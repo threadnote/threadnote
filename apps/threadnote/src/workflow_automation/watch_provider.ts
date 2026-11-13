@@ -3,7 +3,7 @@ import {
   isFiniteNumber as checkedIsFiniteNumber,
 } from '@threadnote/platform/validation';
 import {Array as EffectArray, Predicate} from 'effect';
-import {Context, Effect, Schema} from 'effect';
+import {Cause, Context, Effect, Schema} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
 import type {
   NativeWatchEntity,
@@ -26,6 +26,12 @@ interface Pull {
   readonly mergeable?: boolean | null;
   readonly head: string;
   readonly state: 'open' | 'closed' | 'merged';
+  readonly identity?: {
+    readonly url: string;
+    readonly repository: string;
+    readonly baseBranch: string;
+    readonly headBranch: string;
+  };
 }
 interface Projection {
   readonly items: readonly NativeWatchEntity[];
@@ -229,8 +235,8 @@ export const verifyNativeWatchBoundPr = Effect.fn('nativeWatch.verifyBoundPr')(f
   pr: string,
   expected: {
     readonly head: string;
-    readonly baseBranch: string;
-    readonly headBranch: string;
+    readonly baseBranch?: string;
+    readonly headBranch?: string;
     readonly state?: 'open' | 'closed' | 'merged';
   },
 ) {
@@ -259,8 +265,10 @@ export const verifyNativeWatchBoundPr = Effect.fn('nativeWatch.verifyBoundPr')(f
     typeof raw.baseRepository !== 'string' ||
     EffectString.toLowerCase(raw.baseRepository) !== EffectString.toLowerCase(`${target.owner}/${target.repo}`) ||
     raw.headSha !== expected.head ||
-    raw.baseBranch !== expected.baseBranch ||
-    raw.headBranch !== expected.headBranch ||
+    typeof raw.baseBranch !== 'string' ||
+    typeof raw.headBranch !== 'string' ||
+    (expected.baseBranch !== undefined && raw.baseBranch !== expected.baseBranch) ||
+    (expected.headBranch !== undefined && raw.headBranch !== expected.headBranch) ||
     (expected.state !== undefined && state !== expected.state)
   )
     return yield* fail('watch-binding-drift');
@@ -271,8 +279,8 @@ export const verifyNativeWatchBoundPr = Effect.fn('nativeWatch.verifyBoundPr')(f
   return {
     url: pr,
     headSha: expected.head,
-    baseBranch: expected.baseBranch,
-    headBranch: expected.headBranch,
+    baseBranch: text(raw.baseBranch, 256),
+    headBranch: text(raw.headBranch, 256),
     state,
     ...(mergeCommit ? {mergeCommit} : {}),
   };
@@ -396,343 +404,395 @@ const repliesQuery =
   '}}}rateLimit{cost remaining resetAt}}';
 
 /** All requests are serial and bounded. A failed source retains its previous checkpoint independently. */
-export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')(function* (
-  pr: string,
-  previous: NativeWatchProviderCache = {pages: []},
-) {
-  const target = nativeWatchPullRequest(pr);
-  const base = `repos/${target.owner}/${target.repo}`;
-  const now = yield* NativeWatchProviderNow;
-  const started = now();
-  const metrics: NativeWatchProviderMetrics = {
-    requests: 0,
-    notModified: 0,
-    responseBytes: 0,
-    graphqlCost: 0,
-    providerMilliseconds: 0,
-  };
-  const pages = new Map(EffectArray.map(previous.pages, page => [page.key, page]));
-  const used = new Set<string>();
-  const blockers: {source: string; code: string; retryable: boolean}[] = [];
-  let retryAt = started + 60_000;
-  let blockedUntil = 0;
-  let authenticationFailed = false;
-  const request = Effect.fn('workflowWatch.request')(function* (
-    endpoint: string,
-    data?: unknown,
-    cached?: NativeWatchHttpPage,
+export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')(
+  function* (
+    pr: string,
+    previous: NativeWatchProviderCache = {pages: []},
+    expected?: {readonly head: string; readonly baseBranch: string; readonly headBranch: string},
   ) {
-    if (authenticationFailed) return yield* fail('provider-authentication');
-    if (now() < blockedUntil) return yield* fail('provider-rate-limit', true);
-    if (now() - started > 45_000) return yield* fail('provider-sweep-timeout', true);
-    metrics.requests++;
-    const args = [
-      'api',
-      '--hostname',
-      'github.com',
-      '--include',
-      '--method',
-      data === undefined ? 'GET' : 'POST',
-      endpoint,
-    ];
-    if (cached?.etag) args.push('-H', 'If-None-Match: ' + cached.etag);
-    else if (cached?.modified) args.push('-H', 'If-Modified-Since: ' + cached.modified);
-    if (data !== undefined) args.push('--input', '-');
-    const result = yield* runCommandEffect('gh', args, {
-      allowFailure: true,
-      timeoutMs: 15_000,
-      maxOutputBytes: 8 * 1024 * 1024,
-      ...(data === undefined ? {} : {input: new TextEncoder().encode(JSON.stringify(data))}),
-    }).pipe(Effect.mapError(() => fail('provider-transport', true)));
-    // allowFailure normalizes spawn/timeout/output-limit failures into these
-    // exit codes with no HTTP response. Never expose command diagnostics.
-    if (result.exitCode === 127) return yield* fail('provider-executable');
-    if (result.exitCode === 124) return yield* fail('provider-transport', true);
-    metrics.responseBytes += new TextEncoder().encode(result.stdout).byteLength;
-    const response = yield* Effect.try({
-      try: () => nativeWatchHttpResponse(result.stdout),
-      catch: () => fail('provider-http', true),
-    });
-    const at = now();
-    const seconds = (name: string) => {
-      const value = response.headers.get(name);
-      return value !== undefined && /^\d+$/u.test(value) ? Number(value) : undefined;
+    const target = nativeWatchPullRequest(pr);
+    const base = `repos/${target.owner}/${target.repo}`;
+    const now = yield* NativeWatchProviderNow;
+    const started = now();
+    const metrics: NativeWatchProviderMetrics = {
+      requests: 0,
+      notModified: 0,
+      responseBytes: 0,
+      graphqlCost: 0,
+      providerMilliseconds: 0,
     };
-    const poll = seconds('x-poll-interval');
-    if (poll !== undefined) retryAt = Math.max(retryAt, at + poll * 1000);
-    const retry = response.headers.get('retry-after');
-    if (retry !== undefined) {
-      const until = /^\d+$/u.test(retry) ? at + Number(retry) * 1000 : Date.parse(retry);
-      if (checkedIsFiniteNumber(until)) retryAt = Math.max(retryAt, until);
-    }
-    if (seconds('x-ratelimit-remaining') === 0) {
-      blockedUntil = Math.max(at + 1000, (seconds('x-ratelimit-reset') ?? at / 1000 + 60) * 1000);
-      retryAt = Math.max(retryAt, blockedUntil);
-    }
-    if (response.status === 304 && cached) {
-      metrics.notModified++;
-      return {response, value: undefined, cached: cached.projection};
-    }
-    if (response.status === 401) {
-      authenticationFailed = true;
-      return yield* fail('provider-authentication');
-    }
-    if (response.status === 403 || response.status === 429) {
-      if (retry !== undefined || seconds('x-ratelimit-remaining') === 0 || response.status === 429) {
-        blockedUntil = Math.max(retryAt, at + 60_000);
-        return yield* fail('provider-rate-limit', true);
+    const pages = new Map(EffectArray.map(previous.pages, page => [page.key, page]));
+    const used = new Set<string>();
+    const blockers: {source: string; code: string; retryable: boolean}[] = [];
+    let retryAt = started + 60_000;
+    let blockedUntil = 0;
+    let authenticationFailed = false;
+    const request = Effect.fn('workflowWatch.request')(function* (
+      endpoint: string,
+      data?: unknown,
+      cached?: NativeWatchHttpPage,
+    ) {
+      if (authenticationFailed) return yield* fail('provider-authentication');
+      if (now() < blockedUntil) return yield* fail('provider-rate-limit', true);
+      if (now() - started > 45_000) return yield* fail('provider-sweep-timeout', true);
+      metrics.requests++;
+      const args = [
+        'api',
+        '--hostname',
+        'github.com',
+        '--include',
+        '--method',
+        data === undefined ? 'GET' : 'POST',
+        endpoint,
+      ];
+      if (cached?.etag) args.push('-H', 'If-None-Match: ' + cached.etag);
+      else if (cached?.modified) args.push('-H', 'If-Modified-Since: ' + cached.modified);
+      if (data !== undefined) args.push('--input', '-');
+      const result = yield* runCommandEffect('gh', args, {
+        allowFailure: true,
+        timeoutMs: 15_000,
+        maxOutputBytes: 8 * 1024 * 1024,
+        ...(data === undefined ? {} : {input: new TextEncoder().encode(JSON.stringify(data))}),
+      }).pipe(Effect.mapError(() => fail('provider-transport', true)));
+      // allowFailure normalizes spawn/timeout/output-limit failures into these
+      // exit codes with no HTTP response. Never expose command diagnostics.
+      if (result.exitCode === 127) return yield* fail('provider-executable');
+      if (result.exitCode === 124) return yield* fail('provider-transport', true);
+      metrics.responseBytes += new TextEncoder().encode(result.stdout).byteLength;
+      const response = yield* Effect.try({
+        try: () => nativeWatchHttpResponse(result.stdout),
+        catch: () => fail('provider-http', true),
+      });
+      const at = now();
+      const seconds = (name: string) => {
+        const value = response.headers.get(name);
+        return value !== undefined && /^\d+$/u.test(value) ? Number(value) : undefined;
+      };
+      const poll = seconds('x-poll-interval');
+      if (poll !== undefined) retryAt = Math.max(retryAt, at + poll * 1000);
+      const retry = response.headers.get('retry-after');
+      if (retry !== undefined) {
+        const until = /^\d+$/u.test(retry) ? at + Number(retry) * 1000 : Date.parse(retry);
+        if (checkedIsFiniteNumber(until)) retryAt = Math.max(retryAt, until);
       }
-      return yield* fail('provider-permission');
-    }
-    if (response.status >= 500) return yield* fail('provider-server', true);
-    if (response.status !== 200) return yield* fail('provider-http-' + response.status);
-    const value = yield* Effect.try({
-      try: () => JSON.parse(response.body) as unknown,
-      catch: () => fail('provider-json', true),
+      if (seconds('x-ratelimit-remaining') === 0) {
+        blockedUntil = Math.max(at + 1000, (seconds('x-ratelimit-reset') ?? at / 1000 + 60) * 1000);
+        retryAt = Math.max(retryAt, blockedUntil);
+      }
+      if (response.status === 304 && cached) {
+        metrics.notModified++;
+        return {response, value: undefined, cached: cached.projection};
+      }
+      if (response.status === 401) {
+        authenticationFailed = true;
+        return yield* fail('provider-authentication');
+      }
+      if (response.status === 403 || response.status === 429) {
+        if (retry !== undefined || seconds('x-ratelimit-remaining') === 0 || response.status === 429) {
+          blockedUntil = Math.max(retryAt, at + 60_000);
+          return yield* fail('provider-rate-limit', true);
+        }
+        return yield* fail('provider-permission');
+      }
+      if (response.status >= 500) return yield* fail('provider-server', true);
+      if (response.status !== 200) return yield* fail('provider-http-' + response.status);
+      const value = yield* Effect.try({
+        try: () => JSON.parse(response.body) as unknown,
+        catch: () => fail('provider-json', true),
+      });
+      return {response, value, cached: undefined};
     });
-    return {response, value, cached: undefined};
-  });
-  const rest = Effect.fn('workflowWatch.rest')(function* (
-    key: string,
-    endpoint: string,
-    project: (input: unknown) => Projection,
-  ) {
-    const old = pages.get(key);
-    // Old pull projections need one unconditional refresh within this scheduled request.
-    const refreshPull =
-      // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
-      key === 'pull' && old?.projection.pull !== undefined && !Object.hasOwn(old.projection.pull, 'mergeable');
-    const result = yield* request(endpoint, undefined, refreshPull ? undefined : old);
-    const projection =
-      result.cached ??
-      (yield* Effect.try({
-        try: () => project(result.value),
+    const rest = Effect.fn('workflowWatch.rest')(function* (
+      key: string,
+      endpoint: string,
+      project: (input: unknown) => Projection,
+    ) {
+      const old = pages.get(key);
+      // Old pull projections need one unconditional refresh within this scheduled request.
+      const refreshPull =
+        // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
+        key === 'pull' && old?.projection.pull !== undefined && !Object.hasOwn(old.projection.pull, 'mergeable');
+      const result = yield* request(endpoint, undefined, refreshPull ? undefined : old);
+      const projection =
+        result.cached ??
+        (yield* Effect.try({
+          try: () => project(result.value),
+          catch: error => (Schema.is(WorkflowAutomationError)(error) ? error : fail('provider-shape')),
+        }));
+      const etag = result.response.headers.get('etag') ?? old?.etag;
+      const modified = result.response.headers.get('last-modified') ?? old?.modified;
+      if ((etag?.length ?? 0) > 1024 || (modified?.length ?? 0) > 128) return yield* fail('provider-shape');
+      pages.set(key, {key, projection, ...(etag ? {etag} : {}), ...(modified ? {modified} : {})});
+      used.add(key);
+      return projection;
+    });
+    const graphql = Effect.fn('workflowWatch.graphql')(function* (query: string, variables: unknown) {
+      const result = yield* request('graphql', {query, variables});
+      const value = yield* Effect.try({try: () => object(result.value), catch: () => fail('provider-shape')});
+      if (value.errors !== undefined) {
+        const errors = array(value.errors);
+        const rateLimited = EffectArray.some(errors, error => object(error).type === 'RATE_LIMITED');
+        if (rateLimited) {
+          blockedUntil = Math.max(retryAt, now() + 60_000);
+          retryAt = blockedUntil;
+        }
+        return yield* fail(rateLimited ? 'provider-rate-limit' : 'provider-graphql', rateLimited);
+      }
+      const data = object(value.data);
+      const rate = object(data.rateLimit);
+      metrics.graphqlCost += number(rate.cost);
+      if (number(rate.remaining) === 0) {
+        const reset = Date.parse(text(rate.resetAt));
+        if (!checkedIsFiniteNumber(reset)) return yield* fail('provider-shape');
+        blockedUntil = Math.max(now() + 1000, reset);
+        retryAt = Math.max(retryAt, blockedUntil);
+      }
+      return data;
+    });
+    const pullEndpoint = `${base}/pulls/${target.number}`;
+    const projectPull = (input: unknown): Projection => {
+      const projection = pullProjection(input);
+      if (!expected) return projection;
+      const raw = object(input);
+      const base = object(raw.base);
+      const head = object(raw.head);
+      const repository = text(object(base.repo).full_name);
+      if (
+        raw.number !== target.number ||
+        raw.html_url !== pr ||
+        EffectString.toLowerCase(repository) !== EffectString.toLowerCase(`${target.owner}/${target.repo}`) ||
+        base.ref !== expected.baseBranch ||
+        head.ref !== expected.headBranch ||
+        head.sha !== expected.head
+      )
+        throw fail('watch-binding-drift');
+      return {
+        ...projection,
+        pull: {
+          ...projection.pull!,
+          identity: {url: pr, repository, baseBranch: expected.baseBranch, headBranch: expected.headBranch},
+        },
+      };
+    };
+    const verifyPull = (pull: Pull) => {
+      if (
+        expected &&
+        (pull.head !== expected.head ||
+          pull.identity?.url !== pr ||
+          pull.identity.baseBranch !== expected.baseBranch ||
+          pull.identity.headBranch !== expected.headBranch ||
+          EffectString.toLowerCase(pull.identity.repository) !==
+            EffectString.toLowerCase(`${target.owner}/${target.repo}`))
+      )
+        throw fail('watch-binding-drift');
+      return pull;
+    };
+    if (expected && !pages.get('pull')?.projection.pull?.identity) pages.delete('pull');
+    const verifiedPull = (pull: Pull) =>
+      Effect.try({
+        try: () => verifyPull(pull),
         catch: error => (Schema.is(WorkflowAutomationError)(error) ? error : fail('provider-shape')),
-      }));
-    const etag = result.response.headers.get('etag') ?? old?.etag;
-    const modified = result.response.headers.get('last-modified') ?? old?.modified;
-    if ((etag?.length ?? 0) > 1024 || (modified?.length ?? 0) > 128) return yield* fail('provider-shape');
-    pages.set(key, {key, projection, ...(etag ? {etag} : {}), ...(modified ? {modified} : {})});
-    used.add(key);
-    return projection;
-  });
-  const graphql = Effect.fn('workflowWatch.graphql')(function* (query: string, variables: unknown) {
-    const result = yield* request('graphql', {query, variables});
-    const value = yield* Effect.try({try: () => object(result.value), catch: () => fail('provider-shape')});
-    if (value.errors !== undefined) {
-      const errors = array(value.errors);
-      const rateLimited = EffectArray.some(errors, error => object(error).type === 'RATE_LIMITED');
-      if (rateLimited) {
-        blockedUntil = Math.max(retryAt, now() + 60_000);
-        retryAt = blockedUntil;
-      }
-      return yield* fail(rateLimited ? 'provider-rate-limit' : 'provider-graphql', rateLimited);
-    }
-    const data = object(value.data);
-    const rate = object(data.rateLimit);
-    metrics.graphqlCost += number(rate.cost);
-    if (number(rate.remaining) === 0) {
-      const reset = Date.parse(text(rate.resetAt));
-      if (!checkedIsFiniteNumber(reset)) return yield* fail('provider-shape');
-      blockedUntil = Math.max(now() + 1000, reset);
-      retryAt = Math.max(retryAt, blockedUntil);
-    }
-    return data;
-  });
-  const pullEndpoint = `${base}/pulls/${target.number}`;
-  const before = (yield* rest('pull', pullEndpoint, pullProjection)).pull!;
-  const sources: NativeWatchSourceResult[] = [];
-  const all: NativeWatchEntity[] = [];
-  let pending = 0;
-  let failed = 0;
-  const capture = <R>(source: Source, body: Effect.Effect<readonly NativeWatchEntity[], WorkflowAutomationError, R>) =>
-    Effect.gen(function* () {
-      const result = yield* body.pipe(
-        Effect.catchDefect(error =>
-          Effect.fail(Schema.is(WorkflowAutomationError)(error) ? error : fail('provider-shape')),
-        ),
-        Effect.result,
+      });
+    const before = yield* verifiedPull((yield* rest('pull', pullEndpoint, projectPull)).pull!);
+    const sources: NativeWatchSourceResult[] = [];
+    const all: NativeWatchEntity[] = [];
+    let pending = 0;
+    let failed = 0;
+    const capture = <R>(
+      source: Source,
+      body: Effect.Effect<readonly NativeWatchEntity[], WorkflowAutomationError, R>,
+    ) =>
+      Effect.gen(function* () {
+        const result = yield* body.pipe(
+          Effect.catchDefect(error =>
+            Effect.fail(Schema.is(WorkflowAutomationError)(error) ? error : fail('provider-shape')),
+          ),
+          Effect.result,
+        );
+        if (result._tag === 'Failure') {
+          const error = result.failure;
+          blockers.push({source, code: error.code, retryable: error.retryable === true});
+          sources.push({
+            source,
+            complete: false,
+            error: {code: error.code, retryable: error.retryable === true},
+            at: now(),
+          });
+        } else
+          sources.push({
+            source,
+            complete: true,
+            items: [...result.success],
+            ...(source === 'checks' || source === 'statuses' ? {head: before.head} : {}),
+            at: now(),
+          });
+      });
+    for (const source of ['comments', 'reviews', 'checks', 'statuses'] as const) {
+      const endpoint =
+        source === 'comments'
+          ? `${base}/issues/${target.number}/comments`
+          : source === 'reviews'
+            ? `${base}/pulls/${target.number}/reviews`
+            : source === 'checks'
+              ? `${base}/commits/${before.head}/check-runs?filter=latest`
+              : `${base}/commits/${before.head}/status`;
+      yield* capture(
+        source,
+        Effect.gen(function* () {
+          const items: NativeWatchEntity[] = [];
+          const oldKeys = new Set(used);
+          for (let page = 1; page <= 101; page++) {
+            if (page === 101) return yield* fail('provider-pagination-limit');
+            const query =
+              endpoint + (Effect2.pipe(endpoint, EffectString.includes('?')) ? '&' : '?') + `per_page=100&page=${page}`;
+            const projection = yield* rest(
+              source + ':' + (source === 'checks' || source === 'statuses' ? before.head + ':' : '') + page,
+              query,
+              input => restProjection(source, input, before.head),
+            );
+            items.push(...projection.items);
+            if (source === 'checks' || source === 'statuses') {
+              all.push(...projection.items);
+              pending += projection.pending;
+              failed += projection.failed;
+            }
+            // Poll the next page even when a cached full page has no new Link header.
+            if (projection.size < 100) break;
+          }
+          if (items.length > 10_000 || new Set(EffectArray.map(items, item => item.id)).size !== items.length) {
+            for (const key of used) if (!oldKeys.has(key)) used.delete(key);
+            return yield* fail('provider-pagination-race', true);
+          }
+          return items;
+        }),
       );
-      if (result._tag === 'Failure') {
-        const error = result.failure;
-        blockers.push({source, code: error.code, retryable: error.retryable === true});
-        sources.push({
-          source,
-          complete: false,
-          error: {code: error.code, retryable: error.retryable === true},
-          at: now(),
-        });
-      } else
-        sources.push({
-          source,
-          complete: true,
-          items: [...result.success],
-          ...(source === 'checks' || source === 'statuses' ? {head: before.head} : {}),
-          at: now(),
-        });
-    });
-  for (const source of ['comments', 'reviews', 'checks', 'statuses'] as const) {
-    const endpoint =
-      source === 'comments'
-        ? `${base}/issues/${target.number}/comments`
-        : source === 'reviews'
-          ? `${base}/pulls/${target.number}/reviews`
-          : source === 'checks'
-            ? `${base}/commits/${before.head}/check-runs?filter=latest`
-            : `${base}/commits/${before.head}/status`;
+    }
     yield* capture(
-      source,
+      'threads',
       Effect.gen(function* () {
         const items: NativeWatchEntity[] = [];
-        const oldKeys = new Set(used);
-        for (let page = 1; page <= 101; page++) {
-          if (page === 101) return yield* fail('provider-pagination-limit');
-          const query =
-            endpoint + (Effect2.pipe(endpoint, EffectString.includes('?')) ? '&' : '?') + `per_page=100&page=${page}`;
-          const projection = yield* rest(
-            source + ':' + (source === 'checks' || source === 'statuses' ? before.head + ':' : '') + page,
-            query,
-            input => restProjection(source, input, before.head),
-          );
-          items.push(...projection.items);
-          if (source === 'checks' || source === 'statuses') {
-            all.push(...projection.items);
-            pending += projection.pending;
-            failed += projection.failed;
+        let after: string | null = null;
+        const cursors = new Set<string>();
+        for (let page = 0; page < 100; page++) {
+          const data = yield* graphql(threadsQuery, {...target, after});
+          const connection = object(object(object(data.repository).pullRequest).reviewThreads);
+          for (const raw of array(connection.nodes)) {
+            const thread = object(raw);
+            const id = text(thread.id);
+            if (typeof thread.isResolved !== 'boolean' || typeof thread.isOutdated !== 'boolean')
+              return yield* fail('provider-shape');
+            const comments: Record<string, unknown>[] = [];
+            let connection = object(thread.comments);
+            const commentCursors = new Set<string>();
+            for (let nested = 0; nested < 100; nested++) {
+              comments.push(...EffectArray.map(array(connection.nodes), object));
+              const info = object(connection.pageInfo);
+              if (info.hasNextPage === false) break;
+              const next = text(info.endCursor, 1024);
+              if (nested === 99 || commentCursors.has(next)) return yield* fail('provider-pagination-race', true);
+              commentCursors.add(next);
+              const nextPage = yield* graphql(repliesQuery, {id, after: next});
+              const node = object(nextPage.node);
+              if (node.id !== id) return yield* fail('provider-pagination-race', true);
+              connection = object(node.comments);
+            }
+            const unresolved = !thread.isResolved;
+            const link = comments[0]?.url;
+            const versions = EffectArray.map(comments, comment =>
+              entity(
+                text(comment.id),
+                'review_comment',
+                {
+                  id: comment.id,
+                  body: comment.body,
+                  updatedAt: comment.updatedAt,
+                },
+                unresolved,
+                comment.url,
+              ),
+            );
+            items.push(
+              entity(
+                id,
+                'review_thread',
+                {
+                  id,
+                  resolved: thread.isResolved,
+                  outdated: thread.isOutdated,
+                  path: thread.path,
+                  line: thread.line,
+                  comments: EffectArray.map(versions, comment => [comment.id, comment.version]),
+                },
+                unresolved,
+                link,
+              ),
+              ...versions,
+            );
+            if (items.length > 10_000) return yield* fail('provider-pagination-limit');
           }
-          // Poll the next page even when a cached full page has no new Link header.
-          if (projection.size < 100) break;
+          const info = object(connection.pageInfo);
+          if (info.hasNextPage === false) break;
+          const next = text(info.endCursor, 1024);
+          if (page === 99 || cursors.has(next)) return yield* fail('provider-pagination-race', true);
+          cursors.add(next);
+          after = next;
         }
-        if (items.length > 10_000 || new Set(EffectArray.map(items, item => item.id)).size !== items.length) {
-          for (const key of used) if (!oldKeys.has(key)) used.delete(key);
+        if (new Set(EffectArray.map(items, item => item.id)).size !== items.length)
           return yield* fail('provider-pagination-race', true);
-        }
         return items;
       }),
     );
-  }
-  yield* capture(
-    'threads',
-    Effect.gen(function* () {
-      const items: NativeWatchEntity[] = [];
-      let after: string | null = null;
-      const cursors = new Set<string>();
-      for (let page = 0; page < 100; page++) {
-        const data = yield* graphql(threadsQuery, {...target, after});
-        const connection = object(object(object(data.repository).pullRequest).reviewThreads);
-        for (const raw of array(connection.nodes)) {
-          const thread = object(raw);
-          const id = text(thread.id);
-          if (typeof thread.isResolved !== 'boolean' || typeof thread.isOutdated !== 'boolean')
-            return yield* fail('provider-shape');
-          const comments: Record<string, unknown>[] = [];
-          let connection = object(thread.comments);
-          const commentCursors = new Set<string>();
-          for (let nested = 0; nested < 100; nested++) {
-            comments.push(...EffectArray.map(array(connection.nodes), object));
-            const info = object(connection.pageInfo);
-            if (info.hasNextPage === false) break;
-            const next = text(info.endCursor, 1024);
-            if (nested === 99 || commentCursors.has(next)) return yield* fail('provider-pagination-race', true);
-            commentCursors.add(next);
-            const nextPage = yield* graphql(repliesQuery, {id, after: next});
-            const node = object(nextPage.node);
-            if (node.id !== id) return yield* fail('provider-pagination-race', true);
-            connection = object(node.comments);
-          }
-          const unresolved = !thread.isResolved;
-          const link = comments[0]?.url;
-          const versions = EffectArray.map(comments, comment =>
-            entity(
-              text(comment.id),
-              'review_comment',
-              {
-                id: comment.id,
-                body: comment.body,
-                updatedAt: comment.updatedAt,
-              },
-              unresolved,
-              comment.url,
-            ),
+    const finalPull = yield* rest('pull', pullEndpoint, projectPull).pipe(Effect.result);
+    if (expected && finalPull._tag === 'Failure') return yield* finalPull.failure;
+    const after = finalPull._tag === 'Success' ? yield* verifiedPull(finalPull.success.pull!) : before;
+    if (finalPull._tag === 'Failure')
+      blockers.push({source: 'pull', code: finalPull.failure.code, retryable: finalPull.failure.retryable === true});
+    const verifiedSources =
+      finalPull._tag === 'Success'
+        ? sources
+        : EffectArray.map(sources, source =>
+            source.source === 'checks' || source.source === 'statuses'
+              ? {
+                  source: source.source,
+                  complete: false as const,
+                  error: {code: 'provider-head-unverified', retryable: true},
+                  at: now(),
+                }
+              : source,
           );
-          items.push(
-            entity(
-              id,
-              'review_thread',
-              {
-                id,
-                resolved: thread.isResolved,
-                outdated: thread.isOutdated,
-                path: thread.path,
-                line: thread.line,
-                comments: EffectArray.map(versions, comment => [comment.id, comment.version]),
-              },
-              unresolved,
-              link,
-            ),
-            ...versions,
-          );
-          if (items.length > 10_000) return yield* fail('provider-pagination-limit');
-        }
-        const info = object(connection.pageInfo);
-        if (info.hasNextPage === false) break;
-        const next = text(info.endCursor, 1024);
-        if (page === 99 || cursors.has(next)) return yield* fail('provider-pagination-race', true);
-        cursors.add(next);
-        after = next;
-      }
-      if (new Set(EffectArray.map(items, item => item.id)).size !== items.length)
-        return yield* fail('provider-pagination-race', true);
-      return items;
-    }),
-  );
-  const finalPull = yield* rest('pull', pullEndpoint, pullProjection).pipe(Effect.result);
-  const after = finalPull._tag === 'Success' ? finalPull.success.pull! : before;
-  if (finalPull._tag === 'Failure')
-    blockers.push({source: 'pull', code: finalPull.failure.code, retryable: finalPull.failure.retryable === true});
-  const verifiedSources =
-    finalPull._tag === 'Success'
-      ? sources
-      : EffectArray.map(sources, source =>
-          source.source === 'checks' || source.source === 'statuses'
-            ? {
-                source: source.source,
-                complete: false as const,
-                error: {code: 'provider-head-unverified', retryable: true},
-                at: now(),
-              }
-            : source,
-        );
-  const at = now();
-  metrics.providerMilliseconds = at - started;
-  const complete =
-    verifiedSources.length === 5 &&
-    EffectArray.every(verifiedSources, source => source.complete) &&
-    before.head === after.head;
-  return {
-    sweep: {
-      head: after.head,
-      startedHead: before.head,
-      ...(after.base === undefined ? {} : {base: after.base}),
-      ...(before.base === undefined ? {} : {startedBase: before.base}),
-      ...(finalPull._tag === 'Success' && after.mergeable !== undefined ? {mergeable: after.mergeable} : {}),
-      state: after.state,
-      at,
-      sources: verifiedSources,
-      ci: {
-        head: before.head,
-        complete,
-        count: all.length,
-        pending,
-        failed,
-        version: fingerprint(
-          EffectArray.map(all, item => [item.id, item.version]).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
-        ),
+    const at = now();
+    metrics.providerMilliseconds = at - started;
+    const complete =
+      verifiedSources.length === 5 &&
+      EffectArray.every(verifiedSources, source => source.complete) &&
+      before.head === after.head;
+    return {
+      sweep: {
+        head: after.head,
+        startedHead: before.head,
+        ...(after.base === undefined ? {} : {base: after.base}),
+        ...(before.base === undefined ? {} : {startedBase: before.base}),
+        ...(finalPull._tag === 'Success' && after.mergeable !== undefined ? {mergeable: after.mergeable} : {}),
+        state: after.state,
+        at,
+        sources: verifiedSources,
+        ci: {
+          head: before.head,
+          complete,
+          count: all.length,
+          pending,
+          failed,
+          version: fingerprint(
+            EffectArray.map(all, item => [item.id, item.version]).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+          ),
+        },
       },
-    },
-    cache: {pages: EffectArray.filter([...pages.values()], page => used.has(page.key)).slice(-402)},
-    metrics,
-    retryAt,
-    blockers,
-  } satisfies NativeWatchProviderResult;
-});
+      cache: {pages: EffectArray.filter([...pages.values()], page => used.has(page.key)).slice(-402)},
+      metrics,
+      retryAt,
+      blockers,
+    } satisfies NativeWatchProviderResult;
+  },
+  Effect.timeout('60 seconds'),
+  Effect.catchIf(Cause.isTimeoutError, () => Effect.fail(fail('provider-sweep-timeout', true))),
+);

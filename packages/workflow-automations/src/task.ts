@@ -42,6 +42,22 @@ export const NativeTaskAnchorSchema = Schema.Struct({
   pattern: Schema.String.check(Schema.isMaxLength(256)),
 });
 
+/** Retained diagnostics route; discovery never claims current live source/provider verification. */
+export interface NativeTaskCandidateWatch {
+  readonly diagnosticOnly: true;
+  readonly watchId: string;
+  readonly watchRevision: string;
+  readonly runId: string;
+  readonly callerCwd: string;
+  readonly phaseId: string;
+  readonly snapshotId: string;
+  readonly prUrl: string;
+  readonly candidateWatchRef: string;
+  readonly historical: boolean;
+  readonly collectorStatus: 'absent' | 'starting' | 'running' | 'stopped' | 'blocked' | 'terminal';
+  readonly invalidation?: {readonly kind: 'candidate_invalidated'; readonly reason: string; readonly at: number};
+}
+
 export interface NativeTaskView {
   readonly status: 'ready' | 'blocked' | 'complete' | 'uninitialized';
   readonly runId: string;
@@ -93,8 +109,10 @@ export interface NativeTaskView {
     readonly snapshotScopeFiles: number;
     readonly historicalWatches?: number;
     readonly supplementalPublications?: number;
+    readonly candidateWatches?: number;
   };
   readonly missingInputs: readonly string[];
+  readonly candidateWatches?: readonly NativeTaskCandidateWatch[];
   readonly supplementalPublications?: readonly {
     readonly publicationId: string;
     readonly phaseId: string;
@@ -157,6 +175,8 @@ export interface NativeTaskProjectionOptions {
   /** Result of the application core's live check-phase for an accepted review. */
   readonly acceptedSnapshotCurrent?: boolean;
   readonly historicalWatchCount?: number;
+  /** Bounded immutable owner inventory supplied by the application, independent of live source freshness. */
+  readonly candidateWatches?: readonly NativeTaskCandidateWatch[];
   /** Digest of the refreshed external candidate set used by the caller's paged projection. */
   readonly candidateHash?: string;
 }
@@ -505,7 +525,7 @@ export function nativeTaskCursorMatches(
   );
 }
 
-const taskCursor = (
+export const nativeTaskPageCursor = (
   view: Pick<NativeTaskView, 'runId' | 'generation' | 'revision' | 'next' | 'role'> &
     Pick<NativeTaskProjectionOptions, 'candidateHash'>,
   offset: number,
@@ -527,7 +547,7 @@ const pageSize = 16 as const;
 const page = (items: readonly string[], offset: number) => items.slice(offset, offset + pageSize);
 
 /** Project a bounded continuation page from canonical native state without returning its stored image. */
-export function projectNativeTaskView(
+function projectNativeTaskCoreView(
   state: NativeWorkflowState,
   revision: string,
   options: NativeTaskProjectionOptions = {},
@@ -800,7 +820,7 @@ export function projectNativeTaskView(
       ...(more
         ? {
             nextOffset,
-            nextCursor: taskCursor(
+            nextCursor: nativeTaskPageCursor(
               {
                 runId: state.runId,
                 generation: state.generation,
@@ -902,5 +922,37 @@ export function projectNativeTaskView(
       next.phaseId,
       'snapshotId' in next ? next.snapshotId : undefined,
     ),
+  };
+}
+
+/** Candidate recovery remains reachable on complete, drifted and authoring-blocked task pages. */
+export function projectNativeTaskView(
+  state: NativeWorkflowState,
+  revision: string,
+  options: NativeTaskProjectionOptions = {},
+): NativeTaskView {
+  const view = projectNativeTaskCoreView(state, revision, options);
+  if (options.candidateWatches === undefined) return view;
+  const rows = options.candidateWatches;
+  const offset = view.page.offset;
+  const nextOffset = offset + pageSize;
+  const more = view.page.nextOffset !== undefined || rows.length > nextOffset;
+  return {
+    ...view,
+    counts: {...view.counts, candidateWatches: rows.length},
+    candidateWatches: rows.slice(offset, nextOffset),
+    page: {
+      offset,
+      limit: pageSize,
+      ...(more
+        ? {
+            nextOffset,
+            nextCursor: nativeTaskPageCursor(
+              {...view, ...(options.candidateHash ? {candidateHash: options.candidateHash} : {})},
+              nextOffset,
+            ),
+          }
+        : {}),
+    },
   };
 }

@@ -12,6 +12,7 @@ import {SystemInfo} from '@threadnote/platform/system';
 import {
   decodeNativeTaskCursor,
   nativeTaskCursorMatches,
+  nativeTaskPageCursor,
   nativeTaskCardRef,
   projectNativeTaskView,
   encodeNativeTaskActionRef,
@@ -28,7 +29,7 @@ import {readNativeTaskInspection, runWorkflowAutomation} from './index.js';
 import {gitValue} from '../utils.js';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
-import {readNativeWatch} from './watch_store.js';
+import {readNativeCandidateWatchInventory, readNativeWatch} from './watch_store.js';
 import {verifyNativeCycleBaseRequalification} from './cycle_git.js';
 import {verifyNativeCycleSnapshotEvidence, verifyNativeCycleUnreviewedRebase} from './cycle_recovery.js';
 import {resolveNativeTaskBaseRef} from './task_action_helpers.js';
@@ -624,6 +625,9 @@ export const readNativeTaskView = (config: RuntimeConfig, input: unknown) =>
           ),
         )
       : undefined;
+    const candidateInventory = yield* readNativeCandidateWatchInventory(config, stored, checkout);
+    const candidateWatches = EffectArray.map(candidateInventory.rows, row => ({...row, diagnosticOnly: true as const}));
+    const discoveryHash = sha256HexSync(stableJson([historicalCandidateHash ?? null, candidateInventory.digest]));
     const uncheckedView = projectNativeTaskView(stored.state, stored.revision, {
       ...(request.role === undefined ? {} : {role: request.role}),
       ...(planDrift === undefined ? {} : {planDrift}),
@@ -657,19 +661,30 @@ export const readNativeTaskView = (config: RuntimeConfig, input: unknown) =>
       ...(planDrift === undefined ? {} : {planDrift}),
       ...(acceptedSnapshotCurrent ? {} : {acceptedSnapshotCurrent: false}),
       ...(historicalCandidates.length > 0 ? {historicalWatchCount: historicalCandidates.length} : {}),
-      ...(historicalCandidateHash ? {candidateHash: historicalCandidateHash} : {}),
+      ...(candidateWatches.length > 0 ? {candidateWatches} : {}),
+      candidateHash: discoveryHash,
       ...(offset === 0 ? {} : {offset}),
     });
-    const projectAt = (offset: number) =>
-      continueAuthoring(projectNativeTaskView(stored.state, stored.revision, projectionOptions(offset)));
+    const projectAt = (offset: number) => {
+      const view = continueAuthoring(projectNativeTaskView(stored.state, stored.revision, projectionOptions(offset)));
+      return view.page.nextOffset === undefined
+        ? view
+        : {
+            ...view,
+            page: {
+              ...view.page,
+              nextCursor: nativeTaskPageCursor({...view, candidateHash: discoveryHash}, view.page.nextOffset),
+            },
+          };
+    };
     const initialView = projectAt(0);
     let selectedView = initialView;
     if (request.cursor !== undefined) {
       const cursor = decodeNativeTaskCursor(request.cursor);
-      if (!cursor || !nativeTaskCursorMatches(cursor, initialView, historicalCandidateHash))
+      if (!cursor || !nativeTaskCursorMatches(cursor, initialView, discoveryHash))
         return yield* fail(
           'stale-cursor',
-          'The native task or eligible historical-watch set changed. Restart with workflow_task_view to get a current task card.',
+          'The native task or retained watch inventory changed. Restart with workflow_task_view to get a current task card.',
         );
       selectedView = projectAt(cursor.offset);
     }

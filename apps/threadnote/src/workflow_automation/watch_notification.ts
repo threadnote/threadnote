@@ -12,7 +12,12 @@ import {attachNativeWatchConsumer} from '@threadnote/workflow-automations/watch'
 import {runCommandEffect} from '@threadnote/platform/command';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import {readNativeWatch, writeNativeWatch, withNativeWatchControlLock} from './watch_store.js';
+import {
+  readNativeWatch,
+  readNativeOwnedWatchRoute,
+  writeNativeWatch,
+  withNativeWatchControlLock,
+} from './watch_store.js';
 import {
   nativeWatchNotice,
   stageNativeWatchNotification,
@@ -316,12 +321,14 @@ export const makeNativeWatchNotifier = Effect.fn('nativeWatch.notifier')(functio
           return yield* Effect.fail(admitted.failure);
         }
       }
+      const semantic = yield* readNativeOwnedWatchRoute(config, watchId);
       const notice = nativeWatchNotice(
         {
           home: config.agentContextHome,
           watchId,
           consumerId: claimed.notification.consumerId,
           wakeupId: claimed.notification.wakeupId,
+          ...(semantic ? {semantic} : {}),
         },
         outbox!,
       );

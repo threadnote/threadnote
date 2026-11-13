@@ -90,6 +90,8 @@ describe('completed-local supplemental publication', () => {
         if (!before?.state.cycle) throw new Error('Expected completed cycle.');
         const commands = yield* CommandExecutor;
         let merged = false;
+        let providerHead = pr.headSha;
+        let providerBase = pr.baseBranch;
         let providerCalls = 0;
         const provider = CommandExecutor.of({
           ...commands,
@@ -111,9 +113,9 @@ describe('completed-local supplemental publication', () => {
                 number: 1,
                 url: pr.url,
                 baseRepository: 'example/repo',
-                baseBranch: 'main',
+                baseBranch: providerBase,
                 headBranch: pr.branch,
-                headSha: pr.headSha,
+                headSha: providerHead,
                 state: merged ? 'closed' : 'open',
                 merged,
                 mergeCommit: merged ? EffectString.repeat(40)('a') : null,
@@ -154,6 +156,12 @@ describe('completed-local supplemental publication', () => {
         const {version: _oldVersion, ...oldState} = before.state.cycle.state;
         expect(original).toEqual(oldState);
         merged = true;
+        expect(object(object(yield* attach()).structuredContent)).toMatchObject({
+          replayed: true,
+          records: 1,
+          supplementalRef: attached.supplementalRef,
+        });
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(bytes);
         const complete = () =>
           runNativeTaskAction(f.config, {
             command: 'watch-pr',
@@ -175,7 +183,39 @@ describe('completed-local supplemental publication', () => {
         ).toEqual(['provider-verified', 'merged', 'completed']);
         expect(final!.state.cycle!.state.phases).toEqual(before.state.cycle.state.phases);
         expect((yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo})).status).toBe('complete');
-        expect(providerCalls).toBe(4);
+        const finalBytes = yield* f.fs.readFileString(f.statePath());
+        expect(object(object(yield* attach()).structuredContent)).toMatchObject({
+          replayed: true,
+          completed: true,
+          records: 3,
+          publicationId: attached.publicationId,
+          supplementalRef: done.supplementalRef,
+        });
+        const replay = (overrides: object = {}) =>
+          runNativeTaskAction(f.config, {
+            ...delivery,
+            command: 'supplemental-publication',
+            operation: 'attach',
+            runId: 'native-run',
+            callerCwd: f.repo,
+            ...overrides,
+          }).pipe(Effect.provideService(CommandExecutor, provider), Effect.result);
+        expect(yield* replay({pr: {...pr, baseBranch: 'different'}})).toMatchObject({
+          failure: {code: 'supplemental-replay-conflict'},
+        });
+        providerHead = EffectString.repeat(40)('f');
+        expect(yield* replay()).toMatchObject({failure: {code: 'watch-binding-drift'}});
+        providerHead = pr.headSha;
+        providerBase = 'different';
+        expect(yield* replay()).toMatchObject({failure: {code: 'watch-binding-drift'}});
+        providerBase = pr.baseBranch;
+        merged = false;
+        expect(yield* replay()).toMatchObject({failure: {code: 'supplemental-lifecycle-drift'}});
+        merged = true;
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'dirty after merge');
+        expect(yield* replay()).toMatchObject({failure: {code: 'supplemental-source-drift'}});
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(finalBytes);
+        expect(providerCalls).toBe(9);
       }).pipe(run),
     windowsCycleFixtureTimeout ?? {timeout: 60000},
   );

@@ -149,8 +149,11 @@ const harness = (replyFor: ReplyFor = defaultReply) => {
     },
     executeStreaming: () => Effect.die(new Error('Streaming is outside the provider test contract')),
   });
-  const sweep = (previous?: NativeWatchProviderCache) =>
-    collectNativeWatchGitHub(pr, previous).pipe(
+  const sweep = (
+    previous?: NativeWatchProviderCache,
+    expected?: {head: string; baseBranch: string; headBranch: string},
+  ) =>
+    collectNativeWatchGitHub(pr, previous, expected).pipe(
       Effect.provideService(CommandExecutor, command),
       Effect.provideService(NativeWatchProviderNow, () => now),
     );
@@ -953,4 +956,69 @@ effectIt.effect('binds an existing PR receipt to exact source, destination and s
     ).toBe('Failure');
     expect(calls).toBe(9);
   }),
+);
+
+effectIt.effect(
+  'reuses before/after sweep PR observations for exact candidate destination and counts every request',
+  () =>
+    Effect.gen(function* () {
+      const bound = {head, baseBranch: 'main', headBranch: 'feature/work'};
+      let pulls = 0;
+      let drift = false;
+      const h = harness((args, input, call, now) => {
+        if (apiEndpoint(args) === 'repos/example/project/pulls/7') {
+          pulls++;
+          return {
+            body: {
+              ...pull(drift && pulls === 2 ? pushedHead : head),
+              number: 7,
+              html_url: pr,
+              base: {sha: pushedHead, ref: 'main', repo: {full_name: 'example/project'}},
+              head: {sha: drift && pulls === 2 ? pushedHead : head, ref: 'feature/work'},
+            },
+          };
+        }
+        return defaultReply(args, input, call, now);
+      });
+      const observed = yield* h.sweep(undefined, bound);
+      expect(pulls).toBe(2);
+      expect(observed.metrics.requests).toBe(h.calls.length);
+      expect(observed.sweep.head).toBe(head);
+      pulls = 0;
+      drift = true;
+      expect(yield* h.sweep(undefined, bound).pipe(Effect.result)).toMatchObject({
+        failure: {code: 'watch-binding-drift'},
+      });
+    }),
+);
+
+effectIt.effect(
+  'keeps transient sweep unavailability retryable and accepts the same exact candidate after recovery',
+  () =>
+    Effect.gen(function* () {
+      let transient = true;
+      const h = harness((args, input, call, now) => {
+        if (apiEndpoint(args) === 'repos/example/project/pulls/7') {
+          if (transient) {
+            transient = false;
+            return {status: 503, body: {message: 'temporary'}};
+          }
+          return {
+            body: {
+              ...pull(),
+              number: 7,
+              html_url: pr,
+              base: {sha: pushedHead, ref: 'main', repo: {full_name: 'example/project'}},
+              head: {sha: head, ref: 'feature/work'},
+            },
+          };
+        }
+        return defaultReply(args, input, call, now);
+      });
+      const expected = {head, baseBranch: 'main', headBranch: 'feature/work'};
+      expect(yield* h.sweep(undefined, expected).pipe(Effect.result)).toMatchObject({
+        failure: {code: 'provider-server', retryable: true},
+      });
+      expect((yield* h.sweep(undefined, expected)).sweep.head).toBe(head);
+    }),
 );

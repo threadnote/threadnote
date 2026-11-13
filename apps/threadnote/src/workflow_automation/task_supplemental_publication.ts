@@ -127,12 +127,24 @@ export const runNativeTaskSupplementalPublication = (
             'The attachment request differs from the immutable supplemental receipt.',
           );
         yield* source(checkout, init);
-        yield* verifyNativeWatchBoundPr(init.pr.url, {
+        const observed = yield* verifyNativeWatchBoundPr(init.pr.url, {
           head: init.head,
           baseBranch: init.pr.baseBranch,
           headBranch: init.pr.branch,
-          state: init.pr.state,
         });
+        const merged =
+          init.pr.state === 'merged' ||
+          EffectArray.some(
+            prior.records,
+            record =>
+              record.event.kind === 'merged' ||
+              (record.event.kind === 'provider-verified' && record.event.pr.state === 'merged'),
+          );
+        if (observed.state === 'closed' || (merged && observed.state !== 'merged'))
+          return yield* fail(
+            'supplemental-lifecycle-drift',
+            'Exact attachment replay permits only retained or forward PR lifecycle state.',
+          );
         return output(stored, prior, true);
       }
       if (ref.stateRevision !== stored.revision)

@@ -1,20 +1,29 @@
 import {it as effectIt} from '@effect/vitest';
 import {expect} from 'vitest';
-import {Clock, Effect, Array as EffectArray, String as EffectString} from 'effect';
-import {CommandExecutor} from '@threadnote/platform/command';
+import {Clock, Effect, Deferred, Fiber, Array as EffectArray, String as EffectString} from 'effect';
+import {CommandExecutor, CommandTimedOut, runCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {decodeNativeTaskActionRef, encodeNativeTaskActionRef} from '@threadnote/workflow-automations/task';
 import {recordNativeWatchLifecycle, nativeWatchEventLimit} from '@threadnote/workflow-automations/watch';
 import {runNativeTaskCandidateWatch} from '../../src/workflow_automation/task_candidate_watch.js';
 import {readNativeWorkflowState} from '../../src/workflow_automation/store.js';
-import {readNativeWatch, writeNativeWatch} from '../../src/workflow_automation/watch_store.js';
+import {
+  readNativeWatch,
+  writeNativeWatch,
+  withNativeWatchControlLock,
+  readNativeCandidateWatchInventory,
+  bindNativeCandidateWatchBase,
+  verifyNativeCandidateWatchOwner,
+} from '../../src/workflow_automation/watch_store.js';
 import {runNativeWatch, runNativeWatchCollector} from '../../src/workflow_automation/watch.js';
 import {sha256HexSync} from '../../src/workflow_memory/native_digest.js';
+import {runNativeTaskAction} from '../../src/workflow_automation/task_actions.js';
+import {readNativeTaskView} from '../../src/workflow_automation/task.js';
+import {makeNativeWatchNotifier} from '../../src/workflow_automation/watch_notification.js';
 import {fixture, object, run} from './native-cycle-lifecycle-fixture.js';
 
 const pr = 'https://github.com/example/project/pull/7';
 const threadId = '11111111-1111-4111-8111-111111111111';
-const attemptId = '22222222-2222-4222-8222-222222222222';
 const receipt = '33333333-3333-4333-8333-333333333333';
 const required = <A>(value: A | undefined | null): A => {
   if (value === undefined || value === null) throw new Error('Missing candidate fixture value.');
@@ -29,7 +38,26 @@ effectIt.effect(
   'keeps exact candidate ownership, maps opaque notices/events, gates ACK, and invalidates a sweep without losing pending evidence',
   () =>
     Effect.gen(function* () {
-      const f = yield* fixture(['one']);
+      const f = yield* fixture(
+        ['one'],
+        'pr',
+        false,
+        false,
+        true,
+        {one: {branch: 'feature/one', baseBranch: 'origin/main'}},
+        repo =>
+          Effect.gen(function* () {
+            yield* runCommandEffect('git', [
+              '-C',
+              repo,
+              'remote',
+              'add',
+              'origin',
+              'https://github.com/example/project.git',
+            ]);
+            yield* runCommandEffect('git', ['-C', repo, 'update-ref', 'refs/remotes/origin/main', 'refs/heads/main']);
+          }),
+      );
       yield* f.mutate('begin-phase', {phaseId: 'one'});
       yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "candidate";\n');
       yield* f.git(['add', 'source.ts']);
@@ -64,12 +92,38 @@ effectIt.effect(
       let providerCalls = 0;
       let spawns = 0;
       let providerHead = snapshot.head;
+      let providerUnavailable = false;
+      let slowProvider = false;
+      let emittedNotice: string | undefined;
+      const providerEntered = yield* Deferred.make<void>();
       const testCommands = CommandExecutor.of({
         ...commands,
         execute: (executable, args, options) => {
+          if (executable === '/fixture/codex') {
+            if (args.includes('--help'))
+              return Effect.succeed({
+                exitCode: 0,
+                stderr: '',
+                stdout: 'Usage: codex queue [OPTIONS]\n  --thread <THREAD>\n  --message <TEXT>\n',
+              });
+            emittedNotice = required(args[args.indexOf('--message') + 1]);
+            return Effect.succeed({
+              exitCode: 0,
+              stderr: '',
+              stdout: `Queued message ${receipt} for thread ${threadId}.`,
+            });
+          }
           if (executable !== 'gh') return commands.execute(executable, args, options);
           providerCalls++;
-          return Effect.succeed({
+          if (providerUnavailable) {
+            providerUnavailable = false;
+            return Effect.fail(
+              CommandTimedOut.make({message: 'Temporary provider timeout', executable, args, timeoutMs: 15000}),
+            );
+          }
+          const delayed = slowProvider;
+          slowProvider = false;
+          const result = {
             exitCode: 0,
             stderr: '',
             stdout: JSON.stringify({
@@ -83,7 +137,14 @@ effectIt.effect(
               merged: false,
               mergeCommit: null,
             }),
-          });
+          };
+          return delayed
+            ? Effect.gen(function* () {
+                yield* Deferred.succeed(providerEntered, undefined);
+                yield* Effect.sleep(2100);
+                return result;
+              })
+            : Effect.succeed(result);
         },
         spawnDetached: (_executable, args) =>
           Effect.gen(function* () {
@@ -123,14 +184,33 @@ effectIt.effect(
           operation: 'start' as const,
           snapshotRef,
           pr,
-          wakeup: {
-            host: 'cursor-cli' as const,
-            executable: '/fixture/agent',
-            sessionId: threadId,
-            workspace: f.repo,
-            exclusiveSession: true as const,
-          },
+          wakeup: {host: 'codex' as const, executable: '/fixture/codex', threadId},
         };
+        const candidateSource = {
+          phaseId: 'one',
+          phaseHash: snapshot.phaseHash,
+          head: snapshot.head,
+          tree: snapshot.tree,
+        };
+        for (const comparisonRef of ['main', 'origin/main', 'refs/remotes/origin/main']) {
+          const bound = yield* bindNativeCandidateWatchBase(baseline.repo, comparisonRef, candidateSource, pr);
+          expect(bound.baseBranch).toBe('main');
+          expect(bound.comparisonResolvedRef).toBe(
+            comparisonRef === 'main' ? 'refs/heads/main' : 'refs/remotes/origin/main',
+          );
+        }
+        yield* f.git(['tag', 'origin/main', 'main']);
+        expect(
+          (yield* bindNativeCandidateWatchBase(baseline.repo, 'origin/main', candidateSource, pr).pipe(Effect.result))
+            ._tag,
+        ).toBe('Failure');
+        yield* f.git(['tag', '--delete', 'origin/main']);
+        yield* f.git(['remote', 'set-url', 'origin', 'https://github.com/foreign/project.git']);
+        expect(
+          (yield* bindNativeCandidateWatchBase(baseline.repo, 'origin/main', candidateSource, pr).pipe(Effect.result))
+            ._tag,
+        ).toBe('Failure');
+        yield* f.git(['remote', 'set-url', 'origin', 'https://github.com/example/project.git']);
         const started = object(yield* invoke(startRequest));
         const candidateWatchRef = encoded(started.candidateWatchRef);
         const candidate = required(decodeNativeTaskActionRef(candidateWatchRef));
@@ -139,6 +219,37 @@ effectIt.effect(
         expect(started.diagnosticOnly).toBe(true);
         expect(object(yield* invoke(startRequest)).candidateWatchRef).toBe(candidateWatchRef);
         expect(spawns).toBe(1);
+        const active = required(yield* readNativeWatch(f.config, watchId));
+        const activeOwner = required(active.envelope.owner);
+        const beforeTransient = active.revision;
+        providerUnavailable = true;
+        expect(
+          (yield* invoke({
+            command: 'watch-candidate-pr',
+            runId: 'native-run',
+            candidateWatchRef,
+            operation: 'relay',
+          }).pipe(Effect.result))._tag,
+        ).toBe('Failure');
+        const unavailable = required(yield* readNativeWatch(f.config, watchId));
+        expect(unavailable.revision).toBe(beforeTransient);
+        expect(unavailable.envelope.invalidation).toBeUndefined();
+        yield* invoke({command: 'watch-candidate-pr', runId: 'native-run', candidateWatchRef, operation: 'relay'});
+        const slowCalls = providerCalls;
+        slowProvider = true;
+        const slow = yield* invoke({
+          command: 'watch-candidate-pr',
+          runId: 'native-run',
+          candidateWatchRef,
+          operation: 'relay',
+        }).pipe(Effect.forkChild);
+        yield* Deferred.await(providerEntered);
+        expect(
+          yield* withNativeWatchControlLock(f.config, watchId, Effect.succeed(true)).pipe(Effect.timeout('1 second')),
+        ).toBe(true);
+        yield* Fiber.join(slow);
+        expect(providerCalls - slowCalls).toBe(1);
+        expect(activeOwner.kind).toBe('candidate-pr');
         const continuation = {command: 'watch-candidate-pr' as const, runId: 'native-run', candidateWatchRef};
         const foreign = encodeNativeTaskActionRef({...candidate, kind: 'delivery'});
         expect(
@@ -156,35 +267,38 @@ effectIt.effect(
         let watch = required(yield* readNativeWatch(f.config, watchId));
         const now = yield* Clock.currentTimeMillis;
         const state = recordNativeWatchLifecycle(watch.envelope.state, 'watcher_error', 'diagnostic', now);
-        const notification = {
-          ...required(watch.envelope.notification),
-          target: {host: 'codex' as const, executable: '/fixture/codex', threadId},
-          outbox: {
-            key: `${watchId}:1:1`,
-            first: 1,
-            last: 1,
-            createdAt: now,
-            attempts: 1,
-            nextAttemptAt: now + 60_000,
-            attemptId,
-            collectorToken: required(watch.envelope.collector).token,
-            status: 'queued' as const,
-            receipt,
-            consumedThrough: 0,
-          },
-        };
-        watch = yield* writeNativeWatch(f.config, {...watch.envelope, state, notification}, watch.revision);
-        const inspected = object(yield* invoke({...continuation, operation: 'inspect'}));
-        const noticeRef = encoded(inspected.noticeRef);
+        watch = yield* writeNativeWatch(f.config, {...watch.envelope, state}, watch.revision);
+        const notifier = yield* makeNativeWatchNotifier(f.config, watchId, required(watch.envelope.collector).token);
+        yield* notifier.tick();
+        watch = required(yield* readNativeWatch(f.config, watchId));
+        const actualNotice = required(emittedNotice);
+        const locatorMatch = /Route=(\{.*\})\. Use workflow_task_watch_pr/u.exec(actualNotice);
+        const locator = object(JSON.parse(required(locatorMatch?.[1])) as unknown);
+        const {noticeRef: arrivingNoticeRef, ...resume} = object(locator.semantic);
+        expect(resume.runId).toBe('native-run');
+        expect(resume.callerCwd).toBe(baseline.repo);
+        const inspectRequest = {...resume, command: 'watch-pr', operation: 'inspect'};
+        const inspected = object(yield* runNativeTaskAction(f.config, inspectRequest));
+        const noticeRef = encoded(arrivingNoticeRef);
+        expect(inspected.noticeRef).toBe(noticeRef);
+        const currentView = yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: baseline.repo});
+        expect(currentView.candidateWatches?.[0]?.candidateWatchRef).toBe(candidateWatchRef);
         const notice = required(decodeNativeTaskActionRef(noticeRef));
         expect(notice.kind).toBe('candidate-notice');
         const wrongAttempt = encodeNativeTaskActionRef({...notice, watchAttemptId: receipt});
         const bytesBefore = watch.revision;
         expect(
-          (yield* invoke({...continuation, operation: 'relay', noticeRef: wrongAttempt}).pipe(Effect.result))._tag,
+          (yield* runNativeTaskAction(f.config, {
+            ...resume,
+            command: 'watch-pr',
+            operation: 'relay',
+            noticeRef: wrongAttempt,
+          }).pipe(Effect.result))._tag,
         ).toBe('Failure');
         expect(required(yield* readNativeWatch(f.config, watchId)).revision).toBe(bytesBefore);
-        const relayed = object(yield* invoke({...continuation, operation: 'relay', noticeRef}));
+        const relayed = object(
+          yield* runNativeTaskAction(f.config, {...resume, command: 'watch-pr', operation: 'relay', noticeRef}),
+        );
         const watchDeliveryRef = encoded(relayed.watchDeliveryRef);
         const eventRefs = relayed.eventRefs;
         if (!EffectArray.isArray(eventRefs)) throw new Error('Missing candidate event refs');
@@ -199,15 +313,16 @@ effectIt.effect(
         expect((yield* invoke({...continuation, operation: 'ack', watchDeliveryRef}).pipe(Effect.result))._tag).toBe(
           'Failure',
         );
-        yield* invoke({
-          ...continuation,
+        yield* runNativeTaskAction(f.config, {
+          ...resume,
+          command: 'watch-pr',
           operation: 'disposition',
           watchDeliveryRef,
           dispositions: [
             {eventRef, status: 'open', reason: 'Investigate diagnostic', evidence: 'Exact source event retained'},
           ],
         });
-        yield* invoke({...continuation, operation: 'ack', watchDeliveryRef});
+        yield* runNativeTaskAction(f.config, {...resume, command: 'watch-pr', operation: 'ack', watchDeliveryRef});
         const work = object(object(object(yield* invoke({...continuation, operation: 'work'})).result).work);
         if (!EffectArray.isArray(work.items)) throw new Error('Missing retained work');
         const workRef = encoded(object(work.items[0]).eventRef);
@@ -252,13 +367,50 @@ effectIt.effect(
         expect(invalid.envelope.state.events.at(-1)?.kind).toBe('candidate_invalidated');
         expect(invalid.envelope.state.work).toEqual(oldWork);
         expect(invalid.envelope.notification?.outbox).toEqual(oldOutbox);
-        expect(object(yield* invoke({...continuation, operation: 'inspect'})).status).toBe('candidate-watch-updated');
+        const rediscovered = yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: baseline.repo});
+        expect(rediscovered.candidateWatches?.[0]?.invalidation?.kind).toBe('candidate_invalidated');
+        const recoveredRef = required(rediscovered.candidateWatches?.[0]?.candidateWatchRef);
+        expect(
+          object(
+            yield* runNativeTaskAction(f.config, {
+              command: 'watch-pr',
+              runId: 'native-run',
+              callerCwd: baseline.repo,
+              candidateWatchRef: recoveredRef,
+              operation: 'inspect',
+            }),
+          ).status,
+        ).toBe('candidate-watch-updated');
         expect(object(yield* invoke({...continuation, operation: 'work'})).status).toBe('candidate-watch-updated');
-        expect(object(yield* invoke({...continuation, operation: 'stop'})).status).toBe('candidate-watch-updated');
+        expect(
+          object(
+            yield* runNativeTaskAction(f.config, {
+              command: 'watch-pr',
+              runId: 'native-run',
+              callerCwd: baseline.repo,
+              candidateWatchRef: recoveredRef,
+              operation: 'stop',
+            }),
+          ).status,
+        ).toBe('candidate-watch-updated');
         expect((yield* invoke({...continuation, operation: 'relay'}).pipe(Effect.result))._tag).toBe('Failure');
         expect(providerCalls).toBe(callsBeforeSweep);
         // A changed PR head also refuses a fresh start, without creating/rebinding a watch.
         yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "candidate";\n');
+        yield* f.mutate('invalidate', {
+          phaseId: 'one',
+          reason: 'Repair iteration invalidates the retained snapshot without changing source.',
+        });
+        const retired = required(yield* readNativeWorkflowState(f.config, 'native-run'));
+        const retirementCalls = providerCalls;
+        if (activeOwner.kind !== 'candidate-pr') throw new Error('Expected candidate owner');
+        const retiredCheck = yield* verifyNativeCandidateWatchOwner(f.config, activeOwner).pipe(Effect.result);
+        expect(retiredCheck._tag).toBe('Failure');
+        expect(retiredCheck).toMatchObject({failure: {code: 'candidate-binding-drift'}});
+        expect(providerCalls).toBe(retirementCalls);
+        const retiredInventory = yield* readNativeCandidateWatchInventory(f.config, retired, baseline.repo);
+        expect(retiredInventory.rows[0]?.historical).toBe(true);
+        expect((yield* invoke(startRequest).pipe(Effect.result))._tag).toBe('Failure');
         providerHead = EffectString.repeat(40)('b');
         expect((yield* invoke(startRequest).pipe(Effect.result))._tag).toBe('Failure');
         expect(spawns).toBe(1);

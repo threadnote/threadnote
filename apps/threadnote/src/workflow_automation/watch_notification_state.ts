@@ -229,11 +229,25 @@ export function stageNativeWatchNotification(
 }
 
 export function nativeWatchNotice(
-  route: {home: string; watchId: string; consumerId: string; wakeupId: string},
+  route: {
+    home: string;
+    watchId: string;
+    consumerId: string;
+    wakeupId: string;
+    semantic?: {
+      runId: string;
+      callerCwd: string;
+      candidateWatchRef?: string;
+      supplementalRef?: string;
+      noticeRef?: string;
+    };
+  },
   value: NonNullable<NativeWatchNotification['outbox']>,
 ): string {
   const locator = JSON.stringify({...route, eventKey: value.key, attemptId: value.attemptId});
   if (new TextEncoder().encode(locator).byteLength > 6144)
     throw new Error('Host notification route exceeds its byte budget.');
+  if (route.semantic)
+    return `Threadnote owned watch event. Route=${locator}. Use workflow_task_watch_pr with the semantic runId, callerCwd and typed continuation ref. Inspect first without noticeRef; claim this exact notice with relay and noticeRef. After drift, inspect/stop/work remain available. Persist dispositions before ACK; never use candidate diagnostics as canonical acceptance. Use routed home for this operation.`;
   return `Threadnote watch event. Route=${locator}. Inspect first. If terminal/stopped, pending=0, deliveryId=null, work.open=work.blocked=0: no renewal, relay or ACK. Queued/consumedThrough=0 can survive ACK; interrupted monitoring alone is not failure. Otherwise relay exact route to claim arrival; persist disposition before ACK; retain unresolved work. Use routed home only here; keep caller cwd/default home.`;
 }

@@ -28,6 +28,9 @@ import {
   type NativeWatchEnvelope,
   type NativeWatchOwner,
   verifyNativeCandidateWatchOwner,
+  verifyNativeCandidateNativeFence,
+  verifyNativeCandidateSourceFence,
+  nativeCandidateWatchFailureIsDrift,
 } from './watch_store.js';
 import {launchNativeWatchProcess, nativeWatchCollectorAlive} from './watch_process.js';
 import {assertNativeWatchOutput, nativeWatchWorkList, nativeWatchWorkDetail} from './watch_output.js';
@@ -352,8 +355,12 @@ const assertCandidateMutation = Effect.fn('workflowWatch.assertCandidateMutation
   stored: Effect.Success<ReturnType<typeof readNativeWatch>>,
 ) {
   if (owner?.kind !== 'candidate-pr') return;
-  const checked = yield* verifyNativeCandidateWatchOwner(config, owner).pipe(Effect.result);
+  const checked = yield* Effect.gen(function* () {
+    yield* verifyNativeCandidateNativeFence(config, owner);
+    yield* verifyNativeCandidateSourceFence(owner);
+  }).pipe(Effect.result);
   if (checked._tag === 'Success') return;
+  if (!nativeCandidateWatchFailureIsDrift(checked.failure)) return yield* checked.failure;
   const reason = nativeWorkflowError(checked.failure).code;
   if (stored && !stored.envelope.invalidation) {
     const now = yield* Clock.currentTimeMillis;
@@ -382,9 +389,44 @@ const checkCandidate = Effect.fn('workflowWatch.checkCandidate')(function* (
 ) {
   if (envelope.owner?.kind !== 'candidate-pr') return true;
   if (envelope.invalidation) return false;
-  const checked = yield* verifyNativeCandidateWatchOwner(config, envelope.owner).pipe(Effect.result);
+  const checked = yield* verifyNativeCandidateWatchOwner(config, envelope.owner, {provider: false}).pipe(Effect.result);
   if (checked._tag === 'Success') return true;
-  yield* invalidateNativeCandidateWatch(config, envelope.state.watchId, nativeWorkflowError(checked.failure).code);
+  const error = nativeWorkflowError(checked.failure);
+  if (nativeCandidateWatchFailureIsDrift(error)) {
+    yield* invalidateNativeCandidateWatch(config, envelope.state.watchId, error.code);
+    return false;
+  }
+  yield* withNativeWatchControlLock(
+    config,
+    envelope.state.watchId,
+    Effect.gen(function* () {
+      const current = yield* load(config, envelope.state.watchId);
+      const collector = current.envelope.collector;
+      if (!collector || current.envelope.invalidation) return;
+      const at = yield* Clock.currentTimeMillis;
+      const count = collector.consecutiveErrors + 1;
+      const state =
+        collector.reason === error.code
+          ? current.envelope.state
+          : yield* from(() => recordNativeWatchLifecycle(current.envelope.state, 'watcher_error', error.code, at));
+      yield* writeNativeWatch(
+        config,
+        {
+          ...current.envelope,
+          state,
+          collector: {
+            ...collector,
+            consecutiveErrors: count,
+            status: error.retryable === true && count < 3 ? 'running' : 'blocked',
+            reason: error.code,
+            lastSeenAt: at,
+            nextPollAt: at + Math.min(900000, 60000 * 2 ** (count - 1)),
+          },
+        },
+        current.revision,
+      );
+    }),
+  );
   return false;
 });
 
@@ -484,8 +526,11 @@ export const runNativeWatchCollector = Effect.fn('workflowWatch.collector')(func
               before.envelope.state.prState === 'open' &&
               before.envelope.collector.nextPollAt <= now &&
               !(yield* checkCandidate(config, before.envelope))
-            )
-              return;
+            ) {
+              const paused = yield* load(config, watchId);
+              if (paused.envelope.invalidation || paused.envelope.collector?.status === 'blocked') return;
+              continue;
+            }
             yield* maintainNativeWatchSubscription(config, watchId, token);
             yield* notifier.tick();
             if (before.envelope.stopRequested) {
@@ -511,10 +556,30 @@ export const runNativeWatchCollector = Effect.fn('workflowWatch.collector')(func
               yield* Effect.sleep(Math.min(3000, before.envelope.collector.nextPollAt - now));
               continue;
             }
-            const collected = yield* collectNativeWatchGitHub(before.envelope.state.pr, before.envelope.provider).pipe(
-              Effect.result,
-            );
-            if (!(yield* checkCandidate(config, (yield* load(config, watchId)).envelope))) return;
+            const collected = yield* collectNativeWatchGitHub(
+              before.envelope.state.pr,
+              before.envelope.provider,
+              before.envelope.owner?.kind === 'candidate-pr'
+                ? {
+                    head: before.envelope.owner.head,
+                    baseBranch: before.envelope.owner.baseBranch,
+                    headBranch: before.envelope.owner.headBranch,
+                  }
+                : undefined,
+            ).pipe(Effect.result);
+            if (!(yield* checkCandidate(config, (yield* load(config, watchId)).envelope))) {
+              const paused = yield* load(config, watchId);
+              if (paused.envelope.invalidation || paused.envelope.collector?.status === 'blocked') return;
+              continue;
+            }
+            if (
+              before.envelope.owner?.kind === 'candidate-pr' &&
+              collected._tag === 'Failure' &&
+              nativeCandidateWatchFailureIsDrift(collected.failure)
+            ) {
+              yield* invalidateNativeCandidateWatch(config, watchId, nativeWorkflowError(collected.failure).code);
+              return;
+            }
             if (
               before.envelope.owner &&
               collected._tag === 'Success' &&
@@ -536,10 +601,13 @@ export const runNativeWatchCollector = Effect.fn('workflowWatch.collector')(func
                   return true;
                 const at = yield* Clock.currentTimeMillis;
                 if (current.envelope.owner?.kind === 'candidate-pr') {
-                  const checked = yield* verifyNativeCandidateWatchOwner(config, current.envelope.owner).pipe(
-                    Effect.result,
-                  );
+                  const candidateOwner = current.envelope.owner;
+                  const checked = yield* Effect.gen(function* () {
+                    yield* verifyNativeCandidateNativeFence(config, candidateOwner);
+                    yield* verifyNativeCandidateSourceFence(candidateOwner);
+                  }).pipe(Effect.result);
                   if (checked._tag === 'Failure') {
+                    if (!nativeCandidateWatchFailureIsDrift(checked.failure)) return yield* checked.failure;
                     yield* writeNativeWatch(
                       config,
                       yield* from(() =>
@@ -555,6 +623,8 @@ export const runNativeWatchCollector = Effect.fn('workflowWatch.collector')(func
                   const count = collector.consecutiveErrors + 1;
                   const terminate = error.retryable !== true || count >= 3;
                   const state =
+                    (current.envelope.owner?.kind === 'candidate-pr' &&
+                      current.envelope.state.events.length >= nativeWatchEventLimit - 1) ||
                     collector.reason === error.code
                       ? current.envelope.state
                       : yield* from(() =>
@@ -701,6 +771,7 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (
       return yield* fail('candidate-invalidated', 'Start a fresh candidate from the current snapshot.');
     const checked = yield* verifyNativeCandidateWatchOwner(config, owner).pipe(Effect.result);
     if (checked._tag === 'Failure') {
+      if (!nativeCandidateWatchFailureIsDrift(checked.failure)) return yield* checked.failure;
       if (prior)
         yield* invalidateNativeCandidateWatch(config, request.watchId, nativeWorkflowError(checked.failure).code);
       return yield* fail('candidate-binding-drift', 'The candidate source or PR binding changed.');
@@ -712,7 +783,7 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (
     stableJson(envelope?.notification?.target) === stableJson(request.wakeup);
   let probedCodex = false;
   if (request.wakeup?.host === 'codex' && request.command !== 'renew') {
-    const existing = yield* readNativeWatch(config, request.watchId);
+    const existing = prior;
     if (!sameBinding(existing?.envelope)) {
       yield* preflightNativeWatchCodexQueue(request.wakeup.executable);
       probedCodex = true;

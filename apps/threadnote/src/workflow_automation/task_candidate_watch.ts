@@ -4,6 +4,7 @@ import {
   encodeNativeTaskActionRef,
   type NativeTaskActionRef,
 } from '@threadnote/workflow-automations/task';
+import {nativeCycleSnapshotIsCurrentIteration} from '@threadnote/workflow-automations/cycle-runtime';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
@@ -14,6 +15,8 @@ import {
   readNativeWatch,
   verifyNativeCandidateWatchOwner,
   nativeWatchOwnerDigest,
+  bindNativeCandidateWatchBase,
+  nativeCandidateWatchFailureIsDrift,
   type NativeWatchOwner,
   type NativeCandidateWatchOwner,
 } from './watch_store.js';
@@ -107,13 +110,24 @@ export const runOwnedNativeTaskWatch = (
         if (owner.kind === 'candidate-pr') {
           const checked = yield* verifyNativeCandidateWatchOwner(config, owner).pipe(Effect.result);
           if (checked._tag === 'Failure') {
+            if (!nativeCandidateWatchFailureIsDrift(checked.failure)) return yield* checked.failure;
             yield* invalidateNativeCandidateWatch(config, watchId, nativeWorkflowError(checked.failure).code);
             return yield* fail('candidate-binding-drift', 'The candidate source or PR binding changed.');
           }
         }
         const result = yield* runNativeWatch(
           config,
-          {protocolVersion: 1, executorVersion: 1, action: 'watch', command: 'inspect', watchId},
+          {
+            protocolVersion: 1,
+            executorVersion: 1,
+            action: 'watch',
+            command:
+              watch.envelope.collector?.status === 'blocked' && !watch.envelope.stopRequested ? 'start' : 'inspect',
+            watchId,
+            ...(watch.envelope.collector?.status === 'blocked' && !watch.envelope.stopRequested
+              ? {consumerId, wakeupId, pr: owner.prUrl, wakeup: request.wakeup}
+              : {}),
+          },
           owner,
         );
         return {status: 'watch-updated' as const, operation: request.operation, watchId, result};
@@ -368,8 +382,21 @@ export const runNativeTaskCandidateWatch = (
         -1,
       )?.snapshot;
       const phase = find(runtime.state.plan.phases, item => item.id === ref.phaseId);
-      if (!snapshot || snapshot.snapshotId !== ref.snapshotId || !phase)
+      if (
+        !snapshot ||
+        snapshot.snapshotId !== ref.snapshotId ||
+        !phase ||
+        !nativeCycleSnapshotIsCurrentIteration(runtime, ref.phaseId, ref.snapshotId)
+      )
         return yield* fail('stale-snapshot-ref', 'Use the latest immutable snapshot for this phase.');
+      const baseBinding = yield* bindNativeCandidateWatchBase(
+        checkout,
+        phase.baseBranch,
+        {phaseId: ref.phaseId, phaseHash: ref.phaseHash, head: ref.sourceHead, tree: ref.sourceTree},
+        request.pr,
+      );
+      if (baseBinding.headBranch !== phase.branch)
+        return yield* fail('watch-binding-drift', 'The PR must use the exact admitted phase branch.');
       owner = {
         kind: 'candidate-pr',
         runId: request.runId,
@@ -396,8 +423,8 @@ export const runNativeTaskCandidateWatch = (
           }),
         ),
         prUrl: request.pr,
-        baseBranch: phase.baseBranch,
-        headBranch: phase.branch,
+        comparisonRef: phase.baseBranch,
+        ...baseBinding,
       };
       const digest = nativeWatchOwnerDigest(owner);
       const identity = EffectString.slice(0, 48)(digest);

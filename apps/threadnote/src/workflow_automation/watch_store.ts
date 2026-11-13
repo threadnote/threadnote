@@ -17,8 +17,15 @@ import {
 } from '@threadnote/workflow-automations/watch';
 import {verifyNativeWatchBoundPr, type NativeWatchProviderCache} from './watch_provider.js';
 import {readNativeWorkflowState} from './store.js';
-import {decodeNativeTaskActionRef} from '@threadnote/workflow-automations/task';
-import {gitValue} from '../utils.js';
+import {decodeNativeTaskActionRef, encodeNativeTaskActionRef} from '@threadnote/workflow-automations/task';
+import {nativeCycleSnapshotIsCurrentIteration} from '@threadnote/workflow-automations/cycle-runtime';
+import {
+  nativeCycleSupplementalRef,
+  nativeCycleSupplementalRevision,
+} from '@threadnote/workflow-automations/cycle-runtime';
+import {runCommandEffect} from '@threadnote/platform/command';
+import {bindNativeCycleDeliveryBase, verifyNativeCycleDeliveryRepository} from './cycle_delivery.js';
+import * as Cause from 'effect/Cause';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {decodeBoundedWorkflowJson, encodeBoundedWorkflowJson} from '../workflow_memory/journal_codec.js';
 import {stableJson} from '../workflow_memory/protocol.js';
@@ -99,6 +106,10 @@ export const nativeWatchOwnerSchema = Schema.Union([
     branch: text(512),
     scopeDigest: ownerHash,
     prUrl: text(2048),
+    comparisonRef: text(512),
+    comparisonResolvedRef: text(512),
+    baseConfigDigest: ownerHash,
+    baseRefBinding: Schema.optionalKey(Schema.Struct({ref: text(512), remote: text(128), repository: text(512)})),
     baseBranch: text(512),
     headBranch: text(512),
   }),
@@ -117,37 +128,81 @@ export type NativeWatchOwner = typeof nativeWatchOwnerSchema.Type;
 export type NativeCandidateWatchOwner = Extract<NativeWatchOwner, {kind: 'candidate-pr'}>;
 export const nativeWatchOwnerDigest = (owner: NativeWatchOwner) => sha256HexSync(stableJson(owner));
 
-/** Recheck immutable domain evidence and live clean Git/provider bindings; never adopt new source. */
-export const verifyNativeCandidateWatchOwner = Effect.fn('workflowWatch.verifyCandidateOwner')(function* (
-  config: RuntimeConfig,
+export const nativeCandidateWatchFailureIsDrift = (error: unknown): boolean =>
+  Schema.is(WorkflowAutomationError)(error) &&
+  ['candidate-binding-drift', 'candidate-source-drift', 'candidate-base-drift', 'watch-binding-drift'].includes(
+    error.code,
+  );
+const unavailable = (message: string) =>
+  WorkflowAutomationError.make({code: 'candidate-verification-unavailable', message, retryable: true});
+const boundedCandidateGit = (owner: {callerCwd: string}, args: readonly string[], timeoutMs = 1500) =>
+  runCommandEffect(
+    'git',
+    ['--no-optional-locks', '-c', 'core.warnAmbiguousRefs=true', '-C', owner.callerCwd, ...args],
+    {allowFailure: true, timeoutMs, maxOutputBytes: 65_536},
+  ).pipe(
+    Effect.flatMap(result => {
+      if (result.exitCode === 124) return Effect.fail(unavailable('The bounded candidate source probe timed out.'));
+      if (result.exitCode !== 0 || EffectString.trim(result.stderr))
+        return Effect.fail(
+          issue('candidate-source-drift', 'The exact candidate source/ref is unavailable or ambiguous.'),
+        );
+      return Effect.succeed(EffectString.trim(result.stdout));
+    }),
+    Effect.mapError(error =>
+      Schema.is(WorkflowAutomationError)(error) ? error : unavailable('Candidate source verification is unavailable.'),
+    ),
+  );
+const candidateGitConfiguration = (owner: {callerCwd: string}) =>
+  boundedCandidateGit(owner, ['config', '--get-regexp', '^(remote[.].*[.](url|fetch)|url[.].*[.]insteadof)$']);
+
+/** A short local fence fits below the two-second control-lock waiter budget. No network is permitted. */
+export const verifyNativeCandidateSourceFence = Effect.fn('workflowWatch.candidateSourceFence')(function* (
   owner: NativeCandidateWatchOwner,
 ) {
-  const stored = yield* readNativeWorkflowState(config, owner.runId);
-  const runtime = stored?.state.cycle;
+  const status = yield* boundedCandidateGit(
+    owner,
+    ['status', '--porcelain=v2', '--branch', '--untracked-files=all', '--ignore-submodules=none'],
+    500,
+  );
+  const lines = EffectString.split(status, '\n');
+  if (
+    !lines.includes('# branch.oid ' + owner.head) ||
+    !lines.includes('# branch.head ' + owner.branch) ||
+    EffectArray.some(lines, line => Boolean(line) && !EffectString.startsWith('# ')(line))
+  )
+    return yield* issue('candidate-source-drift', 'The candidate requires its exact clean committed HEAD and branch.');
+});
+
+export const nativeCandidateWatchOwnerIsCurrent = (
+  stored: NonNullable<Effect.Success<ReturnType<typeof readNativeWorkflowState>>>,
+  owner: NativeCandidateWatchOwner,
+): boolean => {
+  const runtime = stored.state.cycle;
   const phase = runtime
     ? Option.getOrUndefined(EffectArray.findFirst(runtime.state.plan.phases, item => item.id === owner.phaseId))
     : undefined;
   const proof = runtime?.state.phases[owner.phaseId];
   const baseline = runtime?.baselines[owner.phaseId];
-  const snapshots = runtime
-    ? EffectArray.filter(runtime.snapshots, item => item.snapshot.phaseId === owner.phaseId)
-    : [];
-  const snapshot = snapshots.at(-1)?.snapshot;
+  const snapshot = runtime
+    ? EffectArray.filter(runtime.snapshots, item => item.snapshot.phaseId === owner.phaseId).at(-1)?.snapshot
+    : undefined;
   const ref = decodeNativeTaskActionRef(owner.snapshotRef);
-  if (
-    !stored ||
-    !runtime ||
-    !phase ||
-    !proof ||
-    !baseline ||
-    !snapshot ||
-    sha256HexSync(stored.state.generation) !== owner.generationHash ||
-    proof.phaseHash !== owner.phaseHash ||
-    snapshot.snapshotId !== owner.snapshotId ||
-    snapshot.phaseHash !== owner.phaseHash ||
-    snapshot.head !== owner.head ||
-    snapshot.tree !== owner.tree ||
-    sha256HexSync(stableJson(snapshot)) !== owner.snapshotDigest ||
+  return Boolean(
+    runtime &&
+    phase &&
+    proof &&
+    baseline &&
+    snapshot &&
+    ref &&
+    nativeCycleSnapshotIsCurrentIteration(runtime, owner.phaseId, owner.snapshotId) &&
+    sha256HexSync(stored.state.generation) === owner.generationHash &&
+    proof.phaseHash === owner.phaseHash &&
+    snapshot.snapshotId === owner.snapshotId &&
+    snapshot.phaseHash === owner.phaseHash &&
+    snapshot.head === owner.head &&
+    snapshot.tree === owner.tree &&
+    sha256HexSync(stableJson(snapshot)) === owner.snapshotDigest &&
     sha256HexSync(
       stableJson({
         phase,
@@ -156,63 +211,164 @@ export const verifyNativeCandidateWatchOwner = Effect.fn('workflowWatch.verifyCa
         scopeBase: snapshot.scopeBase,
         declaredBaseHead: snapshot.declaredBaseHead,
       }),
-    ) !== owner.scopeDigest ||
-    baseline.head !== owner.baselineHead ||
-    baseline.tree !== owner.baselineTree ||
-    baseline.pinnedRef !== owner.baselineRef ||
-    baseline.repo !== owner.callerCwd ||
-    phase.branch !== owner.branch ||
-    phase.baseBranch !== owner.baseBranch ||
-    !ref ||
-    ref.kind !== 'snapshot' ||
-    ref.runId !== owner.runId ||
-    ref.generationHash !== owner.generationHash ||
-    ref.phaseId !== owner.phaseId ||
-    ref.phaseHash !== owner.phaseHash ||
-    ref.snapshotId !== owner.snapshotId ||
-    ref.sourceHead !== owner.head ||
-    ref.sourceTree !== owner.tree ||
-    ref.baselineHead !== owner.baselineHead ||
-    ref.baselineTree !== owner.baselineTree ||
-    ref.baselineRef !== owner.baselineRef
-  )
-    return yield* issue('candidate-binding-drift', 'The candidate immutable source binding changed.');
-  const head = yield* gitValue(['rev-parse', '--verify', 'HEAD'], owner.callerCwd);
-  const tree = yield* gitValue(['rev-parse', '--verify', 'HEAD^{tree}'], owner.callerCwd);
-  const branch = yield* gitValue(['symbolic-ref', '--short', 'HEAD'], owner.callerCwd);
-  const status = yield* gitValue(
-    ['status', '--porcelain=v2', '--untracked-files=all', '--ignore-submodules=none'],
-    owner.callerCwd,
+    ) === owner.scopeDigest &&
+    baseline.head === owner.baselineHead &&
+    baseline.tree === owner.baselineTree &&
+    baseline.pinnedRef === owner.baselineRef &&
+    baseline.repo === owner.callerCwd &&
+    phase.branch === owner.branch &&
+    phase.baseBranch === owner.comparisonRef &&
+    ref.kind === 'snapshot' &&
+    ref.runId === owner.runId &&
+    ref.generationHash === owner.generationHash &&
+    ref.phaseId === owner.phaseId &&
+    ref.phaseHash === owner.phaseHash &&
+    ref.snapshotId === owner.snapshotId &&
+    ref.sourceHead === owner.head &&
+    ref.sourceTree === owner.tree &&
+    ref.baselineHead === owner.baselineHead &&
+    ref.baselineTree === owner.baselineTree &&
+    ref.baselineRef === owner.baselineRef,
   );
-  const pinned = yield* gitValue(
-    ['rev-parse', '--verify', '--end-of-options', owner.baselineRef + '^{tree}'],
-    owner.callerCwd,
-  );
-  if (
-    head !== owner.head ||
-    tree !== owner.tree ||
-    branch !== owner.branch ||
-    status !== '' ||
-    pinned !== owner.baselineTree
-  )
+};
+/** Immutable native fence is cheap; callers use it with a short local fence and existing CAS. */
+export const verifyNativeCandidateNativeFence = Effect.fn('workflowWatch.candidateNativeFence')(function* (
+  config: RuntimeConfig,
+  owner: NativeCandidateWatchOwner,
+) {
+  const stored = yield* readNativeWorkflowState(config, owner.runId);
+  if (!stored || !nativeCandidateWatchOwnerIsCurrent(stored, owner))
     return yield* issue(
-      'candidate-source-drift',
-      'The candidate requires its exact clean committed source and branch.',
+      'candidate-binding-drift',
+      'The candidate snapshot no longer proves the current phase iteration.',
     );
-  yield* verifyNativeWatchBoundPr(owner.prUrl, {
-    head: owner.head,
-    baseBranch: owner.baseBranch,
-    headBranch: owner.headBranch,
-  });
-  const closingHead = yield* gitValue(['rev-parse', '--verify', 'HEAD'], owner.callerCwd);
-  const closingBranch = yield* gitValue(['symbolic-ref', '--short', 'HEAD'], owner.callerCwd);
-  const closingStatus = yield* gitValue(
-    ['status', '--porcelain=v2', '--untracked-files=all', '--ignore-submodules=none'],
-    owner.callerCwd,
-  );
-  if (closingHead !== owner.head || closingBranch !== owner.branch || closingStatus !== '')
-    return yield* issue('candidate-source-drift', 'The candidate source changed during provider observation.');
 });
+
+/** Strict destination binding is established once; its exact ref/config witness is checked on every observation. */
+export const bindNativeCandidateWatchBase = Effect.fn('workflowWatch.bindCandidateBase')(
+  function* (
+    checkout: string,
+    comparisonRef: string,
+    source: {phaseId: string; phaseHash: string; head: string; tree: string},
+    pr: string,
+  ) {
+    const observed = yield* verifyNativeWatchBoundPr(pr, {
+      head: source.head,
+      headBranch: undefined,
+      baseBranch: undefined,
+    });
+    const input = {
+      phaseId: source.phaseId,
+      phaseHash: source.phaseHash,
+      delivery: 'pr',
+      headSha: source.head,
+      validatedTree: source.tree,
+      pr: {
+        url: pr,
+        headSha: source.head,
+        branch: observed.headBranch,
+        baseBranch: observed.baseBranch,
+        state: observed.state === 'merged' ? 'merged' : 'open',
+      },
+    };
+    yield* verifyNativeCycleDeliveryRepository(checkout, input);
+    const bound = yield* bindNativeCycleDeliveryBase(checkout, comparisonRef, input);
+    const probe = {callerCwd: checkout};
+    const comparisonResolvedRef = yield* boundedCandidateGit(probe, [
+      'rev-parse',
+      '--symbolic-full-name',
+      '--verify',
+      '--end-of-options',
+      comparisonRef,
+    ]);
+    if (
+      !bound.pr ||
+      (bound.pr.baseRefBinding
+        ? comparisonResolvedRef !== bound.pr.baseRefBinding.ref
+        : comparisonResolvedRef !== 'refs/heads/' + observed.baseBranch)
+    )
+      return yield* issue('candidate-base-drift', 'The comparison ref does not identify the exact PR destination.');
+    return {
+      baseBranch: observed.baseBranch,
+      headBranch: observed.headBranch,
+      comparisonResolvedRef,
+      baseConfigDigest: sha256HexSync(yield* candidateGitConfiguration(probe)),
+      ...(bound.pr.baseRefBinding ? {baseRefBinding: bound.pr.baseRefBinding} : {}),
+    };
+  },
+  Effect.timeout('10 seconds'),
+  Effect.catchIf(Cause.isTimeoutError, () =>
+    Effect.fail(unavailable('Candidate base verification exceeded its deadline.')),
+  ),
+);
+
+/** Provider I/O is outside control locks. Sweeps reuse their own before/after PR observations. */
+export const verifyNativeCandidateWatchOwner = Effect.fn('workflowWatch.verifyCandidateOwner')(
+  function* (config: RuntimeConfig, owner: NativeCandidateWatchOwner, options: {readonly provider?: boolean} = {}) {
+    yield* verifyNativeCandidateNativeFence(config, owner);
+    yield* verifyNativeCandidateSourceFence(owner);
+    const objects = EffectString.split(
+      yield* boundedCandidateGit(owner, ['rev-parse', '--verify', 'HEAD^{tree}']),
+      '\n',
+    );
+    const pinned = yield* boundedCandidateGit(owner, [
+      'rev-parse',
+      '--verify',
+      '--end-of-options',
+      owner.baselineRef + '^{tree}',
+    ]);
+    const comparison = yield* boundedCandidateGit(owner, [
+      'rev-parse',
+      '--symbolic-full-name',
+      '--verify',
+      '--end-of-options',
+      owner.comparisonRef,
+    ]);
+    const configuration = sha256HexSync(yield* candidateGitConfiguration(owner));
+    if (
+      objects[0] !== owner.tree ||
+      pinned !== owner.baselineTree ||
+      comparison !== owner.comparisonResolvedRef ||
+      configuration !== owner.baseConfigDigest
+    )
+      return yield* issue(
+        'candidate-source-drift',
+        'The candidate source, baseline or exact destination binding changed.',
+      );
+    if (options.provider !== false)
+      yield* verifyNativeWatchBoundPr(owner.prUrl, {
+        head: owner.head,
+        baseBranch: owner.baseBranch,
+        headBranch: owner.headBranch,
+      });
+    yield* verifyNativeCandidateSourceFence(owner);
+  },
+  Effect.timeout('10 seconds'),
+  Effect.catchIf(Cause.isTimeoutError, () => Effect.fail(unavailable('Candidate verification exceeded its deadline.'))),
+);
+
+export const nativeCandidateWatchRef = (owner: NativeCandidateWatchOwner, watchId: string) => {
+  const identity = EffectString.slice(0, 48)(nativeWatchOwnerDigest(owner));
+  return encodeNativeTaskActionRef({
+    version: 1,
+    kind: 'candidate-watch',
+    runId: owner.runId,
+    generationHash: owner.generationHash,
+    phaseId: owner.phaseId,
+    phaseHash: owner.phaseHash,
+    snapshotId: owner.snapshotId,
+    sourceHead: owner.head,
+    sourceTree: owner.tree,
+    baselineHead: owner.baselineHead,
+    baselineTree: owner.baselineTree,
+    baselineRef: owner.baselineRef,
+    watchId,
+    consumerId: 'candidate-task-' + identity,
+    wakeupId: 'candidate-task-' + identity,
+    payloadDigest: nativeWatchOwnerDigest(owner),
+  });
+};
+
 const envelopeSchema = Schema.Struct({
   format: Schema.Literal('threadnote-native-watch-runtime'),
   version: Schema.Literal(1),
@@ -238,6 +394,9 @@ const envelopeSchema = Schema.Struct({
               base: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u))),
               mergeable: Schema.Boolean.pipe(Schema.NullOr, Schema.optionalKey),
               state: Schema.Literals(['open', 'closed', 'merged']),
+              identity: Schema.optionalKey(
+                Schema.Struct({url: text(2048), repository: text(256), baseBranch: text(256), headBranch: text(256)}),
+              ),
             }),
           ),
         }),
@@ -404,11 +563,14 @@ const stateBytes = Effect.fn('workflowAutomation.stateBytes')(function* (file: s
 export const readNativeWatch = Effect.fn('workflowAutomation.readState')(function* (
   config: RuntimeConfig,
   runId: string,
+  expectedRevision?: string,
 ) {
   const file = yield* statePath(config, runId);
   if (file === undefined) return undefined;
   const bytes = yield* stateBytes(file);
   if (bytes === undefined) return undefined;
+  if (expectedRevision !== undefined && sha256HexSync(bytes) !== expectedRevision)
+    return yield* issue('watch-inventory-changed', 'The retained watch changed during bounded inventory read.');
   const state = yield* fromPromiseInterruptible(
     async signal => {
       const parsed: unknown = JSON.parse(bytes);
@@ -430,6 +592,194 @@ export const readNativeWatch = Effect.fn('workflowAutomation.readState')(functio
     return yield* issue('invalid-state', 'The native state file belongs to another run.');
   const result = {envelope: state, revision: sha256HexSync(bytes)};
   return result;
+});
+
+export interface NativeCandidateWatchInventoryRow {
+  readonly watchId: string;
+  readonly watchRevision: string;
+  readonly runId: string;
+  readonly callerCwd: string;
+  readonly phaseId: string;
+  readonly snapshotId: string;
+  readonly prUrl: string;
+  readonly candidateWatchRef: string;
+  readonly historical: boolean;
+  readonly collectorStatus: 'absent' | 'starting' | 'running' | 'stopped' | 'blocked' | 'terminal';
+  readonly invalidation?: {readonly kind: 'candidate_invalidated'; readonly reason: string; readonly at: number};
+}
+/** Bounded retained discovery; no live source/provider probe and no short control lock. */
+export const readNativeCandidateWatchInventory = Effect.fn('workflowWatch.candidateInventory')(
+  function* (
+    config: RuntimeConfig,
+    stored: NonNullable<Effect.Success<ReturnType<typeof readNativeWorkflowState>>>,
+    callerCwd: string,
+  ) {
+    const directory = yield* stateDirectory(config, false);
+    const rows: NativeCandidateWatchInventoryRow[] = [];
+    if (directory === undefined) return {rows, count: 0, digest: sha256HexSync(stableJson(rows))};
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const names = yield* fs.readDirectory(directory);
+    if (names.length > 4096)
+      return yield* issue('watch-inventory-capacity', 'Watch namespace exceeds bounded discovery capacity.');
+    const selected = EffectArray.filter(names, name => /^candidate-[a-f0-9]{48}\.json$/u.test(name)).sort();
+    if (selected.length > 256)
+      return yield* issue(
+        'watch-inventory-capacity',
+        'Candidate watch inventory exceeds256files; no rows were omitted.',
+      );
+    let diskBytes = 0;
+    let logicalBytes = 0;
+    for (const name of selected) {
+      const file = path.join(directory, name);
+      const bytes = yield* stateBytes(file);
+      if (bytes === undefined)
+        return yield* issue('watch-inventory-changed', 'Candidate inventory changed; reload the task view.');
+      diskBytes += new TextEncoder().encode(bytes).byteLength;
+      const shape = yield* Effect.try({
+        try: () => JSON.parse(bytes) as unknown,
+        catch: () => issue('invalid-state', 'Candidate watch inventory is corrupt.'),
+      });
+      const expanded =
+        shape !== null &&
+        typeof shape === 'object' &&
+        'expandedBytes' in shape &&
+        typeof shape.expandedBytes === 'number'
+          ? shape.expandedBytes
+          : new TextEncoder().encode(bytes).byteLength;
+      logicalBytes += expanded;
+      if (
+        diskBytes > 32 * 1024 * 1024 ||
+        !Number.isSafeInteger(expanded) ||
+        expanded < 0 ||
+        logicalBytes > 128 * 1024 * 1024
+      )
+        return yield* issue(
+          'watch-inventory-capacity',
+          'Candidate inventory exceeds bounded read bytes; no rows were omitted.',
+        );
+      const watchId = EffectString.slice(0, -5)(name);
+      const watch = yield* readNativeWatch(config, watchId);
+      if (!watch) return yield* issue('watch-inventory-changed', 'Candidate inventory changed; reload the task view.');
+      const owner = watch.envelope.owner;
+      if (owner?.kind !== 'candidate-pr')
+        return yield* issue('invalid-state', 'Candidate inventory requires its typed retained owner.');
+      if (owner.runId !== stored.state.runId) continue;
+      if (owner.callerCwd !== callerCwd)
+        return yield* issue('watch-owner-conflict', 'The retained candidate belongs to another checkout.');
+      rows.push({
+        watchId,
+        watchRevision: watch.revision,
+        runId: owner.runId,
+        callerCwd: owner.callerCwd,
+        phaseId: owner.phaseId,
+        snapshotId: owner.snapshotId,
+        prUrl: owner.prUrl,
+        candidateWatchRef: nativeCandidateWatchRef(owner, watchId),
+        historical: !nativeCandidateWatchOwnerIsCurrent(stored, owner),
+        collectorStatus: watch.envelope.collector?.status ?? 'absent',
+        ...(watch.envelope.invalidation ? {invalidation: watch.envelope.invalidation} : {}),
+      });
+    }
+    return {rows, count: rows.length, digest: sha256HexSync(stableJson(rows))};
+  },
+  Effect.timeout('5 seconds'),
+  Effect.catchIf(Cause.isTimeoutError, () =>
+    Effect.fail(
+      issue('watch-inventory-unavailable', 'Candidate discovery exceeded its bounded deadline; no rows were omitted.'),
+    ),
+  ),
+);
+
+/** Exact known-notice recovery never enumerates other watches or checks source freshness. */
+export const readNativeOwnedWatchRoute = Effect.fn('workflowWatch.ownedRoute')(function* (
+  config: RuntimeConfig,
+  watchId: string,
+) {
+  const watch = yield* readNativeWatch(config, watchId);
+  const owner = watch?.envelope.owner;
+  if (!watch || !owner) return undefined;
+  const consumer = watch.envelope.state.consumer;
+  if (!consumer) return yield* issue('watch-owner-conflict', 'Owned notice requires its retained consumer.');
+  let callerCwd: string;
+  let candidateWatchRef: string | undefined;
+  let supplementalRef: string | undefined;
+  if (owner.kind === 'candidate-pr') {
+    callerCwd = owner.callerCwd;
+    candidateWatchRef = nativeCandidateWatchRef(owner, watchId);
+  } else {
+    const stored = yield* readNativeWorkflowState(config, owner.runId);
+    const runtime = stored?.state.cycle;
+    const publication = runtime
+      ? Option.getOrUndefined(
+          EffectArray.findFirst(
+            runtime.state.supplementalPublications ?? [],
+            item => item.publicationId === owner.publicationId,
+          ),
+        )
+      : undefined;
+    const init = publication?.initialization;
+    const baseline = runtime?.baselines[owner.phaseId];
+    if (
+      !stored ||
+      !runtime ||
+      !publication ||
+      !init ||
+      !baseline ||
+      sha256HexSync(stored.state.generation) !== owner.generationHash ||
+      init.phaseId !== owner.phaseId ||
+      init.head !== owner.head ||
+      init.tree !== owner.tree ||
+      init.pr.url !== owner.prUrl
+    )
+      return yield* issue('watch-owner-conflict', 'The supplemental notice has no exact retained native owner.');
+    callerCwd = baseline.repo;
+    supplementalRef = encodeNativeTaskActionRef({
+      version: 1,
+      kind: 'supplemental-publication',
+      runId: owner.runId,
+      generationHash: owner.generationHash,
+      stateRevision: stored.revision,
+      phaseId: init.phaseId,
+      phaseHash: init.phaseHash,
+      snapshotId: init.snapshotId,
+      sourceHead: init.head,
+      sourceTree: init.tree,
+      publicationId: publication.publicationId,
+      publicationRef: nativeCycleSupplementalRef(publication),
+      payloadDigest: nativeCycleSupplementalRevision(runtime),
+    });
+  }
+  const outbox = watch.envelope.notification?.outbox;
+  const base =
+    owner.kind === 'candidate-pr'
+      ? decodeNativeTaskActionRef(candidateWatchRef!)
+      : {
+          version: 1 as const,
+          kind: 'delivery' as const,
+          runId: owner.runId,
+          generationHash: owner.generationHash,
+          payloadDigest: nativeWatchOwnerDigest(owner),
+          watchId,
+          consumerId: consumer.id,
+          wakeupId: consumer.wakeupId,
+        };
+  const noticeRef =
+    base && outbox?.attemptId
+      ? encodeNativeTaskActionRef({
+          ...base,
+          kind: owner.kind === 'candidate-pr' ? 'candidate-notice' : 'delivery',
+          eventKey: outbox.key,
+          watchAttemptId: outbox.attemptId,
+        })
+      : undefined;
+  return {
+    runId: owner.runId,
+    callerCwd,
+    ...(candidateWatchRef ? {candidateWatchRef} : {}),
+    ...(supplementalRef ? {supplementalRef} : {}),
+    ...(noticeRef ? {noticeRef} : {}),
+  };
 });
 
 /** Call only under the run lock. CAS and rename preserve the old file on every failed preparation. */
