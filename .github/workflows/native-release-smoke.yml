@@ -297,7 +297,7 @@ jobs:
           mkdir -p .context/semantic-platform
           docker pull "$MUSL_IMAGE"
           docker image inspect "$MUSL_IMAGE" > .context/semantic-platform/image.json
-          docker run --rm --interactive --init --user root             -v "$PWD:/workspace" -w /workspace             -e THREADNOTE_BUILD_TARGET -e RELEASE_TARGET "$MUSL_IMAGE" sh -se <<'MUSL'
+          docker run --rm --interactive --init --user root --tmpfs /tmp:rw,nosuid,nodev,mode=1777             -v "$PWD:/workspace" -w /workspace             -e THREADNOTE_BUILD_TARGET -e RELEASE_TARGET "$MUSL_IMAGE" sh -se <<'MUSL'
               apk add --no-cache bash git ripgrep bubblewrap libstdc++ libgcc
               bun --version > .context/semantic-platform/bun-version.txt
               uname -m > .context/semantic-platform/architecture.txt
@@ -313,6 +313,7 @@ jobs:
               private_tmp="$(mktemp -d /tmp/threadnote-ci-XXXXXX)"
               export TMPDIR="$private_tmp"
               trap 'rm -rf -- "$private_tmp"' EXIT
+              bun --eval 'import {statfsSync,statSync} from "node:fs"; console.log(JSON.stringify({filesystemType:statfsSync(Bun.env.TMPDIR).type,mode:statSync(Bun.env.TMPDIR).mode&0o7777}));' > .context/semantic-platform/private-temp-filesystem.json
               bun --eval 'import {runtimeOpenPrivateWriterDirectory,runtimeClosePrivateWriterDirectory} from "@threadnote/platform/system"; const handle=runtimeOpenPrivateWriterDirectory(Bun.env.TMPDIR); runtimeClosePrivateWriterDirectory(handle); console.log("Native private musl temporary storage proof passed; production qualification remains false");'
               bun --bun vitest run packages/platform/test/system-stable-read.test.ts packages/platform/test/writer-system/linux-acl.test.ts packages/platform/test/writer-system/provider-process.test.ts apps/threadnote/test/unit/semantic-runtime.test.ts apps/threadnote/test/unit/semantic-writer-process.test.ts apps/threadnote/test/unit/semantic-operations.test.ts apps/threadnote/test/unit/semantic-mcp-cli.test.ts apps/threadnote/test/unit/semantic-python.test.ts apps/threadnote/test/unit/semantic-go-rust.test.ts apps/threadnote/test/unit/semantic-java-preparation.test.ts --reporter=default --reporter=json --outputFile=.context/semantic-platform/components.json
               bun run build
