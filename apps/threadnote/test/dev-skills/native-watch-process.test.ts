@@ -111,13 +111,36 @@ interface CliBoundary {
   stderr: string;
   result: unknown;
 }
+type ScenarioStage =
+  | 'fixture-setup'
+  | 'initial-start'
+  | 'initial-delivery'
+  | 'event-gate'
+  | 'collector-crash'
+  | 'collector-restart'
+  | 'restart-sweep'
+  | 'post-restart-relay'
+  | 'disposition-and-ack'
+  | 'stop-before-exit'
+  | 'post-stop-event'
+  | 'work-detail'
+  | 'cleanup';
+interface ScenarioDiagnostics {
+  stage: ScenarioStage;
+  readonly startedAt: number;
+  cliCount: number;
+}
 const required = <A>(value: A | null | undefined): A => {
   expect(value).toBeDefined();
   expect(value).not.toBeNull();
   if (value === null || value === undefined) throw new Error('Required CLI response field missing.');
   return value;
 };
-async function realCollectorScenario(terminal: boolean, eventDriven = false) {
+async function realCollectorScenario(terminal: boolean, eventDriven = false, diagnostics?: ScenarioDiagnostics) {
+  const stage = (value: ScenarioStage) => {
+    if (diagnostics) diagnostics.stage = value;
+  };
+  stage('fixture-setup');
   const root = await mkdtemp(join(tmpdir(), 'native-watch-child-'));
   const home = join(root, 'home');
   const bin = join(root, 'bin');
@@ -190,6 +213,7 @@ process.stdout.write('Queued message bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb for th
   ): Promise<CliBoundary & {result: WatchResult<C>}>;
   function cli(command: string, extra: Record<string, unknown>, success: false): Promise<CliBoundary>;
   async function cli(command: string, extra: Record<string, unknown> = {}, success = true) {
+    if (diagnostics) diagnostics.cliCount++;
     const child = Bun.spawn([process.execPath, entrypoint, 'workflow-automation'], {
       env,
       stdin: 'pipe',
@@ -277,6 +301,7 @@ process.stdout.write('Queued message bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb for th
     return (await cli('relay', claim)).result;
   };
   try {
+    stage('initial-start');
     const initial = (await cli('start', start)).result;
     if (terminal) {
       const pid = required(initial.collector.pid);
@@ -324,6 +349,7 @@ process.stdout.write('Queued message bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb for th
     const firstPid = required(initial.collector.pid);
     owned.add(firstPid);
     let candidate: Delivery | null | undefined;
+    stage('initial-delivery');
     const deadline = Date.now() + 10_000;
     do {
       const waited = (await cli('wait', {...consumer, timeoutSeconds: 1})).result;
@@ -349,6 +375,7 @@ process.stdout.write('Queued message bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb for th
     expect((await cli('relay', consumer)).result.delivery).toEqual(delivery);
     expect(await readFile(counter, 'utf8')).toBe(requests);
     if (eventDriven) {
+      stage('event-gate');
       await notified(1);
       const receiptDeadline = Date.now() + 10_000;
       let notification = (await cli('inspect')).result.notification;
@@ -356,19 +383,23 @@ process.stdout.write('Queued message bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb for th
         notification = (await cli('inspect')).result.notification;
       expect(notification).toMatchObject({status: 'queued', notifiedThrough: 0, consumedThrough: 0});
     }
+    stage('collector-crash');
     process.kill(firstPid, 'SIGKILL');
     await dead(firstPid);
     owned.delete(firstPid);
+    stage('collector-restart');
     const restarted = (await cli('start', start)).result;
     const nextPid = required(restarted.collector.pid);
     owned.add(nextPid);
     expect(restarted.collector.alive).toBe(true);
     expect(nextPid).not.toBe(firstPid);
+    stage('restart-sweep');
     const restartDeadline = Date.now() + 10_000;
     let sweep = (await cli('inspect')).result;
     while (sweep.metrics.sweeps < 2 && Date.now() < restartDeadline) sweep = (await cli('inspect')).result;
     expect(sweep.metrics.sweeps).toBe(2);
     const restartRequests = await readFile(counter, 'utf8');
+    stage('post-restart-relay');
     expect((await cli('relay', consumer)).result.delivery).toEqual(delivery);
     if (eventDriven) expect((await arriveNotice(0)).delivery).toEqual(delivery);
     const largeEvent = required(
@@ -385,6 +416,7 @@ process.stdout.write('Queued message bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb for th
       reason: event.id === largeEvent.id ? largeReason : 'fixture needs follow-up',
       evidence: event.id === largeEvent.id ? largeEvidence : 'fixture lifecycle acceptance',
     }));
+    stage('disposition-and-ack');
     await cli('disposition', {...consumer, deliveryId: delivery.id, dispositions});
     const acknowledged = (await cli('ack', {...consumer, deliveryId: delivery.id})).result;
     expect(acknowledged.pending).toBe(0);
@@ -406,13 +438,18 @@ process.stdout.write('Queued message bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb for th
       await notified(1);
       expect((await hostCalls())[0][4]).toContain(JSON.stringify(home));
     }
+    stage('stop-before-exit');
     await cli('stop');
     await dead(nextPid);
     owned.delete(nextPid);
     const stopped = (await cli('inspect')).result;
     expect(stopped.collector.alive).toBe(false);
     expect(stopped.stopRequested).toBe(true);
-    if (eventDriven) await notified(2);
+    if (eventDriven) {
+      stage('post-stop-event');
+      await notified(2);
+    }
+    stage('work-detail');
     const beforeDetail = (await cli('inspect')).result.revision;
     const wrong = await cli(
       'work-detail',
@@ -458,6 +495,7 @@ process.stdout.write('Queued message bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb for th
     );
     expect(await readFile(counter, 'utf8')).toBe(restartRequests);
   } finally {
+    stage('cleanup');
     // The private fixture state is also authoritative if startup failed after spawning.
     try {
       const state = decodeNativeWatchEnvelope(
@@ -492,11 +530,21 @@ it(
   60_000,
 );
 
-it(
-  'keeps event delivery gated across real collector crash/restart and sends stop before exit',
-  () => realCollectorScenario(false, true),
-  60_000,
-);
+it('keeps event delivery gated across real collector crash/restart and sends stop before exit', ({onTestFailed}) => {
+  const diagnostics: ScenarioDiagnostics = {stage: 'fixture-setup', startedAt: Date.now(), cliCount: 0};
+  onTestFailed(() => {
+    process.stderr.write(
+      'NATIVE_WATCH_SCENARIO_FAILURE ' +
+        JSON.stringify({
+          stage: diagnostics.stage,
+          elapsedMs: Date.now() - diagnostics.startedAt,
+          cliCount: diagnostics.cliCount,
+        }) +
+        '\n',
+    );
+  });
+  return realCollectorScenario(false, true, diagnostics);
+}, 60_000);
 it(
   'sends terminal event notification before the real collector exits',
   () => realCollectorScenario(true, true),
