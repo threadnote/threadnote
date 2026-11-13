@@ -234,6 +234,8 @@ it.skipIf(process.platform !== 'win32')(
       const openRoots: RuntimeWriterRoot[] = [];
       const open = () => {
         const info = fs.statSync(directory, {bigint: true});
+        expect(info.isDirectory()).toBe(true);
+        expect(info.size).toBe(0n);
         const current = runtimeOpenWriterRoot(fs.realpathSync(directory), {dev: info.dev, ino: info.ino});
         openRoots.push(current);
         return current;
@@ -283,6 +285,8 @@ it.skipIf(process.platform !== 'win32')(
             observed = fs.statSync(file, {bigint: true}),
             index = BigInt(l.getUint32(44, true)) * 0x100000000n + BigInt(l.getUint32(48, true)),
             epoch = 116_444_736_000_000_000n;
+          expect(observed.isFile()).toBe(true);
+          expect(observed.size).toBe(BigInt(new TextEncoder().encode('old source').byteLength));
           const projection = {
             volume: f.getUint32(0, true) === l.getUint32(28, true) && observed.dev === BigInt(l.getUint32(28, true)),
             fileId:

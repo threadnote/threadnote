@@ -267,7 +267,8 @@ function projected(path: string, id: NativeFileIdentity, directory: boolean): Ru
     (info.ctimeNs !== (id.changed - epoch) * 100n && 'changed') ||
     (info.mtimeNs !== (id.modified - epoch) * 100n && 'modified') ||
     (info.nlink !== BigInt(id.links) && 'links') ||
-    (info.size !== id.size && 'size');
+    // Bun 1.4.4 pins libuv 8023581113b276e7c1aee3f82da57ca0893faab1: win/fs.c exposes directory st_size as zero.
+    (info.size !== (directory ? 0n : id.size) && 'size');
   if (failed) {
     const error = RuntimeWriterFault.make({reason: 'unsupported-platform'});
     error.message = `windows-projection:${failed}`;
