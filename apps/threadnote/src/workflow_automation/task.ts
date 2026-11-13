@@ -27,6 +27,7 @@ import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {readNativeWatch} from './watch_store.js';
 import {verifyNativeCycleBaseRequalification} from './cycle_git.js';
+import {verifyNativeCycleSnapshotEvidence, verifyNativeCycleUnreviewedRebase} from './cycle_recovery.js';
 import {resolveNativeTaskBaseRef} from './task_action_helpers.js';
 import {currentNativeTaskRef} from './task_action_helpers.js';
 import {decodeJournal} from './closeout_request_schema.js';
@@ -304,7 +305,7 @@ const baseRequalificationRoute = (
     if (fromBranches.size !== 1) return undefined;
     const fromBaseBranch = [...fromBranches][0];
     if (!fromBaseBranch) return undefined;
-    const oldBaseResult = yield* resolveNativeTaskBaseRef(checkout, fromBaseBranch).pipe(Effect.result);
+    const oldBaseResult = yield* verifyNativeCycleSnapshotEvidence(checkout, prior).pipe(Effect.result);
     const headResult = yield* gitValue(['rev-parse', '--verify', '--end-of-options', 'HEAD^{commit}'], checkout).pipe(
       Effect.result,
     );
@@ -317,14 +318,9 @@ const baseRequalificationRoute = (
       newBaseResult._tag === 'Failure'
     )
       return undefined;
-    if (
-      oldBaseResult.success === undefined ||
-      headResult.success === undefined ||
-      branchResult.success === undefined ||
-      newBaseResult.success === undefined
-    )
+    if (headResult.success === undefined || branchResult.success === undefined || newBaseResult.success === undefined)
       return undefined;
-    const priorBaseHead = oldBaseResult.success.commit;
+    const priorBaseHead = prior.declaredBaseHead;
     const currentHead = EffectString.trim(headResult.success);
     const currentBranch = EffectString.trim(branchResult.success);
     const newBaseHead = newBaseResult.success.commit;
@@ -619,9 +615,38 @@ export const readNativeTaskView = (config: RuntimeConfig, input: unknown) =>
     );
     const result = pageWatches.length > 0 ? {...selectedView, historicalWatches: pageWatches} : selectedView;
     const withBaseRequalification = (view: ReturnType<typeof projectNativeTaskView>) =>
-      baseRequalificationRoute(config, stored, checkout, view).pipe(
-        Effect.map(route => (route ? {...view, baseRequalification: route} : view)),
-      );
+      Effect.gen(function* () {
+        const route = yield* baseRequalificationRoute(config, stored, checkout, view);
+        const runtime = stored.state.cycle;
+        const snapshotRef = view.phase?.snapshot?.snapshotRef;
+        const prior = runtime
+          ? EffectOption.getOrUndefined(
+              EffectArray.findFirst(runtime.snapshots, entry => entry.snapshot.snapshotId === view.next.snapshotId),
+            )?.snapshot
+          : undefined;
+        const phase = runtime
+          ? EffectOption.getOrUndefined(
+              EffectArray.findFirst(runtime.state.plan.phases, candidate => candidate.id === view.next.phaseId),
+            )
+          : undefined;
+        const recovery =
+          runtime && prior && phase && snapshotRef && view.status === 'ready' && view.next.action === 'review'
+            ? yield* verifyNativeCycleUnreviewedRebase(checkout, prior, runtime, phase).pipe(Effect.result)
+            : undefined;
+        return {
+          ...view,
+          ...(route ? {baseRequalification: route} : {}),
+          ...(recovery?._tag === 'Success'
+            ? {
+                unreviewedRebaseRecovery: {
+                  action: 'recover-unreviewed-rebase' as const,
+                  snapshotRef: snapshotRef!,
+                  userAuthorityRequired: true as const,
+                },
+              }
+            : {}),
+        };
+      });
     if (request.phaseId === undefined) return yield* withBaseRequalification(result);
     const runtime = stored.state.cycle;
     const requestedPhases = EffectArray.filter(runtime?.state.plan.phases ?? [], phase => phase.id === request.phaseId);

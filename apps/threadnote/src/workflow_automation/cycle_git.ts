@@ -19,6 +19,8 @@ import * as Effect2 from 'effect';
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
 const objectId = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 const outputLimit = 4 * 1_048_576;
+const snapshotPathLimit = 8192;
+const stagingTimeoutMs = 120_000;
 
 export function nativeCycleRelativePath(value: string): boolean {
   return (
@@ -37,9 +39,9 @@ export function nativeCycleRelativePath(value: string): boolean {
 const cycleTreeModes = new Set(['100644', '100755', '120000', '160000']);
 const absentTreeMode = '000000';
 
-const git = (repo: string, args: readonly string[], temporaryIndex?: string) =>
+const git = (repo: string, args: readonly string[], temporaryIndex?: string, timeoutMs = 30_000) =>
   runBinaryCommandEffect('git', ['--no-optional-locks', '-C', repo, ...args], {
-    timeoutMs: 30_000,
+    timeoutMs,
     maxOutputBytes: outputLimit,
     ...(temporaryIndex ? {trustedGitIndexFile: temporaryIndex} : {}),
   }).pipe(
@@ -201,19 +203,29 @@ export const captureNativeCycleSource = Effect.fn('workflowAutomation.cycle.capt
       const temporary = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-cycle-index-'});
       const index = path.join(temporary, 'index');
       if (originalIndex) yield* fs.writeFile(index, originalIndex, {mode: 0o600, flag: 'wx'});
-      yield* git(root, ['add', '--all', '--', '.'], index);
-      yield* git(root, ['add', '--renormalize', '--all', '--', '.'], index);
-      const tree = Effect2.pipe(yield* git(root, ['write-tree'], index), EffectString.trim);
+      yield* git(root, ['add', '--all', '--', '.'], index, stagingTimeoutMs);
+      yield* git(root, ['add', '--renormalize', '--all', '--', '.'], index, stagingTimeoutMs);
+      const tree = Effect2.pipe(yield* git(root, ['write-tree'], index, stagingTimeoutMs), EffectString.trim);
       if (!objectId.test(tree)) return yield* fail('invalid-snapshot', 'Git did not return a snapshot tree.');
       const raw = EffectArray.filter(
         Effect2.pipe(
-          yield* git(root, ['diff', '--raw', '--no-renames', '--abbrev=64', '-z', baseTree, tree, '--']),
+          yield* git(
+            root,
+            ['diff', '--raw', '--no-renames', '--abbrev=64', '-z', baseTree, tree, '--'],
+            undefined,
+            stagingTimeoutMs,
+          ),
           EffectString.split('\0'),
         ),
         Boolean,
       );
-      if (raw.length % 2 !== 0 || raw.length > 16_384)
-        return yield* fail('snapshot-capacity', 'Snapshot changes exceed the bounded file manifest.');
+      if (raw.length % 2 !== 0) return yield* fail('invalid-snapshot', 'Git returned malformed raw diff path framing.');
+      const changedPathCount = raw.length / 2;
+      if (changedPathCount > snapshotPathLimit)
+        return yield* fail(
+          'snapshot-capacity',
+          `Snapshot raw diff contains ${changedPathCount} changed paths, exceeding the ${snapshotPathLimit}-path limit. The bound is measured from the pinned cycle baseline tree (${baseTree}) to the captured worktree tree (${tree}); current HEAD is ${head}. Inspect the reported baseline, captured tree, and HEAD identities. Capture requires the complete baseline-relative delta to contain at most ${snapshotPathLimit} changed paths.`,
+        );
       const files: Record<string, string> = Object.create(null);
       const entries: Record<string, {mode: string; blob: string}> = Object.create(null);
       for (let index = 0; index < raw.length; index += 2) {
@@ -280,7 +292,8 @@ export const pinNativeCycleCommit = Effect.fn('workflowAutomation.cycle.pinCommi
   bindingId: string,
   snapshotId: string,
   commit: string,
-  purpose: 'requalification-before' | 'requalification-after' | 'requalification-base',
+  purpose:
+    'requalification-before' | 'requalification-after' | 'requalification-base' | 'snapshot-head' | 'snapshot-base',
 ) {
   if (
     !/^[a-f0-9]{64}$/u.test(bindingId) ||

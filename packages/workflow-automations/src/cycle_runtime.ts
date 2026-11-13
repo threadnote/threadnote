@@ -2,6 +2,11 @@ import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Schema} from 'effect';
 import {
   NativeCyclePlanSchema,
+  NativeCycleSupplementalInitSchema,
+  NativeCycleSupplementalEventSchema,
+  type NativeCycleSupplementalPublication,
+  nextNativeCycle,
+  nativeCycleAbsolutePath,
   NativeCycleStateSchema,
   decodeNativeCyclePlan,
   decodeNativeCycleState,
@@ -10,6 +15,7 @@ import {
 } from './cycle.js';
 import {
   NativeCycleSnapshotSchema,
+  nativeCycleUnreviewedRecoveryDigest,
   NativeCycleReviewSchema,
   validateNativeCycleReviewHistory,
   nativeCycleBaseRequalificationReceiptDigest,
@@ -253,12 +259,36 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
         latestSnapshotByPhase.get(snapshot.phaseId) !== prior.snapshot.snapshotId ||
         prior.snapshot.phaseId !== snapshot.phaseId ||
         prior.snapshot.phaseHash !== snapshot.phaseHash ||
-        prior.snapshot.tree === snapshot.tree ||
+        (prior.snapshot.tree === snapshot.tree && !snapshot.unreviewedSupersession.rebaseRecovery) ||
         prior.snapshot.baseTree !== snapshot.baseTree ||
         reviews.has(prior.snapshot.snapshotId) ||
         !Effect.pipe(snapshot.unreviewedSupersession.reason, EffectString.trim)
       )
-        fail('Unreviewed supersession must retain the latest changed-source snapshot without an accepted review.');
+        fail('Unreviewed supersession must retain the latest source snapshot without an accepted review.');
+      const recovery = snapshot.unreviewedSupersession.rebaseRecovery;
+      if (
+        recovery &&
+        (!snapshot.comparisonEvidence ||
+          recovery.priorHead !== prior.snapshot.head ||
+          recovery.priorBaseHead !== prior.snapshot.declaredBaseHead ||
+          snapshot.head === recovery.priorHead ||
+          snapshot.declaredBaseHead === recovery.priorBaseHead ||
+          snapshot.acceptedHead !== snapshot.head ||
+          !EffectString.trim(recovery.authority) ||
+          recovery.toBaseBranch !== snapshot.comparisonEvidence.baseBranch ||
+          (prior.snapshot.comparisonEvidence &&
+            recovery.fromBaseBranch !== prior.snapshot.comparisonEvidence.baseBranch) ||
+          (recovery.fromBaseBranch !== recovery.toBaseBranch &&
+            !nativeCycleHasBasePlanTransition(
+              runtime.plans,
+              prior.snapshot,
+              snapshot.phaseHash,
+              recovery.fromBaseBranch,
+              recovery.toBaseBranch,
+            )) ||
+          recovery.receiptDigest !== nativeCycleUnreviewedRecoveryDigest(snapshot))
+      )
+        fail('Unreviewed rebase recovery lost its exact predecessor, authority or immutable evidence.');
     }
     if (snapshot.baseRequalification) {
       const receipt = snapshot.baseRequalification;
@@ -404,6 +434,7 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
     )
       fail('Historical admission lost its complete source, review, attempt, budget or phase proof lineage.');
   }
+  validateNativeCycleSupplementalPublications(runtime);
   return runtime;
 }
 
@@ -455,4 +486,255 @@ export function makeNativeHistoricalDigests(plans: NativeCycleRuntime['plans']) 
     );
   };
   return {planLineage, history};
+}
+
+/** Canonical cycle CAS is independent of provider state and task-card serialization. */
+export const nativeCycleSupplementalRevision = (runtime: NativeCycleRuntime): string =>
+  sha256HexSync(nativeCycleCanonicalJson(runtime));
+const supplementalDigest = (value: unknown): string => sha256HexSync(nativeCycleCanonicalJson(value));
+const supplementalInitialRef = (publicationId: string): string =>
+  supplementalDigest(['threadnote-supplemental-chain-initial-v1', publicationId]);
+const supplementalRecordRef = (publicationId: string, operationId: string): string =>
+  supplementalDigest(['threadnote-supplemental-chain-record-v1', publicationId, operationId]);
+/** Operation identity binds the prior chain ref and the complete record; no prefix serialization. */
+export const nativeCycleSupplementalRef = (publication: NativeCycleSupplementalPublication): string => {
+  const last = publication.records.at(-1);
+  return last
+    ? supplementalRecordRef(publication.publicationId, last.operationId)
+    : supplementalInitialRef(publication.publicationId);
+};
+const supplementalId = (initialization: NativeCycleSupplementalPublication['initialization']): string =>
+  supplementalDigest(['threadnote-supplemental-initialization-v1', initialization]);
+const supplementalOperation = (
+  publicationId: string,
+  record: Omit<NativeCycleSupplementalPublication['records'][number], 'operationId'>,
+): string => supplementalDigest(['threadnote-supplemental-record-v1', publicationId, record]);
+function supplementalFail(message: string): never {
+  throw WorkflowAutomationError.make({code: 'invalid-cycle-state', message});
+}
+
+function supplementalProofContext(runtime: NativeCycleRuntime) {
+  return {
+    planDigest: supplementalDigest(runtime.state.plan),
+    localComplete:
+      runtime.state.plan.delivery === 'local' &&
+      nextNativeCycle(runtime.state).action === 'complete' &&
+      EffectArray.every(
+        runtime.state.plan.phases,
+        item => runtime.state.phases[item.id].delivery?.delivery === 'local',
+      ),
+  };
+}
+function validateSupplementalInitialization(
+  runtime: NativeCycleRuntime,
+  init: NativeCycleSupplementalPublication['initialization'],
+  context = supplementalProofContext(runtime),
+): void {
+  const phase = runtime.state.phases[init.phaseId];
+  const definition = EffectOption.getOrUndefined(
+    EffectArray.findFirst(runtime.state.plan.phases, item => item.id === init.phaseId),
+  );
+  const stored = EffectArray.filter(runtime.snapshots, item => item.snapshot.phaseId === init.phaseId).at(-1);
+  const snapshot = stored?.snapshot;
+  const review = EffectOption.getOrUndefined(
+    EffectArray.findFirst(runtime.reviews, item => item.snapshotId === init.snapshotId),
+  );
+  if (
+    !context.localComplete ||
+    !phase ||
+    !definition ||
+    !snapshot ||
+    !review ||
+    phase.delivery?.delivery !== 'local' ||
+    !phase.validation ||
+    init.planDigest !== context.planDigest ||
+    init.phaseHash !== phase.phaseHash ||
+    snapshot.snapshotId !== init.snapshotId ||
+    snapshot.phaseHash !== init.phaseHash ||
+    !nativeCycleSnapshotIsCurrentIteration(runtime, init.phaseId, init.snapshotId) ||
+    (snapshot.acceptedHead ?? snapshot.head) !== init.head ||
+    snapshot.tree !== init.tree ||
+    phase.head !== init.head ||
+    phase.tree !== init.tree ||
+    init.validationDigest !== supplementalDigest(phase.validation) ||
+    init.localReceiptDigest !== supplementalDigest(phase.delivery) ||
+    init.pr.headSha !== init.head ||
+    init.pr.branch !== definition.branch ||
+    !/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9][0-9]*$/u.test(init.pr.url) ||
+    (definition.baseBranch !== init.pr.baseBranch &&
+      definition.baseBranch !== init.pr.baseRefBinding?.ref &&
+      definition.baseBranch !== `${init.pr.baseRefBinding?.remote}/${init.pr.baseBranch}`)
+  )
+    supplementalFail('Supplemental attachment requires exact completed local proof and an existing matching PR.');
+  const predecessorId = snapshot.previous ?? snapshot.supersedes;
+  const predecessor = predecessorId
+    ? EffectOption.getOrUndefined(
+        EffectArray.findFirst(runtime.snapshots, item => item.snapshot.snapshotId === predecessorId),
+      )?.snapshot
+    : undefined;
+  const priorReview = predecessor
+    ? EffectOption.getOrUndefined(
+        EffectArray.findFirst(runtime.reviews, item => item.snapshotId === predecessor.snapshotId),
+      )?.report
+    : undefined;
+  if (
+    validateNativeCycleReviewHistory(
+      snapshot,
+      review.report,
+      predecessor && priorReview ? {snapshot: predecessor, review: priorReview} : undefined,
+    ).summary.blockingIssueCount
+  )
+    supplementalFail('Supplemental attachment requires an accepted nonblocking source review.');
+}
+
+function validateSupplementalRecords(publication: NativeCycleSupplementalPublication): void {
+  let previousRef = supplementalInitialRef(publication.publicationId);
+  let verified = false,
+    merged = false,
+    watched = false,
+    completed = false;
+  const operations = new Set<string>();
+  for (const record of publication.records) {
+    const {operationId, ...request} = record;
+    if (
+      operations.has(operationId) ||
+      operationId !== supplementalOperation(publication.publicationId, request) ||
+      record.previousRef !== previousRef
+    )
+      supplementalFail('Supplemental records lost their unique operation identity or append-only predecessor.');
+    operations.add(operationId);
+    const event = record.event;
+    if (event.kind === 'provider-verified') {
+      const {state: _initialState, ...destination} = publication.initialization.pr;
+      const {state: currentState, ...observed} = event.pr;
+      if (
+        verified ||
+        (_initialState === 'merged' && currentState !== 'merged') ||
+        nativeCycleCanonicalJson(destination) !== nativeCycleCanonicalJson(observed)
+      )
+        supplementalFail('Provider verification must bind the immutable authorized PR destination and head.');
+      verified = true;
+      merged = currentState === 'merged';
+    } else if (event.kind === 'watch') {
+      if (
+        !verified ||
+        event.watch.prUrl !== publication.initialization.pr.url ||
+        event.watch.headSha !== publication.initialization.head ||
+        event.watch.state !== (merged ? 'terminal' : 'active') ||
+        !nativeCycleAbsolutePath(event.watch.stateDir)
+      )
+        supplementalFail('Supplemental watch requires matching verified PR and lifecycle proof.');
+      watched = true;
+    } else if (event.kind === 'merged') {
+      if (!verified || merged) supplementalFail('Merge observation requires a verified open PR.');
+      merged = true;
+    } else {
+      if (completed || !verified || (!merged && !watched))
+        supplementalFail('Completion requires verified merge or active watch proof.');
+      completed = true;
+    }
+    previousRef = supplementalRecordRef(publication.publicationId, operationId);
+  }
+}
+
+function validateNativeCycleSupplementalPublications(runtime: NativeCycleRuntime): void {
+  const publications = runtime.state.supplementalPublications ?? [];
+  if (publications.length === 0) return;
+  const context = supplementalProofContext(runtime);
+  const ids = new Set<string>();
+  for (const publication of publications) {
+    if (ids.has(publication.publicationId) || publication.publicationId !== supplementalId(publication.initialization))
+      supplementalFail('Supplemental initialization identity is immutable and unique.');
+    ids.add(publication.publicationId);
+    validateSupplementalInitialization(runtime, publication.initialization, context);
+    validateSupplementalRecords(publication);
+  }
+}
+
+export interface NativeCycleSupplementalSource {
+  readonly head: string;
+  readonly tree: string;
+  readonly clean: boolean;
+}
+function requireSupplementalSource(
+  source: NativeCycleSupplementalSource,
+  init: NativeCycleSupplementalPublication['initialization'],
+): void {
+  if (source.clean !== true || source.head !== init.head || source.tree !== init.tree)
+    supplementalFail('Changed or dirty source requires the ordinary development cycle and fresh validation.');
+}
+
+/** Pure proof admission only; the application must supply independently observed provider/source evidence. */
+export function initializeNativeCycleSupplementalPublication(
+  runtimeInput: NativeCycleRuntime,
+  input: unknown,
+  source: NativeCycleSupplementalSource,
+): NativeCycleRuntime {
+  const runtime = decodeNativeCycleRuntime(runtimeInput);
+  const initialization = Schema.decodeUnknownSync(NativeCycleSupplementalInitSchema, {onExcessProperty: 'error'})(
+    input,
+  );
+  requireSupplementalSource(source, initialization);
+  validateSupplementalInitialization(runtime, initialization);
+  const publicationId = supplementalId(initialization);
+  if (EffectArray.some(runtime.state.supplementalPublications ?? [], item => item.publicationId === publicationId))
+    return runtime;
+  if (initialization.expectedRevision !== nativeCycleSupplementalRevision(runtime))
+    supplementalFail('Supplemental initialization CAS is stale.');
+  return decodeNativeCycleRuntime({
+    ...runtime,
+    state: {
+      ...runtime.state,
+      version: 2,
+      supplementalPublications: [
+        ...(runtime.state.supplementalPublications ?? []),
+        {publicationId, initialization, records: []},
+      ],
+    },
+  });
+}
+
+export function appendNativeCycleSupplementalRecord(
+  runtimeInput: NativeCycleRuntime,
+  input: {
+    readonly publicationId: string;
+    readonly publicationRef: string;
+    readonly expectedRevision: string;
+    readonly event: unknown;
+  },
+  source: NativeCycleSupplementalSource,
+): NativeCycleRuntime {
+  const runtime = decodeNativeCycleRuntime(runtimeInput);
+  const publication = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      runtime.state.supplementalPublications ?? [],
+      item => item.publicationId === input.publicationId,
+    ),
+  );
+  if (!publication) return supplementalFail('Supplemental publication owner is missing.');
+  requireSupplementalSource(source, publication.initialization);
+  const event = Schema.decodeUnknownSync(NativeCycleSupplementalEventSchema, {onExcessProperty: 'error'})(input.event);
+  const request = {
+    version: 1 as const,
+    expectedRevision: input.expectedRevision,
+    previousRef: input.publicationRef,
+    event,
+  };
+  const operationId = supplementalOperation(publication.publicationId, request);
+  if (EffectArray.some(publication.records, item => item.operationId === operationId)) return runtime;
+  if (
+    input.expectedRevision !== nativeCycleSupplementalRevision(runtime) ||
+    input.publicationRef !== nativeCycleSupplementalRef(publication)
+  )
+    supplementalFail('Supplemental record CAS or publication reference is stale.');
+  const updated = {...publication, records: [...publication.records, {...request, operationId}]};
+  return decodeNativeCycleRuntime({
+    ...runtime,
+    state: {
+      ...runtime.state,
+      supplementalPublications: EffectArray.map(runtime.state.supplementalPublications ?? [], item =>
+        item.publicationId === publication.publicationId ? updated : item,
+      ),
+    },
+  });
 }
