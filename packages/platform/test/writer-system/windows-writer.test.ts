@@ -1,9 +1,9 @@
 import {dlopen, type FFIFunction} from 'bun:ffi';
 import {expect, it, vi} from 'vitest';
 import fc from 'fast-check';
-import {Array as EffectArray, Record as EffectRecord} from 'effect';
+import {Array as EffectArray, Record as EffectRecord, Schema} from 'effect';
 import {commitWriterTransaction, type WriterTransactionTarget} from '../../src/writer-system/writer-transaction.js';
-import {writerFail} from '../../src/writer-system/fault.js';
+import {RuntimeWriterFault, writerFail} from '../../src/writer-system/fault.js';
 import {
   runtimeOpenWriterRoot,
   runtimeCloseWriterRoot,
@@ -319,7 +319,23 @@ it.skipIf(process.platform !== 'win32')(
           }).toThrow();
           throw new Error('Lossless native identity projection is unsupported on this actual host.');
         }
-        root = open();
+        try {
+          root = open();
+        } catch (error) {
+          expect(Schema.is(RuntimeWriterFault)(error)).toBe(true);
+          if (Schema.is(RuntimeWriterFault)(error)) {
+            expect(error.reason).toBe('unsupported-platform');
+            expect(error.message).toMatch(
+              /^windows-projection:(fileIdEncoding|symbolicLink|directoryType|fileType|volumeLow32|volumeDev|fileIdHigh|fileIdNonzero|fileIdLegacy|fileIdBun|birth|changed|modified|links|size)$/,
+            );
+            process.stdout.write(
+              'WINDOWS_WRITER_ROOT_PROJECTION_REFUSAL ' +
+                JSON.stringify({reason: error.reason, message: error.message}) +
+                String.fromCharCode(10),
+            );
+          }
+          throw error;
+        }
         expect(() => runtimeOpenGuardedDiskTarget(root!, ['..', 'source.txt'], physical(), 1024)).toThrow();
         expect(() => Reflect.apply(runtimeInspectGuardedDiskTarget, undefined, [{}])).toThrow();
         // A preexisting compatible foreign read/write or delete HANDLE must block source acquisition.

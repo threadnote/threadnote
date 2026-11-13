@@ -1929,10 +1929,11 @@ describe.skipIf(process.platform === 'win32')('selected verifier process control
         yield* fs.writeFileString(
           descendant,
           `import {createHash} from 'node:crypto';
-import {writeFileSync} from 'node:fs';
+import {renameSync,writeFileSync} from 'node:fs';
 const bytes=new Uint8Array(8*1024*1024).fill(23);
 const digest=createHash('sha256').update(bytes).digest('hex');
-writeFileSync(${JSON.stringify(ready)},JSON.stringify({pid:process.ppid,descendant:process.pid,digest}));
+writeFileSync(${JSON.stringify(ready + '.tmp')},JSON.stringify({pid:process.ppid,descendant:process.pid,digest}));
+renameSync(${JSON.stringify(ready + '.tmp')},${JSON.stringify(ready)});
 const until=Date.now()+5000;
 while(Date.now()<until)createHash('sha256').update(bytes).digest('hex');
 `,
