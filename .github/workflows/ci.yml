@@ -199,7 +199,7 @@ jobs:
           import {runtimeOpenPrivateWriterDirectory,runtimeClosePrivateWriterDirectory} from "@threadnote/platform/system";
           const root=realpathSync(mkdtempSync("/tmp/threadnote-ci-"));
           try { const handle=runtimeOpenPrivateWriterDirectory(root); runtimeClosePrivateWriterDirectory(handle);
-          appendFileSync(Bun.env.GITHUB_ENV,`THREADNOTE_CI_TEST_TMPDIR=${root}\nTMPDIR=${root}\n`);
+          appendFileSync(Bun.env.GITHUB_ENV,"THREADNOTE_CI_TEST_TMPDIR="+root+"\nTMPDIR="+root+"\n");
           console.log("Native private CI temporary storage proof passed; production qualification remains false"); }
           catch { rmSync(root,{recursive:true}); throw new Error("Native private CI temporary storage proof failed"); }'
 

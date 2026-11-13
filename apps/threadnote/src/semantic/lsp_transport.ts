@@ -1,7 +1,7 @@
 import * as EffectArray from 'effect/Array';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
-import {Cause, Clock, Deferred, Effect, Option, Queue, Schema, Stream} from 'effect';
+import {Cause, Clock, Context, Deferred, Effect, Option, Queue, Schema, Stream} from 'effect';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {
@@ -103,6 +103,14 @@ export interface WireStop {
   readonly stdioClosed: boolean;
   readonly fault: LspFault | undefined;
 }
+/** Host-owned startup cancellation follows the original native capability, including Java wires. */
+export const SemanticWireStartup = Context.Reference<
+  | {
+      readonly termination: (terminate: Effect.Effect<void>) => void;
+      readonly cleanup: (disposition: 'drained' | 'unknown') => void;
+    }
+  | undefined
+>('semantic/WireStartup', {defaultValue: () => undefined});
 export interface LspWire {
   readonly pid: number;
   readonly identity?: string;
@@ -120,6 +128,7 @@ export interface LspLaunch {
   readonly maxMessageBytes?: number;
 }
 export const spawnLspWire = Effect.fn('semantic.spawnLspWire')(function* (options: LspLaunch) {
+  const startup = yield* SemanticWireStartup;
   const frames = yield* Effect.try({
     try: () => new LspFrameDecoder(options.maxMessageBytes),
     catch: () => LspFault.make({code: 'protocol'}),
@@ -129,6 +138,7 @@ export const spawnLspWire = Effect.fn('semantic.spawnLspWire')(function* (option
   let fault: LspFault | undefined;
   let ending = false;
   let forced = false;
+  let nativeClosed = false;
   let queuedBytes = 0;
   let writes = 0;
   let writeBytes = 0;
@@ -209,7 +219,10 @@ export const spawnLspWire = Effect.fn('semantic.spawnLspWire')(function* (option
             if (!drained) fail('exit');
             if (drained) {
               yield* Effect.try({
-                try: () => runtimeCloseOwnedProviderTree(child.handle),
+                try: () => {
+                  runtimeCloseOwnedProviderTree(child.handle);
+                  nativeClosed = true;
+                },
                 catch: () => LspFault.make({code: 'exit'}),
               }).pipe(
                 Effect.catch(() =>
@@ -222,9 +235,13 @@ export const spawnLspWire = Effect.fn('semantic.spawnLspWire')(function* (option
             }
             // Unknown ownership deliberately retains the native handle and admission reservation.
             yield* Queue.shutdown(incoming);
+            startup?.cleanup(drained && observation.stdioClosed ? 'drained' : 'unknown');
             return {code: observation.leaderExitCode, drained, forced, stdioClosed: observation.stdioClosed, fault};
           }),
         ),
+      );
+      startup?.termination(
+        Effect.suspend(() => (!nativeClosed && observe().state !== 'drained' ? terminate('kill') : Effect.void)),
       );
       // These bounded stream pumps live through shutdown so descendant-held pipes and late errors
       // cannot become a successful drain merely because the leader exited or a request was cancelled.

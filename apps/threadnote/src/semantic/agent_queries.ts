@@ -9,13 +9,10 @@ import type {
 } from '@threadnote/context/types';
 import {compactSemanticContextKnowledge} from '@threadnote/context/compiler';
 import {compileSemanticContextKnowledge} from '../context_brief/index.js';
-import {sha256FileHex} from '@threadnote/platform/digest';
-import {sha256HexSync} from '@threadnote/platform/sha256';
-import {SystemInfo} from '@threadnote/platform/system';
-import {getThreadnoteVersion, isStandaloneThreadnoteBuild} from '@threadnote/workspace/runtime-version';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {ensureSemanticEndpoint} from './coordinator.js';
 import {LspFault} from './lsp_transport.js';
+import {semanticCompiledRuntimeIdentity} from './readiness_jobs.js';
 import {SemanticLanguage, SemanticSessionFault} from './provider.js';
 import {readSemanticHostProfile, SemanticHostProfileFault} from './host_profile.js';
 import {
@@ -58,24 +55,7 @@ const endpointFailure = (cause: string) =>
             : 'Semantic provider prerequisites or capacity are unavailable; inspect host setup without running a build or download',
   );
 
-const compiledRuntimeIdentity = Effect.gen(function* () {
-  // The first public binding qualifies standalone bytes. Source-mode protocol generations need a separate source-closure witness.
-  if (!isStandaloneThreadnoteBuild()) return yield* SemanticHostProfileFault.make({reason: 'incompatible'});
-  const system = yield* SystemInfo;
-  const fs = yield* FileSystem.FileSystem;
-  const executable = yield* fs.realPath(system.executablePath);
-  const stat = yield* fs.stat(executable);
-  if (stat.type !== 'File' || Number(stat.size) > 512 * 1024 * 1024)
-    return yield* SemanticHostProfileFault.make({reason: 'incompatible'});
-  return sha256HexSync(
-    JSON.stringify([
-      'threadnote-agent-read-v1',
-      yield* getThreadnoteVersion(),
-      executable,
-      yield* sha256FileHex(executable),
-    ]),
-  );
-});
+const compiledRuntimeIdentity = semanticCompiledRuntimeIdentity;
 
 /** Host-only injectable ports. Public JSON cannot supply these dependencies or their authority. */
 export interface SemanticAgentQueryHost<ContextR = never> {

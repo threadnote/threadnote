@@ -185,6 +185,7 @@ const CORE_TOOL_NAMES = [
   'inspect_code_graph',
   'analyze_code_graph',
   'semantic_capabilities',
+  'semantic_readiness',
   'semantic_change_prepare',
   'semantic_change_status',
   'semantic_change_preflight',
@@ -637,7 +638,25 @@ describe('Threadnote MCP toolsets', () => {
           scope: 'distribution-catalog',
           status: 'ok',
           requestedLanguage: 'java',
-          readiness: {installation: 'not-assessed', project: 'not-assessed', queries: 'requires-host-profile'},
+          readiness: {
+            installation: 'not-assessed',
+            project: 'not-assessed',
+            queries: 'requires-host-profile',
+            savedDisk: {
+              command: 'semantic readiness',
+              tool: 'semantic_readiness',
+              actions: ['start', 'status', 'cancel'],
+              limits: {
+                startupMilliseconds: 120000,
+                queryMilliseconds: 10000,
+                maxQueryMilliseconds: 45000,
+                cancelAcknowledgementMilliseconds: 250,
+                terminationMilliseconds: 2000,
+              },
+            },
+            ownedBufferStartup: 'unimplemented',
+            authorizedJvmImport: 'unimplemented',
+          },
           providers: [
             {
               id: 'jdtls',
@@ -653,6 +672,45 @@ describe('Threadnote MCP toolsets', () => {
         expect(deferred.structuredContent).toMatchObject({status: 'deferred', providers: []});
         const unsupported = await client.callTool({name: 'semantic_capabilities', arguments: {language: 'ruby'}});
         expect(unsupported.structuredContent).toMatchObject({status: 'unsupported', providers: []});
+      },
+      {toolset: 'core'},
+    );
+  });
+  it('refuses readiness execution authority identically through public CLI and MCP before provider binding', async () => {
+    await withMcpClient(
+      async (client, fixture) => {
+        const request = {
+          action: 'start',
+          callerCwd: fixture.root,
+          file: 'source.go',
+          language: 'go',
+          command: 'foreign',
+        };
+        const response = await client.callTool({name: 'semantic_readiness', arguments: {request}});
+        expect(response.isError).not.toBe(true);
+        const mcp: unknown = JSON.parse(contentText(response.content));
+        const cli: unknown = JSON.parse(
+          execFileSync(
+            process.execPath,
+            [join(process.cwd(), 'apps/threadnote/src/standalone.ts'), 'semantic', 'readiness', '--json'],
+            {
+              cwd: fixture.root,
+              input: JSON.stringify(request),
+              encoding: 'utf8',
+              env: {
+                ...process.env,
+                THREADNOTE_HOME: fixture.home,
+                THREADNOTE_ACCOUNT: 'local',
+                THREADNOTE_USER: 'test-user',
+                THREADNOTE_AGENT_ID: 'threadnote',
+                THREADNOTE_MANIFEST: join(fixture.home, 'seed-manifest.yaml'),
+              },
+            },
+          ),
+        );
+        expect(cli).toEqual(mcp);
+        expect(cli).toMatchObject({version: 1, status: 'invalid-request'});
+        expect(await readdir(fixture.home)).not.toContain('semantic');
       },
       {toolset: 'core'},
     );
@@ -890,7 +948,10 @@ describe('Threadnote MCP toolsets', () => {
             tool.name !== 'memory_write_status' &&
             tool.name !== 'workflow_task_view' &&
             !isWorkflowTaskMutatingTool(tool.name) &&
-            !EffectArray.contains(['semantic_capabilities', 'semantic_query', 'semantic_view'], tool.name) &&
+            !EffectArray.contains(
+              ['semantic_capabilities', 'semantic_query', 'semantic_view', 'semantic_readiness'],
+              tool.name,
+            ) &&
             !EffectArray.some(changeTools, change => change.name === tool.name) &&
             !EffectArray.some(writerTools, writer => writer.name === tool.name),
         );
@@ -899,7 +960,10 @@ describe('Threadnote MCP toolsets', () => {
           tool =>
             tool.name !== 'workflow_task_view' &&
             !isWorkflowTaskMutatingTool(tool.name) &&
-            !EffectArray.contains(['semantic_capabilities', 'semantic_query', 'semantic_view'], tool.name) &&
+            !EffectArray.contains(
+              ['semantic_capabilities', 'semantic_query', 'semantic_view', 'semantic_readiness'],
+              tool.name,
+            ) &&
             !EffectArray.some(changeTools, change => change.name === tool.name) &&
             !EffectArray.some(writerTools, writer => writer.name === tool.name),
         );
@@ -907,7 +971,10 @@ describe('Threadnote MCP toolsets', () => {
           tools.tools,
           tool =>
             !isWorkflowTaskMutatingTool(tool.name) &&
-            !EffectArray.contains(['semantic_capabilities', 'semantic_query', 'semantic_view'], tool.name) &&
+            !EffectArray.contains(
+              ['semantic_capabilities', 'semantic_query', 'semantic_view', 'semantic_readiness'],
+              tool.name,
+            ) &&
             !EffectArray.some(changeTools, change => change.name === tool.name) &&
             !EffectArray.some(writerTools, writer => writer.name === tool.name),
         );

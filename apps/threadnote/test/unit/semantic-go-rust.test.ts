@@ -109,55 +109,106 @@ describe('native semantic setup causes', () => {
   // Artifact admission is narrower than native process/private-storage implementation support.
   const hostHasNativeArtifacts = process.platform === 'darwin' && process.arch === 'arm64';
   for (const id of ['gopls', 'rust-analyzer'] as const) {
-    effectIt.effect(`rejects missing and incompatible ${id} before worker launch or bootstrap publication`, () =>
-      Effect.gen(function* () {
-        const f = yield* fixture;
-        let launches = 0;
-        const command = CommandExecutor.of({
-          execute: () => Effect.die('Setup must not execute tools'),
-          executeStreaming: () => Effect.die('Setup must not execute tools'),
-          spawnDetached: () =>
-            Effect.sync(() => {
-              launches++;
-              return true;
-            }),
-        });
-        const candidate = {
-          executable: f.path.join(f.root, 'missing-provider'),
-          executableDigest: id === 'gopls' ? goExecutableDigest : rustExecutableDigest,
-          sdkDirectory: f.path.join(f.root, 'missing-sdk'),
-          sdkTreeDigest: EffectString.repeat(64)('a'),
-        };
-        const absent = yield* verifyNativeSemanticCandidate(undefined, id).pipe(Effect.flip);
-        expect(absent).toMatchObject({providerId: id, reason: 'missing', component: 'provider'});
-        for (const [reason, digest] of [
-          ['missing', candidate.executableDigest],
-          ['incompatible', EffectString.repeat(64)('b')],
-        ] as const) {
-          const home = yield* f.fs.makeTempDirectoryScoped({directory: f.root, prefix: 'home-'});
-          const error = yield* ensureSemanticEndpoint({
-            enabled: true,
-            dataHome: home,
-            worktree: (yield* f.path.toFileUrl(f.root)).href,
-            runtimeIdentity: EffectString.repeat(64)('c'),
-            [id === 'gopls' ? 'go' : 'rust']: {...candidate, executableDigest: digest},
-          }).pipe(Effect.provideService(CommandExecutor, command), Effect.flip);
-          expect(Schema.is(SemanticSetupFault)(error)).toBe(true);
-          expect(error).toMatchObject({
-            providerId: id,
-            reason: reason === 'missing' && !hostHasNativeArtifacts ? 'incompatible' : reason,
-            component: 'provider',
-            requiredVersion: id === 'gopls' ? 'v0.24.0' : rustProviderVersion,
-            requiredSdkVersion: id === 'gopls' ? '1.27.3' : '1.99.1',
-            nextAction: expect.stringContaining('host-approved'),
+    effectIt.effect(
+      `publishes control before selected ${id} verification and refuses missing or incompatible SDKs before preparation`,
+      () =>
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          const worktree = f.path.join(f.root, 'source');
+          yield* f.fs.makeDirectory(worktree, {mode: 0o700});
+          const text = id === 'gopls' ? 'package p\nvar value = 1\n' : 'pub fn value() {}\n';
+          const file = f.path.join(worktree, id === 'gopls' ? 'main.go' : 'lib.rs');
+          yield* f.fs.writeFileString(file, text);
+          const worktreeUri = (yield* f.path.toFileUrl(worktree)).href;
+          const basis: Observation = {
+            version: 1,
+            repository: 'setup-fixture',
+            worktree: worktreeUri,
+            project: worktreeUri,
+            configuration: EffectString.repeat(64)('a'),
+            toolchain: EffectString.repeat(64)('b'),
+            provider: {id, version: id === 'gopls' ? 'v0.24.0' : rustProviderVersion, generation: 0},
+            view: {kind: 'disk', id: 'setup', owner: 'unit', epoch: 0},
+            uri: (yield* f.path.toFileUrl(file)).href,
+            content: sha256HexSync(text),
+            documentVersion: null,
+            projectEpoch: 0,
+          };
+          let launches = 0;
+          const command = CommandExecutor.of({
+            execute: () => Effect.die('Setup must not execute tools'),
+            executeStreaming: () => Effect.die('Setup must not execute tools'),
+            spawnDetached: () =>
+              Effect.sync(() => {
+                launches++;
+                return true;
+              }),
           });
-          const directories = yield* f.fs.readDirectory(f.path.join(home, 'semantic'));
-          expect(directories).toHaveLength(1);
-          expect(yield* f.fs.exists(f.path.join(home, 'semantic', directories[0], 'host.json'))).toBe(false);
-          expect(yield* f.fs.exists(f.path.join(home, 'semantic', directories[0], 'rpc.sock'))).toBe(false);
-        }
-        expect(launches).toBe(0);
-      }).pipe(Effect.provide(Layer.mergeAll(io, TestSystemInfoLayer)), TestClock.withLive),
+          const candidate = {
+            executable: f.path.join(f.root, 'missing-provider'),
+            executableDigest: id === 'gopls' ? goExecutableDigest : rustExecutableDigest,
+            sdkDirectory: f.path.join(f.root, 'missing-sdk'),
+            sdkTreeDigest: EffectString.repeat(64)('a'),
+          };
+          const absent = yield* verifyNativeSemanticCandidate(undefined, id).pipe(Effect.flip);
+          expect(absent).toMatchObject({providerId: id, reason: 'missing', component: 'provider'});
+          const unsafeHome = yield* f.fs.makeTempDirectoryScoped({directory: worktree, prefix: 'unsafe-home-'});
+          expect(
+            yield* ensureSemanticEndpoint({
+              enabled: true,
+              dataHome: unsafeHome,
+              worktree: worktreeUri,
+              runtimeIdentity: EffectString.repeat(64)('c'),
+              [id === 'gopls' ? 'go' : 'rust']: candidate,
+            }).pipe(Effect.provideService(CommandExecutor, command), Effect.flip),
+          ).toMatchObject({code: 'prerequisite'});
+          expect(yield* f.fs.readDirectory(unsafeHome)).toEqual([]);
+          for (const [reason, digest] of [
+            ['missing', candidate.executableDigest],
+            ['incompatible', EffectString.repeat(64)('b')],
+          ] as const) {
+            const home = yield* f.fs.makeTempDirectoryScoped({directory: f.root, prefix: 'home-'});
+            const coordinator = yield* makeSemanticCoordinator({
+              enabled: true,
+              dataHome: home,
+              worktree: worktreeUri,
+              [id === 'gopls' ? 'go' : 'rust']: {...candidate, executableDigest: digest},
+            }).pipe(Effect.provideService(CommandExecutor, command));
+            const directory = yield* f.fs
+              .makeTempDirectoryScoped({directory: '/tmp', prefix: 'tn-setup-http-'})
+              .pipe(Effect.flatMap(f.fs.realPath));
+            const token = EffectString.repeat(64)('c');
+            const endpoint = yield* serveSemanticEndpoint(coordinator, {directory, token, worktree: worktreeUri});
+            expect(yield* requestSemanticEndpoint(endpoint.socket, token, {operation: 'status'})).toMatchObject({
+              experimental: true,
+              sessions: 0,
+              providers: 0,
+            });
+            const error = yield* coordinator.attach(basis, text, id === 'gopls' ? 'go' : 'rust').pipe(Effect.flip);
+            expect(Schema.is(SemanticSetupFault)(error)).toBe(true);
+            expect(error).toMatchObject({
+              providerId: id,
+              reason: reason === 'missing' && !hostHasNativeArtifacts ? 'incompatible' : reason,
+              component: 'provider',
+              requiredVersion: id === 'gopls' ? 'v0.24.0' : rustProviderVersion,
+              requiredSdkVersion: id === 'gopls' ? '1.27.3' : '1.99.1',
+              nextAction: expect.stringContaining('host-approved'),
+            });
+            expect(yield* coordinator.status).toMatchObject({providers: 0, imports: 0, quarantined: 0});
+            expect(yield* f.fs.exists(f.path.join(home, 'semantic', 'environments'))).toBe(false);
+            expect(yield* f.fs.readFileString(file)).toBe(text);
+          }
+          expect(launches).toBe(0);
+        }).pipe(
+          Effect.provide(Layer.mergeAll(io, TestSystemInfoLayer)),
+          Effect.provideService(ChildEnvironmentPolicy, {
+            sanitizeExternal: () => {
+              throw new Error('SDK must refuse before provider launch');
+            },
+            preserveIntendedChild: env => env,
+          }),
+          TestClock.withLive,
+        ),
     );
   }
   effectIt.effect('preserves bounded setup details across the coordinator HTTP boundary', () =>

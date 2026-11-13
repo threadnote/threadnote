@@ -869,6 +869,22 @@ describe('semantic capability discovery', () => {
       installation: 'not-assessed',
       project: 'not-assessed',
       queries: 'requires-host-profile',
+      savedDisk: {
+        command: 'semantic readiness',
+        tool: 'semantic_readiness',
+        actions: ['start', 'status', 'cancel'],
+        limits: {
+          startupMilliseconds: 120000,
+          queryMilliseconds: 10000,
+          maxQueryMilliseconds: 45000,
+          cancelAcknowledgementMilliseconds: 250,
+          terminationMilliseconds: 2000,
+          maxJobs: 32,
+          ttlMilliseconds: 600000,
+        },
+      },
+      ownedBufferStartup: 'unimplemented',
+      authorizedJvmImport: 'unimplemented',
     });
     expect(result.readSurface.operations).toContain('diagnostics');
     expect(result.readSurface.operations).toContain('context');

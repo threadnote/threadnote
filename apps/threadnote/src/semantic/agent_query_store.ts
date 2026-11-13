@@ -8,7 +8,9 @@ import {
   semanticAgentQueryKey,
   type SemanticAgentEndpointQuery,
   type SemanticAgentQueryResult,
+  type SemanticReadinessSource,
 } from './agent_query_protocol.js';
+import type {SemanticStartupControl} from './readiness_jobs.js';
 import type {makeSemanticCoordinator} from './coordinator.js';
 import {readBounded} from './fingerprint.js';
 import {LspFault} from './lsp_transport.js';
@@ -37,8 +39,10 @@ export const makeSemanticAgentDiskQueries = Effect.fn('semantic.agentDiskQueries
   );
   const root = yield* path.fromFileUrl(new URL(worktree));
   const attachDisk = Effect.fn('semantic.attachAgentDisk')(function* (
-    request: SemanticAgentEndpointQuery,
+    request: Pick<SemanticAgentEndpointQuery, 'project' | 'uri' | 'language' | 'environment'>,
     file: string,
+    control?: SemanticStartupControl,
+    expectedContent?: string,
   ) {
     const bytes = yield* readBounded(file, 4 * 1024 * 1024);
     const text = yield* Effect.try({
@@ -46,6 +50,8 @@ export const makeSemanticAgentDiskQueries = Effect.fn('semantic.agentDiskQueries
       catch: () => LspFault.make({code: 'protocol'}),
     });
     const provider = semanticHostSelection[request.language].provider;
+    if (expectedContent !== undefined && sha256HexSync(bytes) !== expectedContent)
+      return yield* SemanticSessionFault.make({reason: 'stale'});
     const seed: Observation = {
       version: 1,
       repository: sha256HexSync(worktree),
@@ -65,7 +71,7 @@ export const makeSemanticAgentDiskQueries = Effect.fn('semantic.agentDiskQueries
       documentVersion: null,
       projectEpoch: 0,
     };
-    return yield* coordinator.attach(seed, text, request.language, request.environment);
+    return yield* coordinator.attach(seed, text, request.language, request.environment, control);
   });
   const query = Effect.fn('semantic.agentDiskQuery')(function* (
     request: SemanticAgentEndpointQuery,
@@ -158,6 +164,26 @@ export const makeSemanticAgentDiskQueries = Effect.fn('semantic.agentDiskQueries
     return yield* store.page(request.query, snapshot.id, budget, request.milliseconds);
   });
   return {
+    capture: (request: SemanticReadinessSource) =>
+      Effect.gen(function* () {
+        const project = yield* path.fromFileUrl(new URL(request.project));
+        const file = yield* path.fromFileUrl(new URL(request.uri));
+        if (
+          request.worktree !== worktree ||
+          !(project === root || EffectString.startsWith(root + path.sep)(project)) ||
+          !EffectString.startsWith(project + path.sep)(file) ||
+          EffectString.split(path.sep)(file).includes('.git') ||
+          (yield* fs.realPath(project)) !== project ||
+          (yield* fs.realPath(file)) !== file
+        )
+          return yield* SemanticSessionFault.make({reason: 'stale'});
+        return sha256HexSync(yield* readBounded(file, 4 * 1024 * 1024));
+      }),
+    prepare: (request: SemanticReadinessSource, content: string, control: SemanticStartupControl) =>
+      Effect.gen(function* () {
+        const file = yield* path.fromFileUrl(new URL(request.uri));
+        return (yield* attachDisk(request, file, control, content)).observation;
+      }),
     query: (request: SemanticAgentEndpointQuery, buffer?: {readonly observation: Observation}) =>
       query(request, buffer).pipe(
         Effect.timeoutOption(request.milliseconds),
