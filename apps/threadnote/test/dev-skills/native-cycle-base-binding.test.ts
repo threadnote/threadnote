@@ -58,6 +58,15 @@ describe('native cycle remote base binding', () => {
     Effect.gen(function* () {
       const f = yield* setup();
       yield* git(f.repo, ['remote', 'add', 'other', 'https://github.com/other/disjoint.git']);
+      const beforePhysicalMismatch = yield* f.inventory();
+      expect(
+        yield* bindNativeCycleDeliveryBase(f.repo, 'origin/main', {
+          ...f.delivery,
+          pr: {...f.delivery.pr, baseBranch: 'origin/main'},
+        }).pipe(Effect.result),
+      ).toMatchObject({failure: {code: 'base-ref-unverified'}});
+      expect(yield* f.inventory()).toEqual(beforePhysicalMismatch);
+
       for (const url of [
         'https://github.com/Example/Repo.git',
         'git@github.com:example/repo.git',
@@ -131,7 +140,7 @@ describe('native cycle remote base binding', () => {
   );
 
   effectIt.effect(
-    'rejects ref expressions, shadows, aliases and caller proof while preserving legacy exact names',
+    'rejects ref expressions, shadows, aliases and caller proof while verifying exact local branch names',
     () =>
       Effect.gen(function* () {
         const f = yield* setup();
@@ -167,7 +176,10 @@ describe('native cycle remote base binding', () => {
         expect(yield* bindNativeCycleDeliveryBase(f.repo, 'origin/main', forged).pipe(Effect.result)).toMatchObject({
           failure: {code: 'base-ref-unverified'},
         });
-        expect(yield* bindNativeCycleDeliveryBase('unused-no-repository', 'main', f.delivery)).toEqual(f.delivery);
+        expect(yield* bindNativeCycleDeliveryBase(f.repo, 'main', f.delivery)).toEqual(f.delivery);
+        expect(
+          yield* bindNativeCycleDeliveryBase('unused-no-repository', 'main', f.delivery).pipe(Effect.result),
+        ).toMatchObject({failure: {code: 'base-ref-unverified'}});
       }).pipe(run),
   );
 

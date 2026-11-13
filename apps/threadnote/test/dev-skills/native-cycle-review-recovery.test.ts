@@ -13,6 +13,65 @@ import * as Effect2 from 'effect';
 import {completeLocalPhase, fixture, object, reviewed, run} from './native-cycle-lifecycle-fixture.js';
 
 describe('native cycle lifecycle', () => {
+  effectIt.effect(
+    'records unchanged-source review with moved or deleted comparison labels while validation remains live',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture(['one'], 'local');
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "feature";\n');
+        yield* f.git(['commit', '-am', 'Feature before base movement']);
+        const head = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
+        const captured = object(
+          object(
+            (yield* f.mutate('snapshot', {
+              phaseId: 'one',
+              snapshotId: 'captured',
+              acceptedHead: head,
+              reason: 'Capture feature.',
+            })).snapshot,
+          ).snapshot,
+        );
+        yield* f.git(['checkout', 'main']);
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'incoming.ts'), 'export const incoming = true;\n');
+        yield* f.git(['add', 'incoming.ts']);
+        yield* f.git(['commit', '-m', 'Advance comparison']);
+        yield* f.git(['checkout', 'feature/one']);
+        const report = {
+          snapshotId: captured.snapshotId,
+          phaseHash: captured.phaseHash,
+          snapshotTree: captured.tree,
+          status: 'complete',
+          mode: 'full',
+          selected: ['correctness', 'simplicity'],
+          lanes: [
+            {name: 'correctness', status: 'complete'},
+            {name: 'simplicity', status: 'complete'},
+          ],
+          findings: [],
+        };
+        expect(
+          yield* f.mutate('validate-review', {snapshotId: captured.snapshotId, attemptId: 'moved-review', report}),
+        ).toMatchObject({status: 'ok'});
+        expect(
+          yield* f.mutate('check-phase', {phaseId: 'one', snapshotId: captured.snapshotId}).pipe(Effect.result),
+        ).toMatchObject({failure: {code: 'review-stale'}});
+        yield* f.git(['branch', '-D', 'main']);
+        expect(
+          yield* f.mutate('validate-review', {snapshotId: captured.snapshotId, attemptId: 'moved-review', report}),
+        ).toMatchObject({status: 'ok'});
+        const detail = yield* f.call({
+          ...f.base('cycle'),
+          command: 'detail',
+          snapshotId: captured.snapshotId,
+          detailKind: 'patch',
+        });
+        expect(object(object(detail).page).text).toContain('+export const fixture = "feature";');
+        expect(
+          (yield* f.mutate('check-phase', {phaseId: 'one', snapshotId: captured.snapshotId}).pipe(Effect.result))._tag,
+        ).toBe('Failure');
+      }).pipe(run),
+  );
+
   effectIt.effect('records one authority-backed review retry atomically and replays the exact report', () =>
     Effect.gen(function* () {
       const f = yield* reviewed();

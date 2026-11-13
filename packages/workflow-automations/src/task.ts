@@ -93,6 +93,16 @@ export interface NativeTaskView {
     readonly title: string;
     readonly prUrl: string;
   }[];
+  readonly prWatchPrerequisites?: {
+    readonly required: readonly string[];
+    readonly missing: readonly string[];
+    readonly publicationAloneArmsWatch: false;
+  };
+  readonly unreviewedRebaseRecovery?: {
+    readonly action: 'recover-unreviewed-rebase';
+    readonly snapshotRef: string;
+    readonly userAuthorityRequired: true;
+  };
   readonly baseRequalification?: {
     readonly action: 'requalify-base';
     readonly phaseId: string;
@@ -541,6 +551,24 @@ export function projectNativeTaskView(
   const phase = next.phaseId
     ? EffectOption.getOrUndefined(EffectArray.findFirst(cycle.plan.phases, item => item.id === next.phaseId))
     : undefined;
+  const currentProof = phase ? cycle.phases[phase.id] : undefined;
+  const currentSource = phase
+    ? EffectArray.filter(
+        runtime.snapshots,
+        entry => entry.snapshot.phaseId === phase.id && entry.snapshot.phaseHash === currentProof?.phaseHash,
+      ).at(-1)?.snapshot
+    : undefined;
+  const watchMissing = phase
+    ? [
+        ...(!currentSource || options.acceptedSnapshotCurrent === false ? ['current-source-snapshot'] : []),
+        ...(!currentSource || !EffectArray.some(runtime.reviews, entry => entry.snapshotId === currentSource.snapshotId)
+          ? ['independent-review']
+          : []),
+        ...(!currentProof?.validation ? ['passing-validation'] : []),
+        ...(!currentProof?.delivery?.pr ? ['verified-pr-delivery'] : []),
+        ...(!currentProof?.delivery?.watch ? ['host-registration'] : []),
+      ]
+    : [];
   const scope = phase?.allowedPaths ?? [];
   const acceptance = phase?.acceptanceCriteria ?? [];
   const acceptanceRefs = phase ? EffectArray.map(phase.acceptanceRefs, item => item.id) : [];
@@ -699,6 +727,21 @@ export function projectNativeTaskView(
     },
     counts,
     missingInputs,
+    ...(cycle.plan.delivery === 'pr'
+      ? {
+          prWatchPrerequisites: {
+            required: [
+              'current-source-snapshot',
+              'independent-review',
+              'passing-validation',
+              'verified-pr-delivery',
+              'host-registration',
+            ],
+            missing: watchMissing,
+            publicationAloneArmsWatch: false as const,
+          },
+        }
+      : {}),
   };
   return {
     ...view,

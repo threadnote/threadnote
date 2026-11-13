@@ -114,7 +114,18 @@ export const bindNativeCycleDeliveryBase = Effect.fn('workflowAutomation.cycle.b
   );
   const pr = delivery.pr;
   if (pr?.baseRefBinding) return yield* invalid();
-  if (!pr || comparisonRef === pr.baseBranch) return delivery;
+  if (!pr) return delivery;
+  if (comparisonRef === pr.baseBranch) {
+    const resolved = yield* readGit(repo, [
+      'rev-parse',
+      '--symbolic-full-name',
+      '--verify',
+      '--end-of-options',
+      comparisonRef,
+    ]);
+    if (resolved !== `refs/heads/${pr.baseBranch}`) return yield* invalid();
+    return delivery;
+  }
   return yield* Effect.gen(function* () {
     const before = yield* observe(repo, comparisonRef, pr);
     const after = yield* observe(repo, comparisonRef, pr);

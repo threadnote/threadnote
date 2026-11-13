@@ -9,6 +9,7 @@ import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {bindNativeCycleDeliveryBase, verifyNativeCycleDeliveryRepository} from './cycle_delivery.js';
 import {runWorkflowAutomation} from './index.js';
+import {verifyNativeWatchPullIdentity} from './watch_provider.js';
 import {readNativeWorkflowState} from './store.js';
 import {readNativeTaskView} from './task.js';
 import {runNativeWatch} from './watch.js';
@@ -145,6 +146,36 @@ export const runNativeTaskCommitDelivery = (
     return {status: 'delivered', replayed: false, deliveryRef, receipt: persisted, next: cycle.next};
   });
 
+const verifyPrIdentity = (
+  checkout: string,
+  receipt: NativeTaskCycleRuntime['state']['phases'][string]['delivery'],
+  allowMerged = false,
+) =>
+  Effect.gen(function* () {
+    if (!receipt?.pr) return yield* fail('invalid-pr-receipt', 'PR delivery evidence is missing.');
+    yield* verifyNativeCycleDeliveryRepository(checkout, receipt);
+    const identity = yield* verifyNativeWatchPullIdentity(receipt.pr.url);
+    if (
+      EffectString.toLowerCase(identity.headRepository) !== EffectString.toLowerCase(identity.baseRepository) ||
+      identity.headSha !== receipt.headSha ||
+      identity.headBranch !== receipt.pr.branch ||
+      identity.baseBranch !== receipt.pr.baseBranch ||
+      (identity.state !== receipt.pr.state && !(allowMerged && identity.state === 'merged'))
+    )
+      return yield* fail(
+        'pr-source-mismatch',
+        'The remote PR repository, branches, state and exact head must match the validated phase.',
+      );
+    const retainedIdentity = receipt.providerIdentity;
+    if (
+      retainedIdentity &&
+      stableJson({...identity, state: allowMerged ? retainedIdentity.state : identity.state}) !==
+        stableJson(retainedIdentity)
+    )
+      return yield* fail('pr-source-mismatch', 'The provider identity changed from its exact provisional evidence.');
+    return identity;
+  });
+
 export const runNativeTaskPrDelivery = (
   config: RuntimeConfig,
   request: Extract<NativeTaskActionRequest, {command: 'deliver-pr'}>,
@@ -196,7 +227,48 @@ export const runNativeTaskPrDelivery = (
       return yield* fail('snapshot-ambiguous', 'PR delivery needs one unique canonical reviewed snapshot.');
     if (request.pr.headSha !== proof.head || request.pr.branch !== phase.branch)
       return yield* fail('pr-source-mismatch', 'The supplied PR head and branch must match the validated phase.');
+    const userAuthority = request.userAuthority ?? proof.delivery?.userAuthority;
+    if (!proof.delivery && !EffectString.trim(userAuthority ?? ''))
+      return yield* fail(
+        'user-authority-required',
+        'Provide caller-provided userAuthority quoting the actual existing approval for this PR delivery; publication evidence is separate.',
+      );
+    const supplied = {
+      phaseId: ref.phaseId,
+      phaseHash: ref.phaseHash,
+      delivery: 'pr' as const,
+      headSha: proof.head,
+      validatedTree: proof.tree,
+      commitEvidence: request.commitEvidence,
+      pr: request.pr,
+      publication: request.publication,
+    };
+    if (!proof.delivery) {
+      const sourceReady = unwrapCycle(
+        yield* inCheckout(
+          runWorkflowAutomation(
+            config,
+            cycleRequest(stored, {
+              command: 'publication-ready',
+              phaseId: ref.phaseId,
+              publication: request.publication,
+            }),
+          ),
+          checkout,
+        ),
+      );
+      if (sourceReady.head !== proof.head || sourceReady.tree !== proof.tree)
+        return yield* fail(
+          'source-drift',
+          'Existing PR adoption needs the exact clean validated source before provider verification.',
+        );
+    }
+    const providerIdentity = proof.delivery
+      ? proof.delivery.providerIdentity
+      : yield* verifyPrIdentity(checkout, supplied);
     const receipt = yield* Schema.decodeEffect(NativeCycleDeliverySchema, {onExcessProperty: 'error'})({
+      ...(userAuthority ? {userAuthority} : {}),
+      ...(providerIdentity ? {providerIdentity} : {}),
       phaseId: ref.phaseId,
       phaseHash: ref.phaseHash,
       delivery: 'pr',
@@ -226,6 +298,8 @@ export const runNativeTaskPrDelivery = (
         storedReceipt.validatedTree !== receipt.validatedTree ||
         storedReceipt.commitEvidence !== receipt.commitEvidence ||
         stableJson(storedReceipt.publication) !== stableJson(receipt.publication) ||
+        storedReceipt.userAuthority !== receipt.userAuthority ||
+        stableJson(storedReceipt.providerIdentity) !== stableJson(receipt.providerIdentity) ||
         (ref.kind === 'delivery' && ref.payloadDigest !== sha256HexSync(stableJson(storedReceipt)))
       )
         return yield* fail('delivery-conflict', 'The phase already has a different canonical delivery receipt.');
@@ -252,7 +326,9 @@ export const runNativeTaskPrDelivery = (
       payloadDigest: deliveryDigest,
       delivery: receipt,
     });
-    const ready = unwrapCycle(
+    yield* verifyPrIdentity(checkout, receipt);
+    if (request.pr.state === 'open') yield* bindNativeCycleDeliveryBase(checkout, phase.baseBranch, receipt);
+    const afterIdentity = unwrapCycle(
       yield* inCheckout(
         runWorkflowAutomation(
           config,
@@ -265,10 +341,14 @@ export const runNativeTaskPrDelivery = (
         checkout,
       ),
     );
-    if (ready.head !== proof.head || ready.tree !== proof.tree)
-      return yield* fail('source-drift', 'The current source no longer matches the reviewed PR snapshot.');
+    const latestBeforeDelivery = yield* readNativeWorkflowState(config, request.runId);
+    if (
+      afterIdentity.head !== proof.head ||
+      afterIdentity.tree !== proof.tree ||
+      latestBeforeDelivery?.revision !== stored.revision
+    )
+      return yield* fail('source-drift', 'Source or canonical task changed during remote PR verification.');
     if (request.pr.state === 'open') {
-      yield* bindNativeCycleDeliveryBase(checkout, phase.baseBranch, receipt);
       return {
         status: 'watch-required',
         replayed: false,
@@ -361,7 +441,7 @@ export const runNativeTaskPrWatch = (
       )
         return yield* fail(
           'provisional-watch-not-eligible',
-          'No current validated provisional PR phase matches this run.',
+          'No current validated provisional PR phase matches this run. Git publication alone cannot arm a watch; read the task card for missing source, independent review and validation before existing-PR delivery and host registration.',
         );
       const snapshots = EffectArray.filter(
         runtime.snapshots,
@@ -441,7 +521,10 @@ export const runNativeTaskPrWatch = (
       };
     }
     if (!request.validationRef || !request.deliveryRef)
-      return yield* fail('invalid-delivery-ref', 'Use both exact current validation and PR delivery references.');
+      return yield* fail(
+        'invalid-delivery-ref',
+        'Use both exact current validation and PR delivery references. Git publication alone supplies neither; follow the task card through source recovery, review, validation and verified existing-PR delivery.',
+      );
     const validationRef = request.validationRef;
     const deliveryRef = request.deliveryRef;
     const validation = decodeNativeTaskActionRef(validationRef);
@@ -488,7 +571,9 @@ export const runNativeTaskPrWatch = (
         receipt.pr?.branch === referencedPr.branch &&
         receipt.pr?.baseBranch === referencedPr.baseBranch &&
         receipt.commitEvidence === embeddedDelivery.commitEvidence &&
-        stableJson(receipt.publication) === stableJson(embeddedDelivery.publication));
+        stableJson(receipt.publication) === stableJson(embeddedDelivery.publication) &&
+        receipt.userAuthority === embeddedDelivery.userAuthority &&
+        stableJson(receipt.providerIdentity) === stableJson(embeddedDelivery.providerIdentity));
     // Retained proof authorizes only maintenance of an already-bound watch. It does
     // not validate the current checkout or admit another delivery at its new HEAD.
     const phase =
@@ -578,6 +663,7 @@ export const runNativeTaskPrWatch = (
             commitEvidence: embeddedDelivery.commitEvidence,
             pr: embeddedDelivery.pr,
             publication: embeddedDelivery.publication,
+            ...(embeddedDelivery.userAuthority ? {userAuthority: embeddedDelivery.userAuthority} : {}),
           },
           stored,
           checkout,
@@ -594,10 +680,10 @@ export const runNativeTaskPrWatch = (
           );
         yield* verifyNativeCycleDeliveryRepository(checkout, admittedAction.delivery);
       });
-    if (request.operation === 'start') yield* admitProvisionalWatch();
     if (request.operation === 'start') {
       if (!request.wakeup)
         return yield* fail('host-registration-required', 'Start needs the actual host registration configuration.');
+      yield* admitProvisionalWatch();
       yield* runNativeWatch(config, {
         protocolVersion: 1,
         executorVersion: 1,
@@ -751,6 +837,11 @@ export const runNativeTaskPrWatch = (
         );
       const planPhase = planPhases[0];
       const canonicalReceipt = currentProof.delivery;
+      if (!canonicalReceipt && (!embeddedDelivery.userAuthority || !embeddedDelivery.providerIdentity))
+        return yield* fail(
+          'user-authority-required',
+          'Before first canonical delivery, adopt this existing PR with actual userAuthority and fresh provider verification through deliver-pr; an older provisional reference cannot replace that evidence.',
+        );
       const canonicalPr = canonicalReceipt?.delivery === 'pr' ? canonicalReceipt.pr : undefined;
       if (canonicalReceipt?.delivery === 'pr') {
         const canonicalIdentity = {
@@ -876,6 +967,7 @@ export const runNativeTaskPrWatch = (
         if (ready.head !== embeddedDelivery.headSha || ready.tree !== validation.sourceTree)
           return yield* fail('source-drift', 'The current source no longer matches the reviewed PR snapshot.');
       }
+      if (!canonicalReceipt) yield* verifyPrIdentity(checkout, embeddedDelivery, terminal);
       const finalReceiptPr = finalReceipt.pr;
       if (!finalReceiptPr) return yield* fail('invalid-watch-receipt', 'The canonical watch PR identity is missing.');
       const {baseRefBinding: _baseRefBinding, ...unboundReceiptPr} = finalReceiptPr;
