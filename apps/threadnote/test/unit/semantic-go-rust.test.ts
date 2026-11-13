@@ -7,9 +7,9 @@ import * as EffectString from 'effect/String';
 /* oxlint-disable effecttsgo/strict-effect-provide -- Scoped Effect tests provide only filesystem/path/crypto services. */
 import {it as effectIt} from '@effect/vitest';
 import * as BunServices from '@effect/platform-bun/BunServices';
-import {ByteSize, Console, Deferred, Effect, Fiber, FileSystem, Layer, Path, Schema} from 'effect';
+import {ByteSize, Console, Deferred, Effect, Fiber, FileSystem, Layer, Path, Schema, Stream} from 'effect';
 import {TestClock} from 'effect/testing';
-import {describe, expect, it} from 'vitest';
+import {describe, expect, it, vi} from 'vitest';
 import fc from 'fast-check';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {SemanticActionChoice} from '../../src/semantic/action_choices.js';
@@ -17,6 +17,7 @@ import {Observation} from '@threadnote/semantic/contracts';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {sha256FileHex} from '@threadnote/platform/digest';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
+import * as composedGoTransport from '../../src/semantic/lsp_transport.js';
 import {LspFault, makeLspClient, spawnLspWire, type LspClient} from '../../src/semantic/lsp_transport.js';
 import {makeSemanticNotifications, SemanticSessionFault, SemanticSetupFault} from '../../src/semantic/provider.js';
 import {semanticSdkDigest, semanticTreeDigest} from '../../src/semantic/fingerprint.js';
@@ -2354,3 +2355,218 @@ describe('public native quickfix selection', () => {
     }).pipe(Effect.provide(io)),
   );
 });
+
+effectIt.effect('composes owned Go rename source closure and publication through real coordinator permits', () =>
+  Effect.gen(function* () {
+    const f = yield* goView;
+    const home = yield* f.fs
+      .makeTempDirectoryScoped({prefix: 'tn-go-compose-home-'})
+      .pipe(Effect.flatMap(f.fs.realPath));
+    const project = f.root;
+    const manifest = f.path.join(project, 'go.mod');
+    const other = f.path.join(project, 'other.go');
+    const otherUri = (yield* f.path.toFileUrl(other)).href;
+    const otherText = 'package p\nvar other = value\n';
+    yield* f.fs.writeFileString(manifest, 'module fixture\n');
+    yield* f.fs.writeFileString(other, otherText);
+    const events: string[] = [];
+    const versions = new Map<string, number>();
+    let renames = 0;
+    const client: LspClient = {
+      ...goClient(() => Effect.die('Unexpected composed Go request')),
+      request: method =>
+        Effect.sync((): Schema.Json => {
+          events.push(method);
+          if (method === 'initialize')
+            return {
+              serverInfo: {name: 'gopls', version: JSON.stringify({Version: 'v0.24.0', GoVersion: 'go1.27.3'})},
+              capabilities: {positionEncoding: 'utf-16', renameProvider: true},
+            };
+          if (method === 'textDocument/documentSymbol') return [];
+          expect(method).toBe('textDocument/rename');
+          renames++;
+          return {
+            documentChanges: EffectArray.map([f.uri, otherUri], uri => ({
+              textDocument: {uri, version: versions.get(uri) ?? 0},
+              edits: [
+                {
+                  range: {
+                    start: {line: 1, character: uri === f.uri ? 4 : 12},
+                    end: {line: 1, character: uri === f.uri ? 9 : 17},
+                  },
+                  newText: 'next',
+                },
+              ],
+            })),
+          };
+        }),
+      notify: (method, params) =>
+        Effect.gen(function* () {
+          if (method !== 'textDocument/didOpen' && method !== 'textDocument/didChange') return;
+          const data = yield* Schema.decodeUnknownEffect(
+            Schema.Struct({textDocument: Schema.Struct({uri: Schema.String, version: Schema.Int})}),
+          )(params).pipe(Effect.mapError(() => LspFault.make({code: 'protocol'})));
+          versions.set(data.textDocument.uri, data.textDocument.version);
+          events.push(method + ':' + (data.textDocument.uri === f.uri ? 'main' : 'other'));
+        }),
+    };
+    // External wire/SDK timing is immediate; the coordinator/provider locks and publication remain real.
+    const stopped = {code: 0, drained: true, forced: false, stdioClosed: true, fault: undefined};
+    const wireSpy = vi.spyOn(composedGoTransport, 'spawnLspWire').mockImplementation(() =>
+      Effect.succeed({
+        pid: process.pid,
+        messages: Stream.empty,
+        failure: () => undefined,
+        beginClosing: Effect.void,
+        send: () => Effect.void,
+        finish: Effect.succeed(stopped),
+      }),
+    );
+    const clientSpy = vi.spyOn(composedGoTransport, 'makeLspClient').mockImplementation(() => Effect.succeed(client));
+    yield* Effect.addFinalizer(() =>
+      Effect.sync(() => {
+        clientSpy.mockRestore();
+        wireSpy.mockRestore();
+      }),
+    );
+    const metadata = CommandExecutor.of({
+      ...noCommands,
+      execute: (_executable, args) =>
+        Effect.sync(() => {
+          events.push('metadata:' + args[0]);
+          expect(['mod', 'list']).toContain(args[0]);
+          return {
+            exitCode: 0,
+            stderr: '',
+            stdout: args[0] === 'mod' ? '{}' : JSON.stringify({Path: 'fixture', Main: true, GoMod: manifest}),
+          };
+        }),
+    });
+    const candidate = {
+      executable: f.path.join(f.root, 'fixture-gopls'),
+      executableDigest: goExecutableDigest,
+      sdkDirectory: f.path.join(f.root, 'fixture-sdk'),
+      sdkTreeDigest: sha256HexSync('fixture SDK'),
+    };
+    const principal = sha256HexSync('composed owned Go principal');
+    const profileText = JSON.stringify({
+      version: 1,
+      enabled: true,
+      worktree: f.basis.worktree,
+      catalog: {go: candidate},
+    });
+    const profile = sha256HexSync(profileText);
+    yield* f.fs.makeDirectory(f.path.join(home, 'semantic', 'profiles'), {recursive: true, mode: 0o700});
+    yield* f.fs.writeFileString(f.path.join(home, 'semantic', 'profiles', principal + '.json'), profileText, {
+      mode: 0o600,
+    });
+    const coordinator = yield* makeSemanticCoordinator({
+      enabled: true,
+      dataHome: home,
+      worktree: f.basis.worktree,
+      go: candidate,
+      verifySelected: (_id, _candidate, _version, configurationOnly) =>
+        Effect.sync(() => {
+          events.push(configurationOnly ? 'verify:configuration' : 'verify:candidate');
+          return sha256HexSync('stable configuration');
+        }),
+    }).pipe(Effect.provideService(CommandExecutor, metadata));
+    const directory = yield* f.fs
+      .makeTempDirectoryScoped({directory: '/tmp', prefix: 'tn-go-compose-'})
+      .pipe(Effect.flatMap(f.fs.realPath));
+    const token = sha256HexSync('composed Go endpoint');
+    const endpoint = yield* serveSemanticEndpoint(coordinator, {
+      directory,
+      token,
+      dataHome: home,
+      runtimeIdentity: sha256HexSync('fixture runtime'),
+      worktree: f.basis.worktree,
+    });
+    const opened = yield* requestSemanticEndpoint(endpoint.socket, token, {
+      operation: 'agent-view',
+      request: {
+        worktree: f.basis.worktree,
+        profile,
+        action: 'open',
+        project: f.basis.project,
+        uri: f.uri,
+        language: 'go',
+        text: f.text,
+        milliseconds: 10000,
+      },
+    });
+    const open = yield* Schema.decodeUnknownEffect(
+      Schema.Struct({
+        status: Schema.Literal('ok'),
+        handle: Schema.Struct({id: Schema.String, capability: Schema.String}),
+        observation: Observation,
+      }),
+    )(opened);
+    events.length = 0;
+    const result = yield* requestSemanticEndpoint(endpoint.socket, token, {
+      operation: 'agent-change',
+      request: {
+        version: 1,
+        worktree: f.basis.worktree,
+        profile,
+        principal,
+        action: 'prepare',
+        project: f.basis.project,
+        uri: f.uri,
+        language: 'go',
+        operation: 'rename',
+        position: {line: 1, character: 5},
+        newName: 'next',
+        view: {kind: 'buffer', handle: open.handle, documentVersion: 1},
+        milliseconds: 10000,
+        maxBytes: 32768,
+      },
+    });
+    expect(result).toMatchObject({status: 'ok', applicable: false, writerAuthorityRequired: true});
+    expect(renames).toBe(2);
+    expect(events).toEqual([
+      'verify:configuration',
+      'verify:candidate',
+      'textDocument/rename',
+      'textDocument/didOpen:other',
+      'textDocument/didChange:main',
+      'textDocument/documentSymbol',
+      'textDocument/rename',
+      'verify:candidate',
+      'verify:configuration',
+      'verify:configuration',
+      'verify:candidate',
+      'verify:candidate',
+      'verify:configuration',
+      'verify:configuration',
+      'verify:candidate',
+      'verify:candidate',
+      'verify:configuration',
+    ]);
+    // Source closure advances the shared epoch; observe only the returned current basis.
+    const prepared = yield* Schema.decodeUnknownEffect(Schema.Struct({observation: Observation}))(result);
+    expect(prepared.observation.projectEpoch).toBeGreaterThan(open.observation.projectEpoch);
+    const observed = yield* requestSemanticEndpoint(endpoint.socket, token, {
+      operation: 'agent-observe',
+      observation: prepared.observation,
+      handle: open.handle,
+      milliseconds: 10000,
+    });
+    expect(observed).toMatchObject({documentVersion: 1, content: sha256HexSync(f.text)});
+    expect(yield* f.fs.readFileString(f.file)).toBe(f.text);
+    expect(yield* f.fs.readFileString(other)).toBe(otherText);
+    expect(
+      yield* requestSemanticEndpoint(endpoint.socket, token, {
+        operation: 'agent-view',
+        request: {worktree: f.basis.worktree, profile, action: 'close', handle: open.handle, milliseconds: 10000},
+      }),
+    ).toMatchObject({status: 'ok'});
+  }).pipe(
+    TestClock.withLive,
+    Effect.provideService(ChildEnvironmentPolicy, {
+      sanitizeExternal: environment => environment,
+      preserveIntendedChild: environment => environment,
+    }),
+    Effect.provide(Layer.mergeAll(io, TestSystemInfoLayer)),
+  ),
+);
