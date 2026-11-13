@@ -1,6 +1,6 @@
 import {Array as EffectArray} from 'effect';
 import {expect, it, vi} from 'vitest';
-import {runtimeAssertPrivateProviderPath} from '../../src/system.js';
+import {runtimeAssertPrivateProviderPath, RuntimeWriterFault} from '../../src/system.js';
 
 const supported =
   (process.platform === 'darwin' || process.platform === 'linux') &&
@@ -20,16 +20,16 @@ function fixture(run: (folder: string, sibling: string) => void): void {
     fs.rmSync(`${sibling}-second`, {force: true});
   }
 }
-function sampleChanges(target: string, change: (sample: number) => void, run: () => void): number {
+function sampleChanges(target: string, change: (sample: number, fd: number) => void, run: () => void): number {
   const anchor = fs.statSync(target, {bigint: true}),
     original = fs.fstatSync.bind(fs);
   let samples = 0;
   const spy = vi.spyOn(fs, 'fstatSync').mockImplementation((fd, options) => {
     const current = original(fd, options);
     if (options?.bigint && current.dev === anchor.dev && current.ino === anchor.ino) {
-      change(++samples);
-      return original(fd, options);
+      change(++samples, fd);
     }
+    // Mutations happen after the actual observation; never substitute a post-mutation sample.
     return current;
   });
   try {
@@ -56,53 +56,103 @@ it.skipIf(!supported)('accepts one actual owned sibling creation between ancestr
       },
     );
     expect(injected).toBe(true);
+    expect(fs.readFileSync(sibling, 'utf8')).toBe('owned fixture');
+    expect(fs.readdirSync(folder)).toEqual([]);
   }),
 );
-it.skipIf(!supported)(
-  'takes one coherent retry when actual sibling creation moves directory data during an allowed ACL sample',
-  () =>
-    fixture((folder, sibling) => {
-      const samples = sampleChanges(
-        path.dirname(folder),
-        sample => {
-          if (sample === 4) fs.writeFileSync(sibling, 'owned fixture', {mode: 0o600});
-        },
-        () => {
-          expect(() => runtimeAssertPrivateProviderPath(folder, {kind: 'directory'})).not.toThrow();
-        },
-      );
-      expect(samples).toBe(9);
-    }),
-);
-it.skipIf(!supported)(
-  'refuses a second directory-data movement instead of extending the bounded coherent sample budget',
-  () =>
-    fixture((folder, sibling) => {
-      const samples = sampleChanges(
-        path.dirname(folder),
-        sample => {
-          if (sample === 4) fs.writeFileSync(sibling, 'one', {mode: 0o600});
-          if (sample === 8) fs.writeFileSync(`${sibling}-second`, 'two', {mode: 0o600});
-        },
-        () => {
-          expect(() => runtimeAssertPrivateProviderPath(folder, {kind: 'directory'})).toThrow();
-        },
-      );
-      expect(samples).toBe(9);
-    }),
-);
+// Exhaust the finite role/count contract: unrelated ancestor entries never spend the
+// selected directory's one coherent retry; a second selected-entry change must refuse.
+for (const role of ['ancestor', 'selected'] as const)
+  for (const changes of [1, 2] as const) {
+    it.skipIf(!supported)(`${role} directory proof preserves bytes across ${changes} real entry changes`, () =>
+      fixture((folder, sibling) => {
+        const sentinel = path.join(folder, 'private.json');
+        fs.writeFileSync(sentinel, 'PRIVATE_ORIGINAL', {mode: 0o600});
+        runtimeAssertPrivateProviderPath(folder, {kind: 'directory'});
+        const originalClose = fs.closeSync.bind(fs);
+        let retained: number | undefined;
+        let namedCloses = 0;
+        const aliases = new Set<number>();
+        const close = vi.spyOn(fs, 'closeSync').mockImplementation(fd => {
+          const result = originalClose(fd);
+          if (aliases.delete(fd)) namedCloses++;
+          return result;
+        });
+        const writes = vi.spyOn(fs, 'writeFileSync');
+        const entries: string[] = [];
+        const cuts = role === 'ancestor' ? [3, 5] : [3, 7];
+        try {
+          const samples = sampleChanges(
+            role === 'ancestor' ? path.dirname(folder) : folder,
+            (sample, fd) => {
+              if (role === 'selected') {
+                retained ??= fd;
+                if (fd !== retained) aliases.add(fd);
+              }
+              if (sample === cuts[0] || (changes === 2 && sample === cuts[1])) {
+                const file =
+                  role === 'ancestor'
+                    ? entries.length === 0
+                      ? sibling
+                      : `${sibling}-second`
+                    : path.join(folder, `owned-change-${entries.length}`);
+                fs.writeFileSync(file, `owned entry ${entries.length}`, {flag: 'wx', mode: 0o600});
+                entries.push(file);
+              }
+            },
+            () => {
+              const assert = () => runtimeAssertPrivateProviderPath(folder, {kind: 'directory'});
+              if (role === 'selected' && changes === 2) expect(assert).toThrow(RuntimeWriterFault);
+              else expect(assert).not.toThrow();
+            },
+          );
+          expect(samples).toBeGreaterThanOrEqual(cuts[changes - 1]);
+          expect(entries).toHaveLength(changes);
+          expect(writes).toHaveBeenCalledTimes(changes);
+          if (role === 'selected') {
+            // Each complete selected-directory attempt owns one fresh named alias, including FD reuse.
+            expect(namedCloses).toBe(2);
+            expect(aliases.size).toBe(0);
+          }
+          expect(fs.readFileSync(sentinel, 'utf8')).toBe('PRIVATE_ORIGINAL');
+          for (const [index, file] of entries.entries())
+            expect(fs.readFileSync(file, 'utf8')).toBe(`owned entry ${index}`);
+          expect(fs.readdirSync(folder).sort()).toEqual(
+            role === 'ancestor'
+              ? ['private.json']
+              : [...EffectArray.map(entries, file => path.basename(file)), 'private.json'].sort(),
+          );
+        } finally {
+          writes.mockRestore();
+          close.mockRestore();
+        }
+      }),
+    );
+  }
 it.skipIf(!supported)('refuses an actual changed private directory mode without a metadata retry', () =>
   fixture(folder => {
+    let changed = false;
+    let restored = false;
     const samples = sampleChanges(
       folder,
       sample => {
-        if (sample === 2) fs.chmodSync(folder, 0o750);
+        if (sample === 2) {
+          fs.chmodSync(folder, 0o750);
+          changed = true;
+        }
+        if (sample === 6) {
+          fs.chmodSync(folder, 0o700);
+          restored = true;
+        }
       },
       () => {
         expect(() => runtimeAssertPrivateProviderPath(folder, {kind: 'directory'})).toThrow();
       },
     );
-    expect(samples).toBe(2);
+    expect(changed).toBe(true);
+    expect(restored).toBe(false);
+    expect(samples).toBeLessThan(6);
+    expect(fs.statSync(folder).mode & 0o777).toBe(0o750);
   }),
 );
 it.skipIf(!supported)(
