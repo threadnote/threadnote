@@ -213,10 +213,10 @@ function checkDirectory(state: DirectoryState) {
   if (state.closed) fail('identity');
   checkEdges(state.chain);
 }
-// A directory's entries may move ctime/mtime/size/nlink without changing its retained
-// identity or security. Recheck the complete ACL and current parent name once; never
-// retry a failed ACL/volume proof or a sampled identity/owner/mode change.
-function assertPrivateDirectoryAcl(edge: Edge, parent: Edge | undefined, privateObject: boolean): void {
+// Ancestor entry changes do not version the selected private namespace. Bind their
+// complete ACL image and current name/identity instead. The protected final directory
+// retains its data-coherence check; failed ACL/volume or critical metadata never retries.
+function assertPrivateDirectoryAcl(edge: Edge, parent: Edge | undefined, privateObject: boolean, ordinal = 0): void {
   const sameCritical = (info: ReturnType<typeof stat>) =>
     info.isDirectory() &&
     same(edge.identity, info) &&
@@ -236,12 +236,22 @@ function assertPrivateDirectoryAcl(edge: Edge, parent: Edge | undefined, private
     const before = stat(edge.fd),
       namedBefore = namedStat();
     if (!sameCritical(before) || !sameCritical(namedBefore)) fail('private-storage');
-    assertPosixPrivateAcl(edge.fd, privateObject, before);
+    const security = assertPosixPrivateAcl(edge.fd, privateObject, before);
     // This fresh nofollow reopen cannot inherit an earlier allowed ACL sample across
     // directory-data movement: incoherence requires another full ACL sample.
     const namedAfter = namedStat(),
       after = stat(edge.fd);
     if (!sameCritical(after) || !sameCritical(namedAfter)) fail('private-storage');
+    if (!privateObject) {
+      // Ancestor entries may change independently of this private namespace. Require the
+      // same complete native ACL image plus retained/current-name identity, owner and mode.
+      const closingSecurity = assertPosixPrivateAcl(edge.fd, false, after),
+        closing = stat(edge.fd),
+        namedClosing = namedStat();
+      if (!sameCritical(closing) || !sameCritical(namedClosing) || !equalBytes(security, closingSecurity))
+        fail('private-storage');
+      return;
+    }
     if (stable(before, namedBefore) && stable(before, namedAfter) && stable(before, after)) return;
     if (attempt !== 0) {
       const error = RuntimeWriterFault.make({reason: 'private-storage'});
@@ -255,7 +265,7 @@ function assertPrivateDirectoryAcl(edge: Edge, parent: Edge | undefined, private
         ] as const)
           for (const field of ['nlink', 'size', 'ctimeNs', 'mtimeNs'] as const)
             if (before[field] !== sample[field]) changed.push(`${name}.${field}`);
-        error.message = `directory-coherence:${EffectArray.join(changed, ',')}`;
+        error.message = `directory-coherence:${privateObject ? 'private' : 'ancestor'}:${ordinal}:${EffectArray.join(changed, ',')}`;
       } catch {
         // Diagnostic projection must never replace the original conservative fault.
       }
@@ -270,7 +280,7 @@ function directoryState(directory: RuntimePrivateWriterDirectory) {
   const info = stat(last(state).fd);
   if (info.uid !== BigInt(runtimeCurrentUserId() ?? -1) || (info.mode & 0o077n) !== 0n) fail('private-storage');
   for (let index = 0; index < state.chain.length; index++)
-    assertPrivateDirectoryAcl(state.chain[index], state.chain[index - 1], index === state.chain.length - 1);
+    assertPrivateDirectoryAcl(state.chain[index], state.chain[index - 1], index === state.chain.length - 1, index);
   return state;
 }
 function requireFile(info: ReturnType<typeof stat>, bound: number, writable: boolean) {
@@ -546,7 +556,7 @@ export function runtimeOpenPrivateWriterChild(
     const info = stat(child);
     if (!info.isDirectory() || info.uid !== BigInt(runtimeCurrentUserId() ?? -1) || (info.mode & 0o077n) !== 0n)
       fail('private-storage');
-    assertPrivateDirectoryAcl({fd: child, identity: info, name}, last(state), true);
+    assertPrivateDirectoryAcl({fd: child, identity: info, name}, last(state), true, state.chain.length);
   } finally {
     native.closeSync(child);
   }
@@ -575,7 +585,7 @@ export function runtimeOpenPrivateWriterAuthority(
   const home = openDirectory(identity.accountHome);
   try {
     for (let index = 0; index < home.chain.length; index++)
-      assertPrivateDirectoryAcl(home.chain[index], home.chain[index - 1], false);
+      assertPrivateDirectoryAcl(home.chain[index], home.chain[index - 1], false, index);
     if (
       EffectArray.some(
         home.chain,

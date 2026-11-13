@@ -10,7 +10,7 @@ import {SemanticHostCatalog} from './host_catalog.js';
 import {withExclusiveFileLockLease} from '@threadnote/platform/file/lock';
 
 /** Policy data selects a finite local operation; it is never a serialized execution capability. */
-export const JavaImportPolicy = Schema.Struct({
+const RestrictedJavaImportPolicy = Schema.Struct({
   version: Schema.Literal(1),
   mode: Schema.Literal('maven21-dependency-free-v1'),
   project: FileUri,
@@ -27,6 +27,62 @@ export const JavaImportPolicy = Schema.Struct({
     gradle: Schema.Literal(false),
   }),
 });
+export const javaTrustedImportMode = 'trusted-java-build-import-unconfined-v1' as const;
+export const javaTrustedImportRiskVersion = 'unconfined-build-import-risk-v1' as const;
+export const javaTrustedImportRisk =
+  'Trusted build import runs code from this exact project and its resolved build dependencies as your OS user. ' +
+  'It can read or change files outside the private copy, including original files, SDKs and readable credentials, ' +
+  'run programs, and contact arbitrary network destinations or transmit readable data. ' +
+  'The private copy and offline flags are not a sandbox. Revocation stops owned work when observed and cannot undo prior effects. ' +
+  'If you require filesystem, network or source-execution restrictions, use a separately qualified restricted mode or do not grant this mode.';
+export const javaTrustedImportPermissions = Object.freeze({
+  importer: true,
+  repositoryCommands: true,
+  sourceExecution: true,
+  network: true,
+  dependencies: true,
+  plugins: true,
+  annotationProcessors: true,
+  gradle: true,
+  filesystem: 'unconfined-os-user',
+  dataDisclosure: 'unconfined-os-user-network',
+} as const);
+const trustedPolicyFields = {
+  version: Schema.Literal(1),
+  mode: Schema.Literal(javaTrustedImportMode),
+  build: Schema.Literals(['maven', 'gradle']),
+  project: FileUri,
+  sourceDigest: Digest,
+  candidate: JavaRuntimeCandidate,
+  scope: Schema.Struct({account: Schema.String, user: Schema.String, worktree: FileUri}),
+  cacheImage: Schema.Struct({directory: FileUri, manifestDigest: Digest, imageDigest: Digest}),
+  configuration: Schema.Struct({version: Schema.Literal('private-java-import-bootstrap-v1'), digest: Digest}),
+  risk: Schema.Struct({
+    version: Schema.Literal(javaTrustedImportRiskVersion),
+    digest: Schema.Literal(sha256HexSync(javaTrustedImportRisk)),
+  }),
+  permissions: Schema.Struct({
+    importer: Schema.Literal(true),
+    repositoryCommands: Schema.Literal(true),
+    sourceExecution: Schema.Literal(true),
+    network: Schema.Literal(true),
+    dependencies: Schema.Literal(true),
+    plugins: Schema.Literal(true),
+    annotationProcessors: Schema.Literal(true),
+    gradle: Schema.Literal(true),
+    filesystem: Schema.Literal('unconfined-os-user'),
+    dataDisclosure: Schema.Literal('unconfined-os-user-network'),
+  }),
+};
+export const JavaTrustedImportPolicyBody = Schema.Struct(trustedPolicyFields);
+export type JavaTrustedImportPolicyBody = typeof JavaTrustedImportPolicyBody.Type;
+export const JavaTrustedImportPolicy = Schema.Struct({
+  ...trustedPolicyFields,
+  // The predecessor is the approved CAS anchor, never the newly containing profile digest.
+  approval: Schema.Struct({expectedDigest: Schema.NullOr(Digest), previewDigest: Digest}),
+});
+export type JavaTrustedImportPolicy = typeof JavaTrustedImportPolicy.Type;
+export const JavaImportPolicy = Schema.Union([RestrictedJavaImportPolicy, JavaTrustedImportPolicy]);
 export type JavaImportPolicy = typeof JavaImportPolicy.Type;
 
 export const SemanticHostProfile = Schema.Struct({

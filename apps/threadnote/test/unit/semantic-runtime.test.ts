@@ -533,9 +533,10 @@ describe.skipIf(process.platform === 'win32')('Java coordinator registration', (
       Effect.gen(function* () {
         const f = yield* javaCoordinatorFixture();
         const native = yield* privateNativeSourceOracle(f.text);
+        // Construct real POSIX admission before selecting the synthetic Windows source issuer.
+        const coordinator = yield* f.make();
         const platform = vi.spyOn(platformSystem, 'runtimePlatform', 'get').mockReturnValue('win32');
         yield* Effect.addFinalizer(() => Effect.sync(() => platform.mockRestore()));
-        const coordinator = yield* f.make();
         const basis = {...f.basis, view: {...f.basis.view, kind: 'disk' as const}, documentVersion: null};
         const previous = yield* coordinator.attach(basis, f.text, 'java', 'prepared-main');
         yield* coordinator.closeView(previous.observation);
@@ -563,6 +564,8 @@ describe.skipIf(process.platform === 'win32')('Java coordinator registration', (
       Effect.gen(function* () {
         const f = yield* javaCoordinatorFixture();
         const native = yield* privateNativeSourceOracle(f.text);
+        // Construct real POSIX admission before selecting the synthetic Windows source issuer.
+        const coordinator = yield* f.make();
         const platform = vi.spyOn(platformSystem, 'runtimePlatform', 'get').mockReturnValue('win32');
         yield* Effect.addFinalizer(() => Effect.sync(() => platform.mockRestore()));
         const original = f.factory.getMockImplementation();
@@ -605,7 +608,6 @@ describe.skipIf(process.platform === 'win32')('Java coordinator registration', (
             };
           }),
         );
-        const coordinator = yield* f.make();
         const basis = {...f.basis, view: {...f.basis.view, kind: 'disk' as const}, documentVersion: null};
         const previous = yield* coordinator.attach(basis, f.text, 'java', 'prepared-main');
         let replacement: Observation | undefined;
@@ -652,9 +654,10 @@ describe.skipIf(process.platform === 'win32')('Java coordinator registration', (
       Effect.gen(function* () {
         const f = yield* javaCoordinatorFixture();
         const native = yield* privateNativeSourceOracle(f.text);
+        // Construct real POSIX admission before selecting the synthetic Windows source issuer.
+        const coordinator = yield* f.make();
         const platform = vi.spyOn(platformSystem, 'runtimePlatform', 'get').mockReturnValue('win32');
         yield* Effect.addFinalizer(() => Effect.sync(() => platform.mockRestore()));
-        const coordinator = yield* f.make();
         const basis = {...f.basis, view: {...f.basis.view, kind: 'disk' as const}, documentVersion: null};
         native.text(f.text + '\n');
         expect(yield* Effect.flip(coordinator.attach(basis, f.text, 'java', 'prepared-main'))).toMatchObject({
@@ -686,9 +689,10 @@ describe.skipIf(process.platform === 'win32')('Java coordinator registration', (
       Effect.gen(function* () {
         const f = yield* javaCoordinatorFixture();
         const native = yield* privateNativeSourceOracle(f.text);
+        // Construct real POSIX admission before selecting the synthetic Windows source issuer.
+        const coordinator = yield* f.make();
         const platform = vi.spyOn(platformSystem, 'runtimePlatform', 'get').mockReturnValue('win32');
         yield* Effect.addFinalizer(() => Effect.sync(() => platform.mockRestore()));
-        const coordinator = yield* f.make();
         const basis = {...f.basis, view: {...f.basis.view, kind: 'disk' as const}, documentVersion: null};
         const previous = yield* coordinator.attach(basis, f.text, 'java', 'prepared-main');
         native.change('replaced-native-object', 0);

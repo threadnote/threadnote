@@ -175,12 +175,11 @@ export const posixDirectoryFlags =
 export const posixFileFlags =
   fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK | (runtimeCurrentPlatform() === 'darwin' ? 0x01000000 : 0x00080000);
 
-/** Descriptor-bound complete ACL proof. Unknown records, remote filesystems and unsupported xattrs refuse. */
-export function assertPosixPrivateAcl(fd: number, privateObject: boolean, before: RuntimeWriterIdentity): void {
+/** Descriptor-bound complete ACL proof and bounded observed image. Unknown records, remote filesystems and xattrs refuse. */
+export function assertPosixPrivateAcl(fd: number, privateObject: boolean, before: RuntimeWriterIdentity): Uint8Array {
   requirePosixWriterPlatform();
   if (runtimeCurrentPlatform() === 'linux') {
-    assertLinuxPrivateAcl(fd);
-    return;
+    return assertLinuxPrivateAcl(fd);
   }
   const lib = dlopen(libcPath(), {
     __fstat64_extended: {args: ['i32', 'buffer', 'buffer', 'buffer'], returns: 'i32'},
@@ -244,14 +243,15 @@ export function assertPosixPrivateAcl(fd: number, privateObject: boolean, before
         if (kind === 1 && (privateObject || (rights & 0x3574) !== 0 || (aceFlags & 0x1e0) !== 0))
           fail('private-storage');
       }
+    return security.slice(0, Number(length[0]));
   } catch {
-    fail('private-storage');
+    return fail('private-storage');
   } finally {
     lib.close();
   }
 }
 
-function assertLinuxPrivateAcl(fd: number): void {
+function assertLinuxPrivateAcl(fd: number): Uint8Array {
   const lib = dlopen(libcPath(), {
     fstatfs: {args: ['i32', 'buffer'], returns: 'i32'},
     fgetxattr: {args: ['i32', 'buffer', 'buffer', 'u64'], returns: 'i64'},
@@ -281,8 +281,10 @@ function assertLinuxPrivateAcl(fd: number): void {
       // ENODATA is absence for these system ACL attributes on the explicitly selected local filesystems.
       if (count !== -1n || error !== 61) fail('private-storage');
     }
+    // The only admitted Linux image is absence of both extended/default ACLs.
+    return new Uint8Array();
   } catch {
-    fail('private-storage');
+    return fail('private-storage');
   } finally {
     lib.close();
   }
@@ -446,10 +448,41 @@ export function assertPosixPrivateProviderPath(path: string, kind: 'file' | 'dir
             if (!sameCritical(edge.identity, namedBefore)) fail('private-storage');
           }
           // Unsafe/unknown ACLs and critical metadata changes are terminal, never caught for retry.
-          assertPosixPrivateAcl(edge.fd, privateObject, before);
+          const security = assertPosixPrivateAcl(edge.fd, privateObject, before);
           const after = descriptorStat(edge.fd),
             namedAfter = reopened < 0 ? after : descriptorStat(reopened);
           if (!sameCritical(edge.identity, after) || !sameCritical(edge.identity, namedAfter)) fail('private-storage');
+          if (!privateObject && before.isDirectory()) {
+            // Sibling entries do not version this retained ancestor. Bind its actual ACL image
+            // across the name/identity proof instead of demanding unrelated directory-data quiescence.
+            const closingSecurity = assertPosixPrivateAcl(edge.fd, false, after),
+              closing = descriptorStat(edge.fd),
+              namedClosing = (() => {
+                if (index === 0) return closing;
+                // The earlier reopened descriptor can survive a rename. Resolve this name
+                // again relative to its retained parent at the closing security barrier.
+                const current = lib.symbols.__openat(
+                  chain[index - 1].fd,
+                  new TextEncoder().encode(`${edge.name}\0`),
+                  posixDirectoryFlags,
+                  0,
+                );
+                if (current < 0) return fail('private-storage');
+                try {
+                  return descriptorStat(current);
+                } finally {
+                  fs.closeSync(current);
+                }
+              })();
+            if (
+              !sameCritical(edge.identity, closing) ||
+              !sameCritical(edge.identity, namedClosing) ||
+              security.length !== closingSecurity.length ||
+              !security.every((value, index) => value === closingSecurity[index])
+            )
+              fail('private-storage');
+            break;
+          }
           const coherent = sameData(before, namedBefore) && sameData(before, after) && sameData(before, namedAfter);
           if (!before.isDirectory()) {
             if (!coherent || !sameData(edge.identity, before)) fail('private-storage');

@@ -23,6 +23,9 @@ import * as Native from '@threadnote/platform/system';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
   inspectJavaImportInputs,
+  inspectTrustedJavaImportInputs,
+  inspectJavaImportCache,
+  javaTrustedImportPreviewDigest,
   JavaImportFault,
   verifyJavaImportCurrentness,
   javaImportCanonicalPom,
@@ -31,12 +34,22 @@ import {
 import {
   inspectSemanticHostProfile,
   JavaImportPolicy,
+  type JavaTrustedImportPolicyBody,
+  javaTrustedImportMode,
+  javaTrustedImportPermissions,
+  javaTrustedImportRisk,
+  javaTrustedImportRiskVersion,
   writeSemanticHostProfile,
   writeSemanticJavaImportPolicy,
 } from '../../src/semantic/host_profile.js';
 import {runSemanticDoctor} from '../../src/semantic/doctor.js';
 import * as javaRuntime from '../../src/semantic/providers/java_runtime.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import {sha256HexSync} from '@threadnote/platform/sha256';
+import {
+  materializeJavaMavenConfiguration,
+  javaMavenImportSettings,
+} from '../../src/semantic/providers/java_preparation.js';
 
 const layer = Layer.mergeAll(
   BunServices.layer,
@@ -339,3 +352,272 @@ describe.skipIf(!Native.runtimeNativePlatformSupport().writer)('protected local 
       }).pipe(provideTestLayer(layer), TestClock.withLive),
   );
 });
+
+const trustedBody: JavaTrustedImportPolicyBody = {
+  version: 1,
+  mode: javaTrustedImportMode,
+  build: 'maven',
+  project: 'file:///original',
+  sourceDigest: sha256HexSync('source'),
+  candidate,
+  scope: {account: 'local', user: 'test', worktree: 'file:///original'},
+  cacheImage: {
+    directory: 'file:///cache',
+    manifestDigest: sha256HexSync('manifest'),
+    imageDigest: sha256HexSync('image'),
+  },
+  configuration: {version: 'private-java-import-bootstrap-v1', digest: sha256HexSync('configuration')},
+  risk: {version: javaTrustedImportRiskVersion, digest: sha256HexSync(javaTrustedImportRisk)},
+  permissions: javaTrustedImportPermissions,
+};
+it('trusted approval binds source, scope, SDK, cache, build and predecessor regardless of object insertion order', () => {
+  const mutations: readonly ((body: JavaTrustedImportPolicyBody, suffix: string) => JavaTrustedImportPolicyBody)[] = [
+    (b, v) => ({...b, sourceDigest: sha256HexSync('source:' + v)}),
+    (b, v) => ({...b, project: 'file:///project-' + encodeURIComponent(v)}),
+    (b, v) => ({...b, scope: {...b.scope, user: 'user:' + v}}),
+    (b, v) => ({...b, scope: {...b.scope, account: 'account:' + v}}),
+    (b, v) => ({...b, scope: {...b.scope, worktree: 'file:///worktree-' + encodeURIComponent(v)}}),
+    (b, v) => ({...b, candidate: {...b.candidate, projectSdkDigest: sha256HexSync('sdk:' + v)}}),
+    (b, v) => ({...b, candidate: {...b.candidate, serverDirectory: '/server-' + v}}),
+    (b, v) => ({...b, cacheImage: {...b.cacheImage, manifestDigest: sha256HexSync('manifest:' + v)}}),
+    (b, v) => ({...b, cacheImage: {...b.cacheImage, imageDigest: sha256HexSync('image:' + v)}}),
+    (b, v) => ({...b, configuration: {...b.configuration, digest: sha256HexSync('config:' + v)}}),
+    b => ({...b, build: 'gradle'}),
+  ];
+  fc.assert(
+    fc.property(fc.string({maxLength: 16}), suffix => {
+      const digest = javaTrustedImportPreviewDigest(trustedBody, null);
+      for (const mutate of mutations)
+        expect(javaTrustedImportPreviewDigest(mutate(trustedBody, suffix), null)).not.toBe(digest);
+      expect(javaTrustedImportPreviewDigest(trustedBody, sha256HexSync('previous:' + suffix))).not.toBe(digest);
+      const reordered = {...trustedBody, scope: {worktree: trustedBody.scope.worktree, user: 'test', account: 'local'}};
+      expect(javaTrustedImportPreviewDigest(reordered, null)).toBe(digest);
+    }),
+    {numRuns: 32},
+  );
+});
+it('the trusted mode cannot retain even one residual denial or borrow restricted permission literals', () => {
+  const policy = {
+    ...trustedBody,
+    approval: {expectedDigest: null, previewDigest: javaTrustedImportPreviewDigest(trustedBody, null)},
+  };
+  expect(Schema.is(JavaImportPolicy)(policy)).toBe(true);
+  const fields = [
+    'repositoryCommands',
+    'sourceExecution',
+    'network',
+    'dependencies',
+    'plugins',
+    'annotationProcessors',
+    'gradle',
+  ] as const;
+  expect(
+    Schema.is(JavaImportPolicy)({...policy, permissions: {...policy.permissions, filesystem: 'private-copy-only'}}),
+  ).toBe(false);
+  fc.assert(
+    fc.property(fc.subarray([...fields], {minLength: 1}), selected => {
+      const denial = EffectRecord.fromEntries(EffectArray.map(selected, field => [field, false] as const));
+      expect(Schema.is(JavaImportPolicy)({...policy, permissions: {...policy.permissions, ...denial}})).toBe(false);
+    }),
+    {numRuns: 32},
+  );
+});
+
+const trustedFixture = Effect.gen(function* () {
+  const f = yield* fixture;
+  const image = f.path.join(f.path.dirname(f.root), 'cache-image');
+  yield* f.fs.makeDirectory(f.path.join(image, 'm2/example'), {recursive: true, mode: 0o700});
+  yield* f.fs.makeDirectory(f.path.join(image, 'notices'), {mode: 0o700});
+  const jar = 'authored fake cache artifact; no JVM executes this';
+  const notice = 'authored fake notice; this is not legal qualification';
+  yield* f.fs.writeFileString(f.path.join(image, 'm2/example/plugin.jar'), jar, {mode: 0o600});
+  yield* f.fs.writeFileString(f.path.join(image, 'notices/plugin.txt'), notice, {mode: 0o600});
+  const manifest = JSON.stringify({
+    version: 1,
+    build: 'maven',
+    artifacts: [{path: 'm2/example/plugin.jar', sha256: sha256HexSync(jar), notice: 'notices/plugin.txt'}],
+    notices: [{path: 'notices/plugin.txt', sha256: sha256HexSync(notice)}],
+  });
+  yield* f.fs.writeFileString(f.path.join(image, 'manifest.json'), manifest, {mode: 0o600});
+  const cacheImage = {
+    directory: canonicalFileUri((yield* f.path.toFileUrl(image)).href),
+    manifestDigest: sha256HexSync(manifest),
+  };
+  const request = {
+    ...f.request,
+    mode: javaTrustedImportMode,
+    build: 'maven' as const,
+    project: f.worktree,
+    candidate,
+    cacheImage,
+  };
+  return {...f, image, cacheImage, request, jar, notice};
+});
+
+effectIt.effect(
+  'trusted raw bindings cover unchanged nested parents/siblings, bytes and paths without normalizing original build files',
+  () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const nested = f.path.join(f.root, 'module');
+      yield* f.fs.makeDirectory(nested);
+      const pom = '<project><dependencies><dependency>original bytes</dependency></dependencies></project>';
+      yield* f.fs.writeFileString(f.path.join(nested, 'pom.xml'), pom);
+      yield* f.fs.writeFileString(f.path.join(f.root, 'README.md'), 'parent input');
+      const before = yield* inspectTrustedJavaImportInputs(f.root, nested);
+      expect(yield* inspectTrustedJavaImportInputs(f.root, nested)).toBe(before);
+      expect(yield* inspectJavaImportInputs(f.root, nested).pipe(Effect.result)).toMatchObject({_tag: 'Failure'});
+      yield* f.fs.writeFileString(f.path.join(f.root, 'README.md'), 'changed parent input');
+      expect(yield* inspectTrustedJavaImportInputs(f.root, nested)).not.toBe(before);
+      expect(yield* f.fs.readFileString(f.path.join(nested, 'pom.xml'))).toBe(pom);
+      yield* f.fs.makeDirectory(f.path.join(f.root, '.mvn'));
+      expect(yield* inspectTrustedJavaImportInputs(f.root, nested).pipe(Effect.result)).toMatchObject({
+        _tag: 'Failure',
+      });
+    }).pipe(provideTestLayer(layer)),
+);
+
+describe.skipIf(!Native.runtimeNativePlatformSupport().writer)(
+  'explicit trusted import policy (authored fake SDK/cache only)',
+  () => {
+    effectIt.effect(
+      'requires the separate local acknowledgement, preserves the predecessor anchor and refuses unproved build ownership before launch',
+      () =>
+        Effect.gen(function* () {
+          const f = yield* trustedFixture;
+          const runtime = vi.spyOn(javaRuntime, 'makeJavaRuntime').mockReturnValue(
+            Effect.succeed({
+              verify: Effect.void,
+              identity: 'authored-fake',
+              projectJavaHome: candidate.projectJavaHome,
+              analysis: () => Effect.die('No provider'),
+              preparation: () => Effect.die('No build/model launch'),
+            }),
+          );
+          yield* Effect.addFinalizer(() => Effect.sync(() => runtime.mockRestore()));
+          const previous = yield* writeSemanticJavaImportPolicy(f.config, f.worktree, f.policy, undefined);
+          const preview = yield* runSemanticJavaImport(f.config, f.request, 'preview');
+          expect(preview).toMatchObject({
+            state: 'preview',
+            execution: 'import-support-unavailable',
+            expectedDigest: previous.digest,
+            policy: {
+              mode: javaTrustedImportMode,
+              approval: {expectedDigest: previous.digest},
+              permissions: javaTrustedImportPermissions,
+            },
+          });
+          const previewPolicy = 'policy' in preview ? preview.policy : undefined;
+          if (!previewPolicy || previewPolicy.mode !== javaTrustedImportMode)
+            throw new Error('Missing trusted preview');
+          const request = {
+            ...f.request,
+            previewDigest: previewPolicy.approval.previewDigest,
+            expectedDigest: previous.digest,
+          };
+          expect((yield* inspectSemanticHostProfile(f.config, f.worktree)).digest).toBe(previous.digest);
+          const beforeDenial = runtime.mock.calls.length;
+          expect(
+            yield* runSemanticJavaImport(f.config, {...f.request, permissions: {network: false}}, 'preview'),
+          ).toMatchObject({state: 'invalid-request'});
+          expect(yield* runSemanticJavaImport(f.config, {...f.request, build: 'gradle'}, 'preview')).toMatchObject({
+            state: 'import-support-unavailable',
+          });
+          expect(runtime.mock.calls.length).toBe(beforeDenial);
+          expect(yield* runSemanticJavaImport(f.config, request, 'apply', true)).toMatchObject({state: 'denied'});
+          expect(
+            yield* runSemanticJavaImport(
+              f.config,
+              {...request, acknowledgeUnconfinedBuildImport: true},
+              'apply',
+              true,
+              true,
+            ),
+          ).toMatchObject({state: 'invalid-request'});
+          expect(
+            yield* runSemanticDoctor(
+              f.config,
+              {
+                version: 1,
+                callerCwd: f.root,
+                apply: true,
+                profile: {version: 1, enabled: true, worktree: f.worktree, catalog: {}, javaImport: previewPolicy},
+              },
+              'setup',
+            ),
+          ).toMatchObject({state: 'incompatible'});
+          expect(yield* runSemanticJavaImport(f.config, request, 'apply', true, true)).toMatchObject({
+            state: 'configured',
+          });
+          const selected = yield* inspectSemanticHostProfile(f.config, f.worktree);
+          expect(selected.digest).not.toBe(previewPolicy.approval.expectedDigest);
+          expect(selected.profile.javaImport).toEqual(previewPolicy);
+          const calls = runtime.mock.calls.length;
+          expect(yield* runSemanticJavaImport(f.config, {version: 1, callerCwd: f.root}, 'run', true)).toMatchObject({
+            state: 'import-support-unavailable',
+          });
+          expect(runtime.mock.calls.length).toBe(calls);
+          expect(yield* f.fs.exists(f.path.join(f.home, 'semantic/admission-v1'))).toBe(false);
+          expect(yield* f.fs.exists(f.path.join(f.home, 'semantic/java-import'))).toBe(false);
+          expect(yield* runSemanticJavaImport(f.config, request, 'apply', true, true)).toMatchObject({state: 'stale'});
+          yield* f.fs.writeFileString(f.path.join(f.root, 'README.md'), 'new source bytes');
+          expect(yield* runSemanticJavaImport(f.config, {version: 1, callerCwd: f.root}, 'run', true)).toMatchObject({
+            state: 'stale',
+          });
+          expect((yield* inspectSemanticHostProfile(f.config, f.worktree)).digest).toBe(selected.digest);
+        }).pipe(provideTestLayer(layer), TestClock.withLive),
+    );
+    effectIt.effect(
+      'requires every declared cache artifact and notice and detects byte drift before native import',
+      () =>
+        Effect.gen(function* () {
+          const f = yield* trustedFixture;
+          const image = yield* inspectJavaImportCache(f.cacheImage, 'maven', [f.root]);
+          expect(image.files.size).toBe(3);
+          expect((yield* inspectJavaImportCache(f.cacheImage, 'maven', [f.root])).binding).toEqual(image.binding);
+          yield* f.fs.remove(f.path.join(f.image, 'notices/plugin.txt'));
+          expect(yield* inspectJavaImportCache(f.cacheImage, 'maven', [f.root]).pipe(Effect.result)).toMatchObject({
+            _tag: 'Failure',
+          });
+          yield* f.fs.writeFileString(f.path.join(f.image, 'notices/plugin.txt'), f.notice, {mode: 0o600});
+          yield* f.fs.writeFileString(f.path.join(f.image, 'm2/example/plugin.jar'), f.jar + 'changed', {mode: 0o600});
+          expect(yield* inspectJavaImportCache(f.cacheImage, 'maven', [f.root]).pipe(Effect.result)).toMatchObject({
+            _tag: 'Failure',
+          });
+        }).pipe(provideTestLayer(layer)),
+    );
+  },
+);
+
+effectIt.effect('private Maven ancestor and configuration guards refuse drift without restoring old eligibility', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    const parent = f.path.dirname(f.root);
+    yield* f.fs.makeDirectory(f.path.join(parent, '.mvn'));
+    yield* f.fs.writeFileString(f.path.join(parent, '.mvn/maven.config'), 'hostile outer settings');
+    const workspace = yield* javaRuntime.makeJavaWorkspace(f.home);
+    const boundary = yield* javaRuntime.makeJavaMavenBoundary(workspace);
+    expect(boundary.directory).toBe(f.path.join(workspace.directory, '.mvn'));
+    expect(yield* f.fs.readDirectory(boundary.directory)).toEqual([]);
+    yield* boundary.verify;
+    yield* f.fs.writeFileString(f.path.join(boundary.directory, 'maven.config'), 'drift');
+    expect(yield* boundary.verify.pipe(Effect.result)).toMatchObject({_tag: 'Failure'});
+    yield* f.fs.remove(f.path.join(boundary.directory, 'maven.config'));
+    expect(yield* boundary.verify.pipe(Effect.result)).toMatchObject({_tag: 'Failure'});
+    const configuration = yield* materializeJavaMavenConfiguration(workspace.directory, '/vetted/Java&21');
+    expect(javaMavenImportSettings(workspace.directory, '/vetted/Java&21').java.configuration.maven).toEqual({
+      userSettings: workspace.directory + '/maven-settings.xml',
+      globalSettings: workspace.directory + '/maven-global-settings.xml',
+    });
+    expect(yield* f.fs.readFileString(f.path.join(workspace.directory, 'home/.m2/toolchains.xml'))).toContain(
+      'Java&amp;21',
+    );
+    const file = f.path.join(workspace.directory, 'maven-global-settings.xml');
+    const original = yield* f.fs.readFileString(file);
+    yield* f.fs.writeFileString(file, 'changed');
+    expect(yield* configuration.verify.pipe(Effect.result)).toMatchObject({_tag: 'Failure'});
+    yield* f.fs.writeFileString(file, original);
+    expect(yield* configuration.verify.pipe(Effect.result)).toMatchObject({_tag: 'Failure'});
+    expect(yield* f.fs.readFileString(f.path.join(f.root, 'pom.xml'))).toBe(javaImportCanonicalPom);
+  }).pipe(provideTestLayer(layer)),
+);

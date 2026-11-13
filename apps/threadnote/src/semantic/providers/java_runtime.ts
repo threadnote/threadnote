@@ -10,6 +10,7 @@ import {LspFault, makeLspClient, spawnLspWire, type LspWire, type WireStop} from
 import {SemanticJavaRuntimeVerifier, SemanticSetupFault, wellFormed} from '../provider.js';
 import {
   consumeJavaPreparationConnection,
+  materializeJavaMavenConfiguration,
   verifyJavaPreparationInputs,
   type JavaPreparationInputs,
 } from './java_preparation.js';
@@ -201,6 +202,111 @@ export const makeJavaWorkspace = Effect.fn('semantic.makeJavaWorkspace')(functio
   };
 });
 export type JavaWorkspace = Effect.Success<ReturnType<typeof makeJavaWorkspace>>;
+
+export type JavaPreparationOwnerPlan = 'provider-tree' | 'provider-and-gradle-foreground';
+export const javaPreparationOwnerContract = 'original-preparation-owners-v1' as const;
+type JavaPreparationOwnerRole = 'provider' | 'gradle-foreground';
+
+/** Private host composition only. A role or a PID is never a process capability or a reuse proof. */
+export const makeJavaPreparationOwners = Effect.fn('semantic.makeJavaPreparationOwners')(function* (
+  plan: JavaPreparationOwnerPlan,
+) {
+  if (plan !== 'provider-tree' && plan !== 'provider-and-gradle-foreground') return yield* fail();
+  const roles: readonly JavaPreparationOwnerRole[] =
+    plan === 'provider-tree' ? ['provider'] : ['provider', 'gradle-foreground'];
+  const attempted = new Set<JavaPreparationOwnerRole>();
+  const captured = new Map<JavaPreparationOwnerRole, Effect.Effect<WireStop, unknown>>();
+  let unknown = false;
+  let closing = false;
+  const refuse = (): never => {
+    unknown = true;
+    throw fail();
+  };
+  const beforeLaunch = (role: JavaPreparationOwnerRole): void => {
+    if (closing || unknown || !roles.includes(role) || attempted.has(role)) refuse();
+    attempted.add(role);
+  };
+  const capture = (role: JavaPreparationOwnerRole, originalFinish: Effect.Effect<WireStop, unknown>): void => {
+    if (closing || !attempted.has(role) || captured.has(role) || !Effect.isEffect(originalFinish)) refuse();
+    // Even after another owner becomes uncertain, retain this original capability for cleanup.
+    captured.set(role, originalFinish);
+  };
+  const verify = Effect.suspend(() => {
+    if (closing || unknown || EffectArray.some(roles, role => !captured.has(role))) {
+      unknown = true;
+      return fail();
+    }
+    return Effect.void;
+  });
+  const finish = yield* Effect.cached(
+    Effect.uninterruptible(
+      Effect.gen(function* () {
+        closing = true;
+        for (const role of attempted) if (!captured.has(role)) unknown = true;
+        // Start every captured owner even when another fails. One shared deadline bounds the
+        // collection; the original native finishes keep their own finite cleanup contracts.
+        const finishing = yield* Effect.all(
+          EffectArray.flatMap(roles, role => {
+            const original = captured.get(role);
+            return original ? [Effect.exit(original)] : [];
+          }),
+          {concurrency: 2},
+        ).pipe(Effect.timeoutOption(30000), Effect.interruptible, Effect.forkChild);
+        const completed = yield* Fiber.await(finishing);
+        if (Exit.isFailure(completed) || Option.isNone(completed.value)) unknown = true;
+        else
+          for (const receipt of completed.value.value)
+            if (Exit.isFailure(receipt) || !receipt.value.drained || !receipt.value.stdioClosed) unknown = true;
+        return Object.freeze({drained: !unknown, stdioClosed: !unknown});
+      }),
+    ),
+  );
+  return Object.freeze({
+    beforeLaunch,
+    capture,
+    verify,
+    markUnknown: () => {
+      unknown = true;
+    },
+    finish,
+  });
+});
+
+/** Nearest importer ancestor, outside the unchanged source copy. This is bootstrap selection, not a sandbox. */
+export const makeJavaMavenBoundary = Effect.fn('semantic.makeJavaMavenBoundary')(function* (workspace: JavaWorkspace) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  yield* workspace.verify;
+  const directory = path.join(workspace.directory, '.mvn');
+  yield* fs.makeDirectory(directory, {mode: 0o700});
+  const original = yield* fs.stat(directory);
+  let invalid = false;
+  const verify = Effect.suspend(() => (invalid ? fail() : workspace.verify)).pipe(
+    Effect.andThen(
+      Effect.gen(function* () {
+        const current = yield* fs.stat(directory);
+        if (
+          (yield* fs.realPath(directory)) !== directory ||
+          current.type !== 'Directory' ||
+          current.mode & 0o077 ||
+          Option.isNone(original.ino) ||
+          Option.isNone(current.ino) ||
+          original.dev !== current.dev ||
+          original.ino.value !== current.ino.value ||
+          (yield* fs.readDirectory(directory)).length !== 0
+        )
+          return yield* fail();
+      }),
+    ),
+    Effect.onError(() =>
+      Effect.sync(() => {
+        invalid = true;
+      }),
+    ),
+  );
+  yield* verify;
+  return {directory, verify};
+});
 
 export interface JavaPreparationDrainContext {
   readonly runtimeDirectory: string;
@@ -410,6 +516,7 @@ export const makeJavaRuntime = Effect.fn('semantic.makeJavaRuntime')(
           )
         )
           return yield* fail();
+        const boundary = mode === 'preparation' ? yield* makeJavaMavenBoundary(options.workspace) : undefined;
         const root = yield* fs.makeTempDirectory({directory: privateDirectory, prefix: 'jdt-'});
         yield* directory(root);
         const launched: {started: boolean; wire: LspWire | undefined} = {started: false, wire: undefined};
@@ -429,6 +536,14 @@ export const makeJavaRuntime = Effect.fn('semantic.makeJavaRuntime')(
         );
         for (const name of ['home', 'm2', 'configuration', 'data', 'tmp', 'gradle'])
           yield* fs.makeDirectory(path.join(root, name), {mode: 0o700});
+        const mavenConfiguration =
+          mode === 'preparation' && build === 'maven'
+            ? yield* materializeJavaMavenConfiguration(root, selected.projectJavaHome)
+            : undefined;
+        const verifyLaunch = verify.pipe(
+          Effect.andThen(boundary?.verify ?? Effect.void),
+          Effect.andThen(mavenConfiguration?.verify ?? Effect.void),
+        );
         const preparationProperties =
           mode === 'preparation'
             ? [
@@ -444,7 +559,7 @@ export const makeJavaRuntime = Effect.fn('semantic.makeJavaRuntime')(
           path.join(root, 'configuration'),
           pins.configurationDigest,
         );
-        yield* verify;
+        yield* verifyLaunch;
         if ((yield* boundedFileDigest(configuration, 16 * 1024)) !== pins.configurationDigest) return yield* fail();
         if (inputs) yield* verifyJavaPreparationInputs(inputs, {...options, build: build!});
         yield* options.workspace.hold;
@@ -493,8 +608,8 @@ export const makeJavaRuntime = Effect.fn('semantic.makeJavaRuntime')(
         launched.wire = wire;
         // Capture the ORIGINAL cached native finish before post-spawn verification can yield or fail.
         if (mode === 'preparation') capturePreparationProvider!(wire.pid, wire.finish);
-        yield* verify.pipe(Effect.onError(() => wire.finish.pipe(Effect.asVoid)));
-        return {wire, directory: root, verify};
+        yield* verifyLaunch.pipe(Effect.onError(() => wire.finish.pipe(Effect.asVoid)));
+        return {wire, directory: root, verify: verifyLaunch};
       }).pipe(
         Effect.timeoutOption(45000),
         Effect.flatMap(result =>

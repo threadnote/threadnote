@@ -83,6 +83,8 @@ export interface JavaPreparationHost {
   readonly verifySetup: Effect.Effect<void, unknown>;
   readonly beforePreparationLaunch: () => void;
   readonly capturePreparationProvider: (pid: number, finish: Effect.Effect<WireStop>) => void;
+  /** All required original owners must be captured before any importer initialization. */
+  readonly verifyOwners: Effect.Effect<void, unknown>;
   readonly onProviderStarted: (pid: number) => Effect.Effect<void, unknown>;
   readonly provisionOfflineCache: (context: JavaPreparationDrainContext) => Effect.Effect<void, unknown>;
   readonly drainBuildProcesses: (
@@ -97,6 +99,7 @@ export const makeJavaPreparation = Effect.fn('semantic.makeJavaPreparation')(
       verifySetup,
       beforePreparationLaunch,
       capturePreparationProvider,
+      verifyOwners,
       onProviderStarted,
       provisionOfflineCache,
       drainBuildProcesses,
@@ -110,6 +113,7 @@ export const makeJavaPreparation = Effect.fn('semantic.makeJavaPreparation')(
     );
     if (
       !Effect.isEffect(verifySetup) ||
+      !Effect.isEffect(verifyOwners) ||
       typeof beforePreparationLaunch !== 'function' ||
       typeof capturePreparationProvider !== 'function' ||
       typeof onProviderStarted !== 'function' ||
@@ -179,6 +183,7 @@ export const makeJavaPreparation = Effect.fn('semantic.makeJavaPreparation')(
           }),
         );
         yield* verifySetup;
+        yield* verifyOwners;
         const observed = yield* observeJavaPreparedImport({runtime: launched, gradle: captured.gradle});
         yield* verifySetup;
         return yield* sealJavaPreparedModel(observed, {

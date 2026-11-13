@@ -23,6 +23,7 @@ import {TestClock} from 'effect/testing';
 import {describe, expect, vi} from 'vitest';
 import {cryptoLayer} from '@threadnote/platform/crypto';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
+import {FileLockLost} from '@threadnote/platform/file/lock';
 import * as Native from '@threadnote/platform/system';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
@@ -48,7 +49,7 @@ import {
 } from '../../src/semantic/admission.js';
 import {createSemanticProposal} from '@threadnote/semantic/proposals';
 import {restoreApplyJournal} from '@threadnote/semantic/journal';
-import {makeSemanticWriterAuthorityFromDirectory} from '../../src/semantic/writer_authority.js';
+import {makeSemanticWriterAuthorityFromDirectory, WriterAuthorityFault} from '../../src/semantic/writer_authority.js';
 import {makeSemanticHostWriterFromAuthority} from '../../src/semantic/writer.js';
 import {
   semanticHostProfileName,
@@ -62,6 +63,80 @@ import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 
 const layer = Layer.mergeAll(BunServices.layer, TestSystemInfoLayer, cryptoLayer);
 const supported = Native.runtimeNativePlatformSupport().writer;
+// Preserve the first actual native/lease/authority refusal before publication maps it to UNKNOWN.
+// Only fixed reason/role/ordinal enums escape; no paths, identities, handles or private bytes are logged.
+const observeNativeWriterFaults = (cut: string) =>
+  Effect.gen(function* () {
+    const nativeMake = Native.RuntimeWriterFault.make.bind(Native.RuntimeWriterFault);
+    const lockMake = FileLockLost.make.bind(FileLockLost);
+    const authorityMake = WriterAuthorityFault.make.bind(WriterAuthorityFault);
+    const faults: {kind: 'native' | 'lease' | 'authority'; fault: {reason: string; message: string}}[] = [];
+    let count = 0;
+    let phase = 'fixture';
+    const record = (kind: 'native' | 'lease' | 'authority', fault: {reason: string; message: string}) => {
+      count++;
+      if (faults.length < 16) faults.push({kind, fault});
+    };
+    const native = vi.spyOn(Native.RuntimeWriterFault, 'make').mockImplementation(input => {
+      const fault = nativeMake(input);
+      record('native', fault);
+      return fault;
+    });
+    const lock = vi.spyOn(FileLockLost, 'make').mockImplementation(input => {
+      const fault = lockMake(input);
+      record('lease', fault);
+      return fault;
+    });
+    const authority = vi.spyOn(WriterAuthorityFault, 'make').mockImplementation(input => {
+      const fault = authorityMake(input);
+      record('authority', fault);
+      return fault;
+    });
+    yield* Effect.addFinalizer(exit =>
+      Effect.sync(() => {
+        native.mockRestore();
+        lock.mockRestore();
+        authority.mockRestore();
+        if (Exit.isFailure(exit))
+          process.stdout.write(
+            JSON.stringify({
+              diagnostic: 'host21-writer-first-rejections',
+              cut,
+              phase,
+              count,
+              faults: EffectArray.map(faults, ({kind, fault}) => ({
+                kind,
+                reason: fault.reason,
+                detail: /^directory-coherence:(private|ancestor):[0-9]+:[a-zA-Z.,-]*$/u.test(fault.message)
+                  ? fault.message
+                  : undefined,
+              })),
+            }) + '\n',
+          );
+      }),
+    );
+    return (current: 'admit' | 'resolve' | 'status' | 'apply' | 'recover' | 'retire') => {
+      phase = current;
+    };
+  });
+effectIt.effect('native failure observers preserve genuine error constructors and restore their scope', () =>
+  Effect.gen(function* () {
+    const nativeMake = Native.RuntimeWriterFault.make;
+    const lockMake = FileLockLost.make;
+    const authorityMake = WriterAuthorityFault.make;
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        yield* observeNativeWriterFaults('observer-setup');
+        expect(Native.RuntimeWriterFault.make({reason: 'private-storage'})).toBeInstanceOf(Native.RuntimeWriterFault);
+        expect(FileLockLost.make({reason: 'lost'})).toBeInstanceOf(FileLockLost);
+        expect(WriterAuthorityFault.make({reason: 'unavailable'})).toBeInstanceOf(WriterAuthorityFault);
+      }),
+    );
+    expect(Native.RuntimeWriterFault.make).toBe(nativeMake);
+    expect(FileLockLost.make).toBe(lockMake);
+    expect(WriterAuthorityFault.make).toBe(authorityMake);
+  }),
+);
 const reorderObjectKeys = (value: unknown, shifts: readonly number[], depth = 0): unknown => {
   if (EffectArray.isArray(value)) return EffectArray.map(value, child => reorderObjectKeys(child, shifts, depth + 1));
   if (!Predicate.isObject(value)) return value;
@@ -119,6 +194,7 @@ const protectedFixtureRoot = (parent: string): string => {
   }
 };
 const fixture = Effect.gen(function* () {
+  const markWriterPhase = yield* observeNativeWriterFaults('writer-fixture');
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
@@ -323,6 +399,7 @@ const fixture = Effect.gen(function* () {
     admissionRequest,
     admit,
     refresh,
+    markWriterPhase,
   };
 });
 
@@ -335,13 +412,19 @@ effectIt.effect.skipIf(!supported)(
         const raw: unknown = JSON.parse(JSON.stringify(f.admissionRequest));
         const request = yield* Schema.decodeUnknownEffect(SemanticWriterAdmissionRequest)(raw);
         expect(EffectRecord.keys(request.handle)).toEqual(['id', 'capability', 'digest']);
+        f.markWriterPhase('admit');
         const admitted = yield* f.writer.admit(f.scope, request, f.resolved);
         if (!('writer' in admitted) || !admitted.writer) return yield* Effect.die('Public-shaped admission refused');
         const handle = admitted.writer;
+        f.markWriterPhase('resolve');
         const record = yield* f.writer.resolve(f.scope, handle);
+        f.markWriterPhase('status');
         expect((yield* f.writer.status(f.scope, handle)).status).toBe('not-started');
+        f.markWriterPhase('apply');
         expect((yield* f.writer.apply(f.scope, handle, record, f.refresh)).status).toBe('applied');
+        f.markWriterPhase('recover');
         expect((yield* f.writer.recover(f.scope, handle, record)).status).toBe('applied');
+        f.markWriterPhase('retire');
         expect((yield* f.writer.retire(f.scope, handle, 'terminal', request.taskAuthorization)).status).toBe('retired');
         for (const [index, target] of f.proposal.targets.entries())
           expect(yield* f.fs.readFileString(f.path.join(f.sourceRoot, `${index}.ts`))).toBe(target.afterText);

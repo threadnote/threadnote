@@ -99,6 +99,7 @@ function publication(folder: string, vault: string, change: (sample: number) => 
     originalSync = fs.fsyncSync.bind(fs);
   let synced = false,
     samples = 0;
+  const write = vi.spyOn(fs, 'writeSync');
   const sync = vi.spyOn(fs, 'fsyncSync').mockImplementation(fd => {
     originalSync(fd);
     if (originalStat(fd).isFile()) synced = true;
@@ -107,8 +108,8 @@ function publication(folder: string, vault: string, change: (sample: number) => 
     const current = originalStat(fd, options);
     if (synced && options?.bigint && current.dev === anchor.dev && current.ino === anchor.ino) {
       change(++samples);
-      return originalStat(fd, options);
     }
+    // Mutations are real; preserve the original observation rather than substituting a fresh sample.
     return current;
   });
   try {
@@ -117,34 +118,39 @@ function publication(folder: string, vault: string, change: (sample: number) => 
       nonce: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
       assertCurrentSync: () => undefined,
     });
-    return {result, samples};
+    return {result, samples, writes: write.mock.calls.length};
   } finally {
     stat.mockRestore();
     sync.mockRestore();
+    write.mockRestore();
     runtimeClosePrivateWriterDirectory(directory);
   }
 }
 
 it.skipIf(!supported)('publishes once after one owned sibling movement during a post-sync directory ACL sample', () =>
   fixture((folder, vault) => {
-    const {result, samples} = publication(folder, vault, sample => {
+    const {result, samples, writes} = publication(folder, vault, sample => {
       if (sample === 5) fs.mkdirSync(path.join(folder, 'owned-sibling'), {mode: 0o700});
     });
     expect(result.status).toBe('published');
-    expect(samples).toBeGreaterThanOrEqual(10);
+    expect(samples).toBeGreaterThanOrEqual(5);
+    expect(writes).toBe(1);
     expect(fs.readFileSync(path.join(vault, 'receipt'))).toEqual(Buffer.from(bytes));
   }),
 );
 
-it.skipIf(!supported)('keeps UNKNOWN after a second movement exhausts the one fresh directory ACL sample', () =>
-  fixture((folder, vault) => {
-    const {result, samples} = publication(folder, vault, sample => {
-      if (sample === 5 || sample === 9) fs.mkdirSync(path.join(folder, `owned-sibling-${sample}`), {mode: 0o700});
-    });
-    expect(result.status).toBe('unknown');
-    expect(samples).toBe(10);
-    expect(fs.readFileSync(path.join(vault, 'receipt'))).toEqual(Buffer.from(bytes));
-  }),
+it.skipIf(!supported)(
+  'publishes once across repeated unrelated ancestor sibling movements with unchanged security',
+  () =>
+    fixture((folder, vault) => {
+      const {result, samples, writes} = publication(folder, vault, sample => {
+        if (sample === 5 || sample === 9) fs.mkdirSync(path.join(folder, `owned-sibling-${sample}`), {mode: 0o700});
+      });
+      expect(result.status).toBe('published');
+      expect(samples).toBeGreaterThanOrEqual(9);
+      expect(writes).toBe(1);
+      expect(fs.readFileSync(path.join(vault, 'receipt'))).toEqual(Buffer.from(bytes));
+    }),
 );
 
 it.skipIf(!supported)('refuses a changed private ancestor mode without retrying it into acceptance', () =>
@@ -154,8 +160,9 @@ it.skipIf(!supported)('refuses a changed private ancestor mode without retrying 
       if (sample === 9) fs.chmodSync(folder, 0o700);
     });
     expect(result.status).toBe('unknown');
-    expect(samples).toBe(6);
+    expect(samples).toBeLessThan(9);
     expect(fs.statSync(folder).mode & 0o777).toBe(0o750);
+    expect(fs.readFileSync(path.join(vault, 'receipt'))).toEqual(Buffer.from(bytes));
   }),
 );
 
@@ -182,7 +189,7 @@ it.skipIf(!supported)('does not retry a failed native ACL proof even when a late
     const acl = vi.spyOn(posix, 'assertPosixPrivateAcl').mockImplementation((fd, privateObject, before) => {
       if (postSync && before.dev === anchor.dev && before.ino === anchor.ino && ++attempts === 1)
         throw new Error('owned unknown native security proof');
-      original(fd, privateObject, before);
+      return original(fd, privateObject, before);
     });
     try {
       const {result} = publication(folder, vault, () => {
@@ -221,7 +228,7 @@ it.skipIf(!supported || process.platform !== 'darwin')(
           }
         });
         expect(result.status).toBe('unknown');
-        expect(samples).toBe(8);
+        expect(samples).toBeLessThan(9);
         expect(unsafe).toBe(true);
       } finally {
         if (unsafe) chmod('-N');
