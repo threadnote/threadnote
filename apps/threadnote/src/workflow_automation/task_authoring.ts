@@ -28,6 +28,8 @@ import {readNativeWorkflowState} from './store.js';
 import {runWorkflowAutomation} from './index.js';
 import {inspectNativeSourcePaths, nativeAuthoringSourceOrigins} from './authoring.js';
 import {readNativeTaskInstalledTarget} from './task_actions.js';
+import {encodeNativeAuthoringTaskRef} from './task.js';
+export {encodeNativeAuthoringTaskRef} from './task.js';
 import {AuthoringRootSchema, decodeAuthoringArtifact} from './authoring_artifacts.js';
 import {validateWorkflowGraphProject} from '../workflow_memory/graph_scope.js';
 import {requireWorkflowGraphReady} from './graph.js';
@@ -78,9 +80,6 @@ const jobRefSchema = Schema.Struct({
   jobId: id,
   documentHash: digest,
 });
-type Ref = typeof refSchema.Type;
-export const encodeNativeAuthoringTaskRef = (ref: Ref) =>
-  'authorref-v1.' + S.replaceAll('/', '_')(S.replaceAll('+', '-')(S.replace(/=+$/u, '')(btoa(stableJson(ref)))));
 export const decodeNativeAuthoringTaskRef = (ref: string) =>
   Effect.try({
     try: () => {
@@ -805,8 +804,16 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
         );
       if (request.command === 'save' && !exactCurrent() && !stored?.state.authoringSave)
         return yield* fail('stale-authoring-ref', 'Read the current draft before changing business content.');
+      const retainedCompactOrigin =
+        request.command === 'save' &&
+        sameBusinessContent &&
+        existing?.document.kind === 'plan' &&
+        existing.document.compactOrigin
+          ? {compactOrigin: existing.document.compactOrigin}
+          : {};
       const document = decodeNativeAuthoringDocument({
         ...normalized,
+        ...retainedCompactOrigin,
         format: 'threadnote-native-authoring',
         schemaVersion: 1,
         kind: documentKind,

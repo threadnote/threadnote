@@ -17,6 +17,11 @@ import {
 } from './fixture-owned-process.js';
 import {fixtureCleanup, fixtureLifecycle, fixtureRemovalDeadline} from './fixture-lifecycle.js';
 import {
+  writeSmokeFailureEvidence,
+  smokeEvidenceStageSchema,
+  type SmokeEvidenceProgress,
+} from './smoke-self-contained-evidence.js';
+import {
   createRecallEmbeddingWorkerFixtureDrain,
   drainRecallEmbeddingWorkerFixture,
 } from '@threadnote/threadnote/recall/embedding_worker_process';
@@ -24,7 +29,7 @@ import {BackgroundWorkerFixtureDrainUnavailable} from '@threadnote/inference/bac
 import {sha256Hex} from '@threadnote/platform/digest';
 import {runtimeReadBoundedStableRegularFile} from '@threadnote/platform/system';
 import {SecureRandom} from 'effect/crypto';
-import {Clock, Console, Effect, FileSystem, Layer, Option, Path, Schema} from 'effect';
+import {Clock, Console, Effect, Exit, FileSystem, Layer, Option, Path, Schema} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import {recallIndexDatabaseFilename} from '@threadnote/recall/index';
 import * as EffectRecord from 'effect/Record';
@@ -79,6 +84,7 @@ const smokeSelfContained = Effect.scoped(
       version: packageManifest.version,
     });
     const processes = new FixtureProcesses(undefined, deadline, monotonicDeadline);
+    const progress: SmokeEvidenceProgress = {stage: 'setup', completed: false, elapsedMilliseconds: 0};
     const body = Effect.gen(function* () {
       if (
         (yield* fs.realPath(executable)) !== candidate ||
@@ -114,17 +120,28 @@ const smokeSelfContained = Effect.scoped(
         USERPROFILE: userHome,
       };
       const run = (stage: FixtureCommandStage, arguments_: readonly string[]) =>
-        Effect.tryPromise({
-          try: () =>
-            runFixtureCommand(processes, candidate, arguments_, {
-              stage,
-              cwd: invocationDirectory,
-              env: environment,
-              maxOutputBytes: 512 * 1024,
-              deadline: Math.min(bodyDeadline, performance.now() + COMMAND_TIMEOUT_MILLISECONDS),
+        Effect.suspend(() => {
+          if (Schema.is(smokeEvidenceStageSchema)(stage)) {
+            progress.stage = stage;
+          }
+          progress.completed = false;
+          return Effect.tryPromise({
+            try: () =>
+              runFixtureCommand(processes, candidate, arguments_, {
+                stage,
+                cwd: invocationDirectory,
+                env: environment,
+                maxOutputBytes: 512 * 1024,
+                deadline: Math.min(bodyDeadline, performance.now() + COMMAND_TIMEOUT_MILLISECONDS),
+              }),
+            catch: cause => scriptError(cause, 'Standalone command failed.'),
+          }).pipe(
+            Effect.map(result => {
+              progress.completed = true;
+              return `${result.stdout}\n${result.stderr}`;
             }),
-          catch: cause => scriptError(cause, 'Standalone command failed.'),
-        }).pipe(Effect.map(result => `${result.stdout}\n${result.stderr}`));
+          );
+        });
 
       const version = yield* run('version', ['--version']);
       if (!Effect2.pipe(version, EffectString.includes(`threadnote v${packageManifest.version}`))) {
@@ -173,6 +190,8 @@ const smokeSelfContained = Effect.scoped(
         storedMemoryPath,
         `${Effect2.pipe(storedMemory, EffectString.trimEnd)}\n\n${LARGE_OUTPUT_START}\n${Effect2.pipe('x', EffectString.repeat(96 * 1024))}\n${LARGE_OUTPUT_END}\n`,
       );
+      progress.stage = 'large-output';
+      progress.completed = false;
       const largeRead = yield* readLargeOutputThroughPlatformPipe({
         consumer: path.join(root, 'apps', 'threadnote', 'test', 'fixtures', 'cli-output-consumer.ts'),
         relay: path.join(root, 'scripts', 'fixtures', 'owned-pipeline-relay.ts'),
@@ -229,24 +248,62 @@ const smokeSelfContained = Effect.scoped(
         }
       }
 
+      progress.stage = 'mcp';
+      progress.completed = false;
       yield* verifyMcp(candidate, invocationDirectory, environment, processes, bodyDeadline);
+      progress.completed = true;
     });
     const remaining = Effect.gen(function* () {
       return Math.min(deadline - (yield* Clock.currentTimeMillis), monotonicDeadline - performance.now());
     });
     const cleanup = fixtureCleanup({
-      producers: Effect.tryPromise({
-        try: () => processes.closeAndObserve(monotonicDeadline),
-        catch: cause => scriptError(cause),
-      }),
-      drain: drainRecallEmbeddingWorkerFixture(capability, deadline).pipe(
+      producers: Effect.sync(() => {
+        progress.bodyStage = progress.stage;
+        progress.bodyCompleted = progress.completed;
+        progress.stage = 'producer-close';
+        progress.completed = false;
+      }).pipe(
+        Effect.andThen(
+          Effect.tryPromise({
+            try: () => processes.closeAndObserve(monotonicDeadline),
+            catch: cause => scriptError(cause),
+          }),
+        ),
+        Effect.tap(() =>
+          Effect.sync(() => {
+            progress.completed = true;
+          }),
+        ),
+      ),
+      drain: Effect.sync(() => {
+        progress.stage = 'worker-drain';
+        progress.completed = false;
+      }).pipe(
+        Effect.andThen(drainRecallEmbeddingWorkerFixture(capability, deadline)),
+        Effect.tap(() =>
+          Effect.sync(() => {
+            progress.completed = true;
+          }),
+        ),
         Effect.tapError(error =>
           Schema.is(BackgroundWorkerFixtureDrainUnavailable)(error)
-            ? Console.error(`Self-contained fixture drain unavailable: ${error.reason}`)
+            ? Effect.sync(() => {
+                progress.drainFailure = error;
+              }).pipe(Effect.andThen(Console.error(`Self-contained fixture drain unavailable: ${error.reason}`)))
             : Effect.void,
         ),
       ),
-      remove: fs.remove(temporaryRoot, {recursive: true, force: true}),
+      remove: Effect.sync(() => {
+        progress.stage = 'remove';
+        progress.completed = false;
+      }).pipe(
+        Effect.andThen(fs.remove(temporaryRoot, {recursive: true, force: true})),
+        Effect.tap(() =>
+          Effect.sync(() => {
+            progress.completed = true;
+          }),
+        ),
+      ),
       remaining,
     });
     const remainingBody = Math.max(0, processes.remaining(bodyDeadline));
@@ -258,8 +315,18 @@ const smokeSelfContained = Effect.scoped(
         }),
       ),
       cleanup,
+    ).pipe(
+      Effect.andThen(fixtureRemovalDeadline(remaining)),
+      Effect.onExit(exit => {
+        if (Exit.isSuccess(exit)) return Effect.void;
+        progress.elapsedMilliseconds = TOTAL_TIMEOUT_MILLISECONDS - (monotonicDeadline - performance.now());
+        return writeSmokeFailureEvidence({
+          home: threadnoteHome,
+          outputDirectory: path.join(root, '.context', 'self-contained-smoke'),
+          progress,
+        });
+      }),
     );
-    yield* fixtureRemovalDeadline(remaining);
     yield* Console.log(
       'Self-contained Bun executable smoke passed with polyglot CLI/MCP graph operations and Node/Bun absent from PATH.',
     );

@@ -19,12 +19,28 @@ const absolute = Schema.String.check(
       : undefined,
   ),
 );
-export const nativeWatchWakeupSchema = Schema.Union([
+const codexExecutable = absolute.check(Schema.isPattern(/[\\/]codex(?:\.exe)?$/iu));
+const codexWakeupFields = {
+  host: Schema.Literal('codex'),
+  executable: codexExecutable,
+  threadId: uuid,
+};
+export const nativeWatchCodexWakeupRequestSchema = Schema.Struct({
+  ...codexWakeupFields,
+  executable: Schema.optionalKey(codexExecutable),
+});
+export const nativeWatchWakeupRequestSchema = Schema.Union([
+  nativeWatchCodexWakeupRequestSchema,
   Schema.Struct({
-    host: Schema.Literal('codex'),
-    executable: absolute.check(Schema.isPattern(/[\\/]codex(?:\.exe)?$/iu)),
-    threadId: uuid,
+    host: Schema.Literal('cursor-cli'),
+    executable: absolute.check(Schema.isPattern(/[\\/](?:agent|cursor-agent)(?:\.exe)?$/iu)),
+    sessionId: uuid,
+    workspace: absolute,
+    exclusiveSession: Schema.Literal(true),
   }),
+]);
+export const nativeWatchWakeupSchema = Schema.Union([
+  Schema.Struct(codexWakeupFields),
   Schema.Struct({
     host: Schema.Literal('cursor-cli'),
     executable: absolute.check(Schema.isPattern(/[\\/](?:agent|cursor-agent)(?:\.exe)?$/iu)),

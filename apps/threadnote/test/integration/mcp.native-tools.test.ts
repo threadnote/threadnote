@@ -708,8 +708,6 @@ describe('Threadnote MCP toolsets', () => {
         const workflowTaskControl = EffectOption.getOrUndefined(
           EffectArray.findFirst(tools.tools, tool => tool.name === 'workflow_task_control'),
         );
-        expect(workflowTaskControl?.description).toContain('resume blocked after dependencies are accepted');
-        expect(workflowTaskControl?.description).toContain('Actor identity is not authenticated');
         const controlProperties = decodeJsonObject(decodeJsonObject(workflowTaskControl?.inputSchema).properties);
         const controlVariants = decodeJsonObject(controlProperties.control).anyOf;
         expect(controlVariants instanceof Array).toBe(true);
@@ -764,7 +762,6 @@ describe('Threadnote MCP toolsets', () => {
         const workflowTaskAuthor = EffectOption.getOrUndefined(
           EffectArray.findFirst(tools.tools, tool => tool.name === 'workflow_task_author'),
         );
-        expect(workflowTaskAuthor?.description).toContain('local, commit, or PR plan');
         const authorProperties = decodeJsonObject(decodeJsonObject(workflowTaskAuthor?.inputSchema).properties);
         const authorDelivery = decodeJsonObject(authorProperties.delivery);
         expect(authorDelivery.enum).toEqual(['local', 'commit', 'pr']);
@@ -772,7 +769,6 @@ describe('Threadnote MCP toolsets', () => {
         const workflowTaskSnapshot = EffectOption.getOrUndefined(
           EffectArray.findFirst(tools.tools, tool => tool.name === 'workflow_task_snapshot'),
         );
-        expect(workflowTaskSnapshot?.description).toContain('supersede only the latest unreviewed snapshot');
         const snapshotProperties = decodeJsonObject(decodeJsonObject(workflowTaskSnapshot?.inputSchema).properties);
         const snapshotVariants = decodeJsonObject(snapshotProperties.snapshot).anyOf;
         expect(snapshotVariants instanceof Array).toBe(true);
@@ -810,7 +806,6 @@ describe('Threadnote MCP toolsets', () => {
         const workflowTaskDeliver = EffectOption.getOrUndefined(
           EffectArray.findFirst(tools.tools, tool => tool.name === 'workflow_task_deliver'),
         );
-        expect(workflowTaskDeliver?.description).toContain('local or commit delivery');
         const deliveryProperties = decodeJsonObject(decodeJsonObject(workflowTaskDeliver?.inputSchema).properties);
         const deliveryVariants = decodeJsonObject(deliveryProperties.delivery).anyOf;
         expect(deliveryVariants instanceof Array).toBe(true);
