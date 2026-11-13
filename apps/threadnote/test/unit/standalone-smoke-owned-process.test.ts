@@ -30,6 +30,7 @@ import {
   reconcileFixturePipelineReceipts,
   runFixtureEmbeddingExitProbe,
   diagnoseFixtureEmbeddingFailure,
+  createFixtureWindowsExitObserver,
 } from '../../../../scripts/fixture-owned-process.js';
 import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
 
@@ -68,6 +69,7 @@ function embeddingProbeChild(onWrite: (text: string) => void) {
       stopped.resolve(code);
     },
     child: {
+      pid: 42,
       stdout: io.stdout,
       stderr: io.stderr,
       exited: stopped.promise,
@@ -93,6 +95,32 @@ function embeddingProbeChild(onWrite: (text: string) => void) {
     },
   };
   return fixture;
+}
+
+function windowsExitFixture() {
+  const handle = 0xfedcba9876543210n;
+  const calls: string[] = [];
+  const library = {
+    symbols: {
+      OpenProcess: vi.fn(() => {
+        calls.push('open');
+        return handle;
+      }),
+      GetExitCodeProcess: vi.fn((_handle: bigint, output: Uint32Array) => {
+        calls.push('query');
+        output[0] = 0xc0000409;
+        return 1;
+      }),
+      CloseHandle: vi.fn(() => {
+        calls.push('handle-close');
+        return 1;
+      }),
+    },
+    close: vi.fn(() => {
+      calls.push('library-close');
+    }),
+  };
+  return {library, calls, observer: createFixtureWindowsExitObserver(() => library)!};
 }
 
 const probeManifest = Option.getOrUndefined(
@@ -267,7 +295,9 @@ it('basic probe setup binds one reply and labels exit after requested stdin clos
 
 it('holds stdin open after EOF and retains independently observed natural exit and sink facts', async () => {
   const sent = Promise.withResolvers<void>();
+  const native = windowsExitFixture();
   const fake = embeddingProbeChild(() => {
+    native.calls.push('write');
     fake.io.stdout.end();
     fake.io.stderr.end();
     sent.resolve();
@@ -280,13 +310,16 @@ it('holds stdin open after EOF and retains independently observed natural exit a
     deadline: performance.now() + 1000,
     maxOutputBytes: 512 * 1024,
     spawn: () => fake.child,
+    nativeExit: native.observer,
   });
   await sent.promise;
   await Promise.resolve();
   expect(fake.ends).toBe(0);
   expect(fake.kills).toBe(0);
-  fake.exit(3221225477, 'SIGABRT');
+  fake.exit(9);
   const result = await pending;
+  native.observer.close();
+  native.observer.close();
   expect(result.snapshot()).toMatchObject({
     outcome: 'exit',
     firstFault: 'stdout-eof',
@@ -296,17 +329,23 @@ it('holds stdin open after EOF and retains independently observed natural exit a
     flush: 'complete',
     flushBytes: 0,
     exitOrigin: 'natural',
-    exit: {exitCode: 3221225477, signal: 'SIGABRT'},
+    exit: {exitCode: 9, signal: null},
+    rawExitCode: 0xc0000409,
     processClosed: true,
     cleanupRequested: false,
   });
   expect(result.snapshot().requestBytes).toBeGreaterThan(65_536);
+  expect(native.calls).toEqual(['open', 'write', 'query', 'handle-close', 'library-close']);
+  expect(native.library.symbols.OpenProcess).toHaveBeenCalledWith(0x1000, 0, 42);
+  expect(native.observer.read()).toBeUndefined();
+  expect(JSON.stringify(result.snapshot())).not.toContain('fedcba');
   expect(await processes.closeAndObserve(performance.now() + 1000)).toBe('exited');
 });
 
 it('keeps deadline cleanup exit separate from natural exit after EOF', async () => {
   vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout', 'performance']});
   try {
+    const native = windowsExitFixture();
     const fake = embeddingProbeChild(() => {
       fake.io.stdout.end();
       fake.io.stderr.end();
@@ -318,9 +357,11 @@ it('keeps deadline cleanup exit separate from natural exit after EOF', async () 
       deadline: performance.now() + 10,
       maxOutputBytes: 512 * 1024,
       spawn: () => fake.child,
+      nativeExit: native.observer,
     });
     await vi.advanceTimersByTimeAsync(10);
     const result = await pending;
+    native.observer.close();
     expect(await processes.closeAndObserve(performance.now() + 100)).toBe('exited');
     expect(result.snapshot()).toMatchObject({
       outcome: 'deadline',
@@ -331,9 +372,49 @@ it('keeps deadline cleanup exit separate from natural exit after EOF', async () 
       processClosed: true,
     });
     expect(fake.kills).toBe(1);
+    expect(result.snapshot().rawExitCode).toBeUndefined();
+    expect(native.calls).toEqual(['open', 'handle-close', 'library-close']);
   } finally {
     vi.useRealTimers();
   }
+});
+
+it('keeps unavailable native observations unknown and closes the library despite handle-close failure', () => {
+  const sensitive = 'PRIVATE_NATIVE_ERROR_HANDLE_ENV_PATH';
+  expect(
+    createFixtureWindowsExitObserver(() => {
+      throw new Error(sensitive);
+    }),
+  ).toBeUndefined();
+  const native = windowsExitFixture();
+  native.library.symbols.GetExitCodeProcess.mockImplementation(() => {
+    throw new Error(sensitive);
+  });
+  native.library.symbols.CloseHandle.mockImplementation(() => {
+    throw new Error(sensitive);
+  });
+  native.observer.pin(42);
+  expect(native.observer.read()).toBeUndefined();
+  expect(native.observer.read()).toBeUndefined();
+  expect(() => native.observer.close()).not.toThrow();
+  native.observer.close();
+  native.observer.pin(42);
+  expect(native.observer.read()).toBeUndefined();
+  expect(native.library.symbols.OpenProcess).toHaveBeenCalledTimes(1);
+  expect(native.library.symbols.GetExitCodeProcess).toHaveBeenCalledTimes(1);
+  expect(native.library.symbols.CloseHandle).toHaveBeenCalledTimes(1);
+  expect(native.library.close).toHaveBeenCalledTimes(1);
+});
+
+it('closes an unused native library without querying or closing a missing handle', () => {
+  const native = windowsExitFixture();
+  native.library.symbols.OpenProcess.mockReturnValue(0n);
+  native.observer.pin(42);
+  expect(native.observer.read()).toBeUndefined();
+  native.observer.close();
+  expect(native.calls).toEqual(['library-close']);
+  expect(native.library.symbols.OpenProcess).toHaveBeenCalledWith(0x1000, 0, 42);
+  expect(native.library.symbols.CloseHandle).not.toHaveBeenCalled();
 });
 
 it('bounds probe output, preserves privacy and confirms the registered producer after cleanup', async () => {

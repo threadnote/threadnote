@@ -1,5 +1,6 @@
 // oxlint-disable-next-line threadnote/no-node-runtime, effecttsgo/node-builtin-import -- Direct child handles and close events are required for fixture-only producer exit proof.
 import {spawn, type ChildProcess} from 'node:child_process';
+import {dlopen} from 'bun:ffi';
 import {Array as EffectArray, Option, Console, Effect, FileSystem, Path} from 'effect';
 import * as EffectString from 'effect/String';
 import {fixturePipelineReceiptProvesExit} from '@threadnote/testing/fixture-pipeline-receipt';
@@ -96,6 +97,7 @@ export class FixtureProcesses {
 }
 
 interface FixtureEmbeddingProbeChild {
+  readonly pid?: number;
   readonly stdin: {
     write(text: string): number | Promise<number>;
     flush(): number | Promise<number>;
@@ -110,6 +112,76 @@ interface FixtureEmbeddingProbeChild {
 }
 
 export const FIXTURE_EMBEDDING_PROBE_SAMPLE = 'short-single-input-control' as const;
+
+interface FixtureWindowsExitLibrary {
+  readonly symbols: {
+    OpenProcess(access: number, inherit: number, processId: number): bigint;
+    GetExitCodeProcess(handle: bigint, output: Uint32Array): number;
+    CloseHandle(handle: bigint): number;
+  };
+  close(): void;
+}
+
+/** Fixture-only: Bun's Windows exitCode is a low byte; retain a query-only native handle. */
+export function createFixtureWindowsExitObserver(
+  load: () => FixtureWindowsExitLibrary = () =>
+    dlopen('kernel32.dll', {
+      OpenProcess: {args: ['u32', 'i32', 'u32'], returns: 'u64'},
+      GetExitCodeProcess: {args: ['u64', 'buffer'], returns: 'i32'},
+      CloseHandle: {args: ['u64'], returns: 'i32'},
+    }),
+) {
+  let library: FixtureWindowsExitLibrary;
+  try {
+    library = load();
+  } catch {
+    return undefined;
+  }
+  let handle: bigint | undefined;
+  let disposed = false,
+    pinned = false,
+    queried = false;
+  return {
+    pin(processId: number | undefined): void {
+      if (disposed || pinned) return;
+      pinned = true;
+      if (processId === undefined || !Number.isInteger(processId) || processId <= 0 || processId > 0xffffffff) return;
+      try {
+        const value = library.symbols.OpenProcess(0x1000, 0, processId);
+        if (value !== 0n) handle = value;
+      } catch {
+        /* Unavailable observation remains unknown. */
+      }
+    },
+    read(): number | undefined {
+      if (disposed || queried || handle === undefined) return undefined;
+      queried = true;
+      try {
+        const output = new Uint32Array(1);
+        return library.symbols.GetExitCodeProcess(handle, output) !== 0 ? output[0] : undefined;
+      } catch {
+        return undefined;
+      }
+    },
+    close(): void {
+      if (disposed) return;
+      disposed = true;
+      try {
+        if (handle !== undefined) library.symbols.CloseHandle(handle);
+      } catch {
+        /* Observation cleanup must not replace the original repair failure. */
+      } finally {
+        try {
+          library.close();
+        } catch {
+          /* No native library or error value escapes the fixture. */
+        }
+      }
+    },
+  };
+}
+
+type FixtureWindowsExitObserver = NonNullable<ReturnType<typeof createFixtureWindowsExitObserver>>;
 
 /** Expected setup failure is diagnostic only; external interruption still propagates. */
 export const diagnoseFixtureEmbeddingFailure = Effect.fn('fixture.diagnoseEmbeddingFailure')(function* (
@@ -147,7 +219,11 @@ export const diagnoseFixtureEmbeddingFailure = Effect.fn('fixture.diagnoseEmbedd
     )
       return yield* ScriptError.make({message: 'Probe model is not verified.'});
     const inputs = [`${manifest.promptPrefixes?.document ?? ''}QZ9 standalone short embedding control.`];
-    return {inputs, manifest, modelPath};
+    const nativeExit = yield* Effect.acquireRelease(
+      Effect.sync(() => (process.platform === 'win32' ? createFixtureWindowsExitObserver() : undefined)),
+      observer => Effect.sync(() => observer?.close()),
+    );
+    return {request: {inputs, manifest, modelPath}, nativeExit};
   });
   return yield* prepare.pipe(
     // This is the remaining original absolute budget, including selection, I/O and hashing.
@@ -155,9 +231,9 @@ export const diagnoseFixtureEmbeddingFailure = Effect.fn('fixture.diagnoseEmbedd
       duration: Math.max(0, processes.remaining(options.deadline)),
       orElse: () => ScriptError.make({message: 'Probe setup deadline expired.'}),
     }),
-    Effect.flatMap(request =>
+    Effect.flatMap(({request, nativeExit}) =>
       Effect.tryPromise({
-        try: () => runFixtureEmbeddingExitProbe(processes, executable, request, options),
+        try: () => runFixtureEmbeddingExitProbe(processes, executable, request, {...options, nativeExit}),
         catch: () => ScriptError.make({message: 'Probe unavailable.'}),
       }),
     ),
@@ -166,6 +242,7 @@ export const diagnoseFixtureEmbeddingFailure = Effect.fn('fixture.diagnoseEmbedd
         `Standalone model worker probe: ${JSON.stringify({sample: FIXTURE_EMBEDDING_PROBE_SAMPLE, outcome: 'setup-unavailable'})}`,
       ).pipe(Effect.as(undefined)),
     ),
+    Effect.scoped,
   );
 });
 
@@ -180,6 +257,7 @@ export async function runFixtureEmbeddingExitProbe(
     deadline: number;
     maxOutputBytes: number;
     spawn?: () => FixtureEmbeddingProbeChild;
+    nativeExit?: FixtureWindowsExitObserver;
   },
 ) {
   const id = 'standalone-embedding-exit-probe';
@@ -211,6 +289,7 @@ export async function runFixtureEmbeddingExitProbe(
     exited = false;
   let exitOrigin: 'natural' | 'stdin-close-requested' | 'cleanup' | undefined;
   let exit: ReturnType<typeof projectLocalModelWorkerExitObservation>;
+  let rawExitCode: number | undefined;
   const fault = (value: NonNullable<typeof firstFault>) => {
     firstFault ??= value;
   };
@@ -230,6 +309,7 @@ export async function runFixtureEmbeddingExitProbe(
     reply,
     ...(exitOrigin === undefined ? {} : {exitOrigin}),
     ...(exit === undefined ? {} : {exit}),
+    ...(rawExitCode === undefined ? {} : {rawExitCode}),
     cleanupRequested,
     processClosed,
   });
@@ -250,6 +330,8 @@ export async function runFixtureEmbeddingExitProbe(
         stdout: 'pipe',
         stderr: 'pipe',
       });
+    // Synchronous, before request writing: the handle pins this child's process instance.
+    options.nativeExit?.pin(child.pid);
     observation.spawned();
   } catch {
     observation.failed();
@@ -262,6 +344,7 @@ export async function runFixtureEmbeddingExitProbe(
     code => {
       exited = true;
       exitOrigin = cleanupRequested ? 'cleanup' : inputCloseRequested ? 'stdin-close-requested' : 'natural';
+      if (!cleanupRequested && !inputCloseRequested) rawExitCode = options.nativeExit?.read();
       exit = projectLocalModelWorkerExitObservation({stage: 'process-exit', exitCode: code, signal: child.signalCode});
       const signal = Option.getOrUndefined(
         EffectArray.findFirst(FIXTURE_DIAGNOSTIC_SIGNALS, known => known === child.signalCode),
