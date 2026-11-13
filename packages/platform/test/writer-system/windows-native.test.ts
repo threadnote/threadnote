@@ -18,6 +18,8 @@ const securitySample = vi.hoisted(() => ({
   active: undefined as
     | {
         incomplete: boolean;
+        getLastError(): number;
+        setLastError(code: number): void;
         security(code: number, owner: BigUint64Array, dacl: BigUint64Array, descriptor: BigUint64Array): void;
         length(descriptor: bigint, bytes: number): void;
       }
@@ -40,7 +42,9 @@ vi.mock('bun:ffi', async importOriginal => {
               const result: unknown = Reflect.apply(original, undefined, args);
               const active = securitySample.active;
               if (active && typeof result === 'number') {
+                let lastError: number | undefined;
                 try {
+                  lastError = active.getLastError();
                   if (
                     key === 'GetSecurityInfo' &&
                     args[3] instanceof BigUint64Array &&
@@ -52,6 +56,12 @@ vi.mock('bun:ffi', async importOriginal => {
                     active.length(args[0], result);
                 } catch {
                   active.incomplete = true;
+                } finally {
+                  try {
+                    if (lastError !== undefined) active.setLastError(lastError);
+                  } catch {
+                    active.incomplete = true;
+                  }
                 }
               }
               return result;
@@ -104,6 +114,133 @@ function descriptor(other: number, rights: number): Uint8Array {
   bytes.set(ace, 64);
   return bytes;
 }
+type PrincipalClass = 'current' | 'SYSTEM' | 'builtin-admins' | 'trusted-installer' | 'other' | 'unknown';
+function boundedSidBytes(bytes: Uint8Array, offset: number, end: number): number {
+  if (offset < 0 || offset + 8 > end || end > bytes.length || bytes[offset] !== 1 || bytes[offset + 1] > 15)
+    throw new Error('Incomplete observed SID header.');
+  const size = 8 + bytes[offset + 1] * 4;
+  if (offset + size > end) throw new Error('Incomplete observed SID span.');
+  return size;
+}
+// Metadata only. Unknown layouts remain incomplete and never reach a native SID reader.
+function sampleDacl(bytes: Uint8Array, offset: number, classify: (offset: number, size: number) => PrincipalClass) {
+  if (bytes.length < 20 || bytes.length > 65536 || bytes[0] !== 1 || offset < 20 || offset + 8 > bytes.length)
+    throw new Error('Incomplete observed DACL header.');
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength),
+    control = view.getUint16(2, true),
+    revision = bytes[offset],
+    size = view.getUint16(offset + 2, true),
+    count = view.getUint16(offset + 4, true);
+  if (
+    (control & 0x8004) !== 0x8004 ||
+    view.getUint32(16, true) !== offset ||
+    (revision !== 2 && revision !== 4) ||
+    bytes[offset + 1] !== 0 ||
+    view.getUint16(offset + 6, true) !== 0 ||
+    size < 8 ||
+    offset + size > bytes.length ||
+    count > 128
+  )
+    throw new Error('Incomplete observed DACL bounds.');
+  const aces: {
+    kind: 'allow' | 'deny' | 'unsupported';
+    kindCode: number;
+    flags: number;
+    inheritOnly: boolean;
+    inherited: boolean;
+    rights: number | null;
+    dangerousRights: number | null;
+    principal: PrincipalClass;
+  }[] = [];
+  let cursor = offset + 8,
+    complete = true;
+  for (let index = 0; index < count; index++) {
+    if (cursor + 4 > offset + size) throw new Error('Incomplete observed ACE header.');
+    const kind = bytes[cursor],
+      flags = bytes[cursor + 1],
+      aceSize = view.getUint16(cursor + 2, true);
+    if (aceSize < 4 || aceSize % 4 !== 0 || cursor + aceSize > offset + size)
+      throw new Error('Incomplete observed ACE bounds.');
+    let rights: number | null = null,
+      principal: PrincipalClass = 'unknown';
+    if (kind === 0 || kind === 1) {
+      if (aceSize < 16) throw new Error('Incomplete observed ordinary ACE.');
+      const sidBytes = boundedSidBytes(bytes, cursor + 8, cursor + aceSize);
+      if (aceSize !== 8 + sidBytes) throw new Error('Unsupported observed ACE trailing data.');
+      rights = view.getUint32(cursor + 4, true);
+      principal = classify(cursor + 8, sidBytes);
+      if (principal === 'unknown') complete = false;
+    } else complete = false;
+    if ((flags & ~0x1f) !== 0) complete = false;
+    aces.push({
+      kind: kind === 0 ? 'allow' : kind === 1 ? 'deny' : 'unsupported',
+      kindCode: kind,
+      flags,
+      inheritOnly: (flags & 8) !== 0,
+      inherited: (flags & 16) !== 0,
+      rights,
+      dangerousRights: rights === null ? null : (rights & 0x500d0040) >>> 0,
+      principal,
+    });
+    cursor += aceSize;
+  }
+  return {control, revision, bytes: size, declaredAceCount: count, complete, aces};
+}
+it('observes bounded ACE metadata without reading truncated or unsupported SID layouts', () => {
+  fc.assert(
+    fc.property(
+      fc.integer({min: 0, max: 1}),
+      fc.integer({min: 0, max: 31}),
+      fc.integer({min: 0, max: 0xffffffff}),
+      fc.integer({min: 0, max: descriptor(1002, 0).length - 1}),
+      (kind, flags, rights, cut) => {
+        const bytes = descriptor(1002, rights);
+        bytes[56] = kind;
+        bytes[57] = flags;
+        const observed = sampleDacl(bytes, 48, (offset, size) => {
+          expect([offset, size]).toEqual([64, 28]);
+          return 'other';
+        });
+        const dangerousBits = [0x40, 0x10000, 0x40000, 0x80000, 0x10000000, 0x40000000];
+        expect(observed.complete).toBe(true);
+        expect(observed.declaredAceCount).toBe(1);
+        expect(observed.aces).toEqual([
+          {
+            kind: kind === 0 ? 'allow' : 'deny',
+            kindCode: kind,
+            flags,
+            inheritOnly: (flags & 8) !== 0,
+            inherited: (flags & 16) !== 0,
+            rights,
+            dangerousRights: EffectArray.reduce(dangerousBits, 0, (sum, bit) => sum + ((rights & bit) !== 0 ? bit : 0)),
+            principal: 'other',
+          },
+        ]);
+        let truncatedReads = 0;
+        expect(() =>
+          sampleDacl(bytes.subarray(0, cut), 48, () => {
+            truncatedReads++;
+            return 'unknown';
+          }),
+        ).toThrow();
+        expect(truncatedReads).toBe(0);
+      },
+    ),
+    {numRuns: 30},
+  );
+  const unknown = descriptor(1002, 1);
+  unknown[56] = 2;
+  expect(
+    sampleDacl(unknown, 48, () => {
+      throw new Error('Unsupported ACE reached a SID reader.');
+    }).complete,
+  ).toBe(false);
+  unknown[56] = 0;
+  unknown[57] = 0x20;
+  expect(sampleDacl(unknown, 48, () => 'other').complete).toBe(false);
+  unknown[57] = 0;
+  expect(sampleDacl(unknown, 48, () => 'unknown').complete).toBe(false);
+});
 it('refuses every generated nonzero foreign private DACL grant and every truncated security record', () => {
   const principal = 'S-1-5-21-11-22-33-1001';
   expect(() => assertWindowsDaclBytes(descriptor(1001, 0x1f01ff), 20, 48, principal, true)).not.toThrow();
@@ -150,6 +287,7 @@ it.skipIf(!windows)('checks actual native SID/DACL, full file ID and exact Bun m
       GetCurrentProcess: {args: [], returns: 'u64'},
       GetComputerNameW: {args: ['buffer', 'buffer'], returns: 'i32'},
       GetLastError: {args: [], returns: 'u32'},
+      SetLastError: {args: ['u32'], returns: 'void'},
       CloseHandle: {args: ['u64'], returns: 'i32'},
       LocalFree: {args: ['u64'], returns: 'u64'},
       CreateDirectoryW: {args: ['buffer', 'buffer'], returns: 'i32'},
@@ -247,11 +385,12 @@ it.skipIf(!windows)('checks actual native SID/DACL, full file ID and exact Bun m
       type Sample = {
         edge: number;
         role: 'root' | 'ancestor' | 'final';
-        owner: 'current' | 'SYSTEM' | 'builtin-admins' | 'trusted-installer' | 'other' | 'unknown';
+        owner: PrincipalClass;
         privateObject: boolean;
         nativeStage: 'security' | 'descriptor';
         nativeCode: number;
         privateAccepted?: boolean;
+        dacl?: ReturnType<typeof sampleDacl>;
       };
       const inspect = (value: string, kind: 'file' | 'directory') => {
         const samples: Sample[] = [],
@@ -259,6 +398,8 @@ it.skipIf(!windows)('checks actual native SID/DACL, full file ID and exact Bun m
         let record: {owner: bigint; dacl: bigint; descriptor: bigint} | undefined;
         const observation: NonNullable<typeof securitySample.active> = {
           incomplete: false,
+          getLastError: setup.symbols.GetLastError,
+          setLastError: setup.symbols.SetLastError,
           security(code, owner, dacl, descriptor) {
             if (samples.length >= 64) {
               observation.incomplete = true;
@@ -292,17 +433,25 @@ it.skipIf(!windows)('checks actual native SID/DACL, full file ID and exact Bun m
             }
             const sample = samples[samples.length - 1];
             sample.nativeStage = 'descriptor';
-            sample.owner =
-              security.symbols.EqualSid(record.owner, sids[0][0]) !== 0
+            const bytes = new Uint8Array(toArrayBuffer(descriptor, 0, length)).slice();
+            const classify = (offset: number, size: number): PrincipalClass => {
+              const address = descriptor + BigInt(offset);
+              if (security.symbols.IsValidSid(address) === 0 || security.symbols.GetLengthSid(address) !== size)
+                throw new Error('Observed native SID validity is unproved.');
+              return security.symbols.EqualSid(address, sids[0][0]) !== 0
                 ? 'current'
-                : security.symbols.EqualSid(record.owner, sids[1][0]) !== 0
+                : security.symbols.EqualSid(address, sids[1][0]) !== 0
                   ? 'SYSTEM'
-                  : security.symbols.EqualSid(record.owner, sids[2][0]) !== 0
+                  : security.symbols.EqualSid(address, sids[2][0]) !== 0
                     ? 'builtin-admins'
-                    : serviceResolved && security.symbols.EqualSid(record.owner, serviceAddress) !== 0
+                    : serviceResolved && security.symbols.EqualSid(address, serviceAddress) !== 0
                       ? 'trusted-installer'
                       : 'other';
-            const bytes = new Uint8Array(toArrayBuffer(descriptor, 0, length)).slice();
+            };
+            const ownerOffset = Number(record.owner - descriptor);
+            sample.owner = classify(ownerOffset, boundedSidBytes(bytes, ownerOffset, bytes.length));
+            sample.dacl = sampleDacl(bytes, Number(record.dacl - descriptor), classify);
+            if (!sample.dacl.complete) observation.incomplete = true;
             try {
               assertWindowsDaclBytes(
                 bytes,
