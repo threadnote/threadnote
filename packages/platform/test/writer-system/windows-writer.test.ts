@@ -160,6 +160,45 @@ it('preserves the single-attempt protocol over bounded payloads and partial nati
     {numRuns: 40},
   );
 });
+it('preserves the completed prefix and never replays after generated lease-loss cut points', () => {
+  fc.assert(
+    fc.property(fc.uint8Array({minLength: 1, maxLength: 32}), fc.integer({min: 1, max: 8}), (after, chunk) => {
+      const writes = Math.ceil(after.length / chunk);
+      for (let lossAt = 2; lossAt <= writes + 3; lossAt++) {
+        const initial = new Uint8Array(after.length + 1).fill(255);
+        const state = memoryTarget(initial, chunk);
+        let assertions = 0;
+        const outcome = commitWriterTransaction(
+          {
+            before: state.before,
+            afterBytes: after,
+            assertCurrentSync() {
+              if (++assertions === lossAt) writerFail('source-changed');
+            },
+          },
+          () => state.target,
+        );
+        const completedWrites = Math.min(writes, lossAt - 2);
+        const prefix = Math.min(after.length, completedWrites * chunk);
+        const expected = lossAt === writes + 3 ? after.slice() : initial.slice();
+        expected.set(after.subarray(0, prefix));
+        expect(state.read()).toEqual(expected);
+        expect(outcome.status).toBe(lossAt === 2 ? 'conflict' : 'unknown');
+        const beforeRetry = state.read();
+        expect(
+          commitWriterTransaction(
+            {before: state.before, afterBytes: after, assertCurrentSync() {}},
+            () => state.target,
+          ),
+        ).toEqual({status: 'conflict', reason: 'source-changed'});
+        expect(state.read()).toEqual(beforeRetry);
+        expect(EffectArray.filter(state.events, event => event === 'write')).toHaveLength(completedWrites);
+      }
+    }),
+    {numRuns: 30},
+  );
+});
+
 it('keeps pre-mutation conflicts intact and refuses invalid counts or late failures without replay', () => {
   const state = memoryTarget(new Uint8Array([1, 2]), 1);
   expect(

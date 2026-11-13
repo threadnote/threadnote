@@ -6,6 +6,10 @@ import {RuntimeWriterFault, writerFail as fail} from './writer-system/fault.js';
 import {commitWriterTransaction} from './writer-system/writer-transaction.js';
 import {
   openWindowsWriterRoot,
+  openWindowsPrivateDirectory,
+  openWindowsPrivateAuthority,
+  type WindowsPrivateDirectory,
+  type WindowsPrivateLease,
   type WindowsWriterRoot,
   type WindowsWriterTarget,
 } from './writer-system/windows-writer.js';
@@ -143,6 +147,7 @@ interface TargetState {
 const roots = new WeakMap<RuntimeWriterRoot, DirectoryState>();
 const directories = new WeakMap<RuntimePrivateWriterDirectory, DirectoryState>();
 const targets = new WeakMap<RuntimeGuardedDiskTarget, TargetState>();
+const windowsDirectories = new WeakMap<RuntimePrivateWriterDirectory, WindowsPrivateDirectory>();
 const windowsRoots = new WeakMap<RuntimeWriterRoot, WindowsWriterRoot>();
 const windowsTargets = new WeakMap<RuntimeGuardedDiskTarget, WindowsWriterTarget>();
 const last = (state: DirectoryState) => state.chain[state.chain.length - 1];
@@ -476,6 +481,12 @@ export function runtimeCloseGuardedDiskTarget(handle: RuntimeGuardedDiskTarget):
 }
 /** Opens a caller-authorized private directory through identical native guards; useful for narrow dependency injection. */
 export function runtimeOpenPrivateWriterDirectory(canonicalPath: string): RuntimePrivateWriterDirectory {
+  if (runtimeCurrentPlatform() === 'win32') {
+    const windows = openWindowsPrivateDirectory(canonicalPath);
+    const handle: RuntimePrivateWriterDirectory = Object.freeze({[privateBrand]: true as const, path: canonicalPath});
+    windowsDirectories.set(handle, windows);
+    return handle;
+  }
   const state = openDirectory(canonicalPath);
   const handle: RuntimePrivateWriterDirectory = Object.freeze({[privateBrand]: true as const, path: canonicalPath});
   directories.set(handle, state);
@@ -492,6 +503,13 @@ export function runtimeOpenPrivateWriterChild(
   name: string,
   create: boolean,
 ): RuntimePrivateWriterDirectory {
+  const windows = windowsDirectories.get(directory);
+  if (windows) {
+    const child = windows.child(name, create);
+    const handle: RuntimePrivateWriterDirectory = Object.freeze({[privateBrand]: true as const, path: child.path});
+    windowsDirectories.set(handle, child);
+    return handle;
+  }
   const state = directoryState(directory);
   const bytes = nameBytes(name);
   if (create) {
@@ -524,8 +542,14 @@ export function runtimeOpenPrivateWriterChild(
 export function runtimeOpenPrivateWriterAuthority(
   identity: RuntimeStableOsUserIdentity,
 ): RuntimePrivateWriterDirectory {
+  if (identity.platform === 'win32') {
+    if (runtimeCurrentPlatform() !== 'win32') return fail('unsupported-platform');
+    const windows = openWindowsPrivateAuthority(identity.accountHome, identity.userId);
+    const handle: RuntimePrivateWriterDirectory = Object.freeze({[privateBrand]: true as const, path: windows.path});
+    windowsDirectories.set(handle, windows);
+    return handle;
+  }
   supported();
-  if (identity.platform === 'win32') return fail('unsupported-platform');
   if (identity.userId !== runtimeCurrentUserId()) fail('identity');
   const home = openDirectory(identity.accountHome);
   try {
@@ -556,12 +580,16 @@ export function runtimeOpenPrivateWriterAuthority(
   }
 }
 export function runtimeClosePrivateWriterDirectory(directory: RuntimePrivateWriterDirectory): void {
+  const windows = windowsDirectories.get(directory);
+  if (windows) return windows.close();
   const state = directories.get(directory);
   if (!state || state.closed) return;
   state.closed = true;
   closeEdges(state.chain);
 }
 export function runtimeAssertPrivateWriterDirectoryCurrent(directory: RuntimePrivateWriterDirectory): void {
+  const windows = windowsDirectories.get(directory);
+  if (windows) return windows.assertCurrentSync();
   directoryState(directory);
 }
 export function runtimeReadPrivateWriterFile(
@@ -569,6 +597,8 @@ export function runtimeReadPrivateWriterFile(
   name: string,
   maximumBytes: number,
 ) {
+  const windows = windowsDirectories.get(directory);
+  if (windows) return windows.read(name, maximumBytes);
   const state = directoryState(directory);
   checkBound(maximumBytes);
   const parent = last(state).fd;
@@ -615,6 +645,8 @@ export function runtimePublishPrivateWriterFile(
   bytes: Uint8Array,
   input: {readonly mode: 'exclusive' | 'replace'; readonly assertCurrentSync: () => void; readonly nonce: string},
 ): RuntimePrivatePublishResult {
+  const windows = windowsDirectories.get(directory);
+  if (windows) return windows.publish(name, bytes, input);
   checkBound(bytes.byteLength);
   nameBytes(name);
   if (!/^[a-f0-9]{32,64}$/u.test(input.nonce)) fail('private-storage');
@@ -689,6 +721,8 @@ export function runtimeRemovePrivateWriterFile(
   expected: RuntimeWriterIdentity,
   assertCurrentSync: () => void,
 ): void {
+  const windows = windowsDirectories.get(directory);
+  if (windows) return windows.remove(name, expected, assertCurrentSync);
   const state = directoryState(directory);
   const observed = runtimeReadPrivateWriterFile(directory, name, maximumFileBytes);
   if (!observed || !stable(expected, observed.identity)) fail('private-storage');
@@ -740,4 +774,17 @@ export function runtimeReadWriterLockToken(path: string): {
 export function runtimeReadWriterProcessIdentity(processId: number): string {
   if (runtimeCurrentPlatform() !== 'win32') return readPosixProcessIdentity(processId);
   return readWindowsWriterProcessIdentity(processId);
+}
+
+/** Writer-only selection requires an issued native directory, never a path or native HANDLE grant. */
+export function runtimeAcquirePrivateWriterLease(
+  directory: RuntimePrivateWriterDirectory,
+  path: string,
+  token: string,
+): WindowsPrivateLease | undefined {
+  const windows = windowsDirectories.get(directory);
+  if (!windows || runtimeCurrentPlatform() !== 'win32') return fail('identity');
+  const prefix = windows.path + '\\';
+  if (!EffectString.startsWith(prefix)(path)) return fail('path');
+  return windows.acquireLease(EffectString.slice(prefix.length)(path), token);
 }

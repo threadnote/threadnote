@@ -7,6 +7,9 @@ import {
   runtimeReadBoundedStableRegularFile,
   runtimeTouchBoundedStableRegularFile,
   runtimeReadWriterLockToken,
+  runtimeAcquirePrivateWriterLease,
+  runtimeCurrentPlatform,
+  type RuntimePrivateWriterDirectory,
   SystemInfo,
   type SystemInfoShape,
 } from '../system.js';
@@ -30,6 +33,8 @@ export interface ExclusiveFileLockOptions {
   readonly heartbeatIntervalMilliseconds?: number;
   /** Writer authority pins its native parent directory at acquisition and each final assertion. */
   readonly assertParentCurrent?: () => void;
+  /** Writer-only native Windows branch; must be an actual issued private-directory capability. */
+  readonly privateDirectory?: RuntimePrivateWriterDirectory;
   readonly onAcquired?: (lockPath: string) => Effect.Effect<void, never>;
   readonly onCompleted?: (lockPath: string) => Effect.Effect<void, never>;
   readonly onContention?: (lockPath: string) => Effect.Effect<void, never>;
@@ -192,9 +197,13 @@ function withFileLock<A, E, R>(
   return Effect.gen(function* () {
     yield* Effect.try(() => options.assertParentCurrent?.());
     const pathService = yield* Path.Path;
-    if (options.createParentDirectory !== false)
+    const nativeDirectory = runtimeCurrentPlatform() === 'win32' ? options.privateDirectory : undefined;
+    let nativeLease: ReturnType<typeof runtimeAcquirePrivateWriterLease>;
+    if (nativeDirectory === undefined && options.createParentDirectory !== false)
       yield* fs.makeDirectory(pathService.dirname(lockPath), {recursive: true});
-    const token = yield* fileLockToken(options.useCanonicalProcessStartIdentity === true);
+    const token = yield* fileLockToken(
+      nativeDirectory !== undefined || options.useCanonicalProcessStartIdentity === true,
+    );
     const startedAt = yield* Clock.currentTimeMillis;
     const budget = yield* CurrentNativeWaitBudget;
     const clock = yield* Clock.Clock;
@@ -206,7 +215,10 @@ function withFileLock<A, E, R>(
           message: FileLockTimeout.of(lockPath).message,
           ...(options.category === undefined ? {} : {category: options.category}),
         });
-      const owner = Option.getOrUndefined(yield* readExclusiveFileLockOwner(fs, lockPath));
+      const owner =
+        nativeDirectory === undefined
+          ? Option.getOrUndefined(yield* readExclusiveFileLockOwner(fs, lockPath))
+          : undefined;
       const observedAt = clock.monotonicTimeNanosUnsafe();
       let cumulative = budget.waitedNanos;
       for (const reservation of budget.reservations) cumulative += observedAt - reservation.started;
@@ -270,12 +282,19 @@ function withFileLock<A, E, R>(
         let active = true,
           lost = false;
         const initial =
-          typeof effect === 'function' ? yield* Effect.try(() => runtimeReadWriterLockToken(lockPath)) : undefined;
+          typeof effect === 'function' && nativeDirectory === undefined
+            ? yield* Effect.try(() => runtimeReadWriterLockToken(lockPath))
+            : undefined;
         const assertCurrentSync = () => {
           if (!active) throw FileLockLost.make({reason: 'inactive'});
           if (lost) throw FileLockLost.make({reason: 'lost'});
           try {
             options.assertParentCurrent?.();
+            if (nativeDirectory !== undefined) {
+              if (!nativeLease) throw FileLockLost.make({reason: 'lost'});
+              nativeLease.assertCurrentSync();
+              return;
+            }
             const current = runtimeReadWriterLockToken(lockPath);
             if (
               !initial ||
@@ -298,9 +317,23 @@ function withFileLock<A, E, R>(
           }),
         };
         yield* Effect.forkScoped(
-          refreshFileLockLease(lockPath, token, heartbeatIntervalMilliseconds, () => {
-            lost = true;
-          }),
+          nativeDirectory === undefined
+            ? refreshFileLockLease(lockPath, token, heartbeatIntervalMilliseconds, () => {
+                lost = true;
+              })
+            : Effect.gen(function* () {
+                for (;;) {
+                  yield* Effect.sleep(heartbeatIntervalMilliseconds);
+                  const refreshed = yield* Effect.try(() => {
+                    if (!nativeLease) throw FileLockLost.make({reason: 'lost'});
+                    nativeLease.heartbeat();
+                  }).pipe(Effect.result);
+                  if (refreshed._tag === 'Failure') {
+                    lost = true;
+                    return;
+                  }
+                }
+              }),
         );
         yield* options.onAcquired?.(lockPath) ?? Effect.void;
         return yield* (typeof effect === 'function' ? effect(lease) : effect).pipe(
@@ -314,19 +347,29 @@ function withFileLock<A, E, R>(
       }),
     );
     for (;;) {
-      const attempted = yield* tryAcquireFileLock(
-        fs,
-        lockPath,
-        token,
-        options,
-        budget === undefined ? undefined : {retry, timeout},
-      ).pipe(
+      const acquire =
+        nativeDirectory === undefined
+          ? tryAcquireFileLock(fs, lockPath, token, options, budget === undefined ? undefined : {retry, timeout})
+          : Effect.try(() => {
+              options.assertParentCurrent?.();
+              nativeLease = runtimeAcquirePrivateWriterLease(nativeDirectory, lockPath, token);
+              return nativeLease !== undefined;
+            });
+      const attempted = yield* acquire.pipe(
         Effect.flatMap(acquired => (acquired ? protectedEffect.pipe(Effect.asSome) : Effect.succeedNone)),
         // Register release around the acquisition itself. Interruption or an
         // I/O failure after the atomic token write must not strand a lock owned
         // by this still-live process. A failed contender cannot remove another
         // owner's lock because release verifies the exact random token.
-        Effect.ensuring(releaseFileLock(fs, lockPath, token)),
+        Effect.ensuring(
+          nativeDirectory === undefined
+            ? releaseFileLock(fs, lockPath, token)
+            : Effect.sync(() => {
+                const owned = nativeLease;
+                nativeLease = undefined;
+                owned?.close();
+              }),
+        ),
       );
       if (Option.isSome(attempted)) return attempted.value;
       if (!contentionReported) {

@@ -1,4 +1,4 @@
-import {Array as EffectArray, String as EffectString} from 'effect';
+import {Array as EffectArray, Schema, String as EffectString} from 'effect';
 import {runtimeNativeDescriptorOperations} from '../system.js';
 import type {RuntimeGuardedDiskObservation, RuntimeWriterIdentity} from '../writer_system.js';
 import {RuntimeWriterFault, writerFail as fail} from './fault.js';
@@ -7,11 +7,17 @@ import {
   windowsAddress,
   windowsSystemLibrary,
   windowsTokenPrincipal,
+  readWindowsWriterProcessIdentity,
   windowsWide,
   type WindowsNativeResourceOwner,
 } from './windows-native.js';
 import {
   windowsFileLibrary,
+  windowsCreatePrivateAt,
+  WindowsPrivateCreateBusy,
+  assertWindowsProtectedSecurity,
+  windowsNativeName,
+  type WindowsPrivateCreatedFile,
   windowsFileIdentity,
   windowsVolumeType,
   windowsSecurityLibrary,
@@ -45,6 +51,7 @@ function ntLibrary(owner: WindowsNativeResourceOwner) {
   return windowsSystemLibrary(
     'ntdll.dll',
     {
+      NtSetInformationFile: {args: ['u64', 'buffer', 'buffer', 'u32', 'u32'], returns: 'i32'},
       NtCreateFile: {
         args: ['buffer', 'u32', 'buffer', 'buffer', 'ptr', 'u32', 'u32', 'u32', 'u32', 'ptr', 'u32'],
         returns: 'i32',
@@ -153,7 +160,14 @@ class Resources {
       uncertain: backing => this.uncertain(backing),
     });
   }
-  openAt(parent: HandleResource, name: string, directory: boolean, writable = false): HandleResource {
+  openAt(
+    parent: HandleResource,
+    name: string,
+    directory: boolean,
+    writable = false,
+    privateAccess = false,
+    allowMissing = false,
+  ): HandleResource {
     this.assertActive();
     if (parent.state !== 'owned') return fail('identity');
     const wide = windowsPathComponent(name),
@@ -174,7 +188,15 @@ class Resources {
     attributesView.setBigUint64(16, windowsAddress(string), true);
     attributesView.setUint32(24, 0x40 | 0x1000, true); // CASE_INSENSITIVE | DONT_REPARSE; not kernel-only attributes.
     guarded.fill(0xa5a5a5a5a5a5a5a5n);
-    const access = directory ? 0x001200a1 : writable ? 0x00120183 : 0x00120081;
+    const access = privateAccess
+      ? directory
+        ? 0xc01000a3
+        : 0x00130081
+      : directory
+        ? 0x001200a1
+        : writable
+          ? 0x00120183
+          : 0x00120081;
     const backing = [wide, wideBytes, string, attributes, output, guarded, io];
     this.pendingBacking.add(backing);
     const status = withNativeArguments(backing, () =>
@@ -185,7 +207,7 @@ class Resources {
         io,
         null,
         0,
-        writable ? 1 : 7,
+        writable && !privateAccess ? 1 : 7,
         1, // FILE_OPEN: acquisition never creates, overwrites, or truncates.
         0x00200000 | 0x20 | (directory ? 1 : 0x40),
         null,
@@ -195,6 +217,7 @@ class Resources {
     if (status !== 0) {
       if (status === 0x103 || output[0] !== 0n) this.uncertain(backing);
       this.pendingBacking.delete(backing);
+      if (allowMissing && status >>> 0 === 0xc0000034) throw WindowsPrivateMissing.make({});
       return fail(writable && (status >>> 0 === 0xc0000022 || status >>> 0 === 0xc0000043) ? 'readonly' : 'path');
     }
     const owned = this.own(output[0]); // Register before any status/metadata/security check can fail.
@@ -341,6 +364,25 @@ export function openWindowsWriterRoot(
   path: string,
   expected: {readonly dev: bigint; readonly ino: bigint},
 ): WindowsWriterRoot {
+  const state = openRootState(path, expected);
+  return {
+    path,
+    close() {
+      state.active = false;
+      state.resources.close();
+    },
+    openTarget: (segments, physical, bound) => openTarget(state, segments, physical, bound),
+  };
+}
+class WindowsPrivateMissing extends Schema.TaggedError<WindowsPrivateMissing, {readonly brand: unique symbol}>()(
+  'WindowsPrivateMissing',
+  {},
+) {}
+function openRootState(
+  path: string,
+  expected: {readonly dev: bigint; readonly ino: bigint},
+  privateWritable = false,
+): RootState {
   assertAcquisitionAvailable();
   if (!/^[A-Za-z]:\\/u.test(path) || /[\p{Cc}]/u.test(path) || native.realpathSync(path) !== path) return fail('path');
   const names = path.length === 3 ? [] : EffectString.split(EffectString.slice(3)(path), '\\');
@@ -364,7 +406,13 @@ export function openWindowsWriterRoot(
     for (const name of names) {
       prefix += (prefix.length === 3 ? '' : '\\') + name;
       chain.push(
-        capture(resources, resources.openAt(chain[chain.length - 1].resource, name, true), name, prefix, true),
+        capture(
+          resources,
+          resources.openAt(chain[chain.length - 1].resource, name, true, false, privateWritable && prefix === path),
+          name,
+          prefix,
+          true,
+        ),
       );
     }
     const final = chain[chain.length - 1],
@@ -372,14 +420,7 @@ export function openWindowsWriterRoot(
     if (info.dev !== expected.dev || info.ino !== expected.ino) return fail('path');
     const state: RootState = {resources, chain, path, active: true};
     checkRoot(state);
-    return {
-      path,
-      close() {
-        state.active = false;
-        resources.close();
-      },
-      openTarget: (segments, physical, bound) => openTarget(state, segments, physical, bound),
-    };
+    return state;
   } catch (error) {
     resources.close();
     throw error;
@@ -556,6 +597,431 @@ function openTarget(
     };
     inspect();
     return target;
+  } catch (error) {
+    resources.close();
+    throw error;
+  }
+}
+
+export interface WindowsPrivateLease {
+  assertCurrentSync(): void;
+  heartbeat(): void;
+  close(): void;
+}
+export interface WindowsPrivateDirectory {
+  readonly path: string;
+  assertCurrentSync(): void;
+  child(name: string, create: boolean): WindowsPrivateDirectory;
+  read(name: string, bound: number): {identity: RuntimeWriterIdentity; bytes: Uint8Array} | undefined;
+  publish(
+    name: string,
+    bytes: Uint8Array,
+    input: {mode: 'exclusive' | 'replace'; nonce: string; assertCurrentSync(): void},
+  ): {status: 'published'; identity: RuntimeWriterIdentity} | {status: 'unknown'};
+  remove(name: string, expected: RuntimeWriterIdentity, assertCurrentSync: () => void): void;
+  acquireLease(name: string, token: string): WindowsPrivateLease | undefined;
+  close(): void;
+}
+/** Same rooted ledger as source I/O; final private authority is always an exact protected current-SID DACL. */
+export function openWindowsPrivateDirectory(path: string): WindowsPrivateDirectory {
+  const expected = native.lstatSync(path, {bigint: true});
+  return privateDirectory(openRootState(path, expected, true), true);
+}
+export function openWindowsPrivateAuthority(accountHome: string, principal: string): WindowsPrivateDirectory {
+  const current = windowsTokenPrincipal();
+  if (current.sid !== principal || current.accountHome !== accountHome) return fail('identity');
+  const expected = native.lstatSync(accountHome, {bigint: true});
+  const state = openRootState(accountHome, expected, true);
+  const home = privateDirectory(state, false);
+  try {
+    if (state.resources.principal !== principal || state.chain[state.chain.length - 1].security.owner !== principal)
+      return fail('identity');
+    return home.child('.threadnote-writer-authority', true);
+  } finally {
+    home.close();
+  }
+}
+function privateDirectory(root: RootState, strict: boolean): WindowsPrivateDirectory {
+  const resources = root.resources,
+    parent = root.chain[root.chain.length - 1];
+  const issued = new WeakMap<RuntimeWriterIdentity, NativeFileIdentity>();
+  let stopped = false;
+  const check = () => {
+    checkRoot(root);
+    const security = windowsReadFileSecurity(
+      parent.resource.handle,
+      resources.principal,
+      strict,
+      strict ? undefined : resources.servicingOwner,
+      borrowed,
+    );
+    if (strict) assertWindowsProtectedSecurity(security.bytes, resources.principal);
+    if (!sameSecurity(parent.security, security)) return fail('private-storage');
+  };
+  const borrowed = {
+    kernel: resources.kernel,
+    security: resources.security,
+    captureNative: resources.captureNative,
+    ownDescriptor: resources.descriptor,
+    uncertain: (backing: readonly ArrayBufferView[]): never => resources.uncertain(backing),
+  };
+  const mutation = (assertCurrent: () => void) => {
+    if (stopped) return fail('identity');
+    check();
+    assertCurrent();
+  };
+  const privateEdge = (resource: HandleResource, name: string): Edge => {
+    const edge = capture(resources, resource, name, childPath(root.path, name), false);
+    const security = windowsReadFileSecurity(resource.handle, resources.principal, true, undefined, borrowed);
+    assertWindowsProtectedSecurity(security.bytes, resources.principal);
+    if (!sameSecurity(edge.security, security) || edge.identity.links !== 1) return fail('private-storage');
+    return edge;
+  };
+  const checkFile = (edge: Edge) => {
+    check();
+    checkEdge(resources, edge, parent, false);
+    const security = windowsReadFileSecurity(edge.resource.handle, resources.principal, true, undefined, borrowed);
+    assertWindowsProtectedSecurity(security.bytes, resources.principal);
+    if (!sameSecurity(edge.security, security)) return fail('private-storage');
+    return windowsFileIdentity(resources.kernel, edge.resource.handle);
+  };
+  const position = (handle: bigint) => {
+    const observed = new BigUint64Array(5);
+    observed.fill(0xa5a5a5a5a5a5a5a5n);
+    let ok: number;
+    try {
+      ok = resources.kernel.symbols.SetFilePointerEx(handle, 0n, observed, 0);
+    } catch {
+      return resources.uncertain(observed);
+    }
+    if (!observed.subarray(1).every(v => v === 0xa5a5a5a5a5a5a5a5n)) return resources.uncertain(observed);
+    if (!ok || observed[0] !== 0n) return fail('io');
+  };
+  const transfer = (handle: bigint, bytes: Uint8Array, write: boolean, assertCurrent: () => void) => {
+    position(handle);
+    let offset = 0;
+    while (offset < bytes.length) {
+      assertCurrent();
+      const count = new Uint32Array(9),
+        part = bytes.subarray(offset),
+        backing = [bytes, part, count];
+      count.fill(0xa5a5a5a5);
+      resources.pendingBacking.add(backing);
+      let ok: number;
+      try {
+        ok = write
+          ? resources.kernel.symbols.WriteFile(handle, part, part.length, count, null)
+          : resources.kernel.symbols.ReadFile(handle, part, part.length, count, null);
+      } catch {
+        return resources.uncertain(backing);
+      }
+      const error = ok === 0 ? resources.kernel.symbols.GetLastError() : 0;
+      if (error === 997 || !count.subarray(1).every(v => v === 0xa5a5a5a5)) return resources.uncertain(backing);
+      resources.pendingBacking.delete(backing);
+      if (ok === 0 || count[0] === 0 || count[0] > part.length) return fail('io');
+      offset += count[0];
+    }
+  };
+  const readEdge = (edge: Edge, bound: number) => {
+    const before = checkFile(edge);
+    if (!Number.isSafeInteger(bound) || bound < 0 || bound > maximumBytes || before.size > BigInt(bound))
+      return fail('private-storage');
+    const bytes = new Uint8Array(Number(before.size));
+    transfer(edge.resource.handle, bytes, false, () => {
+      checkFile(edge);
+    });
+    const after = checkFile(edge);
+    if (!stable(before, after)) return fail('private-storage');
+    const identity = projected(edge.path, after, false);
+    issued.set(identity, after);
+    return {identity, bytes};
+  };
+  const openFile = (name: string, deleteAccess = false): Edge | undefined => {
+    windowsPathComponent(name);
+    check();
+    let owned: HandleResource;
+    try {
+      owned = resources.openAt(parent.resource, name, false, false, deleteAccess, true);
+    } catch (error) {
+      if (Schema.is(WindowsPrivateMissing)(error)) {
+        check();
+        return undefined;
+      }
+      throw error;
+    }
+    try {
+      return privateEdge(owned, name);
+    } catch (error) {
+      resources.release(owned);
+      throw error;
+    }
+  };
+  const flush = (handle: bigint) => {
+    let ok: number;
+    try {
+      ok = resources.kernel.symbols.FlushFileBuffers(handle);
+    } catch {
+      return resources.uncertain();
+    }
+    if (ok === 0) return fail('io');
+  };
+  const setInformation = (handle: bigint, bytes: Uint8Array, kind: number) => {
+    const guarded = new BigUint64Array(6),
+      backing = [bytes, guarded];
+    guarded.fill(0xa5a5a5a5a5a5a5a5n);
+    resources.pendingBacking.add(backing);
+    let status: number;
+    try {
+      status = resources.nt.symbols.NtSetInformationFile(
+        handle,
+        new Uint8Array(guarded.buffer, 0, 16),
+        bytes,
+        bytes.length,
+        kind,
+      );
+    } catch {
+      return resources.uncertain(backing);
+    }
+    if (status === 0x103 || !guarded.subarray(2).every(v => v === 0xa5a5a5a5a5a5a5a5n))
+      return resources.uncertain(backing);
+    resources.pendingBacking.delete(backing);
+    if (status !== 0 || new DataView(guarded.buffer).getInt32(0, true) !== 0) return fail('io');
+  };
+  const create = (name: string, kind: 'file' | 'directory' | 'lease') =>
+    windowsCreatePrivateAt(parent.resource.handle, name, kind, borrowed, check);
+  const createdEdge = (created: WindowsPrivateCreatedFile, name: string): Edge =>
+    privateEdge(
+      {
+        handle: created.handle,
+        state: 'owned',
+        release: () => {
+          created.close();
+          return true;
+        },
+      },
+      name,
+    );
+  const directory: WindowsPrivateDirectory = {
+    path: root.path,
+    assertCurrentSync: check,
+    child(name, shouldCreate) {
+      mutation(() => {});
+      windowsPathComponent(name);
+      let created: WindowsPrivateCreatedFile | undefined;
+      if (shouldCreate) {
+        try {
+          created = create(name, 'directory');
+        } catch (error) {
+          if (!Schema.is(WindowsPrivateCreateBusy)(error)) throw error;
+        }
+      }
+      // Release our creation HANDLE before opening the writable child; retain its full identity across that cut.
+      const identity = created?.identity;
+      created?.close();
+      const child = openWindowsPrivateDirectory(childPath(root.path, name));
+      try {
+        if (identity) {
+          const reopened = resources.openAt(parent.resource, name, true);
+          try {
+            if (!sameCritical(identity, windowsFileIdentity(resources.kernel, reopened.handle)))
+              return fail('private-storage');
+          } finally {
+            resources.release(reopened);
+          }
+        }
+        check();
+        child.assertCurrentSync();
+        flush(parent.resource.handle);
+        return child;
+      } catch (error) {
+        child.close();
+        throw error;
+      }
+    },
+    read(name, bound) {
+      const edge = openFile(name);
+      if (!edge) return undefined;
+      try {
+        return readEdge(edge, bound);
+      } finally {
+        resources.release(edge.resource);
+      }
+    },
+    publish(name, bytes, input) {
+      windowsPathComponent(name);
+      if (bytes.length > maximumBytes || !/^[a-f0-9]{32,64}$/u.test(input.nonce)) return fail('private-storage');
+      mutation(input.assertCurrentSync);
+      let prior: Edge | undefined, created: WindowsPrivateCreatedFile | undefined;
+      try {
+        if (input.mode === 'replace') {
+          prior = openFile(name);
+          if (prior) readEdge(prior, maximumBytes);
+        }
+        const temporary = `.pending-${input.nonce}`;
+        mutation(input.assertCurrentSync);
+        created = create(temporary, 'file');
+        let edge = createdEdge(created, temporary);
+        transfer(created.handle, bytes, true, () => {
+          mutation(input.assertCurrentSync);
+          checkFile(edge);
+        });
+        flush(created.handle);
+        if (!equalBytes(readEdge(edge, bytes.length).bytes, bytes)) return fail('private-storage');
+        mutation(input.assertCurrentSync);
+        if (input.mode === 'replace') {
+          if (prior) {
+            const current = checkFile(prior);
+            if (!stable(prior.identity, current)) return fail('private-storage');
+            // Ordinary replacement requires the destination closed. Retain its authenticated data,
+            // then rely on the caller's current O→M lease/revision fence across this synchronous cut.
+            resources.release(prior.resource);
+          } else if (openFile(name)) return fail('private-storage');
+        }
+        const wide = windowsPathComponent(name),
+          rename = new Uint8Array(20 + wide.byteLength - 2),
+          view = new DataView(rename.buffer);
+        rename[0] = input.mode === 'replace' && prior ? 1 : 0; // Normal rooted rename; no POSIX flags or copy/delete.
+        view.setBigUint64(8, parent.resource.handle, true);
+        view.setUint32(16, wide.byteLength - 2, true);
+        rename.set(new Uint8Array(wide.buffer, 0, wide.byteLength - 2), 20);
+        // The caller may require the old digest/presence. Both modes stage privately until this visibility cut.
+        input.assertCurrentSync();
+        setInformation(created.handle, rename, 10);
+        edge = createdEdge(created, name);
+        flush(parent.resource.handle);
+        const current = readEdge(edge, bytes.length);
+        if (!equalBytes(current.bytes, bytes)) return fail('private-storage');
+        check();
+        const writtenIdentity = windowsFileIdentity(resources.kernel, created.handle);
+        created.close();
+        created = undefined;
+        // Last-writer close may settle native timestamps. Acknowledged identity is observed after that close.
+        flush(parent.resource.handle);
+        const confirmed = openFile(name);
+        if (!confirmed) return fail('private-storage');
+        if (!sameCritical(writtenIdentity, confirmed.identity) || !sameSecurity(edge.security, confirmed.security))
+          return fail('private-storage');
+        const final = readEdge(confirmed, bytes.length);
+        if (!equalBytes(final.bytes, bytes)) return fail('private-storage');
+        resources.release(confirmed.resource);
+        check();
+        return {status: 'published', identity: final.identity};
+      } catch {
+        // Settled failures still may have published bytes. Retain the attempt; never delete or replay it.
+        stopped = true;
+        return {status: 'unknown'};
+      }
+    },
+    remove(name, expected, assertCurrent) {
+      mutation(assertCurrent);
+      const witness = issued.get(expected);
+      if (!witness) return fail('private-storage');
+      const edge = openFile(name, true);
+      if (!edge) return fail('private-storage');
+      try {
+        const current = checkFile(edge);
+        if (!stable(witness, current)) return fail('private-storage');
+        mutation(assertCurrent);
+        setInformation(edge.resource.handle, new Uint8Array([1]), 13);
+        resources.release(edge.resource);
+        flush(parent.resource.handle);
+        check();
+      } catch (error) {
+        stopped = true;
+        throw error;
+      }
+    },
+    acquireLease(name, token) {
+      mutation(() => {});
+      const owner: unknown = JSON.parse(token);
+      if (
+        typeof owner !== 'object' ||
+        owner === null ||
+        !('version' in owner) ||
+        owner.version !== 1 ||
+        !('token' in owner) ||
+        typeof owner.token !== 'string' ||
+        owner.token.length === 0 ||
+        !('processId' in owner) ||
+        owner.processId !== process.pid ||
+        !('processStartIdentity' in owner) ||
+        owner.processStartIdentity !== readWindowsWriterProcessIdentity(process.pid)
+      )
+        return fail('identity');
+      const bytes = new TextEncoder().encode(`${token}\n`);
+      if (bytes.length > 4096) return fail('private-storage');
+      let created: WindowsPrivateCreatedFile;
+      try {
+        created = create(name, 'lease');
+      } catch (error) {
+        if (Schema.is(WindowsPrivateCreateBusy)(error)) return undefined;
+        throw error;
+      }
+      let active = true,
+        lost = false;
+      const expectedName = windowsNativeName(resources.kernel, created.handle);
+      const verify = () => {
+        if (!active || lost) return fail('identity');
+        try {
+          check();
+          const before = windowsFileIdentity(resources.kernel, created.handle);
+          const security = windowsReadFileSecurity(created.handle, resources.principal, true, undefined, borrowed);
+          assertWindowsProtectedSecurity(security.bytes, resources.principal);
+          if (
+            !sameCritical(created.identity, before) ||
+            before.links !== 1 ||
+            before.size !== BigInt(bytes.length) ||
+            !sameSecurity(created.security, security) ||
+            !equalBytes(expectedName, windowsNativeName(resources.kernel, created.handle))
+          )
+            return fail('identity');
+          const observed = new Uint8Array(bytes.length);
+          transfer(created.handle, observed, false, check);
+          if (!equalBytes(bytes, observed) || !stable(before, windowsFileIdentity(resources.kernel, created.handle)))
+            return fail('identity');
+        } catch (error) {
+          lost = true;
+          throw error;
+        }
+      };
+      try {
+        transfer(created.handle, bytes, true, check);
+        flush(created.handle);
+        verify();
+      } catch (error) {
+        lost = true;
+        stopped = true;
+        throw error;
+      }
+      return {
+        assertCurrentSync: verify,
+        heartbeat() {
+          verify();
+          try {
+            const basic = new Uint8Array(40),
+              view = new DataView(basic.buffer);
+            view.setBigInt64(16, BigInt(Date.now()) * 10000n + epoch, true);
+            setInformation(created.handle, basic, 4);
+            verify();
+          } catch (error) {
+            lost = true;
+            throw error;
+          }
+        },
+        close() {
+          active = false;
+          created.close(); // The primitive remembers successful close and sticky close-UNKNOWN; one native attempt.
+        },
+      };
+    },
+    close() {
+      root.active = false;
+      resources.close();
+    },
+  };
+  try {
+    check();
+    return directory;
   } catch (error) {
     resources.close();
     throw error;

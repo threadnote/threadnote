@@ -2,8 +2,10 @@ import {dlopen, toArrayBuffer, type FFIFunction} from 'bun:ffi';
 import {Array as EffectArray, String as EffectString, Schema} from 'effect';
 import {expect, it, vi} from 'vitest';
 import fc from 'fast-check';
+import {sha256HexSync} from '../../src/sha256.js';
 import {
   assertWindowsDaclBytes,
+  assertWindowsProtectedSecurity,
   windowsCreatePrivateAt,
   windowsFileIdentity,
   windowsFileLibrary,
@@ -11,6 +13,14 @@ import {
   windowsSecurityLibrary,
   type WindowsPrivateCreateResources,
 } from '../../src/writer-system/windows-files.js';
+import {
+  runtimeOpenPrivateWriterDirectory,
+  runtimeOpenPrivateWriterChild,
+  runtimeReadPrivateWriterFile,
+  runtimePublishPrivateWriterFile,
+  runtimeRemovePrivateWriterFile,
+  runtimeClosePrivateWriterDirectory,
+} from '../../src/writer_system.js';
 import {RuntimeWriterFault} from '../../src/writer-system/fault.js';
 import {runtimeAssertPrivateProviderPath, runtimeNativePlatformSupport} from '../../src/system.js';
 import {
@@ -34,7 +44,14 @@ const securitySample = vi.hoisted(() => ({
     | undefined,
 }));
 // Final native negative control closes its owned HANDLE, then withholds the acknowledgement once.
-const privateClose = vi.hoisted(() => ({handle: 0n, calls: 0}));
+const privateClose = vi.hoisted(() => ({
+  handle: 0n,
+  calls: 0,
+  failWrite: false,
+  writes: 0,
+  failFlushAt: 0,
+  flushes: 0,
+}));
 vi.mock('bun:ffi', async importOriginal => {
   const real = await importOriginal<typeof import('bun:ffi')>();
   return {
@@ -46,6 +63,26 @@ vi.mock('bun:ffi', async importOriginal => {
         symbols: new Proxy(library.symbols, {
           get(target, key, receiver) {
             const original: unknown = Reflect.get(target, key, receiver);
+            if (key === 'FlushFileBuffers' && typeof original === 'function')
+              return (handle: bigint) => {
+                const result: unknown = Reflect.apply(original, undefined, [handle]);
+                if (privateClose.failFlushAt && ++privateClose.flushes === privateClose.failFlushAt) return 0;
+                return result;
+              };
+            if (key === 'WriteFile' && typeof original === 'function')
+              return (...args: unknown[]) => {
+                const result: unknown = Reflect.apply(original, undefined, args);
+                if (
+                  privateClose.failWrite &&
+                  result === 1 &&
+                  args[3] instanceof Uint32Array &&
+                  typeof args[2] === 'number'
+                ) {
+                  privateClose.writes++;
+                  args[3][0] = args[2] + 1; // Completed real write, invalid acknowledgement: UNKNOWN, never replay.
+                }
+                return result;
+              };
             if (key === 'CloseHandle' && typeof original === 'function')
               return (handle: bigint) => {
                 const result: unknown = Reflect.apply(original, undefined, [handle]);
@@ -341,6 +378,24 @@ it('recognizes only the resolved servicing ancestor owner while preserving every
     assertWindowsDaclBytes(unknownAce.bytes, 20, unknownAce.daclOffset, principal, false, servicingOwner),
   ).toThrow();
 });
+it('requires exactly a protected noninheriting full-control private ACE for every generated principal', () => {
+  fc.assert(
+    fc.property(fc.integer({min: 1, max: 100000}), fc.integer({min: 1, max: 31}), (last, flags) => {
+      const principal = `S-1-5-21-11-22-33-${last}`;
+      const record = securityRecord(sid(last), sid(last), 0x1f01ff);
+      const view = new DataView(record.bytes.buffer);
+      view.setUint16(2, 0x9004, true);
+      expect(() => assertWindowsProtectedSecurity(record.bytes, principal)).not.toThrow();
+      record.bytes[record.daclOffset + 9] = flags;
+      expect(() => assertWindowsProtectedSecurity(record.bytes, principal)).toThrow();
+      record.bytes[record.daclOffset + 9] = 0;
+      view.setUint16(2, 0x8004, true);
+      expect(() => assertWindowsProtectedSecurity(record.bytes, principal)).toThrow();
+    }),
+    {numRuns: 40},
+  );
+});
+
 it('quotes fixed Windows argv boundaries and rejects NUL and unpaired UTF-16 before native creation', () => {
   expect(windowsProviderCommandLine('C:\\tool.exe', ['', 'space value', 'quote"value', 'tail\\'])).toBe(
     '"C:\\tool.exe" "" "space value" "quote\\"value" "tail\\\\"',
@@ -974,6 +1029,141 @@ it.skipIf(!windows)(
         expect(native.readFileSync(occupied, 'utf8')).toBe('independently authored bytes');
         const failedClose = windowsCreatePrivateAt(owned.handle, 'last-lease', 'lease', resources, assertPrivate);
         owned.close();
+        const facade = runtimeOpenPrivateWriterDirectory(path.join(directory, 'private'));
+        try {
+          const child = runtimeOpenPrivateWriterChild(facade, 'facade', true);
+          runtimeClosePrivateWriterDirectory(child);
+          const reopened = runtimeOpenPrivateWriterChild(facade, 'facade', true);
+          try {
+            expect(runtimeReadPrivateWriterFile(reopened, 'absent', 1024)).toBeUndefined();
+            const first = new TextEncoder().encode('first complete receipt');
+            let creationGuards = 0;
+            const published = runtimePublishPrivateWriterFile(reopened, 'receipt', first, {
+              mode: 'exclusive',
+              nonce: EffectString.repeat(32)('a'),
+              assertCurrentSync() {
+                creationGuards++;
+                expect(runtimeReadPrivateWriterFile(reopened, 'receipt', 1024)).toBeUndefined();
+              },
+            });
+            expect(published.status).toBe('published');
+            expect(creationGuards).toBeGreaterThanOrEqual(2);
+            const read = runtimeReadPrivateWriterFile(reopened, 'receipt', 1024);
+            expect(read?.bytes).toEqual(first);
+            const second = new TextEncoder().encode('replacement');
+            const previousDigest = sha256HexSync(new TextDecoder('utf-8', {fatal: true}).decode(read!.bytes));
+            let replacementGuards = 0;
+            expect(
+              runtimePublishPrivateWriterFile(reopened, 'receipt', second, {
+                mode: 'replace',
+                nonce: EffectString.repeat(32)('b'),
+                assertCurrentSync() {
+                  replacementGuards++;
+                  const current = runtimeReadPrivateWriterFile(reopened, 'receipt', 1024);
+                  expect(current).toBeDefined();
+                  expect(sha256HexSync(new TextDecoder('utf-8', {fatal: true}).decode(current!.bytes))).toBe(
+                    previousDigest,
+                  );
+                },
+              }).status,
+            ).toBe('published');
+            expect(replacementGuards).toBeGreaterThanOrEqual(2);
+            const current = runtimeReadPrivateWriterFile(reopened, 'receipt', 1024);
+            expect(current?.bytes).toEqual(second);
+            expect(() => runtimeRemovePrivateWriterFile(reopened, 'receipt', read!.identity, () => {})).toThrow();
+          } finally {
+            runtimeClosePrivateWriterDirectory(reopened);
+          }
+          const removal = runtimeOpenPrivateWriterChild(facade, 'facade', false);
+          try {
+            const current = runtimeReadPrivateWriterFile(removal, 'receipt', 1024)!;
+            expect(() => runtimeRemovePrivateWriterFile(removal, 'receipt', {...current.identity}, () => {})).toThrow();
+            let removalGuards = 0;
+            runtimeRemovePrivateWriterFile(removal, 'receipt', current.identity, () => {
+              removalGuards++;
+              expect(runtimeReadPrivateWriterFile(removal, 'receipt', 1024)?.bytes).toEqual(current.bytes);
+            });
+            expect(removalGuards).toBeGreaterThanOrEqual(2);
+            expect(runtimeReadPrivateWriterFile(removal, 'receipt', 1024)).toBeUndefined();
+            const beforeForeign = native.lstatSync(occupied, {bigint: true});
+            expect(
+              runtimePublishPrivateWriterFile(facade, 'occupied', new Uint8Array([1]), {
+                mode: 'exclusive',
+                nonce: EffectString.repeat(32)('c'),
+                assertCurrentSync() {},
+              }),
+            ).toEqual({status: 'unknown'});
+            expect(native.lstatSync(occupied, {bigint: true})).toEqual(beforeForeign);
+            expect(native.readFileSync(occupied, 'utf8')).toBe('independently authored bytes');
+          } finally {
+            runtimeClosePrivateWriterDirectory(removal);
+          }
+        } finally {
+          runtimeClosePrivateWriterDirectory(facade);
+        }
+        const fault = runtimeOpenPrivateWriterDirectory(path.join(directory, 'private', 'facade'));
+        try {
+          expect(() =>
+            runtimePublishPrivateWriterFile(fault, 'lost', new Uint8Array([1]), {
+              mode: 'exclusive',
+              nonce: EffectString.repeat(32)('d'),
+              assertCurrentSync() {
+                throw new Error('lost lease');
+              },
+            }),
+          ).toThrow();
+          expect(native.existsSync(path.join(directory, 'private', 'facade', 'lost'))).toBe(false);
+          privateClose.failWrite = true;
+          expect(
+            runtimePublishPrivateWriterFile(fault, 'unknown', new Uint8Array([2]), {
+              mode: 'exclusive',
+              nonce: EffectString.repeat(32)('e'),
+              assertCurrentSync() {},
+            }),
+          ).toEqual({status: 'unknown'});
+          expect(privateClose.writes).toBe(1);
+          expect(runtimeReadPrivateWriterFile(fault, 'unknown', 1024)).toBeUndefined();
+          expect(runtimeReadPrivateWriterFile(fault, `.pending-${EffectString.repeat(32)('e')}`, 1024)?.bytes).toEqual(
+            new Uint8Array([2]),
+          );
+          expect(() =>
+            runtimePublishPrivateWriterFile(fault, 'unknown', new Uint8Array([2]), {
+              mode: 'exclusive',
+              nonce: EffectString.repeat(32)('e'),
+              assertCurrentSync() {},
+            }),
+          ).toThrow();
+          expect(privateClose.writes).toBe(1);
+        } finally {
+          privateClose.failWrite = false;
+          runtimeClosePrivateWriterDirectory(fault);
+        }
+        const flushFault = runtimeOpenPrivateWriterDirectory(path.join(directory, 'private', 'facade'));
+        try {
+          privateClose.failFlushAt = 2;
+          privateClose.flushes = 0;
+          const bytes = new Uint8Array([3, 4]);
+          expect(
+            runtimePublishPrivateWriterFile(flushFault, 'parent-unknown', bytes, {
+              mode: 'exclusive',
+              nonce: EffectString.repeat(32)('f'),
+              assertCurrentSync() {},
+            }),
+          ).toEqual({status: 'unknown'});
+          expect(privateClose.flushes).toBe(2); // The real file flush succeeded, then parent acknowledgement was withheld.
+          expect(runtimeReadPrivateWriterFile(flushFault, 'parent-unknown', 1024)?.bytes).toEqual(bytes);
+          expect(() =>
+            runtimePublishPrivateWriterFile(flushFault, 'parent-unknown', bytes, {
+              mode: 'exclusive',
+              nonce: EffectString.repeat(32)('f'),
+              assertCurrentSync() {},
+            }),
+          ).toThrow();
+          expect(privateClose.flushes).toBe(2);
+        } finally {
+          privateClose.failFlushAt = 0;
+          runtimeClosePrivateWriterDirectory(flushFault);
+        }
         // This is the final operation on this ledger: lost close acknowledgement is sticky UNKNOWN, no retry/delete.
         privateClose.handle = failedClose.handle;
         privateClose.calls = 0;

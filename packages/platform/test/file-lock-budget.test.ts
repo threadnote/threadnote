@@ -1,3 +1,4 @@
+import {dlopen} from 'bun:ffi';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {
@@ -19,6 +20,7 @@ import {
 } from 'effect';
 import {expect, vi} from 'vitest';
 import {TestClock} from 'effect/testing';
+import {windowsSystemLibrary, windowsTokenPrincipal, windowsWide} from '../src/writer-system/windows-native.js';
 import {ChildEnvironmentPolicy} from '../src/child-environment-policy.js';
 import {cryptoLayer} from '../src/crypto.js';
 import {
@@ -29,7 +31,15 @@ import {
   withNativeFileLockWaitBudget,
 } from '../src/file/lock.js';
 import {RuntimeEntrypoint} from '../src/runtime-entrypoint.js';
-import {runtimeReadWriterLockToken, SystemInfo} from '../src/system.js';
+import {
+  runtimeReadWriterLockToken,
+  SystemInfo,
+  runtimeOpenPrivateWriterDirectory,
+  runtimeOpenPrivateWriterChild,
+  runtimeClosePrivateWriterDirectory,
+  runtimeAssertPrivateWriterDirectoryCurrent,
+  runtimePublishPrivateWriterFile,
+} from '../src/system.js';
 
 const system = SystemInfo.layer.pipe(
   Layer.provide(
@@ -677,4 +687,146 @@ effectIt.effect('reports a live owner with safe category, start fingerprint and 
     expect(error.message).not.toContain(token);
     expect(error.message).toContain(`PID ${system.processId}`);
   }).pipe(provide),
+);
+
+// Real process/NTFS boundary uses live time; deterministic generic retry properties above retain the test clock.
+effectIt.effect.skipIf(process.platform !== 'win32')(
+  'retains native O then M leases across process contention, release and process death',
+  () =>
+    provide(
+      TestClock.withLive(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem,
+            path = yield* Path.Path;
+          const temporary = yield* fs.makeTempDirectoryScoped({prefix: 'native-writer-lease-'});
+          const ownedPath = path.join(temporary, 'owned');
+          const directory = yield* Effect.acquireRelease(
+            Effect.sync(() => {
+              const principal = windowsTokenPrincipal();
+              const security = windowsSystemLibrary('advapi32.dll', {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW: {
+                  args: ['buffer', 'u32', 'buffer', 'ptr'],
+                  returns: 'i32',
+                },
+              });
+              const kernel = dlopen('kernel32.dll', {
+                CreateDirectoryW: {args: ['buffer', 'buffer'], returns: 'i32'},
+                LocalFree: {args: ['u64'], returns: 'u64'},
+              });
+              const descriptor = new BigUint64Array(1);
+              try {
+                expect(
+                  security.symbols.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    windowsWide(`O:${principal.sid}D:P(A;;FA;;;${principal.sid})`),
+                    1,
+                    descriptor,
+                    null,
+                  ),
+                ).toBe(1);
+                const attributes = new BigUint64Array(3);
+                new DataView(attributes.buffer).setUint32(0, 24, true);
+                attributes[1] = descriptor[0];
+                expect(kernel.symbols.CreateDirectoryW(windowsWide(ownedPath), attributes)).toBe(1);
+              } finally {
+                if (descriptor[0] !== 0n) expect(kernel.symbols.LocalFree(descriptor[0])).toBe(0n);
+                security.close();
+                kernel.close();
+              }
+              const base = runtimeOpenPrivateWriterDirectory(process.getBuiltinModule('fs').realpathSync(ownedPath));
+              try {
+                return runtimeOpenPrivateWriterChild(base, 'leases', true);
+              } finally {
+                runtimeClosePrivateWriterDirectory(base);
+              }
+            }),
+            handle => Effect.sync(() => runtimeClosePrivateWriterDirectory(handle)),
+          );
+          const operation = path.join(directory.path, 'operation.lock'),
+            mutation = path.join(directory.path, 'mutation.lock');
+          const selected = {
+            ...policy,
+            privateDirectory: directory,
+            createParentDirectory: false,
+            retryIntervalMilliseconds: 25,
+            waitTimeoutMilliseconds: 75,
+            heartbeatIntervalMilliseconds: 25,
+            assertParentCurrent: () => runtimeAssertPrivateWriterDirectoryCurrent(directory),
+          };
+          const moduleUrl = new URL('../src/writer_system.ts', import.meta.url).href;
+          for (const disposition of ['release', 'die'] as const) {
+            const ready = path.join(temporary, `ready-${disposition}`);
+            const source = `import {runtimeOpenPrivateWriterDirectory,runtimeAcquirePrivateWriterLease,runtimeReadWriterProcessIdentity,runtimeClosePrivateWriterDirectory} from ${JSON.stringify(moduleUrl)};
+        const directory=runtimeOpenPrivateWriterDirectory(${JSON.stringify(directory.path)});
+        const token=JSON.stringify({version:1,processId:process.pid,processStartIdentity:runtimeReadWriterProcessIdentity(process.pid),token:'isolated-child-token'});
+        const operation=runtimeAcquirePrivateWriterLease(directory,${JSON.stringify(operation)},token);
+        const mutation=runtimeAcquirePrivateWriterLease(directory,${JSON.stringify(mutation)},token);
+        if(!operation||!mutation) throw new Error('child lease not acquired');
+        operation.assertCurrentSync(); mutation.heartbeat();
+        process.getBuiltinModule('fs').writeFileSync(${JSON.stringify(ready)},'ready');
+        const disposition=await Bun.stdin.text();
+        if(disposition==='release'){mutation.close();operation.close();runtimeClosePrivateWriterDirectory(directory);}
+        process.exit(0);`;
+            const child = yield* Effect.acquireRelease(
+              Effect.sync(() =>
+                Bun.spawn([process.execPath, '--eval', source], {
+                  cwd: process.cwd(),
+                  stdin: 'pipe',
+                  stdout: 'pipe',
+                  stderr: 'pipe',
+                }),
+              ),
+              child =>
+                Effect.promise(async () => {
+                  try {
+                    await child.stdin.end();
+                  } catch {
+                    /* The normal handoff already closed stdin. */
+                  }
+                  await child.exited;
+                }),
+            );
+            yield* Effect.gen(function* () {
+              while (!(yield* fs.exists(ready))) yield* Effect.sleep(20);
+            }).pipe(Effect.timeout(10_000));
+            for (const lock of [operation, mutation]) {
+              const result = yield* withNativeFileLockWaitBudget(
+                withExclusiveFileLockLease(fs, lock, selected, () => Effect.void),
+              ).pipe(Effect.result);
+              expect(Result.isFailure(result)).toBe(true);
+              if (Result.isFailure(result)) expect(result.failure).toMatchObject({_tag: 'FileLockTimeout'});
+            }
+            yield* Effect.promise(async () => {
+              await child.stdin.write(disposition);
+              await child.stdin.end();
+            });
+            expect(yield* Effect.promise(() => child.exited)).toBe(0);
+            let saved: (() => void) | undefined;
+            yield* withExclusiveFileLockLease(fs, operation, selected, outer =>
+              withExclusiveFileLockLease(fs, mutation, selected, inner =>
+                Effect.gen(function* () {
+                  yield* Effect.sync(() => {
+                    outer.assertCurrentSync();
+                    inner.assertCurrentSync();
+                    saved = inner.assertCurrentSync;
+                  });
+                  yield* Effect.sleep(60); // Real same-HANDLE heartbeat must survive its own share0 exclusion.
+                  yield* inner.assertCurrent;
+                }),
+              ),
+            );
+            expect(() => saved?.()).toThrow();
+            expect(() =>
+              runtimePublishPrivateWriterFile(directory, 'lost-lease', new Uint8Array([1]), {
+                mode: 'exclusive',
+                nonce: 'abcdef0123456789abcdef0123456789',
+                assertCurrentSync: saved!,
+              }),
+            ).toThrow();
+            expect(yield* fs.exists(path.join(directory.path, 'lost-lease'))).toBe(false);
+            expect(yield* fs.exists(operation)).toBe(false);
+            expect(yield* fs.exists(mutation)).toBe(false);
+          }
+        }),
+      ),
+    ),
 );
