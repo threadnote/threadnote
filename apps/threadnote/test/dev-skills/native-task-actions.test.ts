@@ -1713,7 +1713,7 @@ describe('native task actions', () => {
     'recovers an unchanged-tree rebase through the task snapshot facade without carrying review or validation',
     () =>
       Effect.gen(function* () {
-        const f = yield* fixture(['one'], 'local');
+        const f = yield* fixture(['one'], 'pr');
         yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "feature";\n');
         yield* f.git(['commit', '-am', 'Feature snapshot']);
         const head = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
@@ -1750,6 +1750,29 @@ describe('native task actions', () => {
           userAuthority: 'Rebase this approved feature onto updated main.',
         };
         const bytes = yield* f.fs.readFileString(f.statePath());
+        const report = {
+          mode: 'full',
+          selected: ['correctness', 'simplicity'],
+          lanes: [
+            {name: 'correctness', status: 'complete'},
+            {name: 'simplicity', status: 'complete'},
+          ],
+          findings: [],
+        };
+        expect(
+          yield* runNativeTaskActionCore(f.config, {
+            command: 'record-review',
+            runId: 'native-run',
+            callerCwd: f.repo,
+            snapshotRef,
+            report,
+          }).pipe(Effect.result),
+        ).toMatchObject({failure: {code: 'source-drift'}});
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(bytes);
+        const afterRejectedReview = yield* readNativeWorkflowState(f.config, 'native-run');
+        expect(afterRejectedReview?.state.cycle?.attempts).toEqual(before?.state.cycle?.attempts);
+        expect(afterRejectedReview?.state.cycle?.reviews).toEqual(before?.state.cycle?.reviews);
+
         expect(
           yield* runNativeTaskActionCore(f.config, {...request, userAuthority: '   '}).pipe(Effect.result),
         ).toMatchObject({failure: {code: 'invalid-rebase-recovery'}});
@@ -1800,6 +1823,45 @@ describe('native task actions', () => {
           }),
         );
         expect(reviewed.status).toBe('recorded');
+        const validated = object(
+          yield* runNativeTaskAction(f.config, {
+            command: 'record-validation',
+            runId: 'native-run',
+            callerCwd: f.repo,
+            snapshotRef: recovered.snapshotRef,
+            validation: {
+              checks: [
+                {command: 'same-tree source check', result: 'passed', evidence: 'Actual rebase source was read.'},
+              ],
+              acceptance: [{criterion: 'one works', result: 'passed', evidence: 'Recovered source and history match.'}],
+            },
+          }),
+        );
+        const publication = {exemption: 'small-fix', reason: 'Private same-tree recovery fixture.'};
+        expect(yield* f.mutate('publication-ready', {phaseId: 'one', publication})).toMatchObject({
+          status: 'ok',
+          tree: captured.tree,
+        });
+        const prHead = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
+        expect(
+          object(
+            yield* runNativeTaskAction(f.config, {
+              command: 'deliver-pr',
+              runId: 'native-run',
+              callerCwd: f.repo,
+              validationRef: String(validated.validationRef),
+              commitEvidence: 'Recovered exact source ' + prHead,
+              publication,
+              pr: {
+                url: 'https://github.com/example/repo/pull/1058',
+                headSha: prHead,
+                branch: 'feature/one',
+                baseBranch: 'main',
+                state: 'open',
+              },
+            }),
+          ),
+        ).toMatchObject({status: 'watch-required'});
       }).pipe(run),
   );
 
@@ -3627,6 +3689,7 @@ describe('native task actions', () => {
         ],
         findings: [],
       };
+      yield* f.git(['commit', '--allow-empty', '-m', 'Same-tree PR build marker']);
       yield* runNativeTaskAction(f.config, {
         command: 'record-review',
         runId: 'native-run',
@@ -3634,7 +3697,6 @@ describe('native task actions', () => {
         snapshotRef,
         report,
       });
-      yield* f.git(['commit', '--allow-empty', '-m', 'Same-tree PR build marker']);
       const validation = object(
         yield* runNativeTaskAction(f.config, {
           command: 'record-validation',

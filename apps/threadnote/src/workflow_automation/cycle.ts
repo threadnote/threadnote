@@ -67,7 +67,7 @@ import {
   persistNativeCycleOrdinaryMerge,
   hasNativeCycleMergePlanBinding,
 } from './cycle_merge.js';
-import {bindNativeCycleDeliveryBase} from './cycle_delivery.js';
+import {bindNativeCycleDeliveryBase, verifyNativeCyclePrDeliveryIdentity} from './cycle_delivery.js';
 import {verifyNativeCycleSnapshotEvidence, verifyNativeCycleUnreviewedRebase} from './cycle_recovery.js';
 import type {NativeAuthoringCall} from './authoring_artifacts.js';
 import * as EffectRecord from 'effect/Record';
@@ -286,7 +286,8 @@ const currentSnapshot = Effect.fn('workflowAutomation.cycle.checkSnapshot')(func
     current.tree !== snapshot.tree ||
     (current.head !== snapshot.head &&
       (acceptedHead !== current.head ||
-        Effect2.pipe(yield* git(repo, ['rev-parse', 'HEAD^{tree}']), EffectString.trim) !== snapshot.tree))
+        Effect2.pipe(yield* git(repo, ['rev-parse', 'HEAD^{tree}']), EffectString.trim) !== snapshot.tree ||
+        !(yield* nativeCycleIsAncestor(repo, snapshot.head, current.head))))
   )
     return yield* fail('source-drift', 'Current HEAD/tree differs from the immutable review snapshot.');
   return current;
@@ -1380,6 +1381,12 @@ export const runNativeCycle = <R>(
         if (request.command === 'publication-ready' || request.command === 'record-delivery') {
           const selected = yield* from(getPhase);
           const proof = state.phases[selected.id];
+          if (
+            request.command === 'record-delivery' &&
+            proof.delivery &&
+            stableJson(request.delivery) === stableJson(proof.delivery)
+          )
+            return {status: 'ok', revision: stored.revision, next: nextNativeCycle(state)};
           if (request.command === 'record-delivery' && proof.status === 'merged') {
             const replay = yield* from(() => recordNativeCycleDelivery(state, selected.id, request.delivery));
             return {status: 'ok', revision: stored.revision, next: nextNativeCycle(replay)};
@@ -1468,16 +1475,38 @@ export const runNativeCycle = <R>(
               );
             incomingDelivery = checkedHistoricalBase;
           } else {
-            const source = EffectOption.getOrUndefined(
-              EffectArray.findFirst(
-                runtime.snapshots,
-                entry =>
-                  entry.snapshot.phaseId === selected.id &&
-                  entry.snapshot.phaseHash === proof.phaseHash &&
-                  entry.snapshot.tree === proof.tree,
-              ),
-            );
-            if (!source) return yield* fail('review-pending', 'Retain the exact reviewed snapshot before publication.');
+            const source = EffectArray.filter(
+              runtime.snapshots,
+              entry =>
+                entry.snapshot.phaseId === selected.id &&
+                entry.snapshot.phaseHash === proof.phaseHash &&
+                nativeCycleSnapshotIsCurrentIteration(runtime, selected.id, entry.snapshot.snapshotId),
+            ).at(-1);
+            const review = source
+              ? EffectOption.getOrUndefined(
+                  EffectArray.findFirst(
+                    runtime.reviews,
+                    entry =>
+                      entry.snapshotId === source.snapshot.snapshotId &&
+                      entry.report.phaseHash === proof.phaseHash &&
+                      entry.report.snapshotTree === proof.tree,
+                  ),
+                )?.report
+              : undefined;
+            if (
+              !source ||
+              source.snapshot.tree !== proof.tree ||
+              !review ||
+              EffectArray.some(
+                review.findings,
+                finding =>
+                  ['critical', 'important'].includes(finding.severity) && ['new', 'carried'].includes(finding.state),
+              )
+            )
+              return yield* fail(
+                'review-pending',
+                'Retain the current reviewed validation snapshot before publication.',
+              );
             const liveHead = EffectString.trim(yield* git(repo, ['rev-parse', 'HEAD']));
             const current = yield* currentSnapshot(repo, source.snapshot, liveHead, selected);
             if (
@@ -1515,7 +1544,12 @@ export const runNativeCycle = <R>(
           } else {
             delivery = yield* bindNativeCycleDeliveryBase(repo, selected.baseBranch, request.delivery);
           }
-          if (delivery.pr?.baseRefBinding) {
+          if (delivery.delivery === 'pr')
+            yield* verifyNativeCyclePrDeliveryIdentity(repo, delivery, {
+              requireEvidence: priorDelivery === undefined,
+              allowMerged: delivery.pr?.state === 'merged',
+            });
+          if (delivery.delivery === 'pr' || delivery.pr?.baseRefBinding) {
             if (historicalMergeCandidate) {
               const afterHead = Effect2.pipe(
                 yield* git(repo, [
@@ -1533,7 +1567,15 @@ export const runNativeCycle = <R>(
               if (afterHead !== currentHead || afterTree !== currentTree)
                 return yield* fail('source-drift', 'The published phase branch changed during base verification.');
             } else {
-              const after = yield* captureNativeCycleSource(repo, 'HEAD');
+              const source = EffectArray.filter(
+                runtime.snapshots,
+                entry =>
+                  entry.snapshot.phaseId === selected.id &&
+                  entry.snapshot.phaseHash === proof.phaseHash &&
+                  nativeCycleSnapshotIsCurrentIteration(runtime, selected.id, entry.snapshot.snapshotId),
+              ).at(-1);
+              if (!source) return yield* fail('review-pending', 'The current reviewed source is unavailable.');
+              const after = yield* currentSnapshot(repo, source.snapshot, currentHead, selected);
               if (
                 after.head !== currentHead ||
                 after.tree !== currentTree ||

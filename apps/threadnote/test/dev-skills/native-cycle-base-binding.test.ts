@@ -6,6 +6,7 @@ import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
 import {decodeNativeCycleRuntime} from '@threadnote/workflow-automations/cycle-runtime';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {StandaloneBrokerLayer} from '../../src/effect/runtime-bootstrap.js';
+import {readNativeWorkflowState, serializeNativeWorkflowState} from '../../src/workflow_automation/store.js';
 import {bindNativeCycleDeliveryBase} from '../../src/workflow_automation/cycle_delivery.js';
 import {fixture, object, run as lifecycleRun, windowsCycleFixtureTimeout} from './native-cycle-lifecycle-fixture.js';
 
@@ -286,6 +287,21 @@ describe('native cycle remote base binding', () => {
             evidence: 'Owned synthetic watch receipt.',
           },
         };
+        const providerIdentity = {
+          url: delivery.pr.url,
+          number: 1,
+          baseRepository: 'example/repo',
+          headRepository: 'example/repo',
+          baseBranch: 'main',
+          headBranch: 'feature/one',
+          headSha: head,
+          state: 'open' as const,
+        };
+        const modernDelivery = {
+          ...delivery,
+          userAuthority: 'The fixture user approved this exact PR delivery.',
+          providerIdentity,
+        };
         const bytes = yield* f.fs.readFileString(f.statePath());
         expect(
           yield* f
@@ -294,93 +310,164 @@ describe('native cycle remote base binding', () => {
         ).toMatchObject({_tag: 'Failure'});
         expect(yield* f.fs.readFileString(f.statePath())).toBe(bytes);
         const executor = yield* CommandExecutor;
-        let sourceChanged = false;
-        const sourceDrift = CommandExecutor.of({
+        let observedHead = head;
+        let providerMerged = false;
+        let observations = 0;
+        const provider = CommandExecutor.of({
           ...executor,
-          execute: (executable, args, options) =>
-            executor.execute(executable, args, options).pipe(
-              Effect.tap(() => {
-                if (!sourceChanged && args.includes('get-url')) {
-                  sourceChanged = true;
-                  return f.fs
-                    .writeFileString(f.path.join(f.repo, 'source.ts'), 'export const drift = true;\n')
-                    .pipe(Effect.orDie);
-                }
-                return Effect.void;
-              }),
-            ),
-        });
-        expect(
-          yield* f
-            .mutate('record-delivery', {phaseId: 'one', publication, delivery})
-            .pipe(Effect.provideService(CommandExecutor, sourceDrift), Effect.result),
-        ).toMatchObject({failure: {code: 'source-drift'}});
-        expect(sourceChanged).toBe(true);
-        expect(yield* f.fs.readFileString(f.statePath())).toBe(bytes);
-        yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "bound";\n');
-        yield* f.mutate('record-delivery', {phaseId: 'one', publication, delivery});
-        const after = decodeNativeCycleRuntime(JSON.parse(yield* f.fs.readFileString(f.statePath())).cycle);
-        const canonicalOpenDelivery = after.state.phases.one.delivery;
-        if (canonicalOpenDelivery?.delivery !== 'pr' || !canonicalOpenDelivery.pr || !canonicalOpenDelivery.watch)
-          throw new Error('Expected the canonical stored open PR receipt and watch.');
-        const mergedDelivery = {
-          ...canonicalOpenDelivery,
-          pr: {...canonicalOpenDelivery.pr, state: 'merged' as const},
-          watch: {
-            ...canonicalOpenDelivery.watch,
-            state: 'terminal' as const,
-            evidence: 'The owned watch observed merge.',
+          execute: (executable, args, options) => {
+            if (executable === 'gh' && args.includes('--jq')) {
+              observations++;
+              return Effect.succeed({
+                exitCode: 0,
+                stderr: '',
+                stdout: JSON.stringify({
+                  ...providerIdentity,
+                  headSha: observedHead,
+                  state: providerMerged ? 'closed' : 'open',
+                  merged: providerMerged,
+                }),
+              });
+            }
+            return executor.execute(executable, args, options);
           },
-        };
-        for (const key of [
-          'plans',
-          'baselines',
-          'snapshots',
-          'reviews',
-          'attempts',
-          'reviewLimits',
-          'reviewExpansions',
-        ] as const)
-          expect(after[key]).toEqual(before[key]);
-        expect(after.state.plan).toEqual(before.state.plan);
-        expect(after.state.phases.one.phaseHash).toBe(before.state.phases.one.phaseHash);
-        expect(after.state.phases.one.delivery?.pr).toMatchObject({
-          baseBranch: 'main',
-          baseRefBinding: {ref: 'refs/remotes/origin/main'},
         });
-        yield* f.git(['remote', 'remove', 'origin']);
-        const publishedBytes = yield* f.fs.readFileString(f.statePath());
-        expect(
-          yield* f
-            .mutate('record-delivery', {
-              phaseId: 'one',
-              publication,
-              delivery: mergedDelivery,
-            })
-            .pipe(Effect.result),
-        ).toMatchObject({failure: {code: 'base-ref-unverified'}});
-        expect(yield* f.fs.readFileString(f.statePath())).toBe(publishedBytes);
-        yield* f.git(['remote', 'add', 'origin', 'https://github.com/example/repo.git']);
-        yield* f.git(['update-ref', 'refs/remotes/origin/main', base]);
-        yield* f.mutate('record-delivery', {
-          phaseId: 'one',
-          publication,
-          delivery: mergedDelivery,
-        });
-        const merged = decodeNativeCycleRuntime(JSON.parse(yield* f.fs.readFileString(f.statePath())).cycle);
-        yield* f.git(['remote', 'remove', 'origin']);
-        const mergedBytes = yield* f.fs.readFileString(f.statePath());
-        yield* f.mutate('record-delivery', {phaseId: 'one', delivery: merged.state.phases.one.delivery});
-        expect(yield* f.fs.readFileString(f.statePath())).toBe(mergedBytes);
-        expect(
-          yield* f
-            .mutate('record-delivery', {
-              phaseId: 'one',
-              delivery: {...merged.state.phases.one.delivery, commitEvidence: 'changed'},
-            })
-            .pipe(Effect.result),
-        ).toMatchObject({_tag: 'Failure'});
-        expect(yield* f.fs.readFileString(f.statePath())).toBe(mergedBytes);
+        return yield* Effect.gen(function* () {
+          expect(
+            yield* f.mutate('record-delivery', {phaseId: 'one', publication, delivery}).pipe(Effect.result),
+          ).toMatchObject({failure: {code: 'user-authority-required'}});
+          expect(observations).toBe(0);
+          expect(yield* f.fs.readFileString(f.statePath())).toBe(bytes);
+          observedHead = EffectString.repeat(40)('f');
+          expect(
+            yield* f
+              .mutate('record-delivery', {phaseId: 'one', publication, delivery: modernDelivery})
+              .pipe(Effect.result),
+          ).toMatchObject({failure: {code: 'pr-source-mismatch'}});
+          expect(observations).toBe(1);
+          expect(yield* f.fs.readFileString(f.statePath())).toBe(bytes);
+          observedHead = head;
+          let sourceChanged = false;
+          const sourceDrift = CommandExecutor.of({
+            ...provider,
+            execute: (executable, args, options) =>
+              provider.execute(executable, args, options).pipe(
+                Effect.tap(() => {
+                  if (!sourceChanged && args.includes('get-url')) {
+                    sourceChanged = true;
+                    return f.fs
+                      .writeFileString(f.path.join(f.repo, 'source.ts'), 'export const drift = true;\n')
+                      .pipe(Effect.orDie);
+                  }
+                  return Effect.void;
+                }),
+              ),
+          });
+          expect(
+            yield* f
+              .mutate('record-delivery', {phaseId: 'one', publication, delivery: modernDelivery})
+              .pipe(Effect.provideService(CommandExecutor, sourceDrift), Effect.result),
+          ).toMatchObject({failure: {code: 'source-drift'}});
+          expect(sourceChanged).toBe(true);
+          expect(yield* f.fs.readFileString(f.statePath())).toBe(bytes);
+          yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "bound";\n');
+          yield* f.mutate('record-delivery', {phaseId: 'one', publication, delivery: modernDelivery});
+          const after = decodeNativeCycleRuntime(JSON.parse(yield* f.fs.readFileString(f.statePath())).cycle);
+          const canonicalOpenDelivery = after.state.phases.one.delivery;
+          if (canonicalOpenDelivery?.delivery !== 'pr' || !canonicalOpenDelivery.pr || !canonicalOpenDelivery.watch)
+            throw new Error('Expected the canonical stored open PR receipt and watch.');
+          const mergedDelivery = {
+            ...canonicalOpenDelivery,
+            pr: {...canonicalOpenDelivery.pr, state: 'merged' as const},
+            watch: {
+              ...canonicalOpenDelivery.watch,
+              state: 'terminal' as const,
+              evidence: 'The owned watch observed merge.',
+            },
+          };
+          for (const key of [
+            'plans',
+            'baselines',
+            'snapshots',
+            'reviews',
+            'attempts',
+            'reviewLimits',
+            'reviewExpansions',
+          ] as const)
+            expect(after[key]).toEqual(before[key]);
+          expect(after.state.plan).toEqual(before.state.plan);
+          expect(after.state.phases.one.phaseHash).toBe(before.state.phases.one.phaseHash);
+          expect(after.state.phases.one.delivery?.pr).toMatchObject({
+            baseBranch: 'main',
+            baseRefBinding: {ref: 'refs/remotes/origin/main'},
+          });
+          yield* f.git(['remote', 'remove', 'origin']);
+          const publishedBytes = yield* f.fs.readFileString(f.statePath());
+          expect(
+            yield* f
+              .mutate('record-delivery', {
+                phaseId: 'one',
+                publication,
+                delivery: mergedDelivery,
+              })
+              .pipe(Effect.result),
+          ).toMatchObject({failure: {code: 'base-ref-unverified'}});
+          expect(yield* f.fs.readFileString(f.statePath())).toBe(publishedBytes);
+          yield* f.git(['remote', 'add', 'origin', 'https://github.com/example/repo.git']);
+          yield* f.git(['update-ref', 'refs/remotes/origin/main', base]);
+          providerMerged = true;
+          yield* f.mutate('record-delivery', {
+            phaseId: 'one',
+            publication,
+            delivery: mergedDelivery,
+          });
+          const merged = decodeNativeCycleRuntime(JSON.parse(yield* f.fs.readFileString(f.statePath())).cycle);
+          yield* f.git(['remote', 'remove', 'origin']);
+          const mergedBytes = yield* f.fs.readFileString(f.statePath());
+          yield* f.mutate('record-delivery', {phaseId: 'one', delivery: merged.state.phases.one.delivery});
+          expect(yield* f.fs.readFileString(f.statePath())).toBe(mergedBytes);
+          expect(
+            yield* f
+              .mutate('record-delivery', {
+                phaseId: 'one',
+                delivery: {...merged.state.phases.one.delivery, commitEvidence: 'changed'},
+              })
+              .pipe(Effect.result),
+          ).toMatchObject({_tag: 'Failure'});
+          expect(yield* f.fs.readFileString(f.statePath())).toBe(mergedBytes);
+          const stored = yield* readNativeWorkflowState(f.config, 'native-run');
+          if (!stored?.state.cycle?.state.phases.one.delivery) throw new Error('Expected canonical merged proof.');
+          const {
+            userAuthority: _authority,
+            providerIdentity: _identity,
+            ...legacyReceipt
+          } = stored.state.cycle.state.phases.one.delivery;
+          const legacyState = {
+            ...stored.state,
+            cycle: {
+              ...stored.state.cycle,
+              state: {
+                ...stored.state.cycle.state,
+                phases: {
+                  ...stored.state.cycle.state.phases,
+                  one: {...stored.state.cycle.state.phases.one, delivery: legacyReceipt},
+                },
+              },
+            },
+          };
+          yield* Effect.acquireUseRelease(
+            f.fs.writeFileString(f.statePath(), serializeNativeWorkflowState(legacyState)),
+            () =>
+              Effect.gen(function* () {
+                const legacyBytes = yield* f.fs.readFileString(f.statePath());
+                const beforeReplay = observations;
+                yield* f.mutate('record-delivery', {phaseId: 'one', delivery: legacyReceipt});
+                expect(yield* f.fs.readFileString(f.statePath())).toBe(legacyBytes);
+                expect(observations).toBe(beforeReplay);
+              }),
+            () => f.fs.writeFileString(f.statePath(), mergedBytes),
+          );
+        }).pipe(Effect.provideService(CommandExecutor, provider));
       }).pipe(lifecycleRun),
     windowsCycleFixtureTimeout,
   );

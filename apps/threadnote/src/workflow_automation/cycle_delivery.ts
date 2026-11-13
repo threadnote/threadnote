@@ -3,13 +3,15 @@ import {runCommandEffect} from '@threadnote/platform/command';
 import {normalizeGitRemoteUrl} from '@threadnote/remote-memory/git/canonical_store';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import {NativeCycleDeliverySchema, type NativeCycleDelivery} from '@threadnote/workflow-automations/cycle';
-import {nativeWatchPullRequest} from './watch_provider.js';
+import {nativeWatchPullRequest, verifyNativeWatchPullIdentity} from './watch_provider.js';
+import {stableJson} from '../workflow_memory/protocol.js';
 
 const invalid = () =>
   WorkflowAutomationError.make({
     code: 'base-ref-unverified',
     message: 'PR base requires an unambiguous standard remote-tracking ref in the same GitHub repository.',
   });
+const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
 const remoteName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const supportedURL =
   /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/?$/u;
@@ -136,3 +138,43 @@ export const bindNativeCycleDeliveryBase = Effect.fn('workflowAutomation.cycle.b
     Effect.catchIf(Cause.isTimeoutError, () => Effect.fail(invalid())),
   );
 });
+
+/** Caller fields and opaque refs are evidence to compare, never proof that this observation occurred. */
+export const verifyNativeCyclePrDeliveryIdentity = (
+  checkout: string,
+  receipt: NativeCycleDelivery | undefined,
+  options: {readonly allowMerged?: boolean; readonly requireEvidence?: boolean} = {},
+) =>
+  Effect.gen(function* () {
+    const allowMerged = options.allowMerged === true;
+    if (!receipt?.pr) return yield* fail('invalid-pr-receipt', 'PR delivery evidence is missing.');
+    if (
+      options.requireEvidence &&
+      (!receipt.userAuthority || !EffectString.trim(receipt.userAuthority) || !receipt.providerIdentity)
+    )
+      return yield* fail(
+        'user-authority-required',
+        'A first canonical PR delivery requires actual userAuthority and provider evidence, followed by fresh runtime verification.',
+      );
+    yield* verifyNativeCycleDeliveryRepository(checkout, receipt);
+    const identity = yield* verifyNativeWatchPullIdentity(receipt.pr.url);
+    if (
+      EffectString.toLowerCase(identity.headRepository) !== EffectString.toLowerCase(identity.baseRepository) ||
+      identity.headSha !== receipt.headSha ||
+      identity.headBranch !== receipt.pr.branch ||
+      identity.baseBranch !== receipt.pr.baseBranch ||
+      (identity.state !== receipt.pr.state && !(allowMerged && identity.state === 'merged'))
+    )
+      return yield* fail(
+        'pr-source-mismatch',
+        'The remote PR repository, branches, state and exact head must match the validated phase.',
+      );
+    const retainedIdentity = receipt.providerIdentity;
+    if (
+      retainedIdentity &&
+      stableJson({...identity, state: allowMerged ? retainedIdentity.state : identity.state}) !==
+        stableJson(retainedIdentity)
+    )
+      return yield* fail('pr-source-mismatch', 'The provider identity changed from its exact provisional evidence.');
+    return identity;
+  });

@@ -7,9 +7,12 @@ import * as Clock from 'effect/Clock';
 import * as EffectString from 'effect/String';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
-import {bindNativeCycleDeliveryBase, verifyNativeCycleDeliveryRepository} from './cycle_delivery.js';
+import {
+  bindNativeCycleDeliveryBase,
+  verifyNativeCycleDeliveryRepository,
+  verifyNativeCyclePrDeliveryIdentity,
+} from './cycle_delivery.js';
 import {runWorkflowAutomation} from './index.js';
-import {verifyNativeWatchPullIdentity} from './watch_provider.js';
 import {readNativeWorkflowState} from './store.js';
 import {readNativeTaskView} from './task.js';
 import {runNativeWatch} from './watch.js';
@@ -146,36 +149,6 @@ export const runNativeTaskCommitDelivery = (
     return {status: 'delivered', replayed: false, deliveryRef, receipt: persisted, next: cycle.next};
   });
 
-const verifyPrIdentity = (
-  checkout: string,
-  receipt: NativeTaskCycleRuntime['state']['phases'][string]['delivery'],
-  allowMerged = false,
-) =>
-  Effect.gen(function* () {
-    if (!receipt?.pr) return yield* fail('invalid-pr-receipt', 'PR delivery evidence is missing.');
-    yield* verifyNativeCycleDeliveryRepository(checkout, receipt);
-    const identity = yield* verifyNativeWatchPullIdentity(receipt.pr.url);
-    if (
-      EffectString.toLowerCase(identity.headRepository) !== EffectString.toLowerCase(identity.baseRepository) ||
-      identity.headSha !== receipt.headSha ||
-      identity.headBranch !== receipt.pr.branch ||
-      identity.baseBranch !== receipt.pr.baseBranch ||
-      (identity.state !== receipt.pr.state && !(allowMerged && identity.state === 'merged'))
-    )
-      return yield* fail(
-        'pr-source-mismatch',
-        'The remote PR repository, branches, state and exact head must match the validated phase.',
-      );
-    const retainedIdentity = receipt.providerIdentity;
-    if (
-      retainedIdentity &&
-      stableJson({...identity, state: allowMerged ? retainedIdentity.state : identity.state}) !==
-        stableJson(retainedIdentity)
-    )
-      return yield* fail('pr-source-mismatch', 'The provider identity changed from its exact provisional evidence.');
-    return identity;
-  });
-
 export const runNativeTaskPrDelivery = (
   config: RuntimeConfig,
   request: Extract<NativeTaskActionRequest, {command: 'deliver-pr'}>,
@@ -265,7 +238,7 @@ export const runNativeTaskPrDelivery = (
     }
     const providerIdentity = proof.delivery
       ? proof.delivery.providerIdentity
-      : yield* verifyPrIdentity(checkout, supplied);
+      : yield* verifyNativeCyclePrDeliveryIdentity(checkout, supplied);
     const receipt = yield* Schema.decodeEffect(NativeCycleDeliverySchema, {onExcessProperty: 'error'})({
       ...(userAuthority ? {userAuthority} : {}),
       ...(providerIdentity ? {providerIdentity} : {}),
@@ -326,7 +299,7 @@ export const runNativeTaskPrDelivery = (
       payloadDigest: deliveryDigest,
       delivery: receipt,
     });
-    yield* verifyPrIdentity(checkout, receipt);
+    yield* verifyNativeCyclePrDeliveryIdentity(checkout, receipt);
     if (request.pr.state === 'open') yield* bindNativeCycleDeliveryBase(checkout, phase.baseBranch, receipt);
     const afterIdentity = unwrapCycle(
       yield* inCheckout(
@@ -967,7 +940,8 @@ export const runNativeTaskPrWatch = (
         if (ready.head !== embeddedDelivery.headSha || ready.tree !== validation.sourceTree)
           return yield* fail('source-drift', 'The current source no longer matches the reviewed PR snapshot.');
       }
-      if (!canonicalReceipt) yield* verifyPrIdentity(checkout, embeddedDelivery, terminal);
+      if (!canonicalReceipt)
+        yield* verifyNativeCyclePrDeliveryIdentity(checkout, embeddedDelivery, {allowMerged: terminal});
       const finalReceiptPr = finalReceipt.pr;
       if (!finalReceiptPr) return yield* fail('invalid-watch-receipt', 'The canonical watch PR identity is missing.');
       const {baseRefBinding: _baseRefBinding, ...unboundReceiptPr} = finalReceiptPr;
