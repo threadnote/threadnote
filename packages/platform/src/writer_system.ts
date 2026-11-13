@@ -6,8 +6,14 @@ import {RuntimeWriterFault, writerFail as fail} from './writer-system/fault.js';
 import {commitWriterTransaction} from './writer-system/writer-transaction.js';
 import {
   openWindowsWriterRoot,
+  openWindowsPrivateDirectory,
+  openWindowsPrivateAuthority,
+  provisionWindowsPrivateDirectory,
+  type WindowsPrivateDirectory,
+  type WindowsPrivateLease,
   type WindowsWriterRoot,
   type WindowsWriterTarget,
+  type WindowsSourceWitness,
 } from './writer-system/windows-writer.js';
 import {
   posixWriterLibrary as library,
@@ -143,6 +149,7 @@ interface TargetState {
 const roots = new WeakMap<RuntimeWriterRoot, DirectoryState>();
 const directories = new WeakMap<RuntimePrivateWriterDirectory, DirectoryState>();
 const targets = new WeakMap<RuntimeGuardedDiskTarget, TargetState>();
+const windowsDirectories = new WeakMap<RuntimePrivateWriterDirectory, WindowsPrivateDirectory>();
 const windowsRoots = new WeakMap<RuntimeWriterRoot, WindowsWriterRoot>();
 const windowsTargets = new WeakMap<RuntimeGuardedDiskTarget, WindowsWriterTarget>();
 const last = (state: DirectoryState) => state.chain[state.chain.length - 1];
@@ -206,10 +213,10 @@ function checkDirectory(state: DirectoryState) {
   if (state.closed) fail('identity');
   checkEdges(state.chain);
 }
-// A directory's entries may move ctime/mtime/size/nlink without changing its retained
-// identity or security. Recheck the complete ACL and current parent name once; never
-// retry a failed ACL/volume proof or a sampled identity/owner/mode change.
-function assertPrivateDirectoryAcl(edge: Edge, parent: Edge | undefined, privateObject: boolean): void {
+// Ancestor entry changes do not version the selected private namespace. Bind their
+// complete ACL image and current name/identity instead. The protected final directory
+// retains its data-coherence check; failed ACL/volume or critical metadata never retries.
+function assertPrivateDirectoryAcl(edge: Edge, parent: Edge | undefined, privateObject: boolean, ordinal = 0): void {
   const sameCritical = (info: ReturnType<typeof stat>) =>
     info.isDirectory() &&
     same(edge.identity, info) &&
@@ -229,12 +236,22 @@ function assertPrivateDirectoryAcl(edge: Edge, parent: Edge | undefined, private
     const before = stat(edge.fd),
       namedBefore = namedStat();
     if (!sameCritical(before) || !sameCritical(namedBefore)) fail('private-storage');
-    assertPosixPrivateAcl(edge.fd, privateObject, before);
+    const security = assertPosixPrivateAcl(edge.fd, privateObject, before);
     // This fresh nofollow reopen cannot inherit an earlier allowed ACL sample across
     // directory-data movement: incoherence requires another full ACL sample.
     const namedAfter = namedStat(),
       after = stat(edge.fd);
     if (!sameCritical(after) || !sameCritical(namedAfter)) fail('private-storage');
+    if (!privateObject) {
+      // Ancestor entries may change independently of this private namespace. Require the
+      // same complete native ACL image plus retained/current-name identity, owner and mode.
+      const closingSecurity = assertPosixPrivateAcl(edge.fd, false, after),
+        closing = stat(edge.fd),
+        namedClosing = namedStat();
+      if (!sameCritical(closing) || !sameCritical(namedClosing) || !equalBytes(security, closingSecurity))
+        fail('private-storage');
+      return;
+    }
     if (stable(before, namedBefore) && stable(before, namedAfter) && stable(before, after)) return;
     if (attempt !== 0) {
       const error = RuntimeWriterFault.make({reason: 'private-storage'});
@@ -248,7 +265,7 @@ function assertPrivateDirectoryAcl(edge: Edge, parent: Edge | undefined, private
         ] as const)
           for (const field of ['nlink', 'size', 'ctimeNs', 'mtimeNs'] as const)
             if (before[field] !== sample[field]) changed.push(`${name}.${field}`);
-        error.message = `directory-coherence:${EffectArray.join(changed, ',')}`;
+        error.message = `directory-coherence:${privateObject ? 'private' : 'ancestor'}:${ordinal}:${EffectArray.join(changed, ',')}`;
       } catch {
         // Diagnostic projection must never replace the original conservative fault.
       }
@@ -263,7 +280,7 @@ function directoryState(directory: RuntimePrivateWriterDirectory) {
   const info = stat(last(state).fd);
   if (info.uid !== BigInt(runtimeCurrentUserId() ?? -1) || (info.mode & 0o077n) !== 0n) fail('private-storage');
   for (let index = 0; index < state.chain.length; index++)
-    assertPrivateDirectoryAcl(state.chain[index], state.chain[index - 1], index === state.chain.length - 1);
+    assertPrivateDirectoryAcl(state.chain[index], state.chain[index - 1], index === state.chain.length - 1, index);
   return state;
 }
 function requireFile(info: ReturnType<typeof stat>, bound: number, writable: boolean) {
@@ -417,6 +434,17 @@ export function runtimeInspectGuardedDiskTarget(handle: RuntimeGuardedDiskTarget
   targetState(handle);
   return {...result, physicalIdentity: physical(result.identity)};
 }
+/** Compares historical data only; it neither authenticates an envelope nor enrolls a writer.
+ * Exact snapshot/before bytes are required here. Recovery cannot opt out of them through this API.
+ */
+export function runtimeGuardedDiskTargetMatchesWindowsSourceWitness(
+  handle: RuntimeGuardedDiskTarget,
+  earlier: WindowsSourceWitness,
+): boolean {
+  const windows = windowsTargets.get(handle);
+  if (!windows) return fail('identity');
+  return windows.matchesSourceWitness(earlier);
+}
 export type RuntimeGuardedDiskWriteResult =
   | {readonly status: 'applied'; readonly current: RuntimeGuardedDiskObservation}
   | {readonly status: 'conflict'; readonly reason: 'path' | 'readonly' | 'source-changed'}
@@ -476,6 +504,12 @@ export function runtimeCloseGuardedDiskTarget(handle: RuntimeGuardedDiskTarget):
 }
 /** Opens a caller-authorized private directory through identical native guards; useful for narrow dependency injection. */
 export function runtimeOpenPrivateWriterDirectory(canonicalPath: string): RuntimePrivateWriterDirectory {
+  if (runtimeCurrentPlatform() === 'win32') {
+    const windows = openWindowsPrivateDirectory(canonicalPath);
+    const handle: RuntimePrivateWriterDirectory = Object.freeze({[privateBrand]: true as const, path: canonicalPath});
+    windowsDirectories.set(handle, windows);
+    return handle;
+  }
   const state = openDirectory(canonicalPath);
   const handle: RuntimePrivateWriterDirectory = Object.freeze({[privateBrand]: true as const, path: canonicalPath});
   directories.set(handle, state);
@@ -487,11 +521,26 @@ export function runtimeOpenPrivateWriterDirectory(canonicalPath: string): Runtim
     throw error;
   }
 }
+/** Explicit setup only: missing Windows private children need a strict private parent or the actual account home. */
+export function runtimeProvisionPrivateWriterDirectory(canonicalPath: string): RuntimePrivateWriterDirectory {
+  if (runtimeCurrentPlatform() !== 'win32') return runtimeOpenPrivateWriterDirectory(canonicalPath);
+  const windows = provisionWindowsPrivateDirectory(canonicalPath);
+  const handle: RuntimePrivateWriterDirectory = Object.freeze({[privateBrand]: true as const, path: windows.path});
+  windowsDirectories.set(handle, windows);
+  return handle;
+}
 export function runtimeOpenPrivateWriterChild(
   directory: RuntimePrivateWriterDirectory,
   name: string,
   create: boolean,
 ): RuntimePrivateWriterDirectory {
+  const windows = windowsDirectories.get(directory);
+  if (windows) {
+    const child = windows.child(name, create);
+    const handle: RuntimePrivateWriterDirectory = Object.freeze({[privateBrand]: true as const, path: child.path});
+    windowsDirectories.set(handle, child);
+    return handle;
+  }
   const state = directoryState(directory);
   const bytes = nameBytes(name);
   if (create) {
@@ -507,7 +556,7 @@ export function runtimeOpenPrivateWriterChild(
     const info = stat(child);
     if (!info.isDirectory() || info.uid !== BigInt(runtimeCurrentUserId() ?? -1) || (info.mode & 0o077n) !== 0n)
       fail('private-storage');
-    assertPrivateDirectoryAcl({fd: child, identity: info, name}, last(state), true);
+    assertPrivateDirectoryAcl({fd: child, identity: info, name}, last(state), true, state.chain.length);
   } finally {
     native.closeSync(child);
   }
@@ -524,13 +573,19 @@ export function runtimeOpenPrivateWriterChild(
 export function runtimeOpenPrivateWriterAuthority(
   identity: RuntimeStableOsUserIdentity,
 ): RuntimePrivateWriterDirectory {
+  if (identity.platform === 'win32') {
+    if (runtimeCurrentPlatform() !== 'win32') return fail('unsupported-platform');
+    const windows = openWindowsPrivateAuthority(identity.accountHome, identity.userId);
+    const handle: RuntimePrivateWriterDirectory = Object.freeze({[privateBrand]: true as const, path: windows.path});
+    windowsDirectories.set(handle, windows);
+    return handle;
+  }
   supported();
-  if (identity.platform === 'win32') return fail('unsupported-platform');
   if (identity.userId !== runtimeCurrentUserId()) fail('identity');
   const home = openDirectory(identity.accountHome);
   try {
     for (let index = 0; index < home.chain.length; index++)
-      assertPrivateDirectoryAcl(home.chain[index], home.chain[index - 1], false);
+      assertPrivateDirectoryAcl(home.chain[index], home.chain[index - 1], false, index);
     if (
       EffectArray.some(
         home.chain,
@@ -556,12 +611,16 @@ export function runtimeOpenPrivateWriterAuthority(
   }
 }
 export function runtimeClosePrivateWriterDirectory(directory: RuntimePrivateWriterDirectory): void {
+  const windows = windowsDirectories.get(directory);
+  if (windows) return windows.close();
   const state = directories.get(directory);
   if (!state || state.closed) return;
   state.closed = true;
   closeEdges(state.chain);
 }
 export function runtimeAssertPrivateWriterDirectoryCurrent(directory: RuntimePrivateWriterDirectory): void {
+  const windows = windowsDirectories.get(directory);
+  if (windows) return windows.assertCurrentSync();
   directoryState(directory);
 }
 export function runtimeReadPrivateWriterFile(
@@ -569,6 +628,8 @@ export function runtimeReadPrivateWriterFile(
   name: string,
   maximumBytes: number,
 ) {
+  const windows = windowsDirectories.get(directory);
+  if (windows) return windows.read(name, maximumBytes);
   const state = directoryState(directory);
   checkBound(maximumBytes);
   const parent = last(state).fd;
@@ -615,6 +676,8 @@ export function runtimePublishPrivateWriterFile(
   bytes: Uint8Array,
   input: {readonly mode: 'exclusive' | 'replace'; readonly assertCurrentSync: () => void; readonly nonce: string},
 ): RuntimePrivatePublishResult {
+  const windows = windowsDirectories.get(directory);
+  if (windows) return windows.publish(name, bytes, input);
   checkBound(bytes.byteLength);
   nameBytes(name);
   if (!/^[a-f0-9]{32,64}$/u.test(input.nonce)) fail('private-storage');
@@ -689,6 +752,8 @@ export function runtimeRemovePrivateWriterFile(
   expected: RuntimeWriterIdentity,
   assertCurrentSync: () => void,
 ): void {
+  const windows = windowsDirectories.get(directory);
+  if (windows) return windows.remove(name, expected, assertCurrentSync);
   const state = directoryState(directory);
   const observed = runtimeReadPrivateWriterFile(directory, name, maximumFileBytes);
   if (!observed || !stable(expected, observed.identity)) fail('private-storage');
@@ -740,4 +805,35 @@ export function runtimeReadWriterLockToken(path: string): {
 export function runtimeReadWriterProcessIdentity(processId: number): string {
   if (runtimeCurrentPlatform() !== 'win32') return readPosixProcessIdentity(processId);
   return readWindowsWriterProcessIdentity(processId);
+}
+
+/** Writer-only selection requires an issued native directory, never a path or native HANDLE grant. */
+export function runtimeAcquirePrivateWriterLease(
+  directory: RuntimePrivateWriterDirectory,
+  path: string,
+  token: string,
+): WindowsPrivateLease | undefined {
+  const windows = windowsDirectories.get(directory);
+  if (!windows || runtimeCurrentPlatform() !== 'win32') return fail('identity');
+  const prefix = windows.path + '\\';
+  if (!EffectString.startsWith(prefix)(path)) return fail('path');
+  return windows.acquireLease(EffectString.slice(prefix.length)(path), token);
+}
+// Host-only read evidence is exported through the platform facade, never a writable target.
+export {
+  captureWindowsSource as runtimeCaptureWindowsSource,
+  sameWindowsSourceEvidence as runtimeSameWindowsSourceEvidence,
+  exportWindowsSourceWitness as runtimeExportWindowsSourceWitness,
+  type WindowsSourceEvidence as RuntimeWindowsSourceEvidence,
+  type WindowsSourceWitness as RuntimeWindowsSourceWitness,
+} from './writer-system/windows-writer.js';
+
+/** Historical object comparison for authenticated journal observation only; never initial write eligibility. */
+export function runtimeGuardedDiskTargetObservesWindowsSourceObject(
+  handle: RuntimeGuardedDiskTarget,
+  earlier: WindowsSourceWitness,
+): boolean {
+  const windows = windowsTargets.get(handle);
+  if (!windows) return fail('identity');
+  return windows.observesSourceObject(earlier);
 }

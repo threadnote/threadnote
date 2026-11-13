@@ -61,6 +61,7 @@ export const runSemanticDoctor = Effect.fn('semantic.doctor')(function* (
   action: 'doctor' | 'status' | 'setup' | 'disable' = 'doctor',
 ) {
   let javaImportPolicy = 'not-assessed';
+  let javaImportMode: string | undefined;
   const result = (state: string, nextAction: string, details: object = {}) => ({
     version: 1 as const,
     action,
@@ -72,7 +73,13 @@ export const runSemanticDoctor = Effect.fn('semantic.doctor')(function* (
     policy: {
       automaticDownload: false,
       repositoryBuildPermission: false,
-      javaImport: {state: javaImportPolicy, execution: 'independent-pinned-importer-enforcement-required'},
+      javaImport: {
+        state: javaImportPolicy,
+        execution:
+          javaImportMode === 'trusted-java-build-import-unconfined-v1'
+            ? 'explicit-unconfined-grant-owned-build-support-required'
+            : 'independent-pinned-importer-enforcement-required',
+      },
       sourceReplay: false,
       productionQualified: false,
     },
@@ -112,6 +119,7 @@ export const runSemanticDoctor = Effect.fn('semantic.doctor')(function* (
       return yield* existing.failure;
     const selected = existing._tag === 'Success' ? existing.success : undefined;
     javaImportPolicy = selected?.profile.javaImport ? (selected.profile.enabled ? 'configured' : 'disabled') : 'absent';
+    javaImportMode = selected?.profile.javaImport?.mode;
     const profile = action === 'setup' ? (request.profile ?? selected?.profile) : selected?.profile;
     if (!profile) return result('missing', actions.missing);
     if (profile.worktree !== worktree) return result('incompatible', actions.incompatible);
@@ -130,6 +138,7 @@ export const runSemanticDoctor = Effect.fn('semantic.doctor')(function* (
       if (!selected || request.expectedDigest !== selected.digest) return result('incompatible', actions.incompatible);
       const written = yield* writeSemanticHostProfile(config, worktree, {...profile, enabled: false}, selected.digest);
       javaImportPolicy = profile.javaImport ? 'disabled' : 'absent';
+      javaImportMode = profile.javaImport?.mode;
       return result('disabled', actions.disabled, {profileDigest: written.digest, changed: written.changed});
     }
     if (!profile.enabled && action !== 'setup')
@@ -208,6 +217,7 @@ export const runSemanticDoctor = Effect.fn('semantic.doctor')(function* (
         );
       const written = yield* writeSemanticHostProfile(config, worktree, profile, request.expectedDigest);
       javaImportPolicy = profile.javaImport ? (profile.enabled ? 'configured' : 'disabled') : 'absent';
+      javaImportMode = profile.javaImport?.mode;
       return result(
         profile.enabled ? 'configured' : 'disabled',
         profile.enabled

@@ -1,6 +1,6 @@
 import {runtimeNativeDescriptorOperations} from '../system.js';
 import {dlopen, toArrayBuffer} from 'bun:ffi';
-import {Array as EffectArray, String as EffectString} from 'effect';
+import {Array as EffectArray, Schema, String as EffectString} from 'effect';
 import {withNativeArguments} from './native-arguments.js';
 import {writerFail as fail} from './fault.js';
 import {
@@ -375,13 +375,17 @@ interface BorrowedSecurityResources {
 export interface WindowsPrivateCreateResources extends BorrowedSecurityResources {
   readonly captureNative: WindowsNativeResourceOwner;
 }
+export class WindowsPrivateCreateBusy extends Schema.TaggedError<
+  WindowsPrivateCreateBusy,
+  {readonly brand: unique symbol}
+>()('WindowsPrivateCreateBusy', {}) {}
 export interface WindowsPrivateCreatedFile {
   readonly handle: bigint;
   readonly identity: NativeFileIdentity;
   readonly security: WindowsFileSecurity;
   close(): void;
 }
-function protectedSecurity(bytes: Uint8Array, principal: string): void {
+export function assertWindowsProtectedSecurity(bytes: Uint8Array, principal: string): void {
   if (bytes.length < 20) return fail('private-storage');
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength),
     owner = view.getUint32(4, true),
@@ -398,7 +402,7 @@ function protectedSecurity(bytes: Uint8Array, principal: string): void {
   )
     fail('private-storage');
 }
-function nativeName(kernel: NativeLibrary, handle: bigint): Uint8Array {
+export function windowsNativeName(kernel: NativeLibrary, handle: bigint): Uint8Array {
   const backing = new Uint8Array(65536 + 32);
   backing.fill(0xa5);
   if (
@@ -428,7 +432,7 @@ export function windowsCreatePrivateAt(
     principal = windowsTokenPrincipal(undefined, resources.captureNative).sid;
   assertParentCurrentSync();
   const parentIdentity = windowsFileIdentity(resources.kernel, parent),
-    parentName = nativeName(resources.kernel, parent);
+    parentName = windowsNativeName(resources.kernel, parent);
   if ((parentIdentity.attributes & 0x10) === 0 || windowsVolumeType(resources.kernel, parent) !== 'NTFS')
     return fail('private-storage');
   const security = resources.security,
@@ -472,7 +476,7 @@ export function windowsCreatePrivateAt(
       security.symbols.GetSecurityDescriptorLength(address) !== length[0]
     )
       return fail('private-storage');
-    protectedSecurity(new Uint8Array(toArrayBuffer(address, 0, length[0])).slice(), principal);
+    assertWindowsProtectedSecurity(new Uint8Array(toArrayBuffer(address, 0, length[0])).slice(), principal);
     const string = new BigUint64Array(2),
       stringView = new DataView(string.buffer),
       attributes = new BigUint64Array(6),
@@ -516,7 +520,8 @@ export function windowsCreatePrivateAt(
       if (status === 0x103 || output[0] !== 0n || !guarded.subarray(2).every(v => v === 0xa5a5a5a5a5a5a5a5n))
         return resources.uncertain(backing);
       settled = true;
-      return fail('private-storage'); // Collision/sharing/delete-pending is refusal, never absence or ownership.
+      if ([0xc0000035, 0xc0000043, 0xc0000056].includes(status >>> 0)) throw WindowsPrivateCreateBusy.make({});
+      return fail('private-storage'); // Access/path/I/O failures are never contention.
     }
     if (output[0] === 0n || output[0] === 0xffffffffffffffffn) return resources.uncertain(backing);
     const handle = output[0],
@@ -543,7 +548,7 @@ export function windowsCreatePrivateAt(
     const identity = windowsFileIdentity(resources.kernel, handle),
       actualSecurity = windowsReadFileSecurity(handle, principal, true, undefined, resources),
       after = windowsFileIdentity(resources.kernel, handle);
-    protectedSecurity(actualSecurity.bytes, principal);
+    assertWindowsProtectedSecurity(actualSecurity.bytes, principal);
     if (
       !same(identity, after) ||
       identity.volumeId !== parentIdentity.volumeId ||
@@ -558,7 +563,7 @@ export function windowsCreatePrivateAt(
     expectedName.set(parentName);
     if (separator) expectedName[parentName.length] = 92;
     expectedName.set(new Uint8Array(wide.buffer, 0, wide.byteLength - 2), parentName.length + separator);
-    if (!equalNativeBytes(nativeName(resources.kernel, handle), expectedName)) return fail('path');
+    if (!equalNativeBytes(windowsNativeName(resources.kernel, handle), expectedName)) return fail('path');
     assertParentCurrentSync(); // Own namespace writes may change parent data epochs; never normalize that identity.
     const currentParent = windowsFileIdentity(resources.kernel, parent);
     if (
@@ -568,7 +573,7 @@ export function windowsCreatePrivateAt(
       currentParent.ino !== parentIdentity.ino ||
       currentParent.birthtime !== parentIdentity.birthtime ||
       currentParent.attributes !== parentIdentity.attributes ||
-      !equalNativeBytes(nativeName(resources.kernel, parent), parentName)
+      !equalNativeBytes(windowsNativeName(resources.kernel, parent), parentName)
     )
       return fail('path');
     return {handle, identity: after, security: actualSecurity, close: releaseHandle};

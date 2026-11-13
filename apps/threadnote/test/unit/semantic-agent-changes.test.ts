@@ -23,7 +23,7 @@ import {expect, vi} from 'vitest';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {canonicalFileUri, type Observation, type QueryOutcome} from '@threadnote/semantic/contracts';
-import type {SemanticSession} from '../../src/semantic/provider.js';
+import {SemanticSessionFault, type SemanticSession} from '../../src/semantic/provider.js';
 import {makeSemanticAgentChanges, runSemanticAgentChangeWith} from '../../src/semantic/agent_changes.js';
 import {semanticHostProfileName} from '../../src/semantic/host_profile.js';
 import type {SemanticAgentQueryHost} from '../../src/semantic/agent_queries.js';
@@ -252,263 +252,305 @@ it.effect('rechecks protected read authorization after retrieval before exposing
   ),
 );
 
-it.effect('rolls back failed publication quotas and fences the initiating view after provider use', () =>
-  Effect.gen(function* () {
-    const f = yield* fixture;
-    const path = yield* Path.Path;
-    const worktree = canonicalFileUri((yield* path.toFileUrl(f.request.callerCwd)).href);
-    const uri = canonicalFileUri((yield* path.toFileUrl(path.join(f.request.callerCwd, 'a.ts'))).href);
-    const text = 'export const target = 1;';
-    const identity = yield* f.fs.stat(path.join(f.request.callerCwd, 'a.ts'));
-    if (identity.ino._tag !== 'Some') return yield* Effect.die('Fixture requires an actual file identity');
-    const observed: Observation = {
-      version: 1,
-      repository: 'repo',
-      worktree,
-      project: worktree,
-      uri,
-      configuration: sha256HexSync('config'),
-      toolchain: sha256HexSync('tools'),
-      provider: {id: 'typescript-language-server', version: '6.0.2', generation: 1},
-      view: {kind: 'disk', id: 'disk', owner: 'test', epoch: 0},
-      content: sha256HexSync(text),
-      documentVersion: null,
-      projectEpoch: 0,
-    };
-    const outcome: QueryOutcome = {
-      version: 1,
-      status: 'ok',
-      evidence: {basis: 'semantic', observation: observed, scope: 'project', completeness: 'complete', limitations: []},
-      items: [
-        {
-          kind: 'prepared-edit',
-          operation: 'rename',
-          sourceBasis: 'pre-request-synchronized-text-v1',
-          files: [
-            {
-              observation: observed,
-              beforeText: text,
-              edits: [{range: {start: {line: 0, character: 13}, end: {line: 0, character: 19}}, newText: 'renamed'}],
-              precondition: {
-                sourceKind: 'disk',
-                rawDigest: observed.content,
-                encoding: 'utf-8',
-                physicalIdentity: JSON.stringify([String(identity.dev), String(identity.ino.value)]),
-                owner: 'test',
-                documentVersion: null,
-              },
-            },
-          ],
+it.effect.skipIf(process.platform === 'win32')(
+  'rolls back failed publication quotas and fences the initiating view after provider use (POSIX protocol fixture)',
+  () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const path = yield* Path.Path;
+      const worktree = canonicalFileUri((yield* path.toFileUrl(f.request.callerCwd)).href);
+      const uri = canonicalFileUri((yield* path.toFileUrl(path.join(f.request.callerCwd, 'a.ts'))).href);
+      const text = 'export const target = 1;';
+      const identity = yield* f.fs.stat(path.join(f.request.callerCwd, 'a.ts'));
+      if (identity.ino._tag !== 'Some') return yield* Effect.die('Fixture requires an actual file identity');
+      const observed: Observation = {
+        version: 1,
+        repository: 'repo',
+        worktree,
+        project: worktree,
+        uri,
+        configuration: sha256HexSync('config'),
+        toolchain: sha256HexSync('tools'),
+        provider: {id: 'typescript-language-server', version: '6.0.2', generation: 1},
+        view: {kind: 'disk', id: 'disk', owner: 'test', epoch: 0},
+        content: sha256HexSync(text),
+        documentVersion: null,
+        projectEpoch: 0,
+      };
+      const outcome: QueryOutcome = {
+        version: 1,
+        status: 'ok',
+        evidence: {
+          basis: 'semantic',
+          observation: observed,
+          scope: 'project',
+          completeness: 'complete',
+          limitations: [],
         },
-      ],
-    };
-    let actionCalls = 0;
-    let quickfix = false;
-    const blockedChoice = {
-      kind: 'action-choice',
-      title: 'Opaque command',
-      actionKind: 'quickfix',
-      disabled: null,
-      command: true,
-      qualified: false,
-      selector: sha256HexSync('command'),
-      queryDigest: sha256HexSync('query'),
-      blocker: 'command',
-    };
-    const preparedAction = yield* Schema.decodeUnknownEffect(Schema.Record(Schema.String, Schema.Json))(
-      outcome.items[0],
-    );
-    const session: SemanticSession = {
-      actions: (_observation, _query, _milliseconds, selection) =>
-        Effect.sync(() => {
-          actionCalls++;
-          return {
-            ...outcome,
-            items: quickfix
-              ? selection
-                ? [
-                    {
-                      ...preparedAction,
-                      operation: 'code-action',
-                      qualification: 'qualified-text-only',
-                      operations: [
-                        {
-                          kind: 'text',
-                          uri,
-                          version: null,
-                          edits: [
-                            {
-                              range: {start: {line: 0, character: 13}, end: {line: 0, character: 19}},
-                              newText: 'renamed',
-                            },
-                          ],
-                          target: 0,
-                        },
-                      ],
-                    },
-                  ]
-                : [{...blockedChoice, title: 'Quickfix', command: false, qualified: true, blocker: null}]
-              : selection
-                ? [{kind: 'action-result', status: 'unsupported', reason: 'command'}, blockedChoice]
-                : [blockedChoice],
-          };
+        items: [
+          {
+            kind: 'prepared-edit',
+            operation: 'rename',
+            sourceBasis: 'pre-request-synchronized-text-v1',
+            files: [
+              {
+                observation: observed,
+                beforeText: text,
+                edits: [{range: {start: {line: 0, character: 13}, end: {line: 0, character: 19}}, newText: 'renamed'}],
+                precondition: {
+                  sourceKind: 'disk',
+                  rawDigest: observed.content,
+                  encoding: 'utf-8',
+                  physicalIdentity: JSON.stringify([String(identity.dev), String(identity.ino.value)]),
+                  owner: 'test',
+                  documentVersion: null,
+                },
+              },
+            ],
+          },
+        ],
+      };
+      let actionCalls = 0;
+      let quickfix = false;
+      const blockedChoice = {
+        kind: 'action-choice',
+        title: 'Opaque command',
+        actionKind: 'quickfix',
+        disabled: null,
+        command: true,
+        qualified: false,
+        selector: sha256HexSync('command'),
+        queryDigest: sha256HexSync('query'),
+        blocker: 'command',
+      };
+      const preparedAction = yield* Schema.decodeUnknownEffect(Schema.Record(Schema.String, Schema.Json))(
+        outcome.items[0],
+      );
+      const session: SemanticSession = {
+        actions: (_observation, _query, _milliseconds, selection) =>
+          Effect.sync(() => {
+            actionCalls++;
+            return {
+              ...outcome,
+              items: quickfix
+                ? selection
+                  ? [
+                      {
+                        ...preparedAction,
+                        operation: 'code-action',
+                        qualification: 'qualified-text-only',
+                        operations: [
+                          {
+                            kind: 'text',
+                            uri,
+                            version: null,
+                            edits: [
+                              {
+                                range: {start: {line: 0, character: 13}, end: {line: 0, character: 19}},
+                                newText: 'renamed',
+                              },
+                            ],
+                            target: 0,
+                          },
+                        ],
+                      },
+                    ]
+                  : [{...blockedChoice, title: 'Quickfix', command: false, qualified: true, blocker: null}]
+                : selection
+                  ? [{kind: 'action-result', status: 'unsupported', reason: 'command'}, blockedChoice]
+                  : [blockedChoice],
+            };
+          }),
+        prepare: () => Effect.succeed(outcome),
+        upsert: () => Effect.die('Unexpected upsert'),
+        query: () => Effect.die('Unexpected query'),
+        diagnostics: () => Effect.die('Unexpected diagnostics'),
+        project: () => Effect.succeed({configuration: '/unused/tsconfig.json'}),
+        observation: () => Effect.succeed(observed),
+        available: Effect.succeed(true),
+        invalidate: Effect.void,
+        close: Effect.succeed({
+          code: 0,
+          drained: true,
+          forced: false,
+          stdioClosed: true,
+          fault: undefined,
+          graceful: true,
         }),
-      prepare: () => Effect.succeed(outcome),
-      upsert: () => Effect.die('Unexpected upsert'),
-      query: () => Effect.die('Unexpected query'),
-      diagnostics: () => Effect.die('Unexpected diagnostics'),
-      project: () => Effect.succeed({configuration: '/unused/tsconfig.json'}),
-      observation: () => Effect.succeed(observed),
-      available: Effect.succeed(true),
-      invalidate: Effect.void,
-      close: Effect.succeed({
-        code: 0,
-        drained: true,
-        forced: false,
-        stdioClosed: true,
-        fault: undefined,
-        graceful: true,
-      }),
-    };
-    let stale = false;
-    let invalidateAfterUse = false;
-    const directory = path.join(f.request.callerCwd, 'private-preview');
-    const changes = yield* makeSemanticAgentChanges(
-      {
-        attach: () => Effect.succeed({observation: observed}),
-        use: (_observation, _milliseconds, run) =>
-          run(session).pipe(
-            Effect.tap(() =>
-              Effect.sync(() => {
-                if (invalidateAfterUse) stale = true;
-              }),
+      };
+      let stale = false;
+      let invalidateAfterUse = false;
+      let privateProof = false;
+      let rejectPublication = false;
+      let finalAssertions = 0;
+      const directory = path.join(f.request.callerCwd, 'private-preview');
+      const changes = yield* makeSemanticAgentChanges(
+        {
+          attach: () => Effect.succeed({observation: observed}),
+          use: (_observation, _milliseconds, run) =>
+            run(session).pipe(
+              Effect.tap(() =>
+                Effect.sync(() => {
+                  if (invalidateAfterUse) stale = true;
+                }),
+              ),
             ),
-          ),
-        observe: () => Effect.succeed(stale ? undefined : observed),
-      },
-      {directory, profileHome: f.home, worktree, runtimeIdentity: sha256HexSync('runtime')},
-    );
-    const request = {
-      version: 1 as const,
-      worktree,
-      profile: sha256HexSync(JSON.stringify(f.profile)),
-      principal: EffectString.slice(0, -5)(semanticHostProfileName(f.config, worktree)),
-      action: 'prepare' as const,
-      project: worktree,
-      uri,
-      language: 'typescript' as const,
-      operation: 'rename' as const,
-      position: {line: 0, character: 14},
-      newName: 'renamed',
-      milliseconds: 10000,
-      maxBytes: 1024,
-    };
-    for (let attempt = 0; attempt < 33; attempt++)
-      expect(yield* changes.execute(request, observed)).toMatchObject({status: 'budget-exceeded', applicable: false});
-    const blobs = () =>
-      f.fs
-        .readDirectory(path.join(directory, 'proposals'))
-        .pipe(Effect.map(names => EffectArray.filter(names, name => /^[a-f0-9]{64}\.json$/u.test(name))));
-    expect(yield* blobs()).toEqual([]);
-    invalidateAfterUse = true;
-    expect(yield* changes.execute({...request, maxBytes: 8192}, observed)).toMatchObject({
-      status: 'stale',
-      applicable: false,
-    });
-    expect(yield* blobs()).toEqual([]);
-    stale = false;
-    invalidateAfterUse = false;
-    const prepared = yield* changes.execute({...request, maxBytes: 8192}, observed);
-    expect(prepared).toMatchObject({status: 'ok', applicable: false, writerAuthorityRequired: true});
-    const {handle} = yield* Schema.decodeUnknownEffect(
-      Schema.Struct({handle: Schema.Struct({id: Schema.String, capability: Schema.String, digest: Schema.String})}),
-    )(prepared);
-    const otherConfig = {...f.config, user: 'other-user'};
-    const otherFile = path.join(f.home, 'semantic', 'profiles', semanticHostProfileName(otherConfig, worktree));
-    yield* f.fs.writeFileString(otherFile, JSON.stringify(f.profile), {mode: 0o600});
-    yield* trustProtocolProfile(otherConfig, worktree);
-    const changeContext = yield* Effect.context<Effect.Services<ReturnType<typeof changes.execute>>>();
-    const endpointHost: SemanticAgentQueryHost = {
-      runtimeIdentity: Effect.succeed(sha256HexSync('runtime')),
-      connect: () =>
-        Effect.succeed({
-          request: body =>
-            body.operation === 'agent-change'
-              ? changes.execute(body.request, observed).pipe(
-                  Effect.provideContext(changeContext),
-                  Effect.flatMap(Schema.decodeUnknownEffect(Schema.Json)),
-                  Effect.mapError(() => LspFault.make({code: 'protocol'})),
-                )
-              : Effect.die('Unexpected operation'),
-        }),
-    };
-    const foreign = yield* runSemanticAgentChangeWith(endpointHost, otherConfig, {
-      version: 1,
-      callerCwd: f.request.callerCwd,
-      action: 'status',
-      handle,
-    });
-    expect(foreign).toMatchObject({status: 'stale', applicable: false, writerAuthorityRequired: true});
-    expect(foreign).not.toHaveProperty('page');
-    const action = {
-      version: 1,
-      callerCwd: f.request.callerCwd,
-      action: 'prepare',
-      operation: 'code-action',
-      file: 'a.ts',
-      language: 'typescript',
-      range: {start: {line: 0, character: 0}, end: {line: 0, character: 0}},
-    };
-    const listed = yield* runSemanticAgentChangeWith(endpointHost, f.config, action);
-    const {choices} = yield* Schema.decodeUnknownEffect(
-      Schema.Struct({choices: Schema.Array(Schema.Struct({choiceHandle: Schema.String}))}),
-    )(listed);
-    expect(actionCalls).toBe(1);
-    const selected = {...action, choiceHandle: choices[0].choiceHandle};
-    expect(yield* runSemanticAgentChangeWith(endpointHost, otherConfig, selected)).toMatchObject({status: 'stale'});
-    expect(actionCalls).toBe(1);
-    expect(yield* runSemanticAgentChangeWith(endpointHost, f.config, selected)).toMatchObject({
-      status: 'unsupported',
-      reason: 'command',
-    });
-    expect(actionCalls).toBe(2);
-    quickfix = true;
-    const quickfixList = yield* runSemanticAgentChangeWith(endpointHost, f.config, action);
-    const retained = yield* Schema.decodeUnknownEffect(
-      Schema.Struct({choices: Schema.Array(Schema.Struct({choiceHandle: Schema.String}))}),
-    )(quickfixList);
-    const actionProposal = yield* runSemanticAgentChangeWith(endpointHost, f.config, {
-      ...action,
-      choiceHandle: retained.choices[0].choiceHandle,
-    });
-    expect(actionProposal).toMatchObject({status: 'ok', applicable: false, writerAuthorityRequired: true});
-    expect(actionProposal).toHaveProperty('handle');
-    const actionHandle = yield* Schema.decodeUnknownEffect(
-      Schema.Struct({handle: Schema.Struct({id: Schema.String, capability: Schema.String, digest: Schema.String})}),
-    )(actionProposal);
-    const actionStatus = yield* runSemanticAgentChangeWith(endpointHost, f.config, {
-      version: 1,
-      callerCwd: f.request.callerCwd,
-      action: 'status',
-      handle: actionHandle.handle,
-    });
-    expect(actionStatus).toMatchObject({status: 'ok', applicable: false, writerAuthorityRequired: true});
-    expect(actionStatus).toHaveProperty('page');
-    expect(
-      yield* runSemanticAgentChangeWith(endpointHost, f.config, {
+          usePrepared: (_observation, _milliseconds, run) =>
+            run(session).pipe(
+              Effect.map(result => {
+                if (!privateProof) return {kind: 'ordinary' as const, outcome: result};
+                return {
+                  kind: 'writer-prepared' as const,
+                  outcome: result,
+                  privateSourceRows: [
+                    {capture: {uri, text, content: observed.content, identity: 'private-first'}, observation: observed},
+                  ],
+                  assertCurrentSync: () => {
+                    finalAssertions++;
+                    if (rejectPublication) throw SemanticSessionFault.make({reason: 'stale'});
+                  },
+                };
+              }),
+              Effect.tap(() =>
+                Effect.sync(() => {
+                  if (invalidateAfterUse) stale = true;
+                }),
+              ),
+            ),
+          observe: () => Effect.succeed(stale ? undefined : observed),
+        },
+        {directory, profileHome: f.home, worktree, runtimeIdentity: sha256HexSync('runtime')},
+      );
+      const request = {
+        version: 1 as const,
+        worktree,
+        profile: sha256HexSync(JSON.stringify(f.profile)),
+        principal: EffectString.slice(0, -5)(semanticHostProfileName(f.config, worktree)),
+        action: 'prepare' as const,
+        project: worktree,
+        uri,
+        language: 'typescript' as const,
+        operation: 'rename' as const,
+        position: {line: 0, character: 14},
+        newName: 'renamed',
+        milliseconds: 10000,
+        maxBytes: 1024,
+      };
+      for (let attempt = 0; attempt < 33; attempt++)
+        expect(yield* changes.execute(request, observed)).toMatchObject({status: 'budget-exceeded', applicable: false});
+      const blobs = () =>
+        f.fs
+          .readDirectory(path.join(directory, 'proposals'))
+          .pipe(Effect.map(names => EffectArray.filter(names, name => /^[a-f0-9]{64}\.json$/u.test(name))));
+      expect(yield* blobs()).toEqual([]);
+      invalidateAfterUse = true;
+      expect(yield* changes.execute({...request, maxBytes: 8192}, observed)).toMatchObject({
+        status: 'stale',
+        applicable: false,
+      });
+      expect(yield* blobs()).toEqual([]);
+      stale = false;
+      invalidateAfterUse = false;
+      privateProof = true;
+      rejectPublication = true;
+      expect(yield* changes.execute({...request, maxBytes: 8192}, observed)).toMatchObject({status: 'stale'});
+      expect(finalAssertions).toBe(1);
+      expect(yield* blobs()).toEqual([]);
+      rejectPublication = false;
+      const prepared = yield* changes.execute({...request, maxBytes: 8192}, observed);
+      expect(finalAssertions).toBe(2);
+      expect(JSON.stringify(prepared)).not.toContain('private-first');
+      privateProof = false;
+      expect(prepared).toMatchObject({status: 'ok', applicable: false, writerAuthorityRequired: true});
+      const {handle} = yield* Schema.decodeUnknownEffect(
+        Schema.Struct({handle: Schema.Struct({id: Schema.String, capability: Schema.String, digest: Schema.String})}),
+      )(prepared);
+      const otherConfig = {...f.config, user: 'other-user'};
+      const otherFile = path.join(f.home, 'semantic', 'profiles', semanticHostProfileName(otherConfig, worktree));
+      yield* f.fs.writeFileString(otherFile, JSON.stringify(f.profile), {mode: 0o600});
+      yield* trustProtocolProfile(otherConfig, worktree);
+      const changeContext = yield* Effect.context<Effect.Services<ReturnType<typeof changes.execute>>>();
+      const endpointHost: SemanticAgentQueryHost = {
+        runtimeIdentity: Effect.succeed(sha256HexSync('runtime')),
+        connect: () =>
+          Effect.succeed({
+            request: body =>
+              body.operation === 'agent-change'
+                ? changes.execute(body.request, observed).pipe(
+                    Effect.provideContext(changeContext),
+                    Effect.flatMap(Schema.decodeUnknownEffect(Schema.Json)),
+                    Effect.mapError(() => LspFault.make({code: 'protocol'})),
+                  )
+                : Effect.die('Unexpected operation'),
+          }),
+      };
+      const foreign = yield* runSemanticAgentChangeWith(endpointHost, otherConfig, {
         version: 1,
         callerCwd: f.request.callerCwd,
-        action: 'preflight',
+        action: 'status',
+        handle,
+      });
+      expect(foreign).toMatchObject({status: 'stale', applicable: false, writerAuthorityRequired: true});
+      expect(foreign).not.toHaveProperty('page');
+      const action = {
+        version: 1,
+        callerCwd: f.request.callerCwd,
+        action: 'prepare',
+        operation: 'code-action',
+        file: 'a.ts',
+        language: 'typescript',
+        range: {start: {line: 0, character: 0}, end: {line: 0, character: 0}},
+      };
+      const listed = yield* runSemanticAgentChangeWith(endpointHost, f.config, action);
+      const {choices} = yield* Schema.decodeUnknownEffect(
+        Schema.Struct({choices: Schema.Array(Schema.Struct({choiceHandle: Schema.String}))}),
+      )(listed);
+      expect(actionCalls).toBe(1);
+      const selected = {...action, choiceHandle: choices[0].choiceHandle};
+      expect(yield* runSemanticAgentChangeWith(endpointHost, otherConfig, selected)).toMatchObject({status: 'stale'});
+      expect(actionCalls).toBe(1);
+      expect(yield* runSemanticAgentChangeWith(endpointHost, f.config, selected)).toMatchObject({
+        status: 'unsupported',
+        reason: 'command',
+      });
+      expect(actionCalls).toBe(2);
+      quickfix = true;
+      const quickfixList = yield* runSemanticAgentChangeWith(endpointHost, f.config, action);
+      const retained = yield* Schema.decodeUnknownEffect(
+        Schema.Struct({choices: Schema.Array(Schema.Struct({choiceHandle: Schema.String}))}),
+      )(quickfixList);
+      const actionProposal = yield* runSemanticAgentChangeWith(endpointHost, f.config, {
+        ...action,
+        choiceHandle: retained.choices[0].choiceHandle,
+      });
+      expect(actionProposal).toMatchObject({status: 'ok', applicable: false, writerAuthorityRequired: true});
+      expect(actionProposal).toHaveProperty('handle');
+      const actionHandle = yield* Schema.decodeUnknownEffect(
+        Schema.Struct({handle: Schema.Struct({id: Schema.String, capability: Schema.String, digest: Schema.String})}),
+      )(actionProposal);
+      const actionStatus = yield* runSemanticAgentChangeWith(endpointHost, f.config, {
+        version: 1,
+        callerCwd: f.request.callerCwd,
+        action: 'status',
         handle: actionHandle.handle,
-      }),
-    ).toMatchObject({status: 'ok', applicable: false, writerAuthorityRequired: true, conflicts: []});
+      });
+      expect(actionStatus).toMatchObject({status: 'ok', applicable: false, writerAuthorityRequired: true});
+      expect(actionStatus).toHaveProperty('page');
+      expect(
+        yield* runSemanticAgentChangeWith(endpointHost, f.config, {
+          version: 1,
+          callerCwd: f.request.callerCwd,
+          action: 'preflight',
+          handle: actionHandle.handle,
+        }),
+      ).toMatchObject({status: 'ok', applicable: false, writerAuthorityRequired: true, conflicts: []});
 
-    expect(yield* blobs()).toHaveLength(2);
-    expect(yield* f.fs.readFileString(path.join(f.request.callerCwd, 'a.ts'))).toBe(text);
-  }).pipe(
-    // oxlint-disable-next-line effecttsgo/strict-effect-provide -- Narrow publication filesystem and coordinator seam.
-    Effect.provide(io),
-  ),
+      expect(yield* blobs()).toHaveLength(2);
+      expect(yield* f.fs.readFileString(path.join(f.request.callerCwd, 'a.ts'))).toBe(text);
+    }).pipe(
+      // oxlint-disable-next-line effecttsgo/strict-effect-provide -- Narrow publication filesystem and coordinator seam.
+      Effect.provide(io),
+    ),
 );
 
 it.effect('retains every ordered raw resource effect, refuses the whole preflight and rejects escaped targets', () =>

@@ -176,7 +176,7 @@ describe.skipIf(!privateProfileSupported)('semantic operational inspection', () 
 });
 
 describe('semantic private profile proof', () => {
-  effectIt.effect.skipIf(privateProfileSupported)(
+  effectIt.effect.skipIf(privateProfileSupported || Native.runtimePlatform === 'win32')(
     'refuses real unsupported-host private proof without creating or rewriting profile state',
     () =>
       Effect.gen(function* () {

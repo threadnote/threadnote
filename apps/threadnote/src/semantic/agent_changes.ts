@@ -1,3 +1,4 @@
+import type {SemanticPreparedUse} from './provider.js';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
 import {Digest as EffectDigest, SecureRandom} from 'effect/crypto';
 import {Array as EffectArray, Clock, Effect, FileSystem, Option, Path, Schema, String as EffectString} from 'effect';
@@ -6,9 +7,15 @@ import {createSemanticProposal, proposalPage, type SemanticProposal} from '@thre
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {semanticAgentQueryHost, type SemanticAgentQueryHost} from './agent_queries.js';
-import {SemanticHostProfile, semanticHostProfileName, readSemanticHostProfile} from './host_profile.js';
+import {
+  SemanticHostProfile,
+  semanticHostProfileName,
+  readSemanticHostProfile,
+  readSemanticPrivateProfile,
+} from './host_profile.js';
 import {semanticHostSelection} from './host_catalog.js';
 import {SemanticLanguage, SemanticRange, type SemanticSession} from './provider.js';
+import * as Native from '@threadnote/platform/system';
 import {SystemInfo} from '@threadnote/platform/system';
 import {makeSemanticActionChoices, SemanticActionChoice} from './action_choices.js';
 import {LspFault} from './lsp_transport.js';
@@ -225,6 +232,11 @@ interface ChangeCoordinator {
     milliseconds: number,
     f: (api: SemanticSession) => Effect.Effect<A, E>,
   ) => Effect.Effect<A, unknown, ChangeContext>;
+  readonly usePrepared?: <E>(
+    observation: Observation,
+    milliseconds: number,
+    f: (api: SemanticSession) => Effect.Effect<QueryOutcome, E>,
+  ) => Effect.Effect<SemanticPreparedUse, unknown, ChangeContext>;
   readonly observe: (
     observation: Observation,
     milliseconds: number,
@@ -279,6 +291,11 @@ export const makeSemanticAgentChanges = Effect.fn('semantic.agentChanges')(funct
   const verifyScope = (request: SemanticAgentEndpointChange) =>
     Effect.gen(function* () {
       if (!/^[a-f0-9]{64}$/u.test(request.principal)) return yield* LspFault.make({code: 'rejected'});
+      if (Native.runtimePlatform === 'win32') {
+        const selected = yield* readSemanticPrivateProfile(options.profileHome, request.principal, options.worktree);
+        if (selected.digest !== request.profile) return yield* LspFault.make({code: 'rejected'});
+        return;
+      }
       const directory = path.join(options.profileHome, 'semantic', 'profiles');
       const profileFile = path.join(directory, request.principal + '.json');
       const verify = Effect.gen(function* () {
@@ -332,6 +349,7 @@ export const makeSemanticAgentChanges = Effect.fn('semantic.agentChanges')(funct
     request: SemanticAgentEndpointChange,
     buffer: Observation | undefined,
     enter: (phase: ServiceTimeoutPhase) => Effect.Effect<void>,
+    publication: {published: boolean; expected?: unknown; assertCurrentSync?: () => void},
   ) =>
     Effect.gen(function* () {
       if (request.worktree !== options.worktree) return changeRefusal('conflict', 'Different authenticated worktree');
@@ -405,7 +423,17 @@ export const makeSemanticAgentChanges = Effect.fn('semantic.agentChanges')(funct
         if (request.choiceHandle && !selected)
           return changeRefusal('stale', 'Choice expired or source/query/host binding changed');
         yield* enter('provider-use');
-        const outcome: QueryOutcome = yield* coordinator.use(observed, request.milliseconds, api =>
+        const usePrepared =
+          coordinator.usePrepared ??
+          ((
+            observation: Observation,
+            milliseconds: number,
+            f: (api: SemanticSession) => Effect.Effect<QueryOutcome, unknown>,
+          ) =>
+            coordinator
+              .use(observation, milliseconds, f)
+              .pipe(Effect.map(outcome => ({kind: 'ordinary' as const, outcome}))));
+        const hostResult = yield* usePrepared(observed, request.milliseconds, api =>
           request.operation === 'code-action'
             ? api.actions
               ? api.actions(
@@ -433,6 +461,7 @@ export const makeSemanticAgentChanges = Effect.fn('semantic.agentChanges')(funct
                   evidence: null,
                 }),
         );
+        const outcome = hostResult.outcome;
         if (request.choiceHandle && !(yield* choices.get(request.choiceHandle, choiceBinding, observed)))
           return changeRefusal('stale', 'Selected action capability expired during preparation');
         if (outcome.status !== 'ok') return outcome;
@@ -556,6 +585,22 @@ export const makeSemanticAgentChanges = Effect.fn('semantic.agentChanges')(funct
             ),
           catch: () => LspFault.make({code: 'capacity'}),
         });
+        if (hostResult.kind === 'writer-prepared') {
+          if (Native.runtimePlatform === 'win32' && !hostResult.privateSourceProof)
+            return changeRefusal('stale', 'Complete FIRST native proof is required');
+          if (hostResult.privateSourceRows.length !== proposal.targets.length)
+            return changeRefusal('stale', 'Private source basis does not cover the complete proposal');
+          for (const [index, target] of proposal.targets.entries()) {
+            const row = hostResult.privateSourceRows[index];
+            if (
+              !row ||
+              row.capture.uri !== target.observation.uri ||
+              row.capture.content !== target.precondition.rawDigest ||
+              observationKey(row.observation) !== observationKey(target.observation)
+            )
+              return changeRefusal('stale', 'Private source basis does not match the complete proposal');
+          }
+        }
         if (proposal.version === 2) {
           for (const operation of proposal.operations) {
             const uris = operation.kind === 'rename' ? [operation.oldUri, operation.newUri] : [operation.uri];
@@ -582,52 +627,54 @@ export const makeSemanticAgentChanges = Effect.fn('semantic.agentChanges')(funct
             }
           }
         }
-        let published = false;
-        return yield* Effect.acquireUseRelease(
-          store.retain(proposal, binding(request.profile, request.principal)),
+        const retained = yield* Effect.acquireRelease(
+          store.retain(
+            proposal,
+            binding(request.profile, request.principal),
+            hostResult.kind === 'writer-prepared' ? hostResult.privateSourceProof : undefined,
+          ),
           retained =>
-            Effect.gen(function* () {
-              const result = yield* pageResult(
-                {
-                  version: 1,
-                  status:
-                    proposal.version === 2 && proposal.qualification === 'unsupported-operation-sequence'
-                      ? 'unsupported'
-                      : 'ok',
-                  ...(proposal.version === 2
-                    ? {qualification: proposal.qualification, operationCount: proposal.operations.length}
-                    : {}),
-                  applicable: false,
-                  writerAuthorityRequired: true,
-                  ...retained,
-                  evidence: proposal.evidence,
-                  targetCount: proposal.targets.length,
-                  complete: 'all-provider-returned-edits',
-                  observation: outcome.evidence.observation,
-                },
-                proposal,
-                request.maxBytes,
-              );
-              yield* enter('publication');
-              const current = yield* coordinator
-                .observe(proposal.evidence.observation, request.milliseconds)
-                .pipe(Effect.orElseSucceed(() => undefined));
-              if (!current || observationKey(current) !== observationKey(proposal.evidence.observation))
-                return changeRefusal('stale', 'Initiating view changed before publication');
-              const publicationTime = yield* Clock.currentTimeMillis;
-              if (publicationTime >= retained.expiresAt || publicationTime < retained.createdAt)
-                return changeRefusal('stale', 'Proposal lifetime expired before publication');
-              yield* verifyScope(request);
-              if (request.choiceHandle && !(yield* choices.get(request.choiceHandle, choiceBinding, observed)))
-                return changeRefusal('stale', 'Selected action capability expired before publication');
-              published = true;
-              return result;
-            }),
-          retained =>
-            published
+            publication.published
               ? Effect.void
               : store.discard(retained.handle, binding(request.profile, request.principal)).pipe(Effect.ignore),
         );
+        const result = yield* pageResult(
+          {
+            version: 1,
+            status:
+              proposal.version === 2 && proposal.qualification === 'unsupported-operation-sequence'
+                ? 'unsupported'
+                : 'ok',
+            ...(proposal.version === 2
+              ? {qualification: proposal.qualification, operationCount: proposal.operations.length}
+              : {}),
+            applicable: false,
+            writerAuthorityRequired: true,
+            ...retained,
+            evidence: proposal.evidence,
+            targetCount: proposal.targets.length,
+            complete: 'all-provider-returned-edits',
+            observation: outcome.evidence.observation,
+          },
+          proposal,
+          request.maxBytes,
+        );
+        yield* enter('publication');
+        const current = yield* coordinator
+          .observe(proposal.evidence.observation, request.milliseconds)
+          .pipe(Effect.orElseSucceed(() => undefined));
+        if (!current || observationKey(current) !== observationKey(proposal.evidence.observation))
+          return changeRefusal('stale', 'Initiating view changed before publication');
+        const publicationTime = yield* Clock.currentTimeMillis;
+        if (publicationTime >= retained.expiresAt || publicationTime < retained.createdAt)
+          return changeRefusal('stale', 'Proposal lifetime expired before publication');
+        yield* verifyScope(request);
+        if (request.choiceHandle && !(yield* choices.get(request.choiceHandle, choiceBinding, observed)))
+          return changeRefusal('stale', 'Selected action capability expired before publication');
+        publication.expected = result;
+        publication.assertCurrentSync =
+          hostResult.kind === 'writer-prepared' ? hostResult.assertCurrentSync : undefined;
+        return result;
       }
       if (!request.handle) return changeRefusal('invalid-request', 'Proposal read capability required');
       yield* enter('retained-proposal-check');
@@ -668,7 +715,8 @@ export const makeSemanticAgentChanges = Effect.fn('semantic.agentChanges')(funct
                 return 'physical-identity-conflict';
               if (target.precondition.physicalIdentity !== JSON.stringify([String(stat.dev), String(stat.ino.value)]))
                 return 'physical-identity-conflict';
-              if (request.action === 'preflight' && (stat.mode & 0o222) === 0) return 'readonly';
+              if (Native.runtimePlatform !== 'win32' && request.action === 'preflight' && (stat.mode & 0o222) === 0)
+                return 'readonly';
               if (
                 sha256HexSync(yield* readBounded(file, semanticAgentChangeLimits.maxSourceBytes)) !==
                 target.precondition.rawDigest
@@ -716,13 +764,16 @@ export const makeSemanticAgentChanges = Effect.fn('semantic.agentChanges')(funct
           return changeRefusal('unsupported', 'The complete operation sequence has no qualified writer');
         if (base.status !== 'ok' || retained.stale || unsupportedSequence)
           return changeRefusal('stale', 'A current complete qualified proposal is required');
+        if (Native.runtimePlatform === 'win32' && retained.windows?.proof.kind !== 'complete')
+          return changeRefusal('stale', 'Historical preview has no complete native writer proof');
         const processStartIdentity = system.canonicalProcessStartIdentity
           ? yield* system.canonicalProcessStartIdentity(system.processId)
           : undefined;
         if (!processStartIdentity) return changeRefusal('unavailable', 'Coordinator process identity is unavailable');
         yield* verifyScope(request);
         const result = {
-          version: 1,
+          version: Native.runtimePlatform === 'win32' ? 2 : 1,
+          ...(Native.runtimePlatform === 'win32' ? {windows: retained.windows} : {}),
           status: 'writer-proposal',
           proposal: retained.proposal,
           worktree: options.worktree,
@@ -746,23 +797,41 @@ export const makeSemanticAgentChanges = Effect.fn('semantic.agentChanges')(funct
     });
   return {
     execute: (request: SemanticAgentEndpointChange, buffer?: Observation) =>
-      observeServiceTimeout(request.milliseconds, enter =>
-        execute(request, buffer, enter).pipe(
-          Effect.tap(() => enter('publication').pipe(Effect.andThen(verifyScope(request)))),
-        ),
-      ).pipe(
-        Effect.map(result =>
-          new TextEncoder().encode(JSON.stringify(result)).length <= request.maxBytes
-            ? result
-            : changeRefusal('budget-exceeded', 'Result metadata exceeds the requested byte budget'),
-        ),
-        Effect.catch(error =>
-          Effect.succeed(
-            Schema.is(LspFault)(error) && error.code === 'capacity'
-              ? changeRefusal('budget-exceeded', 'Whole proposal or next chunk exceeds capacity')
-              : changeRefusal('stale', 'Proposal capability, source or scope is unavailable'),
-          ),
-        ),
+      Effect.scoped(
+        Effect.gen(function* () {
+          const publication: {published: boolean; expected?: unknown; assertCurrentSync?: () => void} = {
+            published: false,
+          };
+          return yield* observeServiceTimeout(request.milliseconds, enter =>
+            execute(request, buffer, enter, publication).pipe(
+              Effect.tap(() => enter('publication').pipe(Effect.andThen(verifyScope(request)))),
+            ),
+          ).pipe(
+            Effect.flatMap(result => {
+              if (new TextEncoder().encode(JSON.stringify(result)).length > request.maxBytes)
+                return Effect.succeed(
+                  changeRefusal('budget-exceeded', 'Result metadata exceeds the requested byte budget'),
+                );
+              return Effect.try({
+                try: () => {
+                  if (result === publication.expected) {
+                    publication.assertCurrentSync?.();
+                    publication.published = true;
+                  }
+                  return result;
+                },
+                catch: () => LspFault.make({code: 'rejected'}),
+              });
+            }),
+            Effect.catch(error =>
+              Effect.succeed(
+                Schema.is(LspFault)(error) && error.code === 'capacity'
+                  ? changeRefusal('budget-exceeded', 'Whole proposal or next chunk exceeds capacity')
+                  : changeRefusal('stale', 'Proposal capability, source or scope is unavailable'),
+              ),
+            ),
+          );
+        }),
       ),
   };
 });

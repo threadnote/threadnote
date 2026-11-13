@@ -9,6 +9,7 @@ import {
   Array as EffectArray,
   Context,
   Layer,
+  Logger,
   Effect,
   FileSystem,
   Path,
@@ -42,7 +43,12 @@ import {MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
 import {formatMemoryDocument, type MemoryMetadata} from '@threadnote/memory/document';
 import {canonicalFileUri, type Observation} from '@threadnote/semantic/contracts';
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import {CommandExecutor, runCommandEffect, type CommandExecutionError} from '@threadnote/platform/command';
+import {
+  CommandExecutor,
+  CommandTimedOut,
+  runCommandEffect,
+  type CommandExecutionError,
+} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {compileContextBrief, compileSemanticContextKnowledge} from '../../src/context_brief/index.js';
@@ -207,33 +213,78 @@ const citationFailureEvidence = (candidate: unknown, gaps: unknown, nativeReads:
 const bundledContextWorker = (root: string, home: string) =>
   Effect.gen(function* () {
     const path = yield* Path.Path;
+    const fs = yield* FileSystem.FileSystem;
     const system = yield* SystemInfo;
     const command = yield* CommandExecutor;
     const directory = path.join(root, 'context-worker-bundle');
     const bundled = path.join(directory, 'standalone.js');
-    yield* command.execute(
-      system.executablePath,
-      [
-        '--eval',
-        `const result = await Bun.build(${JSON.stringify({
-          entrypoints: [Bun.fileURLToPath(new URL('../../src/standalone.ts', import.meta.url))],
-          outdir: directory,
-          naming: 'standalone.js',
-          target: 'bun',
-          format: 'esm',
-          minify: true,
-        })});
+    const diagnostic = path.join(root, 'bundle-phase.json');
+    const started = yield* Effect.sync(() => performance.now());
+    yield* command
+      .execute(
+        system.executablePath,
+        [
+          '--eval',
+          `import {writeFileSync} from 'node:fs';
+const started = performance.now();
+const state = {phase: 'process-entry', elapsedMs: 0, success: false, outputCount: 0, exitCode: 0};
+const record = phase => {
+  state.phase = phase;
+  state.elapsedMs = Math.round(performance.now() - started);
+  writeFileSync(${JSON.stringify(diagnostic)}, JSON.stringify(state), {mode: 0o600});
+};
+record('process-entry');
+process.on('exit', code => { state.exitCode = code; record('exit'); });
+const result = await Bun.build(${JSON.stringify({
+            entrypoints: [Bun.fileURLToPath(new URL('../../src/standalone.ts', import.meta.url))],
+            outdir: directory,
+            naming: 'standalone.js',
+            target: 'bun',
+            format: 'esm',
+            minify: true,
+          })});
+state.success = result.success;
+state.outputCount = result.outputs.length;
+record('build-completed');
 if (!result.success || !result.outputs.some(output => output.path === ${JSON.stringify(bundled)}))
   throw new Error('Context worker bundle failed.');`,
-      ],
-      {
-        env: {...system.environment(), THREADNOTE_HOME: home},
-        timeoutMs: 5000,
-        maxOutputBytes: 16 * 1024,
-        forceKillAfterMilliseconds: 0,
-        verifyOwnedProcessExit: system.platform === 'win32' ? 'leader' : 'group',
-      },
-    );
+        ],
+        {
+          env: {...system.environment(), THREADNOTE_HOME: home},
+          timeoutMs: 5000,
+          maxOutputBytes: 16 * 1024,
+          forceKillAfterMilliseconds: 0,
+          verifyOwnedProcessExit: system.platform === 'win32' ? 'leader' : 'group',
+        },
+      )
+      .pipe(
+        Effect.tapError(error =>
+          Effect.gen(function* () {
+            // The command timeout discards captured output; retain only this scoped scalar phase state.
+            const child = yield* fs.readFileString(diagnostic).pipe(
+              Effect.flatMap(
+                Schema.decodeUnknownEffect(
+                  Schema.fromJsonString(
+                    Schema.Struct({
+                      phase: Schema.Literals(['process-entry', 'build-completed', 'exit']),
+                      elapsedMs: Schema.Number.check(Schema.isInt(), Schema.isBetween({minimum: 0, maximum: 60000})),
+                      success: Schema.Boolean,
+                      outputCount: Schema.Number.check(Schema.isInt(), Schema.isBetween({minimum: 0, maximum: 10000})),
+                      exitCode: Schema.Number.check(Schema.isInt(), Schema.isBetween({minimum: 0, maximum: 255})),
+                    }),
+                  ),
+                ),
+              ),
+              Effect.option,
+            );
+            yield* Effect.logError('Context worker bundle setup failed', {
+              errorClass: error._tag,
+              elapsedMs: Math.round(performance.now() - started),
+              child: Option.getOrElse(child, () => 'unavailable'),
+            });
+          }),
+        ),
+      );
     return bundled;
   });
 
@@ -252,6 +303,55 @@ const contextWorkerBundleLayer = Layer.effect(
     return yield* bundledContextWorker(root, home);
   }).pipe(TestClock.withLive),
 ).pipe(Layer.provide(Layer.merge(contextWorkerIo, TestCommandExecutorLayer.pipe(Layer.provide(contextWorkerIo)))));
+
+effectIt.layer(contextWorkerIo)('context worker build diagnostics', it => {
+  it.effect('reports bounded phase evidence on failure and preserves the timeout', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped();
+      const diagnostic = path.join(root, 'bundle-phase.json');
+      const error = CommandTimedOut.make({args: [], executable: 'bun', message: 'fixture timeout', timeoutMs: 5000});
+      const state = {phase: 'build-completed', elapsedMs: 4200, success: true, outputCount: 1, exitCode: 0};
+      for (const fixture of [
+        undefined,
+        {...state, privatePath: 'opaque-private-path'},
+        {...state, phase: 'private-path'},
+      ]) {
+        const messages: unknown[] = [];
+        const executor = CommandExecutor.of({
+          execute: () =>
+            Effect.gen(function* () {
+              if (fixture !== undefined)
+                yield* fs.writeFileString(diagnostic, JSON.stringify(fixture)).pipe(Effect.orDie);
+              return yield* error;
+            }),
+          executeStreaming: () => Effect.succeed({exitCode: 0, stdout: '', stderr: ''}),
+        });
+        const failure = yield* bundledContextWorker(root, root).pipe(
+          Effect.provideService(CommandExecutor, executor),
+          Effect.provideService(
+            Logger.CurrentLoggers,
+            new Set([Logger.make(options => messages.push(options.message))]),
+          ),
+          Effect.flip,
+        );
+        expect(failure).toBe(error);
+        expect(messages).toHaveLength(1);
+        expect(messages[0]).toEqual([
+          'Context worker bundle setup failed',
+          {
+            errorClass: 'CommandTimedOut',
+            elapsedMs: expect.any(Number),
+            child: fixture?.phase === 'build-completed' ? state : 'unavailable',
+          },
+        ]);
+        expect(JSON.stringify(messages)).not.toContain('private-path');
+        expect(JSON.stringify(messages)).not.toContain(root);
+      }
+    }),
+  );
+});
 
 /** Actual graph, canonical memory reads and citation validation; only the provider RPC is a stable fixture. */
 const memoryContextFixture = Effect.gen(function* () {

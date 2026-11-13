@@ -73,6 +73,98 @@ const library = Schema.Struct({
   bytes: Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 64 * 1024 * 1024})),
 });
 
+const mavenXml = (value: string) =>
+  EffectString.replaceAll(
+    '>',
+    '&gt;',
+  )(EffectString.replaceAll('<', '&lt;')(EffectString.replaceAll('&', '&amp;')(value)));
+const mavenSettingsText = (repository: string) =>
+  '<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"><localRepository>' +
+  mavenXml(repository) +
+  '</localRepository><offline>true</offline></settings>';
+const mavenToolchainsText = (javaHome: string) =>
+  '<toolchains><toolchain><type>jdk</type><provides><version>21</version></provides><configuration><jdkHome>' +
+  mavenXml(javaHome) +
+  '</jdkHome></configuration></toolchain></toolchains>';
+export const javaMavenImportSettings = (root: string, javaHome: string) => ({
+  java: {
+    autobuild: {enabled: false},
+    import: {
+      maven: {enabled: true, offline: {enabled: true}},
+      gradle: {
+        enabled: false,
+        offline: {enabled: true},
+        wrapper: {enabled: false},
+        annotationProcessing: {enabled: false},
+      },
+    },
+    configuration: {
+      updateBuildConfiguration: 'automatic',
+      runtimes: [{name: 'JavaSE-21', path: javaHome, default: true}],
+      annotationProcessing: {enabled: false},
+      maven: {userSettings: root + '/maven-settings.xml', globalSettings: root + '/maven-global-settings.xml'},
+    },
+    maven: {downloadSources: false},
+    referencesCodeLens: {enabled: false},
+  },
+});
+/** Bind the actual template/settings bytes with a logical runtime root, independent of a fresh temporary directory. */
+export const javaMavenBootstrapContractDigest = (javaHome: string) =>
+  sha256HexSync(
+    JSON.stringify([
+      'private-java-import-bootstrap-v1',
+      mavenSettingsText('@runtime/m2'),
+      mavenToolchainsText(javaHome),
+      'user.home:@runtime/home',
+      'toolchains:@runtime/home/.m2/toolchains.xml',
+      javaMavenImportSettings('@runtime', javaHome),
+    ]),
+  );
+/** Explicit private user/global settings and private-user.home toolchains. Existing partial/drifted state is never repaired. */
+export const materializeJavaMavenConfiguration = Effect.fn('semantic.materializeJavaMavenConfiguration')(function* (
+  root: string,
+  javaHome: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const files = [
+    [path.join(root, 'maven-settings.xml'), mavenSettingsText(path.join(root, 'm2'))],
+    [path.join(root, 'maven-global-settings.xml'), mavenSettingsText(path.join(root, 'm2'))],
+    [path.join(root, 'home', '.m2', 'toolchains.xml'), mavenToolchainsText(javaHome)],
+  ] as const;
+  const exists = yield* Effect.forEach(files, ([file]) => fs.exists(file));
+  if (EffectArray.some(exists, Boolean) && !EffectArray.every(exists, Boolean)) return yield* fail();
+  if (!EffectArray.some(exists, Boolean)) {
+    const directory = path.join(root, 'home', '.m2');
+    yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
+    for (const [file, text] of files) yield* fs.writeFileString(file, text, {flag: 'wx', mode: 0o600});
+  }
+  const originals = yield* Effect.forEach(files, ([file]) => fs.stat(file));
+  let invalid = false;
+  const verify = Effect.gen(function* () {
+    if (invalid) return yield* fail();
+    for (const [index, [file, text]] of files.entries()) {
+      const current = yield* fs.stat(file);
+      if (
+        (yield* fs.realPath(file)) !== file ||
+        current.type !== 'File' ||
+        current.mode & 0o077 ||
+        !sameIdentity(originals[index], current) ||
+        sha256HexSync(yield* readBounded(file, 64 * 1024)) !== sha256HexSync(text)
+      )
+        return yield* fail();
+    }
+  }).pipe(
+    Effect.onError(() =>
+      Effect.sync(() => {
+        invalid = true;
+      }),
+    ),
+  );
+  yield* verify;
+  return {verify};
+});
+
 /** The fixed setup command's successful wire shape. Refusals and unknown fields never become prepared models. */
 export const JavaPreparedObservation = Schema.Struct({
   protocolVersion: Schema.Literal(1),
@@ -830,29 +922,20 @@ export const observeJavaPreparedImport = Effect.fn('semantic.observeJavaPrepared
           return yield* fail();
       } else if (gradle) return yield* fail();
       const bundle = yield* materializeJavaDiagnosticBundle(root);
+      const mavenConfiguration =
+        inputs.build === 'maven'
+          ? yield* materializeJavaMavenConfiguration(runtime.directory, runtime.projectJavaHome)
+          : undefined;
       const verifyHost = Effect.gen(function* () {
         yield* runtime.verify;
         yield* runtimeOwner;
         yield* bundle.verify;
+        if (mavenConfiguration) yield* mavenConfiguration.verify;
         if (gradle && (yield* semanticSdkDigest(gradle.sdkDirectory)) !== gradle.sdkDigest) return yield* fail();
       });
       yield* verifyHost;
-      const mavenSettings = path.join(runtime.directory, 'maven-settings.xml');
       const gradleHome = path.join(runtime.directory, 'gradle');
-      const escape = (value: string) =>
-        EffectString.replaceAll(
-          '>',
-          '&gt;',
-        )(EffectString.replaceAll('<', '&lt;')(EffectString.replaceAll('&', '&amp;')(value)));
-      if (inputs.build === 'maven')
-        yield* fs.writeFileString(
-          mavenSettings,
-          '<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"><localRepository>' +
-            escape(path.join(runtime.directory, 'm2')) +
-            '</localRepository></settings>',
-          {flag: 'wx', mode: 0o600},
-        );
-      else
+      if (inputs.build === 'gradle')
         yield* fs.writeFileString(
           path.join(gradleHome, 'gradle.properties'),
           'org.gradle.java.installations.auto-detect=false\norg.gradle.java.installations.auto-download=false\norg.gradle.java.installations.paths=' +
@@ -860,31 +943,33 @@ export const observeJavaPreparedImport = Effect.fn('semantic.observeJavaPrepared
             '\norg.gradle.jvmargs=-Xmx256m\n',
           {flag: 'wx', mode: 0o600},
         );
-      const settings = {
-        java: {
-          autobuild: {enabled: false},
-          import: {
-            maven: {enabled: inputs.build === 'maven', offline: {enabled: true}},
-            gradle: {
-              enabled: inputs.build === 'gradle',
-              offline: {enabled: true},
-              wrapper: {enabled: false},
-              ...(gradle
-                ? {home: gradle.sdkDirectory, user: {home: gradleHome}, java: {home: runtime.projectJavaHome}}
-                : {}),
-              annotationProcessing: {enabled: false},
-            },
-          },
-          configuration: {
-            updateBuildConfiguration: 'automatic',
-            runtimes: [{name: 'JavaSE-21', path: runtime.projectJavaHome, default: true}],
-            annotationProcessing: {enabled: false},
-            ...(inputs.build === 'maven' ? {maven: {userSettings: mavenSettings}} : {}),
-          },
-          maven: {downloadSources: false},
-          referencesCodeLens: {enabled: false},
-        },
-      };
+      const settings =
+        inputs.build === 'maven'
+          ? javaMavenImportSettings(runtime.directory, runtime.projectJavaHome)
+          : {
+              java: {
+                autobuild: {enabled: false},
+                import: {
+                  maven: {enabled: false, offline: {enabled: true}},
+                  gradle: {
+                    enabled: true,
+                    offline: {enabled: true},
+                    wrapper: {enabled: false},
+                    ...(gradle
+                      ? {home: gradle.sdkDirectory, user: {home: gradleHome}, java: {home: runtime.projectJavaHome}}
+                      : {}),
+                    annotationProcessing: {enabled: false},
+                  },
+                },
+                configuration: {
+                  updateBuildConfiguration: 'automatic',
+                  runtimes: [{name: 'JavaSE-21', path: runtime.projectJavaHome, default: true}],
+                  annotationProcessing: {enabled: false},
+                },
+                maven: {downloadSources: false},
+                referencesCodeLens: {enabled: false},
+              },
+            };
       const ready = yield* Deferred.make<void, LspFault>();
       const Status = Schema.Struct({type: Schema.Literals(['ServiceReady', 'Error'])});
       const admission = Object.freeze({});

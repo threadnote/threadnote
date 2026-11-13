@@ -3,7 +3,7 @@ import {isJsonObject} from '@threadnote/platform/json';
 import * as EffectRecord from 'effect/Record';
 import * as EffectArray from 'effect/Array';
 import * as EffectString from 'effect/String';
-import {Clock, Effect, Exit, Option, Schema, Semaphore} from 'effect';
+import {Clock, Effect, Exit, Option, Path, Schema, Semaphore} from 'effect';
 import {typeScriptPolicyCommand, typeScriptPolicyVersion} from './typescript_runtime.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
@@ -18,6 +18,10 @@ import {
 import {LspFault, type LspClient} from '../lsp_transport.js';
 import {
   SemanticSessionFault,
+  SemanticPrivateSourceEvidence,
+  isCoreSemanticQuery,
+  type SemanticSession,
+  type LspEditSource,
   SemanticRange as Range,
   validTextPosition,
   validRange,
@@ -55,6 +59,7 @@ export const typeScriptEditClosureLimits = {
   maxRecomputeRounds: 2,
 } as const;
 interface OpenDocument {
+  readonly diskCapture?: LspEditSource;
   observation: Observation;
   readonly text: string;
   readonly wireVersion: number;
@@ -105,11 +110,33 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
   client: LspClient,
   options: TypeScriptSessionOptions,
 ) {
+  const path = yield* Path.Path;
+  const canonicalPath = (file: string): string | undefined => {
+    const windows = path.sep === '\\';
+    if (!path.isAbsolute(file) || /[\p{Cc}]/u.test(file) || (windows && !/^[A-Za-z]:[\\/]/u.test(file)))
+      return undefined;
+    const parts = windows
+      ? EffectString.split(/[\\/]/u)(EffectString.slice(3)(file))
+      : EffectString.split('/')(EffectString.slice(1)(file));
+    if (EffectArray.some(parts, part => !part || part === '.' || part === '..')) return undefined;
+    const normalized = path.normalize(file);
+    return windows
+      ? EffectString.toUpperCase(EffectString.slice(0, 1)(normalized)) + EffectString.slice(1)(normalized)
+      : normalized;
+  };
+  const fileForUri = (uri: string) =>
+    path.fromFileUrl(new URL(uri)).pipe(
+      Effect.flatMap(file => {
+        const canonical = canonicalPath(file);
+        return canonical ? Effect.succeed(canonical) : Effect.fail(invalid());
+      }),
+    );
+  const sourceEvidence = yield* SemanticPrivateSourceEvidence;
   const basis = structuredClone(yield* decode(Observation, options.basis));
   if (
-    !EffectString.startsWith('/')(options.tsserver) ||
-    !EffectString.startsWith('/')(options.compiler) ||
-    !EffectString.startsWith('/')(options.sourceRoot) ||
+    !canonicalPath(options.tsserver) ||
+    !canonicalPath(options.compiler) ||
+    !canonicalPath(options.sourceRoot) ||
     !Number.isSafeInteger(options.maxMemoryMb) ||
     options.maxMemoryMb < 128 ||
     options.maxMemoryMb > 4096
@@ -215,12 +242,14 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
     );
   // Initialization alone can silently fall back to an unguarded SDK. No document opens before this proof.
   yield* policy(options.startupMilliseconds);
-  const allowedRoots = [decodeURIComponent(new URL(basis.worktree).pathname), options.sourceRoot];
-  const contained = (file: string) =>
-    EffectString.startsWith('/')(file) &&
-    !EffectString.includes('//')(file) &&
-    !EffectArray.some(EffectString.split('/')(file), part => part === '.' || part === '..') &&
-    EffectArray.some(allowedRoots, root => EffectString.startsWith(root + '/')(file));
+  const allowedRoots = [yield* fileForUri(basis.worktree), canonicalPath(options.sourceRoot)!];
+  const contained = (file: string) => {
+    const canonical = canonicalPath(file);
+    return (
+      canonical !== undefined &&
+      EffectArray.some(allowedRoots, root => EffectString.startsWith(root + path.sep)(canonical))
+    );
+  };
   const projectInfo = (uri: string, milliseconds: number) =>
     Effect.gen(function* () {
       const project = yield* custom('projectInfo', {file: uri, needFileNameList: true}, milliseconds);
@@ -246,17 +275,27 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
       )
         return yield* SemanticSessionFault.make({reason: 'not-ready'});
       return {
-        configuration: result.body.configFileName,
+        configuration: canonicalPath(result.body.configFileName) ?? result.body.configFileName,
         fileCount: result.body.fileNames.length,
-        files: [...new Set(result.body.fileNames)].sort(),
+        files: [...new Set(EffectArray.map(result.body.fileNames, file => canonicalPath(file)!))].sort(),
       };
     });
+  const sourceGuard = <A, E>(program: Effect.Effect<A, E>) =>
+    program.pipe(
+      Effect.onError(() =>
+        Effect.sync(() => {
+          invalidated = true;
+          for (const entry of documents.values()) entry.ready = false;
+        }),
+      ),
+    );
   const upsertUnlocked = (
     observation: Observation,
     text: string,
     language: OpenDocument['language'],
     milliseconds: number,
     internalDisk = false,
+    suppliedCapture?: LspEditSource,
   ) =>
     Effect.gen(function* () {
       let fixed = structuredClone(yield* decode(Observation, observation));
@@ -274,8 +313,18 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
         !['typescript', 'typescriptreact', 'javascript', 'javascriptreact'].includes(language)
       )
         return yield* invalid();
-      yield* policy(milliseconds);
       const previous = documents.get(fixed.uri);
+      const diskCapture =
+        sourceEvidence && fixed.documentVersion === null
+          ? (suppliedCapture ??
+            (options.captureEditSource ? yield* sourceGuard(options.captureEditSource(fixed.uri)) : undefined))
+          : undefined;
+      if (sourceEvidence && fixed.documentVersion === null) {
+        if (!diskCapture || diskCapture.text !== text || diskCapture.content !== fixed.content)
+          return yield* sourceGuard(SemanticSessionFault.make({reason: 'stale'}));
+        yield* sourceGuard(sourceEvidence.beforeUpsert(diskCapture, previous?.observation));
+      }
+      yield* policy(milliseconds);
       if (
         previous &&
         previous.ready &&
@@ -283,8 +332,10 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
         previous.language === language &&
         observationKey({...fixed, projectEpoch: previous.observation.projectEpoch}) ===
           observationKey(previous.observation)
-      )
+      ) {
+        if (sourceEvidence && diskCapture) yield* sourceGuard(sourceEvidence.bind(diskCapture, previous.observation));
         return structuredClone(previous.observation);
+      }
       if (
         previous &&
         fixed.documentVersion !== null &&
@@ -303,8 +354,14 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
       fixed = {...fixed, projectEpoch: epoch};
       // Every buffer can affect every other document in this provider view.
       updating = true;
-      for (const document of documents.values()) document.observation = {...document.observation, projectEpoch: epoch};
+      for (const [uri, document] of documents) {
+        if (uri === fixed.uri) continue;
+        document.observation = {...document.observation, projectEpoch: epoch};
+        if (sourceEvidence && document.diskCapture)
+          yield* sourceGuard(sourceEvidence.bind(document.diskCapture, document.observation));
+      }
       const document: OpenDocument = {
+        ...(diskCapture ? {diskCapture} : {}),
         observation: fixed,
         wireVersion,
         text,
@@ -313,6 +370,7 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
         diagnosticRequest: 0,
         ...(previous?.diagnostics ? {diagnostics: previous.diagnostics} : {}),
       };
+      if (sourceEvidence && diskCapture) yield* sourceGuard(sourceEvidence.bind(diskCapture, fixed));
       documents.set(fixed.uri, document);
       return yield* Effect.gen(function* () {
         yield* client.notify(
@@ -837,6 +895,7 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
                 language,
                 yield* remaining,
                 true,
+                captured,
               );
             }
             const refreshed = documents.get(observation.uri);
@@ -853,7 +912,7 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
             if (
               barrier.configuration !== initial.project?.configuration ||
               JSON.stringify(barrier.files) !== JSON.stringify(initial.project.files) ||
-              !barrier.files.includes(decodeURIComponent(new URL(observation.uri).pathname))
+              !barrier.files.includes(yield* fileForUri(observation.uri))
             )
               return stale();
             const final = yield* request();
@@ -873,7 +932,7 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
                 !source ||
                 !live ||
                 live.project?.configuration !== barrier.configuration ||
-                !barrier.files.includes(decodeURIComponent(new URL(uri).pathname)) ||
+                !barrier.files.includes(yield* fileForUri(uri)) ||
                 live.wireVersion !== source.wireVersion ||
                 source.observation.projectEpoch !== finalObservation.projectEpoch
               )
@@ -896,7 +955,8 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
               }
               const captured = proof.get(uri);
               if (captured) {
-                const closing = yield* options.captureEditSource(uri);
+                const closing = yield* sourceGuard(options.captureEditSource(uri));
+                if (sourceEvidence) yield* sourceGuard(sourceEvidence.bind(closing, source.observation));
                 if (closing.content !== captured.content || closing.identity !== captured.identity)
                   return yield* SemanticSessionFault.make({reason: 'stale'});
               }
@@ -929,7 +989,7 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
               JSON.stringify(closingProject.files) !== JSON.stringify(barrier.files)
             )
               return stale();
-            return {
+            const result = {
               version: 1,
               status: 'ok',
               evidence: evidence(finalObservation),
@@ -955,6 +1015,17 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
                 },
               ],
             } satisfies QueryOutcome;
+            if (sourceEvidence && EffectArray.every(files, file => file.source === 'disk'))
+              yield* sourceGuard(
+                sourceEvidence.prepared(
+                  result,
+                  EffectArray.map(files, file => ({
+                    capture: documents.get(file.uri)!.diskCapture!,
+                    observation: file.observation,
+                  })),
+                ),
+              );
+            return result;
           }
           return stale();
         }),
@@ -984,4 +1055,23 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
         return !invalidated && !updating && document?.ready ? structuredClone(document.observation) : undefined;
       }),
   };
+});
+
+export const semanticTypeScriptCoordinatorSession = (
+  ts: Effect.Success<ReturnType<typeof makeTypeScriptSession>>,
+): SemanticSession => ({
+  ...ts,
+  query: (operation, observation, position, milliseconds) =>
+    isCoreSemanticQuery(operation)
+      ? ts.query(operation, observation, position, milliseconds)
+      : Effect.succeed<QueryOutcome>({
+          version: 1,
+          status: 'unsupported',
+          reason: 'Optional operation is not qualified for the TypeScript profile',
+          evidence: null,
+        }),
+  upsert: (o, t, l, ms) =>
+    l === 'python' || l === 'go' || l === 'rust' || l === 'java'
+      ? Effect.fail(LspFault.make({code: 'rejected'}))
+      : ts.upsert(o, t, l, ms),
 });

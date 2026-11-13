@@ -69,6 +69,189 @@ const candidate = (): JavaRuntimeCandidate => ({
 });
 const macEffect = process.platform === 'darwin' && process.arch === 'arm64' ? effectIt.effect : effectIt.effect.skip;
 
+describe('Java preparation original-owner collection', () => {
+  const stopped = {code: 0, forced: false, drained: true, stdioClosed: true, fault: undefined};
+  const roles = ['provider', 'gradle-foreground'] as const;
+
+  effectIt.effect.prop(
+    'conserves uncertainty through generated launch, capture and verification histories without changing input',
+    [
+      Schema.Literals(['provider-tree', 'provider-and-gradle-foreground']),
+      Schema.Array(
+        Schema.Literals([
+          'enter-provider',
+          'capture-provider',
+          'enter-foreground',
+          'capture-foreground',
+          'unknown',
+          'verify',
+        ]),
+      ).check(Schema.isMaxLength(12)),
+    ],
+    ([plan, history]) =>
+      Effect.gen(function* () {
+        const owners = yield* javaRuntime.makeJavaPreparationOwners(plan);
+        const events = Object.freeze([...history]);
+        const before = JSON.stringify(events);
+        const required = plan === 'provider-tree' ? ['provider'] : [...roles];
+        const started = new Set<string>();
+        const held = new Set<string>();
+        const attempts: string[] = [];
+        let uncertain = false;
+        for (const event of events) {
+          if (event === 'unknown') {
+            owners.markUnknown();
+            uncertain = true;
+            continue;
+          }
+          if (event === 'verify') {
+            const valid: boolean = !uncertain && EffectArray.every(required, role => held.has(role));
+            expect(Exit.isSuccess(yield* Effect.exit(owners.verify))).toBe(valid);
+            uncertain ||= !valid;
+            continue;
+          }
+          const role = EffectString.endsWith('provider')(event) ? 'provider' : 'gradle-foreground';
+          const entering = EffectString.startsWith('enter')(event);
+          const valid: boolean = entering
+            ? !uncertain && required.includes(role) && !started.has(role)
+            : started.has(role) && !held.has(role);
+          const result = yield* Effect.try(() => {
+            if (entering) owners.beforeLaunch(role);
+            else
+              owners.capture(
+                role,
+                Effect.sync(() => {
+                  attempts.push(role);
+                  return stopped;
+                }),
+              );
+          }).pipe(Effect.exit);
+          expect(Exit.isSuccess(result)).toBe(valid);
+          if (!valid) uncertain = true;
+          else if (entering) started.add(role);
+          else held.add(role);
+        }
+        const expected = !uncertain && EffectArray.every(Array.from(started), role => held.has(role));
+        const [first, retry] = yield* Effect.all([owners.finish, owners.finish], {concurrency: 2});
+        expect(first).toEqual({drained: expected, stdioClosed: expected});
+        expect(retry).toBe(first);
+        expect(Object.isFrozen(first)).toBe(true);
+        expect(attempts.sort()).toEqual(Array.from(held).sort());
+        expect(JSON.stringify(events)).toBe(before);
+      }),
+    {arbitrary: {runs: 48}},
+  );
+
+  effectIt.effect.prop(
+    'attempts every captured owner once regardless of registration order, receipt, failure or defect',
+    [
+      Schema.Boolean,
+      Schema.Literals(['drained', 'running', 'open-stdio', 'failure', 'defect']),
+      Schema.Literals(['drained', 'running', 'open-stdio', 'failure', 'defect']),
+    ],
+    ([reverse, provider, foreground]) =>
+      Effect.gen(function* () {
+        const owners = yield* javaRuntime.makeJavaPreparationOwners('provider-and-gradle-foreground');
+        const attempts: string[] = [];
+        for (const role of reverse ? [...roles].reverse() : roles) {
+          owners.beforeLaunch(role);
+          const outcome = role === 'provider' ? provider : foreground;
+          owners.capture(
+            role,
+            Effect.suspend(() => {
+              attempts.push(role);
+              if (outcome === 'failure') return LspFault.make({code: 'exit'});
+              if (outcome === 'defect') return Effect.die('Authored owner defect');
+              return Effect.succeed({
+                ...stopped,
+                drained: outcome !== 'running',
+                stdioClosed: outcome !== 'open-stdio',
+              });
+            }),
+          );
+        }
+        yield* owners.verify;
+        const first = yield* owners.finish;
+        expect(first.drained).toBe(provider === 'drained' && foreground === 'drained');
+        expect(first.stdioClosed).toBe(first.drained);
+        expect(yield* owners.finish).toBe(first);
+        expect(attempts.sort()).toEqual([...roles].sort());
+        expect(Exit.isFailure(yield* Effect.exit(owners.verify))).toBe(true);
+      }),
+    {arbitrary: {runs: 32}},
+  );
+
+  effectIt.effect('retains the first capability after duplicate capture and still cleans a later captured owner', () =>
+    Effect.gen(function* () {
+      const owners = yield* javaRuntime.makeJavaPreparationOwners('provider-and-gradle-foreground');
+      const attempts: string[] = [];
+      const finish = (name: string) => Effect.sync(() => void attempts.push(name)).pipe(Effect.as(stopped));
+      for (const role of roles) owners.beforeLaunch(role);
+      owners.capture('provider', finish('original-provider'));
+      expect(
+        Exit.isFailure(yield* Effect.try(() => owners.capture('provider', finish('substitute'))).pipe(Effect.exit)),
+      ).toBe(true);
+      owners.capture('gradle-foreground', finish('original-foreground'));
+      expect(yield* owners.finish).toEqual({drained: false, stdioClosed: false});
+      expect(attempts.sort()).toEqual(['original-foreground', 'original-provider']);
+    }),
+  );
+
+  effectIt.effect('uses one bounded aggregate finish and retains unknown after an interrupted owner deadline', () =>
+    Effect.gen(function* () {
+      const owners = yield* javaRuntime.makeJavaPreparationOwners('provider-and-gradle-foreground');
+      const entered = yield* Deferred.make<void>();
+      let foregroundAttempts = 0;
+      let interrupted = false;
+      owners.beforeLaunch('provider');
+      owners.capture('provider', Effect.succeed(stopped));
+      owners.beforeLaunch('gradle-foreground');
+      owners.capture(
+        'gradle-foreground',
+        Effect.sync(() => void foregroundAttempts++).pipe(
+          Effect.andThen(Deferred.succeed(entered, undefined)),
+          Effect.andThen(Effect.never),
+          Effect.onInterrupt(() => Effect.sync(() => void (interrupted = true))),
+        ),
+      );
+      const finishing = yield* Effect.forkChild(owners.finish);
+      yield* Deferred.await(entered);
+      yield* TestClock.adjust(30001);
+      const result = yield* Fiber.join(finishing);
+      expect(result).toEqual({drained: false, stdioClosed: false});
+      expect(interrupted).toBe(true);
+      expect(yield* owners.finish).toBe(result);
+      expect(foregroundAttempts).toBe(1);
+    }),
+  );
+
+  effectIt.effect('attempts both original finishes when the preparation body is already interrupted', () =>
+    Effect.gen(function* () {
+      const ready = yield* Deferred.make<void>();
+      const attempts: string[] = [];
+      let drained = false;
+      const program = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const owners = yield* javaRuntime.makeJavaPreparationOwners('provider-and-gradle-foreground');
+          for (const role of roles) {
+            owners.beforeLaunch(role);
+            owners.capture(role, Effect.sync(() => void attempts.push(role)).pipe(Effect.as(stopped)));
+          }
+          yield* Effect.addFinalizer(() =>
+            owners.finish.pipe(Effect.tap(receipt => Effect.sync(() => void (drained = receipt.drained)))),
+          );
+          yield* Deferred.succeed(ready, undefined);
+          return yield* Effect.never;
+        }),
+      ).pipe(Effect.forkChild);
+      yield* Deferred.await(ready);
+      yield* Fiber.interrupt(program);
+      expect(attempts.sort()).toEqual([...roles].sort());
+      expect(drained).toBe(true);
+    }),
+  );
+});
+
 const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
   control: {
     readonly deferImport?: boolean;
@@ -430,6 +613,7 @@ const preparationCompositionFixture = Effect.fn('test.javaPreparationComposition
       events.push('capture-finish');
     },
     verifySetup: mark('authorize'),
+    verifyOwners: mark('owners-ready'),
     onProviderStarted: pid =>
       Effect.sync(() => expect(pid).toBe(fixture.runtime.pid)).pipe(Effect.andThen(mark('admit'))),
     provisionOfflineCache: context =>
@@ -545,6 +729,8 @@ describe('Java preparation composition', () => {
       expect(f.events.indexOf('capture-finish')).toBeLessThan(f.events.indexOf('admit'));
       expect(f.events.indexOf('admit')).toBeLessThan(f.events.indexOf('initialize'));
       expect(f.events.indexOf('cache')).toBeLessThan(f.events.indexOf('initialize'));
+      expect(f.events.indexOf('owners-ready')).toBeGreaterThan(f.events.indexOf('cache'));
+      expect(f.events.indexOf('owners-ready')).toBeLessThan(f.events.indexOf('initialize'));
       expect(f.events.indexOf('stop-provider')).toBeLessThan(f.events.indexOf('drain-build'));
       expect(f.events.indexOf('drain-build')).toBeLessThan(f.events.indexOf('load-model'));
       expect(f.load).toHaveBeenCalledOnce();
@@ -650,6 +836,34 @@ describe('Java preparation composition', () => {
       expect(f.events).not.toContain('cache');
       expect(f.methods).toEqual([]);
       expect(f.load).not.toHaveBeenCalled();
+    }).pipe(Effect.provide(preparationCompositionLayer)),
+  );
+
+  effectIt.effect('a missing required original owner refuses before initialization and retains uncertainty', () =>
+    Effect.gen(function* () {
+      const f = yield* preparationCompositionFixture();
+      const owners = yield* javaRuntime.makeJavaPreparationOwners('provider-and-gradle-foreground');
+      const result = yield* Effect.exit(
+        makeJavaPreparation(f.options, {
+          ...f.host,
+          beforePreparationLaunch: () => owners.beforeLaunch('provider'),
+          capturePreparationProvider: (_pid, finish) => owners.capture('provider', finish),
+          verifyOwners: owners.verify,
+          drainBuildProcesses: () =>
+            owners.finish.pipe(
+              Effect.flatMap(receipt =>
+                receipt.drained ? Effect.succeed({drained: true}) : LspFault.make({code: 'exit'}),
+              ),
+            ),
+        }),
+      );
+      expect(Exit.isFailure(result)).toBe(true);
+      expect(f.methods).toEqual([]);
+      expect(f.load).not.toHaveBeenCalled();
+      expect(yield* owners.finish).toEqual({drained: false, stdioClosed: false});
+      expect(f.drained()).toBe(false);
+      // This fixture has no real child; allow its private test allocation to be removed.
+      yield* f.workspace.confirmDrained({drained: true, stdioClosed: true});
     }).pipe(Effect.provide(preparationCompositionLayer)),
   );
 

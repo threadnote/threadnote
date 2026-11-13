@@ -107,7 +107,7 @@ recover` reconcile the original operation with its private writer handle; recove
 later user edits. Unknown/indeterminate operation evidence and successful acknowledgements survive failed retries and
 rollback. Disable and setup never retire that authority or reinterpret its journals.
 
-## Local Java import policy (enforcement gated)
+## Local Java import policy
 
 `semantic import preview`, `apply`, `revoke` and `run` are explicit same-user local
 CLI operations. They take bounded version:1 JSON on stdin with an absolute
@@ -146,7 +146,57 @@ commands, source execution, plugins, annotation processors, dependency acquisiti
 and network access. This describes a finite application policy, not an OS
 sandbox.
 
-**Positive import is currently blocked.** No exact pinned JDT/m2e enforcement
+The separate `trusted-java-build-import-unconfined-v1` mode requires explicit
+`mode`, `build` (`maven` or `gradle`) and `cacheImage` fields in preview/apply JSON.
+It is never a fallback from restricted mode. Trusted apply additionally requires
+`--acknowledge-unconfined-build-import` alongside `--authorize-import`; a JSON
+boolean cannot supply local dispatch or that acknowledgement.
+
+Trusted build code, plugins and annotation processors act as the OS user. They
+can run programs, read or change files outside the private copy (including
+originals, SDKs and readable credentials), and contact arbitrary network
+destinations or disclose readable data. Copies and offline flags are not a
+sandbox. Requested residual filesystem, network or source-execution denials
+refuse. Revocation stops owned work when observed and cannot undo prior effects.
+Import permission remains separate from analysis, public commands and writer authority.
+
+Trusted preview binds the full unchanged copied worktree, including selected
+nested parents/siblings, account/worktree scope, SDKs, exact private cache-image
+bytes, bootstrap configuration and risk version. Original `.mvn` input remains
+unsupported. A verified empty private `.mvn` outside the copy stops automatic
+ancestor discovery before JVM startup. Generated private Maven user/global
+settings and private-user-home toolchains select the cache and project JDK;
+observed configuration drift refuses publication. These bootstrap choices do
+not prevent explicitly granted code from deliberately reading other host files.
+
+The source-independent cache image is a private canonical directory.
+`cacheImage` contains its `directory` file URI and SHA-256 `manifestDigest`.
+Closed `manifest.json` has `version:1`, `build`, `artifacts` records (`path`,
+`sha256`, `notice`) and `notices` records (`path`, `sha256`). Artifacts are under
+`m2/` or `gradle/`; notice files are under `notices/`. Every file is declared and
+hashed. Ambient `~/.m2` and `~/.gradle` are not copied. Matching notice bytes do
+not establish license qualification. Apply recomputes the preview and retains
+the prior protected profile digest as its approval anchor; the newly containing
+profile has a separate currentness digest, without a circular approval hash.
+
+**Positive trusted import remains support gated.** `run` currently returns
+`import-support-unavailable` before provisioning, admission or provider launch:
+no exact raw-source/cache/runtime Maven build-owner closure is qualified yet.
+Cleanup retains each required original provider/build owner and attempts every
+captured owner even if another fails. Missing capture, uncertain completion or
+open stdio retains admission and withholds the descriptor; retry does not repeat
+native cleanup. This is bounded owned-process recovery, not universal containment
+of explicitly authorized code running as the OS user.
+Consent does not prove process drain or model facts. Gradle still requires
+actual original-capability build ownership and verified Buildship reuse;
+`--no-daemon` and registry PIDs are not proof. Genuine model/seal, legal,
+nested-project and selected platform duties remain open. Trusted policy never
+fills the restricted denial-enforcement registry.
+This first cut does not configure a Gradle grant: Gradle preview/apply refuses
+before runtime/cache inspection or profile writing until its vetted SDK and
+original build-owner bindings can be supplied. Gradle remains mandatory work.
+
+**Positive restricted import is currently blocked.** No exact pinned JDT/m2e enforcement
 contract has completed independent examination, so `run` returns
 `enforcement-unavailable` before admission, private-cache creation or provider
 launch, even with a current enabled policy. Offline settings, empty caches,

@@ -318,10 +318,14 @@ export function makeSemanticCommand(withRuntime: CliRuntimeRunner) {
                 json: boolean('json', 'Print local import policy or result JSON'),
                 authorizeImport: boolean(
                   'authorize-import',
-                  'Assert local host intent for this exact finite import policy; no human authentication or writer grant',
+                  'Assert local host intent for this exact import policy; no human authentication or writer grant',
+                ),
+                acknowledgeUnconfinedBuildImport: boolean(
+                  'acknowledge-unconfined-build-import',
+                  'Acknowledge OS-user file access, programs and network/data disclosure for this exact trusted build import',
                 ),
               },
-              ({authorizeImport}) =>
+              ({authorizeImport, acknowledgeUnconfinedBuildImport}) =>
                 withRuntime(config =>
                   Effect.gen(function* () {
                     const result = yield* runSemanticJavaImport(
@@ -329,6 +333,7 @@ export function makeSemanticCommand(withRuntime: CliRuntimeRunner) {
                       yield* readSemanticAgentQueryInput,
                       action,
                       authorizeImport,
+                      acknowledgeUnconfinedBuildImport,
                     );
                     return yield* Console.log(JSON.stringify(result));
                   }),

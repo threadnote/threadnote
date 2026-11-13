@@ -1,4 +1,5 @@
 import {Schema} from 'effect';
+import {WindowsRetainedProof} from './proposal_store.js';
 import {Counter, Digest, FileUri, Identifier, Position} from '@threadnote/semantic/contracts';
 import {SemanticAgentBufferView} from './agent_query_protocol.js';
 import {SemanticLanguage, SemanticRange} from './provider.js';
@@ -55,8 +56,7 @@ export const SemanticWriterSession = Schema.Struct({
   runtimeIdentity: Digest,
 });
 export type SemanticWriterSession = typeof SemanticWriterSession.Type;
-export const SemanticWriterProposal = Schema.Struct({
-  version: Schema.Literal(1),
+const WriterProposalFields = {
   status: Schema.Literal('writer-proposal'),
   worktree: FileUri,
   principal: Digest,
@@ -64,7 +64,11 @@ export const SemanticWriterProposal = Schema.Struct({
   expiresAt: Counter,
   proposal: Schema.Unknown,
   session: SemanticWriterSession,
-});
+};
+export const SemanticWriterProposal = Schema.Union([
+  Schema.Struct({version: Schema.Literal(1), ...WriterProposalFields}),
+  Schema.Struct({version: Schema.Literal(2), ...WriterProposalFields, windows: WindowsRetainedProof}),
+]);
 export const SemanticAgentChangeRequest = Schema.Union([
   Schema.Struct({
     ...Common,

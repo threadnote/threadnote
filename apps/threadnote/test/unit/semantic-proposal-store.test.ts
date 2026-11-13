@@ -2,11 +2,34 @@
 import {it as effectIt} from '@effect/vitest';
 import * as BunFileSystem from '@effect/platform-bun/BunFileSystem';
 import * as BunPath from '@effect/platform-bun/BunPath';
-import {Array as EffectArray, Clock, Effect, FileSystem, Layer, Path, Schema, String as EffectString} from 'effect';
+import {
+  Array as EffectArray,
+  Record as EffectRecord,
+  Option,
+  Clock,
+  Effect,
+  FileSystem,
+  Layer,
+  Path,
+  Schema,
+  String as EffectString,
+} from 'effect';
 import {TestClock} from 'effect/testing';
-import {describe, expect} from 'vitest';
+import {dlopen} from 'bun:ffi';
+import * as Native from '@threadnote/platform/system';
+import fc from 'fast-check';
+import {hmacSha256Hex} from '@threadnote/platform/hmac';
+import {
+  WindowsProofClosure,
+  windowsProofDigest,
+  assertWindowsProofTargets,
+  windowsResourceIdentity,
+} from '../../src/semantic/source_evidence.js';
+import {authenticateWindowsRetainedProof, type WindowsRetainedProof} from '../../src/semantic/proposal_store.js';
+import {describe, expect, it} from 'vitest';
 import {cryptoLayer} from '@threadnote/platform/crypto';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import {observationKey} from '@threadnote/semantic/contracts';
 import {createSemanticProposal} from '@threadnote/semantic/proposals';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {makeSemanticProposalStore, semanticProposalStoreLimits} from '../../src/semantic/proposal_store.js';
@@ -53,10 +76,54 @@ const proposal = (beforeText = 'old') => {
     sha256HexSync,
   );
 };
+const protectedFixtureRoot = (parent: string): string => {
+  const kernel = dlopen('kernel32.dll', {
+    GetSystemDirectoryW: {args: ['buffer', 'u32'], returns: 'u32'},
+    CreateDirectoryW: {args: ['buffer', 'buffer'], returns: 'i32'},
+    LocalFree: {args: ['u64'], returns: 'u64'},
+  });
+  const wide = (text: string) => {
+    const result = new Uint16Array(text.length + 1);
+    for (let index = 0; index < text.length; index++)
+      result[index] = Option.getOrElse(EffectString.charCodeAt(index)(text), () => 0);
+    return result;
+  };
+  const system = new Uint16Array(32768),
+    count = kernel.symbols.GetSystemDirectoryW(system, system.length);
+  expect(count > 2 && count < system.length).toBe(true);
+  const systemPath = new TextDecoder('utf-16le').decode(new Uint8Array(system.buffer, 0, count * 2));
+  const security = dlopen(systemPath + '\\advapi32.dll', {
+    ConvertStringSecurityDescriptorToSecurityDescriptorW: {args: ['buffer', 'u32', 'buffer', 'ptr'], returns: 'i32'},
+  });
+  const descriptor = new BigUint64Array(1),
+    path = parent + '\\protected';
+  try {
+    const principal = Native.runtimeReadStableOsUserIdentity().userId;
+    expect(
+      security.symbols.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        wide(`O:${principal}D:P(A;;FA;;;${principal})`),
+        1,
+        descriptor,
+        null,
+      ),
+    ).toBe(1);
+    const attributes = new BigUint64Array(3);
+    new DataView(attributes.buffer).setUint32(0, 24, true);
+    attributes[1] = descriptor[0];
+    expect(kernel.symbols.CreateDirectoryW(wide(path), attributes)).toBe(1);
+    return process.getBuiltinModule('fs').realpathSync(path);
+  } finally {
+    if (descriptor[0] !== 0n) expect(kernel.symbols.LocalFree(descriptor[0])).toBe(0n);
+    security.close();
+    kernel.close();
+  }
+};
 const fixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const home = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'semantic-proposal-'}));
+  const temporary = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'semantic-proposal-'}));
+  const home =
+    Native.runtimePlatform === 'win32' ? yield* Effect.sync(() => protectedFixtureRoot(temporary)) : temporary;
   const directory = path.join(home, 'proposals');
   const store = yield* makeSemanticProposalStore({directory, namespace: 'first'});
   return {fs, path, home, directory, store};
@@ -120,6 +187,7 @@ describe('private semantic proposal retention', () => {
       yield* fs.link(file, alias);
       yield* rejected(store.get(retained.handle, binding));
       yield* fs.remove(alias);
+      if (Native.runtimePlatform === 'win32') return; // POSIX file symlink setup; real Windows junction refusal is owned by the native target fixture.
       yield* fs.rename(file, alias);
       yield* fs.symlink(alias, file);
       yield* rejected(store.get(retained.handle, binding));
@@ -175,23 +243,25 @@ describe('private semantic proposal retention', () => {
     }).pipe(Effect.provide(layer)),
   );
 
-  effectIt.effect('recovers interrupted exclusive publication and refuses replaced or nonprivate directories', () =>
-    Effect.gen(function* () {
-      const {store, fs, directory, path} = yield* fixture;
-      const retained = yield* store.retain(proposal(), binding);
-      yield* fs.link(
-        path.join(directory, retained.handle.id + '.json'),
-        path.join(directory, retained.handle.id + '.tmp'),
-      );
-      expect((yield* store.get(retained.handle, binding)).proposal).toEqual(proposal());
-      expect(EffectArray.some(yield* fs.readDirectory(directory), name => /\.tmp$/u.test(name))).toBe(false);
-      yield* fs.chmod(directory, 0o755);
-      yield* rejected(store.get(retained.handle, binding));
-      yield* fs.chmod(directory, 0o700);
-      yield* fs.rename(directory, directory + '-old');
-      yield* fs.makeDirectory(directory, {mode: 0o700});
-      yield* rejected(store.get(retained.handle, binding));
-    }).pipe(Effect.provide(layer)),
+  effectIt.effect.skipIf(process.platform === 'win32')(
+    'recovers interrupted exclusive publication and refuses replaced or nonprivate directories',
+    () =>
+      Effect.gen(function* () {
+        const {store, fs, directory, path} = yield* fixture;
+        const retained = yield* store.retain(proposal(), binding);
+        yield* fs.link(
+          path.join(directory, retained.handle.id + '.json'),
+          path.join(directory, retained.handle.id + '.tmp'),
+        );
+        expect((yield* store.get(retained.handle, binding)).proposal).toEqual(proposal());
+        expect(EffectArray.some(yield* fs.readDirectory(directory), name => /\.tmp$/u.test(name))).toBe(false);
+        yield* fs.chmod(directory, 0o755);
+        yield* rejected(store.get(retained.handle, binding));
+        yield* fs.chmod(directory, 0o700);
+        yield* fs.rename(directory, directory + '-old');
+        yield* fs.makeDirectory(directory, {mode: 0o700});
+        yield* rejected(store.get(retained.handle, binding));
+      }).pipe(Effect.provide(layer)),
   );
 
   effectIt.effect('serializes distinct store instances at the count boundary', () =>
@@ -213,5 +283,123 @@ describe('private semantic proposal retention', () => {
       );
       expect(EffectArray.filter(outcomes, result => result._tag === 'Success')).toHaveLength(1);
     }).pipe(Effect.provide(layer)),
+  );
+});
+
+it('authenticates complete Windows historical closure values and refuses any altered proof or binding without granting eligibility', () => {
+  fc.assert(
+    fc.property(
+      fc.integer({min: 1, max: 1000}),
+      fc.constantFrom(
+        'object',
+        'snapshot',
+        'uri',
+        'rawDigest',
+        'observationKey',
+        'binding',
+        'namespace',
+        'proposalDigest',
+      ),
+      (seed, field) => {
+        const original = proposal('old' + String(seed));
+        const closure = Schema.decodeSync(WindowsProofClosure)({
+          kind: 'complete',
+          proof: {
+            version: 1,
+            platform: 'win32',
+            targets: EffectArray.map(original.targets, (target, ordinal) => ({
+              ordinal,
+              uri: target.observation.uri,
+              rawDigest: target.precondition.rawDigest,
+              observationKey: observationKey(target.observation),
+              object: 'historical native object ' + seed,
+              snapshot: 'historical native snapshot ' + seed,
+            })),
+          },
+        });
+        const capability = sha256HexSync('private capability ' + seed),
+          handle = {id: sha256HexSync('id ' + seed), digest: original.digest, capability};
+        const entry: WindowsRetainedProof = {
+          version: 2,
+          id: handle.id,
+          proposalDigest: handle.digest,
+          binding,
+          namespace: 'boot',
+          createdAt: seed,
+          expiresAt: seed + semanticProposalStoreLimits.ttlMilliseconds,
+          proof: closure,
+          proofDigest: windowsProofDigest(closure),
+          capabilityHash: '',
+        };
+        // Independent ordered protocol model. This test authenticates synthetic history, never native issuance.
+        const sealed = {
+          ...entry,
+          capabilityHash: hmacSha256Hex(
+            capability,
+            JSON.stringify([
+              'threadnote-semantic-preview-windows-v2',
+              entry.id,
+              entry.proposalDigest,
+              binding,
+              entry.namespace,
+              entry.createdAt,
+              entry.expiresAt,
+              entry.proofDigest,
+            ]),
+          ),
+        };
+        const reordered = EffectRecord.fromEntries(EffectArray.reverse(EffectRecord.toEntries(sealed)));
+        expect(authenticateWindowsRetainedProof(handle, binding, reordered).proofDigest).toBe(entry.proofDigest);
+        const absent = {...entry, proof: {kind: 'absent' as const}, proofDigest: windowsProofDigest({kind: 'absent'})};
+        const authenticatedAbsence = {
+          ...absent,
+          capabilityHash: hmacSha256Hex(
+            capability,
+            JSON.stringify([
+              'threadnote-semantic-preview-windows-v2',
+              absent.id,
+              absent.proposalDigest,
+              absent.binding,
+              absent.namespace,
+              absent.createdAt,
+              absent.expiresAt,
+              absent.proofDigest,
+            ]),
+          ),
+        };
+        expect(authenticateWindowsRetainedProof(handle, binding, authenticatedAbsence).proof.kind).toBe('absent');
+        let changed = structuredClone(sealed);
+        if (['object', 'snapshot', 'uri', 'rawDigest', 'observationKey'].includes(field)) {
+          if (changed.proof.kind !== 'complete') throw new Error('Missing proof fixture');
+          const row = changed.proof.proof.targets[0];
+          const altered = {
+            ...row,
+            [field]: field === 'uri' ? 'file:///other.ts' : field === 'rawDigest' ? sha256HexSync('other') : 'altered',
+          };
+          const proof = {...changed.proof, proof: {...changed.proof.proof, targets: [altered]}};
+          changed = {...changed, proof, proofDigest: windowsProofDigest(proof)};
+        } else Object.assign(changed, {[field]: field === 'namespace' ? 'other-boot' : sha256HexSync('other')});
+        expect(() => authenticateWindowsRetainedProof(handle, binding, changed)).toThrow();
+        if (closure.kind === 'complete') {
+          assertWindowsProofTargets(closure.proof, original);
+          const row = closure.proof.targets[0];
+          const low = '1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0',
+            high = `1,0,0,0,0,0,0,0,${(seed % 255) + 1},0,0,0,0,0,0,0`;
+          const nativeObject = (id: string) =>
+            JSON.stringify(['S-1-5-21-1', [['name', 'path', '18446744073709551615', id, '123', 0, 'S-1-5-21-1', []]]]);
+          expect(windowsResourceIdentity({...row, object: nativeObject(low)})).not.toBe(
+            windowsResourceIdentity({...row, object: nativeObject(high)}),
+          );
+          expect(() => assertWindowsProofTargets({...closure.proof, targets: []}, original)).toThrow();
+          expect(() =>
+            assertWindowsProofTargets(
+              {...closure.proof, targets: [...closure.proof.targets, ...closure.proof.targets]},
+              original,
+            ),
+          ).toThrow();
+        }
+      },
+    ),
+    {numRuns: 32},
   );
 });

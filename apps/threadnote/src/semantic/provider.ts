@@ -18,6 +18,21 @@ import {LspFault, type LspClient} from './lsp_transport.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {readBounded} from './fingerprint.js';
 import {isJsonObject} from '@threadnote/platform/json';
+import {SemanticSessionFault, SemanticPrivateSourceEvidence, type LspEditSource} from './source_evidence.js';
+export {
+  SemanticSessionFault,
+  SemanticPrivateSourceEvidence,
+  makeWindowsSemanticSources,
+  makeSemanticSources,
+  takeSemanticPrepared,
+  takeCurrentSemanticPrepared,
+  validateSemanticSource,
+  type LspEditSource,
+  type SemanticPrivateSourceRow,
+  type SemanticPrivateSourcePort,
+  type SemanticPreparedUse,
+  type WindowsSemanticSources,
+} from './source_evidence.js';
 /** Host-only bridge to the existing selected verifier; absence preserves Java's original local proof. */
 export const SemanticJavaRuntimeVerifier = Context.Reference<
   ((candidate: JavaRuntimeCandidate) => Effect.Effect<void, unknown>) | undefined
@@ -119,12 +134,6 @@ export interface SemanticActionSelection {
   readonly selector: string;
   readonly queryDigest: string;
 }
-export class SemanticSessionFault extends Schema.TaggedError<SemanticSessionFault, {readonly brand: unique symbol}>()(
-  'SemanticSessionFault',
-  {
-    reason: Schema.Literals(['invalid', 'conflict', 'stale', 'not-ready', 'provider']),
-  },
-) {}
 export const SemanticRange = Schema.Struct({start: Position, end: Position});
 export interface SemanticDiagnostic {
   readonly id: string;
@@ -234,6 +243,7 @@ export function makeSemanticNotifications() {
   };
 }
 interface Document {
+  readonly diskCapture?: LspEditSource;
   observation: Observation;
   readonly text: string;
   wireVersion: number;
@@ -294,12 +304,6 @@ export interface LspSessionPolicy {
   readonly pullDiagnostics?: boolean;
   readonly codeActionKinds?: readonly string[];
 }
-export interface LspEditSource {
-  readonly uri: string;
-  readonly text: string;
-  readonly content: string;
-  readonly identity: string;
-}
 export interface LspSessionOptions {
   /** Canonical, authorized host disk capture; never supplied by the caller. */
   readonly captureEditSource?: (uri: string) => Effect.Effect<LspEditSource, unknown>;
@@ -327,6 +331,7 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const sourceEvidence = yield* SemanticPrivateSourceEvidence;
   const basis = structuredClone(yield* decode(Observation, options.basis));
   const {maxDocuments, maxTextLength, maxTotalTextLength} = yield* decode(
     DocumentLimits,
@@ -476,12 +481,25 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
       documentVersion: b.documentVersion,
       projectEpoch: b.projectEpoch,
     }) === observationKey(b);
+  const sourceGuard = <A, E>(program: Effect.Effect<A, E>) =>
+    program.pipe(
+      Effect.onError(() =>
+        Effect.sync(() => {
+          invalidated = true;
+          for (const entry of documents.values()) {
+            entry.ready = false;
+            Deferred.doneUnsafe(entry.wake, Effect.void);
+          }
+        }),
+      ),
+    );
   const upsertUnlocked = (
     observation: Observation,
     text: string,
     language: string,
     milliseconds: number,
     internalDisk = false,
+    suppliedCapture?: LspEditSource,
   ) =>
     Effect.gen(function* () {
       let fixed = structuredClone(yield* decode(Observation, observation));
@@ -496,6 +514,16 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
       )
         return yield* invalid();
       const previous = documents.get(fixed.uri);
+      const diskCapture =
+        sourceEvidence && fixed.documentVersion === null
+          ? (suppliedCapture ??
+            (options.captureEditSource ? yield* sourceGuard(options.captureEditSource(fixed.uri)) : undefined))
+          : undefined;
+      if (sourceEvidence && fixed.documentVersion === null) {
+        if (!diskCapture || diskCapture.text !== text || diskCapture.content !== fixed.content)
+          return yield* sourceGuard(SemanticSessionFault.make({reason: 'stale'}));
+        yield* sourceGuard(sourceEvidence.beforeUpsert(diskCapture, previous?.observation));
+      }
       const totalTextLength = EffectArray.reduce(
         [...documents],
         text.length,
@@ -512,8 +540,10 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
         previous.text === text &&
         observationKey({...fixed, projectEpoch: previous.observation.projectEpoch}) ===
           observationKey(previous.observation)
-      )
+      ) {
+        if (sourceEvidence && diskCapture) yield* sourceGuard(sourceEvidence.bind(diskCapture, previous.observation));
         return structuredClone(previous.observation);
+      }
       if (
         previous &&
         fixed.documentVersion !== null &&
@@ -526,6 +556,7 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
       fixed = {...fixed, projectEpoch: epoch};
       updating = true;
       const document: Document = {
+        ...(diskCapture ? {diskCapture} : {}),
         observation: fixed,
         text,
         wireVersion: previous?.wireVersion ?? 0,
@@ -542,6 +573,8 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
           ...EffectArray.filter([...documents], ([uri]) => uri !== fixed.uri),
         ]) {
           entry.observation = {...entry.observation, projectEpoch: epoch};
+          if (sourceEvidence && entry.diskCapture)
+            yield* sourceGuard(sourceEvidence.bind(entry.diskCapture, entry.observation));
           entry.ready = false;
           entry.published = undefined;
           entry.nativeDiagnostics = undefined;
@@ -1441,6 +1474,7 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
                 options.policy.language,
                 yield* remaining,
                 true,
+                captured,
               );
             }
             const refreshed = documents.get(fixed.uri);
@@ -1522,7 +1556,8 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
               }
               const capture = captures.get(entry.uri);
               if (capture) {
-                const closing = yield* options.captureEditSource(entry.uri);
+                const closing = yield* sourceGuard(options.captureEditSource(entry.uri));
+                if (sourceEvidence) yield* sourceGuard(sourceEvidence.bind(closing, saved.observation));
                 if (closing.content !== capture.content || closing.identity !== capture.identity)
                   return yield* SemanticSessionFault.make({reason: 'stale'});
               }
@@ -1547,7 +1582,7 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
               });
             }
             if (!current(finalObservation)) return stale();
-            return {
+            const result = {
               version: 1,
               status: 'ok',
               evidence: evidence(finalObservation),
@@ -1574,6 +1609,17 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
                 },
               ],
             } satisfies QueryOutcome;
+            if (sourceEvidence && EffectArray.every(files, file => file.source === 'disk'))
+              yield* sourceGuard(
+                sourceEvidence.prepared(
+                  result,
+                  EffectArray.map(files, file => ({
+                    capture: documents.get(file.uri)!.diskCapture!,
+                    observation: file.observation,
+                  })),
+                ),
+              );
+            return result;
           }
           return stale();
         }),
@@ -1632,4 +1678,41 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
         return document && current(document.observation) ? structuredClone(document.observation) : undefined;
       }),
   };
+});
+
+/** Read-only saved-disk source capture shared by host adapters. No writer authority is issued. */
+export const makeSemanticDiskSourceCapture = Effect.fn('semantic.makeDiskSourceCapture')(function* (
+  worktree: string,
+  maximumBytes: number,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  return (uri: string) =>
+    Effect.gen(function* () {
+      const file = yield* path.fromFileUrl(new URL(uri));
+      if (
+        !EffectString.startsWith(worktree + path.sep)(file) ||
+        EffectString.split(path.sep)(file).includes('.git') ||
+        (yield* fs.realPath(file)) !== file
+      )
+        return yield* LspFault.make({code: 'rejected'});
+      const stat = yield* fs.stat(file);
+      if (stat.type !== 'File' || Option.isNone(stat.ino) || Option.isNone(stat.nlink) || stat.nlink.value !== 1n)
+        return yield* LspFault.make({code: 'rejected'});
+      const identity = JSON.stringify([String(stat.dev), String(stat.ino.value)]);
+      const bytes = yield* readBounded(file, maximumBytes);
+      const text = yield* Effect.try({
+        try: () => new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(bytes),
+        catch: () => LspFault.make({code: 'protocol'}),
+      });
+      const after = yield* fs.stat(file);
+      if (
+        (yield* fs.realPath(file)) !== file ||
+        after.type !== 'File' ||
+        Option.isNone(after.ino) ||
+        identity !== JSON.stringify([String(after.dev), String(after.ino.value)])
+      )
+        return yield* LspFault.make({code: 'rejected'});
+      return {uri, text, content: sha256HexSync(bytes), identity};
+    });
 });

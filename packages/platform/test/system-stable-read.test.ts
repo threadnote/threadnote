@@ -1,6 +1,6 @@
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {DateTime, Effect, FileSystem, Path, Schema} from 'effect';
+import {DateTime, Effect, FileSystem, Path, Schema, String as EffectString} from 'effect';
 import {expect, it as boundaryIt, vi} from 'vitest';
 import {fromPromise} from '../src/errors.js';
 import {
@@ -20,11 +20,326 @@ import {
   runtimePublishPrivateWriterFile,
   runtimeReadWriterProcessIdentity,
   runtimeAssertPrivateProviderPath,
+  RuntimeWriterFault,
 } from '../src/system.js';
 
 const posixWriterHost =
   (process.platform === 'darwin' || process.platform === 'linux') &&
   (process.arch === 'arm64' || process.arch === 'x64');
+
+for (const cut of [3, 5] as const) {
+  effectIt.layer(BunServices.layer)(it => {
+    it.effect.skipIf(!posixWriterHost)(
+      `re-resolves a provider ancestor after ${cut === 3 ? 'named-before' : 'named-after'} observation without rejecting sibling activity`,
+      () =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const native = process.getBuiltinModule('fs');
+          for (const mutation of ['sibling', 'ancestor-replacement'] as const) {
+            const folder = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'provider-late-name-'}));
+            yield* Effect.sync(() => {
+              const ancestor = `${folder}/ancestor`,
+                vault = `${ancestor}/vault`,
+                file = `${vault}/private.json`,
+                detached = `${folder}/detached`;
+              native.mkdirSync(vault, {recursive: true, mode: 0o700});
+              native.writeFileSync(file, 'owned original', {mode: 0o600});
+              const identity = native.statSync(ancestor, {bigint: true});
+              const original = native.fstatSync.bind(native);
+              const descriptors: number[] = [];
+              let changed = false;
+              const probe = vi.spyOn(native, 'fstatSync').mockImplementation((fd, options) => {
+                const observed = original(fd, options);
+                if (observed.dev === identity.dev && observed.ino === identity.ino) {
+                  descriptors.push(fd);
+                  if (descriptors.length === cut) {
+                    changed = true;
+                    if (mutation === 'sibling') native.mkdirSync(`${ancestor}/owned-sibling`, {mode: 0o700});
+                    else {
+                      native.renameSync(ancestor, detached);
+                      native.mkdirSync(vault, {recursive: true, mode: 0o700});
+                      native.writeFileSync(file, 'foreign replacement', {mode: 0o600});
+                    }
+                  }
+                }
+                // Mutate after the genuine observation on the already-open named descriptor, without replacing it.
+                return observed;
+              });
+              let accepted = false;
+              let refusal: unknown;
+              try {
+                runtimeAssertPrivateProviderPath(file, {kind: 'file'});
+                accepted = true;
+              } catch (error) {
+                refusal = error;
+              } finally {
+                probe.mockRestore();
+              }
+              expect(changed).toBe(true);
+              // Initial chain and retained-before observations share a descriptor; named-before uses a fresh one.
+              expect(descriptors[0]).toBe(descriptors[1]);
+              expect(descriptors[2]).not.toBe(descriptors[0]);
+              if (cut === 5) expect(descriptors[4]).toBe(descriptors[2]);
+              expect(accepted).toBe(mutation === 'sibling');
+              if (mutation === 'ancestor-replacement') {
+                expect(refusal).toBeInstanceOf(RuntimeWriterFault);
+                expect(native.readFileSync(`${detached}/vault/private.json`, 'utf8')).toBe('owned original');
+                expect(native.readFileSync(file, 'utf8')).toBe('foreign replacement');
+                expect(native.readdirSync(`${detached}/vault`)).toEqual(['private.json']);
+              } else expect(native.readFileSync(file, 'utf8')).toBe('owned original');
+              expect(native.readdirSync(vault)).toEqual(['private.json']);
+            });
+          }
+        }),
+    );
+  });
+}
+
+effectIt.layer(BunServices.layer)(it => {
+  it.effect.prop(
+    'distinguishes real ancestor sibling churn from replaced names and target mutations',
+    [Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 3}))],
+    ([every]) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const native = process.getBuiltinModule('fs');
+        for (const boundary of ['writer', 'provider'] as const)
+          for (const mutation of ['sibling', 'ancestor-replacement', 'unsafe-mode'] as const) {
+            const folder = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'writer-real-ancestor-'}));
+            const ancestor = `${folder}/ancestor`,
+              vault = `${ancestor}/vault`,
+              file = `${vault}/private.json`,
+              detached = `${folder}/detached`;
+            native.mkdirSync(vault, {recursive: true, mode: 0o700});
+            native.writeFileSync(file, 'owned original', {mode: 0o600});
+            const originalAncestor = native.statSync(ancestor, {bigint: true});
+            yield* Effect.acquireUseRelease(
+              Effect.sync(() => runtimeOpenPrivateWriterDirectory(vault)),
+              directory =>
+                Effect.sync(() => {
+                  const original = native.fstatSync.bind(native);
+                  let samples = 0,
+                    mutations = 0;
+                  const probe = vi.spyOn(native, 'fstatSync').mockImplementation((fd, options) => {
+                    const observed = original(fd, options);
+                    if (observed.dev === originalAncestor.dev && observed.ino === originalAncestor.ino) {
+                      samples++;
+                      if (mutation === 'sibling' && samples % every === 0) {
+                        native.mkdirSync(`${ancestor}/sibling-${++mutations}`, {mode: 0o700});
+                      } else if (!mutations && mutation !== 'sibling') {
+                        mutations++;
+                        if (mutation === 'ancestor-replacement') {
+                          native.renameSync(ancestor, detached);
+                          native.mkdirSync(vault, {recursive: true, mode: 0o700});
+                          native.writeFileSync(file, 'foreign replacement', {mode: 0o600});
+                        } else native.chmodSync(ancestor, 0o777);
+                      }
+                    }
+                    // Return the exact original native observation; every change above is a real filesystem operation.
+                    return observed;
+                  });
+                  let accepted = false;
+                  let refusal = 'none';
+                  try {
+                    if (boundary === 'provider') {
+                      runtimeAssertPrivateProviderPath(file, {kind: 'file'});
+                      accepted = true;
+                    } else {
+                      accepted =
+                        runtimePublishPrivateWriterFile(
+                          directory,
+                          'new.json',
+                          new TextEncoder().encode('private publication'),
+                          {
+                            mode: 'exclusive',
+                            nonce: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                            assertCurrentSync: () => undefined,
+                          },
+                        ).status === 'published';
+                    }
+                  } catch (error) {
+                    accepted = false;
+                    refusal = Schema.is(RuntimeWriterFault)(error)
+                      ? error.reason +
+                        (/^directory-coherence:(private|ancestor):[0-9]+:[a-zA-Z.,-]*$/u.test(error.message)
+                          ? ':' + error.message
+                          : '')
+                      : 'native-operation';
+                  } finally {
+                    probe.mockRestore();
+                  }
+                  expect(mutations).toBeGreaterThan(0);
+                  if (mutation === 'sibling') {
+                    const current = native.statSync(ancestor, {bigint: true});
+                    expect([
+                      current.dev,
+                      current.ino,
+                      current.birthtimeNs,
+                      current.uid,
+                      current.gid,
+                      current.mode,
+                    ]).toEqual([
+                      originalAncestor.dev,
+                      originalAncestor.ino,
+                      originalAncestor.birthtimeNs,
+                      originalAncestor.uid,
+                      originalAncestor.gid,
+                      originalAncestor.mode,
+                    ]);
+                    expect(
+                      current.ctimeNs !== originalAncestor.ctimeNs || current.nlink !== originalAncestor.nlink,
+                    ).toBe(true);
+                  }
+                  const surviving = mutation === 'ancestor-replacement' ? `${detached}/vault/private.json` : file;
+                  expect(native.readFileSync(surviving, 'utf8')).toBe('owned original');
+                  if (mutation === 'ancestor-replacement')
+                    expect(native.readFileSync(file, 'utf8')).toBe('foreign replacement');
+                  // Only directory entry churn is outside the selected private object's authority/content image.
+                  expect(accepted, refusal).toBe(mutation === 'sibling');
+                  expect(native.existsSync(`${vault}/new.json`)).toBe(boundary === 'writer' && mutation === 'sibling');
+                  if (mutation === 'ancestor-replacement')
+                    expect(native.existsSync(`${detached}/vault/new.json`)).toBe(false);
+                }),
+              directory => Effect.sync(() => runtimeClosePrivateWriterDirectory(directory)),
+            );
+          }
+      }),
+    {skip: !posixWriterHost, arbitrary: {runs: 12}},
+  );
+});
+
+effectIt.layer(BunServices.layer)(it => {
+  it.effect.prop(
+    'keeps retained target content and identity strict after real replacement or same-byte rewriting',
+    [Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 32}))],
+    ([value]) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const native = process.getBuiltinModule('fs');
+        for (const mutation of ['replacement', 'content', 'same-byte-rewrite'] as const) {
+          const folder = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'writer-real-target-'}));
+          const file = `${folder}/source.txt`,
+            original = `source-${value}`;
+          native.writeFileSync(file, original, {mode: 0o600});
+          const identity = native.statSync(file, {bigint: true});
+          yield* Effect.acquireUseRelease(
+            Effect.sync(() => runtimeOpenWriterRoot(folder, native.statSync(folder, {bigint: true}))),
+            root =>
+              Effect.acquireUseRelease(
+                Effect.sync(() =>
+                  runtimeOpenGuardedDiskTarget(
+                    root,
+                    ['source.txt'],
+                    JSON.stringify([String(identity.dev), String(identity.ino)]),
+                    128,
+                  ),
+                ),
+                target =>
+                  Effect.sync(() => {
+                    const before = runtimeInspectGuardedDiskTarget(target);
+                    const current = mutation === 'same-byte-rewrite' ? original : `later-${value}`;
+                    if (mutation === 'replacement') native.renameSync(file, `${folder}/original.txt`);
+                    native.writeFileSync(file, current, {mode: 0o600});
+                    expect(
+                      runtimeCommitGuardedDiskTarget(target, {
+                        before,
+                        afterBytes: new TextEncoder().encode('must not be written'),
+                        assertCurrentSync: () => undefined,
+                      }).status,
+                    ).toBe('conflict');
+                    expect(native.readFileSync(file, 'utf8')).toBe(current);
+                    if (mutation === 'replacement')
+                      expect(native.readFileSync(`${folder}/original.txt`, 'utf8')).toBe(original);
+                  }),
+                target => Effect.sync(() => runtimeCloseGuardedDiskTarget(target)),
+              ),
+            root => Effect.sync(() => runtimeCloseWriterRoot(root)),
+          );
+        }
+      }),
+    {skip: !posixWriterHost, arbitrary: {runs: 12}},
+  );
+});
+
+for (const boundary of ['writer', 'provider'] as const) {
+  for (const ace of ['allow write,execute,delete_child', 'deny delete_child'] as const) {
+    effectIt.layer(BunServices.layer)(it => {
+      it.effect.skipIf(process.platform !== 'darwin' || (process.arch !== 'arm64' && process.arch !== 'x64'))(
+        `refuses a real late ancestor ACL ${EffectString.startsWith('allow')(ace) ? 'grant' : 'change'} before ${boundary} admission or private bytes`,
+        () =>
+          Effect.gen(function* () {
+            const fs = yield* FileSystem.FileSystem;
+            const native = process.getBuiltinModule('fs');
+            const folder = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'writer-late-ancestor-acl-'}));
+            const ancestor = `${folder}/ancestor`,
+              vault = `${ancestor}/vault`,
+              file = `${vault}/private.json`;
+            native.mkdirSync(vault, {recursive: true, mode: 0o700});
+            native.writeFileSync(file, 'owned original', {mode: 0o600});
+            const identity = native.statSync(ancestor, {bigint: true});
+            yield* Effect.acquireUseRelease(
+              Effect.sync(() => runtimeOpenPrivateWriterDirectory(vault)),
+              directory =>
+                Effect.sync(() => {
+                  const original = native.fstatSync.bind(native);
+                  let samples = 0,
+                    granted = false;
+                  const probe = vi.spyOn(native, 'fstatSync').mockImplementation((fd, options) => {
+                    const observed = original(fd, options);
+                    if (observed.dev === identity.dev && observed.ino === identity.ino && ++samples === 5) {
+                      const chmod = Bun.spawnSync(['/bin/chmod', '+a', 'everyone ' + ace, ancestor], {
+                        stdout: 'pipe',
+                        stderr: 'pipe',
+                        timeout: 5000,
+                      });
+                      expect(chmod.exitCode).toBe(0);
+                      granted = true;
+                    }
+                    return observed;
+                  });
+                  let accepted = false;
+                  try {
+                    if (boundary === 'provider') {
+                      runtimeAssertPrivateProviderPath(file, {kind: 'file'});
+                      accepted = true;
+                    } else
+                      accepted =
+                        runtimePublishPrivateWriterFile(
+                          directory,
+                          'new.json',
+                          new TextEncoder().encode('PRIVATE_SENTINEL'),
+                          {
+                            mode: 'exclusive',
+                            nonce: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                            assertCurrentSync: () => undefined,
+                          },
+                        ).status === 'published';
+                  } catch {
+                    accepted = false;
+                  } finally {
+                    probe.mockRestore();
+                    if (granted && EffectString.startsWith('deny')(ace)) {
+                      // Restore only the known ACE injected into this uniquely owned fixture, so ordinary scoped deletion can finish.
+                      const removed = Bun.spawnSync(['/bin/chmod', '-a', 'everyone ' + ace, ancestor], {
+                        stdout: 'pipe',
+                        stderr: 'pipe',
+                        timeout: 5000,
+                      });
+                      expect(removed.exitCode).toBe(0);
+                    }
+                  }
+                  expect(granted).toBe(true);
+                  expect(accepted).toBe(false);
+                  expect(native.existsSync(`${vault}/new.json`)).toBe(false);
+                  expect(native.readFileSync(file, 'utf8')).toBe('owned original');
+                }),
+              directory => Effect.sync(() => runtimeClosePrivateWriterDirectory(directory)),
+            );
+          }),
+      );
+    });
+  }
+}
 
 effectIt.layer(BunServices.layer)(it => {
   it.effect.skipIf(process.platform !== 'darwin' || (process.arch !== 'arm64' && process.arch !== 'x64'))(
