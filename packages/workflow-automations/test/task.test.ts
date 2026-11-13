@@ -726,6 +726,24 @@ describe('native task projection', () => {
         },
       ],
     });
+    const prior = attached.state.supplementalPublications![0].initialization;
+    attached = initializeNativeCycleSupplementalPublication(
+      attached,
+      {
+        ...prior,
+        expectedRevision: nativeCycleSupplementalRevision(attached),
+        pr: {...prior.pr, url: 'https://github.com/example/repo/pull/2'},
+      },
+      source,
+    );
+    const sharedRevision = nativeCycleSupplementalRevision(attached);
+    const publications = projectNativeTaskView(
+      {...state, cycle: attached},
+      'second-publication-revision',
+    ).supplementalPublications!;
+    expect(publications).toHaveLength(2);
+    expect(publications[0].revision).toBe(sharedRevision);
+    expect(publications[1].revision).toBe(sharedRevision);
   });
 
   it('keeps canonical invalidation blocking ahead of stale snapshot review hints', () => {

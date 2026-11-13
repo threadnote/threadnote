@@ -22,6 +22,8 @@ import {
   validateNativeCyclePhase,
   type NativeCycleValidation,
   type NativeCycleState,
+  nativeCycleSupplementalLimits,
+  type NativeCycleSupplementalPublication,
 } from '../src/cycle.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {nativeCycleCanonicalJson, NativeCycleStateSchema} from '../src/cycle.js';
@@ -795,6 +797,99 @@ const supplementalRequest = (runtime: NativeCycleRuntime, event: unknown) => {
 };
 
 describe('supplemental local publication proof', () => {
+  it('validates a full bounded chain with an independent ref oracle and rejects middle corruption or aggregate overflow', () => {
+    const {runtime, initialization, source} = supplementalFixture();
+    const attached = initializeNativeCycleSupplementalPublication(runtime, initialization, source);
+    const original = attached.state.supplementalPublications![0];
+    const hash = (value: unknown) => sha256HexSync(nativeCycleCanonicalJson(value));
+    const records: NativeCycleSupplementalPublication['records'][number][] = [];
+    let previousRef = hash(['threadnote-supplemental-chain-initial-v1', original.publicationId]);
+    const watch = {
+      ...prDelivery().watch!,
+      prUrl: initialization.pr.url,
+      state: 'active' as const,
+      consumerKind: 'worker' as const,
+    };
+    for (let index = 0; index < nativeCycleSupplementalLimits.recordsPerPublication; index++) {
+      const request = {
+        version: 1 as const,
+        expectedRevision: hash(['observed-revision', index]),
+        previousRef,
+        event:
+          index === 0
+            ? {kind: 'provider-verified' as const, pr: initialization.pr, evidence: 'Provider observation.'}
+            : {kind: 'watch' as const, watch: {...watch, evidence: `${index}:${EffectString.repeat(3072)('x')}`}},
+      };
+      const operationId = hash(['threadnote-supplemental-record-v1', original.publicationId, request]);
+      records.push({...request, operationId});
+      previousRef = hash(['threadnote-supplemental-chain-record-v1', original.publicationId, operationId]);
+    }
+    const publication = {...original, records};
+    const representative = {...attached, state: {...attached.state, supplementalPublications: [publication]}};
+    const decoded = decodeNativeCycleRuntime(representative);
+    expect(nativeCycleSupplementalRef(publication)).toBe(previousRef);
+    const last = records.at(-1)!;
+    const replay = {
+      publicationId: publication.publicationId,
+      publicationRef: last.previousRef,
+      expectedRevision: last.expectedRevision,
+      event: last.event,
+    };
+    expect(appendNativeCycleSupplementalRecord(decoded, replay, source)).toEqual(decoded);
+    expect(() => appendNativeCycleSupplementalRecord(decoded, {...replay, expectedRevision: digest}, source)).toThrow();
+    const middle = records[128];
+    const altered = {
+      ...middle,
+      event: {kind: 'watch' as const, watch: {...watch, evidence: 'Replaced observed evidence.'}},
+    };
+    const {operationId: _oldOperationId, ...changedRequest} = altered;
+    const changedRecords = [...records];
+    changedRecords[128] = {
+      ...changedRequest,
+      operationId: hash(['threadnote-supplemental-record-v1', original.publicationId, changedRequest]),
+    };
+    expect(() =>
+      decodeNativeCycleRuntime({
+        ...representative,
+        state: {...representative.state, supplementalPublications: [{...publication, records: changedRecords}]},
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeNativeCycleRuntime({
+        ...representative,
+        state: {
+          ...representative.state,
+          supplementalPublications: [{...publication, records: [...records.slice(0, 128), ...records.slice(129)]}],
+        },
+      }),
+    ).toThrow();
+
+    // Structural budget oracle isolates count and byte bounds from identity checks above.
+    const smallRecords = EffectArray.map(records, record => ({...record, event: {kind: 'watch' as const, watch}}));
+    const bounded = {...publication, records: smallRecords};
+    const countBoundary = Array.from(
+      {length: nativeCycleSupplementalLimits.totalRecords / records.length},
+      () => bounded,
+    );
+    expect(() =>
+      Schema.decodeSync(NativeCycleStateSchema)({...attached.state, supplementalPublications: countBoundary}),
+    ).not.toThrow();
+    expect(() =>
+      Schema.decodeSync(NativeCycleStateSchema)({
+        ...attached.state,
+        supplementalPublications: [...countBoundary, bounded],
+      }),
+    ).toThrow();
+    const byteOverflow = Array.from({length: 5}, () => publication);
+    expect(byteOverflow.length * records.length).toBeLessThan(nativeCycleSupplementalLimits.totalRecords);
+    expect(new TextEncoder().encode(nativeCycleCanonicalJson(byteOverflow)).byteLength).toBeGreaterThan(
+      nativeCycleSupplementalLimits.bytes,
+    );
+    expect(() =>
+      Schema.decodeSync(NativeCycleStateSchema)({...attached.state, supplementalPublications: byteOverflow}),
+    ).toThrow();
+  });
+
   it('retains exact legacy images and requires an explicitly versioned new variant', () => {
     const {runtime, initialization, source} = supplementalFixture();
     expect(decodeNativeCycleRuntime(runtime)).toEqual(runtime);

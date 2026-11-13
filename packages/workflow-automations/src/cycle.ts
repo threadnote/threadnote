@@ -200,6 +200,14 @@ const phaseStateSchema = Schema.Struct({
   reason: Schema.optionalKey(text()),
   history: Schema.optionalKey(Schema.Array(NativeCyclePhaseProofSchema).check(Schema.isMaxLength(64))),
 });
+/** Supplemental history reserves at most one quarter of the native store's 16 MiB envelope.
+ * The application's full-state preflight still owns capacity including all original proof. */
+export const nativeCycleSupplementalLimits = {
+  publications: 128,
+  recordsPerPublication: 256,
+  totalRecords: 2048,
+  bytes: 4 * 1024 * 1024,
+} as const;
 /** New state version prevents older readers from silently discarding supplemental proof. */
 export const NativeCycleSupplementalEventSchema = Schema.Union([
   Schema.Struct({kind: Schema.Literal('provider-verified'), pr: prSchema, evidence: publicationText(4096)}),
@@ -233,7 +241,7 @@ export const NativeCycleSupplementalPublicationSchema = Schema.Struct({
       previousRef: digest,
       event: NativeCycleSupplementalEventSchema,
     }),
-  ).check(Schema.isMaxLength(256)),
+  ).check(Schema.isMaxLength(nativeCycleSupplementalLimits.recordsPerPublication)),
 });
 export type NativeCycleSupplementalPublication = typeof NativeCycleSupplementalPublicationSchema.Type;
 const specPinSchema = Schema.Struct({root, binding, documentHash: digest, intentHash: digest});
@@ -249,7 +257,16 @@ export const NativeCycleStateSchema = Schema.Struct({
   plan: NativeCyclePlanSchema,
   phases: Schema.Record(id, phaseStateSchema),
   supplementalPublications: Schema.optionalKey(
-    Schema.Array(NativeCycleSupplementalPublicationSchema).check(Schema.isBetweenLength(1, 128)),
+    Schema.Array(NativeCycleSupplementalPublicationSchema).check(
+      Schema.isBetweenLength(1, nativeCycleSupplementalLimits.publications),
+      Schema.makeFilter(publications => {
+        const count = EffectArray.reduce(publications, 0, (sum, publication) => sum + publication.records.length);
+        return count > nativeCycleSupplementalLimits.totalRecords ||
+          new TextEncoder().encode(canonical(publications)).byteLength > nativeCycleSupplementalLimits.bytes
+          ? 'Supplemental history exceeds its aggregate record or byte budget.'
+          : undefined;
+      }),
+    ),
   ),
   specAmendments: Schema.optionalKey(Schema.Array(specAmendmentSchema).check(Schema.isMaxLength(64))),
 });

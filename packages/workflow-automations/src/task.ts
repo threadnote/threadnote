@@ -722,6 +722,7 @@ export function projectNativeTaskView(
     counts,
     missingInputs,
   };
+  const supplementalRevision = cycle.supplementalPublications && nativeCycleSupplementalRevision(runtime);
   return {
     ...view,
     ...(cycle.supplementalPublications
@@ -738,7 +739,7 @@ export function projectNativeTaskView(
                 phaseId: publication.initialization.phaseId,
                 prUrl: publication.initialization.pr.url,
                 publicationRef: nativeCycleSupplementalRef(publication),
-                revision: nativeCycleSupplementalRevision(runtime),
+                revision: supplementalRevision!,
                 completed: EffectArray.some(publication.records, record => record.event.kind === 'completed'),
                 ...(watchEvent?.kind === 'watch'
                   ? {

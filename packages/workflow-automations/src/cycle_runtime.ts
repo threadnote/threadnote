@@ -467,8 +467,17 @@ export function makeNativeHistoricalDigests(plans: NativeCycleRuntime['plans']) 
 export const nativeCycleSupplementalRevision = (runtime: NativeCycleRuntime): string =>
   sha256HexSync(nativeCycleCanonicalJson(runtime));
 const supplementalDigest = (value: unknown): string => sha256HexSync(nativeCycleCanonicalJson(value));
-export const nativeCycleSupplementalRef = (publication: NativeCycleSupplementalPublication): string =>
-  supplementalDigest(['threadnote-supplemental-publication-v1', publication]);
+const supplementalInitialRef = (publicationId: string): string =>
+  supplementalDigest(['threadnote-supplemental-chain-initial-v1', publicationId]);
+const supplementalRecordRef = (publicationId: string, operationId: string): string =>
+  supplementalDigest(['threadnote-supplemental-chain-record-v1', publicationId, operationId]);
+/** Operation identity binds the prior chain ref and the complete record; no prefix serialization. */
+export const nativeCycleSupplementalRef = (publication: NativeCycleSupplementalPublication): string => {
+  const last = publication.records.at(-1);
+  return last
+    ? supplementalRecordRef(publication.publicationId, last.operationId)
+    : supplementalInitialRef(publication.publicationId);
+};
 const supplementalId = (initialization: NativeCycleSupplementalPublication['initialization']): string =>
   supplementalDigest(['threadnote-supplemental-initialization-v1', initialization]);
 const supplementalOperation = (
@@ -479,9 +488,22 @@ function supplementalFail(message: string): never {
   throw WorkflowAutomationError.make({code: 'invalid-cycle-state', message});
 }
 
+function supplementalProofContext(runtime: NativeCycleRuntime) {
+  return {
+    planDigest: supplementalDigest(runtime.state.plan),
+    localComplete:
+      runtime.state.plan.delivery === 'local' &&
+      nextNativeCycle(runtime.state).action === 'complete' &&
+      EffectArray.every(
+        runtime.state.plan.phases,
+        item => runtime.state.phases[item.id].delivery?.delivery === 'local',
+      ),
+  };
+}
 function validateSupplementalInitialization(
   runtime: NativeCycleRuntime,
   init: NativeCycleSupplementalPublication['initialization'],
+  context = supplementalProofContext(runtime),
 ): void {
   const phase = runtime.state.phases[init.phaseId];
   const definition = EffectOption.getOrUndefined(
@@ -493,16 +515,14 @@ function validateSupplementalInitialization(
     EffectArray.findFirst(runtime.reviews, item => item.snapshotId === init.snapshotId),
   );
   if (
-    runtime.state.plan.delivery !== 'local' ||
-    nextNativeCycle(runtime.state).action !== 'complete' ||
-    EffectArray.some(runtime.state.plan.phases, item => runtime.state.phases[item.id].delivery?.delivery !== 'local') ||
+    !context.localComplete ||
     !phase ||
     !definition ||
     !snapshot ||
     !review ||
     phase.delivery?.delivery !== 'local' ||
     !phase.validation ||
-    init.planDigest !== supplementalDigest(runtime.state.plan) ||
+    init.planDigest !== context.planDigest ||
     init.phaseHash !== phase.phaseHash ||
     snapshot.snapshotId !== init.snapshotId ||
     snapshot.phaseHash !== init.phaseHash ||
@@ -543,7 +563,7 @@ function validateSupplementalInitialization(
 }
 
 function validateSupplementalRecords(publication: NativeCycleSupplementalPublication): void {
-  let prefix: NativeCycleSupplementalPublication = {...publication, records: []};
+  let previousRef = supplementalInitialRef(publication.publicationId);
   let verified = false,
     merged = false,
     watched = false,
@@ -554,7 +574,7 @@ function validateSupplementalRecords(publication: NativeCycleSupplementalPublica
     if (
       operations.has(operationId) ||
       operationId !== supplementalOperation(publication.publicationId, request) ||
-      record.previousRef !== nativeCycleSupplementalRef(prefix)
+      record.previousRef !== previousRef
     )
       supplementalFail('Supplemental records lost their unique operation identity or append-only predecessor.');
     operations.add(operationId);
@@ -588,18 +608,20 @@ function validateSupplementalRecords(publication: NativeCycleSupplementalPublica
         supplementalFail('Completion requires verified merge or active watch proof.');
       completed = true;
     }
-    prefix = {...prefix, records: [...prefix.records, record]};
+    previousRef = supplementalRecordRef(publication.publicationId, operationId);
   }
 }
 
 function validateNativeCycleSupplementalPublications(runtime: NativeCycleRuntime): void {
   const publications = runtime.state.supplementalPublications ?? [];
+  if (publications.length === 0) return;
+  const context = supplementalProofContext(runtime);
   const ids = new Set<string>();
   for (const publication of publications) {
     if (ids.has(publication.publicationId) || publication.publicationId !== supplementalId(publication.initialization))
       supplementalFail('Supplemental initialization identity is immutable and unique.');
     ids.add(publication.publicationId);
-    validateSupplementalInitialization(runtime, publication.initialization);
+    validateSupplementalInitialization(runtime, publication.initialization, context);
     validateSupplementalRecords(publication);
   }
 }
