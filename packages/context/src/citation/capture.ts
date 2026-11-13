@@ -45,7 +45,7 @@ export const MEMORY_CODE_CITATION_WORKSET_PREPARATION_COMMAND = 'threadnote work
 export type MemoryCodeCitationCaptureRecoveryCode = 'exact-current-evidence-unavailable' | 'ready-graph-unavailable';
 export type MemoryCodeCitationCaptureFailureCode = 'code-reference-unresolved' | 'outside-project-graph';
 
-export function codeCitationFileEligibility(path: string): 'supported' | 'unsupported' {
+function codeCitationFileEligibility(path: string): 'supported' | 'unsupported' {
   return Option.isSome(BUILTIN_LANGUAGE_PACK_REGISTRY.match(path)) ? 'supported' : 'unsupported';
 }
 

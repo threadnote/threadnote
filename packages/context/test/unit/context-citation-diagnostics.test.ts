@@ -9,7 +9,6 @@ import {
 } from '@threadnote/memory/code/citation';
 import {parseMemoryDocument} from '@threadnote/memory/document';
 import {contextBriefMemoryCandidate} from '../../src/memory-evidence.js';
-import {codeCitationFileEligibility} from '../../src/citation/capture.js';
 import {assembleContextBriefLogicalResult, planContextBrief} from '../../src/planner.js';
 import type {ContextBriefGraphEvidenceV1, ContextBriefCitationValidationReasonV2} from '../../src/types.js';
 import {projectContextBrief, projectContextBriefAgentView} from '../../src/projector.js';
@@ -17,11 +16,6 @@ import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 
 describe('Context Brief citation metadata diagnostics', () => {
-  it('uses the public graph registry to distinguish unsupported source files', () => {
-    expect(codeCitationFileEligibility('src/module.ts')).toBe('supported');
-    expect(codeCitationFileEligibility('assets/unknown-filetype.zzz')).toBe('unsupported');
-  });
-
   it('keeps valid supported citations free of metadata warnings', () => {
     const {logical} = diagnostic([citationLine(0)], MEMORY_SCHEMA_VERSION);
     expect(EffectArray.some(logical.stalenessAndConflicts, issue => issue.kind === 'invalid-code-citation')).toBe(
