@@ -1,8 +1,9 @@
 import {it as effectIt} from '@effect/vitest';
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Option, Result} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
-import {runCommandEffect} from '@threadnote/platform/command';
+import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
 import {
   captureNativeCycleSource,
   pinNativeCycleTree,
@@ -148,6 +149,86 @@ describe('native cycle Git snapshots', () => {
       const before = yield* f.fs.readFile(indexPath);
       expect((yield* captureNativeCycleSource(f.repo, 'HEAD')).tree).toBe(changed.tree);
       expect(yield* f.fs.readFile(indexPath)).toEqual(before);
+    }).pipe(run),
+  );
+
+  effectIt.effect('counts raw diff paths against the pinned baseline and gives staging a bounded deadline', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      yield* git(f.repo, 'add', 'source.ts');
+      yield* commit(f.repo);
+      const baseline = Effect2.pipe(yield* git(f.repo, 'rev-parse', 'HEAD'), EffectString.trim);
+      const baselineTree = Effect2.pipe(yield* git(f.repo, 'rev-parse', `${baseline}^{tree}`), EffectString.trim);
+      for (let index = 0; index < 8192; index++) {
+        const name = `history-${Effect2.pipe(String(index), EffectString.padStart(4, '0'))}.txt`;
+        yield* f.fs.writeFileString(f.path.join(f.repo, name), 'committed change\n');
+      }
+      yield* git(f.repo, 'add', '--all');
+      yield* commit(f.repo);
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'worktree change\n');
+      const headDiff = Effect2.pipe(
+        yield* git(f.repo, 'diff', '--raw', '--no-renames', '--abbrev=64', '-z', 'HEAD', '--'),
+        EffectString.split('\0'),
+        EffectArray.filter(Boolean),
+      );
+      expect(headDiff.length / 2).toBe(1);
+
+      const command = yield* CommandExecutor;
+      const stagingCalls: Array<{args: readonly string[]; timeoutMs?: number}> = [];
+      const executeBytes = command.executeBytes;
+      if (!executeBytes) throw new Error('Expected binary command execution support');
+      const recording = CommandExecutor.of({
+        ...command,
+        executeBytes: (executable, args, options) => {
+          if (args.includes('add') || args.includes('write-tree') || args.includes('diff'))
+            stagingCalls.push({args, timeoutMs: options?.timeoutMs});
+          return executeBytes(executable, args, options);
+        },
+      });
+      const beforeIndex = yield* f.fs.readFile(f.path.join(f.repo, '.git', 'index'));
+      const result = yield* captureNativeCycleSource(f.repo, baseline).pipe(
+        Effect.provideService(CommandExecutor, recording),
+        Effect.result,
+      );
+      expect(result._tag).toBe('Failure');
+      if (result._tag === 'Failure') {
+        expect(result.failure).toMatchObject({code: 'snapshot-capacity'});
+        expect(result.failure.message).toContain('8193 changed paths');
+        expect(result.failure.message).toContain('8192-path limit');
+        expect(result.failure.message).toContain(`baseline tree (${baselineTree})`);
+        expect(result.failure.message).toContain('current HEAD is');
+        expect(result.failure.message).toContain('Inspect the reported baseline, captured tree, and HEAD identities.');
+        expect(result.failure.message).toContain('complete baseline-relative delta');
+        expect(result.failure.message).not.toContain('requalify');
+      }
+      expect(stagingCalls.length).toBeGreaterThanOrEqual(4);
+      expect(EffectArray.every(stagingCalls, call => call.timeoutMs === 120_000)).toBe(true);
+      expect(yield* f.fs.readFile(f.path.join(f.repo, '.git', 'index'))).toEqual(beforeIndex);
+    }).pipe(run),
+  );
+
+  effectIt.effect('classifies malformed raw diff framing as an invalid snapshot', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      yield* git(f.repo, 'add', 'source.ts');
+      yield* commit(f.repo);
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'changed\n');
+      const command = yield* CommandExecutor;
+      const executeBytes = command.executeBytes;
+      if (!executeBytes) throw new Error('Expected binary command execution support');
+      const malformedDiff = CommandExecutor.of({
+        ...command,
+        executeBytes: (executable, args, options) =>
+          args.includes('diff')
+            ? Effect.succeed({exitCode: 0, stderr: '', stdout: new TextEncoder().encode('malformed-header\0')})
+            : executeBytes(executable, args, options),
+      });
+      const result = yield* captureNativeCycleSource(f.repo, 'HEAD').pipe(
+        Effect.provideService(CommandExecutor, malformedDiff),
+        Effect.result,
+      );
+      expect(result._tag).toBe('Failure');
+      if (result._tag === 'Failure') expect(result.failure).toMatchObject({code: 'invalid-snapshot'});
     }).pipe(run),
   );
 
