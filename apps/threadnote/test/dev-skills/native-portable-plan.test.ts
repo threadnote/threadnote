@@ -29,6 +29,7 @@ import {
 } from '../../src/workflow_automation/authoring_artifacts.js';
 import {encodeNativeAuthoringTaskRef} from '../../src/workflow_automation/task_authoring.js';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
+import {CurrentNativeProgress, type NativeProgressPhase} from './native-authoring-progress-diagnostics.js';
 import {Array as EffectArray, Option as EffectOption, pipe} from 'effect';
 import * as EffectString from 'effect/String';
 import {
@@ -274,6 +275,9 @@ effectIt.effect.each([
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
+      const progress = yield* CurrentNativeProgress;
+      const markPhase = (phase: NativeProgressPhase) => progress?.enterPhase(phase);
+      markPhase('fixture-git-setup');
       const donorFixture = yield* nativeFixture();
       const recipientFixture = yield* nativeFixture();
       const donor = {
@@ -334,6 +338,7 @@ effectIt.effect.each([
       };
       const donorSystem = {...system, currentDirectory: () => donor.repo, homeDirectory: donor.home};
       const recipientSystem = {...system, currentDirectory: () => recipient.repo, homeDirectory: recipient.home};
+      markPhase('install-index-share-setup');
       yield* applyDevSkills(donorConfig, 'install', {agent: 'codex'}).pipe(
         Effect.provideService(SystemInfo, donorSystem),
       );
@@ -352,6 +357,7 @@ effectIt.effect.each([
       const recipientWorktree = yield* teamWorktreePath(recipientConfig, 'default');
       yield* setGitIdentity(recipientWorktree);
       yield* git(recipientWorktree, ['config', '--local', 'core.autocrlf', 'true']);
+      markPhase('full-evidence-donor-authoring');
       const location = {account: donorConfig.account, home: donor.home, user: donorConfig.user};
       const store = yield* ResourceStore;
       const evidenceDirectory = 'threadnote://user/donor/memories/durable/projects/repo';
@@ -555,6 +561,7 @@ effectIt.effect.each([
         }),
       );
       expect(readyPlan.status).toBe('ready');
+      markPhase('donor-publication-and-admission');
       const published = yield* Schema.decodeUnknownEffect(shareResult)(
         yield* donorAuthor({
           command: 'share',
@@ -662,6 +669,7 @@ effectIt.effect.each([
         'page-0.md',
       );
       expect(yield* fs.readFileString(recipientPage)).toContain('\r\n');
+      markPhase('recipient-start-and-ownership');
       const recipientStart = {
         callerCwd: recipient.repo,
         sharedPlanRef: published.sharedPlanRef,
@@ -823,6 +831,7 @@ effectIt.effect.each([
       expect((yield* readNativeWorkflowState(recipientConfig, started.taskRef))?.revision).toBe(
         recipientState.revision,
       );
+      markPhase('negative-integrity-cases');
       const originalPayload = yield* readPortablePlanPayload(donorConfig, published.sharedPlanRef, 'repo');
       const changedPlanRef = yield* publishPortablePlanPayload(
         donorConfig,
