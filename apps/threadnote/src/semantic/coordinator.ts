@@ -1651,7 +1651,7 @@ export const serveSemanticEndpoint = Effect.fn('semantic.serveEndpoint')(functio
     gracefulShutdownTimeout: 2000,
   });
   yield* fs.chmod(socket, 0o600);
-  yield* server.serve(handler);
+  yield* server.serve(Effect.interruptible(handler));
   yield* Effect.gen(function* () {
     for (;;) {
       yield* Effect.sleep(1000);

@@ -31,6 +31,8 @@ import {
   makeSemanticAdmission,
   makeSemanticCoordinator,
   ensureSemanticEndpoint,
+  serveSemanticEndpoint,
+  requestSemanticEndpoint,
   semanticCatalogKey,
   verifyJavaSemanticCandidate,
   type JavaHostCandidate,
@@ -351,6 +353,123 @@ describe.skipIf(process.platform === 'win32')('Java coordinator registration', (
           expect(candidate._tag).toBe('Failure');
           expect(f.factory).not.toHaveBeenCalled();
         }).pipe(TestClock.withLive),
+    );
+    layerIt.effect('interrupts a blocked owned semantic query when its HTTP client aborts', () =>
+      Effect.gen(function* () {
+        const f = yield* javaCoordinatorFixture();
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const interrupted = yield* Deferred.make<void>();
+        let delegated = 0;
+        const original = f.factory.getMockImplementation();
+        if (!original) throw new Error('Expected the owned analysis fixture');
+        f.factory.mockImplementation((...arguments_) =>
+          original(...arguments_).pipe(
+            Effect.map(analysis => ({
+              ...analysis,
+              api: {
+                ...analysis.api,
+                query: (...request: Parameters<SemanticSession['query']>) =>
+                  Effect.gen(function* () {
+                    yield* Deferred.succeed(entered, undefined);
+                    // Block before any query result or Java diagnostic publication commits.
+                    yield* Deferred.await(release).pipe(
+                      Effect.onInterrupt(() => Deferred.succeed(interrupted, undefined)),
+                    );
+                    delegated++;
+                    return yield* analysis.api.query(...request);
+                  }),
+              },
+            })),
+          ),
+        );
+        const coordinator = yield* f.make();
+        const directory = yield* f.fs.realPath(
+          yield* f.fs.makeTempDirectoryScoped({prefix: 'tn-abort-', directory: '/tmp'}),
+        );
+        const token = sha256HexSync('owned-http-abort');
+        const endpoint = yield* serveSemanticEndpoint(coordinator, {directory, token, worktree: f.basis.worktree});
+        const attachedReply = yield* requestSemanticEndpoint(endpoint.socket, token, {
+          operation: 'attach',
+          observation: f.basis,
+          text: f.text,
+          language: 'java',
+          environment: 'prepared-main',
+        });
+        const attachment = Schema.Struct({observation: Observation, capability: Schema.String});
+        const refusal = Schema.decodeUnknownResult(
+          Schema.Struct({
+            status: Schema.Literals(['unavailable', 'experimental', 'ok']),
+            reason: Schema.optionalKey(
+              Schema.Literals([
+                'protocol',
+                'prerequisite',
+                'rejected',
+                'setup',
+                'capacity',
+                'conflict',
+                'closing',
+                'stale',
+              ]),
+            ),
+            setup: Schema.optionalKey(
+              Schema.Struct({
+                component: Schema.Literals(['provider', 'sdk', 'runtime', 'project']),
+                reason: Schema.Literals(['missing', 'incompatible', 'unavailable']),
+              }),
+            ),
+          }),
+        )(attachedReply);
+        const safeRefusal =
+          refusal._tag === 'Success'
+            ? {
+                status: refusal.success.status,
+                reason: refusal.success.reason,
+                kind: refusal.success.setup?.component,
+                code: refusal.success.setup?.reason,
+              }
+            : {status: 'unrecognized-refusal'};
+        expect(Schema.is(attachment)(attachedReply), JSON.stringify(safeRefusal)).toBe(true);
+        const attached = yield* Schema.decodeUnknownEffect(attachment)(attachedReply);
+        const query = () =>
+          requestSemanticEndpoint(
+            endpoint.socket,
+            token,
+            {
+              operation: 'query',
+              observation: attached.observation,
+              query: 'symbols',
+              milliseconds: 10000,
+            },
+            attached.capability,
+          );
+        yield* Effect.gen(function* () {
+          const client = yield* Effect.forkChild(query());
+          yield* Deferred.await(entered);
+          expect(delegated).toBe(0);
+          yield* Fiber.interrupt(client);
+          const clientExit = yield* Fiber.await(client);
+          expect(clientExit._tag).toBe('Failure');
+          // Real loopback synchronization only; this is not a250ms cancellation/native-drain benchmark.
+          const cancelled = yield* Deferred.await(interrupted).pipe(Effect.timeoutOption(1000));
+          expect(cancelled._tag, 'The server query must observe client abort before the release gate opens').toBe(
+            'Some',
+          );
+          expect(delegated).toBe(0);
+        }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)));
+        expect(yield* query()).toMatchObject({status: 'ok'});
+        expect(delegated).toBe(1);
+        expect(yield* f.fs.readFileString(f.file)).toBe(f.text);
+        expect(f.control.terminations).toBe(0);
+        yield* requestSemanticEndpoint(
+          endpoint.socket,
+          token,
+          {operation: 'close', observation: attached.observation},
+          attached.capability,
+        );
+        expect(f.finishes()).toBe(1);
+        expect(yield* coordinator.status).toMatchObject({providers: 0, queued: 0, quarantined: 0});
+      }).pipe(TestClock.withLive),
     );
     layerIt.effect(
       'cold saved-disk creation supplies the computed configuration digest to the real provider basis boundary',
