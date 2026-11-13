@@ -1,7 +1,7 @@
 import {Array as EffectArray, String as EffectString} from 'effect';
 import {runtimeNativeDescriptorOperations} from '../system.js';
 import type {RuntimeGuardedDiskObservation, RuntimeWriterIdentity} from '../writer_system.js';
-import {writerFail as fail} from './fault.js';
+import {RuntimeWriterFault, writerFail as fail} from './fault.js';
 import {withNativeArguments} from './native-arguments.js';
 import {
   windowsAddress,
@@ -243,29 +243,37 @@ function projected(path: string, id: NativeFileIdentity, directory: boolean): Ru
       const byte = Number(value);
       return Number.isSafeInteger(byte) && byte >= 0 && byte <= 255 && String(byte) === value;
     })
-  )
-    return fail('unsupported-platform');
+  ) {
+    const error = RuntimeWriterFault.make({reason: 'unsupported-platform'});
+    error.message = 'windows-projection:fileIdEncoding';
+    throw error;
+  }
   const raw = new Uint8Array(EffectArray.map(fileId, value => Number(value))),
     view = new DataView(raw.buffer),
     low = view.getBigUint64(0, true),
     high = view.getBigUint64(8, true);
-  if (
-    info.isSymbolicLink() ||
-    info.isDirectory() !== directory ||
-    (!directory && !info.isFile()) ||
-    id.volumeId !== id.dev ||
-    info.dev !== id.volumeId ||
-    high !== 0n ||
-    low === 0n ||
-    low !== id.ino ||
-    info.ino !== low ||
-    info.birthtimeNs !== (id.birthtime - epoch) * 100n ||
-    info.ctimeNs !== (id.changed - epoch) * 100n ||
-    info.mtimeNs !== (id.modified - epoch) * 100n ||
-    info.nlink !== BigInt(id.links) ||
-    info.size !== id.size
-  )
-    return fail('unsupported-platform');
+  // Preserve the original short-circuit predicate order and report only a fixed field name.
+  const failed =
+    (info.isSymbolicLink() && 'symbolicLink') ||
+    (info.isDirectory() !== directory && 'directoryType') ||
+    (!directory && !info.isFile() && 'fileType') ||
+    ((id.volumeId & 0xffffffffn) !== id.dev && 'volumeLow32') ||
+    (info.dev !== id.dev && 'volumeDev') ||
+    (high !== 0n && 'fileIdHigh') ||
+    (low === 0n && 'fileIdNonzero') ||
+    (low !== id.ino && 'fileIdLegacy') ||
+    (info.ino !== low && 'fileIdBun') ||
+    (info.birthtimeNs !== (id.birthtime - epoch) * 100n && 'birth') ||
+    (info.ctimeNs !== (id.changed - epoch) * 100n && 'changed') ||
+    (info.mtimeNs !== (id.modified - epoch) * 100n && 'modified') ||
+    (info.nlink !== BigInt(id.links) && 'links') ||
+    // Bun 1.4.4 pins libuv 8023581113b276e7c1aee3f82da57ca0893faab1: win/fs.c exposes directory st_size as zero.
+    (info.size !== (directory ? 0n : id.size) && 'size');
+  if (failed) {
+    const error = RuntimeWriterFault.make({reason: 'unsupported-platform'});
+    error.message = `windows-projection:${failed}`;
+    throw error;
+  }
   return info; // Actual compatibility observations only; UID/GID/mode never supply native authority.
 }
 function capture(resources: Resources, resource: HandleResource, name: string, path: string, directory: boolean): Edge {

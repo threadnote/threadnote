@@ -106,3 +106,58 @@ protocol bump must not create a second source-writer authority. Existing `semant
 recover` reconcile the original operation with its private writer handle; recovery never replays writes or overwrites
 later user edits. Unknown/indeterminate operation evidence and successful acknowledgements survive failed retries and
 rollback. Disable and setup never retire that authority or reinterpret its journals.
+
+## Local Java import policy (enforcement gated)
+
+`semantic import preview`, `apply`, `revoke` and `run` are explicit same-user local
+CLI operations. They take bounded version:1 JSON on stdin with an absolute
+`callerCwd`. Apply, revoke and run additionally require `--authorize-import`.
+That flag asserts caller intent; it does not authenticate a human answer. Public
+MCP requests, proposal JSON, repository content and writer grants cannot establish
+import authority.
+
+Preview and apply take `project` (canonical file URI) and a standalone
+`candidate` with the pinned JDTLS, server Java25 and separate project Java21 paths
+and full-tree digests. No prepared Java environment is needed to preview the
+first policy. Preview reads and verifies inputs without launching a provider or
+writing a profile. It returns the exact policy, original source digest, runtime
+versions, `previewDigest` and prior `expectedDigest` (null for an absent profile).
+Apply repeats those checks and requires the previewDigest; include expectedDigest
+when replacing an existing profile, and omit it for a missing profile. Existing
+enabled state and catalog are preserved. Revocation takes the current
+expectedDigest and removes only the import policy. Generic setup can preserve an
+identical policy, and disable retains it; neither can mint or widen one. A disabled
+policy-only bootstrap can be re-enabled with explicit `semantic setup`, the exact
+retained profile with `enabled:true`, and its current `expectedDigest`; the empty
+catalog and policy must remain identical. This does not authorize positive import. Older
+strict profile readers can refuse the new optional field; no silent migration or
+compatibility claim is made.
+
+The current finite input mode is `maven21-dependency-free-v1`. This diagnostic
+requires the project to be the worktree root, so its closed input inventory covers
+the entire worktree copied by the preparation engine. The original POM
+must already equal the product's canonical diagnostic POM byte for byte; it is
+never rewritten. Only bounded UTF-8 Java sources under `src/main/java` are
+accepted alongside it. Unknown files, Maven settings/extensions/plugins,
+dependencies, Gradle inputs, wrappers, preexisting IDE metadata, alternate
+encodings and symlinks refuse. The policy permits only the pinned importer and
+its owned children on a private unchanged copy. It denies arbitrary repository
+commands, source execution, plugins, annotation processors, dependency acquisition
+and network access. This describes a finite application policy, not an OS
+sandbox.
+
+**Positive import is currently blocked.** No exact pinned JDT/m2e enforcement
+contract has completed independent examination, so `run` returns
+`enforcement-unavailable` before admission, private-cache creation or provider
+launch, even with a current enabled policy. Offline settings, empty caches,
+boolean assertions and a dependency-free resulting classpath do not prove those
+denials. No injectable success verifier or JSON field can replace the missing
+proof. Future reviewed activation must retain source/runtime/policy currentness,
+scoped revoke cancellation, real owned provider and finite build-owner drain, and
+the genuine prepared-v2 model. Unknown lifecycle completion retains admission
+quarantine and withholds the descriptor.
+
+This first implementation does not qualify Maven, Gradle or any platform cell.
+Intended original-project Maven and Gradle compatibility, daemon/cache ownership,
+all selected Java/platform obligations and their original acceptance remain open
+and mandatory. Existing Kotlin/editor deferrals are unchanged.

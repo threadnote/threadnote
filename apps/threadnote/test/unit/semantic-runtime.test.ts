@@ -1,3 +1,4 @@
+import {type FFIFunction} from 'bun:ffi';
 import * as EffectArray from 'effect/Array';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
@@ -50,6 +51,22 @@ import {
   type LspWire,
   type WireStop,
 } from '../../src/semantic/lsp_transport.js';
+// Intercept only libraries opened in the panic fixture's scope, using the same native seam as provider-process tests.
+const nativeWaitpidSample = vi.hoisted(() => ({
+  active: undefined as ((symbols: object) => void) | undefined,
+}));
+vi.mock('bun:ffi', async importOriginal => {
+  const real = await importOriginal<typeof import('bun:ffi')>();
+  return {
+    ...real,
+    dlopen: <Fns extends Record<string, FFIFunction>>(name: Parameters<typeof real.dlopen>[0], symbols: Fns) => {
+      const library = real.dlopen(name, symbols);
+      nativeWaitpidSample.active?.(library.symbols);
+      return library;
+    },
+  };
+});
+
 type Message = Parameters<LspWire['send']>[0];
 const fakeWire = Effect.gen(function* () {
   const incoming = yield* Queue.bounded<Message, Cause.Done>(64);
@@ -1598,6 +1615,7 @@ describe.skipIf(process.platform === 'win32')('semantic real process transport',
     ({mode, graceful}) =>
       Effect.gen(function* () {
         let failureEvidence: ((stop: WireStop & {graceful: boolean}) => string) | undefined;
+        let assertNativeRecorder: ((evidence: string | undefined) => void) | undefined;
         if (mode === 'panic-on-exit') {
           const observe = platformSystem.runtimeObserveOwnedProviderTree;
           const terminate = platformSystem.runtimeTerminateOwnedProviderTree;
@@ -1679,6 +1697,55 @@ describe.skipIf(process.platform === 'win32')('semantic real process transport',
               trace.orderTruncated = true;
             }
           };
+          // Record only outcomes of the backend's own calls. No errno reads, additional probes or status bytes.
+          const waitpidCounts = new Uint32Array(4),
+            groupCounts = new Uint32Array(4);
+          const restorations: (() => void)[] = [];
+          // Register before interception: a failed acquisition must still restore every changed descriptor.
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => {
+              for (let index = restorations.length - 1; index >= 0; index--) restorations[index]();
+            }),
+          );
+          const previousSample = nativeWaitpidSample.active;
+          restorations.push(() => {
+            nativeWaitpidSample.active = previousSample;
+          });
+          nativeWaitpidSample.active = symbols => {
+            const waitDescriptor = Object.getOwnPropertyDescriptor(symbols, 'waitpid');
+            const waitpid: unknown = waitDescriptor?.value;
+            if (!waitDescriptor || typeof waitpid !== 'function') return;
+            restorations.push(() => Object.defineProperty(symbols, 'waitpid', waitDescriptor));
+            Object.defineProperty(symbols, 'waitpid', {
+              ...waitDescriptor,
+              value(pid: number, status: Int32Array, options: number) {
+                const result: unknown = waitpid(pid, status, options);
+                // Only comparisons and preallocated typed-array writes occur before returning to the caller.
+                // In particular, no allocation, callback, FFI or other native operation can overwrite errno.
+                const index = result === pid ? 0 : result === 0 ? 1 : result === -1 ? 2 : 3;
+                if (waitpidCounts[index] < 0xffff_ffff) waitpidCounts[index]++;
+                return result;
+              },
+            });
+          };
+          const assertGroup = platformSystem.runtimeAssertProcessGroupExistsSync;
+          const groupMock = vi.spyOn(platformSystem, 'runtimeAssertProcessGroupExistsSync');
+          restorations.push(() => groupMock.mockRestore());
+          groupMock.mockImplementation(group => {
+            try {
+              const result = assertGroup(group);
+              if (groupCounts[0] < 0xffff_ffff) groupCounts[0]++;
+              return result;
+            } catch (error) {
+              // process.kill has already captured errno into its exception before this JS boundary.
+              capture(() => {
+                const code = error !== null && typeof error === 'object' ? own(error, 'code') : undefined;
+                const index = code === 'ESRCH' ? 1 : code === 'EPERM' ? 2 : 3;
+                if (groupCounts[index] < 0xffff_ffff) groupCounts[index]++;
+              });
+              throw error;
+            }
+          });
           const mocks = [
             vi.spyOn(platformSystem, 'runtimeObserveOwnedProviderTree').mockImplementation(handle => {
               try {
@@ -1763,6 +1830,11 @@ describe.skipIf(process.platform === 'win32')('semantic real process transport',
               for (const mock of mocks) mock.mockRestore();
             }),
           );
+          assertNativeRecorder = evidence => {
+            // A real successful drain crosses both seams; this also detects an ineffective module interception.
+            expect(waitpidCounts[0], evidence).toBeGreaterThan(0);
+            expect(groupCounts[1], evidence).toBeGreaterThan(0);
+          };
           failureEvidence = stop => {
             try {
               const fault = own(stop, 'fault');
@@ -1786,6 +1858,20 @@ describe.skipIf(process.platform === 'win32')('semantic real process transport',
                 last,
                 order,
                 ...trace,
+                posixCalls: {
+                  waitpid: {
+                    originalChild: waitpidCounts[0],
+                    zero: waitpidCounts[1],
+                    error: waitpidCounts[2],
+                    other: waitpidCounts[3],
+                  },
+                  groupAssertion: {
+                    returned: groupCounts[0],
+                    ESRCH: groupCounts[1],
+                    EPERM: groupCounts[2],
+                    other: groupCounts[3],
+                  },
+                },
               });
             } catch {
               return '{"observerIncomplete":true}';
@@ -1805,6 +1891,7 @@ describe.skipIf(process.platform === 'win32')('semantic real process transport',
         expect(stopped.graceful, evidence).toBe(graceful);
         expect(stopped.drained, evidence).toBe(true);
         expect(stopped.stdioClosed, evidence).toBe(true);
+        assertNativeRecorder?.(evidence);
       }).pipe(
         TestClock.withLive,
         Effect.provideService(ChildEnvironmentPolicy, {
@@ -1842,10 +1929,11 @@ describe.skipIf(process.platform === 'win32')('selected verifier process control
         yield* fs.writeFileString(
           descendant,
           `import {createHash} from 'node:crypto';
-import {writeFileSync} from 'node:fs';
+import {renameSync,writeFileSync} from 'node:fs';
 const bytes=new Uint8Array(8*1024*1024).fill(23);
 const digest=createHash('sha256').update(bytes).digest('hex');
-writeFileSync(${JSON.stringify(ready)},JSON.stringify({pid:process.ppid,descendant:process.pid,digest}));
+writeFileSync(${JSON.stringify(ready + '.tmp')},JSON.stringify({pid:process.ppid,descendant:process.pid,digest}));
+renameSync(${JSON.stringify(ready + '.tmp')},${JSON.stringify(ready)});
 const until=Date.now()+5000;
 while(Date.now()<until)createHash('sha256').update(bytes).digest('hex');
 `,

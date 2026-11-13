@@ -212,6 +212,7 @@ type JavaLaunchOptions = {
   readonly worktree: string;
 };
 type JavaPreparationOptions = JavaLaunchOptions & {
+  readonly capturePreparationProvider: (pid: number, finish: Effect.Effect<WireStop>) => void;
   readonly build: 'maven' | 'gradle';
   readonly inputs: JavaPreparationInputs;
   readonly drainBuildProcesses: (
@@ -377,12 +378,14 @@ export const makeJavaRuntime = Effect.fn('semantic.makeJavaRuntime')(
       drainBuildProcesses?: JavaPreparationOptions['drainBuildProcesses'],
       build?: JavaPreparationOptions['build'],
       inputs?: JavaPreparationInputs,
+      capturePreparationProvider?: JavaPreparationOptions['capturePreparationProvider'],
     ) => {
       const options = {...input};
       return Effect.gen(function* () {
         if (
           mode === 'preparation' &&
           (typeof drainBuildProcesses !== 'function' ||
+            typeof capturePreparationProvider !== 'function' ||
             !['maven', 'gradle'].includes(build ?? '') ||
             !inputs ||
             inputs.build !== build ||
@@ -488,6 +491,8 @@ export const makeJavaRuntime = Effect.fn('semantic.makeJavaRuntime')(
           },
         });
         launched.wire = wire;
+        // Capture the ORIGINAL cached native finish before post-spawn verification can yield or fail.
+        if (mode === 'preparation') capturePreparationProvider!(wire.pid, wire.finish);
         yield* verify.pipe(Effect.onError(() => wire.finish.pipe(Effect.asVoid)));
         return {wire, directory: root, verify};
       }).pipe(
@@ -504,7 +509,14 @@ export const makeJavaRuntime = Effect.fn('semantic.makeJavaRuntime')(
       analysis: (options: JavaLaunchOptions) => launch('analysis', options),
       preparation: (options: JavaPreparationOptions) => {
         const captured = {...options};
-        return launch('preparation', captured, captured.drainBuildProcesses, captured.build, captured.inputs).pipe(
+        return launch(
+          'preparation',
+          captured,
+          captured.drainBuildProcesses,
+          captured.build,
+          captured.inputs,
+          captured.capturePreparationProvider,
+        ).pipe(
           Effect.map(runtime => {
             const prepared: JavaPreparationRuntime = Object.freeze({
               pid: runtime.wire.pid,

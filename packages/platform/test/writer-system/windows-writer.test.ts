@@ -1,9 +1,9 @@
 import {dlopen, type FFIFunction} from 'bun:ffi';
 import {expect, it, vi} from 'vitest';
 import fc from 'fast-check';
-import {Array as EffectArray, Record as EffectRecord} from 'effect';
+import {Array as EffectArray, Record as EffectRecord, Schema} from 'effect';
 import {commitWriterTransaction, type WriterTransactionTarget} from '../../src/writer-system/writer-transaction.js';
-import {writerFail} from '../../src/writer-system/fault.js';
+import {RuntimeWriterFault, writerFail} from '../../src/writer-system/fault.js';
 import {
   runtimeOpenWriterRoot,
   runtimeCloseWriterRoot,
@@ -234,6 +234,8 @@ it.skipIf(process.platform !== 'win32')(
       const openRoots: RuntimeWriterRoot[] = [];
       const open = () => {
         const info = fs.statSync(directory, {bigint: true});
+        expect(info.isDirectory()).toBe(true);
+        expect(info.size).toBe(0n);
         const current = runtimeOpenWriterRoot(fs.realpathSync(directory), {dev: info.dev, ino: info.ino});
         openRoots.push(current);
         return current;
@@ -283,9 +285,10 @@ it.skipIf(process.platform !== 'win32')(
             observed = fs.statSync(file, {bigint: true}),
             index = BigInt(l.getUint32(44, true)) * 0x100000000n + BigInt(l.getUint32(48, true)),
             epoch = 116_444_736_000_000_000n;
+          expect(observed.isFile()).toBe(true);
+          expect(observed.size).toBe(BigInt(new TextEncoder().encode('old source').byteLength));
           const projection = {
-            volume:
-              f.getBigUint64(0, true) === BigInt(l.getUint32(28, true)) && observed.dev === f.getBigUint64(0, true),
+            volume: f.getUint32(0, true) === l.getUint32(28, true) && observed.dev === BigInt(l.getUint32(28, true)),
             fileId:
               f.getBigUint64(16, true) === 0n &&
               f.getBigUint64(8, true) === index &&
@@ -299,11 +302,14 @@ it.skipIf(process.platform !== 'win32')(
             nativeVolume64EqualsLegacySerial32: f.getBigUint64(0, true) === BigInt(l.getUint32(28, true)),
             legacySerial32EqualsBunBigintDev: BigInt(l.getUint32(28, true)) === observed.dev,
             nativeVolume64EqualsBunBigintDev: f.getBigUint64(0, true) === observed.dev,
+            nativeVolume64Low32EqualsLegacySerial32: f.getUint32(0, true) === l.getUint32(28, true),
           };
+          const previousVolumeProjection =
+            volumeRelations.nativeVolume64EqualsLegacySerial32 && volumeRelations.nativeVolume64EqualsBunBigintDev;
           representable = EffectArray.every(EffectRecord.values(projection), Boolean);
           process.stdout.write(
             'WINDOWS_WRITER_PROJECTION ' +
-              JSON.stringify({projection, volumeRelations, representable, qualified: false}) +
+              JSON.stringify({projection, volumeRelations, previousVolumeProjection, representable, qualified: false}) +
               String.fromCharCode(10),
           );
         } finally {
@@ -317,7 +323,23 @@ it.skipIf(process.platform !== 'win32')(
           }).toThrow();
           throw new Error('Lossless native identity projection is unsupported on this actual host.');
         }
-        root = open();
+        try {
+          root = open();
+        } catch (error) {
+          expect(Schema.is(RuntimeWriterFault)(error)).toBe(true);
+          if (Schema.is(RuntimeWriterFault)(error)) {
+            expect(error.reason).toBe('unsupported-platform');
+            expect(error.message).toMatch(
+              /^windows-projection:(fileIdEncoding|symbolicLink|directoryType|fileType|volumeLow32|volumeDev|fileIdHigh|fileIdNonzero|fileIdLegacy|fileIdBun|birth|changed|modified|links|size)$/,
+            );
+            process.stdout.write(
+              'WINDOWS_WRITER_ROOT_PROJECTION_REFUSAL ' +
+                JSON.stringify({reason: error.reason, message: error.message}) +
+                String.fromCharCode(10),
+            );
+          }
+          throw error;
+        }
         expect(() => runtimeOpenGuardedDiskTarget(root!, ['..', 'source.txt'], physical(), 1024)).toThrow();
         expect(() => Reflect.apply(runtimeInspectGuardedDiskTarget, undefined, [{}])).toThrow();
         // A preexisting compatible foreign read/write or delete HANDLE must block source acquisition.
@@ -340,6 +362,7 @@ it.skipIf(process.platform !== 'win32')(
           expect(error).toBe(32);
         }
         const before = runtimeInspectGuardedDiskTarget(target);
+        expect(before.identity).toEqual(fs.lstatSync(file, {bigint: true}));
         expect(new TextDecoder().decode(before.bytes)).toBe('old source');
         const forged = {...before, bytes: before.bytes.slice()};
         expect(
