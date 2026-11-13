@@ -125,11 +125,41 @@ type ScenarioStage =
   | 'post-stop-event'
   | 'work-detail'
   | 'cleanup';
+interface ScenarioFailureSnapshot {
+  stage: ScenarioStage;
+  elapsedMs: number;
+  cliCount: number;
+}
 interface ScenarioDiagnostics {
   stage: ScenarioStage;
   readonly startedAt: number;
   cliCount: number;
+  failure?: ScenarioFailureSnapshot;
 }
+const scenarioFailureSnapshot = (diagnostics: ScenarioDiagnostics, now = Date.now()): ScenarioFailureSnapshot =>
+  diagnostics.failure ?? {
+    stage: diagnostics.stage,
+    elapsedMs: now - diagnostics.startedAt,
+    cliCount: diagnostics.cliCount,
+  };
+const captureScenarioFailure = (diagnostics: ScenarioDiagnostics | undefined, now = Date.now()) => {
+  if (diagnostics && !diagnostics.failure) diagnostics.failure = scenarioFailureSnapshot(diagnostics, now);
+};
+it('preserves the scenario failure snapshot across cleanup and samples live timeout state', () => {
+  const diagnostics: ScenarioDiagnostics = {stage: 'post-restart-relay', startedAt: 100, cliCount: 4};
+  captureScenarioFailure(diagnostics, 160);
+  diagnostics.stage = 'cleanup';
+  diagnostics.cliCount++;
+  expect(scenarioFailureSnapshot(diagnostics, 250)).toEqual({
+    stage: 'post-restart-relay',
+    elapsedMs: 60,
+    cliCount: 4,
+  });
+  const timedOut: ScenarioDiagnostics = {stage: 'event-gate', startedAt: 100, cliCount: 2};
+  expect(scenarioFailureSnapshot(timedOut, 250)).toEqual({stage: 'event-gate', elapsedMs: 150, cliCount: 2});
+  const cleanupFailure: ScenarioDiagnostics = {stage: 'cleanup', startedAt: 100, cliCount: 5};
+  expect(scenarioFailureSnapshot(cleanupFailure, 250)).toEqual({stage: 'cleanup', elapsedMs: 150, cliCount: 5});
+});
 const required = <A>(value: A | null | undefined): A => {
   expect(value).toBeDefined();
   expect(value).not.toBeNull();
@@ -494,6 +524,9 @@ process.stdout.write('Queued message bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb for th
       true,
     );
     expect(await readFile(counter, 'utf8')).toBe(restartRequests);
+  } catch (error) {
+    captureScenarioFailure(diagnostics);
+    throw error;
   } finally {
     stage('cleanup');
     // The private fixture state is also authoritative if startup failed after spawning.
@@ -534,13 +567,7 @@ it('keeps event delivery gated across real collector crash/restart and sends sto
   const diagnostics: ScenarioDiagnostics = {stage: 'fixture-setup', startedAt: Date.now(), cliCount: 0};
   onTestFailed(() => {
     process.stderr.write(
-      'NATIVE_WATCH_SCENARIO_FAILURE ' +
-        JSON.stringify({
-          stage: diagnostics.stage,
-          elapsedMs: Date.now() - diagnostics.startedAt,
-          cliCount: diagnostics.cliCount,
-        }) +
-        '\n',
+      'NATIVE_WATCH_SCENARIO_FAILURE ' + JSON.stringify(scenarioFailureSnapshot(diagnostics)) + '\n',
     );
   });
   return realCollectorScenario(false, true, diagnostics);
