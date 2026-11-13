@@ -177,11 +177,12 @@ it('omits unreachable long prefixes within the same64KiB and caps overlap before
 });
 it('validates owner, hash, window and policy; retains optional codec fields and closes budgeted owners', () => {
   const file = bodyFile('function f() { "pending items"; }');
-  const facts = captureBodyDiscovery(
-    file,
-    ownerFacts(file, [{line: 1, column: 1, endLine: 1, endColumn: file.content!.length + 1}]),
-  );
+  const span = {line: 1, column: 1, endLine: 1, endColumn: file.content!.length + 1};
+  const facts = captureBodyDiscovery(file, ownerFacts(file, [span, span]));
   const body = facts.derivationInputs!.bodyDiscovery!;
+  expect(body.records).toHaveLength(2);
+  expect(body.records[1].terms).toEqual(body.records[0].terms);
+  expect(validateBodyDiscovery(body, file.path, facts.symbols)).toEqual(body);
   const stored = encodeStoredCodeGraphFact(serializeBoundedCodeGraphFact(facts));
   expect(decodeStoredCodeGraphFact(stored.json).facts).toEqual(facts);
   const checkpoint = {
@@ -197,6 +198,11 @@ it('validates owner, hash, window and policy; retains optional codec fields and 
     {...body, contentHash: EffectString.repeat(64)('b')},
     {...body, records: [{...body.records[0], ownerId: 'absent'}]},
     {...body, records: [{...body.records[0], terms: ['~body:v1:pending']}]},
+    {
+      ...body,
+      records: [body.records[0], {...body.records[1], terms: [...body.records[1].terms, body.records[0].terms[0]]}],
+    },
+    {...body, records: [body.records[0], {...body.records[1], terms: ['PENDING']}]},
     {...body, extra: true},
   ])
     expect(() => validateBodyDiscovery(altered, file.path, facts.symbols)).toThrow();

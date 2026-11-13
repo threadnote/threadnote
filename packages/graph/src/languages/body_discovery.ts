@@ -227,6 +227,7 @@ export function validateBodyDiscovery(
     return span;
   };
   const records: CodeGraphBodyDiscoveryRecord[] = [];
+  const canonicalTerms = new Set<string>();
   for (const record of input.records) {
     if (
       !Predicate.isObject(record) ||
@@ -240,8 +241,11 @@ export function validateBodyDiscovery(
     const terms: string[] = [];
     for (const term of record.terms) {
       if (typeof term !== 'string' || term.length > 128 || Buffer.byteLength(term, 'utf8') > 128) return fail();
-      const normalized = discoveryTerms(term);
-      if (normalized.length !== 1 || normalized[0] !== term) return fail();
+      if (!canonicalTerms.has(term)) {
+        const normalized = discoveryTerms(term);
+        if (normalized.length !== 1 || normalized[0] !== term) return fail();
+        canonicalTerms.add(term);
+      }
       terms.push(term);
     }
     if (new Set(terms).size !== terms.length) return fail();
