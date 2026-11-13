@@ -134,6 +134,17 @@ describe('Cursor Cloud integration', () => {
       expect(error.message).toContain(JSON.stringify({phase, revisionPresent: true, failures: 1, completed: false}));
       expect(error.message).not.toContain('private-');
       expect(error.message).not.toContain(failed.revision);
+      const timeout = lexicalSyncFenceFailure(
+        'Deferred lexical synchronization timed out; last observed demand state.',
+        scope,
+        failed,
+      );
+      expect(timeout.message).toContain(JSON.stringify({phase, revisionPresent: true, failures: 1, completed: false}));
+      expect(timeout.message).not.toContain('private-');
+      expect(timeout.message).not.toContain(failed.revision);
+      expect(lexicalSyncFenceFailure('Last observed demand unavailable.', scope).message).toContain(
+        JSON.stringify({phase}),
+      );
     },
   );
 
@@ -1573,14 +1584,14 @@ function raceLexicalFenceFailure<A>(operation: Promise<A>, failure: Promise<neve
   return Promise.race([operation, failure]);
 }
 
-function lexicalSyncFenceFailure(message: string, scope: RecallLexicalScope, demand: RecallLexicalDemand): Error {
+function lexicalSyncFenceFailure(message: string, scope: RecallLexicalScope, demand?: RecallLexicalDemand): Error {
   const phase = scope.work?.kind === 'synchronize' ? 'synchronization' : (scope.work?.kind ?? 'lexical-publication');
   return new Error(
     `${message} Demand observation: ${JSON.stringify({
       phase,
-      revisionPresent: demand.revision !== undefined,
-      failures: demand.failures,
-      completed: demand.completedAt !== undefined,
+      revisionPresent: demand === undefined ? undefined : demand.revision !== undefined,
+      failures: demand?.failures,
+      completed: demand === undefined ? undefined : demand.completedAt !== undefined,
     })}`,
   );
 }
@@ -1606,7 +1617,7 @@ async function armLexicalSyncCompletionFence(
   let observedActive = false;
   let inspecting = false;
   let dirty = false;
-  let lastObserved = 'before=unread';
+  let lastObserved: RecallLexicalDemand | undefined;
   let observerError: Error | undefined;
   let closed = false;
   let watcher: ReturnType<typeof watch> | undefined;
@@ -1653,7 +1664,13 @@ async function armLexicalSyncCompletionFence(
   };
   const timer = setTimeout(
     () =>
-      fail(new Error(`Deferred lexical synchronization timed out; last demand state: ${lastObserved ?? 'unread'}.`)),
+      fail(
+        lexicalSyncFenceFailure(
+          'Deferred lexical synchronization timed out; last observed demand state.',
+          scope,
+          lastObserved,
+        ),
+      ),
     Math.max(0, deadline - performance.now()),
   );
   void wait.catch(() => undefined);
@@ -1663,7 +1680,7 @@ async function armLexicalSyncCompletionFence(
   const awaitForeground = <A>(operation: Promise<A>) => raceLexicalFenceFailure(operation, failure);
   try {
     before = await awaitForeground(readScopedDemand());
-    lastObserved = `before=${before?.completedAt ?? 'absent'}`;
+    lastObserved = before;
     await awaitForeground(mkdir(directory, {recursive: true, mode: 0o700}));
     requestedAt = Date.now();
     watcher = watch(directory, {persistent: false}, (_event, changedFile) => {
@@ -1685,9 +1702,7 @@ async function armLexicalSyncCompletionFence(
         while (dirty && !(waitSettled && settlementSettled)) {
           dirty = false;
           const current = await awaitForeground(readScopedDemand());
-          lastObserved = current
-            ? JSON.stringify({revision: current.revision, completedAt: current.completedAt, failures: current.failures})
-            : 'absent';
+          lastObserved = current;
           if (!current) {
             if (before !== undefined || observedActive) {
               fail(new Error('Lexical synchronization demand disappeared before successful completion.'));
