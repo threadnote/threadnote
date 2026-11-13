@@ -1,8 +1,10 @@
 import {dlopen, type FFIFunction} from 'bun:ffi';
+import {fileURLToPath} from 'node:url';
 import {windowsProcessIdentity} from '../../src/writer-system/windows-native.js';
 import {windowsProviderCommandLine, WindowsDebugThreadLedger} from '../../src/writer-system/provider-windows.js';
 import * as EffectString from 'effect/String';
 import * as EffectArray from 'effect/Array';
+import * as EffectRecord from 'effect/Record';
 import {expect, it, vi} from 'vitest';
 import fc from 'fast-check';
 import {decodeUnreapedPosixExitStatus} from '../../src/writer-system/provider-posix.js';
@@ -24,6 +26,16 @@ const jobSample = vi.hoisted(() => ({
         getLastError(): number;
         setLastError(code: number): void;
         called(name: string, args: readonly unknown[], result: unknown): void;
+        closed?(symbols: Readonly<Record<string, FFIFunction>>): void;
+      }
+    | undefined,
+}));
+const posixWaitSample = vi.hoisted(() => ({
+  active: undefined as
+    | {
+        enabled: boolean;
+        wait(pid: number, status: Int32Array, flags: number, original: () => number): number;
+        release: (() => void)[];
       }
     | undefined,
 }));
@@ -33,6 +45,7 @@ vi.mock('bun:ffi', async importOriginal => {
     ...real,
     dlopen: <Fns extends Record<string, FFIFunction>>(name: Parameters<typeof real.dlopen>[0], symbols: Fns) => {
       const library = real.dlopen(name, symbols),
+        posix = posixWaitSample.active,
         observed = new Map<string, (...args: unknown[]) => unknown>();
       for (const key of [
         'CreateJobObjectW',
@@ -45,6 +58,16 @@ vi.mock('bun:ffi', async importOriginal => {
         'DuplicateHandle',
         'ResumeThread',
         'WaitForSingleObject',
+        'CreateProcessW',
+        'GetThreadId',
+        'GetProcessIdOfThread',
+        'IsProcessInJob',
+        'CompareObjectHandles',
+        'DebugSetProcessKillOnExit',
+        'ConnectNamedPipe',
+        'ReadFile',
+        'WriteFile',
+        'GetOverlappedResult',
       ]) {
         const original: unknown = Reflect.get(library.symbols, key);
         if (typeof original !== 'function') continue;
@@ -55,8 +78,15 @@ vi.mock('bun:ffi', async importOriginal => {
             let lastError: number | undefined;
             try {
               lastError = active.getLastError();
-              // Failed native calls still belong to the caller; make no secondary observations of them.
-              if ((result !== 0 && result !== 0n) || key === 'WaitForDebugEvent' || key === 'WaitForSingleObject')
+              // Existing Job/close oracles observe successful transitions only. Other calls also
+              // expose finite failure status to the bounded startup discriminator, without native retries.
+              if (
+                (result !== 0 && result !== 0n) ||
+                (key !== 'CreateJobObjectW' &&
+                  key !== 'QueryInformationJobObject' &&
+                  key !== 'TerminateJobObject' &&
+                  key !== 'CloseHandle')
+              )
                 active.called(key, args, result);
             } catch {
               active.incomplete = true;
@@ -71,10 +101,29 @@ vi.mock('bun:ffi', async importOriginal => {
           return result;
         });
       }
+      const nativeWait: unknown = Reflect.get(library.symbols, 'waitpid');
+      const posixWait =
+        posix && typeof nativeWait === 'function'
+          ? (pid: number, status: Int32Array, flags: number) =>
+              posix.enabled
+                ? posix.wait(pid, status, flags, () => nativeWait(pid, status, flags))
+                : nativeWait(pid, status, flags)
+          : undefined;
+      let released = false;
+      const close = () => {
+        if (!released) {
+          released = true;
+          library.close();
+          jobSample.active?.closed?.(symbols);
+        }
+      };
+      posix?.release.push(close);
       return {
         ...library,
+        close: posix || jobSample.active?.closed ? close : library.close,
         symbols: new Proxy(library.symbols, {
           get(target, key, receiver) {
+            if (key === 'waitpid' && posixWait) return posixWait;
             return typeof key === 'string' && observed.has(key)
               ? observed.get(key)
               : Reflect.get(target, key, receiver);
@@ -243,33 +292,254 @@ it('decodes the fixed exit command once across every byte partition and refuses 
 it.skipIf(!supported)(
   'binds actual stdio and refuses close until whole-group zero, EOF and accepted writes settle',
   async () => {
-    const provider = spawn(`for await(const bytes of Bun.stdin.stream()) await Bun.write(Bun.stdout,bytes);`);
-    const output = new Response(provider.stdout).text(),
-      errors = new Response(provider.stderr).text();
+    const windows = process.platform === 'win32',
+      marker = 'native-ready\n',
+      prior = jobSample.active,
+      kernel = windows
+        ? dlopen('kernel32.dll', {
+            GetLastError: {args: [], returns: 'u32'},
+            SetLastError: {args: ['u32'], returns: 'void'},
+          })
+        : undefined;
+    // Only fixed API names, finite scalars and bounded event samples enter failure output.
+    // No HANDLE, PID, path, provider bytes or exception pointers are emitted.
+    const calls = new Map<string, {count: number; result: number; error: number}>(),
+      creators = new Set<number>(),
+      events: {kind: number; exception: number | null; firstChance: number | null}[] = [],
+      sequence: {name: string; result: number; error: number}[] = [];
+    let stage = 'spawn',
+      provider: RuntimeOwnedProviderProcess | undefined,
+      passed = false,
+      outputText = '',
+      observation: ReturnType<typeof runtimeObserveOwnedProviderTree> | undefined;
+    const diagnostic: NonNullable<typeof jobSample.active> = {
+      incomplete: false,
+      getLastError: () => kernel?.symbols.GetLastError() ?? 0,
+      setLastError: code => {
+        kernel?.symbols.SetLastError(code);
+      },
+      called(name, args, result) {
+        if (typeof result !== 'number') return;
+        if (name === 'GetCurrentThreadId') creators.add(result);
+        const scalar =
+            name === 'GetCurrentThreadId' || name === 'GetThreadId' || name === 'GetProcessIdOfThread'
+              ? Number(result > 0)
+              : result,
+          error = diagnostic.getLastError(),
+          priorCall = calls.get(name);
+        calls.set(name, {count: Math.min((priorCall?.count ?? 0) + 1, 100000), result: scalar, error});
+        if (
+          sequence.length < 24 &&
+          (name === 'CreateProcessW' ||
+            name === 'ResumeThread' ||
+            name === 'ContinueDebugEvent' ||
+            name === 'DebugSetProcessKillOnExit' ||
+            (name === 'WaitForDebugEvent' && result !== 0))
+        )
+          sequence.push({name, result: scalar, error});
+        if (name === 'WaitForDebugEvent' && result !== 0 && events.length < 16) {
+          if (!(args[0] instanceof Uint8Array)) throw new Error('No actual debug event backing.');
+          const view = new DataView(args[0].buffer, args[0].byteOffset, args[0].byteLength),
+            kind = view.getUint32(0, true);
+          events.push({
+            kind,
+            exception: kind === 1 ? view.getUint32(16, true) : null,
+            firstChance: kind === 1 ? view.getUint32(168, true) : null,
+          });
+        }
+      },
+    };
+    const emit = (point: string) => {
+      if (windows && !passed)
+        process.stdout.write(
+          'WINDOWS_PROVIDER_STARTUP_SAMPLE ' +
+            JSON.stringify({
+              point,
+              stage,
+              calls: EffectRecord.fromEntries(calls),
+              creatorThreadCount: creators.size,
+              events,
+              sequence,
+              observation,
+              observationIncomplete: diagnostic.incomplete,
+              markerObserved: EffectString.includes(marker)(outputText),
+            }) +
+            String.fromCharCode(10),
+        );
+    };
+    if (windows) jobSample.active = diagnostic;
     try {
-      expect(runtimeObserveOwnedProviderTree(provider.handle).state).toBe('running');
-      expect(() => runtimeCloseOwnedProviderTree(provider.handle)).toThrow();
-      expect(() => Reflect.apply(runtimeObserveOwnedProviderTree, undefined, [Object.freeze({})])).toThrow();
-      expect(runtimeProbeProviderTree({pid: provider.pid, identity: provider.identity})).toBe(
-        process.platform === 'win32' ? 'unknown' : 'present',
+      provider = spawn(
+        `process.stdout.write(${JSON.stringify(marker)});for await(const bytes of Bun.stdin.stream()) await Bun.write(Bun.stdout,bytes);`,
       );
-      expect(runtimeProbeProviderTree({pid: provider.pid, identity: provider.identity + '-different'})).toBe('unknown');
-      await provider.write(new TextEncoder().encode('native-stdio-fixture'));
-      await provider.closeInput();
-      expect(await output).toBe('native-stdio-fixture');
+      const owned = provider,
+        reader = owned.stdout.getReader(),
+        output = (async () => {
+          try {
+            while (true) {
+              const item = await reader.read();
+              if (item.done) return;
+              outputText += new TextDecoder().decode(item.value);
+              if (outputText.length > 65536) throw new Error('Native stdio fixture output bound exceeded.');
+            }
+          } finally {
+            reader.releaseLock();
+          }
+        })(),
+        errors = new Response(owned.stderr).text();
+      // Retain rejection handlers while the existing finite readiness gate is running.
+      void output.catch(() => undefined);
+      void errors.catch(() => undefined);
+      observation = runtimeObserveOwnedProviderTree(owned.handle);
+      expect(observation.state).toBe('running');
+      expect(() => runtimeCloseOwnedProviderTree(owned.handle)).toThrow();
+      expect(() => Reflect.apply(runtimeObserveOwnedProviderTree, undefined, [Object.freeze({})])).toThrow();
+      expect(runtimeProbeProviderTree({pid: owned.pid, identity: owned.identity})).toBe(
+        windows ? 'unknown' : 'present',
+      );
+      expect(runtimeProbeProviderTree({pid: owned.pid, identity: owned.identity + '-different'})).toBe('unknown');
+      stage = 'startup-marker';
+      await until(
+        () => {
+          observation = runtimeObserveOwnedProviderTree(owned.handle);
+          return outputText;
+        },
+        text => EffectString.includes(marker)(text),
+      );
+      stage = 'write';
+      await owned.write(new TextEncoder().encode('native-stdio-fixture'));
+      stage = 'close-input';
+      await owned.closeInput();
+      stage = 'stdio-eof';
+      await output;
+      expect(outputText).toBe(marker + 'native-stdio-fixture');
       expect(await errors).toBe('');
+      stage = 'drain';
       const final = await until(
-        () => runtimeObserveOwnedProviderTree(provider.handle),
+        () => runtimeObserveOwnedProviderTree(owned.handle),
         o => o.state === 'drained',
       );
       expect(final.leaderExitCode).toBe(0);
       expect(final.stdioClosed).toBe(true);
-      expect(runtimeProbeProviderTree({pid: provider.pid, identity: provider.identity})).toBe(
-        process.platform === 'win32' ? 'unknown' : 'absent',
-      );
+      expect(runtimeProbeProviderTree({pid: owned.pid, identity: owned.identity})).toBe(windows ? 'unknown' : 'absent');
+      passed = true;
     } finally {
-      await stop(provider);
+      emit('before-owned-cleanup');
+      try {
+        if (provider) await stop(provider);
+      } finally {
+        emit('after-owned-cleanup');
+        jobSample.active = prior;
+        kernel?.close();
+      }
     }
+  },
+);
+
+it.skipIf(process.platform !== 'win32' || !supported)(
+  'contains the original Job when temporary launch cleanup fails before ownership transfers',
+  async () => {
+    const marker = 'NATIVE_RELEASE_FAILURE_HOST_PASS';
+    if (process.env.THREADNOTE_NATIVE_RELEASE_FAILURE_HOST !== '1') {
+      // UNKNOWN permanently closes this dispatch domain to new launches. End only its owning host;
+      // the ordinary test worker must retain its independent healthy native domain.
+      const child = Bun.spawn(
+          [
+            process.execPath,
+            '--bun',
+            fileURLToPath(new URL('./vitest.mjs', import.meta.resolve('vitest/package.json'))),
+            'run',
+            '--config',
+            'vitest.config.ts',
+            'packages/platform/test/writer-system/provider-process.test.ts',
+            '-t',
+            '^contains the original Job when temporary launch cleanup fails before ownership transfers$',
+            '--pool=threads', // The native owner stays inside the exact host the parent can terminate/join.
+            '--maxWorkers=1',
+            '--reporter=dot',
+          ],
+          {
+            cwd: fileURLToPath(new URL('../../../../', import.meta.url)),
+            env: {
+              ...process.env,
+              THREADNOTE_VITEST_LONG_GROUP: undefined,
+              THREADNOTE_NATIVE_RELEASE_FAILURE_HOST: '1',
+            },
+            stdout: 'pipe',
+            stderr: 'pipe',
+            timeout: 10000,
+            killSignal: 'SIGKILL',
+            maxBuffer: 65536,
+          },
+        ),
+        output = new Response(child.stdout).text(),
+        errors = new Response(child.stderr).text();
+      try {
+        const [exit, stdout, stderr] = await Promise.all([child.exited, output, errors]);
+        expect(exit, stdout).toBe(0);
+        expect(stderr).toBe('');
+        expect(EffectString.includes(marker)(stdout)).toBe(true);
+      } finally {
+        if (child.exitCode === null) child.kill('SIGKILL');
+        await child.exited;
+      }
+      return;
+    }
+    const prior = jobSample.active,
+      kernel = dlopen('kernel32.dll', {
+        GetLastError: {args: [], returns: 'u32'},
+        SetLastError: {args: ['u32'], returns: 'void'},
+      }),
+      failure = new Error('Injected temporary launch release failure');
+    let job: unknown,
+      exactJobStops = 0,
+      resumes = 0,
+      securityCloses = 0,
+      baseCloses = 0,
+      thrown: unknown,
+      returned: RuntimeOwnedProviderProcess | undefined;
+    const sample: NonNullable<typeof jobSample.active> = {
+      incomplete: false,
+      getLastError: () => kernel.symbols.GetLastError(),
+      setLastError: code => kernel.symbols.SetLastError(code),
+      called(name, args, result) {
+        if (name === 'CreateJobObjectW') job = result;
+        if (name === 'TerminateJobObject' && job !== undefined && args[0] === job) exactJobStops++;
+        if (name === 'ResumeThread') resumes++;
+      },
+      closed(symbols) {
+        if ('ConvertStringSecurityDescriptorToSecurityDescriptorW' in symbols) {
+          securityCloses++;
+          throw failure;
+        }
+        if (securityCloses > 0 && 'LocalFree' in symbols && 'GetProcessId' in symbols) baseCloses++;
+      },
+    };
+    jobSample.active = sample;
+    try {
+      try {
+        // No long-lived fixture code even if an old implementation incorrectly resumes it.
+        returned = spawn('process.exit(0);');
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBe(failure);
+      expect(returned).toBeUndefined();
+      expect(securityCloses).toBe(1);
+      expect(baseCloses).toBe(1);
+      expect(exactJobStops).toBe(1);
+      expect(resumes).toBe(0);
+      expect(sample.incomplete).toBe(false);
+      // The failed unreturned capability stays UNKNOWN in its bounded native owner, not force-closed.
+    } finally {
+      jobSample.active = prior;
+      try {
+        if (returned) await stop(returned);
+      } finally {
+        kernel.close();
+      }
+    }
+    process.stdout.write(marker + String.fromCharCode(10));
   },
 );
 
@@ -849,6 +1119,96 @@ it.skipIf(!supported)('retains the native unreaped group anchor while independen
     await stop(provider);
   }
 });
+
+it.skipIf(process.platform === 'win32' || !supported).each([0, -1, 1])(
+  'retains the POSIX child reservation across zero waits and classifies terminal wait %i',
+  async terminal => {
+    // Generate bounded transient prefixes within one retained native launch per terminal example.
+    const zeroCount = 65;
+    let disposed = false,
+      nativeReaped = false,
+      calls = 0,
+      originalWait: (() => number) | undefined,
+      originalPid = 0;
+    const sample = {
+      enabled: false,
+      release: [] as (() => void)[],
+      wait(pid: number, _status: Int32Array, _flags: number, original: () => number) {
+        const wait = () => {
+          const result = original();
+          if (result === pid) nativeReaped = true;
+          return result;
+        };
+        originalWait = wait;
+        originalPid = pid;
+        calls++;
+        if (calls <= zeroCount) return 0;
+        return terminal === 0 ? wait() : terminal === -1 ? -1 : pid + 1;
+      },
+    };
+    const previousSample = posixWaitSample.active;
+    let cleanupProvider: RuntimeOwnedProviderProcess | undefined;
+    posixWaitSample.active = sample;
+    try {
+      const provider = spawn('process.exit(3)');
+      cleanupProvider = provider;
+      sample.enabled = true;
+      await new Response(provider.stdout).text();
+      await new Response(provider.stderr).text();
+      await provider.closeInput();
+      // These synthetic zero returns do not consume the original native child or its PID reservation.
+      const initial = await until(
+        () => runtimeObserveOwnedProviderTree(provider.handle),
+        () => calls > 0,
+      );
+      expect(initial).toMatchObject({state: 'running', stdioClosed: true});
+      fc.assert(
+        fc.property(fc.integer({min: 1, max: 8}), count => {
+          const before = calls;
+          for (let index = 0; index < count; index++)
+            expect(runtimeObserveOwnedProviderTree(provider.handle)).toMatchObject({
+              state: 'running',
+              stdioClosed: true,
+            });
+          expect(calls).toBe(before + count);
+        }),
+        {numRuns: 8},
+      );
+      while (calls < zeroCount) expect(runtimeObserveOwnedProviderTree(provider.handle).state).toBe('running');
+      if (terminal === 0) {
+        const final = await until(
+          () => runtimeObserveOwnedProviderTree(provider.handle),
+          value => value.state === 'drained',
+        );
+        expect(final).toMatchObject({leaderExitCode: 3, stdioClosed: true});
+        runtimeCloseOwnedProviderTree(provider.handle);
+        disposed = true;
+      } else {
+        expect(runtimeObserveOwnedProviderTree(provider.handle).state).toBe('unknown');
+        const failedCalls = calls;
+        expect(runtimeObserveOwnedProviderTree(provider.handle).state).toBe('unknown');
+        expect(calls).toBe(failedCalls);
+        expect(() => runtimeTerminateOwnedProviderTree(provider.handle, 'kill')).toThrow();
+        expect(() => runtimeCloseOwnedProviderTree(provider.handle)).toThrow();
+      }
+    } finally {
+      sample.enabled = false;
+      posixWaitSample.active = previousSample;
+      // An injected unknown cannot use production close. Reap only this launch's captured native child,
+      // then release the test's libraries; no reconstructed PID lookup or signal is used for cleanup.
+      const provider = cleanupProvider;
+      if (provider) {
+        if (!nativeReaped && originalWait) {
+          const wait = originalWait;
+          await until(wait, value => value === originalPid);
+        } else if (!nativeReaped && !disposed) await stop(provider);
+        for (const release of sample.release) release();
+      }
+      // If spawn throws, native launch cleanup or its quarantine still owns every retained library.
+      // Injection stays disabled, including in the proxy captured by a quarantined launch.
+    }
+  },
+);
 
 it.skipIf(process.platform !== 'win32' || !supported)(
   'atomically contains native child creation and refuses an actual Job breakaway request',

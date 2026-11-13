@@ -329,8 +329,9 @@ function makeOwned(input: {
             else if (members.length === 1 && members[0].zombie) {
               const status = new Int32Array(1),
                 result = lib.symbols.waitpid(pid, status, 1);
-              if (result !== pid) unknown = true;
-              else {
+              // A zombie leader can still have exiting threads: WNOHANG zero retains the reservation.
+              if (result !== pid && result !== 0) unknown = true;
+              else if (result === pid) {
                 reaped = true;
                 const raw = status[0];
                 leaderExitCode = (raw & 0x7f) === 0 ? (raw >>> 8) & 0xff : 128 + (raw & 0x7f);

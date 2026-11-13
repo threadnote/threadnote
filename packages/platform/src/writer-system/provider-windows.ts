@@ -385,6 +385,18 @@ class WindowsDebugDispatcher {
     this.schedule();
     return authenticated;
   }
+  start(job: DebugJob): void {
+    this.affinity();
+    if (this.poisoned || !job.root || job.launchAllowed || job.unknown || job.state !== 'active' || job.piThread === 0n)
+      return fail('identity');
+    // PI, completion duplicate, Job and primary-thread reservation are already authenticated/retained.
+    // Release only CREATE_SUSPENDED here: DEBUG_PROCESS still stops at CREATE before target user code.
+    // Waiting to Resume inside CREATE can leave startup waiting on the very thread we kept suspended.
+    job.launchAllowed = true;
+    if (this.lib.symbols.ResumeThread(job.piThread) !== 1) fail('identity');
+    this.affinity();
+    // Keep both PI roles until the genuine CREATE authenticates actual system-handle aliases.
+  }
   private authenticate(job: DebugJob, process: bigint, pid: number): string {
     const member = new Int32Array(1);
     if (
@@ -550,11 +562,11 @@ class WindowsDebugDispatcher {
         // A same-value PI role transfers to system lifetime. Distinct PI roles are explicitly closed once.
         if (job.piProcess !== borrowed) close(job.lib, job.piProcess);
         job.piProcess = 0n;
-        if (job.launchAllowed && !job.unknown && job.state === 'active') {
-          this.affinity();
-          if (this.lib.symbols.ResumeThread(job.piThread) !== 1) fail('identity');
-          this.affinity();
-        } else if (job.lib.symbols.TerminateJobObject(job.handle, 1) === 0) fail('identity');
+        if (
+          (!job.launchAllowed || job.unknown || job.state !== 'active') &&
+          job.lib.symbols.TerminateJobObject(job.handle, 1) === 0
+        )
+          fail('identity');
         if (job.piThread !== borrowedThread) close(job.lib, job.piThread);
         job.piThread = 0n;
         job.threads.releasePi();
@@ -713,13 +725,39 @@ export function spawnWindowsProvider(options: RuntimeOwnedProviderLaunch): Owned
   let descriptor = 0n,
     job = 0n,
     attributesReady = false,
-    transferred = false;
+    transferred = false,
+    temporaryReleased = false;
   let debugJob: DebugJob | undefined;
   const pipes: Pipe[] = [];
   const creationBuffers: ArrayBufferView[] = [];
   const releaseArguments = retainNativeArguments(creationBuffers);
   const attributeSize = new BigUint64Array(1);
   let attributes = new Uint8Array(0);
+  const releaseTemporary = () => {
+    // A failed release has uncertain ownership: attempt each resource only once.
+    temporaryReleased = true;
+    let failed = false,
+      failure: unknown;
+    for (const release of [
+      () => {
+        if (attributesReady) lib.symbols.DeleteProcThreadAttributeList(attributes);
+      },
+      releaseArguments,
+      () => {
+        if (descriptor !== 0n) base.symbols.LocalFree(descriptor);
+      },
+      () => security.close(),
+      () => base.close(),
+    ]) {
+      try {
+        release();
+      } catch (error) {
+        if (!failed) failure = error;
+        failed = true;
+      }
+    }
+    if (failed) throw failure;
+  };
   try {
     if (!/^[A-Za-z]:\\/u.test(options.command) || !/^[A-Za-z]:\\/u.test(options.cwd) || options.args.length > 4096)
       fail('path');
@@ -802,15 +840,21 @@ export function spawnWindowsProvider(options: RuntimeOwnedProviderLaunch): Owned
       pipe.childOpen = false;
     }
     const owned = makeOwnedWindows({lib, job, pid: root.pid, identity: root.identity, pipes, debug, debugJob});
-    debugJob.launchAllowed = true;
+    // No fallible temporary release may abort the return after launch ownership transfers.
+    releaseTemporary();
+    debug.start(debugJob);
     transferred = true;
     return owned;
+  } catch (error) {
+    if (!temporaryReleased) {
+      try {
+        releaseTemporary();
+      } catch {
+        // Preserve the launch failure; the outer finally still contains its original Job.
+      }
+    }
+    throw error;
   } finally {
-    if (attributesReady) lib.symbols.DeleteProcThreadAttributeList(attributes);
-    releaseArguments();
-    if (descriptor !== 0n) base.symbols.LocalFree(descriptor);
-    security.close();
-    base.close();
     if (!transferred) {
       if (debugJob?.attempted) {
         // No count-zero cleanup after a creation attempt. Retain PI backing, pipes and DLL references.
