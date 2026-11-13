@@ -1,6 +1,6 @@
 import {it as effectIt} from '@effect/vitest';
 import {expect} from 'vitest';
-import {Clock, Effect, Deferred, Fiber, Array as EffectArray, String as EffectString} from 'effect';
+import {Clock, Effect, FileSystem, Deferred, Fiber, Array as EffectArray, String as EffectString} from 'effect';
 import {CommandExecutor, CommandTimedOut, runCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {decodeNativeTaskActionRef, encodeNativeTaskActionRef} from '@threadnote/workflow-automations/task';
@@ -19,7 +19,10 @@ import {runNativeWatch, runNativeWatchCollector} from '../../src/workflow_automa
 import {sha256HexSync} from '../../src/workflow_memory/native_digest.js';
 import {runNativeTaskAction} from '../../src/workflow_automation/task_actions.js';
 import {readNativeTaskView} from '../../src/workflow_automation/task.js';
-import {makeNativeWatchNotifier} from '../../src/workflow_automation/watch_notification.js';
+import {
+  makeNativeWatchNotifier,
+  nativeWatchCodexCandidatePaths,
+} from '../../src/workflow_automation/watch_notification.js';
 import {fixture, object, run} from './native-cycle-lifecycle-fixture.js';
 
 const pr = 'https://github.com/example/project/pull/7';
@@ -89,6 +92,17 @@ effectIt.effect(
       const storeContext = yield* Effect.context<Effect.Services<ReturnType<typeof writeNativeWatch>>>();
       const commands = yield* CommandExecutor;
       const system = yield* SystemInfo;
+      const fs = yield* FileSystem.FileSystem;
+      const knownExecutables = nativeWatchCodexCandidatePaths('darwin', system.homeDirectory);
+      let discoveryLookups = 0;
+      const discoveringFileSystem = {
+        ...fs,
+        realPath: (candidate: string) => {
+          if (!knownExecutables.includes(candidate)) return fs.realPath(candidate);
+          discoveryLookups++;
+          return Effect.succeed('/fixture/codex');
+        },
+      };
       let providerCalls = 0;
       let spawns = 0;
       let providerHead = snapshot.head;
@@ -173,6 +187,7 @@ effectIt.effect(
       });
       const scopedSystem = {
         ...system,
+        platform: 'darwin' as const,
         currentDirectory: () => f.repo,
         processId: 12345,
         isProcessRunning: (pid: number) => pid === 12345,
@@ -188,7 +203,7 @@ effectIt.effect(
           operation: 'start' as const,
           snapshotRef,
           pr,
-          wakeup: {host: 'codex' as const, executable: '/fixture/codex', threadId},
+          wakeup: {host: 'codex' as const, threadId},
         };
         const candidateSource = {
           phaseId: 'one',
@@ -215,14 +230,35 @@ effectIt.effect(
             ._tag,
         ).toBe('Failure');
         yield* f.git(['remote', 'set-url', 'origin', 'https://github.com/example/project.git']);
+        const sourceBytes = yield* f.fs.readFileString(f.path.join(f.repo, 'source.ts'));
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), sourceBytes + '// unadmitted bytes\n');
+        expect((yield* invoke(startRequest).pipe(Effect.result))._tag).toBe('Failure');
+        expect(discoveryLookups).toBe(0);
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), sourceBytes);
         const started = object(yield* invoke(startRequest));
+        expect(discoveryLookups).toBeGreaterThan(0);
+        const initialDiscoveryLookups = discoveryLookups;
         const candidateWatchRef = encoded(started.candidateWatchRef);
         const candidate = required(decodeNativeTaskActionRef(candidateWatchRef));
         const watchId = required(candidate.watchId);
         expect(candidate.kind).toBe('candidate-watch');
         expect(started.diagnosticOnly).toBe(true);
         expect(object(yield* invoke(startRequest)).candidateWatchRef).toBe(candidateWatchRef);
+        expect(
+          (yield* invoke({...startRequest, wakeup: {host: 'codex', threadId: receipt}}).pipe(Effect.result))._tag,
+        ).toBe('Failure');
+        expect(discoveryLookups).toBe(initialDiscoveryLookups);
         expect(spawns).toBe(1);
+        expect(
+          yield* invoke({
+            command: 'watch-candidate-pr',
+            runId: 'native-run',
+            candidateWatchRef,
+            operation: 'inspect',
+            wakeup: {host: 'codex', threadId},
+          }).pipe(Effect.result),
+        ).toMatchObject({failure: {code: 'invalid-request'}});
+        expect(discoveryLookups).toBe(initialDiscoveryLookups);
         const active = required(yield* readNativeWatch(f.config, watchId));
         const activeOwner = required(active.envelope.owner);
         const beforeTransient = active.revision;
@@ -418,6 +454,10 @@ effectIt.effect(
         providerHead = EffectString.repeat(40)('b');
         expect((yield* invoke(startRequest).pipe(Effect.result))._tag).toBe('Failure');
         expect(spawns).toBe(1);
-      }).pipe(Effect.provideService(CommandExecutor, testCommands), Effect.provideService(SystemInfo, scopedSystem));
+      }).pipe(
+        Effect.provideService(CommandExecutor, testCommands),
+        Effect.provideService(SystemInfo, scopedSystem),
+        Effect.provideService(FileSystem.FileSystem, discoveringFileSystem),
+      );
     }).pipe(run),
 );

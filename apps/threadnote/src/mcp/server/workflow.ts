@@ -365,13 +365,13 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
         snapshot: Schema.Union([
           Schema.Struct({
             command: Schema.Literal('record'),
-            workRef: McpInput.requiredString('Current work ref'),
-            reason: McpInput.string('Iteration reason'),
+            workRef: McpInput.requiredString(),
+            reason: McpInput.string(),
           }),
           Schema.Struct({
             command: Schema.Literal('supersede-unreviewed'),
-            snapshotRef: McpInput.requiredString('Unreviewed snapshot ref'),
-            reason: McpInput.requiredString('Supersession reason'),
+            snapshotRef: McpInput.requiredString(),
+            reason: McpInput.requiredString(),
           }),
           Schema.Struct({
             command: Schema.Literal('recover-unreviewed-rebase'),
@@ -381,9 +381,9 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
           }),
           Schema.Struct({
             command: Schema.Literal('requalify-base'),
-            snapshotRef: McpInput.requiredString('Reviewed predecessor ref'),
-            reason: McpInput.requiredString('New-base reason'),
-            userAuthority: McpInput.requiredString('Actual base-change authority; caller-asserted, unauthenticated'),
+            snapshotRef: McpInput.requiredString(),
+            reason: McpInput.requiredString(),
+            userAuthority: McpInput.requiredString(),
           }),
           Schema.Struct({
             command: Schema.Literal('requalify-invalid-tail'),
@@ -419,16 +419,16 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
                   snapshotRef: snapshot.snapshotRef,
                   reason: snapshot.reason,
                 }
-            : snapshot.command === 'requalify-invalid-tail'
-              ? {...snapshot, runId, callerCwd}
-              : {
-                  command: 'requalify-base-snapshot',
-                  runId,
-                  callerCwd,
-                  snapshotRef: snapshot.snapshotRef,
-                  reason: snapshot.reason,
-                  userAuthority: snapshot.userAuthority,
-                };
+              : snapshot.command === 'requalify-invalid-tail'
+                ? {...snapshot, runId, callerCwd}
+                : {
+                    command: 'requalify-base-snapshot',
+                    runId,
+                    callerCwd,
+                    snapshotRef: snapshot.snapshotRef,
+                    reason: snapshot.reason,
+                    userAuthority: snapshot.userAuthority,
+                  };
       const result = yield* runNativeTaskAction(config, request);
       const text = JSON.stringify(result);
       return {content: [{type: 'text' as const, text}], structuredContent: result};
@@ -568,20 +568,18 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Operate canonical, candidate diagnostic, or supplemental PR watch with its distinct proof. Relay noticeRefs only; persist dispositions before ACK with current refs; complete from readback.',
+        'Use canonical, diagnostic candidate or supplemental proof. Relay noticeRefs only; persist dispositions before ACK with current refs; complete from readback.',
       inputSchema: {
-        runId: McpInput.requiredString('Native run'),
-        callerCwd: McpInput.requiredString('Bound checkout'),
-        validationRef: McpInput.string('Current validation reference; omit only for provisional inspect or stop'),
-        deliveryRef: McpInput.string('Opaque open PR delivery reference; omit only for provisional inspect or stop'),
+        runId: McpInput.requiredString(),
+        callerCwd: McpInput.requiredString(),
+        validationRef: McpInput.string('Validation ref; provisional inspect/stop may omit'),
+        deliveryRef: McpInput.string('PR delivery ref; provisional inspect/stop may omit'),
         ...Struct.omit(NativeTaskPrWatchFieldsSchema.fields, ['noticeRef']),
-        noticeRef: McpInput.string(
-          'Relay this noticeRef only; record its returned event disposition; ACK with current refs.',
-        ),
-        snapshotRef: McpInput.string('Candidate immutable snapshot; diagnostics only'),
+        noticeRef: McpInput.string('Relay only; persist dispositions before ACK with current refs.'),
+        snapshotRef: McpInput.string('Candidate snapshot; diagnostics only'),
         candidateWatchRef: McpInput.string('Candidate continuation'),
         supplementalRef: McpInput.string('Completed-local publication owner'),
-        pr: McpInput.string('Candidate existing PR URL'),
+        pr: McpInput.string('Candidate PR URL'),
       },
     },
     Effect.fn('mcp_server.workflowTaskWatchPr')(function* ({runId, callerCwd, validationRef, deliveryRef, ...watch}) {

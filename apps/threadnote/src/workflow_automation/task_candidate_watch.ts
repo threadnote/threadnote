@@ -20,7 +20,8 @@ import {
   type NativeWatchOwner,
   type NativeCandidateWatchOwner,
 } from './watch_store.js';
-import type {NativeWatchWakeup} from './watch_notification_state.js';
+import type {NativeWatchWakeup, nativeWatchWakeupRequestSchema} from './watch_notification_state.js';
+import {discoverNativeWatchCodexExecutable} from './watch_notification.js';
 import {
   assertNativeWatchOutput,
   nativeWatchOutputLimit,
@@ -31,7 +32,7 @@ import {
 export interface OwnedNativeTaskWatchRequest {
   readonly operation:
     'start' | 'inspect' | 'relay' | 'disposition' | 'ack' | 'work' | 'work-disposition' | 'work-detail' | 'stop';
-  readonly wakeup?: NativeWatchWakeup;
+  readonly wakeup?: typeof nativeWatchWakeupRequestSchema.Type;
   readonly noticeRef?: string;
   readonly watchDeliveryRef?: string;
   readonly dispositions?: readonly {
@@ -92,12 +93,32 @@ export const runOwnedNativeTaskWatch = (
         watch.envelope.state.pr !== owner.prUrl)
     )
       return yield* fail('watch-owner-conflict', 'This watch belongs to another immutable owner.');
+    if (request.operation !== 'start' && request.wakeup?.host === 'codex' && !request.wakeup.executable)
+      return yield* fail('invalid-request', 'Only a new watch start can discover a Codex executable.');
     if (request.operation === 'start') {
-      if (!request.wakeup) return yield* fail('host-registration-required', 'Start needs actual host registration.');
+      const inputWakeup = request.wakeup;
+      if (!inputWakeup) return yield* fail('host-registration-required', 'Start needs actual host registration.');
+      let wakeup: NativeWatchWakeup;
+      if (inputWakeup.host === 'cursor-cli') wakeup = inputWakeup;
+      else if (inputWakeup.executable !== undefined)
+        wakeup = {host: 'codex', executable: inputWakeup.executable, threadId: inputWakeup.threadId};
+      else if (watch) {
+        const registered = watch.envelope.notification?.target;
+        if (registered?.host !== 'codex' || registered.threadId !== inputWakeup.threadId)
+          return yield* fail('watch-owner-conflict', 'Replay requires the exact registered host.');
+        wakeup = registered;
+      } else {
+        if (owner.kind === 'candidate-pr') yield* verifyNativeCandidateWatchOwner(config, owner);
+        wakeup = {
+          host: 'codex',
+          threadId: inputWakeup.threadId,
+          executable: yield* discoverNativeWatchCodexExecutable(),
+        };
+      }
       // Lost-response replay is inspect-only; it never replaces a subscription or restarts invalidated proof.
       if (watch) {
         if (
-          stableJson(watch.envelope.notification?.target) !== stableJson(request.wakeup) ||
+          stableJson(watch.envelope.notification?.target) !== stableJson(wakeup) ||
           watch.envelope.state.consumer?.id !== consumerId ||
           watch.envelope.state.consumer.wakeupId !== wakeupId
         )
@@ -125,7 +146,7 @@ export const runOwnedNativeTaskWatch = (
               watch.envelope.collector?.status === 'blocked' && !watch.envelope.stopRequested ? 'start' : 'inspect',
             watchId,
             ...(watch.envelope.collector?.status === 'blocked' && !watch.envelope.stopRequested
-              ? {consumerId, wakeupId, pr: owner.prUrl, wakeup: request.wakeup}
+              ? {consumerId, wakeupId, pr: owner.prUrl, wakeup}
               : {}),
           },
           owner,
@@ -143,7 +164,7 @@ export const runOwnedNativeTaskWatch = (
           consumerId,
           wakeupId,
           pr: owner.prUrl,
-          wakeup: request.wakeup,
+          wakeup,
         },
         owner,
       );

@@ -1,3 +1,4 @@
+import {promptCarriesNativeWatchNotice} from '../../src/codex/resume_hook.js';
 import {SecureRandom} from 'effect/crypto';
 import {it as effectIt} from '@effect/vitest';
 import * as Array from 'effect/Array';
@@ -2032,6 +2033,7 @@ it('serializes an owned semantic continuation with the exact retained notice non
     {home: '/private-home', watchId: 'watch-1', consumerId: 'consumer-1', wakeupId: 'wake-1', semantic},
     outbox,
   );
+  expect(promptCarriesNativeWatchNotice(notice)).toBe(true);
   const match = /Route=(\{.*\})\. Use workflow_task_watch_pr/u.exec(notice);
   if (!match) throw new Error('Missing owned semantic locator');
   const parsed: unknown = JSON.parse(match[1]);

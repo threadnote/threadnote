@@ -838,6 +838,11 @@ describe('Threadnote MCP toolsets', () => {
         ]);
         expect(deliveryByCommand.get('local')?.required).toEqual(['command', 'validationRef']);
         expect(deliveryByCommand.get('commit')?.required).toEqual(['command', 'validationRef', 'commitEvidence']);
+        expect(decodeJsonObject(deliveryByCommand.get('pr')?.properties).userAuthority).toMatchObject({
+          type: 'string',
+          minLength: 1,
+          maxLength: 4096,
+        });
         expect(deliveryByCommand.get('pr')?.required).toEqual([
           'command',
           'validationRef',
