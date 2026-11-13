@@ -15,6 +15,7 @@ import {
   reconcileFixturePipelineReceipts,
   runFixtureEmbeddingExitProbe,
   diagnoseFixtureEmbeddingFailure,
+  FIXTURE_EMBEDDING_PROBE_SAMPLE,
   type FixtureCommandStage,
 } from './fixture-owned-process.js';
 import {fixtureCleanup, fixtureLifecycle, fixtureRemovalDeadline} from './fixture-lifecycle.js';
@@ -209,7 +210,6 @@ const smokeSelfContained = Effect.scoped(
           process.platform === 'win32' && process.arch === 'arm64'
             ? diagnoseFixtureEmbeddingFailure(processes, candidate, {
                 home: threadnoteHome,
-                storedMemoryPath,
                 cwd: invocationDirectory,
                 env: environment,
                 deadline: repairDeadline,
@@ -289,7 +289,9 @@ const smokeSelfContained = Effect.scoped(
     ).pipe(
       Effect.onExit(() =>
         embeddingProbe
-          ? Console.error(`Standalone model worker probe: ${JSON.stringify(embeddingProbe.snapshot())}`)
+          ? Console.error(
+              `Standalone model worker probe: ${JSON.stringify({sample: FIXTURE_EMBEDDING_PROBE_SAMPLE, ...embeddingProbe.snapshot()})}`,
+            )
           : Effect.void,
       ),
     );

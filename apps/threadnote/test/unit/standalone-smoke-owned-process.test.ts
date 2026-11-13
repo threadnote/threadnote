@@ -117,7 +117,6 @@ const probeSetupFixture = Effect.gen(function* () {
     modelPath,
     options: {
       home,
-      storedMemoryPath: path.join(home, 'synthetic.md'),
       cwd: home,
       env: {},
       deadline: 100,
@@ -141,7 +140,9 @@ effectIt.effect('diagnostic setup guards preserve the original repair failure', 
     ).pipe(Effect.ensuring(Effect.sync(() => remaining.mockRestore())));
     expect(Result.isFailure(observed.value)).toBe(true);
     if (Result.isFailure(observed.value)) expect(observed.value.failure).toBe(original);
-    expect(observed.output).toBe('Standalone model worker probe: {"outcome":"setup-unavailable"}');
+    expect(observed.output).toBe(
+      'Standalone model worker probe: {"sample":"short-single-input-control","outcome":"setup-unavailable"}',
+    );
     expect(processes.registry.seal()).toEqual([]);
   }).pipe(provideTestLayer(probeSetupLayer)),
 );
@@ -181,7 +182,9 @@ effectIt.effect(
       );
       expect(Result.isFailure(observed.value)).toBe(true);
       if (Result.isFailure(observed.value)) expect(observed.value.failure).toBe(original);
-      expect(observed.output).toBe('Standalone model worker probe: {"outcome":"setup-unavailable"}');
+      expect(observed.output).toBe(
+        'Standalone model worker probe: {"sample":"short-single-input-control","outcome":"setup-unavailable"}',
+      );
       expect(processes.registry.seal()).toEqual([]);
     }).pipe(provideTestLayer(probeSetupLayer)),
 );

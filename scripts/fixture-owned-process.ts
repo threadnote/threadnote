@@ -15,8 +15,6 @@ import {
 import type {LocalEmbeddingRequest} from '@threadnote/inference/engine/local-model-runtime';
 import {BUILTIN_MODEL_MANIFESTS, CORE_EMBEDDING_MODEL_ID} from '@threadnote/inference/models/builtin';
 import {readModelSelection, selectedEmbeddingModelId} from '@threadnote/inference/models/selection';
-import {indexCandidate} from '@threadnote/recall/index/candidate';
-import {chunksForRecallCandidates} from '@threadnote/recall/vector-index';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {ScriptError} from './effect/errors.js';
 
@@ -111,13 +109,14 @@ interface FixtureEmbeddingProbeChild {
   unref(): void;
 }
 
+export const FIXTURE_EMBEDDING_PROBE_SAMPLE = 'short-single-input-control' as const;
+
 /** Expected setup failure is diagnostic only; external interruption still propagates. */
 export const diagnoseFixtureEmbeddingFailure = Effect.fn('fixture.diagnoseEmbeddingFailure')(function* (
   processes: FixtureProcesses,
   executable: string,
   options: {
     home: string;
-    storedMemoryPath: string;
     cwd: string;
     env: NodeJS.ProcessEnv;
     deadline: number;
@@ -127,7 +126,9 @@ export const diagnoseFixtureEmbeddingFailure = Effect.fn('fixture.diagnoseEmbedd
 ) {
   const remaining = processes.remaining(options.deadline);
   if (options.deadline >= options.bodyDeadline || remaining <= 0) {
-    yield* Console.error('Standalone model worker probe: {"outcome":"no-budget"}');
+    yield* Console.error(
+      `Standalone model worker probe: ${JSON.stringify({sample: FIXTURE_EMBEDDING_PROBE_SAMPLE, outcome: 'no-budget'})}`,
+    );
     return undefined;
   }
   const prepare = Effect.gen(function* () {
@@ -145,24 +146,11 @@ export const diagnoseFixtureEmbeddingFailure = Effect.fn('fixture.diagnoseEmbedd
       (yield* sha256Hex(yield* fs.readFile(modelPath))) !== manifest.sha256
     )
       return yield* ScriptError.make({message: 'Probe model is not verified.'});
-    const content = yield* fs.readFileString(options.storedMemoryPath);
-    const inputs = yield* Effect.try({
-      try: () => {
-        const uri = 'threadnote://user/standalone-smoke/memories/durable/projects/threadnote/standalone-bun-smoke.md';
-        const chunks = chunksForRecallCandidates([indexCandidate(uri, content, false)]);
-        // Representative first32 production-chunked synthetic inputs, not a proven failed repair request.
-        return EffectArray.map(
-          chunks.slice(0, 32),
-          chunk => `${manifest.promptPrefixes?.document ?? ''}${chunk.content}`,
-        );
-      },
-      catch: () => ScriptError.make({message: 'Probe synthetic inputs unavailable.'}),
-    });
-    if (inputs.length !== 32) return yield* ScriptError.make({message: 'Probe representative batch unavailable.'});
+    const inputs = [`${manifest.promptPrefixes?.document ?? ''}QZ9 standalone short embedding control.`];
     return {inputs, manifest, modelPath};
   });
   return yield* prepare.pipe(
-    // This is the remaining original absolute budget, including selection, I/O, hashing and chunking.
+    // This is the remaining original absolute budget, including selection, I/O and hashing.
     Effect.timeoutOrElse({
       duration: Math.max(0, processes.remaining(options.deadline)),
       orElse: () => ScriptError.make({message: 'Probe setup deadline expired.'}),
@@ -174,7 +162,9 @@ export const diagnoseFixtureEmbeddingFailure = Effect.fn('fixture.diagnoseEmbedd
       }),
     ),
     Effect.catch(() =>
-      Console.error('Standalone model worker probe: {"outcome":"setup-unavailable"}').pipe(Effect.as(undefined)),
+      Console.error(
+        `Standalone model worker probe: ${JSON.stringify({sample: FIXTURE_EMBEDDING_PROBE_SAMPLE, outcome: 'setup-unavailable'})}`,
+      ).pipe(Effect.as(undefined)),
     ),
   );
 });
