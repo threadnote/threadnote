@@ -1,3 +1,4 @@
+import {factBodyDiscovery} from '../store/utilities.js';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
 import {deferCodeGraphVectorCompletion} from '../vector/publication.js';
@@ -1375,6 +1376,7 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
             input.layout.databasePath,
             EffectArray.map(group, batch => ({
               batchIndex: batch.batchIndex,
+              bodyDiscovery: batch.bodyDiscovery,
               edges: batch.edges,
               finalFactBytes: batch.factBytes,
               monikers: batch.monikers,
@@ -1677,6 +1679,7 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
           unit: 'files',
         }) ?? Effect.void;
         const candidate: PendingMaterializationBatch = {
+          bodyDiscovery: factBodyDiscovery(finalFacts),
           attributionMilliseconds: finalBatchIndex === 0 ? batchAttributionMilliseconds : 0,
           batchCachedFactBytes,
           batchFiles,

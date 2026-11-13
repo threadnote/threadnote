@@ -1,3 +1,4 @@
+import {closeBodyDiscovery} from '../languages/body_discovery.js';
 import {closeNavigationFacts} from '../navigation_facts.js';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
@@ -300,7 +301,21 @@ function selectCachedCodeGraphFactsWithinBudget(
     if (diagnostic !== CACHED_FACT_BUDGET_DIAGNOSTIC) tryAddDiagnostic(diagnostic);
   }
 
-  return output();
+  const result = output();
+  const body = compacted.derivationInputs?.bodyDiscovery;
+  if (body !== undefined) {
+    const closed = closeBodyDiscovery(body, selectedSymbols);
+    const candidate = {...result, derivationInputs: {bodyDiscovery: closed}};
+    if (cachedCodeGraphFactBytes(candidate) <= maximumBytes) return candidate;
+    const omitted = {
+      ...result,
+      derivationInputs: {
+        bodyDiscovery: {...closed, records: [], omissions: [...new Set([...closed.omissions, 'fact-budget'])].sort()},
+      },
+    };
+    if (cachedCodeGraphFactBytes(omitted) <= maximumBytes) return omitted;
+  }
+  return result;
 }
 
 /**

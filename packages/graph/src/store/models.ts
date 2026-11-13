@@ -447,6 +447,7 @@ export interface CodeGraphStagingProgress {
 export type CodeGraphStagingProgressCallback = (progress: CodeGraphStagingProgress) => Effect.Effect<void, never>;
 
 export interface CodeGraphStagingBatch {
+  readonly bodyDiscovery?: readonly import('../types.js').CodeGraphBodyDiscovery[];
   readonly batchIndex: number;
   readonly edges: readonly CodeGraphEdge[];
   /** Exact UTF-8 JSON bytes of the attributed facts represented by this batch. */

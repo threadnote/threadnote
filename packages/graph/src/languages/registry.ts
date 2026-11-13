@@ -1,4 +1,5 @@
 import {Array as EffectArray} from 'effect';
+import {BODY_DISCOVERY_POLICY, captureBodyDiscovery} from './body_discovery.js';
 import {Context, Effect, Layer, Option} from 'effect';
 import {createCachedCodeGraphContractHash} from '../cached_contract_hash.js';
 import {CODE_GRAPH_PARSER_FACTS_VERSION} from '../fact/budget.js';
@@ -177,7 +178,7 @@ export function createCodeGraphLanguagePackRegistry(
     const attributed = {...file, language: matched.value.language};
     return matched.value.pack.extractor
       .extract(attributed, context)
-      .pipe(Effect.map(facts => captureRationaleInputs(attributed, facts)));
+      .pipe(Effect.map(facts => captureBodyDiscovery(attributed, captureRationaleInputs(attributed, facts))));
   }
 }
 
@@ -210,6 +211,7 @@ export function packCacheIdentity(pack: CodeGraphLanguagePack): string {
         'code-graph-language-pack-v3',
         CODE_GRAPH_PARSER_FACTS_VERSION,
         `derivation-inputs:${CODE_GRAPH_RATIONALE_INPUT_VERSION}`,
+        `body-discovery:${BODY_DISCOVERY_POLICY}`,
         `id:${pack.id}`,
         `extractor:${pack.extractor.version}`,
         `parser-runtime:${pack.assets.length > 0 ? TREE_SITTER_RUNTIME_CACHE_IDENTITY : 'pack-owned'}`,
@@ -236,6 +238,7 @@ export function packDerivationIdentity(pack: CodeGraphLanguagePack): string {
       [
         'code-graph-language-pack-derivation-v1',
         `postprocessors:${CODE_GRAPH_RATIONALE_EXTRACTOR_VERSION}`,
+        `body-discovery:${BODY_DISCOVERY_POLICY}`,
         `id:${pack.id}`,
         `version:${pack.version}`,
         `resolver:${pack.resolutionStrategy.domain}:${pack.resolutionStrategy.version}`,

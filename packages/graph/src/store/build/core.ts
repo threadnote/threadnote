@@ -493,6 +493,7 @@ function stageActivationSymbolTerms(
   symbols: readonly CodeGraphSymbol[],
   mode: ActivationInsertMode = 'upsert',
   observer?: ActivationStagingObserver,
+  preparedTerms?: ReadonlyMap<CodeGraphSymbol, readonly (readonly [string, number])[]>,
 ) {
   return Effect.gen(function* () {
     yield* observer?.('terms', 0, true) ?? Effect.void;
@@ -513,7 +514,7 @@ function stageActivationSymbolTerms(
       });
     };
     for (const symbol of sortedBy(symbols, symbol => symbol.id)) {
-      for (const [term, weight] of symbolTerms(symbol)) {
+      for (const [term, weight] of preparedTerms?.get(symbol) ?? symbolTerms(symbol)) {
         termBatch.push([term, symbol.id, weight]);
         if (termBatch.length >= ACTIVATION_TERM_BATCH_ROWS) yield* flush();
       }

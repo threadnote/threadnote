@@ -452,7 +452,9 @@
     "./workspace/primitives": "./src/workspace/primitives.ts",
     "./worktree_reconciliation": "./src/worktree_reconciliation.ts",
     "./navigation_facts": "./src/navigation_facts.ts",
-    "./query/navigation_facts": "./src/query/navigation_facts.ts"
+    "./query/navigation_facts": "./src/query/navigation_facts.ts",
+    "./query/task_discovery": "./src/query/task_discovery.ts",
+    "./languages/body_discovery": "./src/languages/body_discovery.ts"
   },
   "dependencies": {
     "@effect/platform-bun": "4.1.2",

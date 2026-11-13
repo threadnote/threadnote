@@ -134,7 +134,14 @@ const stagePersistedFullFacts = Effect.fn('codeGraph.stagePersistedFullFacts')(f
       (__effectFilterValue: (typeof references)[number], __effectFilterIndex: number) =>
         __effectFilterIndex in references && isCodeGraphReferenceWithinCandidateBudget(__effectFilterValue),
     );
-  const batchFingerprint = yield* persistedFullBatchFingerprint(symbols, edges, boundedReferences, monikers);
+  const batchFingerprint = yield* persistedFullBatchFingerprint(
+    symbols,
+    edges,
+    boundedReferences,
+    monikers,
+    prepared?.batch.bodyDiscovery,
+    prepared?.symbolTerms,
+  );
 
   let lookupCount = 0;
   let termCount = 0;

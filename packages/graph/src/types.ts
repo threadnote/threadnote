@@ -157,7 +157,26 @@ export interface CodeGraphFileFacts {
 }
 
 export interface CodeGraphDerivationInputs {
+  readonly bodyDiscovery?: CodeGraphBodyDiscovery;
   readonly rationale?: readonly CodeGraphRationaleInput[];
+}
+
+/** Private candidate evidence. Textual overlap never establishes a binding or effect. */
+export interface CodeGraphBodyDiscovery {
+  readonly version: 1;
+  readonly policy: string;
+  readonly path: string;
+  readonly contentHash: string;
+  readonly workBytes: number;
+  readonly omissions: readonly string[];
+  readonly records: readonly CodeGraphBodyDiscoveryRecord[];
+}
+
+export interface CodeGraphBodyDiscoveryRecord {
+  readonly ownerId: string;
+  readonly ownerSpan: CodeGraphSpan;
+  readonly window: CodeGraphSpan;
+  readonly terms: readonly string[];
 }
 
 export interface CodeGraphRationaleInput {

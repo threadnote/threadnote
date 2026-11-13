@@ -20,7 +20,6 @@ import {
   type CodeGraphFileFacts,
   type CodeGraphInventoryFile,
   type CodeGraphSnapshot,
-  type CodeGraphSymbol,
   type RepositoryIdentity,
   CodeGraphStoreError,
 } from '../../types.js';
@@ -50,7 +49,7 @@ import {
   stageActivationSymbolTerms,
 } from './core.js';
 import {clearSnapshotOwnedRows} from '../cleanup_core.js';
-import {chunk, sortedBy, symbolTerms, uniqueBy} from '../utilities.js';
+import {chunk, sortedBy, symbolTerms, uniqueBy, preparedSymbolTerms, factBodyDiscovery} from '../utilities.js';
 import {type CodeGraphSqlQueryStatement} from '../visualization_sql.js';
 import {
   normalizedReexportProvenance,
@@ -392,7 +391,7 @@ function preparePersistedFullFactCapacity(batches: readonly CodeGraphStagingBatc
       reference => reference.edgeId,
     );
     const lookupRows = EffectArray.reduce(batch.symbols, 0, (total, symbol) => saturatingCapacityAdd(total, symbol.lookupKeys?.length ?? 0));
-    const termsBySymbol = new Map<CodeGraphSymbol, readonly (readonly [string, number])[]>();
+    const termsBySymbol = new Map(preparedSymbolTerms(batch.symbols, batch.bodyDiscovery));
     let termPostings = 0;
     for (const symbol of batch.symbols) {
       const terms = termsBySymbol.get(symbol) ?? symbolTerms(symbol);
@@ -472,6 +471,7 @@ const stagePersistedFullFactBatches = Effect.fn('codeGraph.stagePersistedFullFac
     }
   }
 
+  const preparedBatches = prepared ?? preparePersistedFullFactCapacity(batches).batches;
   const observers = new Map<number, ActivationStagingObserver>();
   const observer = (batchIndex: number) => {
     const existing = observers.get(batchIndex);
@@ -495,7 +495,7 @@ const stagePersistedFullFactBatches = Effect.fn('codeGraph.stagePersistedFullFac
           batch.references,
           observer(batch.batchIndex),
           true,
-          prepared?.[index],
+          preparedBatches[index],
           batch.monikers ?? [],
         );
       }
@@ -578,7 +578,7 @@ const preparePersistedIncrementalActivation = Effect.fn('codeGraph.preparePersis
   yield* stageActivationFiles(sql, files);
   const symbols = EffectArray.flatMap(facts, file => file.symbols);
   yield* stageActivationSymbols(sql, symbols);
-  yield* stageActivationSymbolTerms(sql, symbols);
+  yield* stageActivationSymbolTerms(sql, symbols, 'upsert', undefined, preparedSymbolTerms(symbols, factBodyDiscovery(facts)));
   yield* stageActivationEdges(
     sql,
     EffectArray.flatMap(facts, file => file.edges),
@@ -931,7 +931,7 @@ const replaceStagedModifiedFiles = Effect.fn('codeGraph.replaceStagedModifiedFil
       yield* stageActivationFiles(sql, files);
       const symbols = EffectArray.flatMap(facts, file => file.symbols);
       yield* stageActivationSymbols(sql, symbols);
-      yield* stageActivationSymbolTerms(sql, symbols);
+      yield* stageActivationSymbolTerms(sql, symbols, 'upsert', undefined, preparedSymbolTerms(symbols, factBodyDiscovery(facts)));
       yield* stageActivationEdges(
         sql,
         EffectArray.flatMap(facts, file => file.edges),

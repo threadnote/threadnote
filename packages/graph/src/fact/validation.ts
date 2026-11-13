@@ -1,3 +1,4 @@
+import {validateBodyDiscovery} from '../languages/body_discovery.js';
 import {parseNavigationFacts} from '../navigation_facts.js';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Predicate, Schema} from 'effect';
@@ -83,7 +84,7 @@ export function parseCodeGraphFileFacts(value: unknown): CodeGraphFileFacts {
           }
         });
   const derivationInputs =
-    input.derivationInputs === undefined ? undefined : parseDerivationInputs(input.derivationInputs);
+    input.derivationInputs === undefined ? undefined : parseDerivationInputs(input.derivationInputs, path, symbols);
   const navigationFacts =
     input.navigationFacts === undefined ? undefined : parseFileNavigationFacts(input.navigationFacts, symbols, edges);
   return {
@@ -194,10 +195,16 @@ function parseReference(value: unknown, index: number): CodeGraphReference {
   };
 }
 
-function parseDerivationInputs(value: unknown): CodeGraphDerivationInputs {
+function parseDerivationInputs(
+  value: unknown,
+  path: string,
+  symbols: readonly CodeGraphSymbol[],
+): CodeGraphDerivationInputs {
   const input = object(value, 'File-fact derivation inputs');
-  exactKeys(input, [], ['rationale']);
-  if (input.rationale === undefined) return {};
+  exactKeys(input, [], ['rationale', 'bodyDiscovery']);
+  const bodyDiscovery =
+    input.bodyDiscovery === undefined ? undefined : validateBodyDiscovery(input.bodyDiscovery, path, symbols);
+  if (input.rationale === undefined) return bodyDiscovery === undefined ? {} : {bodyDiscovery};
   const rationale = EffectArray.map(array(input.rationale, 'File-fact rationale inputs'), (value, index) => {
     const rationale = object(value, `File-fact rationale ${index}`);
     exactKeys(rationale, ['documentation', 'line', 'marker', 'name'], []);
@@ -208,7 +215,7 @@ function parseDerivationInputs(value: unknown): CodeGraphDerivationInputs {
       name: boundedNonEmptyText(rationale.name, 'Rationale name'),
     };
   });
-  return {rationale};
+  return {rationale, ...(bodyDiscovery === undefined ? {} : {bodyDiscovery})};
 }
 
 function parseSpan(value: unknown, label: string): CodeGraphSpan {
