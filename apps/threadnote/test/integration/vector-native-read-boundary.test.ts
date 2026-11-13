@@ -723,6 +723,8 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
     {timeout: 15000},
   );
 
+  const scopePropertyRuns = 8;
+  const scopePropertyExampleMilliseconds = 15_000;
   fcEffectProp(
     effectIt,
     'score export is the intersection of independent project and URI scopes',
@@ -809,8 +811,12 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
             ? [[`threadnote://user/test/memories/durable/projects/${project}/entry.md`, 1]]
             : [],
         );
-      }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
-    {fastCheck: {numRuns: 8}, timeout: 15000},
+      }).pipe(provideTestLayer(ApplicationLayer), Effect.timeout(scopePropertyExampleMilliseconds), TestClock.withLive),
+    {
+      fastCheck: {numRuns: scopePropertyRuns},
+      // Each draw owns setup and scoped cleanup; the request itself still has 2s.
+      timeout: scopePropertyRuns * scopePropertyExampleMilliseconds,
+    },
   );
 
   effectIt.effect(
