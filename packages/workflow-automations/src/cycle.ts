@@ -200,6 +200,42 @@ const phaseStateSchema = Schema.Struct({
   reason: Schema.optionalKey(text()),
   history: Schema.optionalKey(Schema.Array(NativeCyclePhaseProofSchema).check(Schema.isMaxLength(64))),
 });
+/** New state version prevents older readers from silently discarding supplemental proof. */
+export const NativeCycleSupplementalEventSchema = Schema.Union([
+  Schema.Struct({kind: Schema.Literal('provider-verified'), pr: prSchema, evidence: publicationText(4096)}),
+  Schema.Struct({kind: Schema.Literal('watch'), watch: watchSchema}),
+  Schema.Struct({kind: Schema.Literal('completed'), evidence: publicationText(4096)}),
+  Schema.Struct({kind: Schema.Literal('merged'), mergeCommit: gitObject, evidence: publicationText(4096)}),
+]);
+export const NativeCycleSupplementalInitSchema = Schema.Struct({
+  version: Schema.Literal(1),
+  expectedRevision: digest,
+  planDigest: digest,
+  phaseId: id,
+  phaseHash: digest,
+  snapshotId: id,
+  validationDigest: digest,
+  localReceiptDigest: digest,
+  head: gitObject,
+  tree: gitObject,
+  pr: prSchema,
+  // This is supplied attachment authority, not an authenticated actor identity.
+  authority: publicationText(4096),
+});
+export const NativeCycleSupplementalPublicationSchema = Schema.Struct({
+  initialization: NativeCycleSupplementalInitSchema,
+  publicationId: digest,
+  records: Schema.Array(
+    Schema.Struct({
+      version: Schema.Literal(1),
+      operationId: digest,
+      expectedRevision: digest,
+      previousRef: digest,
+      event: NativeCycleSupplementalEventSchema,
+    }),
+  ).check(Schema.isMaxLength(256)),
+});
+export type NativeCycleSupplementalPublication = typeof NativeCycleSupplementalPublicationSchema.Type;
 const specPinSchema = Schema.Struct({root, binding, documentHash: digest, intentHash: digest});
 const specAmendmentSchema = Schema.Struct({
   before: specPinSchema,
@@ -209,9 +245,12 @@ const specAmendmentSchema = Schema.Struct({
 });
 export const NativeCycleStateSchema = Schema.Struct({
   format: Schema.Literal('threadnote-native-cycle'),
-  version: Schema.Literal(1),
+  version: Schema.Literals([1, 2]),
   plan: NativeCyclePlanSchema,
   phases: Schema.Record(id, phaseStateSchema),
+  supplementalPublications: Schema.optionalKey(
+    Schema.Array(NativeCycleSupplementalPublicationSchema).check(Schema.isBetweenLength(1, 128)),
+  ),
   specAmendments: Schema.optionalKey(Schema.Array(specAmendmentSchema).check(Schema.isMaxLength(64))),
 });
 export type NativeCycleState = typeof NativeCycleStateSchema.Type;
@@ -338,6 +377,8 @@ export function decodeNativeCycleState(value: unknown): NativeCycleState {
           )
         : input;
   const s = decode(NativeCycleStateSchema, omitUndefined(value), 'Malformed native cycle state.');
+  if ((s.version === 2) !== (s.supplementalPublications !== undefined))
+    err('Supplemental proof requires cycle version 2.');
   validatePlan(s.plan);
   if (canonical(EffectRecord.keys(s.phases).sort()) !== canonical(EffectArray.map(s.plan.phases, p => p.id).sort()))
     err('State phase keyset does not match plan.');

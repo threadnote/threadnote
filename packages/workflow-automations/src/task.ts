@@ -1,7 +1,12 @@
 import {Array as EffectArray, Option as EffectOption, Schema, String as EffectString, pipe as EffectPipe} from 'effect';
 import {nativeCycleParentsReady, nextNativeCycle as cycleNext} from './cycle.js';
 import {NativeCycleDeliverySchema} from './cycle.js';
-import {nativeCyclePhaseReviewUsage, nativeCycleSnapshotIsCurrentIteration} from './cycle_runtime.js';
+import {
+  nativeCyclePhaseReviewUsage,
+  nativeCycleSnapshotIsCurrentIteration,
+  nativeCycleSupplementalRef,
+  nativeCycleSupplementalRevision,
+} from './cycle_runtime.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {NativeWorkflowState} from './native.js';
 import {NativeCompactIntentSchema} from './authoring.js';
@@ -86,8 +91,23 @@ export interface NativeTaskView {
     readonly snapshotFiles: number;
     readonly snapshotScopeFiles: number;
     readonly historicalWatches?: number;
+    readonly supplementalPublications?: number;
   };
   readonly missingInputs: readonly string[];
+  readonly supplementalPublications?: readonly {
+    readonly publicationId: string;
+    readonly phaseId: string;
+    readonly prUrl: string;
+    readonly publicationRef: string;
+    readonly revision: string;
+    readonly completed: boolean;
+    readonly watch?: {
+      readonly consumerId: string;
+      readonly stateDir: string;
+      readonly state: 'active' | 'terminal';
+      readonly recordRef: string;
+    };
+  }[];
   readonly historicalWatches?: readonly {
     readonly phaseId: string;
     readonly title: string;
@@ -553,6 +573,7 @@ export function projectNativeTaskView(
     acceptanceRefs: acceptanceRefs.length,
     snapshotFiles: snapshotFiles.length,
     snapshotScopeFiles: snapshotScopeFiles.length,
+    ...(cycle.supplementalPublications ? {supplementalPublications: cycle.supplementalPublications.length} : {}),
     ...(options.historicalWatchCount && options.historicalWatchCount > 0
       ? {historicalWatches: options.historicalWatchCount}
       : {}),
@@ -566,6 +587,7 @@ export function projectNativeTaskView(
       counts.snapshotFiles,
       counts.snapshotScopeFiles,
       counts.historicalWatches ?? 0,
+      counts.supplementalPublications ?? 0,
     ],
     count => count > nextOffset,
   );
@@ -702,6 +724,37 @@ export function projectNativeTaskView(
   };
   return {
     ...view,
+    ...(cycle.supplementalPublications
+      ? {
+          supplementalPublications: EffectArray.map(
+            cycle.supplementalPublications.slice(offset, offset + pageSize),
+            publication => {
+              const watchRecord = EffectArray.filter(publication.records, record => record.event.kind === 'watch').at(
+                -1,
+              );
+              const watchEvent = watchRecord?.event;
+              return {
+                publicationId: publication.publicationId,
+                phaseId: publication.initialization.phaseId,
+                prUrl: publication.initialization.pr.url,
+                publicationRef: nativeCycleSupplementalRef(publication),
+                revision: nativeCycleSupplementalRevision(runtime),
+                completed: EffectArray.some(publication.records, record => record.event.kind === 'completed'),
+                ...(watchEvent?.kind === 'watch'
+                  ? {
+                      watch: {
+                        consumerId: watchEvent.watch.consumerId,
+                        stateDir: watchEvent.watch.stateDir,
+                        state: watchEvent.watch.state,
+                        recordRef: watchRecord!.operationId,
+                      },
+                    }
+                  : {}),
+              };
+            },
+          ),
+        }
+      : {}),
     taskRef: nativeTaskCardRef(
       state,
       revision,
