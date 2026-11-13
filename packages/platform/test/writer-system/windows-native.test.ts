@@ -2,7 +2,15 @@ import {dlopen, toArrayBuffer, type FFIFunction} from 'bun:ffi';
 import {Array as EffectArray, String as EffectString, Schema} from 'effect';
 import {expect, it, vi} from 'vitest';
 import fc from 'fast-check';
-import {assertWindowsDaclBytes} from '../../src/writer-system/windows-files.js';
+import {
+  assertWindowsDaclBytes,
+  windowsCreatePrivateAt,
+  windowsFileIdentity,
+  windowsFileLibrary,
+  windowsReadFileSecurity,
+  windowsSecurityLibrary,
+  type WindowsPrivateCreateResources,
+} from '../../src/writer-system/windows-files.js';
 import {RuntimeWriterFault} from '../../src/writer-system/fault.js';
 import {runtimeAssertPrivateProviderPath, runtimeNativePlatformSupport} from '../../src/system.js';
 import {
@@ -25,6 +33,8 @@ const securitySample = vi.hoisted(() => ({
       }
     | undefined,
 }));
+// Final native negative control closes its owned HANDLE, then withholds the acknowledgement once.
+const privateClose = vi.hoisted(() => ({handle: 0n, calls: 0}));
 vi.mock('bun:ffi', async importOriginal => {
   const real = await importOriginal<typeof import('bun:ffi')>();
   return {
@@ -36,6 +46,15 @@ vi.mock('bun:ffi', async importOriginal => {
         symbols: new Proxy(library.symbols, {
           get(target, key, receiver) {
             const original: unknown = Reflect.get(target, key, receiver);
+            if (key === 'CloseHandle' && typeof original === 'function')
+              return (handle: bigint) => {
+                const result: unknown = Reflect.apply(original, undefined, [handle]);
+                if (handle === privateClose.handle) {
+                  privateClose.calls++;
+                  return 0;
+                }
+                return result;
+              };
             if (typeof original !== 'function' || (key !== 'GetSecurityInfo' && key !== 'GetSecurityDescriptorLength'))
               return original;
             return (...args: unknown[]) => {
@@ -78,6 +97,7 @@ const native = process.getBuiltinModule('fs'),
   os = process.getBuiltinModule('os');
 const windows = process.platform === 'win32';
 const invalid = 0xffffffffffffffffn;
+const uncertainPrivateResources = new Set<unknown>();
 function fixture<A>(run: (directory: string) => A): A {
   const directory = native.realpathSync(native.mkdtempSync(path.join(os.tmpdir(), 'threadnote-native-win-')));
   try {
@@ -834,6 +854,143 @@ it.skipIf(!windows)(
         );
         n.close();
         k.close();
+      }
+    }),
+);
+
+it.skipIf(!windows)(
+  'atomically creates protected private children and retains an exclusive delete-on-close lease without replacing occupied names',
+  () =>
+    fixture(directory => {
+      const k = windowsFileLibrary(),
+        security = windowsSecurityLibrary(),
+        releases = new Set<() => void>();
+      let unknown = false;
+      const retained = new Set<readonly ArrayBufferView[]>();
+      const resources: WindowsPrivateCreateResources = {
+        kernel: k,
+        security,
+        captureNative(release) {
+          const close = () => {
+            if (unknown) throw RuntimeWriterFault.make({reason: 'io'});
+            if (!releases.has(close)) return;
+            if (!release()) throw RuntimeWriterFault.make({reason: 'io'});
+            releases.delete(close);
+          };
+          releases.add(close);
+          return close;
+        },
+        ownDescriptor: descriptor => resources.captureNative(() => k.symbols.LocalFree(descriptor) === 0n),
+        uncertain(backing) {
+          unknown = true;
+          retained.add(backing);
+          uncertainPrivateResources.add({resources, releases, retained});
+          throw RuntimeWriterFault.make({reason: 'io'});
+        },
+      };
+      const principal = windowsTokenPrincipal().sid;
+      const parent = k.symbols.CreateFileW(windowsWide(directory), 0x001201a3, 7, null, 3, 0x02200000, 0n);
+      expect(parent !== 0n && parent !== invalid).toBe(true);
+      try {
+        const initial = windowsFileIdentity(k, parent);
+        const assertParent = () => {
+          const current = windowsFileIdentity(k, parent);
+          expect(current.fileId).toBe(initial.fileId);
+          expect(current.volumeId).toBe(initial.volumeId);
+          expect(current.birthtime).toBe(initial.birthtime);
+          // Authenticate the actual owned fixture name and ACL; its namespace epochs may advance after our creates.
+          expect(native.lstatSync(directory, {bigint: true}).ino).toBe(current.ino);
+          windowsReadFileSecurity(parent, principal, false, undefined);
+        };
+        const writeAndRead = (handle: bigint, text: string) => {
+          const bytes = new TextEncoder().encode(text),
+            count = new Uint32Array(1),
+            read = new Uint8Array(bytes.length);
+          expect(k.symbols.WriteFile(handle, bytes, bytes.length, count, null)).toBe(1);
+          expect(count[0]).toBe(bytes.length);
+          expect(k.symbols.FlushFileBuffers(handle)).toBe(1);
+          expect(k.symbols.SetFilePointerEx(handle, 0n, new BigUint64Array(1), 0)).toBe(1);
+          expect(k.symbols.ReadFile(handle, read, read.length, count, null)).toBe(1);
+          expect(count[0]).toBe(bytes.length);
+          expect(read).toEqual(bytes);
+        };
+        assertParent(); // Basic real native setup precedes the first protected create.
+        const owned = windowsCreatePrivateAt(parent, 'private', 'directory', resources, assertParent);
+        const directoryIdentity = owned.identity;
+        const assertPrivate = () => {
+          assertParent();
+          const current = windowsFileIdentity(k, owned.handle);
+          expect(current.fileId).toBe(directoryIdentity.fileId);
+          expect(current.volumeId).toBe(directoryIdentity.volumeId);
+          expect(current.birthtime).toBe(directoryIdentity.birthtime);
+          expect(native.lstatSync(path.join(directory, 'private'), {bigint: true}).ino).toBe(current.ino);
+          windowsReadFileSecurity(owned.handle, principal, true, undefined);
+        };
+        const assertProtected = (bytes: Uint8Array) => {
+          const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength),
+            dacl = view.getUint32(16, true);
+          expect((view.getUint16(2, true) & 0x1000) !== 0).toBe(true);
+          expect(view.getUint16(dacl + 4, true)).toBe(1);
+          expect(bytes[dacl + 8]).toBe(0);
+          expect(bytes[dacl + 9]).toBe(0);
+          expect(view.getUint32(dacl + 12, true)).toBe(0x1f01ff);
+        };
+        expect(owned.security.owner).toBe(principal);
+        assertProtected(owned.security.bytes);
+        const lease = windowsCreatePrivateAt(owned.handle, 'lease', 'lease', resources, assertPrivate);
+        assertProtected(lease.security.bytes);
+        writeAndRead(lease.handle, 'first lease token');
+        // A real second acquisition and independent native open cannot obtain the retained lease.
+        expect(() => windowsCreatePrivateAt(owned.handle, 'lease', 'lease', resources, assertPrivate)).toThrow();
+        const contender = k.symbols.CreateFileW(
+          windowsWide(path.join(directory, 'private', 'lease')),
+          0x80000000,
+          7,
+          null,
+          3,
+          0x00200000,
+          0n,
+        );
+        const contenderError = k.symbols.GetLastError();
+        if (contender !== 0n && contender !== invalid) k.symbols.CloseHandle(contender);
+        expect(contender).toBe(invalid);
+        expect([32, 5, 303]).toContain(contenderError); // sharing violation or delete-pending mapping; never success.
+        expect(windowsFileIdentity(k, lease.handle).fileId).toBe(lease.identity.fileId);
+        lease.close();
+        lease.close(); // A known successful release is idempotent.
+        expect(native.existsSync(path.join(directory, 'private', 'lease'))).toBe(false);
+        const successor = windowsCreatePrivateAt(owned.handle, 'lease', 'lease', resources, assertPrivate);
+        writeAndRead(successor.handle, 'successor token');
+        successor.close();
+        const receipt = windowsCreatePrivateAt(owned.handle, 'receipt', 'file', resources, assertPrivate);
+        writeAndRead(receipt.handle, 'complete immutable receipt');
+        assertProtected(receipt.security.bytes);
+        receipt.close();
+        const occupied = path.join(directory, 'private', 'occupied');
+        native.writeFileSync(occupied, 'independently authored bytes');
+        const before = native.lstatSync(occupied, {bigint: true});
+        expect(() => windowsCreatePrivateAt(owned.handle, 'occupied', 'file', resources, assertPrivate)).toThrow();
+        expect(native.lstatSync(occupied, {bigint: true})).toEqual(before);
+        expect(native.readFileSync(occupied, 'utf8')).toBe('independently authored bytes');
+        const failedClose = windowsCreatePrivateAt(owned.handle, 'last-lease', 'lease', resources, assertPrivate);
+        owned.close();
+        // This is the final operation on this ledger: lost close acknowledgement is sticky UNKNOWN, no retry/delete.
+        privateClose.handle = failedClose.handle;
+        privateClose.calls = 0;
+        expect(() => failedClose.close()).toThrow(RuntimeWriterFault);
+        expect(unknown).toBe(true);
+        expect(() => failedClose.close()).toThrow(RuntimeWriterFault);
+        expect(privateClose.calls).toBe(1);
+        expect(retained.size).toBeGreaterThan(0);
+        expect(runtimeNativePlatformSupport().writer).toBe(false);
+      } finally {
+        privateClose.handle = 0n;
+        if (!unknown) for (const close of EffectArray.reverse(Array.from(releases))) close();
+        expect(k.symbols.CloseHandle(parent)).toBe(1);
+        if (!unknown) {
+          security.close();
+          k.close();
+        }
       }
     }),
 );

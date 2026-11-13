@@ -230,6 +230,10 @@ export function windowsSecurityLibrary(owner?: WindowsNativeResourceOwner) {
       GetSecurityInfo: {args: ['u64', 'u32', 'u32', 'buffer', 'ptr', 'buffer', 'ptr', 'buffer'], returns: 'u32'},
       IsValidSecurityDescriptor: {args: ['u64'], returns: 'i32'},
       GetSecurityDescriptorLength: {args: ['u64'], returns: 'u32'},
+      ConvertStringSecurityDescriptorToSecurityDescriptorW: {
+        args: ['buffer', 'u32', 'buffer', 'buffer'],
+        returns: 'i32',
+      },
     },
     owner,
   );
@@ -365,6 +369,218 @@ interface BorrowedSecurityResources {
   readonly kernel: NativeLibrary;
   readonly ownDescriptor: (descriptor: bigint) => () => void;
   readonly uncertain: (backing: readonly ArrayBufferView[]) => never;
+}
+
+/** Borrow the caller's bounded native ledger. Uncertain operations must poison it and retain their backing. */
+export interface WindowsPrivateCreateResources extends BorrowedSecurityResources {
+  readonly captureNative: WindowsNativeResourceOwner;
+}
+export interface WindowsPrivateCreatedFile {
+  readonly handle: bigint;
+  readonly identity: NativeFileIdentity;
+  readonly security: WindowsFileSecurity;
+  close(): void;
+}
+function protectedSecurity(bytes: Uint8Array, principal: string): void {
+  if (bytes.length < 20) return fail('private-storage');
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength),
+    owner = view.getUint32(4, true),
+    dacl = view.getUint32(16, true);
+  assertWindowsDaclBytes(bytes, owner, dacl, principal, true);
+  // Exactly one noninheriting current-user full-control ACE, protected from broad ancestor inheritance.
+  if (
+    (view.getUint16(2, true) & 0x1000) === 0 ||
+    view.getUint16(dacl + 4, true) !== 1 ||
+    bytes[dacl + 8] !== 0 ||
+    bytes[dacl + 9] !== 0 ||
+    view.getUint32(dacl + 12, true) !== 0x001f01ff ||
+    sidAt(bytes, dacl + 16, bytes.length).text !== principal
+  )
+    fail('private-storage');
+}
+function nativeName(kernel: NativeLibrary, handle: bigint): Uint8Array {
+  const backing = new Uint8Array(65536 + 32);
+  backing.fill(0xa5);
+  if (
+    kernel.symbols.GetFileInformationByHandleEx(handle, 2, backing.subarray(0, 65536), 65536) === 0 ||
+    !backing.subarray(65536).every(value => value === 0xa5)
+  )
+    return fail('path');
+  const length = new DataView(backing.buffer).getUint32(0, true);
+  if (length < 2 || length > 65532 || length % 2 !== 0) return fail('path');
+  return backing.slice(4, 4 + length);
+}
+const equalNativeBytes = (a: Uint8Array, b: Uint8Array) =>
+  a.length === b.length && a.every((value, index) => value === b[index]);
+
+/** Fixed package-private primitive, not a writer grant. The caller retains/authenticates the full parent ancestry.
+ * FILE_CREATE never opens a collision. A lease owns its one exclusive delete-on-close HANDLE; it is not reopened.
+ * Persistent children are incomplete until their caller writes, verifies and durably publishes them.
+ */
+export function windowsCreatePrivateAt(
+  parent: bigint,
+  name: string,
+  kind: 'file' | 'directory' | 'lease',
+  resources: WindowsPrivateCreateResources,
+  assertParentCurrentSync: () => void,
+): WindowsPrivateCreatedFile {
+  const wide = windowsPathComponent(name),
+    principal = windowsTokenPrincipal(undefined, resources.captureNative).sid;
+  assertParentCurrentSync();
+  const parentIdentity = windowsFileIdentity(resources.kernel, parent),
+    parentName = nativeName(resources.kernel, parent);
+  if ((parentIdentity.attributes & 0x10) === 0 || windowsVolumeType(resources.kernel, parent) !== 'NTFS')
+    return fail('private-storage');
+  const security = resources.security,
+    nt = windowsSystemLibrary(
+      'ntdll.dll',
+      {
+        NtCreateFile: {
+          args: ['buffer', 'u32', 'buffer', 'buffer', 'ptr', 'u32', 'u32', 'u32', 'u32', 'ptr', 'u32'],
+          returns: 'i32',
+        },
+      },
+      resources.captureNative,
+    );
+  let releaseDescriptor: (() => void) | undefined, releaseHandle: (() => void) | undefined;
+  let settled = true;
+  try {
+    const sddl = windowsWide(`O:${principal}D:P(A;;FA;;;${principal})`),
+      descriptor = new BigUint64Array(1),
+      length = new Uint32Array(1);
+    settled = false;
+    let converted: number;
+    try {
+      converted = security.symbols.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, descriptor, length);
+    } catch {
+      return resources.uncertain([sddl, descriptor, length]);
+    }
+    if (converted === 0) {
+      if (descriptor[0] !== 0n) return resources.uncertain([sddl, descriptor, length]);
+      settled = true;
+      return fail('private-storage');
+    }
+    if (descriptor[0] === 0n || descriptor[0] === 0xffffffffffffffffn)
+      return resources.uncertain([sddl, descriptor, length]);
+    const address = descriptor[0];
+    releaseDescriptor = resources.ownDescriptor(address);
+    settled = true;
+    if (
+      length[0] < 20 ||
+      length[0] > 65536 ||
+      security.symbols.IsValidSecurityDescriptor(address) === 0 ||
+      security.symbols.GetSecurityDescriptorLength(address) !== length[0]
+    )
+      return fail('private-storage');
+    protectedSecurity(new Uint8Array(toArrayBuffer(address, 0, length[0])).slice(), principal);
+    const string = new BigUint64Array(2),
+      stringView = new DataView(string.buffer),
+      attributes = new BigUint64Array(6),
+      attributesView = new DataView(attributes.buffer),
+      output = new BigUint64Array(1),
+      guarded = new BigUint64Array(6),
+      io = new Uint8Array(guarded.buffer, 0, 16);
+    stringView.setUint16(0, wide.byteLength - 2, true);
+    stringView.setUint16(2, wide.byteLength, true);
+    stringView.setBigUint64(8, windowsAddress(wide), true);
+    attributesView.setUint32(0, 48, true);
+    attributesView.setBigUint64(8, parent, true);
+    attributesView.setBigUint64(16, windowsAddress(string), true);
+    attributesView.setUint32(24, 0x40 | 0x1000, true);
+    attributesView.setBigUint64(32, address, true);
+    guarded.fill(0xa5a5a5a5a5a5a5a5n);
+    const backing = [wide, sddl, descriptor, length, string, attributes, output, guarded, io];
+    assertParentCurrentSync();
+    settled = false;
+    let status: number;
+    try {
+      status = withNativeArguments(backing, () =>
+        nt.symbols.NtCreateFile(
+          output,
+          kind === 'directory' ? 0x001201a3 : 0x00130183,
+          attributes,
+          io,
+          null,
+          0x80,
+          kind === 'lease' ? 0 : 1,
+          2, // FILE_CREATE, never OPEN_IF/OVERWRITE/SUPERSEDE.
+          0x00200000 | 0x20 | (kind === 'directory' ? 1 : 0x40) | (kind === 'lease' ? 0x1000 : 0),
+          null,
+          0,
+        ),
+      );
+    } catch {
+      return resources.uncertain(backing);
+    }
+    if (status !== 0) {
+      if (status === 0x103 || output[0] !== 0n || !guarded.subarray(2).every(v => v === 0xa5a5a5a5a5a5a5a5n))
+        return resources.uncertain(backing);
+      settled = true;
+      return fail('private-storage'); // Collision/sharing/delete-pending is refusal, never absence or ownership.
+    }
+    if (output[0] === 0n || output[0] === 0xffffffffffffffffn) return resources.uncertain(backing);
+    const handle = output[0],
+      release = resources.captureNative(() => resources.kernel.symbols.CloseHandle(handle) !== 0);
+    let handleState: 'owned' | 'closed' | 'unknown' = 'owned';
+    releaseHandle = () => {
+      if (handleState === 'closed') return;
+      if (handleState === 'unknown') return resources.uncertain([]);
+      handleState = 'unknown';
+      try {
+        release();
+      } catch {
+        return resources.uncertain([]);
+      }
+      handleState = 'closed';
+    };
+    if (
+      !guarded.subarray(2).every(v => v === 0xa5a5a5a5a5a5a5a5n) ||
+      new DataView(guarded.buffer).getInt32(0, true) !== 0 ||
+      guarded[1] !== 2n
+    )
+      return resources.uncertain(backing);
+    settled = true;
+    const identity = windowsFileIdentity(resources.kernel, handle),
+      actualSecurity = windowsReadFileSecurity(handle, principal, true, undefined, resources),
+      after = windowsFileIdentity(resources.kernel, handle);
+    protectedSecurity(actualSecurity.bytes, principal);
+    if (
+      !same(identity, after) ||
+      identity.volumeId !== parentIdentity.volumeId ||
+      ((identity.attributes & 0x10) !== 0) !== (kind === 'directory') ||
+      (kind !== 'directory' && (identity.links !== 1 || identity.size !== 0n)) ||
+      windowsVolumeType(resources.kernel, handle) !== 'NTFS'
+    )
+      return fail('private-storage');
+    // Query the same exclusive HANDLE. Reopening the lease name would conflict with our own share0.
+    const separator = parentName.length === 2 && parentName[0] === 92 && parentName[1] === 0 ? 0 : 2,
+      expectedName = new Uint8Array(parentName.length + separator + wide.byteLength - 2);
+    expectedName.set(parentName);
+    if (separator) expectedName[parentName.length] = 92;
+    expectedName.set(new Uint8Array(wide.buffer, 0, wide.byteLength - 2), parentName.length + separator);
+    if (!equalNativeBytes(nativeName(resources.kernel, handle), expectedName)) return fail('path');
+    assertParentCurrentSync(); // Own namespace writes may change parent data epochs; never normalize that identity.
+    const currentParent = windowsFileIdentity(resources.kernel, parent);
+    if (
+      currentParent.volumeId !== parentIdentity.volumeId ||
+      currentParent.fileId !== parentIdentity.fileId ||
+      currentParent.dev !== parentIdentity.dev ||
+      currentParent.ino !== parentIdentity.ino ||
+      currentParent.birthtime !== parentIdentity.birthtime ||
+      currentParent.attributes !== parentIdentity.attributes ||
+      !equalNativeBytes(nativeName(resources.kernel, parent), parentName)
+    )
+      return fail('path');
+    return {handle, identity: after, security: actualSecurity, close: releaseHandle};
+  } catch (error) {
+    if (settled) releaseHandle?.();
+    throw error;
+  } finally {
+    if (settled) {
+      releaseDescriptor?.();
+      nt.close();
+    }
+  }
 }
 export function windowsReadFileSecurity(
   handle: bigint,
