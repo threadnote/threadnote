@@ -1,4 +1,13 @@
-import {Array as EffectArray, Effect, FileSystem, Path, Predicate, Schema, String as EffectString} from 'effect';
+import {
+  Array as EffectArray,
+  Effect,
+  FileSystem,
+  Option as EffectOption,
+  Path,
+  Predicate,
+  Schema,
+  String as EffectString,
+} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import {
   decodeNativeTaskCursor,
@@ -32,6 +41,21 @@ const requestSchema = Schema.Struct({
   cursor: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(2048))),
   phaseId: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128))),
 });
+
+export const encodeNativeAuthoringTaskRef = (ref: {
+  readonly version: 1;
+  readonly kind: 'spec' | 'plan';
+  readonly runId: string;
+  readonly generationHash: string;
+  readonly operationId: string;
+  readonly documentHash: string;
+  readonly stateRevision: string;
+}) =>
+  'authorref-v1.' +
+  EffectString.replaceAll(
+    '/',
+    '_',
+  )(EffectString.replaceAll('+', '-')(EffectString.replace(/=+$/u, '')(btoa(stableJson(ref)))));
 
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
 
@@ -387,10 +411,57 @@ export const readNativeTaskView = (config: RuntimeConfig, input: unknown) =>
     }
     const planDrift = 'planDrift' in inspected ? inspected.planDrift : undefined;
     const authoringResult = inspected.taskAuthoring;
-    const authoring =
+    const authoringValue =
       authoringResult && 'currentPlan' in authoringResult && Predicate.isObject(authoringResult.currentPlan)
         ? authoringResult.currentPlan
         : undefined;
+    const authoringRoot = authoringValue && Predicate.isObject(authoringValue.root) ? authoringValue.root : undefined;
+    const authoringKind =
+      authoringValue && (authoringValue.kind === 'spec' || authoringValue.kind === 'plan')
+        ? authoringValue.kind
+        : undefined;
+    const authoringRootOperation =
+      authoringRoot && authoringKind
+        ? EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              [...stored.state.operations].reverse(),
+              operation =>
+                operation.status === 'verified' &&
+                operation.intent.role === 'authoring-root' &&
+                operation.intent.artifactKey === 'author-root-' + authoringKind &&
+                operation.artifact?.uri === authoringRoot.uri &&
+                operation.artifact.revision === authoringRoot.revision,
+            ),
+          )
+        : undefined;
+    const authoringRef =
+      authoringValue && authoringKind && authoringRootOperation && typeof authoringValue.documentHash === 'string'
+        ? encodeNativeAuthoringTaskRef({
+            version: 1,
+            kind: authoringKind,
+            runId: stored.state.runId,
+            generationHash: sha256HexSync(stored.state.generation),
+            operationId: authoringRootOperation.intent.operationId,
+            documentHash: authoringValue.documentHash,
+            stateRevision: stored.revision,
+          })
+        : undefined;
+    const authoring =
+      authoringValue &&
+      authoringRef &&
+      Predicate.isObject(authoringValue.next) &&
+      authoringValue.next.action === 'compact-confirm'
+        ? {
+            ...authoringValue,
+            authoringRef,
+            continuation: {
+              tool: 'workflow_task_author',
+              authoringRef,
+              read: {command: 'read', detail: 'document'},
+              save: {command: 'save'},
+            },
+          }
+        : authoringValue;
     const afterRead = yield* readNativeWorkflowState(config, request.runId);
     if (afterRead?.revision !== stored.revision)
       return yield* fail('inspection-failed', 'The native run changed while reading its current authoring root.');

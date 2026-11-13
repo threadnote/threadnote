@@ -9,6 +9,7 @@ import {retainCodeGraphCitationEvidence} from '@threadnote/graph/citation/capsul
 import {decodeUtf8} from '@threadnote/graph/inventory/content';
 import {CodeGraphQueryService, observationFromCodeGraphStatus} from '@threadnote/graph/query';
 import {codeGraphScopeAdmitsPath} from '@threadnote/graph/scope/applicability';
+import {BUILTIN_LANGUAGE_PACK_REGISTRY} from '@threadnote/graph/languages/registry';
 import {resolveCodeGraphScopeRoute} from '@threadnote/graph/scope/routing';
 import {CodeGraphStore} from '@threadnote/graph/store';
 import {
@@ -43,6 +44,10 @@ export const MEMORY_CODE_CITATION_WORKSET_PREPARATION_COMMAND = 'threadnote work
 
 export type MemoryCodeCitationCaptureRecoveryCode = 'exact-current-evidence-unavailable' | 'ready-graph-unavailable';
 export type MemoryCodeCitationCaptureFailureCode = 'code-reference-unresolved' | 'outside-project-graph';
+
+export function codeCitationFileEligibility(path: string): 'supported' | 'unsupported' {
+  return Option.isSome(BUILTIN_LANGUAGE_PACK_REGISTRY.match(path)) ? 'supported' : 'unsupported';
+}
 
 export type MemoryCodeCitationGraphPreparationV1 =
   | {
@@ -546,11 +551,11 @@ const captureRepositoryGroup = Effect.fn('memoryCodeCitation.captureRepositoryGr
                   );
                 }
                 if (omitUnresolved) return undefined;
-                return yield* MemoryCodeCitationCaptureError.of(
-                  `Code citation path is not present in the exact current graph: ${target.target.path}. Use a graph-indexed repository-relative path.`,
-                  undefined,
-                  'code-reference-unresolved',
-                );
+                const message =
+                  codeCitationFileEligibility(target.target.path) === 'unsupported'
+                    ? `Code citation path is not a supported graph source: ${target.target.path}. Keep it in ordinary prose or cite an indexed source file.`
+                    : `Code citation path is not present in the exact current graph: ${target.target.path}. Use a graph-indexed repository-relative path.`;
+                return yield* MemoryCodeCitationCaptureError.of(message, undefined, 'code-reference-unresolved');
               }
               return yield* captureFileCitation(file.path, file.contentHash, target.index);
             }

@@ -54,7 +54,7 @@ import {nativeWorkflowError} from './memory.js';
 import {readNativeWorkflowState} from './store.js';
 import {readNativeTaskView, verifyNativeTaskReopen} from './task.js';
 import {inspectOldBindingOwners} from './task_binding_transition.js';
-import {nativeWatchWakeupSchema} from './watch_notification_state.js';
+import {nativeWatchWakeupRequestSchema} from './watch_notification_state.js';
 import {
   cycleRequest,
   currentNativeTaskRef,
@@ -132,7 +132,7 @@ export const NativeTaskPrWatchFieldsSchema = Schema.Struct({
     'complete',
   ]),
   phaseId: Schema.optionalKey(id),
-  wakeup: Schema.optionalKey(nativeWatchWakeupSchema),
+  wakeup: Schema.optionalKey(nativeWatchWakeupRequestSchema),
   takeover: Schema.optionalKey(Schema.Boolean),
   recoverWakeup: Schema.optionalKey(Schema.Boolean),
   noticeRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),

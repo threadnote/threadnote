@@ -1,5 +1,5 @@
 import {runNativeTaskAuthoring} from '../../workflow_automation/task_authoring.js';
-import {Effect, Schema} from 'effect';
+import {Effect, Schema, Struct} from 'effect';
 import {McpInput} from '../../effect/ai/mcp.js';
 import {readNativeTaskView} from '../../workflow_automation/task.js';
 import {
@@ -545,13 +545,16 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Operate the exact current task PR watch, route notices, persist dispositions before ACK, and complete delivery from readback.',
+        'Operate the exact current task PR watch. Relay current notice refs, record each returned event disposition, then ACK with current refs. Persist dispositions before ACK and complete delivery from readback.',
       inputSchema: {
         runId: McpInput.requiredString('Native run'),
         callerCwd: McpInput.requiredString('Bound checkout'),
         validationRef: McpInput.string('Current validation reference; omit only for provisional inspect or stop'),
         deliveryRef: McpInput.string('Opaque open PR delivery reference; omit only for provisional inspect or stop'),
-        ...NativeTaskPrWatchFieldsSchema.fields,
+        ...Struct.omit(NativeTaskPrWatchFieldsSchema.fields, ['noticeRef']),
+        noticeRef: McpInput.string(
+          'Current notice route: relay it, record the returned event disposition, then ACK with current refs.',
+        ),
       },
     },
     Effect.fn('mcp_server.workflowTaskWatchPr')(function* ({runId, callerCwd, validationRef, deliveryRef, ...watch}) {
