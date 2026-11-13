@@ -96,6 +96,7 @@ export function makeNativeTaskPrDeliveryCommand<E, R>(
     readonly commitEvidence: string;
     readonly pr: unknown;
     readonly publication: unknown;
+    readonly userAuthority?: string;
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
 ) {
   return Command.make(
@@ -106,7 +107,14 @@ export function makeNativeTaskPrDeliveryCommand<E, R>(
       validationRef: requiredString('validation-ref', 'Opaque current validation reference from the task flow'),
       commitEvidence: requiredString('commit-evidence', 'Actual verified PR commit evidence'),
       pr: requiredString('pr', 'Physical PR metadata as JSON'),
-      publication: requiredString('publication', 'Actual publication authority input as JSON'),
+      publication: requiredString(
+        'publication',
+        'Feature-memory publication evidence as JSON; separate from user consent',
+      ),
+      userAuthority: optionalString(
+        'user-authority',
+        'Quote actual existing user approval; required for new PR delivery/adoption',
+      ),
     },
     options =>
       Effect.try({
@@ -430,6 +438,13 @@ export function makeNativeTaskActionCommands<E, R>(
     readonly validationRef: string;
     readonly commitEvidence: string;
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
+  recoverUnreviewedRebaseHandler?: (options: {
+    readonly runId: string;
+    readonly callerCwd: string;
+    readonly snapshotRef: string;
+    readonly reason: string;
+    readonly userAuthority: string;
+  }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
 ) {
   const lifecycle = (options: Parameters<NonNullable<typeof lifecycleHandler>>[0]) =>
     lifecycleHandler
@@ -618,6 +633,25 @@ export function makeNativeTaskActionCommands<E, R>(
             }),
           ),
   ).pipe(Command.withDescription('Requalify an exact reviewed predecessor against a newly approved base'));
+  const recoverUnreviewedRebaseSnapshot = Command.make(
+    'recover-unreviewed-rebase-snapshot',
+    {
+      runId: requiredString('run-id', 'Existing native workflow run identifier'),
+      callerCwd: requiredString('caller-cwd', 'Absolute bound checkout path'),
+      snapshotRef: requiredString('snapshot-ref', 'Exact latest unreviewed predecessor reference'),
+      reason: requiredString('reason', 'Why corrected source must recover after rebase'),
+      userAuthority: requiredString('user-authority', 'Quote actual existing user authority for this recovery'),
+    },
+    options =>
+      recoverUnreviewedRebaseHandler
+        ? recoverUnreviewedRebaseHandler(options)
+        : Effect.fail(
+            WorkflowAutomationError.make({
+              code: 'unsupported-action',
+              message: 'Unreviewed rebase recovery is unavailable.',
+            }),
+          ),
+  ).pipe(Command.withDescription('Retain unreviewed rebase history and require a new full review and validation'));
   const supersedeUnreviewedSnapshot = Command.make(
     'supersede-unreviewed-snapshot',
     {
@@ -847,6 +881,7 @@ export function makeNativeTaskActionCommands<E, R>(
       recordSnapshot,
       requalifyBaseSnapshot,
       supersedeUnreviewedSnapshot,
+      recoverUnreviewedRebaseSnapshot,
       recordReview,
       recordValidation,
       deliverLocal,

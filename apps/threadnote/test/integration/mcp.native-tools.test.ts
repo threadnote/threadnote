@@ -786,9 +786,20 @@ describe('Threadnote MCP toolsets', () => {
             return [command[0], variant];
           }),
         );
-        expect([...snapshotByCommand.keys()]).toEqual(['record', 'supersede-unreviewed', 'requalify-base']);
+        expect([...snapshotByCommand.keys()]).toEqual([
+          'record',
+          'supersede-unreviewed',
+          'recover-unreviewed-rebase',
+          'requalify-base',
+        ]);
         expect(snapshotByCommand.get('record')?.required).toEqual(['command', 'workRef']);
         expect(snapshotByCommand.get('supersede-unreviewed')?.required).toEqual(['command', 'snapshotRef', 'reason']);
+        expect(snapshotByCommand.get('recover-unreviewed-rebase')?.required).toEqual([
+          'command',
+          'snapshotRef',
+          'reason',
+          'userAuthority',
+        ]);
         expect(snapshotByCommand.get('requalify-base')?.required).toEqual([
           'command',
           'snapshotRef',

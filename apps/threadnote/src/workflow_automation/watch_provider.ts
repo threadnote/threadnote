@@ -124,6 +124,70 @@ export function nativeWatchPullRequest(pr: string) {
   return {owner: match[1], repo: match[2], number: Number(match[3])};
 }
 
+export interface NativeWatchPullIdentity {
+  readonly url: string;
+  readonly number: number;
+  readonly baseRepository: string;
+  readonly headRepository: string;
+  readonly baseBranch: string;
+  readonly headBranch: string;
+  readonly headSha: string;
+  readonly state: 'open' | 'merged';
+}
+
+/** Fetches only bounded identity fields for adopting an already published PR. */
+export const verifyNativeWatchPullIdentity = Effect.fn('nativeWatch.verifyPullIdentity')(function* (pr: string) {
+  const target = yield* Effect.try({try: () => nativeWatchPullRequest(pr), catch: () => fail('invalid-pr')});
+  const response = yield* runCommandEffect(
+    'gh',
+    [
+      'api',
+      '--hostname',
+      'github.com',
+      '--method',
+      'GET',
+      `repos/${target.owner}/${target.repo}/pulls/${target.number}`,
+      '--jq',
+      '{number, url: .html_url, baseRepository: .base.repo.full_name, headRepository: .head.repo.full_name, baseBranch: .base.ref, headBranch: .head.ref, headSha: .head.sha, state, merged}',
+    ],
+    {timeoutMs: 15_000, maxOutputBytes: 16_384, sensitiveOutput: true},
+  ).pipe(Effect.mapError(() => fail('provider-transport', true)));
+  const identity = yield* Effect.try({
+    try: () => object(JSON.parse(response.stdout)),
+    catch: () => fail('provider-shape'),
+  });
+  const state = identity.state;
+  if (identity.number !== target.number || identity.url !== pr) return yield* fail('provider-identity-conflict');
+  return yield* Effect.try({
+    try: () => {
+      const normalized: NativeWatchPullIdentity = {
+        url: pr,
+        number: target.number,
+        baseRepository: text(identity.baseRepository, 256),
+        headRepository: text(identity.headRepository, 256),
+        baseBranch: text(identity.baseBranch, 256),
+        headBranch: text(identity.headBranch, 256),
+        headSha: sha(identity.headSha),
+        state:
+          state === 'open' && identity.merged === false
+            ? 'open'
+            : state === 'closed' && identity.merged === true
+              ? 'merged'
+              : (() => {
+                  throw fail(state === 'closed' ? 'provider-pr-closed' : 'provider-shape');
+                })(),
+      };
+      if (
+        !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(normalized.baseRepository) ||
+        !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(normalized.headRepository)
+      )
+        throw fail('provider-shape');
+      return normalized;
+    },
+    catch: error => (Schema.is(WorkflowAutomationError)(error) ? error : fail('provider-shape')),
+  });
+});
+
 /** Renewal observes PR identity only; it neither validates nor adopts the current head. */
 export const verifyNativeWatchRenewalPr = Effect.fn('nativeWatch.verifyRenewalPr')(function* (
   pr: string,
