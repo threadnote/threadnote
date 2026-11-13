@@ -73,6 +73,7 @@ export function captureBodyDiscovery(file: CodeGraphInventoryFile, facts: CodeGr
   // No path-bound body evidence is needed without owners. Preserve other derivation inputs unchanged.
   if (owners.length === 0) return facts;
   const records: CodeGraphBodyDiscoveryRecord[] = [];
+  let recordBytes = 0;
   const omissions = new Set<string>();
   let workBytes = 0;
   let index = 0;
@@ -162,15 +163,15 @@ export function captureBodyDiscovery(file: CodeGraphInventoryFile, facts: CodeGr
         term => Buffer.byteLength(term, 'utf8') <= 128,
       ).sort();
       const record = {ownerId: owner.id, ownerSpan: owner.span, window: {line, column, endLine, endColumn}, terms};
-      // Serialized evidence is bounded independently of source work. The transient serialization includes the already bounded accumulated records.
-      if (
-        Buffer.byteLength(JSON.stringify({...body(), records: [...records, record]}), 'utf8') >
-        BODY_DISCOVERY_RECORD_BYTES - 1_024
-      ) {
+      const candidateBytes = Buffer.byteLength(JSON.stringify(record), 'utf8');
+      // The empty array already contributes its brackets; N existing records add N commas with this candidate.
+      const envelopeBytes = Buffer.byteLength(JSON.stringify({...body(), records: []}), 'utf8');
+      if (envelopeBytes + recordBytes + candidateBytes + records.length > BODY_DISCOVERY_RECORD_BYTES - 1_024) {
         omissions.add('record-bytes');
         continue;
       }
       records.push(record);
+      recordBytes += candidateBytes;
     }
   }
   return {...facts, derivationInputs: {...facts.derivationInputs, bodyDiscovery: body()}};
@@ -238,14 +239,9 @@ export function validateBodyDiscovery(
       return fail();
     const terms: string[] = [];
     for (const term of record.terms) {
-      if (
-        typeof term !== 'string' ||
-        term.length > 128 ||
-        Buffer.byteLength(term, 'utf8') > 128 ||
-        discoveryTerms(term).length !== 1 ||
-        discoveryTerms(term)[0] !== term
-      )
-        return fail();
+      if (typeof term !== 'string' || term.length > 128 || Buffer.byteLength(term, 'utf8') > 128) return fail();
+      const normalized = discoveryTerms(term);
+      if (normalized.length !== 1 || normalized[0] !== term) return fail();
       terms.push(term);
     }
     if (new Set(terms).size !== terms.length) return fail();

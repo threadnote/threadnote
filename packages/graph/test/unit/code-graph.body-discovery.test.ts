@@ -12,6 +12,7 @@ import {
   closeBodyDiscovery,
   BODY_DISCOVERY_POLICY,
   BODY_DISCOVERY_PREFIX,
+  BODY_DISCOVERY_RECORD_BYTES,
 } from '@threadnote/graph/languages/body_discovery';
 import {BUILTIN_LANGUAGE_PACK_REGISTRY, packCacheIdentity} from '@threadnote/graph/languages/registry';
 import {codeGraphLanguagePack} from '@threadnote/graph/languages/typescript/pack';
@@ -25,7 +26,12 @@ import {encodeStoredCodeGraphFact, decodeStoredCodeGraphFact} from '@threadnote/
 import {preparedSymbolTerms, symbolTerms} from '@threadnote/graph/store/utilities';
 import {TreeSitterRuntime} from '@threadnote/graph/tree_sitter/runtime';
 import {citationPlatformLayer} from '../helpers/citation-platform.js';
-import type {CodeGraphFileFacts, CodeGraphInventoryFile, CodeGraphSpan} from '@threadnote/graph/types';
+import type {
+  CodeGraphBodyDiscoveryRecord,
+  CodeGraphFileFacts,
+  CodeGraphInventoryFile,
+  CodeGraphSpan,
+} from '@threadnote/graph/types';
 import {FileSystem, Path, Result} from 'effect';
 import {TestClock} from 'effect/testing';
 import {CodeGraphStore} from '@threadnote/graph/store';
@@ -96,6 +102,60 @@ it('charges one monotonic UTF16 locator plus each overlapping UTF8 window and re
   expect(body.records[0].terms).toContain('pending');
   expect(JSON.stringify(body)).not.toContain('function f()');
   expect(captured.symbols).toBe(facts.symbols);
+});
+it('preserves exact UTF8 record-byte admission against full candidate serialization', () => {
+  const words = Array.from({length: 32}, (_, index) => `é${EffectString.padStart(2, '0')(index.toString(16))}`);
+  const file = bodyFile(EffectArray.join(words, ' '));
+  const span = {line: 1, column: 1, endLine: 1, endColumn: file.content!.length + 1};
+  const raw = ownerFacts(
+    file,
+    Array.from({length: 128}, () => span),
+  );
+  const facts = {
+    ...raw,
+    symbols: EffectArray.map(raw.symbols, symbol => ({...symbol, id: symbol.id + EffectString.repeat(220)('é')})),
+  };
+  const records: CodeGraphBodyDiscoveryRecord[] = [];
+  const omissions = new Set<string>();
+  let workBytes = 0;
+  let admittedBytes = 0;
+  let refusedBytes = 0;
+  for (const owner of facts.symbols) {
+    workBytes += 2 * Buffer.byteLength(file.content!, 'utf8');
+    const record = {ownerId: owner.id, ownerSpan: span, window: span, terms: [...words].sort()};
+    const candidate = {
+      version: 1,
+      policy: BODY_DISCOVERY_POLICY,
+      path: file.path,
+      contentHash: file.contentHash,
+      records: [...records, record],
+      workBytes,
+      omissions: [...omissions].sort(),
+    };
+    const bytes = Buffer.byteLength(JSON.stringify(candidate), 'utf8');
+    if (bytes > BODY_DISCOVERY_RECORD_BYTES - 1_024) {
+      refusedBytes = bytes;
+      omissions.add('record-bytes');
+    } else {
+      admittedBytes = bytes;
+      records.push(record);
+    }
+  }
+  expect(admittedBytes).toBeLessThanOrEqual(BODY_DISCOVERY_RECORD_BYTES - 1_024);
+  expect(refusedBytes).toBeGreaterThan(BODY_DISCOVERY_RECORD_BYTES - 1_024);
+  expect(records.length).toBeGreaterThan(0);
+  expect(records.length).toBeLessThan(facts.symbols.length);
+  const captured = captureBodyDiscovery(file, facts).derivationInputs!.bodyDiscovery!;
+  expect(captured).toEqual({
+    version: 1,
+    policy: BODY_DISCOVERY_POLICY,
+    path: file.path,
+    contentHash: file.contentHash,
+    records,
+    workBytes,
+    omissions: ['record-bytes'],
+  });
+  expect(validateBodyDiscovery(captured, file.path, facts.symbols)).toEqual(captured);
 });
 it('omits unreachable long prefixes within the same64KiB and caps overlap before copying', () => {
   const prefix = EffectString.repeat(70_000)(' ') + '\n';
