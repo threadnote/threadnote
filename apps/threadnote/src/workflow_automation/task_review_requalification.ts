@@ -88,13 +88,14 @@ export const requalifyInvalidNativeTaskTail = (config: RuntimeConfig, input: unk
         )?.snapshot;
         const fs = yield* FileSystem.FileSystem;
         const checkout = yield* fs.realPath(request.callerCwd);
+        const reportedCheckout = yield* fs.realPath(yield* git(checkout, ['rev-parse', '--show-toplevel']));
         if (
           !phase ||
           !baseline ||
           !leaf ||
           checkout !== baseline.repo ||
           leaf.repo !== checkout ||
-          (yield* git(checkout, ['rev-parse', '--show-toplevel'])) !== checkout ||
+          reportedCheckout !== checkout ||
           ref.generationHash !== sha256HexSync(stored.state.generation) ||
           ref.phaseHash !== leaf.phaseHash ||
           leaf.phaseId !== phaseId ||

@@ -449,8 +449,13 @@ export const readNativeTaskView = (config: RuntimeConfig, input: unknown) =>
     const callerCwd = yield* fs
       .realPath(request.callerCwd)
       .pipe(Effect.mapError(() => fail('workspace-not-found', 'callerCwd must resolve to an existing checkout.')));
-    const checkout = yield* gitValue(['rev-parse', '--show-toplevel'], callerCwd);
-    if (!checkout) return yield* fail('workspace-not-found', 'callerCwd must be inside a Git checkout.');
+    const reportedCheckout = yield* gitValue(['rev-parse', '--show-toplevel'], callerCwd);
+    if (!reportedCheckout) return yield* fail('workspace-not-found', 'callerCwd must be inside a Git checkout.');
+    const checkout = yield* fs
+      .realPath(reportedCheckout)
+      .pipe(
+        Effect.mapError(() => fail('workspace-not-found', 'The Git checkout root must resolve to an existing path.')),
+      );
     const stored = yield* readNativeWorkflowState(config, request.runId);
     if (!stored) return yield* fail('run-not-found', 'This native run does not exist.');
     const system = yield* SystemInfo;

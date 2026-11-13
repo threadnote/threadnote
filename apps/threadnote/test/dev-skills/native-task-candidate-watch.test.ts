@@ -99,6 +99,10 @@ effectIt.effect(
       const testCommands = CommandExecutor.of({
         ...commands,
         execute: (executable, args, options) => {
+          if (executable === 'git' && args.includes('--show-toplevel'))
+            return commands
+              .execute(executable, args, options)
+              .pipe(Effect.map(result => ({...result, stdout: `${EffectString.trim(result.stdout)}/.\n`})));
           if (executable === '/fixture/codex') {
             if (args.includes('--help'))
               return Effect.succeed({

@@ -4549,6 +4549,7 @@ describe('native task actions', () => {
         expect(pageOne.page.nextCursor).toBeDefined();
         expect(pageOne.page.limit).toBe(16);
         const beforeRevision = (yield* readNativeWorkflowState(f.config, 'native-run'))?.revision;
+        const beforeState = yield* f.fs.readFileString(f.statePath());
         const earlierWatch = yield* readNativeWatch(f.config, p1.watchId);
         if (!earlierWatch?.envelope.collector) throw new Error('Expected the P1 active collector readback.');
 
@@ -4573,13 +4574,11 @@ describe('native task actions', () => {
           callerCwd: f.repo,
           cursor: pageOne.page.nextCursor!,
         }).pipe(Effect.result);
-        expect(continuation).toMatchObject({
-          failure: {
-            code: 'stale-cursor',
-            message: expect.stringContaining('eligible historical-watch set changed'),
-          },
-        });
-        expect((yield* readNativeWorkflowState(f.config, 'native-run'))?.revision).toBe(beforeRevision);
+        expect(continuation).toMatchObject({failure: {code: 'stale-cursor'}});
+        const refreshed = yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo});
+        expect(EffectArray.map(refreshed.historicalWatches ?? [], item => item.phaseId)).toEqual(['two']);
+        expect(refreshed.revision).toBe(beforeRevision);
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeState);
       }).pipe(run),
   );
 

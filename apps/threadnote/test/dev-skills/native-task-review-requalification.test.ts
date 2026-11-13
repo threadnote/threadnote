@@ -1,6 +1,7 @@
 import {it as effectIt} from '@effect/vitest';
 import {Effect, Result, Schema, String as EffectString} from 'effect';
 import {describe, expect} from 'vitest';
+import {CommandExecutor} from '@threadnote/platform/command';
 import {NativeCycleSnapshotSchema, type NativeCycleSnapshot} from '@threadnote/workflow-automations/cycle-review';
 import {nativeCyclePhaseReviewUsage, nativeCycleReviewBasis} from '@threadnote/workflow-automations/cycle-runtime';
 import {decodeNativeTaskActionRef, encodeNativeTaskActionRef} from '@threadnote/workflow-automations/task';
@@ -101,6 +102,22 @@ describe('invalid-only task tail qualification', () => {
     () =>
       Effect.gen(function* () {
         const f = yield* prepare();
+        const commands = yield* CommandExecutor;
+        const gitRootAlias = CommandExecutor.of({
+          ...commands,
+          execute: (executable, args, options) =>
+            commands
+              .execute(executable, args, options)
+              .pipe(
+                Effect.map(result =>
+                  executable === 'git' && args.includes('--show-toplevel')
+                    ? {...result, stdout: `${EffectString.trim(result.stdout)}/.\n`}
+                    : result,
+                ),
+              ),
+        });
+        const invoke = (request: Parameters<typeof requalifyInvalidNativeTaskTail>[1]) =>
+          requalifyInvalidNativeTaskTail(f.config, request).pipe(Effect.provideService(CommandExecutor, gitRootAlias));
         const before = (yield* readNativeWorkflowState(f.config, 'native-run'))!;
         const oldBytes = yield* f.fs.readFileString(f.statePath());
         const indexPath = EffectString.trim((yield* f.git(['rev-parse', '--git-path', 'index'])).stdout);
@@ -114,49 +131,31 @@ describe('invalid-only task tail qualification', () => {
           {phaseOwnedPaths: [{phaseId: 'foreign', paths: ['source.ts']}]},
           {taskRef: f.request.predecessorRef},
         ]) {
-          expect(
-            Result.isFailure(
-              yield* requalifyInvalidNativeTaskTail(f.config, {...f.request, ...changes}).pipe(Effect.result),
-            ),
-          ).toBe(true);
+          expect(Result.isFailure(yield* invoke({...f.request, ...changes}).pipe(Effect.result))).toBe(true);
           expect(yield* f.fs.readFileString(f.statePath())).toBe(oldBytes);
         }
         const parsed = decodeNativeTaskActionRef(f.request.predecessorRef)!;
         const foreign = encodeNativeTaskActionRef({...parsed, stateRevision: EffectString.repeat(64)('0')});
-        expect(
-          Result.isFailure(
-            yield* requalifyInvalidNativeTaskTail(f.config, {...f.request, predecessorRef: foreign}).pipe(
-              Effect.result,
-            ),
-          ),
-        ).toBe(true);
+        expect(Result.isFailure(yield* invoke({...f.request, predecessorRef: foreign}).pipe(Effect.result))).toBe(true);
         yield* f.fs.writeFileString(f.path.join(f.repo, 'dirty.txt'), 'Dirty source');
-        expect(Result.isFailure(yield* requalifyInvalidNativeTaskTail(f.config, f.request).pipe(Effect.result))).toBe(
-          true,
-        );
+        expect(Result.isFailure(yield* invoke(f.request).pipe(Effect.result))).toBe(true);
         expect(yield* f.fs.readFileString(f.statePath())).toBe(oldBytes);
         yield* f.fs.remove(f.path.join(f.repo, 'dirty.txt'));
         yield* f.git(['checkout', 'main']);
-        expect(Result.isFailure(yield* requalifyInvalidNativeTaskTail(f.config, f.request).pipe(Effect.result))).toBe(
-          true,
-        );
+        expect(Result.isFailure(yield* invoke(f.request).pipe(Effect.result))).toBe(true);
         yield* f.git(['checkout', 'feature/one']);
         const originalBase = EffectString.trim(base);
         yield* f.git(['update-ref', 'refs/heads/main', f.leaf.declaredBaseHead]);
-        expect(Result.isFailure(yield* requalifyInvalidNativeTaskTail(f.config, f.request).pipe(Effect.result))).toBe(
-          true,
-        );
+        expect(Result.isFailure(yield* invoke(f.request).pipe(Effect.result))).toBe(true);
         yield* f.git(['update-ref', 'refs/heads/main', originalBase]);
         yield* f.fs.writeFileString(f.path.join(f.repo, 'extra.ts'), 'export const extra = true;\n');
         yield* f.git(['add', 'extra.ts']);
         yield* f.git(['commit', '-m', 'Linear commit is not the prepared normal merge']);
-        expect(Result.isFailure(yield* requalifyInvalidNativeTaskTail(f.config, f.request).pipe(Effect.result))).toBe(
-          true,
-        );
+        expect(Result.isFailure(yield* invoke(f.request).pipe(Effect.result))).toBe(true);
         yield* f.git(['reset', '--hard', EffectString.trim(head)]);
         expect(yield* f.fs.readFileString(f.statePath())).toBe(oldBytes);
         const index = yield* f.fs.readFile(f.path.resolve(f.repo, indexPath));
-        const admitted = yield* requalifyInvalidNativeTaskTail(f.config, f.request);
+        const admitted = yield* invoke(f.request);
         expect(admitted.replayed).toBe(false);
         const proof = admitted.snapshot.snapshot.invalidTailMergeQualificationV1!;
         expect(proof.basisSnapshotId).toBe(f.incremental.snapshotId);
@@ -174,15 +173,11 @@ describe('invalid-only task tail qualification', () => {
         expect(fresh.phase?.snapshot?.recordingMode).toBe('full');
         expect(fresh.next.action).toBe('review');
         expect(fresh.invalidTailRequalification).toBeUndefined();
-        const replay = yield* requalifyInvalidNativeTaskTail(f.config, f.request);
+        const replay = yield* invoke(f.request);
         expect(replay.replayed).toBe(true);
         expect(replay.snapshotRef).toBe(admitted.snapshotRef);
         expect(
-          Result.isFailure(
-            yield* requalifyInvalidNativeTaskTail(f.config, {...f.request, userAuthority: 'Changed authority'}).pipe(
-              Effect.result,
-            ),
-          ),
+          Result.isFailure(yield* invoke({...f.request, userAuthority: 'Changed authority'}).pipe(Effect.result)),
         ).toBe(true);
         expect((yield* f.git(['rev-parse', 'HEAD'])).stdout).toBe(head);
         expect((yield* f.git(['rev-parse', 'main'])).stdout).toBe(base);
