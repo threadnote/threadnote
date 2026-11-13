@@ -95,24 +95,27 @@ function sid(last: number): Uint8Array {
   for (const [index, value] of [21, 11, 22, 33, last].entries()) view.setUint32(8 + index * 4, value, true);
   return bytes;
 }
-function descriptor(other: number, rights: number): Uint8Array {
-  const owner = sid(1001),
-    ace = sid(other),
-    size = 8 + 8 + ace.length,
-    bytes = new Uint8Array(20 + owner.length + size),
+function securityRecord(owner: Uint8Array, ace: Uint8Array, rights: number, flags = 0) {
+  const size = 8 + 8 + ace.length,
+    daclOffset = 20 + owner.length,
+    bytes = new Uint8Array(daclOffset + size),
     view = new DataView(bytes.buffer);
   bytes[0] = 1;
   view.setUint16(2, 0x8004, true);
   view.setUint32(4, 20, true);
-  view.setUint32(16, 48, true);
+  view.setUint32(16, daclOffset, true);
   bytes.set(owner, 20);
-  bytes[48] = 2;
-  view.setUint16(50, size, true);
-  view.setUint16(52, 1, true);
-  view.setUint16(58, 8 + ace.length, true);
-  view.setUint32(60, rights, true);
-  bytes.set(ace, 64);
-  return bytes;
+  bytes[daclOffset] = 2;
+  view.setUint16(daclOffset + 2, size, true);
+  view.setUint16(daclOffset + 4, 1, true);
+  bytes[daclOffset + 9] = flags;
+  view.setUint16(daclOffset + 10, 8 + ace.length, true);
+  view.setUint32(daclOffset + 12, rights, true);
+  bytes.set(ace, daclOffset + 16);
+  return {bytes, daclOffset};
+}
+function descriptor(other: number, rights: number): Uint8Array {
+  return securityRecord(sid(1001), sid(other), rights).bytes;
 }
 type PrincipalClass = 'current' | 'SYSTEM' | 'builtin-admins' | 'trusted-installer' | 'other' | 'unknown';
 function boundedSidBytes(bytes: Uint8Array, offset: number, end: number): number {
@@ -257,6 +260,66 @@ it('refuses every generated nonzero foreign private DACL grant and every truncat
     }),
     {numRuns: 30},
   );
+});
+it('recognizes only the resolved servicing ancestor owner while preserving every ACE and final-owner rule', () => {
+  const principal = 'S-1-5-21-11-22-33-1001',
+    // Synthetic pure-decoder input, not a claim to resolve a real service or qualify a Windows host.
+    servicingOwner = 'S-1-5-80-11-22-33-44-55',
+    service = new Uint8Array(32),
+    view = new DataView(service.buffer);
+  service[0] = 1;
+  service[1] = 6;
+  service[7] = 5;
+  for (const [index, value] of [80, 11, 22, 33, 44, 55].entries()) view.setUint32(8 + index * 4, value, true);
+  const safe = securityRecord(service, sid(1001), 0x1f01ff);
+  expect(() => assertWindowsDaclBytes(safe.bytes, 20, safe.daclOffset, principal, false, servicingOwner)).not.toThrow();
+  expect(() => assertWindowsDaclBytes(safe.bytes, 20, safe.daclOffset, principal, false)).toThrow();
+  expect(() =>
+    assertWindowsDaclBytes(safe.bytes, 20, safe.daclOffset, principal, false, 'S-1-5-80-11-22-33-44-56'),
+  ).toThrow();
+  expect(() => assertWindowsDaclBytes(safe.bytes, 20, safe.daclOffset, principal, true, servicingOwner)).toThrow();
+  const serviceGrant = securityRecord(service, service, 0x1f01ff),
+    privateServiceGrant = securityRecord(sid(1001), service, 0x1f01ff);
+  expect(() =>
+    assertWindowsDaclBytes(serviceGrant.bytes, 20, serviceGrant.daclOffset, principal, false, servicingOwner),
+  ).toThrow();
+  expect(() =>
+    assertWindowsDaclBytes(
+      privateServiceGrant.bytes,
+      20,
+      privateServiceGrant.daclOffset,
+      principal,
+      true,
+      servicingOwner,
+    ),
+  ).toThrow();
+  fc.assert(
+    fc.property(
+      fc.integer({min: 1002, max: 100000}),
+      fc.constantFrom(0x40, 0x10000, 0x40000, 0x80000, 0x10000000, 0x40000000),
+      fc.boolean(),
+      (other, dangerousRight, inheritOnly) => {
+        const record = securityRecord(service, sid(other), dangerousRight, inheritOnly ? 8 : 0),
+          checkAncestor = () =>
+            assertWindowsDaclBytes(record.bytes, 20, record.daclOffset, principal, false, servicingOwner);
+        if (inheritOnly) expect(checkAncestor).not.toThrow();
+        else expect(checkAncestor).toThrow();
+        expect(() =>
+          assertWindowsDaclBytes(record.bytes, 20, record.daclOffset, principal, true, servicingOwner),
+        ).toThrow();
+        const unknownOwner = securityRecord(sid(other), sid(1001), 0x1f01ff);
+        expect(() =>
+          assertWindowsDaclBytes(unknownOwner.bytes, 20, unknownOwner.daclOffset, principal, false, servicingOwner),
+        ).toThrow();
+      },
+    ),
+    {numRuns: 30},
+  );
+  const unknownAce = securityRecord(service, sid(1001), 0x1f01ff);
+  unknownAce.bytes[unknownAce.daclOffset + 8] = 9;
+  expect(() =>
+    assertWindowsDaclBytes(unknownAce.bytes, 20, unknownAce.daclOffset, principal, false, servicingOwner),
+  ).toThrow();
 });
 it('quotes fixed Windows argv boundaries and rejects NUL and unpaired UTF-16 before native creation', () => {
   expect(windowsProviderCommandLine('C:\\tool.exe', ['', 'space value', 'quote"value', 'tail\\'])).toBe(

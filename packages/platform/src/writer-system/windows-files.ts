@@ -31,6 +31,7 @@ function library() {
     CreateFileW: {args: ['buffer', 'u32', 'u32', 'ptr', 'u32', 'u32', 'u64'], returns: 'u64'},
     CloseHandle: {args: ['u64'], returns: 'i32'},
     GetFileType: {args: ['u64'], returns: 'u32'},
+    GetComputerNameW: {args: ['buffer', 'buffer'], returns: 'i32'},
     GetDriveTypeW: {args: ['buffer'], returns: 'u32'},
     GetFileInformationByHandle: {args: ['u64', 'buffer'], returns: 'i32'},
     GetFileInformationByHandleEx: {args: ['u64', 'u32', 'buffer', 'u32'], returns: 'i32'},
@@ -207,15 +208,72 @@ function sidAt(bytes: Uint8Array, offset: number, bound: number): Sid {
   for (let index = 0; index < count; index++) text += `-${view.getUint32(offset + 8 + index * 4, true)}`;
   return {text, bytes: length};
 }
-/** Strict bounded ACL decoder; callback/object/conditional ACEs and unknown layouts refuse. */
+/** Resolve only the native local servicing identity; no account-name or cached SID grants authority. */
+function trustedInstallerOwner(kernel: NativeLibrary): string {
+  const security = windowsSystemLibrary('advapi32.dll', {
+    LookupAccountNameW: {args: ['buffer', 'buffer', 'buffer', 'buffer', 'buffer', 'buffer', 'buffer'], returns: 'i32'},
+    IsValidSid: {args: ['u64'], returns: 'i32'},
+    GetLengthSid: {args: ['u64'], returns: 'u32'},
+  });
+  try {
+    const computer = new Uint16Array(256),
+      computerLength = new Uint32Array([computer.length]),
+      backing = new ArrayBuffer(68 + 32),
+      bytes = new Uint8Array(backing, 0, 68),
+      canary = new Uint8Array(backing, 68),
+      capacity = new Uint32Array([bytes.length]),
+      domain = new Uint16Array(256),
+      domainLength = new Uint32Array([domain.length]),
+      kind = new Uint32Array(1),
+      address = windowsAddress(bytes);
+    canary.fill(0xa5);
+    if (
+      kernel.symbols.GetComputerNameW(computer, computerLength) === 0 ||
+      computerLength[0] === 0 ||
+      computerLength[0] >= computer.length ||
+      computer[computerLength[0]] !== 0 ||
+      security.symbols.LookupAccountNameW(
+        computer,
+        windowsWide('NT SERVICE\\TrustedInstaller'),
+        bytes,
+        capacity,
+        domain,
+        domainLength,
+        kind,
+      ) === 0 ||
+      !canary.every(value => value === 0xa5)
+    )
+      return fail('private-storage');
+    // Successful cbSid is not a returned length. Bound the actual header before native SID readers.
+    const sid = sidAt(bytes, 0, bytes.length);
+    if (
+      !/^S-1-5-80-(?:[0-9]+-){4}[0-9]+$/u.test(sid.text) ||
+      security.symbols.IsValidSid(address) === 0 ||
+      security.symbols.GetLengthSid(address) !== sid.bytes
+    )
+      return fail('private-storage');
+    return sid.text;
+  } finally {
+    security.close();
+  }
+}
+/** Strict bounded ACL decoder; the optional ancestor owner must come from the fixed native resolver above.
+ * Callback/object/conditional ACEs and unknown layouts refuse; servicing identity never privileges ACE grants.
+ */
 export function assertWindowsDaclBytes(
   bytes: Uint8Array,
   ownerOffset: number,
   daclOffset: number,
   principal: string,
   privateObject: boolean,
+  nativeTrustedInstallerOwner?: string,
 ): void {
-  if (bytes.length < 20 || bytes[0] !== 1) return fail('private-storage');
+  if (
+    bytes.length < 20 ||
+    bytes[0] !== 1 ||
+    (nativeTrustedInstallerOwner !== undefined && !/^S-1-5-80-(?:[0-9]+-){4}[0-9]+$/u.test(nativeTrustedInstallerOwner))
+  )
+    return fail('private-storage');
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength),
     control = view.getUint16(2, true);
   if (
@@ -228,7 +286,13 @@ export function assertWindowsDaclBytes(
   )
     fail('private-storage');
   const owner = sidAt(bytes, ownerOffset, bytes.length).text;
-  if (privateObject ? owner !== principal : owner !== principal && !administrativePrincipals.has(owner))
+  if (
+    privateObject
+      ? owner !== principal
+      : owner !== principal &&
+        !administrativePrincipals.has(owner) &&
+        (nativeTrustedInstallerOwner === undefined || owner !== nativeTrustedInstallerOwner)
+  )
     fail('private-storage');
   const revision = bytes[daclOffset],
     length = view.getUint16(daclOffset + 2, true),
@@ -267,7 +331,7 @@ export function assertWindowsDaclBytes(
   // ACL slack is not an omitted ACE: every declared ACE was bounded and consumed above.
   if (cursor > daclOffset + length) fail('private-storage');
 }
-function privateAcl(handle: bigint, principal: string, privateObject: boolean): void {
+function privateAcl(handle: bigint, principal: string, privateObject: boolean, servicingOwner: string): void {
   const lib = windowsSystemLibrary('advapi32.dll', {
     GetSecurityInfo: {args: ['u64', 'u32', 'u32', 'buffer', 'ptr', 'buffer', 'ptr', 'buffer'], returns: 'u32'},
     IsValidSecurityDescriptor: {args: ['u64'], returns: 'i32'},
@@ -299,6 +363,7 @@ function privateAcl(handle: bigint, principal: string, privateObject: boolean): 
       Number(dacl[0] - descriptor),
       principal,
       privateObject,
+      privateObject ? undefined : servicingOwner,
     );
   } finally {
     if (descriptor !== 0n) kernel.symbols.LocalFree(descriptor);
@@ -318,6 +383,7 @@ export function assertWindowsPrivateProviderPath(path: string, kind: 'file' | 'd
   const lib = library(),
     chain: {handle: bigint; identity: NativeFileIdentity; name: string; directory: boolean}[] = [];
   try {
+    const servicingOwner = trustedInstallerOwner(lib);
     if (lib.symbols.GetDriveTypeW(windowsWide(root)) !== 3) fail('private-storage');
     const handle = windowsHandle(
       lib.symbols.CreateFileW(windowsWide(root), 0x001200a1, 7, null, 3, 0x02000000 | 0x00200000, 0n),
@@ -336,7 +402,7 @@ export function assertWindowsPrivateProviderPath(path: string, kind: 'file' | 'd
     for (let index = 0; index < chain.length; index++) {
       const edge = chain[index];
       localVolume(lib, edge.handle);
-      privateAcl(edge.handle, principal, index === chain.length - 1);
+      privateAcl(edge.handle, principal, index === chain.length - 1, servicingOwner);
       if (!same(edge.identity, nativeStat(lib, edge.handle))) fail('private-storage');
       if (index > 0) {
         const reopened = openAt(chain[index - 1].handle, edge.name, edge.directory);
