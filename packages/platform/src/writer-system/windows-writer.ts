@@ -253,8 +253,8 @@ function projected(path: string, id: NativeFileIdentity, directory: boolean): Ru
     info.isSymbolicLink() ||
     info.isDirectory() !== directory ||
     (!directory && !info.isFile()) ||
-    id.volumeId !== id.dev ||
-    info.dev !== id.volumeId ||
+    (id.volumeId & 0xffffffffn) !== id.dev ||
+    info.dev !== id.dev ||
     high !== 0n ||
     low === 0n ||
     low !== id.ino ||
