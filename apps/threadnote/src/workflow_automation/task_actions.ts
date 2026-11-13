@@ -882,7 +882,7 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
         };
       const exportPacket = yield* authoring('export-dev-cycle', {
         uri: current.uri,
-        delivery: 'local',
+        delivery: existingCycle?.plan.delivery ?? 'local',
         bindings,
       });
       const latest = yield* readNativeWorkflowState(config, request.runId);
