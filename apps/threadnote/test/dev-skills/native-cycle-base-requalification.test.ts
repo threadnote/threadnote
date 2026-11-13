@@ -6,6 +6,7 @@ import {describe, expect} from 'vitest';
 import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
 import {decodeNativeCycleRuntime} from '@threadnote/workflow-automations/cycle-runtime';
 import {NativeCycleSnapshotSchema, type NativeCycleSnapshot} from '@threadnote/workflow-automations/cycle-review';
+import {verifyNativeCycleSnapshotEvidence} from '../../src/workflow_automation/cycle_recovery.js';
 import {fixture, object, run} from './native-cycle-lifecycle-fixture.js';
 
 const finding = {
@@ -133,6 +134,123 @@ const qualifyFixture = (oldBaseAhead = false, intermediateMetadata = false) =>
   });
 
 describe('native cycle approved base requalification', () => {
+  effectIt.effect('recovers an unreviewed same-label rebase with retained history and a fresh full review', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(['one'], 'local');
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const feature = true;\n');
+      yield* f.git(['add', 'source.ts']);
+      yield* f.git(['commit', '-m', 'Unreviewed feature']);
+      const head = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
+      const prior = yield* Schema.decodeUnknownEffect(NativeCycleSnapshotSchema)(
+        object(
+          (yield* f.mutate('snapshot', {
+            phaseId: 'one',
+            snapshotId: 'unreviewed',
+            acceptedHead: head,
+            reason: 'Feature before review recording.',
+          })).snapshot,
+        ).snapshot,
+      );
+      yield* f.mutate('validate-review', {snapshotId: prior.snapshotId, attemptId: 'invalid', report: {}});
+      const before = decodeNativeCycleRuntime(JSON.parse(yield* f.fs.readFileString(f.statePath())).cycle);
+      yield* f.git(['checkout', 'main']);
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'incoming.ts'), 'export const incoming = true;\n');
+      yield* f.git(['add', 'incoming.ts']);
+      yield* f.git(['commit', '-m', 'Upstream advance']);
+      yield* f.git(['checkout', 'feature/one']);
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const feature = "corrected";\n');
+      yield* f.git(['commit', '-am', 'Review correction']);
+      yield* f.git(['rebase', 'main']);
+      const rebased = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
+      const request = {
+        phaseId: 'one',
+        snapshotId: 'recovered',
+        previous: prior.snapshotId,
+        acceptedHead: rebased,
+        supersedeUnreviewed: true,
+        recoverUnreviewedRebase: true,
+        reason: 'Recover corrected source after the authorized rebase.',
+        userAuthority: 'Rebase the approved feature onto updated main.',
+      };
+      const beforeRefusal = yield* f.fs.readFileString(f.statePath());
+      const refused = yield* f.mutate('snapshot', {...request, userAuthority: ''}).pipe(Effect.result);
+      expect(refused).toMatchObject({failure: {code: 'invalid-request'}});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeRefusal);
+      const recovered = yield* Schema.decodeUnknownEffect(NativeCycleSnapshotSchema)(
+        object((yield* f.mutate('snapshot', request)).snapshot).snapshot,
+      );
+      expect(recovered).toMatchObject({
+        supersedes: prior.snapshotId,
+        baseTree: prior.baseTree,
+        head: rebased,
+        unreviewedSupersession: {
+          rebaseRecovery: {
+            priorHead: prior.head,
+            priorBaseHead: prior.declaredBaseHead,
+            authority: request.userAuthority,
+          },
+        },
+      });
+      const pending = decodeNativeCycleRuntime(JSON.parse(yield* f.fs.readFileString(f.statePath())).cycle);
+      expect(pending.snapshots[0]).toEqual(before.snapshots[0]);
+      expect(pending.baselines).toEqual(before.baselines);
+      expect(pending.attempts).toEqual(before.attempts);
+      expect(pending.reviewLimits).toEqual(before.reviewLimits);
+      expect(pending.reviews).toEqual([]);
+      const recoveryEntry = pending.snapshots[1];
+      const storedRecovery = recoveryEntry.snapshot.unreviewedSupersession!;
+      expect(() =>
+        decodeNativeCycleRuntime({
+          ...pending,
+          snapshots: [
+            pending.snapshots[0],
+            {
+              ...recoveryEntry,
+              snapshot: {
+                ...recoveryEntry.snapshot,
+                unreviewedSupersession: {
+                  ...storedRecovery,
+                  rebaseRecovery: {
+                    ...storedRecovery.rebaseRecovery!,
+                    authority: 'Altered authority without matching the retained receipt.',
+                  },
+                },
+              },
+            },
+          ],
+        }),
+      ).toThrow();
+
+      expect(yield* f.mutate('snapshot', request)).toMatchObject({status: 'ok'});
+      const full = {...report(recovered, 'full'), findings: []};
+      yield* f.mutate('validate-review', {
+        snapshotId: recovered.snapshotId,
+        attemptId: 'recovery-review',
+        report: full,
+      });
+      const after = decodeNativeCycleRuntime(JSON.parse(yield* f.fs.readFileString(f.statePath())).cycle);
+      expect(after.reviews).toHaveLength(1);
+      expect(after.reviews[0].report.mode).toBe('full');
+      yield* f.git(['reflog', 'expire', '--expire=now', '--all']);
+      yield* f.git(['gc', '--prune=now']);
+      expect(EffectString.trim((yield* f.git(['rev-parse', prior.comparisonEvidence!.sourceRef])).stdout)).toBe(
+        prior.head,
+      );
+      expect(EffectString.trim((yield* f.git(['rev-parse', prior.comparisonEvidence!.baseRef])).stdout)).toBe(
+        prior.declaredBaseHead,
+      );
+      const legacy = {...prior, comparisonEvidence: undefined};
+      yield* verifyNativeCycleSnapshotEvidence(f.repo, legacy);
+      yield* f.git(['update-ref', '-d', prior.comparisonEvidence!.sourceRef]);
+      yield* f.git(['update-ref', '-d', 'ORIG_HEAD']);
+      yield* f.git(['reflog', 'expire', '--expire=now', '--all']);
+      yield* f.git(['gc', '--prune=now']);
+      expect(yield* verifyNativeCycleSnapshotEvidence(f.repo, legacy).pipe(Effect.result)).toMatchObject({
+        failure: {code: 'snapshot-evidence-unavailable'},
+      });
+    }).pipe(run),
+  );
+
   effectIt.effect(
     'preserves the run and ledger while requiring a full new-base review and subsequent incremental deltas',
     () =>
@@ -144,7 +262,7 @@ describe('native cycle approved base requalification', () => {
         for (const command of ['ready', 'check-phase', 'validate-review']) {
           refused(
             yield* f.mutate(command, {phaseId: 'one', snapshotId: f.prior.snapshotId}).pipe(Effect.result),
-            'review-stale',
+            command === 'validate-review' ? 'source-drift' : 'review-stale',
           );
           expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
         }
@@ -209,7 +327,7 @@ describe('native cycle approved base requalification', () => {
         const commandExecutor = yield* CommandExecutor;
         const executeBytes = commandExecutor.executeBytes;
         if (!executeBytes) return yield* Effect.die('Expected binary Git boundary');
-        for (const command of ['ready', 'validate-review']) {
+        for (const command of ['ready']) {
           let moved = false;
           const result = yield* f.mutate(command, {phaseId: 'one', snapshotId: snapshot.snapshotId}).pipe(
             Effect.provideService(
@@ -314,14 +432,18 @@ describe('native cycle approved base requalification', () => {
   );
 
   effectIt.effect(
-    'refuses initial base requalification when the prior base ref is missing without mutating the run',
+    'requalifies from retained comparison evidence when the historical base label is deleted',
     () =>
       Effect.gen(function* () {
         const f = yield* qualifyFixture();
         const before = yield* f.fs.readFileString(f.statePath());
         yield* f.git(['branch', '-D', 'prerelease']);
-        refused(yield* f.capture().pipe(Effect.result), 'invalid-base-requalification');
-        expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
+        const snapshot = yield* f.capture();
+        expect(snapshot.baseRequalification?.priorDeclaredBaseHead).toBe(f.prior.declaredBaseHead);
+        const after = decodeNativeCycleRuntime(JSON.parse(yield* f.fs.readFileString(f.statePath())).cycle);
+        const old = decodeNativeCycleRuntime(JSON.parse(before).cycle);
+        expect(after.snapshots[0]).toEqual(old.snapshots[0]);
+        expect(after.reviews).toEqual(old.reviews);
       }).pipe(run),
     {timeout: 60_000},
   );
@@ -333,9 +455,7 @@ describe('native cycle approved base requalification', () => {
         const f = yield* qualifyFixture(true, true);
         const before = yield* f.fs.readFileString(f.statePath());
         yield* f.git(['update-ref', 'refs/heads/prerelease', f.prior.head]);
-        refused(yield* f.capture().pipe(Effect.result), 'invalid-base-requalification');
-        expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
-        yield* f.git(['update-ref', 'refs/heads/prerelease', f.prior.declaredBaseHead]);
+        // The captured base object, rather than this moved label, owns historical proof.
         const incoming = f.path.join(f.repo, 'incoming.ts');
         const original = yield* f.fs.readFileString(incoming);
         yield* f.fs.writeFileString(incoming, 'unowned edit\n');

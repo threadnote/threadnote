@@ -13,6 +13,8 @@ import {
   FixtureStdioTransport,
   runFixtureCommand,
   reconcileFixturePipelineReceipts,
+  runFixtureEmbeddingExitProbe,
+  diagnoseFixtureEmbeddingFailure,
   type FixtureCommandStage,
 } from './fixture-owned-process.js';
 import {fixtureCleanup, fixtureLifecycle, fixtureRemovalDeadline} from './fixture-lifecycle.js';
@@ -79,6 +81,7 @@ const smokeSelfContained = Effect.scoped(
       version: packageManifest.version,
     });
     const processes = new FixtureProcesses(undefined, deadline, monotonicDeadline);
+    let embeddingProbe: Awaited<ReturnType<typeof runFixtureEmbeddingExitProbe>> | undefined;
     const body = Effect.gen(function* () {
       if (
         (yield* fs.realPath(executable)) !== candidate ||
@@ -113,7 +116,11 @@ const smokeSelfContained = Effect.scoped(
         USER: 'standalone-smoke',
         USERPROFILE: userHome,
       };
-      const run = (stage: FixtureCommandStage, arguments_: readonly string[]) =>
+      const run = (
+        stage: FixtureCommandStage,
+        arguments_: readonly string[],
+        commandDeadline = Math.min(bodyDeadline, performance.now() + COMMAND_TIMEOUT_MILLISECONDS),
+      ) =>
         Effect.tryPromise({
           try: () =>
             runFixtureCommand(processes, candidate, arguments_, {
@@ -121,7 +128,7 @@ const smokeSelfContained = Effect.scoped(
               cwd: invocationDirectory,
               env: environment,
               maxOutputBytes: 512 * 1024,
-              deadline: Math.min(bodyDeadline, performance.now() + COMMAND_TIMEOUT_MILLISECONDS),
+              deadline: commandDeadline,
             }),
           catch: cause => scriptError(cause, 'Standalone command failed.'),
         }).pipe(Effect.map(result => `${result.stdout}\n${result.stderr}`));
@@ -196,7 +203,28 @@ const smokeSelfContained = Effect.scoped(
 
       // The large-output fixture bypasses canonical writes and changes the indexed
       // body. Prepare its derived state explicitly before later indexed retrieval.
-      yield* run('repair', ['repair', '--core-only', '--no-post-update']);
+      const repairDeadline = Math.min(bodyDeadline, performance.now() + COMMAND_TIMEOUT_MILLISECONDS);
+      yield* run('repair', ['repair', '--core-only', '--no-post-update'], repairDeadline).pipe(
+        Effect.tapError(() =>
+          process.platform === 'win32' && process.arch === 'arm64'
+            ? diagnoseFixtureEmbeddingFailure(processes, candidate, {
+                home: threadnoteHome,
+                storedMemoryPath,
+                cwd: invocationDirectory,
+                env: environment,
+                deadline: repairDeadline,
+                bodyDeadline,
+                maxOutputBytes: 512 * 1024,
+              }).pipe(
+                Effect.tap(probe =>
+                  Effect.sync(() => {
+                    embeddingProbe = probe;
+                  }),
+                ),
+              )
+            : Effect.void,
+        ),
+      );
       const lexicalDatabase = path.join(threadnoteHome, 'indexes', 'lexical', recallIndexDatabaseFilename(false));
       const lexicalInfo = yield* fs.stat(lexicalDatabase);
       if (lexicalInfo.type !== 'File' || lexicalInfo.size <= 0) {
@@ -258,6 +286,12 @@ const smokeSelfContained = Effect.scoped(
         }),
       ),
       cleanup,
+    ).pipe(
+      Effect.onExit(() =>
+        embeddingProbe
+          ? Console.error(`Standalone model worker probe: ${JSON.stringify(embeddingProbe.snapshot())}`)
+          : Effect.void,
+      ),
     );
     yield* fixtureRemovalDeadline(remaining);
     yield* Console.log(

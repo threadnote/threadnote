@@ -1,5 +1,22 @@
 import {it as effectIt} from '@effect/vitest';
-import {Effect, Array as EffectArray} from 'effect';
+import {
+  Effect,
+  Array as EffectArray,
+  Option,
+  FileSystem,
+  Path,
+  Layer,
+  Result,
+  Deferred,
+  Fiber,
+  Exit,
+  Cause,
+} from 'effect';
+import * as TestClock from 'effect/testing/TestClock';
+import * as BunServices from '@effect/platform-bun/BunServices';
+import {cryptoLayer} from '@threadnote/platform/crypto';
+import {captureConsole} from '@threadnote/threadnote/effect/console';
+import {provideTestLayer} from '../helpers/effect-layer.js';
 import {EventEmitter} from 'node:events';
 import {PassThrough} from '@threadnote/testing/node-stream';
 import {expect, it, vi} from 'vitest';
@@ -11,7 +28,10 @@ import {
   FixtureStdioTransport,
   runFixtureCommand,
   reconcileFixturePipelineReceipts,
+  runFixtureEmbeddingExitProbe,
+  diagnoseFixtureEmbeddingFailure,
 } from '../../../../scripts/fixture-owned-process.js';
+import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
 
 function commandChild() {
   return Object.assign(new EventEmitter(), {
@@ -24,6 +44,316 @@ function commandChild() {
     },
   });
 }
+
+function embeddingProbeChild(onWrite: (text: string) => void) {
+  const io = commandChild();
+  const stopped = Promise.withResolvers<number>();
+  let signal: NodeJS.Signals | number | null = null;
+  let kills = 0,
+    ends = 0;
+  const fixture = {
+    io,
+    writeBytes: undefined as number | undefined,
+    onEnd: () => {},
+    get kills() {
+      return kills;
+    },
+    get ends() {
+      return ends;
+    },
+    exit(code: number, exitSignal: NodeJS.Signals | number | null = null) {
+      signal = exitSignal;
+      io.stdout.end();
+      io.stderr.end();
+      stopped.resolve(code);
+    },
+    child: {
+      stdout: io.stdout,
+      stderr: io.stderr,
+      exited: stopped.promise,
+      get signalCode() {
+        return signal;
+      },
+      stdin: {
+        write: (text: string) => {
+          onWrite(text);
+          return fixture.writeBytes ?? Buffer.byteLength(text);
+        },
+        flush: () => 0,
+        end: () => {
+          ends++;
+          fixture.onEnd();
+        },
+      },
+      kill: () => {
+        kills++;
+        fixture.exit(137, 'SIGKILL');
+      },
+      unref: () => {},
+    },
+  };
+  return fixture;
+}
+
+const probeManifest = Option.getOrUndefined(
+  EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.id === 'bge-small-en-v1.5-q8'),
+)!;
+const probeRequest = {
+  inputs: new Array<string>(32).fill(EffectString.repeat(2400)('x')),
+  manifest: probeManifest,
+  modelPath: 'PRIVATE_MODEL_PATH',
+};
+
+const probeSetupLayer = Layer.merge(BunServices.layer, cryptoLayer);
+const probeSetupFixture = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-probe-setup-'});
+  const modelPath = path.join(home, 'models', probeManifest.role, probeManifest.id, `${probeManifest.sha256}.gguf`);
+  yield* fs.makeDirectory(path.dirname(modelPath), {recursive: true});
+  yield* fs.writeFileString(modelPath, 'short');
+  return {
+    fs,
+    modelPath,
+    options: {
+      home,
+      storedMemoryPath: path.join(home, 'synthetic.md'),
+      cwd: home,
+      env: {},
+      deadline: 100,
+      bodyDeadline: 200,
+      maxOutputBytes: 512 * 1024,
+    },
+  };
+});
+
+effectIt.effect('diagnostic setup guards preserve the original repair failure', () =>
+  Effect.gen(function* () {
+    const fixture = yield* probeSetupFixture;
+    const processes = new FixtureProcesses();
+    const remaining = vi.spyOn(processes, 'remaining').mockReturnValue(10000);
+    const original = new Error('original repair failure');
+    const observed = yield* captureConsole(
+      Effect.fail(original).pipe(
+        Effect.tapError(() => diagnoseFixtureEmbeddingFailure(processes, 'unused', fixture.options)),
+        Effect.result,
+      ),
+    ).pipe(Effect.ensuring(Effect.sync(() => remaining.mockRestore())));
+    expect(Result.isFailure(observed.value)).toBe(true);
+    if (Result.isFailure(observed.value)) expect(observed.value.failure).toBe(original);
+    expect(observed.output).toBe('Standalone model worker probe: {"outcome":"setup-unavailable"}');
+    expect(processes.registry.seal()).toEqual([]);
+  }).pipe(provideTestLayer(probeSetupLayer)),
+);
+
+effectIt.effect(
+  'model setup uses only the remaining original deadline and preserves the repair failure on timeout',
+  () =>
+    Effect.gen(function* () {
+      const fixture = yield* probeSetupFixture;
+      const entered = yield* Deferred.make<void>();
+      const processes = new FixtureProcesses();
+      const remaining = vi.spyOn(processes, 'remaining').mockReturnValue(5);
+      const blocked = FileSystem.FileSystem.of({
+        ...fixture.fs,
+        stat: file =>
+          file === fixture.modelPath
+            ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never))
+            : fixture.fs.stat(file),
+      });
+      const original = new Error('original repair failure');
+      const observed = yield* captureConsole(
+        Effect.gen(function* () {
+          const reader = yield* Effect.fail(original).pipe(
+            Effect.tapError(() => diagnoseFixtureEmbeddingFailure(processes, 'unused', fixture.options)),
+            Effect.result,
+            Effect.forkScoped,
+          );
+          yield* Deferred.await(entered);
+          yield* TestClock.adjust('4 millis');
+          expect(reader.pollUnsafe()).toBeUndefined();
+          yield* TestClock.adjust('1 millis');
+          return yield* Fiber.join(reader);
+        }),
+      ).pipe(
+        Effect.provideService(FileSystem.FileSystem, blocked),
+        Effect.ensuring(Effect.sync(() => remaining.mockRestore())),
+      );
+      expect(Result.isFailure(observed.value)).toBe(true);
+      if (Result.isFailure(observed.value)) expect(observed.value.failure).toBe(original);
+      expect(observed.output).toBe('Standalone model worker probe: {"outcome":"setup-unavailable"}');
+      expect(processes.registry.seal()).toEqual([]);
+    }).pipe(provideTestLayer(probeSetupLayer)),
+);
+
+effectIt.effect('external interruption of setup is not swallowed as a diagnostic setup failure', () =>
+  Effect.gen(function* () {
+    const fixture = yield* probeSetupFixture;
+    const entered = yield* Deferred.make<void>();
+    const processes = new FixtureProcesses();
+    const remaining = vi.spyOn(processes, 'remaining').mockReturnValue(10000);
+    const blocked = FileSystem.FileSystem.of({
+      ...fixture.fs,
+      stat: file =>
+        file === fixture.modelPath
+          ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never))
+          : fixture.fs.stat(file),
+    });
+    const observed = yield* captureConsole(
+      Effect.gen(function* () {
+        const reader = yield* diagnoseFixtureEmbeddingFailure(processes, 'unused', fixture.options).pipe(
+          Effect.forkScoped,
+        );
+        yield* Deferred.await(entered);
+        yield* Fiber.interrupt(reader);
+        return yield* Fiber.await(reader);
+      }),
+    ).pipe(
+      Effect.provideService(FileSystem.FileSystem, blocked),
+      Effect.ensuring(Effect.sync(() => remaining.mockRestore())),
+    );
+    expect(Exit.isFailure(observed.value)).toBe(true);
+    if (Exit.isFailure(observed.value)) expect(Cause.hasInterruptsOnly(observed.value.cause)).toBe(true);
+    expect(observed.output).toBe('');
+    expect(processes.registry.seal()).toEqual([]);
+  }).pipe(provideTestLayer(probeSetupLayer)),
+);
+
+it('basic probe setup binds one reply and labels exit after requested stdin close', async () => {
+  let spawns = 0;
+  const fake = embeddingProbeChild(text => {
+    const value: unknown = JSON.parse(text);
+    if (typeof value !== 'object' || value === null || !('id' in value)) throw new Error('Invalid test request');
+    fake.io.stdout.end(
+      `${JSON.stringify({
+        id: value.id,
+        protocol: 1,
+        ok: true,
+        result: EffectArray.map(probeRequest.inputs, () => new Array<number>(384).fill(0)),
+      })}\n`,
+    );
+    fake.io.stderr.end();
+  });
+  fake.onEnd = () => fake.exit(0);
+  const processes = new FixtureProcesses();
+  const result = await runFixtureEmbeddingExitProbe(processes, 'PRIVATE_EXECUTABLE', probeRequest, {
+    cwd: 'PRIVATE_PATH',
+    env: {PRIVATE_ENV: 'PRIVATE_VALUE'},
+    deadline: performance.now() + 1000,
+    maxOutputBytes: 512 * 1024,
+    spawn: () => {
+      spawns++;
+      return fake.child;
+    },
+  });
+  expect(result.snapshot()).toMatchObject({
+    outcome: 'reply',
+    reply: 'valid',
+    write: 'returned',
+    flush: 'complete',
+    exitOrigin: 'stdin-close-requested',
+    exit: {exitCode: 0, signal: null},
+    processClosed: true,
+    cleanupRequested: false,
+  });
+  expect(spawns).toBe(1);
+  expect(fake.kills).toBe(0);
+  expect(await processes.closeAndObserve(performance.now() + 1000)).toBe('exited');
+  expect(JSON.stringify(result.snapshot())).not.toContain('PRIVATE_');
+});
+
+it('holds stdin open after EOF and retains independently observed natural exit and sink facts', async () => {
+  const sent = Promise.withResolvers<void>();
+  const fake = embeddingProbeChild(() => {
+    fake.io.stdout.end();
+    fake.io.stderr.end();
+    sent.resolve();
+  });
+  fake.writeBytes = 65_536;
+  const processes = new FixtureProcesses();
+  const pending = runFixtureEmbeddingExitProbe(processes, 'PRIVATE_EXECUTABLE', probeRequest, {
+    cwd: 'PRIVATE_PATH',
+    env: {},
+    deadline: performance.now() + 1000,
+    maxOutputBytes: 512 * 1024,
+    spawn: () => fake.child,
+  });
+  await sent.promise;
+  await Promise.resolve();
+  expect(fake.ends).toBe(0);
+  expect(fake.kills).toBe(0);
+  fake.exit(3221225477, 'SIGABRT');
+  const result = await pending;
+  expect(result.snapshot()).toMatchObject({
+    outcome: 'exit',
+    firstFault: 'stdout-eof',
+    reply: 'none',
+    write: 'returned',
+    writeBytes: 65_536,
+    flush: 'complete',
+    flushBytes: 0,
+    exitOrigin: 'natural',
+    exit: {exitCode: 3221225477, signal: 'SIGABRT'},
+    processClosed: true,
+    cleanupRequested: false,
+  });
+  expect(result.snapshot().requestBytes).toBeGreaterThan(65_536);
+  expect(await processes.closeAndObserve(performance.now() + 1000)).toBe('exited');
+});
+
+it('keeps deadline cleanup exit separate from natural exit after EOF', async () => {
+  vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout', 'performance']});
+  try {
+    const fake = embeddingProbeChild(() => {
+      fake.io.stdout.end();
+      fake.io.stderr.end();
+    });
+    const processes = new FixtureProcesses();
+    const pending = runFixtureEmbeddingExitProbe(processes, 'PRIVATE_EXECUTABLE', probeRequest, {
+      cwd: 'PRIVATE_PATH',
+      env: {},
+      deadline: performance.now() + 10,
+      maxOutputBytes: 512 * 1024,
+      spawn: () => fake.child,
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    const result = await pending;
+    expect(await processes.closeAndObserve(performance.now() + 100)).toBe('exited');
+    expect(result.snapshot()).toMatchObject({
+      outcome: 'deadline',
+      firstFault: 'stdout-eof',
+      cleanupRequested: true,
+      exitOrigin: 'cleanup',
+      exit: {exitCode: 137, signal: 'SIGKILL'},
+      processClosed: true,
+    });
+    expect(fake.kills).toBe(1);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('bounds probe output, preserves privacy and confirms the registered producer after cleanup', async () => {
+  const fake = embeddingProbeChild(() => fake.io.stdout.write(EffectString.repeat(40_000)('PRIVATE_OUTPUT')));
+  const processes = new FixtureProcesses();
+  const result = await runFixtureEmbeddingExitProbe(processes, 'PRIVATE_EXECUTABLE', probeRequest, {
+    cwd: 'PRIVATE_PATH',
+    env: {},
+    deadline: performance.now() + 1000,
+    maxOutputBytes: 512 * 1024,
+    spawn: () => fake.child,
+  });
+  expect(await processes.closeAndObserve(performance.now() + 1000)).toBe('exited');
+  expect(result.snapshot()).toMatchObject({
+    outcome: 'output-overflow',
+    firstFault: 'output-overflow',
+    stdoutBytes: 512 * 1024 + 1,
+    cleanupRequested: true,
+    exitOrigin: 'cleanup',
+    processClosed: true,
+  });
+  expect(JSON.stringify(result.snapshot())).not.toContain('PRIVATE_');
+});
 
 function commandFailureDetails(outcome: unknown): unknown {
   if (!(outcome instanceof Error)) throw new Error('Expected a fixture command failure.');

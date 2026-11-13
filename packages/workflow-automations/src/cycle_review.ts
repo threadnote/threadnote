@@ -47,6 +47,26 @@ const baseRequalificationReceipt = Schema.Struct({
   ),
 });
 
+const retainedCommitRef = Schema.String.check(
+  Schema.isPattern(/^refs\/threadnote\/cycles\/(?:snapshot-head|snapshot-base|merge-head|merge-base)\/[a-f0-9]{64}$/u),
+);
+const comparisonEvidence = Schema.Struct({
+  version: Schema.Literal(1),
+  baseBranch: text(),
+  baseTree: gitObject,
+  sourceRef: retainedCommitRef,
+  baseRef: retainedCommitRef,
+});
+const unreviewedRebaseRecovery = Schema.Struct({
+  version: Schema.Literal(1),
+  priorHead: gitObject,
+  priorBaseHead: gitObject,
+  fromBaseBranch: text(),
+  toBaseBranch: text(),
+  authority: text(),
+  receiptDigest: digest,
+});
+
 export const NativeCycleSnapshotSchema = Schema.Struct({
   format: Schema.Literal('threadnote-native-cycle-snapshot'),
   version: Schema.Literals([1, 2]),
@@ -63,7 +83,13 @@ export const NativeCycleSnapshotSchema = Schema.Struct({
   previous: Schema.optionalKey(id),
   supersedes: Schema.optionalKey(id),
   previousTree: Schema.optionalKey(gitObject),
-  unreviewedSupersession: Schema.optionalKey(Schema.Struct({reason: text()})),
+  comparisonEvidence: Schema.optionalKey(comparisonEvidence),
+  unreviewedSupersession: Schema.optionalKey(
+    Schema.Struct({
+      reason: text(),
+      rebaseRecovery: Schema.optionalKey(unreviewedRebaseRecovery),
+    }),
+  ),
   acceptedHead: Schema.optionalKey(gitObject),
   baseRequalification: Schema.optionalKey(baseRequalificationReceipt),
   ordinaryMergeQualificationV1: Schema.optionalKey(NativeCycleOrdinaryMergeReceiptSchema),
@@ -119,6 +145,35 @@ export function nativeCycleBaseRequalificationReceiptDigest(
       receipt.beforeRef,
       receipt.afterRef,
       receipt.priorBaseRef,
+    ]),
+  );
+}
+
+export function nativeCycleUnreviewedRecoveryDigest(snapshot: NativeCycleSnapshot): string {
+  const recovery = snapshot.unreviewedSupersession?.rebaseRecovery;
+  return sha256HexSync(
+    JSON.stringify([
+      'threadnote-unreviewed-rebase-recovery-v1',
+      snapshot.snapshotId,
+      snapshot.phaseId,
+      snapshot.phaseHash,
+      snapshot.repo,
+      snapshot.head,
+      snapshot.tree,
+      snapshot.baseTree,
+      snapshot.scopeBase,
+      snapshot.declaredBaseHead,
+      snapshot.files,
+      snapshot.scopeFiles,
+      snapshot.supersedes,
+      snapshot.acceptedHead,
+      snapshot.comparisonEvidence,
+      snapshot.unreviewedSupersession?.reason,
+      recovery?.priorHead,
+      recovery?.priorBaseHead,
+      recovery?.fromBaseBranch,
+      recovery?.toBaseBranch,
+      recovery?.authority,
     ]),
   );
 }

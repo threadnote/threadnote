@@ -492,6 +492,11 @@ describe('ordinary merge native qualification', () => {
         const snapshot = yield* f.capture();
         const proof = snapshot.ordinaryMergeQualificationV1!;
         expect(snapshot.version).toBe(2);
+        expect(snapshot.comparisonEvidence).toMatchObject({
+          sourceRef: proof.currentHeadRef,
+          baseRef: proof.currentBaseRef,
+          baseTree: proof.currentBaseTree,
+        });
         expect(snapshot.files).toHaveLength(295);
         expect(snapshot.scopeFiles).toHaveLength(179);
         expect(proof.upstreamEvidence).toHaveLength(116);

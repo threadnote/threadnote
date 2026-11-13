@@ -15,7 +15,7 @@ import {describe, expect, it} from 'vitest';
 
 import fc from 'fast-check';
 
-import {runCommandEffect} from '@threadnote/platform/command';
+import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
 
 import {decodeNativeCyclePlan} from '@threadnote/workflow-automations/cycle';
 
@@ -49,6 +49,67 @@ import {runCloseout} from './native-closeout-diagnostics.js';
 import {assertOwnedState, commandResult, object, proposalFor} from './native-closeout-lifecycle-fixture.js';
 
 type CloseoutFixture = Effect.Success<ReturnType<typeof nativeCloseoutFixture>>;
+
+// Closeout cases exercise existing delivery state, with a deterministic provider boundary for new writes.
+const verifiedFixtureDelivery = <A, E, R>(
+  f: CloseoutFixture,
+  fields: Record<string, unknown>,
+  perform: (input: Record<string, unknown>) => Effect.Effect<A, E, R>,
+) =>
+  Effect.gen(function* () {
+    const delivery = object(fields.delivery);
+    const pr = object(delivery.pr);
+    if (typeof fields.phaseId !== 'string') throw new Error('Expected the delivered fixture phase.');
+    const stored = yield* readNativeWorkflowState(f.config, f.controllerRunId);
+    const existing = stored?.state.cycle?.state.phases[fields.phaseId]?.delivery;
+    const identity = {
+      url: String(pr.url),
+      number: Number(EffectString.split(String(pr.url), '/').at(-1)),
+      baseRepository: 'example/private-fixture',
+      headRepository: 'example/private-fixture',
+      baseBranch: String(pr.baseBranch),
+      headBranch: String(pr.branch),
+      headSha: String(pr.headSha),
+      state: pr.state === 'merged' ? 'merged' : 'open',
+    };
+    const admitted = existing
+      ? delivery
+      : {
+          ...delivery,
+          userAuthority: 'The fixture user approved delivery of this exact repaired source.',
+          providerIdentity: identity,
+        };
+    const executor = yield* CommandExecutor;
+    const provider = CommandExecutor.of({
+      ...executor,
+      execute: (executable, args, options) => {
+        // Scope remote metadata to the verifier so unrelated code citations retain their fixture identity.
+        if (executable === 'git' && args.includes('--no-optional-locks')) {
+          const stdout =
+            args.at(-1) === 'remote'
+              ? 'origin'
+              : args.at(-1) === 'origin'
+                ? 'https://github.com/example/private-fixture.git'
+                : args.at(-1) === 'remote.origin.fetch'
+                  ? '+refs/heads/*:refs/remotes/origin/*'
+                  : undefined;
+          if (stdout !== undefined) return Effect.succeed({exitCode: 0, stderr: '', stdout});
+        }
+        return executable === 'gh' && args.includes('--jq')
+          ? Effect.succeed({
+              exitCode: 0,
+              stderr: '',
+              stdout: JSON.stringify({
+                ...identity,
+                state: pr.state === 'merged' ? 'closed' : 'open',
+                merged: pr.state === 'merged',
+              }),
+            })
+          : executor.execute(executable, args, options);
+      },
+    });
+    return yield* perform({...fields, delivery: admitted}).pipe(Effect.provideService(CommandExecutor, provider));
+  });
 
 const snapshotAuthoringStores = (f: CloseoutFixture) =>
   Effect.gen(function* () {
@@ -201,10 +262,13 @@ describe('native closeout lifecycle', () => {
     () =>
       Effect.gen(function* () {
         const f = yield* nativeCloseoutFixture(false, 'desktop', 'controller', 'pr');
-        const cycle = (command: string, fields: Record<string, unknown> = {}) =>
-          f
-            .call({...f.base('cycle', f.controllerRunId), command, ...fields})
-            .pipe(Effect.map(value => object(object(value).cycle)));
+        const cycle = (command: string, fields: Record<string, unknown> = {}) => {
+          const perform = (input: Record<string, unknown>) =>
+            f
+              .call({...f.base('cycle', f.controllerRunId), command, ...input})
+              .pipe(Effect.map(value => object(object(value).cycle)));
+          return command === 'record-delivery' ? verifiedFixtureDelivery(f, fields, perform) : perform(fields);
+        };
         const mutateCycle = (command: string, fields: Record<string, unknown> = {}) =>
           Effect.gen(function* () {
             const inspected = object(yield* cycle('inspect'));
@@ -527,10 +591,13 @@ describe('native closeout lifecycle', () => {
         if (Result.isFailure(stale)) expect(object(stale.failure).code).toBe('closeout-acceptance-stale');
         const before = yield* readNativeWorkflowState(f.config, f.controllerRunId);
         if (!before?.state.cycle) throw new Error('Expected controller cycle.');
-        const cycle = (command: string, fields: Record<string, unknown> = {}) =>
-          f
-            .call({...f.base('cycle', f.controllerRunId), command, ...fields})
-            .pipe(Effect.map(value => object(object(value).cycle)));
+        const cycle = (command: string, fields: Record<string, unknown> = {}) => {
+          const perform = (input: Record<string, unknown>) =>
+            f
+              .call({...f.base('cycle', f.controllerRunId), command, ...input})
+              .pipe(Effect.map(value => object(object(value).cycle)));
+          return command === 'record-delivery' ? verifiedFixtureDelivery(f, fields, perform) : perform(fields);
+        };
         const mutateCycle = (command: string, fields: Record<string, unknown> = {}) =>
           Effect.gen(function* () {
             const inspected = object(yield* cycle('inspect'));

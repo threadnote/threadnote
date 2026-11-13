@@ -1,6 +1,18 @@
 import {it as effectIt} from '@effect/vitest';
 import {Database} from 'bun:sqlite';
-import {Array as EffectArray, Clock, Duration, Effect, Fiber, FileSystem, Option, Path, Schema} from 'effect';
+import {
+  Array as EffectArray,
+  Clock,
+  Console,
+  Duration,
+  Effect,
+  Fiber,
+  FileSystem,
+  Option,
+  Path,
+  Schema,
+  String as EffectString,
+} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {formatMemoryDocument} from '@threadnote/memory/document';
@@ -16,7 +28,11 @@ import {
   recallVectorStorage,
   readSelectedSemanticVectorState,
 } from '@threadnote/recall/vector-index';
-import {loadNativeVectorReader} from '@threadnote/recall/vector/native-reader-payload';
+import {
+  loadNativeVectorReader,
+  nativeVectorReaderHostProfile,
+  verifyNativeVectorReaderPayload,
+} from '@threadnote/recall/vector/native-reader-payload';
 import {deriveRecallEligibilityPolicy} from '@threadnote/recall/eligibility';
 import {
   recallVectorQueryStateSchema,
@@ -38,6 +54,9 @@ import {
   serializeExternalDocumentManifest,
 } from '@threadnote/store/external-resource';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import {sha256FileHex} from '@threadnote/platform/digest';
+import {getThreadnoteVersion} from '@threadnote/workspace/runtime-version';
+import {runtimeSourceIdentity} from '../../../../scripts/runtime-source-identity.js';
 import {writeSourceConfiguration, sourceConfigurationFingerprint} from '../../src/integrations/config.js';
 import {captureConsole} from '../../src/effect/console.js';
 import {withProductionLogging, productionLogSupportExcerpt} from '../../src/effect/production_log.js';
@@ -46,7 +65,7 @@ import * as SqlClient from 'effect/sql/SqlClient';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import fc from 'fast-check';
 
-import {nativeVectorTestsEnabled} from '@threadnote/testing/native-vector-fixture';
+import {nativeVectorTestsEnabled, nativeVectorTestsRequired} from '@threadnote/testing/native-vector-fixture';
 const manifest = Option.getOrThrow(
   EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, value => value.id === 'bge-small-en-v1.5-q8'),
 );
@@ -123,13 +142,79 @@ const fixture = Effect.gen(function* () {
   return {fs, path, home, config, uris, files, database, scope, lexical, runtime, store};
 });
 
+const productionReadyWorker = (f: Pick<Effect.Success<typeof fixture>, 'fs' | 'path' | 'home'>) =>
+  Effect.gen(function* () {
+    const system = yield* SystemInfo;
+    const command = yield* CommandExecutor;
+    const expectedVersion = yield* getThreadnoteVersion();
+    const root = Bun.fileURLToPath(new URL('../../../../', import.meta.url));
+    const distribution = f.path.join(root, 'dist');
+    const release = yield* Schema.decodeEffect(
+      Schema.fromJsonString(
+        Schema.Struct({
+          executable: Schema.String,
+          runtime: Schema.String,
+          target: Schema.String,
+          version: Schema.String,
+          sourceIdentity: Schema.Unknown,
+        }),
+      ),
+    )(yield* f.fs.readFileString(f.path.join(distribution, 'release.json')));
+    if (release.version !== expectedVersion)
+      return yield* TestError.make({message: 'Compiled native worker release differs from the current version.'});
+    const manifestPath = f.path.join(distribution, 'runtime', 'vector-reader', 'manifest.json');
+    const configuredManifest = system.environment().THREADNOTE_NATIVE_VECTOR_READER_MANIFEST;
+    if (!configuredManifest || (yield* f.fs.realPath(configuredManifest)) !== (yield* f.fs.realPath(manifestPath)))
+      return yield* TestError.make({message: 'Required native worker must use its compiled distribution payload.'});
+    const native = yield* Effect.tryPromise({
+      try: () => verifyNativeVectorReaderPayload(manifestPath),
+      catch: cause => TestError.make({message: 'Compiled native worker payload validation failed.', cause}),
+    });
+    expect(native.development).toBe(false);
+    expect(native.bunTarget).toBe(nativeVectorReaderHostProfile(system));
+    expect(release.target).toBe(native.bunTarget);
+    expect(release.runtime).toBe(`bun-${Bun.version}`);
+    const identity = yield* runtimeSourceIdentity(root, release.target);
+    if (!identity) return yield* TestError.make({message: 'Compiled native worker needs a clean source identity.'});
+    expect(release.sourceIdentity).toEqual(identity);
+    expect(native.buildInfo.sourceCommit).toBe(identity.commit);
+    expect(native.buildInfo.sourceTree).toBe(identity.tree);
+    expect(f.path.basename(release.executable)).toBe(release.executable);
+    const executable = yield* f.fs.realPath(f.path.join(distribution, release.executable));
+    expect(f.path.dirname(executable)).toBe(yield* f.fs.realPath(distribution));
+    const stat = yield* f.fs.stat(executable);
+    expect(stat.type).toBe('File');
+    const selected = {...system, executablePath: executable};
+    expect(readyReadWorkerInvocation(selected.executablePath, selected.developmentEntrypoint)).toEqual({
+      executable,
+      arguments: [RECALL_READY_READ_WORKER_ARGUMENT],
+    });
+    const version = yield* command.execute(executable, ['--home', f.home, '--version'], {
+      env: {...system.environment(), THREADNOTE_HOME: f.home},
+      timeoutMs: 5000,
+      maxOutputBytes: 16 * 1024,
+      forceKillAfterMilliseconds: 0,
+      verifyOwnedProcessExit: system.platform === 'win32' ? 'leader' : 'group',
+    });
+    expect(EffectString.trim(version.stdout)).toBe(`threadnote v${expectedVersion}`);
+    return {
+      system: selected,
+      bundleBytes: Number(stat.size),
+      bundleSha256: yield* sha256FileHex(executable),
+    };
+  }).pipe(
+    Effect.timed,
+    Effect.map(([duration, result]) => ({...result, setupMilliseconds: Duration.toMillis(duration)})),
+  );
+
+// Required normal reads execute the already-built production worker. Explicit
+// observed shims and optional development fixtures keep their source entry.
 // Bundle the actual entry once before this example's read deadline. The setup
 // command owns Bun.build's lifetime because its Promise has no cancellation API.
-const bundledReadyWorker = (
-  f: Effect.Success<typeof fixture>,
-  entrypoint = Bun.fileURLToPath(new URL('../../src/recall/ready_read_entry.ts', import.meta.url)),
-) =>
+const bundledReadyWorker = (f: Pick<Effect.Success<typeof fixture>, 'fs' | 'path' | 'home'>, entrypoint?: string) =>
   Effect.gen(function* () {
+    if (entrypoint === undefined && nativeVectorTestsRequired) return yield* productionReadyWorker(f);
+    entrypoint ??= Bun.fileURLToPath(new URL('../../src/recall/ready_read_entry.ts', import.meta.url));
     const system = yield* SystemInfo;
     const command = yield* CommandExecutor;
     const directory = f.path.join(f.home, 'ready-worker-bundle', f.path.basename(entrypoint));
@@ -171,6 +256,49 @@ if (!result.success || result.outputs.length !== 1) throw new Error('Ready worke
       bundleSha256: sha256HexSync(content),
     };
   });
+
+effectIt.effect.skipIf(!nativeVectorTestsRequired)(
+  'refuses a mismatched production worker release before starting a child',
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      let starts = 0;
+      const failure = yield* bundledReadyWorker({
+        fs: {
+          ...fs,
+          readFileString: () =>
+            Effect.succeed(
+              JSON.stringify({
+                executable: 'threadnote',
+                runtime: `bun-${Bun.version}`,
+                target: 'bun-darwin-arm64',
+                version: 'deliberately-invalid-version',
+                sourceIdentity: null,
+              }),
+            ),
+        },
+        path,
+        home: 'unused-no-child',
+      }).pipe(
+        Effect.provideService(
+          CommandExecutor,
+          CommandExecutor.of({
+            execute: () => {
+              starts++;
+              return Effect.die('A mismatched worker must not start.');
+            },
+            executeStreaming: () => Effect.die('Unexpected streaming worker command.'),
+          }),
+        ),
+        Effect.flip,
+      );
+      expect(Schema.is(TestError)(failure) && failure.message).toBe(
+        'Compiled native worker release differs from the current version.',
+      );
+      expect(starts).toBe(0);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+);
 
 const installSynchronousScoringStall = (database: string, stall = true) =>
   Effect.sync(() => {
@@ -360,7 +488,7 @@ describe.skipIf(!nativeVectorTestsEnabled)('bundled native vector capability', (
                         ? {}
                         : {afterCommandMilliseconds: stage.atMilliseconds - commandStartedAt}),
                     })),
-                  });
+                  }).pipe(Effect.provideService(Console.Console, globalThis.console));
                 }),
               ),
             );
@@ -550,7 +678,7 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
                           readOrdinal,
                           timeoutMilliseconds: options?.timeoutMs,
                           completedReadMilliseconds: [...readMilliseconds],
-                        }),
+                        }).pipe(Effect.provideService(Console.Console, globalThis.console)),
                       ),
                     ),
                 }),
@@ -672,7 +800,7 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
                 setupMilliseconds: bundled.setupMilliseconds,
                 bundleBytes: bundled.bundleBytes,
                 bundleSha256: bundled.bundleSha256,
-              }),
+              }).pipe(Effect.provideService(Console.Console, globalThis.console)),
             ),
           );
         expect(result.outcome).toBe('success');

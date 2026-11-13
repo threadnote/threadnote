@@ -1,13 +1,24 @@
 // oxlint-disable-next-line threadnote/no-node-runtime, effecttsgo/node-builtin-import -- Direct child handles and close events are required for fixture-only producer exit proof.
 import {spawn, type ChildProcess} from 'node:child_process';
-import {Array as EffectArray, Option} from 'effect';
+import {Array as EffectArray, Option, Console, Effect, FileSystem, Path} from 'effect';
+import * as EffectString from 'effect/String';
 import {fixturePipelineReceiptProvesExit} from '@threadnote/testing/fixture-pipeline-receipt';
 import {ReadBuffer, serializeMessage} from '@modelcontextprotocol/sdk/shared/stdio.js';
 import type {Transport} from '@modelcontextprotocol/sdk/shared/transport.js';
 import type {JSONRPCMessage} from '@modelcontextprotocol/sdk/types.js';
 import {FixtureProducers, type FixtureProducerObservation} from '@threadnote/testing/fixture-producers';
 import {projectAnonymousTelemetryDiagnostic} from '@threadnote/threadnote/telemetry/diagnostic';
-import {projectLocalModelWorkerExitObservation} from '@threadnote/threadnote/effect/ai/isolated-local-model-runtime';
+import {
+  LOCAL_MODEL_WORKER_ARGUMENT,
+  projectLocalModelWorkerExitObservation,
+} from '@threadnote/threadnote/effect/ai/isolated-local-model-runtime';
+import type {LocalEmbeddingRequest} from '@threadnote/inference/engine/local-model-runtime';
+import {BUILTIN_MODEL_MANIFESTS, CORE_EMBEDDING_MODEL_ID} from '@threadnote/inference/models/builtin';
+import {readModelSelection, selectedEmbeddingModelId} from '@threadnote/inference/models/selection';
+import {indexCandidate} from '@threadnote/recall/index/candidate';
+import {chunksForRecallCandidates} from '@threadnote/recall/vector-index';
+import {sha256Hex} from '@threadnote/platform/digest';
+import {ScriptError} from './effect/errors.js';
 
 interface FixtureChild {
   readonly stdin: ChildProcess['stdin'];
@@ -84,6 +95,323 @@ export class FixtureProcesses {
     }
     return 'unknown';
   }
+}
+
+interface FixtureEmbeddingProbeChild {
+  readonly stdin: {
+    write(text: string): number | Promise<number>;
+    flush(): number | Promise<number>;
+    end(): void | number | Promise<void | number>;
+  };
+  readonly stdout: AsyncIterable<string | Uint8Array>;
+  readonly stderr: AsyncIterable<string | Uint8Array>;
+  readonly exited: Promise<number>;
+  readonly signalCode: NodeJS.Signals | number | null;
+  kill(signal: NodeJS.Signals): void;
+  unref(): void;
+}
+
+/** Expected setup failure is diagnostic only; external interruption still propagates. */
+export const diagnoseFixtureEmbeddingFailure = Effect.fn('fixture.diagnoseEmbeddingFailure')(function* (
+  processes: FixtureProcesses,
+  executable: string,
+  options: {
+    home: string;
+    storedMemoryPath: string;
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+    deadline: number;
+    bodyDeadline: number;
+    maxOutputBytes: number;
+  },
+) {
+  const remaining = processes.remaining(options.deadline);
+  if (options.deadline >= options.bodyDeadline || remaining <= 0) {
+    yield* Console.error('Standalone model worker probe: {"outcome":"no-budget"}');
+    return undefined;
+  }
+  const prepare = Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const manifest = Option.getOrUndefined(
+      EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.id === CORE_EMBEDDING_MODEL_ID),
+    );
+    const selected = selectedEmbeddingModelId(yield* readModelSelection(options.home), 'recall');
+    if (!manifest || (selected !== undefined && selected !== manifest.id))
+      return yield* ScriptError.make({message: 'Probe model selection differs.'});
+    const modelPath = path.join(options.home, 'models', manifest.role, manifest.id, `${manifest.sha256}.gguf`);
+    if (
+      Number((yield* fs.stat(modelPath)).size) !== manifest.size ||
+      (yield* sha256Hex(yield* fs.readFile(modelPath))) !== manifest.sha256
+    )
+      return yield* ScriptError.make({message: 'Probe model is not verified.'});
+    const content = yield* fs.readFileString(options.storedMemoryPath);
+    const inputs = yield* Effect.try({
+      try: () => {
+        const uri = 'threadnote://user/standalone-smoke/memories/durable/projects/threadnote/standalone-bun-smoke.md';
+        const chunks = chunksForRecallCandidates([indexCandidate(uri, content, false)]);
+        // Representative first32 production-chunked synthetic inputs, not a proven failed repair request.
+        return EffectArray.map(
+          chunks.slice(0, 32),
+          chunk => `${manifest.promptPrefixes?.document ?? ''}${chunk.content}`,
+        );
+      },
+      catch: () => ScriptError.make({message: 'Probe synthetic inputs unavailable.'}),
+    });
+    if (inputs.length !== 32) return yield* ScriptError.make({message: 'Probe representative batch unavailable.'});
+    return {inputs, manifest, modelPath};
+  });
+  return yield* prepare.pipe(
+    // This is the remaining original absolute budget, including selection, I/O, hashing and chunking.
+    Effect.timeoutOrElse({
+      duration: Math.max(0, processes.remaining(options.deadline)),
+      orElse: () => ScriptError.make({message: 'Probe setup deadline expired.'}),
+    }),
+    Effect.flatMap(request =>
+      Effect.tryPromise({
+        try: () => runFixtureEmbeddingExitProbe(processes, executable, request, options),
+        catch: () => ScriptError.make({message: 'Probe unavailable.'}),
+      }),
+    ),
+    Effect.catch(() =>
+      Console.error('Standalone model worker probe: {"outcome":"setup-unavailable"}').pipe(Effect.as(undefined)),
+    ),
+  );
+});
+
+/** One failure-only request; the existing registry guards removal until actual exit and pipe closure. */
+export async function runFixtureEmbeddingExitProbe(
+  processes: FixtureProcesses,
+  executable: string,
+  request: LocalEmbeddingRequest,
+  options: {
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+    deadline: number;
+    maxOutputBytes: number;
+    spawn?: () => FixtureEmbeddingProbeChild;
+  },
+) {
+  const id = 'standalone-embedding-exit-probe';
+  const input = `${JSON.stringify({id, protocol: 1, operation: 'embedMany', payload: request})}\n`;
+  const requestBytes = new TextEncoder().encode(input).byteLength;
+  let stdoutBytes = 0,
+    stderrBytes = 0,
+    buffered = '';
+  let writeBytes: number | undefined, flushBytes: number | undefined;
+  let write: 'pending' | 'returned' | 'failed' = 'pending';
+  let flush: 'not-started' | 'pending' | 'complete' | 'failed' = 'not-started';
+  let reply: 'none' | 'valid' | 'worker-error' | 'invalid' = 'none';
+  let firstFault:
+    | 'stdout-eof'
+    | 'stdout-read'
+    | 'stderr-read'
+    | 'write'
+    | 'flush'
+    | 'reply'
+    | 'output-overflow'
+    | 'exit-observation'
+    | 'deadline'
+    | 'spawn'
+    | undefined;
+  let outcome: 'pending' | 'reply' | 'exit' | 'output-overflow' | 'deadline' | 'spawn' | 'no-budget' = 'pending';
+  let inputCloseRequested = false,
+    cleanupRequested = false,
+    processClosed = false,
+    exited = false;
+  let exitOrigin: 'natural' | 'stdin-close-requested' | 'cleanup' | undefined;
+  let exit: ReturnType<typeof projectLocalModelWorkerExitObservation>;
+  const fault = (value: NonNullable<typeof firstFault>) => {
+    firstFault ??= value;
+  };
+  const byteCount = (value: number) =>
+    Number.isInteger(value) && value >= 0 && value <= options.maxOutputBytes ? value : undefined;
+  const snapshot = () => ({
+    outcome,
+    ...(firstFault === undefined ? {} : {firstFault}),
+    requestBytes,
+    inputs: request.inputs.length,
+    write,
+    ...(writeBytes === undefined ? {} : {writeBytes}),
+    flush,
+    ...(flushBytes === undefined ? {} : {flushBytes}),
+    stdoutBytes,
+    stderrBytes,
+    reply,
+    ...(exitOrigin === undefined ? {} : {exitOrigin}),
+    ...(exit === undefined ? {} : {exit}),
+    cleanupRequested,
+    processClosed,
+  });
+  if (processes.remaining(options.deadline) <= 0 || requestBytes > options.maxOutputBytes) {
+    outcome = 'no-budget';
+    return {snapshot};
+  }
+  const observation = processes.registry.register();
+  let child: FixtureEmbeddingProbeChild;
+  try {
+    child =
+      options.spawn?.() ??
+      Bun.spawn({
+        cmd: [executable, LOCAL_MODEL_WORKER_ARGUMENT],
+        cwd: options.cwd,
+        env: options.env,
+        stdin: 'pipe',
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+    observation.spawned();
+  } catch {
+    observation.failed();
+    fault('spawn');
+    outcome = 'spawn';
+    return {snapshot};
+  }
+  const ready = Promise.withResolvers<'reply' | 'exit' | 'output-overflow'>();
+  const observedExit = child.exited.then(
+    code => {
+      exited = true;
+      exitOrigin = cleanupRequested ? 'cleanup' : inputCloseRequested ? 'stdin-close-requested' : 'natural';
+      exit = projectLocalModelWorkerExitObservation({stage: 'process-exit', exitCode: code, signal: child.signalCode});
+      const signal = Option.getOrUndefined(
+        EffectArray.findFirst(FIXTURE_DIAGNOSTIC_SIGNALS, known => known === child.signalCode),
+      );
+      observation.exited(code, signal ?? null);
+      ready.resolve('exit');
+    },
+    () => {
+      observation.failed();
+      fault('exit-observation');
+      ready.resolve('exit');
+    },
+  );
+  const consume = async (stream: AsyncIterable<string | Uint8Array>, isOut: boolean) => {
+    try {
+      for await (const chunk of stream) {
+        const bytes = typeof chunk === 'string' ? new TextEncoder().encode(chunk).byteLength : chunk.byteLength;
+        if (isOut) stdoutBytes = Math.min(options.maxOutputBytes + 1, stdoutBytes + bytes);
+        else stderrBytes = Math.min(options.maxOutputBytes + 1, stderrBytes + bytes);
+        if (stdoutBytes + stderrBytes > options.maxOutputBytes) {
+          fault('output-overflow');
+          ready.resolve('output-overflow');
+          continue;
+        }
+        if (!isOut) continue;
+        buffered += typeof chunk === 'string' ? chunk : decoder.decode(chunk, {stream: true});
+        const newline = Option.getOrUndefined(EffectString.indexOf('\n')(buffered));
+        if (newline === undefined) continue;
+        const line = EffectString.slice(0, newline)(buffered);
+        buffered = EffectString.slice(newline + 1)(buffered);
+        if (!EffectString.trim(line)) continue;
+        if (reply !== 'none') {
+          reply = 'invalid';
+          fault('reply');
+          ready.resolve('reply');
+          continue;
+        }
+        try {
+          const value: unknown = JSON.parse(line);
+          if (
+            typeof value !== 'object' ||
+            value === null ||
+            !('id' in value) ||
+            value.id !== id ||
+            !('protocol' in value) ||
+            value.protocol !== 1 ||
+            !('ok' in value)
+          )
+            reply = 'invalid';
+          else if (value.ok === false) reply = 'worker-error';
+          else if (
+            value.ok === true &&
+            'result' in value &&
+            EffectArray.isArray(value.result) &&
+            value.result.length === request.inputs.length &&
+            EffectArray.every(
+              value.result,
+              vector =>
+                EffectArray.isArray(vector) &&
+                vector.length === request.manifest.dimensions &&
+                EffectArray.every(vector, value => typeof value === 'number' && Number.isFinite(value)),
+            )
+          )
+            reply = 'valid';
+          else reply = 'invalid';
+        } catch {
+          reply = 'invalid';
+        }
+        if (reply !== 'valid') fault('reply');
+        ready.resolve('reply');
+      }
+      if (isOut && reply === 'none') fault('stdout-eof');
+      if (isOut && EffectString.trim(buffered)) {
+        fault('reply');
+        reply = 'invalid';
+      }
+    } catch {
+      fault(isOut ? 'stdout-read' : 'stderr-read');
+    }
+  };
+  const decoder = new TextDecoder();
+  const stdoutClosed = consume(child.stdout, true),
+    stderrClosed = consume(child.stderr, false);
+  const closed = Promise.all([observedExit, stdoutClosed, stderrClosed]).then(() => {
+    processClosed = exited;
+    if (exited) observation.closed();
+  });
+  const writing = (async () => {
+    try {
+      writeBytes = byteCount(await child.stdin.write(input));
+      write = 'returned';
+      flush = 'pending';
+      flushBytes = byteCount(await child.stdin.flush());
+      flush = 'complete';
+    } catch {
+      fault(write === 'returned' ? 'flush' : 'write');
+      if (write === 'returned') flush = 'failed';
+      else write = 'failed';
+    }
+  })();
+  try {
+    await processes.wait(
+      options.deadline,
+      ready.promise.then(() => {}),
+    );
+    outcome = await ready.promise;
+    if (outcome === 'reply') {
+      await processes.wait(options.deadline, writing);
+      inputCloseRequested = true;
+      await processes.wait(
+        options.deadline,
+        Promise.resolve()
+          .then(() => child.stdin.end())
+          .then(() => {}),
+      );
+    }
+    if (outcome !== 'output-overflow') await processes.wait(options.deadline, closed);
+  } catch {
+    fault('deadline');
+    outcome = 'deadline';
+  } finally {
+    if (!inputCloseRequested) {
+      inputCloseRequested = true;
+      void Promise.resolve()
+        .then(() => child.stdin.end())
+        .catch(() => undefined);
+    }
+    if (!processClosed) {
+      cleanupRequested = true;
+      if (!exited) {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          /* Existing registry retains unknown exit. */
+        }
+      }
+      child.unref();
+    }
+  }
+  return {snapshot};
 }
 
 export function fixtureDeadline(remaining: () => number, operation: Promise<void>): Promise<void> {

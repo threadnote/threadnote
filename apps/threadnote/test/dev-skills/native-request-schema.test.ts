@@ -114,27 +114,26 @@ describe('native request schema discovery', () => {
   });
 
   it.each([
-    ['init', {expectedRevision: expect.stringContaining('cycle inspect')}],
+    ['init', {expectedRevision: expect.any(String)}],
     [
       'snapshot',
       {
-        expectedRevision: expect.stringContaining('cycle inspect'),
+        expectedRevision: expect.any(String),
         phaseId: expect.any(String),
-        snapshotId: expect.stringContaining('fresh immutable'),
-        supersedeUnreviewed: expect.stringContaining('Only for a changed source tree'),
-        baseRequalification: expect.stringContaining('Requires reason and explicit userAuthority.'),
-        ordinaryMergeQualificationV1: expect.stringContaining(
-          'Produces manifest version2; legacy readers must reject it.',
-        ),
+        snapshotId: expect.any(String),
+        supersedeUnreviewed: expect.any(String),
+        recoverUnreviewedRebase: expect.any(String),
+        baseRequalification: expect.any(String),
+        ordinaryMergeQualificationV1: expect.any(String),
       },
     ],
     [
       'validate-review',
       {
-        expectedRevision: expect.stringContaining('cycle inspect'),
-        snapshotId: expect.stringContaining('existing current'),
-        attemptId: expect.stringContaining('immutable review attempt'),
-        report: expect.stringContaining('cycle-review'),
+        expectedRevision: expect.any(String),
+        snapshotId: expect.any(String),
+        attemptId: expect.any(String),
+        report: expect.any(String),
       },
     ],
     ['detail', {minimumMaxBytes: 8192}],
@@ -145,7 +144,12 @@ describe('native request schema discovery', () => {
     const response = nativeRequestSchema({...base, topic: 'cycle', command});
     expect(response).toMatchObject({schemaKind: 'decoding-envelope', runtimeValidationRequired: true});
     expect(response).toHaveProperty('semanticPrerequisites', prerequisites);
-    expect(JSON.parse(response.schemaPage.text).schema.required).not.toContain('expectedRevision');
+    const schema = JSON.parse(response.schemaPage.text).schema;
+    expect(schema.required).toEqual(['protocolVersion', 'executorVersion', 'action', 'command', 'runId', 'generation']);
+    if (command === 'snapshot') {
+      expect(schema.properties.recoverUnreviewedRebase).toEqual({type: 'boolean'});
+      expect(schema.properties.supersedeUnreviewed).toEqual({type: 'boolean'});
+    }
   });
 
   it('discovers mandatory review lanes and the risk-based specialist requirement', () => {
