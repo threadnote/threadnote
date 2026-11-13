@@ -51,6 +51,7 @@ import {
   makeNativeTaskViewCommand,
 } from '../../src/effect/workflow_cli.js';
 import {runNativeTaskAction, runNativeTaskStart} from '../../src/workflow_automation/task_actions.js';
+import {runNativeTaskAuthoring} from '../../src/workflow_automation/task_authoring.js';
 import {readNativeTaskInstalledTarget} from '../../src/workflow_automation/task_admission.js';
 import {readNativeWatch, writeNativeWatch} from '../../src/workflow_automation/watch_store.js';
 import {applyDevSkills, statusDevSkills} from '../../src/dev_skills/index.js';
@@ -2432,6 +2433,275 @@ describe('native task actions', () => {
     }).pipe(run),
   );
 
+  effectIt.effect('reconciles an amended compact-origin PR cycle without changing delivery or bindings', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      const repo = yield* f.fs.realPath(f.repo);
+      const home = yield* f.fs.realPath(f.home);
+      const config = {...f.config, agentContextHome: home, manifestPath: f.path.join(home, 'manifest.json')};
+      const system = yield* SystemInfo;
+      const testSystem = {...system, currentDirectory: () => repo, homeDirectory: home};
+      yield* runCommandEffect('git', ['-C', repo, 'add', 'source.ts']);
+      yield* runCommandEffect('git', [
+        '-C',
+        repo,
+        '-c',
+        'user.name=Fixture',
+        '-c',
+        'user.email=fixture@example.invalid',
+        'commit',
+        '-m',
+        'Fixture source',
+      ]);
+      yield* applyDevSkills(config, 'install', {agent: 'codex'}).pipe(Effect.provideService(SystemInfo, testSystem));
+      const intent = {
+        title: 'Refresh compact fixture data',
+        currentBehavior: 'Expired fixture values are returned without a freshness check.',
+        desiredChange: 'Expired fixture values are refreshed before return.',
+        affectedPaths: ['source.ts'],
+        acceptanceCriterion: 'Expired fixture values refresh before return.',
+        verification: 'Exercise expiration and observe the refreshed value.',
+        eligibilityRationale: 'One local source and one bounded behavior are explicit.',
+        eligibility: {status: 'eligible' as const},
+        review: {required: false, reason: 'The fixture behavior is bounded.'},
+      };
+      const startInput = {callerCwd: repo, featureName: intent.title, installationTarget: 'codex', intent};
+      expect(
+        yield* runNativeTaskStart(config, startInput).pipe(
+          Effect.provideService(SystemInfo, testSystem),
+          Effect.result,
+        ),
+      ).toMatchObject({
+        failure: {code: 'evidence-unavailable'},
+      });
+      expect(
+        (yield* (yield* CodeGraphIndexer).index({cwd: repo, threadnoteHome: home, ensureVectors: false})).snapshot
+          .state,
+      ).toBe('ready');
+      const started = object(
+        yield* runNativeTaskStart(config, startInput).pipe(Effect.provideService(SystemInfo, testSystem)),
+      );
+      const runId = String(started.taskRef);
+      const initialState = yield* readNativeWorkflowState(config, runId);
+      if (!initialState) throw new Error('The compact start must initialize a canonical run.');
+      const compactRead = object(
+        object(
+          yield* f.call(
+            {
+              ...f.base('authoring', runId, initialState.state.generation),
+              command: 'load',
+              uri: object(started.root).uri,
+              detail: 'document',
+            },
+            config,
+          ),
+        ).authoring,
+      );
+      const compactDocument = yield* Schema.decodeUnknownEffect(NativeAuthoringPlanDocumentSchema)(
+        compactRead.document,
+      );
+      const compactPhase = compactDocument.phases[0];
+      const compactAcceptance = compactPhase?.acceptance[0];
+      if (!compactPhase || !compactAcceptance)
+        throw new Error('The compact plan needs one phase and acceptance criterion.');
+      const expansion = {
+        ...compactDocument,
+        current: {
+          ...compactDocument.current,
+          components: ['source.ts contains the fixture value consumed by callers.'],
+        },
+        target: {...compactDocument.target, components: ['Refresh the fixture value before returning it.']},
+        phases: [
+          compactPhase,
+          {
+            ...compactPhase,
+            id: 'verify',
+            title: 'Verify refreshed fixture data',
+            outcome: 'The refreshed fixture value remains available after reload.',
+            dependsOn: [String(compactPhase.id)],
+            acceptance: [
+              {
+                ...compactAcceptance,
+                id: 'persisted',
+                criterion: 'The refreshed value persists.',
+                verification: 'Reload and observe the refreshed value.',
+              },
+            ],
+          },
+        ],
+        decisions: [
+          {
+            id: 'verify-refresh',
+            question: 'How is persistence verified?',
+            selection: 'no-better-alternative',
+            selected: 'Reload the fixture after refresh.',
+            alternatives: [],
+            rationale: 'A dependent phase verifies persistence.',
+            affectedPhases: [String(compactPhase.id), 'verify'],
+            authority: 'orchestrator',
+          },
+        ],
+      };
+      const firstExpansion = object(
+        yield* runNativeTaskAction(config, {
+          command: 'compact-expand',
+          runId,
+          callerCwd: repo,
+          document: expansion,
+        }),
+      );
+      expect(firstExpansion.status).toBe('awaiting-user-confirmation');
+      const expandedRead = object(
+        object(
+          yield* f.call(
+            {
+              ...f.base('authoring', runId, initialState.state.generation),
+              command: 'load',
+              uri: object(firstExpansion.root).uri,
+              detail: 'document',
+            },
+            config,
+          ),
+        ).authoring,
+      );
+      const expandedDocument = yield* Schema.decodeUnknownEffect(NativeAuthoringPlanDocumentSchema)(
+        expandedRead.document,
+      );
+      expect(expandedDocument.compactOrigin?.expanded).toBe(true);
+      const contentFile = f.path.join(home, 'compact-business.json');
+      const business = {
+        title: expandedDocument.title,
+        objective: expandedDocument.objective,
+        requirements: expandedDocument.requirements,
+        context: expandedDocument.context,
+        current: expandedDocument.current,
+        target: expandedDocument.target,
+        phases: expandedDocument.phases,
+        decisions: expandedDocument.decisions,
+        openQuestions: expandedDocument.openQuestions,
+        review: expandedDocument.review,
+      };
+      yield* f.fs.writeFileString(contentFile, JSON.stringify(business));
+      const authored = object(
+        yield* runNativeTaskAuthoring(config, {
+          command: 'start',
+          callerCwd: repo,
+          featureName: intent.title,
+          kind: 'plan',
+          contentFile,
+          installationTarget: 'codex',
+        }).pipe(Effect.provideService(SystemInfo, testSystem)),
+      );
+      expect(authored).toMatchObject({status: 'draft', replayed: true});
+      const approved = object(
+        yield* runNativeTaskAuthoring(config, {
+          command: 'decide',
+          callerCwd: repo,
+          authoringRef: String(authored.authoringRef),
+          userDecision: 'approve',
+          userResponse: 'I approve this exact expanded fixture plan.',
+        }).pipe(Effect.provideService(SystemInfo, testSystem)),
+      );
+      const admitted = object(
+        yield* runNativeTaskAuthoring(config, {
+          command: 'admit',
+          callerCwd: repo,
+          authoringRef: String(approved.authoringRef),
+          delivery: 'pr',
+          bindings: {
+            compact: {branch: 'main', baseBranch: 'main'},
+            verify: {branch: 'main', baseBranch: 'main'},
+          },
+        }).pipe(Effect.provideService(SystemInfo, testSystem)),
+      );
+      expect(admitted.status).toBe('admitted');
+      const initialCycle = yield* readNativeWorkflowState(config, runId);
+      expect(initialCycle?.state.cycle?.state.plan).toMatchObject({
+        delivery: 'pr',
+        phases: [
+          {id: 'compact', branch: 'main', baseBranch: 'main'},
+          {id: 'verify', branch: 'main', baseBranch: 'main'},
+        ],
+      });
+
+      const verifyPhase = expandedDocument.phases[1];
+      const verifyAcceptance = verifyPhase?.acceptance[0];
+      if (!verifyPhase || !verifyAcceptance) throw new Error('The expanded plan must include its verification phase.');
+      const amendment = {
+        ...expandedDocument,
+        title: 'Refresh and verify compact fixture data',
+        objective: 'Refresh fixture data and verify the persisted result.',
+        target: {...expandedDocument.target, summary: 'Expired fixture values refresh and persist before return.'},
+        phases: [
+          ...expandedDocument.phases,
+          {
+            ...verifyPhase,
+            id: 'readback',
+            title: 'Read back refreshed fixture data',
+            outcome: 'The refreshed fixture value is available to later reads.',
+            dependsOn: [String(verifyPhase.id)],
+            acceptance: [
+              {
+                ...verifyAcceptance,
+                id: 'readback',
+                criterion: 'Later reads return the refreshed value.',
+                verification: 'Read the fixture value after reload.',
+              },
+            ],
+          },
+        ],
+        decisions: [
+          ...expandedDocument.decisions,
+          {
+            id: 'readback-refresh',
+            question: 'How are later reads checked?',
+            selection: 'no-better-alternative',
+            selected: 'Read the value after reload.',
+            alternatives: [],
+            rationale: 'The final phase verifies the persisted result.',
+            affectedPhases: ['compact', 'verify', 'readback'],
+            authority: 'orchestrator',
+          },
+        ],
+      };
+      const expanded = object(
+        yield* runNativeTaskAction(config, {
+          command: 'compact-expand',
+          runId,
+          callerCwd: repo,
+          document: amendment,
+        }),
+      );
+      expect(expanded.status).toBe('awaiting-user-confirmation');
+      const confirmed = object(
+        yield* runNativeTaskAction(config, {
+          command: 'compact-confirm',
+          runId,
+          callerCwd: repo,
+          presentedIntentHash: String(expanded.intentHash),
+          userDecision: 'approve',
+          userResponse: 'I approve this exact amended fixture plan.',
+          bindings: {
+            compact: {branch: 'main', baseBranch: 'main'},
+            verify: {branch: 'main', baseBranch: 'main'},
+            readback: {branch: 'main', baseBranch: 'main'},
+          },
+        }),
+      );
+      expect(confirmed.status).toBe('admitted');
+      const after = yield* readNativeWorkflowState(config, runId);
+      expect(after?.state.cycle?.state.plan).toMatchObject({
+        delivery: 'pr',
+        phases: [
+          {id: 'compact', branch: 'main', baseBranch: 'main'},
+          {id: 'verify', branch: 'main', baseBranch: 'main'},
+          {id: 'readback', branch: 'main', baseBranch: 'main'},
+        ],
+      });
+      expect(after?.state.cycle?.plans).toHaveLength(2);
+    }).pipe(run),
+  );
+
   effectIt.effect('saves a compact draft, records exact user approval and initializes the same task facade', () =>
     Effect.gen(function* () {
       const f = yield* nativeFixture();
@@ -2697,6 +2967,7 @@ describe('native task actions', () => {
         taskReadiness: 'ready',
         task: {status: 'ready', next: {action: 'implement'}},
       });
+      expect((yield* readNativeWorkflowState(f.config, 'native-run'))?.state.cycle?.state.plan.delivery).toBe('local');
       const initialPlan = yield* Schema.decodeUnknownEffect(NativeAuthoringPlanDocumentSchema)(draftDocument);
       const work = object(
         yield* runNativeTaskAction(f.config, {
