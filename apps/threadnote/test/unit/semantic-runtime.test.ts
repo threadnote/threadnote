@@ -292,7 +292,8 @@ const javaCoordinatorFixture = Effect.fn('test.javaCoordinatorFixture')(function
 
 describe.skipIf(process.platform === 'win32')('Java coordinator registration', () => {
   effectIt.layer(JavaCoordinatorTestLayer, {buildPerTest: true})(layerIt => {
-    layerIt.effect(
+    // Positive delegation requires actual source-owned host pins; this is not all-platform SDK proof.
+    layerIt.effect.skipIf(javaRuntime.javaRuntimePinsForHost() === undefined)(
       'Java runtime delegates repeated proof to the host port and retains the original refusing default',
       () =>
         Effect.gen(function* () {
@@ -318,6 +319,36 @@ describe.skipIf(process.platform === 'win32')('Java coordinator registration', (
             Effect.result,
           );
           expect(original._tag).toBe('Failure');
+          expect(f.factory).not.toHaveBeenCalled();
+        }).pipe(TestClock.withLive),
+    );
+    layerIt.effect.skipIf(javaRuntime.javaRuntimePinsForHost() !== undefined)(
+      'Java runtime refuses an unvetted host before invoking the host verifier port',
+      () =>
+        Effect.gen(function* () {
+          const f = yield* javaCoordinatorFixture();
+          f.sdk.mockRestore();
+          let proofs = 0;
+          const refused = yield* javaRuntime.makeJavaRuntime(f.candidate.runtimeCandidate).pipe(
+            Effect.provideService(SemanticJavaRuntimeVerifier, () =>
+              Effect.sync(() => {
+                proofs++;
+              }),
+            ),
+            Effect.result,
+          );
+          expect(refused).toMatchObject({
+            _tag: 'Failure',
+            failure: {_tag: 'SemanticSetupFault', providerId: 'jdtls', reason: 'incompatible', component: 'provider'},
+          });
+          expect(proofs).toBe(0);
+          const original = yield* javaRuntime.makeJavaRuntime(f.candidate.runtimeCandidate).pipe(Effect.result);
+          expect(original._tag).toBe('Failure');
+          const candidate = yield* verifyJavaSemanticCandidate(f.candidate).pipe(
+            Effect.provideService(SemanticJavaRuntimeVerifier, () => Effect.void),
+            Effect.result,
+          );
+          expect(candidate._tag).toBe('Failure');
           expect(f.factory).not.toHaveBeenCalled();
         }).pipe(TestClock.withLive),
     );

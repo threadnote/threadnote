@@ -4,7 +4,19 @@ import {CommandExecutor} from '@threadnote/platform/command';
 import {cryptoLayer} from '@threadnote/platform/crypto';
 import {LspFault} from '../../src/semantic/lsp_transport.js';
 import {it} from '@effect/vitest';
-import {Array as EffectArray, Effect, FileSystem, Layer, Path, Schema, String as EffectString} from 'effect';
+import {TestClock} from 'effect/testing';
+import {changeTimeoutRefusal, SemanticChangeTimeoutObservation} from '../../src/semantic/agent_change_protocol.js';
+import {
+  Array as EffectArray,
+  Deferred,
+  Effect,
+  Fiber,
+  FileSystem,
+  Layer,
+  Path,
+  Schema,
+  String as EffectString,
+} from 'effect';
 import * as BunFileSystem from '@effect/platform-bun/BunFileSystem';
 import * as BunPath from '@effect/platform-bun/BunPath';
 import {expect, vi} from 'vitest';
@@ -160,7 +172,12 @@ it.effect('rejects caller-supplied authority and unqualified code actions before
           return {request: () => Effect.succeed({status: 'unexpected'})};
         }),
     };
-    for (const extra of [{writeAuthorized: true}, {operations: []}, {principal: 'administrator'}]) {
+    for (const extra of [
+      {writeAuthorized: true},
+      {operations: []},
+      {principal: 'administrator'},
+      {diagnostic: {origin: 'service'}},
+    ]) {
       expect(yield* runSemanticAgentChangeWith(host, f.config, {...f.request, ...extra})).toMatchObject({
         status: 'invalid-request',
         applicable: false,
@@ -673,3 +690,204 @@ it.effect('retains every ordered raw resource effect, refuses the whole prefligh
     Effect.provide(io),
   ),
 );
+
+it.layer(io, {buildPerTest: true})(layerIt => {
+  layerIt.effect('attributes concurrent host timeouts to their own last entered boundary', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const start = (phase: 'endpoint-connect' | 'endpoint-request') =>
+        Effect.gen(function* () {
+          const entered = yield* Deferred.make<void>();
+          const blocked = Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never));
+          const host: SemanticAgentQueryHost = {
+            runtimeIdentity: Effect.succeed(sha256HexSync('runtime')),
+            connect: () => (phase === 'endpoint-connect' ? blocked : Effect.succeed({request: () => blocked})),
+          };
+          const pending = yield* Effect.forkChild(
+            runSemanticAgentChangeWith(host, f.config, {...f.request, milliseconds: 100}),
+          );
+          yield* Deferred.await(entered);
+          return pending;
+        });
+      const connecting = yield* start('endpoint-connect');
+      const requesting = yield* start('endpoint-request');
+      yield* TestClock.adjust(100);
+      for (const [pending, phase] of [
+        [connecting, 'endpoint-connect'],
+        [requesting, 'endpoint-request'],
+      ] as const) {
+        expect(yield* Fiber.join(pending)).toMatchObject({
+          status: 'timeout',
+          applicable: false,
+          writerAuthorityRequired: true,
+          diagnostic: {
+            origin: 'host',
+            phase,
+            elapsedMilliseconds: 100,
+            phaseElapsedMilliseconds: 100,
+            budgetMilliseconds: 100,
+            remainingMilliseconds: 0,
+            terminal: 'timeout',
+            cleanup: 'unobserved',
+          },
+        });
+      }
+      // A later invocation has fresh timing/phase state, even after both previous wrappers expired.
+      const next = yield* start('endpoint-request');
+      yield* TestClock.adjust(100);
+      expect(yield* Fiber.join(next)).toMatchObject({
+        diagnostic: {phase: 'endpoint-request', elapsedMilliseconds: 100},
+      });
+    }),
+  );
+
+  layerIt.effect.each(['source-attach', 'provider-use'] as const)(
+    'attributes the service timeout at %s without claiming owned cleanup',
+    phase =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const entered = yield* Deferred.make<void>();
+        const blocked = Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never));
+        const changes = yield* makeSemanticAgentChanges(
+          {
+            attach: observation => (phase === 'source-attach' ? blocked : Effect.succeed({observation})),
+            use: () => blocked,
+            observe: () => Effect.die('Unexpected publication'),
+          },
+          {
+            directory: f.path.join(f.home, 'changes'),
+            profileHome: f.home,
+            worktree: f.worktree,
+            runtimeIdentity: sha256HexSync('runtime'),
+          },
+        );
+        const pending = yield* Effect.forkChild(
+          changes.execute({
+            version: 1,
+            action: 'prepare',
+            worktree: f.worktree,
+            project: f.worktree,
+            profile: sha256HexSync(JSON.stringify(f.profile)),
+            principal: EffectString.slice(0, -5)(semanticHostProfileName(f.config, f.worktree)),
+            uri: (yield* f.path.toFileUrl(f.path.join(f.request.callerCwd, 'a.ts'))).href,
+            language: 'typescript',
+            operation: 'rename',
+            position: {line: 0, character: 13},
+            newName: 'renamed',
+            milliseconds: 100,
+            maxBytes: 1024,
+          }),
+        );
+        yield* Deferred.await(entered);
+        yield* TestClock.adjust(100);
+        expect(yield* Fiber.join(pending)).toMatchObject({
+          status: 'timeout',
+          applicable: false,
+          writerAuthorityRequired: true,
+          diagnostic: {
+            origin: 'service',
+            phase,
+            elapsedMilliseconds: 100,
+            phaseElapsedMilliseconds: 100,
+            budgetMilliseconds: 100,
+            remainingMilliseconds: 0,
+            terminal: 'timeout',
+            cleanup: 'unobserved',
+          },
+        });
+      }),
+  );
+
+  layerIt.effect('forwards service timeout attribution unchanged rather than relabelling it as a host expiry', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const service = changeTimeoutRefusal({
+        origin: 'service',
+        phase: 'publication',
+        elapsedMilliseconds: 20,
+        phaseElapsedMilliseconds: 5,
+        budgetMilliseconds: 20,
+        remainingMilliseconds: 0,
+        terminal: 'timeout',
+        cleanup: 'unobserved',
+      });
+      const host: SemanticAgentQueryHost = {
+        runtimeIdentity: Effect.succeed(sha256HexSync('runtime')),
+        connect: () => Effect.succeed({request: () => Effect.succeed(service)}),
+      };
+      expect(yield* runSemanticAgentChangeWith(host, f.config, {...f.request, milliseconds: 100})).toEqual(service);
+      const largest = changeTimeoutRefusal({
+        ...service.diagnostic,
+        elapsedMilliseconds: Number.MAX_SAFE_INTEGER,
+        phaseElapsedMilliseconds: Number.MAX_SAFE_INTEGER,
+        budgetMilliseconds: 45000,
+      });
+      expect(new TextEncoder().encode(JSON.stringify(largest)).length).toBeLessThanOrEqual(1024);
+      const decode = Schema.decodeUnknownResult(SemanticChangeTimeoutObservation, {onExcessProperty: 'error'});
+      expect(decode({...service.diagnostic, origin: 'host', phase: 'endpoint-request'})._tag).toBe('Success');
+      expect(decode({...service.diagnostic, origin: 'host', phase: 'source-attach'})._tag).toBe('Failure');
+      expect(decode({...service.diagnostic, origin: 'service', phase: 'endpoint-request'})._tag).toBe('Failure');
+    }),
+  );
+
+  layerIt.effect.prop(
+    'keeps timeout metadata finite, private and below the existing minimum response budget',
+    {
+      privateText: Schema.String.check(Schema.isPattern(/^[a-z]{10,30}$/)),
+      milliseconds: Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 45000})),
+      observation: SemanticChangeTimeoutObservation,
+    },
+    ({privateText, milliseconds, observation}) =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const secret = 'private-proposal-' + privateText;
+        const entered = yield* Deferred.make<void>();
+        const host: SemanticAgentQueryHost = {
+          runtimeIdentity: Effect.succeed(sha256HexSync('runtime')),
+          connect: () =>
+            Effect.succeed({request: () => Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never))}),
+        };
+        const pending = yield* Effect.forkChild(
+          runSemanticAgentChangeWith(host, f.config, {
+            ...f.request,
+            newName: secret,
+            milliseconds,
+            maxBytes: 1024,
+          }),
+        );
+        yield* Deferred.await(entered);
+        yield* TestClock.adjust(milliseconds);
+        const result = yield* Fiber.join(pending);
+        const decoded = yield* Schema.decodeUnknownEffect(
+          Schema.Struct({diagnostic: SemanticChangeTimeoutObservation}),
+        )(result);
+        expect(decoded.diagnostic).toMatchObject({origin: 'host', phase: 'endpoint-request', cleanup: 'unobserved'});
+        expect(decoded.diagnostic.phaseElapsedMilliseconds).toBeLessThanOrEqual(decoded.diagnostic.elapsedMilliseconds);
+        expect(decoded.diagnostic.remainingMilliseconds).toBeLessThanOrEqual(milliseconds);
+        const decode = Schema.decodeUnknownResult(SemanticChangeTimeoutObservation, {onExcessProperty: 'error'});
+        expect(decode(observation)._tag).toBe('Success');
+        expect(decode({...observation, origin: observation.origin === 'host' ? 'service' : 'host'})._tag).toBe(
+          'Failure',
+        );
+        const serialized = JSON.stringify(result);
+        expect(serialized).not.toContain(secret);
+        expect(new TextEncoder().encode(serialized).length).toBeLessThanOrEqual(1024);
+        for (const extra of [
+          {origin: secret},
+          {phase: secret},
+          {elapsedMilliseconds: -1},
+          {phaseElapsedMilliseconds: NaN},
+          {remainingMilliseconds: 45001},
+          {cleanup: 'drained'},
+          {rawError: secret},
+        ])
+          expect(
+            Schema.decodeUnknownResult(SemanticChangeTimeoutObservation, {onExcessProperty: 'error'})({
+              ...decoded.diagnostic,
+              ...extra,
+            })._tag,
+          ).toBe('Failure');
+      }),
+    {arbitrary: {runs: 16}},
+  );
+});

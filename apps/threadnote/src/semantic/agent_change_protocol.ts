@@ -127,3 +127,46 @@ export const changeRefusal = (status: string, reason: string) => ({
   applicable: false as const,
   writerAuthorityRequired: true as const,
 });
+
+/** Output-only local deadline attribution; never a writer grant or owned-process cleanup receipt. */
+const TimeoutMeasurement = {
+  elapsedMilliseconds: Counter,
+  phaseElapsedMilliseconds: Counter,
+  budgetMilliseconds: Milliseconds,
+  remainingMilliseconds: Counter.check(Schema.isLessThanOrEqualTo(semanticAgentChangeLimits.maxMilliseconds)),
+  terminal: Schema.Literal('timeout'),
+  cleanup: Schema.Literal('unobserved'),
+};
+export const SemanticChangeTimeoutObservation = Schema.Union([
+  Schema.Struct({
+    origin: Schema.Literal('host'),
+    phase: Schema.Literals([
+      'validate-request',
+      'host-scope',
+      'source-scope',
+      'endpoint-connect',
+      'endpoint-request',
+      'host-publication',
+    ]),
+    ...TimeoutMeasurement,
+  }),
+  Schema.Struct({
+    origin: Schema.Literal('service'),
+    phase: Schema.Literals([
+      'scope-check',
+      'source-attach',
+      'choice-binding',
+      'provider-use',
+      'source-currentness',
+      'retain-result',
+      'publication',
+      'retained-proposal-check',
+    ]),
+    ...TimeoutMeasurement,
+  }),
+]);
+export type SemanticChangeTimeoutObservation = typeof SemanticChangeTimeoutObservation.Type;
+export const changeTimeoutRefusal = (diagnostic: SemanticChangeTimeoutObservation) => ({
+  ...changeRefusal('timeout', 'Proposal deadline expired'),
+  diagnostic,
+});
