@@ -192,8 +192,29 @@ jobs:
           fi
           rg --version
 
+      - name: Verify private Linux temporary storage
+        shell: bash
+        run: |
+          bun --eval 'import {mkdtempSync,realpathSync,appendFileSync,rmSync} from "node:fs";
+          import {runtimeOpenPrivateWriterDirectory,runtimeClosePrivateWriterDirectory} from "@threadnote/platform/system";
+          const root=realpathSync(mkdtempSync("/tmp/threadnote-ci-"));
+          try { const handle=runtimeOpenPrivateWriterDirectory(root); runtimeClosePrivateWriterDirectory(handle);
+          appendFileSync(Bun.env.GITHUB_ENV,"THREADNOTE_CI_TEST_TMPDIR="+root+"\nTMPDIR="+root+"\n");
+          console.log("Native private CI temporary storage proof passed; production qualification remains false"); }
+          catch { rmSync(root,{recursive:true}); throw new Error("Native private CI temporary storage proof failed"); }'
+
       - name: Execute Bazel shard
         run: bun tools/ci/bazel-run-selected.mjs ".context/bazel-selection/shards/${{ matrix.id }}.json"
+
+      - name: Remove owned Linux temporary storage
+        if: always() && env.THREADNOTE_CI_TEST_TMPDIR != ''
+        shell: bash
+        run: |
+          bun --eval 'import {lstatSync,realpathSync,rmSync} from "node:fs";
+          const root=Bun.env.THREADNOTE_CI_TEST_TMPDIR;
+          if(!/^\/tmp\/threadnote-ci-[A-Za-z0-9]+$/.test(root)||realpathSync(root)!==root)throw new Error("Owned CI temporary root changed");
+          const stat=lstatSync(root); if(!stat.isDirectory()||stat.uid!==process.getuid()||(stat.mode&0o077)!==0)throw new Error("Owned CI temporary root changed");
+          rmSync(root,{recursive:true});'
 
   manager-e2e:
     name: Manager browser E2E

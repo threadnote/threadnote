@@ -36,6 +36,7 @@ const CLOUD_LOCAL_TOOL_NAMES = [
   'inspect_code_graph',
   'analyze_code_graph',
   'semantic_capabilities',
+  'semantic_readiness',
   'semantic_change_prepare',
   'semantic_change_status',
   'semantic_change_preflight',

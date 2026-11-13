@@ -3,6 +3,7 @@ import {Array as EffectArray, Effect, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {runSemanticAgentQuery, runSemanticAgentView} from '../../semantic/agent_queries.js';
 import {formatSemanticAgentQuery} from '../../semantic/agent_query_protocol.js';
+import {runSemanticReadiness} from '../../semantic/readiness.js';
 import {EffectMcpServerRegistry, McpInput} from '../../effect/ai/mcp.js';
 import {formatSemanticCapabilities, semanticCapabilities} from '../../effect/semantic_cli.js';
 
@@ -27,6 +28,19 @@ export function registerSemanticQueryTool(
   config: RuntimeConfig,
   knowledgeAuthorized = false,
 ): void {
+  server.registerTool(
+    'semantic_readiness',
+    {
+      annotations: {readOnlyHint: false, destructiveHint: false, idempotentHint: false},
+      description:
+        'Explicit saved-disk startup: request start {action,callerCwd,file,language,project?,environment?}; status/cancel {action,callerCwd,job}. Private volatile job; no edits/import authority. See semantic_capabilities.',
+      inputSchema: {request: Schema.Json},
+    },
+    ({request}) =>
+      runSemanticReadiness(config, request).pipe(
+        Effect.map(result => ({content: [{type: 'text' as const, text: JSON.stringify(result)}]})),
+      ),
+  );
   const descriptions = {
     prepare:
       'Read-only V1 preview. request: callerCwd,file,language,operation; rename uses position/newName; code-action uses range and opaque choiceHandle (omit to list). Protected profile required; no writes/writer grant. Details: semantic_capabilities.',

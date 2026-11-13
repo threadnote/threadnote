@@ -15,6 +15,88 @@ const Milliseconds = Counter.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLe
 const ContextBudget = Counter.check(Schema.isGreaterThanOrEqualTo(800), Schema.isLessThanOrEqualTo(1500));
 const Cursor = Schema.Struct({...Continuation.fields, observation: Schema.String.check(Schema.isMaxLength(32768))});
 export const SemanticAgentBufferHandle = Schema.Struct({id: Digest, capability: Digest});
+export const SemanticReadinessHandle = Schema.Struct({id: Digest, capability: Digest});
+export const semanticReadinessLimits = {
+  startupMilliseconds: 120000,
+  queryMilliseconds: 10000,
+  maxQueryMilliseconds: 45000,
+  cancelAcknowledgementMilliseconds: 250,
+  terminationMilliseconds: 2000,
+  maxJobs: 32,
+  ttlMilliseconds: 600000,
+} as const;
+export const SemanticReadinessStage = Schema.Literals([
+  'queued',
+  'verifying-inputs',
+  'preparing-project',
+  'acquiring-provider',
+  'initializing',
+  'synchronizing',
+  'checking-ready',
+  'finalizing',
+]);
+export type SemanticReadinessStage = typeof SemanticReadinessStage.Type;
+export const SemanticReadinessRequest = Schema.Union([
+  Schema.Struct({
+    action: Schema.Literal('start'),
+    callerCwd: PathText,
+    file: PathText,
+    project: Schema.optionalKey(PathText),
+    language: Identifier,
+    environment: Schema.optionalKey(Identifier),
+  }),
+  Schema.Struct({action: Schema.Literals(['status', 'cancel']), callerCwd: PathText, job: SemanticReadinessHandle}),
+]);
+export type SemanticReadinessRequest = typeof SemanticReadinessRequest.Type;
+export const SemanticReadinessSource = Schema.Struct({
+  worktree: FileUri,
+  project: FileUri,
+  uri: FileUri,
+  language: SemanticLanguage,
+  environment: Schema.optionalKey(Identifier),
+  profile: Digest,
+  principal: Digest,
+});
+export type SemanticReadinessSource = typeof SemanticReadinessSource.Type;
+export const SemanticEndpointReadiness = Schema.Union([
+  Schema.Struct({...SemanticReadinessSource.fields, action: Schema.Literal('start')}),
+  Schema.Struct({
+    action: Schema.Literals(['status', 'cancel']),
+    worktree: FileUri,
+    profile: Digest,
+    principal: Digest,
+    job: SemanticReadinessHandle,
+  }),
+]);
+export type SemanticEndpointReadiness = typeof SemanticEndpointReadiness.Type;
+export const SemanticReadinessProgress = Schema.Struct({
+  state: Schema.Literals(['accepted', 'running', 'cancelling', 'ready', 'failed', 'cancelled', 'stale']),
+  stage: SemanticReadinessStage,
+  sequence: Counter,
+  elapsedMilliseconds: Counter,
+  startupMilliseconds: Schema.Literal(120000),
+  queryMilliseconds: Schema.Literal(10000),
+  maxQueryMilliseconds: Schema.Literal(45000),
+  cleanup: Schema.Literals(['not-started', 'pending', 'drained', 'unknown', 'retained']),
+  failureOrigin: Schema.optionalKey(
+    Schema.Literals(['deadline', 'cancelled', 'source', 'prerequisite', 'capacity', 'cleanup']),
+  ),
+});
+export type SemanticReadinessProgress = typeof SemanticReadinessProgress.Type;
+export const SemanticReadinessResult = Schema.Union([
+  Schema.Struct({
+    version: Schema.Literal(1),
+    status: Schema.Literal('ok'),
+    job: Schema.optionalKey(SemanticReadinessHandle),
+    progress: SemanticReadinessProgress,
+  }),
+  Schema.Struct({
+    version: Schema.Literal(1),
+    status: Schema.Literals(['invalid-request', 'unavailable', 'stale']),
+    reason: Identifier,
+  }),
+]);
+export type SemanticReadinessResult = typeof SemanticReadinessResult.Type;
 export const SemanticAgentBufferView = Schema.Struct({
   kind: Schema.Literal('buffer'),
   handle: SemanticAgentBufferHandle,
@@ -182,3 +264,13 @@ export function formatSemanticAgentQuery(result: SemanticAgentQueryResult): stri
   // Canonical compact JSON preserves all outcomes, provenance and continuations without a second lossy projection.
   return JSON.stringify(result);
 }
+
+/** Internal selected-verifier reply; never a public permission or caller input. */
+export const SemanticVerificationReply = Schema.Struct({
+  version: Schema.Literal(1),
+  provider: Schema.Literals(['typescript-language-server', 'basedpyright', 'gopls', 'rust-analyzer', 'jdtls']),
+  candidate: Digest,
+  mode: Schema.Literals(['candidate', 'configuration']),
+  digest: Digest,
+  runtimeVersion: Schema.Boolean,
+});

@@ -56,6 +56,7 @@ import {
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestCommandExecutorLayer, TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {LspFault} from '../../src/semantic/lsp_transport.js';
+import {makeReadDeadline} from '@threadnote/platform/read_deadline';
 import {serveSemanticEndpoint, requestSemanticEndpoint} from '../../src/semantic/coordinator.js';
 import {SemanticSessionFault, type SemanticSession} from '../../src/semantic/provider.js';
 import type {ContextBriefFollowUpV1, SemanticContextKnowledgeV1} from '@threadnote/context/types';
@@ -455,6 +456,8 @@ const diagnosticsFixture = Effect.fn('test.agentDiagnostics')(function* (message
     calls: () => calls,
     status: disk.status,
     observe: disk.observe,
+    capture: disk.capture,
+    prepare: disk.prepare,
     mode: (value: DiagnosticMode) => {
       mode = value;
     },
@@ -465,6 +468,42 @@ const diagnosticsFixture = Effect.fn('test.agentDiagnostics')(function* (message
 });
 
 describe('host-bound public document diagnostics', () => {
+  effectIt.effect(
+    'saved-disk preparation shares the exact later query namespace without querying or consuming a page',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* diagnosticsFixture([]);
+        const source = {
+          worktree: f.worktree,
+          project: f.worktree,
+          uri: canonicalFileUri((yield* f.path.toFileUrl(f.file)).href),
+          language: 'go' as const,
+          profile: sha256HexSync('profile'),
+          principal: sha256HexSync('principal'),
+        };
+        const deadline = yield* makeReadDeadline(120000);
+        const control = {
+          deadline,
+          remaining: Effect.succeed(118000),
+          stage: () => Effect.void,
+          termination: () => {},
+          cleanup: () => {},
+          cleanupUnknown: () => false,
+        };
+        const content = yield* f.capture(source);
+        const prepared = yield* f.prepare(source, content, control);
+        expect(f.calls()).toBe(0);
+        expect(f.status()).toEqual({snapshots: 0, retainedBytes: 0});
+        const read = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+        if (read.status !== 'ok') throw new Error('Missing prepared read');
+        expect(read.evidence.observation).toEqual(prepared);
+        expect(f.calls()).toBe(1);
+        yield* f.fs.writeFileString(f.file, 'export const changed = true;\n');
+        const stale = yield* f.prepare(source, content, control).pipe(Effect.result);
+        expect(stale).toMatchObject({_tag: 'Failure', failure: {reason: 'stale'}});
+        expect(f.calls()).toBe(1);
+      }).pipe(provideTestLayer(queryIo)),
+  );
   effectIt.effect('projects only diagnostic summary fields without mutating provider payloads', () =>
     Effect.gen(function* () {
       const f = yield* diagnosticsFixture(['reported message']);

@@ -22,6 +22,7 @@ import {
   selectedFixture,
   providerCatalog,
   runProviderNavigation,
+  runProviderReadiness,
   runOwnedBufferFixture,
   runProviderPreview,
   runProviderActionPreview,
@@ -56,6 +57,12 @@ const execute = promisify(execFile);
 const repository = new URL('../../../../../', import.meta.url);
 const hash = (bytes: string | Uint8Array) => createHash('sha256').update(bytes).digest('hex');
 const failure = (error: unknown) => (error instanceof Error ? error.message : 'Unknown failure');
+/** Install rejection ownership immediately, even when transport shutdown must finish before consuming the receipt. */
+export const settleProviderShutdown = (pending: ReturnType<typeof shutdownFixtureProviders>) =>
+  pending.then(
+    value => ({status: 'observed' as const, value}),
+    (error: unknown) => ({status: 'unknown' as const, reason: failure(error)}),
+  );
 const alive = (pid: number) => {
   try {
     process.kill(pid, 0);
@@ -175,7 +182,9 @@ export async function runCandidateChecks(
           }
         }
       const semanticCleanup =
-        providerInputsPath && home ? shutdownFixtureProviders(home, join(root, 'project')) : undefined;
+        providerInputsPath && home
+          ? settleProviderShutdown(shutdownFixtureProviders(home, join(root, 'project')))
+          : undefined;
       try {
         await within(close?.close() ?? Promise.resolve(), 4500);
         report.cleanup.mcpCloseCompleted = true;
@@ -199,9 +208,15 @@ export async function runCandidateChecks(
       let semanticDrained = true;
       if (semanticCleanup) {
         try {
-          report.cleanup.semantic = await semanticCleanup;
-          if (report.cleanup.semantic.providers.length > 0) report.provider.started = true;
-          semanticDrained = report.cleanup.semantic.drained;
+          const result = await semanticCleanup;
+          if (result.status === 'unknown') {
+            semanticDrained = false;
+            report.cleanup.closeFailure = result.reason;
+          } else {
+            report.cleanup.semantic = result.value;
+            if (result.value.providers.length > 0) report.provider.started = true;
+            semanticDrained = result.value.drained;
+          }
         } catch (error) {
           semanticDrained = false;
           report.cleanup.closeFailure = failure(error);
@@ -513,6 +528,7 @@ export async function runCandidateChecks(
       const branches: unknown[] = [];
       const setup = report.providerChecks;
       report.providerChecks = {setup, navigation: {status: 'observing', branches, fullScenarioQualified: false}};
+      await runProviderReadiness(provider.input, project, fixture.sources, run, client, within, deadline, branches);
       await runProviderNavigation(provider.input, project, fixture.sources, run, client, within, deadline, branches);
       await runOwnedBufferFixture(provider.input, project, fixture.sources, run, client, within, deadline, branches);
       const prepared = fixture.action

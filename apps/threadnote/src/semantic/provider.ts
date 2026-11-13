@@ -2,7 +2,8 @@ import * as EffectArray from 'effect/Array';
 import * as EffectOption from 'effect/Option';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
-import {Clock, Deferred, Effect, Exit, FileSystem, Option, Path, Schema, Semaphore} from 'effect';
+import {Clock, Context, Deferred, Effect, Exit, FileSystem, Option, Path, Schema, Semaphore} from 'effect';
+import type {JavaRuntimeCandidate} from './providers/java_runtime.js';
 import {
   Counter,
   Evidence,
@@ -17,6 +18,10 @@ import {LspFault, type LspClient} from './lsp_transport.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {readBounded} from './fingerprint.js';
 import {isJsonObject} from '@threadnote/platform/json';
+/** Host-only bridge to the existing selected verifier; absence preserves Java's original local proof. */
+export const SemanticJavaRuntimeVerifier = Context.Reference<
+  ((candidate: JavaRuntimeCandidate) => Effect.Effect<void, unknown>) | undefined
+>('semantic/JavaRuntimeVerifier', {defaultValue: () => undefined});
 export const SemanticLanguage = Schema.Literals([
   'typescript',
   'typescriptreact',

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {expect, it, vi} from 'vitest';
 import {runtimeAssertPrivateProviderPath} from '../../src/system.js';
 
@@ -215,13 +216,32 @@ for (const boundary of ['root', 'child'] as const) {
   it.skipIf(!supported)(`closes every owned descriptor when initial ${boundary} metadata capture fails`, () =>
     fixture(folder => {
       const originalStat = fs.fstatSync.bind(fs),
-        originalClose = fs.closeSync.bind(fs),
-        visited: number[] = [],
-        closed: number[] = [];
+        originalOpen = fs.openSync.bind(fs),
+        originalClose = fs.closeSync.bind(fs);
+      type Acquisition = {fd: number; kind: 'prerequisite' | 'ancestry'};
+      const acquired: Acquisition[] = [],
+        active = new Map<number, Acquisition>(),
+        visited: Acquisition[] = [],
+        closed: Acquisition[] = [],
+        unmatched: number[] = [];
+      const retain = (fd: number, kind: Acquisition['kind']) => {
+        const generation = {fd, kind};
+        acquired.push(generation);
+        active.set(fd, generation);
+        return generation;
+      };
       const target = boundary === 'root' ? 1 : 2;
       let injected = false;
+      // Linux's ELF prerequisite opens/closes a separate generation before ancestry, often reusing the root FD.
+      const open = vi.spyOn(fs, 'openSync').mockImplementation((file, flags, mode) => {
+        const fd = originalOpen(file, flags, mode);
+        retain(fd, file === '/' ? 'ancestry' : 'prerequisite');
+        return fd;
+      });
       const stat = vi.spyOn(fs, 'fstatSync').mockImplementation((fd, options) => {
-        if (!visited.includes(fd)) visited.push(fd);
+        // Native openat acquisitions first cross this observed metadata boundary.
+        const generation = active.get(fd) ?? retain(fd, 'ancestry');
+        if (!visited.includes(generation)) visited.push(generation);
         if (!injected && visited.length === target) {
           injected = true;
           throw new Error('owned initial metadata failure');
@@ -229,17 +249,29 @@ for (const boundary of ['root', 'child'] as const) {
         return originalStat(fd, options);
       });
       const close = vi.spyOn(fs, 'closeSync').mockImplementation(fd => {
-        closed.push(fd);
-        return originalClose(fd);
+        const generation = active.get(fd);
+        const result = originalClose(fd);
+        if (generation) {
+          closed.push(generation);
+          active.delete(fd);
+        } else unmatched.push(fd);
+        return result;
       });
       try {
         expect(() => runtimeAssertPrivateProviderPath(folder, {kind: 'directory'})).toThrow();
         expect(injected).toBe(true);
         expect(visited).toHaveLength(target);
-        expect(closed).toEqual([...visited].reverse());
+        expect(EffectArray.filter(closed, generation => generation.kind === 'ancestry')).toEqual(
+          [...visited].reverse(),
+        );
+        for (const generation of acquired)
+          expect(EffectArray.filter(closed, item => item === generation)).toHaveLength(1);
+        expect(active.size).toBe(0);
+        expect(unmatched).toEqual([]);
       } finally {
         close.mockRestore();
         stat.mockRestore();
+        open.mockRestore();
       }
     }),
   );

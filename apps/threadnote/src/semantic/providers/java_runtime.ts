@@ -7,7 +7,7 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {runtimeNativePlatformTarget, runtimePlatform, platformPathFor} from '@threadnote/platform/system';
 import {boundedFileDigest, readBounded, semanticSdkDigest} from '../fingerprint.js';
 import {LspFault, makeLspClient, spawnLspWire, type LspWire, type WireStop} from '../lsp_transport.js';
-import {SemanticSetupFault, wellFormed} from '../provider.js';
+import {SemanticJavaRuntimeVerifier, SemanticSetupFault, wellFormed} from '../provider.js';
 import {
   consumeJavaPreparationConnection,
   verifyJavaPreparationInputs,
@@ -328,7 +328,7 @@ export const makeJavaRuntime = Effect.fn('semantic.makeJavaRuntime')(
       [selected.runtimeJavaHome, selected.runtimeSdkDigest, pins.runtimeSdkDigest, 'runtime'],
       [selected.projectJavaHome, selected.projectSdkDigest, pins.projectSdkDigest, 'project'],
     ] as const;
-    const verify = Effect.gen(function* () {
+    const verifyLocal = Effect.gen(function* () {
       if (!isCurrentJavaRuntimePlatform(pins.platform)) return yield* setupFault('provider', 'incompatible');
       for (const [root, expected, qualified, component] of sdks)
         if (expected !== qualified || !staticPath(root)) return yield* setupFault(component, 'incompatible');
@@ -368,6 +368,8 @@ export const makeJavaRuntime = Effect.fn('semantic.makeJavaRuntime')(
       Effect.provideService(Path.Path, path),
       Effect.provideService(EffectDigest.Digest, digest),
     );
+    const hostVerifier = yield* SemanticJavaRuntimeVerifier;
+    const verify = hostVerifier ? hostVerifier(selected) : verifyLocal;
     yield* verify;
     const launch = (
       mode: 'analysis' | 'preparation',

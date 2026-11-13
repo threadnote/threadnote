@@ -39,10 +39,10 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force .context/semantic-platform | Out-Null
           bun --eval 'import {mkdirSync,readFileSync,writeFileSync} from "node:fs"; import {createHash} from "node:crypto"; import {release} from "node:os";
-          const paths=["packages/platform/src/system.ts","packages/platform/src/writer-system/provider.ts","packages/platform/src/writer-system/provider-windows.ts","packages/platform/src/writer-system/windows-native.ts","packages/platform/src/writer-system/windows-files.ts","packages/platform/test/writer-system/provider-process.test.ts","packages/platform/test/writer-system/windows-native.test.ts",".github/workflows/native-release-smoke.yml"];
+          const paths=["packages/platform/src/system.ts","packages/platform/src/writer-system/provider.ts","packages/platform/src/writer-system/provider-windows.ts","packages/platform/src/writer-system/windows-native.ts","packages/platform/src/writer-system/windows-files.ts","packages/platform/src/writer_system.ts","packages/platform/src/writer-system/windows-writer.ts","packages/platform/src/writer-system/writer-transaction.ts","packages/platform/test/writer-system/windows-writer.test.ts","packages/platform/test/writer-system/provider-process.test.ts","packages/platform/test/writer-system/windows-native.test.ts",".github/workflows/native-release-smoke.yml"];
           writeFileSync(".context/semantic-platform/windows-source.json",JSON.stringify({version:1,scope:"native-component-observation",sourceCommit:Bun.env.SEMANTIC_SOURCE_COMMIT,os:process.platform,osBuild:release(),architecture:process.arch,bun:Bun.version,productionQualified:false,sourceHashes:Object.fromEntries(paths.map(path=>[path,createHash("sha256").update(readFileSync(path)).digest("hex")]))}));'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          bun --bun vitest run packages/platform/test/writer-system/provider-process.test.ts packages/platform/test/writer-system/windows-native.test.ts --reporter=default --reporter=json --outputFile=.context/semantic-platform/windows-components.json 2>&1 | Tee-Object -FilePath .context/semantic-platform/windows-components.log
+          bun --bun vitest run packages/platform/test/writer-system/provider-process.test.ts packages/platform/test/writer-system/windows-native.test.ts packages/platform/test/writer-system/windows-writer.test.ts --reporter=default --reporter=json --outputFile=.context/semantic-platform/windows-components.json 2>&1 | Tee-Object -FilePath .context/semantic-platform/windows-components.log
           $semanticComponentExit = $LASTEXITCODE
           @{ version = 1; scope = 'native-component-observation'; exitCode = $semanticComponentExit; productionQualified = $false } | ConvertTo-Json | Set-Content .context/semantic-platform/windows-component-status.json
           exit $semanticComponentExit
@@ -63,6 +63,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ripgrep bubblewrap
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Verify private Linux temporary storage
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          bun --eval 'import {mkdtempSync,realpathSync,appendFileSync,rmSync} from "node:fs";
+          import {runtimeOpenPrivateWriterDirectory,runtimeClosePrivateWriterDirectory} from "@threadnote/platform/system";
+          const root=realpathSync(mkdtempSync("/tmp/threadnote-ci-"));
+          try { const handle=runtimeOpenPrivateWriterDirectory(root); runtimeClosePrivateWriterDirectory(handle);
+          appendFileSync(Bun.env.GITHUB_ENV,"THREADNOTE_CI_TEST_TMPDIR="+root+"\nTMPDIR="+root+"\n");
+          console.log("Native private CI temporary storage proof passed; production qualification remains false"); }
+          catch { rmSync(root,{recursive:true}); throw new Error("Native private CI temporary storage proof failed"); }'
       - name: macOS workflow prerequisites
         if: runner.os == 'macOS'
         run: command -v rg || brew install ripgrep
@@ -83,6 +94,7 @@ jobs:
         run: >-
           bun --bun vitest run
           packages/platform/test/system-stable-read.test.ts
+          packages/platform/test/writer-system/linux-acl.test.ts
           packages/platform/test/writer-system/provider-process.test.ts
           apps/threadnote/test/unit/semantic-runtime.test.ts
           apps/threadnote/test/unit/semantic-writer-process.test.ts
@@ -115,6 +127,15 @@ jobs:
           name: native-release-${{ inputs.target }}
           path: artifacts/threadnote-${{ inputs.target }}.tar.gz*
           if-no-files-found: error
+      - name: Remove owned Linux temporary storage
+        if: always() && runner.os == 'Linux' && env.THREADNOTE_CI_TEST_TMPDIR != ''
+        shell: bash
+        run: |
+          bun --eval 'import {lstatSync,realpathSync,rmSync} from "node:fs";
+          const root=Bun.env.THREADNOTE_CI_TEST_TMPDIR;
+          if(!/^\/tmp\/threadnote-ci-[A-Za-z0-9]+$/.test(root)||realpathSync(root)!==root)throw new Error("Owned CI temporary root changed");
+          const stat=lstatSync(root); if(!stat.isDirectory()||stat.uid!==process.getuid()||(stat.mode&0o077)!==0)throw new Error("Owned CI temporary root changed");
+          rmSync(root,{recursive:true});'
 
   installed-e2e:
     name: Installed release E2E
@@ -289,7 +310,11 @@ jobs:
               bun --bun effect-tsgo patch --no-typescript --oxlint --skip-missing
               printf '%s\n' 'Effect Oxlint integration: unsupported on musl; no lint run or pass is claimed.' > .context/semantic-platform/effect-lint-status.txt
               bun --eval 'import {runtimeNativePlatformTarget,runtimeNativePlatformSupport} from "@threadnote/platform/system"; const support=runtimeNativePlatformSupport(); if(!support.writer||!support.providerTree)throw new Error("Native semantic platform capability unavailable"); const actual=runtimeNativePlatformTarget(); const expected=Bun.env.THREADNOTE_BUILD_TARGET.slice(4); if(actual!==expected)throw new Error(`Native libc/CPU target mismatch: ${actual} != ${expected}`); console.log(actual);' > .context/semantic-platform/native-target.txt
-              bun --bun vitest run packages/platform/test/system-stable-read.test.ts packages/platform/test/writer-system/provider-process.test.ts apps/threadnote/test/unit/semantic-runtime.test.ts apps/threadnote/test/unit/semantic-writer-process.test.ts apps/threadnote/test/unit/semantic-operations.test.ts apps/threadnote/test/unit/semantic-mcp-cli.test.ts apps/threadnote/test/unit/semantic-python.test.ts apps/threadnote/test/unit/semantic-go-rust.test.ts apps/threadnote/test/unit/semantic-java-preparation.test.ts --reporter=default --reporter=json --outputFile=.context/semantic-platform/components.json
+              private_tmp="$(mktemp -d /tmp/threadnote-ci-XXXXXX)"
+              export TMPDIR="$private_tmp"
+              trap 'rm -rf -- "$private_tmp"' EXIT
+              bun --eval 'import {runtimeOpenPrivateWriterDirectory,runtimeClosePrivateWriterDirectory} from "@threadnote/platform/system"; const handle=runtimeOpenPrivateWriterDirectory(Bun.env.TMPDIR); runtimeClosePrivateWriterDirectory(handle); console.log("Native private musl temporary storage proof passed; production qualification remains false");'
+              bun --bun vitest run packages/platform/test/system-stable-read.test.ts packages/platform/test/writer-system/linux-acl.test.ts packages/platform/test/writer-system/provider-process.test.ts apps/threadnote/test/unit/semantic-runtime.test.ts apps/threadnote/test/unit/semantic-writer-process.test.ts apps/threadnote/test/unit/semantic-operations.test.ts apps/threadnote/test/unit/semantic-mcp-cli.test.ts apps/threadnote/test/unit/semantic-python.test.ts apps/threadnote/test/unit/semantic-go-rust.test.ts apps/threadnote/test/unit/semantic-java-preparation.test.ts --reporter=default --reporter=json --outputFile=.context/semantic-platform/components.json
               bun run build
               cp dist/release.json .context/semantic-platform/release.json
               sha256sum dist/threadnote > .context/semantic-platform/binary.sha256

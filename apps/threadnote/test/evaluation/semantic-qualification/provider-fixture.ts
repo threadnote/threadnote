@@ -20,6 +20,7 @@ import {providerFixture} from '../../../../../tools/semantic/semantic_provider_f
 import {checkProbeDefinition, checkProbeReferences} from '../../../../../tools/semantic/semantic_probe_assertions.js';
 import {checkProposalStatusTransportParity} from './transport-oracle.js';
 import type {Client} from '@modelcontextprotocol/sdk/client/index.js';
+import {SemanticReadinessResult} from '../../../src/semantic/agent_query_protocol.js';
 
 const digest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
 const common = {
@@ -486,6 +487,95 @@ export function fixtureSymbolPosition(
 }
 
 /** Fixed authored fixture operations, never caller-supplied results or assertions. */
+/** Explicit observable startup, followed by the original first query; never a synthetic navigation warmup. */
+export async function runProviderReadiness(
+  input: ProviderInputs,
+  project: string,
+  sources: Record<string, string>,
+  run: QualificationCli,
+  client: Client,
+  within: <A>(promise: Promise<A>, milliseconds: number) => Promise<A>,
+  deadline: number,
+  results: unknown[],
+) {
+  const request = {
+    action: 'start',
+    callerCwd: project,
+    file: join(project, EffectRecord.keys(sources)[1]),
+    language: input.language,
+    ...providerEnvironment(input),
+  };
+  const record: {
+    operation: string;
+    request: object;
+    fullScenarioQualified: false;
+    observations: unknown[];
+    cancellation?: unknown;
+  } = {
+    operation: 'explicit-saved-disk-readiness',
+    request,
+    fullScenarioQualified: false,
+    observations: [],
+  };
+  results.push(record);
+  const start = Schema.decodeUnknownSync(SemanticReadinessResult, {onExcessProperty: 'error'})(
+    (await run(['semantic', 'readiness', '--json'], request)).value,
+  );
+  record.observations.push(redactCapabilities(start));
+  assert.ok(start.status === 'ok' && start.job, 'Explicit startup accepted a private job');
+  const job = start.job;
+  const call = async (action: 'status' | 'cancel', milliseconds: number) => {
+    const response = await within(
+      client.callTool(
+        {name: 'semantic_readiness', arguments: {request: {action, callerCwd: project, job}}},
+        undefined,
+        {timeout: Math.max(1, milliseconds)},
+      ),
+      milliseconds,
+    );
+    assert.ok(
+      !response.isError &&
+        EffectArray.isArray(response.content) &&
+        response.content.length === 1 &&
+        isJsonObject(response.content[0]) &&
+        response.content[0].type === 'text' &&
+        typeof response.content[0].text === 'string',
+      'One canonical readiness response',
+    );
+    return Schema.decodeUnknownSync(SemanticReadinessResult, {onExcessProperty: 'error'})(
+      JSON.parse(response.content[0].text),
+    );
+  };
+  let ready = false;
+  try {
+    let result = await call('status', Math.min(15000, deadline - Date.now()));
+    for (;;) {
+      record.observations.push(redactCapabilities(result));
+      assert.ok(result.status === 'ok', 'Startup refused or lost its exact bound job');
+      if (result.progress.state === 'ready') {
+        assert.equal(result.progress.cleanup, 'retained', 'Real prepared session remains owned');
+        ready = true;
+        return;
+      }
+      assert.ok(
+        ['accepted', 'running'].includes(result.progress.state),
+        'Startup terminal failure precedes navigation',
+      );
+      assert.ok(Date.now() < deadline, 'Complete case deadline expired during explicit startup');
+      await within(new Promise<void>(resolve => setTimeout(resolve, 250)), deadline - Date.now());
+      result = await call('status', Math.min(15000, deadline - Date.now()));
+    }
+  } finally {
+    if (!ready) {
+      try {
+        record.cancellation = redactCapabilities(await call('cancel', 250));
+      } catch {
+        record.cancellation = {status: 'unknown', cleanup: 'unknown'};
+      }
+    }
+  }
+}
+
 export async function runProviderNavigation(
   input: ProviderInputs,
   project: string,

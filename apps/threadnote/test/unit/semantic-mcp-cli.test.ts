@@ -37,7 +37,7 @@ import {MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
 import {formatMemoryDocument, type MemoryMetadata} from '@threadnote/memory/document';
 import {canonicalFileUri, type Observation} from '@threadnote/semantic/contracts';
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
+import {CommandExecutor, runCommandEffect, type CommandExecutionError} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {compileContextBrief, compileSemanticContextKnowledge} from '../../src/context_brief/index.js';
@@ -50,6 +50,8 @@ import {makeSemanticAgentDiskQueries} from '../../src/semantic/agent_query_store
 import type {SemanticSession} from '../../src/semantic/provider.js';
 import {ReadyRecallReadWorkerAdmission} from '../../src/recall/ready_read_boundary.js';
 import {loadRecallIndexData} from '@threadnote/recall/index';
+import {contextBriefNativeReadResponseSchema} from '../../src/context_brief/native_read_boundary.js';
+import {CONTEXT_BRIEF_NATIVE_READ_WORKER_ARGUMENT} from '../../src/worker_protocol.js';
 
 // This fixture grants protocol tests only their own current profile bytes; native ACL proof is tested separately.
 const protocolProfiles = new Map<
@@ -123,7 +125,62 @@ const trustProtocolProfile = (config: RuntimeConfig, worktree: string) =>
 const memoryByUri = <A extends {readonly uri: string}>(cards: readonly A[], uri: string) =>
   Option.getOrUndefined(EffectArray.findFirst(cards, card => card.uri === uri));
 
-const citationFailureEvidence = (candidate: unknown, gaps: unknown) => {
+const nativeCitationReplyDiagnostic = (stdout: string): readonly string[] => {
+  try {
+    const response = Schema.decodeSync(Schema.fromJsonString(contextBriefNativeReadResponseSchema))(stdout);
+    if (response.operation !== 'citations') return [];
+    if (!response.ok) return [response.failure];
+    return EffectArray.take(
+      EffectArray.flatMap(response.value, validation =>
+        EffectArray.map(validation.receipts, receipt => `${receipt.status}:${receipt.reason}`),
+      ),
+      8,
+    );
+  } catch {
+    return ['invalid-native-response'];
+  }
+};
+it('keeps native citation diagnostics bounded and excludes opaque response fields', () => {
+  fc.assert(
+    fc.property(
+      fc.string({maxLength: 32}),
+      fc.constantFrom('graph-stale', 'extractor-mismatch', 'validation-error'),
+      (value, reason) => {
+        const secret = `opaque-private:${value}`;
+        const receipt = {
+          candidateCount: 0,
+          citationId: secret,
+          coverage: 'incomplete',
+          kind: 'symbol',
+          observedAt: secret,
+          reason,
+          status: 'unknown',
+          strategy: 'none',
+          validatorVersion: 1,
+          sourcePath: secret,
+        };
+        const response = {
+          protocol: 1,
+          binding: secret,
+          commandsJoined: true,
+          ok: true,
+          operation: 'citations',
+          value: [{uri: secret, receipts: EffectArray.makeBy(10, () => receipt)}],
+        };
+        const diagnostic = nativeCitationReplyDiagnostic(JSON.stringify(response));
+        expect(diagnostic).toEqual(EffectArray.makeBy(8, () => `unknown:${reason}`));
+        expect(JSON.stringify(diagnostic)).not.toContain('opaque-private:');
+        expect(
+          nativeCitationReplyDiagnostic(
+            JSON.stringify({...response, value: [{uri: secret, receipts: [{...receipt, reason: secret}]}]}),
+          ),
+        ).toEqual(['invalid-native-response']);
+      },
+    ),
+    {numRuns: 12},
+  );
+});
+const citationFailureEvidence = (candidate: unknown, gaps: unknown, nativeReads: readonly string[] = []) => {
   const selected: Record<string, unknown> = {};
   if (isJsonObject(candidate)) {
     for (const key of [
@@ -137,7 +194,7 @@ const citationFailureEvidence = (candidate: unknown, gaps: unknown) => {
     ])
       if (key in candidate) selected[key] = candidate[key];
   }
-  return EffectString.slice(0, 2048)(JSON.stringify({candidate: selected, gaps}));
+  return EffectString.slice(0, 2048)(JSON.stringify({candidate: selected, gaps, nativeReads}));
 };
 
 // Prepare the actual standalone dispatch before native reads allocate their shared deadline.
@@ -182,6 +239,27 @@ const memoryContextFixture = Effect.gen(function* () {
   const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn-semantic-memory-'}));
   const home = path.join(root, 'home');
   const repository = path.join(root, 'repository');
+  const command = yield* CommandExecutor;
+  const nativeReadReplies: {stdout?: string; error?: CommandExecutionError['_tag']}[] = [];
+  const observedCommand = CommandExecutor.of({
+    ...command,
+    execute: (executable, args, options) => {
+      const observed =
+        args.includes(CONTEXT_BRIEF_NATIVE_READ_WORKER_ARGUMENT) && options?.env?.THREADNOTE_HOME === home;
+      return command.execute(executable, args, options).pipe(
+        Effect.tap(reply =>
+          Effect.sync(() => {
+            if (observed && nativeReadReplies.length < 8) nativeReadReplies.push({stdout: reply.stdout});
+          }),
+        ),
+        Effect.tapError(error =>
+          Effect.sync(() => {
+            if (observed && nativeReadReplies.length < 8) nativeReadReplies.push({error: error._tag});
+          }),
+        ),
+      );
+    },
+  });
   yield* fs.makeDirectory(repository);
   yield* fs.makeDirectory(path.join(home, 'semantic', 'profiles'), {recursive: true, mode: 0o700});
   const contextSystem = Option.isSome(yield* Effect.serviceOption(ReadyRecallReadWorkerAdmission))
@@ -301,6 +379,7 @@ const memoryContextFixture = Effect.gen(function* () {
   > = (currentConfig, input, evidence, target) =>
     compileSemanticContextKnowledge(currentConfig, input, evidence, target).pipe(
       Effect.provideService(SystemInfo, contextSystem),
+      Effect.provideService(CommandExecutor, observedCommand),
       Effect.tap(knowledge =>
         Effect.sync(() => {
           compilerCalls++;
@@ -551,6 +630,14 @@ const memoryContextFixture = Effect.gen(function* () {
     rename,
     document,
     prepareMemory: loadRecallIndexData(config, {includeInactive: false}),
+    // Decode only after compilation: diagnostics must not spend the native read's shared deadline.
+    nativeReadDiagnostics: () =>
+      EffectArray.take(
+        EffectArray.flatMap(nativeReadReplies, reply =>
+          reply.error === undefined ? nativeCitationReplyDiagnostic(reply.stdout ?? '') : [reply.error],
+        ),
+        8,
+      ),
     diagnostics,
     rawContext: runSemanticAgentQueryWith(host, config, request),
     closing: (value: Observation | undefined) => {
@@ -677,13 +764,18 @@ describe('semantic context with canonical citation-backed memory', () => {
         const cards = knowledge.brief?.durableDecisions ?? [];
         expect(
           memoryByUri(cards, 'threadnote://memory/tn_current'),
-          citationFailureEvidence(memoryByUri(cards, 'threadnote://memory/tn_current'), knowledge.gaps),
+          citationFailureEvidence(
+            memoryByUri(cards, 'threadnote://memory/tn_current'),
+            knowledge.gaps,
+            f.nativeReadDiagnostics(),
+          ),
         ).toMatchObject({
           freshness: 'fresh',
           authority: 'user_approved',
           memoryTrust: 'approved',
           freshnessBasis: 'code-citations',
         });
+        expect(f.nativeReadDiagnostics().length).toBeGreaterThan(0);
         expect(JSON.stringify(publicKnowledge)).toContain('KEEP_CURRENT_43');
         expect(JSON.stringify(publicKnowledge)).not.toContain('NEVER_FOR_RUN');
         expect(JSON.stringify(publicKnowledge)).not.toContain('NEVER_FOREIGN_PROJECT');
@@ -728,11 +820,12 @@ describe('semantic context with canonical citation-backed memory', () => {
         yield* f.prepareMemory;
         const {knowledge, publicKnowledge} = yield* f.ask;
         const proposal = memoryByUri(knowledge.brief?.durableDecisions ?? [], 'threadnote://memory/tn_inferred');
-        expect(proposal, citationFailureEvidence(proposal, knowledge.gaps)).toMatchObject({
+        expect(proposal, citationFailureEvidence(proposal, knowledge.gaps, f.nativeReadDiagnostics())).toMatchObject({
           authority: 'agent_generated',
           memoryTrust: 'inferred',
           freshness: 'fresh',
         });
+        expect(f.nativeReadDiagnostics().length).toBeGreaterThan(0);
         expect(JSON.stringify(publicKnowledge)).toContain('PROPOSED_ONLY');
         expect(JSON.stringify(publicKnowledge)).toContain('KEEP_FILE_CONSTRAINT');
         expect(JSON.stringify(publicKnowledge)).toContain('agent_generated');
@@ -776,6 +869,22 @@ describe('semantic capability discovery', () => {
       installation: 'not-assessed',
       project: 'not-assessed',
       queries: 'requires-host-profile',
+      savedDisk: {
+        command: 'semantic readiness',
+        tool: 'semantic_readiness',
+        actions: ['start', 'status', 'cancel'],
+        limits: {
+          startupMilliseconds: 120000,
+          queryMilliseconds: 10000,
+          maxQueryMilliseconds: 45000,
+          cancelAcknowledgementMilliseconds: 250,
+          terminationMilliseconds: 2000,
+          maxJobs: 32,
+          ttlMilliseconds: 600000,
+        },
+      },
+      ownedBufferStartup: 'unimplemented',
+      authorizedJvmImport: 'unimplemented',
     });
     expect(result.readSurface.operations).toContain('diagnostics');
     expect(result.readSurface.operations).toContain('context');

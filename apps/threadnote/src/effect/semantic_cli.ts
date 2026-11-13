@@ -11,10 +11,12 @@ import {
 } from '../semantic/agent_changes.js';
 import type {CliRuntimeRunner} from './cli_runtime_contract.js';
 import {runSemanticAgentQuery, runSemanticAgentView} from '../semantic/agent_queries.js';
+import {runSemanticReadiness} from '../semantic/readiness.js';
 import {
   formatSemanticAgentQuery,
   SemanticAgentReadOperation,
   semanticAgentBufferLimits,
+  semanticReadinessLimits,
 } from '../semantic/agent_query_protocol.js';
 import {LspFault} from '../semantic/lsp_transport.js';
 import {Array as EffectArray, Console, Effect, Schema, Stdio, Stream} from 'effect';
@@ -71,6 +73,14 @@ export function semanticCapabilities(input: unknown = {}) {
       installation: 'not-assessed' as const,
       project: 'not-assessed' as const,
       queries: 'requires-host-profile' as const,
+      savedDisk: {
+        command: 'semantic readiness',
+        tool: 'semantic_readiness',
+        actions: ['start', 'status', 'cancel'],
+        limits: semanticReadinessLimits,
+      },
+      ownedBufferStartup: 'unimplemented' as const,
+      authorizedJvmImport: 'unimplemented' as const,
     },
     readSurface: {
       scope: 'api-operations' as const,
@@ -299,6 +309,19 @@ export function makeSemanticCommand(withRuntime: CliRuntimeRunner) {
       ),
       capabilities,
       query,
+      Command.make('readiness', {json: boolean('json', 'Print explicit saved-disk startup progress JSON')}, () =>
+        withRuntime(config =>
+          Effect.gen(function* () {
+            return yield* Console.log(
+              JSON.stringify(yield* runSemanticReadiness(config, yield* readSemanticAgentQueryInput)),
+            );
+          }),
+        ),
+      ).pipe(
+        Command.withDescription(
+          'Explicit saved-disk provider startup: start, status or cancel; no query warmup or writer grant',
+        ),
+      ),
       change,
       view.pipe(
         Command.withDescription(

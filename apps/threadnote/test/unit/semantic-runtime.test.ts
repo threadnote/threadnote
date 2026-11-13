@@ -4,8 +4,9 @@ import * as EffectString from 'effect/String';
 import {it as effectIt} from '@effect/vitest';
 import * as BunFileSystem from '@effect/platform-bun/BunFileSystem';
 import * as BunPath from '@effect/platform-bun/BunPath';
+import * as BunServices from '@effect/platform-bun/BunServices';
 import {cryptoLayer} from '@threadnote/platform/crypto';
-import {Cause, Deferred, Effect, Fiber, FileSystem, Layer, Path, Queue, Schema, Stream} from 'effect';
+import {Cause, Clock, Deferred, Effect, Fiber, FileSystem, Layer, Path, Queue, Schedule, Schema, Stream} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it, vi} from 'vitest';
 import fc from 'fast-check';
@@ -13,30 +14,41 @@ import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-pol
 import {SystemInfo} from '@threadnote/platform/system';
 import * as platformSystem from '@threadnote/platform/system';
 import {TestClock as SemanticTestClock} from 'effect/testing';
-import {CommandExecutor} from '@threadnote/platform/command';
+import {CommandCleanupUnconfirmed, CommandExecutor} from '@threadnote/platform/command';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {semanticTreeDigest} from '../../src/semantic/fingerprint.js';
 import * as fingerprint from '../../src/semantic/fingerprint.js';
-import {type Observation, type QueryOutcome} from '@threadnote/semantic/contracts';
-import {SemanticSetupFault, type SemanticSession, type DiagnosticDelta} from '../../src/semantic/provider.js';
+import {Observation, type QueryOutcome} from '@threadnote/semantic/contracts';
+import {makeSemanticReadinessJobs, runSemanticSelectedVerification} from '../../src/semantic/readiness_jobs.js';
+import {makeReadDeadline} from '@threadnote/platform/read_deadline';
+import {
+  SemanticJavaRuntimeVerifier,
+  SemanticSetupFault,
+  type SemanticSession,
+  type DiagnosticDelta,
+} from '../../src/semantic/provider.js';
 import {
   makeSemanticAdmission,
   makeSemanticCoordinator,
   ensureSemanticEndpoint,
+  serveSemanticEndpoint,
+  requestSemanticEndpoint,
   semanticCatalogKey,
   verifyJavaSemanticCandidate,
   type JavaHostCandidate,
 } from '../../src/semantic/coordinator.js';
 import * as javaProvider from '../../src/semantic/providers/java.js';
 import * as javaRuntime from '../../src/semantic/providers/java_runtime.js';
-import {TestSystemInfoLayer} from '../helpers/system-layer.js';
+import {TestCommandExecutorLayer, TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {
   LspFrameDecoder,
   LspFault,
   encodeLspFrame,
   makeLspClient,
   spawnLspWire,
+  SemanticWireStartup,
   type LspWire,
+  type WireStop,
 } from '../../src/semantic/lsp_transport.js';
 type Message = Parameters<LspWire['send']>[0];
 const fakeWire = Effect.gen(function* () {
@@ -112,8 +124,27 @@ const javaCoordinatorFixture = Effect.fn('test.javaCoordinatorFixture')(function
     documentVersion: 1,
     projectEpoch: 0,
   };
-  const candidate = javaCandidate();
+  const defaultCandidate = javaCandidate();
+  const sdkDirectory = path.join(root, 'sdk');
+  const candidate = {
+    ...defaultCandidate,
+    runtimeCandidate: {
+      ...defaultCandidate.runtimeCandidate,
+      serverDirectory: path.join(sdkDirectory, 'jdtls'),
+      runtimeJavaHome: path.join(sdkDirectory, 'jdk25'),
+      projectJavaHome: path.join(sdkDirectory, 'jdk21'),
+    },
+  };
+  yield* fs.makeDirectory(sdkDirectory, {mode: 0o700});
+  for (const directory of [
+    candidate.runtimeCandidate.serverDirectory,
+    candidate.runtimeCandidate.runtimeJavaHome,
+    candidate.runtimeCandidate.projectJavaHome,
+  ])
+    yield* fs.makeDirectory(directory, {mode: 0o700});
   const events: string[] = [];
+  const upsertStarted = yield* Deferred.make<void>();
+  const terminated = yield* Deferred.make<void>();
   const control: {
     failAfterPid: boolean;
     rejectSdk: boolean;
@@ -121,6 +152,8 @@ const javaCoordinatorFixture = Effect.fn('test.javaCoordinatorFixture')(function
     graceful: boolean;
     available: boolean;
     afterCommit: Effect.Effect<void, unknown>;
+    blockUpsert: boolean;
+    terminations: number;
   } = {
     failAfterPid: false,
     rejectSdk: false,
@@ -128,6 +161,8 @@ const javaCoordinatorFixture = Effect.fn('test.javaCoordinatorFixture')(function
     graceful: true,
     available: true,
     afterCommit: Effect.void,
+    blockUpsert: false,
+    terminations: 0,
   };
   const constructions: {options: javaProvider.JavaAnalysisOptions; isActive: () => boolean}[] = [];
   let finishes = 0;
@@ -157,12 +192,21 @@ const javaCoordinatorFixture = Effect.fn('test.javaCoordinatorFixture')(function
   );
   const factory = vi.spyOn(javaProvider, 'makeJavaAnalysis').mockImplementation((options, started, active) =>
     Effect.gen(function* () {
+      yield* Schema.decodeEffect(Observation)(options.basis);
+      const startup = yield* SemanticWireStartup;
+      startup?.termination(
+        Effect.gen(function* () {
+          control.terminations++;
+          yield* Deferred.succeed(terminated, undefined);
+        }),
+      );
       const isActive = active ?? (() => true);
       constructions.push({options: structuredClone(options), isActive});
       let ended = false;
       const finish = Effect.sync(() => {
         if (!ended) finishes++;
         ended = true;
+        startup?.cleanup('drained');
         return {code: 0, drained: true, stdioClosed: true, forced: false, fault: undefined};
       });
       yield* started(process.pid, finish);
@@ -177,7 +221,11 @@ const javaCoordinatorFixture = Effect.fn('test.javaCoordinatorFixture')(function
       });
       const api = {
         upsert: (observation: Observation, _text: string, language: string) =>
-          Effect.sync(() => {
+          Effect.gen(function* () {
+            if (control.blockUpsert) {
+              yield* Deferred.succeed(upsertStarted, undefined);
+              return yield* Effect.never.pipe(Effect.ensuring(Deferred.await(terminated)));
+            }
             expect(language).toBe('java');
             documents.set(observation.uri, structuredClone(observation));
             return observation;
@@ -235,6 +283,8 @@ const javaCoordinatorFixture = Effect.fn('test.javaCoordinatorFixture')(function
     candidate,
     events,
     control,
+    upsertStarted,
+    terminated,
     constructions,
     factory,
     sdk,
@@ -245,6 +295,331 @@ const javaCoordinatorFixture = Effect.fn('test.javaCoordinatorFixture')(function
 
 describe.skipIf(process.platform === 'win32')('Java coordinator registration', () => {
   effectIt.layer(JavaCoordinatorTestLayer, {buildPerTest: true})(layerIt => {
+    // Positive delegation requires actual source-owned host pins; this is not all-platform SDK proof.
+    layerIt.effect.skipIf(javaRuntime.javaRuntimePinsForHost() === undefined)(
+      'Java runtime delegates repeated proof to the host port and retains the original refusing default',
+      () =>
+        Effect.gen(function* () {
+          const f = yield* javaCoordinatorFixture();
+          f.sdk.mockRestore();
+          let proofs = 0;
+          const runtime = yield* javaRuntime.makeJavaRuntime(f.candidate.runtimeCandidate).pipe(
+            Effect.provideService(SemanticJavaRuntimeVerifier, candidate =>
+              Effect.sync(() => {
+                expect(candidate).toEqual(f.candidate.runtimeCandidate);
+                proofs++;
+              }),
+            ),
+          );
+          expect(proofs).toBe(1);
+          yield* runtime.verify;
+          expect(proofs).toBe(2);
+          // These authored directories contain no SDK; absence of a trusted host port must still refuse them.
+          const refused = yield* javaRuntime.makeJavaRuntime(f.candidate.runtimeCandidate).pipe(Effect.result);
+          expect(refused._tag).toBe('Failure');
+          const original = yield* verifyJavaSemanticCandidate(f.candidate).pipe(
+            Effect.provideService(SemanticJavaRuntimeVerifier, () => Effect.void),
+            Effect.result,
+          );
+          expect(original._tag).toBe('Failure');
+          expect(f.factory).not.toHaveBeenCalled();
+        }).pipe(TestClock.withLive),
+    );
+    layerIt.effect.skipIf(javaRuntime.javaRuntimePinsForHost() !== undefined)(
+      'Java runtime refuses an unvetted host before invoking the host verifier port',
+      () =>
+        Effect.gen(function* () {
+          const f = yield* javaCoordinatorFixture();
+          f.sdk.mockRestore();
+          let proofs = 0;
+          const refused = yield* javaRuntime.makeJavaRuntime(f.candidate.runtimeCandidate).pipe(
+            Effect.provideService(SemanticJavaRuntimeVerifier, () =>
+              Effect.sync(() => {
+                proofs++;
+              }),
+            ),
+            Effect.result,
+          );
+          expect(refused).toMatchObject({
+            _tag: 'Failure',
+            failure: {_tag: 'SemanticSetupFault', providerId: 'jdtls', reason: 'incompatible', component: 'provider'},
+          });
+          expect(proofs).toBe(0);
+          const original = yield* javaRuntime.makeJavaRuntime(f.candidate.runtimeCandidate).pipe(Effect.result);
+          expect(original._tag).toBe('Failure');
+          const candidate = yield* verifyJavaSemanticCandidate(f.candidate).pipe(
+            Effect.provideService(SemanticJavaRuntimeVerifier, () => Effect.void),
+            Effect.result,
+          );
+          expect(candidate._tag).toBe('Failure');
+          expect(f.factory).not.toHaveBeenCalled();
+        }).pipe(TestClock.withLive),
+    );
+    layerIt.effect('interrupts a blocked owned semantic query when its HTTP client aborts', () =>
+      Effect.gen(function* () {
+        const f = yield* javaCoordinatorFixture();
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const interrupted = yield* Deferred.make<void>();
+        let delegated = 0;
+        const original = f.factory.getMockImplementation();
+        if (!original) throw new Error('Expected the owned analysis fixture');
+        f.factory.mockImplementation((...arguments_) =>
+          original(...arguments_).pipe(
+            Effect.map(analysis => ({
+              ...analysis,
+              api: {
+                ...analysis.api,
+                query: (...request: Parameters<SemanticSession['query']>) =>
+                  Effect.gen(function* () {
+                    yield* Deferred.succeed(entered, undefined);
+                    // Block before any query result or Java diagnostic publication commits.
+                    yield* Deferred.await(release).pipe(
+                      Effect.onInterrupt(() => Deferred.succeed(interrupted, undefined)),
+                    );
+                    delegated++;
+                    return yield* analysis.api.query(...request);
+                  }),
+              },
+            })),
+          ),
+        );
+        const coordinator = yield* f.make();
+        const directory = yield* f.fs.realPath(
+          yield* f.fs.makeTempDirectoryScoped({prefix: 'tn-abort-', directory: '/tmp'}),
+        );
+        const token = sha256HexSync('owned-http-abort');
+        const endpoint = yield* serveSemanticEndpoint(coordinator, {directory, token, worktree: f.basis.worktree});
+        const attachedReply = yield* requestSemanticEndpoint(endpoint.socket, token, {
+          operation: 'attach',
+          observation: f.basis,
+          text: f.text,
+          language: 'java',
+          environment: 'prepared-main',
+        });
+        const attachment = Schema.Struct({observation: Observation, capability: Schema.String});
+        const refusal = Schema.decodeUnknownResult(
+          Schema.Struct({
+            status: Schema.Literals(['unavailable', 'experimental', 'ok']),
+            reason: Schema.optionalKey(
+              Schema.Literals([
+                'protocol',
+                'prerequisite',
+                'rejected',
+                'setup',
+                'capacity',
+                'conflict',
+                'closing',
+                'stale',
+              ]),
+            ),
+            setup: Schema.optionalKey(
+              Schema.Struct({
+                component: Schema.Literals(['provider', 'sdk', 'runtime', 'project']),
+                reason: Schema.Literals(['missing', 'incompatible', 'unavailable']),
+              }),
+            ),
+          }),
+        )(attachedReply);
+        const safeRefusal =
+          refusal._tag === 'Success'
+            ? {
+                status: refusal.success.status,
+                reason: refusal.success.reason,
+                kind: refusal.success.setup?.component,
+                code: refusal.success.setup?.reason,
+              }
+            : {status: 'unrecognized-refusal'};
+        expect(Schema.is(attachment)(attachedReply), JSON.stringify(safeRefusal)).toBe(true);
+        const attached = yield* Schema.decodeUnknownEffect(attachment)(attachedReply);
+        const query = () =>
+          requestSemanticEndpoint(
+            endpoint.socket,
+            token,
+            {
+              operation: 'query',
+              observation: attached.observation,
+              query: 'symbols',
+              milliseconds: 10000,
+            },
+            attached.capability,
+          );
+        yield* Effect.gen(function* () {
+          const client = yield* Effect.forkChild(query());
+          yield* Deferred.await(entered);
+          expect(delegated).toBe(0);
+          yield* Fiber.interrupt(client);
+          const clientExit = yield* Fiber.await(client);
+          expect(clientExit._tag).toBe('Failure');
+          // Real loopback synchronization only; this is not a250ms cancellation/native-drain benchmark.
+          const cancelled = yield* Deferred.await(interrupted).pipe(Effect.timeoutOption(1000));
+          expect(cancelled._tag, 'The server query must observe client abort before the release gate opens').toBe(
+            'Some',
+          );
+          expect(delegated).toBe(0);
+        }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)));
+        expect(yield* query()).toMatchObject({status: 'ok'});
+        expect(delegated).toBe(1);
+        expect(yield* f.fs.readFileString(f.file)).toBe(f.text);
+        expect(f.control.terminations).toBe(0);
+        yield* requestSemanticEndpoint(
+          endpoint.socket,
+          token,
+          {operation: 'close', observation: attached.observation},
+          attached.capability,
+        );
+        expect(f.finishes()).toBe(1);
+        expect(yield* coordinator.status).toMatchObject({providers: 0, queued: 0, quarantined: 0});
+      }).pipe(TestClock.withLive),
+    );
+    layerIt.effect(
+      'cold saved-disk creation supplies the computed configuration digest to the real provider basis boundary',
+      () =>
+        Effect.gen(function* () {
+          const f = yield* javaCoordinatorFixture();
+          const coordinator = yield* f.make();
+          const basis = {...f.basis, view: {...f.basis.view, kind: 'disk' as const}, documentVersion: null};
+          const result = yield* coordinator.attach(basis, f.text, 'java', 'prepared-main');
+          const expected = yield* semanticTreeDigest(f.project);
+          expect(f.constructions[0].options.basis.configuration).toBe(expected);
+          expect(result.observation.configuration).toBe(expected);
+          expect(Schema.is(Observation)(result.observation)).toBe(true);
+          yield* coordinator.closeView(result.observation);
+        }).pipe(TestClock.withLive),
+    );
+    layerIt.effect(
+      'configuration verification cleanup uncertainty quarantines admitted creation with or without startup control',
+      () =>
+        Effect.gen(function* () {
+          for (const supplied of [false, true]) {
+            const f = yield* javaCoordinatorFixture();
+            let unknown = false;
+            const deadline = yield* makeReadDeadline(120000);
+            const error = CommandCleanupUnconfirmed.make({
+              executable: 'fixture',
+              args: [],
+              message: 'Owned cleanup unconfirmed',
+            });
+            const coordinator = yield* makeSemanticCoordinator({
+              enabled: true,
+              dataHome: f.home,
+              java: f.candidate,
+              worktree: f.basis.worktree,
+              verifySelected: (_id, _candidate, _runtime, configurationOnly) =>
+                configurationOnly ? Effect.fail(error) : Effect.succeed(sha256HexSync('verified')),
+            });
+            const result = yield* Effect.exit(
+              coordinator.attach(
+                f.basis,
+                f.text,
+                'java',
+                'prepared-main',
+                supplied
+                  ? {
+                      deadline,
+                      remaining: Effect.succeed(118000),
+                      stage: () => Effect.void,
+                      termination: () => {},
+                      cleanup: disposition => {
+                        unknown ||= disposition === 'unknown';
+                      },
+                      cleanupUnknown: () => unknown,
+                    }
+                  : undefined,
+              ),
+            );
+            expect(result._tag).toBe('Failure');
+            if (result._tag === 'Failure')
+              expect(Cause.findErrorOption(result.cause)).toMatchObject({value: {_tag: 'CommandCleanupUnconfirmed'}});
+            expect(unknown).toBe(supplied);
+            expect(f.factory).not.toHaveBeenCalled();
+            expect(yield* coordinator.status).toMatchObject({providers: 1, quarantined: 1, imports: 0});
+          }
+        }).pipe(TestClock.withLive),
+    );
+    layerIt.effect(
+      'an uncertain warm configuration worker also conserves the original session reservation on close',
+      () =>
+        Effect.gen(function* () {
+          const f = yield* javaCoordinatorFixture();
+          let uncertain = false;
+          const configuration = yield* semanticTreeDigest(f.project);
+          const error = CommandCleanupUnconfirmed.make({
+            executable: 'fixture',
+            args: [],
+            message: 'Owned cleanup unconfirmed',
+          });
+          const coordinator = yield* makeSemanticCoordinator({
+            enabled: true,
+            dataHome: f.home,
+            java: f.candidate,
+            worktree: f.basis.worktree,
+            verifySelected: (_id, _candidate, _runtime, configurationOnly) =>
+              !configurationOnly
+                ? Effect.succeed(sha256HexSync('verified'))
+                : uncertain
+                  ? Effect.fail(error)
+                  : Effect.succeed(configuration),
+          });
+          const attached = yield* coordinator.attach(f.basis, f.text, 'java', 'prepared-main');
+          uncertain = true;
+          const result = yield* coordinator.use(attached.observation, 1000, () => Effect.void).pipe(Effect.exit);
+          expect(result._tag).toBe('Failure');
+          if (result._tag === 'Failure')
+            expect(Cause.findErrorOption(result.cause)).toMatchObject({value: {_tag: 'CommandCleanupUnconfirmed'}});
+          yield* coordinator.closeView(attached.observation);
+          expect(yield* coordinator.status).toMatchObject({providers: 1, imports: 0, quarantined: 1});
+          expect(f.finishes()).toBe(1);
+        }).pipe(TestClock.withLive),
+    );
+    layerIt.effect('warm saved-disk startup binds its cancellation to the retained session capability', () =>
+      Effect.gen(function* () {
+        const f = yield* javaCoordinatorFixture().pipe(TestClock.withLive);
+        const coordinator = yield* f.make().pipe(TestClock.withLive);
+        const basis = {...f.basis, view: {...f.basis.view, kind: 'disk' as const}, documentVersion: null};
+        yield* coordinator.attach(basis, f.text, 'java', 'prepared-main').pipe(TestClock.withLive);
+        f.control.blockUpsert = true;
+        const source = {
+          worktree: basis.worktree,
+          project: basis.project,
+          uri: basis.uri,
+          language: 'java' as const,
+          environment: 'prepared-main',
+          profile: sha256HexSync('profile'),
+          principal: sha256HexSync('principal'),
+        };
+        const jobs = yield* makeSemanticReadinessJobs({
+          worktree: basis.worktree,
+          prepare: (_source, _content, control) =>
+            coordinator
+              .attach(basis, f.text, 'java', 'prepared-main', control)
+              .pipe(Effect.map(result => result.observation)),
+          current: () => Effect.succeed(true),
+          close: coordinator.closeView,
+        });
+        const started = yield* jobs.start(source, basis.content);
+        if (started.status !== 'ok' || !started.job) throw new Error('Missing startup job');
+        yield* Deferred.await(f.upsertStarted);
+        const scope = [source.profile, source.principal, source.worktree] as const;
+        const cancelled = yield* jobs.cancel(started.job, ...scope);
+        expect(cancelled).toMatchObject({status: 'ok', progress: {state: 'cancelling', cleanup: 'pending'}});
+        expect(f.control.terminations).toBe(0);
+        yield* TestClock.adjust(2000);
+        yield* Deferred.await(f.terminated);
+        yield* Effect.yieldNow;
+        expect(f.control.terminations).toBe(1);
+        expect(f.constructions).toHaveLength(1);
+        const terminal = yield* jobs.status(started.job, ...scope).pipe(
+          Effect.tap(() => Effect.yieldNow),
+          Effect.repeat({until: result => result.status === 'ok' && result.progress.state === 'cancelled'}),
+        );
+        expect(terminal).toMatchObject({
+          status: 'ok',
+          progress: {state: 'cancelled', cleanup: 'drained'},
+        });
+        expect(yield* coordinator.status.pipe(TestClock.withLive)).toMatchObject({providers: 0, quarantined: 0});
+      }),
+    );
     layerIt.effect('reports separate Java SDK requirements without starting a provider', () =>
       Effect.gen(function* () {
         const f = yield* javaCoordinatorFixture();
@@ -475,23 +850,15 @@ describe.skipIf(process.platform === 'win32')('Java coordinator registration', (
           expect(yield* Effect.flip(verifyJavaSemanticCandidate(candidate))).toMatchObject({code: 'prerequisite'});
         expect(f.sdk).not.toHaveBeenCalled();
         f.control.rejectSdk = true;
-        expect(yield* Effect.flip(f.make())).toMatchObject({
+        const coordinator = yield* f.make();
+        expect(f.sdk).not.toHaveBeenCalled();
+        expect(yield* Effect.flip(coordinator.attach(f.basis, f.text, 'java', 'prepared-main'))).toMatchObject({
           _tag: 'SemanticSetupFault',
           component: 'sdk',
           reason: 'incompatible',
         });
-        expect(
-          yield* Effect.flip(
-            ensureSemanticEndpoint({
-              enabled: true,
-              dataHome: f.home,
-              java: f.candidate,
-              worktree: f.basis.worktree,
-              runtimeIdentity: sha256HexSync('private fixture runtime'),
-            }),
-          ),
-        ).toMatchObject({_tag: 'SemanticSetupFault', component: 'sdk', reason: 'incompatible'});
-        expect(yield* f.fs.readDirectory(f.home)).toEqual([]);
+        expect(yield* coordinator.status).toMatchObject({providers: 0, imports: 0, quarantined: 0});
+        expect(yield* f.fs.exists(f.path.join(f.home, 'semantic', 'environments'))).toBe(false);
         expect(f.factory).not.toHaveBeenCalled();
       }).pipe(TestClock.withLive),
     );
@@ -1230,6 +1597,201 @@ describe.skipIf(process.platform === 'win32')('semantic real process transport',
     'observes actual owned process cleanup for $mode',
     ({mode, graceful}) =>
       Effect.gen(function* () {
+        let failureEvidence: ((stop: WireStop & {graceful: boolean}) => string) | undefined;
+        if (mode === 'panic-on-exit') {
+          const observe = platformSystem.runtimeObserveOwnedProviderTree;
+          const terminate = platformSystem.runtimeTerminateOwnedProviderTree;
+          const close = platformSystem.runtimeCloseOwnedProviderTree;
+          const faultReason = Schema.Literals([
+            'unsupported-platform',
+            'identity',
+            'path',
+            'readonly',
+            'source-changed',
+            'private-storage',
+            'io',
+          ]);
+          const state = Schema.Literals(['running', 'drained', 'unknown']);
+          const own = (value: object, key: string): unknown => Object.getOwnPropertyDescriptor(value, key)?.value;
+          const exitCode = (value: unknown): number | null | 'unavailable' =>
+            value === null
+              ? null
+              : typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 255
+                ? value
+                : 'unavailable';
+          type ErrorCode = typeof faultReason.Type | 'not-thrown' | 'unavailable';
+          const reason = (error: unknown): ErrorCode => {
+            const value = error !== null && typeof error === 'object' ? own(error, 'reason') : undefined;
+            return Schema.is(faultReason)(value) ? value : 'unavailable';
+          };
+          type Sample = {
+            state: 'running' | 'drained' | 'unknown' | 'unavailable';
+            code: ReturnType<typeof exitCode>;
+            stdioClosed: boolean | 'unavailable';
+          };
+          let first: Sample | undefined, last: Sample | undefined;
+          type Call =
+            | 'observe-returned'
+            | 'observe-threw'
+            | 'terminate-returned'
+            | 'terminate-threw'
+            | 'kill-returned'
+            | 'kill-threw'
+            | 'close-returned'
+            | 'close-threw';
+          const changes: Sample[] = [],
+            order: Call[] = [];
+          const trace: {
+            observeCalls: number;
+            terminateCalls: number;
+            closeCalls: number;
+            changesTruncated: boolean;
+            orderTruncated: boolean;
+            observerIncomplete: boolean;
+            observeError: ErrorCode;
+            terminateError: ErrorCode;
+            closeError: ErrorCode;
+            closeOutcome: 'not-called' | 'returned' | 'threw';
+          } = {
+            observeCalls: 0,
+            terminateCalls: 0,
+            closeCalls: 0,
+            changesTruncated: false,
+            orderTruncated: false,
+            observerIncomplete: false,
+            observeError: 'not-thrown',
+            terminateError: 'not-thrown',
+            closeOutcome: 'not-called',
+            closeError: 'not-thrown',
+          };
+          // Observation failure must never replace a native result/exception or suppress its real cleanup.
+          const capture = (record: () => void) => {
+            try {
+              record();
+            } catch {
+              trace.observerIncomplete = true;
+            }
+          };
+          const recordOrder = (event: Call) => {
+            if (order.length < 16) order.push(event);
+            else {
+              order[15] = event;
+              trace.orderTruncated = true;
+            }
+          };
+          const mocks = [
+            vi.spyOn(platformSystem, 'runtimeObserveOwnedProviderTree').mockImplementation(handle => {
+              try {
+                const result = observe(handle);
+                capture(() => {
+                  trace.observeCalls++;
+                  recordOrder('observe-returned');
+                  const nativeState = own(result, 'state'),
+                    stdio = own(result, 'stdioClosed');
+                  const sample: Sample = {
+                    state: Schema.is(state)(nativeState) ? nativeState : 'unavailable',
+                    code: exitCode(own(result, 'leaderExitCode')),
+                    stdioClosed: typeof stdio === 'boolean' ? stdio : 'unavailable',
+                  };
+                  if (
+                    sample.state === 'unavailable' ||
+                    sample.code === 'unavailable' ||
+                    sample.stdioClosed === 'unavailable'
+                  )
+                    trace.observerIncomplete = true;
+                  first ??= sample;
+                  if (
+                    !last ||
+                    last.state !== sample.state ||
+                    last.code !== sample.code ||
+                    last.stdioClosed !== sample.stdioClosed
+                  ) {
+                    if (changes.length < 8) changes.push(sample);
+                    else trace.changesTruncated = true;
+                  }
+                  last = sample;
+                });
+                return result;
+              } catch (error) {
+                capture(() => {
+                  trace.observeCalls++;
+                  trace.observeError = reason(error);
+                  recordOrder('observe-threw');
+                });
+                throw error;
+              }
+            }),
+            vi.spyOn(platformSystem, 'runtimeTerminateOwnedProviderTree').mockImplementation((handle, signal) => {
+              try {
+                const result = terminate(handle, signal);
+                capture(() => {
+                  trace.terminateCalls++;
+                  recordOrder(signal === 'kill' ? 'kill-returned' : 'terminate-returned');
+                });
+                return result;
+              } catch (error) {
+                capture(() => {
+                  trace.terminateCalls++;
+                  trace.terminateError = reason(error);
+                  recordOrder(signal === 'kill' ? 'kill-threw' : 'terminate-threw');
+                });
+                throw error;
+              }
+            }),
+            vi.spyOn(platformSystem, 'runtimeCloseOwnedProviderTree').mockImplementation(handle => {
+              try {
+                const result = close(handle);
+                capture(() => {
+                  trace.closeCalls++;
+                  trace.closeOutcome = 'returned';
+                  recordOrder('close-returned');
+                });
+                return result;
+              } catch (error) {
+                capture(() => {
+                  trace.closeCalls++;
+                  trace.closeOutcome = 'threw';
+                  trace.closeError = reason(error);
+                  recordOrder('close-threw');
+                });
+                throw error;
+              }
+            }),
+          ];
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => {
+              for (const mock of mocks) mock.mockRestore();
+            }),
+          );
+          failureEvidence = stop => {
+            try {
+              const fault = own(stop, 'fault');
+              const faultCode = fault !== null && typeof fault === 'object' ? own(fault, 'code') : undefined;
+              const boolean = (key: string) => {
+                const value = own(stop, key);
+                return typeof value === 'boolean' ? value : 'unavailable';
+              };
+              return JSON.stringify({
+                stop: {
+                  graceful: boolean('graceful'),
+                  drained: boolean('drained'),
+                  stdioClosed: boolean('stdioClosed'),
+                  forced: boolean('forced'),
+                  code: exitCode(own(stop, 'code')),
+                  faultCode:
+                    fault === undefined ? null : Schema.is(LspFault.fields.code)(faultCode) ? faultCode : 'unavailable',
+                },
+                first,
+                changes,
+                last,
+                order,
+                ...trace,
+              });
+            } catch {
+              return '{"observerIncomplete":true}';
+            }
+          };
+        }
         const wire = yield* spawnLspWire({
           command: process.execPath,
           args: ['apps/threadnote/test/fixtures/semantic/fake-provider.ts', mode],
@@ -1239,9 +1801,10 @@ describe.skipIf(process.platform === 'win32')('semantic real process transport',
         const client = yield* makeLspClient(wire);
         expect(yield* client.request('echo', {text: '🧵\r\n'}, 1000)).toEqual({text: '🧵\r\n'});
         const stopped = yield* client.close;
-        expect(stopped.graceful).toBe(graceful);
-        expect(stopped.drained).toBe(true);
-        expect(stopped.stdioClosed).toBe(true);
+        const evidence = failureEvidence?.(stopped);
+        expect(stopped.graceful, evidence).toBe(graceful);
+        expect(stopped.drained, evidence).toBe(true);
+        expect(stopped.stdioClosed, evidence).toBe(true);
       }).pipe(
         TestClock.withLive,
         Effect.provideService(ChildEnvironmentPolicy, {
@@ -1256,4 +1819,100 @@ describe.skipIf(process.platform === 'win32')('semantic real process transport',
       ),
     15000,
   );
+});
+
+const verifierProcessIo = Layer.mergeAll(BunServices.layer, cryptoLayer, TestSystemInfoLayer);
+const verifierProcessLayer = Layer.merge(
+  verifierProcessIo,
+  TestCommandExecutorLayer.pipe(Layer.provide(verifierProcessIo)),
+);
+describe.skipIf(process.platform === 'win32')('selected verifier process control boundary', () => {
+  effectIt.layer(verifierProcessLayer)(layerIt => {
+    layerIt.effect('keeps status and cancel responsive during real child hashing and proves owned group exit', () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const system = yield* SystemInfo;
+        const root = yield* fs.makeTempDirectoryScoped({prefix: 'tn-readiness-cpu-'});
+        const entrypoint = path.join(root, 'verifier.ts');
+        const descendant = path.join(root, 'hash.ts');
+        const ready = path.join(root, 'hashed.json');
+        const bytes = new Uint8Array(8 * 1024 * 1024).fill(23);
+        const expected = sha256HexSync(bytes);
+        yield* fs.writeFileString(
+          descendant,
+          `import {createHash} from 'node:crypto';
+import {writeFileSync} from 'node:fs';
+const bytes=new Uint8Array(8*1024*1024).fill(23);
+const digest=createHash('sha256').update(bytes).digest('hex');
+writeFileSync(${JSON.stringify(ready)},JSON.stringify({pid:process.ppid,descendant:process.pid,digest}));
+const until=Date.now()+5000;
+while(Date.now()<until)createHash('sha256').update(bytes).digest('hex');
+`,
+        );
+        yield* fs.writeFileString(
+          entrypoint,
+          `import {spawn} from 'node:child_process';
+spawn(process.execPath,[${JSON.stringify(descendant)}],{detached:false,stdio:'ignore'});
+setTimeout(()=>{},6000);
+`,
+        );
+        const basis: Observation = {
+          version: 1,
+          repository: 'verifier-test',
+          worktree: 'file:///verifier-test',
+          project: 'file:///verifier-test',
+          configuration: expected,
+          toolchain: expected,
+          provider: {id: 'gopls', version: 'fixture', generation: 1},
+          view: {kind: 'disk', id: 'fixture', owner: 'host', epoch: 0},
+          uri: 'file:///verifier-test/a.go',
+          content: expected,
+          documentVersion: null,
+          projectEpoch: 1,
+        };
+        const source = {...basis, language: 'go' as const, profile: expected, principal: expected};
+        const jobs = yield* makeSemanticReadinessJobs({
+          worktree: source.worktree,
+          prepare: () =>
+            runSemanticSelectedVerification('/private-fixture.json', 'gopls', expected, false, false).pipe(
+              Effect.provideService(SystemInfo, {
+                ...system,
+                executablePath: process.execPath,
+                developmentEntrypoint: entrypoint,
+              }),
+              Effect.as(basis),
+            ),
+          current: () => Effect.succeed(true),
+          close: () => Effect.void,
+        });
+        const start = yield* jobs.start(source, expected);
+        if (start.status !== 'ok' || !start.job) throw new Error('Missing test job');
+        yield* fs.exists(ready).pipe(Effect.repeat({while: present => !present, schedule: Schedule.spaced(10)}));
+        const child = yield* Schema.decodeEffect(
+          Schema.fromJsonString(Schema.Struct({pid: Schema.Int, descendant: Schema.Int, digest: Schema.String})),
+        )(yield* fs.readFileString(ready));
+        expect(child.digest).toBe(expected);
+        expect(system.isProcessRunning(child.pid)).toBe(true);
+        expect(system.isProcessRunning(child.descendant)).toBe(true);
+        const scope = [source.profile, source.principal, source.worktree] as const;
+        expect(yield* jobs.status(start.job, ...scope)).toMatchObject({status: 'ok', progress: {state: 'accepted'}});
+        expect(system.isProcessRunning(child.descendant)).toBe(true);
+        const before = yield* Clock.monotonicTimeNanos;
+        expect(yield* jobs.cancel(start.job, ...scope)).toMatchObject({status: 'ok', progress: {state: 'cancelling'}});
+        expect(Number((yield* Clock.monotonicTimeNanos) - before) / 1_000_000).toBeLessThan(250);
+        const terminal = yield* jobs.status(start.job, ...scope).pipe(
+          Effect.repeat({
+            until: result => result.status === 'ok' && result.progress.state === 'cancelled',
+            schedule: Schedule.spaced(10),
+          }),
+        );
+        expect(Number((yield* Clock.monotonicTimeNanos) - before) / 1_000_000).toBeLessThanOrEqual(2000);
+        expect(terminal).toMatchObject({status: 'ok', progress: {cleanup: 'drained'}});
+        expect(system.isProcessRunning(child.pid)).toBe(false);
+        expect(system.isProcessRunning(child.descendant)).toBe(false);
+        expect(system.isProcessGroupRunning?.(child.pid)).toBe(false);
+      }).pipe(TestClock.withLive),
+    );
+  });
 });

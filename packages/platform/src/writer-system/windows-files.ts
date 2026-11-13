@@ -10,11 +10,12 @@ import {
   windowsSystemLibrary,
   windowsTokenPrincipal,
   windowsWide,
+  type WindowsNativeResourceOwner,
 } from './windows-native.js';
 
 const fs = runtimeNativeDescriptorOperations();
 const administrativePrincipals = new Set(['S-1-5-18', 'S-1-5-32-544']);
-interface NativeFileIdentity {
+export interface NativeFileIdentity {
   readonly fileId: string;
   readonly volumeId: bigint;
   readonly dev: bigint;
@@ -26,11 +27,19 @@ interface NativeFileIdentity {
   readonly links: number;
   readonly size: bigint;
 }
-function library() {
+export function windowsFileLibrary() {
   return dlopen('kernel32.dll', {
     CreateFileW: {args: ['buffer', 'u32', 'u32', 'ptr', 'u32', 'u32', 'u64'], returns: 'u64'},
     CloseHandle: {args: ['u64'], returns: 'i32'},
     GetFileType: {args: ['u64'], returns: 'u32'},
+    GetLastError: {args: [], returns: 'u32'},
+    LocalFree: {args: ['u64'], returns: 'u64'},
+    ReadFile: {args: ['u64', 'buffer', 'u32', 'buffer', 'ptr'], returns: 'i32'},
+    WriteFile: {args: ['u64', 'buffer', 'u32', 'buffer', 'ptr'], returns: 'i32'},
+    SetFilePointerEx: {args: ['u64', 'i64', 'buffer', 'u32'], returns: 'i32'},
+    SetEndOfFile: {args: ['u64'], returns: 'i32'},
+    FlushFileBuffers: {args: ['u64'], returns: 'i32'},
+    GetComputerNameW: {args: ['buffer', 'buffer'], returns: 'i32'},
     GetDriveTypeW: {args: ['buffer'], returns: 'u32'},
     GetFileInformationByHandle: {args: ['u64', 'buffer'], returns: 'i32'},
     GetFileInformationByHandleEx: {args: ['u64', 'u32', 'buffer', 'u32'], returns: 'i32'},
@@ -40,8 +49,8 @@ function library() {
     },
   });
 }
-type NativeLibrary = ReturnType<typeof library>;
-function nativeStat(lib: NativeLibrary, handle: bigint): NativeFileIdentity {
+export type NativeLibrary = ReturnType<typeof windowsFileLibrary>;
+export function windowsFileIdentity(lib: NativeLibrary, handle: bigint): NativeFileIdentity {
   if (lib.symbols.GetFileType(handle) !== 1) return fail('path');
   const info = new Uint8Array(52 + 32),
     basic = new Uint8Array(40 + 32);
@@ -106,7 +115,7 @@ function same(a: NativeFileIdentity, b: NativeFileIdentity): boolean {
     a.size === b.size
   );
 }
-function localVolume(lib: NativeLibrary, handle: bigint): void {
+export function windowsVolumeType(lib: NativeLibrary, handle: bigint) {
   const serial = new Uint32Array(1),
     maximum = new Uint32Array(1),
     flags = new Uint32Array(1),
@@ -130,7 +139,8 @@ function localVolume(lib: NativeLibrary, handle: bigint): void {
     }
     type += String.fromCharCode(unit);
   }
-  if (!end || (type !== 'NTFS' && type !== 'ReFS')) fail('private-storage');
+  if (!end || (type !== 'NTFS' && type !== 'ReFS')) return fail('private-storage');
+  return type;
 }
 export function windowsPathComponent(name: string): Uint16Array {
   if (
@@ -207,15 +217,88 @@ function sidAt(bytes: Uint8Array, offset: number, bound: number): Sid {
   for (let index = 0; index < count; index++) text += `-${view.getUint32(offset + 8 + index * 4, true)}`;
   return {text, bytes: length};
 }
-/** Strict bounded ACL decoder; callback/object/conditional ACEs and unknown layouts refuse. */
+export function windowsSecurityLibrary(owner?: WindowsNativeResourceOwner) {
+  return windowsSystemLibrary(
+    'advapi32.dll',
+    {
+      LookupAccountNameW: {
+        args: ['buffer', 'buffer', 'buffer', 'buffer', 'buffer', 'buffer', 'buffer'],
+        returns: 'i32',
+      },
+      IsValidSid: {args: ['u64'], returns: 'i32'},
+      GetLengthSid: {args: ['u64'], returns: 'u32'},
+      GetSecurityInfo: {args: ['u64', 'u32', 'u32', 'buffer', 'ptr', 'buffer', 'ptr', 'buffer'], returns: 'u32'},
+      IsValidSecurityDescriptor: {args: ['u64'], returns: 'i32'},
+      GetSecurityDescriptorLength: {args: ['u64'], returns: 'u32'},
+    },
+    owner,
+  );
+}
+/** Resolve only the native local servicing identity; no account-name or cached SID grants authority. */
+export function trustedInstallerOwner(
+  kernel: NativeLibrary,
+  borrowedSecurity?: ReturnType<typeof windowsSecurityLibrary>,
+): string {
+  const security = borrowedSecurity ?? windowsSecurityLibrary();
+  try {
+    const computer = new Uint16Array(256),
+      computerLength = new Uint32Array([computer.length]),
+      backing = new ArrayBuffer(68 + 32),
+      bytes = new Uint8Array(backing, 0, 68),
+      canary = new Uint8Array(backing, 68),
+      capacity = new Uint32Array([bytes.length]),
+      domain = new Uint16Array(256),
+      domainLength = new Uint32Array([domain.length]),
+      kind = new Uint32Array(1),
+      address = windowsAddress(bytes);
+    canary.fill(0xa5);
+    if (
+      kernel.symbols.GetComputerNameW(computer, computerLength) === 0 ||
+      computerLength[0] === 0 ||
+      computerLength[0] >= computer.length ||
+      computer[computerLength[0]] !== 0 ||
+      security.symbols.LookupAccountNameW(
+        computer,
+        windowsWide('NT SERVICE\\TrustedInstaller'),
+        bytes,
+        capacity,
+        domain,
+        domainLength,
+        kind,
+      ) === 0 ||
+      !canary.every(value => value === 0xa5)
+    )
+      return fail('private-storage');
+    // Successful cbSid is not a returned length. Bound the actual header before native SID readers.
+    const sid = sidAt(bytes, 0, bytes.length);
+    if (
+      !/^S-1-5-80-(?:[0-9]+-){4}[0-9]+$/u.test(sid.text) ||
+      security.symbols.IsValidSid(address) === 0 ||
+      security.symbols.GetLengthSid(address) !== sid.bytes
+    )
+      return fail('private-storage');
+    return sid.text;
+  } finally {
+    if (!borrowedSecurity) security.close();
+  }
+}
+/** Strict bounded ACL decoder; the optional ancestor owner must come from the fixed native resolver above.
+ * Callback/object/conditional ACEs and unknown layouts refuse; servicing identity never privileges ACE grants.
+ */
 export function assertWindowsDaclBytes(
   bytes: Uint8Array,
   ownerOffset: number,
   daclOffset: number,
   principal: string,
   privateObject: boolean,
+  nativeTrustedInstallerOwner?: string,
 ): void {
-  if (bytes.length < 20 || bytes[0] !== 1) return fail('private-storage');
+  if (
+    bytes.length < 20 ||
+    bytes[0] !== 1 ||
+    (nativeTrustedInstallerOwner !== undefined && !/^S-1-5-80-(?:[0-9]+-){4}[0-9]+$/u.test(nativeTrustedInstallerOwner))
+  )
+    return fail('private-storage');
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength),
     control = view.getUint16(2, true);
   if (
@@ -228,7 +311,13 @@ export function assertWindowsDaclBytes(
   )
     fail('private-storage');
   const owner = sidAt(bytes, ownerOffset, bytes.length).text;
-  if (privateObject ? owner !== principal : owner !== principal && !administrativePrincipals.has(owner))
+  if (
+    privateObject
+      ? owner !== principal
+      : owner !== principal &&
+        !administrativePrincipals.has(owner) &&
+        (nativeTrustedInstallerOwner === undefined || owner !== nativeTrustedInstallerOwner)
+  )
     fail('private-storage');
   const revision = bytes[daclOffset],
     length = view.getUint16(daclOffset + 2, true),
@@ -267,20 +356,39 @@ export function assertWindowsDaclBytes(
   // ACL slack is not an omitted ACE: every declared ACE was bounded and consumed above.
   if (cursor > daclOffset + length) fail('private-storage');
 }
-function privateAcl(handle: bigint, principal: string, privateObject: boolean): void {
-  const lib = windowsSystemLibrary('advapi32.dll', {
-    GetSecurityInfo: {args: ['u64', 'u32', 'u32', 'buffer', 'ptr', 'buffer', 'ptr', 'buffer'], returns: 'u32'},
-    IsValidSecurityDescriptor: {args: ['u64'], returns: 'i32'},
-    GetSecurityDescriptorLength: {args: ['u64'], returns: 'u32'},
-  });
-  const kernel = windowsKernel();
+export interface WindowsFileSecurity {
+  readonly owner: string;
+  readonly bytes: Uint8Array;
+}
+interface BorrowedSecurityResources {
+  readonly security: ReturnType<typeof windowsSecurityLibrary>;
+  readonly kernel: NativeLibrary;
+  readonly ownDescriptor: (descriptor: bigint) => () => void;
+  readonly uncertain: (backing: readonly ArrayBufferView[]) => never;
+}
+export function windowsReadFileSecurity(
+  handle: bigint,
+  principal: string,
+  privateObject: boolean,
+  servicingOwner: string | undefined,
+  borrowed?: BorrowedSecurityResources,
+): WindowsFileSecurity {
+  const lib = borrowed?.security ?? windowsSecurityLibrary();
+  const kernel = borrowed?.kernel ?? windowsKernel();
   let descriptor = 0n;
+  let releaseDescriptor: (() => void) | undefined;
   try {
     const owner = new BigUint64Array(1),
       dacl = new BigUint64Array(1),
       sd = new BigUint64Array(1);
-    if (lib.symbols.GetSecurityInfo(handle, 1, 5, owner, null, dacl, null, sd) !== 0) fail('private-storage');
+    const code = lib.symbols.GetSecurityInfo(handle, 1, 5, owner, null, dacl, null, sd);
+    if (code !== 0) {
+      // Failure does not authenticate an output allocation. Retain unexpected outputs without freeing them.
+      if (borrowed && sd[0] !== 0n) borrowed.uncertain([owner, dacl, sd]);
+      return fail('private-storage');
+    }
     descriptor = windowsHandle(sd[0]);
+    releaseDescriptor = borrowed?.ownDescriptor(descriptor);
     if (lib.symbols.IsValidSecurityDescriptor(descriptor) === 0) fail('private-storage');
     const length = lib.symbols.GetSecurityDescriptorLength(descriptor);
     if (
@@ -299,11 +407,16 @@ function privateAcl(handle: bigint, principal: string, privateObject: boolean): 
       Number(dacl[0] - descriptor),
       principal,
       privateObject,
+      privateObject ? undefined : servicingOwner,
     );
+    return {owner: sidAt(bytes, Number(owner[0] - descriptor), bytes.length).text, bytes};
   } finally {
-    if (descriptor !== 0n) kernel.symbols.LocalFree(descriptor);
-    lib.close();
-    kernel.close();
+    if (releaseDescriptor) releaseDescriptor();
+    else if (descriptor !== 0n) kernel.symbols.LocalFree(descriptor);
+    if (!borrowed) {
+      lib.close();
+      kernel.close();
+    }
   }
 }
 
@@ -315,33 +428,34 @@ export function assertWindowsPrivateProviderPath(path: string, kind: 'file' | 'd
     parts = EffectString.split(EffectString.slice(3)(path), '\\');
   if (EffectArray.some(parts, part => !part)) fail('private-storage');
   const opened: bigint[] = [];
-  const lib = library(),
+  const lib = windowsFileLibrary(),
     chain: {handle: bigint; identity: NativeFileIdentity; name: string; directory: boolean}[] = [];
   try {
+    const servicingOwner = trustedInstallerOwner(lib);
     if (lib.symbols.GetDriveTypeW(windowsWide(root)) !== 3) fail('private-storage');
     const handle = windowsHandle(
       lib.symbols.CreateFileW(windowsWide(root), 0x001200a1, 7, null, 3, 0x02000000 | 0x00200000, 0n),
     );
     opened.push(handle);
-    chain.push({handle, identity: nativeStat(lib, handle), name: root, directory: true});
+    chain.push({handle, identity: windowsFileIdentity(lib, handle), name: root, directory: true});
     for (let index = 0; index < parts.length; index++) {
       const directory = index < parts.length - 1 || kind === 'directory';
       const child = openAt(chain[chain.length - 1].handle, parts[index], directory);
       opened.push(child);
-      const identity = nativeStat(lib, child);
+      const identity = windowsFileIdentity(lib, child);
       chain.push({handle: child, identity, name: parts[index], directory});
       if (((identity.attributes & 0x10) !== 0) !== directory || (!directory && identity.links !== 1))
         fail('private-storage');
     }
     for (let index = 0; index < chain.length; index++) {
       const edge = chain[index];
-      localVolume(lib, edge.handle);
-      privateAcl(edge.handle, principal, index === chain.length - 1);
-      if (!same(edge.identity, nativeStat(lib, edge.handle))) fail('private-storage');
+      windowsVolumeType(lib, edge.handle);
+      windowsReadFileSecurity(edge.handle, principal, index === chain.length - 1, servicingOwner);
+      if (!same(edge.identity, windowsFileIdentity(lib, edge.handle))) fail('private-storage');
       if (index > 0) {
         const reopened = openAt(chain[index - 1].handle, edge.name, edge.directory);
         try {
-          if (!same(edge.identity, nativeStat(lib, reopened))) fail('private-storage');
+          if (!same(edge.identity, windowsFileIdentity(lib, reopened))) fail('private-storage');
         } finally {
           if (lib.symbols.CloseHandle(reopened) === 0) fail('io');
         }

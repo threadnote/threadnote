@@ -5,6 +5,8 @@ import {
   Array as EffectArray,
   Arbitrary,
   Clock,
+  Deferred,
+  Fiber,
   Effect,
   FileSystem,
   Layer,
@@ -31,6 +33,7 @@ import {restoreApplyJournal} from '@threadnote/semantic/journal';
 import {makeSemanticWriterAuthorityFromDirectory} from '../../src/semantic/writer_authority.js';
 import {makeSemanticHostWriterFromAuthority} from '../../src/semantic/writer.js';
 import {semanticHostProfileName} from '../../src/semantic/host_profile.js';
+import type {SemanticRequest} from '../../src/semantic/coordinator.js';
 import {SemanticWriterAdmissionRequest} from '../../src/semantic/agent_change_protocol.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 
@@ -664,6 +667,74 @@ effectIt.effect.skipIf(!supported)('actual native admission applies once and rec
       expect(yield* f.fs.readFileString(f.path.join(f.sourceRoot, '0.ts'))).toBe('later user edit');
     }),
   ).pipe(Effect.provide(layer)),
+);
+
+effectIt.effect.skipIf(!supported)(
+  'interrupted invalidation keeps the durable journal pending and never replays target writes',
+  () =>
+    TestClock.withLive(
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const handle = yield* f.admit();
+        const record = yield* f.writer.resolve(f.scope, handle);
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const interrupted = yield* Deferred.make<void>();
+        const refresh = () =>
+          f.refresh().pipe(
+            Effect.map(fresh => ({
+              ...fresh,
+              endpoint: {
+                request: (body: SemanticRequest) =>
+                  Effect.gen(function* () {
+                    expect(body.operation).toBe('agent-change');
+                    if (body.operation !== 'agent-change') throw new Error('Unexpected fixture RPC');
+                    expect(body.request.action).toBe('invalidate-for-writer');
+                    yield* Deferred.succeed(entered, undefined);
+                    yield* Deferred.await(release).pipe(
+                      Effect.onInterrupt(() => Deferred.succeed(interrupted, undefined)),
+                    );
+                    return {version: 1, status: 'invalidated'};
+                  }),
+              },
+            })),
+          );
+        yield* Effect.gen(function* () {
+          const applying = yield* Effect.forkChild(f.writer.apply(f.scope, handle, record, refresh));
+          yield* Deferred.await(entered);
+          for (const [index, target] of f.proposal.targets.entries())
+            expect(yield* f.fs.readFileString(f.path.join(f.sourceRoot, `${index}.ts`))).toBe(target.afterText);
+          const cancelled = yield* Fiber.interrupt(applying).pipe(Effect.timeoutOption(1000));
+          expect(cancelled._tag).toBe('Some');
+          expect((yield* Fiber.await(applying))._tag).toBe('Failure');
+          expect((yield* Deferred.await(interrupted).pipe(Effect.timeoutOption(1000)))._tag).toBe('Some');
+        }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)));
+        const journal = yield* f.authority.withOperation(
+          handle.operation,
+          Effect.sync(() => {
+            const file = runtimeReadPrivateWriterFile(
+              f.authority.directory,
+              handle.operation + '.journal.json',
+              16 * 1024 * 1024,
+            );
+            return restoreApplyJournal(JSON.parse(new TextDecoder().decode(file!.bytes)));
+          }),
+        );
+        expect(journal.invalidation).toBe('pending');
+        expect(EffectArray.every(journal.results, result => result.state === 'applied')).toBe(true);
+        yield* f.fs.writeFileString(f.path.join(f.sourceRoot, '0.ts'), 'later user edit');
+        const recovered = yield* f.writer.recover(f.scope, handle, record);
+        expect(recovered.invalidation).toBe('pending');
+        expect(recovered.targets[0].observed).toBe('diverged');
+        yield* f.writer.apply(f.scope, handle, record, () =>
+          Effect.die('Retry must not refresh or replay source writes'),
+        );
+        expect(yield* f.fs.readFileString(f.path.join(f.sourceRoot, '0.ts'))).toBe('later user edit');
+        for (const [index, target] of f.proposal.targets.entries())
+          if (index !== 0)
+            expect(yield* f.fs.readFileString(f.path.join(f.sourceRoot, `${index}.ts`))).toBe(target.afterText);
+      }),
+    ).pipe(Effect.provide(layer)),
 );
 
 effectIt.effect.skipIf(!supported)('started-without-journal refuses replay until explicit local discard', () =>

@@ -10,6 +10,7 @@ import {
   readProviderInputs,
   authoredActionFixture,
   runProviderActionPreview,
+  runProviderReadiness,
   uniqueFixtureAction,
   type QualificationCli,
 } from './provider-fixture.js';
@@ -19,6 +20,7 @@ import {SemanticAgentChangeRequest} from '../../../src/semantic/agent_change_pro
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {observeCandidateTransport} from './transport-lifecycle.js';
+import {shutdownFixtureProviders} from './provider-shutdown.js';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
@@ -30,7 +32,7 @@ import {tmpdir} from 'node:os';
 import {join, dirname} from 'node:path';
 import {createHash} from 'node:crypto';
 import {Ledger, qualificationInventory} from './inventory.js';
-import {candidateTargetMatchesHost, runCandidateChecks} from './candidate.js';
+import {candidateTargetMatchesHost, runCandidateChecks, settleProviderShutdown} from './candidate.js';
 import {checkMissingProfileTransportParity, checkProposalStatusTransportParity} from './transport-oracle.js';
 
 const ledger = Schema.decodeUnknownSync(Ledger)(
@@ -40,6 +42,175 @@ const ledger = Schema.decodeUnknownSync(Ledger)(
 );
 const wrap = (value: unknown) => ({structuredContent: value, content: [{type: 'text', text: JSON.stringify(value)}]});
 describe('final combined qualification preparation', () => {
+  it('owns an early shutdown rejection before delayed transport shutdown consumes the result', async () => {
+    const result = settleProviderShutdown(Promise.reject(new Error('Unknown fixture coordinator proof')));
+    // Promise/OS boundary: let a complete turn pass before the later MCP-close consumer attaches its await.
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
+    expect(await result).toEqual({status: 'unknown', reason: 'Unknown fixture coordinator proof'});
+  });
+  it('retains pre-provider slots with signal-zero absent-owner metadata and refuses missing admission proof', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'tn-cleanup-ledger-'));
+    const home = join(root, 'home'),
+      project = join(root, 'project');
+    const directory = join(home, 'semantic/admission-v1');
+    await mkdir(directory, {recursive: true});
+    await mkdir(project);
+    const file = join(directory, 'admission-v1.json');
+    try {
+      for (const quarantined of [false, true]) {
+        // Inert ledger only: there is deliberately no verifier/provider PID or group witness.
+        await writeFile(
+          file,
+          JSON.stringify({
+            version: 1,
+            slots: [{owner: {pid: 2_000_000_000, identity: 'absent-fixture-owner'}, provider: null, quarantined}],
+            tickets: [],
+          }),
+        );
+        const result = await shutdownFixtureProviders(home, project);
+        expect(result.drained).toBe(false);
+        expect(result.admission).toMatchObject({
+          resolved: false,
+          retainedSlots: 1,
+          preProviderSlots: 1,
+          quarantinedSlots: quarantined ? 1 : 0,
+          unknownObserved: quarantined,
+        });
+        expect(result.providers).toEqual([]);
+        expect(result.signalledLedgerPids).toBe(false);
+        if (process.platform !== 'win32') expect(result.workers).toEqual([{pid: 2_000_000_000, absent: true}]);
+        expect((await stat(root)).isDirectory()).toBe(true);
+      }
+      for (const malformed of [
+        {version: 1, slots: [{owner: {pid: 2_000_000_000, identity: 'unknown'}, provider: null}], tickets: []},
+        {version: 2, slots: [], tickets: []},
+        {version: 1, slots: [], tickets: 'missing-owner-proof'},
+      ]) {
+        const text = JSON.stringify(malformed);
+        await writeFile(file, text);
+        await expect(shutdownFixtureProviders(home, project)).rejects.toThrow('Unknown fixture admission');
+        expect(await readFile(file, 'utf8')).toBe(text);
+      }
+      await writeFile(file, JSON.stringify({version: 1, slots: [], tickets: []}));
+      expect(await shutdownFixtureProviders(home, project)).toMatchObject({
+        drained: true,
+        admission: {resolved: true, retainedSlots: 0, retainedTickets: 0},
+      });
+    } finally {
+      await rm(root, {recursive: true, force: true});
+    }
+  });
+  it('refuses missing host proof in observed coordinator directories while distinguishing an absent semantic root', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'tn-cleanup-host-'));
+    const home = join(root, 'home'),
+      project = join(root, 'project');
+    await mkdir(home);
+    await mkdir(project);
+    try {
+      expect(await shutdownFixtureProviders(home, project)).toMatchObject({
+        drained: true,
+        admission: {initial: 'absent', final: 'absent'},
+      });
+      const coordinator = join(home, 'semantic', EffectString.repeat(20)('a'));
+      const admission = join(home, 'semantic', 'admission-v1');
+      await mkdir(coordinator, {recursive: true});
+      await mkdir(admission);
+      const file = join(admission, 'admission-v1.json');
+      const text = JSON.stringify({version: 1, slots: [], tickets: []});
+      await writeFile(file, text);
+      await expect(shutdownFixtureProviders(home, project)).rejects.toThrow('Unknown fixture coordinator proof');
+      expect((await stat(coordinator)).isDirectory()).toBe(true);
+      expect(await readFile(file, 'utf8')).toBe(text);
+    } finally {
+      await rm(root, {recursive: true, force: true});
+    }
+  });
+  it('awaits one explicit source-bound startup and cancels a failed job before existing owned shutdown', async () => {
+    const inputs = Schema.decodeSync(ProviderInputs)({
+      version: 1,
+      language: 'go',
+      providerVersion: 'v0.24.0',
+      goVersion: '1.27.3',
+      executable: '/fixture/gopls',
+      executableDigest: EffectString.repeat(64)('a'),
+      goExecutableDigest: EffectString.repeat(64)('a'),
+      sdkDirectory: '/fixture/sdk',
+      sdkTreeDigest: EffectString.repeat(64)('a'),
+      notices: [{component: 'fixture', file: '/fixture/notice', sha256: EffectString.repeat(64)('a')}],
+    });
+    const job = {id: EffectString.repeat(64)('b'), capability: EffectString.repeat(64)('c')};
+    const limits = {
+      stage: 'checking-ready',
+      sequence: 1,
+      elapsedMilliseconds: 20,
+      startupMilliseconds: 120000,
+      queryMilliseconds: 10000,
+      maxQueryMilliseconds: 45000,
+    };
+    for (const failed of [false, true]) {
+      const requests: unknown[] = [];
+      const results: unknown[] = [];
+      const timeouts: number[] = [];
+      const run: QualificationCli = async (args, request) => {
+        expect(args).toEqual(['semantic', 'readiness', '--json']);
+        expect(request).toEqual({
+          action: 'start',
+          callerCwd: '/fixture/project',
+          file: '/fixture/project/b.go',
+          language: 'go',
+        });
+        requests.push(request);
+        return {
+          pid: 1,
+          code: 0,
+          stdout: '',
+          stderr: '',
+          value: {version: 1, status: 'ok', job, progress: {...limits, state: 'accepted', cleanup: 'not-started'}},
+        };
+      };
+      const client = new Client({name: 'inert-readiness-boundary', version: '1'});
+      client.callTool = async request => {
+        expect(request.name).toBe('semantic_readiness');
+        const body = request.arguments?.request;
+        expect(body).toMatchObject({callerCwd: '/fixture/project', job});
+        requests.push(body);
+        const cancelling = Schema.decodeUnknownSync(Schema.Struct({action: Schema.String}))(body).action === 'cancel';
+        const value = {
+          version: 1,
+          status: 'ok',
+          progress: {
+            ...limits,
+            state: cancelling ? 'cancelled' : failed ? 'failed' : 'ready',
+            cleanup: cancelling || failed ? 'unknown' : 'retained',
+          },
+        };
+        return {structuredContent: value, content: [{type: 'text' as const, text: JSON.stringify(value)}]};
+      };
+      const operation = runProviderReadiness(
+        inputs,
+        '/fixture/project',
+        {'a.go': 'package demo', 'b.go': 'package demo'},
+        run,
+        client,
+        async (promise, milliseconds) => {
+          timeouts.push(milliseconds);
+          return promise;
+        },
+        Date.now() + 1000,
+        results,
+      );
+      if (failed) await expect(operation).rejects.toThrow('Startup terminal failure');
+      else await operation;
+      expect(requests).toHaveLength(failed ? 3 : 2);
+      expect(results).toHaveLength(1);
+      expect(JSON.stringify(results)).not.toContain(job.capability);
+      expect(results[0]).toMatchObject({operation: 'explicit-saved-disk-readiness', fullScenarioQualified: false});
+      if (failed) {
+        expect(requests[2]).toMatchObject({action: 'cancel'});
+        expect(timeouts.at(-1)).toBe(250);
+      }
+    }
+  });
   it('authors finite actions and refuses ambiguous or unsafe public listings', () => {
     const expected = {
       python: ['action_case.py', 'def selected() -> int:\n    return 1\n\n_ = selected()\n'],
