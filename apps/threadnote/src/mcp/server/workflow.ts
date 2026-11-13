@@ -545,19 +545,25 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Operate the exact current task PR watch, route notices, persist dispositions before ACK, and complete delivery from readback.',
+        'Monitor an explicit PR without a workflow run, or operate an exact workflow-bound watch. Persist dispositions before ACK; standalone monitoring grants no delivery or merge authority.',
       inputSchema: {
-        runId: McpInput.requiredString('Native run'),
+        runId: McpInput.string('Workflow run; omit for standalone monitoring'),
+        prUrl: McpInput.string('Explicit GitHub PR URL for standalone setup'),
+        watchRef: McpInput.string('Opaque standalone watch identity returned by setup'),
         callerCwd: McpInput.requiredString('Bound checkout'),
-        validationRef: McpInput.string('Current validation reference; omit only for provisional inspect or stop'),
-        deliveryRef: McpInput.string('Opaque open PR delivery reference; omit only for provisional inspect or stop'),
+        validationRef: McpInput.string(
+          'Workflow-only validation reference; omit for standalone monitoring or provisional inspect/stop',
+        ),
+        deliveryRef: McpInput.string(
+          'Workflow-only PR delivery reference; omit for standalone monitoring or provisional inspect/stop',
+        ),
         ...NativeTaskPrWatchFieldsSchema.fields,
       },
     },
     Effect.fn('mcp_server.workflowTaskWatchPr')(function* ({runId, callerCwd, validationRef, deliveryRef, ...watch}) {
       const result = yield* runNativeTaskAction(config, {
         command: 'watch-pr',
-        runId,
+        ...(runId === undefined ? {} : {runId}),
         callerCwd,
         ...(validationRef === undefined ? {} : {validationRef}),
         ...(deliveryRef === undefined ? {} : {deliveryRef}),
