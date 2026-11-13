@@ -13,7 +13,7 @@ import {
   nativeWatchWorkList,
 } from './watch_output.js';
 import {readNativeWatch} from './watch_store.js';
-import {nativeWatchWakeupSchema} from './watch_notification_state.js';
+import {nativeWatchWakeupRequestSchema} from './watch_notification_state.js';
 
 export const NativeTaskPrWatchFieldsSchema = Schema.Struct({
   operation: Schema.Literals([
@@ -30,7 +30,7 @@ export const NativeTaskPrWatchFieldsSchema = Schema.Struct({
     'complete',
   ]),
   phaseId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u))),
-  wakeup: Schema.optionalKey(nativeWatchWakeupSchema),
+  wakeup: Schema.optionalKey(nativeWatchWakeupRequestSchema),
   takeover: Schema.optionalKey(Schema.Boolean),
   recoverWakeup: Schema.optionalKey(Schema.Boolean),
   noticeRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),

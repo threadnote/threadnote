@@ -205,6 +205,17 @@ describe('standalone PR watches', () => {
         expect((yield* f.call({operation: 'start', prUrl, wakeup}).pipe(Effect.result))._tag).toBe('Failure');
         f.setRemoteRepository('example/repo');
         expect((yield* f.call({operation: 'start', wakeup}).pipe(Effect.result))._tag).toBe('Failure');
+        const missingExecutable = yield* f
+          .call({
+            operation: 'start',
+            prUrl,
+            wakeup: {host: wakeup.host, threadId: wakeup.threadId},
+          })
+          .pipe(Effect.result);
+        expect(missingExecutable).toMatchObject({failure: {code: 'invalid-request'}});
+        expect(f.spawns()).toBe(0);
+        expect(yield* f.fs.exists(f.path.join(f.home, 'workflow-automations', 'native-watch-v1'))).toBe(false);
+        expect(yield* f.fs.exists(f.path.join(f.home, 'workflow-automations', 'native-v1'))).toBe(false);
         const mcp = new EffectMcpServerAdapter('test', '1', 'fixture');
         registerWorkflowTaskTool(mcp, f.config);
         const envelope = yield* mcp

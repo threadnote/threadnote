@@ -159,6 +159,9 @@ export const runStandalonePrWatch = (
           'standalone-watch-input-required',
           'Start with an explicit prUrl and actual host registration; resume with the returned watchRef.',
         );
+      const wakeup = yield* Schema.decodeUnknownEffect(nativeWatchWakeupSchema)(request.wakeup).pipe(
+        Effect.mapError(() => fail('invalid-request', 'Standalone start requires the actual host executable.')),
+      );
       const truth = yield* observePr(request.prUrl);
       binding = {
         version: 1,
@@ -166,7 +169,7 @@ export const runStandalonePrWatch = (
         prUrl: truth.url,
         baseBranch: truth.baseBranch,
         headBranch: truth.headBranch,
-        wakeup: request.wakeup,
+        wakeup,
       };
     }
     yield* verifyNativePrRepository(checkout, binding.prUrl);

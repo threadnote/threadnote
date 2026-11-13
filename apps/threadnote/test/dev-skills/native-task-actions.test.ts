@@ -5474,6 +5474,48 @@ describe('native task actions', () => {
       }).pipe(Effect.result);
       expect(missingHost).toMatchObject({failure: {code: 'host-registration-required'}});
       expect(yield* readNativeWatch(f.config, watchId)).toBeUndefined();
+      const discoveryState = yield* f.fs.readFileString(f.statePath());
+      const discoveryCommandService = yield* CommandExecutor;
+      const discoverySystemService = yield* SystemInfo;
+      const discoveryCommands = CommandExecutor.of({
+        ...discoveryCommandService,
+        execute: (executable, args, options) =>
+          EffectString.startsWith('/canonical-codex/')(executable) && args[0] === 'queue' && args[1] === '--help'
+            ? Effect.succeed({
+                exitCode: 0,
+                stderr: '',
+                stdout:
+                  'Usage: codex queue [OPTIONS]\n\nOptions:\n      --thread <THREAD>\n          Thread UUID\n      --message <MESSAGE>\n          Message body\n',
+              })
+            : discoveryCommandService.execute(executable, args, options),
+      });
+      const discoveryFileSystem = FileSystem.FileSystem.of({
+        ...f.fs,
+        realPath: candidate => {
+          if (candidate === f.home + '/.local/bin/codex') return Effect.succeed('/canonical-codex/home/codex');
+          if (candidate === '/usr/local/bin/codex') return Effect.succeed('/canonical-codex/local/codex');
+          if (candidate === '/usr/bin/codex') return Effect.succeed('/canonical-codex/system/codex');
+          return f.fs.realPath(candidate);
+        },
+      });
+      const discoverySystem = SystemInfo.of({...discoverySystemService, platform: 'linux', homeDirectory: f.home});
+      const ambiguousDiscovery = yield* runNativeTaskAction(f.config, {
+        command: 'watch-pr',
+        operation: 'start',
+        runId: 'native-run',
+        callerCwd: f.repo,
+        validationRef,
+        deliveryRef,
+        wakeup: {host: 'codex', threadId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'},
+      }).pipe(
+        Effect.provideService(FileSystem.FileSystem, discoveryFileSystem),
+        Effect.provideService(CommandExecutor, discoveryCommands),
+        Effect.provideService(SystemInfo, discoverySystem),
+        Effect.result,
+      );
+      expect(ambiguousDiscovery).toMatchObject({failure: {code: 'host-queue-incompatible'}});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(discoveryState);
+      expect(yield* readNativeWatch(f.config, watchId)).toBeUndefined();
       // Process-boundary adapter: simulate a detached collector's startup acknowledgement without
       // launching a process or contacting a provider. This exercises the real task start and watch engine.
       const commands = yield* CommandExecutor;

@@ -269,5 +269,41 @@ describe('ready citation capture without writer leases', () => {
         expect({acquired, released}).toEqual({acquired: 1, released: 1});
       }).pipe(TestClock.withLive),
     );
+
+    test.effect('distinguishes unsupported and unindexed file citations without retaining evidence', () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const capture = (ref: string) =>
+          captureMemoryCodeCitations(f.config, {callerCwd: f.repo, refs: [ref]}).pipe(
+            Effect.provideService(CodeGraphQueryService, f.query),
+            Effect.provideService(CodeGraphStore, f.store),
+            Effect.result,
+          );
+        const unsupported = yield* capture('assets/operator-proof.zzz');
+        const unindexed = yield* capture('missing.ts');
+        const evidenceDirectory = f.paths.join(f.layout.repositoryRoot, 'local-context', 'citation-evidence');
+
+        expect(unsupported._tag).toBe('Failure');
+        if (unsupported._tag === 'Failure') {
+          expect(unsupported.failure).toBeInstanceOf(MemoryCodeCitationCaptureError);
+          expect(unsupported.failure).toMatchObject({failureCode: 'code-reference-unresolved'});
+          expect(unsupported.failure.message).toContain('assets/operator-proof.zzz');
+          expect(EffectString.toLowerCase(unsupported.failure.message)).toContain('ordinary prose');
+          expect(EffectString.toLowerCase(unsupported.failure.message)).toContain('indexed source file');
+        }
+
+        expect(unindexed._tag).toBe('Failure');
+        if (unindexed._tag === 'Failure') {
+          expect(unindexed.failure).toBeInstanceOf(MemoryCodeCitationCaptureError);
+          expect(unindexed.failure).toMatchObject({failureCode: 'code-reference-unresolved'});
+          expect(unindexed.failure.message).toContain('missing.ts');
+          expect(unindexed.failure.message).toContain('exact current graph');
+          expect(unindexed.failure.message).toContain('graph-indexed repository-relative path');
+          expect(EffectString.toLowerCase(unindexed.failure.message)).not.toContain('ordinary prose');
+        }
+
+        expect(yield* f.fs.exists(evidenceDirectory)).toBe(false);
+      }),
+    );
   });
 });

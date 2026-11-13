@@ -17,6 +17,8 @@ import {readNativeWorkflowState} from './store.js';
 import {readNativeTaskView} from './task.js';
 import {runNativeWatch} from './watch.js';
 import {runNativePrWatchOperation} from './task_pr_watch.js';
+import {discoverNativeWatchCodexExecutable} from './watch_notification.js';
+import type {NativeWatchWakeup} from './watch_notification_state.js';
 import {readNativeWatch, withNativeWatchControlLock} from './watch_store.js';
 
 import type {NativeTaskCycleRuntime, NativeTaskStoredState} from './task_action_helpers.js';
@@ -377,6 +379,20 @@ export const runNativeTaskPrWatch = (
   checkout: string,
 ) =>
   Effect.gen(function* () {
+    const inputWakeup = request.wakeup;
+    let wakeup: NativeWatchWakeup | undefined;
+    if (inputWakeup?.host === 'codex' && inputWakeup.executable) {
+      wakeup = {host: 'codex', executable: inputWakeup.executable, threadId: inputWakeup.threadId};
+    } else if (inputWakeup?.host === 'cursor-cli') {
+      wakeup = inputWakeup;
+    } else if (request.operation !== 'start' && inputWakeup?.host === 'codex') {
+      return yield* fail(
+        'invalid-request',
+        'Only watch start can discover a Codex executable; renewal uses its exact registered host.',
+      );
+    }
+    if (request.operation === 'start' && !inputWakeup)
+      return yield* fail('host-registration-required', 'Start needs the actual host registration configuration.');
     if (!request.validationRef && !request.deliveryRef) {
       if ((request.operation !== 'inspect' && request.operation !== 'stop') || !request.phaseId)
         return yield* fail(
@@ -648,8 +664,14 @@ export const runNativeTaskPrWatch = (
           );
         yield* verifyNativeCycleDeliveryRepository(checkout, admittedAction.delivery);
       });
+    if (request.operation === 'start' && inputWakeup?.host === 'codex' && !inputWakeup.executable)
+      wakeup = {
+        host: 'codex',
+        executable: yield* discoverNativeWatchCodexExecutable(),
+        threadId: inputWakeup.threadId,
+      };
     if (request.operation === 'start') {
-      if (!request.wakeup)
+      if (!wakeup)
         return yield* fail('host-registration-required', 'Start needs the actual host registration configuration.');
       yield* admitProvisionalWatch();
       yield* runNativeWatch(config, {
@@ -661,7 +683,7 @@ export const runNativeTaskPrWatch = (
         pr: embeddedDelivery.pr.url,
         consumerId,
         wakeupId,
-        wakeup: request.wakeup,
+        wakeup: wakeup,
         ...(request.takeover === true ? {takeover: true} : {}),
         ...(request.recoverWakeup === true ? {recoverWakeup: true} : {}),
       });
@@ -671,7 +693,7 @@ export const runNativeTaskPrWatch = (
         readback.envelope.state.pr !== embeddedDelivery.pr.url ||
         readback.envelope.state.consumer?.id !== consumerId ||
         readback.envelope.state.consumer?.wakeupId !== wakeupId ||
-        readback.envelope.notification?.target.host !== request.wakeup.host
+        readback.envelope.notification?.target.host !== wakeup.host
       )
         return yield* fail(
           'watch-readback-mismatch',
@@ -751,7 +773,7 @@ export const runNativeTaskPrWatch = (
         pr: embeddedDelivery.pr.url,
         consumerId,
         wakeupId,
-        wakeup: request.wakeup ?? watch.envelope.notification?.target,
+        wakeup: wakeup ?? watch.envelope.notification?.target,
         baseBranch: embeddedDelivery.pr.baseBranch,
         headBranch: embeddedDelivery.pr.branch,
       });
@@ -1008,7 +1030,7 @@ export const runNativeTaskPrWatch = (
         next: recorded.result.next,
       };
     }
-    return yield* runNativePrWatchOperation(config, request, watch, {
+    return yield* runNativePrWatchOperation(config, {...request, wakeup}, watch, {
       runId: request.runId,
       generationHash: sha256HexSync(stored.state.generation),
     });
