@@ -133,6 +133,7 @@
     "./effect/telemetry": "./src/effect/telemetry.ts",
     "./effect/workflow_cli": "./src/effect/workflow_cli.ts",
     "./effect/workset_cli": "./src/effect/workset_cli.ts",
+    "./evaluation/semantic-qualification-candidate": "./test/evaluation/semantic-qualification/candidate.ts",
     "./evaluation/code-graph": "./src/evaluation/code-graph.ts",
     "./evaluation/code-graph-workset": "./src/evaluation/code-graph-workset.ts",
     "./evaluation/code-memory-link-agent-ab": "./src/evaluation/code-memory-link-agent-ab.ts",

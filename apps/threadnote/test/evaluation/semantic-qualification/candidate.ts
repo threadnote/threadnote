@@ -2,6 +2,7 @@ import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {Array as EffectArray, Record as EffectRecord, Schema, String as EffectString} from 'effect';
 import {isJsonObject} from '@threadnote/platform/json';
+import {javaRuntimePinsForHost} from '../../../src/semantic/providers/java_runtime.js';
 import {runtimeNativePlatformTarget} from '@threadnote/platform/system';
 import {BUN_STANDALONE_TARGETS} from '../../../../../scripts/release-targets.js';
 /* oxlint-disable effecttsgo/node-builtin-import -- Candidate qualification owns explicit process and private evidence-file boundaries. */
@@ -10,14 +11,15 @@ import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {mkdtemp, mkdir, writeFile, readFile, realpath, readdir, rm} from 'node:fs/promises';
 import {tmpdir, release} from 'node:os';
-import {dirname, isAbsolute, join, resolve} from 'node:path';
+import {dirname, isAbsolute, join, resolve, relative} from 'node:path';
 import {parseArgs} from 'node:util';
-import {pathToFileURL} from 'node:url';
+import {pathToFileURL, fileURLToPath} from 'node:url';
 import {observeCandidateTransport} from './transport-lifecycle.js';
 import {installProbeSignalCleanup} from '../../../../../tools/semantic/semantic_probe_process.js';
 import {qualificationInventory} from './inventory.js';
 import {
   readProviderInputs,
+  ProviderInputs,
   assertProviderFixtureBranch,
   selectedFixture,
   providerCatalog,
@@ -28,6 +30,7 @@ import {
   runProviderActionPreview,
   redactCapabilities,
   protocolCapabilities,
+  type JavaCandidateImportAuthority,
 } from './provider-fixture.js';
 import {runContextFixture} from './context-fixture.js';
 import {runProviderApplication, type WriterFixtureRecord} from './writer-fixture.js';
@@ -56,6 +59,104 @@ export function candidateTargetMatchesHost(target: string, nativeHostTarget: str
 const execute = promisify(execFile);
 const repository = new URL('../../../../../', import.meta.url);
 const hash = (bytes: string | Uint8Array) => createHash('sha256').update(bytes).digest('hex');
+/** All tracked caller and production bytes must belong to the actual clean candidate HEAD. */
+async function assertExactCandidateCheckout(candidate: typeof Candidate.Type) {
+  const identity = await execute('git', ['show', '-s', '--format=%H%n%T', 'HEAD'], {
+    cwd: repository,
+    maxBuffer: 4096,
+    timeout: 5000,
+  });
+  if (EffectString.trim(identity.stdout) !== candidate.sourceCommit + '\n' + candidate.sourceTree)
+    throw new Error('Candidate requires actual current exact HEAD/tree');
+  const status = await execute('git', ['status', '--porcelain=v1', '--untracked-files=all'], {
+    cwd: repository,
+    maxBuffer: 65536,
+    timeout: 5000,
+  });
+  if (EffectString.trim(status.stdout)) throw new Error('Candidate requires clean source and harness');
+}
+
+/** Byte bindings constrain the existing metadata handoff; they never select a cleanup policy. */
+export async function candidateDispatchInputBinding(arguments_: readonly string[]) {
+  const {values} = candidateArguments(arguments_);
+  if (!values['candidate-manifest']) return undefined;
+  return {
+    candidateSha256: hash(await readFile(values['candidate-manifest'])),
+    ...(values['provider-inputs'] ? {providerSha256: hash(await readFile(values['provider-inputs']))} : {}),
+  };
+}
+async function assertDispatchInputBinding(manifestPath: string, providerInputsPath?: string) {
+  const raw = process.env.THREADNOTE_QUALIFICATION_INPUT_BINDING;
+  if (raw === undefined) return; // Direct source entry still performs complete source/payload/SDK qualification.
+  const binding = Schema.decodeUnknownSync(
+    Schema.Struct({candidateSha256: digest, providerSha256: Schema.optional(digest)}),
+    {onExcessProperty: 'error'},
+  )(JSON.parse(raw));
+  if (
+    hash(await readFile(manifestPath)) !== binding.candidateSha256 ||
+    (providerInputsPath === undefined
+      ? binding.providerSha256 !== undefined
+      : hash(await readFile(providerInputsPath)) !== binding.providerSha256)
+  )
+    throw new Error('Candidate metadata changed across dispatcher handoff');
+}
+
+/** Finite source-selected cleanup only; provider JSON and argv contain no deadline knob. */
+export async function verifiedJavaGradleCandidateCleanup(arguments_: readonly string[]) {
+  try {
+    const {values} = candidateArguments(arguments_);
+    if (
+      values.inventory ||
+      !values['candidate-manifest'] ||
+      !values['provider-inputs'] ||
+      !values['writer-fixture'] ||
+      !values.output
+    )
+      return undefined;
+    const raw = Schema.decodeUnknownSync(ProviderInputs, {onExcessProperty: 'error'})(
+      JSON.parse(await readFile(values['provider-inputs'], 'utf8')),
+    );
+    if (raw.language !== 'java' || !raw.gradle) return undefined;
+    const pins = javaRuntimePinsForHost();
+    if (
+      !pins ||
+      raw.serverTreeDigest !== pins.serverTreeDigest ||
+      raw.runtimeSdkDigest !== pins.runtimeSdkDigest ||
+      raw.projectSdkDigest !== pins.projectSdkDigest
+    )
+      return undefined;
+    const candidate = Schema.decodeUnknownSync(Candidate, {onExcessProperty: 'error'})(
+      JSON.parse(await readFile(values['candidate-manifest'], 'utf8')),
+    );
+    if (!isAbsolute(candidate.binary)) return undefined;
+    await assertExactCandidateCheckout(candidate);
+    const releaseBytes = await readFile(join(dirname(candidate.binary), 'release.json'));
+    if (
+      hash(await readFile(candidate.binary)) !== candidate.binarySha256 ||
+      hash(releaseBytes) !== candidate.releaseSha256
+    )
+      return undefined;
+    const release = Schema.decodeUnknownSync(Schema.Struct({version: Schema.String, target: Schema.String}))(
+      JSON.parse(releaseBytes.toString()),
+    );
+    if (
+      !EffectString.endsWith('.g' + candidate.sourceCommit)(release.version) ||
+      !candidateTargetMatchesHost(release.target, runtimeNativePlatformTarget())
+    )
+      return undefined;
+    const verified = await readProviderInputs(values['provider-inputs']);
+    if (verified.input.language !== 'java' || !verified.input.gradle) return undefined;
+    await assertExactCandidateCheckout(candidate);
+    return Object.freeze({
+      candidateMilliseconds: 40000,
+      dispatcherMilliseconds: 45000,
+      childJoinMilliseconds: 40000,
+    } as const);
+  } catch {
+    return undefined; // Unverified/other candidates keep the original defaults and actual dispatcher validation.
+  }
+}
+
 const failure = (error: unknown) => (error instanceof Error ? error.message : 'Unknown failure');
 /** Install rejection ownership immediately, even when transport shutdown must finish before consuming the receipt. */
 export const settleProviderShutdown = (pending: ReturnType<typeof shutdownFixtureProviders>) =>
@@ -132,6 +233,10 @@ interface SmokeReport {
     ownedProcessesGone?: boolean;
     fixtureRemoved?: boolean;
     fixtureRetained?: string;
+    productionJavaImport?: {
+      state: 'unused' | 'preparing' | 'sealed' | 'unknown';
+      stages: {stage: string; elapsedMilliseconds: number}[];
+    };
     semantic?: Awaited<ReturnType<typeof shutdownFixtureProviders>>;
   };
 }
@@ -144,10 +249,28 @@ export async function runCandidateChecks(
   writerFixture = false,
   actionFixture = false,
 ) {
+  await assertDispatchInputBinding(manifestPath, providerInputsPath);
+  const cleanupPolicy =
+    providerInputsPath && writerFixture
+      ? await verifiedJavaGradleCandidateCleanup([
+          '--candidate-manifest',
+          manifestPath,
+          '--provider-inputs',
+          providerInputsPath,
+          '--writer-fixture',
+          '--output',
+          output,
+        ])
+      : undefined;
   // Reserve before launching; an existing receipt is never overwritten or rerun.
   await writeFile(
     output,
-    JSON.stringify({schemaVersion: 1, kind: 'candidate-transport-branch', status: 'started'}) + '\n',
+    JSON.stringify({
+      schemaVersion: 1,
+      kind: 'candidate-transport-branch',
+      status: 'started',
+      ...(cleanupPolicy ? {cleanupPendingFile: output + '.cleanup-pending.json'} : {}),
+    }) + '\n',
     {mode: 0o600, flag: 'wx'},
   );
   const started = Date.now(),
@@ -169,9 +292,52 @@ export async function runCandidateChecks(
     cleanup: {},
     provider: {started: false, artifact: null, runtime: null},
   };
+  const javaImportAbort = new AbortController();
+  let javaImportTask: Promise<unknown> | undefined;
+  const javaImport = {
+    state: 'unused' as 'unused' | 'preparing' | 'sealed' | 'unknown',
+    stages: [] as {stage: string; elapsedMilliseconds: number}[],
+  };
   let finishing: Promise<void> | undefined;
   const finish = () =>
     (finishing ??= (async () => {
+      const pendingImport = javaImportTask && javaImport.state === 'preparing';
+      javaImportAbort.abort(); // Start ORIGINAL native cleanup before any publication wait.
+      if (pendingImport) {
+        javaImport.state = 'unknown';
+        report.status = 'failed';
+        report.cleanup.productionJavaImport = javaImport;
+        report.cleanup.fixtureRetained = root;
+        try {
+          const pending =
+            JSON.stringify({
+              schemaVersion: 1,
+              kind: report.kind,
+              status: 'failed',
+              fullScenarioQualified: false,
+              failure: 'Original production import cleanup pending; disposition unknown',
+              cleanup: {productionJavaImport: javaImport, fixtureRetained: root},
+            }) + '\n';
+          if (Buffer.byteLength(pending) > 16384) throw new Error('Pending cleanup receipt capacity');
+          await writeFile(output + '.cleanup-pending.json', pending, {
+            mode: 0o600,
+            flag: 'wx',
+            signal: AbortSignal.timeout(500),
+          });
+        } catch {
+          process.stderr.write(
+            'Production import cleanup receipt could not be persisted; disposition unknown and scratch retained.\n',
+          );
+        }
+      }
+      if (javaImportTask) {
+        try {
+          await within(javaImportTask, 30000);
+        } catch {
+          javaImport.state = 'unknown';
+        }
+        report.cleanup.productionJavaImport = javaImport;
+      }
       // Stop request producers before withdrawing our bootstrap, so timed-out CLI calls cannot relaunch it.
       for (const [pid, child] of children)
         if (pid !== close?.pid && alive(pid)) {
@@ -224,8 +390,16 @@ export async function runCandidateChecks(
       }
       const writerRetired = EffectArray.every(report.writerRecords ?? [], record => record.retired);
       const mcpCleanupKnown = close?.pid == null || (report.cleanup.mcpCloseCompleted && close.closeObserved);
-      if (!mcpCleanupKnown || !semanticDrained || !writerRetired) report.status = 'failed';
-      if (root && report.cleanup.ownedProcessesGone && mcpCleanupKnown && semanticDrained && writerRetired) {
+      const javaImportKnown = javaImport.state === 'unused' || javaImport.state === 'sealed';
+      if (!mcpCleanupKnown || !semanticDrained || !writerRetired || !javaImportKnown) report.status = 'failed';
+      if (
+        root &&
+        report.cleanup.ownedProcessesGone &&
+        mcpCleanupKnown &&
+        semanticDrained &&
+        writerRetired &&
+        javaImportKnown
+      ) {
         await rm(root, {recursive: true, force: true});
         report.cleanup.fixtureRemoved = true;
       } else if (root) {
@@ -260,11 +434,14 @@ export async function runCandidateChecks(
         );
       } else await writeFile(output, serialized, {mode: 0o600});
     })());
-  const signals = installProbeSignalCleanup(async signal => {
-    report.status = 'failed';
-    report.failure = `Interrupted: ${signal}`;
-    await finish();
-  });
+  const signals = installProbeSignalCleanup(
+    async signal => {
+      report.status = 'failed';
+      report.failure = `Interrupted: ${signal}`;
+      await finish();
+    },
+    {milliseconds: cleanupPolicy?.candidateMilliseconds},
+  );
   try {
     if (actionFixture && (!providerInputsPath || !writerFixture))
       throw new Error('Action fixture requires pinned provider inputs and writer fixture');
@@ -361,6 +538,14 @@ export async function runCandidateChecks(
       'writer-fixture.ts',
       '../../../src/semantic/fingerprint.ts',
       '../../../src/semantic/providers/java_preparation.ts',
+      '../../../src/semantic/providers/java_runtime.ts',
+      '../../../src/semantic/providers/java.ts',
+      '../../../src/semantic/java_import.ts',
+      '../../../src/semantic/host_profile.ts',
+      '../../../src/semantic/lsp_transport.ts',
+      '../../../src/telemetry/session.ts',
+      '../../../../../packages/platform/src/system.ts',
+      '../../../../../packages/platform/src/writer_system.ts',
       '../../../src/semantic/providers/java_project.ts',
       '../../../../../tools/semantic/semantic_provider_fixture.ts',
       '../../../../../tools/semantic/semantic_probe_assertions.ts',
@@ -483,7 +668,58 @@ export async function runCandidateChecks(
       maxItems: 8,
     };
     if (provider) {
-      const selected = await providerCatalog(provider.input, root, fixture.sources);
+      let javaAuthority: JavaCandidateImportAuthority | undefined;
+      if (provider.input.language === 'java' && provider.input.gradle) {
+        if (!cleanupPolicy) throw new Error('Verified production cleanup policy unavailable');
+        await assertDispatchInputBinding(manifestPath, providerInputsPath);
+        const boundSourceHashes = {...report.sourceHashes};
+        const verifyCandidateSource = async () => {
+          await assertExactCandidateCheckout(candidate);
+          for (const [file, expected] of EffectRecord.toEntries(boundSourceHashes)) {
+            // Installed SDK metadata is an explicit lock-bound input, not a tracked source file.
+            if (file === '../../../../../node_modules/@modelcontextprotocol/sdk/package.json') continue;
+            const path = relative(fileURLToPath(repository), fileURLToPath(new URL(file, import.meta.url)));
+            const atCommit = await execute('git', ['show', `${candidate.sourceCommit}:${path}`], {
+              cwd: repository,
+              maxBuffer: 4 * 1024 * 1024,
+              encoding: 'buffer',
+              timeout: 5000,
+            });
+            if (hash(atCommit.stdout) !== expected)
+              throw new Error('Candidate source/harness differs from committed HEAD');
+          }
+        };
+        await verifyCandidateSource();
+        javaAuthority = Object.freeze({
+          signal: javaImportAbort.signal,
+          deadline,
+          verify: async () => {
+            if (Date.now() >= deadline || javaImportAbort.signal.aborted) throw new Error('Candidate execution ended');
+            await verifyCandidateSource();
+            await assertDispatchInputBinding(manifestPath, providerInputsPath);
+            for (const [file, expected] of EffectRecord.toEntries(boundSourceHashes))
+              if (hash(await readFile(new URL(file, import.meta.url))) !== expected)
+                throw new Error('Candidate source changed during production import');
+            if (
+              hash(await readFile(binary)) !== candidate.binarySha256 ||
+              hash(await readFile(join(dirname(binary), 'release.json'))) !== candidate.releaseSha256
+            )
+              throw new Error('Candidate payload changed during production import');
+            if (hash(await readFile(providerInputsPath!)) !== provider.manifestSha256)
+              throw new Error('Candidate provider inputs changed');
+          },
+          record: (stage: string, state?: 'preparing' | 'sealed' | 'unknown') => {
+            if (javaImport.stages.length >= 64) throw new Error('Candidate import stage capacity');
+            javaImport.stages.push({stage, elapsedMilliseconds: Date.now() - started});
+            if (javaImport.state === 'unknown' && state === 'sealed')
+              throw new Error('Unknown native preparation cannot become sealed');
+            if (state) javaImport.state = state;
+          },
+        });
+      }
+      const selection = providerCatalog(provider.input, root, fixture.sources, javaAuthority);
+      if (javaAuthority) javaImportTask = selection;
+      const selected = await selection;
       const setup = await run(['semantic', 'setup', '--json'], {
         version: 1,
         callerCwd: project,
@@ -645,8 +881,8 @@ export async function runCandidateChecks(
   return report;
 }
 
-export async function runQualificationCommand(arguments_: readonly string[] = process.argv.slice(2)) {
-  const {values} = parseArgs({
+function candidateArguments(arguments_: readonly string[]) {
+  return parseArgs({
     args: [...arguments_],
     options: {
       inventory: {type: 'boolean'},
@@ -658,6 +894,10 @@ export async function runQualificationCommand(arguments_: readonly string[] = pr
     },
     strict: true,
   });
+}
+
+export async function runQualificationCommand(arguments_: readonly string[] = process.argv.slice(2)) {
+  const {values} = candidateArguments(arguments_);
   if (!values.output || Boolean(values.inventory) === Boolean(values['candidate-manifest']))
     throw new Error('Use --inventory OR --candidate-manifest <manifest.json>, and --output <new-report.json>');
   if (

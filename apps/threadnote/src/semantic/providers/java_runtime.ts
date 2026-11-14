@@ -665,7 +665,7 @@ export const makeJavaGradleForeground = Effect.fn('semantic.makeJavaGradleForegr
     seenReady = true;
     Deferred.doneUnsafe(ready, Effect.succeed(frame));
   });
-  const process = yield* spawnSemanticProcess(
+  const ownedProcess = yield* spawnSemanticProcess(
     {
       command: javaExecutable(options.javaHome),
       cwd: options.project,
@@ -717,7 +717,13 @@ export const makeJavaGradleForeground = Effect.fn('semantic.makeJavaGradleForegr
   );
   const identity = yield* Effect.try({
     try: () =>
-      decodeJavaGradleReady(frame, {nonce, javaHome: options.javaHome, baseDirectory, temporary, pid: process.pid}),
+      decodeJavaGradleReady(frame, {
+        nonce,
+        javaHome: options.javaHome,
+        baseDirectory,
+        temporary,
+        pid: ownedProcess.pid,
+      }),
     catch: () => LspFault.make({code: 'prerequisite'}),
   });
   const values = {
@@ -748,7 +754,7 @@ export const makeJavaGradleForeground = Effect.fn('semantic.makeJavaGradleForegr
     yield* options.verify;
     yield* verifyJavaGradleInstallation(options.configuration);
     if (
-      process.failure() ||
+      ownedProcess.failure() ||
       (yield* fs.readFileString(controlFile)) !== control ||
       (yield* fs.readFileString(propertiesFile)) !== properties
     )
@@ -796,7 +802,7 @@ export const makeJavaGradleForeground = Effect.fn('semantic.makeJavaGradleForegr
       '-Dthreadnote.ownedImport.controlUri=' + (yield* path.toFileUrl(controlFile)).href,
       '-Dthreadnote.ownedImport.controlSha256=' + controlDigest,
     ],
-    finish: process.finish,
+    finish: ownedProcess.finish,
   });
 });
 

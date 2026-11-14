@@ -566,10 +566,10 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (config: 
       Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis;
         const existing = yield* readNativeWatch(config, request.watchId);
+        if (request.expectedRevision !== undefined && request.expectedRevision !== existing?.revision)
+          return yield* fail('watch-state-conflict', 'Watch state changed before admission or renewal.');
         if (request.command === 'renew') {
           if (!existing) return yield* fail('watch-not-found', 'Renewal cannot create a watch.');
-          if (request.expectedRevision !== undefined && request.expectedRevision !== existing.revision)
-            return yield* fail('watch-state-conflict', 'Watch state changed before renewal.');
           if (
             !sameBinding(existing.envelope) ||
             existing.envelope.state.consumer?.id !== consumerId ||
@@ -680,7 +680,14 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (config: 
         let envelope = stored.envelope;
         let output: Record<string, unknown> = {};
         let arrivalOnly = false;
-        if (request.command === 'stop') envelope = {...envelope, stopRequested: true};
+        if (request.command === 'stop')
+          envelope = {
+            ...envelope,
+            stopRequested: true,
+            ...(envelope.collector && envelope.state.prState === 'open' && envelope.collector.status !== 'terminal'
+              ? {collector: {...envelope.collector, reason: 'explicit-stop'}}
+              : {}),
+          };
         else if (request.command === 'consumer') {
           yield* from(() => assertQualifiedBinding(envelope));
           if (

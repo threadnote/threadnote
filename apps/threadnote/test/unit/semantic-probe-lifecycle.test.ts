@@ -1,14 +1,22 @@
 import {isJsonObject} from '@threadnote/platform/json';
 import * as Schema from 'effect/Schema';
+import * as EffectArray from 'effect/Array';
+import * as EffectOption from 'effect/Option';
 import * as EffectString from 'effect/String';
 /* oxlint-disable effecttsgo/node-builtin-import -- Integration regressions exercise actual runner processes and OS signals. */
 import {spawn} from 'node:child_process';
 import {access, chmod, mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
-import {expect, it} from 'vitest';
+import {expect, it, vi} from 'vitest';
+import fc from 'fast-check';
+import {
+  verifiedJavaGradleCandidateCleanup,
+  candidateDispatchInputBinding,
+} from '../evaluation/semantic-qualification/candidate.js';
 import {
   withinProbeDeadline,
+  installProbeSignalCleanup,
   ownedProbeGroup,
   releaseProbeHandles,
 } from '../../../../tools/semantic/semantic_probe_process.js';
@@ -161,3 +169,152 @@ it.skipIf(process.platform === 'win32').each([
   },
   15000,
 );
+
+const captureProcessExit = () => {
+  const original = Object.getOwnPropertyDescriptor(process, 'exit');
+  if (!original) throw new Error('Missing OS exit boundary');
+  const exit = vi.fn();
+  Object.defineProperty(process, 'exit', {...original, value: exit});
+  return {exit, restoreExit: () => Object.defineProperty(process, 'exit', original)};
+};
+
+it.each([
+  {milliseconds: undefined, expected: 8000},
+  {milliseconds: 40000, expected: 40000},
+  {milliseconds: 45000, expected: 45000},
+])(
+  'keeps the finite cleanup deadline at $expected milliseconds and starts cleanup once',
+  async ({milliseconds, expected}) => {
+    vi.useFakeTimers();
+    // Capture the OS exit boundary so this unit test cannot terminate its owning runner.
+    const {exit, restoreExit} = captureProcessExit();
+    const beforeInt = new Set(process.listeners('SIGINT'));
+    const beforeTerm = new Set(process.listeners('SIGTERM'));
+    const cleanup = vi.fn(() => new Promise<void>(() => {}));
+    const signals = installProbeSignalCleanup(cleanup, {milliseconds});
+    try {
+      const interrupt = EffectOption.getOrUndefined(
+        EffectArray.findFirst(process.listeners('SIGINT'), listener => !beforeInt.has(listener)),
+      );
+      const terminate = EffectOption.getOrUndefined(
+        EffectArray.findFirst(process.listeners('SIGTERM'), listener => !beforeTerm.has(listener)),
+      );
+      expect(interrupt).toBeTypeOf('function');
+      expect(terminate).toBeTypeOf('function');
+      interrupt!('SIGINT');
+      terminate!('SIGTERM');
+      expect(cleanup).toHaveBeenCalledExactlyOnceWith('SIGINT');
+      await vi.advanceTimersByTimeAsync(expected - 1);
+      expect(exit).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(exit).toHaveBeenCalledExactlyOnceWith(130);
+      expect(signals.interrupted).toBe('SIGINT');
+    } finally {
+      signals.dispose();
+      restoreExit();
+      vi.useRealTimers();
+    }
+  },
+);
+it('awaits asynchronous cleanup before the hard exit', async () => {
+  vi.useFakeTimers();
+  // This Promise/OS-boundary unit captures exit without creating any engine or native ownership receipt.
+  const {exit, restoreExit} = captureProcessExit();
+  let complete = () => {};
+  const stopped = new Promise<void>(resolve => {
+    complete = resolve;
+  });
+  const before = new Set(process.listeners('SIGTERM'));
+  const signals = installProbeSignalCleanup(() => stopped, {milliseconds: 40000});
+  try {
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(process.listeners('SIGTERM'), listener => !before.has(listener)),
+    )!('SIGTERM');
+    await vi.advanceTimersByTimeAsync(30000);
+    expect(exit).not.toHaveBeenCalled();
+    complete();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(exit).toHaveBeenCalledExactlyOnceWith(143);
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    signals.dispose();
+    restoreExit();
+    vi.useRealTimers();
+  }
+});
+it('refuses invalid cleanup policies without registering listeners', () => {
+  const invalid = fc.oneof(
+    fc.integer({min: -100000, max: 0}),
+    fc.integer({min: 45001, max: 100000}),
+    fc.constantFrom(NaN, Infinity, -Infinity, 0.5),
+  );
+  fc.assert(
+    fc.property(invalid, milliseconds => {
+      const before = [process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')];
+      expect(() => installProbeSignalCleanup(async () => {}, {milliseconds})).toThrow(
+        'Invalid finite signal cleanup deadline',
+      );
+      expect([process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')]).toEqual(before);
+    }),
+    {numRuns: 32},
+  );
+});
+it('never lets raw argv select a longer candidate cleanup policy', async () => {
+  await fc.assert(
+    fc.asyncProperty(fc.integer({min: -100000, max: 100000}), async milliseconds => {
+      expect(
+        await verifiedJavaGradleCandidateCleanup([
+          '--candidate-manifest',
+          '/not-a-candidate',
+          '--provider-inputs',
+          '/not-inputs',
+          '--writer-fixture',
+          '--output',
+          '/not-output',
+          '--cleanup-milliseconds',
+          String(milliseconds),
+        ]),
+      ).toBeUndefined();
+    }),
+    {numRuns: 24},
+  );
+  expect(await verifiedJavaGradleCandidateCleanup(['--inventory', '--output', '/not-output'])).toBeUndefined();
+});
+
+it('conserves exact dispatcher metadata bytes and detects either input changing', async () => {
+  const scratch = await mkdtemp(join(tmpdir(), 'semantic-input-binding-'));
+  const candidate = join(scratch, 'candidate.json'),
+    provider = join(scratch, 'provider.json');
+  const args = [
+    '--candidate-manifest',
+    candidate,
+    '--provider-inputs',
+    provider,
+    '--writer-fixture',
+    '--output',
+    join(scratch, 'report.json'),
+  ];
+  try {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.uint8Array({maxLength: 128}),
+        fc.uint8Array({maxLength: 128}),
+        async (candidateBytes, providerBytes) => {
+          await writeFile(candidate, candidateBytes);
+          await writeFile(provider, providerBytes);
+          const original = await candidateDispatchInputBinding(args);
+          expect(await candidateDispatchInputBinding(args)).toEqual(original);
+          await writeFile(provider, new Uint8Array([...providerBytes, 0]));
+          const changedProvider = await candidateDispatchInputBinding(args);
+          expect(changedProvider?.candidateSha256).toBe(original?.candidateSha256);
+          expect(changedProvider?.providerSha256).not.toBe(original?.providerSha256);
+          await writeFile(candidate, new Uint8Array([...candidateBytes, 0]));
+          expect((await candidateDispatchInputBinding(args))?.candidateSha256).not.toBe(original?.candidateSha256);
+        },
+      ),
+      {numRuns: 24},
+    );
+  } finally {
+    await rm(scratch, {recursive: true, force: true});
+  }
+});

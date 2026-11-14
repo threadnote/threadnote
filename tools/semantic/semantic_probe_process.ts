@@ -24,7 +24,13 @@ export function releaseProbeHandles(child: ChildProcess) {
 }
 
 /** SIGKILL and runtime crashes cannot run this cooperative cleanup. */
-export function installProbeSignalCleanup(cleanup: (signal: 'SIGINT' | 'SIGTERM') => Promise<void>) {
+export function installProbeSignalCleanup(
+  cleanup: (signal: 'SIGINT' | 'SIGTERM') => Promise<void>,
+  options: {readonly milliseconds?: number} = {},
+) {
+  const milliseconds = options.milliseconds ?? 8000;
+  if (!Number.isSafeInteger(milliseconds) || milliseconds <= 0 || milliseconds > 45000)
+    throw new Error('Invalid finite signal cleanup deadline');
   let interrupted: 'SIGINT' | 'SIGTERM' | undefined;
   const handle = (signal: 'SIGINT' | 'SIGTERM') => {
     if (interrupted) return;
@@ -33,7 +39,7 @@ export function installProbeSignalCleanup(cleanup: (signal: 'SIGINT' | 'SIGTERM'
     const timer = setTimeout(() => {
       process.stderr.write('Signal cleanup deadline exceeded; child state is unknown and scratch must be retained.\n');
       process.exit(code);
-    }, 8000);
+    }, milliseconds);
     void cleanup(signal)
       .catch(error => {
         process.stderr.write(`Signal cleanup failed; child state is unknown: ${String(error)}\n`);

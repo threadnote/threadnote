@@ -76,6 +76,7 @@ import {stableJson} from '../../src/workflow_memory/protocol.js';
 import {
   completeLocalPhase,
   fixture as sourceFixture,
+  GraphDiagnostics,
   object,
   run,
   windowsCycleFixtureTimeout,
@@ -1821,10 +1822,14 @@ describe('native task actions', () => {
         );
         expect(graphBlocked).toMatchObject({failure: {code: 'evidence-unavailable'}});
         expect(yield* readNativeWorkflowState(config, expectedRunId)).toBeUndefined();
-        const indexer = yield* CodeGraphIndexer;
-        expect((yield* indexer.index({cwd: canonicalRepo, threadnoteHome: canonicalHome})).snapshot.state).toBe(
-          'ready',
-        );
+        const graph = yield* GraphDiagnostics;
+        expect(
+          (yield* graph.prepare(
+            Effect.flatMap(CodeGraphIndexer, indexer =>
+              indexer.index({cwd: canonicalRepo, threadnoteHome: canonicalHome}),
+            ),
+          )).snapshot.state,
+        ).toBe('ready');
         const mcp = new EffectMcpServerAdapter('test', '1', 'fixture');
         registerWorkflowTaskTool(mcp, config);
         const missingTargetMcpCall = yield* mcp.invokeTool('workflow_task_start', withoutTarget).pipe(Effect.result);

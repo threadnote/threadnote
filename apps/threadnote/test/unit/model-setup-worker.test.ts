@@ -525,6 +525,7 @@ describe('background model setup worker', () => {
   );
 
   effectIt.effect('an active manual install and background request share one transfer and verified publication', () =>
+    // Filesystem contention can register a lock retry after a one-shot test-clock advance.
     Effect.gen(function* () {
       const entered = yield* Deferred.make<void>();
       const barrier = yield* Deferred.make<void>();
@@ -535,11 +536,10 @@ describe('background model setup worker', () => {
       const background = yield* Effect.forkScoped(f.worker());
       yield* Deferred.succeed(barrier, undefined);
       yield* Fiber.join(manual);
-      yield* TestClock.adjust(1000);
       yield* Fiber.join(background);
       expect(f.offsets).toEqual([0]);
       expect((yield* readModelSetupStatus(f.home).pipe(f.provide)).artifactReady).toBe(true);
-    }).pipe(provideTestLayer(platform)),
+    }).pipe(provideTestLayer(platform), TestClock.withLive),
   );
 
   effectIt.effect(

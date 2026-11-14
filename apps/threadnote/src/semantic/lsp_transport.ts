@@ -372,7 +372,7 @@ export const spawnLspWire = Effect.fn('semantic.spawnLspWire')(function* (option
   const incoming = yield* Queue.bounded<{message: Message; bytes: number}, Cause.Done>(64);
   let queuedBytes = 0,
     stderrTail = '';
-  const process = yield* spawnSemanticProcess(options, {
+  const ownedProcess = yield* spawnSemanticProcess(options, {
     stdout: chunk => {
       for (const message of frames.push(chunk)) {
         const bytes = encoder.encode(JSON.stringify(message)).length;
@@ -395,10 +395,10 @@ export const spawnLspWire = Effect.fn('semantic.spawnLspWire')(function* (option
     failed: () => Queue.endUnsafe(incoming),
   });
   const wire: LspWire = {
-    pid: process.pid,
-    identity: process.identity,
-    failure: process.failure,
-    beginClosing: process.beginClosing,
+    pid: ownedProcess.pid,
+    identity: ownedProcess.identity,
+    failure: ownedProcess.failure,
+    beginClosing: ownedProcess.beginClosing,
     messages: Stream.fromQueue(incoming).pipe(
       Stream.map(packet => {
         queuedBytes -= packet.bytes;
@@ -407,9 +407,9 @@ export const spawnLspWire = Effect.fn('semantic.spawnLspWire')(function* (option
     ),
     send: (message: Message) =>
       Effect.try({try: () => encodeLspFrame(message), catch: () => LspFault.make({code: 'protocol'})}).pipe(
-        Effect.flatMap(process.write),
+        Effect.flatMap(ownedProcess.write),
       ),
-    finish: process.finish.pipe(Effect.tap(() => Queue.shutdown(incoming))),
+    finish: ownedProcess.finish.pipe(Effect.tap(() => Queue.shutdown(incoming))),
   };
   return wire;
 });

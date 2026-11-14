@@ -27,6 +27,13 @@ import {
   checkProbeShutdown,
 } from '../tools/semantic/semantic_probe_assertions.js';
 if (process.argv.includes('--inventory') || process.argv.includes('--candidate-manifest')) {
+  const {verifiedJavaGradleCandidateCleanup, candidateDispatchInputBinding} =
+    await import('@threadnote/threadnote/evaluation/semantic-qualification-candidate');
+  const arguments_ = EffectArray.drop(process.argv, 2);
+  const inputBinding = await candidateDispatchInputBinding(arguments_);
+  const cleanupPolicy = await verifiedJavaGradleCandidateCleanup(arguments_);
+  if (JSON.stringify(await candidateDispatchInputBinding(arguments_)) !== JSON.stringify(inputBinding))
+    throw new Error('Candidate inputs changed before dispatcher handoff');
   const child = spawn(
     process.execPath,
     [
@@ -36,35 +43,48 @@ if (process.argv.includes('--inventory') || process.argv.includes('--candidate-m
       'providers',
       ...EffectArray.drop(process.argv, 2),
     ],
-    {stdio: 'inherit', detached: process.platform !== 'win32'},
+    {
+      stdio: 'inherit',
+      detached: process.platform !== 'win32',
+      env: {
+        ...process.env,
+        THREADNOTE_QUALIFICATION_INPUT_BINDING: inputBinding === undefined ? undefined : JSON.stringify(inputBinding),
+      },
+    },
   );
   const group = ownedProbeGroup(child);
   const exited = new Promise<number>((accept, reject) => {
     child.once('error', reject);
     child.once('exit', (code, signal) => accept(code ?? (signal === 'SIGINT' ? 130 : signal === 'SIGTERM' ? 143 : 1)));
   });
-  const signals = installProbeSignalCleanup(async signal => {
-    group.signal(signal);
-    await withinProbeDeadline(exited, 6000);
-    const cleanup = await group.cleanup();
-    if (!cleanup.drained)
-      process.stderr.write('Qualification dispatcher owned process group did not drain; outcome unknown.\n');
-    releaseProbeHandles(child);
-  });
+  let cleanupPromise: ReturnType<typeof group.cleanup> | undefined;
+  const cleanupGroup = () => (cleanupPromise ??= group.cleanup().finally(() => releaseProbeHandles(child)));
+  const signals = installProbeSignalCleanup(
+    async signal => {
+      group.signal(signal);
+      try {
+        await withinProbeDeadline(exited, cleanupPolicy?.childJoinMilliseconds ?? 6000);
+      } finally {
+        const cleanup = await cleanupGroup();
+        if (!cleanup.drained)
+          process.stderr.write('Qualification dispatcher owned process group did not drain; outcome unknown.\n');
+      }
+    },
+    {milliseconds: cleanupPolicy?.dispatcherMilliseconds},
+  );
   const providerBudget = process.argv.includes('--provider-inputs') ? 200000 : 50000;
   const deadline = setTimeout(() => group.signal('SIGTERM'), providerBudget);
   let code = 1;
   try {
-    code = (await withinProbeDeadline(exited, providerBudget + 8000)) ?? 1;
+    code = (await withinProbeDeadline(exited, providerBudget + (cleanupPolicy?.childJoinMilliseconds ?? 8000))) ?? 1;
   } finally {
     clearTimeout(deadline);
-    const cleanup = await group.cleanup();
+    const cleanup = await cleanupGroup();
     if (!cleanup.drained) {
       code = 1;
       process.stderr.write('Qualification dispatcher owned process group did not drain; outcome unknown.\n');
     }
     signals.dispose();
-    releaseProbeHandles(child);
   }
   process.exit(signals.interrupted === 'SIGINT' ? 130 : signals.interrupted === 'SIGTERM' ? 143 : code);
 }
