@@ -314,7 +314,13 @@ jobs:
               export TMPDIR="$private_tmp"
               trap 'rm -rf -- "$private_tmp"' EXIT
               bun --eval 'import {statfsSync,statSync} from "node:fs"; console.log(JSON.stringify({filesystemType:statfsSync(Bun.env.TMPDIR).type,mode:statSync(Bun.env.TMPDIR).mode&0o7777}));' > .context/semantic-platform/private-temp-filesystem.json
+              # Observe the existing bounded ACL fixture before the strict native proof can abort.
+              acl_diagnostic_status=0
+              bun --bun vitest run packages/platform/test/writer-system/linux-acl.test.ts -t 'refuses an actual Linux default ACL while the private directory mode remains0700' --testTimeout=30000 --reporter=default --reporter=json --outputFile=.context/semantic-platform/private-acl-diagnostic.json > .context/semantic-platform/private-acl-diagnostic.log 2>&1 || acl_diagnostic_status=$?
+              cat .context/semantic-platform/private-acl-diagnostic.log
+              printf '{"exitCode":%s}\n' "$acl_diagnostic_status" > .context/semantic-platform/private-acl-diagnostic-status.json
               bun --eval 'import {runtimeOpenPrivateWriterDirectory,runtimeClosePrivateWriterDirectory} from "@threadnote/platform/system"; const handle=runtimeOpenPrivateWriterDirectory(Bun.env.TMPDIR); runtimeClosePrivateWriterDirectory(handle); console.log("Native private musl temporary storage proof passed; production qualification remains false");'
+              test "$acl_diagnostic_status" -eq 0
               bun --bun vitest run packages/platform/test/system-stable-read.test.ts packages/platform/test/writer-system/linux-acl.test.ts packages/platform/test/writer-system/provider-process.test.ts apps/threadnote/test/unit/semantic-runtime.test.ts apps/threadnote/test/unit/semantic-writer-process.test.ts apps/threadnote/test/unit/semantic-operations.test.ts apps/threadnote/test/unit/semantic-mcp-cli.test.ts apps/threadnote/test/unit/semantic-python.test.ts apps/threadnote/test/unit/semantic-go-rust.test.ts apps/threadnote/test/unit/semantic-java-preparation.test.ts --reporter=default --reporter=json --outputFile=.context/semantic-platform/components.json
               bun run build
               cp dist/release.json .context/semantic-platform/release.json

@@ -157,13 +157,14 @@ export const makeJavaPreparation = Effect.fn('semantic.makeJavaPreparation')(
       Effect.gen(function* () {
         yield* verifySetup;
         const workspace = yield* makeJavaWorkspace(captured.privateDirectory);
+        const verifyActive = verifySetup.pipe(Effect.andThen(workspace.verify));
         const inputs = yield* copyJavaPreparationInputs({
           project: captured.project,
           worktree: captured.worktree,
           build: captured.build,
           workspace,
         });
-        yield* verifySetup;
+        yield* verifyActive;
         beforePreparationLaunch();
         const launched = yield* runtime.preparation({
           capturePreparationProvider,
@@ -175,17 +176,19 @@ export const makeJavaPreparation = Effect.fn('semantic.makeJavaPreparation')(
           drainBuildProcesses,
         });
         yield* onProviderStarted(launched.pid);
-        yield* verifySetup;
+        yield* verifyActive;
         yield* provisionOfflineCache(
           Object.freeze({
             runtimeDirectory: launched.directory,
             gradleUserHome: path.join(launched.directory, 'gradle'),
+            retainInput: workspace.retainInput,
+            verifyDisposed: workspace.verifyDisposed,
           }),
         );
-        yield* verifySetup;
+        yield* verifyActive;
         yield* verifyOwners;
         const observed = yield* observeJavaPreparedImport({runtime: launched, gradle: captured.gradle});
-        yield* verifySetup;
+        yield* verifyActive;
         return yield* sealJavaPreparedModel(observed, {
           requestToken: observed.requestToken,
           build: captured.build,
@@ -194,11 +197,10 @@ export const makeJavaPreparation = Effect.fn('semantic.makeJavaPreparation')(
           artifactDirectory: captured.artifactDirectory,
           javaHome: runtime.projectJavaHome,
           javaSdkDigest: captured.candidate.projectSdkDigest,
-          verify: verifySetup.pipe(Effect.andThen(runtime.verify)),
+          verify: verifyActive.pipe(Effect.andThen(runtime.verify)),
         });
       }),
-    );
-    yield* verifySetup;
+    ).pipe(Effect.onExit(() => verifySetup.pipe(Effect.interruptible)));
     const loaded = yield* loadJavaPreparedModel({
       metadataFile: sealed.metadataFile,
       metadataDigest: sealed.metadataDigest,

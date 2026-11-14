@@ -14,7 +14,7 @@ import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {createHash} from '@threadnote/testing/node-crypto';
 import {execFile} from '@threadnote/testing/node-child-process';
-import {watch} from '@threadnote/testing/node-fs';
+import {readFileSync, watch} from '@threadnote/testing/node-fs';
 import {access, mkdir, mkdtemp, readFile, realpath, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
@@ -1650,8 +1650,41 @@ async function armLexicalSyncCompletionFence(
     rejectSettlement(error);
   };
   const timer = setTimeout(
-    () =>
-      fail(new Error(`Deferred lexical synchronization timed out; last demand state: ${lastObserved ?? 'unread'}.`)),
+    () => {
+      const phase =
+        scope.work?.kind === 'synchronize' ? 'synchronization' : (scope.work?.kind ?? 'lexical-publication');
+      let freshObservation: unknown;
+      try {
+        // This synchronous fixture-only read records the durable state at the
+        // deadline without granting completion another asynchronous turn.
+        const current: unknown = JSON.parse(readFileSync(join(directory, filename), 'utf8'));
+        freshObservation =
+          current !== null && typeof current === 'object'
+            ? {
+                state: 'read',
+                revisionPresent: 'revision' in current && typeof current.revision === 'string',
+                failures: 'failures' in current && typeof current.failures === 'number' ? current.failures : null,
+                completedAt:
+                  'completedAt' in current && typeof current.completedAt === 'number' ? current.completedAt : null,
+                notBefore: 'notBefore' in current && typeof current.notBefore === 'number' ? current.notBefore : null,
+              }
+            : {state: 'invalid'};
+      } catch (cause) {
+        freshObservation = {
+          state:
+            cause !== null && typeof cause === 'object' && 'code' in cause && cause.code === 'ENOENT'
+              ? 'absent'
+              : 'read-failed',
+        };
+      }
+      // A successful deadline read is diagnostic only; the original timeout
+      // remains unconditional, including when the persisted demand is complete.
+      fail(
+        new Error(
+          `Deferred lexical synchronization timed out; phase=${phase}; cached demand state: ${lastObserved}; fresh durable demand state: ${JSON.stringify(freshObservation)}.`,
+        ),
+      );
+    },
     Math.max(0, deadline - performance.now()),
   );
   void wait.catch(() => undefined);
@@ -1684,7 +1717,12 @@ async function armLexicalSyncCompletionFence(
           dirty = false;
           const current = await awaitForeground(readScopedDemand());
           lastObserved = current
-            ? JSON.stringify({revision: current.revision, completedAt: current.completedAt, failures: current.failures})
+            ? JSON.stringify({
+                revisionPresent: current.revision !== undefined,
+                completedAt: current.completedAt,
+                notBefore: current.notBefore,
+                failures: current.failures,
+              })
             : 'absent';
           if (!current) {
             if (before !== undefined || observedActive) {

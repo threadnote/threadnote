@@ -28,6 +28,7 @@ const semanticSources = EffectArray.map(
     'apps/threadnote/src/semantic/provider.ts',
     'apps/threadnote/src/semantic/providers/python.ts',
     'apps/threadnote/src/semantic/providers/python_project.ts',
+    'apps/threadnote/src/semantic/providers/typescript.ts',
   ],
   path => ({path, content: readFileSync(path, 'utf8')}),
 );
@@ -167,6 +168,39 @@ describe('self-contained source Python boundary', () => {
     );
   });
 
+  it('scopes the TypeScript provider language discriminator to its exact source path', () => {
+    const provider = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        semanticSources,
+        source => source.path === 'apps/threadnote/src/semantic/providers/typescript.ts',
+      ),
+    )!;
+    expect(
+      hasUndeclaredPythonRuntimeReference('apps/threadnote/src/semantic/providers/other.ts', provider.content),
+    ).toBe(true);
+  });
+
+  it('rejects escaped shell-quoted and argv-list Python invocations in the TypeScript provider', () => {
+    const provider = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        semanticSources,
+        source => source.path === 'apps/threadnote/src/semantic/providers/typescript.ts',
+      ),
+    )!;
+    const examples = [
+      String.raw`Bun.spawn(["sh", "-c", "\"python3\" -V"]);`,
+      String.raw`Bun.spawn([
+  'python',
+  '-V',
+]);`,
+    ];
+    expect(
+      EffectArray.map(examples, example =>
+        hasUndeclaredPythonRuntimeReference(provider.path, `${provider.content}\n${example}`),
+      ),
+    ).toEqual([true, true]);
+  });
+
   it('still rejects added interpreter commands in every semantic metadata source', () => {
     fc.assert(
       fc.property(
@@ -202,6 +236,30 @@ describe('self-contained source Python boundary', () => {
         expect(
           hasUndeclaredPythonRuntimeReference(path, `${content}\nspawn(${JSON.stringify(command)}, ['app.py']);`),
         ).toBe(true);
+  });
+
+  it('rejects generated quoted interpreter arguments in argv and shell-serialized source', () => {
+    const provider = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        semanticSources,
+        source => source.path === 'apps/threadnote/src/semantic/providers/typescript.ts',
+      ),
+    )!;
+    fc.assert(
+      fc.property(fc.constantFrom('python', 'Python3', 'python3.13', 'python.exe'), executable => {
+        const shellCommand = `${JSON.stringify(executable)} -V`;
+        const examples = [
+          `Bun.spawn([\n  ${JSON.stringify(executable)},\n  '-V',\n]);`,
+          `Bun.spawn(["sh", "-c", ${JSON.stringify(shellCommand)}]);`,
+        ];
+        expect(
+          EffectArray.map(examples, example =>
+            hasUndeclaredPythonRuntimeReference(provider.path, `${provider.content}\n${example}`),
+          ),
+        ).toEqual([true, true]);
+      }),
+      {numRuns: 32},
+    );
   });
 });
 

@@ -136,6 +136,152 @@ vi.mock('bun:ffi', async importOriginal => {
 
 const supported = runtimeNativePlatformSupport().providerTree;
 
+const childOutputLimit = 65536,
+  hostFiles = process.getBuiltinModule('fs'),
+  hostPath = process.getBuiltinModule('path'),
+  hostCrypto = process.getBuiltinModule('crypto');
+async function boundedChildOutput(stream: ReadableStream<Uint8Array>, overflow: () => void) {
+  const reader = stream.getReader(),
+    chunks: Uint8Array[] = [];
+  let bytes = 0,
+    retained = 0,
+    truncated = false;
+  try {
+    while (true) {
+      const part = await reader.read();
+      if (part.done) break;
+      bytes += part.value.length;
+      const kept = part.value.slice(0, childOutputLimit - retained);
+      retained += kept.length;
+      if (kept.length) chunks.push(kept);
+      if (bytes > childOutputLimit && !truncated) {
+        truncated = true;
+        overflow();
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const backing = new Uint8Array(retained);
+  let offset = 0;
+  for (const chunk of chunks) {
+    backing.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return {text: new TextDecoder().decode(backing), bytes, truncated};
+}
+function sanitizedChildText(text: string) {
+  // Keep the useful startup prefix, then withhold the whole line tail. Token-by-token
+  // redaction cannot safely delimit Bearer/quoted values or Windows paths with spaces.
+  return EffectString.replace(
+    /["']?\b(token|password|secret|authorization|api[_-]?key)\b["']?\s*[:=][^\r\n]*/giu,
+    '$1=<redacted>',
+  )(
+    EffectString.replace(
+      /(^|[\s('"=])(?:[A-Za-z]:[\\/]|file:\/{2,3}|[\\/])[^\r\n]*/gmu,
+      '$1<path>',
+    )(EffectString.replace(new RegExp(String.fromCharCode(27) + '\\[[0-9;]*m', 'gu'), '')(text)),
+  );
+}
+function assertEmptyChildStderr(stderr: string, diagnostic: string) {
+  expect(stderr === '', diagnostic).toBe(true);
+}
+it.each([
+  ['Bearer credential', 'Error: Authorization: Bearer probe-private-credential'],
+  ['quoted multiword credential', 'Error: token="first word probe-private-credential"'],
+  ['quoted JSON credential', 'Error: "secret": "first word probe-private-credential"'],
+  ['quoted drive path with spaces', 'Error: at "C:\\Program Files\\probe-private-directory\\runner.mjs":7'],
+  ['UNC path', 'Error: at \\\\probe-private-host\\share\\runner.mjs:7'],
+  ['device path', 'Error: at \\\\?\\C:\\Program Files\\probe-private-directory\\runner.mjs:7'],
+  ['quoted POSIX path with spaces', 'Error: at "/private/Program Files/probe-private-directory/runner.mjs":7'],
+])('withholds complete private child text for %s', (_shape, text) => {
+  const safe = sanitizedChildText(text);
+  expect(safe).not.toContain('probe-private');
+  expect(safe).toContain('Error:');
+});
+it('keeps the actual stderr assertion failure private without accepting nonempty stderr', () => {
+  const raw = 'Error: at C:\\probe-private-directory\\runner.mjs',
+    diagnostic = JSON.stringify({exit: 0, stderr: sanitizedChildText(raw)});
+  let caught: unknown;
+  try {
+    assertEmptyChildStderr(raw, diagnostic);
+  } catch (error) {
+    caught = error;
+  }
+  expect(caught).toBeInstanceOf(Error);
+  if (!(caught instanceof Error)) throw new Error('Missing original assertion failure.');
+  const rendered = JSON.stringify({message: caught.message, actual: 'actual' in caught ? caught.actual : undefined});
+  expect(rendered).not.toContain('probe-private');
+  expect(() => assertEmptyChildStderr('', diagnostic)).not.toThrow();
+});
+it('withholds generated credential and path suffixes through the actual failure-rendering sink', () => {
+  fc.assert(
+    fc.property(
+      fc.constantFrom('Bearer', 'quoted', 'plain'),
+      fc.constantFrom('drive', 'UNC', 'device', 'POSIX'),
+      fc
+        .array(fc.constantFrom('a', 'b', 'c', 'd'), {minLength: 1, maxLength: 12})
+        .map(parts => EffectArray.join(parts, '')),
+      (credential, pathKind, suffix) => {
+        const secret = 'probe-private-' + suffix,
+          value =
+            credential === 'Bearer'
+              ? 'Bearer ' + secret
+              : credential === 'quoted'
+                ? '"first word ' + secret + '"'
+                : 'first word ' + secret,
+          privatePath =
+            pathKind === 'drive'
+              ? '"C:\\Program Files\\' + secret + '\\runner.mjs"'
+              : pathKind === 'UNC'
+                ? '\\\\' + secret + '\\share\\runner.mjs'
+                : pathKind === 'device'
+                  ? '\\\\?\\C:\\Program Files\\' + secret + '\\runner.mjs'
+                  : '"/private/Program Files/' + secret + '/runner.mjs"',
+          raw = 'TypeError: unsupported --pool option\nAuthorization: ' + value + '\n at ' + privatePath,
+          safe = sanitizedChildText(raw);
+        expect(safe).toContain('TypeError: unsupported --pool option');
+        expect(safe).not.toContain(secret);
+        let caught: unknown;
+        try {
+          assertEmptyChildStderr(raw, JSON.stringify({exit: 0, stderr: safe}));
+        } catch (error) {
+          caught = error;
+        }
+        expect(caught).toBeInstanceOf(Error);
+        if (!(caught instanceof Error)) throw new Error('Nonempty stderr was accepted.');
+        expect(
+          JSON.stringify({message: caught.message, actual: 'actual' in caught ? caught.actual : undefined}),
+        ).not.toContain(secret);
+      },
+    ),
+    {numRuns: 24},
+  );
+});
+it('bounds owned-host output and forwards sanitized failure stderr without changing its exit', async () => {
+  let stopped = 0;
+  const chunks = [new Uint8Array(childOutputLimit - 4).fill(97), new Uint8Array(16).fill(98)],
+    stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(chunk);
+        controller.close();
+      },
+    }),
+    observed = await boundedChildOutput(stream, () => stopped++);
+  expect(observed.bytes).toBe(childOutputLimit + 12);
+  expect(new TextEncoder().encode(observed.text).length).toBe(childOutputLimit);
+  expect(observed.truncated).toBe(true);
+  expect(stopped).toBe(1);
+  const nativeExit = 1,
+    stderr =
+      'Error: unsupported --pool option\n at C:\\private\\runner.mjs:7\n at /private/checkout/test.ts:8 token=credential';
+  const message = JSON.stringify({exit: nativeExit, stderr: sanitizedChildText(stderr)});
+  expect(nativeExit).toBe(1);
+  expect(message).toContain('unsupported --pool option');
+  expect(message).not.toContain('credential');
+  expect(message).not.toContain('private');
+});
+
 it('retains bounded debug thread roles until successful exit continuation and separates PI alias ownership', () => {
   const shared = {threads: 0, pi: 0},
     member = {},
@@ -443,11 +589,32 @@ it.skipIf(process.platform !== 'win32' || !supported)(
     if (process.env.THREADNOTE_NATIVE_RELEASE_FAILURE_HOST !== '1') {
       // UNKNOWN permanently closes this dispatch domain to new launches. End only its owning host;
       // the ordinary test worker must retain its independent healthy native domain.
-      const child = Bun.spawn(
+      const repository = fileURLToPath(new URL('../../../../', import.meta.url)),
+        packageFile = fileURLToPath(import.meta.resolve('vitest/package.json')),
+        runner = fileURLToPath(new URL('./vitest.mjs', import.meta.resolve('vitest/package.json'))),
+        runnerRelative = hostPath.relative(hostFiles.realpathSync(repository), hostFiles.realpathSync(runner)),
+        version: unknown = JSON.parse(hostFiles.readFileSync(packageFile, 'utf8')).version,
+        pinned: unknown = JSON.parse(
+          hostFiles.readFileSync(new URL('../../../../package.json', import.meta.url), 'utf8'),
+        ).devDependencies.vitest,
+        facts = {
+          localRunner:
+            !hostPath.isAbsolute(runnerRelative) &&
+            !EffectString.startsWith('..')(runnerRelative) &&
+            EffectString.startsWith('node_modules')(runnerRelative),
+          version: typeof version === 'string' && /^[0-9]+\.[0-9]+\.[0-9]+$/u.test(version) ? version : 'unrecognized',
+          pinMatches: version === pinned,
+          entrySHA256: hostCrypto.createHash('sha256').update(hostFiles.readFileSync(runner)).digest('hex'),
+          pool: 'threads',
+          workers: 1,
+          exactFilter: true,
+        },
+        child = Bun.spawn(
           [
             process.execPath,
+            '--no-install',
             '--bun',
-            fileURLToPath(new URL('./vitest.mjs', import.meta.resolve('vitest/package.json'))),
+            runner,
             'run',
             '--config',
             'vitest.config.ts',
@@ -459,7 +626,7 @@ it.skipIf(process.platform !== 'win32' || !supported)(
             '--reporter=dot',
           ],
           {
-            cwd: fileURLToPath(new URL('../../../../', import.meta.url)),
+            cwd: repository,
             env: {
               ...process.env,
               THREADNOTE_VITEST_LONG_GROUP: undefined,
@@ -472,13 +639,24 @@ it.skipIf(process.platform !== 'win32' || !supported)(
             maxBuffer: 65536,
           },
         ),
-        output = new Response(child.stdout).text(),
-        errors = new Response(child.stderr).text();
+        overflow = () => {
+          if (child.exitCode === null) child.kill('SIGKILL');
+        },
+        output = boundedChildOutput(child.stdout, overflow),
+        errors = boundedChildOutput(child.stderr, overflow);
       try {
         const [exit, stdout, stderr] = await Promise.all([child.exited, output, errors]);
-        expect(exit, stdout).toBe(0);
-        expect(stderr).toBe('');
-        expect(EffectString.includes(marker)(stdout)).toBe(true);
+        const diagnostic = JSON.stringify({
+          exit,
+          runner: facts,
+          stdout: {...stdout, text: sanitizedChildText(stdout.text)},
+          stderr: {...stderr, text: sanitizedChildText(stderr.text)},
+        });
+        expect(exit, diagnostic).toBe(0);
+        expect(stdout.truncated || stderr.truncated, diagnostic).toBe(false);
+        expect(facts.localRunner && facts.pinMatches, diagnostic).toBe(true);
+        assertEmptyChildStderr(stderr.text, diagnostic);
+        expect(EffectString.includes(marker)(stdout.text), diagnostic).toBe(true);
       } finally {
         if (child.exitCode === null) child.kill('SIGKILL');
         await child.exited;
@@ -861,19 +1039,55 @@ it.skipIf(process.platform !== 'win32' || !supported)(
     });
     const prior = jobSample.active,
       creatorIds = new Set<number>(),
-      processes = new Map<number, {process: bigint; threads: Map<number, bigint>; exit: boolean}>(),
+      processes = new Map<number, {process: bigint; threads: Map<number, bigint>; jobs: Set<bigint>; exit: boolean}>(),
+      jobs = new Map<bigint, {total: number; active: number; queries: number}>(),
+      launchedRoots: number[] = [],
+      requiredChildren = new Set<number>(),
       borrowed = new Set<bigint>();
     let pending: {kind: number; pid: number; tid: number} | undefined,
       creates = 0,
       threadCreates = 0,
       exits = 0,
       emptyPolls = 0,
-      resumes = 0;
+      resumes = 0,
+      passed = false;
     const observation: NonNullable<typeof jobSample.active> = {
       incomplete: false,
       getLastError: () => kernel.symbols.GetLastError(),
       setLastError: code => kernel.symbols.SetLastError(code),
       called(name, args, result) {
+        if (name === 'CreateJobObjectW') {
+          expect(jobs.size).toBeLessThan(2);
+          jobs.set(BigInt(String(result)), {total: 0, active: 0, queries: 0});
+        }
+        if (name === 'CreateProcessW' && result !== 0) {
+          if (!(args[9] instanceof Uint8Array)) throw new Error('No original process-information backing.');
+          const pi = new DataView(args[9].buffer, args[9].byteOffset, args[9].byteLength);
+          expect(launchedRoots.length).toBeLessThan(2);
+          launchedRoots.push(pi.getUint32(16, true));
+        }
+        if (name === 'QueryInformationJobObject' && args[1] === 1) {
+          const job = jobs.get(BigInt(String(args[0])));
+          if (!job || !(args[2] instanceof Uint8Array)) throw new Error('Missing original Job accounting backing.');
+          const accounting = new DataView(args[2].buffer, args[2].byteOffset, args[2].byteLength),
+            total = accounting.getUint32(36, true),
+            active = accounting.getUint32(40, true);
+          expect(total).toBeGreaterThanOrEqual(job.total);
+          expect(total).toBeLessThanOrEqual(256);
+          expect(active).toBeLessThanOrEqual(total);
+          job.total = total;
+          job.active = active;
+          job.queries++;
+        }
+        if (name === 'IsProcessInJob' && result !== 0 && pending?.kind === 3) {
+          const member = processes.get(pending.pid),
+            job = BigInt(String(args[1]));
+          if (member && args[0] === member.process) {
+            if (!jobs.has(job) || !(args[2] instanceof Int32Array))
+              throw new Error('Missing original membership backing.');
+            if (args[2][0] === 1) member.jobs.add(job);
+          }
+        }
         if (name === 'GetCurrentThreadId' && typeof result === 'number') creatorIds.add(result);
         if (name === 'WaitForDebugEvent') {
           if (result === 0) {
@@ -890,7 +1104,8 @@ it.skipIf(process.platform !== 'win32' || !supported)(
             const process = view.getBigUint64(24, true),
               thread = view.getBigUint64(32, true);
             expect(processes.has(pid)).toBe(false);
-            processes.set(pid, {process, threads: new Map([[tid, thread]]), exit: false});
+            expect(processes.size).toBeLessThan(512);
+            processes.set(pid, {process, threads: new Map([[tid, thread]]), jobs: new Set(), exit: false});
             borrowed.add(process);
             borrowed.add(thread);
             creates++;
@@ -915,6 +1130,7 @@ it.skipIf(process.platform !== 'win32' || !supported)(
           expect(args.slice(0, 2)).toEqual([pending.pid, pending.tid]);
           const member = processes.get(pending.pid);
           if (!member) throw new Error('Continue without captured native process.');
+          if (pending.kind === 3) expect(member.jobs.size).toBe(1);
           if (pending.kind === 4) {
             const thread = member.threads.get(pending.tid);
             if (thread === undefined) throw new Error('Exit without captured native thread.');
@@ -939,8 +1155,10 @@ it.skipIf(process.platform !== 'win32' || !supported)(
         spawn(`
         const worker = new Worker(URL.createObjectURL(new Blob(['postMessage("ready");close();'], {type:'application/javascript'})));
         await new Promise((resolve,reject)=>{worker.onmessage=resolve;worker.onerror=reject;});
-        await Promise.all(Array.from({length:3},()=>Bun.spawn([process.execPath,'-e','process.exit(0)'],{stdout:'ignore',stderr:'ignore'}).exited));
-        process.stdout.write('first');
+        const children=Array.from({length:3},()=>Bun.spawn([process.execPath,'-e','process.exit(0)'],{stdout:'ignore',stderr:'ignore'}));
+        const created=children.map(child=>child.pid);
+        await Promise.all(children.map(child=>child.exited));
+        process.stdout.write(JSON.stringify({role:'first',children:created}));
       `),
       );
       providers.push(spawn("for await (const bytes of Bun.stdin.stream()) {} process.stdout.write('second');"));
@@ -953,26 +1171,110 @@ it.skipIf(process.platform !== 'win32' || !supported)(
         count => count > 0,
       );
       for (const provider of providers) await provider.closeInput();
-      expect(await Promise.all(outputs)).toEqual(['first', 'second']);
-      expect(await Promise.all(errors)).toEqual(['', '']);
+      const [first, second] = await Promise.all(outputs);
+      // Creation receipts identify required fixture actors only. Native HANDLE/Job observations
+      // independently authenticate every member; a numeric receipt never supplies cleanup authority.
+      expect(first.length).toBeLessThan(512);
+      const actors: unknown = JSON.parse(first);
+      if (
+        typeof actors !== 'object' ||
+        actors === null ||
+        !('role' in actors) ||
+        actors.role !== 'first' ||
+        !('children' in actors) ||
+        !EffectArray.isArray(actors.children)
+      )
+        throw new Error('Invalid required-actor receipt.');
+      expect(actors.children.length).toBe(3);
+      for (const pid of actors.children) {
+        if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0)
+          throw new Error('Invalid fixture child receipt.');
+        requiredChildren.add(pid);
+      }
+      expect(requiredChildren.size).toBe(3);
+      expect(second).toBe('second');
+      const standardErrors = await Promise.all(errors);
+      expect(
+        EffectArray.every(standardErrors, stderr => stderr === ''),
+        JSON.stringify({stderr: EffectArray.map(standardErrors, sanitizedChildText)}),
+      ).toBe(true);
       for (const provider of providers)
         await until(
           () => runtimeObserveOwnedProviderTree(provider.handle),
           o => o.state === 'drained',
         );
-      expect(creates).toBe(5);
       expect(exits).toBe(creates);
       expect(threadCreates).toBeGreaterThan(0);
       expect(emptyPolls).toBeGreaterThan(0);
       expect(resumes).toBe(2);
       expect(creatorIds.size).toBe(1);
-      expect(pending).toBeUndefined();
+      expect(pending === undefined).toBe(true);
       expect(borrowed.size).toBe(0);
       expect(observation.incomplete).toBe(false);
+      expect(
+        launchedRoots.length === 2 && EffectArray.every(launchedRoots, (pid, index) => pid === providers[index].pid),
+      ).toBe(true);
+      expect(jobs.size).toBe(2);
+      const firstJob = processes.get(providers[0].pid)?.jobs.values().next().value;
+      if (firstJob === undefined) throw new Error('Missing original first-root membership.');
+      for (const pid of requiredChildren) {
+        const member = processes.get(pid);
+        expect(member !== undefined && member.jobs.size === 1 && member.jobs.has(firstJob) && member.exit).toBe(true);
+      }
+      for (const [handle, accounting] of jobs) {
+        const members = EffectArray.filter([...processes.values()], member => member.jobs.has(handle));
+        expect(accounting.queries).toBeGreaterThan(0);
+        expect(accounting.active).toBe(0);
+        expect(accounting.total).toBe(members.length);
+        expect(
+          EffectArray.every(members, member => member.exit && member.jobs.size === 1 && member.threads.size === 0),
+        ).toBe(true);
+      }
+      // Retain the original disputed oracle until the real member census explains any extra actors.
+      expect(creates).toBe(5);
+      passed = true;
     } finally {
       try {
         for (const provider of providers) await stop(provider);
       } finally {
+        if (!passed) {
+          const roots = new Set(EffectArray.map(providers, provider => provider.pid));
+          process.stdout.write(
+            'WINDOWS_JOB_MEMBER_SAMPLE ' +
+              JSON.stringify({
+                creates,
+                exits,
+                threadCreates,
+                emptyPolls,
+                resumes,
+                creators: creatorIds.size,
+                pendingEvent: pending !== undefined,
+                borrowedRoles: borrowed.size,
+                incomplete: observation.incomplete,
+                rootReceiptMatches:
+                  launchedRoots.length === providers.length &&
+                  EffectArray.every(launchedRoots, (pid, index) => pid === providers[index].pid),
+                requiredChildReceipts: requiredChildren.size,
+                jobs: EffectArray.map([...jobs.entries()], ([handle, accounting], ordinal) => {
+                  const members = EffectArray.filter([...processes.entries()], ([, member]) => member.jobs.has(handle));
+                  return {
+                    ordinal,
+                    ...accounting,
+                    captured: members.length,
+                    exited: EffectArray.filter(members, ([, member]) => member.exit).length,
+                    roots: EffectArray.filter(members, ([pid]) => roots.has(pid)).length,
+                    requiredChildren: EffectArray.filter(members, ([pid]) => requiredChildren.has(pid)).length,
+                    additionalInOriginalJob: EffectArray.filter(
+                      members,
+                      ([pid]) => !roots.has(pid) && !requiredChildren.has(pid),
+                    ).length,
+                  };
+                }),
+                unassigned: EffectArray.filter([...processes.values()], member => member.jobs.size !== 1).length,
+              }) +
+              '\n',
+          );
+        }
         jobSample.active = prior;
         kernel.close();
       }

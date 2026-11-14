@@ -268,6 +268,7 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
     readonly noFilters?: boolean;
     readonly minimalBuildInputs?: boolean;
     readonly separateWorkspaceParent?: boolean;
+    readonly workspaceScope?: Scope.Scope;
     readonly observerGate?: {readonly entered: Deferred.Deferred<void>; readonly release: Deferred.Deferred<void>};
   } = {},
 ) {
@@ -302,7 +303,9 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
   }
   const workspaceParent = control.separateWorkspaceParent ? path.join(parent, 'setup') : parent;
   if (control.separateWorkspaceParent) yield* fs.makeDirectory(workspaceParent, {mode: 0o700});
-  const workspace = yield* makeJavaWorkspace(workspaceParent);
+  const workspace = yield* makeJavaWorkspace(workspaceParent).pipe(
+    Effect.provideService(Scope.Scope, control.workspaceScope ?? (yield* Effect.scope)),
+  );
   const inputs = yield* copyJavaPreparationInputs({project, worktree: project, workspace, build: 'maven'});
   const copiedProject = inputs.copiedProject;
   const runtimeDirectory = path.join(workspace.directory, 'jdt-fixture');
@@ -584,13 +587,16 @@ const preparationCompositionFixture = Effect.fn('test.javaPreparationComposition
   control: {
     readonly beforeCapture?: Effect.Effect<void, LspFault>;
     readonly afterCapture?: Effect.Effect<void, LspFault>;
+    readonly disposeWorkspace?: boolean;
   } = {},
 ) {
+  const workspaceScope = control.disposeWorkspace ? yield* Scope.make() : undefined;
   const fixture = yield* modelFixture({
     deferImport: true,
     passiveProject: true,
     noFilters: true,
     separateWorkspaceParent: true,
+    workspaceScope,
   });
   const events: string[] = [];
   let drained = false;
@@ -624,7 +630,12 @@ const preparationCompositionFixture = Effect.fn('test.javaPreparationComposition
     drainBuildProcesses: () => mark('drain-build').pipe(Effect.as({drained: true})),
   };
   // Reuse preallocated genuine copied inputs; mock native launch and composition allocation, retaining real import/seal/read.
-  const workspace = vi.spyOn(javaRuntime, 'makeJavaWorkspace').mockReturnValue(Effect.succeed(fixture.workspace));
+  const workspace = vi.spyOn(javaRuntime, 'makeJavaWorkspace').mockReturnValue(
+    Effect.gen(function* () {
+      if (workspaceScope) yield* Effect.addFinalizer(() => Scope.close(workspaceScope, Exit.void));
+      return fixture.workspace;
+    }),
+  );
   const copied = vi
     .spyOn(javaPreparation, 'copyJavaPreparationInputs')
     .mockReturnValue(Effect.succeed(fixture.options.inputs));
@@ -667,6 +678,8 @@ const preparationCompositionFixture = Effect.fn('test.javaPreparationComposition
                 launch.drainBuildProcesses({
                   runtimeDirectory: fixture.runtimeDirectory,
                   gradleUserHome: fixture.path.join(fixture.runtimeDirectory, 'gradle'),
+                  retainInput: fixture.workspace.retainInput,
+                  verifyDisposed: fixture.workspace.verifyDisposed,
                 }),
               ),
             ).pipe(Effect.andThen(Effect.sync(() => void (drained = true))), Effect.orDie),
@@ -705,6 +718,81 @@ const preparationCompositionFixture = Effect.fn('test.javaPreparationComposition
 });
 
 describe('Java preparation composition', () => {
+  effectIt.effect('returns after actual disposal without re-reading its former provisioned inputs', () =>
+    Effect.gen(function* () {
+      // Only the provider/model boundary is synthetic; workspace files and scoped removal are real.
+      const f = yield* preparationCompositionFixture({disposeWorkspace: true});
+      const descriptor = yield* makeJavaPreparation(f.options, {
+        ...f.host,
+        provisionOfflineCache: context =>
+          Effect.gen(function* () {
+            const file = f.path.join(context.runtimeDirectory, 'provisioned-cache');
+            yield* f.fs.writeFileString(file, 'approved cache', {mode: 0o600});
+            yield* context.retainInput(file, sha256HexSync('approved cache'));
+            expect(Exit.isFailure(yield* Effect.exit(context.verifyDisposed))).toBe(true);
+          }),
+      });
+      expect(yield* f.fs.exists(f.workspace.directory)).toBe(false);
+      expect(descriptor.metadataDigest).toMatch(/^[a-f0-9]{64}$/u);
+      expect(f.drained()).toBe(true);
+      yield* f.workspace.verifyDisposed;
+      expect(Exit.isFailure(yield* Effect.exit(f.workspace.verify))).toBe(true);
+      expect(
+        Exit.isFailure(
+          yield* Effect.exit(
+            f.workspace.retainInput(f.path.join(f.workspace.directory, 'late-input'), sha256HexSync('late')),
+          ),
+        ),
+      ).toBe(true);
+      yield* f.workspace.verifyDisposed;
+    }).pipe(Effect.provide(preparationCompositionLayer)),
+  );
+  effectIt.effect('joins cancellation while the final retained-input guard is waiting after disposal', () =>
+    Effect.gen(function* () {
+      const f = yield* preparationCompositionFixture({disposeWorkspace: true});
+      const checking = yield* Deferred.make<void>();
+      const worker = yield* Effect.forkChild(
+        makeJavaPreparation(f.options, {
+          ...f.host,
+          verifySetup: Effect.suspend(() =>
+            f.drained() ? Deferred.succeed(checking, undefined).pipe(Effect.andThen(Effect.never)) : f.host.verifySetup,
+          ),
+        }),
+      );
+      yield* Deferred.await(checking);
+      yield* Fiber.interrupt(worker);
+      const exit = yield* Fiber.await(worker);
+      expect(Exit.isFailure(exit)).toBe(true);
+      expect(yield* f.fs.exists(f.workspace.directory)).toBe(false);
+      yield* f.workspace.verifyDisposed;
+      expect(f.load).not.toHaveBeenCalled();
+    }).pipe(Effect.provide(preparationCompositionLayer)),
+  );
+  effectIt.effect('refuses original input drift during cleanup after legitimate temporary disposal', () =>
+    Effect.gen(function* () {
+      const f = yield* preparationCompositionFixture({disposeWorkspace: true});
+      const original = yield* semanticTreeDigest(f.project);
+      const changed = f.path.join(f.project, 'pom.xml');
+      const exit = yield* Effect.exit(
+        makeJavaPreparation(f.options, {
+          ...f.host,
+          verifySetup: Effect.gen(function* () {
+            if ((yield* semanticTreeDigest(f.project)) !== original)
+              return yield* LspFault.make({code: 'prerequisite'});
+          }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
+          drainBuildProcesses: context =>
+            f.host
+              .drainBuildProcesses(context)
+              .pipe(Effect.tap(() => f.fs.writeFileString(changed, 'changed during cleanup').pipe(Effect.orDie))),
+        }),
+      );
+      expect(Exit.isFailure(exit)).toBe(true);
+      expect(yield* f.fs.exists(f.workspace.directory)).toBe(false);
+      yield* f.workspace.verifyDisposed;
+      expect(yield* f.fs.readFileString(changed)).toBe('changed during cleanup');
+      expect(f.load).not.toHaveBeenCalled();
+    }).pipe(Effect.provide(preparationCompositionLayer)),
+  );
   effectIt.effect('returns a frozen, independently readable model after provider and build drain', () =>
     Effect.gen(function* () {
       const f = yield* preparationCompositionFixture();
@@ -2396,6 +2484,102 @@ describe('Java prepared model sealing', () => {
 });
 
 describe('Java pinned runtime and preparation boundary', () => {
+  effectIt.effect.prop(
+    'disposes registered inputs only after both original owners drain and their final bytes remain intact',
+    [Schema.Literals(['unchanged', 'mutated', 'deleted', 'restored-after-refusal']), Schema.Boolean, Schema.Boolean],
+    ([change, providerDrained, buildDrained]) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const parent = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn-java-disposable-'}));
+        const owner = yield* Scope.make();
+        let removals = 0;
+        const workspace = yield* makeJavaWorkspace(parent).pipe(
+          Effect.provideService(Scope.Scope, owner),
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            remove: (file, options) =>
+              Effect.sync(() => {
+                removals++;
+              }).pipe(Effect.andThen(fs.remove(file, options))),
+          }),
+        );
+        yield* workspace.hold;
+        const file = path.join(workspace.directory, 'retained-input');
+        const input = Object.freeze({file, bytes: 'approved bytes', change, providerDrained, buildDrained});
+        const before = JSON.stringify(input);
+        yield* fs.writeFileString(file, input.bytes, {mode: 0o600});
+        yield* workspace.retainInput(file, sha256HexSync(input.bytes));
+        const attempts: string[] = [];
+        yield* Effect.addFinalizer(() =>
+          finishJavaPreparation(
+            workspace,
+            Effect.sync(() => {
+              attempts.push('provider');
+              return {code: 0, forced: false, drained: providerDrained, stdioClosed: providerDrained, fault: undefined};
+            }),
+            Effect.gen(function* () {
+              attempts.push('build');
+              if (change === 'deleted') yield* fs.remove(file);
+              if (change === 'mutated' || change === 'restored-after-refusal')
+                yield* fs.writeFileString(file, 'changed bytes');
+              if (change === 'restored-after-refusal') {
+                expect(Exit.isFailure(yield* Effect.exit(workspace.verify))).toBe(true);
+                yield* fs.writeFileString(file, input.bytes);
+              }
+              return {drained: buildDrained};
+            }).pipe(Effect.orDie),
+          ).pipe(Effect.orDie),
+        ).pipe(Effect.provideService(Scope.Scope, owner));
+        const closed = yield* Effect.exit(Scope.close(owner, Exit.void));
+        const expected = change === 'unchanged' && providerDrained && buildDrained;
+        expect(Exit.isSuccess(closed)).toBe(expected);
+        expect(Exit.isSuccess(yield* Effect.exit(workspace.verifyDisposed))).toBe(expected);
+        expect(yield* fs.exists(workspace.directory)).toBe(!expected);
+        yield* Effect.exit(Scope.close(owner, Exit.void));
+        expect(attempts).toEqual(['provider', 'build']);
+        expect(removals).toBe(expected ? 1 : 0);
+        expect(JSON.stringify(input)).toBe(before);
+        expect(Exit.isFailure(yield* Effect.exit(workspace.verify))).toBe(true);
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
+    {arbitrary: {runs: 24}},
+  );
+  effectIt.effect('keeps disposal uncertain and preserves the original failure when actual removal fails', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const parent = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn-java-remove-fault-'}));
+      let workspace: javaRuntime.JavaWorkspace | undefined;
+      let removals = 0;
+      const exit = yield* Effect.exit(
+        Effect.scoped(
+          Effect.gen(function* () {
+            workspace = yield* makeJavaWorkspace(parent).pipe(
+              Effect.provideService(FileSystem.FileSystem, {
+                ...fs,
+                remove: () =>
+                  Effect.sync(() => {
+                    removals++;
+                  }).pipe(Effect.andThen(Effect.die('fixture removal failed'))),
+              }),
+            );
+            yield* workspace.hold;
+            yield* workspace.confirmDrained({drained: true, stdioClosed: true});
+            return yield* Effect.die('original controlled failure');
+          }),
+        ),
+      );
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (Exit.isFailure(exit)) {
+        expect(Cause.pretty(exit.cause)).toContain('original controlled failure');
+        expect(Cause.pretty(exit.cause)).toContain('fixture removal failed');
+      }
+      expect(workspace).toBeDefined();
+      if (!workspace) return;
+      expect(Exit.isFailure(yield* Effect.exit(workspace.verifyDisposed))).toBe(true);
+      expect(yield* fs.exists(workspace.directory)).toBe(true);
+      expect(removals).toBe(1);
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
+  );
   effectIt.effect('closes process admission before awaiting workspace cleanup verification', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

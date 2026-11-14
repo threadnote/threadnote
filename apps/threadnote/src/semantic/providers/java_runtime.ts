@@ -155,8 +155,29 @@ export const makeJavaWorkspace = Effect.fn('semantic.makeJavaWorkspace')(functio
   if (parentInfo.type !== 'Directory' || parentInfo.mode & 0o077) return yield* fail();
   const directory = yield* fs.makeTempDirectory({directory: parent, prefix: 'java-'});
   const original = yield* fs.stat(directory);
-  let state: 'unused' | 'held' | 'drained' | 'closed' = 'unused';
-  const verify = Effect.gen(function* () {
+  let state: 'unused' | 'held' | 'drained' | 'closing' | 'disposed' | 'unknown' = 'unused';
+  let invalid = false;
+  const inputs: {file: string; digest: string; identity: FileSystem.File.Info}[] = [];
+  const verifyInput = Effect.fn('semantic.verifyJavaDisposableInput')(function* (input: (typeof inputs)[number]) {
+    const current = yield* fs.lstat(input.file);
+    const same = (value: FileSystem.File.Info) =>
+      value.type === 'File' &&
+      value.dev === input.identity.dev &&
+      Option.isSome(value.ino) &&
+      Option.isSome(input.identity.ino) &&
+      value.ino.value === input.identity.ino.value &&
+      value.mode === input.identity.mode &&
+      value.size === input.identity.size;
+    if (
+      !same(current) ||
+      (yield* fs.realPath(input.file)) !== input.file ||
+      sha256HexSync(yield* readBounded(input.file, 64 * 1024 * 1024)) !== input.digest ||
+      !same(yield* fs.lstat(input.file))
+    )
+      return yield* fail();
+  });
+  const verifyDirectory = Effect.gen(function* () {
+    if (invalid) return yield* fail();
     const current = yield* fs.stat(directory);
     if (
       (yield* fs.realPath(directory)) !== directory ||
@@ -168,18 +189,94 @@ export const makeJavaWorkspace = Effect.fn('semantic.makeJavaWorkspace')(functio
       original.ino.value !== current.ino.value
     )
       return yield* fail();
-  });
+  }).pipe(
+    Effect.onError(() =>
+      Effect.sync(() => {
+        invalid = true;
+      }),
+    ),
+  );
+  const verifyLive = verifyDirectory.pipe(
+    Effect.andThen(
+      Effect.gen(function* () {
+        for (const input of inputs) yield* verifyInput(input);
+      }),
+    ),
+    Effect.onError(() =>
+      Effect.sync(() => {
+        invalid = true;
+      }),
+    ),
+  );
+  const verify = Effect.suspend(() =>
+    state === 'closing' || state === 'disposed' || state === 'unknown' ? fail() : verifyLive,
+  );
   yield* verify;
   yield* Effect.addFinalizer(() =>
     Effect.suspend(() => {
-      const retained = state === 'held';
-      state = 'closed';
-      return retained ? Effect.void : verify.pipe(Effect.andThen(fs.remove(directory, {recursive: true})));
+      const retained = state === 'held' || invalid;
+      state = 'closing';
+      if (retained) {
+        state = 'unknown';
+        return Effect.void;
+      }
+      return verifyLive.pipe(
+        Effect.andThen(fs.remove(directory, {recursive: true})),
+        Effect.andThen(
+          Effect.sync(() => {
+            state = 'disposed';
+          }),
+        ),
+        Effect.onError(() =>
+          Effect.sync(() => {
+            state = 'unknown';
+          }),
+        ),
+      );
     }).pipe(Effect.orDie),
   );
   return {
     directory,
     verify,
+    /** Only this owner's successful removal can establish disposal; absence is never a receipt. */
+    verifyDisposed: Effect.suspend(() => (state === 'disposed' && !invalid ? Effect.void : fail())),
+    retainInput: (file: string, digest: string) =>
+      Effect.suspend(() =>
+        state !== 'held'
+          ? fail()
+          : Effect.gen(function* () {
+              yield* verifyDirectory;
+              if (
+                state !== 'held' ||
+                !Schema.is(Digest)(digest) ||
+                !path.isAbsolute(file) ||
+                path.resolve(file) !== file ||
+                file === directory ||
+                !inside(directory, file, path.sep) ||
+                inputs.length >= 512 ||
+                EffectArray.some(inputs, input => input.file === file)
+              )
+                return yield* fail();
+              const identity = yield* fs.lstat(file);
+              if (identity.mode & 0o077) return yield* fail();
+              const input = {file, digest, identity};
+              yield* verifyInput(input);
+              if (
+                state !== 'held' ||
+                invalid ||
+                inputs.length >= 512 ||
+                EffectArray.some(inputs, input => input.file === file)
+              )
+                return yield* fail();
+              inputs.push(input);
+            }).pipe(
+              Effect.onError(() =>
+                Effect.sync(() => {
+                  invalid = true;
+                }),
+              ),
+            ),
+      ),
     hold: verify.pipe(
       Effect.andThen(
         Effect.suspend(() => {
@@ -311,6 +408,8 @@ export const makeJavaMavenBoundary = Effect.fn('semantic.makeJavaMavenBoundary')
 export interface JavaPreparationDrainContext {
   readonly runtimeDirectory: string;
   readonly gradleUserHome: string;
+  readonly retainInput: JavaWorkspace['retainInput'];
+  readonly verifyDisposed: JavaWorkspace['verifyDisposed'];
 }
 type JavaLaunchOptions = {
   readonly workspace: JavaWorkspace;
@@ -520,7 +619,12 @@ export const makeJavaRuntime = Effect.fn('semantic.makeJavaRuntime')(
         const root = yield* fs.makeTempDirectory({directory: privateDirectory, prefix: 'jdt-'});
         yield* directory(root);
         const launched: {started: boolean; wire: LspWire | undefined} = {started: false, wire: undefined};
-        const drainContext = Object.freeze({runtimeDirectory: root, gradleUserHome: path.join(root, 'gradle')});
+        const drainContext = Object.freeze({
+          runtimeDirectory: root,
+          gradleUserHome: path.join(root, 'gradle'),
+          retainInput: options.workspace.retainInput,
+          verifyDisposed: options.workspace.verifyDisposed,
+        });
         yield* Effect.addFinalizer(() =>
           Effect.gen(function* () {
             if (!launched.started) return;

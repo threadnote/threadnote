@@ -129,6 +129,7 @@
         "react": "^19.3.1",
         "react-dom": "^19.3.1",
         "typescript": "6.0.3",
+        "typescript-compiler": "npm:typescript@5.9.3",
         "typescript-language-server": "6.0.2",
         "vitest": "5.0.5",
       },

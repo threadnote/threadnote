@@ -21,6 +21,7 @@ const SEMANTIC_PYTHON_METADATA_SOURCES = new Set([
   'apps/threadnote/src/semantic/providers/python.ts',
   'apps/threadnote/src/semantic/providers/python_project.ts',
 ]);
+const TYPESCRIPT_SEMANTIC_PROVIDER_SOURCE = 'apps/threadnote/src/semantic/providers/typescript.ts';
 const PYTHON_PROJECT_SOURCE = 'apps/threadnote/src/semantic/providers/python_project.ts';
 const PYTHON_CAPSULE_SHA256 = '7741971d0fcd1dcf7944ddb2dc24346f874f6d7b3e1a58c871baf666fb8d9764';
 const PYTHON_IMPORTS = new Set([
@@ -254,6 +255,11 @@ const HISTORICAL_WORKFLOW_DIAGNOSTIC =
 export function hasUndeclaredPythonRuntimeReference(relativePath: string, content: string): boolean {
   if (PYTHON_METADATA_SOURCES.has(relativePath)) return false;
   let source = Effect.pipe(content, EffectString.replaceAll('\r\n', '\n'));
+  if (relativePath === TYPESCRIPT_SEMANTIC_PROVIDER_SOURCE) {
+    // Consume only the exact language-label rejection; keep the generic residual scan for commands.
+    source = EffectString.replace("l === 'python'", '')(source);
+    return /\bpython(?:\d+(?:\.\d+)*)?\b/i.test(source);
+  }
   if (relativePath === PYTHON_PROJECT_SOURCE) {
     const residual = pythonResidualSource(source);
     if (residual === undefined) return true;

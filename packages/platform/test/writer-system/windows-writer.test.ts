@@ -22,6 +22,184 @@ import {
 } from '../../src/writer_system.js';
 import {runtimeNativePlatformSupport} from '../../src/system.js';
 import {windowsTokenPrincipal, windowsSystemLibrary, windowsWide} from '../../src/writer-system/windows-native.js';
+import {
+  assertWindowsWriterLeaseOwner,
+  openWindowsPrivateDirectory,
+  windowsWitnessClosingDifference,
+} from '../../src/writer-system/windows-writer.js';
+import * as windowsNative from '../../src/writer-system/windows-native.js';
+import type {NativeFileIdentity} from '../../src/writer-system/windows-files.js';
+
+function nativePidFixture(pid = 731) {
+  type Kernel = ReturnType<typeof windowsNative.windowsKernel>;
+  const pseudo = 0xffffffffffffffffn,
+    failure = new Error('controlled native PID failure'),
+    release = vi.fn(() => true),
+    close = vi.fn(() => {
+      if (!release()) throw failure;
+    }),
+    capture = vi.fn((_release: () => boolean) => close),
+    symbols: Kernel['symbols'] = {
+      CloseHandle: vi.fn<Kernel['symbols']['CloseHandle']>(),
+      GetLastError: vi.fn<Kernel['symbols']['GetLastError']>(),
+      GetCurrentProcess: vi.fn<Kernel['symbols']['GetCurrentProcess']>().mockReturnValue(pseudo),
+      GetCurrentThread: vi.fn<Kernel['symbols']['GetCurrentThread']>(),
+      GetProcessId: vi.fn<Kernel['symbols']['GetProcessId']>().mockReturnValue(pid),
+      GetProcessTimes: vi.fn<Kernel['symbols']['GetProcessTimes']>(),
+      GetExitCodeProcess: vi.fn<Kernel['symbols']['GetExitCodeProcess']>(),
+      WaitForSingleObject: vi.fn<Kernel['symbols']['WaitForSingleObject']>(),
+      LocalFree: vi.fn<Kernel['symbols']['LocalFree']>(),
+    },
+    kernel = vi.spyOn(windowsNative, 'windowsKernel').mockImplementation(owner => {
+      if (!owner) throw new Error('Unregistered native PID library.');
+      return {symbols, close: owner(release)};
+    }),
+    start = vi.spyOn(windowsNative, 'readWindowsWriterProcessIdentity').mockReturnValue('win32:original-start'),
+    token = JSON.stringify({
+      version: 1,
+      token: 'original-nonce',
+      processId: 731,
+      processStartIdentity: 'win32:original-start',
+    });
+  return {pseudo, failure, release, close, capture, symbols, kernel, start, token};
+}
+it('uses the original native pseudo-handle PID once and joins its registered library without closing the pseudo-handle', () => {
+  const f = nativePidFixture();
+  try {
+    assertWindowsWriterLeaseOwner(f.token, f.capture);
+    expect(f.kernel).toHaveBeenCalledWith(f.capture);
+    expect(f.capture).toHaveBeenCalledWith(f.release);
+    expect(f.symbols.GetCurrentProcess).toHaveBeenCalledTimes(1);
+    expect(f.symbols.GetProcessId).toHaveBeenCalledExactlyOnceWith(f.pseudo);
+    expect(f.start).toHaveBeenCalledExactlyOnceWith(731);
+    expect(f.symbols.CloseHandle).not.toHaveBeenCalled();
+    expect(f.close).toHaveBeenCalledTimes(1);
+    expect(f.release).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(f.token).token).toBe('original-nonce');
+  } finally {
+    vi.restoreAllMocks();
+  }
+});
+it('refuses unsafe native PID observations and mismatching owner tokens while always closing the acquired library', () => {
+  fc.assert(
+    fc.property(
+      fc.oneof(
+        fc.constantFrom(0, -1, 0x100000000, NaN, Infinity, 731.5),
+        fc.integer({min: 1, max: 0xffffffff}).filter(pid => pid !== 731),
+      ),
+      pid => {
+        const f = nativePidFixture(pid);
+        try {
+          expect(() => assertWindowsWriterLeaseOwner(f.token, f.capture)).toThrow(RuntimeWriterFault);
+          expect(f.start).not.toHaveBeenCalled();
+          expect(f.close).toHaveBeenCalledTimes(1);
+          expect(f.symbols.CloseHandle).not.toHaveBeenCalled();
+        } finally {
+          vi.restoreAllMocks();
+        }
+      },
+    ),
+    {numRuns: 24},
+  );
+  const f = nativePidFixture();
+  try {
+    const changed = JSON.stringify({...JSON.parse(f.token), processStartIdentity: 'win32:other-start'});
+    expect(() => assertWindowsWriterLeaseOwner(changed, f.capture)).toThrow(RuntimeWriterFault);
+    expect(f.start).toHaveBeenCalledExactlyOnceWith(731);
+    expect(f.close).toHaveBeenCalledTimes(1);
+  } finally {
+    vi.restoreAllMocks();
+  }
+});
+it('keeps native PID lookup and release faults fail-closed and never acquires a library for malformed tokens', () => {
+  const f = nativePidFixture();
+  try {
+    for (const token of [
+      '{',
+      'null',
+      '{}',
+      JSON.stringify({version: 1, token: '', processId: 731, processStartIdentity: 'win32:original-start'}),
+    ])
+      expect(() => assertWindowsWriterLeaseOwner(token, f.capture)).toThrow();
+    expect(f.kernel).not.toHaveBeenCalled();
+    vi.mocked(f.symbols.GetProcessId).mockImplementation(() => {
+      throw f.failure;
+    });
+    expect(() => assertWindowsWriterLeaseOwner(f.token, f.capture)).toThrow(f.failure);
+    expect(f.close).toHaveBeenCalledTimes(1);
+    expect(f.symbols.CloseHandle).not.toHaveBeenCalled();
+  } finally {
+    vi.restoreAllMocks();
+  }
+  const failedClose = nativePidFixture();
+  try {
+    failedClose.release.mockImplementation(() => {
+      throw failedClose.failure;
+    });
+    expect(() => assertWindowsWriterLeaseOwner(failedClose.token, failedClose.capture)).toThrow(failedClose.failure);
+    expect(failedClose.close).toHaveBeenCalledTimes(1);
+    expect(failedClose.release).toHaveBeenCalledTimes(1);
+    expect(failedClose.symbols.CloseHandle).not.toHaveBeenCalled();
+  } finally {
+    vi.restoreAllMocks();
+  }
+});
+
+it('projects the first closing-bracket difference without exposing or changing native observations', () => {
+  fc.assert(
+    fc.property(
+      fc.constantFrom(
+        'volumeId',
+        'fileId',
+        'dev',
+        'ino',
+        'birthtime',
+        'attributes',
+        'changed',
+        'modified',
+        'links',
+        'size',
+        'security-owner',
+        'security-bytes',
+      ),
+      fc.bigInt({min: 1n, max: 1n << 63n}),
+      (field, value) => {
+        const before: NativeFileIdentity = Object.freeze({
+          volumeId: value,
+          fileId: 'private-native-id',
+          dev: value,
+          ino: value,
+          birthtime: value,
+          attributes: 32,
+          changed: value,
+          modified: value,
+          links: 1,
+          size: value,
+        });
+        const security = {owner: 'private-owner', bytes: new Uint8Array([1, 2, 3])},
+          after = {...before},
+          changedSecurity = {owner: security.owner, bytes: security.bytes.slice()};
+        if (field === 'fileId') after.fileId = 'other-private-id';
+        else if (field === 'attributes' || field === 'links') after[field]++;
+        else if (field === 'security-owner') changedSecurity.owner = 'other-private-owner';
+        else if (field === 'security-bytes') changedSecurity.bytes[1] ^= 1;
+        else after[field] ^= 1n;
+        const captured = {...after},
+          bytes = changedSecurity.bytes.slice();
+        expect(windowsWitnessClosingDifference(before, before, security, security)).toBeUndefined();
+        expect(windowsWitnessClosingDifference(before, after, security, changedSecurity)).toBe(field);
+        expect(after).toEqual(captured);
+        expect(changedSecurity.bytes).toEqual(bytes);
+        expect(security).toEqual({owner: 'private-owner', bytes: new Uint8Array([1, 2, 3])});
+        // Preserve the existing stable-then-security short-circuit order when several fields differ.
+        expect(
+          windowsWitnessClosingDifference(before, {...after, volumeId: value ^ 1n}, security, changedSecurity),
+        ).toBe('volumeId');
+      },
+    ),
+    {numRuns: 24},
+  );
+});
 
 // This final negative control forwards one real close, then withholds its success.
 // It proves conservative close-UNKNOWN retention without leaking a fixture HANDLE.
@@ -298,6 +476,20 @@ function ownedFixture<A>(use: (directory: string) => A): A {
   const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'tn-windows-writer-')));
   try {
     return use(directory);
+  } catch (error) {
+    if (Schema.is(RuntimeWriterFault)(error)) {
+      const fault =
+        /^windows-witness-closing:(root|ancestor|target):([0-9]{1,3}):(volumeId|fileId|dev|ino|birthtime|attributes|changed|modified|links|size|security-owner|security-bytes|unclassified)$/u.exec(
+          error.message,
+        );
+      if (fault)
+        process.stdout.write(
+          'WINDOWS_WRITER_CLOSING_FAULT ' +
+            JSON.stringify({stage: 'closing', role: fault[1], ordinal: Number(fault[2]), field: fault[3]}) +
+            '\n',
+        );
+    }
+    throw error;
   } finally {
     fs.rmSync(directory, {recursive: true, force: true});
   }
@@ -374,6 +566,47 @@ it.skipIf(process.platform !== 'win32')(
         expect(JSON.stringify(firstWitness) === JSON.stringify(closingWitness)).toBe(true);
         expect(() => runtimeExportWindowsSourceWitness({...firstSource.evidence})).toThrow(RuntimeWriterFault);
         expect(releaseControl.writable).toBe(0n); // Read-only evidence never requested the writable source mask.
+        // Real native lease checks precede this fixture's terminal close-UNKNOWN poisoning.
+        const leaseDirectory = openWindowsPrivateDirectory(fs.realpathSync(directory));
+        try {
+          const identityKernel = windowsNative.windowsKernel();
+          try {
+            const currentPid = identityKernel.symbols.GetProcessId(identityKernel.symbols.GetCurrentProcess()),
+              start = windowsNative.readWindowsWriterProcessIdentity(currentPid),
+              owner = {
+                version: 1,
+                token: '17f74b51-472b-4aa6-8062-042cff74d12e',
+                processId: currentPid,
+                processStartIdentity: start,
+              },
+              token = JSON.stringify(owner),
+              name = 'identity-lease';
+            for (const bad of [
+              {...owner, processId: 0},
+              {...owner, processId: currentPid === 1 ? 2 : 1},
+              {...owner, processStartIdentity: start + '-changed'},
+            ]) {
+              expect(() => leaseDirectory.acquireLease(name, JSON.stringify(bad))).toThrow(RuntimeWriterFault);
+              expect(fs.existsSync(path.join(directory, name))).toBe(false);
+              expect(fs.readFileSync(file, 'utf8')).toBe('old source');
+            }
+            const lease = leaseDirectory.acquireLease(name, token);
+            if (!lease) throw new Error('Original native self lease refused.');
+            try {
+              lease.assertCurrentSync();
+              lease.heartbeat();
+            } finally {
+              lease.close();
+            }
+            lease.close();
+            expect(fs.existsSync(path.join(directory, name))).toBe(false);
+            expect(JSON.stringify(owner)).toBe(token);
+          } finally {
+            identityKernel.close(); // No CloseHandle call for its borrowed current-process pseudo-handle.
+          }
+        } finally {
+          leaseDirectory.close();
+        }
         fs.writeFileSync(file, 'new source');
         const editedSource = runtimeCaptureWindowsSource(fs.realpathSync(directory), ['source.txt'], 1024);
         expect(runtimeSameWindowsSourceEvidence(firstSource.evidence, editedSource.evidence, false)).toBe(true);

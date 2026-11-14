@@ -65,6 +65,130 @@ const WARM_COHORTS = CODE_MEMORY_LINK_BENCH_MINIMUM_WARMUPS + WARM_SAMPLES;
 const HIGH_NOISE_MEMORIES = 256;
 const encoder = new TextEncoder();
 
+const diagnosticCallbacks = [
+  'graphEvidence',
+  'memoryEvidence',
+  'codeLinkedMemoryEvidence',
+  'citationValidation',
+] as const;
+type DiagnosticCallback = (typeof diagnosticCallbacks)[number];
+type DiagnosticCounter = {calls: number; failures: number; milliseconds: number};
+type DiagnosticRun = {
+  readonly ordinal: number;
+  readonly phase: 'baseline' | 'warmup' | 'sample';
+  readonly cohortOrdinal: number | null;
+  readonly callbacks: Record<DiagnosticCallback, DiagnosticCounter>;
+  milliseconds: number;
+  completed: boolean;
+};
+export interface CodeMemoryLinkBenchDiagnostic {
+  readonly version: 1;
+  readonly kind: 'code-memory-link-bench-diagnostic';
+  readonly outcome: 'success' | 'failure';
+  readonly runs: readonly DiagnosticRun[];
+  readonly measuredMilliseconds: readonly number[];
+  readonly droppedRuns: number;
+}
+type DiagnosticObserve = <A, E, R>(
+  name: DiagnosticCallback,
+  program: () => Effect.Effect<A, E, R>,
+) => Effect.Effect<A, E, R>;
+
+/** @internal Bounded observation only. Never carries source, task, memory, path or failure bodies. */
+export function makeCodeMemoryLinkBenchDiagnosticRecorder(
+  sink: (diagnostic: CodeMemoryLinkBenchDiagnostic) => void,
+  now: () => number = monotonicMilliseconds,
+) {
+  const runs: DiagnosticRun[] = [];
+  let measuredMilliseconds: readonly number[] = [],
+    droppedRuns = 0;
+  const identity: DiagnosticObserve = (_name, program) => Effect.suspend(program);
+  return {
+    run: <A, E, R>(program: (observe: DiagnosticObserve) => Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
+      Effect.suspend(() => {
+        // One initial run, five warmups and twenty-five measured cohorts; no unbounded trace.
+        if (runs.length >= WARM_COHORTS + 1) {
+          droppedRuns++;
+          return program(identity);
+        }
+        const row: DiagnosticRun = {
+          ordinal: runs.length,
+          phase:
+            runs.length === 0
+              ? 'baseline'
+              : runs.length <= CODE_MEMORY_LINK_BENCH_MINIMUM_WARMUPS
+                ? 'warmup'
+                : 'sample',
+          cohortOrdinal: runs.length === 0 ? null : runs.length - 1,
+          callbacks: {
+            graphEvidence: {calls: 0, failures: 0, milliseconds: 0},
+            memoryEvidence: {calls: 0, failures: 0, milliseconds: 0},
+            codeLinkedMemoryEvidence: {calls: 0, failures: 0, milliseconds: 0},
+            citationValidation: {calls: 0, failures: 0, milliseconds: 0},
+          },
+          milliseconds: 0,
+          completed: false,
+        };
+        runs.push(row);
+        const started = now();
+        const observe: DiagnosticObserve = (name, effect) =>
+          Effect.suspend(() => {
+            const counter = row.callbacks[name];
+            counter.calls++;
+            const callbackStarted = now();
+            return Effect.suspend(effect).pipe(
+              Effect.onExit(exit =>
+                Effect.sync(() => {
+                  counter.milliseconds += Math.max(0, now() - callbackStarted);
+                  if (exit._tag === 'Failure') counter.failures++;
+                }),
+              ),
+            );
+          });
+        return Effect.suspend(() => program(observe)).pipe(
+          Effect.onExit(exit =>
+            Effect.sync(() => {
+              row.milliseconds = Math.max(0, now() - started);
+              row.completed = exit._tag === 'Success';
+            }),
+          ),
+        );
+      }),
+    samples: (values: readonly number[]): void => {
+      measuredMilliseconds = EffectArray.take(values, WARM_SAMPLES);
+    },
+    finish: <A, E, R>(program: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
+      program.pipe(
+        Effect.onExit(exit =>
+          Effect.sync(() => {
+            // Emit only after all timed programs/finalizers. A diagnostic consumer cannot change their outcome.
+            try {
+              sink({
+                version: 1,
+                kind: 'code-memory-link-bench-diagnostic',
+                outcome: exit._tag === 'Success' ? 'success' : 'failure',
+                runs: EffectArray.map(runs, row => ({
+                  ...row,
+                  callbacks: {
+                    graphEvidence: {...row.callbacks.graphEvidence},
+                    memoryEvidence: {...row.callbacks.memoryEvidence},
+                    codeLinkedMemoryEvidence: {...row.callbacks.codeLinkedMemoryEvidence},
+                    citationValidation: {...row.callbacks.citationValidation},
+                  },
+                })),
+                measuredMilliseconds: [...measuredMilliseconds],
+                droppedRuns,
+              });
+            } catch {
+              // Observers are not authority over benchmark values or failures.
+            }
+          }),
+        ),
+      ),
+  };
+}
+type DiagnosticRecorder = ReturnType<typeof makeCodeMemoryLinkBenchDiagnosticRecorder>;
+
 /**
  * Run the frozen gate through current-anchor capture, the real inverse recall
  * index, canonical memory rereads, citation validation, merge, and v3 projection.
@@ -72,21 +196,28 @@ const encoder = new TextEncoder();
  */
 export const evaluateCodeMemoryLinkBenchRuntime = Effect.fn('evaluation.codeMemoryLinkBenchRuntime')(function* (
   fixtureInput: CodeMemoryLinkBenchFixtureV1 | unknown,
+  diagnosticSink?: (diagnostic: CodeMemoryLinkBenchDiagnostic) => void,
 ) {
   const fixture = parseCodeMemoryLinkBenchFixtureV1(fixtureInput);
   assertApprovedCodeMemoryLinkBenchFixture(fixture);
-  const observations = yield* Effect.scoped(
-    Effect.forEach(fixture.queries, query => evaluateRuntimeQuery(query), {concurrency: 1}),
-  );
-  return evaluateCodeMemoryLinkBench(fixture, {
-    fixtureId: fixture.id,
-    observations,
-    version: 1,
+  const diagnostic =
+    diagnosticSink === undefined ? undefined : makeCodeMemoryLinkBenchDiagnosticRecorder(diagnosticSink);
+  const program = Effect.gen(function* () {
+    const observations = yield* Effect.scoped(
+      Effect.forEach(fixture.queries, query => evaluateRuntimeQuery(query, diagnostic), {concurrency: 1}),
+    );
+    return evaluateCodeMemoryLinkBench(fixture, {
+      fixtureId: fixture.id,
+      observations,
+      version: 1,
+    });
   });
+  return yield* diagnostic === undefined ? program : diagnostic.finish(program);
 });
 
 const evaluateRuntimeQuery = Effect.fn('evaluation.codeMemoryLinkBenchRuntime.query')(function* (
   query: CodeMemoryLinkBenchQueryV1,
+  diagnostic?: DiagnosticRecorder,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -99,8 +230,12 @@ const evaluateRuntimeQuery = Effect.fn('evaluation.codeMemoryLinkBenchRuntime.qu
   yield* loadRecallIndexData(config, {forceRefresh: true, includeInactive: false, limit: 0, query: ''});
   const graph = makeRuntimeGraph(root, definition);
   const program = Effect.gen(function* () {
-    const run = (codeRefs: readonly string[] = query.codeRefs) =>
-      compileRuntimeBrief(config, root, query, definition, codeRefs);
+    const run =
+      diagnostic !== undefined && query.measureWarmIncrementalLatency
+        ? (codeRefs: readonly string[] = query.codeRefs) =>
+            diagnostic.run(observe => compileRuntimeBrief(config, root, query, definition, codeRefs, observe))
+        : (codeRefs: readonly string[] = query.codeRefs) =>
+            compileRuntimeBrief(config, root, query, definition, codeRefs);
     const started = monotonicMilliseconds();
     const brief = yield* run();
     const elapsedMilliseconds = elapsed(started);
@@ -122,6 +257,7 @@ const evaluateRuntimeQuery = Effect.fn('evaluation.codeMemoryLinkBenchRuntime.qu
           }),
         {concurrency: 1},
       );
+      diagnostic?.samples(milliseconds);
       warmIncremental = {milliseconds, warmups: CODE_MEMORY_LINK_BENCH_MINIMUM_WARMUPS};
       const expectedUncachedValidations = 1 + CODE_MEMORY_LINK_BENCH_MINIMUM_WARMUPS + WARM_SAMPLES;
       if (graph.validationEvidenceCalls() < expectedUncachedValidations) {
@@ -144,14 +280,28 @@ function compileRuntimeBrief(
   query: CodeMemoryLinkBenchQueryV1,
   definition: ScenarioDefinition,
   codeRefs: readonly string[],
+  observe?: DiagnosticObserve,
 ) {
   return compileContextBriefWith(
     {
-      citationValidation: (scope, candidates, fence) =>
-        validateContextBriefMemoryCitations(config, scope, candidates, fence),
-      codeLinkedMemoryEvidence: plan => retrieveContextBriefCodeLinkedMemoryEvidence(config, plan),
-      graphEvidence: () => Effect.succeed(runtimeGraphEvidence(definition)),
-      memoryEvidence: plan => retrieveContextBriefMemoryEvidence(config, plan),
+      ...(observe === undefined
+        ? {
+            citationValidation: (scope, candidates, fence) =>
+              validateContextBriefMemoryCitations(config, scope, candidates, fence),
+            codeLinkedMemoryEvidence: plan => retrieveContextBriefCodeLinkedMemoryEvidence(config, plan),
+            graphEvidence: () => Effect.succeed(runtimeGraphEvidence(definition)),
+            memoryEvidence: plan => retrieveContextBriefMemoryEvidence(config, plan),
+          }
+        : {
+            citationValidation: (scope, candidates, fence) =>
+              observe('citationValidation', () =>
+                validateContextBriefMemoryCitations(config, scope, candidates, fence),
+              ),
+            codeLinkedMemoryEvidence: plan =>
+              observe('codeLinkedMemoryEvidence', () => retrieveContextBriefCodeLinkedMemoryEvidence(config, plan)),
+            graphEvidence: () => observe('graphEvidence', () => Effect.succeed(runtimeGraphEvidence(definition))),
+            memoryEvidence: plan => observe('memoryEvidence', () => retrieveContextBriefMemoryEvidence(config, plan)),
+          }),
     },
     {
       budgetTokens: query.budgetClass === 'default' ? 1_250 : 1_500,

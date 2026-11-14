@@ -1,4 +1,14 @@
-import {Array as EffectArray, Effect, FileSystem, Option, Path, Schema, Scope, String as EffectString} from 'effect';
+import {
+  Array as EffectArray,
+  Effect,
+  Exit,
+  FileSystem,
+  Option,
+  Path,
+  Schema,
+  Scope,
+  String as EffectString,
+} from 'effect';
 import * as Native from '@threadnote/platform/system';
 import {canonicalFileUri, Digest, FileUri} from '@threadnote/semantic/contracts';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -501,7 +511,8 @@ const executeImport = Effect.fn('semantic.executeJavaImport')(function* (
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const provisioned: {readonly file: string; readonly digest: string}[] = [];
+  let verifyDisposed: Effect.Effect<void, unknown> | undefined;
+  let launchAttempted = false;
   const profileGuard = Effect.gen(function* () {
     const current = yield* readSemanticHostProfile(config, worktree);
     if (current.digest !== profileDigest || JSON.stringify(current.profile.javaImport) !== JSON.stringify(policy))
@@ -513,12 +524,6 @@ const executeImport = Effect.fn('semantic.executeJavaImport')(function* (
     Effect.gen(function* () {
       if (policy.mode === javaTrustedImportMode) yield* verifyTrustedBinding(config, root, project, worktree, policy);
       else if ((yield* inspectJavaImportInputs(root, project)) !== policy.sourceDigest) return yield* reject('stale');
-      for (const artifact of provisioned)
-        if (
-          (yield* fs.realPath(artifact.file)) !== artifact.file ||
-          sha256HexSync(yield* readBounded(artifact.file, 64 * 1024 * 1024)) !== artifact.digest
-        )
-          return yield* reject('stale');
       yield* runtime.verify;
     }),
   );
@@ -534,7 +539,9 @@ const executeImport = Effect.fn('semantic.executeJavaImport')(function* (
         Effect.gen(function* () {
           authorizations.delete(token);
           const receipt = yield* owners.finish;
-          yield* reservation.release(receipt.drained && receipt.stdioClosed);
+          const disposed =
+            !launchAttempted || (verifyDisposed !== undefined && Exit.isSuccess(yield* Effect.exit(verifyDisposed)));
+          yield* reservation.release(receipt.drained && receipt.stdioClosed && disposed);
         }).pipe(Effect.orDie),
       );
       yield* guard; // Queue waiting cannot preserve a stale policy.
@@ -546,6 +553,7 @@ const executeImport = Effect.fn('semantic.executeJavaImport')(function* (
         verifySetup,
         verifyOwners: owners.verify,
         beforePreparationLaunch: () => {
+          launchAttempted = true;
           owners.beforeLaunch('provider');
         },
         capturePreparationProvider: (_pid, originalFinish) => {
@@ -554,6 +562,7 @@ const executeImport = Effect.fn('semantic.executeJavaImport')(function* (
         onProviderStarted: pid => reservation.bindProvider(pid),
         provisionOfflineCache: context =>
           Effect.gen(function* () {
+            verifyDisposed = context.verifyDisposed;
             for (const directory of [path.join(context.runtimeDirectory, 'm2'), context.gradleUserHome]) {
               const info = yield* fs.stat(directory);
               if (
@@ -577,7 +586,7 @@ const executeImport = Effect.fn('semantic.executeJavaImport')(function* (
                 yield* fs.makeDirectory(path.dirname(file), {recursive: true, mode: 0o700});
                 if ((yield* fs.realPath(path.dirname(file))) !== path.dirname(file)) return yield* reject('stale');
                 yield* fs.writeFile(file, bytes, {flag: 'wx', mode: 0o600});
-                provisioned.push({file, digest: sha256HexSync(bytes)});
+                yield* context.retainInput(file, sha256HexSync(bytes));
               }
             }
           }).pipe(Effect.provideService(FileSystem.FileSystem, fs), Effect.provideService(Path.Path, path)),
@@ -607,9 +616,10 @@ const executeImport = Effect.fn('semantic.executeJavaImport')(function* (
       const watchdog = Effect.forever(Effect.sleep(250).pipe(Effect.andThen(profileGuard)));
       return yield* Effect.raceFirst(operation, watchdog);
     }),
+  ).pipe(
+    // Admission release may yield after the engine/watchdog complete. Fence success and failure cleanup.
+    Effect.onExit(() => guard.pipe(Effect.interruptible)),
   );
-  // Admission release may yield after the engine/watchdog complete. Fence that entire cleanup interval.
-  yield* guard;
   return descriptor;
 });
 
