@@ -20,6 +20,7 @@ import {
   validateNativeCycleReviewHistory,
   nativeCycleBaseRequalificationReceiptDigest,
   validateNativeCycleMergeReceipt,
+  validateNativeCycleInvalidTailMergeReceipt,
 } from './cycle_review.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {WorkflowAutomationError} from './contracts.js';
@@ -166,6 +167,89 @@ export function nativeCycleHasBasePlanTransition(
     if (phase.value.baseBranch === fromBaseBranch && hash === prior.phaseHash) fromFound = true;
   }
   return false;
+}
+
+/** Follow actual lineage and use the most recent accepted ledger, including incremental review. */
+export function nativeCycleLatestAcceptedReviewBasis(runtime: NativeCycleRuntime, snapshotId: string) {
+  const seen = new Set<string>();
+  let current = EffectOption.getOrUndefined(
+    EffectArray.findFirst(runtime.snapshots, entry => entry.snapshot.snapshotId === snapshotId),
+  )?.snapshot;
+  while (current && !seen.has(current.snapshotId)) {
+    seen.add(current.snapshotId);
+    const snapshot = current;
+    const report = EffectOption.getOrUndefined(
+      EffectArray.findFirst(runtime.reviews, entry => entry.snapshotId === snapshot.snapshotId),
+    )?.report;
+    if (report) {
+      const digest = sha256HexSync(nativeCycleCanonicalJson(report));
+      const accepted = EffectArray.filter(
+        runtime.attempts,
+        attempt =>
+          attempt.snapshotId === snapshot.snapshotId && attempt.status === 'accepted' && attempt.digest === digest,
+      );
+      return accepted.length === 1 ? {snapshot, review: report, attempt: accepted[0], digest} : undefined;
+    }
+    const predecessor = snapshot.previous ?? snapshot.supersedes;
+    current = EffectOption.getOrUndefined(
+      EffectArray.findFirst(runtime.snapshots, entry => entry.snapshot.snapshotId === predecessor),
+    )?.snapshot;
+  }
+  return undefined;
+}
+
+/** Only the new witness changes the review ledger basis; ordinary direct predecessors remain strict. */
+export function nativeCycleReviewBasis(runtime: NativeCycleRuntime, snapshot: typeof NativeCycleSnapshotSchema.Type) {
+  const predecessor =
+    snapshot.invalidTailMergeQualificationV1?.basisSnapshotId ?? snapshot.previous ?? snapshot.supersedes;
+  const previous = EffectOption.getOrUndefined(
+    EffectArray.findFirst(runtime.snapshots, entry => entry.snapshot.snapshotId === predecessor),
+  )?.snapshot;
+  const review = EffectOption.getOrUndefined(
+    EffectArray.findFirst(runtime.reviews, entry => entry.snapshotId === predecessor),
+  )?.report;
+  return previous && review ? {snapshot: previous, review} : undefined;
+}
+
+export function nativeCycleInvalidTailBasis(runtime: NativeCycleRuntime, phaseId: string) {
+  const leaf = EffectArray.filter(runtime.snapshots, entry => entry.snapshot.phaseId === phaseId).at(-1)?.snapshot;
+  if (
+    !leaf ||
+    leaf.phaseHash !== runtime.state.phases[phaseId]?.phaseHash ||
+    !nativeCycleSnapshotIsCurrentIteration(runtime, phaseId, leaf.snapshotId) ||
+    EffectArray.some(runtime.reviews, entry => entry.snapshotId === leaf.snapshotId) ||
+    !EffectArray.some(
+      runtime.attempts,
+      attempt => attempt.snapshotId === leaf.snapshotId && attempt.status === 'invalid',
+    ) ||
+    EffectArray.some(
+      runtime.attempts,
+      attempt => attempt.snapshotId === leaf.snapshotId && attempt.status === 'accepted',
+    )
+  )
+    return undefined;
+  const basis = nativeCycleLatestAcceptedReviewBasis(runtime, leaf.previous ?? leaf.supersedes ?? '');
+  return basis ? {leaf, basis} : undefined;
+}
+
+/** Appends one source witness; old reviews, reports and continuous phase budgets stay untouched. */
+export function appendNativeCycleInvalidTailRequalification(
+  runtimeInput: NativeCycleRuntime,
+  entry: typeof NativeCycleStoredSnapshotSchema.Type,
+): NativeCycleRuntime {
+  const runtime = decodeNativeCycleRuntime(runtimeInput);
+  const phaseId = entry.snapshot.phaseId;
+  const selected = nativeCycleInvalidTailBasis(runtime, phaseId);
+  if (
+    !selected ||
+    selected.leaf.snapshotId !== entry.snapshot.previous ||
+    !['active', 'pending'].includes(runtime.state.phases[phaseId]?.status ?? '')
+  )
+    throw WorkflowAutomationError.make({
+      code: 'invalid-tail-requalification',
+      message: 'Use the current invalid-only leaf with an accepted ancestral finding ledger.',
+    });
+  return decodeNativeCycleRuntime({...runtime, snapshots: [...runtime.snapshots, entry]});
 }
 
 export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
@@ -349,6 +433,57 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
       )
         fail('Keep the exact per-phase upstream incoming subset separate from the complete merge proof.');
     }
+    if (snapshot.invalidTailMergeQualificationV1) {
+      const proof = snapshot.invalidTailMergeQualificationV1;
+      const prior = snapshots.get(snapshot.previous ?? '')?.snapshot;
+      const basis = prior
+        ? nativeCycleLatestAcceptedReviewBasis(runtime, prior.previous ?? prior.supersedes ?? '')
+        : undefined;
+      if (
+        !prior ||
+        latestSnapshotByPhase.get(snapshot.phaseId) !== prior.snapshotId ||
+        !capturedSnapshots.has(prior.snapshotId) ||
+        reviews.has(prior.snapshotId) ||
+        !EffectArray.some(
+          runtime.attempts,
+          attempt => attempt.snapshotId === prior.snapshotId && attempt.status === 'invalid',
+        ) ||
+        EffectArray.some(
+          runtime.attempts,
+          attempt => attempt.snapshotId === prior.snapshotId && attempt.status === 'accepted',
+        ) ||
+        !basis ||
+        !capturedSnapshots.has(basis.snapshot.snapshotId) ||
+        proof.basisSnapshotId !== basis.snapshot.snapshotId ||
+        proof.basisReviewDigest !== basis.digest ||
+        proof.basisAttemptId !== basis.attempt.id
+      )
+        fail('Invalid-tail qualification lost the exact invalid leaf or latest accepted ancestral finding ledger.');
+      validateNativeCycleInvalidTailMergeReceipt(snapshot, prior, runtime.plans, baseline.head);
+      const plan = EffectOption.getOrUndefined(
+        EffectArray.findFirst(runtime.plans, item => item.source.documentHash === proof.planDocumentHash),
+      )!;
+      const phase = EffectOption.getOrUndefined(
+        EffectArray.findFirst(plan.phases, item => item.id === snapshot.phaseId),
+      )!;
+      const expected = EffectArray.filter(proof.upstreamEvidence, item => !phase.allowedPaths.includes(item.path));
+      if (
+        incoming.length !== expected.length ||
+        EffectArray.some(incoming, (item, index) => {
+          const value = expected[index];
+          return (
+            !value ||
+            item.path !== value.path ||
+            item.source !== 'upstream' ||
+            item.commit !== proof.currentBaseHead ||
+            item.tree !== proof.currentBaseTree ||
+            item.mode !== value.head.mode ||
+            item.blob !== value.head.blob
+          );
+        })
+      )
+        fail('Keep the exhaustive invalid-tail upstream incoming partition.');
+    }
     capturedSnapshots.add(snapshot.snapshotId);
     if (
       !runtime.state.phases[snapshot.phaseId] ||
@@ -402,16 +537,10 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
   for (const {snapshotId, report} of runtime.reviews) {
     const snapshot = snapshots.get(snapshotId)?.snapshot;
     if (!snapshot) fail('Review snapshot is missing.');
-    const predecessor = snapshot.previous ?? snapshot.supersedes;
-    const previous = predecessor ? snapshots.get(predecessor)?.snapshot : undefined;
-    const priorReport = previous ? reviews.get(previous.snapshotId) : undefined;
-    if (previous && !priorReport && !snapshot.unreviewedSupersession)
+    const basis = nativeCycleReviewBasis(runtime, snapshot);
+    if ((snapshot.previous || snapshot.supersedes) && !basis && !snapshot.unreviewedSupersession)
       fail('Review history lost its prior finding ledger.');
-    validateNativeCycleReviewHistory(
-      snapshot,
-      report,
-      previous && priorReport ? {snapshot: previous, review: priorReport} : undefined,
-    );
+    validateNativeCycleReviewHistory(snapshot, report, basis);
   }
   if (EffectArray.some(runtime.attempts, attempt => !snapshots.has(attempt.snapshotId)))
     fail('Review attempt snapshot is missing.');
@@ -566,23 +695,9 @@ function validateSupplementalInitialization(
       definition.baseBranch !== `${init.pr.baseRefBinding?.remote}/${init.pr.baseBranch}`)
   )
     supplementalFail('Supplemental attachment requires exact completed local proof and an existing matching PR.');
-  const predecessorId = snapshot.previous ?? snapshot.supersedes;
-  const predecessor = predecessorId
-    ? EffectOption.getOrUndefined(
-        EffectArray.findFirst(runtime.snapshots, item => item.snapshot.snapshotId === predecessorId),
-      )?.snapshot
-    : undefined;
-  const priorReview = predecessor
-    ? EffectOption.getOrUndefined(
-        EffectArray.findFirst(runtime.reviews, item => item.snapshotId === predecessor.snapshotId),
-      )?.report
-    : undefined;
   if (
-    validateNativeCycleReviewHistory(
-      snapshot,
-      review.report,
-      predecessor && priorReview ? {snapshot: predecessor, review: priorReview} : undefined,
-    ).summary.blockingIssueCount
+    validateNativeCycleReviewHistory(snapshot, review.report, nativeCycleReviewBasis(runtime, snapshot)).summary
+      .blockingIssueCount
   )
     supplementalFail('Supplemental attachment requires an accepted nonblocking source review.');
 }

@@ -1,11 +1,30 @@
+import {sha256HexSync} from '@threadnote/platform/sha256';
+import {
+  appendNativeCycleInvalidTailRequalification,
+  decodeNativeCycleRuntime,
+  nativeCycleInvalidTailBasis,
+  nativeCycleReviewBasis,
+  type NativeCycleRuntime,
+} from '../src/cycle_runtime.js';
 import {Array as EffectArray, String as EffectString} from 'effect';
 import {Schema} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
-import {decodeNativeCyclePlan, nativeCyclePhaseHash} from '../src/cycle.js';
-import {NativeCycleSnapshotSchema, validateNativeCycleReview, type NativeCycleSnapshot} from '../src/cycle_review.js';
+import {
+  decodeNativeCyclePlan,
+  nativeCyclePhaseHash,
+  initializeNativeCycle,
+  nativeCycleCanonicalJson,
+} from '../src/cycle.js';
+import {
+  NativeCycleSnapshotSchema,
+  validateNativeCycleReview,
+  nativeCycleReviewRecordingMode,
+  type NativeCycleSnapshot,
+} from '../src/cycle_review.js';
 import {
   nativeCycleMergeReceiptDigest,
+  nativeCycleInvalidTailMergeReceiptDigest,
   validateNativeCycleMergeOwners,
   validateNativeCycleMergeReceipt,
   type NativeCycleOrdinaryMergeReceipt,
@@ -255,5 +274,281 @@ describe('ordinary merge qualification contract', () => {
       ),
       {numRuns: 40},
     );
+  });
+});
+
+const invalidTailFixture = (materialRestart = false) => {
+  const f = fixture();
+  const full = {...f.prior, snapshotId: 'full'};
+  const incremental = {...f.prior, snapshotId: 'incremental', previous: full.snapshotId, previousTree: full.tree};
+  const currentPlan = materialRestart
+    ? decodeNativeCyclePlan({
+        ...f.plan,
+        source: {...f.plan.source, documentHash: hash('d')},
+        phases: EffectArray.map(f.plan.phases, phase => ({...phase, definitionHash: hash('c')})),
+      })
+    : f.plan;
+  const leaf = {
+    ...f.prior,
+    phaseHash: nativeCyclePhaseHash(currentPlan, 'one'),
+    ...(materialRestart
+      ? {supersedes: incremental.snapshotId}
+      : {previous: incremental.snapshotId, previousTree: incremental.tree}),
+  };
+  const finding = {
+    id: 'late-finding',
+    file: 'owned.ts',
+    line: 1,
+    body: 'Concrete issue',
+    trigger: 'Run input',
+    impact: 'Wrong result',
+    evidence: 'Direct source',
+    severity: 'important' as const,
+    category: 'correctness' as const,
+    confidence: 99,
+    state: 'new' as const,
+  };
+  const review = (
+    snapshot: NativeCycleSnapshot,
+    mode: 'full' | 'incremental',
+    findings: readonly (typeof finding)[],
+  ) => ({
+    snapshotId: snapshot.snapshotId,
+    phaseHash: snapshot.phaseHash,
+    snapshotTree: snapshot.tree,
+    status: 'complete' as const,
+    mode,
+    selected: ['correctness', 'simplicity'],
+    lanes: [
+      {name: 'correctness', status: 'complete' as const},
+      {name: 'simplicity', status: 'complete' as const},
+    ],
+    findings,
+  });
+  const fullReport = review(full, 'full', []);
+  const incrementalReport = review(incremental, 'incremental', [finding]);
+  const accepted = (snapshot: NativeCycleSnapshot, report: typeof fullReport) => ({
+    id: snapshot.snapshotId + '-accepted',
+    snapshotId: snapshot.snapshotId,
+    digest: sha256HexSync(nativeCycleCanonicalJson(report)),
+    status: 'accepted' as const,
+    report: nativeCycleCanonicalJson(report),
+    message: 'Accepted',
+  });
+  const runtime: NativeCycleRuntime = decodeNativeCycleRuntime({
+    state: initializeNativeCycle(currentPlan),
+    plans: materialRestart ? [f.plan, currentPlan] : [f.plan],
+    baselines: {
+      one: {repo: full.repo, head: object('4'), tree: full.baseTree, preservedFiles: [], pinnedRef: 'refs/heads/main'},
+    },
+    reviewLimits: {},
+    reviewExpansions: [],
+    snapshots: EffectArray.map([full, incremental, leaf], snapshot => ({snapshot, incoming: []})),
+    reviews: [
+      {snapshotId: full.snapshotId, report: fullReport},
+      {snapshotId: incremental.snapshotId, report: incrementalReport},
+    ],
+    attempts: [
+      accepted(full, fullReport),
+      accepted(incremental, incrementalReport),
+      {
+        id: 'invalid-1',
+        snapshotId: leaf.snapshotId,
+        digest: hash('f'),
+        status: 'invalid',
+        report: '{}',
+        message: 'Incomplete',
+      },
+      {
+        id: 'invalid-2',
+        snapshotId: leaf.snapshotId,
+        digest: hash('f'),
+        status: 'invalid',
+        report: '{}',
+        message: 'Still incomplete',
+      },
+    ],
+  });
+  const {ordinaryMergeQualificationV1: _ordinary, ...source} = {
+    ...f.snapshot,
+    phaseHash: leaf.phaseHash,
+    version: 3 as const,
+  };
+  const proof = {
+    ...f.receipt,
+    format: 'threadnote-native-invalid-tail-merge-qualification' as const,
+    planDocumentHash: currentPlan.source.documentHash,
+    basisSnapshotId: incremental.snapshotId,
+    basisReviewDigest: sha256HexSync(nativeCycleCanonicalJson(incrementalReport)),
+    basisAttemptId: incremental.snapshotId + '-accepted',
+    taskRefDigest: hash('a'),
+    predecessorRefDigest: hash('b'),
+    operationDigest: hash('c'),
+  };
+  const snapshot: NativeCycleSnapshot = {
+    ...source,
+    invalidTailMergeQualificationV1: {...proof, receiptDigest: nativeCycleInvalidTailMergeReceiptDigest(source, proof)},
+  };
+  const entry = {
+    snapshot,
+    incoming: EffectArray.map(f.receipt.upstreamEvidence, item => ({
+      path: item.path,
+      source: 'upstream' as const,
+      commit: snapshot.declaredBaseHead,
+      tree: snapshot.scopeBase,
+      mode: item.head.mode,
+      blob: item.head.blob,
+    })),
+  };
+  return {runtime, snapshot, entry, incrementalReport, fullReport, full, incremental, leaf, finding};
+};
+
+describe('invalid-only tail merge qualification', () => {
+  it('binds the latest accepted incremental ledger and retains reports, attempts and continuous budgets', () => {
+    const f = invalidTailFixture();
+    expect(nativeCycleInvalidTailBasis(f.runtime, 'one')?.basis.snapshot.snapshotId).toBe('incremental');
+    const next = appendNativeCycleInvalidTailRequalification(f.runtime, f.entry);
+    expect(next.snapshots.slice(0, -1)).toEqual(f.runtime.snapshots);
+    expect(next.attempts).toEqual(f.runtime.attempts);
+    expect(next.reviews).toEqual(f.runtime.reviews);
+    expect(next.reviewLimits).toEqual(f.runtime.reviewLimits);
+    expect(next.reviewExpansions).toEqual(f.runtime.reviewExpansions);
+    expect(next.state).toEqual(f.runtime.state);
+    expect(nativeCycleReviewRecordingMode(f.snapshot)).toBe('full');
+    const basis = nativeCycleReviewBasis(next, f.snapshot);
+    expect(basis?.snapshot.snapshotId).toBe('incremental');
+    const fresh = {
+      ...f.incrementalReport,
+      snapshotId: f.snapshot.snapshotId,
+      snapshotTree: f.snapshot.tree,
+      mode: 'full',
+      findings: [{...f.finding, state: 'carried'}],
+    };
+    expect(() => validateNativeCycleReview(f.snapshot, fresh, basis)).not.toThrow();
+    expect(() => validateNativeCycleReview(f.snapshot, {...fresh, findings: []}, basis)).toThrow();
+    expect(() => validateNativeCycleReview(f.snapshot, {...fresh, mode: 'incremental'}, basis)).toThrow();
+    expect(() => Schema.decodeSync(NativeCycleSnapshotSchema)({...f.snapshot, version: 2})).toThrow();
+    expect(() =>
+      Schema.decodeUnknownSync(NativeCycleSnapshotSchema, {onExcessProperty: 'error'})({
+        ...f.snapshot,
+        invalidTailMergeQualificationV1: {...f.snapshot.invalidTailMergeQualificationV1, version: 2},
+      }),
+    ).toThrow();
+  });
+
+  it('records the required FULL review after qualifying a material restart against the latest accepted incremental ledger', () => {
+    const f = invalidTailFixture(true);
+    expect(f.leaf.supersedes).toBe(f.incremental.snapshotId);
+    expect(f.leaf.phaseHash).not.toBe(f.incremental.phaseHash);
+    const admitted = appendNativeCycleInvalidTailRequalification(f.runtime, f.entry);
+    expect(admitted.snapshots.at(-1)?.snapshot.previous).toBe(f.leaf.snapshotId);
+    const basis = nativeCycleReviewBasis(admitted, f.snapshot)!;
+    expect(basis.snapshot.snapshotId).toBe(f.incremental.snapshotId);
+    expect(basis.review.mode).toBe('incremental');
+    expect(f.snapshot.phaseHash).toBe(f.leaf.phaseHash);
+    expect(nativeCycleReviewRecordingMode(f.snapshot)).toBe('full');
+    const full = {
+      ...f.incrementalReport,
+      snapshotId: f.snapshot.snapshotId,
+      snapshotTree: f.snapshot.tree,
+      phaseHash: f.snapshot.phaseHash,
+      mode: 'full' as const,
+      findings: [{...f.finding, state: 'carried' as const}],
+    };
+    const reviewed = validateNativeCycleReview(f.snapshot, full, basis);
+    const report = nativeCycleCanonicalJson(reviewed.review);
+    const completed = decodeNativeCycleRuntime({
+      ...admitted,
+      reviews: [...admitted.reviews, {snapshotId: f.snapshot.snapshotId, report: reviewed.review}],
+      attempts: [
+        ...admitted.attempts,
+        {
+          id: 'qualified-full',
+          snapshotId: f.snapshot.snapshotId,
+          digest: sha256HexSync(report),
+          status: 'accepted',
+          report,
+          message: 'Fresh complete FULL review',
+        },
+      ],
+    });
+    expect(completed.reviews.at(-1)?.report).toEqual(full);
+    expect(completed.reviews.slice(0, -1)).toEqual(f.runtime.reviews);
+    expect(completed.attempts.slice(0, -1)).toEqual(f.runtime.attempts);
+    expect(completed.reviewLimits).toEqual(f.runtime.reviewLimits);
+    expect(completed.reviewExpansions).toEqual(f.runtime.reviewExpansions);
+    expect(() => validateNativeCycleReview(f.snapshot, {...full, findings: []}, basis)).toThrow();
+    expect(() => validateNativeCycleReview(f.snapshot, {...full, mode: 'incremental'}, basis)).toThrow();
+
+    const ordinary: NativeCycleSnapshot = {
+      ...f.snapshot,
+      version: 1,
+      invalidTailMergeQualificationV1: undefined,
+      previous: basis.snapshot.snapshotId,
+      previousTree: basis.snapshot.tree,
+    };
+    expect(() => validateNativeCycleReview(ordinary, {...full, mode: 'incremental'}, basis)).toThrow();
+    const malformed = {...f.snapshot.invalidTailMergeQualificationV1!, basisReviewDigest: hash('0')};
+    const forged: NativeCycleSnapshot = {
+      ...f.snapshot,
+      invalidTailMergeQualificationV1: {
+        ...malformed,
+        receiptDigest: nativeCycleInvalidTailMergeReceiptDigest(f.snapshot, malformed),
+      },
+    };
+    expect(() => validateNativeCycleReview(forged, full, basis)).toThrow();
+    expect(() => appendNativeCycleInvalidTailRequalification(f.runtime, {...f.entry, snapshot: forged})).toThrow();
+    const wrongPhase = {...f.snapshot, phaseHash: basis.snapshot.phaseHash};
+    wrongPhase.invalidTailMergeQualificationV1 = {
+      ...f.snapshot.invalidTailMergeQualificationV1!,
+      receiptDigest: nativeCycleInvalidTailMergeReceiptDigest(wrongPhase, f.snapshot.invalidTailMergeQualificationV1!),
+    };
+    expect(() => appendNativeCycleInvalidTailRequalification(f.runtime, {...f.entry, snapshot: wrongPhase})).toThrow();
+  });
+
+  it('refuses absent ledgers, an older full basis, wrong receipt provenance and nonlatest or accepted leaves', () => {
+    const f = invalidTailFixture();
+    const withoutLedger = {
+      ...f.runtime,
+      reviews: [],
+      attempts: EffectArray.filter(f.runtime.attempts, attempt => attempt.status === 'invalid'),
+    };
+    expect(nativeCycleInvalidTailBasis(withoutLedger, 'one')).toBeUndefined();
+    expect(() => appendNativeCycleInvalidTailRequalification(withoutLedger, f.entry)).toThrow();
+    for (const change of [
+      {
+        basisSnapshotId: 'full',
+        basisReviewDigest: sha256HexSync(nativeCycleCanonicalJson(f.fullReport)),
+        basisAttemptId: 'full-accepted',
+      },
+      {authority: ' '},
+      {currentBaseHead: f.leaf.declaredBaseHead},
+      {phaseOwnedPaths: []},
+      {mergeBases: {...f.snapshot.invalidTailMergeQualificationV1!.mergeBases, prior: object('0')}},
+    ]) {
+      const proof = {...f.snapshot.invalidTailMergeQualificationV1!, ...change};
+      const snapshot = {
+        ...f.snapshot,
+        invalidTailMergeQualificationV1: {
+          ...proof,
+          receiptDigest: nativeCycleInvalidTailMergeReceiptDigest(f.snapshot, proof),
+        },
+      };
+      expect(() => appendNativeCycleInvalidTailRequalification(f.runtime, {...f.entry, snapshot})).toThrow();
+    }
+    const advanced = {
+      ...f.runtime,
+      snapshots: [...f.runtime.snapshots, {snapshot: {...f.leaf, snapshotId: 'later'}, incoming: []}],
+    };
+    expect(() => appendNativeCycleInvalidTailRequalification(advanced, f.entry)).toThrow();
+    const acceptedLeaf = {
+      ...f.runtime,
+      reviews: [
+        ...f.runtime.reviews,
+        {snapshotId: f.leaf.snapshotId, report: {...f.incrementalReport, snapshotId: f.leaf.snapshotId}},
+      ],
+    };
+    expect(nativeCycleInvalidTailBasis(acceptedLeaf, 'one')).toBeUndefined();
+    expect(f.runtime.snapshots.at(-1)?.snapshot.snapshotId).toBe('prior');
   });
 });
