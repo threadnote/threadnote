@@ -374,8 +374,8 @@ public final class PreparedProjectModel implements IDelegateCommandHandler {
       IJavaProject javaProject = JavaCore.create(project);
       JavaModelManager manager = JavaModelManager.getJavaModelManager();
       PerProjectInfo info = manager.getPerProjectInfo(project, false);
-      require(info != null, "model-not-cached");
-      Map<String, Object> before = cached(javaProject, info, host, budget);
+      requireCached(info != null, "project-info", "info-absent");
+      Map<String, Object> before = cached(javaProject, info, host, budget, "initial");
       // Select only from the immutable image; Buildship preserves a trailing separator on the same known JRE path.
       String capturedJre = null;
       for (Object raw : (List<?>) before.get("rawClasspath")) {
@@ -394,7 +394,7 @@ public final class PreparedProjectModel implements IDelegateCommandHandler {
       List<Map<String, Object>> libraries = libraries(before, host, budget);
       IVMInstall selectedAfter = JavaRuntime.getVMInstall(jrePath);
       require(selectedAfter != null && vmImage.equals(vm(selectedAfter, new Budget(monitor))), "model-changed");
-      Map<String, Object> after = cached(javaProject, info, host, new Budget(monitor));
+      Map<String, Object> after = cached(javaProject, info, host, new Budget(monitor), "confirmed");
       require(manager.getPerProjectInfo(project, false) == info && before.equals(after)
           && vmImage.equals(vm(vm, new Budget(monitor)))
           && actualHome.equals(canonical(vm.getInstallLocation().toPath())), "model-changed");
@@ -575,13 +575,26 @@ public final class PreparedProjectModel implements IDelegateCommandHandler {
         && output.segment(1).matches("output-(?:[0-9]|[12][0-9]|3[0-2])"), "unsupported-output");
   }
 
+  private static void requireCached(boolean condition, String stage, String missing) throws Unsupported {
+    if (!condition) throw new Unsupported("model-not-cached", stage == null ? Map.of()
+        : Map.of("cacheStage", stage, "cacheCondition", missing));
+  }
   private static CacheImage cacheImage(PerProjectInfo info, Budget budget) throws Exception {
+    return cacheImage(info, budget, null);
+  }
+  private static CacheImage cacheImage(PerProjectInfo info, Budget budget, String stage) throws Exception {
     synchronized (info) {
-      require(info.rawClasspath != null && info.rawClasspath != JavaProject.INVALID_CLASSPATH
-          && !info.writtingRawClasspath && info.rawClasspathStatus != null && info.rawClasspathStatus.isOK()
-          && info.unresolvedEntryStatus != null && info.unresolvedEntryStatus.isOK()
-          && info.getResolvedClasspath() != null && info.options != null && info.outputLocation != null,
-          "model-not-cached");
+      // Preserve the original conjunction's short-circuit read order and the same info monitor.
+      requireCached(info.rawClasspath != null, stage, "raw-absent");
+      requireCached(info.rawClasspath != JavaProject.INVALID_CLASSPATH, stage, "raw-invalid");
+      requireCached(!info.writtingRawClasspath, stage, "raw-writing");
+      requireCached(info.rawClasspathStatus != null, stage, "raw-status-absent");
+      requireCached(info.rawClasspathStatus.isOK(), stage, "raw-status-failed");
+      requireCached(info.unresolvedEntryStatus != null, stage, "unresolved-status-absent");
+      requireCached(info.unresolvedEntryStatus.isOK(), stage, "unresolved-status-failed");
+      requireCached(info.getResolvedClasspath() != null, stage, "resolved-absent");
+      requireCached(info.options != null, stage, "options-absent");
+      requireCached(info.outputLocation != null, stage, "output-absent");
       require(info.rawClasspath.length <= 162 && info.resolvedClasspath.length <= 512
           && info.options.size() <= 2048, "capacity");
       List<Map<String, Object>> raw = entries(info.rawClasspath, budget, false);
@@ -596,10 +609,10 @@ public final class PreparedProjectModel implements IDelegateCommandHandler {
           info.rawTimeStamp, DiagnosticSnapshot.sha256(options.toString()));
     }
   }
-  private static Map<String, Object> cached(IJavaProject project, PerProjectInfo info, Host host, Budget budget)
+  private static Map<String, Object> cached(IJavaProject project, PerProjectInfo info, Host host, Budget budget, String stage)
       throws Exception {
     // Only bounded immutable primitives leave the info monitor. Resource, filesystem and global-option work stays outside.
-    CacheImage cache = cacheImage(info, budget);
+    CacheImage cache = cacheImage(info, budget, stage);
     require(project.getProject().isAccessible() && project.getProject().getLocationURI() != null
         && canonical(Path.of(project.getProject().getLocationURI())).equals(host.project()), "unmanaged-project");
     require(project.getProject() instanceof org.eclipse.core.internal.resources.Project, "unsupported-resource-model");
@@ -661,7 +674,7 @@ public final class PreparedProjectModel implements IDelegateCommandHandler {
     var finalLinks = description.getLinks();
     require(pinnedProject.internalGetDescription() == description && (finalLinks == null || finalLinks.isEmpty())
         && resourceFilters.equals(resourceFilters(description, project.getProject(), new Budget(budget.monitor)))
-        && cache.equals(cacheImage(info, new Budget(budget.monitor))), "model-changed");
+        && cache.equals(cacheImage(info, new Budget(budget.monitor), stage + "-stability")), "model-changed");
     return Map.copyOf(model);
   }
 

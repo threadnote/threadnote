@@ -116,6 +116,67 @@ describe('Gradle bootstrap project JVM', () => {
 });
 
 describe('Java prepared refusal wire contract', () => {
+  it('conserves only closed correlated cache refusal coordinates without admitting a model', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom('project-info', 'initial', 'initial-stability', 'confirmed', 'confirmed-stability'),
+        fc.constantFrom(
+          'info-absent',
+          'raw-absent',
+          'raw-invalid',
+          'raw-writing',
+          'raw-status-absent',
+          'raw-status-failed',
+          'unresolved-status-absent',
+          'unresolved-status-failed',
+          'resolved-absent',
+          'options-absent',
+          'output-absent',
+        ),
+        fc.constantFrom('initial', 'confirmation'),
+        (cacheStage, cacheCondition, rpcPhase) => {
+          const reply = {
+            protocolVersion: 1,
+            requestToken: 'cache',
+            status: 'unsupported',
+            reason: 'model-not-cached',
+            evidence: {cacheStage, cacheCondition},
+          };
+          const before = structuredClone(reply);
+          const expected = {requestToken: 'cache', build: 'gradle', rpcPhase} as const;
+          expect(() => readJavaPreparedObservation(reply, expected)).toThrow(JavaPreparedImportRefusal);
+          try {
+            readJavaPreparedObservation(reply, expected);
+          } catch (error) {
+            expect(error).toMatchObject({reason: 'model-not-cached', evidence: reply.evidence, rpcPhase});
+          }
+          for (const malformed of [
+            {...reply, evidence: {...reply.evidence, cacheStage: '/private/untrusted'}},
+            {...reply, evidence: {...reply.evidence, cacheCondition: 'unknown'}},
+            {...reply, evidence: {...reply.evidence, path: '/private/untrusted'}},
+            {...reply, evidence: {cacheStage}},
+            {...reply, requestToken: 'foreign'},
+            {...reply, rpcPhase: 'confirmation'},
+          ]) {
+            expect(() => readJavaPreparedObservation(malformed, expected)).toThrow();
+            expect(() => readJavaPreparedObservation(malformed, expected)).not.toThrow(JavaPreparedImportRefusal);
+          }
+          expect(reply).toEqual(before);
+        },
+      ),
+      {numRuns: 40},
+    );
+  });
+  it('retains legacy empty cache refusals and omits host phase on other refusals', () => {
+    const base = {protocolVersion: 1, requestToken: 'cache', status: 'unsupported', evidence: {}};
+    const expected = {requestToken: 'cache', build: 'gradle', rpcPhase: 'confirmation'} as const;
+    expect(() => readJavaPreparedObservation({...base, reason: 'model-not-cached'}, expected)).toThrow(
+      'Java preparation refused: model-not-cached [confirmation] {}',
+    );
+    expect(() => readJavaPreparedObservation({...base, reason: 'unmanaged-project'}, expected)).toThrow(
+      'Java preparation refused: unmanaged-project {}',
+    );
+  });
   it('keeps the producer generic observation refusal strict and sanitized', () => {
     const reply = {protocolVersion: 1, requestToken: 'request', status: 'unsupported', reason: 'observation-failed'};
     expect(() => readJavaPreparedObservation(reply, {requestToken: 'request', build: 'gradle'})).toThrow(
@@ -399,6 +460,7 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
     readonly firstModelMutation?: 'metadata' | 'source' | 'unexpected';
     readonly secondModelMutation?: 'metadata' | 'source';
     readonly refuseModel?: boolean;
+    readonly cacheRefusal?: 'initial' | 'confirmation';
     readonly failure?: 'initialize' | 'status' | 'token' | 'missing-ready' | 'late-status';
     readonly changeSecondModel?: boolean;
     readonly afterSecondModel?: Effect.Effect<void>;
@@ -664,22 +726,33 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
           yield* Queue.offer(messages, {
             jsonrpc: '2.0',
             id: message.id,
-            result: control.refuseModel
-              ? {
-                  protocolVersion: 1,
-                  requestToken: request.arguments[0].requestToken,
-                  status: 'unsupported',
-                  reason: 'unsupported-container',
-                  evidence: {idSha256: EffectString.repeat(64)('a')},
-                }
-              : {
-                  ...observation,
-                  model: {
-                    ...observation.model,
-                    rawTimestamp: control.changeSecondModel && observations > 1 ? 2 : observation.model.rawTimestamp,
-                  },
-                  requestToken: control.failure === 'token' ? 'wrong-token' : request.arguments[0].requestToken,
-                },
+            result:
+              (control.cacheRefusal === 'initial' && observations === 1) ||
+              (control.cacheRefusal === 'confirmation' && observations === 2)
+                ? {
+                    protocolVersion: 1,
+                    requestToken: request.arguments[0].requestToken,
+                    status: 'unsupported',
+                    reason: 'model-not-cached',
+                    evidence: {cacheStage: 'initial', cacheCondition: 'options-absent'},
+                  }
+                : control.refuseModel
+                  ? {
+                      protocolVersion: 1,
+                      requestToken: request.arguments[0].requestToken,
+                      status: 'unsupported',
+                      reason: 'unsupported-container',
+                      evidence: {idSha256: EffectString.repeat(64)('a')},
+                    }
+                  : {
+                      ...observation,
+                      model: {
+                        ...observation.model,
+                        rawTimestamp:
+                          control.changeSecondModel && observations > 1 ? 2 : observation.model.rawTimestamp,
+                      },
+                      requestToken: control.failure === 'token' ? 'wrong-token' : request.arguments[0].requestToken,
+                    },
           });
         } else if (message.method === 'shutdown') {
           yield* Queue.offer(messages, {jsonrpc: '2.0', id: message.id, result: null});
@@ -2165,6 +2238,24 @@ describe('Java prepared model sealing', () => {
       expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
     }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
+  effectIt.effect('labels the actual initial and confirmation RPC cache refusals without sealing', () =>
+    Effect.gen(function* () {
+      for (const rpcPhase of ['initial', 'confirmation'] as const) {
+        const f = yield* modelFixture({deferImport: true, cacheRefusal: rpcPhase});
+        expect(yield* Effect.flip(f.observe)).toMatchObject({
+          _tag: 'JavaPreparedImportRefusal',
+          reason: 'model-not-cached',
+          rpcPhase,
+          evidence: {cacheStage: 'initial', cacheCondition: 'options-absent'},
+        });
+        expect(EffectArray.filter(f.methods, method => method === 'workspace/executeCommand')).toHaveLength(
+          rpcPhase === 'initial' ? 1 : 2,
+        );
+        expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
+        expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
+      }
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
+  );
   effectIt.effect('preserves a correlated production refusal without sealing or issuing a second model request', () =>
     Effect.gen(function* () {
       const f = yield* modelFixture({deferImport: true, refuseModel: true});
@@ -2742,37 +2833,53 @@ describe('Java prepared model sealing', () => {
       expect(yield* semanticTreeDigest(f.project)).toBe(f.options.inputs.sourceDigest);
     }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
-  effectIt.effect.prop(
+  effectIt.effect(
     'canonical metadata round trips without losing classpath order or depending on object-key order',
-    [
-      Schema.Array(
-        Schema.Array(Schema.Literals(['é', '😀', '\\', ':', '=', '"', '<', 'A'])).check(Schema.isMaxLength(24)),
-      ).check(Schema.isMaxLength(12)),
-    ],
-    ([values]) =>
+    () =>
       Effect.gen(function* () {
+        // Generated values enter only the pure codec; acquire and seal their invariant real fixture once.
         const f = yield* modelFixture();
         const sealed = yield* sealJavaPreparedModel(f.observation, f.options);
-        const compiler = EffectRecord.fromEntries(
-          EffectArray.map(
-            values,
-            (value, i) => ['org.eclipse.jdt.core.compiler.fixture' + i, EffectArray.join(value, '')] as const,
+        const baseBefore = JSON.stringify(sealed.model);
+        const observationBefore = JSON.stringify(f.observation);
+        const result = yield* Arbitrary.checkEffect(
+          Arbitrary.schema(
+            Schema.Array(
+              Schema.Array(Schema.Literals(['é', '😀', '\\', ':', '=', '"', '<', 'A'])).check(Schema.isMaxLength(24)),
+            ).check(Schema.isMaxLength(12)),
           ),
+          values =>
+            Effect.gen(function* () {
+              const compiler = EffectRecord.fromEntries(
+                EffectArray.map(
+                  values,
+                  (value, i) => ['org.eclipse.jdt.core.compiler.fixture' + i, EffectArray.join(value, '')] as const,
+                ),
+              );
+              const model = {...sealed.model, compilerOptions: {...sealed.model.compilerOptions, ...compiler}};
+              const before = JSON.stringify(model);
+              const reversedKeys = {
+                ...model,
+                compilerOptions: EffectRecord.fromEntries(EffectRecord.toEntries(model.compilerOptions).reverse()),
+              };
+              const encoded = yield* Effect.try(() => javaPreparedModelJson(model));
+              const parsed = yield* Effect.try(() => JSON.parse(encoded));
+              const decoded = yield* Schema.decodeUnknownEffect(JavaPreparedModel)(parsed);
+              return yield* Effect.try(() => {
+                expect(javaPreparedModelJson(reversedKeys)).toBe(encoded);
+                expect(javaPreparedModelJson(decoded)).toBe(encoded);
+                expect(parsed.resolvedClasspath).toEqual(model.resolvedClasspath);
+                expect(model.compilerOptions).toEqual({...sealed.model.compilerOptions, ...compiler});
+                expect(JSON.stringify(model)).toBe(before);
+                return true;
+              });
+            }),
+          {runs: 16},
         );
-        const model = {...sealed.model, compilerOptions: {...sealed.model.compilerOptions, ...compiler}};
-        const reversedKeys = {
-          ...model,
-          compilerOptions: EffectRecord.fromEntries(EffectRecord.toEntries(model.compilerOptions).reverse()),
-        };
-        const encoded = javaPreparedModelJson(model);
-        expect(javaPreparedModelJson(reversedKeys)).toBe(encoded);
-        expect(javaPreparedModelJson(yield* Schema.decodeUnknownEffect(JavaPreparedModel)(JSON.parse(encoded)))).toBe(
-          encoded,
-        );
-        expect(JSON.parse(encoded).resolvedClasspath).toEqual(model.resolvedClasspath);
-        expect(model.compilerOptions).toEqual({...sealed.model.compilerOptions, ...compiler});
+        expect(Arbitrary.formatCheckFailure(result)).toBeUndefined();
+        expect(JSON.stringify(sealed.model)).toBe(baseBefore);
+        expect(JSON.stringify(f.observation)).toBe(observationBefore);
       }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
-    {arbitrary: {runs: 16}},
   );
 });
 

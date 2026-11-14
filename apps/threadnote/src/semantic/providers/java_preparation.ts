@@ -206,7 +206,6 @@ const preparationEmptyRefusalReason = Schema.Literals([
   'library-outside-allowset',
   'missing-source-model',
   'model-changed',
-  'model-not-cached',
   'project-import-error',
   'source-changed',
   'unmanaged-project',
@@ -234,6 +233,7 @@ const preparationEmptyRefusalReason = Schema.Literals([
 const preparationRefusalReason = Schema.Union([
   preparationEmptyRefusalReason,
   Schema.Literals([
+    'model-not-cached',
     'unsupported-container',
     'unsupported-attribute',
     'observation-failed',
@@ -247,8 +247,29 @@ const refusalFields = {
   requestToken: preparationRequestToken,
   status: Schema.Literal('unsupported'),
 };
+const preparationCacheEvidence = Schema.Struct({
+  cacheStage: Schema.Literals(['project-info', 'initial', 'initial-stability', 'confirmed', 'confirmed-stability']),
+  cacheCondition: Schema.Literals([
+    'info-absent',
+    'raw-absent',
+    'raw-invalid',
+    'raw-writing',
+    'raw-status-absent',
+    'raw-status-failed',
+    'unresolved-status-absent',
+    'unresolved-status-failed',
+    'resolved-absent',
+    'options-absent',
+    'output-absent',
+  ]),
+});
 // These are the producer's closed refusal arms. Arbitrary imported text, paths and unknown evidence never escape.
 const JavaPreparedRefusal = Schema.Union([
+  Schema.Struct({
+    ...refusalFields,
+    reason: Schema.Literal('model-not-cached'),
+    evidence: Schema.Union([preparationCacheEvidence, Schema.Record(Schema.String, Schema.Never)]),
+  }),
   Schema.Struct({
     ...refusalFields,
     reason: Schema.Literals(['gradle-synchronization-failed', 'gradle-linkage-failed', 'gradle-control-refused']),
@@ -277,17 +298,22 @@ export class JavaPreparedImportRefusal extends Schema.TaggedError<
 >()('JavaPreparedImportRefusal', {
   reason: preparationRefusalReason,
   evidence: Schema.optional(
-    Schema.Struct({
-      idSha256: Schema.optional(Digest),
-      nameSha256: Schema.optional(Digest),
-      statusSha256: Schema.optional(Digest),
-    }),
+    Schema.Union([
+      preparationCacheEvidence,
+      Schema.Struct({
+        idSha256: Schema.optional(Digest),
+        nameSha256: Schema.optional(Digest),
+        statusSha256: Schema.optional(Digest),
+      }),
+    ]),
   ),
+  rpcPhase: Schema.optional(Schema.Literals(['initial', 'confirmation'])),
 }) {
   override get message() {
     return (
       'Java preparation refused: ' +
       this.reason +
+      (this.rpcPhase === undefined ? '' : ' [' + this.rpcPhase + ']') +
       (this.evidence === undefined ? '' : ' ' + JSON.stringify(this.evidence))
     );
   }
@@ -295,7 +321,11 @@ export class JavaPreparedImportRefusal extends Schema.TaggedError<
 /** Correlate the closed production wire reply before surfacing a sanitized refusal or admitting model facts. */
 export function readJavaPreparedObservation(
   raw: unknown,
-  expected: {readonly requestToken: string; readonly build: 'maven' | 'gradle'},
+  expected: {
+    readonly requestToken: string;
+    readonly build: 'maven' | 'gradle';
+    readonly rpcPhase?: 'initial' | 'confirmation';
+  },
 ) {
   const reply = Schema.decodeUnknownSync(Schema.Union([JavaPreparedObservation, JavaPreparedRefusal]), {
     onExcessProperty: 'error',
@@ -304,6 +334,7 @@ export function readJavaPreparedObservation(
   if (reply.status === 'unsupported')
     throw JavaPreparedImportRefusal.make({
       reason: reply.reason,
+      ...(reply.reason === 'model-not-cached' && expected.rpcPhase !== undefined ? {rpcPhase: expected.rpcPhase} : {}),
       ...('evidence' in reply ? {evidence: reply.evidence} : {}),
     });
   if (reply.model.build !== expected.build) throw LspFault.make({code: 'protocol'});
@@ -1179,36 +1210,37 @@ export const observeJavaPreparedImport = Effect.fn('semantic.observeJavaPrepared
       yield* verifyHost;
       yield* proof.verifyPreparedOutputs;
       const passiveBaseline = inputs.build === 'maven' ? yield* semanticTreeDigest(inputs.copiedWorktree) : undefined;
-      const observe = Effect.gen(function* () {
-        yield* healthy;
-        const requestToken = 'java-prepare-' + (yield* random.uuidV4());
-        yield* proof.verifyPreparedOutputs;
-        const raw = yield* client.request(
-          'workspace/executeCommand',
-          {command: javaPreparedModelCommand, arguments: [{protocolVersion: 1, requestToken}]},
-          15000,
-        );
-        yield* proof.verifyPreparedOutputs;
-        yield* healthy;
-        if (new TextEncoder().encode(JSON.stringify(raw)).length > 256 * 1024)
-          return yield* LspFault.make({code: 'capacity'});
-        const observed = yield* Effect.try({
-          try: () => readJavaPreparedObservation(raw, {requestToken, build: inputs.build}),
-          catch: error =>
-            Schema.is(JavaPreparedImportRefusal)(error) || Schema.is(LspFault)(error)
-              ? error
-              : LspFault.make({code: 'protocol'}),
+      const observe = (rpcPhase: 'initial' | 'confirmation') =>
+        Effect.gen(function* () {
+          yield* healthy;
+          const requestToken = 'java-prepare-' + (yield* random.uuidV4());
+          yield* proof.verifyPreparedOutputs;
+          const raw = yield* client.request(
+            'workspace/executeCommand',
+            {command: javaPreparedModelCommand, arguments: [{protocolVersion: 1, requestToken}]},
+            15000,
+          );
+          yield* proof.verifyPreparedOutputs;
+          yield* healthy;
+          if (new TextEncoder().encode(JSON.stringify(raw)).length > 256 * 1024)
+            return yield* LspFault.make({code: 'capacity'});
+          const observed = yield* Effect.try({
+            try: () => readJavaPreparedObservation(raw, {requestToken, build: inputs.build, rpcPhase}),
+            catch: error =>
+              Schema.is(JavaPreparedImportRefusal)(error) || Schema.is(LspFault)(error)
+                ? error
+                : LspFault.make({code: 'protocol'}),
+          });
+          return observed;
         });
-        return observed;
-      });
-      const observed = yield* observe;
+      const observed = yield* observe('initial');
       yield* verifyHost;
       yield* proof.verifyPreparedOutputs;
       // Importer outputs become stable only after the joined first import/model and immutable input proof.
       const outputDigest = yield* semanticTreeDigest(inputs.copiedWorktree);
       if (passiveBaseline !== undefined && passiveBaseline !== outputDigest) return yield* fail();
       // Re-observe cached facts after slow host guards; copied bytes alone cannot attest workspace-cache stability.
-      const confirmed = yield* observe;
+      const confirmed = yield* observe('confirmation');
       if (canonicalJson({...confirmed, requestToken: observed.requestToken}) !== canonicalJson(observed))
         return yield* fail();
       yield* verifyHost;
