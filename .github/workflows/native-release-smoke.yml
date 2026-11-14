@@ -145,37 +145,80 @@ jobs:
                 -not [IO.Path]::IsPathFullyQualified($env:GITHUB_WORKSPACE)) { throw 'Workspace unavailable' }
             $candidate = [IO.Path]::GetFullPath([IO.Path]::Combine($env:GITHUB_WORKSPACE, 'dist', 'threadnote.exe'))
             $sourceBunPath = $null
+            $metadataProcess = $null
+            $metadataStarted = $false
+            $metadataClock = $null
             try {
-              if (Get-Command bun -CommandType Application -ErrorAction Stop) {
-                $shellPath = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
-                $metadataInfo = [Diagnostics.ProcessStartInfo]::new($shellPath)
-                $metadataInfo.UseShellExecute = $false
-                $metadataInfo.CreateNoWindow = $true
-                $metadataInfo.RedirectStandardOutput = $true
-                $metadataInfo.RedirectStandardError = $true
-                $metadataInfo.ArgumentList.Add('-NoLogo')
-                $metadataInfo.ArgumentList.Add('-NoProfile')
-                $metadataInfo.ArgumentList.Add('-NonInteractive')
-                $metadataInfo.ArgumentList.Add('-Command')
-                $metadataInfo.ArgumentList.Add("& bun -e 'process.stdout.write(process.execPath)'")
-                $metadataProcess = [Diagnostics.Process]::new()
-                $metadataProcess.StartInfo = $metadataInfo
-                try {
-                  if ($metadataProcess.Start()) {
-                    $metadataStdout = $metadataProcess.StandardOutput.ReadToEndAsync()
-                    $metadataStderr = $metadataProcess.StandardError.ReadToEndAsync()
-                    if ($metadataProcess.WaitForExit(5000) -and $metadataStdout.Wait(1000) -and $metadataStderr.Wait(1000)) {
-                      $reportedBunPath = $metadataStdout.Result.Trim()
-                      if ($metadataProcess.ExitCode -eq 0 -and $reportedBunPath.Length -le 2048 -and
-                          [IO.Path]::IsPathFullyQualified($reportedBunPath) -and [IO.File]::Exists($reportedBunPath)) {
-                        $sourceBunPath = [IO.Path]::GetFullPath($reportedBunPath)
-                        $summary.sourceBunResolved = $true
-                      }
-                    } elseif (-not $metadataProcess.HasExited) { $metadataProcess.Kill($true) }
+              $bunCommand = Get-Command bun -CommandType Application -ErrorAction Stop
+              $bunExecutable = [string]$bunCommand.Source
+              if ([IO.Path]::GetExtension($bunExecutable) -ine '.exe') { throw 'Bun executable unavailable' }
+              $metadataInfo = [Diagnostics.ProcessStartInfo]::new($bunExecutable)
+              $metadataInfo.UseShellExecute = $false
+              $metadataInfo.CreateNoWindow = $true
+              $metadataInfo.RedirectStandardOutput = $true
+              $metadataInfo.RedirectStandardError = $true
+              $metadataInfo.ArgumentList.Add('-e')
+              $metadataInfo.ArgumentList.Add('process.stdout.write(process.execPath)')
+              $metadataProcess = [Diagnostics.Process]::new()
+              $metadataProcess.StartInfo = $metadataInfo
+              $metadataClock = [Diagnostics.Stopwatch]::StartNew()
+              $metadataStarted = $metadataProcess.Start()
+              if ($metadataStarted) {
+                $stdoutStream = $metadataProcess.StandardOutput.BaseStream
+                $stderrStream = $metadataProcess.StandardError.BaseStream
+                $stdoutBuffer = [byte[]]::new(512)
+                $stderrBuffer = [byte[]]::new(512)
+                $stdoutBytes = [Collections.Generic.List[byte]]::new()
+                $stdoutRead = $stdoutStream.ReadAsync($stdoutBuffer, 0, $stdoutBuffer.Length)
+                $stderrRead = $stderrStream.ReadAsync($stderrBuffer, 0, $stderrBuffer.Length)
+                $exitTask = $metadataProcess.WaitForExitAsync()
+                $stdoutEof = $false
+                $stderrEof = $false
+                $stdoutTooLong = $false
+                while (-not ($stdoutEof -and $stderrEof -and $exitTask.IsCompleted)) {
+                  $remainingWork = 3000 - [int]$metadataClock.ElapsedMilliseconds
+                  if ($remainingWork -le 0) { break }
+                  $pendingReads = [Collections.Generic.List[Threading.Tasks.Task]]::new()
+                  if (-not $stdoutEof) { $pendingReads.Add($stdoutRead) }
+                  if (-not $stderrEof) { $pendingReads.Add($stderrRead) }
+                  if (-not $exitTask.IsCompleted) { $pendingReads.Add($exitTask) }
+                  $nextTask = [Threading.Tasks.Task]::WhenAny([Threading.Tasks.Task[]]$pendingReads.ToArray())
+                  if (-not $nextTask.Wait($remainingWork)) { break }
+                  $completedTask = $nextTask.Result
+                  if (-not $stdoutEof -and [object]::ReferenceEquals($completedTask, $stdoutRead)) {
+                    $readBytes = $stdoutRead.Result
+                    if ($readBytes -eq 0) { $stdoutEof = $true }
+                    else {
+                      $captureBytes = [Math]::Min($readBytes, 2049 - $stdoutBytes.Count)
+                      for ($index = 0; $index -lt $captureBytes; $index++) { $stdoutBytes.Add($stdoutBuffer[$index]) }
+                      if ($captureBytes -lt $readBytes -or $stdoutBytes.Count -gt 2048) { $stdoutTooLong = $true }
+                      $stdoutRead = $stdoutStream.ReadAsync($stdoutBuffer, 0, $stdoutBuffer.Length)
+                    }
+                  } elseif (-not $stderrEof -and [object]::ReferenceEquals($completedTask, $stderrRead)) {
+                    if ($stderrRead.Result -eq 0) { $stderrEof = $true }
+                    else { $stderrRead = $stderrStream.ReadAsync($stderrBuffer, 0, $stderrBuffer.Length) }
                   }
-                } finally { $metadataProcess.Dispose() }
+                }
+                if ($metadataProcess.HasExited -and $stdoutEof -and $stderrEof -and -not $stdoutTooLong -and
+                    $metadataProcess.ExitCode -eq 0) {
+                  $reportedBunPath = [Text.Encoding]::UTF8.GetString($stdoutBytes.ToArray()).Trim()
+                  if ($reportedBunPath.Length -le 2048 -and [IO.Path]::IsPathFullyQualified($reportedBunPath) -and
+                      [IO.File]::Exists($reportedBunPath)) {
+                    $sourceBunPath = [IO.Path]::GetFullPath($reportedBunPath)
+                    $summary.sourceBunResolved = $true
+                  }
+                }
               }
-            } catch { $summary.sourceBunResolved = $false }
+            } catch { $summary.sourceBunResolved = $false } finally {
+              if ($metadataStarted) {
+                try {
+                  if (-not $metadataProcess.HasExited) { try { $metadataProcess.Kill() } catch { } }
+                  $remainingCleanup = [Math]::Min(2000, [Math]::Max(0, 5000 - [int]$metadataClock.ElapsedMilliseconds))
+                  if ($remainingCleanup -gt 0) { [void]$metadataProcess.WaitForExit($remainingCleanup) }
+                } catch { }
+              }
+              if ($metadataProcess) { $metadataProcess.Dispose() }
+            }
             $allowedAppPaths = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::OrdinalIgnoreCase)
             $allowedAppPaths[$candidate] = 'candidate'
             if ($sourceBunPath -and -not $allowedAppPaths.ContainsKey($sourceBunPath)) {
