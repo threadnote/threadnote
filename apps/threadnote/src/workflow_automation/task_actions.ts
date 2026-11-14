@@ -1,3 +1,4 @@
+import {runStandalonePrWatch} from './standalone_pr_watch.js';
 import {SystemInfo} from '@threadnote/platform/system';
 import {
   decodeNativeAuthoringDocument,
@@ -53,7 +54,7 @@ import {nativeWorkflowError} from './memory.js';
 import {readNativeWorkflowState} from './store.js';
 import {readNativeTaskView, verifyNativeTaskReopen} from './task.js';
 import {inspectOldBindingOwners} from './task_binding_transition.js';
-import {nativeWatchWakeupRequestSchema} from './watch_notification_state.js';
+import {NativeTaskPrWatchFieldsSchema} from './task_pr_watch.js';
 import {
   cycleRequest,
   currentNativeTaskRef,
@@ -119,42 +120,7 @@ export const NativeTaskCommitDeliveryFieldsSchema = Schema.Struct({
   commitEvidence: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(2048)),
 });
 export type NativeTaskCommitDeliveryFields = typeof NativeTaskCommitDeliveryFieldsSchema.Type;
-export const NativeTaskPrWatchFieldsSchema = Schema.Struct({
-  operation: Schema.Literals([
-    'start',
-    'renew',
-    'inspect',
-    'relay',
-    'disposition',
-    'ack',
-    'work',
-    'work-disposition',
-    'work-detail',
-    'stop',
-    'complete',
-  ]),
-  phaseId: Schema.optionalKey(id),
-  wakeup: Schema.optionalKey(nativeWatchWakeupRequestSchema),
-  takeover: Schema.optionalKey(Schema.Boolean),
-  recoverWakeup: Schema.optionalKey(Schema.Boolean),
-  noticeRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
-  workEventRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
-  offsetBytes: Schema.optionalKey(Schema.Int.check(Schema.isBetween({minimum: 0, maximum: Number.MAX_SAFE_INTEGER}))),
-  sourceDigest: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
-  workOffset: Schema.optionalKey(Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 8192}))),
-  workViewDigest: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
-  watchDeliveryRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
-  dispositions: Schema.optionalKey(
-    Schema.Array(
-      Schema.Struct({
-        eventRef: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
-        status: Schema.Literals(['open', 'blocked', 'resolved', 'ignored']),
-        reason: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1024)),
-        evidence: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(2048)),
-      }),
-    ).check(Schema.isMaxLength(32)),
-  ),
-});
+export {NativeTaskPrWatchFieldsSchema} from './task_pr_watch.js';
 const closeoutProposalFields = {...NativeCloseoutProposalSchema.fields};
 delete (closeoutProposalFields as Partial<typeof closeoutProposalFields>).watchWork;
 export const NativeTaskCloseoutProposalSchema = Schema.Struct(closeoutProposalFields);
@@ -303,7 +269,9 @@ const requestSchema = Schema.Union([
   }),
   Schema.Struct({
     command: Schema.Literal('watch-pr'),
-    runId: id,
+    runId: Schema.optionalKey(id),
+    prUrl: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(2048))),
+    watchRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(16384))),
     callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
     validationRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
     deliveryRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(8192))),
@@ -632,6 +600,12 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
     const checkout = yield* fs
       .realPath(reportedCheckout)
       .pipe(Effect.mapError(() => fail('workspace-not-found', 'The Git checkout root could not be resolved.')));
+    if (request.command === 'watch-pr' && request.runId === undefined)
+      return yield* runStandalonePrWatch(config, request, checkout);
+    if (request.command === 'watch-pr' && (request.watchRef !== undefined || request.prUrl !== undefined))
+      return yield* fail('invalid-request', 'Workflow-bound watches cannot use standalone watch identities.');
+    if (request.runId === undefined) return yield* fail('invalid-request', 'Use the workflow run identifier.');
+    const runId = request.runId;
     const stored = yield* readNativeWorkflowState(config, request.runId);
     if (!stored) return yield* fail('run-not-found', 'Start a fresh native run before using task actions.');
     const journal = yield* inCheckout(
@@ -932,7 +906,7 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
         'taskRef' in request ? request.taskRef : undefined,
         stored.state,
         stored.revision,
-        request.runId,
+        runId,
         action,
         view,
       );
@@ -1531,7 +1505,8 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
     if (request.command === 'deliver-pr')
       return yield* runNativeTaskPrDelivery(config, request, stored, checkout, runtime);
 
-    if (request.command === 'watch-pr') return yield* runNativeTaskPrWatch(config, request, stored, checkout);
+    if (request.command === 'watch-pr')
+      return yield* runNativeTaskPrWatch(config, {...request, runId}, stored, checkout);
 
     if (request.command === 'work') {
       const view = yield* readNativeTaskView(config, {

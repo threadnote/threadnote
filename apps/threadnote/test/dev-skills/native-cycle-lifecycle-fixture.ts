@@ -104,7 +104,7 @@ const graphDiagnostics = () => {
     },
   };
 };
-class GraphDiagnostics extends Context.Service<GraphDiagnostics, ReturnType<typeof graphDiagnostics>>()(
+export class GraphDiagnostics extends Context.Service<GraphDiagnostics, ReturnType<typeof graphDiagnostics>>()(
   '@threadnote/threadnote/test/dev-skills/native-cycle-lifecycle-fixture/GraphDiagnostics',
 ) {}
 export const run = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
