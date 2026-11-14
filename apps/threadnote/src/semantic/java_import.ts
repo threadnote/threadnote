@@ -1,3 +1,4 @@
+import {Digest as EffectDigest} from 'effect/crypto';
 import {
   Array as EffectArray,
   Effect,
@@ -29,7 +30,11 @@ import {
 import {makeSemanticAdmission} from './admission.js';
 import {LspFault} from './lsp_transport.js';
 import {makeJavaPreparation, type JavaPreparationHost} from './providers/java.js';
-import {javaMavenBootstrapContractDigest} from './providers/java_preparation.js';
+import {
+  JavaPreparationGradle,
+  javaGradleOwnedImport,
+  javaMavenBootstrapContractDigest,
+} from './providers/java_preparation.js';
 import {
   JavaRuntimeCandidate,
   javaRuntimeQualification,
@@ -37,6 +42,7 @@ import {
   makeJavaRuntime,
   makeJavaPreparationOwners,
   javaPreparationOwnerContract,
+  verifyJavaGradleInstallation,
 } from './providers/java_runtime.js';
 
 /** Original authored-project input, compared byte for byte. Never a replacement for a repository POM. */
@@ -318,6 +324,9 @@ export const inspectJavaImportCache = Effect.fn('semantic.inspectJavaImportCache
       for (const artifact of manifest.artifacts) {
         if (
           !EffectString.startsWith(build === 'maven' ? 'm2/' : 'gradle/')(artifact.path) ||
+          (build === 'gradle' &&
+            !EffectString.startsWith('gradle/caches/')(artifact.path) &&
+            !EffectString.startsWith('gradle/native/')(artifact.path)) ||
           EffectString.split('/')(artifact.path).includes('..') ||
           declared.has(artifact.path) ||
           !EffectString.startsWith('notices/')(artifact.notice) ||
@@ -338,7 +347,11 @@ export const inspectJavaImportCache = Effect.fn('semantic.inspectJavaImportCache
   );
 });
 
-const trustedConfiguration = (candidate: JavaRuntimeCandidate, build: 'maven' | 'gradle') => ({
+const trustedConfiguration = (
+  candidate: JavaRuntimeCandidate,
+  build: 'maven' | 'gradle',
+  gradle?: typeof JavaPreparationGradle.Type,
+) => ({
   version: 'private-java-import-bootstrap-v1' as const,
   digest: sha256HexSync(
     JSON.stringify([
@@ -346,7 +359,11 @@ const trustedConfiguration = (candidate: JavaRuntimeCandidate, build: 'maven' | 
       build,
       javaRuntimePinsForHost()?.configurationDigest ?? null,
       candidate.serverTreeDigest,
-      build === 'maven' ? javaMavenBootstrapContractDigest(candidate.projectJavaHome) : 'gradle-owner-not-qualified',
+      build === 'maven'
+        ? javaMavenBootstrapContractDigest(candidate.projectJavaHome)
+        : gradle
+          ? [javaGradleOwnedImport, gradle.sdkDirectory, gradle.sdkDigest]
+          : 'gradle-owner-not-qualified',
       'workspace/.mvn:empty',
       'private-HOME-user.home-TMP-settings-cache',
       'offline-operational-not-sandbox',
@@ -389,6 +406,7 @@ export const javaTrustedImportPreviewDigest = (body: JavaTrustedImportPolicyBody
       body.permissions.gradle,
       body.permissions.filesystem,
       body.permissions.dataDisclosure,
+      ...(body.gradle ? [body.gradle.sdkDirectory, body.gradle.sdkDigest] : []),
       expectedDigest,
     ]),
   );
@@ -429,6 +447,7 @@ const PolicyRequest = Schema.Union([
     ...policyRequestFields,
     mode: Schema.Literal(javaTrustedImportMode),
     build: Schema.Literals(['maven', 'gradle']),
+    gradle: Schema.optional(JavaPreparationGradle),
     cacheImage: Schema.Struct({directory: FileUri, manifestDigest: Digest}),
   }),
 ]);
@@ -436,14 +455,14 @@ const RevokeRequest = Schema.Struct({...Common, expectedDigest: Digest});
 const RunRequest = Schema.Struct(Common);
 // This support gate is separate from denied-operation enforcement. Consent cannot prove build ownership.
 interface TrustedImportContract {
-  readonly build: 'maven';
+  readonly build: 'maven' | 'gradle';
   readonly sourceDigest: string;
   readonly imageDigest: string;
   readonly configurationDigest: string;
   readonly serverTreeDigest: string;
   readonly runtimeSdkDigest: string;
   readonly projectSdkDigest: string;
-  readonly ownerPlan: 'provider-tree';
+  readonly ownerPlan: 'provider-tree' | 'provider-and-gradle-foreground';
 }
 // No real Maven model/cache/build-owner closure has yet been qualified. Gradle requires its own actual owner join.
 const trustedImportContracts: readonly TrustedImportContract[] = Object.freeze([]);
@@ -479,10 +498,12 @@ const verifyTrustedBinding = Effect.fn('semantic.verifyTrustedJavaImportBinding'
     policy.scope.account !== config.account ||
     policy.scope.user !== config.user ||
     policy.scope.worktree !== worktree ||
-    policy.configuration.digest !== trustedConfiguration(policy.candidate, policy.build).digest ||
+    policy.configuration.digest !== trustedConfiguration(policy.candidate, policy.build, policy.gradle).digest ||
     javaTrustedImportPreviewDigest(policy, policy.approval.expectedDigest) !== policy.approval.previewDigest
   )
     return yield* reject('stale');
+  if ((policy.build === 'gradle') !== (policy.gradle !== undefined)) return yield* reject('unsupported-input');
+  if (policy.gradle) yield* verifyJavaGradleInstallation(policy.gradle);
   if ((yield* inspectTrustedJavaImportInputs(root, project)) !== policy.sourceDigest) return yield* reject('stale');
   const cache = yield* inspectJavaImportCache(
     policy.cacheImage,
@@ -507,7 +528,7 @@ const executeImport = Effect.fn('semantic.executeJavaImport')(function* (
   worktree: string,
   profileDigest: string,
   policy: JavaImportPolicy,
-  contract: {readonly ownerPlan: 'provider-tree'},
+  contract: {readonly ownerPlan: 'provider-tree' | 'provider-and-gradle-foreground'},
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -546,7 +567,11 @@ const executeImport = Effect.fn('semantic.executeJavaImport')(function* (
       );
       yield* guard; // Queue waiting cannot preserve a stale policy.
       authorizations.set(token, {
-        guard: guard.pipe(Effect.provideService(FileSystem.FileSystem, fs), Effect.provideService(Path.Path, path)),
+        guard: guard.pipe(
+          Effect.provideService(FileSystem.FileSystem, fs),
+          Effect.provideService(Path.Path, path),
+          Effect.provideService(EffectDigest.Digest, yield* EffectDigest.Digest),
+        ),
       });
       const verifySetup = Effect.suspend(() => authorizations.get(token)?.guard ?? reject('denied'));
       const host: JavaPreparationHost = {
@@ -556,6 +581,11 @@ const executeImport = Effect.fn('semantic.executeJavaImport')(function* (
           launchAttempted = true;
           owners.beforeLaunch('provider');
         },
+        beforeGradleLaunch: () => {
+          launchAttempted = true;
+          owners.beforeLaunch('gradle-foreground');
+        },
+        captureGradleForeground: originalFinish => owners.capture('gradle-foreground', originalFinish),
         capturePreparationProvider: (_pid, originalFinish) => {
           owners.capture('provider', originalFinish);
         },
@@ -581,12 +611,14 @@ const executeImport = Effect.fn('semantic.executeJavaImport')(function* (
               );
               if (image.binding.imageDigest !== policy.cacheImage.imageDigest) return yield* reject('stale');
               for (const [relative, bytes] of image.files) {
-                if (!EffectString.startsWith('m2/')(relative)) continue;
+                if (!EffectString.startsWith(policy.build === 'gradle' ? 'gradle/' : 'm2/')(relative)) continue;
                 const file = path.join(context.runtimeDirectory, relative);
                 yield* fs.makeDirectory(path.dirname(file), {recursive: true, mode: 0o700});
                 if ((yield* fs.realPath(path.dirname(file))) !== path.dirname(file)) return yield* reject('stale');
                 yield* fs.writeFile(file, bytes, {flag: 'wx', mode: 0o600});
-                yield* context.retainInput(file, sha256HexSync(bytes));
+                // Gradle's private working cache has mutable locks/indexes. Its exact source
+                // image remains approval-bound and reverified by verifySetup; it is not a sealed output.
+                if (policy.build === 'maven') yield* context.retainInput(file, sha256HexSync(bytes));
               }
             }
           }).pipe(Effect.provideService(FileSystem.FileSystem, fs), Effect.provideService(Path.Path, path)),
@@ -609,6 +641,7 @@ const executeImport = Effect.fn('semantic.executeJavaImport')(function* (
           privateDirectory,
           artifactDirectory,
           build: policy.mode === javaTrustedImportMode ? policy.build : 'maven',
+          ...(policy.mode === javaTrustedImportMode && policy.gradle ? {gradle: policy.gradle} : {}),
         },
         host,
       ).pipe(Effect.tap(() => verifySetup));
@@ -658,7 +691,7 @@ export const runSemanticJavaImport = Effect.fn('semantic.javaImport')(function* 
       const project = yield* path.fromFileUrl(new URL(policy.project));
       const contract = policy.mode === javaTrustedImportMode ? trustedContract(policy) : enforcedContract(policy);
       if (policy.mode === javaTrustedImportMode) {
-        if (policy.build === 'gradle') return yield* reject('import-support-unavailable');
+        if (policy.build === 'gradle' && !policy.gradle) return yield* reject('import-support-unavailable');
         yield* verifyTrustedBinding(config, root, project, worktree, policy);
         if (contract._tag === 'None') return yield* reject('import-support-unavailable');
       } else {
@@ -673,7 +706,7 @@ export const runSemanticJavaImport = Effect.fn('semantic.javaImport')(function* 
     if (request.mode === javaTrustedImportMode && action === 'apply' && !acknowledgeUnconfinedBuildImport)
       return yield* reject('denied');
     // A Gradle grant cannot be complete before its vetted SDK and original build-owner join exist.
-    if (request.mode === javaTrustedImportMode && request.build === 'gradle')
+    if (request.mode === javaTrustedImportMode && request.build === 'gradle' && !request.gradle)
       return yield* reject('import-support-unavailable');
     const sourceDigest = yield* request.mode === javaTrustedImportMode
       ? inspectTrustedJavaImportInputs(root, project)
@@ -682,6 +715,8 @@ export const runSemanticJavaImport = Effect.fn('semantic.javaImport')(function* 
     const runtime = yield* makeJavaRuntime(request.candidate);
     yield* runtime.verify;
     if (request.mode === javaTrustedImportMode) {
+      if ((request.build === 'gradle') !== (request.gradle !== undefined)) return yield* reject('unsupported-input');
+      if (request.gradle) yield* verifyJavaGradleInstallation(request.gradle);
       const cache = yield* inspectJavaImportCache(
         request.cacheImage,
         request.build,
@@ -692,12 +727,13 @@ export const runSemanticJavaImport = Effect.fn('semantic.javaImport')(function* 
         version: 1,
         mode: javaTrustedImportMode,
         build: request.build,
+        ...(request.gradle ? {gradle: request.gradle} : {}),
         project: request.project,
         sourceDigest,
         candidate: request.candidate,
         scope: {account: config.account, user: config.user, worktree},
         cacheImage: cache.binding,
-        configuration: trustedConfiguration(request.candidate, request.build),
+        configuration: trustedConfiguration(request.candidate, request.build, request.gradle),
         risk: {version: javaTrustedImportRiskVersion, digest: sha256HexSync(javaTrustedImportRisk)},
         permissions: javaTrustedImportPermissions,
       };

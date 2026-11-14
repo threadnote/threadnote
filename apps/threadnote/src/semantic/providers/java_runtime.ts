@@ -1,14 +1,25 @@
-import {Digest as EffectDigest} from 'effect/crypto';
+import {Digest as EffectDigest, SecureRandom} from 'effect/crypto';
+import {Base64Url} from 'effect/encoding';
 import * as EffectArray from 'effect/Array';
 import * as EffectString from 'effect/String';
-import {Cause, Effect, Exit, Fiber, FileSystem, Option, Path, Schema} from 'effect';
+import * as EffectRecord from 'effect/Record';
+import {Cause, Clock, Deferred, Effect, Exit, Fiber, FileSystem, Option, Path, Result, Schema} from 'effect';
 import {Digest} from '@threadnote/semantic/contracts';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {runtimeNativePlatformTarget, runtimePlatform, platformPathFor} from '@threadnote/platform/system';
 import {boundedFileDigest, readBounded, semanticSdkDigest} from '../fingerprint.js';
-import {LspFault, makeLspClient, spawnLspWire, type LspWire, type WireStop} from '../lsp_transport.js';
+import {
+  LspFault,
+  makeLspClient,
+  spawnLspWire,
+  spawnSemanticProcess,
+  type LspWire,
+  type WireStop,
+} from '../lsp_transport.js';
 import {SemanticJavaRuntimeVerifier, SemanticSetupFault, wellFormed} from '../provider.js';
 import {
+  JavaPreparationGradle,
+  javaGradleOwnedImport,
   consumeJavaPreparationConnection,
   materializeJavaMavenConfiguration,
   verifyJavaPreparationInputs,
@@ -405,6 +416,390 @@ export const makeJavaMavenBoundary = Effect.fn('semantic.makeJavaMavenBoundary')
   return {directory, verify};
 });
 
+/** One fixed context for the original foreground and the actual Buildship Tooling API requests. */
+export const javaGradleJvmArguments = (temporary: string) => [
+  '-Xms64m',
+  '-Xmx256m',
+  '-Dfile.encoding=UTF-8',
+  '-Duser.country=',
+  '-Duser.language=en',
+  '-Duser.variant=',
+  '-Djava.io.tmpdir=' + temporary,
+];
+export function javaGradleBootstrapProperties(javaHome: string, temporary: string) {
+  // Gradle ArgumentsSplitter treats quotes as delimiters, not backslash escapes.
+  // Close/reopen double quotes around a single-quoted literal double quote.
+  const quote = (value: string) => '"' + EffectString.replaceAll('"', `"'"'"`)(value) + '"';
+  // java.util.Properties consumes backslashes and ISO-8859-1; encode UTF16 units explicitly.
+  const property = (value: string) =>
+    EffectArray.join(
+      EffectArray.map(EffectString.split(value, ''), unit => {
+        const code = Option.getOrThrow(EffectString.charCodeAt(0)(unit));
+        return unit === '\\'
+          ? '\\\\'
+          : code < 32 || code > 126
+            ? '\\u' + EffectString.padStart(4, '0')(code.toString(16))
+            : unit;
+      }),
+      '',
+    );
+  return (
+    'org.gradle.java.installations.auto-detect=false\norg.gradle.java.installations.auto-download=false\norg.gradle.java.installations.paths=' +
+    property(javaHome) +
+    '\norg.gradle.jvmargs=' +
+    property(EffectArray.join(EffectArray.map(javaGradleJvmArguments(temporary), quote), ' ')) +
+    '\norg.gradle.caching=false\norg.gradle.configuration-cache=false\n'
+  );
+}
+
+/** Raw Gradle readiness is data from the captured original stdout, never an ownership token. */
+export function makeJavaGradleFrameDecoder(onReady: (frame: string) => void) {
+  const decoder = new TextDecoder('utf-8', {fatal: true});
+  let line = '',
+    logDiscarded = false;
+  const ready = () => EffectString.startsWith('THREADNOTE_OWNED_READY_V1 ')(line);
+  const accept = (text: string) => {
+    const parts = EffectString.split(text, '\n');
+    for (let i = 0; i < parts.length; i++) {
+      if (!logDiscarded) {
+        line += parts[i];
+        if (ready() && line.length > 12288) throw LspFault.make({code: 'capacity'});
+        if (!ready() && line.length > 4096) {
+          line = '';
+          logDiscarded = true;
+        }
+      }
+      if (i < parts.length - 1) {
+        if (!logDiscarded && ready()) onReady(EffectString.replace(/\r$/u, '')(line));
+        line = '';
+        logDiscarded = false;
+      }
+    }
+  };
+  return {
+    push: (bytes: Uint8Array) => accept(decoder.decode(bytes, {stream: true})),
+    finish: () => {
+      accept(decoder.decode());
+      if (!logDiscarded && ready()) throw LspFault.make({code: 'protocol'});
+    },
+  };
+}
+export function decodeJavaGradleReady(
+  frame: string,
+  expected: {
+    readonly nonce: string;
+    readonly javaHome: string;
+    readonly baseDirectory: string;
+    readonly temporary: string;
+    readonly pid: number;
+  },
+) {
+  const denied = () => {
+    throw LspFault.make({code: 'prerequisite'});
+  };
+  const fields = EffectString.split(frame, ' ');
+  if (
+    frame.length > 12288 ||
+    fields.length !== 5 ||
+    fields[0] !== 'THREADNOTE_OWNED_READY_V1' ||
+    fields[1] !== expected.nonce ||
+    !/^[a-f0-9-]{36}$/u.test(fields[2]) ||
+    !/^[a-f0-9]{64}$/u.test(fields[3])
+  )
+    return denied();
+  const bytes = Result.match(Base64Url.decode(fields[4]), {onFailure: denied, onSuccess: value => value});
+  let image: string;
+  try {
+    image = new TextDecoder('utf-8', {fatal: true}).decode(bytes);
+  } catch {
+    return denied();
+  }
+  if (Base64Url.encode(bytes) !== fields[4] || image.length > 8192 || sha256HexSync(image) !== fields[3])
+    return denied();
+  const values: string[] = [];
+  let at = 0;
+  while (at < image.length) {
+    const separator = EffectString.indexOf(':')(EffectString.slice(at)(image));
+    const split = Option.isSome(separator) ? at + separator.value : -1,
+      size = Number(EffectString.slice(at, split)(image));
+    if (
+      split <= at ||
+      !/^\d+$/u.test(EffectString.slice(at, split)(image)) ||
+      !Number.isSafeInteger(size) ||
+      size > 4096 ||
+      split + 1 + size > image.length
+    )
+      return denied();
+    values.push(EffectString.slice(split + 1, split + 1 + size)(image));
+    at = split + 1 + size;
+  }
+  const options = EffectArray.map(javaGradleJvmArguments(expected.temporary), value =>
+    value === '-Duser.country=' || value === '-Duser.variant=' ? EffectString.slice(0, -1)(value) : value,
+  ).sort();
+  if (
+    values.length !== 10 + options.length ||
+    values[0] !== fields[2] ||
+    values[1] !== expected.javaHome ||
+    values[2] !== '21' ||
+    values[3] !== 'Eclipse Adoptium' ||
+    values[4] !== expected.baseDirectory ||
+    values[5] !== String(expected.pid) ||
+    values[6] !== '10800000' ||
+    values[7] !== 'NORMAL' ||
+    values[8] !== 'true' ||
+    values[9] !== 'ENABLED' ||
+    JSON.stringify(values.slice(10)) !== JSON.stringify(options)
+  )
+    return denied();
+  return Object.freeze({uid: fields[2], contextHash: fields[3]});
+}
+export const verifyJavaGradleInstallation = Effect.fn('semantic.verifyJavaGradleInstallation')(function* (
+  configuration: typeof JavaPreparationGradle.Type,
+) {
+  const fs = yield* FileSystem.FileSystem,
+    path = yield* Path.Path;
+  yield* Schema.decodeEffect(JavaPreparationGradle, {onExcessProperty: 'error'})(configuration);
+  const directory = configuration.sdkDirectory;
+  if (
+    !path.isAbsolute(directory) ||
+    path.resolve(directory) !== directory ||
+    (yield* fs.realPath(directory)) !== directory ||
+    (yield* fs.stat(directory)).type !== 'Directory' ||
+    (yield* semanticSdkDigest(directory)) !== javaGradleOwnedImport.sdkDigest
+  )
+    return yield* fail();
+  const bytes = yield* readBounded(path.join(directory, 'THREADNOTE-SOURCE-OVERLAY.json'), 128 * 1024);
+  const parsed = yield* Effect.try({
+    try: () => JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(bytes)),
+    catch: () => LspFault.make({code: 'prerequisite'}),
+  });
+  yield* Schema.decodeUnknownEffect(
+    Schema.Struct({
+      kind: Schema.Literal('source-overlay-derivative'),
+      official: Schema.Literal(false),
+      fullSourceBuild: Schema.Literal(false),
+      patchSha256: Schema.Literal(javaGradleOwnedImport.patchSha256),
+      recipeSha256: Schema.Literal(javaGradleOwnedImport.recipeSha256),
+      pins: Schema.Struct({
+        providerCommit: Schema.Literal(javaGradleOwnedImport.providerCommit),
+        consumerCommit: Schema.Literal(javaGradleOwnedImport.consumerCommit),
+      }),
+    }),
+  )(parsed).pipe(Effect.mapError(() => LspFault.make({code: 'prerequisite'})));
+});
+/** Actual completed provider operations; a ready frame or a BuildEnvironment shortcut cannot satisfy this join. */
+export function verifyJavaGradleOperationFrames(
+  events: ReadonlyMap<string, string>,
+  expected: {readonly attempt: string; readonly launch: string; readonly uid: string; readonly contextHash: string},
+  complete: boolean,
+) {
+  if (events.size > 256) throw LspFault.make({code: 'capacity'});
+  const operations = new Map<string, Set<string>>();
+  for (const [name, frame] of events) {
+    const values = EffectString.split(EffectString.trimEnd(frame), ' ');
+    if (
+      !EffectString.endsWith('\n')(frame) ||
+      frame.length > 1024 ||
+      values.length !== 7 ||
+      values[0] !== 'THREADNOTE_OWNED_OPERATION_V1' ||
+      values[1] !== expected.attempt ||
+      values[2] !== expected.launch ||
+      values[4] !== expected.uid ||
+      values[5] !== expected.contextHash ||
+      !/^[a-f0-9-]{36}$/u.test(values[3]) ||
+      !['connected', 'success'].includes(values[6]) ||
+      name !== values[3] + '.' + values[6]
+    )
+      throw LspFault.make({code: 'protocol'});
+    const statuses = operations.get(values[3]) ?? new Set<string>();
+    if (statuses.has(values[6])) throw LspFault.make({code: 'protocol'});
+    statuses.add(values[6]);
+    operations.set(values[3], statuses);
+  }
+  if (
+    complete &&
+    (operations.size === 0 ||
+      EffectArray.some(
+        [...operations.values()],
+        states => !states.has('connected') || !states.has('success') || states.size !== 2,
+      ))
+  )
+    throw LspFault.make({code: 'protocol'});
+  return operations.size;
+}
+export const makeJavaGradleForeground = Effect.fn('semantic.makeJavaGradleForeground')(function* (options: {
+  readonly configuration: typeof JavaPreparationGradle.Type;
+  readonly workspace: JavaWorkspace;
+  readonly project: string;
+  readonly runtimeDirectory: string;
+  readonly javaHome: string;
+  readonly verify: Effect.Effect<void, unknown>;
+  readonly beforeLaunch: () => void;
+  readonly capture: (finish: Effect.Effect<WireStop>) => void;
+}) {
+  const fs = yield* FileSystem.FileSystem,
+    path = yield* Path.Path,
+    random = yield* SecureRandom.SecureRandom,
+    digest = yield* EffectDigest.Digest;
+  yield* options.verify;
+  yield* verifyJavaGradleInstallation(options.configuration);
+  const root = options.runtimeDirectory,
+    userHome = path.join(root, 'gradle'),
+    temporary = path.join(root, 'tmp'),
+    baseDirectory = path.join(userHome, 'daemon');
+  const nonce = sha256HexSync((yield* random.uuidV4()) + (yield* random.uuidV4())),
+    attempt = sha256HexSync((yield* random.uuidV4()) + (yield* random.uuidV4()));
+  const events = path.join(root, 'gradle-owned-events'),
+    controlFile = path.join(root, 'gradle-owned-control');
+  yield* fs.makeDirectory(events, {mode: 0o700});
+  const eventIdentity = yield* fs.stat(events);
+  const propertiesFile = path.join(userHome, 'gradle.properties');
+  const properties = javaGradleBootstrapProperties(options.javaHome, temporary);
+  yield* fs.writeFileString(propertiesFile, properties, {mode: 0o600, flag: 'wx'});
+  yield* options.workspace.retainInput(propertiesFile, sha256HexSync(properties));
+  const ready = yield* Deferred.make<string, LspFault>();
+  let seenReady = false,
+    stderr = '';
+  const decoder = makeJavaGradleFrameDecoder(frame => {
+    if (seenReady) throw LspFault.make({code: 'protocol'});
+    seenReady = true;
+    Deferred.doneUnsafe(ready, Effect.succeed(frame));
+  });
+  const process = yield* spawnSemanticProcess(
+    {
+      command: javaExecutable(options.javaHome),
+      cwd: options.project,
+      beforeCreation: options.beforeLaunch,
+      captureOriginal: (_pid, finish) => options.capture(finish),
+      args: [
+        ...javaGradleJvmArguments(temporary),
+        '-Duser.home=' + path.join(root, 'home'),
+        '-Dthreadnote.ownedImport.launchNonce=' + nonce,
+        '-javaagent:' +
+          path.join(options.configuration.sdkDirectory, 'lib/agents/gradle-instrumentation-agent-9.8.2.jar'),
+        '-jar',
+        path.join(options.configuration.sdkDirectory, 'lib/gradle-gradle-cli-main-9.8.2.jar'),
+        '--foreground',
+        '--gradle-user-home',
+        userHome,
+        '--offline',
+      ],
+      environment: {
+        PATH: path.join(options.javaHome, 'bin') + (runtimePlatform === 'win32' ? '' : ':/usr/bin:/bin'),
+        JAVA_HOME: options.javaHome,
+        HOME: path.join(root, 'home'),
+        TMPDIR: temporary,
+        ...(runtimePlatform === 'win32' ? {TEMP: temporary, TMP: temporary, USERPROFILE: path.join(root, 'home')} : {}),
+        GRADLE_USER_HOME: userHome,
+        JAVA_TOOL_OPTIONS: '',
+        _JAVA_OPTIONS: '',
+        JDK_JAVA_OPTIONS: '',
+        CLASSPATH: '',
+      },
+    },
+    {
+      stdout: decoder.push,
+      stderr: bytes => {
+        stderr = EffectString.slice(-4096)(stderr + new TextDecoder().decode(bytes));
+        if (EffectString.includes('panicked at')(stderr)) throw LspFault.make({code: 'exit'});
+      },
+      end: stdout => {
+        if (stdout) decoder.finish();
+      },
+      failed: fault => {
+        Deferred.doneUnsafe(ready, Effect.fail(fault));
+      },
+    },
+  );
+  const frame = yield* Deferred.await(ready).pipe(
+    Effect.timeoutOption(30000),
+    Effect.flatMap(result => (Option.isSome(result) ? Effect.succeed(result.value) : LspFault.make({code: 'timeout'}))),
+  );
+  const identity = yield* Effect.try({
+    try: () =>
+      decodeJavaGradleReady(frame, {nonce, javaHome: options.javaHome, baseDirectory, temporary, pid: process.pid}),
+    catch: () => LspFault.make({code: 'prerequisite'}),
+  });
+  const values = {
+    version: '1',
+    attemptNonce: attempt,
+    launchNonce: nonce,
+    uid: identity.uid,
+    contextHash: identity.contextHash,
+    project: options.project,
+    userHome,
+    baseDir: baseDirectory,
+    javaHome: options.javaHome,
+    gradleHome: options.configuration.sdkDirectory,
+    events,
+    expiresAt: String((yield* Clock.currentTimeMillis) + 300000),
+  };
+  const control =
+    EffectArray.join(
+      EffectArray.map(EffectRecord.toEntries(values), ([name, value]) => name + '=' + Base64Url.encode(value)),
+      '\n',
+    ) + '\n';
+  if (new TextEncoder().encode(control).length > 16384) return yield* fail();
+  yield* fs.writeFileString(controlFile, control, {mode: 0o600, flag: 'wx'});
+  const controlDigest = sha256HexSync(control);
+  yield* options.workspace.retainInput(controlFile, controlDigest);
+  const previous = new Map<string, string>();
+  const verify = Effect.gen(function* () {
+    yield* options.verify;
+    yield* verifyJavaGradleInstallation(options.configuration);
+    if (
+      process.failure() ||
+      (yield* fs.readFileString(controlFile)) !== control ||
+      (yield* fs.readFileString(propertiesFile)) !== properties
+    )
+      return yield* fail();
+    const current = yield* fs.stat(events);
+    if (
+      (yield* fs.realPath(events)) !== events ||
+      current.type !== 'Directory' ||
+      current.mode & 0o077 ||
+      current.dev !== eventIdentity.dev ||
+      Option.isNone(current.ino) ||
+      Option.isNone(eventIdentity.ino) ||
+      current.ino.value !== eventIdentity.ino.value
+    )
+      return yield* fail();
+  });
+  const verifyOperations = Effect.fn('semantic.verifyJavaGradleOperations')(
+    function* (complete: boolean) {
+      yield* verify;
+      const names = (yield* fs.readDirectory(events)).sort();
+      if (names.length > 256) return yield* LspFault.make({code: 'capacity'});
+      const current = new Map<string, string>();
+      for (const name of names) {
+        if (!/^[a-f0-9-]{36}\.(?:connected|success|failure)$/u.test(name)) return yield* fail();
+        const file = path.join(events, name);
+        if ((yield* fs.realPath(file)) !== file || (yield* fs.stat(file)).type !== 'File') return yield* fail();
+        current.set(name, new TextDecoder('utf-8', {fatal: true}).decode(yield* readBounded(file, 1024)));
+      }
+      for (const [name, value] of previous) if (current.get(name) !== value) return yield* fail();
+      yield* Effect.try({
+        try: () => verifyJavaGradleOperationFrames(current, {attempt, launch: nonce, ...identity}, complete),
+        catch: () => LspFault.make({code: 'protocol'}),
+      });
+      for (const [name, value] of current) previous.set(name, value);
+    },
+    Effect.provideService(FileSystem.FileSystem, fs),
+    Effect.provideService(Path.Path, path),
+    Effect.provideService(EffectDigest.Digest, digest),
+  );
+  yield* verifyOperations(false);
+  return Object.freeze({
+    verify: verifyOperations(false),
+    complete: verifyOperations(true),
+    jvmProperties: [
+      '-Dthreadnote.ownedImport.controlUri=' + (yield* path.toFileUrl(controlFile)).href,
+      '-Dthreadnote.ownedImport.controlSha256=' + controlDigest,
+    ],
+    finish: process.finish,
+  });
+});
+
 export interface JavaPreparationDrainContext {
   readonly runtimeDirectory: string;
   readonly gradleUserHome: string;
@@ -418,6 +813,12 @@ type JavaLaunchOptions = {
 };
 type JavaPreparationOptions = JavaLaunchOptions & {
   readonly capturePreparationProvider: (pid: number, finish: Effect.Effect<WireStop>) => void;
+  readonly gradle?: typeof JavaPreparationGradle.Type;
+  readonly beforeProviderLaunch?: () => void;
+  readonly beforeGradleLaunch?: () => void;
+  readonly captureGradleForeground?: (finish: Effect.Effect<WireStop>) => void;
+  readonly verifyPreparation?: Effect.Effect<void, unknown>;
+  readonly provisionOfflineCache?: (context: JavaPreparationDrainContext) => Effect.Effect<void, unknown>;
   readonly build: 'maven' | 'gradle';
   readonly inputs: JavaPreparationInputs;
   readonly drainBuildProcesses: (
@@ -452,12 +853,17 @@ export const makeJavaPreparationClient = Effect.fn('semantic.makeJavaPreparation
 /** Both owners must stop, including when either finalizer fails. An uncertain build keeps the entire workspace. */
 export const finishJavaPreparation = Effect.fn('semantic.finishJavaPreparation')(function* (
   workspace: JavaWorkspace,
-  finishProvider: Effect.Effect<WireStop, LspFault>,
-  finishBuild: Effect.Effect<{readonly drained: boolean}, LspFault>,
+  finishProvider: Effect.Effect<WireStop, LspFault> | undefined,
+  finishBuild: Effect.Effect<{readonly drained: boolean}, unknown>,
 ) {
-  const provider = yield* finishProvider.pipe(
-    Effect.flatMap(receipt => (receipt.drained && receipt.stdioClosed ? Effect.void : LspFault.make({code: 'exit'}))),
-    Effect.exit,
+  const provider = yield* Effect.exit(
+    finishProvider
+      ? finishProvider.pipe(
+          Effect.flatMap(receipt =>
+            receipt.drained && receipt.stdioClosed ? Effect.void : LspFault.make({code: 'exit'}),
+          ),
+        )
+      : Effect.void,
   );
   // A new child has no pending caller interruption; the finalizer still awaits its bounded result.
   const buildFiber = yield* finishBuild.pipe(
@@ -584,6 +990,7 @@ export const makeJavaRuntime = Effect.fn('semantic.makeJavaRuntime')(
       build?: JavaPreparationOptions['build'],
       inputs?: JavaPreparationInputs,
       capturePreparationProvider?: JavaPreparationOptions['capturePreparationProvider'],
+      preparation?: JavaPreparationOptions,
     ) => {
       const options = {...input};
       return Effect.gen(function* () {
@@ -596,6 +1003,17 @@ export const makeJavaRuntime = Effect.fn('semantic.makeJavaRuntime')(
             inputs.build !== build ||
             inputs.worktree !== options.worktree ||
             inputs.copiedProject !== options.project)
+        )
+          return yield* fail();
+        if (
+          mode === 'preparation' &&
+          build === 'gradle' &&
+          (!preparation?.gradle ||
+            typeof preparation.beforeGradleLaunch !== 'function' ||
+            typeof preparation.captureGradleForeground !== 'function' ||
+            typeof preparation.beforeProviderLaunch !== 'function' ||
+            typeof preparation.provisionOfflineCache !== 'function' ||
+            !Effect.isEffect(preparation.verifyPreparation))
         )
           return yield* fail();
         if (mode === 'preparation') yield* verifyJavaPreparationInputs(inputs!, {...options, build: build!});
@@ -618,7 +1036,12 @@ export const makeJavaRuntime = Effect.fn('semantic.makeJavaRuntime')(
         const boundary = mode === 'preparation' ? yield* makeJavaMavenBoundary(options.workspace) : undefined;
         const root = yield* fs.makeTempDirectory({directory: privateDirectory, prefix: 'jdt-'});
         yield* directory(root);
-        const launched: {started: boolean; wire: LspWire | undefined} = {started: false, wire: undefined};
+        const launched: {started: boolean; held: boolean; wire: LspWire | undefined} = {
+          started: false,
+          held: false,
+          wire: undefined,
+        };
+        let gradleOwner: Effect.Success<ReturnType<typeof makeJavaGradleForeground>> | undefined;
         const drainContext = Object.freeze({
           runtimeDirectory: root,
           gradleUserHome: path.join(root, 'gradle'),
@@ -627,19 +1050,52 @@ export const makeJavaRuntime = Effect.fn('semantic.makeJavaRuntime')(
         });
         yield* Effect.addFinalizer(() =>
           Effect.gen(function* () {
-            if (!launched.started) return;
-            const provider = launched.wire?.finish ?? LspFault.make({code: 'exit'});
+            if (!launched.held) return;
+            const provider = launched.wire?.finish ?? (launched.started ? LspFault.make({code: 'exit'}) : undefined);
             if (drainBuildProcesses)
               return yield* finishJavaPreparation(
                 options.workspace,
                 provider,
-                Effect.suspend(() => drainBuildProcesses(drainContext)),
+                Effect.gen(function* () {
+                  const operations = yield* Effect.exit(gradleOwner?.complete ?? Effect.void);
+                  const stopped = yield* Effect.exit(Effect.suspend(() => drainBuildProcesses(drainContext)));
+                  if (Exit.isFailure(operations) && Exit.isFailure(stopped))
+                    return yield* Effect.failCause(Cause.combine(operations.cause, stopped.cause));
+                  if (Exit.isFailure(operations)) return yield* Effect.failCause(operations.cause);
+                  if (Exit.isFailure(stopped)) return yield* Effect.failCause(stopped.cause);
+                  return stopped.value;
+                }),
               );
-            yield* options.workspace.confirmDrained(yield* provider);
+            if (provider) yield* options.workspace.confirmDrained(yield* provider);
           }).pipe(Effect.orDie),
         );
         for (const name of ['home', 'm2', 'configuration', 'data', 'tmp', 'gradle'])
           yield* fs.makeDirectory(path.join(root, name), {mode: 0o700});
+        if (mode === 'preparation' && build === 'gradle') {
+          yield* Effect.uninterruptible(
+            options.workspace.hold.pipe(
+              Effect.tap(() =>
+                Effect.sync(() => {
+                  launched.held = true;
+                }),
+              ),
+            ),
+          );
+          yield* preparation!.provisionOfflineCache!(drainContext);
+          gradleOwner = yield* makeJavaGradleForeground({
+            configuration: preparation!.gradle!,
+            workspace: options.workspace,
+            project: options.project,
+            runtimeDirectory: root,
+            javaHome: selected.projectJavaHome,
+            verify: verify.pipe(
+              Effect.andThen(options.workspace.verify),
+              Effect.andThen(preparation!.verifyPreparation!),
+            ),
+            beforeLaunch: preparation!.beforeGradleLaunch!,
+            capture: preparation!.captureGradleForeground!,
+          });
+        }
         const mavenConfiguration =
           mode === 'preparation' && build === 'maven'
             ? yield* materializeJavaMavenConfiguration(root, selected.projectJavaHome)
@@ -647,6 +1103,7 @@ export const makeJavaRuntime = Effect.fn('semantic.makeJavaRuntime')(
         const verifyLaunch = verify.pipe(
           Effect.andThen(boundary?.verify ?? Effect.void),
           Effect.andThen(mavenConfiguration?.verify ?? Effect.void),
+          Effect.andThen(preparation?.verifyPreparation ?? Effect.void),
         );
         const preparationProperties =
           mode === 'preparation'
@@ -666,13 +1123,28 @@ export const makeJavaRuntime = Effect.fn('semantic.makeJavaRuntime')(
         yield* verifyLaunch;
         if ((yield* boundedFileDigest(configuration, 16 * 1024)) !== pins.configurationDigest) return yield* fail();
         if (inputs) yield* verifyJavaPreparationInputs(inputs, {...options, build: build!});
-        yield* options.workspace.hold;
-        launched.started = true;
+        if (!launched.held)
+          yield* Effect.uninterruptible(
+            options.workspace.hold.pipe(
+              Effect.tap(() =>
+                Effect.sync(() => {
+                  launched.held = true;
+                }),
+              ),
+            ),
+          );
+        yield* verifyLaunch;
         const wire = yield* spawnLspWire({
           command: javaExecutable(selected.runtimeJavaHome),
           cwd: options.project,
+          beforeCreation: () => {
+            launched.started = true;
+            if (build === 'gradle') preparation!.beforeProviderLaunch!();
+          },
+          captureOriginal: mode === 'preparation' ? capturePreparationProvider : undefined,
           args: [
             '-Djava.awt.headless=true',
+            ...(gradleOwner?.jvmProperties ?? []),
             `-Dthreadnote.java.preparation=${mode === 'preparation' ? 'true' : 'false'}`,
             ...preparationProperties,
             '-Duser.home=' + path.join(root, 'home'),
@@ -711,9 +1183,8 @@ export const makeJavaRuntime = Effect.fn('semantic.makeJavaRuntime')(
         });
         launched.wire = wire;
         // Capture the ORIGINAL cached native finish before post-spawn verification can yield or fail.
-        if (mode === 'preparation') capturePreparationProvider!(wire.pid, wire.finish);
         yield* verifyLaunch.pipe(Effect.onError(() => wire.finish.pipe(Effect.asVoid)));
-        return {wire, directory: root, verify: verifyLaunch};
+        return {wire, directory: root, verify: verifyLaunch.pipe(Effect.andThen(gradleOwner?.verify ?? Effect.void))};
       }).pipe(
         Effect.timeoutOption(45000),
         Effect.flatMap(result =>
@@ -735,6 +1206,7 @@ export const makeJavaRuntime = Effect.fn('semantic.makeJavaRuntime')(
           captured.build,
           captured.inputs,
           captured.capturePreparationProvider,
+          captured,
         ).pipe(
           Effect.map(runtime => {
             const prepared: JavaPreparationRuntime = Object.freeze({

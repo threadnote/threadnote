@@ -1076,7 +1076,7 @@ describe('Java preparation composition', () => {
             build: 'gradle',
             gradle: {
               sdkDirectory: alias,
-              sdkDigest: '6da4ff86101bec03978e03b6acdb2d8ae958759c1da1dc69aa8e1d83f78ff9bc',
+              sdkDigest: javaPreparation.javaGradleOwnedImport.sdkDigest,
             },
             privateDirectory: root,
           },
@@ -1166,7 +1166,7 @@ describe('Java preparation composition', () => {
               build: 'gradle',
               gradle: {
                 sdkDirectory: '/host/gradle',
-                sdkDigest: '6da4ff86101bec03978e03b6acdb2d8ae958759c1da1dc69aa8e1d83f78ff9bc',
+                sdkDigest: javaPreparation.javaGradleOwnedImport.sdkDigest,
               },
               [output]: directory,
             },

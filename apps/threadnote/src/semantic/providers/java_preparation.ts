@@ -882,9 +882,20 @@ export const loadJavaPreparedModel = Effect.fn('semantic.loadJavaPreparedModel')
 );
 
 export const javaPreparedModelCommand = 'threadnote.java.preparedProjectModel.v1';
+/** Candidate source overlay identity; these pins do not activate public import qualification. */
+export const javaGradleOwnedImport = Object.freeze({
+  version: 'gradle-original-foreground-v1',
+  sdkDigest: '521eff6fca682960da1988c278f2bf3b1ebcc0900220eec0ca93263102d105be',
+  treeSha256: '219451038c8e94435feff8b8e5a011584f94e56b9068941c260df8e4bc76c211',
+  archiveSha256: 'd8a05b70c0e9a9f826dcb45b29086528a6aedda9a85b35497c417904cdfbc486',
+  patchSha256: 'afe7700707cb4aa8041d4c7eadcaa9786229e53fdae4c62189b6c705613205c5',
+  recipeSha256: 'c1f8ffc13b998e3ba4e1f062986ad295996c8de1918abb026af05cc33a35c0f2',
+  providerCommit: '8de7bcf76e785507ad92f0741ab9235a430c95e6',
+  consumerCommit: '92f0512e7f06d84621afba191f75e265363890cf',
+} as const);
 export const JavaPreparationGradle = Schema.Struct({
   sdkDirectory: text,
-  sdkDigest: Schema.Literal('6da4ff86101bec03978e03b6acdb2d8ae958759c1da1dc69aa8e1d83f78ff9bc'),
+  sdkDigest: Schema.Literal(javaGradleOwnedImport.sdkDigest),
 });
 
 /** One fixed import protocol on a genuine setup process. A launch alone never upgrades the copied input proof. */
@@ -898,7 +909,6 @@ export const observeJavaPreparedImport = Effect.fn('semantic.observeJavaPrepared
     proof.stage = 'preparing-import';
     proof.runtime = runtime;
     return yield* Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const random = yield* SecureRandom.SecureRandom;
       const root = proof.workspace.directory;
@@ -935,14 +945,6 @@ export const observeJavaPreparedImport = Effect.fn('semantic.observeJavaPrepared
       });
       yield* verifyHost;
       const gradleHome = path.join(runtime.directory, 'gradle');
-      if (inputs.build === 'gradle')
-        yield* fs.writeFileString(
-          path.join(gradleHome, 'gradle.properties'),
-          'org.gradle.java.installations.auto-detect=false\norg.gradle.java.installations.auto-download=false\norg.gradle.java.installations.paths=' +
-            EffectString.replaceAll('\\', '\\\\')(runtime.projectJavaHome) +
-            '\norg.gradle.jvmargs=-Xmx256m\n',
-          {flag: 'wx', mode: 0o600},
-        );
       const settings =
         inputs.build === 'maven'
           ? javaMavenImportSettings(runtime.directory, runtime.projectJavaHome)

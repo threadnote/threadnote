@@ -84,6 +84,8 @@ export interface JavaPreparationHost {
   readonly beforePreparationLaunch: () => void;
   readonly capturePreparationProvider: (pid: number, finish: Effect.Effect<WireStop>) => void;
   /** All required original owners must be captured before any importer initialization. */
+  readonly beforeGradleLaunch?: () => void;
+  readonly captureGradleForeground?: (finish: Effect.Effect<WireStop>) => void;
   readonly verifyOwners: Effect.Effect<void, unknown>;
   readonly onProviderStarted: (pid: number) => Effect.Effect<void, unknown>;
   readonly provisionOfflineCache: (context: JavaPreparationDrainContext) => Effect.Effect<void, unknown>;
@@ -98,6 +100,8 @@ export const makeJavaPreparation = Effect.fn('semantic.makeJavaPreparation')(
     const {
       verifySetup,
       beforePreparationLaunch,
+      beforeGradleLaunch,
+      captureGradleForeground,
       capturePreparationProvider,
       verifyOwners,
       onProviderStarted,
@@ -165,9 +169,15 @@ export const makeJavaPreparation = Effect.fn('semantic.makeJavaPreparation')(
           workspace,
         });
         yield* verifyActive;
-        beforePreparationLaunch();
+        if (captured.build === 'maven') beforePreparationLaunch();
         const launched = yield* runtime.preparation({
           capturePreparationProvider,
+          beforeProviderLaunch: beforePreparationLaunch,
+          beforeGradleLaunch,
+          captureGradleForeground,
+          provisionOfflineCache,
+          verifyPreparation: verifySetup,
+          gradle: captured.gradle,
           workspace,
           project: inputs.copiedProject,
           worktree: captured.worktree,
@@ -177,14 +187,15 @@ export const makeJavaPreparation = Effect.fn('semantic.makeJavaPreparation')(
         });
         yield* onProviderStarted(launched.pid);
         yield* verifyActive;
-        yield* provisionOfflineCache(
-          Object.freeze({
-            runtimeDirectory: launched.directory,
-            gradleUserHome: path.join(launched.directory, 'gradle'),
-            retainInput: workspace.retainInput,
-            verifyDisposed: workspace.verifyDisposed,
-          }),
-        );
+        if (captured.build === 'maven')
+          yield* provisionOfflineCache(
+            Object.freeze({
+              runtimeDirectory: launched.directory,
+              gradleUserHome: path.join(launched.directory, 'gradle'),
+              retainInput: workspace.retainInput,
+              verifyDisposed: workspace.verifyDisposed,
+            }),
+          );
         yield* verifyActive;
         yield* verifyOwners;
         const observed = yield* observeJavaPreparedImport({runtime: launched, gradle: captured.gradle});

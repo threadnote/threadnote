@@ -147,10 +147,11 @@ export const createTargetSpecs = async (root = defaultRoot) => {
     name => !Effect.pipe(name, EffectString.startsWith('@threadnote/')),
   ).sort();
 
+  const graphRuntimeDataRoots = ['assets/code-graph'];
   const packageDataRoots = {
     'packages/evidence': ['apps/threadnote/test/evaluation'],
     'packages/graph': [
-      'assets/code-graph',
+      ...graphRuntimeDataRoots,
       'apps/threadnote/test/evaluation/baselines/code-graph-v1',
       'apps/threadnote/test/evaluation/fixtures/code-graph-v1/repository',
       'packages/graph/src',
@@ -177,22 +178,21 @@ export const createTargetSpecs = async (root = defaultRoot) => {
     'packages/recall': ['apps/threadnote/test/evaluation/fixtures/recall-v1/fixture.json'],
     'packages/remote-memory': ['scripts/build.ts', 'scripts/check-self-contained.ts'],
   };
-  const packageTestNpm = {
-    'packages/graph': [
-      '@repomix/tree-sitter-wasms',
-      '@tree-sitter-grammars/tree-sitter-hcl',
-      '@tree-sitter-grammars/tree-sitter-lua',
-      '@tree-sitter-grammars/tree-sitter-svelte',
-      '@tree-sitter-grammars/tree-sitter-zig',
-      '@vscode/tree-sitter-wasm',
-      'tree-sitter-elixir',
-      'tree-sitter-julia',
-      'tree-sitter-objc',
-      'tree-sitter-scala',
-      'tree-sitter-systemverilog',
-      'web-tree-sitter',
-    ],
-  };
+  const graphRuntimeNpm = [
+    '@repomix/tree-sitter-wasms',
+    '@tree-sitter-grammars/tree-sitter-hcl',
+    '@tree-sitter-grammars/tree-sitter-lua',
+    '@tree-sitter-grammars/tree-sitter-svelte',
+    '@tree-sitter-grammars/tree-sitter-zig',
+    '@vscode/tree-sitter-wasm',
+    'tree-sitter-elixir',
+    'tree-sitter-julia',
+    'tree-sitter-objc',
+    'tree-sitter-scala',
+    'tree-sitter-systemverilog',
+    'web-tree-sitter',
+  ];
+  const packageTestNpm = {'packages/graph': graphRuntimeNpm};
   const applicationReferencedInputRoots = [
     '.cursor-plugin',
     '.github',
@@ -364,6 +364,9 @@ export const createTargetSpecs = async (root = defaultRoot) => {
               name: 'test_runtime',
               entries: runtimeEntries,
               closureEntries: packageRuntimeTestEntries[directory],
+              // These source-runtime consumers launch the graph parser through standalone.ts.
+              dataRoots: [...new Set([...shared.dataRoots, ...graphRuntimeDataRoots])],
+              npm: [...new Set([...shared.npm, ...graphRuntimeNpm])],
             },
           ]
         : []),

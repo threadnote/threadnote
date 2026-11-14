@@ -126,32 +126,41 @@ export interface LspLaunch {
   readonly cwd: string;
   readonly environment: NodeJS.ProcessEnv;
   readonly maxMessageBytes?: number;
+  readonly beforeCreation?: () => void;
+  readonly captureOriginal?: (pid: number, finish: Effect.Effect<WireStop>) => void;
 }
-export const spawnLspWire = Effect.fn('semantic.spawnLspWire')(function* (options: LspLaunch) {
+export interface SemanticProcessAdapter {
+  readonly stdout: (bytes: Uint8Array) => void;
+  readonly stderr: (bytes: Uint8Array) => void;
+  readonly end: (stdout: boolean) => void;
+  readonly failed: (fault: LspFault) => void;
+}
+/** Shared ORIGINAL native acquisition, byte pumps and cached finish; adapters never own or reconstruct a PID capability. */
+export const spawnSemanticProcess = Effect.fn('semantic.spawnSemanticProcess')(function* (
+  options: LspLaunch,
+  adapter: SemanticProcessAdapter,
+) {
   const startup = yield* SemanticWireStartup;
-  const frames = yield* Effect.try({
-    try: () => new LspFrameDecoder(options.maxMessageBytes),
-    catch: () => LspFault.make({code: 'protocol'}),
-  });
   const policy = yield* ChildEnvironmentPolicy;
-  const incoming = yield* Queue.bounded<{message: Message; bytes: number}, Cause.Done>(64);
   let fault: LspFault | undefined;
-  let ending = false;
-  let forced = false;
-  let nativeClosed = false;
-  let queuedBytes = 0;
-  let writes = 0;
-  let writeBytes = 0;
-  let stderrTail = '';
+  let ending = false,
+    forced = false,
+    nativeClosed = false,
+    cleanupUnknown = false;
+  let writes = 0,
+    writeBytes = 0,
+    endedPumps = 0;
+  let pumps: readonly Promise<void>[] = [];
   const fail = (code: LspFault['code']) => {
     fault ??= LspFault.make({code});
-    Queue.endUnsafe(incoming);
+    adapter.failed(fault);
   };
   // Native creation, cleanup registration and both output owners are one acquisition.
   // A pending interrupt is restored only after the scope can drain the owned capability.
   const {child, finish} = yield* Effect.uninterruptible(
     Effect.gen(function* () {
       // The platform capability, never a PID, owns signalling and the original group/Job.
+      options.beforeCreation?.();
       const child = yield* Effect.try({
         try: () =>
           runtimeSpawnOwnedProviderTree({
@@ -164,8 +173,11 @@ export const spawnLspWire = Effect.fn('semantic.spawnLspWire')(function* (option
       });
       const observe = (): RuntimeOwnedProviderObservation => {
         try {
-          return runtimeObserveOwnedProviderTree(child.handle);
+          const observation = runtimeObserveOwnedProviderTree(child.handle);
+          if (observation.state === 'unknown') cleanupUnknown = true;
+          return observation;
         } catch {
+          cleanupUnknown = true;
           fail('exit');
           return {state: 'unknown', leaderExitCode: null, stdioClosed: false};
         }
@@ -186,6 +198,7 @@ export const spawnLspWire = Effect.fn('semantic.spawnLspWire')(function* (option
           try {
             runtimeTerminateOwnedProviderTree(child.handle, mode);
           } catch {
+            cleanupUnknown = true;
             fail('exit');
           }
         });
@@ -200,10 +213,18 @@ export const spawnLspWire = Effect.fn('semantic.spawnLspWire')(function* (option
               Effect.timeoutOption(2000),
               Effect.tap(result =>
                 Effect.sync(() => {
-                  if (Option.isNone(result)) fail('write');
+                  if (Option.isNone(result)) {
+                    cleanupUnknown = true;
+                    fail('write');
+                  }
                 }),
               ),
-              Effect.catch(() => Effect.sync(() => fail('write'))),
+              Effect.catch(() =>
+                Effect.sync(() => {
+                  cleanupUnknown = true;
+                  fail('write');
+                }),
+              ),
             );
             let observation = yield* waitTree(2000);
             if (observation.state !== 'drained') {
@@ -214,8 +235,32 @@ export const spawnLspWire = Effect.fn('semantic.spawnLspWire')(function* (option
                 observation = yield* waitTree(2000);
               }
             }
-            if (writes !== 0) fail('write');
-            let drained = observation.state === 'drained' && observation.stdioClosed && writes === 0;
+            yield* fromPromiseInterruptible(
+              () => Promise.all(pumps),
+              () => LspFault.make({code: 'exit'}),
+            ).pipe(
+              Effect.timeoutOption(2000),
+              Effect.tap(result =>
+                Effect.sync(() => {
+                  if (Option.isNone(result)) cleanupUnknown = true;
+                }),
+              ),
+              Effect.catch(() =>
+                Effect.sync(() => {
+                  cleanupUnknown = true;
+                }),
+              ),
+            );
+            if (writes !== 0) {
+              cleanupUnknown = true;
+              fail('write');
+            }
+            let drained =
+              !cleanupUnknown &&
+              endedPumps === 2 &&
+              observation.state === 'drained' &&
+              observation.stdioClosed &&
+              writes === 0;
             if (!drained) fail('exit');
             if (drained) {
               yield* Effect.try({
@@ -234,7 +279,6 @@ export const spawnLspWire = Effect.fn('semantic.spawnLspWire')(function* (option
               );
             }
             // Unknown ownership deliberately retains the native handle and admission reservation.
-            yield* Queue.shutdown(incoming);
             startup?.cleanup(drained && observation.stdioClosed ? 'drained' : 'unknown');
             return {code: observation.leaderExitCode, drained, forced, stdioClosed: observation.stdioClosed, fault};
           }),
@@ -251,67 +295,45 @@ export const spawnLspWire = Effect.fn('semantic.spawnLspWire')(function* (option
           for (;;) {
             const next = await reader.read();
             if (next.done) break;
-            if (stdout) {
-              if (fault) continue;
+            if (!fault || !stdout) {
               try {
-                for (const message of frames.push(next.value)) {
-                  const bytes = encoder.encode(JSON.stringify(message)).length;
-                  if (queuedBytes + bytes > 32 * 1024 * 1024 || !Queue.offerUnsafe(incoming, {message, bytes})) {
-                    fail('capacity');
-                    break;
-                  }
-                  queuedBytes += bytes;
-                }
-              } catch {
-                // Protocol failure ends delivery, but this owner must still consume the finite
-                // remaining output through EOF before the native group/Job can be drained.
-                fail('protocol');
+                if (stdout) adapter.stdout(next.value);
+                else adapter.stderr(next.value);
+              } catch (error) {
+                fail(Schema.is(LspFault)(error) ? error.code : 'protocol');
               }
-            } else {
-              const text = stderrTail + new TextDecoder().decode(next.value);
-              if (EffectString.includes('panicked at')(text)) fail('exit');
-              stderrTail = EffectString.slice(-4096)(text);
             }
           }
-          if (stdout) {
-            frames.finish();
-            Queue.endUnsafe(incoming);
-            if (!ending) fail('exit');
+          try {
+            adapter.end(stdout);
+          } catch {
+            fail(stdout ? 'protocol' : 'exit');
           }
+          if (stdout && !ending) fail('exit');
         } catch {
+          cleanupUnknown = true;
           fail(stdout ? 'protocol' : 'exit');
         } finally {
+          endedPumps++;
           reader.releaseLock();
         }
       };
-      void pump(child.stdout, true);
-      void pump(child.stderr, false);
+      pumps = [pump(child.stdout, true), pump(child.stderr, false)];
       yield* Effect.addFinalizer(() => finish.pipe(Effect.asVoid));
+      options.captureOriginal?.(child.pid, finish);
       return {child, finish};
     }),
   );
-  const wire: LspWire = {
+  return {
     pid: child.pid,
     identity: child.identity,
-    messages: Stream.fromQueue(incoming).pipe(
-      Stream.map(packet => {
-        queuedBytes -= packet.bytes;
-        return packet.message;
-      }),
-    ),
     failure: () => fault,
     beginClosing: Effect.sync(() => {
       ending = true;
     }),
-    send: (message: Message) =>
+    write: (bytes: Uint8Array) =>
       Effect.suspend(() => {
         if (fault) return Effect.fail(fault);
-        let bytes: Uint8Array;
-        try {
-          bytes = encodeLspFrame(message);
-        } catch {
-          return Effect.fail(LspFault.make({code: 'protocol'}));
-        }
         if (writes >= 64 || writeBytes + bytes.length > 32 * 1024 * 1024)
           return Effect.fail(LspFault.make({code: 'capacity'}));
         return fromPromiseInterruptible(
@@ -340,8 +362,58 @@ export const spawnLspWire = Effect.fn('semantic.spawnLspWire')(function* (option
       }),
     finish,
   };
+});
+
+export const spawnLspWire = Effect.fn('semantic.spawnLspWire')(function* (options: LspLaunch) {
+  const frames = yield* Effect.try({
+    try: () => new LspFrameDecoder(options.maxMessageBytes),
+    catch: () => LspFault.make({code: 'protocol'}),
+  });
+  const incoming = yield* Queue.bounded<{message: Message; bytes: number}, Cause.Done>(64);
+  let queuedBytes = 0,
+    stderrTail = '';
+  const process = yield* spawnSemanticProcess(options, {
+    stdout: chunk => {
+      for (const message of frames.push(chunk)) {
+        const bytes = encoder.encode(JSON.stringify(message)).length;
+        if (queuedBytes + bytes > 32 * 1024 * 1024 || !Queue.offerUnsafe(incoming, {message, bytes}))
+          throw LspFault.make({code: 'capacity'});
+        queuedBytes += bytes;
+      }
+    },
+    stderr: chunk => {
+      const text = stderrTail + new TextDecoder().decode(chunk);
+      stderrTail = EffectString.slice(-4096)(text);
+      if (EffectString.includes('panicked at')(text)) throw LspFault.make({code: 'exit'});
+    },
+    end: stdout => {
+      if (stdout) {
+        frames.finish();
+        Queue.endUnsafe(incoming);
+      }
+    },
+    failed: () => Queue.endUnsafe(incoming),
+  });
+  const wire: LspWire = {
+    pid: process.pid,
+    identity: process.identity,
+    failure: process.failure,
+    beginClosing: process.beginClosing,
+    messages: Stream.fromQueue(incoming).pipe(
+      Stream.map(packet => {
+        queuedBytes -= packet.bytes;
+        return packet.message;
+      }),
+    ),
+    send: (message: Message) =>
+      Effect.try({try: () => encodeLspFrame(message), catch: () => LspFault.make({code: 'protocol'})}).pipe(
+        Effect.flatMap(process.write),
+      ),
+    finish: process.finish.pipe(Effect.tap(() => Queue.shutdown(incoming))),
+  };
   return wire;
 });
+
 export interface LspClient {
   readonly pid: number;
   readonly request: (

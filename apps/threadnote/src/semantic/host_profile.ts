@@ -1,6 +1,7 @@
 import {Effect, FileSystem, Path, Schema, String as EffectString} from 'effect';
 import {SecureRandom} from 'effect/crypto';
 import {Digest} from '@threadnote/semantic/contracts';
+import {JavaPreparationGradle} from './providers/java_preparation.js';
 import {JavaRuntimeCandidate} from './providers/java_runtime.js';
 import {FileUri} from '@threadnote/semantic/contracts';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -51,6 +52,7 @@ const trustedPolicyFields = {
   version: Schema.Literal(1),
   mode: Schema.Literal(javaTrustedImportMode),
   build: Schema.Literals(['maven', 'gradle']),
+  gradle: Schema.optional(JavaPreparationGradle),
   project: FileUri,
   sourceDigest: Digest,
   candidate: JavaRuntimeCandidate,

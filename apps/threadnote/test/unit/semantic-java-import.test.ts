@@ -383,6 +383,13 @@ it('trusted approval binds source, scope, SDK, cache, build and predecessor rega
     (b, v) => ({...b, cacheImage: {...b.cacheImage, imageDigest: sha256HexSync('image:' + v)}}),
     (b, v) => ({...b, configuration: {...b.configuration, digest: sha256HexSync('config:' + v)}}),
     b => ({...b, build: 'gradle'}),
+    (b, v) => ({
+      ...b,
+      gradle: {
+        sdkDirectory: '/derivative-' + v,
+        sdkDigest: '521eff6fca682960da1988c278f2bf3b1ebcc0900220eec0ca93263102d105be',
+      },
+    }),
   ];
   fc.assert(
     fc.property(fc.string({maxLength: 16}), suffix => {
