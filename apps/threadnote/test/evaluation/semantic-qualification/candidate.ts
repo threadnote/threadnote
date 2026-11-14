@@ -165,6 +165,35 @@ export const candidateFailure = (error: unknown) =>
     : error instanceof Error
       ? error.message
       : 'Unknown failure';
+/** Fixture diagnostics only: source coordinates never attest admission, operation success or ownership. */
+export function candidateFailureEvidence(error: unknown, sourceHashes: Readonly<Record<string, string>> = {}) {
+  if (!Schema.is(LspFault)(error) || !Schema.is(LspFault.fields.code)(error.code)) return undefined;
+  try {
+    const sources = new Map<string, string>();
+    for (const [file, digest] of EffectRecord.toEntries(sourceHashes)) {
+      if (!/^[a-f0-9]{64}$/u.test(digest)) continue;
+      const absolute = fileURLToPath(new URL(file, import.meta.url));
+      const path = EffectString.replaceAll('\\', '/')(relative(fileURLToPath(repository), absolute));
+      if (isAbsolute(path) || path === '..' || EffectString.startsWith('../')(path)) continue;
+      if (EffectString.endsWith('.ts')(path) && !EffectString.startsWith('node_modules/')(path))
+        sources.set(absolute, path);
+    }
+    const frames: {path: string; line: number; column: number}[] = [];
+    // 4096 UTF-16 units occupy at most 16 KiB in UTF-8; never scan an unbounded stack.
+    const stack = typeof error.stack === 'string' ? EffectString.slice(0, 4096)(error.stack) : '';
+    for (const line of EffectString.split('\n')(stack)) {
+      const match = /^\s+at (?:[^()\r\n]{0,256} \()?(.+):([1-9][0-9]{0,6}):([1-9][0-9]{0,6})\)?$/u.exec(line);
+      if (!match) continue;
+      const path = sources.get(match[1]);
+      if (!path) continue;
+      frames.push({path, line: Number(match[2]), column: Number(match[3])});
+      if (frames.length === 4) break;
+    }
+    return {code: error.code, sourceFrames: frames};
+  } catch {
+    return undefined; // Diagnostic projection must never replace the original failure.
+  }
+}
 /** Install rejection ownership immediately, even when transport shutdown must finish before consuming the receipt. */
 export const settleProviderShutdown = (pending: ReturnType<typeof shutdownFixtureProviders>) =>
   pending.then(
@@ -230,6 +259,7 @@ interface SmokeReport {
   mcp?: unknown;
   homeInventory?: string[];
   failure?: string;
+  failureEvidence?: ReturnType<typeof candidateFailureEvidence>;
   checks?: unknown;
   elapsedMilliseconds?: number;
   cleanup: {
@@ -881,6 +911,7 @@ export async function runCandidateChecks(
     report.status = 'passed';
   } catch (error) {
     report.failure = candidateFailure(error);
+    report.failureEvidence = candidateFailureEvidence(error, report.sourceHashes);
   } finally {
     await finish();
     signals.dispose();

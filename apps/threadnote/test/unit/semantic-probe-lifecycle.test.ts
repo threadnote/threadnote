@@ -1,9 +1,11 @@
 import {isJsonObject} from '@threadnote/platform/json';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import * as Schema from 'effect/Schema';
 import * as EffectArray from 'effect/Array';
 import * as EffectOption from 'effect/Option';
 import * as EffectString from 'effect/String';
 import {Effect} from 'effect';
+import * as BunServices from '@effect/platform-bun/BunServices';
 /* oxlint-disable effecttsgo/node-builtin-import -- Integration regressions exercise actual runner processes and OS signals. */
 import {spawn} from 'node:child_process';
 import {access, chmod, mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
@@ -13,10 +15,12 @@ import {expect, it, vi} from 'vitest';
 import fc from 'fast-check';
 import {
   candidateFailure,
+  candidateFailureEvidence,
   verifiedJavaGradleCandidateCleanup,
   candidateDispatchInputBinding,
 } from '../evaluation/semantic-qualification/candidate.js';
 import {LspFault} from '../../src/semantic/lsp_transport.js';
+import {makeJavaWorkspace} from '../../src/semantic/providers/java_runtime.js';
 import {
   withinProbeDeadline,
   installProbeSignalCleanup,
@@ -51,6 +55,56 @@ it('projects only closed actual production codes and preserves the unexpected-er
     }),
     {numRuns: 40},
   );
+});
+it('retains the actual pure production guard source coordinate through the Promise boundary', async () => {
+  // The nonabsolute parent refuses before filesystem/native acquisition; only the Promise error contract is tested.
+  // oxlint-disable-next-line threadnote/no-effect-runtime-in-tests -- Exercises the runner's actual Effect-to-Promise error boundary, not an Effect service test.
+  const error = await Effect.runPromise(
+    makeJavaWorkspace('not-an-absolute-parent').pipe(
+      Effect.scoped,
+      // oxlint-disable-next-line effecttsgo/strict-effect-provide -- This Promise-boundary test entry point supplies only filesystem/path services, no application layer.
+      Effect.provide(BunServices.layer),
+    ),
+  ).catch((failure: unknown) => failure);
+  const evidence = candidateFailureEvidence(error, {
+    '../../../src/semantic/providers/java_runtime.ts': sha256HexSync(
+      await readFile(resolve('apps/threadnote/src/semantic/providers/java_runtime.ts')),
+    ),
+  });
+  expect(evidence?.code).toBe('prerequisite');
+  expect(evidence?.sourceFrames).toContainEqual({
+    path: 'apps/threadnote/src/semantic/providers/java_runtime.ts',
+    line: expect.any(Number),
+    column: expect.any(Number),
+  });
+  expect(evidence?.sourceFrames.length).toBeLessThanOrEqual(4);
+});
+it('bounds allowlisted source coordinates and excludes malformed, external and late stack data', () => {
+  const source = resolve('apps/threadnote/src/semantic/providers/java_runtime.ts');
+  const hashes = {'../../../src/semantic/providers/java_runtime.ts': EffectString.repeat(64)('a')};
+  const error = LspFault.make({code: 'prerequisite'});
+  error.stack = EffectArray.join(
+    [
+      'Error: secret header',
+      '    at secretFunction (/external/secret.ts:1:2)',
+      `    at prefix (/external${source}:3:4)`,
+      `    at bad (${source}:0:4)`,
+      ...EffectArray.map([1, 2, 3, 4, 5], line => `    at hiddenFunction (${source}:${line}:9)`),
+    ],
+    '\n',
+  );
+  expect(candidateFailureEvidence(error, hashes)).toEqual({
+    code: 'prerequisite',
+    sourceFrames: EffectArray.map([1, 2, 3, 4], line => ({
+      path: 'apps/threadnote/src/semantic/providers/java_runtime.ts',
+      line,
+      column: 9,
+    })),
+  });
+  expect(candidateFailureEvidence(error, {})).toEqual({code: 'prerequisite', sourceFrames: []});
+  error.stack = EffectString.repeat(4096)('x') + `\n    at late (${source}:99:9)`;
+  expect(candidateFailureEvidence(error, hashes)).toEqual({code: 'prerequisite', sourceFrames: []});
+  expect(candidateFailureEvidence({_tag: 'LspFault', code: 'prerequisite', stack: source}, hashes)).toBeUndefined();
 });
 const quote = (value: string) => `'${EffectString.replaceAll("'", "'\\''")(value)}'`;
 const observe = async (path: string) => {
