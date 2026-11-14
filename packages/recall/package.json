@@ -54,7 +54,7 @@
     "@threadnote/workspace": "workspace:*",
     "@threadnote/protocol": "workspace:*",
     "effect": "4.1.2",
-    "@effect/sql-sqlite-bun": "4.1.2"
+    "@effect/sql-sqlite-bun": "4.1.4"
   },
   "devDependencies": {
     "@threadnote/testing": "workspace:*",
