@@ -134,15 +134,57 @@ jobs:
         timeout-minutes: 1
         shell: pwsh
         run: |
-          $summary = @{ version = 1; status = 'unknown'; recentSeconds = 180; queryLimitReached = $false; records = @() }
+          $summary = @{
+            version = 1; status = 'unknown'; recentSeconds = 180; queryLimitReached = $false
+            sourceBunResolved = $false
+            cdb = @{ available = $false; version = 'unknown'; sha256 = 'unknown'; arm64 = 'unknown' }
+            records = @()
+          }
           try {
             if ([string]::IsNullOrWhiteSpace($env:GITHUB_WORKSPACE) -or
                 -not [IO.Path]::IsPathFullyQualified($env:GITHUB_WORKSPACE)) { throw 'Workspace unavailable' }
             $candidate = [IO.Path]::GetFullPath([IO.Path]::Combine($env:GITHUB_WORKSPACE, 'dist', 'threadnote.exe'))
+            $sourceBunPath = $null
+            try {
+              if (Get-Command bun -CommandType Application -ErrorAction Stop) {
+                $shellPath = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+                $metadataInfo = [Diagnostics.ProcessStartInfo]::new($shellPath)
+                $metadataInfo.UseShellExecute = $false
+                $metadataInfo.CreateNoWindow = $true
+                $metadataInfo.RedirectStandardOutput = $true
+                $metadataInfo.RedirectStandardError = $true
+                $metadataInfo.ArgumentList.Add('-NoLogo')
+                $metadataInfo.ArgumentList.Add('-NoProfile')
+                $metadataInfo.ArgumentList.Add('-NonInteractive')
+                $metadataInfo.ArgumentList.Add('-Command')
+                $metadataInfo.ArgumentList.Add("& bun -e 'process.stdout.write(process.execPath)'")
+                $metadataProcess = [Diagnostics.Process]::new()
+                $metadataProcess.StartInfo = $metadataInfo
+                try {
+                  if ($metadataProcess.Start()) {
+                    $metadataStdout = $metadataProcess.StandardOutput.ReadToEndAsync()
+                    $metadataStderr = $metadataProcess.StandardError.ReadToEndAsync()
+                    if ($metadataProcess.WaitForExit(5000) -and $metadataStdout.Wait(1000) -and $metadataStderr.Wait(1000)) {
+                      $reportedBunPath = $metadataStdout.Result.Trim()
+                      if ($metadataProcess.ExitCode -eq 0 -and $reportedBunPath.Length -le 2048 -and
+                          [IO.Path]::IsPathFullyQualified($reportedBunPath) -and [IO.File]::Exists($reportedBunPath)) {
+                        $sourceBunPath = [IO.Path]::GetFullPath($reportedBunPath)
+                        $summary.sourceBunResolved = $true
+                      }
+                    } elseif (-not $metadataProcess.HasExited) { $metadataProcess.Kill($true) }
+                  }
+                } finally { $metadataProcess.Dispose() }
+              }
+            } catch { $summary.sourceBunResolved = $false }
+            $allowedAppPaths = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::OrdinalIgnoreCase)
+            $allowedAppPaths[$candidate] = 'candidate'
+            if ($sourceBunPath -and -not $allowedAppPaths.ContainsKey($sourceBunPath)) {
+              $allowedAppPaths[$sourceBunPath] = 'source-bun'
+            }
             $now = [DateTime]::UtcNow
             $crashEvents = @(Get-WinEvent -FilterHashtable @{
               LogName = 'Application'; ProviderName = 'Application Error'; Id = 1000
-              StartTime = $now.AddSeconds(-180); EndTime = $now; AppPath = $candidate
+              StartTime = $now.AddSeconds(-180); EndTime = $now; AppPath = [string[]]$allowedAppPaths.Keys
             } -MaxEvents 32 -ErrorAction Stop)
             $summary.queryLimitReached = $crashEvents.Count -eq 32
             $records = [Collections.Generic.List[object]]::new()
@@ -155,8 +197,9 @@ jobs:
                   $fieldName = $field.GetAttribute('Name')
                   if ($fieldName) { $fields[$fieldName] = [string]$field.InnerText }
                 }
-                if (-not [IO.Path]::IsPathFullyQualified([string]$fields.AppPath) -or
-                    -not [StringComparer]::OrdinalIgnoreCase.Equals([IO.Path]::GetFullPath($fields.AppPath), $candidate)) { continue }
+                if (-not [IO.Path]::IsPathFullyQualified([string]$fields.AppPath)) { continue }
+                $eventAppPath = [IO.Path]::GetFullPath([string]$fields.AppPath)
+                if (-not $allowedAppPaths.ContainsKey($eventAppPath)) { continue }
                 $module = [IO.Path]::GetFileName([string]$fields.ModuleName)
                 $exceptionCode = [string]$fields.ExceptionCode
                 $faultOffset = [string]$fields.FaultingOffset
@@ -169,6 +212,7 @@ jobs:
                 elseif ($processText -notmatch '^[0-9]{1,10}$' -or -not [uint32]::TryParse($processText, [ref]$crashPid)) { continue }
                 if ($crashPid -eq 0) { continue }
                 $records.Add(@{
+                  appKind = $allowedAppPaths[$eventAppPath]
                   module = $module; exceptionCode = '0x' + ($exceptionCode -replace '^0x', '').ToLowerInvariant()
                   offset = '0x' + ($faultOffset -replace '^0x', '').ToLowerInvariant(); processId = $crashPid
                   timeUtc = $crashEvent.TimeCreated.ToUniversalTime().ToString('o')
@@ -179,6 +223,38 @@ jobs:
             $summary.records = @($records.ToArray())
             if ($records.Count -gt 0) { $summary.status = 'observed' }
           } catch { $summary.status = 'unknown' }
+          try {
+            $programFiles = [Environment]::GetFolderPath('ProgramFiles')
+            $programFilesX86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+            $debuggerPaths = @()
+            if ($programFiles) { $debuggerPaths += [IO.Path]::Combine($programFiles, 'Windows Kits', '10', 'Debuggers', 'arm64', 'cdb.exe') }
+            if ($programFilesX86) { $debuggerPaths += [IO.Path]::Combine($programFilesX86, 'Windows Kits', '10', 'Debuggers', 'arm64', 'cdb.exe') }
+            foreach ($debuggerPath in $debuggerPaths) {
+              if ([IO.File]::Exists($debuggerPath)) {
+                $summary.cdb.available = $true
+                $debuggerInfo = [IO.FileInfo]::new($debuggerPath)
+                $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($debuggerPath).FileVersion
+                if ($version -match '^[A-Za-z0-9 ._+-]{1,80}$') { $summary.cdb.version = $version }
+                if ($debuggerInfo.Length -le 67108864) {
+                  $hash = (Get-FileHash -LiteralPath $debuggerPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+                  if ($hash -match '^[a-f0-9]{64}$') { $summary.cdb.sha256 = $hash }
+                }
+                $stream = [IO.File]::OpenRead($debuggerPath)
+                try {
+                  if ($stream.Length -ge 64) {
+                    $reader = [IO.BinaryReader]::new($stream)
+                    $stream.Position = 0x3c
+                    $peOffset = $reader.ReadInt32()
+                    if ($peOffset -ge 0 -and $peOffset -le 1048576 -and $peOffset + 6 -le $stream.Length) {
+                      $stream.Position = $peOffset
+                      if ($reader.ReadUInt32() -eq 0x00004550) { $summary.cdb.arm64 = $reader.ReadUInt16() -eq 0xAA64 }
+                    }
+                  }
+                } finally { $stream.Dispose() }
+                break
+              }
+            }
+          } catch { }
           $encoded = $summary | ConvertTo-Json -Depth 4 -Compress
           if ([Text.Encoding]::UTF8.GetByteCount($encoded) -le 4096) { Write-Output $encoded }
           else { Write-Output '{"version":1,"status":"unknown"}' }

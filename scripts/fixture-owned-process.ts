@@ -20,7 +20,6 @@ import {sha256Hex} from '@threadnote/platform/digest';
 import {ScriptError} from './effect/errors.js';
 import {verifyNativeInferenceOverlay, nativeInferenceHostTarget} from './native-inference-payload.js';
 import {javascriptStringLiteral} from './effect/javascript.js';
-import {BACKGROUND_INFERENCE_ENV, BACKGROUND_INFERENCE_THREADS} from '@threadnote/inference/background/admission';
 import {
   resolveNativeEmbeddingGpuLayers,
   parseEmbeddingContextPoolSize,
@@ -198,18 +197,14 @@ const API_PHASES = [
   'runtime-import-ready',
   'initialize-start',
   'initialize-ready',
-  'model-load-start',
-  'model-load-ready',
-  'context-start',
-  'context-ready',
-  'tokenize-start',
-  'tokenize-ready',
-  'embed-start',
-  'embed-ready',
-  'context-dispose-start',
-  'context-dispose-ready',
-  'model-dispose-start',
-  'model-dispose-ready',
+  'gguf-read-start',
+  'gguf-read-ready',
+  'insights-start',
+  'insights-ready',
+  'gpu-layers-start',
+  'gpu-layers-ready',
+  'model-resource-estimate-start',
+  'model-resource-estimate-ready',
   'runtime-dispose-start',
   'runtime-dispose-ready',
   'caught-error',
@@ -219,14 +214,13 @@ type ApiPhase = (typeof API_PHASES)[number];
 /** Disposable public-SDK control, not a product worker or an alternate inference implementation. */
 export function fixtureEmbeddingApiControlSource(
   moduleUrl: string,
-  background: boolean,
   gpuLayers: number | undefined,
   buildType: 'localBuild' | 'prebuilt',
 ): string {
   return `import {writeSync} from 'node:fs';
 const mark = phase => writeSync(2, ${javascriptStringLiteral(API_PHASE_PREFIX)} + phase + '\\n');
 const reader = Bun.stdin.stream().getReader();
-let llama, model, context;
+let llama;
 try {
   let text = '';
   const decoder = new TextDecoder();
@@ -244,34 +238,31 @@ try {
   mark('runtime-import-ready');
   mark('initialize-start');
   llama = await sdk.getLlama({build:'never',debug:false,logger:()=>{},logLevel:'disabled',progressLogs:false,skipDownload:true,usePrebuiltBinaries:true});
-  if (llama.buildType !== ${javascriptStringLiteral(buildType)} || (llama.gpu !== false && process.platform === 'win32')) throw new Error('backend');
+  if (llama.buildType !== ${javascriptStringLiteral(buildType)} || (process.platform === 'win32' && (llama.gpu !== false || llama.supportsGpuOffloading))) throw new Error('backend');
   mark('initialize-ready');
   const signal = new AbortController().signal;
-  mark('model-load-start');
-  model = await llama.loadModel({modelPath:request.modelPath,ignoreMemorySafetyChecks:false,loadSignal:signal${gpuLayers === undefined ? '' : `,gpuLayers:${gpuLayers}`}});
-  mark('model-load-ready');
-  mark('context-start');
-  context = await model.createEmbeddingContext({contextSize:request.manifest.contextLimit,ignoreMemorySafetyChecks:false,createSignal:signal${background ? `,threads:${BACKGROUND_INFERENCE_THREADS}` : ''}});
-  mark('context-ready');
-  mark('tokenize-start');
-  if (model.tokenize(request.inputs[0],false).length > request.manifest.contextLimit - 16) throw new Error('window');
-  mark('tokenize-ready');
-  mark('embed-start');
-  const embedding = await context.getEmbeddingFor(request.inputs[0]);
-  if (embedding.vector.length !== request.manifest.dimensions || !embedding.vector.every(Number.isFinite)) throw new Error('vector');
-  mark('embed-ready');
-  writeSync(1, JSON.stringify({id:frame.id,protocol:1,ok:true,result:[embedding.vector]})+'\\n');
-  while (!(await reader.read()).done) {}
+  mark('gguf-read-start');
+  const info = await sdk.readGgufFileInfo(request.modelPath,{sourceType:'filesystem',signal});
+  mark('gguf-read-ready');
+  mark('insights-start');
+  const insights = await sdk.GgufInsights.from(info,llama);
+  mark('insights-ready');
+  mark('gpu-layers-start');
+  const resolved = await insights.configurationResolver.resolveModelGpuLayersV2(${gpuLayers === undefined ? 'undefined' : gpuLayers},{ignoreMemorySafetyChecks:false,useMmap:llama.supportsMmap?'auto':false,signal});
+  mark('gpu-layers-ready');
+  mark('model-resource-estimate-start');
+  await insights.estimateModelResourceRequirementsV2({gpuLayers:resolved.gpuLayers,useMmap:resolved.useMmap});
+  mark('model-resource-estimate-ready');
 } catch {
   mark('caught-error');
   process.exitCode = 1;
 } finally {
-  for (const [name, resource] of [['context',context],['model',model],['runtime',llama]]) {
-    if (!resource) continue;
-    mark(name+'-dispose-start');
-    try { await resource.dispose(); mark(name+'-dispose-ready'); }
+  if (llama) {
+    mark('runtime-dispose-start');
+    try { await llama.dispose(); mark('runtime-dispose-ready'); }
     catch { mark('caught-error'); process.exitCode = 1; }
   }
+  await reader.cancel();
   reader.releaseLock();
 }
 `;
@@ -338,7 +329,6 @@ export const prepareFixtureEmbeddingApiControl = Effect.fn('fixture.prepareEmbed
     script,
     fixtureEmbeddingApiControlSource(
       moduleUrl,
-      options.env[BACKGROUND_INFERENCE_ENV] === '1',
       gpuLayers,
       overlay.origin === 'portable-local-build' ? 'localBuild' : 'prebuilt',
     ),
@@ -480,7 +470,14 @@ export async function runFixtureEmbeddingExitProbe(
     stderrRead,
     ...(options.apiControl === undefined
       ? {}
-      : {apiControl: {runtime: 'source-bun', bunVersion: options.apiControl.bunVersion, phases: apiPhases}}),
+      : {
+          apiControl: {
+            kind: 'model-resource-estimate',
+            runtime: 'source-bun',
+            bunVersion: options.apiControl.bunVersion,
+            phases: apiPhases,
+          },
+        }),
     reply,
     ...(exitOrigin === undefined ? {} : {exitOrigin}),
     ...(exit === undefined ? {} : {exit}),

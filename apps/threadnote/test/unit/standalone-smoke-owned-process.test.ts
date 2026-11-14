@@ -141,7 +141,7 @@ const probeRequest = {
 
 const probeSetupLayer = Layer.merge(BunServices.layer, cryptoLayer);
 
-effectIt.effect('the generated SDK control uses the exact admitted bundle and unchanged request/reply lifecycle', () =>
+effectIt.effect('the estimator control exits without a reply or stdin EOF after using the exact admitted bundle', () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -161,14 +161,22 @@ effectIt.effect('the generated SDK control uses the exact admitted bundle and un
       path.join(runtime, 'node-llama-cpp.js'),
       `export async function getLlama(options) {
       if(options.build !== 'never' || options.debug !== false || options.logLevel !== 'disabled' || options.progressLogs !== false || options.skipDownload !== true || options.usePrebuiltBinaries !== true) throw new Error('options');
-      return {buildType:'localBuild',gpu:false,dispose:async()=>{},loadModel:async options=> {
-        if(options.ignoreMemorySafetyChecks !== false || !options.loadSignal) throw new Error('model');
-        return {dispose:async()=>{},tokenize:()=>[1],createEmbeddingContext:async options=> {
-          if(options.contextSize !== 512 || options.ignoreMemorySafetyChecks !== false || !options.createSignal || 'threads' in options) throw new Error('context');
-          return {dispose:async()=>{},getEmbeddingFor:async()=>({vector:Array(384).fill(0)})};
-        }};
+      return {buildType:'localBuild',gpu:false,supportsGpuOffloading:false,supportsMmap:true,dispose:async()=>{},loadModel:()=>{throw new Error('must not load a model')}};
+    }
+    export async function readGgufFileInfo(path,options) {
+      if(options.sourceType !== 'filesystem' || !options.signal) throw new Error('read');
+      return {fixture:true};
+    }
+    export const GgufInsights = {from:async(info,llama)=> {
+      if(!info.fixture || llama.buildType !== 'localBuild') throw new Error('insights');
+      return {configurationResolver:{resolveModelGpuLayersV2:async(layers,options)=>{
+        if(options.ignoreMemorySafetyChecks !== false || options.useMmap !== 'auto' || !options.signal) throw new Error('resolver');
+        return {gpuLayers:0,useMmap:true};
+      }},estimateModelResourceRequirementsV2:async(options)=>{
+        if(options.gpuLayers !== 0 || options.useMmap !== true) throw new Error('estimate');
+        return {cpuRam:123,gpuVram:0};
       }};
-    }`,
+    }};`,
     );
     yield* fs.writeFileString(path.join(build, 'llama-addon.node'), 'fake setup addon');
     yield* fs.writeFileString(
@@ -212,13 +220,18 @@ effectIt.effect('the generated SDK control uses the exact admitted bundle and un
     safeToRemove = cleanup === 'exited';
     expect(cleanup).toBe('exited');
     expect(result.snapshot()).toMatchObject({
-      outcome: 'reply',
-      reply: 'valid',
+      outcome: 'exit',
+      reply: 'none',
+      firstFault: 'stdout-eof',
+      stdoutBytes: 0,
+      exitOrigin: 'natural',
+      exit: {exitCode: 0, signal: null},
       processClosed: true,
       cleanupRequested: false,
       stdoutRead: 'eof',
       stderrRead: 'eof',
       apiControl: {
+        kind: 'model-resource-estimate',
         runtime: 'source-bun',
         bunVersion: Bun.version,
         phases: [
@@ -227,18 +240,14 @@ effectIt.effect('the generated SDK control uses the exact admitted bundle and un
           'runtime-import-ready',
           'initialize-start',
           'initialize-ready',
-          'model-load-start',
-          'model-load-ready',
-          'context-start',
-          'context-ready',
-          'tokenize-start',
-          'tokenize-ready',
-          'embed-start',
-          'embed-ready',
-          'context-dispose-start',
-          'context-dispose-ready',
-          'model-dispose-start',
-          'model-dispose-ready',
+          'gguf-read-start',
+          'gguf-read-ready',
+          'insights-start',
+          'insights-ready',
+          'gpu-layers-start',
+          'gpu-layers-ready',
+          'model-resource-estimate-start',
+          'model-resource-estimate-ready',
           'runtime-dispose-start',
           'runtime-dispose-ready',
         ],
@@ -408,7 +417,7 @@ it('basic probe setup binds one reply and labels exit after requested stdin clos
 
 it('projects only complete closed API phase tags without retaining unknown native output', async () => {
   const fake = embeddingProbeChild(() => {
-    fake.io.stderr.write('PRIVATE_NATIVE_OUTPUT\nTHREADNOTE_NATIVE_PHASE:model-load-st');
+    fake.io.stderr.write('PRIVATE_NATIVE_OUTPUT\nTHREADNOTE_NATIVE_PHASE:model-resource-estimate-st');
     fake.io.stderr.end('art\nTHREADNOTE_NATIVE_PHASE:PRIVATE_UNKNOWN_PHASE\n');
     fake.exit(9);
   });
@@ -427,7 +436,12 @@ it('projects only complete closed API phase tags without retaining unknown nativ
     stderrRead: 'eof',
     processClosed: true,
     cleanupRequested: false,
-    apiControl: {runtime: 'source-bun', bunVersion: Bun.version, phases: ['model-load-start']},
+    apiControl: {
+      kind: 'model-resource-estimate',
+      runtime: 'source-bun',
+      bunVersion: Bun.version,
+      phases: ['model-resource-estimate-start'],
+    },
   });
   expect(result.snapshot().stderrBytes).toBeGreaterThan(0);
   expect(JSON.stringify(result.snapshot())).not.toContain('PRIVATE_');
