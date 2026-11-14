@@ -4,6 +4,7 @@ import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {
   assembleNativeInference,
   copyNativeInferenceCompilerRuntimes,
+  readWindowsCMakeCompilerInfoFiles,
   muslWorkflowRuntimeArguments,
   prepareMuslWorkflowSeccomp,
   MUSL_WORKFLOW_BWRAP_SHIM,
@@ -111,13 +112,47 @@ describe('native inference overlay filesystem boundary', () => {
       windowsCMakeCompilerPaths('CMAKE_C_COMPILER:FILEPATH=clang.exe\nCMAKE_CXX_COMPILER:FILEPATH=clang++.exe'),
     ).toThrow('not absolute');
     expect(() => windowsCMakeCompilerPaths('CMAKE_CXX_COMPILER:FILEPATH=C:/LLVM/clang++.exe')).toThrow(
-      'exactly one CMAKE_C_COMPILER',
+      'selection is unavailable',
     );
     expect(() =>
       windowsCMakeCompilerPaths(
         'CMAKE_C_COMPILER:FILEPATH=C:/LLVM/clang.exe\nCMAKE_C_COMPILER:FILEPATH=D:/LLVM/clang.exe\nCMAKE_CXX_COMPILER:FILEPATH=C:/LLVM/clang++.exe',
       ),
-    ).toThrow('exactly one CMAKE_C_COMPILER');
+    ).toThrow('at most one CMAKE_C_COMPILER');
+  });
+
+  it('uses generated CMake compiler selections only when cache entries are absent and cross-checks both sources', () => {
+    const cCompiler = 'C:/Program Files/VS/LLVM/ARM64/bin/clang.exe';
+    const cxxCompiler = 'C:/Program Files/VS/LLVM/ARM64/bin/clang++.exe';
+    const compilerInfo = {
+      cCompiler: `set(CMAKE_C_COMPILER "${cCompiler}")`,
+      cxxCompiler: `set(CMAKE_CXX_COMPILER "${cxxCompiler}")`,
+    };
+    expect(windowsCMakeCompilerPaths('', compilerInfo)).toEqual({cCompiler, cxxCompiler});
+    expect(
+      windowsCMakeCompilerPaths(
+        `CMAKE_C_COMPILER:FILEPATH=${cCompiler}\nCMAKE_CXX_COMPILER:FILEPATH=${cxxCompiler}`,
+        compilerInfo,
+      ),
+    ).toEqual({cCompiler, cxxCompiler});
+    expect(() =>
+      windowsCMakeCompilerPaths(
+        'CMAKE_C_COMPILER:FILEPATH=C:/LLVM/clang.exe\nCMAKE_CXX_COMPILER:FILEPATH=C:/LLVM/clang++.exe',
+        compilerInfo,
+      ),
+    ).toThrow('disagree');
+    expect(() =>
+      windowsCMakeCompilerPaths('', {
+        ...compilerInfo,
+        cCompiler: 'set(CMAKE_C_COMPILER "clang.exe")',
+      }),
+    ).toThrow('not absolute');
+    expect(() =>
+      windowsCMakeCompilerPaths('', {
+        ...compilerInfo,
+        cCompiler: `${compilerInfo.cCompiler}\n${compilerInfo.cCompiler}`,
+      }),
+    ).toThrow('exactly one CMAKE_C_COMPILER value');
   });
 
   effectIt.effect('queries only the selected Windows CMake compiler paths with the existing bounds', () =>
@@ -239,6 +274,46 @@ describe('native inference overlay filesystem boundary', () => {
   });
 
   effectIt.layer(Layer.merge(BunServices.layer, TestSystemInfoLayer))(it => {
+    it.effect('reads the selected C and C++ compilers from CMake versioned compiler-info files', () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({prefix: 'cmake-compiler-info-'});
+        const buildFolder = path.join(root, 'build');
+        const cmakeFiles = path.join(buildFolder, 'CMakeFiles');
+        const versionedFiles = path.join(cmakeFiles, '3.30.9');
+        yield* fs.makeDirectory(versionedFiles, {recursive: true});
+        yield* fs.writeFileString(path.join(cmakeFiles, 'cmake.check_cache'), '');
+        yield* fs.writeFileString(
+          path.join(versionedFiles, 'CMakeCCompiler.cmake'),
+          'set(CMAKE_C_COMPILER "C:/Program Files/VS/LLVM/ARM64/bin/clang.exe")\n',
+        );
+        yield* fs.writeFileString(
+          path.join(versionedFiles, 'CMakeCXXCompiler.cmake'),
+          'set(CMAKE_CXX_COMPILER "C:/Program Files/VS/LLVM/ARM64/bin/clang++.exe")\n',
+        );
+        expect(yield* readWindowsCMakeCompilerInfoFiles(buildFolder)).toEqual({
+          cCompiler: 'set(CMAKE_C_COMPILER "C:/Program Files/VS/LLVM/ARM64/bin/clang.exe")\n',
+          cxxCompiler: 'set(CMAKE_CXX_COMPILER "C:/Program Files/VS/LLVM/ARM64/bin/clang++.exe")\n',
+        });
+        const directBuild = path.join(root, 'direct-build');
+        const directFiles = path.join(directBuild, 'CMakeFiles');
+        yield* fs.makeDirectory(directFiles, {recursive: true});
+        yield* fs.writeFileString(
+          path.join(directFiles, 'CMakeCCompiler.cmake'),
+          'set(CMAKE_C_COMPILER "C:/Program Files/VS/LLVM/ARM64/bin/clang.exe")\n',
+        );
+        yield* fs.writeFileString(
+          path.join(directFiles, 'CMakeCXXCompiler.cmake'),
+          'set(CMAKE_CXX_COMPILER "C:/Program Files/VS/LLVM/ARM64/bin/clang++.exe")\n',
+        );
+        expect(yield* readWindowsCMakeCompilerInfoFiles(directBuild)).toEqual({
+          cCompiler: 'set(CMAKE_C_COMPILER "C:/Program Files/VS/LLVM/ARM64/bin/clang.exe")\n',
+          cxxCompiler: 'set(CMAKE_CXX_COMPILER "C:/Program Files/VS/LLVM/ARM64/bin/clang++.exe")\n',
+        });
+      }),
+    );
+
     it.effect('pins the Docker default policy plus only pivot_root and snapshots its verified bytes', () =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;

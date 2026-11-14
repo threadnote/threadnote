@@ -166,32 +166,84 @@ export function nativeInferenceBuildEnvironment(environment: Readonly<NodeJS.Pro
 }
 
 /** Read the compiler executables selected by a completed Windows CMake configure, never PATH aliases. */
-export function windowsCMakeCompilerPaths(cmakeCache: string): {
-  readonly cCompiler: string;
-  readonly cxxCompiler: string;
-} {
+export function windowsCMakeCompilerPaths(
+  cmakeCache: string,
+  compilerInfo?: {readonly cCompiler: string; readonly cxxCompiler: string},
+): {readonly cCompiler: string; readonly cxxCompiler: string} {
   const winPath = platformPathFor('win32');
-  const extract = (name: 'CMAKE_C_COMPILER' | 'CMAKE_CXX_COMPILER') => {
+  const names = {
+    cCompiler: 'CMAKE_C_COMPILER',
+    cxxCompiler: 'CMAKE_CXX_COMPILER',
+  } as const;
+  const fromCache = (name: (typeof names)[keyof typeof names]) => {
     const entries = EffectArray.filter(EffectString.split(cmakeCache, '\n'), line =>
       EffectString.startsWith(`${name}:`)(line),
     );
-    if (entries.length !== 1) throw new Error(`CMake cache must contain exactly one ${name} entry.`);
+    if (entries.length > 1) throw new Error(`CMake cache must contain at most one ${name} entry.`);
     const entry = entries[0];
-    if (entry === undefined) throw new Error(`CMake cache must contain exactly one ${name} entry.`);
+    if (entry === undefined) return undefined;
     const separator = Option.getOrUndefined(EffectString.indexOf('=')(entry));
     if (separator === undefined) throw new Error(`CMake cache ${name} entry is malformed.`);
-    const executable = EffectString.trim(EffectString.slice(separator + 1)(entry));
-    if (!executable || !winPath.isAbsolute(executable))
-      throw new Error(`CMake cache ${name} path is missing or not absolute.`);
-    return executable;
+    return EffectString.trim(EffectString.slice(separator + 1)(entry));
   };
-  return {cCompiler: extract('CMAKE_C_COMPILER'), cxxCompiler: extract('CMAKE_CXX_COMPILER')};
+  const fromCompilerInfo = (name: (typeof names)[keyof typeof names], content: string) => {
+    const entries = EffectArray.filter(EffectString.split(content, '\n'), line =>
+      EffectString.startsWith(`set(${name} `)(EffectString.trim(line)),
+    );
+    if (entries.length !== 1) throw new Error(`Generated CMake compiler info must contain exactly one ${name} value.`);
+    const match = /^set\((CMAKE_(?:C|CXX)_COMPILER) "([^"]+)"\)$/u.exec(EffectString.trim(entries[0] ?? ''));
+    if (!match || match[1] !== name) throw new Error(`Generated CMake ${name} value is malformed.`);
+    return match[2] ?? '';
+  };
+  const validate = (name: (typeof names)[keyof typeof names], executable: string | undefined) => {
+    if (executable === undefined) throw new Error(`CMake compiler selection is unavailable for ${name}.`);
+    const normalized = EffectString.trim(executable);
+    if (!normalized || !winPath.isAbsolute(normalized))
+      throw new Error(`CMake ${name} path is missing or not absolute.`);
+    return normalized;
+  };
+  const resolve = (key: keyof typeof names) => {
+    const name = names[key];
+    const cached = fromCache(name);
+    const selected = compilerInfo === undefined ? undefined : fromCompilerInfo(name, compilerInfo[key]);
+    if (cached !== undefined && selected !== undefined && cached !== selected)
+      throw new Error(`CMake cache and generated compiler info disagree for ${name}.`);
+    return validate(name, cached ?? selected);
+  };
+  return {cCompiler: resolve('cCompiler'), cxxCompiler: resolve('cxxCompiler')};
 }
+
+/** Read CMake's generated compiler-selection files, including the versioned CMakeFiles layout. */
+export const readWindowsCMakeCompilerInfoFiles = Effect.fn('nativeInference.readWindowsCMakeCompilerInfoFiles')(
+  function* (buildFolder: string) {
+    const fs = yield* FileSystem.FileSystem;
+    const cmakeFiles = path.join(buildFolder, 'CMakeFiles');
+    const entries = yield* fs.readDirectory(cmakeFiles);
+    const readOne = Effect.fn('nativeInference.readWindowsCMakeCompilerInfoFile')(function* (language: 'C' | 'CXX') {
+      const name = `CMake${language}Compiler.cmake`;
+      const candidates = [];
+      const direct = path.join(cmakeFiles, name);
+      if (yield* fs.exists(direct)) candidates.push(direct);
+      for (const entry of entries) {
+        const versionDirectory = path.join(cmakeFiles, entry);
+        if ((yield* fs.lstat(versionDirectory)).type !== 'Directory') continue;
+        const versioned = path.join(versionDirectory, name);
+        if (yield* fs.exists(versioned)) candidates.push(versioned);
+      }
+      if (candidates.length !== 1)
+        throw new Error(`Expected exactly one generated CMake ${language} compiler info file.`);
+      const candidate = candidates[0];
+      if (!candidate) throw new Error(`Generated CMake ${language} compiler info file is unavailable.`);
+      return yield* fs.readFileString(candidate);
+    });
+    return {cCompiler: yield* readOne('C'), cxxCompiler: yield* readOne('CXX')};
+  },
+);
 
 /** Preserve compiler version provenance from the executables selected by CMake. */
 export const captureWindowsCMakeCompilerVersions = Effect.fn('nativeInference.captureWindowsCMakeCompilerVersions')(
-  function* (cmakeCache: string) {
-    const {cCompiler, cxxCompiler} = windowsCMakeCompilerPaths(cmakeCache);
+  function* (cmakeCache: string, compilerInfo?: {readonly cCompiler: string; readonly cxxCompiler: string}) {
+    const {cCompiler, cxxCompiler} = windowsCMakeCompilerPaths(cmakeCache, compilerInfo);
     const c = yield* runCommandEffect(cCompiler, ['--version'], {timeoutMs: 10_000, maxOutputBytes: 16_384});
     const cxx = yield* runCommandEffect(cxxCompiler, ['--version'], {timeoutMs: 10_000, maxOutputBytes: 16_384});
     return {cCompiler, cxxCompiler, cVersion: c.stdout, cxxVersion: cxx.stdout};
@@ -602,7 +654,8 @@ export const assembleNativeInference = Effect.fn('assembleNativeInference')(func
       const compileCommands = yield* filesystem.readFileString(path.join(builtRoot, folder, 'compile_commands.json'));
       toolchain[`compileCommandsSha256:${folder}`] = sha256HexSync(compileCommands);
       if (process.platform === 'win32') {
-        const compilers = yield* captureWindowsCMakeCompilerVersions(cmakeCache);
+        const compilerInfo = yield* readWindowsCMakeCompilerInfoFiles(path.join(builtRoot, folder));
+        const compilers = yield* captureWindowsCMakeCompilerVersions(cmakeCache, compilerInfo);
         windowsCompilerVersions.clang.push({folder, path: compilers.cCompiler, version: compilers.cVersion});
         windowsCompilerVersions.clangxx.push({folder, path: compilers.cxxCompiler, version: compilers.cxxVersion});
         toolchain[`clangCompilerPath:${folder}`] = compilers.cCompiler;
