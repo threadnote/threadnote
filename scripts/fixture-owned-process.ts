@@ -499,9 +499,11 @@ export async function runFixtureEmbeddingExitProbe(
     'pending';
   let inputCloseRequested = false,
     cleanupRequested = false,
+    targetTerminationRequested = false,
     processClosed = false,
     exited = false;
-  let exitOrigin: 'natural' | 'stdin-close-requested' | 'debugger-requested' | 'cleanup' | undefined;
+  let inputCloseOperation = Promise.resolve();
+  let exitOrigin: 'natural' | 'stdin-close-requested' | 'debugger-requested' | 'cleanup' | 'unknown' | undefined;
   let exit: ReturnType<typeof projectLocalModelWorkerExitObservation>;
   let rawExitCode: number | undefined;
   let debuggerChild: FixtureChild | undefined;
@@ -569,7 +571,11 @@ export async function runFixtureEmbeddingExitProbe(
       ? {}
       : {
           rawExitCode,
-          rawExitCodeOrigin: debuggerQuitRequested ? 'after-debugger-q' : 'target-exit',
+          rawExitCodeOrigin: debuggerQuitRequested
+            ? 'after-debugger-q'
+            : exitOrigin === 'unknown'
+              ? 'mediation-unknown'
+              : 'target-exit',
         }),
     cleanupRequested,
     processClosed,
@@ -617,7 +623,18 @@ export async function runFixtureEmbeddingExitProbe(
   const observedExit = child.exited.then(
     code => {
       exited = true;
-      exitOrigin = cleanupRequested ? 'cleanup' : inputCloseRequested ? 'stdin-close-requested' : 'natural';
+      exitOrigin = targetTerminationRequested
+        ? 'cleanup'
+        : debuggerQuitRequested
+          ? 'debugger-requested'
+          : options.apiControl?.debuggerRequired &&
+              (firstFault !== undefined ||
+                !apiPhases.includes('runtime-dispose-ready') ||
+                (debuggerExceptionCode !== undefined && !debuggerCaptureComplete))
+            ? 'unknown'
+            : inputCloseRequested
+              ? 'stdin-close-requested'
+              : 'natural';
       if (!cleanupRequested && !inputCloseRequested) rawExitCode = options.nativeExit?.read();
       exit = projectLocalModelWorkerExitObservation({stage: 'process-exit', exitCode: code, signal: child.signalCode});
       const signal = Option.getOrUndefined(
@@ -751,6 +768,8 @@ export async function runFixtureEmbeddingExitProbe(
     } catch {
       fault('debugger');
       outcome = 'debugger-unavailable';
+      // A synchronous launch failure leaves no child events to settle these waiters.
+      debuggerComplete = Promise.resolve();
       gate.resolve('failed');
     }
     if (debuggerChild) {
@@ -790,7 +809,7 @@ export async function runFixtureEmbeddingExitProbe(
               return;
             }
             if (line === CDB_QUIT_MARKER) {
-              debuggerQuitRequested = debuggerCaptureComplete;
+              debuggerQuitRequested = true;
               return;
             }
             const exception = /^ExceptionCode:\s*(?:0x)?([a-f\d]{8})\b/i.exec(line);
@@ -911,8 +930,12 @@ export async function runFixtureEmbeddingExitProbe(
         }
       }
     }
-    if (outcome !== 'output-overflow' && !processClosed) await processes.wait(options.deadline, closed);
-    if (outcome !== 'output-overflow' && debuggerChild && !debuggerClosed)
+    const terminalDiagnosticFailure =
+      outcome === 'output-overflow' ||
+      outcome === 'debugger-unavailable' ||
+      (outcome === 'exit' && options.apiControl?.debuggerRequired === true && !debuggerArmed);
+    if (!terminalDiagnosticFailure && !processClosed) await processes.wait(options.deadline, closed);
+    if (!terminalDiagnosticFailure && debuggerChild && !debuggerClosed)
       await processes.wait(options.deadline, debuggerComplete);
   } catch {
     fault('deadline');
@@ -923,19 +946,34 @@ export async function runFixtureEmbeddingExitProbe(
       if (!exited) {
         cleanupRequested = true;
         try {
-          await Promise.resolve(child.stdin.end());
+          inputCloseOperation = Promise.resolve(child.stdin.end()).then(
+            () => {},
+            () => {},
+          );
         } catch {
           /* Preserve the original outcome; closure remains unknown. */
         }
       }
     }
-    if (!cleanupRequested && debuggerQuitRequested && exited) exitOrigin = 'debugger-requested';
+    if (
+      exited &&
+      !targetTerminationRequested &&
+      options.apiControl?.debuggerRequired &&
+      !debuggerQuitRequested &&
+      (firstFault !== undefined ||
+        !apiPhases.includes('runtime-dispose-ready') ||
+        (debuggerExceptionCode !== undefined && !debuggerCaptureComplete))
+    )
+      exitOrigin = 'unknown';
+    if (exited && !targetTerminationRequested && debuggerQuitRequested) exitOrigin = 'debugger-requested';
     if (!processClosed || (debuggerChild !== undefined && !debuggerClosed)) {
       cleanupRequested = true;
       if (!exited) {
         try {
+          targetTerminationRequested = true;
           child.kill('SIGKILL');
         } catch {
+          targetTerminationRequested = false;
           /* Existing registry retains unknown exit. */
         }
       }
@@ -951,7 +989,7 @@ export async function runFixtureEmbeddingExitProbe(
       try {
         await processes.wait(
           options.deadline,
-          Promise.all([closed, debuggerComplete]).then(() => {}),
+          Promise.all([closed, debuggerComplete, inputCloseOperation]).then(() => {}),
         );
       } catch {
         /* Do not claim either direct child closed after the shared deadline. */

@@ -62,7 +62,7 @@ function embeddingProbeChild(onWrite: (text: string) => void, onExit: () => void
   const fixture = {
     io,
     writeBytes: undefined as number | undefined,
-    onEnd: () => {},
+    onEnd: (): void | Promise<void> => {},
     get kills() {
       return kills;
     },
@@ -92,7 +92,7 @@ function embeddingProbeChild(onWrite: (text: string) => void, onExit: () => void
         flush: () => 0,
         end: () => {
           ends++;
-          fixture.onEnd();
+          return fixture.onEnd();
         },
       },
       kill: () => {
@@ -437,6 +437,184 @@ it('keeps the request gated and observes both direct-child cleanups when the deb
     stderrRead: 'eof',
     firstFault: 'output-overflow',
     debugger: {kind: 'cdb-arm64', armed: false, exited: true, closed: true},
+  });
+  expect(await processes.closeAndObserve(performance.now() + 1000)).toBe('exited');
+});
+
+it('cleans up a live target when CDB exits before arming without awaiting stdin close', async () => {
+  const debuggerProcess = debuggerProbeChild();
+  let debuggerSpawned = false;
+  debuggerProcess.child.arm = () => {
+    setImmediate(() => {
+      debuggerSpawned = true;
+      debuggerProcess.io.emit('spawn');
+      debuggerProcess.child.finish(1);
+    });
+  };
+  let requestWrites = 0;
+  const fake = embeddingProbeChild(() => requestWrites++);
+  fake.onEnd = () => new Promise<void>(() => {});
+  const processes = new FixtureProcesses((command, args) => {
+    expect(command).toBe('PRIVATE_CDB');
+    expect(args[args.indexOf('-p') + 1]).toBe('42');
+    debuggerProcess.child.arm();
+    return debuggerProcess.child;
+  });
+  const result = await runFixtureEmbeddingExitProbe(
+    processes,
+    'PRIVATE_EXECUTABLE',
+    {...probeRequest, inputs: ['short']},
+    {
+      cwd: 'PRIVATE_PATH',
+      env: {},
+      deadline: performance.now() + 1000,
+      maxOutputBytes: 4096,
+      spawn: () => fake.child,
+      apiControl: {
+        command: [process.execPath, 'PRIVATE_SCRIPT'],
+        bunVersion: Bun.version,
+        debuggerRequired: true,
+        debuggerExecutable: 'PRIVATE_CDB',
+        debuggerStartupFile: 'PRIVATE_STARTUP_FILE',
+        debuggerEnvironment: {PATH: 'PRIVATE_PATH'},
+      },
+    },
+  );
+  expect(debuggerSpawned).toBe(true);
+  expect(requestWrites).toBe(0);
+  expect(fake.kills).toBe(1);
+  expect(debuggerProcess.kills).toBe(0);
+  expect(result.snapshot()).toMatchObject({
+    outcome: 'debugger-unavailable',
+    firstFault: 'debugger',
+    write: 'pending',
+    cleanupRequested: true,
+    exitOrigin: 'cleanup',
+    processClosed: true,
+    stdoutRead: 'eof',
+    stderrRead: 'eof',
+    debugger: {kind: 'cdb-arm64', armed: false, exited: true, exitCode: 1, closed: true},
+  });
+  expect(await processes.closeAndObserve(performance.now() + 1000)).toBe('exited');
+});
+
+it('records the exact CDB quit marker even when fail-fast capture is incomplete', async () => {
+  const debuggerProcess = debuggerProbeChild();
+  const native = windowsExitFixture();
+  debuggerProcess.child.arm = () => {
+    setImmediate(() => {
+      debuggerProcess.io.emit('spawn');
+      debuggerProcess.io.stdout.write('THREADNOTE_NATIVE_CDB_ARMED\n');
+    });
+  };
+  const fake = embeddingProbeChild(
+    () => {
+      debuggerProcess.io.stdout.write(
+        'ExceptionCode: c0000409 (FAIL_FAST_EXCEPTION)\nTHREADNOTE_NATIVE_CDB_QUIT_REQUESTED\n',
+      );
+      fake.exit(0);
+    },
+    () => debuggerProcess.child.finish(0),
+  );
+  const processes = new FixtureProcesses(() => {
+    debuggerProcess.child.arm();
+    return debuggerProcess.child;
+  });
+  const result = await runFixtureEmbeddingExitProbe(
+    processes,
+    'PRIVATE_EXECUTABLE',
+    {...probeRequest, inputs: ['short']},
+    {
+      cwd: 'PRIVATE_PATH',
+      env: {},
+      deadline: performance.now() + 1000,
+      maxOutputBytes: 4096,
+      spawn: () => fake.child,
+      nativeExit: native.observer,
+      apiControl: {
+        command: [process.execPath, 'PRIVATE_SCRIPT'],
+        bunVersion: Bun.version,
+        debuggerRequired: true,
+        debuggerExecutable: 'PRIVATE_CDB',
+        debuggerStartupFile: 'PRIVATE_STARTUP_FILE',
+        debuggerEnvironment: {PATH: 'PRIVATE_PATH'},
+      },
+    },
+  );
+  native.observer.close();
+  expect(result.snapshot()).toMatchObject({
+    outcome: 'exit',
+    exitOrigin: 'debugger-requested',
+    rawExitCodeOrigin: 'after-debugger-q',
+    debugger: {
+      kind: 'cdb-arm64',
+      armed: true,
+      exited: true,
+      closed: true,
+      exceptionCode: 'c0000409',
+      captureComplete: false,
+      quitRequested: true,
+    },
+  });
+  expect(await processes.closeAndObserve(performance.now() + 1000)).toBe('exited');
+});
+
+it('keeps native exit attribution unknown when an incomplete debugger capture has no quit marker', async () => {
+  const debuggerProcess = debuggerProbeChild();
+  debuggerProcess.child.arm = () => {
+    setImmediate(() => {
+      debuggerProcess.io.emit('spawn');
+      debuggerProcess.io.stdout.write('THREADNOTE_NATIVE_CDB_ARMED\n');
+    });
+  };
+  const native = windowsExitFixture();
+  const fake = embeddingProbeChild(
+    () => {
+      debuggerProcess.io.stdout.write('ExceptionCode: c0000409 (FAIL_FAST_EXCEPTION)\n');
+      fake.exit(0xc0000409);
+    },
+    () => debuggerProcess.child.finish(1),
+  );
+  const processes = new FixtureProcesses(() => {
+    debuggerProcess.child.arm();
+    return debuggerProcess.child;
+  });
+  const result = await runFixtureEmbeddingExitProbe(
+    processes,
+    'PRIVATE_EXECUTABLE',
+    {...probeRequest, inputs: ['short']},
+    {
+      cwd: 'PRIVATE_PATH',
+      env: {},
+      deadline: performance.now() + 1000,
+      maxOutputBytes: 4096,
+      spawn: () => fake.child,
+      nativeExit: native.observer,
+      apiControl: {
+        command: [process.execPath, 'PRIVATE_SCRIPT'],
+        bunVersion: Bun.version,
+        debuggerRequired: true,
+        debuggerExecutable: 'PRIVATE_CDB',
+        debuggerStartupFile: 'PRIVATE_STARTUP_FILE',
+        debuggerEnvironment: {PATH: 'PRIVATE_PATH'},
+      },
+    },
+  );
+  native.observer.close();
+  expect(result.snapshot()).toMatchObject({
+    outcome: 'exit',
+    exitOrigin: 'unknown',
+    rawExitCode: 0xc0000409,
+    rawExitCodeOrigin: 'mediation-unknown',
+    debugger: {
+      kind: 'cdb-arm64',
+      armed: true,
+      exited: true,
+      closed: true,
+      exceptionCode: 'c0000409',
+      captureComplete: false,
+      quitRequested: false,
+    },
   });
   expect(await processes.closeAndObserve(performance.now() + 1000)).toBe('exited');
 });
