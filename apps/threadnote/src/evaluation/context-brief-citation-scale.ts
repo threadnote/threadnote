@@ -1,5 +1,5 @@
 import {Array as EffectArray} from 'effect';
-import {Clock, Context, DateTime, Effect, FileSystem, Scope} from 'effect';
+import {Cause, Clock, Console, Context, DateTime, Effect, Exit, FileSystem, Scope} from 'effect';
 import {CodeGraphStore} from '@threadnote/graph/store';
 import {
   CodeGraphEmbeddingIndex,
@@ -469,6 +469,23 @@ const runObservation = Effect.fn('evaluation.contextBriefCitationScaleObservatio
   let selectedMemories = 0;
   let validationReceipts = 0;
   let exactValidationReceipts = 0;
+  let memoryReadState: 'not-started' | 'running' | 'completed' | 'interrupted' | 'failed' = 'not-started';
+  let memoryReadFailure: string | undefined;
+  let projectionEvidence:
+    | {
+        readonly gaps: readonly string[];
+        readonly memory: {
+          readonly consideredCandidates: number;
+          readonly durableCandidates: number;
+          readonly handoffCandidates: number;
+          readonly fresh: number;
+          readonly stale: number;
+          readonly unknown: number;
+        };
+        readonly durableDecisions: number;
+        readonly activeHandoffs: number;
+      }
+    | undefined;
   const observeRss = () => {
     if (!options.captureBoundaryRss) return;
     boundaryPeakRss = Math.max(boundaryPeakRss, system.memoryUsage().rss);
@@ -499,16 +516,33 @@ const runObservation = Effect.fn('evaluation.contextBriefCitationScaleObservatio
       graphEvidence: () => Effect.succeed(scaleGraphEvidence(prepared)),
       memoryEvidence: plan =>
         Effect.gen(function* () {
+          memoryReadState = 'running';
           const phaseStarted = yield* Clock.currentTimeNanos;
           const evidence = yield* retrieveContextBriefMemoryEvidence(fixture.config, plan);
           const phaseFinished = yield* Clock.currentTimeNanos;
           memoryRetrievalMilliseconds = Number(phaseFinished - phaseStarted) / 1_000_000;
           selectedMemories = evidence.candidates.length;
+          memoryReadState = 'completed';
           observeRss();
           return evidence;
-        }),
+        }).pipe(
+          Effect.onExit(exit =>
+            Effect.sync(() => {
+              if (Exit.isFailure(exit)) {
+                memoryReadState = Cause.hasInterrupts(exit.cause) ? 'interrupted' : 'failed';
+                memoryReadFailure = Effect2.pipe(Cause.pretty(exit.cause), EffectString.slice(0, 2_048));
+              }
+            }),
+          ),
+        ),
       projection: (logical, maximumEstimatedTokens) =>
         Effect.sync(() => {
+          projectionEvidence = {
+            gaps: logical.coverage.gaps,
+            memory: logical.coverage.memory,
+            durableDecisions: logical.durableDecisions.length,
+            activeHandoffs: logical.activeHandoffs.length,
+          };
           const projected = projectContextBrief(logical, maximumEstimatedTokens);
           observeRss();
           return projected;
@@ -523,6 +557,22 @@ const runObservation = Effect.fn('evaluation.contextBriefCitationScaleObservatio
   );
   const finished = yield* Clock.currentTimeNanos;
   observeRss();
+  yield* Console.error(
+    JSON.stringify({
+      kind: 'context-brief-citation-scale-disposable-diagnostic',
+      version: 1,
+      releaseQualification: false,
+      profile: profileId,
+      fixtureRunOrdinal: ordinal,
+      taskToken: token,
+      memoryReadState,
+      ...(memoryReadFailure === undefined ? {} : {memoryReadFailure}),
+      projection: projectionEvidence,
+      selectedMemories,
+      validationReceipts,
+      contextBriefMilliseconds: Number(finished - started) / 1_000_000,
+    }),
+  );
   return {
     boundaryAddedRssBytes: Math.max(0, boundaryPeakRss - rssBefore),
     contextBriefMilliseconds: Number(finished - started) / 1_000_000,
