@@ -19,6 +19,7 @@ env:
 jobs:
   build:
     name: Build native payload
+    if: ${{ !endsWith(inputs.target, '-musl') }}
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 45
     steps:
@@ -29,12 +30,50 @@ jobs:
         with:
           bun-version: ${{ env.BUN_VERSION }}
       - run: bun install --frozen-lockfile
+      - name: Observe Windows native process and primitive components
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 5
+        env:
+          SEMANTIC_SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          New-Item -ItemType Directory -Force .context/semantic-platform | Out-Null
+          bun --eval 'import {mkdirSync,readFileSync,writeFileSync} from "node:fs"; import {createHash} from "node:crypto"; import {release} from "node:os";
+          const paths=["packages/platform/src/system.ts","packages/platform/src/writer-system/provider.ts","packages/platform/src/writer-system/provider-windows.ts","packages/platform/src/writer-system/windows-native.ts","packages/platform/src/writer-system/windows-files.ts","packages/platform/src/writer_system.ts","packages/platform/src/writer-system/windows-writer.ts","packages/platform/src/writer-system/writer-transaction.ts","packages/platform/test/writer-system/windows-writer.test.ts","packages/platform/test/writer-system/provider-process.test.ts","packages/platform/test/writer-system/windows-native.test.ts",".github/workflows/native-release-smoke.yml"];
+          writeFileSync(".context/semantic-platform/windows-source.json",JSON.stringify({version:1,scope:"native-component-observation",sourceCommit:Bun.env.SEMANTIC_SOURCE_COMMIT,os:process.platform,osBuild:release(),architecture:process.arch,bun:Bun.version,productionQualified:false,sourceHashes:Object.fromEntries(paths.map(path=>[path,createHash("sha256").update(readFileSync(path)).digest("hex")]))}));'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          bun --bun vitest run packages/platform/test/writer-system/provider-process.test.ts packages/platform/test/writer-system/windows-native.test.ts packages/platform/test/writer-system/windows-writer.test.ts --reporter=default --reporter=json --outputFile=.context/semantic-platform/windows-components.json 2>&1 | Tee-Object -FilePath .context/semantic-platform/windows-components.log
+          $semanticComponentExit = $LASTEXITCODE
+          @{ version = 1; scope = 'native-component-observation'; exitCode = $semanticComponentExit; productionQualified = $false } | ConvertTo-Json | Set-Content .context/semantic-platform/windows-component-status.json
+          exit $semanticComponentExit
+      - name: Require native semantic platform capability
+        if: ${{ !cancelled() }}
+        env:
+          EXPECTED_NATIVE_TARGET: ${{ inputs.target == 'linux-x64' && 'linux-x64-baseline' || inputs.target == 'windows-x64' && 'windows-x64-baseline' || inputs.target }}
+        run: >-
+          bun --eval 'import {runtimeNativePlatformTarget,runtimeNativePlatformSupport} from "@threadnote/platform/system";
+          import {mkdirSync,writeFileSync} from "node:fs";
+          const actual=runtimeNativePlatformTarget(),support=runtimeNativePlatformSupport();
+          mkdirSync(".context/semantic-platform",{recursive:true});
+          writeFileSync(".context/semantic-platform/native.json",JSON.stringify({actual,expected:Bun.env.EXPECTED_NATIVE_TARGET,support,productionQualified:false}));
+          if(actual!==Bun.env.EXPECTED_NATIVE_TARGET||!support.writer||!support.providerTree)throw new Error("Native semantic platform capability unavailable; qualification blocked");'
       - name: Linux workflow prerequisites
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y ripgrep bubblewrap
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Verify private Linux temporary storage
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          bun --eval 'import {mkdtempSync,realpathSync,appendFileSync,rmSync} from "node:fs";
+          import {runtimeOpenPrivateWriterDirectory,runtimeClosePrivateWriterDirectory} from "@threadnote/platform/system";
+          const root=realpathSync(mkdtempSync("/tmp/threadnote-ci-"));
+          try { const handle=runtimeOpenPrivateWriterDirectory(root); runtimeClosePrivateWriterDirectory(handle);
+          appendFileSync(Bun.env.GITHUB_ENV,"THREADNOTE_CI_TEST_TMPDIR="+root+"\nTMPDIR="+root+"\n");
+          console.log("Native private CI temporary storage proof passed; production qualification remains false"); }
+          catch { rmSync(root,{recursive:true}); throw new Error("Native private CI temporary storage proof failed"); }'
       - name: macOS workflow prerequisites
         if: runner.os == 'macOS'
         run: command -v rg || brew install ripgrep
@@ -51,8 +90,32 @@ jobs:
           bun --bun vitest run
           packages/workflow-automations/test/inventory.test.ts
           packages/workflow-automations/test/baseline.test.ts
+      - name: Semantic native ownership and safety components
+        run: >-
+          bun --bun vitest run
+          packages/platform/test/system-stable-read.test.ts
+          packages/platform/test/writer-system/linux-acl.test.ts
+          packages/platform/test/writer-system/provider-process.test.ts
+          apps/threadnote/test/unit/semantic-runtime.test.ts
+          apps/threadnote/test/unit/semantic-writer-process.test.ts
+          apps/threadnote/test/unit/semantic-operations.test.ts
+          apps/threadnote/test/unit/semantic-mcp-cli.test.ts
+          apps/threadnote/test/unit/semantic-python.test.ts
+          apps/threadnote/test/unit/semantic-go-rust.test.ts
+          apps/threadnote/test/unit/semantic-java-preparation.test.ts
+          --reporter=default --reporter=json --outputFile=.context/semantic-platform/components.json
+      - name: Preserve semantic component evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: semantic-components-${{ inputs.target }}
+          path: .context/semantic-platform/
+          include-hidden-files: true
+          if-no-files-found: error
       - name: Build native payload
         run: bun run build
+        env:
+          THREADNOTE_BUILD_TARGET: ${{ inputs.target == 'linux-x64' && 'bun-linux-x64-baseline' || inputs.target == 'windows-x64' && 'bun-windows-x64-baseline' || format('bun-{0}', inputs.target) }}
       - name: Self-contained native smoke
         run: bun scripts/smoke-self-contained.ts
       - name: Preserve bounded self-contained smoke failure evidence
@@ -72,9 +135,19 @@ jobs:
           name: native-release-${{ inputs.target }}
           path: artifacts/threadnote-${{ inputs.target }}.tar.gz*
           if-no-files-found: error
+      - name: Remove owned Linux temporary storage
+        if: always() && runner.os == 'Linux' && env.THREADNOTE_CI_TEST_TMPDIR != ''
+        shell: bash
+        run: |
+          bun --eval 'import {lstatSync,realpathSync,rmSync} from "node:fs";
+          const root=Bun.env.THREADNOTE_CI_TEST_TMPDIR;
+          if(!/^\/tmp\/threadnote-ci-[A-Za-z0-9]+$/.test(root)||realpathSync(root)!==root)throw new Error("Owned CI temporary root changed");
+          const stat=lstatSync(root); if(!stat.isDirectory()||stat.uid!==process.getuid()||(stat.mode&0o077)!==0)throw new Error("Owned CI temporary root changed");
+          rmSync(root,{recursive:true});'
 
   installed-e2e:
     name: Installed release E2E
+    if: ${{ !endsWith(inputs.target, '-musl') }}
     needs: build
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 45
@@ -148,6 +221,7 @@ jobs:
 
   extracted-workflows:
     name: Extracted workflows · ${{ matrix.profile }}
+    if: ${{ !endsWith(inputs.target, '-musl') }}
     needs: build
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 45
@@ -204,3 +278,136 @@ jobs:
           path: .context/release-artifact/
           include-hidden-files: true
           if-no-files-found: ignore
+
+  musl-native:
+    name: Native musl binary and ownership · ${{ inputs.target }}
+    if: endsWith(inputs.target, '-musl')
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Build and execute in native musl userspace
+        shell: bash
+        env:
+          RELEASE_TARGET: ${{ inputs.target }}
+          # Official oven/bun1.4.4 Alpine index; both native amd64/arm64 manifests verified.
+          MUSL_IMAGE: oven/bun:1.4.4-alpine@sha256:4cf82f5686b196504fe119db3fcd9185b191f82ece82c40680e597228ec6070a
+        run: |
+          set -euo pipefail
+          case "$RELEASE_TARGET" in
+            linux-x64-musl) test "$(uname -m)" = x86_64; THREADNOTE_BUILD_TARGET=bun-linux-x64-baseline-musl ;;
+            linux-arm64-musl) test "$(uname -m)" = aarch64; THREADNOTE_BUILD_TARGET=bun-linux-arm64-musl ;;
+            *) exit 1 ;;
+          esac
+          export THREADNOTE_BUILD_TARGET
+          mkdir -p .context/semantic-platform
+          docker pull "$MUSL_IMAGE"
+          docker image inspect "$MUSL_IMAGE" > .context/semantic-platform/image.json
+          # A /tmp mount cannot repair an OverlayFS process root: native ownership
+          # proof starts at literal /. Use the runner filesystem only after admission,
+          # avoiding a second filesystem image/loop device or a memory-sized tmpfs root.
+          rootfs="$(mktemp -d "$RUNNER_TEMP/threadnote-musl-root.XXXXXX")"
+          readonly rootfs
+          image_container=''
+          cleanup() {
+            status=$?
+            trap - EXIT
+            cleanup_failed=0
+            for target in proc dev workspace; do
+              if mountpoint -q "$rootfs/$target"; then
+                sudo umount "$rootfs/$target" || cleanup_failed=1
+              fi
+            done
+            # Never traverse a surviving workspace bind mount during deletion.
+            if test "$cleanup_failed" -eq 0; then
+              sudo rm -rf -- "$rootfs"
+            else
+              echo 'Musl root cleanup left a mounted job-owned root; refusing deletion.' >&2
+              status=1
+            fi
+            if test -n "$image_container"; then
+              docker rm "$image_container" || status=1
+            fi
+            exit "$status"
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          root_magic="$(stat --file-system --format=%t "$rootfs")"
+          case "$root_magic" in ef53|58465342|9123683e|1021994) ;; *) echo "Unsupported musl root filesystem: $root_magic" >&2; exit 1 ;; esac
+          root_options="$(findmnt --noheadings --output OPTIONS --target "$rootfs")"
+          case ",$root_options," in *,ro,*) echo 'Read-only musl root filesystem.' >&2; exit 1 ;; esac
+          printf '{"filesystemMagic":"0x%s","readOnly":false}\n' "$root_magic" > .context/semantic-platform/root-filesystem-host.json
+          image_id="$(docker image inspect --format '{{.Id}}' "$MUSL_IMAGE")"
+          image_container="$(docker create --user root "$image_id")"
+          docker inspect "$image_container" > .context/semantic-platform/root-container.json
+          docker export "$image_container" | sudo tar --extract --preserve-permissions --file=- --directory="$rootfs"
+          sudo chown root:root "$rootfs"
+          sudo chmod 0755 "$rootfs"
+          for target in etc dev proc workspace root; do
+            test ! -L "$rootfs/$target"
+            sudo mkdir -p "$rootfs/$target"
+          done
+          sudo chmod 0700 "$rootfs/root"
+          sudo rm -f -- "$rootfs/etc/resolv.conf"
+          sudo cp -L /etc/resolv.conf "$rootfs/etc/resolv.conf"
+          sudo mount --bind "$PWD" "$rootfs/workspace"
+          sudo mount --bind /dev "$rootfs/dev"
+          # Match the former container isolation: namespace exit kills its children,
+          # and its /proc mount disappears before outer bind-mount cleanup.
+          sudo unshare --mount --pid --fork --kill-child --mount-proc="$rootfs/proc" chroot "$rootfs" /usr/bin/env -i HOME=/root PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin THREADNOTE_BUILD_TARGET="$THREADNOTE_BUILD_TARGET" RELEASE_TARGET="$RELEASE_TARGET" sh -se <<'MUSL'
+              cd /workspace
+              test "$(id -u)" -eq 0
+              test "$HOME" = /root
+              apk add --no-cache bash git ripgrep bubblewrap libstdc++ libgcc acl
+              bun --version > .context/semantic-platform/bun-version.txt
+              uname -m > .context/semantic-platform/architecture.txt
+              apk info -v > .context/semantic-platform/system-packages.txt
+              ldd /usr/local/bin/bun > .context/semantic-platform/bun-libraries.txt 2>&1
+              git config --global --add safe.directory /workspace
+              # Reproduce root prepare explicitly: the pinned Effect Oxlint replacement does not support musl.
+              bun install --frozen-lockfile --ignore-scripts
+              bun --bun husky
+              bun --bun effect-tsgo patch --no-typescript --oxlint --skip-missing
+              printf '%s\n' 'Effect Oxlint integration: unsupported on musl; no lint run or pass is claimed.' > .context/semantic-platform/effect-lint-status.txt
+              bun --eval 'import {runtimeNativePlatformTarget,runtimeNativePlatformSupport} from "@threadnote/platform/system"; const support=runtimeNativePlatformSupport(); if(!support.writer||!support.providerTree)throw new Error("Native semantic platform capability unavailable"); const actual=runtimeNativePlatformTarget(); const expected=Bun.env.THREADNOTE_BUILD_TARGET.slice(4); if(actual!==expected)throw new Error(`Native libc/CPU target mismatch: ${actual} != ${expected}`); console.log(actual);' > .context/semantic-platform/native-target.txt
+              private_tmp="$(mktemp -d /tmp/threadnote-ci-XXXXXX)"
+              export TMPDIR="$private_tmp"
+              trap 'rm -rf -- "$private_tmp"' EXIT
+              bun --eval 'import {statfsSync,statSync} from "node:fs"; const allowed=new Set([0xef53,0x58465342,0x9123683e,0x01021994]); const paths=["/","/workspace",Bun.env.HOME,Bun.env.TMPDIR]; const observations=paths.map(path=>({role:path==="/"?"root":path==="/workspace"?"workspace":path===Bun.env.HOME?"home":"private-temp",filesystemType:statfsSync(path).type,ownerUid:statSync(path).uid,mode:statSync(path).mode&0o7777})); console.log(JSON.stringify(observations)); if(observations.some(item=>!allowed.has(item.filesystemType)))throw new Error("Unsupported musl qualification filesystem");' > .context/semantic-platform/private-temp-filesystem.json
+              # Prove real default-ACL xattrs before the unchanged native negative test.
+              acl_probe="$(mktemp -d "$private_tmp/acl-preflight.XXXXXX")"
+              chmod 0700 "$acl_probe"
+              setfacl -m d:u::rwx,d:g::---,d:o::--- "$acl_probe"
+              test "$(stat -c %a "$acl_probe")" = 700
+              getfacl -cp "$acl_probe" > .context/semantic-platform/default-acl-preflight.txt
+              grep -Fx 'default:user::rwx' .context/semantic-platform/default-acl-preflight.txt
+              grep -Fx 'default:group::---' .context/semantic-platform/default-acl-preflight.txt
+              grep -Fx 'default:other::---' .context/semantic-platform/default-acl-preflight.txt
+              setfacl -k "$acl_probe"
+              getfacl -cp "$acl_probe" > .context/semantic-platform/default-acl-cleared.txt
+              test "$(grep -c '^default:' .context/semantic-platform/default-acl-cleared.txt)" -eq 0
+              rmdir "$acl_probe"
+              # Observe the existing bounded ACL fixture before the strict native proof can abort.
+              acl_diagnostic_status=0
+              bun --bun vitest run packages/platform/test/writer-system/linux-acl.test.ts -t 'refuses an actual Linux default ACL while the private directory mode remains0700' --testTimeout=30000 --reporter=default --reporter=json --outputFile=.context/semantic-platform/private-acl-diagnostic.json > .context/semantic-platform/private-acl-diagnostic.log 2>&1 || acl_diagnostic_status=$?
+              cat .context/semantic-platform/private-acl-diagnostic.log
+              printf '{"exitCode":%s}\n' "$acl_diagnostic_status" > .context/semantic-platform/private-acl-diagnostic-status.json
+              bun --eval 'import {runtimeOpenPrivateWriterDirectory,runtimeClosePrivateWriterDirectory} from "@threadnote/platform/system"; const handle=runtimeOpenPrivateWriterDirectory(Bun.env.TMPDIR); runtimeClosePrivateWriterDirectory(handle); console.log("Native private musl temporary storage proof passed; production qualification remains false");'
+              test "$acl_diagnostic_status" -eq 0
+              bun --bun vitest run packages/platform/test/system-stable-read.test.ts packages/platform/test/writer-system/linux-acl.test.ts packages/platform/test/writer-system/provider-process.test.ts apps/threadnote/test/unit/semantic-runtime.test.ts apps/threadnote/test/unit/semantic-writer-process.test.ts apps/threadnote/test/unit/semantic-operations.test.ts apps/threadnote/test/unit/semantic-mcp-cli.test.ts apps/threadnote/test/unit/semantic-python.test.ts apps/threadnote/test/unit/semantic-go-rust.test.ts apps/threadnote/test/unit/semantic-java-preparation.test.ts --reporter=default --reporter=json --outputFile=.context/semantic-platform/components.json
+              bun run build
+              cp dist/release.json .context/semantic-platform/release.json
+              sha256sum dist/threadnote > .context/semantic-platform/binary.sha256
+              bun scripts/smoke-self-contained.ts
+          MUSL
+      - name: Preserve native musl evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: semantic-native-${{ inputs.target }}
+          path: .context/semantic-platform/
+          include-hidden-files: true
+          if-no-files-found: error

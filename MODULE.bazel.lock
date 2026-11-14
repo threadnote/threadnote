@@ -217,7 +217,7 @@
     "//tools/bazel:repositories.bzl%bun": {
       "os:osx,arch:aarch64": {
         "bzlTransitiveDigest": "mxC+KSulpuk/VKXwdtUtBJvOpKR8j2pDSNw2Bj5uncw=",
-        "usagesDigest": "QFBoaLRhAkMAjwWKsjz/s6SlwG0OlTD1fKW9faHId8E=",
+        "usagesDigest": "m9OeT/rlfHLX+ITVIAOgTkQrl2Ar0FAYRaZM8pvDNQY=",
         "recordedInputs": [],
         "generatedRepoSpecs": {
           "bun_toolchain": {
@@ -251,6 +251,7 @@
                 "@@//packages/protocol:package.json",
                 "@@//packages/recall:package.json",
                 "@@//packages/remote-memory:package.json",
+                "@@//packages/semantic:package.json",
                 "@@//packages/store:package.json",
                 "@@//packages/testing:package.json",
                 "@@//packages/workflow-automations:package.json",

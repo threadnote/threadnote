@@ -1,3 +1,6 @@
+import {projectLexicalSymbols,isLexicalV2Snapshot,lexicalV2PageStatement,stageActivationLexicalV2,ACTIVATION_V2_PHYSICAL_COUNT_SQL,clearActivationLexicalV2Paths} from '../lexical_projection.js';
+import type {SymbolRow} from '../internal_models.js';
+import {symbolFromRow} from '../rows.js';
 import { Array as EffectArray } from "effect"
 import {Clock, DateTime, Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -20,7 +23,6 @@ import {
   type CodeGraphFileFacts,
   type CodeGraphInventoryFile,
   type CodeGraphSnapshot,
-  type CodeGraphSymbol,
   type RepositoryIdentity,
   CodeGraphStoreError,
 } from '../../types.js';
@@ -50,7 +52,7 @@ import {
   stageActivationSymbolTerms,
 } from './core.js';
 import {clearSnapshotOwnedRows} from '../cleanup_core.js';
-import {chunk, sortedBy, symbolTerms, uniqueBy} from '../utilities.js';
+import {chunk, sortedBy, symbolTerms, uniqueBy, preparedSymbolTerms, factBodyDiscovery} from '../utilities.js';
 import {type CodeGraphSqlQueryStatement} from '../visualization_sql.js';
 import {
   normalizedReexportProvenance,
@@ -353,6 +355,21 @@ function preparePersistedFullWorkspace(
  * initiated evidence collection.
  */
 export function codeGraphCompactLexicalDeepAuditStatement(snapshotId: string): CodeGraphSqlQueryStatement {
+  if (isLexicalV2Snapshot(snapshotId)) return {
+    parameters:[snapshotId],
+    text:`SELECT format.posting_count AS expected_posting_count,
+      format.symbol_count AS expected_symbol_count,format.term_count AS expected_term_count,
+      (SELECT COUNT(*) FROM lexical_v2_owners p WHERE p.snapshot_key=compact.snapshot_key)+
+      (SELECT COUNT(*) FROM lexical_v2_shared p WHERE p.snapshot_key=compact.snapshot_key)+
+      (SELECT COUNT(*) FROM lexical_v2_members p WHERE p.snapshot_key=compact.snapshot_key)+
+      (SELECT COUNT(*) FROM lexical_v2_scopes p WHERE p.snapshot_key=compact.snapshot_key)+
+      (SELECT COUNT(*) FROM lexical_compact_terms p WHERE p.snapshot_key=compact.snapshot_key)+
+      (SELECT COUNT(*) FROM lexical_v2_views p WHERE p.snapshot_id=compact.snapshot_id)+2 AS posting_count,
+      (SELECT COUNT(*) FROM lexical_v2_members p WHERE p.snapshot_key=compact.snapshot_key) AS symbol_count,
+      (SELECT COUNT(*) FROM lexical_compact_terms p WHERE p.snapshot_key=compact.snapshot_key) AS term_count
+      FROM lexical_v2_formats format JOIN lexical_compact_snapshots compact ON compact.snapshot_id=format.snapshot_id
+      WHERE format.snapshot_id=? AND format.format_version=2 LIMIT 1`,
+  };
   return {
     parameters: [snapshotId],
     text: `SELECT
@@ -392,7 +409,7 @@ function preparePersistedFullFactCapacity(batches: readonly CodeGraphStagingBatc
       reference => reference.edgeId,
     );
     const lookupRows = EffectArray.reduce(batch.symbols, 0, (total, symbol) => saturatingCapacityAdd(total, symbol.lookupKeys?.length ?? 0));
-    const termsBySymbol = new Map<CodeGraphSymbol, readonly (readonly [string, number])[]>();
+    const termsBySymbol = new Map(preparedSymbolTerms(batch.symbols, batch.bodyDiscovery));
     let termPostings = 0;
     for (const symbol of batch.symbols) {
       const terms = termsBySymbol.get(symbol) ?? symbolTerms(symbol);
@@ -402,6 +419,8 @@ function preparePersistedFullFactCapacity(batches: readonly CodeGraphStagingBatc
       // preceded by an under-sized capacity boundary.
       termPostings = saturatingCapacityAdd(termPostings, terms.length);
     }
+    const lexicalProjection = projectLexicalSymbols(batch.symbols, batch.bodyDiscovery, batch.lexicalFileOrdinals);
+    termPostings = Math.max(termPostings, lexicalProjection.physicalRowCount + 3);
     const reexportsByReferenceBatch = EffectArray.map([...chunk(boundedReferences, ACTIVATION_REFERENCE_BATCH_ROWS)], references =>
       [
         ...uniqueBy(EffectArray.flatMap(references, (__effectFlatMapValue, __effectFlatMapIndex) => __effectFlatMapIndex in references ? normalizedReexportProvenance(__effectFlatMapValue) : []), reexport =>
@@ -472,6 +491,7 @@ const stagePersistedFullFactBatches = Effect.fn('codeGraph.stagePersistedFullFac
     }
   }
 
+  const preparedBatches = prepared ?? preparePersistedFullFactCapacity(batches).batches;
   const observers = new Map<number, ActivationStagingObserver>();
   const observer = (batchIndex: number) => {
     const existing = observers.get(batchIndex);
@@ -495,7 +515,7 @@ const stagePersistedFullFactBatches = Effect.fn('codeGraph.stagePersistedFullFac
           batch.references,
           observer(batch.batchIndex),
           true,
-          prepared?.[index],
+          preparedBatches[index],
           batch.monikers ?? [],
         );
       }
@@ -578,7 +598,13 @@ const preparePersistedIncrementalActivation = Effect.fn('codeGraph.preparePersis
   yield* stageActivationFiles(sql, files);
   const symbols = EffectArray.flatMap(facts, file => file.symbols);
   yield* stageActivationSymbols(sql, symbols);
-  yield* stageActivationSymbolTerms(sql, symbols);
+  yield* stageActivationSymbolTerms(sql, symbols, 'upsert', undefined, preparedSymbolTerms(symbols, factBodyDiscovery(facts)));
+  if (options.foldForward && isLexicalV2Snapshot(options.foldForward.snapshotId)) {
+    if (!(yield* stageFactoredCarry(sql,options.foldForward.snapshotId))) {
+      yield* prepareActivationTables(sql);
+      return false;
+    }
+  }
   yield* stageActivationEdges(
     sql,
     EffectArray.flatMap(facts, file => file.edges),
@@ -597,7 +623,7 @@ const preparePersistedIncrementalActivation = Effect.fn('codeGraph.preparePersis
       + (SELECT COUNT(*) FROM activation_files)
       + (SELECT COUNT(*) FROM activation_symbols)
       + (SELECT COUNT(*) FROM activation_symbol_lookup)
-      + (SELECT COUNT(*) FROM activation_symbol_terms)
+      + ${sql.unsafe(ACTIVATION_V2_PHYSICAL_COUNT_SQL)}
       + (SELECT COUNT(*) FROM activation_edges)
       + (SELECT COUNT(*) FROM activation_references)
       + (SELECT COUNT(*) FROM activation_reference_candidates)
@@ -732,10 +758,14 @@ const stageFoldForwardCarry = Effect.fn('codeGraph.stageFoldForwardCarry')(funct
         + (SELECT COUNT(*) FROM snapshot_files WHERE snapshot_id = ${expected.snapshotId})
         + (SELECT COUNT(*) FROM symbols WHERE snapshot_id = ${expected.snapshotId})
         + (SELECT COUNT(*) FROM snapshot_fold_forward_symbol_lookup WHERE snapshot_id = ${expected.snapshotId})
-        + (SELECT COUNT(*)
-           FROM lexical_compact_snapshots AS compact
-           JOIN lexical_compact_postings AS posting ON posting.snapshot_key = compact.snapshot_key
-           WHERE compact.snapshot_id = ${expected.snapshotId})
+        + (SELECT CASE WHEN ${isLexicalV2Snapshot(expected.snapshotId)} THEN
+             (SELECT COUNT(*) FROM lexical_v2_owners p WHERE p.snapshot_key=compact.snapshot_key)+
+             (SELECT COUNT(*) FROM lexical_v2_shared p WHERE p.snapshot_key=compact.snapshot_key)+
+             (SELECT COUNT(*) FROM lexical_v2_members p WHERE p.snapshot_key=compact.snapshot_key)+
+             (SELECT COUNT(*) FROM lexical_v2_scopes p WHERE p.snapshot_key=compact.snapshot_key)+
+             (SELECT COUNT(*) FROM lexical_compact_terms p WHERE p.snapshot_key=compact.snapshot_key)+3
+           ELSE (SELECT COUNT(*) FROM lexical_compact_postings p WHERE p.snapshot_key=compact.snapshot_key) END
+           FROM lexical_compact_snapshots compact WHERE compact.snapshot_id=${expected.snapshotId})
         + (SELECT COUNT(*) FROM edges WHERE snapshot_id = ${expected.snapshotId})
         + (SELECT COUNT(*) FROM snapshot_reexport_provenance WHERE snapshot_id = ${expected.snapshotId})
         + (SELECT COUNT(*) FROM code_graph_monikers
@@ -805,7 +835,7 @@ const stageFoldForwardCarry = Effect.fn('codeGraph.stageFoldForwardCarry')(funct
      WHERE lookup.snapshot_id = ?`,
     [expected.snapshotId],
   );
-  yield* sql.unsafe(
+  if (!isLexicalV2Snapshot(expected.snapshotId)) yield* sql.unsafe(
     `INSERT INTO activation_symbol_terms (term, symbol_id, weight)
      SELECT term.term, symbol.symbol_id, posting.weight
      FROM lexical_compact_snapshots AS compact
@@ -928,10 +958,11 @@ const replaceStagedModifiedFiles = Effect.fn('codeGraph.replaceStagedModifiedFil
         DELETE FROM activation_files
         WHERE path IN (SELECT path FROM activation_incremental_paths)
       `);
+      yield* clearActivationLexicalV2Paths(sql,[...paths]);
       yield* stageActivationFiles(sql, files);
       const symbols = EffectArray.flatMap(facts, file => file.symbols);
       yield* stageActivationSymbols(sql, symbols);
-      yield* stageActivationSymbolTerms(sql, symbols);
+      yield* stageActivationSymbolTerms(sql, symbols, 'upsert', undefined, preparedSymbolTerms(symbols, factBodyDiscovery(facts)));
       yield* stageActivationEdges(
         sql,
         EffectArray.flatMap(facts, file => file.edges),
@@ -1005,3 +1036,30 @@ export {
   replaceStagedModifiedFiles,
   prepareSnapshotPromotionCapacity,
 };
+
+/** Carry is bounded by the unchanged fold-forward work cap, including decoded logical rows. */
+const stageFactoredCarry = Effect.fn('codeGraph.stageFactoredCarry')(function* (
+  sql: SqlClient.SqlClient,snapshotId: string,
+) {
+  const rows=yield* sql<SymbolRow>`SELECT symbol.* FROM activation_symbols symbol
+    JOIN activation_fold_carry_paths carry ON carry.path=symbol.path`;
+  const symbols=EffectArray.map(rows,symbolFromRow);
+  const byId=new Map(EffectArray.map(symbols,symbol => [symbol.id,symbol]));
+  const logical=new Map(EffectArray.map(symbols,symbol => [symbol,[] as (readonly [string,number])[]]));
+  let cursor: readonly [string,string]|undefined;
+  let decoded=0;
+  while (true) {
+    const statement=lexicalV2PageStatement(snapshotId,cursor,500);
+    const page=yield* sql.unsafe<{readonly term: string;readonly symbol_id: string;readonly weight: number}>(statement.text,statement.parameters);
+    for (const row of page) {
+      if (++decoded>CODE_GRAPH_INCREMENTAL_FOLD_FORWARD_MAX_ROWS) return false;
+      const symbol=byId.get(row.symbol_id);
+      if (symbol) logical.get(symbol)!.push([row.term,row.weight]);
+    }
+    const last=page[page.length-1];
+    if (!last || page.length<500) break;
+    cursor=[last.term,last.symbol_id];
+  }
+  yield* stageActivationLexicalV2(sql,symbols,logical);
+  return true;
+});

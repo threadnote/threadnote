@@ -1,3 +1,4 @@
+import {isLexicalV2Snapshot} from '../lexical_projection.js';
 import {Array as EffectArray} from 'effect';
 import {DateTime, Effect} from 'effect';
 import type * as SqlClient from 'effect/sql/SqlClient';
@@ -278,6 +279,52 @@ export const writeCodeGraphMaterializationSpoolSurfacePage = Effect.fn(
          WHERE source.rowid > ? AND source.rowid <= ? ORDER BY source.rowid`,
         [snapshotId, page.afterRowid, upperRowid],
       );
+    case 'lexical_scopes':
+      return yield* sql.unsafe(
+        `INSERT INTO lexical_v2_scopes
+        SELECT compact.snapshot_key,source.scope_ordinal,source.path,source.content_hash,source.package_name
+        FROM materialization_spool.materialization_ordered_lexical_scopes source
+        CROSS JOIN lexical_compact_snapshots compact ON compact.snapshot_id=?
+        WHERE source.rowid>? AND source.rowid<=? ORDER BY source.rowid`,
+        [snapshotId, page.afterRowid, upperRowid],
+      );
+    case 'lexical_members':
+      return yield* sql.unsafe(
+        `INSERT INTO lexical_v2_members
+        SELECT compact.snapshot_key,source.scope_ordinal,source.member_ordinal,source.symbol_id
+        FROM materialization_spool.materialization_ordered_lexical_members source
+        CROSS JOIN lexical_compact_snapshots compact ON compact.snapshot_id=?
+        JOIN lexical_v2_scopes scope ON scope.snapshot_key=compact.snapshot_key AND scope.scope_ordinal=source.scope_ordinal
+        JOIN symbols symbol ON symbol.snapshot_id=compact.snapshot_id AND symbol.id=source.symbol_id
+          AND symbol.path=scope.path AND symbol.content_hash=scope.content_hash AND symbol.package_name IS scope.package_name
+        WHERE source.rowid>? AND source.rowid<=? ORDER BY source.rowid`,
+        [snapshotId, page.afterRowid, upperRowid],
+      );
+    case 'lexical_owners':
+      return yield* sql.unsafe(
+        `INSERT INTO lexical_v2_owners
+        SELECT compact.snapshot_key,term.term_key,source.origin_mask,source.scope_ordinal,source.member_ordinal,source.metadata_weight
+        FROM materialization_spool.materialization_ordered_lexical_owners source
+        CROSS JOIN lexical_compact_snapshots compact ON compact.snapshot_id=?
+        JOIN lexical_compact_terms term ON term.snapshot_key=compact.snapshot_key AND term.term=source.term
+        JOIN lexical_v2_members member ON member.snapshot_key=compact.snapshot_key
+          AND member.scope_ordinal=source.scope_ordinal AND member.member_ordinal=source.member_ordinal
+        WHERE source.rowid>? AND source.rowid<=? ORDER BY source.rowid`,
+        [snapshotId, page.afterRowid, upperRowid],
+      );
+    case 'lexical_shared':
+      return yield* sql.unsafe(
+        `INSERT INTO lexical_v2_shared
+        SELECT compact.snapshot_key,term.term_key,source.scope_ordinal
+        FROM materialization_spool.materialization_ordered_lexical_shared source
+        CROSS JOIN lexical_compact_snapshots compact ON compact.snapshot_id=?
+        JOIN lexical_compact_terms term ON term.snapshot_key=compact.snapshot_key AND term.term=source.term
+        JOIN lexical_v2_scopes scope ON scope.snapshot_key=compact.snapshot_key AND scope.scope_ordinal=source.scope_ordinal
+        WHERE source.rowid>? AND source.rowid<=? AND EXISTS (
+          SELECT 1 FROM lexical_v2_members member WHERE member.snapshot_key=compact.snapshot_key AND member.scope_ordinal=source.scope_ordinal)
+        ORDER BY source.rowid`,
+        [snapshotId, page.afterRowid, upperRowid],
+      );
     case 'symbol_terms':
       return yield* sql.unsafe(
         `INSERT INTO lexical_compact_postings (snapshot_key, term_key, symbol_key, weight)
@@ -335,6 +382,14 @@ export const finalizeCodeGraphMaterializationSpoolReceipts = Effect.fn(
         'SELECT COUNT(*) AS count FROM materialization_spool.materialization_spool_batches',
       );
       const expectedBatchCount = Number(expectedRows[0]?.count ?? -1);
+      const v2 = isLexicalV2Snapshot(snapshotId);
+      const physicalPostingCount = v2
+        ? `(SELECT COUNT(*) FROM materialization_spool.materialization_ordered_lexical_scopes)+
+        (SELECT COUNT(*) FROM materialization_spool.materialization_ordered_lexical_members)+
+        (SELECT COUNT(*) FROM materialization_spool.materialization_ordered_lexical_owners)+
+        (SELECT COUNT(*) FROM materialization_spool.materialization_ordered_lexical_shared)+
+        (SELECT COUNT(*) FROM materialization_spool.materialization_ordered_terms)+3`
+        : '(SELECT COUNT(*) FROM materialization_spool.materialization_ordered_symbol_terms)';
       if (!Number.isSafeInteger(expectedBatchCount) || expectedBatchCount < 0) {
         return yield* CodeGraphStoreError.of('Persistent materialization spool receipt count is invalid.');
       }
@@ -391,7 +446,7 @@ export const finalizeCodeGraphMaterializationSpoolReceipts = Effect.fn(
           readonly symbol_count: number | bigint;
           readonly term_count: number | bigint;
         }>(`SELECT
-          (SELECT COUNT(*) FROM materialization_spool.materialization_ordered_symbol_terms) AS posting_count,
+          ${physicalPostingCount} AS posting_count,
           (SELECT COUNT(*) FROM materialization_spool.materialization_ordered_symbols) AS symbol_count,
           (SELECT COUNT(*) FROM materialization_spool.materialization_ordered_terms) AS term_count`);
         if (
@@ -443,9 +498,7 @@ export const finalizeCodeGraphMaterializationSpoolReceipts = Effect.fn(
       yield* sql.unsafe(
         `UPDATE building_lexical_counters
          SET completed_batch_count = ?,
-             posting_count = (
-               SELECT COUNT(*) FROM materialization_spool.materialization_ordered_symbol_terms
-             ),
+             posting_count = ${physicalPostingCount},
              symbol_count = (
                SELECT COUNT(*) FROM materialization_spool.materialization_ordered_symbols
              ),
@@ -458,6 +511,33 @@ export const finalizeCodeGraphMaterializationSpoolReceipts = Effect.fn(
       const lexicalUpdates = yield* sql.unsafe<{readonly count: number | bigint}>('SELECT changes() AS count');
       if (Number(lexicalUpdates[0]?.count ?? 0) !== 1) {
         return yield* CodeGraphStoreError.of('Persistent materialization spool lexical receipt is missing.');
+      }
+      if (v2) {
+        const invalid = yield* sql.unsafe<{readonly count: number}>(`SELECT
+          (SELECT COUNT(*) FROM materialization_spool.materialization_ordered_lexical_counts) AS count`);
+        if (Number(invalid[0]?.count) !== expectedBatchCount)
+          return yield* CodeGraphStoreError.of('Factored lexical logical-count receipts are incomplete.');
+        const empty = yield* sql.unsafe(
+          `SELECT scope.scope_ordinal FROM lexical_v2_scopes scope
+          JOIN lexical_compact_snapshots compact ON compact.snapshot_key=scope.snapshot_key
+          WHERE compact.snapshot_id=? AND NOT EXISTS (
+            SELECT 1 FROM lexical_v2_members member WHERE member.snapshot_key=scope.snapshot_key AND member.scope_ordinal=scope.scope_ordinal)
+          LIMIT 1`,
+          [snapshotId],
+        );
+        if (empty.length !== 0)
+          return yield* CodeGraphStoreError.of('Factored lexical scope has no validated members.');
+        yield* sql.unsafe(
+          `INSERT INTO lexical_v2_formats
+          SELECT ?,2,${physicalPostingCount},
+            (SELECT COALESCE(SUM(logical_posting_count),0) FROM materialization_spool.materialization_ordered_lexical_counts),
+            (SELECT COUNT(*) FROM materialization_spool.materialization_ordered_lexical_members),
+            (SELECT COUNT(*) FROM materialization_spool.materialization_ordered_terms),
+            (SELECT COUNT(*) FROM materialization_spool.materialization_ordered_lexical_scopes),
+            (SELECT COUNT(*) FROM materialization_spool.materialization_ordered_lexical_owners),
+            (SELECT COUNT(*) FROM materialization_spool.materialization_ordered_lexical_shared)`,
+          [snapshotId],
+        );
       }
       yield* sql.unsafe(
         `INSERT INTO building_materialization_batches (

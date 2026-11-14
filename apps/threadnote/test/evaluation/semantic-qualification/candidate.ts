@@ -1,0 +1,1001 @@
+import {Client} from '@modelcontextprotocol/sdk/client/index.js';
+import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
+import {Array as EffectArray, Record as EffectRecord, Schema, String as EffectString} from 'effect';
+import {isJsonObject} from '@threadnote/platform/json';
+import {javaRuntimePinsForHost} from '../../../src/semantic/providers/java_runtime.js';
+import {JavaPreparationDiagnostic, LspFault} from '../../../src/semantic/lsp_transport.js';
+import {runtimeNativePlatformTarget} from '@threadnote/platform/system';
+import {BUN_STANDALONE_TARGETS} from '../../../../../scripts/release-targets.js';
+/* oxlint-disable effecttsgo/node-builtin-import -- Candidate qualification owns explicit process and private evidence-file boundaries. */
+import {createHash} from 'node:crypto';
+import {execFile} from 'node:child_process';
+import {promisify} from 'node:util';
+import {mkdtemp, mkdir, writeFile, readFile, realpath, readdir, rm} from 'node:fs/promises';
+import {tmpdir, release} from 'node:os';
+import {dirname, isAbsolute, join, resolve, relative} from 'node:path';
+import {parseArgs} from 'node:util';
+import {pathToFileURL, fileURLToPath} from 'node:url';
+import {observeCandidateTransport} from './transport-lifecycle.js';
+import {installProbeSignalCleanup} from '../../../../../tools/semantic/semantic_probe_process.js';
+import {qualificationInventory} from './inventory.js';
+import {
+  readProviderInputs,
+  ProviderInputs,
+  assertProviderFixtureBranch,
+  selectedFixture,
+  providerCatalog,
+  runProviderNavigation,
+  runProviderReadiness,
+  runOwnedBufferFixture,
+  runProviderPreview,
+  runProviderActionPreview,
+  redactCapabilities,
+  protocolCapabilities,
+  type JavaCandidateImportAuthority,
+} from './provider-fixture.js';
+import {runContextFixture} from './context-fixture.js';
+import {runProviderApplication, type WriterFixtureRecord} from './writer-fixture.js';
+import {shutdownFixtureProviders} from './provider-shutdown.js';
+import {checkMissingProfileTransportParity} from './transport-oracle.js';
+
+const digest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
+const gitId = Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/u));
+export const Candidate = Schema.Struct({
+  binary: Schema.String,
+  binarySha256: digest,
+  releaseSha256: digest,
+  sourceCommit: gitId,
+  sourceTree: gitId,
+});
+/** Compare exact release identities; unknown libc/CPU and non-baseline aliases cannot qualify a host. */
+export function candidateTargetMatchesHost(target: string, nativeHostTarget: string | undefined): boolean {
+  return (
+    nativeHostTarget !== undefined &&
+    EffectArray.some(
+      BUN_STANDALONE_TARGETS,
+      releaseTarget => releaseTarget === target && releaseTarget === `bun-${nativeHostTarget}`,
+    )
+  );
+}
+const execute = promisify(execFile);
+const repository = new URL('../../../../../', import.meta.url);
+const hash = (bytes: string | Uint8Array) => createHash('sha256').update(bytes).digest('hex');
+/** All tracked caller and production bytes must belong to the actual clean candidate HEAD. */
+async function assertExactCandidateCheckout(candidate: typeof Candidate.Type) {
+  const identity = await execute('git', ['show', '-s', '--format=%H%n%T', 'HEAD'], {
+    cwd: repository,
+    maxBuffer: 4096,
+    timeout: 5000,
+  });
+  if (EffectString.trim(identity.stdout) !== candidate.sourceCommit + '\n' + candidate.sourceTree)
+    throw new Error('Candidate requires actual current exact HEAD/tree');
+  const status = await execute('git', ['status', '--porcelain=v1', '--untracked-files=all'], {
+    cwd: repository,
+    maxBuffer: 65536,
+    timeout: 5000,
+  });
+  if (EffectString.trim(status.stdout)) throw new Error('Candidate requires clean source and harness');
+}
+
+/** Byte bindings constrain the existing metadata handoff; they never select a cleanup policy. */
+export async function candidateDispatchInputBinding(arguments_: readonly string[]) {
+  const {values} = candidateArguments(arguments_);
+  if (!values['candidate-manifest']) return undefined;
+  return {
+    candidateSha256: hash(await readFile(values['candidate-manifest'])),
+    ...(values['provider-inputs'] ? {providerSha256: hash(await readFile(values['provider-inputs']))} : {}),
+  };
+}
+async function assertDispatchInputBinding(manifestPath: string, providerInputsPath?: string) {
+  const raw = process.env.THREADNOTE_QUALIFICATION_INPUT_BINDING;
+  if (raw === undefined) return; // Direct source entry still performs complete source/payload/SDK qualification.
+  const binding = Schema.decodeUnknownSync(
+    Schema.Struct({candidateSha256: digest, providerSha256: Schema.optional(digest)}),
+    {onExcessProperty: 'error'},
+  )(JSON.parse(raw));
+  if (
+    hash(await readFile(manifestPath)) !== binding.candidateSha256 ||
+    (providerInputsPath === undefined
+      ? binding.providerSha256 !== undefined
+      : hash(await readFile(providerInputsPath)) !== binding.providerSha256)
+  )
+    throw new Error('Candidate metadata changed across dispatcher handoff');
+}
+
+/** Finite source-selected cleanup only; provider JSON and argv contain no deadline knob. */
+export async function verifiedJavaGradleCandidateCleanup(arguments_: readonly string[]) {
+  try {
+    const {values} = candidateArguments(arguments_);
+    if (
+      values.inventory ||
+      !values['candidate-manifest'] ||
+      !values['provider-inputs'] ||
+      !values['writer-fixture'] ||
+      !values.output
+    )
+      return undefined;
+    const raw = Schema.decodeUnknownSync(ProviderInputs, {onExcessProperty: 'error'})(
+      JSON.parse(await readFile(values['provider-inputs'], 'utf8')),
+    );
+    if (raw.language !== 'java' || !raw.gradle) return undefined;
+    const pins = javaRuntimePinsForHost();
+    if (
+      !pins ||
+      raw.serverTreeDigest !== pins.serverTreeDigest ||
+      raw.runtimeSdkDigest !== pins.runtimeSdkDigest ||
+      raw.projectSdkDigest !== pins.projectSdkDigest
+    )
+      return undefined;
+    const candidate = Schema.decodeUnknownSync(Candidate, {onExcessProperty: 'error'})(
+      JSON.parse(await readFile(values['candidate-manifest'], 'utf8')),
+    );
+    if (!isAbsolute(candidate.binary)) return undefined;
+    await assertExactCandidateCheckout(candidate);
+    const releaseBytes = await readFile(join(dirname(candidate.binary), 'release.json'));
+    if (
+      hash(await readFile(candidate.binary)) !== candidate.binarySha256 ||
+      hash(releaseBytes) !== candidate.releaseSha256
+    )
+      return undefined;
+    const release = Schema.decodeUnknownSync(Schema.Struct({version: Schema.String, target: Schema.String}))(
+      JSON.parse(releaseBytes.toString()),
+    );
+    if (
+      !EffectString.endsWith('.g' + candidate.sourceCommit)(release.version) ||
+      !candidateTargetMatchesHost(release.target, runtimeNativePlatformTarget())
+    )
+      return undefined;
+    const verified = await readProviderInputs(values['provider-inputs']);
+    if (verified.input.language !== 'java' || !verified.input.gradle) return undefined;
+    await assertExactCandidateCheckout(candidate);
+    return Object.freeze({
+      candidateMilliseconds: 40000,
+      dispatcherMilliseconds: 45000,
+      childJoinMilliseconds: 40000,
+    } as const);
+  } catch {
+    return undefined; // Unverified/other candidates keep the original defaults and actual dispatcher validation.
+  }
+}
+
+/** Project only the closed production fault code; preserve existing unexpected-error behavior. */
+export const candidateFailure = (error: unknown) =>
+  Schema.is(LspFault)(error) && Schema.is(LspFault.fields.code)(error.code)
+    ? 'Semantic provider fault: ' + error.code
+    : error instanceof Error
+      ? error.message
+      : 'Unknown failure';
+/** Fixture diagnostics only: source coordinates never attest admission, operation success or ownership. */
+export function candidateFailureEvidence(error: unknown, sourceHashes: Readonly<Record<string, string>> = {}) {
+  if (!Schema.is(LspFault)(error) || !Schema.is(LspFault.fields.code)(error.code)) return undefined;
+  try {
+    const sources = new Map<string, string>();
+    for (const [file, digest] of EffectRecord.toEntries(sourceHashes)) {
+      if (!/^[a-f0-9]{64}$/u.test(digest)) continue;
+      const absolute = fileURLToPath(new URL(file, import.meta.url));
+      const path = EffectString.replaceAll('\\', '/')(relative(fileURLToPath(repository), absolute));
+      if (isAbsolute(path) || path === '..' || EffectString.startsWith('../')(path)) continue;
+      if (EffectString.endsWith('.ts')(path) && !EffectString.startsWith('node_modules/')(path))
+        sources.set(absolute, path);
+    }
+    const frames: {path: string; line: number; column: number}[] = [];
+    // 4096 UTF-16 units occupy at most 16 KiB in UTF-8; never scan an unbounded stack.
+    const stack = typeof error.stack === 'string' ? EffectString.slice(0, 4096)(error.stack) : '';
+    for (const line of EffectString.split('\n')(stack)) {
+      const match = /^\s+at (?:[^()\r\n]{0,256} \()?(.+):([1-9][0-9]{0,6}):([1-9][0-9]{0,6})\)?$/u.exec(line);
+      if (!match) continue;
+      const path = sources.get(match[1]);
+      if (!path) continue;
+      frames.push({path, line: Number(match[2]), column: Number(match[3])});
+      if (frames.length === 4) break;
+    }
+    const context = error.preparationDiagnostic;
+    const relativePath = context?.relativePath;
+    const diagnostic = {
+      reason: context?.reason,
+      entryType: context?.entryType,
+      ...(relativePath === undefined ? {} : {relativePath}),
+    };
+    return {
+      code: error.code,
+      sourceFrames: frames,
+      ...(error.code === 'prerequisite' && Schema.is(JavaPreparationDiagnostic)(diagnostic)
+        ? {
+            preparationDiagnostic: {
+              reason: diagnostic.reason,
+              entryType: diagnostic.entryType,
+              ...(diagnostic.relativePath === undefined ? {} : {relativePath: diagnostic.relativePath}),
+            },
+          }
+        : {}),
+    };
+  } catch {
+    return undefined; // Diagnostic projection must never replace the original failure.
+  }
+}
+/** Install rejection ownership immediately, even when transport shutdown must finish before consuming the receipt. */
+export const settleProviderShutdown = (pending: ReturnType<typeof shutdownFixtureProviders>) =>
+  pending.then(
+    value => ({status: 'observed' as const, value}),
+    (error: unknown) => ({status: 'unknown' as const, reason: candidateFailure(error)}),
+  );
+const alive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (isJsonObject(error) && error.code === 'ESRCH') return false;
+    if (isJsonObject(error) && error.code === 'EPERM') return true;
+    throw error;
+  }
+};
+const within = async <A>(promise: Promise<A>, milliseconds: number): Promise<A> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Deadline')), Math.max(1, milliseconds));
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+};
+const streamText = async (stream: ReadableStream<Uint8Array>, capacity: number) => {
+  let bytes = 0,
+    text = '';
+  const decoder = new TextDecoder('utf-8', {fatal: true});
+  for await (const chunk of stream) {
+    bytes += chunk.length;
+    if (bytes > capacity) throw new Error('Output capacity exceeded');
+    text += decoder.decode(chunk, {stream: true});
+  }
+  return text + decoder.decode();
+};
+interface SmokeReport {
+  schemaVersion: number;
+  kind: string;
+  status: 'passed' | 'failed';
+  scenario: string;
+  branch: string;
+  fullScenarioQualified: false;
+  cost: {modelCalls: number; providerLaunches: number | null; downloads: number};
+  candidate?: unknown;
+  sourceHashes?: Record<string, string>;
+  sourceResult?: unknown;
+  releaseGate?: ReturnType<typeof qualificationInventory>;
+  provider: {started: boolean | null; artifact: unknown; runtime: unknown};
+  providerChecks?: unknown;
+  operations?: unknown[];
+  writerRecords?: WriterFixtureRecord[];
+  harnessSha256?: string;
+  manifestSha256?: string;
+  fixture?: unknown;
+  request?: unknown;
+  environment?: unknown;
+  cli?: unknown;
+  mcp?: unknown;
+  homeInventory?: string[];
+  failure?: string;
+  failureEvidence?: ReturnType<typeof candidateFailureEvidence>;
+  checks?: unknown;
+  elapsedMilliseconds?: number;
+  cleanup: {
+    mcpCloseObserved?: boolean;
+    mcpCloseCompleted?: boolean;
+    closeFailure?: string;
+    ownedProcesses?: {pid: number; absent: boolean}[];
+    ownedProcessesGone?: boolean;
+    fixtureRemoved?: boolean;
+    fixtureRetained?: string;
+    productionJavaImport?: {
+      state: 'unused' | 'preparing' | 'sealed' | 'unknown';
+      stages: {stage: string; elapsedMilliseconds: number}[];
+    };
+    semantic?: Awaited<ReturnType<typeof shutdownFixtureProviders>>;
+  };
+}
+
+/** One real transport branch. No configured provider, proposal, or whole scenario is qualified. */
+export async function runCandidateChecks(
+  manifestPath: string,
+  output: string,
+  providerInputsPath?: string,
+  writerFixture = false,
+  actionFixture = false,
+) {
+  await assertDispatchInputBinding(manifestPath, providerInputsPath);
+  const cleanupPolicy =
+    providerInputsPath && writerFixture
+      ? await verifiedJavaGradleCandidateCleanup([
+          '--candidate-manifest',
+          manifestPath,
+          '--provider-inputs',
+          providerInputsPath,
+          '--writer-fixture',
+          '--output',
+          output,
+        ])
+      : undefined;
+  // Reserve before launching; an existing receipt is never overwritten or rerun.
+  await writeFile(
+    output,
+    JSON.stringify({
+      schemaVersion: 1,
+      kind: 'candidate-transport-branch',
+      status: 'started',
+      ...(cleanupPolicy ? {cleanupPendingFile: output + '.cleanup-pending.json'} : {}),
+    }) + '\n',
+    {mode: 0o600, flag: 'wx'},
+  );
+  const started = Date.now(),
+    deadline = started + (providerInputsPath ? 180_000 : 42_000);
+  let root = '',
+    home = '';
+  let transport: StdioClientTransport | undefined, client: Client | undefined;
+  let close: ReturnType<typeof observeCandidateTransport> | undefined;
+  const privateCapabilities = new Set<string>();
+  const children = new Map<number, {kill: () => unknown; exited?: Promise<number>}>();
+  const report: SmokeReport = {
+    schemaVersion: 1,
+    kind: 'candidate-transport-branch',
+    status: 'failed',
+    scenario: 'S33',
+    branch: 'unavailable-provider',
+    fullScenarioQualified: false,
+    cost: {modelCalls: 0, providerLaunches: 0, downloads: 0},
+    cleanup: {},
+    provider: {started: false, artifact: null, runtime: null},
+  };
+  const javaImportAbort = new AbortController();
+  let javaImportTask: Promise<unknown> | undefined;
+  const javaImport = {
+    state: 'unused' as 'unused' | 'preparing' | 'sealed' | 'unknown',
+    stages: [] as {stage: string; elapsedMilliseconds: number}[],
+  };
+  let finishing: Promise<void> | undefined;
+  const finish = () =>
+    (finishing ??= (async () => {
+      const pendingImport = javaImportTask && javaImport.state === 'preparing';
+      javaImportAbort.abort(); // Start ORIGINAL native cleanup before any publication wait.
+      if (pendingImport) {
+        javaImport.state = 'unknown';
+        report.status = 'failed';
+        report.cleanup.productionJavaImport = javaImport;
+        report.cleanup.fixtureRetained = root;
+        try {
+          const pending =
+            JSON.stringify({
+              schemaVersion: 1,
+              kind: report.kind,
+              status: 'failed',
+              fullScenarioQualified: false,
+              failure: 'Original production import cleanup pending; disposition unknown',
+              cleanup: {productionJavaImport: javaImport, fixtureRetained: root},
+            }) + '\n';
+          if (Buffer.byteLength(pending) > 16384) throw new Error('Pending cleanup receipt capacity');
+          await writeFile(output + '.cleanup-pending.json', pending, {
+            mode: 0o600,
+            flag: 'wx',
+            signal: AbortSignal.timeout(500),
+          });
+        } catch {
+          process.stderr.write(
+            'Production import cleanup receipt could not be persisted; disposition unknown and scratch retained.\n',
+          );
+        }
+      }
+      if (javaImportTask) {
+        try {
+          await within(javaImportTask, 30000);
+        } catch {
+          javaImport.state = 'unknown';
+        }
+        report.cleanup.productionJavaImport = javaImport;
+      }
+      // Stop request producers before withdrawing our bootstrap, so timed-out CLI calls cannot relaunch it.
+      for (const [pid, child] of children)
+        if (pid !== close?.pid && alive(pid)) {
+          try {
+            child.kill();
+          } catch {
+            /* Checked below. */
+          }
+        }
+      const semanticCleanup =
+        providerInputsPath && home
+          ? settleProviderShutdown(shutdownFixtureProviders(home, join(root, 'project')))
+          : undefined;
+      try {
+        await within(close?.close() ?? Promise.resolve(), 4500);
+        report.cleanup.mcpCloseCompleted = true;
+        if (close) await close.waitForCloseIfStarted(AbortSignal.timeout(500));
+        report.cleanup.mcpCloseObserved = close?.closeObserved ?? false;
+      } catch (error) {
+        report.cleanup.closeFailure = candidateFailure(error);
+        report.status = 'failed';
+      }
+      for (const [pid, child] of children)
+        if (alive(pid)) {
+          try {
+            child.kill();
+          } catch {
+            /* Absence checked below. */
+          }
+        }
+      for (const child of children.values()) if (child.exited) await within(child.exited, 500).catch(() => undefined);
+      report.cleanup.ownedProcesses = EffectArray.map([...children.keys()], pid => ({pid, absent: !alive(pid)}));
+      report.cleanup.ownedProcessesGone = EffectArray.every(report.cleanup.ownedProcesses, process => process.absent);
+      let semanticDrained = true;
+      if (semanticCleanup) {
+        try {
+          const result = await semanticCleanup;
+          if (result.status === 'unknown') {
+            semanticDrained = false;
+            report.cleanup.closeFailure = result.reason;
+          } else {
+            report.cleanup.semantic = result.value;
+            if (result.value.providers.length > 0) report.provider.started = true;
+            semanticDrained = result.value.drained;
+          }
+        } catch (error) {
+          semanticDrained = false;
+          report.cleanup.closeFailure = candidateFailure(error);
+        }
+      }
+      const writerRetired = EffectArray.every(report.writerRecords ?? [], record => record.retired);
+      const mcpCleanupKnown = close?.pid == null || (report.cleanup.mcpCloseCompleted && close.closeObserved);
+      const javaImportKnown = javaImport.state === 'unused' || javaImport.state === 'sealed';
+      if (!mcpCleanupKnown || !semanticDrained || !writerRetired || !javaImportKnown) report.status = 'failed';
+      if (
+        root &&
+        report.cleanup.ownedProcessesGone &&
+        mcpCleanupKnown &&
+        semanticDrained &&
+        writerRetired &&
+        javaImportKnown
+      ) {
+        await rm(root, {recursive: true, force: true});
+        report.cleanup.fixtureRemoved = true;
+      } else if (root) {
+        report.cleanup.fixtureRetained = root;
+        report.status = 'failed';
+      }
+      report.elapsedMilliseconds = Date.now() - started;
+      const serialized = JSON.stringify(report, null, 2) + '\n';
+      if (
+        EffectArray.some(
+          [...privateCapabilities],
+          capability => capability.length > 0 && EffectString.includes(capability)(serialized),
+        )
+      ) {
+        report.status = 'failed';
+        report.failure = 'Private capability detected in attempted receipt; detailed content withheld';
+        await writeFile(
+          output,
+          JSON.stringify(
+            {
+              schemaVersion: 1,
+              kind: report.kind,
+              status: report.status,
+              failure: report.failure,
+              cleanup: report.cleanup,
+              fullScenarioQualified: false,
+            },
+            null,
+            2,
+          ) + '\n',
+          {mode: 0o600},
+        );
+      } else await writeFile(output, serialized, {mode: 0o600});
+    })());
+  const signals = installProbeSignalCleanup(
+    async signal => {
+      report.status = 'failed';
+      report.failure = `Interrupted: ${signal}`;
+      await finish();
+    },
+    {milliseconds: cleanupPolicy?.candidateMilliseconds},
+  );
+  try {
+    if (actionFixture && (!providerInputsPath || !writerFixture))
+      throw new Error('Action fixture requires pinned provider inputs and writer fixture');
+    report.releaseGate = qualificationInventory(
+      JSON.parse(
+        await readFile(
+          new URL('../../../../../config/semantic-providers/qualification-lock.json', import.meta.url),
+          'utf8',
+        ),
+      ),
+    );
+    const manifestBytes = await readFile(manifestPath);
+    const candidate = Schema.decodeUnknownSync(Candidate, {onExcessProperty: 'error'})(
+      JSON.parse(manifestBytes.toString()),
+    );
+    if (!isAbsolute(candidate.binary)) throw new Error('Candidate binary must be absolute');
+    const binary = resolve(candidate.binary),
+      releaseBytes = await readFile(join(dirname(binary), 'release.json'));
+    if (hash(await readFile(binary)) !== candidate.binarySha256 || hash(releaseBytes) !== candidate.releaseSha256)
+      throw new Error('Candidate hash mismatch');
+    const built = Schema.decodeUnknownSync(
+      Schema.Struct({version: Schema.String, runtime: Schema.String, target: Schema.String}),
+    )(JSON.parse(releaseBytes.toString()));
+    const git = await execute('git', ['rev-parse', `${candidate.sourceCommit}^{tree}`], {
+      cwd: repository,
+      timeout: 5000,
+      maxBuffer: 4096,
+    });
+    if (
+      EffectString.trim(git.stdout) !== candidate.sourceTree ||
+      !EffectString.endsWith(`.g${candidate.sourceCommit}`)(built.version)
+    )
+      throw new Error('Candidate source/release binding mismatch');
+    const nativeHostTarget = runtimeNativePlatformTarget();
+    if (!candidateTargetMatchesHost(built.target, nativeHostTarget))
+      throw new Error('Candidate target does not match a proven native host target');
+    report.candidate = {
+      ...candidate,
+      release: built,
+      nativeHostTarget,
+      sourceBinding: 'operator-captured-build-manifest; git-tree-and-release-commit-verified',
+      finalCombinedCandidate: false,
+    };
+    const provider = providerInputsPath ? await readProviderInputs(providerInputsPath) : undefined;
+    if (provider) {
+      if (actionFixture) report.scenario = 'S01';
+      report.branch = actionFixture
+        ? 'pinned-provider-public-action-writer-fixture'
+        : writerFixture
+          ? 'pinned-provider-authorized-writer-fixture'
+          : 'pinned-provider-read-fixture';
+      report.provider = {
+        started: null,
+        artifact: provider,
+        runtime:
+          provider.input.language === 'go'
+            ? {
+                version: provider.input.goVersion,
+                sha256: provider.input.goExecutableDigest,
+                sdkTreeDigest: provider.input.sdkTreeDigest,
+              }
+            : provider.input.language === 'rust'
+              ? {
+                  version: provider.input.rustVersion,
+                  sha256: provider.input.rustcExecutableDigest,
+                  cargoSha256: provider.input.cargoExecutableDigest,
+                  rustdocSha256: provider.input.rustdocExecutableDigest,
+                  sdkTreeDigest: provider.input.sdkTreeDigest,
+                }
+              : provider.input.language === 'java'
+                ? {
+                    version: provider.input.runtimeVersion,
+                    sha256: provider.input.runtimeExecutableDigest,
+                    sdkTreeDigest: provider.input.runtimeSdkDigest,
+                    projectVersion: provider.input.projectVersion,
+                    projectSha256: provider.input.projectExecutableDigest,
+                    projectSdkTreeDigest: provider.input.projectSdkDigest,
+                  }
+                : {version: provider.input.runtimeVersion, sha256: provider.input.runtimeDigest},
+      };
+      if (provider.input.language === 'java' && !writerFixture) report.provider.started = false;
+      assertProviderFixtureBranch(provider.input, writerFixture);
+      report.cost.providerLaunches = null;
+    }
+    report.operations = [];
+    report.writerRecords = [];
+    report.sourceHashes = {};
+    for (const path of [
+      'candidate.ts',
+      'entrypoint.ts',
+      'provider-fixture.ts',
+      'context-fixture.ts',
+      'provider-shutdown.ts',
+      'writer-fixture.ts',
+      '../../../src/semantic/fingerprint.ts',
+      '../../../src/semantic/providers/java_preparation.ts',
+      '../../../src/semantic/providers/java_runtime.ts',
+      '../../../src/semantic/providers/java.ts',
+      '../../../src/semantic/java_import.ts',
+      '../../../src/semantic/host_profile.ts',
+      '../../../src/semantic/lsp_transport.ts',
+      '../../../src/telemetry/session.ts',
+      '../../../../../packages/platform/src/system.ts',
+      '../../../../../packages/platform/src/writer_system.ts',
+      '../../../src/semantic/providers/java_project.ts',
+      '../../../../../tools/semantic/semantic_provider_fixture.ts',
+      '../../../../../tools/semantic/semantic_probe_assertions.ts',
+      'inventory.ts',
+      'transport-oracle.ts',
+      'transport-lifecycle.ts',
+      'scenario-contracts.json',
+      '../../helpers/stdio-client-transport-close.ts',
+      '../../../../../tools/semantic/semantic_probe_process.ts',
+      '../../../../../scripts/release-targets.ts',
+      '../../../../../scripts/qualify-semantic-providers.ts',
+      '../../../../../scripts/qualify-semantic-editors.ts',
+      '../../../../../config/semantic-providers/qualification-lock.json',
+      '../../../../../bun.lock',
+      '../../../../../node_modules/@modelcontextprotocol/sdk/package.json',
+    ])
+      report.sourceHashes[path] = hash(await readFile(new URL(path, import.meta.url)));
+    report.manifestSha256 = hash(manifestBytes);
+    report.harnessSha256 = hash(await readFile(import.meta.path));
+    root = await realpath(
+      await mkdtemp(
+        join(
+          provider && process.platform === 'darwin' ? '/tmp' : tmpdir(),
+          provider ? 'tn11-provider-' : 'tn11-transport-',
+        ),
+      ),
+    );
+    home = join(root, 'home');
+    const project = join(root, 'project');
+    await mkdir(home, {mode: 0o700});
+    await mkdir(project, {mode: 0o700});
+    const fixture = provider
+      ? selectedFixture(provider.input, actionFixture)
+      : {
+          sources: {'a.ts': 'export const selected = "🧵 private-fixture";\r\n'},
+          projectFiles: {'tsconfig.json': '{"files":["a.ts"]}\n'},
+          action: undefined,
+        };
+    const files = {...fixture.sources, ...fixture.projectFiles};
+    let expectedFiles = files;
+    for (const [name, text] of EffectRecord.toEntries(files)) {
+      await mkdir(dirname(join(project, name)), {recursive: true});
+      await writeFile(join(project, name), text);
+    }
+    const environment = {
+      HOME: home,
+      USERPROFILE: home,
+      PATH: process.platform === 'win32' ? (process.env.SystemRoot ?? 'C:\\Windows') + '\\System32' : '/usr/bin:/bin',
+      ...(process.platform === 'win32' ? {SystemRoot: process.env.SystemRoot ?? 'C:\\Windows'} : {}),
+      THREADNOTE_HOME: home,
+      THREADNOTE_ACCOUNT: 'local',
+      THREADNOTE_USER: 'synthetic-p11-smoke',
+      THREADNOTE_AGENT_ID: 'threadnote',
+      THREADNOTE_MANIFEST: join(home, 'manifest.yaml'),
+      THREADNOTE_MCP_TOOLSET: 'full',
+      THREADNOTE_MODEL_SETUP: 'off',
+      THREADNOTE_EFFECT_AI: 'off',
+    };
+    const sdk = Schema.decodeUnknownSync(Schema.Struct({version: Schema.String}))(
+      JSON.parse(
+        await readFile(
+          new URL('../../../../../node_modules/@modelcontextprotocol/sdk/package.json', import.meta.url),
+          'utf8',
+        ),
+      ),
+    );
+    report.environment = {
+      sdkVersion: sdk.version,
+      os: process.platform,
+      osRelease: release(),
+      architecture: process.arch,
+      harnessBun: Bun.version,
+      variables: environment,
+    };
+    report.fixture = {
+      id: provider ? 'pinned-provider-unicode-crlf' : 'missing-profile-unicode-crlf',
+      version: 1,
+      ...(fixture.action
+        ? {action: {...fixture.action, engineShape: 'unproven-proposed-case', fullScenarioQualified: false}}
+        : {}),
+      root,
+      files: EffectRecord.fromEntries(
+        EffectArray.map(EffectRecord.toEntries(files), ([name, text]) => [name, hash(text)]),
+      ),
+    };
+    const run = async (args: readonly string[], request: object) => {
+      const cli = Bun.spawn([binary, ...args], {
+        cwd: project,
+        env: environment,
+        stdin: new Blob([JSON.stringify(request)]),
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      children.set(cli.pid, {kill: () => cli.kill('SIGKILL'), exited: cli.exited});
+      const [stdout, stderr, code] = await within(
+        Promise.all([streamText(cli.stdout, 2 * 1024 * 1024), streamText(cli.stderr, 65536), cli.exited]),
+        deadline - Date.now(),
+      );
+      if (code !== 0) throw new Error('CLI returned nonzero');
+      const value: unknown = args[0] === 'remember' ? {text: stdout} : JSON.parse(stdout);
+      for (const capability of protocolCapabilities(value)) privateCapabilities.add(capability);
+      report.operations?.push({
+        args,
+        request: redactCapabilities(request),
+        pid: cli.pid,
+        code,
+        stderr,
+        canonical: redactCapabilities(value),
+      });
+      return {pid: cli.pid, code, stdout, stderr, value};
+    };
+    const request = {
+      callerCwd: project,
+      file: join(project, 'a.ts'),
+      language: 'typescript',
+      operation: 'definition',
+      position: {line: 0, character: 14},
+      milliseconds: 1000,
+      maxBytes: 8192,
+      maxItems: 8,
+    };
+    if (provider) {
+      let javaAuthority: JavaCandidateImportAuthority | undefined;
+      if (provider.input.language === 'java' && provider.input.gradle) {
+        if (!cleanupPolicy) throw new Error('Verified production cleanup policy unavailable');
+        await assertDispatchInputBinding(manifestPath, providerInputsPath);
+        const boundSourceHashes = {...report.sourceHashes};
+        const verifyCandidateSource = async () => {
+          await assertExactCandidateCheckout(candidate);
+          for (const [file, expected] of EffectRecord.toEntries(boundSourceHashes)) {
+            // Installed SDK metadata is an explicit lock-bound input, not a tracked source file.
+            if (file === '../../../../../node_modules/@modelcontextprotocol/sdk/package.json') continue;
+            const path = relative(fileURLToPath(repository), fileURLToPath(new URL(file, import.meta.url)));
+            const atCommit = await execute('git', ['show', `${candidate.sourceCommit}:${path}`], {
+              cwd: repository,
+              maxBuffer: 4 * 1024 * 1024,
+              encoding: 'buffer',
+              timeout: 5000,
+            });
+            if (hash(atCommit.stdout) !== expected)
+              throw new Error('Candidate source/harness differs from committed HEAD');
+          }
+        };
+        await verifyCandidateSource();
+        javaAuthority = Object.freeze({
+          signal: javaImportAbort.signal,
+          deadline,
+          verify: async () => {
+            if (Date.now() >= deadline || javaImportAbort.signal.aborted) throw new Error('Candidate execution ended');
+            await verifyCandidateSource();
+            await assertDispatchInputBinding(manifestPath, providerInputsPath);
+            for (const [file, expected] of EffectRecord.toEntries(boundSourceHashes))
+              if (hash(await readFile(new URL(file, import.meta.url))) !== expected)
+                throw new Error('Candidate source changed during production import');
+            if (
+              hash(await readFile(binary)) !== candidate.binarySha256 ||
+              hash(await readFile(join(dirname(binary), 'release.json'))) !== candidate.releaseSha256
+            )
+              throw new Error('Candidate payload changed during production import');
+            if (hash(await readFile(providerInputsPath!)) !== provider.manifestSha256)
+              throw new Error('Candidate provider inputs changed');
+          },
+          record: (stage: string, state?: 'preparing' | 'sealed' | 'unknown') => {
+            if (javaImport.stages.length >= 64) throw new Error('Candidate import stage capacity');
+            javaImport.stages.push({stage, elapsedMilliseconds: Date.now() - started});
+            if (javaImport.state === 'unknown' && state === 'sealed')
+              throw new Error('Unknown native preparation cannot become sealed');
+            if (state) javaImport.state = state;
+          },
+        });
+      }
+      const selection = providerCatalog(provider.input, root, fixture.sources, javaAuthority);
+      if (javaAuthority) javaImportTask = selection;
+      const selected = await selection;
+      const setup = await run(['semantic', 'setup', '--json'], {
+        version: 1,
+        callerCwd: project,
+        language: provider.input.language,
+        profile: {version: 1, enabled: true, worktree: pathToFileURL(project).href, catalog: selected.catalog},
+        apply: true,
+      });
+      report.providerChecks = {setup: setup.value, environment: selected.environment};
+      if (!isJsonObject(setup.value) || setup.value.state !== 'configured')
+        throw new Error('Pinned provider setup refused');
+    }
+    const cli = provider ? undefined : await run(['semantic', 'query', '--json'], request);
+    if (cli) {
+      report.cli = cli;
+      report.request = request;
+    }
+    transport = new StdioClientTransport({
+      command: binary,
+      args: ['mcp-server'],
+      cwd: project,
+      env: environment,
+      stderr: 'pipe',
+      maxBufferSize: 2 * 1024 * 1024,
+    });
+    close = observeCandidateTransport(transport, pid => {
+      children.set(pid, {kill: () => process.kill(pid, 'SIGKILL')});
+    });
+    let stderrBytes = 0,
+      diagnostics = '',
+      stderrExceeded = false;
+    transport.stderr?.on('data', (chunk: Buffer) => {
+      stderrBytes += chunk.length;
+      if (stderrBytes <= 65536) diagnostics += chunk.toString();
+      else {
+        stderrExceeded = true;
+        void close?.close().catch(() => undefined);
+      }
+    });
+    client = new Client({name: 'threadnote-p11-qualification', version: '1.0.0'});
+    await within(client.connect(transport), deadline - Date.now());
+    if (provider) {
+      const branches: unknown[] = [];
+      const setup = report.providerChecks;
+      report.providerChecks = {setup, navigation: {status: 'observing', branches, fullScenarioQualified: false}};
+      await runProviderReadiness(provider.input, project, fixture.sources, run, client, within, deadline, branches);
+      await runProviderNavigation(provider.input, project, fixture.sources, run, client, within, deadline, branches);
+      await runOwnedBufferFixture(provider.input, project, fixture.sources, run, client, within, deadline, branches);
+      const prepared = fixture.action
+        ? await runProviderActionPreview(
+            provider.input,
+            project,
+            fixture.sources,
+            fixture.action,
+            run,
+            client,
+            within,
+            deadline,
+            branches,
+          )
+        : await runProviderPreview(provider.input, project, fixture.sources, run, client, within, deadline, branches);
+      if (!writerFixture)
+        await runContextFixture(provider.input, project, fixture.sources, run, within, deadline, branches, async () => {
+          const gitOptions = {
+            cwd: project,
+            timeout: 5000,
+            env: {...environment, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null'},
+          };
+          await execute('git', ['init', '--quiet', '--object-format=sha1'], gitOptions);
+          await execute('git', ['add', '--', ...EffectRecord.keys(files)], gitOptions);
+          await execute(
+            'git',
+            [
+              '-c',
+              'core.hooksPath=/dev/null',
+              '-c',
+              'commit.gpgsign=false',
+              '-c',
+              'user.name=Threadnote Fixture',
+              '-c',
+              'user.email=fixture@example.invalid',
+              'commit',
+              '-qm',
+              'P11 authored fixture',
+            ],
+            gitOptions,
+          );
+        });
+      if (writerFixture) {
+        branches.push({
+          operation: 'semantic-context-graph-memory-join',
+          status: 'not-run',
+          reason: 'This writer fixture does not exercise the separate context branch',
+          fullScenarioQualified: false,
+        });
+        const written = await runProviderApplication(
+          home,
+          project,
+          fixture.sources,
+          prepared,
+          run,
+          client,
+          within,
+          deadline,
+          branches,
+          report.writerRecords,
+          fixture.action ? {...fixture.sources, [fixture.action.file]: fixture.action.after} : undefined,
+        );
+        expectedFiles = {...files, ...written};
+      }
+      report.providerChecks = {setup, navigation: {status: 'passed', branches, fullScenarioQualified: false}};
+      report.provider.started = true;
+    } else {
+      const response = await within(
+        client.callTool({name: 'semantic_query', arguments: {request, responseFormat: 'dual'}}, undefined, {
+          timeout: Math.max(1, Math.min(5000, deadline - Date.now())),
+        }),
+        deadline - Date.now(),
+      );
+      report.mcp = {pid: transport.pid, response, stderr: diagnostics, stderrBytes};
+      if (!cli || stderrExceeded || !checkMissingProfileTransportParity(cli.value, response))
+        throw new Error('Missing-profile transport contract mismatch');
+    }
+    const finalHashes: Record<string, string> = {};
+    for (const [name, text] of EffectRecord.toEntries(expectedFiles)) {
+      const observed = await readFile(join(project, name), 'utf8');
+      if (observed !== text) throw new Error('Source changed');
+      finalHashes[name] = hash(observed);
+    }
+    report.sourceResult = {files: finalHashes, onlyExpectedAuthoredChanges: writerFixture};
+    if (provider && providerInputsPath) {
+      const after = await readProviderInputs(providerInputsPath);
+      if (after.manifestSha256 !== provider.manifestSha256) throw new Error('Provider input manifest changed');
+    }
+    const paths: string[] = [];
+    const visit = async (directory: string, prefix = '') => {
+      for (const entry of await readdir(directory, {withFileTypes: true})) {
+        const key = prefix + entry.name;
+        paths.push(key);
+        if (entry.isDirectory()) await visit(join(directory, entry.name), key + '/');
+      }
+    };
+    await visit(home);
+    report.homeInventory = paths;
+    if (!provider && EffectArray.some(paths, path => path === 'semantic' || EffectString.startsWith('semantic/')(path)))
+      throw new Error('Unexpected semantic runtime state');
+    report.checks = {
+      ...(provider
+        ? {sameCanonicalEvidence: true}
+        : {sameCanonicalFailure: true, noSemanticProfileAdmissionBootstrapOrSocket: true}),
+      ...(writerFixture ? {onlyExpectedAuthoredSourceChanges: true} : {sourceUnchanged: true}),
+    };
+    report.status = 'passed';
+  } catch (error) {
+    report.failure = candidateFailure(error);
+    report.failureEvidence = candidateFailureEvidence(error, report.sourceHashes);
+  } finally {
+    await finish();
+    signals.dispose();
+  }
+  return report;
+}
+
+function candidateArguments(arguments_: readonly string[]) {
+  return parseArgs({
+    args: [...arguments_],
+    options: {
+      inventory: {type: 'boolean'},
+      'candidate-manifest': {type: 'string'},
+      'provider-inputs': {type: 'string'},
+      'writer-fixture': {type: 'boolean'},
+      'action-fixture': {type: 'boolean'},
+      output: {type: 'string'},
+    },
+    strict: true,
+  });
+}
+
+export async function runQualificationCommand(arguments_: readonly string[] = process.argv.slice(2)) {
+  const {values} = candidateArguments(arguments_);
+  if (!values.output || Boolean(values.inventory) === Boolean(values['candidate-manifest']))
+    throw new Error('Use --inventory OR --candidate-manifest <manifest.json>, and --output <new-report.json>');
+  if (
+    (values['action-fixture'] && !values['writer-fixture']) ||
+    (values['writer-fixture'] && !values['provider-inputs']) ||
+    (values.inventory && (values['provider-inputs'] || values['writer-fixture']))
+  )
+    throw new Error(
+      'Provider/writer fixture requires candidate-manifest; writer-fixture also requires provider-inputs',
+    );
+  const ledger = JSON.parse(
+    await readFile(
+      new URL('../../../../../config/semantic-providers/qualification-lock.json', import.meta.url),
+      'utf8',
+    ),
+  );
+  const inventory = qualificationInventory(ledger);
+  if (values.inventory) {
+    await writeFile(values.output, JSON.stringify(inventory, null, 2) + '\n', {mode: 0o600, flag: 'wx'});
+    process.stdout.write(JSON.stringify(inventory.counts) + '\n');
+  } else if (values['candidate-manifest']) {
+    const report = await runCandidateChecks(
+      values['candidate-manifest'],
+      values.output,
+      values['provider-inputs'],
+      values['writer-fixture'],
+      values['action-fixture'],
+    );
+    // A branch receipt is not a complete scenario or family/platform/client receipt.
+    // There is intentionally no input that promotes caller assertions into qualification.
+    process.stdout.write(
+      JSON.stringify({
+        status: report.status === 'passed' ? 'blocked' : 'failed',
+        receipt: values.output,
+        branch: report.status,
+        fullScenarioQualified: false,
+        ...inventory.counts,
+      }) + '\n',
+    );
+    process.exitCode = report.status === 'passed' ? 2 : 1;
+  }
+}
+
+if (import.meta.main) await runQualificationCommand();

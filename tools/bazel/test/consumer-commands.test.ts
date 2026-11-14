@@ -7,7 +7,10 @@ import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 
 const generation = {headSha: 'head', sourceDigest: 'source', inventoryDigest: 'inventory'};
-const fixture = async (prefix = 'bazel-consumers-') => {
+const fixture = async (
+  prefix = 'bazel-consumers-',
+  targets = [{label: '//:test', kind: 'test', inputs: [], entries: [], env: {}, weight: 1}],
+) => {
   const root = mkdtempSync(join(tmpdir(), prefix));
   mkdirSync(join(root, 'tools/bazel'), {recursive: true});
   mkdirSync(join(root, 'tools/ci'), {recursive: true});
@@ -31,7 +34,7 @@ export async function prepareBazelWorkspace() {
 export async function readPreparedInventory({expectedGeneration} = {}) {
   await prepareBazelWorkspace();
   if (expectedGeneration && JSON.stringify(expectedGeneration) !== JSON.stringify(generation)) throw new Error('generation drift');
-  const inventory = {targets: [{label:'//:test', kind:'test', inputs:[], entries:[], env:{}, weight:1}]};
+  const inventory = {targets: ${JSON.stringify(targets)}};
   await Bun.write('tools/bazel/targets.json', JSON.stringify(inventory));
   await Bun.write('.context/bazel-generated/receipt.json', JSON.stringify({version:2,...generation}));
   return {generation, inventory};
@@ -47,7 +50,7 @@ export async function readPreparedInventory({expectedGeneration} = {}) {
 const run = async (root: string, path: string, args: string[] = [], env: Record<string, string> = {}) => {
   const child = Bun.spawn([process.execPath, path, ...args], {
     cwd: root,
-    env: {...process.env, ...env},
+    env: {...process.env, THREADNOTE_CI_TEST_TMPDIR: undefined, ...env},
     stdout: 'pipe',
     stderr: 'pipe',
   });
@@ -251,7 +254,10 @@ const i=process.argv.indexOf('-o'); if(i>=0) await Bun.write(process.argv[i+1], 
 );
 
 it('executes exactly the approved selected targets after matching preparation and refuses missing identity', async () => {
-  const root = await fixture();
+  const root = await fixture('bazel-consumers-', [
+    {label: '//:test', kind: 'test', inputs: [], entries: [], env: {}, weight: 1},
+    {label: '//:build', kind: 'action', inputs: [], entries: [], env: {}, weight: 1},
+  ]);
   try {
     const executable = join(root, '.context/bazel');
     await Bun.write(
@@ -271,6 +277,43 @@ it('executes exactly the approved selected targets after matching preparation an
     const result = await run(root, 'tools/ci/bazel-run-selected.mjs', [], {FIXTURE_BAZEL_EXECUTABLE: executable});
     expect(result.code, result.stderr).toBe(0);
     expect(await Bun.file(join(root, 'executed.json')).json()).toEqual(['test', '--local_test_jobs=1', '//:test']);
+    const temporaryRoot = join(root, 'private tests');
+    mkdirSync(temporaryRoot);
+    const environment = {FIXTURE_BAZEL_EXECUTABLE: executable, THREADNOTE_CI_TEST_TMPDIR: temporaryRoot};
+    const routed = await run(root, 'tools/ci/bazel-run-selected.mjs', [], environment);
+    expect(routed.code, routed.stderr).toBe(0);
+    expect(await Bun.file(join(root, 'executed.json')).json()).toEqual([
+      'test',
+      '--local_test_jobs=1',
+      `--test_tmpdir=${temporaryRoot}`,
+      '//:test',
+    ]);
+    await Bun.write(
+      join(root, '.context/bazel-selection/selection.json'),
+      JSON.stringify({generation, targets: ['//:build']}),
+    );
+    expect((await run(root, 'tools/ci/bazel-run-selected.mjs', [], environment)).code).toBe(0);
+    expect(await Bun.file(join(root, 'executed.json')).json()).toEqual(['build', '//:build']);
+    expect(
+      (
+        await run(root, 'tools/ci/bazel-run-selected.mjs', [], {
+          ...environment,
+          THREADNOTE_CI_TEST_TMPDIR: 'ignored-by-build',
+        })
+      ).code,
+    ).toBe(0);
+    await Bun.write(
+      join(root, '.context/bazel-selection/selection.json'),
+      JSON.stringify({generation, targets: ['//:test']}),
+    );
+    const invalid = await run(root, 'tools/ci/bazel-run-selected.mjs', [], {
+      ...environment,
+      THREADNOTE_CI_TEST_TMPDIR: 'relative/path',
+    });
+    expect(invalid.code).not.toBe(0);
+    expect(invalid.stderr).toContain('temporary root must be an absolute path');
+    await Bun.write(executable, `#!${process.execPath}\nprocess.exit(19);`);
+    expect((await run(root, 'tools/ci/bazel-run-selected.mjs', [], environment)).code).toBe(19);
     await Bun.write(join(root, '.context/bazel-selection/selection.json'), JSON.stringify({targets: ['//:test']}));
     for (const path of ['tools/ci/bazel-plan-shards.mjs', 'tools/ci/bazel-run-selected.mjs']) {
       const missing = await run(root, path);

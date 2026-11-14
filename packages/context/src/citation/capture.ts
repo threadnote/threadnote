@@ -1,5 +1,7 @@
-import {Array as EffectArray} from 'effect';
-import {Effect, FileSystem, Option, Path, Schema} from 'effect';
+import * as EffectArray from 'effect/Array';
+import * as EffectOption from 'effect/Option';
+import * as EffectString from 'effect/String';
+import {Clock, Effect, Exit, FileSystem, Option, Path, Schema} from 'effect';
 import {
   CODE_GRAPH_SOURCE_SPAN_CANONICALIZATION_V1,
   createCodeGraphSourceSpanCanonicalizer,
@@ -33,15 +35,10 @@ import {
   type MemoryCodeCitationV1,
 } from '@threadnote/memory/code/citation';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import * as EffectString from 'effect/String';
-import * as Effect2 from 'effect';
-
 const LOCAL_SYMBOL_REF = /^cgs_(?:[0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{64})$/u;
 const QUALIFIED_SYMBOL_REF = /^cgr_[0-9a-f]{40}$/u;
-
 export const MEMORY_CODE_CITATION_GRAPH_PREPARATION_COMMAND = 'threadnote graph index --no-vectors' as const;
 export const MEMORY_CODE_CITATION_WORKSET_PREPARATION_COMMAND = 'threadnote workset prepare' as const;
-
 export type MemoryCodeCitationCaptureRecoveryCode = 'exact-current-evidence-unavailable' | 'ready-graph-unavailable';
 export type MemoryCodeCitationCaptureFailureCode = 'code-reference-unresolved' | 'outside-project-graph';
 
@@ -62,7 +59,6 @@ export type MemoryCodeCitationGraphPreparationV1 =
       readonly command: typeof MEMORY_CODE_CITATION_WORKSET_PREPARATION_COMMAND;
       readonly target: 'workset';
     };
-
 export type MemoryCodeCitationCaptureRecoveryV1 =
   | {
       readonly code: MemoryCodeCitationCaptureRecoveryCode;
@@ -93,12 +89,10 @@ export type MemoryCodeCitationCaptureRecoveryV1 =
       readonly type: 'memory-code-citation-capture-recovery';
       readonly version: 1;
     };
-
 export interface ExpectedMemoryCodeCitationCallerIdentity {
   readonly repositoryId: string;
   readonly worktreeId: string;
 }
-
 /** Private proof that a deferred capture still targets its original project graph. */
 export interface MemoryCodeCitationProjectScopeReceiptV1 {
   readonly closureDigest: string;
@@ -106,7 +100,6 @@ export interface MemoryCodeCitationProjectScopeReceiptV1 {
   readonly project: string;
   readonly scopeKey: string;
 }
-
 export type MemoryCodeCitationProjectScopeExpectationV1 =
   MemoryCodeCitationProjectScopeReceiptV1 | {readonly kind: 'full'};
 
@@ -126,7 +119,6 @@ export function memoryCodeCitationProjectScopeReceipt(
     scopeKey: selection.scope.scopeKey,
   };
 }
-
 export function memoryCodeCitationProjectScopeMatches(
   status: CodeGraphStatus,
   expected: MemoryCodeCitationCaptureScopeExpectationV1,
@@ -142,7 +134,6 @@ export function memoryCodeCitationProjectScopeMatches(
         actual.definitionDigest === expected.definitionDigest &&
         actual.closureDigest === expected.closureDigest;
 }
-
 const resolveCodeGraphProjectForCaller = Effect.fn('memoryCodeCitation.resolveGraphProject')(function* (
   config: RuntimeConfig,
   callerCwd: string,
@@ -152,10 +143,11 @@ const resolveCodeGraphProjectForCaller = Effect.fn('memoryCodeCitation.resolveGr
   const route = yield* resolveCodeGraphScopeRoute(config.manifestPath, callerCwd, requestedProject).pipe(Effect.option);
   return Option.isSome(route) && route.value.state === 'selected' ? route.value.project.name : requestedProject;
 });
-
 export class MemoryCodeCitationCaptureError extends Schema.TaggedError<
   MemoryCodeCitationCaptureError,
-  {readonly brand: unique symbol}
+  {
+    readonly brand: unique symbol;
+  }
 >()('MemoryCodeCitationCaptureError', {
   failureCode: Schema.optionalKey(Schema.Literals(['code-reference-unresolved', 'outside-project-graph'])),
   message: Schema.String,
@@ -176,16 +168,22 @@ export class MemoryCodeCitationCaptureError extends Schema.TaggedError<
     });
   }
 }
-
 interface CaptureTarget {
   readonly project?: string;
   readonly cwd: string;
   readonly index: number;
   readonly preparation: MemoryCodeCitationGraphPreparationV1;
   readonly ref: string;
-  readonly target: {readonly kind: 'file'; readonly path: string} | {readonly kind: 'symbol'; readonly nodeId: string};
+  readonly target:
+    | {
+        readonly kind: 'file';
+        readonly path: string;
+      }
+    | {
+        readonly kind: 'symbol';
+        readonly nodeId: string;
+      };
 }
-
 /**
  * Capture immutable code evidence only from an already-published, exact-current
  * graph. This path never attaches, indexes, refreshes, or requests maintenance.
@@ -223,23 +221,13 @@ export const captureMemoryCodeCitations = Effect.fn('memoryCodeCitation.capture'
   if (!path.isAbsolute(input.callerCwd)) {
     return yield* MemoryCodeCitationCaptureError.of('Code citation callerCwd must be absolute.');
   }
-
-  const invalidQualifiedRef = Option.getOrUndefined(
-    EffectArray.findFirst(
-      refs,
-      __effectArrayValue =>
-        !!(ref => Effect2.pipe(ref, EffectString.startsWith('cgr_')) && !QUALIFIED_SYMBOL_REF.test(ref))(
-          __effectArrayValue,
-        ),
-    ),
+  const invalidQualifiedRef = EffectOption.getOrUndefined(
+    EffectArray.findFirst(refs, ref => EffectString.startsWith('cgr_')(ref) && !QUALIFIED_SYMBOL_REF.test(ref)),
   );
   if (invalidQualifiedRef !== undefined) {
     return yield* MemoryCodeCitationCaptureError.of(`Invalid qualified code graph reference: ${invalidQualifiedRef}.`);
   }
-  const qualifiedRefs = EffectArray.filter(
-    refs,
-    (ref, __effectArrayIndex) => __effectArrayIndex in refs && QUALIFIED_SYMBOL_REF.test(ref),
-  );
+  const qualifiedRefs = EffectArray.filter(refs, ref => QUALIFIED_SYMBOL_REF.test(ref));
   // Local groups already fence the caller before and after capture. Qualified
   // references can target another checkout, so they need a separate caller fence.
   const fenceCallerSeparately =
@@ -258,7 +246,6 @@ export const captureMemoryCodeCitations = Effect.fn('memoryCodeCitation.capture'
     if (input.expectedCallerIdentity) yield* requireExpectedCallerIdentity(callerBefore, input.expectedCallerIdentity);
     if (input.expectedProjectScope) yield* requireExpectedProjectScope(callerBefore, input.expectedProjectScope);
   }
-
   const qualifiedTargets = yield* resolveCodeGraphQualifiedRefTargets(
     config,
     qualifiedRefs,
@@ -305,17 +292,67 @@ export const captureMemoryCodeCitations = Effect.fn('memoryCodeCitation.capture'
     if (input.expectedCallerIdentity) yield* requireExpectedCallerIdentity(callerAfter, input.expectedCallerIdentity);
     if (input.expectedProjectScope) yield* requireExpectedProjectScope(callerAfter, input.expectedProjectScope);
   }
-  const ordered = capturedGroups.flat().sort((left, right) => left.index - right.index);
-  const seen = new Set<string>();
-  const citations: MemoryCodeCitationV1[] = [];
-  for (const item of ordered) {
-    if (seen.has(item.citation.id)) continue;
-    seen.add(item.citation.id);
-    citations.push(item.citation);
-  }
-  return citations;
+  return orderedCitations(capturedGroups.flat());
 });
-
+function orderedCitations(
+  captured: readonly {
+    readonly index: number;
+    readonly citation: MemoryCodeCitationV1;
+  }[],
+) {
+  const ordered = [...captured].sort((left, right) => left.index - right.index);
+  const seen = new Set<string>();
+  return EffectArray.flatMap(ordered, item => {
+    if (seen.has(item.citation.id)) return [];
+    seen.add(item.citation.id);
+    return [item.citation];
+  });
+}
+/** Internal prepare-only continuation; no result escapes its live local source fence. */
+export function withLocalMemoryCodeCitations<A, E, R>(
+  config: RuntimeConfig,
+  input: {
+    readonly callerCwd: string;
+    readonly project?: string;
+    readonly refs: readonly string[];
+    readonly expectedProjectScope?: MemoryCodeCitationCaptureScopeExpectationV1;
+  },
+  use: (citations: readonly MemoryCodeCitationV1[]) => Effect.Effect<A, E, R>,
+) {
+  return Effect.gen(function* () {
+    const refs = yield* Effect.try({
+      try: () => normalizeMemoryCodeRefs(input.refs),
+      catch: cause => captureError('code references', cause),
+    });
+    if (!refs.length) return yield* use([]);
+    if (EffectArray.some(refs, ref => EffectString.startsWith('cgr_')(ref)))
+      return yield* MemoryCodeCitationCaptureError.of('Projection capture requires local code references.');
+    const path = yield* Path.Path;
+    if (!path.isAbsolute(input.callerCwd))
+      return yield* MemoryCodeCitationCaptureError.of('Code citation callerCwd must be absolute.');
+    const project =
+      config.manifestSource === 'bundled-example'
+        ? undefined
+        : yield* resolveCodeGraphProjectForCaller(config, input.callerCwd, input.project);
+    const targets = yield* Effect.forEach(refs, (ref, index) =>
+      resolveCaptureTarget(input.callerCwd, ref, index, new Map(), project),
+    );
+    return yield* withCapturedRepositoryGroup(
+      config,
+      input.callerCwd,
+      targets,
+      captured => use(orderedCitations(captured)),
+      undefined,
+      input.expectedProjectScope,
+      false,
+      project,
+      false,
+      undefined,
+      0,
+      true,
+    );
+  });
+}
 function resolveCaptureTarget(
   callerCwd: string,
   ref: string,
@@ -353,7 +390,7 @@ function resolveCaptureTarget(
         target: {kind: 'symbol', nodeId: ref},
       } satisfies CaptureTarget;
     }
-    if (Effect2.pipe(ref, EffectString.startsWith('cgs_'))) {
+    if (EffectString.startsWith('cgs_')(ref)) {
       return yield* MemoryCodeCitationCaptureError.of(`Invalid local code graph reference: ${ref}.`);
     }
     return {
@@ -366,8 +403,7 @@ function resolveCaptureTarget(
     } satisfies CaptureTarget;
   });
 }
-
-const captureRepositoryGroup = Effect.fn('memoryCodeCitation.captureRepositoryGroup')(function* (
+const captureRepositoryGroup = (
   config: RuntimeConfig,
   cwd: string,
   targets: readonly CaptureTarget[],
@@ -378,271 +414,337 @@ const captureRepositoryGroup = Effect.fn('memoryCodeCitation.captureRepositoryGr
   planOnly = false,
   retainedAt?: string,
   writerWaitTimeoutMilliseconds?: number,
+) =>
+  withCapturedRepositoryGroup(
+    config,
+    cwd,
+    targets,
+    Effect.succeed,
+    expectedCallerIdentity,
+    expectedProjectScope,
+    omitUnresolved,
+    project,
+    planOnly,
+    retainedAt,
+    writerWaitTimeoutMilliseconds,
+  );
+function withCapturedRepositoryGroup<A, E, R>(
+  config: RuntimeConfig,
+  cwd: string,
+  targets: readonly CaptureTarget[],
+  use: (
+    captured: readonly {
+      readonly index: number;
+      readonly citation: MemoryCodeCitationV1;
+    }[],
+  ) => Effect.Effect<A, E, R>,
+  expectedCallerIdentity?: ExpectedMemoryCodeCitationCallerIdentity,
+  expectedProjectScope?: MemoryCodeCitationCaptureScopeExpectationV1,
+  omitUnresolved = false,
+  project?: string,
+  planOnly = false,
+  retainedAt?: string,
+  writerWaitTimeoutMilliseconds?: number,
+  enforceLeaseBudget = false,
 ) {
-  const query = yield* CodeGraphQueryService;
-  const store = yield* CodeGraphStore;
-  const fs = yield* FileSystem.FileSystem;
-  // A copied ready snapshot needs a fresh closing observation, even inside a caller read transaction.
-  const readReadyEvidence = query.withStatusSession ? store.readReadySnapshotCitationEvidence : undefined;
-  const before = yield* query
-    .status(config.agentContextHome, cwd, {
-      project,
-      manifestPath: config.manifestPath,
-      observeWorktree: true,
-      requestMaintenance: false,
-    })
-    .pipe(Effect.mapError(error => captureError(cwd, error)));
-  if (expectedCallerIdentity) yield* requireExpectedCallerIdentity(before, expectedCallerIdentity);
-  if (expectedProjectScope) yield* requireExpectedProjectScope(before, expectedProjectScope);
-  const snapshot = yield* Effect.try({
-    try: () => requireExactCurrentSnapshot(before, captureGroupPreparation(targets)),
-    catch: cause => captureError(cwd, cause),
-  });
-  return yield* Effect.scoped(
-    Effect.gen(function* () {
-      // Request adapters bound uninterruptible scoped lease admission/release;
-      // internal maintenance retains its existing writer-wait contract. A
-      // denied release leaves only the existing bounded, expiring lease.
-      const leaseWriterOptions = {waitTimeoutMilliseconds: writerWaitTimeoutMilliseconds};
-      if (!readReadyEvidence)
-        yield* Effect.acquireRelease(
-          store
-            .acquireSnapshotLease(before.databasePath, snapshot.id, 60_000, leaseWriterOptions)
-            .pipe(
-              Effect.mapError(error =>
-                Schema.is(CodeGraphStoreBusyError)(error)
-                  ? MemoryCodeCitationCaptureError.of(
-                      'The observed graph is ready, but citation storage is busy. Retry this same capture after the graph writer is available; no indexing was started.',
-                      writerBusyRecovery(before),
-                      undefined,
-                      true,
-                    )
-                  : captureError(cwd, error),
-              ),
-            ),
-          token => store.releaseSnapshotLease(before.databasePath, token, leaseWriterOptions).pipe(Effect.ignore),
-        );
-      const repositoryRoot = yield* fs
-        .realPath(before.identity.repoRoot)
-        .pipe(Effect.mapError(error => captureError(before.identity.repoRoot, error)));
-
-      const fileTargets = EffectArray.filter(
-        targets,
-        (target): target is CaptureTarget & {readonly target: {readonly kind: 'file'; readonly path: string}} =>
-          target.target.kind === 'file',
-      );
-      const symbolTargets = EffectArray.filter(
-        targets,
-        (target): target is CaptureTarget & {readonly target: {readonly kind: 'symbol'; readonly nodeId: string}} =>
-          target.target.kind === 'symbol',
-      );
-      const request = {
-        paths: EffectArray.map(fileTargets, target => target.target.path),
-        symbolIds: EffectArray.map(symbolTargets, target => target.target.nodeId),
-      };
-      const evidence = yield* (
-        readReadyEvidence
-          ? readReadyEvidence(before.databasePath, snapshot, request)
-          : store.effectiveSnapshotCitationEvidence(before.databasePath, snapshot.id, request)
-      ).pipe(Effect.mapError(error => captureError(cwd, error)));
-      if (evidence === undefined)
-        return yield* MemoryCodeCitationCaptureError.of(
-          'The ready graph changed before citation evidence could be copied. Retry with exact current evidence.',
-          captureRecovery(before, 'exact-current-evidence-unavailable', captureGroupPreparation(targets)),
-        );
-      const files = evidence.filesByPaths;
-      const symbols = evidence.symbolsByIds;
-      const fileByPath = new Map(
-        EffectArray.flatMap(files, observation => (observation.file ? [[observation.path, observation.file]] : [])),
-      );
-      const symbolById = new Map(EffectArray.map(symbols, symbol => [symbol.id, symbol]));
-      const sourceBytes = yield* readCodeGraphCitationSources({
-        objectFormat: before.identity.objectFormat,
-        repositoryRoot,
-        sourceCommit: snapshot.commit,
-        sources: [
-          ...EffectArray.flatMap(fileTargets, target => {
-            const file = fileByPath.get(target.target.path);
-            return file === undefined
-              ? []
-              : [{expectedContentHash: file.contentHash, repositoryPath: file.path, requireBytes: true}];
-          }),
-          ...EffectArray.flatMap(symbolTargets, target => {
-            const symbol = symbolById.get(target.target.nodeId);
-            return symbol === undefined
-              ? []
-              : [{expectedContentHash: symbol.contentHash, repositoryPath: symbol.path, requireBytes: true}];
-          }),
-        ],
-      });
-      const sourceCache = new Map<
-        string,
-        {
-          readonly bytes: Uint8Array;
-          readonly canonicalizer?: ReturnType<typeof createCodeGraphSourceSpanCanonicalizer>;
-        }
-      >();
-      const readSource = (repositoryPath: string, expectedContentHash: string, needsText: boolean) =>
+  return Effect.gen(function* () {
+    const query = yield* CodeGraphQueryService;
+    const store = yield* CodeGraphStore;
+    const fs = yield* FileSystem.FileSystem;
+    // Ready evidence is read on the caller's SQLite session and must still be followed by a fresh fence.
+    const readReadyEvidence = query.withStatusSession ? store.readReadySnapshotCitationEvidence : undefined;
+    const captureAtStatus = (before: CodeGraphStatus) =>
+      Effect.scoped(
         Effect.gen(function* () {
-          const cacheKey = `${repositoryPath}\0${expectedContentHash}`;
-          const cached = sourceCache.get(cacheKey);
-          if (cached && (!needsText || cached.canonicalizer !== undefined)) return cached;
-          const bytes =
-            cached?.bytes ?? sourceBytes.get(codeGraphCitationSourceKey({expectedContentHash, repositoryPath}));
-          if (bytes === undefined) {
-            return yield* MemoryCodeCitationCaptureError.of(
-              `Code citation source changed during capture: ${repositoryPath}.`,
+          if (expectedCallerIdentity) yield* requireExpectedCallerIdentity(before, expectedCallerIdentity);
+          if (expectedProjectScope) yield* requireExpectedProjectScope(before, expectedProjectScope);
+          const snapshot = yield* Effect.try({
+            try: () => requireExactCurrentSnapshot(before, captureGroupPreparation(targets)),
+            catch: cause => captureError(cwd, cause),
+          });
+          // Request adapters bound uninterruptible scoped lease admission/release;
+          // internal maintenance retains its existing writer-wait contract. A
+          // denied release leaves only the existing bounded, expiring lease.
+          const leaseWriterOptions = {waitTimeoutMilliseconds: writerWaitTimeoutMilliseconds};
+          const leaseStartedAt = yield* Clock.monotonicTimeNanos;
+          if (!readReadyEvidence)
+            yield* Effect.acquireRelease(
+              store
+                .acquireSnapshotLease(before.databasePath, snapshot.id, 60_000, leaseWriterOptions)
+                .pipe(
+                  Effect.mapError(error =>
+                    Schema.is(CodeGraphStoreBusyError)(error)
+                      ? MemoryCodeCitationCaptureError.of(
+                          'The observed graph is ready, but citation storage is busy. Retry this same capture after the graph writer is available; no indexing was started.',
+                          writerBusyRecovery(before),
+                          undefined,
+                          true,
+                        )
+                      : captureError(cwd, error),
+                  ),
+                ),
+              token => store.releaseSnapshotLease(before.databasePath, token, leaseWriterOptions).pipe(Effect.ignore),
             );
-          }
-          const source = needsText ? decodeUtf8(bytes) : undefined;
-          if (needsText && source === undefined) {
-            return yield* MemoryCodeCitationCaptureError.of(
-              `Cited symbol source is not valid UTF-8: ${repositoryPath}.`,
+          const leased = Effect.gen(function* () {
+            const repositoryRoot = yield* fs
+              .realPath(before.identity.repoRoot)
+              .pipe(Effect.mapError(error => captureError(before.identity.repoRoot, error)));
+            const fileTargets = EffectArray.filter(
+              targets,
+              (
+                target,
+              ): target is CaptureTarget & {
+                readonly target: {
+                  readonly kind: 'file';
+                  readonly path: string;
+                };
+              } => target.target.kind === 'file',
             );
-          }
-          const loaded = {
-            ...(source === undefined ? {} : {canonicalizer: createCodeGraphSourceSpanCanonicalizer(source)}),
-            bytes,
-          };
-          sourceCache.set(cacheKey, loaded);
-          return loaded;
-        });
-      const captureFileCitation = Effect.fn('memoryCodeCitation.captureFile')(function* (
-        repositoryPath: string,
-        contentHash: string,
-        index: number,
-      ) {
-        yield* readSource(repositoryPath, contentHash, false);
-        return {
-          citation: yield* createCitation({
-            extractorSet: snapshot.extractorSet,
-            fileContentHash: {algorithm: 'sha256', value: contentHash},
-            path: repositoryPath,
-            repositoryId: before.identity.repositoryId,
-            repositoryIdentityKind: before.identity.remoteIdentity ? 'remote' : 'local',
-            sourceCommit: snapshot.commit,
-            sourceDirty: snapshot.dirty,
-            ...(snapshot.graphContentId === undefined ? {} : {sourceGraphContentId: snapshot.graphContentId}),
-            sourceSnapshotId: snapshot.id,
-            target: {kind: 'file'},
-            version: MEMORY_CODE_CITATION_VERSION,
-          }),
-          index,
-        };
-      });
-
-      const results = yield* Effect.forEach(
-        targets,
-        target =>
-          Effect.gen(function* () {
-            if (target.target.kind === 'file') {
-              const file = fileByPath.get(target.target.path);
-              if (!file) {
-                if (
-                  !codeGraphScopeAdmitsPath(
-                    observationFromCodeGraphStatus(before)?.projectScope?.scope,
-                    target.target.path,
-                  )
-                ) {
+            const symbolTargets = EffectArray.filter(
+              targets,
+              (
+                target,
+              ): target is CaptureTarget & {
+                readonly target: {
+                  readonly kind: 'symbol';
+                  readonly nodeId: string;
+                };
+              } => target.target.kind === 'symbol',
+            );
+            const request = {
+              paths: EffectArray.map(fileTargets, target => target.target.path),
+              symbolIds: EffectArray.map(symbolTargets, target => target.target.nodeId),
+            };
+            const evidence = yield* (
+              readReadyEvidence
+                ? readReadyEvidence(before.databasePath, snapshot, request)
+                : store.effectiveSnapshotCitationEvidence(before.databasePath, snapshot.id, request)
+            ).pipe(Effect.mapError(error => captureError(cwd, error)));
+            if (evidence === undefined)
+              return yield* MemoryCodeCitationCaptureError.of(
+                'The ready graph changed before citation evidence could be copied. Retry with exact current evidence.',
+                captureRecovery(before, 'exact-current-evidence-unavailable', captureGroupPreparation(targets)),
+              );
+            const files = evidence.filesByPaths;
+            const symbols = evidence.symbolsByIds;
+            const fileByPath = new Map(
+              EffectArray.flatMap(files, observation =>
+                observation.file ? [[observation.path, observation.file]] : [],
+              ),
+            );
+            const symbolById = new Map(EffectArray.map(symbols, symbol => [symbol.id, symbol]));
+            const sourceBytes = yield* readCodeGraphCitationSources({
+              objectFormat: before.identity.objectFormat,
+              repositoryRoot,
+              sourceCommit: snapshot.commit,
+              sources: [
+                ...EffectArray.flatMap(fileTargets, target => {
+                  const file = fileByPath.get(target.target.path);
+                  return file === undefined
+                    ? []
+                    : [{expectedContentHash: file.contentHash, repositoryPath: file.path, requireBytes: true}];
+                }),
+                ...EffectArray.flatMap(symbolTargets, target => {
+                  const symbol = symbolById.get(target.target.nodeId);
+                  return symbol === undefined
+                    ? []
+                    : [{expectedContentHash: symbol.contentHash, repositoryPath: symbol.path, requireBytes: true}];
+                }),
+              ],
+            });
+            const sourceCache = new Map<
+              string,
+              {
+                readonly bytes: Uint8Array;
+                readonly canonicalizer?: ReturnType<typeof createCodeGraphSourceSpanCanonicalizer>;
+              }
+            >();
+            const readSource = (repositoryPath: string, expectedContentHash: string, needsText: boolean) =>
+              Effect.gen(function* () {
+                const cacheKey = `${repositoryPath}\0${expectedContentHash}`;
+                const cached = sourceCache.get(cacheKey);
+                if (cached && (!needsText || cached.canonicalizer !== undefined)) return cached;
+                const bytes =
+                  cached?.bytes ?? sourceBytes.get(codeGraphCitationSourceKey({expectedContentHash, repositoryPath}));
+                if (bytes === undefined) {
                   return yield* MemoryCodeCitationCaptureError.of(
-                    `Code citation path is outside the selected project graph: ${target.target.path}. Select a project that includes this path or a full-repository graph.`,
-                    undefined,
-                    'outside-project-graph',
+                    `Code citation source changed during capture: ${repositoryPath}.`,
                   );
                 }
-                if (omitUnresolved) return undefined;
-                const message =
-                  codeCitationFileEligibility(target.target.path) === 'unsupported'
-                    ? `Code citation path is not a supported graph source: ${target.target.path}. Keep it in ordinary prose or cite an indexed source file.`
-                    : `Code citation path is not present in the exact current graph: ${target.target.path}. Use a graph-indexed repository-relative path.`;
-                return yield* MemoryCodeCitationCaptureError.of(message, undefined, 'code-reference-unresolved');
-              }
-              return yield* captureFileCitation(file.path, file.contentHash, target.index);
+                const source = needsText ? decodeUtf8(bytes) : undefined;
+                if (needsText && source === undefined) {
+                  return yield* MemoryCodeCitationCaptureError.of(
+                    `Cited symbol source is not valid UTF-8: ${repositoryPath}.`,
+                  );
+                }
+                const loaded = {
+                  ...(source === undefined ? {} : {canonicalizer: createCodeGraphSourceSpanCanonicalizer(source)}),
+                  bytes,
+                };
+                sourceCache.set(cacheKey, loaded);
+                return loaded;
+              });
+            const captureFileCitation = Effect.fn('memoryCodeCitation.captureFile')(function* (
+              repositoryPath: string,
+              contentHash: string,
+              index: number,
+            ) {
+              yield* readSource(repositoryPath, contentHash, false);
+              return {
+                citation: yield* createCitation({
+                  extractorSet: snapshot.extractorSet,
+                  fileContentHash: {algorithm: 'sha256', value: contentHash},
+                  path: repositoryPath,
+                  repositoryId: before.identity.repositoryId,
+                  repositoryIdentityKind: before.identity.remoteIdentity ? 'remote' : 'local',
+                  sourceCommit: snapshot.commit,
+                  sourceDirty: snapshot.dirty,
+                  ...(snapshot.graphContentId === undefined ? {} : {sourceGraphContentId: snapshot.graphContentId}),
+                  sourceSnapshotId: snapshot.id,
+                  target: {kind: 'file'},
+                  version: MEMORY_CODE_CITATION_VERSION,
+                }),
+                index,
+              };
+            });
+            const results = yield* Effect.forEach(
+              targets,
+              target =>
+                Effect.gen(function* () {
+                  if (target.target.kind === 'file') {
+                    const file = fileByPath.get(target.target.path);
+                    if (!file) {
+                      if (
+                        !codeGraphScopeAdmitsPath(
+                          observationFromCodeGraphStatus(before)?.projectScope?.scope,
+                          target.target.path,
+                        )
+                      ) {
+                        return yield* MemoryCodeCitationCaptureError.of(
+                          `Code citation path is outside the selected project graph: ${target.target.path}. Select a project that includes this path or a full-repository graph.`,
+                          undefined,
+                          'outside-project-graph',
+                        );
+                      }
+                      if (omitUnresolved) return undefined;
+                      return yield* MemoryCodeCitationCaptureError.of(
+                        codeCitationFileEligibility(target.target.path) === 'unsupported'
+                          ? `Code citation path is not a supported graph source: ${target.target.path}. Keep it in ordinary prose or cite an indexed source file.`
+                          : `Code citation path is not present in the exact current graph: ${target.target.path}. Use a graph-indexed repository-relative path.`,
+                        undefined,
+                        'code-reference-unresolved',
+                      );
+                    }
+                    return yield* captureFileCitation(file.path, file.contentHash, target.index);
+                  }
+                  const symbol = symbolById.get(target.target.nodeId);
+                  if (!symbol) {
+                    if (omitUnresolved) return undefined;
+                    return yield* MemoryCodeCitationCaptureError.of(
+                      `Code graph symbol is absent from the exact current graph: ${target.target.nodeId}.`,
+                      undefined,
+                      'code-reference-unresolved',
+                    );
+                  }
+                  if (isFileRootSymbol(symbol)) {
+                    return yield* captureFileCitation(symbol.path, symbol.contentHash, target.index);
+                  }
+                  return yield* captureSymbolCitation(before, snapshot, symbol, target.index, readSource);
+                }).pipe(Effect.mapError(error => captureError(target.ref, error))),
+              {concurrency: 4},
+            );
+            const capturedTargets = EffectArray.filter(
+              results,
+              (result): result is NonNullable<(typeof results)[number]> => result !== undefined,
+            );
+            // Complete preservation before releasing the snapshot lease or returning
+            // anchors: dirty source has no clean-Git recovery after worktree removal.
+            const retainedTargets: typeof capturedTargets = [];
+            for (const captured of capturedTargets) {
+              const {citation} = captured;
+              const bytes = sourceBytes.get(
+                codeGraphCitationSourceKey({
+                  expectedContentHash: citation.fileContentHash.value,
+                  repositoryPath: citation.path,
+                }),
+              );
+              const retained =
+                bytes !== undefined &&
+                (planOnly ||
+                  (yield* retainCodeGraphCitationEvidence({
+                    bytes,
+                    checkoutId: before.identity.checkoutId,
+                    objectFormat: before.identity.objectFormat,
+                    referenceId: sha256HexSync(citation.id),
+                    source: {
+                      extractorSet: citation.extractorSet,
+                      fileContentHash: citation.fileContentHash.value,
+                      path: citation.path,
+                      repositoryId: citation.repositoryId,
+                      sourceCommit: citation.sourceCommit,
+                      sourceDirty: citation.sourceDirty,
+                      sourceSnapshotId: citation.sourceSnapshotId,
+                    },
+                    threadnoteHome: config.agentContextHome,
+                    ...(retainedAt === undefined ? {} : {retainedAt}),
+                  })));
+              retainedTargets.push({
+                ...captured,
+                citation: assertMemoryCodeCitation({
+                  ...citation,
+                  evidenceRetention: retained ? 'capsule-retained' : 'unavailable',
+                }),
+              });
             }
-            const symbol = symbolById.get(target.target.nodeId);
-            if (!symbol) {
-              if (omitUnresolved) return undefined;
+            // Capture callback failures as values so the outer capture error adapter
+            // cannot relabel body, ownership, revision or relation failures.
+            const result = yield* Effect.exit(use(retainedTargets));
+            if (Exit.isFailure(result)) return result;
+            if (enforceLeaseBudget && Number((yield* Clock.monotonicTimeNanos) - leaseStartedAt) / 1_000_000 >= 60_000)
+              return yield* MemoryCodeCitationCaptureError.of('Projection citation lease expired.');
+            const closingOptions = {
+              project,
+              manifestPath: config.manifestPath,
+              observeWorktree: true,
+              requestMaintenance: false,
+            };
+            const after = yield* (
+              readReadyEvidence && query.withStatusSession
+                ? query.withStatusSession(config.agentContextHome, cwd, undefined, closingOptions, Effect.succeed)
+                : query.status(config.agentContextHome, cwd, closingOptions)
+            ).pipe(Effect.mapError(error => captureError(cwd, error)));
+            if (!sameExactSnapshot(before, after)) {
               return yield* MemoryCodeCitationCaptureError.of(
-                `Code graph symbol is absent from the exact current graph: ${target.target.nodeId}.`,
-                undefined,
-                'code-reference-unresolved',
+                'Repository graph or worktree changed while code citations were captured.',
               );
             }
-            if (isFileRootSymbol(symbol)) {
-              return yield* captureFileCitation(symbol.path, symbol.contentHash, target.index);
-            }
-            return yield* captureSymbolCitation(before, snapshot, symbol, target.index, readSource);
-          }).pipe(Effect.mapError(error => captureError(target.ref, error))),
-        {concurrency: 4},
+            if (expectedCallerIdentity) yield* requireExpectedCallerIdentity(after, expectedCallerIdentity);
+            if (expectedProjectScope) yield* requireExpectedProjectScope(after, expectedProjectScope);
+            if (enforceLeaseBudget && Number((yield* Clock.monotonicTimeNanos) - leaseStartedAt) / 1000000 >= 60000)
+              return yield* MemoryCodeCitationCaptureError.of('Projection citation lease expired.');
+            return result;
+          });
+          return yield* enforceLeaseBudget
+            ? leased.pipe(
+                Effect.timeoutOrElse({
+                  duration: Math.max(0, 60000 - Number((yield* Clock.monotonicTimeNanos) - leaseStartedAt) / 1000000),
+                  orElse: () => MemoryCodeCitationCaptureError.of('Projection citation lease expired.'),
+                }),
+              )
+            : leased;
+        }),
       );
-      const capturedTargets = EffectArray.filter(
-        results,
-        (result): result is NonNullable<(typeof results)[number]> => result !== undefined,
-      );
-
-      // The atomic copy has closed before retention. Dirty source still requires
-      // preservation before returning anchors because Git cannot recover it.
-      const retainedTargets: typeof capturedTargets = [];
-      for (const captured of capturedTargets) {
-        const {citation} = captured;
-        const bytes = sourceBytes.get(
-          codeGraphCitationSourceKey({
-            expectedContentHash: citation.fileContentHash.value,
-            repositoryPath: citation.path,
-          }),
-        );
-        const retained =
-          bytes !== undefined &&
-          (planOnly ||
-            (yield* retainCodeGraphCitationEvidence({
-              bytes,
-              checkoutId: before.identity.checkoutId,
-              objectFormat: before.identity.objectFormat,
-              referenceId: sha256HexSync(citation.id),
-              source: {
-                extractorSet: citation.extractorSet,
-                fileContentHash: citation.fileContentHash.value,
-                path: citation.path,
-                repositoryId: citation.repositoryId,
-                sourceCommit: citation.sourceCommit,
-                sourceDirty: citation.sourceDirty,
-                sourceSnapshotId: citation.sourceSnapshotId,
-              },
-              threadnoteHome: config.agentContextHome,
-              ...(retainedAt === undefined ? {} : {retainedAt}),
-            })));
-        retainedTargets.push({
-          ...captured,
-          citation: assertMemoryCodeCitation({
-            ...citation,
-            evidenceRetention: retained ? 'capsule-retained' : 'unavailable',
-          }),
-        });
-      }
-
-      const closingOptions = {
-        project,
-        manifestPath: config.manifestPath,
-        observeWorktree: true,
-        requestMaintenance: false,
-      };
-      const after = yield* (
-        readReadyEvidence && query.withStatusSession
-          ? query.withStatusSession(config.agentContextHome, cwd, undefined, closingOptions, Effect.succeed)
-          : query.status(config.agentContextHome, cwd, closingOptions)
-      ).pipe(Effect.mapError(error => captureError(cwd, error)));
-      if (!sameExactSnapshot(before, after)) {
-        return yield* MemoryCodeCitationCaptureError.of(
-          'Repository graph or worktree changed while code citations were captured.',
-        );
-      }
-      if (expectedCallerIdentity) yield* requireExpectedCallerIdentity(after, expectedCallerIdentity);
-      if (expectedProjectScope) yield* requireExpectedProjectScope(after, expectedProjectScope);
-      return retainedTargets;
-    }),
-  );
-});
-
+    const options = {project, manifestPath: config.manifestPath, observeWorktree: true, requestMaintenance: false};
+    // Retain one repository session through this capture only. The independent
+    // closing status above still reobserves identity, scope, worktree and snapshot.
+    const result = yield* (
+      query.withStatusSession
+        ? query.withStatusSession(config.agentContextHome, cwd, undefined, options, captureAtStatus)
+        : query.status(config.agentContextHome, cwd, options).pipe(Effect.flatMap(captureAtStatus))
+    ).pipe(Effect.mapError(error => captureError(cwd, error)));
+    return yield* Exit.isFailure(result) ? Effect.failCause(result.cause) : Effect.succeed(result.value);
+  }).pipe(Effect.withSpan('memoryCodeCitation.captureRepositoryGroup'));
+}
 const requireExpectedCallerIdentity = Effect.fn('memoryCodeCitation.requireExpectedCallerIdentity')(function* (
   status: CodeGraphStatus,
   expected: ExpectedMemoryCodeCitationCallerIdentity,
@@ -651,7 +753,6 @@ const requireExpectedCallerIdentity = Effect.fn('memoryCodeCitation.requireExpec
     return yield* MemoryCodeCitationCaptureError.of('Code citation caller repository identity changed during capture.');
   }
 });
-
 const requireExpectedProjectScope = Effect.fn('memoryCodeCitation.requireExpectedProjectScope')(function* (
   status: CodeGraphStatus,
   expected: MemoryCodeCitationCaptureScopeExpectationV1,
@@ -664,11 +765,9 @@ const requireExpectedProjectScope = Effect.fn('memoryCodeCitation.requireExpecte
     );
   }
 });
-
 function isFileRootSymbol(symbol: CodeGraphSymbol): boolean {
   return ['asset', 'document', 'file', 'module', 'resource'].includes(symbol.kind);
 }
-
 const captureSymbolCitation = Effect.fn('memoryCodeCitation.captureSymbol')(function* (
   status: CodeGraphStatus,
   snapshot: NonNullable<CodeGraphStatus['readySnapshot']>,
@@ -723,22 +822,18 @@ const captureSymbolCitation = Effect.fn('memoryCodeCitation.captureSymbol')(func
     index,
   };
 });
-
 export function normalizeMemoryCodeRefs(refs: readonly string[]): readonly string[] {
   const seen = new Set<string>();
   const normalized: string[] = [];
   for (const raw of refs) {
-    const ref = Effect2.pipe(raw, EffectString.trim);
+    const ref = EffectString.trim(raw);
     if (!ref) throw MemoryCodeCitationCaptureError.of('Code references must not be empty.');
     if (
       !LOCAL_SYMBOL_REF.test(ref) &&
       !QUALIFIED_SYMBOL_REF.test(ref) &&
-      (Effect2.pipe(ref, EffectString.startsWith('/')) ||
-        Effect2.pipe(ref, EffectString.includes('\\')) ||
-        EffectArray.some(
-          Effect2.pipe(ref, EffectString.split('/')),
-          segment => !segment || segment === '.' || segment === '..',
-        ))
+      (EffectString.startsWith('/')(ref) ||
+        EffectString.includes('\\')(ref) ||
+        EffectArray.some(EffectString.split('/')(ref), segment => !segment || segment === '.' || segment === '..'))
     ) {
       throw MemoryCodeCitationCaptureError.of(`Code reference must be a safe repository-relative path: ${ref}.`);
     }
@@ -752,14 +847,12 @@ export function normalizeMemoryCodeRefs(refs: readonly string[]): readonly strin
   }
   return normalized;
 }
-
 function createCitation(input: Parameters<typeof createMemoryCodeCitation>[0]) {
   return Effect.try({
     try: () => createMemoryCodeCitation(input),
     catch: cause => captureError('canonical citation metadata', cause),
   });
 }
-
 function requireExactCurrentSnapshot(
   status: CodeGraphStatus,
   preparation: MemoryCodeCitationGraphPreparationV1,
@@ -778,7 +871,6 @@ function requireExactCurrentSnapshot(
   }
   return status.readySnapshot;
 }
-
 function captureRecovery(
   status: CodeGraphStatus,
   code: MemoryCodeCitationCaptureRecoveryCode,
@@ -800,7 +892,6 @@ function captureRecovery(
     version: 1,
   };
 }
-
 function writerBusyRecovery(status: CodeGraphStatus): MemoryCodeCitationCaptureRecoveryV1 {
   return {
     code: 'graph-writer-busy',
@@ -817,7 +908,6 @@ function writerBusyRecovery(status: CodeGraphStatus): MemoryCodeCitationCaptureR
     version: 1,
   };
 }
-
 function callerGraphPreparation(): MemoryCodeCitationGraphPreparationV1 {
   return {
     action: 'index-current-graph',
@@ -826,7 +916,6 @@ function callerGraphPreparation(): MemoryCodeCitationGraphPreparationV1 {
     target: 'callerCwd',
   };
 }
-
 function worksetGraphPreparation(worksetName: string): MemoryCodeCitationGraphPreparationV1 {
   return {
     action: 'prepare-workset',
@@ -835,20 +924,17 @@ function worksetGraphPreparation(worksetName: string): MemoryCodeCitationGraphPr
     target: 'workset',
   };
 }
-
 function captureGroupPreparation(targets: readonly CaptureTarget[]): MemoryCodeCitationGraphPreparationV1 {
   return (
-    Option.getOrUndefined(EffectArray.findFirst(targets, target => target.preparation.target === 'callerCwd'))
+    EffectOption.getOrUndefined(EffectArray.findFirst(targets, target => target.preparation.target === 'callerCwd'))
       ?.preparation ?? targets[0].preparation
   );
 }
-
 function captureRecoveryMessage(preparation: MemoryCodeCitationGraphPreparationV1): string {
   return preparation.target === 'callerCwd'
     ? `run \`${preparation.command}\` from callerCwd, then retry.`
     : `prepare the routed Workset ${JSON.stringify(preparation.arguments[0])} with \`${preparation.command} <workset>\`, then retry.`;
 }
-
 function sameExactSnapshot(before: CodeGraphStatus, after: CodeGraphStatus): boolean {
   return (
     !after.stale &&
@@ -859,7 +945,6 @@ function sameExactSnapshot(before: CodeGraphStatus, after: CodeGraphStatus): boo
     before.readySnapshot?.id === after.readySnapshot?.id
   );
 }
-
 function captureError(target: string, cause: unknown): MemoryCodeCitationCaptureError {
   return Schema.is(MemoryCodeCitationCaptureError)(cause)
     ? cause

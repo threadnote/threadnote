@@ -1,3 +1,5 @@
+import {validateBodyDiscovery} from '../languages/body_discovery.js';
+import {parseNavigationFacts} from '../navigation_facts.js';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Predicate, Schema} from 'effect';
 import {parseCodeGraphMonikerV1} from '../cross_repository/monikers.js';
@@ -58,7 +60,11 @@ export class CodeGraphFactValidationError extends Schema.TaggedError<
 /** Exact recursive validator for parser facts crossing a durable or portable boundary. */
 export function parseCodeGraphFileFacts(value: unknown): CodeGraphFileFacts {
   const input = object(value, 'Code graph file facts');
-  exactKeys(input, ['diagnostics', 'edges', 'path', 'symbols'], ['derivationInputs', 'monikers', 'references']);
+  exactKeys(
+    input,
+    ['diagnostics', 'edges', 'path', 'symbols'],
+    ['derivationInputs', 'monikers', 'references', 'navigationFacts'],
+  );
   const path = repositoryPath(input.path, 'File-fact path');
   const diagnostics = stringArray(input.diagnostics, 'File-fact diagnostics', TEXT_LENGTH_MAXIMUM);
   const symbols = EffectArray.map(array(input.symbols, 'File-fact symbols'), parseSymbol);
@@ -78,8 +84,11 @@ export function parseCodeGraphFileFacts(value: unknown): CodeGraphFileFacts {
           }
         });
   const derivationInputs =
-    input.derivationInputs === undefined ? undefined : parseDerivationInputs(input.derivationInputs);
+    input.derivationInputs === undefined ? undefined : parseDerivationInputs(input.derivationInputs, path, symbols);
+  const navigationFacts =
+    input.navigationFacts === undefined ? undefined : parseFileNavigationFacts(input.navigationFacts, symbols, edges);
   return {
+    ...(navigationFacts === undefined ? {} : {navigationFacts}),
     ...(derivationInputs === undefined ? {} : {derivationInputs}),
     diagnostics,
     edges,
@@ -186,10 +195,16 @@ function parseReference(value: unknown, index: number): CodeGraphReference {
   };
 }
 
-function parseDerivationInputs(value: unknown): CodeGraphDerivationInputs {
+function parseDerivationInputs(
+  value: unknown,
+  path: string,
+  symbols: readonly CodeGraphSymbol[],
+): CodeGraphDerivationInputs {
   const input = object(value, 'File-fact derivation inputs');
-  exactKeys(input, [], ['rationale']);
-  if (input.rationale === undefined) return {};
+  exactKeys(input, [], ['rationale', 'bodyDiscovery']);
+  const bodyDiscovery =
+    input.bodyDiscovery === undefined ? undefined : validateBodyDiscovery(input.bodyDiscovery, path, symbols);
+  if (input.rationale === undefined) return bodyDiscovery === undefined ? {} : {bodyDiscovery};
   const rationale = EffectArray.map(array(input.rationale, 'File-fact rationale inputs'), (value, index) => {
     const rationale = object(value, `File-fact rationale ${index}`);
     exactKeys(rationale, ['documentation', 'line', 'marker', 'name'], []);
@@ -200,7 +215,7 @@ function parseDerivationInputs(value: unknown): CodeGraphDerivationInputs {
       name: boundedNonEmptyText(rationale.name, 'Rationale name'),
     };
   });
-  return {rationale};
+  return {rationale, ...(bodyDiscovery === undefined ? {} : {bodyDiscovery})};
 }
 
 function parseSpan(value: unknown, label: string): CodeGraphSpan {
@@ -358,4 +373,16 @@ function relation(value: unknown, label: string): CodeGraphRelation {
     throw CodeGraphFactValidationError.make({message: `${label} is invalid.`});
   }
   return matched;
+}
+
+function parseFileNavigationFacts(
+  value: unknown,
+  symbols: readonly CodeGraphSymbol[],
+  edges: readonly CodeGraphEdge[],
+) {
+  try {
+    return parseNavigationFacts(value, symbols, edges);
+  } catch (cause) {
+    throw CodeGraphFactValidationError.make({cause, message: 'File-fact navigation proof is invalid.'});
+  }
 }

@@ -10,6 +10,7 @@ import {describe, expect, it} from 'vitest';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 import * as FC from 'fast-check';
+import ts from 'typescript-compiler';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 const sourceRoot = join(repoRoot, 'apps', 'threadnote', 'src');
@@ -40,6 +41,122 @@ async function codeFiles(path: string): Promise<readonly string[]> {
     }
   }
   return files;
+}
+
+const forbiddenConsoleMethods = ['debug', 'error', 'info', 'log', 'warn'] as const;
+type ForbiddenConsoleMethod = (typeof forbiddenConsoleMethods)[number];
+
+function scriptKindForPath(path: string): ts.ScriptKind {
+  if (Effect.pipe(path, EffectString.endsWith('.tsx'))) return ts.ScriptKind.TSX;
+  if (Effect.pipe(path, EffectString.endsWith('.jsx'))) return ts.ScriptKind.JSX;
+  if (
+    Effect.pipe(path, EffectString.endsWith('.js')) ||
+    Effect.pipe(path, EffectString.endsWith('.mjs')) ||
+    Effect.pipe(path, EffectString.endsWith('.cjs'))
+  )
+    return ts.ScriptKind.JS;
+  return ts.ScriptKind.TS;
+}
+
+function isForbiddenConsoleMethod(method: string): method is ForbiddenConsoleMethod {
+  return method === 'debug' || method === 'error' || method === 'info' || method === 'log' || method === 'warn';
+}
+
+function inertTemplateText(value: string): string {
+  return Effect.pipe(
+    value,
+    EffectString.replaceAll('\\', '\\\\'),
+    EffectString.replaceAll('`', '\\`'),
+    EffectString.replaceAll('${', '\\${'),
+  );
+}
+
+function inertCommentText(value: string): string {
+  return Effect.pipe(
+    JSON.stringify(value),
+    EffectString.slice(1, -1),
+    EffectString.replaceAll('*/', '*\\/'),
+    EffectString.replaceAll('\u2028', '\\u2028'),
+    EffectString.replaceAll('\u2029', '\\u2029'),
+  );
+}
+
+function rawConsoleCalls(
+  source: string,
+  path = 'source.ts',
+): readonly {method: ForbiddenConsoleMethod; position: number}[] | undefined {
+  let calls: readonly {method: ForbiddenConsoleMethod; position: number}[] | undefined;
+  try {
+    const parsed = ts.transpileModule(source, {
+      fileName: Effect.pipe(path, EffectString.endsWith('.d.ts'))
+        ? `${Effect.pipe(path, EffectString.slice(0, -5))}.ts`
+        : path,
+      reportDiagnostics: true,
+      compilerOptions: {jsx: ts.JsxEmit.Preserve, target: ts.ScriptTarget.Latest},
+      transformers: {
+        before: [
+          () => file => {
+            // Inspect the original parsed tree before emit erases types or rewrites calls.
+            calls = consoleCallsInFile(file);
+            return file;
+          },
+        ],
+      },
+    });
+    if (
+      parsed.diagnostics &&
+      EffectArray.some(parsed.diagnostics, diagnostic => diagnostic.category === ts.DiagnosticCategory.Error)
+    )
+      return undefined;
+  } catch {
+    return undefined;
+  }
+
+  return calls;
+}
+
+function consoleCallsInFile(file: ts.SourceFile): readonly {method: ForbiddenConsoleMethod; position: number}[] {
+  const calls: {method: ForbiddenConsoleMethod; position: number}[] = [];
+  const unwrap = (expression: ts.Expression): ts.Expression =>
+    ts.isParenthesizedExpression(expression) || ts.isAsExpression(expression) || ts.isNonNullExpression(expression)
+      ? unwrap(expression.expression)
+      : expression;
+  const propertyName = (expression: ts.Expression): string | undefined => {
+    const node = unwrap(expression);
+    if (ts.isPropertyAccessExpression(node)) return node.name.text;
+    if (
+      ts.isElementAccessExpression(node) &&
+      node.argumentExpression &&
+      ts.isStringLiteralLike(node.argumentExpression)
+    )
+      return node.argumentExpression.text;
+    return undefined;
+  };
+  const hasConsoleReceiver = (expression: ts.Expression): boolean => {
+    const node = unwrap(expression);
+    if (ts.isIdentifier(node)) return node.text === 'console';
+    if (ts.isPropertyAccessExpression(node)) return node.name.text === 'console' || hasConsoleReceiver(node.expression);
+    if (ts.isElementAccessExpression(node))
+      return propertyName(node) === 'console' || hasConsoleReceiver(node.expression);
+    return false;
+  };
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)) {
+      const callee = unwrap(node.expression);
+      if (
+        (ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)) &&
+        hasConsoleReceiver(callee.expression)
+      ) {
+        const method = propertyName(callee);
+        if (method && isForbiddenConsoleMethod(method)) {
+          calls.push({method, position: node.getStart(file)});
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  return calls;
 }
 
 const sourceFiles = async () => {
@@ -103,6 +220,130 @@ function isNodeBuiltinSpecifier(specifier: string): boolean {
 }
 
 describe('Effect architecture boundaries', () => {
+  it('finds raw console calls in syntax rather than inert source text', () => {
+    const inert = EffectArray.join(
+      [
+        'const text = "console.info(\\\"fixture\\\")";',
+        'const text = `console.log(1)`;',
+        '// console.warn(1)\n/* console.error(1) */',
+        'const pattern = /console.info\\(\\)/u;',
+        'const nested = "\\\'/* `console.log(1)` */\\\'";',
+      ],
+      '\n',
+    );
+    expect(rawConsoleCalls(inert)).toEqual([]);
+    for (const method of forbiddenConsoleMethods) {
+      expect(rawConsoleCalls(`function run() { if (true) console.${method}("sentinel"); }`)).toEqual([
+        expect.objectContaining({method}),
+      ]);
+    }
+    expect(rawConsoleCalls('const value = `data ${console.info("interpolation")} tail`;')).toHaveLength(1);
+    expect(rawConsoleCalls('globalThis.console.log(1);')).toHaveLength(1);
+    expect(rawConsoleCalls('console?.warn?.(1);')).toHaveLength(1);
+    expect(rawConsoleCalls('(console["debug"])(1);')).toHaveLength(1);
+    expect(rawConsoleCalls('const broken = ;')).toBeUndefined();
+    expect(rawConsoleCalls('declare const node: JSX.Element;', 'fixture.d.ts')).toEqual([]);
+    expect(rawConsoleCalls('const view = <div />;', 'fixture.tsx')).toEqual([]);
+    for (const text of ['`', '*/', '${console.log(1)}', '"\\', '\u2028', '\u2029']) {
+      const escapedComment = inertCommentText(text);
+      const spelling = `console.info(${escapedComment})`;
+      const inertSources = [
+        `const data = \`${inertTemplateText(`console.info(${JSON.stringify(text)})`)}\`;`,
+        `/* ${spelling} */`,
+      ];
+      for (const inertSource of inertSources) {
+        const combined = `${inertSource}\nconsole.info(${JSON.stringify(text)});`;
+        expect(EffectArray.map(rawConsoleCalls(combined) ?? [], call => call.method)).toEqual(['info']);
+      }
+    }
+  });
+
+  it('keeps inert console spellings independent from real calls across bounded generated syntax', () => {
+    const methods = FC.constantFrom(...forbiddenConsoleMethods);
+    const payload = FC.string({maxLength: 24});
+    const dataContainer = FC.constantFrom('string', 'template', 'comment', 'regex');
+    const callWrapper = FC.constantFrom('plain', 'nested', 'template');
+    FC.assert(
+      FC.property(methods, payload, dataContainer, callWrapper, (method, text, container, wrapper) => {
+        const spelling = `console.${method}(${JSON.stringify(text)})`;
+        const commentSpelling = `console.${method}(${inertCommentText(text)})`;
+        const inert =
+          container === 'string'
+            ? `const data = ${JSON.stringify(spelling)};`
+            : container === 'template'
+              ? `const data = \`${inertTemplateText(spelling)}\`;`
+              : container === 'comment'
+                ? `/* ${commentSpelling} */`
+                : `const data = /console\\.${method}\\(.*\\)/u;`;
+        expect(rawConsoleCalls(inert)).toEqual([]);
+        const actual =
+          wrapper === 'nested'
+            ? `function run() { if (true) ${spelling}; }`
+            : wrapper === 'template'
+              ? `const value = \`prefix \${${spelling}} suffix\`;`
+              : `${spelling};`;
+        const combined = `${inert}\n${actual}`;
+        expect(EffectArray.map(rawConsoleCalls(combined) ?? [], call => call.method)).toEqual([method]);
+        expect(combined).toContain(spelling);
+      }),
+      {numRuns: 32, seed: 424242},
+    );
+  });
+
+  it('conserves the independent reparse oracle, diagnostics and original positions across source kinds', () => {
+    // Keep the former parse boundary as the comparison oracle. The unchanged
+    // walker isolates original-AST reuse from receiver classification behavior.
+    const reparsed = (source: string, path: string) => {
+      try {
+        const parsed = ts.transpileModule(source, {
+          fileName: EffectString.endsWith('.d.ts')(path) ? EffectString.slice(0, -5)(path) + '.ts' : path,
+          reportDiagnostics: true,
+          compilerOptions: {jsx: ts.JsxEmit.Preserve, target: ts.ScriptTarget.Latest},
+        });
+        if (
+          EffectArray.some(parsed.diagnostics ?? [], diagnostic => diagnostic.category === ts.DiagnosticCategory.Error)
+        )
+          return undefined;
+      } catch {
+        return undefined;
+      }
+      return consoleCallsInFile(
+        ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, scriptKindForPath(path)),
+      );
+    };
+    FC.assert(
+      FC.property(
+        FC.constantFrom('ts', 'tsx', 'd.ts', 'js', 'jsx', 'mjs', 'cjs'),
+        FC.constantFrom(
+          'console.info(1)',
+          'globalThis.console["warn"](1)',
+          'globalThis["console"]?.error?.(1)',
+          '(console["debug"])(1)',
+          'conso\\u006ce.log(1)',
+          '(console as Console)!.log(1)',
+        ),
+        FC.string({maxLength: 24}),
+        FC.boolean(),
+        (extension, call, text, broken) => {
+          const prefix = `const inert = ${JSON.stringify(text)};\n`;
+          const source = prefix + call + (broken ? '; const invalid = ;' : ';');
+          const path = 'fixture.' + extension;
+          const before = source;
+          expect(rawConsoleCalls(source, path)).toEqual(reparsed(source, path));
+          if (!broken) {
+            const calls = rawConsoleCalls(source, path);
+            if (calls !== undefined)
+              expect(calls).toEqual([
+                {method: /(?:info|warn|error|debug|log)/u.exec(call)![0], position: prefix.length},
+              ]);
+          } else expect(rawConsoleCalls(source, path)).toBeUndefined();
+          expect(source).toBe(before);
+        },
+      ),
+      {numRuns: 40, seed: 424243},
+    );
+  });
+
   it('covers every declared runtime workspace without treating artifacts, tests, or the website as runtime roots', () => {
     FC.assert(
       FC.property(FC.uniqueArray(FC.nat(1000), {maxLength: 12}), names => {
@@ -200,7 +441,7 @@ describe('Effect architecture boundaries', () => {
     }
   });
 
-  it('does not import or require Node built-ins in production source', async () => {
+  it('confines Node built-in imports to the declared stdio boundary', async () => {
     const importShapes = EffectArray.join(
       [
         "import '../helpers/node-fs.js';",
@@ -227,6 +468,7 @@ describe('Effect architecture boundaries', () => {
 
     for (const path of await sourceFiles()) {
       const source = await readFile(path, 'utf8');
+      const relativePath = Effect.pipe(relative(repoRoot, path), EffectString.replaceAll('\\', '/'));
       expect(
         EffectArrayPipe(importedModuleSpecifiers(path, source), __effectArrayValues =>
           EffectArray.filter(
@@ -235,7 +477,7 @@ describe('Effect architecture boundaries', () => {
               __effectArrayIndex in __effectArrayValues && isNodeBuiltinSpecifier(__effectArrayValue),
           ),
         ),
-        relative(repoRoot, path),
+        relativePath,
       ).toEqual([]);
     }
   });
@@ -304,7 +546,7 @@ describe('Effect architecture boundaries', () => {
     }
   });
 
-  it('keeps runtime globals inside the SystemInfo, process-adapter, and executable boundaries', async () => {
+  it('keeps runtime globals inside declared adapters and exact semantic boundaries', async () => {
     const allowed = new Set([
       'apps/threadnote/src/effect/ai/isolated-local-model-runtime.ts',
       'apps/threadnote/src/effect/mcp_broker_process.ts',
@@ -312,12 +554,37 @@ describe('Effect architecture boundaries', () => {
       'apps/threadnote/src/standalone.ts',
       'apps/threadnote/src/recall/ready_read_entry.ts',
     ]);
+    const semanticExpressions = new Map([
+      // The POSIX transport/admission adapters own these process-group probes and signals.
+      [
+        'apps/threadnote/src/semantic/lsp_transport.ts',
+        ["process.platform === 'win32'", 'process.kill(-child.pid, 0);', 'process.kill(-child!.pid!, signal);'],
+      ],
+      ['apps/threadnote/src/semantic/coordinator.ts', ['process.kill(-pid, 0);']],
+      // Qualification requires the exact host OS/architecture before inspecting pinned SDKs.
+      ['apps/threadnote/src/semantic/providers/java_runtime.ts', ['`${process.platform}-${process.arch}`']],
+      // These expressions are inside the generated external Node metadata responder.
+      [
+        'apps/threadnote/src/semantic/providers/python_project.ts',
+        [
+          'const a=process.argv.slice(2), m=${JSON.stringify(metadata)};',
+          'process.stdout.write(JSON.stringify(value));',
+        ],
+      ],
+      // This expression is inside the generated external Node launcher attestation.
+      [
+        'apps/threadnote/src/semantic/providers/typescript_runtime.ts',
+        ['pid: process.pid, instance, challenge: args.challenge, locked});'],
+      ],
+    ]);
     for (const path of await sourceFiles()) {
-      const relativePath = relative(repoRoot, path);
+      const relativePath = Effect.pipe(relative(repoRoot, path), EffectString.replaceAll('\\', '/'));
       if (allowed.has(relativePath)) {
         continue;
       }
-      const source = await readFile(path, 'utf8');
+      let source = await readFile(path, 'utf8');
+      for (const expression of semanticExpressions.get(relativePath) ?? [])
+        source = Effect.pipe(source, EffectString.replace(expression, ''));
       expect(source, relativePath).not.toMatch(
         /(?<![$\w])process\.(?:argv|cwd|env|execPath|exitCode|getuid|kill|pid|platform|stdin|stdout)/,
       );
@@ -328,7 +595,9 @@ describe('Effect architecture boundaries', () => {
     for (const root of codeRoots) {
       for (const path of await codeFiles(root)) {
         const source = await readFile(path, 'utf8');
-        expect(source, relative(repoRoot, path)).not.toMatch(/\bconsole\.(?:debug|error|info|log|warn)\s*\(/);
+        const calls = rawConsoleCalls(source, path);
+        expect(calls, relative(repoRoot, path)).not.toBeUndefined();
+        expect(calls, relative(repoRoot, path)).toEqual([]);
       }
     }
   });

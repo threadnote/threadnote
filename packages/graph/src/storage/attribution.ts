@@ -179,6 +179,31 @@ function readSnapshotStorageAttribution(
   database: Database,
   attributedBtreeBytes: number,
 ): CodeGraphStorageSnapshotAttribution {
+  const v2Available =
+    database
+      .query("SELECT 1 AS present FROM sqlite_master WHERE type='table' AND name='lexical_v2_formats' LIMIT 1")
+      .get() !== null;
+  const v2Attribution = v2Available
+    ? `UNION ALL
+    SELECT lexical.snapshot_id,'lexical',
+      (SELECT COUNT(*) FROM lexical_v2_owners p WHERE p.snapshot_key=lexical.snapshot_key)+
+      (SELECT COUNT(*) FROM lexical_v2_shared p WHERE p.snapshot_key=lexical.snapshot_key)+
+      (SELECT COUNT(*) FROM lexical_v2_members p WHERE p.snapshot_key=lexical.snapshot_key)+
+      (SELECT COUNT(*) FROM lexical_v2_scopes p WHERE p.snapshot_key=lexical.snapshot_key)+
+      (SELECT COUNT(*) FROM lexical_v2_formats p WHERE p.snapshot_id=lexical.snapshot_id)+
+      (SELECT COUNT(*) FROM lexical_v2_views p WHERE p.snapshot_id=lexical.snapshot_id)+1,
+      (SELECT COUNT(*)*48 FROM lexical_v2_owners p WHERE p.snapshot_key=lexical.snapshot_key)+
+      (SELECT COUNT(*)*24 FROM lexical_v2_shared p WHERE p.snapshot_key=lexical.snapshot_key)+
+      COALESCE((SELECT SUM(length(CAST(p.symbol_id AS BLOB))+24) FROM lexical_v2_members p WHERE p.snapshot_key=lexical.snapshot_key),0)+
+      COALESCE((SELECT SUM(length(CAST(p.path AS BLOB))+length(CAST(p.content_hash AS BLOB))+length(CAST(COALESCE(p.package_name,'') AS BLOB))+16)
+        FROM lexical_v2_scopes p WHERE p.snapshot_key=lexical.snapshot_key),0)+
+      COALESCE((SELECT SUM(length(CAST(p.logical_snapshot_id AS BLOB))+length(CAST(p.layout_mode AS BLOB))+
+        length(CAST(COALESCE(p.base_snapshot_id,'') AS BLOB))+length(CAST(COALESCE(p.force_generation,'') AS BLOB))+80)
+        FROM lexical_v2_views p WHERE p.snapshot_id=lexical.snapshot_id),0)+
+      (SELECT COUNT(*)*112 FROM lexical_v2_formats p WHERE p.snapshot_id=lexical.snapshot_id),0
+    FROM lexical_compact_snapshots lexical JOIN selected ON selected.snapshot_id=lexical.snapshot_id
+    JOIN lexical_v2_views binding ON binding.snapshot_id=lexical.snapshot_id`
+    : '';
   const metadata = database
     .query<SnapshotMetadataRow, SQLQueryBindings[]>(
       `SELECT snapshot.id, snapshot.commit_id, snapshot.state, snapshot.symbol_count,
@@ -278,6 +303,7 @@ function readSnapshotStorageAttribution(
               COALESCE((SELECT COUNT(*) * 32 FROM lexical_compact_postings AS posting
                 WHERE posting.snapshot_key = lexical.snapshot_key), 0), 0
          FROM lexical_compact_snapshots AS lexical JOIN selected ON selected.snapshot_id = lexical.snapshot_id
+       ${v2Attribution}
        UNION ALL
        SELECT association.snapshot_id, 'facts-cache', COUNT(*),
               COALESCE(SUM(length(CAST(shard.facts_json AS BLOB))), 0),

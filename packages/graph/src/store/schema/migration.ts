@@ -376,6 +376,15 @@ const migratePersistentExtensionTables = Effect.fn('codeGraph.migratePersistentE
           yield* sql.unsafe(currentReferences.createSql);
         }
       }
+      // This additive extension must not retire populated V1 ready snapshots
+      // or interrupted builds simply because V2 tables did not exist yet.
+      for (const table of EffectArray.filter(PERSISTENT_EXTENSION_TABLES, table => table.group === 'lexical-v2')) {
+        const inspection = yield* persistentExtensionTableInspection(sql, table);
+        if (inspection.exists && !inspection.compatible) {
+          return yield* CodeGraphStoreError.of(`Factored lexical schema ${table.name} is incompatible.`);
+        }
+        if (!inspection.exists) yield* sql.unsafe(table.createSql);
+      }
       const inspections = yield* inspectPersistentExtensionTables(sql);
       const extensionSchemaCompatible = EffectArray.every(
         inspections,

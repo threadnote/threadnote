@@ -1,3 +1,4 @@
+import {CODE_GRAPH_SNAPSHOT_ID_PATTERN} from '../store/lexical_projection.js';
 import {Array as EffectArray} from 'effect';
 import {Clock, Effect, FileSystem, Path, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -35,7 +36,7 @@ class CodeGraphSnapshotPurgeError extends Schema.TaggedError<
 }) {}
 
 const HASH_ID = /^[0-9a-f]{64}$/u;
-const SNAPSHOT_ID = /^cgsn_[0-9a-f]{40}(?:-direct|-full-[0-9a-f]{16})?$/u;
+const SNAPSHOT_ID = CODE_GRAPH_SNAPSHOT_ID_PATTERN;
 const APPROVAL_DIGEST = /^sha256:[0-9a-f]{64}$/u;
 
 export type CodeGraphSnapshotPurgeBlockerCode =

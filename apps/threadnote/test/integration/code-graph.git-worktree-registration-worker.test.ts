@@ -82,7 +82,9 @@ describe('code graph Git worktree registration worker', () => {
     effectIt.effect('keeps concurrent helper observations bounded and deterministic under registry load', () =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
-        const common = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-registration-worker-'});
+        const common = yield* fs.realPath(
+          yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-registration-worker-'}),
+        );
         yield* fs.makeDirectory(join(common, 'worktrees'));
         const adminName = 'concurrent-target';
         for (let index = 0; index < 256; index += 1) {

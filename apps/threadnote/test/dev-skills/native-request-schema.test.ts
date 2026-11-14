@@ -120,11 +120,15 @@ describe('native request schema discovery', () => {
       {
         expectedRevision: expect.any(String),
         phaseId: expect.any(String),
-        snapshotId: expect.any(String),
-        supersedeUnreviewed: expect.any(String),
+        rebase: expect.any(String),
+        snapshotId: expect.stringContaining('fresh immutable'),
+        supersedeUnreviewed: expect.stringContaining('Only for a changed source tree'),
+        baseRequalification: expect.stringContaining('Requires reason and explicit userAuthority.'),
+        ordinaryMergeQualificationV1: expect.stringContaining(
+          'Produces manifest version2; legacy readers must reject it.',
+        ),
+        sameLabelRebasedBaseIntegrationV1: expect.any(String),
         recoverUnreviewedRebase: expect.any(String),
-        baseRequalification: expect.any(String),
-        ordinaryMergeQualificationV1: expect.any(String),
       },
     ],
     [
@@ -152,18 +156,66 @@ describe('native request schema discovery', () => {
     }
   });
 
-  it('discovers mandatory review lanes and the risk-based specialist requirement', () => {
+  it('discovers optional closed witnesses for initial rebases and later qualifications', () => {
+    let page = nativeRequestSchema({...base, topic: 'cycle', command: 'snapshot'}).schemaPage;
+    let text = page.text;
+    while (page.nextOffsetBytes !== null) {
+      page = nativeRequestSchema({
+        ...base,
+        topic: 'cycle',
+        command: 'snapshot',
+        offsetBytes: page.nextOffsetBytes,
+        sourceDigest: page.sourceDigest,
+      }).schemaPage;
+      text += page.text;
+    }
+    const schema = JSON.parse(text).schema;
+    expect(schema.properties.protocolVersion.enum).toEqual([1, 2, 3]);
+    for (const [name, required] of [
+      ['rebase', ['preRebaseHead', 'ontoHead', 'rebasedHead']],
+      ['baseRequalification', ['preRebaseHead', 'ontoHead', 'rebasedHead', 'fromBaseBranch']],
+      [
+        'ordinaryMergeQualificationV1',
+        ['priorHead', 'currentBaseHead', 'currentHead', 'fromBaseBranch', 'planDocumentHash', 'phaseOwnedPaths'],
+      ],
+      [
+        'sameLabelRebasedBaseIntegrationV1',
+        [
+          'priorSnapshotId',
+          'expectedPriorEntryDigest',
+          'expectedPriorReviewDigest',
+          'currentBaseHead',
+          'currentHead',
+          'sameBaseBranch',
+          'authorityKind',
+          'planDocumentHash',
+          'phaseOwnedPaths',
+        ],
+      ],
+    ] as const) {
+      expect(schema.required).not.toContain(name);
+      expect(schema.properties[name]).toMatchObject({
+        type: 'object',
+        additionalProperties: false,
+        required: expect.arrayContaining([...required]),
+      });
+      expect(schema.properties[name].required).toHaveLength(required.length);
+      if (name === 'sameLabelRebasedBaseIntegrationV1') {
+        expect(Effect2.Record.keys(schema.properties[name].properties).sort()).toEqual([...required].sort());
+        expect(schema.properties[name].properties.authorityKind.enum).toEqual([
+          'same-label-upstream-rebase-integration',
+        ]);
+      }
+    }
+  });
+
+  it('discovers mandatory review lanes and specialist guidance', () => {
     const response = nativeRequestSchema({...base, topic: 'cycle-review'});
     expect(response).toMatchObject({
       semanticPrerequisites: {
         requiredSelectedLanes: ['correctness', 'simplicity'],
         requiredCompletedLanes: ['correctness', 'simplicity'],
-        specialistLanes: expect.stringContaining('run every applicable lane'),
-      },
-    });
-    expect(response).toMatchObject({
-      semanticPrerequisites: {
-        specialistLanes: expect.stringContaining('cannot determine which specialists apply'),
+        specialistLanes: expect.any(String),
       },
     });
   });

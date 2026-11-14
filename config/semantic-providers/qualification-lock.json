@@ -1,0 +1,1863 @@
+{
+  "schemaVersion": 1,
+  "phase": "P00",
+  "status": "candidate-feasibility-evidence",
+  "observedOn": "2026-10-26",
+  "requiredPlatformsSource": "scripts/release-targets.ts",
+  "requiredPlatforms": [
+    "darwin-arm64",
+    "darwin-x64",
+    "linux-arm64",
+    "linux-arm64-musl",
+    "linux-x64-baseline",
+    "linux-x64-baseline-musl",
+    "windows-arm64",
+    "windows-x64-baseline"
+  ],
+  "automaticDownloadOrExecution": false,
+  "providers": [
+    {
+      "id": "typescript-language-server",
+      "languages": ["typescript", "javascript"],
+      "version": "6.0.2",
+      "runtime": {
+        "typescript": "6.0.3",
+        "nodeObserved": "24.19.0",
+        "nodeMinimum": ">=22.22.2"
+      },
+      "license": {
+        "reported": "Apache-2.0 AND MIT",
+        "evidence": ["https://github.com/typescript-language-server/typescript-language-server/blob/v6.0.2/LICENSE"],
+        "redistribution": "not bundled; distribution obligations remain a release gate",
+        "inspectedSourceSha256": "899d21038f87dd6243dd33b7ee82a078e639d4325a427c01e64d8116315b9680",
+        "inspectedArtifactLicenseSha256": "899d21038f87dd6243dd33b7ee82a078e639d4325a427c01e64d8116315b9680"
+      },
+      "artifacts": [
+        {
+          "url": "https://registry.npmjs.org/typescript-language-server/-/typescript-language-server-6.0.2.tgz",
+          "integrity": "sha512-Ph7Ql+xkUJvMamnkh1h+aKP6HxLR7lrWIYkPn9/LZBkJdJZgtIj7OoVhkDYtQ7zFPTPmqZHOVXaUKGyz9M2q1Q==",
+          "kind": "npm-archive"
+        },
+        {
+          "url": "https://registry.npmjs.org/typescript/-/typescript-6.0.3.tgz",
+          "integrity": "sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw==",
+          "kind": "npm-archive"
+        }
+      ],
+      "platforms": {
+        "darwin-arm64": {
+          "status": "pilot-evidence",
+          "evidence": [
+            "Exact cross-file dirty version2 definition, complete references and rename; Unicode/CRLF preserved; source files unchanged; no forced cleanup and owned POSIX group drained. Fixture-level evidence only."
+          ]
+        },
+        "darwin-x64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64-musl": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-baseline-musl": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        }
+      },
+      "productionQualified": false,
+      "blockers": [
+        "Code actions, project variants, full lifecycle, all other platform rows and final product conformance remain unqualified."
+      ],
+      "pilotEvidence": [
+        {
+          "fixture": "typescript",
+          "reportSha256": "59785af16aa25b59b5bf1e14b88b26b23ddaaa06713605b58a8fadddccaac1d6",
+          "configSha256": "088bf10c8b8fd88f339ae60bf6890d3fa1b172e36276f12bd32fbcee84c65e49",
+          "sourceHashes": {
+            "harness": "aac333d126120c4fea828fb0514c4360237d67018571f2c92dca9247c5ade27c",
+            "fixtures": "17870a062929a11a3802f2b3e2ce77be32d65272f0c6589840eabc387bebd1cc",
+            "transport": "f1aecc08bb40ef2230ea18dd024a076806f667b62a3f6557bf15ff4995e5f0d1",
+            "assertions": "385b0223f440d226627ee72184885d617b8b395148994a0d8a99ed8892cfe07c",
+            "process": "1e47268d16257c1c5c5125fbfaea5b8539982d4ebf1a0cff99090b0b63c3c1c8"
+          },
+          "outcome": "passed"
+        },
+        {
+          "fixture": "javascript",
+          "reportSha256": "cd13c6d95683b846161f2a3c25d80df98e6950bc23ce1c352daf1ecc4c220a91",
+          "configSha256": "eb1bf91073eec817cf7143d094ab4a51944ec0b508df496a0a5c174d8656d042",
+          "sourceHashes": {
+            "harness": "aac333d126120c4fea828fb0514c4360237d67018571f2c92dca9247c5ade27c",
+            "fixtures": "17870a062929a11a3802f2b3e2ce77be32d65272f0c6589840eabc387bebd1cc",
+            "transport": "f1aecc08bb40ef2230ea18dd024a076806f667b62a3f6557bf15ff4995e5f0d1",
+            "assertions": "385b0223f440d226627ee72184885d617b8b395148994a0d8a99ed8892cfe07c",
+            "process": "1e47268d16257c1c5c5125fbfaea5b8539982d4ebf1a0cff99090b0b63c3c1c8"
+          },
+          "outcome": "passed"
+        }
+      ]
+    },
+    {
+      "id": "typescript-native",
+      "languages": ["typescript", "javascript"],
+      "version": "7.0.2",
+      "runtime": {
+        "kind": "native"
+      },
+      "license": {
+        "reported": "Apache-2.0",
+        "evidence": ["https://github.com/microsoft/TypeScript/blob/main/LICENSE.txt"],
+        "redistribution": "not bundled; distribution obligations remain a release gate"
+      },
+      "artifacts": [
+        {
+          "url": "https://registry.npmjs.org/@typescript/typescript-darwin-arm64/-/typescript-darwin-arm64-7.0.2.tgz",
+          "integrity": "sha512-gowzar9MwS/aRWp6f3a4KUqzRjAZjOsmGNCM6LcTgXum+dBfgsBVMN+AgvOCCbguXyick6LJhpBszxMebJ8syA==",
+          "kind": "npm-archive"
+        }
+      ],
+      "platforms": {
+        "darwin-arm64": {
+          "status": "pilot-evidence",
+          "evidence": ["Correct cross-file unsaved references/rename observed; shutdown failed in this fixture."]
+        },
+        "darwin-x64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64-musl": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-baseline-musl": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        }
+      },
+      "productionQualified": false,
+      "blockers": ["Native shutdown panicked in file-watcher teardown; not selected for the initial pilot."]
+    },
+    {
+      "id": "basedpyright",
+      "languages": ["python"],
+      "version": "1.40.2",
+      "runtime": {
+        "pythonObserved": "3.12.13",
+        "nodeObserved": "24.19.0"
+      },
+      "license": {
+        "reported": "MIT",
+        "evidence": ["https://github.com/DetachHead/basedpyright/blob/v1.40.2/LICENSE.txt"],
+        "redistribution": "not bundled; distribution obligations remain a release gate",
+        "inspectedSourceSha256": "f7c936bc43f132b08497ac952e9376cbc102e5eedb4bf6ec902ea8442bd9c68d",
+        "inspectedArtifactLicenseSha256": "f7c936bc43f132b08497ac952e9376cbc102e5eedb4bf6ec902ea8442bd9c68d"
+      },
+      "artifacts": [
+        {
+          "url": "https://files.pythonhosted.org/packages/de/53/0031b22e118264a57a3b64dfc0c8f0659b81af5bccd419ac62933013c601/basedpyright-1.40.2-py3-none-any.whl",
+          "sha256": "3a53aeb93a86675ded0e12bc27bd8476c1742356de07ad8cab67bff18110c690",
+          "kind": "python-wheel"
+        }
+      ],
+      "platforms": {
+        "darwin-arm64": {
+          "status": "pilot-evidence",
+          "evidence": [
+            "Exact cross-file dirty version2 definition, complete references and rename; Unicode/CRLF preserved; source files unchanged; no forced cleanup and owned POSIX group drained. Fixture-level evidence only."
+          ]
+        },
+        "darwin-x64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64-musl": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-baseline-musl": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        }
+      },
+      "productionQualified": false,
+      "blockers": [
+        "Dynamic interpreter/import-hook environments, dynamic analysis limits, other platforms, installed runtime integration and final product conformance require their own current evidence. P03 source fixtures cover static environment switching and a representative inline action; productionQualified remains false."
+      ],
+      "pilotEvidence": [
+        {
+          "fixture": "python",
+          "reportSha256": "abca66a1e8554af0a6c3e01f00e9556ef799039c927928c34bc314b1ec0516ae",
+          "configSha256": "d1fd6cb4c58ce686f0bd4183cc6492e6e3789d10f6be30f97b66907c93ebdbff",
+          "sourceHashes": {
+            "harness": "aac333d126120c4fea828fb0514c4360237d67018571f2c92dca9247c5ade27c",
+            "fixtures": "17870a062929a11a3802f2b3e2ce77be32d65272f0c6589840eabc387bebd1cc",
+            "transport": "f1aecc08bb40ef2230ea18dd024a076806f667b62a3f6557bf15ff4995e5f0d1",
+            "assertions": "385b0223f440d226627ee72184885d617b8b395148994a0d8a99ed8892cfe07c",
+            "process": "1e47268d16257c1c5c5125fbfaea5b8539982d4ebf1a0cff99090b0b63c3c1c8"
+          },
+          "outcome": "passed"
+        }
+      ],
+      "implementationProfile": {
+        "phase": "P03",
+        "status": "experimental-static-environment",
+        "serverEntry": "langserver.index.js",
+        "serverBundleSha256": "3ff64ca89ba46d04a7e8410955f20fb5e02d6b76d9a76f92e57bf43c95635c33",
+        "metadataFormat": "threadnote-static-python-environment-v1",
+        "pythonVersion": [3, 12, 13],
+        "interpreterExecution": false,
+        "intrinsicMetadataProbeSha256": {
+          "paths": "d8a7c87965c4ad49200fda06dd4fb09f6229e65c4a188553889562c01c615510",
+          "version": "5811c668ec7eb72ffad07fa10823ada5a40e9392137033a876850ac30ebd1230"
+        },
+        "operations": [
+          "symbols",
+          "definition",
+          "references",
+          "hover",
+          "versioned-diagnostics",
+          "source-versioned-rename-preparation",
+          "inline-quickfix-preparation",
+          "read-only-completion",
+          "call-hierarchy"
+        ],
+        "denied": [
+          "workspace/executeCommand",
+          "workspace/applyEdit",
+          "resource-operations",
+          "import-hooks",
+          "environment-activation",
+          "automatic-downloads"
+        ],
+        "limitations": [
+          "Explicit host-qualified static environment manifests only; runtime version and dependency provenance are host supplied, not observed by interpreter execution.",
+          "Unsupported or external configuration, competing execution environments, executable or escaping .pth files, symlinks and provider-unavailable optional operations fail explicitly. Completion suggestions omit commands and unversioned insert/import edits.",
+          "Experimental POSIX profile; packaged public proposal/application surfaces and complete platform/performance/GA qualification belong to later phases."
+        ],
+        "sourceEvidence": ["apps/threadnote/test/unit/semantic-python.test.ts"]
+      }
+    },
+    {
+      "id": "python-lsp-server+pylsp-rope",
+      "languages": ["python"],
+      "version": "1.15.0+0.1.17",
+      "runtime": {
+        "pythonObserved": "3.12.13",
+        "rope": "1.15.0",
+        "jedi": "0.20.1"
+      },
+      "license": {
+        "reported": "MIT",
+        "evidence": [
+          "https://github.com/python-lsp/python-lsp-server/blob/v1.15.0/LICENSE",
+          "https://github.com/python-rope/pylsp-rope/blob/main/LICENSE"
+        ],
+        "redistribution": "not bundled; distribution obligations remain a release gate"
+      },
+      "artifacts": [
+        {
+          "url": "https://files.pythonhosted.org/packages/c2/4a/b4abc04dcc65c985fa66d6486393ad3051ff485ccabd9727aea43a242f88/python_lsp_server-1.15.0-py3-none-any.whl",
+          "sha256": "d6ac11b467021310498f2dffb2edf09629bbcfe0d3073156db2337334a60463f",
+          "kind": "python-wheel"
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/42/0d/92a83f4f3f0a15017a7831589d7c01408ba8eaede0028eadf6ca022050ee/pylsp_rope-0.1.17-py3-none-any.whl",
+          "sha256": "6be821913b3834b3125e64457a8bcf2030c4f1d5cd629bce4c26ba5c2c12f30b",
+          "kind": "python-wheel"
+        }
+      ],
+      "platforms": {
+        "darwin-arm64": {
+          "status": "pilot-evidence",
+          "evidence": [
+            "Dirty declaration resolved; references omitted the unsaved dependent file; rename changed CRLF formatting."
+          ]
+        },
+        "darwin-x64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64-musl": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-baseline-musl": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        }
+      },
+      "productionQualified": false,
+      "blockers": ["Does not pass the exact unsaved workspace oracle. Rejected for initial Python pilot."]
+    },
+    {
+      "id": "gopls",
+      "languages": ["go"],
+      "version": "v0.24.0",
+      "runtime": {
+        "goMinimum": "1.27.0",
+        "goObserved": "1.27.3",
+        "initialHostGoObserved": "1.25.14",
+        "pilotExecutableSha256": "701228f3770992e76ba343b3855b0c164064a4225c699f1e5b765b274c7836af",
+        "pilotGoExecutableSha256": "aa355b078a81158d418079a3f8c776719eb99cc6f527e39ffa3250c66566aafb"
+      },
+      "license": {
+        "reported": "BSD-3-Clause",
+        "evidence": ["https://cs.opensource.google/go/x/tools/+/gopls/v0.24.0:LICENSE"],
+        "redistribution": "not bundled; distribution obligations remain a release gate",
+        "inspectedSourceSha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+        "inspectedArtifactLicenseSha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+      },
+      "artifacts": [
+        {
+          "url": "https://proxy.golang.org/golang.org/x/tools/gopls/@v/v0.24.0.zip",
+          "sha256": "a6e8f2c45e4c561d2322ef15088b20afd9ba08cf8b0b51077ad510591528fed2",
+          "kind": "source-module"
+        }
+      ],
+      "platforms": {
+        "darwin-arm64": {
+          "status": "pilot-evidence",
+          "evidence": [
+            "Exact cross-file dirty version2 definition, complete references and rename; Unicode/CRLF preserved; source files unchanged; no forced cleanup and owned POSIX group drained. Fixture-level evidence only."
+          ]
+        },
+        "darwin-x64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64-musl": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-baseline-musl": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        }
+      },
+      "productionQualified": false,
+      "blockers": [
+        "Only an isolated Go1.27.3 macOS arm64 fixture is verified; project variants, full capability/lifecycle/platform matrix, dependency/license inventory and production conformance remain unqualified."
+      ],
+      "pilotEvidence": [
+        {
+          "fixture": "go",
+          "reportSha256": "e02ce13cade633c421303e7feb2a7cc7a4823b8fc608158ccd9a64fc75bda150",
+          "configSha256": "10b41df35b68942243bf5253c412d5885176210144b8fecb457c5ce039892494",
+          "sourceHashes": {
+            "harness": "aac333d126120c4fea828fb0514c4360237d67018571f2c92dca9247c5ade27c",
+            "fixtures": "17870a062929a11a3802f2b3e2ce77be32d65272f0c6589840eabc387bebd1cc",
+            "transport": "f1aecc08bb40ef2230ea18dd024a076806f667b62a3f6557bf15ff4995e5f0d1",
+            "assertions": "385b0223f440d226627ee72184885d617b8b395148994a0d8a99ed8892cfe07c",
+            "process": "1e47268d16257c1c5c5125fbfaea5b8539982d4ebf1a0cff99090b0b63c3c1c8"
+          },
+          "outcome": "passed"
+        }
+      ]
+    },
+    {
+      "id": "rust-analyzer",
+      "languages": ["rust"],
+      "version": "2026-10-26",
+      "runtime": {
+        "kind": "native",
+        "observedServerVersion": "rust-analyzer 0.3.3097-standalone (0c4d74686b 2026-10-22)",
+        "rustcObserved": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+        "cargoObserved": "cargo 1.99.1 (5f94df478 2026-08-27)",
+        "pilotExecutableSha256": "29e8a7d408e7d6936c6d762f2982820812578d7f97a3f5013789de6fc8a711d4",
+        "pilotRustcExecutableSha256": "1ba7bb8e273bd64125f4048d2ecce530e0a6470e565ab1b3aecf0b82b532f7b1",
+        "pilotCargoExecutableSha256": "6d576d8058f8ca643e8fce55b64ee3c614ba64c9da2e536bae843e6a2e1f3951",
+        "rustSrc": "1.99.1 (isolated toolchain sysroot)"
+      },
+      "license": {
+        "reported": "MIT OR Apache-2.0",
+        "evidence": ["https://github.com/rust-lang/rust-analyzer/tree/2026-10-26"],
+        "redistribution": "not bundled; distribution obligations remain a release gate",
+        "inspectedSources": [
+          {
+            "url": "https://raw.githubusercontent.com/rust-lang/rust-analyzer/2026-10-26/LICENSE-MIT",
+            "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+          },
+          {
+            "url": "https://raw.githubusercontent.com/rust-lang/rust-analyzer/2026-10-26/LICENSE-APACHE",
+            "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+          }
+        ]
+      },
+      "artifacts": [
+        {
+          "url": "https://github.com/rust-lang/rust-analyzer/releases/download/2026-10-26/rust-analyzer-aarch64-apple-darwin.gz",
+          "sha256": "8fb90cb58f5910d8d8b24ac1a93cca49f053365cbf0eb3c682144ad0a0027dcf",
+          "kind": "native-archive"
+        },
+        {
+          "url": "https://github.com/rust-lang/rust-analyzer/releases/download/2026-10-26/rust-analyzer-aarch64-pc-windows-msvc.zip",
+          "sha256": "e5f758de3ece10656d7bba6565b92e65fb52843810dc1bd0a911e307755d63ad",
+          "kind": "native-archive"
+        },
+        {
+          "url": "https://github.com/rust-lang/rust-analyzer/releases/download/2026-10-26/rust-analyzer-aarch64-unknown-linux-gnu.gz",
+          "sha256": "1b225c4c9ae329ca96e8a75a5bbcb5562a7f1d25c57c8b55d3e02299a3dbe836",
+          "kind": "native-archive"
+        },
+        {
+          "url": "https://github.com/rust-lang/rust-analyzer/releases/download/2026-10-26/rust-analyzer-arm-unknown-linux-gnueabihf.gz",
+          "sha256": "1086e4b0fbb5839b2946078acc1d2534bf6bdae3ad4a5f95df0d6e1ebd24fb2f",
+          "kind": "native-archive"
+        },
+        {
+          "url": "https://github.com/rust-lang/rust-analyzer/releases/download/2026-10-26/rust-analyzer-i686-pc-windows-msvc.zip",
+          "sha256": "bcc329d619b70eed8250f349ee28f0e95872675dac7abe1fd0988f318c4fcfc2",
+          "kind": "native-archive"
+        },
+        {
+          "url": "https://github.com/rust-lang/rust-analyzer/releases/download/2026-10-26/rust-analyzer-x86_64-apple-darwin.gz",
+          "sha256": "b3e4904877bcf7013a4a342c449cff1bf0ea0b91d5a1a30ac8df3d32142519c0",
+          "kind": "native-archive"
+        },
+        {
+          "url": "https://github.com/rust-lang/rust-analyzer/releases/download/2026-10-26/rust-analyzer-x86_64-pc-windows-msvc.zip",
+          "sha256": "13549dd0c380647685c82c87b8d80904f81bc4de92a82c099b6083c5b9aa1ca1",
+          "kind": "native-archive"
+        },
+        {
+          "url": "https://github.com/rust-lang/rust-analyzer/releases/download/2026-10-26/rust-analyzer-x86_64-unknown-linux-gnu.gz",
+          "sha256": "4c83773525f93b636ed79761389568b4d2a89c05fa7ecc440245032d49ad80ce",
+          "kind": "native-archive"
+        },
+        {
+          "url": "https://github.com/rust-lang/rust-analyzer/releases/download/2026-10-26/rust-analyzer-x86_64-unknown-linux-musl.gz",
+          "sha256": "b12c272401af57558d68afb6310a47f27729bdd65bb11b7171582d9d7f286d32",
+          "kind": "native-archive"
+        }
+      ],
+      "platforms": {
+        "darwin-arm64": {
+          "status": "pilot-evidence",
+          "evidence": [
+            "Exact cross-file dirty version2 definition, complete references and rename; Unicode/CRLF preserved; source files unchanged; no forced cleanup and owned POSIX group drained. Fixture-level evidence only."
+          ]
+        },
+        "darwin-x64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64-musl": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-baseline-musl": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        }
+      },
+      "productionQualified": false,
+      "blockers": [
+        "Early immediate shutdown produced a worker panic despite exit0; retained as negative lifecycle evidence. Current fixture waits for reported quiescence and rejects logged panics.",
+        "Enabled/disabled Cargo build-script markers passed; procedural macros, dependency download control, broader resource limits and production execution policy remain unqualified.",
+        "Standalone archive dependency/notice inventory and all other platform/project/capability cells remain unqualified."
+      ],
+      "pilotEvidence": [
+        {
+          "fixture": "rust",
+          "reportSha256": "f95f90d2f791b5f6376af2615aeca8972d68b691278d86ec074a5600eea434e9",
+          "configSha256": "2fd04c4be47701b223f96e42bf07547f574dfff12c9a4e596236ce44c5d90b6c",
+          "sourceHashes": {
+            "harness": "aac333d126120c4fea828fb0514c4360237d67018571f2c92dca9247c5ade27c",
+            "fixtures": "17870a062929a11a3802f2b3e2ce77be32d65272f0c6589840eabc387bebd1cc",
+            "transport": "f1aecc08bb40ef2230ea18dd024a076806f667b62a3f6557bf15ff4995e5f0d1",
+            "assertions": "385b0223f440d226627ee72184885d617b8b395148994a0d8a99ed8892cfe07c",
+            "process": "1e47268d16257c1c5c5125fbfaea5b8539982d4ebf1a0cff99090b0b63c3c1c8"
+          },
+          "outcome": "passed"
+        },
+        {
+          "fixture": "rust-build-enabled",
+          "reportSha256": "0ce26080d4765cff5a8f07ce823b952e7ae5b91b65f4153c475b846be885559d",
+          "configSha256": "9ddc7b5f4dcd0a41a868da7c41ff8c730c82a38d2c4561a410f755794f9af623",
+          "sourceHashes": {
+            "harness": "aac333d126120c4fea828fb0514c4360237d67018571f2c92dca9247c5ade27c",
+            "fixtures": "17870a062929a11a3802f2b3e2ce77be32d65272f0c6589840eabc387bebd1cc",
+            "transport": "f1aecc08bb40ef2230ea18dd024a076806f667b62a3f6557bf15ff4995e5f0d1",
+            "assertions": "385b0223f440d226627ee72184885d617b8b395148994a0d8a99ed8892cfe07c",
+            "process": "1e47268d16257c1c5c5125fbfaea5b8539982d4ebf1a0cff99090b0b63c3c1c8"
+          },
+          "outcome": "passed"
+        },
+        {
+          "fixture": "rust-build-denied",
+          "reportSha256": "0cb99aab782152283c28afd596d3e587e73b70298142557e6bfb3f1837cba3f1",
+          "configSha256": "0e335b358ac047b2cf78035126b36764a8fabf848f91998c204757675970c817",
+          "sourceHashes": {
+            "harness": "aac333d126120c4fea828fb0514c4360237d67018571f2c92dca9247c5ade27c",
+            "fixtures": "17870a062929a11a3802f2b3e2ce77be32d65272f0c6589840eabc387bebd1cc",
+            "transport": "f1aecc08bb40ef2230ea18dd024a076806f667b62a3f6557bf15ff4995e5f0d1",
+            "assertions": "385b0223f440d226627ee72184885d617b8b395148994a0d8a99ed8892cfe07c",
+            "process": "1e47268d16257c1c5c5125fbfaea5b8539982d4ebf1a0cff99090b0b63c3c1c8"
+          },
+          "outcome": "passed"
+        }
+      ]
+    },
+    {
+      "id": "jdtls",
+      "languages": ["java"],
+      "version": "1.63.0-202610191322",
+      "runtime": {
+        "javaMinimumObserved": "25",
+        "javaObserved": "Eclipse Temurin 25.0.5+8",
+        "projectJavaLevel": "21",
+        "documentationMismatch": "Upstream README says Java21 minimum; the exact distribution bundles org.eclipse.core.filesystem requiring JavaSE25. Java21 startup failed with exit13.",
+        "gradleObserved": "9.8.2"
+      },
+      "license": {
+        "reported": "EPL-2.0",
+        "evidence": ["https://github.com/eclipse-jdtls/eclipse.jdt.ls/blob/v1.63.0/LICENSE"],
+        "redistribution": "not bundled; distribution obligations remain a release gate",
+        "inspectedSourceSha256": "209fe24bf55677bbf81c2b0481c1403201fab57b3b4c609971eba4ec8162b99c",
+        "selectedProfileInventory": {
+          "status": "review-pending",
+          "reportSha256": "1e67f20751aef5f3b2c6b741ca7f2b4521cf1fba9a87f646735802e0193fc39d",
+          "jdtDistributionJars": 111,
+          "runtimeJava": "25.0.5+8",
+          "projectJava": "21.0.13+9",
+          "gradle": "9.8.2",
+          "scope": "Exact local JDT/SDK/Gradle legal files, JAR legal entries and declared metadata; not a blanket distribution license expression",
+          "remaining": [
+            "Map wrapped and transitive components to applicable license/notice evidence",
+            "Review selected-profile permitted use and source/notice obligations",
+            "Redistribution and other platform decisions remain release-gated"
+          ]
+        }
+      },
+      "artifacts": [
+        {
+          "url": "https://codeload.github.com/eclipse-jdtls/eclipse.jdt.ls/tar.gz/d98abba8f04cf041542d9ebb6df0d472a1395606",
+          "sha256": "59bf4c6a6442a61739e1f0bf7e35130a172b2c6b957b7f5e4f6fbd8376960c35",
+          "version": "v1.63.0",
+          "commit": "d98abba8f04cf041542d9ebb6df0d472a1395606",
+          "kind": "source-only"
+        },
+        {
+          "kind": "distribution",
+          "version": "1.63.0-202610191322",
+          "url": "https://download.eclipse.org/jdtls/milestones/1.63.0/jdt-language-server-1.63.0-202610191322.tar.gz",
+          "sha256": "b1f2abe0b3cccb462cf64fb4a5587c7d09df60cf8be7748b152cbd89d018bdc4"
+        },
+        {
+          "kind": "runtime-darwin-arm64",
+          "version": "25.0.5+8.0.LTS",
+          "url": "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.5%2B8/OpenJDK25U-jdk_aarch64_mac_hotspot_25.0.5_8.tar.gz",
+          "sha256": "36dc14d797aaff6d89aab302cd053fdba6207dfdcf772052fa7b023a94b0e857"
+        },
+        {
+          "url": "https://services.gradle.org/distributions/gradle-9.8.2-bin.zip",
+          "sha256": "21bd5da2de49b642904077f38c0efdc7778e92b3ed0889392dca61b97e389607",
+          "kind": "gradle-pilot-runtime"
+        }
+      ],
+      "platforms": {
+        "darwin-arm64": {
+          "status": "pilot-evidence",
+          "evidence": [
+            "Exact cross-file dirty version2 definition, complete references and rename; Unicode/CRLF preserved; source files unchanged; no forced cleanup and owned POSIX group drained. Fixture-level evidence only."
+          ]
+        },
+        "darwin-x64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64-musl": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-baseline-musl": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        }
+      },
+      "productionQualified": false,
+      "blockers": [
+        "P00 historical scope: Maven and Gradle fixtures plus enabled/disabled Gradle import markers pass on macOS arm64 only. Diagnostics/symbols/hover/actions, production import policy, complete distribution licensing and other platform cells remain unqualified. Kotlin is deferred.",
+        "The controlled Gradle source-overlay derivative (SDK521eff6fca682960da1988c278f2bf3b1ebcc0900220eec0ca93263102d105be, constructor907210f1bea3fe40b5a4dba4b4f9d51d3be94f8f) is neither an official distribution nor a full-source Gradle build. Production original-foreground readiness, actual Buildship two-model import, complete operation/finalizer joins and native drain remain unqualified until exact-source execution and review; source construction and unit tests do not qualify them."
+      ],
+      "pilotEvidence": [
+        {
+          "fixture": "java-maven",
+          "reportSha256": "00d958a9fb22a8b4a6635ceddb9202b0f9f222cf499d4f578cda955cd01ece64",
+          "configSha256": "a2379cabbe391a2e80690340880f27add5be32e459a8712c9c04bd27f04f245c",
+          "sourceHashes": {
+            "harness": "aac333d126120c4fea828fb0514c4360237d67018571f2c92dca9247c5ade27c",
+            "fixtures": "17870a062929a11a3802f2b3e2ce77be32d65272f0c6589840eabc387bebd1cc",
+            "transport": "f1aecc08bb40ef2230ea18dd024a076806f667b62a3f6557bf15ff4995e5f0d1",
+            "assertions": "385b0223f440d226627ee72184885d617b8b395148994a0d8a99ed8892cfe07c",
+            "process": "1e47268d16257c1c5c5125fbfaea5b8539982d4ebf1a0cff99090b0b63c3c1c8"
+          },
+          "outcome": "passed"
+        },
+        {
+          "fixture": "java-gradle-enabled",
+          "reportSha256": "a83f4a979175feb4431b02426656c2672e4300f65a62d7ed80efa4f8ae40e838",
+          "configSha256": "a154f54682661e440f7653a1f7da3ef943f2fd76a5bc3d0db20d3ed197275def",
+          "sourceHashes": {
+            "harness": "aac333d126120c4fea828fb0514c4360237d67018571f2c92dca9247c5ade27c",
+            "fixtures": "17870a062929a11a3802f2b3e2ce77be32d65272f0c6589840eabc387bebd1cc",
+            "transport": "f1aecc08bb40ef2230ea18dd024a076806f667b62a3f6557bf15ff4995e5f0d1",
+            "assertions": "385b0223f440d226627ee72184885d617b8b395148994a0d8a99ed8892cfe07c",
+            "process": "1e47268d16257c1c5c5125fbfaea5b8539982d4ebf1a0cff99090b0b63c3c1c8"
+          },
+          "outcome": "passed"
+        },
+        {
+          "fixture": "java-gradle-denied",
+          "reportSha256": "1144b9669ec1a98e059c788014d295aecef6922563483dbf13a2fa2457354cb6",
+          "configSha256": "abee4bf61afe9ab3eb83c96a3940b4ab82eb34a5445e76e9a60191c2c2c79fc5",
+          "sourceHashes": {
+            "harness": "aac333d126120c4fea828fb0514c4360237d67018571f2c92dca9247c5ade27c",
+            "fixtures": "17870a062929a11a3802f2b3e2ce77be32d65272f0c6589840eabc387bebd1cc",
+            "transport": "f1aecc08bb40ef2230ea18dd024a076806f667b62a3f6557bf15ff4995e5f0d1",
+            "assertions": "385b0223f440d226627ee72184885d617b8b395148994a0d8a99ed8892cfe07c",
+            "process": "1e47268d16257c1c5c5125fbfaea5b8539982d4ebf1a0cff99090b0b63c3c1c8"
+          },
+          "outcome": "passed"
+        }
+      ],
+      "phaseEvidence": [
+        {
+          "phase": "P05",
+          "status": "experimental-component-evidence",
+          "nativePhaseAccepted": false,
+          "productionQualified": false,
+          "platform": "darwin-arm64",
+          "sourceCommit": "f6f3c6823624bb8bb8b24576646d6a03c1ea2f18",
+          "reports": [
+            {
+              "purpose": "Actual private Maven1.0 and Gradle2.0 preparation and Java operations",
+              "sha256": "91ca6ee9f43265fd62e4714956534e4b000984e3a668f396b564bd75fe61d70b"
+            },
+            {
+              "purpose": "Actual typed-receiver references and added/remaining/resolved diagnostic lifecycle",
+              "sha256": "4ca28375cdf92cd84b86043bee2ac0e5d2220289fb584a7aa30173919e70d6b2"
+            },
+            {
+              "purpose": "Exact reference-location audit against retained results, including wrong same-file call negative control; no new native run",
+              "sha256": "4447e0d2d42cd2103463e70eab06b60cf5cc2437d000e2ab30d1f8140149e581"
+            }
+          ],
+          "coverage": [
+            "Two existing main/test source roots and two pinned dependency versions",
+            "Definition, exact references, typed receiver separation and complete unapplied rename previews",
+            "Hover, document symbols, completion, signature, source type definition and call hierarchy",
+            "Added, nonempty remaining and resolved diagnostic deltas with prior/current observation binding",
+            "Complete unapplied inline import actions and stale prior-view refusal after unsaved overlay fix",
+            "Source, SDK and offline-cache conservation; empty admission and positive known-owned process absence"
+          ],
+          "limits": [
+            "Fixed private synthetic offline fixtures only; no general repository execution permission or OS sandbox",
+            "No public setup issuer, edit application, editor integration, aggregate RSS or additional platform qualification",
+            "No selected-distribution license approval or native P05 acceptance; Kotlin remains deferred"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "kotlin-lsp",
+      "languages": ["kotlin", "java"],
+      "version": "263.7084.0",
+      "runtime": {
+        "bundledJavaMinimum": "25",
+        "projectTypes": ["JVM Maven", "JVM Gradle", "mixed Java/Kotlin"]
+      },
+      "license": {
+        "reported": "Distribution terms unresolved; repository Apache-2.0 is insufficient",
+        "evidence": [
+          "https://github.com/Kotlin/kotlin-lsp",
+          "https://blog.jetbrains.com/idea/2026/10/intellij-idea-s-java-and-kotlin-for-cursor-and-vs-code-hits-1-0/"
+        ],
+        "redistribution": "not bundled; distribution obligations remain a release gate"
+      },
+      "artifacts": [
+        {
+          "url": "https://download.jetbrains.com/language-server/kotlin-server/263.7084.0/kotlin-server-263.7084.0-aarch64.sit",
+          "sha256": "b403bf8a54bd458e3ba6731cf8abb3340be08b439c03576dfc02b13faf3694b8",
+          "bytes": 360201117,
+          "version": "263.7084.0"
+        },
+        {
+          "url": "https://download.jetbrains.com/language-server/kotlin-server/263.6379.0/kotlin-server-263.6379.0-aarch64.sit",
+          "sha256": "ebef2e13cd4adc4ec9e04084b848000a3ec7a9d2917c64f269574ce2efe9ecad",
+          "version": "263.6379.0"
+        },
+        {
+          "url": "https://download.jetbrains.com/language-server/kotlin-server/262.9593.0/kotlin-server-262.9593.0-aarch64.sit",
+          "sha256": "6ba6021a706b21e64cef33f7e2b79f187c0910320722bb2d3ed05ad1115ec43f",
+          "version": "262.9593.0"
+        }
+      ],
+      "platforms": {
+        "darwin-arm64": {
+          "status": "pilot-evidence",
+          "evidence": [
+            "263.7084.0 and 263.6379.0: bundled --show-eula exits 12, EULA.txt missing. 262.9593.0: server exits 7 because build expired."
+          ]
+        },
+        "darwin-x64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64-musl": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-baseline-musl": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        }
+      },
+      "productionQualified": false,
+      "blockers": [
+        "Kotlin qualification is deferred; preserved observations are historical and do not block the Java-only release gate.",
+        "Mixed-JVM reads/rename have not run. No EULA was accepted, expiry bypassed or license activated. Purely agentic deployment terms and Linux musl/Windows/macOS rows remain unqualified."
+      ],
+      "releaseGate": false,
+      "disposition": "deferred"
+    }
+  ],
+  "editorEvidence": {
+    "darwin-arm64": {
+      "vscode": "1.137.0",
+      "cursorApplication": "3.22.7",
+      "cursorHostAPI": "1.128.0",
+      "checks": [
+        "dirty-buffer apply",
+        "concurrent edit at first host write",
+        "concurrent edit after first target",
+        "ownership transfer after first target",
+        "idempotent retry",
+        "Framed initialize/initialized exchange denies generic and forged bridge clients; stolen proposal ID cannot apply; qualified private channel applies opaque proposal and safely retries.",
+        "owned POSIX process group drained after complete host report"
+      ],
+      "status": "disposable-prototype-passed",
+      "limitations": [
+        "Private one-use fixture capability and in-memory authority/retry state only; production bridge enrollment, durable authority, crash recovery and resource operations remain unqualified.",
+        "The isolated test hosts require bounded termination after their complete reports; forced cleanup is recorded. This does not qualify graceful product lifecycle, deliberately detached descendants or Windows process trees."
+      ],
+      "receipts": {
+        "vscode": {
+          "reportSha256": "064b2ffde4a94f2b9294b7344b6bfd0bd9470e14f186619e58d43b87bf25898f",
+          "launcherSha256": "8ce2bebb778bca2c0724fe5c5c0f894a14c534c64b188ad728928f28393d47e9",
+          "sourceHashes": {
+            "runner": "bc07bff0f8b17d20618a48588ef2cdbb4ea019d3fbf73f47cde83593363c3978",
+            "probe": "3405090a862151ff2b55e2cd9819d31680ae9277cea18afa9bd0382ef33fec8a",
+            "wire": "3e7ed165138094867da5768fc1f0d0322c603f6ec859b57d8ef0f8eafa40cc81",
+            "process": "1e47268d16257c1c5c5125fbfaea5b8539982d4ebf1a0cff99090b0b63c3c1c8"
+          },
+          "terminatedAfterHostReport": true,
+          "forcedCleanup": true,
+          "ownedGroupDrained": true
+        },
+        "cursor": {
+          "reportSha256": "82eeec1eb6c374d8a15eb484ae9b3b892d956bbdedbd39a86e73a3138d8f9165",
+          "launcherSha256": "de63d7265e20da15329ee70250c8596851e39d08cfdc814d5f73c00b8c7962a1",
+          "sourceHashes": {
+            "runner": "bc07bff0f8b17d20618a48588ef2cdbb4ea019d3fbf73f47cde83593363c3978",
+            "probe": "3405090a862151ff2b55e2cd9819d31680ae9277cea18afa9bd0382ef33fec8a",
+            "wire": "3e7ed165138094867da5768fc1f0d0322c603f6ec859b57d8ef0f8eafa40cc81",
+            "process": "1e47268d16257c1c5c5125fbfaea5b8539982d4ebf1a0cff99090b0b63c3c1c8"
+          },
+          "terminatedAfterHostReport": true,
+          "forcedCleanup": true,
+          "ownedGroupDrained": true
+        }
+      }
+    }
+  },
+  "releaseLanguages": ["typescript", "javascript", "python", "go", "rust", "java"],
+  "deferredLanguages": {
+    "kotlin": "Deferred by user direction 2026-10-26; mixed Java/Kotlin, Kotlin JVM, Android and KMP are not current release gates."
+  },
+  "selectedProviders": {
+    "typescript": "typescript-language-server",
+    "javascript": "typescript-language-server",
+    "python": "basedpyright",
+    "go": "gopls",
+    "rust": "rust-analyzer",
+    "java": "jdtls"
+  },
+  "candidateQualification": {
+    "phase": "P11",
+    "status": "blocked",
+    "productionQualified": false,
+    "historicalEvidencePhase": "P00",
+    "inventorySource": "apps/threadnote/test/evaluation/semantic-qualification/inventory.ts",
+    "runner": "scripts/qualify-semantic-providers.ts --candidate-manifest",
+    "familyPlatformCells": 40,
+    "activeClientCells": 80,
+    "qualifiedCells": 0,
+    "receiptPolicy": "Runner-owned operations and assertions only; no imported results or caller qualification flags. Missing, failed, unsupported, unavailable, license, capability, authority and recovery evidence block GA.",
+    "deferredClients": ["editor-lsp", "coexistence", "hover-CodeLens", "first-party-guarded-integration"]
+  },
+  "platformCandidates": {
+    "schemaVersion": 1,
+    "providers": {
+      "typescript-language-server": {
+        "version": "6.0.2",
+        "platforms": {
+          "darwin-arm64": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "6.0.2",
+                "url": "https://registry.npmjs.org/typescript-language-server/-/typescript-language-server-6.0.2.tgz",
+                "archiveSha256": null,
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/typescript-language-server/typescript-language-server/v6.0.2/LICENSE",
+                    "sha256": "899d21038f87dd6243dd33b7ee82a078e639d4325a427c01e64d8116315b9680"
+                  }
+                ]
+              },
+              {
+                "role": "sdk",
+                "version": "6.0.3",
+                "url": "https://registry.npmjs.org/typescript/-/typescript-6.0.3.tgz",
+                "archiveSha256": null,
+                "licenseEvidence": [
+                  {
+                    "url": "https://github.com/microsoft/TypeScript/blob/v6.0.3/LICENSE.txt",
+                    "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+                    "artifactPath": "package/LICENSE.txt",
+                    "digestBasis": "typescript@6.0.3 selected npm package LICENSE.txt bytes",
+                    "license": "Apache-2.0"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "darwin-x64": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "6.0.2",
+                "url": "https://registry.npmjs.org/typescript-language-server/-/typescript-language-server-6.0.2.tgz",
+                "archiveSha256": null,
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/typescript-language-server/typescript-language-server/v6.0.2/LICENSE",
+                    "sha256": "899d21038f87dd6243dd33b7ee82a078e639d4325a427c01e64d8116315b9680"
+                  }
+                ]
+              },
+              {
+                "role": "sdk",
+                "version": "6.0.3",
+                "url": "https://registry.npmjs.org/typescript/-/typescript-6.0.3.tgz",
+                "archiveSha256": null,
+                "licenseEvidence": [
+                  {
+                    "url": "https://github.com/microsoft/TypeScript/blob/v6.0.3/LICENSE.txt",
+                    "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+                    "artifactPath": "package/LICENSE.txt",
+                    "digestBasis": "typescript@6.0.3 selected npm package LICENSE.txt bytes",
+                    "license": "Apache-2.0"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "linux-arm64": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "6.0.2",
+                "url": "https://registry.npmjs.org/typescript-language-server/-/typescript-language-server-6.0.2.tgz",
+                "archiveSha256": null,
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/typescript-language-server/typescript-language-server/v6.0.2/LICENSE",
+                    "sha256": "899d21038f87dd6243dd33b7ee82a078e639d4325a427c01e64d8116315b9680"
+                  }
+                ]
+              },
+              {
+                "role": "sdk",
+                "version": "6.0.3",
+                "url": "https://registry.npmjs.org/typescript/-/typescript-6.0.3.tgz",
+                "archiveSha256": null,
+                "licenseEvidence": [
+                  {
+                    "url": "https://github.com/microsoft/TypeScript/blob/v6.0.3/LICENSE.txt",
+                    "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+                    "artifactPath": "package/LICENSE.txt",
+                    "digestBasis": "typescript@6.0.3 selected npm package LICENSE.txt bytes",
+                    "license": "Apache-2.0"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "linux-arm64-musl": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "6.0.2",
+                "url": "https://registry.npmjs.org/typescript-language-server/-/typescript-language-server-6.0.2.tgz",
+                "archiveSha256": null,
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/typescript-language-server/typescript-language-server/v6.0.2/LICENSE",
+                    "sha256": "899d21038f87dd6243dd33b7ee82a078e639d4325a427c01e64d8116315b9680"
+                  }
+                ]
+              },
+              {
+                "role": "sdk",
+                "version": "6.0.3",
+                "url": "https://registry.npmjs.org/typescript/-/typescript-6.0.3.tgz",
+                "archiveSha256": null,
+                "licenseEvidence": [
+                  {
+                    "url": "https://github.com/microsoft/TypeScript/blob/v6.0.3/LICENSE.txt",
+                    "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+                    "artifactPath": "package/LICENSE.txt",
+                    "digestBasis": "typescript@6.0.3 selected npm package LICENSE.txt bytes",
+                    "license": "Apache-2.0"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "linux-x64-baseline": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "6.0.2",
+                "url": "https://registry.npmjs.org/typescript-language-server/-/typescript-language-server-6.0.2.tgz",
+                "archiveSha256": null,
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/typescript-language-server/typescript-language-server/v6.0.2/LICENSE",
+                    "sha256": "899d21038f87dd6243dd33b7ee82a078e639d4325a427c01e64d8116315b9680"
+                  }
+                ]
+              },
+              {
+                "role": "sdk",
+                "version": "6.0.3",
+                "url": "https://registry.npmjs.org/typescript/-/typescript-6.0.3.tgz",
+                "archiveSha256": null,
+                "licenseEvidence": [
+                  {
+                    "url": "https://github.com/microsoft/TypeScript/blob/v6.0.3/LICENSE.txt",
+                    "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+                    "artifactPath": "package/LICENSE.txt",
+                    "digestBasis": "typescript@6.0.3 selected npm package LICENSE.txt bytes",
+                    "license": "Apache-2.0"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "linux-x64-baseline-musl": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "6.0.2",
+                "url": "https://registry.npmjs.org/typescript-language-server/-/typescript-language-server-6.0.2.tgz",
+                "archiveSha256": null,
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/typescript-language-server/typescript-language-server/v6.0.2/LICENSE",
+                    "sha256": "899d21038f87dd6243dd33b7ee82a078e639d4325a427c01e64d8116315b9680"
+                  }
+                ]
+              },
+              {
+                "role": "sdk",
+                "version": "6.0.3",
+                "url": "https://registry.npmjs.org/typescript/-/typescript-6.0.3.tgz",
+                "archiveSha256": null,
+                "licenseEvidence": [
+                  {
+                    "url": "https://github.com/microsoft/TypeScript/blob/v6.0.3/LICENSE.txt",
+                    "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+                    "artifactPath": "package/LICENSE.txt",
+                    "digestBasis": "typescript@6.0.3 selected npm package LICENSE.txt bytes",
+                    "license": "Apache-2.0"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "windows-arm64": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "6.0.2",
+                "url": "https://registry.npmjs.org/typescript-language-server/-/typescript-language-server-6.0.2.tgz",
+                "archiveSha256": null,
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/typescript-language-server/typescript-language-server/v6.0.2/LICENSE",
+                    "sha256": "899d21038f87dd6243dd33b7ee82a078e639d4325a427c01e64d8116315b9680"
+                  }
+                ]
+              },
+              {
+                "role": "sdk",
+                "version": "6.0.3",
+                "url": "https://registry.npmjs.org/typescript/-/typescript-6.0.3.tgz",
+                "archiveSha256": null,
+                "licenseEvidence": [
+                  {
+                    "url": "https://github.com/microsoft/TypeScript/blob/v6.0.3/LICENSE.txt",
+                    "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+                    "artifactPath": "package/LICENSE.txt",
+                    "digestBasis": "typescript@6.0.3 selected npm package LICENSE.txt bytes",
+                    "license": "Apache-2.0"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "windows-x64-baseline": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "6.0.2",
+                "url": "https://registry.npmjs.org/typescript-language-server/-/typescript-language-server-6.0.2.tgz",
+                "archiveSha256": null,
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/typescript-language-server/typescript-language-server/v6.0.2/LICENSE",
+                    "sha256": "899d21038f87dd6243dd33b7ee82a078e639d4325a427c01e64d8116315b9680"
+                  }
+                ]
+              },
+              {
+                "role": "sdk",
+                "version": "6.0.3",
+                "url": "https://registry.npmjs.org/typescript/-/typescript-6.0.3.tgz",
+                "archiveSha256": null,
+                "licenseEvidence": [
+                  {
+                    "url": "https://github.com/microsoft/TypeScript/blob/v6.0.3/LICENSE.txt",
+                    "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+                    "artifactPath": "package/LICENSE.txt",
+                    "digestBasis": "typescript@6.0.3 selected npm package LICENSE.txt bytes",
+                    "license": "Apache-2.0"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          }
+        }
+      },
+      "basedpyright": {
+        "version": "1.40.2",
+        "platforms": {
+          "darwin-arm64": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "1.40.2",
+                "url": "https://files.pythonhosted.org/packages/de/53/0031b22e118264a57a3b64dfc0c8f0659b81af5bccd419ac62933013c601/basedpyright-1.40.2-py3-none-any.whl",
+                "archiveSha256": "3a53aeb93a86675ded0e12bc27bd8476c1742356de07ad8cab67bff18110c690",
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/DetachHead/basedpyright/v1.40.2/LICENSE.txt",
+                    "sha256": "f7c936bc43f132b08497ac952e9376cbc102e5eedb4bf6ec902ea8442bd9c68d"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "darwin-x64": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "1.40.2",
+                "url": "https://files.pythonhosted.org/packages/de/53/0031b22e118264a57a3b64dfc0c8f0659b81af5bccd419ac62933013c601/basedpyright-1.40.2-py3-none-any.whl",
+                "archiveSha256": "3a53aeb93a86675ded0e12bc27bd8476c1742356de07ad8cab67bff18110c690",
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/DetachHead/basedpyright/v1.40.2/LICENSE.txt",
+                    "sha256": "f7c936bc43f132b08497ac952e9376cbc102e5eedb4bf6ec902ea8442bd9c68d"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "linux-arm64": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "1.40.2",
+                "url": "https://files.pythonhosted.org/packages/de/53/0031b22e118264a57a3b64dfc0c8f0659b81af5bccd419ac62933013c601/basedpyright-1.40.2-py3-none-any.whl",
+                "archiveSha256": "3a53aeb93a86675ded0e12bc27bd8476c1742356de07ad8cab67bff18110c690",
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/DetachHead/basedpyright/v1.40.2/LICENSE.txt",
+                    "sha256": "f7c936bc43f132b08497ac952e9376cbc102e5eedb4bf6ec902ea8442bd9c68d"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "linux-arm64-musl": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "1.40.2",
+                "url": "https://files.pythonhosted.org/packages/de/53/0031b22e118264a57a3b64dfc0c8f0659b81af5bccd419ac62933013c601/basedpyright-1.40.2-py3-none-any.whl",
+                "archiveSha256": "3a53aeb93a86675ded0e12bc27bd8476c1742356de07ad8cab67bff18110c690",
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/DetachHead/basedpyright/v1.40.2/LICENSE.txt",
+                    "sha256": "f7c936bc43f132b08497ac952e9376cbc102e5eedb4bf6ec902ea8442bd9c68d"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "linux-x64-baseline": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "1.40.2",
+                "url": "https://files.pythonhosted.org/packages/de/53/0031b22e118264a57a3b64dfc0c8f0659b81af5bccd419ac62933013c601/basedpyright-1.40.2-py3-none-any.whl",
+                "archiveSha256": "3a53aeb93a86675ded0e12bc27bd8476c1742356de07ad8cab67bff18110c690",
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/DetachHead/basedpyright/v1.40.2/LICENSE.txt",
+                    "sha256": "f7c936bc43f132b08497ac952e9376cbc102e5eedb4bf6ec902ea8442bd9c68d"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "linux-x64-baseline-musl": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "1.40.2",
+                "url": "https://files.pythonhosted.org/packages/de/53/0031b22e118264a57a3b64dfc0c8f0659b81af5bccd419ac62933013c601/basedpyright-1.40.2-py3-none-any.whl",
+                "archiveSha256": "3a53aeb93a86675ded0e12bc27bd8476c1742356de07ad8cab67bff18110c690",
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/DetachHead/basedpyright/v1.40.2/LICENSE.txt",
+                    "sha256": "f7c936bc43f132b08497ac952e9376cbc102e5eedb4bf6ec902ea8442bd9c68d"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "windows-arm64": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "1.40.2",
+                "url": "https://files.pythonhosted.org/packages/de/53/0031b22e118264a57a3b64dfc0c8f0659b81af5bccd419ac62933013c601/basedpyright-1.40.2-py3-none-any.whl",
+                "archiveSha256": "3a53aeb93a86675ded0e12bc27bd8476c1742356de07ad8cab67bff18110c690",
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/DetachHead/basedpyright/v1.40.2/LICENSE.txt",
+                    "sha256": "f7c936bc43f132b08497ac952e9376cbc102e5eedb4bf6ec902ea8442bd9c68d"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "windows-x64-baseline": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "1.40.2",
+                "url": "https://files.pythonhosted.org/packages/de/53/0031b22e118264a57a3b64dfc0c8f0659b81af5bccd419ac62933013c601/basedpyright-1.40.2-py3-none-any.whl",
+                "archiveSha256": "3a53aeb93a86675ded0e12bc27bd8476c1742356de07ad8cab67bff18110c690",
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/DetachHead/basedpyright/v1.40.2/LICENSE.txt",
+                    "sha256": "f7c936bc43f132b08497ac952e9376cbc102e5eedb4bf6ec902ea8442bd9c68d"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          }
+        }
+      },
+      "gopls": {
+        "version": "v0.24.0",
+        "platforms": {
+          "darwin-arm64": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "v0.24.0",
+                "url": "https://proxy.golang.org/golang.org/x/tools/gopls/@v/v0.24.0.zip",
+                "archiveSha256": "a6e8f2c45e4c561d2322ef15088b20afd9ba08cf8b0b51077ad510591528fed2",
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/golang/tools/gopls/v0.24.0/LICENSE",
+                    "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "darwin-x64": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "v0.24.0",
+                "url": "https://proxy.golang.org/golang.org/x/tools/gopls/@v/v0.24.0.zip",
+                "archiveSha256": "a6e8f2c45e4c561d2322ef15088b20afd9ba08cf8b0b51077ad510591528fed2",
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/golang/tools/gopls/v0.24.0/LICENSE",
+                    "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "linux-arm64": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "v0.24.0",
+                "url": "https://proxy.golang.org/golang.org/x/tools/gopls/@v/v0.24.0.zip",
+                "archiveSha256": "a6e8f2c45e4c561d2322ef15088b20afd9ba08cf8b0b51077ad510591528fed2",
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/golang/tools/gopls/v0.24.0/LICENSE",
+                    "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "linux-arm64-musl": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "v0.24.0",
+                "url": "https://proxy.golang.org/golang.org/x/tools/gopls/@v/v0.24.0.zip",
+                "archiveSha256": "a6e8f2c45e4c561d2322ef15088b20afd9ba08cf8b0b51077ad510591528fed2",
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/golang/tools/gopls/v0.24.0/LICENSE",
+                    "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "linux-x64-baseline": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "v0.24.0",
+                "url": "https://proxy.golang.org/golang.org/x/tools/gopls/@v/v0.24.0.zip",
+                "archiveSha256": "a6e8f2c45e4c561d2322ef15088b20afd9ba08cf8b0b51077ad510591528fed2",
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/golang/tools/gopls/v0.24.0/LICENSE",
+                    "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "linux-x64-baseline-musl": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "v0.24.0",
+                "url": "https://proxy.golang.org/golang.org/x/tools/gopls/@v/v0.24.0.zip",
+                "archiveSha256": "a6e8f2c45e4c561d2322ef15088b20afd9ba08cf8b0b51077ad510591528fed2",
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/golang/tools/gopls/v0.24.0/LICENSE",
+                    "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "windows-arm64": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "v0.24.0",
+                "url": "https://proxy.golang.org/golang.org/x/tools/gopls/@v/v0.24.0.zip",
+                "archiveSha256": "a6e8f2c45e4c561d2322ef15088b20afd9ba08cf8b0b51077ad510591528fed2",
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/golang/tools/gopls/v0.24.0/LICENSE",
+                    "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "windows-x64-baseline": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "v0.24.0",
+                "url": "https://proxy.golang.org/golang.org/x/tools/gopls/@v/v0.24.0.zip",
+                "archiveSha256": "a6e8f2c45e4c561d2322ef15088b20afd9ba08cf8b0b51077ad510591528fed2",
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/golang/tools/gopls/v0.24.0/LICENSE",
+                    "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          }
+        }
+      },
+      "rust-analyzer": {
+        "version": "2026-10-26",
+        "platforms": {
+          "darwin-arm64": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "2026-10-26",
+                "url": "https://github.com/rust-lang/rust-analyzer/releases/download/2026-10-26/rust-analyzer-aarch64-apple-darwin.gz",
+                "archiveSha256": "8fb90cb58f5910d8d8b24ac1a93cca49f053365cbf0eb3c682144ad0a0027dcf",
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/rust-lang/rust-analyzer/2026-10-26/LICENSE-MIT",
+                    "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+                  },
+                  {
+                    "url": "https://raw.githubusercontent.com/rust-lang/rust-analyzer/2026-10-26/LICENSE-APACHE",
+                    "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "darwin-x64": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "2026-10-26",
+                "url": "https://github.com/rust-lang/rust-analyzer/releases/download/2026-10-26/rust-analyzer-x86_64-apple-darwin.gz",
+                "archiveSha256": "b3e4904877bcf7013a4a342c449cff1bf0ea0b91d5a1a30ac8df3d32142519c0",
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/rust-lang/rust-analyzer/2026-10-26/LICENSE-MIT",
+                    "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+                  },
+                  {
+                    "url": "https://raw.githubusercontent.com/rust-lang/rust-analyzer/2026-10-26/LICENSE-APACHE",
+                    "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "linux-arm64": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "2026-10-26",
+                "url": "https://github.com/rust-lang/rust-analyzer/releases/download/2026-10-26/rust-analyzer-aarch64-unknown-linux-gnu.gz",
+                "archiveSha256": "1b225c4c9ae329ca96e8a75a5bbcb5562a7f1d25c57c8b55d3e02299a3dbe836",
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/rust-lang/rust-analyzer/2026-10-26/LICENSE-MIT",
+                    "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+                  },
+                  {
+                    "url": "https://raw.githubusercontent.com/rust-lang/rust-analyzer/2026-10-26/LICENSE-APACHE",
+                    "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "linux-arm64-musl": {
+            "status": "metadata-only",
+            "artifacts": [],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "linux-x64-baseline": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "2026-10-26",
+                "url": "https://github.com/rust-lang/rust-analyzer/releases/download/2026-10-26/rust-analyzer-x86_64-unknown-linux-gnu.gz",
+                "archiveSha256": "4c83773525f93b636ed79761389568b4d2a89c05fa7ecc440245032d49ad80ce",
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/rust-lang/rust-analyzer/2026-10-26/LICENSE-MIT",
+                    "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+                  },
+                  {
+                    "url": "https://raw.githubusercontent.com/rust-lang/rust-analyzer/2026-10-26/LICENSE-APACHE",
+                    "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "linux-x64-baseline-musl": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "2026-10-26",
+                "url": "https://github.com/rust-lang/rust-analyzer/releases/download/2026-10-26/rust-analyzer-x86_64-unknown-linux-musl.gz",
+                "archiveSha256": "b12c272401af57558d68afb6310a47f27729bdd65bb11b7171582d9d7f286d32",
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/rust-lang/rust-analyzer/2026-10-26/LICENSE-MIT",
+                    "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+                  },
+                  {
+                    "url": "https://raw.githubusercontent.com/rust-lang/rust-analyzer/2026-10-26/LICENSE-APACHE",
+                    "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "windows-arm64": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "2026-10-26",
+                "url": "https://github.com/rust-lang/rust-analyzer/releases/download/2026-10-26/rust-analyzer-aarch64-pc-windows-msvc.zip",
+                "archiveSha256": "e5f758de3ece10656d7bba6565b92e65fb52843810dc1bd0a911e307755d63ad",
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/rust-lang/rust-analyzer/2026-10-26/LICENSE-MIT",
+                    "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+                  },
+                  {
+                    "url": "https://raw.githubusercontent.com/rust-lang/rust-analyzer/2026-10-26/LICENSE-APACHE",
+                    "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "windows-x64-baseline": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "2026-10-26",
+                "url": "https://github.com/rust-lang/rust-analyzer/releases/download/2026-10-26/rust-analyzer-x86_64-pc-windows-msvc.zip",
+                "archiveSha256": "13549dd0c380647685c82c87b8d80904f81bc4de92a82c099b6083c5b9aa1ca1",
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/rust-lang/rust-analyzer/2026-10-26/LICENSE-MIT",
+                    "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+                  },
+                  {
+                    "url": "https://raw.githubusercontent.com/rust-lang/rust-analyzer/2026-10-26/LICENSE-APACHE",
+                    "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          }
+        }
+      },
+      "jdtls": {
+        "version": "1.63.0-202610191322",
+        "platforms": {
+          "darwin-arm64": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "1.63.0-202610191322",
+                "url": "https://download.eclipse.org/jdtls/milestones/1.63.0/jdt-language-server-1.63.0-202610191322.tar.gz",
+                "archiveSha256": "b1f2abe0b3cccb462cf64fb4a5587c7d09df60cf8be7748b152cbd89d018bdc4",
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/eclipse-jdtls/eclipse.jdt.ls/v1.63.0/LICENSE",
+                    "sha256": "209fe24bf55677bbf81c2b0481c1403201fab57b3b4c609971eba4ec8162b99c"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "darwin-x64": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "1.63.0-202610191322",
+                "url": "https://download.eclipse.org/jdtls/milestones/1.63.0/jdt-language-server-1.63.0-202610191322.tar.gz",
+                "archiveSha256": "b1f2abe0b3cccb462cf64fb4a5587c7d09df60cf8be7748b152cbd89d018bdc4",
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/eclipse-jdtls/eclipse.jdt.ls/v1.63.0/LICENSE",
+                    "sha256": "209fe24bf55677bbf81c2b0481c1403201fab57b3b4c609971eba4ec8162b99c"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "linux-arm64": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "1.63.0-202610191322",
+                "url": "https://download.eclipse.org/jdtls/milestones/1.63.0/jdt-language-server-1.63.0-202610191322.tar.gz",
+                "archiveSha256": "b1f2abe0b3cccb462cf64fb4a5587c7d09df60cf8be7748b152cbd89d018bdc4",
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/eclipse-jdtls/eclipse.jdt.ls/v1.63.0/LICENSE",
+                    "sha256": "209fe24bf55677bbf81c2b0481c1403201fab57b3b4c609971eba4ec8162b99c"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "linux-arm64-musl": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "1.63.0-202610191322",
+                "url": "https://download.eclipse.org/jdtls/milestones/1.63.0/jdt-language-server-1.63.0-202610191322.tar.gz",
+                "archiveSha256": "b1f2abe0b3cccb462cf64fb4a5587c7d09df60cf8be7748b152cbd89d018bdc4",
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/eclipse-jdtls/eclipse.jdt.ls/v1.63.0/LICENSE",
+                    "sha256": "209fe24bf55677bbf81c2b0481c1403201fab57b3b4c609971eba4ec8162b99c"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "linux-x64-baseline": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "1.63.0-202610191322",
+                "url": "https://download.eclipse.org/jdtls/milestones/1.63.0/jdt-language-server-1.63.0-202610191322.tar.gz",
+                "archiveSha256": "b1f2abe0b3cccb462cf64fb4a5587c7d09df60cf8be7748b152cbd89d018bdc4",
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/eclipse-jdtls/eclipse.jdt.ls/v1.63.0/LICENSE",
+                    "sha256": "209fe24bf55677bbf81c2b0481c1403201fab57b3b4c609971eba4ec8162b99c"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "linux-x64-baseline-musl": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "1.63.0-202610191322",
+                "url": "https://download.eclipse.org/jdtls/milestones/1.63.0/jdt-language-server-1.63.0-202610191322.tar.gz",
+                "archiveSha256": "b1f2abe0b3cccb462cf64fb4a5587c7d09df60cf8be7748b152cbd89d018bdc4",
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/eclipse-jdtls/eclipse.jdt.ls/v1.63.0/LICENSE",
+                    "sha256": "209fe24bf55677bbf81c2b0481c1403201fab57b3b4c609971eba4ec8162b99c"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "windows-arm64": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "1.63.0-202610191322",
+                "url": "https://download.eclipse.org/jdtls/milestones/1.63.0/jdt-language-server-1.63.0-202610191322.tar.gz",
+                "archiveSha256": "b1f2abe0b3cccb462cf64fb4a5587c7d09df60cf8be7748b152cbd89d018bdc4",
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/eclipse-jdtls/eclipse.jdt.ls/v1.63.0/LICENSE",
+                    "sha256": "209fe24bf55677bbf81c2b0481c1403201fab57b3b4c609971eba4ec8162b99c"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          },
+          "windows-x64-baseline": {
+            "status": "metadata-only",
+            "artifacts": [
+              {
+                "role": "provider",
+                "version": "1.63.0-202610191322",
+                "url": "https://download.eclipse.org/jdtls/milestones/1.63.0/jdt-language-server-1.63.0-202610191322.tar.gz",
+                "archiveSha256": "b1f2abe0b3cccb462cf64fb4a5587c7d09df60cf8be7748b152cbd89d018bdc4",
+                "licenseEvidence": [
+                  {
+                    "url": "https://raw.githubusercontent.com/eclipse-jdtls/eclipse.jdt.ls/v1.63.0/LICENSE",
+                    "sha256": "209fe24bf55677bbf81c2b0481c1403201fab57b3b4c609971eba4ec8162b99c"
+                  }
+                ]
+              }
+            ],
+            "runtimePins": null,
+            "productionQualified": false
+          }
+        }
+      }
+    },
+    "evidenceScope": "Public pinned metadata and historical source-license digests only. No new archive acquisition, complete runtime pins, selected-profile licensing, native execution or GA qualification follows.",
+    "sourceEvidence": [
+      {
+        "sha256": "31485e8fecb79e4eba844e1e309d4f4331bf27c9547b6e9c97f3269d99cb65cd",
+        "kind": "P11-primary-license-artifact-preparation.json"
+      },
+      {
+        "sha256": "a34666c81f6ebcedd7f64be30f29e1bc0e784f757dd5ca7bbcf6144003059463",
+        "kind": "P11-02-prerequisites-report.json"
+      }
+    ]
+  }
+}

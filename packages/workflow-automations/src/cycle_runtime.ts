@@ -18,8 +18,12 @@ import {
   nativeCycleUnreviewedRecoveryDigest,
   NativeCycleReviewSchema,
   validateNativeCycleReviewHistory,
+  validateNativeCycleReview,
+  nativeCycleReviewBasis as nativeCycleSourceReviewBasis,
+  nativeCycleRebaseReceiptDigest,
   nativeCycleBaseRequalificationReceiptDigest,
   validateNativeCycleMergeReceipt,
+  validateNativeCycleSameLabelRebasedBaseReceipt,
   validateNativeCycleInvalidTailMergeReceipt,
 } from './cycle_review.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -211,6 +215,20 @@ export function nativeCycleReviewBasis(runtime: NativeCycleRuntime, snapshot: ty
   return previous && review ? {snapshot: previous, review} : undefined;
 }
 
+/** Preserve source ancestry separately from the invalid-tail accepted finding ledger. */
+export function nativeCycleReviewContext(
+  runtime: NativeCycleRuntime,
+  snapshot: typeof NativeCycleSnapshotSchema.Type,
+): ReturnType<typeof nativeCycleSourceReviewBasis> {
+  return snapshot.invalidTailMergeQualificationV1
+    ? {previous: nativeCycleReviewBasis(runtime, snapshot)}
+    : nativeCycleSourceReviewBasis(
+        snapshot,
+        EffectArray.map(runtime.snapshots, entry => entry.snapshot),
+        runtime.reviews,
+      );
+}
+
 export function nativeCycleInvalidTailBasis(runtime: NativeCycleRuntime, phaseId: string) {
   const leaf = EffectArray.filter(runtime.snapshots, entry => entry.snapshot.phaseId === phaseId).at(-1)?.snapshot;
   if (
@@ -331,6 +349,7 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
       fail('The pre-implementation baseline lost its phase or preserved-work manifest.');
   }
   const capturedSnapshots = new Set<string>();
+  const capturedPhases = new Set<string>();
   const latestSnapshotByPhase = new Map<string, string>();
   for (const {snapshot, incoming} of runtime.snapshots) {
     const baseline = runtime.baselines[snapshot.phaseId];
@@ -402,13 +421,16 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
       )
         fail('Base requalification lost its reviewed predecessor, approved plan transition or immutable witness.');
     }
-    if (snapshot.ordinaryMergeQualificationV1) {
+    if (snapshot.sameLabelRebasedBaseIntegrationV1)
+      validateNativeCycleSameLabelRebasedBaseReceipt(snapshot, runtime, capturedSnapshots.size);
+    if (snapshot.ordinaryMergeQualificationV1 || snapshot.sameLabelRebasedBaseIntegrationV1) {
       const predecessor = snapshot.previous ?? snapshot.supersedes;
       const prior = predecessor ? snapshots.get(predecessor)?.snapshot : undefined;
       if (!prior || !capturedSnapshots.has(prior.snapshotId) || !reviews.has(prior.snapshotId))
         fail('Ordinary merge qualification requires its retained reviewed predecessor.');
-      validateNativeCycleMergeReceipt(snapshot, prior, runtime.plans, baseline.head);
-      const proof = snapshot.ordinaryMergeQualificationV1;
+      if (snapshot.ordinaryMergeQualificationV1)
+        validateNativeCycleMergeReceipt(snapshot, prior, runtime.plans, baseline.head);
+      const proof = (snapshot.ordinaryMergeQualificationV1 ?? snapshot.sameLabelRebasedBaseIntegrationV1)!;
       const plan = EffectOption.getOrUndefined(
         EffectArray.findFirst(runtime.plans, item => item.source.documentHash === proof.planDocumentHash),
       )!;
@@ -486,6 +508,20 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
     }
     capturedSnapshots.add(snapshot.snapshotId);
     if (
+      snapshot.rebase &&
+      (capturedPhases.has(snapshot.phaseId) ||
+        snapshot.previous ||
+        snapshot.supersedes ||
+        snapshot.rebase.preRebaseHead !== baseline.head ||
+        snapshot.acceptedHead !== snapshot.head ||
+        snapshot.rebase.preRebaseHead === snapshot.head ||
+        snapshot.rebase.receiptDigest !== nativeCycleRebaseReceiptDigest(snapshot, snapshot.rebase) ||
+        !EffectString.trim(snapshot.rebase.reason) ||
+        !EffectString.trim(snapshot.rebase.authority))
+    )
+      fail('Rebase evidence belongs only to the original phase baseline and its first snapshot.');
+    capturedPhases.add(snapshot.phaseId);
+    if (
       !runtime.state.phases[snapshot.phaseId] ||
       !EffectArray.some(
         runtime.plans,
@@ -537,10 +573,15 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
   for (const {snapshotId, report} of runtime.reviews) {
     const snapshot = snapshots.get(snapshotId)?.snapshot;
     if (!snapshot) fail('Review snapshot is missing.');
-    const basis = nativeCycleReviewBasis(runtime, snapshot);
-    if ((snapshot.previous || snapshot.supersedes) && !basis && !snapshot.unreviewedSupersession)
+    const basis = nativeCycleReviewContext(runtime, snapshot);
+    if ((snapshot.previous || snapshot.supersedes) && !basis.previous && !snapshot.unreviewedSupersession)
       fail('Review history lost its prior finding ledger.');
-    validateNativeCycleReviewHistory(snapshot, report, basis);
+    (snapshot.sameLabelRebasedBaseIntegrationV1 ? validateNativeCycleReview : validateNativeCycleReviewHistory)(
+      snapshot,
+      report,
+      basis.previous,
+      basis.findingBasis,
+    );
   }
   if (EffectArray.some(runtime.attempts, attempt => !snapshots.has(attempt.snapshotId)))
     fail('Review attempt snapshot is missing.');
@@ -695,9 +736,10 @@ function validateSupplementalInitialization(
       definition.baseBranch !== `${init.pr.baseRefBinding?.remote}/${init.pr.baseBranch}`)
   )
     supplementalFail('Supplemental attachment requires exact completed local proof and an existing matching PR.');
+  const reviewContext = nativeCycleReviewContext(runtime, snapshot);
   if (
-    validateNativeCycleReviewHistory(snapshot, review.report, nativeCycleReviewBasis(runtime, snapshot)).summary
-      .blockingIssueCount
+    validateNativeCycleReviewHistory(snapshot, review.report, reviewContext.previous, reviewContext.findingBasis)
+      .summary.blockingIssueCount
   )
     supplementalFail('Supplemental attachment requires an accepted nonblocking source review.');
 }

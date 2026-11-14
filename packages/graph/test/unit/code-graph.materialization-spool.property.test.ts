@@ -256,7 +256,7 @@ describe('code graph materialization spool', () => {
     expect(
       codeGraphMaterializationSpoolPath(path, layout, `cgsn_${Effect.pipe('a', EffectString.repeat(40))}-direct`),
     ).toBe(
-      `/threadnote/code-graph/repository/materialization-spool-v2-cgsn_${Effect.pipe('a', EffectString.repeat(40))}-direct.sqlite`,
+      `/threadnote/code-graph/repository/materialization-spool-v3-cgsn_${Effect.pipe('a', EffectString.repeat(40))}-direct.sqlite`,
     );
     for (const invalid of [
       '',

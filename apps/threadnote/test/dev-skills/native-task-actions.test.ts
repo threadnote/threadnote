@@ -23,7 +23,8 @@ import {
   type ResourceStoreLocation,
   type ResourceStoreWriteOptions,
 } from '@threadnote/store/resource-store';
-import {describe, expect} from 'vitest';
+import {describe, expect, vi} from 'vitest';
+import fc from 'fast-check';
 import {
   decodeNativeTaskActionRef,
   encodeNativeTaskActionRef,
@@ -44,6 +45,7 @@ import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
 import {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
 import {registerWorkflowTaskTool} from '../../src/mcp/server/workflow.js';
 import {readNativeTaskView} from '../../src/workflow_automation/task.js';
+import {selectNativeTaskSameLabelIntegration} from '../../src/workflow_automation/task_action_helpers.js';
 import {inspectOldBindingOwners} from '../../src/workflow_automation/task_binding_transition.js';
 import {resolveNativeTaskPrWatch} from '../../src/workflow_automation/task_pr_watch.js';
 import {
@@ -731,6 +733,69 @@ const publishOpenHistoricalPhase = (
   });
 
 describe('native task actions', () => {
+  effectIt.effect('preserves each snapshot authority command through the shared registration schema', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(['one'], 'local');
+      const mcp = new EffectMcpServerAdapter('test', '1', 'fixture');
+      const registration = yield* Effect.acquireRelease(
+        Effect.sync(() => vi.spyOn(mcp, 'registerTool')),
+        registered => Effect.sync(() => registered.mockRestore()),
+      );
+      registerWorkflowTaskTool(mcp, f.config);
+      const snapshot = EffectOption.getOrThrow(
+        EffectArray.findFirst(registration.mock.calls, ([name]) => name === 'workflow_task_snapshot'),
+      );
+      const schema = Schema.Struct(snapshot[1].inputSchema);
+      const decode = Schema.decodeUnknownEffect(schema);
+      const commands = ['recover-unreviewed-rebase', 'requalify-base', 'integrate-same-label-base'] as const;
+      for (const command of commands) {
+        const valid = {
+          runId: 'run',
+          callerCwd: f.repo,
+          snapshot: {
+            command,
+            snapshotRef: 'opaque-ref',
+            reason: 'Existing source authority',
+            userAuthority: 'Caller assertion',
+          },
+        };
+        expect(yield* decode(valid)).toEqual(valid);
+        for (const key of ['command', 'snapshotRef', 'reason', 'userAuthority'] as const) {
+          const missing: Record<string, unknown> = {...valid.snapshot};
+          delete missing[key];
+          expect((yield* decode({...valid, snapshot: missing}).pipe(Effect.exit))._tag).toBe('Failure');
+          for (const invalid of ['', null, 1, false])
+            expect(
+              (yield* decode({...valid, snapshot: {...valid.snapshot, [key]: invalid}}).pipe(Effect.exit))._tag,
+            ).toBe('Failure');
+        }
+      }
+      const value = fc.oneof(fc.string({maxLength: 32}), fc.constantFrom(null, 1, false));
+      fc.assert(
+        fc.property(
+          fc.constantFrom(...commands),
+          value,
+          value,
+          value,
+          (command, snapshotRef, reason, userAuthority) => {
+            // Independent former per-command arm: all three fields are required nonempty strings.
+            const previous = Schema.Struct({
+              command: Schema.Literal(command),
+              snapshotRef: Schema.String.check(Schema.isMinLength(1)),
+              reason: Schema.String.check(Schema.isMinLength(1)),
+              userAuthority: Schema.String.check(Schema.isMinLength(1)),
+            });
+            const input = {command, snapshotRef, reason, userAuthority};
+            expect(Schema.is(schema)({runId: 'run', callerCwd: f.repo, snapshot: input})).toBe(
+              Schema.is(previous)(input),
+            );
+          },
+        ),
+        {numRuns: 40, seed: 424244},
+      );
+    }).pipe(run),
+  );
+
   effectIt.effect('lists recorded installation targets and inspection codes on admission failure', () =>
     Effect.gen(function* () {
       const f = yield* nativeFixture();
@@ -985,6 +1050,349 @@ describe('native task actions', () => {
       ).toMatchObject({failure: {code: 'graph-scope-conflict'}});
       expect(yield* f.fs.readFileString(f.statePath(legacyRunId))).toBe(legacyBytes);
     }).pipe(run),
+  );
+
+  effectIt.effect(
+    'integrates a rewritten same-label base through the public action using retained incremental review and one bounded acquisition',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture(['one', 'two'], 'local', false, false, false, undefined, repo =>
+          Effect.gen(function* () {
+            const fs = yield* FileSystem.FileSystem;
+            yield* runCommandEffect('git', ['-C', repo, 'checkout', 'main']);
+            yield* fs.writeFileString(repo + '/historical.ts', 'export const historical = true;\n');
+            yield* runCommandEffect('git', ['-C', repo, 'add', '.']);
+            yield* runCommandEffect('git', ['-C', repo, 'commit', '-m', 'Historical divergent declared base']);
+            yield* runCommandEffect('git', ['-C', repo, 'checkout', 'feature/one']);
+          }),
+        );
+        const root = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
+        yield* f.git(['commit', '--allow-empty', '-m', 'Retained predecessor HEAD']);
+        const blocker = {
+          id: 'F2011',
+          file: 'source.ts',
+          line: 1,
+          body: 'Keep the retained important blocker',
+          trigger: 'Review the reconciled source',
+          impact: 'Dropping history would admit blocked work',
+          evidence: 'Retained private fixture finding',
+          severity: 'important',
+          category: 'correctness',
+          confidence: 99,
+          state: 'new',
+        };
+        const report = (snapshot: Record<string, unknown>, mode: string) => ({
+          snapshotId: snapshot.snapshotId,
+          phaseHash: snapshot.phaseHash,
+          snapshotTree: snapshot.tree,
+          status: 'complete',
+          mode,
+          selected: ['correctness', 'simplicity'],
+          lanes: [
+            {name: 'correctness', status: 'complete'},
+            {name: 'simplicity', status: 'complete'},
+          ],
+          findings: [{...blocker, state: mode === 'full' ? 'new' : 'carried'}],
+        });
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const staged = 1;\n');
+        yield* f.git(['add', 'source.ts']);
+        const first = object(
+          object(
+            (yield* f.mutate('snapshot', {
+              phaseId: 'one',
+              snapshotId: 'first',
+              acceptedHead: EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout),
+              reason: 'Retain the committed predecessor HEAD with staged source',
+            })).snapshot,
+          ).snapshot,
+        );
+        yield* f.mutate('validate-review', {
+          snapshotId: 'first',
+          attemptId: 'first-review',
+          report: report(first, 'full'),
+        });
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const staged = 2;\n');
+        yield* f.git(['add', 'source.ts']);
+        const prior = object(
+          object((yield* f.mutate('snapshot', {phaseId: 'one', snapshotId: 'incremental', previous: 'first'})).snapshot)
+            .snapshot,
+        );
+        yield* f.mutate('validate-review', {
+          snapshotId: 'incremental',
+          attemptId: 'incremental-review',
+          report: report(prior, 'incremental'),
+        });
+        const before = (yield* readNativeWorkflowState(f.config, 'native-run'))!;
+        const history = before.state.cycle!;
+        yield* f.git(['restore', '--staged', '--worktree', 'source.ts']);
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const committed = true;\n');
+        yield* f.git(['add', '.']);
+        yield* f.git(['commit', '-m', 'Reconcile staged predecessor']);
+        yield* f.git(['checkout', '-b', 'rewritten', root]);
+        for (let index = 0; index < 411; index++)
+          yield* f.fs.writeFileString(f.path.join(f.repo, `upstream-${index}.ts`), 'export const inherited = true;\n');
+        yield* f.git(['add', '.']);
+        yield* f.git(['commit', '-m', 'Rewritten same-label base']);
+        const base = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
+        yield* f.git(['branch', '-f', 'main', base]);
+        yield* f.git(['checkout', 'feature/one']);
+        yield* f.git(['merge', '--no-ff', 'main', '-m', 'Integrate rewritten same-label base']);
+        const plan = yield* f.revise({
+          phases: EffectArray.map(f.document.phases, phase => ({
+            ...phase,
+            contracts: [
+              ...phase.contracts,
+              'Approved qualification prerequisite changes the material phase definition.',
+            ],
+          })),
+        });
+        yield* f.mutate('reconcile', {plan, reason: 'Approved prerequisite preserves the original review history'});
+        const mcp = new EffectMcpServerAdapter('test', '1', 'fixture');
+        registerWorkflowTaskTool(mcp, f.config);
+        const view = object(
+          (yield* mcp.invokeTool('workflow_task_view', {runId: 'native-run', callerCwd: f.repo})).structuredContent,
+        );
+        expect(view.baseRequalification).toBeUndefined();
+        const route = object(view.sameLabelBaseIntegration);
+        expect(route).toMatchObject({action: 'integrate-same-label-base', phaseId: 'one', baseBranch: 'main'});
+        const predecessorRef = String(route.predecessorRef);
+        expect(decodeNativeTaskActionRef(predecessorRef)).toMatchObject({
+          phaseHash: prior.phaseHash,
+          sourceTree: prior.tree,
+        });
+        const request = {
+          command: 'integrate-same-label-base-snapshot',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          snapshotRef: predecessorRef,
+          reason: 'Integrate the approved rewritten same-label base',
+          userAuthority: 'Explicit human authority for this fixture same-label rewrite',
+        };
+        const unchanged = yield* f.fs.readFileString(f.statePath());
+        expect(
+          yield* runNativeTaskAction(f.config, {...request, expectedPriorEntryDigest: 'forged'}).pipe(Effect.result),
+        ).toMatchObject({failure: {code: 'invalid-request'}});
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(unchanged);
+        const retainedRef = decodeNativeTaskActionRef(predecessorRef)!;
+        for (const refusal of [
+          {...request, userAuthority: ' '},
+          {
+            ...request,
+            snapshotRef: encodeNativeTaskActionRef({
+              ...retainedRef,
+              sourceHead: EffectString.slice(0, 40)(sha256HexSync('forged-head')),
+            }),
+          },
+        ]) {
+          expect(yield* runNativeTaskAction(f.config, refusal).pipe(Effect.result)).toMatchObject({
+            failure: {code: 'stale-snapshot-ref'},
+          });
+          expect(yield* f.fs.readFileString(f.statePath())).toBe(unchanged);
+        }
+        const eligible = (yield* readNativeWorkflowState(f.config, 'native-run'))!.state.cycle!;
+        expect(selectNativeTaskSameLabelIntegration(eligible, 'one')?.priorReview.report.mode).toBe('incremental');
+        expect(selectNativeTaskSameLabelIntegration({...eligible, reviews: []}, 'one')).toBeUndefined();
+        expect(selectNativeTaskSameLabelIntegration({...eligible, attempts: []}, 'one')).toBeUndefined();
+        expect(
+          selectNativeTaskSameLabelIntegration(
+            {
+              ...eligible,
+              snapshots: [
+                ...eligible.snapshots,
+                {
+                  ...eligible.snapshots.at(-1)!,
+                  snapshot: {...eligible.snapshots.at(-1)!.snapshot, snapshotId: 'unreviewed-tail'},
+                },
+              ],
+            },
+            'one',
+          ),
+        ).toBeUndefined();
+        const executor = yield* CommandExecutor;
+        const commands: {args: readonly string[]; bytes: number}[] = [];
+        const observe = <A extends {readonly stdout: string | Uint8Array; readonly stderr: string | Uint8Array}, E, R>(
+          args: readonly string[],
+          effect: Effect.Effect<A, E, R>,
+        ) =>
+          effect.pipe(
+            Effect.tap(result =>
+              Effect.sync(() =>
+                commands.push({args, bytes: Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr)}),
+              ),
+            ),
+          );
+        const response = object(
+          yield* mcp
+            .invokeTool('workflow_task_snapshot', {
+              runId: 'native-run',
+              callerCwd: f.repo,
+              snapshot: {
+                command: 'integrate-same-label-base',
+                snapshotRef: predecessorRef,
+                reason: request.reason,
+                userAuthority: request.userAuthority,
+              },
+            })
+            .pipe(
+              Effect.provideService(
+                CommandExecutor,
+                CommandExecutor.of({
+                  ...executor,
+                  execute: (executable, args, options) => observe(args, executor.execute(executable, args, options)),
+                  ...(executor.executeBytes
+                    ? {
+                        executeBytes: (
+                          executable: string,
+                          args: readonly string[],
+                          options?: Parameters<typeof executor.execute>[2],
+                        ) => observe(args, executor.executeBytes!(executable, args, options)),
+                      }
+                    : {}),
+                }),
+              ),
+            ),
+        );
+        expect(response.isError).not.toBe(true);
+        const applied = object(response.structuredContent);
+        expect(applied).toMatchObject({
+          status: 'recorded',
+          replayed: false,
+          requiredReviewMode: 'full',
+          next: {action: 'review', phaseId: 'one', reviewMode: 'full'},
+          snapshot: {version: 3, counts: {files: 412, scopeFiles: 1}},
+        });
+        expect(Buffer.byteLength(JSON.stringify(applied))).toBeLessThanOrEqual(16_384);
+        expect(Buffer.byteLength(JSON.stringify(response))).toBeLessThanOrEqual(16_384); // Existing native detail default.
+        expect(object(applied.snapshot).sameLabelRebasedBaseIntegrationV1).toBeUndefined();
+        const current = (yield* readNativeWorkflowState(f.config, 'native-run'))!.state.cycle!;
+        const admitted = current.snapshots.at(-1)!;
+        expect(admitted.snapshot).toMatchObject({version: 3, supersedes: 'incremental', declaredBaseHead: base});
+        expect(admitted.snapshot.phaseHash).not.toBe(prior.phaseHash);
+        expect(current.baselines).toEqual(history.baselines);
+        expect(current.reviews).toEqual(history.reviews);
+        expect(current.attempts).toEqual(history.attempts);
+        expect(current.reviewLimits).toEqual(history.reviewLimits);
+        expect(current.snapshots.slice(0, -1)).toEqual(history.snapshots);
+        let offsetBytes = 0;
+        let sourceDigest: string | undefined;
+        let manifest = '';
+        do {
+          const page = object(
+            yield* f.call({
+              ...f.base('cycle'),
+              ...object(applied.detail),
+              maxBytes: 65_536,
+              offsetBytes,
+              ...(sourceDigest ? {sourceDigest} : {}),
+            }),
+          );
+          const pagination = object(page.page);
+          manifest += String(pagination.text);
+          sourceDigest = String(pagination.sourceDigest);
+          if (pagination.nextOffsetBytes === null) break;
+          offsetBytes = Number(pagination.nextOffsetBytes);
+        } while (true);
+        expect(JSON.parse(manifest)).toEqual(admitted);
+
+        expect(commands.length).toBeLessThanOrEqual(128);
+        expect(EffectArray.filter(commands, item => item.args.includes('write-tree'))).toHaveLength(4);
+        expect(EffectArray.reduce(commands, 0, (sum, item) => sum + item.bytes)).toBeLessThan(8 * 1024 * 1024);
+        yield* Effect.sync(() =>
+          process.stdout.write(
+            'SAME_LABEL_TASK_ACTION_COST ' +
+              JSON.stringify({
+                commands: commands.length,
+                argumentBytes: EffectArray.reduce(
+                  commands,
+                  0,
+                  (sum, item) =>
+                    sum + EffectArray.reduce(item.args, 0, (bytes, arg) => bytes + Buffer.byteLength(arg) + 1),
+                ),
+                outputBytes: EffectArray.reduce(commands, 0, (sum, item) => sum + item.bytes),
+                writeTreeCaptures: EffectArray.filter(commands, item => item.args.includes('write-tree')).length,
+                treeBatches: EffectArray.filter(commands, item => item.args.includes('ls-tree')).length,
+                receiptBytes: Buffer.byteLength(JSON.stringify(admitted.snapshot.sameLabelRebasedBaseIntegrationV1)),
+                responseBytes: Buffer.byteLength(JSON.stringify(applied)),
+                mcpEnvelopeBytes: Buffer.byteLength(JSON.stringify(response)),
+              }) +
+              '\n',
+          ),
+        );
+        const after = yield* f.fs.readFileString(f.statePath());
+        let replay: Record<string, unknown> | undefined;
+        const actions = makeNativeTaskActionCommands(
+          () => Effect.void,
+          () => Effect.void,
+          () => Effect.void,
+          () => Effect.void,
+          () => Effect.void,
+          () => Effect.void,
+          () => Effect.void,
+          () => Effect.void,
+          () => Effect.void,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          options =>
+            runNativeTaskAction(f.config, {command: 'integrate-same-label-base-snapshot', ...options}).pipe(
+              Effect.tap(value => Effect.sync(() => (replay = object(value)))),
+              Effect.asVoid,
+            ),
+        );
+        const cli = Command.make('workflow-automation').pipe(Command.withSubcommands([actions]));
+        yield* Command.runWith(cli, {version: 'fixture'})([
+          'task-action',
+          'integrate-same-label-base-snapshot',
+          '--run-id',
+          'native-run',
+          '--caller-cwd',
+          f.repo,
+          '--snapshot-ref',
+          predecessorRef,
+          '--reason',
+          request.reason,
+          '--user-authority',
+          request.userAuthority,
+        ]);
+        expect(replay).toMatchObject({status: 'recorded', replayed: true, snapshotRef: applied.snapshotRef});
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(after);
+        const reviewView = object(
+          (yield* mcp.invokeTool('workflow_task_view', {runId: 'native-run', callerCwd: f.repo})).structuredContent,
+        );
+        expect(reviewView).toMatchObject({next: {action: 'review'}, phase: {snapshot: {reviewMode: 'full'}}});
+        expect(reviewView.sameLabelBaseIntegration).toBeUndefined();
+        const publicReport = (mode: string) => ({
+          mode,
+          selected: ['correctness', 'simplicity'],
+          lanes: [
+            {name: 'correctness', status: 'complete'},
+            {name: 'simplicity', status: 'complete'},
+          ],
+          findings: [{...blocker, state: 'carried'}],
+        });
+        const incremental = object(
+          yield* runNativeTaskAction(f.config, {
+            command: 'record-review',
+            runId: 'native-run',
+            callerCwd: f.repo,
+            snapshotRef: String(applied.snapshotRef),
+            report: publicReport('incremental'),
+          }),
+        );
+        expect(incremental.status).toBe('invalid');
+        const full = object(
+          yield* runNativeTaskAction(f.config, {
+            command: 'record-review',
+            runId: 'native-run',
+            callerCwd: f.repo,
+            snapshotRef: String(applied.snapshotRef),
+            report: publicReport('full'),
+          }),
+        );
+        expect(full.status).toBe('recorded');
+      }).pipe(run),
+    windowsRealGitFixtureTimeout,
   );
 
   effectIt.effect(
@@ -1887,7 +2295,7 @@ describe('native task actions', () => {
             },
           }),
         );
-        expect(reviewed.status).toBe('recorded');
+        expect(reviewed.status, typeof reviewed.message === 'string' ? reviewed.message : undefined).toBe('recorded');
         const validated = object(
           yield* runNativeTaskAction(f.config, {
             command: 'record-validation',

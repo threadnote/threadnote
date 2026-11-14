@@ -1,3 +1,4 @@
+import * as EffectOption from 'effect/Option';
 import {Array as EffectArray, Predicate} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Cause, Context, Deferred, Effect, Exit, Fiber, Option, Schema, Tracer} from 'effect';
@@ -21,20 +22,18 @@ import {closeoutSpanDiagnostics} from './native-closeout-span-diagnostics.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
-
 const spanOptions = (name: string, parent: Option.Option<Tracer.AnySpan> = Option.none()) => ({
   name,
   parent,
   annotations: Context.empty(),
   links: [],
-  startTime: 1_000_000n,
+  startTime: 1000000n,
   kind: 'internal' as const,
   root: Option.isNone(parent),
   sampled: true,
 });
 const make = (options: Parameters<typeof makeNativeProgressDiagnostics>[1] = {}) =>
   makeNativeProgressDiagnostics(Tracer.nativeTracer, {now: () => 0, sink: () => {}, ...options});
-
 effectIt.effect('forwards the original call/read Effects, arguments, options and receivers exactly once', () =>
   Effect.gen(function* () {
     const observer = make();
@@ -130,7 +129,6 @@ effectIt.effect('forwards the original call/read Effects, arguments, options and
     expect(JSON.stringify(observer.snapshot())).not.toContain('PRIVATE');
   }),
 );
-
 effectIt.effect('retains the single original program, body snapshot and scope owner through interruption', () =>
   Effect.gen(function* () {
     const outer = closeoutSpanDiagnostics();
@@ -187,7 +185,6 @@ effectIt.effect('retains the single original program, body snapshot and scope ow
     expect(packets).toHaveLength(1);
   }),
 );
-
 effectIt.effect('reports acquisition and cleanup failures after finalization and emits nothing on success', () =>
   Effect.gen(function* () {
     const value = {private: true};
@@ -353,16 +350,16 @@ effectIt.effect('conserves NativeSpan identity, delegation, context and both com
     expect(span.traceId).toBe(parent.traceId);
     const failed = Exit.fail(contextResult);
     const passed = Exit.succeed(contextResult);
-    span.end(3_000_000n, failed);
-    span.end(4_000_000n, passed);
+    span.end(3000000n, failed);
+    span.end(4000000n, passed);
     expect(ends).toEqual([
-      [3_000_000n, failed],
-      [4_000_000n, passed],
+      [3000000n, failed],
+      [4000000n, passed],
     ]);
     expect(ends[0][1]).toBe(failed);
     expect(ends[1][1]).toBe(passed);
     if (span.status._tag === 'Ended') {
-      expect(span.status.endTime).toBe(3_000_000n);
+      expect(span.status.endTime).toBe(3000000n);
       expect(span.status.exit).toBe(failed);
     }
     expect(observer.snapshot().totals['workflowMemory.readJournalFile']).toEqual({
@@ -383,7 +380,6 @@ effectIt.effect('conserves NativeSpan identity, delegation, context and both com
     expect(unknown.end).toBe(Tracer.NativeSpan.prototype.end);
   }),
 );
-
 effectIt.effect(
   'keeps native parent objects through unobserved spans and completes interrupted spans after cleanup',
   () =>
@@ -429,7 +425,6 @@ effectIt.effect(
       }
     }),
 );
-
 effectIt.effect.prop(
   'matches an independent returned-boundary counter/history model',
   {
@@ -442,7 +437,10 @@ effectIt.effect.prop(
       const observer = make();
       let marker = false;
       let history = 0;
-      const returned: {label: NativeProgressBoundary; success: boolean}[] = [];
+      const returned: {
+        label: NativeProgressBoundary;
+        success: boolean;
+      }[] = [];
       for (const event of events) {
         yield* observeNativeBoundary(event.success ? Effect.void : Effect.fail('PRIVATE'), observer, event.label).pipe(
           Effect.exit,
@@ -470,7 +468,6 @@ effectIt.effect.prop(
     }),
   {arbitrary: {runs: 25}},
 );
-
 effectIt.effect('counts 100 cheap completed boundaries and preserves ambiguity between successful calls', () =>
   Effect.gen(function* () {
     const observer = make();
@@ -492,7 +489,6 @@ effectIt.effect('counts 100 cheap completed boundaries and preserves ambiguity b
     expect(JSON.stringify(observer.snapshot())).not.toContain('assertion');
   }),
 );
-
 effectIt.effect.prop(
   'classifies descriptors without getters and never retains arbitrary private names/payloads',
   {
@@ -529,14 +525,13 @@ effectIt.effect.prop(
       const unknown = observer.tracer.span(spanOptions('PRIVATE.' + payload));
       unknown.attribute('PRIVATE', payload);
       unknown.event(payload, 2n, {PRIVATE: payload});
-      unknown.end(3_000_000n, Exit.fail({PRIVATE: payload}));
+      unknown.end(3000000n, Exit.fail({PRIVATE: payload}));
       const packet = JSON.stringify(observer.snapshot());
       expect(packet).not.toContain('PRIVATE');
       expect(observer.snapshot().totals).toEqual({});
     }),
   {arbitrary: {runs: 25}},
 );
-
 effectIt.effect('keeps active ages and facade positions separate from native inclusive durations', () =>
   Effect.sync(() => {
     let milliseconds = 1000;
@@ -546,14 +541,13 @@ effectIt.effect('keeps active ages and facade positions separate from native inc
     milliseconds = 1010;
     expect(observer.snapshot().active[0].ageMs).toBe(10);
     milliseconds = 1020;
-    span.end(3_000_000n, Exit.succeed(undefined));
+    span.end(3000000n, Exit.succeed(undefined));
     observer.end(boundary, 'Success');
     expect(observer.snapshot().lastBoundary?.elapsedMs).toBe(20);
     expect(observer.snapshot().totals['workflowAutomation.save'].inclusiveMs).toBe(2);
     expect(observer.snapshot().historyRule).toBe('inferred-from-fixture-boundaries-after-first-successful-state-read');
   }),
 );
-
 effectIt.effect('records database lifetime labels without retaining their private span data or exits', () =>
   Effect.gen(function* () {
     const lines: string[] = [];
@@ -593,7 +587,309 @@ effectIt.effect('records database lifetime labels without retaining their privat
     expect(lines[0]).not.toContain('PRIVATE');
   }),
 );
-
+const refreshAttributes = (forceAllSources = false) => ({
+  forceAllSources,
+  forceRefresh: false,
+  forceFromMarker: false,
+  canonicalMutationChanged: true,
+  continuityAllowed: !forceAllSources,
+  scannedSources: 8,
+  changedSources: 1,
+  removedSources: 0,
+});
+const annotateRefresh = (span: Tracer.Span, attributes: Record<string, unknown>) => {
+  for (const [key, value] of EffectRecord.toEntries(attributes)) span.attribute(`recall.refresh.${key}`, value);
+};
+effectIt.effect.prop(
+  'matches an independent bounded refresh decision model without retaining private attributes',
+  {
+    events: Schema.Array(
+      Schema.Struct({
+        forceAllSources: Schema.Boolean,
+        forceRefresh: Schema.Boolean,
+        forceFromMarker: Schema.Boolean,
+        canonicalMutationChanged: Schema.Boolean,
+        continuityAllowed: Schema.Boolean,
+        scannedSources: Schema.Literals([0, 1, 8, 255, 2147483648]),
+        changedSources: Schema.Literals([0, 1, 8, 255, 2147483648]),
+        removedSources: Schema.Literals([0, 1, 8, 255, 2147483648]),
+      }),
+    ).check(Schema.isMaxLength(20)),
+  },
+  ({events}) =>
+    Effect.sync(() => {
+      const observer = make();
+      for (const event of events) {
+        const span = observer.tracer.span(spanOptions('recall.refreshDatabase'));
+        annotateRefresh(span, event);
+        span.attribute('PRIVATE', {PRIVATE: 'contents and paths'});
+        span.event('PRIVATE', 1n, {PRIVATE: 'content'});
+        span.end(3000000n, Exit.succeed('PRIVATE'));
+        span.end(4000000n, Exit.fail('PRIVATE'));
+      }
+      const snapshot = observer.snapshot();
+      const clamp = (value: number) => Math.min(2147483647, value);
+      const bucket = (all: boolean) => {
+        const matching = EffectArray.filter(events, event => event.forceAllSources === all);
+        return {
+          count: matching.length,
+          scannedSources: clamp(EffectArray.reduce(matching, 0, (sum, event) => sum + event.scannedSources)),
+          changedSources: clamp(EffectArray.reduce(matching, 0, (sum, event) => sum + event.changedSources)),
+          removedSources: clamp(EffectArray.reduce(matching, 0, (sum, event) => sum + event.removedSources)),
+          maxChangedSources: clamp(Math.max(0, ...EffectArray.map(matching, event => event.changedSources))),
+        };
+      };
+      expect(snapshot.refreshDecisions).toEqual({
+        observed: events.length,
+        forceRefresh: EffectArray.filter(events, event => event.forceRefresh).length,
+        forceFromMarker: EffectArray.filter(events, event => event.forceFromMarker).length,
+        canonicalMutationChanged: EffectArray.filter(events, event => event.canonicalMutationChanged).length,
+        continuityMissing: EffectArray.filter(events, event => !event.continuityAllowed).length,
+        allSources: bucket(true),
+        incremental: bucket(false),
+      });
+      expect(JSON.stringify(snapshot)).not.toContain('PRIVATE');
+      snapshot.refreshDecisions.allSources.count = -1;
+      expect(observer.snapshot().refreshDecisions.allSources.count).toBe(bucket(true).count);
+    }),
+  {arbitrary: {runs: 25}},
+);
+effectIt.effect('rejects incomplete or nonprimitive refresh attributes and attributes on other spans', () =>
+  Effect.sync(() => {
+    const observer = make();
+    const privateValue = {
+      get PRIVATE() {
+        throw new Error('PRIVATE getter');
+      },
+    };
+    for (const key of EffectRecord.keys(refreshAttributes())) {
+      for (const malformed of [undefined, null, 'PRIVATE', privateValue, NaN, Infinity, -1, 0.5]) {
+        const span = observer.tracer.span(spanOptions('recall.refreshDatabase'));
+        annotateRefresh(span, {...refreshAttributes(), [key]: malformed});
+        span.end(3000000n, Exit.fail(privateValue));
+      }
+    }
+    const other = observer.tracer.span(spanOptions('recall.writeRefresh'));
+    annotateRefresh(other, refreshAttributes(true));
+    other.end(3000000n, Exit.succeed(undefined));
+    expect(observer.snapshot().refreshDecisions.observed).toBe(0);
+    expect(observer.snapshot().activeCount).toBe(0);
+    expect(JSON.stringify(observer.snapshot())).not.toContain('PRIVATE');
+  }),
+);
+effectIt.effect('observes coarse refresh phases and explicit close finalization while keeping success quiet', () =>
+  Effect.gen(function* () {
+    const lines: string[] = [];
+    const observer = make({sink: line => lines.push(line)});
+    const value = {PRIVATE: 'original result'};
+    let released = 0;
+    const result = yield* reportNativeFailure(
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* Effect.acquireRelease(Effect.void, () =>
+            Effect.sync(() => {
+              released++;
+            }).pipe(Effect.withSpan('recall.closeDatabase')),
+          );
+          return yield* Effect.gen(function* () {
+            yield* Effect.annotateCurrentSpan(
+              EffectRecord.fromEntries(
+                EffectArray.map(EffectRecord.toEntries(refreshAttributes()), ([key, item]) => [
+                  `recall.refresh.${key}`,
+                  item,
+                ]),
+              ),
+            );
+            yield* Effect.void.pipe(Effect.withSpan('recall.assembleRefreshSources'));
+            yield* Effect.void.pipe(Effect.withSpan('recall.hashRefreshGeneration'));
+            yield* Effect.all([
+              Effect.void.pipe(Effect.withSpan('recall.rebuildIdentityConflicts')),
+              Effect.void.pipe(Effect.withSpan('recall.resolveLegacyMemoryLinks')),
+            ]).pipe(Effect.withSpan('recall.writeRefresh'));
+            return value;
+          }).pipe(Effect.withSpan('recall.refreshDatabase'));
+        }),
+      ).pipe(Effect.withTracer(observer.tracer)),
+      observer,
+    );
+    expect(result).toBe(value);
+    expect(released).toBe(1);
+    expect(lines).toHaveLength(0);
+    for (const label of [
+      'recall.assembleRefreshSources',
+      'recall.hashRefreshGeneration',
+      'recall.writeRefresh',
+      'recall.rebuildIdentityConflicts',
+      'recall.resolveLegacyMemoryLinks',
+      'recall.closeDatabase',
+    ])
+      expect(observer.snapshot().totals[label]).toMatchObject({started: 1, ended: 1, failed: 0});
+    expect(observer.snapshot().refreshDecisions.incremental).toMatchObject({count: 1, changedSources: 1});
+    observer.reportFailure();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).not.toContain('PRIVATE');
+  }),
+);
+effectIt.effect(
+  'retains distinct transaction body timing through its unrecorded SQL parent in the failure packet',
+  () =>
+    Effect.sync(() => {
+      const lines: string[] = [];
+      const observer = make({sink: line => lines.push(line)});
+      const outer = observer.tracer.span(spanOptions('recall.writeRefresh'));
+      const transaction = observer.tracer.span(spanOptions('sql.transaction', Option.some(outer)));
+      const body = observer.tracer.span({
+        ...spanOptions('recall.writeRefreshBody', Option.some(transaction)),
+        startTime: 2000000n,
+      });
+      expect(Option.getOrUndefined(body.parent)).toBe(transaction);
+      expect(Option.getOrUndefined(transaction.parent)).toBe(outer);
+      body.end(6000000n, Exit.succeed(undefined));
+      transaction.end(9000000n, Exit.succeed(undefined));
+      outer.end(10000000n, Exit.succeed(undefined));
+      expect(lines).toHaveLength(0);
+      observer.reportFailure();
+      expect(lines).toHaveLength(1);
+      const packet = JSON.parse(
+        EffectString.slice(EffectOption.getOrElse(EffectString.indexOf('{')(lines[0]), () => -1))(lines[0]),
+      );
+      expect(packet.totals['recall.writeRefreshBody']).toMatchObject({ended: 1, inclusiveMs: 4});
+      expect(packet.totals['recall.writeRefresh']).toMatchObject({ended: 1, inclusiveMs: 9});
+      expect(packet.totals).not.toHaveProperty('sql.transaction');
+      expect(packet.activeCount).toBe(0);
+    }),
+);
+const refreshTransactionSpans = (observer: ReturnType<typeof make>, bodyStart = 3000000n) => {
+  const outer = observer.tracer.span(spanOptions('recall.writeRefresh'));
+  const transaction = observer.tracer.span(spanOptions('sql.transaction', Option.some(outer)));
+  const body = observer.tracer.span({
+    ...spanOptions('recall.writeRefreshBody', Option.some(transaction)),
+    startTime: bodyStart,
+  });
+  return {outer, transaction, body};
+};
+effectIt.effect.prop(
+  'accounts for fixed commit-event intervals without retaining events, attributes or SQL',
+  {
+    acquireAndBeginMs: Schema.Literals([0, 1, 7, 255]),
+    bodyMs: Schema.Literals([0, 1, 7, 255]),
+    preCommitMs: Schema.Literals([0, 1, 7, 255]),
+    commitAndReleaseMs: Schema.Literals([0, 1, 7, 255]),
+  },
+  intervals =>
+    Effect.sync(() => {
+      const lines: string[] = [];
+      const observer = make({sink: line => lines.push(line)});
+      const bodyStart = 1000000n + BigInt(intervals.acquireAndBeginMs) * 1000000n;
+      const {outer, transaction, body} = refreshTransactionSpans(observer, bodyStart);
+      const bodyEnd = bodyStart + BigInt(intervals.bodyMs) * 1000000n;
+      const commit = bodyEnd + BigInt(intervals.preCommitMs) * 1000000n;
+      const end = commit + BigInt(intervals.commitAndReleaseMs) * 1000000n;
+      let privateReads = 0;
+      const attributes = {
+        get PRIVATE() {
+          privateReads++;
+          throw new Error('PRIVATE');
+        },
+      };
+      transaction.attribute('db.query.text', 'PRIVATE SQL');
+      transaction.event('effect.sql.transaction.commit', commit, attributes);
+      body.end(bodyEnd, Exit.succeed('PRIVATE'));
+      transaction.end(end, Exit.succeed('PRIVATE'));
+      transaction.end(end + 1n, Exit.fail('PRIVATE'));
+      outer.end(end, Exit.succeed('PRIVATE'));
+      expect(observer.snapshot().transactionBoundaries).toEqual({observed: 1, rejected: 0, ...intervals});
+      expect(privateReads).toBe(0);
+      expect(observer.snapshot().totals['recall.writeRefreshBody'].ended).toBe(1);
+      expect(observer.snapshot().totals).not.toHaveProperty('sql.transaction');
+      expect(lines).toHaveLength(0);
+      const snapshot = observer.snapshot();
+      snapshot.transactionBoundaries.bodyMs = -1;
+      expect(observer.snapshot().transactionBoundaries.bodyMs).toBe(intervals.bodyMs);
+      observer.reportFailure();
+      expect(lines).toHaveLength(1);
+      expect(JSON.stringify(observer.snapshot())).not.toContain('PRIVATE');
+      expect(lines[0]).not.toContain('PRIVATE');
+      expect(
+        JSON.parse(EffectString.slice(EffectOption.getOrElse(EffectString.indexOf('{')(lines[0]), () => -1))(lines[0]))
+          .transactionBoundaries,
+      ).toEqual({
+        observed: 1,
+        rejected: 0,
+        ...intervals,
+      });
+    }),
+  {arbitrary: {runs: 25}},
+);
+effectIt.effect('rejects absent, duplicate, out-of-order and oversized commit events without changing span exits', () =>
+  Effect.sync(() => {
+    const cases: readonly (readonly (readonly [string, bigint])[])[] = [
+      [],
+      [['PRIVATE', 9000000n]],
+      [
+        ['effect.sql.transaction.commit', 9000000n],
+        ['effect.sql.transaction.commit', 9000000n],
+      ],
+      [['effect.sql.transaction.commit', 6000000n]],
+      [['effect.sql.transaction.commit', 13000000n]],
+      Array.from({length: 5}, () => ['effect.sql.transaction.commit', 9000000n] as const),
+    ];
+    const observer = make();
+    for (const events of cases) {
+      const {outer, transaction, body} = refreshTransactionSpans(observer);
+      for (const [name, at] of events) transaction.event(name, at, {PRIVATE: 'ignored'});
+      const exit = Exit.succeed({PRIVATE: 'original value'});
+      body.end(7000000n, exit);
+      transaction.end(12000000n, exit);
+      outer.end(13000000n, exit);
+      if (transaction.status._tag === 'Ended') expect(transaction.status.exit).toBe(exit);
+      else throw new Error('Expected delegated transaction end');
+    }
+    expect(observer.snapshot().transactionBoundaries).toMatchObject({observed: 0, rejected: cases.length});
+    expect(observer.snapshot().totals['recall.writeRefreshBody']).toMatchObject({
+      started: cases.length,
+      ended: cases.length,
+      failed: 0,
+    });
+    expect(observer.snapshot().activeCount).toBe(0);
+    expect(JSON.stringify(observer.snapshot())).not.toContain('PRIVATE');
+  }),
+);
+effectIt.effect('requires exact observed immediate parents and one successful body for transaction intervals', () =>
+  Effect.sync(() => {
+    const observer = make();
+    const unrelated = Tracer.nativeTracer.span(spanOptions('recall.writeRefresh'));
+    const transaction = observer.tracer.span(spanOptions('sql.transaction', Option.some(unrelated)));
+    const body = observer.tracer.span(spanOptions('recall.writeRefreshBody', Option.some(transaction)));
+    transaction.event('effect.sql.transaction.commit', 9000000n);
+    body.end(7000000n, Exit.void);
+    transaction.end(12000000n, Exit.void);
+    expect(observer.snapshot().transactionBoundaries).toMatchObject({observed: 0, rejected: 0});
+    for (const invalid of [
+      'missing-body',
+      'wrong-parent',
+      'duplicate-body',
+      'failed-body',
+      'failed-transaction',
+    ] as const) {
+      const outer = observer.tracer.span(spanOptions('recall.writeRefresh'));
+      const tx = observer.tracer.span(spanOptions('sql.transaction', Option.some(outer)));
+      if (invalid !== 'missing-body') {
+        const child = observer.tracer.span(
+          spanOptions('recall.writeRefreshBody', Option.some(invalid === 'wrong-parent' ? outer : tx)),
+        );
+        child.end(7000000n, invalid === 'failed-body' ? Exit.fail('PRIVATE') : Exit.void);
+        if (invalid === 'duplicate-body')
+          observer.tracer.span(spanOptions('recall.writeRefreshBody', Option.some(tx))).end(7000000n, Exit.void);
+      }
+      tx.event('effect.sql.transaction.commit', 9000000n);
+      tx.end(12000000n, invalid === 'failed-transaction' ? Exit.fail('PRIVATE') : Exit.void);
+      outer.end(13000000n, Exit.void);
+    }
+    expect(observer.snapshot().transactionBoundaries).toMatchObject({observed: 0, rejected: 5});
+    expect(observer.snapshot().activeCount).toBe(0);
+  }),
+);
 effectIt.effect('bounds all active/recent data, clocks, durations, snapshots and the worst-case failure line', () =>
   Effect.sync(() => {
     const readings = [100, 110, NaN, Infinity, -100, 105, 120];
@@ -605,6 +901,7 @@ effectIt.effect('bounds all active/recent data, clocks, durations, snapshots and
       const boundary = observer.start(label);
       observer.end(boundary, 'Success');
     }
+    for (const phase of nativeProgressPhases) observer.enterPhase(phase);
     const spans = EffectArray.flatMap(nativeProgressSpanLabels, label =>
       Array.from({length: 2}, () => observer.tracer.span(spanOptions(label))),
     );
@@ -616,7 +913,7 @@ effectIt.effect('bounds all active/recent data, clocks, durations, snapshots and
     expect(snapshot.recent).toHaveLength(32);
     expect(snapshot.recentDropped).toBe(spans.length - 32);
     expect(snapshot.elapsedMs).toBe(20);
-    expect(EffectArray.every(EffectRecord.values(snapshot.totals), total => total.inclusiveMs === 2_147_483_647)).toBe(
+    expect(EffectArray.every(EffectRecord.values(snapshot.totals), total => total.inclusiveMs === 2147483647)).toBe(
       true,
     );
     snapshot.counters.init.started = -1;
@@ -627,17 +924,19 @@ effectIt.effect('bounds all active/recent data, clocks, durations, snapshots and
     // Keep every label, eight live spans, the full recent ring and body-exit state in the largest shape.
     for (const label of nativeProgressSpanLabels) observer.tracer.span(spanOptions(label));
     const largest = observer.snapshot();
+    expect(largest.completedPhases).toHaveLength(nativeProgressPhases.length - 1);
+    expect(largest.bodyExitSnapshot?.completedPhases).toHaveLength(nativeProgressPhases.length - 1);
     const saturate = (value: unknown): void => {
       if (EffectArray.isArray(value)) {
         for (let index = 0; index < value.length; index += 1) {
           const child = value[index];
-          if (typeof child === 'number') value[index] = 2_147_483_647;
+          if (typeof child === 'number') value[index] = 2147483647;
           else saturate(child);
         }
       } else if (Predicate.isObject(value)) {
         for (const key of EffectRecord.keys(value)) {
           const child = value[key];
-          if (typeof child === 'number') value[key] = 2_147_483_647;
+          if (typeof child === 'number') value[key] = 2147483647;
           else saturate(child);
         }
       }
@@ -647,7 +946,7 @@ effectIt.effect('bounds all active/recent data, clocks, durations, snapshots and
     observer.snapshot = () => saturated;
     observer.reportFailure();
     expect(lines).toHaveLength(1);
-    expect(lines[0].length).toBeLessThanOrEqual(16_384);
+    expect(lines[0].length).toBeLessThanOrEqual(16384);
     const packet = JSON.parse(
       Effect2.pipe(
         lines[0],
@@ -672,7 +971,6 @@ effectIt.effect('bounds all active/recent data, clocks, durations, snapshots and
     expect(lines[0]).not.toContain('PRIVATE');
   }),
 );
-
 effectIt.effect('broken clocks, sink, serialization, snapshots and bookkeeping cannot replace any exit', () =>
   Effect.gen(function* () {
     const value = {PRIVATE: true};
@@ -721,7 +1019,6 @@ effectIt.effect('broken clocks, sink, serialization, snapshots and bookkeeping c
     }
   }),
 );
-
 effectIt.effect('preserves existing layer ownership wiring', () =>
   Effect.sync(() => {
     // Check the wiring itself, rather than pinning the unrelated lifecycle test file's byte count and digest.

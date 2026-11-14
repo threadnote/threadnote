@@ -15,6 +15,9 @@ import {Option as EffectOption} from 'effect';
 
 const defaultRoot = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 export const createTargetSpecs = async (root = defaultRoot) => {
+  // The disposable extension executes inside the editor, whose runtime supplies
+  // this module. Keep the exemption scoped; application imports still need npm ownership.
+  const hostModules = {'apps/threadnote/test/fixtures/semantic/editor/probe.cjs': ['vscode']};
   const repositoryFiles = listRepositoryFiles(root);
   const ignoredNames = new Set([
     '.DS_Store',
@@ -144,10 +147,11 @@ export const createTargetSpecs = async (root = defaultRoot) => {
     name => !Effect.pipe(name, EffectString.startsWith('@threadnote/')),
   ).sort();
 
+  const graphRuntimeDataRoots = ['assets/code-graph'];
   const packageDataRoots = {
     'packages/evidence': ['apps/threadnote/test/evaluation'],
     'packages/graph': [
-      'assets/code-graph',
+      ...graphRuntimeDataRoots,
       'apps/threadnote/test/evaluation/baselines/code-graph-v1',
       'apps/threadnote/test/evaluation/fixtures/code-graph-v1/repository',
       'packages/graph/src',
@@ -174,22 +178,21 @@ export const createTargetSpecs = async (root = defaultRoot) => {
     'packages/recall': ['apps/threadnote/test/evaluation/fixtures/recall-v1/fixture.json'],
     'packages/remote-memory': ['scripts/build.ts', 'scripts/check-self-contained.ts'],
   };
-  const packageTestNpm = {
-    'packages/graph': [
-      '@repomix/tree-sitter-wasms',
-      '@tree-sitter-grammars/tree-sitter-hcl',
-      '@tree-sitter-grammars/tree-sitter-lua',
-      '@tree-sitter-grammars/tree-sitter-svelte',
-      '@tree-sitter-grammars/tree-sitter-zig',
-      '@vscode/tree-sitter-wasm',
-      'tree-sitter-elixir',
-      'tree-sitter-julia',
-      'tree-sitter-objc',
-      'tree-sitter-scala',
-      'tree-sitter-systemverilog',
-      'web-tree-sitter',
-    ],
-  };
+  const graphRuntimeNpm = [
+    '@repomix/tree-sitter-wasms',
+    '@tree-sitter-grammars/tree-sitter-hcl',
+    '@tree-sitter-grammars/tree-sitter-lua',
+    '@tree-sitter-grammars/tree-sitter-svelte',
+    '@tree-sitter-grammars/tree-sitter-zig',
+    '@vscode/tree-sitter-wasm',
+    'tree-sitter-elixir',
+    'tree-sitter-julia',
+    'tree-sitter-objc',
+    'tree-sitter-scala',
+    'tree-sitter-systemverilog',
+    'web-tree-sitter',
+  ];
+  const packageTestNpm = {'packages/graph': graphRuntimeNpm};
   const applicationReferencedInputRoots = [
     '.cursor-plugin',
     '.github',
@@ -230,6 +233,7 @@ export const createTargetSpecs = async (root = defaultRoot) => {
         read: readSource,
         exists: applicationSourceExists,
         workspaces: applicationWorkspaces,
+        hostModules,
         imports: applicationSourceImports,
       });
       const closureFiles = new Set(closure.files);
@@ -360,6 +364,9 @@ export const createTargetSpecs = async (root = defaultRoot) => {
               name: 'test_runtime',
               entries: runtimeEntries,
               closureEntries: packageRuntimeTestEntries[directory],
+              // These source-runtime consumers launch the graph parser through standalone.ts.
+              dataRoots: [...new Set([...shared.dataRoots, ...graphRuntimeDataRoots])],
+              npm: [...new Set([...shared.npm, ...graphRuntimeNpm])],
             },
           ]
         : []),
@@ -529,6 +536,15 @@ export const createTargetSpecs = async (root = defaultRoot) => {
         'vitest.config.ts',
         'vitest.e2e.config.ts',
         'apps/threadnote/test/unit/effect-system.test.ts',
+        'packages/platform/test/system-stable-read.test.ts',
+        'packages/platform/test/writer-system/provider-process.test.ts',
+        'apps/threadnote/test/unit/semantic-runtime.test.ts',
+        'apps/threadnote/test/unit/semantic-writer-process.test.ts',
+        'apps/threadnote/test/unit/semantic-operations.test.ts',
+        'apps/threadnote/test/unit/semantic-mcp-cli.test.ts',
+        'apps/threadnote/test/unit/semantic-python.test.ts',
+        'apps/threadnote/test/unit/semantic-go-rust.test.ts',
+        'apps/threadnote/test/unit/semantic-java-preparation.test.ts',
         'packages/workflow-automations/test/inventory.test.ts',
         'packages/workflow-automations/test/baseline.test.ts',
         ...EffectArrayPipe(filesBelow('apps/threadnote/test/e2e'), __effectArrayValues =>
@@ -955,5 +971,5 @@ export const createTargetSpecs = async (root = defaultRoot) => {
     },
   ];
 
-  return {targetSpecs, testSuites, staticTargets, virtualModules};
+  return {targetSpecs, testSuites, staticTargets, virtualModules, hostModules};
 };

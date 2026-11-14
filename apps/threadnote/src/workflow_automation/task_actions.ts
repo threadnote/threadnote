@@ -58,6 +58,8 @@ import {NativeTaskPrWatchFieldsSchema} from './task_pr_watch.js';
 import {
   cycleRequest,
   currentNativeTaskRef,
+  runNativeTaskSameLabelIntegration,
+  NativeTaskSameLabelIntegrationSchema,
   fail,
   hasApprovedBasePlanTransition,
   hasExactAcceptedFullReview,
@@ -71,6 +73,7 @@ import {
   snapshotRefMatchesBaseline,
   taskActionSnapshotRef,
   unwrapCycle,
+  unwrapAuthoring,
   verifyRequalificationWitness,
 } from './task_action_helpers.js';
 import {runNativeTaskFinish} from './task_closeout_action.js';
@@ -260,6 +263,7 @@ const requestSchema = Schema.Union([
     reason: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
     userAuthority: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
   }),
+  NativeTaskSameLabelIntegrationSchema,
   Schema.Struct({
     command: Schema.Literal('record-review'),
     runId: id,
@@ -609,17 +613,6 @@ const authoringRequest = (
   ...fields,
 });
 
-const unwrapAuthoring = (result: unknown): Record<string, unknown> => {
-  if (!Predicate.isObject(result) || result.status !== 'ok' || !Predicate.isObject(result.authoring))
-    throw fail(
-      Predicate.isObject(result) && typeof result.code === 'string' ? result.code : 'task-action-failed',
-      Predicate.isObject(result) && Predicate.isObject(result.authoring) && typeof result.authoring.message === 'string'
-        ? result.authoring.message
-        : 'The native authoring action did not return a verified result.',
-    );
-  return result.authoring;
-};
-
 const requireEffectValue = <A>(value: A | undefined, message: string): A => {
   if (value === undefined) throw fail('invalid-state', message);
   return value;
@@ -633,6 +626,8 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
         fail('invalid-request', `Invalid task-action input: ${EffectString.slice(0, 768)(error.message)}`),
       ),
     );
+    if (request.command === 'integrate-same-label-base-snapshot')
+      return yield* runNativeTaskSameLabelIntegration(config, request);
     const path = yield* Path.Path;
     const fs = yield* FileSystem.FileSystem;
     if (!path.isAbsolute(request.callerCwd))

@@ -1,0 +1,2102 @@
+import * as HostProfile from '../../src/semantic/host_profile.js';
+import * as BunServices from '@effect/platform-bun/BunServices';
+import {it as effectIt} from '@effect/vitest';
+import {
+  Array as EffectArray,
+  Clock,
+  Deferred,
+  Effect,
+  Fiber,
+  FileSystem,
+  Layer,
+  Path,
+  Schema,
+  Stream,
+  String as EffectString,
+  Tracer,
+} from 'effect';
+import {TestClock} from 'effect/testing';
+import * as SqlClient from 'effect/sql/SqlClient';
+import * as Statement from 'effect/sql/Statement';
+import * as Reactivity from 'effect/reactivity/Reactivity';
+import {CodeGraphQueryService} from '@threadnote/graph/query';
+import {CodeGraphStore} from '@threadnote/graph/store';
+import {CodeGraphLanguagePackRegistry, createCodeGraphLanguagePackRegistry} from '@threadnote/graph/languages/registry';
+import {ResourceStore} from '@threadnote/store/resource-store';
+import {codeGraphCommittedFileContentHash} from '@threadnote/graph/content_identity';
+import type {CodeGraphStatus, CodeGraphQueryResult} from '@threadnote/graph/types';
+import {compileSemanticContextKnowledge} from '../../src/context_brief/index.js';
+import fc from 'fast-check';
+import {describe, expect, it, vi} from 'vitest';
+import {canonicalFileUri, Counter, type Observation, type QueryOutcome} from '@threadnote/semantic/contracts';
+import type {Continuation} from '@threadnote/semantic/views';
+import {sha256HexSync} from '@threadnote/platform/sha256';
+import type {RuntimeConfig} from '@threadnote/workspace/config';
+import {
+  makeSemanticAgentDiskQueries,
+  makeSemanticAgentQueryStore,
+  semanticAgentQueryLimits,
+} from '../../src/semantic/agent_query_store.js';
+import {
+  readSemanticHostProfile,
+  semanticHostProfileName,
+  SemanticHostProfileFault,
+} from '../../src/semantic/host_profile.js';
+import {
+  runSemanticAgentQueryWith,
+  runSemanticAgentViewWith,
+  type SemanticAgentQueryHost,
+} from '../../src/semantic/agent_queries.js';
+import {
+  SemanticAgentBufferHandle,
+  SemanticAgentViewSuccess,
+  SemanticAgentQueryResult,
+  formatSemanticAgentQuery,
+} from '../../src/semantic/agent_query_protocol.js';
+import {provideTestLayer} from '../helpers/effect-layer.js';
+import {TestCommandExecutorLayer, TestSystemInfoLayer} from '../helpers/system-layer.js';
+import {LspFault} from '../../src/semantic/lsp_transport.js';
+import {makeReadDeadline} from '@threadnote/platform/read_deadline';
+import {serveSemanticEndpoint, requestSemanticEndpoint} from '../../src/semantic/coordinator.js';
+import {SemanticSessionFault, type SemanticSession} from '../../src/semantic/provider.js';
+import type {ContextBriefFollowUpV1, SemanticContextKnowledgeV1} from '@threadnote/context/types';
+import {parseContextBriefJsonText} from '@threadnote/context/projector';
+import {compactSemanticContextKnowledge} from '@threadnote/context/compiler';
+
+// This fixture grants protocol tests only their own current profile bytes; native ACL proof is tested separately.
+const protocolProfiles = new Map<
+  string,
+  {readonly account: string; readonly user: string; readonly worktree: string}
+>();
+const protocolProfileKey = (config: RuntimeConfig, worktree: string) =>
+  JSON.stringify([config.agentContextHome, config.account, config.user, worktree]);
+const nativeReadProfile = HostProfile.readSemanticHostProfile;
+let restoreProtocolProfiles: (() => void) | undefined;
+const trustProtocolProfile = (config: RuntimeConfig, worktree: string) =>
+  Effect.acquireRelease(
+    Effect.sync(() => {
+      if (!restoreProtocolProfiles) {
+        const spy = vi.spyOn(HostProfile, 'readSemanticHostProfile').mockImplementation((current, requested) => {
+          const owned = protocolProfiles.get(protocolProfileKey(current, requested));
+          if (!owned) return nativeReadProfile(current, requested);
+          const reject = (reason: typeof HostProfile.SemanticHostProfileFault.prototype.reason) =>
+            HostProfile.SemanticHostProfileFault.make({reason});
+          return Effect.gen(function* () {
+            const fs = yield* FileSystem.FileSystem;
+            const path = yield* Path.Path;
+            if (current.account !== owned.account || current.user !== owned.user) return yield* reject('untrusted');
+            if (requested !== owned.worktree) return yield* reject('incompatible');
+            if ((yield* fs.realPath(current.agentContextHome)) !== current.agentContextHome)
+              return yield* reject('untrusted');
+            const file = path.join(
+              current.agentContextHome,
+              'semantic',
+              'profiles',
+              semanticHostProfileName(current, requested),
+            );
+            if (!(yield* fs.exists(file))) return yield* reject('missing');
+            const bytes = yield* fs.readFile(file);
+            if (bytes.length > 16384) return yield* reject('invalid');
+            const text = yield* Effect.try({
+              try: () => new TextDecoder('utf-8', {fatal: true}).decode(bytes),
+              catch: () => reject('invalid'),
+            });
+            const value = yield* Effect.try({try: () => JSON.parse(text), catch: () => reject('invalid')});
+            const profile = yield* Schema.decodeUnknownEffect(HostProfile.SemanticHostProfile, {
+              onExcessProperty: 'error',
+            })(value).pipe(Effect.mapError(() => reject('invalid')));
+            if (profile.worktree !== requested) return yield* reject('incompatible');
+            if (!profile.enabled) return yield* reject('disabled');
+            return {home: current.agentContextHome, profile, digest: sha256HexSync(text)};
+          }).pipe(
+            Effect.mapError(error =>
+              Schema.is(HostProfile.SemanticHostProfileFault)(error) ? error : reject('untrusted'),
+            ),
+          );
+        });
+        restoreProtocolProfiles = () => spy.mockRestore();
+      }
+      protocolProfiles.set(protocolProfileKey(config, worktree), {
+        account: config.account,
+        user: config.user,
+        worktree,
+      });
+    }),
+    () =>
+      Effect.sync(() => {
+        protocolProfiles.delete(protocolProfileKey(config, worktree));
+        if (protocolProfiles.size === 0) {
+          restoreProtocolProfiles?.();
+          restoreProtocolProfiles = undefined;
+        }
+      }),
+  );
+
+const profileIo = Layer.merge(BunServices.layer, TestSystemInfoLayer);
+const queryIo = Layer.merge(profileIo, TestCommandExecutorLayer.pipe(Layer.provide(profileIo)));
+
+const observation = (): Observation => ({
+  version: 1,
+  repository: 'repo',
+  worktree: 'file:///repo',
+  project: 'file:///repo',
+  configuration: sha256HexSync('config'),
+  toolchain: sha256HexSync('tools'),
+  provider: {id: 'typescript-language-server', version: '6.0.2', generation: 1},
+  view: {kind: 'disk', id: 'disk', owner: 'host', epoch: 0},
+  uri: 'file:///repo/source.ts',
+  content: sha256HexSync('source'),
+  documentVersion: null,
+  projectEpoch: 1,
+});
+const outcome = (items: readonly Schema.Json[], observed = observation()): Extract<QueryOutcome, {status: 'ok'}> => ({
+  version: 1,
+  status: 'ok',
+  evidence: {
+    basis: 'semantic',
+    observation: observed,
+    scope: 'project:fixture',
+    completeness: 'partial',
+    limitations: ['Fixture scope'],
+  },
+  items,
+});
+
+describe('coordinator retained semantic pages', () => {
+  it('clones retained provider items without mutating or aliasing the input', () => {
+    fc.assert(
+      fc.property(fc.array(fc.integer(), {maxLength: 60}), values => {
+        const original = [...values];
+        const store = makeSemanticAgentQueryStore('private namespace', () => Effect.succeed(observation()));
+        const snapshot = store.retain(sha256HexSync('query'), outcome(values), 0);
+        expect(values).toEqual(original);
+        values.push(-1);
+        expect(snapshot?.items).toEqual(original);
+        expect(Object.isFrozen(snapshot)).toBe(true);
+        expect(Object.isFrozen(snapshot?.items)).toBe(true);
+      }),
+      {numRuns: 32},
+    );
+  });
+  effectIt.effect.prop(
+    'bounded pages reconstruct the original ordered immutable set',
+    [
+      Schema.Array(Schema.String.check(Schema.isMaxLength(80))).check(Schema.isMaxLength(60)),
+      Counter.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(12)),
+      Counter.check(Schema.isGreaterThanOrEqualTo(3200), Schema.isLessThanOrEqualTo(8192)),
+    ],
+    ([values, maxItems, maxBytes]) =>
+      Effect.gen(function* () {
+        const current = observation();
+        let observations = 0;
+        const store = makeSemanticAgentQueryStore('private namespace', () =>
+          Effect.sync(() => {
+            observations++;
+            return structuredClone(current);
+          }),
+        );
+        const items = EffectArray.map(values, (value, ordinal) => ({ordinal, value}));
+        const expected = structuredClone(items);
+        const binding = sha256HexSync('query');
+        let page = yield* store.retainAndFirstPage(
+          binding,
+          outcome(items, current),
+          {maxItems, maxBytes},
+          yield* Clock.currentTimeMillis,
+        );
+        items.push({ordinal: -1, value: 'not in retained evidence'});
+        const collected: Schema.Json[] = [];
+        let pages = 0;
+        do {
+          expect(page.status).toBe('ok');
+          if (page.status !== 'ok') throw new Error('Page unexpectedly unavailable');
+          expect(new TextEncoder().encode(JSON.stringify(page)).length).toBeLessThanOrEqual(maxBytes);
+          expect(page.items.length).toBeLessThanOrEqual(maxItems);
+          expect(page.evidence.observation).toEqual(current);
+          collected.push(...page.items);
+          const cursor = page.next;
+          pages++;
+          expect(pages).toBeLessThanOrEqual(expected.length + 1);
+          if (!cursor) break;
+          page = yield* store.page(binding, cursor.snapshot, {maxItems, maxBytes}, 10000, cursor);
+        } while (true);
+        expect(collected).toEqual(expected);
+        expect(observations).toBe(pages - 1);
+      }),
+    {arbitrary: {runs: 32}},
+  );
+
+  effectIt.effect('refuses changed observations and never substitutes refreshed query items', () =>
+    Effect.gen(function* () {
+      let current = observation();
+      const store = makeSemanticAgentQueryStore('private namespace', () => Effect.succeed(current));
+      const binding = sha256HexSync('query');
+      const snapshot = store.retain(binding, outcome([1, 2, 3], current), yield* Clock.currentTimeMillis);
+      if (!snapshot) throw new Error('Missing fixture snapshot');
+      const first = yield* store.page(binding, snapshot.id, {maxItems: 1, maxBytes: 4096}, 10000);
+      if (first.status !== 'ok' || !first.next) throw new Error('Missing fixture continuation');
+      current = {...current, content: sha256HexSync('changed'), projectEpoch: 2};
+      const next = yield* store.page(binding, snapshot.id, {maxItems: 1, maxBytes: 4096}, 10000, first.next);
+      expect(next.status).toBe('stale');
+      expect(store.status()).toEqual({snapshots: 0, retainedBytes: 0});
+    }),
+  );
+
+  effectIt.effect('binds snapshots to the query and rejects invalid cursor offsets', () =>
+    Effect.gen(function* () {
+      let reads = 0;
+      const store = makeSemanticAgentQueryStore('private namespace', () =>
+        Effect.sync(() => {
+          reads++;
+          return observation();
+        }),
+      );
+      const binding = sha256HexSync('query');
+      const snapshot = store.retain(binding, outcome([1, 2, 3]), yield* Clock.currentTimeMillis);
+      if (!snapshot) throw new Error('Missing fixture snapshot');
+      const foreign = yield* store.page(sha256HexSync('foreign'), snapshot.id, {maxItems: 1, maxBytes: 4096}, 10000);
+      expect(foreign.status).toBe('stale');
+      expect(reads).toBe(0);
+      const first = yield* store.page(binding, snapshot.id, {maxItems: 1, maxBytes: 4096}, 10000);
+      if (first.status !== 'ok' || !first.next) throw new Error('Missing fixture continuation');
+      for (const offset of [0, 3, 100]) {
+        const invalid = yield* store.page(binding, snapshot.id, {maxItems: 1, maxBytes: 4096}, 10000, {
+          ...first.next,
+          offset,
+        });
+        expect(invalid.status).toBe('invalid-cursor');
+      }
+    }),
+  );
+
+  effectIt.effect('expires snapshots on the test clock without requerying a provider', () =>
+    Effect.gen(function* () {
+      let reads = 0;
+      const store = makeSemanticAgentQueryStore('private namespace', () =>
+        Effect.sync(() => {
+          reads++;
+          return observation();
+        }),
+      );
+      const binding = sha256HexSync('query');
+      const snapshot = store.retain(binding, outcome([1]), yield* Clock.currentTimeMillis);
+      if (!snapshot) throw new Error('Missing fixture snapshot');
+      yield* TestClock.adjust(semanticAgentQueryLimits.ttlMilliseconds);
+      expect((yield* store.page(binding, snapshot.id, {maxItems: 1, maxBytes: 4096}, 10000)).status).toBe('stale');
+      expect(reads).toBe(0);
+      expect(store.status()).toEqual({snapshots: 0, retainedBytes: 0});
+    }),
+  );
+
+  effectIt.effect('enforces count, aggregate and individual serialized retention limits', () =>
+    Effect.gen(function* () {
+      const store = makeSemanticAgentQueryStore('private namespace', () => Effect.succeed(observation()));
+      const firstBinding = sha256HexSync('query0');
+      const first = store.retain(firstBinding, outcome([0]), 0);
+      if (!first) throw new Error('Missing fixture snapshot');
+      for (let i = 1; i <= semanticAgentQueryLimits.maxSnapshots; i++)
+        store.retain(sha256HexSync('query' + i), outcome([i]), 0);
+      expect(store.status().snapshots).toBe(semanticAgentQueryLimits.maxSnapshots);
+      expect((yield* store.page(firstBinding, first.id, {maxItems: 1, maxBytes: 4096}, 10000)).status).toBe('stale');
+      for (let i = 0; i < 32; i++)
+        store.retain(sha256HexSync('large' + i), outcome([EffectString.repeat(600000)('x')]), 0);
+      expect(store.status().retainedBytes).toBeLessThanOrEqual(semanticAgentQueryLimits.maxRetainedBytes);
+      expect(store.status().snapshots).toBeLessThan(semanticAgentQueryLimits.maxSnapshots);
+      const before = store.status();
+      expect(
+        store.retain(
+          sha256HexSync('oversized'),
+          outcome([EffectString.repeat(semanticAgentQueryLimits.maxSnapshotBytes)('x')]),
+          0,
+        ),
+      ).toBeUndefined();
+      expect(store.status()).toEqual(before);
+    }),
+  );
+});
+
+const profileFixtureAt = (subdirectory = '', protocol = true) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const directory = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn-semantic-agent-'}));
+    const home = path.join(directory, 'home');
+    const root = path.join(directory, subdirectory, 'worktree');
+    for (const dir of [home, root, path.join(home, 'semantic', 'profiles')])
+      yield* fs.makeDirectory(dir, {recursive: true, mode: 0o700});
+    const file = path.join(root, 'source.ts');
+    yield* fs.writeFileString(file, 'export const answer = 42;\n');
+    const worktree = canonicalFileUri((yield* path.toFileUrl(root)).href);
+    const config: RuntimeConfig = {
+      account: 'local',
+      user: 'tester',
+      agentId: 'semantic-test',
+      agentContextHome: home,
+      manifestPath: path.join(directory, 'manifest.json'),
+    };
+    const profile = {
+      version: 1,
+      enabled: true,
+      worktree,
+      catalog: {
+        go: {
+          executable: '/host/gopls',
+          executableDigest: sha256HexSync('gopls'),
+          sdkDirectory: '/host/go',
+          sdkTreeDigest: sha256HexSync('go'),
+        },
+      },
+    };
+    if (protocol) yield* trustProtocolProfile(config, worktree);
+    const profileFile = path.join(home, 'semantic', 'profiles', semanticHostProfileName(config, worktree));
+    const write = (value: unknown) => fs.writeFileString(profileFile, JSON.stringify(value), {mode: 0o600});
+    return {fs, path, home, root, file, worktree, config, profile, profileFile, write};
+  });
+
+const profileFixture = profileFixtureAt();
+
+type DiagnosticMode =
+  | 'ok'
+  | 'missing-proof'
+  | 'wrong-observation'
+  | 'wrong-proof'
+  | 'malformed-proof'
+  | 'structural-proof'
+  | 'timeout'
+  | 'closing-source-drift'
+  | 'closing-sdk-drift';
+const diagnosticsFixture = Effect.fn('test.agentDiagnostics')(function* (messages: readonly string[]) {
+  const f = yield* profileFixture;
+  yield* f.write(f.profile);
+  const started = yield* Deferred.make<void>();
+  const runtime = sha256HexSync('diagnostic-runtime');
+  const items = EffectArray.map(messages, (message, code) => ({
+    id: sha256HexSync(JSON.stringify([code, message])),
+    range: {start: {line: 0, character: 0}, end: {line: 0, character: 1}},
+    code,
+    category: 'error',
+    message,
+  }));
+  let mode: DiagnosticMode = 'ok';
+  let current: Observation | undefined;
+  let calls = 0;
+  let observations = 0;
+  const api: SemanticSession = {
+    upsert: () => Effect.die('The coordinator owns attachment'),
+    query: () => Effect.die('Diagnostics must not issue navigation queries'),
+    diagnostics: observed =>
+      Effect.gen(function* () {
+        calls++;
+        yield* Deferred.succeed(started, undefined);
+        if (mode === 'timeout') return yield* Effect.never;
+        const proof = outcome([], observed).evidence;
+        return {
+          observation: mode === 'wrong-observation' ? {...observed, projectEpoch: observed.projectEpoch + 1} : observed,
+          ...(mode === 'missing-proof'
+            ? {}
+            : {
+                evidence:
+                  mode === 'wrong-proof'
+                    ? {...proof, observation: {...observed, projectEpoch: observed.projectEpoch + 1}}
+                    : mode === 'malformed-proof'
+                      ? {...proof, scope: '\ninvalid'}
+                      : mode === 'structural-proof'
+                        ? {...proof, basis: 'structural' as const}
+                        : proof,
+              }),
+          items,
+          added: calls === 1 ? items : [],
+          remaining: calls === 1 ? [] : items,
+          resolved: [],
+        };
+      }),
+    project: () => Effect.die('The coordinator owns project verification'),
+    observation: () => Effect.succeed(current),
+    available: Effect.succeed(true),
+    invalidate: Effect.void,
+    close: Effect.die('No provider process exists in this fixture'),
+  };
+  const coordinator: Parameters<typeof makeSemanticAgentDiskQueries>[0] = {
+    attach: seed =>
+      Effect.sync(() => {
+        current = {
+          ...seed,
+          configuration: sha256HexSync('diagnostic-config'),
+          toolchain: sha256HexSync('diagnostic-tools'),
+          provider: {...seed.provider, version: 'v0.24.0', generation: 1},
+          projectEpoch: 1,
+        };
+        return {
+          observation: current,
+          status: 'experimental' as const,
+          completeness: 'partial' as const,
+          edits: 'preparation-only' as const,
+          project: undefined,
+        };
+      }),
+    observe: () =>
+      Effect.sync(() => {
+        observations++;
+        return current;
+      }),
+    use: (_observed, _milliseconds, action) =>
+      Effect.gen(function* () {
+        const result = yield* action(api);
+        if (mode === 'closing-source-drift') {
+          yield* f.fs.writeFileString(f.file, 'changed during producer close');
+          return yield* SemanticSessionFault.make({reason: 'stale'});
+        }
+        if (mode === 'closing-sdk-drift') return yield* LspFault.make({code: 'prerequisite'});
+        return result;
+      }),
+  };
+  const disk = yield* makeSemanticAgentDiskQueries(coordinator, f.worktree, runtime);
+  const services = yield* Effect.context<Effect.Services<ReturnType<typeof disk.query>>>();
+  const host: SemanticAgentQueryHost = {
+    runtimeIdentity: Effect.succeed(runtime),
+    connect: () =>
+      Effect.succeed({
+        request: body => {
+          if (body.operation !== 'agent-query') return Effect.die('Unexpected endpoint operation');
+          return disk.query(body.request).pipe(
+            Effect.provide(services),
+            Effect.catch(error =>
+              Effect.succeed({
+                status: 'unavailable',
+                reason: Schema.is(SemanticSessionFault)(error) ? error.reason : 'provider',
+              }),
+            ),
+            Effect.flatMap(value => Schema.decodeEffect(Schema.Json)(value)),
+            Effect.mapError(() => LspFault.make({code: 'protocol'})),
+          );
+        },
+      }),
+  };
+  return {
+    ...f,
+    host,
+    started,
+    items,
+    input: {callerCwd: f.root, file: 'source.ts', language: 'go', operation: 'diagnostics', maxBytes: 8192},
+    calls: () => calls,
+    observations: () => observations,
+    status: disk.status,
+    observe: disk.observe,
+    capture: disk.capture,
+    prepare: disk.prepare,
+    mode: (value: DiagnosticMode) => {
+      mode = value;
+    },
+    drift: () => {
+      if (current) current = {...current, content: sha256HexSync('changed source')};
+    },
+  };
+});
+
+describe('host-bound public document diagnostics', () => {
+  effectIt.effect(
+    'saved-disk preparation shares the exact later query namespace without querying or consuming a page',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* diagnosticsFixture([]);
+        const source = {
+          worktree: f.worktree,
+          project: f.worktree,
+          uri: canonicalFileUri((yield* f.path.toFileUrl(f.file)).href),
+          language: 'go' as const,
+          profile: sha256HexSync('profile'),
+          principal: sha256HexSync('principal'),
+        };
+        const deadline = yield* makeReadDeadline(120000);
+        const control = {
+          deadline,
+          remaining: Effect.succeed(118000),
+          stage: () => Effect.void,
+          termination: () => {},
+          cleanup: () => {},
+          cleanupUnknown: () => false,
+        };
+        const content = yield* f.capture(source);
+        const prepared = yield* f.prepare(source, content, control);
+        expect(f.calls()).toBe(0);
+        expect(f.status()).toEqual({snapshots: 0, retainedBytes: 0});
+        const read = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+        if (read.status !== 'ok') throw new Error('Missing prepared read');
+        expect(read.evidence.observation).toEqual(prepared);
+        expect(f.calls()).toBe(1);
+        yield* f.fs.writeFileString(f.file, 'export const changed = true;\n');
+        const stale = yield* f.prepare(source, content, control).pipe(Effect.result);
+        expect(stale).toMatchObject({_tag: 'Failure', failure: {reason: 'stale'}});
+        expect(f.calls()).toBe(1);
+      }).pipe(provideTestLayer(queryIo)),
+  );
+  effectIt.effect('packs the closed first result without observing again and checks continuation drift freshly', () =>
+    Effect.gen(function* () {
+      const f = yield* diagnosticsFixture(['first', 'second']);
+      const first = yield* runSemanticAgentQueryWith(f.host, f.config, {...f.input, maxItems: 1});
+      if (first.status !== 'ok' || !first.next) throw new Error('Missing first page');
+      expect(f.calls()).toBe(1);
+      expect(f.observations()).toBe(0);
+      f.drift();
+      const next = yield* runSemanticAgentQueryWith(f.host, f.config, {...f.input, maxItems: 1, cursor: first.next});
+      expect(next.status).toBe('stale');
+      expect(f.observations()).toBe(1);
+      expect(f.calls()).toBe(1);
+      expect(f.status()).toEqual({snapshots: 0, retainedBytes: 0});
+    }).pipe(provideTestLayer(queryIo)),
+  );
+  effectIt.effect('never retains or packs a producer result rejected by its closing source or SDK fence', () =>
+    Effect.gen(function* () {
+      for (const mode of ['closing-source-drift', 'closing-sdk-drift'] as const) {
+        const f = yield* diagnosticsFixture(['candidate result']);
+        f.mode(mode);
+        const result = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+        expect(result.status).not.toBe('ok');
+        expect(f.calls()).toBe(1);
+        expect(f.observations()).toBe(0);
+        expect(f.status()).toEqual({snapshots: 0, retainedBytes: 0});
+      }
+    }).pipe(provideTestLayer(queryIo)),
+  );
+  effectIt.effect('projects only diagnostic summary fields without mutating provider payloads', () =>
+    Effect.gen(function* () {
+      const f = yield* diagnosticsFixture(['reported message']);
+      const expected = structuredClone(f.items);
+      const item = f.items[0];
+      if (!item) throw new Error('Missing fixture diagnostic');
+      Object.assign(item, {data: {internal: 'item sentinel'}, source: 'provider metadata'});
+      Object.assign(item.range, {data: {internal: 'range sentinel'}});
+      Object.assign(item.range.start, {internal: 'start sentinel'});
+      Object.assign(item.range.end, {internal: 'end sentinel'});
+      const original = structuredClone(f.items);
+      const result = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+      expect(result.status).toBe('ok');
+      if (result.status === 'ok') expect(result.items).toEqual(expected);
+      expect(f.items).toEqual(original);
+    }).pipe(provideTestLayer(queryIo)),
+  );
+  effectIt.effect.prop(
+    'pages reconstruct the complete current snapshot even when subsequent delivery deltas contain no added items',
+    [
+      Schema.Array(Schema.String.check(Schema.isMaxLength(80))).check(Schema.isMaxLength(12)),
+      Counter.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(5)),
+    ],
+    ([messages, maxItems]) =>
+      Effect.gen(function* () {
+        const f = yield* diagnosticsFixture(messages);
+        const original = structuredClone(f.items);
+        const collected: Schema.Json[] = [];
+        let cursor: Continuation | undefined;
+        do {
+          const page = yield* runSemanticAgentQueryWith(f.host, f.config, {
+            ...f.input,
+            maxItems,
+            ...(cursor ? {cursor} : {}),
+          });
+          expect(page.status).toBe('ok');
+          if (page.status !== 'ok') throw new Error('Missing diagnostic page');
+          expect(page.evidence.scope).toContain('document:');
+          expect(page.evidence.completeness).toBe('partial');
+          expect(page.evidence.limitations).toEqual(['Fixture scope']);
+          expect(page.items.length).toBeLessThanOrEqual(maxItems);
+          expect(new TextEncoder().encode(JSON.stringify(page)).length).toBeLessThanOrEqual(f.input.maxBytes);
+          collected.push(...page.items);
+          cursor = page.next ?? undefined;
+        } while (cursor);
+        expect(collected).toEqual(original);
+        expect(f.calls()).toBe(1);
+        const repeated = yield* runSemanticAgentQueryWith(f.host, f.config, {...f.input, maxItems});
+        expect(repeated.status).toBe('ok');
+        if (repeated.status === 'ok') expect(repeated.items).toEqual(EffectArray.take(original, maxItems));
+        expect(f.calls()).toBe(2);
+        expect(f.items).toEqual(original);
+      }).pipe(provideTestLayer(queryIo)),
+    {arbitrary: {runs: 16}},
+  );
+  effectIt.effect('distinguishes an empty diagnostic snapshot, unavailable proof and mismatched observations', () =>
+    Effect.gen(function* () {
+      const f = yield* diagnosticsFixture([]);
+      const empty = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+      expect(empty.status).toBe('ok');
+      if (empty.status === 'ok') {
+        expect(empty.items).toEqual([]);
+        expect(empty.remaining).toBe(0);
+        expect(empty.next).toBeNull();
+        expect(empty.evidence.completeness).toBe('partial');
+      }
+      for (const [mode, status] of [
+        ['missing-proof', 'unsupported'],
+        ['wrong-observation', 'stale'],
+        ['wrong-proof', 'stale'],
+        ['malformed-proof', 'unavailable'],
+        ['structural-proof', 'unavailable'],
+      ] as const) {
+        f.mode(mode);
+        const before = f.status();
+        const result = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+        expect(result.status).toBe(status);
+        expect(result.evidence).toBeNull();
+        expect(f.status()).toEqual(before);
+      }
+    }).pipe(provideTestLayer(queryIo)),
+  );
+  effectIt.effect('rejects stale diagnostic continuations without requesting a replacement snapshot', () =>
+    Effect.gen(function* () {
+      const f = yield* diagnosticsFixture(['first', 'second']);
+      const first = yield* runSemanticAgentQueryWith(f.host, f.config, {...f.input, maxItems: 1});
+      if (first.status !== 'ok' || !first.next) throw new Error('Missing diagnostic continuation');
+      expect(
+        (yield* runSemanticAgentQueryWith(f.host, f.config, {...f.input, operation: 'symbols', cursor: first.next}))
+          .status,
+      ).toBe('stale');
+      expect(f.calls()).toBe(1);
+      f.drift();
+      const next = yield* runSemanticAgentQueryWith(f.host, f.config, {...f.input, cursor: first.next});
+      expect(next.status).toBe('stale');
+      expect(f.calls()).toBe(1);
+      expect(f.status()).toEqual({snapshots: 0, retainedBytes: 0});
+    }).pipe(provideTestLayer(queryIo)),
+  );
+  effectIt.effect('keeps diagnostics deadline-bound and rejects positional requests before provider work', () =>
+    Effect.gen(function* () {
+      const f = yield* diagnosticsFixture(['first']);
+      expect(
+        (yield* runSemanticAgentQueryWith(f.host, f.config, {...f.input, position: {line: 0, character: 0}})).status,
+      ).toBe('invalid-request');
+      expect(f.calls()).toBe(0);
+      f.mode('timeout');
+      const pending = yield* runSemanticAgentQueryWith(f.host, f.config, {...f.input, milliseconds: 15}).pipe(
+        Effect.forkScoped,
+      );
+      yield* Deferred.await(f.started);
+      yield* TestClock.adjust(15);
+      expect((yield* Fiber.join(pending)).status).toBe('timeout');
+      expect(f.status()).toEqual({snapshots: 0, retainedBytes: 0});
+    }).pipe(provideTestLayer(queryIo)),
+  );
+});
+
+describe('private semantic host profiles and the canonical application read', () => {
+  effectIt.effect(
+    'preserves configuration incompleteness, zero results, unsupported and timeout in application and compact JSON',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* profileFixture;
+        yield* f.write(f.profile);
+        const observed = {
+          ...observation(),
+          worktree: f.worktree,
+          project: f.worktree,
+          uri: canonicalFileUri((yield* f.path.toFileUrl(f.file)).href),
+          provider: {id: 'gopls', version: 'v0.24.0', generation: 1},
+        };
+        const replies: SemanticAgentQueryResult[] = [
+          {
+            version: 1,
+            status: 'unavailable',
+            reason: 'semantic-project-configuration-incomplete',
+            evidence: outcome([], observed).evidence,
+          },
+          {...outcome([], observed), offset: 0, remaining: 0, next: null},
+          {version: 1, status: 'unsupported', reason: 'operation-not-qualified', evidence: null},
+          {version: 1, status: 'timeout', reason: 'Semantic query deadline expired', evidence: null},
+        ];
+        for (const reply of replies) {
+          const host: SemanticAgentQueryHost = {
+            runtimeIdentity: Effect.succeed(sha256HexSync('runtime')),
+            connect: () =>
+              Effect.succeed({
+                request: () =>
+                  Schema.decodeEffect(Schema.Json)(reply).pipe(
+                    Effect.mapError(() => LspFault.make({code: 'protocol'})),
+                  ),
+              }),
+          };
+          const result = yield* runSemanticAgentQueryWith(host, f.config, {
+            callerCwd: f.root,
+            file: 'source.ts',
+            language: 'go',
+            operation: 'references',
+            position: {line: 0, character: 13},
+          });
+          expect(result).toEqual(reply);
+          expect(JSON.parse(formatSemanticAgentQuery(result))).toEqual(reply);
+          if (result.status !== 'ok') expect('items' in result).toBe(false);
+          else expect(result.evidence.completeness).toBe('partial');
+        }
+      }).pipe(provideTestLayer(queryIo)),
+  );
+
+  effectIt.effect.skipIf(process.platform !== 'darwin' || process.arch !== 'arm64')(
+    'requires explicit enabled private regular worktree-bound profile bytes',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* profileFixtureAt('', false);
+        const missing = yield* readSemanticHostProfile(f.config, f.worktree).pipe(Effect.result);
+        expect(missing._tag).toBe('Failure');
+        if (missing._tag === 'Failure')
+          expect(Schema.is(SemanticHostProfileFault)(missing.failure) && missing.failure.reason).toBe('missing');
+        yield* f.write(f.profile);
+        const accepted = yield* readSemanticHostProfile(f.config, f.worktree);
+        expect(accepted.profile).toEqual(f.profile);
+        for (const [profile, reason] of [
+          [{...f.profile, enabled: false}, 'disabled'],
+          [{...f.profile, worktree: 'file:///different-worktree'}, 'incompatible'],
+          [{...f.profile, executable: '/repository/run'}, 'invalid'],
+        ] as const) {
+          yield* f.write(profile);
+          const rejected = yield* readSemanticHostProfile(f.config, f.worktree).pipe(Effect.result);
+          expect(rejected._tag).toBe('Failure');
+          if (rejected._tag === 'Failure')
+            expect(Schema.is(SemanticHostProfileFault)(rejected.failure) && rejected.failure.reason).toBe(reason);
+        }
+        yield* f.write(f.profile);
+        yield* f.fs.chmod(f.profileFile, 0o644);
+        const publicFile = yield* readSemanticHostProfile(f.config, f.worktree).pipe(Effect.result);
+        expect(publicFile._tag).toBe('Failure');
+        if (publicFile._tag === 'Failure')
+          expect(Schema.is(SemanticHostProfileFault)(publicFile.failure) && publicFile.failure.reason).toBe(
+            'untrusted',
+          );
+      }).pipe(provideTestLayer(profileIo)),
+  );
+
+  effectIt.effect.skipIf(process.platform !== 'darwin' || process.arch !== 'arm64')(
+    'refuses a symlinked profile and an oversized profile before consuming host configuration',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* profileFixtureAt('', false);
+        const other = f.path.join(f.home, 'other.json');
+        yield* f.fs.writeFileString(other, JSON.stringify(f.profile), {mode: 0o600});
+        yield* f.fs.symlink(other, f.profileFile);
+        expect((yield* readSemanticHostProfile(f.config, f.worktree).pipe(Effect.result))._tag).toBe('Failure');
+        yield* f.fs.remove(f.profileFile);
+        yield* f.fs.writeFileString(f.profileFile, EffectString.repeat(16385)(' '), {mode: 0o600});
+        expect((yield* readSemanticHostProfile(f.config, f.worktree).pipe(Effect.result))._tag).toBe('Failure');
+      }).pipe(provideTestLayer(profileIo)),
+  );
+
+  effectIt.effect('rejects public execution authority and unavailable languages without connecting', () =>
+    Effect.gen(function* () {
+      const f = yield* profileFixture;
+      let connections = 0;
+      const host: SemanticAgentQueryHost = {
+        runtimeIdentity: Effect.succeed(sha256HexSync('runtime')),
+        connect: () => {
+          connections++;
+          return Effect.die('Unexpected connection');
+        },
+      };
+      const input = {callerCwd: f.root, file: 'source.ts', language: 'go', operation: 'symbols'};
+      for (const extra of [
+        {executable: '/repo/run'},
+        {catalog: {}},
+        {profile: '/repo/config'},
+        {view: {kind: 'overlay', owner: 'claimed'}},
+      ]) {
+        expect((yield* runSemanticAgentQueryWith(host, f.config, {...input, ...extra})).status).toBe('invalid-request');
+      }
+      expect((yield* runSemanticAgentQueryWith(host, f.config, {...input, language: 'kotlin'})).status).toBe(
+        'unsupported',
+      );
+      expect((yield* runSemanticAgentQueryWith(host, f.config, {...input, operation: 'rename'})).status).toBe(
+        'unsupported',
+      );
+      for (const file of ['file://[', 'file://remote/source.ts', 'file:///bad%zz']) {
+        expect((yield* runSemanticAgentQueryWith(host, f.config, {...input, file})).status).toBe('invalid-request');
+      }
+      expect((yield* runSemanticAgentQueryWith(host, f.config, input)).status).toBe('unavailable');
+      expect(connections).toBe(0);
+    }).pipe(provideTestLayer(queryIo)),
+  );
+
+  effectIt.effect('applies the caller deadline to host binding as well as the provider request', () =>
+    Effect.gen(function* () {
+      const f = yield* profileFixture;
+      yield* f.write(f.profile);
+      const started = yield* Deferred.make<void>();
+      let connected = false;
+      const host: SemanticAgentQueryHost = {
+        runtimeIdentity: Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never)),
+        connect: () => {
+          connected = true;
+          return Effect.die('Unexpected connection');
+        },
+      };
+      const fiber = yield* runSemanticAgentQueryWith(host, f.config, {
+        callerCwd: f.root,
+        file: 'source.ts',
+        language: 'go',
+        operation: 'symbols',
+        milliseconds: 15,
+      }).pipe(Effect.forkScoped);
+      yield* Deferred.await(started);
+      yield* TestClock.adjust(15);
+      expect((yield* Fiber.join(fiber)).status).toBe('timeout');
+      expect(connected).toBe(false);
+    }).pipe(provideTestLayer(queryIo)),
+  );
+  effectIt.effect('uses the protected profile for the host binding and rechecks revocation before publication', () =>
+    Effect.gen(function* () {
+      const f = yield* profileFixture;
+      yield* f.write(f.profile);
+      let requests = 0;
+      let revoke = false;
+      let variant: 'ok' | 'scope' | 'budget' | 'offset' = 'ok';
+      const host: SemanticAgentQueryHost = {
+        runtimeIdentity: Effect.succeed(sha256HexSync('runtime')),
+        connect: options => {
+          expect(options.worktree).toBe(f.worktree);
+          expect(options.go).toEqual(f.profile.catalog.go);
+          return Effect.succeed({
+            request: body =>
+              Effect.gen(function* () {
+                if (body.operation !== 'agent-query') throw new Error('Unexpected protocol operation');
+                requests++;
+                expect(JSON.stringify(body)).not.toContain('/host/gopls');
+                const observed = {
+                  ...observation(),
+                  provider: {id: 'gopls', version: 'v0.24.0', generation: 1},
+                  worktree: f.worktree,
+                  project: f.worktree,
+                  uri: canonicalFileUri((yield* f.path.toFileUrl(f.file)).href),
+                };
+                if (variant === 'scope') observed.worktree = 'file:///different-worktree';
+                const result = {
+                  version: 1,
+                  status: 'ok',
+                  evidence: outcome([], observed).evidence,
+                  items: [{name: variant === 'budget' ? EffectString.repeat(5000)('x') : 'answer'}],
+                  offset: variant === 'offset' ? 1 : 0,
+                  remaining: 0,
+                  next: null,
+                };
+                if (revoke) yield* f.write({...f.profile, enabled: false});
+                return yield* Schema.decodeEffect(Schema.Json)(result);
+              }).pipe(Effect.mapError(() => LspFault.make({code: 'protocol'}))),
+          });
+        },
+      };
+      const input = {callerCwd: f.root, file: 'source.ts', language: 'go', operation: 'symbols'};
+      const accepted = yield* runSemanticAgentQueryWith(host, f.config, input);
+      expect(accepted.status).toBe('ok');
+      expect(Schema.is(SemanticAgentQueryResult)(accepted)).toBe(true);
+      for (const [mode, status] of [
+        ['scope', 'conflict'],
+        ['budget', 'budget-exceeded'],
+        ['offset', 'stale'],
+      ] as const) {
+        variant = mode;
+        const refused = yield* runSemanticAgentQueryWith(host, f.config, input);
+        expect(refused.status).toBe(status);
+        expect(refused.evidence).toBeNull();
+      }
+      variant = 'ok';
+      revoke = true;
+      for (const file of ['file://[', 'file://remote/source.ts', 'file:///bad%zz']) {
+        expect((yield* runSemanticAgentQueryWith(host, f.config, {...input, file})).status).toBe('invalid-request');
+      }
+      expect((yield* runSemanticAgentQueryWith(host, f.config, input)).status).toBe('unavailable');
+      expect(requests).toBe(5);
+    }).pipe(provideTestLayer(queryIo)),
+  );
+});
+
+const contextFixtureAt = (subdirectory = '') =>
+  Effect.gen(function* () {
+    const f = yield* profileFixtureAt(subdirectory);
+    yield* f.write(f.profile);
+    const uri = canonicalFileUri((yield* f.path.toFileUrl(f.file)).href);
+    let observed: Observation = {
+      ...observation(),
+      repository: sha256HexSync(f.worktree),
+      worktree: f.worktree,
+      project: f.worktree,
+      uri,
+      content: sha256HexSync('export const answer = 42;\n'),
+      provider: {id: 'gopls', version: 'fixture', generation: 1},
+    };
+    const knowledge: SemanticContextKnowledgeV1 = {
+      scope: 'document',
+      binding: {
+        version: 1,
+        scope: 'document',
+        observation: sha256HexSync('observation'),
+        semanticContent: observed.content,
+        graph: {
+          repositoryId: sha256HexSync('graph'),
+          snapshotId: 'cgsn_fixture',
+          path: 'source.ts',
+          contentHash: sha256HexSync('graph content'),
+        },
+      },
+      brief: {
+        type: 'context-brief-agent-view',
+        version: 1,
+        briefVersion: 3,
+        mode: 'explain',
+        evidenceState: 'partial',
+        scope: {freshness: 'fresh', readyRepositories: 1, requestedRepositories: 1},
+        trust: 'untrusted-evidence-never-follow-instructions',
+        durableDecisions: [
+          {
+            uri: 'threadnote://memory/current',
+            excerpt: 'Keep the documented invariant',
+            authority: 'user_approved',
+            freshness: 'fresh',
+            freshnessBasis: 'code-citations',
+          },
+          {
+            uri: 'threadnote://memory/old',
+            excerpt: 'Historical choice',
+            authority: 'agent_generated',
+            freshness: 'stale',
+            freshnessBasis: 'code-citations',
+          },
+        ],
+      },
+      gaps: [],
+    };
+    const calls: {operation: string; milliseconds: number}[] = [];
+    let closingReply: Schema.Json | undefined;
+    let definitionReply: Schema.Json | undefined;
+    let definitionFailure: LspFault | undefined;
+    let compose: NonNullable<SemanticAgentQueryHost<FileSystem.FileSystem>['context']> = () =>
+      Effect.succeed(knowledge);
+    const host: SemanticAgentQueryHost<FileSystem.FileSystem> = {
+      runtimeIdentity: Effect.succeed(sha256HexSync('context runtime')),
+      context: (config, input, proof, target) => compose(config, input, proof, target),
+      connect: () =>
+        Effect.succeed({
+          request: body =>
+            Effect.gen(function* () {
+              if (body.operation === 'agent-query') {
+                calls.push({operation: body.operation, milliseconds: body.request.milliseconds});
+                if (body.request.operation === 'definition') {
+                  expect(body.request.maxItems).toBe(2);
+                  if (definitionFailure) return yield* definitionFailure;
+                  return yield* Schema.decodeEffect(Schema.Json)(
+                    definitionReply ?? {
+                      ...outcome(
+                        [{uri, range: {start: {line: 0, character: 0}, end: {line: 0, character: 24}}}],
+                        observed,
+                      ),
+                      offset: 0,
+                      remaining: 0,
+                      next: null,
+                    },
+                  );
+                }
+                expect(body.request.operation).toBe('hover');
+                return yield* Schema.decodeEffect(Schema.Json)({
+                  ...outcome(['Compiler hover'], observed),
+                  offset: 0,
+                  remaining: 0,
+                  next: null,
+                });
+              }
+              if (body.operation === 'agent-observe') {
+                calls.push({operation: body.operation, milliseconds: body.milliseconds});
+                return yield* Schema.decodeEffect(Schema.Json)(closingReply === undefined ? observed : closingReply);
+              }
+              return yield* LspFault.make({code: 'protocol'});
+            }).pipe(Effect.mapError(error => (Schema.is(LspFault)(error) ? error : LspFault.make({code: 'protocol'})))),
+        }),
+    };
+    return {
+      ...f,
+      host,
+      knowledge,
+      calls,
+      observed: () => structuredClone(observed),
+      definition: (value: Schema.Json) => {
+        definitionReply = value;
+        definitionFailure = undefined;
+      },
+      definitionFault: (fault: LspFault) => {
+        definitionFailure = fault;
+      },
+      closing: (value: Schema.Json | undefined) => {
+        closingReply = value;
+      },
+      input: {
+        callerCwd: f.root,
+        file: 'source.ts',
+        language: 'go',
+        operation: 'context',
+        task: 'Understand answer',
+        position: {line: 0, character: 14},
+        budgetTokens: 1500,
+        maxBytes: 8192,
+      },
+      compose: (value: typeof compose) => {
+        compose = value;
+      },
+      drift: () => {
+        observed = {...observed, projectEpoch: observed.projectEpoch + 1};
+      },
+    };
+  });
+
+const contextFixture = contextFixtureAt();
+
+const budgetFollowUpUri = 'threadnote://memory/' + EffectString.repeat(500)('x');
+const budgetFollowUp: ContextBriefFollowUpV1 = {
+  arguments: {uri: budgetFollowUpUri},
+  id: 'followup-memory',
+  operation: 'read-memory',
+  rank: 0,
+  tool: 'read_context',
+  uri: budgetFollowUpUri,
+};
+
+const contextKnowledgeOutput = Schema.Struct({
+  knowledge: Schema.Struct({
+    scope: Schema.Literal('document'),
+    brief: Schema.NullOr(Schema.Json),
+    binding: Schema.Json,
+    memorySelection: Schema.Json,
+    gaps: Schema.Array(Schema.String),
+  }),
+});
+
+const budgetKnowledge = (base: SemanticContextKnowledgeV1): SemanticContextKnowledgeV1 => ({
+  ...base,
+  memorySelection: {
+    version: 1,
+    scope: 'symbol-and-file',
+    nodeId: 'cgs_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    observation: base.binding!.observation,
+    graph: base.binding!.graph,
+    definitionRange: {start: {line: 0, character: 0}, end: {line: 0, character: 24}},
+  },
+  gaps: ['semantic-symbol-memory-coverage-incomplete'],
+  brief: {
+    ...base.brief!,
+    answer: 'Read the source at graph.cards[0].',
+    evidenceState: 'sufficient',
+    coverage: {codeAnchors: {complete: true, matchedMemories: 2, requested: 1, resolved: 1}},
+    durableDecisions: [
+      {
+        uri: 'threadnote://memory/current-run',
+        actionCard: {appliesTo: 'Alpha.run', invariant: 'RUN_SYMBOL_CONSTRAINT_SENTINEL'},
+        excerpt: '',
+        authority: 'user_approved',
+        freshness: 'fresh',
+        freshnessBasis: 'code-citations',
+        preciseStatus: 'exact',
+        selectionBasis: 'code-citation',
+        codeRelations: [{anchorOrdinal: 0, citationId: 'run-citation', kind: 'symbol', status: 'exact'}],
+      },
+      {
+        uri: 'threadnote://memory/file-guide',
+        actionCard: {appliesTo: 'source.ts document', invariant: 'ANSWER_INVARIANT_SENTINEL'},
+        excerpt: '',
+        authority: 'user_approved',
+        freshness: 'fresh',
+        freshnessBasis: 'code-citations',
+        preciseStatus: 'exact',
+        selectionBasis: 'code-citation',
+        codeRelations: [{anchorOrdinal: 0, citationId: 'file-citation', kind: 'file', status: 'exact'}],
+      },
+    ],
+    graph: {
+      cards: [
+        {
+          kind: 'method',
+          line: 1,
+          path: 'source.ts',
+          qualifiedName: 'Alpha.run',
+          ref: 'cgs_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          repositoryKey: 'repo',
+          reason: 'Observed source',
+        },
+      ],
+      sources: [
+        {
+          id: 'source0',
+          repositoryKey: 'repo',
+          freshness: 'fresh',
+          snapshotIdentity: 'current-clean',
+          path: 'source.ts',
+          startLine: 1,
+          endLine: 1,
+          evidenceKind: 'graph-snapshot',
+          truncated: false,
+          coveredGraphRefs: ['cgs_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'],
+          content: EffectString.repeat(100)('optional graph source '),
+        },
+      ],
+      contracts: [
+        {
+          authority: 'supporting',
+          provenance: 'syntactic',
+          relation: 'calls',
+          sourceRef: 'cgs_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          targetRef: 'cgs_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+          evidence: {path: 'source.ts', line: 1, repositoryKey: 'repo'},
+        },
+      ],
+    },
+    output: {
+      truncated: true,
+      omissions: {graphCards: 2, graphContracts: 1, sourceExcerpts: 1, recommendedFollowUps: 1},
+    },
+  },
+});
+
+describe('document-linked semantic context', () => {
+  effectIt.effect('preserves real closing RPC timeout, capacity, conflict and stale outcomes', () =>
+    Effect.gen(function* () {
+      const f = yield* contextFixture;
+      for (const [reason, status] of [
+        ['timeout', 'timeout'],
+        ['capacity', 'unavailable'],
+        ['provider', 'unavailable'],
+        ['conflict', 'conflict'],
+        ['stale', 'stale'],
+        ['rejected', 'stale'],
+        ['invalid', 'invalid-request'],
+      ] as const) {
+        f.closing({status: 'unavailable', readOnly: true, reason, nextAction: 'Fixture retry hint'});
+        const result = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+        expect(result.status).toBe(status);
+        expect(result.evidence).toBeNull();
+        expect(result).not.toHaveProperty('items');
+      }
+      const malformedReplies: readonly Schema.Json[] = [null, {notAnObservation: true}, {status: 'unavailable'}];
+      for (const malformed of malformedReplies) {
+        f.closing(malformed);
+        expect((yield* runSemanticAgentQueryWith(f.host, f.config, f.input)).status).toBe('unavailable');
+      }
+    }).pipe(provideTestLayer(queryIo)),
+  );
+  effectIt.effect('retains separate compiler facts and memory authority/freshness without mutation', () =>
+    Effect.gen(function* () {
+      const f = yield* contextFixture;
+      const original = structuredClone(f.knowledge);
+      f.compose((_config, input, proof, target) =>
+        Effect.sync(() => {
+          expect(input.codeRefs).toEqual(['source.ts']);
+          expect(input.scope).toEqual({kind: 'repository', callerCwd: f.root});
+          expect(proof.basis).toBe('semantic');
+          expect(target?.uri).toBe(proof.observation.uri);
+          expect(target?.evidence.observation).toEqual(proof.observation);
+          return f.knowledge;
+        }),
+      );
+      const result = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+      expect(result.status).toBe('ok');
+      if (result.status !== 'ok') throw new Error('Context fixture refused');
+      expect(result.items).toEqual([{kind: 'context', semantic: ['Compiler hover'], knowledge: f.knowledge}]);
+      expect(f.knowledge).toEqual(original);
+      expect(EffectArray.map(f.calls, call => call.operation)).toEqual(['agent-query', 'agent-query', 'agent-observe']);
+      expect(new TextEncoder().encode(JSON.stringify(result)).length).toBeLessThanOrEqual(4500);
+    }).pipe(provideTestLayer(queryIo)),
+  );
+
+  effectIt.effect('keeps code useful with explicit missing knowledge and refuses source/profile changes', () =>
+    Effect.gen(function* () {
+      const f = yield* contextFixture;
+      f.compose(() => Effect.fail('graph unavailable'));
+      const missing = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+      expect(missing.status).toBe('ok');
+      if (missing.status !== 'ok') throw new Error('Missing knowledge must not erase compiler facts');
+      expect(missing.items).toEqual([
+        {
+          kind: 'context',
+          semantic: ['Compiler hover'],
+          knowledge: {
+            scope: 'document',
+            binding: null,
+            brief: null,
+            gaps: ['knowledge-unavailable'],
+          },
+        },
+      ]);
+      f.compose(() =>
+        Effect.sync(() => {
+          f.drift();
+          return f.knowledge;
+        }),
+      );
+      expect((yield* runSemanticAgentQueryWith(f.host, f.config, f.input)).status).toBe('stale');
+      f.compose(() => f.write({...f.profile, enabled: false}).pipe(Effect.as(f.knowledge)));
+      const revoked = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+      expect(revoked.status).toBe('unavailable');
+      if (revoked.status !== 'ok') expect(revoked.reason).toContain('disabled');
+    }).pipe(provideTestLayer(queryIo)),
+  );
+
+  effectIt.effect('shares the remaining deadline across reads, knowledge and closing observation', () =>
+    Effect.gen(function* () {
+      const f = yield* contextFixture;
+      const started = yield* Deferred.make<void>();
+      f.compose(() =>
+        Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.sleep(5)), Effect.as(f.knowledge)),
+      );
+      const pending = yield* runSemanticAgentQueryWith(f.host, f.config, {...f.input, milliseconds: 20}).pipe(
+        Effect.forkScoped,
+      );
+      yield* Deferred.await(started);
+      yield* TestClock.adjust(5);
+      expect((yield* Fiber.join(pending)).status).toBe('ok');
+      expect(EffectArray.map(f.calls, call => call.milliseconds)).toEqual([20, 20, 15]);
+      f.compose(() => Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never)));
+      const timeout = yield* runSemanticAgentQueryWith(f.host, f.config, {...f.input, milliseconds: 10}).pipe(
+        Effect.forkScoped,
+      );
+      yield* TestClock.adjust(10);
+      expect((yield* Fiber.join(timeout)).status).toBe('timeout');
+    }).pipe(provideTestLayer(queryIo)),
+  );
+
+  effectIt.effect(
+    'closes symbol selection on a deterministic post-transaction snapshot change before memory reads',
+    () =>
+      Effect.gen(function* () {
+        for (const change of ['stale', 'snapshot'] as const) {
+          const f = yield* contextFixture;
+          const contentHash = codeGraphCommittedFileContentHash(
+            'sha1',
+            new TextEncoder().encode('export const answer = 42;\n'),
+          );
+          const identity = {
+            caseMode: 'sensitive' as const,
+            checkoutId: sha256HexSync('checkout'),
+            displayName: 'fixture',
+            gitCommonDirectory: f.path.join(f.root, '.git'),
+            headCommit: EffectString.repeat(40)('a'),
+            objectFormat: 'sha1' as const,
+            repoRoot: f.root,
+            repositoryId: sha256HexSync('repository'),
+            worktreeId: sha256HexSync('worktree'),
+          };
+          const snapshot = {
+            commit: identity.headCommit,
+            dirty: false,
+            id: 'cgsn_' + EffectString.repeat(40)('a'),
+            worktreeId: identity.worktreeId,
+          };
+          const node = {
+            id: 'cgs_' + EffectString.repeat(32)('a'),
+            kind: 'variable',
+            language: 'typescript',
+            name: 'answer',
+            qualifiedName: 'answer',
+            exported: true,
+            score: 1,
+            path: 'source.ts',
+            contentHash,
+            span: {line: 1, column: 14, endLine: 1, endColumn: 25},
+          };
+          let afterSql = false;
+          let targetStatusReads = 0;
+          let symbolMemoryExecutions = 0;
+          const status = (): CodeGraphStatus => ({
+            databasePath: '/isolated/snapshot-race.sqlite',
+            identity,
+            languagePacks: [],
+            freshness: afterSql && change === 'stale' ? 'stale' : 'current',
+            stale: afterSql && change === 'stale',
+            readySnapshot: {
+              ...snapshot,
+              repositoryId: identity.repositoryId,
+              state: 'ready',
+              edgeCount: 0,
+              symbolCount: 1,
+              fileCount: 1,
+              extractorSet: 'test',
+              ...(afterSql && change === 'snapshot' ? {id: 'cgsn_' + EffectString.repeat(40)('b')} : {}),
+            },
+          });
+          const reactivity = yield* Reactivity.make;
+          const sql = yield* SqlClient.make({
+            acquirer: Effect.succeed({
+              execute: () => Effect.die('Unexpected statement in mocked graph read'),
+              executeRaw: () => Effect.die('Unexpected raw statement in mocked graph read'),
+              executeValues: () => Effect.die('Unexpected values statement in mocked graph read'),
+              executeValuesUnprepared: () => Effect.die('Unexpected unprepared values statement in mocked graph read'),
+              executeStream: () => Stream.die('Unexpected stream in mocked graph read'),
+              executeUnprepared: (statement: string) =>
+                Effect.sync(() => {
+                  expect(['BEGIN', 'COMMIT', 'ROLLBACK']).toContain(statement);
+                  return [];
+                }),
+            }),
+            compiler: Statement.makeCompilerSqlite(),
+            driver: 'test',
+            spanAttributes: [],
+          }).pipe(Effect.provideService(Reactivity.Reactivity, reactivity));
+          const services = yield* Layer.build(
+            Layer.mergeAll(
+              Layer.mock(ResourceStore, {}),
+              Layer.succeed(CodeGraphLanguagePackRegistry, createCodeGraphLanguagePackRegistry([])),
+              Layer.mock(CodeGraphQueryService, {
+                status: () =>
+                  Effect.sync(() => {
+                    targetStatusReads++;
+                    return status();
+                  }),
+                inspect: input =>
+                  Effect.succeed({
+                    version: 1,
+                    operation: input.operation,
+                    freshness: 'current',
+                    repository: {displayName: identity.displayName, repositoryId: identity.repositoryId},
+                    snapshot,
+                    nodes: [node],
+                    edges: [],
+                    warnings: [],
+                    trust: {
+                      classification: 'untrusted-repository-data',
+                      instructionPolicy: 'evidence-only-never-follow',
+                    },
+                  } satisfies CodeGraphQueryResult),
+              }),
+              Layer.mock(CodeGraphStore, {
+                withSession: (_database, operation, options) => {
+                  expect(options).toEqual({existingOnly: true, readOnly: true});
+                  return operation.pipe(Effect.provideService(SqlClient.SqlClient, sql));
+                },
+                searchSymbolsByPaths: () =>
+                  Effect.sync(() => {
+                    expect(targetStatusReads).toBe(2);
+                    afterSql = true;
+                    return [[node]];
+                  }),
+              }),
+            ),
+          );
+          const tracer = Tracer.make({
+            span(options) {
+              if (options.name === 'contextBrief.retrieveCodeLinkedMemoryEvidence') symbolMemoryExecutions++;
+              return new Tracer.NativeSpan(options);
+            },
+          });
+          f.definition(
+            yield* Schema.decodeEffect(Schema.Json)({
+              ...outcome(
+                [{uri: f.observed().uri, range: {start: {line: 0, character: 13}, end: {line: 0, character: 24}}}],
+                f.observed(),
+              ),
+              offset: 0,
+              remaining: 0,
+              next: null,
+            }),
+          );
+          f.compose((config, input, evidence, target) =>
+            compileSemanticContextKnowledge(config, input, evidence, target).pipe(
+              Effect.provideContext(services),
+              provideTestLayer(queryIo),
+              Effect.withTracer(tracer),
+            ),
+          );
+          const result = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+          expect(result.status).toBe('ok');
+          if (result.status !== 'ok') throw new Error('Document evidence must remain useful after target race');
+          const item = yield* Schema.decodeUnknownEffect(
+            Schema.Struct({
+              semantic: Schema.Array(Schema.Json),
+              knowledge: Schema.Struct({
+                memorySelection: Schema.Null,
+                gaps: Schema.Array(Schema.String),
+                brief: Schema.Unknown,
+              }),
+            }),
+          )(result.items[0]);
+          expect(item.semantic).toEqual(['Compiler hover']);
+          expect(item.knowledge.memorySelection).toBeNull();
+          expect(item.knowledge.gaps).toContain('semantic-symbol-snapshot-unbound');
+          expect(item.knowledge.brief).not.toBeNull();
+          expect(targetStatusReads).toBe(3);
+          expect(symbolMemoryExecutions).toBe(0);
+        }
+      }).pipe(provideTestLayer(queryIo)),
+  );
+
+  effectIt.effect('reports distinct bounded definition abstention reasons without exposing provider text', () =>
+    Effect.gen(function* () {
+      const f = yield* contextFixture;
+      const sentinel = 'UNTRUSTED_PROVIDER_TEXT';
+      const location = {uri: f.observed().uri, range: {start: {line: 0, character: 0}, end: {line: 0, character: 5}}};
+      const page = (items: readonly Schema.Json[]) => ({
+        ...outcome(items, f.observed()),
+        offset: 0,
+        remaining: 0,
+        next: null,
+      });
+      const denied: SemanticContextKnowledgeV1 = {
+        scope: 'document',
+        binding: null,
+        brief: null,
+        gaps: ['knowledge-not-authorized'],
+      };
+      for (const [reply, gap] of [
+        [
+          {version: 1, status: 'unsupported', reason: sentinel, evidence: null},
+          'semantic-symbol-definition-unsupported',
+        ],
+        [
+          page([{...location, uri: 'file:///external/' + sentinel + '.ts'}]),
+          'semantic-symbol-definition-external-target',
+        ],
+        [page([location, location]), 'semantic-symbol-definition-ambiguous'],
+        [{...page([]), remaining: 1}, 'semantic-symbol-definition-incomplete'],
+        [page([]), 'semantic-symbol-definition-unresolved'],
+        [
+          {
+            ...page([location]),
+            evidence: {
+              ...outcome([], f.observed()).evidence,
+              observation: {...f.observed(), projectEpoch: f.observed().projectEpoch + 1},
+            },
+          },
+          'semantic-symbol-definition-observation-mismatch',
+        ],
+        [{version: 1, status: 'timeout', reason: sentinel, evidence: null}, 'semantic-symbol-definition-timeout'],
+        [{version: 1, status: 'stale', reason: sentinel, evidence: null}, 'semantic-symbol-definition-stale'],
+        [{version: 1, status: 'unavailable', reason: sentinel, evidence: null}, 'semantic-symbol-definition-failed'],
+        [page([{contents: sentinel}]), 'semantic-symbol-definition-target-unsupported'],
+        [{notAProviderResult: sentinel}, 'semantic-symbol-definition-failed'],
+      ] as const) {
+        f.definition(yield* Schema.decodeEffect(Schema.Json)(reply));
+        f.compose((_config, _input, _proof, target) => {
+          expect(target).toBeNull();
+          return Effect.succeed(f.knowledge);
+        });
+        const result = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+        expect(result.status).toBe('ok');
+        if (result.status === 'ok')
+          expect(result.items).toEqual([
+            {
+              kind: 'context',
+              semantic: ['Compiler hover'],
+              knowledge: {...f.knowledge, memorySelection: null, gaps: [gap]},
+            },
+          ]);
+        expect(JSON.stringify(result)).not.toContain(sentinel);
+        // Definition diagnostics cannot disclose knowledge when memory reads were denied.
+        f.compose(() => Effect.succeed(denied));
+        const restricted = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+        expect(restricted.status).toBe('ok');
+        if (restricted.status === 'ok')
+          expect(restricted.items).toEqual([{kind: 'context', semantic: ['Compiler hover'], knowledge: denied}]);
+        expect(JSON.stringify(restricted)).not.toContain(sentinel);
+      }
+    }).pipe(provideTestLayer(queryIo)),
+  );
+
+  effectIt.effect('maps generic rejected definition faults to failure while preserving explicit stale status', () =>
+    Effect.gen(function* () {
+      const f = yield* contextFixture;
+      const sentinel = 'UNTRUSTED_PROVIDER_TEXT';
+      f.compose((_config, _input, _proof, target) => {
+        expect(target).toBeNull();
+        return Effect.succeed(f.knowledge);
+      });
+      // A rejected endpoint grant is a generic boundary failure, without proof of stale source.
+      f.definitionFault(
+        Object.assign(LspFault.make({code: 'rejected'}), {message: sentinel + ': endpoint grant unavailable'}),
+      );
+      const rejected = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+      expect(rejected.status).toBe('ok');
+      if (rejected.status === 'ok')
+        expect(rejected.items).toEqual([
+          {
+            kind: 'context',
+            semantic: ['Compiler hover'],
+            knowledge: {...f.knowledge, memorySelection: null, gaps: ['semantic-symbol-definition-failed']},
+          },
+        ]);
+      expect(JSON.stringify(rejected)).not.toContain(sentinel);
+      f.definition({version: 1, status: 'stale', reason: sentinel, evidence: null});
+      const stale = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+      expect(stale.status).toBe('ok');
+      if (stale.status === 'ok')
+        expect(stale.items).toEqual([
+          {
+            kind: 'context',
+            semantic: ['Compiler hover'],
+            knowledge: {...f.knowledge, memorySelection: null, gaps: ['semantic-symbol-definition-stale']},
+          },
+        ]);
+      expect(JSON.stringify(stale)).not.toContain(sentinel);
+    }).pipe(provideTestLayer(queryIo)),
+  );
+
+  effectIt.effect(
+    'retains both current symbol and file guidance before omitting optional graph output for budget',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* contextFixture;
+        const knowledge = budgetKnowledge(f.knowledge);
+        const original = structuredClone(knowledge);
+        f.compose(() => Effect.succeed(knowledge));
+        const full = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+        expect(full.status).toBe('ok');
+        if (full.status !== 'ok') throw new Error('Expected bounded semantic facts');
+        const item = yield* Schema.decodeUnknownEffect(contextKnowledgeOutput)(full.items[0]);
+        const packed = {
+          ...item.knowledge,
+          brief: item.knowledge.brief === null ? null : parseContextBriefJsonText(JSON.stringify(item.knowledge.brief)),
+        };
+        expect(packed.brief).not.toBeNull();
+        expect(packed.brief?.durableDecisions).toEqual(knowledge.brief?.durableDecisions);
+        expect(packed.brief?.graph).toEqual({});
+        expect(packed.brief).not.toHaveProperty('answer');
+        expect(packed.brief?.evidenceState).toBe('partial');
+        expect(packed.brief?.coverage).toEqual(knowledge.brief?.coverage);
+        expect(packed.binding).toEqual(knowledge.binding);
+        expect(packed.memorySelection).toEqual(knowledge.memorySelection);
+        expect(packed.gaps).toEqual([
+          'semantic-symbol-memory-coverage-incomplete',
+          'knowledge-output-budget-exhausted',
+        ]);
+        expect(packed.brief?.output).toEqual({
+          truncated: true,
+          omissions: {graphCards: 3, graphContracts: 2, sourceExcerpts: 2, recommendedFollowUps: 1},
+        });
+        expect(JSON.stringify(packed)).toContain('RUN_SYMBOL_CONSTRAINT_SENTINEL');
+        expect(JSON.stringify(packed)).toContain('ANSWER_INVARIANT_SENTINEL');
+        expect(JSON.stringify(full)).not.toContain('SAME_FILE_OTHER_SYMBOL_SENTINEL');
+        expect(new TextEncoder().encode(JSON.stringify(full)).length).toBeLessThanOrEqual(4500);
+        expect(parseContextBriefJsonText(JSON.stringify(packed.brief))).toEqual(packed.brief);
+        expect(knowledge).toEqual(original);
+        const withoutMemory = {...knowledge, brief: {...knowledge.brief!, durableDecisions: []}};
+        expect(compactSemanticContextKnowledge(withoutMemory)).toBe(withoutMemory);
+        const fits: SemanticContextKnowledgeV1 = {
+          ...knowledge,
+          brief: {
+            ...knowledge.brief!,
+            graph: {
+              ...knowledge.brief?.graph,
+              sources: EffectArray.map(knowledge.brief?.graph?.sources ?? [], source => ({
+                ...source,
+                content: 'short',
+              })),
+            },
+          },
+        };
+        f.compose(() => Effect.succeed(fits));
+        const unchanged = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+        expect(unchanged.status).toBe('ok');
+        if (unchanged.status === 'ok') {
+          const unchangedItem = yield* Schema.decodeUnknownEffect(contextKnowledgeOutput)(unchanged.items[0]);
+          expect(unchangedItem.knowledge).toEqual(fits);
+        }
+        f.compose(() => Effect.succeed(knowledge));
+        // The mandatory public Observation contains three fixture URIs. Its exact
+        // byte cost varies with the temporary root, including Bazel's longer root.
+        const mandatoryKnowledge: SemanticContextKnowledgeV1 = {
+          ...knowledge,
+          brief: null,
+          gaps: [...knowledge.gaps, 'knowledge-output-budget-exhausted'],
+        };
+        const mandatoryPage = {
+          ...full,
+          items: [{kind: 'context', semantic: ['Compiler hover'], knowledge: mandatoryKnowledge}],
+        };
+        const mandatoryBytes = new TextEncoder().encode(JSON.stringify(mandatoryPage)).length;
+        const small = yield* runSemanticAgentQueryWith(f.host, f.config, {...f.input, budgetTokens: 800});
+        if (mandatoryBytes <= 2400) {
+          expect(small.status).toBe('ok');
+          if (small.status !== 'ok') throw new Error('Mandatory public evidence fits the requested byte ceiling');
+          expect(small).toEqual(mandatoryPage);
+          const smallItem = yield* Schema.decodeUnknownEffect(contextKnowledgeOutput)(small.items[0]);
+          expect(smallItem.knowledge.brief).toBeNull();
+          expect(smallItem.knowledge.gaps).toContain('knowledge-output-budget-exhausted');
+          expect(smallItem.knowledge.memorySelection).toEqual(knowledge.memorySelection);
+        } else {
+          expect(small.status).toBe('budget-exceeded');
+          expect(small.evidence).toBeNull();
+          expect(small).not.toHaveProperty('items');
+          expect(small).toHaveProperty('reason', 'Mandatory context evidence exceeds the requested output budget');
+        }
+        expect(new TextEncoder().encode(JSON.stringify(small)).length).toBeLessThanOrEqual(2400);
+        expect(knowledge).toEqual(original);
+      }).pipe(provideTestLayer(queryIo)),
+  );
+
+  effectIt.effect(
+    'omits optional follow-ups only after graph compaction still exceeds the long-URI byte envelope',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* contextFixtureAt('段段段段段段段段');
+        const initial = budgetKnowledge(f.knowledge);
+        const knowledge: SemanticContextKnowledgeV1 = {
+          ...initial,
+          brief: {
+            ...initial.brief!,
+            recommendedFollowUps: [budgetFollowUp],
+            durableDecisions: EffectArray.map(initial.brief?.durableDecisions ?? [], (card, index) =>
+              index === 0
+                ? card
+                : {
+                    ...card,
+                    freshness: 'stale',
+                    authority: 'agent_generated',
+                    memoryTrust: 'untrusted',
+                    preciseStatus: 'changed',
+                  },
+            ),
+            stalenessAndConflicts: [
+              {
+                id: 'stale-file-guide',
+                kind: 'stale-memory',
+                rank: 0,
+                summary: 'Document guidance needs source recheck',
+                uris: ['threadnote://memory/file-guide'],
+              },
+            ],
+          },
+        };
+        const original = structuredClone(knowledge);
+        f.compose(() => Effect.succeed(knowledge));
+        const result = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+        expect(result.status).toBe('ok');
+        if (result.status !== 'ok') throw new Error('Complete guidance fits after optional follow-up omission');
+        const item = yield* Schema.decodeUnknownEffect(contextKnowledgeOutput)(result.items[0]);
+        expect(item.knowledge.brief).not.toBeNull();
+        const retained = parseContextBriefJsonText(JSON.stringify(item.knowledge.brief));
+        expect(retained.graph).toEqual({});
+        expect(retained.recommendedFollowUps).toEqual([]);
+        expect(retained.durableDecisions).toEqual(knowledge.brief?.durableDecisions);
+        expect(retained.stalenessAndConflicts).toEqual(knowledge.brief?.stalenessAndConflicts);
+        expect(retained.trust).toBe(knowledge.brief?.trust);
+        expect(retained.coverage).toEqual(knowledge.brief?.coverage);
+        expect(retained.scope).toEqual(knowledge.brief?.scope);
+        expect(item.knowledge.binding).toEqual(knowledge.binding);
+        expect(item.knowledge.memorySelection).toEqual(knowledge.memorySelection);
+        expect(retained.output).toEqual({
+          truncated: true,
+          omissions: {graphCards: 3, graphContracts: 2, sourceExcerpts: 2, recommendedFollowUps: 2},
+        });
+        const graphOnlyPage = {
+          ...result,
+          items: [
+            {kind: 'context', semantic: ['Compiler hover'], knowledge: compactSemanticContextKnowledge(knowledge)},
+          ],
+        };
+        expect(new TextEncoder().encode(JSON.stringify(graphOnlyPage)).length).toBeGreaterThan(4500);
+        expect(new TextEncoder().encode(JSON.stringify(result)).length).toBeLessThanOrEqual(4500);
+        expect(knowledge).toEqual(original);
+        expect(yield* runSemanticAgentQueryWith(f.host, f.config, f.input)).toEqual(result);
+      }).pipe(provideTestLayer(queryIo)),
+  );
+
+  effectIt.effect.prop(
+    'packs complete prevalidated guidance deterministically within independent UTF8 byte ceilings without promotion or mutation',
+    [
+      Schema.Int.check(Schema.isBetween({minimum: 800, maximum: 1500})),
+      Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 160})),
+      Schema.Boolean,
+    ],
+    ([budgetTokens, optionalRepeats, historical]) =>
+      Effect.gen(function* () {
+        const f = yield* contextFixtureAt(historical ? '段段段段段段段段' : '');
+        const initial = budgetKnowledge(f.knowledge);
+        const brief = initial.brief!;
+        const knowledge: SemanticContextKnowledgeV1 = {
+          ...initial,
+          brief: {
+            ...brief,
+            recommendedFollowUps: optionalRepeats >= 80 ? [budgetFollowUp] : [],
+            durableDecisions: EffectArray.map(brief.durableDecisions ?? [], card =>
+              historical
+                ? {
+                    ...card,
+                    freshness: 'stale',
+                    authority: 'agent_generated',
+                    memoryTrust: 'untrusted',
+                    preciseStatus: 'changed',
+                  }
+                : card,
+            ),
+            graph: {
+              ...brief.graph,
+              sources: EffectArray.map(brief.graph?.sources ?? [], source => ({
+                ...source,
+                content: EffectString.repeat(optionalRepeats + 1)('🚀optional '),
+              })),
+            },
+          },
+        };
+        const before = structuredClone(knowledge);
+        f.compose(() => Effect.succeed(knowledge));
+        const first = yield* runSemanticAgentQueryWith(f.host, f.config, {...f.input, budgetTokens});
+        const again = yield* runSemanticAgentQueryWith(f.host, f.config, {...f.input, budgetTokens});
+        expect(again).toEqual(first);
+        expect(knowledge).toEqual(before);
+        if (first.status !== 'ok') {
+          expect(first.status).toBe('budget-exceeded');
+          expect(first).not.toHaveProperty('items');
+          return;
+        }
+        expect(new TextEncoder().encode(JSON.stringify(first)).byteLength).toBeLessThanOrEqual(budgetTokens * 3);
+        const item = yield* Schema.decodeUnknownEffect(contextKnowledgeOutput)(first.items[0]);
+        expect(item.knowledge.binding).toEqual(knowledge.binding);
+        expect(item.knowledge.memorySelection).toEqual(knowledge.memorySelection);
+        if (item.knowledge.brief === null) {
+          expect(item.knowledge.gaps).toContain('knowledge-output-budget-exhausted');
+          return;
+        }
+        const retained = parseContextBriefJsonText(JSON.stringify(item.knowledge.brief));
+        expect(retained.durableDecisions).toEqual(knowledge.brief?.durableDecisions);
+        expect(retained.trust).toBe(knowledge.brief?.trust);
+        expect(retained.scope).toEqual(knowledge.brief?.scope);
+        expect(retained.coverage).toEqual(knowledge.brief?.coverage);
+        if (JSON.stringify(retained.graph) !== JSON.stringify(knowledge.brief?.graph)) {
+          expect(retained.graph).toEqual({});
+          expect(retained.output?.omissions.graphCards).toBe(3);
+          expect(retained.output?.omissions.graphContracts).toBe(2);
+          expect(retained.output?.omissions.sourceExcerpts).toBe(2);
+          expect(retained).not.toHaveProperty('answer');
+        } else expect(retained).toEqual(knowledge.brief);
+        if (JSON.stringify(retained.recommendedFollowUps) !== JSON.stringify(knowledge.brief?.recommendedFollowUps)) {
+          expect(retained.recommendedFollowUps).toEqual([]);
+          expect(retained.output?.omissions.recommendedFollowUps).toBe(2);
+        }
+        const compact = compactSemanticContextKnowledge(knowledge);
+        expect(compactSemanticContextKnowledge(compact)).toEqual(compact);
+        const withoutFollowUps = compactSemanticContextKnowledge(compact, {omitFollowUps: true});
+        expect(compactSemanticContextKnowledge(withoutFollowUps, {omitFollowUps: true})).toEqual(withoutFollowUps);
+      }).pipe(provideTestLayer(queryIo)),
+    {arbitrary: {runs: 20}},
+  );
+
+  effectIt.effect('bounds combined output, preserves omissions, and keeps context-only fields closed', () =>
+    Effect.gen(function* () {
+      const f = yield* contextFixture;
+      f.compose(() =>
+        Effect.succeed({...f.knowledge, brief: {...f.knowledge.brief!, answer: EffectString.repeat(10000)('x')}}),
+      );
+      const bounded = yield* runSemanticAgentQueryWith(f.host, f.config, {...f.input, budgetTokens: 1000});
+      expect(bounded.status).toBe('ok');
+      expect(new TextEncoder().encode(JSON.stringify(bounded)).length).toBeLessThanOrEqual(3000);
+      expect(JSON.stringify(bounded)).toContain('knowledge-output-budget-exhausted');
+      for (const extra of [{task: undefined}, {position: undefined}, {budgetTokens: 1501}, {operation: 'hover'}]) {
+        expect((yield* runSemanticAgentQueryWith(f.host, f.config, {...f.input, ...extra})).status).toBe(
+          'invalid-request',
+        );
+      }
+    }).pipe(provideTestLayer(queryIo)),
+  );
+
+  effectIt.effect('closing observations accept only the coordinator-owned disk namespace', () =>
+    Effect.gen(function* () {
+      const f = yield* diagnosticsFixture([]);
+      const result = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+      if (result.status !== 'ok') throw new Error('Missing observation fixture');
+      expect(yield* f.observe(result.evidence.observation, 100)).toEqual(result.evidence.observation);
+      const refused = yield* f
+        .observe({...result.evidence.observation, view: {...result.evidence.observation.view, owner: 'foreign'}}, 100)
+        .pipe(Effect.result);
+      expect(refused._tag).toBe('Failure');
+    }).pipe(provideTestLayer(queryIo)),
+  );
+});
+
+const ownedBufferFixture = Effect.gen(function* () {
+  const f = yield* profileFixture;
+  yield* f.write(f.profile);
+  const runtime = sha256HexSync('owned-buffer-runtime');
+  const current = new Map<string, Observation>();
+  const texts = new Map<string, string>();
+  let closes = 0;
+  let failAttachment = false;
+  let queryBarrier: Effect.Effect<void> = Effect.void;
+  const coordinator: Parameters<typeof serveSemanticEndpoint>[0] = {
+    attach: (seed, text) =>
+      Effect.sync(() => {
+        const observed = {
+          ...seed,
+          configuration: sha256HexSync('config'),
+          toolchain: sha256HexSync('tools'),
+          provider: {...seed.provider, version: 'fixture', generation: 1},
+          projectEpoch: seed.documentVersion ?? 1,
+        };
+        current.set(seed.view.id, observed);
+        texts.set(seed.view.id, text);
+        return {
+          observation: observed,
+          status: 'experimental' as const,
+          completeness: 'partial' as const,
+          edits: 'preparation-only' as const,
+          project: undefined,
+        };
+      }).pipe(
+        Effect.tap(() =>
+          Effect.suspend(() => {
+            if (!failAttachment) return Effect.void;
+            failAttachment = false;
+            return Effect.fail(LspFault.make({code: 'protocol'}));
+          }),
+        ),
+      ),
+    observe: observed => Effect.sync(() => current.get(observed.view.id)),
+    use: (observed, _milliseconds, action) => {
+      const api: SemanticSession = {
+        upsert: () => Effect.die('Coordinator owns attachment'),
+        query: () => queryBarrier.pipe(Effect.as(outcome([texts.get(observed.view.id) ?? '', 2, 3], observed))),
+        diagnostics: () => Effect.die('Not a diagnostic fixture'),
+        project: () => Effect.die('Not a project fixture'),
+        observation: () => Effect.succeed(current.get(observed.view.id)),
+        available: Effect.succeed(true),
+        invalidate: Effect.void,
+        close: Effect.die('No child process exists'),
+      };
+      return action(api);
+    },
+    closeView: observed =>
+      Effect.sync(() => {
+        closes++;
+        current.delete(observed.view.id);
+        texts.delete(observed.view.id);
+      }),
+    status: Effect.die('Status is outside this fixture'),
+  };
+  const directory = yield* f.fs.realPath(yield* f.fs.makeTempDirectoryScoped({prefix: 'tn-buf-', directory: '/tmp'}));
+  const token = sha256HexSync('loopback-auth');
+  const endpoint = yield* serveSemanticEndpoint(coordinator, {
+    directory,
+    token,
+    worktree: f.worktree,
+    runtimeIdentity: runtime,
+  });
+  const host: SemanticAgentQueryHost = {
+    runtimeIdentity: Effect.succeed(runtime),
+    connect: () => Effect.succeed({request: body => requestSemanticEndpoint(endpoint.socket, token, body)}),
+  };
+  const lifecycle = (input: unknown) => runSemanticAgentViewWith(host, f.config, input);
+  const open = (text: string) =>
+    lifecycle({action: 'open', callerCwd: f.root, file: 'source.ts', language: 'go', text}).pipe(
+      Effect.flatMap(Schema.decodeUnknownEffect(SemanticAgentViewSuccess)),
+      Effect.filterOrElse(
+        value => value.action === 'open',
+        () => Effect.die('Expected open result'),
+      ),
+    );
+  const read = (
+    handle: typeof SemanticAgentBufferHandle.Type,
+    documentVersion: number,
+    cursor?: Continuation,
+    operation = 'hover',
+  ) =>
+    runSemanticAgentQueryWith(host, f.config, {
+      callerCwd: f.root,
+      file: 'source.ts',
+      language: 'go',
+      operation,
+      ...(operation === 'context'
+        ? {task: 'Explain this buffer', position: {line: 0, character: 0}, maxItems: 20}
+        : {maxItems: 1}),
+      view: {kind: 'buffer', handle, documentVersion},
+      maxBytes: 8192,
+      ...(cursor ? {cursor} : {}),
+    });
+  return {
+    ...f,
+    open,
+    lifecycle,
+    read,
+    current,
+    closes: () => closes,
+    texts,
+    failNextAttachment: () => {
+      failAttachment = true;
+    },
+    observeOwned: (handle: typeof SemanticAgentBufferHandle.Type, observed: Observation) =>
+      requestSemanticEndpoint(endpoint.socket, token, {
+        operation: 'agent-observe',
+        handle,
+        observation: observed,
+        milliseconds: 1000,
+      }),
+    setBarrier: (barrier: Effect.Effect<void>) => {
+      queryBarrier = barrier;
+    },
+  };
+});
+
+describe('public owned semantic buffers', () => {
+  effectIt.effect(
+    'isolates conflicting text, verifies possession, fences updates/cursors and preserves compiler context',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* ownedBufferFixture;
+        const a = yield* f.open('export const answer = "owner A";');
+        const b = yield* f.open('export const answer = "owner B";');
+        expect(a.observation.view.id).not.toBe(b.observation.view.id);
+        const first = yield* f.read(a.handle, 1);
+        expect(first.status).toBe('ok');
+        if (first.status !== 'ok' || !first.next) return yield* Effect.die('Expected retained continuation');
+        expect(first.items).toEqual(['export const answer = "owner A";']);
+        expect(JSON.stringify(first)).not.toContain(a.handle.capability);
+        expect(yield* f.read(b.handle, 1)).toMatchObject({status: 'ok', items: ['export const answer = "owner B";']});
+        const wrong = {...a.handle, capability: b.handle.capability};
+        expect((yield* f.read(wrong, 1)).status).toBe('conflict');
+        expect(yield* f.observeOwned(wrong, a.observation)).toMatchObject({status: 'unavailable', reason: 'conflict'});
+        expect(
+          (yield* f.lifecycle({
+            action: 'update',
+            callerCwd: f.root,
+            handle: wrong,
+            expectedVersion: 1,
+            text: 'intruder',
+          })).status,
+        ).toBe('conflict');
+        expect((yield* f.lifecycle({action: 'close', callerCwd: f.root, handle: wrong})).status).toBe('conflict');
+        const updated = yield* f.lifecycle({
+          action: 'update',
+          callerCwd: f.root,
+          handle: a.handle,
+          expectedVersion: 1,
+          text: 'changed A',
+        });
+        expect(updated.status).toBe('ok');
+        expect(
+          (yield* f.lifecycle({
+            action: 'update',
+            callerCwd: f.root,
+            handle: a.handle,
+            expectedVersion: 1,
+            text: 'stale A',
+          })).status,
+        ).toBe('conflict');
+        expect((yield* f.read(a.handle, 1, first.next)).status).toBe('conflict');
+        expect((yield* f.read(a.handle, 2, first.next)).status).toBe('stale');
+        const context = yield* f.read(a.handle, 2, undefined, 'context');
+        expect(context.status).toBe('ok');
+        if (context.status !== 'ok') return yield* Effect.die('Expected compiler context');
+        expect(context.items).toMatchObject([
+          {
+            kind: 'context',
+            semantic: ['changed A', 2, 3],
+            knowledge: {binding: null, brief: null, gaps: ['semantic-graph-source-unbound']},
+          },
+        ]);
+        expect((yield* f.lifecycle({action: 'close', callerCwd: f.root, handle: a.handle})).status).toBe('ok');
+        expect((yield* f.read(a.handle, 2)).status).toBe('stale');
+        expect(f.texts.get(b.handle.id)).toContain('owner B');
+        expect(f.closes()).toBe(1);
+      }).pipe(provideTestLayer(queryIo), TestClock.withLive),
+  );
+  effectIt.effect('rejects oversized text before attachment and unknown handles after restart', () =>
+    Effect.gen(function* () {
+      const f = yield* ownedBufferFixture;
+      const oversized = yield* f.lifecycle({
+        action: 'open',
+        callerCwd: f.root,
+        file: 'source.ts',
+        language: 'go',
+        text: EffectString.repeat(600000)('é'),
+      });
+      expect(oversized.status).toBe('unavailable');
+      expect(f.current.size).toBe(0);
+      const a = yield* f.open('valid');
+      const other = yield* ownedBufferFixture;
+      expect((yield* other.read(a.handle, 1)).status).toBe('stale');
+      expect((yield* other.lifecycle({action: 'close', callerCwd: other.root, handle: a.handle})).status).toBe('stale');
+    }).pipe(provideTestLayer(queryIo), TestClock.withLive),
+  );
+  effectIt.effect('expires in-flight publications and releases provider views on the existing timer', () =>
+    Effect.gen(function* () {
+      const f = yield* ownedBufferFixture;
+      const a = yield* f.open('expires');
+      yield* TestClock.adjust(599000);
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      f.setBarrier(Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))));
+      const pending = yield* f.read(a.handle, 1).pipe(Effect.forkChild);
+      yield* Deferred.await(entered);
+      yield* TestClock.adjust(2001);
+      yield* Deferred.succeed(release, undefined);
+      expect((yield* Fiber.join(pending)).status).toBe('stale');
+      yield* TestClock.adjust(1000);
+      expect(f.current.size).toBe(0);
+      expect(f.closes()).toBe(1);
+      expect((yield* f.read(a.handle, 1)).status).toBe('stale');
+    }).pipe(provideTestLayer(queryIo)),
+  );
+  effectIt.effect('bounds aggregate text and grants, and returns capacity after owned close', () =>
+    Effect.gen(function* () {
+      const f = yield* ownedBufferFixture;
+      const large = EffectString.repeat(1024 * 1024)('x');
+      const opened = yield* Effect.forEach(EffectArray.range(1, 8), () => f.open(large));
+      expect(
+        (yield* f.lifecycle({action: 'open', callerCwd: f.root, file: 'source.ts', language: 'go', text: 'overflow'}))
+          .status,
+      ).toBe('unavailable');
+      const first = opened[0];
+      expect(
+        (yield* f.lifecycle({
+          action: 'update',
+          callerCwd: f.root,
+          handle: first.handle,
+          expectedVersion: 1,
+          text: 'small',
+        })).status,
+      ).toBe('ok');
+      const small = yield* f.open('small');
+      expect(
+        (yield* f.lifecycle({
+          action: 'update',
+          callerCwd: f.root,
+          handle: small.handle,
+          expectedVersion: 1,
+          text: large,
+        })).status,
+      ).toBe('unavailable');
+      expect((yield* f.read(small.handle, 1)).status).toBe('ok');
+      yield* f.lifecycle({action: 'close', callerCwd: f.root, handle: opened[1].handle});
+      expect((yield* f.open(large)).status).toBe('ok');
+      yield* Effect.forEach(EffectArray.range(1, 7), () => f.open(''));
+      expect(f.current.size).toBe(16);
+      expect(
+        (yield* f.lifecycle({action: 'open', callerCwd: f.root, file: 'source.ts', language: 'go', text: ''})).status,
+      ).toBe('unavailable');
+    }).pipe(provideTestLayer(queryIo), TestClock.withLive),
+  );
+  effectIt.effect(
+    'retires partial attachments, preserves bounds and rejects changed profile/configuration evidence',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* ownedBufferFixture;
+        f.failNextAttachment();
+        expect(
+          (yield* f.lifecycle({action: 'open', callerCwd: f.root, file: 'source.ts', language: 'go', text: 'partial'}))
+            .status,
+        ).toBe('unavailable');
+        expect(f.current.size).toBe(0);
+        expect(f.closes()).toBe(1);
+        const a = yield* f.open('valid');
+        f.failNextAttachment();
+        expect(
+          (yield* f.lifecycle({
+            action: 'update',
+            callerCwd: f.root,
+            handle: a.handle,
+            expectedVersion: 1,
+            text: 'partial update',
+          })).status,
+        ).toBe('unavailable');
+        expect(f.current.size).toBe(0);
+        expect((yield* f.read(a.handle, 1)).status).toBe('stale');
+        const b = yield* f.open('configuration');
+        f.current.set(b.handle.id, {...b.observation, configuration: sha256HexSync('changed config')});
+        expect((yield* f.read(b.handle, 1)).status).toBe('stale');
+        yield* f.write({...f.profile, enabled: false});
+        expect((yield* f.read(b.handle, 1)).status).toBe('unavailable');
+        expect(
+          (yield* f.lifecycle({
+            action: 'update',
+            callerCwd: f.root,
+            handle: b.handle,
+            expectedVersion: 1,
+            text: 'revoked',
+          })).status,
+        ).toBe('unavailable');
+      }).pipe(provideTestLayer(queryIo), TestClock.withLive),
+  );
+});

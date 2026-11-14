@@ -1,3 +1,12 @@
+import {symbolFromRow} from './rows.js';
+import type {SymbolRow} from './internal_models.js';
+import {
+  prepareActivationLexicalV2,
+  isLexicalV2Snapshot,
+  activationLexicalProjection,
+  stageLexicalV2,
+  lexicalProjectionTermMap,
+} from './lexical_projection.js';
 import {Array as EffectArray} from 'effect';
 import {Clock, DateTime, Effect, Option} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -446,6 +455,7 @@ const prepareActivationTables = Effect.fn('codeGraph.prepareActivationTables')(f
   yield* sql.unsafe('DELETE FROM activation_analysis_edge_affected_ids');
   yield* sql.unsafe('DELETE FROM activation_analysis_edge_before');
   yield* sql.unsafe('DELETE FROM activation_symbol_terms');
+  yield* prepareActivationLexicalV2(sql);
   yield* sql.unsafe('DELETE FROM activation_changed_symbol_ids');
   yield* sql.unsafe('DELETE FROM activation_incremental_paths');
 });
@@ -455,6 +465,25 @@ const copyActivationCompactLexicalFacts = Effect.fn('codeGraph.copyActivationCom
   snapshotId: string,
   selection: CompactActivationSymbolSelection,
 ) {
+  if (isLexicalV2Snapshot(snapshotId)) {
+    const projection = yield* activationLexicalProjection(sql, selection === 'changed');
+    return yield* stageLexicalV2(sql, snapshotId, projection);
+  }
+  const transformed = yield* activationLexicalProjection(sql, selection === 'changed');
+  if (transformed.members.length !== 0) {
+    const selected =
+      selection === 'changed' ? 'JOIN activation_changed_symbol_ids changed ON changed.id=symbol.id' : '';
+    const symbols = EffectArray.map(
+      yield* sql.unsafe<SymbolRow>(`SELECT symbol.* FROM activation_symbols symbol ${selected}`),
+      symbolFromRow,
+    );
+    const logical = lexicalProjectionTermMap(symbols, transformed);
+    for (const symbol of symbols) {
+      for (const [term, weight] of logical.get(symbol) ?? []) {
+        yield* sql`INSERT OR REPLACE INTO activation_symbol_terms VALUES (${term},${symbol.id},${weight})`;
+      }
+    }
+  }
   const snapshotKey = yield* ensureCompactLexicalSnapshot(sql, snapshotId);
   const symbolJoin =
     selection === 'changed' ? 'JOIN activation_changed_symbol_ids AS changed ON changed.id = symbol.id' : '';
@@ -691,10 +720,12 @@ const persistedFullBatchFingerprint = Effect.fn('codeGraph.persistedFullBatchFin
   edges: readonly CodeGraphEdge[],
   references: readonly CodeGraphReference[],
   monikers: readonly CodeGraphMonikerV1[] = [],
+  bodyDiscovery: readonly import('../types.js').CodeGraphBodyDiscovery[] = [],
+  preparedTerms?: ReadonlyMap<CodeGraphSymbol, readonly (readonly [string, number])[]>,
 ) {
   const digest = new Bun.CryptoHasher('sha256');
   let rows = 0;
-  const update = (kind: 'edge' | 'moniker' | 'reference' | 'symbol', value: readonly unknown[]) => {
+  const update = (kind: 'edge' | 'moniker' | 'reference' | 'symbol' | 'body-v1', value: readonly unknown[]) => {
     digest.update(kind);
     digest.update('\0');
     digest.update(JSON.stringify(value));
@@ -751,6 +782,33 @@ const persistedFullBatchFingerprint = Effect.fn('codeGraph.persistedFullBatchFin
       symbol.span,
     ]);
     if ((rows += 1) % 1_024 === 0) yield* Effect.yieldNow;
+  }
+  if (bodyDiscovery.length > 0) {
+    for (const body of [...bodyDiscovery].sort((a, b) => compareCodeUnits(a.path, b.path))) {
+      update('body-v1', [
+        body.version,
+        body.policy,
+        body.path,
+        body.contentHash,
+        body.workBytes,
+        [...body.omissions].sort(),
+        EffectArray.map(
+          [...body.records].sort((a, b) => compareCodeUnits(a.ownerId, b.ownerId)),
+          record => [
+            record.ownerId,
+            [record.ownerSpan.line, record.ownerSpan.column, record.ownerSpan.endLine, record.ownerSpan.endColumn],
+            [record.window.line, record.window.column, record.window.endLine, record.window.endColumn],
+            [...record.terms].sort(),
+          ],
+        ),
+      ]);
+    }
+    for (const symbol of sortedBy(symbols, symbol => symbol.id)) {
+      update('body-v1', [
+        symbol.id,
+        [...(preparedTerms?.get(symbol) ?? [])].sort(([a], [b]) => compareCodeUnits(a, b)),
+      ]);
+    }
   }
   return digest.digest('hex');
 });

@@ -1,9 +1,15 @@
 import {it as effectIt} from '@effect/vitest';
-import {Clock, Effect, Fiber, FileSystem, Path, Schema} from 'effect';
+import {Array as EffectArray, Clock, Effect, Fiber, FileSystem, Option, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
+import {CodeGraphQueryService} from '@threadnote/graph/query';
+import {canonicalFileUri, type Evidence} from '@threadnote/semantic/contracts';
+import {sha256HexSync} from '@threadnote/platform/sha256';
+import {formatMemoryDocument} from '@threadnote/memory/document';
+import {MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
+import {loadRecallCodeLinks} from '@threadnote/recall/index';
 import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
 import {planContextBrief} from '@threadnote/context/planner';
 import {projectContextBrief} from '@threadnote/context/projector';
@@ -19,7 +25,10 @@ import {
   type ContextBriefNativeReadRequest,
 } from '../../src/context_brief/native_read_boundary.js';
 import {nativeContextReadCommands} from '../../src/context_brief/native_read_worker.js';
-import type {ContextBriefRuntimeCompilerSources} from '../../src/context_brief/index.js';
+import {
+  compileSemanticContextKnowledge,
+  type ContextBriefRuntimeCompilerSources,
+} from '../../src/context_brief/index.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {withProductionLogging, withProductionPhaseTiming} from '../../src/effect/production_log.js';
 
@@ -39,7 +48,7 @@ const sources: ContextBriefRuntimeCompilerSources = {
 const fixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-native-context-'});
+  const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-native-context-'}));
   const repo = path.join(root, 'repo');
   const home = path.join(root, 'home');
   yield* fs.makeDirectory(path.join(repo, 'src'), {recursive: true});
@@ -100,6 +109,57 @@ describe('whole native Context Brief read boundary', () => {
     );
   });
 
+  it('binds composite proof to candidate content, scope, limits and graph fence', () => {
+    fc.assert(
+      fc.property(fc.string({maxLength: 80}), excerpt => {
+        const plan = planContextBrief({
+          scope: {kind: 'repository', callerCwd: '/fixture'},
+          codeRefs: ['src/module.ts'],
+          task: 'answer',
+        });
+        const candidate = {
+          kind: 'durable' as const,
+          uri: 'threadnote://fixture/memory',
+          excerpt,
+          rank: 0,
+          citationErrorCount: 0,
+          codeCitations: [],
+        };
+        const request: ContextBriefNativeReadRequest = {
+          protocol: 1,
+          operation: 'memory',
+          remainingMilliseconds: 3000,
+          config: {
+            account: 'local',
+            agentContextHome: '/fixture/home',
+            agentId: 'test',
+            manifestPath: '/fixture/manifest.json',
+            user: 'test',
+          },
+          plan: plan.codeAnchors,
+          candidateLimit: plan.memory.candidateLimit,
+          lexicalMemory: {
+            candidates: [candidate],
+            consideredCandidates: 1,
+            gaps: [],
+            trust: {classification: 'untrusted-memory-data', instructionPolicy: 'evidence-only-never-follow'},
+          },
+          fence: {kind: 'repository', repositoryId: 'repo', snapshotId: 'snapshot'},
+        };
+        const binding = contextBriefNativeReadBinding(request);
+        for (const changed of [
+          {...request, lexicalMemory: {...request.lexicalMemory, candidates: [{...candidate, excerpt: excerpt + '!'}]}},
+          {...request, lexicalMemory: {...request.lexicalMemory, candidates: []}},
+          {...request, candidateLimit: request.candidateLimit + 1},
+          {...request, plan: {...request.plan, scope: {kind: 'repository' as const, callerCwd: '/foreign'}}},
+          {...request, fence: {kind: 'repository' as const, repositoryId: 'repo', snapshotId: 'changed'}},
+        ])
+          expect(contextBriefNativeReadBinding(changed)).not.toBe(binding);
+      }),
+      {numRuns: 24},
+    );
+  });
+
   effectIt.effect(
     'real ready graph and citation reads retain the current snapshot fence, then detect source drift',
     () =>
@@ -135,13 +195,60 @@ describe('whole native Context Brief read boundary', () => {
           rank: 0,
           uri: 'threadnote://user/test/memories/durable/answer.md',
         };
-        const verified = yield* native.citationValidation(
-          plan.scope,
-          [candidate],
+        const linkedFile = f.path.join(f.home, 'data/local/user/test/memories/durable/projects/fixture/linked.md');
+        yield* f.fs.makeDirectory(f.path.dirname(linkedFile), {recursive: true});
+        yield* f.fs.writeFileString(
+          linkedFile,
+          formatMemoryDocument(
+            'MEMORY',
+            {
+              codeCitations: citations,
+              kind: 'durable',
+              project: 'fixture',
+              schemaVersion: MEMORY_SCHEMA_VERSION,
+              sourceAgentClient: 'codex',
+              status: 'active',
+              timestamp: '2026-11-01T00:00:00.000Z',
+              topic: 'linked',
+            },
+            'Canonical linked contract.',
+          ),
+        );
+        const linkedUri = 'threadnote://user/test/memories/durable/projects/fixture/linked.md';
+        yield* loadRecallCodeLinks(f.config, {
+          anchors: citations,
+          forceRefresh: true,
+          includeInactive: false,
+          limit: 24,
+          project: 'fixture',
+        });
+        const lexicalMemory = {
+          ...(yield* sources.memoryEvidence(plan.memory)),
+          candidates: [
+            candidate,
+            {...candidate, uri: linkedUri, excerpt: 'Lexical duplicate must yield to linked canonical data.'},
+          ],
+          consideredCandidates: 2,
+        };
+        const verified = yield* native.memoryEvidenceAfterGraph!(
+          plan,
+          lexicalMemory,
           graph.citationValidationFence,
           yield* makeReadDeadline(5000),
         );
-        expect(verified[0]?.receipts[0]?.status).toBe('exact');
+        expect(EffectArray.map(verified.candidates, candidate => candidate.uri)).toEqual([linkedUri, candidate.uri]);
+        expect(verified.candidates[0]?.excerpt).toContain('Canonical linked contract.');
+        expect(verified.candidates[0]?.lexicallySelected).toBe(true);
+        expect(EffectArray.map(verified.citationValidations ?? [], validation => validation.uri)).toEqual([
+          linkedUri,
+          candidate.uri,
+        ]);
+        expect(
+          EffectArray.every(
+            verified.citationValidations ?? [],
+            validation => validation.receipts[0]?.status === 'exact',
+          ),
+        ).toBe(true);
         yield* f.fs.writeFileString(f.file, 'export function boundedAnswer() { return 43; }\n');
         const drift = yield* native.citationValidation(
           plan.scope,
@@ -151,6 +258,100 @@ describe('whole native Context Brief read boundary', () => {
         );
         expect(drift[0]?.receipts[0]?.coverage).toBe('incomplete');
         expect(drift[0]?.receipts[0]?.status).not.toBe('exact');
+      }).pipe(
+        Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}),
+        provideTestLayer(ApplicationLayer),
+        TestClock.withLive,
+      ),
+    {timeout: 20000},
+  );
+
+  effectIt.effect(
+    'native semantic reads bind the exact document and target, then abstain on foreign project or source drift',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        yield* (yield* CodeGraphIndexer).index({
+          cwd: f.repo,
+          threadnoteHome: f.home,
+          ensureVectors: false,
+          sourceOnly: true,
+        });
+        const nodes = yield* (yield* CodeGraphQueryService).inspect({
+          cwd: f.repo,
+          threadnoteHome: f.home,
+          operation: 'query',
+          query: 'boundedAnswer',
+          nodeLimit: 10,
+          edgeLimit: 1,
+          refresh: false,
+          requestMaintenance: false,
+        });
+        const node = Option.getOrUndefined(EffectArray.findFirst(nodes.nodes, item => item.name === 'boundedAnswer'));
+        if (!node) throw new Error('Fixture target is missing');
+        const worktree = canonicalFileUri((yield* f.path.toFileUrl(f.repo)).href);
+        const uri = canonicalFileUri((yield* f.path.toFileUrl(f.file)).href);
+        const evidence: Evidence = {
+          basis: 'semantic',
+          scope: 'document',
+          completeness: 'partial',
+          limitations: [],
+          observation: {
+            version: 1,
+            repository: sha256HexSync(worktree),
+            worktree,
+            project: worktree,
+            configuration: sha256HexSync('configuration'),
+            toolchain: sha256HexSync('toolchain'),
+            provider: {id: 'fixture', version: '1', generation: 1},
+            view: {kind: 'disk', id: 'fixture', owner: 'fixture', epoch: 0},
+            uri,
+            content: sha256HexSync(yield* f.fs.readFile(f.file)),
+            documentVersion: null,
+            projectEpoch: 1,
+          },
+        };
+        const target = {
+          evidence,
+          uri,
+          range: {
+            start: {line: node.span.line - 1, character: node.span.column - 1},
+            end: {line: node.span.endLine - 1, character: node.span.endColumn - 1},
+          },
+        };
+        const input = {
+          scope: {kind: 'repository' as const, callerCwd: f.repo, project: 'fixture'},
+          codeRefs: ['src/module.ts'],
+          mode: 'explain' as const,
+          task: 'Understand boundedAnswer',
+          budgetTokens: 1500,
+        };
+        const knowledge = yield* compileSemanticContextKnowledge(f.config, input, evidence, target);
+        expect(knowledge.binding?.semanticContent).toBe(evidence.observation.content);
+        expect(knowledge.memorySelection?.nodeId).toBe(node.id);
+        expect(knowledge.brief?.graph?.sources?.[0]?.content).toContain('boundedAnswer');
+        expect(knowledge.gaps).toContain('semantic-symbol-memory-coverage-incomplete');
+        const foreign = {
+          ...evidence,
+          observation: {
+            ...evidence.observation,
+            project: canonicalFileUri((yield* f.path.toFileUrl(f.path.join(f.repo, 'foreign'))).href),
+          },
+        };
+        const unbound = yield* compileSemanticContextKnowledge(f.config, input, foreign, {
+          ...target,
+          evidence: foreign,
+        });
+        expect(unbound.binding).toBeNull();
+        expect(unbound.memorySelection).toBeNull();
+        expect(unbound.brief).toBeNull();
+        expect(unbound.gaps).toContain('semantic-graph-source-unbound');
+        yield* f.fs.writeFileString(f.file, 'export function boundedAnswer() { return 43; }\n');
+        const drifted = yield* compileSemanticContextKnowledge(f.config, input, evidence, target);
+        expect(drifted.binding).toBeNull();
+        expect(drifted.memorySelection).toBeNull();
+        expect(drifted.brief).toBeNull();
+        expect(drifted.gaps).toContain('semantic-graph-source-unbound');
       }).pipe(
         Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}),
         provideTestLayer(ApplicationLayer),
@@ -183,6 +384,9 @@ describe('whole native Context Brief read boundary', () => {
           }),
         );
         const plan = planContextBrief({scope: {kind: 'repository', callerCwd: f.repo}, mode: 'locate', task: 'answer'});
+        const empty = yield* native.citationValidation(plan.scope, [], undefined, yield* makeReadDeadline(5000));
+        expect(empty).toEqual([]);
+        expect(invocations).toBe(0);
         const deadline = yield* makeReadDeadline(1600);
         const start = yield* Clock.monotonicTimeNanos;
         const result = yield* withProductionLogging(

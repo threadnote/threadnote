@@ -1,3 +1,4 @@
+import {isLexicalV2Snapshot, lexicalV2RecordLookupStatement} from './lexical_projection.js';
 import {Array as EffectArray} from 'effect';
 import {Effect, Predicate} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -757,17 +758,20 @@ const stageCheckpointSupplementalRecord = Effect.fn('codeGraph.stageCheckpointSu
       `;
       return;
     case 'lexical': {
+      const v2 = isLexicalV2Snapshot(snapshotId)
+        ? lexicalV2RecordLookupStatement(snapshotId, record.term, record.symbolId)
+        : undefined;
       const rows = yield* sql.unsafe<{readonly weight: unknown}>(
-        `SELECT posting.weight
+        v2?.text ??
+          `SELECT posting.weight
          FROM lexical_compact_snapshots AS snapshot
          JOIN lexical_compact_terms AS term ON term.snapshot_key = snapshot.snapshot_key
          JOIN lexical_compact_postings AS posting
            ON posting.snapshot_key = snapshot.snapshot_key AND posting.term_key = term.term_key
          JOIN lexical_compact_symbols AS symbol
            ON symbol.snapshot_key = snapshot.snapshot_key AND symbol.symbol_key = posting.symbol_key
-         WHERE snapshot.snapshot_id = ? AND term.term = ? AND symbol.symbol_id = ?
-         LIMIT 2`,
-        [snapshotId, record.term, record.symbolId],
+         WHERE snapshot.snapshot_id = ? AND term.term = ? AND symbol.symbol_id = ? LIMIT 2`,
+        v2?.parameters ?? [snapshotId, record.term, record.symbolId],
       );
       if (rows.length !== 1 || Number(rows[0]?.weight) !== record.weight) {
         return yield* invalid('Checkpoint lexical record differs from ABI-compatible materialization.');
@@ -955,10 +959,14 @@ export const verifyCheckpointImportRecordCounts = Effect.fn('codeGraph.verifyChe
         (SELECT COUNT(*) FROM snapshot_reexport_provenance WHERE snapshot_id = ?) AS reexport,
         (SELECT COUNT(*) FROM edges WHERE snapshot_id = ?) AS edge,
         (SELECT COUNT(*) FROM code_graph_monikers WHERE snapshot_id = ?) AS moniker,
-        (SELECT COUNT(*)
+        ${
+          isLexicalV2Snapshot(snapshotId)
+            ? `(SELECT logical_posting_count FROM lexical_v2_formats WHERE snapshot_id=? AND format_version=2)`
+            : `(SELECT COUNT(*)
            FROM lexical_compact_snapshots AS snapshot
            JOIN lexical_compact_postings AS posting ON posting.snapshot_key = snapshot.snapshot_key
-          WHERE snapshot.snapshot_id = ?) AS lexical,
+          WHERE snapshot.snapshot_id = ?)`
+        } AS lexical,
         (SELECT COUNT(*) FROM snapshot_pack_provenance WHERE snapshot_id = ?) AS "pack-provenance"`,
     Array.from({length: 14}, () => snapshotId),
   );

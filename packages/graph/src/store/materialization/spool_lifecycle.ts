@@ -1,3 +1,4 @@
+import {projectLexicalSymbols, isLexicalV2Snapshot} from '../lexical_projection.js';
 import {Array as EffectArray} from 'effect';
 import {Database} from 'bun:sqlite';
 import {Effect, FileSystem, Option} from 'effect';
@@ -92,6 +93,12 @@ export const appendPersistentMaterializationSpoolFactBatches = Effect.fn(
       references: full.boundedReferences,
       symbols: batch.symbols,
       termsBySymbol: full.symbolTerms,
+      ...(isLexicalV2Snapshot(snapshotId)
+        ? {
+            batchIndex: batch.batchIndex,
+            lexicalProjection: projectLexicalSymbols(batch.symbols, batch.bodyDiscovery, batch.lexicalFileOrdinals),
+          }
+        : {}),
     });
     prepared.push({
       prepared: spool,
@@ -101,6 +108,8 @@ export const appendPersistentMaterializationSpoolFactBatches = Effect.fn(
           batch.edges,
           full.boundedReferences,
           batch.monikers ?? [],
+          batch.bodyDiscovery,
+          full.symbolTerms,
         ),
         batchIndex: batch.batchIndex,
         candidateCount: EffectArray.reduce(spool.references, 0, (total, reference) => total + reference.candidateCount),
@@ -112,7 +121,12 @@ export const appendPersistentMaterializationSpoolFactBatches = Effect.fn(
         rowCount: spool.rowCount,
         sourceBytes: batch.sourceBytes ?? 0,
         symbolCount: batch.symbols.length,
-        termCount: spool.symbolTerms.length,
+        termCount:
+          spool.symbolTerms.length +
+          (spool.lexicalScopes?.length ?? 0) +
+          (spool.lexicalMembers?.length ?? 0) +
+          (spool.lexicalOwners?.length ?? 0) +
+          (spool.lexicalShared?.length ?? 0),
       },
     });
   }

@@ -684,7 +684,7 @@ export const readNativeCandidateWatchInventory = Effect.fn('workflowWatch.candid
           'Candidate inventory exceeds bounded read bytes; no rows were omitted.',
         );
       const watchId = EffectString.slice(0, -5)(name);
-      const watch = yield* readNativeWatch(config, watchId);
+      const watch = yield* readNativeWatch(config, watchId, sha256HexSync(bytes));
       if (!watch) return yield* issue('watch-inventory-changed', 'Candidate inventory changed; reload the task view.');
       const owner = watch.envelope.owner;
       if (owner?.kind !== 'candidate-pr')

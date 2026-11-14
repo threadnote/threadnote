@@ -105,6 +105,7 @@
         "@threadnote/protocol": "workspace:*",
         "@threadnote/recall": "workspace:*",
         "@threadnote/remote-memory": "workspace:*",
+        "@threadnote/semantic": "workspace:*",
         "@threadnote/store": "workspace:*",
         "@threadnote/workflow-automations": "workspace:*",
         "@threadnote/workspace": "workspace:*",
@@ -127,6 +128,9 @@
         "postgres": "3.4.9",
         "react": "^19.3.1",
         "react-dom": "^19.3.1",
+        "typescript": "6.0.3",
+        "typescript-compiler": "npm:typescript@5.9.3",
+        "typescript-language-server": "6.0.2",
         "vitest": "5.0.5",
       },
     },
@@ -173,6 +177,7 @@
         "@threadnote/platform": "workspace:*",
         "@threadnote/protocol": "workspace:*",
         "@threadnote/recall": "workspace:*",
+        "@threadnote/semantic": "workspace:*",
         "@threadnote/store": "workspace:*",
         "@threadnote/workspace": "workspace:*",
         "effect": "4.1.2",
@@ -509,6 +514,17 @@
       "devDependencies": {
         "@effect/vitest": "4.1.2",
         "@threadnote/testing": "workspace:*",
+        "fast-check": "4.10.2",
+        "vitest": "5.0.5",
+      },
+    },
+    "packages/semantic": {
+      "name": "@threadnote/semantic",
+      "dependencies": {
+        "effect": "4.1.2",
+      },
+      "devDependencies": {
+        "@effect/vitest": "4.1.2",
         "fast-check": "4.10.2",
         "vitest": "5.0.5",
       },
@@ -1134,6 +1150,8 @@
     "@threadnote/recall": ["@threadnote/recall@workspace:packages/recall"],
 
     "@threadnote/remote-memory": ["@threadnote/remote-memory@workspace:packages/remote-memory"],
+
+    "@threadnote/semantic": ["@threadnote/semantic@workspace:packages/semantic"],
 
     "@threadnote/store": ["@threadnote/store@workspace:packages/store"],
 
@@ -2203,6 +2221,8 @@
 
     "typescript-compiler": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
 
+    "typescript-language-server": ["typescript-language-server@6.0.2", "", { "bin": { "typescript-language-server": "lib/cli.mjs" } }, "sha512-Ph7Ql+xkUJvMamnkh1h+aKP6HxLR7lrWIYkPn9/LZBkJdJZgtIj7OoVhkDYtQ7zFPTPmqZHOVXaUKGyz9M2q1Q=="],
+
     "undici": ["undici@8.12.3", "", {}, "sha512-+fdndUTwBP86cVjihTp21hZHo7d6oj1c/47XPA3lL8mM0XHs+C4EkcjmgRsFnFk2f/UONGDy9ItBItmXsLOQHw=="],
 
     "undici-types": ["undici-types@8.9.0", "", {}, "sha512-KTDyRTYX8sWmKXAikPHHSyc63CRPETMctyjKFupcC6OBLXT3xsN0e9aF7m+mIXutFWpUXuedtowG7iLOzp0kQg=="],
@@ -2320,6 +2340,8 @@
     "@effect/platform-node-shared/ws": ["ws@8.22.1", "", { "peerDependencies": { "bufferutil": "^4.0.1", "utf-8-validate": ">=5.0.2" }, "optionalPeers": ["bufferutil", "utf-8-validate"] }, "sha512-oyL6OPYme/CmiFvNuGzeoxCJ4nOrZE2O1FwM9MWM1AsGri6nLXB2pg+lNA8aLeXMSav0J6eIVS1j6vUPzUtK9g=="],
 
     "@mdxeditor/editor/js-yaml": ["js-yaml@4.3.2", "", { "dependencies": { "argparse": "^2.0.1" }, "bin": { "js-yaml": "bin/js-yaml.js" } }, "sha512-SFNOvSJ+Dgf/9An904Yx+CgSlIPCkIpao4qo51lpee25TIRejdH3rhR4EZMGoNx3/TP3O+wzWuiTFl4sqbltzA=="],
+
+    "@threadnote/threadnote/typescript": ["typescript@6.0.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw=="],
 
     "@vitest/istanbul-lib-source-maps/obug": ["obug@2.2.1", "", {}, "sha512-XrsrhT5sybtKI6wakr2SPOlGZWWYbUXZ7a0jT8/QOeAPau+1X/bSegNe5YR75oJmEZQbKningirmGOEJCIk61Q=="],
 

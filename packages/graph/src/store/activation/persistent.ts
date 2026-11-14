@@ -1,3 +1,9 @@
+import {
+  isLexicalV2Snapshot,
+  recordLexicalViewBinding,
+  projectLexicalSymbols,
+  stageLexicalV2,
+} from '../lexical_projection.js';
 import {Array as EffectArray} from 'effect';
 import {CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY} from '../../index_scope.js';
 import {DateTime, Effect, Option} from 'effect';
@@ -985,8 +991,20 @@ const activateCleanSnapshotAlias = Effect.fn('codeGraph.activateCleanSnapshotAli
         SELECT ${snapshot.id}, path, shard_id
         FROM snapshot_file_shards WHERE snapshot_id = ${baseSnapshotId}
       `;
-      yield* sql`INSERT INTO lexical_compact_snapshots (snapshot_id) VALUES (${snapshot.id})`;
-      yield* publishCompactLexicalFormat(sql, snapshot.id, {postingCount: 0, symbolCount: 0, termCount: 0});
+      if (isLexicalV2Snapshot(snapshot.id)) {
+        if (!options.lexicalBinding) return yield* CodeGraphStoreError.of('V2 alias lacks a logical layout binding.');
+        yield* recordLexicalViewBinding(
+          sql,
+          snapshot,
+          options.lexicalBinding.logicalSnapshotId,
+          options.lexicalBinding,
+        );
+        const lexical = yield* stageLexicalV2(sql, snapshot.id, projectLexicalSymbols([]));
+        yield* publishCompactLexicalFormat(sql, snapshot.id, lexical);
+      } else {
+        yield* sql`INSERT INTO lexical_compact_snapshots (snapshot_id) VALUES (${snapshot.id})`;
+        yield* publishCompactLexicalFormat(sql, snapshot.id, {postingCount: 0, symbolCount: 0, termCount: 0});
+      }
       yield* recordSnapshotExtractorGeneration(sql, snapshot.id);
       yield* sql`
         INSERT INTO snapshot_pack_provenance (

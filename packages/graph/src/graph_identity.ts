@@ -3,7 +3,7 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {codeGraphInventorySha256Hex} from './inventory/identity.js';
 import {compareCodeUnits} from './ordering.js';
 import {codeGraphScopeIdentitySuffix, type CodeGraphScopeIdentity} from './scope/identity.js';
-import {CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION} from './store/build/core.js';
+import {CODE_GRAPH_LEXICAL_LOGICAL_VERSION} from './store/lexical_projection.js';
 import type {CodeGraphLanguagePackProvenance} from './store/models.js';
 import {CODE_GRAPH_EXTRACTOR_SET_VERSION} from './types.js';
 import * as EffectString from 'effect/String';
@@ -81,7 +81,7 @@ export function createCodeGraphContentIdentityAccumulator(
 }
 
 function graphContentPrefix(extractorSet: string, scope: CodeGraphScopeIdentity | undefined): string {
-  return `graph-content-v1\nlexical-storage:${CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION}\n${extractorSet}\n${codeGraphScopeIdentitySuffix(scope)}`;
+  return `graph-content-v1\nlexical-storage:${CODE_GRAPH_LEXICAL_LOGICAL_VERSION}\n${extractorSet}\n${codeGraphScopeIdentitySuffix(scope)}`;
 }
 
 function graphContentLine(file: CodeGraphContentIdentityFile): string {

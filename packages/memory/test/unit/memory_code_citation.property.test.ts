@@ -65,6 +65,17 @@ const symbolTarget: fc.Arbitrary<MemoryCodeCitationTargetV1> = fc
     symbolKind: value.symbolKind,
   }));
 
+// Actual full/direct/overlay/alias/forced identities emitted by the graph V2 factory
+// for logical cgsn_ + 40 a's, direct base, and optional force generation of 16 b's.
+// Keep the corpus independent of this lower-level memory codec and its package dependencies.
+const actualV2Snapshots = [
+  'cgsn_04388f0282d68de40b7a7ec29bb4f0d48c29830b-lx2',
+  'cgsn_dc5c1b9a8514d3681982e39052b7020e745817f8-lx2',
+  'cgsn_79b3ccde5379dfc9e27d1c2582a1b803c408d416-lx2',
+  'cgsn_c55f118a9fd03ded0005612eeb6697b29146f3d0-lx2',
+  'cgsn_1c8cf7af3951f53a7ad6877c205bb1b75e10fc03-lx2',
+] as const;
+
 const citationInput: fc.Arbitrary<MemoryCodeCitationInputV1> = fc
   .record({
     dirty: fc.boolean(),
@@ -73,25 +84,89 @@ const citationInput: fc.Arbitrary<MemoryCodeCitationInputV1> = fc
     path: repositoryPath,
     seed: fc.string({maxLength: 100}),
     sourceGraphContent: fc.boolean(),
+    graphContentUsesSnapshot: fc.boolean(),
+    legacySuffix: fc.constantFrom('', '-direct', '-full-bbbbbbbbbbbbbbbb'),
+    actualV2Snapshot: fc.option(fc.constantFrom(...actualV2Snapshots), {nil: undefined}),
     target: fc.oneof(fc.constant({kind: 'file'} as const), symbolTarget),
   })
-  .map(value => ({
-    extractorSet: value.extractorSet,
-    fileContentHash: hash(`file:${value.seed}`),
-    path: value.path,
-    repositoryId: sha256HexSync(`repository:${value.seed}`),
-    repositoryIdentityKind: value.identityKind,
-    sourceCommit: Effect.pipe(sha256HexSync(`commit:${value.seed}`), EffectString.slice(0, 40)),
-    sourceDirty: value.dirty,
-    ...(value.sourceGraphContent
-      ? {sourceGraphContentId: `cgc_${Effect.pipe(sha256HexSync(`graph:${value.seed}`), EffectString.slice(0, 40))}`}
-      : {}),
-    sourceSnapshotId: `cgsn_${Effect.pipe(sha256HexSync(`snapshot:${value.seed}`), EffectString.slice(0, 40))}`,
-    target: value.target,
-    version: 1,
-  }));
+  .map(value => {
+    const sourceSnapshotId =
+      value.actualV2Snapshot ??
+      `cgsn_${Effect.pipe(sha256HexSync(`snapshot:${value.seed}`), EffectString.slice(0, 40))}${value.legacySuffix}`;
+    return {
+      extractorSet: value.extractorSet,
+      fileContentHash: hash(`file:${value.seed}`),
+      path: value.path,
+      repositoryId: sha256HexSync(`repository:${value.seed}`),
+      repositoryIdentityKind: value.identityKind,
+      sourceCommit: Effect.pipe(sha256HexSync(`commit:${value.seed}`), EffectString.slice(0, 40)),
+      sourceDirty: value.dirty,
+      ...(value.sourceGraphContent
+        ? {
+            sourceGraphContentId: value.graphContentUsesSnapshot
+              ? sourceSnapshotId
+              : `cgc_${Effect.pipe(sha256HexSync(`graph:${value.seed}`), EffectString.slice(0, 40))}`,
+          }
+        : {}),
+      sourceSnapshotId,
+      target: value.target,
+      version: 1,
+    };
+  });
 
 describe('memory code citation properties', () => {
+  it('round trips actual V2 and legacy identities without accepting future or mixed physical shapes', () => {
+    const logical = 'cgsn_' + EffectString.repeat(40)('a');
+    for (const sourceSnapshotId of [
+      logical,
+      logical + '-direct',
+      logical + '-full-bbbbbbbbbbbbbbbb',
+      ...actualV2Snapshots,
+    ]) {
+      const input = {...sampleCitationInput, sourceSnapshotId, sourceGraphContentId: sourceSnapshotId};
+      const citation = createMemoryCodeCitation(input);
+      expect(parseMemoryCodeCitation(formatMemoryCodeCitation(citation))).toEqual({ok: true, citation});
+      expect(citation.sourceSnapshotId).toBe(sourceSnapshotId);
+      expect(citation.sourceGraphContentId).toBe(sourceSnapshotId);
+    }
+    for (const malformed of [
+      logical + '-lx3',
+      logical + '-lx02',
+      logical + '-lx2-direct',
+      logical + '-direct-lx2',
+      logical + '-full-bbbbbbbbbbbbbbbb-lx2',
+      logical + '-lx2-extra',
+      'cgsn_' + EffectString.repeat(39)('a') + '-lx2',
+      'cgsn_' + EffectString.repeat(41)('a') + '-lx2',
+      'cgsn_' + EffectString.repeat(40)('A') + '-lx2',
+      actualV2Snapshots[0] + '\n',
+      ' ' + actualV2Snapshots[0],
+    ]) {
+      expect(() => createMemoryCodeCitation({...sampleCitationInput, sourceSnapshotId: malformed})).toThrow(
+        'invalid shape',
+      );
+      expect(() => createMemoryCodeCitation({...sampleCitationInput, sourceGraphContentId: malformed})).toThrow(
+        'invalid shape',
+      );
+    }
+    expect(() =>
+      createMemoryCodeCitation({
+        ...sampleCitationInput,
+        sourceGraphContentId: 'cgc_' + EffectString.repeat(40)('a') + '-lx2',
+      }),
+    ).toThrow('invalid shape');
+    const original = createMemoryCodeCitation({
+      ...sampleCitationInput,
+      sourceSnapshotId: actualV2Snapshots[0],
+      sourceGraphContentId: actualV2Snapshots[0],
+    });
+    for (const field of ['sourceSnapshotId', 'sourceGraphContentId'] as const)
+      expect(parseMemoryCodeCitation(JSON.stringify({...original, [field]: actualV2Snapshots[1]}))).toEqual({
+        ok: false,
+        error: {reason: 'id-mismatch'},
+      });
+  });
+
   it('preserves the control-character contract across arbitrary UTF-16 text', () => {
     const codeUnits = fc.oneof(
       fc.array(fc.integer({min: 0, max: 0xffff}), {maxLength: 48}),

@@ -1,3 +1,10 @@
+import {
+  isLexicalV2Snapshot,
+  lexicalV2RelationSql,
+  lexicalV2CandidateRelationSql,
+  loadLexicalViewBinding,
+  bindLexicalSnapshotLayout,
+} from './lexical_projection.js';
 import {Array as EffectArray} from 'effect';
 import {Clock, Effect, Option} from 'effect';
 import {CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY} from '../index_scope.js';
@@ -124,6 +131,22 @@ const selectCurrentLexicalReadySnapshotById = Effect.fn('codeGraph.selectCurrent
 ) {
   const sql = yield* SqlClient.SqlClient;
   yield* configureConnection(sql);
+  if (isLexicalV2Snapshot(snapshotId)) {
+    if (!(yield* tableExists(sql, 'lexical_v2_formats'))) return undefined;
+    const rows = yield* sql<SnapshotRow>`SELECT * FROM snapshots WHERE id=${snapshotId} AND state='ready'
+      AND EXISTS(SELECT 1 FROM lexical_v2_formats format WHERE format.snapshot_id=snapshots.id AND format.format_version=2) LIMIT 1`;
+    const row = rows[0];
+    if (!row) return undefined;
+    const binding = yield* loadLexicalViewBinding(sql, snapshotId);
+    if (
+      !binding ||
+      binding.baseSnapshotId !== (row.base_snapshot_id ?? undefined) ||
+      (binding.mode === 'direct' && row.dirty !== 1) ||
+      (binding.mode === 'alias' && row.dirty !== 0)
+    )
+      return undefined;
+    return bindLexicalSnapshotLayout(snapshotFromRow(row), binding);
+  }
   if (!(yield* tableExists(sql, 'snapshots')) || !(yield* tableExists(sql, 'lexical_storage_formats'))) {
     return undefined;
   }
@@ -138,6 +161,19 @@ const selectCurrentLexicalReadySnapshotById = Effect.fn('codeGraph.selectCurrent
     LIMIT 1
   `;
   return rows[0] ? snapshotFromRow(rows[0]) : undefined;
+});
+
+const lexicalReadyPredicate = Effect.fn('codeGraph.lexicalReadyPredicate')(function* (
+  sql: SqlClient.SqlClient,
+  alias: 'snapshots' | 'logical',
+) {
+  const legacy = `EXISTS(SELECT 1 FROM lexical_storage_formats lexical WHERE lexical.snapshot_id=${alias}.id AND lexical.format_version=1)`;
+  const v2 = yield* tableExists(sql, 'lexical_v2_formats');
+  return sql.unsafe(
+    v2
+      ? `(${legacy} OR EXISTS(SELECT 1 FROM lexical_v2_formats lexical WHERE lexical.snapshot_id=${alias}.id AND lexical.format_version=2))`
+      : legacy,
+  );
 });
 
 const selectReadySnapshotForCommit = Effect.fn('codeGraph.selectReadySnapshotForCommit')(function* (
@@ -161,15 +197,17 @@ const selectReadySnapshotForCommit = Effect.fn('codeGraph.selectReadySnapshotFor
       AND dirty = 0
       AND (${extractorSet ?? null} IS NULL OR extractor_set = ${extractorSet ?? null})
       AND state = 'ready'
-      AND EXISTS (
-        SELECT 1 FROM lexical_storage_formats AS lexical
-        WHERE lexical.snapshot_id = snapshots.id
-          AND lexical.format_version = ${CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION}
-      )
+      AND ${yield* lexicalReadyPredicate(sql, 'snapshots')}
     ORDER BY completed_at DESC, id
     LIMIT 1
   `;
-  return rows[0] ? snapshotFromRow(rows[0]) : undefined;
+  const row = rows[0];
+  if (!row) return undefined;
+  if (!isLexicalV2Snapshot(row.id)) return snapshotFromRow(row);
+  const binding = yield* loadLexicalViewBinding(sql, row.id);
+  if (!binding || binding.baseSnapshotId !== (row.base_snapshot_id ?? undefined) || binding.mode === 'direct')
+    return undefined;
+  return bindLexicalSnapshotLayout(snapshotFromRow(row), binding);
 });
 
 const selectRecentReadySnapshotsForRepository = Effect.fn('codeGraph.selectRecentReadySnapshotsForRepository')(
@@ -187,11 +225,7 @@ const selectRecentReadySnapshotsForRepository = Effect.fn('codeGraph.selectRecen
       AND ${scopeColumn} = ${scopeId}
       AND dirty = 0
       AND state = 'ready'
-      AND EXISTS (
-        SELECT 1 FROM lexical_storage_formats AS lexical
-        WHERE lexical.snapshot_id = snapshots.id
-          AND lexical.format_version = ${CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION}
-      )
+      AND ${yield* lexicalReadyPredicate(sql, 'snapshots')}
     ORDER BY completed_at DESC, id
     LIMIT 8
   `;
@@ -642,9 +676,9 @@ const selectReusableBaseReceipt = Effect.fn('codeGraph.selectReusableBaseReceipt
       AND (${allowDirtyRoot ? 1 : 0} = 1 OR snapshot.dirty = 0)
       AND snapshot.base_snapshot_id IS NULL
       AND EXISTS (
-        SELECT 1 FROM lexical_storage_formats AS lexical
+        SELECT 1 FROM ${sql.unsafe(isLexicalV2Snapshot(snapshotId) ? 'lexical_v2_formats' : 'lexical_storage_formats')} AS lexical
         WHERE lexical.snapshot_id = receipt.snapshot_id
-          AND lexical.format_version = ${CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION}
+          AND lexical.format_version = ${isLexicalV2Snapshot(snapshotId) ? 2 : CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION}
       )
       AND (
         receipt.lookup_count = 0 OR EXISTS (
@@ -729,11 +763,7 @@ const selectReusableFoldForwardBase = Effect.fn('codeGraph.selectReusableFoldFor
       AND logical_receipt.workspace_fingerprint = root_receipt.workspace_fingerprint
       AND logical_receipt.file_set_fingerprint = root_receipt.file_set_fingerprint
       AND logical_receipt.inventory_receipt_json IS NOT NULL
-      AND EXISTS (
-        SELECT 1 FROM lexical_storage_formats AS lexical
-        WHERE lexical.snapshot_id = logical.id
-          AND lexical.format_version = ${CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION}
-      )
+      AND ${yield* lexicalReadyPredicate(sql, 'logical')}
     LIMIT 1
   `;
   const logicalRow = candidates[0];
@@ -1408,11 +1438,40 @@ function compactLexicalTermBranch(alias: string, placeholders: string, base: boo
       ${suppression}`;
 }
 
+function lexicalV2EffectiveTerms(
+  snapshotId: string,
+  baseId: string,
+  terms: readonly string[] | undefined,
+  includeBody: boolean,
+): CodeGraphSqlQueryStatement {
+  const relation = lexicalV2RelationSql(includeBody);
+  return {
+    parameters: [
+      snapshotId,
+      terms === undefined ? 'null' : JSON.stringify(terms),
+      baseId,
+      terms === undefined ? 'null' : JSON.stringify(terms),
+      snapshotId,
+      snapshotId,
+    ],
+    text: `WITH current_terms AS (
+      WITH input(snapshot_id,terms_json) AS (VALUES (?,?)) ${relation}
+    ), base_terms AS (
+      WITH input(snapshot_id,terms_json) AS (VALUES (?,?)) ${relation}
+    ) SELECT term,symbol_id,weight FROM current_terms
+      UNION ALL SELECT term,symbol_id,weight FROM base_terms base
+      WHERE NOT EXISTS(SELECT 1 FROM symbols replacement WHERE replacement.snapshot_id=? AND replacement.id=base.symbol_id)
+        AND NOT EXISTS(SELECT 1 FROM snapshot_symbol_deletions deletion WHERE deletion.snapshot_id=? AND deletion.symbol_id=base.symbol_id)
+      ORDER BY term,symbol_id`,
+  };
+}
+
 export function codeGraphEffectiveSymbolTermsQueryStatement(
   snapshotId: string,
   baseSnapshotId: string | undefined,
 ): CodeGraphSqlQueryStatement {
   const baseId = baseSnapshotId ?? '';
+  if (isLexicalV2Snapshot(snapshotId)) return lexicalV2EffectiveTerms(snapshotId, baseId, undefined, true);
   return {
     parameters: [snapshotId, snapshotId, baseId, snapshotId, snapshotId, baseId, snapshotId, snapshotId],
     text: `WITH effective_terms AS (
@@ -1437,6 +1496,29 @@ export function codeGraphTermCandidateQueryStatement(
   limit: number,
 ): CodeGraphSqlQueryStatement {
   const uniqueTerms = [...new Set(terms)].slice(0, 24);
+  if (isLexicalV2Snapshot(snapshotId)) {
+    const relation = lexicalV2CandidateRelationSql();
+    const current = `WITH input(snapshot_id,terms_json) AS (VALUES (?,?)) ${relation}`;
+    const termsJson = JSON.stringify(uniqueTerms);
+    const effective =
+      baseSnapshotId === undefined
+        ? current
+        : `WITH current_terms AS (${current}), base_terms AS (${current})
+          SELECT term,symbol_id,weight FROM current_terms
+          UNION ALL SELECT term,symbol_id,weight FROM base_terms base
+          WHERE NOT EXISTS(SELECT 1 FROM symbols replacement WHERE replacement.snapshot_id=? AND replacement.id=base.symbol_id)
+            AND NOT EXISTS(SELECT 1 FROM snapshot_symbol_deletions deletion WHERE deletion.snapshot_id=? AND deletion.symbol_id=base.symbol_id)`;
+    return {
+      parameters: [
+        snapshotId,
+        termsJson,
+        ...(baseSnapshotId === undefined ? [] : [baseSnapshotId, termsJson, snapshotId, snapshotId]),
+        Math.max(1, Math.min(2_000, Math.floor(limit))),
+      ],
+      text: `WITH effective_terms AS (${effective}) SELECT symbol_id,SUM(weight) AS score
+        FROM effective_terms GROUP BY symbol_id ORDER BY score DESC,symbol_id LIMIT ?`,
+    };
+  }
   const placeholders = EffectArray.join(
     EffectArray.map(uniqueTerms, () => '?'),
     ', ',

@@ -322,3 +322,16 @@ export function makeAuthoringArtifacts<R>(options: {
     });
   return {read, write, writeData, readData};
 }
+
+export const rootSummary = (root: AuthoringRoot, artifact: WorkflowArtifact) => ({
+  root: artifactReference(artifact),
+  kind: root.kind,
+  featureId: root.featureId,
+  documentHash: root.documentHash,
+  intentHash: root.intentHash,
+  readiness: root.readiness,
+  ...(root.confirmation ? {confirmation: root.confirmation} : {}),
+  data: root.data,
+  documents: root.documents,
+  previous: root.previous,
+});

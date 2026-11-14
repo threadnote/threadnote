@@ -41,7 +41,7 @@ import {withWorkflowRecallRefreshBatch} from '../workflow_memory/recall_refresh.
 import {readWorkflowSharedRoots} from '../workflow_memory/scopes.js';
 import {assertWorkflowEvidenceSnapshot, verifyWorkflowEvidence} from '../workflow_memory/evidence.js';
 import {workflowArtifactUri} from '../workflow_memory/naming.js';
-import {nativeWorkflowError} from './memory.js';
+import {nativeWorkflowError, workflowWriteRequest} from './memory.js';
 import {assertNativeJobLiveSource, CurrentNativeJobReadyPromotion, CurrentNativeJobSourceView} from './native_jobs.js';
 import {nativeAuthoringRequestSchema} from './authoring_request_schema.js';
 export {nativeAuthoringRequestSchema} from './authoring_request_schema.js';
@@ -57,6 +57,7 @@ import {
   AuthoringReferenceSchema,
   AuthoringRootSchema,
   artifactReference,
+  rootSummary,
   decodeAuthoringArtifact,
   encodeAuthoringArtifact,
   encodeAuthoringDocument,
@@ -442,19 +443,6 @@ const asArtifact = (value: unknown): WorkflowArtifact => {
   }
   return value.artifact;
 };
-const rootSummary = (root: AuthoringRoot, artifact: WorkflowArtifact) => ({
-  root: artifactReference(artifact),
-  kind: root.kind,
-  featureId: root.featureId,
-  documentHash: root.documentHash,
-  intentHash: root.intentHash,
-  readiness: root.readiness,
-  ...(root.confirmation ? {confirmation: root.confirmation} : {}),
-  data: root.data,
-  documents: root.documents,
-  previous: root.previous,
-});
-
 const acceptancePacket = (
   document: NativeAuthoringDocument,
   validation: ReturnType<typeof validateNativeAuthoring>,
@@ -516,7 +504,25 @@ export const runNativeAuthoring = <R>(
     yield* call(base('inspect'));
     const stored = yield* readNativeWorkflowState(config, request.runId);
     if (!stored) return yield* fail('run-not-found', 'Start a fresh native run before authoring.');
-    const state = stored.state;
+    let state = stored.state;
+    if (request.command === 'save' && state.authoringSave) {
+      const document = yield* Effect.try({
+        try: () => decodeNativeAuthoringDocument(request.document),
+        catch: nativeWorkflowError,
+      });
+      if (document.id !== state.featureId || document.project !== state.project)
+        return yield* fail('binding-drift', 'Authoring document identity must match its existing native binding.');
+      const validation = yield* Effect.try({
+        try: () => validateNativeAuthoring(document, request),
+        catch: nativeWorkflowError,
+      });
+      const saving = request.ready && !validation.ready ? {...request, ready: false} : request;
+      if (yield* recoverAuthoringChild(config, saving, document, validation, call)) {
+        const recovered = yield* readNativeWorkflowState(config, request.runId);
+        if (!recovered) return yield* fail('run-not-found', 'The original native run disappeared during recovery.');
+        state = recovered.state;
+      }
+    }
     if (request.command === 'scope-inspect') {
       if (!request.paths) return yield* fail('invalid-request', 'Provide the exact existing source paths to inspect.');
       if (!request.literalOnly) yield* call(base('graph-ready'));
@@ -1193,6 +1199,86 @@ const clearAuthoringSave = (config: RuntimeConfig, runId: string, intentDigest: 
     }),
   );
 
+const authoringSaveIntent = (
+  state: NativeWorkflowState,
+  request: Request,
+  document: NativeAuthoringDocument,
+  validation: ReturnType<typeof validateNativeAuthoring>,
+) => {
+  const previous = state.authoringSave
+    ? state.authoringSave.rootUri
+    : (EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          [...state.operations].reverse(),
+          operation =>
+            operation.status === 'verified' && operation.intent.artifactKey === 'author-root-' + document.kind,
+        ),
+      )?.artifact?.uri ?? null);
+  const rootUri = request.uri ?? previous;
+  const readiness: 'ready' | 'draft' = request.ready ? 'ready' : 'draft';
+  const metadata = {
+    ...(request.confirmation ? {confirmation: request.confirmation} : {}),
+    ...(request.review ? {review: request.review} : {}),
+  };
+  const saveDigest = sha256HexSync(
+    stableJson({
+      documentHash: validation.documentHash,
+      readiness,
+      metadata,
+      expectedRevision: request.expectedRevision ?? null,
+      uri: rootUri,
+    }),
+  );
+  return {rootUri, readiness, metadata, saveDigest};
+};
+
+// Only the original admitted save may finish an already-journaled non-root
+// child. Ordinary validation/reads and pending roots retain their own guards.
+const recoverAuthoringChild = <R>(
+  config: RuntimeConfig,
+  request: Request,
+  document: NativeAuthoringDocument,
+  validation: ReturnType<typeof validateNativeAuthoring>,
+  call: NativeAuthoringCall<R>,
+) =>
+  withNativeAuthoringLock(
+    config,
+    request.runId,
+    Effect.gen(function* () {
+      const stored = yield* readNativeWorkflowState(config, request.runId);
+      const state = stored?.state;
+      const reservation = state?.authoringSave;
+      if (!state || !reservation) return false;
+      const {saveDigest} = authoringSaveIntent(state, request, document, validation);
+      if (reservation.intentDigest !== saveDigest)
+        return yield* fail('pending-operation', 'Resume the exact authoring save admitted by this run.');
+      const pending = EffectArray.filter(state.operations, operation => operation.status === 'prepared');
+      if (pending.length !== 1) return false;
+      const child = pending[0];
+      if (
+        !['authoring-child', 'authoring-context', 'authoring-history'].includes(child.intent.role) ||
+        !state.operations.slice(reservation.operationStart, reservation.operationLimit).includes(child)
+      )
+        return false;
+      const journal = yield* withWorkflowLock(config, state.bindingId, inspectWorkflowJournal(config, state.bindingId));
+      if (!journal.needsRecovery) return false;
+      const original = journal.state.operations[child.intent.operationId];
+      if (!original) return false;
+      if (original.intentDigest !== sha256HexSync(stableJson(workflowWriteRequest(child.intent))))
+        return yield* fail('invalid-state', 'The admitted child differs from its original native intent.');
+      yield* verifySource(journal.state.binding.repo, document);
+      yield* call({
+        protocolVersion: 1,
+        executorVersion: 1,
+        action: 'recover',
+        runId: request.runId,
+        generation: request.generation,
+        operationId: child.intent.operationId,
+      }).pipe(Effect.provideService(CurrentNativeAuthoringSave, saveDigest));
+      return true;
+    }),
+  );
+
 const saveAuthoring = <R>(
   config: RuntimeConfig,
   request: Request,
@@ -1210,30 +1296,7 @@ const saveAuthoring = <R>(
       if (!stored) return yield* fail('run-not-found', 'The original native run is missing.');
       const state = stored.state;
       if (state.closeoutSave) return yield* fail('pending-operation', 'Finish the admitted closeout before authoring.');
-      const priorRootUri = state.authoringSave
-        ? state.authoringSave.rootUri
-        : (EffectOption.getOrUndefined(
-            EffectArray.findFirst(
-              [...state.operations].reverse(),
-              operation =>
-                operation.status === 'verified' && operation.intent.artifactKey === 'author-root-' + document.kind,
-            ),
-          )?.artifact?.uri ?? null);
-      const rootUri = request.uri ?? priorRootUri;
-      const readiness = request.ready ? 'ready' : 'draft';
-      const metadata = {
-        ...(request.confirmation ? {confirmation: request.confirmation} : {}),
-        ...(request.review ? {review: request.review} : {}),
-      };
-      const saveDigest = sha256HexSync(
-        stableJson({
-          documentHash: validation.documentHash,
-          readiness,
-          metadata,
-          expectedRevision: request.expectedRevision ?? null,
-          uri: rootUri,
-        }),
-      );
+      const {rootUri, readiness, metadata, saveDigest} = authoringSaveIntent(state, request, document, validation);
       if (state.authoringSave && state.authoringSave.intentDigest !== saveDigest)
         return yield* fail('pending-operation', 'Resume the exact authoring save admitted by this run.');
       const initialCompactResume =

@@ -10,6 +10,15 @@ import {makeReadDeadline, readDeadlineRemaining} from '@threadnote/platform/read
 import {CodeGraphScopeRoutingError} from '@threadnote/graph/scope/routing';
 import {retrieveContextBriefGraphEvidence} from '@threadnote/context/graph/evidence';
 import {retrieveContextBriefSourceEvidence} from '@threadnote/context/graph/source_evidence';
+import {
+  retrieveSemanticContextSourceEvidence,
+  retrieveSemanticContextSymbol,
+  filterSemanticContextMemory,
+} from '@threadnote/context/compiler';
+import {
+  mergeContextBriefMemoryEvidence,
+  unavailableContextBriefCodeLinkedMemoryEvidence,
+} from '@threadnote/context/memory-evidence';
 import {validateContextBriefMemoryCitations} from '@threadnote/context/citation_validation';
 import {
   selectVerifiedProcedureEvidence,
@@ -27,6 +36,7 @@ import {
   ContextBriefNativeReadFailed,
   type ContextBriefNativeReadRequest,
   type ContextBriefNativeReadResponse,
+  type ContextBriefNativeSemanticState,
 } from './native_read_boundary.js';
 import type {ReadDeadline} from '@threadnote/platform/read_deadline';
 
@@ -121,28 +131,99 @@ export const serveContextBriefNativeRead = Effect.fn('contextBrief.serveNativeRe
       commandsJoined: true as const,
     };
     switch (request.operation) {
-      case 'graph':
+      case 'graph': {
+        const semantic: ContextBriefNativeSemanticState = {
+          binding: null,
+          repositoryIdentityKind: null,
+          selection: {nodeId: null, gap: 'semantic-symbol-target-unavailable'},
+        };
+        const value = yield* retrieveContextBriefGraphEvidence(
+          request.config,
+          request.plan,
+          sourceRequest => {
+            const proof = request.semantic;
+            if (!proof) return retrieveContextBriefSourceEvidence(sourceRequest);
+            return retrieveSemanticContextSourceEvidence(sourceRequest, proof.evidence).pipe(
+              Effect.flatMap(result =>
+                Effect.gen(function* () {
+                  semantic.binding = result.binding;
+                  semantic.repositoryIdentityKind = sourceRequest.identity.remoteIdentity ? 'remote' : 'local';
+                  semantic.selection = yield* retrieveSemanticContextSymbol(
+                    request.config,
+                    sourceRequest,
+                    proof.evidence,
+                    proof.target,
+                    result.binding,
+                  ).pipe(Effect.orElseSucceed(() => ({nodeId: null, gap: 'semantic-symbol-lookup-unavailable'})));
+                  return result.source;
+                }),
+              ),
+            );
+          },
+          budget,
+        );
         return {
           ...fields,
           ok: true as const,
           operation: request.operation,
-          value: yield* retrieveContextBriefGraphEvidence(
-            request.config,
-            request.plan,
-            retrieveContextBriefSourceEvidence,
-            budget,
-          ),
+          value,
           counters: {remaining: budget.remaining, primaryRemaining: budget.primaryRemaining},
+          ...(request.semantic === undefined ? {} : {semantic}),
         };
+      }
       case 'linked':
+      case 'memory': {
+        const semantic = request.semantic;
+        const linked =
+          semantic && (!semantic.binding || !semantic.repositoryIdentityKind || !semantic.selection.nodeId)
+            ? unavailableContextBriefCodeLinkedMemoryEvidence(
+                1,
+                semantic.selection.gap ?? 'semantic-symbol-target-unavailable',
+              )
+            : request.plan.codeRefs.length === 0
+              ? undefined
+              : yield* retrieveContextBriefCodeLinkedMemoryEvidence(
+                  request.config,
+                  semantic?.selection.nodeId ? {...request.plan, codeRefs: [semantic.selection.nodeId]} : request.plan,
+                  {allowedUriScopes: request.allowedUriScopes},
+                );
+        const filtered =
+          linked && semantic?.binding && semantic.repositoryIdentityKind && semantic.selection.nodeId
+            ? filterSemanticContextMemory(
+                linked,
+                semantic.selection.nodeId,
+                semantic.binding.graph,
+                semantic.repositoryIdentityKind,
+              )
+            : linked;
+        const value =
+          request.operation === 'memory'
+            ? mergeContextBriefMemoryEvidence(
+                request.lexicalMemory,
+                filtered,
+                request.candidateLimit,
+                request.plan.candidateLimit,
+              )
+            : (filtered ?? unavailableContextBriefCodeLinkedMemoryEvidence(0));
+        // Never reuse lexical receipts: only this exact merged set and fence are validated.
+        const citationValidations =
+          request.operation === 'memory'
+            ? EffectArray.every(value.candidates, candidate => candidate.codeCitations.length === 0)
+              ? []
+              : yield* validateContextBriefMemoryCitations(
+                  request.config,
+                  request.plan.scope,
+                  value.candidates,
+                  request.fence,
+                )
+            : undefined;
         return {
           ...fields,
           ok: true as const,
           operation: request.operation,
-          value: yield* retrieveContextBriefCodeLinkedMemoryEvidence(request.config, request.plan, {
-            allowedUriScopes: request.allowedUriScopes,
-          }),
+          value: request.operation === 'memory' ? {...value, citationValidations} : value,
         };
+      }
       case 'citations':
         return {
           ...fields,

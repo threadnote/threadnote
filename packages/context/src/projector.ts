@@ -6,7 +6,6 @@ import {isContextBriefAgentViewV1, isContextBriefV1} from './projector-validatio
 import {
   AGENT_RESPONSE_ESTIMATED_BYTES_PER_TOKEN,
   AgentResponseBudgetTooSmallError,
-  measureAgentToolResponse,
 } from '@threadnote/protocol/agent-response';
 import {
   CONTEXT_BRIEF_DEFAULT_ESTIMATED_TOKENS,
@@ -76,6 +75,18 @@ import {
   compactProjectedIssue,
   compactProjectedMemory,
 } from './projector/compaction.js';
+import {
+  type ProjectionItem as SharedProjectionItem,
+  projectionItemKey,
+  uniqueProjectionItems,
+  laneOrderedItems,
+  laneStableOptionalProjectionItems as orderedOptionalItems,
+  selectedProjectionIds,
+  selectProjectionDictionary,
+  projectionOmissionCount,
+  renderProjectionChannels,
+  selectFiniteProjection,
+} from './projector/selection.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
@@ -107,12 +118,7 @@ const isBoundedPublicCodeRelations = Schema.is(
   UnknownArraySchema.check(Schema.isMaxLength(CONTEXT_BRIEF_MAXIMUM_PUBLIC_CODE_RELATIONS)),
 );
 
-interface ProjectionItem {
-  readonly id: string;
-  readonly lane: ProjectionLane;
-  readonly laneRank: number;
-  readonly priority: number;
-}
+type ProjectionItem = SharedProjectionItem<ProjectionLane>;
 
 interface CodeLinkedEvidenceCoreProjection {
   readonly allCohortKeys: ReadonlySet<string>;
@@ -250,18 +256,15 @@ function projectContextBriefCore(
     ...requiredItems,
     ...optionalItems.slice(0, count),
   ];
-  let selectedCount: number | undefined;
-  for (let count = 0; count <= optionalItems.length; count += 1) {
-    const structuredContent = renderProjection(
-      logical,
-      selectItems(count),
-      protectedMemoryUri,
-      compactMemoryUris,
-      resumeFocusUri,
-    );
-    const measurement = measureContextBriefResponse(structuredContent, responseFormat);
-    if (measurement.totalBytes <= maximumBytes) selectedCount = count;
-  }
+  const selection = selectFiniteProjection({
+    required: requiredItems,
+    optional: optionalItems,
+    maximumBytes,
+    format: responseFormat,
+    render: selected => renderProjection(logical, selected, protectedMemoryUri, compactMemoryUris, resumeFocusUri),
+    renderText: brief => renderContextBriefForFormat(brief, responseFormat),
+  });
+  const selectedCount = selection?.count;
   const codeLinkedFallbackItem = currentCodeLinkedMemoryFallbackItem(logical, items);
   const projectCodeLinkedFallback = (): ProjectedContextBriefV1 | undefined => {
     if (codeLinkedFallbackItem === undefined) return undefined;
@@ -372,8 +375,8 @@ function renderContextBriefForFormat(brief: ContextBriefV1, responseFormat: Cont
 }
 
 function measureContextBriefResponse(brief: ContextBriefV1, responseFormat: ContextBriefResponseFormat) {
-  const text = renderContextBriefForFormat(brief, responseFormat);
-  return measureAgentToolResponse(responseFormat === 'agent' ? {text} : {structuredContent: brief, text});
+  return renderProjectionChannels(brief, responseFormat, value => renderContextBriefForFormat(value, responseFormat))
+    .measurement;
 }
 
 export function parseContextBriefJsonText(text: string): ContextBriefAgentViewV1 {
@@ -1063,12 +1066,7 @@ function renderProjection(
   compactMemoryUris: ReadonlySet<string> = new Set(),
   resumeFocusUri?: string,
 ): ContextBriefV1 {
-  const selectedByLane = new Map<ProjectionLane, Set<string>>();
-  for (const item of selected) {
-    const ids = selectedByLane.get(item.lane) ?? new Set<string>();
-    ids.add(item.id);
-    selectedByLane.set(item.lane, ids);
-  }
+  const selectedByLane = selectedProjectionIds(selected);
   const cards = EffectArray.map(
     selectById(logical.graph.cards, selectedByLane.get('graph-card')),
     compactProjectedGraphCard,
@@ -1153,8 +1151,7 @@ function renderProjection(
       ? {}
       : {verifiedProcedures: logicalVerifiedProcedures.length - verifiedProcedures.length}),
   };
-  // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
-  const omittedItems = EffectArray.reduce(Object.values(omissions), 0, (total, value) => total + value);
+  const omittedItems = projectionOmissionCount(omissions);
   const taskSummary = jsonStringPrefix(logical.task, 96);
   const task = {summary: taskSummary, truncated: taskSummary !== logical.task};
   const projectedVersion = projectedContextBriefVersion(logical.version, {
@@ -1260,8 +1257,7 @@ function renderMinimumProjection(
     stalenessAndConflicts: logical.stalenessAndConflicts.length,
     ...(logical.verifiedProcedures === undefined ? {} : {verifiedProcedures: logical.verifiedProcedures.length}),
   };
-  // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
-  const omittedItems = EffectArray.reduce(Object.values(omissions), 0, (total, value) => total + value) + 1;
+  const omittedItems = projectionOmissionCount(omissions) + 1;
   return {
     activeHandoffs: [],
     coverage: {
@@ -1815,36 +1811,8 @@ function requiredLanePredecessorExclusions(
   return excluded;
 }
 
-function laneOrderedItems(items: readonly ProjectionItem[], lane: ProjectionLane): readonly ProjectionItem[] {
-  return EffectArray.filter(items, item => item.lane === lane).sort(
-    (left, right) => left.laneRank - right.laneRank || compareText(left.id, right.id),
-  );
-}
-
 function laneStableOptionalProjectionItems(items: readonly ProjectionItem[]): readonly ProjectionItem[] {
-  const originalOrder = new Map(EffectArray.map(items, (item, index) => [projectionItemKey(item), index] as const));
-  const lanes = EffectArray.map(PROJECTION_LANES, lane => laneOrderedItems(items, lane));
-  const offsets = EffectArray.map(lanes, () => 0);
-  const ordered: ProjectionItem[] = [];
-  while (ordered.length < items.length) {
-    let selectedLane = -1;
-    let selectedOrder = Number.POSITIVE_INFINITY;
-    for (const [laneIndex, laneItems] of lanes.entries()) {
-      const item = laneItems[offsets[laneIndex] ?? 0];
-      if (item === undefined) continue;
-      const order = originalOrder.get(projectionItemKey(item)) ?? Number.POSITIVE_INFINITY;
-      if (order < selectedOrder) {
-        selectedLane = laneIndex;
-        selectedOrder = order;
-      }
-    }
-    if (selectedLane < 0) break;
-    const item = lanes[selectedLane]?.[offsets[selectedLane] ?? 0];
-    if (item === undefined) break;
-    ordered.push(item);
-    offsets[selectedLane] = (offsets[selectedLane] ?? 0) + 1;
-  }
-  return ordered;
+  return orderedOptionalItems(items, PROJECTION_LANES);
 }
 /** Keep a fixed useful lane bundle; larger agent budgets are ceilings, not refill targets. */
 function agentSemanticOptionalProjectionItems(
@@ -1896,16 +1864,6 @@ function primaryRelationshipMemoryItem(
   );
 }
 
-function uniqueProjectionItems(items: readonly ProjectionItem[]): readonly ProjectionItem[] {
-  const seen = new Set<string>();
-  return EffectArray.filter(items, item => {
-    const key = projectionItemKey(item);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
 function coverageGapProjectionId(gap: string): string {
   return `gap:${gap}`;
 }
@@ -1914,10 +1872,6 @@ function procedureProjectionId(
   procedure: NonNullable<ContextBriefLogicalResultV1['verifiedProcedures']>[number],
 ): string {
   return `${procedure.artifact.id}@${procedure.artifact.semanticVersion}`;
-}
-
-function projectionItemKey(item: ProjectionItem): string {
-  return `${item.lane}\u0000${item.id}`;
 }
 
 function selectById<T extends {readonly id: string; readonly rank: number}>(
@@ -1935,11 +1889,7 @@ function selectById<T extends {readonly id?: string; readonly rank: number; read
   key: 'id' | 'uri' = 'id',
 ): readonly T[] {
   if (selected === undefined) return [];
-  return EffectArray.filter(items, (item, __effectArrayIndex) => {
-    if (!(__effectArrayIndex in items)) return false;
-    const id = item[key];
-    return typeof id === 'string' && selected.has(id);
-  }).sort((left, right) => {
+  return selectProjectionDictionary(items, selected, item => item[key]).sort((left, right) => {
     const leftId = left[key] ?? '';
     const rightId = right[key] ?? '';
     return left.rank - right.rank || compareText(leftId, rightId);

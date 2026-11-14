@@ -1,4 +1,12 @@
 import {Array as EffectArray, Option as EffectOption} from 'effect';
+export {
+  retrieveSemanticContextSourceEvidence,
+  retrieveSemanticContextSymbol,
+  selectSemanticContextSymbol,
+  filterSemanticContextMemory,
+  projectSemanticContextKnowledge,
+  compactSemanticContextKnowledge,
+} from './semantic_evidence.js';
 import {DateTime, Effect, Schema} from 'effect';
 import {
   makeReadDeadline,
@@ -49,10 +57,19 @@ export interface ContextBriefCompilerDependencies<
     plan: ContextBriefPlanV1,
     deadline?: ReadDeadline,
   ) => Effect.Effect<VerifiedProcedureSelection, unknown, MemoryR>;
+  /** Internal callers may require source/target binding before any linked-memory read. */
+  readonly codeLinkedMemoryAfterGraph?: boolean;
   readonly codeLinkedMemoryEvidence?: (
     plan: ContextBriefPlanV1['codeAnchors'],
     deadline?: ReadDeadline,
   ) => Effect.Effect<ContextBriefMemoryRetrievalV1, unknown, MemoryR>;
+  /** Retrieve linked evidence and validate the exact merged lexical/linked set after graph completion. */
+  readonly memoryEvidenceAfterGraph?: (
+    plan: ContextBriefPlanV1,
+    lexicalMemory: ContextBriefMemoryRetrievalV1,
+    fence: ContextBriefCitationValidationFenceV2 | undefined,
+    deadline: ReadDeadline,
+  ) => Effect.Effect<ContextBriefMemoryRetrievalV1, unknown, MemoryR | CitationR>;
   readonly citationValidation?: (
     scope: ContextBriefPlanV1['scope'],
     candidates: ContextBriefMemoryRetrievalV1['candidates'],
@@ -139,7 +156,9 @@ export const compileContextBriefWith = Effect.fn('contextBrief.compileWith')(fun
           Effect.succeed({...unavailableContextBriefMemoryEvidence(), gaps: ['memory-recall-budget-exhausted']}),
         ),
       ),
-      codeLinkedMemory,
+      dependencies.memoryEvidenceAfterGraph || dependencies.codeLinkedMemoryAfterGraph
+        ? succeedUndefined
+        : codeLinkedMemory,
       dependencies.procedureEvidence === undefined
         ? Effect.succeed({gaps: [], procedures: []})
         : withinReadDeadline(
@@ -156,15 +175,49 @@ export const compileContextBriefWith = Effect.fn('contextBrief.compileWith')(fun
   const initialGraph =
     eagerGraph ??
     (yield* readGraph(withResumeMemoryGraphAnchors(plan.graph, lexicalMemory, plan.codeAnchors.candidateLimit)));
-  const memory = mergeContextBriefMemoryEvidence(
-    lexicalMemory,
-    linkedMemory,
-    plan.memory.candidateLimit,
-    plan.codeAnchors.candidateLimit,
-  );
-  const initialValidations = dependencies.citationValidation
-    ? yield* readCitations(memory.candidates, initialGraph.citationValidationFence)
-    : memory.citationValidations;
+  const fallbackMemory = () =>
+    mergeContextBriefMemoryEvidence(
+      lexicalMemory,
+      plan.codeAnchors.codeRefs.length === 0
+        ? undefined
+        : unavailableContextBriefCodeLinkedMemoryEvidence(
+            plan.codeAnchors.codeRefs.length,
+            'code-anchor-read-budget-exhausted',
+          ),
+      plan.memory.candidateLimit,
+      plan.codeAnchors.candidateLimit,
+    );
+  const memory = dependencies.memoryEvidenceAfterGraph
+    ? yield* withinReadDeadline(
+        graphDeadline,
+        Effect.suspend(() =>
+          dependencies.memoryEvidenceAfterGraph!(
+            plan,
+            lexicalMemory,
+            initialGraph.citationValidationFence,
+            graphDeadline,
+          ),
+        ),
+      ).pipe(
+        Effect.catchIf(Schema.is(ReadDeadlineExceeded), () => {
+          const fallback = fallbackMemory();
+          return Effect.succeed({
+            ...fallback,
+            citationValidations: budgetExpiredCitationValidations(fallback.candidates, observedAt),
+          });
+        }),
+      )
+    : mergeContextBriefMemoryEvidence(
+        lexicalMemory,
+        dependencies.codeLinkedMemoryAfterGraph ? yield* codeLinkedMemory : linkedMemory,
+        plan.memory.candidateLimit,
+        plan.codeAnchors.candidateLimit,
+      );
+  const initialValidations = dependencies.memoryEvidenceAfterGraph
+    ? memory.citationValidations
+    : dependencies.citationValidation
+      ? yield* readCitations(memory.candidates, initialGraph.citationValidationFence)
+      : memory.citationValidations;
   let graph = initialGraph;
   let validatedMemory =
     initialValidations === undefined ? memory : {...memory, citationValidations: initialValidations};

@@ -41,7 +41,7 @@ export const CODE_GRAPH_EMBEDDING_DEMAND_TABLE_CONTRACT = {
 } as const satisfies PersistentExtensionTableContract;
 
 export type PersistentExtensionGroup =
-  'analysis' | 'build' | 'checkpoint' | 'cross-repository' | 'lexical' | 'shards' | 'vector-demand';
+  'analysis' | 'build' | 'checkpoint' | 'cross-repository' | 'lexical' | 'lexical-v2' | 'shards' | 'vector-demand';
 
 export type CodeGraphPersistentSchemaMigrationPhase =
   | 'added-build-owner-instance'
@@ -138,6 +138,143 @@ const optionalColumn = (name: string, type: string): PersistentExtensionColumnCo
  * are restarted against the current resumable-build contract.
  */
 export const PERSISTENT_EXTENSION_TABLES = [
+  {
+    name: 'lexical_v2_views',
+    group: 'lexical-v2',
+    columns: [
+      requiredColumn('snapshot_id', 'TEXT', 1),
+      requiredColumn('logical_snapshot_id', 'TEXT'),
+      requiredColumn('layout_mode', 'TEXT'),
+      optionalColumn('base_snapshot_id', 'TEXT'),
+      optionalColumn('force_generation', 'TEXT'),
+      requiredColumn('order_revision', 'INTEGER'),
+    ],
+    createSql: `CREATE TABLE IF NOT EXISTS lexical_v2_views (
+      snapshot_id TEXT PRIMARY KEY NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+      logical_snapshot_id TEXT NOT NULL,layout_mode TEXT NOT NULL CHECK(layout_mode IN ('full','direct','overlay','alias')),
+      base_snapshot_id TEXT,force_generation TEXT,order_revision INTEGER NOT NULL CHECK(order_revision=1)
+    ) WITHOUT ROWID`,
+    foreignKeys: [{from: 'snapshot_id', onDelete: 'CASCADE', table: 'snapshots', to: 'id'}],
+  },
+
+  {
+    name: 'lexical_v2_formats',
+    group: 'lexical-v2',
+    columns: [
+      requiredColumn('snapshot_id', 'TEXT', 1),
+      requiredColumn('format_version', 'INTEGER'),
+      requiredColumn('posting_count', 'INTEGER'),
+      requiredColumn('logical_posting_count', 'INTEGER'),
+      requiredColumn('symbol_count', 'INTEGER'),
+      requiredColumn('term_count', 'INTEGER'),
+      requiredColumn('scope_count', 'INTEGER'),
+      requiredColumn('owner_count', 'INTEGER'),
+      requiredColumn('shared_count', 'INTEGER'),
+    ],
+    createSql: `CREATE TABLE IF NOT EXISTS lexical_v2_formats (
+      snapshot_id TEXT NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+      format_version INTEGER NOT NULL,
+      posting_count INTEGER NOT NULL,
+      logical_posting_count INTEGER NOT NULL,
+      symbol_count INTEGER NOT NULL,
+      term_count INTEGER NOT NULL,
+      scope_count INTEGER NOT NULL,
+      owner_count INTEGER NOT NULL,
+      shared_count INTEGER NOT NULL,
+      PRIMARY KEY (snapshot_id),
+      CHECK (format_version = 2),
+      CHECK (posting_count = term_count + scope_count + symbol_count + owner_count + shared_count + 3),
+      CHECK (term_count >= 0 AND scope_count >= 0 AND symbol_count >= 0 AND owner_count >= 0 AND shared_count >= 0),
+      CHECK (logical_posting_count >= 0)
+    ) WITHOUT ROWID`,
+    foreignKeys: [{from: 'snapshot_id', onDelete: 'CASCADE', table: 'snapshots', to: 'id'}],
+  },
+  {
+    name: 'lexical_v2_scopes',
+    group: 'lexical-v2',
+    columns: [
+      requiredColumn('snapshot_key', 'INTEGER', 1),
+      requiredColumn('scope_ordinal', 'INTEGER', 2),
+      requiredColumn('path', 'TEXT'),
+      requiredColumn('content_hash', 'TEXT'),
+      optionalColumn('package_name', 'TEXT'),
+    ],
+    createSql: `CREATE TABLE IF NOT EXISTS lexical_v2_scopes (
+      snapshot_key INTEGER NOT NULL REFERENCES lexical_compact_snapshots(snapshot_key) ON DELETE CASCADE,
+      scope_ordinal INTEGER NOT NULL,
+      path TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      package_name TEXT,
+      PRIMARY KEY (snapshot_key, scope_ordinal),
+      CHECK (scope_ordinal >= 0)
+    ) WITHOUT ROWID`,
+    foreignKeys: [{from: 'snapshot_key', onDelete: 'CASCADE', table: 'lexical_compact_snapshots', to: 'snapshot_key'}],
+  },
+  {
+    name: 'lexical_v2_members',
+    group: 'lexical-v2',
+    uniqueKeys: [['snapshot_key', 'symbol_id']],
+    columns: [
+      requiredColumn('snapshot_key', 'INTEGER', 1),
+      requiredColumn('scope_ordinal', 'INTEGER', 2),
+      requiredColumn('member_ordinal', 'INTEGER', 3),
+      requiredColumn('symbol_id', 'TEXT'),
+    ],
+    createSql: `CREATE TABLE IF NOT EXISTS lexical_v2_members (
+      snapshot_key INTEGER NOT NULL REFERENCES lexical_compact_snapshots(snapshot_key) ON DELETE CASCADE,
+      scope_ordinal INTEGER NOT NULL,
+      member_ordinal INTEGER NOT NULL,
+      symbol_id TEXT NOT NULL,
+      PRIMARY KEY (snapshot_key, scope_ordinal, member_ordinal),
+      UNIQUE (snapshot_key, symbol_id),
+      CHECK (scope_ordinal >= 0),
+      CHECK (member_ordinal >= 0)
+    ) WITHOUT ROWID`,
+    foreignKeys: [{from: 'snapshot_key', onDelete: 'CASCADE', table: 'lexical_compact_snapshots', to: 'snapshot_key'}],
+  },
+  {
+    name: 'lexical_v2_owners',
+    group: 'lexical-v2',
+    columns: [
+      requiredColumn('snapshot_key', 'INTEGER', 1),
+      requiredColumn('term_key', 'INTEGER', 2),
+      requiredColumn('origin_mask', 'INTEGER', 3),
+      requiredColumn('scope_ordinal', 'INTEGER', 4),
+      requiredColumn('member_ordinal', 'INTEGER', 5),
+      requiredColumn('metadata_weight', 'INTEGER'),
+    ],
+    createSql: `CREATE TABLE IF NOT EXISTS lexical_v2_owners (
+      snapshot_key INTEGER NOT NULL REFERENCES lexical_compact_snapshots(snapshot_key) ON DELETE CASCADE,
+      term_key INTEGER NOT NULL,
+      origin_mask INTEGER NOT NULL,
+      scope_ordinal INTEGER NOT NULL,
+      member_ordinal INTEGER NOT NULL,
+      metadata_weight INTEGER NOT NULL,
+      PRIMARY KEY (snapshot_key, term_key, origin_mask, scope_ordinal, member_ordinal),
+      CHECK (origin_mask IN (1, 2, 3)),
+      CHECK (scope_ordinal >= 0),
+      CHECK (member_ordinal >= 0),
+      CHECK ((origin_mask = 2 AND metadata_weight = 0) OR (origin_mask IN (1, 3) AND metadata_weight BETWEEN 1 AND 5))
+    ) WITHOUT ROWID`,
+    foreignKeys: [{from: 'snapshot_key', onDelete: 'CASCADE', table: 'lexical_compact_snapshots', to: 'snapshot_key'}],
+  },
+  {
+    name: 'lexical_v2_shared',
+    group: 'lexical-v2',
+    columns: [
+      requiredColumn('snapshot_key', 'INTEGER', 1),
+      requiredColumn('term_key', 'INTEGER', 2),
+      requiredColumn('scope_ordinal', 'INTEGER', 3),
+    ],
+    createSql: `CREATE TABLE IF NOT EXISTS lexical_v2_shared (
+      snapshot_key INTEGER NOT NULL REFERENCES lexical_compact_snapshots(snapshot_key) ON DELETE CASCADE,
+      term_key INTEGER NOT NULL,
+      scope_ordinal INTEGER NOT NULL,
+      PRIMARY KEY (snapshot_key, term_key, scope_ordinal),
+      CHECK (scope_ordinal >= 0)
+    ) WITHOUT ROWID`,
+    foreignKeys: [{from: 'snapshot_key', onDelete: 'CASCADE', table: 'lexical_compact_snapshots', to: 'snapshot_key'}],
+  },
   CODE_GRAPH_EMBEDDING_DEMAND_TABLE_CONTRACT,
   {
     columns: [

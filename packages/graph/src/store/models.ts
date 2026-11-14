@@ -164,6 +164,7 @@ export interface CodeGraphReusableBaseReceiptInput {
 
 /** Exact physical-root evidence required when a clean commit aliases its just-committed dirty graph. */
 export interface CodeGraphCleanSnapshotAliasOptions {
+  readonly lexicalBinding?: import('./lexical_projection.js').LexicalViewBinding;
   readonly exactBaseFiles?: readonly Pick<
     CodeGraphInventoryFile,
     'contentHash' | 'language' | 'mode' | 'path' | 'size'
@@ -400,6 +401,7 @@ export type CodeGraphRetiredSnapshotCleanupProgressCallback = (
 ) => Effect.Effect<void, never>;
 
 export interface CodeGraphPersistentBuildClaim {
+  readonly lexicalBinding?: import('./lexical_projection.js').LexicalViewBinding;
   readonly logicalSnapshotId: string;
   readonly owner: CodeGraphBuildOwnerIdentity;
 }
@@ -447,6 +449,8 @@ export interface CodeGraphStagingProgress {
 export type CodeGraphStagingProgressCallback = (progress: CodeGraphStagingProgress) => Effect.Effect<void, never>;
 
 export interface CodeGraphStagingBatch {
+  readonly lexicalFileOrdinals?: ReadonlyMap<string, number>;
+  readonly bodyDiscovery?: readonly import('../types.js').CodeGraphBodyDiscovery[];
   readonly batchIndex: number;
   readonly edges: readonly CodeGraphEdge[];
   /** Exact UTF-8 JSON bytes of the attributed facts represented by this batch. */

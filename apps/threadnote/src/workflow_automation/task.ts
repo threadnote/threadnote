@@ -31,9 +31,13 @@ import {gitValue} from '../utils.js';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {readNativeCandidateWatchInventory, readNativeWatch} from './watch_store.js';
-import {verifyNativeCycleBaseRequalification} from './cycle_git.js';
+import {verifyNativeCycleBaseRequalification, nativeCycleIsAncestor} from './cycle_git.js';
+import {
+  resolveNativeTaskBaseRef,
+  selectNativeTaskSameLabelIntegration,
+  isCurrentTaskTargetForRequalification,
+} from './task_action_helpers.js';
 import {verifyNativeCycleSnapshotEvidence, verifyNativeCycleUnreviewedRebase} from './cycle_recovery.js';
-import {resolveNativeTaskBaseRef} from './task_action_helpers.js';
 import {currentNativeTaskRef} from './task_action_helpers.js';
 import {decodeJournal} from './closeout_request_schema.js';
 import {readNativeCloseoutJournal} from './closeout_store.js';
@@ -381,6 +385,54 @@ const baseRequalificationRoute = (
     };
   });
 
+const sameLabelIntegrationRoute = (
+  config: RuntimeConfig,
+  stored: NonNullable<Effect.Success<ReturnType<typeof readNativeWorkflowState>>>,
+  checkout: string,
+  view: ReturnType<typeof projectNativeTaskView>,
+) =>
+  Effect.gen(function* () {
+    const phaseId = view.next.phaseId;
+    if (!phaseId || !stored.state.cycle || !isCurrentTaskTargetForRequalification(view, phaseId)) return undefined;
+    const selected = selectNativeTaskSameLabelIntegration(stored.state.cycle, phaseId);
+    if (!selected) return undefined;
+    const {phase, priorEntry, baseline} = selected;
+    const prior = priorEntry.snapshot;
+    const base = yield* resolveNativeTaskBaseRef(checkout, phase.baseBranch);
+    const head = yield* gitValue(['rev-parse', '--verify', '--end-of-options', 'HEAD^{commit}'], checkout);
+    const branch = yield* gitValue(['branch', '--show-current'], checkout);
+    if (
+      !base ||
+      !head ||
+      branch !== phase.branch ||
+      base.commit === prior.declaredBaseHead ||
+      !(yield* nativeCycleIsAncestor(checkout, prior.head, head)) ||
+      !(yield* nativeCycleIsAncestor(checkout, base.commit, head))
+    )
+      return undefined;
+    const latest = yield* readNativeWorkflowState(config, stored.state.runId);
+    if (!latest || latest.revision !== stored.revision) return undefined;
+    return {
+      action: 'integrate-same-label-base' as const,
+      phaseId,
+      baseBranch: phase.baseBranch,
+      predecessorRef: encodeNativeTaskActionRef({
+        version: 1,
+        kind: 'snapshot',
+        runId: stored.state.runId,
+        generationHash: sha256HexSync(stored.state.generation),
+        phaseId,
+        phaseHash: prior.phaseHash,
+        baselineHead: baseline.head,
+        baselineTree: baseline.tree,
+        baselineRef: baseline.pinnedRef,
+        snapshotId: prior.snapshotId,
+        sourceHead: prior.head,
+        sourceTree: prior.tree,
+      }),
+    };
+  });
+
 const invalidTailRequalificationRoute = (
   stored: NonNullable<Effect.Success<ReturnType<typeof readNativeWorkflowState>>>,
   checkout: string,
@@ -708,6 +760,7 @@ export const readNativeTaskView = (config: RuntimeConfig, input: unknown) =>
     const result = pageWatches.length > 0 ? {...selectedView, historicalWatches: pageWatches} : selectedView;
     const withBaseRequalification = (view: ReturnType<typeof projectNativeTaskView>) =>
       Effect.gen(function* () {
+        const sameLabel = yield* sameLabelIntegrationRoute(config, stored, checkout, view);
         const route = yield* baseRequalificationRoute(config, stored, checkout, view);
         const invalid = yield* invalidTailRequalificationRoute(stored, checkout, view);
         const runtime = stored.state.cycle;
@@ -728,6 +781,7 @@ export const readNativeTaskView = (config: RuntimeConfig, input: unknown) =>
             : undefined;
         return {
           ...view,
+          ...(sameLabel ? {sameLabelBaseIntegration: sameLabel} : {}),
           ...(route ? {baseRequalification: route} : {}),
           ...(invalid ? {invalidTailRequalification: invalid} : {}),
           ...(recovery?._tag === 'Success'

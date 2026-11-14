@@ -133,6 +133,7 @@
     "./effect/telemetry": "./src/effect/telemetry.ts",
     "./effect/workflow_cli": "./src/effect/workflow_cli.ts",
     "./effect/workset_cli": "./src/effect/workset_cli.ts",
+    "./evaluation/semantic-qualification-candidate": "./test/evaluation/semantic-qualification/candidate.ts",
     "./evaluation/code-graph": "./src/evaluation/code-graph.ts",
     "./evaluation/code-graph-workset": "./src/evaluation/code-graph-workset.ts",
     "./evaluation/code-memory-link-agent-ab": "./src/evaluation/code-memory-link-agent-ab.ts",
@@ -428,7 +429,8 @@
     "pxpipe-proxy": "0.15.1",
     "smol-toml": "1.9.1",
     "yaml": "^2.9.1",
-    "@threadnote/workflow-automations": "workspace:*"
+    "@threadnote/workflow-automations": "workspace:*",
+    "@threadnote/semantic": "workspace:*"
   },
   "devDependencies": {
     "@playwright/test": "1.64.1",
@@ -440,6 +442,9 @@
     "postgres": "3.4.9",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
-    "vitest": "5.0.5"
+    "vitest": "5.0.5",
+    "typescript-language-server": "6.0.2",
+    "typescript": "6.0.3",
+    "typescript-compiler": "npm:typescript@5.9.3"
   }
 }

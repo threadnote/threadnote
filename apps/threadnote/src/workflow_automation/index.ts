@@ -408,6 +408,7 @@ const recover = Effect.fn('workflowAutomation.recover')(function* (
   stored: Stored,
   memory: Memory,
   operationId: string,
+  admission: Effect.Success<ReturnType<typeof inspectWorkflowJournal>>,
 ) {
   if (stored.state.authoringSave && (yield* CurrentNativeAuthoringSave) !== stored.state.authoringSave.intentDigest)
     return yield* issue('pending-operation', 'Resume the original authoring save before recovering its child writes.');
@@ -425,7 +426,17 @@ const recover = Effect.fn('workflowAutomation.recover')(function* (
       'operation-not-found',
       'This native run has no such pending intent. No state was imported or reconstructed.',
     );
-  const artifact = yield* resumeWrite(memory, operation.intent);
+  // inspectNative already compared this held journal admission with every exact
+  // automation intent. An admitted parent may repair its existing transition
+  // without first invoking read-only inspection of the unfinished manifest.
+  // memory.recover still checks the original saved evidence before replay.
+  const replay =
+    admission.needsRecovery &&
+    (stored.state.authoringSave !== undefined || stored.state.closeoutSave !== undefined) &&
+    admission.state.operations[operationId] !== undefined
+      ? memory.recover(operation.intent.bindingId, operationId)
+      : resumeWrite(memory, operation.intent);
+  const artifact = yield* replay;
   if (operation.status !== 'verified')
     yield* writeNativeWorkflowState(
       config,
@@ -654,7 +665,7 @@ const runBound = Effect.fn('workflowAutomation.bound')(function* (
           status: 'ok' as const,
           artifact: yield* memory.read(binding.bindingId, request.uri, request.evidenceRefs),
         };
-      if (request.action === 'recover') return yield* recover(config, stored, memory, request.operationId);
+      if (request.action === 'recover') return yield* recover(config, stored, memory, request.operationId, admission);
       return yield* save(config, stored, memory, request);
     }),
   );

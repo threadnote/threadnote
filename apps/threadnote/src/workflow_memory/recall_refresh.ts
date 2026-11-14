@@ -5,6 +5,7 @@ import {
   type ResourceRecallInvalidationReceipt,
 } from '@threadnote/store/resource/recall-invalidation';
 import {refreshRecallDerivedIndexesAfterCanonicalMutation} from '@threadnote/recall/mcp/refresh';
+import {withRecallDatabaseSession} from '@threadnote/recall/index';
 
 type Config = Parameters<typeof refreshRecallDerivedIndexesAfterCanonicalMutation>[0];
 type Batch = {
@@ -94,6 +95,7 @@ export const makeWorkflowRecallRefresh = <R>(
             Effect.provideService(CurrentWorkflowRecallBatch, batch),
             Effect.provideService(CurrentResourceRecallInvalidationObserver, batch.observation.observer),
             Effect.tap(() => flush(batch, false)),
+            withRecallDatabaseSession,
           ),
         batch => flush(batch, true),
       ),

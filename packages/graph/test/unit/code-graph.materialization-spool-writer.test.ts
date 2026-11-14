@@ -1,3 +1,4 @@
+import {projectLexicalTermRelation, lexicalPhysicalSnapshotIdentity} from '@threadnote/graph/store/utilities';
 import {Array as EffectArray, Schema} from 'effect';
 import {Database} from 'bun:sqlite';
 import {expect, it} from '@effect/vitest';
@@ -104,6 +105,11 @@ it('appends every canonical fact surface under the exact durable batch receipt',
     expect(prepared.rowCount).toBe(9);
     expect(rawSurfaceCounts(database)).toEqual({
       edges: 1,
+      lexical_scopes: 0,
+      lexical_members: 0,
+      lexical_owners: 0,
+      lexical_shared: 0,
+      lexical_counts: 0,
       lookup: 2,
       monikers: 1,
       references: 1,
@@ -137,6 +143,11 @@ it('appends every canonical fact surface under the exact durable batch receipt',
       EffectRecord.fromEntries(EffectArray.map(readyPlan.surfaces, surface => [surface.name, surface.rowCount])),
     ).toEqual({
       edges: 1,
+      lexical_scopes: 0,
+      lexical_members: 0,
+      lexical_owners: 0,
+      lexical_shared: 0,
+      lexical_counts: 0,
       lookup: 2,
       monikers: 1,
       references: 1,
@@ -178,11 +189,130 @@ function edge(id: string, relation: CodeGraphEdge['relation']): CodeGraphEdge {
 
 function rawSurfaceCounts(database: Database): Readonly<Record<string, number>> {
   return EffectRecord.fromEntries(
-    EffectArray.map(['edges', 'lookup', 'monikers', 'references', 'reexports', 'symbol_terms', 'symbols'], surface => [
-      surface,
-      Schema.decodeUnknownSync(Schema.Struct({count: Schema.Finite}))(
-        database.prepare(`SELECT COUNT(*) AS count FROM materialization_raw_${surface}`).get(),
-      ).count,
-    ]),
+    EffectArray.map(
+      [
+        'edges',
+        'lookup',
+        'monikers',
+        'references',
+        'reexports',
+        'symbol_terms',
+        'symbols',
+        'lexical_scopes',
+        'lexical_members',
+        'lexical_owners',
+        'lexical_shared',
+        'lexical_counts',
+      ],
+      surface => [
+        surface,
+        Schema.decodeUnknownSync(Schema.Struct({count: Schema.Finite}))(
+          database.prepare(`SELECT COUNT(*) AS count FROM materialization_raw_${surface}`).get(),
+        ).count,
+      ],
+    ),
   );
 }
+
+it('appends every actual V2 role and logical counter without legacy posting copies', () => {
+  const database = new Database(':memory:');
+  const symbols: CodeGraphSymbol[] = EffectArray.map(['alpha', 'beta'], (name, index) => ({
+    id: 'cgs_' + EffectString.padStart(32, '0')(String(index)),
+    name,
+    qualifiedName: name,
+    path: 'src/shared.ts',
+    contentHash: EffectString.repeat(64)('a'),
+    kind: 'function',
+    language: 'typescript',
+    exported: true,
+    span: {line: index + 1, column: 1, endLine: index + 1, endColumn: 2},
+  }));
+  const logical = new Map(
+    EffectArray.map(symbols, (symbol, index) => [
+      symbol,
+      [
+        [symbol.name, 5],
+        ['src', 3],
+        ['shared.ts', 3],
+        ...(index === 0 ? [['~body:v1:novel', 1] as const] : []),
+      ] as readonly (readonly [string, number])[],
+    ]),
+  );
+  const projection = projectLexicalTermRelation(symbols, logical);
+  const prepared = prepareCodeGraphMaterializationSpoolFactBatch({
+    symbols,
+    termsBySymbol: logical,
+    lexicalProjection: projection,
+    directEdges: [],
+    monikers: [],
+    references: [],
+    referenceEdges: new Map(),
+  });
+  try {
+    initializeCodeGraphMaterializationSpoolDatabase(database, {
+      checkoutId: EffectString.repeat(64)('a'),
+      repositoryId: EffectString.repeat(64)('b'),
+      extractorSet: 'fixture',
+      graphContentId: 'cgc_' + EffectString.repeat(40)('c'),
+      snapshotId: lexicalPhysicalSnapshotIdentity('cgsn_' + EffectString.repeat(40)('d'), 'full'),
+    });
+    expect(prepared.rowCount).toBe(11);
+    commitCodeGraphMaterializationSpoolBatch(
+      database,
+      {
+        batchId: EffectString.repeat(64)('e'),
+        batchIndex: 0,
+        candidateCount: 0,
+        edgeCount: 0,
+        factBytes: 100,
+        lookupCount: 0,
+        referenceCount: 0,
+        reexportCount: 0,
+        rowCount: 11,
+        sourceBytes: 100,
+        symbolCount: 2,
+        termCount: 8,
+      },
+      () => appendCodeGraphMaterializationSpoolFactBatch(database, prepared),
+    );
+    expect(rawSurfaceCounts(database)).toEqual({
+      symbols: 2,
+      lookup: 0,
+      edges: 0,
+      monikers: 0,
+      references: 0,
+      reexports: 0,
+      symbol_terms: 0,
+      lexical_scopes: 1,
+      lexical_members: 2,
+      lexical_owners: 3,
+      lexical_shared: 2,
+      lexical_counts: 1,
+    });
+    sealCodeGraphMaterializationSpool(database, 1);
+    sortCodeGraphMaterializationSpoolSurfaces(database);
+    const ready = readCodeGraphMaterializationSpoolReadyPlan(database);
+    expect(ready.lexicalV2).toBe(true);
+    expect(ready.lexicalTermCount).toBe(5);
+    expect(ready.batches[0]).toMatchObject({rowCount: 11, termCount: 8, symbolCount: 2});
+    expect(database.query('SELECT * FROM materialization_ordered_lexical_counts').all()).toEqual([
+      {batch_index: 0, logical_posting_count: 7},
+    ]);
+    expect(
+      database
+        .query(
+          'SELECT term,origin_mask,scope_ordinal,member_ordinal,metadata_weight FROM materialization_ordered_lexical_owners',
+        )
+        .all(),
+    ).toEqual([
+      {term: 'alpha', origin_mask: 1, scope_ordinal: 0, member_ordinal: 0, metadata_weight: 5},
+      {term: 'beta', origin_mask: 1, scope_ordinal: 0, member_ordinal: 1, metadata_weight: 5},
+      {term: 'novel', origin_mask: 2, scope_ordinal: 0, member_ordinal: 0, metadata_weight: 0},
+    ]);
+    expect(database.query('SELECT term FROM materialization_ordered_terms ORDER BY term').all()).toEqual(
+      EffectArray.map(['alpha', 'beta', 'novel', 'shared.ts', 'src'], term => ({term})),
+    );
+  } finally {
+    database.close();
+  }
+});

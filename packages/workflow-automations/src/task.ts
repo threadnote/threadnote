@@ -3,7 +3,7 @@ import {nativeCycleParentsReady, nextNativeCycle as cycleNext} from './cycle.js'
 import {NativeCycleDeliverySchema} from './cycle.js';
 import {
   nativeCyclePhaseReviewUsage,
-  nativeCycleReviewBasis,
+  nativeCycleReviewContext,
   nativeCycleSnapshotIsCurrentIteration,
   nativeCycleSupplementalRef,
   nativeCycleSupplementalRevision,
@@ -92,6 +92,7 @@ export interface NativeTaskView {
       readonly requiredReviewLanes: readonly string[];
       readonly recordingMode: 'full' | 'incremental';
       readonly snapshotRef: string;
+      readonly reviewMode: 'full' | 'incremental';
       readonly previousAttempt?: {readonly status: 'invalid'; readonly message: string};
     };
   };
@@ -133,6 +134,12 @@ export interface NativeTaskView {
     readonly title: string;
     readonly prUrl: string;
   }[];
+  readonly sameLabelBaseIntegration?: {
+    readonly action: 'integrate-same-label-base';
+    readonly phaseId: string;
+    readonly predecessorRef: string;
+    readonly baseBranch: string;
+  };
   readonly prWatchPrerequisites?: {
     readonly required: readonly string[];
     readonly missing: readonly string[];
@@ -605,11 +612,17 @@ function projectNativeTaskCoreView(
       : undefined;
   const pendingSnapshot = EffectOption.getOrUndefined(
     EffectArray.findFirst(cycle.plan.phases, candidate => {
-      if (localDelivery || canonicalNext.action !== 'implement' || canonicalNext.phaseId !== candidate.id) return false;
+      if (localDelivery || canonicalNext.phaseId !== candidate.id) return false;
       const phaseSnapshots = EffectArray.filter(runtime.snapshots, entry => entry.snapshot.phaseId === candidate.id);
       const latest = phaseSnapshots.at(-1)?.snapshot;
       return Boolean(
         latest &&
+        (canonicalNext.action === 'implement' ||
+          (canonicalNext.action === 'blocked' &&
+            cycle.phases[candidate.id].status === 'stale' &&
+            latest.version === 3 &&
+            latest.sameLabelRebasedBaseIntegrationV1 &&
+            nativeCycleParentsReady(cycle, candidate.id))) &&
         latest.phaseHash === cycle.phases[candidate.id].phaseHash &&
         nativeCycleSnapshotIsCurrentIteration(runtime, candidate.id, latest.snapshotId),
       );
@@ -623,12 +636,17 @@ function projectNativeTaskCoreView(
         EffectArray.findFirst(runtime.reviews, item => item.snapshotId === latestSnapshot.snapshot.snapshotId),
       )
     : undefined;
-  const reviewBasis = latestSnapshot ? nativeCycleReviewBasis(runtime, latestSnapshot.snapshot) : undefined;
+  const reviewBasis =
+    latestSnapshot && acceptedReview ? nativeCycleReviewContext(runtime, latestSnapshot.snapshot) : undefined;
   const blockingReview = Boolean(
     latestSnapshot &&
     acceptedReview &&
-    validateNativeCycleReviewHistory(latestSnapshot.snapshot, acceptedReview.report, reviewBasis).summary
-      .blockingIssueCount,
+    validateNativeCycleReviewHistory(
+      latestSnapshot.snapshot,
+      acceptedReview.report,
+      reviewBasis?.previous,
+      reviewBasis?.findingBasis,
+    ).summary.blockingIssueCount,
   );
   const reviewWork =
     pendingSnapshot && latestSnapshot && !acceptedReview
@@ -805,6 +823,7 @@ function projectNativeTaskCoreView(
                         sourceTree: snapshot.tree,
                       });
                     })(),
+                    reviewMode: nativeCycleReviewRecordingMode(snapshot),
                     ...(latestInvalidAttempt
                       ? {previousAttempt: {status: 'invalid' as const, message: latestInvalidAttempt.message}}
                       : {}),
