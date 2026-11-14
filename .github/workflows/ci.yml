@@ -66,7 +66,8 @@ jobs:
       - id: selection
         name: Select affected Bazel targets
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          # Manual runs have no baseline; the null Git object selects the complete valid-head fallback.
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || '0000000000000000000000000000000000000000' }}
         run: bun tools/ci/bazel-select.mjs --base "$BASE_SHA"
 
       - id: shards
