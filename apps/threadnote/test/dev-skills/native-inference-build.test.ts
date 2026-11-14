@@ -18,6 +18,8 @@ import {
   probeMuslArmVariants,
   muslArmVariantSource,
   MUSL_ARM_BASE_VARIANTS,
+  captureWindowsCMakeCompilerVersions,
+  windowsCMakeCompilerPaths,
 } from '../../../../scripts/assemble-native-inference.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {describe, expect, it} from 'vitest';
@@ -91,6 +93,77 @@ describe('native inference overlay filesystem boundary', () => {
     expect(environment.CXX).toBe('/original/g++');
     expect(nativeInferenceBuildEnvironment({CC: '/native/cc'})).toEqual({CC: '/native/cc'});
   });
+
+  it('reads exactly one absolute Windows CMake compiler path without splitting drive colons or spaces', () => {
+    const cache = EffectArray.join(
+      [
+        '# CMake compiler selections',
+        'CMAKE_C_COMPILER:FILEPATH=C:/Program Files/Microsoft Visual Studio/VC/Tools/Llvm/ARM64/bin/clang.exe',
+        'CMAKE_CXX_COMPILER:FILEPATH=C:/Program Files/Microsoft Visual Studio/VC/Tools/Llvm/ARM64/bin/clang++.exe',
+      ],
+      '\n',
+    );
+    expect(windowsCMakeCompilerPaths(cache)).toEqual({
+      cCompiler: 'C:/Program Files/Microsoft Visual Studio/VC/Tools/Llvm/ARM64/bin/clang.exe',
+      cxxCompiler: 'C:/Program Files/Microsoft Visual Studio/VC/Tools/Llvm/ARM64/bin/clang++.exe',
+    });
+    expect(() =>
+      windowsCMakeCompilerPaths('CMAKE_C_COMPILER:FILEPATH=clang.exe\nCMAKE_CXX_COMPILER:FILEPATH=clang++.exe'),
+    ).toThrow('not absolute');
+    expect(() => windowsCMakeCompilerPaths('CMAKE_CXX_COMPILER:FILEPATH=C:/LLVM/clang++.exe')).toThrow(
+      'exactly one CMAKE_C_COMPILER',
+    );
+    expect(() =>
+      windowsCMakeCompilerPaths(
+        'CMAKE_C_COMPILER:FILEPATH=C:/LLVM/clang.exe\nCMAKE_C_COMPILER:FILEPATH=D:/LLVM/clang.exe\nCMAKE_CXX_COMPILER:FILEPATH=C:/LLVM/clang++.exe',
+      ),
+    ).toThrow('exactly one CMAKE_C_COMPILER');
+  });
+
+  effectIt.effect('queries only the selected Windows CMake compiler paths with the existing bounds', () =>
+    Effect.gen(function* () {
+      const cache = EffectArray.join(
+        [
+          'CMAKE_C_COMPILER:FILEPATH=C:/Program Files/VS/LLVM/ARM64/bin/clang.exe',
+          'CMAKE_CXX_COMPILER:FILEPATH=C:/Program Files/VS/LLVM/ARM64/bin/clang++.exe',
+        ],
+        '\n',
+      );
+      const calls: Array<{executable: string; args: readonly string[]; options?: CommandOptions}> = [];
+      const command = CommandExecutor.of({
+        execute: (executable, args, options) => {
+          calls.push({executable, args, options});
+          return Effect.succeed({
+            exitCode: 0,
+            stdout: EffectString.endsWith('clang.exe')(executable) ? 'clang 22' : 'clang++ 22',
+            stderr: '',
+          });
+        },
+        executeStreaming: () => Effect.die('Unexpected streaming compiler version query'),
+      });
+      const result = yield* captureWindowsCMakeCompilerVersions(cache).pipe(
+        Effect.provideService(CommandExecutor, command),
+      );
+      expect(result).toEqual({
+        cCompiler: 'C:/Program Files/VS/LLVM/ARM64/bin/clang.exe',
+        cxxCompiler: 'C:/Program Files/VS/LLVM/ARM64/bin/clang++.exe',
+        cVersion: 'clang 22',
+        cxxVersion: 'clang++ 22',
+      });
+      expect(calls).toEqual([
+        {
+          executable: 'C:/Program Files/VS/LLVM/ARM64/bin/clang.exe',
+          args: ['--version'],
+          options: {timeoutMs: 10_000, maxOutputBytes: 16_384},
+        },
+        {
+          executable: 'C:/Program Files/VS/LLVM/ARM64/bin/clang++.exe',
+          args: ['--version'],
+          options: {timeoutMs: 10_000, maxOutputBytes: 16_384},
+        },
+      ]);
+    }),
+  );
 
   it('retains build stdout even when Docker pull diagnostics occupy stderr', () => {
     const error = CommandFailed.make({

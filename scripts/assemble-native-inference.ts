@@ -1,5 +1,5 @@
 import {FileSystem} from 'effect';
-import {Console, Effect, Layer, Schema, String as EffectString, Array as EffectArray} from 'effect';
+import {Console, Effect, Layer, Option, Schema, String as EffectString, Array as EffectArray} from 'effect';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {CommandFailed, runCommandEffect, type CommandExecutionError} from '@threadnote/platform/command';
@@ -164,6 +164,39 @@ export function nativeInferenceBuildEnvironment(environment: Readonly<NodeJS.Pro
     ...(environment.THREADNOTE_NATIVE_INFERENCE_CXX ? {CXX: environment.THREADNOTE_NATIVE_INFERENCE_CXX} : {}),
   };
 }
+
+/** Read the compiler executables selected by a completed Windows CMake configure, never PATH aliases. */
+export function windowsCMakeCompilerPaths(cmakeCache: string): {
+  readonly cCompiler: string;
+  readonly cxxCompiler: string;
+} {
+  const winPath = platformPathFor('win32');
+  const extract = (name: 'CMAKE_C_COMPILER' | 'CMAKE_CXX_COMPILER') => {
+    const entries = EffectArray.filter(EffectString.split(cmakeCache, '\n'), line =>
+      EffectString.startsWith(`${name}:`)(line),
+    );
+    if (entries.length !== 1) throw new Error(`CMake cache must contain exactly one ${name} entry.`);
+    const entry = entries[0];
+    if (entry === undefined) throw new Error(`CMake cache must contain exactly one ${name} entry.`);
+    const separator = Option.getOrUndefined(EffectString.indexOf('=')(entry));
+    if (separator === undefined) throw new Error(`CMake cache ${name} entry is malformed.`);
+    const executable = EffectString.trim(EffectString.slice(separator + 1)(entry));
+    if (!executable || !winPath.isAbsolute(executable))
+      throw new Error(`CMake cache ${name} path is missing or not absolute.`);
+    return executable;
+  };
+  return {cCompiler: extract('CMAKE_C_COMPILER'), cxxCompiler: extract('CMAKE_CXX_COMPILER')};
+}
+
+/** Preserve compiler version provenance from the executables selected by CMake. */
+export const captureWindowsCMakeCompilerVersions = Effect.fn('nativeInference.captureWindowsCMakeCompilerVersions')(
+  function* (cmakeCache: string) {
+    const {cCompiler, cxxCompiler} = windowsCMakeCompilerPaths(cmakeCache);
+    const c = yield* runCommandEffect(cCompiler, ['--version'], {timeoutMs: 10_000, maxOutputBytes: 16_384});
+    const cxx = yield* runCommandEffect(cxxCompiler, ['--version'], {timeoutMs: 10_000, maxOutputBytes: 16_384});
+    return {cCompiler, cxxCompiler, cVersion: c.stdout, cxxVersion: cxx.stdout};
+  },
+);
 
 // This exact helper and version table are supplied by the digest-pinned manylinux2014 images.
 export const GNU_INFERENCE_COMPILER_BOOTSTRAP = `manylinux-install-clang -v v20.1.8.0 -c a0e42b3a3b8c752e1382d697b98d00bff256a99dc04146de2eb2fb1c0bd908be
@@ -409,8 +442,6 @@ export const assembleNativeInference = Effect.fn('assembleNativeInference')(func
     const compilerCommands =
       process.platform === 'win32'
         ? ([
-            ['clang', ['--version']],
-            ['clang++', ['--version']],
             ['node', ['--version']],
             ['npm', ['--version']],
           ] as const)
@@ -562,10 +593,23 @@ export const assembleNativeInference = Effect.fn('assembleNativeInference')(func
     const localBuilds = path.join(options.distributionRoot, 'llama', 'localBuilds');
     yield* filesystem.remove(localBuilds, {recursive: true, force: true});
     const builtRoot = path.join(isolatedPackage, 'llama', 'localBuilds');
+    const windowsCompilerVersions: {
+      clang: Array<{readonly folder: string; readonly path: string; readonly version: string}>;
+      clangxx: Array<{readonly folder: string; readonly path: string; readonly version: string}>;
+    } = {clang: [], clangxx: []};
     for (const folder of yield* filesystem.readDirectory(builtRoot)) {
       const cmakeCache = yield* filesystem.readFileString(path.join(builtRoot, folder, 'CMakeCache.txt'));
       const compileCommands = yield* filesystem.readFileString(path.join(builtRoot, folder, 'compile_commands.json'));
       toolchain[`compileCommandsSha256:${folder}`] = sha256HexSync(compileCommands);
+      if (process.platform === 'win32') {
+        const compilers = yield* captureWindowsCMakeCompilerVersions(cmakeCache);
+        windowsCompilerVersions.clang.push({folder, path: compilers.cCompiler, version: compilers.cVersion});
+        windowsCompilerVersions.clangxx.push({folder, path: compilers.cxxCompiler, version: compilers.cxxVersion});
+        toolchain[`clangCompilerPath:${folder}`] = compilers.cCompiler;
+        toolchain[`clangCompilerVersion:${folder}`] = compilers.cVersion;
+        toolchain[`clangxxCompilerPath:${folder}`] = compilers.cxxCompiler;
+        toolchain[`clangxxCompilerVersion:${folder}`] = compilers.cxxVersion;
+      }
       if (includedMuslArmVariants) {
         for (const variant of [
           ...MUSL_ARM_BASE_VARIANTS,
@@ -627,6 +671,23 @@ export const assembleNativeInference = Effect.fn('assembleNativeInference')(func
             auditRole: copy.compilerLibgccProvider ? 'compiler-libgcc' : 'inference',
           });
         }
+      }
+    }
+    if (process.platform === 'win32') {
+      for (const [name, observations] of [
+        ['clang', windowsCompilerVersions.clang],
+        ['clang++', windowsCompilerVersions.clangxx],
+      ] as const) {
+        const first = observations[0];
+        if (!first) throw new Error(`Windows ${name} CMake compiler provenance is missing.`);
+        if (
+          EffectArray.every(
+            observations,
+            observation => observation.path === first.path && observation.version === first.version,
+          )
+        )
+          toolchain[name] = first.version;
+        else toolchain[`${name}ByFolder`] = JSON.stringify(observations);
       }
     }
     yield* filesystem.copyFile(
