@@ -1119,6 +1119,12 @@ export const makeJavaRuntime = Effect.fn('semantic.makeJavaRuntime')(
                 '-Dthreadnote.java.preparedMavenCacheUri=' + (yield* path.toFileUrl(path.join(root, 'm2'))).href,
                 '-Dthreadnote.java.preparedGradleCacheUri=' + (yield* path.toFileUrl(drainContext.gradleUserHome)).href,
                 '-Dthreadnote.java.preparedBuild=' + build,
+                ...(gradleOwner
+                  ? [
+                      '-Dthreadnote.java.preparedGradleHomeUri=' +
+                        (yield* path.toFileUrl(preparation!.gradle!.sdkDirectory)).href,
+                    ]
+                  : []),
               ]
             : [];
         const configuration = yield* materializeJavaRuntimeConfiguration(

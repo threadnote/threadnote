@@ -81,6 +81,41 @@ describe('Java prepared refusal wire contract', () => {
       readJavaPreparedObservation({...reply, evidence: {}}, {requestToken: 'request', build: 'gradle'}),
     ).not.toThrow(JavaPreparedImportRefusal);
   });
+  it('conserves finite synchronization status digests without accepting raw or uncorrelated cause data', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom('gradle-synchronization-failed', 'gradle-linkage-failed', 'gradle-control-refused'),
+        fc.uint8Array({minLength: 0, maxLength: 256}),
+        (reason, bytes) => {
+          const reply = {
+            protocolVersion: 1,
+            requestToken: 'sync-request',
+            status: 'unsupported',
+            reason,
+            evidence: {statusSha256: sha256HexSync(bytes)},
+          };
+          const before = structuredClone(reply);
+          expect(() => readJavaPreparedObservation(reply, {requestToken: 'sync-request', build: 'gradle'})).toThrow(
+            JavaPreparedImportRefusal,
+          );
+          for (const changed of [
+            {...reply, requestToken: 'foreign'},
+            {...reply, evidence: {...reply.evidence, message: '/untrusted/import/path'}},
+            {...reply, evidence: {statusSha256: 'invalid'}},
+          ]) {
+            expect(() =>
+              readJavaPreparedObservation(changed, {requestToken: 'sync-request', build: 'gradle'}),
+            ).toThrow();
+            expect(() =>
+              readJavaPreparedObservation(changed, {requestToken: 'sync-request', build: 'gradle'}),
+            ).not.toThrow(JavaPreparedImportRefusal);
+          }
+          expect(reply).toEqual(before);
+        },
+      ),
+      {numRuns: 32},
+    );
+  });
   it('preserves digest-only refusals and rejects uncorrelated, malformed or extra proof fields without mutation', () => {
     fc.assert(
       fc.property(
@@ -316,6 +351,9 @@ describe('Java preparation original-owner collection', () => {
 const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
   control: {
     readonly deferImport?: boolean;
+    readonly gradleSetup?: boolean;
+    readonly firstModelMutation?: 'metadata' | 'source' | 'unexpected';
+    readonly secondModelMutation?: 'metadata' | 'source';
     readonly refuseModel?: boolean;
     readonly failure?: 'initialize' | 'status' | 'token' | 'missing-ready' | 'late-status';
     readonly changeSecondModel?: boolean;
@@ -334,6 +372,7 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
     readonly observerGate?: {readonly entered: Deferred.Deferred<void>; readonly release: Deferred.Deferred<void>};
   } = {},
 ) {
+  const build = control.gradleSetup ? ('gradle' as const) : ('maven' as const);
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const parent = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn-java-seal-'}));
@@ -368,7 +407,7 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
   const workspace = yield* makeJavaWorkspace(workspaceParent).pipe(
     Effect.provideService(Scope.Scope, control.workspaceScope ?? (yield* Effect.scope)),
   );
-  const inputs = yield* copyJavaPreparationInputs({project, worktree: project, workspace, build: 'maven'});
+  const inputs = yield* copyJavaPreparationInputs({project, worktree: project, workspace, build});
   const copiedProject = inputs.copiedProject;
   const runtimeDirectory = path.join(workspace.directory, 'jdt-fixture');
   yield* fs.makeDirectory(runtimeDirectory, {mode: 0o700});
@@ -428,7 +467,7 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
     ],
     model: {
       projectUri: yield* uri(copiedProject),
-      build: 'maven',
+      build,
       projectCharset: 'UTF-8',
       sourceEncoding: {
         policy: 'utf8-no-bom-v1',
@@ -501,6 +540,7 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
   const methods: string[] = [];
   let stopped = false;
   let observations = 0;
+  let initialization: unknown;
   const wire: LspWire = {
     pid: 4242,
     messages: Stream.fromQueue(messages),
@@ -516,6 +556,7 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
       Effect.gen(function* () {
         if (typeof message.method === 'string') methods.push(message.method);
         if (message.method === 'initialize') {
+          initialization = structuredClone(message.params);
           if (control.failure === 'initialize') {
             yield* Queue.offer(messages, {
               jsonrpc: '2.0',
@@ -550,6 +591,28 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
           if (control.observerGate) {
             yield* Deferred.succeed(control.observerGate.entered, undefined);
             yield* Deferred.await(control.observerGate.release);
+          }
+          if (observations === 1 && control.firstModelMutation) {
+            if (control.firstModelMutation === 'metadata') {
+              yield* fs.makeDirectory(path.join(copiedProject, '.gradle'), {mode: 0o700});
+              yield* fs.writeFileString(
+                path.join(copiedProject, '.gradle/imported-model'),
+                'real allowed output boundary',
+              );
+            } else
+              yield* fs.writeFileString(
+                path.join(
+                  copiedProject,
+                  control.firstModelMutation === 'source' ? 'src/main/java/Main.java' : 'unexpected-imported-input',
+                ),
+                'changed while importing',
+              );
+          }
+          if (observations === 2 && control.secondModelMutation) {
+            const file = control.secondModelMutation === 'source' ? 'src/main/java/Main.java' : '.gradle/late-output';
+            if (control.secondModelMutation === 'metadata')
+              yield* fs.makeDirectory(path.join(copiedProject, '.gradle'), {mode: 0o700});
+            yield* fs.writeFileString(path.join(copiedProject, file), 'late mutation');
           }
           if (control.failure === 'late-status')
             yield* Queue.offer(messages, {jsonrpc: '2.0', method: 'language/status', params: {type: 'Error'}});
@@ -605,9 +668,29 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
           Effect.andThen(makeLspClient(wire, onNotification, settings)),
         ),
       );
-    return observeJavaPreparedImport({runtime}).pipe(
+    const originalSdkDigest = fingerprints.semanticSdkDigest;
+    const selectedGradleSdk = path.join(parent, 'gradle-sdk');
+    const sdkGuard = control.gradleSetup
+      ? vi
+          .spyOn(fingerprints, 'semanticSdkDigest')
+          .mockImplementation(directory =>
+            directory === selectedGradleSdk
+              ? Effect.succeed(javaPreparation.javaGradleOwnedImport.sdkDigest)
+              : originalSdkDigest(directory),
+          )
+      : undefined;
+    return (control.gradleSetup ? fs.makeDirectory(selectedGradleSdk, {mode: 0o700}) : Effect.void).pipe(
+      Effect.andThen(
+        observeJavaPreparedImport({
+          runtime,
+          ...(control.gradleSetup
+            ? {gradle: {sdkDirectory: selectedGradleSdk, sdkDigest: javaPreparation.javaGradleOwnedImport.sdkDigest}}
+            : {}),
+        }),
+      ),
       Effect.ensuring(
         Effect.sync(() => {
+          sdkGuard?.mockRestore();
           runtimeGuard.mockRestore();
           connect.mockRestore();
         }),
@@ -617,7 +700,7 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
   const imported = control.deferImport ? observation : yield* observe;
   const options = {
     requestToken: imported.requestToken,
-    build: 'maven' as const,
+    build,
     inputs,
     runtimeDirectory,
     artifactDirectory,
@@ -626,6 +709,7 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
     verify: Effect.void,
   };
   return {
+    initialization: () => initialization,
     fs,
     path,
     project,
@@ -2048,6 +2132,66 @@ describe('Java prepared model sealing', () => {
       expect(EffectArray.filter(f.methods, method => method === 'workspace/executeCommand')).toHaveLength(1);
       expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
       expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
+  );
+  effectIt.effect('admits finite first Gradle import outputs only before the full passive output baseline', () =>
+    Effect.gen(function* () {
+      const f = yield* modelFixture({
+        deferImport: true,
+        minimalBuildInputs: true,
+        gradleSetup: true,
+        firstModelMutation: 'metadata',
+      });
+      const observed = yield* f.observe;
+      expect(observed.model.build).toBe('gradle');
+      expect(f.initialization()).toMatchObject({
+        initializationOptions: {
+          settings: {
+            java: {
+              import: {gradle: {enabled: false, offline: {enabled: true}, arguments: [], jvm: {arguments: []}}},
+              configuration: {updateBuildConfiguration: 'disabled'},
+            },
+          },
+        },
+      });
+      expect(EffectArray.filter(f.methods, method => method === 'workspace/executeCommand')).toHaveLength(2);
+      expect(yield* f.fs.readFileString(f.path.join(f.copiedProject, '.gradle/imported-model'))).toBe(
+        'real allowed output boundary',
+      );
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
+  );
+  for (const mutation of ['source', 'unexpected'] as const)
+    effectIt.effect('refuses first-sync ' + mutation + ' mutations before capturing an output baseline', () =>
+      Effect.gen(function* () {
+        const f = yield* modelFixture({
+          deferImport: true,
+          minimalBuildInputs: true,
+          gradleSetup: true,
+          firstModelMutation: mutation,
+        });
+        expect((yield* Effect.exit(f.observe))._tag).toBe('Failure');
+        expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
+    );
+  for (const mutation of ['source', 'metadata'] as const)
+    effectIt.effect(
+      'refuses passive second-observation ' + mutation + ' drift against the full first-import baseline',
+      () =>
+        Effect.gen(function* () {
+          const f = yield* modelFixture({
+            deferImport: true,
+            minimalBuildInputs: true,
+            gradleSetup: true,
+            secondModelMutation: mutation,
+          });
+          expect((yield* Effect.exit(f.observe))._tag).toBe('Failure');
+          expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
+        }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
+    );
+  effectIt.effect('keeps Maven model commands passive under their original full output baseline', () =>
+    Effect.gen(function* () {
+      const f = yield* modelFixture({deferImport: true, minimalBuildInputs: true, firstModelMutation: 'metadata'});
+      expect((yield* Effect.exit(f.observe))._tag).toBe('Failure');
     }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect('does not mix completed reports from two independent input proofs', () =>

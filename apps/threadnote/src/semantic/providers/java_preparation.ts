@@ -225,10 +225,22 @@ const preparationEmptyRefusalReason = Schema.Literals([
   'unsupported-source-bom',
   'unsupported-source-charset',
   'wrong-importer',
+  'gradle-binding-changed',
+  'gradle-in-flight',
+  'gradle-canceled',
+  'gradle-configuration-refused',
+  'gradle-status-unknown',
 ]);
 const preparationRefusalReason = Schema.Union([
   preparationEmptyRefusalReason,
-  Schema.Literals(['unsupported-container', 'unsupported-attribute', 'observation-failed']),
+  Schema.Literals([
+    'unsupported-container',
+    'unsupported-attribute',
+    'observation-failed',
+    'gradle-synchronization-failed',
+    'gradle-linkage-failed',
+    'gradle-control-refused',
+  ]),
 ]);
 const refusalFields = {
   protocolVersion: Schema.Literal(1),
@@ -237,6 +249,11 @@ const refusalFields = {
 };
 // These are the producer's closed refusal arms. Arbitrary imported text, paths and unknown evidence never escape.
 const JavaPreparedRefusal = Schema.Union([
+  Schema.Struct({
+    ...refusalFields,
+    reason: Schema.Literals(['gradle-synchronization-failed', 'gradle-linkage-failed', 'gradle-control-refused']),
+    evidence: Schema.Struct({statusSha256: Digest}),
+  }),
   Schema.Struct({
     ...refusalFields,
     reason: Schema.Literal('unsupported-container'),
@@ -259,7 +276,13 @@ export class JavaPreparedImportRefusal extends Schema.TaggedError<
   {readonly brand: unique symbol}
 >()('JavaPreparedImportRefusal', {
   reason: preparationRefusalReason,
-  evidence: Schema.optional(Schema.Struct({idSha256: Schema.optional(Digest), nameSha256: Schema.optional(Digest)})),
+  evidence: Schema.optional(
+    Schema.Struct({
+      idSha256: Schema.optional(Digest),
+      nameSha256: Schema.optional(Digest),
+      statusSha256: Schema.optional(Digest),
+    }),
+  ),
 }) {
   override get message() {
     return (
@@ -1053,9 +1076,11 @@ export const observeJavaPreparedImport = Effect.fn('semantic.observeJavaPrepared
                 import: {
                   maven: {enabled: false, offline: {enabled: true}},
                   gradle: {
-                    enabled: true,
+                    enabled: false,
                     offline: {enabled: true},
                     wrapper: {enabled: false},
+                    arguments: [],
+                    jvm: {arguments: []},
                     ...(gradle
                       ? {home: gradle.sdkDirectory, user: {home: gradleHome}, java: {home: runtime.projectJavaHome}}
                       : {}),
@@ -1063,7 +1088,7 @@ export const observeJavaPreparedImport = Effect.fn('semantic.observeJavaPrepared
                   },
                 },
                 configuration: {
-                  updateBuildConfiguration: 'automatic',
+                  updateBuildConfiguration: 'disabled',
                   runtimes: [{name: 'JavaSE-21', path: runtime.projectJavaHome, default: true}],
                   annotationProcessing: {enabled: false},
                 },
@@ -1141,15 +1166,17 @@ export const observeJavaPreparedImport = Effect.fn('semantic.observeJavaPrepared
       yield* healthy;
       yield* verifyHost;
       yield* proof.verifyPreparedOutputs;
-      const outputDigest = yield* semanticTreeDigest(inputs.copiedWorktree);
+      const passiveBaseline = inputs.build === 'maven' ? yield* semanticTreeDigest(inputs.copiedWorktree) : undefined;
       const observe = Effect.gen(function* () {
         yield* healthy;
         const requestToken = 'java-prepare-' + (yield* random.uuidV4());
+        yield* proof.verifyPreparedOutputs;
         const raw = yield* client.request(
           'workspace/executeCommand',
           {command: javaPreparedModelCommand, arguments: [{protocolVersion: 1, requestToken}]},
           15000,
         );
+        yield* proof.verifyPreparedOutputs;
         yield* healthy;
         if (new TextEncoder().encode(JSON.stringify(raw)).length > 256 * 1024)
           return yield* LspFault.make({code: 'capacity'});
@@ -1165,6 +1192,9 @@ export const observeJavaPreparedImport = Effect.fn('semantic.observeJavaPrepared
       const observed = yield* observe;
       yield* verifyHost;
       yield* proof.verifyPreparedOutputs;
+      // Importer outputs become stable only after the joined first import/model and immutable input proof.
+      const outputDigest = yield* semanticTreeDigest(inputs.copiedWorktree);
+      if (passiveBaseline !== undefined && passiveBaseline !== outputDigest) return yield* fail();
       // Re-observe cached facts after slow host guards; copied bytes alone cannot attest workspace-cache stability.
       const confirmed = yield* observe;
       if (canonicalJson({...confirmed, requestToken: observed.requestToken}) !== canonicalJson(observed))

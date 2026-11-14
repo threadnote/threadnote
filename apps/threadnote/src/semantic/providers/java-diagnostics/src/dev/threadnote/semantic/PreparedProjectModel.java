@@ -1,6 +1,17 @@
 package dev.threadnote.semantic;
 
 import java.net.URI;
+import java.io.InputStream;
+import java.util.IdentityHashMap;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.Callable;
+import org.eclipse.core.runtime.IStatus;
+import org.eclipse.buildship.core.BuildConfiguration;
+import org.eclipse.buildship.core.GradleCore;
+import org.eclipse.buildship.core.LocalGradleDistribution;
+import org.eclipse.jdt.ls.core.internal.managers.GradleProjectImporter;
+import org.eclipse.jdt.ls.core.internal.JavaLanguageServerPlugin;
+import org.eclipse.jdt.ls.core.internal.preferences.Preferences;
 import java.nio.ByteBuffer;
 import java.nio.channels.SeekableByteChannel;
 import java.nio.charset.CodingErrorAction;
@@ -51,12 +62,12 @@ public final class PreparedProjectModel implements IDelegateCommandHandler {
       "ignore_optional_problems", "m2e-apt", "gradle_scope", "gradle_used_by_scope", "module",
       "without_test_code", "limit-modules", "add-exports", "add-reads", "patch-module");
 
-  private static final class Unsupported extends Exception {
+  static final class Unsupported extends Exception {
     final Map<String, String> evidence;
     Unsupported(String reason) { this(reason, Map.of()); }
     Unsupported(String reason, Map<String, String> evidence) { super(reason); this.evidence = evidence; }
   }
-  private static final class Budget {
+  static final class Budget {
     int characters;
     long libraryBytes;
     final IProgressMonitor monitor;
@@ -79,6 +90,267 @@ public final class PreparedProjectModel implements IDelegateCommandHandler {
   }
   record Host(Path project, Path javaHome, List<Path> caches, String build) {}
 
+  private static String frame(List<String> values) {
+    StringBuilder image = new StringBuilder();
+    image.append(values.size()).append(';');
+    for (String value : values) image.append(value.length()).append(':').append(value);
+    return image.toString();
+  }
+
+  private static String bytesDigest(byte[] bytes) throws Unsupported {
+    try { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)); }
+    catch (java.security.NoSuchAlgorithmException unavailable) { throw new Unsupported("gradle-status-unknown"); }
+  }
+
+  /** One private preparation process owns one attempt. Correlation data never substitutes native ownership. */
+  static final class ImportAttempt {
+    record State(String binding, String phase, Unsupported refusal, String configuration) {}
+    private final AtomicReference<State> state = new AtomicReference<>();
+    State enter(String binding) throws Unsupported {
+      State start = new State(binding, "in-flight", null, null);
+      if (state.compareAndSet(null, start)) return start;
+      State current = state.get();
+      require(current.binding().equals(binding), "gradle-binding-changed");
+      if (current.refusal() != null) throw current.refusal();
+      require("synchronized".equals(current.phase()), "gradle-in-flight");
+      return null; // Passive observation, never another synchronize.
+    }
+    State configure(State start, String configuration) throws Unsupported {
+      require(start != null && start.configuration() == null && "in-flight".equals(start.phase()), "gradle-binding-changed");
+      State configured = new State(start.binding(), "in-flight", null, configuration);
+      require(state.compareAndSet(start, configured), "gradle-canceled");
+      return configured;
+    }
+    void verifyConfiguration(String binding, String configuration) throws Unsupported {
+      check(binding);
+      require(configuration.equals(state.get().configuration()), "gradle-binding-changed");
+    }
+    void succeeded(State start) throws Unsupported {
+      require(start != null && start.configuration() != null && "in-flight".equals(start.phase()), "gradle-binding-changed");
+      require(state.compareAndSet(start, new State(start.binding(), "synchronized", null, start.configuration())), "gradle-canceled");
+    }
+    void failed(String binding, Unsupported refusal) {
+      for (;;) {
+        State current = state.get();
+        if (current == null || !current.binding().equals(binding) || current.refusal() != null) return;
+        if (state.compareAndSet(current, new State(binding, "failed", refusal, current.configuration()))) return;
+      }
+    }
+    void observing(String binding) throws Unsupported {
+      check(binding);
+      require("synchronized".equals(state.get().phase()), "gradle-in-flight");
+    }
+    void check(String binding) throws Unsupported {
+      State current = state.get();
+      require(current != null && current.binding().equals(binding), "gradle-binding-changed");
+      if (current.refusal() != null) throw current.refusal();
+    }
+  }
+  private static final ImportAttempt GRADLE_ATTEMPT = new ImportAttempt();
+
+  /** Foreign admission fails before this boundary; every failure of an admitted operation is terminal. */
+  static <T> T admitted(ImportAttempt attempt, String binding, Callable<T> operation) throws Unsupported {
+    if (binding != null) attempt.check(binding);
+    try {
+      if (binding != null) require(!Thread.currentThread().isInterrupted(), "gradle-canceled");
+      T result = operation.call();
+      if (binding != null) {
+        require(!Thread.currentThread().isInterrupted(), "gradle-canceled");
+        attempt.check(binding);
+      }
+      return result;
+    } catch (Unsupported refusal) {
+      if (binding != null) attempt.failed(binding, refusal);
+      throw refusal;
+    } catch (Exception | LinkageError failure) {
+      Unsupported refusal = new Unsupported("observation-failed");
+      if (binding != null) attempt.failed(binding, refusal);
+      throw refusal;
+    }
+  }
+
+  /** Matching passive admission includes its cancellation/configuration preflight, not just later model reads. */
+  static ImportAttempt.State enterImport(ImportAttempt attempt, String binding, Callable<Void> passivePreflight) throws Unsupported {
+    ImportAttempt.State start = attempt.enter(binding);
+    if (start == null) admitted(attempt, binding, passivePreflight);
+    return start;
+  }
+
+  static Object observeBound(ImportAttempt attempt, String binding, Callable<Object> observation) throws Unsupported {
+    if (binding != null) attempt.observing(binding);
+    return admitted(attempt, binding, () -> {
+      Object result = observation.call();
+      if (binding != null) attempt.observing(binding);
+      return result;
+    });
+  }
+
+  record GradleSetup(BuildConfiguration configuration, String binding) {}
+  private static GradleSetup gradleSetup(Host host, Budget budget) throws Exception {
+    Path gradleHome = propertyPath("threadnote.java.preparedGradleHomeUri");
+    String control = System.getProperty("threadnote.ownedImport.controlSha256");
+    require(control != null && control.matches("[a-f0-9]{64}"), "invalid-host");
+    // Refuse remote/version/wrapper preferences BEFORE the upstream builder could consult distribution metadata.
+    require(JavaLanguageServerPlugin.getPreferencesManager() != null, "gradle-configuration-refused");
+    Preferences preferences = JavaLanguageServerPlugin.getPreferencesManager().getPreferences();
+    require(preferences != null && !preferences.isImportGradleEnabled() && !preferences.isGradleWrapperEnabled()
+        && (preferences.getGradleVersion() == null || preferences.getGradleVersion().isBlank())
+        && preferences.isImportGradleOfflineEnabled()
+        && preferences.getUpdateBuildConfigurationStatus() == Preferences.FeatureStatus.disabled
+        && preferences.getGradleArguments() != null && preferences.getGradleArguments().isEmpty()
+        && preferences.getGradleJvmArguments() != null && preferences.getGradleJvmArguments().isEmpty(), "gradle-configuration-refused");
+    require(preferences.getGradleHome() != null && canonical(Path.of(preferences.getGradleHome())).equals(gradleHome)
+        && preferences.getGradleUserHome() != null && canonical(Path.of(preferences.getGradleUserHome())).equals(host.caches().get(1))
+        && preferences.getGradleJavaHome() != null && canonical(Path.of(preferences.getGradleJavaHome())).equals(host.javaHome()), "gradle-configuration-refused");
+    BuildConfiguration config = GradleProjectImporter.getBuildConfiguration(host.project());
+    require(config != null && config.isOverrideWorkspaceConfiguration() && config.isOfflineMode()
+        && !config.isAutoSync() && !config.isBuildScansEnabled(), "gradle-configuration-refused");
+    require(canonical(config.getRootProjectDirectory().toPath()).equals(host.project())
+        && config.getJavaHome().isPresent()
+        && canonical(config.getJavaHome().get().toPath()).equals(host.javaHome())
+        && config.getGradleUserHome().isPresent()
+        && canonical(config.getGradleUserHome().get().toPath()).equals(host.caches().get(1))
+        && config.getGradleDistribution() instanceof LocalGradleDistribution local
+        && canonical(local.getLocation().toPath()).equals(gradleHome), "gradle-configuration-refused");
+    require(config.getArguments() != null && config.getArguments().size() <= 14
+        && config.getJvmArguments() != null && config.getJvmArguments().isEmpty(), "gradle-configuration-refused");
+    List<String> arguments = List.copyOf(config.getArguments());
+    List<String> jvmArguments = List.copyOf(config.getJvmArguments());
+    require(arguments.size() >= 2 && arguments.size() <= 14 && arguments.size() % 2 == 0
+        && jvmArguments.isEmpty(), "gradle-configuration-refused");
+    List<String> scripts = new ArrayList<>();
+    Set<String> distinct = new HashSet<>();
+    List<String> resources = List.of("/gradle/init/init.gradle", "/gradle/protobuf/init.gradle",
+        "/gradle/android/init.gradle", "/gradle/aspectj/init.gradle", "/gradle/kotlin/init.gradle",
+        "/gradle/groovy/init.gradle", "/gradle/scala/init.gradle");
+    for (int i = 0; i < arguments.size(); i += 2) {
+      require("--init-script".equals(arguments.get(i)), "gradle-configuration-refused");
+      Path file = canonical(Path.of(budget.text(arguments.get(i + 1), 8192)));
+      require(Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS) && Files.size(file) <= 131072,
+          "gradle-configuration-refused");
+      byte[] bytes;
+      try (InputStream input = Files.newInputStream(file, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
+        bytes = input.readNBytes(131073);
+      }
+      require(bytes.length <= 131072, "gradle-configuration-refused");
+      try (InputStream input = Files.newInputStream(file, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
+        require(Arrays.equals(bytes, input.readNBytes(131073)), "gradle-configuration-refused");
+      }
+      String matched = null;
+      for (String resource : resources) {
+        try (InputStream input = GradleProjectImporter.class.getResourceAsStream(resource)) {
+          if (input == null) continue;
+          byte[] expected = input.readNBytes(131073);
+          if (matched == null && expected.length <= 131072 && Arrays.equals(expected, bytes)) matched = resource;
+        }
+      }
+      require(matched != null && distinct.add(matched) && (i != 0 || resources.get(0).equals(matched)),
+          "gradle-configuration-refused");
+      scripts.add(frame(List.of(file.toString(), bytesDigest(bytes))));
+    }
+    String image = frame(List.of(host.project().toString(), gradleHome.toString(), host.javaHome().toString(),
+        host.caches().get(1).toString(), control, frame(arguments), frame(scripts), frame(jvmArguments),
+        Boolean.toString(config.isShowConsoleView()), Boolean.toString(config.isShowExecutionsView())));
+    return new GradleSetup(config, DiagnosticSnapshot.sha256(budget.text(image, 16384)));
+  }
+
+  /** One budget/cycle set covers the entire status and throwable graph. Imported text never leaves this process. */
+  static final class StatusImage {
+    private final IdentityHashMap<Object, Boolean> seen = new IdentityHashMap<>();
+    private final StringBuilder image = new StringBuilder();
+    private int nodes;
+    String reason = "gradle-synchronization-failed";
+    void text(String value) throws Unsupported {
+      require(value != null && value.length() <= 1024, "gradle-status-unknown");
+      byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+      require(bytes.length <= 4096, "gradle-status-unknown");
+      image.append(bytes.length).append(':').append(bytesDigest(bytes));
+      require(image.length() <= 8192, "gradle-status-unknown");
+    }
+    void node(Object value, int depth) throws Unsupported {
+      require(value != null && depth <= 8 && ++nodes <= 32 && seen.put(value, true) == null, "gradle-status-unknown");
+    }
+    void cause(Throwable cause, int depth) throws Unsupported {
+      if (cause == null) return;
+      node(cause, depth);
+      text(cause.getClass().getName());
+      String message = cause.getMessage();
+      text(message == null ? "" : message);
+      if (cause instanceof LinkageError) reason = "gradle-linkage-failed";
+      if (cause instanceof IllegalStateException && ("Owned Gradle import control refused.".equals(message)
+          || "Embedded or unowned Gradle execution is refused.".equals(message))) reason = "gradle-control-refused";
+      cause(cause.getCause(), depth + 1);
+      Throwable[] suppressed = cause.getSuppressed();
+      require(suppressed.length <= 32 - nodes, "gradle-status-unknown");
+      for (Throwable item : suppressed) cause(item, depth + 1);
+    }
+    void status(IStatus status, int depth) throws Unsupported {
+      node(status, depth);
+      text(status.getPlugin()); text(status.getMessage());
+      image.append(status.getSeverity()).append(':').append(status.getCode()).append(';');
+      require(image.length() <= 8192, "gradle-status-unknown");
+      cause(status.getException(), depth + 1);
+      IStatus[] children = status.getChildren();
+      require(children != null && children.length <= 32 - nodes, "gradle-status-unknown");
+      for (IStatus child : children) status(child, depth + 1);
+    }
+    Unsupported refusal() throws Unsupported { return new Unsupported(reason, Map.of("statusSha256", bytesDigest(image.toString().getBytes(StandardCharsets.UTF_8)))); }
+  }
+
+  private static String synchronizeGradle(Host host, Budget budget) throws Exception {
+    // Claim before configuration extraction (which can materialize upstream init scripts), never after a build begins.
+    Path selectedGradleHome = propertyPath("threadnote.java.preparedGradleHomeUri");
+    String control = System.getProperty("threadnote.ownedImport.controlSha256");
+    require(control != null && control.matches("[a-f0-9]{64}"), "invalid-host");
+    String binding = DiagnosticSnapshot.sha256(frame(List.of(host.project().toString(), host.javaHome().toString(), host.caches().get(1).toString(), selectedGradleHome.toString(), control)));
+    ImportAttempt.State start = enterImport(GRADLE_ATTEMPT, binding, () -> {
+      budget.check();
+      GRADLE_ATTEMPT.verifyConfiguration(binding, gradleSetup(host, budget).binding());
+      return null;
+    });
+    if (start == null) return binding;
+    IProgressMonitor original = budget.monitor;
+    IProgressMonitor guarded = new IProgressMonitor() {
+      public void beginTask(String name, int total) { original.beginTask(name, total); }
+      public void done() { original.done(); }
+      public void internalWorked(double work) { original.internalWorked(work); }
+      public boolean isCanceled() {
+        boolean canceled = original.isCanceled() || Thread.currentThread().isInterrupted();
+        if (canceled) GRADLE_ATTEMPT.failed(binding, new Unsupported("gradle-canceled"));
+        return canceled;
+      }
+      public void setCanceled(boolean value) { if (value) GRADLE_ATTEMPT.failed(binding, new Unsupported("gradle-canceled")); original.setCanceled(value); }
+      public void setTaskName(String name) { original.setTaskName(name); }
+      public void subTask(String name) { original.subTask(name); }
+      public void worked(int work) { original.worked(work); }
+    };
+    try {
+      require(!guarded.isCanceled(), "gradle-canceled");
+      GradleSetup setup = gradleSetup(host, budget);
+      start = GRADLE_ATTEMPT.configure(start, setup.binding());
+      require(!guarded.isCanceled(), "gradle-canceled");
+      org.eclipse.buildship.core.SynchronizationResult result = GradleCore.getWorkspace().createBuild(setup.configuration()).synchronize(guarded);
+      require(result != null, "gradle-status-unknown");
+      IStatus status = result.getStatus();
+      require(!guarded.isCanceled(), "gradle-canceled");
+      require(status != null, "gradle-status-unknown");
+      if (!status.isOK()) { StatusImage diagnostics = new StatusImage(); diagnostics.status(status, 0); throw diagnostics.refusal(); }
+      require(setup.binding().equals(gradleSetup(host, budget).binding()), "gradle-binding-changed");
+      require(!guarded.isCanceled(), "gradle-canceled");
+      GRADLE_ATTEMPT.succeeded(start);
+      budget.check();
+      return binding;
+    } catch (Unsupported refusal) { GRADLE_ATTEMPT.failed(binding, refusal); throw refusal;
+    } catch (Exception | LinkageError failure) {
+      StatusImage diagnostics = new StatusImage();
+      Unsupported refusal;
+      try { diagnostics.cause(failure, 0); refusal = diagnostics.refusal(); }
+      catch (Unsupported malformed) { refusal = malformed; }
+      GRADLE_ATTEMPT.failed(binding, refusal); throw refusal;
+    }
+  }
+
+
   @Override
   public Object executeCommand(String command, List<Object> arguments, IProgressMonitor monitor) throws Exception {
     // This gate precedes even project lookup, cache access and known VM setup.
@@ -96,6 +368,8 @@ public final class PreparedProjectModel implements IDelegateCommandHandler {
     require(token.matches("[A-Za-z0-9._-]+"), "invalid-request");
     try {
       Host host = host();
+      String validatedBinding = "gradle".equals(host.build()) ? synchronizeGradle(host, budget) : null;
+      return observeBound(GRADLE_ATTEMPT, validatedBinding, () -> {
       IProject project = selectedProject(host.project());
       IJavaProject javaProject = JavaCore.create(project);
       JavaModelManager manager = JavaModelManager.getJavaModelManager();
@@ -128,10 +402,14 @@ public final class PreparedProjectModel implements IDelegateCommandHandler {
       budget.check();
       return Map.of("protocolVersion", 1, "requestToken", token, "status", "observed-cached",
           "model", before, "vm", vmImage, "libraries", libraries);
+      });
     } catch (Unsupported refusal) {
+      if ("observation-failed".equals(refusal.getMessage()))
+        return Map.of("protocolVersion", 1, "requestToken", token, "status", "unsupported", "reason", "observation-failed");
       return Map.of("protocolVersion", 1, "requestToken", token, "status", "unsupported",
           "reason", refusal.getMessage(), "evidence", refusal.evidence);
-    } catch (Exception failure) {
+    } catch (Exception | LinkageError failure) {
+      // Unvalidated host/config input cannot poison another trusted binding.
       // Provider or filesystem exception messages can contain private paths or arbitrary imported text.
       return Map.of("protocolVersion", 1, "requestToken", token, "status", "unsupported", "reason", "observation-failed");
     }
