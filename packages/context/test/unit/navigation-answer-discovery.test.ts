@@ -293,7 +293,63 @@ effectIt.layer(citationPlatformLayer)(it => {
                   const caller = EffectOption.getOrUndefined(
                     EffectArray.findFirst(answer.discovery!.result.nodes, node => node.name === 'g'),
                   );
-                  expect(owner).toMatchObject({name: 'f', path: oracle.path});
+                  const firstDiscovered = answer.discovery?.result.nodes[0];
+                  const firstSpan = firstDiscovered?.span;
+                  const rangeState =
+                    firstSpan === undefined
+                      ? 'missing'
+                      : Number.isSafeInteger(firstSpan.line) &&
+                          Number.isSafeInteger(firstSpan.column) &&
+                          Number.isSafeInteger(firstSpan.endLine) &&
+                          Number.isSafeInteger(firstSpan.endColumn) &&
+                          firstSpan.line > 0 &&
+                          firstSpan.column > 0 &&
+                          (firstSpan.line < firstSpan.endLine ||
+                            (firstSpan.line === firstSpan.endLine && firstSpan.column < firstSpan.endColumn))
+                        ? 'valid'
+                        : 'invalid';
+                  const ownerDiagnostic =
+                    oracle.language === 'py'
+                      ? JSON.stringify({
+                          fixture: oracle.id,
+                          indexedFacts: {
+                            files: summary.snapshot.fileCount,
+                            symbols: summary.snapshot.symbolCount,
+                            edges: summary.snapshot.edgeCount,
+                          },
+                          discovery: answer.discovery
+                            ? {
+                                state: 'present',
+                                gaps: answer.discovery.evidence.gaps,
+                                bodyPostings: answer.discovery.evidence.counters.bodyPostings,
+                                metadataPostings: answer.discovery.evidence.counters.metadataPostings,
+                                hydratedNodes: answer.discovery.evidence.counters.hydratedNodes,
+                                metadataCandidates: answer.discovery.evidence.origins.metadata.considered.length,
+                                bodyCandidates: answer.discovery.evidence.origins.body.considered.length,
+                                selectedCandidates: answer.discovery.evidence.candidates.length,
+                                discoveredNodes: answer.discovery.result.nodes.length,
+                                ownerFound: !!owner && owner.name === 'f',
+                                callerFound: caller !== undefined,
+                                firstNodeKind:
+                                  firstDiscovered?.kind === 'function'
+                                    ? 'function'
+                                    : firstDiscovered === undefined
+                                      ? 'missing'
+                                      : 'other',
+                                firstNodeLanguage:
+                                  firstDiscovered?.language === 'python'
+                                    ? 'python'
+                                    : firstDiscovered === undefined
+                                      ? 'missing'
+                                      : 'other',
+                                firstNodeRange: rangeState,
+                              }
+                            : {state: 'missing'},
+                          structuralNodeCount: answer.structural.answer.nodes.length,
+                          projectedNodeCount: answer.projection.structuredContent.nodes.length,
+                        })
+                      : undefined;
+                  expect(owner, ownerDiagnostic).toMatchObject({name: 'f', path: oracle.path});
                   expect(caller).toBeDefined();
                   expect(EffectArray.map(answer.structural.answer.nodes, node => node.id)).toContain(owner.id);
                   expect(EffectArray.map(answer.structural.answer.nodes, node => node.id)).toContain(caller!.id);

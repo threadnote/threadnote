@@ -42,7 +42,7 @@ describe('polyglot code graph language packs', () => {
     }),
   );
 
-  effectIt.effect('preserves the TypeScript compiler extractor behind the registry', () =>
+  effectIt.effect('preserves TypeScript extraction facts and adds registry body derivation evidence', () =>
     Effect.gen(function* () {
       const file = inventoryFile(
         'src/service.ts',
@@ -56,7 +56,24 @@ describe('polyglot code graph language packs', () => {
       );
       const viaRegistry = yield* runExtraction(file);
       const direct = extractFileFacts(file);
-      expect(viaRegistry).toEqual(direct);
+      const {derivationInputs, ...registryFacts} = viaRegistry;
+      const {bodyDiscovery, ...otherDerivations} = derivationInputs ?? {};
+      expect(registryFacts).toEqual(direct);
+      expect(otherDerivations).toEqual({});
+      const helperId = Option.getOrUndefined(
+        Option.map(
+          EffectArray.findFirst(viaRegistry.symbols, symbol => symbol.qualifiedName === 'helper'),
+          symbol => symbol.id,
+        ),
+      );
+      expect(helperId).toBeDefined();
+      expect(bodyDiscovery).toMatchObject({
+        version: 1,
+        path: file.path,
+        records: expect.arrayContaining([
+          expect.objectContaining({ownerId: helperId, terms: expect.arrayContaining(['ok'])}),
+        ]),
+      });
       expect(EffectArray.map(viaRegistry.symbols, symbol => [symbol.kind, symbol.qualifiedName])).toEqual(
         expect.arrayContaining([
           ['interface', 'Store'],

@@ -1,3 +1,13 @@
+import * as OverlayArray from 'effect/Array';
+import * as OverlayString from 'effect/String';
+import * as OverlayRecord from 'effect/Record';
+import {
+  deterministicZip,
+  rewriteOwnedJar,
+  zipModes,
+  validArchivePath,
+} from '../../../../tools/semantic/build-gradle-owned-import.js';
+import {unzipSync} from 'fflate';
 import {cryptoLayer} from '@threadnote/platform/crypto';
 /* oxlint-disable effecttsgo/strict-effect-provide -- Focused filesystem and deterministic clock tests, without application services. */
 import {it as effectIt} from '@effect/vitest';
@@ -3028,4 +3038,72 @@ it('selects complete source-pin fixtures and fences them in the canonical native
   } finally {
     selected.mockRestore();
   }
+});
+
+// Pure archive/compiler boundary: these examples do not run an Effect program or activate an SDK.
+describe('owned Gradle source-overlay construction', () => {
+  it('conserves all unaffected entry bytes/modes without mutating inputs and is idempotent', () => {
+    fc.assert(
+      fc.property(
+        fc.dictionary(
+          fc.stringMatching(/^[a-z]{1,8}$/u),
+          fc.uint8Array({
+            maxLength: 64,
+          }),
+          {
+            maxKeys: 8,
+          },
+        ),
+        fc.uint8Array({
+          minLength: 1,
+          maxLength: 64,
+        }),
+        fc.boolean(),
+        (resources, replacement, executable) => {
+          const entries = new Map<string, Uint8Array>([
+            ['META-INF/MANIFEST.MF', new TextEncoder().encode('Manifest-Version: 1.0\n\n')],
+            ['pkg/Changed.class', new Uint8Array([1])],
+            ['pkg/Changed$Obsolete.class', new Uint8Array([2])],
+            ...OverlayArray.map(OverlayRecord.toEntries(resources), ([name, bytes]): [string, Uint8Array] => [
+              'resources/' + name,
+              bytes,
+            ]),
+          ]);
+          const modes = new Map(
+            OverlayArray.map([...entries.keys()], name => [name, executable ? 0o100755 : 0o100644]),
+          );
+          const original = deterministicZip(entries, modes),
+            snapshot = original.slice();
+          const replacements = new Map([['pkg/Changed.class', replacement]]);
+          const output = rewriteOwnedJar(original, replacements, ['pkg/Changed']);
+          expect(original).toEqual(snapshot);
+          const loaded = unzipSync(output),
+            observedModes = zipModes(output);
+          for (const [name, bytes] of entries)
+            if (!OverlayString.startsWith('pkg/Changed')(name)) {
+              expect(loaded[name]).toEqual(bytes);
+              expect(observedModes.get(name)).toBe(modes.get(name));
+            }
+          expect(loaded['pkg/Changed.class']).toEqual(replacement);
+          expect(loaded['pkg/Changed$Obsolete.class']).toBeUndefined();
+          expect(rewriteOwnedJar(output, replacements, ['pkg/Changed'])).toEqual(output);
+        },
+      ),
+      {
+        numRuns: 32,
+      },
+    );
+  });
+  it('refuses signature/digest protected input and unsafe archive names', () => {
+    for (const name of ['../escape', '/absolute', 'a/../b', 'a\\b', 'a//b', ''])
+      expect(validArchivePath(name)).toBe(false);
+    const replacement = new Map([['pkg/Changed.class', new Uint8Array([1])]]);
+    for (const protectedEntry of [
+      ['META-INF/KEY.SF', 'Signature-Version: 1.0'],
+      ['META-INF/MANIFEST.MF', 'Manifest-Version: 1.0\nSHA-256-Digest: preserved\n'],
+    ]) {
+      const entries = new Map([[protectedEntry[0], new TextEncoder().encode(protectedEntry[1])]]);
+      expect(() => rewriteOwnedJar(deterministicZip(entries, new Map()), replacement, ['pkg/Changed'])).toThrow();
+    }
+  });
 });
