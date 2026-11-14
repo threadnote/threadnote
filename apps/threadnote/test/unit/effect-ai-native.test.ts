@@ -485,7 +485,7 @@ describe('Effect AI native harness', () => {
     }),
   );
 
-  it.effect('returns an actionable typed error when no prebuilt exists', () =>
+  it.effect('returns an actionable typed error when no compatible bundled runtime exists', () =>
     Effect.gen(function* () {
       class NoBinaryFoundError extends Schema.TaggedError<NoBinaryFoundError, {readonly brand: unique symbol}>()(
         'NoBinaryFoundError',
@@ -508,7 +508,8 @@ describe('Effect AI native harness', () => {
       expect(Exit.isFailure(exit)).toBe(true);
       if (Exit.isFailure(exit)) {
         expect(exit.cause.toString()).toContain('UnsupportedNativeRuntime');
-        expect(exit.cause.toString()).toContain('will not compile llama.cpp automatically');
+        expect(exit.cause.toString()).toContain('requests never compile llama.cpp');
+        expect(exit.cause.toString()).toContain('Rebuild or reinstall');
       }
     }),
   );

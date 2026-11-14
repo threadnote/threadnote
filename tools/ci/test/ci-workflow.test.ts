@@ -1,7 +1,9 @@
 import {Schema} from 'effect';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
-import {readFileSync} from '@threadnote/testing/node-fs';
+import {mkdtempSync, readFileSync, rmSync, writeFileSync} from '@threadnote/testing/node-fs';
 import {spawnSync} from '@threadnote/testing/node-child-process';
+import {tmpdir} from '@threadnote/testing/node-os';
+import {join} from '@threadnote/testing/node-path';
 import fc from 'fast-check';
 import {expect, it} from 'vitest';
 import {parse} from 'yaml';
@@ -109,6 +111,72 @@ function step(job: Job | undefined, name: string): Step | undefined {
   );
 }
 
+it('routes native Bun caches through step-scoped runner paths before the first Bun invocation', () => {
+  const expectedEnvironment = {
+    BUN_INSTALL_CACHE_DIR: '${{ runner.temp }}/threadnote-bun-install',
+    BUN_RUNTIME_TRANSPILER_CACHE_PATH: '${{ runner.temp }}/threadnote-bun-transpiler',
+  };
+  const setup = step(releaseJobs.build, 'Route Bun caches outside the source checkout');
+  for (const name of ['build', 'installed-e2e', 'extracted-workflows']) {
+    const job = releaseJobs[name];
+    const caches = step(job, 'Route Bun caches outside the source checkout');
+    const steps = job?.steps ?? [];
+    expect(caches?.env).toEqual(expectedEnvironment);
+    expect(caches?.shell).toBe('bash');
+    expect(caches?.if).toBeUndefined();
+    expect(caches?.run).toBe(setup?.run);
+    const setupIndex = steps.indexOf(caches!);
+    expect(setupIndex).toBeGreaterThanOrEqual(0);
+    expect(setupIndex).toBeLessThan(
+      EffectOption.getOrElse(
+        EffectArray.findFirstIndex(steps, candidate => candidate.uses === 'oven-sh/setup-bun@v2'),
+        () => -1,
+      ),
+    );
+    for (const [index, candidate] of steps.entries()) {
+      if (/(?:^|[\s;&|])bun(?:\s|$)/u.test(candidate.run ?? '')) expect(setupIndex).toBeLessThan(index);
+      if (candidate === caches) continue;
+      expect(candidate.env?.BUN_INSTALL_CACHE_DIR).toBeUndefined();
+      expect(candidate.env?.BUN_RUNTIME_TRANSPILER_CACHE_PATH).toBeUndefined();
+    }
+  }
+
+  // Exercise the exact shell boundary with Windows separators, spaces and a literal dollar sign.
+  const install = 'D:\\runner temp\\$cache/threadnote-bun-install';
+  const transpiler = 'D:\\runner temp\\$cache/threadnote-bun-transpiler';
+  const root = mkdtempSync(join(tmpdir(), 'threadnote-bun-cache-routing-'));
+  const environmentFile = join(root, 'step env $literal');
+  try {
+    // GitHub supplies a regular env file. A /dev/stdout proxy also depends on
+    // whether the host can reopen the subprocess's captured output descriptor.
+    writeFileSync(environmentFile, 'EXISTING=preserved\n');
+    const exported = spawnSync(
+      '/bin/bash',
+      ['--noprofile', '--norc', '-eo', 'pipefail', '-c', setup?.run ?? 'exit 98'],
+      {
+        cwd: root,
+        encoding: 'utf8',
+        env: {
+          BASH_ENV: '',
+          PATH: '',
+          GITHUB_ENV: environmentFile,
+          BUN_INSTALL_CACHE_DIR: install,
+          BUN_RUNTIME_TRANSPILER_CACHE_PATH: transpiler,
+        },
+        timeout: 2_000,
+      },
+    );
+    expect(exported.error).toBeUndefined();
+    expect(exported.status, exported.stderr).toBe(0);
+    expect(exported.stdout).toBe('');
+    expect(readFileSync(environmentFile, 'utf8')).toBe(
+      `EXISTING=preserved\nBUN_INSTALL_CACHE_DIR=${install}\nBUN_RUNTIME_TRANSPILER_CACHE_PATH=${transpiler}\n`,
+    );
+  } finally {
+    rmSync(root, {recursive: true, force: true});
+  }
+});
+
 it('runs affected-target Bazel CI for every maintained pull-request base', () => {
   expect(workflow.on?.pull_request?.branches).toEqual(['main', 'codex/4.0.0', 'release/5.0.0', 'release/5.1.0']);
 });
@@ -178,7 +246,7 @@ it('builds each native release once and fans its archive out to independent requ
   });
   const builds = EffectArray.filter(
     EffectArray.flatMap(EffectRecord.values(releaseJobs), job => job.steps ?? []),
-    candidate => candidate.run === 'bun run build',
+    candidate => candidate.run === 'bun run build:release',
   );
   expect(builds).toHaveLength(1);
   expect(step(releaseJobs.build, 'Self-contained native smoke')?.run).toBe('bun scripts/smoke-self-contained.ts');
@@ -217,8 +285,79 @@ it('builds each native release once and fans its archive out to independent requ
     THREADNOTE_RELEASE_PROFILE: '${{ matrix.profile }}',
   });
   expect(step(releaseJobs['extracted-workflows'], 'Workflow journal persistence smoke')?.if).toBe(
-    "matrix.profile == 'all' || matrix.profile == 'desktop'",
+    "${{ !endsWith(inputs.target, '-musl') && (matrix.profile == 'all' || matrix.profile == 'desktop') }}",
   );
+});
+
+it('executes musl extracted archives and their compiled harness inside the native musl container', () => {
+  const consumer = releaseJobs['extracted-workflows'];
+  expect(consumer?.if).toBeUndefined();
+  expect(step(consumer, 'Extracted release and installed workflow lifecycle')?.if).toBe(
+    "${{ !endsWith(inputs.target, '-musl') }}",
+  );
+  const musl = step(consumer, 'Extracted musl release and installed workflow lifecycle');
+  expect(musl?.if).toBe("endsWith(inputs.target, '-musl')");
+  expect(musl?.env).toEqual({
+    THREADNOTE_RELEASE_ARCHIVE: 'artifacts/threadnote-${{ inputs.target }}.tar.gz',
+    THREADNOTE_RELEASE_PROFILE: '${{ matrix.profile }}',
+  });
+  expect(musl?.run).toContain('assemble-native-inference.ts --musl-container --workflow-runtime');
+  const builder = step(releaseJobs.build, 'Build musl payload at the preserved libc floor');
+  expect(builder?.run).toContain('--musl-container');
+  expect(builder?.run).not.toContain('--workflow-runtime');
+  const encoded = /--container-command-json '([^']+)'/u.exec(musl?.run ?? '')?.[1];
+  expect(encoded).toBeDefined();
+  const command = Schema.decodeUnknownSync(Schema.Array(Schema.String))(JSON.parse(encoded ?? 'null'));
+  expect(command.slice(0, 2)).toEqual(['bash', '-ec']);
+  expect(command[2]).toContain('command -v git; command -v rg; command -v bwrap;');
+  expect(command[2]).toContain('test -s .context/release-artifact/capabilities.json;');
+  expect(command[2]).toContain('bun --bun vitest run apps/threadnote/test/dev-skills/release-artifact.test.ts');
+  expect(command[2]).toContain(
+    'bun --bun vitest run apps/threadnote/test/dev-skills/workflow-journal-validation.test.ts',
+  );
+  expect(command[2]).not.toContain('build:release');
+});
+
+it('requires native admission tests and isolates the real worker deadline suite on every host', () => {
+  const boundary = 'apps/threadnote/test/integration/vector-native-read-boundary.test.ts';
+  const admission = 'apps/threadnote/test/integration/recall-admission-budget.test.ts';
+  for (const name of [
+    'Build GNU payload at the preserved libc floor',
+    'Build musl payload at the preserved libc floor',
+  ]) {
+    const builder = step(releaseJobs.build, name);
+    expect(builder?.run).toContain('--container-command-json "$NATIVE_RELEASE_COMMAND_JSON"');
+    const command = Schema.decodeUnknownSync(Schema.Array(Schema.String))(
+      JSON.parse(builder?.env?.NATIVE_RELEASE_COMMAND_JSON ?? 'null'),
+    );
+    expect(command.slice(0, 2)).toEqual(['bash', '-ec']);
+    expect(command[2]).toContain('THREADNOTE_NATIVE_VECTOR_READER_REQUIRED=1');
+    expect(command[2]).toContain(
+      'THREADNOTE_NATIVE_VECTOR_READER_MANIFEST="$PWD/dist/runtime/vector-reader/manifest.json"',
+    );
+    const tests = EffectArray.filter(
+      EffectString.split(';')(command[2]),
+      value => EffectString.includes('vitest run')(value) && !EffectString.includes('vitest.e2e')(value),
+    );
+    expect(tests).toHaveLength(2);
+    expect(tests[0]).toContain(admission);
+    expect(tests[0]).not.toContain(boundary);
+    expect(EffectString.trim(tests[1] ?? '')).toBe(
+      `bun --bun vitest run --maxWorkers=1 --no-file-parallelism ${boundary}`,
+    );
+  }
+  const callers = step(releaseJobs.build, 'Exercise Rust through the production ready-read worker');
+  const child = step(releaseJobs.build, 'Exercise the actual ready-read worker without competing suites');
+  expect(callers?.run).toContain(admission);
+  expect(callers?.run).not.toContain(boundary);
+  expect(child?.run).toBe(`bun --bun vitest run --maxWorkers=1 --no-file-parallelism ${boundary}`);
+  for (const candidate of [callers, child]) {
+    expect(candidate?.if).toBe("runner.os != 'Linux'");
+    expect(candidate?.env?.THREADNOTE_NATIVE_VECTOR_READER_REQUIRED).toBe('1');
+    expect(candidate?.env?.THREADNOTE_NATIVE_VECTOR_READER_MANIFEST).toBe(
+      '${{ github.workspace }}/dist/runtime/vector-reader/manifest.json',
+    );
+  }
 });
 
 it('partitions only catalog-supported macOS profiles while other platforms retain complete qualification', () => {

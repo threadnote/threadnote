@@ -32,6 +32,8 @@ import type {DevSkillsMutationLease} from './dev_skills/index.js';
 import {hasManagedOmpHooks} from './omp_hooks.js';
 import {localAiDoctorCheck} from './effect/local-ai.js';
 import {SystemInfo} from '@threadnote/platform/system';
+import {loadNativeVectorReader} from '@threadnote/recall/vector/native-reader-payload';
+import {fromPromise} from '@threadnote/platform/errors';
 import {
   activeInstalledRelease,
   activeInstalledVersion,
@@ -108,6 +110,13 @@ import type {
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {assertSafeThreadnoteHomeForErase, formatStatus} from './utils.js';
 import {errorMessage} from '@threadnote/platform/errors';
+import {isSqlError} from 'effect/sql/SqlError';
+import {anonymousTelemetryDiagnosticFromError} from './telemetry/diagnostic.js';
+import {EmbeddingFailed} from '@threadnote/inference/engine/errors';
+import {
+  LocalModelWorkerTransportError,
+  projectLocalModelWorkerExitObservation,
+} from './effect/ai/isolated-local-model-runtime.js';
 import {memoryFrontmatterField, memoryUriProjectSegment} from '@threadnote/recall/results';
 import {toolRoot} from '@threadnote/workspace/installation';
 import * as EffectRecord from 'effect/Record';
@@ -124,6 +133,89 @@ class LifecycleOperationError extends Schema.TaggedError<LifecycleOperationError
 
 const LAYOUT_RECEIPT = 'layout.json';
 export const RECALL_INDEX_MAINTENANCE_GENERATION_RETRY_LIMIT = 2;
+
+// Only typed metadata crosses this error boundary; driver messages and SQL do not.
+const RECALL_REPAIR_SQL_REASONS = new Set([
+  'ConnectionError',
+  'AuthenticationError',
+  'AuthorizationError',
+  'SqlSyntaxError',
+  'UniqueViolation',
+  'ConstraintError',
+  'DeadlockError',
+  'SerializationError',
+  'LockTimeoutError',
+  'StatementTimeoutError',
+  'UnknownError',
+]);
+const RECALL_REPAIR_SQLITE_CODES = new Set([
+  'SQLITE_ERROR',
+  'SQLITE_INTERNAL',
+  'SQLITE_PERM',
+  'SQLITE_ABORT',
+  'SQLITE_BUSY',
+  'SQLITE_LOCKED',
+  'SQLITE_NOMEM',
+  'SQLITE_READONLY',
+  'SQLITE_INTERRUPT',
+  'SQLITE_IOERR',
+  'SQLITE_CORRUPT',
+  'SQLITE_NOTFOUND',
+  'SQLITE_FULL',
+  'SQLITE_CANTOPEN',
+  'SQLITE_PROTOCOL',
+  'SQLITE_EMPTY',
+  'SQLITE_SCHEMA',
+  'SQLITE_TOOBIG',
+  'SQLITE_CONSTRAINT',
+  'SQLITE_MISMATCH',
+  'SQLITE_MISUSE',
+  'SQLITE_NOLFS',
+  'SQLITE_AUTH',
+  'SQLITE_FORMAT',
+  'SQLITE_RANGE',
+  'SQLITE_NOTADB',
+  'SQLITE_BUSY_RECOVERY',
+  'SQLITE_BUSY_SNAPSHOT',
+  'SQLITE_BUSY_TIMEOUT',
+  'SQLITE_LOCKED_SHAREDCACHE',
+  'SQLITE_CONSTRAINT_UNIQUE',
+  'SQLITE_CONSTRAINT_FOREIGNKEY',
+]);
+
+export function recallIndexRepairFailureDiagnostic(error: unknown) {
+  try {
+    if (isSqlError(error)) {
+      const sqlReason = RECALL_REPAIR_SQL_REASONS.has(error.reason._tag) ? error.reason._tag : 'UnknownError';
+      const driver = error.reason.cause;
+      const code: unknown =
+        typeof driver === 'object' && driver !== null
+          ? Object.getOwnPropertyDescriptor(driver, 'code')?.value
+          : undefined;
+      return {
+        errorType: 'SqlError',
+        sqlReason,
+        ...(typeof code === 'string' && RECALL_REPAIR_SQLITE_CODES.has(code) ? {sqliteCode: code} : {}),
+      };
+    }
+    const diagnostic = anonymousTelemetryDiagnosticFromError(error);
+    const exitObservation =
+      Schema.is(EmbeddingFailed)(error) && Schema.is(LocalModelWorkerTransportError)(error.cause)
+        ? projectLocalModelWorkerExitObservation(error.cause.exitObservation)
+        : undefined;
+    return diagnostic?.domain === 'model-worker'
+      ? {
+          errorType: diagnostic.errorType,
+          domain: diagnostic.domain,
+          operation: diagnostic.operation,
+          reason: diagnostic.reason,
+          ...(exitObservation === undefined ? {} : {exitObservation}),
+        }
+      : {errorType: diagnostic?.errorType ?? 'UnknownError'};
+  } catch {
+    return {errorType: 'UnknownError'};
+  }
+}
 
 export function recallIndexMaintenanceShouldRetry(error: unknown, completedRetries: number): boolean {
   return (
@@ -287,6 +379,18 @@ export const collectDoctorChecks = Effect.fn('lifecycle.collectDoctorChecks')(fu
   ];
   checks.push(yield* safeDoctorCheck('threadnote shim', commandShimCheck(config.agentContextHome)));
   checks.push(yield* safeDoctorCheck('standalone process lifecycle', legacyProcessDoctorCheck(config)));
+  checks.push(
+    yield* safeDoctorCheck(
+      'native vector reader',
+      fromPromise('doctor.nativeVectorReader', () => loadNativeVectorReader(system)).pipe(
+        Effect.map(() => ({
+          detail: 'verified required native vector reader',
+          name: 'native vector reader',
+          status: 'ok' as const,
+        })),
+      ),
+    ),
+  );
   checks.push(
     yield* safeDoctorCheck(
       'Threadnote home',
@@ -551,6 +655,9 @@ export const runRepair = Effect.fn('lifecycle.repair')(function* (config: Runtim
       }
     });
     yield* prepareRecallIndexes(config, recallManifest, authorizationKey, verifyInputs).pipe(
+      Effect.tapError(cause =>
+        Console.error(`Recall repair failure diagnostic: ${JSON.stringify(recallIndexRepairFailureDiagnostic(cause))}`),
+      ),
       Effect.mapError(cause =>
         LifecycleOperationError.make({message: `Recall index repair failed: ${errorMessage(cause)}`}),
       ),

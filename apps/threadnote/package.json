@@ -334,6 +334,7 @@
     "./recall/embedding_worker_process": "./src/recall/embedding_worker_process.ts",
     "./recall/cli_response": "./src/recall/cli_response.ts",
     "./recall/feedback_commands": "./src/recall/feedback_commands.ts",
+    "./recall/ready_read_boundary": "./src/recall/ready_read_boundary.ts",
     "./release/auto_update": "./src/release/auto_update.ts",
     "./release/channel": "./src/release/channel.ts",
     "./release/check": "./src/release/check.ts",

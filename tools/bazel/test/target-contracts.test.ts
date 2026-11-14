@@ -738,3 +738,11 @@ describe('generated Bazel test contracts', () => {
     );
   });
 });
+
+it('ships the Windows sampler PowerShell resource with its owning native boundary test', () => {
+  const owners = EffectArray.filter(inventory.targets, candidate =>
+    EffectArray.contains(candidate.entries ?? [], 'apps/threadnote/test/unit/windows-process-tree-sampler.test.ts'),
+  );
+  expect(owners.length).toBeGreaterThan(0);
+  for (const owner of owners) expect(owner.inputs).toContain('scripts/windows-process-tree-sampler.ps1');
+});

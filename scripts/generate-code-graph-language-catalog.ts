@@ -8,10 +8,9 @@ import * as Effect2 from 'effect';
 
 const ROOT_URL = new URL('..', import.meta.url);
 
-const generateCatalog = Effect.gen(function* () {
+export const generateCodeGraphLanguageCatalog = Effect.fn('generateCodeGraphLanguageCatalog')(function* (root: string) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const root = yield* path.fromFileUrl(ROOT_URL);
   const languagesRoot = path.join(root, 'packages', 'graph', 'src', 'languages');
   const directories = (yield* fs.readDirectory(languagesRoot)).sort();
   const packs: Array<{readonly alias: string; readonly directory: string}> = [];
@@ -40,7 +39,8 @@ const generateCatalog = Effect.gen(function* () {
   );
   const target = path.join(languagesRoot, 'catalog.generated.ts');
   const existing = yield* fs.readFileString(target).pipe(Effect.orElseSucceed(() => ''));
-  if (existing !== output) yield* fs.writeFileString(target, output);
+  // Keep checkout EOL bytes when the catalog is already current (including Windows CRLF checkouts).
+  if (EffectString.replaceAll('\r\n', '\n')(existing) !== output) yield* fs.writeFileString(target, output);
   yield* Console.log(`Generated code graph catalog with ${packs.length} language pack(s).`);
 });
 
@@ -52,4 +52,11 @@ function safeIdentifier(value: string): string {
   return /^[A-Za-z_$]/.test(identifier) ? identifier : `pack${identifier}`;
 }
 
-BunRuntime.runMain(provideScriptLayer(generateCatalog, BunServices.layer));
+if (import.meta.main) {
+  const generateCatalog = Effect.gen(function* () {
+    const path = yield* Path.Path;
+    const root = yield* path.fromFileUrl(ROOT_URL);
+    yield* generateCodeGraphLanguageCatalog(root);
+  });
+  BunRuntime.runMain(provideScriptLayer(generateCatalog, BunServices.layer));
+}

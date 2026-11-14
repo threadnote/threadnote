@@ -452,6 +452,12 @@ export const createTargetSpecs = async (root = defaultRoot) => {
       'scripts/build.ts',
       'scripts/check-embedded-core-model.ts',
       'scripts/check-self-contained.ts',
+      'scripts/assemble-native-vector-reader.ts',
+      'scripts/assemble-native-inference.ts',
+      'scripts/native-inference-payload.ts',
+      'scripts/finalize-native-vector-reader.ts',
+      'scripts/native-vector-reader-payload.ts',
+      'scripts/verify-native-vector-reader.ts',
       'scripts/clean.ts',
       'scripts/generate-code-graph-language-catalog.ts',
     ],
@@ -460,6 +466,8 @@ export const createTargetSpecs = async (root = defaultRoot) => {
       'assets',
       'config',
       'cursor-plugin',
+      // Native source is selection input only; Bazel actions never execute Cargo.
+      'packages/recall/native-vector-reader',
       'packages/manager/static',
       ...EffectArray.map(providerPackages, name => `packages/${name}/static`),
       'packages/remote-memory/src/migrations',
@@ -791,7 +799,12 @@ export const createTargetSpecs = async (root = defaultRoot) => {
       name,
       kind: 'test',
       entries,
-      data: applicationTestData,
+      data: [
+        ...applicationTestData,
+        ...(EffectArray.contains(entries, 'apps/threadnote/test/unit/windows-process-tree-sampler.test.ts')
+          ? ['scripts/windows-process-tree-sampler.ps1']
+          : []),
+      ],
       referencedInputRoots: applicationReferencedInputRoots,
       npm: packageTestNpm['packages/graph'],
       timeout: 'long',

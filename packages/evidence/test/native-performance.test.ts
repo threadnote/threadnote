@@ -3,6 +3,7 @@ import {Array as EffectArray, Record as EffectRecord, String as EffectString} fr
 import {describe, expect, it} from 'vitest';
 import {benchmarkMeasurement, type BenchmarkArtifactV1} from '@threadnote/evidence/benchmark';
 import {
+  NATIVE_VECTOR_PROFILES,
   nativePerformanceGates,
   nativeStagePartition,
   validateNativePerformancePairs,
@@ -326,6 +327,42 @@ describe('native performance evidence admission', () => {
     ).toThrow('real-query');
   });
 
+  it('admits all eight vector profiles only with matching native architecture, OS and libc', () => {
+    for (const profile of NATIVE_VECTOR_PROFILES) {
+      const declared = {
+        ...complete,
+        platform: profile.target,
+        identities: {
+          ...complete.identities,
+          platform: profile.target,
+          ...('libc' in profile ? {libc: profile.libc} : {}),
+        },
+      };
+      const observed = {
+        ...qualificationArtifact,
+        environment: {
+          ...qualificationArtifact.environment,
+          architecture: profile.architecture,
+          operatingSystem: profile.platform,
+        },
+      };
+      expect(parseNativePerformanceCapture(declared, observed).capture.platform).toBe(profile.target);
+      expect(() =>
+        parseNativePerformanceCapture(declared, {
+          ...observed,
+          environment: {...observed.environment, architecture: profile.architecture === 'arm64' ? 'x64' : 'arm64'},
+        }),
+      ).toThrow('platform');
+      if ('libc' in profile)
+        expect(() =>
+          parseNativePerformanceCapture(
+            {...declared, identities: {...declared.identities, libc: profile.libc === 'musl' ? 'gnu' : 'musl'}},
+            observed,
+          ),
+        ).toThrow('platform');
+      expect(() => parseNativePerformanceCapture({...declared, component: 'topology'}, observed)).toThrow('platform');
+    }
+  });
   it('enforces the frozen platform and representative workload without requiring a model for topology', () => {
     for (const platform of ['win32-x64', 'linux-arm64', 'darwin-x64'])
       expect(() => parseNativePerformanceCapture({...complete, platform}, qualificationArtifact)).toThrow('platform');

@@ -1,6 +1,18 @@
 import {Array as EffectArray, Record as EffectRecord, Schema, Context, Exit, Option, Tracer} from 'effect';
 import {parseBenchmarkArtifactV1, type BenchmarkArtifactV1} from './benchmark.js';
 
+/** Native-only vector adoption requires actual native-host captures for every release profile. */
+export const NATIVE_VECTOR_PROFILES = [
+  {target: 'bun-darwin-arm64', platform: 'darwin', architecture: 'arm64'},
+  {target: 'bun-darwin-x64', platform: 'darwin', architecture: 'x64'},
+  {target: 'bun-linux-arm64', platform: 'linux', architecture: 'arm64', libc: 'glibc'},
+  {target: 'bun-linux-arm64-musl', platform: 'linux', architecture: 'arm64', libc: 'musl'},
+  {target: 'bun-linux-x64-baseline', platform: 'linux', architecture: 'x64', libc: 'glibc'},
+  {target: 'bun-linux-x64-baseline-musl', platform: 'linux', architecture: 'x64', libc: 'musl'},
+  {target: 'bun-windows-arm64', platform: 'win32', architecture: 'arm64'},
+  {target: 'bun-windows-x64-baseline', platform: 'win32', architecture: 'x64'},
+] as const;
+
 /** Fixed before optimization. Diagnostic or incomplete captures never authorize adoption. */
 export const NATIVE_PERFORMANCE_CONTRACT = {
   version: 1,
@@ -11,6 +23,7 @@ export const NATIVE_PERFORMANCE_CONTRACT = {
   minimumPairedRuns: 3,
   minimumWarmVectorQueries: 30,
   platforms: ['darwin-arm64', 'linux-x64'],
+  vectorProfiles: EffectArray.map(NATIVE_VECTOR_PROFILES, profile => profile.target),
   vectorDocuments: [10_000, 100_000],
   vectorDistributions: ['dense', 'tied'],
   primaryBoundaries: {
@@ -196,12 +209,28 @@ function validateQualificationDeclarations(capture: NativePerformanceCapture, ar
     throw new Error('Diagnostic or unclassified artifact cannot qualify');
   }
   if (!capture.sourceFence) throw new Error('Qualification requires opening and closing source fences');
-  if (!EffectArray.some(NATIVE_PERFORMANCE_CONTRACT.platforms, platform => platform === capture.platform)) {
-    throw new Error('Unsupported qualification platform');
-  }
+  const vectorProfile =
+    capture.component === 'vector'
+      ? Option.getOrUndefined(
+          EffectArray.findFirst(NATIVE_VECTOR_PROFILES, profile => profile.target === capture.platform),
+        )
+      : undefined;
+  const historicalPlatform = EffectArray.some(
+    NATIVE_PERFORMANCE_CONTRACT.platforms,
+    platform => platform === capture.platform,
+  );
+  if (!historicalPlatform && !vectorProfile) throw new Error('Unsupported qualification platform');
   const environment = artifact.environment;
-  const platformMatches =
-    capture.platform === 'darwin-arm64'
+  const platformMatches = vectorProfile
+    ? environment.architecture === vectorProfile.architecture &&
+      (vectorProfile.platform === 'darwin'
+        ? /darwin|macos/iu
+        : vectorProfile.platform === 'win32'
+          ? /windows|win32/iu
+          : /linux/iu
+      ).test(environment.operatingSystem) &&
+      (!('libc' in vectorProfile) || capture.identities.libc === vectorProfile.libc)
+    : capture.platform === 'darwin-arm64'
       ? environment.architecture === 'arm64' && /darwin|macos/iu.test(environment.operatingSystem)
       : environment.architecture === 'x64' && /linux/iu.test(environment.operatingSystem);
   if (!platformMatches || capture.identities.platform !== capture.platform)

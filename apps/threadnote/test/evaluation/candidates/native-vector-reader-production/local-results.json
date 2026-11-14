@@ -1,0 +1,1080 @@
+{
+  "schemaVersion": 1,
+  "platform": "aarch64-apple-darwin",
+  "status": "diagnostic-only",
+  "qualified": false,
+  "formalQualification": {
+    "status": "pending",
+    "pairedRuns": 0,
+    "warmQueriesPerArm": 0,
+    "completedCases": []
+  },
+  "sourceDiagnostic": {
+    "kind": "dirty-source-production-path-diagnostic",
+    "count": 100000,
+    "sourceCommit": "66f4c1d8baed033ec484f4db2895ea2252b4e2d0",
+    "firstModelUseMilliseconds": 281.028125,
+    "orders": [
+      {
+        "order": ["typescript", "native"],
+        "measurements": {
+          "typescript": [
+            {
+              "i": 0,
+              "ms": 764.4867089999998,
+              "querySha256": "8b5ac424c06b1f004b7e65137e4d0180d52bcc7fe39e03efc446c8380d544095",
+              "scoresSha256": "141c322cbda7cfd90e511154591e462bd736c493816b53d22adf40f627c18679",
+              "nativeCalls": 0
+            },
+            {
+              "i": 1,
+              "ms": 737.3285419999997,
+              "querySha256": "18eb2edfaaf0bacce567e5c1fbabc2425afa4713ed665f9ec83ad2cc96f6cf6d",
+              "scoresSha256": "1c99712eb3f15433eb1e211eb2a2d3f181d24a6a5ede5c6d8710103a4728e31c",
+              "nativeCalls": 0
+            },
+            {
+              "i": 2,
+              "ms": 776.0042089999997,
+              "querySha256": "56fa3b36d7d4a72377419cd157340fc72f4ce3f9266ed7591b4c7c2fe00afc01",
+              "scoresSha256": "ec677172f2a3718d8651138b1efe69f56ae258d39fb3f5e6ecec175aa6c446e2",
+              "nativeCalls": 0
+            },
+            {
+              "i": 3,
+              "ms": 770.692583,
+              "querySha256": "30e471b84b07125b6b6eb85763fbcabf67628a48696d03798118b8465873788c",
+              "scoresSha256": "1c6116eebd70c05380c36aeea0cf88e45b67b2e23bb574291285951c722c7a89",
+              "nativeCalls": 0
+            },
+            {
+              "i": 4,
+              "ms": 773.2615409999999,
+              "querySha256": "52571691e1efbaa231fa236f490ce9d290164d357a93ca5e7a5a9814bcbb8ab8",
+              "scoresSha256": "dac1347dd2616c73c2dc962b9d29e9e3ad0554f4ad74126ead1196d2d9b5b9c9",
+              "nativeCalls": 0
+            }
+          ],
+          "native": [
+            {
+              "i": 0,
+              "ms": 616.9364999999998,
+              "querySha256": "8b5ac424c06b1f004b7e65137e4d0180d52bcc7fe39e03efc446c8380d544095",
+              "scoresSha256": "141c322cbda7cfd90e511154591e462bd736c493816b53d22adf40f627c18679",
+              "nativeCalls": 1
+            },
+            {
+              "i": 1,
+              "ms": 618.157792,
+              "querySha256": "18eb2edfaaf0bacce567e5c1fbabc2425afa4713ed665f9ec83ad2cc96f6cf6d",
+              "scoresSha256": "1c99712eb3f15433eb1e211eb2a2d3f181d24a6a5ede5c6d8710103a4728e31c",
+              "nativeCalls": 1
+            },
+            {
+              "i": 2,
+              "ms": 609.2127090000004,
+              "querySha256": "56fa3b36d7d4a72377419cd157340fc72f4ce3f9266ed7591b4c7c2fe00afc01",
+              "scoresSha256": "ec677172f2a3718d8651138b1efe69f56ae258d39fb3f5e6ecec175aa6c446e2",
+              "nativeCalls": 1
+            },
+            {
+              "i": 3,
+              "ms": 626.3590000000004,
+              "querySha256": "30e471b84b07125b6b6eb85763fbcabf67628a48696d03798118b8465873788c",
+              "scoresSha256": "1c6116eebd70c05380c36aeea0cf88e45b67b2e23bb574291285951c722c7a89",
+              "nativeCalls": 1
+            },
+            {
+              "i": 4,
+              "ms": 625.8230829999993,
+              "querySha256": "52571691e1efbaa231fa236f490ce9d290164d357a93ca5e7a5a9814bcbb8ab8",
+              "scoresSha256": "dac1347dd2616c73c2dc962b9d29e9e3ad0554f4ad74126ead1196d2d9b5b9c9",
+              "nativeCalls": 1
+            }
+          ]
+        }
+      },
+      {
+        "order": ["native", "typescript"],
+        "measurements": {
+          "native": [
+            {
+              "i": 0,
+              "ms": 612.6206660000007,
+              "querySha256": "8b5ac424c06b1f004b7e65137e4d0180d52bcc7fe39e03efc446c8380d544095",
+              "scoresSha256": "141c322cbda7cfd90e511154591e462bd736c493816b53d22adf40f627c18679",
+              "nativeCalls": 1
+            },
+            {
+              "i": 1,
+              "ms": 610.4391660000001,
+              "querySha256": "18eb2edfaaf0bacce567e5c1fbabc2425afa4713ed665f9ec83ad2cc96f6cf6d",
+              "scoresSha256": "1c99712eb3f15433eb1e211eb2a2d3f181d24a6a5ede5c6d8710103a4728e31c",
+              "nativeCalls": 1
+            },
+            {
+              "i": 2,
+              "ms": 615.1386249999996,
+              "querySha256": "56fa3b36d7d4a72377419cd157340fc72f4ce3f9266ed7591b4c7c2fe00afc01",
+              "scoresSha256": "ec677172f2a3718d8651138b1efe69f56ae258d39fb3f5e6ecec175aa6c446e2",
+              "nativeCalls": 1
+            },
+            {
+              "i": 3,
+              "ms": 612.2422910000005,
+              "querySha256": "30e471b84b07125b6b6eb85763fbcabf67628a48696d03798118b8465873788c",
+              "scoresSha256": "1c6116eebd70c05380c36aeea0cf88e45b67b2e23bb574291285951c722c7a89",
+              "nativeCalls": 1
+            },
+            {
+              "i": 4,
+              "ms": 621.1392909999995,
+              "querySha256": "52571691e1efbaa231fa236f490ce9d290164d357a93ca5e7a5a9814bcbb8ab8",
+              "scoresSha256": "dac1347dd2616c73c2dc962b9d29e9e3ad0554f4ad74126ead1196d2d9b5b9c9",
+              "nativeCalls": 1
+            }
+          ],
+          "typescript": [
+            {
+              "i": 0,
+              "ms": 761.8135419999999,
+              "querySha256": "8b5ac424c06b1f004b7e65137e4d0180d52bcc7fe39e03efc446c8380d544095",
+              "scoresSha256": "141c322cbda7cfd90e511154591e462bd736c493816b53d22adf40f627c18679",
+              "nativeCalls": 0
+            },
+            {
+              "i": 1,
+              "ms": 759.4167500000003,
+              "querySha256": "18eb2edfaaf0bacce567e5c1fbabc2425afa4713ed665f9ec83ad2cc96f6cf6d",
+              "scoresSha256": "1c99712eb3f15433eb1e211eb2a2d3f181d24a6a5ede5c6d8710103a4728e31c",
+              "nativeCalls": 0
+            },
+            {
+              "i": 2,
+              "ms": 762.5435420000013,
+              "querySha256": "56fa3b36d7d4a72377419cd157340fc72f4ce3f9266ed7591b4c7c2fe00afc01",
+              "scoresSha256": "ec677172f2a3718d8651138b1efe69f56ae258d39fb3f5e6ecec175aa6c446e2",
+              "nativeCalls": 0
+            },
+            {
+              "i": 3,
+              "ms": 761.2106669999994,
+              "querySha256": "30e471b84b07125b6b6eb85763fbcabf67628a48696d03798118b8465873788c",
+              "scoresSha256": "1c6116eebd70c05380c36aeea0cf88e45b67b2e23bb574291285951c722c7a89",
+              "nativeCalls": 0
+            },
+            {
+              "i": 4,
+              "ms": 764.0790000000015,
+              "querySha256": "52571691e1efbaa231fa236f490ce9d290164d357a93ca5e7a5a9814bcbb8ab8",
+              "scoresSha256": "dac1347dd2616c73c2dc962b9d29e9e3ad0554f4ad74126ead1196d2d9b5b9c9",
+              "nativeCalls": 0
+            }
+          ]
+        }
+      }
+    ],
+    "failures": [],
+    "sourceFilesUnchanged": true,
+    "fixtureDatabaseSha256": "d1b7ac2b96986b469d5c63c84b9165bd82d99aae1ab9629467129427e101d744",
+    "fixtureDatabaseUnchanged": null
+  },
+  "compiledDiagnostic": {
+    "kind": "committed-compiled-production-path-diagnostic",
+    "count": 100000,
+    "sourceCommit": "f2bd0d976947a672ec3412f4c32d8e023d56dc1a",
+    "firstModelUseMilliseconds": 322.8862080000001,
+    "orders": [
+      {
+        "order": ["typescript", "native"],
+        "measurements": {
+          "typescript": [
+            {
+              "i": 1,
+              "ms": 847.4774159999997,
+              "querySha256": "18eb2edfaaf0bacce567e5c1fbabc2425afa4713ed665f9ec83ad2cc96f6cf6d",
+              "scoresSha256": "1c99712eb3f15433eb1e211eb2a2d3f181d24a6a5ede5c6d8710103a4728e31c",
+              "nativePayloadPresent": false,
+              "childStages": [
+                {
+                  "operation": "vector-state",
+                  "ms": 107.08666599999924,
+                  "timeoutMs": 899,
+                  "outcome": "Success"
+                },
+                {
+                  "operation": "vector-scores",
+                  "ms": 688.0432920000003,
+                  "timeoutMs": 741,
+                  "outcome": "Success"
+                }
+              ]
+            },
+            {
+              "i": 2,
+              "ms": 774.6810000000005,
+              "querySha256": "56fa3b36d7d4a72377419cd157340fc72f4ce3f9266ed7591b4c7c2fe00afc01",
+              "scoresSha256": "ec677172f2a3718d8651138b1efe69f56ae258d39fb3f5e6ecec175aa6c446e2",
+              "nativePayloadPresent": false,
+              "childStages": [
+                {
+                  "operation": "vector-state",
+                  "ms": 115.14970800000083,
+                  "timeoutMs": 899,
+                  "outcome": "Success"
+                },
+                {
+                  "operation": "vector-scores",
+                  "ms": 622.266584,
+                  "timeoutMs": 748,
+                  "outcome": "Success"
+                }
+              ]
+            },
+            {
+              "i": 3,
+              "ms": 744.5532080000003,
+              "querySha256": "30e471b84b07125b6b6eb85763fbcabf67628a48696d03798118b8465873788c",
+              "scoresSha256": "1c6116eebd70c05380c36aeea0cf88e45b67b2e23bb574291285951c722c7a89",
+              "nativePayloadPresent": false,
+              "childStages": [
+                {
+                  "operation": "vector-state",
+                  "ms": 101.97629200000029,
+                  "timeoutMs": 899,
+                  "outcome": "Success"
+                },
+                {
+                  "operation": "vector-scores",
+                  "ms": 610.9479999999994,
+                  "timeoutMs": 766,
+                  "outcome": "Success"
+                }
+              ]
+            },
+            {
+              "i": 4,
+              "ms": 722.3796250000005,
+              "querySha256": "52571691e1efbaa231fa236f490ce9d290164d357a93ca5e7a5a9814bcbb8ab8",
+              "scoresSha256": "dac1347dd2616c73c2dc962b9d29e9e3ad0554f4ad74126ead1196d2d9b5b9c9",
+              "nativePayloadPresent": false,
+              "childStages": [
+                {
+                  "operation": "vector-state",
+                  "ms": 103.06541600000037,
+                  "timeoutMs": 899,
+                  "outcome": "Success"
+                },
+                {
+                  "operation": "vector-scores",
+                  "ms": 609.7784170000004,
+                  "timeoutMs": 787,
+                  "outcome": "Success"
+                }
+              ]
+            }
+          ],
+          "native": [
+            {
+              "i": 0,
+              "ms": 592.1005409999998,
+              "querySha256": "8b5ac424c06b1f004b7e65137e4d0180d52bcc7fe39e03efc446c8380d544095",
+              "scoresSha256": "141c322cbda7cfd90e511154591e462bd736c493816b53d22adf40f627c18679",
+              "nativePayloadPresent": true,
+              "childStages": [
+                {
+                  "operation": "vector-state",
+                  "ms": 104.6240000000007,
+                  "timeoutMs": 899,
+                  "outcome": "Success"
+                },
+                {
+                  "operation": "vector-scores",
+                  "ms": 428.0534999999991,
+                  "timeoutMs": 736,
+                  "outcome": "Success"
+                }
+              ]
+            },
+            {
+              "i": 1,
+              "ms": 568.1545000000006,
+              "querySha256": "18eb2edfaaf0bacce567e5c1fbabc2425afa4713ed665f9ec83ad2cc96f6cf6d",
+              "scoresSha256": "1c99712eb3f15433eb1e211eb2a2d3f181d24a6a5ede5c6d8710103a4728e31c",
+              "nativePayloadPresent": true,
+              "childStages": [
+                {
+                  "operation": "vector-state",
+                  "ms": 102.34270900000047,
+                  "timeoutMs": 899,
+                  "outcome": "Success"
+                },
+                {
+                  "operation": "vector-scores",
+                  "ms": 436.231667,
+                  "timeoutMs": 768,
+                  "outcome": "Success"
+                }
+              ]
+            },
+            {
+              "i": 2,
+              "ms": 583.3637920000001,
+              "querySha256": "56fa3b36d7d4a72377419cd157340fc72f4ce3f9266ed7591b4c7c2fe00afc01",
+              "scoresSha256": "ec677172f2a3718d8651138b1efe69f56ae258d39fb3f5e6ecec175aa6c446e2",
+              "nativePayloadPresent": true,
+              "childStages": [
+                {
+                  "operation": "vector-state",
+                  "ms": 103.7385409999988,
+                  "timeoutMs": 899,
+                  "outcome": "Success"
+                },
+                {
+                  "operation": "vector-scores",
+                  "ms": 444.58820899999955,
+                  "timeoutMs": 761,
+                  "outcome": "Success"
+                }
+              ]
+            },
+            {
+              "i": 3,
+              "ms": 591.6331250000003,
+              "querySha256": "30e471b84b07125b6b6eb85763fbcabf67628a48696d03798118b8465873788c",
+              "scoresSha256": "1c6116eebd70c05380c36aeea0cf88e45b67b2e23bb574291285951c722c7a89",
+              "nativePayloadPresent": true,
+              "childStages": [
+                {
+                  "operation": "vector-state",
+                  "ms": 105.62054200000057,
+                  "timeoutMs": 899,
+                  "outcome": "Success"
+                },
+                {
+                  "operation": "vector-scores",
+                  "ms": 463.5251249999983,
+                  "timeoutMs": 772,
+                  "outcome": "Success"
+                }
+              ]
+            },
+            {
+              "i": 4,
+              "ms": 599.40625,
+              "querySha256": "52571691e1efbaa231fa236f490ce9d290164d357a93ca5e7a5a9814bcbb8ab8",
+              "scoresSha256": "dac1347dd2616c73c2dc962b9d29e9e3ad0554f4ad74126ead1196d2d9b5b9c9",
+              "nativePayloadPresent": true,
+              "childStages": [
+                {
+                  "operation": "vector-state",
+                  "ms": 103.34941599999911,
+                  "timeoutMs": 899,
+                  "outcome": "Success"
+                },
+                {
+                  "operation": "vector-scores",
+                  "ms": 459.4550419999996,
+                  "timeoutMs": 760,
+                  "outcome": "Success"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "order": ["native", "typescript"],
+        "measurements": {
+          "native": [
+            {
+              "i": 0,
+              "ms": 604.0803750000014,
+              "querySha256": "8b5ac424c06b1f004b7e65137e4d0180d52bcc7fe39e03efc446c8380d544095",
+              "scoresSha256": "141c322cbda7cfd90e511154591e462bd736c493816b53d22adf40f627c18679",
+              "nativePayloadPresent": true,
+              "childStages": [
+                {
+                  "operation": "vector-state",
+                  "ms": 111.199290999999,
+                  "timeoutMs": 899,
+                  "outcome": "Success"
+                },
+                {
+                  "operation": "vector-scores",
+                  "ms": 467.35854199999994,
+                  "timeoutMs": 763,
+                  "outcome": "Success"
+                }
+              ]
+            },
+            {
+              "i": 1,
+              "ms": 621.3801249999997,
+              "querySha256": "18eb2edfaaf0bacce567e5c1fbabc2425afa4713ed665f9ec83ad2cc96f6cf6d",
+              "scoresSha256": "1c99712eb3f15433eb1e211eb2a2d3f181d24a6a5ede5c6d8710103a4728e31c",
+              "nativePayloadPresent": true,
+              "childStages": [
+                {
+                  "operation": "vector-state",
+                  "ms": 105.49904099999912,
+                  "timeoutMs": 899,
+                  "outcome": "Success"
+                },
+                {
+                  "operation": "vector-scores",
+                  "ms": 471.96445799999856,
+                  "timeoutMs": 751,
+                  "outcome": "Success"
+                }
+              ]
+            },
+            {
+              "i": 2,
+              "ms": 589.9546249999985,
+              "querySha256": "56fa3b36d7d4a72377419cd157340fc72f4ce3f9266ed7591b4c7c2fe00afc01",
+              "scoresSha256": "ec677172f2a3718d8651138b1efe69f56ae258d39fb3f5e6ecec175aa6c446e2",
+              "nativePayloadPresent": true,
+              "childStages": [
+                {
+                  "operation": "vector-state",
+                  "ms": 105.45433400000002,
+                  "timeoutMs": 899,
+                  "outcome": "Success"
+                },
+                {
+                  "operation": "vector-scores",
+                  "ms": 455.3517499999998,
+                  "timeoutMs": 765,
+                  "outcome": "Success"
+                }
+              ]
+            },
+            {
+              "i": 3,
+              "ms": 718.0161669999998,
+              "querySha256": "30e471b84b07125b6b6eb85763fbcabf67628a48696d03798118b8465873788c",
+              "scoresSha256": "1c6116eebd70c05380c36aeea0cf88e45b67b2e23bb574291285951c722c7a89",
+              "nativePayloadPresent": true,
+              "childStages": [
+                {
+                  "operation": "vector-state",
+                  "ms": 104.71145799999977,
+                  "timeoutMs": 899,
+                  "outcome": "Success"
+                },
+                {
+                  "operation": "vector-scores",
+                  "ms": 602.6168749999997,
+                  "timeoutMs": 785,
+                  "outcome": "Success"
+                }
+              ]
+            },
+            {
+              "i": 4,
+              "ms": 584.1910420000004,
+              "querySha256": "52571691e1efbaa231fa236f490ce9d290164d357a93ca5e7a5a9814bcbb8ab8",
+              "scoresSha256": "dac1347dd2616c73c2dc962b9d29e9e3ad0554f4ad74126ead1196d2d9b5b9c9",
+              "nativePayloadPresent": true,
+              "childStages": [
+                {
+                  "operation": "vector-state",
+                  "ms": 106.492291999999,
+                  "timeoutMs": 899,
+                  "outcome": "Success"
+                },
+                {
+                  "operation": "vector-scores",
+                  "ms": 465.75237500000003,
+                  "timeoutMs": 782,
+                  "outcome": "Success"
+                }
+              ]
+            }
+          ],
+          "typescript": [
+            {
+              "i": 0,
+              "ms": 782.2063330000001,
+              "querySha256": "8b5ac424c06b1f004b7e65137e4d0180d52bcc7fe39e03efc446c8380d544095",
+              "scoresSha256": "141c322cbda7cfd90e511154591e462bd736c493816b53d22adf40f627c18679",
+              "nativePayloadPresent": false,
+              "childStages": [
+                {
+                  "operation": "vector-state",
+                  "ms": 107.7289579999997,
+                  "timeoutMs": 899,
+                  "outcome": "Success"
+                },
+                {
+                  "operation": "vector-scores",
+                  "ms": 636.9723749999994,
+                  "timeoutMs": 755,
+                  "outcome": "Success"
+                }
+              ]
+            },
+            {
+              "i": 1,
+              "ms": 755.9189580000002,
+              "querySha256": "18eb2edfaaf0bacce567e5c1fbabc2425afa4713ed665f9ec83ad2cc96f6cf6d",
+              "scoresSha256": "1c99712eb3f15433eb1e211eb2a2d3f181d24a6a5ede5c6d8710103a4728e31c",
+              "nativePayloadPresent": false,
+              "childStages": [
+                {
+                  "operation": "vector-state",
+                  "ms": 105.51787499999955,
+                  "timeoutMs": 899,
+                  "outcome": "Success"
+                },
+                {
+                  "operation": "vector-scores",
+                  "ms": 641.1658329999991,
+                  "timeoutMs": 785,
+                  "outcome": "Success"
+                }
+              ]
+            },
+            {
+              "i": 2,
+              "ms": 744.8028340000001,
+              "querySha256": "56fa3b36d7d4a72377419cd157340fc72f4ce3f9266ed7591b4c7c2fe00afc01",
+              "scoresSha256": "ec677172f2a3718d8651138b1efe69f56ae258d39fb3f5e6ecec175aa6c446e2",
+              "nativePayloadPresent": false,
+              "childStages": [
+                {
+                  "operation": "vector-state",
+                  "ms": 103.74983400000019,
+                  "timeoutMs": 899,
+                  "outcome": "Success"
+                },
+                {
+                  "operation": "vector-scores",
+                  "ms": 630.0385420000002,
+                  "timeoutMs": 785,
+                  "outcome": "Success"
+                }
+              ]
+            },
+            {
+              "i": 3,
+              "ms": 779.7233749999978,
+              "querySha256": "30e471b84b07125b6b6eb85763fbcabf67628a48696d03798118b8465873788c",
+              "scoresSha256": "1c6116eebd70c05380c36aeea0cf88e45b67b2e23bb574291285951c722c7a89",
+              "nativePayloadPresent": false,
+              "childStages": [
+                {
+                  "operation": "vector-state",
+                  "ms": 104.41937499999949,
+                  "timeoutMs": 899,
+                  "outcome": "Success"
+                },
+                {
+                  "operation": "vector-scores",
+                  "ms": 646.3148330000004,
+                  "timeoutMs": 767,
+                  "outcome": "Success"
+                }
+              ]
+            },
+            {
+              "i": 4,
+              "ms": 753.0280829999974,
+              "querySha256": "52571691e1efbaa231fa236f490ce9d290164d357a93ca5e7a5a9814bcbb8ab8",
+              "scoresSha256": "dac1347dd2616c73c2dc962b9d29e9e3ad0554f4ad74126ead1196d2d9b5b9c9",
+              "nativePayloadPresent": false,
+              "childStages": [
+                {
+                  "operation": "vector-state",
+                  "ms": 104.01695800000016,
+                  "timeoutMs": 899,
+                  "outcome": "Success"
+                },
+                {
+                  "operation": "vector-scores",
+                  "ms": 642.9059579999994,
+                  "timeoutMs": 790,
+                  "outcome": "Success"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "failures": [
+      {
+        "backend": "typescript",
+        "i": 0,
+        "ms": 917.0894170000006,
+        "error": "{\"_tag\":\"RecallReadyReadBoundaryError\",\"reason\":\"budget-exhausted\"}",
+        "expected": false,
+        "childStages": [
+          {
+            "operation": "vector-state",
+            "ms": 116.57095799999979,
+            "timeoutMs": 893,
+            "outcome": "Success"
+          },
+          {
+            "operation": "vector-scores",
+            "ms": 687.314625,
+            "timeoutMs": 671,
+            "outcome": "Failure"
+          }
+        ]
+      }
+    ],
+    "sourceFilesUnchanged": true,
+    "fixtureDatabaseSha256": "d1b7ac2b96986b469d5c63c84b9165bd82d99aae1ab9629467129427e101d744",
+    "fixtureDatabaseUnchanged": true
+  },
+  "compiledFirstCase": {
+    "kind": "committed-compiled-production-path-diagnostic",
+    "count": 100000,
+    "sourceCommit": "f2bd0d976947a672ec3412f4c32d8e023d56dc1a",
+    "firstModelUseMilliseconds": 280.3504589999999,
+    "orders": [
+      {
+        "order": ["typescript", "native"],
+        "measurements": {
+          "typescript": [],
+          "native": []
+        }
+      },
+      {
+        "order": ["native", "typescript"],
+        "measurements": {
+          "native": [
+            {
+              "i": 0,
+              "ms": 717.5881250000002,
+              "querySha256": "8b5ac424c06b1f004b7e65137e4d0180d52bcc7fe39e03efc446c8380d544095",
+              "scoresSha256": "141c322cbda7cfd90e511154591e462bd736c493816b53d22adf40f627c18679",
+              "nativePayloadPresent": true
+            }
+          ],
+          "typescript": [
+            {
+              "i": 0,
+              "ms": 719.4689170000001,
+              "querySha256": "8b5ac424c06b1f004b7e65137e4d0180d52bcc7fe39e03efc446c8380d544095",
+              "scoresSha256": "141c322cbda7cfd90e511154591e462bd736c493816b53d22adf40f627c18679",
+              "nativePayloadPresent": false
+            }
+          ]
+        }
+      }
+    ],
+    "failures": [
+      {
+        "backend": "typescript",
+        "i": 0,
+        "ms": 911.6018750000001,
+        "error": "{\"_tag\":\"RecallReadyReadBoundaryError\",\"reason\":\"budget-exhausted\"}",
+        "expected": false
+      },
+      {
+        "backend": "native",
+        "i": 0,
+        "ms": 909.24125,
+        "error": "{\"_tag\":\"RecallReadyReadBoundaryError\",\"reason\":\"budget-exhausted\"}",
+        "expected": false
+      }
+    ],
+    "sourceFilesUnchanged": true,
+    "fixtureDatabaseSha256": "d1b7ac2b96986b469d5c63c84b9165bd82d99aae1ab9629467129427e101d744",
+    "fixtureDatabaseUnchanged": true
+  },
+  "compiledCandidate": {
+    "commit": "f2bd0d976947a672ec3412f4c32d8e023d56dc1a",
+    "executableSha256": "241030d9fdc228995e0aab327b569b6c9728b78a6dca51213c7dfb2693c7bc99",
+    "nativeBinarySha256": "e481a9da45c884f9b83ff509a7abf480368241d26f8f0b1c83a79534e8ed7800",
+    "nativeBuildInfo": {
+      "protocolVersion": 1,
+      "napiVersion": 6,
+      "crateVersion": "0.0.0",
+      "sqliteVersion": "3.54.1",
+      "sqliteSourceId": "2026-10-16 14:45:20 555e07ef33f69a0957d24d8e555b702464a131d6f1607f4c3c1e4551e8e6ca76",
+      "target": "aarch64-apple-darwin",
+      "rustVersion": "1.89.0",
+      "sourceCommit": "f2bd0d976947a672ec3412f4c32d8e023d56dc1a",
+      "sourceTree": "981d6ec844510cc45965704602efde2dd22c22d7",
+      "lockSha256": "3a950d3ed009e3edeea0daabda7f2639bbdb6fbc482085e51fc9b070528d1259",
+      "toolchainSha256": "af97a255440d84ccd35ba218937b58a1a5345687a9ae1a4293f45c570eae35a2",
+      "sourceSha256": "1e5ba50f6a1d11b38994b3fc8b0cf4525b34e31185910fa7cc4b6c2f13091194"
+    },
+    "commonAssetFiles": 156,
+    "commonAssetHashesEqual": true,
+    "onlyOptionalPayloadOmittedInBaseline": true
+  },
+  "engineProof": {
+    "status": "passed",
+    "separateTinyFixture": true,
+    "nativeResult": "exact scalar oracle map",
+    "baselineResult": "strict vector validation failure",
+    "sourceIdsDiffer": true
+  },
+  "retainedSetupFailures": [
+    {
+      "artifact": "compiled-proof-first-failure.log",
+      "observation": "Both initial tiny compiled requests exhausted the unchanged compute allowance."
+    },
+    {
+      "artifact": "reusable-100k-stdout.log",
+      "observation": "First draft reusable 100k setup reached engine proof then failed; an eager finalizer serialized an early snapshot and obscured detailed proof results. Draft serializer fixed before any formal capture."
+    }
+  ],
+  "interpretation": "The 19/20 successful compiled warm requests are not a qualifying paired run. Failed samples and the 718ms native outlier remain intact. Approximate successful-request means do not establish the 20% p95 gate. No 10k/tied/RSS/Linux adoption result exists.",
+  "reusableHarnessDiagnostics": {
+    "status": "setup-and-primary-discriminator-passed-not-qualified",
+    "engineProof": "actual native source-id discriminator passed after explicit executable setup verification",
+    "startupVerification": {
+      "baselineMilliseconds": 1673.312708,
+      "candidateMilliseconds": 117.652209,
+      "scope": "Unmeasured executable setup --version; not a semantic sample"
+    },
+    "tinySmoke": {
+      "documents": 10,
+      "pairs": 1,
+      "warmSamplesPerArm": 1,
+      "firstSemanticBaselineMilliseconds": 170.545708,
+      "firstSemanticCandidateMilliseconds": 208.847916,
+      "warmBaselineMilliseconds": 165.221292,
+      "warmCandidateMilliseconds": 172.618417,
+      "exactOrderedScalarAndQueryParity": true,
+      "sourceFixtureDistributionModelFences": true,
+      "resourceEvidenceComplete": false,
+      "diagnostic": true
+    },
+    "earlierFailures": "All initial unverified executable-path opening failures are retained. They are not reclassified as successful first-use requests. Earlier eager serialization bug was fixed before this verified smoke.",
+    "formalQualification": false,
+    "primaryDiscriminator": {
+      "documents": 100000,
+      "pairs": 1,
+      "warmSamplesPerArm": 1,
+      "capturedCandidate": {
+        "commit": "f2bd0d976947a672ec3412f4c32d8e023d56dc1a",
+        "tree": "981d6ec844510cc45965704602efde2dd22c22d7",
+        "target": "bun-darwin-arm64",
+        "bun": "1.4.4"
+      },
+      "setupMilliseconds": 86339.362375,
+      "executableSetupVerification": [
+        {
+          "backend": "baseline",
+          "milliseconds": 1672.006792,
+          "success": true,
+          "version": "threadnote v5.3.6-local.gf2bd0d976947a672ec3412f4c32d8e023d56dc1a"
+        },
+        {
+          "backend": "candidate",
+          "milliseconds": 115.822667,
+          "success": true,
+          "version": "threadnote v5.3.6-local.gf2bd0d976947a672ec3412f4c32d8e023d56dc1a"
+        }
+      ],
+      "firstUse": {
+        "requests": [
+          {
+            "backend": "baseline",
+            "result": {
+              "sample": 0,
+              "milliseconds": 730.868334,
+              "success": true,
+              "querySha256": "8b5ac424c06b1f004b7e65137e4d0180d52bcc7fe39e03efc446c8380d544095",
+              "scoresSha256": "6968f70b6a69cfaabbeb6281956f2d9e49e256c65c7cabe67ad80bdddf12bc49",
+              "children": [
+                {
+                  "operation": "vector-state",
+                  "milliseconds": 102.897541,
+                  "timeoutMs": 896
+                },
+                {
+                  "operation": "vector-scores",
+                  "milliseconds": 593.110042,
+                  "timeoutMs": 763
+                }
+              ]
+            }
+          },
+          {
+            "backend": "candidate",
+            "result": {
+              "sample": 0,
+              "milliseconds": 596.152792,
+              "success": true,
+              "querySha256": "8b5ac424c06b1f004b7e65137e4d0180d52bcc7fe39e03efc446c8380d544095",
+              "scoresSha256": "6968f70b6a69cfaabbeb6281956f2d9e49e256c65c7cabe67ad80bdddf12bc49",
+              "children": [
+                {
+                  "operation": "vector-state",
+                  "milliseconds": 104.393417,
+                  "timeoutMs": 887
+                },
+                {
+                  "operation": "vector-scores",
+                  "milliseconds": 471.366,
+                  "timeoutMs": 775
+                }
+              ]
+            }
+          }
+        ],
+        "modelMilliseconds": 272.621083
+      },
+      "warmArms": [
+        {
+          "backend": "baseline",
+          "samples": [
+            {
+              "sample": 0,
+              "milliseconds": 702.264541,
+              "success": true,
+              "querySha256": "8b5ac424c06b1f004b7e65137e4d0180d52bcc7fe39e03efc446c8380d544095",
+              "scoresSha256": "6968f70b6a69cfaabbeb6281956f2d9e49e256c65c7cabe67ad80bdddf12bc49",
+              "children": [
+                {
+                  "operation": "vector-state",
+                  "milliseconds": 104.776375,
+                  "timeoutMs": 899
+                },
+                {
+                  "operation": "vector-scores",
+                  "milliseconds": 590.861458,
+                  "timeoutMs": 789
+                }
+              ]
+            }
+          ],
+          "processTreeSampler": {
+            "intervalMilliseconds": 25,
+            "phases": {
+              "finish": {
+                "cpuMilliseconds": 0,
+                "processPeakCount": 0,
+                "processSampleAttempts": 0,
+                "processSampleFailures": 0,
+                "processSampleGapPeakMilliseconds": 0,
+                "processSamples": 0,
+                "rssPeakBytes": 0,
+                "temporaryLinkedPeakBytes": 0,
+                "temporaryOpenAttempts": 0,
+                "temporaryOpenFailures": 0,
+                "temporaryOpenPeakBytes": 0,
+                "temporaryOpenSamples": 0,
+                "databasePeakBytes": 339365888,
+                "journalPeakBytes": 0,
+                "samples": 1,
+                "shmPeakBytes": 32768,
+                "temporaryPeakBytes": 0,
+                "walPeakBytes": 0
+              },
+              "production-query": {
+                "cpuMilliseconds": 560,
+                "processPeakCount": 2,
+                "processSampleAttempts": 2,
+                "processSampleFailures": 0,
+                "processSampleGapPeakMilliseconds": 306,
+                "processSamples": 2,
+                "rssPeakBytes": 1759412224,
+                "temporaryLinkedPeakBytes": 0,
+                "temporaryOpenAttempts": 0,
+                "temporaryOpenFailures": 0,
+                "temporaryOpenPeakBytes": 0,
+                "temporaryOpenSamples": 0,
+                "databasePeakBytes": 339365888,
+                "journalPeakBytes": 0,
+                "samples": 23,
+                "shmPeakBytes": 32768,
+                "temporaryPeakBytes": 0,
+                "walPeakBytes": 0
+              },
+              "start": {
+                "cpuMilliseconds": 0,
+                "processPeakCount": 1,
+                "processSampleAttempts": 1,
+                "processSampleFailures": 0,
+                "processSampleGapPeakMilliseconds": 5,
+                "processSamples": 1,
+                "rssPeakBytes": 1575256064,
+                "temporaryLinkedPeakBytes": 0,
+                "temporaryOpenAttempts": 1,
+                "temporaryOpenFailures": 0,
+                "temporaryOpenPeakBytes": 0,
+                "temporaryOpenSamples": 1,
+                "databasePeakBytes": 339365888,
+                "journalPeakBytes": 0,
+                "samples": 1,
+                "shmPeakBytes": 32768,
+                "temporaryPeakBytes": 0,
+                "walPeakBytes": 0
+              }
+            },
+            "platform": "darwin",
+            "processTelemetry": {
+              "availability": "available",
+              "parentIdentityValidation": "darwin-ps-lstart",
+              "sampleIntervalMilliseconds": 250,
+              "scope": "recursive-process-tree",
+              "source": "darwin-ps"
+            },
+            "samples": 25,
+            "temporaryTelemetry": {
+              "availability": "available",
+              "maximumOpenFileDescriptors": 65536,
+              "maximumProcesses": 4096,
+              "openFileSampleIntervalMilliseconds": 1000,
+              "projectionByteLimit": 8388608,
+              "scope": "temporary-root-linked-plus-process-tree-open-files",
+              "source": "darwin-lsof"
+            },
+            "version": 4
+          },
+          "resourceEvidenceComplete": true
+        },
+        {
+          "backend": "candidate",
+          "samples": [
+            {
+              "sample": 0,
+              "milliseconds": 538.954541,
+              "success": true,
+              "querySha256": "8b5ac424c06b1f004b7e65137e4d0180d52bcc7fe39e03efc446c8380d544095",
+              "scoresSha256": "6968f70b6a69cfaabbeb6281956f2d9e49e256c65c7cabe67ad80bdddf12bc49",
+              "children": [
+                {
+                  "operation": "vector-state",
+                  "milliseconds": 103.663,
+                  "timeoutMs": 899
+                },
+                {
+                  "operation": "vector-scores",
+                  "milliseconds": 427.682709,
+                  "timeoutMs": 789
+                }
+              ]
+            }
+          ],
+          "processTreeSampler": {
+            "intervalMilliseconds": 25,
+            "phases": {
+              "finish": {
+                "cpuMilliseconds": 0,
+                "processPeakCount": 1,
+                "processSampleAttempts": 1,
+                "processSampleFailures": 0,
+                "processSampleGapPeakMilliseconds": 301,
+                "processSamples": 1,
+                "rssPeakBytes": 1574862848,
+                "temporaryLinkedPeakBytes": 0,
+                "temporaryOpenAttempts": 0,
+                "temporaryOpenFailures": 0,
+                "temporaryOpenPeakBytes": 0,
+                "temporaryOpenSamples": 0,
+                "databasePeakBytes": 339365888,
+                "journalPeakBytes": 0,
+                "samples": 1,
+                "shmPeakBytes": 32768,
+                "temporaryPeakBytes": 0,
+                "walPeakBytes": 0
+              },
+              "production-query": {
+                "cpuMilliseconds": 220,
+                "processPeakCount": 2,
+                "processSampleAttempts": 1,
+                "processSampleFailures": 0,
+                "processSampleGapPeakMilliseconds": 283,
+                "processSamples": 1,
+                "rssPeakBytes": 1673330688,
+                "temporaryLinkedPeakBytes": 0,
+                "temporaryOpenAttempts": 0,
+                "temporaryOpenFailures": 0,
+                "temporaryOpenPeakBytes": 0,
+                "temporaryOpenSamples": 0,
+                "databasePeakBytes": 339365888,
+                "journalPeakBytes": 0,
+                "samples": 18,
+                "shmPeakBytes": 32768,
+                "temporaryPeakBytes": 0,
+                "walPeakBytes": 0
+              },
+              "start": {
+                "cpuMilliseconds": 0,
+                "processPeakCount": 1,
+                "processSampleAttempts": 1,
+                "processSampleFailures": 0,
+                "processSampleGapPeakMilliseconds": 4,
+                "processSamples": 1,
+                "rssPeakBytes": 1575387136,
+                "temporaryLinkedPeakBytes": 0,
+                "temporaryOpenAttempts": 1,
+                "temporaryOpenFailures": 0,
+                "temporaryOpenPeakBytes": 0,
+                "temporaryOpenSamples": 1,
+                "databasePeakBytes": 339365888,
+                "journalPeakBytes": 0,
+                "samples": 1,
+                "shmPeakBytes": 32768,
+                "temporaryPeakBytes": 0,
+                "walPeakBytes": 0
+              }
+            },
+            "platform": "darwin",
+            "processTelemetry": {
+              "availability": "available",
+              "parentIdentityValidation": "darwin-ps-lstart",
+              "sampleIntervalMilliseconds": 250,
+              "scope": "recursive-process-tree",
+              "source": "darwin-ps"
+            },
+            "samples": 20,
+            "temporaryTelemetry": {
+              "availability": "available",
+              "maximumOpenFileDescriptors": 65536,
+              "maximumProcesses": 4096,
+              "openFileSampleIntervalMilliseconds": 1000,
+              "projectionByteLimit": 8388608,
+              "scope": "temporary-root-linked-plus-process-tree-open-files",
+              "source": "darwin-lsof"
+            },
+            "version": 4
+          },
+          "resourceEvidenceComplete": false
+        }
+      ],
+      "exactOrderedScalarAndQueryParity": true,
+      "sourceFixtureDistributionModelFences": true,
+      "caseGatesPassed": false,
+      "qualified": false,
+      "diagnostic": true,
+      "note": "One warm sample per arm; the native arm has only one RSS process sample. No formal p95/RSS gate or source-cohort qualification is claimed."
+    }
+  },
+  "historicalScope": "Optional-native and omitted-addon/source diagnostics predating the native-only revision; preserved without relabeling as independent-baseline qualification.",
+  "nativeOnlyQualification": {
+    "status": "not-run",
+    "qualified": false,
+    "baselineCommit": "66f4c1d8baed033ec484f4db2895ea2252b4e2d0",
+    "captures": []
+  },
+  "nativeOnlyBaselineCompatibility": {
+    "status": "passed-correctness-only",
+    "qualified": false,
+    "platform": "bun-darwin-arm64",
+    "sourceCommit": "66f4c1d8baed033ec484f4db2895ea2252b4e2d0",
+    "executableSha256": "43c92eb75c45836ad8159e7eb953a8a952d7a214e7c06b5d25a1dfd80103daf4",
+    "modelSha256": "f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804",
+    "overlayDescriptorSha256": "c341211513775d6f4e1ce1916729ffb2f44e2167901358586115d66f01696029",
+    "hybridInventorySha256": "d1d10507dc6a0a676a4d597c915fa9f3d6e7bc2b3279e81e79ca714aeafe8931",
+    "canonicalDocuments": 2,
+    "realPinnedBgeParent": true,
+    "unchangedWorkerDeadlineMilliseconds": 2000,
+    "exactOrderedScalarParity": true,
+    "originalReceiptUnchanged": true,
+    "hybridInventoryUnchanged": true,
+    "rawArtifact": "/private/tmp/threadnote-native-vector-baseline66-hybrid-compat.json",
+    "reason": "One actual frozen TS66 worker request accepted a genuinely staged shared inference overlay using separately authenticated original component provenance. No timing/performance qualification was attempted."
+  }
+}

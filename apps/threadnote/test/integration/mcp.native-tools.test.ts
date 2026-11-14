@@ -32,6 +32,7 @@ import {memoryIdentityAlias} from '@threadnote/memory/identity-alias';
 import {isDeferredCodeAnchorIntentFilename} from '@threadnote/threadnote/memory/deferred/code_anchor';
 import {runEffect} from '../helpers/effect-runtime.js';
 import {loadRecallIndexData, recallIndexDatabaseFilename} from '@threadnote/recall/index';
+import {codeGraphCommittedFileContentHash} from '@threadnote/graph/content_identity';
 import {
   parseContextBriefJsonText,
   parseContextBriefV1,
@@ -4085,7 +4086,7 @@ describe('Threadnote MCP toolsets', () => {
         }
 
         indexCodeGraph(fixture, repository);
-        await callCodeGraphUntilReady(client, {
+        const finalizedGraph = await callCodeGraphUntilReady(client, {
           callerCwd: repository,
           operation: 'query',
           query: 'addedAfterPull',
@@ -4097,6 +4098,29 @@ describe('Threadnote MCP toolsets', () => {
         const finalizedCitation = finalizedMemory?.metadata.codeCitations?.[0];
         if (!finalizedCitation)
           throw TestError.make({message: 'Automatic finalization did not attach the expected citation.'});
+        const finalizedCommit = EffectString.trim(
+          execFileSync('git', ['rev-parse', 'HEAD'], {cwd: repository, encoding: 'utf8'}),
+        );
+        const objectFormat = Schema.decodeUnknownSync(Schema.Literals(['sha1', 'sha256']))(
+          EffectString.trim(
+            execFileSync('git', ['rev-parse', '--show-object-format'], {cwd: repository, encoding: 'utf8'}),
+          ),
+        );
+        expect(finalizedGraph.structuredContent).toMatchObject({
+          snapshot: {commit: finalizedCommit, id: expect.any(String)},
+        });
+        expect(finalizedCitation).toMatchObject({
+          fileContentHash: {
+            algorithm: 'sha256',
+            value: codeGraphCommittedFileContentHash(objectFormat, await readFile(join(repository, 'src', 'index.ts'))),
+          },
+          sourceCommit: finalizedCommit,
+          sourceDirty: false,
+          sourceSnapshotId: optionalRecordField(
+            optionalRecordField(finalizedGraph.structuredContent, 'snapshot'),
+            'id',
+          ),
+        });
         const automaticBacklink = await client.callTool(
           {
             arguments: {
@@ -4127,8 +4151,22 @@ describe('Threadnote MCP toolsets', () => {
             ),
         );
         expect(automaticMemoryMatches).toHaveLength(1);
+        const automaticMemory = automaticMemoryMatches[0];
+        const automaticReceipt = automaticMemory.citationReceipts?.[0];
+        if (automaticReceipt?.status === 'unknown') {
+          expect(automaticMemory.citationReceipts).toHaveLength(1);
+          expect(automaticReceipt).toMatchObject({
+            citationId: finalizedCitation.id,
+            reason: 'citation-limit',
+          });
+          expect(automaticMemory.citationSummary).toMatchObject({coverage: 'incomplete', exact: 0, unknown: 1});
+          expect(automaticBrief.coverage.gaps).toContain('memory-freshness-unknown');
+        } else {
+          expect(automaticMemory.citationReceipts).toBeUndefined();
+          expect(automaticMemory.citationSummary).toMatchObject({coverage: 'current-complete', exact: 1, unknown: 0});
+        }
         expect(
-          automaticMemoryMatches[0],
+          automaticMemory,
           Effect.pipe(
             JSON.stringify({
               citationReceipts: automaticMemoryMatches[0]?.citationReceipts,
@@ -4143,7 +4181,7 @@ describe('Threadnote MCP toolsets', () => {
               anchorOrdinal: 0,
               citationId: finalizedCitation.id,
               kind: 'file',
-              status: 'exact',
+              status: automaticReceipt?.status ?? 'exact',
             },
           ],
           selectionBasis: 'code-citation',

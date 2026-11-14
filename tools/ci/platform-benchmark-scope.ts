@@ -34,6 +34,10 @@ const RELEASE_READINESS_PATHS = new Set([
 
 const RECALL_PATHS = new Set([
   'scripts/benchmark-recall-vectors.ts',
+  'scripts/assemble-native-vector-reader.ts',
+  'scripts/native-vector-reader-payload.ts',
+  'scripts/finalize-native-vector-reader.ts',
+  'scripts/verify-native-vector-reader.ts',
   'scripts/evaluate-recall.ts',
   'scripts/recall-vector-performance-budget.ts',
   'scripts/recall-vector-storage-budget.ts',
@@ -59,6 +63,8 @@ const CODE_GRAPH_PATHS = new Set([
 ]);
 
 const SHARED_PATHS = new Set([
+  'scripts/windows-process-tree-sampler.ts',
+  'scripts/windows-process-tree-sampler.ps1',
   'packages/platform/src/command.ts',
   'packages/platform/src/digest.ts',
   'apps/threadnote/src/effect/runtime.ts',

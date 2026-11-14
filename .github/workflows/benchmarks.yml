@@ -46,7 +46,7 @@ on:
         type: boolean
         default: false
       include_native_recall_vector_capture:
-        description: Capture serial Linux recall-vector dense/tied evidence with the committed BGE model
+        description: Capture serial native-only/frozen-TypeScript pairs on all eight native profiles with the committed BGE model
         required: false
         type: boolean
         default: false
@@ -121,6 +121,9 @@ jobs:
     if: ${{ always() && github.event_name == 'pull_request' && (needs.classify-platform-benchmark.result != 'success' || needs.classify-platform-benchmark.outputs.run_recall_pr != 'false') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      THREADNOTE_NATIVE_VECTOR_READER_MANIFEST: ${{ github.workspace }}/.context/native-vector-reader/manifest.json
+      THREADNOTE_NATIVE_VECTOR_READER_SOURCE_ROOT: ${{ github.workspace }}
 
     steps:
       - uses: actions/checkout@v7
@@ -130,6 +133,11 @@ jobs:
           bun-version: ${{ env.BUN_VERSION }}
 
       - run: bun install --frozen-lockfile
+
+      - name: Assemble the required source benchmark reader
+        run: >-
+          bun scripts/assemble-native-inference.ts --gnu-container
+          --container-command-json '["bun","scripts/assemble-native-vector-reader.ts","--development"]'
 
       - name: Gate production lexical and exact-search behavior
         run: bun tools/ci/recall-confirmation.ts
@@ -141,6 +149,7 @@ jobs:
           path: |
             artifacts/recall-production-10000.json
             artifacts/recall-confirmation/
+            .context/native-inference-container/*-failure.json
           if-no-files-found: warn
           retention-days: 14
 
@@ -988,16 +997,57 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  recall-vector-native-linux:
-    name: Recall vectors · Linux serial diagnostic capture
+  recall-vector-native:
+    name: Recall vectors · ${{ matrix.target }} native production capture
     if: github.event_name == 'workflow_dispatch' && inputs.include_native_recall_vector_capture
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - target: bun-darwin-arm64
+            os: macos-15
+            musl: false
+            gnu: false
+          - target: bun-darwin-x64
+            os: macos-15-intel
+            musl: false
+            gnu: false
+          - target: bun-linux-arm64
+            os: ubuntu-24.04-arm
+            musl: false
+            gnu: true
+          - target: bun-linux-arm64-musl
+            os: ubuntu-24.04-arm
+            musl: true
+            gnu: false
+          - target: bun-linux-x64-baseline
+            os: ubuntu-24.04
+            musl: false
+            gnu: true
+          - target: bun-linux-x64-baseline-musl
+            os: ubuntu-24.04
+            musl: true
+            gnu: false
+          - target: bun-windows-arm64
+            os: windows-11-arm
+            musl: false
+            gnu: false
+          - target: bun-windows-x64-baseline
+            os: windows-2025
+            musl: false
+            gnu: false
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
+      THREADNOTE_BUILD_TARGET: ${{ matrix.target }}
       MODEL_RELATIVE_PATH: apps/threadnote/embedded/models/bge-small-en-v1.5-q8/f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804.gguf
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -1005,44 +1055,111 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
-      - name: Prepare bounded output directory
-        run: mkdir -p "$RUNNER_TEMP/recall-vector-native"
+      - name: Initialize native Windows C toolchain
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installation = & $vswhere -latest -products '*' -property installationPath
+          if (!$installation) { throw 'Visual Studio native build tools are required.' }
+          Import-Module "$installation\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          $architecture = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
+          Enter-VsDevShell -VsInstallPath $installation -SkipAutomaticLocation -DevCmdArguments "-arch=$architecture -host_arch=$architecture"
+          foreach ($name in @('PATH','INCLUDE','LIB','LIBPATH','VCToolsInstallDir','WindowsSdkDir','WindowsSDKVersion')) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            if ($value) { "$name=$value" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append }
+          }
+      - name: Verify Windows native tools in Bash
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          command -v cl
+          command -v dumpbin
 
-      - name: Capture serial primary samples and separate observer controls
-        timeout-minutes: 40
+      - name: Install pinned native vector toolchain
+        if: ${{ !matrix.musl && !matrix.gnu }}
+        run: rustup toolchain install 1.89.0 --profile minimal
+
+      - name: Prepare one serial native-host capture driver
         shell: bash
         run: |
           set -euo pipefail
-          output_dir="$RUNNER_TEMP/recall-vector-native"
-          model_file="$GITHUB_WORKSPACE/$MODEL_RELATIVE_PATH"
+          mkdir -p .context/native-vector-capture
+          cat > .context/native-vector-capture/run.sh <<'CAPTURE'
+          set -euo pipefail
+          workspace="$(pwd -P)"
+          baseline_root="$workspace/.context/frozen-ts66"
+          output_dir="$workspace/.context/native-vector-capture"
+          model_file="$workspace/apps/threadnote/embedded/models/bge-small-en-v1.5-q8/f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804.gguf"
           test -f "$model_file"
-          for replica in 1 2 3; do
-            for documents in 10000 100000; do
-              for distribution in dense tied; do
-                output="$output_dir/recall-vector-${documents}-${distribution}-replica-${replica}.json"
-                bun scripts/benchmark-recall-vectors.ts \
-                  --pair "$replica" \
-                  --arm baseline \
-                  --documents "$documents" \
-                  --distribution "$distribution" \
-                  --samples 30 \
-                  --stage-attribution \
-                  --model bge-small-en-v1.5-q8 \
-                  --model-file "$model_file" \
-                  --output "$output"
-              done
-            done
+          git worktree add --detach "$baseline_root" 66f4c1d8baed033ec484f4db2895ea2252b4e2d0
+          baseline_install=(bun install --frozen-lockfile --ignore-scripts)
+          if [[ "$THREADNOTE_BUILD_TARGET" == *-musl ]]; then baseline_install+=(--libc=glibc); fi
+          baseline_install_command="${baseline_install[*]}"
+          (
+            cd "$baseline_root"
+            "${baseline_install[@]}"
+            bun -e 'const fs=require("node:fs"),path=require("node:path");const root=fs.realpathSync(".")+path.sep;for(const name of fs.readdirSync("node_modules/@threadnote")){if(!fs.realpathSync(path.join("node_modules/@threadnote",name)).startsWith(root))throw Error("Baseline workspace link escaped its frozen checkout");}'
+            THREADNOTE_DEVELOPMENT_BUILD_VERSION=5.3.6-local.g66f4c1d8baed033ec484f4db2895ea2252b4e2d0 bun run build
+            test -z "$(git status --porcelain=v1 --untracked-files=normal)"
+          )
+          bun scripts/benchmark-recall-vectors.ts --write-baseline-provenance \
+            --baseline-source-root "$baseline_root" --baseline-distribution-root "$baseline_root/dist" \
+            --baseline-install-command "$baseline_install_command"
+          bun run build:release
+          bun scripts/verify-native-vector-reader.ts --required
+          bun scripts/assemble-native-inference.ts --stage-overlay "$workspace/dist" --distribution-root "$baseline_root/dist"
+          if [[ "${OS:-}" == "Windows_NT" ]]; then
+            bun --bun vitest run apps/threadnote/test/unit/windows-process-tree-sampler.test.ts apps/threadnote/test/integration/code-graph.benchmark-failure.test.ts
+          fi
+          bun scripts/benchmark-recall-vectors.ts --production-path --pairs 1 --samples 1 \
+            --documents 2 --distribution dense --model-file "$model_file" \
+            --distribution-root "$workspace/dist" --baseline-distribution-root "$baseline_root/dist" \
+            --output "$output_dir/setup-smoke.json" 2>&1 | tee "$output_dir/setup-smoke.log"
+          for case in 100000-dense 100000-tied 10000-dense 10000-tied; do
+            documents="${case%-*}"
+            distribution="${case#*-}"
+            output="$output_dir/recall-vector-${case}-production.json"
+            bun scripts/benchmark-recall-vectors.ts \
+              --production-path --pairs 3 --samples 30 \
+              --documents "$documents" --distribution "$distribution" \
+              --model-file "$model_file" --distribution-root "$workspace/dist" \
+              --baseline-distribution-root "$baseline_root/dist" --output "$output" 2>&1 | tee "$output.log"
           done
+          CAPTURE
+
+      - name: Capture serial production pairs without a required timing gate
+        if: ${{ !matrix.musl && !matrix.gnu }}
+        timeout-minutes: 40
+        shell: bash
+        run: bash .context/native-vector-capture/run.sh
+
+      - name: Capture in the pinned native GNU compatibility environment
+        if: matrix.gnu
+        timeout-minutes: 40
+        run: >-
+          bun scripts/assemble-native-inference.ts --gnu-container
+          --container-command-json '["bash","-ec","exec bash .context/native-vector-capture/run.sh"]'
+
+      - name: Capture in the pinned native musl environment
+        if: matrix.musl
+        timeout-minutes: 40
+        run: >-
+          bun scripts/assemble-native-inference.ts --musl-container
+          --container-command-json '["bash","-ec","exec bash .context/native-vector-capture/run.sh"]'
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
-        timeout-minutes: 10
+        timeout-minutes: 5
         with:
-          name: recall-vector-native-linux-${{ github.run_id }}
-          path: ${{ runner.temp }}/recall-vector-native/recall-vector-*.json
+          name: recall-vector-native-${{ matrix.target }}-${{ github.run_id }}
+          path: .context/native-vector-capture/
           if-no-files-found: warn
           retention-days: 30
 
-      - name: Remove private capture outputs
+      - name: Remove owned benchmark workspace
         if: always()
-        run: rm -rf -- "$RUNNER_TEMP/recall-vector-native"
+        shell: bash
+        run: |
+          git worktree remove --force "$GITHUB_WORKSPACE/.context/frozen-ts66" || true
+          rm -rf -- "$GITHUB_WORKSPACE/.context/native-vector-capture"

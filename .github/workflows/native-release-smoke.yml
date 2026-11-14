@@ -25,6 +25,14 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
+      - name: Route Bun caches outside the source checkout
+        shell: bash
+        env:
+          BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/threadnote-bun-install
+          BUN_RUNTIME_TRANSPILER_CACHE_PATH: ${{ runner.temp }}/threadnote-bun-transpiler
+        run: |
+          printf '%s\n' "BUN_INSTALL_CACHE_DIR=$BUN_INSTALL_CACHE_DIR" >> "$GITHUB_ENV"
+          printf '%s\n' "BUN_RUNTIME_TRANSPILER_CACHE_PATH=$BUN_RUNTIME_TRANSPILER_CACHE_PATH" >> "$GITHUB_ENV"
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
@@ -51,10 +59,292 @@ jobs:
           bun --bun vitest run
           packages/workflow-automations/test/inventory.test.ts
           packages/workflow-automations/test/baseline.test.ts
+      - name: Initialize native Windows C toolchain
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installation = & $vswhere -latest -products '*' -property installationPath
+          if (!$installation) { throw 'Visual Studio native build tools are required.' }
+          Import-Module "$installation\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          $architecture = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
+          Enter-VsDevShell -VsInstallPath $installation -SkipAutomaticLocation -DevCmdArguments "-arch=$architecture -host_arch=$architecture"
+          foreach ($name in @('PATH','INCLUDE','LIB','LIBPATH','VCToolsInstallDir','WindowsSdkDir','WindowsSDKVersion')) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            if ($value) { "$name=$value" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append }
+          }
+      - name: Install pinned native vector toolchain
+        run: rustup toolchain install 1.89.0 --profile minimal
       - name: Build native payload
-        run: bun run build
+        if: runner.os != 'Linux'
+        run: bun run build:release
+        env:
+          THREADNOTE_BUILD_TARGET: ${{ inputs.target == 'windows-x64' && 'bun-windows-x64-baseline' || format('bun-{0}', inputs.target) }}
+      - name: Build GNU payload at the preserved libc floor
+        if: runner.os == 'Linux' && !endsWith(inputs.target, '-musl')
+        run: >-
+          bun scripts/assemble-native-inference.ts --gnu-container
+          --container-command-json "$NATIVE_RELEASE_COMMAND_JSON"
+        env:
+          # Keep $PWD literal until Bash runs inside the pinned native container.
+          NATIVE_RELEASE_COMMAND_JSON: >-
+            ["bash","-ec","set -euo pipefail; bun run build:release; bun scripts/verify-native-vector-reader.ts --required; export THREADNOTE_NATIVE_VECTOR_READER_REQUIRED=1 THREADNOTE_NATIVE_VECTOR_READER_MANIFEST=\"$PWD/dist/runtime/vector-reader/manifest.json\" THREADNOTE_NATIVE_VECTOR_READER_SOURCE_ROOT=\"$PWD\"; bun --bun vitest run packages/recall/test/unit/native-vector-reader.test.ts packages/recall/test/background-vector-step.test.ts apps/threadnote/test/integration/recall-admission-budget.test.ts apps/threadnote/test/unit/vector-index.test.ts apps/threadnote/test/unit/vector-index.eligibility.test.ts packages/recall/test/unit/vector-scope-upgrade.test.ts apps/threadnote/test/unit/recall.mcp-background-refresh.test.ts; bun --bun vitest run --maxWorkers=1 --no-file-parallelism apps/threadnote/test/integration/vector-native-read-boundary.test.ts; bun scripts/smoke-self-contained.ts; bun --bun vitest run --config vitest.e2e.config.ts apps/threadnote/test/e2e/local-bins.e2e.ts -t \"recalls saved memory|loads only the bundled\""]
+      - name: Build musl payload at the preserved libc floor
+        if: endsWith(inputs.target, '-musl')
+        run: >-
+          bun scripts/assemble-native-inference.ts --musl-container
+          --container-command-json "$NATIVE_RELEASE_COMMAND_JSON"
+        env:
+          # Keep $PWD literal until Bash runs inside the pinned native container.
+          NATIVE_RELEASE_COMMAND_JSON: >-
+            ["bash","-ec","set -euo pipefail; bun run build:release; bun scripts/verify-native-vector-reader.ts --required; export THREADNOTE_NATIVE_VECTOR_READER_REQUIRED=1 THREADNOTE_NATIVE_VECTOR_READER_MANIFEST=\"$PWD/dist/runtime/vector-reader/manifest.json\" THREADNOTE_NATIVE_VECTOR_READER_SOURCE_ROOT=\"$PWD\"; bun --bun vitest run packages/recall/test/unit/native-vector-reader.test.ts packages/recall/test/background-vector-step.test.ts apps/threadnote/test/integration/recall-admission-budget.test.ts apps/threadnote/test/unit/vector-index.test.ts apps/threadnote/test/unit/vector-index.eligibility.test.ts packages/recall/test/unit/vector-scope-upgrade.test.ts apps/threadnote/test/unit/recall.mcp-background-refresh.test.ts; bun --bun vitest run --maxWorkers=1 --no-file-parallelism apps/threadnote/test/integration/vector-native-read-boundary.test.ts; bun scripts/smoke-self-contained.ts; bun --bun vitest run --config vitest.e2e.config.ts apps/threadnote/test/e2e/local-bins.e2e.ts -t \"recalls saved memory|loads only the bundled\""]
+      - name: Verify bundled vector reader
+        if: runner.os != 'Linux'
+        run: bun scripts/verify-native-vector-reader.ts --required
+      - name: Exercise Rust through the production ready-read worker
+        if: runner.os != 'Linux'
+        run: >-
+          bun --bun vitest run
+          packages/recall/test/unit/native-vector-reader.test.ts
+          packages/recall/test/background-vector-step.test.ts
+          apps/threadnote/test/integration/recall-admission-budget.test.ts
+          apps/threadnote/test/unit/vector-index.test.ts
+          apps/threadnote/test/unit/vector-index.eligibility.test.ts
+          packages/recall/test/unit/vector-scope-upgrade.test.ts
+          apps/threadnote/test/unit/recall.mcp-background-refresh.test.ts
+        env:
+          THREADNOTE_NATIVE_VECTOR_READER_REQUIRED: '1'
+          THREADNOTE_NATIVE_VECTOR_READER_MANIFEST: ${{ github.workspace }}/dist/runtime/vector-reader/manifest.json
+          THREADNOTE_NATIVE_VECTOR_READER_SOURCE_ROOT: ${{ github.workspace }}
+      - name: Exercise the actual ready-read worker without competing suites
+        if: runner.os != 'Linux'
+        run: >-
+          bun --bun vitest run --maxWorkers=1 --no-file-parallelism
+          apps/threadnote/test/integration/vector-native-read-boundary.test.ts
+        env:
+          THREADNOTE_NATIVE_VECTOR_READER_REQUIRED: '1'
+          THREADNOTE_NATIVE_VECTOR_READER_MANIFEST: ${{ github.workspace }}/dist/runtime/vector-reader/manifest.json
+          THREADNOTE_NATIVE_VECTOR_READER_SOURCE_ROOT: ${{ github.workspace }}
       - name: Self-contained native smoke
+        if: runner.os != 'Linux'
         run: bun scripts/smoke-self-contained.ts
+      - name: Inspect bounded Windows application failure metadata
+        if: failure() && runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: pwsh
+        run: |
+          $summary = @{
+            version = 1; status = 'unknown'; recentSeconds = 180; queryLimitReached = $false
+            sourceBunResolved = $false
+            cdb = @{ available = $false; version = 'unknown'; sha256 = 'unknown'; arm64 = 'unknown' }
+            records = @()
+          }
+          try {
+            if ([string]::IsNullOrWhiteSpace($env:GITHUB_WORKSPACE) -or
+                -not [IO.Path]::IsPathFullyQualified($env:GITHUB_WORKSPACE)) { throw 'Workspace unavailable' }
+            $candidate = [IO.Path]::GetFullPath([IO.Path]::Combine($env:GITHUB_WORKSPACE, 'dist', 'threadnote.exe'))
+            $sourceBunPath = $null
+            $metadataPathCandidate = $null
+            $metadataProcess = $null
+            $metadataStarted = $false
+            $metadataClock = $null
+            $stdoutReader = $null
+            $stderrReader = $null
+            $stdoutStream = $null
+            $stderrStream = $null
+            $stdoutRead = $null
+            $stderrRead = $null
+            $exitTask = $null
+            try {
+              $bunCommand = Get-Command bun -CommandType Application -ErrorAction Stop
+              $bunExecutable = [string]$bunCommand.Source
+              if ([IO.Path]::GetExtension($bunExecutable) -ine '.exe') { throw 'Bun executable unavailable' }
+              $metadataInfo = [Diagnostics.ProcessStartInfo]::new($bunExecutable)
+              $metadataInfo.UseShellExecute = $false
+              $metadataInfo.CreateNoWindow = $true
+              $metadataInfo.RedirectStandardOutput = $true
+              $metadataInfo.RedirectStandardError = $true
+              $metadataInfo.ArgumentList.Add('-e')
+              $metadataInfo.ArgumentList.Add('process.stdout.write(process.execPath)')
+              $metadataProcess = [Diagnostics.Process]::new()
+              $metadataProcess.StartInfo = $metadataInfo
+              $metadataClock = [Diagnostics.Stopwatch]::StartNew()
+              $metadataStarted = $metadataProcess.Start()
+              if ($metadataStarted) {
+                $stdoutReader = $metadataProcess.StandardOutput
+                $stderrReader = $metadataProcess.StandardError
+                $stdoutStream = $stdoutReader.BaseStream
+                $stderrStream = $stderrReader.BaseStream
+                $stdoutBuffer = [byte[]]::new(512)
+                $stderrBuffer = [byte[]]::new(512)
+                $stdoutBytes = [Collections.Generic.List[byte]]::new()
+                $stdoutRead = $stdoutStream.ReadAsync($stdoutBuffer, 0, $stdoutBuffer.Length)
+                $stderrRead = $stderrStream.ReadAsync($stderrBuffer, 0, $stderrBuffer.Length)
+                $exitTask = $metadataProcess.WaitForExitAsync()
+                $stdoutEof = $false
+                $stderrEof = $false
+                $stdoutTooLong = $false
+                while (-not ($stdoutEof -and $stderrEof -and $exitTask.IsCompleted)) {
+                  $remainingWork = 3000 - [int]$metadataClock.ElapsedMilliseconds
+                  if ($remainingWork -le 0) { break }
+                  $pendingReads = [Collections.Generic.List[Threading.Tasks.Task]]::new()
+                  if (-not $stdoutEof) { $pendingReads.Add($stdoutRead) }
+                  if (-not $stderrEof) { $pendingReads.Add($stderrRead) }
+                  if (-not $exitTask.IsCompleted) { $pendingReads.Add($exitTask) }
+                  $nextTask = [Threading.Tasks.Task]::WhenAny([Threading.Tasks.Task[]]$pendingReads.ToArray())
+                  if (-not $nextTask.Wait($remainingWork)) { break }
+                  $completedTask = $nextTask.Result
+                  if (-not $stdoutEof -and [object]::ReferenceEquals($completedTask, $stdoutRead)) {
+                    $readBytes = $stdoutRead.Result
+                    if ($readBytes -eq 0) { $stdoutEof = $true }
+                    else {
+                      $captureBytes = [Math]::Min($readBytes, 2049 - $stdoutBytes.Count)
+                      for ($index = 0; $index -lt $captureBytes; $index++) { $stdoutBytes.Add($stdoutBuffer[$index]) }
+                      if ($captureBytes -lt $readBytes -or $stdoutBytes.Count -gt 2048) { $stdoutTooLong = $true }
+                      $stdoutRead = $stdoutStream.ReadAsync($stdoutBuffer, 0, $stdoutBuffer.Length)
+                    }
+                  } elseif (-not $stderrEof -and [object]::ReferenceEquals($completedTask, $stderrRead)) {
+                    if ($stderrRead.Result -eq 0) { $stderrEof = $true }
+                    else { $stderrRead = $stderrStream.ReadAsync($stderrBuffer, 0, $stderrBuffer.Length) }
+                  }
+                }
+                if ($metadataProcess.HasExited -and $stdoutEof -and $stderrEof -and -not $stdoutTooLong -and
+                    $metadataProcess.ExitCode -eq 0) {
+                  $reportedBunPath = [Text.Encoding]::UTF8.GetString($stdoutBytes.ToArray()).Trim()
+                  if ($reportedBunPath.Length -le 2048 -and [IO.Path]::IsPathFullyQualified($reportedBunPath) -and
+                      [IO.File]::Exists($reportedBunPath)) {
+                    $metadataPathCandidate = [IO.Path]::GetFullPath($reportedBunPath)
+                  }
+                }
+              }
+            } catch { $summary.sourceBunResolved = $false } finally {
+              $cleanupComplete = $true
+              if ($metadataStarted) {
+                try {
+                  if (-not $metadataProcess.HasExited) { try { $metadataProcess.Kill() } catch { } }
+                } catch { $cleanupComplete = $false }
+              }
+              foreach ($reader in @($stdoutReader, $stderrReader)) {
+                if ($reader) { try { $reader.Dispose() } catch { $cleanupComplete = $false } }
+              }
+              $childExited = -not $metadataStarted
+              if ($metadataStarted) {
+                try {
+                  $remainingChildWait = [Math]::Min(1000, [Math]::Max(0, 5000 - [int]$metadataClock.ElapsedMilliseconds))
+                  if ($remainingChildWait -gt 0) { [void]$metadataProcess.WaitForExit($remainingChildWait) }
+                  $childExited = $metadataProcess.HasExited
+                  if (-not $childExited) { $cleanupComplete = $false }
+                } catch { $cleanupComplete = $false }
+              }
+              $pendingTasks = [Collections.Generic.List[Threading.Tasks.Task]]::new()
+              foreach ($pendingRead in @($stdoutRead, $stderrRead, $exitTask)) {
+                if ($pendingRead) { $pendingTasks.Add($pendingRead) }
+              }
+              if ($pendingTasks.Count -gt 0) {
+                $settledReads = [Threading.Tasks.Task]::WhenAll([Threading.Tasks.Task[]]$pendingTasks.ToArray())
+                $remainingReadWait = [Math]::Max(0, 5000 - [int]$metadataClock.ElapsedMilliseconds)
+                if ($remainingReadWait -gt 0) { try { [void]$settledReads.Wait($remainingReadWait) } catch { } }
+                foreach ($pendingRead in $pendingTasks) {
+                  try {
+                    if ($pendingRead.IsCompleted) { $null = $pendingRead.GetAwaiter().GetResult() }
+                    else { $cleanupComplete = $false }
+                  } catch { $cleanupComplete = $false }
+                }
+              }
+              if ($metadataStarted) {
+                try { $childExited = $metadataProcess.HasExited } catch { $childExited = $false }
+                if (-not $childExited) { $cleanupComplete = $false }
+              }
+              if ($metadataProcess) { try { $metadataProcess.Dispose() } catch { $cleanupComplete = $false } }
+              if ($metadataPathCandidate -and $cleanupComplete -and $childExited) {
+                $sourceBunPath = $metadataPathCandidate
+                $summary.sourceBunResolved = $true
+              } else { $summary.sourceBunResolved = $false }
+            }
+            $allowedAppPaths = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::OrdinalIgnoreCase)
+            $allowedAppPaths[$candidate] = 'candidate'
+            if ($sourceBunPath -and -not $allowedAppPaths.ContainsKey($sourceBunPath)) {
+              $allowedAppPaths[$sourceBunPath] = 'source-bun'
+            }
+            $now = [DateTime]::UtcNow
+            $crashEvents = @(Get-WinEvent -FilterHashtable @{
+              LogName = 'Application'; ProviderName = 'Application Error'; Id = 1000
+              StartTime = $now.AddSeconds(-180); EndTime = $now; AppPath = [string[]]$allowedAppPaths.Keys
+            } -MaxEvents 32 -ErrorAction Stop)
+            $summary.queryLimitReached = $crashEvents.Count -eq 32
+            $records = [Collections.Generic.List[object]]::new()
+            foreach ($crashEvent in $crashEvents) {
+              try {
+                $xmlText = $crashEvent.ToXml()
+                if ($xmlText.Length -gt 65536) { continue }
+                $fields = @{}
+                foreach ($field in ([xml]$xmlText).Event.EventData.Data) {
+                  $fieldName = $field.GetAttribute('Name')
+                  if ($fieldName) { $fields[$fieldName] = [string]$field.InnerText }
+                }
+                if (-not [IO.Path]::IsPathFullyQualified([string]$fields.AppPath)) { continue }
+                $eventAppPath = [IO.Path]::GetFullPath([string]$fields.AppPath)
+                if (-not $allowedAppPaths.ContainsKey($eventAppPath)) { continue }
+                $module = [IO.Path]::GetFileName([string]$fields.ModuleName)
+                $exceptionCode = [string]$fields.ExceptionCode
+                $faultOffset = [string]$fields.FaultingOffset
+                if ($module -notmatch '^[A-Za-z0-9_.-]{1,128}$' -or
+                    $exceptionCode -notmatch '^(?:0x)?[A-Fa-f0-9]{8}$' -or
+                    $faultOffset -notmatch '^(?:0x)?[A-Fa-f0-9]{1,16}$' -or $null -eq $crashEvent.TimeCreated) { continue }
+                $processText = [string]$fields.ProcessId
+                $crashPid = [uint32]0
+                if ($processText -match '^0x([A-Fa-f0-9]{1,8})$') { $crashPid = [Convert]::ToUInt32($Matches[1], 16) }
+                elseif ($processText -notmatch '^[0-9]{1,10}$' -or -not [uint32]::TryParse($processText, [ref]$crashPid)) { continue }
+                if ($crashPid -eq 0) { continue }
+                $records.Add(@{
+                  appKind = $allowedAppPaths[$eventAppPath]
+                  module = $module; exceptionCode = '0x' + ($exceptionCode -replace '^0x', '').ToLowerInvariant()
+                  offset = '0x' + ($faultOffset -replace '^0x', '').ToLowerInvariant(); processId = $crashPid
+                  timeUtc = $crashEvent.TimeCreated.ToUniversalTime().ToString('o')
+                })
+                if ($records.Count -eq 4) { break }
+              } catch { continue }
+            }
+            $summary.records = @($records.ToArray())
+            if ($records.Count -gt 0) { $summary.status = 'observed' }
+          } catch { $summary.status = 'unknown' }
+          try {
+            $programFiles = [Environment]::GetFolderPath('ProgramFiles')
+            $programFilesX86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+            $debuggerPaths = @()
+            if ($programFiles) { $debuggerPaths += [IO.Path]::Combine($programFiles, 'Windows Kits', '10', 'Debuggers', 'arm64', 'cdb.exe') }
+            if ($programFilesX86) { $debuggerPaths += [IO.Path]::Combine($programFilesX86, 'Windows Kits', '10', 'Debuggers', 'arm64', 'cdb.exe') }
+            foreach ($debuggerPath in $debuggerPaths) {
+              if ([IO.File]::Exists($debuggerPath)) {
+                $summary.cdb.available = $true
+                $debuggerInfo = [IO.FileInfo]::new($debuggerPath)
+                $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($debuggerPath).FileVersion
+                if ($version -match '^[A-Za-z0-9 ._+-]{1,80}$') { $summary.cdb.version = $version }
+                if ($debuggerInfo.Length -le 67108864) {
+                  $hash = (Get-FileHash -LiteralPath $debuggerPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+                  if ($hash -match '^[a-f0-9]{64}$') { $summary.cdb.sha256 = $hash }
+                }
+                $stream = [IO.File]::OpenRead($debuggerPath)
+                try {
+                  if ($stream.Length -ge 64) {
+                    $reader = [IO.BinaryReader]::new($stream)
+                    $stream.Position = 0x3c
+                    $peOffset = $reader.ReadInt32()
+                    if ($peOffset -ge 0 -and $peOffset -le 1048576 -and $peOffset + 6 -le $stream.Length) {
+                      $stream.Position = $peOffset
+                      if ($reader.ReadUInt32() -eq 0x00004550) { $summary.cdb.arm64 = $reader.ReadUInt16() -eq 0xAA64 }
+                    }
+                  }
+                } finally { $stream.Dispose() }
+                break
+              }
+            }
+          } catch { }
+          $encoded = $summary | ConvertTo-Json -Depth 4 -Compress
+          if ([Text.Encoding]::UTF8.GetByteCount($encoded) -le 4096) { Write-Output $encoded }
+          else { Write-Output '{"version":1,"status":"unknown"}' }
+          exit 0
       - name: Preserve bounded self-contained smoke failure evidence
         if: failure()
         uses: actions/upload-artifact@v7
@@ -68,12 +358,19 @@ jobs:
         env:
           THREADNOTE_RELEASE_TARGET: ${{ inputs.target }}
       - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: native-container-failure-${{ inputs.target }}
+          path: .context/native-inference-container/*-failure.json
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v7
         with:
           name: native-release-${{ inputs.target }}
           path: artifacts/threadnote-${{ inputs.target }}.tar.gz*
           if-no-files-found: error
 
   installed-e2e:
+    if: ${{ !endsWith(inputs.target, '-musl') }}
     name: Installed release E2E
     needs: build
     runs-on: ${{ inputs.runner }}
@@ -82,6 +379,14 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
+      - name: Route Bun caches outside the source checkout
+        shell: bash
+        env:
+          BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/threadnote-bun-install
+          BUN_RUNTIME_TRANSPILER_CACHE_PATH: ${{ runner.temp }}/threadnote-bun-transpiler
+        run: |
+          printf '%s\n' "BUN_INSTALL_CACHE_DIR=$BUN_INSTALL_CACHE_DIR" >> "$GITHUB_ENV"
+          printf '%s\n' "BUN_RUNTIME_TRANSPILER_CACHE_PATH=$BUN_RUNTIME_TRANSPILER_CACHE_PATH" >> "$GITHUB_ENV"
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
@@ -159,6 +464,14 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
+      - name: Route Bun caches outside the source checkout
+        shell: bash
+        env:
+          BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/threadnote-bun-install
+          BUN_RUNTIME_TRANSPILER_CACHE_PATH: ${{ runner.temp }}/threadnote-bun-transpiler
+        run: |
+          printf '%s\n' "BUN_INSTALL_CACHE_DIR=$BUN_INSTALL_CACHE_DIR" >> "$GITHUB_ENV"
+          printf '%s\n' "BUN_RUNTIME_TRANSPILER_CACHE_PATH=$BUN_RUNTIME_TRANSPILER_CACHE_PATH" >> "$GITHUB_ENV"
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
@@ -187,6 +500,7 @@ jobs:
           mkdir -p dist
           tar -xzf artifacts/threadnote-${{ inputs.target }}.tar.gz -C dist
       - name: Extracted release and installed workflow lifecycle
+        if: ${{ !endsWith(inputs.target, '-musl') }}
         run: >-
           bun --bun vitest run apps/threadnote/test/dev-skills/release-artifact.test.ts
           --reporter=default --reporter=json --outputFile=.context/release-artifact/timings.json
@@ -194,8 +508,16 @@ jobs:
           THREADNOTE_RELEASE_ARCHIVE: artifacts/threadnote-${{ inputs.target }}.tar.gz
           THREADNOTE_RELEASE_PROFILE: ${{ matrix.profile }}
       - name: Workflow journal persistence smoke
-        if: matrix.profile == 'all' || matrix.profile == 'desktop'
+        if: ${{ !endsWith(inputs.target, '-musl') && (matrix.profile == 'all' || matrix.profile == 'desktop') }}
         run: bun --bun vitest run apps/threadnote/test/dev-skills/workflow-journal-validation.test.ts
+      - name: Extracted musl release and installed workflow lifecycle
+        if: endsWith(inputs.target, '-musl')
+        run: >-
+          bun scripts/assemble-native-inference.ts --musl-container --workflow-runtime
+          --container-command-json '["bash","-ec","set -euo pipefail; command -v git; command -v rg; command -v bwrap; test -s .context/release-artifact/capabilities.json; bun --bun vitest run apps/threadnote/test/dev-skills/release-artifact.test.ts --reporter=default --reporter=json --outputFile=.context/release-artifact/timings.json; bun --bun vitest run apps/threadnote/test/dev-skills/workflow-journal-validation.test.ts"]'
+        env:
+          THREADNOTE_RELEASE_ARCHIVE: artifacts/threadnote-${{ inputs.target }}.tar.gz
+          THREADNOTE_RELEASE_PROFILE: ${{ matrix.profile }}
       - name: Preserve bounded release evidence
         if: always()
         uses: actions/upload-artifact@v7

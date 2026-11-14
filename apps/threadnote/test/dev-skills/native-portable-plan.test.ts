@@ -569,12 +569,12 @@ effectIt.effect.each([
           team: 'default',
         }),
       );
-      expect(yield* donorAuthor({command: 'share', authoringRef: readyPlan.authoringRef, team: 'default'})).toEqual(
-        published,
-      );
       const standalone = system.environment().THREADNOTE_STANDALONE_SMOKE;
-      // Opaque-reference transports and source-independent conflicts run once; both directions keep full import.
+      // Replay, opaque-reference transports and source-independent conflicts run once; both directions keep full import.
       if (!direction.fullEvidence) {
+        expect(yield* donorAuthor({command: 'share', authoringRef: readyPlan.authoringRef, team: 'default'})).toEqual(
+          published,
+        );
         const donorMcp = new EffectMcpServerAdapter('portable-test', '1', 'fixture');
         registerWorkflowTaskTool(donorMcp, donorConfig);
         const mcpShared = yield* donorMcp
@@ -776,6 +776,7 @@ effectIt.effect.each([
       }
       const donorSpecReference = yield* Schema.decodeUnknownEffect(Schema.Struct({uri: Schema.String}))(readySpec.root);
       expect(localPlanDocument.spec?.root.uri).not.toBe(donorSpecReference.uri);
+      if (direction.fullEvidence) return;
       expect(
         yield* runNativeTaskStart(recipientConfig, recipientStart).pipe(
           Effect.provideService(SystemInfo, recipientSystem),

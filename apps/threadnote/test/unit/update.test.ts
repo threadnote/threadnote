@@ -322,6 +322,14 @@ describe('standalone release selection', () => {
     expect(() => parseReleaseChecksum(`${checksum}  another.tar.gz\n`, artifact)).toThrow(/Invalid checksum/);
     expect(() => parseReleaseChecksum('not-a-checksum', artifact)).toThrow(/Invalid checksum/);
     expect(releaseArtifactName({architecture: 'aarch64', platform: 'darwin'})).toBe(artifact);
+    for (const architecture of ['arm64', 'x64']) {
+      expect(releaseArtifactName({architecture, platform: 'linux', libc: () => 'musl'})).toBe(
+        `threadnote-linux-${architecture}-musl.tar.gz`,
+      );
+      expect(releaseArtifactName({architecture, platform: 'linux', libc: () => 'glibc'})).toBe(
+        `threadnote-linux-${architecture}.tar.gz`,
+      );
+    }
     expect(() => releaseArtifactName({architecture: 'riscv64', platform: 'linux'})).toThrow(
       /No standalone Threadnote artifact/,
     );

@@ -47,7 +47,9 @@ import {
   recallReadyReadResponseSchema,
   recallReadyReadRequestSchema,
 } from '@threadnote/recall/read_boundary';
-import {ensureVectorIndex} from '@threadnote/recall/vector-index';
+import {ensureVectorIndex, vectorIndexDatabaseFilename} from '@threadnote/recall/vector-index';
+import * as NativeVectorReaderPayload from '@threadnote/recall/vector/native-reader-payload';
+import {nativeVectorTestsEnabled} from '@threadnote/testing/native-vector-fixture';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
 import {withProductionLogging} from '../../src/effect/production_log.js';
 import {captureConsole} from '../../src/effect/console.js';
@@ -107,13 +109,14 @@ const compileFixtureWorker = (home: string) =>
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const system = yield* SystemInfo;
+    const importer = Bun.fileURLToPath(import.meta.url);
     const entrypoint = path.join(home, 'admission-worker.ts');
     yield* fs.writeFileString(
       entrypoint,
       `
-import {Effect, FileSystem, Layer, Runtime} from ${JSON.stringify(Bun.fileURLToPath(import.meta.resolve('effect')))};
-import {CommandExecutor, CommandSpawnFailed} from ${JSON.stringify(Bun.fileURLToPath(import.meta.resolve('@threadnote/platform/command')))};
-import {RuntimeEntrypoint} from ${JSON.stringify(Bun.fileURLToPath(import.meta.resolve('@threadnote/platform/runtime-entrypoint')))};
+import {Effect, FileSystem, Layer, Runtime} from ${JSON.stringify(Bun.resolveSync('effect', importer))};
+import {CommandExecutor, CommandSpawnFailed} from ${JSON.stringify(Bun.resolveSync('@threadnote/platform/command', importer))};
+import {RuntimeEntrypoint} from ${JSON.stringify(Bun.resolveSync('@threadnote/platform/runtime-entrypoint', importer))};
 import {recallReadyReadWorkerProgram, readyRecallReadWorkerLayer} from ${JSON.stringify(Bun.fileURLToPath(new URL('../../src/recall/ready_read_worker.ts', import.meta.url)))};
 import {telemetryChildEnvironmentPolicyLayer} from ${JSON.stringify(Bun.fileURLToPath(new URL('../../src/telemetry/session.ts', import.meta.url)))};
 const commands = CommandExecutor.of({
@@ -237,6 +240,32 @@ const fixture = (model: boolean) =>
         Effect.provideService(LocalModelRuntime, fastRuntime),
         Effect.provideService(LocalModelStore, store),
       );
+      if (!nativeVectorTestsEnabled) {
+        // Composition examples use one known e0 fixture vector. Keep protocol,
+        // corpus and canonical closing checks real without making hermetic Bazel
+        // compile an addon. The required native lane installs no mock at all.
+        yield* Effect.acquireRelease(
+          Effect.sync(() =>
+            vi.spyOn(NativeVectorReaderPayload, 'loadNativeVectorReader').mockResolvedValue({
+              CancellationToken: class {
+                cancel() {}
+              },
+              readSelected: (request, queryVector) => {
+                expect(request.model.id).toBe(embedding.id);
+                expect(request.dbPath).toBe(
+                  path.join(home, 'indexes', 'vectors', embedding.id, vectorIndexDatabaseFilename()),
+                );
+                return Promise.resolve({
+                  status: 'success',
+                  corpusCheckRequired: true,
+                  scores: [{uri, score: Math.max(0, queryVector?.[0] ?? 0)}],
+                });
+              },
+            }),
+          ),
+          mock => Effect.sync(() => mock.mockRestore()),
+        );
+      }
     }
     return {fs, filename, config, uri, store, system: yield* compileFixtureWorker(home)};
   });
@@ -427,6 +456,7 @@ describe('production recall caller admission', () => {
       () =>
         Effect.gen(function* () {
           const f = yield* fixture(true);
+          const path = yield* Path.Path;
           yield* f.fs.writeFileString(f.filename, `${yield* f.fs.readFileString(f.filename)}\nchanged generation\n`);
           yield* loadRecallIndexData(f.config, {includeInactive: false, forceRefresh: true});
           const commands = yield* selectorCompositionCommands(f.system);
@@ -440,7 +470,11 @@ describe('production recall caller admission', () => {
               f.fs.open(...args).pipe(
                 Effect.flatMap(file =>
                   Effect.gen(function* () {
-                    if (!delayedMetadata || !first || args[0] !== `${f.config.agentContextHome}/models/selection.json`)
+                    if (
+                      !delayedMetadata ||
+                      !first ||
+                      args[0] !== path.join(f.config.agentContextHome, 'models', 'selection.json')
+                    )
                       return file;
                     first = false;
                     const readAlloc = file.readAlloc.bind(file);

@@ -1432,8 +1432,8 @@ describe('built self-contained distribution', () => {
     await runCli(['source', 'remove', sourceId, '--apply']);
   });
 
-  it('loads only the prebuilt node-llama runtime', async () => {
-    await expect(runCli(['models', 'runtime'])).resolves.toMatch(/node-llama-cpp:\s+prebuilt/i);
+  it('loads only the bundled node-llama runtime', async () => {
+    await expect(runCli(['models', 'runtime'])).resolves.toMatch(/node-llama-cpp:\s+(?:prebuilt|localBuild)/i);
   });
 
   it('serves native core and full MCP toolsets over stdio', async ({signal}) => {
@@ -1834,6 +1834,7 @@ async function activeVectorRevision(): Promise<string> {
     readonly: true,
   });
   try {
+    database.exec('PRAGMA busy_timeout = 50');
     const pointer = database
       .query<{readonly job_id?: string} | null, SQLQueryBindings[]>(
         `SELECT generation.job_id

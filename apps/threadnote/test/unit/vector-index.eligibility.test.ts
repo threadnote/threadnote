@@ -1,3 +1,4 @@
+import {nativeVectorTestsEnabled} from '@threadnote/testing/native-vector-fixture';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
@@ -42,7 +43,7 @@ const PROJECTLESS_URI = 'threadnote://resources/global/approved-guidance.md';
 const PROJECTLESS_ALIAS = 'threadnote://user/me/memories/shared/team/durable/global/approved-guidance.md';
 
 describe('vector recall eligibility', () => {
-  effectIt.effect(
+  effectIt.effect.skipIf(!nativeVectorTestsEnabled)(
     'filters project and authority before semantic top-k and does not expand aliases from rejected representatives',
     () =>
       withVectorHome(

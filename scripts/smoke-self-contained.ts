@@ -13,6 +13,9 @@ import {
   FixtureStdioTransport,
   runFixtureCommand,
   reconcileFixturePipelineReceipts,
+  runFixtureEmbeddingExitProbe,
+  diagnoseFixtureEmbeddingFailure,
+  FIXTURE_EMBEDDING_PROBE_SAMPLE,
   type FixtureCommandStage,
 } from './fixture-owned-process.js';
 import {fixtureCleanup, fixtureLifecycle, fixtureRemovalDeadline} from './fixture-lifecycle.js';
@@ -84,6 +87,7 @@ const smokeSelfContained = Effect.scoped(
       version: packageManifest.version,
     });
     const processes = new FixtureProcesses(undefined, deadline, monotonicDeadline);
+    let embeddingProbe: Awaited<ReturnType<typeof runFixtureEmbeddingExitProbe>> | undefined;
     const progress: SmokeEvidenceProgress = {stage: 'setup', completed: false, elapsedMilliseconds: 0};
     const body = Effect.gen(function* () {
       if (
@@ -119,7 +123,7 @@ const smokeSelfContained = Effect.scoped(
         USER: 'standalone-smoke',
         USERPROFILE: userHome,
       };
-      const run = (stage: FixtureCommandStage, arguments_: readonly string[]) =>
+      const run = (stage: FixtureCommandStage, arguments_: readonly string[], commandDeadline?: number) =>
         Effect.suspend(() => {
           if (Schema.is(smokeEvidenceStageSchema)(stage)) {
             progress.stage = stage;
@@ -132,7 +136,7 @@ const smokeSelfContained = Effect.scoped(
                 cwd: invocationDirectory,
                 env: environment,
                 maxOutputBytes: 512 * 1024,
-                deadline: Math.min(bodyDeadline, performance.now() + COMMAND_TIMEOUT_MILLISECONDS),
+                deadline: commandDeadline ?? Math.min(bodyDeadline, performance.now() + COMMAND_TIMEOUT_MILLISECONDS),
               }),
             catch: cause => scriptError(cause, 'Standalone command failed.'),
           }).pipe(
@@ -151,7 +155,7 @@ const smokeSelfContained = Effect.scoped(
       yield* run('install-dry-run', ['install', '--dry-run', '--no-start']);
 
       const runtime = yield* run('models-runtime', ['models', 'runtime']);
-      if (!/node-llama-cpp:\s+prebuilt/i.test(runtime)) {
+      if (!/node-llama-cpp:\s+(?:prebuilt|localBuild)/i.test(runtime)) {
         return yield* ScriptError.make({
           message: `Native runtime was not loaded from the release payload:\n${runtime}`,
         });
@@ -215,7 +219,27 @@ const smokeSelfContained = Effect.scoped(
 
       // The large-output fixture bypasses canonical writes and changes the indexed
       // body. Prepare its derived state explicitly before later indexed retrieval.
-      yield* run('repair', ['repair', '--core-only', '--no-post-update']);
+      const repairDeadline = Math.min(bodyDeadline, performance.now() + COMMAND_TIMEOUT_MILLISECONDS);
+      yield* run('repair', ['repair', '--core-only', '--no-post-update'], repairDeadline).pipe(
+        Effect.tapError(() =>
+          process.platform === 'win32' && process.arch === 'arm64'
+            ? diagnoseFixtureEmbeddingFailure(processes, candidate, {
+                home: threadnoteHome,
+                cwd: invocationDirectory,
+                env: environment,
+                deadline: repairDeadline,
+                bodyDeadline,
+                maxOutputBytes: 512 * 1024,
+              }).pipe(
+                Effect.tap(probe =>
+                  Effect.sync(() => {
+                    embeddingProbe = probe;
+                  }),
+                ),
+              )
+            : Effect.void,
+        ),
+      );
       const lexicalDatabase = path.join(threadnoteHome, 'indexes', 'lexical', recallIndexDatabaseFilename(false));
       const lexicalInfo = yield* fs.stat(lexicalDatabase);
       if (lexicalInfo.type !== 'File' || lexicalInfo.size <= 0) {
@@ -326,6 +350,13 @@ const smokeSelfContained = Effect.scoped(
           progress,
         });
       }),
+      Effect.onExit(() =>
+        embeddingProbe
+          ? Console.error(
+              `Standalone model worker probe: ${JSON.stringify({sample: FIXTURE_EMBEDDING_PROBE_SAMPLE, ...embeddingProbe.snapshot()})}`,
+            )
+          : Effect.void,
+      ),
     );
     yield* Console.log(
       'Self-contained Bun executable smoke passed with polyglot CLI/MCP graph operations and Node/Bun absent from PATH.',

@@ -139,6 +139,8 @@ export interface NodeLlamaCppLayerOptions {
   readonly embeddingContextPoolSize?: EmbeddingContextPoolSize;
   readonly embeddingGpuLayers?: number;
   readonly loadModule?: () => Promise<NodeLlamaCppModule>;
+  /** Verified staged runtime override; retain ordinary host/environment inference policy. */
+  readonly moduleSpecifier?: string;
 }
 
 interface NativeEmbeddingPolicy {
@@ -182,8 +184,12 @@ export function nodeLlamaCppEngineLayer(options: NodeLlamaCppLayerOptions = {}) 
           gpuLayers: options.embeddingGpuLayers,
           platform: system.platform,
         };
-        let moduleSpecifier = 'node-llama-cpp';
-        if (typeof THREADNOTE_STANDALONE !== 'undefined' && THREADNOTE_STANDALONE) {
+        let moduleSpecifier = options.moduleSpecifier ?? 'node-llama-cpp';
+        if (
+          options.moduleSpecifier === undefined &&
+          typeof THREADNOTE_STANDALONE !== 'undefined' &&
+          THREADNOTE_STANDALONE
+        ) {
           const nativeModuleUrl = yield* path
             .toFileUrl(path.join(path.dirname(system.executablePath), 'runtime', 'node-llama-cpp.js'))
             .pipe(
@@ -223,7 +229,7 @@ export function nodeLlamaCppEngineLayer(options: NodeLlamaCppLayerOptions = {}) 
               ? UnsupportedNativeRuntime.make({
                   cause,
                   message:
-                    'No compatible prebuilt node-llama-cpp binary is available. Threadnote will not compile llama.cpp automatically.',
+                    'No compatible bundled node-llama-cpp binary is available. Rebuild or reinstall this distribution; requests never compile llama.cpp.',
                 })
               : NativeRuntimeUnavailable.make({
                   cause,

@@ -47,3 +47,6 @@ docs/**/adr/
 
 # Explicit Git-aware website metadata input, regenerated per checkout.
 /apps/website/.bazel-inputs/
+
+# Cargo build outputs never participate in source identity or release discovery.
+/packages/recall/native-vector-reader/target/

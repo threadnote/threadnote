@@ -422,21 +422,27 @@ function createResourceStoreOperations(
     resolved: ResolvedResourcePath,
     options?: {readonly expectedFingerprint?: string; readonly recursive?: boolean},
   ) =>
-    Effect.gen(function* () {
-      yield* verifyExistingPath(fs, path, resolved);
-      yield* verifyFingerprint(resolved, options?.expectedFingerprint);
-      const canonicalMutationGeneration = yield* provideLockServices(
-        advanceCanonicalMutationGeneration(fs, path, location.home, location.account),
-      );
-      yield* fs
-        .remove(resolved.path, {recursive: options?.recursive === true})
-        .pipe(
-          Effect.andThen(syncDirectory(fs, path.dirname(resolved.path))),
-          Effect.ensuring(
-            invalidateRecallBestEffort(location, [resolved.id.canonicalUri], canonicalMutationGeneration),
-          ),
+    Effect.suspend(() => {
+      let stage: ResourceRemoveStage = 'verify';
+      return Effect.gen(function* () {
+        yield* verifyExistingPath(fs, path, resolved);
+        stage = 'fingerprint';
+        yield* verifyFingerprint(resolved, options?.expectedFingerprint);
+        stage = 'generation';
+        const canonicalMutationGeneration = yield* provideLockServices(
+          advanceCanonicalMutationGeneration(fs, path, location.home, location.account),
         );
-    }).pipe(mapIoError('remove', resolved.id.canonicalUri));
+        stage = 'remove';
+        yield* fs
+          .remove(resolved.path, {recursive: options?.recursive === true})
+          .pipe(
+            Effect.andThen(syncDirectory(fs, path.dirname(resolved.path))),
+            Effect.ensuring(
+              invalidateRecallBestEffort(location, [resolved.id.canonicalUri], canonicalMutationGeneration),
+            ),
+          );
+      }).pipe(Effect.mapError(error => resourceRemoveError(stage, resolved.id.canonicalUri, error)));
+    });
   const removeResource = (
     location: ResourceStoreLocation,
     uri: string,
@@ -1141,6 +1147,61 @@ function isResourceStoreError(error: unknown): error is ResourceStoreError {
     Schema.is(ResourceNotFound)(error) ||
     Schema.is(ResourcePathUnsafe)(error)
   );
+}
+
+type ResourceRemoveStage = 'verify' | 'fingerprint' | 'generation' | 'remove';
+const REMOVE_PLATFORM_REASONS = [
+  'AlreadyExists',
+  'BadArgument',
+  'BadResource',
+  'Busy',
+  'InvalidData',
+  'NotFound',
+  'PermissionDenied',
+  'TimedOut',
+  'UnexpectedEof',
+  'Unknown',
+  'WouldBlock',
+  'WriteZero',
+] as const;
+const REMOVE_PLATFORM_CODES = [
+  'EACCES',
+  'EPERM',
+  'EBUSY',
+  'ENOTEMPTY',
+  'ENOENT',
+  'EEXIST',
+  'EINVAL',
+  'EIO',
+  'EROFS',
+  'ENOSPC',
+] as const;
+
+/** Only typed platform classification enters the message; the original cause stays intact. */
+function resourceRemoveError(stage: ResourceRemoveStage, uri: string, error: unknown): ResourceStoreError {
+  if (isResourceStoreError(error)) return error;
+  const platform = PlatformError.isPlatformError(error) ? error.reason : undefined;
+  const reason = Option.getOrElse(
+    EffectArray.findFirst(REMOVE_PLATFORM_REASONS, value => value === platform?._tag),
+    () => 'Unknown' as const,
+  );
+  let suppliedCode: unknown;
+  try {
+    const cause = platform instanceof PlatformError.SystemError ? platform.cause : undefined;
+    suppliedCode = typeof cause === 'object' && cause !== null && 'code' in cause ? cause.code : undefined;
+  } catch {
+    // Optional classification must never replace the original failure.
+  }
+  const code = Option.getOrElse(
+    EffectArray.findFirst(REMOVE_PLATFORM_CODES, value => value === suppliedCode),
+    () => 'Unknown' as const,
+  );
+  return ResourceIoFailed.make({
+    cause: error,
+    message: `Resource remove failed for ${uri}. Remove diagnostic: ${JSON.stringify({stage, reason, code})}`,
+    operation: 'remove',
+    uri,
+  });
 }
 
 function mapIoError(operation: string, uri: string) {

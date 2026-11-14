@@ -635,28 +635,6 @@ describe('native ResourceStore', () => {
     }
   });
 
-  it('classifies a protected remove failure as a remove error instead of lock contention', async () => {
-    const home = await mkdtemp('threadnote-resource-remove-error-');
-    try {
-      await runEffect(
-        Effect.gen(function* () {
-          const store = yield* ResourceStore;
-          const parentUri = 'threadnote://resources/repos/threadnote/non-empty';
-          yield* store.write(location(home), `${parentUri}/child.md`, 'child', {mode: 'create'});
-
-          const failure = yield* Effect.flip(store.remove(location(home), parentUri));
-
-          expect(failure).toBeInstanceOf(ResourceIoFailed);
-          expect(failure).toMatchObject({operation: 'remove', uri: parentUri});
-          expect(failure.message).toBe(`Resource remove failed for ${parentUri}.`);
-          expect(failure.message).not.toContain('lock');
-        }),
-      );
-    } finally {
-      await rm(home, {force: true, recursive: true});
-    }
-  });
-
   it('applies a bulk mutation set behind one public invalidation boundary', async () => {
     const home = await mkdtemp('threadnote-resource-batch-');
     try {

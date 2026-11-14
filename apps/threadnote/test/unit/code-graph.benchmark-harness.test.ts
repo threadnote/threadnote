@@ -1,3 +1,7 @@
+import {
+  baselineSemanticInventoryUnchanged,
+  validateBaselineDependencyInstallation,
+} from '../../../../scripts/benchmark-recall-vectors.js';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {succeedUndefined} from '@threadnote/platform/optional';
@@ -2454,5 +2458,69 @@ describe('isolated embedding runtime diagnostics', () => {
     expect(workflow).toContain('timeout-minutes: 65');
     expect(workflow).toContain('--scale-symbols 100000');
     expect(workflow).toContain('--fail-on-budget');
+  });
+});
+
+describe('frozen TS semantic baseline components', () => {
+  it('requires lifecycle-free baseline staging and explicit build-only GNU optional inputs on musl', () => {
+    expect(
+      validateBaselineDependencyInstallation(
+        'bun-linux-x64-baseline-musl',
+        'bun install --frozen-lockfile --ignore-scripts --libc=glibc',
+      ),
+    ).toBe('bun install --frozen-lockfile --ignore-scripts --libc=glibc');
+    expect(
+      validateBaselineDependencyInstallation(
+        'bun-linux-x64-baseline',
+        'bun install --frozen-lockfile --ignore-scripts',
+      ),
+    ).toBe('bun install --frozen-lockfile --ignore-scripts');
+    expect(() =>
+      validateBaselineDependencyInstallation('bun-linux-x64-baseline-musl', 'bun install --frozen-lockfile'),
+    ).toThrow();
+    expect(() =>
+      validateBaselineDependencyInstallation(
+        'bun-linux-x64-baseline',
+        'bun install --frozen-lockfile --ignore-scripts --libc=glibc',
+      ),
+    ).toThrow();
+  });
+
+  it('allows a declared inference component replacement while preserving every semantic asset', () => {
+    const original = [
+      {path: 'release.json', sha256: 'release'},
+      {path: 'runtime/native/gnu.node', sha256: 'gnu'},
+      {path: 'runtime/node-llama-cpp.js', sha256: 'old-js'},
+      {path: 'threadnote', sha256: 'ts66'},
+    ];
+    const final = [
+      {path: 'baseline-build-provenance.json', sha256: 'provenance'},
+      {path: 'llama/localBuilds/linux-x64/Release/llama-addon.node', sha256: 'musl'},
+      {path: 'native-inference.json', sha256: 'overlay'},
+      {path: 'release.json', sha256: 'release'},
+      {path: 'runtime/node-llama-cpp.js', sha256: 'shared-js'},
+      {path: 'threadnote', sha256: 'ts66'},
+    ];
+    expect(baselineSemanticInventoryUnchanged(original, final)).toBe(true);
+    expect(
+      baselineSemanticInventoryUnchanged(original, [
+        ...final,
+        {path: 'runtime/vector-reader/reader.node', sha256: 'native'},
+      ]),
+    ).toBe(false);
+    expect(
+      baselineSemanticInventoryUnchanged(
+        original,
+        EffectArray.map(final, entry =>
+          entry.path === 'threadnote' ? {...entry, sha256: 'new-semantic-binary'} : entry,
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      baselineSemanticInventoryUnchanged(
+        original,
+        EffectArray.filter(final, entry => entry.path !== 'release.json'),
+      ),
+    ).toBe(false);
   });
 });

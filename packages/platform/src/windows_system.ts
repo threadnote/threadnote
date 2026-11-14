@@ -257,21 +257,21 @@ export function readWindowsProcessStartIdentity(processId: number): Effect.Effec
     try {
       const kernel = dlopen('kernel32.dll', {
         CloseHandle: {
-          args: ['ptr'],
+          args: ['u64'],
           returns: 'i32',
         },
         GetProcessTimes: {
-          args: ['ptr', 'buffer', 'buffer', 'buffer', 'buffer'],
+          args: ['u64', 'buffer', 'buffer', 'buffer', 'buffer'],
           returns: 'i32',
         },
         OpenProcess: {
           args: ['u32', 'i32', 'u32'],
-          returns: 'ptr',
+          returns: 'u64',
         },
       });
       try {
         const handle = kernel.symbols.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, processId);
-        if (handle === null) return undefined;
+        if (handle === 0n) return undefined;
         try {
           const creationTime = new BigUint64Array(1);
           const exitTime = new BigUint64Array(1);

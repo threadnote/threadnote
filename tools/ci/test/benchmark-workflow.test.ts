@@ -1,3 +1,4 @@
+import {NATIVE_VECTOR_PROFILES} from '@threadnote/evidence/native-performance';
 import {Array as EffectArray, Option, Predicate, Schema} from 'effect';
 import {readFileSync} from '@threadnote/testing/node-fs';
 import fc from 'fast-check';
@@ -140,6 +141,111 @@ function captureSteps(workflow: BenchmarkWorkflow): readonly {readonly jobName: 
 }
 
 describe('platform benchmark workflow', () => {
+  it('keeps native-only vector capture manual, serial and bound to all eight native hosts', () => {
+    const workflow = decodeWorkflow(
+      load(readFileSync('.github/workflows/benchmarks.yml', 'utf8'), {schema: JSON_SCHEMA}),
+    );
+    const input = Schema.decodeUnknownSync(
+      Schema.Struct({default: Schema.Literal(false), type: Schema.Literal('boolean')}),
+    )(workflow.on.workflow_dispatch?.inputs?.include_native_recall_vector_capture);
+    expect(input.default).toBe(false);
+    const job = workflow.jobs['recall-vector-native'];
+    expect(job.if).toBe("github.event_name == 'workflow_dispatch' && inputs.include_native_recall_vector_capture");
+    expect(job['timeout-minutes']).toBe(45);
+    expect(job.strategy?.['max-parallel']).toBe(1);
+    const profiles = Schema.decodeUnknownSync(
+      Schema.Array(
+        Schema.Struct({target: Schema.String, os: Schema.String, musl: Schema.Boolean, gnu: Schema.Boolean}),
+      ),
+    )(job.strategy?.matrix?.include);
+    expect(EffectArray.map(profiles, profile => profile.target).sort()).toEqual(
+      EffectArray.map(NATIVE_VECTOR_PROFILES, profile => profile.target).sort(),
+    );
+    expect(EffectArray.filter(profiles, profile => profile.musl)).toEqual([
+      {target: 'bun-linux-arm64-musl', os: 'ubuntu-24.04-arm', musl: true, gnu: false},
+      {target: 'bun-linux-x64-baseline-musl', os: 'ubuntu-24.04', musl: true, gnu: false},
+    ]);
+    expect(profiles).toContainEqual({target: 'bun-windows-arm64', os: 'windows-11-arm', musl: false, gnu: false});
+    const steps = job.steps ?? [];
+    const toolchain = Option.getOrThrow(
+      EffectArray.findFirst(steps, step => step.name === 'Initialize native Windows C toolchain'),
+    );
+    expect(toolchain).toMatchObject({if: "runner.os == 'Windows'", shell: 'pwsh'});
+    for (const token of [
+      'vswhere.exe',
+      'Microsoft.VisualStudio.DevShell.dll',
+      "$env:PROCESSOR_ARCHITECTURE -eq 'ARM64'",
+      "{ 'arm64' } else { 'x64' }",
+      '-arch=$architecture -host_arch=$architecture',
+      "@('PATH','INCLUDE','LIB','LIBPATH','VCToolsInstallDir','WindowsSdkDir','WindowsSDKVersion')",
+      '[Environment]::GetEnvironmentVariable($name)',
+      '$env:GITHUB_ENV',
+    ])
+      expect(toolchain.run).toContain(token);
+    const verifyTools = Option.getOrThrow(
+      EffectArray.findFirst(steps, step => step.name === 'Verify Windows native tools in Bash'),
+    );
+    expect(verifyTools).toMatchObject({if: "runner.os == 'Windows'", shell: 'bash'});
+    expect(verifyTools.run).toContain('command -v cl');
+    expect(verifyTools.run).toContain('command -v dumpbin');
+    expect(steps.indexOf(toolchain)).toBeLessThan(steps.indexOf(verifyTools));
+    for (const name of [
+      'Install pinned native vector toolchain',
+      'Prepare one serial native-host capture driver',
+      'Capture serial production pairs without a required timing gate',
+    ]) {
+      const step = Option.getOrThrow(EffectArray.findFirst(steps, step => step.name === name));
+      expect(steps.indexOf(verifyTools)).toBeLessThan(steps.indexOf(step));
+    }
+    const commands = EffectArray.join(
+      EffectArray.map(job.steps ?? [], step => step.run ?? ''),
+      '\n',
+    );
+    for (const token of [
+      'git worktree add --detach',
+      '66f4c1d8baed033ec484f4db2895ea2252b4e2d0',
+      'THREADNOTE_DEVELOPMENT_BUILD_VERSION=',
+      'bun run build',
+      '--write-baseline-provenance',
+      '--baseline-source-root',
+      '--baseline-install-command',
+      'baseline_install=(bun install --frozen-lockfile --ignore-scripts)',
+      'baseline_install+=(--libc=glibc)',
+      '"${baseline_install[@]}"',
+      'node_modules/@threadnote',
+      '--stage-overlay',
+      '--baseline-distribution-root',
+      '--production-path --pairs 3 --samples 30',
+      '100000-dense 100000-tied 10000-dense 10000-tied',
+      '--musl-container',
+      '--gnu-container',
+      '--container-command-json',
+      'windows-process-tree-sampler.test.ts',
+      'code-graph.benchmark-failure.test.ts',
+      'test -f "$model_file"',
+    ])
+      expect(commands).toContain(token);
+    expect(commands).not.toContain('--fail-on-budget');
+    expect(commands).not.toMatch(/model(?:s)? (?:install|download)/u);
+    expect(Option.getOrElse(EffectString.indexOf('--write-baseline-provenance')(commands), () => -1)).toBeLessThan(
+      Option.getOrElse(EffectString.indexOf('--stage-overlay')(commands), () => -1),
+    );
+    const captureSteps = EffectArray.filter(
+      job.steps ?? [],
+      step =>
+        step.run !== undefined &&
+        (EffectString.includes('run.sh')(step.run) ||
+          EffectString.includes('--musl-container')(step.run) ||
+          EffectString.includes('--gnu-container')(step.run)),
+    );
+    expect(EffectArray.filter(captureSteps, step => step['timeout-minutes'] === 40)).toHaveLength(3);
+    expect(
+      EffectArray.findFirst(
+        job.steps ?? [],
+        step => step.uses !== undefined && EffectString.startsWith('actions/upload-artifact@')(step.uses),
+      ),
+    ).toMatchObject({value: {if: 'always()'}});
+  });
   it('preserves raw extension fields while normalizing empty YAML triggers and accepting scalar env values', () => {
     fc.assert(
       fc.property(fc.jsonValue(), extra => {
@@ -459,6 +565,19 @@ describe('platform benchmark workflow', () => {
     );
     expect(recallJob['runs-on']).toBe('ubuntu-latest');
     expect(recallJob['timeout-minutes']).toBeLessThanOrEqual(15);
+    const sourceReader = Option.getOrUndefined(
+      EffectArray.findFirst(
+        recallJob.steps ?? [],
+        step => step.name === 'Assemble the required source benchmark reader',
+      ),
+    );
+    expect(sourceReader?.run).toContain('assemble-native-inference.ts --gnu-container');
+    const sourceCommand = /--container-command-json '([^']+)'/u.exec(sourceReader?.run ?? '')?.[1];
+    expect(JSON.parse(sourceCommand ?? 'null')).toEqual([
+      'bun',
+      'scripts/assemble-native-vector-reader.ts',
+      '--development',
+    ]);
     expect(recallCommand).toContain('bun tools/ci/recall-confirmation.ts');
     const recallDiagnosticsStep = Option.getOrUndefined(
       Option.map(Option.fromNullishOr(recallJob.steps), findArray =>
@@ -474,7 +593,7 @@ describe('platform benchmark workflow', () => {
     );
     expect(recallDiagnosticsStep?.if).toBe('always()');
     expect(recallDiagnosticsStep?.with?.path).toBe(
-      'artifacts/recall-production-10000.json\nartifacts/recall-confirmation/\n',
+      'artifacts/recall-production-10000.json\nartifacts/recall-confirmation/\n.context/native-inference-container/*-failure.json\n',
     );
     expect(recallDiagnosticsStep?.with?.['if-no-files-found']).toBe('warn');
     expect(recallCommand).toContain('bun run bench:recall:vectors');
