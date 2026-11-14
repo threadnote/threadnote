@@ -446,6 +446,10 @@ export function javaGradleBootstrapProperties(javaHome: string, temporary: strin
   return (
     'org.gradle.java.installations.auto-detect=false\norg.gradle.java.installations.auto-download=false\norg.gradle.java.installations.paths=' +
     property(javaHome) +
+    // Buildship probes BuildEnvironment before applying the operation's setJavaHome.
+    // Pin that bootstrap too; JDT's launcher JVM is intentionally a different SDK.
+    '\norg.gradle.java.home=' +
+    property(javaHome) +
     '\norg.gradle.jvmargs=' +
     property(EffectArray.join(EffectArray.map(javaGradleJvmArguments(temporary), quote), ' ')) +
     '\norg.gradle.caching=false\norg.gradle.configuration-cache=false\n'

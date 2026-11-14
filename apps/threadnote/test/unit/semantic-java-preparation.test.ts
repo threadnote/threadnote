@@ -71,6 +71,49 @@ import {
   loadJavaPreparedModel,
 } from '../../src/semantic/providers/java_preparation.js';
 
+describe('Gradle bootstrap project JVM', () => {
+  // The producer emits only Properties' shared JSON escape subset (\\\\ and \\uXXXX).
+  // Quotes are ordinary Properties characters, so quote them for this independent decoder.
+  const decodedProperty = (text: string, key: string) => {
+    const prefix = key + '=';
+    const line = Option.getOrThrow(
+      EffectArray.findFirst(EffectString.split(text, '\n'), value => EffectString.startsWith(prefix)(value)),
+    );
+    const encoded = EffectString.slice(prefix.length)(line);
+    return Schema.decodeUnknownSync(Schema.String)(
+      JSON.parse('"' + EffectString.replaceAll('"', '\\"')(encoded) + '"'),
+    );
+  };
+  it('pins the raw BuildEnvironment bootstrap to project 21 independently of the JDT launcher 25', () => {
+    const projectHome = '/selected/project-jdk-21/Contents/Home';
+    const launcherHome = '/selected/jdt-jdk-25/Contents/Home';
+    const properties = javaRuntime.javaGradleBootstrapProperties(projectHome, '/private/tmp/gradle');
+    expect(decodedProperty(properties, 'org.gradle.java.home')).toBe(projectHome);
+    expect(decodedProperty(properties, 'org.gradle.java.home')).not.toBe(launcherHome);
+    expect(decodedProperty(properties, 'org.gradle.java.installations.paths')).toBe(projectHome);
+    expect(decodedProperty(properties, 'org.gradle.java.installations.auto-detect')).toBe('false');
+    expect(decodedProperty(properties, 'org.gradle.java.installations.auto-download')).toBe('false');
+  });
+  it('round trips selected absolute homes through bootstrap and toolchain Properties independently', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom('/', 'C:\\', '\\\\server\\share\\'),
+        fc.array(fc.constantFrom('jdk21', ' space ', 'é', '𐐀', '中', '\\', '"', '\t', '\n', '\r'), {
+          minLength: 1,
+          maxLength: 12,
+        }),
+        (root, parts) => {
+          const selected = root + EffectArray.join(parts, '');
+          const properties = javaRuntime.javaGradleBootstrapProperties(selected, '/private/tmp/gradle');
+          expect(decodedProperty(properties, 'org.gradle.java.home')).toBe(selected);
+          expect(decodedProperty(properties, 'org.gradle.java.installations.paths')).toBe(selected);
+        },
+      ),
+      {numRuns: 40},
+    );
+  });
+});
+
 describe('Java prepared refusal wire contract', () => {
   it('keeps the producer generic observation refusal strict and sanitized', () => {
     const reply = {protocolVersion: 1, requestToken: 'request', status: 'unsupported', reason: 'observation-failed'};
