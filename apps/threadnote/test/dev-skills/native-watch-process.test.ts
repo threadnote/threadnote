@@ -596,6 +596,7 @@ import {
   writeNativeWatch,
 } from '../../src/workflow_automation/watch_store.js';
 import {launchNativeWatchProcess} from '../../src/workflow_automation/watch_process.js';
+import {runNativeWatch} from '../../src/workflow_automation/watch.js';
 import * as Fn from 'effect/Function';
 
 effectIt.effect('startup failure sets stop only for its current nonce and preserves queued state', () =>
@@ -633,6 +634,32 @@ effectIt.effect('startup failure sets stop only for its current nonce and preser
     expect(failed.stopRequested).toBe(true);
     expect(failed.state).toEqual(envelope.state);
     expect(failed.collector?.token).toBe(token);
+    expect(failed.collector).toMatchObject({status: 'blocked', reason: 'collector-startup-failed'});
+    const failedRevision = (yield* readNativeWatch(config, 'fixture-watch'))?.revision;
+    yield* runNativeWatch(config, {
+      protocolVersion: 1,
+      executorVersion: 1,
+      action: 'watch',
+      command: 'stop',
+      watchId: 'fixture-watch',
+    });
+    const explicitStop = yield* readNativeWatch(config, 'fixture-watch');
+    expect(explicitStop?.envelope.collector?.reason).toBe('explicit-stop');
+    expect(
+      yield* runNativeWatch(config, {
+        protocolVersion: 1,
+        executorVersion: 1,
+        action: 'watch',
+        command: 'start',
+        watchId: 'fixture-watch',
+        pr: 'https://github.com/fixture/repo/pull/1',
+        consumerId: 'fixture-consumer',
+        wakeupId: 'fixture-wakeup',
+        expectedRevision: failedRevision,
+      }).pipe(Effect.result),
+    ).toMatchObject({failure: {code: 'watch-state-conflict'}});
+    yield* launchNativeWatchProcess(config, 'fixture-watch', token).pipe(Effect.result);
+    expect((yield* readNativeWatch(config, 'fixture-watch'))?.revision).toBe(explicitStop?.revision);
   }).pipe(
     Effect.provideService(CommandExecutor, {
       spawnDetached: () => Effect.succeed(false),

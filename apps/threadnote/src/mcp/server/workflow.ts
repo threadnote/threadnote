@@ -67,10 +67,8 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
       inputSchema: {
         callerCwd: McpInput.requiredString('Absolute checkout path for this task'),
         featureName: McpInput.string('Stable feature name used to resume a compact task'),
-        installationTarget: McpInput.requiredString(
-          'Installed Threadnote host target, required to verify the current bundle on start or resume',
-        ),
-        taskRef: McpInput.string('Optional opaque task reference returned by a previous start'),
+        installationTarget: McpInput.requiredString('Installed host target; verifies current bundle on start/resume'),
+        taskRef: McpInput.string('Opaque task ref from prior start'),
         sharedPlanRef: McpInput.string('One verified portable plan reference for recipient start'),
         graphProject: McpInput.string('Configured graph project for a new native run'),
         intent: Schema.optionalKey(NativeCompactIntentSchema),
@@ -559,12 +557,14 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Operate the exact current task PR watch: relay noticeRefs only; persist each event disposition before ACK with current refs; complete delivery from readback.',
+        'Monitor an explicit PR without a run, or an exact workflow watch. Relay noticeRefs only; persist dispositions before ACK. Workflow delivery needs readback; standalone grants no delivery/merge authority.',
       inputSchema: {
-        runId: McpInput.requiredString('Native run'),
+        runId: McpInput.string('Workflow run; omit for standalone monitoring'),
+        prUrl: McpInput.string('Explicit GitHub PR URL for standalone setup'),
+        watchRef: McpInput.string('Opaque standalone watch identity returned by setup'),
         callerCwd: McpInput.requiredString('Bound checkout'),
-        validationRef: McpInput.string('Current validation reference; omit only for provisional inspect or stop'),
-        deliveryRef: McpInput.string('Opaque open PR delivery reference; omit only for provisional inspect or stop'),
+        validationRef: McpInput.string('Workflow validation ref; omit for standalone or provisional inspect/stop'),
+        deliveryRef: McpInput.string('Workflow delivery ref; omit for standalone or provisional inspect/stop'),
         ...Struct.omit(NativeTaskPrWatchFieldsSchema.fields, ['noticeRef']),
         noticeRef: McpInput.string(
           'Relay this noticeRef only; record its returned event disposition; ACK with current refs.',
@@ -574,7 +574,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     Effect.fn('mcp_server.workflowTaskWatchPr')(function* ({runId, callerCwd, validationRef, deliveryRef, ...watch}) {
       const result = yield* runNativeTaskAction(config, {
         command: 'watch-pr',
-        runId,
+        ...(runId === undefined ? {} : {runId}),
         callerCwd,
         ...(validationRef === undefined ? {} : {validationRef}),
         ...(deliveryRef === undefined ? {} : {deliveryRef}),

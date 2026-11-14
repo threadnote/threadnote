@@ -78,28 +78,7 @@ export const verifyNativeCycleDeliveryRepository = Effect.fn('workflowAutomation
     );
     const pr = delivery.pr;
     if (!pr) return yield* invalid();
-    const target = yield* Effect.try({try: () => nativeWatchPullRequest(pr.url), catch: invalid});
-    const repository = EffectString.toLowerCase(`https://github.com/${target.owner}/${target.repo}`);
-    const remotes = EffectString.split(yield* readGit(repo, ['remote']), '\n');
-    if (remotes.length > 16 || !EffectArray.every(remotes, name => remoteName.test(name))) return yield* invalid();
-    let matchedRepository = false;
-    for (const remote of remotes) {
-      const urls = EffectString.split(yield* readGit(repo, ['remote', 'get-url', '--all', remote]), '\n');
-      const matchingUrls = EffectArray.filter(
-        urls,
-        url =>
-          supportedURL.test(url) && EffectString.toLowerCase(`https://${normalizeGitRemoteUrl(url)}`) === repository,
-      );
-      if (matchingUrls.length > 0) {
-        if (urls.length !== 1 || matchingUrls.length !== 1) return yield* invalid();
-        matchedRepository = true;
-      }
-      const mapping = yield* readGit(repo, ['config', '--get-all', `remote.${remote}.fetch`]);
-      const standard = `refs/heads/*:refs/remotes/${remote}/*`;
-      if (mapping !== standard && mapping !== '+' + standard) return yield* invalid();
-    }
-    if (!matchedRepository) return yield* invalid();
-    return {repository};
+    return yield* verifyNativePrRepository(repo, pr.url);
   },
 );
 
@@ -137,6 +116,34 @@ export const bindNativeCycleDeliveryBase = Effect.fn('workflowAutomation.cycle.b
     Effect.timeout('30 seconds'),
     Effect.catchIf(Cause.isTimeoutError, () => Effect.fail(invalid())),
   );
+});
+
+/** Bind a monitor to a repository without requiring a workflow delivery receipt. */
+export const verifyNativePrRepository = Effect.fn('workflowAutomation.verifyPrRepository')(function* (
+  repo: string,
+  prUrl: string,
+) {
+  const target = yield* Effect.try({try: () => nativeWatchPullRequest(prUrl), catch: invalid});
+  const repository = EffectString.toLowerCase(`https://github.com/${target.owner}/${target.repo}`);
+  const remotes = EffectString.split(yield* readGit(repo, ['remote']), '\n');
+  if (remotes.length > 16 || !EffectArray.every(remotes, name => remoteName.test(name))) return yield* invalid();
+  let matchedRepository = false;
+  for (const remote of remotes) {
+    const urls = EffectString.split(yield* readGit(repo, ['remote', 'get-url', '--all', remote]), '\n');
+    const matchingUrls = EffectArray.filter(
+      urls,
+      url => supportedURL.test(url) && EffectString.toLowerCase(`https://${normalizeGitRemoteUrl(url)}`) === repository,
+    );
+    if (matchingUrls.length > 0) {
+      if (urls.length !== 1 || matchingUrls.length !== 1) return yield* invalid();
+      matchedRepository = true;
+    }
+    const mapping = yield* readGit(repo, ['config', '--get-all', `remote.${remote}.fetch`]);
+    const standard = `refs/heads/*:refs/remotes/${remote}/*`;
+    if (mapping !== standard && mapping !== '+' + standard) return yield* invalid();
+  }
+  if (!matchedRepository) return yield* invalid();
+  return {repository};
 });
 
 /** Caller fields and opaque refs are evidence to compare, never proof that this observation occurred. */
