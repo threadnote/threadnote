@@ -305,8 +305,63 @@ jobs:
           mkdir -p .context/semantic-platform
           docker pull "$MUSL_IMAGE"
           docker image inspect "$MUSL_IMAGE" > .context/semantic-platform/image.json
-          docker run --rm --interactive --init --user root --tmpfs /tmp:rw,nosuid,nodev,mode=1777             -v "$PWD:/workspace" -w /workspace             -e THREADNOTE_BUILD_TARGET -e RELEASE_TARGET "$MUSL_IMAGE" sh -se <<'MUSL'
-              apk add --no-cache bash git ripgrep bubblewrap libstdc++ libgcc
+          # A /tmp mount cannot repair an OverlayFS process root: native ownership
+          # proof starts at literal /. Use the runner filesystem only after admission,
+          # avoiding a second filesystem image/loop device or a memory-sized tmpfs root.
+          rootfs="$(mktemp -d "$RUNNER_TEMP/threadnote-musl-root.XXXXXX")"
+          readonly rootfs
+          image_container=''
+          cleanup() {
+            status=$?
+            trap - EXIT
+            cleanup_failed=0
+            for target in proc dev workspace; do
+              if mountpoint -q "$rootfs/$target"; then
+                sudo umount "$rootfs/$target" || cleanup_failed=1
+              fi
+            done
+            # Never traverse a surviving workspace bind mount during deletion.
+            if test "$cleanup_failed" -eq 0; then
+              sudo rm -rf -- "$rootfs"
+            else
+              echo 'Musl root cleanup left a mounted job-owned root; refusing deletion.' >&2
+              status=1
+            fi
+            if test -n "$image_container"; then
+              docker rm "$image_container" || status=1
+            fi
+            exit "$status"
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          root_magic="$(stat --file-system --format=%t "$rootfs")"
+          case "$root_magic" in ef53|58465342|9123683e|1021994) ;; *) echo "Unsupported musl root filesystem: $root_magic" >&2; exit 1 ;; esac
+          root_options="$(findmnt --noheadings --output OPTIONS --target "$rootfs")"
+          case ",$root_options," in *,ro,*) echo 'Read-only musl root filesystem.' >&2; exit 1 ;; esac
+          printf '{"filesystemMagic":"0x%s","readOnly":false}\n' "$root_magic" > .context/semantic-platform/root-filesystem-host.json
+          image_id="$(docker image inspect --format '{{.Id}}' "$MUSL_IMAGE")"
+          image_container="$(docker create --user root "$image_id")"
+          docker inspect "$image_container" > .context/semantic-platform/root-container.json
+          docker export "$image_container" | sudo tar --extract --preserve-permissions --file=- --directory="$rootfs"
+          sudo chown root:root "$rootfs"
+          sudo chmod 0755 "$rootfs"
+          for target in etc dev proc workspace root; do
+            test ! -L "$rootfs/$target"
+            sudo mkdir -p "$rootfs/$target"
+          done
+          sudo chmod 0700 "$rootfs/root"
+          sudo rm -f -- "$rootfs/etc/resolv.conf"
+          sudo cp -L /etc/resolv.conf "$rootfs/etc/resolv.conf"
+          sudo mount --bind "$PWD" "$rootfs/workspace"
+          sudo mount --bind /dev "$rootfs/dev"
+          # Match the former container isolation: namespace exit kills its children,
+          # and its /proc mount disappears before outer bind-mount cleanup.
+          sudo unshare --mount --pid --fork --kill-child --mount-proc="$rootfs/proc" chroot "$rootfs" /usr/bin/env -i HOME=/root PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin THREADNOTE_BUILD_TARGET="$THREADNOTE_BUILD_TARGET" RELEASE_TARGET="$RELEASE_TARGET" sh -se <<'MUSL'
+              cd /workspace
+              test "$(id -u)" -eq 0
+              test "$HOME" = /root
+              apk add --no-cache bash git ripgrep bubblewrap libstdc++ libgcc acl
               bun --version > .context/semantic-platform/bun-version.txt
               uname -m > .context/semantic-platform/architecture.txt
               apk info -v > .context/semantic-platform/system-packages.txt
@@ -321,7 +376,20 @@ jobs:
               private_tmp="$(mktemp -d /tmp/threadnote-ci-XXXXXX)"
               export TMPDIR="$private_tmp"
               trap 'rm -rf -- "$private_tmp"' EXIT
-              bun --eval 'import {statfsSync,statSync} from "node:fs"; console.log(JSON.stringify({filesystemType:statfsSync(Bun.env.TMPDIR).type,mode:statSync(Bun.env.TMPDIR).mode&0o7777}));' > .context/semantic-platform/private-temp-filesystem.json
+              bun --eval 'import {statfsSync,statSync} from "node:fs"; const allowed=new Set([0xef53,0x58465342,0x9123683e,0x01021994]); const paths=["/","/workspace",Bun.env.HOME,Bun.env.TMPDIR]; const observations=paths.map(path=>({role:path==="/"?"root":path==="/workspace"?"workspace":path===Bun.env.HOME?"home":"private-temp",filesystemType:statfsSync(path).type,ownerUid:statSync(path).uid,mode:statSync(path).mode&0o7777})); console.log(JSON.stringify(observations)); if(observations.some(item=>!allowed.has(item.filesystemType)))throw new Error("Unsupported musl qualification filesystem");' > .context/semantic-platform/private-temp-filesystem.json
+              # Prove real default-ACL xattrs before the unchanged native negative test.
+              acl_probe="$(mktemp -d "$private_tmp/acl-preflight.XXXXXX")"
+              chmod 0700 "$acl_probe"
+              setfacl -m d:u::rwx,d:g::---,d:o::--- "$acl_probe"
+              test "$(stat -c %a "$acl_probe")" = 700
+              getfacl -cp "$acl_probe" > .context/semantic-platform/default-acl-preflight.txt
+              grep -Fx 'default:user::rwx' .context/semantic-platform/default-acl-preflight.txt
+              grep -Fx 'default:group::---' .context/semantic-platform/default-acl-preflight.txt
+              grep -Fx 'default:other::---' .context/semantic-platform/default-acl-preflight.txt
+              setfacl -k "$acl_probe"
+              getfacl -cp "$acl_probe" > .context/semantic-platform/default-acl-cleared.txt
+              test "$(grep -c '^default:' .context/semantic-platform/default-acl-cleared.txt)" -eq 0
+              rmdir "$acl_probe"
               # Observe the existing bounded ACL fixture before the strict native proof can abort.
               acl_diagnostic_status=0
               bun --bun vitest run packages/platform/test/writer-system/linux-acl.test.ts -t 'refuses an actual Linux default ACL while the private directory mode remains0700' --testTimeout=30000 --reporter=default --reporter=json --outputFile=.context/semantic-platform/private-acl-diagnostic.json > .context/semantic-platform/private-acl-diagnostic.log 2>&1 || acl_diagnostic_status=$?

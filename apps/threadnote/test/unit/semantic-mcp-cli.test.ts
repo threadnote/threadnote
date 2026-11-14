@@ -191,7 +191,16 @@ it('keeps native citation diagnostics bounded and excludes opaque response field
     {numRuns: 12},
   );
 });
-const citationFailureEvidence = (candidate: unknown, gaps: unknown, nativeReads: readonly string[] = []) => {
+type NativeReadDiagnostic =
+  | {readonly outcome: 'reply'; readonly elapsedMs: number}
+  | {readonly outcome: 'timeout'; readonly timeoutMs: number; readonly elapsedMs: number}
+  | {readonly outcome: 'error'; readonly errorClass: string; readonly elapsedMs: number};
+
+const citationFailureEvidence = (
+  candidate: unknown,
+  gaps: unknown,
+  nativeReads: readonly (NativeReadDiagnostic | string)[] = [],
+) => {
   const selected: Record<string, unknown> = {};
   if (isJsonObject(candidate)) {
     for (const key of [
@@ -361,21 +370,28 @@ const memoryContextFixture = Effect.gen(function* () {
   const home = path.join(root, 'home');
   const repository = path.join(root, 'repository');
   const command = yield* CommandExecutor;
-  const nativeReadReplies: {stdout?: string; error?: CommandExecutionError['_tag']}[] = [];
+  const nativeReadReplies: {
+    readonly stdout?: string;
+    readonly error?: CommandExecutionError;
+    readonly elapsedMs: number;
+  }[] = [];
   const observedCommand = CommandExecutor.of({
     ...command,
     execute: (executable, args, options) => {
       const observed =
         args.includes(CONTEXT_BRIEF_NATIVE_READ_WORKER_ARGUMENT) && options?.env?.THREADNOTE_HOME === home;
+      const startedAt = performance.now();
       return command.execute(executable, args, options).pipe(
         Effect.tap(reply =>
           Effect.sync(() => {
-            if (observed && nativeReadReplies.length < 8) nativeReadReplies.push({stdout: reply.stdout});
+            if (observed && nativeReadReplies.length < 8)
+              nativeReadReplies.push({stdout: reply.stdout, elapsedMs: Math.round(performance.now() - startedAt)});
           }),
         ),
         Effect.tapError(error =>
           Effect.sync(() => {
-            if (observed && nativeReadReplies.length < 8) nativeReadReplies.push({error: error._tag});
+            if (observed && nativeReadReplies.length < 8)
+              nativeReadReplies.push({error, elapsedMs: Math.round(performance.now() - startedAt)});
           }),
         ),
       );
@@ -752,11 +768,24 @@ const memoryContextFixture = Effect.gen(function* () {
     document,
     prepareMemory: loadRecallIndexData(config, {includeInactive: false}),
     // Decode only after compilation: diagnostics must not spend the native read's shared deadline.
-    nativeReadDiagnostics: () =>
+    nativeReadDiagnostics: (): readonly (NativeReadDiagnostic | string)[] =>
       EffectArray.take(
-        EffectArray.flatMap(nativeReadReplies, reply =>
-          reply.error === undefined ? nativeCitationReplyDiagnostic(reply.stdout ?? '') : [reply.error],
-        ),
+        EffectArray.flatMap(nativeReadReplies, (reply): readonly (NativeReadDiagnostic | string)[] => {
+          if (reply.error === undefined)
+            return EffectArray.map(nativeCitationReplyDiagnostic(reply.stdout ?? ''), () => ({
+              outcome: 'reply' as const,
+              elapsedMs: reply.elapsedMs,
+            }));
+          if (Schema.is(CommandTimedOut)(reply.error))
+            return [
+              {
+                outcome: 'timeout' as const,
+                timeoutMs: reply.error.timeoutMs,
+                elapsedMs: reply.elapsedMs,
+              },
+            ];
+          return [{outcome: 'error' as const, errorClass: reply.error._tag, elapsedMs: reply.elapsedMs}];
+        }),
         8,
       ),
     diagnostics,

@@ -1,4 +1,5 @@
 import {dlopen, type FFIFunction} from 'bun:ffi';
+import {createRequire} from 'node:module';
 import {fileURLToPath} from 'node:url';
 import {windowsProcessIdentity} from '../../src/writer-system/windows-native.js';
 import {windowsProviderCommandLine, WindowsDebugThreadLedger} from '../../src/writer-system/provider-windows.js';
@@ -26,6 +27,7 @@ const jobSample = vi.hoisted(() => ({
         getLastError(): number;
         setLastError(code: number): void;
         called(name: string, args: readonly unknown[], result: unknown): void;
+        failed?(name: string): void;
         closed?(symbols: Readonly<Record<string, FFIFunction>>): void;
       }
     | undefined,
@@ -90,11 +92,13 @@ vi.mock('bun:ffi', async importOriginal => {
                 active.called(key, args, result);
             } catch {
               active.incomplete = true;
+              active.failed?.(key);
             } finally {
               try {
                 if (lastError !== undefined) active.setLastError(lastError);
               } catch {
                 active.incomplete = true;
+                active.failed?.(key);
               }
             }
           }
@@ -186,6 +190,127 @@ function sanitizedChildText(text: string) {
 function assertEmptyChildStderr(stderr: string, diagnostic: string) {
   expect(stderr === '', diagnostic).toBe(true);
 }
+type RootReceiptRelation = 'equal' | 'mismatch' | 'missing';
+type ObserverCallback =
+  | 'job-create'
+  | 'process-create'
+  | 'job-accounting'
+  | 'job-membership'
+  | 'thread-identity'
+  | 'debug-event'
+  | 'handle-close'
+  | 'thread-resume'
+  | 'event-continue'
+  | 'other';
+type ObserverCheckStage =
+  | 'job-create-check'
+  | 'process-create-check'
+  | 'job-accounting-check'
+  | 'job-membership-check'
+  | 'thread-identity-check'
+  | 'debug-event-check'
+  | 'handle-close-check'
+  | 'thread-resume-check'
+  | 'event-continue-check'
+  | 'other-check';
+function observerCallback(name: string): ObserverCallback {
+  switch (name) {
+    case 'CreateJobObjectW':
+      return 'job-create';
+    case 'CreateProcessW':
+      return 'process-create';
+    case 'QueryInformationJobObject':
+      return 'job-accounting';
+    case 'IsProcessInJob':
+      return 'job-membership';
+    case 'GetCurrentThreadId':
+    case 'GetThreadId':
+    case 'GetProcessIdOfThread':
+      return 'thread-identity';
+    case 'WaitForDebugEvent':
+      return 'debug-event';
+    case 'CloseHandle':
+      return 'handle-close';
+    case 'ResumeThread':
+      return 'thread-resume';
+    case 'ContinueDebugEvent':
+      return 'event-continue';
+    default:
+      return 'other';
+  }
+}
+function observerCheckStage(callback: ObserverCallback): ObserverCheckStage {
+  return callback === 'job-create'
+    ? 'job-create-check'
+    : callback === 'process-create'
+      ? 'process-create-check'
+      : callback === 'job-accounting'
+        ? 'job-accounting-check'
+        : callback === 'job-membership'
+          ? 'job-membership-check'
+          : callback === 'thread-identity'
+            ? 'thread-identity-check'
+            : callback === 'debug-event'
+              ? 'debug-event-check'
+              : callback === 'handle-close'
+                ? 'handle-close-check'
+                : callback === 'thread-resume'
+                  ? 'thread-resume-check'
+                  : callback === 'event-continue'
+                    ? 'event-continue-check'
+                    : 'other-check';
+}
+function rootReceiptRelation(actual: readonly number[], expected: readonly number[]): RootReceiptRelation {
+  if (actual.length === 0) return 'missing';
+  return actual.length === expected.length && EffectArray.every(actual, (pid, index) => pid === expected[index])
+    ? 'equal'
+    : 'mismatch';
+}
+function rootVitestRunner(repository: string) {
+  const require = createRequire(hostPath.join(repository, 'package.json')),
+    packageFile = require.resolve('vitest/package.json'),
+    packageRunner = hostPath.join(hostPath.dirname(packageFile), 'vitest.mjs'),
+    runner = hostPath.join(repository, 'node_modules', 'vitest', 'vitest.mjs'),
+    version: unknown = JSON.parse(hostFiles.readFileSync(packageFile, 'utf8')).version,
+    pinned: unknown = JSON.parse(hostFiles.readFileSync(hostPath.join(repository, 'package.json'), 'utf8'))
+      .devDependencies.vitest,
+    relative = hostPath.relative(repository, runner);
+  return {
+    runner,
+    localRunner:
+      hostFiles.realpathSync(runner) === hostFiles.realpathSync(packageRunner) &&
+      !hostPath.isAbsolute(relative) &&
+      !EffectString.startsWith('..')(relative) &&
+      EffectString.startsWith('node_modules')(relative),
+    version: typeof version === 'string' && /^[0-9]+\.[0-9]+\.[0-9]+$/u.test(version) ? version : 'unrecognized',
+    pinMatches: version === pinned,
+  };
+}
+function isPinnedRootRunner(facts: {localRunner: boolean; pinMatches: boolean}) {
+  return facts.localRunner && facts.pinMatches;
+}
+it('uses the pinned root Vitest and classifies sanitized native receipts', () => {
+  const repository = fileURLToPath(new URL('../../../../', import.meta.url)),
+    runner = rootVitestRunner(repository);
+  expect(runner.localRunner && runner.pinMatches).toBe(true);
+  expect(runner.pinMatches && runner.version === '5.0.5').toBe(true);
+  expect(isPinnedRootRunner({localRunner: true, pinMatches: false})).toBe(false);
+  expect(isPinnedRootRunner({localRunner: false, pinMatches: true})).toBe(false);
+  expect(rootReceiptRelation([], [11, 12])).toBe('missing');
+  expect(rootReceiptRelation([11, 12], [11, 12])).toBe('equal');
+  expect(rootReceiptRelation([11], [11, 12])).toBe('mismatch');
+  fc.assert(
+    fc.property(fc.array(fc.integer({min: 0, max: 10000}), {maxLength: 20}), roots => {
+      if (roots.length === 0) {
+        expect(rootReceiptRelation(roots, roots)).toBe('missing');
+        return;
+      }
+      expect(rootReceiptRelation(roots, roots)).toBe('equal');
+      expect(rootReceiptRelation([...roots, Math.max(...roots) + 1], roots)).toBe('mismatch');
+    }),
+    {numRuns: 32},
+  );
+});
 it.each([
   ['Bearer credential', 'Error: Authorization: Bearer probe-private-credential'],
   ['quoted multiword credential', 'Error: token="first word probe-private-credential"'],
@@ -590,26 +715,21 @@ it.skipIf(process.platform !== 'win32' || !supported)(
       // UNKNOWN permanently closes this dispatch domain to new launches. End only its owning host;
       // the ordinary test worker must retain its independent healthy native domain.
       const repository = fileURLToPath(new URL('../../../../', import.meta.url)),
-        packageFile = fileURLToPath(import.meta.resolve('vitest/package.json')),
-        runner = fileURLToPath(new URL('./vitest.mjs', import.meta.resolve('vitest/package.json'))),
-        runnerRelative = hostPath.relative(hostFiles.realpathSync(repository), hostFiles.realpathSync(runner)),
-        version: unknown = JSON.parse(hostFiles.readFileSync(packageFile, 'utf8')).version,
-        pinned: unknown = JSON.parse(
-          hostFiles.readFileSync(new URL('../../../../package.json', import.meta.url), 'utf8'),
-        ).devDependencies.vitest,
+        resolvedRunner = rootVitestRunner(repository),
+        runner = resolvedRunner.runner,
         facts = {
-          localRunner:
-            !hostPath.isAbsolute(runnerRelative) &&
-            !EffectString.startsWith('..')(runnerRelative) &&
-            EffectString.startsWith('node_modules')(runnerRelative),
-          version: typeof version === 'string' && /^[0-9]+\.[0-9]+\.[0-9]+$/u.test(version) ? version : 'unrecognized',
-          pinMatches: version === pinned,
+          localRunner: resolvedRunner.localRunner,
+          version: resolvedRunner.version,
+          pinMatches: resolvedRunner.pinMatches,
           entrySHA256: hostCrypto.createHash('sha256').update(hostFiles.readFileSync(runner)).digest('hex'),
           pool: 'threads',
           workers: 1,
           exactFilter: true,
         },
-        child = Bun.spawn(
+        preflight = JSON.stringify({runner: facts});
+      // Refuse a foreign or mismatched runner before spawning it; this never downloads dependencies.
+      expect(isPinnedRootRunner(facts), preflight).toBe(true);
+      const child = Bun.spawn(
           [
             process.execPath,
             '--no-install',
@@ -654,7 +774,6 @@ it.skipIf(process.platform !== 'win32' || !supported)(
         });
         expect(exit, diagnostic).toBe(0);
         expect(stdout.truncated || stderr.truncated, diagnostic).toBe(false);
-        expect(facts.localRunner && facts.pinMatches, diagnostic).toBe(true);
         assertEmptyChildStderr(stderr.text, diagnostic);
         expect(EffectString.includes(marker)(stdout.text), diagnostic).toBe(true);
       } finally {
@@ -1050,12 +1169,22 @@ it.skipIf(process.platform !== 'win32' || !supported)(
       exits = 0,
       emptyPolls = 0,
       resumes = 0,
-      passed = false;
+      passed = false,
+      firstObserverCallback: ObserverCallback | 'none' = 'none',
+      firstObserverCheckStage: ObserverCheckStage | 'none' = 'none';
+    let checkStage: ObserverCheckStage = 'other-check';
     const observation: NonNullable<typeof jobSample.active> = {
       incomplete: false,
       getLastError: () => kernel.symbols.GetLastError(),
       setLastError: code => kernel.symbols.SetLastError(code),
+      failed(name) {
+        if (firstObserverCallback !== 'none') return;
+        firstObserverCallback = observerCallback(name);
+        firstObserverCheckStage = checkStage;
+      },
       called(name, args, result) {
+        const callback = observerCallback(name);
+        checkStage = observerCheckStage(callback);
         if (name === 'CreateJobObjectW') {
           expect(jobs.size).toBeLessThan(2);
           jobs.set(BigInt(String(result)), {total: 0, active: 0, queries: 0});
@@ -1251,9 +1380,12 @@ it.skipIf(process.platform !== 'win32' || !supported)(
                 pendingEvent: pending !== undefined,
                 borrowedRoles: borrowed.size,
                 incomplete: observation.incomplete,
-                rootReceiptMatches:
-                  launchedRoots.length === providers.length &&
-                  EffectArray.every(launchedRoots, (pid, index) => pid === providers[index].pid),
+                firstObserverCallback,
+                firstObserverCheckStage,
+                rootReceiptRelation: rootReceiptRelation(
+                  launchedRoots,
+                  EffectArray.map(providers, provider => provider.pid),
+                ),
                 requiredChildReceipts: requiredChildren.size,
                 jobs: EffectArray.map([...jobs.entries()], ([handle, accounting], ordinal) => {
                   const members = EffectArray.filter([...processes.entries()], ([, member]) => member.jobs.has(handle));
