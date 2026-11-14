@@ -500,6 +500,7 @@ it.skipIf(process.platform !== 'win32')(
   () =>
     ownedFixture(temporary => {
       const directory = path.join(temporary, 'owned'),
+        privateDirectory = path.join(temporary, 'private-lease'),
         file = path.join(directory, 'source.txt');
       const principal = windowsTokenPrincipal();
       const security = windowsSystemLibrary('advapi32.dll', {
@@ -535,7 +536,8 @@ it.skipIf(process.platform !== 'win32')(
         const info = fs.statSync(file, {bigint: true});
         return JSON.stringify([String(info.dev), String(info.ino)]);
       };
-      const sd = new BigUint64Array(1);
+      const sd = new BigUint64Array(1),
+        privateSd = new BigUint64Array(1);
       releaseControl.setLastError = setup.symbols.SetLastError;
       try {
         expect(runtimeNativePlatformSupport().writer).toBe(false);
@@ -551,6 +553,17 @@ it.skipIf(process.platform !== 'win32')(
         new DataView(attributes.buffer).setUint32(0, 24, true);
         attributes[1] = sd[0];
         expect(setup.symbols.CreateDirectoryW(windowsWide(directory), attributes)).toBe(1);
+        // Source files inherit the rooted I/O ACL; private leases require a separate noninheriting ACE.
+        expect(
+          security.symbols.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            windowsWide(`O:${principal.sid}D:P(A;;FA;;;${principal.sid})`),
+            1,
+            privateSd,
+            null,
+          ),
+        ).toBe(1);
+        attributes[1] = privateSd[0];
+        expect(setup.symbols.CreateDirectoryW(windowsWide(privateDirectory), attributes)).toBe(1);
         fs.writeFileSync(file, 'old source');
         const firstSource = runtimeCaptureWindowsSource(fs.realpathSync(directory), ['source.txt'], 1024);
         const closingSource = runtimeCaptureWindowsSource(fs.realpathSync(directory), ['source.txt'], 1024);
@@ -567,7 +580,7 @@ it.skipIf(process.platform !== 'win32')(
         expect(() => runtimeExportWindowsSourceWitness({...firstSource.evidence})).toThrow(RuntimeWriterFault);
         expect(releaseControl.writable).toBe(0n); // Read-only evidence never requested the writable source mask.
         // Real native lease checks precede this fixture's terminal close-UNKNOWN poisoning.
-        const leaseDirectory = openWindowsPrivateDirectory(fs.realpathSync(directory));
+        const leaseDirectory = openWindowsPrivateDirectory(fs.realpathSync(privateDirectory));
         try {
           const identityKernel = windowsNative.windowsKernel();
           try {
@@ -587,7 +600,7 @@ it.skipIf(process.platform !== 'win32')(
               {...owner, processStartIdentity: start + '-changed'},
             ]) {
               expect(() => leaseDirectory.acquireLease(name, JSON.stringify(bad))).toThrow(RuntimeWriterFault);
-              expect(fs.existsSync(path.join(directory, name))).toBe(false);
+              expect(fs.existsSync(path.join(privateDirectory, name))).toBe(false);
               expect(fs.readFileSync(file, 'utf8')).toBe('old source');
             }
             const lease = leaseDirectory.acquireLease(name, token);
@@ -599,7 +612,7 @@ it.skipIf(process.platform !== 'win32')(
               lease.close();
             }
             lease.close();
-            expect(fs.existsSync(path.join(directory, name))).toBe(false);
+            expect(fs.existsSync(path.join(privateDirectory, name))).toBe(false);
             expect(JSON.stringify(owner)).toBe(token);
           } finally {
             identityKernel.close(); // No CloseHandle call for its borrowed current-process pseudo-handle.
@@ -841,6 +854,7 @@ it.skipIf(process.platform !== 'win32')(
         releaseControl.setLastError = undefined;
         if (target && !closeUnknown) runtimeCloseGuardedDiskTarget(target);
         for (const current of openRoots) runtimeCloseWriterRoot(current);
+        if (privateSd[0] !== 0n) expect(setup.symbols.LocalFree(privateSd[0])).toBe(0n);
         if (sd[0] !== 0n) expect(setup.symbols.LocalFree(sd[0])).toBe(0n);
         security.close();
         setup.close();

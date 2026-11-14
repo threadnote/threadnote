@@ -3,6 +3,7 @@ import * as Schema from 'effect/Schema';
 import * as EffectArray from 'effect/Array';
 import * as EffectOption from 'effect/Option';
 import * as EffectString from 'effect/String';
+import {Effect} from 'effect';
 /* oxlint-disable effecttsgo/node-builtin-import -- Integration regressions exercise actual runner processes and OS signals. */
 import {spawn} from 'node:child_process';
 import {access, chmod, mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
@@ -11,9 +12,11 @@ import {join, resolve} from 'node:path';
 import {expect, it, vi} from 'vitest';
 import fc from 'fast-check';
 import {
+  candidateFailure,
   verifiedJavaGradleCandidateCleanup,
   candidateDispatchInputBinding,
 } from '../evaluation/semantic-qualification/candidate.js';
+import {LspFault} from '../../src/semantic/lsp_transport.js';
 import {
   withinProbeDeadline,
   installProbeSignalCleanup,
@@ -21,6 +24,34 @@ import {
   releaseProbeHandles,
 } from '../../../../tools/semantic/semantic_probe_process.js';
 const fixture = resolve('apps/threadnote/test/fixtures/semantic/fake-provider.ts');
+it.each(['timeout', 'protocol', 'prerequisite'] as const)(
+  'retains the production %s fault code despite its empty Error message',
+  async code => {
+    const error = LspFault.make({code});
+    // Promise rejection identity is the candidate runner boundary under test, not an Effect service.
+    // oxlint-disable-next-line threadnote/no-effect-runtime-in-tests -- Exercises the actual runner Effect-to-Promise rejection boundary, an explicit Promise contract.
+    const observed = await Effect.runPromise(Effect.fail(error)).catch((failure: unknown) => failure);
+    expect(observed).toBe(error);
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toBe('');
+    expect(candidateFailure(observed)).toBe('Semantic provider fault: ' + code);
+  },
+);
+it('projects only closed actual production codes and preserves the unexpected-error fallback', () => {
+  fc.assert(
+    fc.property(fc.string({maxLength: 512}), text => {
+      const unexpected = new Error(text, {cause: new Error('/private/secret-cause')});
+      expect(candidateFailure(unexpected)).toBe(text);
+      expect(candidateFailure({_tag: 'LspFault', code: 'timeout', message: text})).toBe('Unknown failure');
+      const actual = LspFault.make({code: 'timeout'});
+      Object.defineProperty(actual, 'message', {value: text});
+      expect(candidateFailure(actual)).toBe('Semantic provider fault: timeout');
+      const malformed = Object.assign(LspFault.make({code: 'timeout'}), {code: text + '-not-a-code'});
+      expect(candidateFailure(malformed)).toBe(malformed.message);
+    }),
+    {numRuns: 40},
+  );
+});
 const quote = (value: string) => `'${EffectString.replaceAll("'", "'\\''")(value)}'`;
 const observe = async (path: string) => {
   const deadline = performance.now() + 5000;

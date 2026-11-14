@@ -1190,8 +1190,11 @@ it.skipIf(process.platform !== 'win32' || !supported)(
           jobs.set(BigInt(String(result)), {total: 0, active: 0, queries: 0});
         }
         if (name === 'CreateProcessW' && result !== 0) {
-          if (!(args[9] instanceof Uint8Array)) throw new Error('No original process-information backing.');
-          const pi = new DataView(args[9].buffer, args[9].byteOffset, args[9].byteLength);
+          const output = args[9];
+          if (!(output instanceof BigUint64Array)) throw new Error('No original process-information backing.');
+          expect(output.length).toBe(3);
+          expect(output.byteLength).toBe(24);
+          const pi = new DataView(output.buffer, output.byteOffset, output.byteLength);
           expect(launchedRoots.length).toBeLessThan(2);
           launchedRoots.push(pi.getUint32(16, true));
         }

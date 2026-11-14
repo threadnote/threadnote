@@ -3,6 +3,7 @@ import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {Array as EffectArray, Record as EffectRecord, Schema, String as EffectString} from 'effect';
 import {isJsonObject} from '@threadnote/platform/json';
 import {javaRuntimePinsForHost} from '../../../src/semantic/providers/java_runtime.js';
+import {LspFault} from '../../../src/semantic/lsp_transport.js';
 import {runtimeNativePlatformTarget} from '@threadnote/platform/system';
 import {BUN_STANDALONE_TARGETS} from '../../../../../scripts/release-targets.js';
 /* oxlint-disable effecttsgo/node-builtin-import -- Candidate qualification owns explicit process and private evidence-file boundaries. */
@@ -157,12 +158,18 @@ export async function verifiedJavaGradleCandidateCleanup(arguments_: readonly st
   }
 }
 
-const failure = (error: unknown) => (error instanceof Error ? error.message : 'Unknown failure');
+/** Project only the closed production fault code; preserve existing unexpected-error behavior. */
+export const candidateFailure = (error: unknown) =>
+  Schema.is(LspFault)(error) && Schema.is(LspFault.fields.code)(error.code)
+    ? 'Semantic provider fault: ' + error.code
+    : error instanceof Error
+      ? error.message
+      : 'Unknown failure';
 /** Install rejection ownership immediately, even when transport shutdown must finish before consuming the receipt. */
 export const settleProviderShutdown = (pending: ReturnType<typeof shutdownFixtureProviders>) =>
   pending.then(
     value => ({status: 'observed' as const, value}),
-    (error: unknown) => ({status: 'unknown' as const, reason: failure(error)}),
+    (error: unknown) => ({status: 'unknown' as const, reason: candidateFailure(error)}),
   );
 const alive = (pid: number) => {
   try {
@@ -357,7 +364,7 @@ export async function runCandidateChecks(
         if (close) await close.waitForCloseIfStarted(AbortSignal.timeout(500));
         report.cleanup.mcpCloseObserved = close?.closeObserved ?? false;
       } catch (error) {
-        report.cleanup.closeFailure = failure(error);
+        report.cleanup.closeFailure = candidateFailure(error);
         report.status = 'failed';
       }
       for (const [pid, child] of children)
@@ -385,7 +392,7 @@ export async function runCandidateChecks(
           }
         } catch (error) {
           semanticDrained = false;
-          report.cleanup.closeFailure = failure(error);
+          report.cleanup.closeFailure = candidateFailure(error);
         }
       }
       const writerRetired = EffectArray.every(report.writerRecords ?? [], record => record.retired);
@@ -873,7 +880,7 @@ export async function runCandidateChecks(
     };
     report.status = 'passed';
   } catch (error) {
-    report.failure = failure(error);
+    report.failure = candidateFailure(error);
   } finally {
     await finish();
     signals.dispose();
