@@ -96,6 +96,7 @@ export function makeNativeTaskPrDeliveryCommand<E, R>(
     readonly commitEvidence: string;
     readonly pr: unknown;
     readonly publication: unknown;
+    readonly userAuthority?: string;
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
 ) {
   return Command.make(
@@ -106,7 +107,14 @@ export function makeNativeTaskPrDeliveryCommand<E, R>(
       validationRef: requiredString('validation-ref', 'Opaque current validation reference from the task flow'),
       commitEvidence: requiredString('commit-evidence', 'Actual verified PR commit evidence'),
       pr: requiredString('pr', 'Physical PR metadata as JSON'),
-      publication: requiredString('publication', 'Actual publication authority input as JSON'),
+      publication: requiredString(
+        'publication',
+        'Feature-memory publication evidence as JSON; separate from user consent',
+      ),
+      userAuthority: optionalString(
+        'user-authority',
+        'Quote actual existing user approval; required for new PR delivery/adoption',
+      ),
     },
     options =>
       Effect.try({
@@ -191,7 +199,10 @@ export function makeNativeTaskPrWatchCommand<E, R>(
       executable: optionalString('host-executable', 'Absolute registered host executable'),
       hostReference: optionalString('host-reference', 'Codex thread ID or Cursor session ID'),
       workspace: optionalString('workspace', 'Cursor workspace path'),
-      noticeRef: optionalString('notice-ref', 'Opaque notice route returned by the current watch'),
+      noticeRef: optionalString(
+        'notice-ref',
+        'Relay this current notice route, record its disposition, then ACK using the returned current refs',
+      ),
       workEventRef: optionalString('work-event-ref', 'Opaque retained work reference returned by work'),
       offsetBytes: optional(integerFlag('offset-bytes')),
       sourceDigest: optionalString('source-digest', 'Canonical work detail digest returned by work'),
@@ -255,14 +266,18 @@ export function makeNativeTaskPrWatchCommand<E, R>(
       }
       return handler({
         ...options,
-        ...(options.host && options.executable && options.hostReference
+        ...(options.host && options.hostReference && (options.host === 'codex' || options.executable)
           ? {
               wakeup:
                 options.host === 'codex'
-                  ? {host: 'codex' as const, executable: options.executable, threadId: options.hostReference}
+                  ? {
+                      host: 'codex' as const,
+                      ...(options.executable === undefined ? {} : {executable: options.executable}),
+                      threadId: options.hostReference,
+                    }
                   : {
                       host: 'cursor-cli' as const,
-                      executable: options.executable,
+                      executable: options.executable!,
                       sessionId: options.hostReference,
                       workspace: options.workspace ?? '',
                       exclusiveSession: true as const,
@@ -427,6 +442,13 @@ export function makeNativeTaskActionCommands<E, R>(
     readonly commitEvidence: string;
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
   sameLabelIntegrationHandler?: (options: {
+    readonly runId: string;
+    readonly callerCwd: string;
+    readonly snapshotRef: string;
+    readonly reason: string;
+    readonly userAuthority: string;
+  }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
+  recoverUnreviewedRebaseHandler?: (options: {
     readonly runId: string;
     readonly callerCwd: string;
     readonly snapshotRef: string;
@@ -646,6 +668,25 @@ export function makeNativeTaskActionCommands<E, R>(
             }),
           ),
   ).pipe(Command.withDescription('Qualify an ancestry-preserving integration of a rewritten same-label upstream base'));
+  const recoverUnreviewedRebaseSnapshot = Command.make(
+    'recover-unreviewed-rebase-snapshot',
+    {
+      runId: requiredString('run-id', 'Existing native workflow run identifier'),
+      callerCwd: requiredString('caller-cwd', 'Absolute bound checkout path'),
+      snapshotRef: requiredString('snapshot-ref', 'Exact latest unreviewed predecessor reference'),
+      reason: requiredString('reason', 'Why corrected source must recover after rebase'),
+      userAuthority: requiredString('user-authority', 'Quote actual existing user authority for this recovery'),
+    },
+    options =>
+      recoverUnreviewedRebaseHandler
+        ? recoverUnreviewedRebaseHandler(options)
+        : Effect.fail(
+            WorkflowAutomationError.make({
+              code: 'unsupported-action',
+              message: 'Unreviewed rebase recovery is unavailable.',
+            }),
+          ),
+  ).pipe(Command.withDescription('Retain unreviewed rebase history and require a new full review and validation'));
   const supersedeUnreviewedSnapshot = Command.make(
     'supersede-unreviewed-snapshot',
     {
@@ -876,6 +917,7 @@ export function makeNativeTaskActionCommands<E, R>(
       requalifyBaseSnapshot,
       integrateSameLabelBaseSnapshot,
       supersedeUnreviewedSnapshot,
+      recoverUnreviewedRebaseSnapshot,
       recordReview,
       recordValidation,
       deliverLocal,

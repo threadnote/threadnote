@@ -1,4 +1,13 @@
-import {Array as EffectArray, Effect, FileSystem, Path, Predicate, Schema, String as EffectString} from 'effect';
+import {
+  Array as EffectArray,
+  Effect,
+  FileSystem,
+  Option as EffectOption,
+  Path,
+  Predicate,
+  Schema,
+  String as EffectString,
+} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import {
   decodeNativeTaskCursor,
@@ -23,6 +32,7 @@ import {
   selectNativeTaskSameLabelIntegration,
   isCurrentTaskTargetForRequalification,
 } from './task_action_helpers.js';
+import {verifyNativeCycleSnapshotEvidence, verifyNativeCycleUnreviewedRebase} from './cycle_recovery.js';
 import {currentNativeTaskRef} from './task_action_helpers.js';
 import {decodeJournal} from './closeout_request_schema.js';
 import {readNativeCloseoutJournal} from './closeout_store.js';
@@ -36,6 +46,21 @@ const requestSchema = Schema.Struct({
   cursor: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(2048))),
   phaseId: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128))),
 });
+
+export const encodeNativeAuthoringTaskRef = (ref: {
+  readonly version: 1;
+  readonly kind: 'spec' | 'plan';
+  readonly runId: string;
+  readonly generationHash: string;
+  readonly operationId: string;
+  readonly documentHash: string;
+  readonly stateRevision: string;
+}) =>
+  'authorref-v1.' +
+  EffectString.replaceAll(
+    '/',
+    '_',
+  )(EffectString.replaceAll('+', '-')(EffectString.replace(/=+$/u, '')(btoa(stableJson(ref)))));
 
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
 
@@ -284,7 +309,7 @@ const baseRequalificationRoute = (
     if (fromBranches.size !== 1) return undefined;
     const fromBaseBranch = [...fromBranches][0];
     if (!fromBaseBranch) return undefined;
-    const oldBaseResult = yield* resolveNativeTaskBaseRef(checkout, fromBaseBranch).pipe(Effect.result);
+    const oldBaseResult = yield* verifyNativeCycleSnapshotEvidence(checkout, prior).pipe(Effect.result);
     const headResult = yield* gitValue(['rev-parse', '--verify', '--end-of-options', 'HEAD^{commit}'], checkout).pipe(
       Effect.result,
     );
@@ -297,14 +322,9 @@ const baseRequalificationRoute = (
       newBaseResult._tag === 'Failure'
     )
       return undefined;
-    if (
-      oldBaseResult.success === undefined ||
-      headResult.success === undefined ||
-      branchResult.success === undefined ||
-      newBaseResult.success === undefined
-    )
+    if (headResult.success === undefined || branchResult.success === undefined || newBaseResult.success === undefined)
       return undefined;
-    const priorBaseHead = oldBaseResult.success.commit;
+    const priorBaseHead = prior.declaredBaseHead;
     const currentHead = EffectString.trim(headResult.success);
     const currentBranch = EffectString.trim(branchResult.success);
     const newBaseHead = newBaseResult.success.commit;
@@ -439,10 +459,57 @@ export const readNativeTaskView = (config: RuntimeConfig, input: unknown) =>
     }
     const planDrift = 'planDrift' in inspected ? inspected.planDrift : undefined;
     const authoringResult = inspected.taskAuthoring;
-    const authoring =
+    const authoringValue =
       authoringResult && 'currentPlan' in authoringResult && Predicate.isObject(authoringResult.currentPlan)
         ? authoringResult.currentPlan
         : undefined;
+    const authoringRoot = authoringValue && Predicate.isObject(authoringValue.root) ? authoringValue.root : undefined;
+    const authoringKind =
+      authoringValue && (authoringValue.kind === 'spec' || authoringValue.kind === 'plan')
+        ? authoringValue.kind
+        : undefined;
+    const authoringRootOperation =
+      authoringRoot && authoringKind
+        ? EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              [...stored.state.operations].reverse(),
+              operation =>
+                operation.status === 'verified' &&
+                operation.intent.role === 'authoring-root' &&
+                operation.intent.artifactKey === 'author-root-' + authoringKind &&
+                operation.artifact?.uri === authoringRoot.uri &&
+                operation.artifact.revision === authoringRoot.revision,
+            ),
+          )
+        : undefined;
+    const authoringRef =
+      authoringValue && authoringKind && authoringRootOperation && typeof authoringValue.documentHash === 'string'
+        ? encodeNativeAuthoringTaskRef({
+            version: 1,
+            kind: authoringKind,
+            runId: stored.state.runId,
+            generationHash: sha256HexSync(stored.state.generation),
+            operationId: authoringRootOperation.intent.operationId,
+            documentHash: authoringValue.documentHash,
+            stateRevision: stored.revision,
+          })
+        : undefined;
+    const authoring =
+      authoringValue &&
+      authoringRef &&
+      Predicate.isObject(authoringValue.next) &&
+      authoringValue.next.action === 'compact-confirm'
+        ? {
+            ...authoringValue,
+            authoringRef,
+            continuation: {
+              tool: 'workflow_task_author',
+              authoringRef,
+              read: {command: 'read', detail: 'document'},
+              save: {command: 'save'},
+            },
+          }
+        : authoringValue;
     const afterRead = yield* readNativeWorkflowState(config, request.runId);
     if (afterRead?.revision !== stored.revision)
       return yield* fail('inspection-failed', 'The native run changed while reading its current authoring root.');
@@ -601,10 +668,38 @@ export const readNativeTaskView = (config: RuntimeConfig, input: unknown) =>
     const result = pageWatches.length > 0 ? {...selectedView, historicalWatches: pageWatches} : selectedView;
     const withBaseRequalification = (view: ReturnType<typeof projectNativeTaskView>) =>
       Effect.gen(function* () {
-        const route = yield* sameLabelIntegrationRoute(config, stored, checkout, view);
-        if (route) return {...view, sameLabelBaseIntegration: route};
-        const legacy = yield* baseRequalificationRoute(config, stored, checkout, view);
-        return legacy ? {...view, baseRequalification: legacy} : view;
+        const sameLabel = yield* sameLabelIntegrationRoute(config, stored, checkout, view);
+        const route = yield* baseRequalificationRoute(config, stored, checkout, view);
+        const runtime = stored.state.cycle;
+        const snapshotRef = view.phase?.snapshot?.snapshotRef;
+        const prior = runtime
+          ? EffectOption.getOrUndefined(
+              EffectArray.findFirst(runtime.snapshots, entry => entry.snapshot.snapshotId === view.next.snapshotId),
+            )?.snapshot
+          : undefined;
+        const phase = runtime
+          ? EffectOption.getOrUndefined(
+              EffectArray.findFirst(runtime.state.plan.phases, candidate => candidate.id === view.next.phaseId),
+            )
+          : undefined;
+        const recovery =
+          runtime && prior && phase && snapshotRef && view.status === 'ready' && view.next.action === 'review'
+            ? yield* verifyNativeCycleUnreviewedRebase(checkout, prior, runtime, phase).pipe(Effect.result)
+            : undefined;
+        return {
+          ...view,
+          ...(sameLabel ? {sameLabelBaseIntegration: sameLabel} : {}),
+          ...(route ? {baseRequalification: route} : {}),
+          ...(recovery?._tag === 'Success'
+            ? {
+                unreviewedRebaseRecovery: {
+                  action: 'recover-unreviewed-rebase' as const,
+                  snapshotRef: snapshotRef!,
+                  userAuthorityRequired: true as const,
+                },
+              }
+            : {}),
+        };
       });
     if (request.phaseId === undefined) return yield* withBaseRequalification(result);
     const runtime = stored.state.cycle;

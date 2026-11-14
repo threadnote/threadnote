@@ -532,6 +532,11 @@ describe('ordinary merge native qualification', () => {
         const snapshot = yield* f.capture();
         const proof = snapshot.ordinaryMergeQualificationV1!;
         expect(snapshot.version).toBe(2);
+        expect(snapshot.comparisonEvidence).toMatchObject({
+          sourceRef: proof.currentHeadRef,
+          baseRef: proof.currentBaseRef,
+          baseTree: proof.currentBaseTree,
+        });
         expect(snapshot.files).toHaveLength(295);
         expect(snapshot.scopeFiles).toHaveLength(179);
         expect(proof.upstreamEvidence).toHaveLength(116);
@@ -1428,7 +1433,53 @@ describe('same-label rewritten-base native qualification', () => {
             evidence: 'Private synthetic owned watch receipt.',
           },
         };
-        yield* f.mutate('record-delivery', {phaseId: 'one', publication, delivery});
+        // The incoming delivery contract requires explicit authority and a fresh
+        // provider observation; keep this historical publication case offline.
+        yield* f.git(['remote', 'add', 'origin', 'https://github.com/example/repo.git']);
+        const providerIdentity = {
+          url: delivery.pr.url,
+          number: 1,
+          baseRepository: 'example/repo',
+          headRepository: 'example/repo',
+          baseBranch: 'main',
+          headBranch: 'feature/one',
+          headSha: snapshot.head,
+          state: 'open' as const,
+        };
+        const modernDelivery = {
+          ...delivery,
+          userAuthority: 'The fixture user approved this exact historical PR delivery.',
+          providerIdentity,
+        };
+        const executor = yield* CommandExecutor;
+        let providerMerged = false;
+        let observations = 0;
+        const provider = CommandExecutor.of({
+          ...executor,
+          execute: (executable, args, options) => {
+            if (executable === 'gh' && args.includes('--jq')) {
+              observations++;
+              return Effect.succeed({
+                exitCode: 0,
+                stderr: '',
+                stdout: JSON.stringify({
+                  ...providerIdentity,
+                  state: providerMerged ? 'closed' : 'open',
+                  merged: providerMerged,
+                }),
+              });
+            }
+            return executor.execute(executable, args, options);
+          },
+        });
+        expect(
+          yield* f.mutate('record-delivery', {phaseId: 'one', publication, delivery}).pipe(Effect.result),
+        ).toMatchObject({failure: {code: 'user-authority-required'}});
+        expect(observations).toBe(0);
+        yield* f
+          .mutate('record-delivery', {phaseId: 'one', publication, delivery: modernDelivery})
+          .pipe(Effect.provideService(CommandExecutor, provider));
+        expect(observations).toBeGreaterThan(0);
         const published = yield* f.read();
         const prior = published.state.phases.one.delivery!;
         yield* f.git(['checkout', 'main']);
@@ -1440,7 +1491,12 @@ describe('same-label rewritten-base native qualification', () => {
           pr: {...prior.pr!, state: 'merged'},
           watch: {...prior.watch!, state: 'terminal', evidence: 'Private owned watch observed the historical merge.'},
         };
-        expect((yield* f.mutate('record-delivery', {phaseId: 'one', publication, delivery: merged})).status).toBe('ok');
+        providerMerged = true;
+        expect(
+          (yield* f
+            .mutate('record-delivery', {phaseId: 'one', publication, delivery: merged})
+            .pipe(Effect.provideService(CommandExecutor, provider))).status,
+        ).toBe('ok');
         const completed = yield* f.read();
         expect(completed.state.phases.one.status).toBe('merged');
         expect(completed.snapshots).toEqual(published.snapshots);

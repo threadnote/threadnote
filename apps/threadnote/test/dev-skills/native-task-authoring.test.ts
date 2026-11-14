@@ -52,7 +52,7 @@ import {readNativeWorkflowState, withNativeWorkflowLock} from '../../src/workflo
 import {runWorkflowMemory} from '../../src/workflow_memory/index.js';
 import {withWorkflowLock} from '../../src/workflow_memory/journal.js';
 import {readNativeTaskView} from '../../src/workflow_automation/task.js';
-import {runNativeTaskAction} from '../../src/workflow_automation/task_actions.js';
+import {runNativeTaskAction, runNativeTaskStart} from '../../src/workflow_automation/task_actions.js';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {sha256HexSync} from '../../src/workflow_memory/native_digest.js';
@@ -2489,6 +2489,146 @@ effectIt.effect.each(['head', 'bytes'] as const)(
         }),
       ).toMatchObject({status: 'admitted'});
     }).pipe(TestClock.withLive, provideNative),
+);
+
+effectIt.effect('refreshes compact-origin source through the current task-view authoring continuation', () =>
+  Effect.gen(function* () {
+    const f = yield* setup;
+    const intent = {
+      title: 'Refresh expired fixture data',
+      currentBehavior: 'Expired fixture data is returned without a freshness check.',
+      desiredChange: 'Expired fixture data is refreshed before it is returned.',
+      affectedPaths: ['source.ts'],
+      acceptanceCriterion: 'Expired fixture data is refreshed before return.',
+      verification: 'Exercise expired fixture data and observe the refresh.',
+      eligibilityRationale: 'One behavior and one inspected file are explicit with no unresolved decision.',
+      eligibility: {status: 'eligible' as const},
+      review: {required: false, reason: 'Routine operator maintenance.'},
+    };
+    const started = object(
+      yield* runNativeTaskStart(f.config, {
+        callerCwd: f.repo,
+        featureName: 'Compact source refresh',
+        installationTarget: 'codex',
+        intent,
+      }).pipe(Effect.provideService(SystemInfo, f.scoped)),
+    );
+    const runId = String(started.taskRef);
+    const draft = object(
+      yield* runNativeTaskAction(f.config, {
+        command: 'compact-start',
+        runId,
+        callerCwd: f.repo,
+        intent,
+      }).pipe(Effect.provideService(SystemInfo, f.scoped)),
+    );
+    const initialDocument = object(object(draft.packet).document);
+    const approved = object(
+      yield* runNativeTaskAction(f.config, {
+        command: 'compact-confirm',
+        runId,
+        callerCwd: f.repo,
+        presentedIntentHash: String(draft.intentHash),
+        userDecision: 'approve',
+        userResponse: 'I approve this exact compact source refresh intent.',
+        baseBranch: 'main',
+      }).pipe(Effect.provideService(SystemInfo, f.scoped)),
+    );
+    expect(approved).toMatchObject({status: 'admitted'});
+    const beforeView = object(yield* readNativeTaskView(f.config, {runId, callerCwd: f.repo}));
+    const beforeAuthoring = object(beforeView.authoring);
+    const continuation = object(beforeAuthoring.continuation);
+    const authoringRef = String(continuation.authoringRef);
+    expect(beforeAuthoring.authoringRef).toBe(authoringRef);
+    expect(continuation).toMatchObject({
+      tool: 'workflow_task_author',
+      read: {command: 'read', detail: 'document'},
+      save: {command: 'save'},
+    });
+
+    const business = {...initialDocument};
+    for (const key of [
+      'format',
+      'schemaVersion',
+      'id',
+      'project',
+      'source',
+      'sourceFreeReason',
+      'kind',
+      'spec',
+      'compactOrigin',
+    ])
+      delete business[key];
+    const contentFile = f.path.join(f.root, 'compact-source-refresh.json');
+    yield* f.fs.writeFileString(contentFile, JSON.stringify(business));
+    const previousSource = object(initialDocument.source);
+    yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "refreshed";\n');
+    expect((yield* (yield* CodeGraphIndexer).index({cwd: f.repo, threadnoteHome: f.home})).snapshot.state).toBe(
+      'ready',
+    );
+    const refreshed = object(yield* f.author({command: 'save', authoringRef, contentFile}));
+    expect(refreshed).toMatchObject({status: 'ready', replayed: false});
+    expect(refreshed.authoringRef).not.toBe(authoringRef);
+    const readback = object(
+      yield* f.author({command: 'read', authoringRef: String(refreshed.authoringRef), detail: 'document'}),
+    );
+    const document = yield* Schema.decodeUnknownEffect(NativeAuthoringPlanDocumentSchema)(readback.document);
+    expect(document.compactOrigin).toEqual(initialDocument.compactOrigin);
+    expect(document.source?.files).not.toEqual(previousSource.files);
+    const state = yield* readNativeWorkflowState(f.config, runId);
+    const rootOperation = A.findFirst(
+      [...(state?.state.operations ?? [])].reverse(),
+      operation => operation.status === 'verified' && operation.intent.role === 'authoring-root',
+    );
+    const root = decodeAuthoringArtifact(Option.getOrThrow(rootOperation).artifact!.body, AuthoringRootSchema);
+    expect(root.confirmation).toMatchObject({
+      decision: 'approved',
+      response: 'I approve this exact compact source refresh intent.',
+    });
+
+    const afterView = object(yield* readNativeTaskView(f.config, {runId, callerCwd: f.repo}));
+    expect(object(afterView.authoring)).toMatchObject({
+      authoringRef: refreshed.authoringRef,
+      continuation: {
+        tool: 'workflow_task_author',
+        authoringRef: refreshed.authoringRef,
+        read: {command: 'read', detail: 'document'},
+        save: {command: 'save'},
+      },
+    });
+
+    const savedState = yield* f.fs.readFileString(f.statePath(runId));
+    const changedBusiness = {
+      ...business,
+      objective: 'Silently change the approved compact business intent.',
+      current: {
+        summary: 'The existing behavior is inspected.',
+        components: ['Fixture'],
+        contracts: [],
+        diagram: 'flowchart TD\n  Fixture --> Current',
+      },
+      target: {
+        summary: 'The requested behavior is defined.',
+        components: ['Fixture', 'Refresh'],
+        contracts: [],
+        diagram: 'flowchart TD\n  Fixture --> Refresh',
+      },
+    };
+    yield* f.fs.writeFileString(contentFile, JSON.stringify(changedBusiness));
+    const stale = yield* f.author({command: 'save', authoringRef, contentFile}).pipe(Effect.result);
+    expect(stale).toMatchObject({failure: {code: 'stale-authoring-ref'}});
+    expect(yield* f.fs.readFileString(f.statePath(runId))).toBe(savedState);
+    const changed = yield* f
+      .author({
+        command: 'save',
+        authoringRef: String(refreshed.authoringRef),
+        contentFile,
+      })
+      .pipe(Effect.result);
+    // A structurally valid changed plan cannot shed the compact-origin confirmation obligation.
+    expect(changed).toMatchObject({failure: {code: 'compact-confirmation-required'}});
+    expect(yield* f.fs.readFileString(f.statePath(runId))).toBe(savedState);
+  }).pipe(TestClock.withLive, provideNative),
 );
 
 effectIt.effect('background source refresh keeps the confirmed intent in its exact idempotent pending job', () =>

@@ -118,6 +118,14 @@ jobs:
           THREADNOTE_BUILD_TARGET: ${{ inputs.target == 'linux-x64' && 'bun-linux-x64-baseline' || inputs.target == 'windows-x64' && 'bun-windows-x64-baseline' || format('bun-{0}', inputs.target) }}
       - name: Self-contained native smoke
         run: bun scripts/smoke-self-contained.ts
+      - name: Preserve bounded self-contained smoke failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: self-contained-smoke-evidence-${{ inputs.target }}
+          path: .context/self-contained-smoke/failure.json
+          include-hidden-files: true
+          if-no-files-found: ignore
       - name: Archive the native release
         run: bun run archive:release
         env:

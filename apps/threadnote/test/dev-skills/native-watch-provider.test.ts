@@ -3,12 +3,18 @@ import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, Predicate} from 'effect';
 import {describe, expect} from 'vitest';
-import {CommandExecutor, type CommandOptions, type CommandResult} from '@threadnote/platform/command';
+import {
+  CommandExecutor,
+  CommandSpawnFailed,
+  type CommandOptions,
+  type CommandResult,
+} from '@threadnote/platform/command';
 import {initializeNativeWatch, reconcileNativeWatch} from '@threadnote/workflow-automations/watch';
 import {
   collectNativeWatchGitHub,
   NativeWatchProviderNow,
   type NativeWatchProviderCache,
+  verifyNativeWatchPullIdentity,
 } from '../../src/workflow_automation/watch_provider.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
@@ -151,6 +157,164 @@ const harness = (replyFor: ReplyFor = defaultReply) => {
 };
 
 describe('native GitHub watch provider', () => {
+  effectIt.effect('returns only normalized selected PR identity fields through bounded fixed-host gh transport', () =>
+    Effect.gen(function* () {
+      let captured:
+        {readonly executable: string; readonly args: readonly string[]; readonly options?: CommandOptions} | undefined;
+      const command = CommandExecutor.of({
+        execute: (executable, args, options) => {
+          captured = {executable, args, options};
+          return Effect.succeed({
+            exitCode: 0,
+            stdout: JSON.stringify({
+              number: 7,
+              url: pr,
+              baseRepository: 'example/project',
+              headRepository: 'example/project',
+              baseBranch: 'main',
+              headBranch: 'feature/rebase',
+              headSha: pushedHead,
+              state: 'open',
+              merged: false,
+              title: secretBody,
+              body: secretBody,
+            }),
+            stderr: '',
+          });
+        },
+        executeStreaming: () => Effect.die(new Error('Unexpected streaming request')),
+      });
+      const identity = yield* verifyNativeWatchPullIdentity(pr).pipe(Effect.provideService(CommandExecutor, command));
+      expect(identity).toEqual({
+        url: pr,
+        number: 7,
+        baseRepository: 'example/project',
+        headRepository: 'example/project',
+        baseBranch: 'main',
+        headBranch: 'feature/rebase',
+        headSha: pushedHead,
+        state: 'open',
+      });
+      expect(JSON.stringify(identity)).not.toContain(secretBody);
+      expect(captured?.executable).toBe('gh');
+      expect(captured?.args).toContain('--hostname');
+      expect(captured?.args).toContain('github.com');
+      expect(captured?.args).toContain('repos/example/project/pulls/7');
+      expect(captured?.args.at(-1)).toContain('headSha: .head.sha');
+      expect(captured?.options?.timeoutMs).toBe(15_000);
+      expect(captured?.options?.maxOutputBytes).toBe(16_384);
+      expect(captured?.options?.sensitiveOutput).toBe(true);
+    }),
+  );
+
+  for (const [name, url, response, expectedCode] of [
+    ['malformed PR URL', 'https://example.com/project/pull/7', undefined, 'invalid-pr'],
+    ['wrong selected PR identity', pr, {number: 8, url: pr}, 'provider-identity-conflict'],
+    [
+      'closed unmerged PR',
+      pr,
+      {
+        number: 7,
+        url: pr,
+        baseRepository: 'example/project',
+        headRepository: 'example/project',
+        baseBranch: 'main',
+        headBranch: 'feature',
+        headSha: pushedHead,
+        state: 'closed',
+        merged: false,
+      },
+      'provider-pr-closed',
+    ],
+    [
+      'malformed remote head',
+      pr,
+      {
+        number: 7,
+        url: pr,
+        baseRepository: 'example/project',
+        headRepository: 'example/project',
+        baseBranch: 'main',
+        headBranch: 'feature',
+        headSha: 'not-a-sha',
+        state: 'open',
+        merged: false,
+      },
+      'provider-shape',
+    ],
+  ] as const) {
+    effectIt.effect(`refuses ${name}`, () =>
+      Effect.gen(function* () {
+        let calls = 0;
+        const command = CommandExecutor.of({
+          execute: () => {
+            calls++;
+            return Effect.succeed({
+              exitCode: 0,
+              stdout: response === undefined ? '' : JSON.stringify(response),
+              stderr: '',
+            });
+          },
+          executeStreaming: () => Effect.die(new Error('Unexpected streaming request')),
+        });
+        const result = yield* verifyNativeWatchPullIdentity(url).pipe(
+          Effect.provideService(CommandExecutor, command),
+          Effect.result,
+        );
+        expect(result._tag).toBe('Failure');
+        if (result._tag !== 'Failure') throw new Error('Expected identity verification failure.');
+        expect(result.failure.code).toBe(expectedCode);
+        expect(calls).toBe(url === pr ? 1 : 0);
+      }),
+    );
+  }
+
+  effectIt.effect('exposes fork repository identity for caller policy and sanitizes provider failure', () =>
+    Effect.gen(function* () {
+      const fork = {
+        number: 7,
+        url: pr,
+        baseRepository: 'example/project',
+        headRepository: 'contributor/project',
+        baseBranch: 'main',
+        headBranch: 'feature',
+        headSha: pushedHead,
+        state: 'open',
+        merged: false,
+      };
+      const command = CommandExecutor.of({
+        execute: () => Effect.succeed({exitCode: 0, stdout: JSON.stringify(fork), stderr: ''}),
+        executeStreaming: () => Effect.die(new Error('Unexpected streaming request')),
+      });
+      const identity = yield* verifyNativeWatchPullIdentity(pr).pipe(Effect.provideService(CommandExecutor, command));
+      expect(identity.headRepository).toBe('contributor/project');
+
+      const failedCommand = CommandExecutor.of({
+        execute: () =>
+          Effect.fail(
+            CommandSpawnFailed.make({
+              args: ['api'],
+              executable: 'gh',
+              message: 'Provider command could not start.',
+              cause: new Error(secretBody + ' ghp_SECRET_TOKEN /private/host/path'),
+            }),
+          ),
+        executeStreaming: () => Effect.die(new Error('Unexpected streaming request')),
+      });
+      const result = yield* verifyNativeWatchPullIdentity(pr).pipe(
+        Effect.provideService(CommandExecutor, failedCommand),
+        Effect.result,
+      );
+      expect(result._tag).toBe('Failure');
+      if (result._tag !== 'Failure') throw new Error('Expected provider failure.');
+      expect(result.failure.code).toBe('provider-transport');
+      const serialized = JSON.stringify(result.failure);
+      expect(serialized).not.toContain(secretBody);
+      expect(serialized).not.toContain('ghp_SECRET_TOKEN');
+      expect(serialized).not.toContain('/private/host/path');
+    }),
+  );
+
   for (const exitCode of [127, 124]) {
     effectIt.effect('classifies normalized command exit ' + exitCode + ' without exposing command diagnostics', () =>
       Effect.gen(function* () {

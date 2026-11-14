@@ -6,13 +6,20 @@ import fc from 'fast-check';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   initializeNativeCycle,
+  nativeCycleCanonicalJson,
   recordNativeCycleDelivery,
   validateNativeCyclePhase,
   type NativeCyclePlan,
 } from '../src/cycle.js';
 import type {NativeCycleSnapshot} from '../src/cycle_review.js';
 import type {NativeWorkflowState} from '../src/native.js';
-import {decodeNativeCycleRuntime} from '../src/cycle_runtime.js';
+import {
+  initializeNativeCycleSupplementalPublication,
+  appendNativeCycleSupplementalRecord,
+  nativeCycleSupplementalRef,
+  nativeCycleSupplementalRevision,
+  decodeNativeCycleRuntime,
+} from '../src/cycle_runtime.js';
 import {
   decodeNativeTaskActionRef,
   decodeNativeTaskCursor,
@@ -681,6 +688,132 @@ describe('native task projection', () => {
         taskRef: expect.any(String),
       },
     );
+    const completedRuntime = {
+      ...runtime,
+      state: delivered,
+      snapshots: [
+        {snapshot: {...snapshot, head: acceptedHead, baseTree: runtime.baselines['phase-one'].tree}, incoming: []},
+      ],
+    };
+    const hash = (value: unknown) => sha256HexSync(nativeCycleCanonicalJson(value));
+    const source = {head: acceptedHead, tree, clean: true};
+    const pr = {
+      url: 'https://github.com/example/repo/pull/1',
+      headSha: acceptedHead,
+      branch: plan.phases[0].branch,
+      baseBranch: 'main',
+      state: 'open' as const,
+    };
+    let attached = initializeNativeCycleSupplementalPublication(
+      completedRuntime,
+      {
+        version: 1,
+        expectedRevision: nativeCycleSupplementalRevision(completedRuntime),
+        planDigest: hash(plan),
+        phaseId: 'phase-one',
+        phaseHash: delivered.phases['phase-one'].phaseHash,
+        snapshotId: snapshot.snapshotId,
+        validationDigest: hash(validation),
+        localReceiptDigest: hash(delivered.phases['phase-one'].delivery),
+        head: acceptedHead,
+        tree,
+        pr,
+        authority: 'Attach the existing authorized PR.',
+      },
+      source,
+    );
+    const publication = attached.state.supplementalPublications![0];
+    attached = appendNativeCycleSupplementalRecord(
+      attached,
+      {
+        publicationId: publication.publicationId,
+        publicationRef: nativeCycleSupplementalRef(publication),
+        expectedRevision: nativeCycleSupplementalRevision(attached),
+        event: {kind: 'provider-verified', pr, evidence: 'Matching provider observation.'},
+      },
+      source,
+    );
+    const projected = projectNativeTaskView({...state, cycle: attached}, 'publication-revision');
+    expect(projected).toMatchObject({
+      status: 'complete',
+      next: {action: 'complete'},
+      missingInputs: [],
+      counts: {supplementalPublications: 1},
+      supplementalPublications: [
+        {
+          publicationId: publication.publicationId,
+          phaseId: 'phase-one',
+          prUrl: pr.url,
+          publicationRef: nativeCycleSupplementalRef(attached.state.supplementalPublications![0]),
+          revision: nativeCycleSupplementalRevision(attached),
+          completed: false,
+        },
+      ],
+    });
+    expect(projectNativeTaskView({...state, cycle: completedRuntime}, 'legacy-revision')).not.toHaveProperty(
+      'supplementalPublications',
+    );
+    for (const event of [
+      {
+        kind: 'watch',
+        watch: {
+          prUrl: pr.url,
+          headSha: acceptedHead,
+          state: 'active',
+          stateDir: '/repo/watch',
+          consumerKind: 'orchestrator',
+          consumerId: 'supplemental-owner',
+          evidence: 'Active owned watcher.',
+        },
+      },
+      {kind: 'completed', evidence: 'Verified publication with active owned watcher.'},
+      {kind: 'merged', mergeCommit: acceptedHead, evidence: 'Provider merge observation.'},
+    ]) {
+      const owner = attached.state.supplementalPublications![0];
+      attached = appendNativeCycleSupplementalRecord(
+        attached,
+        {
+          publicationId: owner.publicationId,
+          publicationRef: nativeCycleSupplementalRef(owner),
+          expectedRevision: nativeCycleSupplementalRevision(attached),
+          event,
+        },
+        source,
+      );
+    }
+    expect(projectNativeTaskView({...state, cycle: attached}, 'merged-publication-revision')).toMatchObject({
+      status: 'complete',
+      next: {action: 'complete'},
+      supplementalPublications: [
+        {
+          completed: true,
+          watch: {
+            consumerId: 'supplemental-owner',
+            stateDir: '/repo/watch',
+            state: 'active',
+            recordRef: attached.state.supplementalPublications![0].records[1].operationId,
+          },
+        },
+      ],
+    });
+    const prior = attached.state.supplementalPublications![0].initialization;
+    attached = initializeNativeCycleSupplementalPublication(
+      attached,
+      {
+        ...prior,
+        expectedRevision: nativeCycleSupplementalRevision(attached),
+        pr: {...prior.pr, url: 'https://github.com/example/repo/pull/2'},
+      },
+      source,
+    );
+    const sharedRevision = nativeCycleSupplementalRevision(attached);
+    const publications = projectNativeTaskView(
+      {...state, cycle: attached},
+      'second-publication-revision',
+    ).supplementalPublications!;
+    expect(publications).toHaveLength(2);
+    expect(publications[0].revision).toBe(sharedRevision);
+    expect(publications[1].revision).toBe(sharedRevision);
   });
   it.each([
     {version: 1, previous: undefined, reviewMode: 'full'},

@@ -118,7 +118,7 @@ describe('native request schema discovery', () => {
     [
       'snapshot',
       {
-        expectedRevision: expect.stringContaining('cycle inspect'),
+        expectedRevision: expect.any(String),
         phaseId: expect.any(String),
         rebase: expect.any(String),
         snapshotId: expect.stringContaining('fresh immutable'),
@@ -128,6 +128,7 @@ describe('native request schema discovery', () => {
           'Produces manifest version2; legacy readers must reject it.',
         ),
         sameLabelRebasedBaseIntegrationV1: expect.any(String),
+        recoverUnreviewedRebase: expect.any(String),
       },
     ],
     [
@@ -147,7 +148,12 @@ describe('native request schema discovery', () => {
     const response = nativeRequestSchema({...base, topic: 'cycle', command});
     expect(response).toMatchObject({schemaKind: 'decoding-envelope', runtimeValidationRequired: true});
     expect(response).toHaveProperty('semanticPrerequisites', prerequisites);
-    expect(JSON.parse(response.schemaPage.text).schema.required).not.toContain('expectedRevision');
+    const schema = JSON.parse(response.schemaPage.text).schema;
+    expect(schema.required).toEqual(['protocolVersion', 'executorVersion', 'action', 'command', 'runId', 'generation']);
+    if (command === 'snapshot') {
+      expect(schema.properties.recoverUnreviewedRebase).toEqual({type: 'boolean'});
+      expect(schema.properties.supersedeUnreviewed).toEqual({type: 'boolean'});
+    }
   });
 
   it('discovers optional closed witnesses for initial rebases and later qualifications', () => {

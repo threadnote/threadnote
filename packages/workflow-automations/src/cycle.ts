@@ -163,6 +163,16 @@ export const NativeCyclePublicationAuthoritySchema = Schema.Union([
     evidence: publicationText(4096),
   }),
 ]);
+const providerIdentitySchema = Schema.Struct({
+  url: text(2048),
+  number: Schema.Finite.check(Schema.isInt(), Schema.isGreaterThan(0)),
+  baseRepository: text(256),
+  headRepository: text(256),
+  baseBranch: text(256),
+  headBranch: text(256),
+  headSha: gitObject,
+  state: Schema.Literals(['open', 'merged']),
+});
 export const NativeCycleDeliverySchema = Schema.Struct({
   phaseId: id,
   phaseHash: digest,
@@ -173,7 +183,31 @@ export const NativeCycleDeliverySchema = Schema.Struct({
   pr: Schema.optionalKey(prSchema),
   watch: Schema.optionalKey(watchSchema),
   publication: Schema.optionalKey(NativeCyclePublicationAuthoritySchema),
-});
+  userAuthority: Schema.optionalKey(text()),
+  providerIdentity: Schema.optionalKey(providerIdentitySchema),
+}).check(
+  Schema.makeFilter(delivery => {
+    const identity = delivery.providerIdentity;
+    if (!!identity !== !!delivery.userAuthority) return 'Retain both caller authority and provider identity.';
+    if (!identity) return undefined;
+    const pr = delivery.pr;
+    const target = pr
+      ? /^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/([1-9][0-9]*)$/u.exec(pr.url)
+      : undefined;
+    return delivery.delivery === 'pr' &&
+      pr &&
+      target &&
+      identity.url === pr.url &&
+      identity.number === Number(target[3]) &&
+      EffectString.toLowerCase(identity.baseRepository) === EffectString.toLowerCase(`${target[1]}/${target[2]}`) &&
+      EffectString.toLowerCase(identity.headRepository) === EffectString.toLowerCase(identity.baseRepository) &&
+      identity.baseBranch === pr.baseBranch &&
+      identity.headBranch === pr.branch &&
+      identity.headSha === pr.headSha
+      ? undefined
+      : 'Provider identity does not match this exact same-repository PR receipt.';
+  }),
+);
 export type NativeCycleDelivery = typeof NativeCycleDeliverySchema.Type;
 const deliverySchema = NativeCycleDeliverySchema;
 
@@ -200,6 +234,50 @@ const phaseStateSchema = Schema.Struct({
   reason: Schema.optionalKey(text()),
   history: Schema.optionalKey(Schema.Array(NativeCyclePhaseProofSchema).check(Schema.isMaxLength(64))),
 });
+/** Supplemental history reserves at most one quarter of the native store's 16 MiB envelope.
+ * The application's full-state preflight still owns capacity including all original proof. */
+export const nativeCycleSupplementalLimits = {
+  publications: 128,
+  recordsPerPublication: 256,
+  totalRecords: 2048,
+  bytes: 4 * 1024 * 1024,
+} as const;
+/** New state version prevents older readers from silently discarding supplemental proof. */
+export const NativeCycleSupplementalEventSchema = Schema.Union([
+  Schema.Struct({kind: Schema.Literal('provider-verified'), pr: prSchema, evidence: publicationText(4096)}),
+  Schema.Struct({kind: Schema.Literal('watch'), watch: watchSchema}),
+  Schema.Struct({kind: Schema.Literal('completed'), evidence: publicationText(4096)}),
+  Schema.Struct({kind: Schema.Literal('merged'), mergeCommit: gitObject, evidence: publicationText(4096)}),
+]);
+export const NativeCycleSupplementalInitSchema = Schema.Struct({
+  version: Schema.Literal(1),
+  expectedRevision: digest,
+  planDigest: digest,
+  phaseId: id,
+  phaseHash: digest,
+  snapshotId: id,
+  validationDigest: digest,
+  localReceiptDigest: digest,
+  head: gitObject,
+  tree: gitObject,
+  pr: prSchema,
+  // This is supplied attachment authority, not an authenticated actor identity.
+  authority: publicationText(4096),
+});
+export const NativeCycleSupplementalPublicationSchema = Schema.Struct({
+  initialization: NativeCycleSupplementalInitSchema,
+  publicationId: digest,
+  records: Schema.Array(
+    Schema.Struct({
+      version: Schema.Literal(1),
+      operationId: digest,
+      expectedRevision: digest,
+      previousRef: digest,
+      event: NativeCycleSupplementalEventSchema,
+    }),
+  ).check(Schema.isMaxLength(nativeCycleSupplementalLimits.recordsPerPublication)),
+});
+export type NativeCycleSupplementalPublication = typeof NativeCycleSupplementalPublicationSchema.Type;
 const specPinSchema = Schema.Struct({root, binding, documentHash: digest, intentHash: digest});
 const specAmendmentSchema = Schema.Struct({
   before: specPinSchema,
@@ -209,9 +287,21 @@ const specAmendmentSchema = Schema.Struct({
 });
 export const NativeCycleStateSchema = Schema.Struct({
   format: Schema.Literal('threadnote-native-cycle'),
-  version: Schema.Literal(1),
+  version: Schema.Literals([1, 2]),
   plan: NativeCyclePlanSchema,
   phases: Schema.Record(id, phaseStateSchema),
+  supplementalPublications: Schema.optionalKey(
+    Schema.Array(NativeCycleSupplementalPublicationSchema).check(
+      Schema.isBetweenLength(1, nativeCycleSupplementalLimits.publications),
+      Schema.makeFilter(publications => {
+        const count = EffectArray.reduce(publications, 0, (sum, publication) => sum + publication.records.length);
+        return count > nativeCycleSupplementalLimits.totalRecords ||
+          new TextEncoder().encode(canonical(publications)).byteLength > nativeCycleSupplementalLimits.bytes
+          ? 'Supplemental history exceeds its aggregate record or byte budget.'
+          : undefined;
+      }),
+    ),
+  ),
   specAmendments: Schema.optionalKey(Schema.Array(specAmendmentSchema).check(Schema.isMaxLength(64))),
 });
 export type NativeCycleState = typeof NativeCycleStateSchema.Type;
@@ -338,6 +428,8 @@ export function decodeNativeCycleState(value: unknown): NativeCycleState {
           )
         : input;
   const s = decode(NativeCycleStateSchema, omitUndefined(value), 'Malformed native cycle state.');
+  if ((s.version === 2) !== (s.supplementalPublications !== undefined))
+    err('Supplemental proof requires cycle version 2.');
   validatePlan(s.plan);
   if (canonical(EffectRecord.keys(s.phases).sort()) !== canonical(EffectArray.map(s.plan.phases, p => p.id).sort()))
     err('State phase keyset does not match plan.');

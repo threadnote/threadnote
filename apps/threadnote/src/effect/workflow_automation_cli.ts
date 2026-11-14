@@ -211,6 +211,7 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
             commitEvidence: options.commitEvidence,
             pr: options.pr,
             publication: options.publication,
+            ...(options.userAuthority === undefined ? {} : {userAuthority: options.userAuthority}),
           }).pipe(
             Effect.flatMap(value => Console.log(JSON.stringify(value))),
             Effect.mapError(nativeWorkflowError),
@@ -404,6 +405,13 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
         options =>
           withRuntime(config =>
             runNativeTaskAction(config, {command: 'integrate-same-label-base-snapshot', ...options}).pipe(
+              Effect.flatMap(value => Console.log(JSON.stringify(value))),
+              Effect.mapError(nativeWorkflowError),
+            ),
+          ),
+        options =>
+          withRuntime(config =>
+            runNativeTaskAction(config, {command: 'recover-unreviewed-rebase-snapshot', ...options}).pipe(
               Effect.flatMap(value => Console.log(JSON.stringify(value))),
               Effect.mapError(nativeWorkflowError),
             ),

@@ -9,6 +9,7 @@ import {
   CurrentNativeProgress,
   makeNativeProgressDiagnostics,
   nativeProgressBoundaries,
+  nativeProgressPhases,
   nativeProgressFacades,
   nativeProgressMethod,
   nativeProgressSpanLabels,
@@ -238,6 +239,78 @@ effectIt.effect('reports acquisition and cleanup failures after finalization and
     ).toBe(true);
   }),
 );
+
+effectIt.effect('captures only bounded phase timing at body exit and emits it only on failure', () =>
+  Effect.gen(function* () {
+    const successLines: string[] = [];
+    let successNow = 0;
+    const success = make({now: () => successNow, sink: line => successLines.push(line)});
+    const completed = yield* reportNativeFailure(
+      observeNativeBody(
+        Effect.sync(() => {
+          for (const phase of nativeProgressPhases) {
+            success.enterPhase(phase);
+            successNow += 3;
+          }
+          return 'completed';
+        }),
+        success,
+      ),
+      success,
+    );
+    expect(completed).toBe('completed');
+    expect(successLines).toHaveLength(0);
+    expect(success.snapshot().completedPhases).toHaveLength(nativeProgressPhases.length - 1);
+    expect(success.snapshot().currentPhase?.name).toBe(nativeProgressPhases[nativeProgressPhases.length - 1]);
+
+    const lines: string[] = [];
+    let now = 0;
+    const observer = make({now: () => now, sink: line => lines.push(line)});
+    const failing = Effect.gen(function* () {
+      observer.enterPhase(nativeProgressPhases[0]);
+      now = 4;
+      observer.enterPhase(nativeProgressPhases[1]);
+      now = 11;
+      return yield* Effect.fail({private: 'PRIVATE'});
+    });
+    const withCleanup = Effect.scoped(
+      Effect.gen(function* () {
+        yield* Effect.acquireRelease(Effect.void, () =>
+          Effect.sync(() => {
+            now = 100;
+          }),
+        );
+        return yield* observeNativeBody(failing, observer);
+      }),
+    );
+    const exit = yield* reportNativeFailure(withCleanup.pipe(Effect.withTracer(observer.tracer)), observer).pipe(
+      Effect.exit,
+    );
+    expect(Exit.isFailure(exit)).toBe(true);
+    expect(lines).toHaveLength(1);
+    const packet = JSON.parse(
+      Effect2.pipe(
+        lines[0],
+        EffectString.slice(
+          Effect2.pipe(
+            lines[0],
+            EffectString.indexOf('{'),
+            Effect2.Option.getOrElse(() => -1),
+          ),
+        ),
+      ),
+    );
+    expect(packet.bodyExitSnapshot).toMatchObject({
+      completedPhases: [{name: nativeProgressPhases[0], elapsedMs: 4}],
+      currentPhase: {name: nativeProgressPhases[1], elapsedMs: 7},
+    });
+    expect(packet.currentPhase).toMatchObject({name: nativeProgressPhases[1], elapsedMs: 96});
+    expect(packet.bodyExitSnapshot.completedPhases).toHaveLength(1);
+    expect(packet.bodyExitSnapshot.completedPhases.length + 1).toBeLessThanOrEqual(nativeProgressPhases.length);
+    expect(lines[0]).not.toContain('PRIVATE');
+  }),
+);
+
 effectIt.effect('conserves NativeSpan identity, delegation, context and both composed observers', () =>
   Effect.gen(function* () {
     const outer = closeoutSpanDiagnostics(() => 0);
@@ -828,6 +901,7 @@ effectIt.effect('bounds all active/recent data, clocks, durations, snapshots and
       const boundary = observer.start(label);
       observer.end(boundary, 'Success');
     }
+    for (const phase of nativeProgressPhases) observer.enterPhase(phase);
     const spans = EffectArray.flatMap(nativeProgressSpanLabels, label =>
       Array.from({length: 2}, () => observer.tracer.span(spanOptions(label))),
     );
@@ -850,6 +924,8 @@ effectIt.effect('bounds all active/recent data, clocks, durations, snapshots and
     // Keep every label, eight live spans, the full recent ring and body-exit state in the largest shape.
     for (const label of nativeProgressSpanLabels) observer.tracer.span(spanOptions(label));
     const largest = observer.snapshot();
+    expect(largest.completedPhases).toHaveLength(nativeProgressPhases.length - 1);
+    expect(largest.bodyExitSnapshot?.completedPhases).toHaveLength(nativeProgressPhases.length - 1);
     const saturate = (value: unknown): void => {
       if (EffectArray.isArray(value)) {
         for (let index = 0; index < value.length; index += 1) {
@@ -922,9 +998,13 @@ effectIt.effect('broken clocks, sink, serialization, snapshots and bookkeeping c
                 ? Effect.die(value)
                 : Effect.interrupt;
         const exit = yield* reportNativeFailure(
-          observeNativeBody(observeNativeBoundary(original, observer, 'other'), observer).pipe(
-            Effect.withTracer(observer.tracer),
-          ),
+          observeNativeBody(
+            Effect.gen(function* () {
+              observer.enterPhase(nativeProgressPhases[0]);
+              return yield* observeNativeBoundary(original, observer, 'other');
+            }),
+            observer,
+          ).pipe(Effect.withTracer(observer.tracer)),
           observer,
         ).pipe(Effect.exit);
         if (outcome === 'success') {

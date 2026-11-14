@@ -51,7 +51,11 @@ import {
   makeNativeTaskStartCommand,
   makeNativeTaskViewCommand,
 } from '../../src/effect/workflow_cli.js';
-import {runNativeTaskAction, runNativeTaskStart} from '../../src/workflow_automation/task_actions.js';
+import {
+  runNativeTaskAction as runNativeTaskActionCore,
+  runNativeTaskStart,
+} from '../../src/workflow_automation/task_actions.js';
+import {runNativeTaskAuthoring} from '../../src/workflow_automation/task_authoring.js';
 import {readNativeTaskInstalledTarget} from '../../src/workflow_automation/task_admission.js';
 import {readNativeWatch, writeNativeWatch} from '../../src/workflow_automation/watch_store.js';
 import {applyDevSkills, statusDevSkills} from '../../src/dev_skills/index.js';
@@ -71,7 +75,7 @@ import {decodeJournal} from '../../src/workflow_automation/closeout_request_sche
 import {stableJson} from '../../src/workflow_memory/protocol.js';
 import {
   completeLocalPhase,
-  fixture,
+  fixture as sourceFixture,
   object,
   run,
   windowsCycleFixtureTimeout,
@@ -101,6 +105,75 @@ const cliTestLayer = Layer.mergeAll(
     ChildProcessSpawner.make(() => Effect.die('unused')),
   ),
 );
+
+// Lifecycle cases use a declared same-repository remote and deterministic provider boundary.
+// Provider identity rejection and missing-authority cases call the core action explicitly below.
+const fixture = (...args: Parameters<typeof sourceFixture>) =>
+  Effect.gen(function* () {
+    const f = yield* sourceFixture(...args);
+    if (
+      (args[1] ?? 'pr') === 'pr' &&
+      !EffectArray.contains(EffectString.split(EffectString.trim((yield* f.git(['remote'])).stdout), '\n'), 'origin')
+    )
+      yield* f.git(['remote', 'add', 'origin', 'https://github.com/example/repo.git']);
+    return f;
+  });
+const runNativeTaskAction = (...args: Parameters<typeof runNativeTaskActionCore>) =>
+  Effect.gen(function* () {
+    const [config, input] = args;
+    const request = input !== null && typeof input === 'object' ? object(input) : undefined;
+    const delivering = request?.command === 'deliver-pr';
+    const completing = request?.command === 'watch-pr' && request.operation === 'complete';
+    const starting = request?.command === 'watch-pr' && request.operation === 'start';
+    if (!request || (!delivering && !completing && !starting)) return yield* runNativeTaskActionCore(...args);
+    const delivery =
+      typeof request.deliveryRef === 'string' ? decodeNativeTaskActionRef(request.deliveryRef)?.delivery : undefined;
+    const pr = delivering ? object(request.pr) : delivery?.pr;
+    if (!pr) return yield* runNativeTaskActionCore(...args);
+    const phaseId =
+      typeof request.validationRef === 'string' ? decodeNativeTaskActionRef(request.validationRef)?.phaseId : undefined;
+    const watchId = phaseId
+      ? `pr-${EffectString.slice(0, 48)(sha256HexSync(`${request.runId}\n${phaseId}`))}`
+      : undefined;
+    const watch = completing && watchId ? yield* readNativeWatch(config, watchId) : undefined;
+    const merged = completing ? watch?.envelope.state.prState === 'merged' : pr.state === 'merged';
+    const executor = yield* CommandExecutor;
+    const simulated = CommandExecutor.of({
+      ...executor,
+      execute: (executable, commandArgs, options) => {
+        if (
+          executable === 'gh' &&
+          commandArgs.includes('--jq') &&
+          EffectArray.some(commandArgs, arg => EffectString.includes('headSha: .head.sha')(arg))
+        )
+          return Effect.succeed({
+            exitCode: 0,
+            stderr: '',
+            stdout: JSON.stringify({
+              number: Number(EffectString.split(String(pr.url), '/').at(-1)),
+              url: pr.url,
+              baseRepository: 'example/repo',
+              headRepository: 'example/repo',
+              baseBranch: pr.baseBranch,
+              headBranch: pr.branch,
+              headSha: pr.headSha,
+              state: merged ? 'closed' : 'open',
+              merged,
+            }),
+          });
+        return executor.execute(executable, commandArgs, options);
+      },
+    });
+    return yield* runNativeTaskActionCore(
+      config,
+      delivering
+        ? {
+            ...request,
+            userAuthority: request.userAuthority ?? 'The private fixture user approved delivery of this exact PR.',
+          }
+        : request,
+    ).pipe(Effect.provideService(CommandExecutor, simulated));
+  });
 
 const packet = {
   capacity: {
@@ -208,6 +281,7 @@ const attemptSimulatedTaskWatch = (
       threadId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
     };
     const commands = yield* CommandExecutor;
+    const taskProof = (yield* readNativeWorkflowState(f.config, runId))?.state.cycle?.state.phases[phaseId];
     const system = yield* SystemInfo;
     const processAdapterContext = yield* Effect.context<
       FileSystem.FileSystem | Path.Path | SecureRandom.SecureRandom
@@ -238,7 +312,12 @@ const attemptSimulatedTaskWatch = (
               number: Number(number),
               url: prUrl,
               baseRepository: `${owner}/${repo}`,
-              headRepository: `fixture-fork/${repo}`,
+              headRepository: EffectArray.some(args, arg => EffectString.includes('headSha: .head.sha')(arg))
+                ? `${owner}/${repo}`
+                : `fixture-fork/${repo}`,
+              headSha: taskProof?.head,
+              state: 'open',
+              merged: false,
               baseBranch: remoteBaseBranch,
               headBranch: `feature/${phaseId}`,
             }),
@@ -539,7 +618,13 @@ const publishOpenHistoricalPhase = (
         callerCwd: f.repo,
         validationRef: String(validation.validationRef),
         commitEvidence: `Private pagination fixture commit ${headSha}`,
-        pr: {url: prUrl, headSha, branch: `feature/${phaseId}`, baseBranch, state: 'open' as const},
+        pr: {
+          url: prUrl,
+          headSha,
+          branch: `feature/${phaseId}`,
+          baseBranch: baseBranch === 'origin/main' ? 'main' : baseBranch,
+          state: 'open' as const,
+        },
         publication: {exemption: 'small-fix', reason: `Private ${phaseId} pagination fixture authority.`},
       }),
     );
@@ -552,6 +637,28 @@ const publishOpenHistoricalPhase = (
       prUrl,
     );
     yield* writeSimulatedTaskWatch(f, watch.startedWatch, watch, prUrl, headSha, false);
+    if (prNumber === 31) {
+      const provisional = decodeNativeTaskActionRef(String(delivery.deliveryRef));
+      if (!provisional?.delivery) throw new Error('Expected the provisional receipt.');
+      const {userAuthority: _authority, providerIdentity: _identity, ...legacy} = provisional.delivery;
+      const legacyRef = encodeNativeTaskActionRef({
+        ...provisional,
+        delivery: legacy,
+        payloadDigest: sha256HexSync(stableJson(legacy)),
+      });
+      const beforeLegacy = yield* f.fs.readFileString(f.statePath());
+      expect(
+        yield* runNativeTaskActionCore(f.config, {
+          command: 'watch-pr',
+          operation: 'complete',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          validationRef: String(validation.validationRef),
+          deliveryRef: legacyRef,
+        }).pipe(Effect.result),
+      ).toMatchObject({failure: {code: 'user-authority-required'}});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeLegacy);
+    }
     yield* runNativeTaskAction(f.config, {
       command: 'watch-pr',
       operation: 'complete',
@@ -1946,6 +2053,162 @@ describe('native task actions', () => {
       }).pipe(run, provideTestLayer(cliTestLayer)),
   );
 
+  effectIt.effect(
+    'recovers an unchanged-tree rebase through the task snapshot facade without carrying review or validation',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture(['one'], 'pr');
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "feature";\n');
+        yield* f.git(['commit', '-am', 'Feature snapshot']);
+        const head = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
+        const captured = object(
+          object(
+            (yield* f.mutate('snapshot', {
+              phaseId: 'one',
+              snapshotId: 'before-rebase',
+              acceptedHead: head,
+              reason: 'Capture the feature before review.',
+            })).snapshot,
+          ).snapshot,
+        );
+        const before = yield* readNativeWorkflowState(f.config, 'native-run');
+        const originalView = yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo});
+        const snapshotRef = originalView.phase?.snapshot?.snapshotRef;
+        if (!snapshotRef) throw new Error('Expected the original review reference.');
+        yield* f.git(['checkout', 'main']);
+        yield* f.git(['commit', '--allow-empty', '-m', 'Advance base identity without tree changes']);
+        yield* f.git(['checkout', 'feature/one']);
+        yield* f.git(['rebase', 'main']);
+        const view = yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo});
+        expect(view.unreviewedRebaseRecovery).toMatchObject({
+          action: 'recover-unreviewed-rebase',
+          snapshotRef,
+          userAuthorityRequired: true,
+        });
+        const request = {
+          command: 'recover-unreviewed-rebase-snapshot',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          snapshotRef,
+          reason: 'Recover the authorized same-tree rebase.',
+          userAuthority: 'Rebase this approved feature onto updated main.',
+        };
+        const bytes = yield* f.fs.readFileString(f.statePath());
+        const report = {
+          mode: 'full',
+          selected: ['correctness', 'simplicity'],
+          lanes: [
+            {name: 'correctness', status: 'complete'},
+            {name: 'simplicity', status: 'complete'},
+          ],
+          findings: [],
+        };
+        expect(
+          yield* runNativeTaskActionCore(f.config, {
+            command: 'record-review',
+            runId: 'native-run',
+            callerCwd: f.repo,
+            snapshotRef,
+            report,
+          }).pipe(Effect.result),
+        ).toMatchObject({failure: {code: 'source-drift'}});
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(bytes);
+        const afterRejectedReview = yield* readNativeWorkflowState(f.config, 'native-run');
+        expect(afterRejectedReview?.state.cycle?.attempts).toEqual(before?.state.cycle?.attempts);
+        expect(afterRejectedReview?.state.cycle?.reviews).toEqual(before?.state.cycle?.reviews);
+
+        expect(
+          yield* runNativeTaskActionCore(f.config, {...request, userAuthority: '   '}).pipe(Effect.result),
+        ).toMatchObject({failure: {code: 'invalid-rebase-recovery'}});
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(bytes);
+        const mcp = new EffectMcpServerAdapter('test', '1', 'fixture');
+        registerWorkflowTaskTool(mcp, f.config);
+        const recovered = object(
+          object(
+            yield* mcp.invokeTool('workflow_task_snapshot', {
+              runId: request.runId,
+              callerCwd: request.callerCwd,
+              snapshot: {
+                command: 'recover-unreviewed-rebase',
+                snapshotRef,
+                reason: request.reason,
+                userAuthority: request.userAuthority,
+              },
+            }),
+          ).structuredContent,
+        );
+        const admitted = object(object(recovered.snapshot).snapshot);
+        expect(admitted.tree).toBe(captured.tree);
+        expect(admitted.head).not.toBe(captured.head);
+        const after = yield* readNativeWorkflowState(f.config, 'native-run');
+        expect(after?.state.cycle?.snapshots[0]).toEqual(before?.state.cycle?.snapshots[0]);
+        expect(after?.state.cycle?.baselines).toEqual(before?.state.cycle?.baselines);
+        expect(after?.state.cycle?.reviews).toEqual([]);
+        expect(after?.state.cycle?.state.phases.one.validation).toBeUndefined();
+        expect(object(yield* runNativeTaskAction(f.config, request))).toMatchObject({
+          replayed: true,
+          snapshotRef: recovered.snapshotRef,
+        });
+        const reviewed = object(
+          yield* runNativeTaskAction(f.config, {
+            command: 'record-review',
+            runId: request.runId,
+            callerCwd: f.repo,
+            snapshotRef: recovered.snapshotRef,
+            report: {
+              mode: 'full',
+              selected: ['correctness', 'simplicity'],
+              lanes: [
+                {name: 'correctness', status: 'complete'},
+                {name: 'simplicity', status: 'complete'},
+              ],
+              findings: [],
+            },
+          }),
+        );
+        expect(reviewed.status, typeof reviewed.message === 'string' ? reviewed.message : undefined).toBe('recorded');
+        const validated = object(
+          yield* runNativeTaskAction(f.config, {
+            command: 'record-validation',
+            runId: 'native-run',
+            callerCwd: f.repo,
+            snapshotRef: recovered.snapshotRef,
+            validation: {
+              checks: [
+                {command: 'same-tree source check', result: 'passed', evidence: 'Actual rebase source was read.'},
+              ],
+              acceptance: [{criterion: 'one works', result: 'passed', evidence: 'Recovered source and history match.'}],
+            },
+          }),
+        );
+        const publication = {exemption: 'small-fix', reason: 'Private same-tree recovery fixture.'};
+        expect(yield* f.mutate('publication-ready', {phaseId: 'one', publication})).toMatchObject({
+          status: 'ok',
+          tree: captured.tree,
+        });
+        const prHead = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
+        expect(
+          object(
+            yield* runNativeTaskAction(f.config, {
+              command: 'deliver-pr',
+              runId: 'native-run',
+              callerCwd: f.repo,
+              validationRef: String(validated.validationRef),
+              commitEvidence: 'Recovered exact source ' + prHead,
+              publication,
+              pr: {
+                url: 'https://github.com/example/repo/pull/1058',
+                headSha: prHead,
+                branch: 'feature/one',
+                baseBranch: 'main',
+                state: 'open',
+              },
+            }),
+          ),
+        ).toMatchObject({status: 'watch-required'});
+      }).pipe(run),
+  );
+
   effectIt.effect('recovers an unreviewed snapshot through the public task action and requires full review', () =>
     Effect.gen(function* () {
       const affectedPaths = Array.from(
@@ -2298,8 +2561,8 @@ describe('native task actions', () => {
         yield* refuseWithoutMutation({...request, runId: 'foreign-run'}, 'run-not-found');
 
         yield* f.git(['update-ref', 'refs/heads/prerelease', ontoHead]);
-        yield* refuseWithoutMutation(request, 'stale-snapshot-ref');
-        yield* f.git(['update-ref', 'refs/heads/prerelease', String(prior.declaredBaseHead)]);
+        const movedHistoricalLabel = yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo});
+        expect(movedHistoricalLabel.baseRequalification?.predecessorRef).toBe(predecessorRef);
         yield* f.git(['update-ref', 'refs/remotes/origin/main', String(prior.declaredBaseHead)]);
         yield* refuseWithoutMutation(request, 'stale-snapshot-ref');
         yield* f.git(['update-ref', 'refs/remotes/origin/main', ontoHead]);
@@ -2776,6 +3039,275 @@ describe('native task actions', () => {
     }).pipe(run),
   );
 
+  effectIt.effect('reconciles an amended compact-origin PR cycle without changing delivery or bindings', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      const repo = yield* f.fs.realPath(f.repo);
+      const home = yield* f.fs.realPath(f.home);
+      const config = {...f.config, agentContextHome: home, manifestPath: f.path.join(home, 'manifest.json')};
+      const system = yield* SystemInfo;
+      const testSystem = {...system, currentDirectory: () => repo, homeDirectory: home};
+      yield* runCommandEffect('git', ['-C', repo, 'add', 'source.ts']);
+      yield* runCommandEffect('git', [
+        '-C',
+        repo,
+        '-c',
+        'user.name=Fixture',
+        '-c',
+        'user.email=fixture@example.invalid',
+        'commit',
+        '-m',
+        'Fixture source',
+      ]);
+      yield* applyDevSkills(config, 'install', {agent: 'codex'}).pipe(Effect.provideService(SystemInfo, testSystem));
+      const intent = {
+        title: 'Refresh compact fixture data',
+        currentBehavior: 'Expired fixture values are returned without a freshness check.',
+        desiredChange: 'Expired fixture values are refreshed before return.',
+        affectedPaths: ['source.ts'],
+        acceptanceCriterion: 'Expired fixture values refresh before return.',
+        verification: 'Exercise expiration and observe the refreshed value.',
+        eligibilityRationale: 'One local source and one bounded behavior are explicit.',
+        eligibility: {status: 'eligible' as const},
+        review: {required: false, reason: 'The fixture behavior is bounded.'},
+      };
+      const startInput = {callerCwd: repo, featureName: intent.title, installationTarget: 'codex', intent};
+      expect(
+        yield* runNativeTaskStart(config, startInput).pipe(
+          Effect.provideService(SystemInfo, testSystem),
+          Effect.result,
+        ),
+      ).toMatchObject({
+        failure: {code: 'evidence-unavailable'},
+      });
+      expect(
+        (yield* (yield* CodeGraphIndexer).index({cwd: repo, threadnoteHome: home, ensureVectors: false})).snapshot
+          .state,
+      ).toBe('ready');
+      const started = object(
+        yield* runNativeTaskStart(config, startInput).pipe(Effect.provideService(SystemInfo, testSystem)),
+      );
+      const runId = String(started.taskRef);
+      const initialState = yield* readNativeWorkflowState(config, runId);
+      if (!initialState) throw new Error('The compact start must initialize a canonical run.');
+      const compactRead = object(
+        object(
+          yield* f.call(
+            {
+              ...f.base('authoring', runId, initialState.state.generation),
+              command: 'load',
+              uri: object(started.root).uri,
+              detail: 'document',
+            },
+            config,
+          ),
+        ).authoring,
+      );
+      const compactDocument = yield* Schema.decodeUnknownEffect(NativeAuthoringPlanDocumentSchema)(
+        compactRead.document,
+      );
+      const compactPhase = compactDocument.phases[0];
+      const compactAcceptance = compactPhase?.acceptance[0];
+      if (!compactPhase || !compactAcceptance)
+        throw new Error('The compact plan needs one phase and acceptance criterion.');
+      const expansion = {
+        ...compactDocument,
+        current: {
+          ...compactDocument.current,
+          components: ['source.ts contains the fixture value consumed by callers.'],
+        },
+        target: {...compactDocument.target, components: ['Refresh the fixture value before returning it.']},
+        phases: [
+          compactPhase,
+          {
+            ...compactPhase,
+            id: 'verify',
+            title: 'Verify refreshed fixture data',
+            outcome: 'The refreshed fixture value remains available after reload.',
+            dependsOn: [String(compactPhase.id)],
+            acceptance: [
+              {
+                ...compactAcceptance,
+                id: 'persisted',
+                criterion: 'The refreshed value persists.',
+                verification: 'Reload and observe the refreshed value.',
+              },
+            ],
+          },
+        ],
+        decisions: [
+          {
+            id: 'verify-refresh',
+            question: 'How is persistence verified?',
+            selection: 'no-better-alternative',
+            selected: 'Reload the fixture after refresh.',
+            alternatives: [],
+            rationale: 'A dependent phase verifies persistence.',
+            affectedPhases: [String(compactPhase.id), 'verify'],
+            authority: 'orchestrator',
+          },
+        ],
+      };
+      const firstExpansion = object(
+        yield* runNativeTaskAction(config, {
+          command: 'compact-expand',
+          runId,
+          callerCwd: repo,
+          document: expansion,
+        }),
+      );
+      expect(firstExpansion.status).toBe('awaiting-user-confirmation');
+      const expandedRead = object(
+        object(
+          yield* f.call(
+            {
+              ...f.base('authoring', runId, initialState.state.generation),
+              command: 'load',
+              uri: object(firstExpansion.root).uri,
+              detail: 'document',
+            },
+            config,
+          ),
+        ).authoring,
+      );
+      const expandedDocument = yield* Schema.decodeUnknownEffect(NativeAuthoringPlanDocumentSchema)(
+        expandedRead.document,
+      );
+      expect(expandedDocument.compactOrigin?.expanded).toBe(true);
+      const contentFile = f.path.join(home, 'compact-business.json');
+      const business = {
+        title: expandedDocument.title,
+        objective: expandedDocument.objective,
+        requirements: expandedDocument.requirements,
+        context: expandedDocument.context,
+        current: expandedDocument.current,
+        target: expandedDocument.target,
+        phases: expandedDocument.phases,
+        decisions: expandedDocument.decisions,
+        openQuestions: expandedDocument.openQuestions,
+        review: expandedDocument.review,
+      };
+      yield* f.fs.writeFileString(contentFile, JSON.stringify(business));
+      const authored = object(
+        yield* runNativeTaskAuthoring(config, {
+          command: 'start',
+          callerCwd: repo,
+          featureName: intent.title,
+          kind: 'plan',
+          contentFile,
+          installationTarget: 'codex',
+        }).pipe(Effect.provideService(SystemInfo, testSystem)),
+      );
+      expect(authored).toMatchObject({status: 'draft', replayed: true});
+      const approved = object(
+        yield* runNativeTaskAuthoring(config, {
+          command: 'decide',
+          callerCwd: repo,
+          authoringRef: String(authored.authoringRef),
+          userDecision: 'approve',
+          userResponse: 'I approve this exact expanded fixture plan.',
+        }).pipe(Effect.provideService(SystemInfo, testSystem)),
+      );
+      const admitted = object(
+        yield* runNativeTaskAuthoring(config, {
+          command: 'admit',
+          callerCwd: repo,
+          authoringRef: String(approved.authoringRef),
+          delivery: 'pr',
+          bindings: {
+            compact: {branch: 'main', baseBranch: 'main'},
+            verify: {branch: 'main', baseBranch: 'main'},
+          },
+        }).pipe(Effect.provideService(SystemInfo, testSystem)),
+      );
+      expect(admitted.status).toBe('admitted');
+      const initialCycle = yield* readNativeWorkflowState(config, runId);
+      expect(initialCycle?.state.cycle?.state.plan).toMatchObject({
+        delivery: 'pr',
+        phases: [
+          {id: 'compact', branch: 'main', baseBranch: 'main'},
+          {id: 'verify', branch: 'main', baseBranch: 'main'},
+        ],
+      });
+
+      const verifyPhase = expandedDocument.phases[1];
+      const verifyAcceptance = verifyPhase?.acceptance[0];
+      if (!verifyPhase || !verifyAcceptance) throw new Error('The expanded plan must include its verification phase.');
+      const amendment = {
+        ...expandedDocument,
+        title: 'Refresh and verify compact fixture data',
+        objective: 'Refresh fixture data and verify the persisted result.',
+        target: {...expandedDocument.target, summary: 'Expired fixture values refresh and persist before return.'},
+        phases: [
+          ...expandedDocument.phases,
+          {
+            ...verifyPhase,
+            id: 'readback',
+            title: 'Read back refreshed fixture data',
+            outcome: 'The refreshed fixture value is available to later reads.',
+            dependsOn: [String(verifyPhase.id)],
+            acceptance: [
+              {
+                ...verifyAcceptance,
+                id: 'readback',
+                criterion: 'Later reads return the refreshed value.',
+                verification: 'Read the fixture value after reload.',
+              },
+            ],
+          },
+        ],
+        decisions: [
+          ...expandedDocument.decisions,
+          {
+            id: 'readback-refresh',
+            question: 'How are later reads checked?',
+            selection: 'no-better-alternative',
+            selected: 'Read the value after reload.',
+            alternatives: [],
+            rationale: 'The final phase verifies the persisted result.',
+            affectedPhases: ['compact', 'verify', 'readback'],
+            authority: 'orchestrator',
+          },
+        ],
+      };
+      const expanded = object(
+        yield* runNativeTaskAction(config, {
+          command: 'compact-expand',
+          runId,
+          callerCwd: repo,
+          document: amendment,
+        }),
+      );
+      expect(expanded.status).toBe('awaiting-user-confirmation');
+      const confirmed = object(
+        yield* runNativeTaskAction(config, {
+          command: 'compact-confirm',
+          runId,
+          callerCwd: repo,
+          presentedIntentHash: String(expanded.intentHash),
+          userDecision: 'approve',
+          userResponse: 'I approve this exact amended fixture plan.',
+          bindings: {
+            compact: {branch: 'main', baseBranch: 'main'},
+            verify: {branch: 'main', baseBranch: 'main'},
+            readback: {branch: 'main', baseBranch: 'main'},
+          },
+        }),
+      );
+      expect(confirmed.status).toBe('admitted');
+      const after = yield* readNativeWorkflowState(config, runId);
+      expect(after?.state.cycle?.state.plan).toMatchObject({
+        delivery: 'pr',
+        phases: [
+          {id: 'compact', branch: 'main', baseBranch: 'main'},
+          {id: 'verify', branch: 'main', baseBranch: 'main'},
+          {id: 'readback', branch: 'main', baseBranch: 'main'},
+        ],
+      });
+      expect(after?.state.cycle?.plans).toHaveLength(2);
+    }).pipe(run),
+  );
+
   effectIt.effect('saves a compact draft, records exact user approval and initializes the same task facade', () =>
     Effect.gen(function* () {
       const f = yield* nativeFixture();
@@ -3041,6 +3573,7 @@ describe('native task actions', () => {
         taskReadiness: 'ready',
         task: {status: 'ready', next: {action: 'implement'}},
       });
+      expect((yield* readNativeWorkflowState(f.config, 'native-run'))?.state.cycle?.state.plan.delivery).toBe('local');
       const initialPlan = yield* Schema.decodeUnknownEffect(NativeAuthoringPlanDocumentSchema)(draftDocument);
       const work = object(
         yield* runNativeTaskAction(f.config, {
@@ -3500,6 +4033,7 @@ describe('native task actions', () => {
         ],
         findings: [],
       };
+      yield* f.git(['commit', '--allow-empty', '-m', 'Same-tree PR build marker']);
       yield* runNativeTaskAction(f.config, {
         command: 'record-review',
         runId: 'native-run',
@@ -3507,7 +4041,6 @@ describe('native task actions', () => {
         snapshotRef,
         report,
       });
-      yield* f.git(['commit', '--allow-empty', '-m', 'Same-tree PR build marker']);
       const validation = object(
         yield* runNativeTaskAction(f.config, {
           command: 'record-validation',
@@ -3531,20 +4064,137 @@ describe('native task actions', () => {
         state: 'open',
       };
       const beforeOpen = yield* f.fs.readFileString(f.statePath());
+      const deliveryView = yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo});
+      expect(deliveryView.prWatchPrerequisites).toMatchObject({publicationAloneArmsWatch: false});
+      expect(deliveryView.prWatchPrerequisites?.required).toContain('host-registration');
+
       const mcp = new EffectMcpServerAdapter('test', '1', 'fixture');
       registerWorkflowTaskTool(mcp, f.config);
+      const executor = yield* CommandExecutor;
+      const prProvider = CommandExecutor.of({
+        ...executor,
+        execute: (executable, args, options) =>
+          executable === 'gh' &&
+          args.includes('--jq') &&
+          EffectArray.some(args, arg => EffectString.includes('headSha: .head.sha')(arg))
+            ? Effect.succeed({
+                exitCode: 0,
+                stderr: '',
+                stdout: JSON.stringify({
+                  number: 1,
+                  url: openPr.url,
+                  baseRepository: 'example/repo',
+                  headRepository: 'example/repo',
+                  baseBranch: 'main',
+                  headBranch: 'feature/one',
+                  headSha,
+                  state: 'open',
+                  merged: false,
+                }),
+              })
+            : executor.execute(executable, args, options),
+      });
+      const authority = 'The private fixture user approved this existing PR delivery.';
+      const adopt = {
+        command: 'deliver-pr',
+        runId: 'native-run',
+        callerCwd: f.repo,
+        validationRef,
+        commitEvidence: 'Verified private fixture commit ' + headSha,
+        pr: openPr,
+        publication,
+        userAuthority: authority,
+      };
+      const {userAuthority: _authority, ...withoutAuthority} = adopt;
+      expect(yield* runNativeTaskActionCore(f.config, withoutAuthority).pipe(Effect.result)).toMatchObject({
+        failure: {code: 'user-authority-required'},
+      });
+      for (const changed of [
+        {headSha: EffectString.repeat(40)('f')},
+        {headRepository: 'untrusted/fork'},
+        {baseBranch: 'other-base'},
+      ]) {
+        const mismatching = CommandExecutor.of({
+          ...executor,
+          execute: (executable, args, options) =>
+            prProvider
+              .execute(executable, args, options)
+              .pipe(
+                Effect.map(result =>
+                  executable === 'gh' && EffectArray.some(args, arg => EffectString.includes('headSha: .head.sha')(arg))
+                    ? {...result, stdout: JSON.stringify({...JSON.parse(result.stdout), ...changed})}
+                    : result,
+                ),
+              ),
+        });
+        expect(
+          yield* runNativeTaskActionCore(f.config, adopt).pipe(
+            Effect.provideService(CommandExecutor, mismatching),
+            Effect.result,
+          ),
+        ).toMatchObject({failure: {code: 'pr-source-mismatch'}});
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeOpen);
+      }
+      let observations = 0;
+      const moving = CommandExecutor.of({
+        ...executor,
+        execute: (executable, args, options) =>
+          prProvider.execute(executable, args, options).pipe(
+            Effect.map(result => {
+              if (
+                executable === 'gh' &&
+                EffectArray.some(args, arg => EffectString.includes('headSha: .head.sha')(arg)) &&
+                ++observations === 2
+              )
+                return {
+                  ...result,
+                  stdout: JSON.stringify({...JSON.parse(result.stdout), headSha: EffectString.repeat(40)('e')}),
+                };
+              return result;
+            }),
+          ),
+      });
+      expect(
+        yield* runNativeTaskActionCore(f.config, adopt).pipe(
+          Effect.provideService(CommandExecutor, moving),
+          Effect.result,
+        ),
+      ).toMatchObject({failure: {code: 'pr-source-mismatch'}});
+      expect(observations).toBe(2);
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeOpen);
+      const provisional = object(
+        yield* runNativeTaskActionCore(f.config, adopt).pipe(Effect.provideService(CommandExecutor, prProvider)),
+      );
+      const retried = object(
+        yield* runNativeTaskActionCore(f.config, adopt).pipe(Effect.provideService(CommandExecutor, prProvider)),
+      );
+      expect(retried.deliveryRef).toBe(provisional.deliveryRef);
+      const provisionalReceipt = decodeNativeTaskActionRef(String(provisional.deliveryRef))?.delivery;
+      expect(provisionalReceipt).toMatchObject({
+        userAuthority: authority,
+        providerIdentity: {
+          url: openPr.url,
+          headRepository: 'example/repo',
+          baseRepository: 'example/repo',
+          headSha,
+        },
+      });
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeOpen);
       const watchEnvelope = object(
-        yield* mcp.invokeTool('workflow_task_deliver', {
-          runId: 'native-run',
-          callerCwd: f.repo,
-          delivery: {
-            command: 'pr',
-            validationRef,
-            commitEvidence: 'Verified private fixture commit ' + headSha,
-            pr: openPr,
-            publication,
-          },
-        }),
+        yield* mcp
+          .invokeTool('workflow_task_deliver', {
+            runId: 'native-run',
+            callerCwd: f.repo,
+            delivery: {
+              command: 'pr',
+              validationRef,
+              userAuthority: authority,
+              commitEvidence: 'Verified private fixture commit ' + headSha,
+              pr: openPr,
+              publication,
+            },
+          })
+          .pipe(Effect.provideService(CommandExecutor, prProvider)),
       );
       const watchCard = object(watchEnvelope.structuredContent);
       expect(watchCard).toMatchObject({
@@ -3557,6 +4207,13 @@ describe('native task actions', () => {
       const forgedDelivery = {
         ...provisionalRef.delivery,
         pr: {...provisionalRef.delivery.pr, url: 'https://github.com/other-owner/other-repo/pull/99'},
+        providerIdentity: {
+          ...provisionalRef.delivery.providerIdentity!,
+          url: 'https://github.com/other-owner/other-repo/pull/99',
+          number: 99,
+          baseRepository: 'other-owner/other-repo',
+          headRepository: 'other-owner/other-repo',
+        },
       };
       const forgedDeliveryRef = encodeNativeTaskActionRef({
         ...provisionalRef,
@@ -3572,7 +4229,6 @@ describe('native task actions', () => {
         watchId + '.json',
       );
       if (maintenance) {
-        yield* f.git(['remote', 'add', 'origin', 'https://github.com/example/repo.git']);
         // CI edits must not revoke the existing watch route or manufacture validation of the new source.
         const watch = yield* startSimulatedTaskWatch(
           f,
@@ -3649,7 +4305,11 @@ describe('native task actions', () => {
         ).toMatchObject({failure: {code: 'watch-identity-conflict'}});
         watch.setRemoteBase('wrong-base');
         expect(yield* renew({}).pipe(Effect.result)).toMatchObject({failure: {code: 'watch-identity-conflict'}});
-        const retargeted = {...provisionalRef.delivery, pr: {...provisionalRef.delivery.pr, baseBranch: 'wrong-base'}};
+        const retargeted = {
+          ...provisionalRef.delivery,
+          pr: {...provisionalRef.delivery.pr, baseBranch: 'wrong-base'},
+          providerIdentity: {...provisionalRef.delivery.providerIdentity!, baseBranch: 'wrong-base'},
+        };
         const retargetedRef = encodeNativeTaskActionRef({
           ...provisionalRef,
           kind: 'delivery',
@@ -3949,7 +4609,8 @@ describe('native task actions', () => {
         validationRef: String(delivered.deliveryRef),
         commitEvidence: 'Verified private fixture commit ' + headSha,
         pr: mergedPr,
-        publication: {exemption: 'small-fix', reason: 'Changed authority cannot reuse the original receipt.'},
+        publication,
+        userAuthority: 'A different user statement cannot replace retained delivery authority.',
       }).pipe(Effect.result);
       expect(changedAuthority).toMatchObject({failure: {code: 'delivery-conflict'}});
       expect(yield* f.fs.readFileString(f.statePath())).toBe(afterDelivery);
@@ -5044,7 +5705,7 @@ describe('native task actions', () => {
           project: 'repo',
         },
       );
-      yield* f.git(['remote', 'add', 'origin', 'https://github.com/example/repo.git']);
+      yield* f.git(['remote', 'set-url', 'origin', 'https://github.com/example/repo.git']);
       const system = yield* SystemInfo;
       const repo = yield* f.fs.realPath(f.repo);
       const home = yield* f.fs.realPath(f.home);
@@ -5151,6 +5812,48 @@ describe('native task actions', () => {
         deliveryRef,
       }).pipe(Effect.result);
       expect(missingHost).toMatchObject({failure: {code: 'host-registration-required'}});
+      expect(yield* readNativeWatch(f.config, watchId)).toBeUndefined();
+      const discoveryState = yield* f.fs.readFileString(f.statePath());
+      const discoveryCommandService = yield* CommandExecutor;
+      const discoverySystemService = yield* SystemInfo;
+      const discoveryCommands = CommandExecutor.of({
+        ...discoveryCommandService,
+        execute: (executable, args, options) =>
+          EffectString.startsWith('/canonical-codex/')(executable) && args[0] === 'queue' && args[1] === '--help'
+            ? Effect.succeed({
+                exitCode: 0,
+                stderr: '',
+                stdout:
+                  'Usage: codex queue [OPTIONS]\n\nOptions:\n      --thread <THREAD>\n          Thread UUID\n      --message <MESSAGE>\n          Message body\n',
+              })
+            : discoveryCommandService.execute(executable, args, options),
+      });
+      const discoveryFileSystem = FileSystem.FileSystem.of({
+        ...f.fs,
+        realPath: candidate => {
+          if (candidate === f.home + '/.local/bin/codex') return Effect.succeed('/canonical-codex/home/codex');
+          if (candidate === '/usr/local/bin/codex') return Effect.succeed('/canonical-codex/local/codex');
+          if (candidate === '/usr/bin/codex') return Effect.succeed('/canonical-codex/system/codex');
+          return f.fs.realPath(candidate);
+        },
+      });
+      const discoverySystem = SystemInfo.of({...discoverySystemService, platform: 'linux', homeDirectory: f.home});
+      const ambiguousDiscovery = yield* runNativeTaskAction(f.config, {
+        command: 'watch-pr',
+        operation: 'start',
+        runId: 'native-run',
+        callerCwd: f.repo,
+        validationRef,
+        deliveryRef,
+        wakeup: {host: 'codex', threadId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'},
+      }).pipe(
+        Effect.provideService(FileSystem.FileSystem, discoveryFileSystem),
+        Effect.provideService(CommandExecutor, discoveryCommands),
+        Effect.provideService(SystemInfo, discoverySystem),
+        Effect.result,
+      );
+      expect(ambiguousDiscovery).toMatchObject({failure: {code: 'host-queue-incompatible'}});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(discoveryState);
       expect(yield* readNativeWatch(f.config, watchId)).toBeUndefined();
       // Process-boundary adapter: simulate a detached collector's startup acknowledgement without
       // launching a process or contacting a provider. This exercises the real task start and watch engine.
