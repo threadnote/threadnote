@@ -69,9 +69,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
       inputSchema: {
         callerCwd: McpInput.requiredString('Absolute checkout path for this task'),
         featureName: McpInput.string('Stable compact-task name'),
-        installationTarget: McpInput.requiredString(
-          'Installed Threadnote host target, required to verify the current bundle on start or resume',
-        ),
+        installationTarget: McpInput.requiredString('Installed host target; verifies current bundle on start/resume'),
         taskRef: McpInput.string('Prior start task ref'),
         sharedPlanRef: McpInput.string('Verified portable plan ref'),
         graphProject: McpInput.string('New run graph project'),
@@ -568,16 +566,18 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Use canonical, diagnostic candidate or supplemental proof. Relay noticeRefs only; persist dispositions before ACK with current refs; complete from readback.',
+        'Monitor standalone or canonical/candidate/supplemental PR watches with distinct proof. Standalone grants no delivery/merge authority. Relay noticeRefs only; persist dispositions before ACK with current refs.',
       inputSchema: {
-        runId: McpInput.requiredString(),
+        runId: McpInput.string('Omit for standalone'),
+        prUrl: McpInput.string(),
+        watchRef: McpInput.string(),
         callerCwd: McpInput.requiredString(),
-        validationRef: McpInput.string('Validation ref; provisional inspect/stop may omit'),
+        validationRef: McpInput.string(),
         deliveryRef: McpInput.string('PR delivery ref; provisional inspect/stop may omit'),
         ...Struct.omit(NativeTaskPrWatchFieldsSchema.fields, ['noticeRef']),
         noticeRef: McpInput.string('Relay only; persist dispositions before ACK with current refs.'),
         snapshotRef: McpInput.string('Candidate snapshot; diagnostics only'),
-        candidateWatchRef: McpInput.string('Candidate continuation'),
+        candidateWatchRef: McpInput.string(),
         supplementalRef: McpInput.string('Completed-local publication owner'),
         pr: McpInput.string('Candidate PR URL'),
       },
@@ -585,7 +585,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     Effect.fn('mcp_server.workflowTaskWatchPr')(function* ({runId, callerCwd, validationRef, deliveryRef, ...watch}) {
       const result = yield* runNativeTaskAction(config, {
         command: 'watch-pr',
-        runId,
+        ...(runId === undefined ? {} : {runId}),
         callerCwd,
         ...(validationRef === undefined ? {} : {validationRef}),
         ...(deliveryRef === undefined ? {} : {deliveryRef}),

@@ -1,3 +1,4 @@
+import {runNativePrWatchOperation} from '../../src/workflow_automation/task_pr_watch.js';
 import {it as effectIt} from '@effect/vitest';
 import {expect} from 'vitest';
 import {Clock, Effect, FileSystem, Deferred, Fiber, Array as EffectArray, String as EffectString} from 'effect';
@@ -304,6 +305,15 @@ effectIt.effect(
             watchId,
           }).pipe(Effect.result))._tag,
         ).toBe('Failure');
+        const providerCallsBeforeTransportRefusal = providerCalls;
+        const extractedTransport = yield* runNativePrWatchOperation(
+          f.config,
+          {operation: 'inspect'},
+          required(yield* readNativeWatch(f.config, watchId)),
+          {runId: stored.state.runId, generationHash: sha256HexSync(stored.state.generation)},
+        ).pipe(Effect.result);
+        expect(extractedTransport).toMatchObject({failure: {code: 'watch-owner-conflict'}});
+        expect(providerCalls).toBe(providerCallsBeforeTransportRefusal);
         let watch = required(yield* readNativeWatch(f.config, watchId));
         const now = yield* Clock.currentTimeMillis;
         const state = recordNativeWatchLifecycle(watch.envelope.state, 'watcher_error', 'diagnostic', now);

@@ -77,6 +77,7 @@ import {stableJson} from '../../src/workflow_memory/protocol.js';
 import {
   completeLocalPhase,
   fixture as sourceFixture,
+  GraphDiagnostics,
   object,
   run,
   windowsCycleFixtureTimeout,
@@ -1479,10 +1480,14 @@ describe('native task actions', () => {
         );
         expect(graphBlocked).toMatchObject({failure: {code: 'evidence-unavailable'}});
         expect(yield* readNativeWorkflowState(config, expectedRunId)).toBeUndefined();
-        const indexer = yield* CodeGraphIndexer;
-        expect((yield* indexer.index({cwd: canonicalRepo, threadnoteHome: canonicalHome})).snapshot.state).toBe(
-          'ready',
-        );
+        const graph = yield* GraphDiagnostics;
+        expect(
+          (yield* graph.prepare(
+            Effect.flatMap(CodeGraphIndexer, indexer =>
+              indexer.index({cwd: canonicalRepo, threadnoteHome: canonicalHome}),
+            ),
+          )).snapshot.state,
+        ).toBe('ready');
         const mcp = new EffectMcpServerAdapter('test', '1', 'fixture');
         registerWorkflowTaskTool(mcp, config);
         const missingTargetMcpCall = yield* mcp.invokeTool('workflow_task_start', withoutTarget).pipe(Effect.result);
@@ -9313,6 +9318,23 @@ effectIt.effect(
     Effect.gen(function* () {
       const f = yield* fixture(['one'], 'local');
       const before = yield* f.fs.readFileString(f.statePath());
+      const commands = yield* CommandExecutor;
+      let forbiddenEffects = 0;
+      const guardedCommands = CommandExecutor.of({
+        ...commands,
+        execute: (executable, args, options) => {
+          if (executable === 'gh' || executable === '/fixture/codex') {
+            forbiddenEffects++;
+            return Effect.die('Unexpected provider or host call for mixed watch proof.');
+          }
+          return commands.execute(executable, args, options);
+        },
+        spawnDetached: () =>
+          Effect.sync(() => {
+            forbiddenEffects++;
+            return false;
+          }),
+      });
       const invoke = (fields: object) =>
         runNativeTaskAction(f.config, {
           command: 'watch-pr',
@@ -9320,7 +9342,28 @@ effectIt.effect(
           callerCwd: f.repo,
           operation: 'inspect',
           ...fields,
-        }).pipe(Effect.result);
+        }).pipe(Effect.provideService(CommandExecutor, guardedCommands), Effect.result);
+      for (const standalone of [{prUrl: 'https://github.com/example/repo/pull/1'}, {watchRef: 'standalone'}])
+        expect(yield* invoke({...standalone, candidateWatchRef: 'candidate'})).toMatchObject({
+          failure: {code: 'invalid-request'},
+        });
+      for (const proof of [
+        {snapshotRef: 'candidate'},
+        {candidateWatchRef: 'candidate'},
+        {supplementalRef: 'publication'},
+        {pr: 'https://github.com/example/repo/pull/1'},
+      ]) {
+        const standalone = yield* runNativeTaskAction(f.config, {
+          command: 'watch-pr',
+          callerCwd: f.repo,
+          operation: 'start',
+          prUrl: 'https://github.com/example/repo/pull/1',
+          wakeup: {host: 'codex', executable: '/fixture/codex', threadId: '11111111-1111-4111-8111-111111111111'},
+          ...proof,
+        }).pipe(Effect.provideService(CommandExecutor, guardedCommands), Effect.result);
+        expect(standalone).toMatchObject({failure: {code: 'invalid-request'}});
+      }
+      expect(forbiddenEffects).toBe(0);
       expect(yield* invoke({candidateWatchRef: 'candidate', supplementalRef: 'publication'})).toMatchObject({
         failure: {code: 'watch-proof-conflict'},
       });

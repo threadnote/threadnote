@@ -224,7 +224,9 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
         withRuntime(config =>
           runNativeTaskAction(config, {
             command: 'watch-pr',
-            runId: options.runId,
+            ...(options.runId === undefined ? {} : {runId: options.runId}),
+            ...(options.prUrl === undefined ? {} : {prUrl: options.prUrl}),
+            ...(options.watchRef === undefined ? {} : {watchRef: options.watchRef}),
             callerCwd: options.callerCwd,
             ...(options.validationRef === undefined ? {} : {validationRef: options.validationRef}),
             ...(options.deliveryRef === undefined ? {} : {deliveryRef: options.deliveryRef}),

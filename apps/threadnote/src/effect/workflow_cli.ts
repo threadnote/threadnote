@@ -132,7 +132,9 @@ export function makeNativeTaskPrDeliveryCommand<E, R>(
 
 export function makeNativeTaskPrWatchCommand<E, R>(
   handler: (options: {
-    readonly runId: string;
+    readonly runId?: string;
+    readonly prUrl?: string;
+    readonly watchRef?: string;
     readonly callerCwd: string;
     readonly validationRef?: string;
     readonly deliveryRef?: string;
@@ -177,7 +179,9 @@ export function makeNativeTaskPrWatchCommand<E, R>(
   return Command.make(
     'watch-pr',
     {
-      runId: requiredString('run-id', 'Native workflow run identifier'),
+      runId: optionalString('run-id', 'Workflow run; omit for standalone monitoring'),
+      prUrl: optionalString('pr-url', 'Explicit GitHub PR URL for standalone setup'),
+      watchRef: optionalString('watch-ref', 'Opaque standalone watch identity returned by setup'),
       callerCwd: requiredString('caller-cwd', 'Bound checkout path'),
       validationRef: optionalString('validation-ref', 'Current opaque validation reference'),
       deliveryRef: optionalString('delivery-ref', 'Opaque open PR delivery reference'),
@@ -201,7 +205,7 @@ export function makeNativeTaskPrWatchCommand<E, R>(
           'stop',
           'complete',
         ],
-        'Task-bound watch operation',
+        'PR watch operation',
       ),
       host: optionalChoice('host', ['codex', 'cursor-cli'], 'Registered wakeup host'),
       executable: optionalString('host-executable', 'Absolute registered host executable'),
@@ -297,7 +301,7 @@ export function makeNativeTaskPrWatchCommand<E, R>(
         dispositions,
       });
     },
-  ).pipe(Command.withDescription('Run a task-bound PR watch step through native watch state and receipts'));
+  ).pipe(Command.withDescription('Monitor an explicit PR or operate a workflow-bound PR watch'));
 }
 
 export function makeNativeTaskStartCommand<E, R>(
