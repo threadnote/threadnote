@@ -16,7 +16,12 @@ import {runWorkflowAutomation} from './index.js';
 import {readNativeWorkflowState} from './store.js';
 import {readNativeTaskView} from './task.js';
 import {runNativeWatch} from './watch.js';
-import {runNativePrWatchOperation} from './task_pr_watch.js';
+import {
+  runNativePrWatchOperation,
+  readNativeTaskPhaseWatchIds,
+  readNativeTaskPhaseWatch,
+  resolveNativeTaskPrWatch,
+} from './task_pr_watch.js';
 import {discoverNativeWatchCodexExecutable} from './watch_notification.js';
 import type {NativeWatchWakeup} from './watch_notification_state.js';
 import {readNativeWatch, withNativeWatchControlLock} from './watch_store.js';
@@ -455,10 +460,18 @@ export const runNativeTaskPrWatch = (
           'provisional-watch-not-eligible',
           'The current provisional phase lacks unique reviewed source proof.',
         );
-      const identity = EffectString.slice(0, 48)(sha256HexSync(`${request.runId}\n${request.phaseId}`));
-      const watchId = `pr-${identity}`;
-      const consumerId = `task-${identity}`;
-      const watch = yield* readNativeWatch(config, watchId);
+      const watchIds = yield* readNativeTaskPhaseWatchIds(config, request.runId, request.phaseId);
+      if (watchIds.length !== 1)
+        return yield* fail(
+          'watch-identity-conflict',
+          'Provisional recovery needs a unique retained watch; use both exact current validation and PR delivery references.',
+        );
+      const {watchId, consumerId, watch} = yield* readNativeTaskPhaseWatch(
+        config,
+        request.runId,
+        request.phaseId,
+        watchIds[0],
+      );
       if (
         !watch ||
         watch.envelope.state.watchId !== watchId ||
@@ -605,11 +618,21 @@ export const runNativeTaskPrWatch = (
       !deliveryMatches(phase.delivery)
     )
       return yield* fail('stale-delivery-ref', 'The validated PR source changed; reload the current task card.');
-    const watchIdentity = EffectString.slice(0, 48)(sha256HexSync(`${request.runId}\n${validation.phaseId}`));
-    const watchId = `pr-${watchIdentity}`;
-    // This is an internal lease owner key, never an authenticated person or provider identity.
-    const consumerId = `task-${watchIdentity}`;
-    const wakeupId = `task-${watchIdentity}`;
+    if (
+      embeddedDelivery.watch !== undefined &&
+      (!phase.delivery?.watch || embeddedDelivery.watch.consumerId !== phase.delivery.watch.consumerId)
+    )
+      return yield* fail(
+        'watch-identity-conflict',
+        'The supplied watch consumer does not match canonical delivery proof.',
+      );
+    const {watchId, consumerId, wakeupId} = yield* resolveNativeTaskPrWatch(
+      config,
+      request.runId,
+      validation.phaseId,
+      embeddedDelivery.pr.url,
+      phase.delivery?.watch?.consumerId,
+    );
     const admitProvisionalWatch = () =>
       Effect.gen(function* () {
         if (phase.delivery !== undefined) {

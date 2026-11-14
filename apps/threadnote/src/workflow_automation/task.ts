@@ -25,6 +25,7 @@ import {
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {readNativeWorkflowState} from './store.js';
+import {nativeTaskWatchIdentityForConsumer} from './task_pr_watch.js';
 import {readNativeTaskInspection, runWorkflowAutomation} from './index.js';
 import {gitValue} from '../utils.js';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
@@ -130,11 +131,18 @@ const historicalPhaseProof = (
       item.report.status === 'complete',
   );
   if (reviews.length !== 1) return undefined;
+  const watchIdentity = nativeTaskWatchIdentityForConsumer(
+    stored.state.runId,
+    phaseId,
+    receipt.pr.url,
+    receipt.watch.consumerId,
+  );
+  if (!watchIdentity) return undefined;
   return {
     phaseId,
     title: phase.title,
     prUrl: receipt.pr.url,
-    watchId: `pr-${EffectString.slice(0, 48)(sha256HexSync(`${stored.state.runId}\n${phaseId}`))}`,
+    watchId: watchIdentity.watchId,
     phaseHash: proof.phaseHash,
     baseline,
     snapshot,

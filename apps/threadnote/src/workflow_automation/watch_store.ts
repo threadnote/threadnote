@@ -594,6 +594,31 @@ export const readNativeWatch = Effect.fn('workflowAutomation.readState')(functio
   return result;
 });
 
+/** Bounded names-only discovery for legacy and PR-qualified watches of one canonical phase. */
+export const readNativeTaskWatchIds = (config: RuntimeConfig, legacyWatchId: string) =>
+  Effect.gen(function* () {
+    if (!/^pr-[a-f0-9]{48}$/u.test(legacyWatchId))
+      return yield* issue('invalid-state', 'Invalid canonical phase watch namespace.');
+    const directory = yield* stateDirectory(config, false);
+    if (directory === undefined) return [] as string[];
+    const fs = yield* FileSystem.FileSystem;
+    const names = yield* fs.readDirectory(directory);
+    if (names.length > 4096)
+      return yield* issue('watch-inventory-capacity', 'Watch namespace exceeds bounded discovery capacity.');
+    const selected = EffectArray.filter(
+      names,
+      name =>
+        EffectString.endsWith('.json')(name) &&
+        (name === `${legacyWatchId}.json` || EffectString.startsWith(`${legacyWatchId}-`)(name)),
+    ).sort();
+    if (selected.length > 256)
+      return yield* issue('watch-inventory-capacity', 'Phase watch inventory exceeds bounded discovery capacity.');
+    const pattern = new RegExp(`^${legacyWatchId}(?:-[a-f0-9]{48})?\\.json$`, 'u');
+    if (EffectArray.some(selected, name => !pattern.test(name)))
+      return yield* issue('invalid-state', 'The phase watch namespace contains an unrecognized identity.');
+    return EffectArray.map(selected, name => EffectString.slice(0, -5)(name));
+  });
+
 export interface NativeCandidateWatchInventoryRow {
   readonly watchId: string;
   readonly watchRevision: string;
