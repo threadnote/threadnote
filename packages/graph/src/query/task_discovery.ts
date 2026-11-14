@@ -1,3 +1,4 @@
+import {parseLexicalViewBinding, lexicalViewBindingMatches, isLexicalV2Snapshot} from '../store/lexical_projection.js';
 import * as EffectArray from 'effect/Array';
 import * as EffectString from 'effect/String';
 import {Clock, Effect} from 'effect';
@@ -8,6 +9,7 @@ import {withFreshCodeGraphReadTransaction} from '../store/session.js';
 import {
   taskExpansionStatement,
   taskPostingStatement,
+  taskPostingV2Statement,
   taskHeaderStatement,
   taskNodeStatement,
 } from '../store/query/core.js';
@@ -253,6 +255,8 @@ export const discoverCodeGraphTask = Effect.fn('codeGraph.discoverTask')(functio
         readonly compact_base: number;
         readonly row_valid: number;
         readonly transfer_valid: number;
+        readonly layout_current?: string | null;
+        readonly layout_base?: string | null;
       }>(headerQuery.text, headerQuery.parameters),
       4096,
     ))[0];
@@ -269,13 +273,39 @@ export const discoverCodeGraphTask = Effect.fn('codeGraph.discoverTask')(functio
       return;
     }
     const base = header.base_snapshot_id ?? undefined;
-    if (header.compact_current !== 1) gaps.add('task-current-lexical-format-unsupported');
-    if (base !== undefined && header.compact_base !== 1) gaps.add('task-base-lexical-format-unsupported');
-    if (header.compact_current !== 1 || (base !== undefined && header.compact_base !== 1))
+    if (isLexicalV2Snapshot(snapshotId)) {
+      const layout = parseLexicalViewBinding(header.layout_current);
+      const baseLayout = base === undefined ? undefined : parseLexicalViewBinding(header.layout_base);
+      if (
+        !layout ||
+        !lexicalViewBindingMatches(snapshotId, layout.logicalSnapshotId, layout) ||
+        layout.baseSnapshotId !== base ||
+        (base !== undefined &&
+          (!baseLayout || !lexicalViewBindingMatches(base, baseLayout.logicalSnapshotId, baseLayout)))
+      ) {
+        gaps.add('task-observation-layout-conflict');
+        return;
+      }
+    }
+    if (header.compact_current !== 1 && header.compact_current !== 2)
+      gaps.add('task-current-lexical-format-unsupported');
+    if (base !== undefined && header.compact_base !== 1 && header.compact_base !== 2)
+      gaps.add('task-base-lexical-format-unsupported');
+    if (![1, 2].includes(header.compact_current) || (base !== undefined && ![1, 2].includes(header.compact_base)))
       gaps.add('task-lexical-coverage-partial');
     // No unsafe legacy weight read, invented unit score, or absence claim. Keep any
     // compatible compact contributor, and stop after this charged header if neither fits.
-    if (header.compact_current !== 1 && (base === undefined || header.compact_base !== 1)) return;
+    if (![1, 2].includes(header.compact_current) && (base === undefined || ![1, 2].includes(header.compact_base)))
+      return;
+    if (
+      base !== undefined &&
+      [1, 2].includes(header.compact_current) &&
+      [1, 2].includes(header.compact_base) &&
+      header.compact_current !== header.compact_base
+    ) {
+      gaps.add('task-mixed-lexical-format-unsupported');
+      return;
+    }
     const terms = EffectArray.filter(
       discoveryTerms(EffectString.slice(0, 4_096)(input.task)),
       term => Buffer.byteLength(term, 'utf8') <= 128,
@@ -306,7 +336,7 @@ export const discoverCodeGraphTask = Effect.fn('codeGraph.discoverTask')(functio
     }
     for (const origin of ['body', 'metadata'] as const) {
       const started = yield* Clock.monotonicTimeNanos;
-      const statement = taskPostingStatement(
+      const statement = (header.compact_current === 2 ? taskPostingV2Statement : taskPostingStatement)(
         snapshotId,
         base,
         origin === 'body' ? EffectArray.map(terms, term => BODY_DISCOVERY_PREFIX + term) : terms,

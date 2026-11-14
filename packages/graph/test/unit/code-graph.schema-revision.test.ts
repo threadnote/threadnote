@@ -1,3 +1,10 @@
+import * as EffectString from 'effect/String';
+import {it as effectIt} from '@effect/vitest';
+import {Effect} from 'effect';
+import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
+import * as SqlClient from 'effect/sql/SqlClient';
+import {hasCodeGraphEmbeddingDemand, enqueueCodeGraphEmbeddingDemandSql} from '@threadnote/graph/vector/demand';
+import {CODE_GRAPH_EMBEDDING_DEMAND_TABLE_SQL} from '@threadnote/graph/store/schema/contracts';
 import {Array as EffectArray} from 'effect';
 import {readFile} from '@threadnote/testing/node-fs-promises';
 import {dirname, join} from '@threadnote/testing/node-path';
@@ -40,7 +47,8 @@ const historicalProfiles = [
   [16, 'citation-alias-checkpoint-predecessor', 'extend-checkpoint-import'],
   [17, 'checkpoint-import', 'extend-graph-scope-authority'],
   [18, 'graph-scope-authority', 'extend-embedding-demand'],
-  [19, 'embedding-demand', 'current'],
+  [19, 'embedding-demand', 'extend-factored-lexical'],
+  [20, 'factored-lexical', 'current'],
 ] as const;
 
 describe('code graph schema revision entity', () => {
@@ -50,7 +58,7 @@ describe('code graph schema revision entity', () => {
     ).toEqual(historicalProfiles);
     expect(CODE_GRAPH_PERSISTENT_SCHEMA_CITATION_PREDECESSOR.value).toBe(15);
     expect(CODE_GRAPH_PERSISTENT_SCHEMA_CHECKPOINT_PREDECESSOR.value).toBe(16);
-    expect(CODE_GRAPH_PERSISTENT_SCHEMA_CURRENT.value).toBe(19);
+    expect(CODE_GRAPH_PERSISTENT_SCHEMA_CURRENT.value).toBe(20);
   });
 
   it('keeps storage, receipt, artifact, reuse, resolution, and Manager versions distinct', () => {
@@ -87,12 +95,12 @@ describe('code graph schema revision entity', () => {
       fc.property(fc.constantFrom(...CODE_GRAPH_PERSISTENT_SCHEMA_REVISIONS), profile => {
         expect(observeCodeGraphPersistentSchemaRevision(profile.value)).toEqual({profile, state: 'known'});
         expect(observeCodeGraphPersistentSchemaRevision(String(profile.value))).toEqual({profile, state: 'known'});
-        expect(codeGraphPersistentSchemaIsCurrent(profile.value)).toBe(profile.key === 'embedding-demand');
+        expect(codeGraphPersistentSchemaIsCurrent(profile.value)).toBe(profile.key === 'factored-lexical');
         expect(codeGraphPersistentSchemaMigrationPending(profile.value)).toBe(
           profile.lifecycle === 'background-readable',
         );
         const plan = planCodeGraphPersistentSchemaUpgrade(profile.value);
-        expect(plan.state).toBe(profile.key === 'embedding-demand' ? 'ready' : 'upgrade');
+        expect(plan.state).toBe(profile.key === 'factored-lexical' ? 'ready' : 'upgrade');
         if (plan.state !== 'ready' && plan.state !== 'upgrade')
           throw new Error('Historical revision plan unavailable.');
         expect(plan.route).toBe(profile.upgradeRoute);
@@ -141,4 +149,52 @@ describe('code graph schema revision entity', () => {
       expect(source, file).not.toMatch(/CODE_GRAPH_PERSISTENT_EXTENSION_SCHEMA_REVISION\s*[+-]/u);
     }
   });
+});
+
+effectIt.layer(SqliteClient.layer({filename: ':memory:'}))(test => {
+  test.effect(
+    'retains known19/20 readonly demand capability while mutation requires current20 and future schemas refuse',
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql.unsafe('CREATE TABLE schema_metadata(key TEXT PRIMARY KEY,value TEXT)');
+        yield* sql.unsafe(CODE_GRAPH_EMBEDDING_DEMAND_TABLE_SQL);
+        yield* sql.unsafe('CREATE TABLE snapshots(id TEXT,scope_id TEXT,state TEXT)');
+        yield* sql.unsafe(
+          'CREATE TABLE active_snapshots(worktree_id TEXT,scope_id TEXT,snapshot_id TEXT,activated_at TEXT)',
+        );
+        yield* sql.unsafe('CREATE TABLE removed_views(worktree_id TEXT,scope_id TEXT,expected_snapshot_id TEXT)');
+        const target = {
+          worktreeId: EffectString.repeat(64)('a'),
+          snapshotId: 'cgsn_' + EffectString.repeat(40)('b'),
+          activatedAt: '2026-01-01T00:00:00.000Z',
+        };
+        yield* sql.unsafe("INSERT INTO snapshots VALUES(?,'full-repository','ready')", [target.snapshotId]);
+        yield* sql.unsafe("INSERT INTO active_snapshots VALUES(?,'full-repository',?,?)", [
+          target.worktreeId,
+          target.snapshotId,
+          target.activatedAt,
+        ]);
+        yield* sql.unsafe("INSERT INTO embedding_demand VALUES(?,'full-repository',?,?,'queued',0,0,NULL,NULL,NULL)", [
+          target.worktreeId,
+          target.snapshotId,
+          target.activatedAt,
+        ]);
+        for (const revision of [19, 20, 21]) {
+          yield* sql.unsafe("INSERT OR REPLACE INTO schema_metadata VALUES('persistent_extension_schema_revision',?)", [
+            String(revision),
+          ]);
+          const before = yield* sql.unsafe('SELECT * FROM embedding_demand');
+          if (revision <= 20) expect(yield* hasCodeGraphEmbeddingDemand(sql)).toBe(true);
+          else expect((yield* hasCodeGraphEmbeddingDemand(sql).pipe(Effect.flip)).message).toContain('unsupported');
+          expect(yield* sql.unsafe('SELECT * FROM embedding_demand')).toEqual(before);
+          if (revision === 20) expect((yield* enqueueCodeGraphEmbeddingDemandSql(sql, target)).state).toBe('queued');
+          else
+            expect((yield* enqueueCodeGraphEmbeddingDemandSql(sql, target).pipe(Effect.flip)).message).toContain(
+              revision === 19 ? 'requires write preparation' : 'unsupported',
+            );
+          expect(yield* sql.unsafe('SELECT * FROM embedding_demand')).toEqual(before);
+        }
+      }),
+  );
 });

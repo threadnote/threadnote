@@ -1,7 +1,8 @@
 import {Array as EffectArray} from 'effect';
 import {codeGraphUtf8ByteLength} from '../disk/capacity.js';
 import {CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM, type MeasuredCodeGraphFact} from '../fact/budget.js';
-import {symbolTerms} from '../store/utilities.js';
+import {factBodyDiscovery} from '../store/utilities.js';
+import {projectLexicalSymbols} from '../store/lexical_projection.js';
 import {
   PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FILES,
   PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FACT_BYTES,
@@ -138,7 +139,7 @@ export interface CodeGraphIncrementalWork {
   readonly deletedFiles: number;
   /** Exact UTF-8 bytes of the final attributed facts entering incremental staging. */
   readonly factBytes: number;
-  /** Exact rows presented to bounded staging, including changed-path markers. */
+  /** Conservative rows reserved for staging/publication, including every physical lexical category and path counter. */
   readonly plannedRows: number;
   /** Exact repository-membership candidates batch-probed for attribution. */
   readonly probedDependencyPaths: number;
@@ -170,11 +171,15 @@ export function measureCodeGraphIncrementalWork(input: {
     0,
     (total, facts) => total + codeGraphUtf8ByteLength(JSON.stringify(facts)),
   );
-  let factRows = 0;
+  const lexical = projectLexicalSymbols(
+    EffectArray.flatMap(input.facts, fact => fact.symbols),
+    factBodyDiscovery(input.facts),
+  );
+  let factRows = lexical.physicalRowCount + 3 + new Set(EffectArray.map(input.facts, fact => fact.path)).size;
   for (const facts of input.facts) {
     factRows += facts.symbols.length;
     factRows += EffectArray.reduce(facts.symbols, 0, (total, symbol) => total + (symbol.lookupKeys?.length ?? 0));
-    factRows += EffectArray.reduce(facts.symbols, 0, (total, symbol) => total + symbolTerms(symbol).length);
+    factRows += facts.monikers?.length ?? 0;
     factRows += facts.edges.length;
     const references = facts.references ?? [];
     factRows += references.length;

@@ -1,3 +1,4 @@
+import {CODE_GRAPH_SNAPSHOT_ID_PATTERN} from '../store/lexical_projection.js';
 import {Array as EffectArray} from 'effect';
 import type {Database} from 'bun:sqlite';
 import type {Path} from 'effect';
@@ -13,11 +14,11 @@ import {codeGraphSqliteAll, codeGraphSqliteGet, codeGraphSqliteRun} from '../sql
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 
-export const CODE_GRAPH_MATERIALIZATION_SPOOL_FORMAT_VERSION = 2 as const;
+export const CODE_GRAPH_MATERIALIZATION_SPOOL_FORMAT_VERSION = 3 as const;
 export const CODE_GRAPH_MATERIALIZATION_APPLY_PAGE_ROWS = 50_000;
 export const CODE_GRAPH_MATERIALIZATION_SORT_SURFACES_MAXIMUM = 32;
 
-const PERSISTENT_SNAPSHOT_ID = /^cgsn_[0-9a-f]{40}(?:-direct|-full-[0-9a-f]{16})?$/u;
+const PERSISTENT_SNAPSHOT_ID = CODE_GRAPH_SNAPSHOT_ID_PATTERN;
 
 export interface CodeGraphMaterializationApplyPage {
   readonly afterRowid: number;
@@ -56,6 +57,7 @@ export interface CodeGraphMaterializationSpoolState {
 }
 
 export interface CodeGraphMaterializationSpoolReadyPlan {
+  readonly lexicalV2?: boolean;
   readonly batches: readonly CodeGraphMaterializationSpoolBatchReceipt[];
   readonly lexicalTermCount: number;
   readonly spoolIdentity: string;
@@ -506,6 +508,7 @@ export function readCodeGraphMaterializationSpoolReadyPlan(database: Database): 
   return {
     batches: EffectArray.map(receipts, materializationSpoolBatchReceiptFromRow),
     lexicalTermCount,
+    ...(EffectString.endsWith('-lx2')(headers[0].snapshot_id) ? {lexicalV2: true} : {}),
     spoolIdentity: digest.digest('hex'),
     surfaces,
   };
@@ -668,7 +671,7 @@ function validateCodeGraphMaterializationSpoolHeader(header: CodeGraphMaterializ
     !/^[0-9a-f]{64}$/u.test(header.checkoutId) ||
     !/^[0-9a-f]{64}$/u.test(header.repositoryId) ||
     !PERSISTENT_SNAPSHOT_ID.test(header.snapshotId) ||
-    !/^(?:cgc_[0-9a-f]{40}|cgsn_[0-9a-f]{40}(?:-direct|-full-[0-9a-f]{16})?)$/u.test(header.graphContentId) ||
+    !/^(?:cgc_[0-9a-f]{40}|cgsn_[0-9a-f]{40}(?:-direct|-full-[0-9a-f]{16}|-lx2)?)$/u.test(header.graphContentId) ||
     header.extractorSet.length === 0 ||
     header.extractorSet.length > 4_096 ||
     Effect.pipe(header.extractorSet, EffectString.includes('\0'))

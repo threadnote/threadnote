@@ -1,3 +1,4 @@
+import {ACTIVATION_V2_PHYSICAL_COUNT_SQL} from '../lexical_projection.js';
 import {Array as EffectArray} from 'effect';
 import {cancelCodeGraphEmbeddingDemandSql} from '../../vector/demand.js';
 import {withCodeGraphLeaseTiming} from '../lease_timing.js';
@@ -1054,7 +1055,7 @@ const temporaryPublicationCapacity = Effect.fn('codeGraph.temporaryPublicationCa
       (SELECT COUNT(*) FROM activation_symbol_lookup) AS lookup_keys,
       (SELECT COUNT(*) FROM activation_reexport_provenance) AS reexports,
       (SELECT COUNT(*) FROM activation_symbols) AS symbols,
-      (SELECT COUNT(*) FROM activation_symbol_terms) AS terms,
+      ${ACTIVATION_V2_PHYSICAL_COUNT_SQL} AS terms,
       (SELECT COUNT(*) FROM activation_workspace_scopes)
         + (SELECT COUNT(*) FROM activation_workspace_components)
         + (SELECT COUNT(*) FROM activation_workspace_dependencies)

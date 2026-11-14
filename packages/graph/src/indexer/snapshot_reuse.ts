@@ -1,3 +1,14 @@
+import {
+  isLexicalV2Snapshot,
+  lexicalPhysicalSnapshotIdentity,
+  lexicalViewBindingFor,
+  lexicalSnapshotLayoutMode,
+} from '../store/lexical_projection.js';
+import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
+import {CodeGraphProcessActivity} from '../runtime_ports.js';
+import type {CodeGraphBuildResourceCoordinator} from '../build/resources.js';
+import type {CodeGraphIndexOptions} from './types.js';
+import type {CodeGraphRetiredSnapshotCleanupProgress} from '../store/models.js';
 import {Array as EffectArray} from 'effect';
 import {Clock, Effect, FileSystem, Option} from 'effect';
 import {deferCodeGraphVectorCompletion} from '../vector/publication.js';
@@ -6,6 +17,7 @@ import {currentSnapshotReusableBaseReceipt, reusableBaseFileSetFingerprint} from
 import {verifyCommittedIndexInput} from './input/verification.js';
 import {
   CODE_GRAPH_ACTIVATION_LEASE_MILLISECONDS,
+  CODE_GRAPH_LOCK_OPTIONS,
   extractorSetIdentity,
   graphContentIdentity,
   messageOf,
@@ -178,6 +190,23 @@ export const attemptCommittedDirtyRootAlias = Effect.fn('codeGraph.attemptCommit
   ) {
     return Option.none<ReusableCleanSnapshotAttempt>();
   }
+  const factored = isLexicalV2Snapshot(candidate.snapshot.id);
+  if (factored) {
+    // Decoder syntax alone grants no alias capability: re-read the published
+    // receipt and its recomputed actual/logical/layout binding first.
+    const current = yield* input.store.currentLexicalReadySnapshotById(
+      input.layout.databasePath,
+      candidate.snapshot.id,
+    );
+    if (
+      !current ||
+      !current.dirty ||
+      current.baseSnapshotId !== undefined ||
+      !['full', 'direct'].includes(lexicalSnapshotLayoutMode(current) ?? '')
+    ) {
+      return Option.none<ReusableCleanSnapshotAttempt>();
+    }
+  }
   const currentPackProvenance = input.languagePacks.activePackProvenance(
     EffectArray.map(input.inventory.files, file => file.path),
   );
@@ -201,7 +230,9 @@ export const attemptCommittedDirtyRootAlias = Effect.fn('codeGraph.attemptCommit
           extractorSet,
           fileCount: candidate.snapshot.fileCount,
           graphContentId: graphContentIdentity(extractorSet, input.inventory.files),
-          id: input.logicalSnapshotId,
+          id: factored
+            ? lexicalPhysicalSnapshotIdentity(input.logicalSnapshotId, 'alias', candidate.snapshot.id)
+            : input.logicalSnapshotId,
           repositoryId: input.identity.repositoryId,
           state: 'ready',
           symbolCount: candidate.snapshot.symbolCount,
@@ -218,6 +249,9 @@ export const attemptCommittedDirtyRootAlias = Effect.fn('codeGraph.attemptCommit
           candidate.snapshot.id,
           receipt,
           {
+            ...(factored
+              ? {lexicalBinding: lexicalViewBindingFor(alias.id, input.logicalSnapshotId, candidate.snapshot.id)}
+              : {}),
             exactBaseFiles: input.inventory.files,
             expectedBaseGraphContentId: candidate.snapshot.graphContentId ?? candidate.snapshot.id,
           },
@@ -264,3 +298,72 @@ export const attemptCommittedDirtyRootAlias = Effect.fn('codeGraph.attemptCommit
     token => input.store.releaseSnapshotLease(input.layout.databasePath, token).pipe(Effect.ignore),
   );
 });
+
+export function retiredSnapshotCleanupReporter(onProgress: CodeGraphIndexOptions['onProgress']) {
+  return (progress: CodeGraphRetiredSnapshotCleanupProgress) =>
+    (
+      onProgress?.({
+        completed: progress.snapshotsCompleted,
+        pagesCompleted: progress.pagesCompleted,
+        phase: 'reclaiming',
+        rowsDeleted: progress.rowsDeleted,
+        total: progress.snapshotsTotal,
+        unit: 'snapshots',
+      }) ?? Effect.void
+    ).pipe(Effect.ignore);
+}
+
+export function withCodeGraphProcessLock<A, E, R>(
+  fs: FileSystem.FileSystem,
+  lockPath: string,
+  onContention: () => Effect.Effect<void>,
+  builderOperation: string,
+  effect: Effect.Effect<A, E, R>,
+  coordination?: {
+    readonly onAcquired: () => Effect.Effect<void, never>;
+    readonly onCompleted: () => Effect.Effect<void, never>;
+  },
+) {
+  return Effect.flatMap(CodeGraphProcessActivity, activity =>
+    activity.withActivity(
+      'graph-waiter',
+      'repository-lock',
+      withExclusiveFileLock(
+        fs,
+        lockPath,
+        {
+          ...CODE_GRAPH_LOCK_OPTIONS,
+          onContention,
+          ...(coordination ? {onAcquired: coordination.onAcquired, onCompleted: coordination.onCompleted} : {}),
+        },
+        activity.withActivity('graph-builder', builderOperation, effect),
+      ),
+    ),
+  );
+}
+
+export function writerSessionOptions(
+  layout: CodeGraphLayout,
+  options: Pick<CodeGraphIndexOptions, 'onProgress' | 'onSqliteWriterConfigured' | 'sqliteWriterTuning'>,
+  resumeProgress: () => Effect.Effect<void, unknown>,
+  resources?: CodeGraphBuildResourceCoordinator,
+) {
+  return {
+    cleanupCompletedBuildRows: true,
+    ...(options.onSqliteWriterConfigured ? {onSqliteWriterConfigured: options.onSqliteWriterConfigured} : {}),
+    onWriterContention: () =>
+      (resources?.assertWriterMayWait ?? Effect.void).pipe(
+        Effect.orDie,
+        Effect.andThen(options.onProgress?.({phase: 'waiting', reason: 'database-writer'}) ?? Effect.void),
+        Effect.ignore,
+      ),
+    onWriterAcquired: () =>
+      (resources?.acquireWriter ?? Effect.void).pipe(Effect.orDie, Effect.andThen(resumeProgress()), Effect.ignore),
+    onWriterReleased: () => (resources?.releaseWriter ?? Effect.void).pipe(Effect.orDie),
+    sqliteWriterTuning: {
+      reconstructibleBuildSynchronous: 'normal' as const,
+      ...options.sqliteWriterTuning,
+    },
+    writerLockPath: layout.databaseWriteLockPath,
+  } as const;
+}

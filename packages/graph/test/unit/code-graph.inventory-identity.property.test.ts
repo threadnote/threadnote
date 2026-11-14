@@ -1,3 +1,11 @@
+import * as EffectString from 'effect/String';
+import {
+  projectLexicalSymbols,
+  lexicalFileOrdinals,
+  lexicalPhysicalSnapshotIdentity,
+  lexicalViewBindingMatches,
+  parseLexicalViewBinding,
+} from '@threadnote/graph/store/utilities';
 import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
@@ -55,4 +63,91 @@ describe('code graph inventory identity', () => {
       {numRuns: 100},
     );
   });
+});
+
+it('keeps contributor keys and physical categories invariant under whole-file batch repartition', () => {
+  fc.assert(
+    fc.property(
+      fc.uniqueArray(fc.constantFrom('src/a.ts', 'src/𐀀.ts', 'src/\ue000.ts', 'src/empty.ts'), {
+        minLength: 1,
+        maxLength: 4,
+      }),
+      fc.integer({min: 1, max: 4}),
+      (paths, width) => {
+        const files = lexicalFileOrdinals(paths);
+        const groups = EffectArray.map(paths, (path, index) =>
+          EffectArray.map(EffectArray.range(0, index + 1), ordinal => ({
+            id: `cgs_${EffectString.padStart(32, '0')((index * 100 + ordinal).toString(16))}`,
+            path,
+            contentHash: sha256HexSync(path),
+            name: 'sharedPending',
+            qualifiedName: 'Owner.sharedPending',
+            kind: 'function',
+            language: 'typescript',
+            exported: true,
+            packageName: ordinal % 2 === 0 ? 'package/shared' : undefined,
+            span: {line: ordinal + 1, column: 1, endLine: ordinal + 1, endColumn: 2},
+          })),
+        );
+        const complete = projectLexicalSymbols(EffectArray.flatten(groups), [], files);
+        const batches = [];
+        for (let start = 0; start < groups.length; start += width)
+          batches.push(projectLexicalSymbols(EffectArray.flatten(groups.slice(start, start + width)), [], files));
+        const roleRows = (projection: ReturnType<typeof projectLexicalSymbols>) => [
+          ...EffectArray.map(projection.scopes, row => JSON.stringify(['scope', row])),
+          ...EffectArray.map(projection.members, row => JSON.stringify(['member', row])),
+          ...EffectArray.map(projection.owners, ({termOrdinal, ...row}) =>
+            JSON.stringify(['owner', projection.terms[termOrdinal], row]),
+          ),
+          ...EffectArray.map(projection.shared, ({termOrdinal, ...row}) =>
+            JSON.stringify(['shared', projection.terms[termOrdinal], row]),
+          ),
+        ];
+        expect(EffectArray.flatMap(batches, roleRows).sort()).toEqual(roleRows(complete).sort());
+        const dictionary = new Set(EffectArray.flatMap(batches, batch => batch.terms));
+        expect(
+          EffectArray.reduce(batches, 0, (total, batch) => total + batch.physicalRowCount - batch.terms.length) +
+            dictionary.size,
+        ).toBe(complete.physicalRowCount);
+        expect(EffectArray.reduce(batches, 0, (total, batch) => total + batch.logicalPostingCount)).toBe(
+          complete.logicalPostingCount,
+        );
+      },
+    ),
+    {numRuns: 40},
+  );
+});
+
+it('binds actual view identity to exact logical identity, layout, base and generation', () => {
+  fc.assert(
+    fc.property(
+      fc
+        .array(fc.constantFrom(...'0123456789abcdef'), {minLength: 40, maxLength: 40})
+        .map(parts => EffectArray.join(parts, '')),
+      fc
+        .array(fc.constantFrom(...'0123456789abcdef'), {minLength: 40, maxLength: 40})
+        .map(parts => EffectArray.join(parts, '')),
+      (digest, baseDigest) => {
+        const logical = `cgsn_${digest}`;
+        const base = lexicalPhysicalSnapshotIdentity(`cgsn_${baseDigest}`, 'full');
+        const binding = {
+          logicalSnapshotId: logical,
+          mode: 'overlay' as const,
+          baseSnapshotId: base,
+          orderRevision: 1 as const,
+        };
+        const actual = lexicalPhysicalSnapshotIdentity(logical, 'overlay', base);
+        expect(lexicalViewBindingMatches(actual, logical, binding)).toBe(true);
+        expect(parseLexicalViewBinding(JSON.stringify(binding))).toEqual(binding);
+        expect(lexicalViewBindingMatches(actual, logical, {...binding, mode: 'alias'})).toBe(false);
+        expect(lexicalViewBindingMatches(actual, logical, {...binding, forceGeneration: '0123456789abcdef'})).toBe(
+          false,
+        );
+        expect(lexicalViewBindingMatches(actual, base, binding)).toBe(false);
+        expect(parseLexicalViewBinding(JSON.stringify({...binding, extra: 'ignored'}))).toBeUndefined();
+        expect(parseLexicalViewBinding(JSON.stringify({...binding, mode: 'other'}))).toBeUndefined();
+      },
+    ),
+    {numRuns: 40},
+  );
 });

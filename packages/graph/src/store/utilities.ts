@@ -25,6 +25,18 @@ import {
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
+export {
+  projectLexicalSymbols,
+  projectLexicalTermRelation,
+  lexicalUtf16SortKey,
+  lexicalV2PageStatement,
+  lexicalV2RecordLookupStatement,
+  lexicalFileOrdinals,
+  lexicalPhysicalSnapshotIdentity,
+  lexicalViewBindingMatches,
+  parseLexicalViewBinding,
+} from './lexical_projection.js';
+
 const upsertRepository = Effect.fn('codeGraph.upsertRepository')(function* (
   sql: SqlClient.SqlClient,
   identity: RepositoryIdentity,

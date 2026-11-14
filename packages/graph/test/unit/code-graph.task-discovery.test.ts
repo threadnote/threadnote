@@ -1,3 +1,11 @@
+import {PERSISTENT_EXTENSION_TABLES} from '@threadnote/graph/store/schema/contracts';
+import {
+  projectLexicalSymbols,
+  preparedSymbolTerms,
+  lexicalV2PageStatement,
+  lexicalV2RecordLookupStatement,
+} from '@threadnote/graph/store/utilities';
+import {captureBodyDiscovery} from '@threadnote/graph/languages/body_discovery';
 import * as EffectOption from 'effect/Option';
 import * as EffectArray from 'effect/Array';
 import * as EffectString from 'effect/String';
@@ -20,6 +28,7 @@ import {discoverCodeGraphTask, type TaskDiscoveryBudget} from '@threadnote/graph
 import {BODY_DISCOVERY_PREFIX} from '@threadnote/graph/languages/body_discovery';
 import {
   taskPostingStatement,
+  taskPostingV2Statement,
   taskExpansionStatement,
   taskNodeStatement,
   taskHeaderStatement,
@@ -990,7 +999,7 @@ effectIt.layer(citationPlatformLayer)(it => {
                     const saturated = taskPostingStatement(summary.snapshot.id, undefined, ['pending'], 128);
                     expect(db.query(saturated.text).all(...saturated.parameters)).toHaveLength(128);
                     expect(explain).toContain('MATERIALIZE raw');
-                    expect(explain).toContain('SEARCH posting USING PRIMARY KEY');
+                    expect(explain).toContain('SEARCH o USING PRIMARY KEY');
                     expect(explain).not.toMatch(/USE TEMP B-TREE FOR (GROUP BY|ORDER BY)/);
                     const facts = EffectArray.map(
                       db
@@ -1031,7 +1040,14 @@ effectIt.layer(citationPlatformLayer)(it => {
                             Number(
                               fresh
                                 .query<{count: number}, [string]>(
-                                  'SELECT COUNT(*) AS count FROM lexical_compact_postings AS p JOIN lexical_compact_snapshots AS s ON s.snapshot_key=p.snapshot_key WHERE s.snapshot_id=?',
+                                  `SELECT (SELECT COUNT(*) FROM lexical_v2_owners p WHERE p.snapshot_key=s.snapshot_key)+
+                                    (SELECT COUNT(*) FROM lexical_v2_shared p WHERE p.snapshot_key=s.snapshot_key)+
+                                    (SELECT COUNT(*) FROM lexical_v2_scopes p WHERE p.snapshot_key=s.snapshot_key)+
+                                    (SELECT COUNT(*) FROM lexical_v2_members p WHERE p.snapshot_key=s.snapshot_key)+
+                                    (SELECT COUNT(*) FROM lexical_compact_terms p WHERE p.snapshot_key=s.snapshot_key)+
+                                    (SELECT COUNT(*) FROM lexical_v2_formats p WHERE p.snapshot_id=s.snapshot_id)+
+                                    (SELECT COUNT(*) FROM lexical_v2_views p WHERE p.snapshot_id=s.snapshot_id)+1 AS count
+                                    FROM lexical_compact_snapshots s WHERE s.snapshot_id=?`,
                                 )
                                 .get(snapshot)!.count,
                             ),
@@ -1216,6 +1232,187 @@ plainIt('refuses oversized persisted scalars in native SQL before returning boun
       expect(rows[0]).toMatchObject({[field]: null, row_valid: 0, transfer_valid: 1});
       db.query(`UPDATE snapshots SET ${field}=?`).run(field === 'base_snapshot_id' ? null : 'valid');
     }
+  } finally {
+    db.close();
+  }
+});
+
+plainIt('seeks a saturated V2 shared group and coalesces owner collisions before the raw128 cut', () => {
+  const db = new Database(':memory:');
+  try {
+    db.exec(`CREATE TABLE snapshots(id TEXT PRIMARY KEY);
+      CREATE TABLE symbols(snapshot_id TEXT,id TEXT,path TEXT,content_hash TEXT,package_name TEXT,PRIMARY KEY(snapshot_id,id));
+      CREATE TABLE snapshot_files(snapshot_id TEXT,path TEXT,content_hash TEXT,PRIMARY KEY(snapshot_id,path));
+      CREATE TABLE snapshot_symbol_deletions(snapshot_id TEXT,symbol_id TEXT,PRIMARY KEY(snapshot_id,symbol_id));
+      CREATE TABLE snapshot_file_deletions(snapshot_id TEXT,path TEXT,PRIMARY KEY(snapshot_id,path));`);
+    for (const table of EffectArray.filter(PERSISTENT_EXTENSION_TABLES, table =>
+      EffectString.startsWith('lexical_')(table.name),
+    ))
+      db.exec(table.createSql);
+    const snapshot = 'immutable-lx2';
+    const content = EffectArray.join(
+      Array.from({length: 200}, (_, i) => `function f${i}() { "pending"; }`),
+      '\n',
+    );
+    const hash = sha256HexSync(content);
+    const path = 'src/pending/file.ts';
+    const file = {
+      path,
+      content,
+      contentHash: hash,
+      language: 'typescript',
+      blobId: EffectString.repeat(40)('a'),
+      mode: '100644',
+      size: Buffer.byteLength(content),
+      source: 'worktree' as const,
+    };
+    const symbols = Array.from({length: 200}, (_, i) => ({
+      id: 'cgs_' + EffectString.padStart(32, '0')(i.toString(16)),
+      path,
+      contentHash: hash,
+      language: 'typescript',
+      kind: 'function',
+      name: i === 0 ? 'pendingOwner' : `f${i}`,
+      qualifiedName: i === 0 ? 'pendingOwner' : `f${i}`,
+      packageName: '@scope/pkg',
+      exported: true,
+      span: {line: i + 1, column: 1, endLine: i + 1, endColumn: `function f${i}() { "pending"; }`.length + 1},
+    }));
+    const facts = captureBodyDiscovery(file, {path, symbols, edges: [], diagnostics: []});
+    const projection = projectLexicalSymbols(symbols, [facts.derivationInputs!.bodyDiscovery!]);
+    db.query('INSERT INTO snapshots VALUES(?)').run(snapshot);
+    db.query('INSERT INTO lexical_compact_snapshots(snapshot_key,snapshot_id) VALUES(1,?)').run(snapshot);
+    for (const [i, term] of projection.terms.entries())
+      db.query('INSERT INTO lexical_compact_terms VALUES(?,?,?)').run(i + 1, 1, term);
+    for (const scope of projection.scopes)
+      db.query('INSERT INTO lexical_v2_scopes VALUES(?,?,?,?,?)').run(
+        1,
+        scope.scopeOrdinal,
+        scope.path,
+        scope.contentHash,
+        scope.packageName,
+      );
+    for (const member of projection.members)
+      db.query('INSERT INTO lexical_v2_members VALUES(?,?,?,?)').run(
+        1,
+        member.scopeOrdinal,
+        member.memberOrdinal,
+        member.symbolId,
+      );
+    for (const owner of projection.owners)
+      db.query('INSERT INTO lexical_v2_owners VALUES(?,?,?,?,?,?)').run(
+        1,
+        owner.termOrdinal + 1,
+        owner.originMask,
+        owner.scopeOrdinal,
+        owner.memberOrdinal,
+        owner.metadataWeight,
+      );
+    for (const shared of projection.shared)
+      db.query('INSERT INTO lexical_v2_shared VALUES(?,?,?)').run(1, shared.termOrdinal + 1, shared.scopeOrdinal);
+    db.query('INSERT INTO lexical_v2_formats VALUES(?,?,?,?,?,?,?,?,?)').run(
+      snapshot,
+      2,
+      projection.physicalRowCount + 3,
+      projection.logicalPostingCount,
+      projection.members.length,
+      projection.terms.length,
+      projection.scopes.length,
+      projection.owners.length,
+      projection.shared.length,
+    );
+    for (const symbol of symbols)
+      db.query('INSERT INTO symbols VALUES(?,?,?,?,?)').run(snapshot, symbol.id, path, hash, symbol.packageName);
+    db.query('INSERT INTO snapshot_files VALUES(?,?,?)').run(snapshot, path, hash);
+    const expected = EffectArray.flatMap(
+      [...preparedSymbolTerms(symbols, [facts.derivationInputs!.bodyDiscovery!])],
+      ([symbol, terms]) => EffectArray.map(terms, ([term, weight]) => ({term, symbol_id: symbol.id, weight})),
+    ).sort(
+      (a, b) =>
+        Buffer.compare(Buffer.from(a.term), Buffer.from(b.term)) ||
+        Buffer.compare(Buffer.from(a.symbol_id), Buffer.from(b.symbol_id)),
+    );
+    const observed: typeof expected = [];
+    let cursor: readonly [string, string] | undefined;
+    for (let page = 0; page <= Math.ceil(expected.length / 37); page++) {
+      const statement = lexicalV2PageStatement(snapshot, cursor, 37);
+      const rows = db
+        .query<{term: string; symbol_id: string; weight: number}, (string | number)[]>(statement.text)
+        .all(...statement.parameters);
+      if (rows.length === 0) break;
+      observed.push(...rows);
+      cursor = [rows[rows.length - 1].term, rows[rows.length - 1].symbol_id];
+    }
+    expect(observed).toEqual(expected);
+    for (const origin of ['metadata', 'body']) {
+      const statement = taskPostingV2Statement(
+        snapshot,
+        undefined,
+        [origin === 'body' ? BODY_DISCOVERY_PREFIX + 'pending' : 'pending'],
+        128,
+      );
+      const rows = db
+        .query<{id: string; weight: number; eligible: number; row_valid: number}, (string | number)[]>(statement.text)
+        .all(...statement.parameters);
+      expect(rows).toHaveLength(128);
+      expect(EffectArray.map(rows, row => row.id).sort()).toEqual(
+        EffectArray.map(symbols.slice(0, 128), symbol => symbol.id),
+      );
+      expect(EffectArray.every(rows, row => row.row_valid === 1 && row.eligible === 1)).toBe(true);
+      expect(EffectOption.getOrUndefined(EffectArray.findFirst(rows, row => row.id === symbols[0].id))!.weight).toBe(
+        origin === 'body' ? 1 : 5,
+      );
+      const plan = EffectArray.join(
+        EffectArray.map(
+          db
+            .query<{detail: string}, (string | number)[]>('EXPLAIN QUERY PLAN ' + statement.text)
+            .all(...statement.parameters),
+          row => row.detail,
+        ),
+        '\n',
+      );
+      expect(plan).toMatch(/SEARCH o USING PRIMARY KEY/);
+      if (origin === 'metadata') expect(plan).toMatch(/SEARCH g USING PRIMARY KEY/);
+      expect(plan).toMatch(/SEARCH m USING PRIMARY KEY/);
+      expect(plan).not.toMatch(/USE TEMP B-TREE FOR (GROUP BY|ORDER BY)/);
+      expect(plan).not.toMatch(/SCAN (o|g|m)\b/);
+    }
+    for (const row of expected) {
+      const lookup = lexicalV2RecordLookupStatement(snapshot, row.term, row.symbol_id);
+      expect(db.query(lookup.text).all(...lookup.parameters)).toEqual([{weight: row.weight}]);
+    }
+    for (const [term, symbolId, weight] of [
+      ['pending', symbols[0].id, 5],
+      ['pending', symbols[128].id, 3],
+      ['~body:v1:pending', symbols[127].id, 1],
+      ['~body:v1:pending', symbols[128].id, undefined],
+      ['file.ts', symbols[128].id, 3],
+      ['~body:v1:file.ts', symbols[128].id, undefined],
+    ] as const) {
+      const lookup = lexicalV2RecordLookupStatement(snapshot, term, symbolId);
+      const rows = db.query<{weight: number}, (string | number)[]>(lookup.text).all(...lookup.parameters);
+      expect(rows).toEqual(weight === undefined ? [] : [{weight}]);
+      const plan = EffectArray.join(
+        EffectArray.map(
+          db
+            .query<{detail: string}, (string | number)[]>('EXPLAIN QUERY PLAN ' + lookup.text)
+            .all(...lookup.parameters),
+          row => row.detail,
+        ),
+        '\n',
+      );
+      expect(plan).toMatch(/SEARCH t USING.*snapshot_key=\?.*term=\?/);
+      expect(plan).toMatch(/SEARCH m USING.*snapshot_key=\?.*symbol_id=\?/);
+      expect(plan).toMatch(/SEARCH p USING PRIMARY KEY/);
+      expect(plan).not.toMatch(/SCAN (t|m|p)\b|USE TEMP B-TREE/);
+    }
+    // A corrupt empty shared scope consumes one raw key and stops this
+    // contributor; it must not trigger an unbounded skip/refill loop.
+    db.exec('DELETE FROM lexical_v2_members WHERE snapshot_key=1');
+    const refused = taskPostingV2Statement(snapshot, undefined, ['pending'], 128);
+    const invalid = db.query(refused.text).all(...refused.parameters);
+    expect(invalid).toHaveLength(1);
+    expect(invalid[0]).toMatchObject({id: null, weight: null, row_valid: 0});
   } finally {
     db.close();
   }

@@ -6,10 +6,12 @@ import {
   type CodeGraphDirectPersistentCapacityBoundary,
 } from '../disk/capacity.js';
 import {isCodeGraphReferenceWithinCandidateBudget} from '../fact/budget.js';
-import {symbolTerms} from './utilities.js';
+import {factBodyDiscovery} from './utilities.js';
+import {projectLexicalSymbols} from './lexical_projection.js';
 import {type CodeGraphWorkspace} from '../languages/types.js';
 import type {CodeGraphMonikerV1} from '../cross_repository/types.js';
 import {
+  type CodeGraphBodyDiscovery,
   type CodeGraphEdge,
   type CodeGraphFileFacts,
   type CodeGraphInventoryFile,
@@ -61,6 +63,7 @@ export function temporaryActivationFactsCapacity(
   edges: readonly CodeGraphEdge[],
   references: readonly CodeGraphReference[],
   monikers: readonly CodeGraphMonikerV1[] = [],
+  bodies: readonly CodeGraphBodyDiscovery[] = [],
 ): CodeGraphDirectPersistentCapacityBoundary {
   const boundedReferences = EffectArray.filter(
     references,
@@ -70,9 +73,10 @@ export function temporaryActivationFactsCapacity(
   const lookupRows = EffectArray.reduce(symbols, 0, (total, symbol) =>
     saturatingCapacityAdd(total, symbol.lookupKeys?.length ?? 0),
   );
-  const termRows = EffectArray.reduce(symbols, 0, (total, symbol) =>
-    saturatingCapacityAdd(total, symbolTerms(symbol).length),
-  );
+  const termRows =
+    projectLexicalSymbols(symbols, bodies).physicalRowCount +
+    3 +
+    new Set(EffectArray.map(symbols, symbol => symbol.path)).size;
   const candidateRows = EffectArray.reduce(boundedReferences, 0, (total, reference) =>
     saturatingCapacityAdd(
       total,
@@ -94,7 +98,7 @@ export function temporaryActivationFactsCapacity(
   return temporaryBoundary(
     'stage temporary code graph facts',
     rowCount,
-    encodedBytes([symbols, edges, boundedReferences, monikers]),
+    encodedBytes([symbols, edges, boundedReferences, monikers, bodies]),
   );
 }
 
@@ -109,6 +113,7 @@ export function temporaryIncrementalActivationCapacity(
     EffectArray.flatMap(facts, fact => fact.edges),
     EffectArray.flatMap(facts, fact => fact.references ?? []),
     EffectArray.flatMap(facts, fact => fact.monikers ?? []),
+    factBodyDiscovery(facts),
   );
   return temporaryBoundary(
     'prepare temporary incremental code graph activation',

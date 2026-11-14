@@ -1,3 +1,5 @@
+import {isLexicalV2Snapshot} from '../lexical_projection.js';
+import {compareCodeUnits} from '../../ordering.js';
 import {Array as EffectArray} from 'effect';
 import {Effect, Option} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -41,7 +43,24 @@ export function taskTransferBounded(
 }
 
 export function taskHeaderStatement(snapshotId: string): CodeGraphSqlQueryStatement {
+  const v2 = isLexicalV2Snapshot(snapshotId);
   const fields = ['repository_id', 'worktree_id', 'commit_id', 'base_snapshot_id'];
+  const layout = (id: string) => `(SELECT json_object(
+    'logicalSnapshotId',${taskBoundedText('view.logical_snapshot_id', 128)},
+    'mode',${taskBoundedText('view.layout_mode', 16)},
+    'baseSnapshotId',${taskBoundedText('view.base_snapshot_id', 128)},
+    'forceGeneration',${taskBoundedText('view.force_generation', 16)},
+    'orderRevision',CASE WHEN typeof(view.order_revision)='integer' THEN view.order_revision ELSE NULL END)
+    FROM lexical_v2_views view WHERE view.snapshot_id=${id}
+      AND (typeof(view.base_snapshot_id)='null' OR ${taskBoundedText('view.base_snapshot_id', 128)} IS NOT NULL)
+      AND (typeof(view.force_generation)='null' OR ${taskBoundedText('view.force_generation', 16)} IS NOT NULL)
+      LIMIT 1)`;
+  const extra = v2
+    ? [
+        `${layout('snapshots.id')} AS layout_current`,
+        `${layout(taskBoundedText('snapshots.base_snapshot_id', 128))} AS layout_base`,
+      ]
+    : [];
   return taskTransferBounded(
     {
       parameters: [snapshotId],
@@ -49,9 +68,9 @@ export function taskHeaderStatement(snapshotId: string): CodeGraphSqlQueryStatem
     ${EffectArray.join(
       EffectArray.map(fields, field => `${taskBoundedText(field, 128)} AS ${field}`),
       ', ',
-    )}, dirty,
-    EXISTS (SELECT 1 FROM lexical_storage_formats AS format WHERE format.snapshot_id = snapshots.id AND format.format_version = 1) AS compact_current,
-    EXISTS (SELECT 1 FROM lexical_storage_formats AS format WHERE format.snapshot_id = ${taskBoundedText('base_snapshot_id', 128)} AND format.format_version = 1) AS compact_base,
+    )}, dirty,${extra.length ? EffectArray.join(extra, ',') + ',' : ''}
+    ${v2 ? '2 * EXISTS (SELECT 1 FROM lexical_v2_formats AS format WHERE format.snapshot_id=snapshots.id AND format.format_version=2)' : 'EXISTS (SELECT 1 FROM lexical_storage_formats AS format WHERE format.snapshot_id=snapshots.id AND format.format_version=1)'} AS compact_current,
+    ${v2 ? `2 * EXISTS (SELECT 1 FROM lexical_v2_formats AS format WHERE format.snapshot_id=${taskBoundedText('base_snapshot_id', 128)} AND format.format_version=2)` : `EXISTS (SELECT 1 FROM lexical_storage_formats AS format WHERE format.snapshot_id=${taskBoundedText('base_snapshot_id', 128)} AND format.format_version=1)`} AS compact_base,
     (${EffectArray.join(
       EffectArray.map(fields, field =>
         field === 'base_snapshot_id'
@@ -62,7 +81,14 @@ export function taskHeaderStatement(snapshotId: string): CodeGraphSqlQueryStatem
     )}) AS row_valid
     FROM snapshots WHERE id = ? AND state = 'ready' LIMIT 1`,
     },
-    [...fields, 'dirty', 'compact_current', 'compact_base', 'row_valid'],
+    [
+      ...fields,
+      'dirty',
+      'compact_current',
+      'compact_base',
+      'row_valid',
+      ...(v2 ? ['layout_current', 'layout_base'] : []),
+    ],
     4096,
   );
 }
@@ -142,6 +168,7 @@ export function taskPostingStatement(
   terms: readonly string[],
   limit: number,
 ): CodeGraphSqlQueryStatement {
+  if (isLexicalV2Snapshot(snapshotId)) return taskPostingV2Statement(snapshotId, baseSnapshotId, terms, limit);
   const keys = [...new Set(terms)].slice(0, 32);
   const marks = EffectArray.join(
     EffectArray.map(keys, () => '?'),
@@ -201,6 +228,131 @@ export function taskPostingStatement(
       ELSE 0 END AS eligible
     FROM mapped LEFT JOIN symbols AS symbol ON symbol.snapshot_id = mapped.snapshot_id AND symbol.id = mapped.symbol_id`,
     },
+    ['id', 'term', 'weight', 'path', 'package_name', 'content_hash', 'row_valid', 'eligible'],
+    32768,
+  );
+}
+
+/** V2 successor enumeration admits only finite integer keys before hydration. */
+export function taskPostingV2Statement(
+  snapshotId: string,
+  baseSnapshotId: string | undefined,
+  terms: readonly string[],
+  limit: number,
+): CodeGraphSqlQueryStatement {
+  const body = terms.length > 0 && EffectArray.every(terms, term => EffectString.startsWith('~body:v1:')(term));
+  const keys = [...new Set(EffectArray.map(terms, term => (body ? EffectString.slice(9)(term) : term)))]
+    .sort(compareCodeUnits)
+    .slice(0, 32);
+  const positions = EffectArray.flatMap([snapshotId, baseSnapshotId ?? ''], (id, contributor) =>
+    EffectArray.map(keys, (term, ordinal) => [contributor * 32 + ordinal, id, term] as const),
+  );
+  const parameters: (string | number)[] = EffectArray.flatMap(positions, position => [...position]);
+  const maximum = Math.max(0, Math.min(128, Math.floor(limit)));
+  parameters.push(
+    maximum,
+    snapshotId,
+    snapshotId,
+    snapshotId,
+    snapshotId,
+    baseSnapshotId ?? '',
+    snapshotId,
+    snapshotId,
+  );
+  const pack = (scope: string, member: string, weight: string) =>
+    `printf('%016d%016d%d',${scope},${member},9-(${weight}))`;
+  const typed = (column: string) => `typeof(${column})='integer' AND ${column} BETWEEN 0 AND 9007199254740991`;
+  const owner = (mask: number) => `(SELECT CASE WHEN ${typed('o.scope_ordinal')} AND ${typed('o.member_ordinal')}
+    AND typeof(o.metadata_weight)='integer' AND ${mask === 2 ? 'o.metadata_weight=0' : 'o.metadata_weight BETWEEN 1 AND 5'}
+    AND EXISTS(SELECT 1 FROM lexical_v2_members m WHERE m.snapshot_key=p.snapshot_key
+      AND m.scope_ordinal=o.scope_ordinal AND m.member_ordinal=o.member_ordinal)
+    THEN ${pack('o.scope_ordinal', 'o.member_ordinal', body ? '1' : 'o.metadata_weight')} ELSE '!' END
+    FROM lexical_v2_owners o WHERE o.snapshot_key=p.snapshot_key AND o.term_key=p.term_key
+    AND o.origin_mask=${mask} AND (o.scope_ordinal,o.member_ordinal)>(c.scope_ordinal,c.member_ordinal)
+    ORDER BY o.scope_ordinal,o.member_ordinal LIMIT 1)`;
+  const group = (
+    strict: boolean,
+  ) => `(SELECT CASE WHEN ${typed('g.scope_ordinal')} THEN g.scope_ordinal ELSE '!' END FROM lexical_v2_shared g
+    WHERE g.snapshot_key=p.snapshot_key AND g.term_key=p.term_key
+      AND g.scope_ordinal${strict ? '>' : '>='}c.scope_ordinal ORDER BY g.scope_ordinal LIMIT 1)`;
+  const nextGroup = group(true);
+  const currentGroup = group(false);
+  const first = (scope: string) => `(SELECT CASE WHEN ${typed('m.scope_ordinal')} AND ${typed('m.member_ordinal')} THEN
+    ${pack('m.scope_ordinal', 'm.member_ordinal', '3')} ELSE '!' END FROM lexical_v2_members m
+    WHERE m.snapshot_key=p.snapshot_key AND m.scope_ordinal=${scope}
+    ORDER BY m.member_ordinal LIMIT 1)`;
+  const shared = `(CASE WHEN ${currentGroup} IS NULL THEN NULL
+    WHEN ${currentGroup}=c.scope_ordinal THEN COALESCE(
+      (SELECT CASE WHEN ${typed('m.scope_ordinal')} AND ${typed('m.member_ordinal')} THEN ${pack('m.scope_ordinal', 'm.member_ordinal', '3')}
+        ELSE '!' END FROM lexical_v2_members m WHERE m.snapshot_key=p.snapshot_key
+        AND m.scope_ordinal=c.scope_ordinal AND m.member_ordinal>c.member_ordinal
+        ORDER BY m.member_ordinal LIMIT 1),
+      CASE WHEN NOT EXISTS(SELECT 1 FROM lexical_v2_members m WHERE m.snapshot_key=p.snapshot_key
+        AND m.scope_ordinal=c.scope_ordinal) THEN '!'
+        WHEN ${nextGroup} IS NULL THEN NULL ELSE COALESCE(${first(nextGroup)},'!') END)
+    ELSE COALESCE(${first(currentGroup)},'!') END)`;
+  const next = `min(COALESCE(${owner(body ? 2 : 1)},'~'),COALESCE(${owner(3)},'~')${body ? '' : `,COALESCE(${shared},'~')`})`;
+  const advance = `(SELECT MIN(position) FROM positions WHERE position>c.position)`;
+  const skipContributor = `(SELECT MIN(position) FROM positions WHERE position>=(c.position/32+1)*32)`;
+  const raw = `WITH RECURSIVE input(position,snapshot_id,term) AS (VALUES ${
+    positions.length
+      ? EffectArray.join(
+          EffectArray.map(positions, () => '(?,?,?)'),
+          ',',
+        )
+      : "(0,'','')"
+  }),
+    positions AS MATERIALIZED (
+      SELECT input.*,compact.snapshot_key,dictionary.term_key FROM input
+      JOIN lexical_compact_snapshots compact ON compact.snapshot_id=input.snapshot_id
+      JOIN lexical_v2_formats format ON format.snapshot_id=input.snapshot_id AND format.format_version=2
+      JOIN lexical_compact_terms dictionary ON dictionary.snapshot_key=compact.snapshot_key AND dictionary.term=input.term
+    ), bounds AS (SELECT ? AS maximum),
+    cursor(position,scope_ordinal,member_ordinal,raw_count,steps,selected_position,selected_scope,selected_member,weight,valid) AS (
+      SELECT (SELECT MIN(position) FROM positions),-1,-1,0,0,NULL,NULL,NULL,NULL,0
+      UNION ALL
+      SELECT CASE WHEN seek.value='~' THEN ${advance} WHEN seek.value='!' THEN ${skipContributor} ELSE c.position END,
+        CASE WHEN seek.value IN ('~','!') THEN -1 ELSE CAST(substr(seek.value,1,16) AS INTEGER) END,
+        CASE WHEN seek.value IN ('~','!') THEN -1 ELSE CAST(substr(seek.value,17,16) AS INTEGER) END,
+        c.raw_count+(seek.value<>'~'),c.steps+1,
+        CASE WHEN seek.value='~' THEN NULL ELSE c.position END,
+        CASE WHEN seek.value IN ('~','!') THEN NULL ELSE CAST(substr(seek.value,1,16) AS INTEGER) END,
+        CASE WHEN seek.value IN ('~','!') THEN NULL ELSE CAST(substr(seek.value,17,16) AS INTEGER) END,
+        CASE WHEN seek.value IN ('~','!') THEN NULL ELSE 9-CAST(substr(seek.value,33,1) AS INTEGER) END,
+        seek.value NOT IN ('~','!')
+      FROM cursor c JOIN positions p ON p.position=c.position
+      JOIN json_each(json_array(${next})) seek
+      WHERE c.raw_count<(SELECT maximum FROM bounds) AND c.steps<192
+    ), raw AS MATERIALIZED (
+      SELECT p.snapshot_id,p.snapshot_key,c.selected_scope AS scope_ordinal,c.selected_member AS member_ordinal,
+        ${body ? "'~body:v1:'||p.term" : 'p.term'} AS term,c.weight,c.valid
+      FROM cursor c JOIN positions p ON p.position=c.selected_position
+      WHERE c.selected_position IS NOT NULL LIMIT 128
+    ), mapped AS MATERIALIZED (
+      SELECT raw.snapshot_id,${taskBoundedText('dictionary.symbol_id', 128)} AS symbol_id,raw.term,
+        CASE WHEN raw.valid THEN raw.weight ELSE NULL END AS weight
+      FROM raw LEFT JOIN lexical_v2_members dictionary ON dictionary.snapshot_key=raw.snapshot_key
+        AND dictionary.scope_ordinal=raw.scope_ordinal AND dictionary.member_ordinal=raw.member_ordinal
+    )
+    SELECT mapped.symbol_id AS id, mapped.term, mapped.weight,
+      ${taskBoundedText('symbol.path', 4096)} AS path,
+      ${taskBoundedText('symbol.package_name', 256)} AS package_name,
+      ${taskBoundedText('symbol.content_hash', 64)} AS content_hash,
+      (mapped.symbol_id IS NOT NULL AND mapped.term IS NOT NULL AND mapped.weight IS NOT NULL
+        AND ${taskBoundedText('symbol.path', 4096)} IS NOT NULL AND ${taskBoundedText('symbol.content_hash', 64)} IS NOT NULL
+        AND (typeof(symbol.package_name) = 'null' OR ${taskBoundedText('symbol.package_name', 256)} IS NOT NULL)) AS row_valid,
+      CASE WHEN ${taskBoundedText('symbol.path', 4096)} IS NOT NULL AND ${taskBoundedText('symbol.content_hash', 64)} IS NOT NULL THEN
+      (symbol.id IS NOT NULL AND (mapped.snapshot_id = ? OR
+        (NOT EXISTS (SELECT 1 FROM symbols AS replacement WHERE replacement.snapshot_id = ? AND replacement.id = mapped.symbol_id)
+         AND NOT EXISTS (SELECT 1 FROM snapshot_symbol_deletions AS deletion WHERE deletion.snapshot_id = ? AND deletion.symbol_id = mapped.symbol_id)))
+       AND (EXISTS (SELECT 1 FROM snapshot_files AS file WHERE file.snapshot_id = ? AND file.path = symbol.path AND file.content_hash = symbol.content_hash)
+        OR EXISTS (SELECT 1 FROM snapshot_files AS file WHERE file.snapshot_id = ? AND file.path = symbol.path AND file.content_hash = symbol.content_hash
+          AND NOT EXISTS (SELECT 1 FROM snapshot_files AS replacement WHERE replacement.snapshot_id = ? AND replacement.path = file.path)
+          AND NOT EXISTS (SELECT 1 FROM snapshot_file_deletions AS deletion WHERE deletion.snapshot_id = ? AND deletion.path = file.path))))
+      ELSE 0 END AS eligible
+    FROM mapped LEFT JOIN symbols AS symbol ON symbol.snapshot_id = mapped.snapshot_id AND symbol.id = mapped.symbol_id`;
+  return taskTransferBounded(
+    {parameters, text: raw},
     ['id', 'term', 'weight', 'path', 'package_name', 'content_hash', 'row_valid', 'eligible'],
     32768,
   );

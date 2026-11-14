@@ -1,3 +1,9 @@
+import {
+  isLexicalV2Snapshot,
+  lexicalViewBindingMatches,
+  loadLexicalViewBinding,
+  type LexicalViewBinding,
+} from './lexical_projection.js';
 import {Array as EffectArray} from 'effect';
 import {Clock, DateTime, Effect, Option} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -18,10 +24,17 @@ import {
 } from './session.js';
 import {CODE_GRAPH_EXTRACTOR_GENERATION, CodeGraphStoreError} from '../types.js';
 import {codeGraphPersistentSchemaIsCurrent} from './schema/revision.js';
-import {type CodeGraphActivationLease, type PersistentBuildOwnerCandidate} from './internal_models.js';
+import {
+  type CodeGraphActivationLease,
+  type PersistentBuildOwnerCandidate as LegacyPersistentBuildOwnerCandidate,
+} from './internal_models.js';
 import {lastStatementChangeCount} from './activation/core.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+
+type PersistentBuildOwnerCandidate = LegacyPersistentBuildOwnerCandidate & {
+  readonly lexicalBinding?: LexicalViewBinding;
+};
 
 const CODE_GRAPH_ROUTINE_EXPIRED_LEASE_PAGE_SIZE = 100;
 
@@ -181,6 +194,8 @@ const selectPersistentBuildOwnerCandidates = Effect.fn('codeGraph.selectPersiste
         readonly process_start_identity: unknown;
         readonly snapshot_id: string;
         readonly worktree_id: string;
+        readonly base_snapshot_id: string | null;
+        readonly dirty: number;
       }>`
         SELECT
           instance.snapshot_id,
@@ -189,7 +204,7 @@ const selectPersistentBuildOwnerCandidates = Effect.fn('codeGraph.selectPersiste
           instance.process_id,
           instance.process_start_identity,
           instance.logical_snapshot_id,
-          snapshot.worktree_id
+          snapshot.worktree_id,snapshot.base_snapshot_id,snapshot.dirty
         FROM snapshot_build_owner_instances AS instance
         JOIN snapshot_build_owners AS owner
           ON owner.snapshot_id = instance.snapshot_id
@@ -210,10 +225,19 @@ const selectPersistentBuildOwnerCandidates = Effect.fn('codeGraph.selectPersiste
       return candidates;
     }),
   );
-  return EffectArray.map(
-    rows,
-    row =>
-      ({
+  return yield* Effect.forEach(rows, row =>
+    Effect.gen(function* () {
+      let lexicalBinding = isLexicalV2Snapshot(row.snapshot_id)
+        ? yield* loadLexicalViewBinding(sql, row.snapshot_id)
+        : undefined;
+      if (
+        lexicalBinding &&
+        (lexicalBinding.baseSnapshotId !== (row.base_snapshot_id ?? undefined) ||
+          (lexicalBinding.mode === 'alias' && row.dirty !== 0) ||
+          (lexicalBinding.mode === 'direct' && row.dirty !== 1))
+      )
+        lexicalBinding = undefined;
+      return {
         buildId: row.build_id,
         evidenceValid:
           row.process_start_identity == null ||
@@ -226,7 +250,9 @@ const selectPersistentBuildOwnerCandidates = Effect.fn('codeGraph.selectPersiste
         ...(typeof row.process_start_identity === 'string' ? {processStartIdentity: row.process_start_identity} : {}),
         snapshotId: row.snapshot_id,
         worktreeId: row.worktree_id,
-      }) satisfies PersistentBuildOwnerCandidate,
+        ...(lexicalBinding ? {lexicalBinding} : {}),
+      } satisfies PersistentBuildOwnerCandidate;
+    }),
   );
 });
 
@@ -240,13 +266,22 @@ function persistentBuildOwnerCandidateValid(candidate: PersistentBuildOwnerCandi
     candidate.processId > 0 &&
     candidate.ownerToken.length > 0 &&
     candidate.ownerToken.length <= 256 &&
-    persistentSnapshotMatchesLogicalIdentity(candidate.snapshotId, candidate.logicalSnapshotId) &&
+    persistentSnapshotMatchesLogicalIdentity(
+      candidate.snapshotId,
+      candidate.logicalSnapshotId,
+      candidate.lexicalBinding,
+    ) &&
     (candidate.processStartIdentity === undefined ||
       (candidate.processStartIdentity.length > 0 && candidate.processStartIdentity.length <= 256))
   );
 }
 
-function persistentSnapshotMatchesLogicalIdentity(snapshotId: string, logicalSnapshotId: string): boolean {
+function persistentSnapshotMatchesLogicalIdentity(
+  snapshotId: string,
+  logicalSnapshotId: string,
+  lexicalBinding?: LexicalViewBinding,
+): boolean {
+  if (isLexicalV2Snapshot(snapshotId)) return lexicalViewBindingMatches(snapshotId, logicalSnapshotId, lexicalBinding);
   return (
     snapshotId === logicalSnapshotId ||
     snapshotId === `${logicalSnapshotId}-direct` ||

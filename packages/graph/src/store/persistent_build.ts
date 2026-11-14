@@ -1,3 +1,9 @@
+import {
+  isLexicalV2Snapshot,
+  recordLexicalViewBinding,
+  loadLexicalViewBinding,
+  lexicalViewBindingMatches,
+} from './lexical_projection.js';
 import {Array as EffectArray} from 'effect';
 import {CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY} from '../index_scope.js';
 import {Clock, DateTime, Effect} from 'effect';
@@ -61,12 +67,25 @@ const claimPersistentSnapshotBuild = Effect.fn('codeGraph.claimPersistentSnapsho
     (claim.owner.processStartIdentity !== undefined &&
       (claim.owner.processStartIdentity.length === 0 || claim.owner.processStartIdentity.length > 256)) ||
     !/^cgsn_[0-9a-f]{40}$/u.test(claim.logicalSnapshotId) ||
-    (/^cgsn_[0-9a-f]{40}/u.test(snapshot.id) &&
+    (!isLexicalV2Snapshot(snapshot.id) &&
+      /^cgsn_[0-9a-f]{40}/u.test(snapshot.id) &&
       !persistentSnapshotMatchesLogicalIdentity(snapshot.id, claim.logicalSnapshotId))
   ) {
     return yield* CodeGraphStoreError.of('Persistent build owner identity is invalid.');
   }
   yield* runWrite(initializeSchema(sql));
+  const lexicalBinding = isLexicalV2Snapshot(snapshot.id)
+    ? (claim.lexicalBinding ?? (yield* loadLexicalViewBinding(sql, snapshot.id)))
+    : undefined;
+  if (
+    isLexicalV2Snapshot(snapshot.id) &&
+    (!lexicalViewBindingMatches(snapshot.id, claim.logicalSnapshotId, lexicalBinding) ||
+      lexicalBinding?.baseSnapshotId !== snapshot.baseSnapshotId ||
+      (lexicalBinding?.mode === 'alias' && snapshot.dirty) ||
+      (lexicalBinding?.mode === 'direct' && !snapshot.dirty))
+  ) {
+    return yield* CodeGraphStoreError.of('Persistent V2 actual/logical owner binding is invalid.');
+  }
   const retiredUnusableReady = yield* runWrite(
     sql.withTransaction(
       Effect.gen(function* () {
@@ -78,6 +97,17 @@ const claimPersistentSnapshotBuild = Effect.fn('codeGraph.claimPersistentSnapsho
           !persistentSnapshotBuildIdentityMatches(current, snapshot)
         ) {
           return false;
+        }
+        if (isLexicalV2Snapshot(snapshot.id)) {
+          const compatible =
+            yield* sql`SELECT 1 FROM lexical_v2_formats WHERE snapshot_id=${snapshot.id} AND format_version=2 LIMIT 1`;
+          if (compatible.length !== 0) return false;
+          yield* sql`UPDATE snapshots SET state='retired',completed_at=COALESCE(completed_at,${DateTime.formatIso(yield* DateTime.now)}),
+            failure_summary=COALESCE(failure_summary,'Factored lexical receipt changed; rebuild required.')
+            WHERE id=${snapshot.id} AND state='ready'`;
+          const changed = yield* lastStatementChangeCount(sql);
+          if (changed === 1) yield* sql`DELETE FROM active_snapshots WHERE snapshot_id=${snapshot.id}`;
+          return changed === 1;
         }
         const compatible = yield* sql<{readonly count: number}>`
           SELECT COUNT(*) AS count
@@ -152,6 +182,7 @@ const claimPersistentSnapshotBuild = Effect.fn('codeGraph.claimPersistentSnapsho
           )
         `;
           }
+          yield* recordLexicalViewBinding(sql, snapshot, claim.logicalSnapshotId, lexicalBinding);
           yield* sql`
           INSERT INTO snapshot_build_owners (snapshot_id, owner_token, claimed_at)
           VALUES (${snapshot.id}, ${ownerToken}, ${DateTime.formatIso(yield* DateTime.now)})

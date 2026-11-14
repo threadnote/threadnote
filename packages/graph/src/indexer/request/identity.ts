@@ -5,7 +5,7 @@ import {packDerivationIdentity, type CodeGraphLanguagePackRegistryShape} from '.
 import {compareCodeUnits} from '../../ordering.js';
 import {codeGraphScopeIdentitySuffix, type CodeGraphScopeIdentity} from '../../scope/identity.js';
 import {CODE_GRAPH_EXTRACTOR_SET_VERSION, type RepositoryIdentity} from '../../types.js';
-import {CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION} from '../../store.js';
+import {CODE_GRAPH_LEXICAL_V2_FORMAT_VERSION} from '../../store/lexical_projection.js';
 
 export function codeGraphBuildRequestKey(
   identity: Pick<RepositoryIdentity, 'checkoutId' | 'headCommit' | 'repositoryId' | 'worktreeId'>,
@@ -26,7 +26,7 @@ export function codeGraphBuildRequestKey(
       [
         'code-graph-build-request-v5',
         CODE_GRAPH_EXTRACTOR_SET_VERSION,
-        `lexical-storage:${CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION}`,
+        `lexical-storage:${CODE_GRAPH_LEXICAL_V2_FORMAT_VERSION}`,
         identity.repositoryId,
         identity.checkoutId,
         overlay.dirty ? identity.worktreeId : 'shared-commit',

@@ -1,3 +1,10 @@
+import {
+  isLexicalV2Snapshot,
+  lexicalV2PageStatement,
+  lexicalV2PhysicalCountStatement,
+  loadLexicalViewBinding,
+  CODE_GRAPH_LEXICAL_LOGICAL_VERSION,
+} from '../store/lexical_projection.js';
 import {Array as EffectArray} from 'effect';
 import {Effect, Schema} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -103,6 +110,7 @@ interface ProjectionFenceRow extends SnapshotRow {
   readonly inventory_receipt_json: unknown;
   readonly lexical_format_version: number;
   readonly lexical_posting_count: number;
+  readonly lexical_logical_posting_count: number;
   readonly lexical_symbol_count: number;
   readonly lexical_term_count: number;
   readonly lookup_count: number;
@@ -470,19 +478,25 @@ function loadProjectionFence(sql: SqlClient.SqlClient, snapshotId: string) {
               receipt.inventory_receipt_json,
               lexical.format_version AS lexical_format_version,
               lexical.posting_count AS lexical_posting_count,
+              ${isLexicalV2Snapshot(snapshotId) ? 'lexical.logical_posting_count' : 'lexical.posting_count'} AS lexical_logical_posting_count,
               lexical.symbol_count AS lexical_symbol_count,
               lexical.term_count AS lexical_term_count
        FROM snapshots AS snapshot
        JOIN repositories AS repository ON repository.id = snapshot.repository_id
        JOIN snapshot_extractor_generations AS generation ON generation.snapshot_id = snapshot.id
        JOIN snapshot_reuse_receipts AS receipt ON receipt.snapshot_id = snapshot.id
-       JOIN lexical_storage_formats AS lexical ON lexical.snapshot_id = snapshot.id
+       JOIN ${isLexicalV2Snapshot(snapshotId) ? 'lexical_v2_formats' : 'lexical_storage_formats'} AS lexical ON lexical.snapshot_id = snapshot.id
        WHERE snapshot.id = ?
        LIMIT 2`,
       [snapshotId],
     );
     if (rows.length !== 1) {
       return yield* projectionFailure('The selected snapshot is not a complete reusable checkpoint root.');
+    }
+    if (isLexicalV2Snapshot(snapshotId)) {
+      const binding = yield* loadLexicalViewBinding(sql, snapshotId);
+      if (!binding || binding.baseSnapshotId !== (rows[0].base_snapshot_id ?? undefined))
+        return yield* projectionFailure('Checkpoint V2 layout binding is invalid.');
     }
     return rows[0];
   });
@@ -519,10 +533,10 @@ function validateFence(
     row.reuse_format_version !== CODE_GRAPH_REUSABLE_BASE_RECEIPT_VERSION ||
     row.resolution_surface_version !== CODE_GRAPH_RESOLUTION_SURFACE_VERSION ||
     row.reuse_extractor_set !== snapshot.extractorSet ||
-    row.lexical_format_version !== CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION ||
+    row.lexical_format_version !== (isLexicalV2Snapshot(snapshot.id) ? 2 : CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION) ||
     abi.graphSchemaVersion !== CODE_GRAPH_SCHEMA_VERSION ||
     abi.inventoryPolicyVersion !== CODE_GRAPH_INVENTORY_ADMISSION_POLICY_VERSION ||
-    abi.lexicalLogicalFormatVersion !== CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION
+    abi.lexicalLogicalFormatVersion !== CODE_GRAPH_LEXICAL_LOGICAL_VERSION
   ) {
     throw CodeGraphCheckpointProjectionError.make({
       message: 'Checkpoint source ABI or reusable snapshot receipt is incompatible.',
@@ -1307,8 +1321,12 @@ function streamLexical<E, R>(
 ) {
   return streamCompositeCursorPages(
     undefined,
-    cursor =>
-      sql.unsafe<LexicalRow>(
+    cursor => {
+      if (isLexicalV2Snapshot(snapshotId)) {
+        const statement = lexicalV2PageStatement(snapshotId, cursor ? [cursor[0], cursor[1]] : undefined, pageSize);
+        return sql.unsafe<LexicalRow>(statement.text, statement.parameters);
+      }
+      return sql.unsafe<LexicalRow>(
         `SELECT term.term, symbol.symbol_id, posting.weight
          FROM lexical_compact_snapshots AS compact
          JOIN lexical_compact_postings AS posting ON posting.snapshot_key = compact.snapshot_key
@@ -1320,7 +1338,8 @@ function streamLexical<E, R>(
          ORDER BY term.term COLLATE BINARY, symbol.symbol_id COLLATE BINARY
          LIMIT ?`,
         [snapshotId, cursor?.[0] ?? null, ...(cursor ?? ['', '']), pageSize],
-      ),
+      );
+    },
     row => [row.term, row.symbol_id],
     rows =>
       emit(
@@ -1406,7 +1425,7 @@ function validateProjectedCounts(
     counts['symbol-lookup'] !== Number(fence.lookup_count) ||
     aliases !== Number(fence.alias_count) ||
     counts.reexport !== Number(fence.reexport_count) ||
-    counts.lexical !== Number(fence.lexical_posting_count) ||
+    counts.lexical !== Number(fence.lexical_logical_posting_count) ||
     counts['pack-provenance'] !== packCount
   ) {
     throw CodeGraphCheckpointProjectionError.make({
@@ -1417,6 +1436,33 @@ function validateProjectedCounts(
 
 function validateLexicalCounts(sql: SqlClient.SqlClient, snapshotId: string, fence: ProjectionFenceRow) {
   return Effect.gen(function* () {
+    if (isLexicalV2Snapshot(snapshotId)) {
+      const statement = lexicalV2PhysicalCountStatement(snapshotId);
+      const rows = yield* sql.unsafe<Record<string, number>>(statement.text, statement.parameters);
+      const row = rows[0];
+      const total = row
+        ? row.owner_count +
+          row.shared_count +
+          row.symbol_count +
+          row.scope_count +
+          row.term_count +
+          row.format_count +
+          row.view_count +
+          1
+        : -1;
+      if (
+        !row ||
+        row.obsolete_count !== 0 ||
+        row.format_count !== 1 ||
+        row.view_count !== 1 ||
+        total !== Number(fence.lexical_posting_count) ||
+        row.symbol_count !== Number(fence.lexical_symbol_count) ||
+        row.term_count !== Number(fence.lexical_term_count)
+      ) {
+        return yield* projectionFailure('Checkpoint V2 physical categories differ from their immutable receipt.');
+      }
+      return;
+    }
     const rows = yield* sql.unsafe<{
       readonly posting_count: number;
       readonly symbol_count: number;

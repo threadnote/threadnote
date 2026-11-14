@@ -1,3 +1,4 @@
+import {lexicalViewBindingFor, lexicalPhysicalSnapshotIdentity} from '../store/lexical_projection.js';
 import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import {observeCodeGraphSemanticStatus} from '../vector/status.js';
@@ -286,8 +287,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
       ): Effect.Effect<CodeGraphIndexSummary, unknown> => {
         let publishedBackgroundDemand = false;
         const vectorPolicy = codeGraphIndexVectorPolicy(request);
-        // Intercept only indexing publications. Read attachment, startup, exact reuse and
-        // historical ensureCommit never pass this boundary and cannot authorize demand.
+        // Only indexing publications cross this boundary and authorize demand.
         const publicationStore =
           vectorPolicy !== 'background'
             ? unobservedStore
@@ -392,8 +392,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                   admissionEnvironment,
                   scope,
                 );
-            // A demand token is carried only by an isolated background child.
-            // It must adopt the exact observed target before any retry can use it.
+            // Isolated background children must adopt the observed demand target before retrying.
             const refreshDemandToken =
               request.refreshDemandToken ?? codeGraphRefreshDemandFromEnvironment(system.environment());
             const refreshDemandIdentity = {
@@ -503,8 +502,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
               );
               if (reused !== undefined) {
                 if (system.environment()[CODE_GRAPH_ISOLATED_BUILDER_ENV] !== '1') return reused;
-                // Even a structural no-op child owes its parent an exact, owned policy receipt.
-                // Keep vector waiting outside the structural scope and report success only afterward.
+                // Even no-op children owe an owned policy receipt; wait for vectors outside the structural scope.
                 const reporter = yield* withCodeGraphMaintenanceRegistration(
                   request.threadnoteHome,
                   makeCodeGraphBuildReporter(initialIdentity, layout, requestKey ? {key: requestKey} : undefined),
@@ -703,8 +701,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                             );
                             // Completed-concurrent promotion changes the ready authority.
                             yield* beginDemandPublication();
-                            // This result is already materialized. Make bounded cleanup progress;
-                            // another full drain is required only before creating new graph payload.
+                            // Reused payload needs bounded cleanup; only new payload requires another full drain.
                             yield* store.retireIncompleteWorktreeSnapshots(
                               layout.databasePath,
                               identity.repositoryId,
@@ -906,9 +903,8 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                       } satisfies CodeGraphInventory;
                       yield* anonymousTelemetry.observeInventory(inventory);
                       yield* anonymousTelemetry.observeExtractedFactBytes(yield* cacheCoalescer.extractedFactBytes);
-                      // Bulk inventory and extraction build large, short-lived maps and Git payloads. Reclaim them
-                      // synchronously before SQLite activation so their heap high-water does not overlap the writer
-                      // page cache. Small graphs avoid a stop-the-world collection whose pause exceeds their live heap.
+                      // Reclaim large inventory/extraction heaps before activation overlaps the writer page cache.
+                      // Small graphs skip the stop-the-world pause.
                       yield* Effect.sync(() => {
                         if (codeGraphInventoryNeedsSynchronousReclamation(inventory.files)) {
                           Bun.gc(true);
@@ -917,9 +913,8 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                       });
                       yield* Effect.yieldNow;
                       const extractorSet = extractorSetIdentity(inventory.files, languagePacks);
-                      // Compose dirty graph content from the canonical committed graph plus the exact overlay.
-                      // Sparse admission already has those two inputs, so full and proportional routes publish
-                      // the same content identity without forcing the sparse route to hydrate every base row.
+                      // Canonical committed content plus the exact overlay gives full and sparse routes the same identity,
+                      // without hydrating every base row for sparse admission.
                       const graphContentId =
                         inventory.dirty && inventory.overlayFingerprint !== undefined
                           ? sparseOverlayGraphContentIdentity(
@@ -945,6 +940,15 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                         : undefined;
                       const forcedSnapshotId = forcedSnapshotIdentity(logicalSnapshotId, forceGeneration);
                       const directSnapshotId = directFullSnapshotIdentity(logicalSnapshotId);
+                      const flatSnapshotId = lexicalPhysicalSnapshotIdentity(logicalSnapshotId, 'full');
+                      const existing = yield* store.readySnapshot(
+                        layout.databasePath,
+                        identity.worktreeId,
+                        scope?.scopeKey,
+                      );
+                      const overlaySnapshotId = existing?.baseSnapshotId
+                        ? lexicalPhysicalSnapshotIdentity(logicalSnapshotId, 'overlay', existing.baseSnapshotId)
+                        : flatSnapshotId;
                       const resumedForcedBuild =
                         options.force && options.sourceVerification === undefined
                           ? yield* store.resumableForcedBuild(layout.databasePath, logicalSnapshotId)
@@ -952,13 +956,8 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                       const readyCandidateIds = inventory.dirty
                         ? options.incrementalOverlay === false
                           ? [directSnapshotId]
-                          : [logicalSnapshotId, directSnapshotId]
-                        : [logicalSnapshotId];
-                      const existing = yield* store.readySnapshot(
-                        layout.databasePath,
-                        identity.worktreeId,
-                        scope?.scopeKey,
-                      );
+                          : [overlaySnapshotId, flatSnapshotId, directSnapshotId]
+                        : [flatSnapshotId];
                       const reusableExisting = existing
                         ? yield* store.currentLexicalReadySnapshotById(layout.databasePath, existing.id)
                         : undefined;
@@ -967,9 +966,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                           ? reusableExisting
                           : yield* firstReadySnapshotById(store, layout.databasePath, readyCandidateIds)
                         : undefined;
-                      // Exact cgsn_* can miss when inventory source/provenance differs slightly
-                      // from the shared clean row while graph content is identical. Prefer promote
-                      // of a HEAD-matching clean ready snapshot over rematerializing.
+                      // Prefer content-equivalent HEAD reuse when inventory provenance changes the exact snapshot ID.
                       const reusableReady =
                         reusableReadyById ??
                         (!options.force && !inventory.dirty
@@ -983,18 +980,15 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                               store,
                             })
                           : undefined);
-                      // A ready candidate wins this request. Do not preserve an
-                      // interrupted logical/direct sibling that cannot be used on
-                      // the early-return path: a repository-sized persistent build
-                      // would otherwise remain reachable forever unless the user
-                      // explicitly selected that other materialization mode again.
+                      // A ready return cannot resume interrupted siblings; retire them rather than retaining
+                      // repository-sized payloads until their materialization mode is explicitly selected again.
                       const retainedSnapshotIds = reusableReady
                         ? new Set<string>()
                         : options.force
                           ? new Set([resumedForcedBuild?.id ?? forcedSnapshotId])
                           : inventory.dirty
                             ? new Set(readyCandidateIds)
-                            : new Set([logicalSnapshotId]);
+                            : new Set([flatSnapshotId]);
                       // Inventory is complete; every remaining route can promote or materialize.
                       yield* beginDemandPublication();
                       const reclaimSnapshots = (cleanupMode: 'deferred' | 'required') =>
@@ -1049,6 +1043,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                           existing,
                           fallbackSnapshotId: forcedSnapshotId,
                           force: options.force === true,
+                          forceGeneration,
                           sourceVerification: options.sourceVerification,
                           fs,
                           identity,
@@ -1101,7 +1096,16 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                           layout.databasePath,
                           identity,
                           building,
-                          {logicalSnapshotId, owner: reporter.ownerIdentity},
+                          {
+                            logicalSnapshotId,
+                            owner: reporter.ownerIdentity,
+                            lexicalBinding: lexicalViewBindingFor(
+                              building.id,
+                              logicalSnapshotId,
+                              building.baseSnapshotId,
+                              forceGeneration,
+                            ),
+                          },
                         );
                       } else if (resumableDirectBuild) {
                         building = resumableDirectBuild;
@@ -1113,7 +1117,16 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                           layout.databasePath,
                           identity,
                           building,
-                          {logicalSnapshotId, owner: reporter.ownerIdentity},
+                          {
+                            logicalSnapshotId,
+                            owner: reporter.ownerIdentity,
+                            lexicalBinding: lexicalViewBindingFor(
+                              building.id,
+                              logicalSnapshotId,
+                              building.baseSnapshotId,
+                              forceGeneration,
+                            ),
+                          },
                         );
                       } else if (!inventory.dirty && !options.force) {
                         building = {
@@ -1123,7 +1136,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                           extractorSet,
                           fileCount: 0,
                           graphContentId,
-                          id: logicalSnapshotId,
+                          id: flatSnapshotId,
                           repositoryId: identity.repositoryId,
                           scopeId: scope?.scopeKey,
                           state: 'building',
@@ -1134,7 +1147,16 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                           layout.databasePath,
                           identity,
                           building,
-                          {logicalSnapshotId, owner: reporter.ownerIdentity},
+                          {
+                            logicalSnapshotId,
+                            owner: reporter.ownerIdentity,
+                            lexicalBinding: lexicalViewBindingFor(
+                              building.id,
+                              logicalSnapshotId,
+                              building.baseSnapshotId,
+                              forceGeneration,
+                            ),
+                          },
                         );
                       } else if (!canAttemptIncrementalOverlay) {
                         building = {
@@ -1164,7 +1186,16 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                           layout.databasePath,
                           identity,
                           building,
-                          {logicalSnapshotId, owner: reporter.ownerIdentity},
+                          {
+                            logicalSnapshotId,
+                            owner: reporter.ownerIdentity,
+                            lexicalBinding: lexicalViewBindingFor(
+                              building.id,
+                              logicalSnapshotId,
+                              building.baseSnapshotId,
+                              forceGeneration,
+                            ),
+                          },
                         );
                       } else {
                         const reusableDirtyBase = yield* attemptReusableDirtyBase(
@@ -1255,7 +1286,11 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                             extractorSet,
                             fileCount: 0,
                             graphContentId,
-                            id: logicalSnapshotId,
+                            id: lexicalPhysicalSnapshotIdentity(
+                              logicalSnapshotId,
+                              'overlay',
+                              committedBase!.snapshot.id,
+                            ),
                             overlayFingerprint: inventory.overlayFingerprint,
                             repositoryId: identity.repositoryId,
                             scopeId: scope?.scopeKey,
@@ -1378,16 +1413,22 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                             layout.databasePath,
                             identity,
                             building,
-                            {logicalSnapshotId, owner: reporter.ownerIdentity},
+                            {
+                              logicalSnapshotId,
+                              owner: reporter.ownerIdentity,
+                              lexicalBinding: lexicalViewBindingFor(
+                                building.id,
+                                logicalSnapshotId,
+                                building.baseSnapshotId,
+                                forceGeneration,
+                              ),
+                            },
                           );
                         }
                       }
                       if (incrementalPrepared) {
-                        // The prepared delta already contains attributed facts
-                        // and a staged workspace catalog. Retaining thousands
-                        // of project/dependency objects through activation only
-                        // makes one-file overlays overlap full-workspace memory
-                        // with SQLite's effective-graph scans.
+                        // Facts and workspace catalog are staged. Release project/dependency objects before
+                        // activation overlaps full-workspace memory with effective-graph scans.
                         workspace = {
                           diagnostics: workspace.diagnostics,
                           fingerprint: workspace.fingerprint,

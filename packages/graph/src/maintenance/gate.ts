@@ -1,3 +1,4 @@
+import {CODE_GRAPH_SNAPSHOT_ID_PATTERN} from '../store/lexical_projection.js';
 import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import {Clock, DateTime, Effect, FileSystem, Option, Path, Predicate, Schema} from 'effect';
@@ -511,7 +512,7 @@ function parseMaintenanceStatus(value: string, expectedOwnerDigest: string): Cod
         typeof checkoutId !== 'string' ||
         !/^[0-9a-f]{64}$/u.test(checkoutId) ||
         typeof snapshotId !== 'string' ||
-        !/^cgsn_[0-9a-f]{40}(?:-direct|-full-[0-9a-f]{16})?$/u.test(snapshotId)
+        !CODE_GRAPH_SNAPSHOT_ID_PATTERN.test(snapshotId)
       ) {
         return undefined;
       }
@@ -610,10 +611,7 @@ export const CODE_GRAPH_GATE_LOCK_OPTIONS = {
 
 function reportedMaintenanceTargetValid(target: CodeGraphReportedMaintenanceTarget): boolean {
   if (target.operation === 'selected-snapshot-purge') {
-    return (
-      /^[0-9a-f]{64}$/u.test(target.checkoutId) &&
-      /^cgsn_[0-9a-f]{40}(?:-direct|-full-[0-9a-f]{16})?$/u.test(target.snapshotId)
-    );
+    return /^[0-9a-f]{64}$/u.test(target.checkoutId) && CODE_GRAPH_SNAPSHOT_ID_PATTERN.test(target.snapshotId);
   }
   return (
     target.operation === 'graph-maintenance' &&

@@ -85,7 +85,7 @@ function rawConsoleCalls(
   source: string,
   path = 'source.ts',
 ): readonly {method: ForbiddenConsoleMethod; position: number}[] | undefined {
-  const scriptKind = scriptKindForPath(path);
+  let calls: readonly {method: ForbiddenConsoleMethod; position: number}[] | undefined;
   try {
     const parsed = ts.transpileModule(source, {
       fileName: Effect.pipe(path, EffectString.endsWith('.d.ts'))
@@ -93,6 +93,15 @@ function rawConsoleCalls(
         : path,
       reportDiagnostics: true,
       compilerOptions: {jsx: ts.JsxEmit.Preserve, target: ts.ScriptTarget.Latest},
+      transformers: {
+        before: [
+          () => file => {
+            // Inspect the original parsed tree before emit erases types or rewrites calls.
+            calls = consoleCallsInFile(file);
+            return file;
+          },
+        ],
+      },
     });
     if (
       parsed.diagnostics &&
@@ -103,7 +112,10 @@ function rawConsoleCalls(
     return undefined;
   }
 
-  const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, scriptKind);
+  return calls;
+}
+
+function consoleCallsInFile(file: ts.SourceFile): readonly {method: ForbiddenConsoleMethod; position: number}[] {
   const calls: {method: ForbiddenConsoleMethod; position: number}[] = [];
   const unwrap = (expression: ts.Expression): ts.Expression =>
     ts.isParenthesizedExpression(expression) || ts.isAsExpression(expression) || ts.isNonNullExpression(expression)
@@ -275,6 +287,60 @@ describe('Effect architecture boundaries', () => {
         expect(combined).toContain(spelling);
       }),
       {numRuns: 32, seed: 424242},
+    );
+  });
+
+  it('conserves the independent reparse oracle, diagnostics and original positions across source kinds', () => {
+    // Keep the former parse boundary as the comparison oracle. The unchanged
+    // walker isolates original-AST reuse from receiver classification behavior.
+    const reparsed = (source: string, path: string) => {
+      try {
+        const parsed = ts.transpileModule(source, {
+          fileName: EffectString.endsWith('.d.ts')(path) ? EffectString.slice(0, -5)(path) + '.ts' : path,
+          reportDiagnostics: true,
+          compilerOptions: {jsx: ts.JsxEmit.Preserve, target: ts.ScriptTarget.Latest},
+        });
+        if (
+          EffectArray.some(parsed.diagnostics ?? [], diagnostic => diagnostic.category === ts.DiagnosticCategory.Error)
+        )
+          return undefined;
+      } catch {
+        return undefined;
+      }
+      return consoleCallsInFile(
+        ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, scriptKindForPath(path)),
+      );
+    };
+    FC.assert(
+      FC.property(
+        FC.constantFrom('ts', 'tsx', 'd.ts', 'js', 'jsx', 'mjs', 'cjs'),
+        FC.constantFrom(
+          'console.info(1)',
+          'globalThis.console["warn"](1)',
+          'globalThis["console"]?.error?.(1)',
+          '(console["debug"])(1)',
+          'conso\\u006ce.log(1)',
+          '(console as Console)!.log(1)',
+        ),
+        FC.string({maxLength: 24}),
+        FC.boolean(),
+        (extension, call, text, broken) => {
+          const prefix = `const inert = ${JSON.stringify(text)};\n`;
+          const source = prefix + call + (broken ? '; const invalid = ;' : ';');
+          const path = 'fixture.' + extension;
+          const before = source;
+          expect(rawConsoleCalls(source, path)).toEqual(reparsed(source, path));
+          if (!broken) {
+            const calls = rawConsoleCalls(source, path);
+            if (calls !== undefined)
+              expect(calls).toEqual([
+                {method: /(?:info|warn|error|debug|log)/u.exec(call)![0], position: prefix.length},
+              ]);
+          } else expect(rawConsoleCalls(source, path)).toBeUndefined();
+          expect(source).toBe(before);
+        },
+      ),
+      {numRuns: 40, seed: 424243},
     );
   });
 
