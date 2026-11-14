@@ -188,6 +188,105 @@ export const JavaPreparedObservation = Schema.Struct({
   }),
 });
 
+const preparationRequestToken = Schema.String.check(
+  Schema.isBetweenLength(1, 128),
+  Schema.isPattern(/^[A-Za-z0-9._-]+$/u),
+);
+const preparationEmptyRefusalReason = Schema.Literals([
+  'ambiguous-project',
+  'canceled',
+  'capacity',
+  'foreign-project-path',
+  'incomplete-import',
+  'incomplete-projection',
+  'invalid-host',
+  'invalid-request',
+  'invalid-text',
+  'library-changed',
+  'library-outside-allowset',
+  'missing-source-model',
+  'model-changed',
+  'model-not-cached',
+  'project-import-error',
+  'source-changed',
+  'unmanaged-project',
+  'unqualified-jre',
+  'unresolved-entry',
+  'unsafe-path',
+  'unsafe-source',
+  'unsupported-charset',
+  'unsupported-entry',
+  'unsupported-library',
+  'unsupported-linked-resource',
+  'unsupported-nature',
+  'unsupported-output',
+  'unsupported-resource-filter',
+  'unsupported-resource-model',
+  'unsupported-source-bom',
+  'unsupported-source-charset',
+  'wrong-importer',
+]);
+const preparationRefusalReason = Schema.Union([
+  preparationEmptyRefusalReason,
+  Schema.Literals(['unsupported-container', 'unsupported-attribute', 'observation-failed']),
+]);
+const refusalFields = {
+  protocolVersion: Schema.Literal(1),
+  requestToken: preparationRequestToken,
+  status: Schema.Literal('unsupported'),
+};
+// These are the producer's closed refusal arms. Arbitrary imported text, paths and unknown evidence never escape.
+const JavaPreparedRefusal = Schema.Union([
+  Schema.Struct({
+    ...refusalFields,
+    reason: Schema.Literal('unsupported-container'),
+    evidence: Schema.Struct({idSha256: Digest}),
+  }),
+  Schema.Struct({
+    ...refusalFields,
+    reason: Schema.Literal('unsupported-attribute'),
+    evidence: Schema.Struct({nameSha256: Digest}),
+  }),
+  Schema.Struct({
+    ...refusalFields,
+    reason: preparationEmptyRefusalReason,
+    evidence: Schema.Struct({}),
+  }),
+  Schema.Struct({...refusalFields, reason: Schema.Literal('observation-failed')}),
+]);
+export class JavaPreparedImportRefusal extends Schema.TaggedError<
+  JavaPreparedImportRefusal,
+  {readonly brand: unique symbol}
+>()('JavaPreparedImportRefusal', {
+  reason: preparationRefusalReason,
+  evidence: Schema.optional(Schema.Struct({idSha256: Schema.optional(Digest), nameSha256: Schema.optional(Digest)})),
+}) {
+  override get message() {
+    return (
+      'Java preparation refused: ' +
+      this.reason +
+      (this.evidence === undefined ? '' : ' ' + JSON.stringify(this.evidence))
+    );
+  }
+}
+/** Correlate the closed production wire reply before surfacing a sanitized refusal or admitting model facts. */
+export function readJavaPreparedObservation(
+  raw: unknown,
+  expected: {readonly requestToken: string; readonly build: 'maven' | 'gradle'},
+) {
+  const reply = Schema.decodeUnknownSync(Schema.Union([JavaPreparedObservation, JavaPreparedRefusal]), {
+    onExcessProperty: 'error',
+  })(raw);
+  if (reply.requestToken !== expected.requestToken) throw LspFault.make({code: 'protocol'});
+  if (reply.status === 'unsupported')
+    throw JavaPreparedImportRefusal.make({
+      reason: reply.reason,
+      ...('evidence' in reply ? {evidence: reply.evidence} : {}),
+    });
+  if (reply.model.build !== expected.build) throw LspFault.make({code: 'protocol'});
+  return reply;
+}
+
 /** Physical setup URIs are replaced with project-relative paths or sealed, host-owned artifact paths. */
 export const JavaPreparedModel = Schema.Struct({
   format: Schema.Literal('threadnote-prepared-java-project-v2'),
@@ -1054,8 +1153,13 @@ export const observeJavaPreparedImport = Effect.fn('semantic.observeJavaPrepared
         yield* healthy;
         if (new TextEncoder().encode(JSON.stringify(raw)).length > 256 * 1024)
           return yield* LspFault.make({code: 'capacity'});
-        const observed = yield* Schema.decodeUnknownEffect(JavaPreparedObservation, {onExcessProperty: 'error'})(raw);
-        if (observed.requestToken !== requestToken || observed.model.build !== inputs.build) return yield* fail();
+        const observed = yield* Effect.try({
+          try: () => readJavaPreparedObservation(raw, {requestToken, build: inputs.build}),
+          catch: error =>
+            Schema.is(JavaPreparedImportRefusal)(error) || Schema.is(LspFault)(error)
+              ? error
+              : LspFault.make({code: 'protocol'}),
+        });
         return observed;
       });
       const observed = yield* observe;

@@ -57,6 +57,8 @@ import {javaFileUri} from '../../src/semantic/providers/java_snapshot.js';
 import {
   JavaPreparedModel,
   JavaPreparedObservation,
+  JavaPreparedImportRefusal,
+  readJavaPreparedObservation,
   copyJavaPreparationInputs,
   consumeJavaPreparationConnection,
   javaPreparedModelCommand,
@@ -68,6 +70,55 @@ import {
   verifyJavaSourceEncoding,
   loadJavaPreparedModel,
 } from '../../src/semantic/providers/java_preparation.js';
+
+describe('Java prepared refusal wire contract', () => {
+  it('keeps the producer generic observation refusal strict and sanitized', () => {
+    const reply = {protocolVersion: 1, requestToken: 'request', status: 'unsupported', reason: 'observation-failed'};
+    expect(() => readJavaPreparedObservation(reply, {requestToken: 'request', build: 'gradle'})).toThrow(
+      'Java preparation refused: observation-failed',
+    );
+    expect(() =>
+      readJavaPreparedObservation({...reply, evidence: {}}, {requestToken: 'request', build: 'gradle'}),
+    ).not.toThrow(JavaPreparedImportRefusal);
+  });
+  it('preserves digest-only refusals and rejects uncorrelated, malformed or extra proof fields without mutation', () => {
+    fc.assert(
+      fc.property(
+        fc.uuid(),
+        fc.uint8Array({minLength: 32, maxLength: 32}),
+        fc.boolean(),
+        (requestToken, bytes, container) => {
+          const digest = sha256HexSync(bytes);
+          const reason = container ? 'unsupported-container' : 'unsupported-attribute';
+          const evidence = container ? {idSha256: digest} : {nameSha256: digest};
+          const reply = {protocolVersion: 1, requestToken, status: 'unsupported', reason, evidence};
+          const captured = structuredClone(reply);
+          try {
+            readJavaPreparedObservation(reply, {requestToken, build: 'gradle'});
+            throw new Error('Refusal was admitted');
+          } catch (error) {
+            expect(error).toBeInstanceOf(JavaPreparedImportRefusal);
+            expect(error).toMatchObject({reason, evidence});
+          }
+          for (const mutated of [
+            {...reply, requestToken: requestToken + '-old'},
+            {...reply, protocolVersion: 2},
+            {...reply, evidence: {...evidence, path: '/untrusted/imported/path'}},
+            {...reply, evidence: container ? {idSha256: 'invalid'} : {nameSha256: 'invalid'}},
+            {...reply, model: {}},
+          ]) {
+            expect(() => readJavaPreparedObservation(mutated, {requestToken, build: 'gradle'})).toThrow();
+            expect(() => readJavaPreparedObservation(mutated, {requestToken, build: 'gradle'})).not.toThrow(
+              JavaPreparedImportRefusal,
+            );
+          }
+          expect(reply).toEqual(captured);
+        },
+      ),
+      {numRuns: 32},
+    );
+  });
+});
 
 const candidate = (): JavaRuntimeCandidate => ({
   serverDirectory: '/host/jdtls',
@@ -265,6 +316,7 @@ describe('Java preparation original-owner collection', () => {
 const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
   control: {
     readonly deferImport?: boolean;
+    readonly refuseModel?: boolean;
     readonly failure?: 'initialize' | 'status' | 'token' | 'missing-ready' | 'late-status';
     readonly changeSecondModel?: boolean;
     readonly afterSecondModel?: Effect.Effect<void>;
@@ -505,14 +557,22 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
           yield* Queue.offer(messages, {
             jsonrpc: '2.0',
             id: message.id,
-            result: {
-              ...observation,
-              model: {
-                ...observation.model,
-                rawTimestamp: control.changeSecondModel && observations > 1 ? 2 : observation.model.rawTimestamp,
-              },
-              requestToken: control.failure === 'token' ? 'wrong-token' : request.arguments[0].requestToken,
-            },
+            result: control.refuseModel
+              ? {
+                  protocolVersion: 1,
+                  requestToken: request.arguments[0].requestToken,
+                  status: 'unsupported',
+                  reason: 'unsupported-container',
+                  evidence: {idSha256: EffectString.repeat(64)('a')},
+                }
+              : {
+                  ...observation,
+                  model: {
+                    ...observation.model,
+                    rawTimestamp: control.changeSecondModel && observations > 1 ? 2 : observation.model.rawTimestamp,
+                  },
+                  requestToken: control.failure === 'token' ? 'wrong-token' : request.arguments[0].requestToken,
+                },
           });
         } else if (message.method === 'shutdown') {
           yield* Queue.offer(messages, {jsonrpc: '2.0', id: message.id, result: null});
@@ -1975,6 +2035,19 @@ describe('Java prepared model sealing', () => {
       }).pipe(Effect.ensuring(Effect.sync(() => spy.mockRestore())));
       expect(EffectArray.contains(f.methods, 'workspace/executeCommand')).toBe(false);
       expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
+  );
+  effectIt.effect('preserves a correlated production refusal without sealing or issuing a second model request', () =>
+    Effect.gen(function* () {
+      const f = yield* modelFixture({deferImport: true, refuseModel: true});
+      expect(yield* Effect.flip(f.observe)).toMatchObject({
+        _tag: 'JavaPreparedImportRefusal',
+        reason: 'unsupported-container',
+        evidence: {idSha256: EffectString.repeat(64)('a')},
+      });
+      expect(EffectArray.filter(f.methods, method => method === 'workspace/executeCommand')).toHaveLength(1);
+      expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
+      expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
     }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect('does not mix completed reports from two independent input proofs', () =>
