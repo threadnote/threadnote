@@ -758,7 +758,7 @@ export async function runFixtureEmbeddingExitProbe(
     });
     debuggerComplete = completeCdb;
     const failFastCommands = `.exr -1; .ecxr; .kframes 12; k 12; .echo ${CDB_CAPTURED_MARKER}; .echo ${CDB_QUIT_MARKER}; q`;
-    const startupCommands = `sxe -c "${failFastCommands}" 0xc0000409; .echo ${CDB_ARMED_MARKER}; g`;
+    const startupCommands = `sxe -c "${failFastCommands}" -c2 "${failFastCommands}" 0xc0000409; .echo ${CDB_ARMED_MARKER}; g`;
     try {
       debuggerChild = processes.spawn(
         options.apiControl.debuggerExecutable,

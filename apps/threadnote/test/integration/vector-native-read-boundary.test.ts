@@ -897,12 +897,63 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
       Effect.gen(function* () {
         const f = yield* fixture;
         const bundled = yield* bundledReadyWorker(f);
+        const command = yield* CommandExecutor;
+        let readOrdinal = 0;
         const read = (request: RecallReadyReadRequest) =>
           Effect.gen(function* () {
+            const ordinal = ++readOrdinal;
+            let commandOutcome: 'not-invoked' | 'running' | 'completed' | 'failed' = 'not-invoked';
+            let commandTimeoutMilliseconds: number | undefined;
+            let commandElapsedMilliseconds: number | undefined;
+            let commandFailureTag: CommandExecutionError['_tag'] | undefined;
             const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
               Effect.provideService(SystemInfo, bundled.system),
+              Effect.provideService(
+                CommandExecutor,
+                CommandExecutor.of({
+                  ...command,
+                  execute: (executable, arguments_, options) =>
+                    Effect.gen(function* () {
+                      const started = yield* Clock.monotonicTimeNanos;
+                      commandTimeoutMilliseconds = options?.timeoutMs;
+                      commandOutcome = 'running';
+                      return yield* command.execute(executable, arguments_, options).pipe(
+                        Effect.tap(() =>
+                          Effect.sync(() => {
+                            commandOutcome = 'completed';
+                          }),
+                        ),
+                        Effect.tapError(error =>
+                          Effect.gen(function* () {
+                            commandOutcome = 'failed';
+                            commandFailureTag = error._tag;
+                            commandElapsedMilliseconds =
+                              Number((yield* Clock.monotonicTimeNanos) - started) / 1_000_000;
+                          }),
+                        ),
+                      );
+                    }),
+                }),
+              ),
             );
-            return yield* boundary.read(request);
+            const readStarted = yield* Clock.monotonicTimeNanos;
+            return yield* boundary.read(request).pipe(
+              Effect.tapError(error =>
+                Effect.gen(function* () {
+                  const ended = yield* Clock.monotonicTimeNanos;
+                  yield* Effect.logError('Native URI scope boundary timing diagnostic', {
+                    operation: request.operation,
+                    readOrdinal: ordinal,
+                    boundaryReason: error.reason,
+                    elapsedMilliseconds: Number(ended - readStarted) / 1_000_000,
+                    commandOutcome,
+                    ...(commandTimeoutMilliseconds === undefined ? {} : {commandTimeoutMilliseconds}),
+                    ...(commandElapsedMilliseconds === undefined ? {} : {commandElapsedMilliseconds}),
+                    ...(commandFailureTag === undefined ? {} : {commandFailureTag}),
+                  }).pipe(Effect.provideService(Console.Console, globalThis.console));
+                }),
+              ),
+            );
           });
         const opened = yield* read({operation: 'vector-state', config: f.config, options: {model}});
         expect(opened.outcome).toBe('success');
@@ -991,7 +1042,44 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
           expect(Schema.is(RecallReadyReadBoundaryError)(result.failure) && result.failure.reason).toBe(
             'budget-exhausted',
           );
-        expect(Number((yield* Clock.monotonicTimeNanos) - start) / 1_000_000).toBeLessThan(1800);
+        const requestElapsedMilliseconds = Number((yield* Clock.monotonicTimeNanos) - start) / 1_000_000;
+        expect(requestElapsedMilliseconds).toBeLessThan(1800);
+        if (!(yield* f.fs.exists(observed.entered))) {
+          const stages = yield* Effect.gen(function* () {
+            const stat = yield* f.fs.stat(observed.stageFile);
+            if (Number(stat.size) > 4096) return [];
+            return yield* Schema.decodeEffect(
+              Schema.fromJsonString(
+                Schema.Array(
+                  Schema.Struct({
+                    stage: Schema.Literals([
+                      'entry',
+                      'imports-complete',
+                      'dlopen-start',
+                      'dlopen-complete',
+                      'native-call',
+                      'native-settled',
+                    ]),
+                    atMilliseconds: Schema.Finite,
+                    elapsedMilliseconds: Schema.Finite,
+                  }),
+                ).check(Schema.isMaxLength(8)),
+              ),
+            )(yield* f.fs.readFileString(observed.stageFile));
+          }).pipe(Effect.orElseSucceed(() => []));
+          yield* Effect.logError('Native SQLite stall dispatch diagnostic', {
+            nativeDispatchObserved: EffectArray.some(stages, stage => stage.stage === 'native-call'),
+            boundaryReason:
+              result._tag === 'Failure' && Schema.is(RecallReadyReadBoundaryError)(result.failure)
+                ? result.failure.reason
+                : 'unexpected-failure',
+            requestElapsedMilliseconds,
+            stages: EffectArray.map(stages, stage => ({
+              stage: stage.stage,
+              elapsedMilliseconds: stage.elapsedMilliseconds,
+            })),
+          }).pipe(Effect.provideService(Console.Console, globalThis.console));
+        }
         const pid = yield* awaitNativePid(f, observed.entered);
         expect(observed.system.isProcessRunning(pid)).toBe(false);
         // Native SQL views assert the actual connection timeout inside the query.

@@ -331,8 +331,7 @@ it('waits for the owned debugger attach marker before releasing the one model-lo
     expect(args).toContain('-p');
     expect(args[args.indexOf('-p') + 1]).toBe('42');
     const startup = args[args.indexOf('-c') + 1];
-    expect(startup).toContain('sxe -c');
-    expect(startup).toContain('0xc0000409');
+    expect(startup).toMatch(/^sxe -c "([^"]+)" -c2 "\1" 0xc0000409; /);
     expect(startup).toContain('THREADNOTE_NATIVE_CDB_ARMED');
     expect(startup).toContain('THREADNOTE_NATIVE_CDB_QUIT_REQUESTED');
     debuggerProcess.child.arm();
