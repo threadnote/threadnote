@@ -5,6 +5,11 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      stage3_candidate_commit:
+        description: Run only the Stage 3 release gate on this exact protected-main commit
+        required: false
+        type: string
+        default: ''
       include_100k:
         description: Run the 100k scale-boundary suites (lexical Linux and pinned-vector macOS ARM64)
         required: false
@@ -66,6 +71,65 @@ env:
   CODE_GRAPH_EMBEDDING_MODEL_SHA256: f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804
 
 jobs:
+  stage3-release-gate:
+    name: Stage 3 release gate · exact candidate
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.stage3_candidate_commit != '' }}
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Prepare evidence directory
+        env:
+          CANDIDATE: ${{ inputs.stage3_candidate_commit }}
+          CONTROL_COMMIT: ${{ github.sha }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/stage3-evidence"
+          printf 'control_commit=%s\ncandidate_commit=%s\n' "$CONTROL_COMMIT" "$CANDIDATE" > "$RUNNER_TEMP/stage3-evidence/provenance.txt"
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate candidate provenance
+        env:
+          CANDIDATE: ${{ inputs.stage3_candidate_commit }}
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$CANDIDATE" origin/main
+          git checkout --detach "$CANDIDATE"
+          test "$(git rev-parse HEAD)" = "$CANDIDATE"
+          test -z "$(git status --porcelain --untracked-files=all)"
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+
+      - run: bun install --frozen-lockfile
+
+      - name: Install exact candidate and run Stage 3
+        env:
+          CANDIDATE: ${{ inputs.stage3_candidate_commit }}
+        run: |
+          set -euo pipefail
+          bun run dev:install-global -- --json > "$RUNNER_TEMP/stage3-evidence/install.json"
+          executable="$HOME/.local/share/threadnote/versions/$(jq -r '.version' "$RUNNER_TEMP/stage3-evidence/install.json")/threadnote"
+          executable_hash="$(jq -er '.executableSha256' "$RUNNER_TEMP/stage3-evidence/install.json")"
+          test "$(shasum -a 256 "$executable" | awk '{print $1}')" = "$executable_hash"
+          bun run gate:code-graph:stage3 -- --mode execute \
+            --candidate-ref "$CANDIDATE" --candidate-commit "$CANDIDATE" \
+            --candidate-executable "$executable" --candidate-executable-sha256 "$executable_hash" \
+            --output "$RUNNER_TEMP/stage3-evidence/stage3.json" 2>&1 | tee "$RUNNER_TEMP/stage3-evidence/stage3.log"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: stage3-release-gate-${{ github.run_id }}
+          path: ${{ runner.temp }}/stage3-evidence/
+          if-no-files-found: warn
+          retention-days: 90
+
   classify-platform-benchmark:
     name: Classify Platform benchmark PR lanes
     if: github.event_name == 'pull_request'
@@ -202,7 +266,7 @@ jobs:
 
   code-graph:
     name: Code graph · ${{ matrix.os }}
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: ${{ !inputs.stage3_candidate_commit && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     strategy:
       fail-fast: false
       matrix:
@@ -247,7 +311,7 @@ jobs:
 
   code-graph-windows-replicas:
     name: Code graph Windows replica ${{ matrix.replica }} · windows-latest
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: ${{ !inputs.stage3_candidate_commit && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     strategy:
       fail-fast: false
       max-parallel: 3
@@ -293,7 +357,7 @@ jobs:
   code-graph-windows:
     name: Code graph · windows-latest
     needs: code-graph-windows-replicas
-    if: ${{ always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    if: ${{ !inputs.stage3_candidate_commit && (always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -347,7 +411,7 @@ jobs:
 
   code-graph-workset:
     name: Code graph workset 32/50/64/128 · pinned Linux class
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: ${{ !inputs.stage3_candidate_commit && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
 
@@ -384,7 +448,7 @@ jobs:
 
   context-brief-citations-scale:
     name: Context Brief citations 100k memories / 50 / 128 · release macOS class
-    if: github.event_name == 'schedule' || inputs.include_context_brief_citations_scale
+    if: ${{ !inputs.stage3_candidate_commit && (github.event_name == 'schedule' || inputs.include_context_brief_citations_scale) }}
     runs-on: macos-15
     timeout-minutes: 120
 
@@ -422,7 +486,7 @@ jobs:
 
   context-brief-citation-phase-diagnostic:
     name: Context Brief citation phase diagnostic · macOS ARM64
-    if: github.event_name == 'workflow_dispatch' && inputs.include_context_brief_citation_diagnostics
+    if: ${{ !inputs.stage3_candidate_commit && (github.event_name == 'workflow_dispatch' && inputs.include_context_brief_citation_diagnostics) }}
     runs-on: macos-15
     timeout-minutes: 120
 
@@ -458,7 +522,7 @@ jobs:
 
   code-memory-link-inverse-scale:
     name: Code-to-memory inverse selector · 100,000 memories · release macOS class
-    if: github.event_name == 'schedule' || inputs.include_code_memory_link_scale
+    if: ${{ !inputs.stage3_candidate_commit && (github.event_name == 'schedule' || inputs.include_code_memory_link_scale) }}
     runs-on: macos-15
     timeout-minutes: 120
     permissions:
@@ -527,7 +591,7 @@ jobs:
 
   memory-connections-one-hop-scale:
     name: Memory connections · 100,000 memories · release macOS class
-    if: github.event_name == 'schedule' || inputs.include_memory_connections_scale
+    if: ${{ !inputs.stage3_candidate_commit && (github.event_name == 'schedule' || inputs.include_memory_connections_scale) }}
     runs-on: macos-15
     timeout-minutes: 120
 
@@ -567,7 +631,7 @@ jobs:
 
   code-graph-10k:
     name: Code graph 10k · ${{ matrix.os }}
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: ${{ !inputs.stage3_candidate_commit && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     strategy:
       fail-fast: false
       matrix:
@@ -606,7 +670,7 @@ jobs:
 
   code-graph-load-evidence:
     name: Code graph load evidence · Linux
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: ${{ !inputs.stage3_candidate_commit && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -626,7 +690,7 @@ jobs:
 
   prepare-code-graph-vector-model:
     name: Prepare pinned graph model
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: ${{ !inputs.stage3_candidate_commit && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -667,7 +731,7 @@ jobs:
 
   embedding-runtime-diagnostics:
     name: Embedding runtime comparison · macOS ARM64 · diagnostic only
-    if: github.event_name == 'workflow_dispatch' && inputs.include_embedding_runtime_diagnostics
+    if: ${{ !inputs.stage3_candidate_commit && (github.event_name == 'workflow_dispatch' && inputs.include_embedding_runtime_diagnostics) }}
     needs: prepare-code-graph-vector-model
     runs-on: macos-15
     timeout-minutes: 25
@@ -721,7 +785,7 @@ jobs:
 
   code-graph-vectors:
     name: Code graph pinned vectors · Linux
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: ${{ !inputs.stage3_candidate_commit && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     needs: prepare-code-graph-vector-model
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -761,7 +825,7 @@ jobs:
 
   code-graph-vectors-10k:
     name: Code graph pinned vectors 10k · Linux
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: ${{ !inputs.stage3_candidate_commit && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     needs: prepare-code-graph-vector-model
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -802,7 +866,7 @@ jobs:
 
   code-graph-100k:
     name: Code graph 100k scale boundary · Linux
-    if: github.event_name == 'schedule' || inputs.include_100k
+    if: ${{ !inputs.stage3_candidate_commit && (github.event_name == 'schedule' || inputs.include_100k) }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -834,7 +898,7 @@ jobs:
 
   code-graph-vectors-100k:
     name: Code graph pinned vectors 100k · macOS ARM64
-    if: github.event_name == 'schedule' || inputs.include_100k
+    if: ${{ !inputs.stage3_candidate_commit && (github.event_name == 'schedule' || inputs.include_100k) }}
     needs: prepare-code-graph-vector-model
     runs-on: macos-15
     timeout-minutes: 80
@@ -881,12 +945,12 @@ jobs:
           retention-days: 30
 
   code-graph-production-large:
-    if: github.event_name == 'schedule' || inputs.include_production_large
+    if: ${{ !inputs.stage3_candidate_commit && (github.event_name == 'schedule' || inputs.include_production_large) }}
     uses: ./.github/workflows/production-large-evidence.yml
 
   code-graph-heavy-tail:
     name: Code graph parser/cache heavy tail · pinned Linux class
-    if: github.event_name == 'schedule' || inputs.include_heavy_tail
+    if: ${{ !inputs.stage3_candidate_commit && (github.event_name == 'schedule' || inputs.include_heavy_tail) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 180
 
@@ -920,7 +984,7 @@ jobs:
 
   recall-10k:
     name: Recall 10k · ${{ matrix.os }}
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: ${{ !inputs.stage3_candidate_commit && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     strategy:
       fail-fast: false
       matrix:
@@ -960,7 +1024,7 @@ jobs:
 
   recall-100k:
     name: Recall 100k scale boundary · Linux
-    if: github.event_name == 'schedule' || inputs.include_100k
+    if: ${{ !inputs.stage3_candidate_commit && (github.event_name == 'schedule' || inputs.include_100k) }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -990,7 +1054,7 @@ jobs:
 
   recall-vector-native-linux:
     name: Recall vectors · Linux serial diagnostic capture
-    if: github.event_name == 'workflow_dispatch' && inputs.include_native_recall_vector_capture
+    if: ${{ !inputs.stage3_candidate_commit && (github.event_name == 'workflow_dispatch' && inputs.include_native_recall_vector_capture) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
