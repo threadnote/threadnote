@@ -6,7 +6,7 @@ import {Clock, Deferred, Effect, Exit, Fiber, FileSystem, Option, Path, Schema} 
 import {Digest} from '@threadnote/semantic/contracts';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {boundedFileDigest, readBounded, semanticSdkDigest, semanticTreeDigest} from '../fingerprint.js';
-import {LspFault} from '../lsp_transport.js';
+import {JavaPreparationDiagnostic, LspFault} from '../lsp_transport.js';
 import {wellFormed} from '../provider.js';
 import {
   isJavaPreparationRuntime,
@@ -627,7 +627,19 @@ export const copyJavaPreparationInputs = Effect.fn('semantic.copyJavaPreparation
               const gradleCache =
                 selected.build === 'gradle' &&
                 (relative === '.gradle' || EffectString.startsWith('.gradle/')(relative));
-              if (!metadata && !metadataDirectory && !emptyOutputDirectory && !gradleCache) return yield* fail();
+              if (!metadata && !metadataDirectory && !emptyOutputDirectory && !gradleCache) {
+                const diagnostic = {
+                  reason: 'unexpected-copied-project-entry' as const,
+                  entryType: info.type,
+                  relativePath: relative,
+                };
+                return yield* LspFault.make({
+                  code: 'prerequisite',
+                  preparationDiagnostic: Schema.is(JavaPreparationDiagnostic)(diagnostic)
+                    ? diagnostic
+                    : {reason: 'unexpected-copied-project-entry', entryType: info.type},
+                });
+              }
             }
             if (info.type === 'Directory') pending.push(file);
           }

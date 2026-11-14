@@ -41,6 +41,76 @@ it.each(['timeout', 'protocol', 'prerequisite'] as const)(
     expect(candidateFailure(observed)).toBe('Semantic provider fault: ' + code);
   },
 );
+it('preserves bounded typed preparation refusal context through the actual Promise boundary', async () => {
+  const diagnostic = {
+    reason: 'unexpected-copied-project-entry' as const,
+    entryType: 'Directory' as const,
+    relativePath: '.settings/unexpected-import-output',
+  };
+  const error = LspFault.make({code: 'prerequisite', preparationDiagnostic: diagnostic});
+  // oxlint-disable-next-line threadnote/no-effect-runtime-in-tests -- Actual runner Effect-to-Promise rejection identity is this boundary contract.
+  const observed = await Effect.runPromise(Effect.fail(error)).catch((failure: unknown) => failure);
+  expect(observed).toBe(error);
+  expect(error.message).toBe('');
+  expect(candidateFailure(observed)).toBe('Semantic provider fault: prerequisite');
+  expect(candidateFailureEvidence(observed)).toEqual({
+    code: 'prerequisite',
+    sourceFrames: [],
+    preparationDiagnostic: diagnostic,
+  });
+});
+it('omits malformed or unsafe preparation context without changing the original fault', () => {
+  const error = LspFault.make({code: 'prerequisite'});
+  const valid = {reason: 'unexpected-copied-project-entry', entryType: 'File'};
+  for (const malformed of [
+    {...valid, reason: 'unknown-reason'},
+    {...valid, entryType: 'SymbolicLink'},
+    ...EffectArray.map(
+      [
+        '/external/root',
+        'C:/private/root',
+        '\\\\host\\share',
+        '../escape',
+        'a/../escape',
+        'a//b',
+        '.',
+        '',
+        'a\nsecret',
+        'hidden\u202Ename',
+        EffectString.repeat(513)('x'),
+      ],
+      relativePath => ({...valid, relativePath}),
+    ),
+  ]) {
+    // A mutable genuine class instance must not make unvalidated fields trusted.
+    Object.defineProperty(error, 'preparationDiagnostic', {value: malformed, configurable: true});
+    expect(candidateFailure(error)).toBe('Semantic provider fault: prerequisite');
+    expect(candidateFailureEvidence(error)).toEqual({code: 'prerequisite', sourceFrames: []});
+  }
+  Object.defineProperty(error, 'preparationDiagnostic', {value: valid, configurable: true});
+  expect(candidateFailureEvidence(error)?.preparationDiagnostic).toEqual(valid);
+  Object.defineProperty(error, 'preparationDiagnostic', {
+    value: {...valid, relativePath: EffectString.repeat(512)('x'), secret: '/external/cause'},
+    configurable: true,
+  });
+  expect(candidateFailureEvidence(error)?.preparationDiagnostic).toEqual({
+    ...valid,
+    relativePath: EffectString.repeat(512)('x'),
+  });
+  let reads = 0;
+  const changing = {
+    ...valid,
+    get relativePath() {
+      return ++reads === 1 ? 'bounded-entry' : '/external/secret';
+    },
+  };
+  Object.defineProperty(error, 'preparationDiagnostic', {value: changing, configurable: true});
+  expect(candidateFailureEvidence(error)?.preparationDiagnostic).toEqual({...valid, relativePath: 'bounded-entry'});
+  expect(reads).toBe(1);
+  expect(
+    candidateFailureEvidence({_tag: 'LspFault', code: 'prerequisite', preparationDiagnostic: valid}),
+  ).toBeUndefined();
+});
 it('projects only closed actual production codes and preserves the unexpected-error fallback', () => {
   fc.assert(
     fc.property(fc.string({maxLength: 512}), text => {

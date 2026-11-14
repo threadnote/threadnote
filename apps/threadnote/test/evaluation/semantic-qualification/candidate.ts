@@ -3,7 +3,7 @@ import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {Array as EffectArray, Record as EffectRecord, Schema, String as EffectString} from 'effect';
 import {isJsonObject} from '@threadnote/platform/json';
 import {javaRuntimePinsForHost} from '../../../src/semantic/providers/java_runtime.js';
-import {LspFault} from '../../../src/semantic/lsp_transport.js';
+import {JavaPreparationDiagnostic, LspFault} from '../../../src/semantic/lsp_transport.js';
 import {runtimeNativePlatformTarget} from '@threadnote/platform/system';
 import {BUN_STANDALONE_TARGETS} from '../../../../../scripts/release-targets.js';
 /* oxlint-disable effecttsgo/node-builtin-import -- Candidate qualification owns explicit process and private evidence-file boundaries. */
@@ -189,7 +189,26 @@ export function candidateFailureEvidence(error: unknown, sourceHashes: Readonly<
       frames.push({path, line: Number(match[2]), column: Number(match[3])});
       if (frames.length === 4) break;
     }
-    return {code: error.code, sourceFrames: frames};
+    const context = error.preparationDiagnostic;
+    const relativePath = context?.relativePath;
+    const diagnostic = {
+      reason: context?.reason,
+      entryType: context?.entryType,
+      ...(relativePath === undefined ? {} : {relativePath}),
+    };
+    return {
+      code: error.code,
+      sourceFrames: frames,
+      ...(error.code === 'prerequisite' && Schema.is(JavaPreparationDiagnostic)(diagnostic)
+        ? {
+            preparationDiagnostic: {
+              reason: diagnostic.reason,
+              entryType: diagnostic.entryType,
+              ...(diagnostic.relativePath === undefined ? {} : {relativePath: diagnostic.relativePath}),
+            },
+          }
+        : {}),
+    };
   } catch {
     return undefined; // Diagnostic projection must never replace the original failure.
   }

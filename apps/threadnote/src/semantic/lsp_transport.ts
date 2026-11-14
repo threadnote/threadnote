@@ -11,8 +11,24 @@ import {
   runtimeCloseOwnedProviderTree,
   type RuntimeOwnedProviderObservation,
 } from '@threadnote/platform/system';
+/** Bounded refusal context only; never input admission or native-ownership evidence. */
+export const JavaPreparationDiagnostic = Schema.Struct({
+  reason: Schema.Literal('unexpected-copied-project-entry'),
+  entryType: Schema.Literals(['File', 'Directory']),
+  relativePath: Schema.optional(
+    Schema.String.check(
+      Schema.isMinLength(1),
+      Schema.isMaxLength(512),
+      Schema.isPattern(/^[^\\:\p{Cc}\p{Cf}\uD800-\uDFFF\uFFFE\uFFFF]+$/u),
+      Schema.makeFilter(value =>
+        EffectArray.every(EffectString.split('/')(value), part => part !== '' && part !== '.' && part !== '..'),
+      ),
+    ),
+  ),
+});
 export class LspFault extends Schema.TaggedError<LspFault, {readonly brand: unique symbol}>()('LspFault', {
   code: Schema.Literals(['protocol', 'capacity', 'write', 'exit', 'timeout', 'closing', 'rejected', 'prerequisite']),
+  preparationDiagnostic: Schema.optional(JavaPreparationDiagnostic),
 }) {}
 type Message = Record<string, unknown>;
 const encoder = new TextEncoder();

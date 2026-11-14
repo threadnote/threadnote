@@ -1,3 +1,4 @@
+import {candidateFailure, candidateFailureEvidence} from '../evaluation/semantic-qualification/candidate.js';
 import * as OverlayArray from 'effect/Array';
 import * as OverlayString from 'effect/String';
 import * as OverlayRecord from 'effect/Record';
@@ -2206,14 +2207,36 @@ describe('Java prepared model sealing', () => {
   for (const mutation of ['source', 'unexpected'] as const)
     effectIt.effect('refuses first-sync ' + mutation + ' mutations before capturing an output baseline', () =>
       Effect.gen(function* () {
-        const f = yield* modelFixture({
-          deferImport: true,
-          minimalBuildInputs: true,
-          gradleSetup: true,
-          firstModelMutation: mutation,
-        });
-        expect((yield* Effect.exit(f.observe))._tag).toBe('Failure');
-        expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
+        const failure = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const f = yield* modelFixture({
+              deferImport: true,
+              minimalBuildInputs: true,
+              gradleSetup: true,
+              firstModelMutation: mutation,
+            });
+            const sourceDigest = yield* semanticTreeDigest(f.project);
+            const error = yield* Effect.flip(f.observe);
+            expect(error).toMatchObject({_tag: 'LspFault', code: 'prerequisite'});
+            expect(yield* semanticTreeDigest(f.project)).toBe(sourceDigest);
+            expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
+            return {error, copiedProject: f.copiedProject};
+          }),
+        );
+        const fs = yield* FileSystem.FileSystem;
+        expect(yield* fs.exists(failure.copiedProject)).toBe(false);
+        expect(candidateFailure(failure.error)).toBe('Semantic provider fault: prerequisite');
+        if (mutation === 'unexpected') {
+          expect(candidateFailureEvidence(failure.error)).toEqual({
+            code: 'prerequisite',
+            sourceFrames: [],
+            preparationDiagnostic: {
+              reason: 'unexpected-copied-project-entry',
+              entryType: 'File',
+              relativePath: 'unexpected-imported-input',
+            },
+          });
+        } else expect(candidateFailureEvidence(failure.error)?.preparationDiagnostic).toBeUndefined();
       }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
     );
   for (const mutation of ['source', 'metadata'] as const)

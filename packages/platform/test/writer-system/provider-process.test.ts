@@ -1362,8 +1362,8 @@ it.skipIf(process.platform !== 'win32' || !supported)(
           EffectArray.every(members, member => member.exit && member.jobs.size === 1 && member.threads.size === 0),
         ).toBe(true);
       }
-      // Retain the original disputed oracle until the real member census explains any extra actors.
-      expect(creates).toBe(5);
+      // Native Job totals independently account for every authenticated member, including extra actors.
+      expect(creates).toBe(EffectArray.reduce([...jobs.values()], 0, (total, accounting) => total + accounting.total));
       passed = true;
     } finally {
       try {
