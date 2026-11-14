@@ -1,6 +1,7 @@
 import {
   isLexicalV2Snapshot,
   lexicalV2RelationSql,
+  lexicalV2CandidateRelationSql,
   loadLexicalViewBinding,
   bindLexicalSnapshotLayout,
 } from './lexical_projection.js';
@@ -1496,10 +1497,25 @@ export function codeGraphTermCandidateQueryStatement(
 ): CodeGraphSqlQueryStatement {
   const uniqueTerms = [...new Set(terms)].slice(0, 24);
   if (isLexicalV2Snapshot(snapshotId)) {
-    const relation = lexicalV2EffectiveTerms(snapshotId, baseSnapshotId ?? '', uniqueTerms, false);
+    const relation = lexicalV2CandidateRelationSql();
+    const current = `WITH input(snapshot_id,terms_json) AS (VALUES (?,?)) ${relation}`;
+    const termsJson = JSON.stringify(uniqueTerms);
+    const effective =
+      baseSnapshotId === undefined
+        ? current
+        : `WITH current_terms AS (${current}), base_terms AS (${current})
+          SELECT term,symbol_id,weight FROM current_terms
+          UNION ALL SELECT term,symbol_id,weight FROM base_terms base
+          WHERE NOT EXISTS(SELECT 1 FROM symbols replacement WHERE replacement.snapshot_id=? AND replacement.id=base.symbol_id)
+            AND NOT EXISTS(SELECT 1 FROM snapshot_symbol_deletions deletion WHERE deletion.snapshot_id=? AND deletion.symbol_id=base.symbol_id)`;
     return {
-      parameters: [...relation.parameters, Math.max(1, Math.min(2_000, Math.floor(limit)))],
-      text: `WITH effective_terms AS (${relation.text}) SELECT symbol_id,SUM(weight) AS score
+      parameters: [
+        snapshotId,
+        termsJson,
+        ...(baseSnapshotId === undefined ? [] : [baseSnapshotId, termsJson, snapshotId, snapshotId]),
+        Math.max(1, Math.min(2_000, Math.floor(limit))),
+      ],
+      text: `WITH effective_terms AS (${effective}) SELECT symbol_id,SUM(weight) AS score
         FROM effective_terms GROUP BY symbol_id ORDER BY score DESC,symbol_id LIMIT ?`,
     };
   }

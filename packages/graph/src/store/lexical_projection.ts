@@ -607,6 +607,32 @@ export function lexicalV2RecordLookupStatement(snapshotId: string, term: string,
 }
 
 /** Public/checkpoint logical relation; task discovery uses its bounded key lane. */
+/** Metadata-only candidate lookup enters through exact wanted dictionary terms, never a snapshot posting scan. */
+export function lexicalV2CandidateRelationSql(): string {
+  const common = `FROM input
+    JOIN lexical_compact_snapshots compact ON compact.snapshot_id=input.snapshot_id
+    JOIN lexical_v2_formats format ON format.snapshot_id=input.snapshot_id AND format.format_version=2
+    CROSS JOIN json_each(input.terms_json) wanted
+    CROSS JOIN lexical_compact_terms term INDEXED BY sqlite_autoindex_lexical_compact_terms_1`;
+  const wanted = `term.snapshot_key=compact.snapshot_key AND term.term=wanted.value`;
+  return `SELECT term.term,member.symbol_id,posting.metadata_weight AS weight ${common}
+    CROSS JOIN lexical_v2_owners posting
+    CROSS JOIN lexical_v2_members member
+    WHERE ${wanted} AND posting.snapshot_key=compact.snapshot_key AND posting.term_key=term.term_key
+      AND posting.origin_mask IN (1,3) AND member.snapshot_key=posting.snapshot_key
+      AND member.scope_ordinal=posting.scope_ordinal AND member.member_ordinal=posting.member_ordinal
+    UNION ALL
+    SELECT term.term,member.symbol_id,3 AS weight ${common}
+    CROSS JOIN lexical_v2_shared shared
+    CROSS JOIN lexical_v2_members member
+    WHERE ${wanted} AND shared.snapshot_key=compact.snapshot_key AND shared.term_key=term.term_key
+      AND member.snapshot_key=shared.snapshot_key AND member.scope_ordinal=shared.scope_ordinal
+      AND NOT EXISTS (
+        SELECT 1 FROM lexical_v2_owners own WHERE own.snapshot_key=shared.snapshot_key
+        AND own.term_key=shared.term_key AND own.origin_mask IN (1,3)
+        AND own.scope_ordinal=member.scope_ordinal AND own.member_ordinal=member.member_ordinal)`;
+}
+
 export function lexicalV2RelationSql(includeBody: boolean, paged = false): string {
   const wanted = `(input.terms_json IS NULL OR input.terms_json='null' OR term.term IN (SELECT value FROM json_each(input.terms_json)))`;
   const common = `FROM input JOIN lexical_compact_snapshots compact ON compact.snapshot_id=input.snapshot_id

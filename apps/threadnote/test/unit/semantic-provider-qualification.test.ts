@@ -309,7 +309,11 @@ describe('disposable semantic provider qualification', () => {
         expectedBuildExecution: false,
       }),
     );
-    expect(gradle.executionMarker).toBe('probe-gradle-import-ran');
+    expect(gradle.executionMarker).toBe('.gradle/probe-gradle-import-ran');
+    expect(gradle.projectFiles['build.gradle']).toContain('new File(rootDir, ".gradle/probe-gradle-import-ran")');
+    expect(gradle.projectFiles['build.gradle']).toContain('marker.parentFile.mkdirs()');
+    expect(gradle.projectFiles['build.gradle']).toContain('marker.text = "executed"');
+    expect(EffectRecord.has(gradle.projectFiles, '.gradle/probe-gradle-import-ran')).toBe(false);
     expect(gradle.runtimeFiles['gradle/gradle.properties']).toContain('idletimeout=1000');
     expect(gradle.projectFiles).not.toHaveProperty('pom.xml');
     expect(providerFixture({language: 'java'}).projectFiles).toHaveProperty('pom.xml');

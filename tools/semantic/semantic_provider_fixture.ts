@@ -78,10 +78,10 @@ export function providerFixture(config: Pick<ProbeConfig, 'language' | 'fixture'
         'src/main/java/demo/Usage.java': 'package demo;\r\nclass Usage { SavedName value = new SavedName(); }\r\n',
       };
       if (config.fixture === 'java-gradle') {
-        executionMarker = 'probe-gradle-import-ran';
+        executionMarker = '.gradle/probe-gradle-import-ran';
         projectFiles['settings.gradle'] = 'rootProject.name = "semantic-fixture"\n';
         projectFiles['build.gradle'] =
-          'plugins { id "java" }\njava { sourceCompatibility = JavaVersion.VERSION_21; targetCompatibility = JavaVersion.VERSION_21 }\nnew File(rootDir, "probe-gradle-import-ran").text = "executed"\n';
+          'plugins { id "java" }\njava { sourceCompatibility = JavaVersion.VERSION_21; targetCompatibility = JavaVersion.VERSION_21 }\ndef marker = new File(rootDir, ".gradle/probe-gradle-import-ran")\nmarker.parentFile.mkdirs()\nmarker.text = "executed"\n';
         runtimeFiles['gradle/gradle.properties'] = 'org.gradle.daemon.idletimeout=1000\norg.gradle.workers.max=2\n';
       } else {
         projectFiles['pom.xml'] =

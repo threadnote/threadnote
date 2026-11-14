@@ -136,10 +136,11 @@ describe('bounded code graph maintenance', () => {
       const unleasedSnapshot = repairBuildingSnapshot(identity, '1');
       const leasedIdentity = {...identity, worktreeId: Effect2.pipe('e', EffectString.repeat(64))};
       const leasedSnapshot = repairBuildingSnapshot(leasedIdentity, '2');
-      const orphanSnapshotId = `cgsn_${Effect2.pipe('3', EffectString.repeat(40))}-direct`;
+      const orphanSnapshotId = `cgsn_${Effect2.pipe('3', EffectString.repeat(40))}-lx2`;
       const spoolPath = (snapshotId: string) =>
         path.join(repositoryRoot, `materialization-spool-v2-${snapshotId}.sqlite`);
-      const ignoredPath = path.join(repositoryRoot, `materialization-spool-v3-${orphanSnapshotId}.sqlite`);
+      const orphanPath = path.join(repositoryRoot, `materialization-spool-v3-${orphanSnapshotId}.sqlite`);
+      const ignoredPath = path.join(repositoryRoot, `materialization-spool-v4-${orphanSnapshotId}.sqlite`);
       const vectorTemporaryPath = path.join(repositoryRoot, 'vectors', 'model', 'scratch.tmp');
       const store = yield* CodeGraphStore;
       yield* store.initialize(databasePath);
@@ -161,12 +162,7 @@ describe('bounded code graph maintenance', () => {
           database.close(false);
         }
       });
-      for (const file of [
-        spoolPath(unleasedSnapshot.id),
-        spoolPath(leasedSnapshot.id),
-        spoolPath(orphanSnapshotId),
-        ignoredPath,
-      ]) {
+      for (const file of [spoolPath(unleasedSnapshot.id), spoolPath(leasedSnapshot.id), orphanPath, ignoredPath]) {
         yield* fs.writeFile(file, new Uint8Array([1]));
       }
       yield* fs.makeDirectory(path.dirname(vectorTemporaryPath), {recursive: true});
@@ -174,12 +170,7 @@ describe('bounded code graph maintenance', () => {
 
       const preview = yield* repairCodeGraphIndexes(home, true, undefined, undefined, {mode: 'deep'});
       expect(preview).toMatchObject({removedIncompleteSnapshots: 1, removedTemporaryFiles: 3});
-      for (const file of [
-        spoolPath(unleasedSnapshot.id),
-        spoolPath(leasedSnapshot.id),
-        spoolPath(orphanSnapshotId),
-        ignoredPath,
-      ]) {
+      for (const file of [spoolPath(unleasedSnapshot.id), spoolPath(leasedSnapshot.id), orphanPath, ignoredPath]) {
         expect(yield* fs.exists(file)).toBe(true);
       }
       expect(yield* fs.exists(vectorTemporaryPath)).toBe(true);
@@ -187,7 +178,7 @@ describe('bounded code graph maintenance', () => {
       const applied = yield* repairCodeGraphIndexes(home, false, undefined, undefined, {mode: 'deep'});
       expect(applied).toMatchObject({removedIncompleteSnapshots: 1, removedTemporaryFiles: 3});
       expect(yield* fs.exists(spoolPath(unleasedSnapshot.id))).toBe(false);
-      expect(yield* fs.exists(spoolPath(orphanSnapshotId))).toBe(false);
+      expect(yield* fs.exists(orphanPath)).toBe(false);
       expect(yield* fs.exists(spoolPath(leasedSnapshot.id))).toBe(true);
       expect(yield* fs.exists(ignoredPath)).toBe(true);
       expect(yield* fs.exists(vectorTemporaryPath)).toBe(false);
@@ -578,11 +569,12 @@ describe('bounded code graph maintenance', () => {
         .map(value => EffectArray.join(value, ''));
     fc.assert(
       fc.property(
-        fc.constantFrom(1, 2),
+        fc.constantFrom(1, 2, 3),
         hexadecimal(40),
         fc.oneof(
           fc.constant(''),
           fc.constant('-direct'),
+          fc.constant('-lx2'),
           hexadecimal(16).map(value => `-full-${value}`),
         ),
         fc.constantFrom('', '-journal', '-shm', '-wal'),
@@ -594,7 +586,7 @@ describe('bounded code graph maintenance', () => {
           expect(codeGraphTemporaryMaterializationSpoolSnapshotId(`${fileName}.extra`)).toBeUndefined();
           expect(
             codeGraphTemporaryMaterializationSpoolSnapshotId(
-              Effect2.pipe(fileName, EffectString.replace(`-v${version}-`, '-v3-')),
+              Effect2.pipe(fileName, EffectString.replace(`-v${version}-`, '-v4-')),
             ),
           ).toBeUndefined();
         },
