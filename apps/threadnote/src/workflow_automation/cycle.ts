@@ -28,7 +28,6 @@ import {
 } from '@threadnote/workflow-automations/cycle-packet';
 import {
   validateNativeCycleReview,
-  nativeCycleReviewBasis,
   NativeCycleRebaseInputSchema,
   nativeCycleRebaseReceiptDigest,
   NativeCycleBaseRequalificationInputSchema,
@@ -45,6 +44,7 @@ import {
 import {
   decodeNativeCycleRuntime,
   nativeCyclePhaseReviewUsage,
+  nativeCycleReviewContext,
   nativeCycleHasBasePlanTransition,
   nativeCycleSnapshotIsCurrentIteration,
   type NativeCycleRuntime,
@@ -1350,6 +1350,7 @@ const runNativeCycleRequest = <R>(
                   snapshot.baseRequalification ||
                   snapshot.ordinaryMergeQualificationV1 ||
                   snapshot.sameLabelRebasedBaseIntegrationV1 ||
+                  snapshot.invalidTailMergeQualificationV1 ||
                   snapshot.unreviewedSupersession?.rebaseRecovery
                     ? snapshot.scopeBase
                     : (snapshot.previousTree ?? snapshot.baseTree),
@@ -1357,11 +1358,12 @@ const runNativeCycleRequest = <R>(
                   '--',
                   ...(snapshot.sameLabelRebasedBaseIntegrationV1
                     ? EffectArray.map(snapshot.scopeFiles, path => `:(literal)${path}`)
-                    : snapshot.ordinaryMergeQualificationV1
+                    : (snapshot.ordinaryMergeQualificationV1 ?? snapshot.invalidTailMergeQualificationV1)
                       ? EffectArray.map(
                           EffectOption.getOrUndefined(
                             EffectArray.findFirst(
-                              snapshot.ordinaryMergeQualificationV1.phaseOwnedPaths,
+                              (snapshot.ordinaryMergeQualificationV1 ?? snapshot.invalidTailMergeQualificationV1)!
+                                .phaseOwnedPaths,
                               owner => owner.phaseId === snapshot!.phaseId,
                             ),
                           )?.paths ?? [],
@@ -1399,6 +1401,7 @@ const runNativeCycleRequest = <R>(
               !snapshot.unreviewedSupersession?.rebaseRecovery &&
               !snapshot.ordinaryMergeQualificationV1 &&
               !snapshot.sameLabelRebasedBaseIntegrationV1 &&
+              !snapshot.invalidTailMergeQualificationV1 &&
               snapshot.scopeBase !== previousScope
             )
               body +=
@@ -1473,11 +1476,7 @@ const runNativeCycleRequest = <R>(
             );
           const verdict = yield* from(() => {
             try {
-              const basis = nativeCycleReviewBasis(
-                snapshot,
-                EffectArray.map(runtime.snapshots, entry => entry.snapshot),
-                runtime.reviews,
-              );
+              const basis = nativeCycleReviewContext(runtime, snapshot);
               return {
                 accepted: true as const,
                 value: validateNativeCycleReview(snapshot, request.report, basis.previous, basis.findingBasis),
@@ -1589,11 +1588,7 @@ const runNativeCycleRequest = <R>(
           if (!report)
             return yield* fail('review-pending', 'A complete immutable source review is required before acceptance.');
           const reviewed = yield* from(() => {
-            const basis = nativeCycleReviewBasis(
-              entry.snapshot,
-              EffectArray.map(runtime.snapshots, item => item.snapshot),
-              runtime.reviews,
-            );
+            const basis = nativeCycleReviewContext(runtime, entry.snapshot);
             return validateNativeCycleReview(entry.snapshot, report, basis.previous, basis.findingBasis);
           });
           if (reviewed.summary.blockingIssueCount)
@@ -1611,11 +1606,14 @@ const runNativeCycleRequest = <R>(
               {
                 ...current,
                 files:
-                  (entry.snapshot.ordinaryMergeQualificationV1 ?? entry.snapshot.sameLabelRebasedBaseIntegrationV1)
+                  (entry.snapshot.ordinaryMergeQualificationV1 ??
+                  entry.snapshot.sameLabelRebasedBaseIntegrationV1 ??
+                  entry.snapshot.invalidTailMergeQualificationV1)
                     ? (EffectOption.getOrUndefined(
                         EffectArray.findFirst(
                           (entry.snapshot.ordinaryMergeQualificationV1 ??
-                            entry.snapshot.sameLabelRebasedBaseIntegrationV1)!.phaseOwnedPaths,
+                            entry.snapshot.sameLabelRebasedBaseIntegrationV1 ??
+                            entry.snapshot.invalidTailMergeQualificationV1)!.phaseOwnedPaths,
                           owner => owner.phaseId === selected.id,
                         ),
                       )?.paths ?? [])

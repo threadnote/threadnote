@@ -1,6 +1,6 @@
 import {decodeNativeTaskActionRef, encodeNativeTaskActionRef} from '@threadnote/workflow-automations/task';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import {Array as EffectArray, Effect, Option, Predicate, Schema} from 'effect';
+import {Array as EffectArray, Effect, Option, Predicate, Schema, String as EffectString} from 'effect';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {fail} from './task_action_helpers.js';
@@ -12,7 +12,7 @@ import {
   nativeWatchWorkDetail,
   nativeWatchWorkList,
 } from './watch_output.js';
-import {readNativeWatch} from './watch_store.js';
+import {readNativeWatch, readNativeTaskWatchIds} from './watch_store.js';
 import {nativeWatchWakeupRequestSchema} from './watch_notification_state.js';
 
 export const NativeTaskPrWatchFieldsSchema = Schema.Struct({
@@ -51,6 +51,102 @@ export const NativeTaskPrWatchFieldsSchema = Schema.Struct({
     ).check(Schema.isMaxLength(32)),
   ),
 });
+
+// Preserve persisted legacy routes; the PR suffix qualifies only a different PR in the same phase.
+export const nativeTaskLegacyWatchIdentity = (runId: string, phaseId: string) => {
+  const identity = EffectString.slice(0, 48)(sha256HexSync(`${runId}\n${phaseId}`));
+  return {watchId: `pr-${identity}`, consumerId: `task-${identity}`, wakeupId: `task-${identity}`};
+};
+
+const qualifiedWatchIdentity = (runId: string, phaseId: string, prUrl: string) => {
+  const identity = `${EffectString.slice(3)(nativeTaskLegacyWatchIdentity(runId, phaseId).watchId)}-${EffectString.slice(0, 48)(sha256HexSync(prUrl))}`;
+  return {watchId: `pr-${identity}`, consumerId: `task-${identity}`, wakeupId: `task-${identity}`};
+};
+
+export const nativeTaskWatchIdentityForConsumer = (runId: string, phaseId: string, prUrl: string, consumerId: string) =>
+  Option.getOrUndefined(
+    EffectArray.findFirst(
+      [nativeTaskLegacyWatchIdentity(runId, phaseId), qualifiedWatchIdentity(runId, phaseId, prUrl)],
+      identity => identity.consumerId === consumerId,
+    ),
+  );
+
+const phaseWatchIdentity = (
+  runId: string,
+  phaseId: string,
+  watch: NonNullable<Effect.Success<ReturnType<typeof readNativeWatch>>>,
+) => {
+  const state = watch.envelope.state;
+  const identity = Option.getOrUndefined(
+    EffectArray.findFirst(
+      [nativeTaskLegacyWatchIdentity(runId, phaseId), qualifiedWatchIdentity(runId, phaseId, state.pr)],
+      item => item.watchId === state.watchId,
+    ),
+  );
+  return identity &&
+    !watch.envelope.owner &&
+    (!state.consumer || (state.consumer.id === identity.consumerId && state.consumer.wakeupId === identity.wakeupId))
+    ? identity
+    : undefined;
+};
+
+export const resolveNativeTaskPrWatch = (
+  config: RuntimeConfig,
+  runId: string,
+  phaseId: string,
+  prUrl: string,
+  retainedConsumerId?: string,
+) =>
+  Effect.gen(function* () {
+    const legacy = nativeTaskLegacyWatchIdentity(runId, phaseId);
+    const qualified = qualifiedWatchIdentity(runId, phaseId, prUrl);
+    const legacyWatch = yield* readNativeWatch(config, legacy.watchId);
+    const qualifiedWatch = yield* readNativeWatch(config, qualified.watchId);
+    if (
+      EffectArray.some(
+        [legacyWatch, qualifiedWatch],
+        watch => watch !== undefined && !phaseWatchIdentity(runId, phaseId, watch),
+      )
+    )
+      return yield* fail('watch-identity-conflict', 'An occupied phase watch belongs to another owner or consumer.');
+    if (legacyWatch && legacyWatch.envelope.state.pr !== prUrl && !legacyWatch.envelope.state.consumer)
+      return yield* fail('watch-identity-conflict', 'An unbound legacy watch cannot qualify a different PR.');
+    if (qualifiedWatch && qualifiedWatch.envelope.state.pr !== prUrl)
+      return yield* fail('watch-identity-conflict', 'The qualified watch belongs to another PR.');
+    if (retainedConsumerId !== undefined) {
+      const identity = nativeTaskWatchIdentityForConsumer(runId, phaseId, prUrl, retainedConsumerId);
+      if (!identity) return yield* fail('watch-identity-conflict', 'The receipt belongs to another watch consumer.');
+      const watch = identity.watchId === legacy.watchId ? legacyWatch : qualifiedWatch;
+      if (watch && watch.envelope.state.pr !== prUrl)
+        return yield* fail('watch-identity-conflict', 'The retained consumer watch belongs to another PR.');
+      return {...identity, watch};
+    }
+    if (legacyWatch?.envelope.state.pr === prUrl && qualifiedWatch)
+      return yield* fail(
+        'watch-identity-conflict',
+        'Both watch identities match this PR; use its retained consumer receipt.',
+      );
+    if (legacyWatch?.envelope.state.pr === prUrl) return {...legacy, watch: legacyWatch};
+    if (qualifiedWatch || legacyWatch) return {...qualified, watch: qualifiedWatch};
+    return {...legacy, watch: undefined};
+  });
+
+export const readNativeTaskPhaseWatchIds = (config: RuntimeConfig, runId: string, phaseId: string) =>
+  readNativeTaskWatchIds(config, nativeTaskLegacyWatchIdentity(runId, phaseId).watchId);
+
+/** Validate a scoped inventory entry without treating its filename as proof of a different owner. */
+export const readNativeTaskPhaseWatch = (config: RuntimeConfig, runId: string, phaseId: string, watchId: string) =>
+  Effect.gen(function* () {
+    const watch = yield* readNativeWatch(config, watchId);
+    if (!watch) return yield* fail('watch-inventory-changed', 'The phase watch inventory changed; reload it.');
+    const identity = phaseWatchIdentity(runId, phaseId, watch);
+    if (!identity)
+      return yield* fail(
+        'watch-identity-conflict',
+        'The phase inventory contains another PR or task consumer binding.',
+      );
+    return {...identity, watch};
+  });
 
 /** Shared event and retained-work routing; admission and publication remain with each caller. */
 export const runNativePrWatchOperation = (

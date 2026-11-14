@@ -1,10 +1,13 @@
-import {Array as EffectArray, Clock, Effect} from 'effect';
-import * as EffectString from 'effect/String';
+import {Array as EffectArray, Clock, Effect, Option} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {inspectNativeJobsForRun} from './native_jobs.js';
 import {readNativeWorkflowState} from './store.js';
-import {sha256HexSync} from '../workflow_memory/native_digest.js';
-import {readNativeWatch} from './watch_store.js';
+import {
+  readNativeTaskPhaseWatchIds,
+  readNativeTaskPhaseWatch,
+  nativeTaskLegacyWatchIdentity,
+  nativeTaskWatchIdentityForConsumer,
+} from './task_pr_watch.js';
 import {nativeWatchCollectorAlive} from './watch_process.js';
 
 export const inspectOldBindingOwners = (
@@ -51,66 +54,114 @@ export const inspectOldBindingOwners = (
       ...EffectArray.map(runtime?.plan.phases ?? [], phase => phase.id),
     ]);
     for (const phaseId of phaseIds) {
-      const delivery = runtime?.phases[phaseId]?.delivery;
-      const identity = EffectString.slice(0, 48)(sha256HexSync(`${stored.state.runId}\n${phaseId}`));
-      const watchId = `pr-${identity}`;
-      const watchResult = yield* readNativeWatch(config, watchId).pipe(Effect.result);
-      if (watchResult._tag === 'Failure') {
-        unresolved.push({owner: 'watch', watchId, status: 'unavailable', reason: 'run-owned-watch-readback-failed'});
+      const proof = runtime?.phases[phaseId];
+      const deliveries = EffectArray.flatMap([proof, ...(proof?.history ?? [])], item =>
+        item?.delivery ? [item.delivery] : [],
+      );
+      const inventory = yield* readNativeTaskPhaseWatchIds(config, stored.state.runId, phaseId).pipe(Effect.result);
+      if (inventory._tag === 'Failure') {
+        unresolved.push({
+          owner: 'watch-inventory',
+          phaseId,
+          status: 'unavailable',
+          reason: 'run-owned-watch-readback-failed',
+        });
         continue;
       }
-      const observed = watchResult.success;
-      if (!observed) continue;
-      const envelope = observed.envelope;
-      const reasons: string[] = [];
-      if (delivery?.delivery === 'pr' && delivery.pr?.url && envelope.state.pr !== delivery.pr.url)
-        reasons.push('watch-pr-binding-mismatch');
-      if (delivery?.delivery === 'pr' && envelope.state.head !== delivery.headSha)
-        reasons.push('watch-source-head-mismatch');
-      const collectorAlive = yield* nativeWatchCollectorAlive(envelope.collector).pipe(Effect.result);
-      if (collectorAlive._tag === 'Failure' || collectorAlive.success)
-        reasons.push('collector-still-owned-or-unverifiable');
-      if (envelope.collector && envelope.collector.status !== 'stopped' && envelope.collector.status !== 'terminal')
-        reasons.push('collector-not-stopped');
-      const notification = envelope.notification;
-      const outbox = notification?.outbox;
-      if (notification?.recoveryRequested) reasons.push('host-recovery-requested');
-      if (outbox && outbox.attempts > 0 && !(outbox.receipt || notification?.lastReceipt))
-        reasons.push('host-receipt-missing');
-      if (outbox && (outbox.status === 'pending' || outbox.status === 'sending' || outbox.status === 'failed'))
-        reasons.push(`host-outbox-${outbox.status}`);
-      if (
-        outbox?.status === 'queued' &&
-        (!outbox.receipt || (outbox.consumedThrough ?? 0) < envelope.state.nextSequence - 1)
-      )
-        reasons.push('host-outbox-awaiting-consumer-readback');
-      if (envelope.state.delivery !== null) reasons.push('watch-delivery-open');
-      if (envelope.state.prState === 'open') reasons.push('watch-pr-not-terminal');
-      const requiredSources = ['comments', 'reviews', 'threads', 'checks', 'statuses'];
-      if (
-        envelope.state.prState !== 'open' &&
-        (envelope.state.sources.length !== requiredSources.length ||
-          !EffectArray.every(requiredSources, source =>
-            EffectArray.some(
-              envelope.state.sources,
-              item => item.source === source && item.lastCompleteAt !== undefined && item.error === undefined,
+      const watchIds = new Set(inventory.success);
+      for (const receipt of deliveries) {
+        if (receipt.delivery !== 'pr' || !receipt.pr || !receipt.watch?.consumerId) continue;
+        const identity = nativeTaskWatchIdentityForConsumer(
+          stored.state.runId,
+          phaseId,
+          receipt.pr.url,
+          receipt.watch.consumerId,
+        );
+        if (!identity)
+          unresolved.push({
+            owner: 'watch-receipt',
+            phaseId,
+            status: 'unavailable',
+            reason: 'run-owned-watch-binding-mismatch',
+          });
+        else watchIds.add(identity.watchId);
+      }
+      for (const watchId of [...watchIds].sort()) {
+        const watchResult = yield* readNativeTaskPhaseWatch(config, stored.state.runId, phaseId, watchId).pipe(
+          Effect.result,
+        );
+        if (watchResult._tag === 'Failure') {
+          unresolved.push({owner: 'watch', watchId, status: 'unavailable', reason: 'run-owned-watch-readback-failed'});
+          continue;
+        }
+        const observed = watchResult.success.watch;
+        if (!observed) continue;
+        const envelope = observed.envelope;
+        const reasons: string[] = [];
+        const delivery =
+          Option.getOrUndefined(
+            EffectArray.findFirst(
+              deliveries,
+              item =>
+                item.delivery === 'pr' && item.pr?.url === envelope.state.pr && item.headSha === envelope.state.head,
             ),
-          ))
-      )
-        reasons.push('watch-terminal-sources-incomplete');
-      if (envelope.state.acknowledged !== envelope.state.nextSequence - 1) reasons.push('watch-notices-unacknowledged');
-      if (EffectArray.some(envelope.state.work, item => item.status === 'open' || item.status === 'blocked'))
-        reasons.push('watch-work-open');
-      const now = yield* Clock.currentTimeMillis;
-      if (envelope.state.prState === 'open' && envelope.state.consumer && envelope.state.consumer.leaseUntil > now)
-        reasons.push('host-consumer-lease-active');
-      watches.push({
-        watchId,
-        revision: observed.revision,
-        collectorStatus: envelope.collector?.status ?? 'absent',
-        reasons,
-      });
-      if (reasons.length > 0) unresolved.push({owner: 'watch', watchId, status: 'needs-drain', reasons});
+          ) ??
+          Option.getOrUndefined(
+            EffectArray.findFirst(deliveries, item => item.delivery === 'pr' && item.pr?.url === envelope.state.pr),
+          ) ??
+          (watchId === nativeTaskLegacyWatchIdentity(stored.state.runId, phaseId).watchId
+            ? proof?.delivery
+            : undefined);
+        if (delivery?.delivery === 'pr' && delivery.pr?.url && envelope.state.pr !== delivery.pr.url)
+          reasons.push('watch-pr-binding-mismatch');
+        if (delivery?.delivery === 'pr' && envelope.state.head !== delivery.headSha)
+          reasons.push('watch-source-head-mismatch');
+        const collectorAlive = yield* nativeWatchCollectorAlive(envelope.collector).pipe(Effect.result);
+        if (collectorAlive._tag === 'Failure' || collectorAlive.success)
+          reasons.push('collector-still-owned-or-unverifiable');
+        if (envelope.collector && envelope.collector.status !== 'stopped' && envelope.collector.status !== 'terminal')
+          reasons.push('collector-not-stopped');
+        const notification = envelope.notification;
+        const outbox = notification?.outbox;
+        if (notification?.recoveryRequested) reasons.push('host-recovery-requested');
+        if (outbox && outbox.attempts > 0 && !(outbox.receipt || notification?.lastReceipt))
+          reasons.push('host-receipt-missing');
+        if (outbox && (outbox.status === 'pending' || outbox.status === 'sending' || outbox.status === 'failed'))
+          reasons.push(`host-outbox-${outbox.status}`);
+        if (
+          outbox?.status === 'queued' &&
+          (!outbox.receipt || (outbox.consumedThrough ?? 0) < envelope.state.nextSequence - 1)
+        )
+          reasons.push('host-outbox-awaiting-consumer-readback');
+        if (envelope.state.delivery !== null) reasons.push('watch-delivery-open');
+        if (envelope.state.prState === 'open') reasons.push('watch-pr-not-terminal');
+        const requiredSources = ['comments', 'reviews', 'threads', 'checks', 'statuses'];
+        if (
+          envelope.state.prState !== 'open' &&
+          (envelope.state.sources.length !== requiredSources.length ||
+            !EffectArray.every(requiredSources, source =>
+              EffectArray.some(
+                envelope.state.sources,
+                item => item.source === source && item.lastCompleteAt !== undefined && item.error === undefined,
+              ),
+            ))
+        )
+          reasons.push('watch-terminal-sources-incomplete');
+        if (envelope.state.acknowledged !== envelope.state.nextSequence - 1)
+          reasons.push('watch-notices-unacknowledged');
+        if (EffectArray.some(envelope.state.work, item => item.status === 'open' || item.status === 'blocked'))
+          reasons.push('watch-work-open');
+        const now = yield* Clock.currentTimeMillis;
+        if (envelope.state.prState === 'open' && envelope.state.consumer && envelope.state.consumer.leaseUntil > now)
+          reasons.push('host-consumer-lease-active');
+        watches.push({
+          watchId,
+          revision: observed.revision,
+          collectorStatus: envelope.collector?.status ?? 'absent',
+          reasons,
+        });
+        if (reasons.length > 0) unresolved.push({owner: 'watch', watchId, status: 'needs-drain', reasons});
+      }
     }
     return {jobs, watches, unresolved};
   });
