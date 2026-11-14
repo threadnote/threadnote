@@ -470,7 +470,6 @@ const runObservation = Effect.fn('evaluation.contextBriefCitationScaleObservatio
   let validationReceipts = 0;
   let exactValidationReceipts = 0;
   let memoryReadState: 'not-started' | 'running' | 'completed' | 'interrupted' | 'failed' = 'not-started';
-  let memoryReadFailure: string | undefined;
   let projectionEvidence:
     | {
         readonly gaps: readonly string[];
@@ -530,7 +529,6 @@ const runObservation = Effect.fn('evaluation.contextBriefCitationScaleObservatio
             Effect.sync(() => {
               if (Exit.isFailure(exit)) {
                 memoryReadState = Cause.hasInterrupts(exit.cause) ? 'interrupted' : 'failed';
-                memoryReadFailure = Effect2.pipe(Cause.pretty(exit.cause), EffectString.slice(0, 2_048));
               }
             }),
           ),
@@ -566,7 +564,6 @@ const runObservation = Effect.fn('evaluation.contextBriefCitationScaleObservatio
       fixtureRunOrdinal: ordinal,
       taskToken: token,
       memoryReadState,
-      ...(memoryReadFailure === undefined ? {} : {memoryReadFailure}),
       projection: projectionEvidence,
       selectedMemories,
       validationReceipts,

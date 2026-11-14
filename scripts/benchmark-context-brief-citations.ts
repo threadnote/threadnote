@@ -6,7 +6,7 @@ import {ScriptSystemInfoLayer} from './effect/system-layer.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {Console, Effect, FileSystem, Layer, Option, Path, Schema} from 'effect';
-import {runCommandEffect} from '@threadnote/platform/command';
+import {CommandFailed, runCommandEffect} from '@threadnote/platform/command';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {SystemInfo} from '@threadnote/platform/system';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
@@ -88,6 +88,26 @@ export const forwardContextBriefCitationDiagnostics = Effect.fn('contextBriefCit
   },
 );
 
+/** Preserve a diagnostic child's nonzero result without retaining its raw output in a new error. */
+export const forwardContextBriefCitationCommandFailure = Effect.fn('contextBriefCitationScale.forwardCommandFailure')(
+  function* (error: CommandFailed) {
+    const bounded = EffectString.slice(0, MAXIMUM_DIAGNOSTIC_INPUT_CHARACTERS)(error.stderr);
+    const hasDiagnosticMarker = EffectArray.some(EffectString.split(/\r?\n/u)(bounded), line =>
+      EffectString.startsWith(DIAGNOSTIC_PREFIX)(line),
+    );
+    if (!hasDiagnosticMarker) return yield* error;
+    yield* forwardContextBriefCitationDiagnostics(error.stderr);
+    return yield* CommandFailed.make({
+      args: [],
+      executable: 'context-brief-citation-diagnostic-child',
+      exitCode: error.exitCode,
+      message: `Context Brief citation diagnostic child exited with code ${error.exitCode}; inspect retained metadata and any written artifact for the gate outcome.`,
+      stderr: '',
+      stdout: '',
+    });
+  },
+);
+
 /** Build one self-contained Bun target, then retain its digest in the benchmark artifact. */
 const program = Effect.scoped(
   Effect.gen(function* () {
@@ -150,7 +170,7 @@ const program = Effect.scoped(
       system.executablePath,
       [outfile, ...args, '--built-artifact-sha256', digest],
       {maxOutputBytes: 0, timeoutMs: 3 * 60 * 60 * 1_000},
-    );
+    ).pipe(Effect.catchIf(Schema.is(CommandFailed), forwardContextBriefCitationCommandFailure));
     yield* forwardContextBriefCitationDiagnostics(child.stderr);
     if (Effect2.pipe(child.stdout, EffectString.trim))
       yield* Console.log(Effect2.pipe(child.stdout, EffectString.trimEnd));
