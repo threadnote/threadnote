@@ -2238,10 +2238,11 @@ describe('Java prepared model sealing', () => {
       expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
     }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
-  effectIt.effect('labels the actual initial and confirmation RPC cache refusals without sealing', () =>
+  effectIt.effect('never replays initial or invalidated-options cache refusals and preserves original inputs', () =>
     Effect.gen(function* () {
       for (const rpcPhase of ['initial', 'confirmation'] as const) {
         const f = yield* modelFixture({deferImport: true, cacheRefusal: rpcPhase});
+        const originalObservation = JSON.stringify(f.observation);
         expect(yield* Effect.flip(f.observe)).toMatchObject({
           _tag: 'JavaPreparedImportRefusal',
           reason: 'model-not-cached',
@@ -2253,6 +2254,8 @@ describe('Java prepared model sealing', () => {
         );
         expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
         expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
+        expect(JSON.stringify(f.observation)).toBe(originalObservation);
+        expect(yield* semanticTreeDigest(f.project)).toBe(f.options.inputs.sourceDigest);
       }
     }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );

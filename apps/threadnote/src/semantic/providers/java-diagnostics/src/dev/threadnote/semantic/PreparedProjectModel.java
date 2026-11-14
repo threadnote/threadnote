@@ -297,6 +297,14 @@ public final class PreparedProjectModel implements IDelegateCommandHandler {
     Unsupported refusal() throws Unsupported { return new Unsupported(reason, Map.of("statusSha256", bytesDigest(image.toString().getBytes(StandardCharsets.UTF_8)))); }
   }
 
+  /** Explicit first-import setup, never called by cached-only model or passive analysis readers. */
+  static void prepareProjectOptions(IJavaProject project, Budget budget) throws Unsupported {
+    budget.check();
+    Map<String, String> options = project.getOptions(true);
+    require(options != null && options.size() <= 2048, "capacity");
+    budget.check();
+  }
+
   private static String synchronizeGradle(Host host, Budget budget) throws Exception {
     // Claim before configuration extraction (which can materialize upstream init scripts), never after a build begins.
     Path selectedGradleHome = propertyPath("threadnote.java.preparedGradleHomeUri");
@@ -336,6 +344,15 @@ public final class PreparedProjectModel implements IDelegateCommandHandler {
       require(status != null, "gradle-status-unknown");
       if (!status.isOK()) { StatusImage diagnostics = new StatusImage(); diagnostics.status(status, 0); throw diagnostics.refusal(); }
       require(setup.binding().equals(gradleSetup(host, budget).binding()), "gradle-binding-changed");
+      require(!guarded.isCanceled(), "gradle-canceled");
+      // getOptions loads project preference caches; admit it only in this fresh, joined setup branch.
+      IProject project = selectedProject(host.project());
+      IJavaProject javaProject = JavaCore.create(project);
+      JavaModelManager manager = JavaModelManager.getJavaModelManager();
+      PerProjectInfo info = manager.getPerProjectInfo(project, false);
+      requireCached(info != null, "project-info", "info-absent");
+      prepareProjectOptions(javaProject, budget);
+      require(manager.getPerProjectInfo(project, false) == info, "model-changed");
       require(!guarded.isCanceled(), "gradle-canceled");
       GRADLE_ATTEMPT.succeeded(start);
       budget.check();
