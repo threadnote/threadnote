@@ -3,8 +3,13 @@ import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
 import {WorkflowAutomationError} from './contracts.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import {nativeCycleHasControl} from './cycle.js';
-import {NativeCycleOrdinaryMergeReceiptSchema, NativeCycleSameLabelRebasedBaseReceiptSchema} from './cycle_merge.js';
+import {nativeCycleCanonicalJson, nativeCycleHasControl} from './cycle.js';
+import {
+  NativeCycleInvalidTailMergeReceiptSchema,
+  NativeCycleOrdinaryMergeReceiptSchema,
+  NativeCycleSameLabelRebasedBaseReceiptSchema,
+  nativeCycleInvalidTailMergeReceiptDigest,
+} from './cycle_merge.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
@@ -17,6 +22,9 @@ export {
   nativeCycleSameLabelRebasedBaseReceiptDigest,
   validateNativeCycleSameLabelRebasedBaseReceipt,
   NativeCycleOrdinaryMergeInputSchema,
+  NativeCycleInvalidTailMergeReceiptSchema,
+  nativeCycleInvalidTailMergeReceiptDigest,
+  validateNativeCycleInvalidTailMergeReceipt,
   nativeCycleMergeReceiptDigest,
   validateNativeCycleMergeOwners,
   validateNativeCycleMergeReceipt,
@@ -24,6 +32,7 @@ export {
 export type {
   NativeCycleSameLabelRebasedBaseInput,
   NativeCycleSameLabelRebasedBaseReceipt,
+  NativeCycleInvalidTailMergeReceipt,
   NativeCycleOrdinaryMergeInput,
   NativeCycleOrdinaryMergeReceipt,
 } from './cycle_merge.js';
@@ -120,16 +129,28 @@ export const NativeCycleSnapshotSchema = Schema.Struct({
   baseRequalification: Schema.optionalKey(baseRequalificationReceipt),
   sameLabelRebasedBaseIntegrationV1: Schema.optionalKey(NativeCycleSameLabelRebasedBaseReceiptSchema),
   ordinaryMergeQualificationV1: Schema.optionalKey(NativeCycleOrdinaryMergeReceiptSchema),
+  invalidTailMergeQualificationV1: Schema.optionalKey(NativeCycleInvalidTailMergeReceiptSchema),
   files: Schema.Array(text()).check(Schema.isMaxLength(8192)),
   pinnedRef: text(),
 }).check(
   Schema.makeFilter(snapshot =>
-    (snapshot.version === 3) !== !!snapshot.sameLabelRebasedBaseIntegrationV1 ||
+    (snapshot.version === 3) !==
+      !!(snapshot.sameLabelRebasedBaseIntegrationV1 || snapshot.invalidTailMergeQualificationV1) ||
     (snapshot.sameLabelRebasedBaseIntegrationV1 &&
-      (snapshot.ordinaryMergeQualificationV1 ||
+      (snapshot.invalidTailMergeQualificationV1 ||
+        snapshot.ordinaryMergeQualificationV1 ||
         snapshot.baseRequalification ||
         snapshot.rebase ||
         snapshot.unreviewedSupersession)) ||
+    (snapshot.invalidTailMergeQualificationV1 &&
+      (snapshot.sameLabelRebasedBaseIntegrationV1 ||
+        snapshot.baseRequalification ||
+        snapshot.ordinaryMergeQualificationV1 ||
+        snapshot.rebase ||
+        snapshot.unreviewedSupersession ||
+        !snapshot.previous ||
+        !snapshot.previousTree ||
+        snapshot.supersedes !== undefined)) ||
     (snapshot.version === 2) !== !!snapshot.ordinaryMergeQualificationV1 ||
     (snapshot.ordinaryMergeQualificationV1 && (snapshot.baseRequalification || snapshot.rebase)) ||
     (snapshot.rebase && snapshot.baseRequalification)
@@ -343,7 +364,8 @@ export const nativeCycleReviewRecordingMode = (snapshot: NativeCycleSnapshot): '
   snapshot.version !== 3 &&
   !snapshot.baseRequalification &&
   !snapshot.ordinaryMergeQualificationV1 &&
-  !snapshot.sameLabelRebasedBaseIntegrationV1
+  !snapshot.sameLabelRebasedBaseIntegrationV1 &&
+  !snapshot.invalidTailMergeQualificationV1
     ? 'incremental'
     : 'full';
 
@@ -421,14 +443,38 @@ export function validateNativeCycleReviewHistory(
   if (snapshot.unreviewedSupersession && findingBasis === undefined)
     fail('Unreviewed supersession requires its retained ancestral finding basis.');
   if (snapshot.previous && snapshot.supersedes) fail('A snapshot has one source predecessor.');
+  const invalidTail = snapshot.invalidTailMergeQualificationV1;
+  // Admission binds the current source phase to the invalid leaf; this argument is its accepted finding ledger.
+  if (
+    invalidTail &&
+    (!previous ||
+      snapshot.version !== 3 ||
+      !snapshot.previous ||
+      snapshot.supersedes ||
+      snapshot.baseRequalification ||
+      snapshot.ordinaryMergeQualificationV1 ||
+      invalidTail.priorSnapshotId !== snapshot.previous ||
+      invalidTail.priorTree !== snapshot.previousTree ||
+      invalidTail.currentHead !== snapshot.head ||
+      invalidTail.currentBaseHead !== snapshot.declaredBaseHead ||
+      invalidTail.currentBaseTree !== snapshot.scopeBase ||
+      invalidTail.basisSnapshotId !== previous.snapshot.snapshotId ||
+      invalidTail.basisReviewDigest !== sha256HexSync(nativeCycleCanonicalJson(previous.review)) ||
+      invalidTail.receiptDigest !== nativeCycleInvalidTailMergeReceiptDigest(snapshot, invalidTail))
+  )
+    fail('Invalid-tail review requires its exact accepted ledger and witnessed source predecessor.');
   if (
     previous &&
-    ((snapshot.previous ?? snapshot.supersedes) !== previous.snapshot.snapshotId ||
-      (snapshot.previous && snapshot.previousTree !== previous.snapshot.tree) ||
+    ((snapshot.invalidTailMergeQualificationV1?.basisSnapshotId ?? snapshot.previous ?? snapshot.supersedes) !==
+      previous.snapshot.snapshotId ||
+      (snapshot.previous &&
+        !snapshot.invalidTailMergeQualificationV1 &&
+        snapshot.previousTree !== previous.snapshot.tree) ||
       snapshot.phaseId !== previous.snapshot.phaseId ||
-      (snapshot.previous
-        ? snapshot.phaseHash !== previous.snapshot.phaseHash
-        : snapshot.phaseHash === previous.snapshot.phaseHash) ||
+      (!invalidTail &&
+        (snapshot.previous
+          ? snapshot.phaseHash !== previous.snapshot.phaseHash
+          : snapshot.phaseHash === previous.snapshot.phaseHash)) ||
       snapshot.baseTree !== previous.snapshot.baseTree ||
       snapshot.repo !== previous.snapshot.repo ||
       (snapshot.head !== previous.snapshot.head && snapshot.acceptedHead !== snapshot.head))

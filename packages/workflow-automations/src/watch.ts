@@ -741,7 +741,7 @@ export function acknowledgeNativeWatch(
 
 export function recordNativeWatchLifecycle(
   input: NativeWatchState,
-  kind: 'watcher_error' | 'watcher_timeout' | 'watcher_stopped',
+  kind: 'watcher_error' | 'watcher_timeout' | 'watcher_stopped' | 'candidate_invalidated',
   code: string,
   now: number,
 ): NativeWatchState {

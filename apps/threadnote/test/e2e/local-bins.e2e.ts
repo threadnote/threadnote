@@ -1834,6 +1834,7 @@ async function activeVectorRevision(): Promise<string> {
     readonly: true,
   });
   try {
+    database.exec('PRAGMA busy_timeout = 50');
     const pointer = database
       .query<{readonly job_id?: string} | null, SQLQueryBindings[]>(
         `SELECT generation.job_id

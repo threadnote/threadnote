@@ -27,6 +27,7 @@ import {
   encodeNativeTaskActionRef,
   nativeTaskCursorMatches,
   projectNativeTaskView,
+  type NativeTaskCandidateWatch,
 } from '../src/task.js';
 
 const plan: NativeCyclePlan = {
@@ -194,6 +195,65 @@ describe('native task projection', () => {
     expect(() => encodeNativeTaskActionRef({...ref, workViewDigest: 'malformed'})).toThrow();
   });
 
+  it('keeps candidate and supplemental opaque closures distinct and complete', () => {
+    const ref = {
+      version: 1 as const,
+      kind: 'candidate-watch' as const,
+      runId: 'run',
+      generationHash: EffectString.repeat(64)('a'),
+      phaseId: 'phase-one',
+      phaseHash: EffectString.repeat(64)('b'),
+      snapshotId: 'source',
+      sourceHead: EffectString.repeat(40)('c'),
+      sourceTree: EffectString.repeat(40)('d'),
+      baselineHead: EffectString.repeat(40)('e'),
+      baselineTree: EffectString.repeat(40)('f'),
+      baselineRef: 'refs/heads/main',
+      watchId: 'candidate-watch',
+      consumerId: 'consumer',
+      wakeupId: 'wakeup',
+      payloadDigest: EffectString.repeat(64)('a'),
+    };
+    const candidateRefs = [
+      ref,
+      {...ref, kind: 'candidate-notice' as const, eventKey: 'wakeup:1:1'},
+      {...ref, kind: 'candidate-delivery' as const, watchDeliveryId: 'delivery'},
+      {...ref, kind: 'candidate-event' as const, watchDeliveryId: 'delivery', watchEventId: 'event'},
+      {
+        ...ref,
+        kind: 'candidate-work' as const,
+        watchEventId: 'event',
+        workViewDigest: EffectString.repeat(64)('a'),
+        workRowDigest: EffectString.repeat(64)('b'),
+      },
+    ];
+    for (const candidate of candidateRefs) {
+      expect(decodeNativeTaskActionRef(encodeNativeTaskActionRef(candidate))).toEqual(candidate);
+      expect(() => encodeNativeTaskActionRef({...candidate, sourceHead: undefined})).toThrow();
+      expect(() => encodeNativeTaskActionRef({...candidate, publicationId: EffectString.repeat(64)('c')})).toThrow();
+    }
+    expect(() => encodeNativeTaskActionRef({...ref, eventKey: 'wakeup:1:1'})).toThrow();
+    expect(() => encodeNativeTaskActionRef({...ref, kind: 'candidate-event', watchEventId: 'event'})).toThrow();
+    const publication = {
+      version: 1 as const,
+      kind: 'supplemental-publication' as const,
+      runId: 'run',
+      generationHash: ref.generationHash,
+      stateRevision: EffectString.repeat(64)('f'),
+      phaseId: ref.phaseId,
+      phaseHash: ref.phaseHash,
+      snapshotId: ref.snapshotId,
+      sourceHead: ref.sourceHead,
+      sourceTree: ref.sourceTree,
+      publicationId: EffectString.repeat(64)('d'),
+      publicationRef: EffectString.repeat(64)('e'),
+    };
+    expect(decodeNativeTaskActionRef(encodeNativeTaskActionRef(publication))).toEqual(publication);
+    expect(() => encodeNativeTaskActionRef({...publication, kind: 'validation'})).toThrow();
+    expect(() => encodeNativeTaskActionRef({...publication, stateRevision: undefined})).toThrow();
+    expect(() => encodeNativeTaskActionRef({...publication, watchId: 'candidate-watch'})).toThrow();
+  });
+
   it('is deterministic, bounded, and returns only actionable fields', () => {
     const revision = Effect.pipe('f', EffectString.repeat(64));
     const view = projectNativeTaskView(state, revision);
@@ -337,6 +397,76 @@ describe('native task projection', () => {
       }),
       {numRuns: 40},
     );
+  });
+
+  it('pages retained candidate recovery routes independently of canonical work and refuses a changed inventory cursor', () => {
+    const hash = (value: string) => EffectString.repeat(64)(value);
+    const object = (value: string) => EffectString.repeat(40)(value);
+    const rows: readonly NativeTaskCandidateWatch[] = Array.from({length: 18}, (_, index) => {
+      const watchId = `candidate-${index}`;
+      return {
+        diagnosticOnly: true,
+        watchId,
+        watchRevision: hash('a'),
+        runId: state.runId,
+        callerCwd: '/retained/checkout',
+        phaseId: 'phase-one',
+        snapshotId: `retained-${index}`,
+        prUrl: `https://github.com/example/repo/pull/${index + 1}`,
+        historical: index > 0,
+        collectorStatus: index > 0 ? 'stopped' : 'running',
+        ...(index > 0 ? {invalidation: {kind: 'candidate_invalidated' as const, reason: 'source-drift', at: 10}} : {}),
+        candidateWatchRef: encodeNativeTaskActionRef({
+          version: 1,
+          kind: 'candidate-watch',
+          runId: state.runId,
+          generationHash: hash('b'),
+          phaseId: 'phase-one',
+          phaseHash: hash('c'),
+          snapshotId: `retained-${index}`,
+          sourceHead: object('d'),
+          sourceTree: object('e'),
+          baselineHead: object('f'),
+          baselineTree: object('a'),
+          baselineRef: 'refs/heads/main',
+          watchId,
+          consumerId: `consumer-${index}`,
+          wakeupId: `wakeup-${index}`,
+          payloadDigest: hash('b'),
+        }),
+      };
+    });
+    const revision = hash('c');
+    const inventoryHash = hash('d');
+    const canonical = projectNativeTaskView(state, revision);
+    const input = {candidateWatches: rows, candidateHash: inventoryHash};
+    const first = projectNativeTaskView(state, revision, input);
+    expect(first.next).toEqual(canonical.next);
+    expect(first.phase).toEqual(canonical.phase);
+    expect(first.taskRef).toBe(canonical.taskRef);
+    expect(first.status).toBe(canonical.status);
+    expect(first.counts.candidateWatches).toBe(18);
+    expect(first.candidateWatches).toEqual(rows.slice(0, 16));
+    const cursor = decodeNativeTaskCursor(first.page.nextCursor!);
+    expect(cursor?.offset).toBe(16);
+    expect(nativeTaskCursorMatches(cursor!, first, inventoryHash)).toBe(true);
+    expect(nativeTaskCursorMatches(cursor!, first, hash('e'))).toBe(false);
+    const last = projectNativeTaskView(state, revision, {...input, offset: cursor!.offset});
+    expect(last.candidateWatches).toEqual(rows.slice(16));
+    expect(last.candidateWatches?.[0].callerCwd).toBe('/retained/checkout');
+    expect(last.candidateWatches?.[0].historical).toBe(true);
+    expect(last.candidateWatches?.[0].invalidation?.kind).toBe('candidate_invalidated');
+    expect(last.page.nextCursor).toBeUndefined();
+    const drifted = projectNativeTaskView(state, revision, {...input, planDrift: 'Plan changed'});
+    expect(drifted.next.action).toBe('reconcile-plan');
+    expect(drifted.candidateWatches).toEqual(rows.slice(0, 16));
+    expect(drifted.counts.candidateWatches).toBe(18);
+    const driftCursor = decodeNativeTaskCursor(drifted.page.nextCursor!);
+    expect(nativeTaskCursorMatches(driftCursor!, drifted, inventoryHash)).toBe(true);
+    expect(
+      projectNativeTaskView(state, revision, {...input, planDrift: 'Plan changed', offset: driftCursor!.offset})
+        .candidateWatches,
+    ).toEqual(rows.slice(16));
   });
 
   it('keeps emitted cursors within the accepted input bound for admitted generation lengths', () => {

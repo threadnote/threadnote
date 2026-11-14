@@ -10,7 +10,13 @@ import {decodeJournal} from './closeout_request_schema.js';
 import {readNativeCloseoutJournal} from './closeout_store.js';
 import {runWorkflowAutomation} from './index.js';
 import {nativeJobId} from './native_jobs.js';
-import {readNativeWatch} from './watch_store.js';
+import {
+  readNativeTaskPhaseWatchIds,
+  readNativeTaskPhaseWatch,
+  resolveNativeTaskPrWatch,
+  nativeTaskWatchIdentityForConsumer,
+} from './task_pr_watch.js';
+import {nativeWatchCollectorAlive} from './watch_process.js';
 
 import type {NativeTaskCycleRuntime, NativeTaskStoredState} from './task_action_helpers.js';
 import {fail, inCheckout} from './task_action_helpers.js';
@@ -88,8 +94,11 @@ export const runNativeTaskFinish = (
         const proof = state.phases[planPhase.id];
         const receipt = proof?.delivery;
         const pr = receipt?.pr;
-        const watchId = `pr-${EffectString.slice(0, 48)(sha256HexSync(`${request.runId}\n${planPhase.id}`))}`;
-        const watch = yield* readNativeWatch(config, watchId);
+        const resolved =
+          pr?.url && receipt?.watch?.consumerId
+            ? yield* resolveNativeTaskPrWatch(config, request.runId, planPhase.id, pr.url, receipt.watch.consumerId)
+            : undefined;
+        const watch = resolved?.watch;
         const notification = watch?.envelope.notification;
         const consumer = watch?.envelope.state.consumer;
         const hostReceipt = notification?.lastReceipt?.receipt ?? notification?.outbox?.receipt;
@@ -133,19 +142,69 @@ export const runNativeTaskFinish = (
             'finish-scope',
             'PR closeout requires each exact merged PR, terminal source-complete watch, live consumer record, and host receipt.',
           );
-        watchWork.push(
-          ...EffectArray.map(
-            EffectArray.filter(watch.envelope.state.work, item => item.status === 'open' || item.status === 'blocked'),
-            item => ({
-              eventId: item.eventId,
-              status: item.status === 'blocked' ? ('blocked' as const) : ('open' as const),
-              reason: item.reason,
-              evidence: item.evidence,
-              event: item.event,
-              at: item.at,
-            }),
-          ),
-        );
+        const watchIds = new Set(yield* readNativeTaskPhaseWatchIds(config, request.runId, planPhase.id));
+        if (!resolved) return yield* fail('finish-scope', 'The canonical watch identity is unavailable.');
+        watchIds.add(resolved.watchId);
+        for (const prior of [proof, ...(proof.history ?? [])]) {
+          const receipt = prior.delivery;
+          if (receipt?.delivery !== 'pr' || !receipt.pr || !receipt.watch?.consumerId) continue;
+          const identity = nativeTaskWatchIdentityForConsumer(
+            request.runId,
+            planPhase.id,
+            receipt.pr.url,
+            receipt.watch.consumerId,
+          );
+          if (!identity) return yield* fail('finish-scope', 'A retained PR receipt has another watch consumer.');
+          watchIds.add(identity.watchId);
+        }
+        for (const watchId of watchIds) {
+          const retained = yield* readNativeTaskPhaseWatch(config, request.runId, planPhase.id, watchId);
+          if (watchId === resolved.watchId && retained.watch.revision !== watch.revision)
+            return yield* fail('watch-inventory-changed', 'The canonical watch changed during closeout discovery.');
+          const retainedState = retained.watch.envelope.state;
+          const retainedNotification = retained.watch.envelope.notification;
+          const retainedOutbox = retainedNotification?.outbox;
+          if (
+            watchId !== resolved.watchId &&
+            (retainedState.prState === 'open' ||
+              !retained.watch.envelope.collector ||
+              !['terminal', 'stopped'].includes(retained.watch.envelope.collector.status) ||
+              (yield* nativeWatchCollectorAlive(retained.watch.envelope.collector)) ||
+              retainedState.delivery !== null ||
+              retainedState.acknowledged !== retainedState.nextSequence - 1 ||
+              !retainedNotification ||
+              retainedNotification.recoveryRequested ||
+              !(retainedNotification.lastReceipt || retainedOutbox?.receipt) ||
+              (retainedOutbox && ['pending', 'sending', 'failed'].includes(retainedOutbox.status)) ||
+              retainedState.sources.length !== requiredSources.length ||
+              !EffectArray.every(requiredSources, source =>
+                EffectArray.some(
+                  retainedState.sources,
+                  item => item.source === source && item.lastCompleteAt !== undefined && item.error === undefined,
+                ),
+              ))
+          )
+            return yield* fail(
+              'finish-scope',
+              'A retained prior PR watch still owns active collection; settle that exact watch before finish.',
+            );
+          watchWork.push(
+            ...EffectArray.map(
+              EffectArray.filter(
+                retained.watch.envelope.state.work,
+                item => item.status === 'open' || item.status === 'blocked',
+              ),
+              item => ({
+                eventId: item.eventId,
+                status: item.status === 'blocked' ? ('blocked' as const) : ('open' as const),
+                reason: item.reason,
+                evidence: item.evidence,
+                event: item.event,
+                at: item.at,
+              }),
+            ),
+          );
+        }
       }
       closeoutWatchWork = watchWork;
     }
