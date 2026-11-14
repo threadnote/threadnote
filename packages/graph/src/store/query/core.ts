@@ -1136,6 +1136,7 @@ function effectiveAdjacentEdgesCte(
     );
     parameters.push(snapshotId, ...ids, ...provenances);
     if (boundedBranchLimit !== undefined) parameters.push(boundedBranchLimit);
+    if (baseSnapshotId === undefined) continue;
     const baseBranch = `SELECT ${columns('base_edges')}
       FROM edges AS base_edges INDEXED BY ${axis.index}
       WHERE base_edges.snapshot_id = ?

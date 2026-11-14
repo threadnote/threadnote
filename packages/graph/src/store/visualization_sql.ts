@@ -225,6 +225,16 @@ export function codeGraphVisualizationSymbolsQueryStatement(
         WHEN 'function' THEN 4 WHEN 'method' THEN 5 ELSE 6
       END,
       id`;
+  if (baseSnapshotId === undefined) {
+    return {
+      parameters: [snapshotId, ...current.parameters, safeLimit],
+      text: `SELECT current_symbols.*
+        FROM symbols AS current_symbols${scopeIndex}
+        WHERE current_symbols.snapshot_id = ? AND ${current.text}
+        ORDER BY ${order}
+        LIMIT ?`,
+    };
+  }
   return {
     parameters: [
       snapshotId,
