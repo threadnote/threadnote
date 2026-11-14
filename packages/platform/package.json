@@ -34,7 +34,7 @@
   },
   "dependencies": {
     "effect": "4.1.2",
-    "@effect/platform-bun": "4.1.2"
+    "@effect/platform-bun": "4.1.4"
   },
   "devDependencies": {
     "@threadnote/testing": "workspace:*",
