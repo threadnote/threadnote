@@ -53,7 +53,7 @@ function commandChild() {
   });
 }
 
-function embeddingProbeChild(onWrite: (text: string) => void) {
+function embeddingProbeChild(onWrite: (text: string) => void, onExit: () => void = () => {}) {
   const io = commandChild();
   const stopped = Promise.withResolvers<number>();
   let signal: NodeJS.Signals | number | null = null;
@@ -74,6 +74,7 @@ function embeddingProbeChild(onWrite: (text: string) => void) {
       io.stdout.end();
       io.stderr.end();
       stopped.resolve(code);
+      onExit();
     },
     child: {
       pid: 42,
@@ -102,6 +103,41 @@ function embeddingProbeChild(onWrite: (text: string) => void) {
     },
   };
   return fixture;
+}
+
+function debuggerProbeChild() {
+  const io = commandChild();
+  let finished = false,
+    kills = 0;
+  const finish = (code = 0, signal: NodeJS.Signals | null = null) => {
+    if (finished) return;
+    finished = true;
+    io.emit('exit', code, signal);
+    io.stdout.end();
+    io.stderr.end();
+    io.emit('close', code, signal);
+  };
+  const child = Object.assign(io, {
+    kill: () => {
+      kills++;
+      finish(137, 'SIGKILL');
+      return true;
+    },
+    arm: () => {
+      setImmediate(() => {
+        io.emit('spawn');
+        io.stdout.write('THREADNOTE_NATIVE_CDB_ARMED\n');
+      });
+    },
+    finish,
+  });
+  return {
+    child,
+    io,
+    get kills() {
+      return kills;
+    },
+  };
 }
 
 function windowsExitFixture() {
@@ -141,7 +177,7 @@ const probeRequest = {
 
 const probeSetupLayer = Layer.merge(BunServices.layer, cryptoLayer);
 
-effectIt.effect('the estimator control exits without a reply or stdin EOF after using the exact admitted bundle', () =>
+effectIt.effect('the model-load control exits without a reply or stdin EOF after using the exact admitted bundle', () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -151,6 +187,7 @@ effectIt.effect('the estimator control exits without a reply or stdin EOF after 
       safeToRemove ? fs.remove(root, {recursive: true}).pipe(Effect.orDie) : Effect.void,
     );
     const home = path.join(root, 'home');
+    const expectedModelPath = 'PRIVATE_MODEL_PATH';
     const candidate = path.join(root, 'candidate');
     const runtime = path.join(candidate, 'runtime');
     const build = path.join(candidate, 'llama', 'localBuilds', 'fixture', 'Release');
@@ -161,22 +198,15 @@ effectIt.effect('the estimator control exits without a reply or stdin EOF after 
       path.join(runtime, 'node-llama-cpp.js'),
       `export async function getLlama(options) {
       if(options.build !== 'never' || options.debug !== false || options.logLevel !== 'disabled' || options.progressLogs !== false || options.skipDownload !== true || options.usePrebuiltBinaries !== true) throw new Error('options');
-      return {buildType:'localBuild',gpu:false,supportsGpuOffloading:false,supportsMmap:true,dispose:async()=>{},loadModel:()=>{throw new Error('must not load a model')}};
-    }
-    export async function readGgufFileInfo(path,options) {
-      if(options.sourceType !== 'filesystem' || !options.signal) throw new Error('read');
-      return {fixture:true};
-    }
-    export const GgufInsights = {from:async(info,llama)=> {
-      if(!info.fixture || llama.buildType !== 'localBuild') throw new Error('insights');
-      return {configurationResolver:{resolveModelGpuLayersV2:async(layers,options)=>{
-        if(options.ignoreMemorySafetyChecks !== false || options.useMmap !== 'auto' || !options.signal) throw new Error('resolver');
-        return {gpuLayers:0,useMmap:true};
-      }},estimateModelResourceRequirementsV2:async(options)=>{
-        if(options.gpuLayers !== 0 || options.useMmap !== true) throw new Error('estimate');
-        return {cpuRam:123,gpuVram:0};
-      }};
-    }};`,
+      return {
+        buildType:'localBuild',gpu:false,supportsGpuOffloading:false,supportsMmap:true,
+        dispose:async()=>{},
+        loadModel:async options=>{
+          if(options.modelPath !== ${JSON.stringify(expectedModelPath)} || options.ignoreMemorySafetyChecks !== false || !options.loadSignal) throw new Error('model-load-options');
+          return {dispose:async()=>{}};
+        }
+      };
+    }`,
     );
     yield* fs.writeFileString(path.join(build, 'llama-addon.node'), 'fake setup addon');
     yield* fs.writeFileString(
@@ -231,7 +261,7 @@ effectIt.effect('the estimator control exits without a reply or stdin EOF after 
       stdoutRead: 'eof',
       stderrRead: 'eof',
       apiControl: {
-        kind: 'model-resource-estimate',
+        kind: 'direct-model-load',
         runtime: 'source-bun',
         bunVersion: Bun.version,
         phases: [
@@ -240,14 +270,10 @@ effectIt.effect('the estimator control exits without a reply or stdin EOF after 
           'runtime-import-ready',
           'initialize-start',
           'initialize-ready',
-          'gguf-read-start',
-          'gguf-read-ready',
-          'insights-start',
-          'insights-ready',
-          'gpu-layers-start',
-          'gpu-layers-ready',
-          'model-resource-estimate-start',
-          'model-resource-estimate-ready',
+          'model-load-start',
+          'model-load-ready',
+          'model-dispose-start',
+          'model-dispose-ready',
           'runtime-dispose-start',
           'runtime-dispose-ready',
         ],
@@ -274,6 +300,145 @@ const probeSetupFixture = Effect.gen(function* () {
       maxOutputBytes: 512 * 1024,
     },
   };
+});
+
+it('waits for the owned debugger attach marker before releasing the one model-load request', async () => {
+  const debuggerProcess = debuggerProbeChild();
+  const native = windowsExitFixture();
+  let armedMarkerEmitted = false;
+  debuggerProcess.child.arm = () => {
+    setImmediate(() => {
+      armedMarkerEmitted = true;
+      debuggerProcess.io.emit('spawn');
+      debuggerProcess.io.stdout.write('THREADNOTE_NATIVE_CDB_ARMED\n');
+    });
+  };
+  const fake = embeddingProbeChild(
+    () => {
+      expect(armedMarkerEmitted).toBe(true);
+      debuggerProcess.io.stdout.write(
+        'ExceptionCode: c0000409 (FAIL_FAST_EXCEPTION)\nParameter[0]: 5\nKERNELBASE!RaiseFailFastException+0x1\n' +
+          'THREADNOTE_NATIVE_CDB_CAPTURED\nTHREADNOTE_NATIVE_CDB_QUIT_REQUESTED\n',
+      );
+      fake.exit(0);
+    },
+    () => debuggerProcess.child.finish(0),
+  );
+  const processes = new FixtureProcesses((command, args) => {
+    expect(command).toBe('PRIVATE_CDB');
+    expect(args).toContain('-sins');
+    expect(args).toContain('-G');
+    expect(args).toContain('-p');
+    expect(args[args.indexOf('-p') + 1]).toBe('42');
+    const startup = args[args.indexOf('-c') + 1];
+    expect(startup).toContain('sxe -c');
+    expect(startup).toContain('0xc0000409');
+    expect(startup).toContain('THREADNOTE_NATIVE_CDB_ARMED');
+    expect(startup).toContain('THREADNOTE_NATIVE_CDB_QUIT_REQUESTED');
+    debuggerProcess.child.arm();
+    return debuggerProcess.child;
+  });
+  const result = await runFixtureEmbeddingExitProbe(processes, 'PRIVATE_EXECUTABLE', probeRequest, {
+    cwd: 'PRIVATE_PATH',
+    env: {PRIVATE_ENV: 'PRIVATE_VALUE'},
+    deadline: performance.now() + 1000,
+    maxOutputBytes: 512 * 1024,
+    spawn: () => fake.child,
+    nativeExit: native.observer,
+    apiControl: {
+      command: [process.execPath, 'PRIVATE_SCRIPT'],
+      bunVersion: Bun.version,
+      debuggerRequired: true,
+      debuggerExecutable: 'PRIVATE_CDB',
+      debuggerStartupFile: 'PRIVATE_STARTUP_FILE',
+      debuggerEnvironment: {PATH: 'PRIVATE_PATH'},
+    },
+  });
+  native.observer.close();
+  expect(result.snapshot()).toMatchObject({
+    outcome: 'exit',
+    write: 'returned',
+    reply: 'none',
+    exitOrigin: 'debugger-requested',
+    processClosed: true,
+    cleanupRequested: false,
+    rawExitCode: 0xc0000409,
+    rawExitCodeOrigin: 'after-debugger-q',
+    debugger: {
+      kind: 'cdb-arm64',
+      armed: true,
+      exited: true,
+      closed: true,
+      exceptionCode: 'c0000409',
+      parameterZero: '0x5',
+      frames: ['kernelbase!RaiseFailFastException'],
+      captureComplete: true,
+      quitRequested: true,
+    },
+  });
+  expect(await processes.closeAndObserve(performance.now() + 1000)).toBe('exited');
+  expect(JSON.stringify(result.snapshot())).not.toContain('PRIVATE_');
+});
+
+it('keeps the request gated and observes both direct-child cleanups when the debugger never arms', async () => {
+  const debuggerProcess = debuggerProbeChild();
+  let debuggerSpawned = false;
+  debuggerProcess.child.arm = () => {
+    setImmediate(() => {
+      debuggerSpawned = true;
+      debuggerProcess.io.emit('spawn');
+      debuggerProcess.io.stdout.write(EffectString.repeat(8192)('PRIVATE_DEBUGGER_OUTPUT'));
+    });
+  };
+  let requestWrites = 0;
+  const fake = embeddingProbeChild(() => requestWrites++);
+  let targetSpawned = false;
+  const processes = new FixtureProcesses((command, args) => {
+    expect(command).toBe('PRIVATE_CDB');
+    expect(args[args.indexOf('-p') + 1]).toBe('42');
+    debuggerProcess.child.arm();
+    return debuggerProcess.child;
+  });
+  const result = await runFixtureEmbeddingExitProbe(
+    processes,
+    'PRIVATE_EXECUTABLE',
+    {...probeRequest, inputs: ['short']},
+    {
+      cwd: 'PRIVATE_PATH',
+      env: {},
+      deadline: performance.now() + 1000,
+      maxOutputBytes: 4096,
+      spawn: () => {
+        targetSpawned = true;
+        return fake.child;
+      },
+      apiControl: {
+        command: [process.execPath, 'PRIVATE_SCRIPT'],
+        bunVersion: Bun.version,
+        debuggerRequired: true,
+        debuggerExecutable: 'PRIVATE_CDB',
+        debuggerStartupFile: 'PRIVATE_STARTUP_FILE',
+        debuggerEnvironment: {PATH: 'PRIVATE_PATH'},
+      },
+    },
+  );
+  expect(targetSpawned).toBe(true);
+  expect(debuggerSpawned).toBe(true);
+  expect(requestWrites).toBe(0);
+  expect(fake.kills).toBe(1);
+  expect(debuggerProcess.kills).toBe(1);
+  expect(result.snapshot()).toMatchObject({
+    outcome: 'output-overflow',
+    write: 'pending',
+    cleanupRequested: true,
+    exitOrigin: 'cleanup',
+    processClosed: true,
+    stdoutRead: 'eof',
+    stderrRead: 'eof',
+    firstFault: 'output-overflow',
+    debugger: {kind: 'cdb-arm64', armed: false, exited: true, closed: true},
+  });
+  expect(await processes.closeAndObserve(performance.now() + 1000)).toBe('exited');
 });
 
 effectIt.effect('diagnostic setup guards preserve the original repair failure', () =>
@@ -417,7 +582,7 @@ it('basic probe setup binds one reply and labels exit after requested stdin clos
 
 it('projects only complete closed API phase tags without retaining unknown native output', async () => {
   const fake = embeddingProbeChild(() => {
-    fake.io.stderr.write('PRIVATE_NATIVE_OUTPUT\nTHREADNOTE_NATIVE_PHASE:model-resource-estimate-st');
+    fake.io.stderr.write('PRIVATE_NATIVE_OUTPUT\nTHREADNOTE_NATIVE_PHASE:model-load-st');
     fake.io.stderr.end('art\nTHREADNOTE_NATIVE_PHASE:PRIVATE_UNKNOWN_PHASE\n');
     fake.exit(9);
   });
@@ -437,10 +602,10 @@ it('projects only complete closed API phase tags without retaining unknown nativ
     processClosed: true,
     cleanupRequested: false,
     apiControl: {
-      kind: 'model-resource-estimate',
+      kind: 'direct-model-load',
       runtime: 'source-bun',
       bunVersion: Bun.version,
-      phases: ['model-resource-estimate-start'],
+      phases: ['model-load-start'],
     },
   });
   expect(result.snapshot().stderrBytes).toBeGreaterThan(0);

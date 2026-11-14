@@ -31,7 +31,8 @@ type CursorChildPhase =
   | 'seed-remote'
   | 'seed-push'
   | 'bootstrap'
-  | 'start'
+  | 'start-discovered'
+  | 'start-cli-team'
   | 'verify';
 interface CursorChildLifetime {
   readonly deadline: number;
@@ -51,14 +52,23 @@ async function awaitCursorChild<A>(
   phase: CursorChildPhase,
 ): Promise<A> {
   if (lifetime?.closureKnown === false) throw new Error('Cursor Cloud child closure remains unknown.');
+  const attemptStartedAt = performance.now();
+  const caseRemainingMsAtAttempt = lifetime
+    ? Math.round(Math.max(0, Math.min(30_000, lifetime.deadline - attemptStartedAt)))
+    : 0;
   let operation: CursorChildOperation<A>;
   try {
     operation = start();
   } catch (error) {
     if (lifetime) {
       lifetime.closureKnown = false;
+      const attemptElapsedMs = Math.round(Math.max(0, Math.min(30_000, performance.now() - attemptStartedAt)));
       // oxlint-disable-next-line threadnote/no-effect-runtime-in-tests -- Synchronous Promise/OS boundary logging; Exit preserves the original child failure.
-      Effect.runSyncExit(Console.error(`Cursor Cloud child failure: ${JSON.stringify({phase, close: 'unknown'})}`));
+      Effect.runSyncExit(
+        Console.error(
+          `Cursor Cloud child failure: ${JSON.stringify({phase, close: 'unknown', caseRemainingMsAtAttempt, attemptElapsedMs})}`,
+        ),
+      );
     }
     throw error;
   }
@@ -87,11 +97,15 @@ async function awaitCursorChild<A>(
   clearTimeout(timer);
   operation.child.removeListener('close', onClose);
   if (!known) lifetime.closureKnown = false;
-  if (!known || result?.ok === false)
+  if (!known || result?.ok === false) {
+    const attemptElapsedMs = Math.round(Math.max(0, Math.min(30_000, performance.now() - attemptStartedAt)));
     // oxlint-disable-next-line threadnote/no-effect-runtime-in-tests -- Synchronous Promise/OS boundary logging; Exit preserves the original child failure.
     Effect.runSyncExit(
-      Console.error(`Cursor Cloud child failure: ${JSON.stringify({phase, close: known ? 'closed' : 'unknown'})}`),
+      Console.error(
+        `Cursor Cloud child failure: ${JSON.stringify({phase, close: known ? 'closed' : 'unknown', caseRemainingMsAtAttempt, attemptElapsedMs})}`,
+      ),
     );
+  }
   if (!known || result === undefined)
     throw new Error('Cursor Cloud child close was not confirmed.', {
       cause: result?.ok === false ? result.error : undefined,
@@ -168,7 +182,9 @@ describe('Cursor Cloud integration', () => {
       const pending = Object.assign(Promise.reject(original), {
         child: {once: () => {}, removeListener: () => {}},
       });
-      await expect(awaitCursorChild(() => pending, unknown, 'start')).rejects.toMatchObject({cause: original});
+      await expect(awaitCursorChild(() => pending, unknown, 'start-discovered')).rejects.toMatchObject({
+        cause: original,
+      });
       expect(unknown.closureKnown).toBe(false);
       const spawn = {deadline: performance.now() + 1000, closureKnown: true};
       await expect(
@@ -181,11 +197,22 @@ describe('Cursor Cloud integration', () => {
         ),
       ).rejects.toBe(original);
       expect(spawn.closureKnown).toBe(false);
-      expect(output.mock.calls).toEqual([
-        ['Cursor Cloud child failure: {"phase":"verify","close":"closed"}'],
-        ['Cursor Cloud child failure: {"phase":"start","close":"unknown"}'],
-        ['Cursor Cloud child failure: {"phase":"seed-bare","close":"unknown"}'],
+      const markers = EffectArray.map(output.mock.calls, ([message]) =>
+        JSON.parse(EffectString.replace(/^[^{]*/, '')(String(message))),
+      );
+      const timing = {caseRemainingMsAtAttempt: expect.any(Number), attemptElapsedMs: expect.any(Number)};
+      expect(markers).toEqual([
+        {phase: 'verify', close: 'closed', ...timing},
+        {phase: 'start-discovered', close: 'unknown', ...timing, caseRemainingMsAtAttempt: 0},
+        {phase: 'seed-bare', close: 'unknown', ...timing},
       ]);
+      for (const marker of markers) {
+        for (const value of [marker.caseRemainingMsAtAttempt, marker.attemptElapsedMs]) {
+          expect(Number.isInteger(value)).toBe(true);
+          expect(value).toBeGreaterThanOrEqual(0);
+          expect(value).toBeLessThanOrEqual(30_000);
+        }
+      }
     } finally {
       output.mockRestore();
     }
@@ -1616,7 +1643,14 @@ function runCli(
   lifetime?: CursorChildLifetime,
 ) {
   const started = performance.now();
-  const phase = args[2] === 'start' || args[2] === 'verify' ? args[2] : 'bootstrap';
+  const phase =
+    args[2] === 'start'
+      ? EffectArray.contains(args, '--team')
+        ? 'start-cli-team'
+        : 'start-discovered'
+      : args[2] === 'verify'
+        ? 'verify'
+        : 'bootstrap';
   return awaitCursorChild(
     () =>
       execFilePromise(
