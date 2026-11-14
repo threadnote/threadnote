@@ -171,7 +171,7 @@
     "vitest": "5.0.5"
   },
   "dependencies": {
-    "@effect/platform-bun": "4.1.2",
+    "@effect/platform-bun": "4.1.4",
     "@effect/sql-sqlite-bun": "4.1.2",
     "@modelcontextprotocol/sdk": "1.32.2",
     "effect": "4.1.2",
