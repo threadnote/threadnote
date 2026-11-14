@@ -18,6 +18,14 @@ import {BUILTIN_MODEL_MANIFESTS, CORE_EMBEDDING_MODEL_ID} from '@threadnote/infe
 import {readModelSelection, selectedEmbeddingModelId} from '@threadnote/inference/models/selection';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {ScriptError} from './effect/errors.js';
+import {verifyNativeInferenceOverlay, nativeInferenceHostTarget} from './native-inference-payload.js';
+import {javascriptStringLiteral} from './effect/javascript.js';
+import {BACKGROUND_INFERENCE_ENV, BACKGROUND_INFERENCE_THREADS} from '@threadnote/inference/background/admission';
+import {
+  resolveNativeEmbeddingGpuLayers,
+  parseEmbeddingContextPoolSize,
+  THREADNOTE_EMBEDDING_CONTEXTS_ENV,
+} from '@threadnote/inference/engine/node-llama-cpp';
 
 interface FixtureChild {
   readonly stdin: ChildProcess['stdin'];
@@ -183,6 +191,162 @@ export function createFixtureWindowsExitObserver(
 
 type FixtureWindowsExitObserver = NonNullable<ReturnType<typeof createFixtureWindowsExitObserver>>;
 
+const API_PHASE_PREFIX = 'THREADNOTE_NATIVE_PHASE:';
+const API_PHASES = [
+  'input-ready',
+  'runtime-import-start',
+  'runtime-import-ready',
+  'initialize-start',
+  'initialize-ready',
+  'model-load-start',
+  'model-load-ready',
+  'context-start',
+  'context-ready',
+  'tokenize-start',
+  'tokenize-ready',
+  'embed-start',
+  'embed-ready',
+  'context-dispose-start',
+  'context-dispose-ready',
+  'model-dispose-start',
+  'model-dispose-ready',
+  'runtime-dispose-start',
+  'runtime-dispose-ready',
+  'caught-error',
+] as const;
+type ApiPhase = (typeof API_PHASES)[number];
+
+/** Disposable public-SDK control, not a product worker or an alternate inference implementation. */
+export function fixtureEmbeddingApiControlSource(
+  moduleUrl: string,
+  background: boolean,
+  gpuLayers: number | undefined,
+  buildType: 'localBuild' | 'prebuilt',
+): string {
+  return `import {writeSync} from 'node:fs';
+const mark = phase => writeSync(2, ${javascriptStringLiteral(API_PHASE_PREFIX)} + phase + '\\n');
+const reader = Bun.stdin.stream().getReader();
+let llama, model, context;
+try {
+  let text = '';
+  const decoder = new TextDecoder();
+  while (!text.includes('\\n')) {
+    const part = await reader.read();
+    if (part.done || text.length + part.value.byteLength > 524288) throw new Error('input');
+    text += decoder.decode(part.value, {stream:true});
+  }
+  const frame = JSON.parse(text.slice(0, text.indexOf('\\n')));
+  if (frame.protocol !== 1 || frame.operation !== 'embedMany' || frame.payload.inputs.length !== 1) throw new Error('input');
+  const request = frame.payload;
+  mark('input-ready');
+  mark('runtime-import-start');
+  const sdk = await import(${javascriptStringLiteral(moduleUrl)});
+  mark('runtime-import-ready');
+  mark('initialize-start');
+  llama = await sdk.getLlama({build:'never',debug:false,logger:()=>{},logLevel:'disabled',progressLogs:false,skipDownload:true,usePrebuiltBinaries:true});
+  if (llama.buildType !== ${javascriptStringLiteral(buildType)} || (llama.gpu !== false && process.platform === 'win32')) throw new Error('backend');
+  mark('initialize-ready');
+  const signal = new AbortController().signal;
+  mark('model-load-start');
+  model = await llama.loadModel({modelPath:request.modelPath,ignoreMemorySafetyChecks:false,loadSignal:signal${gpuLayers === undefined ? '' : `,gpuLayers:${gpuLayers}`}});
+  mark('model-load-ready');
+  mark('context-start');
+  context = await model.createEmbeddingContext({contextSize:request.manifest.contextLimit,ignoreMemorySafetyChecks:false,createSignal:signal${background ? `,threads:${BACKGROUND_INFERENCE_THREADS}` : ''}});
+  mark('context-ready');
+  mark('tokenize-start');
+  if (model.tokenize(request.inputs[0],false).length > request.manifest.contextLimit - 16) throw new Error('window');
+  mark('tokenize-ready');
+  mark('embed-start');
+  const embedding = await context.getEmbeddingFor(request.inputs[0]);
+  if (embedding.vector.length !== request.manifest.dimensions || !embedding.vector.every(Number.isFinite)) throw new Error('vector');
+  mark('embed-ready');
+  writeSync(1, JSON.stringify({id:frame.id,protocol:1,ok:true,result:[embedding.vector]})+'\\n');
+  while (!(await reader.read()).done) {}
+} catch {
+  mark('caught-error');
+  process.exitCode = 1;
+} finally {
+  for (const [name, resource] of [['context',context],['model',model],['runtime',llama]]) {
+    if (!resource) continue;
+    mark(name+'-dispose-start');
+    try { await resource.dispose(); mark(name+'-dispose-ready'); }
+    catch { mark('caught-error'); process.exitCode = 1; }
+  }
+  reader.releaseLock();
+}
+`;
+}
+
+/** Verify the existing candidate closure before writing its one owned disposable control. */
+export const prepareFixtureEmbeddingApiControl = Effect.fn('fixture.prepareEmbeddingApiControl')(function* (
+  executable: string,
+  options: {home: string; env: NodeJS.ProcessEnv},
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const root = path.dirname(executable);
+  const contexts = yield* Effect.try({
+    try: () => parseEmbeddingContextPoolSize(options.env[THREADNOTE_EMBEDDING_CONTEXTS_ENV]),
+    catch: () => ScriptError.make({message: 'Probe context policy is invalid.'}),
+  });
+  if (contexts !== 1) return yield* ScriptError.make({message: 'Probe context policy is unsupported.'});
+  const overlay = yield* verifyNativeInferenceOverlay(root).pipe(
+    Effect.catchDefect(() => ScriptError.make({message: 'Probe runtime binding is invalid.'})),
+  );
+  if (
+    overlay.bunVersion !== Bun.version ||
+    overlay.bunTarget !== nativeInferenceHostTarget() ||
+    (yield* fs.exists(path.join(root, 'bins')))
+  )
+    return yield* ScriptError.make({message: 'Probe runtime binding is unsupported.'});
+  for (const file of overlay.files) {
+    if (process.platform !== 'win32' || !EffectString.endsWith('.node')(file.path)) continue;
+    const metadataPath = `${EffectString.replace(/[^/]+$/, '')(file.path)}_nlcBuildMetadata.json`;
+    if (!EffectArray.some(overlay.files, entry => entry.path === metadataPath))
+      return yield* ScriptError.make({message: 'Probe native metadata is missing.'});
+    const content = yield* fs.readFileString(path.join(root, metadataPath));
+    const metadata: unknown = yield* Effect.try({
+      try: () => JSON.parse(content),
+      catch: () => ScriptError.make({message: 'Probe native metadata is invalid.'}),
+    });
+    if (
+      typeof metadata !== 'object' ||
+      metadata === null ||
+      !('buildOptions' in metadata) ||
+      typeof metadata.buildOptions !== 'object' ||
+      metadata.buildOptions === null ||
+      !('gpu' in metadata.buildOptions) ||
+      metadata.buildOptions.gpu !== false ||
+      !('arch' in metadata.buildOptions) ||
+      metadata.buildOptions.arch !== process.arch ||
+      !('platform' in metadata.buildOptions) ||
+      metadata.buildOptions.platform !== 'win'
+    )
+      return yield* ScriptError.make({message: 'Probe native build policy is unsupported.'});
+  }
+  const moduleUrl = (yield* path.toFileUrl(path.join(root, 'runtime', 'node-llama-cpp.js'))).href;
+  const script = path.join(options.home, '.embedding-api-probe.mjs');
+  const manifest = Option.getOrUndefined(
+    EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.id === CORE_EMBEDDING_MODEL_ID),
+  );
+  const gpuLayers = resolveNativeEmbeddingGpuLayers({
+    platform: process.platform,
+    architecture: process.arch,
+    modelDarwinArm64GpuLayers: manifest?.runtime.darwinArm64EmbeddingGpuLayers,
+  });
+  yield* fs.writeFileString(
+    script,
+    fixtureEmbeddingApiControlSource(
+      moduleUrl,
+      options.env[BACKGROUND_INFERENCE_ENV] === '1',
+      gpuLayers,
+      overlay.origin === 'portable-local-build' ? 'localBuild' : 'prebuilt',
+    ),
+    {flag: 'wx', mode: 0o600},
+  );
+  return {command: [process.execPath, script] as const, bunVersion: Bun.version};
+});
+
 /** Expected setup failure is diagnostic only; external interruption still propagates. */
 export const diagnoseFixtureEmbeddingFailure = Effect.fn('fixture.diagnoseEmbeddingFailure')(function* (
   processes: FixtureProcesses,
@@ -219,11 +383,12 @@ export const diagnoseFixtureEmbeddingFailure = Effect.fn('fixture.diagnoseEmbedd
     )
       return yield* ScriptError.make({message: 'Probe model is not verified.'});
     const inputs = [`${manifest.promptPrefixes?.document ?? ''}QZ9 standalone short embedding control.`];
+    const apiControl = yield* prepareFixtureEmbeddingApiControl(executable, options);
     const nativeExit = yield* Effect.acquireRelease(
       Effect.sync(() => (process.platform === 'win32' ? createFixtureWindowsExitObserver() : undefined)),
       observer => Effect.sync(() => observer?.close()),
     );
-    return {request: {inputs, manifest, modelPath}, nativeExit};
+    return {request: {inputs, manifest, modelPath}, nativeExit, apiControl};
   });
   return yield* prepare.pipe(
     // This is the remaining original absolute budget, including selection, I/O and hashing.
@@ -231,9 +396,9 @@ export const diagnoseFixtureEmbeddingFailure = Effect.fn('fixture.diagnoseEmbedd
       duration: Math.max(0, processes.remaining(options.deadline)),
       orElse: () => ScriptError.make({message: 'Probe setup deadline expired.'}),
     }),
-    Effect.flatMap(({request, nativeExit}) =>
+    Effect.flatMap(({request, nativeExit, apiControl}) =>
       Effect.tryPromise({
-        try: () => runFixtureEmbeddingExitProbe(processes, executable, request, {...options, nativeExit}),
+        try: () => runFixtureEmbeddingExitProbe(processes, executable, request, {...options, nativeExit, apiControl}),
         catch: () => ScriptError.make({message: 'Probe unavailable.'}),
       }),
     ),
@@ -258,6 +423,7 @@ export async function runFixtureEmbeddingExitProbe(
     maxOutputBytes: number;
     spawn?: () => FixtureEmbeddingProbeChild;
     nativeExit?: FixtureWindowsExitObserver;
+    apiControl?: {command: readonly [string, string]; bunVersion: string};
   },
 ) {
   const id = 'standalone-embedding-exit-probe';
@@ -268,6 +434,8 @@ export async function runFixtureEmbeddingExitProbe(
     buffered = '';
   let stdoutRead: 'pending' | 'eof' | 'failed' = 'pending';
   let stderrRead: 'pending' | 'eof' | 'failed' = 'pending';
+  let stderrBuffered = '';
+  const apiPhases: ApiPhase[] = [];
   let writeBytes: number | undefined, flushBytes: number | undefined;
   let write: 'pending' | 'returned' | 'failed' = 'pending';
   let flush: 'not-started' | 'pending' | 'complete' | 'failed' = 'not-started';
@@ -310,6 +478,9 @@ export async function runFixtureEmbeddingExitProbe(
     stderrBytes,
     stdoutRead,
     stderrRead,
+    ...(options.apiControl === undefined
+      ? {}
+      : {apiControl: {runtime: 'source-bun', bunVersion: options.apiControl.bunVersion, phases: apiPhases}}),
     reply,
     ...(exitOrigin === undefined ? {} : {exitOrigin}),
     ...(exit === undefined ? {} : {exit}),
@@ -327,7 +498,10 @@ export async function runFixtureEmbeddingExitProbe(
     child =
       options.spawn?.() ??
       Bun.spawn({
-        cmd: [executable, LOCAL_MODEL_WORKER_ARGUMENT],
+        cmd:
+          options.apiControl === undefined
+            ? [executable, LOCAL_MODEL_WORKER_ARGUMENT]
+            : [...options.apiControl.command],
         cwd: options.cwd,
         env: options.env,
         stdin: 'pipe',
@@ -373,7 +547,23 @@ export async function runFixtureEmbeddingExitProbe(
           ready.resolve('output-overflow');
           continue;
         }
-        if (!isOut) continue;
+        if (!isOut) {
+          if (options.apiControl) {
+            const lines = EffectString.split(
+              stderrBuffered + (typeof chunk === 'string' ? chunk : stderrDecoder.decode(chunk, {stream: true})),
+              '\n',
+            );
+            const partial = lines.pop() ?? '';
+            stderrBuffered = partial.length <= 128 ? partial : '\0';
+            for (const line of lines) {
+              const phase = Option.getOrUndefined(
+                EffectArray.findFirst(API_PHASES, phase => line === API_PHASE_PREFIX + phase),
+              );
+              if (phase !== undefined && apiPhases.length < API_PHASES.length) apiPhases.push(phase);
+            }
+          }
+          continue;
+        }
         buffered += typeof chunk === 'string' ? chunk : decoder.decode(chunk, {stream: true});
         const newline = Option.getOrUndefined(EffectString.indexOf('\n')(buffered));
         if (newline === undefined) continue;
@@ -434,6 +624,7 @@ export async function runFixtureEmbeddingExitProbe(
     }
   };
   const decoder = new TextDecoder();
+  const stderrDecoder = new TextDecoder();
   const stdoutClosed = consume(child.stdout, true),
     stderrClosed = consume(child.stderr, false);
   const closed = Promise.all([observedExit, stdoutClosed, stderrClosed]).then(() => {

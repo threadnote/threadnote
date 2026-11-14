@@ -33,7 +33,12 @@ import {
   runFixtureEmbeddingExitProbe,
   diagnoseFixtureEmbeddingFailure,
   createFixtureWindowsExitObserver,
+  prepareFixtureEmbeddingApiControl,
 } from '../../../../scripts/fixture-owned-process.js';
+import {
+  publishNativeInferenceOverlay,
+  nativeInferenceHostTarget,
+} from '../../../../scripts/native-inference-payload.js';
 import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
 
 function commandChild() {
@@ -135,6 +140,112 @@ const probeRequest = {
 };
 
 const probeSetupLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
+effectIt.effect('the generated SDK control uses the exact admitted bundle and unchanged request/reply lifecycle', () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const root = yield* fs.makeTempDirectory({prefix: 'threadnote-api-control-'});
+    let safeToRemove = true;
+    yield* Effect.addFinalizer(() =>
+      safeToRemove ? fs.remove(root, {recursive: true}).pipe(Effect.orDie) : Effect.void,
+    );
+    const home = path.join(root, 'home');
+    const candidate = path.join(root, 'candidate');
+    const runtime = path.join(candidate, 'runtime');
+    const build = path.join(candidate, 'llama', 'localBuilds', 'fixture', 'Release');
+    yield* fs.makeDirectory(home);
+    yield* fs.makeDirectory(runtime, {recursive: true});
+    yield* fs.makeDirectory(build, {recursive: true});
+    yield* fs.writeFileString(
+      path.join(runtime, 'node-llama-cpp.js'),
+      `export async function getLlama(options) {
+      if(options.build !== 'never' || options.debug !== false || options.logLevel !== 'disabled' || options.progressLogs !== false || options.skipDownload !== true || options.usePrebuiltBinaries !== true) throw new Error('options');
+      return {buildType:'localBuild',gpu:false,dispose:async()=>{},loadModel:async options=> {
+        if(options.ignoreMemorySafetyChecks !== false || !options.loadSignal) throw new Error('model');
+        return {dispose:async()=>{},tokenize:()=>[1],createEmbeddingContext:async options=> {
+          if(options.contextSize !== 512 || options.ignoreMemorySafetyChecks !== false || !options.createSignal || 'threads' in options) throw new Error('context');
+          return {dispose:async()=>{},getEmbeddingFor:async()=>({vector:Array(384).fill(0)})};
+        }};
+      }};
+    }`,
+    );
+    yield* fs.writeFileString(path.join(build, 'llama-addon.node'), 'fake setup addon');
+    yield* fs.writeFileString(
+      path.join(build, '_nlcBuildMetadata.json'),
+      JSON.stringify({buildOptions: {gpu: false, arch: process.arch, platform: 'win'}}),
+    );
+    yield* fs.writeFileString(path.join(path.dirname(build), 'buildDone.status'), 'done');
+    yield* publishNativeInferenceOverlay(candidate, {
+      bunVersion: '1.4.4',
+      bunTarget: nativeInferenceHostTarget(),
+      packageVersion: '3.22.2',
+      llamaCommit: '1729d2ec2c4846df7754f4ce8f90f75f8a30ca3b',
+      sourceInputDigest: EffectString.repeat(64)('0'),
+      origin: 'portable-local-build',
+      toolchain: {},
+    });
+    const executable = path.join(candidate, 'threadnote');
+    yield* fs.makeDirectory(path.join(candidate, 'bins'));
+    expect(
+      Result.isFailure(yield* prepareFixtureEmbeddingApiControl(executable, {home, env: {}}).pipe(Effect.result)),
+    ).toBe(true);
+    expect(yield* fs.exists(path.join(home, '.embedding-api-probe.mjs'))).toBe(false);
+    yield* fs.remove(path.join(candidate, 'bins'), {recursive: true});
+    yield* fs.writeFileString(path.join(build, 'llama-addon.node'), 'tampered setup addon');
+    expect(
+      Result.isFailure(yield* prepareFixtureEmbeddingApiControl(executable, {home, env: {}}).pipe(Effect.result)),
+    ).toBe(true);
+    yield* fs.writeFileString(path.join(build, 'llama-addon.node'), 'fake setup addon');
+    const apiControl = yield* prepareFixtureEmbeddingApiControl(executable, {home, env: {}});
+    const processes = new FixtureProcesses();
+    safeToRemove = false;
+    const result = yield* Effect.tryPromise(() =>
+      runFixtureEmbeddingExitProbe(
+        processes,
+        executable,
+        {...probeRequest, inputs: ['QZ9 standalone short embedding control.']},
+        {cwd: home, env: process.env, deadline: performance.now() + 3000, maxOutputBytes: 512 * 1024, apiControl},
+      ),
+    );
+    const cleanup = yield* Effect.tryPromise(() => processes.closeAndObserve(performance.now() + 1000));
+    safeToRemove = cleanup === 'exited';
+    expect(cleanup).toBe('exited');
+    expect(result.snapshot()).toMatchObject({
+      outcome: 'reply',
+      reply: 'valid',
+      processClosed: true,
+      cleanupRequested: false,
+      stdoutRead: 'eof',
+      stderrRead: 'eof',
+      apiControl: {
+        runtime: 'source-bun',
+        bunVersion: Bun.version,
+        phases: [
+          'input-ready',
+          'runtime-import-start',
+          'runtime-import-ready',
+          'initialize-start',
+          'initialize-ready',
+          'model-load-start',
+          'model-load-ready',
+          'context-start',
+          'context-ready',
+          'tokenize-start',
+          'tokenize-ready',
+          'embed-start',
+          'embed-ready',
+          'context-dispose-start',
+          'context-dispose-ready',
+          'model-dispose-start',
+          'model-dispose-ready',
+          'runtime-dispose-start',
+          'runtime-dispose-ready',
+        ],
+      },
+    });
+  }).pipe(provideTestLayer(probeSetupLayer), TestClock.withLive),
+);
 const probeSetupFixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -293,6 +404,34 @@ it('basic probe setup binds one reply and labels exit after requested stdin clos
   expect(fake.kills).toBe(0);
   expect(await processes.closeAndObserve(performance.now() + 1000)).toBe('exited');
   expect(JSON.stringify(result.snapshot())).not.toContain('PRIVATE_');
+});
+
+it('projects only complete closed API phase tags without retaining unknown native output', async () => {
+  const fake = embeddingProbeChild(() => {
+    fake.io.stderr.write('PRIVATE_NATIVE_OUTPUT\nTHREADNOTE_NATIVE_PHASE:model-load-st');
+    fake.io.stderr.end('art\nTHREADNOTE_NATIVE_PHASE:PRIVATE_UNKNOWN_PHASE\n');
+    fake.exit(9);
+  });
+  const processes = new FixtureProcesses();
+  const result = await runFixtureEmbeddingExitProbe(processes, 'PRIVATE_EXECUTABLE', probeRequest, {
+    cwd: 'PRIVATE_PATH',
+    env: {},
+    deadline: performance.now() + 1000,
+    maxOutputBytes: 512 * 1024,
+    apiControl: {command: [process.execPath, 'PRIVATE_SCRIPT'], bunVersion: Bun.version},
+    spawn: () => fake.child,
+  });
+  expect(result.snapshot()).toMatchObject({
+    outcome: 'exit',
+    stdoutRead: 'eof',
+    stderrRead: 'eof',
+    processClosed: true,
+    cleanupRequested: false,
+    apiControl: {runtime: 'source-bun', bunVersion: Bun.version, phases: ['model-load-start']},
+  });
+  expect(result.snapshot().stderrBytes).toBeGreaterThan(0);
+  expect(JSON.stringify(result.snapshot())).not.toContain('PRIVATE_');
+  expect(await processes.closeAndObserve(performance.now() + 1000)).toBe('exited');
 });
 
 it('holds stdin open after EOF and retains independently observed natural exit and sink facts', async () => {

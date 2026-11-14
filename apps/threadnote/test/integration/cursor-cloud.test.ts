@@ -19,10 +19,84 @@ import {access, mkdir, mkdtemp, readFile, realpath, rm, writeFile} from '@thread
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import {promisify} from '@threadnote/testing/node-util';
-import {describe, expect, it} from 'vitest';
+import {describe, expect, it, vi} from 'vitest';
 import * as EffectRecord from 'effect/Record';
 
 const execFilePromise = promisify(execFile);
+type CursorChildPhase =
+  | 'seed-bare'
+  | 'seed-init'
+  | 'seed-add'
+  | 'seed-commit'
+  | 'seed-remote'
+  | 'seed-push'
+  | 'bootstrap'
+  | 'start'
+  | 'verify';
+interface CursorChildLifetime {
+  readonly deadline: number;
+  closureKnown: boolean;
+}
+interface CursorChildOperation<A> extends Promise<A> {
+  readonly child: {
+    once(event: 'close', listener: () => void): unknown;
+    removeListener(event: 'close', listener: () => void): unknown;
+  };
+}
+
+/** Join the actual direct child within the caller's original absolute lifetime. */
+async function awaitCursorChild<A>(
+  start: () => CursorChildOperation<A>,
+  lifetime: CursorChildLifetime | undefined,
+  phase: CursorChildPhase,
+): Promise<A> {
+  if (lifetime?.closureKnown === false) throw new Error('Cursor Cloud child closure remains unknown.');
+  let operation: CursorChildOperation<A>;
+  try {
+    operation = start();
+  } catch (error) {
+    if (lifetime) {
+      lifetime.closureKnown = false;
+      // oxlint-disable-next-line effecttsgo/global-console -- Synchronous closed-fact marker at the Promise/OS child boundary.
+      console.error(`Cursor Cloud child failure: ${JSON.stringify({phase, close: 'unknown'})}`);
+    }
+    throw error;
+  }
+  if (!lifetime) return operation;
+  let onClose!: () => void;
+  const closed = new Promise<void>(resolve => {
+    onClose = resolve;
+    operation.child.once('close', onClose);
+  });
+  let result: {readonly ok: true; readonly value: A} | {readonly ok: false; readonly error: unknown} | undefined;
+  const settled = operation.then(
+    value => {
+      result = {ok: true, value};
+    },
+    error => {
+      result = {ok: false, error};
+    },
+  );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const known = await Promise.race([
+    Promise.all([settled, closed]).then(() => true),
+    new Promise<false>(resolve => {
+      timer = setTimeout(() => resolve(false), Math.max(0, lifetime.deadline - performance.now()));
+    }),
+  ]);
+  clearTimeout(timer);
+  operation.child.removeListener('close', onClose);
+  if (!known) lifetime.closureKnown = false;
+  if (!known || result?.ok === false)
+    // oxlint-disable-next-line effecttsgo/global-console -- Synchronous closed-fact marker at the Promise/OS child boundary.
+    console.error(`Cursor Cloud child failure: ${JSON.stringify({phase, close: known ? 'closed' : 'unknown'})}`);
+  if (!known || result === undefined)
+    throw new Error('Cursor Cloud child close was not confirmed.', {
+      cause: result?.ok === false ? result.error : undefined,
+    });
+  if (!result.ok) throw result.error;
+  return result.value;
+}
 const CLOUD_TOOL_NAMES = [
   'complete_activation_retrieval_proof',
   'recall_context',
@@ -63,6 +137,58 @@ const expectColdUnavailableWarnings = (value: unknown): void => {
 };
 
 describe('Cursor Cloud integration', () => {
+  it('joins actual child close and preserves unknown closure without extending the case deadline', async () => {
+    const original = new Error('original abort');
+    const output = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      let close!: () => void;
+      const operation = Object.assign(Promise.reject(original), {
+        child: {
+          once: (_event: 'close', listener: () => void) => {
+            close = listener;
+          },
+          removeListener: () => {},
+        },
+      });
+      const lifetime = {deadline: performance.now() + 1000, closureKnown: true};
+      let returned = false;
+      const observed = awaitCursorChild(() => operation, lifetime, 'verify').catch(error => {
+        returned = true;
+        return error;
+      });
+      await Promise.resolve();
+      expect(returned).toBe(false);
+      close();
+      expect(await observed).toBe(original);
+      expect(lifetime.closureKnown).toBe(true);
+
+      const unknown = {deadline: performance.now(), closureKnown: true};
+      const pending = Object.assign(Promise.reject(original), {
+        child: {once: () => {}, removeListener: () => {}},
+      });
+      await expect(awaitCursorChild(() => pending, unknown, 'start')).rejects.toMatchObject({cause: original});
+      expect(unknown.closureKnown).toBe(false);
+      const spawn = {deadline: performance.now() + 1000, closureKnown: true};
+      await expect(
+        awaitCursorChild(
+          () => {
+            throw original;
+          },
+          spawn,
+          'seed-bare',
+        ),
+      ).rejects.toBe(original);
+      expect(spawn.closureKnown).toBe(false);
+      expect(output.mock.calls).toEqual([
+        ['Cursor Cloud child failure: {"phase":"verify","close":"closed"}'],
+        ['Cursor Cloud child failure: {"phase":"start","close":"unknown"}'],
+        ['Cursor Cloud child failure: {"phase":"seed-bare","close":"unknown"}'],
+      ]);
+    } finally {
+      output.mockRestore();
+    }
+  });
+
   it('rejects a failed terminal lexical demand before fixture publication', () => {
     const before: RecallLexicalDemand = {
       version: 2,
@@ -501,24 +627,31 @@ describe('Cursor Cloud integration', () => {
   });
 
   it('starts and verifies the discovered set with CLI restrictions taking precedence over environment selectors', async () => {
-    const fixture = await cloudFixture();
-    const docsRemote = await seedRemote(fixture.root, 'command-docs-share');
+    const lifetime: CursorChildLifetime = {deadline: performance.now() + 30_000, closureKnown: true};
+    const signal = AbortSignal.timeout(25_000);
+    const fixture = await cloudFixture(signal, lifetime);
     const environment = {HOME: fixture.userHome, THREADNOTE_CURSOR_CLOUD_TEAM: '', THREADNOTE_CURSOR_CLOUD_TEAMS: ''};
     const command = async (name: 'start' | 'verify', extra: readonly string[] = [], env: Record<string, string> = {}) =>
       JSON.parse(
         (
-          await runCli(['cloud', 'cursor', name, '--home', fixture.home, '--cwd', process.cwd(), '--json', ...extra], {
-            ...environment,
-            ...env,
-          })
+          await runCli(
+            ['cloud', 'cursor', name, '--home', fixture.home, '--cwd', process.cwd(), '--json', ...extra],
+            {
+              ...environment,
+              ...env,
+            },
+            signal,
+            lifetime,
+          )
         ).stdout,
       );
     try {
+      const docsRemote = await seedRemote(fixture.root, 'command-docs-share', signal, lifetime);
       await expect(command('verify')).rejects.toMatchObject({
         stderr: expect.stringContaining('No writable Cursor Cloud memory shares'),
       });
-      await bootstrap(fixture);
-      await bootstrap(fixture, 'docs', docsRemote);
+      await bootstrap(fixture, undefined, undefined, true, signal, lifetime);
+      await bootstrap(fixture, 'docs', docsRemote, true, signal, lifetime);
       expect((await command('verify')).teams).toEqual(['docs', 'engineering']);
       const registryPath = join(fixture.home, 'share', 'teams.json');
       const registry = JSON.parse(await readFile(registryPath, 'utf8'));
@@ -539,7 +672,11 @@ describe('Cursor Cloud integration', () => {
         });
       }
     } finally {
-      await rm(fixture.root, {force: true, recursive: true});
+      if (lifetime.closureKnown) await rm(fixture.root, {force: true, recursive: true});
+      else {
+        // oxlint-disable-next-line effecttsgo/global-console -- Cleanup must report unknown ownership without an Effect runtime bridge.
+        console.error('Cursor Cloud fixture retained: child closure unknown.');
+      }
     }
   });
 
@@ -1358,49 +1495,50 @@ interface CloudFixture {
   readonly userHome: string;
 }
 
-async function cloudFixture(signal?: AbortSignal): Promise<CloudFixture> {
+async function cloudFixture(signal?: AbortSignal, lifetime?: CursorChildLifetime): Promise<CloudFixture> {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'threadnote-cursor-cloud-')));
   try {
-    const remote = await seedRemote(root, 'memory-share', signal);
+    const remote = await seedRemote(root, 'memory-share', signal, lifetime);
     const home = join(root, 'home');
     const userHome = join(root, 'user-home');
     await mkdir(userHome, {recursive: true});
     return {home, remote, root, userHome};
   } catch (error) {
-    await rm(root, {force: true, recursive: true});
+    if (lifetime?.closureKnown !== false) await rm(root, {force: true, recursive: true});
+    else {
+      // oxlint-disable-next-line effecttsgo/global-console -- Cleanup must report unknown ownership without an Effect runtime bridge.
+      console.error('Cursor Cloud fixture retained: child closure unknown.');
+    }
     throw error;
   }
 }
 
-async function seedRemote(root: string, name: string, signal?: AbortSignal): Promise<string> {
+async function seedRemote(
+  root: string,
+  name: string,
+  signal?: AbortSignal,
+  lifetime?: CursorChildLifetime,
+): Promise<string> {
   const remote = join(root, `${name}.git`);
   const source = join(root, `${name}-seed`);
   await mkdir(source, {recursive: true});
-  await execFilePromise('git', ['init', '--bare', '--initial-branch=main', remote], {
-    env: {...process.env, ...gitIdentityEnvironment},
-    ...(signal ? {signal, timeout: 20_000, killSignal: 'SIGKILL' as const} : {}),
-  });
-  await execFilePromise('git', ['-C', source, 'init', '--initial-branch=main'], {
-    env: {...process.env, ...gitIdentityEnvironment},
-    ...(signal ? {signal, timeout: 20_000, killSignal: 'SIGKILL' as const} : {}),
-  });
+  const git = (phase: CursorChildPhase, args: readonly string[]) =>
+    awaitCursorChild(
+      () =>
+        execFilePromise('git', args, {
+          env: {...process.env, ...gitIdentityEnvironment},
+          ...(signal ? {signal, timeout: 20_000, killSignal: 'SIGKILL' as const} : {}),
+        }),
+      lifetime,
+      phase,
+    );
+  await git('seed-bare', ['init', '--bare', '--initial-branch=main', remote]);
+  await git('seed-init', ['-C', source, 'init', '--initial-branch=main']);
   await writeFile(join(source, 'README.md'), '# Cursor Cloud memory share\n');
-  await execFilePromise('git', ['-C', source, 'add', 'README.md'], {
-    env: {...process.env, ...gitIdentityEnvironment},
-    ...(signal ? {signal, timeout: 20_000, killSignal: 'SIGKILL' as const} : {}),
-  });
-  await execFilePromise('git', ['-C', source, 'commit', '-m', 'seed memory share'], {
-    env: {...process.env, ...gitIdentityEnvironment},
-    ...(signal ? {signal, timeout: 20_000, killSignal: 'SIGKILL' as const} : {}),
-  });
-  await execFilePromise('git', ['-C', source, 'remote', 'add', 'origin', remote], {
-    env: {...process.env, ...gitIdentityEnvironment},
-    ...(signal ? {signal, timeout: 20_000, killSignal: 'SIGKILL' as const} : {}),
-  });
-  await execFilePromise('git', ['-C', source, 'push', '-u', 'origin', 'main'], {
-    env: {...process.env, ...gitIdentityEnvironment},
-    ...(signal ? {signal, timeout: 20_000, killSignal: 'SIGKILL' as const} : {}),
-  });
+  await git('seed-add', ['-C', source, 'add', 'README.md']);
+  await git('seed-commit', ['-C', source, 'commit', '-m', 'seed memory share']);
+  await git('seed-remote', ['-C', source, 'remote', 'add', 'origin', remote]);
+  await git('seed-push', ['-C', source, 'push', '-u', 'origin', 'main']);
   return remote;
 }
 
@@ -1444,6 +1582,7 @@ function bootstrap(
   remote = fixture.remote,
   sync = true,
   signal?: AbortSignal,
+  lifetime?: CursorChildLifetime,
 ) {
   return runCli(
     [
@@ -1464,32 +1603,44 @@ function bootstrap(
     ],
     {HOME: fixture.userHome},
     signal,
+    lifetime,
   );
 }
 
-function runCli(args: readonly string[], environment: Readonly<Record<string, string>> = {}, signal?: AbortSignal) {
+function runCli(
+  args: readonly string[],
+  environment: Readonly<Record<string, string>> = {},
+  signal?: AbortSignal,
+  lifetime?: CursorChildLifetime,
+) {
   const started = performance.now();
-  return execFilePromise(
-    process.execPath,
-    [
-      'apps/threadnote/src/standalone.ts',
-      ...args,
-      ...(process.platform !== 'linux' &&
-      args[0] === 'cloud' &&
-      args[1] === 'cursor' &&
-      args[2] === 'bootstrap' &&
-      !args.includes('--mode')
-        ? ['--no-dev-skills']
-        : []),
-    ],
-    {
-      cwd: process.cwd(),
-      env: {...process.env, ...gitIdentityEnvironment, ...environment, NO_COLOR: '1'},
-      ...(signal ? {signal, timeout: 20_000, killSignal: 'SIGKILL' as const} : {}),
-      maxBuffer: 1_048_576,
-    },
+  const phase = args[2] === 'start' || args[2] === 'verify' ? args[2] : 'bootstrap';
+  return awaitCursorChild(
+    () =>
+      execFilePromise(
+        process.execPath,
+        [
+          'apps/threadnote/src/standalone.ts',
+          ...args,
+          ...(process.platform !== 'linux' &&
+          args[0] === 'cloud' &&
+          args[1] === 'cursor' &&
+          args[2] === 'bootstrap' &&
+          !args.includes('--mode')
+            ? ['--no-dev-skills']
+            : []),
+        ],
+        {
+          cwd: process.cwd(),
+          env: {...process.env, ...gitIdentityEnvironment, ...environment, NO_COLOR: '1'},
+          ...(signal ? {signal, timeout: 20_000, killSignal: 'SIGKILL' as const} : {}),
+          maxBuffer: 1_048_576,
+        },
+      ),
+    lifetime,
+    phase,
   ).catch((error: unknown) => {
-    if (signal && error instanceof Error) {
+    if (signal && !lifetime && error instanceof Error) {
       const stage = EffectArray.join(args.slice(0, args[0] === 'cloud' ? 3 : 1), ' ');
       const stderr =
         'stderr' in error && typeof error.stderr === 'string' ? EffectString.slice(-2048)(error.stderr) : '';
