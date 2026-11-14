@@ -266,6 +266,8 @@ export async function runFixtureEmbeddingExitProbe(
   let stdoutBytes = 0,
     stderrBytes = 0,
     buffered = '';
+  let stdoutRead: 'pending' | 'eof' | 'failed' = 'pending';
+  let stderrRead: 'pending' | 'eof' | 'failed' = 'pending';
   let writeBytes: number | undefined, flushBytes: number | undefined;
   let write: 'pending' | 'returned' | 'failed' = 'pending';
   let flush: 'not-started' | 'pending' | 'complete' | 'failed' = 'not-started';
@@ -306,6 +308,8 @@ export async function runFixtureEmbeddingExitProbe(
     ...(flushBytes === undefined ? {} : {flushBytes}),
     stdoutBytes,
     stderrBytes,
+    stdoutRead,
+    stderrRead,
     reply,
     ...(exitOrigin === undefined ? {} : {exitOrigin}),
     ...(exit === undefined ? {} : {exit}),
@@ -416,12 +420,16 @@ export async function runFixtureEmbeddingExitProbe(
         if (reply !== 'valid') fault('reply');
         ready.resolve('reply');
       }
+      if (isOut) stdoutRead = 'eof';
+      else stderrRead = 'eof';
       if (isOut && reply === 'none') fault('stdout-eof');
       if (isOut && EffectString.trim(buffered)) {
         fault('reply');
         reply = 'invalid';
       }
     } catch {
+      if (isOut) stdoutRead = 'failed';
+      else stderrRead = 'failed';
       fault(isOut ? 'stdout-read' : 'stderr-read');
     }
   };

@@ -18,6 +18,8 @@ import {cryptoLayer} from '@threadnote/platform/crypto';
 import {captureConsole} from '@threadnote/threadnote/effect/console';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {EventEmitter} from 'node:events';
+// oxlint-disable-next-line effecttsgo/node-builtin-import -- Drain the child pipe callback turn before delivering its later stderr event.
+import {setImmediate} from 'node:timers';
 import {PassThrough} from '@threadnote/testing/node-stream';
 import {expect, it, vi} from 'vitest';
 import fc from 'fast-check';
@@ -328,6 +330,8 @@ it('holds stdin open after EOF and retains independently observed natural exit a
     writeBytes: 65_536,
     flush: 'complete',
     flushBytes: 0,
+    stdoutRead: 'eof',
+    stderrRead: 'eof',
     exitOrigin: 'natural',
     exit: {exitCode: 9, signal: null},
     rawExitCode: 0xc0000409,
@@ -339,6 +343,80 @@ it('holds stdin open after EOF and retains independently observed natural exit a
   expect(native.library.symbols.OpenProcess).toHaveBeenCalledWith(0x1000, 0, 42);
   expect(native.observer.read()).toBeUndefined();
   expect(JSON.stringify(result.snapshot())).not.toContain('fedcba');
+  expect(await processes.closeAndObserve(performance.now() + 1000)).toBe('exited');
+});
+
+it('joins stderr delivered after natural exit before marking the probe closed', async () => {
+  const stopped = Promise.withResolvers<number>();
+  const fake = embeddingProbeChild(() => {});
+  const processes = new FixtureProcesses();
+  let completed = false;
+  const pending = runFixtureEmbeddingExitProbe(processes, 'PRIVATE_EXECUTABLE', probeRequest, {
+    cwd: 'PRIVATE_PATH',
+    env: {},
+    deadline: performance.now() + 1000,
+    maxOutputBytes: 512 * 1024,
+    spawn: () => ({...fake.child, exited: stopped.promise}),
+  }).then(result => {
+    completed = true;
+    return result;
+  });
+  fake.io.stdout.end();
+  stopped.resolve(9);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  expect(completed).toBe(false);
+  expect(fake.ends).toBe(0);
+  expect(fake.kills).toBe(0);
+  const delayed = 'PRIVATE_DELAYED_STDERR';
+  fake.io.stderr.end(delayed);
+  const result = await pending;
+  expect(result.snapshot()).toMatchObject({
+    outcome: 'exit',
+    firstFault: 'stdout-eof',
+    stdoutBytes: 0,
+    stderrBytes: Buffer.byteLength(delayed),
+    stdoutRead: 'eof',
+    stderrRead: 'eof',
+    exitOrigin: 'natural',
+    exit: {exitCode: 9, signal: null},
+    processClosed: true,
+    cleanupRequested: false,
+  });
+  expect(fake.kills).toBe(0);
+  expect(JSON.stringify(result.snapshot())).not.toContain('PRIVATE_');
+  expect(await processes.closeAndObserve(performance.now() + 1000)).toBe('exited');
+});
+
+it('retains a later stderr read failure independently of the first stdout EOF fault', async () => {
+  const stopped = Promise.withResolvers<number>();
+  const fake = embeddingProbeChild(() => {});
+  const processes = new FixtureProcesses();
+  const pending = runFixtureEmbeddingExitProbe(processes, 'PRIVATE_EXECUTABLE', probeRequest, {
+    cwd: 'PRIVATE_PATH',
+    env: {},
+    deadline: performance.now() + 1000,
+    maxOutputBytes: 512 * 1024,
+    spawn: () => ({...fake.child, exited: stopped.promise}),
+  });
+  fake.io.stdout.end();
+  stopped.resolve(9);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  fake.io.stderr.destroy(new Error('PRIVATE_STDERR_READ_FAILURE'));
+  const result = await pending;
+  expect(result.snapshot()).toMatchObject({
+    outcome: 'exit',
+    firstFault: 'stdout-eof',
+    stdoutBytes: 0,
+    stderrBytes: 0,
+    stdoutRead: 'eof',
+    stderrRead: 'failed',
+    exitOrigin: 'natural',
+    exit: {exitCode: 9, signal: null},
+    processClosed: true,
+    cleanupRequested: false,
+  });
+  expect(fake.kills).toBe(0);
+  expect(JSON.stringify(result.snapshot())).not.toContain('PRIVATE_');
   expect(await processes.closeAndObserve(performance.now() + 1000)).toBe('exited');
 });
 

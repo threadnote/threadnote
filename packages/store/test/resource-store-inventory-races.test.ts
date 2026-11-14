@@ -9,7 +9,8 @@ import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-pol
 import {RuntimeEntrypoint} from '@threadnote/platform/runtime-entrypoint';
 import {SystemInfo} from '@threadnote/platform/system';
 import {ResourceRecallInvalidation} from '@threadnote/store/resource/recall-invalidation';
-import {ResourceStore} from '@threadnote/store/resource-store';
+import {ResourceIoFailed, ResourceStore} from '@threadnote/store/resource-store';
+import {resourceAccountMutationGenerationPath} from '@threadnote/store/resource/lock';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
@@ -278,5 +279,101 @@ effectIt.effect('propagates a containing directory disappearance instead of omit
     const result = yield* store.list(f.location, ROOT, {recursive: true}).pipe(Effect.result);
     expect(result._tag).toBe('Failure');
     if (result._tag === 'Failure') expect(result.failure._tag).toBe('ResourceIoFailed');
+  }).pipe(run),
+);
+
+effectIt.effect('classifies a protected remove failure without treating it as lock contention', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    const failure = yield* Effect.flip(f.store.remove(f.location, ROOT));
+    expect(failure).toBeInstanceOf(ResourceIoFailed);
+    expect(failure).toMatchObject({operation: 'remove', uri: ROOT});
+    expect(failure.message).toContain('"stage":"remove"');
+    expect(yield* f.store.read(f.location, `${ROOT}/seed.md`)).toBe('seed');
+  }).pipe(run),
+);
+
+for (const stage of ['verify', 'fingerprint', 'generation', 'remove'] as const) {
+  effectIt.effect(`retains the original remove ${stage} failure with bounded platform facts`, () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const target = f.path.join(f.directory, 'seed.md');
+      const generation = resourceAccountMutationGenerationPath(f.path, f.home, 'local');
+      const secret = 'PRIVATE_REMOVE_PATH_MESSAGE_TOKEN';
+      const original = PlatformError.systemError({
+        _tag: 'Busy',
+        module: 'FileSystem',
+        method: 'private-method',
+        pathOrDescriptor: secret,
+        cause: Object.assign(new Error(secret), {code: 'EBUSY'}),
+      });
+      let removeAttempts = 0;
+      const store = yield* f.withFs({
+        realPath: value => (stage === 'verify' && value === target ? Effect.fail(original) : f.fs.realPath(value)),
+        readFile: value => (stage === 'fingerprint' && value === target ? Effect.fail(original) : f.fs.readFile(value)),
+        rename: (from, to) =>
+          stage === 'generation' && to === generation ? Effect.fail(original) : f.fs.rename(from, to),
+        remove: (value, options) => {
+          if (value !== target) return f.fs.remove(value, options);
+          removeAttempts++;
+          expect(options?.recursive).toBe(true);
+          return Effect.fail(original);
+        },
+      });
+      const failure = yield* Effect.flip(
+        store.remove(f.location, `${ROOT}/seed.md`, {
+          recursive: true,
+          ...(stage === 'fingerprint' ? {expectedFingerprint: 'unread'} : {}),
+        }),
+      );
+      expect(failure).toBeInstanceOf(ResourceIoFailed);
+      if (failure._tag !== 'ResourceIoFailed') return yield* Effect.die('Expected remove I/O classification.');
+      expect(failure).toMatchObject({operation: 'remove', uri: `${ROOT}/seed.md`});
+      expect(failure.cause).toBe(original);
+      expect(failure.message).toContain(JSON.stringify({stage, reason: 'Busy', code: 'EBUSY'}));
+      expect(failure.message).not.toContain(secret);
+      expect(failure.message).not.toContain(f.home);
+      expect(removeAttempts).toBe(stage === 'remove' ? 1 : 0);
+      expect(yield* f.store.read(f.location, `${ROOT}/seed.md`)).toBe('seed');
+    }).pipe(run),
+  );
+}
+
+effectIt.effect('keeps unreadable native code unknown without replacing a remove failure', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    const target = f.path.join(f.directory, 'seed.md');
+    const secret = 'PRIVATE_NATIVE_CAUSE';
+    const original = PlatformError.systemError({
+      _tag: 'PermissionDenied',
+      module: 'FileSystem',
+      method: 'remove',
+      cause: Object.defineProperty({}, 'code', {
+        get: () => {
+          throw new Error(secret);
+        },
+      }),
+    });
+    const store = yield* f.withFs({
+      remove: (value, options) => (value === target ? Effect.fail(original) : f.fs.remove(value, options)),
+    });
+    const failure = yield* Effect.flip(store.remove(f.location, `${ROOT}/seed.md`));
+    if (failure._tag !== 'ResourceIoFailed') return yield* Effect.die('Expected original remove failure.');
+    expect(failure.cause).toBe(original);
+    expect(failure.message).toContain(JSON.stringify({stage: 'remove', reason: 'PermissionDenied', code: 'Unknown'}));
+    expect(failure.message).not.toContain(secret);
+  }).pipe(run),
+);
+
+effectIt.effect('keeps a non-platform generation failure unknown and prevents removal', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    const generation = resourceAccountMutationGenerationPath(f.path, f.home, 'local');
+    yield* f.fs.writeFileString(generation, 'PRIVATE_INVALID_GENERATION');
+    const failure = yield* Effect.flip(f.store.remove(f.location, `${ROOT}/seed.md`));
+    if (failure._tag !== 'ResourceIoFailed') return yield* Effect.die('Expected original generation failure.');
+    expect(failure.message).toContain(JSON.stringify({stage: 'generation', reason: 'Unknown', code: 'Unknown'}));
+    expect(failure.message).not.toContain('PRIVATE_');
+    expect(yield* f.fs.readFileString(f.path.join(f.directory, 'seed.md'))).toBe('seed');
   }).pipe(run),
 );
