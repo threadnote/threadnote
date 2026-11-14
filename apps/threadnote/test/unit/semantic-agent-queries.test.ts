@@ -198,27 +198,30 @@ describe('coordinator retained semantic pages', () => {
         const items = EffectArray.map(values, (value, ordinal) => ({ordinal, value}));
         const expected = structuredClone(items);
         const binding = sha256HexSync('query');
-        const snapshot = store.retain(binding, outcome(items, current), yield* Clock.currentTimeMillis);
-        expect(snapshot).toBeDefined();
-        if (!snapshot) throw new Error('Valid bounded fixture was not retained');
+        let page = yield* store.retainAndFirstPage(
+          binding,
+          outcome(items, current),
+          {maxItems, maxBytes},
+          yield* Clock.currentTimeMillis,
+        );
         items.push({ordinal: -1, value: 'not in retained evidence'});
         const collected: Schema.Json[] = [];
-        let cursor: Continuation | undefined;
         let pages = 0;
         do {
-          const page = yield* store.page(binding, snapshot.id, {maxItems, maxBytes}, 10000, cursor);
           expect(page.status).toBe('ok');
           if (page.status !== 'ok') throw new Error('Page unexpectedly unavailable');
           expect(new TextEncoder().encode(JSON.stringify(page)).length).toBeLessThanOrEqual(maxBytes);
           expect(page.items.length).toBeLessThanOrEqual(maxItems);
           expect(page.evidence.observation).toEqual(current);
           collected.push(...page.items);
-          cursor = page.next ?? undefined;
+          const cursor = page.next;
           pages++;
           expect(pages).toBeLessThanOrEqual(expected.length + 1);
-        } while (cursor);
+          if (!cursor) break;
+          page = yield* store.page(binding, cursor.snapshot, {maxItems, maxBytes}, 10000, cursor);
+        } while (true);
         expect(collected).toEqual(expected);
-        expect(observations).toBe(pages);
+        expect(observations).toBe(pages - 1);
       }),
     {arbitrary: {runs: 32}},
   );
@@ -353,7 +356,15 @@ const profileFixtureAt = (subdirectory = '', protocol = true) =>
 const profileFixture = profileFixtureAt();
 
 type DiagnosticMode =
-  'ok' | 'missing-proof' | 'wrong-observation' | 'wrong-proof' | 'malformed-proof' | 'structural-proof' | 'timeout';
+  | 'ok'
+  | 'missing-proof'
+  | 'wrong-observation'
+  | 'wrong-proof'
+  | 'malformed-proof'
+  | 'structural-proof'
+  | 'timeout'
+  | 'closing-source-drift'
+  | 'closing-sdk-drift';
 const diagnosticsFixture = Effect.fn('test.agentDiagnostics')(function* (messages: readonly string[]) {
   const f = yield* profileFixture;
   yield* f.write(f.profile);
@@ -369,6 +380,7 @@ const diagnosticsFixture = Effect.fn('test.agentDiagnostics')(function* (message
   let mode: DiagnosticMode = 'ok';
   let current: Observation | undefined;
   let calls = 0;
+  let observations = 0;
   const api: SemanticSession = {
     upsert: () => Effect.die('The coordinator owns attachment'),
     query: () => Effect.die('Diagnostics must not issue navigation queries'),
@@ -422,8 +434,21 @@ const diagnosticsFixture = Effect.fn('test.agentDiagnostics')(function* (message
           project: undefined,
         };
       }),
-    observe: () => Effect.succeed(current),
-    use: (_observed, _milliseconds, action) => action(api),
+    observe: () =>
+      Effect.sync(() => {
+        observations++;
+        return current;
+      }),
+    use: (_observed, _milliseconds, action) =>
+      Effect.gen(function* () {
+        const result = yield* action(api);
+        if (mode === 'closing-source-drift') {
+          yield* f.fs.writeFileString(f.file, 'changed during producer close');
+          return yield* SemanticSessionFault.make({reason: 'stale'});
+        }
+        if (mode === 'closing-sdk-drift') return yield* LspFault.make({code: 'prerequisite'});
+        return result;
+      }),
   };
   const disk = yield* makeSemanticAgentDiskQueries(coordinator, f.worktree, runtime);
   const services = yield* Effect.context<Effect.Services<ReturnType<typeof disk.query>>>();
@@ -441,7 +466,7 @@ const diagnosticsFixture = Effect.fn('test.agentDiagnostics')(function* (message
                 reason: Schema.is(SemanticSessionFault)(error) ? error.reason : 'provider',
               }),
             ),
-            Effect.flatMap(value => Schema.decodeUnknownEffect(Schema.Json)(value)),
+            Effect.flatMap(value => Schema.decodeEffect(Schema.Json)(value)),
             Effect.mapError(() => LspFault.make({code: 'protocol'})),
           );
         },
@@ -454,6 +479,7 @@ const diagnosticsFixture = Effect.fn('test.agentDiagnostics')(function* (message
     items,
     input: {callerCwd: f.root, file: 'source.ts', language: 'go', operation: 'diagnostics', maxBytes: 8192},
     calls: () => calls,
+    observations: () => observations,
     status: disk.status,
     observe: disk.observe,
     capture: disk.capture,
@@ -503,6 +529,34 @@ describe('host-bound public document diagnostics', () => {
         expect(stale).toMatchObject({_tag: 'Failure', failure: {reason: 'stale'}});
         expect(f.calls()).toBe(1);
       }).pipe(provideTestLayer(queryIo)),
+  );
+  effectIt.effect('packs the closed first result without observing again and checks continuation drift freshly', () =>
+    Effect.gen(function* () {
+      const f = yield* diagnosticsFixture(['first', 'second']);
+      const first = yield* runSemanticAgentQueryWith(f.host, f.config, {...f.input, maxItems: 1});
+      if (first.status !== 'ok' || !first.next) throw new Error('Missing first page');
+      expect(f.calls()).toBe(1);
+      expect(f.observations()).toBe(0);
+      f.drift();
+      const next = yield* runSemanticAgentQueryWith(f.host, f.config, {...f.input, maxItems: 1, cursor: first.next});
+      expect(next.status).toBe('stale');
+      expect(f.observations()).toBe(1);
+      expect(f.calls()).toBe(1);
+      expect(f.status()).toEqual({snapshots: 0, retainedBytes: 0});
+    }).pipe(provideTestLayer(queryIo)),
+  );
+  effectIt.effect('never retains or packs a producer result rejected by its closing source or SDK fence', () =>
+    Effect.gen(function* () {
+      for (const mode of ['closing-source-drift', 'closing-sdk-drift'] as const) {
+        const f = yield* diagnosticsFixture(['candidate result']);
+        f.mode(mode);
+        const result = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+        expect(result.status).not.toBe('ok');
+        expect(f.calls()).toBe(1);
+        expect(f.observations()).toBe(0);
+        expect(f.status()).toEqual({snapshots: 0, retainedBytes: 0});
+      }
+    }).pipe(provideTestLayer(queryIo)),
   );
   effectIt.effect('projects only diagnostic summary fields without mutating provider payloads', () =>
     Effect.gen(function* () {

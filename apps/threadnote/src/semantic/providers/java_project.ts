@@ -922,18 +922,25 @@ export const makeJavaPreparedProject = Effect.fn('semantic.makeJavaPreparedProje
       }
       for (const [name, content] of EffectRecord.toEntries(files)) yield* verifyFile(path.join(project, name), content);
     });
+    const inspectProjection = Effect.gen(function* () {
+      yield* verifyOwnership;
+      for (const [name, content] of EffectRecord.toEntries(files)) {
+        const file = path.join(project, name);
+        if (sha256HexSync(yield* readBounded(file, 2 * 1024 * 1024)) !== sha256HexSync(content)) return yield* fail();
+      }
+    });
     const verifyUsing = (source: typeof loaded.verify) =>
       Effect.gen(function* () {
         yield* source;
-        yield* verifyOwnership;
-        for (const [name, content] of EffectRecord.toEntries(files)) {
-          const file = path.join(project, name);
-          if (sha256HexSync(yield* readBounded(file, 2 * 1024 * 1024)) !== sha256HexSync(content)) return yield* fail();
-        }
+        yield* inspectProjection;
         yield* source;
         yield* verifyOwnership;
       }).pipe(Effect.mapError(error => (Schema.is(LspFault)(error) ? error : fail())));
-    const verify = verifyUsing(loaded.verify);
+    const verify = loaded.verifyWithOwnedProjection(inspectProjection).pipe(
+      Effect.andThen(verifyOwnership),
+      Effect.asVoid,
+      Effect.mapError(error => (Schema.is(LspFault)(error) ? error : fail())),
+    );
     const verifySource = verifyUsing(loaded.verifySource);
     yield* verify;
     return Object.freeze({

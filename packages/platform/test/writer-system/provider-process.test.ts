@@ -1435,37 +1435,53 @@ it.skipIf(process.platform !== 'win32' || !supported)(
         event=new Uint8Array(208),view=new DataView(event.buffer);
       new DataView(startup.buffer).setUint32(0,104,true);
       const check=v=>{if(!v)throw new Error('Native override fixture failed.');};
+      let stageCount=0,stageBytes=0;
+      const stage=async code=>{
+        const completion=code.startsWith('completion-');
+        if(stageCount>=(completion?96:88)||stageBytes+code.length+1>(completion?2048:1792))return;
+        stageCount++;stageBytes+=code.length+1;
+        await new Promise(resolve=>process.stdout.write(code+'\\n',resolve));
+      };
+      await stage('create:before');
       check(k.symbols.CreateProcessW(wide(process.execPath),wide(${JSON.stringify(windowsProviderCommandLine(process.execPath, ['-e', 'process.exit(0)']))}),null,null,0,0x08000001,null,null,startup,info));
+      await stage('create:after');
+      await stage('duplicate:before');
       const self=k.symbols.GetCurrentProcess();check(k.symbols.DuplicateHandle(self,info[0],self,completion,0x00101000,0,0));
+      await stage('duplicate:after');
       const deadline=Date.now()+2500;let exited=false,initial=true;
+      await stage('wait:before');
       while(!exited&&Date.now()<deadline){
         event.fill(0xa5);
         if(!k.symbols.WaitForDebugEvent(event.subarray(0,176),0)){check(k.symbols.GetLastError()===121);await Bun.sleep(1);continue;}
         check(event.subarray(176).every(v=>v===0xa5));
         const kind=view.getUint32(0,true),pid=view.getUint32(4,true),tid=view.getUint32(8,true);let status=0x10002;
+        await stage('wait:after:'+kind);
         if(kind===3){
-          if(info[0]!==view.getBigUint64(24,true))check(k.symbols.CloseHandle(info[0]));
-          if(info[1]!==view.getBigUint64(32,true))check(k.symbols.CloseHandle(info[1]));
+          if(info[0]!==view.getBigUint64(24,true)){await stage('pi-process:before');check(k.symbols.CloseHandle(info[0]));await stage('pi-process:after');}
+          if(info[1]!==view.getBigUint64(32,true)){await stage('pi-thread:before');check(k.symbols.CloseHandle(info[1]));await stage('pi-thread:after');}
         }
-        if(kind===3||kind===6){const file=view.getBigUint64(16,true);if(file!==0n)check(k.symbols.CloseHandle(file));}
+        if(kind===3||kind===6){const file=view.getBigUint64(16,true);if(file!==0n){await stage('image:'+kind+':before');check(k.symbols.CloseHandle(file));await stage('image:'+kind+':after');}}
         if(kind===1){if(initial&&view.getUint32(16,true)===0x80000003&&view.getUint32(168,true)===1)initial=false;else status=0x80010001;}
-        check(kind>=1&&kind<=8);check(k.symbols.ContinueDebugEvent(pid,tid,status));
+        check(kind>=1&&kind<=8);await stage('continue:'+kind+':before');check(k.symbols.ContinueDebugEvent(pid,tid,status));await stage('continue:'+kind+':after');
+        if(kind!==5)await stage('wait:before');
         if(kind===5)exited=true;
       }
       check(exited);
+      await stage('completion-wait:before');
       while(k.symbols.WaitForSingleObject(completion[0],0)===258&&Date.now()<deadline)await Bun.sleep(1);
-      check(k.symbols.WaitForSingleObject(completion[0],0)===0);check(k.symbols.CloseHandle(completion[0]));k.close();
+      check(k.symbols.WaitForSingleObject(completion[0],0)===0);await stage('completion-wait:after');
+      await stage('completion-close:before');check(k.symbols.CloseHandle(completion[0]));await stage('completion-close:after');k.close();
     `;
     const host = `
       const api=await import(${JSON.stringify(new URL('../../src/system.ts', import.meta.url).href)});
       const provider=api.runtimeSpawnOwnedProviderTree({command:process.execPath,args:['-e',${JSON.stringify(fixture)}],cwd:process.cwd(),environment:process.env});
       const output=new Response(provider.stdout).text(),errors=new Response(provider.stderr).text();
-      await provider.closeInput();await output;const stderr=await errors;
+      await provider.closeInput();const stages=await output,stderr=await errors;
       let observation;const deadline=Date.now()+3000;
       do { observation=api.runtimeObserveOwnedProviderTree(provider.handle);if(observation.state==='unknown')break;await Bun.sleep(5); }while(Date.now()<deadline);
       let closeRefused=false;try{api.runtimeCloseOwnedProviderTree(provider.handle);}catch{closeRefused=true;}
       api.runtimeTerminateOwnedProviderTree(provider.handle,'kill');
-      process.stdout.write(JSON.stringify({state:observation.state,leaderExitCode:observation.leaderExitCode,closeRefused,stderr}));
+      process.stdout.write(JSON.stringify({state:observation.state,leaderExitCode:observation.leaderExitCode,closeRefused,stderr,stages}));
     `;
     const child = Bun.spawn([process.execPath, '-e', host], {stdout: 'pipe', stderr: 'pipe'}),
       output = new Response(child.stdout).text(),
@@ -1473,7 +1489,16 @@ it.skipIf(process.platform !== 'win32' || !supported)(
     try {
       expect(await child.exited).toBe(0);
       expect(await errors).toBe('');
-      expect(JSON.parse(await output)).toEqual({state: 'unknown', leaderExitCode: 0, closeRefused: true, stderr: ''});
+      const {stages, ...actual} = JSON.parse(await output);
+      expect(actual, 'Native debugger stages: ' + String(stages)).toEqual({
+        state: 'unknown',
+        leaderExitCode: 0,
+        closeRefused: true,
+        stderr: '',
+      });
+      expect(stages).toContain('create:before\n');
+      expect(stages).toContain('completion-close:after\n');
+      expect(stages.length).toBeLessThanOrEqual(2048);
     } finally {
       if (child.exitCode === null) child.kill();
     }

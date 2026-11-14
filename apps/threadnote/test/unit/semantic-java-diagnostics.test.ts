@@ -14,6 +14,8 @@ import * as javaRuntime from '../../src/semantic/providers/java_runtime.js';
 import * as lsp from '../../src/semantic/lsp_transport.js';
 import {makeJavaAnalysis, type JavaAnalysisOptions} from '../../src/semantic/providers/java.js';
 import {semanticTreeDigest} from '../../src/semantic/fingerprint.js';
+import * as fingerprints from '../../src/semantic/fingerprint.js';
+import {loadJavaPreparedModel} from '../../src/semantic/providers/java_preparation.js';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SemanticActionChoice} from '../../src/semantic/action_choices.js';
@@ -378,6 +380,74 @@ describe('Java request diagnostics', () => {
         {arbitrary: {runs: 8}},
       );
     }
+    effectIt.effect('encloses owned projection inspection with exactly one fresh model verification', () =>
+      Effect.gen(function* () {
+        const f = yield* preparedSessionFixture();
+        const loaded = yield* loadJavaPreparedModel({
+          project: f.project,
+          worktree: f.project,
+          javaHome: f.javaHome,
+          metadataFile: f.metadataFile,
+          metadataDigest: sha256HexSync(yield* f.fs.readFileString(f.metadataFile)),
+        });
+        const digest = fingerprints.semanticSdkDigest;
+        const events: string[] = [];
+        const spy = vi.spyOn(fingerprints, 'semanticSdkDigest').mockImplementation(root =>
+          digest(root).pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                if (root === f.javaHome) events.push('sdk');
+              }),
+            ),
+          ),
+        );
+        yield* Effect.gen(function* () {
+          yield* loaded.verifyWithOwnedProjection(Effect.sync(() => void events.push('projection')));
+          expect(events).toEqual(['sdk', 'projection', 'sdk']);
+          events.length = 0;
+          yield* f.prepared.verify;
+          expect(events).toEqual(['sdk', 'sdk']);
+          events.length = 0;
+          yield* f.prepared.verifySource;
+          expect(events).toEqual([]);
+        }).pipe(Effect.ensuring(Effect.sync(() => spy.mockRestore())));
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
+    );
+    effectIt.effect('rejects SDK, source and artifact mutation inside owned projection inspection', () =>
+      Effect.gen(function* () {
+        for (const target of ['sdk', 'source', 'model', 'library'] as const) {
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const f = yield* preparedSessionFixture();
+              const loaded = yield* loadJavaPreparedModel({
+                project: f.project,
+                worktree: f.project,
+                javaHome: f.javaHome,
+                metadataFile: f.metadataFile,
+                metadataDigest: sha256HexSync(yield* f.fs.readFileString(f.metadataFile)),
+              });
+              const file = {
+                sdk: f.path.join(f.javaHome, 'release'),
+                source: f.path.join(f.source, 'Main.java'),
+                model: f.metadataFile,
+                library: f.library,
+              }[target];
+              const before = yield* f.fs.readFileString(file);
+              let inspections = 0;
+              const result = yield* loaded
+                .verifyWithOwnedProjection(
+                  Effect.sync(() => {
+                    inspections++;
+                  }).pipe(Effect.andThen(f.fs.writeFileString(file, before + 'changed'))),
+                )
+                .pipe(Effect.exit);
+              expect(result._tag).toBe('Failure');
+              expect(inspections).toBe(1);
+            }),
+          );
+        }
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
+    );
     effectIt.effect('retains exactly two full guards and retires on SDK drift inside a source-only exchange', () =>
       Effect.gen(function* () {
         const f = yield* preparedSessionFixture();

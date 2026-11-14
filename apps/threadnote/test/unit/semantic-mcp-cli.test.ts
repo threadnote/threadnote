@@ -769,7 +769,7 @@ const memoryContextFixture = Effect.gen(function* () {
             if (body.operation !== 'agent-query') return Effect.die('Unexpected diagnostic endpoint operation');
             return disk.query(body.request).pipe(
               Effect.provide(services),
-              Effect.flatMap(value => Schema.decodeUnknownEffect(Schema.Json)(value)),
+              Effect.flatMap(value => Schema.decodeEffect(Schema.Json)(value)),
               Effect.mapError(() => LspFault.make({code: 'protocol'})),
             );
           },

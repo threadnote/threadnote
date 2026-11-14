@@ -33,6 +33,7 @@ export const makeSemanticAgentDiskQueries = Effect.fn('semantic.agentDiskQueries
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const crypto = yield* SecureRandom.SecureRandom;
+  const clock = yield* Clock.Clock;
   const namespace = sha256HexSync(yield* crypto.randomBytes(32));
   const store = makeSemanticAgentQueryStore(namespace, (observation, milliseconds) =>
     coordinator.observe(observation, milliseconds),
@@ -149,19 +150,25 @@ export const makeSemanticAgentDiskQueries = Effect.fn('semantic.agentDiskQueries
         : api.query(request.operation, attached.observation, request.position, request.milliseconds),
     );
     if (outcome.status !== 'ok') return outcome;
-    const now = yield* Clock.currentTimeMillis;
-    const snapshot = yield* Effect.try({
-      try: () => store.retain(request.query, outcome, now),
-      catch: () => LspFault.make({code: 'capacity'}),
-    });
-    if (!snapshot)
-      return {
-        version: 1 as const,
-        status: 'budget-exceeded' as const,
-        reason: 'Complete provider result exceeds the bounded retained-query capacity; no partial set was substituted',
-        evidence: null,
-      };
-    return yield* store.page(request.query, snapshot.id, budget, request.milliseconds);
+    if (buffer !== undefined || request.view !== undefined) {
+      // Owned buffers also require a fresh coordinator observation; their bound view can outlive configuration drift.
+      const now = yield* Clock.currentTimeMillis;
+      const snapshot = yield* Effect.try({
+        try: () => store.retain(request.query, outcome, now),
+        catch: () => LspFault.make({code: 'capacity'}),
+      });
+      if (!snapshot)
+        return {
+          version: 1 as const,
+          status: 'budget-exceeded' as const,
+          reason:
+            'Complete provider result exceeds the bounded retained-query capacity; no partial set was substituted',
+          evidence: null,
+        };
+      return yield* store.page(request.query, snapshot.id, budget, request.milliseconds);
+    }
+    // Only the just-closed saved-disk result uses local retention and initial packing without another observation.
+    return yield* store.retainAndFirstPage(request.query, outcome, budget, clock.currentTimeMillisUnsafe());
   });
   return {
     capture: (request: SemanticReadinessSource) =>
@@ -276,6 +283,60 @@ export function makeSemanticAgentQueryStore<R>(
     retainedBytes += bytes;
     return snapshot;
   };
+  const projectPage = (
+    entry: RetainedQuery,
+    current: Observation,
+    binding: string,
+    budget: {readonly maxItems: number; readonly maxBytes: number},
+    now: number,
+    cursor?: Continuation,
+  ): SemanticAgentQueryResult => {
+    const result = queryPage(entry.snapshot, current, binding, budget, cursor);
+    if (result.status === 'page') {
+      entry.lastUsed = now;
+      return result.page;
+    }
+    if (result.status === 'stale') {
+      drop(entry.snapshot.id);
+      return stale();
+    }
+    return {
+      version: 1 as const,
+      status: result.status === 'invalid-cursor' ? ('invalid-cursor' as const) : ('budget-exceeded' as const),
+      reason:
+        result.status === 'invalid-cursor'
+          ? 'Continuation does not identify this immutable query'
+          : 'Requested page cannot fit its mandatory metadata and items',
+      evidence: null,
+    };
+  };
+  // Only the actual completed query path uses this route; continuations always re-observe below.
+  const retainAndFirstPage = (
+    binding: string,
+    outcome: Extract<QueryOutcome, {status: 'ok'}>,
+    budget: {readonly maxItems: number; readonly maxBytes: number},
+    now: number,
+  ) =>
+    Effect.suspend(() => {
+      let snapshot: ReturnType<typeof retain>;
+      try {
+        snapshot = retain(binding, outcome, now);
+      } catch {
+        return Effect.fail(LspFault.make({code: 'capacity'}));
+      }
+      // Retain and pure page projection share this synchronous continuation, with no intervening work.
+      return Effect.succeed(
+        snapshot
+          ? projectPage(entries.get(snapshot.id)!, snapshot.evidence.observation, binding, budget, now)
+          : {
+              version: 1 as const,
+              status: 'budget-exceeded' as const,
+              reason:
+                'Complete provider result exceeds the bounded retained-query capacity; no partial set was substituted',
+              evidence: null,
+            },
+      );
+    });
   const page = Effect.fn('semantic.agentQueryPage')(function* (
     binding: string,
     snapshotId: string,
@@ -294,27 +355,11 @@ export function makeSemanticAgentQueryStore<R>(
       drop(snapshotId);
       return stale();
     }
-    const result = queryPage(entry.snapshot, current, binding, budget, cursor);
-    if (result.status === 'page') {
-      entry.lastUsed = now;
-      return result.page;
-    }
-    if (result.status === 'stale') {
-      drop(snapshotId);
-      return stale();
-    }
-    return {
-      version: 1 as const,
-      status: result.status === 'invalid-cursor' ? ('invalid-cursor' as const) : ('budget-exceeded' as const),
-      reason:
-        result.status === 'invalid-cursor'
-          ? 'Continuation does not identify this immutable query'
-          : 'Requested page cannot fit its mandatory metadata and items',
-      evidence: null,
-    };
+    return projectPage(entry, current, binding, budget, now, cursor);
   });
   return {
     retain,
+    retainAndFirstPage,
     page,
     prune,
     clear: () => {

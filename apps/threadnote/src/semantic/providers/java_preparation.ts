@@ -993,7 +993,10 @@ export const loadJavaPreparedModel = Effect.fn('semantic.loadJavaPreparedModel')
         if ((yield* semanticTreeDigest(selected.worktree)) !== model.sourceDigest) return yield* fail();
         yield* sdk;
       });
-    const verifyUsing = (sdk: typeof verifySdk) =>
+    const verifyUsing = <E = never, R = never>(
+      sdk: typeof verifySdk,
+      inspectProjection: Effect.Effect<void, E, R> = Effect.void,
+    ) =>
       Effect.gen(function* () {
         for (const owner of owners) yield* owner.verify;
         yield* verifyArtifacts;
@@ -1012,6 +1015,8 @@ export const loadJavaPreparedModel = Effect.fn('semantic.loadJavaPreparedModel')
           image.sourceDigest !== model.sourceEncoding.sourceDigest
         )
           return yield* fail();
+        // Owned projection inspection is enclosed by this same model's opening and closing proofs.
+        yield* inspectProjection;
         yield* verifyArtifacts;
         yield* verifyFingerprints(sdk);
         for (const file of expected.keys()) yield* verifyFile(file);
@@ -1034,6 +1039,8 @@ export const loadJavaPreparedModel = Effect.fn('semantic.loadJavaPreparedModel')
       absentSourceRoots: Object.freeze(absentSourceRoots),
       verify,
       verifySource,
+      verifyWithOwnedProjection: <E, R>(inspection: Effect.Effect<void, E, R>) =>
+        verifyUsing(verifySdk, inspection).pipe(Effect.asVoid),
     });
   },
   effect =>
