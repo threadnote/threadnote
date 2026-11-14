@@ -8,7 +8,7 @@ import {
 } from '@threadnote/recall/background/lexical-demand';
 import {runEffect} from '../helpers/effect-runtime.js';
 import {runShareSync} from '@threadnote/threadnote/effect/share';
-import {Array as EffectArray, Schema} from 'effect';
+import {Array as EffectArray, Console, Effect, Schema} from 'effect';
 import * as EffectString from 'effect/String';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -57,8 +57,8 @@ async function awaitCursorChild<A>(
   } catch (error) {
     if (lifetime) {
       lifetime.closureKnown = false;
-      // oxlint-disable-next-line effecttsgo/global-console -- Synchronous closed-fact marker at the Promise/OS child boundary.
-      console.error(`Cursor Cloud child failure: ${JSON.stringify({phase, close: 'unknown'})}`);
+      // oxlint-disable-next-line threadnote/no-effect-runtime-in-tests -- Synchronous Promise/OS boundary logging; Exit preserves the original child failure.
+      Effect.runSyncExit(Console.error(`Cursor Cloud child failure: ${JSON.stringify({phase, close: 'unknown'})}`));
     }
     throw error;
   }
@@ -88,8 +88,10 @@ async function awaitCursorChild<A>(
   operation.child.removeListener('close', onClose);
   if (!known) lifetime.closureKnown = false;
   if (!known || result?.ok === false)
-    // oxlint-disable-next-line effecttsgo/global-console -- Synchronous closed-fact marker at the Promise/OS child boundary.
-    console.error(`Cursor Cloud child failure: ${JSON.stringify({phase, close: known ? 'closed' : 'unknown'})}`);
+    // oxlint-disable-next-line threadnote/no-effect-runtime-in-tests -- Synchronous Promise/OS boundary logging; Exit preserves the original child failure.
+    Effect.runSyncExit(
+      Console.error(`Cursor Cloud child failure: ${JSON.stringify({phase, close: known ? 'closed' : 'unknown'})}`),
+    );
   if (!known || result === undefined)
     throw new Error('Cursor Cloud child close was not confirmed.', {
       cause: result?.ok === false ? result.error : undefined,
@@ -674,8 +676,8 @@ describe('Cursor Cloud integration', () => {
     } finally {
       if (lifetime.closureKnown) await rm(fixture.root, {force: true, recursive: true});
       else {
-        // oxlint-disable-next-line effecttsgo/global-console -- Cleanup must report unknown ownership without an Effect runtime bridge.
-        console.error('Cursor Cloud fixture retained: child closure unknown.');
+        // oxlint-disable-next-line threadnote/no-effect-runtime-in-tests -- Synchronous Promise/OS cleanup logging; Exit cannot mask the original case failure.
+        Effect.runSyncExit(Console.error('Cursor Cloud fixture retained: child closure unknown.'));
       }
     }
   });
@@ -1506,8 +1508,8 @@ async function cloudFixture(signal?: AbortSignal, lifetime?: CursorChildLifetime
   } catch (error) {
     if (lifetime?.closureKnown !== false) await rm(root, {force: true, recursive: true});
     else {
-      // oxlint-disable-next-line effecttsgo/global-console -- Cleanup must report unknown ownership without an Effect runtime bridge.
-      console.error('Cursor Cloud fixture retained: child closure unknown.');
+      // oxlint-disable-next-line threadnote/no-effect-runtime-in-tests -- Synchronous Promise/OS cleanup logging; Exit cannot mask the original seed failure.
+      Effect.runSyncExit(Console.error('Cursor Cloud fixture retained: child closure unknown.'));
     }
     throw error;
   }
