@@ -1,3 +1,6 @@
+import * as EffectString from 'effect/String';
+import {runCodeGraphCheckpointExport, importCodeGraphCheckpointSnapshot} from '@threadnote/graph/checkpoint/operations';
+import {codeGraphEffectiveSymbolTermsQueryStatement} from '@threadnote/graph/store/queries';
 import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
@@ -92,6 +95,159 @@ const unpublishedSurfaceChangeScenarioArbitrary = surfaceChangeScenarioArbitrary
 );
 
 describe('code graph incremental-overlay differential properties', () => {
+  fcEffectProp(
+    it,
+    'preserves imported compact alias/replacement parity and the original deletion fallback without losing weighted body rows',
+    {scenario: scenarioArbitrary},
+    ({scenario}) =>
+      Effect.acquireUseRelease(
+        Effect.sync(() => createRepository(scenario)),
+        root =>
+          Effect.gen(function* () {
+            const homes = `${root}-import-homes`,
+              sourceHome = join(homes, 'source'),
+              importedHome = join(homes, 'imported'),
+              fullHome = join(homes, 'full');
+            yield* Effect.sync(() => {
+              git(root, ['remote', 'add', 'origin', 'https://github.com/acme/imported-property.git']);
+              writeFileSync(
+                join(root, 'src', 'é-leaf.ts'),
+                'export function caféLeaf() { const bodyOnlyToken = "秘密"; return bodyOnlyToken; }',
+              );
+              git(root, ['add', '.']);
+              git(root, [
+                '-c',
+                'user.name=Fixture',
+                '-c',
+                'user.email=fixture@example.invalid',
+                'commit',
+                '-qm',
+                'independent body leaf',
+              ]);
+            });
+            const indexer = yield* CodeGraphIndexer,
+              store = yield* CodeGraphStore,
+              path = yield* Path.Path;
+            const source = yield* indexer.index({cwd: root, threadnoteHome: sourceHome});
+            expect(isLexicalV2Snapshot(source.snapshot.id)).toBe(true);
+            const config = (home: string) => ({
+              account: 'fixture',
+              agentContextHome: home,
+              agentId: 'fixture',
+              manifestPath: join(homes, 'manifest.yaml'),
+              user: 'fixture',
+            });
+            const artifact = join(homes, 'original.cgcp');
+            yield* runCodeGraphCheckpointExport(config(sourceHome), {cwd: root, output: artifact});
+            const imported = yield* importCodeGraphCheckpointSnapshot(config(importedHome), {
+              cwd: root,
+              input: artifact,
+              followOnIndex: false,
+            });
+            expect(isLexicalV2Snapshot(imported.snapshot.id)).toBe(false);
+            const layout = codeGraphLayout(
+              path,
+              importedHome,
+              imported.identity.checkoutId,
+              imported.identity.worktreeId,
+            );
+            const receiptBefore = yield* store.checkpointImportReceipt(layout.databasePath, imported.snapshot.id);
+            expect(receiptBefore?.completionSha256).toMatch(/^[a-f0-9]{64}$/u);
+            const originalGraph = yield* store.loadGraph(layout.databasePath, imported.snapshot.id);
+            yield* Effect.sync(() =>
+              git(root, [
+                '-c',
+                'user.name=Fixture',
+                '-c',
+                'user.email=fixture@example.invalid',
+                'commit',
+                '--allow-empty',
+                '-qm',
+                'unchanged source alias',
+              ]),
+            );
+            const alias = yield* indexer.index({cwd: root, threadnoteHome: importedHome});
+            expect(alias.snapshot.baseSnapshotId).toBe(imported.snapshot.id);
+            expect(isLexicalV2Snapshot(alias.snapshot.id)).toBe(false);
+            yield* Effect.sync(() => applyDirtyScenario(root, scenario));
+            const incremental = yield* indexer.index({cwd: root, threadnoteHome: importedHome});
+            const full = yield* indexer.index({cwd: root, threadnoteHome: fullHome, incrementalOverlay: false});
+            expect(incremental.materialization?.mode, JSON.stringify(incremental.materialization)).toBe(
+              'incremental-overlay',
+            );
+            expect(incremental.snapshot.baseSnapshotId).toBe(imported.snapshot.id);
+            expect(isLexicalV2Snapshot(incremental.snapshot.id)).toBe(false);
+            expect(isLexicalV2Snapshot(full.snapshot.id)).toBe(true);
+            const fullLayout = codeGraphLayout(path, fullHome, full.identity.checkoutId, full.identity.worktreeId);
+            expect(normalizeGraph(yield* store.loadGraph(layout.databasePath, incremental.snapshot.id))).toEqual(
+              normalizeGraph(yield* store.loadGraph(fullLayout.databasePath, full.snapshot.id)),
+            );
+            const relation = (databasePath: string, snapshotId: string, baseSnapshotId?: string) => {
+              const database = new Database(databasePath, {readonly: true, strict: true});
+              try {
+                const statement = codeGraphEffectiveSymbolTermsQueryStatement(snapshotId, baseSnapshotId);
+                return database.query(statement.text).all(...statement.parameters);
+              } finally {
+                database.close(false);
+              }
+            };
+            const actual = yield* Effect.sync(() =>
+              relation(layout.databasePath, incremental.snapshot.id, incremental.snapshot.baseSnapshotId),
+            );
+            const reference = yield* Effect.sync(() =>
+              relation(fullLayout.databasePath, full.snapshot.id, full.snapshot.baseSnapshotId),
+            );
+            expect(actual).toEqual(reference);
+            expect(
+              EffectArray.some(
+                reference,
+                row =>
+                  typeof row === 'object' &&
+                  row !== null &&
+                  'term' in row &&
+                  typeof row.term === 'string' &&
+                  EffectString.startsWith('~body:v1:')(row.term),
+              ),
+            ).toBe(true);
+            expect(yield* store.checkpointImportReceipt(layout.databasePath, imported.snapshot.id)).toEqual(
+              receiptBefore,
+            );
+            expect(yield* store.loadGraph(layout.databasePath, imported.snapshot.id)).toEqual(originalGraph);
+            yield* Effect.sync(() => rmSync(join(root, 'src', 'é-leaf.ts')));
+            const deleted = yield* indexer.index({cwd: root, threadnoteHome: importedHome});
+            const deletedReference = yield* indexer.index({
+              cwd: root,
+              threadnoteHome: fullHome,
+              incrementalOverlay: false,
+            });
+            expect(deleted.materialization).toMatchObject({mode: 'full', fallbackReason: 'file-set-changed'});
+            expect(isLexicalV2Snapshot(deleted.snapshot.id)).toBe(true);
+            expect(normalizeGraph(yield* store.loadGraph(layout.databasePath, deleted.snapshot.id))).toEqual(
+              normalizeGraph(yield* store.loadGraph(fullLayout.databasePath, deletedReference.snapshot.id)),
+            );
+            expect(
+              yield* Effect.sync(() =>
+                relation(layout.databasePath, deleted.snapshot.id, deleted.snapshot.baseSnapshotId),
+              ),
+            ).toEqual(
+              yield* Effect.sync(() =>
+                relation(
+                  fullLayout.databasePath,
+                  deletedReference.snapshot.id,
+                  deletedReference.snapshot.baseSnapshotId,
+                ),
+              ),
+            );
+          }),
+        root =>
+          Effect.sync(() => {
+            rmSync(root, {recursive: true, force: true});
+            rmSync(`${root}-import-homes`, {recursive: true, force: true});
+          }),
+      ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+    {fastCheck: {numRuns: 4}, timeout: 130000},
+  );
+
   fcEffectProp(
     it,
     'matches a full rebuild after randomized body-only edits change multi-file references',

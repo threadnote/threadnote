@@ -1,3 +1,6 @@
+import {checkpointCompletionCapacity} from '../../checkpoint/pack.js';
+import type {CodeGraphCheckpointImportVerification} from '../models.js';
+import {verifyCheckpointCompletionInPublishingTransaction} from '../../checkpoint/authority.js';
 import {
   isLexicalV2Snapshot,
   recordLexicalViewBinding,
@@ -627,6 +630,7 @@ const activatePersistedFullSnapshot = Effect.fn('codeGraph.activatePersistedFull
   snapshotPackProvenance?: readonly CodeGraphLanguagePackProvenance[],
   materializedFileShardAssociationsComplete = false,
   checkpointImportReceipt?: CodeGraphCheckpointImportReceiptInput,
+  checkpointVerification?: CodeGraphCheckpointImportVerification,
 ) {
   const runWrite: CodeGraphWriterGate = writerGate ?? (effect => effect);
   const observe = activationProgressObserver(onProgress);
@@ -711,14 +715,21 @@ const activatePersistedFullSnapshot = Effect.fn('codeGraph.activatePersistedFull
     materializedFileShardAssociationsComplete,
     snapshotPackProvenance?.length ?? 0,
   );
+  const verificationCapacity =
+    checkpointImportReceipt === undefined
+      ? {bytes: 0, rows: 0}
+      : yield* Effect.try({
+          try: () => checkpointCompletionCapacity(checkpointVerification?.artifactVerification),
+          catch: () => CodeGraphStoreError.of('Original checkpoint verification capacity is unavailable.'),
+        });
   const publicationCapacity: CodeGraphDirectPersistentCapacityBoundary = {
-    finalFactBytes: 0,
+    finalFactBytes: verificationCapacity.bytes,
     operation: 'publish persistent code graph snapshot',
     // V4 rows were associated by bounded materialization batches. Legacy
     // callers can still publish one v3 association per inventory file. The
     // Fixed rows cover lexical/extractor/reuse/lease receipts, the ready state
     // update, build-owner deletion, and pack-provenance delete/insert writes.
-    rowCount: saturatingCapacityAdd(shardPublicationPlan.rowCount, checkpointImportReceipt === undefined ? 0 : 2),
+    rowCount: saturatingCapacityAdd(shardPublicationPlan.rowCount, verificationCapacity.rows),
   };
   let readyTransactionStartedAt = 0;
   const readyTransaction = Effect.suspend(() => {
@@ -756,6 +767,18 @@ const activatePersistedFullSnapshot = Effect.fn('codeGraph.activatePersistedFull
         `;
           }
           yield* insertActivationLease(sql, snapshot.id, promotionLease);
+          let completion: object | undefined;
+          if (checkpointImportReceipt !== undefined) {
+            if (!checkpointVerification)
+              return yield* CodeGraphStoreError.of('Original checkpoint verification is required.');
+            completion = yield* verifyCheckpointCompletionInPublishingTransaction(sql, {
+              snapshotId: snapshot.id,
+              input: checkpointImportReceipt,
+              identity,
+              artifactVerification: checkpointVerification.artifactVerification,
+              ownerToken,
+            }).pipe(Effect.provide(checkpointVerification.context));
+          }
           const completed = yield* sql<{readonly id: string}>`
         UPDATE snapshots
         SET state = 'ready', file_count = ${snapshot.fileCount}, symbol_count = ${snapshot.symbolCount},
@@ -778,6 +801,7 @@ const activatePersistedFullSnapshot = Effect.fn('codeGraph.activatePersistedFull
               snapshot.id,
               checkpointImportReceipt,
               DateTime.formatIso(yield* DateTime.now),
+              completion,
             );
           }
           yield* sql`

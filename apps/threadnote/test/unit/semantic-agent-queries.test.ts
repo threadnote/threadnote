@@ -57,7 +57,8 @@ import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestCommandExecutorLayer, TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {LspFault} from '../../src/semantic/lsp_transport.js';
 import {makeReadDeadline} from '@threadnote/platform/read_deadline';
-import {serveSemanticEndpoint, requestSemanticEndpoint} from '../../src/semantic/coordinator.js';
+import {serveSemanticEndpoint, requestSemanticEndpoint, semanticCatalogKey} from '../../src/semantic/coordinator.js';
+import {runSemanticReadinessWith} from '../../src/semantic/readiness.js';
 import {SemanticSessionFault, type SemanticSession} from '../../src/semantic/provider.js';
 import type {ContextBriefFollowUpV1, SemanticContextKnowledgeV1} from '@threadnote/context/types';
 import {parseContextBriefJsonText} from '@threadnote/context/projector';
@@ -1804,11 +1805,17 @@ const ownedBufferFixture = Effect.gen(function* () {
   const current = new Map<string, Observation>();
   const texts = new Map<string, string>();
   let closes = 0;
+  let attachments = 0;
+  let startupControls = 0;
   let failAttachment = false;
   let queryBarrier: Effect.Effect<void> = Effect.void;
+  let attachBarrier: Effect.Effect<void> = Effect.void;
   const coordinator: Parameters<typeof serveSemanticEndpoint>[0] = {
-    attach: (seed, text) =>
+    catalogKey: semanticCatalogKey(f.profile.catalog),
+    attach: (seed, text, _language, _environment, control) =>
       Effect.sync(() => {
+        attachments++;
+        if (control) startupControls++;
         const observed = {
           ...seed,
           configuration: sha256HexSync('config'),
@@ -1831,6 +1838,13 @@ const ownedBufferFixture = Effect.gen(function* () {
             if (!failAttachment) return Effect.void;
             failAttachment = false;
             return Effect.fail(LspFault.make({code: 'protocol'}));
+          }),
+        ),
+        Effect.tap(() =>
+          Effect.suspend(() => {
+            const barrier = attachBarrier;
+            attachBarrier = Effect.void;
+            return barrier;
           }),
         ),
       ),
@@ -1863,6 +1877,7 @@ const ownedBufferFixture = Effect.gen(function* () {
     token,
     worktree: f.worktree,
     runtimeIdentity: runtime,
+    dataHome: f.home,
   });
   const host: SemanticAgentQueryHost = {
     runtimeIdentity: Effect.succeed(runtime),
@@ -1899,6 +1914,9 @@ const ownedBufferFixture = Effect.gen(function* () {
     ...f,
     open,
     lifecycle,
+    readiness: (input: unknown) => runSemanticReadinessWith(host, f.config, input),
+    attachments: () => attachments,
+    startupControls: () => startupControls,
     read,
     current,
     closes: () => closes,
@@ -1913,6 +1931,9 @@ const ownedBufferFixture = Effect.gen(function* () {
         observation: observed,
         milliseconds: 1000,
       }),
+    setAttachBarrier: (barrier: Effect.Effect<void>) => {
+      attachBarrier = barrier;
+    },
     setBarrier: (barrier: Effect.Effect<void>) => {
       queryBarrier = barrier;
     },
@@ -1981,6 +2002,162 @@ describe('public owned semantic buffers', () => {
         expect(f.texts.get(b.handle.id)).toContain('owner B');
         expect(f.closes()).toBe(1);
       }).pipe(provideTestLayer(queryIo), TestClock.withLive),
+  );
+
+  effectIt.effect(
+    'explicit owned-buffer readiness retains one private overlay and open claims it without another attachment',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* ownedBufferFixture;
+        const text = 'export const answer = "startup buffer";';
+        const started = yield* f.readiness({
+          action: 'start',
+          callerCwd: f.root,
+          file: 'source.ts',
+          language: 'go',
+          view: {kind: 'buffer', text},
+        });
+        expect(started.status).toBe('ok');
+        if (started.status !== 'ok' || !started.job) return yield* Effect.die('Expected private startup job');
+        const job = started.job;
+        let state = started.progress.state;
+        for (let poll = 0; poll < 20 && (state === 'accepted' || state === 'running'); poll++) {
+          yield* Effect.sleep(5);
+          const status = yield* f.readiness({action: 'status', callerCwd: f.root, job});
+          expect(status.status).toBe('ok');
+          if (status.status !== 'ok') return yield* Effect.die('Startup status refused');
+          expect(status).not.toHaveProperty('handle');
+          state = status.progress.state;
+        }
+        expect(state).toBe('ready');
+        expect(f.attachments()).toBe(1);
+        expect(f.startupControls()).toBe(1);
+        const id = [...f.current.keys()][0];
+        if (!id) return yield* Effect.die('Missing prepared overlay');
+        expect((yield* f.read({id, capability: job.capability}, 1)).status).toBe('stale');
+        const open = {
+          action: 'open',
+          callerCwd: f.root,
+          file: 'source.ts',
+          language: 'go',
+          text,
+          startup: job,
+          milliseconds: 10000,
+        };
+        expect((yield* f.lifecycle({...open, text: text + 'foreign'})).status).toBe('stale');
+        const opened = yield* f
+          .lifecycle(open)
+          .pipe(Effect.flatMap(Schema.decodeUnknownEffect(SemanticAgentViewSuccess)));
+        if (opened.action !== 'open') return yield* Effect.die('Expected real open');
+        expect(opened.handle.id).toBe(id);
+        expect(f.attachments()).toBe(1);
+        expect(yield* f.read(opened.handle, 1)).toMatchObject({status: 'ok', items: [text]});
+        expect(yield* f.lifecycle(open)).toEqual(opened);
+        expect(f.attachments()).toBe(1);
+        yield* f.readiness({action: 'cancel', callerCwd: f.root, job});
+        expect(f.closes()).toBe(0);
+        yield* f.lifecycle({action: 'close', callerCwd: f.root, handle: opened.handle});
+        expect(f.closes()).toBe(1);
+        expect((yield* f.lifecycle(open)).status).toBe('stale');
+        expect(f.attachments()).toBe(1);
+      }).pipe(provideTestLayer(queryIo), TestClock.withLive),
+  );
+
+  effectIt.effect(
+    'buffer startup cancellation acknowledges before an uninterruptible attachment finishes and retains original closure',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* ownedBufferFixture;
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        f.setAttachBarrier(
+          Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.uninterruptible(Deferred.await(release)))),
+        );
+        const start = yield* f.readiness({
+          action: 'start',
+          callerCwd: f.root,
+          file: 'source.ts',
+          language: 'go',
+          view: {kind: 'buffer', text: 'pending'},
+        });
+        if (start.status !== 'ok' || !start.job) return yield* Effect.die('Expected startup');
+        yield* Deferred.await(entered);
+        const cancelled = yield* f.readiness({action: 'cancel', callerCwd: f.root, job: start.job});
+        expect(cancelled).toMatchObject({status: 'ok', progress: {state: 'cancelling'}});
+        expect(f.current.size).toBe(1);
+        expect(
+          (yield* f.lifecycle({
+            action: 'open',
+            callerCwd: f.root,
+            file: 'source.ts',
+            language: 'go',
+            text: 'pending',
+            startup: start.job,
+          })).status,
+        ).toBe('stale');
+        yield* Deferred.succeed(release, undefined);
+        for (let poll = 0; poll < 20 && f.current.size !== 0; poll++) yield* Effect.sleep(5);
+        expect(f.current.size).toBe(0);
+        expect(f.attachments()).toBe(1);
+        expect(f.closes()).toBe(1);
+        expect(yield* f.readiness({action: 'status', callerCwd: f.root, job: start.job})).toMatchObject({
+          status: 'ok',
+          progress: {state: 'cancelled', cleanup: 'drained'},
+        });
+      }).pipe(provideTestLayer(queryIo), TestClock.withLive),
+  );
+  effectIt.effect('pending startup and published buffers share the original grant quota through atomic transfer', () =>
+    Effect.gen(function* () {
+      const f = yield* ownedBufferFixture;
+      const start = yield* f.readiness({
+        action: 'start',
+        callerCwd: f.root,
+        file: 'source.ts',
+        language: 'go',
+        view: {kind: 'buffer', text: 'reserved'},
+      });
+      if (start.status !== 'ok' || !start.job) return yield* Effect.die('Expected private startup');
+      const job = start.job;
+      let ready = false;
+      for (let poll = 0; poll < 20 && !ready; poll++) {
+        const status = yield* f.readiness({action: 'status', callerCwd: f.root, job});
+        ready = status.status === 'ok' && status.progress.state === 'ready';
+        if (!ready) yield* Effect.sleep(5);
+      }
+      expect(ready).toBe(true);
+      const publicViews = yield* Effect.forEach(EffectArray.range(1, 15), () => f.open('public'));
+      expect(f.attachments()).toBe(16);
+      expect(
+        (yield* f.readiness({
+          action: 'start',
+          callerCwd: f.root,
+          file: 'source.ts',
+          language: 'go',
+          view: {kind: 'buffer', text: 'over quota'},
+        })).status,
+      ).toBe('unavailable');
+      expect(f.attachments()).toBe(16);
+      const request = {
+        action: 'open',
+        callerCwd: f.root,
+        file: 'source.ts',
+        language: 'go',
+        text: 'reserved',
+        startup: job,
+      };
+      expect(
+        (yield* f.lifecycle({action: 'open', callerCwd: f.root, file: 'source.ts', language: 'go', text: 'reserved'}))
+          .status,
+      ).toBe('unavailable');
+      expect((yield* f.lifecycle(request)).status).toBe('ok');
+      expect(f.attachments()).toBe(16);
+      expect(
+        (yield* f.lifecycle({action: 'open', callerCwd: f.root, file: 'source.ts', language: 'go', text: ''})).status,
+      ).toBe('unavailable');
+      yield* f.lifecycle({action: 'close', callerCwd: f.root, handle: publicViews[0].handle});
+      expect((yield* f.open('released')).status).toBe('ok');
+      expect(f.attachments()).toBe(17);
+    }).pipe(provideTestLayer(queryIo), TestClock.withLive),
   );
   effectIt.effect('rejects oversized text before attachment and unknown handles after restart', () =>
     Effect.gen(function* () {

@@ -40,8 +40,8 @@ import {
   SemanticAgentBufferHandle,
   SemanticEndpointReadiness,
   SemanticVerificationReply,
-  semanticAgentBufferLimits,
 } from './agent_query_protocol.js';
+import {makeSemanticOwnedBufferViews} from './owned_buffer_views.js';
 import {makeSemanticAgentDiskQueries} from './agent_query_store.js';
 import {
   makeSemanticReadinessJobs,
@@ -1142,28 +1142,6 @@ export const serveSemanticEndpoint = Effect.fn('semantic.serveEndpoint')(functio
     Schema.is(Digest)(options.runtimeIdentity) && observe
       ? yield* makeSemanticAgentDiskQueries({...coordinator, observe}, options.worktree, options.runtimeIdentity)
       : undefined;
-  const readiness =
-    agentQueries && options.dataHome && coordinator.catalogKey
-      ? yield* makeSemanticReadinessJobs({
-          worktree: options.worktree,
-          prepare: (source, content, control) =>
-            verifyReadinessProfile(options.dataHome!, source, coordinator.catalogKey!).pipe(
-              Effect.andThen(agentQueries.prepare(source, content, control)),
-            ),
-          current: (source, observation) =>
-            Effect.gen(function* () {
-              yield* verifyReadinessProfile(options.dataHome!, source, coordinator.catalogKey!);
-              const remaining = yield* Effect.serviceOption(ReadDeadlineContext).pipe(
-                Effect.flatMap(deadline =>
-                  Option.isSome(deadline) ? readDeadlineRemaining(deadline.value) : Effect.succeed(10000),
-                ),
-              );
-              const current = yield* agentQueries.observe(observation, Math.min(45000, remaining));
-              return current !== undefined && observationKey(current) === observationKey(observation);
-            }),
-          close: coordinator.closeView,
-        })
-      : undefined;
   const agentChanges =
     Schema.is(Digest)(options.runtimeIdentity) && observe && options.dataHome
       ? yield* makeSemanticAgentChanges(
@@ -1176,212 +1154,58 @@ export const serveSemanticEndpoint = Effect.fn('semantic.serveEndpoint')(functio
           },
         )
       : undefined;
-  const grants = new Map<
-    string,
-    {
-      token: string;
-      lastUsed: number;
-      gate: Semaphore.Semaphore;
-      public?: {
-        id: string;
-        observation: Observation;
-        language: SemanticLanguage;
-        environment?: string;
-        profile: string;
-        bytes: number;
-        expiresAt: number;
-      };
-    }
-  >();
-  const lifecycle = Semaphore.makeUnsafe(1);
-  const publicGrant = (handle: typeof SemanticAgentBufferHandle.Type) => {
-    const entry = EffectOption.getOrUndefined(
-      EffectArray.findFirst([...grants], ([, grant]) => grant.public?.id === handle.id),
-    );
-    if (!entry) return undefined;
-    if (entry[1].token !== handle.capability) throw SemanticSessionFault.make({reason: 'conflict'});
-    return entry;
-  };
-  const checkPublic = Effect.fn('semantic.checkPublicView')(function* (
-    handle: typeof SemanticAgentBufferHandle.Type,
-    profile?: string,
-  ) {
-    const found = yield* Effect.try({
-      try: () => publicGrant(handle),
-      catch: () => SemanticSessionFault.make({reason: 'conflict'}),
-    });
-    if (!found || !found[1].public) return yield* SemanticSessionFault.make({reason: 'stale'});
-    const now = yield* Clock.currentTimeMillis;
-    if (
-      now >= found[1].public.expiresAt ||
-      now < found[1].public.expiresAt - semanticAgentBufferLimits.ttlMilliseconds ||
-      (profile !== undefined && found[1].public.profile !== profile)
-    )
-      return yield* SemanticSessionFault.make({reason: 'stale'});
-    return {id: found[0], grant: found[1], binding: found[1].public};
-  });
-  const agentView = (body: SemanticAgentEndpointView) =>
-    lifecycle
-      .withPermit(
-        Effect.gen(function* () {
-          if (body.worktree !== options.worktree || !options.runtimeIdentity || !observe)
-            return yield* LspFault.make({code: 'rejected'});
-          if (new TextEncoder().encode(JSON.stringify(body)).length > semanticAgentBufferLimits.maxRequestBytes)
-            return yield* LspFault.make({code: 'capacity'});
-          const bytes = new TextEncoder().encode(body.text ?? '').length;
-          const publicEntries = EffectArray.filter([...grants.values()], grant => grant.public !== undefined);
-          const total = EffectArray.reduce(publicEntries, 0, (sum, grant) => sum + (grant.public?.bytes ?? 0));
-          if (
-            bytes > semanticAgentBufferLimits.maxTextBytes ||
-            (body.text !== undefined &&
-              /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(body.text))
-          )
-            return yield* LspFault.make({code: 'capacity'});
-          if (body.action === 'open') {
-            if (
-              !body.project ||
-              !body.uri ||
-              !body.language ||
-              body.text === undefined ||
-              body.handle ||
-              body.expectedVersion !== undefined
-            )
-              return yield* LspFault.make({code: 'protocol'});
-            if (
-              publicEntries.length >= semanticAgentBufferLimits.maxGrants ||
-              grants.size >= 256 ||
-              total + bytes > semanticAgentBufferLimits.maxRetainedBytes
-            )
-              return yield* LspFault.make({code: 'capacity'});
-            const root = yield* path.fromFileUrl(new URL(options.worktree));
-            const project = yield* path.fromFileUrl(new URL(body.project));
-            const file = yield* path.fromFileUrl(new URL(body.uri));
-            if (
-              !(project === root || EffectString.startsWith(root + path.sep)(project)) ||
-              !EffectString.startsWith(project + path.sep)(file) ||
-              EffectString.split(path.sep)(file).includes('.git') ||
-              (yield* fs.realPath(project)) !== project ||
-              (yield* fs.realPath(file)) !== file ||
-              (yield* fs.stat(file)).type !== 'File'
-            )
-              return yield* LspFault.make({code: 'rejected'});
-            const identity = sha256HexSync(yield* crypto.randomBytes(32));
-            const token = sha256HexSync(yield* crypto.randomBytes(32));
-            const seed: Observation = {
-              version: 1,
-              repository: sha256HexSync(options.worktree),
-              worktree: options.worktree,
-              project: body.project,
-              configuration: EffectString.repeat(64)('0'),
-              toolchain: EffectString.repeat(64)('0'),
-              provider: {id: semanticHostSelection[body.language].provider, version: 'host-unbound', generation: 0},
-              view: {kind: 'overlay', id: identity, owner: 'agent-buffer:' + identity, epoch: 0},
-              uri: body.uri,
-              content: sha256HexSync(body.text),
-              documentVersion: 1,
-              projectEpoch: 0,
-            };
-            const id = sessionIdentity(seed);
-            const expiresAt = (yield* Clock.currentTimeMillis) + semanticAgentBufferLimits.ttlMilliseconds;
-            const grant = {
-              token,
-              lastUsed: expiresAt - semanticAgentBufferLimits.ttlMilliseconds,
-              gate: Semaphore.makeUnsafe(1),
-              public: {
-                id: identity,
-                observation: seed,
-                language: body.language,
-                ...(body.environment ? {environment: body.environment} : {}),
-                profile: body.profile,
-                bytes,
-                expiresAt,
-              },
-            };
-            grants.set(id, grant);
-            return yield* Effect.gen(function* () {
-              const attached = yield* coordinator.attach(seed, body.text!, body.language!, body.environment);
-              grant.public.observation = attached.observation;
-              yield* checkPublic({id: identity, capability: token}, body.profile);
-              return {
-                version: 1,
-                status: 'ok',
-                action: 'open',
-                handle: {id: identity, capability: token},
-                observation: attached.observation,
-                expiresAt,
-              };
-            }).pipe(
-              Effect.onExit(exit =>
-                Exit.isFailure(exit)
-                  ? coordinator
-                      .closeView(grant.public.observation)
-                      .pipe(Effect.ignore, Effect.ensuring(Effect.sync(() => grants.delete(id))))
-                  : Effect.void,
+  const {
+    grants,
+    checkPublic,
+    request: legacyAgentView,
+    ...bufferViews
+  } = yield* makeSemanticOwnedBufferViews(coordinator, options, sessionIdentity);
+  const readiness =
+    agentQueries && options.dataHome && coordinator.catalogKey
+      ? yield* makeSemanticReadinessJobs({
+          worktree: options.worktree,
+          reserve: (source, content) => bufferViews.reserve(source, content),
+          prepare: (source, content, control, reserved) =>
+            verifyReadinessProfile(options.dataHome!, source, coordinator.catalogKey!).pipe(
+              Effect.andThen(
+                source.buffer
+                  ? bufferViews.prepare(source, content, control, reserved)
+                  : agentQueries.prepare(source, content, control),
               ),
-            );
-          }
-          if (!body.handle || body.project || body.uri || body.language || body.environment)
-            return yield* LspFault.make({code: 'protocol'});
-          const owned = yield* checkPublic(body.handle, body.profile);
-          return yield* owned.grant.gate.withPermit(
+            ),
+          current: (source, observation) =>
             Effect.gen(function* () {
-              const current = yield* checkPublic(body.handle!, body.profile);
-              if (current.grant !== owned.grant) return yield* SemanticSessionFault.make({reason: 'stale'});
-              if (body.action === 'close') {
-                yield* coordinator.closeView(current.binding.observation);
-                grants.delete(current.id);
-                return {version: 1, status: 'ok', action: 'close'};
-              }
-              const before = current.binding.observation;
-              if (body.expectedVersion !== before.documentVersion)
-                return yield* SemanticSessionFault.make({reason: 'conflict'});
-              if (
-                body.text === undefined ||
-                before.documentVersion === null ||
-                before.documentVersion >= Number.MAX_SAFE_INTEGER
-              )
-                return yield* LspFault.make({code: 'protocol'});
-              if (total - current.binding.bytes + bytes > semanticAgentBufferLimits.maxRetainedBytes)
-                return yield* LspFault.make({code: 'capacity'});
-              const verified = yield* coordinator.observe!(before, body.milliseconds);
-              if (!verified || observationKey(verified) !== observationKey(before))
-                return yield* SemanticSessionFault.make({reason: 'stale'});
-              return yield* Effect.gen(function* () {
-                const attached = yield* coordinator.attach(
-                  {...before, content: sha256HexSync(body.text!), documentVersion: before.documentVersion! + 1},
-                  body.text!,
-                  current.binding.language,
-                  current.binding.environment,
-                );
-                current.binding.observation = attached.observation;
-                current.binding.bytes = bytes;
-                yield* checkPublic(body.handle!, body.profile);
-                return {
-                  version: 1,
-                  status: 'ok',
-                  action: 'update',
-                  observation: attached.observation,
-                  expiresAt: current.binding.expiresAt,
-                };
-              }).pipe(
-                Effect.onExit(exit =>
-                  Exit.isFailure(exit)
-                    ? coordinator
-                        .closeView(current.binding.observation)
-                        .pipe(Effect.ignore, Effect.ensuring(Effect.sync(() => grants.delete(current.id))))
-                    : Effect.void,
+              yield* verifyReadinessProfile(options.dataHome!, source, coordinator.catalogKey!);
+              const remaining = yield* Effect.serviceOption(ReadDeadlineContext).pipe(
+                Effect.flatMap(deadline =>
+                  Option.isSome(deadline) ? readDeadlineRemaining(deadline.value) : Effect.succeed(10000),
                 ),
               );
+              const current = yield* source.buffer
+                ? coordinator.observe!(observation, Math.min(45000, remaining))
+                : agentQueries.observe(observation, Math.min(45000, remaining));
+              if (source.buffer) yield* verifyReadinessProfile(options.dataHome!, source, coordinator.catalogKey!);
+              return current !== undefined && observationKey(current) === observationKey(observation);
             }),
-          );
-        }),
-      )
-      .pipe(
-        Effect.timeoutOption(body.milliseconds),
-        Effect.flatMap(result =>
-          result._tag === 'Some' ? Effect.succeed(result.value) : Effect.fail(LspFault.make({code: 'timeout'})),
-        ),
-      );
+          close: observation =>
+            observation.view.kind === 'overlay'
+              ? bufferViews.closePending(observation)
+              : coordinator.closeView(observation),
+        })
+      : undefined;
+  const agentView = (body: SemanticAgentEndpointView) =>
+    body.action === 'open' && body.startup
+      ? Effect.gen(function* () {
+          if (!readiness) return yield* LspFault.make({code: 'prerequisite'});
+          const source = yield* bufferViews.sourceForOpen(body);
+          return yield* readiness.claim(body.startup!, source, bufferViews.publish);
+        }).pipe(
+          Effect.timeoutOption(body.milliseconds),
+          Effect.flatMap(result =>
+            result._tag === 'Some' ? Effect.succeed(result.value) : Effect.fail(LspFault.make({code: 'timeout'})),
+          ),
+        )
+      : legacyAgentView(body);
   let requests = 0;
   let shutdown = false;
   let lastUsed = yield* Clock.currentTimeMillis;
@@ -1415,11 +1239,19 @@ export const serveSemanticEndpoint = Effect.fn('semantic.serveEndpoint')(functio
           return yield* LspFault.make({code: 'prerequisite'});
         const source = body.request;
         if (source.action === 'start') {
+          if ((source.buffer === undefined) !== (source.text === undefined))
+            return yield* LspFault.make({code: 'protocol'});
           const deadline = yield* makeReadDeadline(120000);
           const content = yield* withinReadDeadline(
             deadline,
             verifyReadinessProfile(options.dataHome, source, coordinator.catalogKey).pipe(
-              Effect.andThen(agentQueries.capture(source)),
+              Effect.andThen(
+                source.buffer
+                  ? source.text !== undefined && sha256HexSync(source.text) === source.buffer.content
+                    ? Effect.succeed(source.text)
+                    : Effect.fail(LspFault.make({code: 'protocol'}))
+                  : agentQueries.capture(source),
+              ),
             ),
           );
           return yield* readiness.start(source, content, deadline);
@@ -1659,12 +1491,15 @@ export const serveSemanticEndpoint = Effect.fn('semantic.serveEndpoint')(functio
           Effect.gen(function* () {
             if (
               grants.get(id) === grant &&
-              (grant.public
-                ? now >= grant.public.expiresAt || now < grant.public.expiresAt - 600000
+              ((grant.public ?? grant.reserved)
+                ? now >= (grant.public ?? grant.reserved)!.expiresAt ||
+                  now < (grant.public ?? grant.reserved)!.expiresAt - 600000
                 : now - grant.lastUsed >= 600000)
             ) {
               if (grant.public) yield* coordinator.closeView(grant.public.observation);
-              grants.delete(id);
+              else if (grant.reserved)
+                yield* bufferViews.closePending(grant.reserved.observation).pipe(Effect.ignoreCause);
+              if (!grant.reserved) grants.delete(id);
             }
           }),
         );

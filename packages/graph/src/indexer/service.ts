@@ -1,3 +1,5 @@
+import {completedLegacyCheckpointBase} from './incremental.js';
+import {isLexicalV2Snapshot} from '../store/lexical_projection.js';
 import {lexicalViewBindingFor, lexicalPhysicalSnapshotIdentity} from '../store/lexical_projection.js';
 import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
@@ -287,7 +289,6 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
       ): Effect.Effect<CodeGraphIndexSummary, unknown> => {
         let publishedBackgroundDemand = false;
         const vectorPolicy = codeGraphIndexVectorPolicy(request);
-        // Only indexing publications cross this boundary and authorize demand.
         const publicationStore =
           vectorPolicy !== 'background'
             ? unobservedStore
@@ -392,7 +393,6 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                   admissionEnvironment,
                   scope,
                 );
-            // Isolated background children must adopt the observed demand target before retrying.
             const refreshDemandToken =
               request.refreshDemandToken ?? codeGraphRefreshDemandFromEnvironment(system.environment());
             const refreshDemandIdentity = {
@@ -428,7 +428,6 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                             }),
                       ),
                     );
-            // Equivalent scoped observations update only applicability authority: no reporter, builder slot, or fact build.
             if (
               !request.force &&
               scopeEvidence !== undefined &&
@@ -699,9 +698,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                               requestedOverlay,
                               scopedObservation,
                             );
-                            // Completed-concurrent promotion changes the ready authority.
                             yield* beginDemandPublication();
-                            // Reused payload needs bounded cleanup; only new payload requires another full drain.
                             yield* store.retireIncompleteWorktreeSnapshots(
                               layout.databasePath,
                               identity.repositoryId,
@@ -904,7 +901,6 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                       yield* anonymousTelemetry.observeInventory(inventory);
                       yield* anonymousTelemetry.observeExtractedFactBytes(yield* cacheCoalescer.extractedFactBytes);
                       // Reclaim large inventory/extraction heaps before activation overlaps the writer page cache.
-                      // Small graphs skip the stop-the-world pause.
                       yield* Effect.sync(() => {
                         if (codeGraphInventoryNeedsSynchronousReclamation(inventory.files)) {
                           Bun.gc(true);
@@ -966,7 +962,6 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                           ? reusableExisting
                           : yield* firstReadySnapshotById(store, layout.databasePath, readyCandidateIds)
                         : undefined;
-                      // Prefer content-equivalent HEAD reuse when inventory provenance changes the exact snapshot ID.
                       const reusableReady =
                         reusableReadyById ??
                         (!options.force && !inventory.dirty
@@ -989,7 +984,6 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                           : inventory.dirty
                             ? new Set(readyCandidateIds)
                             : new Set([flatSnapshotId]);
-                      // Inventory is complete; every remaining route can promote or materialize.
                       yield* beginDemandPublication();
                       const reclaimSnapshots = (cleanupMode: 'deferred' | 'required') =>
                         store
@@ -1277,6 +1271,11 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                         }
                         if (preassessment.mode === 'fallback') {
                           incrementalAssessment = preassessment;
+                        } else if (
+                          !isLexicalV2Snapshot(committedBase!.snapshot.id) &&
+                          !(yield* completedLegacyCheckpointBase(store, layout.databasePath, committedBase!.snapshot))
+                        ) {
+                          incrementalAssessment = {mode: 'fallback', reason: 'staging-identity-mismatch'};
                         } else {
                           incrementalBuilding = {
                             baseSnapshotId: committedBase!.snapshot.id,
@@ -1286,11 +1285,13 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                             extractorSet,
                             fileCount: 0,
                             graphContentId,
-                            id: lexicalPhysicalSnapshotIdentity(
-                              logicalSnapshotId,
-                              'overlay',
-                              committedBase!.snapshot.id,
-                            ),
+                            id: isLexicalV2Snapshot(committedBase!.snapshot.id)
+                              ? lexicalPhysicalSnapshotIdentity(
+                                  logicalSnapshotId,
+                                  'overlay',
+                                  committedBase!.snapshot.id,
+                                )
+                              : logicalSnapshotId,
                             overlayFingerprint: inventory.overlayFingerprint,
                             repositoryId: identity.repositoryId,
                             scopeId: scope?.scopeKey,
@@ -1610,7 +1611,6 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
               embedding,
             }).pipe(Effect.map(semantic => ({...summary, semantic}))),
           ),
-          // Run after the indexing scope releases database sessions, leases and locks.
           Effect.ensuring(
             Effect.suspend(() =>
               publishedBackgroundDemand && Option.isSome(embeddingWorker)

@@ -1,3 +1,6 @@
+import {consumeCheckpointCompletion} from '../checkpoint/authority.js';
+import {symbolTerms, factBodyDiscovery} from './utilities.js';
+import {BODY_DISCOVERY_PREFIX, validateBodyDiscovery} from '../languages/body_discovery.js';
 import {isLexicalV2Snapshot, lexicalV2RecordLookupStatement} from './lexical_projection.js';
 import {Array as EffectArray} from 'effect';
 import {Effect, Predicate} from 'effect';
@@ -55,6 +58,7 @@ interface CheckpointImportRow {
   readonly source_graph_content_id: unknown;
   readonly source_repository_id: unknown;
   readonly trust: unknown;
+  readonly completion_sha256: unknown;
 }
 
 interface CheckpointSnapshotAuthorityRow {
@@ -376,7 +380,18 @@ function receiptFromRow(row: CheckpointImportRow): CodeGraphCheckpointImportRece
   if (typeof row.snapshot_id !== 'string' || typeof row.recorded_at !== 'string') {
     throw invalid('Stored code graph checkpoint import receipt is invalid.');
   }
-  return {...input, importedAt: row.recorded_at, snapshotId: row.snapshot_id};
+  if (
+    row.completion_sha256 !== undefined &&
+    row.completion_sha256 !== null &&
+    (typeof row.completion_sha256 !== 'string' || !SHA256_HEX.test(row.completion_sha256))
+  )
+    throw invalid('Checkpoint completion is invalid.');
+  return {
+    ...input,
+    importedAt: row.recorded_at,
+    snapshotId: row.snapshot_id,
+    ...(typeof row.completion_sha256 === 'string' ? {completionSha256: row.completion_sha256} : {}),
+  };
 }
 
 function sameReceiptInput(
@@ -392,8 +407,13 @@ const selectCheckpointImportRow = Effect.fn('codeGraph.selectCheckpointImportRow
   snapshotId: string,
 ) {
   const timestamp = table === 'checkpoint_import_builds' ? 'started_at' : 'imported_at';
+  const columns = yield* sql.unsafe<{readonly name: string}>(`PRAGMA table_info(${table})`);
+  const completion =
+    table === 'checkpoint_import_receipts' && EffectArray.some(columns, column => column.name === 'completion_sha256')
+      ? 'completion_sha256'
+      : 'NULL';
   const rows = yield* sql.unsafe<CheckpointImportRow>(
-    `SELECT snapshot_id, format_version, source_repository_id, source_commit_id,
+    `SELECT ${completion} AS completion_sha256, snapshot_id, format_version, source_repository_id, source_commit_id,
        source_graph_content_id, abi_algorithm, abi_digest, logical_algorithm, logical_digest,
        base_logical_digest, artifact_algorithm, artifact_digest, artifact_size,
        artifact_media_type, coverage_json, trust, ${timestamp} AS recorded_at
@@ -586,6 +606,56 @@ function samePackProvenance(
     record.resolutionVersion === expected.resolutionVersion
   );
 }
+
+/** File-fact rows precede symbols in the verified wire; retain only this bounded symbol page's closed body terms. */
+const checkpointPreparedTerms = Effect.fn('codeGraph.checkpointPreparedTerms')(function* (
+  sql: SqlClient.SqlClient,
+  snapshotId: string,
+  symbols: readonly CodeGraphSymbol[],
+) {
+  const byPath = new Map<string, CodeGraphSymbol[]>();
+  for (const symbol of symbols) {
+    const group = byPath.get(symbol.path) ?? [];
+    group.push(symbol);
+    byPath.set(symbol.path, group);
+  }
+  const terms = new Map<CodeGraphSymbol, readonly (readonly [string, number])[]>();
+  for (const [path, group] of byPath) {
+    const rows = yield* sql<{readonly facts_json: string}>`SELECT shard.facts_json FROM snapshot_file_shards association
+      JOIN materialized_file_shards shard ON shard.id=association.shard_id WHERE association.snapshot_id=${snapshotId} AND association.path=${path} LIMIT 2`;
+    const extra = new Map<string, readonly string[]>();
+    if (rows.length === 1) {
+      const facts = yield* Effect.try({
+        try: () => decodeStoredCodeGraphFact(rows[0].facts_json, path).facts,
+        catch: () => invalid('Checkpoint body fact is invalid.'),
+      });
+      for (const input of factBodyDiscovery([facts])) {
+        const body = yield* Effect.try({
+          try: () => validateBodyDiscovery(input, path, facts.symbols),
+          catch: () => invalid('Checkpoint body ownership is invalid.'),
+        });
+        for (const symbol of group)
+          for (const record of body.records)
+            if (record.ownerId === symbol.id) {
+              if (
+                symbol.path !== body.path ||
+                symbol.contentHash !== body.contentHash ||
+                (symbol.kind !== 'function' && symbol.kind !== 'method') ||
+                canonicalJson(symbol.span) !== canonicalJson(record.ownerSpan)
+              )
+                return yield* invalid('Checkpoint body symbol differs from its original owner.');
+              extra.set(symbol.id, record.terms);
+            }
+      }
+    }
+    for (const symbol of group)
+      terms.set(symbol, [
+        ...symbolTerms(symbol),
+        ...EffectArray.map(extra.get(symbol.id) ?? [], term => [BODY_DISCOVERY_PREFIX + term, 1] as const),
+      ]);
+  }
+  return terms;
+});
 
 const stageCheckpointSupplementalRecord = Effect.fn('codeGraph.stageCheckpointSupplementalRecord')(function* (
   sql: SqlClient.SqlClient,
@@ -913,22 +983,36 @@ export const stageCheckpointImportRecordPage = Effect.fn('codeGraph.stageCheckpo
     records,
     (record): record is Extract<CodeGraphCheckpointRecordV1, {readonly kind: 'moniker'}> => record.kind === 'moniker',
   );
+  // A verified chunk can contain both file facts and symbols. Body projection needs its original complete file image first.
+  for (const record of records)
+    if (record.kind === 'file' || record.kind === 'file-fact') {
+      yield* stageCheckpointSupplementalRecord(sql, snapshotId, authority[0].extractor_set, record, completedAt);
+    }
+  const preparedSymbols = EffectArray.map(symbols, checkpointSymbol);
+  const preparedEdges = EffectArray.map(edges, checkpointEdge);
+  const terms = yield* checkpointPreparedTerms(sql, snapshotId, preparedSymbols);
   yield* stagePersistedFullFacts(
     sql,
     snapshotId,
     ownerToken,
     page.batchIndex,
-    EffectArray.map(symbols, checkpointSymbol),
-    EffectArray.map(edges, checkpointEdge),
+    preparedSymbols,
+    preparedEdges,
     [],
     () => Effect.void,
     true,
-    undefined,
+    {
+      batch: {batchIndex: page.batchIndex, symbols: preparedSymbols, edges: preparedEdges, references: []},
+      boundedReferences: [],
+      reexportsByReferenceBatch: [],
+      symbolTerms: terms,
+    },
     EffectArray.map(monikers, checkpointMoniker),
   );
-  for (const record of records) {
-    yield* stageCheckpointSupplementalRecord(sql, snapshotId, authority[0].extractor_set, record, completedAt);
-  }
+  for (const record of records)
+    if (record.kind !== 'file' && record.kind !== 'file-fact') {
+      yield* stageCheckpointSupplementalRecord(sql, snapshotId, authority[0].extractor_set, record, completedAt);
+    }
   yield* sql`
     INSERT INTO checkpoint_import_batches (
       snapshot_id, batch_index, digest_algorithm, batch_digest, record_count, completed_at
@@ -1074,7 +1158,7 @@ export const verifyCheckpointImportRecordCounts = Effect.fn('codeGraph.verifyChe
 });
 
 function receiptInputFromReceipt(receipt: CodeGraphCheckpointImportReceipt): CodeGraphCheckpointImportReceiptInput {
-  const {importedAt: _importedAt, snapshotId: _snapshotId, ...input} = receipt;
+  const {importedAt: _importedAt, snapshotId: _snapshotId, completionSha256: _completionSha256, ...input} = receipt;
   return input;
 }
 
@@ -1084,24 +1168,31 @@ export const publishCheckpointImportReceipt = Effect.fn('codeGraph.publishCheckp
   snapshotId: string,
   input: CodeGraphCheckpointImportReceiptInput,
   importedAt: string,
+  completionToken?: object,
 ) {
   const columns = receiptColumns(input);
+  const completionSha256 =
+    completionToken === undefined
+      ? undefined
+      : yield* consumeCheckpointCompletion(sql, completionToken, snapshotId, input);
   const existing = yield* selectCheckpointImportRow(sql, 'checkpoint_import_receipts', snapshotId);
   if (existing !== undefined) {
     if (sameReceiptInput(existing, input)) return existing;
     return yield* invalid(`Checkpoint import receipt ${snapshotId} conflicts with immutable content.`);
   }
+  if (completionSha256 === undefined)
+    return yield* invalid('A transaction-bound actual-content completion is required.');
   yield* sql`
     INSERT INTO checkpoint_import_receipts (
       snapshot_id, format_version, source_repository_id, source_commit_id, source_graph_content_id,
       abi_algorithm, abi_digest, logical_algorithm, logical_digest, base_logical_digest,
-      artifact_algorithm, artifact_digest, artifact_size, artifact_media_type, coverage_json, trust, imported_at
+      artifact_algorithm, artifact_digest, artifact_size, artifact_media_type, coverage_json, trust, imported_at, completion_sha256
     ) VALUES (
       ${snapshotId}, ${columns.formatVersion}, ${columns.sourceRepositoryId}, ${columns.sourceCommitId},
       ${columns.sourceGraphContentId}, ${columns.abiAlgorithm}, ${columns.abiDigest},
       ${columns.logicalAlgorithm}, ${columns.logicalDigest}, ${columns.baseLogicalDigest},
       ${columns.artifactAlgorithm}, ${columns.artifactDigest}, ${columns.artifactSize},
-      ${columns.artifactMediaType}, ${columns.coverageJson}, ${columns.trust}, ${importedAt}
+      ${columns.artifactMediaType}, ${columns.coverageJson}, ${columns.trust}, ${importedAt}, ${completionSha256 ?? null}
     )
   `;
   yield* sql`DELETE FROM checkpoint_import_builds WHERE snapshot_id = ${snapshotId}`;
@@ -1112,7 +1203,7 @@ export const recordReadyCheckpointImportReceipt = Effect.fn('codeGraph.recordRea
   sql: SqlClient.SqlClient,
   snapshotId: string,
   input: CodeGraphCheckpointImportReceiptInput,
-  importedAt: string,
+  _importedAt: string,
 ) {
   yield* assertSnapshotAuthority(sql, snapshotId, input, 'ready');
   const existing = yield* selectCheckpointImportRow(sql, 'checkpoint_import_receipts', snapshotId);
@@ -1122,8 +1213,7 @@ export const recordReadyCheckpointImportReceipt = Effect.fn('codeGraph.recordRea
     }
     return {receipt: existing, state: 'already-recorded'} as const;
   }
-  const receipt = yield* publishCheckpointImportReceipt(sql, snapshotId, input, importedAt);
-  return {receipt, state: 'recorded'} as const;
+  return yield* invalid('Only a verified owned checkpoint import may create an import receipt.');
 });
 
 export const readCheckpointImportReceipt = Effect.fn('codeGraph.readCheckpointImportReceipt')(function* (

@@ -33,7 +33,7 @@ export function registerSemanticQueryTool(
     {
       annotations: {readOnlyHint: false, destructiveHint: false, idempotentHint: false},
       description:
-        'Explicit saved-disk startup: request start {action,callerCwd,file,language,project?,environment?}; status/cancel {action,callerCwd,job}. Private volatile job; no edits/import authority. See semantic_capabilities.',
+        'Explicit private startup: start {action,callerCwd,file,language,project?,environment?,view?:{kind:buffer,text}}; status/cancel {action,callerCwd,job}. Ready buffers open with startup:job; no edits/import grant.',
       inputSchema: {request: Schema.Json},
     },
     ({request}) =>

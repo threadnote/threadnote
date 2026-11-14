@@ -80,7 +80,7 @@ export function semanticCapabilities(input: unknown = {}) {
         actions: ['start', 'status', 'cancel'],
         limits: semanticReadinessLimits,
       },
-      ownedBufferStartup: 'unimplemented' as const,
+      ownedBufferStartup: 'explicit-readiness-then-open' as const,
       // Policy controls alone do not make positive import ready; preserve the public readiness contract.
       authorizedJvmImport: 'unimplemented' as const,
     },
@@ -344,17 +344,20 @@ export function makeSemanticCommand(withRuntime: CliRuntimeRunner) {
       ),
       capabilities,
       query,
-      Command.make('readiness', {json: boolean('json', 'Print explicit saved-disk startup progress JSON')}, () =>
-        withRuntime(config =>
-          Effect.gen(function* () {
-            return yield* Console.log(
-              JSON.stringify(yield* runSemanticReadiness(config, yield* readSemanticAgentQueryInput)),
-            );
-          }),
-        ),
+      Command.make(
+        'readiness',
+        {json: boolean('json', 'Print explicit disk or owned-buffer startup progress JSON')},
+        () =>
+          withRuntime(config =>
+            Effect.gen(function* () {
+              return yield* Console.log(
+                JSON.stringify(yield* runSemanticReadiness(config, yield* readSemanticAgentQueryInput)),
+              );
+            }),
+          ),
       ).pipe(
         Command.withDescription(
-          'Explicit saved-disk provider startup: start, status or cancel; no query warmup or writer grant',
+          'Explicit provider startup: disk or owned buffer; start, status or cancel; no query warmup or writer grant',
         ),
       ),
       change,

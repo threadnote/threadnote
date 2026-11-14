@@ -731,11 +731,13 @@ export async function runProviderReadiness(
   within: <A>(promise: Promise<A>, milliseconds: number) => Promise<A>,
   deadline: number,
   results: unknown[],
+  buffer?: {file: string; text: string},
 ) {
   const request = {
     action: 'start',
     callerCwd: project,
-    file: join(project, EffectRecord.keys(sources)[1]),
+    file: buffer?.file ?? join(project, EffectRecord.keys(sources)[1]),
+    ...(buffer ? {view: {kind: 'buffer', text: buffer.text}} : {}),
     language: input.language,
     ...providerEnvironment(input),
   };
@@ -746,8 +748,8 @@ export async function runProviderReadiness(
     observations: unknown[];
     cancellation?: unknown;
   } = {
-    operation: 'explicit-saved-disk-readiness',
-    request,
+    operation: buffer ? 'explicit-owned-buffer-readiness' : 'explicit-saved-disk-readiness',
+    request: buffer ? {...request, view: {kind: 'buffer', contentDigest: hash(buffer.text)}} : request,
     fullScenarioQualified: false,
     observations: [],
   };
@@ -789,7 +791,7 @@ export async function runProviderReadiness(
       if (result.progress.state === 'ready') {
         assert.equal(result.progress.cleanup, 'retained', 'Real prepared session remains owned');
         ready = true;
-        return;
+        return job;
       }
       assert.ok(
         ['accepted', 'running'].includes(result.progress.state),
@@ -1337,9 +1339,14 @@ export async function runOwnedBufferFixture(
   const declaration = EffectRecord.keys(sources)[0];
   const text = EffectString.replaceAll('UnsavedName', 'BufferName')(sources[declaration]);
   const common = {callerCwd: project, milliseconds: 10000};
+  const startup = await runProviderReadiness(input, project, sources, run, client, within, deadline, results, {
+    file: join(project, declaration),
+    text,
+  });
   const opened = await run(['semantic', 'view', '--json'], {
     ...common,
     action: 'open',
+    startup,
     file: join(project, declaration),
     language: input.language,
     text,
@@ -1350,6 +1357,17 @@ export async function runOwnedBufferFixture(
     fullScenarioQualified: false,
     result: redactCapabilities(opened.value),
   });
+  if (!isJsonObject(opened.value) || opened.value.status !== 'ok') {
+    const cancelled = await within(
+      client.callTool(
+        {name: 'semantic_readiness', arguments: {request: {action: 'cancel', callerCwd: project, job: startup}}},
+        undefined,
+        {timeout: 250},
+      ),
+      250,
+    ).catch(() => ({status: 'unknown', cleanup: 'unknown'}));
+    results.push({operation: 'owned-buffer-startup-cancel', result: redactCapabilities(cancelled)});
+  }
   assert.ok(isJsonObject(opened.value) && opened.value.status === 'ok', 'Explicit owned buffer opens');
   const handle = Schema.decodeUnknownSync(Schema.Struct({id: digest, capability: digest}))(opened.value.handle);
   const query = {

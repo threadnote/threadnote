@@ -1,3 +1,4 @@
+import {completedLegacyCheckpointBase} from './incremental.js';
 import {isLexicalV2Snapshot, lexicalPhysicalSnapshotIdentity} from '../store/lexical_projection.js';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
@@ -183,7 +184,9 @@ export const attemptSparseReusableOverlay = Effect.fn('codeGraph.attemptSparseRe
   // that slice, turning one-file indexing into repository-sized pause time.
   yield* Effect.yieldNow;
 
-  if (!isLexicalV2Snapshot(base.snapshot.id)) return Option.none<CodeGraphIndexSummary>();
+  const factored = isLexicalV2Snapshot(base.snapshot.id);
+  if (!factored && !(yield* completedLegacyCheckpointBase(input.store, input.layout.databasePath, base.snapshot)))
+    return Option.none<CodeGraphIndexSummary>();
   const logicalSnapshotId = sparseOverlaySnapshotIdentity(
     input.identity,
     base.snapshot.id,
@@ -191,7 +194,9 @@ export const attemptSparseReusableOverlay = Effect.fn('codeGraph.attemptSparseRe
     admission.overlayFingerprint,
     input.scopeObservation?.scope,
   );
-  const physicalSnapshotId = lexicalPhysicalSnapshotIdentity(logicalSnapshotId, 'overlay', base.snapshot.id);
+  const physicalSnapshotId = factored
+    ? lexicalPhysicalSnapshotIdentity(logicalSnapshotId, 'overlay', base.snapshot.id)
+    : logicalSnapshotId;
   const existing = yield* input.store.readySnapshot(
     input.layout.databasePath,
     input.identity.worktreeId,

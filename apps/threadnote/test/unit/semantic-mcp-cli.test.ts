@@ -1066,7 +1066,7 @@ describe('semantic capability discovery', () => {
           ttlMilliseconds: 600000,
         },
       },
-      ownedBufferStartup: 'unimplemented',
+      ownedBufferStartup: 'explicit-readiness-then-open',
       authorizedJvmImport: 'unimplemented',
     });
     expect(result.readSurface.operations).toContain('diagnostics');

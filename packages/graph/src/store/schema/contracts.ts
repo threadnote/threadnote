@@ -944,6 +944,7 @@ export const PERSISTENT_EXTENSION_TABLES = [
       requiredColumn('coverage_json', 'TEXT'),
       requiredColumn('trust', 'TEXT'),
       requiredColumn('imported_at', 'TEXT'),
+      optionalColumn('completion_sha256', 'TEXT'),
     ],
     createSql: `CREATE TABLE IF NOT EXISTS checkpoint_import_receipts (
       snapshot_id TEXT PRIMARY KEY NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
@@ -962,7 +963,8 @@ export const PERSISTENT_EXTENSION_TABLES = [
       artifact_media_type TEXT NOT NULL,
       coverage_json TEXT NOT NULL,
       trust TEXT NOT NULL CHECK (trust IN ('local-unverified', 'expected-descriptor-verified')),
-      imported_at TEXT NOT NULL
+      imported_at TEXT NOT NULL,
+      completion_sha256 TEXT CHECK (completion_sha256 IS NULL OR length(completion_sha256) = 64)
     ) WITHOUT ROWID`,
     group: 'checkpoint',
     name: 'checkpoint_import_receipts',

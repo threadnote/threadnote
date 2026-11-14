@@ -1,3 +1,4 @@
+import {completedLegacyCheckpointBase} from './incremental.js';
 import {
   LexicalViewBindingContext,
   lexicalViewBindingFor,
@@ -314,7 +315,9 @@ const attemptReusableCleanCandidate = Effect.fn('codeGraph.attemptReusableCleanC
   candidate: CodeGraphReusableCleanBase,
   extractorSet: string,
 ) {
-  if (!isLexicalV2Snapshot(candidate.snapshot.id)) return Option.none<ReusableCleanSnapshotAttempt>();
+  const factored = isLexicalV2Snapshot(candidate.snapshot.id);
+  if (!factored && !(yield* completedLegacyCheckpointBase(input.store, input.layout.databasePath, candidate.snapshot)))
+    return Option.none<ReusableCleanSnapshotAttempt>();
   if (candidate.snapshot.id === input.logicalSnapshotId) return Option.none<ReusableCleanSnapshotAttempt>();
   if (!(yield* codeGraphScopedBaseReusable(input, candidate))) return Option.none<ReusableCleanSnapshotAttempt>();
   const baseByPath = new Map(EffectArray.map(candidate.files, file => [file.path, file]));
@@ -386,7 +389,9 @@ const attemptReusableCleanCandidate = Effect.fn('codeGraph.attemptReusableCleanC
             extractorSet,
             fileCount: candidate.snapshot.fileCount,
             graphContentId: graphContentIdentity(extractorSet, input.inventory.files, input.inventory.scope),
-            id: lexicalPhysicalSnapshotIdentity(input.logicalSnapshotId, 'alias', candidate.snapshot.id),
+            id: factored
+              ? lexicalPhysicalSnapshotIdentity(input.logicalSnapshotId, 'alias', candidate.snapshot.id)
+              : input.logicalSnapshotId,
             repositoryId: input.identity.repositoryId,
             scopeId: input.inventory.scope?.scopeKey,
             state: 'ready',
@@ -479,7 +484,9 @@ const attemptReusableCleanCandidate = Effect.fn('codeGraph.attemptReusableCleanC
           extractorSet,
           fileCount: 0,
           graphContentId: graphContentIdentity(extractorSet, input.inventory.files, input.inventory.scope),
-          id: lexicalPhysicalSnapshotIdentity(input.logicalSnapshotId, 'overlay', candidate.snapshot.id),
+          id: factored
+            ? lexicalPhysicalSnapshotIdentity(input.logicalSnapshotId, 'overlay', candidate.snapshot.id)
+            : input.logicalSnapshotId,
           repositoryId: input.identity.repositoryId,
           scopeId: input.inventory.scope?.scopeKey,
           state: 'building',

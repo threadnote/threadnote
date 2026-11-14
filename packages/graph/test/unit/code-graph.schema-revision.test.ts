@@ -48,7 +48,8 @@ const historicalProfiles = [
   [17, 'checkpoint-import', 'extend-graph-scope-authority'],
   [18, 'graph-scope-authority', 'extend-embedding-demand'],
   [19, 'embedding-demand', 'extend-factored-lexical'],
-  [20, 'factored-lexical', 'current'],
+  [20, 'factored-lexical', 'extend-checkpoint-completion'],
+  [21, 'checkpoint-completion', 'current'],
 ] as const;
 
 describe('code graph schema revision entity', () => {
@@ -58,7 +59,7 @@ describe('code graph schema revision entity', () => {
     ).toEqual(historicalProfiles);
     expect(CODE_GRAPH_PERSISTENT_SCHEMA_CITATION_PREDECESSOR.value).toBe(15);
     expect(CODE_GRAPH_PERSISTENT_SCHEMA_CHECKPOINT_PREDECESSOR.value).toBe(16);
-    expect(CODE_GRAPH_PERSISTENT_SCHEMA_CURRENT.value).toBe(20);
+    expect(CODE_GRAPH_PERSISTENT_SCHEMA_CURRENT.value).toBe(21);
   });
 
   it('keeps storage, receipt, artifact, reuse, resolution, and Manager versions distinct', () => {
@@ -95,12 +96,12 @@ describe('code graph schema revision entity', () => {
       fc.property(fc.constantFrom(...CODE_GRAPH_PERSISTENT_SCHEMA_REVISIONS), profile => {
         expect(observeCodeGraphPersistentSchemaRevision(profile.value)).toEqual({profile, state: 'known'});
         expect(observeCodeGraphPersistentSchemaRevision(String(profile.value))).toEqual({profile, state: 'known'});
-        expect(codeGraphPersistentSchemaIsCurrent(profile.value)).toBe(profile.key === 'factored-lexical');
+        expect(codeGraphPersistentSchemaIsCurrent(profile.value)).toBe(profile.key === 'checkpoint-completion');
         expect(codeGraphPersistentSchemaMigrationPending(profile.value)).toBe(
           profile.lifecycle === 'background-readable',
         );
         const plan = planCodeGraphPersistentSchemaUpgrade(profile.value);
-        expect(plan.state).toBe(profile.key === 'factored-lexical' ? 'ready' : 'upgrade');
+        expect(plan.state).toBe(profile.key === 'checkpoint-completion' ? 'ready' : 'upgrade');
         if (plan.state !== 'ready' && plan.state !== 'upgrade')
           throw new Error('Historical revision plan unavailable.');
         expect(plan.route).toBe(profile.upgradeRoute);
@@ -153,7 +154,7 @@ describe('code graph schema revision entity', () => {
 
 effectIt.layer(SqliteClient.layer({filename: ':memory:'}))(test => {
   test.effect(
-    'retains known19/20 readonly demand capability while mutation requires current20 and future schemas refuse',
+    'retains known19/20/21 readonly demand capability while mutation requires current21 and future schemas refuse',
     () =>
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
@@ -180,18 +181,18 @@ effectIt.layer(SqliteClient.layer({filename: ':memory:'}))(test => {
           target.snapshotId,
           target.activatedAt,
         ]);
-        for (const revision of [19, 20, 21]) {
+        for (const revision of [19, 20, 21, 22]) {
           yield* sql.unsafe("INSERT OR REPLACE INTO schema_metadata VALUES('persistent_extension_schema_revision',?)", [
             String(revision),
           ]);
           const before = yield* sql.unsafe('SELECT * FROM embedding_demand');
-          if (revision <= 20) expect(yield* hasCodeGraphEmbeddingDemand(sql)).toBe(true);
+          if (revision <= 21) expect(yield* hasCodeGraphEmbeddingDemand(sql)).toBe(true);
           else expect((yield* hasCodeGraphEmbeddingDemand(sql).pipe(Effect.flip)).message).toContain('unsupported');
           expect(yield* sql.unsafe('SELECT * FROM embedding_demand')).toEqual(before);
-          if (revision === 20) expect((yield* enqueueCodeGraphEmbeddingDemandSql(sql, target)).state).toBe('queued');
+          if (revision === 21) expect((yield* enqueueCodeGraphEmbeddingDemandSql(sql, target)).state).toBe('queued');
           else
             expect((yield* enqueueCodeGraphEmbeddingDemandSql(sql, target).pipe(Effect.flip)).message).toContain(
-              revision === 19 ? 'requires write preparation' : 'unsupported',
+              revision < 21 ? 'requires write preparation' : 'unsupported',
             );
           expect(yield* sql.unsafe('SELECT * FROM embedding_demand')).toEqual(before);
         }

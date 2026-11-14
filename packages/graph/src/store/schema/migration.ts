@@ -276,6 +276,17 @@ const migratePersistentExtensionTables = Effect.fn('codeGraph.migratePersistentE
         return yield* CodeGraphStoreError.of('Code graph embedding demand authority is incompatible.');
       }
       yield* initializeCodeGraphEmbeddingDemandSchema(sql);
+      const completionColumns = yield* sql.unsafe<{readonly name: string}>(
+        'PRAGMA table_info(checkpoint_import_receipts)',
+      );
+      if (
+        completionColumns.length > 0 &&
+        !EffectArray.some(completionColumns, column => column.name === 'completion_sha256')
+      ) {
+        yield* sql.unsafe(
+          'ALTER TABLE checkpoint_import_receipts ADD COLUMN completion_sha256 TEXT CHECK (completion_sha256 IS NULL OR length(completion_sha256) = 64)',
+        );
+      }
       if (!(yield* codeGraphWorktreeReconciliationSchemaCompatible(sql, true, false))) {
         return yield* CodeGraphStoreError.of('Code graph cleanup authority schema is incompatible.');
       }

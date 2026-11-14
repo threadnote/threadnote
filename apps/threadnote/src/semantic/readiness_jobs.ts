@@ -41,7 +41,7 @@ export const semanticCompiledRuntimeIdentity = Effect.gen(function* () {
 import {
   semanticReadinessLimits,
   SemanticVerificationReply,
-  type SemanticReadinessSource,
+  SemanticReadinessSource,
   type SemanticReadinessStage,
   type SemanticReadinessProgress,
   type SemanticReadinessResult,
@@ -90,12 +90,14 @@ export function makeSemanticStartupBinding(initial?: SemanticStartupControl) {
 }
 interface Job {
   readonly source: SemanticReadinessSource;
-  readonly content: string;
+  content: string;
   readonly capability: string;
   readonly started: bigint;
   readonly expires: bigint;
   progress: SemanticReadinessProgress;
   cancelled: boolean;
+  claimed?: boolean;
+  closing?: boolean;
   observation?: Observation;
   fiber?: Fiber.Fiber<void>;
   terminate?: Effect.Effect<void>;
@@ -142,7 +144,9 @@ export const makeSemanticReadinessJobs = Effect.fn('semantic.readinessJobs')(fun
     source: SemanticReadinessSource,
     content: string,
     control: SemanticStartupControl,
+    reserved?: Observation,
   ) => Effect.Effect<Observation, unknown, R>;
+  readonly reserve?: (source: SemanticReadinessSource, content: string) => Effect.Effect<Observation, unknown, R>;
   readonly current: (source: SemanticReadinessSource, observation: Observation) => Effect.Effect<boolean, unknown, R>;
   readonly close: (observation: Observation) => Effect.Effect<void, unknown, R>;
 }) {
@@ -166,9 +170,41 @@ export const makeSemanticReadinessJobs = Effect.fn('semantic.readinessJobs')(fun
       Effect.andThen(terminatePending(job)),
       Effect.forkIn(scope),
     );
-  const prune = (now: bigint) => {
-    for (const [id, job] of jobs) if (terminal(job) && now >= job.expires) jobs.delete(id);
-  };
+  const closeJob = (job: Job) =>
+    Effect.gen(function* () {
+      if (job.claimed || job.closing || !job.observation) return;
+      job.closing = true;
+      job.progress = {...job.progress, cleanup: job.progress.cleanup === 'unknown' ? 'unknown' : 'pending'};
+      const closed = yield* ports.close(job.observation).pipe(Effect.result);
+      job.progress = {
+        ...job.progress,
+        cleanup: closed._tag === 'Failure' || job.progress.cleanup === 'unknown' ? 'unknown' : 'drained',
+        ...(job.cancelled ? {state: 'cancelled' as const} : {}),
+      };
+    });
+  const prune = (now: bigint) =>
+    Effect.forEach(
+      jobs,
+      ([id, job]) =>
+        Effect.gen(function* () {
+          if (!terminal(job) || now < job.expires) return;
+          if (job.source.buffer && !job.claimed) {
+            job.cancelled = true;
+            if (!job.closing)
+              yield* closeJob(job).pipe(
+                Effect.tap(() =>
+                  Effect.sync(() => {
+                    if (job.progress.cleanup === 'drained') jobs.delete(id);
+                  }),
+                ),
+                Effect.forkIn(scope),
+              );
+            return;
+          }
+          jobs.delete(id);
+        }),
+      {discard: true},
+    );
   const snapshot = (job: Job) =>
     Clock.monotonicTimeNanos.pipe(
       Effect.map(now => ({
@@ -194,7 +230,8 @@ export const makeSemanticReadinessJobs = Effect.fn('semantic.readinessJobs')(fun
   const start = (source: SemanticReadinessSource, content: string, inheritedDeadline?: ReadDeadline) =>
     Effect.gen(function* () {
       const now = yield* Clock.monotonicTimeNanos;
-      prune(now);
+      yield* prune(now);
+      const admittedSource = yield* Schema.decodeEffect(SemanticReadinessSource)(source);
       if (source.worktree !== ports.worktree || jobs.size >= semanticReadinessLimits.maxJobs) return refusal();
       const id = sha256HexSync(yield* random.randomBytes(32));
       const capability = sha256HexSync(yield* random.randomBytes(32));
@@ -203,109 +240,148 @@ export const makeSemanticReadinessJobs = Effect.fn('semantic.readinessJobs')(fun
       const workDeadline = {
         expiresAtNanos: deadline.expiresAtNanos - BigInt(semanticReadinessLimits.terminationMilliseconds) * 1_000_000n,
       };
-      const job: Job = {
-        source: structuredClone(source),
-        content,
-        capability,
-        started: deadline.expiresAtNanos - BigInt(semanticReadinessLimits.startupMilliseconds) * 1_000_000n,
-        expires: now + BigInt(semanticReadinessLimits.ttlMilliseconds) * 1_000_000n,
-        cancelled: false,
-        terminationRequested: false,
-        progress: {
-          state: 'accepted',
-          stage: 'queued',
-          sequence: 0,
-          elapsedMilliseconds: 0,
-          startupMilliseconds: 120000,
-          queryMilliseconds: 10000,
-          maxQueryMilliseconds: 45000,
-          cleanup: 'not-started',
-        },
-      };
-      // Entropy and deadline acquisition yield. The final capacity check and insertion are one synchronous admission.
-      if (jobs.size >= semanticReadinessLimits.maxJobs) return refusal();
-      jobs.set(id, job);
-      const control: SemanticStartupControl = {
-        deadline,
-        remaining: readDeadlineRemaining(workDeadline),
-        stage: stage =>
-          Effect.sync(() => {
-            if (!terminal(job) && !job.cancelled) {
-              job.progress = {...job.progress, state: 'running', stage, sequence: job.progress.sequence + 1};
-            }
-          }),
-        termination: terminate => {
-          job.terminate = terminate;
-          job.progress = {...job.progress, cleanup: 'pending'};
-        },
-        cleanup: disposition => {
-          if (job.progress.cleanup !== 'unknown') job.progress = {...job.progress, cleanup: disposition};
-        },
-        cleanupUnknown: () => job.progress.cleanup === 'unknown',
-      };
-      const program = withinReadDeadline(
-        workDeadline,
-        Effect.gen(function* () {
-          const observation = yield* ports.prepare(job.source, job.content, control);
-          job.observation = observation;
-          yield* control.stage('finalizing');
-          if (!(yield* ports.current(job.source, observation))) return yield* Effect.fail('source' as const);
-        }),
-      ).pipe(
-        Effect.onExit(exit =>
+      let adopted = false;
+      return yield* Effect.acquireUseRelease(
+        admittedSource.buffer
+          ? (ports.reserve
+              ? ports.reserve(admittedSource, content)
+              : Effect.fail(LspFault.make({code: 'prerequisite'}))
+            ).pipe(Effect.result, Effect.asSome)
+          : Effect.succeedNone,
+        reservation =>
           Effect.gen(function* () {
-            if ((job.cancelled || Exit.isFailure(exit)) && job.observation && job.terminate) {
-              yield* ports
-                .close(job.observation)
-                .pipe(Effect.catchCause(() => Effect.sync(() => control.cleanup('unknown'))));
-            }
-            if (Exit.isFailure(exit) && hasReadCleanupUnconfirmed(exit.cause)) control.cleanup('unknown');
-            const deadlineExpired = (yield* control.remaining) === 0;
-            const errors = Exit.isFailure(exit) ? Cause.findErrorOption(exit.cause) : undefined;
-            const sourceChanged =
-              job.progress.cleanup !== 'unknown' &&
-              errors?._tag === 'Some' &&
-              (errors.value === 'source' ||
-                (Schema.is(SemanticSessionFault)(errors.value) && errors.value.reason === 'stale'));
-            job.progress = {
-              ...job.progress,
-              state: job.cancelled ? 'cancelled' : Exit.isSuccess(exit) ? 'ready' : sourceChanged ? 'stale' : 'failed',
-              sequence: job.progress.sequence + 1,
-              cleanup:
-                job.progress.cleanup === 'unknown'
-                  ? 'unknown'
-                  : !job.cancelled && Exit.isSuccess(exit)
-                    ? 'retained'
-                    : job.progress.cleanup === 'pending'
-                      ? 'pending'
-                      : 'drained',
-              ...(job.cancelled
-                ? {failureOrigin: 'cancelled' as const}
-                : Exit.isFailure(exit)
-                  ? {
-                      failureOrigin: deadlineExpired
-                        ? ('deadline' as const)
-                        : sourceChanged
-                          ? ('source' as const)
-                          : ('prerequisite' as const),
-                    }
-                  : {}),
+            if (Option.isSome(reservation) && reservation.value._tag === 'Failure') return refusal();
+            const reserved =
+              Option.isSome(reservation) && reservation.value._tag === 'Success'
+                ? reservation.value.success
+                : undefined;
+            const job: Job = {
+              source: structuredClone(admittedSource),
+              ...(reserved ? {observation: reserved} : {}),
+              content,
+              capability,
+              started: deadline.expiresAtNanos - BigInt(semanticReadinessLimits.startupMilliseconds) * 1_000_000n,
+              expires: now + BigInt(semanticReadinessLimits.ttlMilliseconds) * 1_000_000n,
+              cancelled: false,
+              terminationRequested: false,
+              progress: {
+                state: 'accepted',
+                stage: 'queued',
+                sequence: 0,
+                elapsedMilliseconds: 0,
+                startupMilliseconds: 120000,
+                queryMilliseconds: 10000,
+                maxQueryMilliseconds: 45000,
+                cleanup: 'not-started',
+              },
             };
-            if (job.progress.cleanup === 'pending' || job.progress.cleanup === 'unknown')
-              yield* scheduleTermination(job, deadline);
+            // Reservation and job admission transfer together; failed/cancelled callers cannot strand a seed.
+            if (jobs.size >= semanticReadinessLimits.maxJobs) return refusal();
+            jobs.set(id, job);
+            adopted = true;
+            const control: SemanticStartupControl = {
+              deadline,
+              remaining: readDeadlineRemaining(workDeadline),
+              stage: stage =>
+                Effect.sync(() => {
+                  if (!terminal(job) && !job.cancelled) {
+                    job.progress = {...job.progress, state: 'running', stage, sequence: job.progress.sequence + 1};
+                  }
+                }),
+              termination: terminate => {
+                job.terminate = terminate;
+                job.progress = {...job.progress, cleanup: 'pending'};
+              },
+              cleanup: disposition => {
+                if (job.progress.cleanup !== 'unknown') job.progress = {...job.progress, cleanup: disposition};
+              },
+              cleanupUnknown: () => job.progress.cleanup === 'unknown',
+            };
+            const program = withinReadDeadline(
+              workDeadline,
+              Effect.gen(function* () {
+                const observation = yield* ports.prepare(job.source, job.content, control, reserved);
+                job.observation = observation;
+                yield* control.stage('finalizing');
+                if (!(yield* ports.current(job.source, observation))) return yield* Effect.fail('source' as const);
+              }),
+            ).pipe(
+              Effect.onExit(exit =>
+                Effect.gen(function* () {
+                  if (
+                    (job.cancelled ||
+                      Exit.isFailure(exit) ||
+                      (job.source.buffer && job.progress.cleanup === 'unknown')) &&
+                    job.observation &&
+                    (job.terminate || job.source.buffer)
+                  )
+                    yield* closeJob(job);
+                  if (Exit.isFailure(exit) && hasReadCleanupUnconfirmed(exit.cause)) control.cleanup('unknown');
+                  const deadlineExpired = (yield* control.remaining) === 0;
+                  const errors = Exit.isFailure(exit) ? Cause.findErrorOption(exit.cause) : undefined;
+                  const sourceChanged =
+                    job.progress.cleanup !== 'unknown' &&
+                    errors?._tag === 'Some' &&
+                    (errors.value === 'source' ||
+                      (Schema.is(SemanticSessionFault)(errors.value) && errors.value.reason === 'stale'));
+                  job.progress = {
+                    ...job.progress,
+                    state: job.cancelled
+                      ? 'cancelled'
+                      : Exit.isSuccess(exit) && !(job.source.buffer && job.progress.cleanup === 'unknown')
+                        ? 'ready'
+                        : sourceChanged
+                          ? 'stale'
+                          : 'failed',
+                    sequence: job.progress.sequence + 1,
+                    cleanup:
+                      job.progress.cleanup === 'unknown'
+                        ? 'unknown'
+                        : !job.cancelled && Exit.isSuccess(exit)
+                          ? 'retained'
+                          : job.progress.cleanup === 'pending'
+                            ? 'pending'
+                            : 'drained',
+                    ...(job.cancelled
+                      ? {failureOrigin: 'cancelled' as const}
+                      : Exit.isFailure(exit)
+                        ? {
+                            failureOrigin: deadlineExpired
+                              ? ('deadline' as const)
+                              : sourceChanged
+                                ? ('source' as const)
+                                : ('prerequisite' as const),
+                          }
+                        : {}),
+                  };
+                  if (job.source.buffer) job.content = '';
+                  if (job.progress.cleanup === 'pending' || job.progress.cleanup === 'unknown')
+                    yield* scheduleTermination(job, deadline);
+                }),
+              ),
+              Effect.provideService(ReadDeadlineContext, deadline),
+              Effect.provideService(SemanticWireStartup, control),
+              Effect.ignoreCause,
+            );
+            job.fiber = yield* program.pipe(Effect.forkIn(scope));
+            if (source.buffer)
+              yield* Effect.sleep(semanticReadinessLimits.ttlMilliseconds).pipe(
+                Effect.andThen(Clock.monotonicTimeNanos),
+                Effect.flatMap(prune),
+                Effect.forkIn(scope),
+              );
+            yield* readDeadlineRemaining(deadline).pipe(
+              Effect.flatMap(remaining => Effect.sleep(remaining)),
+              Effect.andThen(terminatePending(job)),
+              Effect.forkIn(scope),
+            );
+            return {...(yield* snapshot(job)), job: {id, capability}} satisfies SemanticReadinessResult;
           }),
-        ),
-        Effect.provideService(ReadDeadlineContext, deadline),
-        Effect.provideService(SemanticWireStartup, control),
-        Effect.ignoreCause,
+        reservation =>
+          Option.isSome(reservation) && reservation.value._tag === 'Success' && !adopted
+            ? ports.close(reservation.value.success).pipe(Effect.ignoreCause)
+            : Effect.void,
       );
-      job.fiber = yield* program.pipe(Effect.forkIn(scope));
-      yield* readDeadlineRemaining(deadline).pipe(
-        Effect.flatMap(remaining => Effect.sleep(remaining)),
-        Effect.andThen(terminatePending(job)),
-        Effect.forkIn(scope),
-      );
-      return {...(yield* snapshot(job)), job: {id, capability}} satisfies SemanticReadinessResult;
     });
   const inspect = (
     handle: typeof SemanticReadinessHandle.Type,
@@ -315,10 +391,15 @@ export const makeSemanticReadinessJobs = Effect.fn('semantic.readinessJobs')(fun
     cancel: boolean,
   ) =>
     Effect.gen(function* () {
-      prune(yield* Clock.monotonicTimeNanos);
+      yield* prune(yield* Clock.monotonicTimeNanos);
       const job = find(handle, profile, principal, worktree);
       if (!job) return refusal();
-      if (cancel && !terminal(job) && !job.cancelled) {
+      if (
+        cancel &&
+        !job.claimed &&
+        !job.cancelled &&
+        (!terminal(job) || (job.source.buffer && job.progress.state === 'ready'))
+      ) {
         job.cancelled = true;
         job.progress = {...job.progress, state: 'cancelling', sequence: job.progress.sequence + 1};
         // Neither acknowledgement nor status waits for an uninterruptible provider finalizer.
@@ -326,28 +407,95 @@ export const makeSemanticReadinessJobs = Effect.fn('semantic.readinessJobs')(fun
           expiresAtNanos: job.started + BigInt(semanticReadinessLimits.startupMilliseconds) * 1_000_000n,
         });
         if (job.fiber) yield* Fiber.interrupt(job.fiber).pipe(Effect.forkIn(scope));
+        if (job.source.buffer && job.observation) yield* closeJob(job).pipe(Effect.forkIn(scope));
       }
       if (
         !cancel &&
         job.progress.state === 'ready' &&
         job.observation &&
-        !(yield* ports.current(job.source, job.observation))
-      )
+        !(yield* ports.current(job.source, job.observation).pipe(Effect.orElseSucceed(() => false)))
+      ) {
         job.progress = {...job.progress, state: 'stale', sequence: job.progress.sequence + 1, failureOrigin: 'source'};
+        if (job.source.buffer && !job.claimed) yield* closeJob(job).pipe(Effect.forkIn(scope));
+      }
       return yield* snapshot(job);
     });
+  const sourceBinding = (source: SemanticReadinessSource) =>
+    JSON.stringify([
+      source.worktree,
+      source.project,
+      source.uri,
+      source.language,
+      source.environment ?? null,
+      source.profile,
+      source.principal,
+      source.buffer ? ['buffer', source.buffer.content] : null,
+    ]);
+  const claim = <A>(
+    handle: typeof SemanticReadinessHandle.Type,
+    source: SemanticReadinessSource,
+    publish: (observation: Observation) => A,
+  ) =>
+    Effect.gen(function* () {
+      yield* prune(yield* Clock.monotonicTimeNanos);
+      const job = find(handle, source.profile, source.principal, source.worktree);
+      if (
+        !source.buffer ||
+        !job?.source.buffer ||
+        sourceBinding(source) !== sourceBinding(job.source) ||
+        job.cancelled ||
+        job.progress.state !== 'ready' ||
+        job.progress.cleanup !== 'retained' ||
+        !job.observation
+      )
+        return yield* LspFault.make({code: 'rejected'});
+      // No lock across an asynchronous proof: cancellation must acknowledge while it runs.
+      return yield* Effect.gen(function* () {
+        if (!(yield* ports.current(job.source, job.observation!)))
+          return yield* SemanticSessionFault.make({reason: 'stale'});
+        const now = yield* Clock.monotonicTimeNanos;
+        if (
+          jobs.get(handle.id) !== job ||
+          job.cancelled ||
+          job.progress.state !== 'ready' ||
+          job.progress.cleanup !== 'retained' ||
+          now >= job.expires
+        )
+          return yield* SemanticSessionFault.make({reason: 'stale'});
+        return yield* Effect.try({
+          try: () => {
+            const result = publish(job.observation!);
+            job.claimed = true;
+            return result;
+          },
+          catch: () => SemanticSessionFault.make({reason: 'stale'}),
+        });
+      }).pipe(
+        Effect.onError(() => {
+          if (job.claimed) return Effect.void;
+          job.progress = {
+            ...job.progress,
+            state: 'stale',
+            sequence: job.progress.sequence + 1,
+            failureOrigin: 'source',
+          };
+          return closeJob(job).pipe(Effect.forkIn(scope), Effect.asVoid);
+        }),
+      );
+    });
+  yield* Effect.addFinalizer(() =>
+    Effect.forEach(jobs, ([, job]) => (job.source.buffer && !job.claimed ? closeJob(job) : Effect.void), {
+      discard: true,
+    }),
+  );
   return {
     start,
+    claim,
     status: (handle: typeof SemanticReadinessHandle.Type, profile: string, principal: string, worktree: string) =>
       inspect(handle, profile, principal, worktree, false),
     cancel: (handle: typeof SemanticReadinessHandle.Type, profile: string, principal: string, worktree: string) =>
       inspect(handle, profile, principal, worktree, true),
-    idle: Clock.monotonicTimeNanos.pipe(
-      Effect.map(now => {
-        prune(now);
-        return jobs.size === 0;
-      }),
-    ),
+    idle: Clock.monotonicTimeNanos.pipe(Effect.flatMap(now => prune(now).pipe(Effect.map(() => jobs.size === 0)))),
   };
 });
 

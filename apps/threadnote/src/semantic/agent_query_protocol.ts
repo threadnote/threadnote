@@ -36,6 +36,8 @@ export const SemanticReadinessStage = Schema.Literals([
   'finalizing',
 ]);
 export type SemanticReadinessStage = typeof SemanticReadinessStage.Type;
+const BufferText = Schema.String.check(Schema.isMaxLength(1024 * 1024));
+const ReadinessBuffer = Schema.Struct({kind: Schema.Literal('buffer'), text: BufferText});
 export const SemanticReadinessRequest = Schema.Union([
   Schema.Struct({
     action: Schema.Literal('start'),
@@ -44,6 +46,7 @@ export const SemanticReadinessRequest = Schema.Union([
     project: Schema.optionalKey(PathText),
     language: Identifier,
     environment: Schema.optionalKey(Identifier),
+    view: Schema.optionalKey(ReadinessBuffer),
   }),
   Schema.Struct({action: Schema.Literals(['status', 'cancel']), callerCwd: PathText, job: SemanticReadinessHandle}),
 ]);
@@ -56,10 +59,15 @@ export const SemanticReadinessSource = Schema.Struct({
   environment: Schema.optionalKey(Identifier),
   profile: Digest,
   principal: Digest,
+  buffer: Schema.optionalKey(Schema.Struct({kind: Schema.Literal('buffer'), content: Digest})),
 });
 export type SemanticReadinessSource = typeof SemanticReadinessSource.Type;
 export const SemanticEndpointReadiness = Schema.Union([
-  Schema.Struct({...SemanticReadinessSource.fields, action: Schema.Literal('start')}),
+  Schema.Struct({
+    ...SemanticReadinessSource.fields,
+    action: Schema.Literal('start'),
+    text: Schema.optionalKey(BufferText),
+  }),
   Schema.Struct({
     action: Schema.Literals(['status', 'cancel']),
     worktree: FileUri,
@@ -102,7 +110,6 @@ export const SemanticAgentBufferView = Schema.Struct({
   handle: SemanticAgentBufferHandle,
   documentVersion: Counter.check(Schema.isGreaterThanOrEqualTo(1)),
 });
-const BufferText = Schema.String.check(Schema.isMaxLength(1024 * 1024));
 const ViewScope = {callerCwd: PathText, milliseconds: Schema.optionalKey(Milliseconds)};
 export const SemanticAgentViewRequest = Schema.Union([
   Schema.Struct({
@@ -113,6 +120,7 @@ export const SemanticAgentViewRequest = Schema.Union([
     language: Identifier,
     environment: Schema.optionalKey(Identifier),
     text: BufferText,
+    startup: Schema.optionalKey(SemanticReadinessHandle),
   }),
   Schema.Struct({
     ...ViewScope,
@@ -135,6 +143,8 @@ export const SemanticAgentEndpointView = Schema.Struct({
   text: Schema.optionalKey(BufferText),
   handle: Schema.optionalKey(SemanticAgentBufferHandle),
   expectedVersion: Schema.optionalKey(Counter),
+  startup: Schema.optionalKey(SemanticReadinessHandle),
+  principal: Schema.optionalKey(Digest),
   milliseconds: Milliseconds,
 });
 export type SemanticAgentEndpointView = typeof SemanticAgentEndpointView.Type;
