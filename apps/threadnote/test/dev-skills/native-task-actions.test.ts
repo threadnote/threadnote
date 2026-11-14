@@ -3979,6 +3979,20 @@ describe('native task actions', () => {
 
         yield* f.mutate('invalidate', {phaseId: 'one', reason: 'CI follow-up source needs separate validation.'});
         const maintenanceRunBytes = yield* f.fs.readFileString(f.statePath());
+        const provisionalState = yield* readNativeWorkflowState(f.config, 'native-run');
+        const provisionalPhase = provisionalState?.state.cycle?.state.phases.one;
+        const validationProof = decodeNativeTaskActionRef(validationRef);
+        const retainedProofs = EffectArray.filter(
+          provisionalPhase?.history ?? [],
+          proof =>
+            proof.head === headSha &&
+            proof.tree === validationProof?.sourceTree &&
+            proof.phaseHash === validationProof?.phaseHash,
+        );
+        expect(provisionalPhase?.delivery).toBeUndefined();
+        expect(retainedProofs.length).toBeGreaterThan(0);
+        expect(EffectArray.every(retainedProofs, proof => proof.delivery === undefined)).toBe(true);
+
         const watchRequest = {
           runId: 'native-run',
           callerCwd: f.repo,
@@ -4128,25 +4142,95 @@ describe('native task actions', () => {
             validationRef: foreignValidation,
           }).pipe(Effect.result),
         ).toMatchObject({failure: {code: 'invalid-delivery-ref'}});
-        expect(
-          yield* runNativeTaskAction(f.config, {
-            command: 'watch-pr',
-            operation: 'relay',
-            ...watchRequest,
-            deliveryRef: forgedDeliveryRef,
-          }).pipe(Effect.result),
-        ).toMatchObject({failure: {code: 'watch-identity-conflict'}});
+        const watchDirectory = f.path.dirname(watchPath);
+        const storedWatchBytes = () =>
+          Effect.gen(function* () {
+            const names = EffectArray.filter(yield* f.fs.readDirectory(watchDirectory), name =>
+              EffectString.endsWith('.json')(name),
+            ).sort();
+            return yield* Effect.forEach(names, name =>
+              Effect.map(f.fs.readFileString(f.path.join(watchDirectory, name)), bytes => ({name, bytes})),
+            );
+          });
+        const beforeForgedWatches = yield* storedWatchBytes();
+        const beforeForgedRevision = (yield* readNativeWatch(f.config, watchId))?.revision;
+        const effects = {provider: 0, host: 0, spawn: 0};
+        const readOnlyCommands = CommandExecutor.of({
+          ...watch.commands,
+          execute: (executable, args, options) => {
+            if (executable === 'gh' || executable === watch.wakeup.executable) {
+              if (executable === 'gh') effects.provider++;
+              else effects.host++;
+              return Effect.succeed({
+                exitCode: 1,
+                stdout: '',
+                stderr: 'Read-only watch lookup must not call provider or host.',
+              });
+            }
+            return watch.commands.execute(executable, args, options);
+          },
+          spawnDetached: () => {
+            effects.spawn++;
+            return Effect.succeed(false);
+          },
+        });
+        const forgedResult = yield* runNativeTaskAction(f.config, {
+          command: 'watch-pr',
+          operation: 'relay',
+          ...watchRequest,
+          deliveryRef: forgedDeliveryRef,
+        }).pipe(Effect.provideService(CommandExecutor, readOnlyCommands), Effect.result);
+        // Retained provisional proof does not bind this different PR: its qualified slot is absent.
+        expect(forgedResult).toMatchObject({failure: {code: 'watch-not-found'}});
+        expect(effects).toEqual({provider: 0, host: 0, spawn: 0});
+        expect(yield* storedWatchBytes()).toEqual(beforeForgedWatches);
+        expect((yield* readNativeWatch(f.config, watchId))?.revision).toBe(beforeForgedRevision);
+        const missingQualifiedId = `${watchId}-${EffectString.slice(0, 48)(sha256HexSync(forgedDelivery.pr.url))}`;
+        expect(yield* readNativeWatch(f.config, missingQualifiedId)).toBeUndefined();
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(maintenanceRunBytes);
         expect(yield* f.fs.readFileString(watchPath)).toBe(historicalWatchBytes);
-        expect(
-          object(yield* runNativeTaskAction(f.config, {command: 'watch-pr', operation: 'inspect', ...watchRequest})),
-        ).toMatchObject({status: 'watch-updated'});
+        const inspected = object(
+          yield* runNativeTaskAction(f.config, {command: 'watch-pr', operation: 'inspect', ...watchRequest}),
+        );
+        expect(inspected).toMatchObject({status: 'watch-updated'});
+        const noticeRef = String(inspected.noticeRef);
         const relayed = object(
-          yield* runNativeTaskAction(f.config, {command: 'watch-pr', operation: 'relay', ...watchRequest}),
+          yield* runNativeTaskAction(f.config, {command: 'watch-pr', operation: 'relay', ...watchRequest, noticeRef}),
         );
         const eventRefs = relayed.eventRefs;
         if (!EffectArray.isArray(eventRefs) || !eventRefs.length)
           throw new Error('Expected the queued historical event.');
         const watchDeliveryRef = String(relayed.watchDeliveryRef);
+        const beforeNoticeReuse = yield* readNativeWatch(f.config, watchId);
+        if (!beforeNoticeReuse) throw new Error('Expected the exact claimed notice delivery.');
+        const beforeNoticeReuseBytes = yield* f.fs.readFileString(watchPath);
+        const reusedNotice = yield* runNativeTaskAction(f.config, {
+          command: 'watch-pr',
+          operation: 'disposition',
+          ...watchRequest,
+          noticeRef,
+          watchDeliveryRef,
+          dispositions: [
+            {
+              eventRef: String(eventRefs[0]),
+              status: 'blocked',
+              reason: 'CI repair remains open.',
+              evidence: 'Retained event proof.',
+            },
+          ],
+        }).pipe(Effect.provideService(CommandExecutor, readOnlyCommands), Effect.result);
+        expect(reusedNotice).toMatchObject({failure: {code: 'invalid-request'}});
+        expect(effects).toEqual({provider: 0, host: 0, spawn: 0});
+        expect(yield* f.fs.readFileString(watchPath)).toBe(beforeNoticeReuseBytes);
+        const afterNoticeReuse = yield* readNativeWatch(f.config, watchId);
+        expect(afterNoticeReuse?.revision).toBe(beforeNoticeReuse.revision);
+        expect(afterNoticeReuse?.envelope.state.delivery).toEqual(beforeNoticeReuse.envelope.state.delivery);
+        expect(afterNoticeReuse?.envelope.state.acknowledged).toBe(beforeNoticeReuse.envelope.state.acknowledged);
+        expect(afterNoticeReuse?.envelope.notification?.outbox).toEqual(
+          beforeNoticeReuse.envelope.notification?.outbox,
+        );
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(maintenanceRunBytes);
+
         yield* runNativeTaskAction(f.config, {
           command: 'watch-pr',
           operation: 'disposition',
@@ -8589,6 +8673,51 @@ describe('native task actions', () => {
             return Effect.succeed(false);
           },
         });
+        if (!decoded.delivery.pr) throw new Error('Expected the canonical PR identity.');
+        const foreignUrl = 'https://github.com/other-owner/other-repo/pull/99';
+        const urlForged = {
+          ...decoded.delivery,
+          pr: {...decoded.delivery.pr, url: foreignUrl},
+          providerIdentity: {
+            ...decoded.delivery.providerIdentity!,
+            url: foreignUrl,
+            number: 99,
+            baseRepository: 'other-owner/other-repo',
+            headRepository: 'other-owner/other-repo',
+          },
+        };
+        const urlForgedRef = encodeNativeTaskActionRef({
+          ...decoded,
+          delivery: urlForged,
+          payloadDigest: sha256HexSync(stableJson(urlForged)),
+        });
+        let watchLookups = 0;
+        const lookupCountingFs = {
+          ...f.fs,
+          stat: (file: string) => {
+            if (/[\\/]native-watch-v1(?:[\\/]|$)/u.test(file)) watchLookups++;
+            return f.fs.stat(file);
+          },
+        };
+        const canonicalUrlResult = yield* runNativeTaskActionCore(f.config, {
+          command: 'watch-pr',
+          operation: 'inspect',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          validationRef: existing.validationRef,
+          deliveryRef: urlForgedRef,
+        }).pipe(
+          Effect.provideService(CommandExecutor, trapped),
+          Effect.provideService(FileSystem.FileSystem, lookupCountingFs),
+          Effect.result,
+        );
+        expect(canonicalUrlResult).toMatchObject({failure: {code: 'stale-delivery-ref'}});
+        expect(watchLookups).toBe(0);
+        expect(effects).toBe(0);
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(sourceBefore);
+        expect(yield* f.fs.readFileString(watchPath)).toBe(watchBefore);
+        const foreignQualifiedId = `${existing.watchId}-${EffectString.slice(0, 48)(sha256HexSync(foreignUrl))}`;
+        expect(yield* readNativeWatch(f.config, foreignQualifiedId)).toBeUndefined();
         const result = yield* runNativeTaskActionCore(f.config, {
           command: 'watch-pr',
           operation: 'start',

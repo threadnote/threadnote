@@ -754,7 +754,10 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (
     (request.eventKey !== undefined && (request.command !== 'relay' || request.wakeupId === undefined)) ||
     (request.attemptId !== undefined && request.eventKey === undefined)
   )
-    return yield* fail('invalid-request', 'Notice arrival requires relay with its owned wakeupId and eventKey.');
+    return yield* fail(
+      'invalid-request',
+      'Notice arrival requires relay with its owned wakeupId and eventKey. After relay, omit arrival fields (task calls: noticeRef) from disposition/ACK and use its deliveryId (task calls: watchDeliveryRef; disposition also needs eventRefs).',
+    );
   const assertOwner = (envelope: NativeWatchEnvelope | undefined) => {
     if (stableJson(envelope?.owner) !== stableJson(owner) && (envelope !== undefined || owner === undefined))
       throw fail('watch-owner-conflict', 'Use the exact typed owner for this watch.');
