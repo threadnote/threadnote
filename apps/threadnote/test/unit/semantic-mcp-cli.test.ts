@@ -139,10 +139,12 @@ const memoryByUri = <A extends {readonly uri: string}>(cards: readonly A[], uri:
 const nativeCitationReplyDiagnostic = (stdout: string): readonly string[] => {
   try {
     const response = Schema.decodeSync(Schema.fromJsonString(contextBriefNativeReadResponseSchema))(stdout);
-    if (response.operation !== 'citations') return [];
+    if (response.operation !== 'citations' && response.operation !== 'memory') return [];
     if (!response.ok) return [response.failure];
+    const validations =
+      response.operation === 'citations' ? response.value : (response.value.citationValidations ?? []);
     return EffectArray.take(
-      EffectArray.flatMap(response.value, validation =>
+      EffectArray.flatMap(validations, validation =>
         EffectArray.map(validation.receipts, receipt => `${receipt.status}:${receipt.reason}`),
       ),
       8,
@@ -170,27 +172,58 @@ it('keeps native citation diagnostics bounded and excludes opaque response field
           validatorVersion: 1,
           sourcePath: secret,
         };
-        const response = {
-          protocol: 1,
-          binding: secret,
-          commandsJoined: true,
-          ok: true,
-          operation: 'citations',
-          value: [{uri: secret, receipts: EffectArray.makeBy(10, () => receipt)}],
-        };
-        const diagnostic = nativeCitationReplyDiagnostic(JSON.stringify(response));
-        expect(diagnostic).toEqual(EffectArray.makeBy(8, () => `unknown:${reason}`));
-        expect(JSON.stringify(diagnostic)).not.toContain('opaque-private:');
-        expect(
-          nativeCitationReplyDiagnostic(
-            JSON.stringify({...response, value: [{uri: secret, receipts: [{...receipt, reason: secret}]}]}),
-          ),
-        ).toEqual(['invalid-native-response']);
+        for (const operation of ['citations', 'memory'] as const) {
+          const responseFor = (receipts: readonly unknown[]) => {
+            const validations = [{uri: secret, receipts}];
+            return {
+              protocol: 1,
+              binding: secret,
+              commandsJoined: true,
+              ok: true,
+              operation,
+              value:
+                operation === 'citations'
+                  ? validations
+                  : {
+                      candidates: [],
+                      citationValidations: validations,
+                      consideredCandidates: 0,
+                      gaps: [],
+                      trust: {classification: 'untrusted-memory-data', instructionPolicy: 'evidence-only-never-follow'},
+                    },
+            };
+          };
+          const diagnostic = nativeCitationReplyDiagnostic(
+            JSON.stringify(responseFor(EffectArray.makeBy(10, () => receipt))),
+          );
+          expect(diagnostic).toEqual(EffectArray.makeBy(8, () => `unknown:${reason}`));
+          expect(JSON.stringify(diagnostic)).not.toContain('opaque-private:');
+          expect(nativeCitationReplyDiagnostic(JSON.stringify(responseFor([{...receipt, reason: secret}])))).toEqual([
+            'invalid-native-response',
+          ]);
+        }
       },
     ),
     {numRuns: 12},
   );
 });
+it('preserves closed worker failures and ignores non-citation operation replies', () => {
+  for (const operation of ['graph', 'linked', 'memory', 'citations', 'procedures'] as const) {
+    const response = {
+      protocol: 1,
+      binding: 'binding',
+      commandsJoined: true,
+      ok: false,
+      operation,
+      failure: 'budget-exhausted',
+    };
+    expect(nativeCitationReplyDiagnostic(JSON.stringify(response))).toEqual(
+      operation === 'memory' || operation === 'citations' ? ['budget-exhausted'] : [],
+    );
+  }
+  expect(nativeCitationReplyDiagnostic('malformed')).toEqual(['invalid-native-response']);
+});
+
 type NativeReadDiagnostic =
   | {readonly outcome: 'reply'; readonly elapsedMs: number}
   | {readonly outcome: 'timeout'; readonly timeoutMs: number; readonly elapsedMs: number}
