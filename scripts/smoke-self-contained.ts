@@ -1,4 +1,5 @@
 import {Array as EffectArray} from 'effect';
+import {expectedNativeRuntimeBuildType} from './build.js';
 import {ScriptCommandExecutorLayer} from './effect/system-layer.js';
 import {ScriptSystemInfoLayer} from './effect/system-layer.js';
 import {provideScriptLayer, scriptError, ScriptError} from './effect/errors.js';
@@ -151,7 +152,10 @@ const smokeSelfContained = Effect.scoped(
       yield* run('install-dry-run', ['install', '--dry-run', '--no-start']);
 
       const runtime = yield* run('models-runtime', ['models', 'runtime']);
-      if (!/node-llama-cpp:\s+prebuilt/i.test(runtime)) {
+      const expectedBuildType = expectedNativeRuntimeBuildType(
+        JSON.parse(yield* fs.readFileString(path.join(root, 'dist', 'release.json'))),
+      );
+      if (!new RegExp(`node-llama-cpp:\\s+${expectedBuildType}(?:\\s|$)`, 'iu').test(runtime)) {
         return yield* ScriptError.make({
           message: `Native runtime was not loaded from the release payload:\n${runtime}`,
         });

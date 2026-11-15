@@ -1711,19 +1711,58 @@ it.skipIf(!supported)(
     const first = spawn('setInterval(()=>{},1000)'),
       second = spawn('setInterval(()=>{},1000)');
     const outputs = [first.stdout.cancel(), first.stderr.cancel(), second.stdout.cancel(), second.stderr.cancel()];
+    const secondCancellation: Array<'pending' | 'fulfilled' | 'rejected'> = ['pending', 'pending'];
+    for (const [index, output] of outputs.slice(2).entries())
+      void output.then(
+        () => {
+          secondCancellation[index] = 'fulfilled';
+        },
+        () => {
+          secondCancellation[index] = 'rejected';
+        },
+      );
+    let firstDrained: ReturnType<typeof runtimeObserveOwnedProviderTree> | undefined;
     try {
       runtimeTerminateOwnedProviderTree(first.handle, 'kill');
       await first.closeInput();
       await outputs[0];
       await outputs[1];
-      await until(
+      firstDrained = await until(
         () => runtimeObserveOwnedProviderTree(first.handle),
         o => o.state === 'drained',
       );
       expect(runtimeObserveOwnedProviderTree(second.handle).state).toBe('running');
     } finally {
       await stop(first);
-      await stop(second);
+      await stop(second).catch(error => {
+        if (error instanceof Error) {
+          let secondObserved: ReturnType<typeof runtimeObserveOwnedProviderTree> | 'unavailable' = 'unavailable';
+          try {
+            secondObserved = runtimeObserveOwnedProviderTree(second.handle);
+          } catch {
+            // Preserve the original stop failure if observation itself is unavailable.
+          }
+          error.message += `; two-provider drain ${JSON.stringify({
+            first: firstDrained
+              ? {
+                  state: firstDrained.state,
+                  stdioClosed: firstDrained.stdioClosed,
+                  leaderExitCode: firstDrained.leaderExitCode,
+                }
+              : 'unavailable',
+            second:
+              secondObserved === 'unavailable'
+                ? 'unavailable'
+                : {
+                    state: secondObserved.state,
+                    stdioClosed: secondObserved.stdioClosed,
+                    leaderExitCode: secondObserved.leaderExitCode,
+                  },
+            secondCancellation,
+          })}`;
+        }
+        return Promise.reject(error);
+      });
       await Promise.all(outputs);
     }
   },

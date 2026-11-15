@@ -1381,6 +1381,8 @@ export async function runOwnedBufferFixture(
     maxItems: 32,
     ...providerEnvironment(input),
   };
+  let stage: 'symbols' | 'preview' | 'disk-conservation' | 'version-update' | 'stale-version' = 'symbols';
+  let primaryFailed = false;
   try {
     const cli = await run(['semantic', 'query', '--json'], query);
     const response = await within(
@@ -1412,6 +1414,7 @@ export async function runOwnedBufferFixture(
       'Compiler sees exact unsaved symbol',
     );
     assert.ok(isDeepStrictEqual(cli.value, response.structuredContent), 'Owned buffer CLI/MCP evidence parity');
+    stage = 'preview';
     const position = fixtureSymbolPosition(text, 'BufferName');
     const preview = await run(['semantic', 'change', 'prepare', '--json'], {
       version: 1,
@@ -1445,8 +1448,10 @@ export async function runOwnedBufferFixture(
         'Java owned overlay mutation must refuse without a proposal or writer capability',
       );
     }
+    stage = 'disk-conservation';
     for (const [name, bytes] of EffectRecord.toEntries(sources))
       assert.equal(await readFile(join(project, name), 'utf8'), bytes, 'Unsaved owner never rewrites disk');
+    stage = 'version-update';
     const updated = await run(['semantic', 'view', '--json'], {
       ...common,
       action: 'update',
@@ -1466,6 +1471,7 @@ export async function runOwnedBufferFixture(
         updated.value.observation.documentVersion === 2,
       'Version update acknowledged',
     );
+    stage = 'stale-version';
     const stale = await run(['semantic', 'query', '--json'], query);
     results.push({
       operation: 'stale-buffer-version-refusal',
@@ -1476,13 +1482,23 @@ export async function runOwnedBufferFixture(
       isJsonObject(stale.value) && ['stale', 'conflict'].includes(String(stale.value.status)),
       'Earlier buffer version must not be silently rebound',
     );
+  } catch (cause) {
+    primaryFailed = true;
+    results.push({operation: 'owned-buffer-failure', stage, fullScenarioQualified: false});
+    throw cause;
   } finally {
-    const closed = await run(['semantic', 'view', '--json'], {...common, action: 'close', handle});
-    results.push({
-      operation: 'owned-buffer-close',
-      fullScenarioQualified: false,
-      result: redactCapabilities(closed.value),
-    });
-    assert.ok(isJsonObject(closed.value) && closed.value.status === 'ok', 'Only our buffer handle closed');
+    await run(['semantic', 'view', '--json'], {...common, action: 'close', handle})
+      .then(closed => {
+        results.push({
+          operation: 'owned-buffer-close',
+          fullScenarioQualified: false,
+          result: redactCapabilities(closed.value),
+        });
+        assert.ok(isJsonObject(closed.value) && closed.value.status === 'ok', 'Only our buffer handle closed');
+      })
+      .catch(cause => {
+        results.push({operation: 'owned-buffer-close-failure', fullScenarioQualified: false, cleanup: 'unknown'});
+        if (!primaryFailed) return Promise.reject(cause);
+      });
   }
 }
