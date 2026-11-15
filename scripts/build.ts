@@ -325,7 +325,7 @@ const stageTypeScriptNativeAsset = Effect.fn('build.stageTypeScriptNativeAsset')
     process.arch !== 'arm64' ||
     !('binarySha256' in raw) ||
     typeof raw.binarySha256 !== 'string' ||
-    raw.binarySha256 !== '28eb8b850cde747a69589e9dc2c3348b2083c21b9de6db99ec6d7a456260f2a3' ||
+    raw.binarySha256 !== '6453082c0e4fa16b78a37106fce911d0df9b79192025a1b4fdecdf92286e3c47' ||
     !('officialNpmBinary' in raw) ||
     raw.officialNpmBinary !== false ||
     !('focusedTestsPass' in raw) ||

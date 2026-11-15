@@ -1283,7 +1283,12 @@ effectIt.effect.skipIf(process.platform !== 'win32')(
       const inspection = yield* prepareSemanticEndpointDirectory(directory, false);
       const after = Native.runtimeReadPrivateWriterFile(inspection!, 'host.json', 16 * 1024)!;
       expect(after.bytes).toEqual(occupied.bytes);
-      expect(after.identity).toEqual(occupied.identity);
+      // Reads may advance access time; every other observed identity field remains conserved.
+      expect(new Set(Reflect.ownKeys(after.identity))).toEqual(new Set(Reflect.ownKeys(occupied.identity)));
+      for (const key of Reflect.ownKeys(occupied.identity)) {
+        if (key !== 'atimeMs' && key !== 'atimeNs')
+          expect(Reflect.get(after.identity, key), String(key)).toEqual(Reflect.get(occupied.identity, key));
+      }
       const failedDirectory = f.path.join(f.home, 'semantic', 'endpoint-lost-lease');
       const failed = yield* prepareSemanticEndpointDirectory(failedDirectory);
       expect(
