@@ -13,7 +13,6 @@ import {TestClock} from 'effect/testing';
 import {describe, expect, it, vi} from 'vitest';
 import fc from 'fast-check';
 import serverPackage from 'typescript-language-server/package.json' with {type: 'json'};
-import sdkPackage from 'typescript/package.json' with {type: 'json'};
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {sha256FileHex} from '@threadnote/platform/digest';
@@ -1144,10 +1143,14 @@ describe.skipIf(process.platform === 'win32')('pinned TypeScript engine read pil
     () =>
       Effect.gen(function* () {
         expect(serverPackage.version).toBe('6.0.2');
-        expect(sdkPackage.version).toBe('6.0.3');
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const resolveFrom = path.dirname(yield* path.fromFileUrl(new URL(import.meta.url)));
+        const sdkDirectory = yield* fs.realPath(path.dirname(Bun.resolveSync('typescript/package.json', resolveFrom)));
+        const sdkPackage = yield* Schema.decodeEffect(Schema.fromJsonString(Schema.Struct({version: Schema.String})))(
+          yield* fs.readFileString(path.join(sdkDirectory, 'package.json')),
+        );
+        expect(sdkPackage.version).toBe('6.0.3');
         const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-semantic-ts-'});
         const uri = (yield* path.toFileUrl(root)).href;
         const source =
@@ -1168,7 +1171,6 @@ describe.skipIf(process.platform === 'win32')('pinned TypeScript engine read pil
         const client = yield* makeLspClient(wire);
         const basis = observation(source, {worktree: uri, project: uri, uri: fileUri});
         const privateHome = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn6-ts-host-'}));
-        const sdkDirectory = yield* fs.realPath(path.dirname(Bun.resolveSync('typescript/package.json', resolveFrom)));
         const runtime = yield* makeTypeScriptRuntime({
           home: privateHome,
           sdkDirectory,

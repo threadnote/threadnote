@@ -1458,7 +1458,8 @@ it.skipIf(process.platform !== 'win32' || !supported)(
       await stage('duplicate:before');
       const self=k.symbols.GetCurrentProcess();check(k.symbols.DuplicateHandle(self,info[0],self,completion,0x00101000,0,0));
       await stage('duplicate:after');
-      const deadline=Date.now()+2500;let exited=false,initial=true;
+      const rootPid=Number(info[2]&0xffffffffn);
+      const deadline=Date.now()+2500;let exited=false,initial=true,piRolesConsumed=false;
       await stage('wait:before');
       while(!exited&&Date.now()<deadline){
         event.fill(0xa5);
@@ -1466,9 +1467,12 @@ it.skipIf(process.platform !== 'win32' || !supported)(
         check(event.subarray(176).every(v=>v===0xa5));
         const kind=view.getUint32(0,true),pid=view.getUint32(4,true),tid=view.getUint32(8,true);let status=0x10002;
         await stage('wait:after:'+kind);
-        if(kind===3){
+        if(kind===3&&pid===rootPid){
+          check(!piRolesConsumed);
           if(info[0]!==view.getBigUint64(24,true)){await stage('pi-process:before');check(k.symbols.CloseHandle(info[0]));await stage('pi-process:after');}
+          info[0]=0n;
           if(info[1]!==view.getBigUint64(32,true)){await stage('pi-thread:before');check(k.symbols.CloseHandle(info[1]));await stage('pi-thread:after');}
+          info[1]=0n;piRolesConsumed=true;
         }
         if(kind===3||kind===6){const file=view.getBigUint64(16,true);if(file!==0n){await stage('image:'+kind+':before');check(k.symbols.CloseHandle(file));await stage('image:'+kind+':after');}}
         if(kind===1){if(initial&&view.getUint32(16,true)===0x80000003&&view.getUint32(168,true)===1)initial=false;else status=0x80010001;}
@@ -1477,6 +1481,7 @@ it.skipIf(process.platform !== 'win32' || !supported)(
         if(kind===5)exited=true;
       }
       check(exited);
+      check(piRolesConsumed);
       await stage('completion-wait:before');
       while(k.symbols.WaitForSingleObject(completion[0],0)===258&&Date.now()<deadline)await Bun.sleep(1);
       check(k.symbols.WaitForSingleObject(completion[0],0)===0);await stage('completion-wait:after');

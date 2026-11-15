@@ -654,7 +654,7 @@ describe('Threadnote MCP toolsets', () => {
                 terminationMilliseconds: 2000,
               },
             },
-            ownedBufferStartup: 'unimplemented',
+            ownedBufferStartup: 'explicit-readiness-then-open',
             authorizedJvmImport: 'unimplemented',
           },
           providers: [
