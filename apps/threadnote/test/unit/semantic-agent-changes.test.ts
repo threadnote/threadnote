@@ -783,6 +783,66 @@ it.layer(io, {buildPerTest: true})(layerIt => {
     }),
   );
 
+  layerIt.effect('returns the existing service phase before the original host deadline', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const entered = yield* Deferred.make<void>();
+      const connecting = yield* Deferred.make<void>();
+      const sentBudget = yield* Deferred.make<number>();
+      const changes = yield* makeSemanticAgentChanges(
+        {
+          attach: () => Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)),
+          use: () => Effect.die('Unexpected provider use'),
+          observe: () => Effect.die('Unexpected publication'),
+        },
+        {
+          directory: f.path.join(f.home, 'changes'),
+          profileHome: f.home,
+          worktree: f.worktree,
+          runtimeIdentity: sha256HexSync('runtime'),
+        },
+      );
+      const testContext = yield* Effect.context<Effect.Services<ReturnType<typeof changes.execute>>>();
+      const host: SemanticAgentQueryHost = {
+        runtimeIdentity: Effect.succeed(sha256HexSync('runtime')),
+        connect: () =>
+          Deferred.succeed(connecting, undefined).pipe(
+            Effect.andThen(Effect.sleep(300)),
+            Effect.as({
+              request: (
+                input: Parameters<Effect.Success<ReturnType<SemanticAgentQueryHost['connect']>>['request']>[0],
+              ) =>
+                Effect.gen(function* () {
+                  if (input.operation !== 'agent-change') return yield* Effect.die('Unexpected endpoint request');
+                  yield* Deferred.succeed(sentBudget, input.request.milliseconds);
+                  const result = yield* changes.execute(input.request).pipe(Effect.provide(testContext));
+                  const encoded: unknown = JSON.parse(JSON.stringify(result));
+                  return yield* Schema.decodeUnknownEffect(Schema.Json)(encoded).pipe(Effect.orDie);
+                }),
+            }),
+          ),
+      };
+      const pending = yield* Effect.forkChild(
+        runSemanticAgentChangeWith(host, f.config, {...f.request, milliseconds: 10000}),
+      );
+      yield* Deferred.await(connecting);
+      yield* TestClock.adjust(300);
+      const serviceMilliseconds = yield* Deferred.await(sentBudget);
+      expect(serviceMilliseconds).toBe(9450);
+      yield* Deferred.await(entered);
+      yield* TestClock.adjust(serviceMilliseconds);
+      expect(yield* Fiber.join(pending)).toMatchObject({
+        status: 'timeout',
+        diagnostic: {
+          origin: 'service',
+          phase: 'source-attach',
+          budgetMilliseconds: serviceMilliseconds,
+          cleanup: 'unobserved',
+        },
+      });
+    }),
+  );
+
   layerIt.effect.each(['source-attach', 'provider-use'] as const)(
     'attributes the service timeout at %s without claiming owned cleanup',
     phase =>
@@ -870,6 +930,59 @@ it.layer(io, {buildPerTest: true})(layerIt => {
       expect(decode({...service.diagnostic, origin: 'host', phase: 'source-attach'})._tag).toBe('Failure');
       expect(decode({...service.diagnostic, origin: 'service', phase: 'endpoint-request'})._tag).toBe('Failure');
     }),
+  );
+
+  layerIt.effect.prop(
+    'never extends the host deadline when endpoint connection takes longer',
+    {
+      firstDelay: Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 1000})),
+      extraDelay: Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 1000})),
+    },
+    ({firstDelay, extraDelay}) =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const sent = (delay: number) =>
+          Effect.gen(function* () {
+            const connecting = yield* Deferred.make<void>();
+            const budget = yield* Deferred.make<number>();
+            const host: SemanticAgentQueryHost = {
+              runtimeIdentity: Effect.succeed(sha256HexSync('runtime')),
+              connect: () =>
+                Deferred.succeed(connecting, undefined).pipe(
+                  Effect.andThen(Effect.sleep(delay)),
+                  Effect.as({
+                    request: (
+                      input: Parameters<Effect.Success<ReturnType<SemanticAgentQueryHost['connect']>>['request']>[0],
+                    ) =>
+                      Effect.gen(function* () {
+                        if (input.operation !== 'agent-change') return yield* Effect.die('Unexpected endpoint request');
+                        yield* Deferred.succeed(budget, input.request.milliseconds);
+                        return {
+                          version: 1,
+                          status: 'unsupported',
+                          reason: 'test endpoint',
+                          applicable: false,
+                          writerAuthorityRequired: true,
+                        };
+                      }),
+                  }),
+                ),
+            };
+            const pending = yield* Effect.forkChild(
+              runSemanticAgentChangeWith(host, f.config, {...f.request, milliseconds: 10000}),
+            );
+            yield* Deferred.await(connecting);
+            yield* TestClock.adjust(delay);
+            expect(yield* Fiber.join(pending)).toMatchObject({status: 'unsupported'});
+            return yield* Deferred.await(budget);
+          });
+        const early = yield* sent(firstDelay);
+        const late = yield* sent(firstDelay + extraDelay);
+        expect(late).toBeLessThan(early);
+        expect(early + firstDelay).toBeLessThanOrEqual(10000);
+        expect(late + firstDelay + extraDelay).toBeLessThanOrEqual(10000);
+      }),
+    {arbitrary: {runs: 16}},
   );
 
   layerIt.effect.prop(

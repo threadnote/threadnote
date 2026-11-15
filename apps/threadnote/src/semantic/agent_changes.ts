@@ -45,7 +45,10 @@ const observeChangeTimeout =
     initial: Phase,
     refuse: (phase: Phase, measurement: TimeoutMeasurement) => ReturnType<typeof changeTimeoutRefusal>,
   ) =>
-  <A, E, R>(milliseconds: number, program: (enter: (phase: Phase) => Effect.Effect<void>) => Effect.Effect<A, E, R>) =>
+  <A, E, R>(
+    milliseconds: number,
+    program: (enter: (phase: Phase) => Effect.Effect<void>, remaining: Effect.Effect<number>) => Effect.Effect<A, E, R>,
+  ) =>
     Effect.gen(function* () {
       const started = yield* Clock.monotonicTimeNanos;
       let phase = initial;
@@ -57,7 +60,10 @@ const observeChangeTimeout =
             phaseStarted = now;
           }),
         );
-      const result = yield* program(enter).pipe(Effect.timeoutOption(milliseconds));
+      const remaining = Clock.monotonicTimeNanos.pipe(
+        Effect.map(now => Math.max(0, milliseconds - Number((now - started) / 1_000_000n))),
+      );
+      const result = yield* program(enter, remaining).pipe(Effect.timeoutOption(milliseconds));
       if (result._tag === 'Some') return result.value;
       const now = yield* Clock.monotonicTimeNanos;
       const elapsed = (since: bigint) =>
@@ -93,7 +99,7 @@ export const runSemanticAgentChangeWith = <R>(
         Schema.is(SemanticAgentChangeRequest)(input)
           ? (input.milliseconds ?? semanticAgentChangeLimits.defaultMilliseconds)
           : semanticAgentChangeLimits.defaultMilliseconds,
-        enter =>
+        (enter, hostRemaining) =>
           Effect.gen(function* () {
             const bytes = yield* Effect.try({
               try: () => new TextEncoder().encode(JSON.stringify(input)).length,
@@ -177,6 +183,9 @@ export const runSemanticAgentChangeWith = <R>(
               ...selected.profile.catalog,
             });
             yield* enter('endpoint-request');
+            const remaining = yield* hostRemaining;
+            // Leave room for the private service refusal and endpoint cleanup to reach this host.
+            const serviceMilliseconds = Math.max(1, remaining - Math.min(250, Math.floor(remaining / 20)));
             const result = yield* endpoint.request({
               operation: 'agent-change',
               request: {
@@ -187,7 +196,7 @@ export const runSemanticAgentChangeWith = <R>(
                 action: request.action,
                 ...scope,
                 maxBytes: request.maxBytes ?? semanticAgentChangeLimits.defaultPageBytes,
-                milliseconds: request.milliseconds ?? semanticAgentChangeLimits.defaultMilliseconds,
+                milliseconds: serviceMilliseconds,
               },
             });
             yield* enter('host-publication');
