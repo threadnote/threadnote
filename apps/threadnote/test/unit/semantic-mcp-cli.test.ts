@@ -139,10 +139,12 @@ const memoryByUri = <A extends {readonly uri: string}>(cards: readonly A[], uri:
 const nativeCitationReplyDiagnostic = (stdout: string): readonly string[] => {
   try {
     const response = Schema.decodeSync(Schema.fromJsonString(contextBriefNativeReadResponseSchema))(stdout);
-    if (response.operation !== 'citations') return [];
+    if (response.operation !== 'citations' && response.operation !== 'memory') return [];
     if (!response.ok) return [response.failure];
+    const validations =
+      response.operation === 'citations' ? response.value : (response.value.citationValidations ?? []);
     return EffectArray.take(
-      EffectArray.flatMap(response.value, validation =>
+      EffectArray.flatMap(validations, validation =>
         EffectArray.map(validation.receipts, receipt => `${receipt.status}:${receipt.reason}`),
       ),
       8,
@@ -170,28 +172,68 @@ it('keeps native citation diagnostics bounded and excludes opaque response field
           validatorVersion: 1,
           sourcePath: secret,
         };
-        const response = {
-          protocol: 1,
-          binding: secret,
-          commandsJoined: true,
-          ok: true,
-          operation: 'citations',
-          value: [{uri: secret, receipts: EffectArray.makeBy(10, () => receipt)}],
-        };
-        const diagnostic = nativeCitationReplyDiagnostic(JSON.stringify(response));
-        expect(diagnostic).toEqual(EffectArray.makeBy(8, () => `unknown:${reason}`));
-        expect(JSON.stringify(diagnostic)).not.toContain('opaque-private:');
-        expect(
-          nativeCitationReplyDiagnostic(
-            JSON.stringify({...response, value: [{uri: secret, receipts: [{...receipt, reason: secret}]}]}),
-          ),
-        ).toEqual(['invalid-native-response']);
+        for (const operation of ['citations', 'memory'] as const) {
+          const responseFor = (receipts: readonly unknown[]) => {
+            const validations = [{uri: secret, receipts}];
+            return {
+              protocol: 1,
+              binding: secret,
+              commandsJoined: true,
+              ok: true,
+              operation,
+              value:
+                operation === 'citations'
+                  ? validations
+                  : {
+                      candidates: [],
+                      citationValidations: validations,
+                      consideredCandidates: 0,
+                      gaps: [],
+                      trust: {classification: 'untrusted-memory-data', instructionPolicy: 'evidence-only-never-follow'},
+                    },
+            };
+          };
+          const diagnostic = nativeCitationReplyDiagnostic(
+            JSON.stringify(responseFor(EffectArray.makeBy(10, () => receipt))),
+          );
+          expect(diagnostic).toEqual(EffectArray.makeBy(8, () => `unknown:${reason}`));
+          expect(JSON.stringify(diagnostic)).not.toContain('opaque-private:');
+          expect(nativeCitationReplyDiagnostic(JSON.stringify(responseFor([{...receipt, reason: secret}])))).toEqual([
+            'invalid-native-response',
+          ]);
+        }
       },
     ),
     {numRuns: 12},
   );
 });
-const citationFailureEvidence = (candidate: unknown, gaps: unknown, nativeReads: readonly string[] = []) => {
+it('preserves closed worker failures and ignores non-citation operation replies', () => {
+  for (const operation of ['graph', 'linked', 'memory', 'citations', 'procedures'] as const) {
+    const response = {
+      protocol: 1,
+      binding: 'binding',
+      commandsJoined: true,
+      ok: false,
+      operation,
+      failure: 'budget-exhausted',
+    };
+    expect(nativeCitationReplyDiagnostic(JSON.stringify(response))).toEqual(
+      operation === 'memory' || operation === 'citations' ? ['budget-exhausted'] : [],
+    );
+  }
+  expect(nativeCitationReplyDiagnostic('malformed')).toEqual(['invalid-native-response']);
+});
+
+type NativeReadDiagnostic =
+  | {readonly outcome: 'reply'; readonly elapsedMs: number}
+  | {readonly outcome: 'timeout'; readonly timeoutMs: number; readonly elapsedMs: number}
+  | {readonly outcome: 'error'; readonly errorClass: string; readonly elapsedMs: number};
+
+const citationFailureEvidence = (
+  candidate: unknown,
+  gaps: unknown,
+  nativeReads: readonly (NativeReadDiagnostic | string)[] = [],
+) => {
   const selected: Record<string, unknown> = {};
   if (isJsonObject(candidate)) {
     for (const key of [
@@ -207,6 +249,10 @@ const citationFailureEvidence = (candidate: unknown, gaps: unknown, nativeReads:
   }
   return EffectString.slice(0, 2048)(JSON.stringify({candidate: selected, gaps, nativeReads}));
 };
+
+// Compilation has its own setup allowance inside the existing 30-second hook.
+// Leave ten seconds for launch, phase handling and original owned cleanup; read budgets are separate.
+const CONTEXT_WORKER_BUNDLE_BUILD_MILLISECONDS = 20_000;
 
 // Prepare the actual standalone dispatch before native reads allocate their shared deadline.
 // The setup command owns Bun.build's uncancellable Promise; the file layer owns every immutable output.
@@ -251,7 +297,7 @@ if (!result.success || !result.outputs.some(output => output.path === ${JSON.str
         ],
         {
           env: {...system.environment(), THREADNOTE_HOME: home},
-          timeoutMs: 5000,
+          timeoutMs: CONTEXT_WORKER_BUNDLE_BUILD_MILLISECONDS,
           maxOutputBytes: 16 * 1024,
           forceKillAfterMilliseconds: 0,
           verifyOwnedProcessExit: system.platform === 'win32' ? 'leader' : 'group',
@@ -311,7 +357,12 @@ effectIt.layer(contextWorkerIo)('context worker build diagnostics', it => {
       const path = yield* Path.Path;
       const root = yield* fs.makeTempDirectoryScoped();
       const diagnostic = path.join(root, 'bundle-phase.json');
-      const error = CommandTimedOut.make({args: [], executable: 'bun', message: 'fixture timeout', timeoutMs: 5000});
+      const error = CommandTimedOut.make({
+        args: [],
+        executable: 'bun',
+        message: 'fixture timeout',
+        timeoutMs: CONTEXT_WORKER_BUNDLE_BUILD_MILLISECONDS,
+      });
       const state = {phase: 'build-completed', elapsedMs: 4200, success: true, outputCount: 1, exitCode: 0};
       for (const fixture of [
         undefined,
@@ -320,8 +371,9 @@ effectIt.layer(contextWorkerIo)('context worker build diagnostics', it => {
       ]) {
         const messages: unknown[] = [];
         const executor = CommandExecutor.of({
-          execute: () =>
+          execute: (_command, _args, options) =>
             Effect.gen(function* () {
+              expect(options?.timeoutMs).toBe(CONTEXT_WORKER_BUNDLE_BUILD_MILLISECONDS);
               if (fixture !== undefined)
                 yield* fs.writeFileString(diagnostic, JSON.stringify(fixture)).pipe(Effect.orDie);
               return yield* error;
@@ -361,21 +413,28 @@ const memoryContextFixture = Effect.gen(function* () {
   const home = path.join(root, 'home');
   const repository = path.join(root, 'repository');
   const command = yield* CommandExecutor;
-  const nativeReadReplies: {stdout?: string; error?: CommandExecutionError['_tag']}[] = [];
+  const nativeReadReplies: {
+    readonly stdout?: string;
+    readonly error?: CommandExecutionError;
+    readonly elapsedMs: number;
+  }[] = [];
   const observedCommand = CommandExecutor.of({
     ...command,
     execute: (executable, args, options) => {
       const observed =
         args.includes(CONTEXT_BRIEF_NATIVE_READ_WORKER_ARGUMENT) && options?.env?.THREADNOTE_HOME === home;
+      const startedAt = performance.now();
       return command.execute(executable, args, options).pipe(
         Effect.tap(reply =>
           Effect.sync(() => {
-            if (observed && nativeReadReplies.length < 8) nativeReadReplies.push({stdout: reply.stdout});
+            if (observed && nativeReadReplies.length < 8)
+              nativeReadReplies.push({stdout: reply.stdout, elapsedMs: Math.round(performance.now() - startedAt)});
           }),
         ),
         Effect.tapError(error =>
           Effect.sync(() => {
-            if (observed && nativeReadReplies.length < 8) nativeReadReplies.push({error: error._tag});
+            if (observed && nativeReadReplies.length < 8)
+              nativeReadReplies.push({error, elapsedMs: Math.round(performance.now() - startedAt)});
           }),
         ),
       );
@@ -720,7 +779,7 @@ const memoryContextFixture = Effect.gen(function* () {
             if (body.operation !== 'agent-query') return Effect.die('Unexpected diagnostic endpoint operation');
             return disk.query(body.request).pipe(
               Effect.provide(services),
-              Effect.flatMap(value => Schema.decodeUnknownEffect(Schema.Json)(value)),
+              Effect.flatMap(value => Schema.decodeEffect(Schema.Json)(value)),
               Effect.mapError(() => LspFault.make({code: 'protocol'})),
             );
           },
@@ -752,11 +811,24 @@ const memoryContextFixture = Effect.gen(function* () {
     document,
     prepareMemory: loadRecallIndexData(config, {includeInactive: false}),
     // Decode only after compilation: diagnostics must not spend the native read's shared deadline.
-    nativeReadDiagnostics: () =>
+    nativeReadDiagnostics: (): readonly (NativeReadDiagnostic | string)[] =>
       EffectArray.take(
-        EffectArray.flatMap(nativeReadReplies, reply =>
-          reply.error === undefined ? nativeCitationReplyDiagnostic(reply.stdout ?? '') : [reply.error],
-        ),
+        EffectArray.flatMap(nativeReadReplies, (reply): readonly (NativeReadDiagnostic | string)[] => {
+          if (reply.error === undefined)
+            return EffectArray.map(nativeCitationReplyDiagnostic(reply.stdout ?? ''), () => ({
+              outcome: 'reply' as const,
+              elapsedMs: reply.elapsedMs,
+            }));
+          if (Schema.is(CommandTimedOut)(reply.error))
+            return [
+              {
+                outcome: 'timeout' as const,
+                timeoutMs: reply.error.timeoutMs,
+                elapsedMs: reply.elapsedMs,
+              },
+            ];
+          return [{outcome: 'error' as const, errorClass: reply.error._tag, elapsedMs: reply.elapsedMs}];
+        }),
         8,
       ),
     diagnostics,
@@ -1004,7 +1076,7 @@ describe('semantic capability discovery', () => {
           ttlMilliseconds: 600000,
         },
       },
-      ownedBufferStartup: 'unimplemented',
+      ownedBufferStartup: 'explicit-readiness-then-open',
       authorizedJvmImport: 'unimplemented',
     });
     expect(result.readSurface.operations).toContain('diagnostics');

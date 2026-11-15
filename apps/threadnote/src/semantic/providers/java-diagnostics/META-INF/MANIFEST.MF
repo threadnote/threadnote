@@ -6,6 +6,8 @@ Bundle-Version: 1.0.0
 Bundle-RequiredExecutionEnvironment: JavaSE-21
 Require-Bundle: org.eclipse.jdt.ls.core;
  bundle-version="[1.63.0.202610191322,1.63.0.202610191322]",
+ org.eclipse.buildship.core;
+ bundle-version="[3.1.13.v20260923-0232-s,3.1.13.v20260923-0232-s]",
  org.eclipse.jdt.core;
  bundle-version="[3.48.0.v20261007-1246,3.48.0.v20261007-1246]",
  org.eclipse.core.resources;

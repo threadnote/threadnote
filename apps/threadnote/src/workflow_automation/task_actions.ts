@@ -1,3 +1,4 @@
+import {runStandalonePrWatch} from './standalone_pr_watch.js';
 import {SystemInfo} from '@threadnote/platform/system';
 import {
   decodeNativeAuthoringDocument,
@@ -25,7 +26,6 @@ import {
   nativeTaskStartRunId,
   NativeTaskAnchorSchema,
   NativeTaskStartRequestSchema,
-  nativeTaskSnapshotId,
 } from '@threadnote/workflow-automations/task';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
@@ -54,7 +54,7 @@ import {nativeWorkflowError} from './memory.js';
 import {readNativeWorkflowState} from './store.js';
 import {readNativeTaskView, verifyNativeTaskReopen} from './task.js';
 import {inspectOldBindingOwners} from './task_binding_transition.js';
-import {nativeWatchWakeupSchema} from './watch_notification_state.js';
+import {NativeTaskPrWatchFieldsSchema} from './task_pr_watch.js';
 import {
   cycleRequest,
   currentNativeTaskRef,
@@ -77,8 +77,16 @@ import {
   verifyRequalificationWitness,
 } from './task_action_helpers.js';
 import {runNativeTaskFinish} from './task_closeout_action.js';
+import {runNativeTaskSnapshotAction} from './task_snapshot_actions.js';
 import {runNativeSharedPlanStart} from './portable_plan_start.js';
-import {runNativeTaskCommitDelivery, runNativeTaskPrDelivery, runNativeTaskPrWatch} from './task_delivery_actions.js';
+import {runNativeTaskSupplementalPublication} from './task_supplemental_publication.js';
+import {requalifyInvalidNativeTaskTail} from './task_review_requalification.js';
+import {
+  runNativeTaskLocalDelivery,
+  runNativeTaskCommitDelivery,
+  runNativeTaskPrDelivery,
+  runNativeTaskWatchAction,
+} from './task_delivery_actions.js';
 const id = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u));
 const packetInputSchema = Schema.Struct({
   capacity: NativeCyclePacketOptionsSchema.fields.capacity,
@@ -111,6 +119,8 @@ const prDeliverySchema = Schema.Struct({
   state: Schema.Literals(['open', 'merged']),
 });
 export const NativeTaskPrDeliveryFieldsSchema = Schema.Struct({
+  // Optional only for exact replay of legacy receipts; new delivery requires explicit text.
+  userAuthority: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
   commitEvidence: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(2048)),
   pr: prDeliverySchema,
   publication: NativeCyclePublicationAuthoritySchema,
@@ -120,41 +130,28 @@ export const NativeTaskCommitDeliveryFieldsSchema = Schema.Struct({
   commitEvidence: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(2048)),
 });
 export type NativeTaskCommitDeliveryFields = typeof NativeTaskCommitDeliveryFieldsSchema.Type;
-export const NativeTaskPrWatchFieldsSchema = Schema.Struct({
-  operation: Schema.Literals([
-    'start',
-    'renew',
-    'inspect',
-    'relay',
-    'disposition',
-    'ack',
-    'work',
-    'work-disposition',
-    'work-detail',
-    'stop',
-    'complete',
-  ]),
-  phaseId: Schema.optionalKey(id),
-  wakeup: Schema.optionalKey(nativeWatchWakeupSchema),
-  takeover: Schema.optionalKey(Schema.Boolean),
-  recoverWakeup: Schema.optionalKey(Schema.Boolean),
-  noticeRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
-  workEventRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
-  offsetBytes: Schema.optionalKey(Schema.Int.check(Schema.isBetween({minimum: 0, maximum: Number.MAX_SAFE_INTEGER}))),
-  sourceDigest: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
-  workOffset: Schema.optionalKey(Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 8192}))),
-  workViewDigest: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
-  watchDeliveryRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
-  dispositions: Schema.optionalKey(
-    Schema.Array(
-      Schema.Struct({
-        eventRef: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
-        status: Schema.Literals(['open', 'blocked', 'resolved', 'ignored']),
-        reason: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1024)),
-        evidence: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(2048)),
-      }),
-    ).check(Schema.isMaxLength(32)),
-  ),
+export {NativeTaskPrWatchFieldsSchema} from './task_pr_watch.js';
+export type NativeTaskPrWatchFields = typeof NativeTaskPrWatchFieldsSchema.Type;
+const boundedRef = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(8192));
+export const NativeTaskSupplementalAttachFieldsSchema = Schema.Struct({
+  taskRef: boundedRef,
+  phaseId: id,
+  pr: prDeliverySchema,
+  userAuthority: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+});
+export const NativeTaskInvalidTailFieldsSchema = Schema.Struct({
+  taskRef: boundedRef,
+  predecessorRef: boundedRef,
+  reason: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+  userAuthority: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+  phaseOwnedPaths: Schema.Array(
+    Schema.Struct({
+      phaseId: id,
+      paths: Schema.Array(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))).check(
+        Schema.isBetweenLength(1, 256),
+      ),
+    }),
+  ).check(Schema.isBetweenLength(1, 128)),
 });
 const closeoutProposalFields = {...NativeCloseoutProposalSchema.fields};
 delete (closeoutProposalFields as Partial<typeof closeoutProposalFields>).watchWork;
@@ -251,6 +248,14 @@ const requestSchema = Schema.Union([
     reason: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
   }),
   Schema.Struct({
+    command: Schema.Literal('recover-unreviewed-rebase-snapshot'),
+    runId: id,
+    callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    snapshotRef: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    reason: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    userAuthority: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+  }),
+  Schema.Struct({
     command: Schema.Literal('requalify-base-snapshot'),
     runId: id,
     callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
@@ -297,11 +302,30 @@ const requestSchema = Schema.Union([
   }),
   Schema.Struct({
     command: Schema.Literal('watch-pr'),
-    runId: id,
+    runId: Schema.optionalKey(id),
+    prUrl: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(2048))),
+    watchRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(16384))),
     callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
     validationRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
     deliveryRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(8192))),
     ...NativeTaskPrWatchFieldsSchema.fields,
+    snapshotRef: Schema.optionalKey(boundedRef),
+    candidateWatchRef: Schema.optionalKey(boundedRef),
+    supplementalRef: Schema.optionalKey(boundedRef),
+    pr: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(2048))),
+  }),
+  Schema.Struct({
+    command: Schema.Literal('supplemental-publication'),
+    runId: id,
+    callerCwd: boundedRef,
+    operation: Schema.Literal('attach'),
+    ...NativeTaskSupplementalAttachFieldsSchema.fields,
+  }),
+  Schema.Struct({
+    command: Schema.Literal('requalify-invalid-tail'),
+    runId: id,
+    callerCwd: boundedRef,
+    ...NativeTaskInvalidTailFieldsSchema.fields,
   }),
   Schema.Struct({
     command: Schema.Literal('finish'),
@@ -617,6 +641,29 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
     const checkout = yield* fs
       .realPath(reportedCheckout)
       .pipe(Effect.mapError(() => fail('workspace-not-found', 'The Git checkout root could not be resolved.')));
+    if (
+      request.command === 'watch-pr' &&
+      request.runId === undefined &&
+      EffectArray.some(
+        [
+          request.validationRef,
+          request.deliveryRef,
+          request.phaseId,
+          request.snapshotRef,
+          request.candidateWatchRef,
+          request.supplementalRef,
+          request.pr,
+        ],
+        value => value !== undefined,
+      )
+    )
+      return yield* fail('invalid-request', 'Standalone monitoring cannot use workflow proof fields.');
+    if (request.command === 'watch-pr' && request.runId === undefined)
+      return yield* runStandalonePrWatch(config, request, checkout);
+    if (request.command === 'watch-pr' && (request.watchRef !== undefined || request.prUrl !== undefined))
+      return yield* fail('invalid-request', 'Workflow-bound watches cannot use standalone watch identities.');
+    if (request.runId === undefined) return yield* fail('invalid-request', 'Use the workflow run identifier.');
+    const runId = request.runId;
     const stored = yield* readNativeWorkflowState(config, request.runId);
     if (!stored) return yield* fail('run-not-found', 'Start a fresh native run before using task actions.');
     const journal = yield* inCheckout(
@@ -867,7 +914,7 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
         };
       const exportPacket = yield* authoring('export-dev-cycle', {
         uri: current.uri,
-        delivery: 'local',
+        delivery: existingCycle?.plan.delivery ?? 'local',
         bindings,
       });
       const latest = yield* readNativeWorkflowState(config, request.runId);
@@ -917,7 +964,7 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
         'taskRef' in request ? request.taskRef : undefined,
         stored.state,
         stored.revision,
-        request.runId,
+        runId,
         action,
         view,
       );
@@ -1427,88 +1474,8 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
       if (!accepted) return yield* fail('validation-not-recorded', 'The canonical phase validation was not persisted.');
       return {status: 'recorded', replayed: false, validationRef, validation: accepted};
     }
-    if (request.command === 'deliver-local') {
-      const ref = decodeNativeTaskActionRef(request.validationRef);
-      if (
-        !ref ||
-        (ref.kind !== 'validation' && ref.kind !== 'delivery') ||
-        ref.runId !== request.runId ||
-        ref.generationHash !== sha256HexSync(stored.state.generation) ||
-        !ref.phaseId ||
-        !ref.phaseHash ||
-        !ref.snapshotId ||
-        !ref.sourceHead ||
-        !ref.sourceTree ||
-        !ref.payloadDigest
-      )
-        return yield* fail(
-          'invalid-validation-ref',
-          'Use the current canonical validation reference for local delivery.',
-        );
-      if (state.plan.delivery !== 'local')
-        return yield* fail('delivery-scope', 'This task operation supports local delivery only.');
-      const proof = state.phases[ref.phaseId];
-      const validationDigest = proof?.validation ? sha256HexSync(stableJson(proof.validation)) : undefined;
-      if (
-        !proof?.validation ||
-        proof.phaseHash !== ref.phaseHash ||
-        proof.head !== (proof.validation.head ?? ref.sourceHead) ||
-        proof.tree !== ref.sourceTree ||
-        (ref.kind === 'validation' && validationDigest !== ref.payloadDigest)
-      )
-        return yield* fail('stale-validation-ref', 'The reference does not match current canonical phase validation.');
-      const snapshots = EffectArray.filter(
-        runtime.snapshots,
-        item =>
-          item.snapshot.snapshotId === ref.snapshotId &&
-          item.snapshot.phaseId === ref.phaseId &&
-          item.snapshot.phaseHash === ref.phaseHash &&
-          item.snapshot.head === ref.sourceHead &&
-          item.snapshot.tree === ref.sourceTree,
-      );
-      if (snapshots.length !== 1)
-        return yield* fail('snapshot-ambiguous', 'Local delivery needs one unique canonical source snapshot.');
-      const receipt = {
-        phaseId: ref.phaseId,
-        phaseHash: ref.phaseHash,
-        delivery: 'local' as const,
-        headSha: proof.head,
-        validatedTree: proof.tree,
-      };
-      const deliveryDigest = sha256HexSync(stableJson(receipt));
-      if (ref.kind === 'delivery' && ref.payloadDigest !== deliveryDigest)
-        return yield* fail('delivery-conflict', 'The delivery reference is bound to different receipt content.');
-      const deliveryRef = encodeNativeTaskActionRef({...ref, kind: 'delivery', payloadDigest: deliveryDigest});
-      if (proof.delivery) {
-        if (
-          stableJson(proof.delivery) !== stableJson(receipt) ||
-          (ref.kind === 'delivery' && ref.payloadDigest !== deliveryDigest)
-        )
-          return yield* fail('delivery-conflict', 'The phase already has a different canonical delivery receipt.');
-        return {status: 'delivered', replayed: true, deliveryRef, receipt: proof.delivery};
-      }
-      if (ref.kind === 'delivery')
-        return yield* fail('stale-delivery-ref', 'This delivery reference has no matching canonical receipt.');
-      unwrapCycle(
-        yield* inCheckout(
-          runWorkflowAutomation(
-            config,
-            cycleRequest(stored, {
-              command: 'record-delivery',
-              phaseId: ref.phaseId,
-              delivery: receipt,
-              expectedRevision: stored.revision,
-            }),
-          ),
-          checkout,
-        ),
-      );
-      const latest = yield* readNativeWorkflowState(config, request.runId);
-      const persisted = latest?.state.cycle?.state.phases[ref.phaseId]?.delivery;
-      if (!persisted || stableJson(persisted) !== stableJson(receipt))
-        return yield* fail('delivery-not-recorded', 'The canonical local delivery receipt was not persisted.');
-      return {status: 'delivered', replayed: false, deliveryRef, receipt: persisted};
-    }
+    if (request.command === 'deliver-local')
+      return yield* runNativeTaskLocalDelivery(config, request, stored, checkout, runtime);
 
     if (request.command === 'deliver-commit')
       return yield* runNativeTaskCommitDelivery(config, request, stored, checkout, runtime);
@@ -1516,7 +1483,14 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
     if (request.command === 'deliver-pr')
       return yield* runNativeTaskPrDelivery(config, request, stored, checkout, runtime);
 
-    if (request.command === 'watch-pr') return yield* runNativeTaskPrWatch(config, request, stored, checkout);
+    if (request.command === 'supplemental-publication')
+      return yield* runNativeTaskSupplementalPublication(config, request, stored, checkout, runtime);
+    if (request.command === 'requalify-invalid-tail') {
+      const {command: _command, ...input} = request;
+      return yield* requalifyInvalidNativeTaskTail(config, input);
+    }
+    if (request.command === 'watch-pr')
+      return yield* runNativeTaskWatchAction(config, {...request, runId}, stored, checkout, runtime);
 
     if (request.command === 'work') {
       const view = yield* readNativeTaskView(config, {
@@ -1817,179 +1791,5 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
       };
     }
 
-    if (request.command === 'supersede-unreviewed-snapshot') {
-      const ref = decodeNativeTaskActionRef(request.snapshotRef);
-      if (
-        !ref ||
-        ref.kind !== 'snapshot' ||
-        ref.runId !== request.runId ||
-        ref.generationHash !== sha256HexSync(stored.state.generation) ||
-        !ref.phaseId ||
-        !ref.phaseHash ||
-        !ref.snapshotId ||
-        !ref.sourceHead ||
-        !ref.sourceTree ||
-        !ref.baselineHead ||
-        !ref.baselineTree ||
-        !ref.baselineRef
-      )
-        return yield* fail('invalid-snapshot-ref', 'Use the exact reference for the unreviewed snapshot to supersede.');
-      const entry = EffectOption.getOrUndefined(
-        EffectArray.findFirst(runtime.snapshots, item => item.snapshot.snapshotId === ref.snapshotId),
-      );
-      if (state.plan.delivery !== 'local' && state.plan.delivery !== 'commit' && state.plan.delivery !== 'pr')
-        return yield* fail('task-scope', 'Snapshot recovery supports approved local, commit, or PR delivery plans.');
-      const snapshotId = `superseded-${sha256HexSync(stableJson([ref.snapshotId, request.reason]))}`;
-      const alreadyAdmitted = EffectArray.findFirst(runtime.snapshots, item => item.snapshot.snapshotId === snapshotId);
-      const exactReplay =
-        alreadyAdmitted._tag === 'Some' &&
-        alreadyAdmitted.value.snapshot.supersedes === ref.snapshotId &&
-        alreadyAdmitted.value.snapshot.unreviewedSupersession?.reason === request.reason;
-      const baseline = runtime.baselines[ref.phaseId];
-      const latest = EffectArray.filter(runtime.snapshots, item => item.snapshot.phaseId === ref.phaseId).at(-1);
-      if (
-        !entry ||
-        entry.snapshot.phaseId !== ref.phaseId ||
-        entry.snapshot.phaseHash !== ref.phaseHash ||
-        entry.snapshot.head !== ref.sourceHead ||
-        entry.snapshot.tree !== ref.sourceTree ||
-        !baseline ||
-        baseline.head !== ref.baselineHead ||
-        baseline.tree !== ref.baselineTree ||
-        baseline.pinnedRef !== ref.baselineRef ||
-        state.phases[ref.phaseId]?.phaseHash !== ref.phaseHash ||
-        state.phases[ref.phaseId]?.status !== 'pending' ||
-        (latest?.snapshot.snapshotId !== ref.snapshotId && !exactReplay)
-      )
-        return yield* fail('stale-snapshot-ref', 'The exact snapshot is no longer the current phase predecessor.');
-      if (EffectArray.some(runtime.reviews, item => item.snapshotId === ref.snapshotId))
-        return yield* fail('review-history', 'Only an unreviewed snapshot can use supersession recovery.');
-      const currentTask = yield* readNativeTaskView(config, {
-        runId: request.runId,
-        callerCwd: checkout,
-        role: 'review',
-      });
-      if (
-        currentTask.revision !== stored.revision ||
-        currentTask.status !== 'ready' ||
-        currentTask.next.action !== 'review' ||
-        currentTask.next.phaseId !== ref.phaseId ||
-        (currentTask.next.snapshotId !== ref.snapshotId &&
-          !(exactReplay && currentTask.next.snapshotId === snapshotId)) ||
-        currentTask.phase?.snapshot?.snapshotId !== currentTask.next.snapshotId
-      )
-        return yield* fail(
-          'stale-snapshot-ref',
-          'Recovery requires the exact unreviewed snapshot on the current phase review card.',
-        );
-      const head = yield* gitValue(['rev-parse', 'HEAD'], checkout);
-      if (!head) return yield* fail('source-unavailable', 'Could not read the current source head.');
-      yield* inCheckout(
-        runWorkflowAutomation(
-          config,
-          cycleRequest(stored, {
-            command: 'snapshot',
-            phaseId: ref.phaseId,
-            snapshotId,
-            previous: ref.snapshotId,
-            supersedeUnreviewed: true,
-            acceptedHead: head,
-            reason: request.reason,
-            expectedRevision: stored.revision,
-          }),
-        ),
-        checkout,
-      );
-      const canonical = yield* readCanonicalSnapshot(snapshotId);
-      return {
-        status: 'recorded',
-        replayed: alreadyAdmitted._tag === 'Some',
-        snapshot: canonical,
-        snapshotRef: taskActionSnapshotRef(ref, canonical),
-      };
-    }
-
-    const ref = decodeNativeTaskActionRef(request.workRef);
-    if (
-      !ref ||
-      ref.kind !== 'work' ||
-      ref.runId !== request.runId ||
-      ref.generationHash !== sha256HexSync(stored.state.generation) ||
-      !ref.phaseId ||
-      !ref.phaseHash ||
-      !ref.baselineHead ||
-      !ref.baselineTree ||
-      !ref.baselineRef
-    )
-      return yield* fail('invalid-work-ref', 'Restart with the current implementation packet for this run.');
-    const snapshotId = nativeTaskSnapshotId(request.workRef);
-    const admitted = EffectOption.getOrUndefined(
-      EffectArray.findFirst(runtime.snapshots, item => item.snapshot.snapshotId === snapshotId),
-    );
-    if (admitted) {
-      if (admitted.snapshot.phaseId !== ref.phaseId || admitted.snapshot.phaseHash !== ref.phaseHash)
-        return yield* fail(
-          'snapshot-conflict',
-          'This task reference is already bound to different canonical snapshot evidence.',
-        );
-      return {
-        status: 'recorded',
-        replayed: true,
-        snapshot: admitted,
-        snapshotRef: taskActionSnapshotRef(ref, admitted),
-      };
-    }
-    const baseline = runtime.baselines[ref.phaseId];
-    if (
-      !baseline ||
-      baseline.head !== ref.baselineHead ||
-      baseline.tree !== ref.baselineTree ||
-      baseline.pinnedRef !== ref.baselineRef ||
-      state.phases[ref.phaseId]?.phaseHash !== ref.phaseHash ||
-      stored.revision !== ref.stateRevision
-    )
-      return yield* fail('stale-work-ref', 'This packet is no longer admitted. Restart with the current task view.');
-    const view = yield* readNativeTaskView(config, {
-      runId: request.runId,
-      callerCwd: checkout,
-      role: 'implementation',
-    });
-    if (
-      view.status !== 'ready' ||
-      !['implement', 'validate'].includes(view.next.action) ||
-      view.next.phaseId !== ref.phaseId
-    )
-      return yield* fail(
-        'task-not-ready',
-        EffectArray.join(view.missingInputs, ' ') || 'Follow the current native task action.',
-      );
-    const head = yield* gitValue(['rev-parse', 'HEAD'], checkout);
-    if (!head) return yield* fail('source-unavailable', 'Could not read the current source head.');
-    const previous = EffectArray.filter(runtime.snapshots, item => item.snapshot.phaseId === ref.phaseId).at(
-      -1,
-    )?.snapshot;
-    if (previous && !request.reason)
-      return yield* fail('review-history', 'Give a concrete reason before recording another source iteration.');
-    yield* inCheckout(
-      runWorkflowAutomation(
-        config,
-        cycleRequest(stored, {
-          command: 'snapshot',
-          phaseId: ref.phaseId,
-          snapshotId,
-          acceptedHead: head,
-          ...(previous ? {previous: previous.snapshotId} : {}),
-          reason: request.reason ?? 'Record the exact worker source result for this implementation packet.',
-          expectedRevision: stored.revision,
-        }),
-      ),
-      checkout,
-    );
-    const canonical = yield* readCanonicalSnapshot(snapshotId);
-    return {
-      status: 'recorded',
-      replayed: false,
-      snapshot: canonical,
-      snapshotRef: taskActionSnapshotRef(ref, canonical),
-    };
+    return yield* runNativeTaskSnapshotAction(config, request, stored, checkout, runtime);
   });

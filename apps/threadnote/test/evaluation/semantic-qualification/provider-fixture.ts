@@ -1,11 +1,19 @@
 /* oxlint-disable effecttsgo/node-builtin-import -- Qualification verifies explicit local artifacts and disposable fixture bytes. */
 import {createHash} from 'node:crypto';
-import {readFile, mkdir, writeFile, lstat} from 'node:fs/promises';
+import {readFile, mkdir, writeFile, lstat, readdir, statfs} from 'node:fs/promises';
 import {join, relative, isAbsolute} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {strict as assert} from 'node:assert';
 import {isDeepStrictEqual} from 'node:util';
-import {Array as EffectArray, Effect, Layer, Record as EffectRecord, Schema, String as EffectString} from 'effect';
+import {
+  Array as EffectArray,
+  Clock,
+  Effect,
+  Layer,
+  Record as EffectRecord,
+  Schema,
+  String as EffectString,
+} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {cryptoLayer} from '@threadnote/platform/crypto';
 import {isJsonObject} from '@threadnote/platform/json';
@@ -14,8 +22,13 @@ import {
   javaPreparedModelJson,
   javaSourceEncodingImage,
   loadJavaPreparedModel,
+  JavaPreparationGradle,
   type JavaPreparedModel,
 } from '../../../src/semantic/providers/java_preparation.js';
+import {LspFault} from '../../../src/semantic/lsp_transport.js';
+import {makeJavaPreparation} from '../../../src/semantic/providers/java.js';
+import {makeJavaPreparationOwners, verifyJavaGradleInstallation} from '../../../src/semantic/providers/java_runtime.js';
+import {telemetryChildEnvironmentPolicyLayer} from '../../../src/telemetry/session.js';
 import {providerFixture} from '../../../../../tools/semantic/semantic_provider_fixture.js';
 import {checkProbeDefinition, checkProbeReferences} from '../../../../../tools/semantic/semantic_probe_assertions.js';
 import {checkProposalStatusTransportParity} from './transport-oracle.js';
@@ -85,6 +98,7 @@ export const ProviderInputs = Schema.Union([
     projectJavaHome: Schema.String,
     projectSdkDigest: digest,
     projectExecutableDigest: digest,
+    gradle: Schema.optional(JavaPreparationGradle),
   }),
 ]);
 export type ProviderInputs = typeof ProviderInputs.Type;
@@ -152,6 +166,13 @@ export async function readProviderInputs(file: string) {
       );
       assert.equal(await tree(directory, true), expected, 'Complete Java SDK tree');
     }
+    if (input.gradle)
+      await Effect.runPromise(
+        verifyJavaGradleInstallation(input.gradle).pipe(
+          // oxlint-disable-next-line effecttsgo/strict-effect-provide -- Provider-input OS entry boundary verifies pinned SDK bytes without launching Gradle.
+          Effect.provide(Layer.merge(BunServices.layer, cryptoLayer)),
+        ),
+      );
     assert.equal(await tree(input.serverDirectory, true), input.serverTreeDigest, 'Complete JDT provider tree');
     assert.equal(
       hash(await readFile(join(input.serverDirectory, 'config_mac_arm/config.ini'))),
@@ -187,7 +208,10 @@ export async function readProviderInputs(file: string) {
 }
 
 export function selectedFixture(input: ProviderInputs, actions = false) {
-  const fixture = providerFixture({language: input.language});
+  const fixture = providerFixture({
+    language: input.language,
+    ...(input.language === 'java' && input.gradle ? {fixture: 'java-gradle' as const} : {}),
+  });
   const sources = EffectRecord.fromEntries(
     EffectArray.map(EffectRecord.toEntries(fixture.sources), ([name, text]) => [
       name,
@@ -255,7 +279,7 @@ export function providerEnvironment(input: ProviderInputs) {
   return input.language === 'python'
     ? {environment: 'p11-static-environment'}
     : input.language === 'java'
-      ? {environment: 'p11-synthetic-java-environment'}
+      ? {environment: input.gradle ? 'p11-production-gradle-environment' : 'p11-synthetic-java-environment'}
       : {};
 }
 
@@ -266,10 +290,19 @@ export function assertProviderFixtureBranch(input: ProviderInputs, writerFixture
     );
 }
 
+/** In-memory caller capability minted by the verified candidate runner, never decoded from provider JSON. */
+export interface JavaCandidateImportAuthority {
+  readonly signal: AbortSignal;
+  readonly verify: () => Promise<void>;
+  readonly deadline: number;
+  readonly record: (stage: string, state?: 'preparing' | 'sealed' | 'unknown') => void;
+}
+
 export async function providerCatalog(
   input: ProviderInputs,
   scratch: string,
   sources = selectedFixture(input).sources,
+  javaAuthority?: JavaCandidateImportAuthority,
 ) {
   if (input.language === 'java') {
     const project = join(scratch, 'project');
@@ -290,6 +323,207 @@ export async function providerCatalog(
         'Separate private Java model artifacts',
       );
     await mkdir(artifacts, {mode: 0o700});
+    if (input.gradle) {
+      assert.ok(
+        javaAuthority &&
+          javaAuthority.signal instanceof AbortSignal &&
+          !javaAuthority.signal.aborted &&
+          typeof javaAuthority.verify === 'function' &&
+          typeof javaAuthority.record === 'function' &&
+          Number.isFinite(javaAuthority.deadline) &&
+          javaAuthority.deadline > Date.now() &&
+          javaAuthority.deadline <= Date.now() + 180000,
+        'Original candidate execution authority required',
+      );
+      const authority = javaAuthority;
+      authority.record('production-import-start', 'preparing');
+      const privateDirectory = join(scratch, 'java-preparation');
+      await mkdir(privateDirectory, {mode: 0o700});
+      const originalSource = await tree(project);
+      const cacheRoots = new Set<string>();
+      let resourceFailure = false;
+      const resources = async (initial = false) => {
+        const until = performance.now() + 2000;
+        let entries = 0,
+          cacheBytes = 0,
+          otherBytes = 0;
+        const check = () => {
+          if (performance.now() >= until) throw new Error('Candidate resource scan capacity');
+        };
+        const walk = async (directory: string, depth: number): Promise<void> => {
+          check();
+          if (depth > 32) throw new Error('Candidate resource depth');
+          const names = await readdir(directory);
+          check();
+          for (const name of names) {
+            if (++entries > 20000) throw new Error('Candidate resource entry capacity');
+            check();
+            const file = join(directory, name),
+              info = await lstat(file);
+            check();
+            if (info.isSymbolicLink()) throw new Error('Candidate private output symlink');
+            if (info.isDirectory()) await walk(file, depth + 1);
+            else if (info.isFile()) {
+              if (EffectArray.some([...cacheRoots], root => file === root || EffectString.startsWith(root + '/')(file)))
+                cacheBytes += info.size;
+              else otherBytes += info.size;
+              if (cacheBytes > 2 * 1024 ** 3 || otherBytes > 64 * 1024 ** 2)
+                throw new Error('Candidate private output budget');
+            } else throw new Error('Candidate private output kind');
+            check();
+          }
+        };
+        await walk(scratch, 0);
+        check();
+        const disk = await statfs(scratch);
+        check();
+        if (disk.bavail * disk.bsize < (initial ? 4 : 2) * 1024 ** 3) throw new Error('Candidate free disk pressure');
+      };
+      await resources(true);
+      const abort = new AbortController();
+      const onAbort = () => abort.abort();
+      authority.signal.addEventListener('abort', onAbort, {once: true});
+      let scan: Promise<void> | undefined;
+      const monitor = setInterval(() => {
+        if (scan) return;
+        scan = resources()
+          .catch(() => {
+            resourceFailure = true;
+            abort.abort();
+            authority.record('cold-private-resource-refusal', 'unknown');
+          })
+          .finally(() => {
+            scan = undefined;
+          });
+      }, 1000);
+
+      const verify = Effect.gen(function* () {
+        if (resourceFailure || authority.signal.aborted || (yield* Clock.currentTimeMillis) >= authority.deadline)
+          throw new Error('Candidate import deadline');
+        yield* Effect.tryPromise(async () => {
+          await resources();
+          await authority.verify();
+          if ((await tree(project)) !== originalSource)
+            throw new Error('Candidate authored project changed during import');
+        });
+      });
+      let descriptor: Effect.Success<ReturnType<typeof makeJavaPreparation>> | undefined;
+      try {
+        descriptor = await Effect.runPromise(
+          Effect.scoped(
+            Effect.gen(function* () {
+              const owners = yield* makeJavaPreparationOwners('provider-and-gradle-foreground');
+              yield* Effect.addFinalizer(() =>
+                owners.finish.pipe(
+                  Effect.tap(receipt =>
+                    Effect.sync(() => {
+                      if (!receipt.drained || !receipt.stdioClosed)
+                        authority.record('original-native-drain-unknown', 'unknown');
+                    }),
+                  ),
+                ),
+              );
+              return yield* makeJavaPreparation(
+                {
+                  project,
+                  worktree: project,
+                  privateDirectory,
+                  artifactDirectory: artifacts,
+                  candidate: {
+                    serverDirectory: input.serverDirectory,
+                    serverTreeDigest: input.serverTreeDigest,
+                    runtimeJavaHome: input.runtimeJavaHome,
+                    runtimeSdkDigest: input.runtimeSdkDigest,
+                    projectJavaHome: input.projectJavaHome,
+                    projectSdkDigest: input.projectSdkDigest,
+                  },
+                  build: 'gradle',
+                  gradle: input.gradle,
+                },
+                {
+                  verifySetup: verify,
+                  verifyOwners: owners.verify,
+                  beforePreparationLaunch: () => {
+                    owners.beforeLaunch('provider');
+                    authority.record('jdt-native-create');
+                  },
+                  capturePreparationProvider: (_pid, finish) => {
+                    owners.capture('provider', finish);
+                    authority.record('jdt-original-captured');
+                  },
+                  beforeGradleLaunch: () => {
+                    owners.beforeLaunch('gradle-foreground');
+                    authority.record('gradle-native-create');
+                  },
+                  captureGradleForeground: finish => {
+                    owners.capture('gradle-foreground', finish);
+                    authority.record('gradle-original-captured');
+                  },
+                  onProviderStarted: () => Effect.sync(() => authority.record('jdt-started-after-foreground-control')),
+                  provisionOfflineCache: context =>
+                    verify.pipe(
+                      Effect.andThen(
+                        Effect.sync(() => {
+                          cacheRoots.add(context.gradleUserHome);
+                          authority.record('explicit-cold-private-home-no-external-dependencies');
+                        }),
+                      ),
+                    ),
+                  drainBuildProcesses: () =>
+                    owners.finish.pipe(
+                      Effect.flatMap(receipt =>
+                        receipt.drained && receipt.stdioClosed
+                          ? Effect.succeed({drained: true})
+                          : Effect.fail(LspFault.make({code: 'exit'})),
+                      ),
+                    ),
+                },
+              );
+            }),
+          ).pipe(
+            // oxlint-disable-next-line effecttsgo/strict-effect-provide -- Source-bound candidate Promise/OS entry owns the entire production import scope and narrow layers.
+            Effect.provide(Layer.mergeAll(BunServices.layer, cryptoLayer, telemetryChildEnvironmentPolicyLayer)),
+          ),
+          {signal: abort.signal},
+        );
+        await scan;
+        await resources();
+        if (resourceFailure) throw new Error('Candidate private resource refusal');
+      } catch (error) {
+        authority.record('production-import-failed-or-interrupted', 'unknown');
+        throw error;
+      } finally {
+        clearInterval(monitor);
+        authority.signal.removeEventListener('abort', onAbort);
+        await scan;
+      }
+      if (resourceFailure || authority.signal.aborted || Date.now() >= authority.deadline || !descriptor) {
+        authority.record('production-import-final-disposition-refused', 'unknown');
+        throw new Error('Candidate final cleanup, deadline or resource refusal');
+      }
+      authority.record('real-two-model-operation-closure-drain-seal', 'sealed');
+      const environment = {id: 'p11-production-gradle-environment', ...descriptor};
+      return {
+        catalog: {
+          java: {
+            runtimeCandidate: {
+              serverDirectory: input.serverDirectory,
+              serverTreeDigest: input.serverTreeDigest,
+              runtimeJavaHome: input.runtimeJavaHome,
+              runtimeSdkDigest: input.runtimeSdkDigest,
+              projectJavaHome: input.projectJavaHome,
+              projectSdkDigest: input.projectSdkDigest,
+            },
+            environments: [environment],
+          },
+        },
+        environment: {
+          ...environment,
+          provenance:
+            'actual production makeJavaPreparation; source-bound candidate only; no public import or compileJava qualification',
+        },
+      };
+    }
     const common = {
       exported: false,
       combineAccessRules: false,
@@ -497,11 +731,13 @@ export async function runProviderReadiness(
   within: <A>(promise: Promise<A>, milliseconds: number) => Promise<A>,
   deadline: number,
   results: unknown[],
+  buffer?: {file: string; text: string},
 ) {
   const request = {
     action: 'start',
     callerCwd: project,
-    file: join(project, EffectRecord.keys(sources)[1]),
+    file: buffer?.file ?? join(project, EffectRecord.keys(sources)[1]),
+    ...(buffer ? {view: {kind: 'buffer', text: buffer.text}} : {}),
     language: input.language,
     ...providerEnvironment(input),
   };
@@ -512,8 +748,8 @@ export async function runProviderReadiness(
     observations: unknown[];
     cancellation?: unknown;
   } = {
-    operation: 'explicit-saved-disk-readiness',
-    request,
+    operation: buffer ? 'explicit-owned-buffer-readiness' : 'explicit-saved-disk-readiness',
+    request: buffer ? {...request, view: {kind: 'buffer', contentDigest: hash(buffer.text)}} : request,
     fullScenarioQualified: false,
     observations: [],
   };
@@ -555,7 +791,7 @@ export async function runProviderReadiness(
       if (result.progress.state === 'ready') {
         assert.equal(result.progress.cleanup, 'retained', 'Real prepared session remains owned');
         ready = true;
-        return;
+        return job;
       }
       assert.ok(
         ['accepted', 'running'].includes(result.progress.state),
@@ -1103,9 +1339,14 @@ export async function runOwnedBufferFixture(
   const declaration = EffectRecord.keys(sources)[0];
   const text = EffectString.replaceAll('UnsavedName', 'BufferName')(sources[declaration]);
   const common = {callerCwd: project, milliseconds: 10000};
+  const startup = await runProviderReadiness(input, project, sources, run, client, within, deadline, results, {
+    file: join(project, declaration),
+    text,
+  });
   const opened = await run(['semantic', 'view', '--json'], {
     ...common,
     action: 'open',
+    startup,
     file: join(project, declaration),
     language: input.language,
     text,
@@ -1116,6 +1357,17 @@ export async function runOwnedBufferFixture(
     fullScenarioQualified: false,
     result: redactCapabilities(opened.value),
   });
+  if (!isJsonObject(opened.value) || opened.value.status !== 'ok') {
+    const cancelled = await within(
+      client.callTool(
+        {name: 'semantic_readiness', arguments: {request: {action: 'cancel', callerCwd: project, job: startup}}},
+        undefined,
+        {timeout: 250},
+      ),
+      250,
+    ).catch(() => ({status: 'unknown', cleanup: 'unknown'}));
+    results.push({operation: 'owned-buffer-startup-cancel', result: redactCapabilities(cancelled)});
+  }
   assert.ok(isJsonObject(opened.value) && opened.value.status === 'ok', 'Explicit owned buffer opens');
   const handle = Schema.decodeUnknownSync(Schema.Struct({id: digest, capability: digest}))(opened.value.handle);
   const query = {
@@ -1129,6 +1381,8 @@ export async function runOwnedBufferFixture(
     maxItems: 32,
     ...providerEnvironment(input),
   };
+  let stage: 'symbols' | 'preview' | 'disk-conservation' | 'version-update' | 'stale-version' = 'symbols';
+  let primaryFailed = false;
   try {
     const cli = await run(['semantic', 'query', '--json'], query);
     const response = await within(
@@ -1160,6 +1414,7 @@ export async function runOwnedBufferFixture(
       'Compiler sees exact unsaved symbol',
     );
     assert.ok(isDeepStrictEqual(cli.value, response.structuredContent), 'Owned buffer CLI/MCP evidence parity');
+    stage = 'preview';
     const position = fixtureSymbolPosition(text, 'BufferName');
     const preview = await run(['semantic', 'change', 'prepare', '--json'], {
       version: 1,
@@ -1193,8 +1448,10 @@ export async function runOwnedBufferFixture(
         'Java owned overlay mutation must refuse without a proposal or writer capability',
       );
     }
+    stage = 'disk-conservation';
     for (const [name, bytes] of EffectRecord.toEntries(sources))
       assert.equal(await readFile(join(project, name), 'utf8'), bytes, 'Unsaved owner never rewrites disk');
+    stage = 'version-update';
     const updated = await run(['semantic', 'view', '--json'], {
       ...common,
       action: 'update',
@@ -1214,6 +1471,7 @@ export async function runOwnedBufferFixture(
         updated.value.observation.documentVersion === 2,
       'Version update acknowledged',
     );
+    stage = 'stale-version';
     const stale = await run(['semantic', 'query', '--json'], query);
     results.push({
       operation: 'stale-buffer-version-refusal',
@@ -1224,13 +1482,23 @@ export async function runOwnedBufferFixture(
       isJsonObject(stale.value) && ['stale', 'conflict'].includes(String(stale.value.status)),
       'Earlier buffer version must not be silently rebound',
     );
+  } catch (cause) {
+    primaryFailed = true;
+    results.push({operation: 'owned-buffer-failure', stage, fullScenarioQualified: false});
+    throw cause;
   } finally {
-    const closed = await run(['semantic', 'view', '--json'], {...common, action: 'close', handle});
-    results.push({
-      operation: 'owned-buffer-close',
-      fullScenarioQualified: false,
-      result: redactCapabilities(closed.value),
-    });
-    assert.ok(isJsonObject(closed.value) && closed.value.status === 'ok', 'Only our buffer handle closed');
+    await run(['semantic', 'view', '--json'], {...common, action: 'close', handle})
+      .then(closed => {
+        results.push({
+          operation: 'owned-buffer-close',
+          fullScenarioQualified: false,
+          result: redactCapabilities(closed.value),
+        });
+        assert.ok(isJsonObject(closed.value) && closed.value.status === 'ok', 'Only our buffer handle closed');
+      })
+      .catch(cause => {
+        results.push({operation: 'owned-buffer-close-failure', fullScenarioQualified: false, cleanup: 'unknown'});
+        if (!primaryFailed) return Promise.reject(cause);
+      });
   }
 }

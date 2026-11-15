@@ -1,11 +1,15 @@
 import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from '@effect/vitest';
 import {codeGraphAdjacencyQueryStatement} from '@threadnote/graph/store/query/core';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {CodeGraphProvenance} from '@threadnote/graph/types';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import * as FC from 'fast-check';
 import {codeGraphEdgesByIdsQueryStatement, codeGraphTraversalQueryStatement} from '../../src/store/query/traversal.js';
+import {codeGraphVisualizationSymbolsQueryStatement} from '../../src/store/visualization_sql.js';
+import {CODE_GRAPH_QUERY_INDEX_DEFINITIONS} from '../../src/store/query/indexes.js';
+import type {CodeGraphVisualizationScope} from '../../src/store/models.js';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 
@@ -87,6 +91,13 @@ describe('code graph traversal projection SQL', () => {
           const traversal = rows<TraversalRow>(database, codeGraphTraversalQueryStatement(...args));
 
           expect(baseline).toEqual(expected);
+          if (!overlay) {
+            // An explicit empty base retains the former SQL path; the model
+            // above independently checks its selection, priority and dedup.
+            const previous = codeGraphAdjacencyQueryStatement(currentSnapshot, '', nodes, direction, limit, allowed);
+            expect(baseline).toEqual(rows<EdgeRow>(database, previous));
+            expect(codeGraphAdjacencyQueryStatement(...args).text).not.toContain('base_edges');
+          }
           expect(traversal).toEqual(EffectArray.map(expected, project));
           expect(new Set(EffectArray.map(traversal, row => row.id)).size).toBe(traversal.length);
           const ids = EffectArray.map(traversal, row => row.id).reverse();
@@ -104,6 +115,155 @@ describe('code graph traversal projection SQL', () => {
     },
     {fastCheck: {numRuns: 100}},
   );
+
+  fcProp(
+    it,
+    'conserves root visualization symbol sampling against the former SQL and an independent scope-order model',
+    {
+      symbols: FC.array(
+        FC.record({
+          id: FC.integer({min: 0, max: 23}).map(value => `symbol-${value}`),
+          scope: FC.constantFrom(null, 'component-a', 'component-b'),
+          package: FC.constantFrom(null, '', 'pkg-a', 'pkg-b'),
+          path: FC.constantFrom('src/first.ts', 'apps/second.ts', 'root.ts'),
+          qualified: FC.constantFrom('Alpha', 'beta', 'tie'),
+          language: FC.constantFrom('typescript', 'markdown'),
+          kind: FC.constantFrom('package', 'module', 'class', 'interface', 'function', 'method', 'document', 'other'),
+          exported: FC.integer({min: 0, max: 1}),
+        }),
+        {maxLength: 35},
+      ),
+      limit: FC.integer({min: -2, max: 25}).map(value => value + 0.75),
+    },
+    ({symbols, limit}) => {
+      withDatabase([], [], [], database => {
+        database.exec(`CREATE TABLE symbols (
+          snapshot_id TEXT NOT NULL,id TEXT NOT NULL,resolution_scope_id TEXT,package_name TEXT,
+          path TEXT NOT NULL,qualified_name TEXT NOT NULL,language TEXT NOT NULL,kind TEXT NOT NULL,
+          exported INTEGER NOT NULL,PRIMARY KEY(snapshot_id,id)) WITHOUT ROWID;
+          CREATE TABLE snapshot_symbol_deletions (
+            snapshot_id TEXT NOT NULL,symbol_id TEXT NOT NULL,PRIMARY KEY(snapshot_id,symbol_id)) WITHOUT ROWID;
+          CREATE INDEX symbols_export_order ON symbols(snapshot_id,path,qualified_name,id);`);
+        for (const index of CODE_GRAPH_QUERY_INDEX_DEFINITIONS)
+          if (index.name === 'symbols_visualization_scope_v2') database.exec(index.createSql);
+        const insert = database.query('INSERT OR REPLACE INTO symbols VALUES(?,?,?,?,?,?,?,?,?)');
+        for (const symbol of symbols) {
+          for (const snapshot of [currentSnapshot, baseSnapshot, 'unrelated']) {
+            insert.run(
+              snapshot,
+              symbol.id,
+              symbol.scope,
+              symbol.package,
+              symbol.path,
+              symbol.qualified,
+              symbol.language,
+              symbol.kind,
+              symbol.exported,
+            );
+          }
+        }
+        const unique = [...new Map(EffectArray.map(symbols, symbol => [symbol.id, symbol])).values()];
+        const scopes: readonly CodeGraphVisualizationScope[] = [
+          {type: 'all'},
+          {type: 'component', value: 'component-a'},
+          {type: 'component', value: 'missing'},
+          {type: 'package', value: 'pkg-a'},
+          {type: 'path', value: 'src'},
+          {type: 'path', value: '(root)'},
+          {type: 'unscoped'},
+          {type: 'documentation-facet'},
+        ];
+        for (const scope of scopes) {
+          const expected = EffectArray.filter(unique, symbol => {
+            switch (scope.type) {
+              case 'all':
+                return true;
+              case 'component':
+                return symbol.scope === scope.value;
+              case 'package':
+                return symbol.scope === null && symbol.package === scope.value;
+              case 'path': {
+                const parts = EffectString.split('/')(symbol.path);
+                return (
+                  symbol.scope === null &&
+                  (symbol.package === null || EffectString.trim(symbol.package) === '') &&
+                  (parts.length > 1 ? parts[0] : '(root)') === scope.value
+                );
+              }
+              case 'unscoped':
+                return symbol.scope === null;
+              case 'documentation-facet':
+                return (
+                  symbol.scope === null &&
+                  (symbol.language === 'markdown' || ['document', 'heading', 'section'].includes(symbol.kind))
+                );
+            }
+          })
+            .sort((left, right) => {
+              if (scope.type === 'all')
+                return compareTuple([left.path, left.qualified, left.id], [right.path, right.qualified, right.id]);
+              const kind = (value: string) =>
+                ['package', 'module', 'class', 'interface', 'function', 'method'].indexOf(value);
+              return compareTuple(
+                [-left.exported, kind(left.kind) < 0 ? 6 : kind(left.kind), left.id],
+                [-right.exported, kind(right.kind) < 0 ? 6 : kind(right.kind), right.id],
+              );
+            })
+            .slice(0, Math.max(1, Math.min(500, Math.floor(limit))));
+          const current = codeGraphVisualizationSymbolsQueryStatement(currentSnapshot, undefined, scope, limit);
+          const previous = codeGraphVisualizationSymbolsQueryStatement(currentSnapshot, '', scope, limit);
+          const actual = rows<{id: string; snapshot_id: string}>(database, current);
+          expect(actual).toEqual(rows(database, previous));
+          expect(EffectArray.map(actual, row => row.id)).toEqual(EffectArray.map(expected, symbol => symbol.id));
+          expect(EffectArray.every(actual, row => row.snapshot_id === currentSnapshot)).toBe(true);
+          expect(current.text).not.toContain('base_symbols');
+        }
+      });
+    },
+    {fastCheck: {numRuns: 40, seed: 424244}},
+  );
+
+  it('leaves the existing overlay SQL and parameters unchanged', () => {
+    // Captured from the f917 preimage, not calculated from an optimized root query.
+    const adjacency = [
+      '3987c62b216bb90aa4255b060b0cce3029ab74ff7199e5d6e1cf929df5ca23da',
+      '6cc29a325f2ed362511bf3b812a89d963113cff4c35d705232a13a81d0f7c3f4',
+      '907f752dec6644cf85f8090bd57725ff2bc5fc835bcd95f6fcc2fdc716249c13',
+    ];
+    for (const [index, direction] of directions.entries()) {
+      expect(
+        sha256HexSync(
+          JSON.stringify(
+            codeGraphAdjacencyQueryStatement(
+              currentSnapshot,
+              baseSnapshot,
+              ['node-0', 'node-1'],
+              direction,
+              7,
+              provenances,
+            ),
+          ),
+        ),
+      ).toBe(adjacency[index]);
+    }
+    expect(
+      sha256HexSync(
+        JSON.stringify(codeGraphVisualizationSymbolsQueryStatement(currentSnapshot, baseSnapshot, {type: 'all'}, 7)),
+      ),
+    ).toBe('af2b37a950da3f23862e925a10c8e2ccc9d9457041b51c296172a9e43df51464');
+    expect(
+      sha256HexSync(
+        JSON.stringify(
+          codeGraphVisualizationSymbolsQueryStatement(
+            currentSnapshot,
+            baseSnapshot,
+            {type: 'component', value: 'component-a'},
+            7,
+          ),
+        ),
+      ),
+    ).toBe('8d2805075ba68ced787e94f26177515ebded61b3daef52b03f4b6192328cf82e');
+  });
 
   it('preserves priority ties, all provenance tiers, parallel edges, self-loops, and unresolved endpoints', () => {
     const base = EffectArray.flatMap(provenances, (provenance, provenanceIndex) =>

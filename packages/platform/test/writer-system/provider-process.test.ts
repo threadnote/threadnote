@@ -1,4 +1,5 @@
 import {dlopen, type FFIFunction} from 'bun:ffi';
+import {createRequire} from 'node:module';
 import {fileURLToPath} from 'node:url';
 import {windowsProcessIdentity} from '../../src/writer-system/windows-native.js';
 import {windowsProviderCommandLine, WindowsDebugThreadLedger} from '../../src/writer-system/provider-windows.js';
@@ -26,6 +27,8 @@ const jobSample = vi.hoisted(() => ({
         getLastError(): number;
         setLastError(code: number): void;
         called(name: string, args: readonly unknown[], result: unknown): void;
+        sample?(name: string, args: readonly unknown[], result: unknown, lastError: number): void;
+        failed?(name: string): void;
         closed?(symbols: Readonly<Record<string, FFIFunction>>): void;
       }
     | undefined,
@@ -53,6 +56,8 @@ vi.mock('bun:ffi', async importOriginal => {
         'TerminateJobObject',
         'CloseHandle',
         'GetCurrentThreadId',
+        'GetProcessId',
+        'GetProcessTimes',
         'WaitForDebugEvent',
         'ContinueDebugEvent',
         'DuplicateHandle',
@@ -74,27 +79,32 @@ vi.mock('bun:ffi', async importOriginal => {
         observed.set(key, (...args: unknown[]) => {
           const result: unknown = Reflect.apply(original, undefined, args);
           const active = jobSample.active;
-          if (active) {
+          if (active && (active.sample || (key !== 'GetProcessId' && key !== 'GetProcessTimes'))) {
             let lastError: number | undefined;
             try {
               lastError = active.getLastError();
+              active.sample?.(key, args, result, lastError);
               // Existing Job/close oracles observe successful transitions only. Other calls also
               // expose finite failure status to the bounded startup discriminator, without native retries.
               if (
-                (result !== 0 && result !== 0n) ||
-                (key !== 'CreateJobObjectW' &&
-                  key !== 'QueryInformationJobObject' &&
-                  key !== 'TerminateJobObject' &&
-                  key !== 'CloseHandle')
+                key !== 'GetProcessId' &&
+                key !== 'GetProcessTimes' &&
+                ((result !== 0 && result !== 0n) ||
+                  (key !== 'CreateJobObjectW' &&
+                    key !== 'QueryInformationJobObject' &&
+                    key !== 'TerminateJobObject' &&
+                    key !== 'CloseHandle'))
               )
                 active.called(key, args, result);
             } catch {
               active.incomplete = true;
+              active.failed?.(key);
             } finally {
               try {
                 if (lastError !== undefined) active.setLastError(lastError);
               } catch {
                 active.incomplete = true;
+                active.failed?.(key);
               }
             }
           }
@@ -135,6 +145,273 @@ vi.mock('bun:ffi', async importOriginal => {
 });
 
 const supported = runtimeNativePlatformSupport().providerTree;
+
+const childOutputLimit = 65536,
+  hostFiles = process.getBuiltinModule('fs'),
+  hostPath = process.getBuiltinModule('path'),
+  hostCrypto = process.getBuiltinModule('crypto');
+async function boundedChildOutput(stream: ReadableStream<Uint8Array>, overflow: () => void) {
+  const reader = stream.getReader(),
+    chunks: Uint8Array[] = [];
+  let bytes = 0,
+    retained = 0,
+    truncated = false;
+  try {
+    while (true) {
+      const part = await reader.read();
+      if (part.done) break;
+      bytes += part.value.length;
+      const kept = part.value.slice(0, childOutputLimit - retained);
+      retained += kept.length;
+      if (kept.length) chunks.push(kept);
+      if (bytes > childOutputLimit && !truncated) {
+        truncated = true;
+        overflow();
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const backing = new Uint8Array(retained);
+  let offset = 0;
+  for (const chunk of chunks) {
+    backing.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return {text: new TextDecoder().decode(backing), bytes, truncated};
+}
+function sanitizedChildText(text: string) {
+  // Keep the useful startup prefix, then withhold the whole line tail. Token-by-token
+  // redaction cannot safely delimit Bearer/quoted values or Windows paths with spaces.
+  return EffectString.replace(
+    /["']?\b(token|password|secret|authorization|api[_-]?key)\b["']?\s*[:=][^\r\n]*/giu,
+    '$1=<redacted>',
+  )(
+    EffectString.replace(
+      /(^|[\s('"=])(?:[A-Za-z]:[\\/]|file:\/{2,3}|[\\/])[^\r\n]*/gmu,
+      '$1<path>',
+    )(EffectString.replace(new RegExp(String.fromCharCode(27) + '\\[[0-9;]*m', 'gu'), '')(text)),
+  );
+}
+function assertEmptyChildStderr(stderr: string, diagnostic: string) {
+  expect(stderr === '', diagnostic).toBe(true);
+}
+type RootReceiptRelation = 'equal' | 'mismatch' | 'missing';
+type ObserverCallback =
+  | 'job-create'
+  | 'process-create'
+  | 'job-accounting'
+  | 'job-membership'
+  | 'thread-identity'
+  | 'debug-event'
+  | 'handle-close'
+  | 'thread-resume'
+  | 'event-continue'
+  | 'other';
+type ObserverCheckStage =
+  | 'job-create-check'
+  | 'process-create-check'
+  | 'job-accounting-check'
+  | 'job-membership-check'
+  | 'thread-identity-check'
+  | 'debug-event-check'
+  | 'handle-close-check'
+  | 'thread-resume-check'
+  | 'event-continue-check'
+  | 'other-check';
+function observerCallback(name: string): ObserverCallback {
+  switch (name) {
+    case 'CreateJobObjectW':
+      return 'job-create';
+    case 'CreateProcessW':
+      return 'process-create';
+    case 'QueryInformationJobObject':
+      return 'job-accounting';
+    case 'IsProcessInJob':
+      return 'job-membership';
+    case 'GetCurrentThreadId':
+    case 'GetThreadId':
+    case 'GetProcessIdOfThread':
+      return 'thread-identity';
+    case 'WaitForDebugEvent':
+      return 'debug-event';
+    case 'CloseHandle':
+      return 'handle-close';
+    case 'ResumeThread':
+      return 'thread-resume';
+    case 'ContinueDebugEvent':
+      return 'event-continue';
+    default:
+      return 'other';
+  }
+}
+function observerCheckStage(callback: ObserverCallback): ObserverCheckStage {
+  return callback === 'job-create'
+    ? 'job-create-check'
+    : callback === 'process-create'
+      ? 'process-create-check'
+      : callback === 'job-accounting'
+        ? 'job-accounting-check'
+        : callback === 'job-membership'
+          ? 'job-membership-check'
+          : callback === 'thread-identity'
+            ? 'thread-identity-check'
+            : callback === 'debug-event'
+              ? 'debug-event-check'
+              : callback === 'handle-close'
+                ? 'handle-close-check'
+                : callback === 'thread-resume'
+                  ? 'thread-resume-check'
+                  : callback === 'event-continue'
+                    ? 'event-continue-check'
+                    : 'other-check';
+}
+function rootReceiptRelation(actual: readonly number[], expected: readonly number[]): RootReceiptRelation {
+  if (actual.length === 0) return 'missing';
+  return actual.length === expected.length && EffectArray.every(actual, (pid, index) => pid === expected[index])
+    ? 'equal'
+    : 'mismatch';
+}
+function rootVitestRunner(repository: string) {
+  const require = createRequire(hostPath.join(repository, 'package.json')),
+    packageFile = require.resolve('vitest/package.json'),
+    packageRunner = hostPath.join(hostPath.dirname(packageFile), 'vitest.mjs'),
+    runner = hostPath.join(repository, 'node_modules', 'vitest', 'vitest.mjs'),
+    version: unknown = JSON.parse(hostFiles.readFileSync(packageFile, 'utf8')).version,
+    pinned: unknown = JSON.parse(hostFiles.readFileSync(hostPath.join(repository, 'package.json'), 'utf8'))
+      .devDependencies.vitest,
+    relative = hostPath.relative(repository, runner);
+  return {
+    runner,
+    localRunner:
+      hostFiles.realpathSync(runner) === hostFiles.realpathSync(packageRunner) &&
+      !hostPath.isAbsolute(relative) &&
+      !EffectString.startsWith('..')(relative) &&
+      EffectString.startsWith('node_modules')(relative),
+    version: typeof version === 'string' && /^[0-9]+\.[0-9]+\.[0-9]+$/u.test(version) ? version : 'unrecognized',
+    pinMatches: version === pinned,
+  };
+}
+function isPinnedRootRunner(facts: {localRunner: boolean; pinMatches: boolean}) {
+  return facts.localRunner && facts.pinMatches;
+}
+it('uses the pinned root Vitest and classifies sanitized native receipts', () => {
+  const repository = fileURLToPath(new URL('../../../../', import.meta.url)),
+    runner = rootVitestRunner(repository);
+  expect(runner.localRunner && runner.pinMatches).toBe(true);
+  expect(runner.pinMatches && runner.version === '5.0.5').toBe(true);
+  expect(isPinnedRootRunner({localRunner: true, pinMatches: false})).toBe(false);
+  expect(isPinnedRootRunner({localRunner: false, pinMatches: true})).toBe(false);
+  expect(rootReceiptRelation([], [11, 12])).toBe('missing');
+  expect(rootReceiptRelation([11, 12], [11, 12])).toBe('equal');
+  expect(rootReceiptRelation([11], [11, 12])).toBe('mismatch');
+  fc.assert(
+    fc.property(fc.array(fc.integer({min: 0, max: 10000}), {maxLength: 20}), roots => {
+      if (roots.length === 0) {
+        expect(rootReceiptRelation(roots, roots)).toBe('missing');
+        return;
+      }
+      expect(rootReceiptRelation(roots, roots)).toBe('equal');
+      expect(rootReceiptRelation([...roots, Math.max(...roots) + 1], roots)).toBe('mismatch');
+    }),
+    {numRuns: 32},
+  );
+});
+it.each([
+  ['Bearer credential', 'Error: Authorization: Bearer probe-private-credential'],
+  ['quoted multiword credential', 'Error: token="first word probe-private-credential"'],
+  ['quoted JSON credential', 'Error: "secret": "first word probe-private-credential"'],
+  ['quoted drive path with spaces', 'Error: at "C:\\Program Files\\probe-private-directory\\runner.mjs":7'],
+  ['UNC path', 'Error: at \\\\probe-private-host\\share\\runner.mjs:7'],
+  ['device path', 'Error: at \\\\?\\C:\\Program Files\\probe-private-directory\\runner.mjs:7'],
+  ['quoted POSIX path with spaces', 'Error: at "/private/Program Files/probe-private-directory/runner.mjs":7'],
+])('withholds complete private child text for %s', (_shape, text) => {
+  const safe = sanitizedChildText(text);
+  expect(safe).not.toContain('probe-private');
+  expect(safe).toContain('Error:');
+});
+it('keeps the actual stderr assertion failure private without accepting nonempty stderr', () => {
+  const raw = 'Error: at C:\\probe-private-directory\\runner.mjs',
+    diagnostic = JSON.stringify({exit: 0, stderr: sanitizedChildText(raw)});
+  let caught: unknown;
+  try {
+    assertEmptyChildStderr(raw, diagnostic);
+  } catch (error) {
+    caught = error;
+  }
+  expect(caught).toBeInstanceOf(Error);
+  if (!(caught instanceof Error)) throw new Error('Missing original assertion failure.');
+  const rendered = JSON.stringify({message: caught.message, actual: 'actual' in caught ? caught.actual : undefined});
+  expect(rendered).not.toContain('probe-private');
+  expect(() => assertEmptyChildStderr('', diagnostic)).not.toThrow();
+});
+it('withholds generated credential and path suffixes through the actual failure-rendering sink', () => {
+  fc.assert(
+    fc.property(
+      fc.constantFrom('Bearer', 'quoted', 'plain'),
+      fc.constantFrom('drive', 'UNC', 'device', 'POSIX'),
+      fc
+        .array(fc.constantFrom('a', 'b', 'c', 'd'), {minLength: 1, maxLength: 12})
+        .map(parts => EffectArray.join(parts, '')),
+      (credential, pathKind, suffix) => {
+        const secret = 'probe-private-' + suffix,
+          value =
+            credential === 'Bearer'
+              ? 'Bearer ' + secret
+              : credential === 'quoted'
+                ? '"first word ' + secret + '"'
+                : 'first word ' + secret,
+          privatePath =
+            pathKind === 'drive'
+              ? '"C:\\Program Files\\' + secret + '\\runner.mjs"'
+              : pathKind === 'UNC'
+                ? '\\\\' + secret + '\\share\\runner.mjs'
+                : pathKind === 'device'
+                  ? '\\\\?\\C:\\Program Files\\' + secret + '\\runner.mjs'
+                  : '"/private/Program Files/' + secret + '/runner.mjs"',
+          raw = 'TypeError: unsupported --pool option\nAuthorization: ' + value + '\n at ' + privatePath,
+          safe = sanitizedChildText(raw);
+        expect(safe).toContain('TypeError: unsupported --pool option');
+        expect(safe).not.toContain(secret);
+        let caught: unknown;
+        try {
+          assertEmptyChildStderr(raw, JSON.stringify({exit: 0, stderr: safe}));
+        } catch (error) {
+          caught = error;
+        }
+        expect(caught).toBeInstanceOf(Error);
+        if (!(caught instanceof Error)) throw new Error('Nonempty stderr was accepted.');
+        expect(
+          JSON.stringify({message: caught.message, actual: 'actual' in caught ? caught.actual : undefined}),
+        ).not.toContain(secret);
+      },
+    ),
+    {numRuns: 24},
+  );
+});
+it('bounds owned-host output and forwards sanitized failure stderr without changing its exit', async () => {
+  let stopped = 0;
+  const chunks = [new Uint8Array(childOutputLimit - 4).fill(97), new Uint8Array(16).fill(98)],
+    stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(chunk);
+        controller.close();
+      },
+    }),
+    observed = await boundedChildOutput(stream, () => stopped++);
+  expect(observed.bytes).toBe(childOutputLimit + 12);
+  expect(new TextEncoder().encode(observed.text).length).toBe(childOutputLimit);
+  expect(observed.truncated).toBe(true);
+  expect(stopped).toBe(1);
+  const nativeExit = 1,
+    stderr =
+      'Error: unsupported --pool option\n at C:\\private\\runner.mjs:7\n at /private/checkout/test.ts:8 token=credential';
+  const message = JSON.stringify({exit: nativeExit, stderr: sanitizedChildText(stderr)});
+  expect(nativeExit).toBe(1);
+  expect(message).toContain('unsupported --pool option');
+  expect(message).not.toContain('credential');
+  expect(message).not.toContain('private');
+});
 
 it('retains bounded debug thread roles until successful exit continuation and separates PI alias ownership', () => {
   const shared = {threads: 0, pi: 0},
@@ -241,13 +518,17 @@ async function until<T>(read: () => T, accept: (value: T) => boolean, millisecon
     await Bun.sleep(5);
   }
 }
-async function stop(provider: RuntimeOwnedProviderProcess): Promise<void> {
-  if (runtimeObserveOwnedProviderTree(provider.handle).state !== 'drained')
-    runtimeTerminateOwnedProviderTree(provider.handle, 'kill');
-  await until(
-    () => runtimeObserveOwnedProviderTree(provider.handle),
-    o => o.state === 'drained',
-  );
+async function stop(
+  provider: RuntimeOwnedProviderProcess,
+  sampled?: (observation: ReturnType<typeof runtimeObserveOwnedProviderTree>) => void,
+): Promise<void> {
+  const observe = () => {
+    const observation = runtimeObserveOwnedProviderTree(provider.handle);
+    sampled?.(observation);
+    return observation;
+  };
+  if (observe().state !== 'drained') runtimeTerminateOwnedProviderTree(provider.handle, 'kill');
+  await until(observe, o => o.state === 'drained');
   runtimeCloseOwnedProviderTree(provider.handle);
 }
 
@@ -443,11 +724,27 @@ it.skipIf(process.platform !== 'win32' || !supported)(
     if (process.env.THREADNOTE_NATIVE_RELEASE_FAILURE_HOST !== '1') {
       // UNKNOWN permanently closes this dispatch domain to new launches. End only its owning host;
       // the ordinary test worker must retain its independent healthy native domain.
+      const repository = fileURLToPath(new URL('../../../../', import.meta.url)),
+        resolvedRunner = rootVitestRunner(repository),
+        runner = resolvedRunner.runner,
+        facts = {
+          localRunner: resolvedRunner.localRunner,
+          version: resolvedRunner.version,
+          pinMatches: resolvedRunner.pinMatches,
+          entrySHA256: hostCrypto.createHash('sha256').update(hostFiles.readFileSync(runner)).digest('hex'),
+          pool: 'threads',
+          workers: 1,
+          exactFilter: true,
+        },
+        preflight = JSON.stringify({runner: facts});
+      // Refuse a foreign or mismatched runner before spawning it; this never downloads dependencies.
+      expect(isPinnedRootRunner(facts), preflight).toBe(true);
       const child = Bun.spawn(
           [
             process.execPath,
+            '--no-install',
             '--bun',
-            fileURLToPath(new URL('./vitest.mjs', import.meta.resolve('vitest/package.json'))),
+            runner,
             'run',
             '--config',
             'vitest.config.ts',
@@ -459,7 +756,7 @@ it.skipIf(process.platform !== 'win32' || !supported)(
             '--reporter=dot',
           ],
           {
-            cwd: fileURLToPath(new URL('../../../../', import.meta.url)),
+            cwd: repository,
             env: {
               ...process.env,
               THREADNOTE_VITEST_LONG_GROUP: undefined,
@@ -472,13 +769,23 @@ it.skipIf(process.platform !== 'win32' || !supported)(
             maxBuffer: 65536,
           },
         ),
-        output = new Response(child.stdout).text(),
-        errors = new Response(child.stderr).text();
+        overflow = () => {
+          if (child.exitCode === null) child.kill('SIGKILL');
+        },
+        output = boundedChildOutput(child.stdout, overflow),
+        errors = boundedChildOutput(child.stderr, overflow);
       try {
         const [exit, stdout, stderr] = await Promise.all([child.exited, output, errors]);
-        expect(exit, stdout).toBe(0);
-        expect(stderr).toBe('');
-        expect(EffectString.includes(marker)(stdout)).toBe(true);
+        const diagnostic = JSON.stringify({
+          exit,
+          runner: facts,
+          stdout: {...stdout, text: sanitizedChildText(stdout.text)},
+          stderr: {...stderr, text: sanitizedChildText(stderr.text)},
+        });
+        expect(exit, diagnostic).toBe(0);
+        expect(stdout.truncated || stderr.truncated, diagnostic).toBe(false);
+        assertEmptyChildStderr(stderr.text, diagnostic);
+        expect(EffectString.includes(marker)(stdout.text), diagnostic).toBe(true);
       } finally {
         if (child.exitCode === null) child.kill('SIGKILL');
         await child.exited;
@@ -861,19 +1168,68 @@ it.skipIf(process.platform !== 'win32' || !supported)(
     });
     const prior = jobSample.active,
       creatorIds = new Set<number>(),
-      processes = new Map<number, {process: bigint; threads: Map<number, bigint>; exit: boolean}>(),
+      processes = new Map<number, {process: bigint; threads: Map<number, bigint>; jobs: Set<bigint>; exit: boolean}>(),
+      jobs = new Map<bigint, {total: number; active: number; queries: number}>(),
+      launchedRoots: number[] = [],
+      requiredChildren = new Set<number>(),
       borrowed = new Set<bigint>();
     let pending: {kind: number; pid: number; tid: number} | undefined,
       creates = 0,
       threadCreates = 0,
       exits = 0,
       emptyPolls = 0,
-      resumes = 0;
+      resumes = 0,
+      passed = false,
+      firstObserverCallback: ObserverCallback | 'none' = 'none',
+      firstObserverCheckStage: ObserverCheckStage | 'none' = 'none';
+    let checkStage: ObserverCheckStage = 'other-check';
     const observation: NonNullable<typeof jobSample.active> = {
       incomplete: false,
       getLastError: () => kernel.symbols.GetLastError(),
       setLastError: code => kernel.symbols.SetLastError(code),
+      failed(name) {
+        if (firstObserverCallback !== 'none') return;
+        firstObserverCallback = observerCallback(name);
+        firstObserverCheckStage = checkStage;
+      },
       called(name, args, result) {
+        const callback = observerCallback(name);
+        checkStage = observerCheckStage(callback);
+        if (name === 'CreateJobObjectW') {
+          expect(jobs.size).toBeLessThan(2);
+          jobs.set(BigInt(String(result)), {total: 0, active: 0, queries: 0});
+        }
+        if (name === 'CreateProcessW' && result !== 0) {
+          const output = args[9];
+          if (!(output instanceof BigUint64Array)) throw new Error('No original process-information backing.');
+          expect(output.length).toBe(3);
+          expect(output.byteLength).toBe(24);
+          const pi = new DataView(output.buffer, output.byteOffset, output.byteLength);
+          expect(launchedRoots.length).toBeLessThan(2);
+          launchedRoots.push(pi.getUint32(16, true));
+        }
+        if (name === 'QueryInformationJobObject' && args[1] === 1) {
+          const job = jobs.get(BigInt(String(args[0])));
+          if (!job || !(args[2] instanceof Uint8Array)) throw new Error('Missing original Job accounting backing.');
+          const accounting = new DataView(args[2].buffer, args[2].byteOffset, args[2].byteLength),
+            total = accounting.getUint32(36, true),
+            active = accounting.getUint32(40, true);
+          expect(total).toBeGreaterThanOrEqual(job.total);
+          expect(total).toBeLessThanOrEqual(256);
+          expect(active).toBeLessThanOrEqual(total);
+          job.total = total;
+          job.active = active;
+          job.queries++;
+        }
+        if (name === 'IsProcessInJob' && result !== 0 && pending?.kind === 3) {
+          const member = processes.get(pending.pid),
+            job = BigInt(String(args[1]));
+          if (member && args[0] === member.process) {
+            if (!jobs.has(job) || !(args[2] instanceof Int32Array))
+              throw new Error('Missing original membership backing.');
+            if (args[2][0] === 1) member.jobs.add(job);
+          }
+        }
         if (name === 'GetCurrentThreadId' && typeof result === 'number') creatorIds.add(result);
         if (name === 'WaitForDebugEvent') {
           if (result === 0) {
@@ -890,7 +1246,8 @@ it.skipIf(process.platform !== 'win32' || !supported)(
             const process = view.getBigUint64(24, true),
               thread = view.getBigUint64(32, true);
             expect(processes.has(pid)).toBe(false);
-            processes.set(pid, {process, threads: new Map([[tid, thread]]), exit: false});
+            expect(processes.size).toBeLessThan(512);
+            processes.set(pid, {process, threads: new Map([[tid, thread]]), jobs: new Set(), exit: false});
             borrowed.add(process);
             borrowed.add(thread);
             creates++;
@@ -915,6 +1272,7 @@ it.skipIf(process.platform !== 'win32' || !supported)(
           expect(args.slice(0, 2)).toEqual([pending.pid, pending.tid]);
           const member = processes.get(pending.pid);
           if (!member) throw new Error('Continue without captured native process.');
+          if (pending.kind === 3) expect(member.jobs.size).toBe(1);
           if (pending.kind === 4) {
             const thread = member.threads.get(pending.tid);
             if (thread === undefined) throw new Error('Exit without captured native thread.');
@@ -939,8 +1297,10 @@ it.skipIf(process.platform !== 'win32' || !supported)(
         spawn(`
         const worker = new Worker(URL.createObjectURL(new Blob(['postMessage("ready");close();'], {type:'application/javascript'})));
         await new Promise((resolve,reject)=>{worker.onmessage=resolve;worker.onerror=reject;});
-        await Promise.all(Array.from({length:3},()=>Bun.spawn([process.execPath,'-e','process.exit(0)'],{stdout:'ignore',stderr:'ignore'}).exited));
-        process.stdout.write('first');
+        const children=Array.from({length:3},()=>Bun.spawn([process.execPath,'-e','process.exit(0)'],{stdout:'ignore',stderr:'ignore'}));
+        const created=children.map(child=>child.pid);
+        await Promise.all(children.map(child=>child.exited));
+        process.stdout.write(JSON.stringify({role:'first',children:created}));
       `),
       );
       providers.push(spawn("for await (const bytes of Bun.stdin.stream()) {} process.stdout.write('second');"));
@@ -953,26 +1313,113 @@ it.skipIf(process.platform !== 'win32' || !supported)(
         count => count > 0,
       );
       for (const provider of providers) await provider.closeInput();
-      expect(await Promise.all(outputs)).toEqual(['first', 'second']);
-      expect(await Promise.all(errors)).toEqual(['', '']);
+      const [first, second] = await Promise.all(outputs);
+      // Creation receipts identify required fixture actors only. Native HANDLE/Job observations
+      // independently authenticate every member; a numeric receipt never supplies cleanup authority.
+      expect(first.length).toBeLessThan(512);
+      const actors: unknown = JSON.parse(first);
+      if (
+        typeof actors !== 'object' ||
+        actors === null ||
+        !('role' in actors) ||
+        actors.role !== 'first' ||
+        !('children' in actors) ||
+        !EffectArray.isArray(actors.children)
+      )
+        throw new Error('Invalid required-actor receipt.');
+      expect(actors.children.length).toBe(3);
+      for (const pid of actors.children) {
+        if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0)
+          throw new Error('Invalid fixture child receipt.');
+        requiredChildren.add(pid);
+      }
+      expect(requiredChildren.size).toBe(3);
+      expect(second).toBe('second');
+      const standardErrors = await Promise.all(errors);
+      expect(
+        EffectArray.every(standardErrors, stderr => stderr === ''),
+        JSON.stringify({stderr: EffectArray.map(standardErrors, sanitizedChildText)}),
+      ).toBe(true);
       for (const provider of providers)
         await until(
           () => runtimeObserveOwnedProviderTree(provider.handle),
           o => o.state === 'drained',
         );
-      expect(creates).toBe(5);
       expect(exits).toBe(creates);
       expect(threadCreates).toBeGreaterThan(0);
       expect(emptyPolls).toBeGreaterThan(0);
       expect(resumes).toBe(2);
       expect(creatorIds.size).toBe(1);
-      expect(pending).toBeUndefined();
+      expect(pending === undefined).toBe(true);
       expect(borrowed.size).toBe(0);
       expect(observation.incomplete).toBe(false);
+      expect(
+        launchedRoots.length === 2 && EffectArray.every(launchedRoots, (pid, index) => pid === providers[index].pid),
+      ).toBe(true);
+      expect(jobs.size).toBe(2);
+      const firstJob = processes.get(providers[0].pid)?.jobs.values().next().value;
+      if (firstJob === undefined) throw new Error('Missing original first-root membership.');
+      for (const pid of requiredChildren) {
+        const member = processes.get(pid);
+        expect(member !== undefined && member.jobs.size === 1 && member.jobs.has(firstJob) && member.exit).toBe(true);
+      }
+      for (const [handle, accounting] of jobs) {
+        const members = EffectArray.filter([...processes.values()], member => member.jobs.has(handle));
+        expect(accounting.queries).toBeGreaterThan(0);
+        expect(accounting.active).toBe(0);
+        expect(accounting.total).toBe(members.length);
+        expect(
+          EffectArray.every(members, member => member.exit && member.jobs.size === 1 && member.threads.size === 0),
+        ).toBe(true);
+      }
+      // Native Job totals independently account for every authenticated member, including extra actors.
+      expect(creates).toBe(EffectArray.reduce([...jobs.values()], 0, (total, accounting) => total + accounting.total));
+      passed = true;
     } finally {
       try {
         for (const provider of providers) await stop(provider);
       } finally {
+        if (!passed) {
+          const roots = new Set(EffectArray.map(providers, provider => provider.pid));
+          process.stdout.write(
+            'WINDOWS_JOB_MEMBER_SAMPLE ' +
+              JSON.stringify({
+                creates,
+                exits,
+                threadCreates,
+                emptyPolls,
+                resumes,
+                creators: creatorIds.size,
+                pendingEvent: pending !== undefined,
+                borrowedRoles: borrowed.size,
+                incomplete: observation.incomplete,
+                firstObserverCallback,
+                firstObserverCheckStage,
+                rootReceiptRelation: rootReceiptRelation(
+                  launchedRoots,
+                  EffectArray.map(providers, provider => provider.pid),
+                ),
+                requiredChildReceipts: requiredChildren.size,
+                jobs: EffectArray.map([...jobs.entries()], ([handle, accounting], ordinal) => {
+                  const members = EffectArray.filter([...processes.entries()], ([, member]) => member.jobs.has(handle));
+                  return {
+                    ordinal,
+                    ...accounting,
+                    captured: members.length,
+                    exited: EffectArray.filter(members, ([, member]) => member.exit).length,
+                    roots: EffectArray.filter(members, ([pid]) => roots.has(pid)).length,
+                    requiredChildren: EffectArray.filter(members, ([pid]) => requiredChildren.has(pid)).length,
+                    additionalInOriginalJob: EffectArray.filter(
+                      members,
+                      ([pid]) => !roots.has(pid) && !requiredChildren.has(pid),
+                    ).length,
+                  };
+                }),
+                unassigned: EffectArray.filter([...processes.values()], member => member.jobs.size !== 1).length,
+              }) +
+              '\n',
+          );
+        }
         jobSample.active = prior;
         kernel.close();
       }
@@ -998,37 +1445,53 @@ it.skipIf(process.platform !== 'win32' || !supported)(
         event=new Uint8Array(208),view=new DataView(event.buffer);
       new DataView(startup.buffer).setUint32(0,104,true);
       const check=v=>{if(!v)throw new Error('Native override fixture failed.');};
+      let stageCount=0,stageBytes=0;
+      const stage=async code=>{
+        const completion=code.startsWith('completion-');
+        if(stageCount>=(completion?96:88)||stageBytes+code.length+1>(completion?2048:1792))return;
+        stageCount++;stageBytes+=code.length+1;
+        await new Promise(resolve=>process.stdout.write(code+'\\n',resolve));
+      };
+      await stage('create:before');
       check(k.symbols.CreateProcessW(wide(process.execPath),wide(${JSON.stringify(windowsProviderCommandLine(process.execPath, ['-e', 'process.exit(0)']))}),null,null,0,0x08000001,null,null,startup,info));
+      await stage('create:after');
+      await stage('duplicate:before');
       const self=k.symbols.GetCurrentProcess();check(k.symbols.DuplicateHandle(self,info[0],self,completion,0x00101000,0,0));
+      await stage('duplicate:after');
       const deadline=Date.now()+2500;let exited=false,initial=true;
+      await stage('wait:before');
       while(!exited&&Date.now()<deadline){
         event.fill(0xa5);
         if(!k.symbols.WaitForDebugEvent(event.subarray(0,176),0)){check(k.symbols.GetLastError()===121);await Bun.sleep(1);continue;}
         check(event.subarray(176).every(v=>v===0xa5));
         const kind=view.getUint32(0,true),pid=view.getUint32(4,true),tid=view.getUint32(8,true);let status=0x10002;
+        await stage('wait:after:'+kind);
         if(kind===3){
-          if(info[0]!==view.getBigUint64(24,true))check(k.symbols.CloseHandle(info[0]));
-          if(info[1]!==view.getBigUint64(32,true))check(k.symbols.CloseHandle(info[1]));
+          if(info[0]!==view.getBigUint64(24,true)){await stage('pi-process:before');check(k.symbols.CloseHandle(info[0]));await stage('pi-process:after');}
+          if(info[1]!==view.getBigUint64(32,true)){await stage('pi-thread:before');check(k.symbols.CloseHandle(info[1]));await stage('pi-thread:after');}
         }
-        if(kind===3||kind===6){const file=view.getBigUint64(16,true);if(file!==0n)check(k.symbols.CloseHandle(file));}
+        if(kind===3||kind===6){const file=view.getBigUint64(16,true);if(file!==0n){await stage('image:'+kind+':before');check(k.symbols.CloseHandle(file));await stage('image:'+kind+':after');}}
         if(kind===1){if(initial&&view.getUint32(16,true)===0x80000003&&view.getUint32(168,true)===1)initial=false;else status=0x80010001;}
-        check(kind>=1&&kind<=8);check(k.symbols.ContinueDebugEvent(pid,tid,status));
+        check(kind>=1&&kind<=8);await stage('continue:'+kind+':before');check(k.symbols.ContinueDebugEvent(pid,tid,status));await stage('continue:'+kind+':after');
+        if(kind!==5)await stage('wait:before');
         if(kind===5)exited=true;
       }
       check(exited);
+      await stage('completion-wait:before');
       while(k.symbols.WaitForSingleObject(completion[0],0)===258&&Date.now()<deadline)await Bun.sleep(1);
-      check(k.symbols.WaitForSingleObject(completion[0],0)===0);check(k.symbols.CloseHandle(completion[0]));k.close();
+      check(k.symbols.WaitForSingleObject(completion[0],0)===0);await stage('completion-wait:after');
+      await stage('completion-close:before');check(k.symbols.CloseHandle(completion[0]));await stage('completion-close:after');k.close();
     `;
     const host = `
       const api=await import(${JSON.stringify(new URL('../../src/system.ts', import.meta.url).href)});
       const provider=api.runtimeSpawnOwnedProviderTree({command:process.execPath,args:['-e',${JSON.stringify(fixture)}],cwd:process.cwd(),environment:process.env});
       const output=new Response(provider.stdout).text(),errors=new Response(provider.stderr).text();
-      await provider.closeInput();await output;const stderr=await errors;
+      await provider.closeInput();const stages=await output,stderr=await errors;
       let observation;const deadline=Date.now()+3000;
       do { observation=api.runtimeObserveOwnedProviderTree(provider.handle);if(observation.state==='unknown')break;await Bun.sleep(5); }while(Date.now()<deadline);
       let closeRefused=false;try{api.runtimeCloseOwnedProviderTree(provider.handle);}catch{closeRefused=true;}
       api.runtimeTerminateOwnedProviderTree(provider.handle,'kill');
-      process.stdout.write(JSON.stringify({state:observation.state,leaderExitCode:observation.leaderExitCode,closeRefused,stderr}));
+      process.stdout.write(JSON.stringify({state:observation.state,leaderExitCode:observation.leaderExitCode,closeRefused,stderr,stages}));
     `;
     const child = Bun.spawn([process.execPath, '-e', host], {stdout: 'pipe', stderr: 'pipe'}),
       output = new Response(child.stdout).text(),
@@ -1036,7 +1499,16 @@ it.skipIf(process.platform !== 'win32' || !supported)(
     try {
       expect(await child.exited).toBe(0);
       expect(await errors).toBe('');
-      expect(JSON.parse(await output)).toEqual({state: 'unknown', leaderExitCode: 0, closeRefused: true, stderr: ''});
+      const {stages, ...actual} = JSON.parse(await output);
+      expect(actual, 'Native debugger stages: ' + String(stages)).toEqual({
+        state: 'unknown',
+        leaderExitCode: 0,
+        closeRefused: true,
+        stderr: '',
+      });
+      expect(stages).toContain('create:before\n');
+      expect(stages).toContain('completion-close:after\n');
+      expect(stages.length).toBeLessThanOrEqual(2048);
     } finally {
       if (child.exitCode === null) child.kill();
     }
@@ -1246,23 +1718,242 @@ it.skipIf(process.platform !== 'win32' || !supported)(
 it.skipIf(!supported)(
   'signals only the captured original group or Job and leaves a separate owned provider running',
   async () => {
-    const first = spawn('setInterval(()=>{},1000)'),
-      second = spawn('setInterval(()=>{},1000)');
-    const outputs = [first.stdout.cancel(), first.stderr.cancel(), second.stdout.cancel(), second.stderr.cancel()];
+    const windows = process.platform === 'win32',
+      prior = jobSample.active,
+      kernel = windows
+        ? dlopen('kernel32.dll', {
+            GetLastError: {args: [], returns: 'u32'},
+            SetLastError: {args: ['u32'], returns: 'void'},
+          })
+        : undefined;
+    // Actual handles/IDs remain private keys. Only two aliases, finite results and counts are rendered.
+    const jobs: {
+        accounting: {total: number; active: number} | null;
+        createsContinued: number;
+        exitsSeen: number;
+        exitsContinued: number;
+        threadsCreated: number;
+        threadsExited: number;
+        wait: number | null;
+        identityQueriesFailed: boolean;
+        identityMatches: boolean;
+      }[] = [],
+      handles = new Map<unknown, number>(),
+      processes = new Map<number, number>(),
+      processIds = new Map<unknown, number>(),
+      creationTimes = new Map<number, bigint>(),
+      trace: {api: string; job: number | null; result: number; error: number; kind: number | null}[] = [];
+    let creator: number | undefined,
+      affinityMatches = true,
+      pendingEvent: {pid: number; kind: number} | undefined,
+      currentJob: number | undefined,
+      secondKillAt: number | undefined,
+      firstUnknown: {millisecondsSinceKill: number | null; native: ReturnType<typeof snapshot>} | undefined;
+    const snapshot = () => ({
+      jobs: EffectArray.map(jobs, job => ({...job, accounting: job.accounting ? {...job.accounting} : null})),
+      affinityMatches,
+      trace: EffectArray.map(trace, call => ({...call})),
+      observerIncomplete: diagnostic.incomplete,
+    });
+    const diagnostic: NonNullable<typeof jobSample.active> = {
+      incomplete: false,
+      getLastError: () => kernel?.symbols.GetLastError() ?? 0,
+      setLastError: code => {
+        kernel?.symbols.SetLastError(code);
+      },
+      called() {},
+      sample(name, args, result, error) {
+        if (name === 'CreateJobObjectW' && result !== 0n && result !== 0) {
+          if (jobs.length >= 2) {
+            diagnostic.incomplete = true;
+            return;
+          }
+          currentJob = jobs.length;
+          handles.set(result, currentJob);
+          jobs.push({
+            accounting: null,
+            createsContinued: 0,
+            exitsSeen: 0,
+            exitsContinued: 0,
+            threadsCreated: 0,
+            threadsExited: 0,
+            wait: null,
+            identityQueriesFailed: false,
+            identityMatches: true,
+          });
+        }
+        if (name === 'GetCurrentThreadId' && typeof result === 'number') {
+          creator ??= result;
+          affinityMatches &&= result === creator;
+          return;
+        }
+        if (
+          name === 'CreateProcessW' &&
+          result !== 0 &&
+          args[9] instanceof BigUint64Array &&
+          currentJob !== undefined
+        ) {
+          const pi = args[9];
+          processes.set(Number(pi[2] & 0xffffffffn), currentJob);
+          handles.set(pi[0], currentJob);
+          processIds.set(pi[0], Number(pi[2] & 0xffffffffn));
+        }
+        if (name === 'WaitForDebugEvent' && result !== 0 && args[0] instanceof Uint8Array) {
+          const view = new DataView(args[0].buffer, args[0].byteOffset, args[0].byteLength);
+          pendingEvent = {pid: view.getUint32(4, true), kind: view.getUint32(0, true)};
+        }
+        if (name === 'IsProcessInJob' && result !== 0 && args[2] instanceof Int32Array && args[2][0] === 1) {
+          const owner = handles.get(args[1]);
+          if (owner !== undefined && handles.size < 2048) {
+            handles.set(args[0], owner);
+            if (pendingEvent?.kind === 3 && processes.size < 512) {
+              processes.set(pendingEvent.pid, owner);
+              processIds.set(args[0], pendingEvent.pid);
+            }
+          }
+        }
+        const owner =
+            handles.get(args[0]) ??
+            (name === 'ContinueDebugEvent' && typeof args[0] === 'number' ? processes.get(args[0]) : undefined) ??
+            (name === 'WaitForDebugEvent' && result !== 0 && pendingEvent
+              ? processes.get(pendingEvent.pid)
+              : undefined),
+          job = owner === undefined ? undefined : jobs[owner];
+        if (name === 'DuplicateHandle' && result !== 0 && args[3] instanceof BigUint64Array) {
+          const source = handles.get(args[1]);
+          if (source !== undefined && handles.size < 2048) {
+            handles.set(args[3][0], source);
+            const pid = processIds.get(args[1]);
+            if (pid !== undefined) processIds.set(args[3][0], pid);
+          }
+        }
+        if (
+          name === 'QueryInformationJobObject' &&
+          args[1] === 1 &&
+          job &&
+          result !== 0 &&
+          args[2] instanceof Uint8Array
+        ) {
+          const view = new DataView(args[2].buffer, args[2].byteOffset, args[2].byteLength);
+          job.accounting = {total: view.getUint32(36, true), active: view.getUint32(40, true)};
+        }
+        if (name === 'WaitForSingleObject' && job && typeof result === 'number') job.wait = result;
+        if ((name === 'GetProcessId' || name === 'GetProcessTimes') && job && result === 0)
+          job.identityQueriesFailed = true;
+        const expectedPid = processIds.get(args[0]);
+        if (name === 'GetProcessId' && job && expectedPid !== undefined) job.identityMatches &&= result === expectedPid;
+        if (
+          name === 'GetProcessTimes' &&
+          job &&
+          result !== 0 &&
+          expectedPid !== undefined &&
+          args[1] instanceof BigUint64Array
+        ) {
+          const creation = args[1][0],
+            priorCreation = creationTimes.get(expectedPid);
+          job.identityMatches &&= creation !== 0n && (priorCreation === undefined || creation === priorCreation);
+          if (creationTimes.size < 512) creationTimes.set(expectedPid, creation);
+        }
+        if (name === 'WaitForDebugEvent' && result !== 0 && job && pendingEvent?.kind === 5) job.exitsSeen++;
+        if (name === 'ContinueDebugEvent' && result !== 0 && job && pendingEvent) {
+          if (pendingEvent.kind === 3) job.createsContinued++;
+          if (pendingEvent.kind === 5) job.exitsContinued++;
+          if (pendingEvent.kind === 2 || pendingEvent.kind === 3) job.threadsCreated++;
+          if (pendingEvent.kind === 4) job.threadsExited++;
+        }
+        if (name === 'TerminateJobObject' && owner === 1) secondKillAt ??= performance.now();
+        if (
+          typeof result === 'number' &&
+          (name === 'WaitForDebugEvent' ||
+            name === 'ContinueDebugEvent' ||
+            name === 'QueryInformationJobObject' ||
+            name === 'WaitForSingleObject' ||
+            name === 'GetOverlappedResult' ||
+            ((name === 'GetProcessId' || name === 'GetProcessTimes') && result === 0))
+        ) {
+          if (trace.length === 16) trace.shift();
+          trace.push({
+            api: name,
+            job: owner ?? null,
+            result: name === 'GetProcessId' ? Number(result > 0) : result,
+            error,
+            kind:
+              name === 'ContinueDebugEvent' || (name === 'WaitForDebugEvent' && result !== 0)
+                ? (pendingEvent?.kind ?? null)
+                : null,
+          });
+        }
+      },
+    };
+    if (windows) jobSample.active = diagnostic;
     try {
-      runtimeTerminateOwnedProviderTree(first.handle, 'kill');
-      await first.closeInput();
-      await outputs[0];
-      await outputs[1];
-      await until(
-        () => runtimeObserveOwnedProviderTree(first.handle),
-        o => o.state === 'drained',
-      );
-      expect(runtimeObserveOwnedProviderTree(second.handle).state).toBe('running');
+      const first = spawn('setInterval(()=>{},1000)'),
+        second = spawn('setInterval(()=>{},1000)');
+      const outputs = [first.stdout.cancel(), first.stderr.cancel(), second.stdout.cancel(), second.stderr.cancel()];
+      const secondCancellation: Array<'pending' | 'fulfilled' | 'rejected'> = ['pending', 'pending'];
+      for (const [index, output] of outputs.slice(2).entries())
+        void output.then(
+          () => {
+            secondCancellation[index] = 'fulfilled';
+          },
+          () => {
+            secondCancellation[index] = 'rejected';
+          },
+        );
+      let firstDrained: ReturnType<typeof runtimeObserveOwnedProviderTree> | undefined;
+      try {
+        runtimeTerminateOwnedProviderTree(first.handle, 'kill');
+        await first.closeInput();
+        await outputs[0];
+        await outputs[1];
+        firstDrained = await until(
+          () => runtimeObserveOwnedProviderTree(first.handle),
+          o => o.state === 'drained',
+        );
+        expect(runtimeObserveOwnedProviderTree(second.handle).state).toBe('running');
+      } finally {
+        await stop(first);
+        await stop(second, observation => {
+          if (windows && observation.state === 'unknown' && !firstUnknown)
+            firstUnknown = {
+              millisecondsSinceKill: secondKillAt === undefined ? null : Math.round(performance.now() - secondKillAt),
+              native: snapshot(),
+            };
+        }).catch(error => {
+          if (error instanceof Error) {
+            let secondObserved: ReturnType<typeof runtimeObserveOwnedProviderTree> | 'unavailable' = 'unavailable';
+            try {
+              secondObserved = runtimeObserveOwnedProviderTree(second.handle);
+            } catch {
+              // Preserve the original stop failure if observation itself is unavailable.
+            }
+            error.message += `; two-provider drain ${JSON.stringify({
+              first: firstDrained
+                ? {
+                    state: firstDrained.state,
+                    stdioClosed: firstDrained.stdioClosed,
+                    leaderExitCode: firstDrained.leaderExitCode,
+                  }
+                : 'unavailable',
+              second:
+                secondObserved === 'unavailable'
+                  ? 'unavailable'
+                  : {
+                      state: secondObserved.state,
+                      stdioClosed: secondObserved.stdioClosed,
+                      leaderExitCode: secondObserved.leaderExitCode,
+                    },
+              secondCancellation,
+              nativeProof: windows ? {firstUnknown, final: snapshot()} : undefined,
+            })}`;
+          }
+          return Promise.reject(error);
+        });
+        await Promise.all(outputs);
+      }
     } finally {
-      await stop(first);
-      await stop(second);
-      await Promise.all(outputs);
+      jobSample.active = prior;
+      kernel?.close();
     }
   },
 );

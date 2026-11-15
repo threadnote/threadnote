@@ -597,6 +597,83 @@ describe('topic maintenance draft contract', () => {
     expect(proposal.draft.outcome).toBe('propose-update');
   });
 
+  it.each([
+    `cgsn_${Effect.pipe('1', EffectString.repeat(40))}`,
+    `cgsn_${Effect.pipe('1', EffectString.repeat(40))}-direct`,
+    `cgsn_${Effect.pipe('1', EffectString.repeat(40))}-full-${Effect.pipe('2', EffectString.repeat(16))}`,
+    // Actual full/direct/overlay/alias/forced physical identities from the graph factory corpus.
+    'cgsn_04388f0282d68de40b7a7ec29bb4f0d48c29830b-lx2',
+    'cgsn_dc5c1b9a8514d3681982e39052b7020e745817f8-lx2',
+    'cgsn_79b3ccde5379dfc9e27d1c2582a1b803c408d416-lx2',
+    'cgsn_c55f118a9fd03ded0005612eeb6697b29146f3d0-lx2',
+    'cgsn_1c8cf7af3951f53a7ad6877c205bb1b75e10fc03-lx2',
+  ])('validates correlated private review evidence for snapshot %s without mutating it', sourceSnapshotId => {
+    const basis = validateTopicMaintenanceDraftBasis(basisFor('Alpha.'));
+    const currentCitation = createMemoryCodeCitation({
+      version: 1,
+      evidenceRetention: 'capsule-retained',
+      extractorSet: citation.extractorSet,
+      fileContentHash: citation.fileContentHash,
+      path: citation.path,
+      repositoryId: citation.repositoryId,
+      repositoryIdentityKind: citation.repositoryIdentityKind,
+      sourceCommit: citation.sourceCommit,
+      sourceDirty: false,
+      sourceSnapshotId,
+      target: citation.target,
+    });
+    const reviewEvidence = EffectArray.map([historicalHandle, currentHandle], handleId => {
+      const pinned = handleId === historicalHandle ? citation : currentCitation;
+      return {
+        handleId,
+        content: 'export const alpha = 1;',
+        excerptHash: consolidationRevision('export const alpha = 1;'),
+        fileBytesHash: Effect.pipe('4', EffectString.repeat(64)),
+        startLine: 1,
+        endLine: 1,
+        provenance: handleId === historicalHandle ? ('historical-verified' as const) : ('current-verified' as const),
+        supportsCitation: true,
+        truncated: false,
+        source: {
+          extractorSet: pinned.extractorSet,
+          fileContentHash: pinned.fileContentHash.value,
+          path: pinned.path,
+          repositoryId: pinned.repositoryId,
+          sourceCommit: pinned.sourceCommit,
+          sourceDirty: pinned.sourceDirty,
+          sourceSnapshotId: pinned.sourceSnapshotId,
+        },
+        citation: pinned,
+      };
+    });
+    const before = JSON.stringify(reviewEvidence);
+    expect(validateTopicMaintenanceReviewEvidence(basis, reviewEvidence)).toEqual(reviewEvidence);
+    for (const invalidSnapshotId of [
+      `${sourceSnapshotId}-lx3`,
+      `${sourceSnapshotId}-lx2-direct`,
+      `cgsn_${Effect.pipe('A', EffectString.repeat(40))}-lx2`,
+      `cgsn_${Effect.pipe('a', EffectString.repeat(39))}-lx2`,
+    ]) {
+      const invalid = EffectArray.map(reviewEvidence, evidence => ({
+        ...evidence,
+        source: {
+          ...evidence.source,
+          sourceSnapshotId: evidence.handleId === currentHandle ? invalidSnapshotId : evidence.source.sourceSnapshotId,
+        },
+      }));
+      const invalidBefore = JSON.stringify(invalid);
+      expect(() => validateTopicMaintenanceReviewEvidence(basis, invalid)).toThrow(/pinned citation/);
+      expect(JSON.stringify(invalid)).toBe(invalidBefore);
+    }
+    // A valid shape still cannot replace the historical citation's pinned source.
+    const mismatched = EffectArray.map(reviewEvidence, evidence => ({
+      ...evidence,
+      source: {...evidence.source, sourceSnapshotId: `cgsn_${Effect.pipe('f', EffectString.repeat(40))}-lx2`},
+    }));
+    expect(() => validateTopicMaintenanceReviewEvidence(basis, mismatched)).toThrow(/pinned citation/);
+    expect(JSON.stringify(reviewEvidence)).toBe(before);
+  });
+
   it('rejects incomplete or forged private review payload and unsupported versions through CandidateReview', () => {
     const basis = validateTopicMaintenanceDraftBasis(basisFor('Alpha.'));
     const proposal = parse(basis, draftFor(basis));

@@ -121,14 +121,46 @@ const program = Effect.scoped(
     entries['plugin.xml'] = [inputs.plugin, {mtime: stamp, level: 9}];
     const classDirectory = path.join(temporary, 'classes/dev/threadnote/semantic');
     const classes = (yield* fs.readDirectory(classDirectory)).sort();
-    check(classes.length > 0 && classes.length <= 16, 'Unexpected compiler outputs');
+    const expectedClasses = [
+      'DiagnosticSnapshot$Input.class',
+      'DiagnosticSnapshot$Model.class',
+      'DiagnosticSnapshot.class',
+      'PreparedProjectModel$1.class',
+      'PreparedProjectModel$Budget.class',
+      'PreparedProjectModel$CacheImage.class',
+      'PreparedProjectModel$GradleSetup.class',
+      'PreparedProjectModel$Host.class',
+      'PreparedProjectModel$ImportAttempt$State.class',
+      'PreparedProjectModel$ImportAttempt.class',
+      'PreparedProjectModel$PassiveProjection.class',
+      'PreparedProjectModel$StatusImage.class',
+      'PreparedProjectModel$Unsupported.class',
+      'PreparedProjectModel.class',
+      'TypeDefinitionSnapshot$Result.class',
+      'TypeDefinitionSnapshot$SourceImage.class',
+      'TypeDefinitionSnapshot.class',
+    ];
+    check(
+      classes.length === expectedClasses.length &&
+        EffectArray.every(classes, file => EffectArray.contains(expectedClasses, file)),
+      'Unexpected compiler outputs',
+    );
+    let classBytes = 0;
     for (const file of classes) {
-      check(
-        /^(?:DiagnosticSnapshot|TypeDefinitionSnapshot|PreparedProjectModel)(?:\$[A-Za-z]+)?\.class$/u.test(file),
-        'Unexpected compiler output',
-      );
       const bytes = yield* fs.readFile(path.join(classDirectory, file));
       check(bytes.length <= 128 * 1024, 'Compiler output exceeds capacity');
+      classBytes += bytes.length;
+      check(classBytes <= 128 * 1024, 'Aggregate compiler output exceeds capacity');
+      check(
+        bytes.length >= 8 &&
+          bytes[0] === 0xca &&
+          bytes[1] === 0xfe &&
+          bytes[2] === 0xba &&
+          bytes[3] === 0xbe &&
+          bytes[6] === 0 &&
+          bytes[7] === 65,
+        'Unexpected compiler class ABI',
+      );
       entries['dev/threadnote/semantic/' + file] = [bytes, {mtime: stamp, level: 9}];
     }
     const jar = zipSync(entries, {level: 9});

@@ -5,6 +5,7 @@ import {it as effectIt} from '@effect/vitest';
 import {describe, expect} from 'vitest';
 import {decodeNativeCycleRuntime} from '@threadnote/workflow-automations/cycle-runtime';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import {CommandExecutor} from '@threadnote/platform/command';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import * as Effect2 from 'effect';
@@ -1326,34 +1327,83 @@ describe('native cycle lifecycle', () => {
       yield* f.git(['add', 'source.ts']);
       yield* f.git(['commit', '-m', 'Phase one']);
       const head = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
-      const delivered = yield* f.mutate('record-delivery', {
+      const delivery = {
         phaseId: 'one',
-        publication: {exemption: 'maintenance', reason: 'Private test, no feature publication.'},
-        delivery: {
-          phaseId: 'one',
-          phaseHash: f.snapshot.phaseHash,
-          delivery: 'pr',
+        phaseHash: f.snapshot.phaseHash,
+        delivery: 'pr' as const,
+        headSha: head,
+        validatedTree: f.snapshot.tree,
+        commitEvidence: 'Actual clean Git commit.',
+        pr: {
+          url: 'https://github.com/example/private-fixture/pull/1',
           headSha: head,
-          validatedTree: f.snapshot.tree,
-          commitEvidence: 'Actual clean Git commit.',
-          pr: {
-            url: 'https://github.com/example/private-fixture/pull/1',
-            headSha: head,
-            branch: 'feature/one',
-            baseBranch: 'main',
-            state: 'open',
-          },
-          watch: {
-            prUrl: 'https://github.com/example/private-fixture/pull/1',
-            headSha: head,
-            state: 'active',
-            stateDir: f.path.join(f.root, 'watch'),
-            consumerKind: 'orchestrator',
-            consumerId: 'test',
-            evidence: 'Private owned consumer fixture; no external poller.',
-          },
+          branch: 'feature/one',
+          baseBranch: 'main',
+          state: 'open' as const,
+        },
+        watch: {
+          prUrl: 'https://github.com/example/private-fixture/pull/1',
+          headSha: head,
+          state: 'active' as const,
+          stateDir: f.path.join(f.root, 'watch'),
+          consumerKind: 'orchestrator' as const,
+          consumerId: 'test',
+          evidence: 'Private owned consumer fixture; no external poller.',
+        },
+      };
+      const publication = {exemption: 'maintenance' as const, reason: 'Private test, no feature publication.'};
+      const beforeMissingEvidence = yield* f.fs.readFileString(f.statePath());
+      expect(
+        yield* f.mutate('record-delivery', {phaseId: 'one', publication, delivery}).pipe(Effect.result),
+      ).toMatchObject({failure: {code: 'user-authority-required'}});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeMissingEvidence);
+      const providerIdentity = {
+        url: delivery.pr.url,
+        number: 1,
+        baseRepository: 'example/private-fixture',
+        headRepository: 'example/private-fixture',
+        baseBranch: delivery.pr.baseBranch,
+        headBranch: delivery.pr.branch,
+        headSha: head,
+        state: 'open' as const,
+      };
+      const executor = yield* CommandExecutor;
+      const verifiedProvider = CommandExecutor.of({
+        ...executor,
+        execute: (executable, args, options) => {
+          if (executable === 'git' && args.includes('--no-optional-locks')) {
+            const stdout =
+              args.at(-1) === 'remote'
+                ? 'origin'
+                : args.at(-1) === 'main' && args.includes('--symbolic-full-name')
+                  ? 'refs/heads/main'
+                  : args.at(-1) === 'origin'
+                    ? 'https://github.com/example/private-fixture.git'
+                    : args.at(-1) === 'remote.origin.fetch'
+                      ? '+refs/heads/*:refs/remotes/origin/*'
+                      : undefined;
+            if (stdout !== undefined) return Effect.succeed({exitCode: 0, stderr: '', stdout});
+          }
+          return executable === 'gh' && args.includes('repos/example/private-fixture/pulls/1')
+            ? Effect.succeed({
+                exitCode: 0,
+                stderr: '',
+                stdout: JSON.stringify({...providerIdentity, merged: false}),
+              })
+            : executor.execute(executable, args, options);
         },
       });
+      const delivered = yield* f
+        .mutate('record-delivery', {
+          phaseId: 'one',
+          publication,
+          delivery: {
+            ...delivery,
+            userAuthority: 'The fixture user authorizes recording this exact first PR delivery.',
+            providerIdentity,
+          },
+        })
+        .pipe(Effect.provideService(CommandExecutor, verifiedProvider));
       expect(delivered.next).toEqual({action: 'implement', phaseId: 'two'});
       expect((yield* f.inspect()).next).toEqual({action: 'implement', phaseId: 'two'});
       const before = yield* f.fs.readFileString(f.statePath());

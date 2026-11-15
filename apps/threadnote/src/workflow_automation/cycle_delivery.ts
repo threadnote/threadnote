@@ -3,13 +3,15 @@ import {runCommandEffect} from '@threadnote/platform/command';
 import {normalizeGitRemoteUrl} from '@threadnote/remote-memory/git/canonical_store';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import {NativeCycleDeliverySchema, type NativeCycleDelivery} from '@threadnote/workflow-automations/cycle';
-import {nativeWatchPullRequest} from './watch_provider.js';
+import {nativeWatchPullRequest, verifyNativeWatchPullIdentity} from './watch_provider.js';
+import {stableJson} from '../workflow_memory/protocol.js';
 
 const invalid = () =>
   WorkflowAutomationError.make({
     code: 'base-ref-unverified',
     message: 'PR base requires an unambiguous standard remote-tracking ref in the same GitHub repository.',
   });
+const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
 const remoteName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const supportedURL =
   /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/?$/u;
@@ -76,28 +78,7 @@ export const verifyNativeCycleDeliveryRepository = Effect.fn('workflowAutomation
     );
     const pr = delivery.pr;
     if (!pr) return yield* invalid();
-    const target = yield* Effect.try({try: () => nativeWatchPullRequest(pr.url), catch: invalid});
-    const repository = EffectString.toLowerCase(`https://github.com/${target.owner}/${target.repo}`);
-    const remotes = EffectString.split(yield* readGit(repo, ['remote']), '\n');
-    if (remotes.length > 16 || !EffectArray.every(remotes, name => remoteName.test(name))) return yield* invalid();
-    let matchedRepository = false;
-    for (const remote of remotes) {
-      const urls = EffectString.split(yield* readGit(repo, ['remote', 'get-url', '--all', remote]), '\n');
-      const matchingUrls = EffectArray.filter(
-        urls,
-        url =>
-          supportedURL.test(url) && EffectString.toLowerCase(`https://${normalizeGitRemoteUrl(url)}`) === repository,
-      );
-      if (matchingUrls.length > 0) {
-        if (urls.length !== 1 || matchingUrls.length !== 1) return yield* invalid();
-        matchedRepository = true;
-      }
-      const mapping = yield* readGit(repo, ['config', '--get-all', `remote.${remote}.fetch`]);
-      const standard = `refs/heads/*:refs/remotes/${remote}/*`;
-      if (mapping !== standard && mapping !== '+' + standard) return yield* invalid();
-    }
-    if (!matchedRepository) return yield* invalid();
-    return {repository};
+    return yield* verifyNativePrRepository(repo, pr.url);
   },
 );
 
@@ -114,7 +95,18 @@ export const bindNativeCycleDeliveryBase = Effect.fn('workflowAutomation.cycle.b
   );
   const pr = delivery.pr;
   if (pr?.baseRefBinding) return yield* invalid();
-  if (!pr || comparisonRef === pr.baseBranch) return delivery;
+  if (!pr) return delivery;
+  if (comparisonRef === pr.baseBranch) {
+    const resolved = yield* readGit(repo, [
+      'rev-parse',
+      '--symbolic-full-name',
+      '--verify',
+      '--end-of-options',
+      comparisonRef,
+    ]);
+    if (resolved !== `refs/heads/${pr.baseBranch}`) return yield* invalid();
+    return delivery;
+  }
   return yield* Effect.gen(function* () {
     const before = yield* observe(repo, comparisonRef, pr);
     const after = yield* observe(repo, comparisonRef, pr);
@@ -125,3 +117,71 @@ export const bindNativeCycleDeliveryBase = Effect.fn('workflowAutomation.cycle.b
     Effect.catchIf(Cause.isTimeoutError, () => Effect.fail(invalid())),
   );
 });
+
+/** Bind a monitor to a repository without requiring a workflow delivery receipt. */
+export const verifyNativePrRepository = Effect.fn('workflowAutomation.verifyPrRepository')(function* (
+  repo: string,
+  prUrl: string,
+) {
+  const target = yield* Effect.try({try: () => nativeWatchPullRequest(prUrl), catch: invalid});
+  const repository = EffectString.toLowerCase(`https://github.com/${target.owner}/${target.repo}`);
+  const remotes = EffectString.split(yield* readGit(repo, ['remote']), '\n');
+  if (remotes.length > 16 || !EffectArray.every(remotes, name => remoteName.test(name))) return yield* invalid();
+  let matchedRepository = false;
+  for (const remote of remotes) {
+    const urls = EffectString.split(yield* readGit(repo, ['remote', 'get-url', '--all', remote]), '\n');
+    const matchingUrls = EffectArray.filter(
+      urls,
+      url => supportedURL.test(url) && EffectString.toLowerCase(`https://${normalizeGitRemoteUrl(url)}`) === repository,
+    );
+    if (matchingUrls.length > 0) {
+      if (urls.length !== 1 || matchingUrls.length !== 1) return yield* invalid();
+      matchedRepository = true;
+    }
+    const mapping = yield* readGit(repo, ['config', '--get-all', `remote.${remote}.fetch`]);
+    const standard = `refs/heads/*:refs/remotes/${remote}/*`;
+    if (mapping !== standard && mapping !== '+' + standard) return yield* invalid();
+  }
+  if (!matchedRepository) return yield* invalid();
+  return {repository};
+});
+
+/** Caller fields and opaque refs are evidence to compare, never proof that this observation occurred. */
+export const verifyNativeCyclePrDeliveryIdentity = (
+  checkout: string,
+  receipt: NativeCycleDelivery | undefined,
+  options: {readonly allowMerged?: boolean; readonly requireEvidence?: boolean} = {},
+) =>
+  Effect.gen(function* () {
+    const allowMerged = options.allowMerged === true;
+    if (!receipt?.pr) return yield* fail('invalid-pr-receipt', 'PR delivery evidence is missing.');
+    if (
+      options.requireEvidence &&
+      (!receipt.userAuthority || !EffectString.trim(receipt.userAuthority) || !receipt.providerIdentity)
+    )
+      return yield* fail(
+        'user-authority-required',
+        'A first canonical PR delivery requires actual userAuthority and provider evidence, followed by fresh runtime verification.',
+      );
+    yield* verifyNativeCycleDeliveryRepository(checkout, receipt);
+    const identity = yield* verifyNativeWatchPullIdentity(receipt.pr.url);
+    if (
+      EffectString.toLowerCase(identity.headRepository) !== EffectString.toLowerCase(identity.baseRepository) ||
+      identity.headSha !== receipt.headSha ||
+      identity.headBranch !== receipt.pr.branch ||
+      identity.baseBranch !== receipt.pr.baseBranch ||
+      (identity.state !== receipt.pr.state && !(allowMerged && identity.state === 'merged'))
+    )
+      return yield* fail(
+        'pr-source-mismatch',
+        'The remote PR repository, branches, state and exact head must match the validated phase.',
+      );
+    const retainedIdentity = receipt.providerIdentity;
+    if (
+      retainedIdentity &&
+      stableJson({...identity, state: allowMerged ? retainedIdentity.state : identity.state}) !==
+        stableJson(retainedIdentity)
+    )
+      return yield* fail('pr-source-mismatch', 'The provider identity changed from its exact provisional evidence.');
+    return identity;
+  });

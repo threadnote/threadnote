@@ -11,6 +11,7 @@ import {
   parseCodexResumeHookEvent,
   projectCodexResumePreload,
   promptCarriesActiveHandoff,
+  promptCarriesNativeWatchNotice,
   renderCodexResumeHookOutput,
   type CodexResumeHookEvent,
   type CodexResumeReceiptV1,
@@ -303,6 +304,8 @@ describe('Codex resume preload', () => {
     expect(parseCodexResumeHookEvent({...event, hookEventName: 'Stop'})).toBeUndefined();
     expect(promptCarriesActiveHandoff('read threadnote://user/u/memories/handoffs/active/p/t.md')).toBe(true);
     expect(promptCarriesActiveHandoff('continue without a supplied handoff')).toBe(false);
+    expect(promptCarriesNativeWatchNotice('Threadnote watch event. Route=threadnote://watch/notice')).toBe(true);
+    expect(promptCarriesNativeWatchNotice('A normal prompt mentions an unrelated watch notification.')).toBe(false);
     expect(JSON.parse(renderCodexResumeHookOutput('{"brief":true}'))).toEqual({
       hookSpecificOutput: {
         additionalContext: '{"brief":true}',

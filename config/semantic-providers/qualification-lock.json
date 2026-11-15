@@ -689,7 +689,8 @@
       },
       "productionQualified": false,
       "blockers": [
-        "P00 historical scope: Maven and Gradle fixtures plus enabled/disabled Gradle import markers pass on macOS arm64 only. Diagnostics/symbols/hover/actions, production import policy, complete distribution licensing and other platform cells remain unqualified. Kotlin is deferred."
+        "P00 historical scope: Maven and Gradle fixtures plus enabled/disabled Gradle import markers pass on macOS arm64 only. Diagnostics/symbols/hover/actions, production import policy, complete distribution licensing and other platform cells remain unqualified. Kotlin is deferred.",
+        "The controlled Gradle source-overlay derivative (SDK521eff6fca682960da1988c278f2bf3b1ebcc0900220eec0ca93263102d105be, constructor907210f1bea3fe40b5a4dba4b4f9d51d3be94f8f) is neither an official distribution nor a full-source Gradle build. Production original-foreground readiness, actual Buildship two-model import, complete operation/finalizer joins and native drain remain unqualified until exact-source execution and review; source construction and unit tests do not qualify them."
       ],
       "pilotEvidence": [
         {

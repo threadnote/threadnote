@@ -606,7 +606,7 @@ describe('built self-contained distribution', () => {
         snapshot: {
           commit: Effect.pipe(await runGit(['rev-parse', 'HEAD'], graphRepository), EffectString.trim),
           dirty: false,
-          id: expect.stringMatching(/^cgsn_[a-f0-9]{40}$/),
+          id: expect.stringMatching(/^cgsn_[a-f0-9]{40}-lx2$/),
           worktreeId: expect.stringMatching(/^[a-f0-9]{64}$/),
         },
       });
@@ -1834,6 +1834,7 @@ async function activeVectorRevision(): Promise<string> {
     readonly: true,
   });
   try {
+    database.exec('PRAGMA busy_timeout = 50');
     const pointer = database
       .query<{readonly job_id?: string} | null, SQLQueryBindings[]>(
         `SELECT generation.job_id

@@ -43,6 +43,7 @@ import {withSharedRepositoryLock} from '@threadnote/threadnote/effect/share/lock
 import * as automaticCompaction from '@threadnote/graph/automatic/compaction';
 import * as isolatedIndex from '@threadnote/graph/isolated/index';
 import {codeGraphLayout} from '@threadnote/graph/layout';
+import {lexicalPhysicalSnapshotIdentity} from '@threadnote/graph/store/utilities';
 import {makeCodeGraphBuildReporter} from '@threadnote/graph/build_status';
 import {
   readCodeGraphLocalAssociation,
@@ -3397,129 +3398,172 @@ describe('manager http API', () => {
     }
   });
 
-  it('previews and applies an exact authenticated graph view removal with an approval digest', async () => {
-    const config = await makeRuntime();
-    homes.push(config.agentContextHome);
-    const snapshotId = `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}-direct`;
-    const checkoutId = await seedManagerGraph(config, snapshotId);
-    const worktreeId = Effect2.pipe('c', EffectString.repeat(64));
-    const server = await startServer(config, 'secret');
-    try {
-      const headers = {authorization: 'Bearer secret', 'content-type': 'application/json'};
-      const target = {action: 'remove-view', checkoutId, expectedSnapshotId: snapshotId, worktreeId};
-      const unauthorized = await testHttpFetch(`${server.url}/api/graphs/action`, {
-        body: JSON.stringify({...target, dryRun: true}),
-        headers: {'content-type': 'application/json'},
-        method: 'POST',
-      });
-      expect(unauthorized.status).toBe(401);
+  it.each([
+    ['legacy', `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}`],
+    ['direct', `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}-direct`],
+    ['full', `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}-full-${Effect2.pipe('e', EffectString.repeat(16))}`],
+    ['lexical V2', lexicalPhysicalSnapshotIdentity(`cgsn_${Effect2.pipe('d', EffectString.repeat(40))}`, 'full')],
+  ])(
+    'previews and applies an exact authenticated graph view removal with an approval digest (%s)',
+    async (_, snapshotId) => {
+      const config = await makeRuntime();
+      homes.push(config.agentContextHome);
+      const checkoutId = await seedManagerGraph(config, snapshotId);
+      const worktreeId = Effect2.pipe('c', EffectString.repeat(64));
+      const server = await startServer(config, 'secret');
+      try {
+        const headers = {authorization: 'Bearer secret', 'content-type': 'application/json'};
+        const target = {action: 'remove-view', checkoutId, expectedSnapshotId: snapshotId, worktreeId};
+        const unauthorized = await testHttpFetch(`${server.url}/api/graphs/action`, {
+          body: JSON.stringify({...target, dryRun: true}),
+          headers: {'content-type': 'application/json'},
+          method: 'POST',
+        });
+        expect(unauthorized.status).toBe(401);
 
-      const catalog = await testHttpFetch(`${server.url}/api/graphs`, {headers});
-      expect(catalog.status).toBe(200);
-      const preview = await testHttpFetch(`${server.url}/api/graphs/action`, {
-        body: JSON.stringify({...target, dryRun: true}),
-        headers,
-        method: 'POST',
-      });
-      const prepared = decodeJson(
-        Schema.StructWithRest(
-          Schema.Struct({
-            approvalDigest: Schema.String,
-            output: Schema.String,
-            result: Schema.StructWithRest(
-              Schema.Struct({
-                applied: Schema.Boolean,
-                state: Schema.String,
-                type: Schema.String,
-                version: Schema.Finite,
-              }),
-              [JsonRecordSchema],
+        const catalog = await testHttpFetch(`${server.url}/api/graphs`, {headers});
+        expect(catalog.status).toBe(200);
+        // Syntactic identity never authorizes removal: malformed/future identities
+        // must leave the real store ready for the exact authenticated preview.
+        for (const invalidSnapshotId of [
+          `${snapshotId}-lx3`,
+          `${snapshotId}-lx2-direct`,
+          `cgsn_${Effect2.pipe('D', EffectString.repeat(40))}-lx2`,
+          `cgsn_${Effect2.pipe('d', EffectString.repeat(39))}-lx2`,
+        ]) {
+          const invalid = await testHttpFetch(`${server.url}/api/graphs/action`, {
+            body: JSON.stringify({...target, expectedSnapshotId: invalidSnapshotId, confirm: true}),
+            headers,
+            method: 'POST',
+          });
+          expect(invalid.status).toBe(500);
+          expect(await invalid.json()).toEqual({
+            error: 'Provide expectedSnapshotId as an exact code graph snapshot identity.',
+          });
+        }
+        const preview = await testHttpFetch(`${server.url}/api/graphs/action`, {
+          body: JSON.stringify({...target, dryRun: true}),
+          headers,
+          method: 'POST',
+        });
+        const prepared = decodeJson(
+          Schema.StructWithRest(
+            Schema.Struct({
+              approvalDigest: Schema.String,
+              output: Schema.String,
+              result: Schema.StructWithRest(
+                Schema.Struct({
+                  applied: Schema.Boolean,
+                  state: Schema.String,
+                  type: Schema.String,
+                  version: Schema.Finite,
+                }),
+                [JsonRecordSchema],
+              ),
+            }),
+            [JsonRecordSchema],
+          ),
+          await preview.json(),
+        );
+        expect(preview.status).toBe(200);
+        expect(prepared).toMatchObject({
+          approvalDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+          output: expect.stringContaining('Would remove native code graph view'),
+          result: {applied: false, state: 'ready', type: 'code-graph-view-removal', version: 1},
+        });
+        expect(JSON.stringify(prepared)).not.toContain(config.agentContextHome);
+
+        const refused = await testHttpFetch(`${server.url}/api/graphs/action`, {
+          body: JSON.stringify({...target, confirm: true}),
+          headers,
+          method: 'POST',
+        });
+        expect(refused.status).toBe(500);
+        expect(await refused.json()).toEqual({
+          error: 'Preview this exact graph view removal and provide its approval digest before applying.',
+        });
+
+        const wrongTarget = await testHttpFetch(`${server.url}/api/graphs/action`, {
+          body: JSON.stringify({
+            ...target,
+            expectedSnapshotId: lexicalPhysicalSnapshotIdentity(
+              `cgsn_${Effect2.pipe('e', EffectString.repeat(40))}`,
+              'full',
             ),
+            approvalDigest: prepared.approvalDigest,
+            confirm: true,
           }),
-          [JsonRecordSchema],
-        ),
-        await preview.json(),
-      );
-      expect(preview.status).toBe(200);
-      expect(prepared).toMatchObject({
-        approvalDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
-        output: expect.stringContaining('Would remove native code graph view'),
-        result: {applied: false, state: 'ready', type: 'code-graph-view-removal', version: 1},
-      });
-      expect(JSON.stringify(prepared)).not.toContain(config.agentContextHome);
+          headers,
+          method: 'POST',
+        });
+        expect(wrongTarget.status).toBe(500);
+        expect(await wrongTarget.json()).toEqual({
+          error: 'Preview this exact graph view removal and provide its approval digest before applying.',
+        });
 
-      const refused = await testHttpFetch(`${server.url}/api/graphs/action`, {
-        body: JSON.stringify({...target, confirm: true}),
-        headers,
-        method: 'POST',
-      });
-      expect(refused.status).toBe(500);
-      expect(await refused.json()).toEqual({
-        error: 'Preview this exact graph view removal and provide its approval digest before applying.',
-      });
+        const applied = await testHttpFetch(`${server.url}/api/graphs/action`, {
+          body: JSON.stringify({...target, approvalDigest: prepared.approvalDigest, confirm: true}),
+          headers,
+          method: 'POST',
+        });
+        const result = decodeJson(
+          Schema.StructWithRest(
+            Schema.Struct({
+              approvalDigest: Schema.String,
+              output: Schema.String,
+              result: Schema.StructWithRest(Schema.Struct({applied: Schema.Boolean, state: Schema.String}), [
+                JsonRecordSchema,
+              ]),
+            }),
+            [JsonRecordSchema],
+          ),
+          await applied.json(),
+        );
+        expect(applied.status).toBe(200);
+        expect(result).toMatchObject({
+          approvalDigest: prepared.approvalDigest,
+          output: expect.stringContaining('Removed native code graph view'),
+          result: {applied: true, state: 'removed'},
+        });
+        expect(JSON.stringify(result)).not.toContain(config.agentContextHome);
+        const databasePath = join(
+          config.agentContextHome,
+          'indexes',
+          'code-graph',
+          'repositories',
+          checkoutId,
+          'graph-v3.sqlite',
+        );
+        const database = new (await import('bun:sqlite')).Database(databasePath, {readonly: true});
+        expect(database.query('SELECT COUNT(*) AS count FROM snapshot_leases').get()).toEqual({count: 0});
+        database.close();
 
-      const applied = await testHttpFetch(`${server.url}/api/graphs/action`, {
-        body: JSON.stringify({...target, approvalDigest: prepared.approvalDigest, confirm: true}),
-        headers,
-        method: 'POST',
-      });
-      const result = decodeJson(
-        Schema.StructWithRest(
-          Schema.Struct({
-            approvalDigest: Schema.String,
-            output: Schema.String,
-            result: Schema.StructWithRest(Schema.Struct({applied: Schema.Boolean, state: Schema.String}), [
-              JsonRecordSchema,
-            ]),
+        const retried = await fetchManagerGraphActionWhenAvailable(`${server.url}/api/graphs/action`, {
+          body: JSON.stringify({...target, approvalDigest: prepared.approvalDigest, confirm: true}),
+          headers,
+          method: 'POST',
+        });
+        expect(retried.status).toBe(200);
+        expect(await retried.json()).toMatchObject({result: {applied: true, state: 'already-removed'}});
+
+        const stalePreview = await testHttpFetch(`${server.url}/api/graphs/action`, {
+          body: JSON.stringify({
+            ...target,
+            dryRun: true,
+            expectedSnapshotId: `cgsn_${Effect2.pipe('e', EffectString.repeat(40))}-direct`,
           }),
-          [JsonRecordSchema],
-        ),
-        await applied.json(),
-      );
-      expect(applied.status).toBe(200);
-      expect(result).toMatchObject({
-        approvalDigest: prepared.approvalDigest,
-        output: expect.stringContaining('Removed native code graph view'),
-        result: {applied: true, state: 'removed'},
-      });
-      expect(JSON.stringify(result)).not.toContain(config.agentContextHome);
-      const databasePath = join(
-        config.agentContextHome,
-        'indexes',
-        'code-graph',
-        'repositories',
-        checkoutId,
-        'graph-v3.sqlite',
-      );
-      const database = new (await import('bun:sqlite')).Database(databasePath, {readonly: true});
-      expect(database.query('SELECT COUNT(*) AS count FROM snapshot_leases').get()).toEqual({count: 0});
-      database.close();
-
-      const retried = await fetchManagerGraphActionWhenAvailable(`${server.url}/api/graphs/action`, {
-        body: JSON.stringify({...target, approvalDigest: prepared.approvalDigest, confirm: true}),
-        headers,
-        method: 'POST',
-      });
-      expect(retried.status).toBe(200);
-      expect(await retried.json()).toMatchObject({result: {applied: true, state: 'already-removed'}});
-
-      const stalePreview = await testHttpFetch(`${server.url}/api/graphs/action`, {
-        body: JSON.stringify({
-          ...target,
-          dryRun: true,
-          expectedSnapshotId: `cgsn_${Effect2.pipe('e', EffectString.repeat(40))}-direct`,
-        }),
-        headers,
-        method: 'POST',
-      });
-      expect(stalePreview.status).toBe(200);
-      const stale = await stalePreview.json();
-      expect(stale).toMatchObject({result: {observedState: 'removed', state: 'stale-target'}});
-      expect(JSON.stringify(stale)).not.toContain(config.agentContextHome);
-    } finally {
-      await server.close();
-    }
-  });
+          headers,
+          method: 'POST',
+        });
+        expect(stalePreview.status).toBe(200);
+        const stale = await stalePreview.json();
+        expect(stale).toMatchObject({result: {observedState: 'removed', state: 'stale-target'}});
+        expect(JSON.stringify(stale)).not.toContain(config.agentContextHome);
+      } finally {
+        await server.close();
+      }
+    },
+  );
 
   effectIt.effect('maps a busy graph view target to a fixed path-free retry response', () =>
     Effect.scoped(

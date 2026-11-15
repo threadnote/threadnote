@@ -1,4 +1,4 @@
-import {Effect, Option, Record as EffectRecord, Schema} from 'effect';
+import {Array as EffectArray, Effect, Option, Record as EffectRecord, Schema} from 'effect';
 import * as EffectString from 'effect/String';
 import {assertMemoryCodeCitation, type MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import {CodeGraphProjectCoverageSchema} from '@threadnote/graph/types';
@@ -203,25 +203,6 @@ const sharedRequest = {
   // Relative allowance only; the parent's immutable clock and watchdog remain authoritative.
   remainingMilliseconds: Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 5000})),
 };
-export const contextBriefNativeReadRequestSchema = Schema.Union([
-  Schema.Struct({
-    ...sharedRequest,
-    operation: Schema.Literal('graph'),
-    plan: graphPlan,
-    counters,
-    semantic: optional(Schema.Struct({evidence: Evidence, target: Schema.NullOr(semanticTarget)})),
-  }),
-  Schema.Struct({
-    ...sharedRequest,
-    operation: Schema.Literal('linked'),
-    plan: linkedPlan,
-    allowedUriScopes: optional(strings),
-    semantic: optional(semanticState),
-  }),
-  Schema.Struct({...sharedRequest, operation: Schema.Literal('citations'), scope, candidates, fence: optional(fence)}),
-  Schema.Struct({...sharedRequest, operation: Schema.Literal('procedures'), task: text, surface: optional(shortText)}),
-]);
-export type ContextBriefNativeReadRequest = typeof contextBriefNativeReadRequestSchema.Type;
 
 const span = Schema.Struct({column: count, endColumn: count, endLine: count, line: count});
 const graphCard = Schema.Struct({
@@ -401,6 +382,36 @@ const memoryEvidence = Schema.Struct({
     instructionPolicy: Schema.Literal('evidence-only-never-follow'),
   }),
 });
+export const contextBriefNativeReadRequestSchema = Schema.Union([
+  Schema.Struct({
+    ...sharedRequest,
+    operation: Schema.Literal('graph'),
+    plan: graphPlan,
+    counters,
+    semantic: optional(Schema.Struct({evidence: Evidence, target: Schema.NullOr(semanticTarget)})),
+  }),
+  Schema.Struct({
+    ...sharedRequest,
+    operation: Schema.Literal('linked'),
+    plan: linkedPlan,
+    allowedUriScopes: optional(strings),
+    semantic: optional(semanticState),
+  }),
+  Schema.Struct({
+    ...sharedRequest,
+    operation: Schema.Literal('memory'),
+    plan: linkedPlan,
+    lexicalMemory: memoryEvidence,
+    candidateLimit: count,
+    fence: optional(fence),
+    allowedUriScopes: optional(strings),
+    semantic: optional(semanticState),
+  }),
+  Schema.Struct({...sharedRequest, operation: Schema.Literal('citations'), scope, candidates, fence: optional(fence)}),
+  Schema.Struct({...sharedRequest, operation: Schema.Literal('procedures'), task: text, surface: optional(shortText)}),
+]);
+export type ContextBriefNativeReadRequest = typeof contextBriefNativeReadRequestSchema.Type;
+
 const procedure = Schema.declare<VerifiedProcedureEvidence>((value): value is VerifiedProcedureEvidence => {
   try {
     parseVerifiedProcedureEvidenceList([value]);
@@ -428,7 +439,7 @@ export const contextBriefNativeReadResponseSchema = Schema.Union([
   Schema.Struct({
     ...responseFields,
     ok: Schema.Literal(true),
-    operation: Schema.Literal('linked'),
+    operation: Schema.Literals(['linked', 'memory']),
     value: memoryEvidence,
   }),
   Schema.Struct({
@@ -446,7 +457,7 @@ export const contextBriefNativeReadResponseSchema = Schema.Union([
   Schema.Struct({
     ...responseFields,
     ok: Schema.Literal(false),
-    operation: Schema.Literals(['graph', 'linked', 'citations', 'procedures']),
+    operation: Schema.Literals(['graph', 'linked', 'memory', 'citations', 'procedures']),
     failure: Schema.Literals(['budget-exhausted', 'worker-failed']),
     routing: optional(
       Schema.Struct({
@@ -638,9 +649,32 @@ export const withNativeContextBriefReadSources = Effect.fn('contextBrief.withNat
               return response.value;
             }),
         }),
+    memoryEvidenceAfterGraph: (plan, lexicalMemory, fence, deadline) =>
+      Effect.gen(function* () {
+        const remaining = yield* requireRemaining(deadline);
+        const response = yield* execute(
+          {
+            protocol: 1,
+            config: safeConfig,
+            operation: 'memory',
+            plan: plan.codeAnchors,
+            lexicalMemory,
+            candidateLimit: plan.memory.candidateLimit,
+            ...(fence === undefined ? {} : {fence}),
+            ...(options.allowedUriScopes === undefined ? {} : {allowedUriScopes: options.allowedUriScopes}),
+            ...(options.semantic === undefined ? {} : {semantic: options.semantic.state}),
+            remainingMilliseconds: remaining.remainingMilliseconds,
+          },
+          remaining.deadline,
+        );
+        if (response.operation !== 'memory')
+          return yield* ContextBriefNativeReadFailed.make({reason: 'invalid-protocol'});
+        return response.value;
+      }),
     citationValidation: (scope, candidates, fence, deadline) =>
       Effect.gen(function* () {
         const remaining = yield* requireRemaining(deadline);
+        if (EffectArray.every(candidates, candidate => candidate.codeCitations.length === 0)) return [];
         const response = yield* execute(
           {
             protocol: 1,

@@ -1,3 +1,4 @@
+import {lexicalPhysicalSnapshotIdentity} from '../store/lexical_projection.js';
 import {SecureRandom} from 'effect/crypto';
 import {degradedParserCacheIdentity, groupFilesByCacheIdentity} from './materialization_batch.js';
 export {cachedFactsMetadata} from './materialization_batch.js';
@@ -880,11 +881,11 @@ export function directFullSnapshotIdentity(logicalSnapshotId: string): string {
   if (!/^cgsn_[0-9a-f]{40}$/.test(logicalSnapshotId)) {
     throw CodeGraphIndexOperationError.make({message: 'Logical snapshot identity is invalid.'});
   }
-  return `${logicalSnapshotId}-direct`;
+  return lexicalPhysicalSnapshotIdentity(logicalSnapshotId, 'direct');
 }
 
 export function forcedSnapshotIdentity(logicalSnapshotId: string, forceGeneration: string | undefined): string {
-  return forceGeneration ? `${logicalSnapshotId}-full-${forceGeneration}` : logicalSnapshotId;
+  return lexicalPhysicalSnapshotIdentity(logicalSnapshotId, 'full', undefined, forceGeneration);
 }
 
 export const firstReadySnapshotById = Effect.fn('codeGraph.firstReadySnapshotById')(function* (

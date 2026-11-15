@@ -1,3 +1,9 @@
+import {
+  projectLexicalSymbols,
+  stageLexicalV2,
+  isLexicalV2Snapshot,
+  loadLexicalViewBinding,
+} from '../lexical_projection.js';
 import {Array as EffectArray} from 'effect';
 import {DateTime, Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -61,15 +67,31 @@ const selectResumableForcedBuild = Effect.fn('codeGraph.selectResumableForcedBui
   }
   const sql = yield* SqlClient.SqlClient;
   yield* configureConnection(sql);
+  if (yield* tableExists(sql, 'lexical_v2_views')) {
+    const rows = yield* sql<SnapshotRow>`
+      SELECT snapshot.* FROM lexical_v2_views AS binding
+      JOIN snapshots AS snapshot ON snapshot.id=binding.snapshot_id
+      WHERE snapshot.state='building' AND binding.logical_snapshot_id=${logicalSnapshotId}
+        AND binding.layout_mode='full' AND binding.force_generation IS NOT NULL
+      ORDER BY snapshot.started_at DESC,snapshot.id DESC LIMIT 1`;
+    const row = rows[0];
+    if (row) {
+      const binding = yield* loadLexicalViewBinding(sql, row.id);
+      if (
+        binding?.logicalSnapshotId === logicalSnapshotId &&
+        binding.mode === 'full' &&
+        binding.forceGeneration &&
+        binding.baseSnapshotId === undefined &&
+        row.base_snapshot_id === null
+      )
+        return snapshotFromRow(row);
+    }
+  }
   const rows = yield* sql<SnapshotRow>`
-    SELECT *
-    FROM snapshots
-    WHERE state = 'building'
+    SELECT * FROM snapshots WHERE state='building'
       AND id GLOB ${`${logicalSnapshotId}-full-[0-9a-f]*`}
-      AND length(id) = ${logicalSnapshotId.length + '-full-'.length + 16}
-    ORDER BY started_at DESC, id DESC
-    LIMIT 1
-  `;
+      AND length(id)=${logicalSnapshotId.length + '-full-'.length + 16}
+    ORDER BY started_at DESC,id DESC LIMIT 1`;
   return rows[0] ? snapshotFromRow(rows[0]) : undefined;
 });
 
@@ -250,7 +272,14 @@ const stagePersistedFullFacts = Effect.fn('codeGraph.stagePersistedFullFacts')(f
       yield* observer('symbols', 0, true);
       yield* observer('lookup-keys', 0, true);
 
-      compactBatchCounts = yield* stageCompactLexicalFacts(sql, snapshotId, symbols, observer, prepared?.symbolTerms);
+      compactBatchCounts = isLexicalV2Snapshot(snapshotId)
+        ? yield* stageLexicalV2(
+            sql,
+            snapshotId,
+            projectLexicalSymbols(symbols, prepared?.batch.bodyDiscovery, prepared?.batch.lexicalFileOrdinals),
+          )
+        : yield* stageCompactLexicalFacts(sql, snapshotId, symbols, observer, prepared?.symbolTerms);
+      if (isLexicalV2Snapshot(snapshotId)) yield* observer('terms', compactBatchCounts.postingCount);
       termCount = compactBatchCounts.postingCount;
 
       const edgePartition = yield* Effect.try({

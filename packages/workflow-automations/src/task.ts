@@ -1,15 +1,17 @@
 import {Array as EffectArray, Option as EffectOption, Schema, String as EffectString, pipe as EffectPipe} from 'effect';
 import {nativeCycleParentsReady, nextNativeCycle as cycleNext} from './cycle.js';
 import {NativeCycleDeliverySchema} from './cycle.js';
-import {nativeCyclePhaseReviewUsage, nativeCycleSnapshotIsCurrentIteration} from './cycle_runtime.js';
+import {
+  nativeCyclePhaseReviewUsage,
+  nativeCycleReviewContext,
+  nativeCycleSnapshotIsCurrentIteration,
+  nativeCycleSupplementalRef,
+  nativeCycleSupplementalRevision,
+} from './cycle_runtime.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {NativeWorkflowState} from './native.js';
 import {NativeCompactIntentSchema} from './authoring.js';
-import {
-  nativeCycleReviewBasis,
-  nativeCycleReviewRecordingMode,
-  validateNativeCycleReviewHistory,
-} from './cycle_review.js';
+import {nativeCycleReviewRecordingMode, validateNativeCycleReviewHistory} from './cycle_review.js';
 
 export const NativeTaskStartRequestSchema = Schema.Union([
   Schema.Struct({
@@ -39,6 +41,22 @@ export const NativeTaskAnchorSchema = Schema.Struct({
   path: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
   pattern: Schema.String.check(Schema.isMaxLength(256)),
 });
+
+/** Retained diagnostics route; discovery never claims current live source/provider verification. */
+export interface NativeTaskCandidateWatch {
+  readonly diagnosticOnly: true;
+  readonly watchId: string;
+  readonly watchRevision: string;
+  readonly runId: string;
+  readonly callerCwd: string;
+  readonly phaseId: string;
+  readonly snapshotId: string;
+  readonly prUrl: string;
+  readonly candidateWatchRef: string;
+  readonly historical: boolean;
+  readonly collectorStatus: 'absent' | 'starting' | 'running' | 'stopped' | 'blocked' | 'terminal';
+  readonly invalidation?: {readonly kind: 'candidate_invalidated'; readonly reason: string; readonly at: number};
+}
 
 export interface NativeTaskView {
   readonly status: 'ready' | 'blocked' | 'complete' | 'uninitialized';
@@ -91,8 +109,26 @@ export interface NativeTaskView {
     readonly snapshotFiles: number;
     readonly snapshotScopeFiles: number;
     readonly historicalWatches?: number;
+    readonly supplementalPublications?: number;
+    readonly candidateWatches?: number;
   };
   readonly missingInputs: readonly string[];
+  readonly candidateWatches?: readonly NativeTaskCandidateWatch[];
+  readonly supplementalPublications?: readonly {
+    readonly publicationId: string;
+    readonly phaseId: string;
+    readonly prUrl: string;
+    readonly publicationRef: string;
+    readonly supplementalRef?: string;
+    readonly revision: string;
+    readonly completed: boolean;
+    readonly watch?: {
+      readonly consumerId: string;
+      readonly stateDir: string;
+      readonly state: 'active' | 'terminal';
+      readonly recordRef: string;
+    };
+  }[];
   readonly historicalWatches?: readonly {
     readonly phaseId: string;
     readonly title: string;
@@ -104,12 +140,30 @@ export interface NativeTaskView {
     readonly predecessorRef: string;
     readonly baseBranch: string;
   };
+  readonly prWatchPrerequisites?: {
+    readonly required: readonly string[];
+    readonly missing: readonly string[];
+    readonly publicationAloneArmsWatch: false;
+  };
+  readonly unreviewedRebaseRecovery?: {
+    readonly action: 'recover-unreviewed-rebase';
+    readonly snapshotRef: string;
+    readonly userAuthorityRequired: true;
+  };
   readonly baseRequalification?: {
     readonly action: 'requalify-base';
     readonly phaseId: string;
     readonly predecessorRef: string;
     readonly fromBaseBranch: string;
     readonly toBaseBranch: string;
+  };
+  readonly invalidTailRequalification?: {
+    readonly action: 'requalify-invalid-tail';
+    readonly taskRef: string;
+    readonly phaseId: string;
+    readonly predecessorRef: string;
+    readonly liveBaseHead: string;
+    readonly basisSnapshotId: string;
   };
   readonly historicalWatch?: {
     readonly action: 'watch-pr';
@@ -128,6 +182,8 @@ export interface NativeTaskProjectionOptions {
   /** Result of the application core's live check-phase for an accepted review. */
   readonly acceptedSnapshotCurrent?: boolean;
   readonly historicalWatchCount?: number;
+  /** Bounded immutable owner inventory supplied by the application, independent of live source freshness. */
+  readonly candidateWatches?: readonly NativeTaskCandidateWatch[];
   /** Digest of the refreshed external candidate set used by the caller's paged projection. */
   readonly candidateHash?: string;
 }
@@ -141,6 +197,12 @@ export const NativeTaskActionRefSchema = Schema.Struct({
     'validation',
     'delivery',
     'retained-work',
+    'candidate-watch',
+    'candidate-notice',
+    'candidate-delivery',
+    'candidate-event',
+    'candidate-work',
+    'supplemental-publication',
     'closeout-prepare',
     'closeout-finish',
   ]),
@@ -160,6 +222,8 @@ export const NativeTaskActionRefSchema = Schema.Struct({
   previousAttemptId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u))),
   payloadDigest: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
   delivery: Schema.optionalKey(NativeCycleDeliverySchema),
+  publicationId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
+  publicationRef: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
   watchId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u))),
   consumerId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u))),
   wakeupId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u))),
@@ -177,8 +241,80 @@ export const NativeTaskActionRefSchema = Schema.Struct({
   transactionId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
   jobId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u))),
 }).check(
+  Schema.makeFilter(ref => {
+    if (ref.kind === 'supplemental-publication')
+      return Boolean(
+        ref.phaseId &&
+        ref.phaseHash &&
+        ref.snapshotId &&
+        ref.sourceHead &&
+        ref.sourceTree &&
+        ref.publicationId &&
+        ref.publicationRef &&
+        ref.stateRevision &&
+        !ref.watchId &&
+        !ref.consumerId &&
+        !ref.wakeupId &&
+        !ref.eventKey &&
+        !ref.watchAttemptId &&
+        !ref.watchDeliveryId &&
+        !ref.watchEventId &&
+        !ref.workViewDigest &&
+        !ref.workRowDigest,
+      );
+    if (!EffectString.startsWith('candidate-')(ref.kind))
+      return ref.publicationId === undefined && ref.publicationRef === undefined;
+    if (!(
+      ref.phaseId &&
+      ref.phaseHash &&
+      ref.snapshotId &&
+      ref.sourceHead &&
+      ref.sourceTree &&
+      ref.baselineHead &&
+      ref.baselineTree &&
+      ref.baselineRef &&
+      ref.watchId &&
+      ref.consumerId &&
+      ref.wakeupId &&
+      ref.payloadDigest
+    ))
+      return false;
+    if (ref.publicationId !== undefined || ref.publicationRef !== undefined) return false;
+    if (ref.kind === 'candidate-watch')
+      return (
+        !ref.eventKey &&
+        !ref.watchAttemptId &&
+        !ref.watchDeliveryId &&
+        !ref.watchEventId &&
+        !ref.workViewDigest &&
+        !ref.workRowDigest
+      );
+    if (ref.kind === 'candidate-notice')
+      return Boolean(
+        ref.eventKey && !ref.watchDeliveryId && !ref.watchEventId && !ref.workViewDigest && !ref.workRowDigest,
+      );
+    if (ref.kind === 'candidate-delivery')
+      return Boolean(
+        ref.watchDeliveryId &&
+        !ref.eventKey &&
+        !ref.watchAttemptId &&
+        !ref.watchEventId &&
+        !ref.workViewDigest &&
+        !ref.workRowDigest,
+      );
+    if (ref.kind === 'candidate-event')
+      return Boolean(
+        ref.watchDeliveryId &&
+        ref.watchEventId &&
+        !ref.eventKey &&
+        !ref.watchAttemptId &&
+        !ref.workViewDigest &&
+        !ref.workRowDigest,
+      );
+    return ref.kind === 'candidate-work';
+  }),
   Schema.makeFilter(ref =>
-    ref.kind === 'retained-work'
+    ref.kind === 'retained-work' || ref.kind === 'candidate-work'
       ? Boolean(
           ref.watchId &&
           ref.consumerId &&
@@ -396,7 +532,7 @@ export function nativeTaskCursorMatches(
   );
 }
 
-const taskCursor = (
+export const nativeTaskPageCursor = (
   view: Pick<NativeTaskView, 'runId' | 'generation' | 'revision' | 'next' | 'role'> &
     Pick<NativeTaskProjectionOptions, 'candidateHash'>,
   offset: number,
@@ -418,7 +554,7 @@ const pageSize = 16 as const;
 const page = (items: readonly string[], offset: number) => items.slice(offset, offset + pageSize);
 
 /** Project a bounded continuation page from canonical native state without returning its stored image. */
-export function projectNativeTaskView(
+function projectNativeTaskCoreView(
   state: NativeWorkflowState,
   revision: string,
   options: NativeTaskProjectionOptions = {},
@@ -501,13 +637,7 @@ export function projectNativeTaskView(
       )
     : undefined;
   const reviewBasis =
-    latestSnapshot && acceptedReview
-      ? nativeCycleReviewBasis(
-          latestSnapshot.snapshot,
-          EffectArray.map(runtime.snapshots, entry => entry.snapshot),
-          runtime.reviews,
-        )
-      : undefined;
+    latestSnapshot && acceptedReview ? nativeCycleReviewContext(runtime, latestSnapshot.snapshot) : undefined;
   const blockingReview = Boolean(
     latestSnapshot &&
     acceptedReview &&
@@ -556,6 +686,24 @@ export function projectNativeTaskView(
   const phase = next.phaseId
     ? EffectOption.getOrUndefined(EffectArray.findFirst(cycle.plan.phases, item => item.id === next.phaseId))
     : undefined;
+  const currentProof = phase ? cycle.phases[phase.id] : undefined;
+  const currentSource = phase
+    ? EffectArray.filter(
+        runtime.snapshots,
+        entry => entry.snapshot.phaseId === phase.id && entry.snapshot.phaseHash === currentProof?.phaseHash,
+      ).at(-1)?.snapshot
+    : undefined;
+  const watchMissing = phase
+    ? [
+        ...(!currentSource || options.acceptedSnapshotCurrent === false ? ['current-source-snapshot'] : []),
+        ...(!currentSource || !EffectArray.some(runtime.reviews, entry => entry.snapshotId === currentSource.snapshotId)
+          ? ['independent-review']
+          : []),
+        ...(!currentProof?.validation ? ['passing-validation'] : []),
+        ...(!currentProof?.delivery?.pr ? ['verified-pr-delivery'] : []),
+        ...(!currentProof?.delivery?.watch ? ['host-registration'] : []),
+      ]
+    : [];
   const scope = phase?.allowedPaths ?? [];
   const acceptance = phase?.acceptanceCriteria ?? [];
   const acceptanceRefs = phase ? EffectArray.map(phase.acceptanceRefs, item => item.id) : [];
@@ -568,6 +716,7 @@ export function projectNativeTaskView(
     acceptanceRefs: acceptanceRefs.length,
     snapshotFiles: snapshotFiles.length,
     snapshotScopeFiles: snapshotScopeFiles.length,
+    ...(cycle.supplementalPublications ? {supplementalPublications: cycle.supplementalPublications.length} : {}),
     ...(options.historicalWatchCount && options.historicalWatchCount > 0
       ? {historicalWatches: options.historicalWatchCount}
       : {}),
@@ -581,6 +730,7 @@ export function projectNativeTaskView(
       counts.snapshotFiles,
       counts.snapshotScopeFiles,
       counts.historicalWatches ?? 0,
+      counts.supplementalPublications ?? 0,
     ],
     count => count > nextOffset,
   );
@@ -689,7 +839,7 @@ export function projectNativeTaskView(
       ...(more
         ? {
             nextOffset,
-            nextCursor: taskCursor(
+            nextCursor: nativeTaskPageCursor(
               {
                 runId: state.runId,
                 generation: state.generation,
@@ -715,9 +865,75 @@ export function projectNativeTaskView(
     },
     counts,
     missingInputs,
+    ...(cycle.plan.delivery === 'pr'
+      ? {
+          prWatchPrerequisites: {
+            required: [
+              'current-source-snapshot',
+              'independent-review',
+              'passing-validation',
+              'verified-pr-delivery',
+              'host-registration',
+            ],
+            missing: watchMissing,
+            publicationAloneArmsWatch: false as const,
+          },
+        }
+      : {}),
   };
+  const supplementalRevision = cycle.supplementalPublications && nativeCycleSupplementalRevision(runtime);
   return {
     ...view,
+    ...(cycle.supplementalPublications
+      ? {
+          supplementalPublications: EffectArray.map(
+            cycle.supplementalPublications.slice(offset, offset + pageSize),
+            publication => {
+              const watchRecord = EffectArray.filter(publication.records, record => record.event.kind === 'watch').at(
+                -1,
+              );
+              const watchEvent = watchRecord?.event;
+              return {
+                publicationId: publication.publicationId,
+                phaseId: publication.initialization.phaseId,
+                prUrl: publication.initialization.pr.url,
+                publicationRef: nativeCycleSupplementalRef(publication),
+                revision: supplementalRevision!,
+                ...(/^[a-f0-9]{64}$/u.test(revision)
+                  ? {
+                      supplementalRef: encodeNativeTaskActionRef({
+                        version: 1,
+                        kind: 'supplemental-publication',
+                        runId: state.runId,
+                        generationHash: sha256HexSync(state.generation),
+                        stateRevision: revision,
+                        phaseId: publication.initialization.phaseId,
+                        phaseHash: publication.initialization.phaseHash,
+                        snapshotId: publication.initialization.snapshotId,
+                        sourceHead: publication.initialization.head,
+                        sourceTree: publication.initialization.tree,
+                        publicationId: publication.publicationId,
+                        publicationRef: nativeCycleSupplementalRef(publication),
+                        payloadDigest: supplementalRevision!,
+                      }),
+                    }
+                  : {}),
+                completed: EffectArray.some(publication.records, record => record.event.kind === 'completed'),
+                ...(watchEvent?.kind === 'watch'
+                  ? {
+                      watch: {
+                        consumerId: watchEvent.watch.consumerId,
+                        stateDir: watchEvent.watch.stateDir,
+                        state: watchEvent.watch.state,
+                        recordRef: watchRecord!.operationId,
+                      },
+                    }
+                  : {}),
+              };
+            },
+          ),
+        }
+      : {}),
     taskRef: nativeTaskCardRef(
       state,
       revision,
@@ -725,5 +941,37 @@ export function projectNativeTaskView(
       next.phaseId,
       'snapshotId' in next ? next.snapshotId : undefined,
     ),
+  };
+}
+
+/** Candidate recovery remains reachable on complete, drifted and authoring-blocked task pages. */
+export function projectNativeTaskView(
+  state: NativeWorkflowState,
+  revision: string,
+  options: NativeTaskProjectionOptions = {},
+): NativeTaskView {
+  const view = projectNativeTaskCoreView(state, revision, options);
+  if (options.candidateWatches === undefined) return view;
+  const rows = options.candidateWatches;
+  const offset = view.page.offset;
+  const nextOffset = offset + pageSize;
+  const more = view.page.nextOffset !== undefined || rows.length > nextOffset;
+  return {
+    ...view,
+    counts: {...view.counts, candidateWatches: rows.length},
+    candidateWatches: rows.slice(offset, nextOffset),
+    page: {
+      offset,
+      limit: pageSize,
+      ...(more
+        ? {
+            nextOffset,
+            nextCursor: nativeTaskPageCursor(
+              {...view, ...(options.candidateHash ? {candidateHash: options.candidateHash} : {})},
+              nextOffset,
+            ),
+          }
+        : {}),
+    },
   };
 }

@@ -7,6 +7,9 @@ import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {canonicalFileUri, type Evidence} from '@threadnote/semantic/contracts';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import {formatMemoryDocument} from '@threadnote/memory/document';
+import {MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
+import {loadRecallCodeLinks} from '@threadnote/recall/index';
 import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
 import {planContextBrief} from '@threadnote/context/planner';
 import {projectContextBrief} from '@threadnote/context/projector';
@@ -106,6 +109,57 @@ describe('whole native Context Brief read boundary', () => {
     );
   });
 
+  it('binds composite proof to candidate content, scope, limits and graph fence', () => {
+    fc.assert(
+      fc.property(fc.string({maxLength: 80}), excerpt => {
+        const plan = planContextBrief({
+          scope: {kind: 'repository', callerCwd: '/fixture'},
+          codeRefs: ['src/module.ts'],
+          task: 'answer',
+        });
+        const candidate = {
+          kind: 'durable' as const,
+          uri: 'threadnote://fixture/memory',
+          excerpt,
+          rank: 0,
+          citationErrorCount: 0,
+          codeCitations: [],
+        };
+        const request: ContextBriefNativeReadRequest = {
+          protocol: 1,
+          operation: 'memory',
+          remainingMilliseconds: 3000,
+          config: {
+            account: 'local',
+            agentContextHome: '/fixture/home',
+            agentId: 'test',
+            manifestPath: '/fixture/manifest.json',
+            user: 'test',
+          },
+          plan: plan.codeAnchors,
+          candidateLimit: plan.memory.candidateLimit,
+          lexicalMemory: {
+            candidates: [candidate],
+            consideredCandidates: 1,
+            gaps: [],
+            trust: {classification: 'untrusted-memory-data', instructionPolicy: 'evidence-only-never-follow'},
+          },
+          fence: {kind: 'repository', repositoryId: 'repo', snapshotId: 'snapshot'},
+        };
+        const binding = contextBriefNativeReadBinding(request);
+        for (const changed of [
+          {...request, lexicalMemory: {...request.lexicalMemory, candidates: [{...candidate, excerpt: excerpt + '!'}]}},
+          {...request, lexicalMemory: {...request.lexicalMemory, candidates: []}},
+          {...request, candidateLimit: request.candidateLimit + 1},
+          {...request, plan: {...request.plan, scope: {kind: 'repository' as const, callerCwd: '/foreign'}}},
+          {...request, fence: {kind: 'repository' as const, repositoryId: 'repo', snapshotId: 'changed'}},
+        ])
+          expect(contextBriefNativeReadBinding(changed)).not.toBe(binding);
+      }),
+      {numRuns: 24},
+    );
+  });
+
   effectIt.effect(
     'real ready graph and citation reads retain the current snapshot fence, then detect source drift',
     () =>
@@ -141,13 +195,60 @@ describe('whole native Context Brief read boundary', () => {
           rank: 0,
           uri: 'threadnote://user/test/memories/durable/answer.md',
         };
-        const verified = yield* native.citationValidation(
-          plan.scope,
-          [candidate],
+        const linkedFile = f.path.join(f.home, 'data/local/user/test/memories/durable/projects/fixture/linked.md');
+        yield* f.fs.makeDirectory(f.path.dirname(linkedFile), {recursive: true});
+        yield* f.fs.writeFileString(
+          linkedFile,
+          formatMemoryDocument(
+            'MEMORY',
+            {
+              codeCitations: citations,
+              kind: 'durable',
+              project: 'fixture',
+              schemaVersion: MEMORY_SCHEMA_VERSION,
+              sourceAgentClient: 'codex',
+              status: 'active',
+              timestamp: '2026-11-01T00:00:00.000Z',
+              topic: 'linked',
+            },
+            'Canonical linked contract.',
+          ),
+        );
+        const linkedUri = 'threadnote://user/test/memories/durable/projects/fixture/linked.md';
+        yield* loadRecallCodeLinks(f.config, {
+          anchors: citations,
+          forceRefresh: true,
+          includeInactive: false,
+          limit: 24,
+          project: 'fixture',
+        });
+        const lexicalMemory = {
+          ...(yield* sources.memoryEvidence(plan.memory)),
+          candidates: [
+            candidate,
+            {...candidate, uri: linkedUri, excerpt: 'Lexical duplicate must yield to linked canonical data.'},
+          ],
+          consideredCandidates: 2,
+        };
+        const verified = yield* native.memoryEvidenceAfterGraph!(
+          plan,
+          lexicalMemory,
           graph.citationValidationFence,
           yield* makeReadDeadline(5000),
         );
-        expect(verified[0]?.receipts[0]?.status).toBe('exact');
+        expect(EffectArray.map(verified.candidates, candidate => candidate.uri)).toEqual([linkedUri, candidate.uri]);
+        expect(verified.candidates[0]?.excerpt).toContain('Canonical linked contract.');
+        expect(verified.candidates[0]?.lexicallySelected).toBe(true);
+        expect(EffectArray.map(verified.citationValidations ?? [], validation => validation.uri)).toEqual([
+          linkedUri,
+          candidate.uri,
+        ]);
+        expect(
+          EffectArray.every(
+            verified.citationValidations ?? [],
+            validation => validation.receipts[0]?.status === 'exact',
+          ),
+        ).toBe(true);
         yield* f.fs.writeFileString(f.file, 'export function boundedAnswer() { return 43; }\n');
         const drift = yield* native.citationValidation(
           plan.scope,
@@ -283,6 +384,9 @@ describe('whole native Context Brief read boundary', () => {
           }),
         );
         const plan = planContextBrief({scope: {kind: 'repository', callerCwd: f.repo}, mode: 'locate', task: 'answer'});
+        const empty = yield* native.citationValidation(plan.scope, [], undefined, yield* makeReadDeadline(5000));
+        expect(empty).toEqual([]);
+        expect(invocations).toBe(0);
         const deadline = yield* makeReadDeadline(1600);
         const start = yield* Clock.monotonicTimeNanos;
         const result = yield* withProductionLogging(

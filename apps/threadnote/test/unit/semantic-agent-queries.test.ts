@@ -57,7 +57,8 @@ import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestCommandExecutorLayer, TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {LspFault} from '../../src/semantic/lsp_transport.js';
 import {makeReadDeadline} from '@threadnote/platform/read_deadline';
-import {serveSemanticEndpoint, requestSemanticEndpoint} from '../../src/semantic/coordinator.js';
+import {serveSemanticEndpoint, requestSemanticEndpoint, semanticCatalogKey} from '../../src/semantic/coordinator.js';
+import {runSemanticReadinessWith} from '../../src/semantic/readiness.js';
 import {SemanticSessionFault, type SemanticSession} from '../../src/semantic/provider.js';
 import type {ContextBriefFollowUpV1, SemanticContextKnowledgeV1} from '@threadnote/context/types';
 import {parseContextBriefJsonText} from '@threadnote/context/projector';
@@ -198,27 +199,30 @@ describe('coordinator retained semantic pages', () => {
         const items = EffectArray.map(values, (value, ordinal) => ({ordinal, value}));
         const expected = structuredClone(items);
         const binding = sha256HexSync('query');
-        const snapshot = store.retain(binding, outcome(items, current), yield* Clock.currentTimeMillis);
-        expect(snapshot).toBeDefined();
-        if (!snapshot) throw new Error('Valid bounded fixture was not retained');
+        let page = yield* store.retainAndFirstPage(
+          binding,
+          outcome(items, current),
+          {maxItems, maxBytes},
+          yield* Clock.currentTimeMillis,
+        );
         items.push({ordinal: -1, value: 'not in retained evidence'});
         const collected: Schema.Json[] = [];
-        let cursor: Continuation | undefined;
         let pages = 0;
         do {
-          const page = yield* store.page(binding, snapshot.id, {maxItems, maxBytes}, 10000, cursor);
           expect(page.status).toBe('ok');
           if (page.status !== 'ok') throw new Error('Page unexpectedly unavailable');
           expect(new TextEncoder().encode(JSON.stringify(page)).length).toBeLessThanOrEqual(maxBytes);
           expect(page.items.length).toBeLessThanOrEqual(maxItems);
           expect(page.evidence.observation).toEqual(current);
           collected.push(...page.items);
-          cursor = page.next ?? undefined;
+          const cursor = page.next;
           pages++;
           expect(pages).toBeLessThanOrEqual(expected.length + 1);
-        } while (cursor);
+          if (!cursor) break;
+          page = yield* store.page(binding, cursor.snapshot, {maxItems, maxBytes}, 10000, cursor);
+        } while (true);
         expect(collected).toEqual(expected);
-        expect(observations).toBe(pages);
+        expect(observations).toBe(pages - 1);
       }),
     {arbitrary: {runs: 32}},
   );
@@ -353,7 +357,15 @@ const profileFixtureAt = (subdirectory = '', protocol = true) =>
 const profileFixture = profileFixtureAt();
 
 type DiagnosticMode =
-  'ok' | 'missing-proof' | 'wrong-observation' | 'wrong-proof' | 'malformed-proof' | 'structural-proof' | 'timeout';
+  | 'ok'
+  | 'missing-proof'
+  | 'wrong-observation'
+  | 'wrong-proof'
+  | 'malformed-proof'
+  | 'structural-proof'
+  | 'timeout'
+  | 'closing-source-drift'
+  | 'closing-sdk-drift';
 const diagnosticsFixture = Effect.fn('test.agentDiagnostics')(function* (messages: readonly string[]) {
   const f = yield* profileFixture;
   yield* f.write(f.profile);
@@ -369,6 +381,7 @@ const diagnosticsFixture = Effect.fn('test.agentDiagnostics')(function* (message
   let mode: DiagnosticMode = 'ok';
   let current: Observation | undefined;
   let calls = 0;
+  let observations = 0;
   const api: SemanticSession = {
     upsert: () => Effect.die('The coordinator owns attachment'),
     query: () => Effect.die('Diagnostics must not issue navigation queries'),
@@ -422,8 +435,21 @@ const diagnosticsFixture = Effect.fn('test.agentDiagnostics')(function* (message
           project: undefined,
         };
       }),
-    observe: () => Effect.succeed(current),
-    use: (_observed, _milliseconds, action) => action(api),
+    observe: () =>
+      Effect.sync(() => {
+        observations++;
+        return current;
+      }),
+    use: (_observed, _milliseconds, action) =>
+      Effect.gen(function* () {
+        const result = yield* action(api);
+        if (mode === 'closing-source-drift') {
+          yield* f.fs.writeFileString(f.file, 'changed during producer close');
+          return yield* SemanticSessionFault.make({reason: 'stale'});
+        }
+        if (mode === 'closing-sdk-drift') return yield* LspFault.make({code: 'prerequisite'});
+        return result;
+      }),
   };
   const disk = yield* makeSemanticAgentDiskQueries(coordinator, f.worktree, runtime);
   const services = yield* Effect.context<Effect.Services<ReturnType<typeof disk.query>>>();
@@ -441,7 +467,7 @@ const diagnosticsFixture = Effect.fn('test.agentDiagnostics')(function* (message
                 reason: Schema.is(SemanticSessionFault)(error) ? error.reason : 'provider',
               }),
             ),
-            Effect.flatMap(value => Schema.decodeUnknownEffect(Schema.Json)(value)),
+            Effect.flatMap(value => Schema.decodeEffect(Schema.Json)(value)),
             Effect.mapError(() => LspFault.make({code: 'protocol'})),
           );
         },
@@ -454,6 +480,7 @@ const diagnosticsFixture = Effect.fn('test.agentDiagnostics')(function* (message
     items,
     input: {callerCwd: f.root, file: 'source.ts', language: 'go', operation: 'diagnostics', maxBytes: 8192},
     calls: () => calls,
+    observations: () => observations,
     status: disk.status,
     observe: disk.observe,
     capture: disk.capture,
@@ -503,6 +530,34 @@ describe('host-bound public document diagnostics', () => {
         expect(stale).toMatchObject({_tag: 'Failure', failure: {reason: 'stale'}});
         expect(f.calls()).toBe(1);
       }).pipe(provideTestLayer(queryIo)),
+  );
+  effectIt.effect('packs the closed first result without observing again and checks continuation drift freshly', () =>
+    Effect.gen(function* () {
+      const f = yield* diagnosticsFixture(['first', 'second']);
+      const first = yield* runSemanticAgentQueryWith(f.host, f.config, {...f.input, maxItems: 1});
+      if (first.status !== 'ok' || !first.next) throw new Error('Missing first page');
+      expect(f.calls()).toBe(1);
+      expect(f.observations()).toBe(0);
+      f.drift();
+      const next = yield* runSemanticAgentQueryWith(f.host, f.config, {...f.input, maxItems: 1, cursor: first.next});
+      expect(next.status).toBe('stale');
+      expect(f.observations()).toBe(1);
+      expect(f.calls()).toBe(1);
+      expect(f.status()).toEqual({snapshots: 0, retainedBytes: 0});
+    }).pipe(provideTestLayer(queryIo)),
+  );
+  effectIt.effect('never retains or packs a producer result rejected by its closing source or SDK fence', () =>
+    Effect.gen(function* () {
+      for (const mode of ['closing-source-drift', 'closing-sdk-drift'] as const) {
+        const f = yield* diagnosticsFixture(['candidate result']);
+        f.mode(mode);
+        const result = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+        expect(result.status).not.toBe('ok');
+        expect(f.calls()).toBe(1);
+        expect(f.observations()).toBe(0);
+        expect(f.status()).toEqual({snapshots: 0, retainedBytes: 0});
+      }
+    }).pipe(provideTestLayer(queryIo)),
   );
   effectIt.effect('projects only diagnostic summary fields without mutating provider payloads', () =>
     Effect.gen(function* () {
@@ -1750,11 +1805,17 @@ const ownedBufferFixture = Effect.gen(function* () {
   const current = new Map<string, Observation>();
   const texts = new Map<string, string>();
   let closes = 0;
+  let attachments = 0;
+  let startupControls = 0;
   let failAttachment = false;
   let queryBarrier: Effect.Effect<void> = Effect.void;
+  let attachBarrier: Effect.Effect<void> = Effect.void;
   const coordinator: Parameters<typeof serveSemanticEndpoint>[0] = {
-    attach: (seed, text) =>
+    catalogKey: semanticCatalogKey(f.profile.catalog),
+    attach: (seed, text, _language, _environment, control) =>
       Effect.sync(() => {
+        attachments++;
+        if (control) startupControls++;
         const observed = {
           ...seed,
           configuration: sha256HexSync('config'),
@@ -1777,6 +1838,13 @@ const ownedBufferFixture = Effect.gen(function* () {
             if (!failAttachment) return Effect.void;
             failAttachment = false;
             return Effect.fail(LspFault.make({code: 'protocol'}));
+          }),
+        ),
+        Effect.tap(() =>
+          Effect.suspend(() => {
+            const barrier = attachBarrier;
+            attachBarrier = Effect.void;
+            return barrier;
           }),
         ),
       ),
@@ -1809,6 +1877,7 @@ const ownedBufferFixture = Effect.gen(function* () {
     token,
     worktree: f.worktree,
     runtimeIdentity: runtime,
+    dataHome: f.home,
   });
   const host: SemanticAgentQueryHost = {
     runtimeIdentity: Effect.succeed(runtime),
@@ -1845,6 +1914,9 @@ const ownedBufferFixture = Effect.gen(function* () {
     ...f,
     open,
     lifecycle,
+    readiness: (input: unknown) => runSemanticReadinessWith(host, f.config, input),
+    attachments: () => attachments,
+    startupControls: () => startupControls,
     read,
     current,
     closes: () => closes,
@@ -1859,6 +1931,9 @@ const ownedBufferFixture = Effect.gen(function* () {
         observation: observed,
         milliseconds: 1000,
       }),
+    setAttachBarrier: (barrier: Effect.Effect<void>) => {
+      attachBarrier = barrier;
+    },
     setBarrier: (barrier: Effect.Effect<void>) => {
       queryBarrier = barrier;
     },
@@ -1927,6 +2002,162 @@ describe('public owned semantic buffers', () => {
         expect(f.texts.get(b.handle.id)).toContain('owner B');
         expect(f.closes()).toBe(1);
       }).pipe(provideTestLayer(queryIo), TestClock.withLive),
+  );
+
+  effectIt.effect(
+    'explicit owned-buffer readiness retains one private overlay and open claims it without another attachment',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* ownedBufferFixture;
+        const text = 'export const answer = "startup buffer";';
+        const started = yield* f.readiness({
+          action: 'start',
+          callerCwd: f.root,
+          file: 'source.ts',
+          language: 'go',
+          view: {kind: 'buffer', text},
+        });
+        expect(started.status).toBe('ok');
+        if (started.status !== 'ok' || !started.job) return yield* Effect.die('Expected private startup job');
+        const job = started.job;
+        let state = started.progress.state;
+        for (let poll = 0; poll < 20 && (state === 'accepted' || state === 'running'); poll++) {
+          yield* Effect.sleep(5);
+          const status = yield* f.readiness({action: 'status', callerCwd: f.root, job});
+          expect(status.status).toBe('ok');
+          if (status.status !== 'ok') return yield* Effect.die('Startup status refused');
+          expect(status).not.toHaveProperty('handle');
+          state = status.progress.state;
+        }
+        expect(state).toBe('ready');
+        expect(f.attachments()).toBe(1);
+        expect(f.startupControls()).toBe(1);
+        const id = [...f.current.keys()][0];
+        if (!id) return yield* Effect.die('Missing prepared overlay');
+        expect((yield* f.read({id, capability: job.capability}, 1)).status).toBe('stale');
+        const open = {
+          action: 'open',
+          callerCwd: f.root,
+          file: 'source.ts',
+          language: 'go',
+          text,
+          startup: job,
+          milliseconds: 10000,
+        };
+        expect((yield* f.lifecycle({...open, text: text + 'foreign'})).status).toBe('stale');
+        const opened = yield* f
+          .lifecycle(open)
+          .pipe(Effect.flatMap(Schema.decodeUnknownEffect(SemanticAgentViewSuccess)));
+        if (opened.action !== 'open') return yield* Effect.die('Expected real open');
+        expect(opened.handle.id).toBe(id);
+        expect(f.attachments()).toBe(1);
+        expect(yield* f.read(opened.handle, 1)).toMatchObject({status: 'ok', items: [text]});
+        expect(yield* f.lifecycle(open)).toEqual(opened);
+        expect(f.attachments()).toBe(1);
+        yield* f.readiness({action: 'cancel', callerCwd: f.root, job});
+        expect(f.closes()).toBe(0);
+        yield* f.lifecycle({action: 'close', callerCwd: f.root, handle: opened.handle});
+        expect(f.closes()).toBe(1);
+        expect((yield* f.lifecycle(open)).status).toBe('stale');
+        expect(f.attachments()).toBe(1);
+      }).pipe(provideTestLayer(queryIo), TestClock.withLive),
+  );
+
+  effectIt.effect(
+    'buffer startup cancellation acknowledges before an uninterruptible attachment finishes and retains original closure',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* ownedBufferFixture;
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        f.setAttachBarrier(
+          Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.uninterruptible(Deferred.await(release)))),
+        );
+        const start = yield* f.readiness({
+          action: 'start',
+          callerCwd: f.root,
+          file: 'source.ts',
+          language: 'go',
+          view: {kind: 'buffer', text: 'pending'},
+        });
+        if (start.status !== 'ok' || !start.job) return yield* Effect.die('Expected startup');
+        yield* Deferred.await(entered);
+        const cancelled = yield* f.readiness({action: 'cancel', callerCwd: f.root, job: start.job});
+        expect(cancelled).toMatchObject({status: 'ok', progress: {state: 'cancelling'}});
+        expect(f.current.size).toBe(1);
+        expect(
+          (yield* f.lifecycle({
+            action: 'open',
+            callerCwd: f.root,
+            file: 'source.ts',
+            language: 'go',
+            text: 'pending',
+            startup: start.job,
+          })).status,
+        ).toBe('stale');
+        yield* Deferred.succeed(release, undefined);
+        for (let poll = 0; poll < 20 && f.current.size !== 0; poll++) yield* Effect.sleep(5);
+        expect(f.current.size).toBe(0);
+        expect(f.attachments()).toBe(1);
+        expect(f.closes()).toBe(1);
+        expect(yield* f.readiness({action: 'status', callerCwd: f.root, job: start.job})).toMatchObject({
+          status: 'ok',
+          progress: {state: 'cancelled', cleanup: 'drained'},
+        });
+      }).pipe(provideTestLayer(queryIo), TestClock.withLive),
+  );
+  effectIt.effect('pending startup and published buffers share the original grant quota through atomic transfer', () =>
+    Effect.gen(function* () {
+      const f = yield* ownedBufferFixture;
+      const start = yield* f.readiness({
+        action: 'start',
+        callerCwd: f.root,
+        file: 'source.ts',
+        language: 'go',
+        view: {kind: 'buffer', text: 'reserved'},
+      });
+      if (start.status !== 'ok' || !start.job) return yield* Effect.die('Expected private startup');
+      const job = start.job;
+      let ready = false;
+      for (let poll = 0; poll < 20 && !ready; poll++) {
+        const status = yield* f.readiness({action: 'status', callerCwd: f.root, job});
+        ready = status.status === 'ok' && status.progress.state === 'ready';
+        if (!ready) yield* Effect.sleep(5);
+      }
+      expect(ready).toBe(true);
+      const publicViews = yield* Effect.forEach(EffectArray.range(1, 15), () => f.open('public'));
+      expect(f.attachments()).toBe(16);
+      expect(
+        (yield* f.readiness({
+          action: 'start',
+          callerCwd: f.root,
+          file: 'source.ts',
+          language: 'go',
+          view: {kind: 'buffer', text: 'over quota'},
+        })).status,
+      ).toBe('unavailable');
+      expect(f.attachments()).toBe(16);
+      const request = {
+        action: 'open',
+        callerCwd: f.root,
+        file: 'source.ts',
+        language: 'go',
+        text: 'reserved',
+        startup: job,
+      };
+      expect(
+        (yield* f.lifecycle({action: 'open', callerCwd: f.root, file: 'source.ts', language: 'go', text: 'reserved'}))
+          .status,
+      ).toBe('unavailable');
+      expect((yield* f.lifecycle(request)).status).toBe('ok');
+      expect(f.attachments()).toBe(16);
+      expect(
+        (yield* f.lifecycle({action: 'open', callerCwd: f.root, file: 'source.ts', language: 'go', text: ''})).status,
+      ).toBe('unavailable');
+      yield* f.lifecycle({action: 'close', callerCwd: f.root, handle: publicViews[0].handle});
+      expect((yield* f.open('released')).status).toBe('ok');
+      expect(f.attachments()).toBe(17);
+    }).pipe(provideTestLayer(queryIo), TestClock.withLive),
   );
   effectIt.effect('rejects oversized text before attachment and unknown handles after restart', () =>
     Effect.gen(function* () {

@@ -60,6 +60,7 @@ import {
   worktreeOverlayState,
 } from '@threadnote/graph/inventory';
 import {CodeGraphQueryService, observationFromCodeGraphStatus} from '@threadnote/graph/query';
+import {CODE_GRAPH_MATERIALIZATION_SPOOL_FORMAT_VERSION} from '@threadnote/graph/materialization/spool';
 import {codeGraphDoctorCheck, purgeAllCodeGraphIndexes, repairCodeGraphIndexes} from '@threadnote/graph/maintenance';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {compactCodeGraphStorage} from '@threadnote/graph/storage';
@@ -700,8 +701,8 @@ describe('native code graph lifecycle', () => {
     expect(EffectArray.some(resultB.nodes, node => node.name === 'ensureBranchAVectorIndex')).toBe(false);
     expect(resultA.snapshot.worktreeId).not.toBe(resultB.snapshot.worktreeId);
     expect(resultA.snapshot.id).not.toBe(resultB.snapshot.id);
-    expect(resultA.snapshot.id).toMatch(/^cgsn_[0-9a-f]{40}$/u);
-    expect(resultB.snapshot.id).toMatch(/^cgsn_[0-9a-f]{40}$/u);
+    expect(resultA.snapshot.id).toMatch(/^cgsn_[0-9a-f]{40}-lx2$/u);
+    expect(resultB.snapshot.id).toMatch(/^cgsn_[0-9a-f]{40}-lx2$/u);
     expect(resultA.snapshot).toMatchObject({dirty: true});
     expect(resultB.snapshot).toMatchObject({dirty: true});
 
@@ -5530,9 +5531,12 @@ describe('native code graph lifecycle', () => {
       const interrupted = requiredRow(
         interruptedDatabase
           .query<{readonly id: string}, SQLQueryBindings[]>(
-            "SELECT id FROM snapshots WHERE state = 'building' AND id GLOB 'cgsn_*-full-*' LIMIT 1",
+            `SELECT snapshot.id FROM snapshots AS snapshot
+             JOIN lexical_v2_views AS view ON view.snapshot_id = snapshot.id
+             WHERE snapshot.state = 'building' AND snapshot.worktree_id = ?
+               AND view.layout_mode = 'full'`,
           )
-          .get(),
+          .get(identity.worktreeId),
       );
       const receiptsBefore = interruptedDatabase
         .query<{readonly batch_index: number}, SQLQueryBindings[]>(
@@ -5848,7 +5852,11 @@ describe('native code graph lifecycle', () => {
       expect(
         EffectArray.filter(
           readdirSync(join(home, 'indexes', 'code-graph', 'repositories', baseline.identity.checkoutId)),
-          candidate => Effect2.pipe(candidate, EffectString.startsWith('materialization-spool-v2-')),
+          candidate =>
+            Effect2.pipe(
+              candidate,
+              EffectString.startsWith(`materialization-spool-v${CODE_GRAPH_MATERIALIZATION_SPOOL_FORMAT_VERSION}-`),
+            ),
         ),
       ).toEqual([]);
     }).pipe(provideTestLayer(ApplicationLayer)),
@@ -7529,7 +7537,7 @@ function codeGraphMaterializationSpoolPath(
     'code-graph',
     'repositories',
     indexed.identity.checkoutId,
-    `materialization-spool-v2-${snapshotId}.sqlite`,
+    `materialization-spool-v${CODE_GRAPH_MATERIALIZATION_SPOOL_FORMAT_VERSION}-${snapshotId}.sqlite`,
   );
 }
 

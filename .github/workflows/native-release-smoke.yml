@@ -118,6 +118,14 @@ jobs:
           THREADNOTE_BUILD_TARGET: ${{ inputs.target == 'linux-x64' && 'bun-linux-x64-baseline' || inputs.target == 'windows-x64' && 'bun-windows-x64-baseline' || format('bun-{0}', inputs.target) }}
       - name: Self-contained native smoke
         run: bun scripts/smoke-self-contained.ts
+      - name: Preserve bounded self-contained smoke failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: self-contained-smoke-evidence-${{ inputs.target }}
+          path: .context/self-contained-smoke/failure.json
+          include-hidden-files: true
+          if-no-files-found: ignore
       - name: Archive the native release
         run: bun run archive:release
         env:
@@ -297,8 +305,63 @@ jobs:
           mkdir -p .context/semantic-platform
           docker pull "$MUSL_IMAGE"
           docker image inspect "$MUSL_IMAGE" > .context/semantic-platform/image.json
-          docker run --rm --interactive --init --user root --tmpfs /tmp:rw,nosuid,nodev,mode=1777             -v "$PWD:/workspace" -w /workspace             -e THREADNOTE_BUILD_TARGET -e RELEASE_TARGET "$MUSL_IMAGE" sh -se <<'MUSL'
-              apk add --no-cache bash git ripgrep bubblewrap libstdc++ libgcc
+          # A /tmp mount cannot repair an OverlayFS process root: native ownership
+          # proof starts at literal /. Use the runner filesystem only after admission,
+          # avoiding a second filesystem image/loop device or a memory-sized tmpfs root.
+          rootfs="$(mktemp -d "$RUNNER_TEMP/threadnote-musl-root.XXXXXX")"
+          readonly rootfs
+          image_container=''
+          cleanup() {
+            status=$?
+            trap - EXIT
+            cleanup_failed=0
+            for target in proc dev workspace; do
+              if mountpoint -q "$rootfs/$target"; then
+                sudo umount "$rootfs/$target" || cleanup_failed=1
+              fi
+            done
+            # Never traverse a surviving workspace bind mount during deletion.
+            if test "$cleanup_failed" -eq 0; then
+              sudo rm -rf -- "$rootfs"
+            else
+              echo 'Musl root cleanup left a mounted job-owned root; refusing deletion.' >&2
+              status=1
+            fi
+            if test -n "$image_container"; then
+              docker rm "$image_container" || status=1
+            fi
+            exit "$status"
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          root_magic="$(stat --file-system --format=%t "$rootfs")"
+          case "$root_magic" in ef53|58465342|9123683e|1021994) ;; *) echo "Unsupported musl root filesystem: $root_magic" >&2; exit 1 ;; esac
+          root_options="$(findmnt --noheadings --output OPTIONS --target "$rootfs")"
+          case ",$root_options," in *,ro,*) echo 'Read-only musl root filesystem.' >&2; exit 1 ;; esac
+          printf '{"filesystemMagic":"0x%s","readOnly":false}\n' "$root_magic" > .context/semantic-platform/root-filesystem-host.json
+          image_id="$(docker image inspect --format '{{.Id}}' "$MUSL_IMAGE")"
+          image_container="$(docker create --user root "$image_id")"
+          docker inspect "$image_container" > .context/semantic-platform/root-container.json
+          docker export "$image_container" | sudo tar --extract --preserve-permissions --file=- --directory="$rootfs"
+          sudo chown root:root "$rootfs"
+          sudo chmod 0755 "$rootfs"
+          for target in etc dev proc workspace root; do
+            test ! -L "$rootfs/$target"
+            sudo mkdir -p "$rootfs/$target"
+          done
+          sudo chmod 0700 "$rootfs/root"
+          sudo rm -f -- "$rootfs/etc/resolv.conf"
+          sudo cp -L /etc/resolv.conf "$rootfs/etc/resolv.conf"
+          sudo mount --bind "$PWD" "$rootfs/workspace"
+          sudo mount --bind /dev "$rootfs/dev"
+          # Match the former container isolation: namespace exit kills its children,
+          # and its /proc mount disappears before outer bind-mount cleanup.
+          sudo unshare --mount --pid --fork --kill-child --mount-proc="$rootfs/proc" chroot "$rootfs" /usr/bin/env -i HOME=/root PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin THREADNOTE_BUILD_TARGET="$THREADNOTE_BUILD_TARGET" RELEASE_TARGET="$RELEASE_TARGET" sh -se <<'MUSL'
+              cd /workspace
+              test "$(id -u)" -eq 0
+              test "$HOME" = /root
+              apk add --no-cache bash git ripgrep bubblewrap libstdc++ libgcc acl nodejs npm cmake build-base binutils linux-headers
               bun --version > .context/semantic-platform/bun-version.txt
               uname -m > .context/semantic-platform/architecture.txt
               apk info -v > .context/semantic-platform/system-packages.txt
@@ -313,13 +376,54 @@ jobs:
               private_tmp="$(mktemp -d /tmp/threadnote-ci-XXXXXX)"
               export TMPDIR="$private_tmp"
               trap 'rm -rf -- "$private_tmp"' EXIT
-              bun --eval 'import {statfsSync,statSync} from "node:fs"; console.log(JSON.stringify({filesystemType:statfsSync(Bun.env.TMPDIR).type,mode:statSync(Bun.env.TMPDIR).mode&0o7777}));' > .context/semantic-platform/private-temp-filesystem.json
+              bun --eval 'import {statfsSync,statSync} from "node:fs"; const allowed=new Set([0xef53,0x58465342,0x9123683e,0x01021994]); const paths=["/","/workspace",Bun.env.HOME,Bun.env.TMPDIR]; const observations=paths.map(path=>({role:path==="/"?"root":path==="/workspace"?"workspace":path===Bun.env.HOME?"home":"private-temp",filesystemType:statfsSync(path).type,ownerUid:statSync(path).uid,mode:statSync(path).mode&0o7777})); console.log(JSON.stringify(observations)); if(observations.some(item=>!allowed.has(item.filesystemType)))throw new Error("Unsupported musl qualification filesystem");' > .context/semantic-platform/private-temp-filesystem.json
+              # Prove real default-ACL xattrs before the unchanged native negative test.
+              acl_probe="$(mktemp -d "$private_tmp/acl-preflight.XXXXXX")"
+              chmod 0700 "$acl_probe"
+              setfacl -m d:u::rwx,d:g::---,d:o::--- "$acl_probe"
+              test "$(stat -c %a "$acl_probe")" = 700
+              getfacl -cp "$acl_probe" > .context/semantic-platform/default-acl-preflight.txt
+              grep -Fx 'default:user::rwx' .context/semantic-platform/default-acl-preflight.txt
+              grep -Fx 'default:group::---' .context/semantic-platform/default-acl-preflight.txt
+              grep -Fx 'default:other::---' .context/semantic-platform/default-acl-preflight.txt
+              setfacl -k "$acl_probe"
+              getfacl -cp "$acl_probe" > .context/semantic-platform/default-acl-cleared.txt
+              test "$(grep -c '^default:' .context/semantic-platform/default-acl-cleared.txt)" -eq 0
+              rmdir "$acl_probe"
+              # Observe the existing bounded ACL fixture before the strict native proof can abort.
+              acl_diagnostic_status=0
+              bun --bun vitest run packages/platform/test/writer-system/linux-acl.test.ts -t 'refuses an actual Linux default ACL while the private directory mode remains0700' --testTimeout=30000 --reporter=default --reporter=json --outputFile=.context/semantic-platform/private-acl-diagnostic.json > .context/semantic-platform/private-acl-diagnostic.log 2>&1 || acl_diagnostic_status=$?
+              cat .context/semantic-platform/private-acl-diagnostic.log
+              printf '{"exitCode":%s}\n' "$acl_diagnostic_status" > .context/semantic-platform/private-acl-diagnostic-status.json
               bun --eval 'import {runtimeOpenPrivateWriterDirectory,runtimeClosePrivateWriterDirectory} from "@threadnote/platform/system"; const handle=runtimeOpenPrivateWriterDirectory(Bun.env.TMPDIR); runtimeClosePrivateWriterDirectory(handle); console.log("Native private musl temporary storage proof passed; production qualification remains false");'
+              test "$acl_diagnostic_status" -eq 0
               bun --bun vitest run packages/platform/test/system-stable-read.test.ts packages/platform/test/writer-system/linux-acl.test.ts packages/platform/test/writer-system/provider-process.test.ts apps/threadnote/test/unit/semantic-runtime.test.ts apps/threadnote/test/unit/semantic-writer-process.test.ts apps/threadnote/test/unit/semantic-operations.test.ts apps/threadnote/test/unit/semantic-mcp-cli.test.ts apps/threadnote/test/unit/semantic-python.test.ts apps/threadnote/test/unit/semantic-go-rust.test.ts apps/threadnote/test/unit/semantic-java-preparation.test.ts --reporter=default --reporter=json --outputFile=.context/semantic-platform/components.json
+              # Build only the exact bundled source. Runtime remains build:never/skipDownload:true.
+              export CI=true
+              node --version > .context/semantic-platform/native-node-version.txt
+              npm --version > .context/semantic-platform/native-npm-version.txt
+              cmake --version > .context/semantic-platform/native-cmake-version.txt
+              test "$(node -p "require('./node_modules/node-llama-cpp/package.json').version")" = 3.22.2
+              printf '%s\n' '1717cc2867373a8962212f4beeff8431565393fe087b0d8cf96769cc11d4036e  node_modules/node-llama-cpp/llama/gitRelease.bundle' 'e5f4f94cf59e286992e14a967dd9b608b66096170fdf6f0ac4920efa61171b92  node_modules/node-llama-cpp/llama/patches/PR-22566.diff' | sha256sum -c -
+              node -e "const fs=require('node:fs'); const root='node_modules/node-llama-cpp/llama/'; const source=JSON.parse(fs.readFileSync(root+'llama.cpp.info.json','utf8')); const binary=JSON.parse(fs.readFileSync(root+'binariesGithubRelease.json','utf8')); if(source.tag!=='v0.7.0'||source.llamaCppGithubRepo!=='ggml-org/llama.cpp'||binary.release!=='v0.7.0')throw Error('Bundled source metadata differs from its pin');"
+              test ! -e node_modules/node-llama-cpp/llama/llama.cpp
+              GIT_ALLOW_PROTOCOL=file node node_modules/node-llama-cpp/dist/cli/cli.js source download --skipBuild --gpu false --noUsageExample > .context/semantic-platform/native-source-download.log 2>&1
+              test "$(git -C node_modules/node-llama-cpp/llama/llama.cpp rev-parse HEAD)" = 1729d2ec2c4846df7754f4ce8f90f75f8a30ca3b
+              node node_modules/node-llama-cpp/dist/cli/cli.js source build --gpu false --ciMode --noUsageExample > .context/semantic-platform/native-source-build.log 2>&1
               bun run build
               cp dist/release.json .context/semantic-platform/release.json
               sha256sum dist/threadnote > .context/semantic-platform/binary.sha256
               bun scripts/smoke-self-contained.ts
+              THREADNOTE_RELEASE_TARGET="$RELEASE_TARGET" bun run archive:release
+              # Exercise the archived payload, not the live build directory or upstream source tree.
+              rm -rf dist
+              mkdir dist
+              tar -xzf "artifacts/threadnote-$RELEASE_TARGET.tar.gz" -C dist
+              mv node_modules/node-llama-cpp "$private_tmp/source-package-held"
+              trap 'if test -e "$private_tmp/source-package-held"; then mv "$private_tmp/source-package-held" node_modules/node-llama-cpp; fi; rm -rf -- "$private_tmp"' EXIT
+              test ! -e node_modules/node-llama-cpp
+              bun scripts/smoke-self-contained.ts
+              bun --bun vitest run --config vitest.e2e.config.ts apps/threadnote/test/e2e/local-bins.e2e.ts -t 'recalls saved memory immediately and explicitly rebuilds vectors through built launchers' --reporter=default --reporter=json --outputFile=.context/semantic-platform/installed-musl-gguf-embedding.json
           MUSL
       - name: Preserve native musl evidence
         if: always()

@@ -43,6 +43,7 @@ import type {ContextBriefSourceEvidenceRequest} from '@threadnote/context/graph/
 import {
   unavailableContextBriefCodeLinkedMemoryEvidence,
   unavailableContextBriefMemoryEvidence,
+  mergeContextBriefMemoryEvidence,
 } from '@threadnote/context/memory-evidence';
 import {retrieveContextBriefCodeLinkedMemoryEvidence, retrieveContextBriefMemoryEvidence} from './memory_evidence.js';
 import {planContextBrief} from '@threadnote/context/planner';
@@ -69,6 +70,11 @@ export interface ContextBriefRuntimeCompilerSources<
   readonly citationValidation: NonNullable<
     ContextBriefCompilerDependencies<never, never, CitationR>['citationValidation']
   >;
+  readonly memoryEvidenceAfterGraph?: ContextBriefCompilerDependencies<
+    never,
+    MemoryR,
+    CitationR
+  >['memoryEvidenceAfterGraph'];
   readonly codeLinkedMemoryAfterGraph?: boolean;
   readonly graphEvidence: ContextBriefCompilerDependencies<GraphR>['graphEvidence'];
   readonly codeLinkedMemoryEvidence?: ContextBriefCompilerDependencies<never, MemoryR>['codeLinkedMemoryEvidence'];
@@ -121,6 +127,52 @@ export function instrumentContextBriefCompilerDependencies<
 ): ContextBriefCompilerDependencies<GraphR, MemoryR, CitationR, ProjectR> {
   return {
     codeLinkedMemoryAfterGraph: sources.codeLinkedMemoryAfterGraph,
+    ...(sources.memoryEvidenceAfterGraph === undefined
+      ? {}
+      : {
+          memoryEvidenceAfterGraph: (plan, lexicalMemory, fence, deadline) =>
+            reporter
+              .codeLinkedMemory(
+                withProductionPhaseTiming(
+                  'context.brief.code-linked-memory',
+                  reporter.citationValidation(
+                    sources.memoryEvidenceAfterGraph!(plan, lexicalMemory, fence, deadline),
+                    memory =>
+                      summarizeContextBriefCitationTelemetry(memory.candidates, memory.citationValidations ?? []),
+                  ),
+                  contextBriefCodeLinkedMemoryPhaseOutcome,
+                ),
+                contextBriefCodeLinkedMemoryPhaseOutcome,
+              )
+              .pipe(
+                Effect.catchIf(
+                  error => !Schema.is(ReadDeadlineExceeded)(error) && !isReadCleanupUnconfirmed(error),
+                  () =>
+                    Clock.currentTimeMillis.pipe(
+                      Effect.map(now => {
+                        const memory = mergeContextBriefMemoryEvidence(
+                          lexicalMemory,
+                          plan.codeAnchors.codeRefs.length === 0
+                            ? undefined
+                            : unavailableContextBriefCodeLinkedMemoryEvidence(
+                                plan.codeAnchors.codeRefs.length,
+                                'code-anchor-resolution-unavailable',
+                              ),
+                          plan.memory.candidateLimit,
+                          plan.codeAnchors.candidateLimit,
+                        );
+                        return {
+                          ...memory,
+                          citationValidations: failedContextBriefCitationValidations(
+                            memory.candidates,
+                            new Date(now).toISOString(),
+                          ),
+                        };
+                      }),
+                    ),
+                ),
+              ),
+        }),
     citationValidation: (scope, candidates, fence, deadline) =>
       reporter
         .citationValidation(

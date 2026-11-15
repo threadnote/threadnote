@@ -1,3 +1,14 @@
+import {candidateFailure, candidateFailureEvidence} from '../evaluation/semantic-qualification/candidate.js';
+import * as OverlayArray from 'effect/Array';
+import * as OverlayString from 'effect/String';
+import * as OverlayRecord from 'effect/Record';
+import {
+  deterministicZip,
+  rewriteOwnedJar,
+  zipModes,
+  validArchivePath,
+} from '../../../../tools/semantic/build-gradle-owned-import.js';
+import {unzipSync} from 'fflate';
 import {cryptoLayer} from '@threadnote/platform/crypto';
 /* oxlint-disable effecttsgo/strict-effect-provide -- Focused filesystem and deterministic clock tests, without application services. */
 import {it as effectIt} from '@effect/vitest';
@@ -47,6 +58,8 @@ import {javaFileUri} from '../../src/semantic/providers/java_snapshot.js';
 import {
   JavaPreparedModel,
   JavaPreparedObservation,
+  JavaPreparedImportRefusal,
+  readJavaPreparedObservation,
   copyJavaPreparationInputs,
   consumeJavaPreparationConnection,
   javaPreparedModelCommand,
@@ -58,6 +71,194 @@ import {
   verifyJavaSourceEncoding,
   loadJavaPreparedModel,
 } from '../../src/semantic/providers/java_preparation.js';
+
+describe('Gradle bootstrap project JVM', () => {
+  // The producer emits only Properties' shared JSON escape subset (\\\\ and \\uXXXX).
+  // Quotes are ordinary Properties characters, so quote them for this independent decoder.
+  const decodedProperty = (text: string, key: string) => {
+    const prefix = key + '=';
+    const line = Option.getOrThrow(
+      EffectArray.findFirst(EffectString.split(text, '\n'), value => EffectString.startsWith(prefix)(value)),
+    );
+    const encoded = EffectString.slice(prefix.length)(line);
+    return Schema.decodeUnknownSync(Schema.String)(
+      JSON.parse('"' + EffectString.replaceAll('"', '\\"')(encoded) + '"'),
+    );
+  };
+  it('pins the raw BuildEnvironment bootstrap to project 21 independently of the JDT launcher 25', () => {
+    const projectHome = '/selected/project-jdk-21/Contents/Home';
+    const launcherHome = '/selected/jdt-jdk-25/Contents/Home';
+    const properties = javaRuntime.javaGradleBootstrapProperties(projectHome, '/private/tmp/gradle');
+    expect(decodedProperty(properties, 'org.gradle.java.home')).toBe(projectHome);
+    expect(decodedProperty(properties, 'org.gradle.java.home')).not.toBe(launcherHome);
+    expect(decodedProperty(properties, 'org.gradle.java.installations.paths')).toBe(projectHome);
+    expect(decodedProperty(properties, 'org.gradle.java.installations.auto-detect')).toBe('false');
+    expect(decodedProperty(properties, 'org.gradle.java.installations.auto-download')).toBe('false');
+  });
+  it('round trips selected absolute homes through bootstrap and toolchain Properties independently', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom('/', 'C:\\', '\\\\server\\share\\'),
+        fc.array(fc.constantFrom('jdk21', ' space ', 'é', '𐐀', '中', '\\', '"', '\t', '\n', '\r'), {
+          minLength: 1,
+          maxLength: 12,
+        }),
+        (root, parts) => {
+          const selected = root + EffectArray.join(parts, '');
+          const properties = javaRuntime.javaGradleBootstrapProperties(selected, '/private/tmp/gradle');
+          expect(decodedProperty(properties, 'org.gradle.java.home')).toBe(selected);
+          expect(decodedProperty(properties, 'org.gradle.java.installations.paths')).toBe(selected);
+        },
+      ),
+      {numRuns: 40},
+    );
+  });
+});
+
+describe('Java prepared refusal wire contract', () => {
+  it('conserves only closed correlated cache refusal coordinates without admitting a model', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom('project-info', 'initial', 'initial-stability', 'confirmed', 'confirmed-stability'),
+        fc.constantFrom(
+          'info-absent',
+          'raw-absent',
+          'raw-invalid',
+          'raw-writing',
+          'raw-status-absent',
+          'raw-status-failed',
+          'unresolved-status-absent',
+          'unresolved-status-failed',
+          'resolved-absent',
+          'options-absent',
+          'output-absent',
+        ),
+        fc.constantFrom('initial', 'confirmation'),
+        (cacheStage, cacheCondition, rpcPhase) => {
+          const reply = {
+            protocolVersion: 1,
+            requestToken: 'cache',
+            status: 'unsupported',
+            reason: 'model-not-cached',
+            evidence: {cacheStage, cacheCondition},
+          };
+          const before = structuredClone(reply);
+          const expected = {requestToken: 'cache', build: 'gradle', rpcPhase} as const;
+          expect(() => readJavaPreparedObservation(reply, expected)).toThrow(JavaPreparedImportRefusal);
+          try {
+            readJavaPreparedObservation(reply, expected);
+          } catch (error) {
+            expect(error).toMatchObject({reason: 'model-not-cached', evidence: reply.evidence, rpcPhase});
+          }
+          for (const malformed of [
+            {...reply, evidence: {...reply.evidence, cacheStage: '/private/untrusted'}},
+            {...reply, evidence: {...reply.evidence, cacheCondition: 'unknown'}},
+            {...reply, evidence: {...reply.evidence, path: '/private/untrusted'}},
+            {...reply, evidence: {cacheStage}},
+            {...reply, requestToken: 'foreign'},
+            {...reply, rpcPhase: 'confirmation'},
+          ]) {
+            expect(() => readJavaPreparedObservation(malformed, expected)).toThrow();
+            expect(() => readJavaPreparedObservation(malformed, expected)).not.toThrow(JavaPreparedImportRefusal);
+          }
+          expect(reply).toEqual(before);
+        },
+      ),
+      {numRuns: 40},
+    );
+  });
+  it('retains legacy empty cache refusals and omits host phase on other refusals', () => {
+    const base = {protocolVersion: 1, requestToken: 'cache', status: 'unsupported', evidence: {}};
+    const expected = {requestToken: 'cache', build: 'gradle', rpcPhase: 'confirmation'} as const;
+    expect(() => readJavaPreparedObservation({...base, reason: 'model-not-cached'}, expected)).toThrow(
+      'Java preparation refused: model-not-cached [confirmation] {}',
+    );
+    expect(() => readJavaPreparedObservation({...base, reason: 'unmanaged-project'}, expected)).toThrow(
+      'Java preparation refused: unmanaged-project {}',
+    );
+  });
+  it('keeps the producer generic observation refusal strict and sanitized', () => {
+    const reply = {protocolVersion: 1, requestToken: 'request', status: 'unsupported', reason: 'observation-failed'};
+    expect(() => readJavaPreparedObservation(reply, {requestToken: 'request', build: 'gradle'})).toThrow(
+      'Java preparation refused: observation-failed',
+    );
+    expect(() =>
+      readJavaPreparedObservation({...reply, evidence: {}}, {requestToken: 'request', build: 'gradle'}),
+    ).not.toThrow(JavaPreparedImportRefusal);
+  });
+  it('conserves finite synchronization status digests without accepting raw or uncorrelated cause data', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom('gradle-synchronization-failed', 'gradle-linkage-failed', 'gradle-control-refused'),
+        fc.uint8Array({minLength: 0, maxLength: 256}),
+        (reason, bytes) => {
+          const reply = {
+            protocolVersion: 1,
+            requestToken: 'sync-request',
+            status: 'unsupported',
+            reason,
+            evidence: {statusSha256: sha256HexSync(bytes)},
+          };
+          const before = structuredClone(reply);
+          expect(() => readJavaPreparedObservation(reply, {requestToken: 'sync-request', build: 'gradle'})).toThrow(
+            JavaPreparedImportRefusal,
+          );
+          for (const changed of [
+            {...reply, requestToken: 'foreign'},
+            {...reply, evidence: {...reply.evidence, message: '/untrusted/import/path'}},
+            {...reply, evidence: {statusSha256: 'invalid'}},
+          ]) {
+            expect(() =>
+              readJavaPreparedObservation(changed, {requestToken: 'sync-request', build: 'gradle'}),
+            ).toThrow();
+            expect(() =>
+              readJavaPreparedObservation(changed, {requestToken: 'sync-request', build: 'gradle'}),
+            ).not.toThrow(JavaPreparedImportRefusal);
+          }
+          expect(reply).toEqual(before);
+        },
+      ),
+      {numRuns: 32},
+    );
+  });
+  it('preserves digest-only refusals and rejects uncorrelated, malformed or extra proof fields without mutation', () => {
+    fc.assert(
+      fc.property(
+        fc.uuid(),
+        fc.uint8Array({minLength: 32, maxLength: 32}),
+        fc.boolean(),
+        (requestToken, bytes, container) => {
+          const digest = sha256HexSync(bytes);
+          const reason = container ? 'unsupported-container' : 'unsupported-attribute';
+          const evidence = container ? {idSha256: digest} : {nameSha256: digest};
+          const reply = {protocolVersion: 1, requestToken, status: 'unsupported', reason, evidence};
+          const captured = structuredClone(reply);
+          try {
+            readJavaPreparedObservation(reply, {requestToken, build: 'gradle'});
+            throw new Error('Refusal was admitted');
+          } catch (error) {
+            expect(error).toBeInstanceOf(JavaPreparedImportRefusal);
+            expect(error).toMatchObject({reason, evidence});
+          }
+          for (const mutated of [
+            {...reply, requestToken: requestToken + '-old'},
+            {...reply, protocolVersion: 2},
+            {...reply, evidence: {...evidence, path: '/untrusted/imported/path'}},
+            {...reply, evidence: container ? {idSha256: 'invalid'} : {nameSha256: 'invalid'}},
+            {...reply, model: {}},
+          ]) {
+            expect(() => readJavaPreparedObservation(mutated, {requestToken, build: 'gradle'})).toThrow();
+            expect(() => readJavaPreparedObservation(mutated, {requestToken, build: 'gradle'})).not.toThrow(
+              JavaPreparedImportRefusal,
+            );
+          }
+          expect(reply).toEqual(captured);
+        },
+      ),
+      {numRuns: 32},
+    );
+  });
+});
 
 const candidate = (): JavaRuntimeCandidate => ({
   serverDirectory: '/host/jdtls',
@@ -255,6 +456,11 @@ describe('Java preparation original-owner collection', () => {
 const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
   control: {
     readonly deferImport?: boolean;
+    readonly gradleSetup?: boolean;
+    readonly firstModelMutation?: 'metadata' | 'source' | 'unexpected';
+    readonly secondModelMutation?: 'metadata' | 'source';
+    readonly refuseModel?: boolean;
+    readonly cacheRefusal?: 'initial' | 'confirmation';
     readonly failure?: 'initialize' | 'status' | 'token' | 'missing-ready' | 'late-status';
     readonly changeSecondModel?: boolean;
     readonly afterSecondModel?: Effect.Effect<void>;
@@ -268,9 +474,11 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
     readonly noFilters?: boolean;
     readonly minimalBuildInputs?: boolean;
     readonly separateWorkspaceParent?: boolean;
+    readonly workspaceScope?: Scope.Scope;
     readonly observerGate?: {readonly entered: Deferred.Deferred<void>; readonly release: Deferred.Deferred<void>};
   } = {},
 ) {
+  const build = control.gradleSetup ? ('gradle' as const) : ('maven' as const);
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const parent = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn-java-seal-'}));
@@ -302,8 +510,10 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
   }
   const workspaceParent = control.separateWorkspaceParent ? path.join(parent, 'setup') : parent;
   if (control.separateWorkspaceParent) yield* fs.makeDirectory(workspaceParent, {mode: 0o700});
-  const workspace = yield* makeJavaWorkspace(workspaceParent);
-  const inputs = yield* copyJavaPreparationInputs({project, worktree: project, workspace, build: 'maven'});
+  const workspace = yield* makeJavaWorkspace(workspaceParent).pipe(
+    Effect.provideService(Scope.Scope, control.workspaceScope ?? (yield* Effect.scope)),
+  );
+  const inputs = yield* copyJavaPreparationInputs({project, worktree: project, workspace, build});
   const copiedProject = inputs.copiedProject;
   const runtimeDirectory = path.join(workspace.directory, 'jdt-fixture');
   yield* fs.makeDirectory(runtimeDirectory, {mode: 0o700});
@@ -363,7 +573,7 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
     ],
     model: {
       projectUri: yield* uri(copiedProject),
-      build: 'maven',
+      build,
       projectCharset: 'UTF-8',
       sourceEncoding: {
         policy: 'utf8-no-bom-v1',
@@ -436,6 +646,7 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
   const methods: string[] = [];
   let stopped = false;
   let observations = 0;
+  let initialization: unknown;
   const wire: LspWire = {
     pid: 4242,
     messages: Stream.fromQueue(messages),
@@ -451,6 +662,7 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
       Effect.gen(function* () {
         if (typeof message.method === 'string') methods.push(message.method);
         if (message.method === 'initialize') {
+          initialization = structuredClone(message.params);
           if (control.failure === 'initialize') {
             yield* Queue.offer(messages, {
               jsonrpc: '2.0',
@@ -486,20 +698,61 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
             yield* Deferred.succeed(control.observerGate.entered, undefined);
             yield* Deferred.await(control.observerGate.release);
           }
+          if (observations === 1 && control.firstModelMutation) {
+            if (control.firstModelMutation === 'metadata') {
+              yield* fs.makeDirectory(path.join(copiedProject, '.gradle'), {mode: 0o700});
+              yield* fs.writeFileString(
+                path.join(copiedProject, '.gradle/imported-model'),
+                'real allowed output boundary',
+              );
+            } else
+              yield* fs.writeFileString(
+                path.join(
+                  copiedProject,
+                  control.firstModelMutation === 'source' ? 'src/main/java/Main.java' : 'unexpected-imported-input',
+                ),
+                'changed while importing',
+              );
+          }
+          if (observations === 2 && control.secondModelMutation) {
+            const file = control.secondModelMutation === 'source' ? 'src/main/java/Main.java' : '.gradle/late-output';
+            if (control.secondModelMutation === 'metadata')
+              yield* fs.makeDirectory(path.join(copiedProject, '.gradle'), {mode: 0o700});
+            yield* fs.writeFileString(path.join(copiedProject, file), 'late mutation');
+          }
           if (control.failure === 'late-status')
             yield* Queue.offer(messages, {jsonrpc: '2.0', method: 'language/status', params: {type: 'Error'}});
           if (observations === 2 && control.afterSecondModel) yield* control.afterSecondModel;
           yield* Queue.offer(messages, {
             jsonrpc: '2.0',
             id: message.id,
-            result: {
-              ...observation,
-              model: {
-                ...observation.model,
-                rawTimestamp: control.changeSecondModel && observations > 1 ? 2 : observation.model.rawTimestamp,
-              },
-              requestToken: control.failure === 'token' ? 'wrong-token' : request.arguments[0].requestToken,
-            },
+            result:
+              (control.cacheRefusal === 'initial' && observations === 1) ||
+              (control.cacheRefusal === 'confirmation' && observations === 2)
+                ? {
+                    protocolVersion: 1,
+                    requestToken: request.arguments[0].requestToken,
+                    status: 'unsupported',
+                    reason: 'model-not-cached',
+                    evidence: {cacheStage: 'initial', cacheCondition: 'options-absent'},
+                  }
+                : control.refuseModel
+                  ? {
+                      protocolVersion: 1,
+                      requestToken: request.arguments[0].requestToken,
+                      status: 'unsupported',
+                      reason: 'unsupported-container',
+                      evidence: {idSha256: EffectString.repeat(64)('a')},
+                    }
+                  : {
+                      ...observation,
+                      model: {
+                        ...observation.model,
+                        rawTimestamp:
+                          control.changeSecondModel && observations > 1 ? 2 : observation.model.rawTimestamp,
+                      },
+                      requestToken: control.failure === 'token' ? 'wrong-token' : request.arguments[0].requestToken,
+                    },
           });
         } else if (message.method === 'shutdown') {
           yield* Queue.offer(messages, {jsonrpc: '2.0', id: message.id, result: null});
@@ -532,9 +785,29 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
           Effect.andThen(makeLspClient(wire, onNotification, settings)),
         ),
       );
-    return observeJavaPreparedImport({runtime}).pipe(
+    const originalSdkDigest = fingerprints.semanticSdkDigest;
+    const selectedGradleSdk = path.join(parent, 'gradle-sdk');
+    const sdkGuard = control.gradleSetup
+      ? vi
+          .spyOn(fingerprints, 'semanticSdkDigest')
+          .mockImplementation(directory =>
+            directory === selectedGradleSdk
+              ? Effect.succeed(javaPreparation.javaGradleOwnedImport.sdkDigest)
+              : originalSdkDigest(directory),
+          )
+      : undefined;
+    return (control.gradleSetup ? fs.makeDirectory(selectedGradleSdk, {mode: 0o700}) : Effect.void).pipe(
+      Effect.andThen(
+        observeJavaPreparedImport({
+          runtime,
+          ...(control.gradleSetup
+            ? {gradle: {sdkDirectory: selectedGradleSdk, sdkDigest: javaPreparation.javaGradleOwnedImport.sdkDigest}}
+            : {}),
+        }),
+      ),
       Effect.ensuring(
         Effect.sync(() => {
+          sdkGuard?.mockRestore();
           runtimeGuard.mockRestore();
           connect.mockRestore();
         }),
@@ -544,7 +817,7 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
   const imported = control.deferImport ? observation : yield* observe;
   const options = {
     requestToken: imported.requestToken,
-    build: 'maven' as const,
+    build,
     inputs,
     runtimeDirectory,
     artifactDirectory,
@@ -553,6 +826,7 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
     verify: Effect.void,
   };
   return {
+    initialization: () => initialization,
     fs,
     path,
     project,
@@ -584,13 +858,16 @@ const preparationCompositionFixture = Effect.fn('test.javaPreparationComposition
   control: {
     readonly beforeCapture?: Effect.Effect<void, LspFault>;
     readonly afterCapture?: Effect.Effect<void, LspFault>;
+    readonly disposeWorkspace?: boolean;
   } = {},
 ) {
+  const workspaceScope = control.disposeWorkspace ? yield* Scope.make() : undefined;
   const fixture = yield* modelFixture({
     deferImport: true,
     passiveProject: true,
     noFilters: true,
     separateWorkspaceParent: true,
+    workspaceScope,
   });
   const events: string[] = [];
   let drained = false;
@@ -624,7 +901,12 @@ const preparationCompositionFixture = Effect.fn('test.javaPreparationComposition
     drainBuildProcesses: () => mark('drain-build').pipe(Effect.as({drained: true})),
   };
   // Reuse preallocated genuine copied inputs; mock native launch and composition allocation, retaining real import/seal/read.
-  const workspace = vi.spyOn(javaRuntime, 'makeJavaWorkspace').mockReturnValue(Effect.succeed(fixture.workspace));
+  const workspace = vi.spyOn(javaRuntime, 'makeJavaWorkspace').mockReturnValue(
+    Effect.gen(function* () {
+      if (workspaceScope) yield* Effect.addFinalizer(() => Scope.close(workspaceScope, Exit.void));
+      return fixture.workspace;
+    }),
+  );
   const copied = vi
     .spyOn(javaPreparation, 'copyJavaPreparationInputs')
     .mockReturnValue(Effect.succeed(fixture.options.inputs));
@@ -667,6 +949,8 @@ const preparationCompositionFixture = Effect.fn('test.javaPreparationComposition
                 launch.drainBuildProcesses({
                   runtimeDirectory: fixture.runtimeDirectory,
                   gradleUserHome: fixture.path.join(fixture.runtimeDirectory, 'gradle'),
+                  retainInput: fixture.workspace.retainInput,
+                  verifyDisposed: fixture.workspace.verifyDisposed,
                 }),
               ),
             ).pipe(Effect.andThen(Effect.sync(() => void (drained = true))), Effect.orDie),
@@ -705,6 +989,81 @@ const preparationCompositionFixture = Effect.fn('test.javaPreparationComposition
 });
 
 describe('Java preparation composition', () => {
+  effectIt.effect('returns after actual disposal without re-reading its former provisioned inputs', () =>
+    Effect.gen(function* () {
+      // Only the provider/model boundary is synthetic; workspace files and scoped removal are real.
+      const f = yield* preparationCompositionFixture({disposeWorkspace: true});
+      const descriptor = yield* makeJavaPreparation(f.options, {
+        ...f.host,
+        provisionOfflineCache: context =>
+          Effect.gen(function* () {
+            const file = f.path.join(context.runtimeDirectory, 'provisioned-cache');
+            yield* f.fs.writeFileString(file, 'approved cache', {mode: 0o600});
+            yield* context.retainInput(file, sha256HexSync('approved cache'));
+            expect(Exit.isFailure(yield* Effect.exit(context.verifyDisposed))).toBe(true);
+          }),
+      });
+      expect(yield* f.fs.exists(f.workspace.directory)).toBe(false);
+      expect(descriptor.metadataDigest).toMatch(/^[a-f0-9]{64}$/u);
+      expect(f.drained()).toBe(true);
+      yield* f.workspace.verifyDisposed;
+      expect(Exit.isFailure(yield* Effect.exit(f.workspace.verify))).toBe(true);
+      expect(
+        Exit.isFailure(
+          yield* Effect.exit(
+            f.workspace.retainInput(f.path.join(f.workspace.directory, 'late-input'), sha256HexSync('late')),
+          ),
+        ),
+      ).toBe(true);
+      yield* f.workspace.verifyDisposed;
+    }).pipe(Effect.provide(preparationCompositionLayer)),
+  );
+  effectIt.effect('joins cancellation while the final retained-input guard is waiting after disposal', () =>
+    Effect.gen(function* () {
+      const f = yield* preparationCompositionFixture({disposeWorkspace: true});
+      const checking = yield* Deferred.make<void>();
+      const worker = yield* Effect.forkChild(
+        makeJavaPreparation(f.options, {
+          ...f.host,
+          verifySetup: Effect.suspend(() =>
+            f.drained() ? Deferred.succeed(checking, undefined).pipe(Effect.andThen(Effect.never)) : f.host.verifySetup,
+          ),
+        }),
+      );
+      yield* Deferred.await(checking);
+      yield* Fiber.interrupt(worker);
+      const exit = yield* Fiber.await(worker);
+      expect(Exit.isFailure(exit)).toBe(true);
+      expect(yield* f.fs.exists(f.workspace.directory)).toBe(false);
+      yield* f.workspace.verifyDisposed;
+      expect(f.load).not.toHaveBeenCalled();
+    }).pipe(Effect.provide(preparationCompositionLayer)),
+  );
+  effectIt.effect('refuses original input drift during cleanup after legitimate temporary disposal', () =>
+    Effect.gen(function* () {
+      const f = yield* preparationCompositionFixture({disposeWorkspace: true});
+      const original = yield* semanticTreeDigest(f.project);
+      const changed = f.path.join(f.project, 'pom.xml');
+      const exit = yield* Effect.exit(
+        makeJavaPreparation(f.options, {
+          ...f.host,
+          verifySetup: Effect.gen(function* () {
+            if ((yield* semanticTreeDigest(f.project)) !== original)
+              return yield* LspFault.make({code: 'prerequisite'});
+          }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
+          drainBuildProcesses: context =>
+            f.host
+              .drainBuildProcesses(context)
+              .pipe(Effect.tap(() => f.fs.writeFileString(changed, 'changed during cleanup').pipe(Effect.orDie))),
+        }),
+      );
+      expect(Exit.isFailure(exit)).toBe(true);
+      expect(yield* f.fs.exists(f.workspace.directory)).toBe(false);
+      yield* f.workspace.verifyDisposed;
+      expect(yield* f.fs.readFileString(changed)).toBe('changed during cleanup');
+      expect(f.load).not.toHaveBeenCalled();
+    }).pipe(Effect.provide(preparationCompositionLayer)),
+  );
   effectIt.effect('returns a frozen, independently readable model after provider and build drain', () =>
     Effect.gen(function* () {
       const f = yield* preparationCompositionFixture();
@@ -978,7 +1337,7 @@ describe('Java preparation composition', () => {
             build: 'gradle',
             gradle: {
               sdkDirectory: alias,
-              sdkDigest: '6da4ff86101bec03978e03b6acdb2d8ae958759c1da1dc69aa8e1d83f78ff9bc',
+              sdkDigest: javaPreparation.javaGradleOwnedImport.sdkDigest,
             },
             privateDirectory: root,
           },
@@ -1068,7 +1427,7 @@ describe('Java preparation composition', () => {
               build: 'gradle',
               gradle: {
                 sdkDirectory: '/host/gradle',
-                sdkDigest: '6da4ff86101bec03978e03b6acdb2d8ae958759c1da1dc69aa8e1d83f78ff9bc',
+                sdkDigest: javaPreparation.javaGradleOwnedImport.sdkDigest,
               },
               [output]: directory,
             },
@@ -1879,6 +2238,122 @@ describe('Java prepared model sealing', () => {
       expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
     }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
+  effectIt.effect('never replays initial or invalidated-options cache refusals and preserves original inputs', () =>
+    Effect.gen(function* () {
+      for (const rpcPhase of ['initial', 'confirmation'] as const) {
+        const f = yield* modelFixture({deferImport: true, cacheRefusal: rpcPhase});
+        const originalObservation = JSON.stringify(f.observation);
+        expect(yield* Effect.flip(f.observe)).toMatchObject({
+          _tag: 'JavaPreparedImportRefusal',
+          reason: 'model-not-cached',
+          rpcPhase,
+          evidence: {cacheStage: 'initial', cacheCondition: 'options-absent'},
+        });
+        expect(EffectArray.filter(f.methods, method => method === 'workspace/executeCommand')).toHaveLength(
+          rpcPhase === 'initial' ? 1 : 2,
+        );
+        expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
+        expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
+        expect(JSON.stringify(f.observation)).toBe(originalObservation);
+        expect(yield* semanticTreeDigest(f.project)).toBe(f.options.inputs.sourceDigest);
+      }
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
+  );
+  effectIt.effect('preserves a correlated production refusal without sealing or issuing a second model request', () =>
+    Effect.gen(function* () {
+      const f = yield* modelFixture({deferImport: true, refuseModel: true});
+      expect(yield* Effect.flip(f.observe)).toMatchObject({
+        _tag: 'JavaPreparedImportRefusal',
+        reason: 'unsupported-container',
+        evidence: {idSha256: EffectString.repeat(64)('a')},
+      });
+      expect(EffectArray.filter(f.methods, method => method === 'workspace/executeCommand')).toHaveLength(1);
+      expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
+      expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
+  );
+  effectIt.effect('admits finite first Gradle import outputs only before the full passive output baseline', () =>
+    Effect.gen(function* () {
+      const f = yield* modelFixture({
+        deferImport: true,
+        minimalBuildInputs: true,
+        gradleSetup: true,
+        firstModelMutation: 'metadata',
+      });
+      const observed = yield* f.observe;
+      expect(observed.model.build).toBe('gradle');
+      expect(f.initialization()).toMatchObject({
+        initializationOptions: {
+          settings: {
+            java: {
+              import: {gradle: {enabled: false, offline: {enabled: true}, arguments: [], jvm: {arguments: []}}},
+              configuration: {updateBuildConfiguration: 'disabled'},
+            },
+          },
+        },
+      });
+      expect(EffectArray.filter(f.methods, method => method === 'workspace/executeCommand')).toHaveLength(2);
+      expect(yield* f.fs.readFileString(f.path.join(f.copiedProject, '.gradle/imported-model'))).toBe(
+        'real allowed output boundary',
+      );
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
+  );
+  for (const mutation of ['source', 'unexpected'] as const)
+    effectIt.effect('refuses first-sync ' + mutation + ' mutations before capturing an output baseline', () =>
+      Effect.gen(function* () {
+        const failure = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const f = yield* modelFixture({
+              deferImport: true,
+              minimalBuildInputs: true,
+              gradleSetup: true,
+              firstModelMutation: mutation,
+            });
+            const sourceDigest = yield* semanticTreeDigest(f.project);
+            const error = yield* Effect.flip(f.observe);
+            expect(error).toMatchObject({_tag: 'LspFault', code: 'prerequisite'});
+            expect(yield* semanticTreeDigest(f.project)).toBe(sourceDigest);
+            expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
+            return {error, copiedProject: f.copiedProject};
+          }),
+        );
+        const fs = yield* FileSystem.FileSystem;
+        expect(yield* fs.exists(failure.copiedProject)).toBe(false);
+        expect(candidateFailure(failure.error)).toBe('Semantic provider fault: prerequisite');
+        if (mutation === 'unexpected') {
+          expect(candidateFailureEvidence(failure.error)).toEqual({
+            code: 'prerequisite',
+            sourceFrames: [],
+            preparationDiagnostic: {
+              reason: 'unexpected-copied-project-entry',
+              entryType: 'File',
+              relativePath: 'unexpected-imported-input',
+            },
+          });
+        } else expect(candidateFailureEvidence(failure.error)?.preparationDiagnostic).toBeUndefined();
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
+    );
+  for (const mutation of ['source', 'metadata'] as const)
+    effectIt.effect(
+      'refuses passive second-observation ' + mutation + ' drift against the full first-import baseline',
+      () =>
+        Effect.gen(function* () {
+          const f = yield* modelFixture({
+            deferImport: true,
+            minimalBuildInputs: true,
+            gradleSetup: true,
+            secondModelMutation: mutation,
+          });
+          expect((yield* Effect.exit(f.observe))._tag).toBe('Failure');
+          expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
+        }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
+    );
+  effectIt.effect('keeps Maven model commands passive under their original full output baseline', () =>
+    Effect.gen(function* () {
+      const f = yield* modelFixture({deferImport: true, minimalBuildInputs: true, firstModelMutation: 'metadata'});
+      expect((yield* Effect.exit(f.observe))._tag).toBe('Failure');
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
+  );
   effectIt.effect('does not mix completed reports from two independent input proofs', () =>
     Effect.gen(function* () {
       const first = yield* modelFixture();
@@ -2103,28 +2578,31 @@ describe('Java prepared model sealing', () => {
       expect(yield* f.fs.readDirectory(workspace.directory)).toEqual([]);
     }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
-  effectIt.effect.prop(
-    'binds every copied original build input, including metadata and nested configuration',
-    [
-      Schema.Literals([
+  effectIt.effect('binds every copied original build input, including metadata and nested configuration', () =>
+    Effect.gen(function* () {
+      // This closed six-path domain is exhaustive; each mutation still owns a fresh full model and proof Scope.
+      for (const relative of [
         'pom.xml',
         'settings.gradle',
         'build.gradle',
         'gradle.properties',
         '.mvn/maven.config',
         '.project',
-      ]),
-    ],
-    ([relative]) =>
-      Effect.gen(function* () {
-        const f = yield* modelFixture();
-        yield* f.fs.writeFileString(f.path.join(f.copiedProject, relative), 'different imported build input');
-        expect((yield* Effect.exit(f.options.inputs.verify))._tag).toBe('Failure');
-        expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
-        expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
-        expect(yield* semanticTreeDigest(f.project)).toBe(f.options.inputs.sourceDigest);
-      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
-    {arbitrary: {runs: 16}},
+      ]) {
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const f = yield* modelFixture();
+            yield* f.fs.writeFileString(f.path.join(f.copiedProject, relative), 'different imported build input');
+            expect((yield* Effect.exit(f.options.inputs.verify))._tag, relative).toBe('Failure');
+            expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag, relative).toBe(
+              'Failure',
+            );
+            expect(yield* f.fs.readDirectory(f.artifactDirectory), relative).toEqual([]);
+            expect(yield* semanticTreeDigest(f.project), relative).toBe(f.options.inputs.sourceDigest);
+          }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
+        );
+      }
+    }),
   );
   effectIt.effect('rejects forged proofs and keeps generated metadata outside the strict input image', () =>
     Effect.gen(function* () {
@@ -2361,41 +2839,153 @@ describe('Java prepared model sealing', () => {
       expect(yield* semanticTreeDigest(f.project)).toBe(f.options.inputs.sourceDigest);
     }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
-  effectIt.effect.prop(
+  effectIt.effect(
     'canonical metadata round trips without losing classpath order or depending on object-key order',
-    [
-      Schema.Array(
-        Schema.Array(Schema.Literals(['é', '😀', '\\', ':', '=', '"', '<', 'A'])).check(Schema.isMaxLength(24)),
-      ).check(Schema.isMaxLength(12)),
-    ],
-    ([values]) =>
+    () =>
       Effect.gen(function* () {
+        // Generated values enter only the pure codec; acquire and seal their invariant real fixture once.
         const f = yield* modelFixture();
         const sealed = yield* sealJavaPreparedModel(f.observation, f.options);
-        const compiler = EffectRecord.fromEntries(
-          EffectArray.map(
-            values,
-            (value, i) => ['org.eclipse.jdt.core.compiler.fixture' + i, EffectArray.join(value, '')] as const,
+        const baseBefore = JSON.stringify(sealed.model);
+        const observationBefore = JSON.stringify(f.observation);
+        const result = yield* Arbitrary.checkEffect(
+          Arbitrary.schema(
+            Schema.Array(
+              Schema.Array(Schema.Literals(['é', '😀', '\\', ':', '=', '"', '<', 'A'])).check(Schema.isMaxLength(24)),
+            ).check(Schema.isMaxLength(12)),
           ),
+          values =>
+            Effect.gen(function* () {
+              const compiler = EffectRecord.fromEntries(
+                EffectArray.map(
+                  values,
+                  (value, i) => ['org.eclipse.jdt.core.compiler.fixture' + i, EffectArray.join(value, '')] as const,
+                ),
+              );
+              const model = {...sealed.model, compilerOptions: {...sealed.model.compilerOptions, ...compiler}};
+              const before = JSON.stringify(model);
+              const reversedKeys = {
+                ...model,
+                compilerOptions: EffectRecord.fromEntries(EffectRecord.toEntries(model.compilerOptions).reverse()),
+              };
+              const encoded = yield* Effect.try(() => javaPreparedModelJson(model));
+              const parsed = yield* Effect.try(() => JSON.parse(encoded));
+              const decoded = yield* Schema.decodeUnknownEffect(JavaPreparedModel)(parsed);
+              return yield* Effect.try(() => {
+                expect(javaPreparedModelJson(reversedKeys)).toBe(encoded);
+                expect(javaPreparedModelJson(decoded)).toBe(encoded);
+                expect(parsed.resolvedClasspath).toEqual(model.resolvedClasspath);
+                expect(model.compilerOptions).toEqual({...sealed.model.compilerOptions, ...compiler});
+                expect(JSON.stringify(model)).toBe(before);
+                return true;
+              });
+            }),
+          {runs: 16},
         );
-        const model = {...sealed.model, compilerOptions: {...sealed.model.compilerOptions, ...compiler}};
-        const reversedKeys = {
-          ...model,
-          compilerOptions: EffectRecord.fromEntries(EffectRecord.toEntries(model.compilerOptions).reverse()),
-        };
-        const encoded = javaPreparedModelJson(model);
-        expect(javaPreparedModelJson(reversedKeys)).toBe(encoded);
-        expect(javaPreparedModelJson(yield* Schema.decodeUnknownEffect(JavaPreparedModel)(JSON.parse(encoded)))).toBe(
-          encoded,
-        );
-        expect(JSON.parse(encoded).resolvedClasspath).toEqual(model.resolvedClasspath);
-        expect(model.compilerOptions).toEqual({...sealed.model.compilerOptions, ...compiler});
+        expect(Arbitrary.formatCheckFailure(result)).toBeUndefined();
+        expect(JSON.stringify(sealed.model)).toBe(baseBefore);
+        expect(JSON.stringify(f.observation)).toBe(observationBefore);
       }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
-    {arbitrary: {runs: 16}},
   );
 });
 
 describe('Java pinned runtime and preparation boundary', () => {
+  effectIt.effect.prop(
+    'disposes registered inputs only after both original owners drain and their final bytes remain intact',
+    [Schema.Literals(['unchanged', 'mutated', 'deleted', 'restored-after-refusal']), Schema.Boolean, Schema.Boolean],
+    ([change, providerDrained, buildDrained]) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const parent = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn-java-disposable-'}));
+        const owner = yield* Scope.make();
+        let removals = 0;
+        const workspace = yield* makeJavaWorkspace(parent).pipe(
+          Effect.provideService(Scope.Scope, owner),
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            remove: (file, options) =>
+              Effect.sync(() => {
+                removals++;
+              }).pipe(Effect.andThen(fs.remove(file, options))),
+          }),
+        );
+        yield* workspace.hold;
+        const file = path.join(workspace.directory, 'retained-input');
+        const input = Object.freeze({file, bytes: 'approved bytes', change, providerDrained, buildDrained});
+        const before = JSON.stringify(input);
+        yield* fs.writeFileString(file, input.bytes, {mode: 0o600});
+        yield* workspace.retainInput(file, sha256HexSync(input.bytes));
+        const attempts: string[] = [];
+        yield* Effect.addFinalizer(() =>
+          finishJavaPreparation(
+            workspace,
+            Effect.sync(() => {
+              attempts.push('provider');
+              return {code: 0, forced: false, drained: providerDrained, stdioClosed: providerDrained, fault: undefined};
+            }),
+            Effect.gen(function* () {
+              attempts.push('build');
+              if (change === 'deleted') yield* fs.remove(file);
+              if (change === 'mutated' || change === 'restored-after-refusal')
+                yield* fs.writeFileString(file, 'changed bytes');
+              if (change === 'restored-after-refusal') {
+                expect(Exit.isFailure(yield* Effect.exit(workspace.verify))).toBe(true);
+                yield* fs.writeFileString(file, input.bytes);
+              }
+              return {drained: buildDrained};
+            }).pipe(Effect.orDie),
+          ).pipe(Effect.orDie),
+        ).pipe(Effect.provideService(Scope.Scope, owner));
+        const closed = yield* Effect.exit(Scope.close(owner, Exit.void));
+        const expected = change === 'unchanged' && providerDrained && buildDrained;
+        expect(Exit.isSuccess(closed)).toBe(expected);
+        expect(Exit.isSuccess(yield* Effect.exit(workspace.verifyDisposed))).toBe(expected);
+        expect(yield* fs.exists(workspace.directory)).toBe(!expected);
+        yield* Effect.exit(Scope.close(owner, Exit.void));
+        expect(attempts).toEqual(['provider', 'build']);
+        expect(removals).toBe(expected ? 1 : 0);
+        expect(JSON.stringify(input)).toBe(before);
+        expect(Exit.isFailure(yield* Effect.exit(workspace.verify))).toBe(true);
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
+    {arbitrary: {runs: 24}},
+  );
+  effectIt.effect('keeps disposal uncertain and preserves the original failure when actual removal fails', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const parent = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn-java-remove-fault-'}));
+      let workspace: javaRuntime.JavaWorkspace | undefined;
+      let removals = 0;
+      const exit = yield* Effect.exit(
+        Effect.scoped(
+          Effect.gen(function* () {
+            workspace = yield* makeJavaWorkspace(parent).pipe(
+              Effect.provideService(FileSystem.FileSystem, {
+                ...fs,
+                remove: () =>
+                  Effect.sync(() => {
+                    removals++;
+                  }).pipe(Effect.andThen(Effect.die('fixture removal failed'))),
+              }),
+            );
+            yield* workspace.hold;
+            yield* workspace.confirmDrained({drained: true, stdioClosed: true});
+            return yield* Effect.die('original controlled failure');
+          }),
+        ),
+      );
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (Exit.isFailure(exit)) {
+        expect(Cause.pretty(exit.cause)).toContain('original controlled failure');
+        expect(Cause.pretty(exit.cause)).toContain('fixture removal failed');
+      }
+      expect(workspace).toBeDefined();
+      if (!workspace) return;
+      expect(Exit.isFailure(yield* Effect.exit(workspace.verifyDisposed))).toBe(true);
+      expect(yield* fs.exists(workspace.directory)).toBe(true);
+      expect(removals).toBe(1);
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
+  );
   effectIt.effect('closes process admission before awaiting workspace cleanup verification', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -2844,4 +3434,72 @@ it('selects complete source-pin fixtures and fences them in the canonical native
   } finally {
     selected.mockRestore();
   }
+});
+
+// Pure archive/compiler boundary: these examples do not run an Effect program or activate an SDK.
+describe('owned Gradle source-overlay construction', () => {
+  it('conserves all unaffected entry bytes/modes without mutating inputs and is idempotent', () => {
+    fc.assert(
+      fc.property(
+        fc.dictionary(
+          fc.stringMatching(/^[a-z]{1,8}$/u),
+          fc.uint8Array({
+            maxLength: 64,
+          }),
+          {
+            maxKeys: 8,
+          },
+        ),
+        fc.uint8Array({
+          minLength: 1,
+          maxLength: 64,
+        }),
+        fc.boolean(),
+        (resources, replacement, executable) => {
+          const entries = new Map<string, Uint8Array>([
+            ['META-INF/MANIFEST.MF', new TextEncoder().encode('Manifest-Version: 1.0\n\n')],
+            ['pkg/Changed.class', new Uint8Array([1])],
+            ['pkg/Changed$Obsolete.class', new Uint8Array([2])],
+            ...OverlayArray.map(OverlayRecord.toEntries(resources), ([name, bytes]): [string, Uint8Array] => [
+              'resources/' + name,
+              bytes,
+            ]),
+          ]);
+          const modes = new Map(
+            OverlayArray.map([...entries.keys()], name => [name, executable ? 0o100755 : 0o100644]),
+          );
+          const original = deterministicZip(entries, modes),
+            snapshot = original.slice();
+          const replacements = new Map([['pkg/Changed.class', replacement]]);
+          const output = rewriteOwnedJar(original, replacements, ['pkg/Changed']);
+          expect(original).toEqual(snapshot);
+          const loaded = unzipSync(output),
+            observedModes = zipModes(output);
+          for (const [name, bytes] of entries)
+            if (!OverlayString.startsWith('pkg/Changed')(name)) {
+              expect(loaded[name]).toEqual(bytes);
+              expect(observedModes.get(name)).toBe(modes.get(name));
+            }
+          expect(loaded['pkg/Changed.class']).toEqual(replacement);
+          expect(loaded['pkg/Changed$Obsolete.class']).toBeUndefined();
+          expect(rewriteOwnedJar(output, replacements, ['pkg/Changed'])).toEqual(output);
+        },
+      ),
+      {
+        numRuns: 32,
+      },
+    );
+  });
+  it('refuses signature/digest protected input and unsafe archive names', () => {
+    for (const name of ['../escape', '/absolute', 'a/../b', 'a\\b', 'a//b', ''])
+      expect(validArchivePath(name)).toBe(false);
+    const replacement = new Map([['pkg/Changed.class', new Uint8Array([1])]]);
+    for (const protectedEntry of [
+      ['META-INF/KEY.SF', 'Signature-Version: 1.0'],
+      ['META-INF/MANIFEST.MF', 'Manifest-Version: 1.0\nSHA-256-Digest: preserved\n'],
+    ]) {
+      const entries = new Map([[protectedEntry[0], new TextEncoder().encode(protectedEntry[1])]]);
+      expect(() => rewriteOwnedJar(deterministicZip(entries, new Map()), replacement, ['pkg/Changed'])).toThrow();
+    }
+  });
 });

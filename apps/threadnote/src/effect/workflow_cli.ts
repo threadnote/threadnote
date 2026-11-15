@@ -96,6 +96,7 @@ export function makeNativeTaskPrDeliveryCommand<E, R>(
     readonly commitEvidence: string;
     readonly pr: unknown;
     readonly publication: unknown;
+    readonly userAuthority?: string;
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
 ) {
   return Command.make(
@@ -106,7 +107,14 @@ export function makeNativeTaskPrDeliveryCommand<E, R>(
       validationRef: requiredString('validation-ref', 'Opaque current validation reference from the task flow'),
       commitEvidence: requiredString('commit-evidence', 'Actual verified PR commit evidence'),
       pr: requiredString('pr', 'Physical PR metadata as JSON'),
-      publication: requiredString('publication', 'Actual publication authority input as JSON'),
+      publication: requiredString(
+        'publication',
+        'Feature-memory publication evidence as JSON; separate from user consent',
+      ),
+      userAuthority: optionalString(
+        'user-authority',
+        'Quote actual existing user approval; required for new PR delivery/adoption',
+      ),
     },
     options =>
       Effect.try({
@@ -124,10 +132,16 @@ export function makeNativeTaskPrDeliveryCommand<E, R>(
 
 export function makeNativeTaskPrWatchCommand<E, R>(
   handler: (options: {
-    readonly runId: string;
+    readonly runId?: string;
+    readonly prUrl?: string;
+    readonly watchRef?: string;
     readonly callerCwd: string;
     readonly validationRef?: string;
     readonly deliveryRef?: string;
+    readonly snapshotRef?: string;
+    readonly candidateWatchRef?: string;
+    readonly supplementalRef?: string;
+    readonly pr?: string;
     readonly phaseId?: string;
     readonly operation:
       | 'start'
@@ -165,10 +179,16 @@ export function makeNativeTaskPrWatchCommand<E, R>(
   return Command.make(
     'watch-pr',
     {
-      runId: requiredString('run-id', 'Native workflow run identifier'),
+      runId: optionalString('run-id', 'Workflow run; omit for standalone monitoring'),
+      prUrl: optionalString('pr-url', 'Explicit GitHub PR URL for standalone setup'),
+      watchRef: optionalString('watch-ref', 'Opaque standalone watch identity returned by setup'),
       callerCwd: requiredString('caller-cwd', 'Bound checkout path'),
       validationRef: optionalString('validation-ref', 'Current opaque validation reference'),
       deliveryRef: optionalString('delivery-ref', 'Opaque open PR delivery reference'),
+      snapshotRef: optionalString('snapshot-ref', 'Candidate start immutable snapshot reference; diagnostics only'),
+      candidateWatchRef: optionalString('candidate-watch-ref', 'Candidate continuation reference'),
+      supplementalRef: optionalString('supplemental-ref', 'Completed-local publication reference'),
+      pr: optionalString('pr', 'Candidate existing PR URL'),
       phaseId: optionalString('phase-id', 'Current phase for provisional inspect or stop'),
       operation: requiredChoice(
         'operation',
@@ -185,13 +205,16 @@ export function makeNativeTaskPrWatchCommand<E, R>(
           'stop',
           'complete',
         ],
-        'Task-bound watch operation',
+        'PR watch operation',
       ),
       host: optionalChoice('host', ['codex', 'cursor-cli'], 'Registered wakeup host'),
       executable: optionalString('host-executable', 'Absolute registered host executable'),
       hostReference: optionalString('host-reference', 'Codex thread ID or Cursor session ID'),
       workspace: optionalString('workspace', 'Cursor workspace path'),
-      noticeRef: optionalString('notice-ref', 'Opaque notice route returned by the current watch'),
+      noticeRef: optionalString(
+        'notice-ref',
+        'Relay this current notice route, record its disposition, then ACK using the returned current refs',
+      ),
       workEventRef: optionalString('work-event-ref', 'Opaque retained work reference returned by work'),
       offsetBytes: optional(integerFlag('offset-bytes')),
       sourceDigest: optionalString('source-digest', 'Canonical work detail digest returned by work'),
@@ -255,14 +278,18 @@ export function makeNativeTaskPrWatchCommand<E, R>(
       }
       return handler({
         ...options,
-        ...(options.host && options.executable && options.hostReference
+        ...(options.host && options.hostReference && (options.host === 'codex' || options.executable)
           ? {
               wakeup:
                 options.host === 'codex'
-                  ? {host: 'codex' as const, executable: options.executable, threadId: options.hostReference}
+                  ? {
+                      host: 'codex' as const,
+                      ...(options.executable === undefined ? {} : {executable: options.executable}),
+                      threadId: options.hostReference,
+                    }
                   : {
                       host: 'cursor-cli' as const,
-                      executable: options.executable,
+                      executable: options.executable!,
                       sessionId: options.hostReference,
                       workspace: options.workspace ?? '',
                       exclusiveSession: true as const,
@@ -274,7 +301,7 @@ export function makeNativeTaskPrWatchCommand<E, R>(
         dispositions,
       });
     },
-  ).pipe(Command.withDescription('Run a task-bound PR watch step through native watch state and receipts'));
+  ).pipe(Command.withDescription('Monitor an explicit PR or operate a workflow-bound PR watch'));
 }
 
 export function makeNativeTaskStartCommand<E, R>(
@@ -427,6 +454,13 @@ export function makeNativeTaskActionCommands<E, R>(
     readonly commitEvidence: string;
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
   sameLabelIntegrationHandler?: (options: {
+    readonly runId: string;
+    readonly callerCwd: string;
+    readonly snapshotRef: string;
+    readonly reason: string;
+    readonly userAuthority: string;
+  }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
+  recoverUnreviewedRebaseHandler?: (options: {
     readonly runId: string;
     readonly callerCwd: string;
     readonly snapshotRef: string;
@@ -646,6 +680,25 @@ export function makeNativeTaskActionCommands<E, R>(
             }),
           ),
   ).pipe(Command.withDescription('Qualify an ancestry-preserving integration of a rewritten same-label upstream base'));
+  const recoverUnreviewedRebaseSnapshot = Command.make(
+    'recover-unreviewed-rebase-snapshot',
+    {
+      runId: requiredString('run-id', 'Existing native workflow run identifier'),
+      callerCwd: requiredString('caller-cwd', 'Absolute bound checkout path'),
+      snapshotRef: requiredString('snapshot-ref', 'Exact latest unreviewed predecessor reference'),
+      reason: requiredString('reason', 'Why corrected source must recover after rebase'),
+      userAuthority: requiredString('user-authority', 'Quote actual existing user authority for this recovery'),
+    },
+    options =>
+      recoverUnreviewedRebaseHandler
+        ? recoverUnreviewedRebaseHandler(options)
+        : Effect.fail(
+            WorkflowAutomationError.make({
+              code: 'unsupported-action',
+              message: 'Unreviewed rebase recovery is unavailable.',
+            }),
+          ),
+  ).pipe(Command.withDescription('Retain unreviewed rebase history and require a new full review and validation'));
   const supersedeUnreviewedSnapshot = Command.make(
     'supersede-unreviewed-snapshot',
     {
@@ -876,6 +929,7 @@ export function makeNativeTaskActionCommands<E, R>(
       requalifyBaseSnapshot,
       integrateSameLabelBaseSnapshot,
       supersedeUnreviewedSnapshot,
+      recoverUnreviewedRebaseSnapshot,
       recordReview,
       recordValidation,
       deliverLocal,
@@ -1316,4 +1370,62 @@ export function makeContextMaintainCommand<E, R>(
     },
     handler,
   ).pipe(Command.withDescription('Run bounded local structural maintenance or inspect/pause/undo it'));
+}
+
+export function makeNativeTaskSupplementalCommand<E, R>(
+  handler: (options: {
+    runId: string;
+    callerCwd: string;
+    taskRef: string;
+    phaseId: string;
+    pr: unknown;
+    userAuthority: string;
+  }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
+) {
+  return Command.make(
+    'publish-local',
+    {
+      runId: requiredString('run-id', 'Run ID'),
+      callerCwd: requiredString('caller-cwd', 'Bound checkout'),
+      taskRef: requiredString('task-ref', 'Completed task reference'),
+      phaseId: requiredString('phase-id', 'Completed local phase'),
+      pr: requiredString('pr', 'Already-created typed PR receipt as JSON'),
+      userAuthority: requiredString('user-authority', 'Actual supplied authority to attach this existing PR'),
+    },
+    options =>
+      Effect.try({
+        try: () => JSON.parse(options.pr) as unknown,
+        catch: () => WorkflowAutomationError.make({code: 'invalid-request', message: 'PR receipt must be JSON.'}),
+      }).pipe(Effect.flatMap(pr => handler({...options, pr}))),
+  );
+}
+export function makeNativeTaskInvalidTailCommand<E, R>(
+  handler: (options: {
+    runId: string;
+    callerCwd: string;
+    taskRef: string;
+    predecessorRef: string;
+    reason: string;
+    userAuthority: string;
+    phaseOwnedPaths: unknown;
+  }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
+) {
+  return Command.make(
+    'requalify-invalid-tail',
+    {
+      runId: requiredString('run-id', 'Run ID'),
+      callerCwd: requiredString('caller-cwd', 'Bound checkout'),
+      taskRef: requiredString('task-ref', 'Current invalid-tail task reference'),
+      predecessorRef: requiredString('predecessor-ref', 'Exact invalid leaf snapshot reference'),
+      reason: requiredString('reason', 'Reason for normal-merge requalification'),
+      userAuthority: requiredString('user-authority', 'Actual supplied requalification authority'),
+      phaseOwnedPaths: requiredString('phase-owned-paths', 'Complete [{phaseId,paths}] inventory as JSON'),
+    },
+    options =>
+      Effect.try({
+        try: () => JSON.parse(options.phaseOwnedPaths) as unknown,
+        catch: () =>
+          WorkflowAutomationError.make({code: 'invalid-request', message: 'Owned-path inventory must be JSON.'}),
+      }).pipe(Effect.flatMap(phaseOwnedPaths => handler({...options, phaseOwnedPaths}))),
+  );
 }

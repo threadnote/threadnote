@@ -1,3 +1,4 @@
+import {CODE_GRAPH_SNAPSHOT_ID_PATTERN} from '../store/lexical_projection.js';
 import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Option, Path, PlatformError, Predicate, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -20,7 +21,7 @@ const MANAGER_CONTEXT_FILE_BYTES_LIMIT = 8 * 1_024;
 const INVALID_SIDECAR_RETRY_MILLISECONDS = 30_000;
 const IO_RETRY_MILLISECONDS = 1_000;
 const HASH_ID = /^[0-9a-f]{64}$/u;
-const SNAPSHOT_ID = /^cgsn_[0-9a-f]{40}(?:-direct|-full-[0-9a-f]{16})?$/u;
+const SNAPSHOT_ID = CODE_GRAPH_SNAPSHOT_ID_PATTERN;
 const BUILD_STATUS_FILE = /^([0-9a-f-]{16,64})\.json$/u;
 const BUILD_ID = /^[0-9a-f-]{16,64}$/u;
 const BUILD_DIGEST = /^[0-9a-f]{64}$/u;

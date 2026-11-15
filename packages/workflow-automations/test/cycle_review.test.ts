@@ -247,9 +247,9 @@ describe('native cycle review validation', () => {
     ).toMatchObject({_tag: 'SchemaError'});
   });
 
-  it('conserves the most recent accepted ledger over bounded unreviewed source chains', () => {
+  it('conserves the accepted ledger across changed-source and authorized equal-tree recovery chains', () => {
     fc.assert(
-      fc.property(fc.integer({min: 1, max: 8}), count => {
+      fc.property(fc.array(fc.boolean(), {minLength: 1, maxLength: 8}), equalTrees => {
         const pending = snapshot({
           snapshotId: 'pending',
           previous: priorSnapshot.snapshotId,
@@ -257,18 +257,45 @@ describe('native cycle review validation', () => {
         });
         const retained = [priorSnapshot, pending];
         let current = pending;
-        for (let index = 0; index < count; index++) {
+        const accepted = [{snapshotId: priorSnapshot.snapshotId, report: priorReview}];
+        for (const [index, equalTree] of equalTrees.entries()) {
+          const predecessor = current;
+          const head = objectId((index + 1).toString(16));
           current = snapshot({
             snapshotId: `recovery-${index}`,
             previous: undefined,
             previousTree: undefined,
-            supersedes: current.snapshotId,
-            tree: objectId((index + 1).toString(16)),
-            unreviewedSupersession: {reason: 'Correct the unreviewed source.'},
+            supersedes: predecessor.snapshotId,
+            head,
+            acceptedHead: head,
+            declaredBaseHead: equalTree ? head : predecessor.declaredBaseHead,
+            tree: equalTree ? predecessor.tree : objectId((index + 1).toString(16)),
+            unreviewedSupersession: {
+              reason: 'Correct the unreviewed source.',
+              ...(equalTree
+                ? {
+                    rebaseRecovery: {
+                      version: 1 as const,
+                      priorHead: predecessor.head,
+                      priorBaseHead: predecessor.declaredBaseHead,
+                      fromBaseBranch: 'main',
+                      toBaseBranch: 'main',
+                      authority: 'Existing user authority for the exact recovery.',
+                      receiptDigest: hash('a'),
+                    },
+                  }
+                : {}),
+            },
           });
+          if (equalTree) {
+            // Content equality never grants ordinary supersession authority.
+            const unqualified = {...current, unreviewedSupersession: {reason: 'No rewrite witness.'}};
+            expect(
+              caught(() => nativeCycleReviewBasis(unqualified, [...retained, unqualified], accepted)),
+            ).toMatchObject({code: 'invalid-cycle-review'});
+          }
           retained.push(current);
         }
-        const accepted = [{snapshotId: priorSnapshot.snapshotId, report: priorReview}];
         const original = JSON.stringify({retained, accepted});
         const basis = nativeCycleReviewBasis(current, retained, accepted);
         expect(basis.previous).toBeUndefined();
@@ -299,7 +326,7 @@ describe('native cycle review validation', () => {
           ).toMatchObject({code: 'invalid-cycle-review'});
         }
       }),
-      {numRuns: 16},
+      {numRuns: 32},
     );
   });
 

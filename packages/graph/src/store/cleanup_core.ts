@@ -326,10 +326,36 @@ interface CompactLexicalCleanupSpec {
   readonly indexName?: string;
   readonly keyColumns: readonly string[];
   readonly maximumBatchRows: number;
-  readonly table: 'lexical_compact_postings' | 'lexical_compact_symbols' | 'lexical_compact_terms';
+  readonly table:
+    | 'lexical_compact_postings'
+    | 'lexical_compact_symbols'
+    | 'lexical_compact_terms'
+    | 'lexical_v2_owners'
+    | 'lexical_v2_shared'
+    | 'lexical_v2_members'
+    | 'lexical_v2_scopes';
 }
 
 const COMPACT_LEXICAL_CLEANUP_SPECS: readonly CompactLexicalCleanupSpec[] = [
+  {
+    batchRows: 5000,
+    maximumBatchRows: 20000,
+    table: 'lexical_v2_owners',
+    keyColumns: ['snapshot_key', 'term_key', 'origin_mask', 'scope_ordinal', 'member_ordinal'],
+  },
+  {
+    batchRows: 5000,
+    maximumBatchRows: 20000,
+    table: 'lexical_v2_shared',
+    keyColumns: ['snapshot_key', 'term_key', 'scope_ordinal'],
+  },
+  {
+    batchRows: 5000,
+    maximumBatchRows: 20000,
+    table: 'lexical_v2_members',
+    keyColumns: ['snapshot_key', 'scope_ordinal', 'member_ordinal'],
+  },
+  {batchRows: 1000, maximumBatchRows: 5000, table: 'lexical_v2_scopes', keyColumns: ['snapshot_key', 'scope_ordinal']},
   {
     batchRows: 5_000,
     keyColumns: ['snapshot_key', 'term_key', 'symbol_key'],
@@ -447,6 +473,7 @@ const clearCompactLexicalSnapshotRows = Effect.fn('codeGraph.clearCompactLexical
     sql.withTransaction(
       Effect.gen(function* () {
         if (ownerToken !== undefined) yield* assertPersistentBuildOwner(sql, snapshotId, ownerToken);
+        yield* sql`DELETE FROM lexical_v2_formats WHERE snapshot_id = ${snapshotId}`;
         yield* sql`DELETE FROM lexical_storage_formats WHERE snapshot_id = ${snapshotId}`;
         yield* sql`DELETE FROM lexical_compact_snapshots WHERE snapshot_id = ${snapshotId}`;
       }),
@@ -502,6 +529,12 @@ const pruneRetiredCompactLexicalRows = Effect.fn('codeGraph.pruneRetiredCompactL
     const metadataDeleted = yield* writerGate(
       sql.withTransaction(
         Effect.gen(function* () {
+          yield* sql.unsafe(
+            `DELETE FROM lexical_v2_formats WHERE snapshot_id IN (
+            SELECT snapshot_id FROM lexical_compact_snapshots WHERE snapshot_key=?
+          )`,
+            [compactSnapshotKey],
+          );
           yield* sql.unsafe(
             `DELETE FROM lexical_storage_formats
              WHERE snapshot_id = ?

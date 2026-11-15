@@ -12,9 +12,47 @@ import * as Effect from 'effect';
 import {Option as EffectOption} from 'effect';
 
 const root = resolve(import.meta.dir, '../..');
-const option = name => process.argv[process.argv.indexOf(name) + 1];
-const base = process.argv.includes('--base') ? option('--base') : undefined;
-const output = resolve(root, process.argv.includes('--output') ? option('--output') : '.context/bazel-selection');
+const selectorUsage = `Usage: bun tools/ci/bazel-select.mjs --base <revision> [--base <revision>] [--output <directory>]
+`;
+const parseSelectorArguments = args => {
+  let base;
+  let output = '.context/bazel-selection';
+  let help = false;
+  for (let index = 0; index < args.length; index++) {
+    const argument = args[index];
+    if (argument === '--help' || argument === '-h') {
+      help = true;
+    } else if (argument === '--base' || argument === '--output') {
+      const value = args[index + 1];
+      if (value === undefined || value.length === 0 || value.startsWith('--'))
+        throw new Error(`Missing value for ${argument}.`);
+      index++;
+      if (argument === '--base') base = value;
+      else output = value;
+    } else if (argument === '--head') {
+      throw new Error('--head is unsupported; choose the current head by running this selector from its checkout.');
+    } else {
+      throw new Error(`Unknown argument: ${argument}`);
+    }
+  }
+  if (help) return {help: true};
+  if (base === undefined) throw new Error('Missing required --base <revision>.');
+  if (!/^[a-zA-Z0-9_./-]+$/u.test(base)) throw new Error('Invalid --base revision.');
+  return {base, help: false, output};
+};
+let parsed;
+try {
+  parsed = parseSelectorArguments(process.argv.slice(2));
+} catch (error) {
+  process.stderr.write(`bazel:affected: ${error instanceof Error ? error.message : String(error)}\n`);
+  process.exit(2);
+}
+if (parsed.help) {
+  process.stdout.write(selectorUsage);
+  process.exit(0);
+}
+const {base, output: outputArgument} = parsed;
+const output = resolve(root, outputArgument);
 mkdirSync(output, {recursive: true});
 // Pinned bazel-diff probes `mod graph` without command options and splits startup
 // options on spaces. A fixed relative rc covers probes and workspace paths with spaces.
@@ -48,7 +86,6 @@ let revision;
 let changeFailure;
 let changedFiles = [];
 try {
-  if (!base || !/^[a-zA-Z0-9_./-]+$/u.test(base)) throw new Error('Missing or invalid baseline revision');
   revision = await run(['git', 'rev-parse', '--verify', `${base}^{commit}`]);
   const tracked = await run(['git', 'diff', '--name-only', '--no-renames', '-z', revision], root, true);
   const untracked = await run(['git', 'ls-files', '--others', '--exclude-standard', '-z'], root, true);

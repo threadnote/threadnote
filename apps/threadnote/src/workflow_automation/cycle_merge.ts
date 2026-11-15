@@ -19,6 +19,7 @@ import {
   type NativeCycleSameLabelRebasedBaseInput,
   type NativeCycleSameLabelRebasedBaseReceipt,
   type NativeCycleOrdinaryMergeInput,
+  type NativeCycleInvalidTailMergeReceipt,
   type NativeCycleOrdinaryMergeReceipt,
   type NativeCycleSnapshot,
 } from '@threadnote/workflow-automations/cycle-review';
@@ -555,7 +556,9 @@ const prepareMergeRetention = Effect.fn('workflowAutomation.cycle.prepareMergeRe
   baseline: NativeCycleRuntime['baselines'][string],
   phase: NativeCyclePlan['phases'][number],
 ) {
-  const proof = (snapshot.ordinaryMergeQualificationV1 ?? snapshot.sameLabelRebasedBaseIntegrationV1)!;
+  const proof = (snapshot.ordinaryMergeQualificationV1 ??
+    snapshot.sameLabelRebasedBaseIntegrationV1 ??
+    snapshot.invalidTailMergeQualificationV1)!;
   const refs = [
     [proof.priorHeadRef, prior.head],
     [proof.currentHeadRef, snapshot.head],
@@ -604,7 +607,7 @@ const prepareMergeRetention = Effect.fn('workflowAutomation.cycle.prepareMergeRe
       return yield* fail('The bound Git worktree identity changed.');
     if ((yield* git(repo, ['status', '--porcelain=v2', '-z', '--ignore-submodules=none'])) !== '')
       return yield* fail('Same-label qualification requires a clean contributor index and worktree.');
-  } else yield* verifyCommits(repo, snapshot.ordinaryMergeQualificationV1!);
+  } else yield* verifyCommits(repo, proof);
   const closing = yield* captureNativeCycleSource(repo, baseline.tree);
   if (
     closing.head !== snapshot.head ||
@@ -711,3 +714,45 @@ export function hasNativeCycleMergePlanBinding(
     ),
   );
 }
+
+/** Read-only qualification of caller-prepared committed source. Never merge, fetch, reset or write refs. */
+export const prepareNativeCycleInvalidTailMerge = Effect.fn('workflowAutomation.cycle.prepareInvalidTailMerge')(
+  function* (...args: Parameters<typeof prepareNativeCycleOrdinaryMerge>) {
+    const [repo, , phase, , prior, captured] = args;
+    const status = yield* git(repo, ['status', '--porcelain=v1', '--untracked-files=all']);
+    const parents = EffectString.split(yield* git(repo, ['rev-list', '--parents', '-n', '1', captured.head]), ' ');
+    if (
+      status ||
+      captured.head === prior.head ||
+      parents.length !== 3 ||
+      !(yield* nativeCycleIsAncestor(repo, prior.head, parents[1])) ||
+      !(yield* nativeCycleIsAncestor(repo, args[6].currentBaseHead, parents[2])) ||
+      (yield* resolve(repo, captured.head, 'tree')) !== captured.tree ||
+      args[6].fromBaseBranch !== phase.baseBranch
+    )
+      return yield* fail('Prepare a clean committed normal merge from the invalid leaf and exact live declared base.');
+    return yield* prepareNativeCycleOrdinaryMerge(...args);
+  },
+);
+
+/** A last read-only source/base fence immediately before CAS admission. */
+export const verifyNativeCycleInvalidTailMergeSource = Effect.fn(
+  'workflowAutomation.cycle.verifyInvalidTailMergeSource',
+)(function* (
+  repo: string,
+  snapshot: NativeCycleSnapshot,
+  baseline: NativeCycleRuntime['baselines'][string],
+  phase: NativeCyclePlan['phases'][number],
+) {
+  const proof: NativeCycleInvalidTailMergeReceipt = snapshot.invalidTailMergeQualificationV1!;
+  yield* verifyCommits(repo, proof);
+  if (
+    (yield* git(repo, ['status', '--porcelain=v1', '--untracked-files=all'])) ||
+    (yield* resolve(repo, 'HEAD', 'commit')) !== snapshot.head ||
+    (yield* resolve(repo, 'HEAD', 'tree')) !== snapshot.tree ||
+    (yield* resolve(repo, phase.baseBranch, 'commit')) !== snapshot.declaredBaseHead ||
+    (yield* git(repo, ['branch', '--show-current'])) !== phase.branch ||
+    (yield* resolve(repo, baseline.pinnedRef, 'tree')) !== baseline.tree
+  )
+    return yield* fail('Source, branch or live declared base changed before invalid-tail admission.');
+});

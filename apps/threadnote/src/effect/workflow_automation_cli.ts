@@ -12,6 +12,8 @@ import {
   makeNativeTaskActionCommands,
   makeNativeTaskPrDeliveryCommand,
   makeNativeTaskPrWatchCommand,
+  makeNativeTaskSupplementalCommand,
+  makeNativeTaskInvalidTailCommand,
   makeNativeTaskStartCommand,
   makeNativeTaskViewCommand,
 } from './workflow_cli.js';
@@ -211,6 +213,7 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
             commitEvidence: options.commitEvidence,
             pr: options.pr,
             publication: options.publication,
+            ...(options.userAuthority === undefined ? {} : {userAuthority: options.userAuthority}),
           }).pipe(
             Effect.flatMap(value => Console.log(JSON.stringify(value))),
             Effect.mapError(nativeWorkflowError),
@@ -221,10 +224,16 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
         withRuntime(config =>
           runNativeTaskAction(config, {
             command: 'watch-pr',
-            runId: options.runId,
+            ...(options.runId === undefined ? {} : {runId: options.runId}),
+            ...(options.prUrl === undefined ? {} : {prUrl: options.prUrl}),
+            ...(options.watchRef === undefined ? {} : {watchRef: options.watchRef}),
             callerCwd: options.callerCwd,
             ...(options.validationRef === undefined ? {} : {validationRef: options.validationRef}),
             ...(options.deliveryRef === undefined ? {} : {deliveryRef: options.deliveryRef}),
+            ...(options.snapshotRef === undefined ? {} : {snapshotRef: options.snapshotRef}),
+            ...(options.candidateWatchRef === undefined ? {} : {candidateWatchRef: options.candidateWatchRef}),
+            ...(options.supplementalRef === undefined ? {} : {supplementalRef: options.supplementalRef}),
+            ...(options.pr === undefined ? {} : {pr: options.pr}),
             ...(options.phaseId === undefined ? {} : {phaseId: options.phaseId}),
             operation: options.operation,
             ...('wakeup' in options && options.wakeup !== undefined ? {wakeup: options.wakeup} : {}),
@@ -239,6 +248,22 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
             ...(options.watchDeliveryRef === undefined ? {} : {watchDeliveryRef: options.watchDeliveryRef}),
             ...(options.dispositions === undefined ? {} : {dispositions: options.dispositions}),
           }).pipe(
+            Effect.flatMap(value => Console.log(JSON.stringify(value))),
+            Effect.mapError(nativeWorkflowError),
+          ),
+        ),
+      ),
+      makeNativeTaskSupplementalCommand(options =>
+        withRuntime(config =>
+          runNativeTaskAction(config, {...options, command: 'supplemental-publication', operation: 'attach'}).pipe(
+            Effect.flatMap(value => Console.log(JSON.stringify(value))),
+            Effect.mapError(nativeWorkflowError),
+          ),
+        ),
+      ),
+      makeNativeTaskInvalidTailCommand(options =>
+        withRuntime(config =>
+          runNativeTaskAction(config, {...options, command: 'requalify-invalid-tail'}).pipe(
             Effect.flatMap(value => Console.log(JSON.stringify(value))),
             Effect.mapError(nativeWorkflowError),
           ),
@@ -404,6 +429,13 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
         options =>
           withRuntime(config =>
             runNativeTaskAction(config, {command: 'integrate-same-label-base-snapshot', ...options}).pipe(
+              Effect.flatMap(value => Console.log(JSON.stringify(value))),
+              Effect.mapError(nativeWorkflowError),
+            ),
+          ),
+        options =>
+          withRuntime(config =>
+            runNativeTaskAction(config, {command: 'recover-unreviewed-rebase-snapshot', ...options}).pipe(
               Effect.flatMap(value => Console.log(JSON.stringify(value))),
               Effect.mapError(nativeWorkflowError),
             ),

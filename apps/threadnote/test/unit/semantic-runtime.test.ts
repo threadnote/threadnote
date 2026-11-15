@@ -65,6 +65,7 @@ import {
   encodeLspFrame,
   makeLspClient,
   spawnLspWire,
+  spawnSemanticProcess,
   SemanticWireStartup,
   type LspWire,
   type WireStop,
@@ -2439,3 +2440,201 @@ effectIt.effect('rejects forged capture objects, mixed prepared batches, and for
     Effect.provide(BunPath.layerPosix),
   ),
 );
+
+describe('production original Gradle transport and operation joins', () => {
+  it('decodes UTF8 readiness independently of arbitrary byte partitions and bounds each ready line', () => {
+    fc.assert(
+      fc.property(fc.array(fc.integer({min: 1, max: 35}), {minLength: 1, maxLength: 20}), sizes => {
+        const line = 'THREADNOTE_OWNED_READY_V1 nonce uid hash données';
+        const bytes = new TextEncoder().encode('log é\n' + line + '\n');
+        const frames: string[] = [];
+        const decoder = javaRuntime.makeJavaGradleFrameDecoder(frame => frames.push(frame));
+        let at = 0,
+          part = 0;
+        while (at < bytes.length) {
+          const end = Math.min(bytes.length, at + sizes[part++ % sizes.length]);
+          decoder.push(bytes.slice(at, end));
+          at = end;
+        }
+        decoder.finish();
+        expect(frames).toEqual([line]);
+      }),
+      {numRuns: 32},
+    );
+    const frames: string[] = [];
+    const decoder = javaRuntime.makeJavaGradleFrameDecoder(frame => frames.push(frame));
+    decoder.push(new TextEncoder().encode(EffectString.repeat(5)(EffectString.repeat(4000)('x') + '\n')));
+    expect(frames).toEqual([]);
+    expect(() =>
+      decoder.push(new TextEncoder().encode('THREADNOTE_OWNED_READY_V1 ' + EffectString.repeat(12288)('x') + '\n')),
+    ).toThrow();
+  });
+  it('seals bootstrap properties before import with the exact foreground JVM arguments', () => {
+    const properties = javaRuntime.javaGradleBootstrapProperties('/sdk/java21', '/private/tmp');
+    expect(properties).toContain('org.gradle.java.installations.auto-download=false\n');
+    expect(properties).toContain('org.gradle.java.installations.paths=/sdk/java21\n');
+    expect(properties).toContain('org.gradle.jvmargs="-Xms64m" "-Xmx256m"');
+    expect(properties).toContain('"-Djava.io.tmpdir=/private/tmp"');
+    expect(javaRuntime.javaGradleBootstrapProperties('/sdk/é', '/private/space "quote"')).toContain(
+      'org.gradle.java.installations.paths=/sdk/\\u00e9',
+    );
+  });
+  it('binds readiness to every immutable foreground context field rather than UID or nonce alone', () => {
+    const expected = {
+      nonce: EffectString.repeat(64)('a'),
+      javaHome: '/fixed/java21',
+      baseDirectory: '/private/gradle/daemon',
+      temporary: '/private/tmp',
+      pid: 42,
+    };
+    const uid = '12345678-1234-1234-1234-123456789abc';
+    const values = [
+      uid,
+      expected.javaHome,
+      '21',
+      'Eclipse Adoptium',
+      expected.baseDirectory,
+      '42',
+      '10800000',
+      'NORMAL',
+      'true',
+      'ENABLED',
+      ...[
+        '-Xms64m',
+        '-Xmx256m',
+        '-Dfile.encoding=UTF-8',
+        '-Duser.country',
+        '-Duser.language=en',
+        '-Duser.variant',
+        '-Djava.io.tmpdir=' + expected.temporary,
+      ].sort(),
+    ];
+    const frame = (parts: readonly string[]) => {
+      const image = EffectArray.join(
+        EffectArray.map(parts, value => value.length + ':' + value),
+        '',
+      );
+      return (
+        'THREADNOTE_OWNED_READY_V1 ' +
+        expected.nonce +
+        ' ' +
+        uid +
+        ' ' +
+        sha256HexSync(image) +
+        ' ' +
+        Buffer.from(image).toString('base64url')
+      );
+    };
+    expect(javaRuntime.decodeJavaGradleReady(frame(values), expected).uid).toBe(uid);
+    for (const at of [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]) {
+      const changed = [...values];
+      changed[at] += '-different';
+      expect(() => javaRuntime.decodeJavaGradleReady(frame(changed), expected)).toThrow();
+    }
+  });
+  it('requires every actual operation to join connected and success with conserved attempt identity', () => {
+    const expected = {
+      attempt: EffectString.repeat(64)('a'),
+      launch: EffectString.repeat(64)('b'),
+      uid: '12345678-1234-1234-1234-123456789abc',
+      contextHash: EffectString.repeat(64)('c'),
+    };
+    const frame = (id: string, status: string) =>
+      EffectArray.join(
+        [
+          'THREADNOTE_OWNED_OPERATION_V1',
+          expected.attempt,
+          expected.launch,
+          id,
+          expected.uid,
+          expected.contextHash,
+          status,
+        ],
+        ' ',
+      ) + '\n';
+    fc.assert(
+      fc.property(fc.uniqueArray(fc.uuid(), {minLength: 1, maxLength: 8}), ids => {
+        const events = new Map<string, string>();
+        for (const id of ids) {
+          events.set(id + '.connected', frame(id, 'connected'));
+          events.set(id + '.success', frame(id, 'success'));
+        }
+        expect(javaRuntime.verifyJavaGradleOperationFrames(events, expected, true)).toBe(ids.length);
+        events.delete(ids[0] + '.success');
+        expect(() => javaRuntime.verifyJavaGradleOperationFrames(events, expected, true)).toThrow();
+        events.set(ids[0] + '.failure', frame(ids[0], 'failure'));
+        expect(() => javaRuntime.verifyJavaGradleOperationFrames(events, expected, false)).toThrow();
+        expect(() =>
+          javaRuntime.verifyJavaGradleOperationFrames(
+            events,
+            {...expected, launch: EffectString.repeat(64)('d')},
+            false,
+          ),
+        ).toThrow();
+      }),
+      {numRuns: 32},
+    );
+    expect(() => javaRuntime.verifyJavaGradleOperationFrames(new Map(), expected, true)).toThrow();
+  });
+  effectIt.effect('raw adapter closeInput refusal still attempts original native cleanup and retains unknown', () =>
+    Effect.gen(function* () {
+      const modes: string[] = [];
+      const controllers: ReadableStreamDefaultController<Uint8Array>[] = [];
+      const stream = () =>
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controllers.push(controller);
+          },
+        });
+      let dead = false;
+      const closed = vi.fn();
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Only mocked native functions consume this synthetic opaque capability.
+      const handle = {} as platformSystem.RuntimeOwnedProviderTree;
+      const mocks = [
+        vi.spyOn(platformSystem, 'runtimeSpawnOwnedProviderTree').mockReturnValue({
+          handle,
+          pid: 42,
+          identity: 'original',
+          stdout: stream(),
+          stderr: stream(),
+          write: async () => {},
+          closeInput: async () => {
+            throw new Error('closed input fault');
+          },
+        }),
+        vi.spyOn(platformSystem, 'runtimeObserveOwnedProviderTree').mockImplementation(() => ({
+          state: dead ? 'drained' : 'running',
+          leaderExitCode: dead ? 0 : null,
+          stdioClosed: dead,
+        })),
+        vi.spyOn(platformSystem, 'runtimeTerminateOwnedProviderTree').mockImplementation((actual, mode) => {
+          expect(actual).toBe(handle);
+          modes.push(mode);
+          if (mode === 'kill') {
+            dead = true;
+            for (const controller of controllers) controller.close();
+          }
+        }),
+        vi.spyOn(platformSystem, 'runtimeCloseOwnedProviderTree').mockImplementation(closed),
+      ];
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          for (const mock of mocks) mock.mockRestore();
+        }),
+      );
+      const wire = yield* spawnSemanticProcess(
+        {command: '/fixed/java', args: [], cwd: '/private/project', environment: {}},
+        {stdout: () => {}, stderr: () => {}, end: () => {}, failed: () => {}},
+      );
+      const finishing = yield* Effect.forkChild(wire.finish);
+      yield* TestClock.adjust(10000);
+      expect(yield* Fiber.join(finishing)).toMatchObject({drained: false, stdioClosed: true});
+      expect(modes).toEqual(['terminate', 'kill']);
+      expect(closed).not.toHaveBeenCalled();
+      expect(yield* wire.finish).toMatchObject({drained: false});
+      expect(modes).toEqual(['terminate', 'kill']);
+    }).pipe(
+      Effect.provideService(ChildEnvironmentPolicy, {sanitizeExternal: env => env, preserveIntendedChild: env => env}),
+    ),
+  );
+});

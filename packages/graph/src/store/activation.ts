@@ -1,3 +1,4 @@
+import {ACTIVATION_V2_PHYSICAL_COUNT_SQL, isLexicalV2Snapshot, ensureLexicalViewBinding} from './lexical_projection.js';
 import {CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY} from '../index_scope.js';
 import {DateTime, Effect, Option} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -122,7 +123,7 @@ const recordFoldForwardReceipt = Effect.fn('codeGraph.recordFoldForwardReceipt')
         + (SELECT COUNT(*) FROM activation_symbols)
         + (SELECT COUNT(*) FROM activation_symbol_lookup AS lookup
            WHERE lookup.evidence_path IN (SELECT path FROM activation_incremental_paths))
-        + (SELECT COUNT(*) FROM activation_symbol_terms)
+        + ${sql.unsafe(isLexicalV2Snapshot(snapshot.id) ? ACTIVATION_V2_PHYSICAL_COUNT_SQL : '(SELECT COUNT(*) FROM activation_symbol_terms)')}
         + (SELECT COUNT(*) FROM activation_edges)
         + (SELECT COUNT(*) FROM activation_reexport_provenance)
         + (SELECT COUNT(*) FROM activation_monikers
@@ -319,7 +320,7 @@ const activateStagedSnapshot = Effect.fn('codeGraph.activateStagedSnapshot')(fun
       (SELECT COUNT(*) FROM activation_symbol_lookup) AS lookup_keys,
       (SELECT COUNT(*) FROM activation_reexport_provenance) AS reexports,
       (SELECT COUNT(*) FROM activation_symbols) AS symbols,
-      (SELECT COUNT(*) FROM activation_symbol_terms) AS terms,
+      ${sql.unsafe(isLexicalV2Snapshot(snapshot.id) ? ACTIVATION_V2_PHYSICAL_COUNT_SQL : '(SELECT COALESCE(SUM(logical_posting_count),0) FROM activation_v2_counts)+(SELECT COUNT(*) FROM activation_symbol_terms)')} AS terms,
       (SELECT COUNT(*) FROM activation_workspace_scopes)
         + (SELECT COUNT(*) FROM activation_workspace_components)
         + (SELECT COUNT(*) FROM activation_workspace_dependencies)
@@ -573,6 +574,7 @@ const activateStagedSnapshot = Effect.fn('codeGraph.activateStagedSnapshot')(fun
         }
         yield* associateSnapshotFileShards(sql, snapshot, reusableBaseReceipt);
       }
+      yield* ensureLexicalViewBinding(sql, snapshot);
       yield* recordSnapshotExtractorGeneration(sql, snapshot.id);
       if (snapshotPackProvenance !== undefined) {
         yield* recordSnapshotPackProvenance(sql, snapshot.id, snapshotPackProvenance);
@@ -766,7 +768,7 @@ const activatePersistedIncrementalSnapshot = Effect.fn('codeGraph.activatePersis
           (SELECT COUNT(*) FROM activation_edges) AS edges,
           (SELECT COUNT(*) FROM activation_files) AS files,
           (SELECT COUNT(*) FROM activation_symbols) AS symbols,
-          (SELECT COUNT(*) FROM activation_symbol_terms) AS terms
+          ${sql.unsafe(isLexicalV2Snapshot(snapshot.id) ? ACTIVATION_V2_PHYSICAL_COUNT_SQL : '(SELECT COALESCE(SUM(logical_posting_count),0) FROM activation_v2_counts)+(SELECT COUNT(*) FROM activation_symbol_terms)')} AS terms
       `;
       const staged = stagedRows[0] ?? {edges: 0, files: 0, symbols: 0, terms: 0};
       yield* observe('validating-input', 'completed', counts.files + counts.symbols + counts.edges);
@@ -902,7 +904,9 @@ const activatePersistedIncrementalSnapshot = Effect.fn('codeGraph.activatePersis
         yield* observe('copying-terms', 'started');
         const compact = yield* copyActivationCompactLexicalFacts(sql, snapshot.id, 'all');
         if (compact.symbolCount !== Number(staged.symbols) || compact.postingCount !== Number(staged.terms)) {
-          return yield* CodeGraphStoreError.of('Persisted incremental compact lexical rows changed.');
+          return yield* CodeGraphStoreError.of(
+            `Persisted incremental compact lexical rows changed (${compact.symbolCount}/${staged.symbols} symbols, ${compact.postingCount}/${staged.terms} physical rows).`,
+          );
         }
         compactLexicalReceipt = Option.some(compact);
         yield* observe('copying-terms', 'completed', compact.postingCount);
@@ -936,6 +940,7 @@ const activatePersistedIncrementalSnapshot = Effect.fn('codeGraph.activatePersis
         if (!snapshot.dirty) yield* inheritSnapshotFileShards(sql, snapshot.id, baseSnapshotId);
         yield* associateSnapshotFileShards(sql, snapshot, reusableBaseReceipt);
       }
+      yield* ensureLexicalViewBinding(sql, snapshot);
       yield* recordSnapshotExtractorGeneration(sql, snapshot.id);
       if (snapshotPackProvenance !== undefined) {
         yield* recordSnapshotPackProvenance(sql, snapshot.id, snapshotPackProvenance);

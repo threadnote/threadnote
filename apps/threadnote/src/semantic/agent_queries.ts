@@ -14,7 +14,7 @@ import {ensureSemanticEndpoint} from './coordinator.js';
 import {LspFault} from './lsp_transport.js';
 import {semanticCompiledRuntimeIdentity} from './readiness_jobs.js';
 import {SemanticLanguage, SemanticSessionFault} from './provider.js';
-import {readSemanticHostProfile, SemanticHostProfileFault} from './host_profile.js';
+import {readSemanticHostProfile, semanticHostProfileName, SemanticHostProfileFault} from './host_profile.js';
 import {
   SemanticAgentQuery,
   SemanticAgentViewRequest,
@@ -548,6 +548,9 @@ export const runSemanticAgentViewWith = <ContextR = never>(
         ...('text' in parsed ? {text: parsed.text} : {}),
         ...('handle' in parsed ? {handle: parsed.handle} : {}),
         ...('expectedVersion' in parsed ? {expectedVersion: parsed.expectedVersion} : {}),
+        ...(parsed.action === 'open' && parsed.startup
+          ? {startup: parsed.startup, principal: EffectString.slice(0, -5)(semanticHostProfileName(config, worktree))}
+          : {}),
         milliseconds: parsed.milliseconds ?? 10000,
       },
     });

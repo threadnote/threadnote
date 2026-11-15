@@ -15,7 +15,10 @@ import {
   retrieveSemanticContextSymbol,
   filterSemanticContextMemory,
 } from '@threadnote/context/compiler';
-import {unavailableContextBriefCodeLinkedMemoryEvidence} from '@threadnote/context/memory-evidence';
+import {
+  mergeContextBriefMemoryEvidence,
+  unavailableContextBriefCodeLinkedMemoryEvidence,
+} from '@threadnote/context/memory-evidence';
 import {validateContextBriefMemoryCitations} from '@threadnote/context/citation_validation';
 import {
   selectVerifiedProcedureEvidence,
@@ -168,36 +171,57 @@ export const serveContextBriefNativeRead = Effect.fn('contextBrief.serveNativeRe
           ...(request.semantic === undefined ? {} : {semantic}),
         };
       }
-      case 'linked': {
+      case 'linked':
+      case 'memory': {
         const semantic = request.semantic;
-        if (semantic && (!semantic.binding || !semantic.repositoryIdentityKind || !semantic.selection.nodeId))
-          return {
-            ...fields,
-            ok: true as const,
-            operation: request.operation,
-            value: unavailableContextBriefCodeLinkedMemoryEvidence(
-              1,
-              semantic.selection.gap ?? 'semantic-symbol-target-unavailable',
-            ),
-          };
-        const memory = yield* retrieveContextBriefCodeLinkedMemoryEvidence(
-          request.config,
-          semantic?.selection.nodeId ? {...request.plan, codeRefs: [semantic.selection.nodeId]} : request.plan,
-          {allowedUriScopes: request.allowedUriScopes},
-        );
+        const linked =
+          semantic && (!semantic.binding || !semantic.repositoryIdentityKind || !semantic.selection.nodeId)
+            ? unavailableContextBriefCodeLinkedMemoryEvidence(
+                1,
+                semantic.selection.gap ?? 'semantic-symbol-target-unavailable',
+              )
+            : request.plan.codeRefs.length === 0
+              ? undefined
+              : yield* retrieveContextBriefCodeLinkedMemoryEvidence(
+                  request.config,
+                  semantic?.selection.nodeId ? {...request.plan, codeRefs: [semantic.selection.nodeId]} : request.plan,
+                  {allowedUriScopes: request.allowedUriScopes},
+                );
+        const filtered =
+          linked && semantic?.binding && semantic.repositoryIdentityKind && semantic.selection.nodeId
+            ? filterSemanticContextMemory(
+                linked,
+                semantic.selection.nodeId,
+                semantic.binding.graph,
+                semantic.repositoryIdentityKind,
+              )
+            : linked;
+        const value =
+          request.operation === 'memory'
+            ? mergeContextBriefMemoryEvidence(
+                request.lexicalMemory,
+                filtered,
+                request.candidateLimit,
+                request.plan.candidateLimit,
+              )
+            : (filtered ?? unavailableContextBriefCodeLinkedMemoryEvidence(0));
+        // Never reuse lexical receipts: only this exact merged set and fence are validated.
+        const citationValidations =
+          request.operation === 'memory'
+            ? EffectArray.every(value.candidates, candidate => candidate.codeCitations.length === 0)
+              ? []
+              : yield* validateContextBriefMemoryCitations(
+                  request.config,
+                  request.plan.scope,
+                  value.candidates,
+                  request.fence,
+                )
+            : undefined;
         return {
           ...fields,
           ok: true as const,
           operation: request.operation,
-          value:
-            semantic?.binding && semantic.repositoryIdentityKind && semantic.selection.nodeId
-              ? filterSemanticContextMemory(
-                  memory,
-                  semantic.selection.nodeId,
-                  semantic.binding.graph,
-                  semantic.repositoryIdentityKind,
-                )
-              : memory,
+          value: request.operation === 'memory' ? {...value, citationValidations} : value,
         };
       }
       case 'citations':

@@ -6,13 +6,20 @@ import fc from 'fast-check';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   initializeNativeCycle,
+  nativeCycleCanonicalJson,
   recordNativeCycleDelivery,
   validateNativeCyclePhase,
   type NativeCyclePlan,
 } from '../src/cycle.js';
 import type {NativeCycleSnapshot} from '../src/cycle_review.js';
 import type {NativeWorkflowState} from '../src/native.js';
-import {decodeNativeCycleRuntime} from '../src/cycle_runtime.js';
+import {
+  initializeNativeCycleSupplementalPublication,
+  appendNativeCycleSupplementalRecord,
+  nativeCycleSupplementalRef,
+  nativeCycleSupplementalRevision,
+  decodeNativeCycleRuntime,
+} from '../src/cycle_runtime.js';
 import {
   decodeNativeTaskActionRef,
   decodeNativeTaskCursor,
@@ -20,6 +27,7 @@ import {
   encodeNativeTaskActionRef,
   nativeTaskCursorMatches,
   projectNativeTaskView,
+  type NativeTaskCandidateWatch,
 } from '../src/task.js';
 
 const plan: NativeCyclePlan = {
@@ -187,6 +195,65 @@ describe('native task projection', () => {
     expect(() => encodeNativeTaskActionRef({...ref, workViewDigest: 'malformed'})).toThrow();
   });
 
+  it('keeps candidate and supplemental opaque closures distinct and complete', () => {
+    const ref = {
+      version: 1 as const,
+      kind: 'candidate-watch' as const,
+      runId: 'run',
+      generationHash: EffectString.repeat(64)('a'),
+      phaseId: 'phase-one',
+      phaseHash: EffectString.repeat(64)('b'),
+      snapshotId: 'source',
+      sourceHead: EffectString.repeat(40)('c'),
+      sourceTree: EffectString.repeat(40)('d'),
+      baselineHead: EffectString.repeat(40)('e'),
+      baselineTree: EffectString.repeat(40)('f'),
+      baselineRef: 'refs/heads/main',
+      watchId: 'candidate-watch',
+      consumerId: 'consumer',
+      wakeupId: 'wakeup',
+      payloadDigest: EffectString.repeat(64)('a'),
+    };
+    const candidateRefs = [
+      ref,
+      {...ref, kind: 'candidate-notice' as const, eventKey: 'wakeup:1:1'},
+      {...ref, kind: 'candidate-delivery' as const, watchDeliveryId: 'delivery'},
+      {...ref, kind: 'candidate-event' as const, watchDeliveryId: 'delivery', watchEventId: 'event'},
+      {
+        ...ref,
+        kind: 'candidate-work' as const,
+        watchEventId: 'event',
+        workViewDigest: EffectString.repeat(64)('a'),
+        workRowDigest: EffectString.repeat(64)('b'),
+      },
+    ];
+    for (const candidate of candidateRefs) {
+      expect(decodeNativeTaskActionRef(encodeNativeTaskActionRef(candidate))).toEqual(candidate);
+      expect(() => encodeNativeTaskActionRef({...candidate, sourceHead: undefined})).toThrow();
+      expect(() => encodeNativeTaskActionRef({...candidate, publicationId: EffectString.repeat(64)('c')})).toThrow();
+    }
+    expect(() => encodeNativeTaskActionRef({...ref, eventKey: 'wakeup:1:1'})).toThrow();
+    expect(() => encodeNativeTaskActionRef({...ref, kind: 'candidate-event', watchEventId: 'event'})).toThrow();
+    const publication = {
+      version: 1 as const,
+      kind: 'supplemental-publication' as const,
+      runId: 'run',
+      generationHash: ref.generationHash,
+      stateRevision: EffectString.repeat(64)('f'),
+      phaseId: ref.phaseId,
+      phaseHash: ref.phaseHash,
+      snapshotId: ref.snapshotId,
+      sourceHead: ref.sourceHead,
+      sourceTree: ref.sourceTree,
+      publicationId: EffectString.repeat(64)('d'),
+      publicationRef: EffectString.repeat(64)('e'),
+    };
+    expect(decodeNativeTaskActionRef(encodeNativeTaskActionRef(publication))).toEqual(publication);
+    expect(() => encodeNativeTaskActionRef({...publication, kind: 'validation'})).toThrow();
+    expect(() => encodeNativeTaskActionRef({...publication, stateRevision: undefined})).toThrow();
+    expect(() => encodeNativeTaskActionRef({...publication, watchId: 'candidate-watch'})).toThrow();
+  });
+
   it('is deterministic, bounded, and returns only actionable fields', () => {
     const revision = Effect.pipe('f', EffectString.repeat(64));
     const view = projectNativeTaskView(state, revision);
@@ -330,6 +397,76 @@ describe('native task projection', () => {
       }),
       {numRuns: 40},
     );
+  });
+
+  it('pages retained candidate recovery routes independently of canonical work and refuses a changed inventory cursor', () => {
+    const hash = (value: string) => EffectString.repeat(64)(value);
+    const object = (value: string) => EffectString.repeat(40)(value);
+    const rows: readonly NativeTaskCandidateWatch[] = Array.from({length: 18}, (_, index) => {
+      const watchId = `candidate-${index}`;
+      return {
+        diagnosticOnly: true,
+        watchId,
+        watchRevision: hash('a'),
+        runId: state.runId,
+        callerCwd: '/retained/checkout',
+        phaseId: 'phase-one',
+        snapshotId: `retained-${index}`,
+        prUrl: `https://github.com/example/repo/pull/${index + 1}`,
+        historical: index > 0,
+        collectorStatus: index > 0 ? 'stopped' : 'running',
+        ...(index > 0 ? {invalidation: {kind: 'candidate_invalidated' as const, reason: 'source-drift', at: 10}} : {}),
+        candidateWatchRef: encodeNativeTaskActionRef({
+          version: 1,
+          kind: 'candidate-watch',
+          runId: state.runId,
+          generationHash: hash('b'),
+          phaseId: 'phase-one',
+          phaseHash: hash('c'),
+          snapshotId: `retained-${index}`,
+          sourceHead: object('d'),
+          sourceTree: object('e'),
+          baselineHead: object('f'),
+          baselineTree: object('a'),
+          baselineRef: 'refs/heads/main',
+          watchId,
+          consumerId: `consumer-${index}`,
+          wakeupId: `wakeup-${index}`,
+          payloadDigest: hash('b'),
+        }),
+      };
+    });
+    const revision = hash('c');
+    const inventoryHash = hash('d');
+    const canonical = projectNativeTaskView(state, revision);
+    const input = {candidateWatches: rows, candidateHash: inventoryHash};
+    const first = projectNativeTaskView(state, revision, input);
+    expect(first.next).toEqual(canonical.next);
+    expect(first.phase).toEqual(canonical.phase);
+    expect(first.taskRef).toBe(canonical.taskRef);
+    expect(first.status).toBe(canonical.status);
+    expect(first.counts.candidateWatches).toBe(18);
+    expect(first.candidateWatches).toEqual(rows.slice(0, 16));
+    const cursor = decodeNativeTaskCursor(first.page.nextCursor!);
+    expect(cursor?.offset).toBe(16);
+    expect(nativeTaskCursorMatches(cursor!, first, inventoryHash)).toBe(true);
+    expect(nativeTaskCursorMatches(cursor!, first, hash('e'))).toBe(false);
+    const last = projectNativeTaskView(state, revision, {...input, offset: cursor!.offset});
+    expect(last.candidateWatches).toEqual(rows.slice(16));
+    expect(last.candidateWatches?.[0].callerCwd).toBe('/retained/checkout');
+    expect(last.candidateWatches?.[0].historical).toBe(true);
+    expect(last.candidateWatches?.[0].invalidation?.kind).toBe('candidate_invalidated');
+    expect(last.page.nextCursor).toBeUndefined();
+    const drifted = projectNativeTaskView(state, revision, {...input, planDrift: 'Plan changed'});
+    expect(drifted.next.action).toBe('reconcile-plan');
+    expect(drifted.candidateWatches).toEqual(rows.slice(0, 16));
+    expect(drifted.counts.candidateWatches).toBe(18);
+    const driftCursor = decodeNativeTaskCursor(drifted.page.nextCursor!);
+    expect(nativeTaskCursorMatches(driftCursor!, drifted, inventoryHash)).toBe(true);
+    expect(
+      projectNativeTaskView(state, revision, {...input, planDrift: 'Plan changed', offset: driftCursor!.offset})
+        .candidateWatches,
+    ).toEqual(rows.slice(16));
   });
 
   it('keeps emitted cursors within the accepted input bound for admitted generation lengths', () => {
@@ -681,6 +818,132 @@ describe('native task projection', () => {
         taskRef: expect.any(String),
       },
     );
+    const completedRuntime = {
+      ...runtime,
+      state: delivered,
+      snapshots: [
+        {snapshot: {...snapshot, head: acceptedHead, baseTree: runtime.baselines['phase-one'].tree}, incoming: []},
+      ],
+    };
+    const hash = (value: unknown) => sha256HexSync(nativeCycleCanonicalJson(value));
+    const source = {head: acceptedHead, tree, clean: true};
+    const pr = {
+      url: 'https://github.com/example/repo/pull/1',
+      headSha: acceptedHead,
+      branch: plan.phases[0].branch,
+      baseBranch: 'main',
+      state: 'open' as const,
+    };
+    let attached = initializeNativeCycleSupplementalPublication(
+      completedRuntime,
+      {
+        version: 1,
+        expectedRevision: nativeCycleSupplementalRevision(completedRuntime),
+        planDigest: hash(plan),
+        phaseId: 'phase-one',
+        phaseHash: delivered.phases['phase-one'].phaseHash,
+        snapshotId: snapshot.snapshotId,
+        validationDigest: hash(validation),
+        localReceiptDigest: hash(delivered.phases['phase-one'].delivery),
+        head: acceptedHead,
+        tree,
+        pr,
+        authority: 'Attach the existing authorized PR.',
+      },
+      source,
+    );
+    const publication = attached.state.supplementalPublications![0];
+    attached = appendNativeCycleSupplementalRecord(
+      attached,
+      {
+        publicationId: publication.publicationId,
+        publicationRef: nativeCycleSupplementalRef(publication),
+        expectedRevision: nativeCycleSupplementalRevision(attached),
+        event: {kind: 'provider-verified', pr, evidence: 'Matching provider observation.'},
+      },
+      source,
+    );
+    const projected = projectNativeTaskView({...state, cycle: attached}, 'publication-revision');
+    expect(projected).toMatchObject({
+      status: 'complete',
+      next: {action: 'complete'},
+      missingInputs: [],
+      counts: {supplementalPublications: 1},
+      supplementalPublications: [
+        {
+          publicationId: publication.publicationId,
+          phaseId: 'phase-one',
+          prUrl: pr.url,
+          publicationRef: nativeCycleSupplementalRef(attached.state.supplementalPublications![0]),
+          revision: nativeCycleSupplementalRevision(attached),
+          completed: false,
+        },
+      ],
+    });
+    expect(projectNativeTaskView({...state, cycle: completedRuntime}, 'legacy-revision')).not.toHaveProperty(
+      'supplementalPublications',
+    );
+    for (const event of [
+      {
+        kind: 'watch',
+        watch: {
+          prUrl: pr.url,
+          headSha: acceptedHead,
+          state: 'active',
+          stateDir: '/repo/watch',
+          consumerKind: 'orchestrator',
+          consumerId: 'supplemental-owner',
+          evidence: 'Active owned watcher.',
+        },
+      },
+      {kind: 'completed', evidence: 'Verified publication with active owned watcher.'},
+      {kind: 'merged', mergeCommit: acceptedHead, evidence: 'Provider merge observation.'},
+    ]) {
+      const owner = attached.state.supplementalPublications![0];
+      attached = appendNativeCycleSupplementalRecord(
+        attached,
+        {
+          publicationId: owner.publicationId,
+          publicationRef: nativeCycleSupplementalRef(owner),
+          expectedRevision: nativeCycleSupplementalRevision(attached),
+          event,
+        },
+        source,
+      );
+    }
+    expect(projectNativeTaskView({...state, cycle: attached}, 'merged-publication-revision')).toMatchObject({
+      status: 'complete',
+      next: {action: 'complete'},
+      supplementalPublications: [
+        {
+          completed: true,
+          watch: {
+            consumerId: 'supplemental-owner',
+            stateDir: '/repo/watch',
+            state: 'active',
+            recordRef: attached.state.supplementalPublications![0].records[1].operationId,
+          },
+        },
+      ],
+    });
+    const prior = attached.state.supplementalPublications![0].initialization;
+    attached = initializeNativeCycleSupplementalPublication(
+      attached,
+      {
+        ...prior,
+        expectedRevision: nativeCycleSupplementalRevision(attached),
+        pr: {...prior.pr, url: 'https://github.com/example/repo/pull/2'},
+      },
+      source,
+    );
+    const sharedRevision = nativeCycleSupplementalRevision(attached);
+    const publications = projectNativeTaskView(
+      {...state, cycle: attached},
+      'second-publication-revision',
+    ).supplementalPublications!;
+    expect(publications).toHaveLength(2);
+    expect(publications[0].revision).toBe(sharedRevision);
+    expect(publications[1].revision).toBe(sharedRevision);
   });
   it.each([
     {version: 1, previous: undefined, reviewMode: 'full'},

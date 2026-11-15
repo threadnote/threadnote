@@ -10,6 +10,7 @@ import {
   DateTime,
   Deferred,
   Effect,
+  Exit,
   Fiber,
   FileSystem,
   Layer,
@@ -857,25 +858,72 @@ describe('owned native ready-read boundary', () => {
             'Alpha bounded ready recall evidence.',
           ),
         );
-        const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000));
-        const response = yield* boundary.read({
-          operation: 'data',
-          config: f.config,
-          options: {
-            includeInactive: false,
-            query: 'alpha',
-            eligibility: {
-              kind: 'candidate-policy',
-              authority: 'any',
-              projects: {mode: 'allow-projects-and-projectless', projects: ['allowed']},
+        let summary: {outcome?: string; freshness?: string; maintenance?: string; maintenanceRequested?: boolean} = {};
+        yield* Effect.gen(function* () {
+          const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000));
+          const response = yield* boundary.read({
+            operation: 'data',
+            config: f.config,
+            options: {
+              includeInactive: false,
+              query: 'alpha',
+              eligibility: {
+                kind: 'candidate-policy',
+                authority: 'any',
+                projects: {mode: 'allow-projects-and-projectless', projects: ['allowed']},
+              },
             },
-          },
-        });
-        expect(response.outcome).toBe('success');
-        expect(recallIndexDataResult(response.value).candidates).toEqual([]);
-        expect(recallIndexDataResult(response.value).readState?.freshness).toBe('stale');
-        expect(response.maintenanceRequested).toBe(true);
-        expect(yield* f.fs.readFile(database)).toEqual(before);
+          });
+          const state = response.outcome === 'success' ? recallIndexDataResult(response.value).readState : undefined;
+          summary = {
+            outcome: response.outcome,
+            freshness: state?.freshness === 'stale' || state?.freshness === 'current' ? state.freshness : undefined,
+            maintenance:
+              state?.maintenance === 'queued' ||
+              state?.maintenance === 'unavailable' ||
+              state?.maintenance === 'unneeded'
+                ? state.maintenance
+                : undefined,
+            maintenanceRequested: response.maintenanceRequested,
+          };
+          expect(yield* f.fs.readFile(database)).toEqual(before);
+          expect(response.outcome).toBe('success');
+          expect(recallIndexDataResult(response.value).candidates).toEqual([]);
+          expect(recallIndexDataResult(response.value).readState?.freshness).toBe('stale');
+          expect(response.maintenanceRequested).toBe(true);
+        }).pipe(
+          Effect.onExit(exit => {
+            if (Exit.isSuccess(exit) && summary.maintenanceRequested !== false) return Effect.void;
+            return Effect.gen(function* () {
+              const observed = yield* readRecallLexicalDemand({...f.config, includeInactive: false}).pipe(
+                Effect.result,
+                Effect.timeoutOption(100),
+              );
+              const demand =
+                Option.isSome(observed) && Result.isSuccess(observed.value) ? observed.value.success : undefined;
+              const receiptStatus = Option.isNone(observed)
+                ? 'timeout'
+                : Result.isFailure(observed.value)
+                  ? 'unavailable'
+                  : demand === undefined
+                    ? 'missing'
+                    : 'present';
+              const encoded = JSON.stringify({
+                ...summary,
+                receiptStatus,
+                revision:
+                  demand?.revision !== undefined && /^[a-f0-9-]{36}$/u.test(demand.revision)
+                    ? demand.revision
+                    : undefined,
+                failures: demand?.failures,
+                completed: demand?.completedAt !== undefined,
+                backoff: demand?.notBefore !== undefined,
+              });
+              if (new TextEncoder().encode(encoded).length <= 1024)
+                yield* Console.error(`Ready read maintenance evidence: ${encoded}`);
+            }).pipe(Effect.interruptible, Effect.timeoutOption(250), Effect.ignoreCause);
+          }),
+        );
       }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
     {timeout: 10000},
   );

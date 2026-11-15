@@ -1,3 +1,12 @@
+import {completedLegacyCheckpointBase} from './incremental.js';
+import {
+  LexicalViewBindingContext,
+  lexicalViewBindingFor,
+  lexicalPhysicalSnapshotIdentity,
+  isLexicalV2Snapshot,
+  lexicalFileOrdinals,
+  lexicalSnapshotLogicalIdentity,
+} from '../store/lexical_projection.js';
 import {factBodyDiscovery} from '../store/utilities.js';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
@@ -5,9 +14,7 @@ import {deferCodeGraphVectorCompletion} from '../vector/publication.js';
 import {Clock, Effect, FileSystem, Option, Path} from 'effect';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
-import {CodeGraphProcessActivity} from '../runtime_ports.js';
 import type {CodeGraphBuildOwnerIdentity} from '../build/owner.js';
-import type {CodeGraphBuildResourceCoordinator} from '../build/resources.js';
 import {canonicalCodeGraphMonikers} from '../cross_repository/monikers.js';
 import {isNonResumableCodeGraphBuildFailure} from '../disk/capacity.js';
 import {coordinateCodeGraphBuild, measureCodeGraphAttribution} from './build_coordination.js';
@@ -40,6 +47,7 @@ import {
   extractorSetIdentityFromPackProvenance,
   factMaterializationBatches,
   forcedSnapshotIdentity,
+  sparseOverlaySnapshotIdentity,
   graphContentIdentity,
   incrementalMaterializationMetrics,
   initialMaterializationStorageTelemetry,
@@ -81,10 +89,12 @@ import {
   attemptCommittedDirtyRootAlias,
   prepareReadyAnalysisSummary,
   reuseReadySnapshot,
+  retiredSnapshotCleanupReporter,
+  withCodeGraphProcessLock,
+  writerSessionOptions,
   type ReusableCleanSnapshotInput,
 } from './snapshot_reuse.js';
 import type {
-  CodeGraphIndexOptions,
   CodeGraphBuildAndActivateInput,
   CodeGraphSourceVerification,
   CommittedBaseResult,
@@ -118,7 +128,6 @@ import {
   shardDonorIds,
   type CodeGraphDirectPersistentCapacityProtector,
   type CodeGraphMaterializationSpoolContext,
-  type CodeGraphRetiredSnapshotCleanupProgress,
   type CodeGraphReusableCleanBase,
   type CodeGraphStagingProgress,
   type CodeGraphStoreShape,
@@ -146,76 +155,13 @@ export function settleInterruptedCodeGraphBuild(
     : store.releasePersistentBuild(databasePath, snapshotId, CODE_GRAPH_INTERRUPTED_BUILD_SUMMARY, ownerToken);
 }
 
-export function withCodeGraphProcessLock<A, E, R>(
-  fs: FileSystem.FileSystem,
-  lockPath: string,
-  onContention: () => Effect.Effect<void>,
-  builderOperation: string,
-  effect: Effect.Effect<A, E, R>,
-  coordination?: {
-    readonly onAcquired: () => Effect.Effect<void, never>;
-    readonly onCompleted: () => Effect.Effect<void, never>;
-  },
-) {
-  return Effect.flatMap(CodeGraphProcessActivity, activity =>
-    activity.withActivity(
-      'graph-waiter',
-      'repository-lock',
-      withExclusiveFileLock(
-        fs,
-        lockPath,
-        {
-          ...CODE_GRAPH_LOCK_OPTIONS,
-          onContention,
-          ...(coordination ? {onAcquired: coordination.onAcquired, onCompleted: coordination.onCompleted} : {}),
-        },
-        activity.withActivity('graph-builder', builderOperation, effect),
-      ),
-    ),
-  );
-}
-
-export function writerSessionOptions(
-  layout: CodeGraphLayout,
-  options: Pick<CodeGraphIndexOptions, 'onProgress' | 'onSqliteWriterConfigured' | 'sqliteWriterTuning'>,
-  resumeProgress: () => Effect.Effect<void, unknown>,
-  resources?: CodeGraphBuildResourceCoordinator,
-) {
-  return {
-    cleanupCompletedBuildRows: true,
-    ...(options.onSqliteWriterConfigured ? {onSqliteWriterConfigured: options.onSqliteWriterConfigured} : {}),
-    onWriterContention: () =>
-      (resources?.assertWriterMayWait ?? Effect.void).pipe(
-        Effect.orDie,
-        Effect.andThen(options.onProgress?.({phase: 'waiting', reason: 'database-writer'}) ?? Effect.void),
-        Effect.ignore,
-      ),
-    onWriterAcquired: () =>
-      (resources?.acquireWriter ?? Effect.void).pipe(Effect.orDie, Effect.andThen(resumeProgress()), Effect.ignore),
-    onWriterReleased: () => (resources?.releaseWriter ?? Effect.void).pipe(Effect.orDie),
-    sqliteWriterTuning: {
-      reconstructibleBuildSynchronous: 'normal' as const,
-      ...options.sqliteWriterTuning,
-    },
-    writerLockPath: layout.databaseWriteLockPath,
-  } as const;
-}
-
-export function retiredSnapshotCleanupReporter(onProgress: CodeGraphIndexOptions['onProgress']) {
-  return (progress: CodeGraphRetiredSnapshotCleanupProgress) =>
-    (
-      onProgress?.({
-        completed: progress.snapshotsCompleted,
-        pagesCompleted: progress.pagesCompleted,
-        phase: 'reclaiming',
-        rowsDeleted: progress.rowsDeleted,
-        total: progress.snapshotsTotal,
-        unit: 'snapshots',
-      }) ?? Effect.void
-    ).pipe(Effect.ignore);
-}
-
-export {prepareReadyAnalysisSummary, reuseReadySnapshot};
+export {
+  prepareReadyAnalysisSummary,
+  reuseReadySnapshot,
+  retiredSnapshotCleanupReporter,
+  withCodeGraphProcessLock,
+  writerSessionOptions,
+};
 
 export {codeGraphBuildRequestKey} from './request/identity.js';
 
@@ -227,6 +173,7 @@ export const buildOwnedCleanSnapshot = Effect.fn('codeGraph.buildOwnedCleanSnaps
   readonly existing: CodeGraphSnapshot | undefined;
   readonly fallbackSnapshotId: string;
   readonly force: boolean;
+  readonly forceGeneration?: string;
   readonly sourceVerification?: CodeGraphSourceVerification;
   readonly fs: FileSystem.FileSystem;
   readonly identity: RepositoryIdentity;
@@ -263,7 +210,7 @@ export const buildOwnedCleanSnapshot = Effect.fn('codeGraph.buildOwnedCleanSnaps
       if (!input.force) {
         let ready = yield* input.store.currentLexicalReadySnapshotById(
           input.layout.databasePath,
-          input.logicalSnapshotId,
+          lexicalPhysicalSnapshotIdentity(input.logicalSnapshotId, 'full'),
         );
         if (!ready) {
           const extractorSet = extractorSetIdentity(input.inventory.files, input.languagePacks);
@@ -335,6 +282,12 @@ export const buildOwnedCleanSnapshot = Effect.fn('codeGraph.buildOwnedCleanSnaps
       const ownerToken = yield* input.store.claimPersistentBuild(input.layout.databasePath, input.identity, building, {
         logicalSnapshotId: input.logicalSnapshotId,
         owner: input.buildOwner,
+        lexicalBinding: lexicalViewBindingFor(
+          building.id,
+          input.logicalSnapshotId,
+          building.baseSnapshotId,
+          input.forceGeneration,
+        ),
       });
       return yield* buildAndActivate({
         ...input,
@@ -362,6 +315,9 @@ const attemptReusableCleanCandidate = Effect.fn('codeGraph.attemptReusableCleanC
   candidate: CodeGraphReusableCleanBase,
   extractorSet: string,
 ) {
+  const factored = isLexicalV2Snapshot(candidate.snapshot.id);
+  if (!factored && !(yield* completedLegacyCheckpointBase(input.store, input.layout.databasePath, candidate.snapshot)))
+    return Option.none<ReusableCleanSnapshotAttempt>();
   if (candidate.snapshot.id === input.logicalSnapshotId) return Option.none<ReusableCleanSnapshotAttempt>();
   if (!(yield* codeGraphScopedBaseReusable(input, candidate))) return Option.none<ReusableCleanSnapshotAttempt>();
   const baseByPath = new Map(EffectArray.map(candidate.files, file => [file.path, file]));
@@ -433,7 +389,9 @@ const attemptReusableCleanCandidate = Effect.fn('codeGraph.attemptReusableCleanC
             extractorSet,
             fileCount: candidate.snapshot.fileCount,
             graphContentId: graphContentIdentity(extractorSet, input.inventory.files, input.inventory.scope),
-            id: input.logicalSnapshotId,
+            id: factored
+              ? lexicalPhysicalSnapshotIdentity(input.logicalSnapshotId, 'alias', candidate.snapshot.id)
+              : input.logicalSnapshotId,
             repositoryId: input.identity.repositoryId,
             scopeId: input.inventory.scope?.scopeKey,
             state: 'ready',
@@ -453,6 +411,7 @@ const attemptReusableCleanCandidate = Effect.fn('codeGraph.attemptReusableCleanC
               workspace,
               input.languagePacks.activePackProvenance(EffectArray.map(input.inventory.files, file => file.path)),
             ),
+            {lexicalBinding: lexicalViewBindingFor(alias.id, input.logicalSnapshotId, candidate.snapshot.id)},
           );
           yield* input.onProgress?.({phase: 'activating', snapshotId: alias.id, subphase: 'promoting'}) ?? Effect.void;
           yield* verifyCommittedIndexInput({
@@ -525,7 +484,9 @@ const attemptReusableCleanCandidate = Effect.fn('codeGraph.attemptReusableCleanC
           extractorSet,
           fileCount: 0,
           graphContentId: graphContentIdentity(extractorSet, input.inventory.files, input.inventory.scope),
-          id: input.logicalSnapshotId,
+          id: factored
+            ? lexicalPhysicalSnapshotIdentity(input.logicalSnapshotId, 'overlay', candidate.snapshot.id)
+            : input.logicalSnapshotId,
           repositoryId: input.identity.repositoryId,
           scopeId: input.inventory.scope?.scopeKey,
           state: 'building',
@@ -700,10 +661,19 @@ export const attemptReusableDirtyBase = Effect.fn('codeGraph.attemptReusableDirt
     input.inventory.committedFiles,
     input.inventory.scope,
   );
-  const exactCommittedSnapshot = yield* input.store.currentLexicalReadySnapshotById(
+  const commitReady = yield* input.store.readySnapshotForCommit(
     input.layout.databasePath,
-    exactCommittedSnapshotId,
+    input.identity.repositoryId,
+    input.identity.headCommit,
+    committedExtractorSet,
+    input.inventory.scope?.scopeKey,
   );
+  const exactCommittedSnapshot =
+    (yield* input.store.currentLexicalReadySnapshotById(
+      input.layout.databasePath,
+      lexicalPhysicalSnapshotIdentity(exactCommittedSnapshotId, 'full'),
+    )) ??
+    (commitReady && lexicalSnapshotLogicalIdentity(commitReady) === exactCommittedSnapshotId ? commitReady : undefined);
   if (!retainedOverlayCandidate && exactCommittedSnapshot && exactCommittedSnapshot.baseSnapshotId === undefined)
     return Option.none();
   const committedFileSetFingerprint = reusableBaseFileSetFingerprint(input.inventory.committedFiles);
@@ -751,13 +721,6 @@ export const attemptReusableDirtyBase = Effect.fn('codeGraph.attemptReusableDirt
     input.store.reusableFoldForwardBase
       ? yield* input.store.reusableFoldForwardBase(input.layout.databasePath, exactCommittedSnapshot.id)
       : undefined;
-  const commitReady = yield* input.store.readySnapshotForCommit(
-    input.layout.databasePath,
-    input.identity.repositoryId,
-    input.identity.headCommit,
-    committedExtractorSet,
-    input.inventory.scope?.scopeKey,
-  );
   const commitReceipt = commitReady
     ? yield* input.store.reusableBaseReceipt(input.layout.databasePath, commitReady.id)
     : undefined;
@@ -951,7 +914,10 @@ export const ensureCommittedBase = Effect.fn('codeGraph.ensureCommittedBase')(fu
     Effect.gen(function* () {
       if (!input.force) {
         const ready =
-          (yield* input.store.currentLexicalReadySnapshotById(input.layout.databasePath, logicalSnapshotId)) ??
+          (yield* input.store.currentLexicalReadySnapshotById(
+            input.layout.databasePath,
+            forcedSnapshotIdentity(logicalSnapshotId, undefined),
+          )) ??
           (yield* reusableReadySnapshotForCleanCommit({
             scopeId: input.inventory.scope?.scopeKey,
             databasePath: input.layout.databasePath,
@@ -993,6 +959,12 @@ export const ensureCommittedBase = Effect.fn('codeGraph.ensureCommittedBase')(fu
       const ownerToken = yield* input.store.claimPersistentBuild(input.layout.databasePath, input.identity, building, {
         logicalSnapshotId,
         owner: input.buildOwner,
+        lexicalBinding: lexicalViewBindingFor(
+          building.id,
+          logicalSnapshotId,
+          building.baseSnapshotId,
+          input.forceGeneration,
+        ),
       });
       return yield* buildAndActivate({
         ...input,
@@ -1216,6 +1188,7 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
     let temporaryDatabaseBytes = 0;
     let temporaryDatabaseHighWaterBytes = 0;
     let materializedRows: CodeGraphMaterializationRows = {};
+    const lexicalOrdinals = lexicalFileOrdinals(EffectArray.map(input.inventory.files, file => file.path));
     const stageMilliseconds: Partial<Record<CodeGraphMaterializationActivity['stage'], number>> = {};
     const metrics = (finalFactsBytesTotal?: number): CodeGraphMaterializationMetrics => ({
       attributionMilliseconds,
@@ -1377,6 +1350,7 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
             EffectArray.map(group, batch => ({
               batchIndex: batch.batchIndex,
               bodyDiscovery: batch.bodyDiscovery,
+              lexicalFileOrdinals: batch.lexicalFileOrdinals,
               edges: batch.edges,
               finalFactBytes: batch.factBytes,
               monikers: batch.monikers,
@@ -1680,6 +1654,7 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
         }) ?? Effect.void;
         const candidate: PendingMaterializationBatch = {
           bodyDiscovery: factBodyDiscovery(finalFacts),
+          lexicalFileOrdinals: lexicalOrdinals,
           attributionMilliseconds: finalBatchIndex === 0 ? batchAttributionMilliseconds : 0,
           batchCachedFactBytes,
           batchFiles,
@@ -1808,25 +1783,40 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
     snapshotId: ready.id,
     subphase: 'writing-and-checkpointing',
   }) ?? Effect.void;
+  const bindingLogicalId =
+    input.sparseProjection && input.committedBase && input.inventory.overlayFingerprint
+      ? sparseOverlaySnapshotIdentity(
+          input.identity,
+          input.committedBase.snapshot.id,
+          ready.extractorSet,
+          input.inventory.overlayFingerprint,
+          input.inventory.scope,
+        )
+      : snapshotIdentity(input.identity, ready.dirty, ready.extractorSet, input.inventory.files, input.inventory.scope);
+  const activationBinding = lexicalViewBindingFor(ready.id, bindingLogicalId, ready.baseSnapshotId);
   const activationLease = yield* Effect.acquireRelease(
-    input.store.activateStaged(
-      input.layout.databasePath,
-      input.identity,
-      ready,
-      reusableBaseReceipt,
-      CODE_GRAPH_ACTIVATION_LEASE_MILLISECONDS,
-      activity =>
-        (
-          input.onProgress?.({
-            activity,
-            phase: 'activating',
-            snapshotId: ready.id,
-          }) ?? Effect.void
-        ).pipe(Effect.ignore),
-      persistentCapacityGuard,
-      packProvenance,
-      directPersistentMaterialization && !incrementalApplied && materializedShardAssociationsComplete,
-    ),
+    input.store
+      .activateStaged(
+        input.layout.databasePath,
+        input.identity,
+        ready,
+        reusableBaseReceipt,
+        CODE_GRAPH_ACTIVATION_LEASE_MILLISECONDS,
+        activity =>
+          (
+            input.onProgress?.({
+              activity,
+              phase: 'activating',
+              snapshotId: ready.id,
+            }) ?? Effect.void
+          ).pipe(Effect.ignore),
+        persistentCapacityGuard,
+        packProvenance,
+        directPersistentMaterialization && !incrementalApplied && materializedShardAssociationsComplete,
+      )
+      .pipe(effect =>
+        activationBinding ? Effect.provideService(effect, LexicalViewBindingContext, activationBinding) : effect,
+      ),
     lease =>
       Option.match(lease, {
         onNone: () => Effect.void,

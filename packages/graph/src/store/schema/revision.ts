@@ -60,6 +60,7 @@ export const CODE_GRAPH_PERSISTENT_SCHEMA_CAPABILITIES = [
   'explicit-cleanup-preparation',
   'graph-scope-authority',
   'embedding-demand',
+  'factored-lexical-authority',
 ] as const;
 
 export type CodeGraphPersistentSchemaCapability = (typeof CODE_GRAPH_PERSISTENT_SCHEMA_CAPABILITIES)[number];
@@ -82,7 +83,9 @@ export type CodeGraphPersistentSchemaRevisionKey =
   | 'citation-alias-checkpoint-predecessor'
   | 'checkpoint-import'
   | 'graph-scope-authority'
-  | 'embedding-demand';
+  | 'embedding-demand'
+  | 'factored-lexical'
+  | 'checkpoint-completion';
 
 export type CodeGraphPersistentSchemaUpgradeRoute =
   | 'adopt-current-contract'
@@ -91,6 +94,8 @@ export type CodeGraphPersistentSchemaUpgradeRoute =
   | 'extend-checkpoint-import'
   | 'extend-graph-scope-authority'
   | 'extend-embedding-demand'
+  | 'extend-checkpoint-completion'
+  | 'extend-factored-lexical'
   | 'retire-legacy-references-and-rebuild'
   | 'rebuild-extensions';
 
@@ -217,6 +222,37 @@ export const CODE_GRAPH_PERSISTENT_SCHEMA_REVISIONS = [
   profile(
     19,
     'embedding-demand',
+    'background-readable',
+    'extend-factored-lexical',
+    [
+      ...citationColumn,
+      'checkpoint-import',
+      'direct-current-contract-adoption',
+      'explicit-cleanup-preparation',
+      'graph-scope-authority',
+      'embedding-demand',
+    ],
+    'current',
+  ),
+  profile(
+    20,
+    'factored-lexical',
+    'background-readable',
+    'extend-checkpoint-completion',
+    [
+      ...citationColumn,
+      'checkpoint-import',
+      'direct-current-contract-adoption',
+      'explicit-cleanup-preparation',
+      'graph-scope-authority',
+      'embedding-demand',
+      'factored-lexical-authority',
+    ],
+    'current',
+  ),
+  profile(
+    21,
+    'checkpoint-completion',
     'current',
     'current',
     [
@@ -226,6 +262,7 @@ export const CODE_GRAPH_PERSISTENT_SCHEMA_REVISIONS = [
       'explicit-cleanup-preparation',
       'graph-scope-authority',
       'embedding-demand',
+      'factored-lexical-authority',
     ],
     'current',
   ),
@@ -249,7 +286,7 @@ function requiredProfile<const Key extends CodeGraphPersistentSchemaRevisionKey>
   return value;
 }
 
-export const CODE_GRAPH_PERSISTENT_SCHEMA_CURRENT = requiredProfile('embedding-demand');
+export const CODE_GRAPH_PERSISTENT_SCHEMA_CURRENT = requiredProfile('checkpoint-completion');
 export const CODE_GRAPH_PERSISTENT_SCHEMA_CITATION_PREDECESSOR = requiredProfile('sorted-spool-citation-predecessor');
 export const CODE_GRAPH_PERSISTENT_SCHEMA_CHECKPOINT_PREDECESSOR = requiredProfile(
   'citation-alias-checkpoint-predecessor',

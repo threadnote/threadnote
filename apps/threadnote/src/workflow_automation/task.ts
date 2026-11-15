@@ -1,28 +1,43 @@
-import {Array as EffectArray, Effect, FileSystem, Path, Predicate, Schema, String as EffectString} from 'effect';
+import {
+  Array as EffectArray,
+  Effect,
+  FileSystem,
+  Option as EffectOption,
+  Path,
+  Predicate,
+  Schema,
+  String as EffectString,
+} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import {
   decodeNativeTaskCursor,
   nativeTaskCursorMatches,
+  nativeTaskPageCursor,
   nativeTaskCardRef,
   projectNativeTaskView,
   encodeNativeTaskActionRef,
 } from '@threadnote/workflow-automations/task';
 import {nativeCyclePhaseHash} from '@threadnote/workflow-automations/cycle';
-import {nativeCycleHasBasePlanTransition} from '@threadnote/workflow-automations/cycle-runtime';
+import {
+  nativeCycleHasBasePlanTransition,
+  nativeCycleInvalidTailBasis,
+} from '@threadnote/workflow-automations/cycle-runtime';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {readNativeWorkflowState} from './store.js';
+import {nativeTaskWatchIdentityForConsumer} from './task_pr_watch.js';
 import {readNativeTaskInspection, runWorkflowAutomation} from './index.js';
 import {gitValue} from '../utils.js';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
-import {readNativeWatch} from './watch_store.js';
+import {readNativeCandidateWatchInventory, readNativeWatch} from './watch_store.js';
 import {verifyNativeCycleBaseRequalification, nativeCycleIsAncestor} from './cycle_git.js';
 import {
   resolveNativeTaskBaseRef,
   selectNativeTaskSameLabelIntegration,
   isCurrentTaskTargetForRequalification,
 } from './task_action_helpers.js';
+import {verifyNativeCycleSnapshotEvidence, verifyNativeCycleUnreviewedRebase} from './cycle_recovery.js';
 import {currentNativeTaskRef} from './task_action_helpers.js';
 import {decodeJournal} from './closeout_request_schema.js';
 import {readNativeCloseoutJournal} from './closeout_store.js';
@@ -36,6 +51,21 @@ const requestSchema = Schema.Struct({
   cursor: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(2048))),
   phaseId: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128))),
 });
+
+export const encodeNativeAuthoringTaskRef = (ref: {
+  readonly version: 1;
+  readonly kind: 'spec' | 'plan';
+  readonly runId: string;
+  readonly generationHash: string;
+  readonly operationId: string;
+  readonly documentHash: string;
+  readonly stateRevision: string;
+}) =>
+  'authorref-v1.' +
+  EffectString.replaceAll(
+    '/',
+    '_',
+  )(EffectString.replaceAll('+', '-')(EffectString.replace(/=+$/u, '')(btoa(stableJson(ref)))));
 
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
 
@@ -105,11 +135,18 @@ const historicalPhaseProof = (
       item.report.status === 'complete',
   );
   if (reviews.length !== 1) return undefined;
+  const watchIdentity = nativeTaskWatchIdentityForConsumer(
+    stored.state.runId,
+    phaseId,
+    receipt.pr.url,
+    receipt.watch.consumerId,
+  );
+  if (!watchIdentity) return undefined;
   return {
     phaseId,
     title: phase.title,
     prUrl: receipt.pr.url,
-    watchId: `pr-${EffectString.slice(0, 48)(sha256HexSync(`${stored.state.runId}\n${phaseId}`))}`,
+    watchId: watchIdentity.watchId,
     phaseHash: proof.phaseHash,
     baseline,
     snapshot,
@@ -284,7 +321,7 @@ const baseRequalificationRoute = (
     if (fromBranches.size !== 1) return undefined;
     const fromBaseBranch = [...fromBranches][0];
     if (!fromBaseBranch) return undefined;
-    const oldBaseResult = yield* resolveNativeTaskBaseRef(checkout, fromBaseBranch).pipe(Effect.result);
+    const oldBaseResult = yield* verifyNativeCycleSnapshotEvidence(checkout, prior).pipe(Effect.result);
     const headResult = yield* gitValue(['rev-parse', '--verify', '--end-of-options', 'HEAD^{commit}'], checkout).pipe(
       Effect.result,
     );
@@ -297,14 +334,9 @@ const baseRequalificationRoute = (
       newBaseResult._tag === 'Failure'
     )
       return undefined;
-    if (
-      oldBaseResult.success === undefined ||
-      headResult.success === undefined ||
-      branchResult.success === undefined ||
-      newBaseResult.success === undefined
-    )
+    if (headResult.success === undefined || branchResult.success === undefined || newBaseResult.success === undefined)
       return undefined;
-    const priorBaseHead = oldBaseResult.success.commit;
+    const priorBaseHead = prior.declaredBaseHead;
     const currentHead = EffectString.trim(headResult.success);
     const currentBranch = EffectString.trim(branchResult.success);
     const newBaseHead = newBaseResult.success.commit;
@@ -401,6 +433,67 @@ const sameLabelIntegrationRoute = (
     };
   });
 
+const invalidTailRequalificationRoute = (
+  stored: NonNullable<Effect.Success<ReturnType<typeof readNativeWorkflowState>>>,
+  checkout: string,
+  view: ReturnType<typeof projectNativeTaskView>,
+) =>
+  Effect.gen(function* () {
+    const runtime = stored.state.cycle;
+    const phaseId = view.next.phaseId;
+    if (
+      !runtime ||
+      !phaseId ||
+      !['review', 'resolve-review-failure', 'expand-review-budget'].includes(view.next.action)
+    )
+      return undefined;
+    const selected = nativeCycleInvalidTailBasis(runtime, phaseId);
+    const phase = EffectOption.getOrUndefined(
+      EffectArray.findFirst(runtime.state.plan.phases, item => item.id === phaseId),
+    );
+    const baseline = runtime.baselines[phaseId];
+    if (
+      !selected ||
+      !phase ||
+      !baseline ||
+      !['active', 'pending'].includes(runtime.state.phases[phaseId]?.status ?? '')
+    )
+      return undefined;
+    const observed = yield* resolveNativeTaskBaseRef(checkout, phase.baseBranch).pipe(Effect.option);
+    if (observed._tag === 'None' || !observed.value || observed.value.commit === selected.leaf.declaredBaseHead)
+      return undefined;
+    const liveBaseHead = observed.value.commit;
+    return {
+      action: 'requalify-invalid-tail' as const,
+      phaseId,
+      liveBaseHead,
+      basisSnapshotId: selected.basis.snapshot.snapshotId,
+      taskRef: nativeTaskCardRef(
+        stored.state,
+        stored.revision,
+        'requalify-invalid-tail',
+        phaseId,
+        selected.leaf.snapshotId,
+        sha256HexSync(stableJson([selected.leaf.snapshotId, selected.basis.snapshot.snapshotId, liveBaseHead])),
+      ),
+      predecessorRef: encodeNativeTaskActionRef({
+        version: 1,
+        kind: 'snapshot',
+        runId: stored.state.runId,
+        generationHash: sha256HexSync(stored.state.generation),
+        stateRevision: stored.revision,
+        phaseId,
+        phaseHash: selected.leaf.phaseHash,
+        snapshotId: selected.leaf.snapshotId,
+        sourceHead: selected.leaf.head,
+        sourceTree: selected.leaf.tree,
+        baselineHead: baseline.head,
+        baselineTree: baseline.tree,
+        baselineRef: baseline.pinnedRef,
+      }),
+    };
+  });
+
 /** Read the canonical run, then use the guarded native inspection path before projecting a task. */
 export const readNativeTaskView = (config: RuntimeConfig, input: unknown) =>
   Effect.gen(function* () {
@@ -416,8 +509,13 @@ export const readNativeTaskView = (config: RuntimeConfig, input: unknown) =>
     const callerCwd = yield* fs
       .realPath(request.callerCwd)
       .pipe(Effect.mapError(() => fail('workspace-not-found', 'callerCwd must resolve to an existing checkout.')));
-    const checkout = yield* gitValue(['rev-parse', '--show-toplevel'], callerCwd);
-    if (!checkout) return yield* fail('workspace-not-found', 'callerCwd must be inside a Git checkout.');
+    const reportedCheckout = yield* gitValue(['rev-parse', '--show-toplevel'], callerCwd);
+    if (!reportedCheckout) return yield* fail('workspace-not-found', 'callerCwd must be inside a Git checkout.');
+    const checkout = yield* fs
+      .realPath(reportedCheckout)
+      .pipe(
+        Effect.mapError(() => fail('workspace-not-found', 'The Git checkout root must resolve to an existing path.')),
+      );
     const stored = yield* readNativeWorkflowState(config, request.runId);
     if (!stored) return yield* fail('run-not-found', 'This native run does not exist.');
     const system = yield* SystemInfo;
@@ -439,10 +537,57 @@ export const readNativeTaskView = (config: RuntimeConfig, input: unknown) =>
     }
     const planDrift = 'planDrift' in inspected ? inspected.planDrift : undefined;
     const authoringResult = inspected.taskAuthoring;
-    const authoring =
+    const authoringValue =
       authoringResult && 'currentPlan' in authoringResult && Predicate.isObject(authoringResult.currentPlan)
         ? authoringResult.currentPlan
         : undefined;
+    const authoringRoot = authoringValue && Predicate.isObject(authoringValue.root) ? authoringValue.root : undefined;
+    const authoringKind =
+      authoringValue && (authoringValue.kind === 'spec' || authoringValue.kind === 'plan')
+        ? authoringValue.kind
+        : undefined;
+    const authoringRootOperation =
+      authoringRoot && authoringKind
+        ? EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              [...stored.state.operations].reverse(),
+              operation =>
+                operation.status === 'verified' &&
+                operation.intent.role === 'authoring-root' &&
+                operation.intent.artifactKey === 'author-root-' + authoringKind &&
+                operation.artifact?.uri === authoringRoot.uri &&
+                operation.artifact.revision === authoringRoot.revision,
+            ),
+          )
+        : undefined;
+    const authoringRef =
+      authoringValue && authoringKind && authoringRootOperation && typeof authoringValue.documentHash === 'string'
+        ? encodeNativeAuthoringTaskRef({
+            version: 1,
+            kind: authoringKind,
+            runId: stored.state.runId,
+            generationHash: sha256HexSync(stored.state.generation),
+            operationId: authoringRootOperation.intent.operationId,
+            documentHash: authoringValue.documentHash,
+            stateRevision: stored.revision,
+          })
+        : undefined;
+    const authoring =
+      authoringValue &&
+      authoringRef &&
+      Predicate.isObject(authoringValue.next) &&
+      authoringValue.next.action === 'compact-confirm'
+        ? {
+            ...authoringValue,
+            authoringRef,
+            continuation: {
+              tool: 'workflow_task_author',
+              authoringRef,
+              read: {command: 'read', detail: 'document'},
+              save: {command: 'save'},
+            },
+          }
+        : authoringValue;
     const afterRead = yield* readNativeWorkflowState(config, request.runId);
     if (afterRead?.revision !== stored.revision)
       return yield* fail('inspection-failed', 'The native run changed while reading its current authoring root.');
@@ -545,6 +690,9 @@ export const readNativeTaskView = (config: RuntimeConfig, input: unknown) =>
           ),
         )
       : undefined;
+    const candidateInventory = yield* readNativeCandidateWatchInventory(config, stored, checkout);
+    const candidateWatches = EffectArray.map(candidateInventory.rows, row => ({...row, diagnosticOnly: true as const}));
+    const discoveryHash = sha256HexSync(stableJson([historicalCandidateHash ?? null, candidateInventory.digest]));
     const uncheckedView = projectNativeTaskView(stored.state, stored.revision, {
       ...(request.role === undefined ? {} : {role: request.role}),
       ...(planDrift === undefined ? {} : {planDrift}),
@@ -578,19 +726,30 @@ export const readNativeTaskView = (config: RuntimeConfig, input: unknown) =>
       ...(planDrift === undefined ? {} : {planDrift}),
       ...(acceptedSnapshotCurrent ? {} : {acceptedSnapshotCurrent: false}),
       ...(historicalCandidates.length > 0 ? {historicalWatchCount: historicalCandidates.length} : {}),
-      ...(historicalCandidateHash ? {candidateHash: historicalCandidateHash} : {}),
+      ...(candidateWatches.length > 0 ? {candidateWatches} : {}),
+      candidateHash: discoveryHash,
       ...(offset === 0 ? {} : {offset}),
     });
-    const projectAt = (offset: number) =>
-      continueAuthoring(projectNativeTaskView(stored.state, stored.revision, projectionOptions(offset)));
+    const projectAt = (offset: number) => {
+      const view = continueAuthoring(projectNativeTaskView(stored.state, stored.revision, projectionOptions(offset)));
+      return view.page.nextOffset === undefined
+        ? view
+        : {
+            ...view,
+            page: {
+              ...view.page,
+              nextCursor: nativeTaskPageCursor({...view, candidateHash: discoveryHash}, view.page.nextOffset),
+            },
+          };
+    };
     const initialView = projectAt(0);
     let selectedView = initialView;
     if (request.cursor !== undefined) {
       const cursor = decodeNativeTaskCursor(request.cursor);
-      if (!cursor || !nativeTaskCursorMatches(cursor, initialView, historicalCandidateHash))
+      if (!cursor || !nativeTaskCursorMatches(cursor, initialView, discoveryHash))
         return yield* fail(
           'stale-cursor',
-          'The native task or eligible historical-watch set changed. Restart with workflow_task_view to get a current task card.',
+          'The native task or retained watch inventory changed. Restart with workflow_task_view to get a current task card.',
         );
       selectedView = projectAt(cursor.offset);
     }
@@ -601,10 +760,40 @@ export const readNativeTaskView = (config: RuntimeConfig, input: unknown) =>
     const result = pageWatches.length > 0 ? {...selectedView, historicalWatches: pageWatches} : selectedView;
     const withBaseRequalification = (view: ReturnType<typeof projectNativeTaskView>) =>
       Effect.gen(function* () {
-        const route = yield* sameLabelIntegrationRoute(config, stored, checkout, view);
-        if (route) return {...view, sameLabelBaseIntegration: route};
-        const legacy = yield* baseRequalificationRoute(config, stored, checkout, view);
-        return legacy ? {...view, baseRequalification: legacy} : view;
+        const sameLabel = yield* sameLabelIntegrationRoute(config, stored, checkout, view);
+        const route = yield* baseRequalificationRoute(config, stored, checkout, view);
+        const invalid = yield* invalidTailRequalificationRoute(stored, checkout, view);
+        const runtime = stored.state.cycle;
+        const snapshotRef = view.phase?.snapshot?.snapshotRef;
+        const prior = runtime
+          ? EffectOption.getOrUndefined(
+              EffectArray.findFirst(runtime.snapshots, entry => entry.snapshot.snapshotId === view.next.snapshotId),
+            )?.snapshot
+          : undefined;
+        const phase = runtime
+          ? EffectOption.getOrUndefined(
+              EffectArray.findFirst(runtime.state.plan.phases, candidate => candidate.id === view.next.phaseId),
+            )
+          : undefined;
+        const recovery =
+          runtime && prior && phase && snapshotRef && view.status === 'ready' && view.next.action === 'review'
+            ? yield* verifyNativeCycleUnreviewedRebase(checkout, prior, runtime, phase).pipe(Effect.result)
+            : undefined;
+        return {
+          ...view,
+          ...(sameLabel ? {sameLabelBaseIntegration: sameLabel} : {}),
+          ...(route ? {baseRequalification: route} : {}),
+          ...(invalid ? {invalidTailRequalification: invalid} : {}),
+          ...(recovery?._tag === 'Success'
+            ? {
+                unreviewedRebaseRecovery: {
+                  action: 'recover-unreviewed-rebase' as const,
+                  snapshotRef: snapshotRef!,
+                  userAuthorityRequired: true as const,
+                },
+              }
+            : {}),
+        };
       });
     if (request.phaseId === undefined) return yield* withBaseRequalification(result);
     const runtime = stored.state.cycle;

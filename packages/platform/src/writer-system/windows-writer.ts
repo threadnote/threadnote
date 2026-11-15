@@ -6,6 +6,7 @@ import {RuntimeWriterFault, writerFail as fail} from './fault.js';
 import {withNativeArguments} from './native-arguments.js';
 import {
   windowsAddress,
+  windowsKernel,
   windowsSystemLibrary,
   windowsTokenPrincipal,
   readWindowsWriterProcessIdentity,
@@ -40,6 +41,38 @@ const outstanding = new Set<Resources>();
 let ownershipUnknown = false;
 function assertAcquisitionAvailable(): void {
   if (ownershipUnknown || outstanding.size >= maximumBundles) fail('identity');
+}
+/** Self ownership is native-derived; the serialized PID is only a value to compare. */
+export function assertWindowsWriterLeaseOwner(token: string, captureNative: WindowsNativeResourceOwner): void {
+  const owner: unknown = JSON.parse(token);
+  if (
+    typeof owner !== 'object' ||
+    owner === null ||
+    !('version' in owner) ||
+    owner.version !== 1 ||
+    !('token' in owner) ||
+    typeof owner.token !== 'string' ||
+    owner.token.length === 0 ||
+    !('processId' in owner) ||
+    !('processStartIdentity' in owner)
+  )
+    return fail('identity');
+  const kernel = windowsKernel(captureNative);
+  try {
+    // GetCurrentProcess returns a borrowed pseudo-handle, including the all-ones value.
+    // It is neither an owned HANDLE nor subject to CloseHandle/windowsHandle validation.
+    const processId = kernel.symbols.GetProcessId(kernel.symbols.GetCurrentProcess());
+    if (
+      !Number.isSafeInteger(processId) ||
+      processId <= 0 ||
+      processId > 0xffffffff ||
+      owner.processId !== processId ||
+      owner.processStartIdentity !== readWindowsWriterProcessIdentity(processId)
+    )
+      return fail('identity');
+  } finally {
+    kernel.close(); // The same Resources ledger owns this library, including failed release.
+  }
 }
 interface Resource {
   state: 'owned' | 'closed' | 'close-unknown';
@@ -258,6 +291,30 @@ const stable = (a: NativeFileIdentity, b: NativeFileIdentity) =>
   a.size === b.size;
 const sameSecurity = (a: WindowsFileSecurity, b: WindowsFileSecurity) =>
   a.owner === b.owner && equalBytes(a.bytes, b.bytes);
+/** Fixed diagnostic projection of observations already made by the closing bracket. No native reads. */
+export function windowsWitnessClosingDifference(
+  before: NativeFileIdentity,
+  after: NativeFileIdentity,
+  securityBefore: WindowsFileSecurity,
+  securityAfter: WindowsFileSecurity,
+) {
+  for (const field of [
+    'volumeId',
+    'fileId',
+    'dev',
+    'ino',
+    'birthtime',
+    'attributes',
+    'changed',
+    'modified',
+    'links',
+    'size',
+  ] as const)
+    if (before[field] !== after[field]) return field;
+  if (securityBefore.owner !== securityAfter.owner) return 'security-owner';
+  if (!equalBytes(securityBefore.bytes, securityAfter.bytes)) return 'security-bytes';
+  return undefined;
+}
 function projected(path: string, id: NativeFileIdentity, directory: boolean): RuntimeWriterIdentity {
   const info = native.lstatSync(path, {bigint: true});
   const fileId = EffectString.split(id.fileId, ',');
@@ -709,8 +766,13 @@ function openTarget(
             index < opening.length - 1 ? resources.servicingOwner : undefined,
           ),
           after = windowsFileIdentity(resources.kernel, current.resource.handle);
-        if (!stable(current.identity, after) || !sameSecurity(current.security, security))
-          return fail('source-changed');
+        if (!stable(current.identity, after) || !sameSecurity(current.security, security)) {
+          const role = index < root.chain.length ? 'root' : index === opening.length - 1 ? 'target' : 'ancestor',
+            field = windowsWitnessClosingDifference(current.identity, after, current.security, security),
+            error = RuntimeWriterFault.make({reason: 'source-changed'});
+          error.message = `windows-witness-closing:${role}:${index}:${field ?? 'unclassified'}`;
+          throw error;
+        }
       }
       check();
       const current = sourceWitness(resources.principal, opening, observed.bytes);
@@ -1167,21 +1229,7 @@ function privateDirectory(root: RootState, strict: boolean): WindowsPrivateDirec
     },
     acquireLease(name, token) {
       mutation(() => {});
-      const owner: unknown = JSON.parse(token);
-      if (
-        typeof owner !== 'object' ||
-        owner === null ||
-        !('version' in owner) ||
-        owner.version !== 1 ||
-        !('token' in owner) ||
-        typeof owner.token !== 'string' ||
-        owner.token.length === 0 ||
-        !('processId' in owner) ||
-        owner.processId !== process.pid ||
-        !('processStartIdentity' in owner) ||
-        owner.processStartIdentity !== readWindowsWriterProcessIdentity(process.pid)
-      )
-        return fail('identity');
+      assertWindowsWriterLeaseOwner(token, resources.captureNative);
       const bytes = new TextEncoder().encode(`${token}\n`);
       if (bytes.length > 4096) return fail('private-storage');
       let created: WindowsPrivateCreatedFile;

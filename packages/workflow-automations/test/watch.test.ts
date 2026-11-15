@@ -1070,3 +1070,30 @@ describe('native merge conflict metadata', () => {
     }
   });
 });
+
+it('candidate invalidation is typed, idempotent and preserves pending delivery and retained work', () => {
+  const initial = recordNativeWatchLifecycle(withConsumer(state()), 'watcher_error', 'retained-diagnostic', 20);
+  const relay = relayNativeWatch(initial, 'consumer-1', 30);
+  const delivered = required(relay.delivery);
+  const event = delivered.events[0];
+  const retained = recordNativeWatchDispositions(
+    relay.state,
+    'consumer-1',
+    delivered.id,
+    [
+      {
+        eventId: event.id,
+        status: 'open',
+        reason: 'Pending diagnostic',
+        evidence: 'Retained source observation',
+      },
+    ],
+    40,
+  );
+  const invalid = recordNativeWatchLifecycle(retained, 'candidate_invalidated', 'candidate-source-drift', 50);
+  expect(invalid.events.slice(0, -1)).toEqual(retained.events);
+  expect(invalid.events.at(-1)?.kind).toBe('candidate_invalidated');
+  expect(invalid.delivery).toEqual(retained.delivery);
+  expect(invalid.work).toEqual(retained.work);
+  expect(recordNativeWatchLifecycle(invalid, 'candidate_invalidated', 'candidate-source-drift', 60)).toEqual(invalid);
+});

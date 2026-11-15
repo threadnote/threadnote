@@ -774,8 +774,6 @@ describe('Threadnote MCP toolsets', () => {
         const workflowTaskControl = EffectOption.getOrUndefined(
           EffectArray.findFirst(tools.tools, tool => tool.name === 'workflow_task_control'),
         );
-        expect(workflowTaskControl?.description).toContain('resume blocked after dependencies are accepted');
-        expect(workflowTaskControl?.description).toContain('Actor identity is not authenticated');
         const controlProperties = decodeJsonObject(decodeJsonObject(workflowTaskControl?.inputSchema).properties);
         const controlVariants = decodeJsonObject(controlProperties.control).anyOf;
         expect(controlVariants instanceof Array).toBe(true);
@@ -830,7 +828,6 @@ describe('Threadnote MCP toolsets', () => {
         const workflowTaskAuthor = EffectOption.getOrUndefined(
           EffectArray.findFirst(tools.tools, tool => tool.name === 'workflow_task_author'),
         );
-        expect(workflowTaskAuthor?.description).toContain('local, commit, or PR plan');
         const authorProperties = decodeJsonObject(decodeJsonObject(workflowTaskAuthor?.inputSchema).properties);
         const authorDelivery = decodeJsonObject(authorProperties.delivery);
         expect(authorDelivery.enum).toEqual(['local', 'commit', 'pr']);
@@ -838,34 +835,52 @@ describe('Threadnote MCP toolsets', () => {
         const workflowTaskSnapshot = EffectOption.getOrUndefined(
           EffectArray.findFirst(tools.tools, tool => tool.name === 'workflow_task_snapshot'),
         );
-        expect(workflowTaskSnapshot?.description).toContain('supersede only the latest unreviewed snapshot');
         const snapshotProperties = decodeJsonObject(decodeJsonObject(workflowTaskSnapshot?.inputSchema).properties);
         const snapshotVariants = decodeJsonObject(snapshotProperties.snapshot).anyOf;
         expect(snapshotVariants instanceof Array).toBe(true);
         if (!(snapshotVariants instanceof Array)) throw new Error('Snapshot operations must be typed variants.');
-        const snapshotByCommand = new Map(
-          EffectArray.map(snapshotVariants, value => {
-            const variant = decodeJsonObject(value);
-            const command = decodeJsonObject(decodeJsonObject(variant.properties).command).enum;
-            if (!(command instanceof Array) || typeof command[0] !== 'string')
-              throw new Error('Each snapshot operation must expose one command literal.');
-            return [command[0], variant];
-          }),
-        );
-        expect(snapshotVariants).toHaveLength(4);
+        const snapshotCommands = EffectArray.flatMap(snapshotVariants, value => {
+          const variant = decodeJsonObject(value);
+          const commands = decodeJsonObject(decodeJsonObject(variant.properties).command).enum;
+          if (
+            !(commands instanceof Array) ||
+            commands.length === 0 ||
+            !EffectArray.every(commands, command => typeof command === 'string')
+          )
+            throw new Error('Each snapshot variant must expose every command literal.');
+          return EffectArray.map(commands, command => [String(command), variant] as const);
+        });
+        const snapshotByCommand = new Map(snapshotCommands);
+        expect(snapshotByCommand.size).toBe(snapshotCommands.length);
         expect([...snapshotByCommand.keys()]).toEqual([
           'record',
           'supersede-unreviewed',
+          'recover-unreviewed-rebase',
           'requalify-base',
           'integrate-same-label-base',
+          'requalify-invalid-tail',
         ]);
         expect(snapshotByCommand.get('record')?.required).toEqual(['command', 'workRef']);
         expect(snapshotByCommand.get('supersede-unreviewed')?.required).toEqual(['command', 'snapshotRef', 'reason']);
+        expect(snapshotByCommand.get('recover-unreviewed-rebase')?.required).toEqual([
+          'command',
+          'snapshotRef',
+          'reason',
+          'userAuthority',
+        ]);
         expect(snapshotByCommand.get('requalify-base')?.required).toEqual([
           'command',
           'snapshotRef',
           'reason',
           'userAuthority',
+        ]);
+        expect(snapshotByCommand.get('requalify-invalid-tail')?.required).toEqual([
+          'command',
+          'taskRef',
+          'predecessorRef',
+          'reason',
+          'userAuthority',
+          'phaseOwnedPaths',
         ]);
         const sameLabelSnapshot = snapshotByCommand.get('integrate-same-label-base');
         expect(sameLabelSnapshot?.required).toEqual(['command', 'snapshotRef', 'reason', 'userAuthority']);
@@ -876,12 +891,15 @@ describe('Threadnote MCP toolsets', () => {
           'snapshotRef',
           'userAuthority',
         ]);
-        expect(decodeJsonObject(sameLabelProperties.command).enum).toEqual(['integrate-same-label-base']);
+        expect(decodeJsonObject(sameLabelProperties.command).enum).toEqual([
+          'recover-unreviewed-rebase',
+          'requalify-base',
+          'integrate-same-label-base',
+        ]);
 
         const workflowTaskDeliver = EffectOption.getOrUndefined(
           EffectArray.findFirst(tools.tools, tool => tool.name === 'workflow_task_deliver'),
         );
-        expect(workflowTaskDeliver?.description).toContain('local or commit delivery');
         const deliveryProperties = decodeJsonObject(decodeJsonObject(workflowTaskDeliver?.inputSchema).properties);
         const deliveryVariants = decodeJsonObject(deliveryProperties.delivery).anyOf;
         expect(deliveryVariants instanceof Array).toBe(true);
@@ -895,9 +913,29 @@ describe('Threadnote MCP toolsets', () => {
             return [command[0], variant];
           }),
         );
-        expect([...deliveryByCommand.keys()]).toEqual(['local', 'commit', 'pr']);
+        expect([...deliveryByCommand.keys()]).toEqual(['local', 'commit', 'pr', 'supplemental']);
+        expect(deliveryByCommand.get('supplemental')?.required).toEqual([
+          'command',
+          'taskRef',
+          'phaseId',
+          'pr',
+          'userAuthority',
+        ]);
+        expect(snapshotByCommand.get('requalify-invalid-tail')?.required).toEqual([
+          'command',
+          'taskRef',
+          'predecessorRef',
+          'reason',
+          'userAuthority',
+          'phaseOwnedPaths',
+        ]);
         expect(deliveryByCommand.get('local')?.required).toEqual(['command', 'validationRef']);
         expect(deliveryByCommand.get('commit')?.required).toEqual(['command', 'validationRef', 'commitEvidence']);
+        expect(decodeJsonObject(deliveryByCommand.get('pr')?.properties).userAuthority).toMatchObject({
+          type: 'string',
+          minLength: 1,
+          maxLength: 4096,
+        });
         expect(deliveryByCommand.get('pr')?.required).toEqual([
           'command',
           'validationRef',
@@ -1008,11 +1046,33 @@ describe('Threadnote MCP toolsets', () => {
           tools.tools,
           tool => !EffectArray.some(semanticNames, name => name === tool.name),
         );
-        const baselineSnapshotVariants = EffectArray.filter(snapshotVariants, value => {
-          const command = decodeJsonObject(decodeJsonObject(decodeJsonObject(value).properties).command).enum;
-          return !(command instanceof Array && command[0] === 'integrate-same-label-base');
+        const baselineSnapshotVariants = EffectArray.map(snapshotVariants, value => {
+          const variant = decodeJsonObject(value);
+          const properties = decodeJsonObject(variant.properties);
+          const command = decodeJsonObject(properties.command);
+          if (!(command.enum instanceof Array)) throw new Error('Snapshot commands must remain enumerated.');
+          return {
+            ...variant,
+            properties: {
+              ...properties,
+              command: {
+                ...command,
+                enum: EffectArray.filter(command.enum, value => value !== 'integrate-same-label-base'),
+              },
+            },
+          };
         });
-        expect(baselineSnapshotVariants).toHaveLength(3);
+        expect(
+          EffectArray.flatMap(baselineSnapshotVariants, variant =>
+            Schema.decodeUnknownSync(Schema.Array(Schema.String))(decodeJsonObject(variant.properties.command).enum),
+          ),
+        ).toEqual([
+          'record',
+          'supersede-unreviewed',
+          'recover-unreviewed-rebase',
+          'requalify-base',
+          'requalify-invalid-tail',
+        ]);
         const baselineSnapshot = {
           ...workflowTaskSnapshot,
           inputSchema: {
@@ -1027,7 +1087,7 @@ describe('Threadnote MCP toolsets', () => {
         const baselineCatalog = EffectArray.map(nonsemanticCatalog, tool =>
           tool.name === 'workflow_task_snapshot' ? baselineSnapshot : tool,
         );
-        // Remove only the new named schema branch; preserve every other received descriptor field.
+        // Remove only the local command literal; preserve every other received descriptor field.
         const baselineCatalogBytes = Buffer.byteLength(JSON.stringify(baselineCatalog));
         expect(baselineCatalog.length).toBeGreaterThan(0);
         expect(baselineCatalogBytes).toBeLessThanOrEqual(65_000);

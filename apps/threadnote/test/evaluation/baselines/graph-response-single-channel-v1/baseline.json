@@ -1,16 +1,16 @@
 {
   "version": 1,
-  "sourceCommit": "30475f6899bf8512eef8ebdcf71541ba8f1e04f7",
+  "sourceCommit": "7665e703e177b826bb4d673d35d6b8fe1d75652a",
   "fixtureHash": "c4c45a6bcc25517df1fdae711f19f4989e13fde6b4763d596d547c6757230e7d",
   "measurement": "combined serialized text plus structuredContent UTF-8 bytes",
   "queries": [
-    {"id": "definition-exclusive-lock", "dualBytes": 2378, "textBytes": 2225},
-    {"id": "path-app-to-lock", "dualBytes": 3392, "textBytes": 2713},
-    {"id": "impact-lock", "dualBytes": 18419, "textBytes": 14203},
-    {"id": "documentation-recovery", "dualBytes": 2395, "textBytes": 2225},
-    {"id": "missing-payment-service", "dualBytes": 815, "textBytes": 676}
+    {"id": "definition-exclusive-lock", "dualBytes": 2386, "textBytes": 2229},
+    {"id": "path-app-to-lock", "dualBytes": 3400, "textBytes": 2717},
+    {"id": "impact-lock", "dualBytes": 18427, "textBytes": 14207},
+    {"id": "documentation-recovery", "dualBytes": 1969, "textBytes": 2229},
+    {"id": "missing-payment-service", "dualBytes": 823, "textBytes": 680}
   ],
-  "totals": {"dualBytes": 27399, "textBytes": 22042},
+  "totals": {"dualBytes": 27005, "textBytes": 22062},
   "agentEnvelopeComparison": {
     "comparisonBaseCommit": "30475f6899bf8512eef8ebdcf71541ba8f1e04f7",
     "measurement": "serialized model-facing MCP text UTF-8 bytes; dual also includes structuredContent",
@@ -26,16 +26,16 @@
     },
     "after": {
       "queries": [
-        {"id": "definition-exclusive-lock", "agentBytes": 932, "dualBytes": 2378, "textBytes": 2225},
-        {"id": "path-app-to-lock", "agentBytes": 855, "dualBytes": 3392, "textBytes": 2713},
-        {"id": "impact-lock", "agentBytes": 1408, "dualBytes": 18419, "textBytes": 14203},
-        {"id": "documentation-recovery", "agentBytes": 869, "dualBytes": 2395, "textBytes": 2225},
-        {"id": "missing-payment-service", "agentBytes": 104, "dualBytes": 815, "textBytes": 676}
+        {"id": "definition-exclusive-lock", "agentBytes": 932, "dualBytes": 2386, "textBytes": 2229},
+        {"id": "path-app-to-lock", "agentBytes": 855, "dualBytes": 3400, "textBytes": 2717},
+        {"id": "impact-lock", "agentBytes": 1408, "dualBytes": 18427, "textBytes": 14207},
+        {"id": "documentation-recovery", "agentBytes": 869, "dualBytes": 1969, "textBytes": 2229},
+        {"id": "missing-payment-service", "agentBytes": 104, "dualBytes": 823, "textBytes": 680}
       ],
-      "totals": {"agentBytes": 4168, "dualBytes": 27399, "estimatedTokens": 1390, "textBytes": 22042}
+      "totals": {"agentBytes": 4168, "dualBytes": 27005, "estimatedTokens": 1390, "textBytes": 22062}
     },
     "savings": {"agentBytes": 14475, "estimatedTokens": 4825, "percent": 77.6},
-    "caveat": "The five deterministic synthetic queries measure response-envelope bytes, not provider-billed tokens or verified task completion. Impact uses a complete connected behavioral core. Query returns the top three ranked nodes and relationships between them unless nodeLimit explicitly requests a larger result. Both operations treat the token budget as a ceiling rather than refilling it. Agent mode renders the same selected graph as concise readable lines; dual and text retain structured compatibility."
+    "caveat": "The five deterministic synthetic queries measure response-envelope bytes, not provider-billed tokens or verified task completion. Impact uses a complete connected behavioral core. Query returns the top three ranked nodes and relationships between them unless nodeLimit explicitly requests a larger result. Both operations treat the token budget as a ceiling rather than refilling it. At the default 800-token ceiling, documentation-recovery dual returns one node and one edge while retaining totalNodes=8, totalEdges=12 and explicit truncation; text returns two nodes and two edges. Agent mode renders the same selected graph as concise readable lines; dual and text retain structured compatibility."
   },
   "modelPilot": {
     "model": "gpt-5.6-luna",

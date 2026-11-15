@@ -1,3 +1,4 @@
+import {CODE_GRAPH_SNAPSHOT_ID_PATTERN} from './lexical_projection.js';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Clock, DateTime, Effect, Predicate} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -293,7 +294,7 @@ const claimWorktreeReconciliationCandidates = Effect.fn('codeGraph.claimWorktree
             typeof row.repository_id !== 'string' ||
             !/^[0-9a-f]{64}$/.test(row.repository_id) ||
             !/^[0-9a-f]{64}$/.test(row.worktree_id) ||
-            !/^cgsn_[0-9a-f]{40}(?:-direct|-full-[0-9a-f]{16})?$/.test(row.snapshot_id) ||
+            !CODE_GRAPH_SNAPSHOT_ID_PATTERN.test(row.snapshot_id) ||
             !['building', 'failed', 'ready', 'retired'].includes(row.snapshot_state) ||
             (Number(row.tombstoned) !== 0 && Number(row.tombstoned) !== 1),
         )

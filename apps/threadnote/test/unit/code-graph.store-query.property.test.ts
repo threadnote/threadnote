@@ -28,8 +28,21 @@ import {
   CODE_GRAPH_FILE_BLOB_AUTHORITY_TRIGGER_SQL,
 } from '@threadnote/graph/store/cache/authority';
 import {neighborQuery, pathQuery} from '@threadnote/graph/query';
-import {codeGraphIdentitySelectors} from '@threadnote/graph/store/utilities';
-import type {CodeGraphEdge, CodeGraphProvenance} from '@threadnote/graph/types';
+import {
+  codeGraphIdentitySelectors,
+  preparedSymbolTerms,
+  projectLexicalSymbols,
+  lexicalPhysicalSnapshotIdentity,
+  lexicalViewBindingMatches,
+} from '@threadnote/graph/store/utilities';
+import {captureBodyDiscovery} from '@threadnote/graph/languages/body_discovery';
+import {sha256HexSync} from '@threadnote/platform/sha256';
+import type {
+  CodeGraphEdge,
+  CodeGraphProvenance,
+  CodeGraphSymbol,
+  CodeGraphInventoryFile,
+} from '@threadnote/graph/types';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -61,7 +74,7 @@ interface LexicalPostingSpec {
   readonly weight: number;
 }
 
-type LexicalFixtureFormat = 'compact' | 'legacy';
+type LexicalFixtureFormat = 'compact' | 'legacy' | 'v2';
 
 const edgeSpec = FC.record({
   confidence: FC.integer({max: 100, min: 0}),
@@ -1002,6 +1015,159 @@ describe('code graph indexed query properties', () => {
     {fastCheck: {numRuns: 80}},
   );
 
+  fcEffectProp(
+    it,
+    'preserves actual persisted V2 weighted candidates, body exclusion, overlays and indexed term entry',
+    {
+      base: FC.uniqueArray(
+        FC.record({id: FC.integer({min: 0, max: 5}), name: FC.constantFrom('alpha', 'shared', 'éclair', '\u{10000}')}),
+        {selector: value => value.id, maxLength: 6},
+      ),
+      current: FC.uniqueArray(
+        FC.record({id: FC.integer({min: 0, max: 5}), name: FC.constantFrom('alpha', 'shared', 'éclair', '\u{10000}')}),
+        {selector: value => value.id, maxLength: 6},
+      ),
+      deleted: FC.uniqueArray(FC.integer({min: 0, max: 7}), {maxLength: 8}),
+      mode: FC.constantFrom('full' as const, 'direct' as const, 'overlay' as const, 'alias' as const),
+      saturated: FC.boolean(),
+      limit: FC.integer({min: 1, max: 20}),
+      terms: FC.array(
+        FC.constantFrom(
+          'alpha',
+          'shared',
+          'éclair',
+          'e\u0301clair',
+          '\u{10000}',
+          '~body:v1:alpha',
+          'bodyonly',
+          'signatureterm',
+          'documentationterm',
+          'qualifiedterm',
+        ),
+        {maxLength: 35},
+      ),
+    },
+    ({base, current, deleted, mode, saturated, limit, terms}) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const store = yield* CodeGraphStore;
+          const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-graph-v2-query-property-'});
+          const databasePath = path.join(root, 'graph-v3.sqlite');
+          yield* store.initialize(databasePath);
+          const before = lexicalV2QueryFixture(base, saturated);
+          expect([...new Set(EffectArray.map(before.rows, row => row.weight))].sort()).toEqual([1, 2, 3, 4, 5]);
+          const after = lexicalV2QueryFixture(current, saturated, mode === 'alias');
+          const hasBase = mode === 'overlay' || mode === 'alias';
+          const deletedIds = mode === 'alias' ? [] : deleted;
+          const baseId = lexicalPhysicalSnapshotIdentity('cgsn_' + EffectString.repeat(40)('a'), 'full');
+          const dirty = mode === 'direct' || mode === 'overlay';
+          const fingerprint = dirty ? EffectString.repeat(64)('c') : null;
+          const visibleSymbols = (mode === 'alias' ? before : after).symbols.length;
+          const binding = {
+            logicalSnapshotId: 'cgsn_' + EffectString.repeat(40)('b'),
+            mode,
+            baseSnapshotId: hasBase ? baseId : undefined,
+            orderRevision: 1 as const,
+          };
+          const currentId = lexicalPhysicalSnapshotIdentity(binding.logicalSnapshotId, mode, binding.baseSnapshotId);
+          expect(lexicalViewBindingMatches(currentId, binding.logicalSnapshotId, binding)).toBe(true);
+          yield* Effect.sync(() => {
+            const database = new Database(databasePath, {strict: true});
+            try {
+              database.transaction(() => {
+                insertRepository(database);
+                insertSnapshot(database, baseId, undefined, 0);
+                insertSnapshot(database, currentId, hasBase ? baseId : undefined, 0);
+                insertLexicalSnapshot(database, baseId, before.rows, 'v2');
+                insertLexicalSnapshot(database, currentId, after.rows, 'v2');
+                database
+                  .query('UPDATE snapshots SET dirty=?, overlay_fingerprint=?, symbol_count=? WHERE id=?')
+                  .run(dirty ? 1 : 0, fingerprint, visibleSymbols, currentId);
+                const view = database.query('INSERT INTO lexical_v2_views VALUES (?, ?, ?, ?, NULL, 1)');
+                view.run(baseId, 'cgsn_' + EffectString.repeat(40)('a'), 'full', null);
+                view.run(currentId, binding.logicalSnapshotId, mode, hasBase ? baseId : null);
+                const deletion = database.query('INSERT INTO snapshot_symbol_deletions VALUES (?, ?)');
+                for (const id of deletedIds) deletion.run(currentId, lexicalSymbolId(id));
+                persistLexicalV2QueryFixture(database, baseId, before.projection);
+                persistLexicalV2QueryFixture(database, currentId, after.projection);
+              })();
+            } finally {
+              database.close(false);
+            }
+          });
+          expect((yield* store.currentLexicalReadySnapshotById(databasePath, currentId))?.id).toBe(currentId);
+          const replaced = new Set(EffectArray.map(after.symbols, symbol => symbol.id));
+          const removed = new Set(EffectArray.map(deletedIds, lexicalSymbolId));
+          const expected = [
+            ...after.rows,
+            ...(hasBase
+              ? EffectArray.filter(before.rows, row => !replaced.has(row.symbol_id) && !removed.has(row.symbol_id))
+              : []),
+          ];
+          const database = new Database(databasePath, {readonly: true, strict: true});
+          try {
+            const canonical = codeGraphEffectiveSymbolTermsQueryStatement(currentId, hasBase ? baseId : undefined);
+            expect(
+              database.query<LexicalCanonicalRow, SQLQueryBindings[]>(canonical.text).all(...canonical.parameters),
+            ).toEqual(
+              [...expected].sort(
+                (a, b) =>
+                  Buffer.compare(Buffer.from(a.term), Buffer.from(b.term)) ||
+                  Buffer.compare(Buffer.from(a.symbol_id), Buffer.from(b.symbol_id)),
+              ),
+            );
+            for (const wanted of [
+              terms,
+              [],
+              ['no-such-term'],
+              ['bodyonly', '~body:v1:bodyonly'],
+              ['shared', 'alpha', 'signature0', 'documentation0', 'qualified0', 'qualified39'],
+              [...EffectArray.makeBy(24, i => 'absent' + i), 'shared'],
+            ]) {
+              const statement = codeGraphTermCandidateQueryStatement(
+                currentId,
+                hasBase ? baseId : undefined,
+                wanted,
+                limit,
+              );
+              const actual = database
+                .query<{readonly score: number; readonly symbol_id: string}, SQLQueryBindings[]>(statement.text)
+                .all(...statement.parameters);
+              const metadata = EffectArray.filter(expected, row => !EffectString.startsWith('~body:v1:')(row.term));
+              expect(actual).toEqual(
+                lexicalCandidateReference(metadata, new Set([...new Set(wanted)].slice(0, 24)), limit),
+              );
+            }
+            const planStatement = codeGraphTermCandidateQueryStatement(
+              currentId,
+              hasBase ? baseId : undefined,
+              ['shared', 'alpha'],
+              limit,
+            );
+            const plan = queryPlan(database, planStatement.text, planStatement.parameters);
+            expect(EffectArray.join(plan, '\n')).toContain(
+              'SEARCH term USING COVERING INDEX sqlite_autoindex_lexical_compact_terms_1 (snapshot_key=? AND term=?)',
+            );
+            expect(EffectArray.join(plan, '\n')).toContain(
+              'SEARCH posting USING PRIMARY KEY (snapshot_key=? AND term_key=? AND origin_mask=?)',
+            );
+            expect(EffectArray.join(plan, '\n')).toContain(
+              'SEARCH shared USING PRIMARY KEY (snapshot_key=? AND term_key=?)',
+            );
+            expect(EffectArray.filter(plan, item => EffectString.startsWith('USE TEMP B-TREE')(item))).toEqual([
+              'USE TEMP B-TREE FOR GROUP BY',
+              'USE TEMP B-TREE FOR ORDER BY',
+            ]);
+          } finally {
+            database.close(false);
+          }
+        }),
+      ).pipe(provideTestLayer(ApplicationLayer)),
+    {fastCheck: {numRuns: 35}},
+  );
+
   it.effect('bounds every branch before merging a high-degree adjacency result', () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -1318,6 +1484,122 @@ interface LexicalCanonicalRow {
   readonly weight: number;
 }
 
+function persistLexicalV2QueryFixture(
+  database: Database,
+  snapshotId: string,
+  projection: ReturnType<typeof projectLexicalSymbols>,
+): void {
+  database.query('INSERT INTO lexical_compact_snapshots (snapshot_id) VALUES (?)').run(snapshotId);
+  const snapshotKey = requiredRow(
+    database
+      .query<{readonly snapshot_key: number}, [string]>(
+        'SELECT snapshot_key FROM lexical_compact_snapshots WHERE snapshot_id=?',
+      )
+      .get(snapshotId),
+  ).snapshot_key;
+  const termKeys = EffectArray.map(projection.terms, term => {
+    database.query('INSERT INTO lexical_compact_terms (snapshot_key,term) VALUES (?,?)').run(snapshotKey, term);
+    return requiredRow(
+      database
+        .query<{readonly term_key: number}, [number, string]>(
+          'SELECT term_key FROM lexical_compact_terms WHERE snapshot_key=? AND term=?',
+        )
+        .get(snapshotKey, term),
+    ).term_key;
+  });
+  for (const scope of projection.scopes)
+    database
+      .query('INSERT INTO lexical_v2_scopes VALUES (?,?,?,?,?)')
+      .run(snapshotKey, scope.scopeOrdinal, scope.path, scope.contentHash, scope.packageName);
+  for (const member of projection.members)
+    database
+      .query('INSERT INTO lexical_v2_members VALUES (?,?,?,?)')
+      .run(snapshotKey, member.scopeOrdinal, member.memberOrdinal, member.symbolId);
+  for (const owner of projection.owners)
+    database
+      .query('INSERT INTO lexical_v2_owners VALUES (?,?,?,?,?,?)')
+      .run(
+        snapshotKey,
+        termKeys[owner.termOrdinal],
+        owner.originMask,
+        owner.scopeOrdinal,
+        owner.memberOrdinal,
+        owner.metadataWeight,
+      );
+  for (const shared of projection.shared)
+    database
+      .query('INSERT INTO lexical_v2_shared VALUES (?,?,?)')
+      .run(snapshotKey, termKeys[shared.termOrdinal], shared.scopeOrdinal);
+  database
+    .query('INSERT INTO lexical_v2_formats VALUES (?,?,?,?,?,?,?,?,?)')
+    .run(
+      snapshotId,
+      2,
+      projection.physicalRowCount + 3,
+      projection.logicalPostingCount,
+      projection.members.length,
+      projection.terms.length,
+      projection.scopes.length,
+      projection.owners.length,
+      projection.shared.length,
+    );
+}
+
+function lexicalV2QueryFixture(
+  input: readonly {readonly id: number; readonly name: string}[],
+  saturated: boolean,
+  alias = false,
+) {
+  const actors = alias ? [] : [...input, {id: 6, name: 'shared'}, {id: 7, name: 'shared'}];
+  const lines = EffectArray.map(actors, actor => `function ${actor.name}() { "bodyonly shared alpha éclair"; }`);
+  const content = EffectArray.join(lines, '\n');
+  const file: CodeGraphInventoryFile = {
+    path:
+      'src/shared/\u{10000}/' +
+      (saturated
+        ? EffectArray.join(
+            EffectArray.makeBy(40, i => 'segment' + i),
+            '/',
+          ) + '/'
+        : '') +
+      'module.ts',
+    content,
+    contentHash: sha256HexSync(content),
+    blobId: EffectString.repeat(40)('a'),
+    language: 'typescript',
+    mode: '100644',
+    size: Buffer.byteLength(content),
+    source: 'worktree',
+  };
+  const field = (prefix: string, fallback: string) =>
+    saturated
+      ? EffectArray.join(
+          EffectArray.makeBy(40, i => prefix + i),
+          ' ',
+        )
+      : fallback;
+  const symbols: CodeGraphSymbol[] = EffectArray.map(actors, (actor, index) => ({
+    id: lexicalSymbolId(actor.id),
+    name: actor.name,
+    qualifiedName: field('qualified', 'qualifiedterm') + '.' + actor.name,
+    signature: field('signature', 'signatureterm'),
+    documentation: field('documentation', 'documentationterm'),
+    path: file.path,
+    contentHash: file.contentHash,
+    packageName: field('package', '@scope/shared'),
+    language: 'typescript',
+    kind: 'function',
+    exported: true,
+    span: {line: index + 1, column: 1, endLine: index + 1, endColumn: lines[index].length + 1},
+  }));
+  const facts = {path: file.path, symbols, edges: [], diagnostics: []};
+  const body = captureBodyDiscovery(file, facts).derivationInputs?.bodyDiscovery;
+  const rows: LexicalCanonicalRow[] = [];
+  for (const [symbol, terms] of preparedSymbolTerms(symbols, body ? [body] : []))
+    for (const [term, weight] of terms) rows.push({symbol_id: symbol.id, term, weight});
+  return {symbols, rows, projection: projectLexicalSymbols(symbols, body ? [body] : [])};
+}
+
 function insertLexicalOverlayFixture(
   databasePath: string,
   baseInput: readonly LexicalPostingSpec[],
@@ -1394,6 +1676,7 @@ function insertLexicalSnapshot(
     );
   }
   database.query('UPDATE snapshots SET symbol_count = ? WHERE id = ?').run(symbolIds.length, snapshotId);
+  if (format === 'v2') return;
   if (format === 'legacy') {
     const insert = database.query(
       'INSERT INTO symbol_terms (snapshot_id, term, symbol_id, weight) VALUES (?, ?, ?, ?)',

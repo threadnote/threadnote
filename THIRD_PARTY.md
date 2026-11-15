@@ -7,7 +7,7 @@ Python, OpenViking, or a separate memory server.
 
 Direct runtime software and packages bundled into the published JavaScript retain their own licenses:
 
-- `node-llama-cpp` (MIT), used in a supervised local worker with prebuilt `llama.cpp` binaries for GGUF inference
+- `node-llama-cpp` (MIT), used in a supervised local worker with prebuilt `llama.cpp` binaries on glibc Linux, macOS and Windows, and pinned source-built CPU binaries on musl Linux, for GGUF inference. Musl payloads retain the node-llama-cpp MIT notice and the bundled `ggml-org/llama.cpp` v0.7.0 MIT notice in `runtime/NATIVE-LICENSE` and `runtime/LLAMA-CPP-LICENSE`; release metadata records the exact source commit and content hashes
 - Bun (MIT), embedded into each compiled executable
 - `effect`, `@effect/platform-bun`, `@effect/ai-openai-compat`, `@effect/sql-sqlite-bun`, and `@effect/vitest` (MIT)
 - `@modelcontextprotocol/sdk` 1.32.2 (MIT), pinned for the Streamable HTTP and stdio MCP protocol boundary

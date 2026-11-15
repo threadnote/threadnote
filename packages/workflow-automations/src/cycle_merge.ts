@@ -61,6 +61,19 @@ export const NativeCycleOrdinaryMergeReceiptSchema = Schema.Struct({
 });
 export type NativeCycleOrdinaryMergeReceipt = typeof NativeCycleOrdinaryMergeReceiptSchema.Type;
 
+/** Separate invalid-tail proof preserves the existing owned immutable retention refs. */
+export const NativeCycleInvalidTailMergeReceiptSchema = Schema.Struct({
+  ...NativeCycleOrdinaryMergeReceiptSchema.fields,
+  format: Schema.Literal('threadnote-native-invalid-tail-merge-qualification'),
+  basisSnapshotId: id,
+  basisReviewDigest: digest,
+  basisAttemptId: id,
+  taskRefDigest: digest,
+  predecessorRefDigest: digest,
+  operationDigest: digest,
+});
+export type NativeCycleInvalidTailMergeReceipt = typeof NativeCycleInvalidTailMergeReceiptSchema.Type;
+
 const fail = (message: string): never => {
   throw WorkflowAutomationError.make({code: 'invalid-ordinary-merge', message});
 };
@@ -631,4 +644,53 @@ export function validateNativeCycleSameLabelRebasedBaseReceipt(
   }
   if (proof.receiptDigest !== nativeCycleSameLabelRebasedBaseReceiptDigest(snapshot, proof))
     fail('Same-label integration receipt digest changed.');
+}
+
+export function nativeCycleInvalidTailMergeReceiptDigest(
+  snapshot: NativeCycleSnapshot,
+  receipt: Omit<NativeCycleInvalidTailMergeReceipt, 'receiptDigest'>,
+): string {
+  const ordinary = {...receipt, format: 'threadnote-native-ordinary-merge-qualification' as const};
+  return sha256HexSync(
+    JSON.stringify([
+      'threadnote-native-invalid-tail-merge-v1',
+      nativeCycleMergeReceiptDigest(snapshot, ordinary),
+      receipt.basisSnapshotId,
+      receipt.basisReviewDigest,
+      receipt.basisAttemptId,
+      receipt.taskRefDigest,
+      receipt.predecessorRefDigest,
+      receipt.operationDigest,
+    ]),
+  );
+}
+
+export function validateNativeCycleInvalidTailMergeReceipt(
+  snapshot: NativeCycleSnapshot,
+  prior: NativeCycleSnapshot,
+  plans: readonly NativeCyclePlan[],
+  baselineHead: string,
+) {
+  const proof = snapshot.invalidTailMergeQualificationV1;
+  if (
+    !proof ||
+    snapshot.version !== 3 ||
+    snapshot.baseRequalification ||
+    snapshot.ordinaryMergeQualificationV1 ||
+    snapshot.previous !== prior.snapshotId ||
+    snapshot.phaseHash !== prior.phaseHash ||
+    snapshot.supersedes ||
+    proof.fromBaseBranch !== proof.toBaseBranch
+  )
+    return fail('Use the distinct same-label invalid-tail merge witness and owned immutable retention refs.');
+  const ordinary = {...proof, format: 'threadnote-native-ordinary-merge-qualification' as const};
+  const adapted = {
+    ...snapshot,
+    version: 2 as const,
+    invalidTailMergeQualificationV1: undefined,
+    ordinaryMergeQualificationV1: {...ordinary, receiptDigest: nativeCycleMergeReceiptDigest(snapshot, ordinary)},
+  };
+  validateNativeCycleMergeReceipt(adapted, prior, plans, baselineHead);
+  if (proof.receiptDigest !== nativeCycleInvalidTailMergeReceiptDigest(snapshot, proof))
+    return fail('Invalid-tail merge receipt digest changed.');
 }

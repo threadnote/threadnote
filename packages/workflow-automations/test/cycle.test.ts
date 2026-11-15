@@ -22,10 +22,21 @@ import {
   validateNativeCyclePhase,
   type NativeCycleValidation,
   type NativeCycleState,
+  nativeCycleSupplementalLimits,
+  type NativeCycleSupplementalPublication,
 } from '../src/cycle.js';
+import {sha256HexSync} from '@threadnote/platform/sha256';
+import {nativeCycleCanonicalJson, NativeCycleStateSchema} from '../src/cycle.js';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
-import {decodeNativeCycleRuntime} from '../src/cycle_runtime.js';
+import {
+  appendNativeCycleSupplementalRecord,
+  initializeNativeCycleSupplementalPublication,
+  nativeCycleSupplementalRef,
+  nativeCycleSupplementalRevision,
+  type NativeCycleRuntime,
+  decodeNativeCycleRuntime,
+} from '../src/cycle_runtime.js';
 
 const gitSha = Effect.pipe('a', EffectString.repeat(40));
 const gitTree = Effect.pipe('b', EffectString.repeat(40));
@@ -698,5 +709,328 @@ describe('native cycle pure domain', () => {
     const mainAgentCapacity = {...packetOptions.capacity, selection: 'main-agent'};
     expect(() => validateNativeCycleCapacityRecord(mainAgentCapacity)).toThrow('background worker');
     expect(Schema.is(NativeCyclePacketOptionsSchema)({...packetOptions, capacity: mainAgentCapacity})).toBe(false);
+  });
+});
+
+/** Uses the existing pure cycle fixture; no provider, Git or Effect execution boundary. */
+const supplementalFixture = () => {
+  const plan = decodeNativeCyclePlan({...makePlan([makePlan().phases[0]]), delivery: 'local'});
+  const phase = plan.phases[0];
+  const validated = validateNativeCyclePhase(initializeNativeCycle(plan), phase.id, snapshot(), validation);
+  const receipt = {
+    phaseId: phase.id,
+    phaseHash: validated.phases.one.phaseHash,
+    delivery: 'local' as const,
+    headSha: gitSha,
+    validatedTree: gitTree,
+  };
+  const state = recordNativeCycleDelivery(validated, phase.id, receipt);
+  const source = {head: gitSha, tree: gitTree, clean: true};
+  const stored = {
+    format: 'threadnote-native-cycle-snapshot' as const,
+    version: 1 as const,
+    snapshotId: 'accepted-one',
+    phaseId: phase.id,
+    phaseHash: receipt.phaseHash,
+    repo: '/repo',
+    head: gitSha,
+    tree: gitTree,
+    baseTree: gitSha,
+    scopeBase: gitSha,
+    declaredBaseHead: gitSha,
+    files: ['src/a.ts'],
+    scopeFiles: ['src/a.ts'],
+    pinnedRef: 'refs/threadnote/snapshot/accepted-one',
+  };
+  const runtime: NativeCycleRuntime = {
+    state,
+    plans: [plan],
+    baselines: {one: {repo: '/repo', head: gitSha, tree: gitSha, preservedFiles: [], pinnedRef: 'refs/heads/main'}},
+    reviewLimits: {},
+    reviewExpansions: [],
+    snapshots: [{snapshot: stored, incoming: []}],
+    attempts: [],
+    reviews: [
+      {
+        snapshotId: stored.snapshotId,
+        report: {
+          snapshotId: stored.snapshotId,
+          phaseHash: stored.phaseHash,
+          snapshotTree: gitTree,
+          status: 'complete',
+          mode: 'full',
+          selected: ['correctness', 'simplicity'],
+          lanes: [
+            {name: 'correctness', status: 'complete'},
+            {name: 'simplicity', status: 'complete'},
+          ],
+          findings: [],
+        },
+      },
+    ],
+  };
+  const hash = (value: unknown) => sha256HexSync(nativeCycleCanonicalJson(value));
+  const initialization = {
+    version: 1 as const,
+    expectedRevision: nativeCycleSupplementalRevision(runtime),
+    planDigest: hash(plan),
+    phaseId: phase.id,
+    phaseHash: receipt.phaseHash,
+    snapshotId: stored.snapshotId,
+    validationDigest: hash(state.phases.one.validation),
+    localReceiptDigest: hash(receipt),
+    head: gitSha,
+    tree: gitTree,
+    pr: {...prDelivery().pr, url: 'https://github.com/example/repo/pull/1'},
+    authority: 'Attach this existing authorized PR to the completed local proof.',
+  };
+  return {runtime, source, initialization};
+};
+const supplementalRequest = (runtime: NativeCycleRuntime, event: unknown) => {
+  const publication = runtime.state.supplementalPublications![0];
+  return {
+    publicationId: publication.publicationId,
+    publicationRef: nativeCycleSupplementalRef(publication),
+    expectedRevision: nativeCycleSupplementalRevision(runtime),
+    event,
+  };
+};
+
+describe('supplemental local publication proof', () => {
+  it('validates a full bounded chain with an independent ref oracle and rejects middle corruption or aggregate overflow', () => {
+    const {runtime, initialization, source} = supplementalFixture();
+    const attached = initializeNativeCycleSupplementalPublication(runtime, initialization, source);
+    const original = attached.state.supplementalPublications![0];
+    const hash = (value: unknown) => sha256HexSync(nativeCycleCanonicalJson(value));
+    const records: NativeCycleSupplementalPublication['records'][number][] = [];
+    let previousRef = hash(['threadnote-supplemental-chain-initial-v1', original.publicationId]);
+    const watch = {
+      ...prDelivery().watch!,
+      prUrl: initialization.pr.url,
+      state: 'active' as const,
+      consumerKind: 'worker' as const,
+    };
+    for (let index = 0; index < nativeCycleSupplementalLimits.recordsPerPublication; index++) {
+      const request = {
+        version: 1 as const,
+        expectedRevision: hash(['observed-revision', index]),
+        previousRef,
+        event:
+          index === 0
+            ? {kind: 'provider-verified' as const, pr: initialization.pr, evidence: 'Provider observation.'}
+            : {kind: 'watch' as const, watch: {...watch, evidence: `${index}:${EffectString.repeat(3072)('x')}`}},
+      };
+      const operationId = hash(['threadnote-supplemental-record-v1', original.publicationId, request]);
+      records.push({...request, operationId});
+      previousRef = hash(['threadnote-supplemental-chain-record-v1', original.publicationId, operationId]);
+    }
+    const publication = {...original, records};
+    const representative = {...attached, state: {...attached.state, supplementalPublications: [publication]}};
+    const decoded = decodeNativeCycleRuntime(representative);
+    expect(nativeCycleSupplementalRef(publication)).toBe(previousRef);
+    const last = records.at(-1)!;
+    const replay = {
+      publicationId: publication.publicationId,
+      publicationRef: last.previousRef,
+      expectedRevision: last.expectedRevision,
+      event: last.event,
+    };
+    expect(appendNativeCycleSupplementalRecord(decoded, replay, source)).toEqual(decoded);
+    expect(() => appendNativeCycleSupplementalRecord(decoded, {...replay, expectedRevision: digest}, source)).toThrow();
+    const middle = records[128];
+    const altered = {
+      ...middle,
+      event: {kind: 'watch' as const, watch: {...watch, evidence: 'Replaced observed evidence.'}},
+    };
+    const {operationId: _oldOperationId, ...changedRequest} = altered;
+    const changedRecords = [...records];
+    changedRecords[128] = {
+      ...changedRequest,
+      operationId: hash(['threadnote-supplemental-record-v1', original.publicationId, changedRequest]),
+    };
+    expect(() =>
+      decodeNativeCycleRuntime({
+        ...representative,
+        state: {...representative.state, supplementalPublications: [{...publication, records: changedRecords}]},
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeNativeCycleRuntime({
+        ...representative,
+        state: {
+          ...representative.state,
+          supplementalPublications: [{...publication, records: [...records.slice(0, 128), ...records.slice(129)]}],
+        },
+      }),
+    ).toThrow();
+
+    // Structural budget oracle isolates count and byte bounds from identity checks above.
+    const smallRecords = EffectArray.map(records, record => ({...record, event: {kind: 'watch' as const, watch}}));
+    const bounded = {...publication, records: smallRecords};
+    const countBoundary = Array.from(
+      {length: nativeCycleSupplementalLimits.totalRecords / records.length},
+      () => bounded,
+    );
+    expect(() =>
+      Schema.decodeSync(NativeCycleStateSchema)({...attached.state, supplementalPublications: countBoundary}),
+    ).not.toThrow();
+    expect(() =>
+      Schema.decodeSync(NativeCycleStateSchema)({
+        ...attached.state,
+        supplementalPublications: [...countBoundary, bounded],
+      }),
+    ).toThrow();
+    const byteOverflow = Array.from({length: 5}, () => publication);
+    expect(byteOverflow.length * records.length).toBeLessThan(nativeCycleSupplementalLimits.totalRecords);
+    expect(new TextEncoder().encode(nativeCycleCanonicalJson(byteOverflow)).byteLength).toBeGreaterThan(
+      nativeCycleSupplementalLimits.bytes,
+    );
+    expect(() =>
+      Schema.decodeSync(NativeCycleStateSchema)({...attached.state, supplementalPublications: byteOverflow}),
+    ).toThrow();
+  });
+
+  it('retains exact legacy images and requires an explicitly versioned new variant', () => {
+    const {runtime, initialization, source} = supplementalFixture();
+    expect(decodeNativeCycleRuntime(runtime)).toEqual(runtime);
+    const attached = initializeNativeCycleSupplementalPublication(runtime, initialization, source);
+    expect(attached.state.version).toBe(2);
+    const oldStateSchema = Schema.Struct({...NativeCycleStateSchema.fields, version: Schema.Literal(1)});
+    expect(() => Schema.decodeUnknownSync(oldStateSchema)(attached.state)).toThrow();
+    expect(() => decodeNativeCycleRuntime({...attached, state: {...attached.state, version: 1}})).toThrow();
+    const entry = attached.state.supplementalPublications![0];
+    expect(() =>
+      decodeNativeCycleRuntime({
+        ...attached,
+        state: {
+          ...attached.state,
+          supplementalPublications: [{...entry, initialization: {...entry.initialization, version: 2}}],
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      appendNativeCycleSupplementalRecord(attached, supplementalRequest(attached, {kind: 'unknown'}), source),
+    ).toThrow();
+  });
+
+  it('refuses stale refs, dirty or changed source, incomplete or mismatched local proof and blank authority', () => {
+    const {runtime, initialization, source} = supplementalFixture();
+    for (const input of [
+      {...initialization, expectedRevision: digest},
+      {...initialization, planDigest: digest},
+      {...initialization, phaseHash: digest},
+      {...initialization, snapshotId: 'missing'},
+      {...initialization, validationDigest: digest},
+      {...initialization, localReceiptDigest: digest},
+      {...initialization, authority: ' '},
+      {...initialization, pr: {...initialization.pr, headSha: gitTree}},
+      {...initialization, pr: {...initialization.pr, baseBranch: 'other'}},
+    ])
+      expect(() => initializeNativeCycleSupplementalPublication(runtime, input, source)).toThrow();
+    for (const observed of [
+      {...source, clean: false},
+      {...source, head: gitTree},
+      {...source, tree: gitSha},
+    ])
+      expect(() => initializeNativeCycleSupplementalPublication(runtime, initialization, observed)).toThrow();
+    expect(() =>
+      initializeNativeCycleSupplementalPublication({...runtime, reviews: []}, initialization, source),
+    ).toThrow();
+    expect(() =>
+      initializeNativeCycleSupplementalPublication(
+        {
+          ...runtime,
+          state: {
+            ...runtime.state,
+            phases: {...runtime.state.phases, one: {...runtime.state.phases.one, delivery: undefined}},
+          },
+        },
+        initialization,
+        source,
+      ),
+    ).toThrow();
+    expect(runtime.state.version).toBe(1);
+  });
+
+  it('appends verified completion, watch and merge proof with exact replay while preserving original evidence', () => {
+    const {runtime, initialization, source} = supplementalFixture();
+    let current = initializeNativeCycleSupplementalPublication(runtime, initialization, source);
+    expect(initializeNativeCycleSupplementalPublication(current, initialization, source)).toEqual(current);
+    expect(() =>
+      appendNativeCycleSupplementalRecord(
+        current,
+        supplementalRequest(current, {kind: 'completed', evidence: 'complete'}),
+        source,
+      ),
+    ).toThrow();
+    const verification = supplementalRequest(current, {
+      kind: 'provider-verified',
+      pr: initialization.pr,
+      evidence: 'Independent provider readback of the authorized existing PR.',
+    });
+    current = appendNativeCycleSupplementalRecord(current, verification, source);
+    const watch = {...prDelivery().watch!, prUrl: initialization.pr.url};
+    const watching = supplementalRequest(current, {kind: 'watch', watch});
+    current = appendNativeCycleSupplementalRecord(current, watching, source);
+    const completion = supplementalRequest(current, {
+      kind: 'completed',
+      evidence: 'Publication is verified and owned watch is active.',
+    });
+    current = appendNativeCycleSupplementalRecord(current, completion, source);
+    current = appendNativeCycleSupplementalRecord(
+      current,
+      supplementalRequest(current, {
+        kind: 'merged',
+        mergeCommit: gitTree,
+        evidence: 'Provider confirms merge of the bound head.',
+      }),
+      source,
+    );
+    current = appendNativeCycleSupplementalRecord(
+      current,
+      supplementalRequest(current, {kind: 'watch', watch: {...watch, state: 'terminal'}}),
+      source,
+    );
+    expect(appendNativeCycleSupplementalRecord(current, verification, source)).toEqual(current);
+    expect(appendNativeCycleSupplementalRecord(current, completion, source)).toEqual(current);
+    expect(initializeNativeCycleSupplementalPublication(current, initialization, source)).toEqual(current);
+    expect(() =>
+      appendNativeCycleSupplementalRecord(
+        current,
+        {...watching, event: {kind: 'watch', watch: {...watch, evidence: 'changed'}}},
+        source,
+      ),
+    ).toThrow();
+    expect(() =>
+      appendNativeCycleSupplementalRecord(
+        current,
+        {...supplementalRequest(current, {kind: 'completed', evidence: 'again'}), publicationRef: digest},
+        source,
+      ),
+    ).toThrow();
+    const {supplementalPublications, version: _version, ...retainedState} = current.state;
+    const {version: _legacyVersion, ...originalState} = runtime.state;
+    expect(retainedState).toEqual(originalState);
+    const {state: _state, ...retainedRuntime} = current;
+    const {state: _original, ...originalRuntime} = runtime;
+    expect(retainedRuntime).toEqual(originalRuntime);
+    expect(supplementalPublications![0].initialization).toEqual(initialization);
+    expect(EffectArray.map(supplementalPublications![0].records, record => record.event.kind)).toEqual([
+      'provider-verified',
+      'watch',
+      'completed',
+      'merged',
+      'watch',
+    ]);
+    expect(nextNativeCycle(current.state)).toEqual({action: 'complete'});
+    const entry = supplementalPublications![0];
+    const records = [...entry.records];
+    records[1] = {...records[1], previousRef: digest};
+    expect(() =>
+      decodeNativeCycleRuntime({
+        ...current,
+        state: {...current.state, supplementalPublications: [{...entry, records}]},
+      }),
+    ).toThrow();
   });
 });

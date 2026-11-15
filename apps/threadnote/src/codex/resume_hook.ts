@@ -144,6 +144,10 @@ export function promptCarriesActiveHandoff(prompt: string): boolean {
   );
 }
 
+export function promptCarriesNativeWatchNotice(prompt: string): boolean {
+  return Effect2.pipe(prompt, EffectString.includes('Threadnote watch event. Route='));
+}
+
 export function contextBriefIsEligibleForCodexResume(projected: ProjectedContextBriefV1): boolean {
   return codexResumeIneligibilityReason(projected) === undefined;
 }
@@ -288,7 +292,7 @@ export function runCodexResumeHook(config: RuntimeConfig, options: {readonly dia
       result = emptyResult('disabled');
     } else if (event === undefined) {
       result = emptyResult('invalid-input');
-    } else if (promptCarriesActiveHandoff(event.prompt)) {
+    } else if (promptCarriesActiveHandoff(event.prompt) || promptCarriesNativeWatchNotice(event.prompt)) {
       result = emptyResult('manual-context');
     } else {
       result = yield* runEligibleCodexResumeHook(config, event).pipe(

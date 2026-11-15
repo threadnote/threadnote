@@ -2,7 +2,7 @@ import {Array as EffectArray} from 'effect';
 import {CODE_GRAPH_INVENTORY_ADMISSION_POLICY_VERSION} from '../inventory/policy.js';
 import {codeGraphLanguagePackProvenance, type CodeGraphLanguagePackRegistryShape} from '../languages/registry.js';
 import {compareCodeUnits} from '../ordering.js';
-import {CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION} from '../store/build/core.js';
+import {CODE_GRAPH_LEXICAL_LOGICAL_VERSION} from '../store/lexical_projection.js';
 import type {CodeGraphLanguagePackProvenance} from '../store/models.js';
 import {CODE_GRAPH_RESOLUTION_SURFACE_VERSION} from '../store/schema/revision.js';
 import {CODE_GRAPH_SCHEMA_VERSION} from '../types.js';
@@ -49,7 +49,7 @@ export function codeGraphCheckpointAbiInputV1(
         resolutionVersion: pack.resolutionVersion,
       }),
     ),
-    lexicalLogicalFormatVersion: CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION,
+    lexicalLogicalFormatVersion: CODE_GRAPH_LEXICAL_LOGICAL_VERSION,
     pathPolicy: CODE_GRAPH_CHECKPOINT_PATH_POLICY,
     referenceResolutionVersion: CODE_GRAPH_CHECKPOINT_REFERENCE_RESOLUTION_VERSION,
     workspaceModelVersion: CODE_GRAPH_WORKSPACE_MODEL_VERSION,

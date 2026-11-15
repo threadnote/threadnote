@@ -300,4 +300,252 @@ effectIt.layer(cryptoLayer, {buildPerTest: true})(layerIt => {
       }
     }),
   );
+  layerIt.effect('claims one prepared buffer without replay and binds every claim field before publication', () =>
+    Effect.gen(function* () {
+      const buffer = {...source, buffer: {kind: 'buffer' as const, content: sha256HexSync('unsaved')}};
+      const entered = yield* Deferred.make<void>();
+      let preparations = 0,
+        publications = 0,
+        closes = 0;
+      const jobs = yield* makeSemanticReadinessJobs({
+        worktree: source.worktree,
+        reserve: () => Effect.succeed(observation),
+        prepare: (_, text, control) =>
+          Effect.gen(function* () {
+            preparations++;
+            expect(text).toBe('unsaved');
+            expect(yield* control.remaining).toBe(118000);
+            yield* Deferred.succeed(entered, undefined);
+            return observation;
+          }),
+        current: () => Effect.succeed(true),
+        close: () =>
+          Effect.sync(() => {
+            closes++;
+          }),
+      });
+      const job = accepted(yield* jobs.start(buffer, 'unsaved'));
+      yield* Deferred.await(entered);
+      yield* Effect.yieldNow;
+      expect(progress(yield* jobs.status(job, ...scope)).state).toBe('ready');
+      const publish = (actual: Observation) => {
+        publications++;
+        return actual;
+      };
+      for (const changed of [
+        {...buffer, buffer: {...buffer.buffer, content: sha256HexSync('other')}},
+        {...buffer, environment: 'other'},
+        {...buffer, project: 'file:///other'},
+        {...buffer, uri: 'file:///readiness/other.go'},
+        {...buffer, language: 'java' as const},
+        {...buffer, principal: sha256HexSync('foreign')},
+        {...buffer, profile: sha256HexSync('foreign')},
+      ])
+        expect((yield* jobs.claim(job, changed, publish).pipe(Effect.result))._tag).toBe('Failure');
+      expect(publications).toBe(0);
+      expect(closes).toBe(0);
+      expect(yield* jobs.claim(job, buffer, publish)).toEqual(observation);
+      expect(yield* jobs.claim(job, buffer, publish)).toEqual(observation);
+      yield* jobs.cancel(job, ...scope);
+      yield* TestClock.adjust(600001);
+      yield* Effect.yieldNow;
+      expect(preparations).toBe(1);
+      expect(closes).toBe(0); // Published views are closed by their original view handle, not a spent startup job.
+    }),
+  );
+
+  layerIt.effect('cancellation wins during asynchronous buffer claim proof and cannot publish a late observation', () =>
+    Effect.gen(function* () {
+      const buffer = {...source, buffer: {kind: 'buffer' as const, content: sha256HexSync('unsaved')}};
+      const prepared = yield* Deferred.make<void>();
+      const checking = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      let block = false,
+        publications = 0,
+        closes = 0;
+      const jobs = yield* makeSemanticReadinessJobs({
+        worktree: source.worktree,
+        reserve: () => Effect.succeed(observation),
+        prepare: () => Deferred.succeed(prepared, undefined).pipe(Effect.as(observation)),
+        current: () =>
+          block
+            ? Deferred.succeed(checking, undefined).pipe(Effect.andThen(Deferred.await(release)), Effect.as(true))
+            : Effect.succeed(true),
+        close: () =>
+          Effect.sync(() => {
+            closes++;
+          }),
+      });
+      const job = accepted(yield* jobs.start(buffer, 'unsaved'));
+      yield* Deferred.await(prepared);
+      yield* Effect.yieldNow;
+      block = true;
+      const claim = yield* jobs
+        .claim(job, buffer, () => {
+          publications++;
+        })
+        .pipe(Effect.result, Effect.forkChild);
+      yield* Deferred.await(checking);
+      const cancelled = progress(yield* jobs.cancel(job, ...scope));
+      expect(['cancelling', 'cancelled']).toContain(cancelled.state);
+      yield* Deferred.succeed(release, undefined);
+      expect((yield* Fiber.join(claim))._tag).toBe('Failure');
+      yield* Effect.yieldNow;
+      expect(closes).toBe(1);
+      expect(publications).toBe(0);
+      expect((yield* jobs.claim(job, buffer, () => undefined).pipe(Effect.result))._tag).toBe('Failure');
+    }),
+  );
+
+  layerIt.effect('expires unclaimed ready buffers through original close and retains unknown cleanup admission', () =>
+    Effect.gen(function* () {
+      for (const disposition of ['drained', 'close-failure', 'original-unknown'] as const) {
+        const entered = yield* Deferred.make<void>();
+        let closes = 0;
+        const jobs = yield* makeSemanticReadinessJobs({
+          worktree: source.worktree,
+          reserve: () => Effect.succeed(observation),
+          prepare: (_, __, control) =>
+            Effect.sync(() => {
+              if (disposition === 'original-unknown') control.cleanup('unknown');
+            }).pipe(Effect.andThen(Deferred.succeed(entered, undefined)), Effect.as(observation)),
+          current: () => Effect.succeed(true),
+          close: () =>
+            Effect.sync(() => {
+              closes++;
+            }).pipe(
+              Effect.andThen(disposition === 'close-failure' ? Effect.fail('original-close-unknown') : Effect.void),
+            ),
+        });
+        const buffer = {...source, buffer: {kind: 'buffer' as const, content: sha256HexSync('unsaved')}};
+        const job = accepted(yield* jobs.start(buffer, 'unsaved'));
+        yield* Deferred.await(entered);
+        yield* Effect.yieldNow;
+        if (disposition === 'original-unknown') {
+          expect(progress(yield* jobs.status(job, ...scope))).toMatchObject({state: 'failed', cleanup: 'unknown'});
+          expect((yield* jobs.claim(job, buffer, () => 'must-not-publish').pipe(Effect.result))._tag).toBe('Failure');
+        }
+        yield* TestClock.adjust(600001);
+        yield* Effect.yieldNow;
+        expect(closes).toBe(1);
+        expect(yield* jobs.idle).toBe(disposition === 'drained');
+      }
+    }),
+  );
+
+  layerIt.effect('a failed closing buffer proof is sticky and cannot be revived by a later good observation', () =>
+    Effect.gen(function* () {
+      const buffer = {...source, buffer: {kind: 'buffer' as const, content: sha256HexSync('unsaved')}};
+      const prepared = yield* Deferred.make<void>();
+      let current = true,
+        closes = 0,
+        publications = 0;
+      const jobs = yield* makeSemanticReadinessJobs({
+        worktree: source.worktree,
+        reserve: () => Effect.succeed(observation),
+        prepare: () => Deferred.succeed(prepared, undefined).pipe(Effect.as(observation)),
+        current: () => Effect.succeed(current),
+        close: () =>
+          Effect.sync(() => {
+            closes++;
+          }),
+      });
+      const job = accepted(yield* jobs.start(buffer, 'unsaved'));
+      yield* Deferred.await(prepared);
+      yield* Effect.yieldNow;
+      current = false;
+      expect(
+        (yield* jobs
+          .claim(job, buffer, () => {
+            publications++;
+          })
+          .pipe(Effect.result))._tag,
+      ).toBe('Failure');
+      current = true;
+      expect(
+        (yield* jobs
+          .claim(job, buffer, () => {
+            publications++;
+          })
+          .pipe(Effect.result))._tag,
+      ).toBe('Failure');
+      yield* Effect.yieldNow;
+      expect(publications).toBe(0);
+      expect(closes).toBe(1);
+    }),
+  );
+  layerIt.effect('closing the owner Scope joins pending buffer work and cancels its expiry and deadline fibers', () =>
+    Effect.gen(function* () {
+      let active = 0,
+        closes = 0;
+      const entered = yield* Deferred.make<void>();
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const jobs = yield* makeSemanticReadinessJobs({
+            worktree: source.worktree,
+            reserve: () => Effect.succeed(observation),
+            prepare: () =>
+              Effect.gen(function* () {
+                active++;
+                yield* Deferred.succeed(entered, undefined);
+                return yield* Effect.never;
+              }).pipe(
+                Effect.ensuring(
+                  Effect.sync(() => {
+                    active--;
+                  }),
+                ),
+              ),
+            current: () => Effect.succeed(true),
+            close: () =>
+              Effect.sync(() => {
+                closes++;
+              }),
+          });
+          accepted(
+            yield* jobs.start({...source, buffer: {kind: 'buffer', content: sha256HexSync('unsaved')}}, 'unsaved'),
+          );
+          yield* Deferred.await(entered);
+          expect(active).toBe(1);
+        }),
+      );
+      expect(active).toBe(0);
+      expect(closes).toBe(1);
+      yield* TestClock.adjust(600001);
+      yield* Effect.yieldNow;
+      expect(active).toBe(0);
+      expect(closes).toBe(1);
+    }),
+  );
+  layerIt.effect('releases the original buffer reservation when concurrent job admission fills the registry', () =>
+    Effect.gen(function* () {
+      const reserving = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      let closes = 0,
+        bufferPreparations = 0;
+      const jobs = yield* makeSemanticReadinessJobs({
+        worktree: source.worktree,
+        reserve: () =>
+          Deferred.succeed(reserving, undefined).pipe(Effect.andThen(Deferred.await(release)), Effect.as(observation)),
+        prepare: actual => {
+          if (actual.buffer) bufferPreparations++;
+          return Effect.never;
+        },
+        current: () => Effect.succeed(true),
+        close: () =>
+          Effect.sync(() => {
+            closes++;
+          }),
+      });
+      const pending = yield* jobs
+        .start({...source, buffer: {kind: 'buffer', content: sha256HexSync('reserved')}}, 'reserved')
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(reserving);
+      for (let index = 0; index < 32; index++) accepted(yield* jobs.start(source, observation.content));
+      yield* Deferred.succeed(release, undefined);
+      expect((yield* Fiber.join(pending)).status).toBe('unavailable');
+      expect(closes).toBe(1);
+      expect(bufferPreparations).toBe(0);
+    }),
+  );
 });

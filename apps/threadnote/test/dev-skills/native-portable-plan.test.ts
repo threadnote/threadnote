@@ -29,6 +29,7 @@ import {
 } from '../../src/workflow_automation/authoring_artifacts.js';
 import {encodeNativeAuthoringTaskRef} from '../../src/workflow_automation/task_authoring.js';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
+import {CurrentNativeProgress, type NativeProgressPhase} from './native-authoring-progress-diagnostics.js';
 import {Array as EffectArray, Option as EffectOption, pipe} from 'effect';
 import * as EffectString from 'effect/String';
 import {
@@ -274,6 +275,9 @@ effectIt.effect.each([
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
+      const progress = yield* CurrentNativeProgress;
+      const markPhase = (phase: NativeProgressPhase) => progress?.enterPhase(phase);
+      markPhase('fixture-git-setup');
       const donorFixture = yield* nativeFixture();
       const recipientFixture = yield* nativeFixture();
       const donor = {
@@ -334,6 +338,7 @@ effectIt.effect.each([
       };
       const donorSystem = {...system, currentDirectory: () => donor.repo, homeDirectory: donor.home};
       const recipientSystem = {...system, currentDirectory: () => recipient.repo, homeDirectory: recipient.home};
+      markPhase('install-index-share-setup');
       yield* applyDevSkills(donorConfig, 'install', {agent: 'codex'}).pipe(
         Effect.provideService(SystemInfo, donorSystem),
       );
@@ -352,6 +357,7 @@ effectIt.effect.each([
       const recipientWorktree = yield* teamWorktreePath(recipientConfig, 'default');
       yield* setGitIdentity(recipientWorktree);
       yield* git(recipientWorktree, ['config', '--local', 'core.autocrlf', 'true']);
+      markPhase('full-evidence-donor-authoring');
       const location = {account: donorConfig.account, home: donor.home, user: donorConfig.user};
       const store = yield* ResourceStore;
       const evidenceDirectory = 'threadnote://user/donor/memories/durable/projects/repo';
@@ -555,6 +561,7 @@ effectIt.effect.each([
         }),
       );
       expect(readyPlan.status).toBe('ready');
+      markPhase('donor-publication-and-admission');
       const published = yield* Schema.decodeUnknownEffect(shareResult)(
         yield* donorAuthor({
           command: 'share',
@@ -565,67 +572,70 @@ effectIt.effect.each([
       expect(yield* donorAuthor({command: 'share', authoringRef: readyPlan.authoringRef, team: 'default'})).toEqual(
         published,
       );
-      const donorMcp = new EffectMcpServerAdapter('portable-test', '1', 'fixture');
-      registerWorkflowTaskTool(donorMcp, donorConfig);
-      const mcpShared = yield* donorMcp
-        .invokeTool('workflow_task_author', {
-          command: 'share',
-          callerCwd: donor.repo,
-          authoringRef: readyPlan.authoringRef,
-          team: 'default',
-        })
-        .pipe(Effect.provideService(SystemInfo, donorSystem));
-      expect(
-        (yield* Schema.decodeUnknownEffect(shareResult)(
-          (yield* Schema.decodeUnknownEffect(Schema.Struct({structuredContent: Schema.Unknown}))(mcpShared))
-            .structuredContent,
-        )).sharedPlanRef,
-      ).toBe(published.sharedPlanRef);
-      const authorCli = Command.make('threadnote').pipe(
-        Command.withSubcommands([makeNativeTaskAuthoringCommand(program => program(donorConfig))]),
-      );
-      yield* Command.runWith(authorCli, {version: 'fixture'})([
-        'task-author',
-        '--operation',
-        'share',
-        '--caller-cwd',
-        donor.repo,
-        '--authoring-ref',
-        readyPlan.authoringRef,
-        '--team',
-        'default',
-      ]).pipe(Effect.provideService(SystemInfo, donorSystem));
       const standalone = system.environment().THREADNOTE_STANDALONE_SMOKE;
-      if (standalone) {
-        const result = yield* runCommandEffect(
-          standalone,
-          [
-            'workflow-automation',
-            'task-author',
-            '--operation',
-            'share',
-            '--caller-cwd',
-            donor.repo,
-            '--authoring-ref',
-            readyPlan.authoringRef,
-            '--team',
-            'default',
-          ],
-          {
-            cwd: donor.repo,
-            env: {
-              ...system.environment(),
-              THREADNOTE_HOME: donor.home,
-              THREADNOTE_ACCOUNT: donorConfig.account,
-              THREADNOTE_USER: donorConfig.user,
-              THREADNOTE_AGENT_ID: donorConfig.agentId,
-            },
-            timeoutMs: 30_000,
-            maxOutputBytes: 16_000,
-          },
+      // Opaque-reference transports and source-independent conflicts run once; both directions keep full import.
+      if (!direction.fullEvidence) {
+        const donorMcp = new EffectMcpServerAdapter('portable-test', '1', 'fixture');
+        registerWorkflowTaskTool(donorMcp, donorConfig);
+        const mcpShared = yield* donorMcp
+          .invokeTool('workflow_task_author', {
+            command: 'share',
+            callerCwd: donor.repo,
+            authoringRef: readyPlan.authoringRef,
+            team: 'default',
+          })
+          .pipe(Effect.provideService(SystemInfo, donorSystem));
+        expect(
+          (yield* Schema.decodeUnknownEffect(shareResult)(
+            (yield* Schema.decodeUnknownEffect(Schema.Struct({structuredContent: Schema.Unknown}))(mcpShared))
+              .structuredContent,
+          )).sharedPlanRef,
+        ).toBe(published.sharedPlanRef);
+        const authorCli = Command.make('threadnote').pipe(
+          Command.withSubcommands([makeNativeTaskAuthoringCommand(program => program(donorConfig))]),
         );
-        expect(result.exitCode).toBe(0);
-        expect(JSON.parse(result.stdout)).toMatchObject({sharedPlanRef: published.sharedPlanRef});
+        yield* Command.runWith(authorCli, {version: 'fixture'})([
+          'task-author',
+          '--operation',
+          'share',
+          '--caller-cwd',
+          donor.repo,
+          '--authoring-ref',
+          readyPlan.authoringRef,
+          '--team',
+          'default',
+        ]).pipe(Effect.provideService(SystemInfo, donorSystem));
+        if (standalone) {
+          const result = yield* runCommandEffect(
+            standalone,
+            [
+              'workflow-automation',
+              'task-author',
+              '--operation',
+              'share',
+              '--caller-cwd',
+              donor.repo,
+              '--authoring-ref',
+              readyPlan.authoringRef,
+              '--team',
+              'default',
+            ],
+            {
+              cwd: donor.repo,
+              env: {
+                ...system.environment(),
+                THREADNOTE_HOME: donor.home,
+                THREADNOTE_ACCOUNT: donorConfig.account,
+                THREADNOTE_USER: donorConfig.user,
+                THREADNOTE_AGENT_ID: donorConfig.agentId,
+              },
+              timeoutMs: 30_000,
+              maxOutputBytes: 16_000,
+            },
+          );
+          expect(result.exitCode).toBe(0);
+          expect(JSON.parse(result.stdout)).toMatchObject({sharedPlanRef: published.sharedPlanRef});
+        }
       }
       const donorPlanRead = yield* donorAuthor({
         command: 'read',
@@ -662,6 +672,7 @@ effectIt.effect.each([
         'page-0.md',
       );
       expect(yield* fs.readFileString(recipientPage)).toContain('\r\n');
+      markPhase('recipient-start-and-ownership');
       const recipientStart = {
         callerCwd: recipient.repo,
         sharedPlanRef: published.sharedPlanRef,
@@ -786,142 +797,145 @@ effectIt.effect.each([
       expect((yield* readNativeWorkflowState(recipientConfig, started.taskRef))?.revision).toBe(
         recipientState.revision,
       );
-      const recipientMcp = new EffectMcpServerAdapter('portable-test', '1', 'fixture');
-      registerWorkflowTaskTool(recipientMcp, recipientConfig);
-      const mcpStarted = yield* recipientMcp
-        .invokeTool('workflow_task_start', recipientStart)
-        .pipe(Effect.provideService(SystemInfo, recipientSystem));
-      expect(
-        (yield* Schema.decodeUnknownEffect(startResult)(
-          (yield* Schema.decodeUnknownEffect(Schema.Struct({structuredContent: Schema.Unknown}))(mcpStarted))
-            .structuredContent,
-        )).taskRef,
-      ).toBe(started.taskRef);
-      const bindingsFile = path.join(recipient.root, 'bindings.json');
-      yield* fs.writeFileString(bindingsFile, stableJson(recipientStart.bindings));
-      const startCli = Command.make('threadnote').pipe(
-        Command.withSubcommands([makeWorkflowAutomationCommand(program => program(recipientConfig))]),
-      );
-      yield* Command.runWith(startCli, {version: 'fixture'})([
-        'workflow-automation',
-        'task-start',
-        '--caller-cwd',
-        recipient.repo,
-        '--shared-plan-ref',
-        published.sharedPlanRef,
-        '--installation-target',
-        'codex',
-        '--bindings-file',
-        bindingsFile,
-        '--delivery',
-        'local',
-        '--response',
-        recipientStart.userResponse,
-        '--review-outcome',
-        'accepted',
-      ]).pipe(Effect.provideService(SystemInfo, recipientSystem));
-      expect((yield* readNativeWorkflowState(recipientConfig, started.taskRef))?.revision).toBe(
-        recipientState.revision,
-      );
-      const originalPayload = yield* readPortablePlanPayload(donorConfig, published.sharedPlanRef, 'repo');
-      const changedPlanRef = yield* publishPortablePlanPayload(
-        donorConfig,
-        {
-          ...originalPayload.payload,
-          provenance: {
-            ...originalPayload.payload.provenance,
-            root: {...originalPayload.payload.provenance.root, revision: h('different-plan-root')},
+      if (!direction.fullEvidence) {
+        const recipientMcp = new EffectMcpServerAdapter('portable-test', '1', 'fixture');
+        registerWorkflowTaskTool(recipientMcp, recipientConfig);
+        const mcpStarted = yield* recipientMcp
+          .invokeTool('workflow_task_start', recipientStart)
+          .pipe(Effect.provideService(SystemInfo, recipientSystem));
+        expect(
+          (yield* Schema.decodeUnknownEffect(startResult)(
+            (yield* Schema.decodeUnknownEffect(Schema.Struct({structuredContent: Schema.Unknown}))(mcpStarted))
+              .structuredContent,
+          )).taskRef,
+        ).toBe(started.taskRef);
+        const bindingsFile = path.join(recipient.root, 'bindings.json');
+        yield* fs.writeFileString(bindingsFile, stableJson(recipientStart.bindings));
+        const startCli = Command.make('threadnote').pipe(
+          Command.withSubcommands([makeWorkflowAutomationCommand(program => program(recipientConfig))]),
+        );
+        yield* Command.runWith(startCli, {version: 'fixture'})([
+          'workflow-automation',
+          'task-start',
+          '--caller-cwd',
+          recipient.repo,
+          '--shared-plan-ref',
+          published.sharedPlanRef,
+          '--installation-target',
+          'codex',
+          '--bindings-file',
+          bindingsFile,
+          '--delivery',
+          'local',
+          '--response',
+          recipientStart.userResponse,
+          '--review-outcome',
+          'accepted',
+        ]).pipe(Effect.provideService(SystemInfo, recipientSystem));
+        expect((yield* readNativeWorkflowState(recipientConfig, started.taskRef))?.revision).toBe(
+          recipientState.revision,
+        );
+        markPhase('negative-integrity-cases');
+        const originalPayload = yield* readPortablePlanPayload(donorConfig, published.sharedPlanRef, 'repo');
+        const changedPlanRef = yield* publishPortablePlanPayload(
+          donorConfig,
+          {
+            ...originalPayload.payload,
+            provenance: {
+              ...originalPayload.payload.provenance,
+              root: {...originalPayload.payload.provenance.root, revision: h('different-plan-root')},
+            },
           },
-        },
-        'default',
-      );
-      yield* runShareSync(recipientConfig, {team: 'default', push: false});
-      expect(
-        yield* runNativeTaskStart(recipientConfig, {
-          ...recipientStart,
-          sharedPlanRef: changedPlanRef.sharedPlanRef,
-        }).pipe(Effect.provideService(SystemInfo, recipientSystem), Effect.result),
-      ).toMatchObject({failure: {code: 'portable-plan-conflict'}});
-      expect((yield* readNativeWorkflowState(recipientConfig, started.taskRef))?.revision).toBe(
-        recipientState.revision,
-      );
-      expect(
-        yield* runNativeTaskStart(recipientConfig, {
-          ...recipientStart,
-          bindings: {phase: {branch: 'different', baseBranch: 'main'}},
-        }).pipe(Effect.provideService(SystemInfo, recipientSystem), Effect.result),
-      ).toMatchObject({failure: {code: 'cycle-conflict'}});
-      expect((yield* readNativeWorkflowState(recipientConfig, started.taskRef))?.revision).toBe(
-        recipientState.revision,
-      );
-      const mismatchFixture = yield* nativeFixture();
-      const mismatchHome = yield* fs.realPath(mismatchFixture.home);
-      const mismatchRepo = yield* fs.realPath(mismatchFixture.repo);
-      yield* setGitIdentity(mismatchRepo);
-      const mismatchConfig = {
-        ...mismatchFixture.config,
-        user: 'mismatch',
-        account: 'mismatch-account',
-        agentContextHome: mismatchHome,
-        manifestPath: path.join(mismatchHome, 'manifest.json'),
-      };
-      yield* runShareInit(mismatchConfig, remote, {team: 'default'});
-      yield* setGitIdentity(yield* teamWorktreePath(mismatchConfig, 'default'));
-      yield* runShareSync(mismatchConfig, {team: 'default', push: false});
-      const mismatchResult = yield* runNativeTaskStart(mismatchConfig, {
-        ...recipientStart,
-        callerCwd: mismatchRepo,
-      }).pipe(Effect.result);
-      expect(mismatchResult, JSON.stringify(mismatchResult)).toMatchObject({failure: {code: 'source-drift'}});
-      expect(yield* readNativeWorkflowState(mismatchConfig, started.taskRef)).toBeUndefined();
-      if (standalone) {
-        yield* git(mismatchRepo, ['fetch', donor.repo, 'main']);
-        yield* git(mismatchRepo, ['reset', '--hard', 'FETCH_HEAD']);
-        const env = {
-          ...system.environment(),
-          HOME: mismatchHome,
-          THREADNOTE_HOME: mismatchHome,
-          THREADNOTE_ACCOUNT: mismatchConfig.account,
-          THREADNOTE_USER: mismatchConfig.user,
-          THREADNOTE_AGENT_ID: mismatchConfig.agentId,
+          'default',
+        );
+        yield* runShareSync(recipientConfig, {team: 'default', push: false});
+        expect(
+          yield* runNativeTaskStart(recipientConfig, {
+            ...recipientStart,
+            sharedPlanRef: changedPlanRef.sharedPlanRef,
+          }).pipe(Effect.provideService(SystemInfo, recipientSystem), Effect.result),
+        ).toMatchObject({failure: {code: 'portable-plan-conflict'}});
+        expect((yield* readNativeWorkflowState(recipientConfig, started.taskRef))?.revision).toBe(
+          recipientState.revision,
+        );
+        expect(
+          yield* runNativeTaskStart(recipientConfig, {
+            ...recipientStart,
+            bindings: {phase: {branch: 'different', baseBranch: 'main'}},
+          }).pipe(Effect.provideService(SystemInfo, recipientSystem), Effect.result),
+        ).toMatchObject({failure: {code: 'cycle-conflict'}});
+        expect((yield* readNativeWorkflowState(recipientConfig, started.taskRef))?.revision).toBe(
+          recipientState.revision,
+        );
+        const mismatchFixture = yield* nativeFixture();
+        const mismatchHome = yield* fs.realPath(mismatchFixture.home);
+        const mismatchRepo = yield* fs.realPath(mismatchFixture.repo);
+        yield* setGitIdentity(mismatchRepo);
+        const mismatchConfig = {
+          ...mismatchFixture.config,
+          user: 'mismatch',
+          account: 'mismatch-account',
+          agentContextHome: mismatchHome,
+          manifestPath: path.join(mismatchHome, 'manifest.json'),
         };
-        yield* runCommandEffect(
-          standalone,
-          ['dev-skills', 'install', '--agent', 'codex', '--scope', 'user', '--profile', 'desktop'],
-          {cwd: mismatchRepo, env, timeoutMs: 30_000, maxOutputBytes: 16_000},
-        );
-        yield* runCommandEffect(standalone, ['graph', 'index', '--cwd', mismatchRepo, '--no-vectors'], {
-          cwd: mismatchRepo,
-          env,
-          timeoutMs: 30_000,
-          maxOutputBytes: 16_000,
-        });
-        const result = yield* runCommandEffect(
-          standalone,
-          [
-            'workflow-automation',
-            'task-start',
-            '--caller-cwd',
-            mismatchRepo,
-            '--shared-plan-ref',
-            published.sharedPlanRef,
-            '--installation-target',
-            'codex',
-            '--bindings-file',
-            bindingsFile,
-            '--delivery',
-            'local',
-            '--response',
-            recipientStart.userResponse,
-            '--review-outcome',
-            'accepted',
-          ],
-          {cwd: mismatchRepo, env, timeoutMs: 30_000, maxOutputBytes: 32_000},
-        );
-        expect(result.exitCode).toBe(0);
-        expect(JSON.parse(result.stdout)).toMatchObject({taskRef: started.taskRef});
-        const binaryState = yield* readNativeWorkflowState(mismatchConfig, started.taskRef);
-        expect(binaryState?.state.cycle?.state.plan.source.root.uri).toContain('threadnote://user/mismatch/');
+        yield* runShareInit(mismatchConfig, remote, {team: 'default'});
+        yield* setGitIdentity(yield* teamWorktreePath(mismatchConfig, 'default'));
+        yield* runShareSync(mismatchConfig, {team: 'default', push: false});
+        const mismatchResult = yield* runNativeTaskStart(mismatchConfig, {
+          ...recipientStart,
+          callerCwd: mismatchRepo,
+        }).pipe(Effect.result);
+        expect(mismatchResult, JSON.stringify(mismatchResult)).toMatchObject({failure: {code: 'source-drift'}});
+        expect(yield* readNativeWorkflowState(mismatchConfig, started.taskRef)).toBeUndefined();
+        if (standalone) {
+          yield* git(mismatchRepo, ['fetch', donor.repo, 'main']);
+          yield* git(mismatchRepo, ['reset', '--hard', 'FETCH_HEAD']);
+          const env = {
+            ...system.environment(),
+            HOME: mismatchHome,
+            THREADNOTE_HOME: mismatchHome,
+            THREADNOTE_ACCOUNT: mismatchConfig.account,
+            THREADNOTE_USER: mismatchConfig.user,
+            THREADNOTE_AGENT_ID: mismatchConfig.agentId,
+          };
+          yield* runCommandEffect(
+            standalone,
+            ['dev-skills', 'install', '--agent', 'codex', '--scope', 'user', '--profile', 'desktop'],
+            {cwd: mismatchRepo, env, timeoutMs: 30_000, maxOutputBytes: 16_000},
+          );
+          yield* runCommandEffect(standalone, ['graph', 'index', '--cwd', mismatchRepo, '--no-vectors'], {
+            cwd: mismatchRepo,
+            env,
+            timeoutMs: 30_000,
+            maxOutputBytes: 16_000,
+          });
+          const result = yield* runCommandEffect(
+            standalone,
+            [
+              'workflow-automation',
+              'task-start',
+              '--caller-cwd',
+              mismatchRepo,
+              '--shared-plan-ref',
+              published.sharedPlanRef,
+              '--installation-target',
+              'codex',
+              '--bindings-file',
+              bindingsFile,
+              '--delivery',
+              'local',
+              '--response',
+              recipientStart.userResponse,
+              '--review-outcome',
+              'accepted',
+            ],
+            {cwd: mismatchRepo, env, timeoutMs: 30_000, maxOutputBytes: 32_000},
+          );
+          expect(result.exitCode).toBe(0);
+          expect(JSON.parse(result.stdout)).toMatchObject({taskRef: started.taskRef});
+          const binaryState = yield* readNativeWorkflowState(mismatchConfig, started.taskRef);
+          expect(binaryState?.state.cycle?.state.plan.source.root.uri).toContain('threadnote://user/mismatch/');
+        }
       }
     }).pipe(TestClock.withLive, provideNative),
   {timeout: process.platform === 'win32' ? 180_000 : 120_000},

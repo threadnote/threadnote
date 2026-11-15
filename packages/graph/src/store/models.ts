@@ -1,5 +1,7 @@
 import type {CodeGraphLeaseTimingObserver} from './lease_timing.js';
-import type {Effect, Option} from 'effect';
+import type {Context, Effect, FileSystem, Option, Path} from 'effect';
+import type {CommandExecutor} from '@threadnote/platform/command';
+import type {SystemInfo} from '@threadnote/platform/system';
 import type {CodeGraphBuildOwnerIdentity} from '../build/owner.js';
 import type {CodeGraphDirectPersistentCapacityBoundary} from '../disk/capacity.js';
 import type {CodeGraphCacheFactInput} from '../fact/budget.js';
@@ -90,6 +92,7 @@ export interface CodeGraphCheckpointImportReceiptInput {
 }
 
 export interface CodeGraphCheckpointImportReceipt extends CodeGraphCheckpointImportReceiptInput {
+  readonly completionSha256?: string;
   readonly importedAt: string;
   /** Newly created local receiving snapshot, never a donor database identity. */
   readonly snapshotId: string;
@@ -110,7 +113,12 @@ export interface CodeGraphCheckpointImportRecordPage {
 export type CodeGraphCheckpointImportRecordPageResult =
   {readonly records: number; readonly state: 'already-staged'} | {readonly records: number; readonly state: 'staged'};
 
+export interface CodeGraphCheckpointImportVerification {
+  readonly artifactVerification: unknown;
+  readonly context: Context.Context<CommandExecutor | SystemInfo | FileSystem.FileSystem | Path.Path>;
+}
 export interface CodeGraphCheckpointImportFinalizeOptions {
+  readonly verification?: CodeGraphCheckpointImportVerification;
   readonly onProgress?: CodeGraphActivationProgressCallback;
   readonly persistentCapacityProtector?: CodeGraphDirectPersistentCapacityProtector;
   readonly reusableBaseReceipt?: CodeGraphReusableBaseReceiptInput;
@@ -164,6 +172,7 @@ export interface CodeGraphReusableBaseReceiptInput {
 
 /** Exact physical-root evidence required when a clean commit aliases its just-committed dirty graph. */
 export interface CodeGraphCleanSnapshotAliasOptions {
+  readonly lexicalBinding?: import('./lexical_projection.js').LexicalViewBinding;
   readonly exactBaseFiles?: readonly Pick<
     CodeGraphInventoryFile,
     'contentHash' | 'language' | 'mode' | 'path' | 'size'
@@ -400,6 +409,7 @@ export type CodeGraphRetiredSnapshotCleanupProgressCallback = (
 ) => Effect.Effect<void, never>;
 
 export interface CodeGraphPersistentBuildClaim {
+  readonly lexicalBinding?: import('./lexical_projection.js').LexicalViewBinding;
   readonly logicalSnapshotId: string;
   readonly owner: CodeGraphBuildOwnerIdentity;
 }
@@ -447,6 +457,7 @@ export interface CodeGraphStagingProgress {
 export type CodeGraphStagingProgressCallback = (progress: CodeGraphStagingProgress) => Effect.Effect<void, never>;
 
 export interface CodeGraphStagingBatch {
+  readonly lexicalFileOrdinals?: ReadonlyMap<string, number>;
   readonly bodyDiscovery?: readonly import('../types.js').CodeGraphBodyDiscovery[];
   readonly batchIndex: number;
   readonly edges: readonly CodeGraphEdge[];

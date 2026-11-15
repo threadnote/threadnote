@@ -1828,7 +1828,7 @@ function requireGraphIdentity(value: unknown, name: string): string {
 }
 function requireGraphSnapshotIdentity(value: unknown): string {
   const identity = requireString(value, 'expectedSnapshotId');
-  if (!/^cgsn_[0-9a-f]{40}(?:-direct|-full-[0-9a-f]{16})?$/.test(identity)) {
+  if (!/^cgsn_[0-9a-f]{40}(?:-direct|-full-[0-9a-f]{16}|-lx2)?$/.test(identity)) {
     throw ManagerOperationError.make({message: 'Provide expectedSnapshotId as an exact code graph snapshot identity.'});
   }
   return identity;

@@ -4,11 +4,13 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {semanticAgentQueryHost, type SemanticAgentQueryHost} from './agent_queries.js';
 import {
   SemanticReadinessRequest,
+  semanticAgentBufferLimits,
   SemanticReadinessResult,
   type SemanticEndpointReadiness,
 } from './agent_query_protocol.js';
 import {readSemanticHostProfile, semanticHostProfileName} from './host_profile.js';
 import {SemanticLanguage} from './provider.js';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {LspFault} from './lsp_transport.js';
 import {semanticHostSelection} from './host_catalog.js';
 
@@ -30,9 +32,15 @@ export const runSemanticReadinessWith = Effect.fn('semantic.readinessWith')(func
     return {
       version: 1,
       status: 'invalid-request',
-      reason: 'Provide explicit saved-disk readiness start, status or cancel JSON',
+      reason: 'Provide explicit readiness start, status or cancel JSON',
     } satisfies SemanticReadinessResult;
   const request = parsed.success;
+  if (new TextEncoder().encode(JSON.stringify(input)).length > semanticAgentBufferLimits.maxRequestBytes)
+    return {
+      version: 1,
+      status: 'invalid-request',
+      reason: 'Readiness request exceeds its byte limit',
+    } satisfies SemanticReadinessResult;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   if (!path.isAbsolute(request.callerCwd))
@@ -79,6 +87,9 @@ export const runSemanticReadinessWith = Effect.fn('semantic.readinessWith')(func
       project: canonicalFileUri((yield* path.toFileUrl(projectPath)).href),
       uri: canonicalFileUri((yield* path.toFileUrl(file)).href),
       language: request.language,
+      ...(request.view === undefined
+        ? {}
+        : {buffer: {kind: 'buffer' as const, content: sha256HexSync(request.view.text)}, text: request.view.text}),
       ...(request.environment === undefined ? {} : {environment: request.environment}),
     };
   } else body = {...scope, action: request.action, job: request.job};

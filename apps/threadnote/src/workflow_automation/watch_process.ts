@@ -98,8 +98,21 @@ export const launchNativeWatchProcess = Effect.fn('nativeWatch.launch')(function
     id,
     Effect.gen(function* () {
       const current = yield* readNativeWatch(config, id);
-      if (current?.envelope.collector?.token === token)
-        yield* writeNativeWatch(config, {...current.envelope, stopRequested: true}, current.revision);
+      if (current?.envelope.collector?.token === token && !current.envelope.stopRequested) {
+        const collector = current.envelope.collector;
+        yield* writeNativeWatch(
+          config,
+          {
+            ...current.envelope,
+            stopRequested: true,
+            // Preserve terminal reasons and any explicit stop that won this lock.
+            ...(current.envelope.state.prState === 'open' && collector.status === 'starting'
+              ? {collector: {...collector, status: 'blocked', reason: 'collector-startup-failed'}}
+              : {}),
+          },
+          current.revision,
+        );
+      }
     }),
   );
   return yield* WorkflowAutomationError.make({

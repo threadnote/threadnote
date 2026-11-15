@@ -6,7 +6,7 @@ import {Clock, Deferred, Effect, Exit, Fiber, FileSystem, Option, Path, Schema} 
 import {Digest} from '@threadnote/semantic/contracts';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {boundedFileDigest, readBounded, semanticSdkDigest, semanticTreeDigest} from '../fingerprint.js';
-import {LspFault} from '../lsp_transport.js';
+import {JavaPreparationDiagnostic, LspFault} from '../lsp_transport.js';
 import {wellFormed} from '../provider.js';
 import {
   isJavaPreparationRuntime,
@@ -187,6 +187,159 @@ export const JavaPreparedObservation = Schema.Struct({
     resolvedClasspath: Schema.Array(observedEntry).check(Schema.isMaxLength(512)),
   }),
 });
+
+const preparationRequestToken = Schema.String.check(
+  Schema.isBetweenLength(1, 128),
+  Schema.isPattern(/^[A-Za-z0-9._-]+$/u),
+);
+const preparationEmptyRefusalReason = Schema.Literals([
+  'ambiguous-project',
+  'canceled',
+  'capacity',
+  'foreign-project-path',
+  'incomplete-import',
+  'incomplete-projection',
+  'invalid-host',
+  'invalid-request',
+  'invalid-text',
+  'library-changed',
+  'library-outside-allowset',
+  'missing-source-model',
+  'model-changed',
+  'project-import-error',
+  'source-changed',
+  'unmanaged-project',
+  'unqualified-jre',
+  'unresolved-entry',
+  'unsafe-path',
+  'unsafe-source',
+  'unsupported-charset',
+  'unsupported-entry',
+  'unsupported-library',
+  'unsupported-linked-resource',
+  'unsupported-nature',
+  'unsupported-output',
+  'unsupported-resource-filter',
+  'unsupported-resource-model',
+  'unsupported-source-bom',
+  'unsupported-source-charset',
+  'wrong-importer',
+  'gradle-binding-changed',
+  'gradle-in-flight',
+  'gradle-canceled',
+  'gradle-configuration-refused',
+  'gradle-status-unknown',
+]);
+const preparationRefusalReason = Schema.Union([
+  preparationEmptyRefusalReason,
+  Schema.Literals([
+    'model-not-cached',
+    'unsupported-container',
+    'unsupported-attribute',
+    'observation-failed',
+    'gradle-synchronization-failed',
+    'gradle-linkage-failed',
+    'gradle-control-refused',
+  ]),
+]);
+const refusalFields = {
+  protocolVersion: Schema.Literal(1),
+  requestToken: preparationRequestToken,
+  status: Schema.Literal('unsupported'),
+};
+const preparationCacheEvidence = Schema.Struct({
+  cacheStage: Schema.Literals(['project-info', 'initial', 'initial-stability', 'confirmed', 'confirmed-stability']),
+  cacheCondition: Schema.Literals([
+    'info-absent',
+    'raw-absent',
+    'raw-invalid',
+    'raw-writing',
+    'raw-status-absent',
+    'raw-status-failed',
+    'unresolved-status-absent',
+    'unresolved-status-failed',
+    'resolved-absent',
+    'options-absent',
+    'output-absent',
+  ]),
+});
+// These are the producer's closed refusal arms. Arbitrary imported text, paths and unknown evidence never escape.
+const JavaPreparedRefusal = Schema.Union([
+  Schema.Struct({
+    ...refusalFields,
+    reason: Schema.Literal('model-not-cached'),
+    evidence: Schema.Union([preparationCacheEvidence, Schema.Record(Schema.String, Schema.Never)]),
+  }),
+  Schema.Struct({
+    ...refusalFields,
+    reason: Schema.Literals(['gradle-synchronization-failed', 'gradle-linkage-failed', 'gradle-control-refused']),
+    evidence: Schema.Struct({statusSha256: Digest}),
+  }),
+  Schema.Struct({
+    ...refusalFields,
+    reason: Schema.Literal('unsupported-container'),
+    evidence: Schema.Struct({idSha256: Digest}),
+  }),
+  Schema.Struct({
+    ...refusalFields,
+    reason: Schema.Literal('unsupported-attribute'),
+    evidence: Schema.Struct({nameSha256: Digest}),
+  }),
+  Schema.Struct({
+    ...refusalFields,
+    reason: preparationEmptyRefusalReason,
+    evidence: Schema.Struct({}),
+  }),
+  Schema.Struct({...refusalFields, reason: Schema.Literal('observation-failed')}),
+]);
+export class JavaPreparedImportRefusal extends Schema.TaggedError<
+  JavaPreparedImportRefusal,
+  {readonly brand: unique symbol}
+>()('JavaPreparedImportRefusal', {
+  reason: preparationRefusalReason,
+  evidence: Schema.optional(
+    Schema.Union([
+      preparationCacheEvidence,
+      Schema.Struct({
+        idSha256: Schema.optional(Digest),
+        nameSha256: Schema.optional(Digest),
+        statusSha256: Schema.optional(Digest),
+      }),
+    ]),
+  ),
+  rpcPhase: Schema.optional(Schema.Literals(['initial', 'confirmation'])),
+}) {
+  override get message() {
+    return (
+      'Java preparation refused: ' +
+      this.reason +
+      (this.rpcPhase === undefined ? '' : ' [' + this.rpcPhase + ']') +
+      (this.evidence === undefined ? '' : ' ' + JSON.stringify(this.evidence))
+    );
+  }
+}
+/** Correlate the closed production wire reply before surfacing a sanitized refusal or admitting model facts. */
+export function readJavaPreparedObservation(
+  raw: unknown,
+  expected: {
+    readonly requestToken: string;
+    readonly build: 'maven' | 'gradle';
+    readonly rpcPhase?: 'initial' | 'confirmation';
+  },
+) {
+  const reply = Schema.decodeUnknownSync(Schema.Union([JavaPreparedObservation, JavaPreparedRefusal]), {
+    onExcessProperty: 'error',
+  })(raw);
+  if (reply.requestToken !== expected.requestToken) throw LspFault.make({code: 'protocol'});
+  if (reply.status === 'unsupported')
+    throw JavaPreparedImportRefusal.make({
+      reason: reply.reason,
+      ...(reply.reason === 'model-not-cached' && expected.rpcPhase !== undefined ? {rpcPhase: expected.rpcPhase} : {}),
+      ...('evidence' in reply ? {evidence: reply.evidence} : {}),
+    });
+  if (reply.model.build !== expected.build) throw LspFault.make({code: 'protocol'});
+  return reply;
+}
 
 /** Physical setup URIs are replaced with project-relative paths or sealed, host-owned artifact paths. */
 export const JavaPreparedModel = Schema.Struct({
@@ -505,7 +658,19 @@ export const copyJavaPreparationInputs = Effect.fn('semantic.copyJavaPreparation
               const gradleCache =
                 selected.build === 'gradle' &&
                 (relative === '.gradle' || EffectString.startsWith('.gradle/')(relative));
-              if (!metadata && !metadataDirectory && !emptyOutputDirectory && !gradleCache) return yield* fail();
+              if (!metadata && !metadataDirectory && !emptyOutputDirectory && !gradleCache) {
+                const diagnostic = {
+                  reason: 'unexpected-copied-project-entry' as const,
+                  entryType: info.type,
+                  relativePath: relative,
+                };
+                return yield* LspFault.make({
+                  code: 'prerequisite',
+                  preparationDiagnostic: Schema.is(JavaPreparationDiagnostic)(diagnostic)
+                    ? diagnostic
+                    : {reason: 'unexpected-copied-project-entry', entryType: info.type},
+                });
+              }
             }
             if (info.type === 'Directory') pending.push(file);
           }
@@ -828,7 +993,10 @@ export const loadJavaPreparedModel = Effect.fn('semantic.loadJavaPreparedModel')
         if ((yield* semanticTreeDigest(selected.worktree)) !== model.sourceDigest) return yield* fail();
         yield* sdk;
       });
-    const verifyUsing = (sdk: typeof verifySdk) =>
+    const verifyUsing = <E = never, R = never>(
+      sdk: typeof verifySdk,
+      inspectProjection: Effect.Effect<void, E, R> = Effect.void,
+    ) =>
       Effect.gen(function* () {
         for (const owner of owners) yield* owner.verify;
         yield* verifyArtifacts;
@@ -847,6 +1015,8 @@ export const loadJavaPreparedModel = Effect.fn('semantic.loadJavaPreparedModel')
           image.sourceDigest !== model.sourceEncoding.sourceDigest
         )
           return yield* fail();
+        // Owned projection inspection is enclosed by this same model's opening and closing proofs.
+        yield* inspectProjection;
         yield* verifyArtifacts;
         yield* verifyFingerprints(sdk);
         for (const file of expected.keys()) yield* verifyFile(file);
@@ -869,6 +1039,8 @@ export const loadJavaPreparedModel = Effect.fn('semantic.loadJavaPreparedModel')
       absentSourceRoots: Object.freeze(absentSourceRoots),
       verify,
       verifySource,
+      verifyWithOwnedProjection: <E, R>(inspection: Effect.Effect<void, E, R>) =>
+        verifyUsing(verifySdk, inspection).pipe(Effect.asVoid),
     });
   },
   effect =>
@@ -882,9 +1054,20 @@ export const loadJavaPreparedModel = Effect.fn('semantic.loadJavaPreparedModel')
 );
 
 export const javaPreparedModelCommand = 'threadnote.java.preparedProjectModel.v1';
+/** Candidate source overlay identity; these pins do not activate public import qualification. */
+export const javaGradleOwnedImport = Object.freeze({
+  version: 'gradle-original-foreground-v1',
+  sdkDigest: '521eff6fca682960da1988c278f2bf3b1ebcc0900220eec0ca93263102d105be',
+  treeSha256: '219451038c8e94435feff8b8e5a011584f94e56b9068941c260df8e4bc76c211',
+  archiveSha256: 'd8a05b70c0e9a9f826dcb45b29086528a6aedda9a85b35497c417904cdfbc486',
+  patchSha256: 'afe7700707cb4aa8041d4c7eadcaa9786229e53fdae4c62189b6c705613205c5',
+  recipeSha256: 'c1f8ffc13b998e3ba4e1f062986ad295996c8de1918abb026af05cc33a35c0f2',
+  providerCommit: '8de7bcf76e785507ad92f0741ab9235a430c95e6',
+  consumerCommit: '92f0512e7f06d84621afba191f75e265363890cf',
+} as const);
 export const JavaPreparationGradle = Schema.Struct({
   sdkDirectory: text,
-  sdkDigest: Schema.Literal('6da4ff86101bec03978e03b6acdb2d8ae958759c1da1dc69aa8e1d83f78ff9bc'),
+  sdkDigest: Schema.Literal(javaGradleOwnedImport.sdkDigest),
 });
 
 /** One fixed import protocol on a genuine setup process. A launch alone never upgrades the copied input proof. */
@@ -898,7 +1081,6 @@ export const observeJavaPreparedImport = Effect.fn('semantic.observeJavaPrepared
     proof.stage = 'preparing-import';
     proof.runtime = runtime;
     return yield* Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const random = yield* SecureRandom.SecureRandom;
       const root = proof.workspace.directory;
@@ -935,14 +1117,6 @@ export const observeJavaPreparedImport = Effect.fn('semantic.observeJavaPrepared
       });
       yield* verifyHost;
       const gradleHome = path.join(runtime.directory, 'gradle');
-      if (inputs.build === 'gradle')
-        yield* fs.writeFileString(
-          path.join(gradleHome, 'gradle.properties'),
-          'org.gradle.java.installations.auto-detect=false\norg.gradle.java.installations.auto-download=false\norg.gradle.java.installations.paths=' +
-            EffectString.replaceAll('\\', '\\\\')(runtime.projectJavaHome) +
-            '\norg.gradle.jvmargs=-Xmx256m\n',
-          {flag: 'wx', mode: 0o600},
-        );
       const settings =
         inputs.build === 'maven'
           ? javaMavenImportSettings(runtime.directory, runtime.projectJavaHome)
@@ -952,9 +1126,11 @@ export const observeJavaPreparedImport = Effect.fn('semantic.observeJavaPrepared
                 import: {
                   maven: {enabled: false, offline: {enabled: true}},
                   gradle: {
-                    enabled: true,
+                    enabled: false,
                     offline: {enabled: true},
                     wrapper: {enabled: false},
+                    arguments: [],
+                    jvm: {arguments: []},
                     ...(gradle
                       ? {home: gradle.sdkDirectory, user: {home: gradleHome}, java: {home: runtime.projectJavaHome}}
                       : {}),
@@ -962,7 +1138,7 @@ export const observeJavaPreparedImport = Effect.fn('semantic.observeJavaPrepared
                   },
                 },
                 configuration: {
-                  updateBuildConfiguration: 'automatic',
+                  updateBuildConfiguration: 'disabled',
                   runtimes: [{name: 'JavaSE-21', path: runtime.projectJavaHome, default: true}],
                   annotationProcessing: {enabled: false},
                 },
@@ -1040,27 +1216,38 @@ export const observeJavaPreparedImport = Effect.fn('semantic.observeJavaPrepared
       yield* healthy;
       yield* verifyHost;
       yield* proof.verifyPreparedOutputs;
-      const outputDigest = yield* semanticTreeDigest(inputs.copiedWorktree);
-      const observe = Effect.gen(function* () {
-        yield* healthy;
-        const requestToken = 'java-prepare-' + (yield* random.uuidV4());
-        const raw = yield* client.request(
-          'workspace/executeCommand',
-          {command: javaPreparedModelCommand, arguments: [{protocolVersion: 1, requestToken}]},
-          15000,
-        );
-        yield* healthy;
-        if (new TextEncoder().encode(JSON.stringify(raw)).length > 256 * 1024)
-          return yield* LspFault.make({code: 'capacity'});
-        const observed = yield* Schema.decodeUnknownEffect(JavaPreparedObservation, {onExcessProperty: 'error'})(raw);
-        if (observed.requestToken !== requestToken || observed.model.build !== inputs.build) return yield* fail();
-        return observed;
-      });
-      const observed = yield* observe;
+      const passiveBaseline = inputs.build === 'maven' ? yield* semanticTreeDigest(inputs.copiedWorktree) : undefined;
+      const observe = (rpcPhase: 'initial' | 'confirmation') =>
+        Effect.gen(function* () {
+          yield* healthy;
+          const requestToken = 'java-prepare-' + (yield* random.uuidV4());
+          yield* proof.verifyPreparedOutputs;
+          const raw = yield* client.request(
+            'workspace/executeCommand',
+            {command: javaPreparedModelCommand, arguments: [{protocolVersion: 1, requestToken}]},
+            15000,
+          );
+          yield* proof.verifyPreparedOutputs;
+          yield* healthy;
+          if (new TextEncoder().encode(JSON.stringify(raw)).length > 256 * 1024)
+            return yield* LspFault.make({code: 'capacity'});
+          const observed = yield* Effect.try({
+            try: () => readJavaPreparedObservation(raw, {requestToken, build: inputs.build, rpcPhase}),
+            catch: error =>
+              Schema.is(JavaPreparedImportRefusal)(error) || Schema.is(LspFault)(error)
+                ? error
+                : LspFault.make({code: 'protocol'}),
+          });
+          return observed;
+        });
+      const observed = yield* observe('initial');
       yield* verifyHost;
       yield* proof.verifyPreparedOutputs;
+      // Importer outputs become stable only after the joined first import/model and immutable input proof.
+      const outputDigest = yield* semanticTreeDigest(inputs.copiedWorktree);
+      if (passiveBaseline !== undefined && passiveBaseline !== outputDigest) return yield* fail();
       // Re-observe cached facts after slow host guards; copied bytes alone cannot attest workspace-cache stability.
-      const confirmed = yield* observe;
+      const confirmed = yield* observe('confirmation');
       if (canonicalJson({...confirmed, requestToken: observed.requestToken}) !== canonicalJson(observed))
         return yield* fail();
       yield* verifyHost;

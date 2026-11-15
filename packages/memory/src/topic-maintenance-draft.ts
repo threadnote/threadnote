@@ -35,7 +35,7 @@ export const MAX_TOPIC_MAINTENANCE_BASIS_BYTES = 64 * 1024;
 export const MAX_TOPIC_MAINTENANCE_REVIEW_BYTES = 128 * 1024;
 const HASH = /^[a-f0-9]{64}$/u;
 const COMMIT = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
-const SNAPSHOT = /^cgsn_[a-f0-9]{40}(?:-direct|-full-[a-f0-9]{16})?$/u;
+const SNAPSHOT = /^cgsn_[a-f0-9]{40}(?:-direct|-full-[a-f0-9]{16}|-lx2)?$/u;
 const CITATION_ID = /^tncc_[a-f0-9]{40}$/u;
 const HANDLE_ID = /^(historical|current):(tncc_[a-f0-9]{40})$/u;
 const textBytes = (value: string) => new TextEncoder().encode(value).byteLength;

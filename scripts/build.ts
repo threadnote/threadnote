@@ -14,6 +14,7 @@ import {Console, Effect, FileSystem, Path, Schema} from 'effect';
 import {javascriptStringLiteral, optionalNativePackageFallbackModule} from './effect/javascript.js';
 import {isDevelopmentBuildVersion} from './development-runtime.js';
 import {sha256Hex} from '@threadnote/platform/digest';
+import {runtimeNativePlatformTarget} from '@threadnote/platform/system';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -193,22 +194,28 @@ const build = Effect.gen(function* () {
       return yield* ScriptError.make({message: 'Could not compile the macOS graph Keychain library.'});
     yield* fs.chmod(keychainLibrary, 0o755);
   }
+  const musl = muslNativeArchitecture(target);
   const nativePackage = nativePackageForTarget(target);
   const nativePackageRoot = path.join(root, 'node_modules', ...Effect2.pipe(nativePackage, EffectString.split('/')));
-  if (!(yield* fs.exists(nativePackageRoot))) {
+  if (!musl && !(yield* fs.exists(nativePackageRoot))) {
     return yield* ScriptError.make({
       message: `${nativePackage} is not installed on this target build host. Run bun install before building.`,
     });
   }
   yield* fs.makeDirectory(nativeRuntimeRoot, {recursive: true});
+  const nativeRuntimeSource = musl
+    ? yield* stageMuslNativeRuntime(fs, path, root, outputRoot, musl, nativeRuntimeVersion)
+    : undefined;
   yield* bundleNativeRuntime(
     path.join(root, 'node_modules', NATIVE_RUNTIME_PACKAGE, 'dist', 'index.js'),
     path.join(nativeRuntimeRoot, 'node-llama-cpp.js'),
-    nativePackage,
+    musl ? undefined : nativePackage,
     nativeRuntimeVersion,
   );
-  yield* fs.copy(path.join(nativePackageRoot, 'bins'), path.join(nativeRuntimeRoot, 'native'), {overwrite: true});
-  yield* fs.copyFile(path.join(nativePackageRoot, 'LICENSE'), path.join(nativeRuntimeRoot, 'NATIVE-LICENSE'));
+  if (!musl) {
+    yield* fs.copy(path.join(nativePackageRoot, 'bins'), path.join(nativeRuntimeRoot, 'native'), {overwrite: true});
+    yield* fs.copyFile(path.join(nativePackageRoot, 'LICENSE'), path.join(nativeRuntimeRoot, 'NATIVE-LICENSE'));
+  }
   yield* fs.makeDirectory(path.join(outputRoot, 'llama'), {recursive: true});
   yield* fs.copyFile(
     path.join(root, 'node_modules', NATIVE_RUNTIME_PACKAGE, 'llama', 'binariesGithubRelease.json'),
@@ -230,7 +237,7 @@ const build = Effect.gen(function* () {
         executable: executableName,
         devSkills: {digest: devSkills.digest, manifest: 'config/dev-skills.json', protocol: devSkills.workflowProtocol},
         nativeRuntime: `runtime/${NATIVE_RUNTIME_PACKAGE}.js`,
-        nativeRuntimePackage: nativePackage,
+        ...(nativeRuntimeSource ? {nativeRuntimeSource} : {nativeRuntimePackage: nativePackage}),
         runtime: `bun-${Bun.version}`,
         target,
         version,
@@ -324,7 +331,12 @@ function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }
 
-function bundleNativeRuntime(entrypoint: string, outfile: string, nativePackage: string, nativeRuntimeVersion: string) {
+function bundleNativeRuntime(
+  entrypoint: string,
+  outfile: string,
+  nativePackage: string | undefined,
+  nativeRuntimeVersion: string,
+) {
   return runBunBuild({
     entrypoints: [entrypoint],
     minify: true,
@@ -365,6 +377,367 @@ function bundleNativeRuntime(entrypoint: string, outfile: string, nativePackage:
     target: 'bun',
   });
 }
+
+export const MUSL_NATIVE_SOURCE = {
+  packageVersion: '3.22.2',
+  repository: 'ggml-org/llama.cpp',
+  tag: 'v0.7.0',
+  commit: '1729d2ec2c4846df7754f4ce8f90f75f8a30ca3b',
+  bundleSha256: '1717cc2867373a8962212f4beeff8431565393fe087b0d8cf96769cc11d4036e',
+  upstreamPatchSha256: 'e5f4f94cf59e286992e14a967dd9b608b66096170fdf6f0ac4920efa61171b92',
+} as const;
+
+export function muslNativeArchitecture(target: string): 'x64' | 'arm64' | undefined {
+  if (/^bun-linux-x64(?:-baseline)?-musl$/u.test(target)) return 'x64';
+  if (/^bun-linux-(?:arm64|aarch64)-musl$/u.test(target)) return 'arm64';
+  if (EffectString.endsWith('-musl')(target)) throw ScriptError.make({message: 'Unsupported musl native target.'});
+  return undefined;
+}
+
+/** Only the pinned, explicitly musl source payload may report a local build in release smoke. */
+export function expectedNativeRuntimeBuildType(release: unknown): 'localBuild' | 'prebuilt' {
+  if (!isRecord(release) || typeof release.target !== 'string')
+    throw ScriptError.make({message: 'Missing native release target.'});
+  const architecture = muslNativeArchitecture(release.target);
+  if (!architecture) return 'prebuilt';
+  const source = release.nativeRuntimeSource;
+  if (
+    !isRecord(source) ||
+    source.kind !== 'source-built' ||
+    source.buildType !== 'localBuild' ||
+    source.packageVersion !== MUSL_NATIVE_SOURCE.packageVersion ||
+    source.repository !== MUSL_NATIVE_SOURCE.repository ||
+    source.tag !== MUSL_NATIVE_SOURCE.tag ||
+    source.commit !== MUSL_NATIVE_SOURCE.commit ||
+    source.bundleSha256 !== MUSL_NATIVE_SOURCE.bundleSha256 ||
+    source.upstreamPatchSha256 !== MUSL_NATIVE_SOURCE.upstreamPatchSha256 ||
+    !isRecord(source.sourceTree) ||
+    !/^[a-f0-9]{40}$/u.test(String(source.sourceTree.tree)) ||
+    (source.sourceTree.disposition !== 'bundled-base' && source.sourceTree.disposition !== 'packaged-PR22566') ||
+    source.architecture !== architecture ||
+    source.libc !== 'musl' ||
+    !isRecord(source.files) ||
+    !/^[a-f0-9]{64}$/u.test(String(source.files['llama-addon.node'])) ||
+    !/^[a-f0-9]{64}$/u.test(String(source.files['_nlcBuildMetadata.json'])) ||
+    'nativeRuntimePackage' in release
+  )
+    throw ScriptError.make({message: 'Missing or incompatible musl source-built release provenance.'});
+  return 'localBuild';
+}
+
+export function validateMuslBuildMetadata(value: unknown, architecture: 'x64' | 'arm64'): void {
+  if (!isRecord(value) || !isRecord(value.buildOptions))
+    throw ScriptError.make({message: 'Missing musl build metadata.'});
+  const options = value.buildOptions;
+  if (
+    options.platform !== 'linux' ||
+    options.arch !== architecture ||
+    options.gpu !== false ||
+    !isRecord(options.llamaCpp) ||
+    options.llamaCpp.repo !== MUSL_NATIVE_SOURCE.repository ||
+    options.llamaCpp.release !== MUSL_NATIVE_SOURCE.tag ||
+    !isRecord(options.customCmakeOptions) ||
+    EffectRecord.keys(options.customCmakeOptions).length !== 0
+  ) {
+    throw ScriptError.make({message: 'Musl build metadata differs from the pinned CPU/source basis.'});
+  }
+}
+
+export function validateMuslCmakeCache(cache: string): void {
+  if (!/^CMAKE_GENERATOR:INTERNAL=Unix Makefiles\r?$/mu.test(cache))
+    throw ScriptError.make({message: 'Musl artifact membership requires the current Makefiles build manifest.'});
+  for (const [key, value] of [
+    ['GGML_NATIVE', 'OFF'],
+    ['GGML_CPU_ALL_VARIANTS', 'ON'],
+    ['GGML_BACKEND_DL', 'ON'],
+    ['GGML_OPENMP', 'OFF'],
+  ]) {
+    if (!new RegExp(`^${key}:[A-Z_]+=${value}\\r?$`, 'mu').test(cache))
+      throw ScriptError.make({message: `Musl portable build option is missing: ${key}=${value}.`});
+  }
+}
+
+/** readelf is an explicit CI build prerequisite, never a runtime dependency. */
+export function validateMuslElfReport(
+  report: string,
+  architecture: 'x64' | 'arm64',
+  files: readonly string[],
+): readonly string[] {
+  if (
+    report.length > 262144 ||
+    !/Class:\s+ELF64/u.test(report) ||
+    !/Data:\s+2's complement, little endian/u.test(report) ||
+    !(architecture === 'x64' ? /Machine:\s+Advanced Micro Devices X86-64/u : /Machine:\s+AArch64/u).test(report) ||
+    /GLIBC_|ld-linux|libc\.so\.6/u.test(report)
+  )
+    throw ScriptError.make({message: 'Incompatible musl ELF payload.'});
+  const needed = EffectArray.map(
+    [...EffectString.matchAll(/\(NEEDED\)[^\n]*\[([^\]]+)\]/gu)(report)],
+    match => match[1],
+  );
+  for (const dependency of needed) {
+    if (
+      !EffectArray.contains(files, dependency) &&
+      !new RegExp(
+        `^(?:libstdc\\+\\+\\.so\\.6|libgcc_s\\.so\\.1|libc\\.musl-${architecture === 'x64' ? 'x86_64' : 'aarch64'}\\.so\\.1)$`,
+        'u',
+      ).test(dependency)
+    )
+      throw ScriptError.make({message: 'Musl ELF dependency is outside the staged/declared system closure.'});
+  }
+  for (const match of EffectString.matchAll(/\((?:RPATH|RUNPATH)\)[^\n]*\[([^\]]+)\]/gu)(report))
+    if (EffectArray.some(EffectString.split(':')(match[1]), entry => entry !== '$ORIGIN'))
+      throw ScriptError.make({message: 'Musl ELF contains an external runtime search path.'});
+  return needed;
+}
+
+/** Exact current CMake link outputs, independent of the Release directory being admitted. */
+export function muslLinkedArtifact(command: string): {output: string; name: string} | undefined {
+  if (command.length > 262144) throw ScriptError.make({message: 'Oversized CMake link command.'});
+  const outputs = [...EffectString.matchAll(/(?:^|\s)-o\s+([^\s]+)/gu)(command)];
+  if (outputs.length === 0) return undefined; // Static archives and utility targets have no dynamic link output.
+  if (outputs.length !== 1 || !/^[A-Za-z0-9_./+-]+$/u.test(outputs[0][1]))
+    throw ScriptError.make({message: 'Ambiguous CMake link output.'});
+  const output = outputs[0][1],
+    name = EffectString.split('/')(output).at(-1)!;
+  return name === 'llama-addon.node' || /^lib[A-Za-z0-9_.+-]+\.so(?:\.[0-9]+)*$/u.test(name)
+    ? {output, name}
+    : undefined;
+}
+export function validateMuslBuildInventory(actual: readonly string[], linked: readonly string[]): void {
+  const expected = ['_nlcBuildMetadata.json', ...linked].sort();
+  if (
+    !EffectArray.contains(linked, 'llama-addon.node') ||
+    linked.length !== new Set(linked).size ||
+    JSON.stringify([...actual].sort()) !== JSON.stringify(expected)
+  )
+    throw ScriptError.make({message: 'Musl Release inventory differs from the current CMake dynamic targets.'});
+}
+
+const muslBuildCommand = (args: readonly string[], environment?: NodeJS.ProcessEnv) =>
+  Effect.try({
+    try: () => {
+      const result = Bun.spawnSync({cmd: [...args], env: environment, stdout: 'pipe', stderr: 'pipe'});
+      if (result.exitCode !== 0 || result.stdout.byteLength > 262144 || result.stderr.byteLength > 262144)
+        throw ScriptError.make({message: 'Musl source/ELF build verification failed.'});
+      return new TextDecoder('utf-8', {fatal: true}).decode(result.stdout);
+    },
+    catch: cause => ScriptError.make({message: 'Could not verify musl source/ELF closure.', cause}),
+  });
+
+/** A separate index derives the one permitted patched tree; the original index/HEAD/source are read only. */
+export const verifyMuslTrackedSource = Effect.fn('build.verifyMuslTrackedSource')(
+  (source: string, patch: string, commit: string) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem,
+          path = yield* Path.Path;
+        if (
+          !/^[a-f0-9]{40}$/u.test(commit) ||
+          (yield* fs.realPath(source)) !== source ||
+          (yield* fs.realPath(path.join(source, '.git'))) !== path.join(source, '.git') ||
+          (yield* fs.stat(path.join(source, '.git'))).type !== 'Directory'
+        )
+          return yield* ScriptError.make({message: 'Invalid musl source checkout.'});
+        const temporary = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-musl-source-index-'});
+        const environment = {
+          ...process.env,
+          GIT_INDEX_FILE: path.join(temporary, 'index'),
+          GIT_OPTIONAL_LOCKS: '0',
+          GIT_CONFIG_GLOBAL: path.join(temporary, 'absent-global-config'),
+          GIT_CONFIG_NOSYSTEM: '1',
+        };
+        const git = (args: readonly string[]) =>
+          muslBuildCommand(
+            ['git', '-C', source, '-c', 'core.fsmonitor=false', '-c', `core.hooksPath=${temporary}`, ...args],
+            environment,
+          );
+        if (EffectString.trim(yield* git(['rev-parse', 'HEAD'])) !== commit)
+          return yield* ScriptError.make({message: 'Musl source is not the bundled commit.'});
+        yield* git(['read-tree', commit]);
+        if ((yield* git(['ls-files', '--others', '--exclude-standard'])).length !== 0)
+          return yield* ScriptError.make({message: 'Musl source has unowned untracked files.'});
+        const changes = yield* git(['diff-files', '--patch', '--no-ext-diff', '--no-textconv']);
+        let disposition: 'bundled-base' | 'packaged-PR22566' = 'bundled-base';
+        if (changes.length !== 0) {
+          yield* git(['apply', '--cached', '--whitespace=nowarn', patch]);
+          disposition = 'packaged-PR22566';
+        }
+        const tree = EffectString.trim(yield* git(['write-tree']));
+        yield* git(['diff', '--exit-code', '--no-ext-diff', '--no-textconv', tree, '--']);
+        if (EffectString.trim(yield* git(['rev-parse', 'HEAD'])) !== commit)
+          return yield* ScriptError.make({message: 'Musl source commit changed during verification.'});
+        return {tree, disposition};
+      }),
+    ),
+);
+
+const stageMuslNativeRuntime = Effect.fn('build.stageMuslNativeRuntime')(function* (
+  fs: FileSystem.FileSystem,
+  path: Path.Path,
+  root: string,
+  outputRoot: string,
+  architecture: 'x64' | 'arm64',
+  version: string,
+) {
+  const fail = (message: string) => Effect.fail(ScriptError.make({message}));
+  if (
+    version !== MUSL_NATIVE_SOURCE.packageVersion ||
+    process.platform !== 'linux' ||
+    process.arch !== architecture ||
+    !EffectString.endsWith('-musl')(runtimeNativePlatformTarget() ?? '')
+  )
+    return yield* fail('Source-built native payload requires its exact musl OS/architecture and package pin.');
+  const packageRoot = yield* fs.realPath(path.join(root, 'node_modules', NATIVE_RUNTIME_PACKAGE));
+  const regular = Effect.fn('build.muslRegular')(function* (relative: string, maximum: number) {
+    const file = path.join(packageRoot, relative);
+    if (
+      (yield* fs.realPath(file)) !== file ||
+      (yield* fs.stat(file)).type !== 'File' ||
+      Number((yield* fs.stat(file)).size) > maximum
+    )
+      return yield* fail('Missing, escaping or oversized musl source/build member.');
+    return yield* fs.readFile(file);
+  });
+  const installed = yield* readPackageManifest(fs, path.join(packageRoot, 'package.json'));
+  if (
+    installed.version !== version ||
+    (yield* sha256Hex(yield* regular('llama/gitRelease.bundle', 64 * 1024 * 1024))) !== MUSL_NATIVE_SOURCE.bundleSha256
+  )
+    return yield* fail('Musl packaged source pin changed.');
+  const command = (args: readonly string[]) => muslBuildCommand(args);
+  const patchFile = path.join(packageRoot, 'llama', 'patches', 'PR-22566.diff');
+  if (
+    (yield* sha256Hex(yield* regular('llama/patches/PR-22566.diff', 65536))) !== MUSL_NATIVE_SOURCE.upstreamPatchSha256
+  )
+    return yield* fail('The packaged upstream source patch changed.');
+  const sourceDirectory = path.join(packageRoot, 'llama', 'llama.cpp');
+  const sourceTree = yield* verifyMuslTrackedSource(sourceDirectory, patchFile, MUSL_NATIVE_SOURCE.commit);
+  const folder = `llama/localBuilds/linux-${architecture}`;
+  const buildDone = yield* regular(`${folder}/buildDone.status`, 1024);
+  if (buildDone.byteLength !== 0) return yield* fail('Invalid upstream build completion marker.');
+  const metadata = yield* regular(`${folder}/Release/_nlcBuildMetadata.json`, 65536);
+  yield* Effect.try({
+    try: () => validateMuslBuildMetadata(JSON.parse(new TextDecoder().decode(metadata)), architecture),
+    catch: cause => ScriptError.make({message: 'Invalid musl build metadata.', cause}),
+  });
+  const cache = new TextDecoder().decode(yield* regular(`${folder}/CMakeCache.txt`, 2 * 1024 * 1024));
+  yield* Effect.try({
+    try: () => validateMuslCmakeCache(cache),
+    catch: cause => ScriptError.make({message: 'Invalid musl portable CPU flags.', cause}),
+  });
+  const release = path.join(packageRoot, folder, 'Release');
+  const files = (yield* fs.readDirectory(release)).sort();
+  if (
+    !EffectArray.contains(files, 'llama-addon.node') ||
+    !EffectArray.contains(files, '_nlcBuildMetadata.json') ||
+    files.length > 256 ||
+    EffectArray.some(
+      files,
+      name =>
+        name !== 'llama-addon.node' &&
+        name !== '_nlcBuildMetadata.json' &&
+        !/^lib[A-Za-z0-9_.+-]+\.so(?:\.[0-9]+)*$/u.test(name),
+    )
+  )
+    return yield* fail('Unexpected or incomplete musl build output.');
+  const buildRoot = path.join(packageRoot, folder);
+  const directories = EffectString.split('\n')(
+    new TextDecoder().decode(yield* regular(`${folder}/CMakeFiles/TargetDirectories.txt`, 1024 * 1024)),
+  );
+  if (directories.length > 2048) return yield* fail('CMake target inventory exceeds its bound.');
+  const linked: {name: string; sha256: string}[] = [];
+  let linkedBytes = 0;
+  for (const entry of directories) {
+    if (entry === '') continue;
+    const directory = path.resolve(entry);
+    if (!EffectString.startsWith(buildRoot + path.sep)(directory))
+      return yield* fail('CMake target directory escaped its build.');
+    if (!EffectString.endsWith('.dir')(directory)) continue; // Utility targets have no dynamic artifact.
+    const commandFile = path.join(directory, 'link.txt');
+    if (!(yield* fs.exists(commandFile))) continue;
+    const text = new TextDecoder('utf-8', {fatal: true}).decode(
+      yield* regular(path.relative(packageRoot, commandFile), 262144),
+    );
+    const output = yield* Effect.try({
+      try: () => muslLinkedArtifact(text),
+      catch: cause => ScriptError.make({message: 'Invalid CMake target artifact.', cause}),
+    });
+    if (!output) continue;
+    const artifact = path.resolve(path.dirname(path.dirname(directory)), output.output);
+    if (!EffectString.startsWith(buildRoot + path.sep)(artifact))
+      return yield* fail('CMake target artifact escaped its build.');
+    if (linked.length >= 255) return yield* fail('CMake dynamic artifact inventory exceeds its bound.');
+    const linkedData = yield* regular(path.relative(packageRoot, artifact), 256 * 1024 * 1024);
+    linkedBytes += linkedData.byteLength;
+    if (linkedBytes > 512 * 1024 * 1024) return yield* fail('CMake dynamic artifacts exceed their byte bound.');
+    linked.push({name: output.name, sha256: yield* sha256Hex(linkedData)});
+  }
+  yield* Effect.try({
+    try: () =>
+      validateMuslBuildInventory(
+        files,
+        EffectArray.map(linked, item => item.name),
+      ),
+    catch: cause => ScriptError.make({message: 'Unexpected musl Release member.', cause}),
+  });
+  const hashes: Record<string, string> = {},
+    dependencies: Record<string, readonly string[]> = {};
+  let bytes = 0;
+  for (const name of files) {
+    const data = yield* regular(`${folder}/Release/${name}`, 256 * 1024 * 1024);
+    bytes += data.byteLength;
+    if (bytes > 512 * 1024 * 1024) return yield* fail('Musl native payload exceeds its byte bound.');
+    hashes[name] = yield* sha256Hex(data);
+    if (
+      name !== '_nlcBuildMetadata.json' &&
+      !EffectArray.some(linked, item => item.name === name && item.sha256 === hashes[name])
+    )
+      return yield* fail('Musl Release member differs from its current CMake link output.');
+    if (name !== '_nlcBuildMetadata.json') {
+      const report = yield* command(['readelf', '-h', '-d', '--version-info', path.join(release, name)]);
+      dependencies[name] = yield* Effect.try({
+        try: () => validateMuslElfReport(report, architecture, files),
+        catch: cause => ScriptError.make({message: 'Invalid musl native dependency closure.', cause}),
+      });
+    }
+  }
+  if (
+    !EffectArray.some(EffectRecord.values(dependencies), list =>
+      EffectArray.some(list, name => EffectString.startsWith('libc.musl-')(name)),
+    )
+  )
+    return yield* fail('Musl runtime linkage was not proven.');
+  const target = path.join(outputRoot, 'llama', 'localBuilds');
+  yield* fs.remove(target, {recursive: true, force: true});
+  const staged = path.join(target, `linux-${architecture}`, 'Release');
+  yield* fs.makeDirectory(staged, {recursive: true});
+  for (const name of files) {
+    const data = yield* regular(`${folder}/Release/${name}`, 256 * 1024 * 1024);
+    if ((yield* sha256Hex(data)) !== hashes[name]) return yield* fail('Musl build member changed during staging.');
+    yield* fs.writeFile(path.join(staged, name), data);
+  }
+  yield* fs.writeFile(path.join(path.dirname(staged), 'buildDone.status'), buildDone);
+  for (const [source, name] of [
+    ['LICENSE', 'NATIVE-LICENSE'],
+    ['llama/llama.cpp/LICENSE', 'LLAMA-CPP-LICENSE'],
+  ])
+    yield* fs.writeFile(path.join(outputRoot, 'runtime', name), yield* regular(source, 1024 * 1024));
+  const closingSourceTree = yield* verifyMuslTrackedSource(sourceDirectory, patchFile, MUSL_NATIVE_SOURCE.commit);
+  if (JSON.stringify(closingSourceTree) !== JSON.stringify(sourceTree))
+    return yield* fail('Musl source changed during staging.');
+  return {
+    kind: 'source-built' as const,
+    buildType: 'localBuild' as const,
+    ...MUSL_NATIVE_SOURCE,
+    architecture,
+    libc: 'musl' as const,
+    sourceTree,
+    files: hashes,
+    dependencies,
+    linkedArtifacts: linked,
+  };
+});
 
 function isCompileTarget(value: string): value is Bun.Build.CompileTarget {
   return /^bun-(?:darwin-(?:x64|arm64|aarch64)(?:-(?:baseline|modern))?|linux-(?:x64|arm64|aarch64)(?:-(?:glibc|musl)|-(?:baseline|modern)(?:-(?:glibc|musl))?)?|windows-(?:x64(?:-(?:baseline|modern))?|arm64|aarch64))$/u.test(

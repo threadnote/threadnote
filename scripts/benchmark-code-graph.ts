@@ -1,3 +1,4 @@
+import {lexicalV2PhysicalCountStatement, isLexicalV2Snapshot} from '@threadnote/graph/store';
 import {CodeGraphLanguagePackRegistry} from '@threadnote/graph/languages/registry';
 import {TreeSitterRuntime, TREE_SITTER_RUNTIME_CACHE_IDENTITY} from '@threadnote/graph/tree_sitter/runtime';
 import type {Query} from 'web-tree-sitter';
@@ -4199,6 +4200,29 @@ function sqliteRowCount(databasePath: string, query: string, ...parameters: read
 function sqliteLexicalTermRowCount(databasePath: string, snapshotId: string): number {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
+    if (isLexicalV2Snapshot(snapshotId)) {
+      const statement = lexicalV2PhysicalCountStatement(snapshotId);
+      const row = database
+        .query<Record<string, number>, SQLQueryBindings[]>(statement.text)
+        .get(...statement.parameters);
+      if (!row || row.obsolete_count !== 0 || row.format_count !== 1 || row.view_count !== 1)
+        throw ScriptError.make({message: 'Factored lexical physical accounting is incomplete.'});
+      const count =
+        row.owner_count +
+        row.shared_count +
+        row.symbol_count +
+        row.scope_count +
+        row.term_count +
+        row.format_count +
+        row.view_count +
+        1;
+      const receipt = database
+        .query<{posting_count: number}, [string]>('SELECT posting_count FROM lexical_v2_formats WHERE snapshot_id=?')
+        .get(snapshotId);
+      if (!Number.isSafeInteger(count) || count < 0 || receipt?.posting_count !== count)
+        throw ScriptError.make({message: 'Factored lexical physical row count differs from its receipt.'});
+      return count;
+    }
     const compact = database
       .query<{readonly count?: bigint | number} | null, SQLQueryBindings[]>(
         'SELECT posting_count AS count FROM lexical_storage_formats WHERE snapshot_id = ? LIMIT 1',

@@ -1,3 +1,4 @@
+import {lexicalPhysicalSnapshotIdentity, parseLexicalViewBinding} from '@threadnote/graph/store/utilities';
 import * as EffectArray from 'effect/Array';
 import * as EffectOption from 'effect/Option';
 import * as EffectString from 'effect/String';
@@ -714,4 +715,51 @@ it('preserves nullable text, integer arity and provenance enum semantics with fi
     ),
     {numRuns: 25},
   );
+});
+
+it('bounds V2 layout metadata before transfer and refuses oversized optional fields', () => {
+  const db = postingDatabase(false, true);
+  try {
+    for (const table of PERSISTENT_EXTENSION_TABLES) if (table.group === 'lexical-v2') db.exec(table.createSql);
+    const logical = 'cgsn_' + EffectString.repeat(40)('a');
+    const actual = lexicalPhysicalSnapshotIdentity(logical, 'full');
+    db.query(
+      `INSERT INTO snapshots SELECT ?,repository_id,worktree_id,commit_id,graph_content_id,base_snapshot_id,
+      extractor_set,dirty,overlay_fingerprint,state,file_count,symbol_count,edge_count,started_at,completed_at,failure_summary
+      FROM snapshots WHERE id='snap'`,
+    ).run(actual);
+    db.query('INSERT INTO lexical_v2_views VALUES(?,?,?,NULL,NULL,1)').run(actual, logical, 'full');
+    const statement = taskHeaderStatement(actual);
+    const observe = () =>
+      db.query<Record<string, unknown>, (string | number)[]>(statement.text).all(...statement.parameters);
+    expect(parseLexicalViewBinding(observe()[0].layout_current)).toBeDefined();
+    for (const column of ['base_snapshot_id', 'force_generation']) {
+      db.query(`UPDATE lexical_v2_views SET ${column}=? WHERE snapshot_id=?`).run(
+        EffectString.repeat(40000)('x'),
+        actual,
+      );
+      const rows = observe();
+      expect(rows).toHaveLength(1);
+      expect(Buffer.byteLength(JSON.stringify(rows))).toBeLessThanOrEqual(4096);
+      expect(rows[0].layout_current).toBeNull();
+      db.query(`UPDATE lexical_v2_views SET ${column}=NULL WHERE snapshot_id=?`).run(actual);
+    }
+    const program = db
+      .query<NativeInstruction, (string | number)[]>('EXPLAIN ' + statement.text)
+      .all(...statement.parameters);
+    const columns = EffectArray.filter(
+      persistedColumns(db, program),
+      column => column.table === 'lexical_v2_views' && ['base_snapshot_id', 'force_generation'].includes(column.column),
+    );
+    expect(columns.length).toBeGreaterThan(0);
+    expect(
+      EffectArray.filter(
+        columns,
+        ({op, index}) =>
+          op.p5 === 0 && ['IsNull', 'NotNull'].includes(program[index + 1]?.opcode) && program[index + 1].p1 === op.p3,
+      ),
+    ).toEqual([]);
+  } finally {
+    db.close();
+  }
 });
