@@ -250,6 +250,10 @@ const citationFailureEvidence = (
   return EffectString.slice(0, 2048)(JSON.stringify({candidate: selected, gaps, nativeReads}));
 };
 
+// Compilation has its own setup allowance inside the existing 30-second hook.
+// Leave ten seconds for launch, phase handling and original owned cleanup; read budgets are separate.
+const CONTEXT_WORKER_BUNDLE_BUILD_MILLISECONDS = 20_000;
+
 // Prepare the actual standalone dispatch before native reads allocate their shared deadline.
 // The setup command owns Bun.build's uncancellable Promise; the file layer owns every immutable output.
 const bundledContextWorker = (root: string, home: string) =>
@@ -293,7 +297,7 @@ if (!result.success || !result.outputs.some(output => output.path === ${JSON.str
         ],
         {
           env: {...system.environment(), THREADNOTE_HOME: home},
-          timeoutMs: 5000,
+          timeoutMs: CONTEXT_WORKER_BUNDLE_BUILD_MILLISECONDS,
           maxOutputBytes: 16 * 1024,
           forceKillAfterMilliseconds: 0,
           verifyOwnedProcessExit: system.platform === 'win32' ? 'leader' : 'group',
@@ -353,7 +357,12 @@ effectIt.layer(contextWorkerIo)('context worker build diagnostics', it => {
       const path = yield* Path.Path;
       const root = yield* fs.makeTempDirectoryScoped();
       const diagnostic = path.join(root, 'bundle-phase.json');
-      const error = CommandTimedOut.make({args: [], executable: 'bun', message: 'fixture timeout', timeoutMs: 5000});
+      const error = CommandTimedOut.make({
+        args: [],
+        executable: 'bun',
+        message: 'fixture timeout',
+        timeoutMs: CONTEXT_WORKER_BUNDLE_BUILD_MILLISECONDS,
+      });
       const state = {phase: 'build-completed', elapsedMs: 4200, success: true, outputCount: 1, exitCode: 0};
       for (const fixture of [
         undefined,
@@ -362,8 +371,9 @@ effectIt.layer(contextWorkerIo)('context worker build diagnostics', it => {
       ]) {
         const messages: unknown[] = [];
         const executor = CommandExecutor.of({
-          execute: () =>
+          execute: (_command, _args, options) =>
             Effect.gen(function* () {
+              expect(options?.timeoutMs).toBe(CONTEXT_WORKER_BUNDLE_BUILD_MILLISECONDS);
               if (fixture !== undefined)
                 yield* fs.writeFileString(diagnostic, JSON.stringify(fixture)).pipe(Effect.orDie);
               return yield* error;

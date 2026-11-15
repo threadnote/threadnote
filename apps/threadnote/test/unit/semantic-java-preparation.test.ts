@@ -2578,28 +2578,31 @@ describe('Java prepared model sealing', () => {
       expect(yield* f.fs.readDirectory(workspace.directory)).toEqual([]);
     }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
-  effectIt.effect.prop(
-    'binds every copied original build input, including metadata and nested configuration',
-    [
-      Schema.Literals([
+  effectIt.effect('binds every copied original build input, including metadata and nested configuration', () =>
+    Effect.gen(function* () {
+      // This closed six-path domain is exhaustive; each mutation still owns a fresh full model and proof Scope.
+      for (const relative of [
         'pom.xml',
         'settings.gradle',
         'build.gradle',
         'gradle.properties',
         '.mvn/maven.config',
         '.project',
-      ]),
-    ],
-    ([relative]) =>
-      Effect.gen(function* () {
-        const f = yield* modelFixture();
-        yield* f.fs.writeFileString(f.path.join(f.copiedProject, relative), 'different imported build input');
-        expect((yield* Effect.exit(f.options.inputs.verify))._tag).toBe('Failure');
-        expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
-        expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
-        expect(yield* semanticTreeDigest(f.project)).toBe(f.options.inputs.sourceDigest);
-      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
-    {arbitrary: {runs: 16}},
+      ]) {
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const f = yield* modelFixture();
+            yield* f.fs.writeFileString(f.path.join(f.copiedProject, relative), 'different imported build input');
+            expect((yield* Effect.exit(f.options.inputs.verify))._tag, relative).toBe('Failure');
+            expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag, relative).toBe(
+              'Failure',
+            );
+            expect(yield* f.fs.readDirectory(f.artifactDirectory), relative).toEqual([]);
+            expect(yield* semanticTreeDigest(f.project), relative).toBe(f.options.inputs.sourceDigest);
+          }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
+        );
+      }
+    }),
   );
   effectIt.effect('rejects forged proofs and keeps generated metadata outside the strict input image', () =>
     Effect.gen(function* () {
