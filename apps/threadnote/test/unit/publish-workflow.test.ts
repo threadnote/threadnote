@@ -482,8 +482,17 @@ describe('standalone release workflows', () => {
       expect(checker).toContain('BUNDLED_MODEL_LICENSE_SHA256');
       expect(modelLicense).toContain('Copyright (c) 2022 staoxiao');
       expect(modelLicense).toContain('The above copyright notice and this permission notice shall be included');
-      expect(stringProperty(property(packageManifest, 'scripts'), 'build')).toMatch(
-        /^bun scripts\/check-embedded-core-model\.ts && /,
+      expect(stringProperty(property(packageManifest, 'scripts'), 'build')).toBe(
+        EffectArray.join(
+          [
+            'bun scripts/clean.ts --preflight-native-asset',
+            'bun scripts/check-embedded-core-model.ts',
+            'bun run generate:code-graph-languages',
+            'bun run clean',
+            'bun scripts/build.ts',
+          ],
+          ' && ',
+        ),
       );
       expect(stringProperty(property(packageManifest, 'scripts'), 'compile:targets')).toMatch(
         /^bun scripts\/check-embedded-core-model\.ts && /,
