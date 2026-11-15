@@ -1,6 +1,6 @@
 // oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import, effecttsgo/prefer-effect-array, effecttsgo/prefer-effect-string -- This explicitly invoked offline construction tool owns raw Git/Go process and private filesystem boundaries; no product runtime imports it.
 import {createHash} from 'node:crypto';
-import {copyFile, cp, mkdir, mkdtemp, realpath, rm, stat, writeFile} from 'node:fs/promises';
+import {chmod, copyFile, cp, mkdir, mkdtemp, readdir, realpath, rm, stat, writeFile} from 'node:fs/promises';
 import {basename, dirname, isAbsolute, join, parse, relative, resolve, sep} from 'node:path';
 import {
   runtimeCloseOwnedProviderTree,
@@ -478,6 +478,162 @@ async function command(
     }
     throw error;
   }
+}
+
+/** Derives the shipped frontend from the exact installed SDK without changing that installation. */
+export async function stageNativeTypeScriptFrontendSdk(
+  sourceDirectory: string,
+  destinationDirectory: string,
+  repositoryRoot: string,
+): Promise<void> {
+  const source = resolve(sourceDirectory);
+  const destination = resolve(destinationDirectory);
+  const parent = dirname(destination);
+  const repository = resolve(repositoryRoot);
+  if (
+    (await realpath(source)) !== source ||
+    (await realpath(parent)) !== parent ||
+    (await realpath(repository)) !== repository ||
+    source === destination ||
+    relative(source, destination) === '' ||
+    (!relative(source, destination).startsWith(`..${sep}`) && relative(source, destination) !== '..') ||
+    (!relative(destination, source).startsWith(`..${sep}`) && relative(destination, source) !== '..')
+  )
+    throw new Error('Native TypeScript frontend input and output must be separate canonical trees.');
+  try {
+    await stat(destination);
+    throw new Error('Native TypeScript derived frontend output must be fresh.');
+  } catch (error) {
+    if (typeof error !== 'object' || error === null || !('code' in error) || error.code !== 'ENOENT') throw error;
+  }
+  const frontend = {
+    patchSha256: '2d85454eb544d731610470668ec2a2e8b4153b328323ecf3c66a81c9b73dfba2',
+    distBeforeSha256: '629dc5e5978c15f93453084e2da86841a21a044d2ff38bcedbde10744adad088',
+    distAfterSha256: 'f3c440657da611b7cf002a6c86c83b2c975715b6ffed8f0a48c19fb5e4522822',
+  } as const;
+  const patch = await exact(
+    join(repository, 'tools', 'semantic', 'typescript-native-frontend-bom.patch'),
+    frontend.patchSha256,
+    16 * 1024,
+  );
+  const directories: Array<{path: string; mode: number}> = [];
+  const pending = [''];
+  let entries = 0;
+  let bytes = 0;
+  await mkdir(destination, {mode: 0o700});
+  while (pending.length) {
+    const current = pending.pop()!;
+    const inputDirectory = join(source, current);
+    if ((await realpath(inputDirectory)) !== inputDirectory)
+      throw new Error('Native TypeScript SDK directory contains an alias.');
+    const info = await stat(inputDirectory);
+    if (!info.isDirectory()) throw new Error('Native TypeScript SDK directory changed.');
+    directories.push({path: join(destination, current), mode: info.mode & 0o777});
+    const names = (await readdir(inputDirectory)).sort();
+    for (const name of names) {
+      if (name === '.git' || ++entries > 1200) throw new Error('Native TypeScript SDK member inventory is invalid.');
+      const relativeName = current ? join(current, name) : name;
+      const input = join(source, relativeName);
+      if ((await realpath(input)) !== input) throw new Error('Native TypeScript SDK member contains an alias.');
+      const member = await stat(input);
+      const output = join(destination, relativeName);
+      if (member.isDirectory()) {
+        await mkdir(output, {mode: 0o700});
+        pending.push(relativeName);
+        continue;
+      }
+      if (!member.isFile() || member.size > 8 * 1024 * 1024 || bytes + member.size > 16 * 1024 * 1024)
+        throw new Error('Native TypeScript SDK member exceeds its bound.');
+      const content = await runtimeReadBoundedStableRegularFile(input, 8 * 1024 * 1024);
+      bytes += content.byteLength;
+      if (bytes > 16 * 1024 * 1024) throw new Error('Native TypeScript SDK copy exceeds its bound.');
+      await writeFile(output, content, {mode: member.mode & 0o777});
+      await chmod(output, member.mode & 0o777);
+    }
+  }
+  const target = join(destination, 'dist', 'api', 'node', 'wtf8.js');
+  await exact(target, frontend.distBeforeSha256, 16 * 1024);
+  const snapshotDirectory = await mkdtemp(join(parent, '.tn-ts71-frontend-'));
+  const patchSnapshot = join(snapshotDirectory, 'frontend.patch');
+  await writeFile(patchSnapshot, patch, {mode: 0o600});
+  const git = Bun.which('git');
+  if (!git) throw new Error('Pinned frontend patch requires Git.');
+  await command(git, ['apply', '--check', '--include=dist/api/node/wtf8.js', patchSnapshot], destination, {}, 10000);
+  await command(git, ['apply', '--include=dist/api/node/wtf8.js', patchSnapshot], destination, {}, 10000);
+  await exact(target, frontend.distAfterSha256, 16 * 1024);
+  for (const directory of directories.reverse()) await chmod(directory.path, directory.mode);
+  await rm(snapshotDirectory, {recursive: true});
+}
+
+/** Bundle only the verified SDK's genuine public entrypoints for standalone file-URL loading. */
+export async function stageNativeTypeScriptPublicFrontendBundles(
+  sdkDirectory: string,
+  destinationDirectory: string,
+): Promise<Readonly<Record<'api/async/api.js' | 'ast/index.js' | 'chunk.js', string>>> {
+  const sdk = resolve(sdkDirectory);
+  const destination = resolve(destinationDirectory);
+  if (
+    (await realpath(sdk)) !== sdk ||
+    (await realpath(dirname(destination))) !== dirname(destination) ||
+    destination === sdk ||
+    destination.startsWith(`${sdk}${sep}`)
+  )
+    throw new Error('Native TypeScript public frontend bundle paths are invalid.');
+  try {
+    await stat(destination);
+    throw new Error('Native TypeScript public frontend bundle output must be fresh.');
+  } catch (error) {
+    if (typeof error !== 'object' || error === null || !('code' in error) || error.code !== 'ENOENT') throw error;
+  }
+  await exact(
+    join(sdk, 'dist', 'api', 'node', 'wtf8.js'),
+    'f3c440657da611b7cf002a6c86c83b2c975715b6ffed8f0a48c19fb5e4522822',
+    16 * 1024,
+  );
+  const entries = ['dist/api/async/api.js', 'dist/ast/index.js'] as const;
+  for (const entry of entries) {
+    const input = join(sdk, entry);
+    if ((await realpath(input)) !== input || !(await stat(input)).isFile())
+      throw new Error('Native TypeScript public frontend entrypoint changed.');
+  }
+  const built = await Bun.build({
+    entrypoints: entries.map(entry => join(sdk, entry)),
+    root: join(sdk, 'dist'),
+    target: 'node',
+    format: 'esm',
+    splitting: true,
+    sourcemap: 'none',
+    minify: true,
+    naming: {chunk: './chunk.js'},
+  });
+  if (!built.success || built.outputs.length !== 3)
+    throw new Error('Native TypeScript public frontend entrypoints could not be bundled.');
+  const outputs: Record<string, string> = {};
+  await mkdir(destination, {mode: 0o700});
+  for (const output of built.outputs) {
+    const name = output.path.replace(/^\.\//u, '');
+    if (name in outputs || (name !== 'api/async/api.js' && name !== 'ast/index.js' && name !== 'chunk.js'))
+      throw new Error('Native TypeScript public frontend output inventory changed.');
+    const bytes = new Uint8Array(await output.arrayBuffer());
+    if (bytes.byteLength === 0 || bytes.byteLength > 16 * 1024 * 1024)
+      throw new Error('Native TypeScript public frontend bundle exceeds its bound.');
+    const source = new TextDecoder('utf-8', {fatal: true}).decode(bytes);
+    if (source.includes(sdk) || source.includes(dirname(sdk)) || source.includes('sourceMappingURL'))
+      throw new Error('Native TypeScript public frontend bundle exposes a source path or map.');
+    const target = join(destination, name);
+    await mkdir(dirname(target), {recursive: true, mode: 0o700});
+    await writeFile(target, bytes, {mode: 0o600});
+    const stable = await runtimeReadBoundedStableRegularFile(target, 16 * 1024 * 1024);
+    if (hash(stable) !== hash(bytes)) throw new Error('Native TypeScript public frontend bundle changed.');
+    outputs[name] = hash(stable);
+  }
+  if (!outputs['api/async/api.js'] || !outputs['ast/index.js'] || !outputs['chunk.js'])
+    throw new Error('Native TypeScript public frontend output inventory is incomplete.');
+  return {
+    'api/async/api.js': outputs['api/async/api.js'],
+    'ast/index.js': outputs['ast/index.js'],
+    'chunk.js': outputs['chunk.js'],
+  };
 }
 
 /** Never selects or downloads a compiler/toolchain. Module acquisition uses the pinned go.mod graph only. */

@@ -17,6 +17,8 @@ import {sha256Hex} from '@threadnote/platform/digest';
 import {runtimeReadBoundedStableRegularFile} from '@threadnote/platform/system';
 import {
   assertNativeTypeScriptAssetOutsideReleaseOutput,
+  stageNativeTypeScriptFrontendSdk,
+  stageNativeTypeScriptPublicFrontendBundles,
   typescriptNativeBuildRecipe,
 } from '../tools/semantic/build-typescript-native.js';
 import {semanticTreeDigest} from '@threadnote/threadnote/semantic/fingerprint';
@@ -270,7 +272,7 @@ const build = Effect.gen(function* () {
 });
 
 /** A release input is a verified derivative payload, never the old npm native binary. */
-const stageTypeScriptNativeAsset = Effect.fn('build.stageTypeScriptNativeAsset')(function* (
+export const stageTypeScriptNativeAsset = Effect.fn('build.stageTypeScriptNativeAsset')(function* (
   fs: FileSystem.FileSystem,
   path: Path.Path,
   root: string,
@@ -371,53 +373,44 @@ const stageTypeScriptNativeAsset = Effect.fn('build.stageTypeScriptNativeAsset')
     yield* fs.writeFile(path.join(staged, file), notice);
   }
   const sdkSource = path.join(root, 'node_modules', 'typescript');
-  const sdkDigest = '359158a40b603029094ae95804af12820ef1e90187300b12bdf6d3b50da5e568';
-  if ((yield* semanticTreeDigest(sdkSource)) !== sdkDigest)
+  const baseSdkDigest = '359158a40b603029094ae95804af12820ef1e90187300b12bdf6d3b50da5e568';
+  const sdkDigest = 'd4807d3176106daeea1f77ddc25be07c0444c57c3cd7a276e025d490b96d6f1c';
+  if ((yield* semanticTreeDigest(sdkSource)) !== baseSdkDigest)
     return yield* ScriptError.make({message: 'Installed TypeScript 7.1 SDK tree differs from the pinned package.'});
   const sdkDestination = path.join(staged, 'sdk');
-  const pending = [''];
-  let entries = 0;
-  let bytes = 0;
-  while (pending.length) {
-    const relative = pending.pop()!;
-    const sourceDirectory = path.join(sdkSource, relative);
-    if ((yield* fs.realPath(sourceDirectory)) !== sourceDirectory)
-      return yield* ScriptError.make({message: 'Installed TypeScript 7.1 SDK directory is not canonical.'});
-    yield* fs.makeDirectory(path.join(sdkDestination, relative), {recursive: true});
-    for (const name of (yield* fs.readDirectory(sourceDirectory)).sort()) {
-      if (name === '.git') return yield* ScriptError.make({message: 'TypeScript 7.1 SDK contains Git metadata.'});
-      if (++entries > 1200) return yield* ScriptError.make({message: 'TypeScript 7.1 SDK tree is too large.'});
-      const child = relative ? path.join(relative, name) : name;
-      const input = path.join(sdkSource, child);
-      if ((yield* fs.realPath(input)) !== input)
-        return yield* ScriptError.make({message: 'TypeScript 7.1 SDK contains a symbolic link.'});
-      const info = yield* fs.stat(input);
-      if (info.type === 'Directory') {
-        pending.push(child);
-        continue;
-      }
-      if (info.type !== 'File' || Number(info.size) > 8 * 1024 * 1024)
-        return yield* ScriptError.make({message: 'TypeScript 7.1 SDK contains an unsupported member.'});
-      if (bytes + Number(info.size) > 16 * 1024 * 1024)
-        return yield* ScriptError.make({message: 'TypeScript 7.1 SDK copy exceeds its byte bound.'});
-      const content = yield* Effect.tryPromise({
-        try: () => runtimeReadBoundedStableRegularFile(input, 8 * 1024 * 1024),
-        catch: cause => ScriptError.make({message: 'TypeScript 7.1 SDK input changed during staging.', cause}),
-      });
-      bytes += content.byteLength;
-      if (bytes > 16 * 1024 * 1024)
-        return yield* ScriptError.make({message: 'TypeScript 7.1 SDK copy exceeds its byte bound.'});
-      const target = path.join(sdkDestination, child);
-      yield* fs.writeFile(target, content);
-      yield* fs.chmod(target, info.mode);
-    }
-  }
+  yield* Effect.tryPromise({
+    try: () => stageNativeTypeScriptFrontendSdk(sdkSource, sdkDestination, root),
+    catch: cause => ScriptError.make({message: 'Could not derive the pinned TypeScript 7.1 frontend.', cause}),
+  });
+  if ((yield* semanticTreeDigest(sdkSource)) !== baseSdkDigest)
+    return yield* ScriptError.make({message: 'Installed TypeScript 7.1 SDK changed during staging.'});
   if ((yield* semanticTreeDigest(sdkDestination)) !== sdkDigest)
     return yield* ScriptError.make({message: 'Staged TypeScript 7.1 SDK tree changed.'});
+  const bundleDestination = path.join(staged, 'frontend');
+  const bundleHashes = yield* Effect.tryPromise({
+    try: () => stageNativeTypeScriptPublicFrontendBundles(sdkDestination, bundleDestination),
+    catch: cause => ScriptError.make({message: 'Could not bundle the pinned TypeScript 7.1 public frontend.', cause}),
+  });
+  const bundleDigest = 'f5db6d62b42f88480b8ae9e9499f04cfe66f345df5dec4cb278dbecc54701cc9';
+  if (
+    bundleHashes['api/async/api.js'] !== '6078e80617efccad93fea11c78780df69aadeb93e0f3792ca9045400f973c592' ||
+    bundleHashes['ast/index.js'] !== '663a4ce4d22c8ec5e1283374d7c77ff0738f52606ed1e1c7b21df6d7d2894069' ||
+    bundleHashes['chunk.js'] !== '755fb016e88a8eb6bf3e01d7b5a6040dbc144065b2e65fe7472a4cc67576c474' ||
+    (yield* semanticTreeDigest(bundleDestination)) !== bundleDigest
+  )
+    return yield* ScriptError.make({message: 'Staged TypeScript 7.1 public frontend differs.'});
+  if ((yield* semanticTreeDigest(sdkDestination)) !== sdkDigest)
+    return yield* ScriptError.make({message: 'Staged TypeScript 7.1 SDK changed after bundling.'});
   const manifest = {
     version: typescriptNativeBuildRecipe.upstream.version,
     executable: name,
     sha256: digest,
+    frontend: {
+      baseSdkTreeSha256: baseSdkDigest,
+      patchSha256: '2d85454eb544d731610470668ec2a2e8b4153b328323ecf3c66a81c9b73dfba2',
+      derivedSdkTreeSha256: sdkDigest,
+      bundleTreeSha256: bundleDigest,
+    },
     provenance: {
       kind: raw.kind,
       sourceCommit: raw.officialSourceCommit,
@@ -430,6 +423,7 @@ const stageTypeScriptNativeAsset = Effect.fn('build.stageTypeScriptNativeAsset')
   return {
     manifest: 'runtime/typescript/manifest.json',
     sdk: 'runtime/typescript/sdk',
+    frontend: 'runtime/typescript/frontend',
     sdkTreeDigest: sdkDigest,
     version: manifest.version,
     provenance: manifest.provenance.kind,
