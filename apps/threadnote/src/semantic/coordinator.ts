@@ -1145,7 +1145,7 @@ export const serveSemanticEndpoint = Effect.fn('semantic.serveEndpoint')(functio
   const agentChanges =
     Schema.is(Digest)(options.runtimeIdentity) && observe && options.dataHome
       ? yield* makeSemanticAgentChanges(
-          {...coordinator, observe},
+          {...coordinator, observe, attach: agentQueries?.attachDisk ?? coordinator.attach},
           {
             directory: path.join(path.dirname(options.directory), 'proposals', sha256HexSync(options.worktree)),
             profileHome: options.dataHome,

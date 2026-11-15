@@ -462,15 +462,72 @@ export function validateMuslElfReport(
   report: string,
   architecture: 'x64' | 'arm64',
   files: readonly string[],
+  member?: {readonly name: string; readonly bytes: number},
 ): readonly string[] {
-  if (
-    report.length > 262144 ||
-    !/Class:\s+ELF64/u.test(report) ||
-    !/Data:\s+2's complement, little endian/u.test(report) ||
-    !(architecture === 'x64' ? /Machine:\s+Advanced Micro Devices X86-64/u : /Machine:\s+AArch64/u).test(report) ||
-    /GLIBC_|ld-linux|libc\.so\.6/u.test(report)
-  )
-    throw ScriptError.make({message: 'Incompatible musl ELF payload.'});
+  const reject = (
+    message: string,
+    check: 'size' | 'class' | 'data' | 'machine' | 'glibc' | 'needed' | 'search-path',
+  ) => {
+    // Evidence only: never emit report text, external paths or unadmitted member names.
+    const bounded = report.length <= 262144 ? report : '';
+    const names = (expression: RegExp, searchPath = false) => {
+      const values: string[] = [];
+      for (const match of EffectString.matchAll(expression)(bounded)) {
+        if (values.length === 8) break;
+        const value = match[1];
+        values.push(
+          searchPath
+            ? value === '$ORIGIN'
+              ? value
+              : 'external'
+            : /^[A-Za-z0-9_.+-]{1,64}$/u.test(value)
+              ? value
+              : 'unrecognized',
+        );
+      }
+      return values;
+    };
+    const admittedMember =
+      member &&
+      EffectArray.contains(files, member.name) &&
+      /^(?:llama-addon\.node|lib[A-Za-z0-9_.+-]+\.so(?:\.[0-9]+)*)$/u.test(member.name) &&
+      member.name.length <= 96;
+    const diagnostic = {
+      check,
+      architecture,
+      member: admittedMember ? member.name : 'unavailable',
+      memberBytes:
+        admittedMember && Number.isSafeInteger(member.bytes) && member.bytes >= 0 && member.bytes <= 256 * 1024 * 1024
+          ? member.bytes
+          : null,
+      reportCharacters: report.length,
+      reportBytes: report.length <= 262144 ? Buffer.byteLength(report, 'utf8') : null,
+      class: /Class:\s+ELF64/u.test(bounded) ? 'ELF64' : /Class:\s+ELF32/u.test(bounded) ? 'ELF32' : 'unrecognized',
+      data: /Data:\s+2's complement, little endian/u.test(bounded)
+        ? 'little-endian'
+        : /Data:\s+2's complement, big endian/u.test(bounded)
+          ? 'big-endian'
+          : 'unrecognized',
+      machine: /Machine:\s+Advanced Micro Devices X86-64/u.test(bounded)
+        ? 'x64'
+        : /Machine:\s+AArch64/u.test(bounded)
+          ? 'arm64'
+          : 'unrecognized',
+      needed: names(/\(NEEDED\)[^\n]*\[([^\]]+)\]/gu),
+      rpath: names(/\(RPATH\)[^\n]*\[([^\]]+)\]/gu, true),
+      runpath: names(/\(RUNPATH\)[^\n]*\[([^\]]+)\]/gu, true),
+      forbidden: EffectArray.filter(['GLIBC_', 'ld-linux', 'libc.so.6'], token =>
+        EffectString.includes(token)(bounded),
+      ),
+    };
+    throw ScriptError.make({message: `${message} ${JSON.stringify(diagnostic)}`});
+  };
+  if (report.length > 262144) reject('Incompatible musl ELF payload.', 'size');
+  if (!/Class:\s+ELF64/u.test(report)) reject('Incompatible musl ELF payload.', 'class');
+  if (!/Data:\s+2's complement, little endian/u.test(report)) reject('Incompatible musl ELF payload.', 'data');
+  if (!(architecture === 'x64' ? /Machine:\s+Advanced Micro Devices X86-64/u : /Machine:\s+AArch64/u).test(report))
+    reject('Incompatible musl ELF payload.', 'machine');
+  if (/GLIBC_|ld-linux|libc\.so\.6/u.test(report)) reject('Incompatible musl ELF payload.', 'glibc');
   const needed = EffectArray.map(
     [...EffectString.matchAll(/\(NEEDED\)[^\n]*\[([^\]]+)\]/gu)(report)],
     match => match[1],
@@ -483,11 +540,11 @@ export function validateMuslElfReport(
         'u',
       ).test(dependency)
     )
-      throw ScriptError.make({message: 'Musl ELF dependency is outside the staged/declared system closure.'});
+      reject('Musl ELF dependency is outside the staged/declared system closure.', 'needed');
   }
   for (const match of EffectString.matchAll(/\((?:RPATH|RUNPATH)\)[^\n]*\[([^\]]+)\]/gu)(report))
     if (EffectArray.some(EffectString.split(':')(match[1]), entry => entry !== '$ORIGIN'))
-      throw ScriptError.make({message: 'Musl ELF contains an external runtime search path.'});
+      reject('Musl ELF contains an external runtime search path.', 'search-path');
   return needed;
 }
 
@@ -697,7 +754,7 @@ const stageMuslNativeRuntime = Effect.fn('build.stageMuslNativeRuntime')(functio
     if (name !== '_nlcBuildMetadata.json') {
       const report = yield* command(['readelf', '-h', '-d', '--version-info', path.join(release, name)]);
       dependencies[name] = yield* Effect.try({
-        try: () => validateMuslElfReport(report, architecture, files),
+        try: () => validateMuslElfReport(report, architecture, files, {name, bytes: data.byteLength}),
         catch: cause => ScriptError.make({message: 'Invalid musl native dependency closure.', cause}),
       });
     }
