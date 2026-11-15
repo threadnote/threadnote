@@ -748,11 +748,13 @@ export async function runCandidateChecks(
           }
         };
         await verifyCandidateSource();
+        const importDeadline = Math.min(deadline, Date.now() + 180000);
         javaAuthority = Object.freeze({
           signal: javaImportAbort.signal,
-          deadline,
+          deadline: importDeadline,
           verify: async () => {
-            if (Date.now() >= deadline || javaImportAbort.signal.aborted) throw new Error('Candidate execution ended');
+            if (Date.now() >= importDeadline || javaImportAbort.signal.aborted)
+              throw new Error('Candidate execution ended');
             await verifyCandidateSource();
             await assertDispatchInputBinding(manifestPath, providerInputsPath);
             for (const [file, expected] of EffectRecord.toEntries(boundSourceHashes))
