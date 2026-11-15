@@ -6,6 +6,7 @@ import type {
   RuntimeOwnedProviderLaunch,
   RuntimeOwnedProviderProcess,
   RuntimeOwnedProviderObservation,
+  RuntimeOwnedProviderResourceObservation,
 } from './provider-contract.js';
 import {linuxRuntimeLibc, assertPosixPrivateProviderPath} from './posix-native.js';
 import {assertWindowsPrivateProviderPath} from './windows-files.js';
@@ -17,6 +18,7 @@ export type {
   RuntimeOwnedProviderLaunch,
   RuntimeOwnedProviderProcess,
   RuntimeOwnedProviderObservation,
+  RuntimeOwnedProviderResourceObservation,
 } from './provider-contract.js';
 const liveNativeOwners = new Set<OwnedProviderBackend>();
 const owned = new WeakMap<RuntimeOwnedProviderTree, OwnedProviderBackend>();
@@ -47,6 +49,12 @@ export function runtimeSpawnOwnedProviderTree(options: RuntimeOwnedProviderLaunc
 }
 export function runtimeObserveOwnedProviderTree(handle: RuntimeOwnedProviderTree): RuntimeOwnedProviderObservation {
   return backend(handle).observe();
+}
+/** Resource evidence is tied to the original owner; coverage is explicit and never upgrades ownership. */
+export function runtimeObserveOwnedProviderResources(
+  handle: RuntimeOwnedProviderTree,
+): RuntimeOwnedProviderResourceObservation {
+  return backend(handle).observeResources();
 }
 export function runtimeTerminateOwnedProviderTree(handle: RuntimeOwnedProviderTree, mode: 'terminate' | 'kill'): void {
   backend(handle).terminate(mode);

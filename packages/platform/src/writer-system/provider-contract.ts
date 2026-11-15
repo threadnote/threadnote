@@ -14,6 +14,67 @@ export interface RuntimeOwnedProviderObservation {
   readonly leaderExitCode: number | null;
   readonly stdioClosed: boolean;
 }
+/** Process counters do not attest a complete historical POSIX descendant census. */
+export type RuntimeOwnedProviderResourceObservation =
+  | {readonly state: 'unknown'}
+  | {
+      readonly state: 'known';
+      readonly coverage: 'original-process' | 'complete-captured-tree';
+      readonly currentRssBytes: number;
+      /** Sum of retained kernel process peaks: a conservative bound, not simultaneous sampled RSS. */
+      readonly peakRssUpperBoundBytes: number;
+      readonly capturedProcesses: number;
+    };
+
+/** Internal accounting only. Native backends supply authenticated process objects, never caller PIDs. */
+export class OwnedProviderResourceLedger {
+  private readonly members = new Map<object, {current: number; peak: number; terminal: boolean}>();
+  private unknown = false;
+  constructor(private readonly maximumMembers: number) {
+    if (!Number.isSafeInteger(maximumMembers) || maximumMembers < 1 || maximumMembers > 4096) this.invalidate();
+  }
+  invalidate(): void {
+    this.unknown = true;
+  }
+  capture(member: object, current: number, peak: number, terminal = false): void {
+    const previous = this.members.get(member);
+    if (
+      this.unknown ||
+      !Number.isSafeInteger(current) ||
+      !Number.isSafeInteger(peak) ||
+      current < 0 ||
+      peak < current ||
+      (terminal && current !== 0) ||
+      (previous !== undefined &&
+        (peak < previous.peak || (previous.terminal && (!terminal || peak !== previous.peak)))) ||
+      (previous === undefined && this.members.size >= this.maximumMembers)
+    ) {
+      this.invalidate();
+      return;
+    }
+    this.members.set(member, {current, peak, terminal});
+  }
+  observe(coverage: 'original-process' | 'complete-captured-tree'): RuntimeOwnedProviderResourceObservation {
+    if (this.unknown || this.members.size === 0) return {state: 'unknown'};
+    let currentRssBytes = 0,
+      peakRssUpperBoundBytes = 0;
+    for (const member of this.members.values()) {
+      currentRssBytes += member.current;
+      peakRssUpperBoundBytes += member.peak;
+      if (!Number.isSafeInteger(currentRssBytes) || !Number.isSafeInteger(peakRssUpperBoundBytes)) {
+        this.invalidate();
+        return {state: 'unknown'};
+      }
+    }
+    return {
+      state: 'known',
+      coverage,
+      currentRssBytes,
+      peakRssUpperBoundBytes,
+      capturedProcesses: this.members.size,
+    };
+  }
+}
 export interface RuntimeOwnedProviderProcess {
   readonly handle: RuntimeOwnedProviderTree;
   readonly pid: number;
@@ -25,6 +86,7 @@ export interface RuntimeOwnedProviderProcess {
 }
 export interface OwnedProviderBackend extends Omit<RuntimeOwnedProviderProcess, 'handle'> {
   readonly observe: () => RuntimeOwnedProviderObservation;
+  readonly observeResources: () => RuntimeOwnedProviderResourceObservation;
   readonly terminate: (mode: 'terminate' | 'kill') => void;
   readonly close: () => void;
 }

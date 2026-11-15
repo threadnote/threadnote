@@ -15,7 +15,12 @@ import {
   windowsWellFormed,
   windowsSystemLibrary,
 } from './windows-native.js';
-import type {OwnedProviderBackend, RuntimeOwnedProviderLaunch} from './provider-contract.js';
+import {
+  OwnedProviderResourceLedger,
+  type OwnedProviderBackend,
+  type RuntimeOwnedProviderLaunch,
+  type RuntimeOwnedProviderResourceObservation,
+} from './provider-contract.js';
 
 /** Microsoft CRT argv quoting. CreateProcess receives a separate exact application path; no shell participates. */
 export function windowsProviderCommandLine(command: string, args: readonly string[]): string {
@@ -80,6 +85,7 @@ function kernel() {
     CreateJobObjectW: {args: ['ptr', 'ptr'], returns: 'u64'},
     SetInformationJobObject: {args: ['u64', 'u32', 'buffer', 'u32'], returns: 'i32'},
     QueryInformationJobObject: {args: ['u64', 'u32', 'buffer', 'u32', 'buffer'], returns: 'i32'},
+    K32GetProcessMemoryInfo: {args: ['u64', 'buffer', 'u32'], returns: 'i32'},
     TerminateJobObject: {args: ['u64', 'u32'], returns: 'i32'},
     InitializeProcThreadAttributeList: {args: ['ptr', 'u32', 'u32', 'buffer'], returns: 'i32'},
     UpdateProcThreadAttribute: {args: ['buffer', 'u32', 'u64', 'buffer', 'u64', 'ptr', 'ptr'], returns: 'i32'},
@@ -237,6 +243,7 @@ interface DebugMember {
   startup: boolean;
   exitContinued: boolean;
   exitCode: number | null;
+  resourcePeak?: number;
 }
 interface DebugJob {
   readonly lib: Kernel;
@@ -246,6 +253,7 @@ interface DebugJob {
   usable: boolean;
   readonly threads: WindowsDebugThreadLedger;
   readonly members: DebugMember[];
+  readonly memory: OwnedProviderResourceLedger;
   readonly live: Map<number, DebugMember>;
   readonly pi: BigUint64Array;
   root?: DebugMember;
@@ -259,6 +267,41 @@ interface DebugJob {
   total: number;
   generation: number;
   quarantineEvents: number;
+}
+function captureWindowsResources(job: DebugJob, member: DebugMember, terminal: boolean): void {
+  try {
+    if (windowsProcessIdentity(member.completion, member.pid) !== member.identity) fail('identity');
+    if (terminal) {
+      const wait = job.lib.symbols.WaitForSingleObject(member.completion, 0);
+      if (wait === 0) {
+        const peak = member.resourcePeak ?? fail('identity');
+        if (!member.exitContinued || windowsProcessIdentity(member.completion, member.pid) !== member.identity)
+          fail('identity');
+        job.memory.capture(member, 0, peak, true);
+        return;
+      }
+      if (wait !== 258) fail('identity');
+      // EXIT continuation precedes kernel teardown. Until the original handle signals,
+      // observe actual current RSS below; an unavailable counter remains unknown.
+    }
+    const bytes = new Uint8Array(72 + 32),
+      view = new DataView(bytes.buffer);
+    bytes.fill(0xa5);
+    view.setUint32(0, 72, true); // PROCESS_MEMORY_COUNTERS, same layout on both supported 64-bit architectures.
+    if (
+      job.lib.symbols.K32GetProcessMemoryInfo(member.completion, bytes.subarray(0, 72), 72) === 0 ||
+      view.getUint32(0, true) !== 72 ||
+      !bytes.subarray(72).every(value => value === 0xa5) ||
+      windowsProcessIdentity(member.completion, member.pid) !== member.identity
+    )
+      fail('identity');
+    const peak = Number(view.getBigUint64(8, true));
+    job.memory.capture(member, Number(view.getBigUint64(16, true)), peak);
+    member.resourcePeak = peak;
+  } catch {
+    // Accounting failure cannot change the existing owner/cleanup state or manufacture a resource proof.
+    job.memory.invalidate();
+  }
 }
 let debugDispatcher: WindowsDebugDispatcher | undefined;
 /** One creator-thread queue; never poll a separate debugger queue for each Job. */
@@ -321,6 +364,7 @@ class WindowsDebugDispatcher {
       usable: true,
       threads: new WindowsDebugThreadLedger(this.resources),
       members: [],
+      memory: new OwnedProviderResourceLedger(256),
       live: new Map(),
       pi: new BigUint64Array(3),
       piProcess: 0n,
@@ -615,7 +659,11 @@ class WindowsDebugDispatcher {
         fail('identity');
       job.threads.create(member, tid);
     } else if (kind === 6) this.closeImage(job);
-    else if (kind === 5) member.exitCode = this.view.getUint32(16, true);
+    else if (kind === 5) {
+      member.exitCode = this.view.getUint32(16, true);
+      // Capture the kernel lifetime peak while the original completion handle is still retained.
+      captureWindowsResources(job, member, false);
+    }
     this.affinity();
     if (this.lib.symbols.ContinueDebugEvent(pid, tid, status) === 0) fail('identity');
     this.pending = false;
@@ -650,6 +698,38 @@ class WindowsDebugDispatcher {
     job.total = total;
     return {active, total};
   }
+  observeResources(job: DebugJob): RuntimeOwnedProviderResourceObservation {
+    if (this.poisoned || job.unknown || job.state === 'quarantined' || !job.usable) job.memory.invalidate();
+    try {
+      this.affinity();
+      this.pump();
+      if (this.poisoned || job.unknown || job.state === 'quarantined' || !job.usable) job.memory.invalidate();
+      const first = this.accounting(job),
+        generation = job.generation;
+      if (first.total !== job.members.length || !job.root || this.pending) job.memory.invalidate();
+      for (const member of job.members) {
+        if (!member.created) job.memory.invalidate();
+        captureWindowsResources(job, member, member.exitContinued);
+      }
+      const last = this.accounting(job);
+      if (
+        this.poisoned ||
+        job.unknown ||
+        first.total !== last.total ||
+        first.active !== last.active ||
+        generation !== job.generation
+      )
+        job.memory.invalidate();
+    } catch {
+      job.memory.invalidate();
+    }
+    const result = job.memory.observe('complete-captured-tree');
+    if (result.state === 'known' && result.capturedProcesses !== job.members.length) {
+      job.memory.invalidate();
+      return {state: 'unknown'};
+    }
+    return result;
+  }
   proof(job: DebugJob): 'running' | 'drained' | 'unknown' {
     if (this.poisoned || job.unknown || job.state === 'quarantined') return 'unknown';
     this.pump();
@@ -677,6 +757,8 @@ class WindowsDebugDispatcher {
         const wait = job.lib.symbols.WaitForSingleObject(member.completion, 0);
         if (wait === 258) return 'running';
         if (wait !== 0) fail('identity');
+        // Retire retained resource counters only after the same original handle has signaled.
+        captureWindowsResources(job, member, true);
       }
       const second = this.accounting(job);
       return second.active === 0 && second.total === first.total && generation === job.generation
@@ -1126,6 +1208,15 @@ function makeOwnedWindows(input: {
     stdout: stdout[0],
     stderr: stdout[1],
     observe,
+    observeResources() {
+      if (!closed && (unknown || ioUnknown || closing)) debugJob.memory.invalidate();
+      if (!closed) return debug.observeResources(debugJob);
+      // Original close already required complete native census/exit/stdio proof. Handles are no longer queried.
+      const result = debugJob.memory.observe('complete-captured-tree');
+      return result.state === 'known' && result.capturedProcesses === debugJob.members.length
+        ? result
+        : {state: 'unknown' as const};
+    },
     write(bytes, signal) {
       if (closed || closing || unknown || inputClosing || pipes[0].closed || signal?.aborted)
         return Promise.reject(new Error('Provider input unavailable'));

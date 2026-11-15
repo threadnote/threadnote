@@ -9,8 +9,17 @@ import {Array as EffectArray, String as EffectString, Record as EffectRecord, Op
 import {dlopen, ptr, read} from 'bun:ffi';
 import {withNativeArguments} from './native-arguments.js';
 import {writerFail as fail} from './fault.js';
-import {linuxRuntimeLibc, readPosixProcessIdentity, requirePosixWriterPlatform} from './posix-native.js';
-import type {OwnedProviderBackend, RuntimeOwnedProviderLaunch} from './provider-contract.js';
+import {
+  linuxRuntimeLibc,
+  readPosixProcessIdentity,
+  requirePosixWriterPlatform,
+  readDarwinOriginalProcessResources,
+} from './posix-native.js';
+import {
+  OwnedProviderResourceLedger,
+  type OwnedProviderBackend,
+  type RuntimeOwnedProviderLaunch,
+} from './provider-contract.js';
 
 const fs = runtimeNativeDescriptorOperations();
 const encoder = new TextEncoder();
@@ -60,7 +69,7 @@ export function spawnPosixProvider(options: RuntimeOwnedProviderLaunch): OwnedPr
     posix_spawn_file_actions_addchdir_np: {args: ['buffer', 'buffer'], returns: 'i32'},
     read: {args: ['i32', 'buffer', 'u64'], returns: 'i64'},
     write: {args: ['i32', 'buffer', 'u64'], returns: 'i64'},
-    waitpid: {args: ['i32', 'buffer', 'i32'], returns: 'i32'},
+    wait4: {args: ['i32', 'buffer', 'i32', 'buffer'], returns: 'i32'},
     kill: {args: ['i32', 'i32'], returns: 'i32'},
   });
   const nativeIo = providerIoLibrary(path);
@@ -166,7 +175,7 @@ export function spawnPosixProvider(options: RuntimeOwnedProviderLaunch): OwnedPr
       let reaped = false;
       const cleanup = () => {
         if (!reaped) {
-          const result = lib.symbols.waitpid(pid, new Int32Array(1), 1);
+          const result = lib.symbols.wait4(pid, new Int32Array(1), 1, new Uint8Array(144));
           if (result !== pid) return false;
           reaped = true;
         }
@@ -207,7 +216,7 @@ function makeOwned(input: {
   stderrRead: number;
   lib: {
     readonly symbols: {
-      readonly waitpid: (pid: number, status: Int32Array, flags: number) => number;
+      readonly wait4: (pid: number, status: Int32Array, flags: number, usage: Uint8Array) => number;
       readonly kill: (pid: number, signal: number) => number;
       readonly read: (fd: number, bytes: Uint8Array, size: bigint) => bigint;
       readonly write: (fd: number, bytes: Uint8Array, size: bigint) => bigint;
@@ -218,6 +227,8 @@ function makeOwned(input: {
   errno: () => number;
 }): OwnedProviderBackend {
   const {pid, identity, lib, closeFd} = input;
+  const resources = new OwnedProviderResourceLedger(1),
+    resourceMember = {};
   const retry = () => {
     const errno = input.errno();
     return errno === 4 || errno === (runtimeCurrentPlatform() === 'darwin' ? 35 : 11);
@@ -328,11 +339,19 @@ function makeOwned(input: {
             if (members === undefined) unknown = true;
             else if (members.length === 1 && members[0].zombie) {
               const status = new Int32Array(1),
-                result = lib.symbols.waitpid(pid, status, 1);
+                usage = new Uint8Array(144 + 32);
+              usage.fill(0xa5);
+              const result = lib.symbols.wait4(pid, status, 1, usage.subarray(0, 144));
               // A zombie leader can still have exiting threads: WNOHANG zero retains the reservation.
               if (result !== pid && result !== 0) unknown = true;
               else if (result === pid) {
                 reaped = true;
+                // This is the sole original native waiter. Never reap another process for accounting.
+                const peak = new DataView(usage.buffer).getBigInt64(32, true),
+                  bytes = Number(peak * (runtimeCurrentPlatform() === 'linux' ? 1024n : 1n));
+                if (peak < 0n || !Number.isSafeInteger(bytes) || !usage.subarray(144).every(value => value === 0xa5))
+                  resources.invalidate();
+                else resources.capture(resourceMember, 0, bytes, true);
                 const raw = status[0];
                 leaderExitCode = (raw & 0x7f) === 0 ? (raw >>> 8) & 0xff : 128 + (raw & 0x7f);
                 try {
@@ -363,6 +382,41 @@ function makeOwned(input: {
   return {
     pid,
     identity,
+    observeResources() {
+      observe();
+      if (unknown || ioUnknown) resources.invalidate();
+      if (!reaped && !closed) {
+        try {
+          const member = readGroupMember(pid);
+          if (member.identity !== identity || member.group !== pid || member.uid !== runtimeCurrentUserId())
+            fail('identity');
+          // A zombie's live task/proc image is not a terminal high-water receipt. wait4 owns that transition.
+          if (member.zombie) {
+            resources.invalidate();
+            return {state: 'unknown' as const};
+          }
+          if (runtimeCurrentPlatform() === 'darwin') {
+            const sample = readDarwinOriginalProcessResources(pid, identity);
+            resources.capture(resourceMember, sample.current, sample.peak);
+          } else {
+            const status = fs.readFileSync(`/proc/${pid}/status`, 'utf8');
+            if (status.length > 65536 || readPosixProcessIdentity(pid, true) !== identity) fail('identity');
+            const value = (field: string) => {
+              const match = new RegExp(`^${field}:[\\t ]+(\\d+)[\\t ]+kB[\\t ]*$`, 'mu').exec(status);
+              if (!match) return fail('identity');
+              const bytes = Number(match[1]) * 1024;
+              if (!Number.isSafeInteger(bytes)) fail('identity');
+              return bytes;
+            };
+            resources.capture(resourceMember, value('VmRSS'), value('VmHWM'));
+          }
+        } catch {
+          resources.invalidate();
+        }
+      }
+      // wait4's child roll-up uses MAX, not a simultaneous whole-group sum. Never upgrade this coverage.
+      return resources.observe('original-process');
+    },
     stdout: streams[0],
     stderr: streams[1],
     observe,

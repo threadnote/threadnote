@@ -9,9 +9,11 @@ import * as EffectRecord from 'effect/Record';
 import {expect, it, vi} from 'vitest';
 import fc from 'fast-check';
 import {decodeUnreapedPosixExitStatus} from '../../src/writer-system/provider-posix.js';
+import {OwnedProviderResourceLedger} from '../../src/writer-system/provider-contract.js';
 import {
   runtimeSpawnOwnedProviderTree,
   runtimeObserveOwnedProviderTree,
+  runtimeObserveOwnedProviderResources,
   runtimeTerminateOwnedProviderTree,
   runtimeCloseOwnedProviderTree,
   runtimeProbeProviderTree,
@@ -111,13 +113,14 @@ vi.mock('bun:ffi', async importOriginal => {
           return result;
         });
       }
-      const nativeWait: unknown = Reflect.get(library.symbols, 'waitpid');
+      const waitName = typeof Reflect.get(library.symbols, 'wait4') === 'function' ? 'wait4' : 'waitpid';
+      const nativeWait: unknown = Reflect.get(library.symbols, waitName);
       const posixWait =
         posix && typeof nativeWait === 'function'
-          ? (pid: number, status: Int32Array, flags: number) =>
+          ? (pid: number, status: Int32Array, flags: number, usage?: Uint8Array) =>
               posix.enabled
-                ? posix.wait(pid, status, flags, () => nativeWait(pid, status, flags))
-                : nativeWait(pid, status, flags)
+                ? posix.wait(pid, status, flags, () => nativeWait(pid, status, flags, usage))
+                : nativeWait(pid, status, flags, usage)
           : undefined;
       let released = false;
       const close = () => {
@@ -133,7 +136,7 @@ vi.mock('bun:ffi', async importOriginal => {
         close: posix || jobSample.active?.closed ? close : library.close,
         symbols: new Proxy(library.symbols, {
           get(target, key, receiver) {
-            if (key === 'waitpid' && posixWait) return posixWait;
+            if (key === waitName && posixWait) return posixWait;
             return typeof key === 'string' && observed.has(key)
               ? observed.get(key)
               : Reflect.get(target, key, receiver);
@@ -145,6 +148,63 @@ vi.mock('bun:ffi', async importOriginal => {
 });
 
 const supported = runtimeNativePlatformSupport().providerTree;
+
+it('retains kernel member peaks across retirement independently of live RSS and order', () => {
+  fc.assert(
+    fc.property(
+      fc.array(fc.integer({min: 0, max: 1_000_000}), {minLength: 1, maxLength: 8}),
+      fc.nat(),
+      (peaks, cut) => {
+        const ledger = new OwnedProviderResourceLedger(8),
+          members = EffectArray.map(peaks, () => ({})),
+          retired = new Set<number>(),
+          totalPeak = EffectArray.reduce(peaks, 0, (total, value) => total + value);
+        for (let index = 0; index < peaks.length; index++) ledger.capture(members[index], peaks[index], peaks[index]);
+        for (let offset = 0; offset < peaks.length; offset++) {
+          const index = (offset + (cut % peaks.length)) % peaks.length;
+          ledger.capture(members[index], 0, peaks[index], true);
+          retired.add(index);
+          const expectedCurrent = EffectArray.reduce(
+            peaks,
+            0,
+            (total, value, position) => total + (retired.has(position) ? 0 : value),
+          );
+          expect(ledger.observe('complete-captured-tree')).toEqual({
+            state: 'known',
+            coverage: 'complete-captured-tree',
+            currentRssBytes: expectedCurrent,
+            peakRssUpperBoundBytes: totalPeak,
+            capturedProcesses: peaks.length,
+          });
+        }
+      },
+    ),
+    {numRuns: 32},
+  );
+});
+
+it('keeps invalid, regressing and overflowing resource evidence unknown without reopening retired members', () => {
+  for (const invalid of [NaN, Infinity, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    const ledger = new OwnedProviderResourceLedger(2),
+      member = {};
+    ledger.capture(member, 0, invalid);
+    ledger.capture(member, 1, 2);
+    expect(ledger.observe('original-process')).toEqual({state: 'unknown'});
+  }
+  const regressed = new OwnedProviderResourceLedger(2),
+    member = {};
+  regressed.capture(member, 1, 20);
+  regressed.capture(member, 0, 19, true);
+  expect(regressed.observe('original-process')).toEqual({state: 'unknown'});
+  const retired = new OwnedProviderResourceLedger(2);
+  retired.capture(member, 0, 20, true);
+  retired.capture(member, 1, 20);
+  expect(retired.observe('original-process')).toEqual({state: 'unknown'});
+  const overflow = new OwnedProviderResourceLedger(2);
+  overflow.capture({}, 0, Number.MAX_SAFE_INTEGER);
+  overflow.capture({}, 0, 1);
+  expect(overflow.observe('complete-captured-tree')).toEqual({state: 'unknown'});
+});
 
 const childOutputLimit = 65536,
   hostFiles = process.getBuiltinModule('fs'),
@@ -531,6 +591,59 @@ async function stop(
   await until(observe, o => o.state === 'drained');
   runtimeCloseOwnedProviderTree(provider.handle);
 }
+
+it.skipIf(!supported)(
+  'observes original-process RSS and retains its kernel peak after the owned child exits',
+  async () => {
+    const provider = spawn(
+      'const bytes=new Uint8Array(32*1024*1024);for(let i=0;i<bytes.length;i+=4096)bytes[i]=1;globalThis.ownedResourceBytes=bytes;process.stdout.write("RESOURCE_READY");for await(const chunk of Bun.stdin.stream())break;',
+    );
+    let output = '';
+    const stdout = (async () => {
+        for await (const chunk of provider.stdout) output += new TextDecoder().decode(chunk);
+      })(),
+      stderr = new Response(provider.stderr).text();
+    void stdout.catch(() => undefined);
+    void stderr.catch(() => undefined);
+    try {
+      await until(
+        () => {
+          runtimeObserveOwnedProviderTree(provider.handle);
+          return output;
+        },
+        text => text === 'RESOURCE_READY',
+      );
+      expect(() => Reflect.apply(runtimeObserveOwnedProviderResources, undefined, [Object.freeze({})])).toThrow();
+      const live = runtimeObserveOwnedProviderResources(provider.handle);
+      expect(live.state).toBe('known');
+      if (live.state !== 'known') throw new Error('Original native RSS capability is unavailable');
+      expect(live.coverage).toBe(process.platform === 'win32' ? 'complete-captured-tree' : 'original-process');
+      expect(live.currentRssBytes).toBeGreaterThan(0);
+      expect(live.peakRssUpperBoundBytes).toBeGreaterThanOrEqual(live.currentRssBytes);
+      expect(live.peakRssUpperBoundBytes).toBeGreaterThanOrEqual(32 * 1024 * 1024);
+      await provider.write(new Uint8Array([1]));
+      await provider.closeInput();
+      await stdout;
+      expect(await stderr).toBe('');
+      const final = await until(
+        () => runtimeObserveOwnedProviderTree(provider.handle),
+        value => value.state === 'drained',
+      );
+      expect(final.leaderExitCode).toBe(0);
+      expect(final.stdioClosed).toBe(true);
+      const terminal = runtimeObserveOwnedProviderResources(provider.handle);
+      expect(terminal).toMatchObject({state: 'known', currentRssBytes: 0, capturedProcesses: 1});
+      if (terminal.state !== 'known') throw new Error('Original terminal peak was not retained');
+      expect(terminal.peakRssUpperBoundBytes).toBeGreaterThanOrEqual(live.peakRssUpperBoundBytes);
+      runtimeCloseOwnedProviderTree(provider.handle);
+      expect(runtimeObserveOwnedProviderResources(provider.handle)).toEqual(terminal);
+    } finally {
+      await stop(provider);
+      await stdout;
+      await stderr;
+    }
+  },
+);
 
 // Fixed test-only wire command. Its emitted function is the same decoder exercised below.
 function fixtureExitCommand(progress: number, bytes: Uint8Array): number {

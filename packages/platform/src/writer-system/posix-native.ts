@@ -5,6 +5,62 @@ import {writerFail as fail} from './fault.js';
 import type {RuntimeWriterIdentity} from '../writer_system.js';
 
 const fs = runtimeNativeDescriptorOperations();
+/** Same-UID name ports suffice for MACH_TASK_BASIC_INFO; no debugger/task-read entitlement is assumed. */
+export function readDarwinOriginalProcessResources(
+  pid: number,
+  identity: string,
+): {readonly current: number; readonly peak: number} {
+  if (runtimeCurrentPlatform() !== 'darwin' || readPosixProcessIdentity(pid, true) !== identity) fail('identity');
+  const lib = dlopen('/usr/lib/libSystem.B.dylib', {
+    task_self_trap: {args: [], returns: 'u32'},
+    task_name_for_pid: {args: ['u32', 'i32', 'buffer'], returns: 'i32'},
+    pid_for_task: {args: ['u32', 'buffer'], returns: 'i32'},
+    task_info: {args: ['u32', 'u32', 'buffer', 'buffer'], returns: 'i32'},
+    mach_port_deallocate: {args: ['u32', 'u32'], returns: 'i32'},
+  });
+  let self = 0,
+    port = 0;
+  try {
+    self = lib.symbols.task_self_trap();
+    const name = new Uint32Array(9);
+    name.fill(0xa5a5a5a5);
+    name[0] = 0;
+    if (self === 0 || lib.symbols.task_name_for_pid(self, pid, name.subarray(0, 1)) !== 0) fail('identity');
+    port = name[0];
+    if (port === 0 || !name.subarray(1).every(value => value === 0xa5a5a5a5)) fail('identity');
+    const actualPid = new Int32Array(1),
+      count = new Uint32Array([12]),
+      bytes = new Uint8Array(48 + 32);
+    bytes.fill(0xa5);
+    if (
+      lib.symbols.pid_for_task(port, actualPid) !== 0 ||
+      actualPid[0] !== pid ||
+      lib.symbols.task_info(port, 20, bytes.subarray(0, 48), count) !== 0 ||
+      count[0] !== 12 ||
+      !bytes.subarray(48).every(value => value === 0xa5) ||
+      readPosixProcessIdentity(pid, true) !== identity
+    )
+      fail('identity');
+    const view = new DataView(bytes.buffer),
+      current = Number(view.getBigUint64(8, true)),
+      peak = Number(view.getBigUint64(16, true));
+    if (!Number.isSafeInteger(current) || !Number.isSafeInteger(peak) || peak < current) fail('identity');
+    return {current, peak};
+  } finally {
+    let failed = false;
+    // Unlike the cached mach_task_self_ macro, task_self_trap copies out an owned send right.
+    for (const right of [port, self]) {
+      if (right === 0) continue;
+      try {
+        if (lib.symbols.mach_port_deallocate(self, right) !== 0) failed = true;
+      } catch {
+        failed = true;
+      }
+    }
+    lib.close();
+    if (failed) fail('io');
+  }
+}
 export interface RuntimeStableOsUserIdentity {
   readonly platform: 'darwin' | 'linux';
   readonly architecture: 'arm64' | 'x64';
