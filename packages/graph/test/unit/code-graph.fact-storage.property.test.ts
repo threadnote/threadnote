@@ -10,9 +10,10 @@ import {
 import {budgetCachedCodeGraphFacts, serializeBoundedCodeGraphFact} from '@threadnote/graph/fact/budget';
 import {parseCodeGraphFileFacts} from '@threadnote/graph/fact/validation';
 import * as factValidation from '@threadnote/graph/fact/validation';
+import {captureBodyDiscovery} from '@threadnote/graph/languages/body_discovery';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {isJsonObject} from '@threadnote/platform/json';
-import type {CodeGraphFileFacts} from '@threadnote/graph/types';
+import type {CodeGraphFileFacts, CodeGraphInventoryFile} from '@threadnote/graph/types';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 
@@ -108,6 +109,67 @@ describe('compact code graph fact storage', () => {
         expect(JSON.stringify(facts)).toBe(before);
       }),
       {numRuns: 200},
+    );
+  });
+
+  it('preserves body discovery across native and legacy compact envelopes without mutating facts', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.constantFrom('pending', 'éclair', '漢字', 'journal', 'items'), {minLength: 10, maxLength: 24}),
+        words => {
+          const path = 'src/body-cache.ts';
+          const lines = EffectArray.map(words, (word, index) => `export function f${index}() { return "${word}"; }`);
+          const content = `${EffectArray.join(lines, '\n')}\n`;
+          const contentHash = sha256HexSync(content);
+          const file: CodeGraphInventoryFile = {
+            blobId: EffectString.repeat(40)('a'),
+            content,
+            contentHash,
+            language: 'typescript',
+            mode: '100644',
+            path,
+            size: Buffer.byteLength(content),
+            source: 'worktree',
+          };
+          const facts: CodeGraphFileFacts = {
+            diagnostics: [],
+            edges: [],
+            path,
+            symbols: EffectArray.map(lines, (line, index) => ({
+              contentHash,
+              exported: true,
+              id: `cgs_${EffectString.padStart(32, '0')(index.toString(16))}`,
+              kind: 'function' as const,
+              language: 'typescript' as const,
+              name: `f${index}`,
+              path,
+              qualifiedName: `f${index}`,
+              span: {column: 1, endColumn: line.length + 1, endLine: index + 1, line: index + 1},
+            })),
+          };
+          const original = JSON.stringify([file, facts]);
+          const captured = captureBodyDiscovery(file, facts);
+          const capturedBefore = JSON.stringify(captured);
+          const bounded = serializeBoundedCodeGraphFact(captured);
+          const first = encodeStoredCodeGraphFact(bounded);
+          const second = encodeStoredCodeGraphFact(bounded);
+          expect(first.codec).toBe(CODE_GRAPH_STORED_FACT_CODEC);
+          expect(first).toEqual(second);
+          expect(decodeStoredCodeGraphFact(first.json, path)).toEqual(bounded);
+
+          const envelope = requireJsonObject(JSON.parse(first.json));
+          const raw = factEncoder.encode(bounded.json);
+          const legacy = JSON.stringify({
+            ...envelope,
+            payload: Buffer.from(zlibSync(raw, {level: 3})).toString('base64'),
+          });
+          expect(decodeStoredCodeGraphFact(legacy, path)).toEqual(bounded);
+          expect(captured.derivationInputs?.bodyDiscovery?.records).toHaveLength(lines.length);
+          expect(JSON.stringify(captured)).toBe(capturedBefore);
+          expect(JSON.stringify([file, facts])).toBe(original);
+        },
+      ),
+      {numRuns: 40},
     );
   });
 

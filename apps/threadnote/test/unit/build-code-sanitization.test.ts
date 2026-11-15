@@ -104,14 +104,56 @@ describe('pinned musl source payload admission', () => {
       expect(() =>
         validateMuslCmakeCache(EffectString.replace(new RegExp(`^${key}:[^\\n]+\\n`, 'mu'), '')(cache)),
       ).toThrow();
-    for (const report of [
-      elf('arm64'),
-      elf('x64') + 'GLIBC_2.38',
-      elf('x64') + '(NEEDED) Shared library: [libunshipped.so]\n',
-      EffectString.replace('$ORIGIN', '/workspace/node_modules')(elf('x64')),
-      EffectString.replace('ELF64', 'ELF32')(elf('x64')),
+    for (const [report, check] of [
+      [elf('arm64'), 'machine'],
+      [elf('x64') + 'GLIBC_2.38', 'glibc'],
+      [elf('x64') + '(NEEDED) Shared library: [libunshipped.so]\n', 'needed'],
+      [EffectString.replace('$ORIGIN', '/workspace/node_modules')(elf('x64')), 'search-path'],
+      [EffectString.replace('ELF64', 'ELF32')(elf('x64')), 'class'],
+      [EffectString.replace('little endian', 'big endian')(elf('x64')), 'data'],
+      [EffectString.repeat(262145)('x'), 'size'],
     ])
-      expect(() => validateMuslElfReport(report, 'x64', [])).toThrow();
+      expect(() =>
+        validateMuslElfReport(report, 'x64', ['llama-addon.node'], {name: 'llama-addon.node', bytes: 123}),
+      ).toThrow(`"check":"${check}"`);
+  });
+  it('bounds rejection evidence to admitted names and closed ELF facts without exposing report paths', () => {
+    const report =
+      elf('arm64') +
+      '(NEEDED) Shared library: [/private/build/secret.so]\n' +
+      '(RPATH) Library rpath: [/private/build/secret]\nGLIBC_2.38';
+    const reject = (name: string) => {
+      try {
+        validateMuslElfReport(report, 'x64', ['llama-addon.node'], {name, bytes: 123});
+        throw new Error('Expected ELF refusal.');
+      } catch (error) {
+        if (!(error instanceof Error)) throw error;
+        return error.message;
+      }
+    };
+    const message = reject('llama-addon.node');
+    expect(message).toContain('Incompatible musl ELF payload.');
+    expect(message).toContain('"check":"machine"');
+    expect(message).toContain('"member":"llama-addon.node"');
+    expect(message).toContain('"memberBytes":123');
+    expect(message).toContain(`"reportBytes":${Buffer.byteLength(report, 'utf8')}`);
+    expect(message).toContain('"class":"ELF64","data":"little-endian","machine":"arm64"');
+    expect(message).toContain('"needed":["libc.musl-aarch64.so.1","unrecognized"]');
+    expect(message).toContain('"rpath":["external"],"runpath":["$ORIGIN"]');
+    expect(message).toContain('"forbidden":["GLIBC_"]');
+    expect(message).not.toContain('/private');
+    expect(Buffer.byteLength(message, 'utf8')).toBeLessThan(2048);
+    expect(reject('/private/unadmitted.node')).toContain('"member":"unavailable","memberBytes":null');
+    const excessive = elf('x64') + EffectString.repeat(100)('(NEEDED) Shared library: [libunshipped.so]\n');
+    expect(() => validateMuslElfReport(excessive, 'x64', ['llama-addon.node'])).toThrow(
+      '"needed":["libc.musl-x86_64.so.1","libunshipped.so"',
+    );
+    try {
+      validateMuslElfReport(excessive, 'x64', []);
+    } catch (error) {
+      if (!(error instanceof Error)) throw error;
+      expect(Buffer.byteLength(error.message, 'utf8')).toBeLessThan(2048);
+    }
   });
   it('admits only independently generated CMake dynamic targets, not an extra valid musl library', () => {
     const linked = ['llama-addon.node', 'libggml-base.so', 'libggml-cpu-x64.so'];

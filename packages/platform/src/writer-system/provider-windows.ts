@@ -457,7 +457,13 @@ class WindowsDebugDispatcher {
     return EffectArray.some(
       [...this.jobs],
       job =>
-        job.attempted && (job.members.length === 0 || EffectArray.some(job.members, member => !member.exitContinued)),
+        job.attempted &&
+        (job.members.length === 0 ||
+          (job.state === 'closing' &&
+            job.deadline > 0 &&
+            performance.now() < job.deadline &&
+            job.total > job.members.length) ||
+          EffectArray.some(job.members, member => !member.exitContinued)),
     );
   }
   pump(): void {
