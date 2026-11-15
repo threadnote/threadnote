@@ -166,7 +166,7 @@
     "tree-sitter-objc": "3.0.2",
     "tree-sitter-scala": "0.24.0",
     "tree-sitter-systemverilog": "0.4.1",
-    "typescript": "7.0.2",
+    "typescript": "7.1.0-beta",
     "vite": "8.3.5",
     "vitest": "5.0.5"
   },
