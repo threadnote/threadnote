@@ -53,6 +53,51 @@ describe('parser worker shutdown', () => {
 
     it.effect('keeps successful stdin close and exit graceful', () => checkShutdown(['graceful']));
 
+    it.effect('refuses current tasks and replacements after original worker completion stays unknown', () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const home = yield* fs.makeTempDirectoryScoped({prefix: 'parser-worker-unknown-'});
+        const worker = new ClosingWorker('unknown');
+        let spawned = 0;
+        const poolLayer = codeGraphParserPoolLayer({
+          capacity: 1,
+          spawnWorker: () => {
+            spawned++;
+            return worker;
+          },
+        }).pipe(Layer.provide(TestLayer));
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const context = yield* Layer.build(poolLayer);
+            const pool = Context.get(context, CodeGraphParserPool);
+            yield* pool.warm(home, 1);
+            yield* pool.trimIdle;
+            const result = yield* pool.extract(
+              {
+                blobId: '',
+                contentHash: '',
+                content: 'export const later = 1;',
+                language: 'typescript',
+                mode: '100644',
+                path: 'later.ts',
+                size: 23,
+                source: 'worktree',
+              },
+              home,
+            );
+            expect(result.degraded).toBe(true);
+            expect(result.degradationReason).toBe('exit');
+            yield* pool.warm(home, 1);
+            expect(spawned).toBe(1);
+            expect(worker.closeInputCalls).toBe(1);
+            expect(worker.killCalls).toBe(1);
+          }),
+        );
+        expect(worker.closeInputCalls).toBe(1);
+        expect(worker.killCalls).toBe(1);
+      }).pipe(TestClock.withLive),
+    );
+
     fcEffectProp(
       it,
       'isolates shutdown failures across mixed owned workers',
@@ -126,10 +171,11 @@ class ClosingWorker implements ParserWorkerProcess {
   killCalls = 0;
   private stopped = false;
 
-  constructor(private readonly mode: CloseMode) {}
+  constructor(private readonly mode: CloseMode | 'unknown') {}
 
   closeInput(): Promise<void> | void {
     this.closeInputCalls += 1;
+    if (this.mode === 'unknown') return new Promise<void>(() => undefined);
     if (this.mode === 'graceful') {
       this.finish(0);
       return;
@@ -142,7 +188,7 @@ class ClosingWorker implements ParserWorkerProcess {
   kill(): void {
     if (this.stopped) return;
     this.killCalls += 1;
-    this.finish(137);
+    if (this.mode !== 'unknown') this.finish(137);
   }
 
   private finish(code: number): void {

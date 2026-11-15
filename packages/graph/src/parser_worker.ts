@@ -4,7 +4,14 @@ import {Context, Effect, FileSystem, Layer, Option, Path, Predicate, Queue, Stdi
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {fromPromise, fromPromiseInterruptibleAwaiting} from '@threadnote/platform/errors';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
-import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
+import {
+  SystemInfo,
+  runtimeSpawnOwnedProviderTree,
+  runtimeObserveOwnedProviderTree,
+  runtimeTerminateOwnedProviderTree,
+  runtimeCloseOwnedProviderTree,
+  type SystemInfoShape,
+} from '@threadnote/platform/system';
 import {
   cachedCodeGraphFactByteUpperBound,
   cachedCodeGraphFactBytes,
@@ -124,6 +131,7 @@ export interface ParserWorkerSpawnOptions {
   readonly arguments: readonly string[];
   readonly environment: ParserWorkerEnvironment;
   readonly executable: string;
+  readonly cwd?: string;
 }
 
 export type ParserWorkerSpawner = (
@@ -584,10 +592,7 @@ class ParserWorkerSlot {
     await this.evictingConnection?.catch(() => undefined);
     if (Option.isNone(this.connection)) return;
     const connection = this.connection.value;
-    this.connection = Option.none();
-    this.connectionHome = Option.none();
-    this.warmedConnection = Option.none();
-    await connection.close();
+    await this.discard(connection);
   }
 
   async warm(threadnoteHome: string, signal: AbortSignal): Promise<void> {
@@ -654,12 +659,18 @@ class ParserWorkerSlot {
   }
 
   private async discard(connection: ParserWorkerConnection): Promise<void> {
+    try {
+      await connection.close();
+    } catch (cause) {
+      this.closed = true;
+      this.connection = Option.some(connection);
+      throw cause;
+    }
     if (Option.isSome(this.connection) && this.connection.value === connection) {
       this.connection = Option.none();
       this.connectionHome = Option.none();
       this.warmedConnection = Option.none();
     }
-    await connection.close();
   }
 
   private cancelIdleEviction(): void {
@@ -689,18 +700,13 @@ class ParserWorkerSlot {
       ) {
         return;
       }
-      void this.evictConnection(connection);
+      void this.evictConnection(connection).catch(() => undefined);
     }, this.idleTimeoutMilliseconds);
     this.idleTimer.unref?.();
   }
 
   private async evictConnection(connection: ParserWorkerConnection): Promise<void> {
-    if (Option.isSome(this.connection) && this.connection.value === connection) {
-      this.connection = Option.none();
-      this.connectionHome = Option.none();
-      this.warmedConnection = Option.none();
-    }
-    const eviction = connection.close();
+    const eviction = this.discard(connection);
     this.evictingConnection = eviction;
     try {
       await eviction;
@@ -718,6 +724,8 @@ class ParserWorkerConnection {
   private readonly encoder = new TextEncoder();
   private readonly reader: AsyncIterator<string | Uint8Array>;
   private stderrBytes = 0;
+  private readonly stderrDone: Promise<void>;
+  private finishing: Promise<void> | undefined;
 
   constructor(
     private readonly worker: ParserWorkerProcess,
@@ -725,7 +733,8 @@ class ParserWorkerConnection {
     private readonly maxStderrBytes: number,
   ) {
     this.reader = worker.stdout[Symbol.asyncIterator]();
-    void this.consumeStderr(worker.stderr).catch(() => undefined);
+    this.stderrDone = this.consumeStderr(worker.stderr);
+    void this.stderrDone.catch(() => undefined);
     void worker.exited.then(
       () => {
         this.isClosed = true;
@@ -764,25 +773,27 @@ class ParserWorkerConnection {
     return decoded;
   }
 
-  async close(): Promise<void> {
-    if (this.isClosed) {
-      this.kill();
-      void Promise.resolve()
-        .then(() => this.worker.closeInput())
-        .catch(() => undefined);
-      return;
-    }
+  close(): Promise<void> {
+    return (this.finishing ??= this.finish());
+  }
+
+  private async finish(): Promise<void> {
     this.isClosed = true;
-    const closedGracefully = await completesBeforeDeadline(
-      Promise.resolve()
-        .then(() => this.worker.closeInput())
-        .then(() => this.worker.exited),
-      WORKER_SHUTDOWN_TIMEOUT_MILLISECONDS,
-    );
+    const deadline = performance.now() + WORKER_SHUTDOWN_TIMEOUT_MILLISECONDS;
+    const input = Promise.resolve().then(() => this.worker.closeInput());
+    const graceful = input.then(() => this.worker.exited);
+    // Reserve part of the existing close budget for original-owner kill and its completion proof.
+    const closedGracefully = await completesBeforeDeadline(graceful, Math.max(0, deadline - performance.now() - 100));
     if (!closedGracefully) this.kill();
-    void Promise.resolve()
-      .then(() => this.reader.return?.())
-      .catch(() => undefined);
+    const completion = Promise.all([
+      this.worker.exited,
+      this.stderrDone,
+      Promise.resolve().then(() => this.reader.return?.()),
+    ]);
+    if (!(await completesBeforeDeadline(completion, Math.max(0, deadline - performance.now())))) {
+      nativeParserWorkerUnknown.get(this.worker)?.();
+      throw ParserWorkerError.of('exit');
+    }
   }
 
   private async writeAndRead(encoded: string): Promise<string> {
@@ -838,34 +849,56 @@ class ParserWorkerConnection {
   }
 }
 
+// A failed original-owner completion remains charged for this process lifetime. Recreating
+// a pool cannot turn an unobserved child into capacity for unbounded replacement workers.
+let parserWorkerOwnershipUnknown = false;
+const nativeParserWorkerUnknown = new WeakMap<ParserWorkerProcess, () => void>();
 function spawnBunParserWorker(options: ParserWorkerSpawnOptions): ParserWorkerProcess {
-  const child = Bun.spawn({
-    cmd: [options.executable, ...options.arguments],
-    env: {...options.environment},
-    stdin: 'pipe',
-    stderr: 'pipe',
-    stdout: 'pipe',
+  if (parserWorkerOwnershipUnknown) throw ParserWorkerError.of('exit');
+  const child = runtimeSpawnOwnedProviderTree({
+    command: options.executable,
+    args: options.arguments,
+    cwd: options.cwd ?? process.cwd(),
+    environment: {...options.environment},
   });
-  const input = child.stdin;
-  return {
-    closeInput: async () => {
-      await input.end();
-    },
-    exited: child.exited,
-    kill: () => child.kill('SIGKILL'),
-    stderr: child.stderr as ReadableStream<Uint8Array>,
-    stdout: child.stdout as ReadableStream<Uint8Array>,
-    write: async line => {
-      await input.write(line);
-      await input.flush();
-    },
+  let retainedUnknown = false;
+  const exited = (async () => {
+    for (;;) {
+      if (retainedUnknown) throw ParserWorkerError.of('exit');
+      const observation = runtimeObserveOwnedProviderTree(child.handle);
+      if (observation.state === 'unknown') throw ParserWorkerError.of('exit');
+      if (observation.state === 'drained') {
+        if (!observation.stdioClosed || observation.leaderExitCode === null) throw ParserWorkerError.of('exit');
+        runtimeCloseOwnedProviderTree(child.handle);
+        return observation.leaderExitCode;
+      }
+      await Bun.sleep(5);
+    }
+  })();
+  void exited.catch(() => {
+    // Do not close/release an owner whose original process/group/stdio proof is unknown.
+    parserWorkerOwnershipUnknown = true;
+  });
+  const worker: ParserWorkerProcess = {
+    closeInput: child.closeInput,
+    exited,
+    kill: () => runtimeTerminateOwnedProviderTree(child.handle, 'kill'),
+    stderr: child.stderr,
+    stdout: child.stdout,
+    write: line => child.write(new TextEncoder().encode(line)),
   };
+  nativeParserWorkerUnknown.set(worker, () => {
+    retainedUnknown = true;
+    parserWorkerOwnershipUnknown = true;
+  });
+  return worker;
 }
 
 function parserWorkerSpawnOptions(system: SystemInfoShape, threadnoteHome: string): ParserWorkerSpawnOptions {
   const script = developmentStandaloneScript(system);
   return {
     arguments: [...Option.toArray(script), CODE_GRAPH_PARSER_WORKER_ARGUMENT],
+    cwd: system.currentDirectory(),
     environment: {
       ...system.intendedChildEnvironment(system.environment(), 'parser-worker'),
       THREADNOTE_HOME: threadnoteHome,
