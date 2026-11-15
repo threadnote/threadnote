@@ -356,6 +356,7 @@
     "./search/commands": "./src/search/commands.ts",
     "./seed_pattern": "./src/seed_pattern.ts",
     "./seeding": "./src/seeding.ts",
+    "./semantic/fingerprint": "./src/semantic/fingerprint.ts",
     "./setup/contract": "./src/setup/contract.ts",
     "./setup/index": "./src/setup/index.ts",
     "./setup/lock": "./src/setup/lock.ts",

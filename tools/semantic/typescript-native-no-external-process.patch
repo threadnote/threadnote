@@ -1,0 +1,130 @@
+diff --git a/tsc/cmd/tsc/lsp.go b/tsc/cmd/tsc/lsp.go
+--- a/tsc/cmd/tsc/lsp.go
++++ b/tsc/cmd/tsc/lsp.go
+@@ -5,7 +5,6 @@
+ 	"flag"
+ 	"fmt"
+ 	"os"
+-	"os/exec"
+ 	"os/signal"
+ 	"syscall"
+ 	"time"
+@@ -50,7 +49,7 @@
+ 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+ 	defer stop()
+ 
+-	s := lsp.NewServer(&lsp.ServerOptions{
++	s := newNoExternalProcessLSPServer(&lsp.ServerOptions{
+ 		In:                 lsp.ToReader(os.Stdin),
+ 		Out:                lsp.ToWriter(os.Stdout),
+ 		Err:                os.Stderr,
+@@ -58,12 +57,6 @@
+ 		FS:                 fs,
+ 		DefaultLibraryPath: defaultLibraryPath,
+ 		TypingsLocation:    typingsLocation,
+-		NpmInstall: func(ctx context.Context, cwd string, args []string) ([]byte, error) {
+-			cmd := exec.CommandContext(ctx, "npm", args...)
+-			cmd.Dir = cwd
+-			return cmd.Output()
+-		},
+-		Spawn:              spawnProcess,
+ 		ProgressDelay:      250 * time.Millisecond,
+ 		SetParentProcessID: newParentProcessWatchdog(ctx, stop, *clientProcessID),
+ 	})
+@@ -73,6 +66,17 @@
+ 		return 1
+ 	}
+ 	return 0
++}
++
++// newNoExternalProcessLSPServer installs the host policy before the server copies
++// its callbacks. ATA and content mappers cannot launch external programs, even
++// when a client requests external-code support.
++func newNoExternalProcessLSPServer(opts *lsp.ServerOptions) *lsp.Server {
++	opts.NpmInstall = func(context.Context, string, []string) ([]byte, error) {
++		return nil, errExternalProcessDisabled
++	}
++	opts.Spawn = denyExternalProcess
++	return lsp.NewServer(opts)
+ }
+ 
+ // newParentProcessWatchdog returns a SetParentProcessID callback if the platform
+diff --git a/tsc/cmd/tsc/lsp_external_process_test.go b/tsc/cmd/tsc/lsp_external_process_test.go
+new file mode 100644
+--- /dev/null
++++ b/tsc/cmd/tsc/lsp_external_process_test.go
+@@ -0,0 +1,54 @@
++package main
++
++import (
++	"bytes"
++	"context"
++	"errors"
++	"io"
++	"testing"
++
++	"github.com/microsoft/TypeScript/tsc/internal/lsp"
++	"github.com/microsoft/TypeScript/tsc/internal/tspath"
++)
++
++func TestLSPHostDeniesExternalProcesses(t *testing.T) {
++	// Exercise the same constructor as runLSP, not just a denial helper. An
++	// incoming host callback must not survive selection by the production host.
++	opts := &lsp.ServerOptions{
++		Cwd: tspath.RootedDirectoryPathFromAbsolute("/project"),
++		Err: io.Discard,
++		NpmInstall: func(context.Context, string, []string) ([]byte, error) {
++			t.Fatal("incoming npm callback was invoked")
++			return nil, nil
++		},
++		Spawn: func([]string, string, io.Writer) (io.ReadWriteCloser, error) {
++			t.Fatal("incoming spawn callback was invoked")
++			return nil, nil
++		},
++	}
++	server := newNoExternalProcessLSPServer(opts)
++	for _, args := range [][]string{nil, {"install", "--ignore-scripts", "types-registry@latest"}, {"install", "@types/example"}} {
++		result, err := server.NpmInstall(context.Background(), opts.Cwd, args)
++		if result != nil || !errors.Is(err, errExternalProcessDisabled) {
++			t.Fatalf("npm host did not refuse: result=%v, error=%v", result, err)
++		}
++	}
++	assertExternalSpawnDenied(t, opts.Spawn)
++}
++
++func TestAPISystemDeniesExternalProcesses(t *testing.T) {
++	// runAPI supplies the actual OS system as ContentMapperSpawner. Denial is
++	// unconditional, including when RunExternalCode is explicitly requested.
++	assertExternalSpawnDenied(t, (&osSys{}).Spawn)
++}
++
++func assertExternalSpawnDenied(t *testing.T, spawn func([]string, string, io.Writer) (io.ReadWriteCloser, error)) {
++	t.Helper()
++	for _, command := range [][]string{nil, {}, {""}, {"npm", "install", "example"}, {"node", "mapper.js"}} {
++		var stderr bytes.Buffer
++		process, err := spawn(command, "/project", &stderr)
++		if process != nil || !errors.Is(err, errExternalProcessDisabled) || stderr.Len() != 0 {
++			t.Fatalf("spawn host did not refuse: process=%v, error=%v, stderr=%q", process, err, stderr.String())
++		}
++	}
++}
+diff --git a/tsc/cmd/tsc/sys.go b/tsc/cmd/tsc/sys.go
+--- a/tsc/cmd/tsc/sys.go
++++ b/tsc/cmd/tsc/sys.go
+@@ -66,7 +66,15 @@
+ }
+ 
+ func (s *osSys) Spawn(command []string, dir string, stderr io.Writer) (io.ReadWriteCloser, error) {
+-	return spawnProcess(command, dir, stderr)
++	return denyExternalProcess(command, dir, stderr)
++}
++
++var errExternalProcessDisabled = errors.New("external process execution is disabled in this TypeScript build")
++
++// denyExternalProcess is shared by the LSP host and the API/CLI system. Refusal
++// does not inspect arguments, resolve executables, or touch process state.
++func denyExternalProcess([]string, string, io.Writer) (io.ReadWriteCloser, error) {
++	return nil, errExternalProcessDisabled
+ }
+ 
+ // spawnProcess launches a process and adapts its stdio to an io.ReadWriteCloser (Read is its stdout,

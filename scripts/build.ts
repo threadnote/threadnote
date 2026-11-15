@@ -14,6 +14,12 @@ import {Console, Effect, FileSystem, Path, Schema} from 'effect';
 import {javascriptStringLiteral, optionalNativePackageFallbackModule} from './effect/javascript.js';
 import {isDevelopmentBuildVersion} from './development-runtime.js';
 import {sha256Hex} from '@threadnote/platform/digest';
+import {runtimeReadBoundedStableRegularFile} from '@threadnote/platform/system';
+import {
+  assertNativeTypeScriptAssetOutsideReleaseOutput,
+  typescriptNativeBuildRecipe,
+} from '../tools/semantic/build-typescript-native.js';
+import {semanticTreeDigest} from '@threadnote/threadnote/semantic/fingerprint';
 import {runtimeNativePlatformTarget} from '@threadnote/platform/system';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
@@ -35,11 +41,23 @@ const OPTIONAL_NATIVE_PACKAGE = /^@node-llama-cpp\//;
 const EXACT_PACKAGE_VERSION =
   /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
+const pathsOverlap = (path: Path.Path, left: string, right: string) => {
+  const relative = path.relative(left, right);
+  return (
+    relative === '' ||
+    (relative !== '..' && !EffectString.startsWith(`..${path.sep}`)(relative) && !path.isAbsolute(relative))
+  );
+};
+
 const build = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const root = yield* path.fromFileUrl(ROOT_URL);
   const outputRoot = path.join(root, 'dist');
+  yield* Effect.tryPromise({
+    try: () => assertNativeTypeScriptAssetOutsideReleaseOutput(Bun.env.THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR, root),
+    catch: cause => ScriptError.make({message: 'Native TypeScript release input preflight failed.', cause}),
+  });
   const manifest = yield* readPackageManifest(fs, path.join(root, 'package.json'));
   if (manifest.packageManager !== `bun@${Bun.version}`) {
     return yield* ScriptError.make({
@@ -164,6 +182,7 @@ const build = Effect.gen(function* () {
   );
 
   const nativeRuntimeRoot = path.join(outputRoot, 'runtime');
+  const typescriptNativeAsset = yield* stageTypeScriptNativeAsset(fs, path, root, outputRoot);
   if (Effect2.pipe(target, EffectString.includes('darwin'))) {
     yield* fs.makeDirectory(nativeRuntimeRoot, {recursive: true});
     const keychainLibrary = path.join(nativeRuntimeRoot, 'graph-keychain.dylib');
@@ -237,6 +256,7 @@ const build = Effect.gen(function* () {
         executable: executableName,
         devSkills: {digest: devSkills.digest, manifest: 'config/dev-skills.json', protocol: devSkills.workflowProtocol},
         nativeRuntime: `runtime/${NATIVE_RUNTIME_PACKAGE}.js`,
+        ...(typescriptNativeAsset ? {typescriptNativeAsset} : {}),
         ...(nativeRuntimeSource ? {nativeRuntimeSource} : {nativeRuntimePackage: nativePackage}),
         runtime: `bun-${Bun.version}`,
         target,
@@ -247,6 +267,173 @@ const build = Effect.gen(function* () {
     )}\n`,
   );
   yield* Console.log(`Built standalone Threadnote ${version} for ${target}: ${executablePath}`);
+});
+
+/** A release input is a verified derivative payload, never the old npm native binary. */
+const stageTypeScriptNativeAsset = Effect.fn('build.stageTypeScriptNativeAsset')(function* (
+  fs: FileSystem.FileSystem,
+  path: Path.Path,
+  root: string,
+  outputRoot: string,
+) {
+  const staged = path.join(outputRoot, 'runtime', 'typescript');
+  const assetRoot = Bun.env.THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR;
+  if (!assetRoot) {
+    if (yield* fs.exists(staged)) yield* fs.remove(staged, {recursive: true});
+    return undefined;
+  }
+  const source = path.resolve(assetRoot);
+  const sourceReal = yield* fs.realPath(source);
+  const stagedParent = path.dirname(staged);
+  const stagedParentReal = (yield* fs.exists(stagedParent))
+    ? yield* fs.realPath(stagedParent)
+    : path.join(yield* fs.realPath(outputRoot), 'runtime');
+  const stagedReal = (yield* fs.exists(staged))
+    ? yield* fs.realPath(staged)
+    : path.join(stagedParentReal, path.basename(staged));
+  if (
+    pathsOverlap(path, sourceReal, stagedReal) ||
+    pathsOverlap(path, stagedReal, sourceReal) ||
+    pathsOverlap(path, sourceReal, path.join(stagedParentReal, path.basename(staged))) ||
+    pathsOverlap(path, path.join(stagedParentReal, path.basename(staged)), sourceReal)
+  )
+    return yield* ScriptError.make({message: 'Native TypeScript source and staged asset overlap.'});
+  if (yield* fs.exists(staged)) yield* fs.remove(staged, {recursive: true});
+  yield* fs.makeDirectory(stagedParent, {recursive: true});
+  const provenancePath = path.join(source, 'provenance.json');
+  const raw: unknown = yield* Effect.tryPromise({
+    try: async () =>
+      JSON.parse(new TextDecoder().decode(await runtimeReadBoundedStableRegularFile(provenancePath, 16 * 1024))),
+    catch: cause => ScriptError.make({message: 'Native TypeScript provenance is unavailable.', cause}),
+  });
+  if (
+    !raw ||
+    typeof raw !== 'object' ||
+    !('kind' in raw) ||
+    raw.kind !== 'private-source-overlay' ||
+    !('baseVersion' in raw) ||
+    raw.baseVersion !== typescriptNativeBuildRecipe.upstream.version ||
+    !('officialSourceCommit' in raw) ||
+    raw.officialSourceCommit !== typescriptNativeBuildRecipe.upstream.commit ||
+    !('officialSourceTree' in raw) ||
+    raw.officialSourceTree !== typescriptNativeBuildRecipe.upstream.tree ||
+    !('sourceOverlaySha256' in raw) ||
+    raw.sourceOverlaySha256 !== typescriptNativeBuildRecipe.orderedOverlayDigest ||
+    !('platform' in raw) ||
+    raw.platform !== 'darwin-arm64' ||
+    process.platform !== 'darwin' ||
+    process.arch !== 'arm64' ||
+    !('binarySha256' in raw) ||
+    typeof raw.binarySha256 !== 'string' ||
+    raw.binarySha256 !== '28eb8b850cde747a69589e9dc2c3348b2083c21b9de6db99ec6d7a456260f2a3' ||
+    !('officialNpmBinary' in raw) ||
+    raw.officialNpmBinary !== false ||
+    !('focusedTestsPass' in raw) ||
+    raw.focusedTestsPass !== true ||
+    !('raceTestsPass' in raw) ||
+    raw.raceTestsPass !== true ||
+    !('versionOnlyPass' in raw) ||
+    raw.versionOnlyPass !== true
+  )
+    return yield* ScriptError.make({message: 'Native TypeScript provenance does not match the pinned source overlay.'});
+  const name = 'tsc';
+  const candidate = path.join(source, name);
+  const binary = yield* Effect.tryPromise({
+    try: () => runtimeReadBoundedStableRegularFile(candidate, 128 * 1024 * 1024),
+    catch: cause => ScriptError.make({message: 'Native TypeScript asset is not a bounded stable regular file.', cause}),
+  });
+  const digest = yield* sha256Hex(binary);
+  if (digest !== raw.binarySha256)
+    return yield* ScriptError.make({message: 'Native TypeScript asset changed after validation.'});
+  yield* fs.makeDirectory(staged, {recursive: true});
+  const destination = path.join(staged, name);
+  yield* fs.writeFile(destination, binary);
+  const stagedBytes = yield* Effect.tryPromise({
+    try: () => runtimeReadBoundedStableRegularFile(destination, 128 * 1024 * 1024),
+    catch: cause => ScriptError.make({message: 'Native TypeScript staged asset is unstable.', cause}),
+  });
+  if ((yield* sha256Hex(stagedBytes)) !== digest)
+    return yield* ScriptError.make({message: 'Native TypeScript staged bytes changed.'});
+  yield* fs.chmod(destination, 0o755);
+  for (const [file, expected] of [
+    ['TYPESCRIPT_LICENSE.txt', 'a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47'],
+    ['TSC_LICENSE.txt', 'a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47'],
+    ['TYPESCRIPT_NOTICE.txt', '317cd4d9d8a4de4971222bd232bc45c010424bf0dae61be830e49532e62e4d33'],
+    ['BUNDLED_NOTICE.txt', typescriptNativeBuildRecipe.upstream.bundled.copyrightNoticeSha256],
+    ['GO_LICENSE.txt', '911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad'],
+  ] as const) {
+    const notice = yield* Effect.tryPromise({
+      try: () => runtimeReadBoundedStableRegularFile(path.join(source, file), 128 * 1024),
+      catch: cause => ScriptError.make({message: 'Native TypeScript attribution input is unavailable.', cause}),
+    });
+    if ((yield* sha256Hex(notice)) !== expected)
+      return yield* ScriptError.make({message: 'Native TypeScript attribution input differs.'});
+    yield* fs.writeFile(path.join(staged, file), notice);
+  }
+  const sdkSource = path.join(root, 'node_modules', 'typescript');
+  const sdkDigest = '359158a40b603029094ae95804af12820ef1e90187300b12bdf6d3b50da5e568';
+  if ((yield* semanticTreeDigest(sdkSource)) !== sdkDigest)
+    return yield* ScriptError.make({message: 'Installed TypeScript 7.1 SDK tree differs from the pinned package.'});
+  const sdkDestination = path.join(staged, 'sdk');
+  const pending = [''];
+  let entries = 0;
+  let bytes = 0;
+  while (pending.length) {
+    const relative = pending.pop()!;
+    const sourceDirectory = path.join(sdkSource, relative);
+    if ((yield* fs.realPath(sourceDirectory)) !== sourceDirectory)
+      return yield* ScriptError.make({message: 'Installed TypeScript 7.1 SDK directory is not canonical.'});
+    yield* fs.makeDirectory(path.join(sdkDestination, relative), {recursive: true});
+    for (const name of (yield* fs.readDirectory(sourceDirectory)).sort()) {
+      if (name === '.git') return yield* ScriptError.make({message: 'TypeScript 7.1 SDK contains Git metadata.'});
+      if (++entries > 1200) return yield* ScriptError.make({message: 'TypeScript 7.1 SDK tree is too large.'});
+      const child = relative ? path.join(relative, name) : name;
+      const input = path.join(sdkSource, child);
+      if ((yield* fs.realPath(input)) !== input)
+        return yield* ScriptError.make({message: 'TypeScript 7.1 SDK contains a symbolic link.'});
+      const info = yield* fs.stat(input);
+      if (info.type === 'Directory') {
+        pending.push(child);
+        continue;
+      }
+      if (info.type !== 'File' || Number(info.size) > 8 * 1024 * 1024)
+        return yield* ScriptError.make({message: 'TypeScript 7.1 SDK contains an unsupported member.'});
+      if (bytes + Number(info.size) > 16 * 1024 * 1024)
+        return yield* ScriptError.make({message: 'TypeScript 7.1 SDK copy exceeds its byte bound.'});
+      const content = yield* Effect.tryPromise({
+        try: () => runtimeReadBoundedStableRegularFile(input, 8 * 1024 * 1024),
+        catch: cause => ScriptError.make({message: 'TypeScript 7.1 SDK input changed during staging.', cause}),
+      });
+      bytes += content.byteLength;
+      if (bytes > 16 * 1024 * 1024)
+        return yield* ScriptError.make({message: 'TypeScript 7.1 SDK copy exceeds its byte bound.'});
+      const target = path.join(sdkDestination, child);
+      yield* fs.writeFile(target, content);
+      yield* fs.chmod(target, info.mode);
+    }
+  }
+  if ((yield* semanticTreeDigest(sdkDestination)) !== sdkDigest)
+    return yield* ScriptError.make({message: 'Staged TypeScript 7.1 SDK tree changed.'});
+  const manifest = {
+    version: typescriptNativeBuildRecipe.upstream.version,
+    executable: name,
+    sha256: digest,
+    provenance: {
+      kind: raw.kind,
+      sourceCommit: raw.officialSourceCommit,
+      sourceTree: raw.officialSourceTree,
+      overlaySha256: raw.sourceOverlaySha256,
+      officialNpmBinary: false,
+    },
+  };
+  yield* fs.writeFileString(path.join(staged, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+  return {
+    manifest: 'runtime/typescript/manifest.json',
+    sdk: 'runtime/typescript/sdk',
+    sdkTreeDigest: sdkDigest,
+    version: manifest.version,
+    provenance: manifest.provenance.kind,
+  };
 });
 
 function readPackageManifest(fs: FileSystem.FileSystem, path: string) {
