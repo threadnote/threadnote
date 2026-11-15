@@ -72,7 +72,8 @@ if (process.argv.includes('--inventory') || process.argv.includes('--candidate-m
     },
     {milliseconds: cleanupPolicy?.dispatcherMilliseconds},
   );
-  const providerBudget = process.argv.includes('--provider-inputs') ? 200000 : 50000;
+  const providerBudget =
+    cleanupPolicy?.dispatcherSignalMilliseconds ?? (process.argv.includes('--provider-inputs') ? 200000 : 50000);
   const deadline = setTimeout(() => group.signal('SIGTERM'), providerBudget);
   let code = 1;
   try {

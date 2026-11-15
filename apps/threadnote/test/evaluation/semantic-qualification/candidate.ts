@@ -149,6 +149,8 @@ export async function verifiedJavaGradleCandidateCleanup(arguments_: readonly st
     if (verified.input.language !== 'java' || !verified.input.gradle) return undefined;
     await assertExactCandidateCheckout(candidate);
     return Object.freeze({
+      workMilliseconds: 960000,
+      dispatcherSignalMilliseconds: 1010000,
       candidateMilliseconds: 40000,
       dispatcherMilliseconds: 45000,
       childJoinMilliseconds: 40000,
@@ -330,7 +332,7 @@ export async function runCandidateChecks(
     {mode: 0o600, flag: 'wx'},
   );
   const started = Date.now(),
-    deadline = started + (providerInputsPath ? 180_000 : 42_000);
+    deadline = started + (cleanupPolicy?.workMilliseconds ?? (providerInputsPath ? 180_000 : 42_000));
   let root = '',
     home = '';
   let transport: StdioClientTransport | undefined, client: Client | undefined;

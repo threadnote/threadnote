@@ -27,6 +27,7 @@ const jobSample = vi.hoisted(() => ({
         getLastError(): number;
         setLastError(code: number): void;
         called(name: string, args: readonly unknown[], result: unknown): void;
+        sample?(name: string, args: readonly unknown[], result: unknown, lastError: number): void;
         failed?(name: string): void;
         closed?(symbols: Readonly<Record<string, FFIFunction>>): void;
       }
@@ -55,6 +56,8 @@ vi.mock('bun:ffi', async importOriginal => {
         'TerminateJobObject',
         'CloseHandle',
         'GetCurrentThreadId',
+        'GetProcessId',
+        'GetProcessTimes',
         'WaitForDebugEvent',
         'ContinueDebugEvent',
         'DuplicateHandle',
@@ -76,18 +79,21 @@ vi.mock('bun:ffi', async importOriginal => {
         observed.set(key, (...args: unknown[]) => {
           const result: unknown = Reflect.apply(original, undefined, args);
           const active = jobSample.active;
-          if (active) {
+          if (active && (active.sample || (key !== 'GetProcessId' && key !== 'GetProcessTimes'))) {
             let lastError: number | undefined;
             try {
               lastError = active.getLastError();
+              active.sample?.(key, args, result, lastError);
               // Existing Job/close oracles observe successful transitions only. Other calls also
               // expose finite failure status to the bounded startup discriminator, without native retries.
               if (
-                (result !== 0 && result !== 0n) ||
-                (key !== 'CreateJobObjectW' &&
-                  key !== 'QueryInformationJobObject' &&
-                  key !== 'TerminateJobObject' &&
-                  key !== 'CloseHandle')
+                key !== 'GetProcessId' &&
+                key !== 'GetProcessTimes' &&
+                ((result !== 0 && result !== 0n) ||
+                  (key !== 'CreateJobObjectW' &&
+                    key !== 'QueryInformationJobObject' &&
+                    key !== 'TerminateJobObject' &&
+                    key !== 'CloseHandle'))
               )
                 active.called(key, args, result);
             } catch {
@@ -512,13 +518,17 @@ async function until<T>(read: () => T, accept: (value: T) => boolean, millisecon
     await Bun.sleep(5);
   }
 }
-async function stop(provider: RuntimeOwnedProviderProcess): Promise<void> {
-  if (runtimeObserveOwnedProviderTree(provider.handle).state !== 'drained')
-    runtimeTerminateOwnedProviderTree(provider.handle, 'kill');
-  await until(
-    () => runtimeObserveOwnedProviderTree(provider.handle),
-    o => o.state === 'drained',
-  );
+async function stop(
+  provider: RuntimeOwnedProviderProcess,
+  sampled?: (observation: ReturnType<typeof runtimeObserveOwnedProviderTree>) => void,
+): Promise<void> {
+  const observe = () => {
+    const observation = runtimeObserveOwnedProviderTree(provider.handle);
+    sampled?.(observation);
+    return observation;
+  };
+  if (observe().state !== 'drained') runtimeTerminateOwnedProviderTree(provider.handle, 'kill');
+  await until(observe, o => o.state === 'drained');
   runtimeCloseOwnedProviderTree(provider.handle);
 }
 
@@ -1708,62 +1718,242 @@ it.skipIf(process.platform !== 'win32' || !supported)(
 it.skipIf(!supported)(
   'signals only the captured original group or Job and leaves a separate owned provider running',
   async () => {
-    const first = spawn('setInterval(()=>{},1000)'),
-      second = spawn('setInterval(()=>{},1000)');
-    const outputs = [first.stdout.cancel(), first.stderr.cancel(), second.stdout.cancel(), second.stderr.cancel()];
-    const secondCancellation: Array<'pending' | 'fulfilled' | 'rejected'> = ['pending', 'pending'];
-    for (const [index, output] of outputs.slice(2).entries())
-      void output.then(
-        () => {
-          secondCancellation[index] = 'fulfilled';
-        },
-        () => {
-          secondCancellation[index] = 'rejected';
-        },
-      );
-    let firstDrained: ReturnType<typeof runtimeObserveOwnedProviderTree> | undefined;
-    try {
-      runtimeTerminateOwnedProviderTree(first.handle, 'kill');
-      await first.closeInput();
-      await outputs[0];
-      await outputs[1];
-      firstDrained = await until(
-        () => runtimeObserveOwnedProviderTree(first.handle),
-        o => o.state === 'drained',
-      );
-      expect(runtimeObserveOwnedProviderTree(second.handle).state).toBe('running');
-    } finally {
-      await stop(first);
-      await stop(second).catch(error => {
-        if (error instanceof Error) {
-          let secondObserved: ReturnType<typeof runtimeObserveOwnedProviderTree> | 'unavailable' = 'unavailable';
-          try {
-            secondObserved = runtimeObserveOwnedProviderTree(second.handle);
-          } catch {
-            // Preserve the original stop failure if observation itself is unavailable.
+    const windows = process.platform === 'win32',
+      prior = jobSample.active,
+      kernel = windows
+        ? dlopen('kernel32.dll', {
+            GetLastError: {args: [], returns: 'u32'},
+            SetLastError: {args: ['u32'], returns: 'void'},
+          })
+        : undefined;
+    // Actual handles/IDs remain private keys. Only two aliases, finite results and counts are rendered.
+    const jobs: {
+        accounting: {total: number; active: number} | null;
+        createsContinued: number;
+        exitsSeen: number;
+        exitsContinued: number;
+        threadsCreated: number;
+        threadsExited: number;
+        wait: number | null;
+        identityQueriesFailed: boolean;
+        identityMatches: boolean;
+      }[] = [],
+      handles = new Map<unknown, number>(),
+      processes = new Map<number, number>(),
+      processIds = new Map<unknown, number>(),
+      creationTimes = new Map<number, bigint>(),
+      trace: {api: string; job: number | null; result: number; error: number; kind: number | null}[] = [];
+    let creator: number | undefined,
+      affinityMatches = true,
+      pendingEvent: {pid: number; kind: number} | undefined,
+      currentJob: number | undefined,
+      secondKillAt: number | undefined,
+      firstUnknown: {millisecondsSinceKill: number | null; native: ReturnType<typeof snapshot>} | undefined;
+    const snapshot = () => ({
+      jobs: EffectArray.map(jobs, job => ({...job, accounting: job.accounting ? {...job.accounting} : null})),
+      affinityMatches,
+      trace: EffectArray.map(trace, call => ({...call})),
+      observerIncomplete: diagnostic.incomplete,
+    });
+    const diagnostic: NonNullable<typeof jobSample.active> = {
+      incomplete: false,
+      getLastError: () => kernel?.symbols.GetLastError() ?? 0,
+      setLastError: code => {
+        kernel?.symbols.SetLastError(code);
+      },
+      called() {},
+      sample(name, args, result, error) {
+        if (name === 'CreateJobObjectW' && result !== 0n && result !== 0) {
+          if (jobs.length >= 2) {
+            diagnostic.incomplete = true;
+            return;
           }
-          error.message += `; two-provider drain ${JSON.stringify({
-            first: firstDrained
-              ? {
-                  state: firstDrained.state,
-                  stdioClosed: firstDrained.stdioClosed,
-                  leaderExitCode: firstDrained.leaderExitCode,
-                }
-              : 'unavailable',
-            second:
-              secondObserved === 'unavailable'
-                ? 'unavailable'
-                : {
-                    state: secondObserved.state,
-                    stdioClosed: secondObserved.stdioClosed,
-                    leaderExitCode: secondObserved.leaderExitCode,
-                  },
-            secondCancellation,
-          })}`;
+          currentJob = jobs.length;
+          handles.set(result, currentJob);
+          jobs.push({
+            accounting: null,
+            createsContinued: 0,
+            exitsSeen: 0,
+            exitsContinued: 0,
+            threadsCreated: 0,
+            threadsExited: 0,
+            wait: null,
+            identityQueriesFailed: false,
+            identityMatches: true,
+          });
         }
-        return Promise.reject(error);
-      });
-      await Promise.all(outputs);
+        if (name === 'GetCurrentThreadId' && typeof result === 'number') {
+          creator ??= result;
+          affinityMatches &&= result === creator;
+          return;
+        }
+        if (
+          name === 'CreateProcessW' &&
+          result !== 0 &&
+          args[9] instanceof BigUint64Array &&
+          currentJob !== undefined
+        ) {
+          const pi = args[9];
+          processes.set(Number(pi[2] & 0xffffffffn), currentJob);
+          handles.set(pi[0], currentJob);
+          processIds.set(pi[0], Number(pi[2] & 0xffffffffn));
+        }
+        if (name === 'WaitForDebugEvent' && result !== 0 && args[0] instanceof Uint8Array) {
+          const view = new DataView(args[0].buffer, args[0].byteOffset, args[0].byteLength);
+          pendingEvent = {pid: view.getUint32(4, true), kind: view.getUint32(0, true)};
+        }
+        if (name === 'IsProcessInJob' && result !== 0 && args[2] instanceof Int32Array && args[2][0] === 1) {
+          const owner = handles.get(args[1]);
+          if (owner !== undefined && handles.size < 2048) {
+            handles.set(args[0], owner);
+            if (pendingEvent?.kind === 3 && processes.size < 512) {
+              processes.set(pendingEvent.pid, owner);
+              processIds.set(args[0], pendingEvent.pid);
+            }
+          }
+        }
+        const owner =
+            handles.get(args[0]) ??
+            (name === 'ContinueDebugEvent' && typeof args[0] === 'number' ? processes.get(args[0]) : undefined) ??
+            (name === 'WaitForDebugEvent' && result !== 0 && pendingEvent
+              ? processes.get(pendingEvent.pid)
+              : undefined),
+          job = owner === undefined ? undefined : jobs[owner];
+        if (name === 'DuplicateHandle' && result !== 0 && args[3] instanceof BigUint64Array) {
+          const source = handles.get(args[1]);
+          if (source !== undefined && handles.size < 2048) {
+            handles.set(args[3][0], source);
+            const pid = processIds.get(args[1]);
+            if (pid !== undefined) processIds.set(args[3][0], pid);
+          }
+        }
+        if (
+          name === 'QueryInformationJobObject' &&
+          args[1] === 1 &&
+          job &&
+          result !== 0 &&
+          args[2] instanceof Uint8Array
+        ) {
+          const view = new DataView(args[2].buffer, args[2].byteOffset, args[2].byteLength);
+          job.accounting = {total: view.getUint32(36, true), active: view.getUint32(40, true)};
+        }
+        if (name === 'WaitForSingleObject' && job && typeof result === 'number') job.wait = result;
+        if ((name === 'GetProcessId' || name === 'GetProcessTimes') && job && result === 0)
+          job.identityQueriesFailed = true;
+        const expectedPid = processIds.get(args[0]);
+        if (name === 'GetProcessId' && job && expectedPid !== undefined) job.identityMatches &&= result === expectedPid;
+        if (
+          name === 'GetProcessTimes' &&
+          job &&
+          result !== 0 &&
+          expectedPid !== undefined &&
+          args[1] instanceof BigUint64Array
+        ) {
+          const creation = args[1][0],
+            priorCreation = creationTimes.get(expectedPid);
+          job.identityMatches &&= creation !== 0n && (priorCreation === undefined || creation === priorCreation);
+          if (creationTimes.size < 512) creationTimes.set(expectedPid, creation);
+        }
+        if (name === 'WaitForDebugEvent' && result !== 0 && job && pendingEvent?.kind === 5) job.exitsSeen++;
+        if (name === 'ContinueDebugEvent' && result !== 0 && job && pendingEvent) {
+          if (pendingEvent.kind === 3) job.createsContinued++;
+          if (pendingEvent.kind === 5) job.exitsContinued++;
+          if (pendingEvent.kind === 2 || pendingEvent.kind === 3) job.threadsCreated++;
+          if (pendingEvent.kind === 4) job.threadsExited++;
+        }
+        if (name === 'TerminateJobObject' && owner === 1) secondKillAt ??= performance.now();
+        if (
+          typeof result === 'number' &&
+          (name === 'WaitForDebugEvent' ||
+            name === 'ContinueDebugEvent' ||
+            name === 'QueryInformationJobObject' ||
+            name === 'WaitForSingleObject' ||
+            name === 'GetOverlappedResult' ||
+            ((name === 'GetProcessId' || name === 'GetProcessTimes') && result === 0))
+        ) {
+          if (trace.length === 16) trace.shift();
+          trace.push({
+            api: name,
+            job: owner ?? null,
+            result: name === 'GetProcessId' ? Number(result > 0) : result,
+            error,
+            kind:
+              name === 'ContinueDebugEvent' || (name === 'WaitForDebugEvent' && result !== 0)
+                ? (pendingEvent?.kind ?? null)
+                : null,
+          });
+        }
+      },
+    };
+    if (windows) jobSample.active = diagnostic;
+    try {
+      const first = spawn('setInterval(()=>{},1000)'),
+        second = spawn('setInterval(()=>{},1000)');
+      const outputs = [first.stdout.cancel(), first.stderr.cancel(), second.stdout.cancel(), second.stderr.cancel()];
+      const secondCancellation: Array<'pending' | 'fulfilled' | 'rejected'> = ['pending', 'pending'];
+      for (const [index, output] of outputs.slice(2).entries())
+        void output.then(
+          () => {
+            secondCancellation[index] = 'fulfilled';
+          },
+          () => {
+            secondCancellation[index] = 'rejected';
+          },
+        );
+      let firstDrained: ReturnType<typeof runtimeObserveOwnedProviderTree> | undefined;
+      try {
+        runtimeTerminateOwnedProviderTree(first.handle, 'kill');
+        await first.closeInput();
+        await outputs[0];
+        await outputs[1];
+        firstDrained = await until(
+          () => runtimeObserveOwnedProviderTree(first.handle),
+          o => o.state === 'drained',
+        );
+        expect(runtimeObserveOwnedProviderTree(second.handle).state).toBe('running');
+      } finally {
+        await stop(first);
+        await stop(second, observation => {
+          if (windows && observation.state === 'unknown' && !firstUnknown)
+            firstUnknown = {
+              millisecondsSinceKill: secondKillAt === undefined ? null : Math.round(performance.now() - secondKillAt),
+              native: snapshot(),
+            };
+        }).catch(error => {
+          if (error instanceof Error) {
+            let secondObserved: ReturnType<typeof runtimeObserveOwnedProviderTree> | 'unavailable' = 'unavailable';
+            try {
+              secondObserved = runtimeObserveOwnedProviderTree(second.handle);
+            } catch {
+              // Preserve the original stop failure if observation itself is unavailable.
+            }
+            error.message += `; two-provider drain ${JSON.stringify({
+              first: firstDrained
+                ? {
+                    state: firstDrained.state,
+                    stdioClosed: firstDrained.stdioClosed,
+                    leaderExitCode: firstDrained.leaderExitCode,
+                  }
+                : 'unavailable',
+              second:
+                secondObserved === 'unavailable'
+                  ? 'unavailable'
+                  : {
+                      state: secondObserved.state,
+                      stdioClosed: secondObserved.stdioClosed,
+                      leaderExitCode: secondObserved.leaderExitCode,
+                    },
+              secondCancellation,
+              nativeProof: windows ? {firstUnknown, final: snapshot()} : undefined,
+            })}`;
+          }
+          return Promise.reject(error);
+        });
+        await Promise.all(outputs);
+      }
+    } finally {
+      jobSample.active = prior;
+      kernel?.close();
     }
   },
 );
