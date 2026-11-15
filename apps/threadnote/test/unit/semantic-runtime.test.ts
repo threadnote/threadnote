@@ -72,7 +72,7 @@ import {
   type WireStop,
 } from '../../src/semantic/lsp_transport.js';
 // Intercept only libraries opened in the panic fixture's scope, using the same native seam as provider-process tests.
-const nativeWaitpidSample = vi.hoisted(() => ({
+const nativeWait4Sample = vi.hoisted(() => ({
   active: undefined as ((symbols: object) => void) | undefined,
 }));
 vi.mock('bun:ffi', async importOriginal => {
@@ -81,7 +81,7 @@ vi.mock('bun:ffi', async importOriginal => {
     ...real,
     dlopen: <Fns extends Record<string, FFIFunction>>(name: Parameters<typeof real.dlopen>[0], symbols: Fns) => {
       const library = real.dlopen(name, symbols);
-      nativeWaitpidSample.active?.(library.symbols);
+      nativeWait4Sample.active?.(library.symbols);
       return library;
     },
   };
@@ -2026,7 +2026,7 @@ describe.skipIf(process.platform === 'win32')('semantic real process transport',
             }
           };
           // Record only outcomes of the backend's own calls. No errno reads, additional probes or status bytes.
-          const waitpidCounts = new Uint32Array(4),
+          const wait4Counts = new Uint32Array(4),
             groupCounts = new Uint32Array(4);
           const restorations: (() => void)[] = [];
           // Register before interception: a failed acquisition must still restore every changed descriptor.
@@ -2035,23 +2035,23 @@ describe.skipIf(process.platform === 'win32')('semantic real process transport',
               for (let index = restorations.length - 1; index >= 0; index--) restorations[index]();
             }),
           );
-          const previousSample = nativeWaitpidSample.active;
+          const previousSample = nativeWait4Sample.active;
           restorations.push(() => {
-            nativeWaitpidSample.active = previousSample;
+            nativeWait4Sample.active = previousSample;
           });
-          nativeWaitpidSample.active = symbols => {
-            const waitDescriptor = Object.getOwnPropertyDescriptor(symbols, 'waitpid');
-            const waitpid: unknown = waitDescriptor?.value;
-            if (!waitDescriptor || typeof waitpid !== 'function') return;
-            restorations.push(() => Object.defineProperty(symbols, 'waitpid', waitDescriptor));
-            Object.defineProperty(symbols, 'waitpid', {
+          nativeWait4Sample.active = symbols => {
+            const waitDescriptor = Object.getOwnPropertyDescriptor(symbols, 'wait4');
+            const wait4: unknown = waitDescriptor?.value;
+            if (!waitDescriptor || typeof wait4 !== 'function') return;
+            restorations.push(() => Object.defineProperty(symbols, 'wait4', waitDescriptor));
+            Object.defineProperty(symbols, 'wait4', {
               ...waitDescriptor,
-              value(pid: number, status: Int32Array, options: number) {
-                const result: unknown = waitpid(pid, status, options);
+              value(pid: number, status: Int32Array, options: number, usage: Uint8Array) {
+                const result: unknown = wait4(pid, status, options, usage);
                 // Only comparisons and preallocated typed-array writes occur before returning to the caller.
                 // In particular, no allocation, callback, FFI or other native operation can overwrite errno.
                 const index = result === pid ? 0 : result === 0 ? 1 : result === -1 ? 2 : 3;
-                if (waitpidCounts[index] < 0xffff_ffff) waitpidCounts[index]++;
+                if (wait4Counts[index] < 0xffff_ffff) wait4Counts[index]++;
                 return result;
               },
             });
@@ -2160,7 +2160,7 @@ describe.skipIf(process.platform === 'win32')('semantic real process transport',
           );
           assertNativeRecorder = evidence => {
             // A real successful drain crosses both seams; this also detects an ineffective module interception.
-            expect(waitpidCounts[0], evidence).toBeGreaterThan(0);
+            expect(wait4Counts[0], evidence).toBeGreaterThan(0);
             expect(groupCounts[1], evidence).toBeGreaterThan(0);
           };
           failureEvidence = stop => {
@@ -2187,11 +2187,11 @@ describe.skipIf(process.platform === 'win32')('semantic real process transport',
                 order,
                 ...trace,
                 posixCalls: {
-                  waitpid: {
-                    originalChild: waitpidCounts[0],
-                    zero: waitpidCounts[1],
-                    error: waitpidCounts[2],
-                    other: waitpidCounts[3],
+                  wait4: {
+                    originalChild: wait4Counts[0],
+                    zero: wait4Counts[1],
+                    error: wait4Counts[2],
+                    other: wait4Counts[3],
                   },
                   groupAssertion: {
                     returned: groupCounts[0],
