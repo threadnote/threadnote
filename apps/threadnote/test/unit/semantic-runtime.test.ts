@@ -36,6 +36,7 @@ import * as fingerprint from '../../src/semantic/fingerprint.js';
 import {Observation, type QueryOutcome} from '@threadnote/semantic/contracts';
 import {makeSemanticReadinessJobs, runSemanticSelectedVerification} from '../../src/semantic/readiness_jobs.js';
 import {makeReadDeadline} from '@threadnote/platform/read_deadline';
+import {makeSemanticAgentDiskQueries} from '../../src/semantic/agent_query_store.js';
 import {
   makeWindowsSemanticSources,
   takeSemanticPrepared,
@@ -271,6 +272,7 @@ const javaCoordinatorFixture = Effect.fn('test.javaCoordinatorFixture')(function
           upsert: (observation: Observation, _text: string, language: string) =>
             mutations.withPermit(
               Effect.gen(function* () {
+                events.push('source-upsert');
                 if (control.blockUpsert) {
                   yield* Deferred.succeed(upsertStarted, undefined);
                   return yield* Effect.never.pipe(Effect.ensuring(Deferred.await(terminated)));
@@ -811,6 +813,109 @@ describe.skipIf(process.platform === 'win32')('Java coordinator registration', (
           expect(yield* coordinator.status).toMatchObject({providers: 1, imports: 0, quarantined: 1});
           expect(f.finishes()).toBe(1);
         }).pipe(TestClock.withLive),
+    );
+    layerIt.effect(
+      'saved-disk preview attachment reuses the ready provider and refuses drift without granting preparation',
+      () =>
+        Effect.gen(function* () {
+          const f = yield* javaCoordinatorFixture();
+          const coordinator = yield* f.make();
+          const disk = yield* makeSemanticAgentDiskQueries(coordinator, f.basis.worktree, sha256HexSync('runtime'));
+          const seed = {...f.basis, view: {...f.basis.view, kind: 'disk' as const}, documentVersion: null};
+          const source = {
+            worktree: seed.worktree,
+            project: seed.project,
+            uri: seed.uri,
+            language: 'java' as const,
+            environment: 'prepared-main',
+            profile: sha256HexSync('profile'),
+            principal: sha256HexSync('principal'),
+          };
+          const deadline = yield* makeReadDeadline(120000);
+          const prepared = yield* disk.prepare(source, seed.content, {
+            deadline,
+            remaining: Effect.succeed(120000),
+            stage: () => Effect.void,
+            termination: () => {},
+            cleanup: () => {},
+            cleanupUnknown: () => false,
+          });
+          const checks = EffectArray.filter(f.events, event => event === 'source-upsert').length;
+          const attached = yield* disk.attachDisk(seed, f.text, 'java', 'prepared-main');
+          expect(attached.observation.view).toEqual(prepared.view);
+          expect(attached.observation.provider.generation).toBe(prepared.provider.generation);
+          expect(f.constructions).toHaveLength(1);
+          expect(EffectArray.filter(f.events, event => event === 'source-upsert').length).toBeGreaterThan(checks);
+          const used = yield* coordinator.usePrepared(attached.observation, 1000, api =>
+            api.prepare!('rename', attached.observation, {line: 0, character: 6}, 'Renamed', 1000),
+          );
+          // An ordinary read outcome is not a nominal source-before-request prepared proof.
+          expect(used.kind).toBe('ordinary');
+          expect(used).not.toHaveProperty('rows');
+          expect((yield* disk.attachDisk(f.basis, f.text, 'java', 'prepared-main').pipe(Effect.result))._tag).toBe(
+            'Failure',
+          );
+          expect((yield* disk.attachDisk(seed, f.text, 'java', 'foreign').pipe(Effect.result))._tag).toBe('Failure');
+          yield* f.fs.writeFileString(f.file, 'class Changed {}\n');
+          expect((yield* disk.attachDisk(seed, f.text, 'java', 'prepared-main').pipe(Effect.result))._tag).toBe(
+            'Failure',
+          );
+          expect(f.constructions).toHaveLength(1);
+          yield* f.fs.writeFileString(f.file, f.text);
+          f.control.rejectSdk = true;
+          expect(
+            (yield* coordinator
+              .use(attached.observation, 1000, api => api.query('symbols', attached.observation, undefined, 1000))
+              .pipe(Effect.result))._tag,
+          ).toBe('Failure');
+          expect(f.constructions).toHaveLength(1);
+        }).pipe(TestClock.withLive),
+    );
+    layerIt.effect.prop(
+      'saved-disk attachment order shares one actual provider per selected project and environment',
+      [
+        Schema.Array(
+          Schema.Struct({environment: Schema.Literals(['prepared-main', 'prepared-other']), nested: Schema.Boolean}),
+        ).check(Schema.isBetweenLength(1, 4)),
+      ],
+      ([requests]) =>
+        Effect.gen(function* () {
+          const f = yield* javaCoordinatorFixture();
+          f.candidate.environments = [
+            ...f.candidate.environments,
+            {...f.candidate.environments[0], id: 'prepared-other'},
+          ];
+          const coordinator = yield* f.make();
+          const disk = yield* makeSemanticAgentDiskQueries(coordinator, f.basis.worktree, sha256HexSync('runtime'));
+          const seed = {...f.basis, view: {...f.basis.view, kind: 'disk' as const}, documentVersion: null};
+          const nested = f.path.join(f.project, 'nested');
+          yield* f.fs.makeDirectory(nested);
+          const nestedFile = f.path.join(nested, 'Main.java');
+          yield* f.fs.writeFileString(nestedFile, f.text);
+          const nestedSeed = {
+            ...seed,
+            project: (yield* f.path.toFileUrl(nested)).href,
+            uri: (yield* f.path.toFileUrl(nestedFile)).href,
+          };
+          const generations = new Map<string, number>();
+          for (const request of requests) {
+            const key = JSON.stringify([request.nested, request.environment]);
+            const checks = EffectArray.filter(f.events, event => event === 'source-upsert').length;
+            const attached = yield* disk.attachDisk(
+              request.nested ? nestedSeed : seed,
+              f.text,
+              'java',
+              request.environment,
+            );
+            const prior = generations.get(key);
+            if (prior !== undefined) expect(attached.observation.provider.generation).toBe(prior);
+            generations.set(key, attached.observation.provider.generation);
+            expect(f.constructions).toHaveLength(new Set(generations.keys()).size);
+            expect(EffectArray.filter(f.events, event => event === 'source-upsert').length).toBeGreaterThan(checks);
+          }
+          expect(new Set(generations.values()).size).toBe(generations.size);
+        }).pipe(TestClock.withLive),
+      {arbitrary: {runs: 8}},
     );
     layerIt.effect('warm saved-disk startup binds its cancellation to the retained session capability', () =>
       Effect.gen(function* () {

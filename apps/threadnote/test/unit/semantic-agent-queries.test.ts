@@ -59,7 +59,13 @@ import {LspFault} from '../../src/semantic/lsp_transport.js';
 import {makeReadDeadline} from '@threadnote/platform/read_deadline';
 import {serveSemanticEndpoint, requestSemanticEndpoint, semanticCatalogKey} from '../../src/semantic/coordinator.js';
 import {runSemanticReadinessWith} from '../../src/semantic/readiness.js';
-import {SemanticSessionFault, type SemanticSession} from '../../src/semantic/provider.js';
+import {runSemanticAgentChangeWith} from '../../src/semantic/agent_changes.js';
+import {
+  SemanticSessionFault,
+  makeSemanticDiskSourceCapture,
+  type SemanticSession,
+} from '../../src/semantic/provider.js';
+import {SemanticProposalHandle} from '../../src/semantic/agent_change_protocol.js';
 import type {ContextBriefFollowUpV1, SemanticContextKnowledgeV1} from '@threadnote/context/types';
 import {parseContextBriefJsonText} from '@threadnote/context/projector';
 import {compactSemanticContextKnowledge} from '@threadnote/context/compiler';
@@ -1806,15 +1812,18 @@ const ownedBufferFixture = Effect.gen(function* () {
   const texts = new Map<string, string>();
   let closes = 0;
   let attachments = 0;
+  const attachedViews: Observation[] = [];
   let startupControls = 0;
   let failAttachment = false;
   let queryBarrier: Effect.Effect<void> = Effect.void;
   let attachBarrier: Effect.Effect<void> = Effect.void;
+  let prepare: SemanticSession['prepare'];
   const coordinator: Parameters<typeof serveSemanticEndpoint>[0] = {
     catalogKey: semanticCatalogKey(f.profile.catalog),
     attach: (seed, text, _language, _environment, control) =>
       Effect.sync(() => {
         attachments++;
+        attachedViews.push(structuredClone(seed));
         if (control) startupControls++;
         const observed = {
           ...seed,
@@ -1854,6 +1863,7 @@ const ownedBufferFixture = Effect.gen(function* () {
         upsert: () => Effect.die('Coordinator owns attachment'),
         query: () => queryBarrier.pipe(Effect.as(outcome([texts.get(observed.view.id) ?? '', 2, 3], observed))),
         diagnostics: () => Effect.die('Not a diagnostic fixture'),
+        ...(prepare ? {prepare} : {}),
         project: () => Effect.die('Not a project fixture'),
         observation: () => Effect.succeed(current.get(observed.view.id)),
         available: Effect.succeed(true),
@@ -1912,6 +1922,11 @@ const ownedBufferFixture = Effect.gen(function* () {
     });
   return {
     ...f,
+    host,
+    attachedViews,
+    setPreparation: (implementation: NonNullable<SemanticSession['prepare']>) => {
+      prepare = implementation;
+    },
     open,
     lifecycle,
     readiness: (input: unknown) => runSemanticReadinessWith(host, f.config, input),
@@ -1941,6 +1956,162 @@ const ownedBufferFixture = Effect.gen(function* () {
 });
 
 describe('public owned semantic buffers', () => {
+  effectIt.effect(
+    'shared ready disk attachment publishes a complete read-only proposal through status and preflight',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* ownedBufferFixture;
+        const before = yield* f.fs.readFileString(f.file);
+        const capture = yield* makeSemanticDiskSourceCapture(f.root, 4 * 1024 * 1024);
+        // The provider boundary supplies edits, not nominal writer authority. Source identity is actually captured.
+        f.setPreparation((_operation, observed, _position, newName) =>
+          Effect.gen(function* () {
+            const source = yield* capture(observed.uri);
+            return {
+              ...outcome([], observed),
+              items: [
+                {
+                  kind: 'prepared-edit',
+                  operation: 'rename',
+                  sourceBasis: 'pre-request-synchronized-text-v1',
+                  files: [
+                    {
+                      observation: observed,
+                      beforeText: source.text,
+                      edits: [
+                        {range: {start: {line: 0, character: 13}, end: {line: 0, character: 19}}, newText: newName!},
+                      ],
+                      precondition: {
+                        sourceKind: 'disk',
+                        rawDigest: source.content,
+                        encoding: 'utf-8',
+                        physicalIdentity: source.identity,
+                        owner: observed.view.owner,
+                        documentVersion: null,
+                      },
+                    },
+                  ],
+                },
+              ],
+            };
+          }),
+        );
+        const start = yield* f.readiness({action: 'start', callerCwd: f.root, file: 'source.ts', language: 'go'});
+        if (start.status !== 'ok' || !start.job) throw new Error('Missing private readiness job');
+        let state = yield* f.readiness({action: 'status', callerCwd: f.root, job: start.job});
+        for (let poll = 0; poll < 20 && state.status === 'ok' && state.progress.state !== 'ready'; poll++) {
+          yield* Effect.sleep(5);
+          state = yield* f.readiness({action: 'status', callerCwd: f.root, job: start.job});
+        }
+        expect(state).toMatchObject({status: 'ok', progress: {state: 'ready'}});
+        const common = {version: 1, callerCwd: f.root, maxBytes: 8192};
+        const result = yield* runSemanticAgentChangeWith(f.host, f.config, {
+          ...common,
+          action: 'prepare',
+          file: 'source.ts',
+          language: 'go',
+          operation: 'rename',
+          position: {line: 0, character: 13},
+          newName: 'renamed',
+        });
+        expect(result).toMatchObject({
+          status: 'ok',
+          targetCount: 1,
+          complete: 'all-provider-returned-edits',
+          applicable: false,
+          writerAuthorityRequired: true,
+        });
+        expect(result).not.toHaveProperty('writer');
+        const {handle, page} = yield* Schema.decodeUnknownEffect(
+          Schema.Struct({
+            handle: SemanticProposalHandle,
+            page: Schema.Struct({
+              digest: Schema.String,
+              next: Schema.NullOr(Schema.Finite),
+              chunks: Schema.Array(Schema.Struct({kind: Schema.String, text: Schema.String})),
+            }),
+          }),
+        )(result);
+        expect(page.digest).toBe(handle.digest);
+        expect(page.next).toBeNull();
+        const chunkText = (kind: string) =>
+          EffectArray.join(
+            EffectArray.map(
+              EffectArray.filter(page.chunks, chunk => chunk.kind === kind),
+              chunk => chunk.text,
+            ),
+            '',
+          );
+        const rawManifest: unknown = JSON.parse(chunkText('manifest'));
+        const manifest = yield* Schema.decodeUnknownEffect(
+          Schema.Struct({
+            targets: Schema.Array(
+              Schema.Struct({
+                observation: Schema.Struct({uri: Schema.String}),
+                precondition: Schema.Struct({rawDigest: Schema.String}),
+                edits: Schema.Array(Schema.Struct({newText: Schema.String})),
+              }),
+            ),
+          }),
+        )(rawManifest);
+        expect(manifest.targets).toHaveLength(1);
+        expect(manifest.targets[0].observation.uri).toBe((yield* f.path.toFileUrl(f.file)).href);
+        expect(manifest.targets[0].precondition.rawDigest).toBe(sha256HexSync(before));
+        expect(manifest.targets[0].edits).toEqual([{newText: 'renamed'}]);
+        expect(chunkText('before')).toBe(before);
+        expect(chunkText('after')).toBe('export const renamed = 42;\n');
+        const status = yield* runSemanticAgentChangeWith(f.host, f.config, {
+          ...common,
+          action: 'status',
+          handle,
+          offset: 0,
+        });
+        const preflight = yield* runSemanticAgentChangeWith(f.host, f.config, {...common, action: 'preflight', handle});
+        for (const reply of [status, preflight]) {
+          expect(reply).toMatchObject({status: 'ok', applicable: false, writerAuthorityRequired: true});
+          expect(reply).not.toHaveProperty('writer');
+        }
+        expect(status).toHaveProperty('page.digest', handle.digest);
+        const denied = yield* runSemanticAgentChangeWith(f.host, f.config, {...common, action: 'apply', handle});
+        expect(denied).toMatchObject({status: 'invalid-request', applicable: false});
+        expect(f.attachedViews).toHaveLength(2);
+        expect(f.attachedViews[1].view).toEqual(f.attachedViews[0].view);
+        expect(yield* f.fs.readFileString(f.file)).toBe(before);
+      }).pipe(provideTestLayer(queryIo), TestClock.withLive),
+  );
+  effectIt.effect('saved-disk readiness and preview use one private attachment namespace without granting writes', () =>
+    Effect.gen(function* () {
+      const f = yield* ownedBufferFixture;
+      const start = yield* f.readiness({action: 'start', callerCwd: f.root, file: 'source.ts', language: 'go'});
+      if (start.status !== 'ok' || !start.job) throw new Error('Missing private readiness job');
+      let state = yield* f.readiness({action: 'status', callerCwd: f.root, job: start.job});
+      for (let poll = 0; poll < 20 && state.status === 'ok' && state.progress.state !== 'ready'; poll++) {
+        yield* Effect.sleep(5);
+        state = yield* f.readiness({action: 'status', callerCwd: f.root, job: start.job});
+      }
+      expect(state).toMatchObject({status: 'ok', progress: {state: 'ready'}});
+      const initial = f.attachedViews[0];
+      const preview = yield* runSemanticAgentChangeWith(f.host, f.config, {
+        version: 1,
+        action: 'prepare',
+        callerCwd: f.root,
+        file: 'source.ts',
+        language: 'go',
+        operation: 'rename',
+        position: {line: 0, character: 13},
+        newName: 'renamed',
+      });
+      expect(preview).toMatchObject({status: 'unsupported', reason: 'Provider preparation unavailable'});
+      expect(preview).not.toHaveProperty('handle');
+      expect(preview).not.toHaveProperty('writer');
+      expect(f.attachedViews).toHaveLength(2);
+      expect(f.attachedViews[1].view).toEqual(initial.view);
+      expect(f.attachedViews[1].content).toBe(initial.content);
+      expect(f.startupControls()).toBe(1);
+      expect(yield* f.fs.readFileString(f.file)).toBe('export const answer = 42;\n');
+    }).pipe(provideTestLayer(queryIo), TestClock.withLive),
+  );
+
   effectIt.effect(
     'isolates conflicting text, verifies possession, fences updates/cursors and preserves compiler context',
     () =>

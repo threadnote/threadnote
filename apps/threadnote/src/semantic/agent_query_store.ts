@@ -14,7 +14,7 @@ import type {SemanticStartupControl} from './readiness_jobs.js';
 import type {makeSemanticCoordinator} from './coordinator.js';
 import {readBounded} from './fingerprint.js';
 import {LspFault} from './lsp_transport.js';
-import {SemanticSessionFault} from './provider.js';
+import {SemanticSessionFault, type SemanticLanguage} from './provider.js';
 
 interface RetainedQuery {
   readonly binding: string;
@@ -45,6 +45,15 @@ export const makeSemanticAgentDiskQueries = Effect.fn('semantic.agentDiskQueries
     control?: SemanticStartupControl,
     expectedContent?: string,
   ) {
+    const project = yield* path.fromFileUrl(new URL(request.project));
+    if (
+      !(project === root || EffectString.startsWith(root + path.sep)(project)) ||
+      !EffectString.startsWith(project + path.sep)(file) ||
+      EffectString.split(path.sep)(file).includes('.git') ||
+      (yield* fs.realPath(project)) !== project ||
+      (yield* fs.realPath(file)) !== file
+    )
+      return yield* SemanticSessionFault.make({reason: 'stale'});
     const bytes = yield* readBounded(file, 4 * 1024 * 1024);
     const text = yield* Effect.try({
       try: () => new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(bytes),
@@ -171,6 +180,24 @@ export const makeSemanticAgentDiskQueries = Effect.fn('semantic.agentDiskQueries
     return yield* store.retainAndFirstPage(request.query, outcome, budget, clock.currentTimeMillisUnsafe());
   });
   return {
+    attachDisk: (seed: Observation, text: string, language: SemanticLanguage, environment?: string) =>
+      Effect.gen(function* () {
+        const fixed = yield* Schema.decodeEffect(Observation)(seed);
+        if (
+          fixed.worktree !== worktree ||
+          fixed.view.kind !== 'disk' ||
+          fixed.provider.id !== semanticHostSelection[language].provider ||
+          sha256HexSync(text) !== fixed.content
+        )
+          return yield* SemanticSessionFault.make({reason: 'conflict'});
+        const file = yield* path.fromFileUrl(new URL(fixed.uri));
+        return yield* attachDisk(
+          {project: fixed.project, uri: fixed.uri, language, environment},
+          file,
+          undefined,
+          fixed.content,
+        );
+      }),
     capture: (request: SemanticReadinessSource) =>
       Effect.gen(function* () {
         const project = yield* path.fromFileUrl(new URL(request.project));
