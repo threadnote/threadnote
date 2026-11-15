@@ -44,6 +44,9 @@ export interface TaskPosting {
   readonly eligible: number;
   readonly transfer_valid?: number;
   readonly row_valid?: number;
+  readonly accounting_only?: number;
+  readonly examined_count?: number;
+  readonly posting_cap_reached?: number;
 }
 export interface TaskCandidate {
   readonly id: string;
@@ -65,6 +68,7 @@ export function rankTaskPostings(
   const scores = new Map<string, number>();
   for (const row of rows) {
     if (
+      row.accounting_only === 1 ||
       row.row_valid === 0 ||
       row.eligible !== 1 ||
       !ID.test(row.id) ||
@@ -346,12 +350,20 @@ export const discoverCodeGraphTask = Effect.fn('codeGraph.discoverTask')(functio
         sql.unsafe<TaskPosting>(statement.text, statement.parameters),
         postingLimit * POSTING_BYTES,
       );
-      if (EffectArray.some(postings, row => row.transfer_valid !== 1 || row.row_valid !== 1))
+      if (
+        EffectArray.some(
+          postings,
+          row => row.accounting_only !== 1 && (row.transfer_valid !== 1 || row.row_valid !== 1),
+        )
+      )
         gaps.add('task-posting-metadata-omitted');
-      counters[origin === 'body' ? 'bodyPostings' : 'metadataPostings'] += postings.length;
+      const accounting = EffectArray.findFirst(postings, row => row.accounting_only === 1);
+      const examinedCount = accounting._tag === 'Some' ? (accounting.value.examined_count ?? 0) : postings.length;
+      counters[origin === 'body' ? 'bodyPostings' : 'metadataPostings'] += examinedCount;
       counters[origin === 'body' ? 'bodyMilliseconds' : 'metadataMilliseconds'] +=
         Number((yield* Clock.monotonicTimeNanos) - started) / 1e6;
-      if (postings.length === postingLimit) gaps.add(`task-${origin}-posting-cap-reached`);
+      if (accounting._tag === 'Some' ? accounting.value.posting_cap_reached === 1 : postings.length === postingLimit)
+        gaps.add(`task-${origin}-posting-cap-reached`);
       origins[origin] = rankTaskPostings(postings, origin, input);
     }
     seeds = selectTaskSeeds(origins.metadata, origins.body, seedLimit);

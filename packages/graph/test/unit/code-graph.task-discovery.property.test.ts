@@ -9,6 +9,7 @@ import {PERSISTENT_EXTENSION_TABLES} from '@threadnote/graph/store/schema/contra
 import {
   taskBoundedText,
   taskPostingStatement,
+  taskPostingV2Statement,
   taskHeaderStatement,
   taskNodeStatement,
   taskExpansionStatement,
@@ -759,6 +760,69 @@ it('bounds V2 layout metadata before transfer and refuses oversized optional fie
           op.p5 === 0 && ['IsNull', 'NotNull'].includes(program[index + 1]?.opcode) && program[index + 1].p1 === op.p3,
       ),
     ).toEqual([]);
+  } finally {
+    db.close();
+  }
+});
+
+it('charges interleaved V2 owner heads before examining the origin or caller boundary', () => {
+  const db = postingDatabase(true);
+  try {
+    for (const table of PERSISTENT_EXTENSION_TABLES) if (table.group === 'lexical-v2') db.exec(table.createSql);
+    const snapshot = lexicalPhysicalSnapshotIdentity('cgsn_' + EffectString.repeat(40)('a'), 'full');
+    db.query('INSERT INTO snapshots VALUES(?)').run(snapshot);
+    db.query('UPDATE lexical_compact_snapshots SET snapshot_id=? WHERE snapshot_key=2').run(snapshot);
+    db.query("INSERT INTO lexical_compact_terms VALUES(2,2,'pending')").run();
+    db.query('INSERT INTO lexical_v2_formats VALUES(?,2,264,129,129,1,2,129,0)').run(snapshot);
+    const examined: number[] = [];
+    db.function('examined_owner', (scope: number, member: number, weight: number) => {
+      examined.push(scope * 128 + member + 1);
+      return weight;
+    });
+    for (let n = 0; n < 129; n++) {
+      const scope = Math.floor(n / 128);
+      const member = n % 128;
+      db.query('INSERT INTO lexical_v2_members VALUES(2,?,?,?)').run(scope, member, id(n));
+    }
+    for (const origin of ['body', 'metadata'] as const) {
+      db.exec('DELETE FROM lexical_v2_owners');
+      for (let n = 0; n < 129; n++) {
+        const mask = n % 2 === 0 ? (origin === 'body' ? 2 : 1) : 3;
+        db.query('INSERT INTO lexical_v2_owners VALUES(2,2,?,?,?,?)').run(
+          mask,
+          Math.floor(n / 128),
+          n % 128,
+          mask === 2 ? 0 : 1,
+        );
+      }
+      for (const maximum of [1, 3, 128]) {
+        examined.length = 0;
+        const statement = taskPostingV2Statement(
+          snapshot,
+          undefined,
+          [origin === 'body' ? '~body:v1:pending' : 'pending'],
+          maximum,
+        );
+        // Observe the actual owner validation at its native boundary, independently
+        // of output cardinality and the query's own accounting projection.
+        const observed = EffectString.replaceAll(
+          'typeof(o.metadata_weight)',
+          'typeof(examined_owner(o.scope_ordinal,o.member_ordinal,o.metadata_weight))',
+        )(statement.text);
+        const rows = db.query<Record<string, unknown>, (string | number)[]>(observed).all(...statement.parameters);
+        expect(examined.length).toBeLessThanOrEqual(maximum);
+        expect([...new Set(examined)].sort((a, b) => a - b)).toEqual(
+          Array.from({length: maximum === 1 ? 0 : maximum}, (_, n) => n + 1),
+        );
+        const accounting = rows[rows.length - 1];
+        expect(accounting).toMatchObject({accounting_only: 1, examined_count: examined.length, posting_cap_reached: 1});
+        const logical = EffectArray.filter(rows, row => row.accounting_only !== 1);
+        expect(EffectArray.map(logical, row => row.id)).toEqual(
+          Array.from({length: maximum === 1 ? 0 : maximum - 1}, (_, n) => id(n)),
+        );
+        expect(Buffer.byteLength(JSON.stringify(rows))).toBeLessThanOrEqual(maximum * 32768);
+      }
+    }
   } finally {
     db.close();
   }

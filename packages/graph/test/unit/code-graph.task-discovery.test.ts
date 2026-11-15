@@ -997,7 +997,15 @@ effectIt.layer(citationPlatformLayer)(it => {
                       '\n',
                     );
                     const saturated = taskPostingStatement(summary.snapshot.id, undefined, ['pending'], 128);
-                    expect(db.query(saturated.text).all(...saturated.parameters)).toHaveLength(128);
+                    const saturatedRows = db
+                      .query<Record<string, unknown>, (string | number)[]>(saturated.text)
+                      .all(...saturated.parameters);
+                    expect(EffectArray.filter(saturatedRows, row => row.accounting_only !== 1)).toHaveLength(128);
+                    expect(saturatedRows[saturatedRows.length - 1]).toMatchObject({
+                      accounting_only: 1,
+                      examined_count: 128,
+                      posting_cap_reached: 1,
+                    });
                     expect(explain).toContain('MATERIALIZE raw');
                     expect(explain).toContain('SEARCH o USING PRIMARY KEY');
                     expect(explain).not.toMatch(/USE TEMP B-TREE FOR (GROUP BY|ORDER BY)/);
@@ -1344,19 +1352,58 @@ plainIt('seeks a saturated V2 shared group and coalesces owner collisions before
       cursor = [rows[rows.length - 1].term, rows[rows.length - 1].symbol_id];
     }
     expect(observed).toEqual(expected);
+    let examinedHeads = 0;
+    db.function('examined_owner', (weight: number) => {
+      examinedHeads += 1;
+      return weight;
+    });
+    db.function('examined_shared', (scope: number) => {
+      examinedHeads += 1;
+      return scope;
+    });
     for (const origin of ['metadata', 'body']) {
+      examinedHeads = 0;
       const statement = taskPostingV2Statement(
         snapshot,
         undefined,
         [origin === 'body' ? BODY_DISCOVERY_PREFIX + 'pending' : 'pending'],
         128,
       );
-      const rows = db
-        .query<{id: string; weight: number; eligible: number; row_valid: number}, (string | number)[]>(statement.text)
+      const instrumented = EffectString.replaceAll(
+        'typeof(m.scope_ordinal)',
+        'typeof(examined_shared(m.scope_ordinal))',
+      )(
+        EffectString.replaceAll(
+          'typeof(o.metadata_weight)',
+          'typeof(examined_owner(o.metadata_weight))',
+        )(statement.text),
+      );
+      const acquired = db
+        .query<
+          {
+            id: string;
+            weight: number;
+            eligible: number;
+            row_valid: number;
+            accounting_only: number;
+            examined_count: number;
+            posting_cap_reached: number;
+          },
+          (string | number)[]
+        >(instrumented)
         .all(...statement.parameters);
-      expect(rows).toHaveLength(128);
+      const rows = EffectArray.filter(acquired, row => row.accounting_only !== 1);
+      expect(examinedHeads).toBe(128);
+      expect(acquired[acquired.length - 1]).toMatchObject({
+        accounting_only: 1,
+        examined_count: examinedHeads,
+        posting_cap_reached: 1,
+      });
+      // The metadata shared/owner collision is one logical result but two
+      // examined heads. Body has no shared stream and preserves all128 owners.
+      expect(rows).toHaveLength(origin === 'metadata' ? 127 : 128);
       expect(EffectArray.map(rows, row => row.id).sort()).toEqual(
-        EffectArray.map(symbols.slice(0, 128), symbol => symbol.id),
+        EffectArray.map(symbols.slice(0, rows.length), symbol => symbol.id),
       );
       expect(EffectArray.every(rows, row => row.row_valid === 1 && row.eligible === 1)).toBe(true);
       expect(EffectOption.getOrUndefined(EffectArray.findFirst(rows, row => row.id === symbols[0].id))!.weight).toBe(
@@ -1410,7 +1457,10 @@ plainIt('seeks a saturated V2 shared group and coalesces owner collisions before
     // contributor; it must not trigger an unbounded skip/refill loop.
     db.exec('DELETE FROM lexical_v2_members WHERE snapshot_key=1');
     const refused = taskPostingV2Statement(snapshot, undefined, ['pending'], 128);
-    const invalid = db.query(refused.text).all(...refused.parameters);
+    const invalid = EffectArray.filter(
+      db.query<Record<string, unknown>, (string | number)[]>(refused.text).all(...refused.parameters),
+      row => row.accounting_only !== 1,
+    );
     expect(invalid).toHaveLength(1);
     expect(invalid[0]).toMatchObject({id: null, weight: null, row_valid: 0});
   } finally {
