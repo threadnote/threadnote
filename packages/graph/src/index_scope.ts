@@ -1,10 +1,13 @@
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
-import {Effect, Schema} from 'effect';
+import {Context, Effect, Layer, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {ProjectGraphManifest, ProjectManifest} from '@threadnote/workspace/config';
-import type {CodeGraphLanguagePackRegistryShape} from './languages/registry.js';
-import {CodeGraphWorkspaceSchema} from './languages/types.js';
+import {
+  BUILTIN_LANGUAGE_PACK_REGISTRY,
+  CodeGraphLanguagePackRegistry,
+  type CodeGraphLanguagePackRegistryShape,
+} from './languages/registry.js';
 import type {CodeGraphLanguagePackError, CodeGraphWorkspace, CodeGraphWorkspaceProject} from './languages/types.js';
 import {compareCodeUnits} from './ordering.js';
 import type {CodeGraphInventoryFile} from './types.js';
@@ -23,20 +26,85 @@ export interface CodeGraphWorkspaceCatalog {
   readonly workspace: CodeGraphWorkspace;
 }
 
-const isCodeGraphWorkspaceCatalog = Schema.is(
-  Schema.Struct({
-    fingerprint: Schema.String,
-    resolutionContextPaths: Schema.Array(Schema.String),
-    workspace: CodeGraphWorkspaceSchema,
-  }),
-);
-
 const WORKSPACE_CATALOG_CACHE_MAXIMUM = 8;
 const WORKSPACE_CATALOG_CACHE_BYTES = 4 * 1_024 * 1_024;
-const workspaceCatalogs = new WeakMap<
-  CodeGraphLanguagePackRegistryShape,
-  Map<string, {readonly serialized: string; readonly bytes: number}>
->();
+let defaultLayerLanguagePackRegistry: CodeGraphLanguagePackRegistryShape | undefined;
+
+const normalizeLanguagePackCacheBucket = (
+  languagePacks: CodeGraphLanguagePackRegistryShape,
+): Effect.Effect<CodeGraphLanguagePackRegistryShape> => {
+  if (languagePacks === BUILTIN_LANGUAGE_PACK_REGISTRY || languagePacks === defaultLayerLanguagePackRegistry) {
+    return Effect.succeed(BUILTIN_LANGUAGE_PACK_REGISTRY);
+  }
+  if (defaultLayerLanguagePackRegistry !== undefined) {
+    return Effect.succeed(languagePacks);
+  }
+  return Effect.scoped(Layer.build(CodeGraphLanguagePackRegistry.layer)).pipe(
+    Effect.map(context => {
+      defaultLayerLanguagePackRegistry = Context.get(context, CodeGraphLanguagePackRegistry);
+      return languagePacks === defaultLayerLanguagePackRegistry ? BUILTIN_LANGUAGE_PACK_REGISTRY : languagePacks;
+    }),
+  );
+};
+
+export interface LanguagePackLruCache<V> {
+  readonly get: (
+    languagePacks: CodeGraphLanguagePackRegistryShape,
+    key: string | undefined,
+  ) => Effect.Effect<V | undefined>;
+  readonly set: (
+    languagePacks: CodeGraphLanguagePackRegistryShape,
+    key: string | undefined,
+    value: V,
+    bytes: number,
+  ) => Effect.Effect<V>;
+}
+
+export function createLanguagePackLruCache<V>(options: {
+  readonly maxBytes: number;
+  readonly maxEntries: number;
+}): LanguagePackLruCache<V> {
+  const buckets = new WeakMap<
+    CodeGraphLanguagePackRegistryShape,
+    Map<string, {readonly bytes: number; readonly value: V}>
+  >();
+  return {
+    get: (languagePacks, key) =>
+      Effect.gen(function* () {
+        if (key === undefined) return undefined;
+        const bucket = yield* normalizeLanguagePackCacheBucket(languagePacks);
+        const entries = buckets.get(bucket);
+        const existing = entries?.get(key);
+        if (existing === undefined) return undefined;
+        entries!.delete(key);
+        entries!.set(key, existing);
+        return existing.value;
+      }),
+    set: (languagePacks, key, value, bytes) =>
+      key === undefined || bytes > options.maxBytes
+        ? Effect.succeed(value)
+        : normalizeLanguagePackCacheBucket(languagePacks).pipe(
+            Effect.map(bucket => {
+              const entries = buckets.get(bucket) ?? new Map<string, {readonly bytes: number; readonly value: V}>();
+              entries.delete(key);
+              entries.set(key, {bytes, value});
+              let retainedBytes = EffectArray.reduce([...entries.values()], 0, (total, entry) => total + entry.bytes);
+              while (entries.size > options.maxEntries || retainedBytes > options.maxBytes) {
+                const oldest = entries.keys().next().value!;
+                retainedBytes -= entries.get(oldest)!.bytes;
+                entries.delete(oldest);
+              }
+              buckets.set(bucket, entries);
+              return value;
+            }),
+          ),
+  };
+}
+
+const workspaceCatalogs = createLanguagePackLruCache<CodeGraphWorkspaceCatalog>({
+  maxBytes: WORKSPACE_CATALOG_CACHE_BYTES,
+  maxEntries: WORKSPACE_CATALOG_CACHE_MAXIMUM,
+});
 
 export interface ResolvedCodeGraphIndexScope {
   readonly admittedPrefixes: readonly string[];
@@ -120,41 +188,37 @@ export function resolveCodeGraphWorkspaceCatalog(
   ).sort((left, right) => compareCodeUnits(left.path, right.path));
   const fingerprint = workspaceCatalogFingerprint(contexts);
   if (cached?.fingerprint === fingerprint) return Effect.succeed(cached);
-  const retained = workspaceCatalogs.get(languagePacks);
-  const previous = retained?.get(fingerprint);
-  if (previous !== undefined) {
-    retained!.delete(fingerprint);
-    retained!.set(fingerprint, previous);
-    return Effect.sync(() => {
-      const catalog: unknown = JSON.parse(previous.serialized);
-      if (!isCodeGraphWorkspaceCatalog(catalog)) {
-        throw new Error('Cached code graph workspace catalog is invalid.');
-      }
-      return catalog;
-    });
-  }
-  return languagePacks.discoverWorkspace(contexts).pipe(
-    Effect.map(workspace => {
-      const catalog = {fingerprint, resolutionContextPaths: EffectArray.map(contexts, file => file.path), workspace};
-      const serialized = JSON.stringify(catalog);
-      const bytes = serialized.length * 2;
-      if (bytes <= WORKSPACE_CATALOG_CACHE_BYTES) {
-        const entries =
-          workspaceCatalogs.get(languagePacks) ??
-          new Map<string, {readonly serialized: string; readonly bytes: number}>();
-        entries.delete(fingerprint);
-        entries.set(fingerprint, {serialized, bytes});
-        let retainedBytes = EffectArray.reduce([...entries.values()], 0, (total, entry) => total + entry.bytes);
-        while (entries.size > WORKSPACE_CATALOG_CACHE_MAXIMUM || retainedBytes > WORKSPACE_CATALOG_CACHE_BYTES) {
-          const oldest = entries.keys().next().value!;
-          retainedBytes -= entries.get(oldest)!.bytes;
-          entries.delete(oldest);
-        }
-        workspaceCatalogs.set(languagePacks, entries);
-      }
-      return catalog;
-    }),
+  return workspaceCatalogs.get(languagePacks, fingerprint).pipe(
+    Effect.flatMap(previous =>
+      previous !== undefined
+        ? Effect.succeed(cloneWorkspaceCatalog(previous))
+        : languagePacks.discoverWorkspace(contexts).pipe(
+            Effect.flatMap(workspace => {
+              const catalog = freezeWorkspaceCatalogEntries({
+                fingerprint,
+                resolutionContextPaths: EffectArray.map(contexts, file => file.path),
+                workspace,
+              });
+              return workspaceCatalogs
+                .set(languagePacks, fingerprint, catalog, JSON.stringify(catalog).length * 2)
+                .pipe(Effect.map(cloneWorkspaceCatalog));
+            }),
+          ),
+    ),
   );
+}
+
+export function codeGraphProjectScopeIdentity(project: Pick<ProjectManifest, 'graph' | 'uri'>): {
+  readonly definitionDigest: string;
+  readonly scopeKey: string;
+} {
+  return {
+    definitionDigest: digestDefinition(project.graph),
+    scopeKey:
+      project.graph === undefined
+        ? CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY
+        : `code-graph-scope:${sha256HexSync(project.uri)}`,
+  };
 }
 
 export function resolveCodeGraphIndexScope(
@@ -163,9 +227,7 @@ export function resolveCodeGraphIndexScope(
 ): ResolvedCodeGraphIndexScope {
   const graph = project.graph;
   const allProjects = [...catalog.workspace.projects].sort(compareProjects);
-  const definitionDigest = digestDefinition(graph);
-  const scopeKey =
-    graph === undefined ? CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY : `code-graph-scope:${sha256HexSync(project.uri)}`;
+  const {definitionDigest, scopeKey} = codeGraphProjectScopeIdentity(project);
   if (graph === undefined) {
     return resolvedScope({
       admittedPrefixes: [''],
@@ -455,4 +517,43 @@ function compareProjects(left: CodeGraphWorkspaceProject, right: CodeGraphWorksp
     compareCodeUnits(left.resolutionDomain, right.resolutionDomain) ||
     compareCodeUnits(left.id, right.id)
   );
+}
+
+function cloneWorkspaceCatalog(catalog: CodeGraphWorkspaceCatalog): CodeGraphWorkspaceCatalog {
+  return {
+    ...catalog,
+    resolutionContextPaths: [...catalog.resolutionContextPaths],
+    workspace: {
+      ...catalog.workspace,
+      diagnostics: [...catalog.workspace.diagnostics],
+      projects: [...catalog.workspace.projects],
+      workspaces: [...catalog.workspace.workspaces],
+    },
+  };
+}
+
+function freezeWorkspaceCatalogEntries(catalog: CodeGraphWorkspaceCatalog): CodeGraphWorkspaceCatalog {
+  for (const project of catalog.workspace.projects) {
+    Object.freeze(project.dependencies);
+    for (const detail of project.dependencyDetails) Object.freeze(detail);
+    Object.freeze(project.dependencyDetails);
+    if (project.externalDependencies !== undefined) {
+      for (const dependency of project.externalDependencies) Object.freeze(dependency);
+      Object.freeze(project.externalDependencies);
+    }
+    Object.freeze(project.diagnostics);
+    Object.freeze(project.languages);
+    if (project.monikers !== undefined) {
+      for (const moniker of project.monikers) Object.freeze(moniker);
+      Object.freeze(project.monikers);
+    }
+    Object.freeze(project.sourceRoots);
+    Object.freeze(project.workspaceRoots);
+    Object.freeze(project);
+  }
+  for (const workspace of catalog.workspace.workspaces) {
+    Object.freeze(workspace.diagnostics);
+    Object.freeze(workspace);
+  }
+  return catalog;
 }

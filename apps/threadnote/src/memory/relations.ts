@@ -16,6 +16,7 @@ import {
   memoryIdFromIdentityAlias,
 } from '@threadnote/memory/identity-alias';
 import {readMemoryWithRelocations} from '@threadnote/memory/relocation';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   prepareMemoryIdentityAliases,
   resolveMemoryIdentityAliases,
@@ -35,6 +36,12 @@ export interface AuthoredMemoryRelationTarget {
   readonly content: string;
   readonly memoryId?: string;
   readonly uri: string;
+}
+
+export interface OwnedActiveRelationArtifact {
+  readonly memoryId: string;
+  readonly revision: string;
+  readonly state: 'active' | 'archived';
 }
 
 export interface ResolvedAuthoredMemoryRelations {
@@ -139,6 +146,7 @@ export const resolveAuthoredMemoryRelations = Effect.fn('memory.resolveAuthoredR
   inputs: readonly RelationInput[],
   options: {
     readonly allowedUriScopes: readonly string[];
+    readonly ownedActiveArtifacts?: Readonly<Record<string, OwnedActiveRelationArtifact>>;
     readonly sourceMemoryId?: string;
     readonly sourceUri?: string;
   },
@@ -205,22 +213,38 @@ export const resolveAuthoredMemoryRelations = Effect.fn('memory.resolveAuthoredR
     liveTargets,
     (target): target is (typeof liveTargets)[number] & {readonly memoryId: string} => target.memoryId !== undefined,
   );
+  const directlyVerifiedOwnedTargets = new Set<(typeof liveTargets)[number]>();
+  const recallIdentityTargets = EffectArray.filter(identityBearing, target => {
+    const owned = options.ownedActiveArtifacts?.[target.uri];
+    if (
+      owned !== undefined &&
+      owned.state === 'active' &&
+      memoryIdFromIdentityAlias(target.relation.uri) === undefined &&
+      target.uri === target.relation.uri &&
+      owned.memoryId === target.memoryId &&
+      sha256HexSync(target.content) === owned.revision
+    ) {
+      directlyVerifiedOwnedTargets.add(target);
+      return false;
+    }
+    return true;
+  });
   const identityChecks =
-    identityBearing.length === 0
+    recallIdentityTargets.length === 0
       ? []
       : yield* prepareMemoryIdentityAliases(
           config,
-          EffectArray.map(identityBearing, target => memoryIdentityAlias(target.memoryId)),
+          EffectArray.map(recallIdentityTargets, target => memoryIdentityAlias(target.memoryId)),
           allowedUriScopes,
         );
   const identityByMemoryId = new Map(
-    EffectArray.map(identityBearing, (target, index) => [target.memoryId, identityChecks[index]] as const),
+    EffectArray.map(recallIdentityTargets, (target, index) => [target.memoryId, identityChecks[index]] as const),
   );
   const output: MemoryRelation[] = [];
   const targets = new Map<string, AuthoredMemoryRelationTarget>();
   const seen = new Set<string>();
   for (const target of liveTargets) {
-    if (target.memoryId !== undefined) {
+    if (target.memoryId !== undefined && !directlyVerifiedOwnedTargets.has(target)) {
       const identity = identityByMemoryId.get(target.memoryId);
       if (identity === undefined || identity.canonicalUri !== target.uri) {
         return yield* relationError('Relation target identity changed during validation; refresh memory and retry.');

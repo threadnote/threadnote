@@ -18,6 +18,7 @@ import {Command} from 'effect/cli';
 import {SecureRandom} from 'effect/crypto';
 import {it as effectIt} from '@effect/vitest';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
+import {CodeGraphStore} from '@threadnote/graph/store';
 import {
   ResourceStore,
   type ResourceStoreLocation,
@@ -10012,6 +10013,108 @@ effectIt.effect('routes distinct semantic proof inputs through CLI adapters', ()
       pr: 'https://github.com/example/repo/pull/1',
     });
   }).pipe(provideTestLayer(cliTestLayer)),
+);
+
+effectIt.effect(
+  'captures foreground citations at most twice for workflow_task_start and workflow_task_compact_confirm',
+  () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      yield* runCommandEffect('git', ['-C', f.repo, 'add', 'source.ts']);
+      yield* runCommandEffect('git', [
+        '-C',
+        f.repo,
+        '-c',
+        'user.name=Fixture',
+        '-c',
+        'user.email=fixture@example.invalid',
+        'commit',
+        '-m',
+        'Fixture source',
+      ]);
+      const system = yield* SystemInfo;
+      const repo = yield* f.fs.realPath(f.repo);
+      const home = yield* f.fs.realPath(f.home);
+      const config = {...f.config, agentContextHome: home, manifestPath: f.path.join(home, 'manifest.json')};
+      const scopedSystem = {...system, currentDirectory: () => repo, homeDirectory: home};
+      yield* applyDevSkills(config, 'install', {agent: 'codex'}).pipe(Effect.provideService(SystemInfo, scopedSystem));
+      const indexer = yield* CodeGraphIndexer;
+      expect((yield* indexer.index({cwd: repo, threadnoteHome: home})).snapshot.state).toBe('ready');
+
+      const graphStore = yield* CodeGraphStore;
+      let evidenceReads = 0;
+      const observedGraphStore = CodeGraphStore.of({
+        ...graphStore,
+        ...(graphStore.readReadySnapshotCitationEvidence
+          ? {
+              readReadySnapshotCitationEvidence: (...args) =>
+                Effect.sync(() => {
+                  evidenceReads += 1;
+                }).pipe(Effect.andThen(graphStore.readReadySnapshotCitationEvidence!(...args))),
+            }
+          : {}),
+        effectiveSnapshotCitationEvidence: (...args) =>
+          Effect.sync(() => {
+            evidenceReads += 1;
+          }).pipe(Effect.andThen(graphStore.effectiveSnapshotCitationEvidence(...args))),
+      });
+      const countCaptures = <A, E, R>(program: Effect.Effect<A, E, R>) =>
+        Effect.gen(function* () {
+          evidenceReads = 0;
+          const value = yield* program.pipe(Effect.provideService(SystemInfo, scopedSystem));
+          return {value, captures: evidenceReads};
+        });
+
+      const mcp = new EffectMcpServerAdapter('test', '1', 'fixture');
+      yield* Effect.sync(() => {
+        registerWorkflowTaskTool(mcp, config);
+      }).pipe(Effect.provideService(CodeGraphStore, observedGraphStore));
+
+      const started = yield* countCaptures(
+        mcp
+          .invokeTool('workflow_task_start', {
+            featureName: 'Bounded citation count',
+            callerCwd: repo,
+            installationTarget: 'codex',
+            intent: {
+              title: 'Bounded citation count',
+              currentBehavior: 'Foreground compact start captures code citations per child artifact.',
+              desiredChange: 'Foreground compact start reuses opening citations and re-verifies root.',
+              affectedPaths: ['source.ts'],
+              acceptanceCriterion: 'At most two citation captures execute per foreground save.',
+              verification: 'Count snapshot citation evidence reads during foreground save.',
+              eligibilityRationale: 'Single bounded behavior with no open design questions.',
+              eligibility: {status: 'eligible'},
+              review: {required: false, reason: 'Synthetic verification test.'},
+            },
+          })
+          .pipe(Effect.provideService(CodeGraphStore, observedGraphStore)),
+      );
+      const startedResult = object(started.value);
+      expect(startedResult.isError).not.toBe(true);
+      expect(started.captures).toBe(2);
+
+      const structuredStart = object(startedResult.structuredContent);
+      const runId = String(structuredStart.taskRef);
+      const intentHash = String(structuredStart.intentHash);
+
+      const confirmed = yield* countCaptures(
+        mcp
+          .invokeTool('workflow_task_compact_confirm', {
+            runId,
+            callerCwd: repo,
+            presentedIntentHash: intentHash,
+            userResponse: 'Approve exact compact intent.',
+            userDecision: 'approve',
+            baseBranch: 'main',
+          })
+          .pipe(Effect.provideService(CodeGraphStore, observedGraphStore)),
+      );
+      const confirmedResult = object(confirmed.value);
+      expect(confirmedResult.isError).not.toBe(true);
+      expect(confirmed.captures).toBe(2);
+    }).pipe(run),
+  windowsRealGitFixtureTimeout,
 );
 
 effectIt.effect(

@@ -1589,6 +1589,8 @@ const initializeRecallDatabase = Effect.fn('recall.initializeDatabase')(function
       recorded_at TEXT,
       source_size INTEGER NOT NULL CHECK (source_size >= 0),
       authority_policy_key TEXT,
+      memory_id TEXT,
+      content_hash TEXT,
       candidate_json TEXT NOT NULL,
       logical_key TEXT NOT NULL,
       document_length INTEGER NOT NULL CHECK (document_length >= 0),
@@ -1662,7 +1664,7 @@ const initializeRecallDatabase = Effect.fn('recall.initializeDatabase')(function
     )
   `);
   yield* sql.unsafe('CREATE INDEX IF NOT EXISTS documents_uri ON documents(uri)');
-  yield* sql.unsafe('CREATE INDEX IF NOT EXISTS documents_logical_key ON documents(logical_key)');
+  yield* sql.unsafe('CREATE INDEX IF NOT EXISTS documents_logical_key ON documents(logical_key, document_length)');
   yield* RecallIndexIdentity.initializeRecallIdentityIndex(sql);
   yield* sql.unsafe('CREATE INDEX IF NOT EXISTS documents_modified_uri ON documents(source_modified_at DESC, uri)');
   yield* sql.unsafe(

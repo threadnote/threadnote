@@ -314,6 +314,8 @@ export const publishPreparedRecallDatabase = Effect.fn('recall.publishPreparedDa
       recorded_at,
       source_size,
       authority_policy_key,
+      memory_id,
+      content_hash,
       candidate_json,
       logical_key,
       document_length,
@@ -329,6 +331,8 @@ export const publishPreparedRecallDatabase = Effect.fn('recall.publishPreparedDa
       indexed.recorded_at,
       source.source_size,
       source.authority_policy_key,
+      indexed.memory_id,
+      indexed.content_hash,
       indexed.candidate_json,
       indexed.logical_key,
       indexed.document_length,
@@ -440,6 +444,7 @@ export const publishPreparedRecallDatabase = Effect.fn('recall.publishPreparedDa
     ['logical_scope_content_generation', contentGeneration],
     ['initialized', 'true'],
     ['memory_identity_conflict_generation', contentGeneration],
+    ['memory_identity_schema_version', RecallIndexIdentity.RECALL_IDENTITY_COLUMN_SCHEMA_VERSION],
     ['logical_document_count', String(logicalDocumentCount)],
     ['logical_total_document_length', String(logicalTotalDocumentLength)],
     ['oversized_document_count', String(sourceScan.skippedOversizedDocumentCount)],
@@ -471,23 +476,22 @@ export const publishPreparedRecallDatabase = Effect.fn('recall.publishPreparedDa
 const resolveLegacyRecallMemoryLinks = Effect.fn('recall.resolveLegacyMemoryLinks')(function* (
   sql: SqlClient.SqlClient,
 ) {
-  const resolvedTarget = `(SELECT json_extract(target.candidate_json, '$.memoryId')
+  const resolvedTarget = `(SELECT target.memory_id
     FROM temp.${RECALL_REFRESH_SOURCE_TABLE} AS target_source
     INNER JOIN documents AS target ON target.uri = target_source.uri
     WHERE target_source.uri_locator_digest = memory_links.target_locator_digest
-      AND json_type(target.candidate_json, '$.memoryId') = 'text'
+      AND target.memory_id IS NOT NULL
       AND COALESCE(json_extract(target.candidate_json, '$.status'), 'active') = 'active'
-      AND length(json_extract(target.candidate_json, '$.memoryId')) BETWEEN 4 AND 131
-      AND substr(json_extract(target.candidate_json, '$.memoryId'), 1, 3) = 'tn_'
-      AND substr(json_extract(target.candidate_json, '$.memoryId'), 4) NOT GLOB '*[^A-Za-z0-9_-]*'
+      AND length(target.memory_id) BETWEEN 4 AND 131
+      AND substr(target.memory_id, 1, 3) = 'tn_'
+      AND substr(target.memory_id, 4) NOT GLOB '*[^A-Za-z0-9_-]*'
       AND NOT EXISTS (
         SELECT 1 FROM memory_identity_conflicts AS conflict
-        WHERE conflict.memory_id = json_extract(target.candidate_json, '$.memoryId')
+        WHERE conflict.memory_id = target.memory_id
       )
       AND (
         SELECT COUNT(*) FROM documents AS identity_document
-        WHERE json_extract(identity_document.candidate_json, '$.memoryId') =
-          json_extract(target.candidate_json, '$.memoryId')
+        WHERE identity_document.memory_id = target.memory_id
       ) = 1
     ORDER BY target.uri COLLATE BINARY
     LIMIT 1)`;

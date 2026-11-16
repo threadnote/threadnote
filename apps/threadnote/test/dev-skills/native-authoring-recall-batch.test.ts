@@ -7,7 +7,16 @@ import {
   CurrentResourceRecallInvalidationObserver,
   consumeResourceRecallInvalidationReceipt,
 } from '@threadnote/store/resource/recall-invalidation';
+import {ResourceStore} from '@threadnote/store/resource-store';
+import {recordMemoryRelocation} from '@threadnote/memory/relocation';
+import {recallIndexDatabaseFilename, recallIndexStatus} from '@threadnote/recall/index';
+import {decodeNativeAuthoringDocument} from '@threadnote/workflow-automations/authoring';
+import {SystemInfo} from '@threadnote/platform/system';
+import {resolveAuthoredMemoryRelations} from '../../src/memory/relations.js';
 import {makeWorkflowRecallRefresh} from '../../src/workflow_memory/recall_refresh.js';
+import {runWorkflowAutomation} from '../../src/workflow_automation/index.js';
+import {CurrentNativeProgress} from './native-authoring-progress-diagnostics.js';
+import {nativeFixture, provideNative} from './native-automation-fixture.js';
 
 const config = {
   account: 'local',
@@ -395,4 +404,344 @@ it.effect.prop(
       ]);
     }),
   {arbitrary: {runs: 30}},
+);
+
+const batchPlanDocument = () =>
+  decodeNativeAuthoringDocument({
+    format: 'threadnote-native-authoring',
+    schemaVersion: 1,
+    kind: 'plan',
+    id: 'feature',
+    project: 'fixture',
+    title: 'Batched authoring save plan',
+    objective: 'Save multi-artifact authoring state with one end-of-batch lexical refresh.',
+    requirements: [{id: 'req-batch', behavior: 'All child and root artifacts persist under one recall refresh batch.'}],
+    context: {
+      codeRefs: [],
+      evidenceRefs: [],
+      note: 'Synthetic batch verification fixture.',
+    },
+    source: null,
+    sourceFreeReason: 'This fixture exercises recall refresh batching without Git source capture.',
+    current: {
+      summary: 'Mid-batch child relation checks previously rebuilt the lexical index per artifact.',
+      components: ['Native authoring', 'Workflow memory'],
+      contracts: [],
+      diagram: 'flowchart TD\n  Child --> Index --> Root',
+    },
+    target: {
+      summary: 'Unshared journal-owned child relations verify live bytes directly and flush recall once.',
+      components: ['Native authoring', 'Workflow memory', 'Recall refresh batch'],
+      contracts: ['Shared team bindings retain full recall identity admission.'],
+      diagram: 'flowchart TD\n  Child --> DirectCheck --> FlushOnce',
+    },
+    phases: [
+      {
+        id: 'phase-batch',
+        title: 'Batch refresh verification',
+        outcome: 'Save completes with one final lexical refresh.',
+        dependsOn: [],
+        affectedPaths: ['src/authoring.ts'],
+        newPaths: [],
+        contracts: ['Preserve canonical memory_id aliases on stored relations.'],
+        acceptance: [
+          {
+            id: 'accept-batch',
+            criterion: 'No mid-batch prepareDatabase runs on unshared child writes.',
+            verification: 'Observe recall.prepareDatabase spans across runNativeAuthoring save.',
+            requirementIds: ['req-batch'],
+          },
+        ],
+        safeBoundary: 'Keep configured shares on full recall identity admission.',
+      },
+    ],
+    decisions: [
+      {
+        id: 'decision-batch',
+        question: 'When can workflow relation writes bypass mid-batch lexical rebuilds?',
+        selection: 'no-better-alternative',
+        selected:
+          'Only when no shared team roots or external evidence refs exist and targets are active journal-owned artifacts.',
+        alternatives: [],
+        rationale: 'Journal lock + live byte verification proves unique active ownership.',
+        affectedPhases: ['phase-batch'],
+        authority: 'orchestrator',
+      },
+    ],
+    openQuestions: [],
+    review: {required: false, reason: 'Synthetic batch test.'},
+  });
+
+const traceRecallRefreshes = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  Effect.gen(function* () {
+    const progress = yield* CurrentNativeProgress;
+    if (!progress) throw new Error('Expected native progress diagnostics');
+    const before = progress.snapshot().totals;
+    const beforeRefresh = before['recall.ensureDatabaseFresh']?.started ?? 0;
+    const beforeIdentity = before['recall.loadMemoryIdentities']?.started ?? 0;
+    const value = yield* effect;
+    const after = progress.snapshot().totals;
+    return {
+      value,
+      ensureDatabaseFreshCalls: (after['recall.ensureDatabaseFresh']?.started ?? 0) - beforeRefresh,
+      identityAdmissionCalls: (after['recall.loadMemoryIdentities']?.started ?? 0) - beforeIdentity,
+    };
+  });
+
+it.effect(
+  'flushes lexical recall once at batch completion for unshared multi-artifact authoring saves while keeping full recall admission for configured team shares',
+  () =>
+    Effect.gen(function* () {
+      const system = yield* SystemInfo;
+      const runTracedSave = (f: Effect.Success<ReturnType<typeof nativeFixture>>) =>
+        traceRecallRefreshes(
+          runWorkflowAutomation(f.config, {
+            ...f.base('authoring'),
+            command: 'save',
+            document: batchPlanDocument(),
+            ready: false,
+            expectedRevision: null,
+          }).pipe(Effect.provideService(SystemInfo, {...system, currentDirectory: () => f.repo})),
+        );
+
+      const unshared = yield* nativeFixture();
+      yield* unshared.init();
+      const unsharedSave = yield* runTracedSave(unshared);
+      expect(unsharedSave.value).toMatchObject({status: 'ok'});
+      expect(unsharedSave.identityAdmissionCalls).toBe(0);
+      expect(unsharedSave.ensureDatabaseFreshCalls).toBe(1);
+      const unsharedStatus = yield* recallIndexStatus(unshared.config, false);
+      expect(unsharedStatus.ready).toBe(true);
+      expect(unsharedStatus.documentCount).toBeGreaterThanOrEqual(6);
+
+      const shared = yield* nativeFixture();
+      yield* shared.fs.makeDirectory(shared.path.join(shared.home, 'share'), {recursive: true});
+      yield* shared.fs.writeFileString(
+        shared.path.join(shared.home, 'share', 'teams.json'),
+        JSON.stringify({
+          version: 1,
+          teams: {
+            engineering: {
+              remote: 'https://example.invalid/engineering.git',
+              branch: 'main',
+            },
+          },
+        }),
+      );
+      yield* shared.init();
+      const sharedSave = yield* runTracedSave(shared);
+      expect(sharedSave.value).toMatchObject({status: 'ok'});
+      expect(sharedSave.identityAdmissionCalls).toBeGreaterThan(0);
+      expect(sharedSave.ensureDatabaseFreshCalls).toBeGreaterThan(1);
+      const sharedStatus = yield* recallIndexStatus(shared.config, false);
+      expect(sharedStatus.ready).toBe(true);
+    }).pipe(TestClock.withLive, provideNative),
+);
+
+const SavedWriteResponseSchema = Schema.Struct({
+  artifact: Schema.Struct({
+    uri: Schema.String,
+    memoryId: Schema.String,
+    revision: Schema.String,
+  }),
+});
+
+it.effect(
+  'enforces commit-fence recall admission for shared bindings, memory_id aliases, and relocated URIs targeting active journal-owned artifacts',
+  () =>
+    Effect.gen(function* () {
+      const writeChild = (f: Effect.Success<ReturnType<typeof nativeFixture>>, operationId: string) =>
+        f
+          .call({
+            ...f.base('write'),
+            operationId,
+            artifactKey: operationId,
+            role: 'authoring-child',
+            nameHint: operationId,
+            expectedRevision: null,
+            body: `# ${operationId}\n\nOwned active target.\n`,
+            storageKind: 'durable',
+          })
+          .pipe(Effect.map(value => Schema.decodeUnknownSync(SavedWriteResponseSchema)(value).artifact));
+
+      const withStaleInjectionAtCommitFence = <A, E, R>(
+        f: Effect.Success<ReturnType<typeof nativeFixture>>,
+        effect: Effect.Effect<A, E, R>,
+      ) =>
+        Effect.gen(function* () {
+          const store = yield* ResourceStore;
+          const stalePath = f.path.join(f.home, 'indexes', 'lexical', recallIndexDatabaseFilename(false)) + '.stale';
+          const injectedStore = ResourceStore.of({
+            ...store,
+            writeChecked: (location, uri, content, options, beforeCommit) =>
+              store.writeChecked(
+                location,
+                uri,
+                content,
+                options,
+                f.fs
+                  .writeFileString(stalePath, 'external-commit-fence-stale')
+                  .pipe(Effect.orDie, Effect.andThen(beforeCommit ?? Effect.void)),
+              ),
+          });
+          return yield* effect.pipe(
+            Effect.provideService(ResourceStore, injectedStore),
+            Effect.ensuring(f.fs.remove(stalePath, {force: true}).pipe(Effect.ignore)),
+          );
+        });
+
+      // 1. Direct canonical URI on unshared binding bypasses commit-fence readCut, whereas shared binding enforces it.
+      const unshared = yield* nativeFixture();
+      yield* unshared.init();
+      const unsharedTarget = yield* writeChild(unshared, 'owned-target');
+      const unsharedDirect = yield* withStaleInjectionAtCommitFence(
+        unshared,
+        unshared
+          .call({
+            ...unshared.base('write'),
+            operationId: 'direct-owned-link',
+            artifactKey: 'direct-owned-link',
+            role: 'authoring-child',
+            nameHint: 'direct-owned-link',
+            expectedRevision: null,
+            body: '# Direct link\n\nLinks directly to owned URI.\n',
+            storageKind: 'durable',
+            relations: [{type: 'references', uri: unsharedTarget.uri}],
+          })
+          .pipe(Effect.result),
+      );
+      expect(Result.isSuccess(unsharedDirect)).toBe(true);
+
+      const shared = yield* nativeFixture();
+      yield* shared.fs.makeDirectory(shared.path.join(shared.home, 'share'), {recursive: true});
+      yield* shared.fs.writeFileString(
+        shared.path.join(shared.home, 'share', 'teams.json'),
+        JSON.stringify({
+          version: 1,
+          teams: {
+            engineering: {
+              remote: 'https://example.invalid/engineering.git',
+              branch: 'main',
+            },
+          },
+        }),
+      );
+      yield* shared.init();
+      const sharedTarget = yield* writeChild(shared, 'owned-target');
+      const sharedFenceFailure = yield* withStaleInjectionAtCommitFence(
+        shared,
+        shared
+          .call({
+            ...shared.base('write'),
+            operationId: 'shared-owned-link',
+            artifactKey: 'shared-owned-link',
+            role: 'authoring-child',
+            nameHint: 'shared-owned-link',
+            expectedRevision: null,
+            body: '# Shared link\n\nRequires commit-fence recall admission.\n',
+            storageKind: 'durable',
+            relations: [{type: 'references', uri: sharedTarget.uri}],
+          })
+          .pipe(Effect.result),
+      );
+      expect(Result.isFailure(sharedFenceFailure)).toBe(true);
+      if (Result.isFailure(sharedFenceFailure)) {
+        expect(sharedFenceFailure.failure).toMatchObject({code: 'admission-busy'});
+      }
+      expect(yield* shared.call({...shared.base('recover'), operationId: 'shared-owned-link'})).toMatchObject({
+        status: 'ok',
+      });
+
+      // 2. Identity alias (threadnote://memory/tn_...) targeting an active journal-owned artifact never takes directOwnedBypass or isDirectlyVerifiedOwned.
+      const aliasUri = `threadnote://memory/${unsharedTarget.memoryId}`;
+      const targetContent = yield* unshared.store.read(unshared.location, unsharedTarget.uri);
+      const ownedActiveArtifacts = {
+        [unsharedTarget.uri]: {
+          memoryId: unsharedTarget.memoryId,
+          revision: unsharedTarget.revision,
+          state: 'active' as const,
+        },
+      };
+      const directRelationTrace = yield* traceRecallRefreshes(
+        resolveAuthoredMemoryRelations(unshared.config, [{type: 'references', uri: unsharedTarget.uri}], {
+          allowedUriScopes: [`threadnote://user/${unshared.config.user}/memories`],
+          ownedActiveArtifacts,
+        }),
+      );
+      expect(directRelationTrace.identityAdmissionCalls).toBe(0);
+
+      const aliasRelationTrace = yield* traceRecallRefreshes(
+        resolveAuthoredMemoryRelations(unshared.config, [{type: 'references', uri: aliasUri}], {
+          allowedUriScopes: [`threadnote://user/${unshared.config.user}/memories`],
+          ownedActiveArtifacts,
+        }),
+      );
+      expect(aliasRelationTrace.identityAdmissionCalls).toBeGreaterThan(0);
+
+      const aliasFenceFailure = yield* withStaleInjectionAtCommitFence(
+        unshared,
+        unshared
+          .call({
+            ...unshared.base('write'),
+            operationId: 'alias-owned-link',
+            artifactKey: 'alias-owned-link',
+            role: 'authoring-child',
+            nameHint: 'alias-owned-link',
+            expectedRevision: null,
+            body: '# Alias link\n\nUses memory_id alias to owned artifact.\n',
+            storageKind: 'durable',
+            relations: [{type: 'references', uri: aliasUri}],
+          })
+          .pipe(Effect.result),
+      );
+      expect(Result.isFailure(aliasFenceFailure)).toBe(true);
+      if (Result.isFailure(aliasFenceFailure)) {
+        expect(aliasFenceFailure.failure).toMatchObject({code: 'admission-busy'});
+      }
+      expect(yield* unshared.call({...unshared.base('recover'), operationId: 'alias-owned-link'})).toMatchObject({
+        status: 'ok',
+      });
+
+      // 3. Relocated URI targeting an active journal-owned artifact never takes directOwnedBypass or isDirectlyVerifiedOwned.
+      const relocatedFromUri = `threadnote://user/${unshared.config.user}/memories/durable/projects/fixture/relocated-origin.md`;
+      const recordedRelocation = yield* recordMemoryRelocation(unshared.config, {
+        fromContent: targetContent,
+        fromUri: relocatedFromUri,
+        toContent: targetContent,
+        toUri: unsharedTarget.uri,
+      });
+      expect(recordedRelocation).toBe(true);
+
+      const relocatedRelationTrace = yield* traceRecallRefreshes(
+        resolveAuthoredMemoryRelations(unshared.config, [{type: 'references', uri: relocatedFromUri}], {
+          allowedUriScopes: [`threadnote://user/${unshared.config.user}/memories`],
+          ownedActiveArtifacts,
+        }),
+      );
+      expect(relocatedRelationTrace.identityAdmissionCalls).toBeGreaterThan(0);
+
+      const relocatedFenceFailure = yield* withStaleInjectionAtCommitFence(
+        unshared,
+        unshared
+          .call({
+            ...unshared.base('write'),
+            operationId: 'relocated-owned-link',
+            artifactKey: 'relocated-owned-link',
+            role: 'authoring-child',
+            nameHint: 'relocated-owned-link',
+            expectedRevision: null,
+            body: '# Relocated link\n\nUses relocated URI to owned artifact.\n',
+            storageKind: 'durable',
+            relations: [{type: 'references', uri: relocatedFromUri}],
+          })
+          .pipe(Effect.result),
+      );
+      expect(Result.isFailure(relocatedFenceFailure)).toBe(true);
+      if (Result.isFailure(relocatedFenceFailure)) {
+        expect(relocatedFenceFailure.failure).toMatchObject({code: 'admission-busy'});
+      }
+      expect(yield* unshared.call({...unshared.base('recover'), operationId: 'relocated-owned-link'})).toMatchObject({
+        status: 'ok',
+      });
+    }).pipe(TestClock.withLive, provideNative),
 );

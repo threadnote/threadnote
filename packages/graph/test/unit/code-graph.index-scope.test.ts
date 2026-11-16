@@ -8,8 +8,10 @@ import {
   forwardDependencyClosure,
   previewCodeGraphIndexScope,
   resolveCodeGraphIndexScope,
+  resolveCodeGraphWorkspaceCatalog,
   type CodeGraphWorkspaceCatalog,
 } from '@threadnote/graph/index_scope';
+import {BUILTIN_LANGUAGE_PACK_REGISTRY, CodeGraphLanguagePackRegistry} from '@threadnote/graph/languages/registry';
 import type {CodeGraphWorkspaceProject} from '@threadnote/graph/languages/types';
 import type {CodeGraphInventoryFile} from '@threadnote/graph/types';
 import {discoverBazelWorkspace, discoverManifestWorkspace} from '@threadnote/graph/workspace';
@@ -523,5 +525,91 @@ describe('code graph index scope', () => {
       expect(after.includedProjectIds).not.toContain('reverse');
     },
     {fastCheck: {numRuns: 60}},
+  );
+
+  it.effect(
+    'returns shallow-cloned workspace catalogs on warm hits without JSON.parse or re-discovery while isolating custom registries',
+    () =>
+      Effect.Effect.gen(function* () {
+        let discoveries = 0;
+        const registry = {
+          ...BUILTIN_LANGUAGE_PACK_REGISTRY,
+          discoverWorkspace: (files: readonly CodeGraphInventoryFile[]) => {
+            discoveries += 1;
+            return BUILTIN_LANGUAGE_PACK_REGISTRY.discoverWorkspace(files);
+          },
+        };
+        const inputs = [
+          workspaceFile('package.json', JSON.stringify({private: true, workspaces: ['apps/*']}), 'npm-manifest'),
+          workspaceFile('apps/web/package.json', JSON.stringify({name: '@fixture/web'}), 'npm-manifest'),
+        ];
+
+        const cold = yield* resolveCodeGraphWorkspaceCatalog(inputs, registry);
+        const expected = structuredClone(cold);
+        expect(discoveries).toBe(1);
+        expect(Object.isFrozen(cold.workspace.projects[0])).toBe(true);
+        expect(Reflect.set(cold.resolutionContextPaths, String(cold.resolutionContextPaths.length), 'mutated')).toBe(
+          true,
+        );
+
+        let jsonParseCalls = 0;
+        const warm = yield* Effect.Effect.acquireUseRelease(
+          Effect.Effect.sync(() => {
+            const originalParse = JSON.parse;
+            JSON.parse = ((...args: Parameters<typeof JSON.parse>) => {
+              jsonParseCalls += 1;
+              return originalParse(...args);
+            }) as typeof JSON.parse;
+            return originalParse;
+          }),
+          () => resolveCodeGraphWorkspaceCatalog(inputs, registry),
+          originalParse =>
+            Effect.Effect.sync(() => {
+              JSON.parse = originalParse;
+            }),
+        );
+        expect(discoveries).toBe(1);
+        expect(jsonParseCalls).toBe(0);
+        expect(warm).toEqual(expected);
+
+        // Built-in singleton and default layer singleton share one cache bucket, while spread overrides stay isolated.
+        const uniqueInputs = [
+          workspaceFile('package.json', JSON.stringify({name: '@fixture/shared-bucket-test'}), 'npm-manifest'),
+        ];
+        const layerRegistry = Effect.Context.get(
+          yield* Effect.Effect.scoped(Effect.Layer.build(CodeGraphLanguagePackRegistry.layer)),
+          CodeGraphLanguagePackRegistry,
+        );
+        const fromBuiltin = yield* resolveCodeGraphWorkspaceCatalog(uniqueInputs, BUILTIN_LANGUAGE_PACK_REGISTRY);
+        let layerParseCalls = 0;
+        const fromLayer = yield* Effect.Effect.acquireUseRelease(
+          Effect.Effect.sync(() => {
+            const originalParse = JSON.parse;
+            JSON.parse = ((...args: Parameters<typeof JSON.parse>) => {
+              layerParseCalls += 1;
+              return originalParse(...args);
+            }) as typeof JSON.parse;
+            return originalParse;
+          }),
+          () => resolveCodeGraphWorkspaceCatalog(uniqueInputs, layerRegistry),
+          originalParse =>
+            Effect.Effect.sync(() => {
+              JSON.parse = originalParse;
+            }),
+        );
+        expect(layerParseCalls).toBe(0);
+        expect(fromLayer).toEqual(fromBuiltin);
+
+        let customMatchDiscoveries = 0;
+        const customMatchRegistry = {
+          ...BUILTIN_LANGUAGE_PACK_REGISTRY,
+          discoverWorkspace: (files: readonly CodeGraphInventoryFile[]) => {
+            customMatchDiscoveries += 1;
+            return BUILTIN_LANGUAGE_PACK_REGISTRY.discoverWorkspace(files);
+          },
+        };
+        yield* resolveCodeGraphWorkspaceCatalog(uniqueInputs, customMatchRegistry);
+        expect(customMatchDiscoveries).toBe(1);
+      }),
   );
 });

@@ -94,7 +94,7 @@ export function selectRecallDocumentRowsByMemoryIds(
           `SELECT d.id, d.uri, d.candidate_json
            FROM documents AS d
            WHERE ${scope.sql}
-             AND json_extract(d.candidate_json, '$.memoryId') IN (${parameters})
+             AND d.memory_id IN (${parameters})
            ORDER BY d.uri${rowLimit === undefined ? '' : ' LIMIT ?'}`,
           [...scope.params, ...batch, ...(rowLimit === undefined ? [] : [rowLimit - rows.length])],
         )),

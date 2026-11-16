@@ -1,5 +1,7 @@
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {loadRecallMemoryIdentities, withRecallIdentityPreparation} from '@threadnote/recall/index';
+import {memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
+import {parseResourceId} from '@threadnote/store/resource-id';
 import {nativeRequestSchema} from './request_schema.js';
 import {nativeWorkflowFeatureVersions} from './features.js';
 import {Effect} from 'effect';
@@ -18,6 +20,7 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {withNativeWorkflowMemorySession} from '../workflow_memory/index.js';
 import {resolveWorkflowBinding} from '../workflow_memory/profile.js';
 import {bindWorkflow, inspectWorkflowJournal, withWorkflowLock} from '../workflow_memory/journal.js';
+import {readWorkflowSharedRoots} from '../workflow_memory/scopes.js';
 import {stableJson, type WorkflowBinding} from '../workflow_memory/protocol.js';
 import {makeWorkflowMemoryAdapter, nativeWorkflowError, workflowWriteRequest} from './memory.js';
 import {makeWorkflowGraphAdapter} from './graph.js';
@@ -294,6 +297,7 @@ const resumeWrite = (memory: Memory, intent: WorkflowWriteIntent) =>
 const save = Effect.fn('workflowAutomation.save')(function* (
   config: RuntimeConfig,
   stored: Stored,
+  binding: WorkflowBinding,
   memory: Memory,
   request: WriteRequest,
 ) {
@@ -311,10 +315,33 @@ const save = Effect.fn('workflowAutomation.save')(function* (
   );
   if (existing && existing.intentDigest !== digest)
     return yield* issue('operation-intent-conflict', 'This operationId already belongs to different native intent.');
-  if ((intent.relations?.length ?? 0) > 0 || (intent.evidenceRefs?.length ?? 0) > 0)
-    yield* loadRecallMemoryIdentities(config, {allowedUriScopes: [], memoryIds: []}).pipe(
-      withRecallIdentityPreparation,
-    );
+  if ((intent.relations?.length ?? 0) > 0 || (intent.evidenceRefs?.length ?? 0) > 0) {
+    const ownedCandidate =
+      (intent.evidenceRefs?.length ?? 0) === 0 &&
+      !stored.state.team &&
+      (intent.relations?.length ?? 0) > 0 &&
+      (() => {
+        const activeOwnedUris = new Set<string>();
+        for (const operation of stored.state.operations) {
+          if (operation.status !== 'verified' || !operation.artifact) continue;
+          if (operation.artifact.state === 'active') activeOwnedUris.add(operation.artifact.uri);
+          else activeOwnedUris.delete(operation.artifact.uri);
+        }
+        return EffectArray.every(intent.relations ?? [], relation => {
+          try {
+            const canonical = parseResourceId(EffectString.trim(relation.uri)).canonicalUri;
+            return memoryIdFromIdentityAlias(canonical) === undefined && activeOwnedUris.has(canonical);
+          } catch {
+            return false;
+          }
+        });
+      })();
+    const sharedRoots = ownedCandidate ? yield* readWorkflowSharedRoots(config, binding) : [];
+    if (!ownedCandidate || sharedRoots.length > 0)
+      yield* loadRecallMemoryIdentities(config, {allowedUriScopes: [], memoryIds: []}).pipe(
+        withRecallIdentityPreparation,
+      );
+  }
   if (request.action === 'preflight' && existing) {
     if (existing.status !== 'verified' || !existing.artifact)
       return yield* issue(
@@ -655,10 +682,15 @@ const runBound = Effect.fn('workflowAutomation.bound')(function* (
           artifact: yield* memory.read(binding.bindingId, request.uri, request.evidenceRefs),
         };
       if (request.action === 'recover') return yield* recover(config, stored, memory, request.operationId);
-      return yield* save(config, stored, memory, request);
+      return yield* save(config, stored, binding, memory, request);
     }),
   );
 });
+
+const ensureWorkflowReadCache = <A, E, R>(program: Effect.Effect<A, E, R>) =>
+  Effect.gen(function* () {
+    return (yield* CurrentWorkflowReadCache) !== undefined ? yield* program : yield* withWorkflowReadCache(program);
+  });
 
 const runCoreNative = Effect.fn('workflowAutomation.run')(function* (config: RuntimeConfig, input: unknown) {
   const request = yield* Effect.try({try: () => decodeNativeWorkflowRequest(input), catch: nativeWorkflowError});
@@ -698,7 +730,7 @@ const runCoreNative = Effect.fn('workflowAutomation.run')(function* (config: Run
     return {...version, status: 'ok' as const, graph: yield* graph.ready(binding.repo)};
   }
   return yield* withNativeWorkflowLock(config, request.runId, false, runBound(config, request));
-});
+}, ensureWorkflowReadCache);
 
 const dispatchNative = Effect.fn('workflowAutomation.dispatch')(function* (
   config: RuntimeConfig,
@@ -807,11 +839,13 @@ export const readNativeTaskInspection = (
   detail: 'summary' | 'packet',
   outputKey?: string,
 ) =>
-  withNativeWorkflowLock(
-    config,
-    runId,
-    false,
-    runBound(config, {...version, action: 'inspect', runId, generation}, detail, outputKey),
+  ensureWorkflowReadCache(
+    withNativeWorkflowLock(
+      config,
+      runId,
+      false,
+      runBound(config, {...version, action: 'inspect', runId, generation}, detail, outputKey),
+    ),
   ).pipe(
     withNativeFileLockWaitBudget,
     Effect.catchDefect(error => Effect.fail(nativeWorkflowError(error))),

@@ -593,10 +593,10 @@ export function insertIndexedRecallSources(sql: SqlClient.SqlClient, indexedSour
     yield* sql.unsafe(
       `INSERT INTO temp.${RECALL_REFRESH_INDEXED_DOCUMENT_TABLE} (
         uri, project, approved_authoritative, workspace_scope, recorded_at,
-        candidate_json, logical_key, document_length, exact_search_text,
+        memory_id, content_hash, candidate_json, logical_key, document_length, exact_search_text,
         memory_links_json, memory_links_truncated
       ) VALUES ${EffectArray.join(
-        EffectArray.map(indexedSources, () => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'),
+        EffectArray.map(indexedSources, () => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'),
         ', ',
       )}`,
       EffectArray.flatMap(indexedSources, indexed => [
@@ -605,6 +605,8 @@ export function insertIndexedRecallSources(sql: SqlClient.SqlClient, indexedSour
         recallApprovedAuthoritative(indexed.candidate.authority, indexed.candidate.trust) ? 1 : 0,
         normalizeRecallWorkspaceScope(indexed.candidate.fields?.workspaceScope) ?? null,
         normalizedRecallRecordedAt(indexed.candidate.timestamp),
+        typeof indexed.candidate.memoryId === 'string' ? indexed.candidate.memoryId : null,
+        typeof indexed.candidate.contentHash === 'string' ? indexed.candidate.contentHash : null,
         JSON.stringify(indexed.candidate),
         recallCandidateLogicalCorpusKey(indexed.candidate),
         indexed.documentLength,
@@ -860,7 +862,8 @@ function prepareRecallSourceScan(sql: SqlClient.SqlClient) {
     yield* sql.unsafe(`CREATE TEMP TABLE ${RECALL_REFRESH_INDEXED_DOCUMENT_TABLE} (
       uri TEXT PRIMARY KEY NOT NULL, project TEXT,
       approved_authoritative INTEGER NOT NULL CHECK (approved_authoritative IN (0, 1)),
-      workspace_scope TEXT, recorded_at TEXT, candidate_json TEXT NOT NULL, logical_key TEXT NOT NULL,
+      workspace_scope TEXT, recorded_at TEXT, memory_id TEXT, content_hash TEXT,
+      candidate_json TEXT NOT NULL, logical_key TEXT NOT NULL,
       document_length INTEGER NOT NULL CHECK (document_length >= 0), exact_search_text TEXT NOT NULL,
       memory_links_json TEXT NOT NULL,
       memory_links_truncated INTEGER NOT NULL CHECK (memory_links_truncated IN (0, 1))) WITHOUT ROWID`);

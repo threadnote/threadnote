@@ -40,6 +40,11 @@ import {withWorkflowReadCache} from '../workflow_memory/read_cache.js';
 import {withWorkflowRecallRefreshBatch} from '../workflow_memory/recall_refresh.js';
 import {readWorkflowSharedRoots} from '../workflow_memory/scopes.js';
 import {assertWorkflowEvidenceSnapshot, verifyWorkflowEvidence} from '../workflow_memory/evidence.js';
+import {
+  CurrentForegroundAuthoringCitationCollector,
+  CurrentForegroundAuthoringCitations,
+  type ForegroundAuthoringCitationCollector,
+} from '../workflow_memory/artifacts.js';
 import {workflowArtifactUri} from '../workflow_memory/naming.js';
 import {nativeWorkflowError} from './memory.js';
 import {assertNativeJobLiveSource, CurrentNativeJobReadyPromotion, CurrentNativeJobSourceView} from './native_jobs.js';
@@ -1105,7 +1110,14 @@ export const runNativeAuthoring = <R>(
       codeRefs: document.context.codeRefs,
       evidenceRefs: document.context.evidenceRefs,
     };
-    yield* call(preview);
+    const admittedJobSource = yield* CurrentNativeJobSourceView;
+    const foregroundCitationCollector: ForegroundAuthoringCitationCollector | undefined =
+      request.command === 'save' && admittedJobSource === undefined ? {} : undefined;
+    yield* foregroundCitationCollector
+      ? call(preview).pipe(
+          Effect.provideService(CurrentForegroundAuthoringCitationCollector, foregroundCitationCollector),
+        )
+      : call(preview);
     if (request.command === 'validate') return validation;
     if (request.command !== 'save')
       return yield* fail('invalid-request', 'This native authoring operation is unsupported.');
@@ -1118,7 +1130,7 @@ export const runNativeAuthoring = <R>(
       call,
       journal.state.binding.repo,
       admitLinkedSpec,
-    );
+    ).pipe(Effect.provideService(CurrentForegroundAuthoringCitations, foregroundCitationCollector?.witness));
     return {
       ...saved,
       requestedReadiness: request.ready ? 'ready' : 'draft',
@@ -1771,6 +1783,7 @@ const saveAuthoring = <R>(
       });
       const artifact = yield* rootWrite.pipe(
         Effect.provideService(CurrentNativeJobReadyPromotion, readiness === 'ready'),
+        Effect.provideService(CurrentForegroundAuthoringCitations, undefined),
       );
       const admitted = yield* CurrentNativeJobSourceView;
       if (admitted && readiness === 'ready') yield* assertNativeJobLiveSource(admitted);

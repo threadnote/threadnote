@@ -165,6 +165,7 @@ export function withWorkflowEvidenceAdmission<A, E, R>(
   use: (
     check: Effect.Effect<void, unknown, ResourceStore | FileSystem.FileSystem | Path.Path>,
   ) => Effect.Effect<A, E, R>,
+  options: {readonly directOwnedBypass?: boolean} = {},
 ) {
   const pinnedRefs = EffectArray.map(refs, ref => ({...ref}));
   const pinnedTargets = EffectArray.map(targets, target => ({
@@ -175,8 +176,9 @@ export function withWorkflowEvidenceAdmission<A, E, R>(
     Effect.andThen(verifyAuthoredMemoryRelationTargetBytes(config, pinnedTargets)),
   );
   if (
-    !pinnedRefs.length &&
-    !EffectArray.some(pinnedTargets, target => !!(target.memoryId && target.allowedUriScopes?.length))
+    (!pinnedRefs.length && options.directOwnedBypass === true) ||
+    (!pinnedRefs.length &&
+      !EffectArray.some(pinnedTargets, target => !!(target.memoryId && target.allowedUriScopes?.length)))
   )
     return use(bytes);
   const prepare = verifyWorkflowEvidence(config, binding, pinnedRefs).pipe(
