@@ -502,15 +502,31 @@ export const captureNativeCycleSource = Effect.fn('workflowAutomation.cycle.capt
     onSome: info => info.platform,
   });
   const objectFormat = head.length === 64 ? 'sha256' : 'sha1';
-  const status = yield* git(root, [
-    'status',
-    '--porcelain=v2',
+  // Status omits ignored files, yet Git still applies an ignored .gitattributes; --directory skips wholly ignored trees.
+  // A failed probe leaves the attribute basis unknown, so it counts as drift.
+  const ignoredGitAttributesProbe = git(root, [
+    'ls-files',
+    '--others',
+    '--ignored',
+    '--exclude-standard',
+    '--directory',
     '-z',
-    '--ignore-submodules=none',
-    '--untracked-files=all',
-  ]);
+    '--',
+    ':(icase,glob).gitattributes',
+    ':(icase,glob)**/.gitattributes',
+  ]).pipe(
+    Effect.map(ignored => EffectArray.some(Effect2.pipe(ignored, EffectString.split('\0')), isGitAttributesPath)),
+    Effect.orElseSucceed(() => true),
+  );
+  const [status, hasIgnoredGitAttributes] = yield* Effect.all(
+    [
+      git(root, ['status', '--porcelain=v2', '-z', '--ignore-submodules=none', '--untracked-files=all']),
+      platform === 'win32' ? Effect.succeed(true) : ignoredGitAttributesProbe,
+    ],
+    {concurrency: 2},
+  );
   const statusRecords = Effect2.pipe(status, EffectString.split('\0'));
-  let hasNormalizationBasisDrift = platform === 'win32';
+  let hasNormalizationBasisDrift = hasIgnoredGitAttributes;
   for (let index = 0; index < statusRecords.length; index++) {
     const record = statusRecords[index];
     if (!record) continue;
@@ -545,21 +561,6 @@ export const captureNativeCycleSource = Effect.fn('workflowAutomation.cycle.capt
       Effect2.pipe(submodule, EffectString.slice(2)) !== '..'
     )
       return yield* fail('dirty-submodule', 'Run a separate cycle for dirty submodule content.');
-  }
-  // Status omits ignored files, yet Git still applies an ignored .gitattributes; --directory skips wholly ignored trees.
-  if (!hasNormalizationBasisDrift) {
-    const ignored = yield* git(root, [
-      'ls-files',
-      '--others',
-      '--ignored',
-      '--exclude-standard',
-      '--directory',
-      '-z',
-      '--',
-      ':(icase,glob).gitattributes',
-      ':(icase,glob)**/.gitattributes',
-    ]);
-    hasNormalizationBasisDrift = EffectArray.some(Effect2.pipe(ignored, EffectString.split('\0')), isGitAttributesPath);
   }
   const gitPathLines = Effect2.pipe(
     yield* git(root, ['rev-parse', '--git-path', 'index', '--git-path', 'info/attributes']),

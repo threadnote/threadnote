@@ -280,6 +280,7 @@ export const prepareRecallDatabase = Effect.fn('recall.prepareDatabase')(functio
     policyInputProof: base.policyInputProof,
     sourceScan,
     forceAllSources,
+    touchedFallback: mode.kind === 'touched' && touched === undefined,
     refreshCounts,
     contentGeneration,
     previousValidatedAt,
