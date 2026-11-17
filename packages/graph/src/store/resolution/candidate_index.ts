@@ -166,7 +166,10 @@ export const selectResolutionCandidateIndexMatches = Effect.fn('codeGraph.select
           ordinals.add(entry.ordinal);
         }
         const referencePaths = new Set<string>();
-        for (const batch of EffectArray.chunksOf([...ordinals].sort((left, right) => left - right), SELECT_PARAMETERS)) {
+        for (const batch of EffectArray.chunksOf(
+          [...ordinals].sort((left, right) => left - right),
+          SELECT_PARAMETERS,
+        )) {
           const rows = yield* sql.unsafe<{readonly path: string}>(
             `SELECT path FROM snapshot_resolution_candidate_paths
              WHERE snapshot_id = ? AND ordinal IN (${EffectArray.join(
@@ -212,10 +215,15 @@ function referenceRuns(index: ProjectResolutionCandidateIndex): {readonly runs: 
         : index.referenceOrdinals[left] - index.referenceOrdinals[right],
   );
   return {
-    runs: encodeRuns(REFERENCE_RUN, order.length, position => signed[order[position]], (view, offset, position) => {
-      view.setBigInt64(offset, signed[order[position]], true);
-      view.setUint32(offset + 8, index.referenceOrdinals[order[position]], true);
-    }),
+    runs: encodeRuns(
+      REFERENCE_RUN,
+      order.length,
+      position => signed[order[position]],
+      (view, offset, position) => {
+        view.setBigInt64(offset, signed[order[position]], true);
+        view.setUint32(offset + 8, index.referenceOrdinals[order[position]], true);
+      },
+    ),
   };
 }
 
@@ -229,9 +237,14 @@ function symbolRuns(fingerprints: BigUint64Array): {readonly entries: number; re
   }
   return {
     entries: distinct,
-    runs: encodeRuns(SYMBOL_RUN, distinct, position => sorted[position], (view, offset, position) => {
-      view.setBigInt64(offset, sorted[position], true);
-    }),
+    runs: encodeRuns(
+      SYMBOL_RUN,
+      distinct,
+      position => sorted[position],
+      (view, offset, position) => {
+        view.setBigInt64(offset, sorted[position], true);
+      },
+    ),
   };
 }
 
@@ -265,8 +278,8 @@ const lookupRunEntries = Effect.fn('codeGraph.lookupResolutionCandidateRunEntrie
   fingerprints: ReadonlySet<bigint>,
 ) {
   if (fingerprints.size === 0) return [];
-  const wanted = EffectArray.map([...fingerprints], fingerprint => BigInt.asIntN(64, fingerprint)).sort((left, right) =>
-    left < right ? -1 : left > right ? 1 : 0,
+  const wanted = EffectArray.map([...fingerprints], fingerprint => BigInt.asIntN(64, fingerprint)).sort(
+    (left, right) => (left < right ? -1 : left > right ? 1 : 0),
   );
   const boundaries = EffectArray.map(
     yield* sql<{readonly first_key: number}>`
@@ -306,7 +319,7 @@ const lookupRunEntries = Effect.fn('codeGraph.lookupResolutionCandidateRunEntrie
       if (!(row.entries instanceof Uint8Array) || row.entries.byteLength !== row.entry_count * width) return undefined;
       const view = new DataView(row.entries.buffer, row.entries.byteOffset, row.entries.byteLength);
       for (const fingerprint of wantedByRun.get(row.first_key) ?? []) {
-        for (let position = firstAtLeast(view, width, row.entry_count, fingerprint); position < row.entry_count; ) {
+        for (let position = firstAtLeast(view, width, row.entry_count, fingerprint); position < row.entry_count;) {
           if (view.getBigInt64(position * width, true) !== fingerprint) break;
           entries.push({
             fingerprint: BigInt.asUintN(64, fingerprint),

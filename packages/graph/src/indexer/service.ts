@@ -1193,7 +1193,22 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                           preassessment = reusableDirtyBase.value.preassessment;
                         } else {
                           preassessment = yield* assessIncrementalOverlayCompatibility(
-                            {extractorSet, inventory, languagePacks, layout, store},
+                            {
+                              // The committed snapshot identity is exact for this inventory;
+                              // persisted evidence is used only if that snapshot is ready.
+                              baseSnapshotId: snapshotIdentity(
+                                identity,
+                                false,
+                                extractorSetIdentity(inventory.committedFiles, languagePacks),
+                                inventory.committedFiles,
+                                inventory.scope,
+                              ),
+                              extractorSet,
+                              inventory,
+                              languagePacks,
+                              layout,
+                              store,
+                            },
                             workspace,
                           );
                           if (preassessment.mode === 'compatible') {

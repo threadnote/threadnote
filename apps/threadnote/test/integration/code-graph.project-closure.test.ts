@@ -1254,6 +1254,32 @@ describe('project-closure incremental indexing', () => {
               'src/consumer.ts',
               'src/core.ts',
             ]);
+            expect(resolutionCandidateIndexOwners(incrementalLayout.databasePath)).toEqual([base.snapshot.id]);
+
+            // The first edit persisted the committed base's evidence, so a later
+            // export edit selects the same consumers without decoding the base.
+            yield* Effect.sync(() =>
+              writeFile(
+                root,
+                'src/core.ts',
+                'export const stable = 1;\nexport function renamedAgain() { return stable; }\n',
+              ),
+            );
+            const indexed = yield* indexer.index({cwd: root, threadnoteHome: incrementalHome});
+            const indexedFull = yield* indexer.index({cwd: root, incrementalOverlay: false, threadnoteHome: fullHome});
+            expect(indexed.materialization).toMatchObject({
+              mode: 'incremental-overlay',
+              resolutionClosure: 'project',
+              stagedFiles: 4,
+            });
+            expect(indexed.incrementalWork).toMatchObject({
+              attributionContextFiles: 0,
+              baseFactsLoaded: 4,
+              changedFiles: 4,
+            });
+            expect(normalizeGraph(yield* store.loadGraph(incrementalLayout.databasePath, indexed.snapshot.id))).toEqual(
+              normalizeGraph(yield* store.loadGraph(fullLayout.databasePath, indexedFull.snapshot.id)),
+            );
             expect(yield* store.diagnose(incrementalLayout.databasePath)).toMatchObject({
               foreignKeyViolations: 0,
               integrity: 'ok',
@@ -1582,6 +1608,22 @@ function deltaPaths(databasePath: string, snapshotId: string): readonly string[]
         .query<{readonly path: string}, [string]>('SELECT path FROM snapshot_files WHERE snapshot_id = ? ORDER BY path')
         .all(snapshotId),
       row => row.path,
+    );
+  } finally {
+    database.close(false);
+  }
+}
+
+function resolutionCandidateIndexOwners(databasePath: string): readonly string[] {
+  const database = new Database(databasePath, {readonly: true});
+  try {
+    return EffectArray.map(
+      database
+        .query<{readonly snapshot_id: string}, []>(
+          'SELECT snapshot_id FROM snapshot_resolution_candidate_indexes ORDER BY snapshot_id',
+        )
+        .all(),
+      row => row.snapshot_id,
     );
   } finally {
     database.close(false);
