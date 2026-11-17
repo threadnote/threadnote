@@ -5,7 +5,7 @@ import {CodeGraphStoreBusyError, CodeGraphStoreTransientIoError, type CodeGraphS
 import {WorkflowAutomationError, WorkflowGraph} from '@threadnote/workflow-automations/contracts';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import type {WorkflowBinding} from '../workflow_memory/protocol.js';
-import {resolveWorkflowGraphScope} from '../workflow_memory/graph_scope.js';
+import {requireWorkflowGraphProjectHint, resolveWorkflowGraphScope} from '../workflow_memory/graph_scope.js';
 import {resolveWorkflowBinding} from '../workflow_memory/profile.js';
 import {nativeWorkflowError} from './memory.js';
 import {shellQuote} from '../utils.js';
@@ -117,5 +117,6 @@ export const requireWorkflowGraphReady = Effect.fn('workflowAutomation.requireGr
     input.graphProject,
   );
   const graph = yield* makeWorkflowGraphAdapter(config, binding, {prepare: false, recovery: input.recovery});
+  yield* requireWorkflowGraphProjectHint(config, binding, input.recovery);
   return yield* graph.ready(input.checkout);
 });

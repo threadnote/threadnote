@@ -987,6 +987,82 @@ describe('native task actions', () => {
     }).pipe(run),
   );
 
+  const startFromCheckout = (configuredProject: string, linkedWorktree: string | undefined) =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      const repo = yield* f.fs.realPath(f.repo);
+      const home = yield* f.fs.realPath(f.home);
+      yield* runCommandEffect('git', ['-C', repo, 'add', 'source.ts']);
+      yield* runCommandEffect('git', [
+        '-C',
+        repo,
+        '-c',
+        'user.name=Fixture',
+        '-c',
+        'user.email=fixture@example.invalid',
+        'commit',
+        '-m',
+        'Fixture source',
+      ]);
+      const checkoutPath = linkedWorktree === undefined ? repo : f.path.join(f.root, linkedWorktree);
+      if (linkedWorktree !== undefined)
+        yield* runCommandEffect('git', ['-C', repo, 'worktree', 'add', '-b', linkedWorktree, checkoutPath]);
+      const checkout = yield* f.fs.realPath(checkoutPath);
+      const config = {...f.config, agentContextHome: home, manifestPath: f.path.join(home, 'manifest.json')};
+      yield* f.fs.writeFileString(
+        config.manifestPath,
+        JSON.stringify({
+          version: 1,
+          projects: [
+            {name: configuredProject, path: repo, seed: [], uri: `threadnote://resources/repos/${configuredProject}`},
+          ],
+        }),
+      );
+      const system = yield* SystemInfo;
+      const testSystem = {...system, currentDirectory: () => checkout, homeDirectory: home};
+      yield* applyDevSkills(config, 'install', {agent: 'codex'}).pipe(Effect.provideService(SystemInfo, testSystem));
+      const indexed = yield* (yield* CodeGraphIndexer).index({cwd: checkout, threadnoteHome: home});
+      expect(indexed.snapshot.state).toBe('ready');
+      const start = (graphProject?: string) =>
+        runNativeTaskStart(config, {
+          callerCwd: checkout,
+          featureName: 'Checkout task',
+          installationTarget: 'codex',
+          ...(graphProject === undefined ? {} : {graphProject}),
+          intent: {
+            title: 'Checkout task',
+            currentBehavior: 'Checkout source is not checked.',
+            desiredChange: 'Checkout source is checked.',
+            affectedPaths: ['source.ts'],
+            acceptanceCriterion: 'Checkout source is checked.',
+            verification: 'Inspect checkout source.',
+            eligibilityRationale: 'One local source and behavior are explicit.',
+            eligibility: {status: 'eligible' as const},
+            review: {required: false, reason: 'Focused fixture.'},
+          },
+        }).pipe(Effect.provideService(SystemInfo, testSystem), Effect.result);
+      const runId = nativeTaskStartRunId(undefined, 'repo', 'checkout-task');
+      return {start, state: readNativeWorkflowState(config, runId), runId};
+    });
+
+  effectIt.effect('files a linked-worktree task start under the repository project', () =>
+    Effect.gen(function* () {
+      const checkout = yield* startFromCheckout('repo', 'repo-second');
+      expect(yield* checkout.start()).toMatchObject({success: {taskRef: checkout.runId}});
+      expect((yield* checkout.state)?.state.project).toBe('repo');
+    }).pipe(run),
+  );
+
+  effectIt.effect('rejects an unroutable project before writing state, so the recommended retry starts', () =>
+    Effect.gen(function* () {
+      const checkout = yield* startFromCheckout('other', undefined);
+      const rejected = yield* checkout.start();
+      expect(yield* checkout.state).toBeUndefined();
+      expect(rejected).toMatchObject({failure: {code: 'graph-scope-required'}});
+      expect(yield* checkout.start('other')).toMatchObject({success: {taskRef: checkout.runId}});
+    }).pipe(run),
+  );
+
   effectIt.effect(
     'reports a read-back drained outcome for a canonical prior binding without rewriting its history',
     () =>

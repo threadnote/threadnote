@@ -8,6 +8,7 @@ import {
   Effect,
   Exit,
   FileSystem,
+  Layer,
   Option,
   Path,
   PlatformError,
@@ -25,6 +26,15 @@ import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {
+  RECALL_DIAGNOSTIC_SCOPES,
+  RECALL_INVALIDATION_FAILURE_STAGES,
+  RECALL_LEXICAL_REFRESH_DECISIONS,
+  RECALL_LEXICAL_REFRESH_FAILURE_STAGES,
+  RECALL_LEXICAL_REFRESH_REASONS,
+  RecallDiagnosticsPort,
+  type RecallDiagnostic,
+} from '@threadnote/recall/diagnostics';
 
 export const PRODUCTION_LOG_FILE_NAME = 'threadnote.log';
 export const PRODUCTION_LOG_MAX_BYTES = 1024 * 1024;
@@ -57,6 +67,7 @@ const PRODUCTION_LOG_PHASE_TIMING_MAX_COUNT = 32;
 const PRODUCTION_LOG_SUPPORT_FILE_READ_MAX_BYTES = 256 * 1024;
 const PRODUCTION_LOG_SUPPORT_UTF8_BYTES_PER_CHARACTER = 4;
 const PRODUCTION_LOG_SUPPORT_LINE_SLACK_BYTES = 4 * 1024;
+const PRODUCTION_LOG_DIAGNOSTIC_WRITE_TIMEOUT_MILLISECONDS = 500;
 const SAFE_DIAGNOSTIC_LABEL = /^[A-Za-z][A-Za-z0-9_.-]*$/;
 const PRODUCTION_LOG_LOCK_OPTIONS = {
   retryIntervalMilliseconds: PRODUCTION_LOG_LOCK_RETRY_MILLISECONDS,
@@ -157,6 +168,60 @@ const DEFAULT_PRODUCTION_LOG_POLICY: ProductionLogPolicy = {
   maxBytes: PRODUCTION_LOG_MAX_BYTES,
   rotatedFileCount: PRODUCTION_LOG_ROTATED_FILE_COUNT,
 };
+
+const diagnosticCount = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
+const diagnosticLabel = Schema.String.check(
+  Schema.isMaxLength(PRODUCTION_LOG_DIAGNOSTIC_LABEL_MAX_CHARACTERS),
+  Schema.isPattern(SAFE_DIAGNOSTIC_LABEL),
+);
+const diagnosticVersion = Schema.String.check(
+  Schema.isMaxLength(PRODUCTION_LOG_DIAGNOSTIC_LABEL_MAX_CHARACTERS),
+  Schema.isPattern(/^[A-Za-z0-9.+_-]+$/),
+);
+const diagnosticBase = {
+  architecture: diagnosticLabel,
+  platform: diagnosticLabel,
+  processId: diagnosticCount,
+  runtime: diagnosticLabel,
+  runtimeVersion: diagnosticVersion,
+  schemaVersion: Schema.Literal(PRODUCTION_LOG_SCHEMA_VERSION),
+  scope: Schema.Literals(RECALL_DIAGNOSTIC_SCOPES),
+  timestamp: Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/)),
+  version: diagnosticVersion,
+};
+/** Standalone records carry closed reasons, counts and error types; writes and support excerpts both decode them. */
+const ProductionLogDiagnosticEntry = Schema.Union([
+  Schema.Struct({
+    ...diagnosticBase,
+    event: Schema.Literal('recall.lexical-refresh'),
+    level: Schema.Literal('info'),
+    decision: Schema.Literals(RECALL_LEXICAL_REFRESH_DECISIONS),
+    reasons: Schema.Array(Schema.Literals(RECALL_LEXICAL_REFRESH_REASONS)).check(
+      Schema.isMaxLength(RECALL_LEXICAL_REFRESH_REASONS.length),
+    ),
+    invalidatedUriCount: diagnosticCount,
+    changedSourceCount: Schema.optionalKey(diagnosticCount),
+    removedSourceCount: Schema.optionalKey(diagnosticCount),
+    documentCount: Schema.optionalKey(diagnosticCount),
+    durationMilliseconds: diagnosticCount,
+  }),
+  Schema.Struct({
+    ...diagnosticBase,
+    event: Schema.Literal('recall.lexical-refresh-failed'),
+    level: Schema.Literal('warn'),
+    stage: Schema.Literals(RECALL_LEXICAL_REFRESH_FAILURE_STAGES),
+    errorType: Schema.optionalKey(diagnosticLabel),
+  }),
+  Schema.Struct({
+    ...diagnosticBase,
+    event: Schema.Literal('recall.invalidation-failed'),
+    level: Schema.Literal('warn'),
+    stage: Schema.Literals(RECALL_INVALIDATION_FAILURE_STAGES),
+    invalidatedUriCount: diagnosticCount,
+    errorType: Schema.optionalKey(diagnosticLabel),
+  }),
+]);
+type ProductionLogDiagnosticEntry = typeof ProductionLogDiagnosticEntry.Type;
 
 /**
  * Adds privacy-safe lifecycle diagnostics around an Effect without changing its
@@ -401,9 +466,44 @@ export const productionLogSupportExcerpt = Effect.fn('productionLog.productionLo
   } satisfies ProductionLogSupportExcerpt;
 });
 
+/** One best-effort record per recall diagnostic; like invocation entries it never fails the caller. */
+function appendRecallProductionDiagnostic(home: string, diagnostic: RecallDiagnostic) {
+  return Effect.gen(function* () {
+    const system = yield* SystemInfo;
+    const entry = Schema.decodeUnknownOption(ProductionLogDiagnosticEntry)({
+      architecture: system.architecture,
+      platform: system.platform,
+      processId: system.processId,
+      runtime: PRODUCTION_LOG_RUNTIME_NAME,
+      runtimeVersion: system.runtimeVersion,
+      schemaVersion: PRODUCTION_LOG_SCHEMA_VERSION,
+      timestamp: timestamp(yield* Clock.currentTimeMillis),
+      version: yield* getThreadnoteVersion().pipe(Effect.orElseSucceed(() => 'unknown')),
+      ...diagnostic,
+      level: diagnostic.event === 'recall.lexical-refresh' ? 'info' : 'warn',
+      ...('error' in diagnostic && diagnostic.error !== undefined
+        ? {errorType: diagnosticErrorType(diagnostic.error)}
+        : {}),
+    });
+    if (Option.isSome(entry)) yield* appendProductionLogs(home, [entry.value], DEFAULT_PRODUCTION_LOG_POLICY);
+  }).pipe(Effect.timeout(PRODUCTION_LOG_DIAGNOSTIC_WRITE_TIMEOUT_MILLISECONDS), Effect.ignore);
+}
+
+/** Routes recall diagnostics to the production log of the home that produced them. */
+export const productionRecallDiagnosticsLayer = Layer.effect(
+  RecallDiagnosticsPort,
+  Effect.gen(function* () {
+    const services = yield* Effect.context<
+      FileSystem.FileSystem | Path.Path | SystemInfo | SecureRandom.SecureRandom
+    >();
+    return (home: string, diagnostic: RecallDiagnostic) =>
+      appendRecallProductionDiagnostic(home, diagnostic).pipe(Effect.provide(services));
+  }),
+);
+
 function appendProductionLogs(
   home: string,
-  entries: readonly ProductionLogEntry[],
+  entries: readonly (ProductionLogEntry | ProductionLogDiagnosticEntry)[],
   policy: ProductionLogPolicy,
 ): Effect.Effect<void, never, FileSystem.FileSystem | Path.Path | SystemInfo | SecureRandom.SecureRandom> {
   return Effect.gen(function* () {
@@ -817,12 +917,15 @@ function safeDiagnosticLabel(value: string | undefined, fallback: string): strin
     : fallback;
 }
 
-function parseProductionLogEntry(line: string): ProductionLogEntry | undefined {
+function parseProductionLogEntry(line: string): ProductionLogEntry | ProductionLogDiagnosticEntry | undefined {
   const parsed = Result.try(() => JSON.parse(line) as unknown);
   if (Result.isFailure(parsed) || !Predicate.isObject(parsed.success)) {
     return undefined;
   }
   const value = parsed.success;
+  if (typeof value.event === 'string' && Effect2.pipe(value.event, EffectString.startsWith('recall.'))) {
+    return Option.getOrUndefined(Schema.decodeUnknownOption(ProductionLogDiagnosticEntry)(value));
+  }
   const component = oneOf(value.component, ['cli', 'mcp'] as const);
   const event = oneOf(value.event, ['invocation.finished', 'invocation.started'] as const);
   const level = oneOf(value.level, ['error', 'info', 'warn'] as const);

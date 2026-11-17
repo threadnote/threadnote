@@ -60,11 +60,14 @@ vi.mock('../../src/workflow_memory/journal_validation.js', async importOriginal 
       const memory = parseMemoryDocument(state.manifestUri, current);
       if (!memory) throw new Error('Expected an actual previous manifest');
       const previousValue: unknown = JSON.parse(memory.body);
-      const previousSchema = Schema.Struct({
-        artifacts: Schema.Record(Schema.String, Schema.Unknown),
-      });
-      if (!Schema.is(previousSchema)(previousValue)) throw new Error('Expected a manifest with artifacts');
-      const previous = previousValue;
+      const legacySchema = Schema.Struct({artifacts: Schema.Record(Schema.String, Schema.Unknown)});
+      const committedSchema = Schema.Struct({artifactsSha256: Schema.String});
+      const previous = Schema.is(legacySchema)(previousValue)
+        ? previousValue
+        : Schema.is(committedSchema)(previousValue) && state.previousArtifacts
+          ? {artifacts: state.previousArtifacts}
+          : undefined;
+      if (!previous) throw new Error('Expected a manifest with artifacts');
       const sample: WitnessSample = {
         bindingId: state.binding.bindingId,
         verifiedReceipts: EffectArray.filter(

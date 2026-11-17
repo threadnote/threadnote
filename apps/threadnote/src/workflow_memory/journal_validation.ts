@@ -106,9 +106,14 @@ function assertWorkflowArtifacts(
   }
 }
 
+export const workflowArtifactsDigest = (artifacts: WorkflowJournal['artifacts']): string =>
+  sha256HexSync(stableJson(artifacts));
+
+/** A legacy manifest carries its registry; a current one admits `candidate` only by its digest. */
 function manifestArtifacts(
   state: WorkflowJournal,
   content: string,
+  candidate: WorkflowJournal['artifacts'] | undefined,
   cache?: WorkflowReadCache,
 ): WorkflowJournal['artifacts'] {
   check(typeof content === 'string');
@@ -131,10 +136,16 @@ function manifestArtifacts(
   check(record.metadata.memoryId === `tn_${Effect.pipe(state.binding.bindingId, EffectString.slice(0, 20))}`);
   check(record.metadata.sourceSessionId === state.binding.workflowRunId);
   const parsed: unknown = JSON.parse(record.body);
-  check(
-    object(parsed) && parsed.protocolVersion === 1 && same(parsed.binding, state.binding) && object(parsed.artifacts),
-  );
-  const artifacts = parsed.artifacts;
+  check(object(parsed) && same(parsed.binding, state.binding));
+  const artifacts =
+    parsed.protocolVersion === 1 && object(parsed.artifacts)
+      ? parsed.artifacts
+      : parsed.protocolVersion === 2 &&
+          candidate !== undefined &&
+          parsed.artifactsSha256 === workflowArtifactsDigest(candidate)
+        ? candidate
+        : undefined;
+  check(artifacts !== undefined);
   assertWorkflowArtifacts(state.binding, artifacts);
   if (cache) {
     immutableWorkflowImage(state.binding);
@@ -353,8 +364,8 @@ export function assertWorkflowJournalIntegrity(
     state.manifestUri ===
       `${root(state.binding)}/handoffs/active/${uriSegment(state.binding.project)}/${uriSegment(workflowStateTopic(state.binding))}.md`,
   );
-  const desired = manifestArtifacts(state, state.manifestContent, cache);
-  check(same(desired, state.artifacts));
+  const desired = manifestArtifacts(state, state.manifestContent, state.artifacts, cache);
+  check(desired === state.artifacts || same(desired, state.artifacts));
   for (const [key, operation] of EffectRecord.toEntries(state.operations)) {
     const checked = cache?.operations.get(operation);
     if (checked?.binding === state.binding && checked.key === key) continue;
@@ -379,7 +390,7 @@ export function assertWorkflowJournalIntegrity(
     check(EffectRecord.keys(state.artifacts).length === 0 && EffectRecord.keys(state.operations).length === 0);
     return;
   }
-  const previous = manifestArtifacts(state, currentManifestContent, cache);
+  const previous = manifestArtifacts(state, currentManifestContent, state.previousArtifacts, cache);
   const changed = EffectArray.filter(
     EffectRecord.keys({...previous, ...state.artifacts}),
     uri => !same(previous[uri], state.artifacts[uri]),
