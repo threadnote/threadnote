@@ -118,6 +118,16 @@ export interface ProjectResolutionCandidateIndexMatches {
   readonly symbolFingerprints: ReadonlySet<bigint>;
 }
 
+/**
+ * `indexed`: complete evidence for the exact context. `missing`: the owner is
+ * ready, so evidence collected now can be recorded. `unavailable`: no ready
+ * owner (or a database that predates the tables); nothing can be recorded.
+ */
+export type CodeGraphResolutionCandidateIndexState =
+  | {readonly reexports: readonly ProjectResolutionReexportKeys[]; readonly state: 'indexed'}
+  | {readonly state: 'missing'}
+  | {readonly state: 'unavailable'};
+
 /** Resolves fingerprints against one evidence source; `undefined` means the evidence is no longer available. */
 export type ProjectResolutionCandidateIndexLookup<E> = (query: {
   readonly maximumReferencePaths: number;

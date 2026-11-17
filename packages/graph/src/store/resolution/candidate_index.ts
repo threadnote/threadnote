@@ -4,6 +4,7 @@ import * as SqlClient from 'effect/sql/SqlClient';
 import type {ProjectResolutionLookupKey} from '../../incremental/closure.js';
 import {tableExists} from '../session.js';
 import type {
+  CodeGraphResolutionCandidateIndexState,
   ProjectResolutionCandidateIndex,
   ProjectResolutionCandidateIndexMatches,
   ProjectResolutionReexportKeys,
@@ -58,16 +59,6 @@ export const CODE_GRAPH_RESOLUTION_CANDIDATE_INDEX_TABLES_SQL = [
     PRIMARY KEY (snapshot_id, kind, first_key)
   ) WITHOUT ROWID`,
 ] as const;
-
-/**
- * `indexed`: complete evidence for the exact context. `missing`: the owner is
- * ready, so evidence collected now can be recorded. `unavailable`: no ready
- * owner (or a database that predates the tables); nothing can be recorded.
- */
-export type CodeGraphResolutionCandidateIndexState =
-  | {readonly reexports: readonly ProjectResolutionReexportKeys[]; readonly state: 'indexed'}
-  | {readonly state: 'missing'}
-  | {readonly state: 'unavailable'};
 
 export const recordResolutionCandidateIndex = Effect.fn('codeGraph.recordResolutionCandidateIndex')(function* (
   snapshotId: string,

@@ -12,11 +12,11 @@ import type {CodeGraphCacheFactInput} from '../fact/budget.js';
 import type {CodeGraphWorkspace} from '../languages/types.js';
 import type {CodeGraphMonikerV1} from '../cross_repository/types.js';
 import type {
+  CodeGraphResolutionCandidateIndexState,
   ProjectResolutionCandidateIndex,
   ProjectResolutionCandidateIndexLookup,
   ProjectResolutionCandidateIndexMatches,
 } from './resolution/candidate_closure.js';
-import type {CodeGraphResolutionCandidateIndexState} from './resolution/candidate_index.js';
 import type {
   CodeGraphEffectiveFileHashMatches,
   CodeGraphEffectiveFilePathObservation,
