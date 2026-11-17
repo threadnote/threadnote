@@ -1005,7 +1005,7 @@ export function makeCodeGraphStoreDataMethods(runtime: CodeGraphStoreRuntime): C
         Effect.flatMap(exists =>
           exists
             ? useReadOnlyDatabase(databasePath, selectResolutionCandidateIndex(snapshotId, contextFingerprint))
-            : succeedUndefined,
+            : Effect.succeed({state: 'unavailable'} as const),
         ),
         Effect.mapError(cause => storeError('load code graph resolution candidate index', cause)),
       ),

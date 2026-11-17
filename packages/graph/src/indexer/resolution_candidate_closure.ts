@@ -93,9 +93,18 @@ export const assessResolutionCandidateIncrementalClosure = Effect.fn(
           context: resolutionCandidateIndexContext(input.baseFiles, input.committedWorkspace, input.languagePacks),
           snapshotId: input.baseSnapshotId,
         };
+  const indexState =
+    evidence === undefined || input.store.resolutionCandidateIndex === undefined
+      ? undefined
+      : yield* input.store.resolutionCandidateIndex(input.layout.databasePath, evidence.snapshotId, evidence.context);
   const scan =
-    (evidence === undefined ? undefined : yield* indexedResolutionCandidateClosure(input, evidence)) ??
-    (yield* scannedResolutionCandidateClosure(input, evidence));
+    (indexState?.state === 'indexed'
+      ? yield* indexedResolutionCandidateClosure(input, evidence!, indexState.reexports)
+      : undefined) ??
+    (yield* scannedResolutionCandidateClosure(
+      input,
+      indexState === undefined || indexState.state === 'unavailable' ? undefined : evidence,
+    ));
   if (scan.mode === 'fallback') return scan;
 
   const selectedPaths = new Set([
@@ -159,22 +168,21 @@ interface ResolutionCandidateDiscoveryInput {
   readonly store: CodeGraphStoreShape;
 }
 
-/** Resolve from persisted evidence; `undefined` when this base has none for the exact context. */
+/** Resolve from persisted evidence; `undefined` when it vanished before the lookup. */
 const indexedResolutionCandidateClosure = Effect.fn('codeGraph.indexedResolutionCandidateClosure')(function* (
   input: ResolutionCandidateDiscoveryInput,
   evidence: ResolutionCandidateEvidenceIdentity,
+  reexports: readonly ProjectResolutionReexportKeys[],
 ) {
-  const {matchResolutionCandidateIndex, resolutionCandidateIndex} = input.store;
-  if (resolutionCandidateIndex === undefined || matchResolutionCandidateIndex === undefined) return undefined;
-  const receipt = yield* resolutionCandidateIndex(input.layout.databasePath, evidence.snapshotId, evidence.context);
-  if (receipt === undefined) return undefined;
+  const {matchResolutionCandidateIndex} = input.store;
+  if (matchResolutionCandidateIndex === undefined) return undefined;
   const closure = yield* resolveIndexedProjectResolutionCandidateClosure({
     additionalReexports: input.candidateReexports,
     initialLookupKeys: input.initialLookupKeys,
     lookup: query =>
       matchResolutionCandidateIndex(input.layout.databasePath, evidence.snapshotId, evidence.context, query),
     maximumSelectedFiles: PROJECT_INCREMENTAL_CLOSURE_MAX_FILES,
-    reexports: receipt.reexports,
+    reexports,
   });
   // Evidence that disappeared between the receipt and the lookup is not a closure result.
   if (closure.mode === 'fallback' && closure.reason === 'cache-incomplete') return undefined;

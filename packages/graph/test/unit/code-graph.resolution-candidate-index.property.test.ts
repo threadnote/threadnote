@@ -87,7 +87,7 @@ describe('persisted resolution-candidate index', () => {
           expect(index).toBeDefined();
           expect(yield* store.recordResolutionCandidateIndex!(databasePath, 'base', CONTEXT, index!)).toBe(true);
           const receipt = yield* store.resolutionCandidateIndex!(databasePath, 'base', CONTEXT);
-          expect(receipt).toBeDefined();
+          if (receipt.state !== 'indexed') throw new Error(`Expected recorded evidence, received ${receipt.state}.`);
 
           for (const edit of edits) {
             const query = editQuery(model, edit);
@@ -98,7 +98,7 @@ describe('persisted resolution-candidate index', () => {
               lookup: lookup => store.matchResolutionCandidateIndex!(databasePath, 'base', CONTEXT, lookup),
               maximumSelectedFiles,
               ...(weakFingerprint ? {projectionFingerprint: collidingFingerprint} : {}),
-              reexports: receipt!.reexports,
+              reexports: receipt.reexports,
             });
             expect(comparableClosure(indexed)).toEqual(comparableClosure(scanned));
           }
@@ -106,14 +106,20 @@ describe('persisted resolution-candidate index', () => {
       {fastCheck: {numRuns: 150}},
     );
 
-    it.effect('ignores evidence recorded under another attribution context or format', () =>
+    it.effect('reports another attribution context as missing and an absent owner as unavailable', () =>
       Effect.gen(function* () {
         const store = yield* CodeGraphStore;
         const databasePath = yield* readyBaseDatabase('base');
         const index = yield* collectedIndex({barrels: [], consumers: [[]], modules: [['alpha']]});
+        expect(yield* store.resolutionCandidateIndex!(databasePath, 'base', CONTEXT)).toEqual({state: 'missing'});
         expect(yield* store.recordResolutionCandidateIndex!(databasePath, 'base', CONTEXT, index)).toBe(true);
 
-        expect(yield* store.resolutionCandidateIndex!(databasePath, 'base', OTHER_CONTEXT)).toBeUndefined();
+        expect(yield* store.resolutionCandidateIndex!(databasePath, 'base', OTHER_CONTEXT)).toEqual({
+          state: 'missing',
+        });
+        expect(yield* store.resolutionCandidateIndex!(databasePath, 'missing', CONTEXT)).toEqual({
+          state: 'unavailable',
+        });
         expect(
           yield* store.matchResolutionCandidateIndex!(databasePath, 'base', OTHER_CONTEXT, {
             maximumReferencePaths: 10,
@@ -198,7 +204,7 @@ describe('persisted resolution-candidate index', () => {
           }
         });
         const index = yield* collectedIndex({barrels: [], consumers: [[]], modules: [['alpha']]});
-        expect(yield* store.resolutionCandidateIndex!(databasePath, 'base', CONTEXT)).toBeUndefined();
+        expect(yield* store.resolutionCandidateIndex!(databasePath, 'base', CONTEXT)).toEqual({state: 'unavailable'});
 
         yield* store.withSession(databasePath, store.initialize(databasePath), {
           cleanupCompletedBuildRows: true,
@@ -206,7 +212,10 @@ describe('persisted resolution-candidate index', () => {
         });
 
         expect(yield* store.recordResolutionCandidateIndex!(databasePath, 'base', CONTEXT, index)).toBe(true);
-        expect(yield* store.resolutionCandidateIndex!(databasePath, 'base', CONTEXT)).toEqual({reexports: []});
+        expect(yield* store.resolutionCandidateIndex!(databasePath, 'base', CONTEXT)).toEqual({
+          reexports: [],
+          state: 'indexed',
+        });
       }),
     );
 

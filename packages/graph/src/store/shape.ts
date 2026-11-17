@@ -16,7 +16,7 @@ import type {
   ProjectResolutionCandidateIndexLookup,
   ProjectResolutionCandidateIndexMatches,
 } from './resolution/candidate_closure.js';
-import type {CodeGraphResolutionCandidateIndexReceipt} from './resolution/candidate_index.js';
+import type {CodeGraphResolutionCandidateIndexState} from './resolution/candidate_index.js';
 import type {
   CodeGraphEffectiveFileHashMatches,
   CodeGraphEffectiveFilePathObservation,
@@ -714,7 +714,7 @@ export interface CodeGraphStoreShape {
     databasePath: string,
     snapshotId: string,
     contextFingerprint: string,
-  ) => Effect.Effect<CodeGraphResolutionCandidateIndexReceipt | undefined, CodeGraphStoreFailure>;
+  ) => Effect.Effect<CodeGraphResolutionCandidateIndexState, CodeGraphStoreFailure>;
   readonly matchResolutionCandidateIndex?: (
     databasePath: string,
     snapshotId: string,

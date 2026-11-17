@@ -59,9 +59,15 @@ export const CODE_GRAPH_RESOLUTION_CANDIDATE_INDEX_TABLES_SQL = [
   ) WITHOUT ROWID`,
 ] as const;
 
-export interface CodeGraphResolutionCandidateIndexReceipt {
-  readonly reexports: readonly ProjectResolutionReexportKeys[];
-}
+/**
+ * `indexed`: complete evidence for the exact context. `missing`: the owner is
+ * ready, so evidence collected now can be recorded. `unavailable`: no ready
+ * owner (or a database that predates the tables); nothing can be recorded.
+ */
+export type CodeGraphResolutionCandidateIndexState =
+  | {readonly reexports: readonly ProjectResolutionReexportKeys[]; readonly state: 'indexed'}
+  | {readonly state: 'missing'}
+  | {readonly state: 'unavailable'};
 
 export const recordResolutionCandidateIndex = Effect.fn('codeGraph.recordResolutionCandidateIndex')(function* (
   snapshotId: string,
@@ -123,16 +129,23 @@ export const selectResolutionCandidateIndex = Effect.fn('codeGraph.selectResolut
   contextFingerprint: string,
 ) {
   const sql = yield* SqlClient.SqlClient;
-  if (!(yield* tableExists(sql, CODE_GRAPH_RESOLUTION_CANDIDATE_RUNS_TABLE))) return undefined;
-  const rows = yield* sql<{readonly reexports_json: string}>`
-    SELECT reexports_json FROM snapshot_resolution_candidate_indexes
-    WHERE snapshot_id = ${snapshotId}
-      AND format_version = ${CODE_GRAPH_RESOLUTION_CANDIDATE_INDEX_FORMAT_VERSION}
-      AND context_fingerprint = ${contextFingerprint}
+  const unavailable: CodeGraphResolutionCandidateIndexState = {state: 'unavailable'};
+  if (!(yield* tableExists(sql, CODE_GRAPH_RESOLUTION_CANDIDATE_RUNS_TABLE))) return unavailable;
+  const rows = yield* sql<{readonly reexports_json: string | null}>`
+    SELECT receipt.reexports_json
+    FROM snapshots AS snapshot
+    LEFT JOIN snapshot_resolution_candidate_indexes AS receipt
+      ON receipt.snapshot_id = snapshot.id
+      AND receipt.format_version = ${CODE_GRAPH_RESOLUTION_CANDIDATE_INDEX_FORMAT_VERSION}
+      AND receipt.context_fingerprint = ${contextFingerprint}
+    WHERE snapshot.id = ${snapshotId} AND snapshot.state = 'ready'
     LIMIT 1
   `;
-  const reexports = rows.length === 1 ? decodeReexports(rows[0].reexports_json) : undefined;
-  return reexports === undefined ? undefined : ({reexports} satisfies CodeGraphResolutionCandidateIndexReceipt);
+  if (rows.length !== 1) return unavailable;
+  const reexports = rows[0].reexports_json === null ? undefined : decodeReexports(rows[0].reexports_json);
+  return reexports === undefined
+    ? ({state: 'missing'} satisfies CodeGraphResolutionCandidateIndexState)
+    : ({reexports, state: 'indexed'} satisfies CodeGraphResolutionCandidateIndexState);
 });
 
 export const selectResolutionCandidateIndexMatches = Effect.fn('codeGraph.selectResolutionCandidateIndexMatches')(
