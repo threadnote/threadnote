@@ -3,12 +3,15 @@ import {Context, Effect, Schema} from 'effect';
 /** Versioned executor contracts are independent from immutable skill provenance. */
 export const workflowAutomationProtocol = 1 as const;
 
-/** The next legal command for a refusal; an unknown argument value is shown as `<placeholder>`. */
+/**
+ * The next legal command for a refusal: MCP `arguments` for `tool` and the equivalent CLI line. An unknown value is a
+ * `<placeholder>` string.
+ */
 export const WorkflowNextCommandSchema = Schema.Struct({
   tool: Schema.TemplateLiteral(['workflow_task_', Schema.String]),
   command: Schema.String,
   cli: Schema.String,
-  args: Schema.Record(Schema.String, Schema.String),
+  arguments: Schema.Record(Schema.String, Schema.Unknown),
 });
 export type WorkflowNextCommand = typeof WorkflowNextCommandSchema.Type;
 export const WorkflowRefusalDetailSchema = Schema.Struct({

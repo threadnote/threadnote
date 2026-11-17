@@ -7742,7 +7742,10 @@ describe('native task actions', () => {
       expect(object(taskViewEnvelope.structuredContent).next).toMatchObject({
         action: 'deliver',
         tool: 'workflow_task_deliver',
-        guidance: 'Choose local, commit, or pr to match the approved plan.',
+        arguments: {
+          runId: 'native-run',
+          delivery: {command: 'commit', validationRef: '<validationRef>', commitEvidence: '<commitEvidence>'},
+        },
       });
       const evidence = 'Verified fixture commit ' + EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
       const beforeForeign = yield* f.fs.readFileString(f.statePath());

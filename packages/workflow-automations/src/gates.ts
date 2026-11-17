@@ -66,24 +66,128 @@ export function decideGate(
 const cliFlag = (key: string) => '--' + EffectString.replaceAll('_', '-')(EffectString.camelToSnake(key));
 const cliValue = (value: string) => (/[\s"'$`\\]/u.test(value) ? JSON.stringify(value) : value);
 
+/**
+ * One next command in both callable forms: MCP `arguments` shaped by the tool's input schema, and the CLI line. An
+ * unknown value appears as a `<placeholder>`.
+ */
 export function nativeNextCommand(
   tool: NativeNextCommand['tool'],
   command: string,
-  cliCommand: string,
-  args: Readonly<Record<string, string>>,
+  cli: {readonly command: string; readonly flags: Readonly<Record<string, string>>},
+  mcpArguments: Readonly<Record<string, unknown>>,
 ): NativeNextCommand {
-  const flags = EffectArray.map(EffectRecord.toEntries(args), ([key, value]) => `${cliFlag(key)} ${cliValue(value)}`);
+  const flags = EffectArray.map(
+    EffectRecord.toEntries(cli.flags),
+    ([key, value]) => `${cliFlag(key)} ${cliValue(value)}`,
+  );
   return {
     tool,
     command,
-    cli: EffectArray.join(['threadnote workflow-automation', cliCommand, ...flags], ' '),
-    args,
+    cli: EffectArray.join(['threadnote workflow-automation', cli.command, ...flags], ' '),
+    arguments: mcpArguments,
   };
 }
 
+type NativeNextScope = {readonly runId: string; readonly callerCwd: string};
+const sameShape = (
+  tool: NativeNextCommand['tool'],
+  command: string,
+  cliCommand: string,
+  fields: Readonly<Record<string, string>>,
+) => nativeNextCommand(tool, command, {command: cliCommand, flags: fields}, fields);
+
+/** A `workflow_task_control` command; MCP nests it under `control` beside the current task card's `taskRef`. */
+export const nativeControlNext = (
+  scope: NativeNextScope,
+  command: string,
+  fields: Readonly<Record<string, string>>,
+  cliTaskRef = true,
+) =>
+  nativeNextCommand(
+    'workflow_task_control',
+    command,
+    {command: 'task-action ' + command, flags: {...scope, ...(cliTaskRef ? {taskRef: '<taskRef>'} : {}), ...fields}},
+    {...scope, taskRef: '<taskRef>', control: {command, ...fields}},
+  );
+
+/** The next legal commands of the dev-cycle, each callable as given on MCP and on the CLI. */
+export const nativeNext = {
+  view: (scope: NativeNextScope) => sameShape('workflow_task_view', 'view', 'task-view', scope),
+  snapshot: (scope: NativeNextScope) =>
+    nativeNextCommand(
+      'workflow_task_snapshot',
+      'record',
+      {command: 'task-action record-snapshot', flags: scope},
+      {...scope, snapshot: {command: 'record'}},
+    ),
+  work: (scope: NativeNextScope) =>
+    nativeNextCommand(
+      'workflow_task_work',
+      'work',
+      {command: 'task-action work', flags: scope},
+      {...scope, capacity: '<capacity>', anchors: '<anchors>', ownership: '<ownership>', checks: '<checks>'},
+    ),
+  review: (scope: NativeNextScope) =>
+    nativeNextCommand(
+      'workflow_task_record_review',
+      'record-review',
+      {command: 'task-action record-review', flags: {...scope, snapshotRef: '<snapshotRef>', report: '<report>'}},
+      {
+        ...scope,
+        snapshotRef: '<snapshotRef>',
+        mode: '<mode>',
+        selected: '<selected>',
+        lanes: '<lanes>',
+        findings: '<findings>',
+      },
+    ),
+  validation: (scope: NativeNextScope) =>
+    nativeNextCommand(
+      'workflow_task_record_validation',
+      'record-validation',
+      {
+        command: 'task-action record-validation',
+        flags: {...scope, snapshotRef: '<snapshotRef>', validation: '<validation>'},
+      },
+      {...scope, snapshotRef: '<snapshotRef>', checks: '<checks>', acceptance: '<acceptance>'},
+    ),
+  deliver: (scope: NativeNextScope, delivery: 'local' | 'commit' | 'pr' = 'local') => {
+    const fields = {
+      validationRef: '<validationRef>',
+      ...(delivery === 'local' ? {} : {commitEvidence: '<commitEvidence>'}),
+      ...(delivery === 'pr' ? {pr: '<pr>', publication: '<publication>', userAuthority: '<userAuthority>'} : {}),
+    };
+    return nativeNextCommand(
+      'workflow_task_deliver',
+      'deliver-' + delivery,
+      {command: (delivery === 'pr' ? '' : 'task-action ') + 'deliver-' + delivery, flags: {...scope, ...fields}},
+      {...scope, delivery: {command: delivery, ...fields}},
+    );
+  },
+  finish: (scope: NativeNextScope) => sameShape('workflow_task_finish', 'finish', 'task-action finish', scope),
+  compactConfirm: (scope: NativeNextScope) =>
+    nativeNextCommand(
+      'workflow_task_compact_confirm',
+      'compact-confirm',
+      {
+        command: 'task-action compact-confirm',
+        flags: {...scope, intentHash: '<intentHash>', userDecision: '<userDecision>', userResponse: '<userResponse>'},
+      },
+      {...scope, presentedIntentHash: '<intentHash>', userDecision: '<userDecision>', userResponse: '<userResponse>'},
+    ),
+  waive: (scope: NativeNextScope, gate: NativeWaivableGateId) =>
+    nativeControlNext(scope, 'waive', {gate, reason: '<reason>', userAuthority: '<userAuthority>'}, false),
+  authoringRead: (callerCwd: string, authoringRef: string) =>
+    nativeNextCommand(
+      'workflow_task_author',
+      'read',
+      {command: 'task-author --operation read', flags: {callerCwd, authoringRef}},
+      {command: 'read', callerCwd, authoringRef},
+    ),
+} as const;
+
 /** The default next step for a mechanical refusal: reread the current task card. */
-export const nativeTaskViewNext = (runId: string, callerCwd: string) =>
-  nativeNextCommand('workflow_task_view', 'view', 'task-view', {runId, callerCwd});
+export const nativeTaskViewNext = (runId: string, callerCwd: string) => nativeNext.view({runId, callerCwd});
 
 /** Every refusal names its rule and the next legal command; the type makes `next` mandatory. */
 export const nativeRefusal = (
@@ -106,36 +210,35 @@ export const nativeGateRefusal = (
 ) => nativeRefusal(code, message, decision);
 
 /** The next legal command for the action on the current task card. */
-export const nativeNextForTaskAction = (action: string, runId: string, callerCwd: string): NativeNextCommand => {
+export const nativeNextForTaskAction = (
+  action: string,
+  runId: string,
+  callerCwd: string,
+  delivery: 'local' | 'commit' | 'pr' = 'local',
+): NativeNextCommand => {
   const scope = {runId, callerCwd};
   switch (action) {
     case 'implement':
-      return nativeNextCommand('workflow_task_snapshot', 'record', 'task-action record-snapshot', scope);
+      return nativeNext.snapshot(scope);
     case 'review':
-      return nativeNextCommand('workflow_task_record_review', 'record-review', 'task-action record-review', {
-        ...scope,
-        snapshotRef: '<snapshotRef>',
-        report: '<report>',
-      });
+      return nativeNext.review(scope);
     case 'validate':
-      return nativeNextCommand(
-        'workflow_task_record_validation',
-        'record-validation',
-        'task-action record-validation',
-        {...scope, snapshotRef: '<snapshotRef>', validation: '<validation>'},
-      );
+      return nativeNext.validation(scope);
     case 'deliver':
-      return nativeNextCommand('workflow_task_deliver', 'deliver-local', 'task-action deliver-local', {
-        ...scope,
-        validationRef: '<validationRef>',
-      });
+      return nativeNext.deliver(scope, delivery);
     case 'complete':
-      return nativeNextCommand('workflow_task_finish', 'finish', 'task-action finish', scope);
+      return nativeNext.finish(scope);
     case 'compact-confirm':
-      return nativeNextCommand('workflow_task_compact_confirm', 'compact-confirm', 'task-action compact-confirm', {
-        ...scope,
-        intentHash: '<intentHash>',
-        userResponse: '<userResponse>',
+      return nativeNext.compactConfirm(scope);
+    case 'blocked':
+      return nativeControlNext(scope, 'resume', {reason: '<reason>'});
+    case 'reconcile-plan':
+      return nativeControlNext(scope, 'reconcile', {reason: '<reason>'});
+    case 'expand-review-budget':
+      return nativeControlNext(scope, 'extend-review-budget', {
+        additionalReviews: '<additionalReviews>',
+        reason: '<reason>',
+        userAuthority: '<userAuthority>',
       });
     default:
       return nativeTaskViewNext(runId, callerCwd);
@@ -154,13 +257,3 @@ export const withNativeNext = (error: WorkflowAutomationError, next: NativeNextC
         ...(error.detail === undefined ? {} : {detail: error.detail}),
         next,
       });
-
-/** The audited waiver command for a gate that refused. */
-export const nativeTaskWaiveNext = (runId: string, callerCwd: string, gate: NativeWaivableGateId) =>
-  nativeNextCommand('workflow_task_control', 'waive', 'task-action waive', {
-    runId,
-    callerCwd,
-    gate,
-    reason: '<reason>',
-    userAuthority: '<userAuthority>',
-  });

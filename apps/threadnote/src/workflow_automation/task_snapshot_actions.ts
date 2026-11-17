@@ -1,7 +1,12 @@
 import {Array as EffectArray, Option as EffectOption, Effect, String as EffectString} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {decodeNativeTaskActionRef, nativeTaskSnapshotId} from '@threadnote/workflow-automations/task';
-import {nativeNextCommand, nativeRefusal, nativeWorkflowPolicyOf} from '@threadnote/workflow-automations/gates';
+import {
+  nativeNext,
+  nativeNextCommand,
+  nativeRefusal,
+  nativeWorkflowPolicyOf,
+} from '@threadnote/workflow-automations/gates';
 import {recordNativeTaskTreeSnapshot} from './task_tree_snapshot_action.js';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
@@ -156,10 +161,7 @@ export const runNativeTaskSnapshotAction = (
         'invalid-work-ref',
         'A strict-profile snapshot records the source of an admitted work packet; prepare one first.',
         {
-          next: nativeNextCommand('workflow_task_work', 'work', 'task-action work', {
-            runId: request.runId,
-            callerCwd: checkout,
-          }),
+          next: nativeNext.work({runId: request.runId, callerCwd: checkout}),
         },
       );
     const ref = decodeNativeTaskActionRef(request.workRef);
@@ -204,10 +206,16 @@ export const runNativeTaskSnapshotAction = (
               ? nativeNextCommand(
                   'workflow_task_snapshot',
                   'supersede-unreviewed',
-                  'task-action supersede-unreviewed-snapshot',
-                  {...scope, snapshotRef: '<snapshotRef>', reason: '<reason>'},
+                  {
+                    command: 'task-action supersede-unreviewed-snapshot',
+                    flags: {...scope, snapshotRef: '<snapshotRef>', reason: '<reason>'},
+                  },
+                  {
+                    ...scope,
+                    snapshot: {command: 'supersede-unreviewed', snapshotRef: '<snapshotRef>', reason: '<reason>'},
+                  },
                 )
-              : nativeNextCommand('workflow_task_work', 'work', 'task-action work', scope),
+              : nativeNext.work(scope),
           },
         );
       }

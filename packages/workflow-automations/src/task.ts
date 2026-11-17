@@ -70,6 +70,7 @@ export interface NativeTaskView {
   readonly featureId: string;
   readonly objective: string;
   readonly policy?: 'standard' | 'strict';
+  readonly delivery?: 'local' | 'commit' | 'pr';
   readonly next: {
     readonly action: string;
     readonly phaseId?: string;
@@ -940,7 +941,11 @@ export function projectNativeTaskView(
   options: NativeTaskProjectionOptions = {},
 ): NativeTaskView {
   const core = projectNativeTaskCoreView(state, revision, options);
-  const view = state.policy ? {...core, policy: state.policy.mode} : core;
+  const view = {
+    ...core,
+    ...(state.policy ? {policy: state.policy.mode} : {}),
+    ...(state.cycle ? {delivery: state.cycle.state.plan.delivery} : {}),
+  };
   if (options.candidateWatches === undefined) return view;
   const rows = options.candidateWatches;
   const offset = view.page.offset;

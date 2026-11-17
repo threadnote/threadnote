@@ -1,4 +1,5 @@
-import {Array as EffectArray, Effect} from 'effect';
+import {Array as EffectArray, Effect, Predicate, String as EffectString} from 'effect';
+import * as EffectRecord from 'effect/Record';
 import {TestClock} from 'effect/testing';
 import {it as effectIt} from '@effect/vitest';
 import {describe, expect} from 'vitest';
@@ -374,7 +375,11 @@ describe('actionable refusals', () => {
         report: {},
       }).pipe(Effect.flip);
       expect(refusal).toMatchObject({
-        next: {tool: 'workflow_task_snapshot', command: 'record', args: {runId: 'native-run', callerCwd: f.repo}},
+        next: {
+          tool: 'workflow_task_snapshot',
+          command: 'record',
+          arguments: {runId: 'native-run', callerCwd: f.repo, snapshot: {command: 'record'}},
+        },
       });
       expect(refusal.next?.cli).toContain('task-action record-snapshot --run-id native-run');
     }).pipe(runCycle),
@@ -426,7 +431,7 @@ describe('audited waivers', () => {
       expect(yield* validate().pipe(Effect.flip)).toMatchObject({
         code: 'review-pending',
         gate: 'review.required',
-        next: {tool: 'workflow_task_control', command: 'waive', args: {gate: 'review.required'}},
+        next: {tool: 'workflow_task_control', command: 'waive', arguments: {control: {gate: 'review.required'}}},
       });
       const first = yield* waive(f);
       expect(first).toMatchObject({status: 'waived', replayed: false, waiver: {gate: 'review.required'}});
@@ -442,6 +447,68 @@ describe('audited waivers', () => {
         }),
       );
       expect(delivered).toMatchObject({status: 'delivered', waivers: [first.waiver]});
+    }).pipe(runCycle),
+  );
+
+  effectIt.effect('lets an MCP caller run the next command of a refusal as given', () =>
+    Effect.gen(function* () {
+      const f = yield* cycleFixture(
+        ['one'],
+        'local',
+        false,
+        false,
+        true,
+        undefined,
+        undefined,
+        {},
+        {policy: 'standard'},
+      );
+      const mcp = new EffectMcpServerAdapter('test', '1', 'workflow next fixture');
+      registerWorkflowTaskTool(mcp, f.config);
+      const invoke = (tool: string, input: unknown) =>
+        mcp.invokeTool(tool, object(input)).pipe(
+          Effect.matchCauseEffect({onFailure: mcpToolFailureResult, onSuccess: Effect.succeed}),
+          Effect.map(result => object(object(result).structuredContent)),
+        );
+      const fill = (value: unknown, values: Readonly<Record<string, string>>): unknown =>
+        typeof value === 'string' && /^<[A-Za-z]+>$/u.test(value)
+          ? (values[EffectString.slice(1, -1)(value)] ?? value)
+          : EffectArray.isArray(value)
+            ? EffectArray.map(value, item => fill(item, values))
+            : Predicate.isObject(value)
+              ? EffectRecord.map(value as Record<string, unknown>, item => fill(item, values))
+              : value;
+      const scope = {runId: 'native-run', callerCwd: f.repo};
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = 1;\n');
+      yield* f.git(['commit', '-qam', 'one']);
+      const recorded = yield* invoke('workflow_task_snapshot', {...scope, snapshot: {command: 'record'}});
+      const refused = yield* invoke('workflow_task_record_validation', {
+        ...scope,
+        snapshotRef: recorded.snapshotRef,
+        ...validation,
+      });
+      expect(refused).toMatchObject({code: 'review-pending', next: {tool: 'workflow_task_control'}});
+      const taskRef = String((yield* readNativeTaskView(f.config, scope)).taskRef);
+      const next = object(refused.next);
+      const authority = {taskRef, reason: 'No reviewer is available.', userAuthority: 'User: ship it unreviewed.'};
+      expect(yield* invoke(String(next.tool), fill(next.arguments, authority))).toMatchObject({status: 'waived'});
+      const card = yield* invoke('workflow_task_view', scope);
+      expect(card.next).toMatchObject({
+        action: 'validate',
+        tool: 'workflow_task_record_validation',
+        arguments: {...scope, snapshotRef: '<snapshotRef>', checks: '<checks>', acceptance: '<acceptance>'},
+      });
+      const control = (profile: 'standard' | 'strict') => ({
+        ...scope,
+        taskRef,
+        control: {command: 'set-profile', profile, reason: 'Release work needs every gate.'},
+      });
+      expect(yield* invoke('workflow_task_control', control('strict'))).toMatchObject({status: 'changed'});
+      const loosen = object((yield* invoke('workflow_task_control', control('standard'))).next);
+      expect(yield* invoke(String(loosen.tool), fill(loosen.arguments, authority))).toMatchObject({
+        status: 'changed',
+        profile: 'standard',
+      });
     }).pipe(runCycle),
   );
 

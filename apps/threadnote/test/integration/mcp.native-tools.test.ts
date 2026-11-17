@@ -730,9 +730,11 @@ describe('Threadnote MCP toolsets', () => {
           'reopen',
           'reconcile',
           'waive',
+          'set-profile',
           'extend-review-budget',
         ]);
         expect(variantsByCommand.get('waive')?.required).toEqual(['command', 'gate', 'reason', 'userAuthority']);
+        expect(variantsByCommand.get('set-profile')?.required).toEqual(['command', 'profile', 'reason']);
         for (const field of ['runId', 'callerCwd', 'taskRef'])
           expect(controlProperties[field]).toMatchObject({type: 'string', minLength: 1});
         expect(variantsByCommand.get('begin')?.required).toEqual(['command']);
@@ -883,8 +885,8 @@ describe('Threadnote MCP toolsets', () => {
         expect(Buffer.byteLength(JSON.stringify(status))).toBeLessThanOrEqual(500);
         expect(Buffer.byteLength(JSON.stringify(withoutWorkflowTaskTools))).toBeLessThanOrEqual(36_500);
         expect(Buffer.byteLength(JSON.stringify(withoutMutatingWorkflowTaskTools))).toBeLessThanOrEqual(37_200);
-        // Semantic task bootstrap adds one tool beyond compact authoring, and the audited gate waiver adds one control
-        // variant; keep the additive catalog budget explicit.
+        // Semantic task bootstrap adds one tool beyond compact authoring, and the review waiver and run profile add
+        // control variants; keep the additive catalog budget explicit.
         const totalCatalogBytes = Buffer.byteLength(JSON.stringify(tools.tools));
         expect(totalCatalogBytes).toBeLessThanOrEqual(65_200);
         expect(

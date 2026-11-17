@@ -1,4 +1,4 @@
-import {nativeWorkflowPolicies, nativeNextCommand, withNativeNext} from '@threadnote/workflow-automations/gates';
+import {nativeWorkflowPolicies, nativeNext, withNativeNext} from '@threadnote/workflow-automations/gates';
 import {
   Array as A,
   Effect,
@@ -983,8 +983,8 @@ const withAuthoringNext = (error: WorkflowAutomationError, input: unknown) =>
     ? error
     : withNativeNext(
         error,
-        nativeNextCommand('workflow_task_author', 'read', 'task-author --operation read', {
-          callerCwd: input.callerCwd,
-          authoringRef: typeof input.authoringRef === 'string' ? input.authoringRef : '<authoringRef>',
-        }),
+        nativeNext.authoringRead(
+          input.callerCwd,
+          typeof input.authoringRef === 'string' ? input.authoringRef : '<authoringRef>',
+        ),
       );

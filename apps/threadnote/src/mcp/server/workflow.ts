@@ -16,6 +16,7 @@ import {NativeCycleReviewSchema} from '@threadnote/workflow-automations/cycle-re
 import {NativeCycleValidationSchema} from '@threadnote/workflow-automations/cycle';
 import {NativeTaskAnchorSchema} from '@threadnote/workflow-automations/task';
 import {NativeCompactIntentSchema} from '@threadnote/workflow-automations/authoring';
+import {nativeNextForTaskAction, nativeWorkflowPolicies} from '@threadnote/workflow-automations/gates';
 import type {RuntimeConfig} from './common.js';
 import type {EffectMcpServerAdapter} from '../../effect/ai/mcp.js';
 
@@ -205,36 +206,11 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
         ...(detail === undefined ? {} : {detail}),
         ...(outputKey === undefined ? {} : {outputKey}),
       });
-      const nextTool =
-        result.next.action === 'deliver'
-          ? {
-              tool: 'workflow_task_deliver',
-              guidance: 'Choose local, commit, or pr to match the approved plan.',
-            }
-          : result.next.action === 'validate'
-            ? {
-                tool: 'workflow_task_record_validation',
-                guidance: 'Record passed checks and acceptance for the reviewed snapshotRef.',
-              }
-            : result.next.action === 'review'
-              ? {
-                  tool: 'workflow_task_record_review',
-                  guidance: 'Record the independent review for this snapshotRef.',
-                }
-              : result.next.action === 'implement'
-                ? {
-                    tool: 'workflow_task_snapshot',
-                    guidance:
-                      'After work, record the source; supersede-unreviewed is only for its eligible latest snapshot.',
-                  }
-                : result.next.action === 'complete'
-                  ? {
-                      tool: 'workflow_task_finish',
-                      guidance:
-                        'Finish an eligible completed cycle; PR delivery requires a merged, source-complete terminal watch.',
-                    }
-                  : undefined;
-      const response = nextTool ? {...result, next: {...result.next, ...nextTool}} : result;
+      const next = nativeNextForTaskAction(result.next.action, runId, callerCwd, result.delivery);
+      const response =
+        next.tool === 'workflow_task_view'
+          ? result
+          : {...result, next: {...result.next, tool: next.tool, arguments: next.arguments}};
       const text = JSON.stringify(response);
       return {content: [{type: 'text' as const, text}], structuredContent: response};
     }),
@@ -287,7 +263,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Phase control: begin, reopen after failure, resume after dependencies, reconcile the ready plan, extend the review budget, or waive one gate for the current tree. Authority is caller-asserted.',
+        'Phase control: lifecycle, plan reconcile, review budget, review waiver, run profile. Authority is caller-asserted.',
       inputSchema: {
         runId: McpInput.requiredString(),
         callerCwd: McpInput.requiredString(),
@@ -317,12 +293,16 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
             userAuthority: McpInput.requiredString(),
           }),
           Schema.Struct({
+            command: Schema.Literal('set-profile'),
+            profile: Schema.Literals(nativeWorkflowPolicies),
+            reason: McpInput.requiredString(),
+            userAuthority: McpInput.string(),
+          }),
+          Schema.Struct({
             command: Schema.Literal('extend-review-budget'),
             additionalReviews: Schema.Finite.check(Schema.isInt(), Schema.isBetween({minimum: 1, maximum: 251})),
             reason: McpInput.requiredString(),
-            userAuthority: McpInput.requiredString(
-              'Caller-provided human authority; actor identity is not authenticated',
-            ),
+            userAuthority: McpInput.requiredString(),
           }),
         ]).pipe(Schema.toTaggedUnion('command')),
       },
@@ -335,33 +315,42 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
             ? {command: control.command, runId, callerCwd, taskRef, reason: control.reason}
             : control.command === 'reopen'
               ? {command: control.command, runId, callerCwd, taskRef, phaseId: control.phaseId, reason: control.reason}
-              : control.command === 'waive'
+              : control.command === 'set-profile'
                 ? {
                     command: control.command,
                     runId,
                     callerCwd,
-                    gate: control.gate,
+                    profile: control.profile,
                     reason: control.reason,
-                    userAuthority: control.userAuthority,
+                    ...(control.userAuthority === undefined ? {} : {userAuthority: control.userAuthority}),
                   }
-                : control.command === 'reconcile'
+                : control.command === 'waive'
                   ? {
                       command: control.command,
                       runId,
                       callerCwd,
-                      taskRef,
-                      reason: control.reason,
-                      ...(control.bindings === undefined ? {} : {bindings: control.bindings}),
-                    }
-                  : {
-                      command: control.command,
-                      runId,
-                      callerCwd,
-                      taskRef,
-                      additionalReviews: control.additionalReviews,
+                      gate: control.gate,
                       reason: control.reason,
                       userAuthority: control.userAuthority,
-                    };
+                    }
+                  : control.command === 'reconcile'
+                    ? {
+                        command: control.command,
+                        runId,
+                        callerCwd,
+                        taskRef,
+                        reason: control.reason,
+                        ...(control.bindings === undefined ? {} : {bindings: control.bindings}),
+                      }
+                    : {
+                        command: control.command,
+                        runId,
+                        callerCwd,
+                        taskRef,
+                        additionalReviews: control.additionalReviews,
+                        reason: control.reason,
+                        userAuthority: control.userAuthority,
+                      };
       const result = yield* runNativeTaskAction(config, request);
       return {content: [{type: 'text' as const, text: JSON.stringify(result)}], structuredContent: result};
     }),
@@ -371,7 +360,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Record the current tree; the newest snapshot supersedes an unreviewed one. Strict recovery: supersede, rebase recovery, base or invalid-tail requalification.',
+        'Record the current tree; the newest snapshot supersedes an unreviewed one. Strict recovery: supersede, rebase, base or invalid-tail requalification.',
       inputSchema: {
         runId: McpInput.requiredString(),
         callerCwd: McpInput.requiredString(),

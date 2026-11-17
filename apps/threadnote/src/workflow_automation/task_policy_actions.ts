@@ -1,9 +1,9 @@
 import {Array as EffectArray, Effect, Option as EffectOption, String as EffectString} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
+  nativeControlNext,
   nativeRefusal,
   nativeTaskViewNext,
-  nativeNextCommand,
   nativeWorkflowPolicyOf,
 } from '@threadnote/workflow-automations/gates';
 import {readNativeWorkflowState, withNativeWorkflowLock, writeNativeWorkflowState} from './store.js';
@@ -98,13 +98,12 @@ export const runNativeTaskSetProfile = (
         'profile-authority-required',
         'Loosening a run to the standard profile needs the user’s explicit authority statement.',
         {
-          next: nativeNextCommand('workflow_task_control', 'set-profile', 'task-action set-profile', {
-            runId: request.runId,
-            callerCwd: checkout,
-            profile: request.profile,
-            reason: request.reason,
-            userAuthority: '<userAuthority>',
-          }),
+          next: nativeControlNext(
+            {runId: request.runId, callerCwd: checkout},
+            'set-profile',
+            {profile: request.profile, reason: request.reason, userAuthority: '<userAuthority>'},
+            false,
+          ),
         },
       );
     const policy = {

@@ -80,7 +80,7 @@ import {
   nativeTaskViewNext,
   nativeWorkflowPolicyOf,
   nativeRefusal,
-  nativeTaskWaiveNext,
+  nativeNext,
   nativeWaivableGateIds,
 } from '@threadnote/workflow-automations/gates';
 import * as EffectRecord from 'effect/Record';
@@ -1356,7 +1356,7 @@ export const runNativeCycle = <R>(
             'review.required',
             report ? undefined : {},
             nativeCycleWaiverFor(runtime, 'review.required', entry.snapshot),
-            nativeTaskWaiveNext(request.runId, repo, 'review.required'),
+            nativeNext.waive({runId: request.runId, callerCwd: repo}, 'review.required'),
           );
           if (reviewDecision._tag === 'refuse')
             return yield* nativeGateRefusal(
@@ -1378,7 +1378,7 @@ export const runNativeCycle = <R>(
             'review.blocking',
             reviewed?.summary.blockingIssueCount ? {} : undefined,
             nativeCycleWaiverFor(runtime, 'review.blocking', entry.snapshot),
-            nativeTaskWaiveNext(request.runId, repo, 'review.blocking'),
+            nativeNext.waive({runId: request.runId, callerCwd: repo}, 'review.blocking'),
           );
           if (blockingDecision._tag === 'refuse')
             return yield* nativeGateRefusal(

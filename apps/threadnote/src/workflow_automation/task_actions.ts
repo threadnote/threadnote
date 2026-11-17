@@ -6,7 +6,7 @@ import {
   withNativeNext,
   decideGate,
   nativeGateRefusal,
-  nativeTaskWaiveNext,
+  nativeNext,
   nativeWaivableGateIds,
   nativeWorkflowPolicies,
 } from '@threadnote/workflow-automations/gates';
@@ -691,6 +691,7 @@ const withTaskNext = (config: RuntimeConfig, input: unknown, cause: unknown) =>
             projectNativeTaskView(current.value.state, current.value.revision).next.action,
             runId,
             callerCwd,
+            current.value.state.cycle?.state.plan.delivery,
           )
         : nativeTaskViewNext(runId, callerCwd),
     );
@@ -1509,7 +1510,7 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
         'review.required',
         report ? undefined : {},
         nativeCycleWaiverFor(runtime, 'review.required', entry.snapshot),
-        nativeTaskWaiveNext(request.runId, checkout, 'review.required'),
+        nativeNext.waive({runId: request.runId, callerCwd: checkout}, 'review.required'),
       );
       if (reviewDecision._tag === 'refuse')
         return yield* nativeGateRefusal(

@@ -52,18 +52,19 @@ describe('dev-cycle gate decisions', () => {
     expect(nativeWorkflowPolicyOf({policy: {mode: 'standard'}})).toBe('standard');
   });
 
-  it('renders the next command for the CLI with placeholders for unknown values', () => {
+  it('renders a next command for MCP and for the CLI with placeholders for unknown values', () => {
     expect(
-      nativeNextCommand('workflow_task_snapshot', 'record', 'task-action record-snapshot', {
-        runId: 'run-1',
-        callerCwd: '/a b',
-        reason: '<reason>',
-      }),
+      nativeNextCommand(
+        'workflow_task_snapshot',
+        'record',
+        {command: 'task-action record-snapshot', flags: {runId: 'run-1', callerCwd: '/a b', reason: '<reason>'}},
+        {runId: 'run-1', callerCwd: '/a b', snapshot: {command: 'record', reason: '<reason>'}},
+      ),
     ).toEqual({
       tool: 'workflow_task_snapshot',
       command: 'record',
       cli: 'threadnote workflow-automation task-action record-snapshot --run-id run-1 --caller-cwd "/a b" --reason <reason>',
-      args: {runId: 'run-1', callerCwd: '/a b', reason: '<reason>'},
+      arguments: {runId: 'run-1', callerCwd: '/a b', snapshot: {command: 'record', reason: '<reason>'}},
     });
   });
 });
