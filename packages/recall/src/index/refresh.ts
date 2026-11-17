@@ -499,6 +499,40 @@ function recallTouchedSourceParentPrefix(rootUri: string, segments: readonly str
   return segments.length <= 1 ? `${rootUri}/` : `${rootUri}/${EffectArray.join(segments.slice(0, -1), '/')}/`;
 }
 
+/** Indexed ASCII case aliases for one path segment. Mixed interior case is not enumerated. */
+function recallAsciiCaseVariants(segment: string): readonly string[] {
+  const variants = new Set<string>();
+  const consider = (variant: string) => {
+    if (variant !== segment) variants.add(variant);
+  };
+  consider(EffectString.toLowerCase(segment));
+  consider(EffectString.toUpperCase(segment));
+  consider(EffectString.capitalize(EffectString.toLowerCase(segment)));
+  return EffectArray.fromIterable(variants);
+}
+
+/**
+ * One tight URI range per ancestor segment. `dir/new.md` probes `Dir/` and `DIR/`
+ * without scanning every document under the resource root.
+ */
+function recallCaseFlippedLocatorPrefixes(
+  rootUri: string,
+  segments: readonly string[],
+): readonly {readonly directory: boolean; readonly uri: string}[] {
+  const prefixes: {readonly directory: boolean; readonly uri: string}[] = [];
+  for (let index = 0; index < segments.length; index++) {
+    for (const variant of recallAsciiCaseVariants(segments[index])) {
+      const parts: string[] = [];
+      for (let part = 0; part <= index; part++) parts.push(part === index ? variant : segments[part]);
+      prefixes.push({
+        directory: index < segments.length - 1,
+        uri: `${rootUri}/${EffectArray.join(parts, '/')}`,
+      });
+    }
+  }
+  return prefixes;
+}
+
 function recallTouchedSourceNeedsCorpusAliasProbe(segments: readonly string[]) {
   return EffectArray.some(
     segments,
@@ -514,59 +548,31 @@ const probeTouchedRecallSourceCorpusAliases = Effect.fn('recall.probeTouchedCorp
   ambiguousTargets: Set<string>,
 ) {
   for (const [uri, target] of targets) {
-    const rootPrefix = `${target.root.uri}/`;
-    const escapedRoot = EffectString.replaceAll(
-      '_',
-      '\\_',
-    )(EffectString.replaceAll('%', '\\%')(EffectString.replaceAll('\\', '\\\\')(rootPrefix)));
-    const rootVariants = yield* sql.unsafe<{readonly uri: string}>(
-      `SELECT uri FROM documents
-       WHERE lower(uri) LIKE lower(?) ESCAPE '\\'
-       ORDER BY uri COLLATE BINARY
-       LIMIT ?`,
-      [`${escapedRoot}%`, RECALL_REFRESH_SOURCE_PAGE_SIZE + 1],
-    );
-    if (rootVariants.length > RECALL_REFRESH_SOURCE_PAGE_SIZE) return false;
-    for (const row of rootVariants) {
-      if (row.uri === uri) continue;
-      const alias = folded.get(EffectString.toLowerCase(row.uri));
-      if (alias !== undefined && alias !== row.uri) return false;
-      const root = EffectArray.findFirst(roots, candidate => EffectString.startsWith(candidate.uri + '/')(row.uri));
-      if (Option.isNone(root)) continue;
-      const id = yield* Effect.try(() => parseResourceId(row.uri)).pipe(Effect.option);
-      if (Option.isNone(id)) return false;
-      const segments = id.value.segments.slice(root.value.id.segments.length);
-      if (target.root.uri === root.value.uri && recallSourcePathsMayAlias(segments, target.segments))
-        ambiguousTargets.add(uri);
+    for (const prefix of recallCaseFlippedLocatorPrefixes(target.root.uri, target.segments)) {
+      const start = prefix.directory ? `${prefix.uri}/` : prefix.uri;
+      const caseVariants = yield* sql.unsafe<{readonly uri: string}>(
+        `SELECT uri FROM documents
+         WHERE uri >= ? AND uri < ?
+         ORDER BY uri
+         LIMIT ?`,
+        [start, `${start}\u{10ffff}`, RECALL_REFRESH_SOURCE_PAGE_SIZE + 1],
+      );
+      if (caseVariants.length > RECALL_REFRESH_SOURCE_PAGE_SIZE) return false;
+      for (const row of caseVariants) {
+        if (row.uri === uri) continue;
+        const alias = folded.get(EffectString.toLowerCase(row.uri));
+        if (alias !== undefined && alias !== row.uri) return false;
+        const root = EffectArray.findFirst(roots, candidate => EffectString.startsWith(candidate.uri + '/')(row.uri));
+        if (Option.isNone(root)) return false;
+        const id = yield* Effect.try(() => parseResourceId(row.uri)).pipe(Effect.option);
+        if (Option.isNone(id)) return false;
+        const segments = id.value.segments.slice(root.value.id.segments.length);
+        if (target.root.uri === root.value.uri && recallSourcePathsMayAlias(segments, target.segments))
+          ambiguousTargets.add(uri);
+      }
     }
     const parentPrefix = recallTouchedSourceParentPrefix(target.root.uri, target.segments);
     const upperBound = `${parentPrefix}\u{10ffff}`;
-    const caseFoldedParent = yield* sql.unsafe<{readonly uri: string}>(
-      `SELECT uri FROM documents
-       WHERE uri LIKE ? ESCAPE '\\'
-         AND NOT (uri COLLATE BINARY >= ? COLLATE BINARY AND uri COLLATE BINARY < ? COLLATE BINARY)
-       ORDER BY uri COLLATE BINARY
-       LIMIT ?`,
-      [
-        `${EffectString.replaceAll('_', '\\_')(EffectString.replaceAll('%', '\\%')(EffectString.replaceAll('\\', '\\\\')(parentPrefix)))}%`,
-        parentPrefix,
-        upperBound,
-        RECALL_REFRESH_SOURCE_PAGE_SIZE,
-      ],
-    );
-    if (caseFoldedParent.length === RECALL_REFRESH_SOURCE_PAGE_SIZE) return false;
-    for (const row of caseFoldedParent) {
-      if (row.uri === uri) continue;
-      const alias = folded.get(EffectString.toLowerCase(row.uri));
-      if (alias !== undefined && alias !== row.uri) return false;
-      const root = EffectArray.findFirst(roots, root => EffectString.startsWith(root.uri + '/')(row.uri));
-      if (Option.isNone(root)) return false;
-      const id = yield* Effect.try(() => parseResourceId(row.uri)).pipe(Effect.option);
-      if (Option.isNone(id)) return false;
-      const segments = id.value.segments.slice(root.value.id.segments.length);
-      if (target.root.uri === root.value.uri && recallSourcePathsMayAlias(segments, target.segments))
-        ambiguousTargets.add(uri);
-    }
     let cursor = parentPrefix;
     let rows: readonly {readonly uri: string}[];
     for (;;) {

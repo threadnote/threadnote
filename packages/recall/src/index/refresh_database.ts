@@ -298,6 +298,14 @@ export const publishPreparedRecallDatabase = Effect.fn('recall.publishPreparedDa
 ) {
   const {staleGeneration, canonicalMutationGeneration, sourceScan, contentGeneration, previousValidatedAt, now} =
     prepared;
+  const removedLocators = sourceScan.inventoryComplete
+    ? []
+    : yield* sql.unsafe<{readonly memory_id: string | null; readonly uri: string}>(
+        `SELECT document.uri AS uri, document.memory_id AS memory_id
+         FROM documents AS document
+         INNER JOIN temp.${RECALL_REFRESH_REPLACED_DOCUMENT_TABLE} AS replaced
+           ON replaced.document_id = document.id`,
+      );
   yield* sql.unsafe(`
     DELETE FROM exact_search
     WHERE rowid IN (SELECT document_id FROM temp.${RECALL_REFRESH_REPLACED_DOCUMENT_TABLE})
@@ -400,8 +408,11 @@ export const publishPreparedRecallDatabase = Effect.fn('recall.publishPreparedDa
     ORDER BY posting.term COLLATE BINARY, document.id
   `);
   yield* RecallIndexIdentity.rebuildRecallIdentityConflicts(sql);
-  if (!sourceScan.inventoryComplete) yield* stageUnchangedRecallLocatorDigests(sql);
-  yield* resolveLegacyRecallMemoryLinks(sql, includeInactive, {kind: 'full'});
+  if (sourceScan.inventoryComplete) yield* resolveLegacyRecallMemoryLinks(sql, includeInactive, {kind: 'full'});
+  else {
+    const touchedLinks = yield* stageTouchedRecallLinkTargets(sql, removedLocators);
+    yield* resolveLegacyRecallMemoryLinks(sql, includeInactive, touchedLinks);
+  }
   yield* sql.unsafe(`
     DELETE FROM term_statistics
     WHERE term IN (SELECT term FROM temp.${RECALL_REFRESH_AFFECTED_TERM_TABLE})
@@ -472,20 +483,95 @@ export const publishPreparedRecallDatabase = Effect.fn('recall.publishPreparedDa
   return documentCount;
 });
 
+const RECALL_LEGACY_LINK_BATCH = 200;
+const recallSqlPlaceholders = (count: number) =>
+  EffectArray.join(
+    EffectArray.makeBy(count, () => '?'),
+    ', ',
+  );
+
 /**
- * Legacy URI edges retain only a locator digest. Re-resolve every such row
- * against the exact corpus staged for this database so target add/delete/move
- * operations converge with a clean rebuild even when the source is unchanged.
+ * A touched publish must re-resolve legacy edges whose target URI, memory id,
+ * or uniqueness changed, including backlinks from sources that were not
+ * rewritten. Only those target rows are read. The covering URI index is walked
+ * only to invert a digest that is not already known from the change set.
  */
-const stageUnchangedRecallLocatorDigests = Effect.fn('recall.stageUnchangedLocatorDigests')(function* (
+const stageTouchedRecallLinkTargets = Effect.fn('recall.stageTouchedLinkTargets')(function* (
   sql: SqlClient.SqlClient,
+  removed: readonly {readonly memory_id: string | null; readonly uri: string}[],
 ) {
   const legacy = yield* sql.unsafe<{readonly present: number}>(
     "SELECT 1 AS present FROM memory_links WHERE target_locator_digest <> '' LIMIT 1",
   );
-  if (legacy.length === 0) return;
-  let cursor = '';
-  for (;;) {
+  if (legacy.length === 0) return {kind: 'touched' as const, uris: [], digests: []};
+  const digests = new Set<string>();
+  const knownUris = new Set<string>();
+  const stageUris = new Set<string>();
+  for (const row of removed) {
+    digests.add(memoryLinkLocatorDigest(row.uri));
+    knownUris.add(row.uri);
+  }
+  const inserted = yield* sql.unsafe<{readonly memory_id: string | null; readonly uri: string}>(
+    `SELECT uri, memory_id FROM temp.${RECALL_REFRESH_INDEXED_DOCUMENT_TABLE}`,
+  );
+  for (const row of inserted) {
+    digests.add(memoryLinkLocatorDigest(row.uri));
+    knownUris.add(row.uri);
+  }
+  const memoryIds = EffectArray.dedupe(
+    EffectArray.filter(
+      EffectArray.appendAll(
+        EffectArray.map(removed, row => row.memory_id ?? ''),
+        EffectArray.map(inserted, row => row.memory_id ?? ''),
+      ),
+      id => id !== '',
+    ),
+  );
+  for (const batch of EffectArray.chunksOf(memoryIds, RECALL_LEGACY_LINK_BATCH)) {
+    const survivors = yield* sql.unsafe<{readonly uri: string}>(
+      `SELECT uri FROM documents WHERE memory_id IN (${recallSqlPlaceholders(batch.length)})`,
+      batch,
+    );
+    for (const survivor of survivors) {
+      digests.add(memoryLinkLocatorDigest(survivor.uri));
+      knownUris.add(survivor.uri);
+      stageUris.add(survivor.uri);
+    }
+  }
+  const linkDigests = yield* sql.unsafe<{readonly digest: string}>(
+    `SELECT DISTINCT target_locator_digest AS digest
+     FROM memory_links
+     WHERE target_locator_digest <> ''
+       AND source_uri IN (
+         SELECT uri FROM temp.${RECALL_REFRESH_SOURCE_TABLE} WHERE invalidated = 1
+       )`,
+  );
+  for (const row of linkDigests) digests.add(row.digest);
+  const unresolved = new Set(digests);
+  for (const uri of knownUris) unresolved.delete(memoryLinkLocatorDigest(uri));
+  if (unresolved.size > 0) {
+    let cursor = '';
+    for (;;) {
+      const rows = yield* sql.unsafe<{readonly uri: string}>(
+        `SELECT uri FROM documents WHERE uri > ? ORDER BY uri LIMIT 512`,
+        [cursor],
+      );
+      if (rows.length === 0) break;
+      for (const row of rows) {
+        const digest = memoryLinkLocatorDigest(row.uri);
+        if (!unresolved.has(digest)) continue;
+        unresolved.delete(digest);
+        stageUris.add(row.uri);
+      }
+      const last = rows[rows.length - 1];
+      if (unresolved.size === 0 || rows.length < 512 || last === undefined) break;
+      cursor = last.uri;
+    }
+  }
+  const insertedUris = new Set(EffectArray.map(inserted, row => row.uri));
+  const removedUris = new Set(EffectArray.map(removed, row => row.uri));
+  const toStage = EffectArray.filter([...stageUris], uri => !insertedUris.has(uri) && !removedUris.has(uri));
+  for (const batch of EffectArray.chunksOf(toStage, 80)) {
     const rows = yield* sql.unsafe<{
       readonly authority_policy_key: string | null;
       readonly source_modified_at: string | null;
@@ -495,21 +581,18 @@ const stageUnchangedRecallLocatorDigests = Effect.fn('recall.stageUnchangedLocat
     }>(
       `SELECT uri, source_path, source_modified_at, source_size, authority_policy_key
        FROM documents
-       WHERE uri > ?
-         AND uri NOT IN (SELECT uri FROM temp.${RECALL_REFRESH_SOURCE_TABLE})
-       ORDER BY uri
-       LIMIT 256`,
-      [cursor],
+       WHERE uri IN (${recallSqlPlaceholders(batch.length)})
+         AND uri NOT IN (SELECT uri FROM temp.${RECALL_REFRESH_SOURCE_TABLE})`,
+      batch,
     );
-    if (rows.length === 0) return;
-    const placeholders = EffectArray.join(
-      EffectArray.map(rows, () => '(?, ?, ?, ?, ?, ?, 0)'),
-      ', ',
-    );
+    if (rows.length === 0) continue;
     yield* sql.unsafe(
       `INSERT OR IGNORE INTO temp.${RECALL_REFRESH_SOURCE_TABLE} (
         uri, uri_locator_digest, source_path, source_modified_at, source_size, authority_policy_key, invalidated
-      ) VALUES ${placeholders}`,
+      ) VALUES ${EffectArray.join(
+        EffectArray.map(rows, () => '(?, ?, ?, ?, ?, ?, 0)'),
+        ', ',
+      )}`,
       EffectArray.flatMap(rows, row => [
         row.uri,
         memoryLinkLocatorDigest(row.uri),
@@ -519,16 +602,23 @@ const stageUnchangedRecallLocatorDigests = Effect.fn('recall.stageUnchangedLocat
         row.authority_policy_key,
       ]),
     );
-    const last = rows[rows.length - 1];
-    if (rows.length < 256 || last === undefined) return;
-    cursor = last.uri;
   }
+  const touched = yield* sql.unsafe<{readonly uri: string}>(
+    `SELECT uri FROM temp.${RECALL_REFRESH_SOURCE_TABLE} WHERE invalidated = 1 ORDER BY uri`,
+  );
+  return {
+    kind: 'touched' as const,
+    uris: EffectArray.map(touched, row => row.uri),
+    digests: [...digests],
+  };
 });
 
 export const resolveLegacyRecallMemoryLinks = Effect.fn('recall.resolveLegacyMemoryLinks')(function* (
   sql: SqlClient.SqlClient,
   includeInactive: boolean,
-  scope: {readonly kind: 'full'} | {readonly kind: 'touched'; readonly uris: readonly string[]},
+  scope:
+    | {readonly kind: 'full'}
+    | {readonly kind: 'touched'; readonly digests?: readonly string[]; readonly uris: readonly string[]},
 ) {
   const inactivePredicate = includeInactive
     ? ''
@@ -563,20 +653,13 @@ export const resolveLegacyRecallMemoryLinks = Effect.fn('recall.resolveLegacyMem
       ) = 1
     ORDER BY target.uri COLLATE BINARY
     LIMIT 1)`;
-  if (scope.kind === 'touched' && scope.uris.length === 0) return;
-  const touchedParameters =
-    scope.kind === 'touched'
-      ? EffectArray.join(
-          EffectArray.map(scope.uris, () => '?'),
-          ', ',
-        )
-      : '';
-  const updateScope =
-    scope.kind === 'full'
-      ? ''
-      : `
-      AND (
-        source_uri IN (${touchedParameters})
+  if (
+    scope.kind === 'touched' &&
+    scope.uris.length === 0 &&
+    (scope.digests === undefined || scope.digests.length === 0)
+  )
+    return;
+  const existsScope = `
         OR EXISTS (
           SELECT 1
           FROM temp.${RECALL_REFRESH_SOURCE_TABLE} AS changed
@@ -597,16 +680,43 @@ export const resolveLegacyRecallMemoryLinks = Effect.fn('recall.resolveLegacyMem
                 ) > 1
               )
             )
+        )`;
+  const updateLegacyLinks = (uris: readonly string[], digests: readonly string[]) => {
+    const sourceClause = uris.length === 0 ? '0' : `source_uri IN (${recallSqlPlaceholders(uris.length)})`;
+    const digestClause =
+      digests.length === 0 ? '' : `OR target_locator_digest IN (${recallSqlPlaceholders(digests.length)})`;
+    return sql.unsafe(
+      `
+      UPDATE memory_links
+      SET target_memory_id = COALESCE(${resolvedTarget}, '')
+      WHERE target_locator_digest <> ''
+        AND target_memory_id <> COALESCE(${resolvedTarget}, '')
+        AND (
+          ${sourceClause}
+          ${digestClause}
+          ${existsScope}
         )
-      )`;
-  yield* sql.unsafe(
-    `
-    UPDATE memory_links
-    SET target_memory_id = COALESCE(${resolvedTarget}, '')
-    WHERE target_locator_digest <> ''
-      AND target_memory_id <> COALESCE(${resolvedTarget}, '')
-      ${updateScope}
-  `,
-    scope.kind === 'touched' ? scope.uris : [],
-  );
+    `,
+      EffectArray.appendAll(uris, digests),
+    );
+  };
+  if (scope.kind === 'full') {
+    yield* sql.unsafe(
+      `
+      UPDATE memory_links
+      SET target_memory_id = COALESCE(${resolvedTarget}, '')
+      WHERE target_locator_digest <> ''
+        AND target_memory_id <> COALESCE(${resolvedTarget}, '')
+    `,
+    );
+    return;
+  }
+  const digests = scope.digests ?? [];
+  if (scope.uris.length + digests.length <= RECALL_LEGACY_LINK_BATCH) {
+    yield* updateLegacyLinks(scope.uris, digests);
+    return;
+  }
+  for (const uris of EffectArray.chunksOf(scope.uris, RECALL_LEGACY_LINK_BATCH)) yield* updateLegacyLinks(uris, []);
+  for (const digestBatch of EffectArray.chunksOf(digests, RECALL_LEGACY_LINK_BATCH))
+    yield* updateLegacyLinks([], digestBatch);
 });
