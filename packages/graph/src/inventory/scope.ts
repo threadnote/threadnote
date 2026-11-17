@@ -1,5 +1,5 @@
 import {Array as EffectArray} from 'effect';
-import {Effect, FileSystem, Path} from 'effect';
+import {Effect, FileSystem, Option, Path} from 'effect';
 import type {ProjectManifest} from '@threadnote/workspace/config';
 import type {
   CodeGraphCommittedScopeBasisCapture,
@@ -225,6 +225,7 @@ interface CommittedScopedBasis {
   readonly acceptedPaths: ReadonlySet<string>;
   readonly admissionProjectRoots: readonly string[];
   readonly admissionSourceRoots: readonly string[];
+  readonly applicableGitignoreDigest: string;
   readonly catalogFingerprint: string;
   readonly committedDigestRows: readonly (readonly [string, string, string])[];
   readonly committedExtractorSet: string;
@@ -280,6 +281,45 @@ function committedScopedBasisCacheKey(
     ),
   ]);
 }
+
+const digestApplicableLiveGitignoreFiles = Effect.fn('codeGraph.digestLiveGitignoreFiles')(function* (
+  identity: RepositoryIdentity,
+) {
+  const observed = yield* runCommandEffect(
+    'git',
+    ['-C', identity.repoRoot, 'ls-files', '-co', '-z', '--exclude-standard', ':(glob)**/.gitignore'],
+    {maxOutputBytes: 4 * 1_048_576, timeoutMs: 120_000},
+  );
+  const ignoredUntracked = yield* runCommandEffect(
+    'git',
+    ['-C', identity.repoRoot, 'ls-files', '-o', '-i', '-z', '--exclude-standard', ':(glob)**/.gitignore'],
+    {allowFailure: true, maxOutputBytes: 4 * 1_048_576, timeoutMs: 120_000},
+  );
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const records: Array<{readonly content: string; readonly path: string}> = [];
+  for (const raw of [
+    ...Effect2.pipe(observed.stdout, EffectString.split('\0'), EffectArray.filter(Boolean)),
+    ...(ignoredUntracked.exitCode === 0
+      ? Effect2.pipe(ignoredUntracked.stdout, EffectString.split('\0'), EffectArray.filter(Boolean))
+      : []),
+  ]) {
+    const fullPath = path.join(identity.repoRoot, raw);
+    if (Option.isSome(yield* fs.readLink(fullPath).pipe(Effect.option))) continue;
+    const content = yield* fs.readFileString(fullPath).pipe(Effect.option);
+    if (Option.isNone(content)) continue;
+    records.push({content: content.value, path: raw});
+  }
+  records.sort((left, right) => compareCodeUnits(left.path, right.path));
+  return sha256HexSync(
+    JSON.stringify(
+      EffectArray.map(records, record => ({
+        content: record.content,
+        path: record.path,
+      })),
+    ),
+  );
+});
 
 function readCachedCommittedScopedBasis(
   languagePacks: CodeGraphLanguagePackRegistryShape,
@@ -384,6 +424,10 @@ export const observeCodeGraphStatusScope = Effect.fn('codeGraph.observeStatusSco
     languagePacks,
   );
   let basis = yield* readCachedCommittedScopedBasis(languagePacks, basisKey);
+  if (basis !== undefined && worktreeClean) {
+    const liveGitignoreDigest = yield* digestApplicableLiveGitignoreFiles(identity);
+    if (basis.applicableGitignoreDigest !== liveGitignoreDigest) basis = undefined;
+  }
   if (basis === undefined) {
     let captured: CodeGraphCommittedScopeBasisCapture | undefined;
     const committedInventory = yield* inventoryRepository(identity, {
@@ -416,10 +460,12 @@ export const observeCodeGraphStatusScope = Effect.fn('codeGraph.observeStatusSco
       captured!.accepted,
       entry => [entry.path, entry.mode, entry.blobId] as const,
     );
+    const applicableGitignoreDigest = yield* digestApplicableLiveGitignoreFiles(identity);
     basis = yield* writeCachedCommittedScopedBasis(languagePacks, basisKey, {
       acceptedPaths: captured!.acceptedPaths,
       admissionProjectRoots: captured!.admissionProjectRoots,
       admissionSourceRoots: captured!.admissionSourceRoots,
+      applicableGitignoreDigest,
       catalogFingerprint: captured!.scopeObservation.catalog.fingerprint,
       committedDigestRows,
       committedExtractorSet: computeScopeExtractorSet(committedFiles, languagePacks),

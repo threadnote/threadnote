@@ -325,7 +325,10 @@ const save = Effect.fn('workflowAutomation.save')(function* (
         for (const operation of stored.state.operations) {
           if (operation.status !== 'verified' || !operation.artifact) continue;
           if (operation.artifact.state === 'active') activeOwnedUris.add(operation.artifact.uri);
-          else activeOwnedUris.delete(operation.artifact.uri);
+          else {
+            activeOwnedUris.delete(operation.artifact.uri);
+            if (operation.intent.uri !== undefined) activeOwnedUris.delete(operation.intent.uri);
+          }
         }
         return EffectArray.every(intent.relations ?? [], relation => {
           try {

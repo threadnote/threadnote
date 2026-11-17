@@ -7,6 +7,7 @@ import {
   requiredText,
   validateWorkflowInput,
   type WorkflowRequest,
+  stableJson,
   type WorkflowJournal,
   type WorkflowOperation,
   workflowError,
@@ -178,6 +179,7 @@ export const withNativeWorkflowMemorySession = <A, E, R>(
     let preparedCache:
       | {
           readonly stateRef: WorkflowJournal;
+          readonly journalRevision: string;
           readonly jobSourceView: Effect.Success<typeof CurrentNativeJobSourceView>;
           readonly jobReadyPromotion: boolean;
           readonly foregroundCitations: ForegroundAuthoringCitationWitness | undefined;
@@ -209,6 +211,7 @@ export const withNativeWorkflowMemorySession = <A, E, R>(
               const prepared = yield* prepareWorkflowOperation(config, state, request);
               preparedCache = {
                 stateRef: state,
+                journalRevision: stableJson(state),
                 jobSourceView,
                 jobReadyPromotion,
                 foregroundCitations,
@@ -222,11 +225,14 @@ export const withNativeWorkflowMemorySession = <A, E, R>(
               const jobSourceView = yield* CurrentNativeJobSourceView;
               const jobReadyPromotion = yield* CurrentNativeJobReadyPromotion;
               const foregroundCitations = yield* CurrentForegroundAuthoringCitations;
+              const citationRefs = 'codeRefs' in request ? request.codeRefs : undefined;
               const precomputed =
                 state === priorPrepared.stateRef &&
+                stableJson(state) === priorPrepared.journalRevision &&
                 jobSourceView === priorPrepared.jobSourceView &&
                 jobReadyPromotion === priorPrepared.jobReadyPromotion &&
-                foregroundCitations === priorPrepared.foregroundCitations
+                foregroundCitations === priorPrepared.foregroundCitations &&
+                (citationRefs?.length ?? 0) === 0
                   ? priorPrepared.prepared
                   : undefined;
               return yield* executeWorkflowOperation(config, state, request, precomputed);

@@ -277,6 +277,29 @@ describe('native cycle Git snapshots', () => {
           yield* Effect.sleep('200 millis');
         }
 
+        // 1b. Post-window same-size edit with restored mtime must still rehash without full renormalization on POSIX.
+        recordedCalls.length = 0;
+        yield* f.fs.writeFileString(sameSecondFile, 'export const sameSec = false;\n');
+        yield* f.fs.utimes(sameSecondFile, Option.getOrThrow(agedStat.atime), Option.getOrThrow(agedStat.mtime));
+        const delayedSnapshot = yield* captureNativeCycleSource(f.repo, 'HEAD').pipe(
+          Effect.provideService(CommandExecutor, recording),
+        );
+        expect(yield* git(f.repo, 'show', `${delayedSnapshot.tree}:same-second.ts`)).toBe(
+          'export const sameSec = false;\n',
+        );
+        if (process.platform !== 'win32') {
+          const delayedRenormalize = EffectArray.filter(recordedCalls, call => call.args.includes('--renormalize'));
+          expect(delayedRenormalize).toHaveLength(0);
+          expect(
+            EffectArray.some(
+              recordedCalls,
+              call => call.args.includes('add') && call.args.includes(':(literal)same-second.ts'),
+            ),
+          ).toBe(true);
+        }
+        yield* f.fs.writeFileString(sameSecondFile, 'export const sameSec = null;\n');
+        yield* f.fs.utimes(sameSecondFile, Option.getOrThrow(agedStat.atime), Option.getOrThrow(agedStat.mtime));
+
         // 2. Post-second in-place same-size edit with restored atime/mtime and core.trustctime=false:
         // must rehash via explicit -c core.trustctime=true without invoking git add --renormalize on POSIX.
         recordedCalls.length = 0;
@@ -302,7 +325,7 @@ describe('native cycle Git snapshots', () => {
           expect(fastStagingCalls).toHaveLength(4);
         } else {
           expect(EffectArray.some(recordedCalls, call => call.args.includes('--renormalize'))).toBe(false);
-          expect(fastStagingCalls).toHaveLength(3);
+          expect(fastStagingCalls).toHaveLength(4);
         }
         expect(EffectArray.every(fastStagingCalls, call => call.timeoutMs === 120_000)).toBe(true);
         expect(yield* f.fs.readFile(indexPath)).toEqual(originalIndexBytes);

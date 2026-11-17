@@ -840,6 +840,33 @@ describe('native authoring documents', () => {
       },
     });
     expect(validation).toMatchObject({ready: true, issues: []});
+    const manyPaths = Array.from({length: 16}, (_, index) => `src/file-${index}.ts`);
+    const wide = projectNativeCompactIntent(
+      compactInput({affectedPaths: manyPaths}),
+      {featureId: 'cache-refresh', project: 'threadnote'},
+      {head: compactSource.head, files: EffectArray.map(manyPaths, path => ({path, sha256: hash}))},
+    );
+    expect(wide.status).toBe('eligible');
+    if (wide.status !== 'eligible' || wide.document.kind !== 'plan')
+      throw new Error('Expected a 16-path compact plan.');
+    expect(wide.document.context.codeRefs).toHaveLength(8);
+    expect(wide.document.phases[0]?.affectedPaths).toEqual(manyPaths);
+    fc.assert(
+      fc.property(fc.uniqueArray(fc.nat({max: 48}), {minLength: 1, maxLength: 16}), pathIndexes => {
+        const affectedPaths = EffectArray.map(pathIndexes, index => `src/file-${index}.ts`);
+        const projected = projectNativeCompactIntent(
+          compactInput({affectedPaths}),
+          {featureId: 'cache-refresh', project: 'threadnote'},
+          {head: compactSource.head, files: EffectArray.map(affectedPaths, path => ({path, sha256: hash}))},
+        );
+        expect(projected.status).toBe('eligible');
+        if (projected.status !== 'eligible' || projected.document.kind !== 'plan') return;
+        expect(projected.document.phases[0]?.affectedPaths).toEqual(affectedPaths);
+        expect(projected.document.context.codeRefs).toHaveLength(Math.min(8, affectedPaths.length));
+        expect(projected.document.context.codeRefs).toEqual(affectedPaths.slice(0, 8));
+      }),
+      {numRuns: 30},
+    );
     expect(
       validateNativeAuthoring(plan, {
         ready: true,

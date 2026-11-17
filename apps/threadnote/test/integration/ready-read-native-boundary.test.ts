@@ -608,7 +608,7 @@ describe('owned native ready-read boundary', () => {
         expect(connections.outcome).toBe('unavailable');
         expect(connections.maintenanceRequested).toBe(true);
         stage = 'database-absence';
-        expect(yield* fs.exists(path.join(home, 'indexes/lexical/active-v13.sqlite'))).toBe(false);
+        expect(yield* fs.exists(path.join(home, 'indexes/lexical/active-v14.sqlite'))).toBe(false);
       }).pipe(
         Effect.onError(cause => {
           if (Cause.hasInterrupts(cause)) return Effect.void;
@@ -841,7 +841,7 @@ describe('owned native ready-read boundary', () => {
       Effect.gen(function* () {
         const f = yield* fixture;
         const filename = f.path.join(f.home, 'data/local/user/test/memories/durable/alpha.md');
-        const database = f.path.join(f.home, 'indexes/lexical/active-v13.sqlite');
+        const database = f.path.join(f.home, 'indexes/lexical/active-v14.sqlite');
         const before = yield* f.fs.readFile(database);
         yield* f.fs.writeFileString(
           filename,

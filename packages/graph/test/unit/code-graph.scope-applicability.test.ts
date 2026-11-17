@@ -381,6 +381,21 @@ describe('scoped applicability', () => {
           );
           yield* remove('apps/a/.gitignore');
 
+          yield* write('apps/a/.gitignore', '.gitignore\nsecondary.ts\n');
+          const selfHidingGitignoreObserved = yield* observeCodeGraphQueryScope(
+            home,
+            root,
+            identity,
+            BUILTIN_LANGUAGE_PACK_REGISTRY,
+            {project: 'a', manifestPath},
+          );
+          const expectedSelfHiding = yield* uncachedOracle(identity);
+          expect(selfHidingGitignoreObserved?.scope).toEqual(expectedSelfHiding.scope);
+          expect(selfHidingGitignoreObserved?.evidence?.inventoryFingerprint).not.toBe(
+            expectedClean.evidence?.inventoryFingerprint,
+          );
+          yield* remove('apps/a/.gitignore');
+
           // Cold-miss observeCodeGraphStatusScope forwards a custom languagePacks registry into inventoryRepository
           // instead of falling back to BUILTIN_LANGUAGE_PACK_REGISTRY.
           let customDiscoverCalls = 0;

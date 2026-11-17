@@ -34,7 +34,7 @@ const fixture = Effect.gen(function* () {
     db =>
       Effect.sync(() => {
         db.exec('CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT)');
-        db.query('INSERT INTO metadata VALUES (?, ?)').run('schema_version', '13');
+        db.query('INSERT INTO metadata VALUES (?, ?)').run('schema_version', '14');
         db.query('INSERT INTO metadata VALUES (?, ?)').run('initialized', 'true');
         db.query('INSERT INTO metadata VALUES (?, ?)').run('content_generation', 'new-corpus');
       }),

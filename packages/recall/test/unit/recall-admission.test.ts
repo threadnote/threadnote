@@ -351,7 +351,7 @@ effectIt.effect('preserves programming defects in read-only readiness checks', (
       databasePath: Effect.die(defect),
       pointerPath: f.database + '.pointer.json',
       fixedDatabasePath: f.database,
-      schemaVersion: 13,
+      schemaVersion: 14,
       logicalScope: recallLogicalScope(f.config, false),
     }).pipe(Effect.exit);
     expect(Exit.isFailure(exit)).toBe(true);
@@ -497,7 +497,7 @@ effectIt.effect(
         databasePath: Effect.succeed(f.database),
         pointerPath: EffectString.replace(/\.sqlite$/, '.pointer.json')(f.database),
         fixedDatabasePath: f.database,
-        schemaVersion: 13,
+        schemaVersion: 14,
         logicalScope: recallLogicalScope(f.config, false),
       }).pipe(Effect.flip);
       expect(cutFailure).toMatchObject({_tag: 'RecallIdentityAdmissionBusy'});

@@ -216,7 +216,7 @@ interface RecallTermStatisticRow {
   readonly term: string;
 }
 
-const RECALL_INDEX_DATABASE_VERSION = 13;
+const RECALL_INDEX_DATABASE_VERSION = 14;
 const RECALL_INDEX_POINTER_VERSION = 1;
 const ACTIVE_DATABASE_FILENAME = `active-v${RECALL_INDEX_DATABASE_VERSION}.sqlite`;
 const INACTIVE_DATABASE_FILENAME = `with-inactive-v${RECALL_INDEX_DATABASE_VERSION}.sqlite`;

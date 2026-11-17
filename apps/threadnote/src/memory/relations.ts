@@ -1,4 +1,5 @@
 import {Array as EffectArray, Schema} from 'effect';
+import * as EffectRecord from 'effect/Record';
 import {Effect} from 'effect';
 import {ResourceNotFound, ResourceStore} from '@threadnote/store/resource-store';
 import {makeResourceIdScopeChecker, parseResourceId} from '@threadnote/store/resource-id';
@@ -56,6 +57,44 @@ type RelationTargetSnapshot = {
   readonly memoryId?: string;
   readonly uri: string;
 };
+
+export type AuthorizedOwnedMemoryIdProofs = ReadonlyMap<string, string | false>;
+
+export const buildAuthorizedOwnedMemoryIdProofs = Effect.fn('memory.buildOwnedMemoryIdProofs')(function* (
+  config: Pick<RuntimeConfig, 'account' | 'agentContextHome' | 'manifestPath' | 'user'>,
+  allowedUriScopes: readonly string[],
+  ownedActiveArtifacts: Readonly<Record<string, OwnedActiveRelationArtifact>>,
+) {
+  const resourceIds = makeResourceIdScopeChecker();
+  const proofs = new Map<string, string | false>();
+  for (const [uri, artifact] of EffectRecord.toEntries(ownedActiveArtifacts)) {
+    if (artifact.state !== 'active') continue;
+    if (!EffectArray.some(allowedUriScopes, scope => resourceIds.isWithin(uri, scope))) continue;
+    const live = yield* readMemoryWithRelocations(config, uri, {allowedUriScopes});
+    if (!EffectArray.some(allowedUriScopes, scope => resourceIds.isWithin(live.canonicalUri, scope))) continue;
+    const record = parseMemoryDocument(live.canonicalUri, live.content);
+    if (!record || record.metadata.status !== 'active') continue;
+    const liveMemoryId = record.metadata.memoryId;
+    if (liveMemoryId === undefined) continue;
+    const existing = proofs.get(liveMemoryId);
+    if (existing === false) continue;
+    if (existing !== undefined) {
+      if (existing !== live.canonicalUri) proofs.set(liveMemoryId, false);
+    } else {
+      proofs.set(liveMemoryId, live.canonicalUri);
+    }
+  }
+  return proofs satisfies AuthorizedOwnedMemoryIdProofs;
+});
+
+export function isAuthorizedOwnedMemoryIdOwner(
+  proofs: AuthorizedOwnedMemoryIdProofs,
+  memoryId: string,
+  canonicalUri: string,
+): boolean {
+  const ownerUri = proofs.get(memoryId);
+  return ownerUri !== undefined && ownerUri !== false && ownerUri === canonicalUri;
+}
 
 export function memoryIdentityWriteLockKeys(
   sourceMemoryId: string | undefined,
@@ -147,6 +186,7 @@ export const resolveAuthoredMemoryRelations = Effect.fn('memory.resolveAuthoredR
   options: {
     readonly allowedUriScopes: readonly string[];
     readonly ownedActiveArtifacts?: Readonly<Record<string, OwnedActiveRelationArtifact>>;
+    readonly ownedMemoryIdProofs?: AuthorizedOwnedMemoryIdProofs;
     readonly sourceMemoryId?: string;
     readonly sourceUri?: string;
   },
@@ -209,12 +249,18 @@ export const resolveAuthoredMemoryRelations = Effect.fn('memory.resolveAuthoredR
     }),
   );
 
+  const ownedMemoryIdProofs =
+    options.ownedMemoryIdProofs ??
+    (options.ownedActiveArtifacts === undefined
+      ? undefined
+      : yield* buildAuthorizedOwnedMemoryIdProofs(config, allowedUriScopes, options.ownedActiveArtifacts));
   const identityBearing = EffectArray.filter(
     liveTargets,
     (target): target is (typeof liveTargets)[number] & {readonly memoryId: string} => target.memoryId !== undefined,
   );
   const directlyVerifiedOwnedTargets = new Set<(typeof liveTargets)[number]>();
-  const recallIdentityTargets = EffectArray.filter(identityBearing, target => {
+  const recallIdentityTargets: typeof identityBearing = [];
+  for (const target of identityBearing) {
     const owned = options.ownedActiveArtifacts?.[target.uri];
     if (
       owned !== undefined &&
@@ -224,11 +270,17 @@ export const resolveAuthoredMemoryRelations = Effect.fn('memory.resolveAuthoredR
       owned.memoryId === target.memoryId &&
       sha256HexSync(target.content) === owned.revision
     ) {
-      directlyVerifiedOwnedTargets.add(target);
-      return false;
+      const ownerProven =
+        ownedMemoryIdProofs === undefined
+          ? false
+          : isAuthorizedOwnedMemoryIdOwner(ownedMemoryIdProofs, target.memoryId, target.uri);
+      if (ownerProven) {
+        directlyVerifiedOwnedTargets.add(target);
+        continue;
+      }
     }
-    return true;
-  });
+    recallIdentityTargets.push(target);
+  }
   const identityChecks =
     recallIdentityTargets.length === 0
       ? []

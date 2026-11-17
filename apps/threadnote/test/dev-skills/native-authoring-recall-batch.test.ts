@@ -12,6 +12,9 @@ import {recordMemoryRelocation} from '@threadnote/memory/relocation';
 import {recallIndexDatabaseFilename, recallIndexStatus} from '@threadnote/recall/index';
 import {decodeNativeAuthoringDocument} from '@threadnote/workflow-automations/authoring';
 import {SystemInfo} from '@threadnote/platform/system';
+import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
+import {sha256HexSync} from '@threadnote/platform/sha256';
+import {workflowLocation} from '../../src/workflow_memory/journal.js';
 import {resolveAuthoredMemoryRelations} from '../../src/memory/relations.js';
 import {makeWorkflowRecallRefresh} from '../../src/workflow_memory/recall_refresh.js';
 import {runWorkflowAutomation} from '../../src/workflow_automation/index.js';
@@ -744,4 +747,46 @@ it.effect(
         status: 'ok',
       });
     }).pipe(TestClock.withLive, provideNative),
+);
+
+it.effect('falls back to recall identity admission when another owned artifact reuses the same live memory id', () =>
+  Effect.gen(function* () {
+    const writeChild = (f: Effect.Success<ReturnType<typeof nativeFixture>>, operationId: string) =>
+      f
+        .call({
+          ...f.base('write'),
+          operationId,
+          artifactKey: operationId,
+          role: 'authoring-child',
+          nameHint: operationId,
+          expectedRevision: null,
+          body: `# ${operationId}\n\nOwned active target.\n`,
+          storageKind: 'durable',
+        })
+        .pipe(Effect.map(value => Schema.decodeUnknownSync(SavedWriteResponseSchema)(value).artifact));
+    const f = yield* nativeFixture();
+    yield* f.init();
+    const ownerA = yield* writeChild(f, 'collision-owner-a');
+    const ownerB = yield* writeChild(f, 'collision-owner-b');
+    const store = yield* ResourceStore;
+    const location = workflowLocation(f.config);
+    const forgedBody = yield* store.read(location, ownerB.uri);
+    const forged = parseMemoryDocument(ownerB.uri, forgedBody);
+    if (!forged) throw new Error('Expected owned artifact B on disk.');
+    yield* store.write(
+      location,
+      ownerB.uri,
+      formatMemoryDocument('MEMORY', {...forged.metadata, memoryId: ownerA.memoryId}, forged.body),
+      {mode: 'replace'},
+    );
+    const forgedRevision = sha256HexSync(yield* store.read(location, ownerB.uri));
+    const relationFailure = yield* resolveAuthoredMemoryRelations(f.config, [{type: 'references', uri: ownerA.uri}], {
+      allowedUriScopes: [ownerA.uri, ownerB.uri],
+      ownedActiveArtifacts: {
+        [ownerA.uri]: {memoryId: ownerA.memoryId, revision: ownerA.revision, state: 'active'},
+        [ownerB.uri]: {memoryId: ownerB.memoryId, revision: forgedRevision, state: 'active'},
+      },
+    }).pipe(Effect.flip);
+    expect(String(relationFailure)).toContain('identity');
+  }).pipe(TestClock.withLive, provideNative),
 );

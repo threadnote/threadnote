@@ -187,11 +187,11 @@ export function resolveCodeGraphWorkspaceCatalog(
     (file, __effectArrayIndex) => __effectArrayIndex in files && languagePacks.isResolutionContext(file.path),
   ).sort((left, right) => compareCodeUnits(left.path, right.path));
   const fingerprint = workspaceCatalogFingerprint(contexts);
-  if (cached?.fingerprint === fingerprint) return Effect.succeed(cached);
+  if (cached?.fingerprint === fingerprint) return Effect.succeed(returnWorkspaceCatalog(cached));
   return workspaceCatalogs.get(languagePacks, fingerprint).pipe(
     Effect.flatMap(previous =>
       previous !== undefined
-        ? Effect.succeed(cloneWorkspaceCatalog(previous))
+        ? Effect.succeed(returnWorkspaceCatalog(previous))
         : languagePacks.discoverWorkspace(contexts).pipe(
             Effect.flatMap(workspace => {
               const catalog = freezeWorkspaceCatalogEntries({
@@ -201,7 +201,7 @@ export function resolveCodeGraphWorkspaceCatalog(
               });
               return workspaceCatalogs
                 .set(languagePacks, fingerprint, catalog, JSON.stringify(catalog).length * 2)
-                .pipe(Effect.map(cloneWorkspaceCatalog));
+                .pipe(Effect.map(returnWorkspaceCatalog));
             }),
           ),
     ),
@@ -519,6 +519,10 @@ function compareProjects(left: CodeGraphWorkspaceProject, right: CodeGraphWorksp
   );
 }
 
+function returnWorkspaceCatalog(catalog: CodeGraphWorkspaceCatalog): CodeGraphWorkspaceCatalog {
+  return freezeWorkspaceCatalogEntries(cloneWorkspaceCatalog(catalog));
+}
+
 function cloneWorkspaceCatalog(catalog: CodeGraphWorkspaceCatalog): CodeGraphWorkspaceCatalog {
   return {
     ...catalog,
@@ -526,7 +530,41 @@ function cloneWorkspaceCatalog(catalog: CodeGraphWorkspaceCatalog): CodeGraphWor
     workspace: {
       ...catalog.workspace,
       diagnostics: [...catalog.workspace.diagnostics],
-      projects: [...catalog.workspace.projects],
+      projects: EffectArray.map(catalog.workspace.projects, project => ({
+        ...project,
+        dependencies: [...project.dependencies],
+        dependencyDetails: EffectArray.map(project.dependencyDetails, detail => ({...detail})),
+        diagnostics: [...project.diagnostics],
+        languages: [...project.languages],
+        sourceRoots: [...project.sourceRoots],
+        workspaceRoots: [...project.workspaceRoots],
+        ...(project.externalDependencies === undefined
+          ? {}
+          : {
+              externalDependencies: EffectArray.map(project.externalDependencies, dependency => ({
+                ...dependency,
+                ...(dependency.evidence === undefined
+                  ? {}
+                  : {
+                      evidence: {
+                        ...dependency.evidence,
+                        ...(dependency.evidence.span === undefined ? {} : {span: {...dependency.evidence.span}}),
+                      },
+                    }),
+              })),
+            }),
+        ...(project.monikers === undefined
+          ? {}
+          : {
+              monikers: EffectArray.map(project.monikers, moniker => ({
+                ...moniker,
+                evidence: {
+                  ...moniker.evidence,
+                  span: {...moniker.evidence.span},
+                },
+              })),
+            }),
+      })),
       workspaces: [...catalog.workspace.workspaces],
     },
   };
@@ -538,13 +576,23 @@ function freezeWorkspaceCatalogEntries(catalog: CodeGraphWorkspaceCatalog): Code
     for (const detail of project.dependencyDetails) Object.freeze(detail);
     Object.freeze(project.dependencyDetails);
     if (project.externalDependencies !== undefined) {
-      for (const dependency of project.externalDependencies) Object.freeze(dependency);
+      for (const dependency of project.externalDependencies) {
+        if (dependency.evidence !== undefined) {
+          if (dependency.evidence.span !== undefined) Object.freeze(dependency.evidence.span);
+          Object.freeze(dependency.evidence);
+        }
+        Object.freeze(dependency);
+      }
       Object.freeze(project.externalDependencies);
     }
     Object.freeze(project.diagnostics);
     Object.freeze(project.languages);
     if (project.monikers !== undefined) {
-      for (const moniker of project.monikers) Object.freeze(moniker);
+      for (const moniker of project.monikers) {
+        Object.freeze(moniker.evidence.span);
+        Object.freeze(moniker.evidence);
+        Object.freeze(moniker);
+      }
       Object.freeze(project.monikers);
     }
     Object.freeze(project.sourceRoots);

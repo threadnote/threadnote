@@ -532,12 +532,52 @@ describe('code graph index scope', () => {
     () =>
       Effect.Effect.gen(function* () {
         let discoveries = 0;
+        const nestedEvidenceSpan = {line: 1, column: 1, endLine: 1, endColumn: 8};
         const registry = {
           ...BUILTIN_LANGUAGE_PACK_REGISTRY,
-          discoverWorkspace: (files: readonly CodeGraphInventoryFile[]) => {
-            discoveries += 1;
-            return BUILTIN_LANGUAGE_PACK_REGISTRY.discoverWorkspace(files);
-          },
+          discoverWorkspace: (files: readonly CodeGraphInventoryFile[]) =>
+            BUILTIN_LANGUAGE_PACK_REGISTRY.discoverWorkspace(files).pipe(
+              Effect.Effect.map(workspace => {
+                discoveries += 1;
+                return {
+                  ...workspace,
+                  projects: EffectArray.map(workspace.projects, (entry, index) =>
+                    index === 0
+                      ? {
+                          ...entry,
+                          externalDependencies: [
+                            {
+                              ecosystem: 'npm' as const,
+                              evidence: {path: 'apps/web/package.json', span: {...nestedEvidenceSpan}},
+                              importAlias: 'lodash',
+                              kind: 'runtime' as const,
+                              name: 'lodash',
+                              versionConstraint: '*',
+                            },
+                          ],
+                          monikers: [
+                            {
+                              version: 1 as const,
+                              id: 'import-lodash',
+                              identity: 'package:lodash',
+                              role: 'import' as const,
+                              kind: 'package' as const,
+                              componentId: entry.id,
+                              packageName: 'lodash',
+                              resolutionDomain: 'package:npm' as const,
+                              scheme: 'package' as const,
+                              evidence: {
+                                path: 'apps/web/src/index.ts',
+                                span: {line: 2, column: 3, endLine: 2, endColumn: 10},
+                              },
+                            },
+                          ],
+                        }
+                      : entry,
+                  ),
+                };
+              }),
+            ),
         };
         const inputs = [
           workspaceFile('package.json', JSON.stringify({private: true, workspaces: ['apps/*']}), 'npm-manifest'),
@@ -571,6 +611,30 @@ describe('code graph index scope', () => {
         expect(discoveries).toBe(1);
         expect(jsonParseCalls).toBe(0);
         expect(warm).toEqual(expected);
+        const fingerprintHit = yield* resolveCodeGraphWorkspaceCatalog(inputs, registry, warm);
+        expect(fingerprintHit).not.toBe(warm);
+        expect(fingerprintHit.fingerprint).toBe(warm.fingerprint);
+        expect(Reflect.set(fingerprintHit.resolutionContextPaths, 0, 'mutated')).toBe(true);
+        expect(warm.resolutionContextPaths[0]).not.toBe('mutated');
+        const warmExternal = warm.workspace.projects[0]?.externalDependencies?.[0];
+        const hitExternal = fingerprintHit.workspace.projects[0]?.externalDependencies?.[0];
+        const warmMoniker = warm.workspace.projects[0]?.monikers?.[0];
+        const hitMoniker = fingerprintHit.workspace.projects[0]?.monikers?.[0];
+        if (
+          warmExternal?.evidence !== undefined &&
+          hitExternal?.evidence !== undefined &&
+          warmMoniker !== undefined &&
+          hitMoniker !== undefined
+        ) {
+          expect(Reflect.set(hitExternal.evidence, 'path', 'mutated-evidence')).toBe(false);
+          expect(Reflect.set(hitExternal.evidence.span!, 'line', 99)).toBe(false);
+          expect(warmExternal.evidence.path).not.toBe('mutated-evidence');
+          expect(warmExternal.evidence.span!.line).not.toBe(99);
+          expect(Reflect.set(hitMoniker.evidence, 'path', 'mutated-moniker')).toBe(false);
+          expect(Reflect.set(hitMoniker.evidence.span, 'column', 99)).toBe(false);
+          expect(warmMoniker.evidence.path).not.toBe('mutated-moniker');
+          expect(warmMoniker.evidence.span.column).not.toBe(99);
+        }
 
         // Built-in singleton and default layer singleton share one cache bucket, while spread overrides stay isolated.
         const uniqueInputs = [

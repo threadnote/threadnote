@@ -460,7 +460,7 @@ export function projectNativeCompactIntent(
     title: compact.title,
     objective: `Implement the bounded change: ${compact.desiredChange}`,
     requirements: [{id: 'behavior', behavior: compact.desiredChange}],
-    context: {codeRefs: sourcePaths, evidenceRefs: [], note: ''},
+    context: {codeRefs: sourcePaths.slice(0, 8), evidenceRefs: [], note: ''},
     source: sourceSnapshot,
     current: {summary: compact.currentBehavior, components: [], contracts: [], diagram: ''},
     target: {summary: compact.desiredChange, components: [], contracts: [], diagram: ''},

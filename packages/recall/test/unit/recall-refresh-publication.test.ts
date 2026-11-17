@@ -155,7 +155,7 @@ effectIt.effect('clears published invalidations when the configured home uses a 
     const alias = f.path.join(aliasDirectory, 'home');
     yield* f.fs.symlink(f.home, alias);
     const config = {...f.config, agentContextHome: alias};
-    const markerPath = f.path.join(f.home, 'indexes', 'lexical', 'active-v13.sqlite');
+    const markerPath = f.path.join(f.home, 'indexes', 'lexical', recallIndexDatabaseFilename(false));
     for (let i = 0; i < 2; i++) {
       yield* f.write(0, `alpha updated ${i}`);
       const events: RecallIndexProgress[] = [];
@@ -314,7 +314,7 @@ effectIt.effect('reconciles legacy inactive inventory before admitting current w
       databasePath: Effect.succeed(database),
       fixedDatabasePath: database,
       pointerPath: EffectString.replace(/\.sqlite$/, '.pointer.json')(database),
-      schemaVersion: 13,
+      schemaVersion: 14,
       logicalScope: recallLogicalScope(f.config, false),
     });
     expect(yield* current.pipe(Effect.flip)).toMatchObject({_tag: 'RecallIdentityAdmissionBusy'});
@@ -334,7 +334,7 @@ effectIt.effect('reconciles legacy inactive inventory before admitting current w
         databasePath: Effect.succeed(database),
         fixedDatabasePath: database,
         pointerPath: EffectString.replace(/\.sqlite$/, '.pointer.json')(database),
-        schemaVersion: 13,
+        schemaVersion: 14,
         logicalScope: recallLogicalScope({...f.config, user: 'other'}, false),
       }).pipe(Effect.flip),
     ).toMatchObject({_tag: 'RecallIdentityAdmissionBusy'});
