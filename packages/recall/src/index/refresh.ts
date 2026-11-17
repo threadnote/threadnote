@@ -94,7 +94,8 @@ export const RECALL_REFRESH_INDEXED_MEMORY_LINK_TABLE = 'recall_refresh_indexed_
 export const RECALL_REFRESH_INDEXED_POSTING_TABLE = 'recall_refresh_indexed_postings';
 export const RECALL_REFRESH_REPLACED_DOCUMENT_TABLE = 'recall_refresh_replaced_documents';
 export const RECALL_REFRESH_SOURCE_TABLE = 'recall_refresh_sources';
-const RECALL_REFRESH_SOURCE_DIGEST_TABLE = 'recall_refresh_source_digests';
+export const RECALL_REFRESH_LINK_IDENTITY_TABLE = 'recall_refresh_link_identities';
+export const RECALL_REFRESH_LINK_TARGET_TABLE = 'recall_refresh_link_targets';
 
 export const scanRecallSources = Effect.fn('recall.scanSources')(function* (
   sql: SqlClient.SqlClient,
@@ -246,7 +247,7 @@ export const stageRecallSources = Effect.fn('recall.stageSources')(function* (
       options.invalidatedUris,
     )),
     mode: 'full' as const,
-    forceAllSources: options.mode.kind === 'touched',
+    forceAllSources: false,
     inventoryComplete: true,
   };
 });
@@ -498,50 +499,95 @@ const stageTouchedRecallSources = Effect.fn('recall.stageTouchedSources')(functi
   return {scannedSourceCount, skippedOversizedDocumentCount, omittedSourceInputs};
 });
 
-function recallTouchedSourceParentPrefix(rootUri: string, segments: readonly string[]) {
-  return segments.length <= 1 ? `${rootUri}/` : `${rootUri}/${EffectArray.join(segments.slice(0, -1), '/')}/`;
-}
-
-/** Indexed ASCII case aliases for one path segment. Mixed interior case is not enumerated. */
-function recallAsciiCaseVariants(segment: string): readonly string[] {
-  const variants = new Set<string>();
-  const consider = (variant: string) => {
-    if (variant !== segment) variants.add(variant);
-  };
-  consider(EffectString.toLowerCase(segment));
-  consider(EffectString.toUpperCase(segment));
-  consider(EffectString.capitalize(EffectString.toLowerCase(segment)));
-  return EffectArray.fromIterable(variants);
-}
-
-/**
- * One tight URI range per ancestor segment. `dir/new.md` probes `Dir/` and `DIR/`
- * without scanning every document under the resource root.
- */
-function recallCaseFlippedLocatorPrefixes(
-  rootUri: string,
-  segments: readonly string[],
-): readonly {readonly directory: boolean; readonly uri: string}[] {
-  const prefixes: {readonly directory: boolean; readonly uri: string}[] = [];
-  for (let index = 0; index < segments.length; index++) {
-    for (const variant of recallAsciiCaseVariants(segments[index])) {
-      const parts: string[] = [];
-      for (let part = 0; part <= index; part++) parts.push(part === index ? variant : segments[part]);
-      prefixes.push({
-        directory: index < segments.length - 1,
-        uri: `${rootUri}/${EffectArray.join(parts, '/')}`,
-      });
-    }
-  }
-  return prefixes;
-}
-
 function recallTouchedSourceNeedsCorpusAliasProbe(segments: readonly string[]) {
   return EffectArray.some(
     segments,
     segment => /\P{ASCII}/u.test(segment) || EffectString.toLowerCase(segment) !== segment,
   );
 }
+
+interface RecallCaseAliasBranch {
+  readonly exact: boolean;
+  readonly index: number;
+  readonly prefix: string;
+}
+
+interface RecallCaseAliasProbe {
+  readonly high: string;
+  readonly hit: (uri: string) => void;
+  readonly low: string;
+}
+
+const RECALL_CASE_ALIAS_BRANCH_LIMIT = 64;
+const RECALL_CASE_ALIAS_PROBE_BATCH = 256;
+
+/**
+ * Stored URIs that may name `uri` on a case-insensitive filesystem. Canonical URIs are
+ * percent-encoded ASCII, so the walk follows ASCII case spellings of the encoded target over the
+ * binary URI index and keeps a branch only while some stored URI starts with it. Probes therefore
+ * scale with case-variant prefixes present in the corpus, not with directory or root size. A
+ * stored URI that leaves a case-matching prefix through an encoded non-ASCII byte (`%C`..`%F`) is
+ * returned too, because its filesystem folding is unknown. A branch reports its first stored URI
+ * when it completes a segment, which proves an aliased directory or file. Too many live branches
+ * return undefined so the caller falls back to a full scan.
+ */
+const findRecallCaseAliasUris = Effect.fn('recall.findCaseAliasUris')(function* (
+  sql: SqlClient.SqlClient,
+  rootUri: string,
+  uri: string,
+) {
+  const base = `${rootUri}/`;
+  const rest = EffectString.slice(base.length)(uri);
+  const aliases = new Set<string>();
+  const probesFor = (branch: RecallCaseAliasBranch, next: RecallCaseAliasBranch[]) => {
+    const probes: RecallCaseAliasProbe[] = [];
+    if (branch.index === rest.length) return probes;
+    const char = rest[branch.index];
+    if (char !== '%')
+      probes.push({low: `${branch.prefix}%C`, high: `${branch.prefix}%G`, hit: alias => aliases.add(alias)});
+    const spellings: readonly string[] = /^[A-Za-z]$/.test(char)
+      ? [EffectString.toLowerCase(char), EffectString.toUpperCase(char)]
+      : [char];
+    for (const spelling of spellings) {
+      if (branch.exact && spelling === char) continue;
+      const prefix = `${branch.prefix}${spelling}`;
+      const index = branch.index + 1;
+      probes.push({
+        low: prefix,
+        high: `${prefix}\u{10ffff}`,
+        hit: alias => {
+          next.push({exact: false, index, prefix});
+          if (spelling === '/' || index === rest.length) aliases.add(alias);
+        },
+      });
+    }
+    return probes;
+  };
+  let branches: RecallCaseAliasBranch[] = [];
+  let probes: RecallCaseAliasProbe[] = [];
+  for (let index = 0; index < rest.length; index++)
+    probes.push(...probesFor({exact: true, index, prefix: `${base}${EffectString.slice(0, index)(rest)}`}, branches));
+  while (probes.length > 0) {
+    for (const batch of EffectArray.chunksOf(probes, RECALL_CASE_ALIAS_PROBE_BATCH)) {
+      const rows = yield* sql.unsafe<{readonly id: number; readonly uri: string | null}>(
+        `WITH probe(id, low, high) AS (VALUES ${EffectArray.join(
+          EffectArray.map(batch, () => '(?, ?, ?)'),
+          ', ',
+        )})
+         SELECT probe.id AS id,
+           (SELECT uri FROM documents WHERE uri >= probe.low AND uri < probe.high ORDER BY uri LIMIT 1) AS uri
+         FROM probe`,
+        EffectArray.flatMap(batch, (probe, id) => [id, probe.low, probe.high]),
+      );
+      for (const row of rows) if (row.uri !== null) batch[row.id].hit(row.uri);
+    }
+    if (branches.length > RECALL_CASE_ALIAS_BRANCH_LIMIT) return undefined;
+    const current = branches;
+    branches = [];
+    probes = EffectArray.flatMap(current, branch => probesFor(branch, branches));
+  }
+  return aliases;
+});
 
 const probeTouchedRecallSourceCorpusAliases = Effect.fn('recall.probeTouchedCorpusAliases')(function* (
   sql: SqlClient.SqlClient,
@@ -551,54 +597,18 @@ const probeTouchedRecallSourceCorpusAliases = Effect.fn('recall.probeTouchedCorp
   ambiguousTargets: Set<string>,
 ) {
   for (const [uri, target] of targets) {
-    for (const prefix of recallCaseFlippedLocatorPrefixes(target.root.uri, target.segments)) {
-      const start = prefix.directory ? `${prefix.uri}/` : prefix.uri;
-      const caseVariants = yield* sql.unsafe<{readonly uri: string}>(
-        `SELECT uri FROM documents
-         WHERE uri >= ? AND uri < ?
-         ORDER BY uri
-         LIMIT ?`,
-        [start, `${start}\u{10ffff}`, RECALL_REFRESH_SOURCE_PAGE_SIZE + 1],
-      );
-      if (caseVariants.length > RECALL_REFRESH_SOURCE_PAGE_SIZE) return false;
-      for (const row of caseVariants) {
-        if (row.uri === uri) continue;
-        const alias = folded.get(EffectString.toLowerCase(row.uri));
-        if (alias !== undefined && alias !== row.uri) return false;
-        const root = EffectArray.findFirst(roots, candidate => EffectString.startsWith(candidate.uri + '/')(row.uri));
-        if (Option.isNone(root)) return false;
-        const id = yield* Effect.try(() => parseResourceId(row.uri)).pipe(Effect.option);
-        if (Option.isNone(id)) return false;
-        const segments = id.value.segments.slice(root.value.id.segments.length);
-        if (target.root.uri === root.value.uri && recallSourcePathsMayAlias(segments, target.segments))
-          ambiguousTargets.add(uri);
-      }
-    }
-    const parentPrefix = recallTouchedSourceParentPrefix(target.root.uri, target.segments);
-    const upperBound = `${parentPrefix}\u{10ffff}`;
-    let cursor = parentPrefix;
-    let rows: readonly {readonly uri: string}[];
-    for (;;) {
-      rows = yield* sql.unsafe<{readonly uri: string}>(
-        `SELECT uri FROM documents
-         WHERE uri COLLATE BINARY > ? COLLATE BINARY AND uri COLLATE BINARY < ? COLLATE BINARY
-         ORDER BY uri COLLATE BINARY LIMIT ?`,
-        [cursor, upperBound, RECALL_REFRESH_SOURCE_PAGE_SIZE],
-      );
-      for (const row of rows) {
-        if (row.uri === uri) continue;
-        const alias = folded.get(EffectString.toLowerCase(row.uri));
-        if (alias !== undefined && alias !== row.uri) return false;
-        const root = EffectArray.findFirst(roots, root => EffectString.startsWith(root.uri + '/')(row.uri));
-        if (Option.isNone(root)) return false;
-        const id = yield* Effect.try(() => parseResourceId(row.uri)).pipe(Effect.option);
-        if (Option.isNone(id)) return false;
-        const segments = id.value.segments.slice(root.value.id.segments.length);
-        if (target.root.uri === root.value.uri && recallSourcePathsMayAlias(segments, target.segments))
-          ambiguousTargets.add(uri);
-      }
-      if (rows.length < RECALL_REFRESH_SOURCE_PAGE_SIZE) break;
-      cursor = rows[rows.length - 1].uri;
+    const aliases = yield* findRecallCaseAliasUris(sql, target.root.uri, uri);
+    if (aliases === undefined) return false;
+    for (const alias of aliases) {
+      const foldedTarget = folded.get(EffectString.toLowerCase(alias));
+      if (foldedTarget !== undefined && foldedTarget !== alias) return false;
+      const root = EffectArray.findFirst(roots, candidate => EffectString.startsWith(candidate.uri + '/')(alias));
+      if (Option.isNone(root)) return false;
+      const id = yield* Effect.try(() => parseResourceId(alias)).pipe(Effect.option);
+      if (Option.isNone(id)) return false;
+      const segments = id.value.segments.slice(root.value.id.segments.length);
+      if (target.root.uri === root.value.uri && recallSourcePathsMayAlias(segments, target.segments))
+        ambiguousTargets.add(uri);
     }
   }
   return true;
@@ -963,7 +973,8 @@ export function dropRecallSourceScan(sql: SqlClient.SqlClient) {
       RECALL_REFRESH_INDEXED_CODE_LINK_TABLE,
       RECALL_REFRESH_INDEXED_MEMORY_LINK_TABLE,
       RECALL_REFRESH_INDEXED_DOCUMENT_TABLE,
-      RECALL_REFRESH_SOURCE_DIGEST_TABLE,
+      RECALL_REFRESH_LINK_IDENTITY_TABLE,
+      RECALL_REFRESH_LINK_TARGET_TABLE,
       RECALL_REFRESH_SOURCE_TABLE,
     ]) {
       yield* sql.unsafe(`DROP TABLE IF EXISTS temp.${table}`);
@@ -983,11 +994,10 @@ function prepareRecallSourceScan(sql: SqlClient.SqlClient) {
       source_path TEXT NOT NULL, source_modified_at TEXT,
       source_size INTEGER NOT NULL CHECK (source_size >= 0), authority_policy_key TEXT,
       invalidated INTEGER NOT NULL CHECK (invalidated IN (0, 1))) WITHOUT ROWID`);
-    yield* sql.unsafe(`CREATE TEMP TABLE ${RECALL_REFRESH_SOURCE_DIGEST_TABLE} (
-      uri TEXT PRIMARY KEY NOT NULL,
-      uri_locator_digest TEXT NOT NULL CHECK (
-        length(uri_locator_digest) = 64 AND uri_locator_digest NOT GLOB '*[^0-9a-f]*'
-      )) WITHOUT ROWID`);
+    yield* sql.unsafe(`CREATE TEMP TABLE ${RECALL_REFRESH_LINK_IDENTITY_TABLE} (
+      memory_id TEXT PRIMARY KEY NOT NULL) WITHOUT ROWID`);
+    yield* sql.unsafe(`CREATE TEMP TABLE ${RECALL_REFRESH_LINK_TARGET_TABLE} (
+      uri_locator_digest TEXT PRIMARY KEY NOT NULL) WITHOUT ROWID`);
     yield* sql.unsafe(`CREATE TEMP TABLE ${RECALL_REFRESH_INDEXED_DOCUMENT_TABLE} (
       uri TEXT PRIMARY KEY NOT NULL, project TEXT,
       approved_authoritative INTEGER NOT NULL CHECK (approved_authoritative IN (0, 1)),

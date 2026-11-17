@@ -221,7 +221,7 @@ interface RecallTermStatisticRow {
  * files into that new file. Older filenames are not opened or migrated in place,
  * so a previous binary cannot write the current database.
  */
-const RECALL_INDEX_DATABASE_VERSION = 14;
+const RECALL_INDEX_DATABASE_VERSION = 15;
 const RECALL_INDEX_POINTER_VERSION = 1;
 const ACTIVE_DATABASE_FILENAME = `active-v${RECALL_INDEX_DATABASE_VERSION}.sqlite`;
 const INACTIVE_DATABASE_FILENAME = `with-inactive-v${RECALL_INDEX_DATABASE_VERSION}.sqlite`;
@@ -1594,6 +1594,7 @@ const initializeRecallDatabase = Effect.fn('recall.initializeDatabase')(function
       recorded_at TEXT,
       source_size INTEGER NOT NULL CHECK (source_size >= 0),
       authority_policy_key TEXT,
+      uri_locator_digest TEXT NOT NULL,
       memory_id TEXT,
       content_hash TEXT,
       candidate_json TEXT NOT NULL,
@@ -1668,9 +1669,17 @@ const initializeRecallDatabase = Effect.fn('recall.initializeDatabase')(function
       tokenize = 'trigram'
     )
   `);
+  const documentColumns = yield* sql.unsafe<{readonly name: string}>("PRAGMA table_info('documents')");
+  if (!EffectArray.some(documentColumns, column => column.name === 'uri_locator_digest'))
+    return yield* RecallIndexSchemaIncompatible.make({
+      message: 'Lexical index documents predate persisted URI locator digests; rebuild from canonical files.',
+    });
   yield* sql.unsafe('CREATE INDEX IF NOT EXISTS documents_uri ON documents(uri)');
   yield* sql.unsafe('CREATE INDEX IF NOT EXISTS documents_logical_key ON documents(logical_key, document_length)');
   yield* RecallIndexIdentity.initializeRecallIdentityIndex(sql);
+  yield* sql.unsafe(
+    'CREATE INDEX IF NOT EXISTS documents_uri_locator_digest ON documents(uri_locator_digest, uri, memory_id)',
+  );
   yield* sql.unsafe('CREATE INDEX IF NOT EXISTS documents_modified_uri ON documents(source_modified_at DESC, uri)');
   yield* sql.unsafe(
     'CREATE INDEX IF NOT EXISTS documents_project_modified_uri ON documents(project, source_modified_at DESC, uri)',

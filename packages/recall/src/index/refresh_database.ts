@@ -11,7 +11,7 @@ import {
 import {parseMemoryDocument} from '@threadnote/memory/document';
 import type {RecallIndexConfig, RecallIndexProgress} from '../index.js';
 import {deriveIndexedRecallCodeLinks} from '../code_links.js';
-import {deriveIndexedRecallMemoryLinks, memoryLinkLocatorDigest} from '../memory/links.js';
+import {deriveIndexedRecallMemoryLinks} from '../memory/links.js';
 import {recallDocumentTerms} from '../rank.js';
 import {indexCandidate, recallExactSearchText} from './candidate.js';
 import {loadCanonicalResourcePolicy, verifyCanonicalResource} from './canonical_resource.js';
@@ -36,6 +36,8 @@ import {
   RECALL_REFRESH_INDEXED_DOCUMENT_TABLE,
   RECALL_REFRESH_INDEXED_MEMORY_LINK_TABLE,
   RECALL_REFRESH_INDEXED_POSTING_TABLE,
+  RECALL_REFRESH_LINK_IDENTITY_TABLE,
+  RECALL_REFRESH_LINK_TARGET_TABLE,
   RECALL_REFRESH_REPLACED_DOCUMENT_TABLE,
   RECALL_REFRESH_SOURCE_TABLE,
   stageRecallRefreshAffectedTerms,
@@ -119,7 +121,7 @@ export const prepareRecallDatabase = Effect.fn('recall.prepareDatabase')(functio
             invalidatedUris,
           )),
           mode: 'full' as const,
-          forceAllSources: mode.kind === 'touched',
+          forceAllSources: false,
           inventoryComplete: true,
         }
       : {...touched, mode: 'touched' as const, forceAllSources: false, inventoryComplete: false};
@@ -298,14 +300,7 @@ export const publishPreparedRecallDatabase = Effect.fn('recall.publishPreparedDa
 ) {
   const {staleGeneration, canonicalMutationGeneration, sourceScan, contentGeneration, previousValidatedAt, now} =
     prepared;
-  const removedLocators = sourceScan.inventoryComplete
-    ? []
-    : yield* sql.unsafe<{readonly memory_id: string | null; readonly uri: string}>(
-        `SELECT document.uri AS uri, document.memory_id AS memory_id
-         FROM documents AS document
-         INNER JOIN temp.${RECALL_REFRESH_REPLACED_DOCUMENT_TABLE} AS replaced
-           ON replaced.document_id = document.id`,
-      );
+  yield* stageRemovedRecallLinkTargets(sql);
   yield* sql.unsafe(`
     DELETE FROM exact_search
     WHERE rowid IN (SELECT document_id FROM temp.${RECALL_REFRESH_REPLACED_DOCUMENT_TABLE})
@@ -325,6 +320,7 @@ export const publishPreparedRecallDatabase = Effect.fn('recall.publishPreparedDa
       recorded_at,
       source_size,
       authority_policy_key,
+      uri_locator_digest,
       memory_id,
       content_hash,
       candidate_json,
@@ -342,6 +338,7 @@ export const publishPreparedRecallDatabase = Effect.fn('recall.publishPreparedDa
       indexed.recorded_at,
       source.source_size,
       source.authority_policy_key,
+      source.uri_locator_digest,
       indexed.memory_id,
       indexed.content_hash,
       indexed.candidate_json,
@@ -408,11 +405,7 @@ export const publishPreparedRecallDatabase = Effect.fn('recall.publishPreparedDa
     ORDER BY posting.term COLLATE BINARY, document.id
   `);
   yield* RecallIndexIdentity.rebuildRecallIdentityConflicts(sql);
-  if (sourceScan.inventoryComplete) yield* resolveLegacyRecallMemoryLinks(sql, includeInactive, {kind: 'full'});
-  else {
-    const touchedLinks = yield* stageTouchedRecallLinkTargets(sql, removedLocators);
-    yield* resolveLegacyRecallMemoryLinks(sql, includeInactive, touchedLinks);
-  }
+  yield* resolveLegacyRecallMemoryLinks(sql, includeInactive);
   yield* sql.unsafe(`
     DELETE FROM term_statistics
     WHERE term IN (SELECT term FROM temp.${RECALL_REFRESH_AFFECTED_TERM_TABLE})
@@ -483,160 +476,75 @@ export const publishPreparedRecallDatabase = Effect.fn('recall.publishPreparedDa
   return documentCount;
 });
 
-const RECALL_LEGACY_LINK_BATCH = 200;
-const recallSqlPlaceholders = (count: number) =>
-  EffectArray.join(
-    EffectArray.makeBy(count, () => '?'),
-    ', ',
-  );
+const hasLegacyRecallMemoryLinks = (sql: SqlClient.SqlClient) =>
+  sql
+    .unsafe<{readonly present: number}>(
+      "SELECT 1 AS present FROM memory_links WHERE target_locator_digest <> '' LIMIT 1",
+    )
+    .pipe(Effect.map(rows => rows.length > 0));
+
+// CROSS JOIN keeps each small TEMP change set as the outer loop; TEMP tables carry no planner statistics.
 
 /**
- * A touched publish must re-resolve legacy edges whose target URI, memory id,
- * or uniqueness changed, including backlinks from sources that were not
- * rewritten. Only those target rows are read. The covering URI index is walked
- * only to invert a digest that is not already known from the change set.
+ * Legacy URI edges keep only a target locator digest. Before replaced and removed documents are
+ * deleted, record their digests and memory identities so that edges from unchanged sources which
+ * point at them are re-resolved after publication.
  */
-const stageTouchedRecallLinkTargets = Effect.fn('recall.stageTouchedLinkTargets')(function* (
-  sql: SqlClient.SqlClient,
-  removed: readonly {readonly memory_id: string | null; readonly uri: string}[],
-) {
-  const legacy = yield* sql.unsafe<{readonly present: number}>(
-    "SELECT 1 AS present FROM memory_links WHERE target_locator_digest <> '' LIMIT 1",
-  );
-  if (legacy.length === 0) return {kind: 'touched' as const, uris: [], digests: []};
-  const digests = new Set<string>();
-  const knownUris = new Set<string>();
-  const stageUris = new Set<string>();
-  for (const row of removed) {
-    digests.add(memoryLinkLocatorDigest(row.uri));
-    knownUris.add(row.uri);
-  }
-  const inserted = yield* sql.unsafe<{readonly memory_id: string | null; readonly uri: string}>(
-    `SELECT uri, memory_id FROM temp.${RECALL_REFRESH_INDEXED_DOCUMENT_TABLE}`,
-  );
-  for (const row of inserted) {
-    digests.add(memoryLinkLocatorDigest(row.uri));
-    knownUris.add(row.uri);
-  }
-  const memoryIds = EffectArray.dedupe(
-    EffectArray.filter(
-      EffectArray.appendAll(
-        EffectArray.map(removed, row => row.memory_id ?? ''),
-        EffectArray.map(inserted, row => row.memory_id ?? ''),
-      ),
-      id => id !== '',
-    ),
-  );
-  for (const batch of EffectArray.chunksOf(memoryIds, RECALL_LEGACY_LINK_BATCH)) {
-    const survivors = yield* sql.unsafe<{readonly uri: string}>(
-      `SELECT uri FROM documents WHERE memory_id IN (${recallSqlPlaceholders(batch.length)})`,
-      batch,
-    );
-    for (const survivor of survivors) {
-      digests.add(memoryLinkLocatorDigest(survivor.uri));
-      knownUris.add(survivor.uri);
-      stageUris.add(survivor.uri);
-    }
-  }
-  const linkDigests = yield* sql.unsafe<{readonly digest: string}>(
-    `SELECT DISTINCT target_locator_digest AS digest
-     FROM memory_links
-     WHERE target_locator_digest <> ''
-       AND source_uri IN (
-         SELECT uri FROM temp.${RECALL_REFRESH_SOURCE_TABLE} WHERE invalidated = 1
-       )`,
-  );
-  for (const row of linkDigests) digests.add(row.digest);
-  const unresolved = new Set(digests);
-  for (const uri of knownUris) unresolved.delete(memoryLinkLocatorDigest(uri));
-  if (unresolved.size > 0) {
-    let cursor = '';
-    for (;;) {
-      const rows = yield* sql.unsafe<{readonly uri: string}>(
-        `SELECT uri FROM documents WHERE uri > ? ORDER BY uri LIMIT 512`,
-        [cursor],
-      );
-      if (rows.length === 0) break;
-      for (const row of rows) {
-        const digest = memoryLinkLocatorDigest(row.uri);
-        if (!unresolved.has(digest)) continue;
-        unresolved.delete(digest);
-        stageUris.add(row.uri);
-      }
-      const last = rows[rows.length - 1];
-      if (unresolved.size === 0 || rows.length < 512 || last === undefined) break;
-      cursor = last.uri;
-    }
-  }
-  const insertedUris = new Set(EffectArray.map(inserted, row => row.uri));
-  const removedUris = new Set(EffectArray.map(removed, row => row.uri));
-  const toStage = EffectArray.filter([...stageUris], uri => !insertedUris.has(uri) && !removedUris.has(uri));
-  for (const batch of EffectArray.chunksOf(toStage, 80)) {
-    const rows = yield* sql.unsafe<{
-      readonly authority_policy_key: string | null;
-      readonly source_modified_at: string | null;
-      readonly source_path: string;
-      readonly source_size: number;
-      readonly uri: string;
-    }>(
-      `SELECT uri, source_path, source_modified_at, source_size, authority_policy_key
-       FROM documents
-       WHERE uri IN (${recallSqlPlaceholders(batch.length)})
-         AND uri NOT IN (SELECT uri FROM temp.${RECALL_REFRESH_SOURCE_TABLE})`,
-      batch,
-    );
-    if (rows.length === 0) continue;
-    yield* sql.unsafe(
-      `INSERT OR IGNORE INTO temp.${RECALL_REFRESH_SOURCE_TABLE} (
-        uri, uri_locator_digest, source_path, source_modified_at, source_size, authority_policy_key, invalidated
-      ) VALUES ${EffectArray.join(
-        EffectArray.map(rows, () => '(?, ?, ?, ?, ?, ?, 0)'),
-        ', ',
-      )}`,
-      EffectArray.flatMap(rows, row => [
-        row.uri,
-        memoryLinkLocatorDigest(row.uri),
-        row.source_path,
-        row.source_modified_at,
-        row.source_size,
-        row.authority_policy_key,
-      ]),
-    );
-  }
-  const touched = yield* sql.unsafe<{readonly uri: string}>(
-    `SELECT uri FROM temp.${RECALL_REFRESH_SOURCE_TABLE} WHERE invalidated = 1 ORDER BY uri`,
-  );
-  return {
-    kind: 'touched' as const,
-    uris: EffectArray.map(touched, row => row.uri),
-    digests: [...digests],
-  };
+const stageRemovedRecallLinkTargets = Effect.fn('recall.stageRemovedLinkTargets')(function* (sql: SqlClient.SqlClient) {
+  if (!(yield* hasLegacyRecallMemoryLinks(sql))) return;
+  yield* sql.unsafe(`
+    INSERT OR IGNORE INTO temp.${RECALL_REFRESH_LINK_TARGET_TABLE} (uri_locator_digest)
+    SELECT document.uri_locator_digest
+    FROM temp.${RECALL_REFRESH_REPLACED_DOCUMENT_TABLE} AS replaced
+    CROSS JOIN documents AS document ON document.id = replaced.document_id
+  `);
+  yield* sql.unsafe(`
+    INSERT OR IGNORE INTO temp.${RECALL_REFRESH_LINK_IDENTITY_TABLE} (memory_id)
+    SELECT document.memory_id
+    FROM temp.${RECALL_REFRESH_REPLACED_DOCUMENT_TABLE} AS replaced
+    CROSS JOIN documents AS document ON document.id = replaced.document_id
+    WHERE document.memory_id IS NOT NULL
+  `);
 });
 
-export const resolveLegacyRecallMemoryLinks = Effect.fn('recall.resolveLegacyMemoryLinks')(function* (
+/**
+ * Re-resolve only the legacy edges whose answer can have changed: edges from re-indexed sources,
+ * and edges whose target digest belongs to an inserted, replaced or removed URI, or to any document
+ * that shares a memory identity with one, because uniqueness and conflict state follow the
+ * identity. Targets are read through the persisted URI digest, so unchanged documents resolve too.
+ */
+const resolveLegacyRecallMemoryLinks = Effect.fn('recall.resolveLegacyMemoryLinks')(function* (
   sql: SqlClient.SqlClient,
   includeInactive: boolean,
-  scope:
-    | {readonly kind: 'full'}
-    | {readonly kind: 'touched'; readonly digests?: readonly string[]; readonly uris: readonly string[]},
 ) {
+  if (!(yield* hasLegacyRecallMemoryLinks(sql))) return;
+  yield* sql.unsafe(`
+    INSERT OR IGNORE INTO temp.${RECALL_REFRESH_LINK_IDENTITY_TABLE} (memory_id)
+    SELECT memory_id FROM temp.${RECALL_REFRESH_INDEXED_DOCUMENT_TABLE} WHERE memory_id IS NOT NULL
+  `);
+  yield* sql.unsafe(`
+    INSERT OR IGNORE INTO temp.${RECALL_REFRESH_LINK_TARGET_TABLE} (uri_locator_digest)
+    SELECT source.uri_locator_digest
+    FROM temp.${RECALL_REFRESH_INDEXED_DOCUMENT_TABLE} AS indexed
+    INNER JOIN temp.${RECALL_REFRESH_SOURCE_TABLE} AS source ON source.uri = indexed.uri
+  `);
+  yield* sql.unsafe(`
+    INSERT OR IGNORE INTO temp.${RECALL_REFRESH_LINK_TARGET_TABLE} (uri_locator_digest)
+    SELECT document.uri_locator_digest
+    FROM temp.${RECALL_REFRESH_LINK_IDENTITY_TABLE} AS identity
+    CROSS JOIN documents AS document ON document.memory_id = identity.memory_id
+  `);
   const inactivePredicate = includeInactive
     ? ''
     : `
       AND target.uri NOT LIKE '%/archived/%'
       AND target.uri NOT LIKE '%/expired/%'
       AND target.uri NOT LIKE '%/superseded/%'`;
-  const statusPredicate = `AND COALESCE(json_extract(target.candidate_json, '$.status'), 'active') = 'active'`;
-  const legacyLinks = yield* sql.unsafe<{readonly present: number}>(
-    "SELECT 1 AS present FROM memory_links WHERE target_locator_digest <> '' LIMIT 1",
-  );
-  if (legacyLinks.length === 0) return;
-  const resolvedTarget = `(SELECT target.memory_id
-    FROM temp.${RECALL_REFRESH_SOURCE_TABLE} AS target_source
-    INNER JOIN documents AS target ON target.uri = target_source.uri
-    WHERE target_source.uri_locator_digest = memory_links.target_locator_digest
+  const resolvedTarget = `COALESCE((SELECT target.memory_id
+    FROM documents AS target
+    WHERE target.uri_locator_digest = memory_links.target_locator_digest
       AND target.memory_id IS NOT NULL
-      ${statusPredicate}
+      AND COALESCE(json_extract(target.candidate_json, '$.status'), 'active') = 'active'
       ${inactivePredicate}
       AND length(target.memory_id) BETWEEN 4 AND 131
       AND substr(target.memory_id, 1, 3) = 'tn_'
@@ -650,71 +558,23 @@ export const resolveLegacyRecallMemoryLinks = Effect.fn('recall.resolveLegacyMem
         WHERE identity_document.memory_id = target.memory_id
       ) = 1
     ORDER BY target.uri COLLATE BINARY
-    LIMIT 1)`;
-  if (
-    scope.kind === 'touched' &&
-    scope.uris.length === 0 &&
-    (scope.digests === undefined || scope.digests.length === 0)
-  )
-    return;
-  const existsScope = `
-        OR EXISTS (
-          SELECT 1
-          FROM temp.${RECALL_REFRESH_SOURCE_TABLE} AS changed
-          INNER JOIN documents AS target ON target.uri = changed.uri
-          WHERE changed.uri_locator_digest = memory_links.target_locator_digest
-            AND (
-              changed.invalidated = 1
-              OR EXISTS (
-                SELECT 1
-                FROM memory_identity_conflicts AS conflict
-                WHERE conflict.memory_id = target.memory_id
-              )
-              OR (
-                target.memory_id <> ''
-                AND (
-                  SELECT COUNT(*) FROM documents AS identity_document
-                  WHERE identity_document.memory_id = target.memory_id
-                ) > 1
-              )
-            )
-        )`;
-  const updateLegacyLinks = (uris: readonly string[], digests: readonly string[]) => {
-    const sourceClause = uris.length === 0 ? '0' : `source_uri IN (${recallSqlPlaceholders(uris.length)})`;
-    const digestClause =
-      digests.length === 0 ? '' : `OR target_locator_digest IN (${recallSqlPlaceholders(digests.length)})`;
-    return sql.unsafe(
-      `
-      UPDATE memory_links
-      SET target_memory_id = COALESCE(${resolvedTarget}, '')
-      WHERE target_locator_digest <> ''
-        AND target_memory_id <> COALESCE(${resolvedTarget}, '')
-        AND (
-          ${sourceClause}
-          ${digestClause}
-          ${existsScope}
-        )
-    `,
-      EffectArray.appendAll(uris, digests),
-    );
-  };
-  if (scope.kind === 'full') {
-    yield* sql.unsafe(
-      `
-      UPDATE memory_links
-      SET target_memory_id = COALESCE(${resolvedTarget}, '')
-      WHERE target_locator_digest <> ''
-        AND target_memory_id <> COALESCE(${resolvedTarget}, '')
-    `,
-    );
-    return;
-  }
-  const digests = scope.digests ?? [];
-  if (scope.uris.length + digests.length <= RECALL_LEGACY_LINK_BATCH) {
-    yield* updateLegacyLinks(scope.uris, digests);
-    return;
-  }
-  for (const uris of EffectArray.chunksOf(scope.uris, RECALL_LEGACY_LINK_BATCH)) yield* updateLegacyLinks(uris, []);
-  for (const digestBatch of EffectArray.chunksOf(digests, RECALL_LEGACY_LINK_BATCH))
-    yield* updateLegacyLinks([], digestBatch);
+    LIMIT 1), '')`;
+  yield* sql.unsafe(`
+    UPDATE memory_links
+    SET target_memory_id = ${resolvedTarget}
+    WHERE target_locator_digest <> ''
+      AND target_locator_digest IN (SELECT uri_locator_digest FROM temp.${RECALL_REFRESH_LINK_TARGET_TABLE})
+      AND target_memory_id <> ${resolvedTarget}
+  `);
+  yield* sql.unsafe(`
+    UPDATE memory_links
+    SET target_memory_id = ${resolvedTarget}
+    WHERE target_locator_digest <> ''
+      AND source_document_id IN (
+        SELECT document.id
+        FROM temp.${RECALL_REFRESH_INDEXED_DOCUMENT_TABLE} AS indexed
+        CROSS JOIN documents AS document ON document.uri = indexed.uri
+      )
+      AND target_memory_id <> ${resolvedTarget}
+  `);
 });

@@ -1,3 +1,4 @@
+import {Database} from 'bun:sqlite';
 import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
@@ -11,8 +12,14 @@ import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {ExternalSourcePolicy} from '@threadnote/store/external-resource';
 import {canonicalResourceUri} from '@threadnote/store/resource-id';
 import {RECALL_REFRESH_SOURCE_TABLE, scanRecallSources, stageRecallSources} from '@threadnote/recall/index/refresh';
-import {resolveLegacyRecallMemoryLinks} from '@threadnote/recall/index/refresh_database';
-import {memoryLinkLocatorDigest} from '@threadnote/recall/memory/links';
+import {expireRecallIndexValidation, loadRecallIndexData, recallIndexDatabaseFilename} from '@threadnote/recall/index';
+import {recallResourceInvalidationLayer} from '@threadnote/recall/resource-invalidation';
+import {formatMemoryDocument} from '@threadnote/memory/document';
+import {ResourceStore} from '@threadnote/store/resource-store';
+import {cryptoLayer} from '@threadnote/platform/crypto';
+import {SystemInfo} from '@threadnote/platform/system';
+import {RuntimeEntrypoint} from '@threadnote/platform/runtime-entrypoint';
+import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
@@ -459,7 +466,7 @@ describe('Recall source staging', () => {
             });
             expect(result).toMatchObject({
               mode: 'full',
-              forceAllSources: true,
+              forceAllSources: false,
               scannedSourceCount: 1,
               skippedOversizedDocumentCount: 0,
             });
@@ -580,7 +587,7 @@ describe('Recall source staging', () => {
               mode: {kind: 'touched', contentGeneration: 'baseline'},
             });
             expect(result.mode).toBe(change === 'shrink' || change === 'delete-oversized' ? 'full' : 'touched');
-            expect(result.forceAllSources).toBe(result.mode === 'full');
+            expect(result.forceAllSources).toBe(false);
             const staged = yield* sql.unsafe<SourceRow>(
               `SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`,
             );
@@ -844,108 +851,62 @@ describe('Recall source staging', () => {
         }).pipe(withDatabase);
       }),
     );
-    it.effect('scopes legacy memory-link resolution to the touched uri set', () =>
+    for (const {stored, added} of [
+      {stored: 'DiR/old.md', added: 'dir/new.md'},
+      {stored: 'DiR/sub/old.md', added: 'dir/other/new.md'},
+    ])
+      it.effect(`falls back to a full scan when stored ${stored} case-aliases an ancestor of ${added}`, () =>
+        Effect.gen(function* () {
+          const {scan, fs, path, config, policy} = yield* fixture(sources(1));
+          const root = path.join(config.agentContextHome, 'data', 'acct', 'resources');
+          yield* Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient;
+            yield* scan(sql);
+            yield* seedPersistedInventory(sql);
+            yield* sql.unsafe(
+              `INSERT INTO documents (uri, source_path, source_modified_at, source_size, authority_policy_key)
+               VALUES (?, ?, NULL, 1, NULL)`,
+              [`threadnote://resources/${stored}`, path.join(root, stored)],
+            );
+            yield* fs.makeDirectory(path.dirname(path.join(root, added)), {recursive: true});
+            yield* fs.writeFileString(path.join(root, added), 'added source');
+            const result = yield* stageRecallSources(sql, fs, path, config, {
+              includeInactive: true,
+              canonicalResourcePolicy: policy,
+              invalidatedUris: new Set([`threadnote://resources/${added}`]),
+              mode: {kind: 'touched', contentGeneration: 'baseline'},
+            });
+            expect(result.mode).toBe('full');
+          }).pipe(withDatabase);
+        }),
+      );
+    it.effect('keeps a new lowercase target touched in a root above one probe page', () =>
       Effect.gen(function* () {
-        const changedUri = 'threadnote://resources/changed.md';
-        const unchangedUri = 'threadnote://resources/unchanged.md';
-        const unrelatedUri = 'threadnote://resources/unrelated.md';
-        const changedDigest = memoryLinkLocatorDigest(changedUri);
-        const unchangedDigest = memoryLinkLocatorDigest(unchangedUri);
+        const {scan, fs, path, config, policy} = yield* fixture(sources(600));
+        const root = path.join(config.agentContextHome, 'data', 'acct', 'resources');
         yield* Effect.gen(function* () {
           const sql = yield* SqlClient.SqlClient;
-          yield* sql.unsafe(`
-            CREATE TABLE documents (
-              id INTEGER PRIMARY KEY,
-              uri TEXT NOT NULL,
-              memory_id TEXT,
-              candidate_json TEXT NOT NULL,
-              approved_authoritative INTEGER NOT NULL DEFAULT 1,
-              logical_key TEXT NOT NULL DEFAULT 'k',
-              document_length INTEGER NOT NULL DEFAULT 1
-            )
-          `);
-          yield* sql.unsafe(
-            `CREATE TABLE memory_links (
-              source_document_id INTEGER NOT NULL,
-              source_uri TEXT NOT NULL,
-              source_memory_id TEXT NOT NULL DEFAULT '',
-              target_memory_id TEXT NOT NULL DEFAULT '',
-              target_locator_digest TEXT NOT NULL DEFAULT '',
-              relation_type TEXT NOT NULL,
-              relation_origin TEXT NOT NULL,
-              relation_ordinal INTEGER NOT NULL
-            )`,
-          );
-          yield* sql.unsafe(
-            `CREATE TABLE memory_identity_conflicts (memory_id TEXT PRIMARY KEY NOT NULL) WITHOUT ROWID`,
-          );
-          for (const [uri, memoryId] of [
-            [changedUri, 'tn_changed'],
-            [unchangedUri, 'tn_unchanged'],
-            [unrelatedUri, 'tn_unrelated'],
-          ] as const) {
-            yield* sql.unsafe(`INSERT INTO documents (uri, memory_id, candidate_json) VALUES (?, ?, ?)`, [
-              uri,
-              memoryId,
-              JSON.stringify({memoryId, status: 'active'}),
-            ]);
-          }
-          const insertLink = (sourceUri: string, digest: string) =>
-            sql.unsafe(
-              `INSERT INTO memory_links (
-                source_document_id, source_uri, target_memory_id, target_locator_digest,
-                relation_type, relation_origin, relation_ordinal
-              ) VALUES (
-                (SELECT id FROM documents WHERE uri = ?), ?, '', ?, 'references', 'test', 0
-              )`,
-              [sourceUri, sourceUri, digest],
-            );
-          yield* insertLink(changedUri, unchangedDigest);
-          yield* insertLink(unchangedUri, changedDigest);
-          yield* insertLink(unrelatedUri, unchangedDigest);
-          yield* sql.unsafe('PRAGMA temp_store = FILE');
-          yield* sql.unsafe(`CREATE TEMP TABLE ${RECALL_REFRESH_SOURCE_TABLE} (
-            uri TEXT PRIMARY KEY NOT NULL,
-            uri_locator_digest TEXT NOT NULL,
-            source_path TEXT NOT NULL DEFAULT '',
-            source_modified_at TEXT,
-            source_size INTEGER NOT NULL DEFAULT 0,
-            authority_policy_key TEXT,
-            invalidated INTEGER NOT NULL DEFAULT 1
-          ) WITHOUT ROWID`);
-          yield* sql.unsafe(
-            `INSERT INTO ${RECALL_REFRESH_SOURCE_TABLE} (uri, uri_locator_digest, invalidated)
-             VALUES (?, ?, 1)`,
-            [changedUri, changedDigest],
-          );
-          let legacyUpdates = 0;
+          yield* scan(sql);
+          yield* seedPersistedInventory(sql);
+          yield* fs.writeFileString(path.join(root, 'source-added.md'), 'added source');
+          let documentReads = 0;
           const counted = new Proxy(sql, {
             get(target, property, receiver) {
               if (property !== 'unsafe') return Reflect.get(target, property, receiver);
               return <A extends object>(text: string, parameters: readonly unknown[] = []) => {
-                if (EffectString.includes('UPDATE memory_links')(text)) legacyUpdates += 1;
+                if (EffectString.includes('FROM documents')(text)) documentReads += 1;
                 return target.unsafe<A>(text, parameters);
               };
             },
           });
-          yield* resolveLegacyRecallMemoryLinks(counted, false, {kind: 'touched', uris: [changedUri]});
-          expect(legacyUpdates).toBe(1);
-          const afterTouched = yield* sql.unsafe<{target_memory_id: string}>(
-            `SELECT target_memory_id FROM memory_links ORDER BY source_uri`,
-          );
-          yield* sql.unsafe(`DELETE FROM temp.${RECALL_REFRESH_SOURCE_TABLE}`);
-          for (const uri of [changedUri, unchangedUri, unrelatedUri]) {
-            yield* sql.unsafe(
-              `INSERT INTO temp.${RECALL_REFRESH_SOURCE_TABLE} (uri, uri_locator_digest, invalidated)
-               VALUES (?, ?, 0)`,
-              [uri, memoryLinkLocatorDigest(uri)],
-            );
-          }
-          yield* resolveLegacyRecallMemoryLinks(sql, false, {kind: 'full'});
-          const afterFull = yield* sql.unsafe<{target_memory_id: string}>(
-            `SELECT target_memory_id FROM memory_links ORDER BY source_uri`,
-          );
-          expect(afterFull).not.toEqual(afterTouched);
+          const result = yield* stageRecallSources(counted, fs, path, config, {
+            includeInactive: true,
+            canonicalResourcePolicy: policy,
+            invalidatedUris: new Set(['threadnote://resources/source-added.md']),
+            mode: {kind: 'touched', contentGeneration: 'baseline'},
+          });
+          expect(result).toMatchObject({mode: 'touched', scannedSourceCount: 1});
+          expect(documentReads).toBeLessThanOrEqual(4);
         }).pipe(withDatabase);
       }),
     );
@@ -1020,5 +981,121 @@ describe('Recall source staging', () => {
         }),
       );
     }
+  });
+});
+
+const recallPlatform = ResourceStore.layer.pipe(
+  Layer.provideMerge(
+    Layer.mergeAll(
+      BunServices.layer,
+      cryptoLayer,
+      SystemInfo.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.succeed(RuntimeEntrypoint, {developmentEntrypoint: import.meta.path}),
+            Layer.succeed(ChildEnvironmentPolicy, {preserveIntendedChild: env => env, sanitizeExternal: env => env}),
+          ),
+        ),
+      ),
+      recallResourceInvalidationLayer,
+    ),
+  ),
+);
+
+const legacyLinkFixture = Effect.fn('test.recallLegacyLinkFixture')(function* (options: {
+  readonly oversizedResource?: boolean;
+}) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const store = yield* ResourceStore;
+  const home = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'recall-legacy-links-'}));
+  const config = {account: 'local', agentContextHome: home, user: 'me'};
+  const uri = (topic: string) => `threadnote://user/me/memories/durable/${topic}.md`;
+  const write = (topic: string, memoryId: string, body: string, relationTarget?: string) =>
+    store.write(
+      {account: 'local', home, user: 'me'},
+      uri(topic),
+      formatMemoryDocument(
+        'MEMORY',
+        {
+          kind: 'durable',
+          memoryId,
+          sourceAgentClient: 'test',
+          status: 'active',
+          timestamp: '2026-11-03T00:00:00.000Z',
+          topic,
+          ...(relationTarget === undefined ? {} : {relations: [{type: 'references', uri: relationTarget}]}),
+        },
+        body,
+      ),
+      {mode: 'upsert'},
+    );
+  const refresh = (mode: 'forced' | 'touched') =>
+    Effect.gen(function* () {
+      if (mode === 'forced') yield* expireRecallIndexValidation(home, false);
+      let indexing: {readonly scanned: number; readonly total: number} | undefined;
+      yield* loadRecallIndexData(config, {
+        includeInactive: false,
+        onProgress: progress =>
+          Effect.sync(() => {
+            if (progress.phase === 'indexing' && indexing === undefined)
+              indexing = {scanned: progress.scanned, total: progress.total};
+          }),
+      });
+      return indexing;
+    });
+  const legacyLinks = Effect.acquireUseRelease(
+    Effect.sync(
+      () => new Database(path.join(home, 'indexes', 'lexical', recallIndexDatabaseFilename(false)), {readonly: true}),
+    ),
+    database =>
+      Effect.sync(() =>
+        database
+          .query<{readonly source_uri: string; readonly target_memory_id: string}, []>(
+            `SELECT source_uri, target_memory_id FROM memory_links
+             WHERE target_locator_digest <> '' ORDER BY source_uri`,
+          )
+          .all(),
+      ),
+    database => Effect.sync(() => database.close()),
+  );
+  if (options.oversizedResource) {
+    const resources = path.join(home, 'data', 'local', 'resources');
+    yield* fs.makeDirectory(resources, {recursive: true});
+    yield* fs.writeFileString(path.join(resources, 'oversized.md'), EffectString.repeat(512 * 1024 + 1)('x'));
+  }
+  yield* write('b', 'tn_legacy_b', 'legacy target');
+  yield* write('a', 'tn_legacy_a', 'legacy source', uri('b'));
+  yield* loadRecallIndexData(config, {includeInactive: false});
+  expect(yield* legacyLinks).toEqual([{source_uri: uri('a'), target_memory_id: 'tn_legacy_b'}]);
+  return {uri, write, refresh, legacyLinks};
+});
+
+describe('Recall refresh publication', () => {
+  effectIt.layer(recallPlatform)(it => {
+    for (const mode of ['touched', 'forced'] as const)
+      it.effect(`keeps a ${mode} refresh of the source resolving its link to an unchanged target`, () =>
+        Effect.gen(function* () {
+          const f = yield* legacyLinkFixture({});
+          yield* f.write('a', 'tn_legacy_a', 'legacy source revised', f.uri('b'));
+          expect(yield* f.refresh(mode)).toEqual(mode === 'touched' ? {scanned: 1, total: 1} : {scanned: 2, total: 2});
+          expect(yield* f.legacyLinks).toEqual([{source_uri: f.uri('a'), target_memory_id: 'tn_legacy_b'}]);
+        }).pipe(TestClock.withLive),
+      );
+    it.effect('unresolves an untouched link when a new document duplicates the target identity', () =>
+      Effect.gen(function* () {
+        const f = yield* legacyLinkFixture({});
+        yield* f.write('c', 'tn_legacy_b', 'duplicate identity');
+        expect(yield* f.refresh('touched')).toEqual({scanned: 1, total: 1});
+        expect(yield* f.legacyLinks).toEqual([{source_uri: f.uri('a'), target_memory_id: ''}]);
+      }).pipe(TestClock.withLive),
+    );
+    it.effect('re-indexes only a new uri when an oversized document sends the touched pass to a full scan', () =>
+      Effect.gen(function* () {
+        const f = yield* legacyLinkFixture({oversizedResource: true});
+        yield* f.write('c', 'tn_new_c', 'new memory beside an oversized resource');
+        expect(yield* f.refresh('touched')).toEqual({scanned: 3, total: 1});
+      }).pipe(TestClock.withLive),
+    );
   });
 });

@@ -29,7 +29,12 @@ import {SystemInfo} from '@threadnote/platform/system';
 import {CommandCleanupUnconfirmed, CommandExecutor, CommandTimedOut} from '@threadnote/platform/command';
 import {RecallEmbeddingWakePort} from '@threadnote/recall/background/demand';
 import {readRecallLexicalDemand, requestRecallLexicalRefresh} from '@threadnote/recall/background/lexical-demand';
-import {loadRecallIndexData, readRecallExactMatches, readRecallIndexData} from '@threadnote/recall/index';
+import {
+  loadRecallIndexData,
+  readRecallExactMatches,
+  readRecallIndexData,
+  recallIndexDatabaseFilename,
+} from '@threadnote/recall/index';
 import {recallIndexDataResult} from '@threadnote/recall/index/result';
 import {
   RecallReadyReadBoundary,
@@ -608,7 +613,7 @@ describe('owned native ready-read boundary', () => {
         expect(connections.outcome).toBe('unavailable');
         expect(connections.maintenanceRequested).toBe(true);
         stage = 'database-absence';
-        expect(yield* fs.exists(path.join(home, 'indexes/lexical/active-v14.sqlite'))).toBe(false);
+        expect(yield* fs.exists(path.join(home, 'indexes/lexical', recallIndexDatabaseFilename(false)))).toBe(false);
       }).pipe(
         Effect.onError(cause => {
           if (Cause.hasInterrupts(cause)) return Effect.void;
@@ -841,7 +846,7 @@ describe('owned native ready-read boundary', () => {
       Effect.gen(function* () {
         const f = yield* fixture;
         const filename = f.path.join(f.home, 'data/local/user/test/memories/durable/alpha.md');
-        const database = f.path.join(f.home, 'indexes/lexical/active-v14.sqlite');
+        const database = f.path.join(f.home, 'indexes/lexical', recallIndexDatabaseFilename(false));
         const before = yield* f.fs.readFile(database);
         yield* f.fs.writeFileString(
           filename,

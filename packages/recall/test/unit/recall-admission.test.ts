@@ -351,7 +351,7 @@ effectIt.effect('preserves programming defects in read-only readiness checks', (
       databasePath: Effect.die(defect),
       pointerPath: f.database + '.pointer.json',
       fixedDatabasePath: f.database,
-      schemaVersion: 14,
+      schemaVersion: 15,
       logicalScope: recallLogicalScope(f.config, false),
     }).pipe(Effect.exit);
     expect(Exit.isFailure(exit)).toBe(true);
@@ -440,6 +440,7 @@ effectIt.effect(
               recorded_at TEXT,
               source_size INTEGER NOT NULL CHECK (source_size >= 0),
               authority_policy_key TEXT,
+              uri_locator_digest TEXT NOT NULL,
               candidate_json TEXT NOT NULL,
               logical_key TEXT NOT NULL,
               document_length INTEGER NOT NULL CHECK (document_length >= 0),
@@ -449,12 +450,12 @@ effectIt.effect(
           db.exec(`
             INSERT INTO documents_legacy (
               id, uri, project, approved_authoritative, workspace_scope, source_path, source_modified_at,
-              recorded_at, source_size, authority_policy_key, candidate_json, logical_key, document_length,
+              recorded_at, source_size, authority_policy_key, uri_locator_digest, candidate_json, logical_key, document_length,
               memory_links_truncated
             )
             SELECT
               id, uri, project, approved_authoritative, workspace_scope, source_path, source_modified_at,
-              recorded_at, source_size, authority_policy_key, candidate_json, logical_key, document_length,
+              recorded_at, source_size, authority_policy_key, uri_locator_digest, candidate_json, logical_key, document_length,
               memory_links_truncated
             FROM documents
           `);
@@ -497,7 +498,7 @@ effectIt.effect(
         databasePath: Effect.succeed(f.database),
         pointerPath: EffectString.replace(/\.sqlite$/, '.pointer.json')(f.database),
         fixedDatabasePath: f.database,
-        schemaVersion: 14,
+        schemaVersion: 15,
         logicalScope: recallLogicalScope(f.config, false),
       }).pipe(Effect.flip);
       expect(cutFailure).toMatchObject({_tag: 'RecallIdentityAdmissionBusy'});

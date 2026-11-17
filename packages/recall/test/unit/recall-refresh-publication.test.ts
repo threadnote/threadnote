@@ -153,18 +153,16 @@ effectIt.effect('rebuilds the next lexical filename instead of adopting the prev
     const f = yield* fixture(1);
     const lexical = f.path.join(f.home, 'indexes', 'lexical');
     const current = f.path.join(lexical, recallIndexDatabaseFilename(false));
-    const previous = f.path.join(lexical, 'active-v13.sqlite');
-    yield* f.fs.writeFileString(previous, 'v13-not-migrated');
+    const previous = f.path.join(lexical, 'active-v14.sqlite');
+    yield* f.fs.writeFileString(previous, 'v14-not-migrated');
     yield* f.write(0, 'alpha rebuilt after version bump');
     yield* f.refresh();
     expect(yield* f.fs.exists(previous)).toBe(false);
     expect(yield* f.fs.exists(current)).toBe(true);
     expect(
       yield* useDatabase(current, db => db.query("SELECT value FROM metadata WHERE key = 'schema_version'").get()),
-    ).toEqual({value: '14'});
-    expect(yield* f.fs.readFileString(current).pipe(Effect.option)).not.toEqual(
-      Option.some('v13-not-migrated'),
-    );
+    ).toEqual({value: '15'});
+    expect(yield* f.fs.readFileString(current).pipe(Effect.option)).not.toEqual(Option.some('v14-not-migrated'));
   }).pipe(provide, TestClock.withLive),
 );
 
