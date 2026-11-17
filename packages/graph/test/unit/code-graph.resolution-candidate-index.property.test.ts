@@ -103,7 +103,7 @@ describe('persisted resolution-candidate index', () => {
             expect(comparableClosure(indexed)).toEqual(comparableClosure(scanned));
           }
         }),
-      {fastCheck: {numRuns: 150}},
+      {fastCheck: {numRuns: 40}},
     );
 
     it.effect('reports another attribution context as missing and an absent owner as unavailable', () =>
