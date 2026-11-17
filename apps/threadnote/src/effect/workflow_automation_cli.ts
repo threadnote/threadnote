@@ -1,4 +1,4 @@
-import {makeNativeTaskAuthoringCommand} from './task_authoring_cli.js';
+import {makeNativeTaskAuthoringCommand, printWorkflowRefusal} from './task_authoring_cli.js';
 import {Console, Effect, FileSystem, Path, Schema, Stdio, Stream} from 'effect';
 import {Command, Flag} from 'effect/cli';
 import type {CliRuntimeRunner} from './cli.js';
@@ -56,12 +56,6 @@ export const readNativeWorkflowInput = Effect.gen(function* () {
       WorkflowAutomationError.make({code: 'invalid-request', message: 'Native workflow input must be valid UTF-8.'}),
   });
 });
-
-/** An actionable refusal also prints its rule and next command as one JSON line before failing. */
-const printWorkflowRefusal = (error: WorkflowAutomationError) =>
-  error.gate === undefined && error.detail === undefined && error.next === undefined
-    ? Effect.void
-    : Console.log(JSON.stringify(workflowAutomationErrorEnvelope(error)));
 
 export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
   return Command.make('workflow-automation', {}, () =>

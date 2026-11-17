@@ -7,7 +7,8 @@ import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 import {Option as EffectOption} from 'effect';
 
-const invalid = (message: string) => WorkflowAutomationError.make({code: 'invalid-document', message});
+const invalid = (message: string, detail?: {readonly path: string; readonly limit?: number}) =>
+  WorkflowAutomationError.make({code: 'invalid-document', message, ...(detail === undefined ? {} : {detail})});
 const AUTHORING_CONTROL_CHARACTER = /[^\u0020-\u007e\u00a0-\u{10ffff}]/u;
 const AUTHORING_TEXT_CONTROL_CHARACTER = /(?!\n)[^\u0020-\u007e\u00a0-\u{10ffff}]/u;
 const boundedText = (maximum: number, nonblank = false, singleLine = false) =>
@@ -429,6 +430,56 @@ const schemaIssueDiagnostic = (issue: SchemaIssue.Issue, path: readonly Property
   }
 };
 
+const schemaIssueLimit = (issue: SchemaIssue.Filter): number | undefined => {
+  const payload = issue.filter.annotations?.representation?.payload;
+  if (!Predicate.isObject(payload)) return undefined;
+  return typeof payload.maxLength === 'number'
+    ? payload.maxLength
+    : typeof payload.maximum === 'number'
+      ? payload.maximum
+      : undefined;
+};
+
+/** The first failing schema location and, for a size rule, its limit; the same walk as the bounded message. */
+const schemaIssueLocation = (
+  issue: SchemaIssue.Issue,
+  path: readonly PropertyKey[] = [],
+): {readonly path: readonly PropertyKey[]; readonly limit?: number} => {
+  switch (issue._tag) {
+    case 'Pointer':
+      return schemaIssueLocation(issue.issue, [...path, ...issue.path]);
+    case 'Encoding':
+      return schemaIssueLocation(issue.issue, path);
+    case 'Composite':
+      return schemaIssueLocation(issue.issues[0], path);
+    case 'AnyOf':
+      return issue.issues[0] ? schemaIssueLocation(issue.issues[0], path) : {path};
+    case 'Filter': {
+      const limit = schemaIssueLimit(issue);
+      return limit === undefined ? {path} : {path, limit};
+    }
+    case 'UnexpectedKey':
+      return {path: path.slice(0, -1)};
+    default:
+      return {path};
+  }
+};
+
+/** Structured refusal detail for a native authoring schema rejection: the field path and any size limit. */
+export const nativeAuthoringSchemaDetail = (
+  error: unknown,
+): {readonly path: string; readonly limit?: number} | undefined => {
+  if (!Predicate.isObject(error) || !SchemaIssue.isIssue(error.issue)) return undefined;
+  try {
+    const location = schemaIssueLocation(error.issue);
+    if (location.path.length === 0) return undefined;
+    const path = issueLocation(location.path);
+    return location.limit === undefined ? {path} : {path, limit: location.limit};
+  } catch {
+    return undefined;
+  }
+};
+
 /** Bounded caller-facing diagnostic for a native authoring schema rejection, or undefined when none is safe. */
 export const nativeAuthoringSchemaDiagnostic = (error: unknown): string | undefined => {
   if (!Predicate.isObject(error) || !SchemaIssue.isIssue(error.issue)) return undefined;
@@ -456,6 +507,7 @@ export function decodeNativeAuthoringDocument(input: unknown): NativeAuthoringDo
     throw invalid(
       nativeAuthoringSchemaDiagnostic(error) ??
         'The native authoring document is malformed or contains unsupported fields.',
+      nativeAuthoringSchemaDetail(error),
     );
   }
   if (new TextEncoder().encode(canonicalAuthoringJson(document)).byteLength > 1_000_000)

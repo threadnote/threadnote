@@ -428,7 +428,7 @@ const startSimulatedTaskWatch = (
       prUrl,
       expectedWatchId,
     );
-    if (!attempt.result.ok) return yield* Effect.fail(attempt.result.failure);
+    if (!attempt.result.ok) return yield* attempt.result.failure;
     const started = object(attempt.result.value);
     const startedWatch = attempt.startedWatch;
     if (!startedWatch) throw new Error('Expected the simulated task watch to persist.');
@@ -3094,10 +3094,19 @@ describe('native task actions', () => {
           context: {...expansion.context, codeRefs: [...expansion.context.codeRefs, 'unlisted.ts']},
         },
       }).pipe(Effect.result);
-      expect(rejectedExpansion).toMatchObject({failure: {code: 'invalid-document'}});
-      expect(JSON.stringify(rejectedExpansion)).toContain(
-        `code-ref-out-of-snapshot at context.codeRefs[${outsideRefIndex}]`,
-      );
+      expect(rejectedExpansion).toMatchObject({
+        failure: {
+          code: 'invalid-document',
+          detail: {
+            issues: expect.arrayContaining([
+              expect.objectContaining({
+                code: 'code-ref-out-of-snapshot',
+                path: `context.codeRefs[${outsideRefIndex}]`,
+              }),
+            ]),
+          },
+        },
+      });
       const firstExpansion = object(
         yield* runNativeTaskAction(config, {
           command: 'compact-expand',

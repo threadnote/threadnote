@@ -1557,10 +1557,11 @@ const saveAuthoring = <R>(
         );
       const structural = validateNativeAuthoring(document);
       if (structural.issues.length)
-        return yield* fail(
-          'invalid-document',
-          `Resolve the document’s structural/coverage/source issues before saving; readiness-only questions remain draftable. Issues: ${nativeAuthoringIssueSummary(structural.issues)}`,
-        );
+        return yield* WorkflowAutomationError.make({
+          code: 'invalid-document',
+          message: `Resolve the document’s structural/coverage/source issues before saving; readiness-only questions remain draftable. Issues: ${nativeAuthoringIssueSummary(structural.issues)}`,
+          detail: {issues: structural.issues},
+        });
       const text = canonicalAuthoringJson(document);
       const views = EffectArray.map(documentViews(document), item => ({...item, document: boundedView(item.document)}));
       const encodedViews = yield* Effect.try({

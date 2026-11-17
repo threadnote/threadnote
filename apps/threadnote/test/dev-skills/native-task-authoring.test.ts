@@ -482,8 +482,13 @@ effectIt.effect('reports field-specific schema failures on task-author start and
     const oversizedRefsSave = yield* f
       .author({command: 'save', authoringRef: draft.authoringRef, contentFile: oversizedRefsFile})
       .pipe(Effect.result);
-    expect(oversizedRefsSave).toMatchObject({failure: {code: 'invalid-content'}});
-    expect(JSON.stringify(oversizedRefsSave)).toMatch(/context\.codeRefs\b.*\bat most 8\b/u);
+    expect(oversizedRefsSave).toMatchObject({
+      failure: {
+        code: 'invalid-content',
+        detail: {path: 'context.codeRefs', limit: 8},
+        next: {tool: 'workflow_task_author', command: 'read'},
+      },
+    });
     expect(JSON.stringify(oversizedRefsSave)).not.toContain(marker);
     expect(yield* f.fs.readFileString(statePath)).toBe(before);
   }).pipe(TestClock.withLive, provideNative),

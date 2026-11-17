@@ -204,3 +204,32 @@ describe('standard-profile derived ownership', () => {
     }).pipe(runCycle),
   );
 });
+
+describe('actionable refusals', () => {
+  effectIt.effect('points a review without a review card at the action on the current card', () =>
+    Effect.gen(function* () {
+      const f = yield* cycleFixture(
+        ['one'],
+        'local',
+        false,
+        false,
+        true,
+        undefined,
+        undefined,
+        {},
+        {policy: 'standard'},
+      );
+      const refusal = yield* runNativeTaskAction(f.config, {
+        command: 'record-review',
+        runId: 'native-run',
+        callerCwd: f.repo,
+        snapshotRef: 'not-a-snapshot-ref',
+        report: {},
+      }).pipe(Effect.flip);
+      expect(refusal).toMatchObject({
+        next: {tool: 'workflow_task_snapshot', command: 'record', args: {runId: 'native-run', callerCwd: f.repo}},
+      });
+      expect(refusal.next?.cli).toContain('task-action record-snapshot --run-id native-run');
+    }).pipe(runCycle),
+  );
+});

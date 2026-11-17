@@ -401,7 +401,7 @@ describe('native authoring documents', () => {
       const before = JSON.stringify(invalid);
       const error = caught(() => decodeNativeAuthoringDocument(invalid));
       if (!(error instanceof Error)) throw new Error('Invalid document unexpectedly decoded.');
-      expect(error).toMatchObject({code: 'invalid-document'});
+      expect(error).toMatchObject({code: 'invalid-document', detail: {path: location}});
       expect(error.message).toContain(location);
       expect(error.message).toContain(constraint);
       expect(error.message).not.toContain(marker);
@@ -992,6 +992,20 @@ describe('native authoring documents', () => {
       ),
       {numRuns: 40},
     );
+  });
+});
+
+describe('structured authoring refusals', () => {
+  it('names the field path and the size limit of a cap violation', () => {
+    const plan = validPlan();
+    expect(
+      caught(() =>
+        decodeNativeAuthoringDocument({
+          ...plan,
+          context: {...plan.context, codeRefs: EffectArray.makeBy(9, index => `src/file-${index}.ts`)},
+        }),
+      ),
+    ).toMatchObject({code: 'invalid-document', detail: {path: 'context.codeRefs', limit: 8}});
   });
 });
 

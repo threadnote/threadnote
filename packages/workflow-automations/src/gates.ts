@@ -104,3 +104,53 @@ export const nativeGateRefusal = (
   message: string,
   decision: Extract<GateDecision, {readonly _tag: 'refuse'}>,
 ) => nativeRefusal(code, message, decision);
+
+/** The next legal command for the action on the current task card. */
+export const nativeNextForTaskAction = (action: string, runId: string, callerCwd: string): NativeNextCommand => {
+  const scope = {runId, callerCwd};
+  switch (action) {
+    case 'implement':
+      return nativeNextCommand('workflow_task_snapshot', 'record', 'task-action record-snapshot', scope);
+    case 'review':
+      return nativeNextCommand('workflow_task_record_review', 'record-review', 'task-action record-review', {
+        ...scope,
+        snapshotRef: '<snapshotRef>',
+        report: '<report>',
+      });
+    case 'validate':
+      return nativeNextCommand(
+        'workflow_task_record_validation',
+        'record-validation',
+        'task-action record-validation',
+        {...scope, snapshotRef: '<snapshotRef>', validation: '<validation>'},
+      );
+    case 'deliver':
+      return nativeNextCommand('workflow_task_deliver', 'deliver-local', 'task-action deliver-local', {
+        ...scope,
+        validationRef: '<validationRef>',
+      });
+    case 'complete':
+      return nativeNextCommand('workflow_task_finish', 'finish', 'task-action finish', scope);
+    case 'compact-confirm':
+      return nativeNextCommand('workflow_task_compact_confirm', 'compact-confirm', 'task-action compact-confirm', {
+        ...scope,
+        intentHash: '<intentHash>',
+        userResponse: '<userResponse>',
+      });
+    default:
+      return nativeTaskViewNext(runId, callerCwd);
+  }
+};
+
+/** Attach a next command to a refusal that does not name one yet. */
+export const withNativeNext = (error: WorkflowAutomationError, next: NativeNextCommand) =>
+  error.next !== undefined
+    ? error
+    : WorkflowAutomationError.make({
+        code: error.code,
+        message: error.message,
+        ...(error.retryable === undefined ? {} : {retryable: error.retryable}),
+        ...(error.gate === undefined ? {} : {gate: error.gate}),
+        ...(error.detail === undefined ? {} : {detail: error.detail}),
+        next,
+      });

@@ -1,4 +1,9 @@
-import {nativeWorkflowPolicyOf} from '@threadnote/workflow-automations/gates';
+import {
+  nativeWorkflowPolicyOf,
+  nativeNextForTaskAction,
+  nativeTaskViewNext,
+  withNativeNext,
+} from '@threadnote/workflow-automations/gates';
 import {runStandalonePrWatch} from './standalone_pr_watch.js';
 import {SystemInfo} from '@threadnote/platform/system';
 import {
@@ -28,6 +33,7 @@ import {
   nativeTaskStartRunId,
   NativeTaskAnchorSchema,
   NativeTaskStartRequestSchema,
+  projectNativeTaskView,
 } from '@threadnote/workflow-automations/task';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
@@ -636,6 +642,35 @@ const requireEffectValue = <A>(value: A | undefined, message: string): A => {
 
 /** Typed task operations over the existing cycle state; references never authorize a mutation by themselves. */
 export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
+  runNativeTaskActionCore(config, input).pipe(Effect.catch(error => withTaskNext(config, input, error)));
+
+/** A refusal without a named next command points at the action on the current task card. */
+const withTaskNext = (config: RuntimeConfig, input: unknown, cause: unknown) =>
+  Effect.gen(function* () {
+    const error = nativeWorkflowError(cause);
+    if (
+      error.next !== undefined ||
+      !Predicate.isObject(input) ||
+      typeof input.runId !== 'string' ||
+      typeof input.callerCwd !== 'string'
+    )
+      return yield* error;
+    const {runId, callerCwd} = input;
+    // Project the card from stored state only: a refusal must not reach providers or watches.
+    const current = yield* readNativeWorkflowState(config, runId).pipe(Effect.exit);
+    return yield* withNativeNext(
+      error,
+      current._tag === 'Success' && current.value
+        ? nativeNextForTaskAction(
+            projectNativeTaskView(current.value.state, current.value.revision).next.action,
+            runId,
+            callerCwd,
+          )
+        : nativeTaskViewNext(runId, callerCwd),
+    );
+  });
+
+const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
   Effect.gen(function* () {
     const request = yield* Schema.decodeUnknownEffect(requestSchema, {onExcessProperty: 'error'})(input).pipe(
       Effect.mapError(error =>

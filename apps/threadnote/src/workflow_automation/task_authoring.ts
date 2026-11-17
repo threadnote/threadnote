@@ -1,4 +1,4 @@
-import {nativeWorkflowPolicies} from '@threadnote/workflow-automations/gates';
+import {nativeWorkflowPolicies, nativeNextCommand, withNativeNext} from '@threadnote/workflow-automations/gates';
 import {
   Array as A,
   Effect,
@@ -26,6 +26,7 @@ import {
   type NativeAuthoringDocument,
   nativePlanIntentPolicyFor,
   NativeDerivedOwnershipPlanIntentPolicyVersion,
+  nativeAuthoringSchemaDetail,
 } from '@threadnote/workflow-automations/authoring';
 import {readNativeWorkflowState} from './store.js';
 import {runWorkflowAutomation} from './index.js';
@@ -714,13 +715,16 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
         onExcessProperty: 'error',
         reportInput: true,
       })(raw).pipe(
-        Effect.mapError(error =>
-          fail(
-            'invalid-content',
-            nativeAuthoringSchemaDiagnostic(error) ??
+        Effect.mapError(error => {
+          const detail = nativeAuthoringSchemaDetail(error);
+          return WorkflowAutomationError.make({
+            code: 'invalid-content',
+            message:
+              nativeAuthoringSchemaDiagnostic(error) ??
               'Business content must match spec/plan fields; omit format, id, project, source, spec export and compact-origin metadata.',
-          ),
-        ),
+            ...(detail === undefined ? {} : {detail}),
+          });
+        }),
       );
       let spec: unknown;
       let requirements: unknown = content.requirements;
@@ -954,5 +958,17 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
     return result(existing);
   }).pipe(
     Effect.catchDefect(error => Effect.fail(nativeWorkflowError(error))),
-    Effect.mapError(nativeWorkflowError),
+    Effect.mapError(error => withAuthoringNext(nativeWorkflowError(error), input)),
   );
+
+/** Every authoring refusal names its next legal command: reread the current authoring card. */
+const withAuthoringNext = (error: WorkflowAutomationError, input: unknown) =>
+  !Predicate.isObject(input) || typeof input.callerCwd !== 'string'
+    ? error
+    : withNativeNext(
+        error,
+        nativeNextCommand('workflow_task_author', 'read', 'task-author --operation read', {
+          callerCwd: input.callerCwd,
+          authoringRef: typeof input.authoringRef === 'string' ? input.authoringRef : '<authoringRef>',
+        }),
+      );
