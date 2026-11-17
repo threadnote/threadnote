@@ -225,14 +225,12 @@ export const withNativeWorkflowMemorySession = <A, E, R>(
               const jobSourceView = yield* CurrentNativeJobSourceView;
               const jobReadyPromotion = yield* CurrentNativeJobReadyPromotion;
               const foregroundCitations = yield* CurrentForegroundAuthoringCitations;
-              const citationRefs = 'codeRefs' in request ? request.codeRefs : undefined;
               const precomputed =
                 state === priorPrepared.stateRef &&
                 stableJson(state) === priorPrepared.journalRevision &&
                 jobSourceView === priorPrepared.jobSourceView &&
                 jobReadyPromotion === priorPrepared.jobReadyPromotion &&
-                foregroundCitations === priorPrepared.foregroundCitations &&
-                (citationRefs?.length ?? 0) === 0
+                foregroundCitations === priorPrepared.foregroundCitations
                   ? priorPrepared.prepared
                   : undefined;
               return yield* executeWorkflowOperation(config, state, request, precomputed);

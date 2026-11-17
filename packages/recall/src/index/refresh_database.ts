@@ -11,7 +11,7 @@ import {
 import {parseMemoryDocument} from '@threadnote/memory/document';
 import type {RecallIndexConfig, RecallIndexProgress} from '../index.js';
 import {deriveIndexedRecallCodeLinks} from '../code_links.js';
-import {deriveIndexedRecallMemoryLinks} from '../memory/links.js';
+import {deriveIndexedRecallMemoryLinks, memoryLinkLocatorDigest} from '../memory/links.js';
 import {recallDocumentTerms} from '../rank.js';
 import {indexCandidate, recallExactSearchText} from './candidate.js';
 import {loadCanonicalResourcePolicy, verifyCanonicalResource} from './canonical_resource.js';
@@ -400,16 +400,8 @@ export const publishPreparedRecallDatabase = Effect.fn('recall.publishPreparedDa
     ORDER BY posting.term COLLATE BINARY, document.id
   `);
   yield* RecallIndexIdentity.rebuildRecallIdentityConflicts(sql);
-  const touchedUriRows = sourceScan.inventoryComplete
-    ? []
-    : yield* sql.unsafe<{readonly uri: string}>(`SELECT uri FROM temp.${RECALL_REFRESH_SOURCE_TABLE}`);
-  yield* resolveLegacyRecallMemoryLinks(
-    sql,
-    includeInactive,
-    sourceScan.inventoryComplete
-      ? {kind: 'full'}
-      : {kind: 'touched', uris: EffectArray.map(touchedUriRows, row => row.uri)},
-  );
+  if (!sourceScan.inventoryComplete) yield* stageUnchangedRecallLocatorDigests(sql);
+  yield* resolveLegacyRecallMemoryLinks(sql, includeInactive, {kind: 'full'});
   yield* sql.unsafe(`
     DELETE FROM term_statistics
     WHERE term IN (SELECT term FROM temp.${RECALL_REFRESH_AFFECTED_TERM_TABLE})
@@ -485,6 +477,54 @@ export const publishPreparedRecallDatabase = Effect.fn('recall.publishPreparedDa
  * against the exact corpus staged for this database so target add/delete/move
  * operations converge with a clean rebuild even when the source is unchanged.
  */
+const stageUnchangedRecallLocatorDigests = Effect.fn('recall.stageUnchangedLocatorDigests')(function* (
+  sql: SqlClient.SqlClient,
+) {
+  const legacy = yield* sql.unsafe<{readonly present: number}>(
+    "SELECT 1 AS present FROM memory_links WHERE target_locator_digest <> '' LIMIT 1",
+  );
+  if (legacy.length === 0) return;
+  let cursor = '';
+  for (;;) {
+    const rows = yield* sql.unsafe<{
+      readonly authority_policy_key: string | null;
+      readonly source_modified_at: string | null;
+      readonly source_path: string;
+      readonly source_size: number;
+      readonly uri: string;
+    }>(
+      `SELECT uri, source_path, source_modified_at, source_size, authority_policy_key
+       FROM documents
+       WHERE uri > ?
+         AND uri NOT IN (SELECT uri FROM temp.${RECALL_REFRESH_SOURCE_TABLE})
+       ORDER BY uri
+       LIMIT 256`,
+      [cursor],
+    );
+    if (rows.length === 0) return;
+    const placeholders = EffectArray.join(
+      EffectArray.map(rows, () => '(?, ?, ?, ?, ?, ?, 0)'),
+      ', ',
+    );
+    yield* sql.unsafe(
+      `INSERT OR IGNORE INTO temp.${RECALL_REFRESH_SOURCE_TABLE} (
+        uri, uri_locator_digest, source_path, source_modified_at, source_size, authority_policy_key, invalidated
+      ) VALUES ${placeholders}`,
+      EffectArray.flatMap(rows, row => [
+        row.uri,
+        memoryLinkLocatorDigest(row.uri),
+        row.source_path,
+        row.source_modified_at,
+        row.source_size,
+        row.authority_policy_key,
+      ]),
+    );
+    const last = rows[rows.length - 1];
+    if (rows.length < 256 || last === undefined) return;
+    cursor = last.uri;
+  }
+});
+
 export const resolveLegacyRecallMemoryLinks = Effect.fn('recall.resolveLegacyMemoryLinks')(function* (
   sql: SqlClient.SqlClient,
   includeInactive: boolean,

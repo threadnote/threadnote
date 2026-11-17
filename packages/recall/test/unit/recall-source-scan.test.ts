@@ -579,7 +579,8 @@ describe('Recall source staging', () => {
           const fullStaged = yield* sql.unsafe<SourceRow>(
             `SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`,
           );
-          expectTouchedStagingMatchesFullScanSubset(staged, fullStaged, new Set([uri]));
+          if (result.mode === 'touched') expectTouchedStagingMatchesFullScanSubset(staged, fullStaged, new Set([uri]));
+          else expect(staged).toEqual(fullStaged);
         }).pipe(withDatabase);
       }),
     );

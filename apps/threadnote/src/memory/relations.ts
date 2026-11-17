@@ -70,7 +70,10 @@ export const buildAuthorizedOwnedMemoryIdProofs = Effect.fn('memory.buildOwnedMe
   for (const [uri, artifact] of EffectRecord.toEntries(ownedActiveArtifacts)) {
     if (artifact.state !== 'active') continue;
     if (!EffectArray.some(allowedUriScopes, scope => resourceIds.isWithin(uri, scope))) continue;
-    const live = yield* readMemoryWithRelocations(config, uri, {allowedUriScopes});
+    const live = yield* readMemoryWithRelocations(config, uri, {allowedUriScopes}).pipe(
+      Effect.catchTag('MemoryPointerNotFound', () => Effect.void),
+    );
+    if (!live) continue;
     if (!EffectArray.some(allowedUriScopes, scope => resourceIds.isWithin(live.canonicalUri, scope))) continue;
     const record = parseMemoryDocument(live.canonicalUri, live.content);
     if (!record || record.metadata.status !== 'active') continue;

@@ -508,6 +508,32 @@ const probeTouchedRecallSourceCorpusAliases = Effect.fn('recall.probeTouchedCorp
   for (const [uri, target] of targets) {
     const parentPrefix = recallTouchedSourceParentPrefix(target.root.uri, target.segments);
     const upperBound = `${parentPrefix}\u{10ffff}`;
+    const caseFoldedParent = yield* sql.unsafe<{readonly uri: string}>(
+      `SELECT uri FROM documents
+       WHERE uri LIKE ? ESCAPE '\\'
+         AND NOT (uri COLLATE BINARY >= ? COLLATE BINARY AND uri COLLATE BINARY < ? COLLATE BINARY)
+       ORDER BY uri COLLATE BINARY
+       LIMIT ?`,
+      [
+        `${EffectString.replaceAll('_', '\\_')(EffectString.replaceAll('%', '\\%')(EffectString.replaceAll('\\', '\\\\')(parentPrefix)))}%`,
+        parentPrefix,
+        upperBound,
+        RECALL_REFRESH_SOURCE_PAGE_SIZE,
+      ],
+    );
+    if (caseFoldedParent.length === RECALL_REFRESH_SOURCE_PAGE_SIZE) return false;
+    for (const row of caseFoldedParent) {
+      if (row.uri === uri) continue;
+      const alias = folded.get(EffectString.toLowerCase(row.uri));
+      if (alias !== undefined && alias !== row.uri) return false;
+      const root = EffectArray.findFirst(roots, root => EffectString.startsWith(root.uri + '/')(row.uri));
+      if (Option.isNone(root)) return false;
+      const id = yield* Effect.try(() => parseResourceId(row.uri)).pipe(Effect.option);
+      if (Option.isNone(id)) return false;
+      const segments = id.value.segments.slice(root.value.id.segments.length);
+      if (target.root.uri === root.value.uri && recallSourcePathsMayAlias(segments, target.segments))
+        ambiguousTargets.add(uri);
+    }
     let cursor = parentPrefix;
     let rows: readonly {readonly uri: string}[];
     for (;;) {
