@@ -443,8 +443,8 @@
     "cold-lexical-term-rows": {
       "samplesMinimum": 1,
       "unit": "count",
-      "maximum": 2714348,
-      "minimum": 2714348
+      "maximum": 1475651,
+      "minimum": 1475651
     },
     "cold-materialization": {
       "samplesMinimum": 1,
@@ -718,8 +718,8 @@
     "cold-materialized-lexical-term-rows": {
       "samplesMinimum": 1,
       "unit": "count",
-      "maximum": 2714348,
-      "minimum": 2714348
+      "maximum": 1475651,
+      "minimum": 1475651
     },
     "cold-materialized-lookup-key-rows-n1": {
       "samplesMinimum": 1,
@@ -1454,8 +1454,8 @@
     "one-file-reindex-activation-copying-terms-rows-n1": {
       "samplesMinimum": 1,
       "unit": "count",
-      "maximum": 883,
-      "minimum": 883
+      "maximum": 490,
+      "minimum": 490
     },
     "one-file-reindex-activation-copying-workspace-duration-n1": {
       "samplesMinimum": 1,
