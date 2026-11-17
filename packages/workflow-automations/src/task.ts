@@ -8,6 +8,7 @@ import {
   nativeCycleSnapshotIsCurrentIteration,
   nativeCycleSupplementalRef,
   nativeCycleSupplementalRevision,
+  nativeCycleWaiverFor,
 } from './cycle_runtime.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {NativeWorkflowState} from './native.js';
@@ -633,12 +634,21 @@ function projectNativeTaskCoreView(
     validateNativeCycleReviewHistory(latestSnapshot.snapshot, acceptedReview.report, reviewBasis).summary
       .blockingIssueCount,
   );
+  const reviewWaived = Boolean(
+    pendingSnapshot &&
+    latestSnapshot &&
+    nativeCycleWaiverFor(runtime, 'review.required', pendingSnapshot.id, latestSnapshot.snapshot.tree),
+  );
   const reviewWork =
-    pendingSnapshot && latestSnapshot && !acceptedReview
+    pendingSnapshot && latestSnapshot && !acceptedReview && !reviewWaived
       ? {phase: pendingSnapshot, snapshot: latestSnapshot}
       : undefined;
   const validationWork =
-    pendingSnapshot && latestSnapshot && acceptedReview && !blockingReview && options.acceptedSnapshotCurrent !== false
+    pendingSnapshot &&
+    latestSnapshot &&
+    (acceptedReview || reviewWaived) &&
+    !blockingReview &&
+    options.acceptedSnapshotCurrent !== false
       ? {phase: pendingSnapshot, snapshot: latestSnapshot}
       : undefined;
   const latestInvalidAttempt = reviewWork

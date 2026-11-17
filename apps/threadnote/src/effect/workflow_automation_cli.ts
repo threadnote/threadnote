@@ -450,6 +450,14 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
               Effect.tapError(printWorkflowRefusal),
             ),
           ),
+        options =>
+          withRuntime(config =>
+            runNativeTaskAction(config, {command: 'waive', ...options}).pipe(
+              Effect.flatMap(value => Console.log(JSON.stringify(value))),
+              Effect.mapError(nativeWorkflowError),
+              Effect.tapError(printWorkflowRefusal),
+            ),
+          ),
       ),
     ]),
   );

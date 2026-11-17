@@ -40,6 +40,8 @@ import {
   nativeCycleHasBasePlanTransition,
   nativeCycleSnapshotIsCurrentIteration,
   type NativeCycleRuntime,
+  nativeCycleWaiverFor,
+  nativeCycleWaiverId,
 } from '@threadnote/workflow-automations/cycle-runtime';
 import {nativeCycleTextPage} from '@threadnote/workflow-automations/cycle-output';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -76,6 +78,9 @@ import {
   nativeGateRefusal,
   nativeTaskViewNext,
   nativeWorkflowPolicyOf,
+  nativeRefusal,
+  nativeTaskWaiveNext,
+  nativeWaivableGateIds,
 } from '@threadnote/workflow-automations/gates';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
@@ -110,6 +115,7 @@ export const nativeCycleRequestSchema = Schema.Struct({
     'schema',
     'validate-plan',
     'check-phase',
+    'waive',
   ]),
   runId: id,
   generation: text,
@@ -134,6 +140,7 @@ export const nativeCycleRequestSchema = Schema.Struct({
   attemptId: Schema.optionalKey(id),
   validation: Schema.optionalKey(Schema.Unknown),
   reviewSkipped: Schema.optionalKey(text),
+  gate: Schema.optionalKey(text),
   delivery: Schema.optionalKey(Schema.Unknown),
   publication: Schema.optionalKey(Schema.Unknown),
   packet: Schema.optionalKey(Schema.Unknown),
@@ -583,6 +590,42 @@ export const runNativeCycle = <R>(
             ...(EffectRecord.keys(invalidatedThroughSnapshot).length > 0 ? {invalidatedThroughSnapshot} : {}),
           };
           return {status: 'ok', revision: yield* save(marked), next: nextNativeCycle(updated)};
+        }
+        if (request.command === 'waive') {
+          const selected = yield* from(getPhase);
+          const {snapshot} = yield* from(getSnapshot);
+          const gate = EffectOption.getOrUndefined(
+            EffectArray.findFirst(nativeWaivableGateIds, item => item === request.gate),
+          );
+          if (!gate)
+            return yield* nativeRefusal(
+              'invalid-waiver',
+              'Only an integrity or advisory gate can be waived; intent changes need a confirmation.',
+              {next: nativeTaskViewNext(request.runId, repo)},
+            );
+          if (snapshot.phaseId !== selected.id)
+            return yield* fail('invalid-waiver', 'A waiver covers a snapshot of its own phase.');
+          const fields = {
+            gate,
+            phaseId: selected.id,
+            snapshotId: snapshot.snapshotId,
+            tree: snapshot.tree,
+            intentHash: snapshot.intentHash ?? snapshot.phaseHash,
+            reason: yield* from(() => required(request.reason, 'a concrete waiver reason')),
+            userAuthority: yield* from(() => required(request.userAuthority, 'the explicit human authority')),
+          };
+          const id = nativeCycleWaiverId(fields);
+          const existing = EffectOption.getOrUndefined(
+            EffectArray.findFirst(runtime.waivers ?? [], item => item.id === id),
+          );
+          if (existing) return {status: 'ok', revision: stored.revision, replayed: true, waiver: existing};
+          const waiver = {id, ...fields};
+          return {
+            status: 'ok',
+            revision: yield* save({...runtime, waivers: [...(runtime.waivers ?? []), waiver]}),
+            replayed: false,
+            waiver,
+          };
         }
         if (request.command === 'snapshot' && request.treeBound) {
           if (nativeWorkflowPolicyOf(stored.state) !== 'standard')
@@ -1307,12 +1350,38 @@ export const runNativeCycle = <R>(
           const report = EffectOption.getOrUndefined(
             EffectArray.findFirst(runtime.reviews, item => item.snapshotId === entry.snapshot.snapshotId),
           )?.report;
-          if (!report)
-            return yield* fail('review-pending', 'A complete immutable source review is required before acceptance.');
-          const reviewBasis = nativeCycleReviewBasis(runtime, entry.snapshot);
-          const reviewed = yield* from(() => validateNativeCycleReview(entry.snapshot, report, reviewBasis));
-          if (reviewed.summary.blockingIssueCount)
-            return yield* fail('review-blocked', 'Resolve the recorded blockers before accepting this phase.');
+          const policy = nativeWorkflowPolicyOf(stored.state);
+          const reviewDecision = decideGate(
+            policy,
+            'review.required',
+            report ? undefined : {},
+            nativeCycleWaiverFor(runtime, 'review.required', selected.id, entry.snapshot.tree),
+            nativeTaskWaiveNext(request.runId, repo, 'review.required'),
+          );
+          if (reviewDecision._tag === 'refuse')
+            return yield* nativeGateRefusal(
+              'review-pending',
+              'A complete immutable source review is required before acceptance.',
+              reviewDecision,
+            );
+          const reviewed = report
+            ? yield* from(() =>
+                validateNativeCycleReview(entry.snapshot, report, nativeCycleReviewBasis(runtime, entry.snapshot)),
+              )
+            : undefined;
+          const blockingDecision = decideGate(
+            policy,
+            'review.blocking',
+            reviewed?.summary.blockingIssueCount ? {} : undefined,
+            nativeCycleWaiverFor(runtime, 'review.blocking', selected.id, entry.snapshot.tree),
+            nativeTaskWaiveNext(request.runId, repo, 'review.blocking'),
+          );
+          if (blockingDecision._tag === 'refuse')
+            return yield* nativeGateRefusal(
+              'review-blocked',
+              'Resolve the recorded blockers before accepting this phase.',
+              blockingDecision,
+            );
           if (state.plan.delivery !== 'local' && EffectArray.some(entry.incoming, item => item.source === 'preserved'))
             return yield* fail(
               'preserved-work-publication',
@@ -1474,16 +1543,18 @@ export const runNativeCycle = <R>(
                   ),
                 )?.report
               : undefined;
-            if (
-              !source ||
-              source.snapshot.tree !== proof.tree ||
+            const reviewCovered =
+              review !== undefined ||
+              nativeCycleWaiverFor(runtime, 'review.required', selected.id, proof.tree) !== undefined;
+            const blockersCovered =
               !review ||
-              EffectArray.some(
+              !EffectArray.some(
                 review.findings,
                 finding =>
                   ['critical', 'important'].includes(finding.severity) && ['new', 'carried'].includes(finding.state),
-              )
-            )
+              ) ||
+              nativeCycleWaiverFor(runtime, 'review.blocking', selected.id, proof.tree) !== undefined;
+            if (!source || source.snapshot.tree !== proof.tree || !reviewCovered || !blockersCovered)
               return yield* fail(
                 'review-pending',
                 'Retain the current reviewed validation snapshot before publication.',

@@ -1,8 +1,13 @@
+import {runNativeTaskWaiver, withNativeTaskWaivers} from './task_policy_actions.js';
 import {
   nativeWorkflowPolicyOf,
   nativeNextForTaskAction,
   nativeTaskViewNext,
   withNativeNext,
+  decideGate,
+  nativeGateRefusal,
+  nativeTaskWaiveNext,
+  nativeWaivableGateIds,
 } from '@threadnote/workflow-automations/gates';
 import {runStandalonePrWatch} from './standalone_pr_watch.js';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -23,7 +28,7 @@ import {
 import {NativeCyclePacketOptionsSchema} from '@threadnote/workflow-automations/cycle-packet';
 import * as CycleOutput from '@threadnote/workflow-automations/cycle-output';
 import {NativeCycleReviewSchema} from '@threadnote/workflow-automations/cycle-review';
-import {nativeCyclePhaseReviewUsage} from '@threadnote/workflow-automations/cycle-runtime';
+import {nativeCyclePhaseReviewUsage, nativeCycleWaiverFor} from '@threadnote/workflow-automations/cycle-runtime';
 import {workflowTitleSlug} from '@threadnote/workflow-automations/naming';
 import {
   decodeNativeTaskActionRef,
@@ -229,6 +234,14 @@ const requestSchema = Schema.Union([
     callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
     taskRef: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
     additionalReviews: Schema.Finite.check(Schema.isInt(), Schema.isBetween({minimum: 1, maximum: 251})),
+    reason: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    userAuthority: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+  }),
+  Schema.Struct({
+    command: Schema.Literal('waive'),
+    runId: id,
+    callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    gate: Schema.Literals(nativeWaivableGateIds),
     reason: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
     userAuthority: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
   }),
@@ -1328,7 +1341,9 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
       return {status: 'extended', replayed: false, expansion, cycle, task: yield* taskView()};
     }
 
-    if (request.command === 'finish') return yield* runNativeTaskFinish(config, request, stored, checkout, state);
+    if (request.command === 'finish')
+      return withNativeTaskWaivers(yield* runNativeTaskFinish(config, request, stored, checkout, state), runtime);
+    if (request.command === 'waive') return yield* runNativeTaskWaiver(config, request, stored, checkout, runtime);
 
     if (request.command === 'record-review') {
       const ref = decodeNativeTaskActionRef(request.snapshotRef);
@@ -1477,7 +1492,19 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
       const report = EffectOption.getOrUndefined(
         EffectArray.findFirst(runtime.reviews, item => item.snapshotId === ref.snapshotId),
       );
-      if (!report) return yield* fail('review-pending', 'Record the complete accepted review before validation.');
+      const reviewDecision = decideGate(
+        nativeWorkflowPolicyOf(stored.state),
+        'review.required',
+        report ? undefined : {},
+        nativeCycleWaiverFor(runtime, 'review.required', ref.phaseId, entry.snapshot.tree),
+        nativeTaskWaiveNext(request.runId, checkout, 'review.required'),
+      );
+      if (reviewDecision._tag === 'refuse')
+        return yield* nativeGateRefusal(
+          'review-pending',
+          'Record the complete accepted review before validation.',
+          reviewDecision,
+        );
       const proof = state.phases[ref.phaseId];
       const head = proof?.validation ? proof.head : yield* gitValue(['rev-parse', 'HEAD'], checkout);
       if (!head) return yield* fail('source-unavailable', 'Could not read the current validation source head.');
@@ -1531,7 +1558,10 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
       return {status: 'recorded', replayed: false, validationRef, validation: accepted};
     }
     if (request.command === 'deliver-local')
-      return yield* runNativeTaskLocalDelivery(config, request, stored, checkout, runtime);
+      return withNativeTaskWaivers(
+        yield* runNativeTaskLocalDelivery(config, request, stored, checkout, runtime),
+        runtime,
+      );
 
     if (request.command === 'deliver-commit')
       return yield* runNativeTaskCommitDelivery(config, request, stored, checkout, runtime);

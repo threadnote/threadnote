@@ -287,7 +287,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Control phases: begin eligible; reopen validated/published after failure; resume blocked after accepted dependencies; reconcile the verified ready approved plan with bindings; extend exhausted review budget with caller authority. Actor identity is unauthenticated.',
+        'Phase control: begin, reopen after failure, resume after dependencies, reconcile the ready plan, extend the review budget, or waive one gate for the current tree. Authority is caller-asserted.',
       inputSchema: {
         runId: McpInput.requiredString(),
         callerCwd: McpInput.requiredString(),
@@ -311,6 +311,12 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
             ),
           }),
           Schema.Struct({
+            command: Schema.Literal('waive'),
+            gate: McpInput.requiredString(),
+            reason: McpInput.requiredString(),
+            userAuthority: McpInput.requiredString(),
+          }),
+          Schema.Struct({
             command: Schema.Literal('extend-review-budget'),
             additionalReviews: Schema.Finite.check(Schema.isInt(), Schema.isBetween({minimum: 1, maximum: 251})),
             reason: McpInput.requiredString(),
@@ -329,24 +335,33 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
             ? {command: control.command, runId, callerCwd, taskRef, reason: control.reason}
             : control.command === 'reopen'
               ? {command: control.command, runId, callerCwd, taskRef, phaseId: control.phaseId, reason: control.reason}
-              : control.command === 'reconcile'
+              : control.command === 'waive'
                 ? {
                     command: control.command,
                     runId,
                     callerCwd,
-                    taskRef,
-                    reason: control.reason,
-                    ...(control.bindings === undefined ? {} : {bindings: control.bindings}),
-                  }
-                : {
-                    command: control.command,
-                    runId,
-                    callerCwd,
-                    taskRef,
-                    additionalReviews: control.additionalReviews,
+                    gate: control.gate,
                     reason: control.reason,
                     userAuthority: control.userAuthority,
-                  };
+                  }
+                : control.command === 'reconcile'
+                  ? {
+                      command: control.command,
+                      runId,
+                      callerCwd,
+                      taskRef,
+                      reason: control.reason,
+                      ...(control.bindings === undefined ? {} : {bindings: control.bindings}),
+                    }
+                  : {
+                      command: control.command,
+                      runId,
+                      callerCwd,
+                      taskRef,
+                      additionalReviews: control.additionalReviews,
+                      reason: control.reason,
+                      userAuthority: control.userAuthority,
+                    };
       const result = yield* runNativeTaskAction(config, request);
       return {content: [{type: 'text' as const, text: JSON.stringify(result)}], structuredContent: result};
     }),
@@ -356,7 +371,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Current opaque refs; keep history. Record; supersede latest unreviewed only; recover authorized rebase; requalify reviewed base or prepared normal-merge invalid tail. Fresh full review/validation required.',
+        'Record the current tree; the newest snapshot supersedes an unreviewed one. Strict recovery: supersede, rebase recovery, base or invalid-tail requalification.',
       inputSchema: {
         runId: McpInput.requiredString(),
         callerCwd: McpInput.requiredString(),

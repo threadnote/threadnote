@@ -154,3 +154,13 @@ export const withNativeNext = (error: WorkflowAutomationError, next: NativeNextC
         ...(error.detail === undefined ? {} : {detail: error.detail}),
         next,
       });
+
+/** The audited waiver command for a gate that refused. */
+export const nativeTaskWaiveNext = (runId: string, callerCwd: string, gate: NativeWaivableGateId) =>
+  nativeNextCommand('workflow_task_control', 'waive', 'task-action waive', {
+    runId,
+    callerCwd,
+    gate,
+    reason: '<reason>',
+    userAuthority: '<userAuthority>',
+  });

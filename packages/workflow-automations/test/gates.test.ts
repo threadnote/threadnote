@@ -1,4 +1,7 @@
+import {Schema} from 'effect';
+import {NativeCycleWaiverSchema, nativeCycleWaiverId} from '../src/cycle_runtime.js';
 import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
 import {describe, expect, it} from 'vitest';
 import {
   decideGate,
@@ -62,5 +65,28 @@ describe('dev-cycle gate decisions', () => {
       cli: 'threadnote workflow-automation task-action record-snapshot --run-id run-1 --caller-cwd "/a b" --reason <reason>',
       args: {runId: 'run-1', callerCwd: '/a b', reason: '<reason>'},
     });
+  });
+});
+
+describe('audited waiver records', () => {
+  const waiver = {
+    gate: 'review.required' as const,
+    phaseId: 'one',
+    snapshotId: 'tree-1',
+    tree: EffectString.repeat(40)('a'),
+    intentHash: EffectString.repeat(64)('b'),
+    reason: 'The reviewer is unavailable.',
+    userAuthority: 'User: proceed without review.',
+  };
+  const decode = Schema.decodeUnknownExit(NativeCycleWaiverSchema);
+
+  it('derives a stable identity from its content', () => {
+    expect(nativeCycleWaiverId(waiver)).toBe(nativeCycleWaiverId({...waiver}));
+    expect(nativeCycleWaiverId({...waiver, tree: EffectString.repeat(40)('c')})).not.toBe(nativeCycleWaiverId(waiver));
+    expect(decode({id: nativeCycleWaiverId(waiver), ...waiver})._tag).toBe('Success');
+  });
+
+  it('never records a waiver of intent confirmation', () => {
+    expect(decode({id: nativeCycleWaiverId(waiver), ...waiver, gate: 'intent.confirmation'})._tag).toBe('Failure');
   });
 });

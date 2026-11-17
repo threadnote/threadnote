@@ -1,3 +1,4 @@
+import {nativeWaivableGateIds} from '@threadnote/workflow-automations/gates';
 import {Array as EffectArray, Effect, Schema} from 'effect';
 import {Command, Flag} from 'effect/cli';
 import {withDefaultActionSubcommand} from './cli/help.js';
@@ -466,6 +467,13 @@ export function makeNativeTaskActionCommands<E, R>(
     readonly reason: string;
     readonly userAuthority: string;
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
+  waiveHandler?: (options: {
+    readonly runId: string;
+    readonly callerCwd: string;
+    readonly gate: (typeof nativeWaivableGateIds)[number];
+    readonly reason: string;
+    readonly userAuthority: string;
+  }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
 ) {
   const lifecycle = (options: Parameters<NonNullable<typeof lifecycleHandler>>[0]) =>
     lifecycleHandler
@@ -894,9 +902,29 @@ export function makeNativeTaskActionCommands<E, R>(
       'Record a caller-provided exact-intent response, then admit or reconcile the same canonical run; actor identity is not independently authenticated',
     ),
   );
+  const waive = Command.make(
+    'waive',
+    {
+      runId: requiredString('run-id', 'Existing native workflow run identifier'),
+      callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
+      gate: requiredChoice('gate', nativeWaivableGateIds, 'Integrity or advisory gate to waive for the current tree'),
+      reason: requiredString('reason', 'Concrete reason this gate is waived'),
+      userAuthority: requiredString(
+        'user-authority',
+        'Caller-provided human authority statement; actor identity is not independently authenticated',
+      ),
+    },
+    options =>
+      waiveHandler
+        ? waiveHandler(options)
+        : Effect.fail(
+            WorkflowAutomationError.make({code: 'unsupported-action', message: 'This task action is unavailable.'}),
+          ),
+  ).pipe(Command.withDescription('Record an audited waiver of one gate for the current phase tree'));
   return Command.make('task-action', {}).pipe(
     Command.withSubcommands([
       work,
+      waive,
       begin,
       resume,
       reopen,

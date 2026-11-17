@@ -233,3 +233,102 @@ describe('actionable refusals', () => {
     }).pipe(runCycle),
   );
 });
+
+describe('audited waivers', () => {
+  const validation = {
+    checks: [{command: 'private flow', result: 'passed', evidence: 'Actual scoped source fixture.'}],
+    acceptance: [{criterion: 'one works', result: 'passed', evidence: 'Source readback.'}],
+  };
+  const waive = (f: {readonly config: RuntimeConfig; readonly repo: string}) =>
+    runNativeTaskAction(f.config, {
+      command: 'waive',
+      runId: 'native-run',
+      callerCwd: f.repo,
+      gate: 'review.required',
+      reason: 'The review tool is unavailable for this local fixture.',
+      userAuthority: 'User: ship this local change without a review.',
+    }).pipe(Effect.map(object));
+
+  effectIt.effect('delivers an unreviewed tree only after a recorded waiver for that exact tree', () =>
+    Effect.gen(function* () {
+      const f = yield* cycleFixture(
+        ['one'],
+        'local',
+        false,
+        false,
+        true,
+        undefined,
+        undefined,
+        {},
+        {policy: 'standard'},
+      );
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = 1;\n');
+      yield* f.git(['add', 'source.ts']);
+      yield* f.git(['commit', '-m', 'one']);
+      const recorded = object(
+        yield* runNativeTaskAction(f.config, {command: 'record-snapshot', runId: 'native-run', callerCwd: f.repo}),
+      );
+      const validate = () =>
+        runNativeTaskAction(f.config, {
+          command: 'record-validation',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          snapshotRef: String(recorded.snapshotRef),
+          validation,
+        });
+      expect(yield* validate().pipe(Effect.flip)).toMatchObject({
+        code: 'review-pending',
+        gate: 'review.required',
+        next: {tool: 'workflow_task_control', command: 'waive', args: {gate: 'review.required'}},
+      });
+      const first = yield* waive(f);
+      expect(first).toMatchObject({status: 'waived', replayed: false, waiver: {gate: 'review.required'}});
+      const repeated = yield* waive(f);
+      expect(repeated).toMatchObject({replayed: true, revision: first.revision, waiver: first.waiver});
+      const validated = object(yield* validate());
+      const delivered = object(
+        yield* runNativeTaskAction(f.config, {
+          command: 'deliver-local',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          validationRef: String(validated.validationRef),
+        }),
+      );
+      expect(delivered).toMatchObject({status: 'delivered', waivers: [first.waiver]});
+    }).pipe(runCycle),
+  );
+
+  effectIt.effect('does not carry a waiver to a changed tree', () =>
+    Effect.gen(function* () {
+      const f = yield* cycleFixture(
+        ['one'],
+        'local',
+        false,
+        false,
+        true,
+        undefined,
+        undefined,
+        {},
+        {policy: 'standard'},
+      );
+      const record = () =>
+        runNativeTaskAction(f.config, {command: 'record-snapshot', runId: 'native-run', callerCwd: f.repo}).pipe(
+          Effect.map(object),
+        );
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = 1;\n');
+      yield* record();
+      yield* waive(f);
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = 2;\n');
+      const changed = yield* record();
+      expect(
+        yield* runNativeTaskAction(f.config, {
+          command: 'record-validation',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          snapshotRef: String(changed.snapshotRef),
+          validation,
+        }).pipe(Effect.flip),
+      ).toMatchObject({code: 'review-pending', gate: 'review.required'});
+    }).pipe(runCycle),
+  );
+});

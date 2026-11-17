@@ -1,3 +1,4 @@
+import {nativeWaivableGateIds} from './gates.js';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Schema} from 'effect';
 import {
@@ -69,6 +70,45 @@ export const NativeCycleReviewAttemptSchema = Schema.Struct({
   report: Schema.String.check(Schema.isMaxLength(65_536)),
   authority: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
 });
+/** An audited, caller-asserted waiver of one non-intent gate for one exact tree. */
+export const NativeCycleWaiverSchema = Schema.Struct({
+  id: Schema.String.check(Schema.isPattern(/^waiver-[a-f0-9]{48}$/u)),
+  gate: Schema.Literals(nativeWaivableGateIds),
+  phaseId: id,
+  snapshotId: id,
+  tree: gitObject,
+  intentHash: digest,
+  reason: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+  userAuthority: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+});
+export type NativeCycleWaiver = typeof NativeCycleWaiverSchema.Type;
+
+/** Content-derived, so repeating the same waiver replays it. */
+export const nativeCycleWaiverId = (
+  waiver: Pick<NativeCycleWaiver, 'gate' | 'phaseId' | 'tree' | 'reason' | 'userAuthority'>,
+) =>
+  'waiver-' +
+  Effect.pipe(
+    sha256HexSync(
+      nativeCycleCanonicalJson([waiver.gate, waiver.phaseId, waiver.tree, waiver.reason, waiver.userAuthority]),
+    ),
+    EffectString.slice(0, 48),
+  );
+
+/** The waiver that covers this gate for this exact phase tree, if any. */
+export const nativeCycleWaiverFor = (
+  runtime: {readonly waivers?: readonly NativeCycleWaiver[]},
+  gate: NativeCycleWaiver['gate'],
+  phaseId: string,
+  tree: string,
+) =>
+  EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      runtime.waivers ?? [],
+      waiver => waiver.gate === gate && waiver.phaseId === phaseId && waiver.tree === tree,
+    ),
+  );
+
 export const NativeCycleRuntimeSchema = Schema.Struct({
   state: NativeCycleStateSchema,
   plans: Schema.Array(NativeCyclePlanSchema).check(Schema.isBetweenLength(1, 64)),
@@ -82,6 +122,7 @@ export const NativeCycleRuntimeSchema = Schema.Struct({
     Schema.isMaxLength(256),
   ),
   attempts: Schema.Array(NativeCycleReviewAttemptSchema).check(Schema.isMaxLength(512)),
+  waivers: Schema.optionalKey(Schema.Array(NativeCycleWaiverSchema).check(Schema.isMaxLength(128))),
   historicalAdmission: Schema.optionalKey(
     Schema.Struct({
       version: Schema.Literal(1),
@@ -562,6 +603,22 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
   }
   if (EffectArray.some(runtime.attempts, attempt => !snapshots.has(attempt.snapshotId)))
     fail('Review attempt snapshot is missing.');
+  const waiverIds = new Set<string>();
+  for (const waiver of runtime.waivers ?? []) {
+    const snapshot = snapshots.get(waiver.snapshotId)?.snapshot;
+    if (
+      waiverIds.has(waiver.id) ||
+      waiver.id !== nativeCycleWaiverId(waiver) ||
+      !snapshot ||
+      snapshot.phaseId !== waiver.phaseId ||
+      snapshot.tree !== waiver.tree ||
+      (snapshot.intentHash ?? snapshot.phaseHash) !== waiver.intentHash ||
+      !EffectString.trim(waiver.reason) ||
+      !EffectString.trim(waiver.userAuthority)
+    )
+      fail('A waiver must name one retained snapshot tree, its intent, a reason and explicit authority.');
+    waiverIds.add(waiver.id);
+  }
   const checksums = makeNativeHistoricalDigests(runtime.plans);
   for (const admission of admissions) {
     const {history, ...metadata} = admission;
