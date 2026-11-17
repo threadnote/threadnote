@@ -17,3 +17,4 @@ packages/workspace/node_modules
 .context
 dist
 .git
+.claude/worktrees
