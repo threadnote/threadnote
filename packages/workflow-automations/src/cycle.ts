@@ -668,6 +668,8 @@ export interface CycleSnapshot {
   readonly head: string;
   readonly tree: string;
   readonly files: readonly string[];
+  /** The tree the covering review reviewed, when it differs from `tree` or no review covers it. */
+  readonly reviewTree?: string;
 }
 export function checkNativeCycleScope(phase: NativeCyclePlan['phases'][number], files: readonly string[]): boolean {
   return EffectArray.every(
@@ -710,7 +712,7 @@ export function validateNativeCyclePhase(
     !isGitObject(snapshot.tree) ||
     v.snapshotTree !== snapshot.tree ||
     (v.head && v.head !== snapshot.head) ||
-    (v.reviewTree && v.reviewTree !== snapshot.tree) ||
+    (v.reviewTree && v.reviewTree !== ('reviewTree' in snapshot ? snapshot.reviewTree : snapshot.tree)) ||
     r.phaseHash !== nativeCyclePhaseHash(s.plan, idValue)
   )
     err('Validation does not match snapshot.');

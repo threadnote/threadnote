@@ -1,4 +1,5 @@
 import {NativeCycleDeliverySchema, nextNativeCycle} from '@threadnote/workflow-automations/cycle';
+import {nativeCycleCoverage, nativeCycleCoverageAccepts} from '@threadnote/workflow-automations/cycle-runtime';
 import {decodeNativeTaskActionRef, encodeNativeTaskActionRef} from '@threadnote/workflow-automations/task';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {runCommandEffect} from '@threadnote/platform/command';
@@ -426,7 +427,6 @@ export const runNativeTaskPrWatch = (
         phase.validation.status !== 'passed' ||
         phase.validation.productState !== 'working' ||
         phase.validation.snapshotTree !== phase.tree ||
-        phase.validation.reviewTree !== phase.tree ||
         (phase.validation.head !== undefined && phase.validation.head !== phase.head) ||
         !baseline
       )
@@ -444,18 +444,7 @@ export const runNativeTaskPrWatch = (
           item.snapshot.baseTree === baseline.tree,
       );
       const snapshot = snapshots[0]?.snapshot;
-      const reviews = snapshot
-        ? EffectArray.filter(
-            runtime.reviews,
-            item =>
-              item.snapshotId === snapshot.snapshotId &&
-              item.report.snapshotId === snapshot.snapshotId &&
-              item.report.phaseHash === phase.phaseHash &&
-              item.report.snapshotTree === phase.tree &&
-              item.report.status === 'complete',
-          )
-        : [];
-      if (snapshots.length !== 1 || reviews.length !== 1)
+      if (snapshots.length !== 1 || !snapshot || !nativeCycleCoverageAccepts(nativeCycleCoverage(runtime, snapshot)))
         return yield* fail(
           'provisional-watch-not-eligible',
           'The current provisional phase lacks unique reviewed source proof.',

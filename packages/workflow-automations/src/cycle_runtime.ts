@@ -16,7 +16,7 @@ import {
 } from './cycle.js';
 import {
   NativeCycleSnapshotSchema,
-  nativeCycleReviewRecordingMode,
+  nativeCycleBlockingFinding,
   type NativeCycleReview,
   type NativeCycleSnapshot,
   nativeCycleUnreviewedRecoveryDigest,
@@ -151,10 +151,7 @@ export function nativeCycleCoveringReview(
       !review ||
       candidate.phaseId !== snapshot.phaseId ||
       (candidate.intentHash ?? candidate.phaseHash) !== intent ||
-      EffectArray.some(
-        review.findings,
-        finding => ['critical', 'important'].includes(finding.severity) && ['new', 'carried'].includes(finding.state),
-      )
+      EffectArray.some(review.findings, nativeCycleBlockingFinding)
     )
       continue;
     if (candidate.tree === snapshot.tree) return {snapshot: candidate, review, match: 'tree'};
@@ -168,21 +165,36 @@ export function nativeCycleCoveringReview(
   return undefined;
 }
 
+/** How a snapshot's tree is covered for validation and delivery; derived on read, never stored. */
 export type NativeCycleTreeCoverage =
-  | {readonly _tag: 'reviewed'; readonly reviewSnapshotId: string; readonly match: 'exact' | 'tree' | 'change'}
-  | {readonly _tag: 'waived'; readonly waiverId: string}
-  | {readonly _tag: 'pending'; readonly mode: 'full' | 'incremental'};
+  | {
+      readonly _tag: 'reviewed';
+      readonly snapshot: NativeCycleSnapshot;
+      readonly review: NativeCycleReview;
+      readonly match: 'exact' | 'tree' | 'change';
+      readonly blocked: boolean;
+      readonly blockingWaiver?: NativeCycleWaiver;
+    }
+  | {readonly _tag: 'waived'; readonly waiver: NativeCycleWaiver}
+  | {readonly _tag: 'pending'};
 
 export function nativeCycleCoverage(
   runtime: NativeCycleRuntime,
   snapshot: NativeCycleSnapshot,
 ): NativeCycleTreeCoverage {
   const covering = nativeCycleCoveringReview(runtime, snapshot);
-  if (covering) return {_tag: 'reviewed', reviewSnapshotId: covering.snapshot.snapshotId, match: covering.match};
+  if (covering) {
+    const blocked = EffectArray.some(covering.review.findings, nativeCycleBlockingFinding);
+    const blockingWaiver = blocked ? nativeCycleWaiverFor(runtime, 'review.blocking', snapshot) : undefined;
+    return {_tag: 'reviewed', ...covering, blocked, ...(blockingWaiver ? {blockingWaiver} : {})};
+  }
   const waiver = nativeCycleWaiverFor(runtime, 'review.required', snapshot);
-  if (waiver) return {_tag: 'waived', waiverId: waiver.id};
-  return {_tag: 'pending', mode: nativeCycleReviewRecordingMode(snapshot)};
+  return waiver ? {_tag: 'waived', waiver} : {_tag: 'pending'};
 }
+
+/** A tree may go on to validation and delivery once reviewed with no unwaived blocker, or waived. */
+export const nativeCycleCoverageAccepts = (coverage: NativeCycleTreeCoverage) =>
+  coverage._tag === 'waived' || (coverage._tag === 'reviewed' && (!coverage.blocked || !!coverage.blockingWaiver));
 
 export const NativeCycleRuntimeSchema = Schema.Struct({
   state: NativeCycleStateSchema,
@@ -815,15 +827,12 @@ function validateSupplementalInitialization(
   );
   const stored = EffectArray.filter(runtime.snapshots, item => item.snapshot.phaseId === init.phaseId).at(-1);
   const snapshot = stored?.snapshot;
-  const review = EffectOption.getOrUndefined(
-    EffectArray.findFirst(runtime.reviews, item => item.snapshotId === init.snapshotId),
-  );
   if (
     !context.localComplete ||
     !phase ||
     !definition ||
     !snapshot ||
-    !review ||
+    !nativeCycleCoverageAccepts(nativeCycleCoverage(runtime, snapshot)) ||
     phase.delivery?.delivery !== 'local' ||
     !phase.validation ||
     init.planDigest !== context.planDigest ||
@@ -845,11 +854,6 @@ function validateSupplementalInitialization(
       definition.baseBranch !== `${init.pr.baseRefBinding?.remote}/${init.pr.baseBranch}`)
   )
     supplementalFail('Supplemental attachment requires exact completed local proof and an existing matching PR.');
-  if (
-    validateNativeCycleReviewHistory(snapshot, review.report, nativeCycleReviewBasis(runtime, snapshot)).summary
-      .blockingIssueCount
-  )
-    supplementalFail('Supplemental attachment requires an accepted nonblocking source review.');
 }
 
 function validateSupplementalRecords(publication: NativeCycleSupplementalPublication): void {

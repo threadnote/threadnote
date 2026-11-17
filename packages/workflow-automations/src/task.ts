@@ -4,17 +4,16 @@ import {nativeCycleParentsReady, nextNativeCycle as cycleNext} from './cycle.js'
 import {NativeCycleDeliverySchema} from './cycle.js';
 import {
   nativeCyclePhaseReviewUsage,
-  nativeCycleReviewBasis,
   nativeCycleSnapshotIsCurrentIteration,
   nativeCycleSupplementalRef,
   nativeCycleSupplementalRevision,
-  nativeCycleWaiverFor,
-  nativeCycleCoveringReview,
+  nativeCycleCoverage,
+  nativeCycleCoverageAccepts,
 } from './cycle_runtime.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {NativeWorkflowState} from './native.js';
 import {NativeCompactIntentSchema} from './authoring.js';
-import {nativeCycleReviewRecordingMode, validateNativeCycleReviewHistory} from './cycle_review.js';
+import {nativeCycleReviewRecordingMode} from './cycle_review.js';
 
 export const NativeTaskStartRequestSchema = Schema.Union([
   Schema.Struct({
@@ -625,25 +624,16 @@ function projectNativeTaskCoreView(
     ? EffectArray.filter(runtime.snapshots, entry => entry.snapshot.phaseId === pendingSnapshot.id).at(-1)
     : undefined;
   // A review of the same tree, or of the byte-identical change after the base moved, covers the latest snapshot.
-  const covering = latestSnapshot ? nativeCycleCoveringReview(runtime, latestSnapshot.snapshot) : undefined;
-  const acceptedReview = covering ? {snapshotId: covering.snapshot.snapshotId, report: covering.review} : undefined;
-  const reviewBasis = covering ? nativeCycleReviewBasis(runtime, covering.snapshot) : undefined;
-  const blockingReview = Boolean(
-    covering &&
-    validateNativeCycleReviewHistory(covering.snapshot, covering.review, reviewBasis).summary.blockingIssueCount,
-  );
-  const reviewWaived = Boolean(
-    latestSnapshot && nativeCycleWaiverFor(runtime, 'review.required', latestSnapshot.snapshot),
-  );
+  const coverage = latestSnapshot ? nativeCycleCoverage(runtime, latestSnapshot.snapshot) : undefined;
   const reviewWork =
-    pendingSnapshot && latestSnapshot && !acceptedReview && !reviewWaived
+    pendingSnapshot && latestSnapshot && coverage?._tag === 'pending'
       ? {phase: pendingSnapshot, snapshot: latestSnapshot}
       : undefined;
   const validationWork =
     pendingSnapshot &&
     latestSnapshot &&
-    (acceptedReview || reviewWaived) &&
-    !blockingReview &&
+    coverage &&
+    nativeCycleCoverageAccepts(coverage) &&
     options.acceptedSnapshotCurrent !== false
       ? {phase: pendingSnapshot, snapshot: latestSnapshot}
       : undefined;
@@ -687,7 +677,7 @@ function projectNativeTaskCoreView(
   const watchMissing = phase
     ? [
         ...(!currentSource || options.acceptedSnapshotCurrent === false ? ['current-source-snapshot'] : []),
-        ...(!currentSource || !EffectArray.some(runtime.reviews, entry => entry.snapshotId === currentSource.snapshotId)
+        ...(!currentSource || !nativeCycleCoverageAccepts(nativeCycleCoverage(runtime, currentSource))
           ? ['independent-review']
           : []),
         ...(!currentProof?.validation ? ['passing-validation'] : []),

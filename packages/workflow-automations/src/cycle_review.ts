@@ -275,8 +275,10 @@ export const nativeCycleReviewRecordingMode = (snapshot: NativeCycleSnapshot): '
       ? 'incremental'
       : 'full';
 
-const blocking = (finding: NativeCycleReview['findings'][number]) =>
+/** A finding that blocks acceptance until it is resolved or a `review.blocking` waiver covers the tree. */
+export const nativeCycleBlockingFinding = (finding: NativeCycleReview['findings'][number]) =>
   ['critical', 'important'].includes(finding.severity) && ['new', 'carried'].includes(finding.state);
+const blocking = nativeCycleBlockingFinding;
 const safePath = (value: string) =>
   value.length > 0 &&
   !/[\\:]/u.test(value) &&

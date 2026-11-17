@@ -29,11 +29,7 @@ import {
 import {NativeCyclePacketOptionsSchema} from '@threadnote/workflow-automations/cycle-packet';
 import * as CycleOutput from '@threadnote/workflow-automations/cycle-output';
 import {NativeCycleReviewSchema} from '@threadnote/workflow-automations/cycle-review';
-import {
-  nativeCyclePhaseReviewUsage,
-  nativeCycleWaiverFor,
-  nativeCycleCoveringReview,
-} from '@threadnote/workflow-automations/cycle-runtime';
+import {nativeCyclePhaseReviewUsage, nativeCycleCoverage} from '@threadnote/workflow-automations/cycle-runtime';
 import {workflowTitleSlug} from '@threadnote/workflow-automations/naming';
 import {
   decodeNativeTaskActionRef,
@@ -1504,12 +1500,12 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
           'snapshot-ambiguous',
           'Recovery requires one unique canonical snapshot for this validation.',
         );
-      const report = nativeCycleCoveringReview(runtime, entry.snapshot);
+      const coverage = nativeCycleCoverage(runtime, entry.snapshot);
       const reviewDecision = decideGate(
         nativeWorkflowPolicyOf(stored.state),
         'review.required',
-        report ? undefined : {},
-        nativeCycleWaiverFor(runtime, 'review.required', entry.snapshot),
+        coverage._tag === 'pending' ? {} : undefined,
+        coverage._tag === 'waived' ? coverage.waiver : undefined,
         nativeNext.waive({runId: request.runId, callerCwd: checkout}, 'review.required'),
       );
       if (reviewDecision._tag === 'refuse')
@@ -1523,7 +1519,7 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
       if (!head) return yield* fail('source-unavailable', 'Could not read the current validation source head.');
       const validation = {
         snapshotTree: entry.snapshot.tree,
-        reviewTree: entry.snapshot.tree,
+        ...(coverage._tag === 'reviewed' ? {reviewTree: coverage.snapshot.tree} : {}),
         head,
         status: 'passed' as const,
         productState: 'working' as const,

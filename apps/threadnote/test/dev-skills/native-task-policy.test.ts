@@ -542,6 +542,83 @@ describe('audited waivers', () => {
     }).pipe(runCycle),
   );
 
+  effectIt.effect('moves the card to validation once a review.blocking waiver covers the blocked tree', () =>
+    Effect.gen(function* () {
+      const f = yield* cycleFixture(
+        ['one'],
+        'local',
+        false,
+        false,
+        true,
+        undefined,
+        undefined,
+        {},
+        {policy: 'standard'},
+      );
+      const view = () => readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo});
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = 1;\n');
+      yield* f.git(['commit', '-qam', 'one']);
+      const recorded = object(
+        yield* runNativeTaskAction(f.config, {command: 'record-snapshot', runId: 'native-run', callerCwd: f.repo}),
+      );
+      const snapshot = object(object(recorded.snapshot).snapshot);
+      yield* f.mutate('validate-review', {
+        snapshotId: snapshot.snapshotId,
+        attemptId: 'a1',
+        report: {
+          snapshotId: snapshot.snapshotId,
+          phaseHash: snapshot.phaseHash,
+          snapshotTree: snapshot.tree,
+          status: 'complete',
+          mode: 'full',
+          selected: ['correctness', 'simplicity'],
+          lanes: [
+            {name: 'correctness', status: 'complete'},
+            {name: 'simplicity', status: 'complete'},
+          ],
+          findings: [
+            {
+              id: 'f1',
+              file: 'source.ts',
+              line: 1,
+              body: 'Wrong value.',
+              trigger: 'Always.',
+              impact: 'Breaks.',
+              evidence: 'Read it.',
+              severity: 'important',
+              category: 'correctness',
+              confidence: 90,
+              state: 'new',
+            },
+          ],
+        },
+      });
+      const validate = () =>
+        runNativeTaskAction(f.config, {
+          command: 'record-validation',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          snapshotRef: String(recorded.snapshotRef),
+          validation,
+        });
+      expect((yield* view()).next).toMatchObject({action: 'implement'});
+      expect(yield* validate().pipe(Effect.flip)).toMatchObject({
+        gate: 'review.blocking',
+        next: {command: 'waive', arguments: {control: {gate: 'review.blocking'}}},
+      });
+      yield* runNativeTaskAction(f.config, {
+        command: 'waive',
+        runId: 'native-run',
+        callerCwd: f.repo,
+        gate: 'review.blocking',
+        reason: 'The finding is accepted for this local fixture.',
+        userAuthority: 'User: ship it with the known finding.',
+      });
+      expect((yield* view()).next).toMatchObject({action: 'validate', snapshotId: snapshot.snapshotId});
+      expect(object(yield* validate())).toMatchObject({status: 'recorded'});
+    }).pipe(runCycle),
+  );
+
   effectIt.effect('does not carry a waiver to a changed tree', () =>
     Effect.gen(function* () {
       const f = yield* cycleFixture(

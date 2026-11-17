@@ -19,6 +19,8 @@ import {
 } from '@threadnote/workflow-automations/task';
 import {nativeCyclePhaseHash} from '@threadnote/workflow-automations/cycle';
 import {
+  nativeCycleCoverage,
+  nativeCycleCoverageAccepts,
   nativeCycleHasBasePlanTransition,
   nativeCycleInvalidTailBasis,
 } from '@threadnote/workflow-automations/cycle-runtime';
@@ -89,7 +91,6 @@ const historicalPhaseProof = (
     validation.status !== 'passed' ||
     validation.productState !== 'working' ||
     validation.snapshotTree !== proof.tree ||
-    validation.reviewTree !== proof.tree ||
     (validation.head !== undefined && validation.head !== proof.head) ||
     !baseline ||
     !receipt ||
@@ -121,16 +122,7 @@ const historicalPhaseProof = (
   );
   if (snapshots.length !== 1 || !snapshots[0]) return undefined;
   const snapshot = snapshots[0].snapshot;
-  const reviews = EffectArray.filter(
-    runtime.reviews,
-    item =>
-      item.snapshotId === snapshot.snapshotId &&
-      item.report.snapshotId === snapshot.snapshotId &&
-      item.report.phaseHash === proof.phaseHash &&
-      item.report.snapshotTree === proof.tree &&
-      item.report.status === 'complete',
-  );
-  if (reviews.length !== 1) return undefined;
+  if (!nativeCycleCoverageAccepts(nativeCycleCoverage(runtime, snapshot))) return undefined;
   const watchIdentity = nativeTaskWatchIdentityForConsumer(
     stored.state.runId,
     phaseId,
