@@ -366,11 +366,11 @@ const liveStandaloneProcessLeases = Effect.fn('installations.liveProcessLeases')
   if (Exit.isFailure(versions)) {
     return {leases: live, truncated: true};
   }
+  // Leases are only ever written as <validated version>/<pid>.json, and pruning
+  // only removes validated releases, so any other name (such as Finder's
+  // .DS_Store) cannot pin a release and is not a gap in the inspection.
   scan: for (const version of versions.value.sort()) {
-    if (!STANDALONE_RELEASE_VERSION_PATTERN.test(version)) {
-      truncated = true;
-      continue;
-    }
+    if (!STANDALONE_RELEASE_VERSION_PATTERN.test(version)) continue;
     const versionRoot = path.join(leasesRoot, version);
     const names = yield* Effect.exit(fs.readDirectory(versionRoot));
     if (Exit.isFailure(names)) {
@@ -385,10 +385,7 @@ const liveStandaloneProcessLeases = Effect.fn('installations.liveProcessLeases')
       inspected += 1;
       const processId = Number(/^([1-9]\d*)\.json$/.exec(name)?.[1]);
       const leasePath = path.join(versionRoot, name);
-      if (!Number.isSafeInteger(processId) || processId <= 0) {
-        truncated = true;
-        continue;
-      }
+      if (!Number.isSafeInteger(processId) || processId <= 0) continue;
       const lease = yield* readProcessLease(fs, leasePath);
       if (Option.isNone(lease) || lease.value.processId !== processId || lease.value.version !== version) {
         if (system.isProcessRunning(processId)) truncated = true;

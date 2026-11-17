@@ -2397,10 +2397,9 @@ function activateWithCleanupRace(race: CleanupRace, processCount = 1) {
               if (finalBoundary && race === 'scan-failed')
                 return yield* fs.readDirectory(path.join(root, 'missing-fixture-directory'));
             }
-            const entries = yield* fs.readDirectory(directory);
-            return finalBoundary && race === 'scan-truncated' && directory === oldLeasesRoot
-              ? [...entries, 'malformed-entry']
-              : entries;
+            if (finalBoundary && race === 'scan-truncated' && directory === oldLeasesRoot)
+              return yield* fs.readDirectory(path.join(root, 'missing-fixture-directory'));
+            return yield* fs.readDirectory(directory);
           }),
       });
       const installed = yield* activateLocalStandaloneRelease({

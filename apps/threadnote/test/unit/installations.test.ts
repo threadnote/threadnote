@@ -794,7 +794,6 @@ describe('standalone release lifecycle', () => {
             const leaseRoot = path.join(installRoot, 'leases', '4.0.0');
             yield* fs.makeDirectory(leaseRoot, {recursive: true});
             yield* fs.writeFileString(path.join(leaseRoot, `${processId}.json`), '{malformed');
-            yield* fs.makeDirectory(path.join(installRoot, 'leases', 'unexpected-directory'));
             const testSystem = SystemInfo.of({
               ...baseSystem,
               environment: () => ({...baseSystem.environment(), THREADNOTE_INSTALL_ROOT: installRoot}),
