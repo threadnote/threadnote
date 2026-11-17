@@ -1222,10 +1222,12 @@ describe('project-closure incremental indexing', () => {
               stagedFiles: 4,
             });
             expect(incremental.incrementalWork).toMatchObject({
+              attributionContextFiles: 0,
               baseFactsLoaded: 4,
               changedFiles: 4,
             });
-            expect(incremental.incrementalWork?.attributionContextFiles).toBe(base.materialization?.totalFiles ?? 0);
+            // The first edit decodes the base once and records it as reusable evidence.
+            expect(incremental.incrementalWork?.resolutionEvidenceFiles).toBe(base.materialization?.totalFiles ?? 0);
             expect(normalizeGraph(incrementalGraph)).toEqual(normalizeGraph(fullGraph));
             const discovered = EffectOption.getOrUndefined(
               EffectArray.findFirst(incrementalGraph.symbols, symbol => symbol.name === 'discovered'),
@@ -1277,6 +1279,7 @@ describe('project-closure incremental indexing', () => {
               baseFactsLoaded: 4,
               changedFiles: 4,
             });
+            expect(indexed.incrementalWork?.resolutionEvidenceFiles).toBeUndefined();
             expect(normalizeGraph(yield* store.loadGraph(incrementalLayout.databasePath, indexed.snapshot.id))).toEqual(
               normalizeGraph(yield* store.loadGraph(fullLayout.databasePath, indexedFull.snapshot.id)),
             );

@@ -132,6 +132,12 @@ export interface CodeGraphIncrementalWork {
   readonly membershipCandidate?: CodeGraphMembershipCandidateWork;
   /** Persisted attribution context decoded for this delta. */
   readonly attributionContextFiles: number;
+  /**
+   * Base files decoded once to record reusable resolver evidence for the base.
+   * Later deltas against that base read the evidence instead, so this one-time
+   * cost is reported here and is not part of the delta's attribution context.
+   */
+  readonly resolutionEvidenceFiles?: number;
   /** Base final facts decoded for compatibility checks. */
   readonly baseFactsLoaded: number;
   readonly changedFiles: number;
@@ -155,6 +161,7 @@ export type CodeGraphIncrementalWorkObservation = Pick<
   | 'inventoryFilesInspected'
   | 'probedDependencyPaths'
   | 'membershipCandidate'
+  | 'resolutionEvidenceFiles'
 >;
 
 export function measureCodeGraphIncrementalWork(input: {
@@ -188,6 +195,9 @@ export function measureCodeGraphIncrementalWork(input: {
   return {
     ...(input.observation?.membershipCandidate ? {membershipCandidate: input.observation.membershipCandidate} : {}),
     attributionContextFiles: input.observation?.attributionContextFiles ?? 0,
+    ...(input.observation?.resolutionEvidenceFiles === undefined
+      ? {}
+      : {resolutionEvidenceFiles: input.observation.resolutionEvidenceFiles}),
     baseFactsLoaded: input.observation?.baseFactsLoaded ?? input.files.length,
     changedFiles: input.files.length,
     deletedFiles,

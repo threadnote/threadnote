@@ -144,14 +144,17 @@ export const assessResolutionCandidateIncrementalClosure = Effect.fn(
   return yield* assessSelectedResolutionCandidateClosure({...input, scan, selectedFiles});
 });
 
+type ResolutionCandidateSelection = Extract<ProjectResolutionCandidateClosure, {readonly mode: 'eligible'}> & {
+  readonly resolutionEvidenceFiles?: number;
+};
+
 interface ResolutionCandidateEvidenceIdentity {
   readonly context: string;
   readonly snapshotId: string;
 }
 
 type ResolutionCandidateDiscovery =
-  | Extract<ProjectResolutionCandidateClosure, {readonly mode: 'eligible'}>
-  | Extract<IncrementalOverlayPreassessment, {readonly mode: 'fallback'}>;
+  ResolutionCandidateSelection | Extract<IncrementalOverlayPreassessment, {readonly mode: 'fallback'}>;
 
 interface ResolutionCandidateDiscoveryInput {
   readonly baseAttributionContext?: {
@@ -259,20 +262,23 @@ const scannedResolutionCandidateClosure = Effect.fn('codeGraph.scannedResolution
         }),
       ),
   });
-  if (collected !== undefined && evidence !== undefined) {
-    // The evidence is complete even when this edit's closure falls back. A
-    // failed write only means the next edit scans again, so it never fails
-    // the assessment that already has its answer.
-    yield* input.store.recordResolutionCandidateIndex!(
-      input.layout.databasePath,
-      evidence.snapshotId,
-      evidence.context,
-      collected,
-    ).pipe(Effect.ignore);
-  }
-  return scan.mode === 'fallback'
-    ? resolutionCandidateScanFallback(scan, changedFiles)
-    : (scan satisfies ResolutionCandidateDiscovery);
+  // The evidence is complete even when this edit's closure falls back. A
+  // failed write only means the next edit scans again, so it never fails the
+  // assessment that already has its answer.
+  const recorded =
+    collected !== undefined && evidence !== undefined
+      ? yield* input.store.recordResolutionCandidateIndex!(
+          input.layout.databasePath,
+          evidence.snapshotId,
+          evidence.context,
+          collected,
+        ).pipe(Effect.orElseSucceed(() => false))
+      : false;
+  if (scan.mode === 'fallback') return resolutionCandidateScanFallback(scan, changedFiles);
+  // Recorded decoding belongs to the base, not to this delta's attribution context.
+  return (
+    recorded ? {...scan, resolutionEvidenceFiles: scan.scannedFiles, scannedFiles: 0} : scan
+  ) satisfies ResolutionCandidateDiscovery;
 });
 
 /** Exact inputs of base-fact attribution: cached facts per content, inventory, workspace and packs. */
@@ -560,7 +566,7 @@ const assessSelectedResolutionCandidateClosure = Effect.fn('codeGraph.assessSele
     readonly languagePacks: CodeGraphLanguagePackRegistryShape;
     readonly layout: CodeGraphLayout;
     readonly projectCount: number;
-    readonly scan: Extract<ProjectResolutionCandidateClosure, {readonly mode: 'eligible'}>;
+    readonly scan: ResolutionCandidateSelection;
     readonly selectedFiles: readonly CodeGraphInventoryFile[];
     readonly store: CodeGraphStoreShape;
   }) {
@@ -644,6 +650,9 @@ const assessSelectedResolutionCandidateClosure = Effect.fn('codeGraph.assessSele
       proportionalWork: {
         ...(input.candidateWork ? {membershipCandidate: input.candidateWork} : {}),
         attributionContextFiles: input.scan.scannedFiles,
+        ...(input.scan.resolutionEvidenceFiles === undefined
+          ? {}
+          : {resolutionEvidenceFiles: input.scan.resolutionEvidenceFiles}),
         baseFactsLoaded: input.selectedFiles.length,
         inventoryFilesInspected: input.currentFiles.length,
         probedDependencyPaths: 0,
