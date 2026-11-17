@@ -563,8 +563,9 @@ export const assembleNativeInference = Effect.fn('assembleNativeInference')(func
         EffectString.replaceAll('-march=armv8.7-a', '-march=armv8-a')(original),
       );
       // ggml and llama are separate DLLs that share CRT FILE*/fd state (llama-mmap.cpp opens via
-      // ggml_fopen, then calls _get_osfhandle(_fileno(fp))). A per-DLL static CRT fail-fasts there, so
-      // keep upstream's shared dynamic CRT, matching the locked x64 distribution.
+      // ggml_fopen, then calls _get_osfhandle(_fileno(fp))). A per-DLL static CRT fail-fasts there.
+      // cmake-js defaults Windows addons to MultiThreaded and upstream re-forces MultiThreadedDLL only
+      // for win-x64, so the build options below select the shared dynamic CRT explicitly.
       const adaptationPath = path.join(isolatedPackage, 'llama', 'cmake', 'win32.llvmApplyGnuModeAdaptations.cmake');
       if (!EffectString.includes('--dependent-lib=msvcrt')(yield* filesystem.readFileString(adaptationPath)))
         throw new Error('Pinned Windows inference CRT adaptation changed.');
@@ -616,7 +617,7 @@ export const assembleNativeInference = Effect.fn('assembleNativeInference')(func
         nativeInferenceBuildDriverSource(`
       const {compileLlamaCpp} = await import('./node-llama-cpp/dist/bindings/utils/compileLLamaCpp.js');
       const {getPlatformInfo} = await import('./node-llama-cpp/dist/bindings/utils/getPlatformInfo.js');
-      await compileLlamaCpp({customCmakeOptions:new Map(Object.entries(${JSON.stringify({...PORTABLE_OPTIONS, ...(sourceGpu === 'metal' ? {GGML_METAL: 'ON', GGML_METAL_EMBED_LIBRARY: 'ON'} : {}), ...(process.platform === 'win32' ? {GGML_CPU_ALL_VARIANTS: 'OFF', GGML_CPU_ARM_ARCH: 'armv8-a'} : {})})})),
+      await compileLlamaCpp({customCmakeOptions:new Map(Object.entries(${JSON.stringify({...PORTABLE_OPTIONS, ...(sourceGpu === 'metal' ? {GGML_METAL: 'ON', GGML_METAL_EMBED_LIBRARY: 'ON'} : {}), ...(process.platform === 'win32' ? {GGML_CPU_ALL_VARIANTS: 'OFF', GGML_CPU_ARM_ARCH: 'armv8-a', CMAKE_MSVC_RUNTIME_LIBRARY: 'MultiThreadedDLL'} : {})})})),
         progressLogs:'stderr',platform:${JSON.stringify(process.platform === 'darwin' ? 'mac' : process.platform === 'win32' ? 'win' : 'linux')},
         platformInfo:await getPlatformInfo(),arch:process.arch,gpu:${JSON.stringify(sourceGpu)},
         llamaCpp:{repo:'ggml-org/llama.cpp',release:'v0.7.0'}},
