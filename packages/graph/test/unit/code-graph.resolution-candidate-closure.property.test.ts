@@ -3,8 +3,8 @@ import {fcEffectProp, fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it as effectIt} from '@effect/vitest';
 import {Effect} from 'effect';
 import * as FC from 'fast-check';
-import {CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM} from '@threadnote/graph/fact/budget';
 import type {ProjectResolutionLookupKey} from '@threadnote/graph/incremental/closure';
+import {codeGraphIncrementalWorkFitsBudget} from '@threadnote/graph/incremental/work';
 import {
   assessResolutionCandidateReexportSafety,
   boundedReusableReexportsFromKeys,
@@ -16,8 +16,8 @@ import {
   PROJECT_RESOLUTION_CANDIDATE_MAX_REEXPORT_LOOKUP_KEYS,
   PROJECT_RESOLUTION_CANDIDATE_MAX_REEXPORTS,
   PROJECT_RESOLUTION_CANDIDATE_PROJECTION_STORAGE_MAX_BYTES,
-  PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FACT_BYTES,
   PROJECT_RESOLUTION_CANDIDATE_SCAN_PAGE_MAX_FACT_BYTES,
+  PROJECT_RESOLUTION_CANDIDATE_SCAN_PAGE_MAX_FILES,
   planProjectResolutionCandidateScan,
   resolutionCandidateLookupKeyClosure,
   scanProjectResolutionCandidateClosure,
@@ -53,8 +53,6 @@ describe('resolution-candidate closure', () => {
       const plan = planProjectResolutionCandidateScan({
         bytesByPath,
         files: inputFiles,
-        maximumFactBytes: Number.MAX_SAFE_INTEGER,
-        maximumFiles: 80,
         pageMaximumFactBytes,
         pageMaximumFiles,
       });
@@ -81,8 +79,6 @@ describe('resolution-candidate closure', () => {
       const reordered = planProjectResolutionCandidateScan({
         bytesByPath,
         files: [...inputFiles].reverse(),
-        maximumFactBytes: Number.MAX_SAFE_INTEGER,
-        maximumFiles: 80,
         pageMaximumFactBytes,
         pageMaximumFiles,
       });
@@ -670,34 +666,7 @@ describe('resolution-candidate closure', () => {
     }),
   );
 
-  effectIt('reports exact planning, lookup, selection, and reexport cap boundaries', () => {
-    const files = [inventory('a.ts', 1), inventory('b.ts', 1), inventory('c.ts', 1)];
-    expect(
-      planProjectResolutionCandidateScan({
-        bytesByPath: new Map(EffectArray.map(files, file => [file.path, 1])),
-        files,
-        maximumFiles: 2,
-      }),
-    ).toEqual({
-      detail: 'candidate-scan-files',
-      limit: 2,
-      mode: 'fallback',
-      observed: 3,
-      reason: 'project-closure-unbounded',
-    });
-    expect(
-      planProjectResolutionCandidateScan({
-        bytesByPath: new Map(EffectArray.map(files, file => [file.path, 1])),
-        files,
-        maximumFactBytes: 2,
-      }),
-    ).toEqual({
-      detail: 'candidate-scan-fact-bytes',
-      limit: 2,
-      mode: 'fallback',
-      observed: 3,
-      reason: 'project-closure-unbounded',
-    });
+  effectIt('reports the exact lookup-key cap boundary', () => {
     expect(
       resolutionCandidateLookupKeyClosure(
         [lookup('typescript', 'one'), lookup('typescript', 'two'), lookup('typescript', 'three')],
@@ -713,40 +682,63 @@ describe('resolution-candidate closure', () => {
     });
   });
 
-  effectIt('keeps a production-sized cached-fact surface within the default bounded scan', () => {
-    const files = Array.from({length: 48}, (_, index) => inventory(`file-${index}.ts`, 1));
-    const productionSurfaceBytes = 192 * 1_048_576;
-    const bytesPerFile = productionSurfaceBytes / files.length;
+  effectIt('keeps an export edit incremental when the scanned surface exceeds the former aggregate caps', () => {
+    const files = Array.from({length: 6_000}, (_, index) => inventory(`file-${index}.ts`, 1));
+    const bytesPerFile = 64 * 1_024;
     const plan = planProjectResolutionCandidateScan({
       bytesByPath: new Map(EffectArray.map(files, file => [file.path, bytesPerFile])),
       files,
     });
 
-    expect(PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FACT_BYTES).toBe(256 * 1_048_576);
-    expect(PROJECT_RESOLUTION_CANDIDATE_SCAN_PAGE_MAX_FACT_BYTES).toBe(CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM);
-    expect(plan).toMatchObject({factBytes: productionSurfaceBytes, files: 48, mode: 'eligible'});
-    if (plan.mode === 'eligible') {
-      expect(plan.pages).toHaveLength(24);
-      expect(
-        EffectArray.every(plan.pages, page => page.factBytes <= PROJECT_RESOLUTION_CANDIDATE_SCAN_PAGE_MAX_FACT_BYTES),
-      ).toBe(true);
-    }
-    const overflowFiles = [inventory('overflow-a.ts', 1), inventory('overflow-b.ts', 1)];
+    expect(plan).toMatchObject({factBytes: files.length * bytesPerFile, files: files.length, mode: 'eligible'});
+    if (plan.mode !== 'eligible') return;
+    expect(plan.pages).toHaveLength(Math.ceil(files.length / PROJECT_RESOLUTION_CANDIDATE_SCAN_PAGE_MAX_FILES));
     expect(
-      planProjectResolutionCandidateScan({
-        bytesByPath: new Map([
-          [overflowFiles[0].path, PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FACT_BYTES],
-          [overflowFiles[1].path, 1],
-        ]),
-        files: overflowFiles,
+      EffectArray.every(
+        plan.pages,
+        page =>
+          page.files.length <= PROJECT_RESOLUTION_CANDIDATE_SCAN_PAGE_MAX_FILES &&
+          page.factBytes <= PROJECT_RESOLUTION_CANDIDATE_SCAN_PAGE_MAX_FACT_BYTES,
+      ),
+    ).toBe(true);
+
+    const changedFiles = 2;
+    const work = {
+      attributionContextFiles: files.length,
+      baseFactsLoaded: changedFiles,
+      changedFiles,
+      deletedFiles: 0,
+      factBytes: 4_096,
+      inventoryFilesInspected: files.length,
+      membershipCandidate: {
+        metadataFactBytes: plan.factBytes,
+        metadataFiles: plan.files,
+        omittedFactBytes: 0,
+        omittedFiles: 0,
+        projectionObservations: 0,
+        projectionObservedKeyBytes: 0,
+        rawBaseBytes: plan.factBytes - changedFiles * bytesPerFile,
+        rawBaseFiles: plan.files - changedFiles,
+        rawCurrentBytes: changedFiles * bytesPerFile,
+        rawCurrentFiles: changedFiles,
+        selectedReloadBytes: changedFiles * bytesPerFile,
+        selectedReloadFiles: changedFiles,
+      },
+      plannedRows: 64,
+      probedDependencyPaths: 0,
+      sourceBytes: 1_024,
+      totalFiles: files.length,
+    };
+    expect(codeGraphIncrementalWorkFitsBudget(work)).toBe(true);
+    expect(
+      codeGraphIncrementalWorkFitsBudget({
+        ...work,
+        membershipCandidate: {
+          ...work.membershipCandidate,
+          rawCurrentBytes: work.membershipCandidate.rawCurrentBytes + 1,
+        },
       }),
-    ).toEqual({
-      detail: 'candidate-scan-fact-bytes',
-      limit: PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FACT_BYTES,
-      mode: 'fallback',
-      observed: PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FACT_BYTES + 1,
-      reason: 'project-closure-unbounded',
-    });
+    ).toBe(false);
   });
 
   effectIt.effect('accepts exact one-pass projection limits and fails before dedupe can hide excess work', () =>
@@ -825,9 +817,9 @@ describe('resolution-candidate closure', () => {
     }),
   );
 
-  effectIt('ratchets the full projection record payload below 20 MiB', () => {
-    expect(PROJECT_RESOLUTION_CANDIDATE_PROJECTION_STORAGE_MAX_BYTES).toBe(20_316_160);
-    expect(PROJECT_RESOLUTION_CANDIDATE_PROJECTION_STORAGE_MAX_BYTES).toBeLessThan(20 * 1_048_576);
+  effectIt('ratchets the full projection record payload below 24 MiB', () => {
+    expect(PROJECT_RESOLUTION_CANDIDATE_PROJECTION_STORAGE_MAX_BYTES).toBe(24_379_392);
+    expect(PROJECT_RESOLUTION_CANDIDATE_PROJECTION_STORAGE_MAX_BYTES).toBeLessThan(24 * 1_048_576);
   });
 
   effectIt.effect('fails closed on incomplete pages and reports exact selected/reexport overflows', () =>
@@ -1248,8 +1240,6 @@ function eligiblePlan(
   const plan = planProjectResolutionCandidateScan({
     bytesByPath: new Map(EffectArray.map(files, file => [file.path, 1])),
     files,
-    maximumFactBytes: Number.MAX_SAFE_INTEGER,
-    maximumFiles: Math.max(files.length, 1),
     pageMaximumFactBytes: Number.MAX_SAFE_INTEGER,
     pageMaximumFiles,
   });

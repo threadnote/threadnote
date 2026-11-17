@@ -11,6 +11,7 @@ import {
 } from '../incremental/closure.js';
 import {assessCodeGraphIncrementalFactBytes, codeGraphIncrementalFactBatchesFitBudget} from '../incremental/work.js';
 import {cachedFactsMetadata, loadCachedFacts} from './materialization.js';
+import {codeGraphInventorySha256Hex} from '../inventory/identity.js';
 import type {IncrementalOverlayPreassessment} from './types.js';
 import type {CodeGraphLanguagePackRegistryShape} from '../languages/registry.js';
 import type {CodeGraphWorkspace} from '../languages/types.js';
@@ -24,11 +25,12 @@ import {
 import {CODE_GRAPH_RESOLUTION_PASS_MAXIMUM} from '../store/resolution.js';
 import {
   planProjectResolutionCandidateScan,
-  PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FILES,
   PROJECT_RESOLUTION_CANDIDATE_MAX_LOOKUP_KEYS,
   PROJECT_RESOLUTION_CANDIDATE_SCAN_PAGE_MAX_FACT_BYTES,
+  resolveIndexedProjectResolutionCandidateClosure,
   scanProjectResolutionCandidateClosure,
   type ProjectResolutionCandidateClosure,
+  type ProjectResolutionCandidateIndex,
   type ProjectResolutionCandidateScanPlan,
   type ProjectResolutionReexportKeys,
 } from '../store/resolution/candidate_closure.js';
@@ -63,6 +65,13 @@ export const assessResolutionCandidateIncrementalClosure = Effect.fn(
   };
   readonly baseFileSetFingerprint: string;
   readonly baseFiles: readonly CodeGraphInventoryFile[];
+  /**
+   * Snapshot that owns persisted evidence for exactly `baseFiles` and
+   * `committedWorkspace`, with the extractor set that loads their cached
+   * facts. Only set when base facts are attributed in that same context;
+   * file-set and workspace transitions re-attribute and scan.
+   */
+  readonly resolutionEvidenceOwner?: CodeGraphResolutionEvidenceOwner;
   readonly candidateReexports: readonly ProjectResolutionReexportCandidate[];
   readonly committedWorkspace: CodeGraphWorkspace;
   readonly currentChangedFiles: readonly CodeGraphInventoryFile[];
@@ -77,50 +86,27 @@ export const assessResolutionCandidateIncrementalClosure = Effect.fn(
   readonly requiredFiles?: readonly CodeGraphInventoryFile[];
   readonly store: CodeGraphStoreShape;
 }) {
-  if (input.baseFiles.length > PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FILES) {
-    return projectClosureBoundFallback(
-      input.currentChangedFiles.length,
-      {metric: 'candidate-scan-files', stage: 'resolution-candidate-scan'},
-      input.baseFiles.length,
-      PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FILES,
-    );
-  }
-  const metadata = yield* cachedFactsMetadata(
-    input.store,
-    input.layout.databasePath,
-    input.baseFiles,
-    input.languagePacks,
-  );
-  if (metadata.files !== input.baseFiles.length || metadata.bytesByPath.size !== input.baseFiles.length) {
-    return {mode: 'fallback', reason: 'cache-incomplete'} satisfies IncrementalOverlayPreassessment;
-  }
-  const plan = planProjectResolutionCandidateScan({bytesByPath: metadata.bytesByPath, files: input.baseFiles});
-  if (plan.mode === 'fallback') return resolutionCandidateScanFallback(plan, input.currentChangedFiles.length);
-
-  const attributeBaseFacts = createFactsAttributor(
-    input.baseAttributionContext?.files ?? input.baseFiles,
-    input.baseAttributionContext?.workspace ?? input.committedWorkspace,
-  );
-  const scan = yield* scanProjectResolutionCandidateClosure({
-    additionalReexports: input.candidateReexports,
-    initialLookupKeys: input.initialLookupKeys,
-    maximumSelectedFiles: PROJECT_INCREMENTAL_CLOSURE_MAX_FILES,
-    plan,
-    loadPage: (files: readonly CodeGraphInventoryFile[]) =>
-      loadCachedFacts(input.store, input.layout.databasePath, files, input.languagePacks).pipe(
-        Effect.map(loaded => {
-          const rawFacts = EffectArray.flatMap(files, file => {
-            const facts = loaded.facts.get(file.path);
-            return facts === undefined ? [] : [input.languagePacks.postprocessFile(file, facts)];
-          });
-          return {
-            bytesByPath: loaded.bytesByPath,
-            facts: new Map(EffectArray.map(attributeBaseFacts(rawFacts), facts => [facts.path, facts])),
-          };
-        }),
-      ),
-  });
-  if (scan.mode === 'fallback') return resolutionCandidateScanFallback(scan, input.currentChangedFiles.length);
+  const owner = input.resolutionEvidenceOwner;
+  const evidence =
+    owner === undefined || input.baseAttributionContext !== undefined
+      ? undefined
+      : {
+          context: resolutionCandidateIndexContext(input.baseFiles, input.committedWorkspace, owner.extractorSet),
+          snapshotId: owner.snapshotId,
+        };
+  const indexState =
+    evidence === undefined || input.store.resolutionCandidateIndex === undefined
+      ? undefined
+      : yield* input.store.resolutionCandidateIndex(input.layout.databasePath, evidence.snapshotId, evidence.context);
+  const scan =
+    (indexState?.state === 'indexed'
+      ? yield* indexedResolutionCandidateClosure(input, evidence!, indexState.reexports)
+      : undefined) ??
+    (yield* scannedResolutionCandidateClosure(
+      input,
+      indexState === undefined || indexState.state === 'unavailable' ? undefined : evidence,
+    ));
+  if (scan.mode === 'fallback') return scan;
 
   const selectedPaths = new Set([
     ...scan.paths,
@@ -158,6 +144,150 @@ export const assessResolutionCandidateIncrementalClosure = Effect.fn(
   }
   return yield* assessSelectedResolutionCandidateClosure({...input, scan, selectedFiles});
 });
+
+type ResolutionCandidateSelection = Extract<ProjectResolutionCandidateClosure, {readonly mode: 'eligible'}> & {
+  readonly resolutionEvidenceFiles?: number;
+};
+
+interface ResolutionCandidateEvidenceIdentity {
+  readonly context: string;
+  readonly snapshotId: string;
+}
+
+type ResolutionCandidateDiscovery =
+  ResolutionCandidateSelection | Extract<IncrementalOverlayPreassessment, {readonly mode: 'fallback'}>;
+
+interface ResolutionCandidateDiscoveryInput {
+  readonly baseAttributionContext?: {
+    readonly files: readonly CodeGraphInventoryFile[];
+    readonly workspace: CodeGraphWorkspace;
+  };
+  readonly baseFiles: readonly CodeGraphInventoryFile[];
+  readonly candidateReexports: readonly ProjectResolutionReexportCandidate[];
+  readonly committedWorkspace: CodeGraphWorkspace;
+  readonly currentChangedFiles: readonly CodeGraphInventoryFile[];
+  readonly initialLookupKeys: readonly ProjectResolutionLookupKey[];
+  readonly languagePacks: CodeGraphLanguagePackRegistryShape;
+  readonly layout: CodeGraphLayout;
+  readonly store: CodeGraphStoreShape;
+}
+
+/** Resolve from persisted evidence; `undefined` when it vanished before the lookup. */
+const indexedResolutionCandidateClosure = Effect.fn('codeGraph.indexedResolutionCandidateClosure')(function* (
+  input: ResolutionCandidateDiscoveryInput,
+  evidence: ResolutionCandidateEvidenceIdentity,
+  reexports: readonly ProjectResolutionReexportKeys[],
+) {
+  const {matchResolutionCandidateIndex} = input.store;
+  if (matchResolutionCandidateIndex === undefined) return undefined;
+  const closure = yield* resolveIndexedProjectResolutionCandidateClosure({
+    additionalReexports: input.candidateReexports,
+    initialLookupKeys: input.initialLookupKeys,
+    lookup: query =>
+      matchResolutionCandidateIndex(input.layout.databasePath, evidence.snapshotId, evidence.context, query),
+    maximumSelectedFiles: PROJECT_INCREMENTAL_CLOSURE_MAX_FILES,
+    reexports,
+  });
+  // Evidence that disappeared between the receipt and the lookup is not a closure result.
+  if (closure.mode === 'fallback' && closure.reason === 'cache-incomplete') return undefined;
+  return closure.mode === 'fallback'
+    ? resolutionCandidateScanFallback(closure, input.currentChangedFiles.length)
+    : (closure satisfies ResolutionCandidateDiscovery);
+});
+
+/**
+ * Decode every committed file's cached facts, bounded per page and by the
+ * projection caps. With a ready owner and no base file served degraded, the
+ * collected evidence is recorded, so later edits against the same base read
+ * only the affected evidence.
+ */
+const scannedResolutionCandidateClosure = Effect.fn('codeGraph.scannedResolutionCandidateClosure')(function* (
+  input: ResolutionCandidateDiscoveryInput,
+  evidence: ResolutionCandidateEvidenceIdentity | undefined,
+) {
+  const changedFiles = input.currentChangedFiles.length;
+  const recordable = evidence !== undefined && input.store.recordResolutionCandidateIndex !== undefined;
+  const metadata = yield* cachedFactsMetadata(
+    input.store,
+    input.layout.databasePath,
+    input.baseFiles,
+    input.languagePacks,
+  );
+  if (metadata.files !== input.baseFiles.length || metadata.bytesByPath.size !== input.baseFiles.length) {
+    return {mode: 'fallback', reason: 'cache-incomplete'} satisfies IncrementalOverlayPreassessment;
+  }
+  const plan = planProjectResolutionCandidateScan({bytesByPath: metadata.bytesByPath, files: input.baseFiles});
+  if (plan.mode === 'fallback') return resolutionCandidateScanFallback(plan, changedFiles);
+
+  const attributeBaseFacts = createFactsAttributor(
+    input.baseAttributionContext?.files ?? input.baseFiles,
+    input.baseAttributionContext?.workspace ?? input.committedWorkspace,
+  );
+  let collected: ProjectResolutionCandidateIndex | undefined;
+  const scan = yield* scanProjectResolutionCandidateClosure({
+    additionalReexports: input.candidateReexports,
+    initialLookupKeys: input.initialLookupKeys,
+    maximumSelectedFiles: PROJECT_INCREMENTAL_CLOSURE_MAX_FILES,
+    ...(recordable
+      ? {
+          onIndex: (index: ProjectResolutionCandidateIndex) => {
+            collected = index;
+          },
+        }
+      : {}),
+    plan,
+    loadPage: (files: readonly CodeGraphInventoryFile[]) =>
+      loadCachedFacts(input.store, input.layout.databasePath, files, input.languagePacks).pipe(
+        Effect.map(loaded => {
+          const rawFacts = EffectArray.flatMap(files, file => {
+            const facts = loaded.facts.get(file.path);
+            return facts === undefined ? [] : [input.languagePacks.postprocessFile(file, facts)];
+          });
+          return {
+            bytesByPath: loaded.bytesByPath,
+            degradedPaths: loaded.degradedPaths,
+            facts: new Map(EffectArray.map(attributeBaseFacts(rawFacts), facts => [facts.path, facts])),
+          };
+        }),
+      ),
+  });
+  // The evidence is complete even when this edit's closure falls back. A
+  // failed write only means the next edit scans again, so it never fails the
+  // assessment that already has its answer.
+  const recorded =
+    collected !== undefined && evidence !== undefined
+      ? yield* input.store.recordResolutionCandidateIndex!(
+          input.layout.databasePath,
+          evidence.snapshotId,
+          evidence.context,
+          collected,
+        ).pipe(Effect.orElseSucceed(() => false))
+      : false;
+  if (scan.mode === 'fallback') return resolutionCandidateScanFallback(scan, changedFiles);
+  // Recorded decoding belongs to the base, not to this delta's attribution context.
+  return (
+    recorded ? {...scan, resolutionEvidenceFiles: scan.scannedFiles, scannedFiles: 0} : scan
+  ) satisfies ResolutionCandidateDiscovery;
+});
+
+export interface CodeGraphResolutionEvidenceOwner {
+  /** Extractor set of the base paths; callers have already validated it for this inventory. */
+  readonly extractorSet: string;
+  readonly snapshotId: string;
+}
+
+/** Exact inputs of base-fact attribution: cached facts per content, inventory, workspace and packs. */
+function resolutionCandidateIndexContext(
+  files: readonly CodeGraphInventoryFile[],
+  workspace: CodeGraphWorkspace,
+  extractorSet: string,
+): string {
+  return codeGraphInventorySha256Hex(
+    `resolution-candidate-index-v1\n${extractorSet}\n${workspace.fingerprint}\n`,
+    files,
+    file => `${file.path}\0${file.language}\0${file.mode}\0${file.contentHash}\0${file.content === undefined ? 0 : 1}`,
+  );
+}
 
 /** Complete two-version evidence with a narrow, metadata-certified inert tail. */
 export const assessWorkspaceTransitionIncrementalClosure = Effect.fn(
@@ -431,7 +561,7 @@ const assessSelectedResolutionCandidateClosure = Effect.fn('codeGraph.assessSele
     readonly languagePacks: CodeGraphLanguagePackRegistryShape;
     readonly layout: CodeGraphLayout;
     readonly projectCount: number;
-    readonly scan: Extract<ProjectResolutionCandidateClosure, {readonly mode: 'eligible'}>;
+    readonly scan: ResolutionCandidateSelection;
     readonly selectedFiles: readonly CodeGraphInventoryFile[];
     readonly store: CodeGraphStoreShape;
   }) {
@@ -515,6 +645,9 @@ const assessSelectedResolutionCandidateClosure = Effect.fn('codeGraph.assessSele
       proportionalWork: {
         ...(input.candidateWork ? {membershipCandidate: input.candidateWork} : {}),
         attributionContextFiles: input.scan.scannedFiles,
+        ...(input.scan.resolutionEvidenceFiles === undefined
+          ? {}
+          : {resolutionEvidenceFiles: input.scan.resolutionEvidenceFiles}),
         baseFactsLoaded: input.selectedFiles.length,
         inventoryFilesInspected: input.currentFiles.length,
         probedDependencyPaths: 0,

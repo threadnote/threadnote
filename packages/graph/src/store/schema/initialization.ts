@@ -16,6 +16,7 @@ import {ensureCodeGraphFileBlobAuthority} from '../cache/authority.js';
 import {assertCodeGraphSnapshotFileCitationSchemaMigratable} from '../file_alias_schema.js';
 import {codeGraphSchemaInitializationReceiptCurrent, recordCodeGraphSchemaInitializationReceipt} from './receipt.js';
 import {ensureCodeGraphQueryIndexes} from '../query/indexes.js';
+import {CODE_GRAPH_RESOLUTION_CANDIDATE_INDEX_TABLES_SQL} from '../resolution/candidate_index.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
@@ -436,6 +437,7 @@ const initializeSchemaFully = Effect.fn('codeGraph.initializeSchemaFully')(funct
       PRIMARY KEY (snapshot_id, source_path, local_name, target_path, imported_name)
     ) WITHOUT ROWID
   `);
+  for (const statement of CODE_GRAPH_RESOLUTION_CANDIDATE_INDEX_TABLES_SQL) yield* sql.unsafe(statement);
   // A layered clean snapshot remains a one-level physical delta over its root.
   // These receipts prove that the delta can be folded into a later sibling
   // without ever making the layered snapshot a physical base. The dedicated
