@@ -122,7 +122,7 @@ function expectTouchedStagingMatchesFullScanSubset(
   }
   for (const uri of invalidatedUris) {
     if (!fullByUri.has(uri)) continue;
-    expect(EffectArray.findFirst(touched, row => row.uri === uri)).toBeDefined();
+    expect(Option.isSome(EffectArray.findFirst(touched, row => row.uri === uri))).toBe(true);
   }
 }
 
@@ -392,6 +392,47 @@ describe('Recall source staging', () => {
           }).pipe(withDatabase);
         }),
       );
+    it.effect('requests a full scan when a stored URI only matches a root by LIKE metacharacters or case', () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fs.makeTempDirectoryScoped({prefix: 'recall-like-prefix-'});
+        const note = path.join(home, 'data', 'acct', 'user', 'dev_team', 'memories', 'note.md');
+        yield* fs.makeDirectory(path.dirname(note), {recursive: true});
+        yield* fs.writeFileString(note, 'note');
+        const config = {account: 'acct', agentContextHome: home, user: 'dev_team'};
+        const policy = {entryKeyByUri: new Map<string, string>(), sourcePathByUri: new Map<string, string>()};
+        const uri = 'threadnote://user/dev_team/memories/note.md';
+        yield* Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql.unsafe('CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+          yield* sql.unsafe(
+            "INSERT INTO metadata VALUES ('content_generation', 'baseline'), ('oversized_document_count', '0')",
+          );
+          yield* sql.unsafe(
+            `CREATE TABLE documents (
+              uri TEXT, source_path TEXT, source_modified_at TEXT, source_size INTEGER, authority_policy_key TEXT
+            )`,
+          );
+          for (const foreign of [
+            'threadnote://user/devXteam/memories/foreign.md',
+            'threadnote://user/Dev_team/memories/foreign.md',
+          ])
+            yield* sql.unsafe(
+              `INSERT INTO documents (uri, source_path, source_modified_at, source_size, authority_policy_key)
+               VALUES (?, ?, NULL, 4, NULL)`,
+              [foreign, note],
+            );
+          const result = yield* stageRecallSources(sql, fs, path, config, {
+            includeInactive: true,
+            canonicalResourcePolicy: policy,
+            invalidatedUris: new Set([uri]),
+            mode: {kind: 'touched', contentGeneration: 'baseline'},
+          });
+          expect(result.mode).toBe('full');
+        }).pipe(withDatabase);
+      }),
+    );
     for (const uncertainty of ['generation', 'oversized-count', 'prefix', 'foreign-user', 'unknown-missing'] as const) {
       it.effect(`requests full rehydration when ${uncertainty} prevents a proved touched pass`, () =>
         Effect.gen(function* () {

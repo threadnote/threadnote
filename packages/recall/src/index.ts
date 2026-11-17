@@ -216,6 +216,11 @@ interface RecallTermStatisticRow {
   readonly term: string;
 }
 
+/**
+ * The version is part of the database filename. A bump rebuilds from canonical
+ * files into that new file. Older filenames are not opened or migrated in place,
+ * so a previous binary cannot write the current database.
+ */
 const RECALL_INDEX_DATABASE_VERSION = 14;
 const RECALL_INDEX_POINTER_VERSION = 1;
 const ACTIVE_DATABASE_FILENAME = `active-v${RECALL_INDEX_DATABASE_VERSION}.sqlite`;

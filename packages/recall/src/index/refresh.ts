@@ -302,11 +302,14 @@ const stageTouchedRecallSources = Effect.fn('recall.stageTouchedSources')(functi
   const foreignInventory = yield* sql.unsafe<{readonly uri: string}>(
     `SELECT uri FROM documents
      WHERE NOT (${EffectArray.join(
-       EffectArray.map(roots, () => 'uri LIKE ?'),
+       EffectArray.map(roots, () => '(uri >= ? AND uri < ?)'),
        ' OR ',
      )})
      LIMIT 1`,
-    EffectArray.map(roots, root => `${root.uri}/%`),
+    EffectArray.flatMap(roots, root => {
+      const prefix = `${root.uri}/`;
+      return [prefix, `${prefix}\u{10ffff}`] as const;
+    }),
   );
   if (foreignInventory.length > 0) return undefined;
   const selected = new Map<string, {readonly root: (typeof roots)[number]; readonly segments: readonly string[]}>();

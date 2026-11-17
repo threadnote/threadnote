@@ -143,23 +143,6 @@ function verifyDirectOwnedRelationArtifacts(
   return true;
 }
 
-function ownedActiveArtifactsForRelationProofs(
-  artifacts: Readonly<Record<string, OwnedActiveRelationArtifact>>,
-  relationUris: readonly string[],
-): Readonly<Record<string, OwnedActiveRelationArtifact>> {
-  const relationMemoryIds = new Set<string>();
-  for (const uri of relationUris) {
-    const owned = artifacts[uri];
-    if (owned?.state === 'active') relationMemoryIds.add(owned.memoryId);
-  }
-  return EffectRecord.fromEntries(
-    EffectArray.filter(EffectRecord.toEntries(artifacts), ([uri, artifact]) => {
-      if (artifact.state !== 'active') return false;
-      return relationUris.includes(uri) || relationMemoryIds.has(artifact.memoryId);
-    }),
-  );
-}
-
 function admitPrivateCandidate(
   state: WorkflowJournal,
   uri: string,
@@ -448,8 +431,7 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
         revision: artifact.revision,
         state: artifact.state,
       }));
-      const proofArtifacts = ownedActiveArtifactsForRelationProofs(ownedActive, relationUris);
-      ownedMemoryIdProofs = yield* buildAuthorizedOwnedMemoryIdProofs(config, relationScopeList, proofArtifacts);
+      ownedMemoryIdProofs = yield* buildAuthorizedOwnedMemoryIdProofs(config, relationScopeList, ownedActive);
       ownedActiveArtifacts = verifyDirectOwnedRelationArtifacts(ownedMemoryIdProofs, ownedActive, relationUris)
         ? ownedActive
         : undefined;
@@ -762,11 +744,10 @@ export const executeWorkflowOperation = Effect.fn('workflowMemory.executeOperati
           );
         })
       ) {
-        const proofArtifacts = ownedActiveArtifactsForRelationProofs(ownedBypassArtifacts, relationUrisForOwnedProof);
         const ownedMemoryIdProofs = yield* buildAuthorizedOwnedMemoryIdProofs(
           config,
           ownedBypassScopes,
-          proofArtifacts,
+          ownedBypassArtifacts,
         );
         const authorized = verifyDirectOwnedRelationArtifacts(
           ownedMemoryIdProofs,

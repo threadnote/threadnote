@@ -626,9 +626,7 @@ export const resolveLegacyRecallMemoryLinks = Effect.fn('recall.resolveLegacyMem
       AND target.uri NOT LIKE '%/archived/%'
       AND target.uri NOT LIKE '%/expired/%'
       AND target.uri NOT LIKE '%/superseded/%'`;
-  const statusPredicate = includeInactive
-    ? ''
-    : `AND COALESCE(json_extract(target.candidate_json, '$.status'), 'active') = 'active'`;
+  const statusPredicate = `AND COALESCE(json_extract(target.candidate_json, '$.status'), 'active') = 'active'`;
   const legacyLinks = yield* sql.unsafe<{readonly present: number}>(
     "SELECT 1 AS present FROM memory_links WHERE target_locator_digest <> '' LIMIT 1",
   );

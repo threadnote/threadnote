@@ -292,7 +292,7 @@ const digestApplicableLiveGitignoreFiles = Effect.fn('codeGraph.digestLiveGitign
   );
   const ignoredUntracked = yield* runCommandEffect(
     'git',
-    ['-C', identity.repoRoot, 'ls-files', '-o', '-i', '-z', '--exclude-standard', ':(glob)**/.gitignore'],
+    ['-C', identity.repoRoot, 'ls-files', '-o', '-i', '-z', '--directory', '--exclude-standard', ':(glob)**/.gitignore'],
     {allowFailure: true, maxOutputBytes: 4 * 1_048_576, timeoutMs: 120_000},
   );
   const fs = yield* FileSystem.FileSystem;
