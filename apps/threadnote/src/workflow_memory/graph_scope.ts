@@ -108,3 +108,20 @@ export const workflowGraphProjectHint = Effect.fn('workflowGraph.projectHint')(f
     return yield* workflowError('graph-scope-unavailable', 'The bound graph project is unavailable.');
   return route.project.name;
 });
+
+/** Citation capture routes an unselected run by its project hint; prove that route before init writes state. */
+export const requireWorkflowGraphProjectHint = Effect.fn('workflowGraph.requireProjectHint')(function* (
+  config: RuntimeConfig,
+  binding: WorkflowBinding,
+  recovery: 'same-task' | 'new-task' = 'same-task',
+) {
+  if (binding.graphProject !== undefined || config.manifestSource === 'bundled-example') return;
+  yield* resolveCodeGraphScopeRoute(config.manifestPath, binding.repo, binding.project).pipe(
+    Effect.catch(() =>
+      workflowError(
+        'graph-scope-required',
+        `Workflow project "${binding.project}" is not a configured graph project in this checkout. ${recovery === 'same-task' ? 'Retry this task start with the same feature name' : 'Start a new task with a new feature name'} and graphProject or --graph-project set to a configured project in this checkout, or configure a graph project named "${binding.project}" for it.`,
+      ),
+    ),
+  );
+});
