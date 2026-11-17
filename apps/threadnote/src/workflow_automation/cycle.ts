@@ -1355,7 +1355,7 @@ export const runNativeCycle = <R>(
             policy,
             'review.required',
             report ? undefined : {},
-            nativeCycleWaiverFor(runtime, 'review.required', selected.id, entry.snapshot.tree),
+            nativeCycleWaiverFor(runtime, 'review.required', entry.snapshot),
             nativeTaskWaiveNext(request.runId, repo, 'review.required'),
           );
           if (reviewDecision._tag === 'refuse')
@@ -1377,7 +1377,7 @@ export const runNativeCycle = <R>(
             policy,
             'review.blocking',
             reviewed?.summary.blockingIssueCount ? {} : undefined,
-            nativeCycleWaiverFor(runtime, 'review.blocking', selected.id, entry.snapshot.tree),
+            nativeCycleWaiverFor(runtime, 'review.blocking', entry.snapshot),
             nativeTaskWaiveNext(request.runId, repo, 'review.blocking'),
           );
           if (blockingDecision._tag === 'refuse')
@@ -1545,7 +1545,7 @@ export const runNativeCycle = <R>(
                 : undefined;
             const reviewCovered =
               review !== undefined ||
-              nativeCycleWaiverFor(runtime, 'review.required', selected.id, proof.tree) !== undefined;
+              (source !== undefined && nativeCycleWaiverFor(runtime, 'review.required', source.snapshot) !== undefined);
             const blockersCovered =
               !review ||
               !EffectArray.some(
@@ -1553,7 +1553,7 @@ export const runNativeCycle = <R>(
                 finding =>
                   ['critical', 'important'].includes(finding.severity) && ['new', 'carried'].includes(finding.state),
               ) ||
-              nativeCycleWaiverFor(runtime, 'review.blocking', selected.id, proof.tree) !== undefined;
+              (source !== undefined && nativeCycleWaiverFor(runtime, 'review.blocking', source.snapshot) !== undefined);
             if (!source || source.snapshot.tree !== proof.tree || !reviewCovered || !blockersCovered)
               return yield* fail(
                 'review-pending',

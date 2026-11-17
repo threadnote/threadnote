@@ -83,6 +83,9 @@ describe('audited waiver records', () => {
   it('derives a stable identity from its content', () => {
     expect(nativeCycleWaiverId(waiver)).toBe(nativeCycleWaiverId({...waiver}));
     expect(nativeCycleWaiverId({...waiver, tree: EffectString.repeat(40)('c')})).not.toBe(nativeCycleWaiverId(waiver));
+    expect(nativeCycleWaiverId({...waiver, intentHash: EffectString.repeat(64)('d')})).not.toBe(
+      nativeCycleWaiverId(waiver),
+    );
     expect(decode({id: nativeCycleWaiverId(waiver), ...waiver})._tag).toBe('Success');
   });
 

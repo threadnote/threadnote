@@ -1508,7 +1508,7 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
         nativeWorkflowPolicyOf(stored.state),
         'review.required',
         report ? undefined : {},
-        nativeCycleWaiverFor(runtime, 'review.required', ref.phaseId, entry.snapshot.tree),
+        nativeCycleWaiverFor(runtime, 'review.required', entry.snapshot),
         nativeTaskWaiveNext(request.runId, checkout, 'review.required'),
       );
       if (reviewDecision._tag === 'refuse')

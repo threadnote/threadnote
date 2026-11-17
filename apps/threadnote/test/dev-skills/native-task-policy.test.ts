@@ -331,6 +331,57 @@ describe('audited waivers', () => {
       ).toMatchObject({code: 'review-pending', gate: 'review.required'});
     }).pipe(runCycle),
   );
+  effectIt.effect('does not carry a waiver across a change of the phase intent', () =>
+    Effect.gen(function* () {
+      const f = yield* cycleFixture(
+        ['one'],
+        'local',
+        false,
+        false,
+        true,
+        undefined,
+        undefined,
+        {},
+        {policy: 'standard'},
+      );
+      const record = () =>
+        runNativeTaskAction(f.config, {command: 'record-snapshot', runId: 'native-run', callerCwd: f.repo}).pipe(
+          Effect.map(object),
+        );
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = 1;\n');
+      yield* f.git(['commit', '-qam', 'phase one']);
+      const first = object(object((yield* record()).snapshot).snapshot);
+      yield* waive(f);
+      const revised = yield* f.revise({
+        phases: EffectArray.map(f.document.phases, phase => ({
+          ...phase,
+          outcome: 'Phase works and also does something materially different.',
+          acceptance: EffectArray.map(phase.acceptance, item => ({...item, verification: 'Exercise another flow.'})),
+        })),
+      });
+      expect((yield* f.mutate('reconcile', {plan: revised, reason: 'The phase intent changed.'})).affected).toEqual([
+        'one',
+      ]);
+      yield* f.mutate('resume-phase', {phaseId: 'one', reason: 'The phase intent was reconciled.'});
+      const changed = yield* record();
+      const snapshot = object(object(changed.snapshot).snapshot);
+      expect(snapshot).toMatchObject({tree: first.tree});
+      expect(snapshot.intentHash).not.toBe(first.intentHash);
+      expect((yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo})).next).toMatchObject({
+        action: 'review',
+        snapshotId: snapshot.snapshotId,
+      });
+      expect(
+        yield* runNativeTaskAction(f.config, {
+          command: 'record-validation',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          snapshotRef: String(changed.snapshotRef),
+          validation,
+        }).pipe(Effect.flip),
+      ).toMatchObject({code: 'review-pending', gate: 'review.required'});
+    }).pipe(runCycle),
+  );
 });
 
 describe('incremental review by default', () => {

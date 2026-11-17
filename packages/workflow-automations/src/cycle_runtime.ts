@@ -88,27 +88,37 @@ export type NativeCycleWaiver = typeof NativeCycleWaiverSchema.Type;
 
 /** Content-derived, so repeating the same waiver replays it. */
 export const nativeCycleWaiverId = (
-  waiver: Pick<NativeCycleWaiver, 'gate' | 'phaseId' | 'tree' | 'reason' | 'userAuthority'>,
+  waiver: Pick<NativeCycleWaiver, 'gate' | 'phaseId' | 'tree' | 'intentHash' | 'reason' | 'userAuthority'>,
 ) =>
   'waiver-' +
   Effect.pipe(
     sha256HexSync(
-      nativeCycleCanonicalJson([waiver.gate, waiver.phaseId, waiver.tree, waiver.reason, waiver.userAuthority]),
+      nativeCycleCanonicalJson([
+        waiver.gate,
+        waiver.phaseId,
+        waiver.tree,
+        waiver.intentHash,
+        waiver.reason,
+        waiver.userAuthority,
+      ]),
     ),
     EffectString.slice(0, 48),
   );
 
-/** The waiver that covers this gate for this exact phase tree, if any. */
+/** The waiver that covers this gate for this exact phase tree under the snapshot's own intent, if any. */
 export const nativeCycleWaiverFor = (
   runtime: {readonly waivers?: readonly NativeCycleWaiver[]},
   gate: NativeCycleWaiver['gate'],
-  phaseId: string,
-  tree: string,
+  snapshot: Pick<NativeCycleSnapshot, 'phaseId' | 'tree' | 'phaseHash' | 'intentHash'>,
 ) =>
   EffectOption.getOrUndefined(
     EffectArray.findFirst(
       runtime.waivers ?? [],
-      waiver => waiver.gate === gate && waiver.phaseId === phaseId && waiver.tree === tree,
+      waiver =>
+        waiver.gate === gate &&
+        waiver.phaseId === snapshot.phaseId &&
+        waiver.tree === snapshot.tree &&
+        waiver.intentHash === (snapshot.intentHash ?? snapshot.phaseHash),
     ),
   );
 
@@ -169,7 +179,7 @@ export function nativeCycleCoverage(
 ): NativeCycleTreeCoverage {
   const covering = nativeCycleCoveringReview(runtime, snapshot);
   if (covering) return {_tag: 'reviewed', reviewSnapshotId: covering.snapshot.snapshotId, match: covering.match};
-  const waiver = nativeCycleWaiverFor(runtime, 'review.required', snapshot.phaseId, snapshot.tree);
+  const waiver = nativeCycleWaiverFor(runtime, 'review.required', snapshot);
   if (waiver) return {_tag: 'waived', waiverId: waiver.id};
   return {_tag: 'pending', mode: nativeCycleReviewRecordingMode(snapshot)};
 }

@@ -632,9 +632,7 @@ function projectNativeTaskCoreView(
     validateNativeCycleReviewHistory(covering.snapshot, covering.review, reviewBasis).summary.blockingIssueCount,
   );
   const reviewWaived = Boolean(
-    pendingSnapshot &&
-    latestSnapshot &&
-    nativeCycleWaiverFor(runtime, 'review.required', pendingSnapshot.id, latestSnapshot.snapshot.tree),
+    latestSnapshot && nativeCycleWaiverFor(runtime, 'review.required', latestSnapshot.snapshot),
   );
   const reviewWork =
     pendingSnapshot && latestSnapshot && !acceptedReview && !reviewWaived
