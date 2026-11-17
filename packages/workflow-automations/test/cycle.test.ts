@@ -1068,6 +1068,40 @@ describe('standard-profile plan reconciliation', () => {
     ).toBe('stale');
   });
 
+  it('compares a plan exported before a switch to standard on what both plans carry', () => {
+    const publication = {
+      state: 'published' as const,
+      team: 'default',
+      uri: 'threadnote://memories/shared/default/durable/pr-publication',
+      revision: digest,
+      currentHead: gitSha,
+      remoteCommit: gitSha,
+      evidence: 'The current source was published with this exact reviewed receipt.',
+    };
+    const pending = initializeNativeCycle(decodeNativeCyclePlan(makePlan()));
+    const merged = recordNativeCycleDelivery(validateFirst(), 'one', {...prDelivery('merged'), publication});
+    const reexport = (two: {readonly allowedPaths?: string[]; readonly definitionHash?: string} = {}) =>
+      decodeNativeCyclePlan(
+        makePlan(
+          EffectArray.map(makePlan().phases, phase => ({
+            ...phase,
+            intentDefinitionHash: Effect.pipe('9', EffectString.repeat(64)),
+            ...(phase.id === 'two' ? two : {}),
+          })),
+        ),
+      );
+    for (const before of [pending, merged]) {
+      expect(reconcileNativeCyclePlan(before, reexport(), 'Switched to standard', 'standard').affected).toEqual([]);
+      const pathOnly = reexport({
+        allowedPaths: ['test/', 'docs/'],
+        definitionHash: Effect.pipe('3', EffectString.repeat(64)),
+      });
+      expect(reconcileNativeCyclePlan(before, pathOnly, 'Own the docs', 'standard').affected).toEqual([]);
+      const unexplained = reexport({definitionHash: Effect.pipe('3', EffectString.repeat(64))});
+      expect(reconcileNativeCyclePlan(before, unexplained, 'Outcome changed', 'standard').affected).toEqual(['two']);
+    }
+  });
+
   it('retires validation bound to the old phase hash on a path-only change, but not on a base-only change', () => {
     const validated = validateNativeCyclePhase(
       initializeNativeCycle(withIntent(['src/'])),

@@ -25,6 +25,8 @@ import {
   validateNativeAuthoring,
   type NativeAuthoringDocument,
   nativePlanIntentPolicyFor,
+  nativePlanIntentPolicyForSave,
+  nativeSpecIntentDigest,
   NativeDerivedOwnershipPlanIntentPolicyVersion,
   nativeAuthoringSchemaDetail,
 } from '@threadnote/workflow-automations/authoring';
@@ -889,15 +891,29 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
       if (request.command === 'start' && spec && document.kind === 'plan')
         yield* call('from-spec', {document, packet: yield* call('export-plan', {uri: referenced?.artifact?.uri})});
       const sourceExisting = existing;
-      const refreshedSameIntent =
+      const priorConfirmation =
         request.command === 'save' &&
-        sourceExisting !== undefined &&
-        (sameBusinessContent || pathOnlyEdit) &&
-        validateNativeAuthoring(sourceExisting.document, {planIntentPolicyVersion}).intentHash ===
-          structural.intentHash &&
-        sourceExisting.root.confirmation?.decision === 'approved' &&
-        sourceExisting.root.confirmation.intentHash === structural.intentHash;
-      const retainedConfirmation = sourceExisting && refreshedSameIntent ? sourceExisting.root.confirmation : undefined;
+        sourceExisting?.root.confirmation?.decision === 'approved' &&
+        sourceExisting.root.confirmation.intentHash === sourceExisting.root.intentHash
+          ? sourceExisting.root.confirmation
+          : undefined;
+      // The same content keeps the confirmation under the policy it was given in; a path-only edit under standard
+      // carries it to the path-free intent, which both documents share.
+      const retainedConfirmation =
+        priorConfirmation &&
+        sameBusinessContent &&
+        nativeSpecIntentDigest(
+          document,
+          nativePlanIntentPolicyForSave(stored?.state ?? {}, document, priorConfirmation.intentHash),
+        ) === priorConfirmation.intentHash
+          ? priorConfirmation
+          : priorConfirmation &&
+              pathOnlyEdit &&
+              validateNativeAuthoring(sourceExisting!.document, {planIntentPolicyVersion}).intentHash ===
+                structural.intentHash
+            ? {...priorConfirmation, intentHash: structural.intentHash}
+            : undefined;
+      const refreshedSameIntent = retainedConfirmation !== undefined;
       const retainedReview =
         sameSource && sourceExisting?.root.review?.documentHash === structural.documentHash
           ? sourceExisting.root.review

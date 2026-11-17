@@ -18,6 +18,8 @@ import {
   validateNativeAuthoring,
   type NativeAuthoringDocument,
   nativePlanIntentPolicyFor,
+  nativePlanIntentPolicyForSave,
+  type NativePlanIntentPolicyVersion,
 } from '@threadnote/workflow-automations/authoring';
 import {
   decodeNativeDocument,
@@ -997,9 +999,12 @@ export const runNativeAuthoring = <R>(
         withRecallIdentityPreparation,
       );
     yield* admitLinkedSpec(document);
+    const planIntentPolicyVersion =
+      request.command === 'save'
+        ? nativePlanIntentPolicyForSave(state, document, request.confirmation?.intentHash)
+        : nativePlanIntentPolicyFor(state);
     const validation = yield* Effect.try({
-      try: () =>
-        validateNativeAuthoring(document, {...request, planIntentPolicyVersion: nativePlanIntentPolicyFor(state)}),
+      try: () => validateNativeAuthoring(document, {...request, planIntentPolicyVersion}),
       catch: nativeWorkflowError,
     });
     if (request.command === 'acceptance-packet') return acceptancePacket(document, validation, request.detail);
@@ -1130,6 +1135,7 @@ export const runNativeAuthoring = <R>(
       savingRequest,
       document,
       validation,
+      planIntentPolicyVersion,
       call,
       journal.state.binding.repo,
       admitLinkedSpec,
@@ -1213,6 +1219,7 @@ const saveAuthoring = <R>(
   request: Request,
   document: NativeAuthoringDocument,
   validation: ReturnType<typeof validateNativeAuthoring>,
+  planIntentPolicyVersion: NativePlanIntentPolicyVersion,
   call: NativeAuthoringCall<R>,
   repo: string,
   admitLinkedSpec: (document: NativeAuthoringDocument) => Effect.Effect<unknown, WorkflowAutomationError, R>,
@@ -1751,7 +1758,7 @@ const saveAuthoring = <R>(
         },
         documentHash: validation.documentHash,
         intentHash: validation.intentHash,
-        ...(document.kind === 'plan' ? {planIntentPolicyVersion: nativePlanIntentPolicyFor(state)} : {}),
+        ...(document.kind === 'plan' && planIntentPolicyVersion !== 1 ? {planIntentPolicyVersion} : {}),
         baseRevision: prior?.revision ?? null,
         readiness,
         data,

@@ -547,14 +547,38 @@ export function nativeCyclePhaseHash(plan: NativeCyclePlan, phaseId: string): st
     `threadnote.native-cycle.phase.v1\n${canonical({objective: plan.objective, delivery: plan.delivery, featureId: plan.featureId, project: plan.project, spec: plan.spec, phase: {id: key, title, dependsOn, allowedPaths, acceptanceCriteria, acceptanceRefs, safeToMergeReason, definitionHash}})}`,
   );
 }
-/** Business intent of a phase: everything but its owned paths and branch binding. */
+type NativeCyclePlanPhase = NativeCyclePlan['phases'][number];
+const phaseIntentDigest = (plan: NativeCyclePlan, phase: NativeCyclePlanPhase, intentDefinitionHash?: string) => {
+  const {id: key, title, dependsOn, acceptanceCriteria, acceptanceRefs, safeToMergeReason} = phase;
+  return sha256HexSync(
+    `threadnote.native-cycle.phase-intent.v1\n${canonical({objective: plan.objective, delivery: plan.delivery, featureId: plan.featureId, project: plan.project, spec: plan.spec, phase: {id: key, title, dependsOn, acceptanceCriteria, acceptanceRefs, safeToMergeReason, intentDefinitionHash}})}`,
+  );
+};
+/**
+ * Business intent of a phase: everything but its owned paths and branch binding. A plan exported before the standard
+ * profile keeps its phase hash as the snapshot intent, so earlier reviews under that same plan still cover a tree.
+ */
 export function nativeCyclePhaseIntentHash(plan: NativeCyclePlan, phaseId: string): string {
   const p = EffectOption.getOrUndefined(EffectArray.findFirst(plan.phases, x => x.id === phaseId));
   if (!p) return err('Unknown phase.');
-  if (p.intentDefinitionHash === undefined) return nativeCyclePhaseHash(plan, phaseId);
-  const {id: key, title, dependsOn, acceptanceCriteria, acceptanceRefs, safeToMergeReason, intentDefinitionHash} = p;
-  return sha256HexSync(
-    `threadnote.native-cycle.phase-intent.v1\n${canonical({objective: plan.objective, delivery: plan.delivery, featureId: plan.featureId, project: plan.project, spec: plan.spec, phase: {id: key, title, dependsOn, acceptanceCriteria, acceptanceRefs, safeToMergeReason, intentDefinitionHash}})}`,
+  return p.intentDefinitionHash === undefined
+    ? nativeCyclePhaseHash(plan, phaseId)
+    : phaseIntentDigest(plan, p, p.intentDefinitionHash);
+}
+/**
+ * Whether a phase keeps its business intent across a reconcile. A plan exported before the standard profile has no
+ * path-free definition, so both plans are compared on what each carries, and a changed definition that the paths do
+ * not explain is intent.
+ */
+function samePhaseIntent(old: NativeCyclePlan, plan: NativeCyclePlan, phaseId: string): boolean {
+  const before = EffectOption.getOrUndefined(EffectArray.findFirst(old.phases, x => x.id === phaseId));
+  const after = EffectOption.getOrUndefined(EffectArray.findFirst(plan.phases, x => x.id === phaseId));
+  if (!before || !after) return false;
+  if (before.intentDefinitionHash !== undefined && after.intentDefinitionHash !== undefined)
+    return nativeCyclePhaseIntentHash(old, phaseId) === nativeCyclePhaseIntentHash(plan, phaseId);
+  return (
+    phaseIntentDigest(old, before) === phaseIntentDigest(plan, after) &&
+    (before.definitionHash === after.definitionHash || canonical(before.allowedPaths) !== canonical(after.allowedPaths))
   );
 }
 export function initializeNativeCycle(value: NativeCyclePlan): NativeCycleState {
@@ -874,7 +898,7 @@ export function reconcileNativeCyclePlan(
     const material =
       policy === 'standard'
         ? !before ||
-          nativeCyclePhaseIntentHash(old, p.id) !== nativeCyclePhaseIntentHash(plan, p.id) ||
+          !samePhaseIntent(old, plan, p.id) ||
           (before.baseBranch !== p.baseBranch && s.phases[p.id]?.delivery !== undefined) ||
           (s.phases[p.id]?.validation !== undefined &&
             nativeCyclePhaseHash(old, p.id) !== nativeCyclePhaseHash(plan, p.id))

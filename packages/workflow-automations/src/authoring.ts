@@ -627,6 +627,26 @@ export function isNativeMermaidDiagram(value: string): boolean {
   );
 }
 
+/**
+ * The plan-intent policy a saved plan records: the one under which its retained confirmation holds, so a confirmed
+ * root keeps its recorded policy until the next confirmation after a switch to standard; otherwise the run's policy.
+ */
+export function nativePlanIntentPolicyForSave(
+  state: {readonly policy?: {readonly mode: 'standard' | 'strict'}},
+  document: NativeAuthoringDocument,
+  confirmedIntentHash: string | undefined,
+): NativePlanIntentPolicyVersion {
+  const current = nativePlanIntentPolicyFor(state);
+  if (confirmedIntentHash === undefined || document.kind !== 'plan') return current;
+  const candidates: readonly NativePlanIntentPolicyVersion[] =
+    current === NativeDerivedOwnershipPlanIntentPolicyVersion ? [current, NativePlanIntentPolicyVersion, 1] : [current];
+  return (
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(candidates, version => nativeSpecIntentDigest(document, version) === confirmedIntentHash),
+    ) ?? current
+  );
+}
+
 export function nativeSpecIntentDigest(
   document: NativeAuthoringDocument,
   planPolicyVersion: NativePlanIntentPolicyVersion = NativePlanIntentPolicyVersion,
