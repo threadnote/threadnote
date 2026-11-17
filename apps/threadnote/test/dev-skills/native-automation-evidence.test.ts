@@ -178,40 +178,38 @@ describe('native workflow graph evidence contention', () => {
     }).pipe(run),
   );
 
-  effectIt.effect(
-    'reuses the preflight citation read for the following write and keeps the verified citations',
-    () =>
-      Effect.gen(function* () {
-        const f = yield* readyFixture();
-        const graph = yield* CodeGraphStore;
-        let attempts = 0;
-        const countEvidenceReads = CodeGraphStore.of({
-          ...graph,
-          readReadySnapshotCitationEvidence: (
-            ...args: Parameters<NonNullable<typeof graph.readReadySnapshotCitationEvidence>>
-          ) => {
-            attempts++;
-            return graph.readReadySnapshotCitationEvidence!(...args);
-          },
-        });
-        const request = citationWrite(f, 'resume-citations');
-        const written = yield* f.f
-          .call(request, f.config)
-          .pipe(Effect.provideService(CodeGraphStore, countEvidenceReads));
-        assertArtifactContent(written);
-        expect(attempts).toBe(1);
-        expect(written.artifact.body).toBe(request.body);
-        const content = yield* f.f.store.read(f.f.location, written.artifact.uri);
-        const citation = checkedCitations(content)!;
-        expect(citation.fileContentHash.value).toMatch(/^[a-f0-9]{64}$/u);
-        const after = JSON.parse(yield* f.f.fs.readFileString(f.f.statePath()));
-        expect(
-          after.operations.find(
-            (operation: {intent: {operationId: string}}) => operation.intent.operationId === 'resume-citations',
-          ).status,
-        ).toBe('verified');
-        expect(yield* f.f.store.read(f.f.location, f.rootUri)).toBe(f.rootBytes);
-      }).pipe(run),
+  effectIt.effect('reuses the preflight citation read for the following write and keeps the verified citations', () =>
+    Effect.gen(function* () {
+      const f = yield* readyFixture();
+      const graph = yield* CodeGraphStore;
+      let attempts = 0;
+      const countEvidenceReads = CodeGraphStore.of({
+        ...graph,
+        readReadySnapshotCitationEvidence: (
+          ...args: Parameters<NonNullable<typeof graph.readReadySnapshotCitationEvidence>>
+        ) => {
+          attempts++;
+          return graph.readReadySnapshotCitationEvidence!(...args);
+        },
+      });
+      const request = citationWrite(f, 'resume-citations');
+      const written = yield* f.f
+        .call(request, f.config)
+        .pipe(Effect.provideService(CodeGraphStore, countEvidenceReads));
+      assertArtifactContent(written);
+      expect(attempts).toBe(1);
+      expect(written.artifact.body).toBe(request.body);
+      const content = yield* f.f.store.read(f.f.location, written.artifact.uri);
+      const citation = checkedCitations(content)!;
+      expect(citation.fileContentHash.value).toMatch(/^[a-f0-9]{64}$/u);
+      const after = JSON.parse(yield* f.f.fs.readFileString(f.f.statePath()));
+      expect(
+        after.operations.find(
+          (operation: {intent: {operationId: string}}) => operation.intent.operationId === 'resume-citations',
+        ).status,
+      ).toBe('verified');
+      expect(yield* f.f.store.read(f.f.location, f.rootUri)).toBe(f.rootBytes);
+    }).pipe(run),
   );
 
   effectIt.effect('retains the same prepared receipt when graph evidence is busy during post-write readback', () =>
