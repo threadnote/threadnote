@@ -605,6 +605,24 @@ const RETIRED_SNAPSHOT_CLEANUP_SPECS = [
     table: 'snapshot_reexport_provenance',
   },
   {
+    batchRows: 64,
+    keyColumns: ['snapshot_id', 'kind', 'first_key'],
+    maximumBatchRows: 256,
+    table: 'snapshot_resolution_candidate_runs',
+  },
+  {
+    batchRows: 5_000,
+    keyColumns: ['snapshot_id', 'ordinal'],
+    maximumBatchRows: 20_000,
+    table: 'snapshot_resolution_candidate_paths',
+  },
+  {
+    batchRows: 1_000,
+    keyColumns: ['snapshot_id'],
+    maximumBatchRows: 1_000,
+    table: 'snapshot_resolution_candidate_indexes',
+  },
+  {
     batchRows: 5_000,
     keyColumns: ['snapshot_id', 'id'],
     maximumBatchRows: 20_000,

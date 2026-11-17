@@ -1,13 +1,19 @@
 import {Array as EffectArray} from 'effect';
 import {describe, expect, it as effectIt} from '@effect/vitest';
-import {Effect} from 'effect';
+import {Database} from 'bun:sqlite';
+import {Effect, FileSystem, Layer, Path} from 'effect';
+import * as SqlClient from 'effect/sql/SqlClient';
 import * as FC from 'fast-check';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import type {ProjectResolutionLookupKey} from '@threadnote/graph/incremental/closure';
+import {CodeGraphStore} from '@threadnote/graph/store';
+import {CODE_GRAPH_SCHEMA_INITIALIZATION_RECEIPT_REVISION} from '@threadnote/graph/store/schema/revision';
 import {
   planProjectResolutionCandidateScan,
+  resolveIndexedProjectResolutionCandidateClosure,
   scanProjectResolutionCandidateClosure,
   type ProjectResolutionCandidateClosure,
+  type ProjectResolutionCandidateIndex,
   type ProjectResolutionReexportKeys,
 } from '@threadnote/graph/store/resolution/candidate_closure';
 import type {
@@ -16,8 +22,14 @@ import type {
   CodeGraphReference,
   CodeGraphSymbol,
 } from '@threadnote/graph/types';
+import {citationPlatformLayer} from '../helpers/citation-platform.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+
+const storeLayer = CodeGraphStore.layer.pipe(Layer.provideMerge(citationPlatformLayer));
+const CONTEXT = Effect2.pipe('c', EffectString.repeat(64));
+const OTHER_CONTEXT = Effect2.pipe('d', EffectString.repeat(64));
+const COMMIT = Effect2.pipe('1', EffectString.repeat(40));
 
 describe('resolution-candidate closure oracle', () => {
   fcEffectProp(
@@ -28,7 +40,7 @@ describe('resolution-candidate closure oracle', () => {
       Effect.gen(function* () {
         const repository = repositoryFacts(model);
         const query = editQuery(model, edit);
-        const closure = yield* fullScanClosure(repository, query, pageMaximumFiles);
+        const closure = yield* fullScanClosure(repository, query, {pageMaximumFiles});
         const expected = independentClosure(repository, query);
 
         expect(closure.mode).toBe('eligible');
@@ -41,6 +53,264 @@ describe('resolution-candidate closure oracle', () => {
     {fastCheck: {numRuns: 300}},
   );
 });
+
+describe('persisted resolution-candidate index', () => {
+  effectIt.layer(storeLayer)(it => {
+    fcEffectProp(
+      it,
+      'resolves the same closure as the full scan for every later edit against the same base',
+      {
+        edits: FC.array(editArbitrary(), {maxLength: 4, minLength: 1}),
+        maximumSelectedFiles: FC.oneof(FC.constant(1_000), FC.integer({max: 4, min: 0})),
+        model: modelArbitrary(),
+        pageMaximumFiles: FC.integer({max: 8, min: 1}),
+        weakFingerprint: FC.boolean(),
+      },
+      ({edits, maximumSelectedFiles, model, pageMaximumFiles, weakFingerprint}) =>
+        Effect.gen(function* () {
+          const store = yield* CodeGraphStore;
+          const databasePath = yield* readyBaseDatabase('base');
+          const repository = repositoryFacts(model);
+          const options = {
+            maximumSelectedFiles,
+            pageMaximumFiles,
+            ...(weakFingerprint ? {projectionFingerprint: collidingFingerprint} : {}),
+          };
+          let index: ProjectResolutionCandidateIndex | undefined;
+          // The evidence does not depend on the edit that first collected it.
+          yield* fullScanClosure(repository, editQuery(model, edits[0]), {
+            ...options,
+            onIndex: value => {
+              index = value;
+            },
+          });
+          expect(index).toBeDefined();
+          expect(yield* store.recordResolutionCandidateIndex!(databasePath, 'base', CONTEXT, index!)).toBe(true);
+          const receipt = yield* store.resolutionCandidateIndex!(databasePath, 'base', CONTEXT);
+          expect(receipt).toBeDefined();
+
+          for (const edit of edits) {
+            const query = editQuery(model, edit);
+            const scanned = yield* fullScanClosure(repository, query, options);
+            const indexed = yield* resolveIndexedProjectResolutionCandidateClosure({
+              additionalReexports: query.additionalReexports,
+              initialLookupKeys: query.initialLookupKeys,
+              lookup: lookup => store.matchResolutionCandidateIndex!(databasePath, 'base', CONTEXT, lookup),
+              maximumSelectedFiles,
+              ...(weakFingerprint ? {projectionFingerprint: collidingFingerprint} : {}),
+              reexports: receipt!.reexports,
+            });
+            expect(comparableClosure(indexed)).toEqual(comparableClosure(scanned));
+          }
+        }),
+      {fastCheck: {numRuns: 150}},
+    );
+
+    it.effect('ignores evidence recorded under another attribution context or format', () =>
+      Effect.gen(function* () {
+        const store = yield* CodeGraphStore;
+        const databasePath = yield* readyBaseDatabase('base');
+        const index = yield* collectedIndex({barrels: [], consumers: [[]], modules: [['alpha']]});
+        expect(yield* store.recordResolutionCandidateIndex!(databasePath, 'base', CONTEXT, index)).toBe(true);
+
+        expect(yield* store.resolutionCandidateIndex!(databasePath, 'base', OTHER_CONTEXT)).toBeUndefined();
+        expect(
+          yield* store.matchResolutionCandidateIndex!(databasePath, 'base', OTHER_CONTEXT, {
+            maximumReferencePaths: 10,
+            referenceFingerprints: new Set([1n]),
+            symbolFingerprints: new Set(),
+          }),
+        ).toBeUndefined();
+        expect(yield* store.recordResolutionCandidateIndex!(databasePath, 'missing', CONTEXT, index)).toBe(false);
+      }),
+    );
+
+    it.effect('finds every entry across many sorted runs, signed boundaries, and an oversized run', () =>
+      Effect.gen(function* () {
+        const store = yield* CodeGraphStore;
+        const databasePath = yield* readyBaseDatabase('base');
+        const crowded = 0x8000_0000_0000_0123n;
+        const edges = [0n, 1n, (1n << 63n) - 1n, 1n << 63n, (1n << 64n) - 1n, crowded];
+        const fingerprints: bigint[] = [];
+        const ordinals: number[] = [];
+        for (let ordinal = 0; ordinal < 9_000; ordinal += 1) {
+          fingerprints.push(BigInt.asUintN(64, BigInt(ordinal) * 0x9e37_79b9_7f4a_7c15n));
+          ordinals.push(ordinal % 700);
+        }
+        for (let ordinal = 0; ordinal < 3_000; ordinal += 1) {
+          fingerprints.push(crowded);
+          ordinals.push(ordinal % 700);
+        }
+        for (const [position, fingerprint] of edges.entries()) {
+          fingerprints.push(fingerprint);
+          ordinals.push(position);
+        }
+        const index: ProjectResolutionCandidateIndex = {
+          paths: Array.from({length: 700}, (_, ordinal) => `src/file-${ordinal}.ts`),
+          referenceFingerprints: BigUint64Array.from(fingerprints),
+          referenceOrdinals: Uint32Array.from(ordinals),
+          reexports: [],
+          symbolFingerprints: BigUint64Array.from([...fingerprints, ...edges]),
+        };
+        expect(yield* store.recordResolutionCandidateIndex!(databasePath, 'base', CONTEXT, index)).toBe(true);
+        const requested = new Set([...edges, fingerprints[17], fingerprints[8_999], 0x1234_5678n]);
+        const matches = yield* store.matchResolutionCandidateIndex!(databasePath, 'base', CONTEXT, {
+          maximumReferencePaths: 1_000,
+          referenceFingerprints: requested,
+          symbolFingerprints: requested,
+        });
+        const expectedPaths = new Set(
+          EffectArray.flatMap(fingerprints, (fingerprint, position) =>
+            requested.has(fingerprint) ? [index.paths[ordinals[position]]] : [],
+          ),
+        );
+
+        expect(matches?.referencePaths).toEqual(expectedPaths);
+        expect(matches?.symbolFingerprints).toEqual(
+          new Set(EffectArray.filter([...requested], value => value !== 0x1234_5678n)),
+        );
+      }),
+    );
+
+    it.effect('falls back on a revision-8 database and creates the evidence tables when it is upgraded', () =>
+      Effect.gen(function* () {
+        const store = yield* CodeGraphStore;
+        const databasePath = yield* readyBaseDatabase('base');
+        yield* Effect.sync(() => {
+          const database = new Database(databasePath);
+          try {
+            database.exec(`
+              DROP TABLE snapshot_resolution_candidate_runs;
+              DROP TABLE snapshot_resolution_candidate_paths;
+              DROP TABLE snapshot_resolution_candidate_indexes;
+            `);
+            const schemaVersion = database
+              .query<{readonly schema_version: number}, []>('PRAGMA main.schema_version')
+              .get()?.schema_version;
+            database
+              .query('UPDATE schema_initialization_receipt SET contract_revision = ?, sqlite_schema_version = ?')
+              .run(
+                CODE_GRAPH_SCHEMA_INITIALIZATION_RECEIPT_REVISION.resolutionCandidateIndexPredecessor,
+                schemaVersion ?? 0,
+              );
+          } finally {
+            database.close();
+          }
+        });
+        const index = yield* collectedIndex({barrels: [], consumers: [[]], modules: [['alpha']]});
+        expect(yield* store.resolutionCandidateIndex!(databasePath, 'base', CONTEXT)).toBeUndefined();
+
+        yield* store.withSession(databasePath, store.initialize(databasePath), {
+          cleanupCompletedBuildRows: true,
+          writerLockPath: `${databasePath}.writer.lock`,
+        });
+
+        expect(yield* store.recordResolutionCandidateIndex!(databasePath, 'base', CONTEXT, index)).toBe(true);
+        expect(yield* store.resolutionCandidateIndex!(databasePath, 'base', CONTEXT)).toEqual({reexports: []});
+      }),
+    );
+
+    it.effect('removes the evidence with the retired snapshot that owns it', () =>
+      Effect.gen(function* () {
+        const store = yield* CodeGraphStore;
+        const databasePath = yield* readyBaseDatabase('base');
+        const index = yield* collectedIndex({
+          barrels: [],
+          consumers: [[{form: 'named', name: 'alpha', target: 0}]],
+          modules: [['alpha']],
+        });
+        expect(yield* store.recordResolutionCandidateIndex!(databasePath, 'base', CONTEXT, index)).toBe(true);
+        yield* store.withSession(
+          databasePath,
+          Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient;
+            yield* sql`UPDATE snapshots SET state = 'retired' WHERE id = 'base'`;
+          }),
+        );
+        yield* store.pruneRetiredSnapshots(databasePath);
+
+        expect(yield* indexRowCounts(databasePath)).toEqual({indexes: 0, paths: 0, runs: 0});
+      }),
+    );
+  });
+});
+
+function comparableClosure(closure: ProjectResolutionCandidateClosure): unknown {
+  if (closure.mode !== 'eligible') return closure;
+  const {factBytes: _factBytes, scannedFiles: _scannedFiles, ...rest} = closure;
+  return {
+    ...rest,
+    affectedAliasLookupIdentities: [...closure.affectedAliasLookupIdentities].sort(),
+    directAliasSymbolConflictIdentities: [...closure.directAliasSymbolConflictIdentities].sort(),
+  };
+}
+
+/** Two-bit fingerprints force collisions; the index must widen exactly as the scan does. */
+function collidingFingerprint(identity: string): bigint {
+  return BigInt(identity.length & 3);
+}
+
+function collectedIndex(model: ResolutionModel) {
+  return Effect.gen(function* () {
+    let index: ProjectResolutionCandidateIndex | undefined;
+    yield* fullScanClosure(
+      repositoryFacts(model),
+      {additionalReexports: [], initialLookupKeys: []},
+      {
+        onIndex: value => {
+          index = value;
+        },
+      },
+    );
+    return index!;
+  });
+}
+
+function readyBaseDatabase(snapshotId: string) {
+  return Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const store = yield* CodeGraphStore;
+    const directory = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-resolution-candidate-index-'});
+    const databasePath = path.join(directory, 'graph.sqlite');
+    yield* store.initialize(databasePath);
+    yield* store.withSession(
+      databasePath,
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`INSERT INTO repositories (id, display_name, object_format, created_at, last_used_at)
+          VALUES ('repository', 'fixture', 'sha1', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`;
+        yield* sql`INSERT INTO snapshots (
+            id, repository_id, worktree_id, commit_id, extractor_set, dirty, state,
+            file_count, symbol_count, edge_count, started_at, completed_at
+          ) VALUES (
+            ${snapshotId}, 'repository', 'worktree', ${COMMIT}, 'extractor', 0, 'ready',
+            0, 0, 0, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
+          )`;
+      }),
+    );
+    return databasePath;
+  });
+}
+
+function indexRowCounts(databasePath: string) {
+  return Effect.gen(function* () {
+    const store = yield* CodeGraphStore;
+    return yield* store.withSession(
+      databasePath,
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const rows = yield* sql<{readonly indexes: number; readonly paths: number; readonly runs: number}>`
+          SELECT
+            (SELECT COUNT(*) FROM snapshot_resolution_candidate_indexes) AS indexes,
+            (SELECT COUNT(*) FROM snapshot_resolution_candidate_paths) AS paths,
+            (SELECT COUNT(*) FROM snapshot_resolution_candidate_runs) AS runs
+        `;
+        return rows[0];
+      }),
+    );
+  });
+}
 
 type ConsumerForm = 'default' | 'global' | 'mixed-domain' | 'named' | 'namespace' | 'scoped';
 
@@ -271,12 +541,17 @@ function editQuery(model: ResolutionModel, edit: ResolutionEdit): ResolutionQuer
 function fullScanClosure(
   repository: ResolutionRepository,
   query: ResolutionQuery,
-  pageMaximumFiles: number,
+  options: {
+    readonly maximumSelectedFiles?: number;
+    readonly onIndex?: (index: ProjectResolutionCandidateIndex) => void;
+    readonly pageMaximumFiles?: number;
+    readonly projectionFingerprint?: (identity: string) => bigint;
+  } = {},
 ): Effect.Effect<ProjectResolutionCandidateClosure> {
   const plan = planProjectResolutionCandidateScan({
     bytesByPath: new Map(EffectArray.map(repository.files, file => [file.path, 1])),
     files: repository.files,
-    pageMaximumFiles,
+    pageMaximumFiles: options.pageMaximumFiles ?? 8,
   });
   if (plan.mode !== 'eligible') return Effect.die(new Error(`Expected an eligible scan plan, received ${plan.mode}.`));
   return scanProjectResolutionCandidateClosure({
@@ -287,8 +562,10 @@ function fullScanClosure(
         bytesByPath: new Map(EffectArray.map(files, file => [file.path, 1])),
         facts: new Map(EffectArray.map(files, file => [file.path, repository.facts.get(file.path)!])),
       }),
-    maximumSelectedFiles: 1_000,
+    maximumSelectedFiles: options.maximumSelectedFiles ?? 1_000,
+    ...(options.onIndex === undefined ? {} : {onIndex: options.onIndex}),
     plan,
+    ...(options.projectionFingerprint === undefined ? {} : {projectionFingerprint: options.projectionFingerprint}),
   });
 }
 

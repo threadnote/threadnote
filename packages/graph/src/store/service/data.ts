@@ -12,6 +12,11 @@ import {configureConnection, useDatabase, useReadOnlyDatabase, withFreshCodeGrap
 import {CodeGraphStoreError} from '../../types.js';
 import {upsertRepository, storeError} from '../utilities.js';
 import {selectCachedCommittedFileKeys} from '../query/core.js';
+import {
+  recordResolutionCandidateIndex,
+  selectResolutionCandidateIndex,
+  selectResolutionCandidateIndexMatches,
+} from '../resolution/candidate_index.js';
 import {discardInvalidCachedFacts} from '../cache/repair.js';
 import {stageActivationFiles, activationMode, type CodeGraphWriterGate} from '../build/core.js';
 import {
@@ -168,6 +173,9 @@ type CodeGraphStoreDataMethods = Pick<
   | 'snapshotProjectClosureFiles'
   | 'reusableOverlayBase'
   | 'reusableReexports'
+  | 'resolutionCandidateIndex'
+  | 'matchResolutionCandidateIndex'
+  | 'recordResolutionCandidateIndex'
   | 'relationshipSummaryForNode'
   | 'pruneCachedFacts'
   | 'pruneRetiredSnapshots'
@@ -992,6 +1000,32 @@ export function makeCodeGraphStoreDataMethods(runtime: CodeGraphStoreRuntime): C
         ),
         Effect.mapError(cause => storeError('load reusable code graph reexport provenance', cause)),
       ),
+    resolutionCandidateIndex: (databasePath, snapshotId, contextFingerprint) =>
+      fs.exists(databasePath).pipe(
+        Effect.flatMap(exists =>
+          exists
+            ? useReadOnlyDatabase(databasePath, selectResolutionCandidateIndex(snapshotId, contextFingerprint))
+            : succeedUndefined,
+        ),
+        Effect.mapError(cause => storeError('load code graph resolution candidate index', cause)),
+      ),
+    matchResolutionCandidateIndex: (databasePath, snapshotId, contextFingerprint, query) =>
+      fs.exists(databasePath).pipe(
+        Effect.flatMap(exists =>
+          exists
+            ? useReadOnlyDatabase(
+                databasePath,
+                selectResolutionCandidateIndexMatches(snapshotId, contextFingerprint, query),
+              )
+            : succeedUndefined,
+        ),
+        Effect.mapError(cause => storeError('match code graph resolution candidate index', cause)),
+      ),
+    recordResolutionCandidateIndex: (databasePath, snapshotId, contextFingerprint, index) =>
+      withWriterGate(
+        databasePath,
+        useDatabase(databasePath, recordResolutionCandidateIndex(snapshotId, contextFingerprint, index)),
+      ).pipe(Effect.mapError(cause => storeError('record code graph resolution candidate index', cause))),
     relationshipSummaryForNode: (databasePath, snapshotId, nodeId, allowedProvenances, limit) =>
       prepare(databasePath).pipe(
         Effect.andThen(

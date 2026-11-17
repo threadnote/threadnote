@@ -12,6 +12,12 @@ import type {CodeGraphCacheFactInput} from '../fact/budget.js';
 import type {CodeGraphWorkspace} from '../languages/types.js';
 import type {CodeGraphMonikerV1} from '../cross_repository/types.js';
 import type {
+  ProjectResolutionCandidateIndex,
+  ProjectResolutionCandidateIndexLookup,
+  ProjectResolutionCandidateIndexMatches,
+} from './resolution/candidate_closure.js';
+import type {CodeGraphResolutionCandidateIndexReceipt} from './resolution/candidate_index.js';
+import type {
   CodeGraphEffectiveFileHashMatches,
   CodeGraphEffectiveFilePathObservation,
   CodeGraphEffectiveSnapshotCitationEvidence,
@@ -703,6 +709,25 @@ export interface CodeGraphStoreShape {
     seeds: readonly CodeGraphReusableReexportSeed[],
     options?: {readonly allowDirtyRoot?: boolean; readonly maxRows?: number},
   ) => Effect.Effect<readonly CodeGraphReusableReexport[] | undefined, CodeGraphStoreFailure>;
+  /** Persisted reverse resolver evidence for exactly this snapshot and attribution context. */
+  readonly resolutionCandidateIndex?: (
+    databasePath: string,
+    snapshotId: string,
+    contextFingerprint: string,
+  ) => Effect.Effect<CodeGraphResolutionCandidateIndexReceipt | undefined, CodeGraphStoreFailure>;
+  readonly matchResolutionCandidateIndex?: (
+    databasePath: string,
+    snapshotId: string,
+    contextFingerprint: string,
+    query: Parameters<ProjectResolutionCandidateIndexLookup<never>>[0],
+  ) => Effect.Effect<ProjectResolutionCandidateIndexMatches | undefined, CodeGraphStoreFailure>;
+  /** Replaces the snapshot's evidence atomically; returns false when the snapshot is no longer ready. */
+  readonly recordResolutionCandidateIndex?: (
+    databasePath: string,
+    snapshotId: string,
+    contextFingerprint: string,
+    index: ProjectResolutionCandidateIndex,
+  ) => Effect.Effect<boolean, CodeGraphStoreFailure>;
   readonly pruneCachedFacts: (
     databasePath: string,
     acceptedExtractorSets?: readonly string[],
