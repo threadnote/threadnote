@@ -424,7 +424,7 @@ export const observeCodeGraphStatusScope = Effect.fn('codeGraph.observeStatusSco
     languagePacks,
   );
   let basis = yield* readCachedCommittedScopedBasis(languagePacks, basisKey);
-  if (basis !== undefined && worktreeClean) {
+  if (basis !== undefined) {
     const liveGitignoreDigest = yield* digestApplicableLiveGitignoreFiles(identity);
     if (basis.applicableGitignoreDigest !== liveGitignoreDigest) basis = undefined;
   }

@@ -176,6 +176,19 @@ export const scanRecallSources = Effect.fn('recall.scanSources')(function* (
   return {scannedSourceCount, skippedOversizedDocumentCount, omittedSourceInputs};
 });
 
+const queueRecallReplacedDocumentByUri = Effect.fn('recall.queueReplacedDocumentByUri')(function* (
+  sql: SqlClient.SqlClient,
+  uri: string,
+) {
+  const documentId = yield* sql.unsafe<{readonly name: string}>('PRAGMA table_info(documents)');
+  if (EffectArray.some(documentId, column => column.name === 'id'))
+    yield* sql.unsafe(
+      `INSERT OR IGNORE INTO temp.${RECALL_REFRESH_REPLACED_DOCUMENT_TABLE} (document_id)
+       SELECT id FROM documents WHERE uri = ?`,
+      [uri],
+    );
+});
+
 function insertRecallSourceMetadata(sql: SqlClient.SqlClient, sources: readonly RecallRefreshSourceInsert[]) {
   if (sources.length === 0) return Effect.void;
   return sql.unsafe(
@@ -446,13 +459,7 @@ const stageTouchedRecallSources = Effect.fn('recall.stageTouchedSources')(functi
       if (prior && info.failure.reason._tag === 'NotFound') {
         const input = yield* captureRecallSourceInput(filename);
         if (input.info !== undefined) return yield* recallRefreshSuperseded();
-        const documentId = yield* sql.unsafe<{readonly name: string}>('PRAGMA table_info(documents)');
-        if (EffectArray.some(documentId, column => column.name === 'id'))
-          yield* sql.unsafe(
-            `INSERT OR IGNORE INTO temp.${RECALL_REFRESH_REPLACED_DOCUMENT_TABLE} (document_id)
-             SELECT id FROM documents WHERE uri = ?`,
-            [uri],
-          );
+        yield* queueRecallReplacedDocumentByUri(sql, uri);
         omittedSourceInputs.set(filename, input.key);
         continue;
       }
@@ -462,6 +469,7 @@ const stageTouchedRecallSources = Effect.fn('recall.stageTouchedSources')(functi
     if (Number(info.success.size) > MAX_INDEXED_FILE_BYTES) {
       const input = yield* captureRecallSourceInput(filename);
       if (!input.info || input.info.size !== info.success.size) return yield* recallRefreshSuperseded();
+      if (prior) yield* queueRecallReplacedDocumentByUri(sql, uri);
       omittedSourceInputs.set(filename, input.key);
       skippedOversizedDocumentCount++;
       continue;
@@ -506,6 +514,28 @@ const probeTouchedRecallSourceCorpusAliases = Effect.fn('recall.probeTouchedCorp
   ambiguousTargets: Set<string>,
 ) {
   for (const [uri, target] of targets) {
+    const rootPrefix = `${target.root.uri}/`;
+    const escapedRoot = EffectString.replaceAll('_', '\\_')(EffectString.replaceAll('%', '\\%')(EffectString.replaceAll('\\', '\\\\')(rootPrefix)));
+    const rootVariants = yield* sql.unsafe<{readonly uri: string}>(
+      `SELECT uri FROM documents
+       WHERE lower(uri) LIKE lower(?) ESCAPE '\\'
+       ORDER BY uri COLLATE BINARY
+       LIMIT ?`,
+      [`${escapedRoot}%`, RECALL_REFRESH_SOURCE_PAGE_SIZE + 1],
+    );
+    if (rootVariants.length > RECALL_REFRESH_SOURCE_PAGE_SIZE) return false;
+    for (const row of rootVariants) {
+      if (row.uri === uri) continue;
+      const alias = folded.get(EffectString.toLowerCase(row.uri));
+      if (alias !== undefined && alias !== row.uri) return false;
+      const root = EffectArray.findFirst(roots, candidate => EffectString.startsWith(candidate.uri + '/')(row.uri));
+      if (Option.isNone(root)) continue;
+      const id = yield* Effect.try(() => parseResourceId(row.uri)).pipe(Effect.option);
+      if (Option.isNone(id)) return false;
+      const segments = id.value.segments.slice(root.value.id.segments.length);
+      if (target.root.uri === root.value.uri && recallSourcePathsMayAlias(segments, target.segments))
+        ambiguousTargets.add(uri);
+    }
     const parentPrefix = recallTouchedSourceParentPrefix(target.root.uri, target.segments);
     const upperBound = `${parentPrefix}\u{10ffff}`;
     const caseFoldedParent = yield* sql.unsafe<{readonly uri: string}>(
@@ -585,10 +615,13 @@ export function countRecallSourceChanges(sql: SqlClient.SqlClient, forceRefresh:
            OR document.source_path <> source.source_path
            OR document.source_modified_at IS NOT source.source_modified_at
            OR document.source_size <> source.source_size
-           OR document.authority_policy_key IS NOT source.authority_policy_key)) AS changed_source_count,
+           OR document.authority_policy_key IS NOT source.authority_policy_key)
+         ) + (SELECT COUNT(*) FROM temp.${RECALL_REFRESH_REPLACED_DOCUMENT_TABLE}) AS changed_source_count,
         (SELECT COUNT(*) FROM documents AS document
          LEFT JOIN temp.${RECALL_REFRESH_SOURCE_TABLE} AS source ON source.uri = document.uri
-         WHERE source.uri IS NULL AND ? = 1) AS removed_source_count`,
+         WHERE source.uri IS NULL AND ? = 1)
+         + (SELECT COUNT(*) FROM temp.${RECALL_REFRESH_REPLACED_DOCUMENT_TABLE} AS replaced
+            INNER JOIN documents AS document ON document.id = replaced.document_id) AS removed_source_count`,
       [forceRefresh ? 1 : 0, inventoryComplete ? 1 : 0],
     )
     .pipe(
@@ -840,6 +873,25 @@ export function hashRecallRefreshGeneration(
     }
     hash.update(`],"previous":${JSON.stringify(previousContentGeneration ?? null)},"removed":[`);
     first = true;
+    let tombstoneCursor: string | undefined;
+    for (;;) {
+      const tombstones = yield* sql.unsafe<{readonly uri: string}>(
+        `SELECT document.uri FROM temp.${RECALL_REFRESH_REPLACED_DOCUMENT_TABLE} AS replaced
+         INNER JOIN documents AS document ON document.id = replaced.document_id
+         ${tombstoneCursor === undefined ? '' : 'WHERE document.uri COLLATE BINARY > ? COLLATE BINARY'}
+         ORDER BY document.uri COLLATE BINARY LIMIT ?`,
+        tombstoneCursor === undefined
+          ? [RECALL_REFRESH_SOURCE_PAGE_SIZE]
+          : [tombstoneCursor, RECALL_REFRESH_SOURCE_PAGE_SIZE],
+      );
+      if (tombstones.length === 0) break;
+      for (const row of tombstones) {
+        hash.update(`${first ? '' : ','}${JSON.stringify(row.uri)}`);
+        first = false;
+      }
+      tombstoneCursor = tombstones.at(-1)?.uri;
+      if (tombstones.length < RECALL_REFRESH_SOURCE_PAGE_SIZE) break;
+    }
     if (inventoryComplete) {
       cursor = undefined;
       while (true) {
@@ -847,7 +899,8 @@ export function hashRecallRefreshGeneration(
         const rows: readonly {readonly uri: string}[] = yield* sql.unsafe<{readonly uri: string}>(
           `SELECT document.uri FROM documents AS document
            LEFT JOIN temp.${RECALL_REFRESH_SOURCE_TABLE} AS source ON source.uri = document.uri
-           WHERE source.uri IS NULL ${predicate}
+           LEFT JOIN temp.${RECALL_REFRESH_REPLACED_DOCUMENT_TABLE} AS replaced ON replaced.document_id = document.id
+           WHERE source.uri IS NULL AND replaced.document_id IS NULL ${predicate}
            ORDER BY document.uri COLLATE BINARY LIMIT ?`,
           cursor === undefined ? [RECALL_REFRESH_SOURCE_PAGE_SIZE] : [cursor, RECALL_REFRESH_SOURCE_PAGE_SIZE],
         );

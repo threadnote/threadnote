@@ -537,8 +537,12 @@ export const resolveLegacyRecallMemoryLinks = Effect.fn('recall.resolveLegacyMem
       AND target.uri NOT LIKE '%/expired/%'
       AND target.uri NOT LIKE '%/superseded/%'`;
   const statusPredicate = includeInactive
-    ? `AND COALESCE(json_extract(target.candidate_json, '$.status'), 'active') = 'active'`
-    : '';
+    ? ''
+    : `AND COALESCE(json_extract(target.candidate_json, '$.status'), 'active') = 'active'`;
+  const legacyLinks = yield* sql.unsafe<{readonly present: number}>(
+    "SELECT 1 AS present FROM memory_links WHERE target_locator_digest <> '' LIMIT 1",
+  );
+  if (legacyLinks.length === 0) return;
   const resolvedTarget = `(SELECT target.memory_id
     FROM temp.${RECALL_REFRESH_SOURCE_TABLE} AS target_source
     INNER JOIN documents AS target ON target.uri = target_source.uri
@@ -576,7 +580,23 @@ export const resolveLegacyRecallMemoryLinks = Effect.fn('recall.resolveLegacyMem
         OR EXISTS (
           SELECT 1
           FROM temp.${RECALL_REFRESH_SOURCE_TABLE} AS changed
+          INNER JOIN documents AS target ON target.uri = changed.uri
           WHERE changed.uri_locator_digest = memory_links.target_locator_digest
+            AND (
+              changed.invalidated = 1
+              OR EXISTS (
+                SELECT 1
+                FROM memory_identity_conflicts AS conflict
+                WHERE conflict.memory_id = target.memory_id
+              )
+              OR (
+                target.memory_id <> ''
+                AND (
+                  SELECT COUNT(*) FROM documents AS identity_document
+                  WHERE identity_document.memory_id = target.memory_id
+                ) > 1
+              )
+            )
         )
       )`;
   yield* sql.unsafe(

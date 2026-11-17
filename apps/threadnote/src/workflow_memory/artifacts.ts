@@ -143,6 +143,23 @@ function verifyDirectOwnedRelationArtifacts(
   return true;
 }
 
+function ownedActiveArtifactsForRelationProofs(
+  artifacts: Readonly<Record<string, OwnedActiveRelationArtifact>>,
+  relationUris: readonly string[],
+): Readonly<Record<string, OwnedActiveRelationArtifact>> {
+  const relationMemoryIds = new Set<string>();
+  for (const uri of relationUris) {
+    const owned = artifacts[uri];
+    if (owned?.state === 'active') relationMemoryIds.add(owned.memoryId);
+  }
+  return EffectRecord.fromEntries(
+    EffectArray.filter(EffectRecord.toEntries(artifacts), ([uri, artifact]) => {
+      if (artifact.state !== 'active') return false;
+      return relationUris.includes(uri) || relationMemoryIds.has(artifact.memoryId);
+    }),
+  );
+}
+
 function admitPrivateCandidate(
   state: WorkflowJournal,
   uri: string,
@@ -426,9 +443,15 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
     let ownedActiveArtifacts: Readonly<Record<string, OwnedActiveRelationArtifact>> | undefined;
     let ownedMemoryIdProofs: AuthorizedOwnedMemoryIdProofs | undefined;
     if (ownedCandidate !== undefined) {
-      ownedMemoryIdProofs = yield* buildAuthorizedOwnedMemoryIdProofs(config, relationScopeList, ownedCandidate);
-      ownedActiveArtifacts = verifyDirectOwnedRelationArtifacts(ownedMemoryIdProofs, ownedCandidate, relationUris)
-        ? ownedCandidate
+      const ownedActive = EffectRecord.map(ownedCandidate, artifact => ({
+        memoryId: artifact.memoryId,
+        revision: artifact.revision,
+        state: artifact.state,
+      }));
+      const proofArtifacts = ownedActiveArtifactsForRelationProofs(ownedActive, relationUris);
+      ownedMemoryIdProofs = yield* buildAuthorizedOwnedMemoryIdProofs(config, relationScopeList, proofArtifacts);
+      ownedActiveArtifacts = verifyDirectOwnedRelationArtifacts(ownedMemoryIdProofs, ownedActive, relationUris)
+        ? ownedActive
         : undefined;
     }
     const resolvedRelations = yield* resolveAuthoredMemoryRelations(config, request.relations ?? [], {
@@ -681,73 +704,98 @@ export const executeWorkflowOperation = Effect.fn('workflowMemory.executeOperati
   const directOwnedSharedRoots = directOwnedCandidate ? yield* readWorkflowSharedRoots(config, initial.binding) : [];
   const ownedCounts =
     directOwnedCandidate && directOwnedSharedRoots.length === 0 ? uniqueOwnedMemoryIds(prepared) : undefined;
-  let directOwnedBypass = false;
-  if (
-    ownedCounts !== undefined &&
-    EffectArray.every(operation.relations, target => {
-      const owned = initial.artifacts[target.uri];
-      return (
-        requestedDirectUris.has(target.uri) &&
-        owned !== undefined &&
-        owned.state === 'active' &&
-        target.memoryId !== undefined &&
-        owned.memoryId === target.memoryId &&
-        (ownedCounts.get(owned.memoryId) ?? 0) === 1 &&
-        sha256HexSync(target.content) === owned.revision
-      );
-    })
-  ) {
-    const ownedBypassScopes = EffectArray.map(ownedArtifacts(prepared), artifact => artifact.canonicalUri);
-    const ownedBypassArtifacts = EffectRecord.fromEntries(
-      EffectArray.flatMap(ownedArtifacts(prepared), artifact => {
-        const owned = initial.artifacts[artifact.canonicalUri];
-        return owned === undefined || owned.state !== 'active'
-          ? []
-          : [
-              [
-                artifact.canonicalUri,
-                {
-                  memoryId: owned.memoryId,
-                  revision: owned.revision,
-                  state: owned.state,
-                },
-              ] as const,
-            ];
-      }),
-    );
-    const ownedMemoryIdProofs = yield* buildAuthorizedOwnedMemoryIdProofs(
-      config,
-      ownedBypassScopes,
-      ownedBypassArtifacts,
-    );
-    directOwnedBypass = EffectArray.every(
-      operation.relations,
-      target =>
-        target.memoryId !== undefined &&
-        isAuthorizedOwnedMemoryIdOwner(ownedMemoryIdProofs, target.memoryId, target.uri),
-    );
-  }
+  const ownedBypassScopes =
+    ownedCounts === undefined ? undefined : EffectArray.map(ownedArtifacts(prepared), artifact => artifact.canonicalUri);
+  const ownedBypassArtifacts =
+    ownedCounts === undefined
+      ? undefined
+      : EffectRecord.fromEntries(
+          EffectArray.flatMap(ownedArtifacts(prepared), ownedArtifactEntry => {
+            const owned = initial.artifacts[ownedArtifactEntry.canonicalUri];
+            return owned === undefined || owned.state !== 'active'
+              ? []
+              : [
+                  [
+                    ownedArtifactEntry.canonicalUri,
+                    {
+                      memoryId: owned.memoryId,
+                      revision: owned.revision,
+                      state: owned.state,
+                    },
+                  ] as const,
+                ];
+          }),
+        );
+  const relationUrisForOwnedProof = EffectArray.map(operation.relations, target => target.uri);
   let staged: Effect.Success<ReturnType<typeof persistPreparedDeferredCodeAnchorIntent>> | undefined;
-  yield* withWorkflowEvidenceAdmission(
+  yield* withDeferredCodeAnchorMutationLocks(
+    fs,
     config,
-    initial.binding,
-    operation.request.evidenceRefs ?? [],
-    operation.relations,
-    check =>
-      withDeferredCodeAnchorMutationLocks(
-        fs,
+    [
+      artifact.canonicalUri,
+      operation.sourceUri,
+      ...EffectArray.map(operation.relations, target => target.uri),
+      ...EffectArray.flatMap(operation.request.evidenceRefs ?? [], ref => [
+        ref.uri,
+        memoryIdentityLockKey(ref.memoryId),
+      ]),
+      ...memoryIdentityWriteLockKeys(artifact.memoryId, operation.relations),
+    ],
+    Effect.gen(function* () {
+      let directOwnedBypass = false;
+      if (
+        ownedCounts !== undefined &&
+        ownedBypassScopes !== undefined &&
+        ownedBypassArtifacts !== undefined &&
+        EffectArray.every(operation.relations, target => {
+          const owned = initial.artifacts[target.uri];
+          return (
+            requestedDirectUris.has(target.uri) &&
+            owned !== undefined &&
+            owned.state === 'active' &&
+            target.memoryId !== undefined &&
+            owned.memoryId === target.memoryId &&
+            (ownedCounts.get(owned.memoryId) ?? 0) === 1 &&
+            sha256HexSync(target.content) === owned.revision
+          );
+        })
+      ) {
+        const proofArtifacts = ownedActiveArtifactsForRelationProofs(
+          ownedBypassArtifacts,
+          relationUrisForOwnedProof,
+        );
+        const ownedMemoryIdProofs = yield* buildAuthorizedOwnedMemoryIdProofs(
+          config,
+          ownedBypassScopes,
+          proofArtifacts,
+        );
+        const authorized = verifyDirectOwnedRelationArtifacts(ownedMemoryIdProofs, ownedBypassArtifacts, relationUrisForOwnedProof)
+          ? ownedMemoryIdProofs
+          : undefined;
+        if (authorized === undefined)
+          return yield* workflowError(
+            'identity-conflict',
+            'Owned relation targets changed before commit; refresh before mutating.',
+          );
+        directOwnedBypass = EffectArray.every(
+          operation.relations,
+          target =>
+            target.memoryId !== undefined &&
+            isAuthorizedOwnedMemoryIdOwner(authorized, target.memoryId, target.uri),
+        );
+        if (!directOwnedBypass)
+          return yield* workflowError(
+            'identity-conflict',
+            'Owned relation targets changed before commit; refresh before mutating.',
+          );
+      }
+      return yield* withWorkflowEvidenceAdmission(
         config,
-        [
-          artifact.canonicalUri,
-          operation.sourceUri,
-          ...EffectArray.map(operation.relations, target => target.uri),
-          ...EffectArray.flatMap(operation.request.evidenceRefs ?? [], ref => [
-            ref.uri,
-            memoryIdentityLockKey(ref.memoryId),
-          ]),
-          ...memoryIdentityWriteLockKeys(artifact.memoryId, operation.relations),
-        ],
-        Effect.gen(function* () {
+        initial.binding,
+        operation.request.evidenceRefs ?? [],
+        operation.relations,
+        check =>
+          Effect.gen(function* () {
           const current = yield* readOptionalResource(config, artifact.canonicalUri);
           if (
             original.deferredCodeAnchor &&
@@ -874,9 +922,10 @@ export const executeWorkflowOperation = Effect.fn('workflowMemory.executeOperati
               'readback-conflict',
               'Artifact readback differs from the exact journaled document.',
             );
-        }),
-      ),
-    {directOwnedBypass},
+          }),
+        {directOwnedBypass},
+      );
+    }),
   );
   if (deferred) yield* schedulePreparedDeferredCodeAnchorIntent(config, deferred.intent);
   if (!needsReceipt) return {...(yield* readWorkflowArtifact(config, prepared, artifact.canonicalUri)), operationId};

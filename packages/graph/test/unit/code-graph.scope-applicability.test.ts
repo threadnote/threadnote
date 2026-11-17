@@ -396,6 +396,25 @@ describe('scoped applicability', () => {
           );
           yield* remove('apps/a/.gitignore');
 
+          // A dirty out-of-scope edit plus an untracked self-hiding nested .gitignore must bypass the warm basis.
+          yield* write('apps/b/index.ts', "export const b = 'dirty-out-of-scope';\n");
+          yield* write('apps/a/.gitignore', '.gitignore\nsecondary.ts\n');
+          const warmDirtySelfHiding = yield* captureGitSubcommands(
+            observeCodeGraphQueryScope(home, root, identity, BUILTIN_LANGUAGE_PACK_REGISTRY, {
+              project: 'a',
+              manifestPath,
+            }),
+          );
+          const expectedDirtySelfHiding = yield* uncachedOracle(identity);
+          expect(warmDirtySelfHiding?.scope).toEqual(expectedDirtySelfHiding.scope);
+          expect(warmDirtySelfHiding?.evidence?.inventoryFingerprint).not.toBe(expectedClean.evidence?.inventoryFingerprint);
+          for (const args of recordedGitSubcommands) {
+            expect(args).not.toContain('ls-tree');
+            expect(args).not.toContain('cat-file');
+          }
+          yield* write('apps/b/index.ts', "export const b = 'v1';\n");
+          yield* remove('apps/a/.gitignore');
+
           // Cold-miss observeCodeGraphStatusScope forwards a custom languagePacks registry into inventoryRepository
           // instead of falling back to BUILTIN_LANGUAGE_PACK_REGISTRY.
           let customDiscoverCalls = 0;

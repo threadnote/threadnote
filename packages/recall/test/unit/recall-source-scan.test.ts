@@ -646,15 +646,16 @@ describe('Recall source staging', () => {
           const before = yield* sql.unsafe('SELECT * FROM documents ORDER BY uri');
           yield* fs.writeFileString(canonical, 'new');
           const uri = 'threadnote://resources/%C3%A9.md';
-          const staged = yield* stageRecallSources(sql, fs, path, config, {
+          const stagedExit = yield* stageRecallSources(sql, fs, path, config, {
             includeInactive: true,
             canonicalResourcePolicy: policy,
             invalidatedUris: new Set([uri]),
             mode: {kind: 'touched', contentGeneration: 'baseline'},
           }).pipe(Effect.exit);
-          if (distinctNames) expect(Exit.isFailure(staged)).toBe(true);
+          if (distinctNames) expect(Exit.isFailure(stagedExit)).toBe(true);
           else {
-            expect(Exit.isSuccess(staged)).toBe(true);
+            expect(Exit.isSuccess(stagedExit)).toBe(true);
+            const staged = Exit.isSuccess(stagedExit) ? stagedExit.value : undefined;
             const inventory = yield* sql.unsafe<SourceRow>(
               `SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`,
             );
@@ -662,7 +663,7 @@ describe('Recall source staging', () => {
             const fullStaged = yield* sql.unsafe<SourceRow>(
               `SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`,
             );
-            if (Exit.isSuccess(staged) && staged.value.mode === 'touched')
+            if (staged?.mode === 'touched')
               expectTouchedStagingMatchesFullScanSubset(inventory, fullStaged, new Set([uri]));
             else expect(inventory).toEqual(fullStaged);
           }
