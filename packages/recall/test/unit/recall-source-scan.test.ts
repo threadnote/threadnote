@@ -11,6 +11,8 @@ import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {ExternalSourcePolicy} from '@threadnote/store/external-resource';
 import {canonicalResourceUri} from '@threadnote/store/resource-id';
 import {RECALL_REFRESH_SOURCE_TABLE, scanRecallSources, stageRecallSources} from '@threadnote/recall/index/refresh';
+import {resolveLegacyRecallMemoryLinks} from '@threadnote/recall/index/refresh_database';
+import {memoryLinkLocatorDigest} from '@threadnote/recall/memory/links';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
@@ -108,6 +110,22 @@ const seedPersistedInventory = (sql: SqlClient.SqlClient, skipped = 0) =>
       `CREATE TABLE documents AS SELECT uri, source_path, source_modified_at, source_size, authority_policy_key FROM temp.${RECALL_REFRESH_SOURCE_TABLE}`,
     );
   });
+function expectTouchedStagingMatchesFullScanSubset(
+  touched: readonly SourceRow[],
+  full: readonly SourceRow[],
+  invalidatedUris: ReadonlySet<string>,
+) {
+  const fullByUri = new Map(EffectArray.map(full, row => [row.uri, row]));
+  for (const row of touched) {
+    expect(invalidatedUris.has(row.uri)).toBe(true);
+    expect(row).toEqual(fullByUri.get(row.uri));
+  }
+  for (const uri of invalidatedUris) {
+    if (!fullByUri.has(uri)) continue;
+    expect(EffectArray.findFirst(touched, row => row.uri === uri)).toBeDefined();
+  }
+}
+
 const verifyInventory = Effect.fn('test.verifyRecallSourceInventory')(function* (sources: readonly Source[]) {
   const {expected, scan} = yield* fixture(sources);
   yield* Effect.gen(function* () {
@@ -321,17 +339,19 @@ describe('Recall source staging', () => {
               invalidatedUris: new Set([`threadnote://resources/${name}`]),
               mode: {kind: 'touched', contentGeneration: 'baseline'},
             });
+            const invalidated = new Set([`threadnote://resources/${name}`]);
             expect(result).toMatchObject({mode: 'touched', scannedSourceCount: 1});
             expect(yield* sql.unsafe(`SELECT COUNT(*) AS count FROM temp.${RECALL_REFRESH_SOURCE_TABLE}`)).toEqual([
-              {count: 3},
+              {count: 1},
             ]);
             const staged = yield* sql.unsafe<SourceRow>(
               `SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`,
             );
-            yield* scanRecallSources(sql, fs, path, config, true, policy, new Set([`threadnote://resources/${name}`]));
-            expect(
-              yield* sql.unsafe<SourceRow>(`SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`),
-            ).toEqual(staged);
+            yield* scanRecallSources(sql, fs, path, config, true, policy, invalidated);
+            const fullStaged = yield* sql.unsafe<SourceRow>(
+              `SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`,
+            );
+            expectTouchedStagingMatchesFullScanSubset(staged, fullStaged, invalidated);
           }).pipe(withDatabase);
         }),
       {fastCheck: {numRuns: 8}},
@@ -481,9 +501,11 @@ describe('Recall source staging', () => {
               `SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`,
             );
             const full = yield* scanRecallSources(sql, fs, path, config, true, policy, touched);
-            expect(
-              yield* sql.unsafe<SourceRow>(`SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`),
-            ).toEqual(staged);
+            const fullStaged = yield* sql.unsafe<SourceRow>(
+              `SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`,
+            );
+            if (result.mode === 'touched') expectTouchedStagingMatchesFullScanSubset(staged, fullStaged, touched);
+            else expect(staged).toEqual(fullStaged);
             expect(result.skippedOversizedDocumentCount).toBe(full.skippedOversizedDocumentCount);
             expect(yield* sql.unsafe('SELECT * FROM documents ORDER BY uri')).toEqual(before);
           }).pipe(withDatabase);
@@ -522,10 +544,13 @@ describe('Recall source staging', () => {
               `SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`,
             );
             const full = yield* scanRecallSources(sql, fs, path, config, true, policy, new Set([target.uri]));
+            const fullStaged = yield* sql.unsafe<SourceRow>(
+              `SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`,
+            );
             expect(result.skippedOversizedDocumentCount).toBe(full.skippedOversizedDocumentCount);
-            expect(
-              yield* sql.unsafe<SourceRow>(`SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`),
-            ).toEqual(staged);
+            if (result.mode === 'touched')
+              expectTouchedStagingMatchesFullScanSubset(staged, fullStaged, new Set([target.uri]));
+            else expect(staged).toEqual(fullStaged);
           }).pipe(withDatabase);
         }),
       );
@@ -551,9 +576,10 @@ describe('Recall source staging', () => {
           expect(result.mode).toBe(canonicalExists ? 'touched' : 'full');
           const staged = yield* sql.unsafe<SourceRow>(`SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`);
           yield* scanRecallSources(sql, fs, path, config, true, policy, new Set([uri]));
-          expect(
-            yield* sql.unsafe<SourceRow>(`SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`),
-          ).toEqual(staged);
+          const fullStaged = yield* sql.unsafe<SourceRow>(
+            `SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`,
+          );
+          expectTouchedStagingMatchesFullScanSubset(staged, fullStaged, new Set([uri]));
         }).pipe(withDatabase);
       }),
     );
@@ -595,9 +621,11 @@ describe('Recall source staging', () => {
               `SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`,
             );
             yield* scanRecallSources(sql, fs, path, config, true, policy, touched);
-            expect(
-              yield* sql.unsafe<SourceRow>(`SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`),
-            ).toEqual(staged);
+            const fullStaged = yield* sql.unsafe<SourceRow>(
+              `SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`,
+            );
+            if (result.mode === 'touched') expectTouchedStagingMatchesFullScanSubset(staged, fullStaged, touched);
+            else expect(staged).toEqual(fullStaged);
           }).pipe(withDatabase);
         }),
       );
@@ -630,9 +658,12 @@ describe('Recall source staging', () => {
               `SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`,
             );
             yield* scanRecallSources(sql, fs, path, config, true, policy, new Set([uri]));
-            expect(
-              yield* sql.unsafe<SourceRow>(`SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`),
-            ).toEqual(inventory);
+            const fullStaged = yield* sql.unsafe<SourceRow>(
+              `SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`,
+            );
+            if (Exit.isSuccess(staged) && staged.value.mode === 'touched')
+              expectTouchedStagingMatchesFullScanSubset(inventory, fullStaged, new Set([uri]));
+            else expect(inventory).toEqual(fullStaged);
           }
           expect(yield* sql.unsafe('SELECT * FROM documents ORDER BY uri')).toEqual(before);
         }).pipe(withDatabase);
@@ -667,6 +698,7 @@ describe('Recall source staging', () => {
             let directoryReads = 0;
             let unrelatedFileStats = 0;
             let externalPolicyReads = 0;
+            let corpusDocumentWalks = 0;
             const traced = {
               ...fs,
               readDirectory: (...args: Parameters<typeof fs.readDirectory>) => {
@@ -679,7 +711,21 @@ describe('Recall source staging', () => {
               },
             };
             const before = yield* sql.unsafe('SELECT * FROM documents ORDER BY uri');
-            const result = yield* stageRecallSources(sql, traced, path, config, {
+            const countedSql = new Proxy(sql, {
+              get(sqlTarget, property, receiver) {
+                if (property !== 'unsafe') return Reflect.get(sqlTarget, property, receiver);
+                return <A extends object>(text: string, parameters: readonly unknown[] = []) => {
+                  if (
+                    Effect2.pipe(text, EffectString.includes('FROM documents')) &&
+                    Effect2.pipe(text, EffectString.includes('ORDER BY uri')) &&
+                    !Effect2.pipe(text, EffectString.includes('WHERE uri IN ('))
+                  )
+                    corpusDocumentWalks += 1;
+                  return sqlTarget.unsafe<A>(text, parameters);
+                };
+              },
+            });
+            const result = yield* stageRecallSources(countedSql, traced, path, config, {
               includeInactive: true,
               canonicalResourcePolicy: policy,
               invalidatedUris: new Set([target.uri]),
@@ -698,11 +744,12 @@ describe('Recall source staging', () => {
             expect(directoryReads).toBe(0);
             expect(unrelatedFileStats).toBe(0);
             expect(externalPolicyReads).toBe(0);
+            expect(corpusDocumentWalks).toBe(0);
             expect(yield* sql.unsafe('SELECT * FROM documents ORDER BY uri')).toEqual(before);
             const staged = yield* sql.unsafe<SourceRow>(
               `SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`,
             );
-            expect(staged).toHaveLength(expected.length);
+            expect(staged).toHaveLength(1);
             expect(
               EffectArray.map(
                 EffectArray.filter(staged, row => row.invalidated === 1),
@@ -710,11 +757,154 @@ describe('Recall source staging', () => {
               ),
             ).toEqual([target.uri]);
             yield* scanRecallSources(sql, fs, path, config, true, policy, new Set([target.uri]));
-            expect(
-              yield* sql.unsafe<SourceRow>(`SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`),
-            ).toEqual(staged);
+            const fullStaged = yield* sql.unsafe<SourceRow>(
+              `SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`,
+            );
+            expectTouchedStagingMatchesFullScanSubset(staged, fullStaged, new Set([target.uri]));
           }).pipe(withDatabase);
         }),
+    );
+    it.effect('stages two touched uris without paging the full documents inventory', () =>
+      Effect.gen(function* () {
+        const {expected, scan, fs, path, config, policy} = yield* fixture(sources(64));
+        yield* Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* scan(sql);
+          yield* seedPersistedInventory(sql);
+          const targets = expected.slice(0, 2);
+          let documentInventoryPages = 0;
+          const counted = new Proxy(sql, {
+            get(target, property, receiver) {
+              if (property !== 'unsafe') return Reflect.get(target, property, receiver);
+              return <A extends object>(text: string, parameters: readonly unknown[] = []) => {
+                if (
+                  EffectString.includes('SELECT uri FROM documents')(text) &&
+                  EffectString.includes('ORDER BY uri COLLATE BINARY LIMIT')(text) &&
+                  !EffectString.includes('WHERE uri IN (')(text)
+                )
+                  documentInventoryPages += 1;
+                return target.unsafe<A>(text, parameters);
+              };
+            },
+          });
+          const invalidated = new Set(EffectArray.map(targets, row => row.uri));
+          const result = yield* stageRecallSources(counted, fs, path, config, {
+            includeInactive: true,
+            canonicalResourcePolicy: policy,
+            invalidatedUris: invalidated,
+            mode: {kind: 'touched', contentGeneration: 'baseline'},
+          });
+          expect(result).toMatchObject({mode: 'touched', scannedSourceCount: 2});
+          expect(documentInventoryPages).toBe(0);
+          const staged = yield* sql.unsafe<SourceRow>(`SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`);
+          expect(staged).toHaveLength(2);
+        }).pipe(withDatabase);
+      }),
+    );
+    it.effect('scopes legacy memory-link resolution to the touched uri set', () =>
+      Effect.gen(function* () {
+        const changedUri = 'threadnote://resources/changed.md';
+        const unchangedUri = 'threadnote://resources/unchanged.md';
+        const unrelatedUri = 'threadnote://resources/unrelated.md';
+        const changedDigest = memoryLinkLocatorDigest(changedUri);
+        const unchangedDigest = memoryLinkLocatorDigest(unchangedUri);
+        yield* Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql.unsafe(`
+            CREATE TABLE documents (
+              id INTEGER PRIMARY KEY,
+              uri TEXT NOT NULL,
+              memory_id TEXT,
+              candidate_json TEXT NOT NULL,
+              approved_authoritative INTEGER NOT NULL DEFAULT 1,
+              logical_key TEXT NOT NULL DEFAULT 'k',
+              document_length INTEGER NOT NULL DEFAULT 1
+            )
+          `);
+          yield* sql.unsafe(
+            `CREATE TABLE memory_links (
+              source_document_id INTEGER NOT NULL,
+              source_uri TEXT NOT NULL,
+              source_memory_id TEXT NOT NULL DEFAULT '',
+              target_memory_id TEXT NOT NULL DEFAULT '',
+              target_locator_digest TEXT NOT NULL DEFAULT '',
+              relation_type TEXT NOT NULL,
+              relation_origin TEXT NOT NULL,
+              relation_ordinal INTEGER NOT NULL
+            )`,
+          );
+          yield* sql.unsafe(
+            `CREATE TABLE memory_identity_conflicts (memory_id TEXT PRIMARY KEY NOT NULL) WITHOUT ROWID`,
+          );
+          for (const [uri, memoryId] of [
+            [changedUri, 'tn_changed'],
+            [unchangedUri, 'tn_unchanged'],
+            [unrelatedUri, 'tn_unrelated'],
+          ] as const) {
+            yield* sql.unsafe(`INSERT INTO documents (uri, memory_id, candidate_json) VALUES (?, ?, ?)`, [
+              uri,
+              memoryId,
+              JSON.stringify({memoryId, status: 'active'}),
+            ]);
+          }
+          const insertLink = (sourceUri: string, digest: string) =>
+            sql.unsafe(
+              `INSERT INTO memory_links (
+                source_document_id, source_uri, target_memory_id, target_locator_digest,
+                relation_type, relation_origin, relation_ordinal
+              ) VALUES (
+                (SELECT id FROM documents WHERE uri = ?), ?, '', ?, 'references', 'test', 0
+              )`,
+              [sourceUri, sourceUri, digest],
+            );
+          yield* insertLink(changedUri, unchangedDigest);
+          yield* insertLink(unchangedUri, changedDigest);
+          yield* insertLink(unrelatedUri, unchangedDigest);
+          yield* sql.unsafe('PRAGMA temp_store = FILE');
+          yield* sql.unsafe(`CREATE TEMP TABLE ${RECALL_REFRESH_SOURCE_TABLE} (
+            uri TEXT PRIMARY KEY NOT NULL,
+            uri_locator_digest TEXT NOT NULL,
+            source_path TEXT NOT NULL DEFAULT '',
+            source_modified_at TEXT,
+            source_size INTEGER NOT NULL DEFAULT 0,
+            authority_policy_key TEXT,
+            invalidated INTEGER NOT NULL DEFAULT 1
+          ) WITHOUT ROWID`);
+          yield* sql.unsafe(
+            `INSERT INTO ${RECALL_REFRESH_SOURCE_TABLE} (uri, uri_locator_digest, invalidated)
+             VALUES (?, ?, 1)`,
+            [changedUri, changedDigest],
+          );
+          let legacyUpdates = 0;
+          const counted = new Proxy(sql, {
+            get(target, property, receiver) {
+              if (property !== 'unsafe') return Reflect.get(target, property, receiver);
+              return <A extends object>(text: string, parameters: readonly unknown[] = []) => {
+                if (EffectString.includes('UPDATE memory_links')(text)) legacyUpdates += 1;
+                return target.unsafe<A>(text, parameters);
+              };
+            },
+          });
+          yield* resolveLegacyRecallMemoryLinks(counted, false, {kind: 'touched', uris: [changedUri]});
+          expect(legacyUpdates).toBe(1);
+          const afterTouched = yield* sql.unsafe<{target_memory_id: string}>(
+            `SELECT target_memory_id FROM memory_links ORDER BY source_uri`,
+          );
+          yield* sql.unsafe(`DELETE FROM temp.${RECALL_REFRESH_SOURCE_TABLE}`);
+          for (const uri of [changedUri, unchangedUri, unrelatedUri]) {
+            yield* sql.unsafe(
+              `INSERT INTO temp.${RECALL_REFRESH_SOURCE_TABLE} (uri, uri_locator_digest, invalidated)
+               VALUES (?, ?, 0)`,
+              [uri, memoryLinkLocatorDigest(uri)],
+            );
+          }
+          yield* resolveLegacyRecallMemoryLinks(sql, false, {kind: 'full'});
+          const afterFull = yield* sql.unsafe<{target_memory_id: string}>(
+            `SELECT target_memory_id FROM memory_links ORDER BY source_uri`,
+          );
+          expect(afterFull).not.toEqual(afterTouched);
+        }).pipe(withDatabase);
+      }),
     );
     for (const count of [0, 1, 255, 256, 257, 513]) {
       it.effect(`stages complete metadata and indexed locator lookups for ${count} sources`, () =>
