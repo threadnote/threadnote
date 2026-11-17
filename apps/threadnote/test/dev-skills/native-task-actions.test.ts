@@ -7049,7 +7049,7 @@ describe('native task actions', () => {
   );
 
   // prettier-ignore
-  effectIt.effect('records a canonical snapshot and review with exact replay after source drift', () =>
+  effectIt.effect('replays an exact snapshot and review but refuses a snapshot replay after source drift', () =>
     Effect.gen(function* () {
       const f = yield* fixture(['one'], 'local');
       const readbackProposal = {
@@ -7087,21 +7087,30 @@ describe('native task actions', () => {
       const recorded = object(recordedEnvelope.structuredContent);
       expect(recorded).toMatchObject({status: 'recorded', replayed: false});
       const snapshotRef = String(recorded.snapshotRef);
+      const recordedTree = String(object(object(recorded.snapshot).snapshot).tree);
+      const recordSnapshot = runNativeTaskAction(f.config, {
+        command: 'record-snapshot',
+        runId: 'native-run',
+        callerCwd: f.repo,
+        workRef,
+      });
+      const failureMessage = (result: unknown) => String(object(object(result).failure).message);
       const beforeReplay = yield* f.fs.readFileString(f.statePath());
       yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "later drift";\n');
-      const replay = object(
-        yield* runNativeTaskAction(f.config, {
-          command: 'record-snapshot',
-          runId: 'native-run',
-          callerCwd: f.repo,
-          workRef,
-        }),
-      );
+      yield* f.git(['add', 'source.ts']);
+      const driftTree = EffectString.trim((yield* f.git(['write-tree'])).stdout);
+      const staleReplay = yield* recordSnapshot.pipe(Effect.result);
+      expect(staleReplay).toMatchObject({failure: {code: 'source-drift'}});
+      expect(failureMessage(staleReplay)).toContain(recordedTree);
+      expect(failureMessage(staleReplay)).toContain(driftTree);
+      expect(failureMessage(staleReplay)).toContain('supersede-unreviewed-snapshot');
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeReplay);
+      yield* f.git(['checkout', 'HEAD', '--', 'source.ts']);
+      const replay = object(yield* recordSnapshot);
       expect(replay).toMatchObject({status: 'recorded', replayed: true});
       expect(replay.snapshot).toEqual(recorded.snapshot);
       expect(object(object(replay.snapshot).snapshot).snapshotId).toBe(nativeTaskSnapshotId(workRef));
       expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeReplay);
-      yield* f.git(['checkout', '--', 'source.ts']);
       const report = {
         mode: 'full',
         selected: ['correctness', 'simplicity'],
@@ -7144,6 +7153,10 @@ describe('native task actions', () => {
         report: {...report, mode: 'incremental'},
       }).pipe(Effect.result);
       expect(changed).toMatchObject({failure: {code: 'review-conflict'}});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(afterReview);
+      const reviewedReplay = yield* recordSnapshot.pipe(Effect.result);
+      expect(reviewedReplay).toMatchObject({failure: {code: 'source-drift'}});
+      expect(failureMessage(reviewedReplay)).toContain('task-action work');
       expect(yield* f.fs.readFileString(f.statePath())).toBe(afterReview);
       yield* f.git(['checkout', '--', 'source.ts']);
       const validationEvidence = {
