@@ -1034,3 +1034,37 @@ describe('supplemental local publication proof', () => {
     ).toThrow();
   });
 });
+
+describe('standard-profile plan reconciliation', () => {
+  const withIntent = (allowedPaths: readonly string[], baseBranch = 'main', acceptance = 'works') =>
+    decodeNativeCyclePlan(
+      makePlan(
+        EffectArray.map(makePlan().phases, phase => ({
+          ...phase,
+          intentDefinitionHash: Effect.pipe('9', EffectString.repeat(64)),
+          ...(phase.id === 'one' ? {allowedPaths: [...allowedPaths], baseBranch} : {}),
+          ...(phase.id === 'one' && acceptance !== 'works'
+            ? {
+                acceptanceCriteria: [acceptance],
+                acceptanceRefs: [{id: 'a1', criterion: acceptance, requirements: ['req'], specScenarios: []}],
+              }
+            : {}),
+        })),
+      ),
+    );
+
+  it('keeps an undelivered phase pending across a path-only or base-only change under standard only', () => {
+    const before = initializeNativeCycle(withIntent(['src/']));
+    for (const plan of [withIntent(['src/', 'docs/']), withIntent(['src/'], 'release')]) {
+      expect(reconcileNativeCyclePlan(before, plan, 'Paths changed', 'standard')).toMatchObject({
+        affected: [],
+        state: {phases: {one: {status: 'pending', phaseHash: nativeCyclePhaseHash(plan, 'one')}}},
+      });
+      expect(reconcileNativeCyclePlan(before, plan, 'Paths changed').state.phases.one.status).toBe('stale');
+    }
+    expect(
+      reconcileNativeCyclePlan(before, withIntent(['src/'], 'main', 'works faster'), 'Intent changed', 'standard').state
+        .phases.one.status,
+    ).toBe('stale');
+  });
+});

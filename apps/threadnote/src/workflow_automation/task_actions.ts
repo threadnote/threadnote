@@ -8,6 +8,7 @@ import {
   nativeSpecIntentDigest,
   projectNativeCompactIntent,
   type NativeCompactIntent,
+  nativePlanIntentPolicyFor,
 } from '@threadnote/workflow-automations/authoring';
 import {NativeCloseoutProposalSchema} from '@threadnote/workflow-automations/closeout';
 import {
@@ -835,7 +836,7 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
       const current = yield* loadRoot();
       if (current.document.kind !== 'plan' || !current.document.compactOrigin)
         return yield* fail('compact-origin-required', 'This plan has no compact-origin confirmation obligation.');
-      const intentHash = nativeSpecIntentDigest(current.document);
+      const intentHash = nativeSpecIntentDigest(current.document, nativePlanIntentPolicyFor(stored.state));
       if (request.presentedIntentHash !== intentHash)
         return yield* fail(
           'stale-intent',
@@ -1141,7 +1142,14 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
       if (!Predicate.isObject(loadedValue) || !Predicate.isObject(loadedValue.document))
         return {status: 'needs-planning', missingInputs: ['The approved plan document readback']};
       const document = decodeNativeAuthoringDocument(loadedValue.document);
-      if (document.kind !== 'plan' || document.openQuestions.length > 0 || document.decisions.length === 0)
+      // A standard compact plan keeps its confirmed intent through a path-only edit, so it reconciles without decisions.
+      const confirmedCompact =
+        document.kind === 'plan' && !!document.compactOrigin && nativeWorkflowPolicyOf(stored.state) === 'standard';
+      if (
+        document.kind !== 'plan' ||
+        document.openQuestions.length > 0 ||
+        (document.decisions.length === 0 && !confirmedCompact)
+      )
         return {status: 'needs-planning', missingInputs: ['Resolved plan questions and a recorded design decision']};
       const suppliedBindings = request.bindings ?? {};
       // An admitted replay must reproduce the reconciled plan exactly. This also

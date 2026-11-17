@@ -62,7 +62,7 @@ export const AuthoringRootSchema = Schema.Struct({
   }),
   documentHash: digest,
   intentHash: digest,
-  planIntentPolicyVersion: Schema.optionalKey(Schema.Literal(2)),
+  planIntentPolicyVersion: Schema.optionalKey(Schema.Literals([2, 3])),
   baseRevision: Schema.NullOr(digest),
   readiness: Schema.Literals(['draft', 'ready']),
   data: AuthoringReferenceSchema,

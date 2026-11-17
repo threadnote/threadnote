@@ -24,6 +24,8 @@ import {
   nativeAuthoringDigest,
   validateNativeAuthoring,
   type NativeAuthoringDocument,
+  nativePlanIntentPolicyFor,
+  NativeDerivedOwnershipPlanIntentPolicyVersion,
 } from '@threadnote/workflow-automations/authoring';
 import {readNativeWorkflowState} from './store.js';
 import {runWorkflowAutomation} from './index.js';
@@ -174,6 +176,15 @@ const object = (value: unknown): Record<string, unknown> => {
   return value;
 };
 const unwrap = (value: unknown) => object(object(value).authoring);
+const withoutPhasePaths = (content: object) =>
+  'phases' in content && A.isArray(content.phases)
+    ? {
+        ...content,
+        phases: A.map(content.phases, (phase: unknown) =>
+          Predicate.isObject(phase) ? Struct.omit(phase, ['affectedPaths', 'newPaths']) : phase,
+        ),
+      }
+    : content;
 const contentOf = (document: NativeAuthoringDocument) =>
   document.kind === 'spec'
     ? Struct.omit(document, [...metadata, 'kind'])
@@ -792,6 +803,13 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
           stableJson(spec ?? null);
       const sameSource =
         existing !== undefined && stableJson(existing.document.source ?? null) === stableJson(source ?? null);
+      const planIntentPolicyVersion = nativePlanIntentPolicyFor(stored?.state ?? {});
+      // Under the standard profile ownership is derived: a path-only edit keeps the plan's compact origin and intent.
+      const pathOnlyEdit =
+        planIntentPolicyVersion === NativeDerivedOwnershipPlanIntentPolicyVersion &&
+        existing?.document.kind === 'plan' &&
+        stableJson(withoutPhasePaths(contentOf(existing.document))) === stableJson(withoutPhasePaths(normalized)) &&
+        stableJson(existing.document.spec ?? null) === stableJson(spec ?? null);
       if (existing && sameBusinessContent && sameSource && !stored?.state.authoringSave) {
         if (
           request.command === 'start' ||
@@ -809,7 +827,7 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
         return yield* fail('stale-authoring-ref', 'Read the current draft before changing business content.');
       const retainedCompactOrigin =
         request.command === 'save' &&
-        sameBusinessContent &&
+        (sameBusinessContent || pathOnlyEdit) &&
         existing?.document.kind === 'plan' &&
         existing.document.compactOrigin
           ? {compactOrigin: existing.document.compactOrigin}
@@ -825,7 +843,7 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
         source,
         ...(spec ? {spec} : {}),
       });
-      const structural = validateNativeAuthoring(document);
+      const structural = validateNativeAuthoring(document, {planIntentPolicyVersion});
       if (structural.issues.length) return {status: 'needs-planning', issues: structural.issues};
       if (!stored) {
         if (request.command !== 'start' || !featureId)
@@ -870,8 +888,9 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
       const refreshedSameIntent =
         request.command === 'save' &&
         sourceExisting !== undefined &&
-        sameBusinessContent &&
-        validateNativeAuthoring(sourceExisting.document).intentHash === structural.intentHash &&
+        (sameBusinessContent || pathOnlyEdit) &&
+        validateNativeAuthoring(sourceExisting.document, {planIntentPolicyVersion}).intentHash ===
+          structural.intentHash &&
         sourceExisting.root.confirmation?.decision === 'approved' &&
         sourceExisting.root.confirmation.intentHash === structural.intentHash;
       const retainedConfirmation = sourceExisting && refreshedSameIntent ? sourceExisting.root.confirmation : undefined;

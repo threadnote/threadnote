@@ -71,7 +71,12 @@ import {bindNativeCycleDeliveryBase, verifyNativeCyclePrDeliveryIdentity} from '
 import {verifyNativeCycleSnapshotEvidence, verifyNativeCycleUnreviewedRebase} from './cycle_recovery.js';
 import type {NativeAuthoringCall} from './authoring_artifacts.js';
 import {readNativeCycleIncoming, recordNativeCycleTreeSnapshot} from './cycle_tree_snapshot.js';
-import {nativeWorkflowPolicyOf} from '@threadnote/workflow-automations/gates';
+import {
+  decideGate,
+  nativeGateRefusal,
+  nativeTaskViewNext,
+  nativeWorkflowPolicyOf,
+} from '@threadnote/workflow-automations/gates';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -528,6 +533,7 @@ export const runNativeCycle = <R>(
               state,
               verifiedPlan!,
               required(request.reason, 'a concrete reconciliation reason'),
+              nativeWorkflowPolicyOf(stored.state),
             ),
           );
           return {
@@ -1263,8 +1269,23 @@ export const runNativeCycle = <R>(
             )
               return yield* fail('anchor-drift', 'Packet anchor bytes or literal symbol changed.');
           }
-          if (!checkNativeCycleScope(selected, options.ownership))
-            return yield* fail('phase-scope', 'Worker ownership exceeds the approved phase scope.');
+          const ownershipOutside = EffectArray.filter(
+            options.ownership,
+            path => !checkNativeCycleScope(selected, [path]),
+          );
+          const ownershipDecision = decideGate(
+            nativeWorkflowPolicyOf(stored.state),
+            'scope.out-of-plan',
+            ownershipOutside.length > 0 ? {files: ownershipOutside} : undefined,
+            undefined,
+            nativeTaskViewNext(request.runId, repo),
+          );
+          if (ownershipDecision._tag === 'refuse')
+            return yield* nativeGateRefusal(
+              'phase-scope',
+              'Worker ownership exceeds the approved phase scope.',
+              ownershipDecision,
+            );
           const after = yield* captureNativeCycleSource(repo, 'HEAD');
           if (after.head !== captured.head || after.tree !== captured.tree)
             return yield* fail('source-drift', 'Source changed while preparing the implementation packet.');
@@ -1298,6 +1319,17 @@ export const runNativeCycle = <R>(
               'Preserve unowned existing work outside the phase commit. Use a clean isolated phase checkout.',
             );
           const incoming = new Set(EffectArray.map(entry.incoming, item => item.path));
+          const changed = EffectArray.filter(entry.snapshot.files, file => !incoming.has(file));
+          const outOfPlan = EffectArray.filter(changed, file => !checkNativeCycleScope(selected, [file]));
+          const scopeDecision = decideGate(
+            nativeWorkflowPolicyOf(stored.state),
+            'scope.out-of-plan',
+            entry.snapshot.version === 4 && outOfPlan.length > 0 ? {files: outOfPlan} : undefined,
+            undefined,
+            nativeTaskViewNext(request.runId, repo),
+          );
+          if (scopeDecision._tag === 'refuse')
+            return yield* nativeGateRefusal('phase-scope', 'Changed paths exceed allowed scope.', scopeDecision);
           const updated = yield* from(() =>
             validateNativeCyclePhase(
               state,
@@ -1313,12 +1345,19 @@ export const runNativeCycle = <R>(
                           owner => owner.phaseId === selected.id,
                         ),
                       )?.paths ?? [])
-                    : EffectArray.filter(entry.snapshot.files, file => !incoming.has(file)),
+                    : scopeDecision._tag === 'warn'
+                      ? EffectArray.filter(changed, file => !outOfPlan.includes(file))
+                      : changed,
               },
               request.validation,
             ),
           );
-          return {status: 'ok', revision: yield* save({...runtime, state: updated}), next: nextNativeCycle(updated)};
+          return {
+            status: 'ok',
+            revision: yield* save({...runtime, state: updated}),
+            next: nextNativeCycle(updated),
+            ...(scopeDecision._tag === 'warn' ? {warnings: [scopeDecision]} : {}),
+          };
         }
         if (request.command === 'publication-ready' || request.command === 'record-delivery') {
           const selected = yield* from(getPhase);

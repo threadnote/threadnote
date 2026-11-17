@@ -81,13 +81,10 @@ describe('standard-profile tree snapshots', () => {
       });
       expect(replay).toMatchObject({replayed: true, snapshot: {snapshot: {snapshotId: second.snapshotId}}});
       const revised = yield* f.revise({
-        phases: EffectArray.map(f.document.phases, phase => ({
-          ...phase,
-          affectedPaths: [...phase.affectedPaths, 'notes.md'],
-        })),
+        phases: EffectArray.map(f.document.phases, phase => ({...phase, outcome: 'Phase works faster.'})),
       });
-      yield* f.mutate('reconcile', {plan: revised, reason: 'Own the notes file.'});
-      yield* f.mutate('resume-phase', {phaseId: 'one', reason: 'The plan paths were reconciled.'});
+      yield* f.mutate('reconcile', {plan: revised, reason: 'The phase outcome changed.'});
+      yield* f.mutate('resume-phase', {phaseId: 'one', reason: 'The phase outcome was reconciled.'});
       const after = yield* record(f);
       expect(after).toMatchObject({version: 4, supersedes: second.snapshotId});
       expect(after.phaseHash).not.toBe(second.phaseHash);
@@ -104,6 +101,106 @@ describe('standard-profile tree snapshots', () => {
           Effect.flip,
         ),
       ).toMatchObject({code: 'invalid-work-ref', next: {tool: 'workflow_task_work'}});
+    }).pipe(runCycle),
+  );
+});
+
+describe('standard-profile derived ownership', () => {
+  const review = (snapshot: Record<string, unknown>) => ({
+    snapshotId: snapshot.snapshotId,
+    phaseHash: snapshot.phaseHash,
+    snapshotTree: snapshot.tree,
+    status: 'complete',
+    mode: snapshot.reviewBasis ? 'incremental' : 'full',
+    selected: ['correctness', 'simplicity'],
+    lanes: [
+      {name: 'correctness', status: 'complete'},
+      {name: 'simplicity', status: 'complete'},
+    ],
+    findings: [],
+  });
+  const validation = (snapshot: Record<string, unknown>) => ({
+    snapshotTree: snapshot.tree,
+    reviewTree: snapshot.tree,
+    status: 'passed',
+    productState: 'working',
+    checks: [{command: 'private flow', result: 'passed', evidence: 'Actual scoped source fixture.'}],
+    acceptance: [{criterion: 'one works', result: 'passed', evidence: 'Source readback.'}],
+  });
+
+  effectIt.effect('warns about an edit outside the plan and still accepts the reviewed tree', () =>
+    Effect.gen(function* () {
+      const f = yield* cycleFixture(
+        ['one'],
+        'local',
+        false,
+        false,
+        true,
+        undefined,
+        undefined,
+        {},
+        {policy: 'standard'},
+      );
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = 1;\n');
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'notes.md'), 'Unplanned note.\n');
+      const recorded = object(
+        yield* runNativeTaskAction(f.config, {command: 'record-snapshot', runId: 'native-run', callerCwd: f.repo}),
+      );
+      expect(recorded.warnings).toEqual([{_tag: 'warn', gate: 'scope.out-of-plan', detail: {files: ['notes.md']}}]);
+      const snapshot = object(object(recorded.snapshot).snapshot);
+      expect(snapshot.outOfPlan).toEqual(['notes.md']);
+      yield* f.mutate('validate-review', {snapshotId: snapshot.snapshotId, attemptId: 'a1', report: review(snapshot)});
+      const ready = yield* f.mutate('ready', {
+        phaseId: 'one',
+        snapshotId: snapshot.snapshotId,
+        validation: validation(snapshot),
+      });
+      expect(ready).toMatchObject({
+        status: 'ok',
+        warnings: [{_tag: 'warn', gate: 'scope.out-of-plan', detail: {files: ['notes.md']}}],
+      });
+    }).pipe(runCycle),
+  );
+
+  effectIt.effect('keeps the phase pending across a path-only reconcile', () =>
+    Effect.gen(function* () {
+      const f = yield* cycleFixture(
+        ['one'],
+        'local',
+        false,
+        false,
+        true,
+        undefined,
+        undefined,
+        {},
+        {policy: 'standard'},
+      );
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = 1;\n');
+      const first = object(
+        object(
+          object(
+            yield* runNativeTaskAction(f.config, {command: 'record-snapshot', runId: 'native-run', callerCwd: f.repo}),
+          ).snapshot,
+        ).snapshot,
+      );
+      yield* f.mutate('validate-review', {snapshotId: first.snapshotId, attemptId: 'a1', report: review(first)});
+      const revised = yield* f.revise({
+        phases: EffectArray.map(f.document.phases, phase => ({
+          ...phase,
+          affectedPaths: [...phase.affectedPaths, 'notes.md'],
+        })),
+      });
+      const reconciled = yield* f.mutate('reconcile', {plan: revised, reason: 'Own the notes file.'});
+      expect(reconciled.affected).toEqual([]);
+      const after = object(
+        object(
+          object(
+            yield* runNativeTaskAction(f.config, {command: 'record-snapshot', runId: 'native-run', callerCwd: f.repo}),
+          ).snapshot,
+        ).snapshot,
+      );
+      expect(after).toMatchObject({intentHash: first.intentHash, reviewBasis: {snapshotId: first.snapshotId}});
+      expect(after.phaseHash).not.toBe(first.phaseHash);
     }).pipe(runCycle),
   );
 });

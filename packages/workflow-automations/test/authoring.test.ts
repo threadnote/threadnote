@@ -11,6 +11,7 @@ import {
   nativeSpecIntentDigest,
   validateNativeAuthoring,
   type NativeAuthoringDocument,
+  NativeDerivedOwnershipPlanIntentPolicyVersion,
 } from '../src/authoring.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
@@ -991,5 +992,31 @@ describe('native authoring documents', () => {
       ),
       {numRuns: 40},
     );
+  });
+});
+
+describe('derived-ownership plan intent', () => {
+  it('ignores phase path edits and binds acceptance changes', () => {
+    const plan = validPlan();
+    if (plan.kind !== 'plan') throw new Error('Expected a plan fixture.');
+    const repathed = validPlan({
+      phases: EffectArray.map(plan.phases, phase => ({
+        ...phase,
+        affectedPaths: [...phase.affectedPaths, 'docs/notes.md'],
+      })),
+    });
+    const reworded = validPlan({
+      phases: EffectArray.map(plan.phases, phase => ({
+        ...phase,
+        acceptance: EffectArray.map(phase.acceptance, item => ({
+          ...item,
+          criterion: item.criterion + ' within one second',
+        })),
+      })),
+    });
+    const v3 = NativeDerivedOwnershipPlanIntentPolicyVersion;
+    expect(nativeSpecIntentDigest(repathed, v3)).toBe(nativeSpecIntentDigest(plan, v3));
+    expect(nativeSpecIntentDigest(repathed)).not.toBe(nativeSpecIntentDigest(plan));
+    expect(nativeSpecIntentDigest(reworded, v3)).not.toBe(nativeSpecIntentDigest(plan, v3));
   });
 });

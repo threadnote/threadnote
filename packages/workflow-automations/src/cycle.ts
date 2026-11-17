@@ -57,6 +57,8 @@ const acceptanceRef = Schema.Struct({id, criterion: text(), requirements: refs, 
 const phaseSchema = Schema.Struct({
   id,
   definitionHash: digest,
+  /** The phase definition without its paths; present on plans exported for standard-profile runs. */
+  intentDefinitionHash: Schema.optionalKey(digest),
   title: text(256),
   dependsOn: refs,
   allowedPaths: Schema.Array(text()).check(Schema.isMaxLength(256)),
@@ -545,6 +547,16 @@ export function nativeCyclePhaseHash(plan: NativeCyclePlan, phaseId: string): st
     `threadnote.native-cycle.phase.v1\n${canonical({objective: plan.objective, delivery: plan.delivery, featureId: plan.featureId, project: plan.project, spec: plan.spec, phase: {id: key, title, dependsOn, allowedPaths, acceptanceCriteria, acceptanceRefs, safeToMergeReason, definitionHash}})}`,
   );
 }
+/** Business intent of a phase: everything but its owned paths and branch binding. */
+export function nativeCyclePhaseIntentHash(plan: NativeCyclePlan, phaseId: string): string {
+  const p = EffectOption.getOrUndefined(EffectArray.findFirst(plan.phases, x => x.id === phaseId));
+  if (!p) return err('Unknown phase.');
+  if (p.intentDefinitionHash === undefined) return nativeCyclePhaseHash(plan, phaseId);
+  const {id: key, title, dependsOn, acceptanceCriteria, acceptanceRefs, safeToMergeReason, intentDefinitionHash} = p;
+  return sha256HexSync(
+    `threadnote.native-cycle.phase-intent.v1\n${canonical({objective: plan.objective, delivery: plan.delivery, featureId: plan.featureId, project: plan.project, spec: plan.spec, phase: {id: key, title, dependsOn, acceptanceCriteria, acceptanceRefs, safeToMergeReason, intentDefinitionHash}})}`,
+  );
+}
 export function initializeNativeCycle(value: NativeCyclePlan): NativeCycleState {
   const plan = decodeNativeCyclePlan(value);
   return {
@@ -835,6 +847,7 @@ export function reconcileNativeCyclePlan(
   value: NativeCycleState,
   newValue: NativeCyclePlan,
   reason: string,
+  policy: 'standard' | 'strict' = 'strict',
 ): {readonly state: NativeCycleState; readonly affected: readonly string[]} {
   const s = decodeNativeCycleState(value),
     plan = decodeNativeCyclePlan(newValue),
@@ -855,12 +868,16 @@ export function reconcileNativeCyclePlan(
   );
   for (const p of plan.phases) {
     const before = EffectOption.getOrUndefined(EffectArray.findFirst(old.phases, x => x.id === p.id));
-    if (
-      !before ||
-      before.baseBranch !== p.baseBranch ||
-      nativeCyclePhaseHash(old, p.id) !== nativeCyclePhaseHash(plan, p.id)
-    )
-      seeds.push(p.id);
+    // Under standard, paths and an undelivered base binding are derived bookkeeping, not material intent.
+    const material =
+      policy === 'standard'
+        ? !before ||
+          nativeCyclePhaseIntentHash(old, p.id) !== nativeCyclePhaseIntentHash(plan, p.id) ||
+          (before.baseBranch !== p.baseBranch && s.phases[p.id]?.delivery !== undefined)
+        : !before ||
+          before.baseBranch !== p.baseBranch ||
+          nativeCyclePhaseHash(old, p.id) !== nativeCyclePhaseHash(plan, p.id);
+    if (material) seeds.push(p.id);
   }
   const affected = descendants([old, plan], seeds);
   for (const k of affected) if (s.phases[k]?.status === 'merged') err('Merged history cannot be rewritten.');

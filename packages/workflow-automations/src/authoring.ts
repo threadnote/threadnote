@@ -258,7 +258,16 @@ export type NativeCompactIntent = typeof NativeCompactIntentSchema.Type;
 export const NativeCompactSourceSnapshotSchema = source;
 
 export const NativePlanIntentPolicyVersion = 2 as const;
-export type NativePlanIntentPolicyVersion = 1 | typeof NativePlanIntentPolicyVersion;
+/** Version 3 leaves ownership out of plan intent: phase paths and the compact expansion marker need no confirmation. */
+export const NativeDerivedOwnershipPlanIntentPolicyVersion = 3 as const;
+export type NativePlanIntentPolicyVersion =
+  1 | typeof NativePlanIntentPolicyVersion | typeof NativeDerivedOwnershipPlanIntentPolicyVersion;
+
+/** Standard-profile runs derive ownership, so their plans confirm intent without phase paths. */
+export const nativePlanIntentPolicyFor = (state: {
+  readonly policy?: {readonly mode: 'standard' | 'strict'};
+}): typeof NativePlanIntentPolicyVersion | typeof NativeDerivedOwnershipPlanIntentPolicyVersion =>
+  state.policy?.mode === 'standard' ? NativeDerivedOwnershipPlanIntentPolicyVersion : NativePlanIntentPolicyVersion;
 
 const alternativesDiagnostic = (issue: SchemaIssue.Issue, path: readonly PropertyKey[] = []): string | undefined => {
   if (
@@ -584,7 +593,10 @@ export function nativeSpecIntentDigest(
       requirements: decoded.requirements,
       current: decoded.current,
       target: decoded.target,
-      phases: decoded.phases,
+      phases:
+        planPolicyVersion === NativeDerivedOwnershipPlanIntentPolicyVersion
+          ? EffectArray.map(decoded.phases, ({affectedPaths: _affected, newPaths: _new, ...phase}) => phase)
+          : decoded.phases,
       decisions: decoded.decisions,
       reviewRequired: decoded.review.required,
       ...(decoded.spec
@@ -596,10 +608,20 @@ export function nativeSpecIntentDigest(
             },
           }
         : {}),
-      ...(decoded.compactOrigin ? {compactOrigin: decoded.compactOrigin} : {}),
+      ...(decoded.compactOrigin
+        ? {
+            compactOrigin:
+              planPolicyVersion === NativeDerivedOwnershipPlanIntentPolicyVersion
+                ? {
+                    version: decoded.compactOrigin.version,
+                    eligibilityRationale: decoded.compactOrigin.eligibilityRationale,
+                  }
+                : decoded.compactOrigin,
+          }
+        : {}),
     };
     return sha256HexSync(
-      `threadnote.native-authoring.plan-intent.v${NativePlanIntentPolicyVersion}\n${canonicalAuthoringJson(intent)}`,
+      `threadnote.native-authoring.plan-intent.v${planPolicyVersion}\n${canonicalAuthoringJson(intent)}`,
     );
   }
   const intent = {

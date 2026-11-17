@@ -1,3 +1,4 @@
+import {nativeWorkflowPolicyOf} from '@threadnote/workflow-automations/gates';
 import {isJsonObject} from '@threadnote/platform/json';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Effect, FileSystem, Path, Schema} from 'effect';
@@ -13,10 +14,10 @@ import {
   isNativeMermaidDiagram,
   nativeAuthoringDigest,
   nativeAuthoringIssueSummary,
-  NativePlanIntentPolicyVersion,
   nativeSpecIntentDigest,
   validateNativeAuthoring,
   type NativeAuthoringDocument,
+  nativePlanIntentPolicyFor,
 } from '@threadnote/workflow-automations/authoring';
 import {
   decodeNativeDocument,
@@ -997,7 +998,8 @@ export const runNativeAuthoring = <R>(
       );
     yield* admitLinkedSpec(document);
     const validation = yield* Effect.try({
-      try: () => validateNativeAuthoring(document, request),
+      try: () =>
+        validateNativeAuthoring(document, {...request, planIntentPolicyVersion: nativePlanIntentPolicyFor(state)}),
       catch: nativeWorkflowError,
     });
     if (request.command === 'acceptance-packet') return acceptancePacket(document, validation, request.detail);
@@ -1748,7 +1750,7 @@ const saveAuthoring = <R>(
         },
         documentHash: validation.documentHash,
         intentHash: validation.intentHash,
-        ...(document.kind === 'plan' ? {planIntentPolicyVersion: NativePlanIntentPolicyVersion} : {}),
+        ...(document.kind === 'plan' ? {planIntentPolicyVersion: nativePlanIntentPolicyFor(state)} : {}),
         baseRevision: prior?.revision ?? null,
         readiness,
         data,
@@ -1897,6 +1899,7 @@ const exportAuthoring = Effect.fn('workflowAutomation.authoring.export')(functio
     EffectArray.join(EffectArray.map(document.phases, phase => phase.id).sort(), '\n')
   )
     return yield* fail('invalid-request', 'Branch bindings must cover exactly the approved phase IDs.');
+  const derivedOwnership = nativeWorkflowPolicyOf(state) === 'standard';
   const phases = [];
   for (const phase of document.phases) {
     const branch = request.bindings[phase.id];
@@ -1911,6 +1914,14 @@ const exportAuthoring = Effect.fn('workflowAutomation.authoring.export')(functio
     phases.push({
       id: phase.id,
       definitionHash: sha256HexSync('threadnote.native-cycle.phase-definition.v1\n' + stableJson(phase)),
+      ...(derivedOwnership
+        ? {
+            intentDefinitionHash: sha256HexSync(
+              'threadnote.native-cycle.phase-intent-definition.v1\n' +
+                stableJson({...phase, affectedPaths: undefined, newPaths: undefined}),
+            ),
+          }
+        : {}),
       title: phase.title,
       dependsOn: phase.dependsOn,
       allowedPaths: [...phase.affectedPaths, ...phase.newPaths],

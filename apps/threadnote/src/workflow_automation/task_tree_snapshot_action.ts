@@ -59,9 +59,13 @@ export const recordNativeTaskTreeSnapshot = (
     const baseline = latest?.baselines[phaseId];
     if (!recorded || !baseline)
       return yield* fail('snapshot-not-recorded', 'The canonical snapshot was not persisted.');
+    const outOfPlan = recorded.snapshot.outOfPlan ?? [];
     return {
       status: 'recorded',
       replayed: recorded.snapshot.snapshotId === before?.snapshot.snapshotId,
+      ...(outOfPlan.length > 0
+        ? {warnings: [{_tag: 'warn' as const, gate: 'scope.out-of-plan' as const, detail: {files: outOfPlan}}]}
+        : {}),
       snapshot: recorded,
       snapshotRef: taskActionSnapshotRef(
         {

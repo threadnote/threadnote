@@ -2,7 +2,12 @@ import {Array as EffectArray, Effect, Option as EffectOption, String as EffectSt
 import * as EffectRecord from 'effect/Record';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
-import {checkNativeCycleScope, nextNativeCycle, nativeCycleParentsReady} from '@threadnote/workflow-automations/cycle';
+import {
+  checkNativeCycleScope,
+  nextNativeCycle,
+  nativeCycleParentsReady,
+  nativeCyclePhaseIntentHash,
+} from '@threadnote/workflow-automations/cycle';
 import type {NativeCycleState} from '@threadnote/workflow-automations/cycle';
 import type {NativeCycleSnapshot} from '@threadnote/workflow-automations/cycle-review';
 import type {NativeCycleRuntime} from '@threadnote/workflow-automations/cycle-runtime';
@@ -159,7 +164,7 @@ export const recordNativeCycleTreeSnapshot = Effect.fn('workflowAutomation.cycle
   const captured = yield* captureNativeCycleSource(repo, baseline.tree);
   const outOfPlan: string[] = [];
   const scope = yield* readNativeCycleIncoming(repo, phase, captured, baseline, outOfPlan);
-  const intentHash = state.phases[phase.id].phaseHash;
+  const intentHash = nativeCyclePhaseIntentHash(state.plan, phase.id);
   const phaseSnapshots = EffectArray.filter(runtime.snapshots, entry => entry.snapshot.phaseId === phase.id);
   const latest = phaseSnapshots.at(-1);
   const reviewed = new Set(EffectArray.map(runtime.reviews, entry => entry.snapshotId));
