@@ -560,18 +560,16 @@ export const assembleNativeInference = Effect.fn('assembleNativeInference')(func
         throw new Error('Pinned Windows ARM inference toolchain changed.');
       yield* filesystem.writeFileString(
         toolchainPath,
-        EffectString.replaceAll('-march=armv8.7-a', '-march=armv8-a -fms-runtime-lib=static')(original),
+        EffectString.replaceAll('-march=armv8.7-a', '-march=armv8-a')(original),
       );
+      // ggml and llama are separate DLLs that share CRT FILE*/fd state (llama-mmap.cpp opens via
+      // ggml_fopen, then calls _get_osfhandle(_fileno(fp))). A per-DLL static CRT fail-fasts there, so
+      // keep upstream's shared dynamic CRT, matching the locked x64 distribution.
       const adaptationPath = path.join(isolatedPackage, 'llama', 'cmake', 'win32.llvmApplyGnuModeAdaptations.cmake');
-      const adaptation = yield* filesystem.readFileString(adaptationPath);
-      if (!EffectString.includes('--dependent-lib=msvcrt')(adaptation))
+      if (!EffectString.includes('--dependent-lib=msvcrt')(yield* filesystem.readFileString(adaptationPath)))
         throw new Error('Pinned Windows inference CRT adaptation changed.');
-      yield* filesystem.writeFileString(
-        adaptationPath,
-        EffectString.replaceAll('--dependent-lib=msvcrt', '--dependent-lib=libcmt')(adaptation),
-      );
       toolchain.windowsCpuFloor = 'armv8-a';
-      toolchain.windowsCrt = 'static';
+      toolchain.windowsCrt = 'dynamic';
     }
 
     const source = path.join(isolatedPackage, 'llama', 'llama.cpp');
@@ -618,7 +616,7 @@ export const assembleNativeInference = Effect.fn('assembleNativeInference')(func
         nativeInferenceBuildDriverSource(`
       const {compileLlamaCpp} = await import('./node-llama-cpp/dist/bindings/utils/compileLLamaCpp.js');
       const {getPlatformInfo} = await import('./node-llama-cpp/dist/bindings/utils/getPlatformInfo.js');
-      await compileLlamaCpp({customCmakeOptions:new Map(Object.entries(${JSON.stringify({...PORTABLE_OPTIONS, ...(sourceGpu === 'metal' ? {GGML_METAL: 'ON', GGML_METAL_EMBED_LIBRARY: 'ON'} : {}), ...(process.platform === 'win32' ? {GGML_CPU_ALL_VARIANTS: 'OFF', GGML_CPU_ARM_ARCH: 'armv8-a', CMAKE_MSVC_RUNTIME_LIBRARY: 'MultiThreaded'} : {})})})),
+      await compileLlamaCpp({customCmakeOptions:new Map(Object.entries(${JSON.stringify({...PORTABLE_OPTIONS, ...(sourceGpu === 'metal' ? {GGML_METAL: 'ON', GGML_METAL_EMBED_LIBRARY: 'ON'} : {}), ...(process.platform === 'win32' ? {GGML_CPU_ALL_VARIANTS: 'OFF', GGML_CPU_ARM_ARCH: 'armv8-a'} : {})})})),
         progressLogs:'stderr',platform:${JSON.stringify(process.platform === 'darwin' ? 'mac' : process.platform === 'win32' ? 'win' : 'linux')},
         platformInfo:await getPlatformInfo(),arch:process.arch,gpu:${JSON.stringify(sourceGpu)},
         llamaCpp:{repo:'ggml-org/llama.cpp',release:'v0.7.0'}},
@@ -682,12 +680,12 @@ export const assembleNativeInference = Effect.fn('assembleNativeInference')(func
       if (process.platform === 'win32') {
         if (
           !EffectString.includes('-march=armv8-a')(compileCommands) ||
-          !EffectString.includes('-fms-runtime-lib=static')(compileCommands) ||
+          !EffectString.includes('--dependent-lib=msvcrt')(compileCommands) ||
           /-march=(?:native|armv(?:8\.[1-9]|9)[^\s"\\]*)/u.test(compileCommands) ||
-          EffectString.includes('--dependent-lib=msvcrt')(compileCommands)
+          /-fms-runtime-lib=static|--dependent-lib=libcmt/u.test(compileCommands)
         )
-          throw new Error('Actual Windows ARM compile commands violate the portable CPU/static CRT profile.');
-        toolchain.windowsCompileProfileVerified = 'armv8-a/staticCRT';
+          throw new Error('Actual Windows ARM compile commands violate the portable CPU/dynamic CRT profile.');
+        toolchain.windowsCompileProfileVerified = 'armv8-a/dynamicCRT';
       }
 
       toolchain[`cmakeInputs:${folder}`] = EffectArray.join(

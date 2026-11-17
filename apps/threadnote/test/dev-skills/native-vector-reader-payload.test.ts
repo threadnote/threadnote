@@ -75,9 +75,10 @@ if (${args.includes('/EXPORTS')}) {
         expect(Exit.isFailure(dependency) && Cause.pretty(dependency.cause)).toContain('external SQLite');
 
         const crt = yield* fixture({dependencies: '  VCRUNTIME140.dll\r\n'});
-        const arm = yield* crt().pipe(Effect.exit);
-        expect(Exit.isFailure(arm) && Cause.pretty(arm.cause)).toContain('pinned static CRT');
-        // The locked x64 inference distribution retains its existing upstream dynamic CRT allowance.
+        const reader = yield* crt(false).pipe(Effect.exit);
+        expect(Exit.isFailure(reader) && Cause.pretty(reader.cause)).toContain('pinned static CRT');
+        // Multi-DLL inference keeps upstream's shared dynamic CRT on both Windows architectures.
+        expect(yield* crt()).toMatch(/^[a-f0-9]{64}$/u);
         expect(yield* crt(true, 'bun-windows-x64-baseline')).toMatch(/^[a-f0-9]{64}$/u);
 
         const leaked = yield* fixture({exports: '    2 1 00011000 sqlite3_open\r\n'});

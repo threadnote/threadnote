@@ -414,7 +414,7 @@ export const auditNativeReaderBinary = Effect.fn('nativeReader.auditBinary')(fun
   }
   if (
     platform === 'win32' &&
-    (!options.inference || bunTarget === 'bun-windows-arm64') &&
+    !options.inference &&
     /\b(?:vcruntime\d*|msvcp\d*|msvcr\d*|msvcrt)(?:_[a-z0-9]+)?\.dll\b/iu.test(output)
   )
     throw new Error('Native payload requires an external Visual C++ runtime instead of the pinned static CRT.');
