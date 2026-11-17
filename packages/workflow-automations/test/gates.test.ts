@@ -21,14 +21,11 @@ describe('dev-cycle gate decisions', () => {
   const cases: readonly [GateId, 'standard' | 'strict', boolean, 'pass' | 'warn' | 'refuse'][] = [
     ['scope.out-of-plan', 'standard', false, 'warn'],
     ['scope.out-of-plan', 'strict', false, 'refuse'],
-    ['scope.out-of-plan', 'strict', true, 'warn'],
     ['review.required', 'standard', false, 'refuse'],
     ['review.required', 'strict', false, 'refuse'],
-    ['review.required', 'standard', true, 'warn'],
-    ['validation.required', 'strict', true, 'warn'],
-    ['intent.confirmation', 'standard', false, 'refuse'],
-    ['intent.confirmation', 'standard', true, 'refuse'],
-    ['intent.confirmation', 'strict', true, 'refuse'],
+    ['review.required', 'strict', true, 'warn'],
+    ['review.blocking', 'standard', false, 'refuse'],
+    ['review.blocking', 'standard', true, 'warn'],
   ];
   it.each(cases)('%s under %s with waiver=%s decides %s', (gate, policy, waived, expected) => {
     const decision = decideGate(policy, gate, violation, waived ? waiver : undefined, next);
@@ -42,9 +39,8 @@ describe('dev-cycle gate decisions', () => {
       expect(decideGate('strict', gate, undefined, undefined, next)).toEqual({_tag: 'pass'});
   });
 
-  it('never offers intent confirmation as a waivable gate', () => {
-    expect(nativeWaivableGateIds).not.toContain('intent.confirmation');
-    expect(nativeWaivableGateIds).toContain('review.required');
+  it('offers waivers only for the review gates', () => {
+    expect(nativeWaivableGateIds).toEqual(['review.required', 'review.blocking']);
   });
 
   it('treats a run without a recorded policy as strict', () => {
@@ -90,7 +86,8 @@ describe('audited waiver records', () => {
     expect(decode({id: nativeCycleWaiverId(waiver), ...waiver})._tag).toBe('Success');
   });
 
-  it('never records a waiver of intent confirmation', () => {
-    expect(decode({id: nativeCycleWaiverId(waiver), ...waiver, gate: 'intent.confirmation'})._tag).toBe('Failure');
+  it('never records a waiver of a gate that no decision consults, such as intent confirmation', () => {
+    for (const gate of ['intent.confirmation', 'validation.required', 'scope.out-of-plan'])
+      expect(decode({id: nativeCycleWaiverId(waiver), ...waiver, gate})._tag).toBe('Failure');
   });
 });

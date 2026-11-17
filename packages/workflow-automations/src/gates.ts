@@ -5,25 +5,25 @@ import {WorkflowAutomationError, type WorkflowNextCommand, type WorkflowRefusalD
 /** `profile` already names the host surface, so the dev-cycle strictness is a policy. */
 export const nativeWorkflowPolicies = ['standard', 'strict'] as const;
 export type NativeWorkflowPolicy = (typeof nativeWorkflowPolicies)[number];
-export type NativeGateClass = 'intent' | 'integrity' | 'advisory';
+export type NativeGateClass = 'integrity' | 'advisory';
 
-/** One registry for every policy refusal; intent is satisfied only by a confirmation or an admission. */
+/**
+ * The gates `decideGate` decides. An advisory gate warns under standard and refuses under strict; an integrity gate
+ * refuses on every profile unless an audited waiver covers the exact tree. Intent is not a gate: only a confirmation
+ * or an admission satisfies it.
+ */
 export const nativeGates = {
   'scope.out-of-plan': {class: 'advisory'},
-  'source.clean-tree': {class: 'advisory'},
-  'source.anchor': {class: 'advisory'},
-  'base.binding-change': {class: 'advisory'},
-  'graph.citation-currency': {class: 'advisory'},
   'review.required': {class: 'integrity'},
   'review.blocking': {class: 'integrity'},
-  'validation.required': {class: 'integrity'},
-  'intent.confirmation': {class: 'intent'},
 } as const satisfies Record<string, {readonly class: NativeGateClass}>;
 export type GateId = keyof typeof nativeGates;
-export type NativeWaivableGateId = Exclude<GateId, 'intent.confirmation'>;
+export type NativeWaivableGateId = {
+  [Gate in GateId]: (typeof nativeGates)[Gate]['class'] extends 'integrity' ? Gate : never;
+}[GateId];
 export const nativeWaivableGateIds = EffectArray.filter(
   EffectRecord.keys(nativeGates),
-  (gate): gate is NativeWaivableGateId => nativeGates[gate].class !== 'intent',
+  (gate): gate is NativeWaivableGateId => nativeGates[gate].class === 'integrity',
 );
 
 export type NativeNextCommand = WorkflowNextCommand;
@@ -48,7 +48,7 @@ export const nativeWorkflowPolicyOf = (state: {
   readonly policy?: {readonly mode: NativeWorkflowPolicy};
 }): NativeWorkflowPolicy => state.policy?.mode ?? 'strict';
 
-/** Pure. A waived violation warns, an advisory violation warns under standard, anything else refuses. */
+/** Pure. A waived integrity violation warns, an advisory violation warns under standard, anything else refuses. */
 export function decideGate(
   policy: NativeWorkflowPolicy,
   gate: GateId,
@@ -58,7 +58,7 @@ export function decideGate(
 ): GateDecision {
   if (violation === undefined) return {_tag: 'pass'};
   const gateClass: NativeGateClass = nativeGates[gate].class;
-  if (gateClass !== 'intent' && waiver) return {_tag: 'warn', gate, detail: violation, waiverId: waiver.id};
+  if (gateClass === 'integrity' && waiver) return {_tag: 'warn', gate, detail: violation, waiverId: waiver.id};
   if (gateClass === 'advisory' && policy === 'standard') return {_tag: 'warn', gate, detail: violation};
   return {_tag: 'refuse', gate, detail: violation, next};
 }

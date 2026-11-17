@@ -512,6 +512,36 @@ describe('audited waivers', () => {
     }).pipe(runCycle),
   );
 
+  effectIt.effect('refuses a waiver of a gate that no decision consults', () =>
+    Effect.gen(function* () {
+      const f = yield* cycleFixture(
+        ['one'],
+        'local',
+        false,
+        false,
+        true,
+        undefined,
+        undefined,
+        {},
+        {policy: 'standard'},
+      );
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = 1;\n');
+      yield* runNativeTaskAction(f.config, {command: 'record-snapshot', runId: 'native-run', callerCwd: f.repo});
+      const before = yield* f.fs.readFileString(f.statePath());
+      expect(
+        yield* runNativeTaskAction(f.config, {
+          command: 'waive',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          gate: 'validation.required',
+          reason: 'No validation is possible here.',
+          userAuthority: 'User: skip validation.',
+        }).pipe(Effect.flip),
+      ).toMatchObject({code: 'invalid-request'});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
+    }).pipe(runCycle),
+  );
+
   effectIt.effect('does not carry a waiver to a changed tree', () =>
     Effect.gen(function* () {
       const f = yield* cycleFixture(
