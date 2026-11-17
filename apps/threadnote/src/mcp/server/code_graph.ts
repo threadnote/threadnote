@@ -378,7 +378,11 @@ export function registerCodeGraphTool(
         ) {
           return argumentError('inspect_code_graph package is valid only for operation=query.');
         }
-        const missingSelector = missingCodeGraphSelector(operation, {from, nodeId, query, symbol, to});
+        const missingSelector = Effect2.pipe(workset, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+        )
+          ? undefined
+          : missingCodeGraphSelector(operation, {from, nodeId, query, symbol, to});
         if (missingSelector !== undefined) return argumentError(missingSelector);
         if (
           options.allowWorkset === false &&
