@@ -2844,7 +2844,8 @@ describe('native task actions', () => {
       const config = {...f.config, agentContextHome: home, manifestPath: f.path.join(home, 'manifest.json')};
       const system = yield* SystemInfo;
       const testSystem = {...system, currentDirectory: () => repo, homeDirectory: home};
-      yield* runCommandEffect('git', ['-C', repo, 'add', 'source.ts']);
+      yield* f.fs.writeFileString(f.path.join(repo, 'unlisted.ts'), 'export const unlisted = true;\n');
+      yield* runCommandEffect('git', ['-C', repo, 'add', 'source.ts', 'unlisted.ts']);
       yield* runCommandEffect('git', [
         '-C',
         repo,
@@ -2945,6 +2946,20 @@ describe('native task actions', () => {
           },
         ],
       };
+      const outsideRefIndex = expansion.context.codeRefs.length;
+      const rejectedExpansion = yield* runNativeTaskAction(config, {
+        command: 'compact-expand',
+        runId,
+        callerCwd: repo,
+        document: {
+          ...expansion,
+          context: {...expansion.context, codeRefs: [...expansion.context.codeRefs, 'unlisted.ts']},
+        },
+      }).pipe(Effect.result);
+      expect(rejectedExpansion).toMatchObject({failure: {code: 'invalid-document'}});
+      expect(JSON.stringify(rejectedExpansion)).toContain(
+        `code-ref-out-of-snapshot at context.codeRefs[${outsideRefIndex}]`,
+      );
       const firstExpansion = object(
         yield* runNativeTaskAction(config, {
           command: 'compact-expand',

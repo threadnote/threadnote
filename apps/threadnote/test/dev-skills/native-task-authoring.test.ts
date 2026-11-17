@@ -419,7 +419,7 @@ effectIt.effect('selects a configured graph project on task-author start in an a
   }).pipe(TestClock.withLive, provideNative),
 );
 
-effectIt.effect('reports canonical path failures on task-author start and save without changing state', () =>
+effectIt.effect('reports field-specific schema failures on task-author start and save without changing state', () =>
   Effect.gen(function* () {
     const f = yield* setup;
     const validPlan = {
@@ -431,10 +431,17 @@ effectIt.effect('reports canonical path failures on task-author start and save w
       })),
     };
     const invalidPlan = {...validPlan, phases: [{...validPlan.phases[0], affectedPaths: ['src/']}]};
+    const marker = 'private-code-ref-marker';
+    const oversizedRefsPlan = {
+      ...validPlan,
+      context: {...validPlan.context, codeRefs: A.makeBy(9, index => `${marker}/${index}.ts`)},
+    };
     const invalidFile = f.path.join(f.root, 'invalid-plan.json');
     const validFile = f.path.join(f.root, 'valid-plan.json');
+    const oversizedRefsFile = f.path.join(f.root, 'oversized-refs-plan.json');
     yield* f.fs.writeFileString(invalidFile, JSON.stringify(invalidPlan));
     yield* f.fs.writeFileString(validFile, JSON.stringify(validPlan));
+    yield* f.fs.writeFileString(oversizedRefsFile, JSON.stringify(oversizedRefsPlan));
     const invalidStart = yield* f
       .author({
         command: 'start',
@@ -472,6 +479,12 @@ effectIt.effect('reports canonical path failures on task-author start and save w
     if (invalidSave._tag !== 'Failure') throw new Error('Invalid plan unexpectedly saved.');
     expect(JSON.stringify(invalidSave)).toContain('phases[0].affectedPaths[0]');
     expect(JSON.stringify(invalidSave)).toContain('a trailing separator');
+    const oversizedRefsSave = yield* f
+      .author({command: 'save', authoringRef: draft.authoringRef, contentFile: oversizedRefsFile})
+      .pipe(Effect.result);
+    expect(oversizedRefsSave).toMatchObject({failure: {code: 'invalid-content'}});
+    expect(JSON.stringify(oversizedRefsSave)).toMatch(/context\.codeRefs\b.*\bat most 8\b/u);
+    expect(JSON.stringify(oversizedRefsSave)).not.toContain(marker);
     expect(yield* f.fs.readFileString(statePath)).toBe(before);
   }).pipe(TestClock.withLive, provideNative),
 );

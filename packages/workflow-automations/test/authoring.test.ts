@@ -357,30 +357,54 @@ describe('native authoring documents', () => {
     );
   });
 
-  it('keeps unrelated, malformed and unknown-field failures generic without inventing alternatives diagnostics', () => {
+  it('names the failing field and constraint without authored content or invented alternatives diagnostics', () => {
     const input = alternativesPlan(2);
     const decision = input.decisions[0];
     if (!decision) throw new Error('Expected the decision fixture.');
     const marker = 'private-field-and-value';
-    for (const invalid of [
-      {...input, [marker]: marker},
-      {...input, context: {...input.context, codeRefs: Array.from({length: 9}, (_, i) => `src/${i}.ts`)}},
-      {...input, decisions: [{...decision, alternatives: {length: 3, [marker]: marker}}]},
-      {...input, decisions: [{...decision, alternatives: [{id: 'a', design: 0, tradeoffs: marker}]}]},
-      {
-        ...input,
-        decisions: [{...decision, alternatives: [{id: 'a', design: 0, tradeoffs: marker}, ...decision.alternatives]}],
-      },
-      {
-        ...input,
-        decisions: [{...decision, alternatives: [{id: 'a', design: marker, tradeoffs: marker, [marker]: marker}]}],
-      },
-    ]) {
+    const cases: ReadonlyArray<readonly [unknown, string, string]> = [
+      [
+        {...input, context: {...input.context, codeRefs: Array.from({length: 9}, (_, i) => `${marker}/${i}.ts`)}},
+        'context.codeRefs',
+        'at most 8',
+      ],
+      [
+        {...input, decisions: [{...decision, alternatives: {length: 3, [marker]: marker}}]},
+        'decisions[0].alternatives',
+        'array',
+      ],
+      [
+        {...input, decisions: [{...decision, alternatives: [{id: 'a', design: 0, tradeoffs: marker}]}]},
+        'decisions[0].alternatives[0].design',
+        'string',
+      ],
+      [
+        {
+          ...input,
+          decisions: [{...decision, alternatives: [{id: 'a', design: 0, tradeoffs: marker}, ...decision.alternatives]}],
+        },
+        'decisions[0].alternatives[0].design',
+        'string',
+      ],
+      [
+        {
+          ...input,
+          decisions: [{...decision, alternatives: [{id: 'a', design: marker, tradeoffs: marker, [marker]: marker}]}],
+        },
+        'decisions[0].alternatives[0]',
+        'unsupported field',
+      ],
+    ];
+    for (const [invalid, location, constraint] of cases) {
       const before = JSON.stringify(invalid);
-      expect(caught(() => decodeNativeAuthoringDocument(invalid))).toMatchObject({
-        code: 'invalid-document',
-        message: 'The native authoring document is malformed or contains unsupported fields.',
-      });
+      const error = caught(() => decodeNativeAuthoringDocument(invalid));
+      if (!(error instanceof Error)) throw new Error('Invalid document unexpectedly decoded.');
+      expect(error).toMatchObject({code: 'invalid-document'});
+      expect(error.message).toContain(location);
+      expect(error.message).toContain(constraint);
+      expect(error.message).not.toContain(marker);
+      expect(error.message).not.toContain('items; maximum');
+      expect(new TextEncoder().encode(error.message).byteLength).toBeLessThanOrEqual(256);
       expect(JSON.stringify(invalid)).toBe(before);
     }
   });
@@ -436,16 +460,20 @@ describe('native authoring documents', () => {
       expect(error.message).toContain('a trailing separator');
       expect(error.message).not.toContain('src/');
     }
-    const genericCases = [
-      {...base, unexpectedField: 'private-marker'},
-      {...base, phases: [{...base.phases[0], affectedPaths: [42]}, ...base.phases.slice(1)]},
-    ];
-    for (const input of genericCases) {
-      expect(caught(() => decodeNativeAuthoringDocument(input))).toMatchObject({
-        code: 'invalid-document',
-        message: 'The native authoring document is malformed or contains unsupported fields.',
-      });
-    }
+    expect(caught(() => decodeNativeAuthoringDocument({...base, unexpectedField: 'private-marker'}))).toMatchObject({
+      code: 'invalid-document',
+      message: 'The native authoring document is malformed or contains unsupported fields.',
+    });
+    const nonString = caught(() =>
+      decodeNativeAuthoringDocument({
+        ...base,
+        phases: [{...base.phases[0], affectedPaths: [42]}, ...base.phases.slice(1)],
+      }),
+    );
+    if (!(nonString instanceof Error)) throw new Error('Invalid path unexpectedly decoded.');
+    expect(nonString.message).toContain('phases[0].affectedPaths[0]');
+    expect(nonString.message).toContain('string');
+    expect(nonString.message).not.toContain('violates');
     const marker = 'private-marker-';
     fc.assert(
       fc.property(
