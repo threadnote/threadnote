@@ -13,6 +13,7 @@ import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
 const THREADNOTE_COMMAND = 'threadnote';
+const THREADNOTE_ALIAS_COMMAND = 'tn';
 const THREADNOTE_MCP_COMMAND = 'threadnote-mcp-server';
 const THREADNOTE_AUTH0_CREDENTIAL_COMMAND = 'threadnote-credential-auth0-m2m';
 const THREADNOTE_AUTH0_REGISTRY_CREDENTIAL_COMMAND = 'docker-credential-threadnote-auth0-m2m';
@@ -26,6 +27,7 @@ class CommandShimConfigurationError extends Schema.TaggedError<
 export type LauncherMode =
   | 'cli'
   | 'mcp'
+  | 'cli-alias'
   | 'credential-oauth-m2m'
   | 'credential-registry-oauth-m2m'
   | 'credential-registry-oauth-publisher-m2m'
@@ -37,6 +39,7 @@ export type LauncherMode =
 const LAUNCHER_MODES: readonly LauncherMode[] = [
   'cli',
   'mcp',
+  'cli-alias',
   'credential-oauth-m2m',
   'credential-registry-oauth-m2m',
   'credential-registry-oauth-publisher-m2m',
@@ -46,7 +49,7 @@ const LAUNCHER_MODES: readonly LauncherMode[] = [
   'credential-registry-auth0-publisher-m2m',
   'credential-registry-auth0-user',
 ];
-const CORE_LAUNCHER_MODES: readonly LauncherMode[] = ['cli', 'mcp'];
+const CORE_LAUNCHER_MODES: readonly LauncherMode[] = ['cli', 'mcp', 'cli-alias'];
 const CONTROL_HELPER_MODES = new Map<string, LauncherMode>([
   ['oauth-m2m', 'credential-oauth-m2m'],
   ['auth0-m2m', 'credential-auth0-m2m'],
@@ -216,6 +219,7 @@ export const commandShimCheck = Effect.fn('commandShim.check')(function* (home?:
     for (const kind of managedCommandLauncherKinds(system.platform)) {
       const shimPath = yield* managedCommandShimPath(mode, kind);
       if (Option.isSome(yield* fs.readLink(shimPath).pipe(Effect.option))) {
+        if (mode === 'cli-alias') continue;
         return {
           detail: `${shimPath} is a symbolic link; repair will not overwrite it`,
           name: 'threadnote launcher',
@@ -231,6 +235,7 @@ export const commandShimCheck = Effect.fn('commandShim.check')(function* (home?:
         } satisfies DoctorCheck;
       }
       if (!isManagedCommandShim(content)) {
+        if (mode === 'cli-alias') continue;
         return {
           detail: `${shimPath} exists but is not managed by Threadnote; repair will not overwrite it`,
           name: 'threadnote launcher',
@@ -515,7 +520,9 @@ const managedCommandShimPath = Effect.fn('commandShim.path')(function* (
                     ? THREADNOTE_OAUTH_USER_REGISTRY_CREDENTIAL_COMMAND
                     : mode === 'credential-registry-auth0-user'
                       ? THREADNOTE_AUTH0_USER_REGISTRY_CREDENTIAL_COMMAND
-                      : THREADNOTE_COMMAND;
+                      : mode === 'cli-alias'
+                        ? THREADNOTE_ALIAS_COMMAND
+                        : THREADNOTE_COMMAND;
   const resolvedKind = kind ?? primaryCommandLauncherKind(system.platform);
   return path.join(binDirectory, resolvedKind === 'cmd' ? `${command}.cmd` : command);
 });
