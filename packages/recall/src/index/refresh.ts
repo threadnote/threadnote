@@ -515,7 +515,10 @@ const probeTouchedRecallSourceCorpusAliases = Effect.fn('recall.probeTouchedCorp
 ) {
   for (const [uri, target] of targets) {
     const rootPrefix = `${target.root.uri}/`;
-    const escapedRoot = EffectString.replaceAll('_', '\\_')(EffectString.replaceAll('%', '\\%')(EffectString.replaceAll('\\', '\\\\')(rootPrefix)));
+    const escapedRoot = EffectString.replaceAll(
+      '_',
+      '\\_',
+    )(EffectString.replaceAll('%', '\\%')(EffectString.replaceAll('\\', '\\\\')(rootPrefix)));
     const rootVariants = yield* sql.unsafe<{readonly uri: string}>(
       `SELECT uri FROM documents
        WHERE lower(uri) LIKE lower(?) ESCAPE '\\'

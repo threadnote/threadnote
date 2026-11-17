@@ -407,7 +407,9 @@ describe('scoped applicability', () => {
           );
           const expectedDirtySelfHiding = yield* uncachedOracle(identity);
           expect(warmDirtySelfHiding?.scope).toEqual(expectedDirtySelfHiding.scope);
-          expect(warmDirtySelfHiding?.evidence?.inventoryFingerprint).not.toBe(expectedClean.evidence?.inventoryFingerprint);
+          expect(warmDirtySelfHiding?.evidence?.inventoryFingerprint).not.toBe(
+            expectedClean.evidence?.inventoryFingerprint,
+          );
           for (const args of recordedGitSubcommands) {
             expect(args).not.toContain('ls-tree');
             expect(args).not.toContain('cat-file');
