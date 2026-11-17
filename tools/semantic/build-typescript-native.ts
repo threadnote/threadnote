@@ -558,8 +558,17 @@ export async function stageNativeTypeScriptFrontendSdk(
   await writeFile(patchSnapshot, patch, {mode: 0o600});
   const git = Bun.which('git');
   if (!git) throw new Error('Pinned frontend patch requires Git.');
-  await command(git, ['apply', '--check', '--include=dist/api/node/wtf8.js', patchSnapshot], destination, {}, 10000);
-  await command(git, ['apply', '--include=dist/api/node/wtf8.js', patchSnapshot], destination, {}, 10000);
+  // An enclosing work tree (a release build stages under the checkout) would rebase patch paths onto its root and
+  // silently skip them; the ceiling confines discovery to the copied tree, which never contains `.git`.
+  const gitEnvironment = {GIT_CEILING_DIRECTORIES: parent};
+  await command(
+    git,
+    ['apply', '--check', '--include=dist/api/node/wtf8.js', patchSnapshot],
+    destination,
+    gitEnvironment,
+    10000,
+  );
+  await command(git, ['apply', '--include=dist/api/node/wtf8.js', patchSnapshot], destination, gitEnvironment, 10000);
   await exact(target, frontend.distAfterSha256, 16 * 1024);
   for (const directory of directories.reverse()) await chmod(directory.path, directory.mode);
   await rm(snapshotDirectory, {recursive: true});
