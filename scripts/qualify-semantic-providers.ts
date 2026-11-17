@@ -102,6 +102,9 @@ if (!values.probe || !values.config || !values.output)
 const configText = await readFile(values.config, 'utf8');
 const input: unknown = JSON.parse(configText);
 const config = Schema.decodeUnknownSync(ProbeConfig, {onExcessProperty: 'error'})(input);
+// Relative paths resolve beside the configuration, so a relocated construction payload probes its own executable.
+const configDirectory = dirname(resolve(values.config));
+const command = resolve(configDirectory, config.command);
 const sourceHashes = EffectRecord.fromEntries(
   await Promise.all(
     EffectArray.map(
@@ -165,10 +168,13 @@ try {
     await mkdir(join(scratch, 'configuration'));
     await mkdir(join(scratch, 'home'));
     // Copy authored configuration only; never reuse a previous provider's mutable cache.
-    await copyFile(join(config.configurationTemplate!, 'config.ini'), join(scratch, 'configuration/config.ini'));
+    await copyFile(
+      join(resolve(configDirectory, config.configurationTemplate!), 'config.ini'),
+      join(scratch, 'configuration/config.ini'),
+    );
   }
   const args = EffectArray.map(config.args, arg => EffectString.replaceAll('{scratch}', scratch)(arg));
-  const peer = startSemanticProbe(resolve(config.command), args, root, settings, (method, params) => {
+  const peer = startSemanticProbe(command, args, root, settings, (method, params) => {
     if (method === 'experimental/serverStatus' && Schema.is(RustStatus)(params)) rustStatus = params;
   });
   signalCleanup = installProbeSignalCleanup(async signal => {
@@ -404,7 +410,7 @@ try {
       declaredVersion: config.version,
       language: config.language,
       fixture: config.fixture ?? 'standard',
-      executableSha256: hash(await readFile(resolve(config.command))),
+      executableSha256: hash(await readFile(command)),
       platform: process.platform,
       architecture: process.arch,
       initialized,

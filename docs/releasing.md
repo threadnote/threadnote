@@ -41,6 +41,29 @@ and `macos-15-intel` runner labels used by the release workflow. Their real-mode
 supervised local-model worker and disk-capacity admission—is therefore a pre-tag gate rather than being exercised for
 the first time after a tag is pushed.
 
+## Native TypeScript 7.1 source asset
+
+`tools/semantic/build-typescript-native.ts` constructs the private source-overlay `tsc` from pinned inputs. It never
+downloads a toolchain, and a construction receipt is build evidence only: it does not make the asset qualified or
+provider-eligible.
+
+- Inputs: a clean checkout of the exact official TypeScript commit in `typescriptNativeBuildRecipe.upstream`, the
+  pinned Go archive for the current host (checked by SHA-256 and size before extraction), a fresh private root outside
+  the checkout, and the canonical repository root. The pinned module graph is fetched once unless a module cache is
+  passed as the optional last argument.
+- `bun tools/semantic/build-typescript-native.ts --prepare OFFICIAL_SOURCE GO_ARCHIVE PRIVATE_ROOT REPOSITORY_ROOT`
+  writes `PRIVATE_ROOT/native-ts71-*/payload` (binary, notices, `probe-config.json`, `construction-receipt.json`) and
+  the sibling `prepared` runtime asset, then verifies both.
+- `--verify-construction PAYLOAD` re-checks a payload on its own and prints the executable to run; take the probe
+  executable from this output. `--verify-prepared PREPARED` re-checks a prepared asset, including POSIX modes, and
+  succeeds only beside its sibling `payload`. A schema-v1 payload stores an absolute probe command and is refused once
+  moved; schema-v2 commands are relative to `payload`.
+- Cache `payload` and `prepared` together as one unit so the prepared asset stays verifiable.
+- `THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR` names a raw `payload` for `bun run build`, which stages
+  `dist/runtime/typescript` only for a reviewed host binary pin.
+- To label a local stage, set `THREADNOTE_DEVELOPMENT_BUILD_VERSION` to a SHA-bound version such as
+  `6.0.0-local.g<40-hex commit>`.
+
 ## Signing order
 
 macOS builds sign each nested Mach-O native library first, then sign the Bun executable with hardened runtime and the

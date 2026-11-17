@@ -148,7 +148,8 @@ const treeDigest = Effect.fn('semantic.treeDigest')(function* (
       name =>
         Effect.gen(function* () {
           const file = path.join(directory, name);
-          const relative = path.relative(canonical, file);
+          // Portable `/` names: identical on POSIX, and Windows digests match the native asset builder's.
+          const relative = EffectString.replaceAll(path.sep, '/')(path.relative(canonical, file));
           if (relative === '.git' || EffectString.startsWith('.git/')(relative)) return;
           if (++files > 20000) return yield* LspFault.make({code: 'capacity'});
           // Symlinked or external project roots need explicit provider qualification; never silently omit them.
@@ -213,6 +214,7 @@ const treeDigest = Effect.fn('semantic.treeDigest')(function* (
       }
     }
   }
+  // localeCompare ordering is part of every existing digest and the native asset pins; code-unit order would change them.
   return sha256HexSync(JSON.stringify(entries.sort(([a], [b]) => EffectString.localeCompare(b)(a))));
 });
 export const semanticTreeDigest = (root: string, projectConfiguration = false) =>

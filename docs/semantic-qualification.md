@@ -60,6 +60,11 @@ bun scripts/qualify-semantic-providers.ts --probe --config /absolute/probe.json 
 bun scripts/qualify-semantic-editors.ts --probe --editor /absolute/editor-cli --output /absolute/editor-report.json
 ```
 
+Only a relative `command` or `configurationTemplate` resolves against the directory containing the probe configuration
+rather than the current directory; relative paths inside `args`, such as a Java `-jar` launcher, reach the child
+unchanged. A moved native TypeScript construction payload therefore probes its own executable. CI should first run
+`build-typescript-native.ts --verify-construction PAYLOAD`, then probe with that payload's own `probe-config.json`.
+
 Java uses `language: "java"`, the selected Java executable as `command`, and an explicit JDT LS launcher/configuration in
 `args`. Set `configurationTemplate` to the platform-specific server configuration directory. The harness copies only its
 `config.ini` into a new `{scratch}/configuration`; it does not reuse mutable server state. The literal `{scratch}` in an

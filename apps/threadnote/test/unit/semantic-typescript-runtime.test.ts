@@ -1,8 +1,12 @@
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Array as EffectArray, Config, Effect, FileSystem, Layer, Path} from 'effect';
+import {Array as EffectArray, Config, Effect, FileSystem, Layer, Option, Path} from 'effect';
 import {TestClock} from 'effect/testing';
-import {describe, expect} from 'vitest';
+import {describe, expect, it} from 'vitest';
+/* oxlint-disable effecttsgo/node-builtin-import -- The construction receipt readback is a Promise filesystem boundary. */
+import {mkdir, mkdtemp, realpath, rename, rm, writeFile} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {Observation} from '@threadnote/semantic/contracts';
@@ -12,6 +16,10 @@ import {makeTypeScriptRuntime} from '../../src/semantic/providers/typescript_run
 import {makeTypeScriptSession} from '../../src/semantic/providers/typescript.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import {
+  readNativeTypeScriptConstructionReceipt,
+  typescriptNativeBuildRecipe,
+} from '../../../../tools/semantic/build-typescript-native.js';
 
 describe.skipIf(process.platform === 'win32')('TypeScript continuous host plugin policy', () => {
   effectIt.effect(
@@ -167,4 +175,79 @@ describe.skipIf(process.platform === 'win32')('TypeScript continuous host plugin
       ),
     45000,
   );
+});
+
+const {upstream, orderedOverlayDigest, toolchain, runtimeAsset} = typescriptNativeBuildRecipe;
+const hostArchive = Option.getOrUndefined(
+  EffectArray.findFirst(
+    toolchain.archives,
+    item =>
+      item.os === (process.platform === 'win32' ? 'windows' : process.platform) &&
+      item.arch === (process.arch === 'x64' ? 'amd64' : process.arch),
+  ),
+);
+/** A tiny stand-in payload whose receipt is built only from recipe values; no construction runs. */
+async function writeConstructionPayload(payload: string, schema: 'v1' | 'v2') {
+  const executable = runtimeAsset.executableName();
+  const binary = new TextEncoder().encode('#!/bin/sh\nexit 0\n');
+  await mkdir(payload, {mode: 0o700});
+  await writeFile(join(payload, executable), binary, {mode: 0o755});
+  const probeConfig = `${JSON.stringify(
+    {
+      id: 'typescript-native',
+      version: upstream.version,
+      command: schema === 'v2' ? executable : join(payload, executable),
+      args: ['--lsp', '--stdio'],
+      language: 'typescript',
+    },
+    null,
+    2,
+  )}\n`;
+  await writeFile(join(payload, 'probe-config.json'), probeConfig, {mode: 0o600});
+  const raceSupported = process.platform !== 'win32' || process.arch === 'x64';
+  const receipt = {
+    kind: `threadnote-native-typescript-source-construction-${schema}`,
+    version: upstream.version,
+    sourceCommit: upstream.commit,
+    sourceTree: upstream.tree,
+    orderedOverlaySha256: orderedOverlayDigest,
+    goArchiveSha256: hostArchive?.sha256,
+    goVersion: toolchain.version,
+    host: `${process.platform}-${process.arch}`,
+    binarySha256: sha256HexSync(binary),
+    binaryBytes: binary.byteLength,
+    probeConfigSha256: sha256HexSync(probeConfig),
+    completedChecks: [
+      'module-verify',
+      'focused-go',
+      raceSupported ? 'race-go' : 'race-unsupported-windows-arm64',
+      'build',
+      'version',
+    ],
+  };
+  await writeFile(join(payload, 'construction-receipt.json'), `${JSON.stringify(receipt, null, 2)}\n`, {mode: 0o600});
+  return {executable, binarySha256: receipt.binarySha256};
+}
+
+describe.skipIf(hostArchive === undefined)('native TypeScript construction receipt relocation', () => {
+  it('derives the command for a moved v2 payload and refuses a moved v1 payload as stale', async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'tn-ts71-receipt-')));
+    try {
+      const v2 = await writeConstructionPayload(join(root, 'v2-built'), 'v2');
+      await rename(join(root, 'v2-built'), join(root, 'v2-moved'));
+      await expect(readNativeTypeScriptConstructionReceipt(join(root, 'v2-moved'))).resolves.toEqual({
+        host: `${process.platform}-${process.arch}`,
+        binarySha256: v2.binarySha256,
+        command: join(root, 'v2-moved', v2.executable),
+      });
+      const v1 = await writeConstructionPayload(join(root, 'v1-built'), 'v1');
+      expect((await readNativeTypeScriptConstructionReceipt(join(root, 'v1-built'))).command).toBe(
+        join(root, 'v1-built', v1.executable),
+      );
+      await rename(join(root, 'v1-built'), join(root, 'v1-moved'));
+      await expect(readNativeTypeScriptConstructionReceipt(join(root, 'v1-moved'))).rejects.toThrow(/stale/u);
+    } finally {
+      await rm(root, {recursive: true, force: true});
+    }
+  });
 });
