@@ -22,7 +22,7 @@ import {
 } from './protocol.js';
 import {verifyWorkflowBinding} from './profile.js';
 import {resolveWorkflowGraphScope} from './graph_scope.js';
-import {assertWorkflowJournalIntegrity} from './journal_validation.js';
+import {assertWorkflowJournalIntegrity, workflowArtifactsDigest} from './journal_validation.js';
 import {readWorkflowSharedRoots} from './scopes.js';
 import {verifyWorkflowEvidence} from './evidence.js';
 import {decodeWorkflowJournal, encodeWorkflowJournal, workflowJournalLimits} from './journal_codec.js';
@@ -118,6 +118,7 @@ const WorkflowJournalSchema = Schema.Struct({
   manifestUri: Schema.String,
   manifestContent: Schema.String,
   previousManifestContent: Schema.optionalKey(Schema.String),
+  previousArtifacts: Schema.optionalKey(Schema.Record(Schema.String, WorkflowArtifactSchema)),
   manifestCommitted: Schema.Boolean,
 });
 
@@ -466,6 +467,7 @@ export const withWorkflowJournalSession = <A, E, R>(
     }),
   );
 
+// A digest keeps the indexed state memory a fixed size; the private journal holds the registry.
 const manifestDocument = (binding: WorkflowBinding, artifacts: WorkflowJournal['artifacts'], timestamp: string) =>
   formatMemoryDocument(
     'MEMORY',
@@ -479,7 +481,7 @@ const manifestDocument = (binding: WorkflowBinding, artifacts: WorkflowJournal['
       sourceAgentClient: 'threadnote',
       sourceSessionId: binding.workflowRunId,
     },
-    stableJson({protocolVersion: 1, binding, artifacts}),
+    stableJson({protocolVersion: 2, binding, artifactsSha256: workflowArtifactsDigest(artifacts)}),
   );
 
 export const workflowTransition = (
@@ -489,6 +491,7 @@ export const workflowTransition = (
 ): WorkflowJournal => ({
   ...updated,
   previousManifestContent: previous.manifestContent,
+  previousArtifacts: previous.artifacts,
   manifestContent: manifestDocument(updated.binding, updated.artifacts, timestamp),
   manifestCommitted: false,
 });

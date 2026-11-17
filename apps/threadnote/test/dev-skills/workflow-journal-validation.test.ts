@@ -292,6 +292,10 @@ describe('workflow journal ownership validation', () => {
     expect(() => assertWorkflowJournalIntegrity(pending, committed.manifestContent)).not.toThrow();
     const final = {...pending, manifestCommitted: true};
     expect(() => assertWorkflowJournalIntegrity(final, final.manifestContent)).not.toThrow();
+    // A run that still has a full-registry manifest upgrades on its next transition.
+    const legacy = state(committed.artifacts);
+    const upgraded = workflowTransition(legacy, grown(receipts.length), timestamp);
+    expect(() => assertWorkflowJournalIntegrity(upgraded, legacy.manifestContent)).not.toThrow();
     // The bounded commitment still refuses a registry or predecessor it does not describe.
     const shrunk = {...final, artifacts: grown(receipts.length - 1).artifacts};
     expect(() => assertWorkflowJournalIntegrity(shrunk, final.manifestContent)).toThrow();
