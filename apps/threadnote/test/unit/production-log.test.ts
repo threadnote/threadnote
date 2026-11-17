@@ -6,6 +6,7 @@ import {it as effectIt} from '@effect/vitest';
 import {
   Cause,
   Clock,
+  Context,
   Deferred,
   Duration,
   Effect,
@@ -29,6 +30,8 @@ import {
   recordUnavailableProductionPhase,
 } from '@threadnote/threadnote/effect/production_log';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import {ResourceStore} from '@threadnote/store/resource-store';
+import {loadRecallIndexData, recallIndexDatabaseFilename} from '@threadnote/recall/index';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {captureConsole} from '@threadnote/threadnote/effect/console';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -548,6 +551,91 @@ describe('production log writer', () => {
         expect(excerpt.discardedEntries).toBeGreaterThan(0);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
+  );
+});
+
+describe('recall production diagnostics', () => {
+  const memory = (store: Context.Service.Shape<typeof ResourceStore>, home: string, id: number, body: string) =>
+    store.write(
+      {account: 'local', user: 'me', home},
+      `threadnote://user/me/memories/durable/${id}.md`,
+      `MEMORY\nkind: durable\nstatus: active\nmemory_id: tn_${id}\nsource_agent_client: test\ntimestamp: 2026-11-03T00:00:00.000Z\n\n${body}`,
+      {mode: 'create'},
+    );
+  const records = (content: string, event: string) =>
+    EffectArray.filter(
+      EffectArray.map(EffectArray.filter(Effect2.pipe(content, EffectString.split('\n')), Boolean), line =>
+        Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown))(JSON.parse(line)),
+      ),
+      record => record.event === event,
+    );
+
+  effectIt.effect('records why each lexical refresh was forced, skipped or incremental without content', () =>
+    Effect.gen(function* () {
+      const {fs, home, path} = yield* ownedTestHome('recall-refresh');
+      const store = yield* ResourceStore;
+      const config = {account: 'local', user: 'me', agentContextHome: home};
+      const privateBody = 'customer-memory-body-must-not-appear';
+      const privateQuery = 'private-recall-query-must-not-appear';
+      yield* memory(store, home, 0, privateBody);
+      yield* loadRecallIndexData(config, {includeInactive: false, memoryIds: []});
+      yield* loadRecallIndexData(config, {includeInactive: false, memoryIds: []});
+      yield* memory(store, home, 1, `${privateBody} second`);
+      yield* loadRecallIndexData(config, {includeInactive: false, query: privateQuery});
+
+      const content = yield* fs.readFileString(productionLogPath(path, home));
+      expect(records(content, 'recall.lexical-refresh')).toEqual([
+        expect.objectContaining({
+          decision: 'forced',
+          documentCount: 1,
+          level: 'info',
+          reasons: expect.arrayContaining(['integrity', 'inventory-policy']),
+          scope: 'active',
+        }),
+        expect.objectContaining({decision: 'skipped', reasons: []}),
+        expect.objectContaining({
+          changedSourceCount: 1,
+          decision: 'incremental',
+          documentCount: 2,
+          invalidatedUriCount: 1,
+          reasons: [],
+          removedSourceCount: 0,
+        }),
+      ]);
+      for (const secret of [privateBody, privateQuery, 'threadnote://', home]) expect(content).not.toContain(secret);
+      const excerpt = yield* productionLogSupportExcerpt(home, 100_000);
+      expect(excerpt).toMatchObject({discardedEntries: 0, includedEntries: 3});
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('records a swallowed recall invalidation failure while the canonical write commits', () =>
+    Effect.gen(function* () {
+      const {fs, home, path} = yield* ownedTestHome('recall-invalidation');
+      const store = yield* ResourceStore;
+      // A non-empty directory where the active stale marker belongs makes every marker rename fail.
+      yield* fs.makeDirectory(
+        path.join(home, 'indexes', 'lexical', `${recallIndexDatabaseFilename(false)}.stale`, 'x'),
+        {
+          recursive: true,
+        },
+      );
+      yield* memory(store, home, 0, 'committed despite the marker failure');
+
+      expect(
+        yield* store.read({account: 'local', user: 'me', home}, 'threadnote://user/me/memories/durable/0.md'),
+      ).toContain('committed despite the marker failure');
+      const content = yield* fs.readFileString(productionLogPath(path, home));
+      expect(records(content, 'recall.invalidation-failed')).toEqual([
+        expect.objectContaining({
+          errorType: expect.stringMatching(/^[A-Za-z][A-Za-z0-9_.-]*$/),
+          invalidatedUriCount: 1,
+          level: 'warn',
+          scope: 'active',
+          stage: 'store-expire',
+        }),
+      ]);
+      expect(content).not.toContain('threadnote://');
+    }).pipe(provideTestLayer(ApplicationLayer)),
   );
 });
 

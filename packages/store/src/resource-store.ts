@@ -1,6 +1,6 @@
 import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Context, Effect, FileSystem, Layer, Option, Path, PlatformError, Result, Schedule, Schema} from 'effect';
+import {Cause, Context, Effect, FileSystem, Layer, Option, Path, PlatformError, Result, Schedule, Schema} from 'effect';
 import {uriSegment} from '@threadnote/store/resource-segment';
 import {globToRegExp} from '@threadnote/platform/glob';
 import {readExclusiveFileLockOwner} from '@threadnote/platform/file/lock';
@@ -51,6 +51,8 @@ export interface ResourceStoreLayerOptions {
 
 export interface ResourceRecallInvalidationFailureEvent {
   readonly account: string;
+  readonly cause: Cause.Cause<unknown>;
+  readonly home: string;
   readonly includeInactive: boolean;
   readonly invalidatedUriCount: number;
 }
@@ -338,9 +340,11 @@ function createResourceStoreOperations(
             return invalidateRecall(location, includeInactive, invalidatedUris, canonicalMutationGeneration).pipe(
               Effect.retry(Schedule.recurs(2)),
               Effect.tap(() => acknowledge(true)),
-              Effect.catchCause(() => {
+              Effect.catchCause(cause => {
                 const event = {
                   account: location.account,
+                  cause,
+                  home: location.home,
                   includeInactive,
                   invalidatedUriCount: invalidatedUris.length,
                 } satisfies ResourceRecallInvalidationFailureEvent;

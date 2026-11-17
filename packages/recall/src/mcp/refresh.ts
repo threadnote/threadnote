@@ -11,6 +11,7 @@ import {readModelSelection, selectedEmbeddingModelId} from '@threadnote/inferenc
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {vectorIndexGenerationReadiness} from '../vector-index.js';
 import {expireRecallIndexValidation, loadRecallIndexData, recallIndexStatus, type RecallIndexStatus} from '../index.js';
+import {emitRecallDiagnostic} from '../diagnostics.js';
 
 interface McpRecallRefreshConfig {
   readonly account: string;
@@ -66,7 +67,14 @@ export const refreshRecallDerivedIndexesFromSelection = Effect.fn('recall.refres
             Effect.as(false),
             Effect.catchCauseIf(
               cause => !Cause.hasInterrupts(cause),
-              () => Effect.succeed(true),
+              cause =>
+                emitRecallDiagnostic(config.agentContextHome, {
+                  event: 'recall.invalidation-failed',
+                  scope: 'active',
+                  stage: 'refresh-expire',
+                  invalidatedUriCount: uris.length,
+                  error: Cause.squash(cause),
+                }).pipe(Effect.as(true)),
             ),
           );
     // Complete lexical freshness before deciding whether any vector caller needs candidate data.
@@ -126,11 +134,18 @@ export const refreshRecallDerivedIndexesAfterCanonicalMutation = Effect.fn(
   const outcome = yield* refreshRecallDerivedIndexesFromSelection(config, invalidatedUris, receipt, onStage).pipe(
     Effect.catchCauseIf(
       cause => !Cause.hasInterrupts(cause),
-      () =>
-        Effect.succeed({
-          repair: 'Canonical memory was committed, but lexical recall refresh failed; run `threadnote repair`.',
-          state: 'blocked' as const,
-        }),
+      cause =>
+        emitRecallDiagnostic(config.agentContextHome, {
+          event: 'recall.lexical-refresh-failed',
+          scope: 'active',
+          stage: 'mutation-hook',
+          error: Cause.squash(cause),
+        }).pipe(
+          Effect.as({
+            repair: 'Canonical memory was committed, but lexical recall refresh failed; run `threadnote repair`.',
+            state: 'blocked' as const,
+          }),
+        ),
     ),
   );
   if (
