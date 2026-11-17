@@ -1,3 +1,5 @@
+import {nativeWorkflowPolicyOf} from '@threadnote/workflow-automations/gates';
+import {readNativeWorkflowState} from '../workflow_automation/store.js';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Context, DateTime, Effect, FileSystem, Path, Schema} from 'effect';
 import {sha256Hex} from '@threadnote/platform/digest';
@@ -534,6 +536,9 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
                   ? {}
                   : {expectedProjectScope: {kind: 'selected-project' as const, project: state.binding.graphProject}}),
                 refs: request.codeRefs ?? [],
+                ...((yield* standardProfileBinding(config, state.binding.workflowRunId))
+                  ? {allowStaleGraph: true}
+                  : {}),
               },
               'workflow-memory',
             );
@@ -882,3 +887,12 @@ export const executeWorkflowOperation = Effect.fn('workflowMemory.executeOperati
   yield* refreshWorkflowRecall(config, [artifact.canonicalUri, ...(operation.sourceUri ? [operation.sourceUri] : [])]);
   return {...(yield* readWorkflowArtifact(config, updated, artifact.canonicalUri)), operationId};
 });
+
+/** A standard-profile dev-cycle run cites only what it cites: a stale graph elsewhere does not refuse the write. */
+const standardProfileBinding = (config: RuntimeConfig, workflowRunId: string) =>
+  Effect2.pipe(workflowRunId, EffectString.startsWith('native-v1-'))
+    ? readNativeWorkflowState(config, Effect2.pipe(workflowRunId, EffectString.slice('native-v1-'.length))).pipe(
+        Effect.map(stored => stored !== undefined && nativeWorkflowPolicyOf(stored.state) === 'standard'),
+        Effect.orElseSucceed(() => false),
+      )
+    : Effect.succeed(false);
