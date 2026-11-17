@@ -59,15 +59,13 @@ export const runRecallLexicalWorkerUnit = Effect.fn('recall.lexicalWorkerUnit')(
       ? {state: 'complete' as const, delay: 0}
       : {state: 'checkpointed' as const, reason: 'newer-demand', delay: 50};
   }
-  const status = yield* recallIndexStatus(scope, scope.includeInactive);
-  if (lexicalRefreshDisposition(status) === 'unsafe') {
-    yield* failRecallLexicalRefresh(scope, revision, true);
-    return {state: 'blocked' as const, reason: 'lexical-storage-requires-repair', delay: 0};
-  }
+  // The snapshot is derived from canonical sources, so an untrusted one is rebuilt here.
+  // `threadnote repair` covers only the active scope and would strand the inactive one.
+  const repair = lexicalRefreshDisposition(yield* recallIndexStatus(scope, scope.includeInactive)) === 'unsafe';
   const result = yield* loadRecallIndexData(scope, {
     includeInactive: scope.includeInactive,
     memoryIds: [],
-    forceRefresh: demand.reconcile === true,
+    forceRefresh: demand.reconcile === true || repair,
   }).pipe(Effect.result);
   if (result._tag === 'Failure') {
     if (Schema.is(RecallIndexSourceChanged)(result.failure))
@@ -75,9 +73,16 @@ export const runRecallLexicalWorkerUnit = Effect.fn('recall.lexicalWorkerUnit')(
     yield* failRecallLexicalRefresh(scope, revision);
     return {state: 'deferred' as const, reason: 'lexical-maintenance-failed', delay: 1000};
   }
-  // A concurrent canonical mutation retains demand for another pass.
-  if (!(yield* recallIndexStatus(scope, scope.includeInactive)).ready)
+  const refreshed = yield* recallIndexStatus(scope, scope.includeInactive);
+  if (!refreshed.ready) {
+    // A rebuild that leaves storage untrusted backs off instead of rebuilding every pass.
+    if (repair && lexicalRefreshDisposition(refreshed) === 'unsafe') {
+      yield* failRecallLexicalRefresh(scope, revision);
+      return {state: 'deferred' as const, reason: 'lexical-storage-requires-repair', delay: 1000};
+    }
+    // A concurrent canonical mutation retains demand for another pass.
     return {state: 'checkpointed' as const, reason: 'source-changed', delay: 50};
+  }
   return (yield* completeRecallLexicalRefresh(scope, revision))
     ? {state: 'complete' as const, delay: 0}
     : {state: 'checkpointed' as const, reason: 'newer-demand', delay: 50};
