@@ -477,8 +477,11 @@ export function projectNativeCompactIntent(
   let compact: NativeCompactIntent;
   try {
     compact = Schema.decodeUnknownSync(NativeCompactIntentSchema)(input);
-  } catch {
-    throw invalid('The compact task intent is malformed or exceeds its bounded input limits.');
+  } catch (error) {
+    throw invalid(
+      nativeAuthoringSchemaDiagnostic(error) ??
+        'The compact task intent is malformed or exceeds its bounded input limits.',
+    );
   }
   if (compact.eligibility.status === 'needs-planning')
     return {
