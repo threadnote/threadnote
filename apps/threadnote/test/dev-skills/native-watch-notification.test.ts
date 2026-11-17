@@ -1,3 +1,4 @@
+import {promptCarriesNativeWatchNotice} from '../../src/codex/resume_hook.js';
 import {SecureRandom} from 'effect/crypto';
 import {it as effectIt} from '@effect/vitest';
 import * as Array from 'effect/Array';
@@ -2009,3 +2010,52 @@ effectIt.effect(
       expect(files).toEqual(['cursor-' + cursorTarget.sessionId + '.json']);
     }).pipe(provide, TestClock.withLive),
 );
+
+it('serializes an owned semantic continuation with the exact retained notice nonce and enforces its byte bound', () => {
+  const outbox = {
+    key: 'watch-1:1:1',
+    first: 1,
+    last: 1,
+    createdAt: 0,
+    attempts: 1,
+    nextAttemptAt: 0,
+    attemptId: '22222222-2222-4222-8222-222222222222',
+    collectorToken: '33333333-3333-4333-8333-333333333333',
+    status: 'sending' as const,
+  };
+  const semantic = {
+    runId: 'run-1',
+    callerCwd: '/checkout',
+    candidateWatchRef: 'taskref-v1.retained-owner',
+    noticeRef: 'taskref-v1.exact-notice',
+  };
+  const notice = nativeWatchNotice(
+    {home: '/private-home', watchId: 'watch-1', consumerId: 'consumer-1', wakeupId: 'wake-1', semantic},
+    outbox,
+  );
+  expect(promptCarriesNativeWatchNotice(notice)).toBe(true);
+  const match = /Route=(\{.*\})\. Use workflow_task_watch_pr/u.exec(notice);
+  if (!match) throw new Error('Missing owned semantic locator');
+  const parsed: unknown = JSON.parse(match[1]);
+  expect(parsed).toEqual({
+    home: '/private-home',
+    watchId: 'watch-1',
+    consumerId: 'consumer-1',
+    wakeupId: 'wake-1',
+    semantic,
+    eventKey: outbox.key,
+    attemptId: outbox.attemptId,
+  });
+  expect(() =>
+    nativeWatchNotice(
+      {
+        home: '/private-home',
+        watchId: 'watch-1',
+        consumerId: 'consumer-1',
+        wakeupId: 'wake-1',
+        semantic: {...semantic, candidateWatchRef: EffectString.repeat(7000)('x')},
+      },
+      outbox,
+    ),
+  ).toThrow();
+});

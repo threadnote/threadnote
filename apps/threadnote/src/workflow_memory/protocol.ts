@@ -152,6 +152,8 @@ export interface WorkflowJournal {
   readonly manifestUri: string;
   readonly manifestContent: string;
   readonly previousManifestContent?: string;
+  /** The registry that previousManifestContent commits to by digest. */
+  readonly previousArtifacts?: Readonly<Record<string, WorkflowArtifact>>;
   readonly manifestCommitted: boolean;
 }
 export interface WorkflowReadResult {

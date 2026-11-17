@@ -9,7 +9,7 @@ import {workflowTitleSlug} from '@threadnote/workflow-automations/naming';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {decodeNativeAuthoringDocument, type NativeAuthoringDocument} from '@threadnote/workflow-automations/authoring';
-import {gitValue} from '../utils.js';
+import {gitValue, resolveRepoName} from '../utils.js';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {inspectNativeSourcePaths, nativeAuthoringSourceOrigins} from './authoring.js';
@@ -65,8 +65,9 @@ export const runNativeSharedPlanStart = Effect.fn('workflowAutomation.runNativeS
   const reported = yield* gitValue(['rev-parse', '--show-toplevel'], cwd);
   if (!reported) return yield* fail('wrong-checkout', 'The recipient path must be inside a Git checkout.');
   const checkout = yield* fs.realPath(reported);
+  const repositoryName = (yield* resolveRepoName(checkout)) ?? path.basename(checkout);
   const project = yield* Effect.try({
-    try: () => workflowTitleSlug(path.basename(checkout)),
+    try: () => workflowTitleSlug(repositoryName),
     catch: () => fail('wrong-project', 'The recipient checkout has no stable project name.'),
   });
   const shared = yield* readPortablePlanPayload(config, request.sharedPlanRef, project);

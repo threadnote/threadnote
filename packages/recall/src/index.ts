@@ -68,7 +68,6 @@ import {
   recallInventoryPolicyIsCurrent,
   recallLogicalScope,
   recallScopeIsCurrent,
-  recallIndexCanonicalMutationContinuityAllowsIncrementalRefresh,
   recallIndexForegroundRefreshRequired,
 } from './index/freshness.js';
 import {
@@ -97,6 +96,12 @@ import {
 } from './index/selection.js';
 import {dropRecallSourceScan} from './index/refresh.js';
 import {prepareRecallDatabase, publishPreparedRecallDatabase} from './index/refresh_database.js';
+import {
+  recallIncrementalRefreshBlockers,
+  recallPublishedRefreshOutcome,
+  recallRefreshForceReasons,
+} from './index/refresh_decision.js';
+import {emitRecallDiagnostic, emitRecallLexicalRefresh, recallDiagnosticScope} from './diagnostics.js';
 import {
   captureRecallRefreshCut,
   recallMetadataCut,
@@ -1732,10 +1737,16 @@ const ensureRecallDatabaseFresh = Effect.fn('recall.ensureDatabaseFresh')(functi
     !recallScopeIsCurrent(metadata, config, options.includeInactive) ||
     !recallInventoryPolicyIsCurrent(metadata) ||
     recallIndexForegroundRefreshRequired(recallIndexForegroundFreshness(metadata, marker, canonical, options));
+  const startedAt = yield* Clock.currentTimeMillis;
+  const skipped = emitRecallLexicalRefresh(config.agentContextHome, options.includeInactive, startedAt, {
+    decision: 'skipped',
+    reasons: [],
+    invalidatedUriCount: 0,
+  });
   const metadata = yield* loadRecallMetadata(sql);
   const marker = yield* readStaleMarker(fs, staleMarkerBasePath);
   const canonical = yield* readCanonicalMutationGeneration(fs, path, config.agentContextHome, config.account);
-  if (!activation && !required(metadata, marker, canonical)) return;
+  if (!activation && !required(metadata, marker, canonical)) return yield* skipped;
   const fenced = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
     withRecallIndexLock(fs, recallIndexLockPath(path, config.agentContextHome, options.includeInactive), () =>
       withCanonicalResourceMutationLock(fs, path, config.agentContextHome, config.account, effect),
@@ -1758,14 +1769,13 @@ const ensureRecallDatabaseFresh = Effect.fn('recall.ensureDatabaseFresh')(functi
       });
     });
   const base = yield* fenced(capture());
-  if (!activation && !required(base.metadata, base.staleMarker, base.canonicalMutationGeneration)) return;
-  const force =
-    options.forceRefresh === true ||
-    !RecallIndexIdentity.recallIndexMetadataIsCurrent(base.metadata) ||
-    !recallInventoryPolicyIsCurrent(base.metadata);
+  if (!activation && !required(base.metadata, base.staleMarker, base.canonicalMutationGeneration))
+    return yield* skipped;
+  const forceReasons = recallRefreshForceReasons(options.forceRefresh === true, base.metadata);
+  const force = forceReasons.length > 0;
   yield* Effect.gen(function* () {
     // End this read snapshot before acquiring the publication transaction. TEMP survives COMMIT.
-    const prepared = yield* sql
+    const {blockers, prepared} = yield* sql
       .withTransaction(
         Effect.gen(function* () {
           if (
@@ -1773,30 +1783,21 @@ const ensureRecallDatabaseFresh = Effect.fn('recall.ensureDatabaseFresh')(functi
             (yield* recallResourcePolicyInputProof(config)) !== base.policyInputProof
           )
             return yield* recallRefreshSuperseded();
-          const stale = base.staleMarker;
-          const uris = new Set(stale?.invalidatedUris ?? []);
           const external = yield* sql<{
             readonly present: number;
           }>`SELECT EXISTS(SELECT 1 FROM documents WHERE uri LIKE 'threadnote://resources/external/%') AS present`;
-          const touched =
-            !force &&
-            recallScopeIsCurrent(base.metadata, config, options.includeInactive) &&
-            base.policyInputProof !== undefined &&
-            base.metadata.get('source_policy_inputs') === base.policyInputProof &&
-            external[0]?.present === 0 &&
-            stale !== undefined &&
-            !stale.forceRefresh &&
-            stale.generation !== base.metadata.get('stale_generation') &&
-            uris.size > 0 &&
-            uris.size <= 1024 &&
-            EffectArray.every([...uris], uri => !isExternalResourceUri(uri)) &&
-            recallIndexCanonicalMutationContinuityAllowsIncrementalRefresh({
-              markerCurrentGeneration: stale.canonicalMutationGeneration,
-              markerPreviousGeneration: stale.previousCanonicalMutationGeneration,
-              observedGeneration: base.canonicalMutationGeneration,
-              persistedGeneration: base.metadata.get('canonical_mutation_generation') ?? '',
-            });
-          return yield* prepareRecallDatabase(
+          const blockers = recallIncrementalRefreshBlockers({
+            forceReasons,
+            scopeCurrent: recallScopeIsCurrent(base.metadata, config, options.includeInactive),
+            sourcePolicyCurrent:
+              base.policyInputProof !== undefined &&
+              base.metadata.get('source_policy_inputs') === base.policyInputProof,
+            externalDocuments: external[0]?.present !== 0,
+            marker: base.staleMarker,
+            metadata: base.metadata,
+            observedCanonicalMutationGeneration: base.canonicalMutationGeneration,
+          });
+          const prepared = yield* prepareRecallDatabase(
             sql,
             fs,
             path,
@@ -1804,9 +1805,12 @@ const ensureRecallDatabaseFresh = Effect.fn('recall.ensureDatabaseFresh')(functi
             options.includeInactive,
             force,
             base,
-            touched ? {kind: 'touched', contentGeneration: base.metadata.get('content_generation')!} : {kind: 'full'},
+            blockers.length === 0
+              ? {kind: 'touched', contentGeneration: base.metadata.get('content_generation')!}
+              : {kind: 'full'},
             options.onProgress,
           );
+          return {blockers, prepared};
         }),
       )
       .pipe(Effect.provideService(SqlClient.BeginTransaction, 'BEGIN DEFERRED'));
@@ -1837,12 +1841,29 @@ const ensureRecallDatabaseFresh = Effect.fn('recall.ensureDatabaseFresh')(functi
             activation.relativeDatabasePath,
           );
         }
-        if (base.staleMarker && base.metadata.get('stale_generation') !== base.staleMarker.generation)
-          yield* clearStaleMarkerInvalidations(fs, staleMarkerBasePath, base.staleMarker).pipe(Effect.ignore);
+        const observedMarker = base.staleMarker;
+        if (observedMarker && base.metadata.get('stale_generation') !== observedMarker.generation)
+          yield* clearStaleMarkerInvalidations(fs, staleMarkerBasePath, observedMarker).pipe(
+            Effect.catch(error =>
+              emitRecallDiagnostic(config.agentContextHome, {
+                event: 'recall.invalidation-failed',
+                scope: recallDiagnosticScope(options.includeInactive),
+                stage: 'marker-clear',
+                invalidatedUriCount: observedMarker.invalidatedUris.length,
+                error,
+              }),
+            ),
+          );
         yield* fs.chmod(databasePath, 0o600);
         yield* removeLegacyRecallIndexArtifacts(fs, path, config.agentContextHome, RECALL_INDEX_DATABASE_VERSION);
         return count;
       }),
+    );
+    yield* emitRecallLexicalRefresh(
+      config.agentContextHome,
+      options.includeInactive,
+      startedAt,
+      recallPublishedRefreshOutcome(blockers, activation !== undefined, base.staleMarker, prepared, documentCount),
     );
     yield* options.onProgress?.({
       phase: 'writing',

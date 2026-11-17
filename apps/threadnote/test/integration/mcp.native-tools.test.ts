@@ -788,6 +788,7 @@ describe('Threadnote MCP toolsets', () => {
           'supersede-unreviewed',
           'recover-unreviewed-rebase',
           'requalify-base',
+          'requalify-invalid-tail',
         ]);
         expect(snapshotByCommand.get('record')?.required).toEqual(['command', 'workRef']);
         expect(snapshotByCommand.get('supersede-unreviewed')?.required).toEqual(['command', 'snapshotRef', 'reason']);
@@ -820,9 +821,29 @@ describe('Threadnote MCP toolsets', () => {
             return [command[0], variant];
           }),
         );
-        expect([...deliveryByCommand.keys()]).toEqual(['local', 'commit', 'pr']);
+        expect([...deliveryByCommand.keys()]).toEqual(['local', 'commit', 'pr', 'supplemental']);
+        expect(deliveryByCommand.get('supplemental')?.required).toEqual([
+          'command',
+          'taskRef',
+          'phaseId',
+          'pr',
+          'userAuthority',
+        ]);
+        expect(snapshotByCommand.get('requalify-invalid-tail')?.required).toEqual([
+          'command',
+          'taskRef',
+          'predecessorRef',
+          'reason',
+          'userAuthority',
+          'phaseOwnedPaths',
+        ]);
         expect(deliveryByCommand.get('local')?.required).toEqual(['command', 'validationRef']);
         expect(deliveryByCommand.get('commit')?.required).toEqual(['command', 'validationRef', 'commitEvidence']);
+        expect(decodeJsonObject(deliveryByCommand.get('pr')?.properties).userAuthority).toMatchObject({
+          type: 'string',
+          minLength: 1,
+          maxLength: 4096,
+        });
         expect(deliveryByCommand.get('pr')?.required).toEqual([
           'command',
           'validationRef',
@@ -1892,7 +1913,7 @@ describe('Threadnote MCP toolsets', () => {
     );
   }, 40_000);
 
-  it('returns complete body and compact metadata once in the default read_context agent format', async () => {
+  it('returns the complete body as text with no metadata-only structured content in the default read_context agent format', async () => {
     await withMcpClient(
       async (client, fixture) => {
         const uri = 'threadnote://user/test-user/memories/durable/projects/threadnote/text-read.md';
@@ -1932,7 +1953,6 @@ describe('Threadnote MCP toolsets', () => {
         );
         expect(result.isError, JSON.stringify(result)).not.toBe(true);
         const output = isReadonlyArray(result.content) ? result.content : [];
-        const structured = decodeJsonObject(result.structuredContent);
         const text = readTextAt(output, 0) ?? '';
         expect(text).toContain('TN-MEMORY/1');
         expect(text).toContain('Memory: kind=durable; status=active; project=threadnote; topic=text-read');
@@ -1941,15 +1961,8 @@ describe('Threadnote MCP toolsets', () => {
           `Code evidence [remote:${Effect.pipe(citation.repositoryId, EffectString.slice(0, 12))} @ ${citation.sourceCommit}]: packages/memory/src/read/projection.ts`,
         );
         expect(text).not.toContain('source_agent_client:');
-        expect(structured).toMatchObject({
-          complete: true,
-          contentBytes: Buffer.byteLength(content),
-          contentChannel: 'agent',
-          type: 'threadnote-read',
-          version: 2,
-        });
-        expect(structured).not.toHaveProperty('uri');
-        expect(structured).not.toHaveProperty('content');
+        expect(result.structuredContent).toBeUndefined();
+        expect(result._meta).toMatchObject({'threadnote.io/read': {contentIndex: 0, type: 'threadnote-read'}});
 
         const canonical = await client.callTool(
           {arguments: {responseFormat: 'text', uri}, name: 'read_context'},
@@ -5651,13 +5664,15 @@ describe('Threadnote MCP toolsets', () => {
           client.callTool({arguments: {uri}, name: 'read'}),
         ]);
         expect(aliasRead.content).toEqual(primaryRead.content);
-        if (!aliasRead.structuredContent || !primaryRead.structuredContent)
-          throw new Error('A successful canonical read must include structured content.');
-        const {warnings: aliasWarnings, ...aliasStableProjection} = aliasRead.structuredContent;
-        const {warnings: primaryWarnings, ...primaryStableProjection} = primaryRead.structuredContent;
-        expect(aliasStableProjection).toEqual(primaryStableProjection);
-        for (const warnings of [primaryWarnings, aliasWarnings]) {
-          if (!EffectArray.isArray(warnings)) throw new Error('A canonical read must retain warning diagnostics.');
+        expect(primaryRead.structuredContent).toBeUndefined();
+        const warningBlocks = (read: typeof primaryRead) =>
+          EffectArray.flatMap(textContents(read.content), block =>
+            Effect.pipe(block.text, EffectString.startsWith('Warning: '))
+              ? [Effect.pipe(block.text, EffectString.slice(9))]
+              : [],
+          );
+        for (const warnings of [warningBlocks(primaryRead), warningBlocks(aliasRead)]) {
+          expect(warnings.length).toBeGreaterThan(0);
           expect(
             EffectArray.every(
               warnings,

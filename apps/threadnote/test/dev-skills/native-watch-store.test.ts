@@ -102,6 +102,29 @@ effectIt.effect('read does not create state; CAS preserves exact old bytes and c
     );
     expect(yield* fs.readFileString(file)).toBe(bytes);
     expect((yield* readNativeWatch(config, 'watch-1'))?.revision).toBe(initial.revision);
+    const owner = {
+      kind: 'supplemental-publication' as const,
+      runId: 'run-1',
+      generationHash: EffectString.repeat(64)('a'),
+      publicationId: 'pub-1',
+      head: EffectString.repeat(40)('a'),
+      tree: EffectString.repeat(40)('b'),
+      phaseId: 'one',
+      prUrl: envelope.state.pr,
+    };
+    const owned = yield* writeNativeWatch(
+      config,
+      {...envelope, state: initializeNativeWatch('sup-owned', owner.prUrl, 0), owner},
+      null,
+    );
+    expect(
+      (yield* writeNativeWatch(
+        config,
+        {...owned.envelope, owner: {...owner, publicationId: 'pub-2'}},
+        owned.revision,
+      ).pipe(Effect.result))._tag,
+    ).toBe('Failure');
+    expect((yield* readNativeWatch(config, 'sup-owned'))?.revision).toBe(owned.revision);
     yield* fs.writeFileString(file, '{"legacy":true}');
     expect((yield* readNativeWatch(config, 'watch-1').pipe(Effect.result))._tag).toBe('Failure');
     expect((yield* writeNativeWatch(config, envelope, null).pipe(Effect.result))._tag).toBe('Failure');
@@ -115,3 +138,31 @@ effectIt.effect('read does not create state; CAS preserves exact old bytes and c
     expect(yield* fs.readFileString(outside)).toBe(bytes);
   }).pipe(provideTestLayer(BunServices.layer), TestClock.withLive),
 );
+
+it('requires typed diagnostic owners and fails closed on mismatched owner state or invalidation', () => {
+  const owner = {
+    kind: 'supplemental-publication',
+    runId: 'run-1',
+    generationHash: EffectString.repeat(64)('a'),
+    publicationId: 'pub-1',
+    head: EffectString.repeat(40)('a'),
+    tree: EffectString.repeat(40)('b'),
+    phaseId: 'one',
+    prUrl: fixture().state.pr,
+  };
+  const input = {...fixture(), state: initializeNativeWatch('sup-fixture', owner.prUrl, 0), owner};
+  expect(decodeNativeWatchEnvelope(input).owner).toEqual(owner);
+  expect(() => decodeNativeWatchEnvelope({...input, owner: undefined})).toThrow();
+  expect(() => decodeNativeWatchEnvelope({...input, owner: {...owner, kind: 'candidate-pr'}})).toThrow();
+  expect(() =>
+    decodeNativeWatchEnvelope({...input, state: {...input.state, head: EffectString.repeat(40)('c')}}),
+  ).toThrow();
+  expect(() =>
+    decodeNativeWatchEnvelope({
+      ...input,
+      invalidation: {kind: 'candidate_invalidated', reason: 'drift', at: 0},
+      stopRequested: true,
+    }),
+  ).toThrow();
+  expect(() => decodeNativeWatchEnvelope({...fixture(), owner})).toThrow();
+});

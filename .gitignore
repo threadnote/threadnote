@@ -21,6 +21,7 @@ artifacts/
 manager/app.js
 CLAUDE.md
 .claude/settings.json
+.claude/worktrees/
 .codex/hooks.json
 .context
 .venv/

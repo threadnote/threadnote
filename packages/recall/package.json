@@ -7,6 +7,7 @@
     "./chunker": "./src/chunker.ts",
     "./code_links": "./src/code_links.ts",
     "./connection_confidence": "./src/connection_confidence.ts",
+    "./diagnostics": "./src/diagnostics.ts",
     "./eligibility": "./src/eligibility.ts",
     "./evaluate": "./src/evaluate.ts",
     "./feedback": "./src/feedback.ts",

@@ -36,6 +36,7 @@ import {
 import {
   decodeNativeCycleRuntime,
   nativeCyclePhaseReviewUsage,
+  nativeCycleReviewBasis,
   nativeCycleHasBasePlanTransition,
   nativeCycleSnapshotIsCurrentIteration,
   type NativeCycleRuntime,
@@ -1104,16 +1105,18 @@ export const runNativeCycle = <R>(
                   '--binary',
                   snapshot.baseRequalification ||
                   snapshot.ordinaryMergeQualificationV1 ||
+                  snapshot.invalidTailMergeQualificationV1 ||
                   snapshot.unreviewedSupersession?.rebaseRecovery
                     ? snapshot.scopeBase
                     : (snapshot.previousTree ?? snapshot.baseTree),
                   snapshot.tree,
                   '--',
-                  ...(snapshot.ordinaryMergeQualificationV1
+                  ...((snapshot.ordinaryMergeQualificationV1 ?? snapshot.invalidTailMergeQualificationV1)
                     ? EffectArray.map(
                         EffectOption.getOrUndefined(
                           EffectArray.findFirst(
-                            snapshot.ordinaryMergeQualificationV1.phaseOwnedPaths,
+                            (snapshot.ordinaryMergeQualificationV1 ?? snapshot.invalidTailMergeQualificationV1)!
+                              .phaseOwnedPaths,
                             owner => owner.phaseId === snapshot!.phaseId,
                           ),
                         )?.paths ?? [],
@@ -1133,6 +1136,7 @@ export const runNativeCycle = <R>(
               !snapshot.baseRequalification &&
               !snapshot.unreviewedSupersession?.rebaseRecovery &&
               !snapshot.ordinaryMergeQualificationV1 &&
+              !snapshot.invalidTailMergeQualificationV1 &&
               snapshot.scopeBase !== previousScope
             )
               body +=
@@ -1204,26 +1208,12 @@ export const runNativeCycle = <R>(
               'review-failed',
               'The malformed review and its targeted recovery both failed; retain the reports and resolve the review failure.',
             );
-          const predecessor = snapshot.previous ?? snapshot.supersedes;
-          const previous = predecessor
-            ? EffectOption.getOrUndefined(
-                EffectArray.findFirst(runtime.snapshots, item => item.snapshot.snapshotId === predecessor),
-              )?.snapshot
-            : undefined;
-          const priorReview = previous
-            ? EffectOption.getOrUndefined(
-                EffectArray.findFirst(runtime.reviews, item => item.snapshotId === previous.snapshotId),
-              )?.report
-            : undefined;
+          const reviewBasis = nativeCycleReviewBasis(runtime, snapshot);
           const verdict = yield* from(() => {
             try {
               return {
                 accepted: true as const,
-                value: validateNativeCycleReview(
-                  snapshot,
-                  request.report,
-                  previous && priorReview ? {snapshot: previous, review: priorReview} : undefined,
-                ),
+                value: validateNativeCycleReview(snapshot, request.report, reviewBasis),
               };
             } catch (error) {
               return {accepted: false as const, message: nativeWorkflowError(error).message};
@@ -1331,24 +1321,8 @@ export const runNativeCycle = <R>(
           )?.report;
           if (!report)
             return yield* fail('review-pending', 'A complete immutable source review is required before acceptance.');
-          const predecessor = entry.snapshot.previous ?? entry.snapshot.supersedes;
-          const previous = predecessor
-            ? EffectOption.getOrUndefined(
-                EffectArray.findFirst(runtime.snapshots, item => item.snapshot.snapshotId === predecessor),
-              )?.snapshot
-            : undefined;
-          const priorReport = previous
-            ? EffectOption.getOrUndefined(
-                EffectArray.findFirst(runtime.reviews, item => item.snapshotId === previous.snapshotId),
-              )?.report
-            : undefined;
-          const reviewed = yield* from(() =>
-            validateNativeCycleReview(
-              entry.snapshot,
-              report,
-              previous && priorReport ? {snapshot: previous, review: priorReport} : undefined,
-            ),
-          );
+          const reviewBasis = nativeCycleReviewBasis(runtime, entry.snapshot);
+          const reviewed = yield* from(() => validateNativeCycleReview(entry.snapshot, report, reviewBasis));
           if (reviewed.summary.blockingIssueCount)
             return yield* fail('review-blocked', 'Resolve the recorded blockers before accepting this phase.');
           if (state.plan.delivery !== 'local' && EffectArray.some(entry.incoming, item => item.source === 'preserved'))
@@ -1363,14 +1337,16 @@ export const runNativeCycle = <R>(
               selected.id,
               {
                 ...current,
-                files: entry.snapshot.ordinaryMergeQualificationV1
-                  ? (EffectOption.getOrUndefined(
-                      EffectArray.findFirst(
-                        entry.snapshot.ordinaryMergeQualificationV1.phaseOwnedPaths,
-                        owner => owner.phaseId === selected.id,
-                      ),
-                    )?.paths ?? [])
-                  : EffectArray.filter(entry.snapshot.files, file => !incoming.has(file)),
+                files:
+                  (entry.snapshot.ordinaryMergeQualificationV1 ?? entry.snapshot.invalidTailMergeQualificationV1)
+                    ? (EffectOption.getOrUndefined(
+                        EffectArray.findFirst(
+                          (entry.snapshot.ordinaryMergeQualificationV1 ??
+                            entry.snapshot.invalidTailMergeQualificationV1)!.phaseOwnedPaths,
+                          owner => owner.phaseId === selected.id,
+                        ),
+                      )?.paths ?? [])
+                    : EffectArray.filter(entry.snapshot.files, file => !incoming.has(file)),
               },
               request.validation,
             ),

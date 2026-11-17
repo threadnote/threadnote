@@ -51,19 +51,6 @@ export interface MemoryRead {
 
 export type MemoryReadMcpResponseFormat = 'agent' | 'dual' | 'text';
 
-export type MemoryReadMcpStructuredContent =
-  | MemoryReadStructuredContent
-  | (Omit<MemoryReadStructuredContent, 'content' | 'version'> & {
-      readonly contentChannel: 'text';
-      readonly uri: string;
-      readonly version: 2;
-    })
-  | (Omit<MemoryReadStructuredContent, 'content' | 'version'> & {
-      readonly contentChannel: 'agent';
-      readonly sources?: readonly string[];
-      readonly version: 2;
-    });
-
 export class MemoryReadProjectionError extends Schema.TaggedError<
   MemoryReadProjectionError,
   {readonly brand: unique symbol}
@@ -210,19 +197,17 @@ export function projectMemoryRead(
   };
 }
 
-export function memoryReadMcpStructuredContent(
+export function memoryReadMcpNotices(
   read: MemoryRead,
   responseFormat: MemoryReadMcpResponseFormat = 'agent',
-): MemoryReadMcpStructuredContent {
-  if (responseFormat === 'dual') return read.structuredContent;
-  const {content: _content, version: _version, ...metadata} = read.structuredContent;
-  if (responseFormat === 'text') return {...metadata, contentChannel: 'text', uri: read.uri, version: 2};
-  return {
-    ...metadata,
-    contentChannel: 'agent',
-    ...(read.agentSources.length === 0 ? {} : {sources: read.agentSources}),
-    version: 2,
-  };
+): readonly string[] {
+  if (responseFormat === 'dual') return [];
+  return [
+    ...(responseFormat === 'agent' && read.agentSources.length > 0
+      ? [`Sources: ${EffectArray.join(read.agentSources, ', ')}`]
+      : []),
+    ...EffectArray.map(read.structuredContent.warnings ?? [], warning => `Warning: ${warning}`),
+  ];
 }
 
 export function memoryReadMcpText(read: MemoryRead, responseFormat: MemoryReadMcpResponseFormat = 'agent'): string {

@@ -275,6 +275,7 @@ export const prepareRecallDatabase = Effect.fn('recall.prepareDatabase')(functio
     canonicalMutationGeneration,
     policyInputProof: base.policyInputProof,
     sourceScan,
+    forceAllSources,
     refreshCounts,
     contentGeneration,
     previousValidatedAt,

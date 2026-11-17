@@ -59,7 +59,8 @@ describe('code graph schema revision entity', () => {
       citationAliasPredecessor: 2,
       foldForwardPredecessor: 3,
       endpointIndexPredecessor: 4,
-      current: 8,
+      resolutionCandidateIndexPredecessor: 8,
+      current: 9,
     });
     expect(CODE_GRAPH_PROTOCOL_VERSIONS).toEqual({
       checkpointArtifact: 1,

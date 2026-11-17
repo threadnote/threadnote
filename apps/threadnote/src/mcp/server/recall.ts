@@ -53,7 +53,7 @@ import {
   MEMORY_READ_MAXIMUM_CONTENT_BYTES,
   MemoryReadProjectionError,
   MemoryReadTooLargeError,
-  memoryReadMcpStructuredContent,
+  memoryReadMcpNotices,
   memoryReadMcpText,
   projectMemoryRead,
 } from '@threadnote/memory/read/projection';
@@ -1701,9 +1701,10 @@ export function registerReadTool(
                 {type: 'text' as const, text: memoryReadMcpText(read, responseFormat)},
                 ...(read.continuation === undefined ? [] : [{type: 'text' as const, text: read.continuation}]),
                 ...(read.receipt === undefined ? [] : [{type: 'text' as const, text: read.receipt}]),
+                ...EffectArray.map(memoryReadMcpNotices(read, responseFormat), text => ({type: 'text' as const, text})),
                 ...EffectArray.map(missingRecoveries, text => ({type: 'text' as const, text})),
               ],
-              structuredContent: memoryReadMcpStructuredContent(read, responseFormat),
+              ...(responseFormat === 'dual' ? {structuredContent: read.structuredContent} : {}),
             };
           }),
           {boundProgram: true},

@@ -12,6 +12,7 @@ import {TestClock} from 'effect/testing';
 import * as FC from 'fast-check';
 import {Effect, Path} from 'effect';
 import {CodeGraphIndexer, graphContentIdentity} from '@threadnote/graph/indexer';
+import {degradedParserCacheIdentity} from '@threadnote/graph/indexer/materialization_batch';
 import {serializeBoundedCodeGraphFact} from '@threadnote/graph/fact/budget';
 import {decodeStoredCodeGraphFact, encodeStoredCodeGraphFact} from '@threadnote/graph/fact/storage';
 import {inventoryRepository} from '@threadnote/graph/inventory';
@@ -813,8 +814,13 @@ describe('project-closure incremental indexing', () => {
               stagedFiles: 6,
             });
             expect(incremental.materialization?.stagedFiles).toBeLessThan(incremental.materialization?.totalFiles ?? 0);
-            expect(incremental.incrementalWork).toMatchObject({baseFactsLoaded: 6, changedFiles: 6});
-            expect(incremental.incrementalWork?.attributionContextFiles).toBe(base.materialization?.totalFiles ?? 0);
+            expect(incremental.incrementalWork).toMatchObject({
+              attributionContextFiles: 0,
+              baseFactsLoaded: 6,
+              changedFiles: 6,
+            });
+            // The clean base's context is decoded once and recorded as reusable evidence.
+            expect(incremental.incrementalWork?.resolutionEvidenceFiles).toBe(base.materialization?.totalFiles ?? 0);
             expect(normalizeGraph(incrementalGraph)).toEqual(normalizeGraph(fullGraph));
             expect(documentEdge(incrementalGraph, 'docs/consumer-retiring.md', 'Retiring')?.targetId).toBeUndefined();
             expect(documentEdge(incrementalGraph, 'docs/consumer-added.md', 'Added')?.targetId).toBeDefined();
@@ -1222,10 +1228,12 @@ describe('project-closure incremental indexing', () => {
               stagedFiles: 4,
             });
             expect(incremental.incrementalWork).toMatchObject({
+              attributionContextFiles: 0,
               baseFactsLoaded: 4,
               changedFiles: 4,
             });
-            expect(incremental.incrementalWork?.attributionContextFiles).toBe(base.materialization?.totalFiles ?? 0);
+            // The first edit decodes the base once and records it as reusable evidence.
+            expect(incremental.incrementalWork?.resolutionEvidenceFiles).toBe(base.materialization?.totalFiles ?? 0);
             expect(normalizeGraph(incrementalGraph)).toEqual(normalizeGraph(fullGraph));
             const discovered = EffectOption.getOrUndefined(
               EffectArray.findFirst(incrementalGraph.symbols, symbol => symbol.name === 'discovered'),
@@ -1254,10 +1262,95 @@ describe('project-closure incremental indexing', () => {
               'src/consumer.ts',
               'src/core.ts',
             ]);
+            expect(resolutionCandidateIndexOwners(incrementalLayout.databasePath)).toEqual([base.snapshot.id]);
+
+            // The first edit persisted the committed base's evidence, so a later
+            // export edit selects the same consumers without decoding the base.
+            yield* Effect.sync(() =>
+              writeFile(
+                root,
+                'src/core.ts',
+                'export const stable = 1;\nexport function renamedAgain() { return stable; }\n',
+              ),
+            );
+            const indexed = yield* indexer.index({cwd: root, threadnoteHome: incrementalHome});
+            const indexedFull = yield* indexer.index({cwd: root, incrementalOverlay: false, threadnoteHome: fullHome});
+            expect(indexed.materialization).toMatchObject({
+              mode: 'incremental-overlay',
+              resolutionClosure: 'project',
+              stagedFiles: 4,
+            });
+            expect(indexed.incrementalWork).toMatchObject({
+              attributionContextFiles: 0,
+              baseFactsLoaded: 4,
+              changedFiles: 4,
+            });
+            expect(indexed.incrementalWork?.resolutionEvidenceFiles).toBeUndefined();
+            expect(normalizeGraph(yield* store.loadGraph(incrementalLayout.databasePath, indexed.snapshot.id))).toEqual(
+              normalizeGraph(yield* store.loadGraph(fullLayout.databasePath, indexedFull.snapshot.id)),
+            );
             expect(yield* store.diagnose(incrementalLayout.databasePath)).toMatchObject({
               foreignKeyViolations: 0,
               integrity: 'ok',
             });
+          }),
+        root => Effect.sync(() => rmSync(root, {force: true, recursive: true})),
+      ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+    {timeout: 120_000},
+  );
+
+  it.effect(
+    'records no evidence while a base file is served degraded, so its consumer is selected once it parses',
+    () =>
+      Effect.acquireUseRelease(
+        Effect.sync(createLargeRootProjectRepository),
+        root =>
+          Effect.gen(function* () {
+            const indexer = yield* CodeGraphIndexer;
+            const store = yield* CodeGraphStore;
+            const path = yield* Path.Path;
+            const incrementalHome = join(root, '.threadnote-incremental');
+            const fullHome = join(root, '.threadnote-full');
+            const base = yield* indexer.index({cwd: root, threadnoteHome: incrementalHome});
+            const layout = codeGraphLayout(path, incrementalHome, base.identity.checkoutId, base.identity.worktreeId);
+            const active = serveCachedFactsDegraded(
+              layout.databasePath,
+              snapshotFileContentHash(layout.databasePath, base.snapshot.id, 'src/consumer.ts'),
+            );
+
+            // An unrelated export edit decodes the base while the consumer's references are missing.
+            yield* Effect.sync(() =>
+              writeFile(root, 'src/core.ts', 'export const stable = 1;\nexport const added = 2;\n'),
+            );
+            const degraded = yield* indexer.index({cwd: root, threadnoteHome: incrementalHome});
+            expect(degraded.materialization).toMatchObject({mode: 'incremental-overlay', resolutionClosure: 'project'});
+            expect(degraded.incrementalWork?.resolutionEvidenceFiles).toBeUndefined();
+            expect(degraded.incrementalWork?.attributionContextFiles).toBe(base.materialization?.totalFiles ?? 0);
+            expect(resolutionCandidateIndexOwners(layout.databasePath)).toEqual([]);
+
+            // A later parse stores active facts for the same content, then the export the consumer awaits appears.
+            yield* Effect.sync(() => {
+              restoreCachedFacts(layout.databasePath, active);
+              writeFile(
+                root,
+                'src/core.ts',
+                'export const stable = 1;\nexport const added = 2;\nexport function discovered() { return stable; }\n',
+              );
+            });
+            const discovered = yield* indexer.index({cwd: root, threadnoteHome: incrementalHome});
+            const full = yield* indexer.index({cwd: root, incrementalOverlay: false, threadnoteHome: fullHome});
+            const fullLayout = codeGraphLayout(path, fullHome, full.identity.checkoutId, full.identity.worktreeId);
+
+            expect(discovered.materialization).toMatchObject({
+              mode: 'incremental-overlay',
+              resolutionClosure: 'project',
+            });
+            expect(deltaPaths(layout.databasePath, discovered.snapshot.id)).toContain('src/consumer.ts');
+            expect(normalizeGraph(yield* store.loadGraph(layout.databasePath, discovered.snapshot.id))).toEqual(
+              normalizeGraph(yield* store.loadGraph(fullLayout.databasePath, full.snapshot.id)),
+            );
+            expect(discovered.incrementalWork?.resolutionEvidenceFiles).toBe(base.materialization?.totalFiles ?? 0);
+            expect(resolutionCandidateIndexOwners(layout.databasePath)).toEqual([base.snapshot.id]);
           }),
         root => Effect.sync(() => rmSync(root, {force: true, recursive: true})),
       ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
@@ -1588,6 +1681,22 @@ function deltaPaths(databasePath: string, snapshotId: string): readonly string[]
   }
 }
 
+function resolutionCandidateIndexOwners(databasePath: string): readonly string[] {
+  const database = new Database(databasePath, {readonly: true});
+  try {
+    return EffectArray.map(
+      database
+        .query<{readonly snapshot_id: string}, []>(
+          'SELECT snapshot_id FROM snapshot_resolution_candidate_indexes ORDER BY snapshot_id',
+        )
+        .all(),
+      row => row.snapshot_id,
+    );
+  } finally {
+    database.close(false);
+  }
+}
+
 function mutateBarrelCache(databasePath: string, scenario: 'missing' | 'oversized' | 'receipt'): void {
   const database = new Database(databasePath);
   try {
@@ -1646,6 +1755,61 @@ function snapshotFileContentHash(databasePath: string, snapshotId: string, path:
       .get(snapshotId, path);
     if (!row) throw TestError.make({message: `Missing snapshot file ${path}.`});
     return row.contentHash;
+  } finally {
+    database.close(false);
+  }
+}
+
+interface CachedFactRow {
+  readonly blob_id: string | null;
+  readonly content_hash: string;
+  readonly created_at: string;
+  readonly extractor_set: string;
+  readonly facts_json: string;
+  readonly path_hint: string;
+  readonly reuse_class: string | null;
+}
+
+/** Leaves only a degraded parser generation, without edges or references, for the content; returns the active row. */
+function serveCachedFactsDegraded(databasePath: string, contentHash: string): CachedFactRow {
+  const database = new Database(databasePath);
+  try {
+    const rows = database
+      .query<CachedFactRow, [string]>('SELECT * FROM file_blobs WHERE content_hash = ?')
+      .all(contentHash);
+    if (rows.length !== 1) throw TestError.make({message: `Expected one cached fact row for ${contentHash}.`});
+    const [active] = rows;
+    const facts = decodeStoredCodeGraphFact(active.facts_json, active.path_hint).facts;
+    database.run(
+      'UPDATE file_blobs SET extractor_set = ?, facts_json = ?, blob_id = NULL, reuse_class = NULL WHERE content_hash = ?',
+      [
+        degradedParserCacheIdentity(active.extractor_set),
+        encodeStoredCodeGraphFact(serializeBoundedCodeGraphFact({...facts, edges: [], references: []})).json,
+        contentHash,
+      ],
+    );
+    return active;
+  } finally {
+    database.close(false);
+  }
+}
+
+function restoreCachedFacts(databasePath: string, row: CachedFactRow): void {
+  const database = new Database(databasePath);
+  try {
+    database.run(
+      `INSERT INTO file_blobs (content_hash, extractor_set, path_hint, blob_id, reuse_class, facts_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        row.content_hash,
+        row.extractor_set,
+        row.path_hint,
+        row.blob_id,
+        row.reuse_class,
+        row.facts_json,
+        row.created_at,
+      ],
+    );
   } finally {
     database.close(false);
   }

@@ -127,6 +127,9 @@ describe('Windows Git Bash command launchers', () => {
         expect(yield* commandLauncherPath('mcp').pipe(Effect.provideService(SystemInfo, testSystem))).toMatch(
           /threadnote-mcp-server\.cmd$/,
         );
+        expect(yield* commandLauncherPath('cli-alias').pipe(Effect.provideService(SystemInfo, testSystem))).toMatch(
+          /[\\/]tn\.cmd$/,
+        );
         expect(
           yield* commandLauncherPath('credential-auth0-m2m').pipe(Effect.provideService(SystemInfo, testSystem)),
         ).toMatch(/threadnote-credential-auth0-m2m\.cmd$/);
@@ -156,6 +159,8 @@ describe('Windows Git Bash command launchers', () => {
           cliPosix: yield* readLauncher(testSystem, 'cli', 'posix'),
           mcpCmd: yield* readLauncher(testSystem, 'mcp', 'cmd'),
           mcpPosix: yield* readLauncher(testSystem, 'mcp', 'posix'),
+          aliasCmd: yield* readLauncher(testSystem, 'cli-alias', 'cmd'),
+          aliasPosix: yield* readLauncher(testSystem, 'cli-alias', 'posix'),
         };
         expect(installed.output).toContain(`Wrote command launcher: ${files.cliCmd.path}`);
         expect(installed.output).toContain(`Wrote command launcher: ${files.cliPosix.path}`);
@@ -163,6 +168,9 @@ describe('Windows Git Bash command launchers', () => {
         expect(installed.output).toContain(`Wrote command launcher: ${files.mcpPosix.path}`);
         expect(path.basename(files.cliPosix.path)).toBe('threadnote');
         expect(path.basename(files.mcpPosix.path)).toBe('threadnote-mcp-server');
+        expect(path.basename(files.aliasPosix.path)).toBe('tn');
+        expect(files.aliasCmd.content).toBe(files.cliCmd.content);
+        expect(files.aliasPosix.content).toBe(files.cliPosix.content);
         expect(files.cliCmd.content).toBe(yield* renderFor(testSystem, releaseRoot, 'cli', 'cmd'));
         expect(files.cliPosix.content).toBe(yield* renderFor(testSystem, releaseRoot, 'cli', 'posix'));
         expect(files.mcpCmd.content).toBe(yield* renderFor(testSystem, releaseRoot, 'mcp', 'cmd'));
@@ -278,9 +286,39 @@ describe('Windows Git Bash command launchers', () => {
         const cliPosix = yield* commandLauncherPath('cli', 'posix').pipe(Effect.provideService(SystemInfo, testSystem));
         const mcpCmd = yield* commandLauncherPath('mcp', 'cmd').pipe(Effect.provideService(SystemInfo, testSystem));
         const mcpPosix = yield* commandLauncherPath('mcp', 'posix').pipe(Effect.provideService(SystemInfo, testSystem));
+        const aliasCmd = yield* commandLauncherPath('cli-alias', 'cmd').pipe(
+          Effect.provideService(SystemInfo, testSystem),
+        );
+        const aliasPosix = yield* commandLauncherPath('cli-alias', 'posix').pipe(
+          Effect.provideService(SystemInfo, testSystem),
+        );
         const check = yield* commandShimCheck().pipe(Effect.provideService(SystemInfo, testSystem));
         expect(check.status).toBe('ok');
-        expect(check.detail).toBe(`${cliCmd}; ${cliPosix}; ${mcpCmd}; ${mcpPosix}`);
+        expect(check.detail).toBe(`${cliCmd}; ${cliPosix}; ${mcpCmd}; ${mcpPosix}; ${aliasCmd}; ${aliasPosix}`);
+      }),
+    ).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('leaves an unmanaged tn command in place without failing doctor or uninstall', () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-win-shim-alias-'});
+        const {testSystem} = yield* windowsShimFixture(root);
+        const aliasPosix = yield* commandLauncherPath('cli-alias', 'posix').pipe(
+          Effect.provideService(SystemInfo, testSystem),
+        );
+        const unmanaged = '#!/usr/bin/env sh\necho another tn tool\n';
+        yield* fs.writeFileString(aliasPosix, unmanaged);
+        const installed = yield* captureConsole(installCommandShim(false)).pipe(
+          Effect.provideService(SystemInfo, testSystem),
+        );
+        expect(installed.output).toContain(`WARN not overwriting unmanaged command launcher: ${aliasPosix}`);
+        const check = yield* commandShimCheck().pipe(Effect.provideService(SystemInfo, testSystem));
+        expect(check.status).toBe('ok');
+        expect(Effect2.pipe(check.detail, EffectString.split('; '))).not.toContain(aliasPosix);
+        yield* removeCommandShim(false).pipe(Effect.provideService(SystemInfo, testSystem));
+        expect(yield* fs.readFileString(aliasPosix)).toBe(unmanaged);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
@@ -556,6 +594,7 @@ describe('Windows Git Bash command launchers', () => {
         for (const mode of [
           'cli',
           'mcp',
+          'cli-alias',
           'credential-oauth-m2m',
           'credential-registry-oauth-m2m',
           'credential-registry-oauth-publisher-m2m',
@@ -581,6 +620,7 @@ describe('Windows Git Bash command launchers', () => {
       mode: fc.constantFrom(
         'cli' as const,
         'mcp' as const,
+        'cli-alias' as const,
         'credential-oauth-m2m' as const,
         'credential-registry-oauth-m2m' as const,
         'credential-registry-oauth-publisher-m2m' as const,
@@ -686,6 +726,7 @@ const renderFor = (
   mode:
     | 'cli'
     | 'mcp'
+    | 'cli-alias'
     | 'credential-auth0-m2m'
     | 'credential-registry-auth0-m2m'
     | 'credential-registry-auth0-publisher-m2m'
@@ -698,6 +739,7 @@ const readLauncher = Effect.fn('test.readLauncher')(function* (
   mode:
     | 'cli'
     | 'mcp'
+    | 'cli-alias'
     | 'credential-auth0-m2m'
     | 'credential-registry-auth0-m2m'
     | 'credential-registry-auth0-publisher-m2m'
