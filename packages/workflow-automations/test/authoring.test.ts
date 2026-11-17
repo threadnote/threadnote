@@ -895,6 +895,16 @@ describe('native authoring documents', () => {
     ).toBe(false);
   });
 
+  it('names the failing compact intent field and its constraint', () => {
+    expect(() =>
+      projectNativeCompactIntent(
+        compactInput({affectedPaths: EffectArray.makeBy(17, index => `src/file-${index}.ts`)}),
+        {featureId: 'cache-refresh', project: 'threadnote'},
+        compactSource,
+      ),
+    ).toThrow('affectedPaths: Expected a value with a length between 1 and 16');
+  });
+
   it('returns the exact planning decision for ineligible compact intent without constructing a plan', () => {
     const result = projectNativeCompactIntent(
       compactInput({
