@@ -19,6 +19,7 @@ import {
   pinNativeCycleCommit,
   pinNativeCycleTree,
   readNativeCycleTreeEntries,
+  nativeCyclePatchId,
 } from './cycle_git.js';
 
 type Phase = NativeCycleState['plan']['phases'][number];
@@ -176,7 +177,8 @@ export const recordNativeCycleTreeSnapshot = Effect.fn('workflowAutomation.cycle
   )
     return {status: 'ok', revision: input.revision, replayed: true, snapshot: latest};
   const superseded = latest && !reviewed.has(latest.snapshot.snapshotId) ? latest.snapshot : undefined;
-  const basis = EffectOption.getOrUndefined(
+  const patchId = yield* nativeCyclePatchId(repo, scope.scopeBase, captured.tree);
+  const latestReviewed = EffectOption.getOrUndefined(
     EffectArray.findLast(
       phaseSnapshots,
       entry =>
@@ -184,6 +186,12 @@ export const recordNativeCycleTreeSnapshot = Effect.fn('workflowAutomation.cycle
         (entry.snapshot.intentHash ?? entry.snapshot.phaseHash) === intentHash,
     ),
   )?.snapshot;
+  // After the base moved, a changed patch (a conflicted or extended rebase) restarts with a full review.
+  const basis =
+    latestReviewed &&
+    (latestReviewed.scopeBase === scope.scopeBase || (patchId !== undefined && latestReviewed.patchId === patchId))
+      ? latestReviewed
+      : undefined;
   const snapshotId = nativeCycleTreeSnapshotId({
     phaseId: phase.id,
     position: phaseSnapshots.length,
@@ -225,7 +233,16 @@ export const recordNativeCycleTreeSnapshot = Effect.fn('workflowAutomation.cycle
           },
         }
       : {}),
-    ...(basis ? {reviewBasis: {snapshotId: basis.snapshotId, tree: basis.tree}} : {}),
+    ...(patchId === undefined ? {} : {patchId}),
+    ...(basis
+      ? {
+          reviewBasis: {
+            snapshotId: basis.snapshotId,
+            tree: basis.tree,
+            ...(basis.patchId === undefined ? {} : {patchId: basis.patchId}),
+          },
+        }
+      : {}),
     acceptedHead: captured.head,
     pinnedRef: yield* pinNativeCycleTree(repo, bindingId, snapshotId, captured.tree),
   };

@@ -28,7 +28,11 @@ import {
 import {NativeCyclePacketOptionsSchema} from '@threadnote/workflow-automations/cycle-packet';
 import * as CycleOutput from '@threadnote/workflow-automations/cycle-output';
 import {NativeCycleReviewSchema} from '@threadnote/workflow-automations/cycle-review';
-import {nativeCyclePhaseReviewUsage, nativeCycleWaiverFor} from '@threadnote/workflow-automations/cycle-runtime';
+import {
+  nativeCyclePhaseReviewUsage,
+  nativeCycleWaiverFor,
+  nativeCycleCoveringReview,
+} from '@threadnote/workflow-automations/cycle-runtime';
 import {workflowTitleSlug} from '@threadnote/workflow-automations/naming';
 import {
   decodeNativeTaskActionRef,
@@ -1489,9 +1493,7 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
           'snapshot-ambiguous',
           'Recovery requires one unique canonical snapshot for this validation.',
         );
-      const report = EffectOption.getOrUndefined(
-        EffectArray.findFirst(runtime.reviews, item => item.snapshotId === ref.snapshotId),
-      );
+      const report = nativeCycleCoveringReview(runtime, entry.snapshot);
       const reviewDecision = decideGate(
         nativeWorkflowPolicyOf(stored.state),
         'review.required',

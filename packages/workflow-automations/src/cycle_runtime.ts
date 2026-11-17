@@ -16,6 +16,9 @@ import {
 } from './cycle.js';
 import {
   NativeCycleSnapshotSchema,
+  nativeCycleReviewRecordingMode,
+  type NativeCycleReview,
+  type NativeCycleSnapshot,
   nativeCycleUnreviewedRecoveryDigest,
   NativeCycleReviewSchema,
   validateNativeCycleReviewHistory,
@@ -108,6 +111,64 @@ export const nativeCycleWaiverFor = (
       waiver => waiver.gate === gate && waiver.phaseId === phaseId && waiver.tree === tree,
     ),
   );
+
+/**
+ * The accepted review that covers a snapshot: its own, or under the same intent a review of the same tree or, after
+ * the base moved, of the same patch. Derived on read; reviews[] stays the only owner of review state.
+ */
+export function nativeCycleCoveringReview(
+  runtime: NativeCycleRuntime,
+  snapshot: NativeCycleSnapshot,
+):
+  | {
+      readonly snapshot: NativeCycleSnapshot;
+      readonly review: NativeCycleReview;
+      readonly match: 'exact' | 'tree' | 'patch-id';
+    }
+  | undefined {
+  const own = EffectOption.getOrUndefined(
+    EffectArray.findFirst(runtime.reviews, entry => entry.snapshotId === snapshot.snapshotId),
+  );
+  if (own) return {snapshot, review: own.report, match: 'exact'};
+  if (snapshot.version !== 4) return undefined;
+  const intent = snapshot.intentHash;
+  for (const entry of [...runtime.snapshots].reverse()) {
+    const candidate = entry.snapshot;
+    const review = EffectOption.getOrUndefined(
+      EffectArray.findFirst(runtime.reviews, item => item.snapshotId === candidate.snapshotId),
+    )?.report;
+    if (
+      !review ||
+      candidate.phaseId !== snapshot.phaseId ||
+      (candidate.intentHash ?? candidate.phaseHash) !== intent ||
+      EffectArray.some(
+        review.findings,
+        finding => ['critical', 'important'].includes(finding.severity) && ['new', 'carried'].includes(finding.state),
+      )
+    )
+      continue;
+    if (candidate.tree === snapshot.tree) return {snapshot: candidate, review, match: 'tree'};
+    if (snapshot.patchId && candidate.patchId === snapshot.patchId && candidate.scopeBase !== snapshot.scopeBase)
+      return {snapshot: candidate, review, match: 'patch-id'};
+  }
+  return undefined;
+}
+
+export type NativeCycleTreeCoverage =
+  | {readonly _tag: 'reviewed'; readonly reviewSnapshotId: string; readonly match: 'exact' | 'tree' | 'patch-id'}
+  | {readonly _tag: 'waived'; readonly waiverId: string}
+  | {readonly _tag: 'pending'; readonly mode: 'full' | 'incremental'};
+
+export function nativeCycleCoverage(
+  runtime: NativeCycleRuntime,
+  snapshot: NativeCycleSnapshot,
+): NativeCycleTreeCoverage {
+  const covering = nativeCycleCoveringReview(runtime, snapshot);
+  if (covering) return {_tag: 'reviewed', reviewSnapshotId: covering.snapshot.snapshotId, match: covering.match};
+  const waiver = nativeCycleWaiverFor(runtime, 'review.required', snapshot.phaseId, snapshot.tree);
+  if (waiver) return {_tag: 'waived', waiverId: waiver.id};
+  return {_tag: 'pending', mode: nativeCycleReviewRecordingMode(snapshot)};
+}
 
 export const NativeCycleRuntimeSchema = Schema.Struct({
   state: NativeCycleStateSchema,

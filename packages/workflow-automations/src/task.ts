@@ -9,6 +9,7 @@ import {
   nativeCycleSupplementalRef,
   nativeCycleSupplementalRevision,
   nativeCycleWaiverFor,
+  nativeCycleCoveringReview,
 } from './cycle_runtime.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {NativeWorkflowState} from './native.js';
@@ -622,17 +623,13 @@ function projectNativeTaskCoreView(
   const latestSnapshot = pendingSnapshot
     ? EffectArray.filter(runtime.snapshots, entry => entry.snapshot.phaseId === pendingSnapshot.id).at(-1)
     : undefined;
-  const acceptedReview = latestSnapshot
-    ? EffectOption.getOrUndefined(
-        EffectArray.findFirst(runtime.reviews, item => item.snapshotId === latestSnapshot.snapshot.snapshotId),
-      )
-    : undefined;
-  const reviewBasis = latestSnapshot ? nativeCycleReviewBasis(runtime, latestSnapshot.snapshot) : undefined;
+  // A review of the same tree, or of the same patch after the base moved, covers the latest snapshot.
+  const covering = latestSnapshot ? nativeCycleCoveringReview(runtime, latestSnapshot.snapshot) : undefined;
+  const acceptedReview = covering ? {snapshotId: covering.snapshot.snapshotId, report: covering.review} : undefined;
+  const reviewBasis = covering ? nativeCycleReviewBasis(runtime, covering.snapshot) : undefined;
   const blockingReview = Boolean(
-    latestSnapshot &&
-    acceptedReview &&
-    validateNativeCycleReviewHistory(latestSnapshot.snapshot, acceptedReview.report, reviewBasis).summary
-      .blockingIssueCount,
+    covering &&
+    validateNativeCycleReviewHistory(covering.snapshot, covering.review, reviewBasis).summary.blockingIssueCount,
   );
   const reviewWaived = Boolean(
     pendingSnapshot &&

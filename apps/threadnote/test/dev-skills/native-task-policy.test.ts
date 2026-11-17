@@ -332,3 +332,90 @@ describe('audited waivers', () => {
     }).pipe(runCycle),
   );
 });
+
+describe('incremental review by default', () => {
+  const report = (snapshot: Record<string, unknown>) => ({
+    snapshotId: snapshot.snapshotId,
+    phaseHash: snapshot.phaseHash,
+    snapshotTree: snapshot.tree,
+    status: 'complete',
+    mode: snapshot.reviewBasis ? 'incremental' : 'full',
+    selected: ['correctness', 'simplicity'],
+    lanes: [
+      {name: 'correctness', status: 'complete'},
+      {name: 'simplicity', status: 'complete'},
+    ],
+    findings: [],
+  });
+  const setup = () =>
+    Effect.gen(function* () {
+      const f = yield* cycleFixture(
+        ['one'],
+        'local',
+        false,
+        false,
+        true,
+        undefined,
+        undefined,
+        {},
+        {policy: 'standard'},
+      );
+      const record = () =>
+        runNativeTaskAction(f.config, {command: 'record-snapshot', runId: 'native-run', callerCwd: f.repo}).pipe(
+          Effect.map(result => object(object(object(result).snapshot).snapshot)),
+        );
+      const view = () => readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo, role: 'review'});
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = 1;\n');
+      yield* f.git(['add', 'source.ts']);
+      yield* f.git(['commit', '-m', 'phase one']);
+      const reviewed = yield* record();
+      yield* f.mutate('validate-review', {snapshotId: reviewed.snapshotId, attemptId: 'a1', report: report(reviewed)});
+      // Move the base: a new upstream commit on main that does not touch the phase file.
+      yield* f.git(['checkout', '-q', 'main']);
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'upstream.md'), 'Upstream work.\n');
+      yield* f.git(['add', 'upstream.md']);
+      yield* f.git(['commit', '-m', 'upstream']);
+      yield* f.git(['checkout', '-q', 'feature/one']);
+      return {f, record, view, reviewed};
+    });
+
+  effectIt.effect('reuses the review after a clean rebase and asks only for validation', () =>
+    Effect.gen(function* () {
+      const {f, record, view, reviewed} = yield* setup();
+      yield* f.git(['rebase', '-q', 'main']);
+      const rebased = yield* record();
+      expect(rebased.patchId).toBe(reviewed.patchId);
+      expect(rebased.scopeBase).not.toBe(reviewed.scopeBase);
+      expect((yield* view()).next).toMatchObject({action: 'validate', snapshotId: rebased.snapshotId});
+    }).pipe(runCycle),
+  );
+
+  effectIt.effect('restarts with a full review when the rebased patch changed', () =>
+    Effect.gen(function* () {
+      const {f, record, view, reviewed} = yield* setup();
+      yield* f.git(['rebase', '-q', 'main']);
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = 2;\n');
+      const changed = yield* record();
+      expect(changed.patchId).not.toBe(reviewed.patchId);
+      expect(changed).not.toHaveProperty('reviewBasis');
+      expect((yield* view()).next).toMatchObject({action: 'review', snapshotId: changed.snapshotId});
+    }).pipe(runCycle),
+  );
+
+  effectIt.effect('reviews only the increment after a path-only reconcile', () =>
+    Effect.gen(function* () {
+      const {f, record, view, reviewed} = yield* setup();
+      const revised = yield* f.revise({
+        phases: EffectArray.map(f.document.phases, phase => ({
+          ...phase,
+          affectedPaths: [...phase.affectedPaths, 'notes.md'],
+        })),
+      });
+      yield* f.mutate('reconcile', {plan: revised, reason: 'Own the notes file.'});
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = 3;\n');
+      const next = yield* record();
+      expect(next).toMatchObject({reviewBasis: {snapshotId: reviewed.snapshotId}});
+      expect((yield* view()).phase?.snapshot).toMatchObject({recordingMode: 'incremental'});
+    }).pipe(runCycle),
+  );
+});

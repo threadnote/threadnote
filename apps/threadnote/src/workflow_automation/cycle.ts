@@ -42,6 +42,7 @@ import {
   type NativeCycleRuntime,
   nativeCycleWaiverFor,
   nativeCycleWaiverId,
+  nativeCycleCoveringReview,
 } from '@threadnote/workflow-automations/cycle-runtime';
 import {nativeCycleTextPage} from '@threadnote/workflow-automations/cycle-output';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -1347,9 +1348,8 @@ export const runNativeCycle = <R>(
           if (!nativeCycleSnapshotIsCurrentIteration(runtime, selected.id, entry.snapshot.snapshotId))
             return yield* fail('review-stale', 'Record a fresh snapshot and review after phase invalidation.');
           const current = yield* currentSnapshot(repo, entry.snapshot, request.acceptedHead, selected);
-          const report = EffectOption.getOrUndefined(
-            EffectArray.findFirst(runtime.reviews, item => item.snapshotId === entry.snapshot.snapshotId),
-          )?.report;
+          const covering = nativeCycleCoveringReview(runtime, entry.snapshot);
+          const report = covering?.review;
           const policy = nativeWorkflowPolicyOf(stored.state);
           const reviewDecision = decideGate(
             policy,
@@ -1364,9 +1364,13 @@ export const runNativeCycle = <R>(
               'A complete immutable source review is required before acceptance.',
               reviewDecision,
             );
-          const reviewed = report
+          const reviewed = covering
             ? yield* from(() =>
-                validateNativeCycleReview(entry.snapshot, report, nativeCycleReviewBasis(runtime, entry.snapshot)),
+                validateNativeCycleReview(
+                  covering.snapshot,
+                  covering.review,
+                  nativeCycleReviewBasis(runtime, covering.snapshot),
+                ),
               )
             : undefined;
           const blockingDecision = decideGate(
@@ -1532,17 +1536,13 @@ export const runNativeCycle = <R>(
                 entry.snapshot.phaseHash === proof.phaseHash &&
                 nativeCycleSnapshotIsCurrentIteration(runtime, selected.id, entry.snapshot.snapshotId),
             ).at(-1);
-            const review = source
-              ? EffectOption.getOrUndefined(
-                  EffectArray.findFirst(
-                    runtime.reviews,
-                    entry =>
-                      entry.snapshotId === source.snapshot.snapshotId &&
-                      entry.report.phaseHash === proof.phaseHash &&
-                      entry.report.snapshotTree === proof.tree,
-                  ),
-                )?.report
-              : undefined;
+            const covering = source ? nativeCycleCoveringReview(runtime, source.snapshot) : undefined;
+            const review =
+              covering &&
+              (covering.match !== 'exact' ||
+                (covering.review.phaseHash === proof.phaseHash && covering.review.snapshotTree === proof.tree))
+                ? covering.review
+                : undefined;
             const reviewCovered =
               review !== undefined ||
               nativeCycleWaiverFor(runtime, 'review.required', selected.id, proof.tree) !== undefined;

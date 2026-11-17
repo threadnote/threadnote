@@ -83,7 +83,11 @@ const treeSnapshotFields = {
   intentHash: Schema.optionalKey(digest),
   dirty: Schema.optionalKey(Schema.Boolean),
   outOfPlan: Schema.optionalKey(Schema.Array(text()).check(Schema.isMaxLength(8192))),
-  reviewBasis: Schema.optionalKey(Schema.Struct({snapshotId: id, tree: gitObject})),
+  /** `git patch-id --stable` of the diff from the scope base, so a clean rebase can reuse a review. */
+  patchId: Schema.optionalKey(gitObject),
+  reviewBasis: Schema.optionalKey(
+    Schema.Struct({snapshotId: id, tree: gitObject, patchId: Schema.optionalKey(gitObject)}),
+  ),
 } as const;
 
 export const NativeCycleSnapshotSchema = Schema.Struct({
@@ -120,7 +124,10 @@ export const NativeCycleSnapshotSchema = Schema.Struct({
   Schema.makeFilter(snapshot =>
     (snapshot.version === 4) !== (snapshot.intentHash !== undefined) ||
     (snapshot.version !== 4 &&
-      (snapshot.dirty !== undefined || snapshot.outOfPlan !== undefined || snapshot.reviewBasis !== undefined)) ||
+      (snapshot.dirty !== undefined ||
+        snapshot.outOfPlan !== undefined ||
+        snapshot.patchId !== undefined ||
+        snapshot.reviewBasis !== undefined)) ||
     (snapshot.version === 4 &&
       (snapshot.previous !== undefined ||
         snapshot.previousTree !== undefined ||

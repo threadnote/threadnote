@@ -918,3 +918,21 @@ export const makeWorkflowGitAdapter = Effect.fn('workflowAutomation.cycle.gitAda
       }).pipe(Effect.provideContext(services), Effect.mapError(nativeWorkflowError)),
   });
 });
+
+/** Stable patch identity of a tree diff; absent for an empty or unreadable diff, which never reuses a review. */
+export const nativeCyclePatchId = (repo: string, fromTree: string, toTree: string) =>
+  Effect.gen(function* () {
+    const diff = yield* runCommandEffect(
+      'git',
+      ['--no-optional-locks', '-C', repo, 'diff-tree', '-p', '--binary', '--no-color', fromTree, toTree],
+      {timeoutMs: 30_000, maxOutputBytes: 64 * 1024 * 1024},
+    );
+    if (!diff.stdout) return undefined;
+    const identity = yield* runCommandEffect('git', ['--no-optional-locks', '-C', repo, 'patch-id', '--stable'], {
+      input: new TextEncoder().encode(diff.stdout),
+      timeoutMs: 30_000,
+      maxOutputBytes: 4096,
+    });
+    const patchId = EffectString.split(EffectString.trim(identity.stdout), ' ')[0];
+    return patchId && objectId.test(patchId) ? patchId : undefined;
+  }).pipe(Effect.orElseSucceed(() => undefined));
