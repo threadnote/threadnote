@@ -419,3 +419,86 @@ describe('incremental review by default', () => {
     }).pipe(runCycle),
   );
 });
+
+describe('issue #1074 acceptance', () => {
+  effectIt.effect(
+    'replays snapshot, unplanned edit, snapshot, rebase onto a moved base and snapshot without refusal',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* cycleFixture(
+          ['one'],
+          'local',
+          false,
+          false,
+          true,
+          undefined,
+          undefined,
+          {},
+          {policy: 'standard'},
+        );
+        const record = (reason: string) =>
+          runNativeTaskAction(f.config, {
+            command: 'record-snapshot',
+            runId: 'native-run',
+            callerCwd: f.repo,
+            reason,
+          }).pipe(Effect.map(result => object(object(object(result).snapshot).snapshot)));
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = 1;\n');
+        const first = yield* record('first source');
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'notes.md'), 'Outside the planned paths.\n');
+        const second = yield* record('edit outside the plan');
+        expect(second).toMatchObject({supersedes: first.snapshotId, outOfPlan: ['notes.md']});
+        yield* f.git(['add', '-A']);
+        yield* f.git(['commit', '-m', 'phase work']);
+        yield* f.git(['checkout', '-q', 'main']);
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'upstream.md'), 'Moved base.\n');
+        yield* f.git(['add', 'upstream.md']);
+        yield* f.git(['commit', '-m', 'move the base']);
+        yield* f.git(['checkout', '-q', 'feature/one']);
+        yield* f.git(['rebase', '-q', 'main']);
+        const third = yield* record('rebased onto the moved base');
+        expect(third).toMatchObject({version: 4, supersedes: second.snapshotId, outOfPlan: ['notes.md']});
+        expect(third.scopeBase).not.toBe(second.scopeBase);
+      }).pipe(runCycle),
+  );
+});
+
+describe('workflow profile switch', () => {
+  effectIt.effect('tightens with a reason, replays, and loosens only with user authority', () =>
+    Effect.gen(function* () {
+      const f = yield* cycleFixture(
+        ['one'],
+        'local',
+        false,
+        false,
+        true,
+        undefined,
+        undefined,
+        {},
+        {policy: 'standard'},
+      );
+      const setProfile = (profile: 'standard' | 'strict', userAuthority?: string) =>
+        runNativeTaskAction(f.config, {
+          command: 'set-profile',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          profile,
+          reason: 'Release work needs every gate.',
+          ...(userAuthority === undefined ? {} : {userAuthority}),
+        });
+      const strict = object(yield* setProfile('strict'));
+      expect(strict).toMatchObject({status: 'changed', profile: 'strict', from: 'standard'});
+      expect(object(yield* setProfile('strict'))).toMatchObject({status: 'unchanged', revision: strict.revision});
+      expect((yield* readNativeWorkflowState(f.config, 'native-run'))?.state.policy).toMatchObject({mode: 'strict'});
+      expect(yield* setProfile('standard').pipe(Effect.flip)).toMatchObject({
+        code: 'profile-authority-required',
+        next: {command: 'set-profile'},
+      });
+      expect(object(yield* setProfile('standard', 'User: loosen this run again.'))).toMatchObject({
+        status: 'changed',
+        profile: 'standard',
+        policy: {userAuthority: 'User: loosen this run again.'},
+      });
+    }).pipe(runCycle),
+  );
+});

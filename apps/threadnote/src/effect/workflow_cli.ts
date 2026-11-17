@@ -474,6 +474,13 @@ export function makeNativeTaskActionCommands<E, R>(
     readonly reason: string;
     readonly userAuthority: string;
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
+  setProfileHandler?: (options: {
+    readonly runId: string;
+    readonly callerCwd: string;
+    readonly profile: 'standard' | 'strict';
+    readonly reason: string;
+    readonly userAuthority?: string;
+  }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
 ) {
   const lifecycle = (options: Parameters<NonNullable<typeof lifecycleHandler>>[0]) =>
     lifecycleHandler
@@ -921,10 +928,30 @@ export function makeNativeTaskActionCommands<E, R>(
             WorkflowAutomationError.make({code: 'unsupported-action', message: 'This task action is unavailable.'}),
           ),
   ).pipe(Command.withDescription('Record an audited waiver of one gate for the current phase tree'));
+  const setProfile = Command.make(
+    'set-profile',
+    {
+      runId: requiredString('run-id', 'Existing native workflow run identifier'),
+      callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
+      profile: requiredChoice('profile', ['standard', 'strict'], 'Dev-cycle profile for this run'),
+      reason: requiredString('reason', 'Why the run changes profile'),
+      userAuthority: optionalString(
+        'user-authority',
+        'Caller-provided human authority; required to loosen a run to the standard profile',
+      ),
+    },
+    options =>
+      setProfileHandler
+        ? setProfileHandler(options)
+        : Effect.fail(
+            WorkflowAutomationError.make({code: 'unsupported-action', message: 'This task action is unavailable.'}),
+          ),
+  ).pipe(Command.withDescription('Switch this run between the standard and strict dev-cycle profiles'));
   return Command.make('task-action', {}).pipe(
     Command.withSubcommands([
       work,
       waive,
+      setProfile,
       begin,
       resume,
       reopen,

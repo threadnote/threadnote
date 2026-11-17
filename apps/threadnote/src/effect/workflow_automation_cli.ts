@@ -458,6 +458,21 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
               Effect.tapError(printWorkflowRefusal),
             ),
           ),
+        options =>
+          withRuntime(config =>
+            runNativeTaskAction(config, {
+              command: 'set-profile',
+              runId: options.runId,
+              callerCwd: options.callerCwd,
+              profile: options.profile,
+              reason: options.reason,
+              ...(options.userAuthority === undefined ? {} : {userAuthority: options.userAuthority}),
+            }).pipe(
+              Effect.flatMap(value => Console.log(JSON.stringify(value))),
+              Effect.mapError(nativeWorkflowError),
+              Effect.tapError(printWorkflowRefusal),
+            ),
+          ),
       ),
     ]),
   );

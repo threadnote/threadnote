@@ -1,4 +1,4 @@
-import {runNativeTaskWaiver, withNativeTaskWaivers} from './task_policy_actions.js';
+import {runNativeTaskWaiver, withNativeTaskWaivers, runNativeTaskSetProfile} from './task_policy_actions.js';
 import {
   nativeWorkflowPolicyOf,
   nativeNextForTaskAction,
@@ -8,6 +8,7 @@ import {
   nativeGateRefusal,
   nativeTaskWaiveNext,
   nativeWaivableGateIds,
+  nativeWorkflowPolicies,
 } from '@threadnote/workflow-automations/gates';
 import {runStandalonePrWatch} from './standalone_pr_watch.js';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -240,6 +241,14 @@ const requestSchema = Schema.Union([
     additionalReviews: Schema.Finite.check(Schema.isInt(), Schema.isBetween({minimum: 1, maximum: 251})),
     reason: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
     userAuthority: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+  }),
+  Schema.Struct({
+    command: Schema.Literal('set-profile'),
+    runId: id,
+    callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    profile: Schema.Literals(nativeWorkflowPolicies),
+    reason: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    userAuthority: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
   }),
   Schema.Struct({
     command: Schema.Literal('waive'),
@@ -738,6 +747,7 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
     );
     if (journal.state.binding.repo !== checkout)
       return yield* fail('wrong-checkout', 'Use the checkout bound to this native run.');
+    if (request.command === 'set-profile') return yield* runNativeTaskSetProfile(config, request, stored, checkout);
 
     if (
       request.command === 'compact-start' ||
