@@ -19,7 +19,13 @@ import {createMemoryCodeCitation, MEMORY_SCHEMA_VERSION} from '@threadnote/memor
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {isJsonObject} from '@threadnote/platform/json';
 import {assertWorkflowJournalIntegrity, workflowOwnedArtifacts} from '../../src/workflow_memory/journal_validation.js';
-import {assertWorkflowJournalCapacity, serializeWorkflowJournal} from '../../src/workflow_memory/journal.js';
+import {
+  assertWorkflowJournalCapacity,
+  serializeWorkflowJournal,
+  workflowTransition,
+} from '../../src/workflow_memory/journal.js';
+import {MAX_INDEXED_FILE_BYTES} from '@threadnote/recall/index/refresh';
+import {nativeWorkflowOperationLimit} from '@threadnote/workflow-automations/native';
 import {
   workflowArtifactTopic,
   workflowArtifactUri,
@@ -265,6 +271,32 @@ describe('workflow journal ownership validation', () => {
     expect(() => assertWorkflowJournalIntegrity({...next, previousManifestContent: undefined}, undefined)).toThrow();
     const initial = {...empty, manifestCommitted: false};
     expect(() => assertWorkflowJournalIntegrity(initial, undefined)).not.toThrow();
+  });
+
+  it('keeps the indexed state memory bounded when artifact creation repeats to the run operation limit', () => {
+    const receipts = EffectArray.makeBy(nativeWorkflowOperationLimit, index => ({
+      ...create(`artifact-${index}`),
+      status: 'verified' as const,
+    }));
+    const grown = (count: number): WorkflowJournal => ({
+      ...state(),
+      artifacts: EffectRecord.fromEntries(
+        EffectArray.map(receipts.slice(0, count), receipt => [receipt.artifact.canonicalUri, receipt.artifact]),
+      ),
+      operations: operations(receipts[count - 1]),
+    });
+    const committed = {...workflowTransition(state(), grown(receipts.length - 1), timestamp), manifestCommitted: true};
+    const pending = workflowTransition(committed, grown(receipts.length), timestamp);
+    expect(new TextEncoder().encode(pending.manifestContent).byteLength).toBeLessThan(MAX_INDEXED_FILE_BYTES / 64);
+    expect(() => assertWorkflowJournalIntegrity(committed, committed.manifestContent)).not.toThrow();
+    expect(() => assertWorkflowJournalIntegrity(pending, committed.manifestContent)).not.toThrow();
+    const final = {...pending, manifestCommitted: true};
+    expect(() => assertWorkflowJournalIntegrity(final, final.manifestContent)).not.toThrow();
+    // The bounded commitment still refuses a registry or predecessor it does not describe.
+    const shrunk = {...final, artifacts: grown(receipts.length - 1).artifacts};
+    expect(() => assertWorkflowJournalIntegrity(shrunk, final.manifestContent)).toThrow();
+    const other = workflowTransition(state(), grown(receipts.length - 2), timestamp).manifestContent;
+    expect(() => assertWorkflowJournalIntegrity({...pending, previousManifestContent: other}, other)).toThrow();
   });
 
   it('requires prepared relation receipts to match the authored edge without broadening their read scope', () => {
