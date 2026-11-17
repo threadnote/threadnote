@@ -291,7 +291,30 @@ export function taskPostingV2Statement(
         AND m.scope_ordinal=c.scope_ordinal) THEN '!'
         WHEN ${nextGroup} IS NULL THEN NULL ELSE COALESCE(${first(nextGroup)},'!') END)
     ELSE COALESCE(${first(currentGroup)},'!') END)`;
-  const next = `min(COALESCE(${owner(body ? 2 : 1)},'~'),COALESCE(${owner(3)},'~')${body ? '' : `,COALESCE(${shared},'~')`})`;
+  // Retain each admitted lookahead until its logical key is selected. Reserving
+  // every missing head before evaluating these scalar queries prevents a free
+  // N+1 owner read at the end of the caller's examined-posting allowance.
+  const streams = [owner(body ? 2 : 1), owner(3), ...(body ? [] : [shared])];
+  const head = (index: number) => `json_extract(heads.value,'$[${index}]')`;
+  const missing = EffectArray.join(
+    EffectArray.map(streams, (_, index) => `(c.head${index}='?')`),
+    '+',
+  );
+  const next = `min(${EffectArray.join(
+    EffectArray.map(streams, (_, index) => head(index)),
+    ',',
+  )})`;
+  const fetched = EffectArray.join(
+    EffectArray.map(
+      streams,
+      (stream, index) => `CASE WHEN c.head${index}='?' THEN COALESCE(${stream},'~') ELSE c.head${index} END`,
+    ),
+    ',',
+  );
+  const examined = EffectArray.join(
+    EffectArray.map(streams, (_, index) => `(c.head${index}='?' AND ${head(index)}<>'~')`),
+    '+',
+  );
   const advance = `(SELECT MIN(position) FROM positions WHERE position>c.position)`;
   const skipContributor = `(SELECT MIN(position) FROM positions WHERE position>=(c.position/32+1)*32)`;
   const raw = `WITH RECURSIVE input(position,snapshot_id,term) AS (VALUES ${
@@ -308,33 +331,55 @@ export function taskPostingV2Statement(
       JOIN lexical_v2_formats format ON format.snapshot_id=input.snapshot_id AND format.format_version=2
       JOIN lexical_compact_terms dictionary ON dictionary.snapshot_key=compact.snapshot_key AND dictionary.term=input.term
     ), bounds AS (SELECT ? AS maximum),
-    cursor(position,scope_ordinal,member_ordinal,raw_count,steps,selected_position,selected_scope,selected_member,weight,valid) AS (
-      SELECT (SELECT MIN(position) FROM positions),-1,-1,0,0,NULL,NULL,NULL,NULL,0
+    cursor(position,scope_ordinal,member_ordinal,raw_count,steps,selected_position,selected_scope,selected_member,weight,valid,${EffectArray.join(
+      EffectArray.map(streams, (_, index) => `head${index}`),
+      ',',
+    )}) AS (
+      SELECT (SELECT MIN(position) FROM positions),-1,-1,0,0,NULL,NULL,NULL,NULL,0,${EffectArray.join(
+        EffectArray.map(streams, () => "'?'"),
+        ',',
+      )}
       UNION ALL
       SELECT CASE WHEN seek.value='~' THEN ${advance} WHEN seek.value='!' THEN ${skipContributor} ELSE c.position END,
         CASE WHEN seek.value IN ('~','!') THEN -1 ELSE CAST(substr(seek.value,1,16) AS INTEGER) END,
         CASE WHEN seek.value IN ('~','!') THEN -1 ELSE CAST(substr(seek.value,17,16) AS INTEGER) END,
-        c.raw_count+(seek.value<>'~'),c.steps+1,
+        c.raw_count+${examined},c.steps+1,
         CASE WHEN seek.value='~' THEN NULL ELSE c.position END,
         CASE WHEN seek.value IN ('~','!') THEN NULL ELSE CAST(substr(seek.value,1,16) AS INTEGER) END,
         CASE WHEN seek.value IN ('~','!') THEN NULL ELSE CAST(substr(seek.value,17,16) AS INTEGER) END,
         CASE WHEN seek.value IN ('~','!') THEN NULL ELSE 9-CAST(substr(seek.value,33,1) AS INTEGER) END,
-        seek.value NOT IN ('~','!')
+        seek.value NOT IN ('~','!'),
+        ${EffectArray.join(
+          EffectArray.map(
+            streams,
+            (_, index) =>
+              `CASE WHEN seek.value IN ('~','!') OR substr(${head(index)},1,32)=substr(seek.value,1,32) THEN '?' ELSE ${head(index)} END`,
+          ),
+          ',',
+        )}
       FROM cursor c JOIN positions p ON p.position=c.position
+      JOIN json_each(json_array(json_array(${fetched}))) heads
       JOIN json_each(json_array(${next})) seek
-      WHERE c.raw_count<(SELECT maximum FROM bounds) AND c.steps<192
+      WHERE c.raw_count+${missing}<=(SELECT maximum FROM bounds) AND c.steps<192
     ), raw AS MATERIALIZED (
       SELECT p.snapshot_id,p.snapshot_key,c.selected_scope AS scope_ordinal,c.selected_member AS member_ordinal,
         ${body ? "'~body:v1:'||p.term" : 'p.term'} AS term,c.weight,c.valid
       FROM cursor c JOIN positions p ON p.position=c.selected_position
       WHERE c.selected_position IS NOT NULL LIMIT 128
+    ), accounting AS MATERIALIZED (
+      SELECT raw_count AS examined_count,
+        (position IS NOT NULL AND (raw_count+${EffectArray.join(
+          EffectArray.map(streams, (_, index) => `(head${index}='?')`),
+          '+',
+        )}>(SELECT maximum FROM bounds) OR steps>=192)) AS posting_cap_reached
+      FROM cursor WHERE steps=(SELECT MAX(steps) FROM cursor)
     ), mapped AS MATERIALIZED (
       SELECT raw.snapshot_id,${taskBoundedText('dictionary.symbol_id', 128)} AS symbol_id,raw.term,
         CASE WHEN raw.valid THEN raw.weight ELSE NULL END AS weight
       FROM raw LEFT JOIN lexical_v2_members dictionary ON dictionary.snapshot_key=raw.snapshot_key
         AND dictionary.scope_ordinal=raw.scope_ordinal AND dictionary.member_ordinal=raw.member_ordinal
-    )
-    SELECT mapped.symbol_id AS id, mapped.term, mapped.weight,
+    )`;
+  const projection = `SELECT mapped.symbol_id AS id, mapped.term, mapped.weight,
       ${taskBoundedText('symbol.path', 4096)} AS path,
       ${taskBoundedText('symbol.package_name', 256)} AS package_name,
       ${taskBoundedText('symbol.content_hash', 64)} AS content_hash,
@@ -351,11 +396,27 @@ export function taskPostingV2Statement(
           AND NOT EXISTS (SELECT 1 FROM snapshot_file_deletions AS deletion WHERE deletion.snapshot_id = ? AND deletion.path = file.path))))
       ELSE 0 END AS eligible
     FROM mapped LEFT JOIN symbols AS symbol ON symbol.snapshot_id = mapped.snapshot_id AND symbol.id = mapped.symbol_id`;
-  return taskTransferBounded(
-    {parameters, text: raw},
-    ['id', 'term', 'weight', 'path', 'package_name', 'content_hash', 'row_valid', 'eligible'],
-    32768,
+  // A compact accounting row survives malformed/empty logical results. Its
+  // native 512-byte JSON bound and the constant bookkeeping fields fit within
+  // the logical rows' existing 1KiB headroom, including at the one-row clamp.
+  const columns = ['id', 'term', 'weight', 'path', 'package_name', 'content_hash', 'row_valid', 'eligible'];
+  const bounded = taskTransferBounded({parameters, text: projection}, columns, 32768);
+  const accounting = taskTransferBounded(
+    {
+      parameters: [],
+      text: `SELECT NULL AS id,NULL AS term,NULL AS weight,NULL AS path,NULL AS package_name,NULL AS content_hash,
+      1 AS row_valid,0 AS eligible,1 AS accounting_only,examined_count,posting_cap_reached
+      FROM accounting WHERE (SELECT maximum FROM bounds)>0`,
+    },
+    [...columns, 'accounting_only', 'examined_count', 'posting_cap_reached'],
+    1536,
   );
+  return {
+    parameters,
+    text: `${raw}, bounded AS (${bounded.text}), bounded_accounting AS (${accounting.text})
+    SELECT bounded.*,0 AS accounting_only,NULL AS examined_count,NULL AS posting_cap_reached FROM bounded
+    UNION ALL SELECT ${EffectArray.join(columns, ',')},transfer_valid,accounting_only,examined_count,posting_cap_reached FROM bounded_accounting`,
+  };
 }
 
 /** Seek relation-keyed adjacency. Even suppressed/unresolved rows consume the one raw edge allowance. */

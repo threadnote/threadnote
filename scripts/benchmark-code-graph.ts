@@ -1585,7 +1585,8 @@ const benchmarkCodeGraph = Effect.scoped(
     }
 
     const storage = yield* codeGraphStorageTelemetry(fs, path, analysisStatus.databasePath, databaseRoot);
-    const coldLexicalTermRows = sqliteLexicalTermRowCount(analysisStatus.databasePath, cold.snapshot.id);
+    const coldLexicalPostings = sqliteLexicalPostingCounts(analysisStatus.databasePath, cold.snapshot.id);
+    const coldLexicalTermRows = coldLexicalPostings.physicalRows;
     const sqliteVersion = sqliteVersionString(analysisStatus.databasePath);
     const sqlitePageSizeBytes = sqlitePageSize(analysisStatus.databasePath);
     yield* runCheckpoint?.mark('structural-parity') ?? Effect.void;
@@ -1939,7 +1940,7 @@ const benchmarkCodeGraph = Effect.scoped(
               files: cold.snapshot.fileCount,
               skipped: cold.skippedFiles,
               symbols: cold.snapshot.symbolCount,
-              terms: coldLexicalTermRows,
+              terms: coldLexicalPostings.logicalPostings,
             })
           : []),
       ],
@@ -4197,7 +4198,15 @@ function sqliteRowCount(databasePath: string, query: string, ...parameters: read
   }
 }
 
-function sqliteLexicalTermRowCount(databasePath: string, snapshotId: string): number {
+/**
+ * Physical rows are the storage cost of the snapshot's lexical layout. Logical
+ * postings are the layout-independent symbol/term workload the production
+ * fixture targets, so factoring storage changes only the former.
+ */
+function sqliteLexicalPostingCounts(
+  databasePath: string,
+  snapshotId: string,
+): {readonly logicalPostings: number; readonly physicalRows: number} {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
     if (isLexicalV2Snapshot(snapshotId)) {
@@ -4217,11 +4226,15 @@ function sqliteLexicalTermRowCount(databasePath: string, snapshotId: string): nu
         row.view_count +
         1;
       const receipt = database
-        .query<{posting_count: number}, [string]>('SELECT posting_count FROM lexical_v2_formats WHERE snapshot_id=?')
+        .query<{logical_posting_count: number; posting_count: number}, [string]>(
+          'SELECT posting_count,logical_posting_count FROM lexical_v2_formats WHERE snapshot_id=?',
+        )
         .get(snapshotId);
       if (!Number.isSafeInteger(count) || count < 0 || receipt?.posting_count !== count)
         throw ScriptError.make({message: 'Factored lexical physical row count differs from its receipt.'});
-      return count;
+      if (!Number.isSafeInteger(receipt.logical_posting_count) || receipt.logical_posting_count < 0)
+        throw ScriptError.make({message: 'Factored lexical logical posting count is invalid.'});
+      return {logicalPostings: receipt.logical_posting_count, physicalRows: count};
     }
     const compact = database
       .query<{readonly count?: bigint | number} | null, SQLQueryBindings[]>(
@@ -4242,7 +4255,7 @@ function sqliteLexicalTermRowCount(databasePath: string, snapshotId: string): nu
     if (!Number.isSafeInteger(count) || count < 0) {
       throw ScriptError.make({message: `Invalid SQLite lexical term row count for ${databasePath}.`});
     }
-    return count;
+    return {logicalPostings: count, physicalRows: count};
   } finally {
     database.close(false);
   }
