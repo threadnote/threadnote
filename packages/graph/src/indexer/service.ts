@@ -1195,11 +1195,12 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                           preassessment = yield* assessIncrementalOverlayCompatibility(
                             {
                               // The committed snapshot identity is exact for this inventory;
-                              // persisted evidence is used only if that snapshot is ready.
+                              // persisted evidence is used only if that snapshot is ready. The
+                              // assessment rejects a committed extractor set other than this one.
                               baseSnapshotId: snapshotIdentity(
                                 identity,
                                 false,
-                                extractorSetIdentity(inventory.committedFiles, languagePacks),
+                                extractorSet,
                                 inventory.committedFiles,
                                 inventory.scope,
                               ),

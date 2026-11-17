@@ -57,6 +57,7 @@ import {
   assessWorkspaceTransitionIncrementalClosure,
   enrichPersistedTypeScriptReexports,
   reusableReexportSeeds,
+  type CodeGraphResolutionEvidenceOwner,
 } from './resolution_candidate_closure.js';
 import {
   type CodeGraphFileFacts,
@@ -358,7 +359,9 @@ export const assessIncrementalOverlayCompatibility = Effect.fn('codeGraph.assess
     }
     const closure = yield* assessProjectIncrementalClosureCompatibility({
       baseFiles: input.inventory.committedFiles,
-      ...(input.baseSnapshotId === undefined ? {} : {baseSnapshotId: input.baseSnapshotId}),
+      ...(input.baseSnapshotId === undefined
+        ? {}
+        : {resolutionEvidenceOwner: {extractorSet: input.extractorSet, snapshotId: input.baseSnapshotId}}),
       baseFileSetFingerprint: reusableBaseFileSetFingerprint(input.inventory.committedFiles),
       baseWorkspace: committedWorkspace,
       changedBaseFacts: committedFacts,
@@ -564,7 +567,7 @@ export const assessReusableCleanBaseCompatibility = Effect.fn('codeGraph.assessR
     if (reexportResolutionSurfaceChanged || resolutionSurfaceChanged || workspaceSeedProjectIds.length > 0) {
       const closure = yield* assessProjectIncrementalClosureCompatibility({
         baseFiles: input.candidate.files,
-        baseSnapshotId: input.candidate.snapshot.id,
+        resolutionEvidenceOwner: {extractorSet: currentExtractorSet, snapshotId: input.candidate.snapshot.id},
         baseFileSetFingerprint: reusableBaseFileSetFingerprint(input.candidate.files),
         baseWorkspace: committedWorkspace,
         changedBaseFacts: baseFacts,
@@ -606,7 +609,7 @@ const assessProjectIncrementalClosureCompatibility = Effect.fn(
 )(function* (input: {
   readonly baseFiles: readonly CodeGraphInventoryFile[];
   readonly baseFileSetFingerprint: string;
-  readonly baseSnapshotId?: string;
+  readonly resolutionEvidenceOwner?: CodeGraphResolutionEvidenceOwner;
   readonly baseWorkspace: CodeGraphWorkspace;
   readonly changedBaseFacts: readonly CodeGraphFileFacts[];
   readonly changedCurrentFacts: readonly CodeGraphFileFacts[];
@@ -633,7 +636,7 @@ const assessProjectIncrementalClosureCompatibility = Effect.fn(
     return yield* assessResolutionCandidateIncrementalClosure({
       baseFileSetFingerprint: input.baseFileSetFingerprint,
       baseFiles: input.baseFiles,
-      ...(input.baseSnapshotId === undefined ? {} : {baseSnapshotId: input.baseSnapshotId}),
+      ...(input.resolutionEvidenceOwner === undefined ? {} : {resolutionEvidenceOwner: input.resolutionEvidenceOwner}),
       candidateReexports: seeds.candidateReexports ?? [],
       committedWorkspace: input.baseWorkspace,
       currentChangedFiles: input.currentChangedFiles,
@@ -671,7 +674,7 @@ const assessProjectIncrementalClosureCompatibility = Effect.fn(
   return yield* assessResolutionCandidateIncrementalClosure({
     baseFileSetFingerprint: input.baseFileSetFingerprint,
     baseFiles: input.baseFiles,
-    ...(input.baseSnapshotId === undefined ? {} : {baseSnapshotId: input.baseSnapshotId}),
+    ...(input.resolutionEvidenceOwner === undefined ? {} : {resolutionEvidenceOwner: input.resolutionEvidenceOwner}),
     committedWorkspace: input.baseWorkspace,
     currentChangedFiles: input.currentChangedFiles,
     currentFiles: input.currentFiles,

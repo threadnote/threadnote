@@ -10,7 +10,7 @@ import {
   PROJECT_INCREMENTAL_CLOSURE_MAX_SOURCE_BYTES,
 } from '../incremental/closure.js';
 import {assessCodeGraphIncrementalFactBytes, codeGraphIncrementalFactBatchesFitBudget} from '../incremental/work.js';
-import {cachedFactsMetadata, extractorSetIdentity, loadCachedFacts} from './materialization.js';
+import {cachedFactsMetadata, loadCachedFacts} from './materialization.js';
 import {codeGraphInventorySha256Hex} from '../inventory/identity.js';
 import type {IncrementalOverlayPreassessment} from './types.js';
 import type {CodeGraphLanguagePackRegistryShape} from '../languages/registry.js';
@@ -66,11 +66,12 @@ export const assessResolutionCandidateIncrementalClosure = Effect.fn(
   readonly baseFileSetFingerprint: string;
   readonly baseFiles: readonly CodeGraphInventoryFile[];
   /**
-   * Ready snapshot that owns persisted evidence for exactly `baseFiles` and
-   * `committedWorkspace`. Only set when base facts are attributed in that
-   * same context; file-set and workspace transitions re-attribute and scan.
+   * Snapshot that owns persisted evidence for exactly `baseFiles` and
+   * `committedWorkspace`, with the extractor set that loads their cached
+   * facts. Only set when base facts are attributed in that same context;
+   * file-set and workspace transitions re-attribute and scan.
    */
-  readonly baseSnapshotId?: string;
+  readonly resolutionEvidenceOwner?: CodeGraphResolutionEvidenceOwner;
   readonly candidateReexports: readonly ProjectResolutionReexportCandidate[];
   readonly committedWorkspace: CodeGraphWorkspace;
   readonly currentChangedFiles: readonly CodeGraphInventoryFile[];
@@ -85,12 +86,13 @@ export const assessResolutionCandidateIncrementalClosure = Effect.fn(
   readonly requiredFiles?: readonly CodeGraphInventoryFile[];
   readonly store: CodeGraphStoreShape;
 }) {
+  const owner = input.resolutionEvidenceOwner;
   const evidence =
-    input.baseSnapshotId === undefined || input.baseAttributionContext !== undefined
+    owner === undefined || input.baseAttributionContext !== undefined
       ? undefined
       : {
-          context: resolutionCandidateIndexContext(input.baseFiles, input.committedWorkspace, input.languagePacks),
-          snapshotId: input.baseSnapshotId,
+          context: resolutionCandidateIndexContext(input.baseFiles, input.committedWorkspace, owner.extractorSet),
+          snapshotId: owner.snapshotId,
         };
   const indexState =
     evidence === undefined || input.store.resolutionCandidateIndex === undefined
@@ -266,14 +268,20 @@ const scannedResolutionCandidateClosure = Effect.fn('codeGraph.scannedResolution
   ) satisfies ResolutionCandidateDiscovery;
 });
 
+export interface CodeGraphResolutionEvidenceOwner {
+  /** Extractor set of the base paths; callers have already validated it for this inventory. */
+  readonly extractorSet: string;
+  readonly snapshotId: string;
+}
+
 /** Exact inputs of base-fact attribution: cached facts per content, inventory, workspace and packs. */
 function resolutionCandidateIndexContext(
   files: readonly CodeGraphInventoryFile[],
   workspace: CodeGraphWorkspace,
-  languagePacks: CodeGraphLanguagePackRegistryShape,
+  extractorSet: string,
 ): string {
   return codeGraphInventorySha256Hex(
-    `resolution-candidate-index-v1\n${extractorSetIdentity(files, languagePacks)}\n${workspace.fingerprint}\n`,
+    `resolution-candidate-index-v1\n${extractorSet}\n${workspace.fingerprint}\n`,
     files,
     file => `${file.path}\0${file.language}\0${file.mode}\0${file.contentHash}\0${file.content === undefined ? 0 : 1}`,
   );
