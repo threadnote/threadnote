@@ -20,7 +20,7 @@ export const PROJECT_RESOLUTION_CANDIDATE_MAX_REEXPORT_LOOKUP_KEYS = 100_000;
 export const PROJECT_RESOLUTION_CANDIDATE_MAX_REEXPORT_KEY_BYTES = 8 * 1_048_576;
 const PROJECT_RESOLUTION_CANDIDATE_PROJECTION_RECORDS_PER_CHUNK = 65_536;
 const PROJECT_RESOLUTION_CANDIDATE_PROJECTION_RECORD_BYTES =
-  BigUint64Array.BYTES_PER_ELEMENT + Uint16Array.BYTES_PER_ELEMENT;
+  BigUint64Array.BYTES_PER_ELEMENT + Uint32Array.BYTES_PER_ELEMENT;
 /**
  * Deterministic typed-array payload ceiling for the one-pass projection. The
  * projection grows in chunks and never retains lookup strings or per-identity
@@ -566,7 +566,7 @@ function createResolutionCandidateProjection(input: {
   readonly maximumObservedKeyBytes: number;
 }) {
   const recordHashes: BigUint64Array[] = [];
-  const recordKinds: Uint16Array[] = [];
+  const recordKinds: Uint32Array[] = [];
   let records = 0;
   let associations = 0;
   let observations = 0;
@@ -602,7 +602,7 @@ function createResolutionCandidateProjection(input: {
     const offset = records % PROJECT_RESOLUTION_CANDIDATE_PROJECTION_RECORDS_PER_CHUNK;
     if (recordHashes[chunkIndex] === undefined) {
       recordHashes.push(new BigUint64Array(PROJECT_RESOLUTION_CANDIDATE_PROJECTION_RECORDS_PER_CHUNK));
-      recordKinds.push(new Uint16Array(PROJECT_RESOLUTION_CANDIDATE_PROJECTION_RECORDS_PER_CHUNK));
+      recordKinds.push(new Uint32Array(PROJECT_RESOLUTION_CANDIDATE_PROJECTION_RECORDS_PER_CHUNK));
     }
     recordHashes[chunkIndex][offset] = fingerprint;
     recordKinds[chunkIndex][offset] = kind;
@@ -700,7 +700,8 @@ function createResolutionCandidateProjection(input: {
   };
 }
 
-const PROJECTION_SYMBOL_RECORD = 0xffff;
+/** File ordinals share the record kind; 32 bits admit every inventory the scan can page through. */
+const PROJECTION_SYMBOL_RECORD = 0xffff_ffff;
 const PROJECTION_FINGERPRINT_MAXIMUM = 0xffff_ffff_ffff_ffffn;
 const PROJECTION_FINGERPRINT_SEED = 0x85eb_ca6b_27d4_eb2fn;
 

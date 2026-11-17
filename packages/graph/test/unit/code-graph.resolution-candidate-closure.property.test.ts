@@ -817,9 +817,9 @@ describe('resolution-candidate closure', () => {
     }),
   );
 
-  effectIt('ratchets the full projection record payload below 20 MiB', () => {
-    expect(PROJECT_RESOLUTION_CANDIDATE_PROJECTION_STORAGE_MAX_BYTES).toBe(20_316_160);
-    expect(PROJECT_RESOLUTION_CANDIDATE_PROJECTION_STORAGE_MAX_BYTES).toBeLessThan(20 * 1_048_576);
+  effectIt('ratchets the full projection record payload below 24 MiB', () => {
+    expect(PROJECT_RESOLUTION_CANDIDATE_PROJECTION_STORAGE_MAX_BYTES).toBe(24_379_392);
+    expect(PROJECT_RESOLUTION_CANDIDATE_PROJECTION_STORAGE_MAX_BYTES).toBeLessThan(24 * 1_048_576);
   });
 
   effectIt.effect('fails closed on incomplete pages and reports exact selected/reexport overflows', () =>
