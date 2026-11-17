@@ -4,6 +4,7 @@ import {decodeNativeTaskActionRef, nativeTaskSnapshotId} from '@threadnote/workf
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {gitValue} from '../utils.js';
+import {captureNativeCycleSource} from './cycle_git.js';
 import {readNativeWorkflowState} from './store.js';
 import {readNativeTaskView} from './task.js';
 import {runWorkflowAutomation} from './index.js';
@@ -169,6 +170,21 @@ export const runNativeTaskSnapshotAction = (
           'snapshot-conflict',
           'This task reference is already bound to different canonical snapshot evidence.',
         );
+      // One work packet records one snapshot, so a replay is only truthful for that snapshot's exact source.
+      const current = yield* captureNativeCycleSource(checkout, admitted.snapshot.baseTree);
+      if (current.tree !== admitted.snapshot.tree) {
+        const latest = EffectArray.filter(runtime.snapshots, item => item.snapshot.phaseId === ref.phaseId).at(-1);
+        const supersedable =
+          latest?.snapshot.snapshotId === snapshotId &&
+          !EffectArray.some(runtime.reviews, item => item.snapshotId === snapshotId);
+        return yield* fail(
+          'source-drift',
+          `Source changed after this work packet recorded snapshot ${snapshotId}: snapshot tree ${admitted.snapshot.tree}, current tree ${current.tree}. ` +
+            (supersedable
+              ? 'Supersede it with supersede-unreviewed-snapshot, using its snapshotRef from the task view and a concrete reason.'
+              : 'Prepare a new work packet with task-action work, then record it with a concrete reason.'),
+        );
+      }
       return {
         status: 'recorded',
         replayed: true,
