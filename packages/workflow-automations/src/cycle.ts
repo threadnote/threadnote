@@ -868,12 +868,16 @@ export function reconcileNativeCyclePlan(
   );
   for (const p of plan.phases) {
     const before = EffectOption.getOrUndefined(EffectArray.findFirst(old.phases, x => x.id === p.id));
-    // Under standard, paths and an undelivered base binding are derived bookkeeping, not material intent.
+    // Under standard, paths and an undelivered base binding are derived bookkeeping, not material intent. Validation
+    // and delivery receipts bind the phase hash, so a path edit still retires them; the review of the same tree and
+    // intent covers the phase again.
     const material =
       policy === 'standard'
         ? !before ||
           nativeCyclePhaseIntentHash(old, p.id) !== nativeCyclePhaseIntentHash(plan, p.id) ||
-          (before.baseBranch !== p.baseBranch && s.phases[p.id]?.delivery !== undefined)
+          (before.baseBranch !== p.baseBranch && s.phases[p.id]?.delivery !== undefined) ||
+          (s.phases[p.id]?.validation !== undefined &&
+            nativeCyclePhaseHash(old, p.id) !== nativeCyclePhaseHash(plan, p.id))
         : !before ||
           before.baseBranch !== p.baseBranch ||
           nativeCyclePhaseHash(old, p.id) !== nativeCyclePhaseHash(plan, p.id);

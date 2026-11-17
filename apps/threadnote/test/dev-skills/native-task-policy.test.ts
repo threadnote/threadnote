@@ -254,6 +254,104 @@ describe('standard-profile derived ownership', () => {
   );
 });
 
+describe('standard-profile reconcile of a phase with proof', () => {
+  const validation = {
+    checks: [{command: 'private flow', result: 'passed', evidence: 'Actual scoped source fixture.'}],
+    acceptance: [{criterion: 'one works', result: 'passed', evidence: 'Source readback.'}],
+  };
+  const setup = () =>
+    Effect.gen(function* () {
+      const f = yield* cycleFixture(
+        ['one'],
+        'local',
+        false,
+        false,
+        true,
+        undefined,
+        undefined,
+        {},
+        {policy: 'standard'},
+      );
+      const task = (command: string, fields: Record<string, unknown> = {}) =>
+        runNativeTaskAction(f.config, {command, runId: 'native-run', callerCwd: f.repo, ...fields}).pipe(
+          Effect.map(object),
+        );
+      const view = () => readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo});
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = 1;\n');
+      yield* f.git(['commit', '-qam', 'phase one']);
+      const recorded = yield* task('record-snapshot');
+      const snapshot = object(object(recorded.snapshot).snapshot);
+      yield* f.mutate('validate-review', {
+        snapshotId: snapshot.snapshotId,
+        attemptId: 'a1',
+        report: {
+          snapshotId: snapshot.snapshotId,
+          phaseHash: snapshot.phaseHash,
+          snapshotTree: snapshot.tree,
+          status: 'complete',
+          mode: 'full',
+          selected: ['correctness', 'simplicity'],
+          lanes: [
+            {name: 'correctness', status: 'complete'},
+            {name: 'simplicity', status: 'complete'},
+          ],
+          findings: [],
+        },
+      });
+      const validated = yield* task('record-validation', {snapshotRef: String(recorded.snapshotRef), validation});
+      const pathOnly = f.revise({
+        phases: EffectArray.map(f.document.phases, phase => ({
+          ...phase,
+          affectedPaths: [...phase.affectedPaths, 'notes.md'],
+        })),
+      });
+      // A path-only edit retires the proof bound to the old phase hash; the review of the same tree still covers it.
+      const redeliver = () =>
+        Effect.gen(function* () {
+          yield* task('resume', {taskRef: (yield* view()).taskRef, reason: 'The plan paths were reconciled.'});
+          const again = yield* task('record-snapshot');
+          expect((yield* view()).next).toMatchObject({action: 'validate'});
+          const revalidated = yield* task('record-validation', {snapshotRef: String(again.snapshotRef), validation});
+          return yield* task('deliver-local', {validationRef: String(revalidated.validationRef)});
+        });
+      return {f, task, view, validated, pathOnly, redeliver};
+    });
+
+  effectIt.effect('retires the validation of a path-only edit and reuses the review of the same tree', () =>
+    Effect.gen(function* () {
+      const {f, view, pathOnly, redeliver} = yield* setup();
+      const reconciled = yield* f.mutate('reconcile', {plan: yield* pathOnly, reason: 'Own the notes file.'});
+      expect(reconciled.affected).toEqual(['one']);
+      expect((yield* view()).next).toMatchObject({action: 'blocked', phaseId: 'one'});
+      expect(yield* redeliver()).toMatchObject({status: 'delivered'});
+    }).pipe(runCycle),
+  );
+
+  effectIt.effect('reconciles a path-only edit of a delivered phase and delivers it again', () =>
+    Effect.gen(function* () {
+      const {f, task, validated, pathOnly, redeliver} = yield* setup();
+      yield* task('deliver-local', {validationRef: String(validated.validationRef)});
+      const reconciled = yield* f.mutate('reconcile', {plan: yield* pathOnly, reason: 'Own the notes file.'});
+      expect(reconciled.affected).toEqual(['one']);
+      expect(yield* redeliver()).toMatchObject({status: 'delivered'});
+    }).pipe(runCycle),
+  );
+
+  effectIt.effect('keeps a validated phase deliverable across an undelivered base-only reconcile', () =>
+    Effect.gen(function* () {
+      const {f, task, validated} = yield* setup();
+      yield* f.git(['branch', 'release', 'main']);
+      const rebound = yield* f.revise({}, {one: {branch: 'feature/one', baseBranch: 'release'}});
+      expect((yield* f.mutate('reconcile', {plan: rebound, reason: 'Target the release branch.'})).affected).toEqual(
+        [],
+      );
+      expect(yield* task('deliver-local', {validationRef: String(validated.validationRef)})).toMatchObject({
+        status: 'delivered',
+      });
+    }).pipe(runCycle),
+  );
+});
+
 describe('actionable refusals', () => {
   effectIt.effect('points a review without a review card at the action on the current card', () =>
     Effect.gen(function* () {

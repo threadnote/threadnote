@@ -1067,4 +1067,19 @@ describe('standard-profile plan reconciliation', () => {
         .phases.one.status,
     ).toBe('stale');
   });
+
+  it('retires validation bound to the old phase hash on a path-only change, but not on a base-only change', () => {
+    const validated = validateNativeCyclePhase(
+      initializeNativeCycle(withIntent(['src/'])),
+      'one',
+      snapshot(),
+      validation,
+    );
+    expect(
+      reconcileNativeCyclePlan(validated, withIntent(['src/', 'docs/']), 'Paths changed', 'standard'),
+    ).toMatchObject({affected: ['one', 'two'], state: {phases: {one: {status: 'stale'}}}});
+    expect(
+      reconcileNativeCyclePlan(validated, withIntent(['src/'], 'release'), 'Base changed', 'standard'),
+    ).toMatchObject({affected: [], state: {phases: {one: {status: 'validated', validation}}}});
+  });
 });
