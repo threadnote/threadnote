@@ -328,6 +328,7 @@ export function makeNativeTaskStartCommand<E, R>(
     readonly evidenceRefs: readonly string[];
     readonly reviewRequired: boolean;
     readonly reviewReason?: string;
+    readonly workflowProfile?: 'standard' | 'strict';
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
 ) {
   return Command.make(
@@ -358,6 +359,11 @@ export function makeNativeTaskStartCommand<E, R>(
       evidenceRefs: repeatedString('evidence-ref', 'Evidence URI for needs-planning; repeat as needed'),
       reviewRequired: boolean('review-required', 'Whether an independent authoring review is required'),
       reviewReason: optionalString('review-reason', 'Why review is or is not required'),
+      workflowProfile: optionalChoice(
+        'workflow-profile',
+        ['standard', 'strict'],
+        'Dev-cycle profile for a new task; strict keeps every bookkeeping gate',
+      ),
     },
     handler,
   ).pipe(Command.withDescription('Start or resume a bounded task from semantic intent'));

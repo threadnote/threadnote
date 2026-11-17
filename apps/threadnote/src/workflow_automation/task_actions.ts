@@ -1,3 +1,4 @@
+import {nativeWorkflowPolicyOf} from '@threadnote/workflow-automations/gates';
 import {runStandalonePrWatch} from './standalone_pr_watch.js';
 import {SystemInfo} from '@threadnote/platform/system';
 import {
@@ -453,6 +454,11 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
           'task-identity-conflict',
           'This task name already belongs to different canonical intent. Resume its current task card or choose a new feature name.',
         );
+      if (request.workflowProfile !== undefined && request.workflowProfile !== nativeWorkflowPolicyOf(stored.state))
+        return yield* fail(
+          'workflow-profile-conflict',
+          'This task already runs under another workflow profile. Resume it without --workflow-profile or start a new feature name.',
+        );
       const storedProfile = stored.state.profile ?? 'desktop';
       const selectedTarget = yield* readNativeTaskInstalledTarget(config, request.installationTarget, checkout, [
         storedProfile,
@@ -577,6 +583,7 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
         profile: target.target.profile,
         title: request.intent.title,
         ...(graphProject === undefined ? {} : {graphProject}),
+        ...(request.workflowProfile === undefined ? {} : {policy: request.workflowProfile}),
       }),
     );
     const initResult: unknown = initialized;

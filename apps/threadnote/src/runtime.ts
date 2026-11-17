@@ -52,6 +52,8 @@ export const getRuntimeConfig = Effect.fn('runtime.getRuntimeConfig')(function* 
     manifestSource,
     user: environmentUser ?? cloudProfile?.user ?? system.userName,
     userSource: environmentUser ? ('environment' as const) : cloudProfile ? cloudSource : ('system' as const),
+    workflowPolicyDefault:
+      environment.THREADNOTE_WORKFLOW_PROFILE === 'strict' ? ('strict' as const) : ('standard' as const),
   };
 });
 

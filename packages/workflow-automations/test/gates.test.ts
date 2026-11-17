@@ -1,0 +1,66 @@
+import * as EffectRecord from 'effect/Record';
+import {describe, expect, it} from 'vitest';
+import {
+  decideGate,
+  nativeGates,
+  nativeNextCommand,
+  nativeTaskViewNext,
+  nativeWaivableGateIds,
+  nativeWorkflowPolicyOf,
+  type GateId,
+} from '../src/gates.js';
+
+const next = nativeTaskViewNext('run-1', '/checkout');
+const violation = {files: ['docs/unplanned.md']};
+const waiver = {id: 'waiver-1'};
+
+describe('dev-cycle gate decisions', () => {
+  const cases: readonly [GateId, 'standard' | 'strict', boolean, 'pass' | 'warn' | 'refuse'][] = [
+    ['scope.out-of-plan', 'standard', false, 'warn'],
+    ['scope.out-of-plan', 'strict', false, 'refuse'],
+    ['scope.out-of-plan', 'strict', true, 'warn'],
+    ['review.required', 'standard', false, 'refuse'],
+    ['review.required', 'strict', false, 'refuse'],
+    ['review.required', 'standard', true, 'warn'],
+    ['validation.required', 'strict', true, 'warn'],
+    ['intent.confirmation', 'standard', false, 'refuse'],
+    ['intent.confirmation', 'standard', true, 'refuse'],
+    ['intent.confirmation', 'strict', true, 'refuse'],
+  ];
+  it.each(cases)('%s under %s with waiver=%s decides %s', (gate, policy, waived, expected) => {
+    const decision = decideGate(policy, gate, violation, waived ? waiver : undefined, next);
+    expect(decision._tag).toBe(expected);
+    if (decision._tag === 'refuse') expect(decision).toMatchObject({gate, detail: violation, next});
+    if (decision._tag === 'warn') expect(decision.waiverId).toBe(waived ? waiver.id : undefined);
+  });
+
+  it('passes every gate when nothing is violated', () => {
+    for (const gate of EffectRecord.keys(nativeGates))
+      expect(decideGate('strict', gate, undefined, undefined, next)).toEqual({_tag: 'pass'});
+  });
+
+  it('never offers intent confirmation as a waivable gate', () => {
+    expect(nativeWaivableGateIds).not.toContain('intent.confirmation');
+    expect(nativeWaivableGateIds).toContain('review.required');
+  });
+
+  it('treats a run without a recorded policy as strict', () => {
+    expect(nativeWorkflowPolicyOf({})).toBe('strict');
+    expect(nativeWorkflowPolicyOf({policy: {mode: 'standard'}})).toBe('standard');
+  });
+
+  it('renders the next command for the CLI with placeholders for unknown values', () => {
+    expect(
+      nativeNextCommand('workflow_task_snapshot', 'record', 'task-action record-snapshot', {
+        runId: 'run-1',
+        callerCwd: '/a b',
+        reason: '<reason>',
+      }),
+    ).toEqual({
+      tool: 'workflow_task_snapshot',
+      command: 'record',
+      cli: 'threadnote workflow-automation task-action record-snapshot --run-id run-1 --caller-cwd "/a b" --reason <reason>',
+      args: {runId: 'run-1', callerCwd: '/a b', reason: '<reason>'},
+    });
+  });
+});

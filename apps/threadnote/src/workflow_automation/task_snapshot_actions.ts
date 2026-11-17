@@ -1,6 +1,7 @@
 import {Array as EffectArray, Option as EffectOption, Effect, String as EffectString} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {decodeNativeTaskActionRef, nativeTaskSnapshotId} from '@threadnote/workflow-automations/task';
+import {nativeNextCommand, nativeRefusal} from '@threadnote/workflow-automations/gates';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {gitValue} from '../utils.js';
@@ -177,12 +178,23 @@ export const runNativeTaskSnapshotAction = (
         const supersedable =
           latest?.snapshot.snapshotId === snapshotId &&
           !EffectArray.some(runtime.reviews, item => item.snapshotId === snapshotId);
-        return yield* fail(
+        const scope = {runId: request.runId, callerCwd: checkout};
+        return yield* nativeRefusal(
           'source-drift',
           `Source changed after this work packet recorded snapshot ${snapshotId}: snapshot tree ${admitted.snapshot.tree}, current tree ${current.tree}. ` +
             (supersedable
               ? 'Supersede it with supersede-unreviewed-snapshot, using its snapshotRef from the task view and a concrete reason.'
               : 'Prepare a new work packet with task-action work, then record it with a concrete reason.'),
+          {
+            next: supersedable
+              ? nativeNextCommand(
+                  'workflow_task_snapshot',
+                  'supersede-unreviewed',
+                  'task-action supersede-unreviewed-snapshot',
+                  {...scope, snapshotRef: '<snapshotRef>', reason: '<reason>'},
+                )
+              : nativeNextCommand('workflow_task_work', 'work', 'task-action work', scope),
+          },
         );
       }
       return {

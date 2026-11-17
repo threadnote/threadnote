@@ -21,6 +21,11 @@ export const makeNativeTaskAuthoringCommand = (withRuntime: CliRuntimeRunner) =>
       saveMode: optionalChoice('save-mode', ['background'], 'Submit an exact save to the durable native job worker'),
       installationTarget: optionalString('installation-target', 'Required for start; installed target for job resume'),
       graphProject: optionalString('graph-project', 'Configured graph project for a new authoring task'),
+      workflowProfile: optionalChoice(
+        'workflow-profile',
+        ['standard', 'strict'],
+        'Dev-cycle profile for a new task; strict keeps every bookkeeping gate',
+      ),
       authoringRef: optionalString('authoring-ref', 'Opaque current authoring continuation'),
       team: optionalString('team', 'Writable shared team for plan publication'),
       jobRef: optionalString('job-ref', 'Opaque accepted semantic authoring job continuation'),

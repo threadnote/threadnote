@@ -1,3 +1,4 @@
+import {nativeWorkflowPolicies} from '@threadnote/workflow-automations/gates';
 import {
   Array as A,
   Effect,
@@ -118,6 +119,7 @@ const inputSchema = Schema.Union([
     installationTarget: Schema.optionalKey(text),
     graphProject: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256))),
     specRef: Schema.optionalKey(text),
+    workflowProfile: Schema.optionalKey(Schema.Literals(nativeWorkflowPolicies)),
   }),
   Schema.Struct({
     ...scope,
@@ -857,6 +859,7 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
             profile: target.target.profile,
             title: document.title,
             ...(graphProject === undefined ? {} : {graphProject}),
+            ...(request.workflowProfile === undefined ? {} : {policy: request.workflowProfile}),
           }),
         );
         stored = yield* readNativeWorkflowState(config, runId);

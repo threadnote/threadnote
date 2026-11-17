@@ -4,7 +4,7 @@ import {Command, Flag} from 'effect/cli';
 import type {CliRuntimeRunner} from './cli.js';
 import {runWorkflowAutomation} from '../workflow_automation/index.js';
 import {nativeWorkflowError} from '../workflow_automation/memory.js';
-import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
+import {WorkflowAutomationError, workflowAutomationErrorEnvelope} from '@threadnote/workflow-automations/contracts';
 import {SystemInfo} from '@threadnote/platform/system';
 import {runNativeWatchCollector} from '../workflow_automation/watch.js';
 import {runNativeJobWorker} from '../workflow_automation/native_jobs.js';
@@ -57,6 +57,12 @@ export const readNativeWorkflowInput = Effect.gen(function* () {
   });
 });
 
+/** An actionable refusal also prints its rule and next command as one JSON line before failing. */
+const printWorkflowRefusal = (error: WorkflowAutomationError) =>
+  error.gate === undefined && error.detail === undefined && error.next === undefined
+    ? Effect.void
+    : Console.log(JSON.stringify(workflowAutomationErrorEnvelope(error)));
+
 export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
   return Command.make('workflow-automation', {}, () =>
     withRuntime(config =>
@@ -77,14 +83,7 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
           const failure = nativeWorkflowError(error);
           return Effect.gen(function* () {
             (yield* SystemInfo).setExitCode(1);
-            return {
-              protocolVersion: 1,
-              executorVersion: 1,
-              status: 'error',
-              code: failure.code,
-              message: failure.message,
-              ...(failure.retryable === undefined ? {} : {retryable: failure.retryable}),
-            };
+            return {protocolVersion: 1, executorVersion: 1, ...workflowAutomationErrorEnvelope(failure)};
           });
         }),
         Effect.flatMap(result =>
@@ -123,6 +122,7 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
           }).pipe(
             Effect.flatMap(value => Console.log(JSON.stringify(value))),
             Effect.mapError(nativeWorkflowError),
+            Effect.tapError(printWorkflowRefusal),
           ),
         ),
       ),
@@ -195,10 +195,12 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
               ...(fields.installationTarget === undefined ? {} : {installationTarget: fields.installationTarget}),
               ...(fields.taskRef === undefined ? {} : {taskRef: fields.taskRef}),
               ...(fields.graphProject === undefined ? {} : {graphProject: fields.graphProject}),
+              ...(fields.workflowProfile === undefined ? {} : {workflowProfile: fields.workflowProfile}),
               intent,
             }).pipe(
               Effect.flatMap(value => Console.log(JSON.stringify(value))),
               Effect.mapError(nativeWorkflowError),
+              Effect.tapError(printWorkflowRefusal),
             );
           }),
         ),
@@ -217,6 +219,7 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
           }).pipe(
             Effect.flatMap(value => Console.log(JSON.stringify(value))),
             Effect.mapError(nativeWorkflowError),
+            Effect.tapError(printWorkflowRefusal),
           ),
         ),
       ),
@@ -250,6 +253,7 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
           }).pipe(
             Effect.flatMap(value => Console.log(JSON.stringify(value))),
             Effect.mapError(nativeWorkflowError),
+            Effect.tapError(printWorkflowRefusal),
           ),
         ),
       ),
@@ -258,6 +262,7 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
           runNativeTaskAction(config, {...options, command: 'supplemental-publication', operation: 'attach'}).pipe(
             Effect.flatMap(value => Console.log(JSON.stringify(value))),
             Effect.mapError(nativeWorkflowError),
+            Effect.tapError(printWorkflowRefusal),
           ),
         ),
       ),
@@ -266,6 +271,7 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
           runNativeTaskAction(config, {...options, command: 'requalify-invalid-tail'}).pipe(
             Effect.flatMap(value => Console.log(JSON.stringify(value))),
             Effect.mapError(nativeWorkflowError),
+            Effect.tapError(printWorkflowRefusal),
           ),
         ),
       ),
@@ -280,6 +286,7 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
             }).pipe(
               Effect.flatMap(value => Console.log(JSON.stringify(value))),
               Effect.mapError(nativeWorkflowError),
+              Effect.tapError(printWorkflowRefusal),
             ),
           ),
         options =>
@@ -293,6 +300,7 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
             }).pipe(
               Effect.flatMap(value => Console.log(JSON.stringify(value))),
               Effect.mapError(nativeWorkflowError),
+              Effect.tapError(printWorkflowRefusal),
             ),
           ),
         options =>
@@ -308,6 +316,7 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
             }).pipe(
               Effect.flatMap(value => Console.log(JSON.stringify(value))),
               Effect.mapError(nativeWorkflowError),
+              Effect.tapError(printWorkflowRefusal),
             ),
           ),
         options =>
@@ -321,6 +330,7 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
             }).pipe(
               Effect.flatMap(value => Console.log(JSON.stringify(value))),
               Effect.mapError(nativeWorkflowError),
+              Effect.tapError(printWorkflowRefusal),
             ),
           ),
         options =>
@@ -333,6 +343,7 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
             }).pipe(
               Effect.flatMap(value => Console.log(JSON.stringify(value))),
               Effect.mapError(nativeWorkflowError),
+              Effect.tapError(printWorkflowRefusal),
             ),
           ),
         options =>
@@ -348,6 +359,7 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
             }).pipe(
               Effect.flatMap(value => Console.log(JSON.stringify(value))),
               Effect.mapError(nativeWorkflowError),
+              Effect.tapError(printWorkflowRefusal),
             ),
           ),
         options =>
@@ -360,6 +372,7 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
             }).pipe(
               Effect.flatMap(value => Console.log(JSON.stringify(value))),
               Effect.mapError(nativeWorkflowError),
+              Effect.tapError(printWorkflowRefusal),
             ),
           ),
         options =>
@@ -372,6 +385,7 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
             }).pipe(
               Effect.flatMap(value => Console.log(JSON.stringify(value))),
               Effect.mapError(nativeWorkflowError),
+              Effect.tapError(printWorkflowRefusal),
             ),
           ),
         options =>
@@ -390,6 +404,7 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
             }).pipe(
               Effect.flatMap(value => Console.log(JSON.stringify(value))),
               Effect.mapError(nativeWorkflowError),
+              Effect.tapError(printWorkflowRefusal),
             ),
           ),
         options =>
@@ -403,6 +418,7 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
             }).pipe(
               Effect.flatMap(value => Console.log(JSON.stringify(value))),
               Effect.mapError(nativeWorkflowError),
+              Effect.tapError(printWorkflowRefusal),
             ),
           ),
         options =>
@@ -410,6 +426,7 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
             runNativeTaskAction(config, options).pipe(
               Effect.flatMap(value => Console.log(JSON.stringify(value))),
               Effect.mapError(nativeWorkflowError),
+              Effect.tapError(printWorkflowRefusal),
             ),
           ),
         options =>
@@ -417,6 +434,7 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
             runNativeTaskAction(config, {command: 'requalify-base-snapshot', ...options}).pipe(
               Effect.flatMap(value => Console.log(JSON.stringify(value))),
               Effect.mapError(nativeWorkflowError),
+              Effect.tapError(printWorkflowRefusal),
             ),
           ),
         options =>
@@ -424,6 +442,7 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
             runNativeTaskAction(config, {command: 'deliver-commit', ...options}).pipe(
               Effect.flatMap(value => Console.log(JSON.stringify(value))),
               Effect.mapError(nativeWorkflowError),
+              Effect.tapError(printWorkflowRefusal),
             ),
           ),
         options =>
@@ -434,6 +453,7 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
             }).pipe(
               Effect.flatMap(value => Console.log(JSON.stringify(value))),
               Effect.mapError(nativeWorkflowError),
+              Effect.tapError(printWorkflowRefusal),
             ),
           ),
       ),

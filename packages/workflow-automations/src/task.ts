@@ -1,3 +1,4 @@
+import {nativeWorkflowPolicies} from './gates.js';
 import {Array as EffectArray, Option as EffectOption, Schema, String as EffectString, pipe as EffectPipe} from 'effect';
 import {nativeCycleParentsReady, nextNativeCycle as cycleNext} from './cycle.js';
 import {NativeCycleDeliverySchema} from './cycle.js';
@@ -21,6 +22,7 @@ export const NativeTaskStartRequestSchema = Schema.Union([
     installationTarget: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128))),
     taskRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
     intent: NativeCompactIntentSchema,
+    workflowProfile: Schema.optionalKey(Schema.Literals(nativeWorkflowPolicies)),
   }),
   Schema.Struct({
     callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
@@ -65,6 +67,7 @@ export interface NativeTaskView {
   readonly revision: string;
   readonly featureId: string;
   readonly objective: string;
+  readonly policy?: 'standard' | 'strict';
   readonly next: {
     readonly action: string;
     readonly phaseId?: string;
@@ -931,7 +934,8 @@ export function projectNativeTaskView(
   revision: string,
   options: NativeTaskProjectionOptions = {},
 ): NativeTaskView {
-  const view = projectNativeTaskCoreView(state, revision, options);
+  const core = projectNativeTaskCoreView(state, revision, options);
+  const view = state.policy ? {...core, policy: state.policy.mode} : core;
   if (options.candidateWatches === undefined) return view;
   const rows = options.candidateWatches;
   const offset = view.page.offset;

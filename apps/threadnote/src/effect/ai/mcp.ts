@@ -3,6 +3,7 @@ import {Array as EffectArray} from 'effect';
 import * as BunStdio from '@effect/platform-bun/BunStdio';
 import {Cause, Context, Effect, Layer, Logger, Option, Schema, Sink, Stdio} from 'effect';
 import {McpProtocol, McpSchema, McpServer} from 'effect/ai';
+import {WorkflowAutomationError, workflowAutomationErrorEnvelope} from '@threadnote/workflow-automations/contracts';
 import * as HttpRouter from 'effect/http/HttpRouter';
 import * as HttpEffect from 'effect/http/HttpEffect';
 import * as HttpServerRequest from 'effect/http/HttpServerRequest';
@@ -1181,13 +1182,17 @@ export function mcpToolFailureResult(cause: Cause.Cause<unknown>): Effect.Effect
   if (Cause.hasInterruptsOnly(cause)) {
     return Effect.failCause(interruptCause(cause));
   }
+  const squashed = Cause.squash(cause);
+  // Workflow refusals keep their code, rule and next command so MCP callers can act on them.
+  const refusal = Schema.is(WorkflowAutomationError)(squashed) ? workflowAutomationErrorEnvelope(squashed) : undefined;
   return Effect.succeed(
     attachAnonymousTelemetryError(
       McpSchema.CallToolResult.make({
-        content: [{type: 'text', text: causeMessage(cause)}],
+        content: [{type: 'text', text: refusal ? JSON.stringify(refusal) : causeMessage(cause)}],
+        ...(refusal ? {structuredContent: refusal} : {}),
         isError: true,
       }),
-      Cause.squash(cause),
+      squashed,
     ),
   );
 }
