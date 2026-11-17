@@ -12,6 +12,7 @@ import {
   decodeNativeAuthoringDocument,
   isNativeMermaidDiagram,
   nativeAuthoringDigest,
+  nativeAuthoringIssueSummary,
   NativePlanIntentPolicyVersion,
   nativeSpecIntentDigest,
   validateNativeAuthoring,
@@ -1556,7 +1557,7 @@ const saveAuthoring = <R>(
       if (structural.issues.length)
         return yield* fail(
           'invalid-document',
-          'Resolve the document’s structural/coverage/source issues before saving; readiness-only questions remain draftable.',
+          `Resolve the document’s structural/coverage/source issues before saving; readiness-only questions remain draftable. Issues: ${nativeAuthoringIssueSummary(structural.issues)}`,
         );
       const text = canonicalAuthoringJson(document);
       const views = EffectArray.map(documentViews(document), item => ({...item, document: boundedView(item.document)}));
