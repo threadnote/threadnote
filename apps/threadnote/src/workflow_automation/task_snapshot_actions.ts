@@ -91,7 +91,6 @@ export const runNativeTaskSnapshotAction = (
         baseline.head !== ref.baselineHead ||
         baseline.tree !== ref.baselineTree ||
         baseline.pinnedRef !== ref.baselineRef ||
-        state.phases[ref.phaseId]?.phaseHash !== ref.phaseHash ||
         state.phases[ref.phaseId]?.status !== 'pending' ||
         (latest?.snapshot.snapshotId !== ref.snapshotId && !exactReplay)
       )
@@ -103,18 +102,21 @@ export const runNativeTaskSnapshotAction = (
         callerCwd: checkout,
         role: 'review',
       });
+      const next = currentTask.next;
+      const staleContract = state.phases[ref.phaseId]?.phaseHash !== ref.phaseHash && !exactReplay;
       if (
         currentTask.revision !== stored.revision ||
         currentTask.status !== 'ready' ||
-        currentTask.next.action !== 'review' ||
-        currentTask.next.phaseId !== ref.phaseId ||
-        (currentTask.next.snapshotId !== ref.snapshotId &&
-          !(exactReplay && currentTask.next.snapshotId === snapshotId)) ||
-        currentTask.phase?.snapshot?.snapshotId !== currentTask.next.snapshotId
+        next.phaseId !== ref.phaseId ||
+        (staleContract
+          ? next.action !== 'implement'
+          : next.action !== 'review' ||
+            (next.snapshotId !== ref.snapshotId && !(exactReplay && next.snapshotId === snapshotId)) ||
+            currentTask.phase?.snapshot?.snapshotId !== next.snapshotId)
       )
         return yield* fail(
           'stale-snapshot-ref',
-          'Recovery requires the exact unreviewed snapshot on the current phase review card.',
+          'Recovery requires the exact unreviewed snapshot on the current phase card.',
         );
       const head = yield* gitValue(['rev-parse', 'HEAD'], checkout);
       if (!head) return yield* fail('source-unavailable', 'Could not read the current source head.');
@@ -205,6 +207,10 @@ export const runNativeTaskSnapshotAction = (
     )?.snapshot;
     if (previous && !request.reason)
       return yield* fail('review-history', 'Give a concrete reason before recording another source iteration.');
+    const supersedeStale =
+      previous !== undefined &&
+      previous.phaseHash !== ref.phaseHash &&
+      !EffectArray.some(runtime.reviews, item => item.snapshotId === previous.snapshotId);
     yield* inCheckout(
       runWorkflowAutomation(
         config,
@@ -214,6 +220,7 @@ export const runNativeTaskSnapshotAction = (
           snapshotId,
           acceptedHead: head,
           ...(previous ? {previous: previous.snapshotId} : {}),
+          ...(supersedeStale ? {supersedeUnreviewed: true} : {}),
           reason: request.reason ?? 'Record the exact worker source result for this implementation packet.',
           expectedRevision: stored.revision,
         }),

@@ -83,7 +83,12 @@ export const taskActionSnapshotRef = (work: NativeTaskActionRef, entry: unknown)
   if (!Predicate.isObject(entry) || !Predicate.isObject(entry.snapshot))
     throw fail('invalid-state', 'Canonical snapshot evidence is unavailable.');
   const snapshot = entry.snapshot;
-  if (typeof snapshot.snapshotId !== 'string' || typeof snapshot.head !== 'string' || typeof snapshot.tree !== 'string')
+  if (
+    typeof snapshot.snapshotId !== 'string' ||
+    typeof snapshot.phaseHash !== 'string' ||
+    typeof snapshot.head !== 'string' ||
+    typeof snapshot.tree !== 'string'
+  )
     throw fail('invalid-state', 'Canonical snapshot identity is incomplete.');
   return encodeNativeTaskActionRef({
     version: 1,
@@ -91,7 +96,7 @@ export const taskActionSnapshotRef = (work: NativeTaskActionRef, entry: unknown)
     runId: work.runId,
     generationHash: work.generationHash,
     phaseId: work.phaseId,
-    phaseHash: work.phaseHash,
+    phaseHash: snapshot.phaseHash,
     baselineHead: work.baselineHead,
     baselineTree: work.baselineTree,
     baselineRef: work.baselineRef,

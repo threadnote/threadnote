@@ -721,14 +721,13 @@ export const runNativeCycle = <R>(
               prior.snapshotId !== last.snapshotId ||
               reviewed.has(prior.snapshotId) ||
               state.phases[selected.id].status !== 'pending' ||
-              prior.phaseHash !== state.phases[selected.id].phaseHash ||
               !EffectString.trim(request.reason ?? '') ||
               request.baseRequalification !== undefined ||
               request.ordinaryMergeQualificationV1 !== undefined)
           )
             return yield* fail(
               'review-history',
-              'Explicitly supersede only the latest unreviewed snapshot under the unchanged phase contract.',
+              'Explicitly supersede only the latest unreviewed snapshot of a pending phase.',
             );
           if (last && prior?.snapshotId !== last.snapshotId) {
             const priorIndex = EffectOption.getOrElse(
@@ -756,7 +755,12 @@ export const runNativeCycle = <R>(
           const baseline = runtime.baselines[selected.id];
           if (!baseline) return yield* fail('baseline-required', 'Run begin-phase before implementation.');
           const captured = yield* captureNativeCycleSource(repo, baseline.tree);
-          if (request.supersedeUnreviewed && !request.recoverUnreviewedRebase && prior?.tree === captured.tree)
+          if (
+            request.supersedeUnreviewed &&
+            !request.recoverUnreviewedRebase &&
+            prior?.tree === captured.tree &&
+            prior.phaseHash === state.phases[selected.id].phaseHash
+          )
             return yield* fail(
               'review-history',
               'The superseding source tree must differ from the unreviewed snapshot.',

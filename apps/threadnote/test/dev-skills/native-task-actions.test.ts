@@ -2174,6 +2174,143 @@ describe('native task actions', () => {
     }).pipe(run),
   );
 
+  effectIt.effect('records the next iteration over an unreviewed snapshot that a reconcile made stale', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(['one'], 'local');
+      yield* f.mutate('begin-phase', {phaseId: 'one'});
+      const work = (workPacket = packet) =>
+        Effect.map(
+          runNativeTaskAction(f.config, {command: 'work', runId: 'native-run', callerCwd: f.repo, packet: workPacket}),
+          result => String(object(result).workRef),
+        );
+      const firstWorkRef = yield* work();
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "before amendment";\n');
+      yield* f.git(['commit', '-am', 'Source before the amendment']);
+      const stale = object(
+        object(
+          object(
+            yield* runNativeTaskAction(f.config, {
+              command: 'record-snapshot',
+              runId: 'native-run',
+              callerCwd: f.repo,
+              workRef: firstWorkRef,
+            }),
+          ).snapshot,
+        ).snapshot,
+      );
+      const plan = yield* f.revise({
+        phases: EffectArray.map(f.document.phases, phase => ({...phase, outcome: 'Amended approved outcome.'})),
+      });
+      yield* f.mutate('reconcile', {plan, reason: 'The approved phase outcome changed before review.'});
+      yield* f.mutate('resume-phase', {phaseId: 'one', reason: 'Implement the amended contract.'});
+      const request = {
+        command: 'record-snapshot',
+        runId: 'native-run',
+        callerCwd: f.repo,
+        workRef: yield* work(),
+        reason: 'The amended contract retires the unreviewed snapshot; review the same source in full.',
+      } as const;
+      const recorded = object(yield* runNativeTaskAction(f.config, request));
+      const current = object(object(recorded.snapshot).snapshot);
+      expect(current).toMatchObject({
+        supersedes: stale.snapshotId,
+        unreviewedSupersession: {reason: request.reason},
+        tree: stale.tree,
+      });
+      expect(current.phaseHash).not.toBe(stale.phaseHash);
+      const afterRecord = yield* f.fs.readFileString(f.statePath());
+      expect(object(yield* runNativeTaskAction(f.config, request))).toMatchObject({replayed: true});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(afterRecord);
+      const review = {
+        selected: ['correctness', 'simplicity'],
+        lanes: [
+          {name: 'correctness', status: 'complete'},
+          {name: 'simplicity', status: 'complete'},
+        ],
+        findings: [],
+      };
+      const record = (mode: string) =>
+        runNativeTaskAction(f.config, {
+          command: 'record-review',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          snapshotRef: String(recorded.snapshotRef),
+          report: {...review, mode},
+        });
+      expect(object(yield* record('incremental'))).toMatchObject({status: 'invalid'});
+      expect(object(yield* record('full'))).toMatchObject({status: 'recorded'});
+      const runtime = (yield* readNativeWorkflowState(f.config, 'native-run'))?.state.cycle;
+      expect(runtime?.snapshots[0]?.snapshot).toEqual(stale);
+      expect(EffectArray.map(runtime?.reviews ?? [], item => item.snapshotId)).toEqual([current.snapshotId]);
+    }).pipe(run),
+  );
+
+  effectIt.effect('recovers a rebased unreviewed snapshot that a reconcile made stale', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(['one'], 'local');
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "feature";\n');
+      yield* f.git(['commit', '-am', 'Feature snapshot']);
+      const head = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
+      const stale = object(
+        object(
+          (yield* f.mutate('snapshot', {
+            phaseId: 'one',
+            snapshotId: 'before-rebase',
+            acceptedHead: head,
+            reason: 'Capture the feature before review.',
+          })).snapshot,
+        ).snapshot,
+      );
+      const snapshotRef = (yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo})).phase
+        ?.snapshot?.snapshotRef;
+      if (!snapshotRef) throw new Error('Expected the original review reference.');
+      yield* f.git(['checkout', 'main']);
+      yield* f.git(['commit', '--allow-empty', '-m', 'Advance the base']);
+      yield* f.git(['checkout', 'feature/one']);
+      yield* f.git(['rebase', 'main']);
+      const plan = yield* f.revise({
+        phases: EffectArray.map(f.document.phases, phase => ({...phase, outcome: 'Amended approved outcome.'})),
+      });
+      yield* f.mutate('reconcile', {plan, reason: 'The approved phase outcome changed after the rebase.'});
+      yield* f.mutate('resume-phase', {phaseId: 'one', reason: 'Recover the rebased source under the amendment.'});
+      const request = {
+        command: 'recover-unreviewed-rebase-snapshot',
+        runId: 'native-run',
+        callerCwd: f.repo,
+        snapshotRef,
+        reason: 'Recover the rebased source under the amended contract.',
+        userAuthority: 'Rebase this approved feature onto updated main.',
+      } as const;
+      const recovered = object(yield* runNativeTaskAction(f.config, request));
+      const current = object(object(recovered.snapshot).snapshot);
+      expect(current).toMatchObject({
+        supersedes: stale.snapshotId,
+        unreviewedSupersession: {reason: request.reason, rebaseRecovery: {authority: request.userAuthority}},
+      });
+      expect(current.phaseHash).not.toBe(stale.phaseHash);
+      expect(object(yield* runNativeTaskAction(f.config, request))).toMatchObject({replayed: true});
+      expect(
+        object(
+          yield* runNativeTaskAction(f.config, {
+            command: 'record-review',
+            runId: 'native-run',
+            callerCwd: f.repo,
+            snapshotRef: String(recovered.snapshotRef),
+            report: {
+              mode: 'full',
+              selected: ['correctness', 'simplicity'],
+              lanes: [
+                {name: 'correctness', status: 'complete'},
+                {name: 'simplicity', status: 'complete'},
+              ],
+              findings: [],
+            },
+          }),
+        ),
+      ).toMatchObject({status: 'recorded'});
+    }).pipe(run),
+  );
+
   effectIt.effect(
     'requalifies an exact reviewed predecessor on an approved divergent base through the consolidated snapshot action',
     () =>

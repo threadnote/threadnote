@@ -342,8 +342,9 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
         !prior ||
         latestSnapshotByPhase.get(snapshot.phaseId) !== prior.snapshot.snapshotId ||
         prior.snapshot.phaseId !== snapshot.phaseId ||
-        prior.snapshot.phaseHash !== snapshot.phaseHash ||
-        (prior.snapshot.tree === snapshot.tree && !snapshot.unreviewedSupersession.rebaseRecovery) ||
+        (prior.snapshot.tree === snapshot.tree &&
+          prior.snapshot.phaseHash === snapshot.phaseHash &&
+          !snapshot.unreviewedSupersession.rebaseRecovery) ||
         prior.snapshot.baseTree !== snapshot.baseTree ||
         reviews.has(prior.snapshot.snapshotId) ||
         !Effect.pipe(snapshot.unreviewedSupersession.reason, EffectString.trim)
@@ -526,9 +527,7 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
         snapshot.previous ||
         prior.phaseId !== snapshot.phaseId ||
         prior.baseTree !== snapshot.baseTree ||
-        (snapshot.unreviewedSupersession
-          ? prior.phaseHash !== snapshot.phaseHash
-          : prior.phaseHash === snapshot.phaseHash)
+        (!snapshot.unreviewedSupersession && prior.phaseHash === snapshot.phaseHash)
       )
         fail('Material review restart lacks its historical source boundary.');
     }
