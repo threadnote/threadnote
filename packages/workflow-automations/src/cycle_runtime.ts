@@ -196,20 +196,27 @@ export function nativeCycleCoverage(
 export const nativeCycleCoverageAccepts = (coverage: NativeCycleTreeCoverage) =>
   coverage._tag === 'waived' || (coverage._tag === 'reviewed' && (!coverage.blocked || !!coverage.blockingWaiver));
 
+/** History a run may retain; a write that would exceed one refuses before it is saved. */
+export const nativeCycleRuntimeLimits = {snapshots: 256, waivers: 128} as const;
+
 export const NativeCycleRuntimeSchema = Schema.Struct({
   state: NativeCycleStateSchema,
   plans: Schema.Array(NativeCyclePlanSchema).check(Schema.isBetweenLength(1, 64)),
   baselines: Schema.Record(id, NativeCycleBaselineSchema),
   reviewLimits: Schema.Record(id, Schema.Finite.check(Schema.isInt(), Schema.isBetween({minimum: 5, maximum: 256}))),
   reviewExpansions: Schema.Array(NativeCycleReviewExpansionSchema).check(Schema.isMaxLength(256)),
-  snapshots: Schema.Array(NativeCycleStoredSnapshotSchema).check(Schema.isMaxLength(256)),
+  snapshots: Schema.Array(NativeCycleStoredSnapshotSchema).check(
+    Schema.isMaxLength(nativeCycleRuntimeLimits.snapshots),
+  ),
   /** For each invalidated phase, the last snapshot that predates its current repair iteration. */
   invalidatedThroughSnapshot: Schema.optionalKey(Schema.Record(id, id)),
   reviews: Schema.Array(Schema.Struct({snapshotId: id, report: NativeCycleReviewSchema})).check(
     Schema.isMaxLength(256),
   ),
   attempts: Schema.Array(NativeCycleReviewAttemptSchema).check(Schema.isMaxLength(512)),
-  waivers: Schema.optionalKey(Schema.Array(NativeCycleWaiverSchema).check(Schema.isMaxLength(128))),
+  waivers: Schema.optionalKey(
+    Schema.Array(NativeCycleWaiverSchema).check(Schema.isMaxLength(nativeCycleRuntimeLimits.waivers)),
+  ),
   historicalAdmission: Schema.optionalKey(
     Schema.Struct({
       version: Schema.Literal(1),

@@ -40,6 +40,7 @@ import {
   nativeCycleHasBasePlanTransition,
   nativeCycleSnapshotIsCurrentIteration,
   type NativeCycleRuntime,
+  nativeCycleRuntimeLimits,
   nativeCycleWaiverFor,
   nativeCycleWaiverId,
   nativeCycleCoverage,
@@ -417,6 +418,18 @@ export const runNativeCycle = <R>(
         const save = (value: NativeCycleRuntime) =>
           Effect.gen(function* () {
             if (stableJson(value) === stableJson(stored.state.cycle)) return stored.revision;
+            const full =
+              value.snapshots.length > nativeCycleRuntimeLimits.snapshots
+                ? {code: 'snapshot-capacity', limit: nativeCycleRuntimeLimits.snapshots}
+                : (value.waivers?.length ?? 0) > nativeCycleRuntimeLimits.waivers
+                  ? {code: 'waiver-capacity', limit: nativeCycleRuntimeLimits.waivers}
+                  : undefined;
+            if (full)
+              return yield* nativeRefusal(
+                full.code,
+                'This run already retains its maximum history; deliver the reviewed work and continue in a new task.',
+                {detail: {limit: full.limit}, next: nativeTaskViewNext(request.runId, repo)},
+              );
             const canonical = yield* from(() => decodeNativeCycleRuntime(JSON.parse(stableJson(value))));
             return (yield* writeNativeWorkflowState(config, {...stored.state, cycle: canonical}, stored.revision))
               .revision;

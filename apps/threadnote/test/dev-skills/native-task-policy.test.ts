@@ -5,7 +5,8 @@ import {it as effectIt} from '@effect/vitest';
 import {describe, expect} from 'vitest';
 import {EffectMcpServerAdapter, mcpToolFailureResult} from '../../src/effect/ai/mcp.js';
 import {registerWorkflowTaskTool} from '../../src/mcp/server/workflow.js';
-import {readNativeWorkflowState} from '../../src/workflow_automation/store.js';
+import {readNativeWorkflowState, writeNativeWorkflowState} from '../../src/workflow_automation/store.js';
+import {nativeCycleWaiverId} from '@threadnote/workflow-automations/cycle-runtime';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
 import {fixture as cycleFixture, object, run as runCycle} from './native-cycle-lifecycle-fixture.js';
 import {runNativeTaskAction} from '../../src/workflow_automation/task_actions.js';
@@ -694,6 +695,48 @@ describe('audited waivers', () => {
           commitEvidence: 'Verified fixture commit ' + EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout),
         }),
       ).toMatchObject({status: 'delivered', waivers: [first.waiver]});
+    }).pipe(runCycle),
+  );
+
+  effectIt.effect('refuses a waiver past the retained limit before saving', () =>
+    Effect.gen(function* () {
+      const f = yield* cycleFixture(
+        ['one'],
+        'local',
+        false,
+        false,
+        true,
+        undefined,
+        undefined,
+        {},
+        {policy: 'standard'},
+      );
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = 1;\n');
+      yield* runNativeTaskAction(f.config, {command: 'record-snapshot', runId: 'native-run', callerCwd: f.repo});
+      const stored = yield* readNativeWorkflowState(f.config, 'native-run');
+      const cycle = stored?.state.cycle;
+      const snapshot = cycle?.snapshots.at(-1)?.snapshot;
+      if (!stored || !cycle || !snapshot) throw new Error('Expected a recorded snapshot.');
+      const waivers = EffectArray.makeBy(128, index => {
+        const fields = {
+          gate: 'review.blocking' as const,
+          phaseId: snapshot.phaseId,
+          snapshotId: snapshot.snapshotId,
+          tree: snapshot.tree,
+          intentHash: snapshot.intentHash ?? snapshot.phaseHash,
+          reason: `Fixture waiver ${index}.`,
+          userAuthority: 'User: fixture authority.',
+        };
+        return {id: nativeCycleWaiverId(fields), ...fields};
+      });
+      yield* writeNativeWorkflowState(f.config, {...stored.state, cycle: {...cycle, waivers}}, stored.revision);
+      const before = yield* f.fs.readFileString(f.statePath());
+      expect(yield* waive(f).pipe(Effect.flip)).toMatchObject({
+        code: 'waiver-capacity',
+        detail: {limit: 128},
+        next: {tool: 'workflow_task_view'},
+      });
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
     }).pipe(runCycle),
   );
 
