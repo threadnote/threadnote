@@ -1836,6 +1836,8 @@ export function loadCachedFacts(
   {
     readonly bytes: number;
     readonly bytesByPath: ReadonlyMap<string, number>;
+    /** Paths served from the degraded parser generation because their content has no active facts. */
+    readonly degradedPaths: ReadonlySet<string>;
     readonly facts: ReadonlyMap<string, CodeGraphFileFacts>;
   },
   unknown
@@ -1846,7 +1848,7 @@ export function loadCachedFacts(
       Effect.gen(function* () {
         const active = yield* store.loadCachedFacts(databasePath, group.files, group.cacheIdentity);
         const missing = EffectArray.filter(group.files, file => !active.facts.has(file.path));
-        if (missing.length === 0) return active;
+        if (missing.length === 0) return {...active, degradedPaths: []};
         const degraded = yield* store.loadCachedFacts(
           databasePath,
           missing,
@@ -1855,6 +1857,7 @@ export function loadCachedFacts(
         return {
           bytes: active.bytes + degraded.bytes,
           bytesByPath: new Map([...(active.bytesByPath ?? []), ...(degraded.bytesByPath ?? [])]),
+          degradedPaths: [...degraded.facts.keys()],
           facts: new Map([...active.facts, ...degraded.facts]),
         };
       }),
@@ -1880,7 +1883,12 @@ export function loadCachedFacts(
           bytes += budgetedBytes;
         }
       }
-      return {bytes, bytesByPath, facts: output};
+      return {
+        bytes,
+        bytesByPath,
+        degradedPaths: new Set(EffectArray.flatMap(groups, group => group.degradedPaths)),
+        facts: output,
+      };
     }),
   );
 }

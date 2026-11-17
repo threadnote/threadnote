@@ -90,6 +90,12 @@ export type ProjectResolutionCandidateClosure =
 
 export interface ProjectResolutionCandidateFactPage {
   readonly bytesByPath: ReadonlyMap<string, number>;
+  /**
+   * Paths served from the degraded parser generation. A later parse of the
+   * same content can observe more references, so evidence that includes them
+   * is never handed to `onIndex`.
+   */
+  readonly degradedPaths?: ReadonlySet<string>;
   readonly facts: ReadonlyMap<string, CodeGraphFileFacts>;
   /** A second attribution version shares the same path ordinal and every projection cap. */
   readonly previousFacts?: ReadonlyMap<string, CodeGraphFileFacts>;
@@ -202,7 +208,7 @@ export const scanProjectResolutionCandidateClosure = Effect.fn('codeGraph.scanPr
     readonly loadPage: (
       files: readonly CodeGraphInventoryFile[],
     ) => Effect.Effect<ProjectResolutionCandidateFactPage, E>;
-    /** Receives the complete single-version evidence once every page has been observed. */
+    /** Receives the complete single-version evidence once every page has been observed without degraded facts. */
     readonly onIndex?: (index: ProjectResolutionCandidateIndex) => void;
   }) {
     const maximumProjectionAssociations =
@@ -244,6 +250,7 @@ export const scanProjectResolutionCandidateClosure = Effect.fn('codeGraph.scanPr
     });
     const scannedPaths: string[] = [];
     let versioned = false;
+    let degraded = false;
     let reexportKeyBytes = 0;
     let reexportLookupKeys = 0;
     for (const reexport of input.additionalReexports ?? []) {
@@ -256,6 +263,7 @@ export const scanProjectResolutionCandidateClosure = Effect.fn('codeGraph.scanPr
     for (const page of input.plan.pages) {
       const loaded = yield* input.loadPage(page.files);
       if (!completePage(page, loaded)) return {mode: 'fallback', reason: 'cache-incomplete'} as const;
+      if ((loaded.degradedPaths?.size ?? 0) > 0) degraded = true;
       for (const file of page.files) {
         const fileOrdinal = scannedPaths.length;
         scannedPaths.push(file.path);
@@ -301,7 +309,7 @@ export const scanProjectResolutionCandidateClosure = Effect.fn('codeGraph.scanPr
       }
     }
     if (scannedPaths.length !== input.plan.files) return {mode: 'fallback', reason: 'cache-incomplete'} as const;
-    if (!versioned) input.onIndex?.(projection.index(scannedPaths, baseReexports));
+    if (!versioned && !degraded) input.onIndex?.(projection.index(scannedPaths, baseReexports));
     return yield* resolveObservedResolutionCandidateClosure({
       baseReexports,
       factBytes: input.plan.factBytes,

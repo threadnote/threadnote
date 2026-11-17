@@ -197,8 +197,9 @@ const indexedResolutionCandidateClosure = Effect.fn('codeGraph.indexedResolution
 
 /**
  * Decode every committed file's cached facts, bounded per page and by the
- * projection caps. With a ready owner the collected evidence is recorded, so
- * later edits against the same base read only the affected evidence.
+ * projection caps. With a ready owner and no base file served degraded, the
+ * collected evidence is recorded, so later edits against the same base read
+ * only the affected evidence.
  */
 const scannedResolutionCandidateClosure = Effect.fn('codeGraph.scannedResolutionCandidateClosure')(function* (
   input: ResolutionCandidateDiscoveryInput,
@@ -244,6 +245,7 @@ const scannedResolutionCandidateClosure = Effect.fn('codeGraph.scannedResolution
           });
           return {
             bytesByPath: loaded.bytesByPath,
+            degradedPaths: loaded.degradedPaths,
             facts: new Map(EffectArray.map(attributeBaseFacts(rawFacts), facts => [facts.path, facts])),
           };
         }),
