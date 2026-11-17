@@ -378,6 +378,8 @@ export function registerCodeGraphTool(
         ) {
           return argumentError('inspect_code_graph package is valid only for operation=query.');
         }
+        const missingSelector = missingCodeGraphSelector(operation, {from, nodeId, query, symbol, to});
+        if (missingSelector !== undefined) return argumentError(missingSelector);
         if (
           options.allowWorkset === false &&
           (Effect2.pipe(workset, effectOptionalString =>
@@ -1743,4 +1745,25 @@ function formatCodeGraphDuration(milliseconds: number): string {
   const minutes = Math.ceil(seconds / 60);
   if (minutes < 90) return `${minutes} minute${minutes === 1 ? '' : 's'}`;
   return `${Math.ceil(minutes / 60)} hours`;
+}
+
+function missingCodeGraphSelector(
+  operation: string,
+  selectors: {
+    readonly from?: string;
+    readonly nodeId?: string;
+    readonly query?: string;
+    readonly symbol?: string;
+    readonly to?: string;
+  },
+): string | undefined {
+  const present = (value: string | undefined) =>
+    value !== undefined && Effect2.pipe(value, EffectString.trim, EffectString.isNonEmpty);
+  if ((operation === 'node' || operation === 'neighbors') && !present(selectors.nodeId))
+    return `inspect_code_graph operation=${operation} requires nodeId: a cgs_ or cgr_ ID from a query result.`;
+  if (operation === 'path' && (!present(selectors.from) || !present(selectors.to)))
+    return 'inspect_code_graph operation=path requires from and to.';
+  if (operation === 'explain' && !present(selectors.symbol) && !present(selectors.query))
+    return 'inspect_code_graph operation=explain requires symbol or query.';
+  return undefined;
 }
