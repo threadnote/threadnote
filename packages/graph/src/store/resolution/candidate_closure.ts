@@ -7,15 +7,6 @@ import type {CodeGraphFileFacts, CodeGraphInventoryFile, CodeGraphReference} fro
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
-/** One complete scan must stay within the ordinary 5,000-file attribution-work ceiling. */
-export const PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FILES = 5_000;
-/**
- * Pages remain independently bounded; this limit caps aggregate decoded work.
- * Real repositories can produce roughly 8x as many cached-fact bytes as
- * source bytes, so 256 MiB keeps ordinary exported TypeScript edits
- * incremental without making the scan unbounded.
- */
-export const PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FACT_BYTES = 256 * 1_048_576;
 export const PROJECT_RESOLUTION_CANDIDATE_SCAN_PAGE_MAX_FILES = 32;
 /** Matches the independent per-file cached-fact ceiling while keeping every decoded page bounded. */
 export const PROJECT_RESOLUTION_CANDIDATE_SCAN_PAGE_MAX_FACT_BYTES = CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM;
@@ -53,8 +44,6 @@ export type ProjectResolutionCandidateScanFallbackDetail =
   | 'candidate-reexport-key-bytes'
   | 'candidate-reexport-lookup-keys'
   | 'candidate-reexports'
-  | 'candidate-scan-fact-bytes'
-  | 'candidate-scan-files'
   | 'candidate-selected-files';
 
 export interface ProjectResolutionCandidateScanPage {
@@ -68,13 +57,6 @@ export type ProjectResolutionCandidateScanPlan =
       readonly files: number;
       readonly mode: 'eligible';
       readonly pages: readonly ProjectResolutionCandidateScanPage[];
-    }
-  | {
-      readonly detail: 'candidate-scan-fact-bytes' | 'candidate-scan-files';
-      readonly limit: number;
-      readonly mode: 'fallback';
-      readonly observed: number;
-      readonly reason: 'project-closure-unbounded';
     }
   | {
       readonly mode: 'fallback';
@@ -146,32 +128,17 @@ export type ProjectResolutionCandidateIndexLookup<E> = (query: {
 export function planProjectResolutionCandidateScan(input: {
   readonly bytesByPath: ReadonlyMap<string, number>;
   readonly files: readonly CodeGraphInventoryFile[];
-  readonly maximumFactBytes?: number;
-  readonly maximumFiles?: number;
   readonly pageMaximumFactBytes?: number;
   readonly pageMaximumFiles?: number;
 }): ProjectResolutionCandidateScanPlan {
-  const maximumFiles = input.maximumFiles ?? PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FILES;
-  const maximumFactBytes = input.maximumFactBytes ?? PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FACT_BYTES;
   const pageMaximumFiles = input.pageMaximumFiles ?? PROJECT_RESOLUTION_CANDIDATE_SCAN_PAGE_MAX_FILES;
   const pageMaximumFactBytes = input.pageMaximumFactBytes ?? PROJECT_RESOLUTION_CANDIDATE_SCAN_PAGE_MAX_FACT_BYTES;
   if (
-    !isNonNegativeSafeInteger(maximumFiles) ||
-    !isNonNegativeSafeInteger(maximumFactBytes) ||
     !isPositiveSafeInteger(pageMaximumFiles) ||
     !isPositiveSafeInteger(pageMaximumFactBytes) ||
     new Set(EffectArray.map(input.files, file => file.path)).size !== input.files.length
   ) {
     return {mode: 'fallback', reason: 'cache-incomplete'};
-  }
-  if (input.files.length > maximumFiles) {
-    return {
-      detail: 'candidate-scan-files',
-      limit: maximumFiles,
-      mode: 'fallback',
-      observed: input.files.length,
-      reason: 'project-closure-unbounded',
-    };
   }
   const ordered = [...input.files].sort((left, right) => compareCodeUnits(left.path, right.path));
   const pages: ProjectResolutionCandidateScanPage[] = [];
@@ -182,15 +149,6 @@ export function planProjectResolutionCandidateScan(input: {
     const bytes = input.bytesByPath.get(file.path);
     if (bytes === undefined || !Number.isSafeInteger(bytes) || bytes < 0) {
       return {mode: 'fallback', reason: 'cache-incomplete'};
-    }
-    if (factBytes > maximumFactBytes - bytes) {
-      return {
-        detail: 'candidate-scan-fact-bytes',
-        limit: maximumFactBytes,
-        mode: 'fallback',
-        observed: factBytes + bytes,
-        reason: 'project-closure-unbounded',
-      };
     }
     const pageFull = page.length > 0 && (page.length >= pageMaximumFiles || pageBytes > pageMaximumFactBytes - bytes);
     if (pageFull) {

@@ -25,7 +25,6 @@ import {
 import {CODE_GRAPH_RESOLUTION_PASS_MAXIMUM} from '../store/resolution.js';
 import {
   planProjectResolutionCandidateScan,
-  PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FILES,
   PROJECT_RESOLUTION_CANDIDATE_MAX_LOOKUP_KEYS,
   PROJECT_RESOLUTION_CANDIDATE_SCAN_PAGE_MAX_FACT_BYTES,
   resolveIndexedProjectResolutionCandidateClosure,
@@ -195,26 +194,16 @@ const indexedResolutionCandidateClosure = Effect.fn('codeGraph.indexedResolution
 });
 
 /**
- * Decode every committed file's cached facts. When the result can be
- * persisted for a ready base, the aggregate file and fact-byte caps do not
- * apply: this one scan replaces the full rebuild those caps would select, and
- * later edits against the same base read only the affected evidence. Page and
- * projection bounds still apply.
+ * Decode every committed file's cached facts, bounded per page and by the
+ * projection caps. With a ready owner the collected evidence is recorded, so
+ * later edits against the same base read only the affected evidence.
  */
 const scannedResolutionCandidateClosure = Effect.fn('codeGraph.scannedResolutionCandidateClosure')(function* (
   input: ResolutionCandidateDiscoveryInput,
   evidence: ResolutionCandidateEvidenceIdentity | undefined,
 ) {
   const changedFiles = input.currentChangedFiles.length;
-  const persisted = evidence !== undefined && input.store.recordResolutionCandidateIndex !== undefined;
-  if (!persisted && input.baseFiles.length > PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FILES) {
-    return projectClosureBoundFallback(
-      changedFiles,
-      {metric: 'candidate-scan-files', stage: 'resolution-candidate-scan'},
-      input.baseFiles.length,
-      PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FILES,
-    );
-  }
+  const recordable = evidence !== undefined && input.store.recordResolutionCandidateIndex !== undefined;
   const metadata = yield* cachedFactsMetadata(
     input.store,
     input.layout.databasePath,
@@ -224,11 +213,7 @@ const scannedResolutionCandidateClosure = Effect.fn('codeGraph.scannedResolution
   if (metadata.files !== input.baseFiles.length || metadata.bytesByPath.size !== input.baseFiles.length) {
     return {mode: 'fallback', reason: 'cache-incomplete'} satisfies IncrementalOverlayPreassessment;
   }
-  const plan = planProjectResolutionCandidateScan({
-    bytesByPath: metadata.bytesByPath,
-    files: input.baseFiles,
-    ...(persisted ? {maximumFactBytes: Number.MAX_SAFE_INTEGER, maximumFiles: Number.MAX_SAFE_INTEGER} : {}),
-  });
+  const plan = planProjectResolutionCandidateScan({bytesByPath: metadata.bytesByPath, files: input.baseFiles});
   if (plan.mode === 'fallback') return resolutionCandidateScanFallback(plan, changedFiles);
 
   const attributeBaseFacts = createFactsAttributor(
@@ -240,7 +225,7 @@ const scannedResolutionCandidateClosure = Effect.fn('codeGraph.scannedResolution
     additionalReexports: input.candidateReexports,
     initialLookupKeys: input.initialLookupKeys,
     maximumSelectedFiles: PROJECT_INCREMENTAL_CLOSURE_MAX_FILES,
-    ...(persisted
+    ...(recordable
       ? {
           onIndex: (index: ProjectResolutionCandidateIndex) => {
             collected = index;

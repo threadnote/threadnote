@@ -95,9 +95,7 @@ export const assessIncrementalOverlay = Effect.fn('codeGraph.assessIncrementalOv
     suppliedPreassessment ??
     (yield* assessIncrementalOverlayCompatibility(
       {
-        // Short-lived dirty roots never own evidence; recording it would add a
-        // scan to every edit while successive edits keep replacing that base.
-        ...(input.committedBase === undefined || input.committedBase.snapshot.dirty
+        ...(input.committedBase === undefined
           ? {}
           : {baseSnapshotId: input.committedBase.foldForward?.logicalSnapshotId ?? input.committedBase.snapshot.id}),
         extractorSet: input.building.extractorSet,
@@ -566,7 +564,7 @@ export const assessReusableCleanBaseCompatibility = Effect.fn('codeGraph.assessR
     if (reexportResolutionSurfaceChanged || resolutionSurfaceChanged || workspaceSeedProjectIds.length > 0) {
       const closure = yield* assessProjectIncrementalClosureCompatibility({
         baseFiles: input.candidate.files,
-        ...(input.candidate.snapshot.dirty ? {} : {baseSnapshotId: input.candidate.snapshot.id}),
+        baseSnapshotId: input.candidate.snapshot.id,
         baseFileSetFingerprint: reusableBaseFileSetFingerprint(input.candidate.files),
         baseWorkspace: committedWorkspace,
         changedBaseFacts: baseFacts,

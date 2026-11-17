@@ -2,10 +2,6 @@ import {Array as EffectArray} from 'effect';
 import {codeGraphUtf8ByteLength} from '../disk/capacity.js';
 import {CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM, type MeasuredCodeGraphFact} from '../fact/budget.js';
 import {symbolTerms} from '../store/utilities.js';
-import {
-  PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FILES,
-  PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FACT_BYTES,
-} from '../store/resolution/candidate_closure.js';
 import type {CodeGraphFileFacts, CodeGraphInventoryFile} from '../types.js';
 import * as EffectRecord from 'effect/Record';
 
@@ -215,8 +211,6 @@ export function codeGraphIncrementalWorkFitsBudget(work: CodeGraphIncrementalWor
   if (
     candidate &&
     (EffectArray.some(EffectRecord.values(candidate), value => !Number.isSafeInteger(value) || value < 0) ||
-      candidate.metadataFiles > PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FILES ||
-      candidate.metadataFactBytes > PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FACT_BYTES ||
       candidate.omittedFiles + candidate.rawBaseFiles + candidate.rawCurrentFiles < candidate.metadataFiles ||
       candidate.omittedFactBytes + candidate.rawBaseBytes + candidate.rawCurrentBytes !== candidate.metadataFactBytes ||
       candidate.selectedReloadFiles !== work.changedFiles)
