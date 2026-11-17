@@ -26,21 +26,19 @@ export const nativeWaivableGateIds = EffectArray.filter(
   (gate): gate is NativeWaivableGateId => nativeGates[gate].class === 'integrity',
 );
 
-export type NativeNextCommand = WorkflowNextCommand;
-export type NativeRefusalDetail = WorkflowRefusalDetail;
 export type GateDecision =
   | {readonly _tag: 'pass'}
   | {
       readonly _tag: 'warn';
       readonly gate: GateId;
-      readonly detail: NativeRefusalDetail;
+      readonly detail: WorkflowRefusalDetail;
       readonly waiverId?: string;
     }
   | {
       readonly _tag: 'refuse';
       readonly gate: GateId;
-      readonly detail: NativeRefusalDetail;
-      readonly next: NativeNextCommand;
+      readonly detail: WorkflowRefusalDetail;
+      readonly next: WorkflowNextCommand;
     };
 
 /** A run without a recorded policy predates policies and keeps the strict behavior it was created with. */
@@ -52,9 +50,9 @@ export const nativeWorkflowPolicyOf = (state: {
 export function decideGate(
   policy: NativeWorkflowPolicy,
   gate: GateId,
-  violation: NativeRefusalDetail | undefined,
+  violation: WorkflowRefusalDetail | undefined,
   waiver: {readonly id: string} | undefined,
-  next: NativeNextCommand,
+  next: WorkflowNextCommand,
 ): GateDecision {
   if (violation === undefined) return {_tag: 'pass'};
   const gateClass: NativeGateClass = nativeGates[gate].class;
@@ -71,11 +69,11 @@ const cliValue = (value: string) => (/[\s"'$`\\]/u.test(value) ? JSON.stringify(
  * unknown value appears as a `<placeholder>`.
  */
 export function nativeNextCommand(
-  tool: NativeNextCommand['tool'],
+  tool: WorkflowNextCommand['tool'],
   command: string,
   cli: {readonly command: string; readonly flags: Readonly<Record<string, string>>},
   mcpArguments: Readonly<Record<string, unknown>>,
-): NativeNextCommand {
+): WorkflowNextCommand {
   const flags = EffectArray.map(
     EffectRecord.toEntries(cli.flags),
     ([key, value]) => `${cliFlag(key)} ${cliValue(value)}`,
@@ -90,7 +88,7 @@ export function nativeNextCommand(
 
 type NativeNextScope = {readonly runId: string; readonly callerCwd: string};
 const sameShape = (
-  tool: NativeNextCommand['tool'],
+  tool: WorkflowNextCommand['tool'],
   command: string,
   cliCommand: string,
   fields: Readonly<Record<string, string>>,
@@ -193,7 +191,7 @@ export const nativeTaskViewNext = (runId: string, callerCwd: string) => nativeNe
 export const nativeRefusal = (
   code: string,
   message: string,
-  refusal: {readonly next: NativeNextCommand; readonly gate?: GateId; readonly detail?: NativeRefusalDetail},
+  refusal: {readonly next: WorkflowNextCommand; readonly gate?: GateId; readonly detail?: WorkflowRefusalDetail},
 ) =>
   WorkflowAutomationError.make({
     code,
@@ -203,19 +201,13 @@ export const nativeRefusal = (
     ...(refusal.detail === undefined ? {} : {detail: refusal.detail}),
   });
 
-export const nativeGateRefusal = (
-  code: string,
-  message: string,
-  decision: Extract<GateDecision, {readonly _tag: 'refuse'}>,
-) => nativeRefusal(code, message, decision);
-
 /** The next legal command for the action on the current task card. */
 export const nativeNextForTaskAction = (
   action: string,
   runId: string,
   callerCwd: string,
   delivery: 'local' | 'commit' | 'pr' = 'local',
-): NativeNextCommand => {
+): WorkflowNextCommand => {
   const scope = {runId, callerCwd};
   switch (action) {
     case 'implement':
@@ -246,7 +238,7 @@ export const nativeNextForTaskAction = (
 };
 
 /** Attach a next command to a refusal that does not name one yet. */
-export const withNativeNext = (error: WorkflowAutomationError, next: NativeNextCommand) =>
+export const withNativeNext = (error: WorkflowAutomationError, next: WorkflowNextCommand) =>
   error.next !== undefined
     ? error
     : WorkflowAutomationError.make({

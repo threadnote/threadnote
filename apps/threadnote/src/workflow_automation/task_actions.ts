@@ -6,7 +6,6 @@ import {
   withNativeNext,
   nativeRefusal,
   decideGate,
-  nativeGateRefusal,
   nativeNext,
   nativeWaivableGateIds,
   nativeWorkflowPolicies,
@@ -1525,7 +1524,7 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
         nativeNext.waive({runId: request.runId, callerCwd: checkout}, 'review.required'),
       );
       if (reviewDecision._tag === 'refuse')
-        return yield* nativeGateRefusal(
+        return yield* nativeRefusal(
           'review-pending',
           'Record the complete accepted review before validation.',
           reviewDecision,

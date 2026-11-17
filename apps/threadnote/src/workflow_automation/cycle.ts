@@ -78,7 +78,6 @@ import type {NativeAuthoringCall} from './authoring_artifacts.js';
 import {readNativeCycleIncoming, recordNativeCycleTreeSnapshot} from './cycle_tree_snapshot.js';
 import {
   decideGate,
-  nativeGateRefusal,
   nativeTaskViewNext,
   nativeWorkflowPolicyOf,
   nativeRefusal,
@@ -1339,7 +1338,7 @@ export const runNativeCycle = <R>(
             nativeTaskViewNext(request.runId, repo),
           );
           if (ownershipDecision._tag === 'refuse')
-            return yield* nativeGateRefusal(
+            return yield* nativeRefusal(
               'phase-scope',
               'Worker ownership exceeds the approved phase scope.',
               ownershipDecision,
@@ -1372,7 +1371,7 @@ export const runNativeCycle = <R>(
             nativeNext.waive({runId: request.runId, callerCwd: repo}, 'review.required'),
           );
           if (reviewDecision._tag === 'refuse')
-            return yield* nativeGateRefusal(
+            return yield* nativeRefusal(
               'review-pending',
               'A complete immutable source review is required before acceptance.',
               reviewDecision,
@@ -1393,7 +1392,7 @@ export const runNativeCycle = <R>(
             nativeNext.waive({runId: request.runId, callerCwd: repo}, 'review.blocking'),
           );
           if (blockingDecision._tag === 'refuse')
-            return yield* nativeGateRefusal(
+            return yield* nativeRefusal(
               'review-blocked',
               'Resolve the recorded blockers before accepting this phase.',
               blockingDecision,
@@ -1414,7 +1413,7 @@ export const runNativeCycle = <R>(
             nativeTaskViewNext(request.runId, repo),
           );
           if (scopeDecision._tag === 'refuse')
-            return yield* nativeGateRefusal('phase-scope', 'Changed paths exceed allowed scope.', scopeDecision);
+            return yield* nativeRefusal('phase-scope', 'Changed paths exceed allowed scope.', scopeDecision);
           const updated = yield* from(() =>
             validateNativeCyclePhase(
               state,
