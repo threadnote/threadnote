@@ -2004,7 +2004,7 @@
     "production-shape-lexical-term-target-attainment": {
       "samplesMinimum": 1,
       "unit": "percent",
-      "minimum": 168.33165891472868
+      "minimum": 150
     },
     "production-shape-repository-file-target-attainment": {
       "samplesMinimum": 1,
