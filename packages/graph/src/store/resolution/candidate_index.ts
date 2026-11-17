@@ -13,8 +13,11 @@ import type {
 /**
  * Persisted reverse resolver evidence for one snapshot under one exact
  * attribution context. The receipt row is written in the same transaction as
- * its runs and paths, so a reader that finds a receipt with the expected
- * context fingerprint reads complete evidence. Runs are sorted fingerprint
+ * its runs and paths, so a reader that finds, in one read transaction, a
+ * receipt with the expected context fingerprint and a ready owner reads
+ * complete evidence. Retired-snapshot cleanup deletes runs, paths and then the
+ * receipt across separately committed pages, so a retired owner's receipt
+ * certifies nothing. Runs are sorted fingerprint
  * blocks: a lookup reads only the blocks that can hold the requested
  * fingerprints instead of the repository's cached facts.
  */
@@ -154,10 +157,11 @@ export const selectResolutionCandidateIndexMatches = Effect.fn('codeGraph.select
     return yield* sql.withTransaction(
       Effect.gen(function* () {
         const receipt = yield* sql`
-          SELECT 1 FROM snapshot_resolution_candidate_indexes
-          WHERE snapshot_id = ${snapshotId}
-            AND format_version = ${CODE_GRAPH_RESOLUTION_CANDIDATE_INDEX_FORMAT_VERSION}
-            AND context_fingerprint = ${contextFingerprint}
+          SELECT 1 FROM snapshot_resolution_candidate_indexes AS receipt
+          JOIN snapshots AS snapshot ON snapshot.id = receipt.snapshot_id AND snapshot.state = 'ready'
+          WHERE receipt.snapshot_id = ${snapshotId}
+            AND receipt.format_version = ${CODE_GRAPH_RESOLUTION_CANDIDATE_INDEX_FORMAT_VERSION}
+            AND receipt.context_fingerprint = ${contextFingerprint}
           LIMIT 1
         `;
         if (receipt.length !== 1) return undefined;
