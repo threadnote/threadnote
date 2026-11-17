@@ -680,11 +680,15 @@ export const assembleNativeInference = Effect.fn('assembleNativeInference')(func
       if (process.platform === 'win32') {
         if (
           !EffectString.includes('-march=armv8-a')(compileCommands) ||
-          !EffectString.includes('--dependent-lib=msvcrt')(compileCommands) ||
-          /-march=(?:native|armv(?:8\.[1-9]|9)[^\s"\\]*)/u.test(compileCommands) ||
-          /-fms-runtime-lib=static|--dependent-lib=libcmt/u.test(compileCommands)
+          /-march=(?:native|armv(?:8\.[1-9]|9)[^\s"\\]*)/u.test(compileCommands)
         )
-          throw new Error('Actual Windows ARM compile commands violate the portable CPU/dynamic CRT profile.');
+          throw new Error('Actual Windows ARM compile commands violate the portable armv8-a CPU profile.');
+        // CMake spells the clang GNU-mode MSVC runtime as -fms-runtime-lib or --dependent-lib by version.
+        if (
+          !/-fms-runtime-lib=dll\b|--dependent-lib=msvcrt\b/u.test(compileCommands) ||
+          /-fms-runtime-lib=static|--dependent-lib=libcmt\b/u.test(compileCommands)
+        )
+          throw new Error('Actual Windows ARM compile commands violate the shared dynamic CRT profile.');
         toolchain.windowsCompileProfileVerified = 'armv8-a/dynamicCRT';
       }
 
