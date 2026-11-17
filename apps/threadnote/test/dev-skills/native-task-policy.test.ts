@@ -143,6 +143,32 @@ describe('standard-profile tree snapshots', () => {
     }).pipe(runCycle),
   );
 
+  effectIt.effect('refuses the strict recovery commands and points at record-snapshot', () =>
+    Effect.gen(function* () {
+      const f = yield* standard();
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = 1;\n');
+      const recorded = object(
+        yield* runNativeTaskAction(f.config, {command: 'record-snapshot', runId: 'native-run', callerCwd: f.repo}),
+      );
+      const before = yield* f.fs.readFileString(f.statePath());
+      for (const command of ['supersede-unreviewed-snapshot', 'requalify-base-snapshot'])
+        expect(
+          yield* runNativeTaskAction(f.config, {
+            command,
+            runId: 'native-run',
+            callerCwd: f.repo,
+            snapshotRef: String(recorded.snapshotRef),
+            reason: 'Try the strict recovery.',
+            ...(command === 'requalify-base-snapshot' ? {userAuthority: 'User: requalify.'} : {}),
+          }).pipe(Effect.flip),
+        ).toMatchObject({
+          code: 'standard-profile-recovery',
+          next: {tool: 'workflow_task_snapshot', arguments: {snapshot: {command: 'record'}}},
+        });
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
+    }).pipe(runCycle),
+  );
+
   effectIt.effect('keeps the work-packet precondition for a strict run', () =>
     Effect.gen(function* () {
       const f = yield* cycleFixture(['one'], 'local');

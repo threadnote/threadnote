@@ -4,6 +4,7 @@ import {
   nativeNextForTaskAction,
   nativeTaskViewNext,
   withNativeNext,
+  nativeRefusal,
   decideGate,
   nativeGateRefusal,
   nativeNext,
@@ -662,6 +663,13 @@ const requireEffectValue = <A>(value: A | undefined, message: string): A => {
   return value;
 };
 
+const standardRefusedRecoveries = new Set<string>([
+  'supersede-unreviewed-snapshot',
+  'recover-unreviewed-rebase-snapshot',
+  'requalify-base-snapshot',
+  'requalify-invalid-tail',
+]);
+
 /** Typed task operations over the existing cycle state; references never authorize a mutation by themselves. */
 export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
   runNativeTaskActionCore(config, input).pipe(Effect.catch(error => withTaskNext(config, input, error)));
@@ -745,6 +753,14 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
     if (journal.state.binding.repo !== checkout)
       return yield* fail('wrong-checkout', 'Use the checkout bound to this native run.');
     if (request.command === 'set-profile') return yield* runNativeTaskSetProfile(config, request, stored, checkout);
+    // A standard run keeps one way to record source: the newest tree supersedes an unreviewed snapshot and a moved
+    // base needs no requalification, so the strict recovery commands would only mix receipt lineages.
+    if (standardRefusedRecoveries.has(request.command) && nativeWorkflowPolicyOf(stored.state) === 'standard')
+      return yield* nativeRefusal(
+        'standard-profile-recovery',
+        'A standard-profile run records the current tree with record-snapshot instead of this strict recovery.',
+        {next: nativeNext.snapshot({runId: request.runId, callerCwd: checkout})},
+      );
 
     if (
       request.command === 'compact-start' ||

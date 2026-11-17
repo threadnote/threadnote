@@ -25,6 +25,7 @@ import {
   nativeCycleInvalidTailBasis,
 } from '@threadnote/workflow-automations/cycle-runtime';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
+import {nativeWorkflowPolicyOf} from '@threadnote/workflow-automations/gates';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {readNativeWorkflowState} from './store.js';
 import {nativeTaskWatchIdentityForConsumer} from './task_pr_watch.js';
@@ -700,6 +701,8 @@ export const readNativeTaskView = (config: RuntimeConfig, input: unknown) =>
     const result = pageWatches.length > 0 ? {...selectedView, historicalWatches: pageWatches} : selectedView;
     const withBaseRequalification = (view: ReturnType<typeof projectNativeTaskView>) =>
       Effect.gen(function* () {
+        // Standard runs refuse the strict recovery commands, so their card never offers them.
+        if (nativeWorkflowPolicyOf(stored.state) === 'standard') return view;
         const route = yield* baseRequalificationRoute(config, stored, checkout, view);
         const invalid = yield* invalidTailRequalificationRoute(stored, checkout, view);
         const runtime = stored.state.cycle;
