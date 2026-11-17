@@ -19,7 +19,7 @@ import {
   NativeAuthoringPlanDocumentSchema,
   decodeNativeAuthoringDocument,
   canonicalAuthoringJson,
-  nativeAuthoringPathDiagnostic,
+  nativeAuthoringSchemaDiagnostic,
   nativeAuthoringDigest,
   validateNativeAuthoring,
   type NativeAuthoringDocument,
@@ -704,7 +704,7 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
         Effect.mapError(error =>
           fail(
             'invalid-content',
-            nativeAuthoringPathDiagnostic(error) ??
+            nativeAuthoringSchemaDiagnostic(error) ??
               'Business content must match spec/plan fields; omit format, id, project, source, spec export and compact-origin metadata.',
           ),
         ),

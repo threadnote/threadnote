@@ -5,6 +5,7 @@ import {
   canonicalAuthoringJson,
   decodeNativeAuthoringDocument,
   nativeAuthoringDigest,
+  nativeAuthoringIssueSummary,
   NativeAuthoringPlanDocumentSchema,
   projectNativeCompactIntent,
   nativeSpecIntentDigest,
@@ -620,6 +621,20 @@ describe('native authoring documents', () => {
       }),
       {numRuns: 60},
     );
+  });
+
+  it('summarizes computed issues by code and path with a bounded remainder', () => {
+    const issues = Array.from({length: 7}, (_, index) => ({
+      code: 'code-ref-out-of-snapshot',
+      path: `context.codeRefs[${index}]`,
+      message: 'Code references must name an inspected source path.',
+    }));
+    const summary = nativeAuthoringIssueSummary(issues);
+    expect(summary).toContain('code-ref-out-of-snapshot at context.codeRefs[0]');
+    expect(summary).toContain('context.codeRefs[4]');
+    expect(summary).not.toContain('context.codeRefs[5]');
+    expect(summary).toContain('and 2 more');
+    expect(nativeAuthoringIssueSummary(issues.slice(0, 1))).not.toContain('more');
   });
 
   it('reports spec semantic gaps and only marks an exact confirmed, reviewed spec ready', () => {

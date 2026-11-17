@@ -325,6 +325,11 @@ const combinedPhasePathsDiagnostic = (
   }
 };
 
+const issueLocation = (path: readonly PropertyKey[]) =>
+  EffectArray.reduce(path, '', (result, part) =>
+    typeof part === 'number' ? `${result}[${part}]` : result ? `${result}.${String(part)}` : String(part),
+  );
+
 const pathDiagnostic = (issue: SchemaIssue.Issue, path: readonly PropertyKey[] = []): string | undefined => {
   const validIndex = (value: PropertyKey | undefined) =>
     typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
@@ -369,10 +374,7 @@ const pathDiagnostic = (issue: SchemaIssue.Issue, path: readonly PropertyKey[] =
         rule = 'a parent path segment';
       else if (new TextEncoder().encode(value).byteLength > 4096) rule = 'the 4096-byte path limit';
       if (rule === undefined) return undefined;
-      const location = EffectArray.reduce(path, '', (result, part) =>
-        typeof part === 'number' ? `${result}[${part}]` : result ? `${result}.${String(part)}` : String(part),
-      );
-      const message = `${location} violates ${rule}.`;
+      const message = `${issueLocation(path)} violates ${rule}.`;
       return new TextEncoder().encode(message).byteLength <= 256 ? message : undefined;
     }
     default:
@@ -380,9 +382,59 @@ const pathDiagnostic = (issue: SchemaIssue.Issue, path: readonly PropertyKey[] =
   }
 };
 
-export const nativeAuthoringPathDiagnostic = (error: unknown): string | undefined => {
+const fieldDiagnostic = (path: readonly PropertyKey[], constraint: string): string | undefined => {
+  if (path.length === 0) return undefined;
+  const message = `${issueLocation(path)}: ${constraint}`;
+  return new TextEncoder().encode(message).byteLength <= 256 ? message : undefined;
+};
+
+/** First failing schema field and its declared constraint; never the rejected input or an unexpected key. */
+const schemaIssueDiagnostic = (issue: SchemaIssue.Issue, path: readonly PropertyKey[] = []): string | undefined => {
+  switch (issue._tag) {
+    case 'Pointer':
+      return schemaIssueDiagnostic(issue.issue, [...path, ...issue.path]);
+    case 'Encoding':
+      return schemaIssueDiagnostic(issue.issue, path);
+    case 'Composite':
+      return schemaIssueDiagnostic(issue.issues[0], path);
+    case 'AnyOf': {
+      const [first] = issue.issues;
+      return first
+        ? schemaIssueDiagnostic(first, path)
+        : fieldDiagnostic(path, SchemaIssue.defaultLeafHook(new SchemaIssue.InvalidType(issue.ast)));
+    }
+    case 'Filter':
+      return fieldDiagnostic(
+        path,
+        SchemaIssue.defaultCheckHook(issue) ??
+          `Expected ${String(issue.filter.annotations?.expected ?? 'a valid value')}`,
+      );
+    case 'InvalidType':
+      return fieldDiagnostic(path, SchemaIssue.defaultLeafHook(new SchemaIssue.InvalidType(issue.ast)));
+    case 'MissingKey':
+      return fieldDiagnostic(path, SchemaIssue.defaultLeafHook(issue));
+    case 'UnexpectedKey':
+      return fieldDiagnostic(path.slice(0, -1), 'contains an unsupported field');
+    default:
+      return fieldDiagnostic(path, 'Invalid value');
+  }
+};
+
+/** Bounded caller-facing diagnostic for a native authoring schema rejection, or undefined when none is safe. */
+export const nativeAuthoringSchemaDiagnostic = (error: unknown): string | undefined => {
   if (!Predicate.isObject(error) || !SchemaIssue.isIssue(error.issue)) return undefined;
-  return pathDiagnostic(error.issue);
+  const issue = error.issue;
+  try {
+    return (
+      alternativesDiagnostic(issue) ??
+      combinedPhasePathsDiagnostic(issue) ??
+      pathDiagnostic(issue) ??
+      schemaIssueDiagnostic(issue)
+    );
+  } catch {
+    // Optional diagnostics must preserve the original rejection if projection fails.
+    return undefined;
+  }
 };
 
 export function decodeNativeAuthoringDocument(input: unknown): NativeAuthoringDocument {
@@ -392,18 +444,10 @@ export function decodeNativeAuthoringDocument(input: unknown): NativeAuthoringDo
       input,
     );
   } catch (error) {
-    let message = 'The native authoring document is malformed or contains unsupported fields.';
-    try {
-      if (Schema.isSchemaError(error))
-        message =
-          alternativesDiagnostic(error.issue) ??
-          combinedPhasePathsDiagnostic(error.issue) ??
-          pathDiagnostic(error.issue) ??
-          message;
-    } catch {
-      // Optional diagnostics must preserve the original rejection if projection fails.
-    }
-    throw invalid(message);
+    throw invalid(
+      nativeAuthoringSchemaDiagnostic(error) ??
+        'The native authoring document is malformed or contains unsupported fields.',
+    );
   }
   if (new TextEncoder().encode(canonicalAuthoringJson(document)).byteLength > 1_000_000)
     throw invalid('The native authoring document exceeds 1000000 canonical UTF-8 bytes.');
@@ -581,6 +625,17 @@ export interface NativeAuthoringIssue {
   readonly path: string;
   readonly message: string;
 }
+
+/** Lists at most `limit` computed issues by code, document path and fixed explanation. */
+export const nativeAuthoringIssueSummary = (issues: readonly NativeAuthoringIssue[], limit = 5): string => {
+  const listed = EffectArray.map(
+    EffectArray.take(issues, limit),
+    issue => `${issue.code} at ${issue.path} (${issue.message})`,
+  );
+  const remaining = issues.length - listed.length;
+  return EffectArray.join(remaining > 0 ? [...listed, `and ${remaining} more`] : listed, '; ');
+};
+
 export interface NativeAuthoringValidationOptions {
   readonly ready?: boolean;
   readonly planIntentPolicyVersion?: NativePlanIntentPolicyVersion;
