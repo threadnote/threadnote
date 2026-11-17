@@ -93,6 +93,55 @@ describe('standard-profile tree snapshots', () => {
     }).pipe(runCycle),
   );
 
+  effectIt.effect('records a new iteration of an unchanged tree after a reopen instead of replaying it', () =>
+    Effect.gen(function* () {
+      const f = yield* standard();
+      const task = (command: string, fields: Record<string, unknown> = {}) =>
+        runNativeTaskAction(f.config, {command, runId: 'native-run', callerCwd: f.repo, ...fields}).pipe(
+          Effect.map(object),
+        );
+      const view = () => readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo});
+      const validation = {
+        checks: [{command: 'private flow', result: 'passed', evidence: 'Actual scoped source fixture.'}],
+        acceptance: [{criterion: 'one works', result: 'passed', evidence: 'Source readback.'}],
+      };
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = 1;\n');
+      yield* f.git(['commit', '-qam', 'phase one']);
+      const recorded = yield* task('record-snapshot');
+      const first = object(object(recorded.snapshot).snapshot);
+      yield* f.mutate('validate-review', {
+        snapshotId: first.snapshotId,
+        attemptId: 'a1',
+        report: {
+          snapshotId: first.snapshotId,
+          phaseHash: first.phaseHash,
+          snapshotTree: first.tree,
+          status: 'complete',
+          mode: 'full',
+          selected: ['correctness', 'simplicity'],
+          lanes: [
+            {name: 'correctness', status: 'complete'},
+            {name: 'simplicity', status: 'complete'},
+          ],
+          findings: [],
+        },
+      });
+      yield* task('record-validation', {snapshotRef: String(recorded.snapshotRef), validation});
+      yield* task('reopen', {taskRef: (yield* view()).taskRef, phaseId: 'one', reason: 'The evidence was incomplete.'});
+      yield* task('resume', {taskRef: (yield* view()).taskRef, reason: 'Resume after the reopen.'});
+      const again = yield* task('record-snapshot', {reason: 'Same tree after the reopen.'});
+      const second = object(object(again.snapshot).snapshot);
+      expect(again.replayed).toBe(false);
+      expect(second.snapshotId).not.toBe(first.snapshotId);
+      expect(second.tree).toBe(first.tree);
+      expect((yield* view()).next).toMatchObject({action: 'validate', snapshotId: second.snapshotId});
+      const validated = yield* task('record-validation', {snapshotRef: String(again.snapshotRef), validation});
+      expect(yield* task('deliver-local', {validationRef: String(validated.validationRef)})).toMatchObject({
+        status: 'delivered',
+      });
+    }).pipe(runCycle),
+  );
+
   effectIt.effect('keeps the work-packet precondition for a strict run', () =>
     Effect.gen(function* () {
       const f = yield* cycleFixture(['one'], 'local');

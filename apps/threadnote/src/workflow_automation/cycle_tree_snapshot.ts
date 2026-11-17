@@ -10,7 +10,10 @@ import {
 } from '@threadnote/workflow-automations/cycle';
 import type {NativeCycleState} from '@threadnote/workflow-automations/cycle';
 import type {NativeCycleSnapshot} from '@threadnote/workflow-automations/cycle-review';
-import type {NativeCycleRuntime} from '@threadnote/workflow-automations/cycle-runtime';
+import {
+  nativeCycleSnapshotIsCurrentIteration,
+  type NativeCycleRuntime,
+} from '@threadnote/workflow-automations/cycle-runtime';
 import {nativeTaskViewNext, nativeRefusal} from '@threadnote/workflow-automations/gates';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
@@ -167,16 +170,19 @@ export const recordNativeCycleTreeSnapshot = Effect.fn('workflowAutomation.cycle
   const scope = yield* readNativeCycleIncoming(repo, phase, captured, baseline, outOfPlan);
   const intentHash = nativeCyclePhaseIntentHash(state.plan, phase.id);
   const phaseSnapshots = EffectArray.filter(runtime.snapshots, entry => entry.snapshot.phaseId === phase.id);
-  const latest = phaseSnapshots.at(-1);
+  // A snapshot retired by an invalidation never answers for the next iteration, even for the same tree.
+  const latest = EffectOption.getOrUndefined(EffectArray.last(phaseSnapshots));
+  const current =
+    latest && nativeCycleSnapshotIsCurrentIteration(runtime, phase.id, latest.snapshot.snapshotId) ? latest : undefined;
   const reviewed = new Set(EffectArray.map(runtime.reviews, entry => entry.snapshotId));
   if (
-    latest?.snapshot.version === 4 &&
-    latest.snapshot.tree === captured.tree &&
-    latest.snapshot.scopeBase === scope.scopeBase &&
-    latest.snapshot.phaseHash === state.phases[phase.id].phaseHash
+    current?.snapshot.version === 4 &&
+    current.snapshot.tree === captured.tree &&
+    current.snapshot.scopeBase === scope.scopeBase &&
+    current.snapshot.phaseHash === state.phases[phase.id].phaseHash
   )
-    return {status: 'ok', revision: input.revision, replayed: true, snapshot: latest};
-  const superseded = latest && !reviewed.has(latest.snapshot.snapshotId) ? latest.snapshot : undefined;
+    return {status: 'ok', revision: input.revision, replayed: true, snapshot: current};
+  const superseded = current && !reviewed.has(current.snapshot.snapshotId) ? current.snapshot : undefined;
   const changeDigest = yield* nativeCycleChangeDigest(repo, scope.scopeBase, captured.tree);
   const latestReviewed = EffectOption.getOrUndefined(
     EffectArray.findLast(
