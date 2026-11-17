@@ -1023,31 +1023,43 @@ describe('native task actions', () => {
       yield* applyDevSkills(config, 'install', {agent: 'codex'}).pipe(Effect.provideService(SystemInfo, testSystem));
       const indexed = yield* (yield* CodeGraphIndexer).index({cwd: checkout, threadnoteHome: home});
       expect(indexed.snapshot.state).toBe('ready');
-      const result = yield* runNativeTaskStart(config, {
-        callerCwd: checkout,
-        featureName: 'Checkout task',
-        installationTarget: 'codex',
-        intent: {
-          title: 'Checkout task',
-          currentBehavior: 'Checkout source is not checked.',
-          desiredChange: 'Checkout source is checked.',
-          affectedPaths: ['source.ts'],
-          acceptanceCriterion: 'Checkout source is checked.',
-          verification: 'Inspect checkout source.',
-          eligibilityRationale: 'One local source and behavior are explicit.',
-          eligibility: {status: 'eligible' as const},
-          review: {required: false, reason: 'Focused fixture.'},
-        },
-      }).pipe(Effect.provideService(SystemInfo, testSystem), Effect.result);
+      const start = (graphProject?: string) =>
+        runNativeTaskStart(config, {
+          callerCwd: checkout,
+          featureName: 'Checkout task',
+          installationTarget: 'codex',
+          ...(graphProject === undefined ? {} : {graphProject}),
+          intent: {
+            title: 'Checkout task',
+            currentBehavior: 'Checkout source is not checked.',
+            desiredChange: 'Checkout source is checked.',
+            affectedPaths: ['source.ts'],
+            acceptanceCriterion: 'Checkout source is checked.',
+            verification: 'Inspect checkout source.',
+            eligibilityRationale: 'One local source and behavior are explicit.',
+            eligibility: {status: 'eligible' as const},
+            review: {required: false, reason: 'Focused fixture.'},
+          },
+        }).pipe(Effect.provideService(SystemInfo, testSystem), Effect.result);
       const runId = nativeTaskStartRunId(undefined, 'repo', 'checkout-task');
-      return {result, state: yield* readNativeWorkflowState(config, runId), runId};
+      return {start, state: readNativeWorkflowState(config, runId), runId};
     });
 
   effectIt.effect('files a linked-worktree task start under the repository project', () =>
     Effect.gen(function* () {
-      const {result, state, runId} = yield* startFromCheckout('repo', 'repo-second');
-      expect(result).toMatchObject({success: {taskRef: runId}});
-      expect(state?.state.project).toBe('repo');
+      const checkout = yield* startFromCheckout('repo', 'repo-second');
+      expect(yield* checkout.start()).toMatchObject({success: {taskRef: checkout.runId}});
+      expect((yield* checkout.state)?.state.project).toBe('repo');
+    }).pipe(run),
+  );
+
+  effectIt.effect('rejects an unroutable project before writing state, so the recommended retry starts', () =>
+    Effect.gen(function* () {
+      const checkout = yield* startFromCheckout('other', undefined);
+      const rejected = yield* checkout.start();
+      expect(yield* checkout.state).toBeUndefined();
+      expect(rejected).toMatchObject({failure: {code: 'graph-scope-required'}});
+      expect(yield* checkout.start('other')).toMatchObject({success: {taskRef: checkout.runId}});
     }).pipe(run),
   );
 
