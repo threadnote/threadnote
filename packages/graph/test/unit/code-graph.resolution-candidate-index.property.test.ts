@@ -241,6 +241,42 @@ describe('persisted resolution-candidate index', () => {
         expect(yield* indexRowCounts(databasePath)).toEqual({indexes: 0, paths: 0, runs: 0});
       }),
     );
+
+    it.effect('treats a retired owner as having no evidence while cleanup has deleted only some runs', () =>
+      Effect.gen(function* () {
+        const store = yield* CodeGraphStore;
+        const databasePath = yield* readyBaseDatabase('base');
+        const index = yield* collectedIndex({
+          barrels: [],
+          consumers: [[{form: 'named', name: 'alpha', target: 0}]],
+          modules: [['alpha']],
+        });
+        const query = {
+          maximumReferencePaths: 10,
+          referenceFingerprints: new Set(index.referenceFingerprints),
+          symbolFingerprints: new Set(index.symbolFingerprints),
+        };
+        expect(yield* store.recordResolutionCandidateIndex!(databasePath, 'base', CONTEXT, index)).toBe(true);
+        const consumers = new Set(Array.from(index.referenceOrdinals, ordinal => index.paths[ordinal]));
+        expect(consumers.size).toBeGreaterThan(0);
+        expect(
+          (yield* store.matchResolutionCandidateIndex!(databasePath, 'base', CONTEXT, query))?.referencePaths,
+        ).toEqual(consumers);
+        // Cleanup commits the reference runs' page before it reaches the symbol runs, paths and receipt.
+        yield* store.withSession(
+          databasePath,
+          Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient;
+            yield* sql`UPDATE snapshots SET state = 'retired' WHERE id = 'base'`;
+            yield* sql`DELETE FROM snapshot_resolution_candidate_runs WHERE snapshot_id = 'base' AND kind = 0`;
+          }),
+        );
+
+        expect(yield* indexRowCounts(databasePath)).toMatchObject({indexes: 1, paths: index.paths.length});
+        expect(yield* store.resolutionCandidateIndex!(databasePath, 'base', CONTEXT)).toEqual({state: 'unavailable'});
+        expect(yield* store.matchResolutionCandidateIndex!(databasePath, 'base', CONTEXT, query)).toBeUndefined();
+      }),
+    );
   });
 });
 

@@ -12,6 +12,7 @@ import {TestClock} from 'effect/testing';
 import * as FC from 'fast-check';
 import {Effect, Path} from 'effect';
 import {CodeGraphIndexer, graphContentIdentity} from '@threadnote/graph/indexer';
+import {degradedParserCacheIdentity} from '@threadnote/graph/indexer/materialization_batch';
 import {serializeBoundedCodeGraphFact} from '@threadnote/graph/fact/budget';
 import {decodeStoredCodeGraphFact, encodeStoredCodeGraphFact} from '@threadnote/graph/fact/storage';
 import {inventoryRepository} from '@threadnote/graph/inventory';
@@ -1298,6 +1299,64 @@ describe('project-closure incremental indexing', () => {
     {timeout: 120_000},
   );
 
+  it.effect(
+    'records no evidence while a base file is served degraded, so its consumer is selected once it parses',
+    () =>
+      Effect.acquireUseRelease(
+        Effect.sync(createLargeRootProjectRepository),
+        root =>
+          Effect.gen(function* () {
+            const indexer = yield* CodeGraphIndexer;
+            const store = yield* CodeGraphStore;
+            const path = yield* Path.Path;
+            const incrementalHome = join(root, '.threadnote-incremental');
+            const fullHome = join(root, '.threadnote-full');
+            const base = yield* indexer.index({cwd: root, threadnoteHome: incrementalHome});
+            const layout = codeGraphLayout(path, incrementalHome, base.identity.checkoutId, base.identity.worktreeId);
+            const active = serveCachedFactsDegraded(
+              layout.databasePath,
+              snapshotFileContentHash(layout.databasePath, base.snapshot.id, 'src/consumer.ts'),
+            );
+
+            // An unrelated export edit decodes the base while the consumer's references are missing.
+            yield* Effect.sync(() =>
+              writeFile(root, 'src/core.ts', 'export const stable = 1;\nexport const added = 2;\n'),
+            );
+            const degraded = yield* indexer.index({cwd: root, threadnoteHome: incrementalHome});
+            expect(degraded.materialization).toMatchObject({mode: 'incremental-overlay', resolutionClosure: 'project'});
+            expect(degraded.incrementalWork?.resolutionEvidenceFiles).toBeUndefined();
+            expect(degraded.incrementalWork?.attributionContextFiles).toBe(base.materialization?.totalFiles ?? 0);
+            expect(resolutionCandidateIndexOwners(layout.databasePath)).toEqual([]);
+
+            // A later parse stores active facts for the same content, then the export the consumer awaits appears.
+            yield* Effect.sync(() => {
+              restoreCachedFacts(layout.databasePath, active);
+              writeFile(
+                root,
+                'src/core.ts',
+                'export const stable = 1;\nexport const added = 2;\nexport function discovered() { return stable; }\n',
+              );
+            });
+            const discovered = yield* indexer.index({cwd: root, threadnoteHome: incrementalHome});
+            const full = yield* indexer.index({cwd: root, incrementalOverlay: false, threadnoteHome: fullHome});
+            const fullLayout = codeGraphLayout(path, fullHome, full.identity.checkoutId, full.identity.worktreeId);
+
+            expect(discovered.materialization).toMatchObject({
+              mode: 'incremental-overlay',
+              resolutionClosure: 'project',
+            });
+            expect(deltaPaths(layout.databasePath, discovered.snapshot.id)).toContain('src/consumer.ts');
+            expect(normalizeGraph(yield* store.loadGraph(layout.databasePath, discovered.snapshot.id))).toEqual(
+              normalizeGraph(yield* store.loadGraph(fullLayout.databasePath, full.snapshot.id)),
+            );
+            expect(discovered.incrementalWork?.resolutionEvidenceFiles).toBe(base.materialization?.totalFiles ?? 0);
+            expect(resolutionCandidateIndexOwners(layout.databasePath)).toEqual([base.snapshot.id]);
+          }),
+        root => Effect.sync(() => rmSync(root, {force: true, recursive: true})),
+      ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+    {timeout: 120_000},
+  );
+
   fcEffectProp(
     it,
     'matches forced-full graph, query, catalog, health, counts, and delta paths across randomized project chains',
@@ -1696,6 +1755,61 @@ function snapshotFileContentHash(databasePath: string, snapshotId: string, path:
       .get(snapshotId, path);
     if (!row) throw TestError.make({message: `Missing snapshot file ${path}.`});
     return row.contentHash;
+  } finally {
+    database.close(false);
+  }
+}
+
+interface CachedFactRow {
+  readonly blob_id: string | null;
+  readonly content_hash: string;
+  readonly created_at: string;
+  readonly extractor_set: string;
+  readonly facts_json: string;
+  readonly path_hint: string;
+  readonly reuse_class: string | null;
+}
+
+/** Leaves only a degraded parser generation, without edges or references, for the content; returns the active row. */
+function serveCachedFactsDegraded(databasePath: string, contentHash: string): CachedFactRow {
+  const database = new Database(databasePath);
+  try {
+    const rows = database
+      .query<CachedFactRow, [string]>('SELECT * FROM file_blobs WHERE content_hash = ?')
+      .all(contentHash);
+    if (rows.length !== 1) throw TestError.make({message: `Expected one cached fact row for ${contentHash}.`});
+    const [active] = rows;
+    const facts = decodeStoredCodeGraphFact(active.facts_json, active.path_hint).facts;
+    database.run(
+      'UPDATE file_blobs SET extractor_set = ?, facts_json = ?, blob_id = NULL, reuse_class = NULL WHERE content_hash = ?',
+      [
+        degradedParserCacheIdentity(active.extractor_set),
+        encodeStoredCodeGraphFact(serializeBoundedCodeGraphFact({...facts, edges: [], references: []})).json,
+        contentHash,
+      ],
+    );
+    return active;
+  } finally {
+    database.close(false);
+  }
+}
+
+function restoreCachedFacts(databasePath: string, row: CachedFactRow): void {
+  const database = new Database(databasePath);
+  try {
+    database.run(
+      `INSERT INTO file_blobs (content_hash, extractor_set, path_hint, blob_id, reuse_class, facts_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        row.content_hash,
+        row.extractor_set,
+        row.path_hint,
+        row.blob_id,
+        row.reuse_class,
+        row.facts_json,
+        row.created_at,
+      ],
+    );
   } finally {
     database.close(false);
   }
