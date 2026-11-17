@@ -378,7 +378,7 @@ export function makeNativeTaskActionCommands<E, R>(
   snapshotHandler: (options: {
     readonly runId: string;
     readonly callerCwd: string;
-    readonly workRef: string;
+    readonly workRef?: string;
     readonly reason?: string;
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
   reviewHandler: (options: {
@@ -627,11 +627,14 @@ export function makeNativeTaskActionCommands<E, R>(
     {
       runId: requiredString('run-id', 'Existing native workflow run identifier'),
       callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
-      workRef: requiredString('work-ref', 'Opaque reference returned by workflow-automation task-action work'),
+      workRef: optionalString(
+        'work-ref',
+        'Work packet reference; required by the strict profile, ignored by standard tree snapshots',
+      ),
       reason: optionalString('reason', 'Concrete reason for another source iteration'),
     },
     snapshotHandler,
-  ).pipe(Command.withDescription('Record the current worker source for an admitted implementation packet'));
+  ).pipe(Command.withDescription('Record the current source tree for the phase on the task card'));
   const requalifyBaseSnapshot = Command.make(
     'requalify-base-snapshot',
     {

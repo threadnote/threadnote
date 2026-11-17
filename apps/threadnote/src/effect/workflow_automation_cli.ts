@@ -295,7 +295,7 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
               command: 'record-snapshot',
               runId: options.runId,
               callerCwd: options.callerCwd,
-              workRef: options.workRef,
+              ...(options.workRef === undefined ? {} : {workRef: options.workRef}),
               ...(options.reason === undefined ? {} : {reason: options.reason}),
             }).pipe(
               Effect.flatMap(value => Console.log(JSON.stringify(value))),

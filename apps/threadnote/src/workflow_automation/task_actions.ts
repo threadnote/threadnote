@@ -235,7 +235,7 @@ const requestSchema = Schema.Union([
     command: Schema.Literal('record-snapshot'),
     runId: id,
     callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
-    workRef: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    workRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
     reason: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
   }),
   Schema.Struct({

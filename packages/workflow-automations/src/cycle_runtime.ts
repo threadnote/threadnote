@@ -190,7 +190,7 @@ export function nativeCycleLatestAcceptedReviewBasis(runtime: NativeCycleRuntime
       );
       return accepted.length === 1 ? {snapshot, review: report, attempt: accepted[0], digest} : undefined;
     }
-    const predecessor = snapshot.previous ?? snapshot.supersedes;
+    const predecessor = snapshot.reviewBasis?.snapshotId ?? snapshot.previous ?? snapshot.supersedes;
     current = EffectOption.getOrUndefined(
       EffectArray.findFirst(runtime.snapshots, entry => entry.snapshot.snapshotId === predecessor),
     )?.snapshot;
@@ -201,7 +201,9 @@ export function nativeCycleLatestAcceptedReviewBasis(runtime: NativeCycleRuntime
 /** Only the new witness changes the review ledger basis; ordinary direct predecessors remain strict. */
 export function nativeCycleReviewBasis(runtime: NativeCycleRuntime, snapshot: typeof NativeCycleSnapshotSchema.Type) {
   const predecessor =
-    snapshot.invalidTailMergeQualificationV1?.basisSnapshotId ?? snapshot.previous ?? snapshot.supersedes;
+    snapshot.version === 4
+      ? snapshot.reviewBasis?.snapshotId
+      : (snapshot.invalidTailMergeQualificationV1?.basisSnapshotId ?? snapshot.previous ?? snapshot.supersedes);
   const previous = EffectOption.getOrUndefined(
     EffectArray.findFirst(runtime.snapshots, entry => entry.snapshot.snapshotId === predecessor),
   )?.snapshot;
@@ -342,7 +344,8 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
         !prior ||
         latestSnapshotByPhase.get(snapshot.phaseId) !== prior.snapshot.snapshotId ||
         prior.snapshot.phaseId !== snapshot.phaseId ||
-        (prior.snapshot.tree === snapshot.tree &&
+        (snapshot.version !== 4 &&
+          prior.snapshot.tree === snapshot.tree &&
           prior.snapshot.phaseHash === snapshot.phaseHash &&
           !snapshot.unreviewedSupersession.rebaseRecovery) ||
         prior.snapshot.baseTree !== snapshot.baseTree ||
@@ -520,6 +523,18 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
       )
         fail('Snapshot history is incomplete.');
     } else if (snapshot.previousTree) fail('Snapshot previous tree has no identity.');
+    if (snapshot.reviewBasis) {
+      const basis = snapshots.get(snapshot.reviewBasis.snapshotId)?.snapshot;
+      if (
+        !basis ||
+        !capturedSnapshots.has(basis.snapshotId) ||
+        !reviews.has(basis.snapshotId) ||
+        basis.tree !== snapshot.reviewBasis.tree ||
+        basis.phaseId !== snapshot.phaseId ||
+        (basis.intentHash ?? basis.phaseHash) !== snapshot.intentHash
+      )
+        fail('A tree snapshot review basis must be an earlier reviewed snapshot under the same phase intent.');
+    }
     if (snapshot.supersedes) {
       const prior = snapshots.get(snapshot.supersedes)?.snapshot;
       if (
@@ -537,7 +552,11 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
     const snapshot = snapshots.get(snapshotId)?.snapshot;
     if (!snapshot) fail('Review snapshot is missing.');
     const basis = nativeCycleReviewBasis(runtime, snapshot);
-    if ((snapshot.previous || snapshot.supersedes) && !basis && !snapshot.unreviewedSupersession)
+    if (
+      snapshot.version === 4
+        ? snapshot.reviewBasis && !basis
+        : (snapshot.previous || snapshot.supersedes) && !basis && !snapshot.unreviewedSupersession
+    )
       fail('Review history lost its prior finding ledger.');
     validateNativeCycleReviewHistory(snapshot, report, basis);
   }

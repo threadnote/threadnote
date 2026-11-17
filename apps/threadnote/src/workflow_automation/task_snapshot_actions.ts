@@ -1,7 +1,8 @@
 import {Array as EffectArray, Option as EffectOption, Effect, String as EffectString} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {decodeNativeTaskActionRef, nativeTaskSnapshotId} from '@threadnote/workflow-automations/task';
-import {nativeNextCommand, nativeRefusal} from '@threadnote/workflow-automations/gates';
+import {nativeNextCommand, nativeRefusal, nativeWorkflowPolicyOf} from '@threadnote/workflow-automations/gates';
+import {recordNativeTaskTreeSnapshot} from './task_tree_snapshot_action.js';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {gitValue} from '../utils.js';
@@ -148,6 +149,19 @@ export const runNativeTaskSnapshotAction = (
       };
     }
 
+    if (nativeWorkflowPolicyOf(stored.state) === 'standard')
+      return yield* recordNativeTaskTreeSnapshot(config, request, stored, checkout, runtime);
+    if (request.workRef === undefined)
+      return yield* nativeRefusal(
+        'invalid-work-ref',
+        'A strict-profile snapshot records the source of an admitted work packet; prepare one first.',
+        {
+          next: nativeNextCommand('workflow_task_work', 'work', 'task-action work', {
+            runId: request.runId,
+            callerCwd: checkout,
+          }),
+        },
+      );
     const ref = decodeNativeTaskActionRef(request.workRef);
     if (
       !ref ||

@@ -636,3 +636,58 @@ describe('native cycle review validation', () => {
     );
   });
 });
+
+describe('tree-bound snapshot lineage', () => {
+  const tree = (overrides: Partial<NativeCycleSnapshot> = {}): NativeCycleSnapshot => {
+    const {previous: _previous, previousTree: _previousTree, ...legacy} = snapshot();
+    return {
+      ...legacy,
+      version: 4,
+      snapshotId: 'tree-2',
+      intentHash: hash('a'),
+      dirty: true,
+      outOfPlan: [],
+      ...overrides,
+    };
+  };
+  const decode = Schema.decodeUnknownExit(NativeCycleSnapshotSchema);
+
+  it('supersedes an unreviewed snapshot across a phase contract change', () => {
+    const superseding = tree({
+      phaseHash: hash('9'),
+      intentHash: hash('9'),
+      supersedes: 'snapshot-1',
+      unreviewedSupersession: {reason: 'The plan paths were reconciled.'},
+    });
+    expect(decode(superseding)._tag).toBe('Success');
+    expect(nativeCycleReviewRecordingMode(superseding)).toBe('full');
+    expect(() =>
+      validateNativeCycleReviewHistory(
+        superseding,
+        review({mode: 'full', findings: [finding({state: 'new'})]}, superseding),
+      ),
+    ).not.toThrow();
+  });
+
+  it('refuses legacy predecessor receipts and a missing intent on a tree snapshot', () => {
+    expect(decode(tree({previous: 'snapshot-1', previousTree: objectId('e')}))._tag).toBe('Failure');
+    const {intentHash: _intentHash, ...withoutIntent} = tree();
+    expect(decode(tree())._tag).toBe('Success');
+    expect(decode(withoutIntent)._tag).toBe('Failure');
+    expect(decode(snapshot({reviewBasis: {snapshotId: 'snapshot-1', tree: objectId('e')}}))._tag).toBe('Failure');
+  });
+
+  it('reviews incrementally from a reviewed basis only under the same intent', () => {
+    const basis = {...previous, snapshot: {...priorSnapshot, intentHash: hash('a')}};
+    const incremental = tree({reviewBasis: {snapshotId: 'snapshot-1', tree: objectId('e')}});
+    expect(nativeCycleReviewRecordingMode(incremental)).toBe('incremental');
+    expect(() => validateNativeCycleReviewHistory(incremental, review({}, incremental), basis)).not.toThrow();
+    expect(caught(() => validateNativeCycleReviewHistory(incremental, review({}, incremental)))).toMatchObject({
+      code: 'invalid-cycle-review',
+    });
+    const otherIntent = {...basis, snapshot: {...basis.snapshot, intentHash: hash('f')}};
+    expect(
+      caught(() => validateNativeCycleReviewHistory(incremental, review({}, incremental), otherIntent)),
+    ).toMatchObject({code: 'invalid-cycle-review'});
+  });
+});

@@ -60,7 +60,6 @@ import {
   verifyNativeCycleBaseRequalification,
   makeWorkflowGitAdapter,
   nativeCycleRelativePath,
-  readNativeCycleTreeEntries,
 } from './cycle_git.js';
 import {nativeWorkflowError} from './memory.js';
 import {
@@ -71,6 +70,8 @@ import {
 import {bindNativeCycleDeliveryBase, verifyNativeCyclePrDeliveryIdentity} from './cycle_delivery.js';
 import {verifyNativeCycleSnapshotEvidence, verifyNativeCycleUnreviewedRebase} from './cycle_recovery.js';
 import type {NativeAuthoringCall} from './authoring_artifacts.js';
+import {readNativeCycleIncoming, recordNativeCycleTreeSnapshot} from './cycle_tree_snapshot.js';
+import {nativeWorkflowPolicyOf} from '@threadnote/workflow-automations/gates';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -112,6 +113,7 @@ export const nativeCycleRequestSchema = Schema.Struct({
   snapshotId: Schema.optionalKey(id),
   previous: Schema.optionalKey(id),
   supersedeUnreviewed: Schema.optionalKey(Schema.Boolean),
+  treeBound: Schema.optionalKey(Schema.Boolean),
   recoverUnreviewedRebase: Schema.optionalKey(Schema.Boolean),
   acceptedHead: Schema.optionalKey(text),
   baseRequalification: Schema.optionalKey(NativeCycleBaseRequalificationInputSchema),
@@ -199,60 +201,6 @@ const git = (repo: string, args: readonly string[], maximum = 1_000_000) =>
     timeoutMs: 30_000,
     maxOutputBytes: maximum,
   }).pipe(Effect.map(result => result.stdout));
-
-const readOnlyIncoming = Effect.fn('workflowAutomation.cycle.incoming')(function* (
-  repo: string,
-  phase: NativeCycleState['plan']['phases'][number],
-  captured: Effect.Success<ReturnType<typeof captureNativeCycleSource>>,
-  baseline: NativeCycleRuntime['baselines'][string],
-) {
-  const base = Effect2.pipe(
-    yield* git(repo, ['rev-parse', '--verify', '--end-of-options', phase.baseBranch + '^{commit}']),
-    EffectString.trim,
-  );
-  const common = Effect2.pipe(yield* git(repo, ['merge-base', base, captured.head]), EffectString.trim);
-  const scope = yield* captureNativeCycleSource(repo, common);
-  if (scope.head !== captured.head || scope.tree !== captured.tree)
-    return yield* fail('source-drift', 'Source changed during declared-base scope verification.');
-  const files = [...new Set([...EffectRecord.keys(captured.files), ...EffectRecord.keys(scope.files)])].sort();
-  const paths = EffectArray.filter(files, file => !checkNativeCycleScope(phase, [file]));
-  const preservedPaths = new Set(baseline.preservedFiles);
-  const preservedEntries = yield* readNativeCycleTreeEntries(
-    repo,
-    baseline.tree,
-    EffectArray.filter(paths, file => preservedPaths.has(file)),
-  );
-  const upstreamEntries = yield* readNativeCycleTreeEntries(
-    repo,
-    common,
-    EffectArray.filter(paths, file => !preservedPaths.has(file)),
-  );
-  const incoming = [];
-  for (const file of paths) {
-    const actual = captured.entries[file] ?? scope.entries[file];
-    const preserved = preservedPaths.has(file);
-    const expected = (preserved ? preservedEntries : upstreamEntries)[file];
-    if (!actual || expected.blob !== actual.blob || expected.mode !== actual.mode)
-      return yield* fail(
-        'phase-scope',
-        'Unowned source differs from its original preserved work or declared upstream base: ' + file,
-      );
-    incoming.push({
-      path: file,
-      ...expected,
-      source: preserved ? ('preserved' as const) : ('upstream' as const),
-      tree: preserved ? baseline.tree : scope.baseTree,
-      commit: preserved ? baseline.head : common,
-    });
-  }
-  return {
-    files,
-    incoming,
-    scopeBase: scope.baseTree,
-    declaredBaseHead: base,
-    scopeFiles: EffectRecord.keys(scope.files).sort(),
-  };
-});
 
 const currentSnapshot = Effect.fn('workflowAutomation.cycle.checkSnapshot')(function* (
   repo: string,
@@ -630,6 +578,21 @@ export const runNativeCycle = <R>(
           };
           return {status: 'ok', revision: yield* save(marked), next: nextNativeCycle(updated)};
         }
+        if (request.command === 'snapshot' && request.treeBound) {
+          if (nativeWorkflowPolicyOf(stored.state) !== 'standard')
+            return yield* fail('invalid-request', 'Tree-bound snapshots belong to standard-profile runs.');
+          return yield* recordNativeCycleTreeSnapshot({
+            repo,
+            bindingId: stored.state.bindingId,
+            runId: request.runId,
+            revision: stored.revision,
+            runtime,
+            phase: yield* from(getPhase),
+            reason: request.reason,
+            pinBaseline,
+            save,
+          });
+        }
         if (request.command === 'snapshot') {
           const selected = yield* from(getPhase);
           const next = nextNativeCycle(state);
@@ -825,7 +788,7 @@ export const runNativeCycle = <R>(
           const rebaseRecovery = request.recoverUnreviewedRebase
             ? yield* verifyNativeCycleUnreviewedRebase(repo, prior!, runtime, selected, request.userAuthority ?? '')
             : undefined;
-          const scope = merge ?? (yield* readOnlyIncoming(repo, selected, captured, baseline));
+          const scope = merge ?? (yield* readNativeCycleIncoming(repo, selected, captured, baseline));
           let baseRequalification:
             Omit<NonNullable<NativeCycleSnapshot['baseRequalification']>, 'receiptDigest'> | undefined;
           if (request.baseRequalification) {

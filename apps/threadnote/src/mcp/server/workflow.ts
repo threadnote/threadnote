@@ -363,7 +363,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
         snapshot: Schema.Union([
           Schema.Struct({
             command: Schema.Literal('record'),
-            workRef: McpInput.requiredString(),
+            workRef: McpInput.string(),
             reason: McpInput.string(),
           }),
           Schema.Struct({
@@ -397,7 +397,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
               command: 'record-snapshot',
               runId,
               callerCwd,
-              workRef: snapshot.workRef,
+              ...(snapshot.workRef === undefined ? {} : {workRef: snapshot.workRef}),
               ...(snapshot.reason === undefined ? {} : {reason: snapshot.reason}),
             }
           : snapshot.command === 'recover-unreviewed-rebase'
