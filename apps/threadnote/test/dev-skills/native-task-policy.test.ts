@@ -619,6 +619,58 @@ describe('audited waivers', () => {
     }).pipe(runCycle),
   );
 
+  effectIt.effect('replays a waiver for a later snapshot of the same tree and lists it in a commit delivery', () =>
+    Effect.gen(function* () {
+      const f = yield* cycleFixture(
+        ['one'],
+        'commit',
+        false,
+        false,
+        true,
+        undefined,
+        undefined,
+        {},
+        {policy: 'standard'},
+      );
+      const record = () =>
+        runNativeTaskAction(f.config, {command: 'record-snapshot', runId: 'native-run', callerCwd: f.repo}).pipe(
+          Effect.map(object),
+        );
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = 1;\n');
+      yield* f.git(['commit', '-qam', 'one']);
+      yield* record();
+      const first = yield* waive(f);
+      const revised = yield* f.revise({
+        phases: EffectArray.map(f.document.phases, phase => ({
+          ...phase,
+          affectedPaths: [...phase.affectedPaths, 'notes.md'],
+        })),
+      });
+      yield* f.mutate('reconcile', {plan: revised, reason: 'Own the notes file.'});
+      const again = yield* record();
+      expect(object(object(again.snapshot).snapshot).snapshotId).not.toBe(object(first.waiver).snapshotId);
+      expect(yield* waive(f)).toMatchObject({status: 'waived', replayed: true, waiver: first.waiver});
+      const validated = object(
+        yield* runNativeTaskAction(f.config, {
+          command: 'record-validation',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          snapshotRef: String(again.snapshotRef),
+          validation,
+        }),
+      );
+      expect(
+        yield* runNativeTaskAction(f.config, {
+          command: 'deliver-commit',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          validationRef: String(validated.validationRef),
+          commitEvidence: 'Verified fixture commit ' + EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout),
+        }),
+      ).toMatchObject({status: 'delivered', waivers: [first.waiver]});
+    }).pipe(runCycle),
+  );
+
   effectIt.effect('does not carry a waiver to a changed tree', () =>
     Effect.gen(function* () {
       const f = yield* cycleFixture(

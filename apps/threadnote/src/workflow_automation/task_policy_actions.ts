@@ -1,4 +1,5 @@
-import {Array as EffectArray, Effect, Option as EffectOption, String as EffectString} from 'effect';
+import {Array as EffectArray, Effect, String as EffectString} from 'effect';
+import {nativeCycleWaiverFor} from '@threadnote/workflow-automations/cycle-runtime';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
   nativeControlNext,
@@ -56,16 +57,9 @@ export const runNativeTaskWaiver = (
       checkout,
     );
     const current = yield* readNativeWorkflowState(config, request.runId);
-    const waiver = EffectOption.getOrUndefined(
-      EffectArray.findFirst(
-        current?.state.cycle?.waivers ?? [],
-        item =>
-          item.gate === request.gate &&
-          item.snapshotId === latest.snapshot.snapshotId &&
-          item.reason === request.reason &&
-          item.userAuthority === request.userAuthority,
-      ),
-    );
+    const waiver = current?.state.cycle
+      ? nativeCycleWaiverFor(current.state.cycle, request.gate, latest.snapshot)
+      : undefined;
     if (!waiver || !current) return yield* fail('waiver-not-recorded', 'The canonical waiver was not persisted.');
     return {
       status: 'waived',

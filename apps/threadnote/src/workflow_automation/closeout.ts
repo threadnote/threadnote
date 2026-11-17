@@ -364,7 +364,7 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
               inputs.source,
             );
           const admission = yield* attempt(() =>
-            prepareNativeCloseout(inputs.cycle, inputs.plan, request.proposal, inputs.spec),
+            prepareNativeCloseout(inputs.cycle, inputs.plan, request.proposal, inputs.spec, inputs.waivers),
           );
           // Admit every final document before any knowledge write or retirement.
           yield* attempt(() =>
@@ -449,6 +449,7 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
             plan: inputs.plan,
             ...(inputs.spec ? {spec: inputs.spec} : {}),
             proposal: request.proposal,
+            ...(inputs.waivers.length ? {waivers: inputs.waivers} : {}),
             owned,
             documents,
             documentDigest: hash(documents),
@@ -689,7 +690,7 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
           journal.owned,
         );
         const admission = yield* attempt(() =>
-          prepareNativeCloseout(journal.cycle, journal.plan, journal.proposal, journal.spec),
+          prepareNativeCloseout(journal.cycle, journal.plan, journal.proposal, journal.spec, journal.waivers),
         );
         const journalState = yield* withWorkflowLock(
           config,

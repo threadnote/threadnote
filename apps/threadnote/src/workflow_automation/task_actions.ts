@@ -1573,10 +1573,13 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
       );
 
     if (request.command === 'deliver-commit')
-      return yield* runNativeTaskCommitDelivery(config, request, stored, checkout, runtime);
+      return withNativeTaskWaivers(
+        yield* runNativeTaskCommitDelivery(config, request, stored, checkout, runtime),
+        runtime,
+      );
 
     if (request.command === 'deliver-pr')
-      return yield* runNativeTaskPrDelivery(config, request, stored, checkout, runtime);
+      return withNativeTaskWaivers(yield* runNativeTaskPrDelivery(config, request, stored, checkout, runtime), runtime);
 
     if (request.command === 'supplemental-publication')
       return yield* runNativeTaskSupplementalPublication(config, request, stored, checkout, runtime);

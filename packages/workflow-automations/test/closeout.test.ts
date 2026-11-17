@@ -216,6 +216,28 @@ describe('pure native closeout admission', () => {
       expect(renderNativeDocument(result.documents.decisions[0])).toContain(f.plan.decisions[0].rationale);
     }
   });
+  it('lists every audited waiver in the closeout handoff and nothing when there is none', () => {
+    const f = fixture();
+    const waiver = {
+      id: 'waiver-' + Effect.pipe('a', EffectString.repeat(48)),
+      gate: 'review.required' as const,
+      phaseId: f.state.plan.phases[0].id,
+      snapshotId: 'tree-1',
+      tree: Effect.pipe('b', EffectString.repeat(40)),
+      intentHash: Effect.pipe('c', EffectString.repeat(64)),
+      reason: 'The reviewer was unavailable for this fixture.',
+      userAuthority: 'User: deliver without a review.',
+    };
+    const handoff = renderNativeDocument(
+      prepareNativeCloseout(f.state, f.plan, f.proposal, undefined, [waiver]).documents.handoff,
+    );
+    expect(handoff).toContain('Audited waivers');
+    expect(handoff).toContain(waiver.reason);
+    expect(handoff).toContain(waiver.userAuthority);
+    expect(renderNativeDocument(prepareNativeCloseout(f.state, f.plan, f.proposal).documents.handoff)).not.toContain(
+      'Audited waivers',
+    );
+  });
   it('requires completed cycle and exact pinned plan identity/hash', () => {
     const f = fixture();
     expect(() => prepareNativeCloseout(f.initial, f.plan, f.proposal)).toThrow();

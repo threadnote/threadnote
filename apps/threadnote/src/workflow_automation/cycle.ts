@@ -40,6 +40,7 @@ import {
   nativeCycleHasBasePlanTransition,
   nativeCycleSnapshotIsCurrentIteration,
   type NativeCycleRuntime,
+  nativeCycleWaiverFor,
   nativeCycleWaiverId,
   nativeCycleCoverage,
   nativeCycleCoverageAccepts,
@@ -615,11 +616,11 @@ export const runNativeCycle = <R>(
             reason: yield* from(() => required(request.reason, 'a concrete waiver reason')),
             userAuthority: yield* from(() => required(request.userAuthority, 'the explicit human authority')),
           };
-          const id = nativeCycleWaiverId(fields);
-          const existing = EffectOption.getOrUndefined(
-            EffectArray.findFirst(runtime.waivers ?? [], item => item.id === id),
-          );
+          // A waiver of this gate that already covers the tree under the same intent replays, whatever snapshot of
+          // that tree it was first recorded for.
+          const existing = nativeCycleWaiverFor(runtime, gate, snapshot);
           if (existing) return {status: 'ok', revision: stored.revision, replayed: true, waiver: existing};
+          const id = nativeCycleWaiverId(fields);
           const waiver = {id, ...fields};
           return {
             status: 'ok',
