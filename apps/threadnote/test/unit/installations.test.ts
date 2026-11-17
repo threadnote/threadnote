@@ -170,6 +170,50 @@ describe('standalone release lifecycle', () => {
     }),
   );
 
+  effectIt.effect('prunes past Finder metadata in the lease tree while retaining live leased releases', () =>
+    Effect.gen(function* () {
+      const result = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const baseSystem = yield* SystemInfo;
+          const temporaryRoot = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-installations-ds-store-'});
+          const installRoot = path.join(temporaryRoot, 'install');
+          const versionsRoot = path.join(installRoot, 'versions');
+          for (const version of ['4.0.0', '4.0.1', '4.0.2', '4.0.3']) {
+            const releaseRoot = path.join(versionsRoot, version);
+            yield* fs.makeDirectory(releaseRoot, {recursive: true});
+            yield* fs.writeFileString(path.join(releaseRoot, 'release.json'), `${JSON.stringify({version})}\n`);
+          }
+          const leasedProcessId = 1_234_568;
+          yield* writeProcessLease(fs, path, installRoot, '4.0.0', leasedProcessId);
+          for (const directory of [
+            versionsRoot,
+            path.join(installRoot, 'leases'),
+            path.join(installRoot, 'leases', '4.0.0'),
+          ]) {
+            yield* fs.writeFileString(path.join(directory, '.DS_Store'), 'Finder metadata\n');
+          }
+          const activeRelease = path.join(versionsRoot, '4.0.3');
+          const testSystem = SystemInfo.of({
+            ...installationTestSystem(baseSystem, installRoot, path.join(versionsRoot, '4.0.2')),
+            isProcessRunning: processId => processId === leasedProcessId,
+          });
+
+          const pruning = yield* pruneStandaloneReleases(activeRelease, false).pipe(
+            Effect.provideService(SystemInfo, testSystem),
+          );
+          return {
+            complete: pruning.complete,
+            releases: EffectArray.filter(yield* fs.readDirectory(versionsRoot), name => name !== '.DS_Store').sort(),
+          };
+        }),
+      ).pipe(provideTestLayer(ApplicationLayer));
+
+      expect(result).toEqual({complete: true, releases: ['4.0.0', '4.0.2', '4.0.3']});
+    }),
+  );
+
   effectIt.effect('discards a lease when its process ID has been reused by another process', () =>
     Effect.gen(function* () {
       const result = yield* Effect.scoped(
