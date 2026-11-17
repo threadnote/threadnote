@@ -675,8 +675,8 @@ describe('tree-bound snapshot lineage', () => {
     expect(decode(tree())._tag).toBe('Success');
     expect(decode(withoutIntent)._tag).toBe('Failure');
     expect(decode(snapshot({reviewBasis: {snapshotId: 'snapshot-1', tree: objectId('e')}}))._tag).toBe('Failure');
-    expect(decode(snapshot({patchId: objectId('7')}))._tag).toBe('Failure');
-    expect(decode(tree({patchId: objectId('7')}))._tag).toBe('Success');
+    expect(decode(snapshot({changeDigest: hash('7')}))._tag).toBe('Failure');
+    expect(decode(tree({changeDigest: hash('7')}))._tag).toBe('Success');
   });
 
   it('reviews incrementally from a reviewed basis only under the same intent', () => {

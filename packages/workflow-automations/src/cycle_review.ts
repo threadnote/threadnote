@@ -83,11 +83,11 @@ const treeSnapshotFields = {
   intentHash: Schema.optionalKey(digest),
   dirty: Schema.optionalKey(Schema.Boolean),
   outOfPlan: Schema.optionalKey(Schema.Array(text()).check(Schema.isMaxLength(8192))),
-  /** `git patch-id --stable` of the diff from the scope base, so a clean rebase can reuse a review. */
+  /** Digest of the raw path, mode and blob entries from the scope base, so a clean rebase can reuse a review. */
+  changeDigest: Schema.optionalKey(digest),
+  /** Legacy `git patch-id`; kept only so earlier tree snapshots decode, and never matched. */
   patchId: Schema.optionalKey(gitObject),
-  reviewBasis: Schema.optionalKey(
-    Schema.Struct({snapshotId: id, tree: gitObject, patchId: Schema.optionalKey(gitObject)}),
-  ),
+  reviewBasis: Schema.optionalKey(Schema.Struct({snapshotId: id, tree: gitObject})),
 } as const;
 
 export const NativeCycleSnapshotSchema = Schema.Struct({
@@ -126,6 +126,7 @@ export const NativeCycleSnapshotSchema = Schema.Struct({
     (snapshot.version !== 4 &&
       (snapshot.dirty !== undefined ||
         snapshot.outOfPlan !== undefined ||
+        snapshot.changeDigest !== undefined ||
         snapshot.patchId !== undefined ||
         snapshot.reviewBasis !== undefined)) ||
     (snapshot.version === 4 &&

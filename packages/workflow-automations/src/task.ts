@@ -623,7 +623,7 @@ function projectNativeTaskCoreView(
   const latestSnapshot = pendingSnapshot
     ? EffectArray.filter(runtime.snapshots, entry => entry.snapshot.phaseId === pendingSnapshot.id).at(-1)
     : undefined;
-  // A review of the same tree, or of the same patch after the base moved, covers the latest snapshot.
+  // A review of the same tree, or of the byte-identical change after the base moved, covers the latest snapshot.
   const covering = latestSnapshot ? nativeCycleCoveringReview(runtime, latestSnapshot.snapshot) : undefined;
   const acceptedReview = covering ? {snapshotId: covering.snapshot.snapshotId, report: covering.review} : undefined;
   const reviewBasis = covering ? nativeCycleReviewBasis(runtime, covering.snapshot) : undefined;

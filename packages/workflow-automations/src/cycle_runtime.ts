@@ -114,7 +114,7 @@ export const nativeCycleWaiverFor = (
 
 /**
  * The accepted review that covers a snapshot: its own, or under the same intent a review of the same tree or, after
- * the base moved, of the same patch. Derived on read; reviews[] stays the only owner of review state.
+ * the base moved, of the byte-identical change. Derived on read; reviews[] stays the only owner of review state.
  */
 export function nativeCycleCoveringReview(
   runtime: NativeCycleRuntime,
@@ -123,7 +123,7 @@ export function nativeCycleCoveringReview(
   | {
       readonly snapshot: NativeCycleSnapshot;
       readonly review: NativeCycleReview;
-      readonly match: 'exact' | 'tree' | 'patch-id';
+      readonly match: 'exact' | 'tree' | 'change';
     }
   | undefined {
   const own = EffectOption.getOrUndefined(
@@ -148,14 +148,18 @@ export function nativeCycleCoveringReview(
     )
       continue;
     if (candidate.tree === snapshot.tree) return {snapshot: candidate, review, match: 'tree'};
-    if (snapshot.patchId && candidate.patchId === snapshot.patchId && candidate.scopeBase !== snapshot.scopeBase)
-      return {snapshot: candidate, review, match: 'patch-id'};
+    if (
+      snapshot.changeDigest &&
+      candidate.changeDigest === snapshot.changeDigest &&
+      candidate.scopeBase !== snapshot.scopeBase
+    )
+      return {snapshot: candidate, review, match: 'change'};
   }
   return undefined;
 }
 
 export type NativeCycleTreeCoverage =
-  | {readonly _tag: 'reviewed'; readonly reviewSnapshotId: string; readonly match: 'exact' | 'tree' | 'patch-id'}
+  | {readonly _tag: 'reviewed'; readonly reviewSnapshotId: string; readonly match: 'exact' | 'tree' | 'change'}
   | {readonly _tag: 'waived'; readonly waiverId: string}
   | {readonly _tag: 'pending'; readonly mode: 'full' | 'incremental'};
 

@@ -19,7 +19,7 @@ import {
   pinNativeCycleCommit,
   pinNativeCycleTree,
   readNativeCycleTreeEntries,
-  nativeCyclePatchId,
+  nativeCycleChangeDigest,
 } from './cycle_git.js';
 
 type Phase = NativeCycleState['plan']['phases'][number];
@@ -177,7 +177,7 @@ export const recordNativeCycleTreeSnapshot = Effect.fn('workflowAutomation.cycle
   )
     return {status: 'ok', revision: input.revision, replayed: true, snapshot: latest};
   const superseded = latest && !reviewed.has(latest.snapshot.snapshotId) ? latest.snapshot : undefined;
-  const patchId = yield* nativeCyclePatchId(repo, scope.scopeBase, captured.tree);
+  const changeDigest = yield* nativeCycleChangeDigest(repo, scope.scopeBase, captured.tree);
   const latestReviewed = EffectOption.getOrUndefined(
     EffectArray.findLast(
       phaseSnapshots,
@@ -186,10 +186,11 @@ export const recordNativeCycleTreeSnapshot = Effect.fn('workflowAutomation.cycle
         (entry.snapshot.intentHash ?? entry.snapshot.phaseHash) === intentHash,
     ),
   )?.snapshot;
-  // After the base moved, a changed patch (a conflicted or extended rebase) restarts with a full review.
+  // After the base moved, any byte change to the phase (a conflicted or extended rebase) restarts with a full review.
   const basis =
     latestReviewed &&
-    (latestReviewed.scopeBase === scope.scopeBase || (patchId !== undefined && latestReviewed.patchId === patchId))
+    (latestReviewed.scopeBase === scope.scopeBase ||
+      (changeDigest !== undefined && latestReviewed.changeDigest === changeDigest))
       ? latestReviewed
       : undefined;
   const snapshotId = nativeCycleTreeSnapshotId({
@@ -233,16 +234,8 @@ export const recordNativeCycleTreeSnapshot = Effect.fn('workflowAutomation.cycle
           },
         }
       : {}),
-    ...(patchId === undefined ? {} : {patchId}),
-    ...(basis
-      ? {
-          reviewBasis: {
-            snapshotId: basis.snapshotId,
-            tree: basis.tree,
-            ...(basis.patchId === undefined ? {} : {patchId: basis.patchId}),
-          },
-        }
-      : {}),
+    ...(changeDigest === undefined ? {} : {changeDigest}),
+    ...(basis ? {reviewBasis: {snapshotId: basis.snapshotId, tree: basis.tree}} : {}),
     acceptedHead: captured.head,
     pinnedRef: yield* pinNativeCycleTree(repo, bindingId, snapshotId, captured.tree),
   };

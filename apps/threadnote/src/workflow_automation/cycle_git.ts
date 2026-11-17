@@ -919,20 +919,36 @@ export const makeWorkflowGitAdapter = Effect.fn('workflowAutomation.cycle.gitAda
   });
 });
 
-/** Stable patch identity of a tree diff; absent for an empty or unreadable diff, which never reuses a review. */
-export const nativeCyclePatchId = (repo: string, fromTree: string, toTree: string) =>
-  Effect.gen(function* () {
-    const diff = yield* runCommandEffect(
-      'git',
-      ['--no-optional-locks', '-C', repo, 'diff-tree', '-p', '--binary', '--no-color', fromTree, toTree],
-      {timeoutMs: 30_000, maxOutputBytes: 64 * 1024 * 1024},
-    );
-    if (!diff.stdout) return undefined;
-    const identity = yield* runCommandEffect('git', ['--no-optional-locks', '-C', repo, 'patch-id', '--stable'], {
-      input: new TextEncoder().encode(diff.stdout),
-      timeoutMs: 30_000,
-      maxOutputBytes: 4096,
-    });
-    const patchId = EffectString.split(EffectString.trim(identity.stdout), ' ')[0];
-    return patchId && objectId.test(patchId) ? patchId : undefined;
-  }).pipe(Effect.orElseSucceed(() => undefined));
+/**
+ * Exact identity of a phase change: every changed path with its old and new mode and blob, read as raw bytes. Two
+ * changes match only when each file's old and new content is byte-identical; an empty or unreadable change is absent
+ * and never reuses a review.
+ */
+export const nativeCycleChangeDigest = (repo: string, fromTree: string, toTree: string) =>
+  runBinaryCommandEffect(
+    'git',
+    [
+      '--no-optional-locks',
+      '-C',
+      repo,
+      'diff-tree',
+      '-r',
+      '-z',
+      '--raw',
+      '--no-abbrev',
+      '--no-renames',
+      fromTree,
+      toTree,
+    ],
+    {timeoutMs: 30_000, maxOutputBytes: 16 * 1024 * 1024},
+  ).pipe(
+    Effect.map(({stdout}) => {
+      if (stdout.byteLength === 0) return undefined;
+      const domain = new TextEncoder().encode('threadnote.native-cycle.change.v1\n');
+      const bytes = new Uint8Array(domain.byteLength + stdout.byteLength);
+      bytes.set(domain);
+      bytes.set(stdout, domain.byteLength);
+      return sha256HexSync(bytes);
+    }),
+    Effect.orElseSucceed(() => undefined),
+  );

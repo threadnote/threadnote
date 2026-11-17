@@ -347,7 +347,7 @@ describe('incremental review by default', () => {
     ],
     findings: [],
   });
-  const setup = () =>
+  const setup = (initial: string | Uint8Array = 'export const fixture = 1;\n') =>
     Effect.gen(function* () {
       const f = yield* cycleFixture(
         ['one'],
@@ -365,7 +365,9 @@ describe('incremental review by default', () => {
           Effect.map(result => object(object(object(result).snapshot).snapshot)),
         );
       const view = () => readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo, role: 'review'});
-      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = 1;\n');
+      yield* typeof initial === 'string'
+        ? f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), initial)
+        : f.fs.writeFile(f.path.join(f.repo, 'source.ts'), initial);
       yield* f.git(['add', 'source.ts']);
       yield* f.git(['commit', '-m', 'phase one']);
       const reviewed = yield* record();
@@ -384,7 +386,7 @@ describe('incremental review by default', () => {
       const {f, record, view, reviewed} = yield* setup();
       yield* f.git(['rebase', '-q', 'main']);
       const rebased = yield* record();
-      expect(rebased.patchId).toBe(reviewed.patchId);
+      expect(rebased.changeDigest).toBe(reviewed.changeDigest);
       expect(rebased.scopeBase).not.toBe(reviewed.scopeBase);
       expect((yield* view()).next).toMatchObject({action: 'validate', snapshotId: rebased.snapshotId});
     }).pipe(runCycle),
@@ -396,11 +398,31 @@ describe('incremental review by default', () => {
       yield* f.git(['rebase', '-q', 'main']);
       yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = 2;\n');
       const changed = yield* record();
-      expect(changed.patchId).not.toBe(reviewed.patchId);
+      expect(changed.changeDigest).not.toBe(reviewed.changeDigest);
       expect(changed).not.toHaveProperty('reviewBasis');
       expect((yield* view()).next).toMatchObject({action: 'review', snapshotId: changed.snapshotId});
     }).pipe(runCycle),
   );
+
+  // git patch-id ignores whitespace inside a line, and a decoded diff loses bytes that are not valid UTF-8.
+  for (const [label, initial, edited] of [
+    ['whitespace inside a line', 'export const fixture = "a b";\n', 'export const fixture = "ab";\n'],
+    ['a byte that is not valid UTF-8', Uint8Array.of(0x2f, 0x2f, 0xe9, 0x0a), Uint8Array.of(0x2f, 0x2f, 0xe8, 0x0a)],
+  ] as const)
+    effectIt.effect(`restarts with a full review when a rebased change differs only by ${label}`, () =>
+      Effect.gen(function* () {
+        const {f, record, view, reviewed} = yield* setup(initial);
+        yield* f.git(['rebase', '-q', 'main']);
+        yield* typeof edited === 'string'
+          ? f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), edited)
+          : f.fs.writeFile(f.path.join(f.repo, 'source.ts'), edited);
+        yield* f.git(['commit', '-qam', 'edit the reviewed change']);
+        const changed = yield* record();
+        expect(changed.changeDigest).not.toBe(reviewed.changeDigest);
+        expect(changed).not.toHaveProperty('reviewBasis');
+        expect((yield* view()).next).toMatchObject({action: 'review', snapshotId: changed.snapshotId});
+      }).pipe(runCycle),
+    );
 
   effectIt.effect('reviews only the increment after a path-only reconcile', () =>
     Effect.gen(function* () {
