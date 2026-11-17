@@ -1,5 +1,5 @@
 import {FileSystem} from 'effect';
-import {Console, Effect, Layer, Option, Schema, String as EffectString, Array as EffectArray} from 'effect';
+import {Console, Effect, Layer, Option, Schema, String as EffectString, Array as EffectArray, Order} from 'effect';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {CommandFailed, runCommandEffect, type CommandExecutionError} from '@threadnote/platform/command';
@@ -687,8 +687,17 @@ export const assembleNativeInference = Effect.fn('assembleNativeInference')(func
         if (
           !/-fms-runtime-lib=dll\b|--dependent-lib=msvcrt\b/u.test(compileCommands) ||
           /-fms-runtime-lib=static|--dependent-lib=libcmt\b/u.test(compileCommands)
-        )
-          throw new Error('Actual Windows ARM compile commands violate the shared dynamic CRT profile.');
+        ) {
+          const markers = new Set(
+            EffectArray.map(
+              [...EffectString.matchAll(/-fms-runtime-lib=\w+|--dependent-lib=\w+|\/M[DT]d?\b|-D_DLL\b/gu)(compileCommands)],
+              match => match[0],
+            ),
+          );
+          throw new Error(
+            `Actual Windows ARM compile commands violate the shared dynamic CRT profile (runtime markers: ${EffectArray.join(EffectArray.sort([...markers], Order.String), ', ') || 'none'}).`,
+          );
+        }
         toolchain.windowsCompileProfileVerified = 'armv8-a/dynamicCRT';
       }
 
