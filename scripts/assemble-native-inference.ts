@@ -690,7 +690,11 @@ export const assembleNativeInference = Effect.fn('assembleNativeInference')(func
         ) {
           const markers = new Set(
             EffectArray.map(
-              [...EffectString.matchAll(/-fms-runtime-lib=\w+|--dependent-lib=\w+|\/M[DT]d?\b|-D_DLL\b/gu)(compileCommands)],
+              [
+                ...EffectString.matchAll(/-fms-runtime-lib=\w+|--dependent-lib=\w+|\/M[DT]d?\b|-D_DLL\b/gu)(
+                  compileCommands,
+                ),
+              ],
               match => match[0],
             ),
           );
