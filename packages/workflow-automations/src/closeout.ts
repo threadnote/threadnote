@@ -1,7 +1,13 @@
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Schema} from 'effect';
 import {WorkflowAutomationError} from './contracts.js';
-import {decodeNativeCycleState, nextNativeCycle, nativeCycleHasControl, type NativeCycleState} from './cycle.js';
+import {
+  checkNativeCycleScope,
+  decodeNativeCycleState,
+  nextNativeCycle,
+  nativeCycleHasControl,
+  type NativeCycleState,
+} from './cycle.js';
 import type {NativeCycleWaiver} from './cycle_runtime.js';
 import {
   decodeNativeAuthoringDocument,
@@ -143,6 +149,42 @@ const lines = (values: readonly string[]) =>
       )
     : 'None recorded.';
 
+/** Each phase's paths as its validated snapshot changed them; the runtime derives it, never the proposal. */
+export interface NativeCloseoutPhaseChanges {
+  readonly phaseId: string;
+  readonly paths: readonly string[];
+}
+const actualChangesBudgetBytes = 8192;
+/** Drift (outside allowedPaths) is listed first; whatever exceeds the byte budget is counted, never dropped silently. */
+const actualChangeRows = (state: NativeCycleState, changes: readonly NativeCloseoutPhaseChanges[]) => {
+  const byPhase = new Map(EffectArray.map(changes, change => [change.phaseId, change.paths] as const));
+  if (byPhase.size !== changes.length || EffectArray.some(changes, change => !state.phases[change.phaseId]))
+    fail('Actual changes must name each cycle phase at most once.');
+  let budget = actualChangesBudgetBytes;
+  return EffectArray.map(state.plan.phases, phase => {
+    const paths = [...new Set(byPhase.get(phase.id) ?? [])].sort();
+    const row = {phaseId: phase.id, drift: [] as string[], paths: [] as string[], more: 0};
+    for (const [drift, path] of [
+      ...EffectArray.map(
+        EffectArray.filter(paths, path => !checkNativeCycleScope(phase, [path])),
+        path => [true, path] as const,
+      ),
+      ...EffectArray.map(
+        EffectArray.filter(paths, path => checkNativeCycleScope(phase, [path])),
+        path => [false, path] as const,
+      ),
+    ]) {
+      const bytes = new TextEncoder().encode(path).byteLength + 8;
+      if (bytes > budget) row.more++;
+      else {
+        budget -= bytes;
+        (drift ? row.drift : row.paths).push(path);
+      }
+    }
+    return row;
+  });
+};
+
 /** Pure admission only: the application must independently verify roots, Git and publication authority. */
 export function prepareNativeCloseout(
   input: NativeCycleState,
@@ -150,6 +192,7 @@ export function prepareNativeCloseout(
   rawProposal: unknown,
   specDocument?: NativeAuthoringDocument,
   waivers: readonly NativeCycleWaiver[] = [],
+  actualChanges?: readonly NativeCloseoutPhaseChanges[],
 ) {
   const state = decodeNativeCycleState(input);
   if (nextNativeCycle(state).action !== 'complete')
@@ -243,6 +286,7 @@ export function prepareNativeCloseout(
           return {scenario, evidence: evidence.evidence};
         })
       : [];
+  const changeRows = actualChanges === undefined ? undefined : actualChangeRows(state, actualChanges);
   const titleFor = (suffix: string) =>
     Effect.pipe(plan.title, EffectString.slice(0, 256 - suffix.length), EffectString.replace(/[\uD800-\uDBFF]$/u, '')) +
     suffix;
@@ -263,7 +307,10 @@ export function prepareNativeCloseout(
         '\n\nRetained unresolved PR watch work\n' +
         json(proposal.watchWork ?? []),
       ...(proposal.architecture.diagram === undefined ? {} : {diagram: proposal.architecture.diagram}),
-      'data-flow': 'Source references\n' + lines(proposal.architecture.codeRefs),
+      'data-flow':
+        'Source references\n' +
+        lines(proposal.architecture.codeRefs) +
+        (changeRows ? '\n\nActual changes\n' + json(changeRows) : ''),
     },
   });
   // Separate documents preserve complete original decisions; any individual overflow rejects before mutation.
@@ -366,6 +413,7 @@ export function prepareNativeCloseout(
       scenarios,
       ...(proposal.behaviorVerification === undefined ? {} : {behaviorVerification: proposal.behaviorVerification}),
       watchWork: proposal.watchWork ?? [],
+      ...(changeRows ? {actualChanges: changeRows} : {}),
       documents: {architecture, decisions: decisionDocuments, handoff, ...(behavior ? {behavior} : {})},
     }),
   );

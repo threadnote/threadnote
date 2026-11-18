@@ -1441,11 +1441,10 @@ export const runNativeCycle = <R>(
                           owner => owner.phaseId === selected.id,
                         ),
                       )?.paths ?? [])
-                    : scopeDecision._tag === 'warn'
-                      ? EffectArray.filter(changed, file => !outOfPlan.includes(file))
-                      : changed,
+                    : changed,
               },
               request.validation,
+              nativeWorkflowPolicyOf(stored.state),
             ),
           );
           return {

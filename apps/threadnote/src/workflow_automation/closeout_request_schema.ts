@@ -71,6 +71,11 @@ const journalFields = {
   waivers: Schema.optionalKey(
     Schema.Array(NativeCycleWaiverSchema).check(Schema.isMaxLength(nativeCycleRuntimeLimits.waivers)),
   ),
+  actualChanges: Schema.optionalKey(
+    Schema.Array(Schema.Struct({phaseId: id, paths: Schema.Array(text).check(Schema.isMaxLength(4096))})).check(
+      Schema.isMaxLength(256),
+    ),
+  ),
   owned: Schema.Array(ownedSchema).check(Schema.isMaxLength(4096)),
   documents: Schema.Array(
     Schema.Struct({
@@ -135,7 +140,14 @@ export const decodeJournal = (input: unknown): Journal => {
   )
     throw fail('invalid-closeout-state', 'Retained admissions changed identity or reused a transaction.');
   for (const admission of [value, ...(value.history ?? [])]) {
-    prepareNativeCloseout(admission.cycle, admission.plan, admission.proposal, admission.spec, admission.waivers);
+    prepareNativeCloseout(
+      admission.cycle,
+      admission.plan,
+      admission.proposal,
+      admission.spec,
+      admission.waivers,
+      admission.actualChanges,
+    );
     if (admission.documentDigest !== hash(admission.documents))
       throw fail('invalid-closeout-state', 'Admitted final document bytes changed.');
     if (

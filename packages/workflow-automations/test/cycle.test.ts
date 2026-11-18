@@ -308,6 +308,11 @@ describe('native cycle pure domain', () => {
     expect(checkNativeCycleScope(plan.phases[0], ['src/a.ts'])).toBe(false);
     expect(validateNativeCyclePhase(state, 'one', snapshot([]), validation).phases.one.status).toBe('validated');
     expect(() => validateNativeCyclePhase(state, 'one', snapshot(['src/a.ts']), validation)).toThrow();
+    // Declared scope is not a lock under standard: the reviewed snapshot's drift validates; strict still refuses.
+    expect(
+      validateNativeCyclePhase(state, 'one', snapshot(['src/a.ts']), validation, 'standard').phases.one.status,
+    ).toBe('validated');
+    expect(() => validateNativeCyclePhase(state, 'one', snapshot(['src/a.ts']), validation, 'strict')).toThrow();
     for (const count of [129, 162, 256]) {
       const allowedPaths = Array.from({length: count}, (_, index) => `src/file-${index}.ts`);
       const phase = withPaths(allowedPaths).phases[0];

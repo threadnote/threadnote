@@ -9,7 +9,7 @@ Start or resume with `workflow_task_start`, then follow `workflow_task_view` and
 
 Write all workflow outputs in the [Threadnote STE profile](references/writing.md).
 
-Affected and allowed paths are a declared starting scope, not a lock. Under the default `standard` profile, out-of-plan paths are advisory: fold a discovered dogfood or tooling fix into the current phase and record it in the snapshot, where review and validation cover it. Reconcile the plan only under `strict` or when requirements actually change.
+Affected and allowed paths are a declared starting scope, not a lock. Under the default `standard` profile, out-of-plan paths are advisory: fold a discovered dogfood or tooling fix into the current phase and record it in the snapshot, where review and validation cover it. Reconcile the plan only under `strict` or when requirements actually change. Closeout records every phase's actual changed paths and marks drift.
 Routine fixes within approved requirements need a fresh source snapshot and review, not repeated business-plan rewrites.
 When a validated or published phase needs a routine correction, use its current task card reference with `workflow_task_control` `reopen`, an explicit phase ID, and the observed reason; then resume the stale phase and record fresh source, review, validation, and delivery. Reopening retains prior proof and does not rewrite a merged phase.
 

@@ -253,6 +253,36 @@ describe('pure native closeout admission', () => {
       'Audited waivers',
     );
   });
+  it('records every runtime-derived phase change, marking drift and counting what exceeds the bound', () => {
+    const f = fixture();
+    const [first, ...others] = EffectArray.map(f.state.plan.phases, phase => phase.id);
+    const many = Array.from({length: 400}, (_, index) => `src/generated/file-${index}.ts`);
+    const result = prepareNativeCloseout(
+      f.state,
+      f.plan,
+      f.proposal,
+      undefined,
+      [],
+      [{phaseId: first, paths: ['src/reader.ts', 'tools/discovered-fix.ts', ...many]}],
+    );
+    const dataFlow = EffectArray.findFirst(
+      result.documents.architecture.sections,
+      section => section.id === 'data-flow',
+    );
+    if (dataFlow._tag === 'None') throw new Error('Expected the data-flow section.');
+    const rows = JSON.parse(EffectString.split(dataFlow.value.body, 'Actual changes\n')[1]) as unknown;
+    expect(rows).toEqual(result.actualChanges);
+    expect(result.actualChanges?.[0]).toMatchObject({phaseId: first, drift: ['tools/discovered-fix.ts']});
+    expect(result.actualChanges?.[0]?.paths[0]).toBe(many[0]);
+    const listed = (result.actualChanges?.[0]?.paths.length ?? 0) + (result.actualChanges?.[0]?.drift.length ?? 0);
+    expect(result.actualChanges?.[0]?.more).toBe(402 - listed);
+    expect(result.actualChanges?.[0]?.more).toBeGreaterThan(0);
+    expect(EffectArray.map(result.actualChanges?.slice(1) ?? [], row => row.phaseId)).toEqual(others);
+    expect(() =>
+      prepareNativeCloseout(f.state, f.plan, f.proposal, undefined, [], [{phaseId: 'unknown', paths: []}]),
+    ).toThrow();
+    expect(prepareNativeCloseout(f.state, f.plan, f.proposal).actualChanges).toBeUndefined();
+  });
   it('requires completed cycle and exact pinned plan identity/hash', () => {
     const f = fixture();
     expect(() => prepareNativeCloseout(f.initial, f.plan, f.proposal)).toThrow();
