@@ -886,5 +886,34 @@ if [ "$1" = --bun ] && [ "$2" = husky ]; then [ "$HUSKY" = 0 ] || exit 41; fi
         expect((yield* stageNativeInferenceOverlay(source, destination).pipe(Effect.exit))._tag).toBe('Failure');
       }),
     );
+    it.effect('binds the llama.cpp notice into a portable local build closure', () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-inference-license-'});
+        const release = path.join(root, 'llama', 'localBuilds', 'linux-x64', 'Release');
+        yield* fs.makeDirectory(release, {recursive: true});
+        yield* fs.makeDirectory(path.join(root, 'runtime'), {recursive: true});
+        yield* fs.writeFileString(path.join(root, 'runtime', 'node-llama-cpp.js'), 'export const runtime = true;');
+        yield* fs.writeFileString(path.join(release, 'llama-addon.node'), 'fixture-native-bytes');
+        yield* fs.writeFileString(path.join(release, '_nlcBuildMetadata.json'), '{}');
+        yield* fs.writeFileString(path.join(path.dirname(release), 'buildDone.status'), '');
+        const fields: Parameters<typeof publishNativeInferenceOverlay>[1] = {
+          bunVersion: '1.4.4',
+          bunTarget: 'bun-linux-x64-baseline-musl',
+          packageVersion: '3.22.2',
+          llamaCommit: NATIVE_INFERENCE_LLAMA_COMMIT,
+          sourceInputDigest: EffectString.repeat(64)('a'),
+          origin: 'portable-local-build',
+          toolchain: {bun: '1.4.4'},
+        };
+        expect((yield* publishNativeInferenceOverlay(root, fields).pipe(Effect.exit))._tag).toBe('Failure');
+        yield* fs.writeFileString(path.join(root, 'runtime', 'LLAMA-CPP-LICENSE'), 'MIT License');
+        const descriptor = yield* publishNativeInferenceOverlay(root, fields);
+        expect(EffectArray.map(descriptor.files, file => file.path)).toContain('runtime/LLAMA-CPP-LICENSE');
+        yield* fs.writeFileString(path.join(root, 'runtime', 'LLAMA-CPP-LICENSE'), 'changed');
+        expect((yield* verifyNativeInferenceOverlay(root).pipe(Effect.exit))._tag).toBe('Failure');
+      }),
+    );
   });
 });

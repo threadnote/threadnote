@@ -680,7 +680,7 @@ jobs:
               cd /workspace
               test "$(id -u)" -eq 0
               test "$HOME" = /root
-              apk add --no-cache bash git ripgrep bubblewrap libstdc++ libgcc acl nodejs npm cmake build-base binutils linux-headers
+              apk add --no-cache bash git ripgrep bubblewrap libstdc++ libgcc acl
               bun --version > .context/semantic-platform/bun-version.txt
               uname -m > .context/semantic-platform/architecture.txt
               apk info -v > .context/semantic-platform/system-packages.txt

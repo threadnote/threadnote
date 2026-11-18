@@ -374,7 +374,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Record the current tree; the newest snapshot supersedes an unreviewed one. Strict recovery: supersede, rebase, base or invalid-tail requalification.',
+        'Record current tree; newest supersedes unreviewed. Strict recovery: supersede, rebase, base/invalid-tail requalification. Caller authority unverified.',
       inputSchema: {
         runId: McpInput.requiredString(),
         callerCwd: McpInput.requiredString(),

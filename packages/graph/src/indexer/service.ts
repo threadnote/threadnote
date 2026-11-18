@@ -1,6 +1,10 @@
 import {completedLegacyCheckpointBase} from './incremental.js';
 import {isLexicalV2Snapshot} from '../store/lexical_projection.js';
-import {lexicalViewBindingFor, lexicalPhysicalSnapshotIdentity} from '../store/lexical_projection.js';
+import {
+  lexicalViewBindingFor,
+  lexicalPhysicalSnapshotIdentity,
+  lexicalSnapshotLogicalIdentity,
+} from '../store/lexical_projection.js';
 import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import {observeCodeGraphSemanticStatus} from '../vector/status.js';
@@ -1173,21 +1177,35 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                           committedBase = reusableDirtyBase.value.committedBase;
                           preassessment = reusableDirtyBase.value.preassessment;
                         } else {
+                          // Persisted evidence belongs to the ready committed row, whichever lexical view
+                          // activated it (full, or an alias of an equivalent snapshot), as in build.ts.
+                          const committedLogicalId = snapshotIdentity(
+                            identity,
+                            false,
+                            extractorSet,
+                            inventory.committedFiles,
+                            inventory.scope,
+                          );
+                          const committedCommitReady = yield* store.readySnapshotForCommit(
+                            layout.databasePath,
+                            identity.repositoryId,
+                            identity.headCommit,
+                            extractorSet,
+                            inventory.scope?.scopeKey,
+                          );
+                          const committedReady =
+                            (yield* store.currentLexicalReadySnapshotById(
+                              layout.databasePath,
+                              lexicalPhysicalSnapshotIdentity(committedLogicalId, 'full'),
+                            )) ??
+                            (committedCommitReady &&
+                            lexicalSnapshotLogicalIdentity(committedCommitReady) === committedLogicalId
+                              ? committedCommitReady
+                              : undefined);
                           preassessment = yield* assessIncrementalOverlayCompatibility(
                             {
-                              // The committed full lexical view is exact for this inventory; persisted
-                              // evidence is used only if that physical snapshot is ready. The
-                              // assessment rejects a committed extractor set other than this one.
-                              baseSnapshotId: lexicalPhysicalSnapshotIdentity(
-                                snapshotIdentity(
-                                  identity,
-                                  false,
-                                  extractorSet,
-                                  inventory.committedFiles,
-                                  inventory.scope,
-                                ),
-                                'full',
-                              ),
+                              // The assessment rejects a committed extractor set other than this one.
+                              ...(committedReady ? {baseSnapshotId: committedReady.id} : {}),
                               extractorSet,
                               inventory,
                               languagePacks,

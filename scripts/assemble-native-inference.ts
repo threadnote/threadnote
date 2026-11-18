@@ -763,6 +763,11 @@ export const assembleNativeInference = Effect.fn('assembleNativeInference')(func
       path.join(isolatedPackage, 'llama', 'lastBuild.json'),
       path.join(options.distributionRoot, 'llama', 'lastBuild.json'),
     );
+    // Source-built binaries carry the cloned llama.cpp notice beside the node-llama-cpp one.
+    yield* filesystem.copyFile(
+      path.join(isolatedPackage, 'llama', 'llama.cpp', 'LICENSE'),
+      path.join(options.distributionRoot, 'runtime', 'LLAMA-CPP-LICENSE'),
+    );
   }
   const audits: Record<string, string> = {};
   for (const file of yield* nativeInferenceInventory(options.distributionRoot)) {

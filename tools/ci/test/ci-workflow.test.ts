@@ -177,6 +177,33 @@ it('routes native Bun caches through step-scoped runner paths before the first B
   }
 });
 
+it('runs each native release target exactly once in the self-contained distribution matrix', () => {
+  const rows = Schema.decodeUnknownSync(
+    Schema.Struct({
+      jobs: Schema.Struct({
+        'self-contained-distribution': Schema.Struct({
+          strategy: Schema.Struct({
+            matrix: Schema.Struct({include: Schema.Array(Schema.Struct({os: Schema.String, target: Schema.String}))}),
+          }),
+        }),
+      }),
+    }),
+  )(rawWorkflow).jobs['self-contained-distribution'].strategy.matrix.include;
+  const targets = EffectArray.map(rows, row => row.target);
+  // Duplicate rows fail the bazel-plan coverage check and collide on native-release-<target> artifacts.
+  expect(new Set(targets).size).toBe(targets.length);
+  expect([...targets].sort()).toEqual([
+    'darwin-arm64',
+    'darwin-x64',
+    'linux-arm64',
+    'linux-arm64-musl',
+    'linux-x64',
+    'linux-x64-musl',
+    'windows-arm64',
+    'windows-x64',
+  ]);
+});
+
 it('runs affected-target Bazel CI for every maintained pull-request base', () => {
   expect(workflow.on?.pull_request?.branches).toEqual(['main', 'codex/4.0.0', 'release/5.0.0', 'release/5.1.0']);
 });
