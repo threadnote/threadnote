@@ -107,13 +107,19 @@ export function parseCodeGraphFileFacts(value: unknown): CodeGraphFileFacts {
   const input = object(value, 'Code graph file facts');
   exactKeys(input, FILE_FACTS_SHAPE);
   const path = repositoryPath(input.path, 'File-fact path');
+  // Nearly every nested path repeats the file path; validate each distinct string once.
+  const paths = new Set([path]);
   const diagnostics = stringArray(input.diagnostics, 'File-fact diagnostics', TEXT_LENGTH_MAXIMUM);
-  const symbols = EffectArray.map(array(input.symbols, 'File-fact symbols'), parseSymbol);
-  const edges = EffectArray.map(array(input.edges, 'File-fact edges'), parseEdge);
+  const symbols = EffectArray.map(array(input.symbols, 'File-fact symbols'), (symbol, index) =>
+    parseSymbol(symbol, index, paths),
+  );
+  const edges = EffectArray.map(array(input.edges, 'File-fact edges'), (edge, index) => parseEdge(edge, index, paths));
   const references =
     input.references === undefined
       ? undefined
-      : EffectArray.map(array(input.references, 'File-fact references'), parseReference);
+      : EffectArray.map(array(input.references, 'File-fact references'), (reference, index) =>
+          parseReference(reference, index, paths),
+        );
   const monikers =
     input.monikers === undefined
       ? undefined
@@ -137,7 +143,7 @@ export function parseCodeGraphFileFacts(value: unknown): CodeGraphFileFacts {
   };
 }
 
-function parseSymbol(value: unknown, index: number): CodeGraphSymbol {
+function parseSymbol(value: unknown, index: number, paths: Set<string>): CodeGraphSymbol {
   const input = object(value, `File-fact symbol ${index}`);
   exactKeys(input, SYMBOL_SHAPE);
   return {
@@ -155,7 +161,7 @@ function parseSymbol(value: unknown, index: number): CodeGraphSymbol {
     ...(input.packageName === undefined
       ? {}
       : {packageName: boundedNonEmptyText(input.packageName, 'Symbol package name')}),
-    path: repositoryPath(input.path, 'Symbol path'),
+    path: knownRepositoryPath(paths, input.path, 'Symbol path'),
     qualifiedName: boundedNonEmptyText(input.qualifiedName, 'Symbol qualified name'),
     ...(input.resolutionDomain === undefined
       ? {}
@@ -168,12 +174,12 @@ function parseSymbol(value: unknown, index: number): CodeGraphSymbol {
   };
 }
 
-function parseEdge(value: unknown, index: number): CodeGraphEdge {
+function parseEdge(value: unknown, index: number, paths: Set<string>): CodeGraphEdge {
   const input = object(value, `File-fact edge ${index}`);
   exactKeys(input, EDGE_SHAPE);
   return {
     confidence: finiteRange(input.confidence, 'Edge confidence', 0, 1),
-    evidencePath: repositoryPath(input.evidencePath, 'Edge evidence path'),
+    evidencePath: knownRepositoryPath(paths, input.evidencePath, 'Edge evidence path'),
     evidenceSpan: parseSpan(input.evidenceSpan, 'Edge evidence span'),
     id: shortText(input.id, 'Edge ID'),
     provenance: provenance(input.provenance, 'Edge provenance'),
@@ -185,7 +191,7 @@ function parseEdge(value: unknown, index: number): CodeGraphEdge {
   };
 }
 
-function parseReference(value: unknown, index: number): CodeGraphReference {
+function parseReference(value: unknown, index: number, paths: Set<string>): CodeGraphReference {
   const input = object(value, `File-fact reference ${index}`);
   exactKeys(input, REFERENCE_SHAPE);
   return {
@@ -194,7 +200,7 @@ function parseReference(value: unknown, index: number): CodeGraphReference {
       : {aliasLookupKeys: nonEmptyStringArray(input.aliasLookupKeys, 'Reference alias lookup keys', false)}),
     ...(input.arity === undefined ? {} : {arity: nonnegativeInteger(input.arity, 'Reference arity')}),
     edgeId: shortText(input.edgeId, 'Reference edge ID'),
-    evidencePath: repositoryPath(input.evidencePath, 'Reference evidence path'),
+    evidencePath: knownRepositoryPath(paths, input.evidencePath, 'Reference evidence path'),
     evidenceSpan: parseSpan(input.evidenceSpan, 'Reference evidence span'),
     ...(input.exportedOnly === undefined
       ? {}
@@ -308,6 +314,13 @@ function nonEmptyStringArray(value: unknown, label: string, controlFree: boolean
   return EffectArray.map(array(value, label), entry =>
     controlFree ? shortText(entry, `${label} entry`) : boundedNonEmptyText(entry, `${label} entry`),
   );
+}
+
+function knownRepositoryPath(validated: Set<string>, value: unknown, label: string): string {
+  if (typeof value === 'string' && validated.has(value)) return value;
+  const path = repositoryPath(value, label);
+  validated.add(path);
+  return path;
 }
 
 function repositoryPath(value: unknown, label: string): string {
