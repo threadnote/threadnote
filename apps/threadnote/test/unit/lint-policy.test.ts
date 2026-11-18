@@ -66,7 +66,7 @@ describe('lint policy', () => {
       );
       expect(exceptions).toEqual([
         {
-          files: ['apps/threadnote/src/standalone.ts', 'apps/threadnote/src/recall/ready_read_entry.ts'],
+          files: ['apps/threadnote/src/standalone_cli.ts', 'apps/threadnote/src/recall/ready_read_entry.ts'],
           rules: {'effecttsgo/strict-effect-provide': 'off', 'threadnote/no-effect-runtime': 'off'},
         },
         {

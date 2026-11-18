@@ -750,7 +750,9 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
   );
 
   const scopePropertyRuns = 8;
-  const scopePropertyExampleMilliseconds = 15_000;
+  // Each draw builds its own fixture; this guards only against hangs, since reads run under caller cancellation.
+  // Hosted Windows runners exceeded 15 s on fixture setup in 2 of 3 runs.
+  const scopePropertyExampleMilliseconds = process.platform === 'win32' ? 45_000 : 15_000;
   let scopeWorker: Effect.Success<ReturnType<typeof bundledReadyWorker>> | undefined;
   fcEffectProp(
     effectIt,

@@ -65,7 +65,7 @@ describe('remote memory executable boundaries', () => {
 
   it('awaits delayed operation drain before releasing after SIGTERM', async () => {
     const standalone = await readFile(
-      new URL('../../../../apps/threadnote/src/standalone.ts', import.meta.url),
+      new URL('../../../../apps/threadnote/src/standalone_cli.ts', import.meta.url),
       'utf8',
     );
     const operator = await readFile(

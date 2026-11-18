@@ -592,53 +592,60 @@ describe('Threadnote MCP toolsets', () => {
     const word = fc.stringMatching(/^[a-z]{1,8}$/u);
     const topic = fc.stringMatching(/^[a-z][a-z0-9-]{0,12}$/u);
     fc.assert(
-      fc.property(word, word, word, topic, (first, last, foreign, memoryTopic) => {
-        const currentUser = `${Effect.pipe(first, EffectString.toUpperCase)}.${last} ${first}`;
-        const canonicalUser = `${first}.${last}-${first}`;
-        const rawCurrentUri = `threadnote://user/${encodeURIComponent(currentUser)}/memories/durable/projects/threadnote/${memoryTopic}.md`;
-        const canonicalCurrentUri = `threadnote://user/${canonicalUser}/memories/durable/projects/threadnote/${memoryTopic}.md`;
-        const foreignUri = `threadnote://user/${encodeURIComponent(foreign)}/memories/durable/projects/threadnote/${memoryTopic}.md`;
-        const input = EffectArray.join(
-          [rawCurrentUri, canonicalCurrentUri, foreignUri, 'threadnote://memory/tn_stable'],
-          '\n',
-        );
-        const expected = EffectArray.join(
-          [
-            `memories/durable/projects/threadnote/${memoryTopic}.md`,
-            `memories/durable/projects/threadnote/${memoryTopic}.md`,
-            foreignUri,
-            'threadnote://memory/tn_stable',
-          ],
-          '\n',
-        );
+      // A user segment named like a Windows device (prn.a-prn) is rejected by the resource parser.
+      fc.property(
+        word.filter(value => !/^(?:con|prn|aux|nul)$/u.test(value)),
+        word,
+        word,
+        topic,
+        (first, last, foreign, memoryTopic) => {
+          const currentUser = `${Effect.pipe(first, EffectString.toUpperCase)}.${last} ${first}`;
+          const canonicalUser = `${first}.${last}-${first}`;
+          const rawCurrentUri = `threadnote://user/${encodeURIComponent(currentUser)}/memories/durable/projects/threadnote/${memoryTopic}.md`;
+          const canonicalCurrentUri = `threadnote://user/${canonicalUser}/memories/durable/projects/threadnote/${memoryTopic}.md`;
+          const foreignUri = `threadnote://user/${encodeURIComponent(foreign)}/memories/durable/projects/threadnote/${memoryTopic}.md`;
+          const input = EffectArray.join(
+            [rawCurrentUri, canonicalCurrentUri, foreignUri, 'threadnote://memory/tn_stable'],
+            '\n',
+          );
+          const expected = EffectArray.join(
+            [
+              `memories/durable/projects/threadnote/${memoryTopic}.md`,
+              `memories/durable/projects/threadnote/${memoryTopic}.md`,
+              foreignUri,
+              'threadnote://memory/tn_stable',
+            ],
+            '\n',
+          );
 
-        const compacted = compactPersonalMemoryReferences(input, currentUser);
-        expect(compacted).toBe(expected);
-        expect(compactPersonalMemoryReferences(compacted, currentUser)).toBe(expected);
+          const compacted = compactPersonalMemoryReferences(input, currentUser);
+          expect(compacted).toBe(expected);
+          expect(compactPersonalMemoryReferences(compacted, currentUser)).toBe(expected);
 
-        const sharedCurrentUri = Effect.pipe(
-          rawCurrentUri,
-          EffectString.replace('/memories/', '/memories/shared/default/'),
-        );
-        const structured = {
-          nested: [{uri: rawCurrentUri}, {uri: sharedCurrentUri}, {uri: foreignUri}],
-          text: `Read ${canonicalCurrentUri} first.`,
-        };
-        const original = JSON.stringify(structured);
-        const compactedStructured = compactPersonalMemoryStructuredReferences(structured, currentUser);
-        expect(compactedStructured).toEqual({
-          nested: [
-            {uri: `memories/durable/projects/threadnote/${memoryTopic}.md`},
-            {uri: `memories/shared/default/durable/projects/threadnote/${memoryTopic}.md`},
-            {uri: foreignUri},
-          ],
-          text: `Read memories/durable/projects/threadnote/${memoryTopic}.md first.`,
-        });
-        expect(JSON.stringify(structured)).toBe(original);
-        expect(compactPersonalMemoryStructuredReferences(compactedStructured, currentUser)).toEqual(
-          compactedStructured,
-        );
-      }),
+          const sharedCurrentUri = Effect.pipe(
+            rawCurrentUri,
+            EffectString.replace('/memories/', '/memories/shared/default/'),
+          );
+          const structured = {
+            nested: [{uri: rawCurrentUri}, {uri: sharedCurrentUri}, {uri: foreignUri}],
+            text: `Read ${canonicalCurrentUri} first.`,
+          };
+          const original = JSON.stringify(structured);
+          const compactedStructured = compactPersonalMemoryStructuredReferences(structured, currentUser);
+          expect(compactedStructured).toEqual({
+            nested: [
+              {uri: `memories/durable/projects/threadnote/${memoryTopic}.md`},
+              {uri: `memories/shared/default/durable/projects/threadnote/${memoryTopic}.md`},
+              {uri: foreignUri},
+            ],
+            text: `Read memories/durable/projects/threadnote/${memoryTopic}.md first.`,
+          });
+          expect(JSON.stringify(structured)).toBe(original);
+          expect(compactPersonalMemoryStructuredReferences(compactedStructured, currentUser)).toEqual(
+            compactedStructured,
+          );
+        },
+      ),
       {numRuns: 50},
     );
   });
