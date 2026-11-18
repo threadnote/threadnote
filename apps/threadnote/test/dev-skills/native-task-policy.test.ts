@@ -1153,6 +1153,24 @@ describe('review coverage under one intent', () => {
     }).pipe(runCycle),
   );
 
+  effectIt.effect('refuses a review.blocking waiver until a recorded review of the tree has blockers', () =>
+    Effect.gen(function* () {
+      const {f, task, commit, review} = yield* setup();
+      const first = yield* commit('export const fixture = 1;\n');
+      const accept = {gate: 'review.blocking', reason: 'Accept whatever comes.', userAuthority: 'User: fine.'};
+      expect(yield* task('waive', accept).pipe(Effect.flip)).toMatchObject({
+        code: 'invalid-waiver',
+        next: {command: 'record-review'},
+      });
+      yield* review(first.snapshot, 'a1');
+      expect(yield* task('waive', accept).pipe(Effect.flip)).toMatchObject({
+        code: 'invalid-waiver',
+        next: {command: 'view'},
+      });
+      expect((yield* readNativeWorkflowState(f.config, 'native-run'))?.state.cycle?.waivers ?? []).toEqual([]);
+    }).pipe(runCycle),
+  );
+
   effectIt.effect('binds a review.blocking waiver to the blocked review it accepted', () =>
     Effect.gen(function* () {
       const {task, view, commit, review} = yield* setup();

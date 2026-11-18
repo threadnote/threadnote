@@ -642,8 +642,19 @@ export const runNativeCycle = <R>(
             );
           if (snapshot.phaseId !== selected.id)
             return yield* fail('invalid-waiver', 'A waiver covers a snapshot of its own phase.');
-          // A review.blocking waiver accepts the findings of the review that covers the tree.
+          // A review.blocking waiver accepts the findings of the review that covers the tree, so it needs one with blockers.
           const coverage = gate === 'review.blocking' ? nativeCycleCoverage(runtime, snapshot) : undefined;
+          if (coverage && (coverage._tag !== 'reviewed' || !coverage.blocked))
+            return yield* nativeRefusal(
+              'invalid-waiver',
+              'A review.blocking waiver accepts the blockers of a recorded review of this tree, and none is recorded.',
+              {
+                next:
+                  coverage._tag === 'pending'
+                    ? nativeNext.review({runId: request.runId, callerCwd: repo})
+                    : nativeNext.view({runId: request.runId, callerCwd: repo}),
+              },
+            );
           const target = coverage?._tag === 'reviewed' ? coverage.snapshot : snapshot;
           const fields = {
             gate,
