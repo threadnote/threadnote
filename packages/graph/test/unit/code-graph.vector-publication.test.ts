@@ -52,7 +52,7 @@ const fixture = Effect.gen(function* () {
   };
   const store = {
     withSession: <A, E, R>(_path: string, program: Effect.Effect<A, E, R | SqlClient.SqlClient>) =>
-      Effect.provide(program, context),
+      Effect.provideService(program, SqlClient.SqlClient, sql),
     readySnapshot: () => Effect.succeed(ready ? snapshot : undefined),
   };
   const capture = captureCodeGraphVectorPublication({store, layout, threadnoteHome: home, snapshot});

@@ -172,7 +172,9 @@ export function useExistingDatabase<A, E, R>(
         cause => !Cause.hasInterruptsOnly(cause),
         () => Effect.fail(CodeGraphStoreError.of('Existing code graph database could not be opened.')),
       ),
-      Effect.flatMap(context => effect.pipe(Effect.provide(context))),
+      Effect.flatMap(context =>
+        effect.pipe(Effect.provideService(SqlClient.SqlClient, Context.get(context, SqlClient.SqlClient))),
+      ),
     ),
   );
 }
@@ -192,7 +194,11 @@ export function useDatabaseDirect<A, E, R>(
       })
     : SqliteClient.layer({disableWAL: true, filename: databasePath});
   return Effect.scoped(
-    Layer.build(layer.pipe(Layer.orDie)).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))),
+    Layer.build(layer.pipe(Layer.orDie)).pipe(
+      Effect.flatMap(context =>
+        effect.pipe(Effect.provideService(SqlClient.SqlClient, Context.get(context, SqlClient.SqlClient))),
+      ),
+    ),
   );
 }
 

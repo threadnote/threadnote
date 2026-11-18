@@ -28,8 +28,8 @@
     "./native-vector-fixture": "./src/native-vector-fixture.ts"
   },
   "dependencies": {
-    "@effect/vitest": "4.1.2",
-    "effect": "4.1.2",
+    "@effect/vitest": "4.1.4",
+    "effect": "4.1.4",
     "fast-check": "4.10.2"
   }
 }

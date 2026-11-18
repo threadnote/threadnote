@@ -2,7 +2,7 @@ import {Array as EffectArray} from 'effect';
 import {CODE_GRAPH_VECTOR_PROGRESS_TRIGGERS} from '../generation_schema.js';
 import {requireCodeGraphGenerationSchema} from '../generation.js';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
-import {Effect, Layer} from 'effect';
+import {Context, Effect, Layer} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {
   CODE_GRAPH_VECTOR_GENERATIONS_TABLE_SQL,
@@ -782,7 +782,11 @@ export function useExistingVectorDatabase<A, E, R>(
         filename: databasePath,
         readwrite: true,
       }).pipe(Layer.orDie),
-    ).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))),
+    ).pipe(
+      Effect.flatMap(context =>
+        effect.pipe(Effect.provideService(SqlClient.SqlClient, Context.get(context, SqlClient.SqlClient))),
+      ),
+    ),
   );
 }
 
@@ -808,7 +812,11 @@ export function useReadOnlyVectorDatabase<A, E, R>(
         readonly: true,
         readwrite: false,
       }).pipe(Layer.orDie),
-    ).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))),
+    ).pipe(
+      Effect.flatMap(context =>
+        effect.pipe(Effect.provideService(SqlClient.SqlClient, Context.get(context, SqlClient.SqlClient))),
+      ),
+    ),
   );
 }
 
