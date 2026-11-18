@@ -1127,10 +1127,11 @@ function streamSymbols<E, R>(
                 lookup_keys_json, resolution_domain, resolution_scope_id, package_name,
                 exported, signature, documentation, span_json
          FROM symbols
-         WHERE snapshot_id = ? AND (? IS NULL OR id > ? COLLATE BINARY)
+         WHERE snapshot_id = ?
+           ${cursor === undefined ? '' : 'AND id > ? COLLATE BINARY'}
          ORDER BY id COLLATE BINARY
          LIMIT ?`,
-        [snapshotId, cursor ?? null, cursor ?? null, pageSize],
+        cursor === undefined ? [snapshotId, pageSize] : [snapshotId, cursor, pageSize],
       ),
     row => row.id,
     rows => decodeAndEmit(rows, row => symbolRecord(symbolFromRow(row)), emit, 'symbols'),
@@ -1174,10 +1175,11 @@ function streamSymbolLookups<E, R>(
           `SELECT lookup_key, symbol_id, resolution_domain, exported, provenance,
                   evidence_edge_id, evidence_path
            FROM snapshot_symbol_lookup
-           WHERE snapshot_id = ? AND (? IS NULL OR (lookup_key, symbol_id) > (?, ?))
+           WHERE snapshot_id = ?
+             ${cursor === undefined ? '' : 'AND (lookup_key, symbol_id) > (?, ?)'}
            ORDER BY lookup_key COLLATE BINARY, symbol_id COLLATE BINARY
            LIMIT ?`,
-          [snapshotId, cursor?.[0] ?? null, ...(cursor ?? ['', '']), pageSize],
+          cursor === undefined ? [snapshotId, pageSize] : [snapshotId, ...cursor, pageSize],
         ),
       row => [row.lookup_key, row.symbol_id],
       rows =>
@@ -1251,10 +1253,11 @@ function streamEdges<E, R>(
         `SELECT id, source_id, source_name, relation, target_id, target_name,
                 provenance, confidence, evidence_path, evidence_span_json
          FROM edges
-         WHERE snapshot_id = ? AND (? IS NULL OR id > ? COLLATE BINARY)
+         WHERE snapshot_id = ?
+           ${cursor === undefined ? '' : 'AND id > ? COLLATE BINARY'}
          ORDER BY id COLLATE BINARY
          LIMIT ?`,
-        [snapshotId, cursor ?? null, cursor ?? null, pageSize],
+        cursor === undefined ? [snapshotId, pageSize] : [snapshotId, cursor, pageSize],
       ),
     row => row.id,
     rows => decodeAndEmit(rows, row => edgeRecord(edgeFromRow(row)), emit, 'edges'),
