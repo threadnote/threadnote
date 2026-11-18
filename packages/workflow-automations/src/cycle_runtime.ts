@@ -123,8 +123,9 @@ export const nativeCycleWaiverFor = (
   );
 
 /**
- * The accepted review that covers a snapshot: its own, or under the same intent a review of the same tree or, after
- * the base moved, of the byte-identical change. Derived on read; reviews[] stays the only owner of review state.
+ * The accepted review that covers a snapshot: its own, or under the same intent the newest review of the same tree or,
+ * after the base moved, of the byte-identical change. A newer review that recorded a blocker ends the search, so an
+ * older clean review never answers for it. Derived on read; reviews[] stays the only owner of review state.
  */
 export function nativeCycleCoveringReview(
   runtime: NativeCycleRuntime,
@@ -147,12 +148,7 @@ export function nativeCycleCoveringReview(
     const review = EffectOption.getOrUndefined(
       EffectArray.findFirst(runtime.reviews, item => item.snapshotId === candidate.snapshotId),
     )?.report;
-    if (
-      !review ||
-      candidate.phaseId !== snapshot.phaseId ||
-      (candidate.intentHash ?? candidate.phaseHash) !== intent ||
-      EffectArray.some(review.findings, nativeCycleBlockingFinding)
-    )
+    if (!review || candidate.phaseId !== snapshot.phaseId || (candidate.intentHash ?? candidate.phaseHash) !== intent)
       continue;
     if (candidate.tree === snapshot.tree) return {snapshot: candidate, review, match: 'tree'};
     if (
@@ -161,6 +157,7 @@ export function nativeCycleCoveringReview(
       candidate.scopeBase !== snapshot.scopeBase
     )
       return {snapshot: candidate, review, match: 'change'};
+    if (EffectArray.some(review.findings, nativeCycleBlockingFinding)) return undefined;
   }
   return undefined;
 }

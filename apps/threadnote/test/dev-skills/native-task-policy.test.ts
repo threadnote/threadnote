@@ -923,6 +923,117 @@ describe('audited waivers', () => {
   );
 });
 
+describe('review coverage under one intent', () => {
+  const validation = {
+    checks: [{command: 'private flow', result: 'passed', evidence: 'Actual scoped source fixture.'}],
+    acceptance: [{criterion: 'one works', result: 'passed', evidence: 'Source readback.'}],
+  };
+  const blocker = (id: string, state = 'new') => ({
+    id,
+    file: 'source.ts',
+    line: 1,
+    body: 'The helper is wrong.',
+    trigger: 'Always.',
+    impact: 'Breaks the phase.',
+    evidence: 'Read it.',
+    severity: 'important',
+    category: 'correctness',
+    confidence: 90,
+    state,
+  });
+  const setup = () =>
+    Effect.gen(function* () {
+      const f = yield* cycleFixture(
+        ['one'],
+        'local',
+        false,
+        false,
+        true,
+        undefined,
+        undefined,
+        {},
+        {policy: 'standard'},
+      );
+      const task = (command: string, fields: Record<string, unknown> = {}) =>
+        runNativeTaskAction(f.config, {command, runId: 'native-run', callerCwd: f.repo, ...fields}).pipe(
+          Effect.map(object),
+        );
+      const view = () => readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo});
+      const commit = (text: string) =>
+        Effect.gen(function* () {
+          yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), text);
+          yield* f.git(['commit', '-qam', 'phase change']);
+          const recorded = yield* task('record-snapshot');
+          return {ref: String(recorded.snapshotRef), snapshot: object(object(recorded.snapshot).snapshot)};
+        });
+      const review = (snapshot: Record<string, unknown>, attemptId: string, findings: readonly unknown[] = []) =>
+        f.mutate('validate-review', {
+          snapshotId: snapshot.snapshotId,
+          attemptId,
+          report: {
+            snapshotId: snapshot.snapshotId,
+            phaseHash: snapshot.phaseHash,
+            snapshotTree: snapshot.tree,
+            status: 'complete',
+            mode: snapshot.reviewBasis ? 'incremental' : 'full',
+            selected: ['correctness', 'simplicity'],
+            lanes: [
+              {name: 'correctness', status: 'complete'},
+              {name: 'simplicity', status: 'complete'},
+            ],
+            findings,
+          },
+        });
+      return {f, task, view, commit, review};
+    });
+
+  effectIt.effect('does not let an earlier clean review answer for a later review that recorded a blocker', () =>
+    Effect.gen(function* () {
+      const {task, view, commit, review} = yield* setup();
+      const first = yield* commit('export const helper = 1;\nexport const fixture = 1;\n');
+      yield* review(first.snapshot, 'a1');
+      const second = yield* commit('export const helper = 1;\nexport const fixture = 2;\n');
+      yield* review(second.snapshot, 'a2', [blocker('f1')]);
+      const reverted = yield* commit('export const helper = 1;\nexport const fixture = 1;\n');
+      expect(reverted.snapshot.tree).toBe(first.snapshot.tree);
+      expect((yield* view()).next).toMatchObject({action: 'review', snapshotId: reverted.snapshot.snapshotId});
+      expect(yield* task('record-validation', {snapshotRef: reverted.ref, validation}).pipe(Effect.flip)).toMatchObject(
+        {
+          code: 'review-pending',
+        },
+      );
+    }).pipe(runCycle),
+  );
+
+  effectIt.effect('takes the newest review of the same tree, so a later blocker outranks an earlier clean review', () =>
+    Effect.gen(function* () {
+      const {f, task, commit, review} = yield* setup();
+      const first = yield* commit('export const fixture = 1;\n');
+      yield* review(first.snapshot, 'a1');
+      // Each move of the declared base records a new snapshot of the same tree.
+      const sameTreeAfterBaseMove = (name: string) =>
+        Effect.gen(function* () {
+          yield* f.git(['checkout', '-q', 'main']);
+          yield* f.fs.writeFileString(f.path.join(f.repo, name), 'Upstream work.\n');
+          yield* f.git(['add', name]);
+          yield* f.git(['commit', '-qm', 'upstream']);
+          yield* f.git(['checkout', '-q', 'feature/one']);
+          const recorded = yield* task('record-snapshot');
+          const snapshot = object(object(recorded.snapshot).snapshot);
+          expect(snapshot.tree).toBe(first.snapshot.tree);
+          return {ref: String(recorded.snapshotRef), snapshot};
+        });
+      const second = yield* sameTreeAfterBaseMove('upstream-1.md');
+      yield* review(second.snapshot, 'a2', [blocker('f1')]);
+      const third = yield* sameTreeAfterBaseMove('upstream-2.md');
+      expect(yield* task('record-validation', {snapshotRef: third.ref, validation}).pipe(Effect.flip)).toMatchObject({
+        code: 'review-blocked',
+        gate: 'review.blocking',
+      });
+    }).pipe(runCycle),
+  );
+});
+
 describe('incremental review by default', () => {
   const report = (snapshot: Record<string, unknown>) => ({
     snapshotId: snapshot.snapshotId,
