@@ -1221,6 +1221,37 @@ effectIt.effect('simultaneous separate homes progress independently and cannot i
   ),
 );
 
+effectIt.effect(
+  'a save refused while another owned save is live records a terminal explained outcome',
+  () =>
+    withSource(
+      Effect.gen(function* () {
+        const f = yield* actualHandoff;
+        const live = yield* f.start({THREADNOTE_TEST_HANDOFF_HOLD_STAGE: 'uri-lock'});
+        expect(live.structuredContent).toMatchObject({state: 'pending', authorized: true});
+        const refused = yield* f.start();
+        expect(refused.structuredContent).toMatchObject({
+          state: 'not-started',
+          authorized: false,
+          reason: 'another-save-in-progress',
+        });
+        const {operationId} = yield* Schema.decodeUnknownEffect(Schema.Struct({operationId: Schema.String}))(
+          refused.structuredContent,
+        );
+        // memory_write_status must not strand a refused save as unknown.
+        for (let repeat = 0; repeat < 2; repeat++)
+          expect((yield* inspectHandoffSaveOperation(f.config, operationId)).structuredContent).toMatchObject({
+            state: 'not-started',
+            authorized: false,
+            possiblyApplied: false,
+            reason: 'another-save-in-progress',
+          });
+        expect(f.children[0].exitCode).toBeNull();
+      }),
+    ),
+  {timeout: 15_000},
+);
+
 for (const observation of ['different-instance', 'unknown'] as const)
   effectIt.effect(`pre-go status cancellation never signals a ${observation} process`, () =>
     withSource(
