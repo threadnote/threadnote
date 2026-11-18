@@ -1035,7 +1035,7 @@ function parseJsonObject(
   }
 }
 
-function stripJsonCommentsAndTrailingCommas(content: string): string {
+export function stripJsonCommentsAndTrailingCommas(content: string): string {
   let output = '';
   let inString = false;
   let escaped = false;

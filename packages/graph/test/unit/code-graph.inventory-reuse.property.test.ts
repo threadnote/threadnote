@@ -7,6 +7,7 @@ import {
   decodeCodeGraphInventoryReuseReceipt,
   encodeCodeGraphInventoryReuseReceipt,
 } from '@threadnote/graph/inventory/reuse';
+import {retainResolutionContext} from '@threadnote/graph/inventory/content';
 import {BUILTIN_LANGUAGE_PACK_REGISTRY} from '@threadnote/graph/languages/registry';
 import {CODE_GRAPH_INVENTORY_EXCLUSION_REASONS} from '@threadnote/graph/inventory/policy';
 import {CODE_GRAPH_INVENTORY_REUSE_RECEIPT_VERSION} from '@threadnote/graph/store/models';
@@ -44,6 +45,28 @@ describe('code graph inventory reuse receipts', () => {
         ),
       ),
     ).toEqual(['package.json', 'packages/app/tsconfig.json']);
+  });
+
+  it('keeps a JSONC tsconfig with comments and trailing commas as attribution context', () => {
+    const content =
+      '{\n  // TypeScript accepts JSONC.\n  "compilerOptions": {"paths": {"@lib/*": ["src/lib/*"],},},\n}\n';
+    const tsconfig = retainResolutionContext(
+      {
+        blobId: 'blob:tsconfig.json',
+        content,
+        contentHash: Effect.pipe('a', EffectString.repeat(64)),
+        language: 'fixture',
+        mode: '100644',
+        path: 'tsconfig.json',
+        size: new TextEncoder().encode(content).byteLength,
+        source: 'commit',
+      },
+      BUILTIN_LANGUAGE_PACK_REGISTRY,
+    );
+    const retained = codeGraphAttributionContextFilesForReceipt([tsconfig], BUILTIN_LANGUAGE_PACK_REGISTRY);
+
+    expect(EffectArray.map(retained ?? [], item => item.path)).toEqual(['tsconfig.json']);
+    expect(retained?.[0]?.content).toContain('"@lib/*"');
   });
 
   fcProp(
