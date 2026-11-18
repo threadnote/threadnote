@@ -83,6 +83,7 @@ if (import.meta.main) {
           }),
         );
       }).pipe(
+        // oxlint-disable-next-line effecttsgo/strict-effect-provide -- This script is the application entry point.
         Effect.provide(
           ApplicationLayer.pipe(
             Layer.provide(Layer.merge(runtimeEntrypointLayer, telemetryChildEnvironmentPolicyLayer)),

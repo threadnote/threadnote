@@ -1026,6 +1026,7 @@ export async function stage(arguments_: StageArguments, dependencies: StageDepen
     const expected = inventory(join(checkout, 'dist'));
     requireCondition(EffectRecord.keys(expected).length > 0, 'Expected built release is absent');
     // This compiled host-controller entrypoint owns the extraction scope.
+    // oxlint-disable-next-line effecttsgo/strict-effect-provide
     await Effect.runPromise(extractGzipTar(archive, payload).pipe(Effect.provide(BunServices.layer)));
     requireCondition(
       isDeepStrictEqual(inventory(payload), expected),

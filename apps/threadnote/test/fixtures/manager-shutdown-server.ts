@@ -91,4 +91,5 @@ const program = Effect.gen(function* () {
   );
 }).pipe(Effect.ensuring(Effect.sync(() => input.close())));
 
+// oxlint-disable-next-line effecttsgo/strict-effect-provide -- This fixture is the owned child-process application entrypoint.
 BunRuntime.runMain(program.pipe(Effect.provide(platformServicesLayer)));

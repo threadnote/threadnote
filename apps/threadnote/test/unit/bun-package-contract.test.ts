@@ -54,9 +54,9 @@ describe('Bun distribution contract', () => {
       expect(allDependencies[packageName]).toBe(effectVersion);
     }
     expect(manifest.overrides?.['@effect/platform-node-shared']).toBe(effectVersion);
-    expect(manifest.devDependencies?.['@effect/tsgo']).toBe('0.70.0');
-    expect(manifest.devDependencies?.oxlint).toBe('1.94.0');
-    expect(manifest.devDependencies?.['oxlint-tsgolint']).toBe('7.0.2007');
+    expect(manifest.devDependencies?.['@effect/tsgo']).toBe('0.63.0');
+    expect(manifest.devDependencies?.oxlint).toBe('1.90.0');
+    expect(manifest.devDependencies?.['oxlint-tsgolint']).toBe('7.0.2005');
     expect(allDependencies['@effect/platform-node']).toBeUndefined();
     expect(allDependencies['@effect/sql-sqlite-node']).toBeUndefined();
     expect(manifest.engines?.node).toBeUndefined();

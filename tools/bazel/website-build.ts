@@ -29,4 +29,5 @@ const program = Effect.gen(function* () {
   yield* generateDocsArticlePages(output);
   yield* generateWebsitePostPages(output, metadata);
 });
+// oxlint-disable-next-line effecttsgo/strict-effect-provide -- This is the sandboxed website build entry point.
 BunRuntime.runMain(program.pipe(Effect.provide(BunServices.layer)));

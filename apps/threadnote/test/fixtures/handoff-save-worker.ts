@@ -61,4 +61,5 @@ const program = Effect.gen(function* () {
     {existingHomeOnly: true, nativeFree: true},
   );
 });
+// oxlint-disable-next-line effecttsgo/strict-effect-provide -- This private test executable is the application entry point.
 BunRuntime.runMain(program.pipe(Effect.provide(ApplicationLayer)), {disableErrorReporting: false});

@@ -303,6 +303,7 @@ BunRuntime.runMain(
     'artifacts/recall-production-10000.json',
     process.env.THREADNOTE_RECALL_ATTEMPT_NONCE,
     // This executable owns the outer receipt-publication filesystem after application cleanup.
+    // oxlint-disable-next-line effecttsgo/strict-effect-provide
   ).pipe(Effect.provide(BunServices.layer)),
   {disableErrorReporting: false, teardown: recallEvaluationTeardown},
 );

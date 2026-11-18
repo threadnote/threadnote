@@ -6,7 +6,9 @@ import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
 // This standalone CI entrypoint owns its Bun platform services.
+// oxlint-disable-next-line effecttsgo/strict-effect-provide
 const fileSystem = Effect.runSync(Effect.provide(FileSystem.FileSystem, BunFileSystem.layer));
+// oxlint-disable-next-line effecttsgo/strict-effect-provide
 const path = Effect.runSync(Effect.provide(Path.Path, BunPath.layer));
 
 export const VERSION = '15.2.0';

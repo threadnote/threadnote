@@ -9,6 +9,7 @@ const receiptSchema = Schema.Struct({
   diagnosticsSha256: Schema.String,
 });
 // This standalone process boundary owns its filesystem services.
+// oxlint-disable-next-line effecttsgo/strict-effect-provide
 const fs = Effect.runSync(Effect.provide(FileSystem.FileSystem, BunFileSystem.layer));
 // Fresh process-owned evidence names and producer nonces at this OS orchestration boundary.
 // oxlint-disable-next-line effecttsgo/crypto-random-uuid
