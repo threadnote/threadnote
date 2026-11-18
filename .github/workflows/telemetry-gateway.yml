@@ -30,9 +30,10 @@ permissions:
 # A production rollout and its storage proof are one serialized operation. Pull
 # request and manual validation runs use a unique group and remain parallel.
 concurrency:
-  group: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.redeploy_production == true)) && 'telemetry-production-gateway' || format('telemetry-gateway-{0}', github.run_id) }}
+  group: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.redeploy_production == true)) && 'telemetry-production-gateway' || (github.event_name == 'pull_request' && format('telemetry-gateway-pr-{0}', github.event.pull_request.number)) || format('telemetry-gateway-{0}', github.run_id) }}
   queue: max
-  cancel-in-progress: false
+  # Only a superseded pull-request run is cancelled; production rollouts always finish.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   classify:

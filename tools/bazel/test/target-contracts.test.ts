@@ -6,6 +6,7 @@ import fc from 'fast-check';
 import {ciRequiredLongRunningTestGroupNames} from '../../ci/vitest-plan.js';
 import {selectTargets} from '../../ci/selection.mjs';
 import {createVitestConfig} from '../../../vitest.config.js';
+import {DECLARED_WINDOWS_DEV_SKILLS, platformNeutralDevSkills} from '../../ci/windows-smoke.config.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
@@ -151,6 +152,16 @@ describe('generated Bazel test contracts', () => {
     const unknown = selectForChangedInput('unmodeled/manager-fixture-input.ts');
     expect(unknown.mode).toBe('fallback');
     expect(unknown.targets).toContain('//:manager_e2e');
+  });
+
+  it('keeps every declared Windows smoke dev-skills entry on the Windows lane', () => {
+    const declared = EffectArray.filter(targetEntries(target('//:windows_smoke_inputs')), path =>
+      EffectString.startsWith('apps/threadnote/test/dev-skills/')(path),
+    );
+    expect(declared.length).toBeGreaterThan(0);
+    const neutral = new Set(platformNeutralDevSkills());
+    expect(EffectArray.filter(declared, path => neutral.has(path))).toEqual([]);
+    for (const path of DECLARED_WINDOWS_DEV_SKILLS) expect(declared).toContain(path);
   });
 
   it('selects Windows smoke when its workflow changes', () => {

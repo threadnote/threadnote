@@ -429,7 +429,7 @@ describe('telemetry producer and production gateway schema', () => {
     expect(gatewayWorkflow).toContain('THREADNOTE_TELEMETRY_FLY_DEPLOY_TOKEN');
     expect(gatewayWorkflow).toContain('version: 0.4.83');
     expect(gatewayWorkflow).toContain('queue: max');
-    expect(gatewayWorkflow).toContain('cancel-in-progress: false');
+    expect(gatewayWorkflow).toContain("cancel-in-progress: ${{ github.event_name == 'pull_request' }}");
     expect(gatewayWorkflow).toContain('classify-changes.sh');
     expect(
       Effect.pipe(
