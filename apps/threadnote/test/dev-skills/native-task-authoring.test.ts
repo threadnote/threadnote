@@ -142,6 +142,7 @@ const planBusiness = {
 };
 const setupWithCleanup = Effect.fn('test.nativeAuthoring.setup')(function* (
   cleanupRoot?: (root: string) => Effect.Effect<void>,
+  indexed = true,
 ) {
   const f = yield* nativeFixture({}, cleanupRoot);
   yield* runCommandEffect('git', ['-C', f.repo, 'add', 'source.ts']);
@@ -162,7 +163,8 @@ const setupWithCleanup = Effect.fn('test.nativeAuthoring.setup')(function* (
   const config = {...f.config, agentContextHome: home, manifestPath: f.path.join(home, 'manifest.json')};
   const scoped = {...system, currentDirectory: () => repo, homeDirectory: home};
   yield* applyDevSkills(config, 'install', {agent: 'codex'}).pipe(Effect.provideService(SystemInfo, scoped));
-  expect((yield* (yield* CodeGraphIndexer).index({cwd: repo, threadnoteHome: home})).snapshot.state).toBe('ready');
+  if (indexed)
+    expect((yield* (yield* CodeGraphIndexer).index({cwd: repo, threadnoteHome: home})).snapshot.state).toBe('ready');
   const mcp = new EffectMcpServerAdapter('test', '1', 'private authoring fixture');
   registerWorkflowTaskTool(mcp, config);
   const author = (input: object) =>
@@ -178,6 +180,32 @@ const setupWithCleanup = Effect.fn('test.nativeAuthoring.setup')(function* (
 });
 
 const setup = setupWithCleanup();
+
+effectIt.effect('starts standard authoring without a published graph while strict still refuses before init', () =>
+  Effect.gen(function* () {
+    const f = yield* setupWithCleanup(undefined, false);
+    const contentFile = f.path.join(f.root, 'spec-business.json');
+    yield* f.fs.writeFileString(contentFile, JSON.stringify(specBusiness));
+    const request = {
+      command: 'start',
+      callerCwd: f.repo,
+      featureName: 'Graphless fixture',
+      kind: 'spec',
+      contentFile,
+      installationTarget: 'codex',
+    } as const;
+    expect(
+      yield* runNativeTaskAuthoring(f.config, {...request, workflowProfile: 'strict'}).pipe(
+        Effect.provideService(SystemInfo, f.scoped),
+        Effect.result,
+      ),
+    ).toMatchObject({failure: {code: 'evidence-unavailable'}});
+    const started = yield* runNativeTaskAuthoring(f.config, {...request, workflowProfile: 'standard'}).pipe(
+      Effect.provideService(SystemInfo, f.scoped),
+    );
+    expect(started).toMatchObject({status: 'draft'});
+  }).pipe(TestClock.withLive, provideNative),
+);
 
 const snapshotAuthoringJobFiles = Effect.fn('test.snapshotAuthoringJobFiles')(function* (
   f: Effect.Success<typeof setup>,

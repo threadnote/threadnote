@@ -41,6 +41,65 @@ import {
   publishOpenHistoricalPhase,
 } from './native-task-actions-fixture.js';
 
+/** Starts a real standalone watch for the PR; only GitHub, the host probe and the collector spawn are simulated. */
+const startStandaloneWatch = (
+  f: Effect.Success<ReturnType<typeof fixture>>,
+  prUrl: string,
+  wakeup: {readonly host: 'codex'; readonly executable: string; readonly threadId: string},
+) =>
+  Effect.gen(function* () {
+    const commands = yield* CommandExecutor;
+    const context = yield* Effect.context<FileSystem.FileSystem | Path.Path | SecureRandom.SecureRandom>();
+    const [, owner, repo, , number] = EffectString.split(new URL(prUrl).pathname, '/');
+    const standaloneCommands = CommandExecutor.of({
+      ...commands,
+      execute: (executable, args, options) =>
+        executable === wakeup.executable
+          ? Effect.succeed({exitCode: 0, stderr: '', stdout: 'Usage: codex queue\n --thread <T>\n --message <M>\n'})
+          : executable === 'gh'
+            ? Effect.succeed({
+                exitCode: 0,
+                stderr: '',
+                stdout: JSON.stringify({
+                  number: Number(number),
+                  url: prUrl,
+                  baseRepository: `${owner}/${repo}`,
+                  baseBranch: 'main',
+                  headBranch: 'feature/one',
+                  headSha: EffectString.repeat(40)('a'),
+                  state: 'open',
+                  merged: false,
+                }),
+              })
+            : commands.execute(executable, args, options),
+      spawnDetached: (_executable, args) =>
+        Effect.gen(function* () {
+          const watchId = args[args.indexOf('--watch-id') + 1];
+          const starting = yield* readNativeWatch(f.config, watchId);
+          if (!starting?.envelope.collector) return false;
+          yield* writeNativeWatch(
+            f.config,
+            {...starting.envelope, collector: {...starting.envelope.collector, pid: 77777, status: 'running'}},
+            starting.revision,
+          );
+          return true;
+        }).pipe(Effect.provide(context), Effect.orDie),
+    });
+    const system = yield* SystemInfo;
+    return object(
+      yield* runNativeTaskAction(f.config, {
+        command: 'watch-pr',
+        operation: 'start',
+        callerCwd: f.repo,
+        prUrl,
+        wakeup,
+      }).pipe(
+        Effect.provideService(CommandExecutor, standaloneCommands),
+        Effect.provideService(SystemInfo, SystemInfo.of({...system, isProcessRunning: pid => pid === 77777})),
+      ),
+    );
+  });
+
 describe('native task actions', () => {
   const prReceiptCase = (maintenance: boolean) =>
     Effect.gen(function* () {
@@ -266,6 +325,12 @@ describe('native task actions', () => {
         watchId + '.json',
       );
       if (maintenance) {
+        const standalone = yield* startStandaloneWatch(f, openPr.url, {
+          host: 'codex',
+          executable: '/usr/bin/codex',
+          threadId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+        });
+        expect(standalone).toMatchObject({status: 'watching', authority: 'monitor-only'});
         // CI edits must not revoke the existing watch route or manufacture validation of the new source.
         const watch = yield* startSimulatedTaskWatch(
           f,
@@ -275,6 +340,12 @@ describe('native task actions', () => {
           String(watchCard.deliveryRef),
           openPr.url,
         );
+        // The workflow-bound watch replaces the standalone one, so the session is woken once per PR event.
+        expect(watch.result).toMatchObject({ok: true, value: {supersededStandaloneWatchId: standalone.watchId}});
+        expect((yield* readNativeWatch(f.config, String(standalone.watchId)))?.envelope).toMatchObject({
+          stopRequested: true,
+          stopReason: 'superseded',
+        });
         yield* writeSimulatedTaskWatch(f, watch.startedWatch, watch, openPr.url, headSha, false);
         yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "CI maintenance";\n');
         yield* f.git(['add', 'source.ts']);

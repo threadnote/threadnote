@@ -33,13 +33,47 @@ const decode = (value: string, marker: string): unknown => {
   if (!/^[A-Za-z0-9_-]+$/u.test(body)) throw fail('invalid-watch-ref', 'Malformed standalone watch reference.');
   return JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
 };
+const standaloneWatchId = (checkout: string, prUrl: string) =>
+  'standalone-pr-' + EffectString.slice(0, 48)(sha256HexSync(stableJson({checkout, prUrl})));
 const bindingIdentity = (binding: typeof bindingSchema.Type) => {
-  const watchId =
-    'standalone-pr-' +
-    EffectString.slice(0, 48)(sha256HexSync(stableJson({checkout: binding.checkout, prUrl: binding.prUrl})));
   const digest = sha256HexSync(stableJson(binding));
-  return {watchId, consumerId: 'standalone-' + EffectString.slice(0, 48)(digest), digest};
+  return {
+    watchId: standaloneWatchId(binding.checkout, binding.prUrl),
+    consumerId: 'standalone-' + EffectString.slice(0, 48)(digest),
+    digest,
+  };
 };
+
+/**
+ * Stops the standalone watch a workflow-bound watch replaces, so one PR wakes the session once. Both routes store
+ * GitHub's exact html_url, so the identity derives from the same checkout and URL. A later standalone start revives it.
+ */
+export const stopSupersededStandalonePrWatch = (config: RuntimeConfig, checkout: string, prUrl: string) =>
+  Effect.gen(function* () {
+    const watchId = standaloneWatchId(checkout, prUrl);
+    const watch = yield* readNativeWatch(config, watchId);
+    const consumer = watch?.envelope.state.consumer;
+    if (
+      !watch ||
+      !consumer ||
+      watch.envelope.stopRequested ||
+      watch.envelope.owner ||
+      watch.envelope.state.pr !== prUrl
+    )
+      return undefined;
+    yield* runNativeWatch(config, {
+      protocolVersion: 1,
+      executorVersion: 1,
+      action: 'watch',
+      command: 'stop',
+      watchId,
+      consumerId: consumer.id,
+      wakeupId: consumer.wakeupId,
+      expectedRevision: watch.revision,
+      stopReason: 'superseded',
+    });
+    return watchId;
+  });
 
 /** Wire references explicitly identify a standalone watch; no workflow run or validation is created. */
 const standaloneEventRefs = {
@@ -183,13 +217,14 @@ export const runStandalonePrWatch = (
       stored.envelope.state.consumer?.id === consumerId &&
       stored.envelope.state.consumer.wakeupId === consumerId &&
       stableJson(stored.envelope.notification?.target) === stableJson(binding.wakeup);
+    // Only a failed admission or a workflow-bound handover may be revived; an explicit stop stays stopped.
     const retryFailedAdmission =
       request.operation === 'start' &&
       watch !== undefined &&
       checkIdentity(watch) &&
       watch.envelope.stopRequested &&
       watch.envelope.state.prState === 'open' &&
-      watch.envelope.collector?.reason === 'collector-startup-failed' &&
+      (watch.envelope.collector?.reason === 'collector-startup-failed' || watch.envelope.stopReason === 'superseded') &&
       !(yield* nativeWatchCollectorAlive(watch.envelope.collector));
     if (request.operation === 'start' && (!watch || retryFailedAdmission)) {
       if (!watch && request.watchRef)
@@ -221,7 +256,14 @@ export const runStandalonePrWatch = (
       watch.envelope.state.acknowledged === watch.envelope.state.nextSequence - 1 &&
       !EffectArray.some(watch.envelope.state.work, row => row.status === 'open' || row.status === 'blocked');
     if (terminalEmpty && EffectArray.contains(['start', 'relay', 'ack', 'disposition', 'renew'], request.operation))
-      return {status: 'terminal-empty', watchId, watchRef, prUrl: binding.prUrl, revision: watch.revision};
+      return {
+        status: 'terminal-empty',
+        watchId,
+        watchRef,
+        prUrl: binding.prUrl,
+        revision: watch.revision,
+        authority: 'monitor-only' as const,
+      };
     if (request.operation === 'start' || request.operation === 'renew') {
       if (request.operation === 'renew') {
         yield* runNativeWatch(config, {
@@ -261,5 +303,8 @@ export const runStandalonePrWatch = (
       return {...inspected, status, watchRef, authority: 'monitor-only' as const};
     }
     const {wakeup: _wakeup, ...operation} = request;
-    return yield* runNativePrWatchOperation(config, operation, watch, scope, standaloneEventRefs);
+    return {
+      ...(yield* runNativePrWatchOperation(config, operation, watch, scope, standaloneEventRefs)),
+      authority: 'monitor-only' as const,
+    };
   });

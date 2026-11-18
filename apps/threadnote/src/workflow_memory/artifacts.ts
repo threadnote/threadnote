@@ -527,6 +527,8 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
       );
     if (foregroundReusable && stableJson(request.codeRefs ?? []) !== stableJson(foregroundAdmitted.citationRefs))
       return yield* workflowError('citation-drift', 'Child code references differ from the admitted citation witness.');
+    // A standard run never waits for a graph: stale evidence is accepted and missing evidence defers its anchors.
+    const standardRun = yield* standardProfileBinding(config, state.binding.workflowRunId);
     const captured =
       admitted && !promotion
         ? {ok: true as const, citations: admitted.citations}
@@ -541,9 +543,7 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
                   ? {}
                   : {expectedProjectScope: {kind: 'selected-project' as const, project: state.binding.graphProject}}),
                 refs: request.codeRefs ?? [],
-                ...((yield* standardProfileBinding(config, state.binding.workflowRunId))
-                  ? {allowStaleGraph: true}
-                  : {}),
+                ...(standardRun ? {allowStaleGraph: true} : {}),
               },
               'workflow-memory',
             );
@@ -565,7 +565,7 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
         );
       if (
         state.binding.graphProject !== undefined ||
-        request.citationPolicy !== 'defer' ||
+        (request.citationPolicy !== 'defer' && !standardRun) ||
         !Schema.is(MemoryCodeCitationCaptureError)(captured.failure) ||
         !captured.failure.recovery
       )

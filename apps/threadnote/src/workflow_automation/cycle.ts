@@ -389,21 +389,6 @@ export const runNativeCycle = <R>(
         checkedPlanSource = stableJson(plan.source);
       }
     }
-    // Graph preparation can index and must never run while holding a native run lock.
-    let sourceBeforeGraph: Effect.Success<ReturnType<typeof captureNativeCycleSource>> | undefined;
-    if (request.command === 'packet') {
-      const state = yield* readNativeWorkflowState(config, request.runId);
-      if (!state) return yield* fail('run-not-found', 'Start the native run first.');
-      if (!state.state.cycle?.baselines[request.phaseId ?? ''])
-        return yield* fail('baseline-required', 'Run begin-phase before preparing an implementation packet.');
-      const journal = yield* withWorkflowLock(
-        config,
-        state.state.bindingId,
-        inspectWorkflowJournal(config, state.state.bindingId),
-      );
-      sourceBeforeGraph = yield* captureNativeCycleSource(journal.state.binding.repo, 'HEAD');
-    }
-    const graph = request.command === 'packet' ? yield* call(base('graph-ready')) : undefined;
     return yield* withNativeWorkflowLock(
       config,
       request.runId,
@@ -1326,26 +1311,10 @@ export const runNativeCycle = <R>(
               fail('invalid-cycle-packet', 'Provide bounded source anchors, ownership, checks and capacity evidence.'),
             ),
           );
-          const observedGraphValue = isJsonObject(graph) ? graph.graph : undefined;
+          // Capture writes the whole working tree, so a packet is dispatched only from committed, clean source.
           const captured = yield* captureNativeCycleSource(repo, 'HEAD');
-          if (
-            !sourceBeforeGraph ||
-            sourceBeforeGraph.head !== captured.head ||
-            sourceBeforeGraph.tree !== captured.tree
-          )
-            return yield* fail(
-              'source-drift',
-              'Source changed around ready-graph preparation. Retry with current evidence.',
-            );
-          if (!isJsonObject(observedGraphValue))
-            return yield* fail('source-drift', 'Packet graph evidence does not match exact current checkout bytes.');
-          const proof: Record<string, unknown> = {...observedGraphValue, tree: captured.tree};
-          if (
-            stableJson(proof) !== stableJson(options.graphProof) ||
-            proof['head'] !== captured.head ||
-            proof['repositoryRoot'] !== (yield* (yield* FileSystem.FileSystem).realPath(repo))
-          )
-            return yield* fail('source-drift', 'Packet graph evidence does not match exact current checkout bytes.');
+          if (captured.tree !== captured.baseTree)
+            return yield* fail('source-drift', 'Commit or discard working-tree changes before preparing the packet.');
           const adapter = yield* makeWorkflowGitAdapter();
           const source = yield* adapter.inspect(repo, [
             ...new Set(EffectArray.map(options.anchors, anchor => anchor.path)),

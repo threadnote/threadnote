@@ -92,6 +92,7 @@ export const nativeWatchRequestSchema = Schema.Struct({
   eventId: Schema.optionalKey(text),
   sourceDigest: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
   offsetBytes: Schema.optionalKey(Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 65536}))),
+  stopReason: Schema.optionalKey(Schema.Literal('superseded')),
 });
 const version = {protocolVersion: 1 as const, executorVersion: 1 as const};
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
@@ -744,6 +745,8 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (
   const request = yield* from(() =>
     Schema.decodeUnknownSync(nativeWatchRequestSchema, {onExcessProperty: 'error'})(input),
   );
+  if (request.stopReason && request.command !== 'stop')
+    return yield* fail('invalid-request', 'Only stop records a stop reason.');
   if (
     (request.wakeup || request.recoverWakeup) &&
     request.command !== 'start' &&
@@ -885,10 +888,11 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (
           };
         }
         const token = yield* (yield* SecureRandom.SecureRandom).uuidV4();
+        const {stopReason: _stopReason, ...admitted} = envelope;
         const saved = yield* writeNativeWatch(
           config,
           {
-            ...envelope,
+            ...admitted,
             state,
             stopRequested: false,
             collector: {
@@ -945,15 +949,17 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (
         let envelope = stored.envelope;
         let output: Record<string, unknown> = {};
         let arrivalOnly = false;
-        if (request.command === 'stop')
+        if (request.command === 'stop') {
+          const {stopReason: _stopReason, ...current} = envelope;
           envelope = {
-            ...envelope,
+            ...current,
             stopRequested: true,
+            ...(request.stopReason ? {stopReason: request.stopReason} : {}),
             ...(envelope.collector && envelope.state.prState === 'open' && envelope.collector.status !== 'terminal'
               ? {collector: {...envelope.collector, reason: 'explicit-stop'}}
               : {}),
           };
-        else if (request.command === 'consumer') {
+        } else if (request.command === 'consumer') {
           yield* from(() => assertQualifiedBinding(envelope));
           if (
             request.recoverWakeup &&

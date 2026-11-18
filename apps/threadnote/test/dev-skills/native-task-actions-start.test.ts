@@ -2335,6 +2335,39 @@ describe('native task actions', () => {
       ).toMatchObject({
         failure: {code: 'evidence-unavailable'},
       });
+      const mixedShape = yield* runNativeTaskStart(config, {
+        ...startInput,
+        delivery: 'pr',
+        bindings: {compact: {branch: 'main', baseBranch: 'main'}},
+      }).pipe(Effect.provideService(SystemInfo, testSystem), Effect.result);
+      if (mixedShape._tag !== 'Failure') throw new Error('A compact start must refuse shared-plan fields.');
+      expect(mixedShape.failure).toMatchObject({code: 'invalid-request'});
+      expect(mixedShape.failure.message).toContain('delivery');
+      expect(mixedShape.failure.message).toContain('bindings');
+      // A standard run needs no published graph: it starts in a fresh checkout and defers its code citations.
+      const standardStart = object(
+        yield* runNativeTaskStart(config, {
+          ...startInput,
+          featureName: 'Standard ' + intent.title,
+          workflowProfile: 'standard',
+        }).pipe(Effect.provideService(SystemInfo, testSystem)),
+      );
+      expect(standardStart.status).toBe('awaiting-user-confirmation');
+      const standardRunId = String(standardStart.taskRef);
+      // Compact confirmation chooses the first admission's delivery.
+      expect(
+        yield* runNativeTaskAction(config, {
+          command: 'compact-confirm',
+          runId: standardRunId,
+          callerCwd: repo,
+          presentedIntentHash: String(standardStart.intentHash),
+          userDecision: 'approve',
+          userResponse: 'I approve this exact fixture change delivered as a PR.',
+          baseBranch: 'main',
+          delivery: 'pr',
+        }).pipe(Effect.provideService(SystemInfo, testSystem)),
+      ).toMatchObject({status: 'admitted'});
+      expect((yield* readNativeWorkflowState(config, standardRunId))?.state.cycle?.state.plan.delivery).toBe('pr');
       expect(
         (yield* (yield* CodeGraphIndexer).index({cwd: repo, threadnoteHome: home, ensureVectors: false})).snapshot
           .state,

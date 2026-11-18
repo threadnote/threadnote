@@ -104,15 +104,6 @@ const packetOptions = {
     reason: 'Routine bounded work',
     catalogEvidence: 'Available model supports the task.',
   },
-  graphProof: {
-    state: 'ready',
-    head: gitSha,
-    tree: gitTree,
-    dirty: true,
-    snapshotId: 'snapshot-1',
-    graphContentId: 'graph-1',
-    repositoryRoot: 'C:\\repo',
-  },
   anchors: [
     {path: 'packages/workflow-automations/src/cycle.ts', sha256: digest, pattern: 'phase state and validation'},
   ],
@@ -701,7 +692,7 @@ describe('native cycle pure domain', () => {
       reason: 'graph-or-anchor-proof-unavailable',
     });
     expect(
-      nativeCyclePacket(state, 'one', {...packetOptions, graphProof: {...packetOptions.graphProof, tree: 'bad'}}),
+      nativeCyclePacket(state, 'one', {...packetOptions, anchors: [{...packetOptions.anchors[0], path: '../secret'}]}),
     ).toMatchObject({available: false, reason: 'graph-or-anchor-proof-unavailable'});
     expect(() =>
       validateNativeCycleCapacityRecord({...packetOptions.capacity, selection: 'escalation', risk: 'settled'}),

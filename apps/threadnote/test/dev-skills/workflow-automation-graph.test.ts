@@ -2,18 +2,24 @@ import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Cause, Deferred, Effect, Exit, Fiber} from 'effect';
 import {TestClock} from 'effect/testing';
-import {describe, expect} from 'vitest';
+import {describe, expect, vi} from 'vitest';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
-import {runCommandEffect} from '@threadnote/platform/command';
+import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
+import {SystemInfo} from '@threadnote/platform/system';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {attachCodeGraphStatusObservation} from '@threadnote/graph/query/contract';
 import {CodeGraphStoreBusyError, type CodeGraphIndexSummary, type CodeGraphStatus} from '@threadnote/graph/types';
-import {makeWorkflowGraphAdapter} from '../../src/workflow_automation/graph.js';
+import {makeWorkflowGraphAdapter, requireWorkflowGraphScope} from '../../src/workflow_automation/graph.js';
 import type {WorkflowBinding} from '../../src/workflow_memory/protocol.js';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
 import * as EffectString from 'effect/String';
-import * as EffectOption from 'effect/Option';
 import * as Effect2 from 'effect';
+
+const build = vi.hoisted(() => ({standalone: false}));
+vi.mock('@threadnote/workspace/runtime-version', async importOriginal => ({
+  ...(await importOriginal<typeof import('@threadnote/workspace/runtime-version')>()),
+  isStandaloneThreadnoteBuild: () => build.standalone,
+}));
 
 const run = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect.pipe(TestClock.withLive, provideNative);
 
@@ -81,7 +87,6 @@ const makeReady = Effect.fn('test.workflowAutomationGraph.makeReady')(function* 
   index: (
     options: Parameters<Parameters<typeof CodeGraphIndexer.of>[0]['index']>[0],
   ) => Effect.Effect<CodeGraphIndexSummary, unknown>,
-  options: {readonly prepare?: boolean} = {},
   binding: WorkflowBinding = bindingFor(f),
 ) {
   const query = yield* CodeGraphQueryService;
@@ -103,7 +108,7 @@ const makeReady = Effect.fn('test.workflowAutomationGraph.makeReady')(function* 
       return index(options);
     },
   });
-  const adapter = yield* makeWorkflowGraphAdapter(f.config, binding, options).pipe(
+  const adapter = yield* makeWorkflowGraphAdapter(f.config, binding).pipe(
     Effect.provideService(CodeGraphQueryService, observedQuery),
     Effect.provideService(CodeGraphIndexer, observedIndexer),
   );
@@ -141,9 +146,9 @@ describe('native workflow graph adapter', () => {
       );
       const binding = {...bindingFor(f), graphProject: 'Alpha'};
       const full = graphStatus(f.repo);
-      const wrong = yield* makeReady(f, [full], () => Effect.die('index must not run'), {prepare: false}, binding);
+      const wrong = yield* makeReady(f, [full], () => Effect.succeed(completedIndex(full)), binding);
       expect(yield* wrong.adapter.ready(f.repo).pipe(Effect.result)).toMatchObject({
-        failure: {code: 'evidence-unavailable'},
+        failure: {code: 'evidence-not-ready'},
       });
       const selected = attachCodeGraphStatusObservation(
         {...full},
@@ -153,12 +158,12 @@ describe('native workflow graph adapter', () => {
           projectScope: {project: {name: 'Alpha', uri: 'threadnote://resources/repos/alpha'}},
         },
       );
-      const right = yield* makeReady(f, [selected], () => Effect.die('index must not run'), {prepare: false}, binding);
+      const right = yield* makeReady(f, [selected], () => Effect.die('index must not run'), binding);
       expect(yield* right.adapter.ready(f.repo)).toMatchObject({state: 'ready'});
     }).pipe(run),
   );
 
-  effectIt.effect('uses the bound project and names it in preparation guidance', () =>
+  effectIt.effect('prepares only the bound project and refuses when its manifest entry disappears', () =>
     Effect.gen(function* () {
       const f = yield* nativeFixture();
       yield* runCommandEffect('git', [
@@ -188,12 +193,20 @@ describe('native workflow graph adapter', () => {
       );
       const binding = {...bindingFor(f), graphProject: 'Alpha'};
       const stale = graphStatus(f.repo, {stale: true});
-      const fixture = yield* makeReady(f, [stale], () => Effect.die('index must not start'), {prepare: false}, binding);
-      const result = yield* fixture.adapter.ready(f.repo).pipe(Effect.result);
-      expect(result).toMatchObject({
-        failure: {code: 'evidence-unavailable', message: expect.stringContaining('--project Alpha')},
+      let optionsSeen: unknown;
+      const fixture = yield* makeReady(
+        f,
+        [stale],
+        options => {
+          optionsSeen = options;
+          return Effect.succeed(completedIndex(stale));
+        },
+        binding,
+      );
+      expect(yield* fixture.adapter.ready(f.repo).pipe(Effect.result)).toMatchObject({
+        failure: {code: 'evidence-not-ready'},
       });
-      expect(fixture.counts()).toEqual({indexCalls: 0, statusCalls: 1});
+      expect(optionsSeen).toMatchObject({project: {name: 'Alpha'}});
       yield* f.fs.writeFileString(
         f.config.manifestPath,
         JSON.stringify({
@@ -207,44 +220,86 @@ describe('native workflow graph adapter', () => {
     }).pipe(run),
   );
 
-  effectIt.effect('renders the selected project as one executable shell argument', () =>
-    Effect.gen(function* () {
-      if (process.platform === 'win32') return;
-      const f = yield* nativeFixture();
-      const projectName = 'Alpha Beta;printf injected';
-      yield* f.fs.writeFileString(
-        f.config.manifestPath,
-        JSON.stringify({
-          version: 1,
-          projects: [{name: projectName, path: f.repo, seed: [], uri: 'threadnote://resources/repos/alpha'}],
-        }),
-      );
-      const binding = {...bindingFor(f), graphProject: projectName};
-      const fixture = yield* makeReady(
-        f,
-        [graphStatus(f.repo, {stale: true})],
-        () => Effect.die('index must not start'),
-        {prepare: false},
-        binding,
-      );
-      const result = yield* fixture.adapter.ready(f.repo).pipe(Effect.result);
-      if (result._tag !== 'Failure') throw new Error('Expected recovery guidance for a stale graph.');
-      const command = Effect2.pipe(
-        result.failure.message,
-        EffectString.match(/run `([^`]+)` from callerCwd/u),
-        EffectOption.getOrUndefined,
-      )?.[1];
-      if (!command) throw new Error('Expected a bounded executable graph command.');
-      const argv = yield* runCommandEffect('sh', ['-c', `set -- ${command}; printf '%s\\n' "$@"`]);
-      expect(Effect2.pipe(argv.stdout, EffectString.trimEnd, EffectString.split('\n'))).toEqual([
-        'threadnote',
-        'graph',
-        'index',
-        '--no-vectors',
-        '--project',
-        projectName,
-      ]);
-    }).pipe(run),
+  effectIt.effect(
+    'admits a standard run without a ready graph, warms it in the background and keeps strict exact',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* nativeFixture();
+        const projectName = 'Alpha Beta;printf injected';
+        yield* f.fs.writeFileString(
+          f.config.manifestPath,
+          JSON.stringify({
+            version: 1,
+            projects: [{name: projectName, path: f.repo, seed: [], uri: 'threadnote://resources/repos/alpha'}],
+          }),
+        );
+        const query = yield* CodeGraphQueryService;
+        const indexer = yield* CodeGraphIndexer;
+        const commands = yield* CommandExecutor;
+        const system = yield* SystemInfo;
+        let status: CodeGraphStatus = graphStatus(f.repo, {stale: true});
+        const spawned: {readonly executable: string; readonly args: readonly string[]; readonly cwd?: string}[] = [];
+        let spawn = (executable: string, args: readonly string[], cwd?: string) =>
+          Effect.sync(() => spawned.push({executable, args, cwd})).pipe(Effect.as(true));
+        const scope = (policy: 'standard' | 'strict') =>
+          requireWorkflowGraphScope(f.config, {
+            checkout: f.repo,
+            runId: 'graph-test',
+            project: 'fixture',
+            featureId: 'feature',
+            generation: 'generation-v1',
+            profile: 'desktop',
+            policy,
+            graphProject: projectName,
+          });
+        const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+          effect.pipe(
+            Effect.provideService(
+              CodeGraphQueryService,
+              CodeGraphQueryService.of({...query, status: () => Effect.succeed(status)}),
+            ),
+            Effect.provideService(
+              CodeGraphIndexer,
+              CodeGraphIndexer.of({...indexer, index: () => Effect.die('start must not index')}),
+            ),
+            Effect.provideService(
+              CommandExecutor,
+              CommandExecutor.of({
+                ...commands,
+                spawnDetached: (executable, args, options) => spawn(executable, args, options?.cwd),
+              }),
+            ),
+            Effect.provideService(SystemInfo, {...system, currentDirectory: () => f.repo}),
+          );
+        const start = provide(scope('standard'));
+        yield* start;
+        expect(spawned).toEqual([]);
+        expect(yield* provide(scope('strict')).pipe(Effect.result)).toMatchObject({
+          failure: {code: 'evidence-unavailable'},
+        });
+        build.standalone = true;
+        yield* start.pipe(Effect.ensuring(Effect.sync(() => (build.standalone = false))));
+        expect(spawned).toEqual([
+          {
+            executable: system.executablePath,
+            args: ['graph', 'index', '--no-vectors', '--project', projectName],
+            cwd: f.repo,
+          },
+        ]);
+        build.standalone = true;
+        spawn = () => Effect.die('spawn failed');
+        yield* start.pipe(Effect.ensuring(Effect.sync(() => (build.standalone = false))));
+        expect(spawned).toHaveLength(1);
+        status = attachCodeGraphStatusObservation(graphStatus(f.repo), {
+          identity: status.identity,
+          projectScopeObserved: true,
+          projectScope: {project: {name: projectName, uri: 'threadnote://resources/repos/alpha'}},
+        });
+        spawn = () => Effect.die('a ready graph needs no warm-up');
+        build.standalone = true;
+        yield* start.pipe(Effect.ensuring(Effect.sync(() => (build.standalone = false))));
+        yield* provide(scope('strict'));
+      }).pipe(run),
   );
 
   effectIt.effect('uses exact current ready source identity without indexing', () =>
@@ -278,25 +333,6 @@ describe('native workflow graph adapter', () => {
       expect(yield* fixture.adapter.ready(f.repo)).toMatchObject({state: 'ready', snapshotId: 'snapshot-fixture'});
       expect(fixture.counts()).toEqual({indexCalls: 1, statusCalls: 2});
       expect(optionsSeen).toMatchObject({cwd: f.repo, threadnoteHome: f.home, ensureVectors: false});
-    }).pipe(run),
-  );
-
-  effectIt.effect('refuses stale graph evidence without starting preparation when disabled', () =>
-    Effect.gen(function* () {
-      const f = yield* nativeFixture();
-      const stale = graphStatus(f.repo, {stale: true});
-      const fixture = yield* makeReady(
-        f,
-        [stale],
-        () => Effect.die('index must not run when preparation is disabled'),
-        {prepare: false},
-      );
-      const failed = yield* fixture.adapter.ready(f.repo).pipe(Effect.result);
-      expect(failed).toMatchObject({
-        _tag: 'Failure',
-        failure: {code: 'evidence-unavailable', retryable: false},
-      });
-      expect(fixture.counts()).toEqual({indexCalls: 0, statusCalls: 1});
     }).pipe(run),
   );
 

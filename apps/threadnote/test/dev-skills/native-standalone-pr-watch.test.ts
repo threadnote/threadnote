@@ -24,6 +24,7 @@ import {describe, expect} from 'vitest';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
 import {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
 import {registerWorkflowTaskTool} from '../../src/mcp/server/workflow.js';
+import {stopSupersededStandalonePrWatch} from '../../src/workflow_automation/standalone_pr_watch.js';
 import {runNativeTaskAction} from '../../src/workflow_automation/task_actions.js';
 import {runNativeWatch} from '../../src/workflow_automation/watch.js';
 import {readNativeWatch, writeNativeWatch} from '../../src/workflow_automation/watch_store.js';
@@ -67,6 +68,7 @@ const setup = Effect.gen(function* () {
   let watchId = '';
   let spawns = 0;
   let spawnSucceeds = true;
+  let collectorAlive = true;
   let remoteBase = 'main';
   let remoteRepository = 'example/repo';
   const commands = CommandExecutor.of({
@@ -101,6 +103,7 @@ const setup = Effect.gen(function* () {
         const index = args.indexOf('--watch-id');
         watchId = args[index + 1];
         if (!spawnSucceeds) return false;
+        collectorAlive = true;
         const stored = yield* readNativeWatch(config, watchId);
         if (!stored?.envelope.collector) return false;
         yield* writeNativeWatch(
@@ -113,7 +116,7 @@ const setup = Effect.gen(function* () {
   });
   const fakeSystem = SystemInfo.of({
     ...system,
-    isProcessRunning: pid => pid === 77777,
+    isProcessRunning: pid => pid === 77777 && collectorAlive,
     processStartIdentity: () => succeedUndefined,
     canonicalProcessStartIdentity: () => succeedUndefined,
   });
@@ -134,6 +137,17 @@ const setup = Effect.gen(function* () {
     setSpawnSucceeds: (succeeds: boolean) => {
       spawnSucceeds = succeeds;
     },
+    /** Simulates the collector's own exit after a stop, which overwrites its collector reason. */
+    exitCollector: Effect.gen(function* () {
+      const stored = yield* readNativeWatch(config, watchId);
+      if (!stored?.envelope.collector) throw new Error('Expected a collector');
+      yield* writeNativeWatch(
+        config,
+        {...stored.envelope, collector: {...stored.envelope.collector, status: 'stopped', reason: 'stop-requested'}},
+        stored.revision,
+      );
+      collectorAlive = false;
+    }),
     setRemoteBase: (base: string) => {
       remoteBase = base;
     },
@@ -299,11 +313,21 @@ describe('standalone PR watches', () => {
           {operation: 'inspect', wakeup: {...wakeup, threadId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'}},
           {operation: 'renew', takeover: true},
           {operation: 'complete'},
-          {operation: 'inspect', runId: 'fake-run'},
+          {operation: 'inspect', runId: 'fake-run', phaseId: 'one'},
           {operation: 'start', wakeup: {...wakeup, threadId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'}},
         ]) {
           expect((yield* f.call({watchRef, ...fields}).pipe(Effect.result))._tag).toBe('Failure');
         }
+        // A run identifier without workflow proof never blocks or upgrades standalone monitoring.
+        expect(yield* f.call({operation: 'inspect', watchRef, runId: 'task-without-delivery'})).toMatchObject({
+          watchId: started.watchId,
+          authority: 'monitor-only',
+        });
+        expect(yield* f.call({operation: 'start', prUrl, wakeup, runId: 'task-without-delivery'})).toMatchObject({
+          status: 'watching',
+          watchRef,
+          authority: 'monitor-only',
+        });
         const foreign = f.path.join(f.home, 'foreign');
         yield* f.fs.makeDirectory(foreign);
         yield* runCommandEffect('git', ['init', foreign]);
@@ -428,6 +452,31 @@ describe('standalone PR watches', () => {
         collector: {alive: false, reason: 'explicit-stop'},
       });
       expect(stoppedFixture.spawns()).toBe(1);
+    }).pipe(run),
+  );
+
+  effectIt.effect('revives a watch superseded by a workflow-bound start but never an explicit stop', () =>
+    Effect.gen(function* () {
+      const f = yield* setup;
+      const watchRef = String(object(yield* f.call({operation: 'start', prUrl, wakeup})).watchRef);
+      const supersede = stopSupersededStandalonePrWatch(f.config, yield* f.fs.realPath(f.repo), prUrl).pipe(
+        Effect.provideService(CommandExecutor, f.commands),
+        Effect.provideService(SystemInfo, f.system),
+      );
+      expect(yield* supersede).toBe(f.getWatchId());
+      expect(yield* supersede).toBeUndefined();
+      yield* f.exitCollector;
+      const revived = object(yield* f.call({operation: 'start', prUrl, wakeup}));
+      expect(revived).toMatchObject({status: 'watching', watchRef, authority: 'monitor-only'});
+      expect(object(revived.result)).toMatchObject({stopRequested: false, collector: {alive: true}});
+      expect(f.spawns()).toBe(2);
+
+      // An explicit stop after a handover withdraws revival.
+      expect(yield* supersede).toBe(f.getWatchId());
+      yield* f.call({operation: 'stop', watchRef});
+      yield* f.exitCollector;
+      expect(object(yield* f.call({operation: 'start', prUrl, wakeup})).status).toBe('watch-stopped');
+      expect(f.spawns()).toBe(2);
     }).pipe(run),
   );
 

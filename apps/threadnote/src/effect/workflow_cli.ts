@@ -427,6 +427,7 @@ export function makeNativeTaskActionCommands<E, R>(
     readonly userResponse?: string;
     readonly userDecision?: 'approve' | 'reject' | 'defer';
     readonly baseBranch?: string;
+    readonly delivery?: 'local' | 'commit' | 'pr';
     readonly reconcileReason?: string;
     readonly bindings?: unknown;
     readonly review?: unknown;
@@ -875,7 +876,8 @@ export function makeNativeTaskActionCommands<E, R>(
       presentedIntentHash: requiredString('intent-hash', 'Exact intent hash from the complete approval packet'),
       userResponse: optionalString('user-response', 'Caller-provided response to the displayed exact-intent packet'),
       userDecision: optionalChoice('user-decision', ['approve', 'reject', 'defer'], 'Caller-provided user decision'),
-      baseBranch: optionalString('base-branch', 'Exact base branch for a new local cycle'),
+      baseBranch: optionalString('base-branch', 'Exact base branch for a new cycle'),
+      delivery: optionalChoice('delivery', ['local', 'commit', 'pr'], 'Approved delivery for the first admission'),
       reconcileReason: optionalString('reconcile-reason', 'Concrete reason for reconciling an existing cycle'),
       bindings: optionalString('bindings', 'Exact phase-to-branch/base-branch map as JSON'),
       review: optionalString('review', 'Accepted exact-document independent review as JSON, when required'),
