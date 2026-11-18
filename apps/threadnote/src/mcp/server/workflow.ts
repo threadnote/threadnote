@@ -16,7 +16,13 @@ import {NativeCycleReviewSchema} from '@threadnote/workflow-automations/cycle-re
 import {NativeCycleValidationSchema} from '@threadnote/workflow-automations/cycle';
 import {NativeTaskAnchorSchema} from '@threadnote/workflow-automations/task';
 import {NativeCompactIntentSchema} from '@threadnote/workflow-automations/authoring';
-import {nativeNextForTaskAction, nativeWorkflowPolicies} from '@threadnote/workflow-automations/gates';
+import {
+  fillNativeNext,
+  nativeNextForTaskAction,
+  nativeNext,
+  nativeRefusal,
+  nativeWorkflowPolicies,
+} from '@threadnote/workflow-automations/gates';
 import type {RuntimeConfig} from './common.js';
 import type {EffectMcpServerAdapter} from '../../effect/ai/mcp.js';
 
@@ -206,7 +212,10 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
         ...(detail === undefined ? {} : {detail}),
         ...(outputKey === undefined ? {} : {outputKey}),
       });
-      const next = nativeNextForTaskAction(result.next.action, runId, callerCwd, result.delivery);
+      const next = fillNativeNext(nativeNextForTaskAction(result.next.action, runId, callerCwd, result.delivery), {
+        taskRef: result.taskRef,
+        snapshotRef: result.phase?.snapshot?.snapshotRef,
+      });
       const response =
         next.tool === 'workflow_task_view'
           ? result
@@ -267,7 +276,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
       inputSchema: {
         runId: McpInput.requiredString(),
         callerCwd: McpInput.requiredString(),
-        taskRef: McpInput.requiredString(),
+        taskRef: Schema.optionalKey(McpInput.requiredString()),
         control: Schema.Union([
           Schema.Struct({command: Schema.Literal('begin')}),
           Schema.Struct({
@@ -308,6 +317,10 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
       },
     },
     Effect.fn('mcp_server.workflowTaskControl')(function* ({runId, callerCwd, taskRef, control}) {
+      if (taskRef === undefined && control.command !== 'waive' && control.command !== 'set-profile')
+        return yield* nativeRefusal('invalid-request', `Control ${control.command} needs the current card taskRef.`, {
+          next: nativeNext.view({runId, callerCwd}),
+        });
       const request =
         control.command === 'begin'
           ? {command: control.command, runId, callerCwd, taskRef}

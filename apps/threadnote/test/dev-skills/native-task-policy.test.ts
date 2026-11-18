@@ -612,19 +612,20 @@ describe('audited waivers', () => {
         ...validation,
       });
       expect(refused).toMatchObject({code: 'review-pending', next: {tool: 'workflow_task_control'}});
-      const taskRef = String((yield* readNativeTaskView(f.config, scope)).taskRef);
       const next = object(refused.next);
-      const authority = {taskRef, reason: 'No reviewer is available.', userAuthority: 'User: ship it unreviewed.'};
+      expect(next.arguments).not.toHaveProperty('taskRef');
+      const authority = {reason: 'No reviewer is available.', userAuthority: 'User: ship it unreviewed.'};
       expect(yield* invoke(String(next.tool), fill(next.arguments, authority))).toMatchObject({status: 'waived'});
       const card = yield* invoke('workflow_task_view', scope);
+      const snapshotRef = object(object(card.phase).snapshot).snapshotRef;
+      expect(snapshotRef).toMatch(/^taskref-/u);
       expect(card.next).toMatchObject({
         action: 'validate',
         tool: 'workflow_task_record_validation',
-        arguments: {...scope, snapshotRef: '<snapshotRef>', checks: '<checks>', acceptance: '<acceptance>'},
+        arguments: {...scope, snapshotRef, checks: '<checks>', acceptance: '<acceptance>'},
       });
       const control = (profile: 'standard' | 'strict') => ({
         ...scope,
-        taskRef,
         control: {command: 'set-profile', profile, reason: 'Release work needs every gate.'},
       });
       expect(yield* invoke('workflow_task_control', control('strict'))).toMatchObject({status: 'changed'});

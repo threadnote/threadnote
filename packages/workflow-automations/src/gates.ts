@@ -124,19 +124,24 @@ const sameShape = (
   fields: Readonly<Record<string, string>>,
 ) => nativeNextCommand(tool, command, {command: cliCommand, flags: fields}, fields);
 
-/** A `workflow_task_control` command; MCP nests it under `control` beside the current task card's `taskRef`. */
+/**
+ * A `workflow_task_control` command; MCP nests it under `control`, beside the current task card's `taskRef` for the
+ * commands that act on that card.
+ */
 export const nativeControlNext = (
   scope: NativeNextScope,
   command: string,
   fields: Readonly<Record<string, string>>,
-  cliTaskRef = true,
-) =>
-  nativeNextCommand(
+  cardBound = true,
+) => {
+  const taskRef: Readonly<Record<string, string>> = cardBound ? {taskRef: '<taskRef>'} : {};
+  return nativeNextCommand(
     'workflow_task_control',
     command,
-    {command: 'task-action ' + command, flags: {...scope, ...(cliTaskRef ? {taskRef: '<taskRef>'} : {}), ...fields}},
-    {...scope, taskRef: '<taskRef>', control: {command, ...fields}},
+    {command: 'task-action ' + command, flags: {...scope, ...taskRef, ...fields}},
+    {...scope, ...taskRef, control: {command, ...fields}},
   );
+};
 
 /** The next legal commands of the dev-cycle, each callable as given on MCP and on the CLI. */
 export const nativeNext = {

@@ -737,6 +737,7 @@ describe('Threadnote MCP toolsets', () => {
         expect(variantsByCommand.get('set-profile')?.required).toEqual(['command', 'profile', 'reason']);
         for (const field of ['runId', 'callerCwd', 'taskRef'])
           expect(controlProperties[field]).toMatchObject({type: 'string', minLength: 1});
+        expect(decodeJsonObject(workflowTaskControl?.inputSchema).required).toEqual(['runId', 'callerCwd', 'control']);
         expect(variantsByCommand.get('begin')?.required).toEqual(['command']);
         expect(variantsByCommand.get('resume')?.required).toEqual(['command', 'reason']);
         expect(variantsByCommand.get('resume')?.properties.reason).toMatchObject({type: 'string', minLength: 1});
