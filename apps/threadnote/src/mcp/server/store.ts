@@ -145,6 +145,11 @@ export function registerStoreTool(
       },
       context: McpToolCallContext,
     ) {
+      // Accept the same compact memories/ pointers that recall returns and read_context resolves.
+      const checkedReplaceUri = optionalResourceUri(replaceUri, name, 'replaceUri', {personalMemoryUser: config.user});
+      if (!checkedReplaceUri.ok) {
+        return checkedReplaceUri.error;
+      }
       const ownedArgs = {
         callerCwd,
         citationPolicy,
@@ -156,7 +161,7 @@ export function registerStoreTool(
         references,
         regenerateKeywords,
         relations,
-        replaceUri,
+        replaceUri: checkedReplaceUri.value,
         sourceAgentClient,
         status,
         team,
@@ -174,10 +179,6 @@ export function registerStoreTool(
       const checkedText = requiredText(text, name, 'text', {text: 'Durable engineering note...'});
       if (!checkedText.ok) {
         return checkedText.error;
-      }
-      const checkedReplaceUri = optionalResourceUri(replaceUri, name, 'replaceUri');
-      if (!checkedReplaceUri.ok) {
-        return checkedReplaceUri.error;
       }
       const checkedReferences = optionalResourceUriList(references, name);
       if (!checkedReferences.ok) {
