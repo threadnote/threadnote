@@ -64,6 +64,8 @@ const retainedCommitRef = Schema.String.check(
 const comparisonEvidence = Schema.Struct({
   version: Schema.Literal(1),
   baseBranch: text(),
+  /** The remote-tracking upstream that answered for a stale local `baseBranch`; the PR still targets `baseBranch`. */
+  comparisonRef: Schema.optionalKey(text()),
   baseTree: gitObject,
   sourceRef: retainedCommitRef,
   baseRef: retainedCommitRef,

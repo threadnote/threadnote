@@ -67,6 +67,7 @@ import {
   verifyNativeCycleBaseRequalification,
   makeWorkflowGitAdapter,
   nativeCycleRelativePath,
+  resolveNativeCycleBase,
 } from './cycle_git.js';
 import {nativeWorkflowError} from './memory.js';
 import {
@@ -230,16 +231,14 @@ const currentSnapshot = Effect.fn('workflowAutomation.cycle.checkSnapshot')(func
   if (phase) {
     const base = historicalComparison
       ? snapshot.declaredBaseHead
-      : EffectString.trim(
-          yield* git(repo, ['rev-parse', '--verify', '--end-of-options', phase.baseBranch + '^{commit}']).pipe(
-            Effect.mapError(() =>
-              fail(
-                'review-stale',
-                'The current declared base is unavailable; restore its approved binding before validation or publication.',
-              ),
+      : (yield* resolveNativeCycleBase(repo, phase.baseBranch).pipe(
+          Effect.mapError(() =>
+            fail(
+              'review-stale',
+              'The current declared base is unavailable; restore its approved binding before validation or publication.',
             ),
           ),
-        );
+        )).commit;
     const branch = EffectString.trim(yield* git(repo, ['branch', '--show-current']));
     // A phase on its own base branch advances that base with the commit it accepts; the tree check below binds it.
     const acceptedOwnBase = phase.baseBranch === phase.branch && acceptedHead !== undefined && base === acceptedHead;
@@ -954,6 +953,7 @@ export const runNativeCycle = <R>(
             comparisonEvidence: {
               version: 1,
               baseBranch: selected.baseBranch,
+              ...(scope.comparisonRef ? {comparisonRef: scope.comparisonRef} : {}),
               baseTree: EffectString.trim(yield* git(repo, ['rev-parse', scope.declaredBaseHead + '^{tree}'])),
               // Ordinary merges retain these same commits inside their fenced ref/state transaction.
               sourceRef:
@@ -997,9 +997,7 @@ export const runNativeCycle = <R>(
             : sourceSnapshot;
           if (baseRequalification || rebaseRecovery) {
             const closing = yield* captureNativeCycleSource(repo, baseline.tree);
-            const declared = EffectString.trim(
-              yield* git(repo, ['rev-parse', '--verify', '--end-of-options', selected.baseBranch + '^{commit}']),
-            );
+            const declared = (yield* resolveNativeCycleBase(repo, selected.baseBranch)).commit;
             const branch = EffectString.trim(yield* git(repo, ['branch', '--show-current']));
             if (
               closing.head !== captured.head ||

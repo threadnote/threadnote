@@ -1359,7 +1359,11 @@ describe('native task actions', () => {
       );
       const firstSnapshot = object(object(firstResult.snapshot).snapshot);
       const firstSnapshotRef = String(firstResult.snapshotRef);
-      expect(new TextEncoder().encode(JSON.stringify(firstResult.snapshot)).byteLength).toBeGreaterThan(16_384);
+      const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
+      const storedFirst = (yield* readNativeWorkflowState(f.config, 'native-run'))?.state.cycle?.snapshots.at(-1);
+      expect(bytes(storedFirst)).toBeGreaterThan(16_384);
+      expect(object(firstResult.snapshot).counts).toMatchObject({files: affectedPaths.length + 1});
+      expect(bytes(firstResult.snapshot)).toBeLessThan(4_096);
       expect(decodeNativeTaskActionRef(firstSnapshotRef)).toMatchObject({
         snapshotId: firstSnapshot.snapshotId,
         sourceHead: firstSnapshot.head,
@@ -1408,6 +1412,7 @@ describe('native task actions', () => {
       const recovered = object(recoveryResponse.structuredContent);
       expect(recovered).toMatchObject({status: 'recorded', replayed: false});
       const secondSnapshot = object(object(recovered.snapshot).snapshot);
+      const storedSecond = (yield* readNativeWorkflowState(f.config, 'native-run'))?.state.cycle?.snapshots.at(-1);
       expect(secondSnapshot).toMatchObject({
         snapshotId: expect.stringMatching(/^superseded-/u),
         supersedes: firstSnapshot.snapshotId,
@@ -1416,7 +1421,8 @@ describe('native task actions', () => {
         baseTree: firstSnapshot.baseTree,
       });
       expect(secondSnapshot.tree).not.toBe(firstSnapshot.tree);
-      expect(new TextEncoder().encode(JSON.stringify(recovered.snapshot)).byteLength).toBeGreaterThan(16_384);
+      expect(object(recovered.snapshot).counts).toMatchObject({files: affectedPaths.length + 1});
+      expect(bytes(recoveryResponse)).toBeLessThan(8_192);
       expect(decodeNativeTaskActionRef(String(recovered.snapshotRef))).toMatchObject({
         snapshotId: secondSnapshot.snapshotId,
         sourceHead: secondSnapshot.head,
@@ -1487,8 +1493,8 @@ describe('native task actions', () => {
       expect(review.status).toBe('recorded');
       const runtime = (yield* readNativeWorkflowState(f.config, 'native-run'))?.state.cycle;
       expect(runtime?.snapshots).toHaveLength(2);
-      expect(runtime?.snapshots[0]?.snapshot).toEqual(firstSnapshot);
-      expect(runtime?.snapshots[1]?.snapshot).toEqual(secondSnapshot);
+      expect(runtime?.snapshots[0]?.snapshot).toEqual(storedFirst?.snapshot);
+      expect(runtime?.snapshots[1]?.snapshot).toEqual(storedSecond?.snapshot);
       expect(EffectArray.map(runtime?.reviews ?? [], item => item.report.mode)).toEqual(['full']);
     }).pipe(run),
   );
@@ -1517,6 +1523,9 @@ describe('native task actions', () => {
           ).snapshot,
         ).snapshot,
       );
+      const staleStored = (yield* readNativeWorkflowState(f.config, 'native-run'))?.state.cycle?.snapshots.at(
+        -1,
+      )?.snapshot;
       const plan = yield* f.revise({
         phases: EffectArray.map(f.document.phases, phase => ({...phase, outcome: 'Amended approved outcome.'})),
       });
@@ -1559,7 +1568,7 @@ describe('native task actions', () => {
       expect(object(yield* record('incremental'))).toMatchObject({status: 'invalid'});
       expect(object(yield* record('full'))).toMatchObject({status: 'recorded'});
       const runtime = (yield* readNativeWorkflowState(f.config, 'native-run'))?.state.cycle;
-      expect(runtime?.snapshots[0]?.snapshot).toEqual(stale);
+      expect(runtime?.snapshots[0]?.snapshot).toEqual(staleStored);
       expect(EffectArray.map(runtime?.reviews ?? [], item => item.snapshotId)).toEqual([current.snapshotId]);
     }).pipe(run),
   );
@@ -1662,6 +1671,9 @@ describe('native task actions', () => {
           }),
         );
         const prior = object(object(priorResult.snapshot).snapshot);
+        const priorStored = (yield* readNativeWorkflowState(f.config, 'native-run'))?.state.cycle?.snapshots.at(
+          -1,
+        )?.snapshot;
         const predecessorRef = String(priorResult.snapshotRef);
         const priorFinding = {
           id: 'F1011',
@@ -1934,7 +1946,7 @@ describe('native task actions', () => {
         expect(beforeReviewState.state.cycle.reviewLimits).toEqual(reviewLimits);
         expect(beforeReviewState.state.cycle.reviews[0]).toEqual(historicalReviews[0]);
         expect(beforeReviewState.state.cycle.attempts.slice(0, historicalAttempts.length)).toEqual(historicalAttempts);
-        expect(beforeReviewState.state.cycle.snapshots[0]?.snapshot).toEqual(prior);
+        expect(beforeReviewState.state.cycle.snapshots[0]?.snapshot).toEqual(priorStored);
         const requalifiedFullReport = {
           ...priorReview,
           findings: [{...priorFinding, state: 'carried', reason: 'Retained and rechecked after base requalification.'}],

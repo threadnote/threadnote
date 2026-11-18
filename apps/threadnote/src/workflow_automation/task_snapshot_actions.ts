@@ -20,6 +20,7 @@ import {
   cycleRequest,
   fail,
   inCheckout,
+  nativeTaskSnapshotSummary,
   taskActionSnapshotRef,
   type NativeTaskStoredState,
   type NativeTaskCycleRuntime,
@@ -149,7 +150,7 @@ export const runNativeTaskSnapshotAction = (
       return {
         status: 'recorded',
         replayed: alreadyAdmitted._tag === 'Some',
-        snapshot: canonical,
+        snapshot: nativeTaskSnapshotSummary(canonical),
         snapshotRef: taskActionSnapshotRef(ref, canonical),
       };
     }
@@ -222,7 +223,7 @@ export const runNativeTaskSnapshotAction = (
       return {
         status: 'recorded',
         replayed: true,
-        snapshot: admitted,
+        snapshot: nativeTaskSnapshotSummary(admitted),
         snapshotRef: taskActionSnapshotRef(ref, admitted),
       };
     }
@@ -281,7 +282,7 @@ export const runNativeTaskSnapshotAction = (
     return {
       status: 'recorded',
       replayed: false,
-      snapshot: canonical,
+      snapshot: nativeTaskSnapshotSummary(canonical),
       snapshotRef: taskActionSnapshotRef(ref, canonical),
     };
   });

@@ -835,6 +835,31 @@ export const nativeCycleIsAncestor = Effect.fn('workflowAutomation.cycle.isAnces
   return yield* fail('invalid-base-requalification', 'Git could not verify source ancestry.');
 });
 
+/**
+ * The commit a declared base compares against. A local branch that is a strict ancestor of its remote-tracking
+ * upstream is a stale label, so the upstream answers and the declared name stays the PR target. A diverged branch
+ * keeps its own commit. No ref moves.
+ */
+export const resolveNativeCycleBase = Effect.fn('workflowAutomation.cycle.resolveBase')(function* (
+  repo: string,
+  baseBranch: string,
+) {
+  const commit = yield* resolveObject(repo, baseBranch, 'commit');
+  // A remote-tracking, ambiguous or non-branch name resolves elsewhere and keeps its own commit.
+  const [tip, upstream] = EffectString.split(
+    EffectString.trim(
+      yield* git(repo, ['for-each-ref', '--format=%(objectname) %(upstream)', `refs/heads/${baseBranch}`]),
+    ),
+    ' ',
+  );
+  if (tip !== commit || !upstream || !EffectString.startsWith('refs/remotes/')(upstream)) return {commit};
+  const tracked = yield* resolveObject(repo, upstream, 'commit').pipe(Effect.option);
+  if (Option.isNone(tracked) || tracked.value === commit) return {commit};
+  if (yield* nativeCycleIsAncestor(repo, commit, tracked.value))
+    return {commit: tracked.value, comparisonRef: upstream};
+  return (yield* nativeCycleIsAncestor(repo, tracked.value, commit)) ? {commit} : {commit, divergedUpstream: upstream};
+});
+
 export const verifyNativeCycleBaseRequalification = Effect.fn('workflowAutomation.cycle.verifyBaseRequalification')(
   function* (
     repo: string,

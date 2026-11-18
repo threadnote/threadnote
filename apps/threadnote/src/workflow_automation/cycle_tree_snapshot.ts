@@ -23,6 +23,7 @@ import {
   pinNativeCycleTree,
   readNativeCycleTreeEntries,
   nativeCycleChangeDigest,
+  resolveNativeCycleBase,
 } from './cycle_git.js';
 
 type Phase = NativeCycleState['plan']['phases'][number];
@@ -47,7 +48,7 @@ export const readNativeCycleIncoming = Effect.fn('workflowAutomation.cycle.incom
   baseline: Baseline,
   outOfPlan?: string[],
 ) {
-  const base = yield* git(repo, ['rev-parse', '--verify', '--end-of-options', phase.baseBranch + '^{commit}']);
+  const {commit: base, comparisonRef} = yield* resolveNativeCycleBase(repo, phase.baseBranch);
   const common = yield* git(repo, ['merge-base', base, captured.head]);
   const scope = yield* captureNativeCycleSource(repo, common);
   if (scope.head !== captured.head || scope.tree !== captured.tree)
@@ -93,6 +94,7 @@ export const readNativeCycleIncoming = Effect.fn('workflowAutomation.cycle.incom
     incoming,
     scopeBase: scope.baseTree,
     declaredBaseHead: base,
+    ...(comparisonRef ? {comparisonRef} : {}),
     scopeFiles: EffectRecord.keys(scope.files).sort(),
   };
 });
@@ -154,8 +156,8 @@ export const recordNativeCycleTreeSnapshot = Effect.fn('workflowAutomation.cycle
   if (!baseline && EffectRecord.isEmptyRecord((yield* captureNativeCycleSource(repo, 'HEAD')).files))
     baseline = yield* input.pinBaseline(phase.id);
   if (!baseline) {
-    const declared = yield* git(repo, ['rev-parse', '--verify', '--end-of-options', phase.baseBranch + '^{commit}']);
-    const head = yield* git(repo, ['merge-base', declared, 'HEAD']);
+    const declared = yield* resolveNativeCycleBase(repo, phase.baseBranch);
+    const head = yield* git(repo, ['merge-base', declared.commit, 'HEAD']);
     const tree = yield* git(repo, ['rev-parse', head + '^{tree}']);
     baseline = {
       repo,
@@ -229,6 +231,7 @@ export const recordNativeCycleTreeSnapshot = Effect.fn('workflowAutomation.cycle
     comparisonEvidence: {
       version: 1,
       baseBranch: phase.baseBranch,
+      ...(scope.comparisonRef ? {comparisonRef: scope.comparisonRef} : {}),
       baseTree: yield* git(repo, ['rev-parse', scope.declaredBaseHead + '^{tree}']),
       sourceRef: yield* pinNativeCycleCommit(repo, bindingId, snapshotId, captured.head, 'snapshot-head'),
       baseRef: yield* pinNativeCycleCommit(repo, bindingId, snapshotId, scope.declaredBaseHead, 'snapshot-base'),

@@ -13,7 +13,7 @@ import {nativeCycleHasBasePlanTransition} from '@threadnote/workflow-automations
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {gitValue} from '../utils.js';
-import {verifyNativeCycleBaseRequalification} from './cycle_git.js';
+import {resolveNativeCycleBase, verifyNativeCycleBaseRequalification} from './cycle_git.js';
 import type {readNativeWorkflowState} from './store.js';
 
 export type NativeTaskStoredState = NonNullable<Effect.Success<ReturnType<typeof readNativeWorkflowState>>>;
@@ -106,6 +106,20 @@ export const taskActionSnapshotRef = (work: NativeTaskActionRef, entry: unknown)
   });
 };
 
+/** The facade view of a canonical snapshot entry. Path lists become counts so that the response stays bounded. */
+export const nativeTaskSnapshotSummary = ({snapshot, incoming}: NativeTaskCycleRuntime['snapshots'][number]) => {
+  const {files, scopeFiles, outOfPlan = [], ...identity} = snapshot;
+  return {
+    snapshot: identity,
+    counts: {
+      files: files.length,
+      scopeFiles: scopeFiles.length,
+      outOfPlan: outOfPlan.length,
+      incoming: incoming.length,
+    },
+  };
+};
+
 export const reviewAttemptRef = (ref: NativeTaskActionRef, attemptId: string, payloadDigest: string): string =>
   encodeNativeTaskActionRef({...ref, kind: 'snapshot', attemptId, payloadDigest});
 
@@ -137,9 +151,9 @@ export const resolveNativeTaskBaseRef = Effect.fn('workflowAutomation.task.resol
     checkout,
   );
   if (!ref || !/^refs\/(?:heads|remotes)\/[^\s]+$/u.test(ref)) return undefined;
-  const commit = yield* gitValue(['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`], checkout);
-  if (!commit || !gitObjectId.test(commit)) return undefined;
-  return {ref, commit};
+  const base = yield* resolveNativeCycleBase(checkout, baseBranch).pipe(Effect.option);
+  if (Option.isNone(base) || !gitObjectId.test(base.value.commit)) return undefined;
+  return {ref, commit: base.value.commit};
 });
 
 export const nativeTaskBindingsCanReconcile = Effect.fn('workflowAutomation.task.validateReconcileBindings')(function* (
