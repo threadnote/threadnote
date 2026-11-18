@@ -8,7 +8,7 @@ import {recallEmbeddingWakeLayer, resumeExistingRecallEmbeddingDemand} from '../
 import {codeGraphRuntimeAdapters} from '../code_graph/runtime_adapters.js';
 import * as BunHttpClient from '@effect/platform-bun/BunHttpClient';
 import * as BunServices from '@effect/platform-bun/BunServices';
-import {Effect, Layer} from 'effect';
+import {Cause, Effect, Layer} from 'effect';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {threadnoteCliFormatterLayer} from './cli/help.js';
 import {CliOutput} from './cli/output.js';
@@ -35,6 +35,8 @@ import {
 } from '../memory/deferred/code_anchor_index_heal.js';
 import {deferredCodeAnchorRefreshSchedulerLayer} from '../memory/deferred/code_anchor_refresh.js';
 import {recallResourceInvalidationLayer} from '@threadnote/recall/resource-invalidation';
+import {emitRecallDiagnostic, recallDiagnosticScope} from '@threadnote/recall/diagnostics';
+import {productionRecallDiagnosticsLayer} from './production_log.js';
 import {
   commandLayer,
   standaloneBrokerLayerForHome,
@@ -58,7 +60,16 @@ export function applicationLayerWithCommands(
     Layer.provide(integrationConfigurationLayer),
     Layer.provide(systemLayer),
   );
-  const resourceStoreLayer = ResourceStore.layer.pipe(
+  const resourceStoreLayer = ResourceStore.layerWith({
+    onRecallInvalidationFailed: event =>
+      emitRecallDiagnostic(event.home, {
+        event: 'recall.invalidation-failed',
+        scope: recallDiagnosticScope(event.includeInactive),
+        stage: 'store-expire',
+        invalidatedUriCount: event.invalidatedUriCount,
+        error: Cause.squash(event.cause),
+      }),
+  }).pipe(
     Layer.provide(externalSourcePolicyLayer),
     Layer.provide(recallResourceInvalidationLayer),
     Layer.provide(systemLayer),
@@ -125,6 +136,7 @@ export function applicationLayerWithCommands(
 
   const ApplicationServicesLayer = Layer.mergeAll(
     BackgroundInferenceAdmission.layer.pipe(Layer.provideMerge(systemLayer)),
+    productionRecallDiagnosticsLayer.pipe(Layer.provide(systemLayer)),
     cliOutputLayer,
     graphEmbeddingWorkerProcessLayer,
     threadnoteCliFormatterLayer,

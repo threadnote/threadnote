@@ -594,7 +594,18 @@ printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
   die "Resolved release version is invalid."
 platform="$(platform_name)"
 architecture="$(architecture_name)"
-artifact="threadnote-$platform-$architecture.tar.gz"
+libc_suffix=""
+if [ "$platform" = linux ]; then
+  # ldd reports the host libc; a missing ldd is an error rather than a glibc guess.
+  require_command ldd
+  libc_description="$(ldd --version 2>&1 || true)"
+  case "$libc_description" in
+    *musl*) libc_suffix="-musl" ;;
+    *GLIBC*|*glibc*|*GNU*) libc_suffix="" ;;
+    *) die "Unable to identify Linux libc for the release archive." ;;
+  esac
+fi
+artifact="threadnote-$platform-$architecture$libc_suffix.tar.gz"
 tag="v$version"
 download_root="${THREADNOTE_RELEASE_DOWNLOAD_ROOT:-https://github.com/$REPOSITORY/releases/download/$tag}"
 temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/threadnote-install.XXXXXX")"
@@ -637,8 +648,10 @@ if [ "$platform" = "darwin" ] &&
   [ -z "${THREADNOTE_RELEASE_DOWNLOAD_ROOT:-}" ]; then
   require_command codesign
   require_command file
-  find "$staged_root/runtime" -type f -print |
+  # Native code can live outside runtime, including portable llama/localBuilds.
+  find "$staged_root" -type f -print |
     while IFS= read -r native_file; do
+      [ "$native_file" != "$staged_root/threadnote" ] || continue
       if file "$native_file" | grep -q 'Mach-O'; then
         verify_code_signature "$native_file"
       fi

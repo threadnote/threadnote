@@ -7,6 +7,7 @@
     "./chunker": "./src/chunker.ts",
     "./code_links": "./src/code_links.ts",
     "./connection_confidence": "./src/connection_confidence.ts",
+    "./diagnostics": "./src/diagnostics.ts",
     "./eligibility": "./src/eligibility.ts",
     "./evaluate": "./src/evaluate.ts",
     "./feedback": "./src/feedback.ts",
@@ -44,7 +45,8 @@
     "./warning": "./src/warning.ts",
     "./background/demand": "./src/background/demand.ts",
     "./background/vector-step": "./src/background/vector-step.ts",
-    "./background/lexical-demand": "./src/background/lexical-demand.ts"
+    "./background/lexical-demand": "./src/background/lexical-demand.ts",
+    "./vector/native-reader-payload": "./src/vector/native-reader-payload.ts"
   },
   "dependencies": {
     "@threadnote/platform": "workspace:*",

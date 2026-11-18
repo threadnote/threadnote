@@ -268,9 +268,8 @@ effectIt.effect('verifies only the base or exact packaged patch without mutating
     );
     expect(denied.exitCode).not.toBe(0);
     expect(new TextDecoder().decode(denied.stderr)).toContain("transport 'https' not allowed");
-    const workflow = yield* fs.readFileString(path.join(process.cwd(), '.github/workflows/native-release-smoke.yml'));
-    expect(workflow).toContain(
-      'GIT_ALLOW_PROTOCOL=file node node_modules/node-llama-cpp/dist/cli/cli.js source download',
-    );
+    // The release musl source clone now runs inside the native inference assembler, not the workflow script.
+    const assembler = yield* fs.readFileString(path.join(process.cwd(), 'scripts/assemble-native-inference.ts'));
+    expect(assembler).toContain("env: {...Bun.env, GIT_ALLOW_PROTOCOL: 'file'}");
   }).pipe(provideTestLayer(BunServices.layer)),
 );

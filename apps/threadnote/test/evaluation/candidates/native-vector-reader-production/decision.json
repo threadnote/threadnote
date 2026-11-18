@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "capability": "rust-owned-vector-reader",
+  "status": "unqualified",
+  "adoptionDecision": "defer-shipping-until-complete-R5-evidence",
+  "privateMatchingCandidatePayloadExecutes": true,
+  "qualifiedPlatforms": [],
+  "qualificationCandidates": [
+    "bun-darwin-arm64",
+    "bun-darwin-x64",
+    "bun-linux-arm64",
+    "bun-linux-arm64-musl",
+    "bun-linux-x64-baseline",
+    "bun-linux-x64-baseline-musl",
+    "bun-windows-arm64",
+    "bun-windows-x64-baseline"
+  ],
+  "gates": {
+    "pairedRunsMinimum": 3,
+    "warmQueriesPerArmMinimum": 30,
+    "primaryCase": "100000-dense",
+    "primaryP95ImprovementMinimum": 0.2,
+    "secondaryCaseDocuments": 10000,
+    "secondaryP95MaximumRegression": "max(5 milliseconds, 5 percent)",
+    "sampledProcessTreePeakRssMaximumGrowth": 0.1,
+    "distributions": ["dense", "tied"],
+    "firstUseSeparate": true,
+    "exactQueryAndScalarOracleParityRequired": true,
+    "productionCanonicalWorkerAndUnchangedDeadlinesRequired": true
+  },
+  "evidence": {
+    "darwin": "local-results.json",
+    "linux": "linux-results.json",
+    "allProfiles": "platform-results.json"
+  },
+  "reason": "Native-only all-eight qualification is pending. Earlier omitted-addon/source diagnostics remain historical and unqualified; no frozen native-only 3x30 paired capture has passed on any profile.",
+  "rollout": "native-only-all-eight",
+  "baseline": {
+    "commit": "66f4c1d8baed033ec484f4db2895ea2252b4e2d0",
+    "method": "independently frozen TypeScript semantic executable; shared verified inference overlay explicitly identified"
+  }
+}

@@ -70,9 +70,12 @@ The absolute command printed at the end of installation also works immediately, 
 `"$HOME/.local/bin/threadnote" doctor --dry-run`. A custom `THREADNOTE_BIN_DIR` is never added to a profile
 automatically; add that directory to `PATH` yourself or use its absolute launcher path.
 
+The installer also writes `tn`, a short alias that runs the same release as `threadnote`. If that directory already
+holds a `tn` that Threadnote did not write, the installer keeps it, prints a warning, and doctor does not report it.
+
 On Windows, launchers live in `%LOCALAPPDATA%\Threadnote\bin` (or `THREADNOTE_BIN_DIR`). The installer writes
 `threadnote.cmd` for cmd.exe and PowerShell plus an extensionless `threadnote` for Git Bash and other MSYS shells, and
-the same pair for `threadnote-mcp-server`. Git Bash does not apply PATHEXT, so `threadnote` needs that extensionless
+the same pairs for `tn` and `threadnote-mcp-server`. Git Bash does not apply PATHEXT, so `threadnote` needs that extensionless
 file. `threadnote repair` recreates a missing managed launcher when a validated active standalone release is
 available; it does not switch launchers to the checkout running repair. After install, open a new terminal if
 `threadnote` is still not found; the installer also prepends the default bin directory to the Windows user `PATH`.

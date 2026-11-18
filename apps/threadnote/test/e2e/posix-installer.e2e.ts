@@ -1,3 +1,4 @@
+import {runtimeLinuxLibc} from '@threadnote/platform/system';
 import {Array as EffectArray} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {execFile} from '@threadnote/testing/node-child-process';
@@ -26,7 +27,8 @@ posixIt('POSIX bootstrap verifies and installs the standalone Bun release withou
   )(await Bun.file(join(process.cwd(), 'package.json')).json());
   const platform = process.platform === 'darwin' ? 'darwin' : 'linux';
   const architecture = process.arch === 'arm64' ? 'arm64' : 'x64';
-  const artifactName = `threadnote-${platform}-${architecture}.tar.gz`;
+  const libcSuffix = platform === 'linux' && runtimeLinuxLibc() === 'musl' ? '-musl' : '';
+  const artifactName = `threadnote-${platform}-${architecture}${libcSuffix}.tar.gz`;
   const artifact = join(root, artifactName);
   const checksum = `${artifact}.sha256`;
   const installRoot = join(root, 'install');
@@ -40,9 +42,23 @@ posixIt('POSIX bootstrap verifies and installs the standalone Bun release withou
       env: {
         ...process.env,
         THREADNOTE_ARTIFACTS_ROOT: root,
-        THREADNOTE_RELEASE_TARGET: `${platform}-${architecture}`,
+        THREADNOTE_RELEASE_TARGET: `${platform}-${architecture}${libcSuffix}`,
       },
     });
+    const inference = Schema.decodeUnknownSync(
+      Schema.Struct({files: Schema.Array(Schema.Struct({path: Schema.String}))}),
+    )(await Bun.file(join(process.cwd(), 'dist', 'native-inference.json')).json());
+    const vectorReader = Schema.decodeUnknownSync(Schema.Struct({binary: Schema.String}))(
+      await Bun.file(join(process.cwd(), 'dist', 'runtime', 'vector-reader', 'manifest.json')).json(),
+    );
+    const nativePayloadPaths = [
+      `runtime/vector-reader/${vectorReader.binary}`,
+      ...EffectArray.map(
+        EffectArray.filter(inference.files, file => /\.(?:node|dylib|so)$/u.test(file.path)),
+        file => file.path,
+      ),
+    ];
+    expect(nativePayloadPaths.length).toBeGreaterThan(1);
     const unsafeParentArtifact = join(root, 'unsafe-parent.tar.gz');
     const unsafeLinkArtifact = join(root, 'unsafe-link.tar.gz');
     await Promise.all([
@@ -69,8 +85,12 @@ posixIt('POSIX bootstrap verifies and installs the standalone Bun release withou
     const officialChecksum = join(root, `${officialArtifactName}.sha256`);
     const officialReleases = join(root, 'official-releases.json');
     const signatureLog = join(root, 'official-signatures.log');
-    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
-    const checksumHex = Effect.pipe(await readFile(checksum, 'utf8'), EffectString.trim).split(/\s+/, 1)[0];
+    const checksumHex = Effect.pipe(
+      await readFile(checksum, 'utf8'),
+      EffectString.trim,
+      EffectString.split(/\s+/),
+      EffectArray.headNonEmpty,
+    );
     await Promise.all([
       mkdir(officialToolsRoot),
       mkdir(officialInstallRoot),
@@ -130,7 +150,7 @@ esac
       file: `#!/bin/sh
 set -eu
 case "$1" in
-  *.so) printf '%s\\n' 'Mach-O 64-bit bundle' ;;
+  *.node|*.dylib|*.so) printf '%s\\n' 'Mach-O 64-bit bundle' ;;
   *) printf '%s\\n' 'data' ;;
 esac
 `,
@@ -179,6 +199,9 @@ esac
     expect(String(childProcessOutput(officialSignatureFailure, 'stderr'))).toContain(
       'Release signature validation failed',
     );
+    expect(
+      await Bun.file(join(officialInstallRoot, 'versions', packageManifest.version, 'release.json')).exists(),
+    ).toBe(false);
     const officialInstall = await execute(
       'sh',
       [join(process.cwd(), 'scripts', 'install.sh'), '--beta', '--no-start'],
@@ -202,8 +225,11 @@ esac
       `Installed standalone Threadnote ${packageManifest.version}`,
     );
     const signatureCommands = await readFile(signatureLog, 'utf8');
-    expect(signatureCommands).toMatch(/codesign .*\.so(?:\s|$)/);
+    const signatureLines = EffectString.split('\n')(signatureCommands);
+    for (const relativePath of nativePayloadPaths)
+      expect(EffectArray.some(signatureLines, line => EffectString.endsWith(`/${relativePath}`)(line))).toBe(true);
     expect(signatureCommands).toMatch(/codesign .*threadnote(?:\s|$)/);
+    expect(signatureCommands).not.toContain('runtime/node-llama-cpp.js');
     expect(signatureCommands).not.toContain('spctl');
     expect(`${officialInstall.stdout}${officialInstall.stderr}`).not.toContain('valid on disk');
 
@@ -447,13 +473,12 @@ esac
         },
       );
       expect(
-        Effect.Option.getOrUndefined(
-          Effect.Option.map(
-            // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native limited split and optional indexing preserve profile output parsing.
-            Effect.Option.fromNullishOr(profiledVersion.stdout.split('\n', 1)[0]?.split(':')),
-            __effectOptionalArrayReceiver =>
-              EffectArray.filter(__effectOptionalArrayReceiver, entry => entry === binRoot),
-          ),
+        Effect.pipe(
+          profiledVersion.stdout,
+          EffectString.split('\n'),
+          EffectArray.headNonEmpty,
+          EffectString.split(':'),
+          EffectArray.filter(entry => entry === binRoot),
         ),
       ).toHaveLength(1);
       expect(profiledVersion.stdout).toContain(join(binRoot, 'threadnote'));

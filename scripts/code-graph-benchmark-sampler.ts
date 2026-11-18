@@ -1,3 +1,4 @@
+import {makeWindowsProcessTreeSampler, WINDOWS_PROCESS_TREE_INTERVAL_MS} from './windows-process-tree-sampler.js';
 import {Array as EffectArray} from 'effect';
 import {ScriptSystemInfoLayer} from './effect/system-layer.js';
 import {provideScriptLayer, scriptError, ScriptError} from './effect/errors.js';
@@ -52,10 +53,14 @@ const ProcessTelemetrySchema = Schema.Union([
   withRest({
     availability: Schema.Literal('available'),
     ioCounters: Schema.optionalKey(Schema.Literal('linux-proc-read-write-bytes')),
-    parentIdentityValidation: Schema.Literals(['darwin-ps-lstart', 'linux-proc-starttime']),
+    parentIdentityValidation: Schema.Literals([
+      'darwin-ps-lstart',
+      'linux-proc-starttime',
+      'windows-process-creation-ticks',
+    ]),
     sampleIntervalMilliseconds: optionalNumber,
     scope: Schema.optionalKey(Schema.Literal('recursive-process-tree')),
-    source: Schema.Literals(['darwin-ps', 'linux-proc']),
+    source: Schema.Literals(['darwin-ps', 'linux-proc', 'windows-cim-dotnet']),
   }),
   withRest({
     availability: Schema.Literal('unavailable'),
@@ -88,13 +93,13 @@ const SamplerArtifactSchema = withRest({
   processTelemetry: ProcessTelemetrySchema,
   samples: Schema.Finite,
   temporaryTelemetry: Schema.optionalKey(TemporaryTelemetrySchema),
-  version: Schema.Literals([2, 3, 4]),
+  version: Schema.Literals([2, 3, 4, 5]),
 });
 const SamplerCheckpointSchema = withRest({
   sampler: SamplerArtifactSchema,
   state: Schema.Literals(['aborted', 'complete', 'parent-exited', 'running']),
   updatedAt: Schema.String,
-  version: Schema.Literals([2, 3, 4]),
+  version: Schema.Literals([2, 3, 4, 5]),
 });
 function decodeJson<S extends Schema.ConstraintDecoder<unknown>>(schema: S, value: unknown): S['Type'] {
   return Schema.decodeUnknownSync(schema)(value);
@@ -127,10 +132,10 @@ export type CodeGraphBenchmarkSamplerProcessTelemetry =
   | {
       readonly availability: 'available';
       readonly ioCounters?: 'linux-proc-read-write-bytes';
-      readonly parentIdentityValidation: 'darwin-ps-lstart' | 'linux-proc-starttime';
+      readonly parentIdentityValidation: 'darwin-ps-lstart' | 'linux-proc-starttime' | 'windows-process-creation-ticks';
       readonly sampleIntervalMilliseconds?: number;
       readonly scope?: 'recursive-process-tree';
-      readonly source: 'darwin-ps' | 'linux-proc';
+      readonly source: 'darwin-ps' | 'linux-proc' | 'windows-cim-dotnet';
     }
   | {
       readonly availability: 'unavailable';
@@ -283,14 +288,14 @@ export interface CodeGraphBenchmarkSamplerArtifact {
   readonly samples: number;
   readonly rssPeakDiagnostic?: BenchmarkRssPeakDiagnostic;
   readonly temporaryTelemetry?: CodeGraphBenchmarkSamplerTemporaryTelemetry;
-  readonly version: 2 | 3 | 4;
+  readonly version: 2 | 3 | 4 | 5;
 }
 
 export interface CodeGraphBenchmarkSamplerCheckpoint {
   readonly sampler: CodeGraphBenchmarkSamplerArtifact;
   readonly state: 'aborted' | 'complete' | 'parent-exited' | 'running';
   readonly updatedAt: string;
-  readonly version: 2 | 3 | 4;
+  readonly version: 2 | 3 | 4 | 5;
 }
 
 export function parseCodeGraphBenchmarkSamplerArtifact(value: unknown): CodeGraphBenchmarkSamplerArtifact {
@@ -300,7 +305,7 @@ export function parseCodeGraphBenchmarkSamplerArtifact(value: unknown): CodeGrap
     throw ScriptError.make({message: 'Benchmark sampler artifact is invalid.'});
   const artifact: CodeGraphBenchmarkSamplerArtifact = value;
   if (
-    (artifact.version !== 2 && artifact.version !== 3 && artifact.version !== 4) ||
+    (artifact.version !== 2 && artifact.version !== 3 && artifact.version !== 4 && artifact.version !== 5) ||
     typeof artifact.intervalMilliseconds !== 'number' ||
     !Number.isSafeInteger(artifact.intervalMilliseconds) ||
     artifact.intervalMilliseconds < 10 ||
@@ -322,7 +327,9 @@ export function parseCodeGraphBenchmarkSamplerArtifact(value: unknown): CodeGrap
   let phaseSamples = 0;
   for (const [phase, sample] of EffectRecord.toEntries(artifact.phases)) {
     if (!phase || !isSamplerPhase(sample, processTelemetry, temporaryTelemetry, artifact.version)) {
-      throw ScriptError.make({message: `Benchmark sampler phase ${phase || '<empty>'} is invalid.`});
+      throw ScriptError.make({
+        message: `Benchmark sampler phase ${phase || '<empty>'} is invalid.`,
+      });
     }
     phaseSamples += sample.samples;
     if (!Number.isSafeInteger(phaseSamples))
@@ -333,7 +340,7 @@ export function parseCodeGraphBenchmarkSamplerArtifact(value: unknown): CodeGrap
   const phaseValues = EffectRecord.values(artifact.phases);
   if (
     artifact.rssPeakDiagnostic !== undefined &&
-    (artifact.version !== 4 ||
+    (artifact.version < 4 ||
       processTelemetry.availability !== 'available' ||
       !isRssPeakDiagnostic(artifact.rssPeakDiagnostic) ||
       artifact.rssPeakDiagnostic.rssBytes !==
@@ -486,7 +493,7 @@ export function parseCodeGraphBenchmarkSamplerCheckpoint(value: unknown): CodeGr
     throw ScriptError.make({message: 'Benchmark sampler checkpoint is invalid.'});
   const checkpoint: CodeGraphBenchmarkSamplerCheckpoint = value;
   if (
-    (checkpoint.version !== 2 && checkpoint.version !== 3 && checkpoint.version !== 4) ||
+    (checkpoint.version !== 2 && checkpoint.version !== 3 && checkpoint.version !== 4 && checkpoint.version !== 5) ||
     !['aborted', 'complete', 'parent-exited', 'running'].includes(checkpoint.state ?? '') ||
     typeof checkpoint.updatedAt !== 'string' ||
     !Number.isFinite(Date.parse(checkpoint.updatedAt))
@@ -511,7 +518,9 @@ function parseSamplerProcessTelemetry(
   try {
     telemetry = decodeJson(ProcessTelemetrySchema, value);
   } catch {
-    throw ScriptError.make({message: 'Benchmark sampler process telemetry does not match its platform.'});
+    throw ScriptError.make({
+      message: 'Benchmark sampler process telemetry does not match its platform.',
+    });
   }
   if (telemetry.availability === 'available') {
     const legacyLinux =
@@ -536,8 +545,15 @@ function parseSamplerProcessTelemetry(
       telemetry.source === 'darwin-ps' &&
       telemetry.scope === 'recursive-process-tree' &&
       telemetry.ioCounters === undefined;
+    const windowsTree =
+      version >= 5 &&
+      platform === 'win32' &&
+      telemetry.parentIdentityValidation === 'windows-process-creation-ticks' &&
+      telemetry.source === 'windows-cim-dotnet' &&
+      telemetry.scope === 'recursive-process-tree' &&
+      telemetry.ioCounters === undefined;
     if (
-      (legacyLinux || linuxTree || darwinTree) &&
+      (legacyLinux || linuxTree || darwinTree || windowsTree) &&
       (version === 2 ||
         (Number.isSafeInteger(telemetry.sampleIntervalMilliseconds) &&
           Number(telemetry.sampleIntervalMilliseconds) >= 10))
@@ -546,7 +562,7 @@ function parseSamplerProcessTelemetry(
     }
   }
   const expectedReason =
-    platform === 'linux' || (version >= 3 && platform === 'darwin')
+    platform === 'linux' || (version >= 3 && platform === 'darwin') || (version >= 5 && platform === 'win32')
       ? 'parent-inspection-unavailable'
       : 'unsupported-platform';
   if (
@@ -557,7 +573,9 @@ function parseSamplerProcessTelemetry(
   ) {
     return telemetry;
   }
-  throw ScriptError.make({message: 'Benchmark sampler process telemetry does not match its platform.'});
+  throw ScriptError.make({
+    message: 'Benchmark sampler process telemetry does not match its platform.',
+  });
 }
 
 function parseSamplerTemporaryTelemetry(
@@ -567,7 +585,9 @@ function parseSamplerTemporaryTelemetry(
 ): CodeGraphBenchmarkSamplerTemporaryTelemetry | undefined {
   if (version < 4) {
     if (value !== undefined)
-      throw ScriptError.make({message: 'Legacy benchmark sampler temporary telemetry must be omitted.'});
+      throw ScriptError.make({
+        message: 'Legacy benchmark sampler temporary telemetry must be omitted.',
+      });
     return undefined;
   }
   if (typeof value !== 'object' || value === null) {
@@ -577,7 +597,9 @@ function parseSamplerTemporaryTelemetry(
   try {
     telemetry = decodeJson(TemporaryTelemetrySchema, value);
   } catch {
-    throw ScriptError.make({message: 'Benchmark sampler temporary telemetry does not match its platform.'});
+    throw ScriptError.make({
+      message: 'Benchmark sampler temporary telemetry does not match its platform.',
+    });
   }
   if (
     telemetry.availability === 'available' &&
@@ -606,7 +628,9 @@ function parseSamplerTemporaryTelemetry(
   ) {
     return telemetry;
   }
-  throw ScriptError.make({message: 'Benchmark sampler temporary telemetry does not match its platform.'});
+  throw ScriptError.make({
+    message: 'Benchmark sampler temporary telemetry does not match its platform.',
+  });
 }
 
 function isSamplerPhase(
@@ -729,6 +753,7 @@ interface SamplerOptions {
   readonly processId: number;
   readonly readyPath: string;
   readonly rssPeakDiagnostics?: true;
+  readonly windowsProcessTree?: true;
   readonly stopPath: string;
   readonly temporaryRoot: string;
 }
@@ -742,10 +767,36 @@ const samplerMain = Effect.gen(function* () {
   let rssPeakDiagnostic: BenchmarkRssPeakDiagnostic | undefined;
   const canonicalTemporaryRoot = yield* canonicalDirectory(options.temporaryRoot);
   const clockTicksPerSecond = yield* linuxClockTicksPerSecond();
-  const processSampleIntervalMilliseconds = system.platform === 'darwin' ? 250 : options.intervalMilliseconds;
+  const windowsResult =
+    system.platform === 'win32' && options.windowsProcessTree === true
+      ? yield* makeWindowsProcessTreeSampler().pipe(Effect.result)
+      : undefined;
+  const windowsSampler = windowsResult?._tag === 'Success' ? windowsResult.success : undefined;
+  const windowsStartupFailure = windowsResult?._tag === 'Failure' ? windowsResult.failure.message : undefined;
+  const sampleProcessTree = (
+    pid: number,
+    ticks: number,
+    exclusions: readonly number[] = [],
+    tokenizer?: RssDiagnosticTokenizer,
+  ) =>
+    windowsSampler
+      ? windowsSampler
+          .sample(pid)
+          .pipe(
+            Effect.map(entries =>
+              entries === undefined ? undefined : aggregateProcessTree(entries, pid, undefined, exclusions, tokenizer),
+            ),
+          )
+      : readProcessTreeSample(pid, ticks, exclusions, tokenizer);
+  const processSampleIntervalMilliseconds =
+    system.platform === 'win32' && options.windowsProcessTree === true
+      ? WINDOWS_PROCESS_TREE_INTERVAL_MS
+      : system.platform === 'darwin'
+        ? 250
+        : options.intervalMilliseconds;
   const openFileSampleIntervalMilliseconds =
     system.platform === 'darwin' ? DARWIN_OPEN_FILE_SAMPLE_INTERVAL_MILLISECONDS : options.intervalMilliseconds;
-  const initialUnfilteredProcessSample = yield* readProcessTreeSample(
+  const initialUnfilteredProcessSample = yield* sampleProcessTree(
     options.processId,
     clockTicksPerSecond,
     [],
@@ -758,17 +809,21 @@ const samplerMain = Effect.gen(function* () {
   const initialProcessSample =
     samplerProcessTreeExclusions.length === 0
       ? initialUnfilteredProcessSample
-      : yield* readProcessTreeSample(
+      : yield* sampleProcessTree(
           options.processId,
           clockTicksPerSecond,
           samplerProcessTreeExclusions,
           diagnosticTokenizer,
         );
-  const processTelemetry = samplerProcessTelemetryContract(
-    system.platform,
-    initialProcessSample?.rootStartIdentity,
-    processSampleIntervalMilliseconds,
-  );
+  const processTelemetry = {
+    ...samplerProcessTelemetryContract(
+      system.platform,
+      initialProcessSample?.rootStartIdentity,
+      processSampleIntervalMilliseconds,
+      options.windowsProcessTree === true,
+    ),
+    ...(windowsStartupFailure === undefined ? {} : {diagnostic: windowsStartupFailure}),
+  };
   const parentStartIdentity = initialProcessSample?.rootStartIdentity;
   const initialTemporaryOpenFiles = initialProcessSample
     ? yield* readOpenTemporaryFileSnapshot(initialProcessSample.processIds, canonicalTemporaryRoot)
@@ -816,7 +871,7 @@ const samplerMain = Effect.gen(function* () {
           processSampleDue
             ? pendingInitialProcessSample !== undefined
               ? Effect.succeed(pendingInitialProcessSample)
-              : readProcessTreeSample(
+              : sampleProcessTree(
                   options.processId,
                   clockTicksPerSecond,
                   samplerProcessTreeExclusions,
@@ -856,7 +911,10 @@ const samplerMain = Effect.gen(function* () {
         : undefined;
     const temporaryBytes = mergeTemporaryFileSnapshots(temporaryLinkedFiles, temporaryOpenFiles).bytes;
     const parentExists = system.isProcessRunning(options.processId);
-    const parentExited = samplerParentExited(parentStartIdentity, processSample?.rootStartIdentity, parentExists);
+    const parentExited =
+      windowsSampler?.parentExited === true ||
+      samplerParentExited(parentStartIdentity, processSample?.rootStartIdentity, parentExists);
+    if (windowsSampler?.failure !== undefined) processTelemetry.diagnostic = windowsSampler.failure;
     const telemetrySample = processTelemetry.availability === 'available' && !parentExited ? processSample : undefined;
     if (diagnosticTokenizer !== undefined) {
       rssPeakDiagnostic = recordRssPeakDiagnostic(
@@ -939,11 +997,15 @@ const samplerMain = Effect.gen(function* () {
           temporaryTelemetry,
           samples,
           rssPeakDiagnostic,
+          options.windowsProcessTree === true,
         ),
         stopState,
       );
       if (!readyPublished) {
-        yield* atomicWriteFile(options.readyPath, '{"checkpointVersion":4,"version":1}\n');
+        yield* atomicWriteFile(
+          options.readyPath,
+          `${JSON.stringify({checkpointVersion: options.windowsProcessTree === true ? 5 : 4, version: 1, windowsHelper: windowsSampler?.identity})}\n`,
+        );
         readyPublished = true;
       }
       lastCheckpointAt = now;
@@ -959,6 +1021,7 @@ const samplerMain = Effect.gen(function* () {
     temporaryTelemetry,
     samples,
     rssPeakDiagnostic,
+    options.windowsProcessTree === true,
   );
   yield* atomicWriteFile(options.outputPath, `${JSON.stringify(artifact)}\n`);
 });
@@ -971,6 +1034,7 @@ export function samplerArtifact(
   temporaryTelemetry: CodeGraphBenchmarkSamplerTemporaryTelemetry,
   samples: number,
   rssPeakDiagnostic?: BenchmarkRssPeakDiagnostic,
+  windowsProcessTree = false,
 ): CodeGraphBenchmarkSamplerArtifact {
   return {
     intervalMilliseconds,
@@ -1023,7 +1087,7 @@ export function samplerArtifact(
     processTelemetry,
     samples,
     temporaryTelemetry,
-    version: 4,
+    version: windowsProcessTree ? 5 : 4,
     ...(rssPeakDiagnostic === undefined ? {} : {rssPeakDiagnostic}),
   };
 }
@@ -1411,7 +1475,13 @@ function parseDarwinProcessLine(line: string): BenchmarkProcessTreeEntry | undef
   ) {
     return undefined;
   }
-  return {cpuMilliseconds, parentProcessId, processId, rssBytes: rssKilobytes * 1024, startIdentity};
+  return {
+    cpuMilliseconds,
+    parentProcessId,
+    processId,
+    rssBytes: rssKilobytes * 1024,
+    startIdentity,
+  };
 }
 
 export function parseProcessCpuTime(value: string): number | undefined {
@@ -1491,10 +1561,28 @@ export function parseLinuxProcessStat(statText: string):
   return {parentProcessId, startIdentity, systemTicks, userTicks};
 }
 
+type LegacySamplerProcessTelemetry =
+  | (Extract<CodeGraphBenchmarkSamplerProcessTelemetry, {availability: 'available'}> & {
+      source: 'darwin-ps' | 'linux-proc';
+      parentIdentityValidation: 'darwin-ps-lstart' | 'linux-proc-starttime';
+    })
+  | Extract<CodeGraphBenchmarkSamplerProcessTelemetry, {availability: 'unavailable'}>;
+export function samplerProcessTelemetryContract(
+  platform: string,
+  parentStartIdentity: string | undefined,
+  sampleIntervalMilliseconds?: number,
+): LegacySamplerProcessTelemetry;
+export function samplerProcessTelemetryContract(
+  platform: string,
+  parentStartIdentity: string | undefined,
+  sampleIntervalMilliseconds: number,
+  windowsCollector: boolean,
+): CodeGraphBenchmarkSamplerProcessTelemetry;
 export function samplerProcessTelemetryContract(
   platform: string,
   parentStartIdentity: string | undefined,
   sampleIntervalMilliseconds = 25,
+  windowsCollector = false,
 ): CodeGraphBenchmarkSamplerProcessTelemetry {
   if (platform === 'linux' && parentStartIdentity !== undefined) {
     return {
@@ -1504,6 +1592,15 @@ export function samplerProcessTelemetryContract(
       sampleIntervalMilliseconds,
       scope: 'recursive-process-tree',
       source: 'linux-proc',
+    };
+  }
+  if (windowsCollector && platform === 'win32' && parentStartIdentity !== undefined) {
+    return {
+      availability: 'available',
+      parentIdentityValidation: 'windows-process-creation-ticks',
+      sampleIntervalMilliseconds,
+      scope: 'recursive-process-tree',
+      source: 'windows-cim-dotnet',
     };
   }
   if (platform === 'darwin' && parentStartIdentity !== undefined) {
@@ -1518,7 +1615,10 @@ export function samplerProcessTelemetryContract(
   return {
     availability: 'unavailable',
     parentIdentityValidation: 'process-liveness-only',
-    reason: platform === 'linux' || platform === 'darwin' ? 'parent-inspection-unavailable' : 'unsupported-platform',
+    reason:
+      platform === 'linux' || platform === 'darwin' || (windowsCollector && platform === 'win32')
+        ? 'parent-inspection-unavailable'
+        : 'unsupported-platform',
     source: 'none',
   };
 }
@@ -1885,7 +1985,10 @@ function collectDirectoryFiles(
     if (Option.isNone(names)) return;
     for (const name of names.value) {
       const child = hostPath.join(directory, name);
-      const info = yield* Effect.tryPromise({try: () => runtimeLstat(child), catch: scriptError}).pipe(Effect.option);
+      const info = yield* Effect.tryPromise({
+        try: () => runtimeLstat(child),
+        catch: scriptError,
+      }).pipe(Effect.option);
       if (Option.isNone(info)) continue;
       if (info.value.isDirectory()) {
         yield* collectDirectoryFiles(child, files);
@@ -1928,6 +2031,9 @@ export function parseCodeGraphBenchmarkSamplerArguments(args: readonly string[])
     if (!value) throw ScriptError.make({message: `Missing benchmark sampler argument ${flag}.`});
     return value;
   };
+  const windowsFlag = values.get('--windows-process-tree');
+  if (windowsFlag !== undefined && windowsFlag !== 'true' && windowsFlag !== 'false')
+    throw ScriptError.make({message: 'Sampler Windows process-tree option must be true or false.'});
   const diagnosticFlag = values.get('--rss-peak-diagnostics');
   if (diagnosticFlag !== undefined && diagnosticFlag !== 'true' && diagnosticFlag !== 'false')
     throw ScriptError.make({message: 'Sampler RSS peak diagnostics must be true or false.'});
@@ -1940,7 +2046,9 @@ export function parseCodeGraphBenchmarkSamplerArguments(args: readonly string[])
     throw ScriptError.make({message: 'Sampler interval must be at least 10 milliseconds.'});
   }
   if (!Number.isSafeInteger(checkpointIntervalMilliseconds) || checkpointIntervalMilliseconds < intervalMilliseconds) {
-    throw ScriptError.make({message: 'Sampler checkpoint interval must be at least the sampling interval.'});
+    throw ScriptError.make({
+      message: 'Sampler checkpoint interval must be at least the sampling interval.',
+    });
   }
   const outputPath = required('--output');
   const checkpointPath = required('--checkpoint-output');
@@ -1953,7 +2061,9 @@ export function parseCodeGraphBenchmarkSamplerArguments(args: readonly string[])
   if (hostPath.dirname(readyPath) === readyPath)
     throw ScriptError.make({message: 'Sampler ready path must have a parent directory.'});
   if (new Set([checkpointPath, outputPath, readyPath]).size !== 3) {
-    throw ScriptError.make({message: 'Sampler checkpoint, output, and ready paths must be distinct.'});
+    throw ScriptError.make({
+      message: 'Sampler checkpoint, output, and ready paths must be distinct.',
+    });
   }
   return {
     checkpointIntervalMilliseconds,
@@ -1965,6 +2075,7 @@ export function parseCodeGraphBenchmarkSamplerArguments(args: readonly string[])
     processId,
     readyPath,
     ...(diagnosticFlag === 'true' ? {rssPeakDiagnostics: true as const} : {}),
+    ...(windowsFlag === 'true' ? {windowsProcessTree: true as const} : {}),
     stopPath: required('--stop'),
     temporaryRoot: required('--temp-root'),
   };

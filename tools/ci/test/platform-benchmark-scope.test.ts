@@ -28,6 +28,10 @@ function scope(
 }
 
 describe('Platform benchmark PR scope', () => {
+  it('runs both owners when recursive Windows sampling changes', () => {
+    for (const path of ['scripts/windows-process-tree-sampler.ts', 'scripts/windows-process-tree-sampler.ps1'])
+      expect(scope([path])).toMatchObject({runCodeGraphPr: true, runRecallPr: true});
+  });
   it('skips the audited native workflow test-policy edits including PR #918', () => {
     for (const path of [
       'apps/threadnote/test/dev-skills/native-closeout-lifecycle.test.ts',

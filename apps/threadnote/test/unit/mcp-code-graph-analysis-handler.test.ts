@@ -263,6 +263,24 @@ describe('registered analyze_code_graph snapshot resolution', () => {
       expect(harness.observation.statusOptions).toHaveLength(0);
     }).pipe(provideTestLayer(harness.layer));
   });
+  effectIt.effect('names the missing selector before dispatching an inspection', () => {
+    const ready = codeGraphStatus({ready: true, stale: false});
+    const harness = analyzeHandlerHarness({attachResults: [], refresh: false, statuses: [ready]});
+
+    return Effect.gen(function* () {
+      for (const [input, expected] of [
+        [{operation: 'neighbors', query: 'value'}, 'operation=neighbors requires nodeId'],
+        [{operation: 'node', nodeId: ' '}, 'operation=node requires nodeId'],
+        [{operation: 'path', from: 'value'}, 'operation=path requires from and to'],
+        [{operation: 'explain'}, 'operation=explain requires symbol or query'],
+      ] as const) {
+        const result = yield* harness.invokeInspect({callerCwd: ready.identity.repoRoot, ...input});
+        expect(result.isError).toBe(true);
+        expect(JSON.stringify(result.content)).toContain(expected);
+      }
+      expect(harness.observation.statusOptions).toHaveLength(0);
+    }).pipe(provideTestLayer(harness.layer));
+  });
 
   effectIt.effect(
     'uses compact defaults only for local graph queries and preserves explicit and non-query limits',

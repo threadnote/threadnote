@@ -4,6 +4,7 @@ import {join} from '@threadnote/testing/node-path';
 import fc from 'fast-check';
 import {expect, it} from 'vitest';
 import {collectSourceIdentity, generationDigest, readPreparedInventory} from '../prepare.mjs';
+import * as EffectString from 'effect/String';
 
 const metadata = '{"schemaVersion":1}';
 const fixture = async () => {
@@ -70,6 +71,40 @@ it('reuses only content-verified output and binds reads to the expected generati
     await expect(
       readPreparedInventory({root, expectedGeneration: {...generation, headSha: 'different'}}),
     ).rejects.toThrow('generation mismatch');
+  } finally {
+    rmSync(root, {recursive: true, force: true});
+  }
+});
+
+it('identifies each mismatching generation fingerprint without reflecting malformed values', async () => {
+  const {root, generation} = await fixture();
+  const mismatchMessage = (expectedGeneration: object) =>
+    readPreparedInventory({root, expectedGeneration}).then(
+      () => '',
+      error => (error instanceof Error ? error.message : String(error)),
+    );
+  try {
+    for (const field of ['headSha', 'sourceDigest', 'inventoryDigest'] as const) {
+      const expected = EffectString.repeat(field === 'headSha' ? 40 : 64)('0');
+      expect(await mismatchMessage({...generation, [field]: expected})).toBe(
+        'Bazel generation mismatch: worker differs from planner; fingerprints=' +
+          JSON.stringify([{field, expected, actual: generation[field]}]),
+      );
+    }
+    const message = await mismatchMessage({
+      ...generation,
+      headSha: undefined,
+      sourceDigest: EffectString.repeat(4_096)('/private/synthetic-fixture/'),
+    });
+    expect(message).toBe(
+      'Bazel generation mismatch: worker differs from planner; fingerprints=' +
+        JSON.stringify([
+          {field: 'headSha', expected: '<missing>', actual: generation.headSha},
+          {field: 'sourceDigest', expected: '<invalid>', actual: generation.sourceDigest},
+        ]),
+    );
+    expect(message.length).toBeLessThan(600);
+    expect(message).not.toContain('private');
   } finally {
     rmSync(root, {recursive: true, force: true});
   }

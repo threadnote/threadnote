@@ -9,7 +9,7 @@ import {
   MemoryReadProjectionError,
   MemoryReadTooLargeError,
   memoryMarkdownOutline,
-  memoryReadMcpStructuredContent,
+  memoryReadMcpNotices,
   memoryReadMcpText,
   memoryReadContentBytes,
   projectMemoryRead,
@@ -19,22 +19,19 @@ import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 
 describe('complete memory read projection', () => {
-  it('defaults to agent-channel metadata while explicit text and dual preserve canonical content', () => {
-    fc.assert(
-      fc.property(fc.string({maxLength: 2_000}), text => {
-        const read = projectMemoryRead([{text, uri: 'threadnote://test/decision.md'}]);
-        const omitted = memoryReadMcpStructuredContent(read);
-        const explicitAgent = memoryReadMcpStructuredContent(read, 'agent');
-        const explicitText = memoryReadMcpStructuredContent(read, 'text');
-        expect(omitted).toEqual(explicitAgent);
-        expect(omitted).toMatchObject({contentChannel: 'agent'});
-        expect(explicitText).toMatchObject({contentChannel: 'text', uri: read.uri});
-        expect(omitted).not.toHaveProperty('content');
-        expect(omitted).not.toHaveProperty('uri');
-        expect(memoryReadMcpStructuredContent(read, 'dual')).toBe(read.structuredContent);
-      }),
-      {numRuns: 50},
-    );
+  it('carries sources and warnings as text unless the client asked for structured content', () => {
+    const read = projectMemoryRead([{text: 'Plain note.', uri: 'threadnote://test/decision.md'}], {
+      warnings: ['Auto-sync warning: queued.'],
+    });
+    expect(memoryReadMcpNotices(read)).toEqual([
+      'Sources: threadnote://test/decision.md',
+      'Warning: Auto-sync warning: queued.',
+    ]);
+    expect(memoryReadMcpNotices(read, 'agent')).toEqual(memoryReadMcpNotices(read));
+    expect(memoryReadMcpNotices(read, 'text')).toEqual(['Warning: Auto-sync warning: queued.']);
+    expect(memoryReadMcpNotices(read, 'dual')).toEqual([]);
+    expect(read.structuredContent.warnings).toEqual(['Auto-sync warning: queued.']);
+    expect(memoryReadMcpText(read, 'text')).toBe('Plain note.');
   });
 
   it('replaces raw citation JSON with compact code evidence without changing the memory body', () => {
@@ -103,43 +100,21 @@ describe('complete memory read projection', () => {
       {text: canonical, uri: 'threadnote://user/test/memories/durable/projects/threadnote/compact-read.md'},
       {text: 'Plain fallback.', uri: 'threadnote://user/test/memories/durable/projects/threadnote/plain.md'},
     ]);
-    expect(memoryReadMcpStructuredContent(mixed)).toMatchObject({
-      contentChannel: 'agent',
-      sources: ['memories/durable/projects/threadnote/plain.md'],
-    });
+    expect(memoryReadMcpNotices(mixed)).toEqual(['Sources: memories/durable/projects/threadnote/plain.md']);
     expect(memoryReadMcpText(mixed)).toContain('Plain fallback.');
   });
 
-  it('moves complete text into one authoritative channel without dropping read metadata', () => {
+  it('moves complete text into one authoritative channel', () => {
     fc.assert(
       fc.property(fc.string({maxLength: 2_000}), text => {
         const read = projectMemoryRead([{text, uri: 'threadnote://test/decision.md'}]);
         expect(memoryReadContentBytes(memoryReadMcpText(read))).toBeLessThanOrEqual(
           memoryReadContentBytes(read.content),
         );
-        const compact = memoryReadMcpStructuredContent(read, 'text');
-        const {content: _content, version: _version, ...metadata} = read.structuredContent;
-        expect(compact).toEqual({...metadata, contentChannel: 'text', uri: read.uri, version: 2});
-        expect(compact).not.toHaveProperty('content');
         expect(read.content).toBe(text);
       }),
       {numRuns: 50},
     );
-  });
-
-  it('preserves outline, section, and page recovery in the text-channel form', () => {
-    const resources = [
-      {text: '# Decision\nKeep evidence.\n## Verify\nCheck current source.\n', uri: 'threadnote://test/decision.md'},
-    ];
-    for (const options of [{mode: 'outline' as const}, {section: 'Verify'}, {offsetBytes: 0}]) {
-      const read = projectMemoryRead(resources, options);
-      const compact = memoryReadMcpStructuredContent(read, 'text');
-      expect(compact).not.toHaveProperty('content');
-      expect(compact.contentBytes).toBe(memoryReadContentBytes(read.content));
-      expect(compact.complete).toBe(read.structuredContent.complete);
-      expect(compact.nextOffsetBytes).toBe(read.structuredContent.nextOffsetBytes);
-      expect(compact.sourceHash).toBe(read.structuredContent.sourceHash);
-    }
   });
 
   it('returns exact under-cap source bytes in one shot', () => {
@@ -230,10 +205,7 @@ describe('complete memory read projection', () => {
             expect(page.contentBytes).toBeLessThanOrEqual(MEMORY_READ_PAGE_BYTES);
             expect(page.content).toBe(read.content);
             expect(memoryReadMcpText(read)).toBe(read.content);
-            expect(memoryReadMcpStructuredContent(read)).toMatchObject({
-              contentChannel: 'agent',
-              sources: ['threadnote://test/headingless.md'],
-            });
+            expect(memoryReadMcpNotices(read)).toEqual(['Sources: threadnote://test/headingless.md']);
             expect(page.offsetBytes).toBe(offsetBytes);
             expect(page.totalBytes).toBe(memoryReadContentBytes(text));
             expect(page.sourceHash).toMatch(/^[a-f0-9]{64}$/u);

@@ -26,7 +26,13 @@ import {
   loadExternalResourceAccess,
 } from '@threadnote/store/external-resource';
 import {chunkRecallDocument, RECALL_CHUNKER_VERSION, type RecallChunk} from './chunker.js';
-import {normalizeVector, type VectorSearchResult} from '@threadnote/inference/vector-search';
+import {normalizeVector} from '@threadnote/inference/vector-search';
+import {
+  VectorIndexOperationError,
+  validateEncodedVector,
+  encodedVectorValidationFailure,
+  compareCodeUnits,
+} from './vector/scoring.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -35,6 +41,7 @@ import {
   recallVectorAuthorizationKey,
   recallVectorPreparationIdentity,
   recallVectorPreparationMatches,
+  recallVectorPreparationJobId,
 } from './vector/preparation-identity.js';
 export {loadRecallVectorAuthorizationKey};
 import {
@@ -47,6 +54,8 @@ import {
   type RecallVectorReadState,
 } from './read_boundary.js';
 import {readRecallIndexData, type RecallIndexConfig} from './index.js';
+import {requiredNativeVectorReader, runNativeVectorRead} from './vector/native-reader.js';
+import type {NativeVectorReadRequest} from './vector/native-reader-contract.js';
 type VectorReadModel = Pick<LocalModelManifest, 'id' | 'sha256' | 'dimensions' | 'promptPrefixes'>;
 type VectorReadConfig = {
   readonly agentContextHome: string;
@@ -83,14 +92,6 @@ const throughVectorReadBoundary = Effect.fn('vectorIndex.throughReadyReadBoundar
     catch: () => RecallReadyReadBoundaryError.make({reason: 'invalid-protocol'}),
   });
 });
-
-class VectorIndexOperationError extends Schema.TaggedError<
-  VectorIndexOperationError,
-  {readonly brand: unique symbol}
->()('VectorIndexOperationError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
 
 const VECTOR_INDEX_DATABASE_VERSION = 5;
 
@@ -151,15 +152,6 @@ interface VectorChunkMapping extends RecallChunk {
 
 interface DesiredVectorChunk extends VectorChunkMapping {
   readonly vectorKey: string;
-}
-
-interface SemanticChunkMatch extends VectorSearchResult {
-  readonly uri: string;
-}
-
-interface VectorAliasRow {
-  readonly representative_uri: string;
-  readonly uri: string;
 }
 
 interface VectorAliasMapping {
@@ -230,7 +222,15 @@ interface VectorIndexBuildOptions<R> extends VectorCorpusGenerationOptions<R> {
   readonly onProgress?: (progress: VectorIndexProgress) => Effect.Effect<void, unknown>;
 }
 
-interface SemanticScoreOptions<R> extends VectorCorpusGenerationOptions<R> {
+/** Semantic fences run in the caller's ambient context, outside the native snapshot.
+ * Build/promotion callbacks retain their separate vector-SqlClient transaction context.
+ */
+interface SemanticCorpusGenerationOptions<R> {
+  readonly corpusGeneration?: string;
+  readonly currentCorpusGeneration?: () => Effect.Effect<Option.Option<string>, unknown, R>;
+}
+
+interface SemanticScoreOptions<R> extends SemanticCorpusGenerationOptions<R> {
   readonly allowedUriScopes?: readonly string[];
   readonly eligibility?: RecallEligibilityPolicy;
   readonly limit?: number;
@@ -717,7 +717,7 @@ export const selectedSemanticScores = Effect.fn('vectorIndex.selectedSemanticSco
 export const readSelectedSemanticVectorState = Effect.fn('vectorIndex.readSelectedState')(function* <R = never>(
   config: VectorReadConfig,
   manifest: VectorReadModel,
-  options: VectorCorpusGenerationOptions<R> = {},
+  options: SemanticCorpusGenerationOptions<R> = {},
 ) {
   const externalLocation =
     config.account !== undefined && config.user !== undefined
@@ -769,17 +769,6 @@ export const readSelectedSemanticVectorScores = Effect.fn('vectorIndex.readSelec
       : undefined;
   const externalResources = externalLocation === undefined ? {} : yield* loadExternalResourceAccess(externalLocation);
   const authorizationKey = recallVectorAuthorizationKey(externalResources);
-  const matchesAuthorization = (active: VectorGenerationRow) =>
-    recallVectorPreparationMatches(
-      active.job_id,
-      recallVectorPreparationIdentity(
-        options.corpusGeneration ?? active.corpus_generation ?? '',
-        authorizationKey,
-        manifest.id,
-        embeddingRecipe(manifest),
-      ),
-    );
-
   if (authorizationKey !== state.authorizationKey) return undefined;
   const suppliedExternal = options.eligibility?.externalResources;
   const effectiveExternal =
@@ -795,88 +784,72 @@ export const readSelectedSemanticVectorScores = Effect.fn('vectorIndex.readSelec
     ...(options.eligibility ?? {kind: 'candidate-policy', authority: 'any', projects: {mode: 'unrestricted'}}),
     externalResources: effectiveExternal,
   };
-  const scores = yield* useVectorDatabaseReadOnly(
-    databasePath,
-    Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      return yield* sql.withTransaction(
-        Effect.gen(function* () {
-          yield* validateVectorDatabase(sql, 50);
-          const active = yield* selectActiveGeneration(sql);
-          if (!active || active.generation !== state.generation || !generationIsCompatible(active, manifest))
-            return undefined;
-          if (!matchesAuthorization(active)) return undefined;
-          yield* verifySelectedCorpusGeneration(active, manifest, options);
-          if (active.chunk_count === 0) return new Map<string, number>();
-          if (Option.isNone(normalizedQuery)) {
-            return yield* VectorIndexOperationError.make({
-              message: 'The active vector corpus changed shape during semantic scoring.',
-            });
-          }
-          const limit = Math.min(active.chunk_count, options.limit ?? 500);
-          const selection = vectorChunkSelectionPredicate(eligibility, options.allowedUriScopes);
-          let cursor = '';
-          let best: readonly SemanticChunkMatch[] = [];
-          for (;;) {
-            const rows = yield* sql.unsafe<VectorRow>(
-              `SELECT chunk.chunk_id, chunk.uri, chunk.fingerprint, value.vector
-               FROM vector_chunks AS chunk
-               JOIN vector_values AS value ON value.id = chunk.vector_id
-               WHERE chunk.generation = ?
-                 AND chunk.chunk_id > ?
-                 AND ${selection.sql}
-               ORDER BY chunk.chunk_id
-               LIMIT ?`,
-              [active.generation, cursor, ...selection.params, VECTOR_INDEX_PAGE_SIZE],
-            );
-            if (rows.length === 0) break;
-            const pageMatches = yield* Effect.try({
-              try: () => searchEncodedVectorRows(normalizedQuery.value, rows, active.dimensions, limit),
-              catch: cause =>
-                VectorIndexCorrupt.make({
-                  message: cause instanceof Error ? cause.message : String(cause),
-                  modelId: manifest.id,
-                }),
-            });
-            best = mergeSemanticMatches(best, pageMatches, limit);
-            cursor = rows.at(-1)!.chunk_id;
-            if (rows.length < VECTOR_INDEX_PAGE_SIZE) break;
-          }
-          const scores = new Map<string, number>();
-          for (const result of best) {
-            scores.set(result.uri, Math.max(scores.get(result.uri) ?? 0, Math.max(0, result.score)));
-          }
-          const aliases = yield* loadVectorAliasesForRepresentatives(
-            sql,
-            active.generation,
-            [...scores.keys()],
-            eligibility,
-            options.allowedUriScopes,
-          );
-          for (const alias of aliases) {
-            const score = scores.get(alias.representative_uri);
-            if (score !== undefined) scores.set(alias.uri, Math.max(scores.get(alias.uri) ?? 0, score));
-          }
-          if (options.allowedUriScopes?.length) {
-            for (const uri of scores.keys()) {
-              if (!recallUriMatchesScopes(uri, options.allowedUriScopes)) scores.delete(uri);
-            }
-          }
-          return scores;
-        }),
-      );
-    }),
-  ).pipe(
-    // Effect's generator inference does not retain the tagged error introduced by
-    // the paged synchronous scorer, so make the public failure channel explicit.
-    Effect.mapError(error => error),
-  );
+  const nativeRequest: NativeVectorReadRequest = {
+    dbPath: databasePath,
+    generation: state.generation,
+    model: {
+      id: manifest.id,
+      sha256: manifest.sha256,
+      dimensions: manifest.dimensions ?? 0,
+      embeddingRecipe: embeddingRecipe(manifest),
+      chunkerVersion: RECALL_CHUNKER_VERSION,
+    },
+    expectedPreparationJobId: recallVectorPreparationJobId(
+      recallVectorPreparationIdentity(
+        options.corpusGeneration ?? state.corpusGeneration ?? '',
+        authorizationKey,
+        manifest.id,
+        embeddingRecipe(manifest),
+      ),
+    ),
+    preparationIdentitySuffix: EffectString.slice(1)(
+      JSON.stringify([authorizationKey, manifest.id, embeddingRecipe(manifest), RECALL_CHUNKER_VERSION]),
+    ),
+    ...(options.corpusGeneration === undefined ? {} : {corpusGeneration: options.corpusGeneration}),
+    limit: options.limit ?? 500,
+    selection: vectorChunkSelectionPredicate(eligibility, options.allowedUriScopes),
+    aliasScope: recallUriScopePredicate('alias', options.allowedUriScopes),
+    aliasEligibility: recallEligibilityPredicate('chunk', eligibility, false),
+  };
+  const query = Option.getOrUndefined(normalizedQuery);
+  const binding = yield* requiredNativeVectorReader;
+  const selectedRead = Effect.gen(function* () {
+    // Evaluate the independent lexical proof before native work, but defer its
+    // failure until metadata reaches the old callback position. Schema/count,
+    // generation/preparation and requested-corpus outcomes keep their precedence.
+    const openingCorpus = yield* verifyCurrentCorpusGeneration(manifest, options).pipe(Effect.result);
+    const result = yield* runNativeVectorRead(binding, nativeRequest, query);
+    if (result.corpusCheckRequired && Result.isFailure(openingCorpus)) return yield* Effect.fail(openingCorpus.failure);
+    switch (result.status) {
+      case 'success':
+        return new Map(EffectArray.map(result.scores, value => [value.uri, value.score] as const));
+      case 'absent':
+        return undefined;
+      case 'corrupt':
+        return yield* VectorIndexCorrupt.make({modelId: manifest.id, message: result.message});
+      case 'corpus-changed':
+        return yield* VectorCorpusGenerationChanged.make({
+          modelId: manifest.id,
+          requestedGeneration: nativeRequest.corpusGeneration ?? '',
+          message: result.message,
+        });
+      case 'operation-error':
+        return yield* VectorIndexOperationError.make({message: result.message});
+      case 'cancelled':
+        return yield* Effect.interrupt;
+    }
+  });
+  const scores = yield* selectedRead;
   // The SQLite transaction pins the vector snapshot. Re-check the independently
   // changing lexical corpus after releasing that read snapshot so a long paged
   // scan cannot return scores for a corpus that was superseded mid-query.
   yield* verifyCurrentCorpusGeneration(manifest, options);
   if (scores !== undefined) {
     for (const uri of scores.keys()) {
+      if (!recallUriMatchesScopes(uri, options.allowedUriScopes)) {
+        scores.delete(uri);
+        continue;
+      }
       if (
         isExternalResourceUri(uri) &&
         (externalLocation === undefined ||
@@ -1326,43 +1299,6 @@ const replaceVectorAliases = Effect.fn('vectorIndex.replaceAliases')(function* (
   }
 });
 
-const loadVectorAliasesForRepresentatives = Effect.fn('vectorIndex.loadAliasesForRepresentatives')(function* (
-  sql: SqlClient.SqlClient,
-  generation: string,
-  representativeUris: readonly string[],
-  eligibilityPolicy?: RecallEligibilityPolicy,
-  allowedUriScopes?: readonly string[],
-) {
-  const eligibility = recallEligibilityPredicate('chunk', eligibilityPolicy, false);
-  const uriScope = recallUriScopePredicate('alias', allowedUriScopes);
-  const aliases: VectorAliasRow[] = [];
-  for (let start = 0; start < representativeUris.length; start += VECTOR_INDEX_INSERT_BATCH_SIZE) {
-    const batch = representativeUris.slice(start, start + VECTOR_INDEX_INSERT_BATCH_SIZE);
-    aliases.push(
-      ...(yield* sql.unsafe<VectorAliasRow>(
-        `SELECT alias.uri, alias.representative_uri
-         FROM vector_aliases AS alias
-         WHERE alias.generation = ?
-           AND alias.representative_uri IN (${EffectArray.join(
-             EffectArray.map(batch, () => '?'),
-             ', ',
-           )})
-           AND ${uriScope.sql}
-           AND EXISTS (
-             SELECT 1
-             FROM vector_chunks AS chunk
-             WHERE chunk.generation = alias.generation
-               AND chunk.uri = alias.representative_uri
-               AND ${eligibility.sql}
-           )
-         ORDER BY alias.representative_uri, alias.uri`,
-        [generation, ...batch, ...uriScope.params, ...eligibility.params],
-      )),
-    );
-  }
-  return aliases;
-});
-
 function vectorChunkSelectionPredicate(
   eligibilityPolicy: RecallEligibilityPolicy | undefined,
   allowedUriScopes: readonly string[] | undefined,
@@ -1668,105 +1604,6 @@ function encodeVector(vector: readonly number[], dimensions: number): Uint8Array
     throw VectorIndexOperationError.make({message: 'Vector is not L2-normalized.'});
   }
   return bytes;
-}
-
-function validateEncodedVector(value: unknown, dimensions: number): void {
-  const bytes = bytesFromSqlBlob(value);
-  if (bytes.byteLength !== dimensions * 4) {
-    throw VectorIndexOperationError.make({
-      message: `Stored vector has ${bytes.byteLength} bytes; expected ${dimensions * 4}.`,
-    });
-  }
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  let squaredMagnitude = 0;
-  for (let index = 0; index < dimensions; index += 1) {
-    const component = view.getFloat32(index * 4, true);
-    if (!Number.isFinite(component)) {
-      throw VectorIndexOperationError.make({message: 'Stored vector contains a non-finite component.'});
-    }
-    squaredMagnitude += component * component;
-  }
-  if (Math.abs(Math.sqrt(squaredMagnitude) - 1) > 0.002) {
-    throw VectorIndexOperationError.make({message: 'Stored vector is not L2-normalized.'});
-  }
-}
-
-function encodedVectorValidationFailure(value: unknown, dimensions: number): unknown | undefined {
-  try {
-    validateEncodedVector(value, dimensions);
-    return undefined;
-  } catch (cause) {
-    return cause;
-  }
-}
-
-function bytesFromSqlBlob(value: unknown): Uint8Array {
-  if (value instanceof Uint8Array) return value;
-  if (value instanceof ArrayBuffer) return new Uint8Array(value);
-  if (ArrayBuffer.isView(value)) {
-    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-  }
-  throw VectorIndexOperationError.make({message: 'Stored vector is not a binary SQLite value.'});
-}
-
-function mergeSemanticMatches(
-  left: readonly SemanticChunkMatch[],
-  right: readonly SemanticChunkMatch[],
-  limit: number,
-): readonly SemanticChunkMatch[] {
-  return [...left, ...right].sort(compareVectorMatches).slice(0, limit);
-}
-
-function searchEncodedVectorRows(
-  normalizedQuery: readonly number[],
-  rows: readonly VectorRow[],
-  dimensions: number,
-  limit: number,
-): readonly SemanticChunkMatch[] {
-  if (normalizedQuery.length !== dimensions) {
-    throw VectorIndexOperationError.make({
-      message: `Query vector has ${normalizedQuery.length} dimensions; expected ${dimensions}.`,
-    });
-  }
-  const matches: SemanticChunkMatch[] = [];
-  for (const row of rows) {
-    const bytes = bytesFromSqlBlob(row.vector);
-    if (bytes.byteLength !== dimensions * 4) {
-      throw VectorIndexOperationError.make({
-        message: `Stored vector ${row.chunk_id} has ${bytes.byteLength} bytes; expected ${dimensions * 4}.`,
-      });
-    }
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    let score = 0;
-    let squaredMagnitude = 0;
-    for (let index = 0; index < dimensions; index += 1) {
-      const component = view.getFloat32(index * 4, true);
-      if (!Number.isFinite(component)) {
-        throw VectorIndexOperationError.make({
-          message: `Stored vector ${row.chunk_id} contains a non-finite component.`,
-        });
-      }
-      squaredMagnitude += component * component;
-      score += normalizedQuery[index] * component;
-    }
-    if (Math.abs(Math.sqrt(squaredMagnitude) - 1) > 0.002) {
-      throw VectorIndexOperationError.make({message: `Stored vector ${row.chunk_id} is not L2-normalized.`});
-    }
-    matches.push({
-      id: row.chunk_id,
-      score: Math.max(-1, Math.min(1, score)),
-      uri: row.uri,
-    });
-  }
-  return matches.sort(compareVectorMatches).slice(0, Math.min(limit, matches.length));
-}
-
-function compareVectorMatches(left: VectorSearchResult, right: VectorSearchResult): number {
-  return right.score - left.score || compareCodeUnits(left.id, right.id);
-}
-
-function compareCodeUnits(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function generationMatchesCorpus(

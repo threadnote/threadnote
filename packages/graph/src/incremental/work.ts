@@ -3,10 +3,6 @@ import {codeGraphUtf8ByteLength} from '../disk/capacity.js';
 import {CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM, type MeasuredCodeGraphFact} from '../fact/budget.js';
 import {factBodyDiscovery, preparedSymbolTerms} from '../store/utilities.js';
 import {projectLexicalSymbols} from '../store/lexical_projection.js';
-import {
-  PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FILES,
-  PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FACT_BYTES,
-} from '../store/resolution/candidate_closure.js';
 import type {CodeGraphFileFacts, CodeGraphInventoryFile} from '../types.js';
 import * as EffectRecord from 'effect/Record';
 
@@ -133,6 +129,12 @@ export interface CodeGraphIncrementalWork {
   readonly membershipCandidate?: CodeGraphMembershipCandidateWork;
   /** Persisted attribution context decoded for this delta. */
   readonly attributionContextFiles: number;
+  /**
+   * Base files decoded once to record reusable resolver evidence for the base.
+   * Later deltas against that base read the evidence instead, so this one-time
+   * cost is reported here and is not part of the delta's attribution context.
+   */
+  readonly resolutionEvidenceFiles?: number;
   /** Base final facts decoded for compatibility checks. */
   readonly baseFactsLoaded: number;
   readonly changedFiles: number;
@@ -156,6 +158,7 @@ export type CodeGraphIncrementalWorkObservation = Pick<
   | 'inventoryFilesInspected'
   | 'probedDependencyPaths'
   | 'membershipCandidate'
+  | 'resolutionEvidenceFiles'
 >;
 
 export function measureCodeGraphIncrementalWork(input: {
@@ -210,6 +213,9 @@ export function measureCodeGraphIncrementalWork(input: {
   return {
     ...(input.observation?.membershipCandidate ? {membershipCandidate: input.observation.membershipCandidate} : {}),
     attributionContextFiles: input.observation?.attributionContextFiles ?? 0,
+    ...(input.observation?.resolutionEvidenceFiles === undefined
+      ? {}
+      : {resolutionEvidenceFiles: input.observation.resolutionEvidenceFiles}),
     baseFactsLoaded: input.observation?.baseFactsLoaded ?? input.files.length,
     changedFiles: input.files.length,
     deletedFiles,
@@ -227,8 +233,6 @@ export function codeGraphIncrementalWorkFitsBudget(work: CodeGraphIncrementalWor
   if (
     candidate &&
     (EffectArray.some(EffectRecord.values(candidate), value => !Number.isSafeInteger(value) || value < 0) ||
-      candidate.metadataFiles > PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FILES ||
-      candidate.metadataFactBytes > PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FACT_BYTES ||
       candidate.omittedFiles + candidate.rawBaseFiles + candidate.rawCurrentFiles < candidate.metadataFiles ||
       candidate.omittedFactBytes + candidate.rawBaseBytes + candidate.rawCurrentBytes !== candidate.metadataFactBytes ||
       candidate.selectedReloadFiles !== work.changedFiles)

@@ -1083,45 +1083,29 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                       let incrementalPrepared = false;
                       let building: CodeGraphSnapshot;
                       let persistentOwnerToken: string | undefined;
+                      // Every persistent claim binds its physical lexical view to the claimed snapshot.
+                      const claimPersistentBuild = (snapshot: CodeGraphSnapshot) =>
+                        store.claimPersistentBuild(layout.databasePath, identity, snapshot, {
+                          logicalSnapshotId,
+                          owner: reporter.ownerIdentity,
+                          lexicalBinding: lexicalViewBindingFor(
+                            snapshot.id,
+                            logicalSnapshotId,
+                            snapshot.baseSnapshotId,
+                            forceGeneration,
+                          ),
+                        });
                       if (resumedForcedBuild) {
                         building = resumedForcedBuild;
                         incrementalAssessment = {mode: 'fallback', reason: 'forced-full-rebuild'};
-                        persistentOwnerToken = yield* store.claimPersistentBuild(
-                          layout.databasePath,
-                          identity,
-                          building,
-                          {
-                            logicalSnapshotId,
-                            owner: reporter.ownerIdentity,
-                            lexicalBinding: lexicalViewBindingFor(
-                              building.id,
-                              logicalSnapshotId,
-                              building.baseSnapshotId,
-                              forceGeneration,
-                            ),
-                          },
-                        );
+                        persistentOwnerToken = yield* claimPersistentBuild(building);
                       } else if (resumableDirectBuild) {
                         building = resumableDirectBuild;
                         incrementalAssessment = {
                           mode: 'fallback',
                           reason: options.incrementalOverlay === false ? 'disabled' : 'staging-unavailable',
                         };
-                        persistentOwnerToken = yield* store.claimPersistentBuild(
-                          layout.databasePath,
-                          identity,
-                          building,
-                          {
-                            logicalSnapshotId,
-                            owner: reporter.ownerIdentity,
-                            lexicalBinding: lexicalViewBindingFor(
-                              building.id,
-                              logicalSnapshotId,
-                              building.baseSnapshotId,
-                              forceGeneration,
-                            ),
-                          },
-                        );
+                        persistentOwnerToken = yield* claimPersistentBuild(building);
                       } else if (!inventory.dirty && !options.force) {
                         building = {
                           commit: identity.headCommit,
@@ -1137,21 +1121,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                           symbolCount: 0,
                           worktreeId: identity.worktreeId,
                         };
-                        persistentOwnerToken = yield* store.claimPersistentBuild(
-                          layout.databasePath,
-                          identity,
-                          building,
-                          {
-                            logicalSnapshotId,
-                            owner: reporter.ownerIdentity,
-                            lexicalBinding: lexicalViewBindingFor(
-                              building.id,
-                              logicalSnapshotId,
-                              building.baseSnapshotId,
-                              forceGeneration,
-                            ),
-                          },
-                        );
+                        persistentOwnerToken = yield* claimPersistentBuild(building);
                       } else if (!canAttemptIncrementalOverlay) {
                         building = {
                           commit: identity.headCommit,
@@ -1176,21 +1146,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                               ? 'workspace-changed'
                               : 'disabled',
                         };
-                        persistentOwnerToken = yield* store.claimPersistentBuild(
-                          layout.databasePath,
-                          identity,
-                          building,
-                          {
-                            logicalSnapshotId,
-                            owner: reporter.ownerIdentity,
-                            lexicalBinding: lexicalViewBindingFor(
-                              building.id,
-                              logicalSnapshotId,
-                              building.baseSnapshotId,
-                              forceGeneration,
-                            ),
-                          },
-                        );
+                        persistentOwnerToken = yield* claimPersistentBuild(building);
                       } else {
                         const reusableDirtyBase = yield* attemptReusableDirtyBase(
                           {
@@ -1218,7 +1174,26 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                           preassessment = reusableDirtyBase.value.preassessment;
                         } else {
                           preassessment = yield* assessIncrementalOverlayCompatibility(
-                            {extractorSet, inventory, languagePacks, layout, store},
+                            {
+                              // The committed full lexical view is exact for this inventory; persisted
+                              // evidence is used only if that physical snapshot is ready. The
+                              // assessment rejects a committed extractor set other than this one.
+                              baseSnapshotId: lexicalPhysicalSnapshotIdentity(
+                                snapshotIdentity(
+                                  identity,
+                                  false,
+                                  extractorSet,
+                                  inventory.committedFiles,
+                                  inventory.scope,
+                                ),
+                                'full',
+                              ),
+                              extractorSet,
+                              inventory,
+                              languagePacks,
+                              layout,
+                              store,
+                            },
                             workspace,
                           );
                           if (preassessment.mode === 'compatible') {
@@ -1410,21 +1385,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                             worktreeId: identity.worktreeId,
                           };
                           committedBase = undefined;
-                          persistentOwnerToken = yield* store.claimPersistentBuild(
-                            layout.databasePath,
-                            identity,
-                            building,
-                            {
-                              logicalSnapshotId,
-                              owner: reporter.ownerIdentity,
-                              lexicalBinding: lexicalViewBindingFor(
-                                building.id,
-                                logicalSnapshotId,
-                                building.baseSnapshotId,
-                                forceGeneration,
-                              ),
-                            },
-                          );
+                          persistentOwnerToken = yield* claimPersistentBuild(building);
                         }
                       }
                       if (incrementalPrepared) {

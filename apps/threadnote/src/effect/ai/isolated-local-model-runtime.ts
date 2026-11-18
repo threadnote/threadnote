@@ -63,6 +63,66 @@ const WORKER_CRASH_PATTERN =
 
 type WorkerOperation = 'diagnostics' | 'embedMany' | 'embedManyIdleV1' | 'embedManyCapacityV2' | 'generate' | 'rerank';
 type WorkerFailureReason = 'crash' | 'exit' | 'protocol' | 'spawn' | 'timeout' | 'write' | 'cleanup-unconfirmed';
+const WORKER_EXIT_STAGES = ['process-exit', 'stdout-eof', 'stdout-read', 'stderr-read', 'abort'] as const;
+const WORKER_EXIT_SIGNALS = [
+  'SIGINT',
+  'SIGTERM',
+  'SIGKILL',
+  'SIGABRT',
+  'SIGSEGV',
+  'SIGPIPE',
+  'SIGHUP',
+  'SIGQUIT',
+  'SIGILL',
+  'SIGBUS',
+  'SIGFPE',
+  'SIGTRAP',
+  'SIGSYS',
+  'SIGXCPU',
+  'SIGXFSZ',
+  'SIGALRM',
+  'SIGUSR1',
+  'SIGUSR2',
+  'SIGBREAK',
+] as const;
+export interface LocalModelWorkerExitObservation {
+  readonly stage?: (typeof WORKER_EXIT_STAGES)[number];
+  readonly exitCode?: number;
+  readonly signal?: (typeof WORKER_EXIT_SIGNALS)[number] | number | null;
+}
+
+/** Local diagnostic only: no free-form values or worker/telemetry wire fields. */
+export function projectLocalModelWorkerExitObservation(value: unknown): LocalModelWorkerExitObservation | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const stage = Option.getOrUndefined(
+    EffectArray.findFirst(WORKER_EXIT_STAGES, stage => 'stage' in value && value.stage === stage),
+  );
+  const exitCode =
+    'exitCode' in value &&
+    typeof value.exitCode === 'number' &&
+    Number.isInteger(value.exitCode) &&
+    value.exitCode >= -2147483648 &&
+    value.exitCode <= 4294967295
+      ? value.exitCode
+      : undefined;
+  const suppliedSignal = 'signal' in value ? value.signal : undefined;
+  const signal =
+    suppliedSignal === null
+      ? null
+      : typeof suppliedSignal === 'number' &&
+          Number.isInteger(suppliedSignal) &&
+          suppliedSignal >= 1 &&
+          suppliedSignal <= 64
+        ? suppliedSignal
+        : Option.getOrUndefined(EffectArray.findFirst(WORKER_EXIT_SIGNALS, signal => signal === suppliedSignal));
+  return stage === undefined && exitCode === undefined && signal === undefined
+    ? undefined
+    : Object.freeze({
+        ...(stage === undefined ? {} : {stage}),
+        ...(exitCode === undefined ? {} : {exitCode}),
+        ...(signal === undefined ? {} : {signal}),
+      });
+}
 interface OwnedReadCleanup {
   readonly deadlineAtMilliseconds?: number;
 }
@@ -99,11 +159,14 @@ export class LocalModelWorkerTransportError extends Schema.TaggedError<
   message: Schema.String,
   operation: Schema.String,
   reason: Schema.Literals(['crash', 'exit', 'protocol', 'spawn', 'timeout', 'write', 'cleanup-unconfirmed']),
-}) {}
+}) {
+  declare readonly exitObservation?: LocalModelWorkerExitObservation;
+}
 
 export interface LocalModelWorkerProcess {
   readonly closeInput: () => Promise<void> | void;
   readonly exited: Promise<number>;
+  readonly readExitStatus?: () => {readonly exitCode: number | null; readonly signal: NodeJS.Signals | number | null};
   readonly kill: () => void;
   readonly stderr: AsyncIterable<string | Uint8Array>;
   readonly stdout: AsyncIterable<string | Uint8Array>;
@@ -640,9 +703,12 @@ class LocalModelWorkerPool {
 
 class LocalModelWorkerConnection {
   private closed = false;
+  private retireAfterRequest = false;
   private pending = Option.none<PendingResponse>();
   private pendingWrite: Promise<void> | undefined;
-  private pendingCompletion: ((reason: WorkerFailureReason) => void) | undefined;
+  private pendingCompletion:
+    ((reason: WorkerFailureReason, observation?: LocalModelWorkerExitObservation) => void) | undefined;
+  private observedExitCode: number | undefined;
   private stderrTail = new Uint8Array();
   private stdoutBuffer = '';
   private stdoutBufferBytes = 0;
@@ -660,8 +726,14 @@ class LocalModelWorkerConnection {
     this.stdoutClosed = this.consumeStdout();
     this.stderrClosed = this.consumeStderr();
     void process.exited.then(
-      () => this.fail('exit'),
-      () => this.fail('exit'),
+      code => {
+        this.observedExitCode = code;
+        if (code !== 0 || this.pendingCompletion === undefined) return this.fail('exit', 'process-exit');
+        // Process exit can precede delivery of already-buffered pipe data.
+        this.retireAfterRequest = true;
+        void this.stdoutClosed.then(() => this.retireAfterResponse());
+      },
+      () => this.fail('exit', 'process-exit'),
     );
   }
 
@@ -719,7 +791,7 @@ class LocalModelWorkerConnection {
     if (this.closed) throw transportError(request.operation, 'exit');
     if (Option.isSome(this.pending)) throw transportError(request.operation, 'protocol');
     if (signal.aborted) {
-      this.fail('exit');
+      this.fail('exit', 'abort');
       throw transportError(request.operation, 'exit');
     }
 
@@ -732,9 +804,10 @@ class LocalModelWorkerConnection {
       resolve,
     });
     const stopped = Promise.withResolvers<never>();
-    this.pendingCompletion = reason => stopped.reject(transportError(request.operation, reason));
+    this.pendingCompletion = (reason, observation) =>
+      stopped.reject(transportError(request.operation, reason, observation));
     const timeout = deadlineMs === undefined ? undefined : setTimeout(() => this.fail('timeout'), deadlineMs);
-    const onAbort = () => this.fail('exit');
+    const onAbort = () => this.fail('exit', 'abort');
     signal.addEventListener('abort', onAbort, {once: true});
     removeAbortListener = () => signal.removeEventListener('abort', onAbort);
 
@@ -749,6 +822,7 @@ class LocalModelWorkerConnection {
       this.pendingCompletion = undefined;
       if (timeout !== undefined) clearTimeout(timeout);
       removeAbortListener();
+      if (this.retireAfterRequest) this.fail('exit');
     });
   }
 
@@ -767,7 +841,7 @@ class LocalModelWorkerConnection {
         }
       }
     } catch {
-      this.fail('exit');
+      this.fail('exit', 'stderr-read');
     }
   }
 
@@ -789,10 +863,17 @@ class LocalModelWorkerConnection {
       this.stdoutBuffer += this.decoder.decode();
       this.consumeStdoutLines();
       if (Effect2.pipe(this.stdoutBuffer, EffectString.trim)) this.fail('protocol');
-      else this.fail('exit');
+      else this.retireAfterResponse();
     } catch {
-      this.fail('exit');
+      this.fail('exit', 'stdout-read');
     }
+  }
+
+  private retireAfterResponse(): void {
+    this.retireAfterRequest = true;
+    // A decoded reply still has to finish its write. Timeout/cancellation must
+    // remain active until that happens; EOF must not win against its result.
+    if (Option.isSome(this.pending) || this.pendingCompletion === undefined) this.fail('exit', 'stdout-eof');
   }
 
   private consumeStdoutLines(): void {
@@ -837,10 +918,25 @@ class LocalModelWorkerConnection {
     this.stderrTail = merged;
   }
 
-  private fail(reason: WorkerFailureReason): void {
+  private fail(reason: WorkerFailureReason, stage?: LocalModelWorkerExitObservation['stage']): void {
     if (!this.closed) {
+      // Snapshot before our cleanup signal; later kill results cannot become the cause.
+      let observation: LocalModelWorkerExitObservation | undefined;
+      try {
+        const status = this.process.readExitStatus?.();
+        const exitCode = status?.exitCode ?? this.observedExitCode;
+        observation = projectLocalModelWorkerExitObservation({
+          stage,
+          exitCode,
+          ...(exitCode !== undefined || (status?.signal !== undefined && status.signal !== null)
+            ? {signal: status?.signal}
+            : {}),
+        });
+      } catch {
+        observation = projectLocalModelWorkerExitObservation({stage, exitCode: this.observedExitCode});
+      }
       this.closed = true;
-      this.rejectPending(reason);
+      this.rejectPending(reason, observation);
       this.kill();
     }
   }
@@ -853,12 +949,12 @@ class LocalModelWorkerConnection {
     }
   }
 
-  private rejectPending(reason: WorkerFailureReason): void {
-    this.pendingCompletion?.(reason);
+  private rejectPending(reason: WorkerFailureReason, observation?: LocalModelWorkerExitObservation): void {
+    this.pendingCompletion?.(reason, observation);
     if (Option.isNone(this.pending)) return;
     const pending = this.pending.value;
     this.pending = Option.none();
-    pending.reject(transportError(pending.operation, reason));
+    pending.reject(transportError(pending.operation, reason, observation));
   }
 }
 
@@ -876,6 +972,7 @@ function spawnBunWorker(options: LocalModelWorkerSpawnOptions): LocalModelWorker
       await input.end();
     },
     exited: child.exited,
+    readExitStatus: () => ({exitCode: child.exitCode, signal: child.signalCode}),
     kill: () => child.kill('SIGKILL'),
     stderr: child.stderr as ReadableStream<Uint8Array>,
     stdout: child.stdout as ReadableStream<Uint8Array>,
@@ -1419,7 +1516,7 @@ function workerEmbeddingFailure(
 ): EmbeddingFailed {
   return withWorkerTransportDiagnostic(
     EmbeddingFailed.make({
-      cause: genericWorkerCause(error.reason),
+      cause: error,
       message: `Local AI embedding failed after the isolated worker retry was exhausted: ${error.message}`,
       modelId: request.manifest.id,
     }),
@@ -1480,12 +1577,19 @@ function protocolFailure(id: string): WorkerFailure {
   };
 }
 
-function transportError(operation: WorkerOperation, reason: WorkerFailureReason): LocalModelWorkerTransportError {
-  return LocalModelWorkerTransportError.make({
+function transportError(
+  operation: WorkerOperation,
+  reason: WorkerFailureReason,
+  observation?: LocalModelWorkerExitObservation,
+): LocalModelWorkerTransportError {
+  const error = LocalModelWorkerTransportError.make({
     message: workerTransportMessage(operation, reason),
     operation,
     reason,
   });
+  const projected = projectLocalModelWorkerExitObservation(observation);
+  if (projected !== undefined) Object.defineProperty(error, 'exitObservation', {value: projected, enumerable: false});
+  return error;
 }
 
 function workerTransportMessage(operation: WorkerOperation, reason: WorkerFailureReason): string {

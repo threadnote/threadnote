@@ -23,6 +23,7 @@ import {
   type RecallEmbeddingScope,
 } from '@threadnote/recall/background/demand';
 import {RecallVectorSourceChanged, runRecallVectorPreparationBatch} from '@threadnote/recall/background/vector-step';
+import {emitRecallDiagnostic, recallDiagnosticScope} from '@threadnote/recall/diagnostics';
 
 import {
   readRecallLexicalDemand,
@@ -41,12 +42,20 @@ export const runRecallLexicalWorkerUnit = Effect.fn('recall.lexicalWorkerUnit')(
     return {state: 'deferred' as const, reason: 'retry-backoff', delay: 1000};
   const revision = demand.revision;
   scope = {...scope, work: demand.work};
+  const failed = (stage: 'worker' | 'worker-repair' | 'read-maintenance', error?: unknown) =>
+    emitRecallDiagnostic(scope.agentContextHome, {
+      event: 'recall.lexical-refresh-failed',
+      scope: recallDiagnosticScope(scope.includeInactive),
+      stage,
+      error,
+    });
   if (scope.work) {
     const port = yield* RecallReadMaintenancePort;
     if (!port) return {state: 'blocked' as const, reason: 'read-maintenance-unavailable', delay: 0};
     const result = yield* port(scope).pipe(Effect.result);
     if (result._tag === 'Failure') {
       yield* failRecallLexicalRefresh(scope, revision);
+      yield* failed('read-maintenance', result.failure);
       return {state: 'deferred' as const, reason: 'read-maintenance-failed', delay: 1000};
     }
     if (result.success === 'pending') {
@@ -59,25 +68,32 @@ export const runRecallLexicalWorkerUnit = Effect.fn('recall.lexicalWorkerUnit')(
       ? {state: 'complete' as const, delay: 0}
       : {state: 'checkpointed' as const, reason: 'newer-demand', delay: 50};
   }
-  const status = yield* recallIndexStatus(scope, scope.includeInactive);
-  if (lexicalRefreshDisposition(status) === 'unsafe') {
-    yield* failRecallLexicalRefresh(scope, revision, true);
-    return {state: 'blocked' as const, reason: 'lexical-storage-requires-repair', delay: 0};
-  }
+  // The snapshot is derived from canonical sources, so an untrusted one is rebuilt here.
+  // `threadnote repair` covers only the active scope and would strand the inactive one.
+  const repair = lexicalRefreshDisposition(yield* recallIndexStatus(scope, scope.includeInactive)) === 'unsafe';
   const result = yield* loadRecallIndexData(scope, {
     includeInactive: scope.includeInactive,
     memoryIds: [],
-    forceRefresh: demand.reconcile === true,
+    forceRefresh: demand.reconcile === true || repair,
   }).pipe(Effect.result);
   if (result._tag === 'Failure') {
     if (Schema.is(RecallIndexSourceChanged)(result.failure))
       return {state: 'checkpointed' as const, reason: 'source-changed', delay: 50};
     yield* failRecallLexicalRefresh(scope, revision);
+    yield* failed('worker', result.failure);
     return {state: 'deferred' as const, reason: 'lexical-maintenance-failed', delay: 1000};
   }
-  // A concurrent canonical mutation retains demand for another pass.
-  if (!(yield* recallIndexStatus(scope, scope.includeInactive)).ready)
+  const refreshed = yield* recallIndexStatus(scope, scope.includeInactive);
+  if (!refreshed.ready) {
+    // A rebuild that leaves storage untrusted backs off instead of rebuilding every pass.
+    if (repair && lexicalRefreshDisposition(refreshed) === 'unsafe') {
+      yield* failRecallLexicalRefresh(scope, revision);
+      yield* failed('worker-repair');
+      return {state: 'deferred' as const, reason: 'lexical-storage-requires-repair', delay: 1000};
+    }
+    // A concurrent canonical mutation retains demand for another pass.
     return {state: 'checkpointed' as const, reason: 'source-changed', delay: 50};
+  }
   return (yield* completeRecallLexicalRefresh(scope, revision))
     ? {state: 'complete' as const, delay: 0}
     : {state: 'checkpointed' as const, reason: 'newer-demand', delay: 50};

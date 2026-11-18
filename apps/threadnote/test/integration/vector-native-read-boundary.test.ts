@@ -1,6 +1,18 @@
 import {it as effectIt} from '@effect/vitest';
 import {Database} from 'bun:sqlite';
-import {Array as EffectArray, Clock, Duration, Effect, Fiber, FileSystem, Option, Path, Schema} from 'effect';
+import {
+  Array as EffectArray,
+  Clock,
+  Console,
+  Duration,
+  Effect,
+  Fiber,
+  FileSystem,
+  Option,
+  Path,
+  Schema,
+  String as EffectString,
+} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {formatMemoryDocument} from '@threadnote/memory/document';
@@ -14,7 +26,13 @@ import {
   vectorIndexDatabaseFilename,
   loadRecallVectorAuthorizationKey,
   recallVectorStorage,
+  readSelectedSemanticVectorState,
 } from '@threadnote/recall/vector-index';
+import {
+  loadNativeVectorReader,
+  nativeVectorReaderHostProfile,
+  verifyNativeVectorReaderPayload,
+} from '@threadnote/recall/vector/native-reader-payload';
 import {deriveRecallEligibilityPolicy} from '@threadnote/recall/eligibility';
 import {
   recallVectorQueryStateSchema,
@@ -23,7 +41,7 @@ import {
 } from '@threadnote/recall/read_boundary';
 import {makeReadDeadline} from '@threadnote/platform/read_deadline';
 import {SystemInfo} from '@threadnote/platform/system';
-import {CommandExecutor} from '@threadnote/platform/command';
+import {CommandExecutor, type CommandExecutionError} from '@threadnote/platform/command';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
 import {makeReadyRecallReadBoundary, readyReadWorkerInvocation} from '../../src/recall/ready_read_boundary.js';
 import {RECALL_READY_READ_WORKER_ARGUMENT} from '../../src/worker_protocol.js';
@@ -36,6 +54,9 @@ import {
   serializeExternalDocumentManifest,
 } from '@threadnote/store/external-resource';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import {sha256FileHex} from '@threadnote/platform/digest';
+import {getThreadnoteVersion} from '@threadnote/workspace/runtime-version';
+import {runtimeSourceIdentity} from '../../../../scripts/runtime-source-identity.js';
 import {writeSourceConfiguration, sourceConfigurationFingerprint} from '../../src/integrations/config.js';
 import {captureConsole} from '../../src/effect/console.js';
 import {withProductionLogging, productionLogSupportExcerpt} from '../../src/effect/production_log.js';
@@ -44,6 +65,7 @@ import * as SqlClient from 'effect/sql/SqlClient';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import fc from 'fast-check';
 
+import {nativeVectorTestsEnabled, nativeVectorTestsRequired} from '@threadnote/testing/native-vector-fixture';
 const manifest = Option.getOrThrow(
   EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, value => value.id === 'bge-small-en-v1.5-q8'),
 );
@@ -120,13 +142,79 @@ const fixture = Effect.gen(function* () {
   return {fs, path, home, config, uris, files, database, scope, lexical, runtime, store};
 });
 
+const productionReadyWorker = (f: Pick<Effect.Success<typeof fixture>, 'fs' | 'path' | 'home'>) =>
+  Effect.gen(function* () {
+    const system = yield* SystemInfo;
+    const command = yield* CommandExecutor;
+    const expectedVersion = yield* getThreadnoteVersion();
+    const root = Bun.fileURLToPath(new URL('../../../../', import.meta.url));
+    const distribution = f.path.join(root, 'dist');
+    const release = yield* Schema.decodeEffect(
+      Schema.fromJsonString(
+        Schema.Struct({
+          executable: Schema.String,
+          runtime: Schema.String,
+          target: Schema.String,
+          version: Schema.String,
+          sourceIdentity: Schema.Unknown,
+        }),
+      ),
+    )(yield* f.fs.readFileString(f.path.join(distribution, 'release.json')));
+    if (release.version !== expectedVersion)
+      return yield* TestError.make({message: 'Compiled native worker release differs from the current version.'});
+    const manifestPath = f.path.join(distribution, 'runtime', 'vector-reader', 'manifest.json');
+    const configuredManifest = system.environment().THREADNOTE_NATIVE_VECTOR_READER_MANIFEST;
+    if (!configuredManifest || (yield* f.fs.realPath(configuredManifest)) !== (yield* f.fs.realPath(manifestPath)))
+      return yield* TestError.make({message: 'Required native worker must use its compiled distribution payload.'});
+    const native = yield* Effect.tryPromise({
+      try: () => verifyNativeVectorReaderPayload(manifestPath),
+      catch: cause => TestError.make({message: 'Compiled native worker payload validation failed.', cause}),
+    });
+    expect(native.development).toBe(false);
+    expect(native.bunTarget).toBe(nativeVectorReaderHostProfile(system));
+    expect(release.target).toBe(native.bunTarget);
+    expect(release.runtime).toBe(`bun-${Bun.version}`);
+    const identity = yield* runtimeSourceIdentity(root, release.target);
+    if (!identity) return yield* TestError.make({message: 'Compiled native worker needs a clean source identity.'});
+    expect(release.sourceIdentity).toEqual(identity);
+    expect(native.buildInfo.sourceCommit).toBe(identity.commit);
+    expect(native.buildInfo.sourceTree).toBe(identity.tree);
+    expect(f.path.basename(release.executable)).toBe(release.executable);
+    const executable = yield* f.fs.realPath(f.path.join(distribution, release.executable));
+    expect(f.path.dirname(executable)).toBe(yield* f.fs.realPath(distribution));
+    const stat = yield* f.fs.stat(executable);
+    expect(stat.type).toBe('File');
+    const selected = {...system, executablePath: executable};
+    expect(readyReadWorkerInvocation(selected.executablePath, selected.developmentEntrypoint)).toEqual({
+      executable,
+      arguments: [RECALL_READY_READ_WORKER_ARGUMENT],
+    });
+    const version = yield* command.execute(executable, ['--home', f.home, '--version'], {
+      env: {...system.environment(), THREADNOTE_HOME: f.home},
+      timeoutMs: 5000,
+      maxOutputBytes: 16 * 1024,
+      forceKillAfterMilliseconds: 0,
+      verifyOwnedProcessExit: system.platform === 'win32' ? 'leader' : 'group',
+    });
+    expect(EffectString.trim(version.stdout)).toBe(`threadnote v${expectedVersion}`);
+    return {
+      system: selected,
+      bundleBytes: Number(stat.size),
+      bundleSha256: yield* sha256FileHex(executable),
+    };
+  }).pipe(
+    Effect.timed,
+    Effect.map(([duration, result]) => ({...result, setupMilliseconds: Duration.toMillis(duration)})),
+  );
+
+// Required normal reads execute the already-built production worker. Explicit
+// observed shims and optional development fixtures keep their source entry.
 // Bundle the actual entry once before this example's read deadline. The setup
 // command owns Bun.build's lifetime because its Promise has no cancellation API.
-const bundledReadyWorker = (
-  f: Effect.Success<typeof fixture>,
-  entrypoint = Bun.fileURLToPath(new URL('../../src/recall/ready_read_entry.ts', import.meta.url)),
-) =>
+const bundledReadyWorker = (f: Pick<Effect.Success<typeof fixture>, 'fs' | 'path' | 'home'>, entrypoint?: string) =>
   Effect.gen(function* () {
+    if (entrypoint === undefined && nativeVectorTestsRequired) return yield* productionReadyWorker(f);
+    entrypoint ??= Bun.fileURLToPath(new URL('../../src/recall/ready_read_entry.ts', import.meta.url));
     const system = yield* SystemInfo;
     const command = yield* CommandExecutor;
     const directory = f.path.join(f.home, 'ready-worker-bundle', f.path.basename(entrypoint));
@@ -169,39 +257,92 @@ if (!result.success || result.outputs.length !== 1) throw new Error('Ready worke
     };
   });
 
+effectIt.effect.skipIf(!nativeVectorTestsRequired)(
+  'refuses a mismatched production worker release before starting a child',
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      let starts = 0;
+      const failure = yield* bundledReadyWorker({
+        fs: {
+          ...fs,
+          readFileString: () =>
+            Effect.succeed(
+              JSON.stringify({
+                executable: 'threadnote',
+                runtime: `bun-${Bun.version}`,
+                target: 'bun-darwin-arm64',
+                version: 'deliberately-invalid-version',
+                sourceIdentity: null,
+              }),
+            ),
+        },
+        path,
+        home: 'unused-no-child',
+      }).pipe(
+        Effect.provideService(
+          CommandExecutor,
+          CommandExecutor.of({
+            execute: () => {
+              starts++;
+              return Effect.die('A mismatched worker must not start.');
+            },
+            executeStreaming: () => Effect.die('Unexpected streaming worker command.'),
+          }),
+        ),
+        Effect.flip,
+      );
+      expect(Schema.is(TestError)(failure) && failure.message).toBe(
+        'Compiled native worker release differs from the current version.',
+      );
+      expect(starts).toBe(0);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+);
+
 const installSynchronousScoringStall = (database: string, stall = true) =>
   Effect.sync(() => {
     const db = new Database(database);
     try {
       db.exec('ALTER TABLE vector_values RENAME TO fixture_vector_values');
+      const entered = '0';
+      const expression = stall
+        ? `(WITH RECURSIVE n(x) AS (VALUES(${entered}) UNION ALL SELECT x+1 FROM n WHERE x<1000000000) SELECT sum(x) FROM n)>0`
+        : '1';
       db.exec(`CREATE VIEW vector_values AS SELECT id, vector_key, vector FROM fixture_vector_values
-      WHERE ${stall ? '(WITH RECURSIVE n(x) AS (VALUES(fixture_native_entered()) UNION ALL SELECT x+1 FROM n WHERE x<1000000000) SELECT sum(x) FROM n)>0' : 'fixture_native_entered()=1'}`);
+        WHERE CASE WHEN (SELECT timeout FROM pragma_busy_timeout)=50 THEN (${expression}) ELSE json('wrong-vector-busy-timeout') END`);
     } finally {
       db.close();
     }
   });
 
-// The SQLite scalar runs inside the actual scoring query before native recursion.
-// The shim only installs this fixture function; production worker/layer and SQL stay real.
+// Observe the actual addon export without instrumentation in production code.
 const observedWorker = (f: Effect.Success<typeof fixture>, promote = false) =>
   Effect.gen(function* () {
     const script = f.path.join(f.home, 'observed-vector-worker.ts');
     const entered = f.path.join(f.home, 'native-query-entered.pid');
     const timeoutFile = f.path.join(f.home, 'native-query-timeout.json');
+    const stageFile = f.path.join(f.home, 'native-worker-stages.json');
+    const native = true;
     yield* f.fs.writeFileString(
       script,
       `
 import {Database} from 'bun:sqlite';
 import {renameSync, writeFileSync} from 'node:fs';
-const original = Database.prototype.query;
-const registered = new WeakSet();
+const started = performance.now();
+const stages = [];
+function mark(stage) {
+  if (stages.length >= 8) throw new Error('Unexpected fixture stage count.');
+  stages.push({stage, atMilliseconds: Date.now(), elapsedMilliseconds: Math.round(performance.now() - started)});
+  writeFileSync(${JSON.stringify(stageFile)} + '.tmp', JSON.stringify(stages));
+  renameSync(${JSON.stringify(stageFile)} + '.tmp', ${JSON.stringify(stageFile)});
+}
+mark('entry');
 let promoted = false;
-Database.prototype.query = function(sql) {
-  if (!registered.has(this)) {
-    this.function('fixture_native_entered', () => { const entered = ${JSON.stringify(entered)}; writeFileSync(entered + '.tmp', String(process.pid)); renameSync(entered + '.tmp', entered);
-      ${
-        promote
-          ? `if (!promoted) {
+function promoteGeneration() {
+  ${
+    promote
+      ? `if (!promoted) {
         promoted = true;
         const writer = new Database(${JSON.stringify(f.database)});
         try {
@@ -210,15 +351,29 @@ Database.prototype.query = function(sql) {
           writer.exec('COMMIT');
         } finally {writer.close();}
       }`
-          : ''
-      }
-      return 1; });
-    registered.add(this);
+      : ''
   }
-  if (sql.includes('FROM vector_chunks AS chunk') && sql.includes('JOIN vector_values'))
-    writeFileSync(${JSON.stringify(timeoutFile)}, JSON.stringify(original.call(this, 'PRAGMA busy_timeout').get()));
-  return original.call(this, sql);
-};
+}
+if (${native}) {
+  const originalDlopen = process.dlopen;
+  process.dlopen = function(module, filename, flags) {
+    if (String(filename).endsWith('threadnote-vector-reader.node')) mark('dlopen-start');
+    const result = originalDlopen.call(process, module, filename, flags);
+    if (typeof module.exports.readSelected === 'function') {
+      mark('dlopen-complete');
+      const originalRead = module.exports.readSelected;
+      module.exports.readSelected = function(...args) {
+        const pending = originalRead.apply(this, args);
+        mark('native-call');
+        const entered = ${JSON.stringify(entered)};
+        writeFileSync(entered + '.tmp', String(process.pid));
+        renameSync(entered + '.tmp', entered);
+        return pending.then(value => { mark('native-settled'); promoteGeneration(); return value; });
+      };
+    }
+    return result;
+  };
+}
 // Invoke the same narrow main as the ordinary source read worker. Importing
 // standalone here would also initialize unrelated CLI dispatch dependencies.
 const {Effect, Layer, Runtime} = await import(${JSON.stringify(Bun.fileURLToPath(import.meta.resolve('effect')))});
@@ -227,6 +382,7 @@ const {withCliDiagnostics} = await import(${JSON.stringify(Bun.fileURLToPath(new
 const {runtimeEntrypointLayer} = await import(${JSON.stringify(Bun.fileURLToPath(new URL('../../src/effect/runtime-entrypoint.ts', import.meta.url)))});
 const {signalTransparentTeardown} = await import(${JSON.stringify(Bun.fileURLToPath(new URL('../../src/process/signal_transparent_main.ts', import.meta.url)))});
 const {telemetryChildEnvironmentPolicyLayer} = await import(${JSON.stringify(Bun.fileURLToPath(new URL('../../src/telemetry/session.ts', import.meta.url)))});
+mark('imports-complete');
 Runtime.makeRunMain(signalTransparentTeardown)(
   makeReadyRecallReadWorkerProgram(process.argv.slice(2), process.env).pipe(
     Effect.provide(readyRecallReadWorkerLayer.pipe(
@@ -239,7 +395,7 @@ Runtime.makeRunMain(signalTransparentTeardown)(
 `,
     );
     const bundled = yield* bundledReadyWorker(f, script);
-    return {system: bundled.system, entered, timeoutFile};
+    return {...bundled, entered, timeoutFile, stageFile, native};
   });
 
 const awaitNativePid = (f: Effect.Success<typeof fixture>, entered: string) =>
@@ -258,9 +414,105 @@ const awaitNativePid = (f: Effect.Success<typeof fixture>, entered: string) =>
     return pid;
   });
 
-describe('model-free native vector reads', () => {
+describe.skipIf(!nativeVectorTestsEnabled)('bundled native vector capability', () => {
   effectIt.effect(
-    'the closing vector fence rejects promotion performed during the actual SQLite score query',
+    'executes the actual production worker with canonical validation through Rust SQLite',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const system = yield* SystemInfo;
+        const binding = yield* Effect.tryPromise(() => loadNativeVectorReader(system));
+        expect(binding).toBeDefined();
+        const bundled = yield* observedWorker(f);
+        const command = yield* CommandExecutor;
+        let requestOrdinal = 0;
+        const read = (request: RecallReadyReadRequest) =>
+          Effect.gen(function* () {
+            const ordinal = ++requestOrdinal;
+            let allowance: number | undefined;
+            let commandStartedAt: number | undefined;
+            yield* f.fs.remove(bundled.stageFile, {force: true});
+            const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
+              Effect.provideService(SystemInfo, bundled.system),
+              Effect.provideService(
+                CommandExecutor,
+                CommandExecutor.of({
+                  ...command,
+                  execute: (executable, arguments_, options) =>
+                    Effect.gen(function* () {
+                      allowance = options?.timeoutMs;
+                      commandStartedAt = yield* Clock.currentTimeMillis;
+                      return yield* command.execute(executable, arguments_, options);
+                    }),
+                }),
+              ),
+            );
+            return yield* boundary.read(request).pipe(
+              Effect.tapError(() =>
+                Effect.gen(function* () {
+                  const stages = yield* Effect.gen(function* () {
+                    const stat = yield* f.fs.stat(bundled.stageFile);
+                    if (Number(stat.size) > 4096) return [];
+                    return yield* Schema.decodeEffect(
+                      Schema.fromJsonString(
+                        Schema.Array(
+                          Schema.Struct({
+                            stage: Schema.Literals([
+                              'entry',
+                              'imports-complete',
+                              'dlopen-start',
+                              'dlopen-complete',
+                              'native-call',
+                              'native-settled',
+                            ]),
+                            atMilliseconds: Schema.Finite,
+                            elapsedMilliseconds: Schema.Finite,
+                          }),
+                        ).check(Schema.isMaxLength(8)),
+                      ),
+                    )(yield* f.fs.readFileString(bundled.stageFile));
+                  }).pipe(Effect.orElseSucceed(() => []));
+                  yield* Effect.logError('Native capability worker failed', {
+                    operation: request.operation,
+                    requestOrdinal: ordinal,
+                    timeoutMilliseconds: allowance,
+                    setupMilliseconds: bundled.setupMilliseconds,
+                    bundleBytes: bundled.bundleBytes,
+                    bundleSha256: bundled.bundleSha256,
+                    // Epoch time correlates two processes for diagnostics only;
+                    // every deadline above continues to use its original monotonic clock.
+                    stages: EffectArray.map(stages, stage => ({
+                      stage: stage.stage,
+                      elapsedMilliseconds: stage.elapsedMilliseconds,
+                      ...(commandStartedAt === undefined
+                        ? {}
+                        : {afterCommandMilliseconds: stage.atMilliseconds - commandStartedAt}),
+                    })),
+                  }).pipe(Effect.provideService(Console.Console, globalThis.console));
+                }),
+              ),
+            );
+          });
+        const opening = yield* read({operation: 'vector-state', config: f.config, options: {model}});
+        const proof = yield* Schema.decodeUnknownEffect(recallVectorQueryStateSchema)(opening.value);
+        if (proof.readiness !== 'current') return yield* Effect.die('Missing native capability opening proof');
+        const result = yield* read({
+          operation: 'vector-scores',
+          config: f.config,
+          options: {model, state: proof.state, queryVector: vector, eligibility: f.scope},
+        });
+        expect(result.outcome).toBe('success');
+        expect(result.value).toEqual([[f.uris[0], 1]]);
+        const nativePid = yield* awaitNativePid(f, bundled.entered);
+        expect(bundled.system.isProcessRunning(nativePid)).toBe(false);
+      }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+    {timeout: 15000},
+  );
+});
+
+describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () => {
+  effectIt.effect(
+    'the closing vector fence rejects promotion at the actual scoring boundary',
     () =>
       Effect.gen(function* () {
         const f = yield* fixture;
@@ -285,8 +537,15 @@ describe('model-free native vector reads', () => {
         expect(result.value).toBeUndefined();
         const pid = yield* awaitNativePid(f, observed.entered);
         expect(observed.system.isProcessRunning(pid)).toBe(false);
-        expect(JSON.parse(yield* f.fs.readFileString(observed.timeoutFile))).toEqual({timeout: 50});
-        const current = yield* scoring.read({operation: 'vector-state', config: f.config, options: {model}});
+        // Native SQL views assert the actual connection timeout inside the query.
+        if (!observed.native)
+          expect(JSON.parse(yield* f.fs.readFileString(observed.timeoutFile))).toEqual({timeout: 50});
+        // Verifying the new generation is a separate request after the scoring
+        // worker has exited, with its own unchanged production allowance.
+        const currentRead = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
+          Effect.provideService(SystemInfo, observed.system),
+        );
+        const current = yield* currentRead.read({operation: 'vector-state', config: f.config, options: {model}});
         const closing = yield* Schema.decodeUnknownEffect(recallVectorQueryStateSchema)(current.value);
         expect(closing.readiness).toBe('current');
         if (closing.readiness === 'current') expect(closing.state.generation).not.toBe(proof.state.generation);
@@ -419,7 +678,7 @@ describe('model-free native vector reads', () => {
                           readOrdinal,
                           timeoutMilliseconds: options?.timeoutMs,
                           completedReadMilliseconds: [...readMilliseconds],
-                        }),
+                        }).pipe(Effect.provideService(Console.Console, globalThis.console)),
                       ),
                     ),
                 }),
@@ -464,6 +723,8 @@ describe('model-free native vector reads', () => {
     {timeout: 15000},
   );
 
+  const scopePropertyRuns = 8;
+  const scopePropertyExampleMilliseconds = 15_000;
   fcEffectProp(
     effectIt,
     'score export is the intersection of independent project and URI scopes',
@@ -471,36 +732,91 @@ describe('model-free native vector reads', () => {
     ([project, selected]) =>
       Effect.gen(function* () {
         const f = yield* fixture;
+        // Opening is setup for this authorization oracle; only the actual Rust
+        // scoring child consumes its bounded request allowance.
+        const state = yield* readSelectedSemanticVectorState(f.config, model, {
+          corpusGeneration: f.lexical.generation,
+        });
+        if (state === undefined) return yield* Effect.die('Missing property opening proof');
         const bundled = yield* bundledReadyWorker(f);
+        const command = yield* CommandExecutor;
+        let commandOutcome: 'not-invoked' | 'running' | 'completed' | 'failed' = 'not-invoked';
+        let allowance: number | undefined;
+        let commandFailure:
+          {tag: CommandExecutionError['_tag']; elapsedMilliseconds: number; exitCode?: number} | undefined;
         const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
           Effect.provideService(SystemInfo, bundled.system),
+          Effect.provideService(
+            CommandExecutor,
+            CommandExecutor.of({
+              ...command,
+              execute: (executable, arguments_, options) =>
+                Effect.gen(function* () {
+                  commandOutcome = 'running';
+                  allowance = options?.timeoutMs;
+                  const started = yield* Clock.currentTimeMillis;
+                  return yield* command.execute(executable, arguments_, options).pipe(
+                    Effect.tap(() =>
+                      Effect.sync(() => {
+                        commandOutcome = 'completed';
+                      }),
+                    ),
+                    Effect.tapError(error =>
+                      Effect.gen(function* () {
+                        commandOutcome = 'failed';
+                        commandFailure = {
+                          tag: error._tag,
+                          elapsedMilliseconds: Math.max(0, (yield* Clock.currentTimeMillis) - started),
+                          ...(error._tag === 'CommandFailed' ? {exitCode: error.exitCode} : {}),
+                        };
+                      }),
+                    ),
+                  );
+                }),
+            }),
+          ),
         );
-        const reply = yield* boundary.read({operation: 'vector-state', config: f.config, options: {model}});
-        const proof = yield* Schema.decodeUnknownEffect(recallVectorQueryStateSchema)(reply.value);
-        if (proof.readiness !== 'current') return yield* Effect.die('Missing property opening proof');
         const allowedUriScopes = EffectArray.map(
           selected,
           name => `threadnote://user/test/memories/durable/projects/${name}`,
         );
-        const result = yield* boundary.read({
-          operation: 'vector-scores',
-          config: f.config,
-          options: {
-            model,
-            state: proof.state,
-            queryVector: vector,
-            allowedUriScopes,
-            eligibility: deriveRecallEligibilityPolicy({explicitProject: project, originalQuery: 'private vector'}),
-          },
-        });
+        const result = yield* boundary
+          .read({
+            operation: 'vector-scores',
+            config: f.config,
+            options: {
+              model,
+              state,
+              queryVector: vector,
+              allowedUriScopes,
+              eligibility: deriveRecallEligibilityPolicy({explicitProject: project, originalQuery: 'private vector'}),
+            },
+          })
+          .pipe(
+            Effect.tapError(error =>
+              Effect.logError('Native scope property worker failed', {
+                reason: error.reason,
+                commandOutcome,
+                timeoutMilliseconds: allowance,
+                commandFailure,
+                setupMilliseconds: bundled.setupMilliseconds,
+                bundleBytes: bundled.bundleBytes,
+                bundleSha256: bundled.bundleSha256,
+              }).pipe(Effect.provideService(Console.Console, globalThis.console)),
+            ),
+          );
         expect(result.outcome).toBe('success');
         expect(result.value).toEqual(
           selected.includes(project)
             ? [[`threadnote://user/test/memories/durable/projects/${project}/entry.md`, 1]]
             : [],
         );
-      }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
-    {fastCheck: {numRuns: 8}, timeout: 15000},
+      }).pipe(provideTestLayer(ApplicationLayer), Effect.timeout(scopePropertyExampleMilliseconds), TestClock.withLive),
+    {
+      fastCheck: {numRuns: scopePropertyRuns},
+      // Each draw owns setup and scoped cleanup; the request itself still has 2s.
+      timeout: scopePropertyRuns * scopePropertyExampleMilliseconds,
+    },
   );
 
   effectIt.effect(
@@ -509,14 +825,20 @@ describe('model-free native vector reads', () => {
       Effect.gen(function* () {
         const f = yield* fixture;
         let wakes = 0;
-        const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
-          Effect.provideService(RecallEmbeddingWakePort, () =>
-            Effect.sync(() => {
-              wakes++;
-            }),
-          ),
-        );
-        const reply = yield* boundary.read({operation: 'vector-state', config: f.config, options: {model}});
+        const bundled = yield* bundledReadyWorker(f);
+        const read = (request: RecallReadyReadRequest) =>
+          Effect.gen(function* () {
+            const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
+              Effect.provideService(SystemInfo, bundled.system),
+              Effect.provideService(RecallEmbeddingWakePort, () =>
+                Effect.sync(() => {
+                  wakes++;
+                }),
+              ),
+            );
+            return yield* boundary.read(request);
+          });
+        const reply = yield* read({operation: 'vector-state', config: f.config, options: {model}});
         const proof = yield* Schema.decodeUnknownEffect(recallVectorQueryStateSchema)(reply.value);
         if (proof.readiness !== 'current') return yield* Effect.die('Missing private opening proof');
         yield* f.fs.writeFileString(
@@ -527,7 +849,7 @@ describe('model-free native vector reads', () => {
           withProductionLogging(
             f.home,
             {component: 'mcp', operation: 'recall_context'},
-            boundary.read({
+            read({
               operation: 'vector-scores',
               config: f.config,
               options: {
@@ -575,10 +897,65 @@ describe('model-free native vector reads', () => {
       Effect.gen(function* () {
         const f = yield* fixture;
         const bundled = yield* bundledReadyWorker(f);
-        const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
-          Effect.provideService(SystemInfo, bundled.system),
-        );
-        const opened = yield* boundary.read({operation: 'vector-state', config: f.config, options: {model}});
+        const command = yield* CommandExecutor;
+        let readOrdinal = 0;
+        const read = (request: RecallReadyReadRequest) =>
+          Effect.gen(function* () {
+            const ordinal = ++readOrdinal;
+            let commandOutcome: 'not-invoked' | 'running' | 'completed' | 'failed' = 'not-invoked';
+            let commandTimeoutMilliseconds: number | undefined;
+            let commandElapsedMilliseconds: number | undefined;
+            let commandFailureTag: CommandExecutionError['_tag'] | undefined;
+            const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
+              Effect.provideService(SystemInfo, bundled.system),
+              Effect.provideService(
+                CommandExecutor,
+                CommandExecutor.of({
+                  ...command,
+                  execute: (executable, arguments_, options) =>
+                    Effect.gen(function* () {
+                      const started = yield* Clock.monotonicTimeNanos;
+                      commandTimeoutMilliseconds = options?.timeoutMs;
+                      commandOutcome = 'running';
+                      return yield* command.execute(executable, arguments_, options).pipe(
+                        Effect.tap(() =>
+                          Effect.sync(() => {
+                            commandOutcome = 'completed';
+                          }),
+                        ),
+                        Effect.tapError(error =>
+                          Effect.gen(function* () {
+                            commandOutcome = 'failed';
+                            commandFailureTag = error._tag;
+                            commandElapsedMilliseconds =
+                              Number((yield* Clock.monotonicTimeNanos) - started) / 1_000_000;
+                          }),
+                        ),
+                      );
+                    }),
+                }),
+              ),
+            );
+            const readStarted = yield* Clock.monotonicTimeNanos;
+            return yield* boundary.read(request).pipe(
+              Effect.tapError(error =>
+                Effect.gen(function* () {
+                  const ended = yield* Clock.monotonicTimeNanos;
+                  yield* Effect.logError('Native URI scope boundary timing diagnostic', {
+                    operation: request.operation,
+                    readOrdinal: ordinal,
+                    boundaryReason: error.reason,
+                    elapsedMilliseconds: Number(ended - readStarted) / 1_000_000,
+                    commandOutcome,
+                    ...(commandTimeoutMilliseconds === undefined ? {} : {commandTimeoutMilliseconds}),
+                    ...(commandElapsedMilliseconds === undefined ? {} : {commandElapsedMilliseconds}),
+                    ...(commandFailureTag === undefined ? {} : {commandFailureTag}),
+                  }).pipe(Effect.provideService(Console.Console, globalThis.console));
+                }),
+              ),
+            );
+          });
+        const opened = yield* read({operation: 'vector-state', config: f.config, options: {model}});
         expect(opened.outcome).toBe('success');
         const proof = yield* Schema.decodeUnknownEffect(recallVectorQueryStateSchema)(opened.value);
         expect(proof.readiness).toBe('current');
@@ -596,13 +973,11 @@ describe('model-free native vector reads', () => {
             limit: 12,
           },
         };
-        const scores = yield* boundary.read(request);
+        const scores = yield* read(request);
         expect(scores.outcome).toBe('success');
         expect(scores.value).toEqual([[f.uris[0], 1]]);
         expect(JSON.stringify(scores)).not.toContain('PRIVATE_VECTOR');
-        const wrong = yield* (yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
-          Effect.provideService(SystemInfo, bundled.system),
-        )).read({
+        const wrong = yield* read({
           ...request,
           config: {...f.config, user: 'other'},
         });
@@ -623,9 +998,7 @@ describe('model-free native vector reads', () => {
             'PRIVATE_CHANGED_SOURCE',
           ),
         );
-        const changed = yield* (yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
-          Effect.provideService(SystemInfo, bundled.system),
-        )).read(request);
+        const changed = yield* read(request);
         expect(changed.outcome).toBe('success');
         expect(changed.value).toEqual([]);
         expect(JSON.stringify(changed)).not.toContain('PRIVATE_CHANGED_SOURCE');
@@ -638,16 +1011,12 @@ describe('model-free native vector reads', () => {
     () =>
       Effect.gen(function* () {
         const f = yield* fixture;
-        const bundled = yield* bundledReadyWorker(f);
-        const proofReply = yield* (yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
-          Effect.provideService(SystemInfo, bundled.system),
-        )).read({
-          operation: 'vector-state',
-          config: f.config,
-          options: {model},
+        // Prepare opening metadata before the measured stalled scoring request.
+        // Cold opening-process startup is covered by the separate worker examples.
+        const state = yield* readSelectedSemanticVectorState(f.config, model, {
+          corpusGeneration: f.lexical.generation,
         });
-        const proof = yield* Schema.decodeUnknownEffect(recallVectorQueryStateSchema)(proofReply.value);
-        if (proof.readiness !== 'current') return yield* Effect.die('Vector opening proof unavailable.');
+        if (state === undefined) return yield* Effect.die('Vector opening proof unavailable.');
         yield* installSynchronousScoringStall(f.database);
         const observed = yield* observedWorker(f);
         const deadline = yield* makeReadDeadline(1800);
@@ -661,8 +1030,8 @@ describe('model-free native vector reads', () => {
             config: f.config,
             options: {
               model,
-              state: proof.state,
-              corpusGeneration: proof.corpusGeneration,
+              state,
+              corpusGeneration: f.lexical.generation,
               queryVector: vector,
               limit: 12,
             },
@@ -673,10 +1042,49 @@ describe('model-free native vector reads', () => {
           expect(Schema.is(RecallReadyReadBoundaryError)(result.failure) && result.failure.reason).toBe(
             'budget-exhausted',
           );
-        expect(Number((yield* Clock.monotonicTimeNanos) - start) / 1_000_000).toBeLessThan(1800);
+        const requestElapsedMilliseconds = Number((yield* Clock.monotonicTimeNanos) - start) / 1_000_000;
+        expect(requestElapsedMilliseconds).toBeLessThan(1800);
+        if (!(yield* f.fs.exists(observed.entered))) {
+          const stages = yield* Effect.gen(function* () {
+            const stat = yield* f.fs.stat(observed.stageFile);
+            if (Number(stat.size) > 4096) return [];
+            return yield* Schema.decodeEffect(
+              Schema.fromJsonString(
+                Schema.Array(
+                  Schema.Struct({
+                    stage: Schema.Literals([
+                      'entry',
+                      'imports-complete',
+                      'dlopen-start',
+                      'dlopen-complete',
+                      'native-call',
+                      'native-settled',
+                    ]),
+                    atMilliseconds: Schema.Finite,
+                    elapsedMilliseconds: Schema.Finite,
+                  }),
+                ).check(Schema.isMaxLength(8)),
+              ),
+            )(yield* f.fs.readFileString(observed.stageFile));
+          }).pipe(Effect.orElseSucceed(() => []));
+          yield* Effect.logError('Native SQLite stall dispatch diagnostic', {
+            nativeDispatchObserved: EffectArray.some(stages, stage => stage.stage === 'native-call'),
+            boundaryReason:
+              result._tag === 'Failure' && Schema.is(RecallReadyReadBoundaryError)(result.failure)
+                ? result.failure.reason
+                : 'unexpected-failure',
+            requestElapsedMilliseconds,
+            stages: EffectArray.map(stages, stage => ({
+              stage: stage.stage,
+              elapsedMilliseconds: stage.elapsedMilliseconds,
+            })),
+          }).pipe(Effect.provideService(Console.Console, globalThis.console));
+        }
         const pid = yield* awaitNativePid(f, observed.entered);
         expect(observed.system.isProcessRunning(pid)).toBe(false);
-        expect(JSON.parse(yield* f.fs.readFileString(observed.timeoutFile))).toEqual({timeout: 50});
+        // Native SQL views assert the actual connection timeout inside the query.
+        if (!observed.native)
+          expect(JSON.parse(yield* f.fs.readFileString(observed.timeoutFile))).toEqual({timeout: 50});
         const later = yield* boundary
           .read({operation: 'generation', config: f.config, options: {includeInactive: false}})
           .pipe(Effect.result);
@@ -718,10 +1126,22 @@ describe('model-free native vector reads', () => {
             },
           })
           .pipe(Effect.forkScoped);
-        const pid = yield* awaitNativePid(f, observed.entered);
+        const pid = yield* Effect.raceFirst(
+          Effect.gen(function* () {
+            while (!(yield* f.fs.exists(observed.entered))) yield* Effect.sleep(5);
+            return yield* awaitNativePid(f, observed.entered);
+          }),
+          Fiber.join(child).pipe(
+            Effect.andThen(
+              TestError.make({message: 'Owned vector worker completed before native scoring could be cancelled.'}),
+            ),
+          ),
+        );
         yield* Fiber.interrupt(child);
         expect(observed.system.isProcessRunning(pid)).toBe(false);
-        expect(JSON.parse(yield* f.fs.readFileString(observed.timeoutFile))).toEqual({timeout: 50});
+        // Native SQL views assert the actual connection timeout inside the query.
+        if (!observed.native)
+          expect(JSON.parse(yield* f.fs.readFileString(observed.timeoutFile))).toEqual({timeout: 50});
       }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
     {timeout: 10000},
   );

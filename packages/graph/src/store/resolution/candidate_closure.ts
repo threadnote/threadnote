@@ -7,15 +7,6 @@ import type {CodeGraphFileFacts, CodeGraphInventoryFile, CodeGraphReference} fro
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
-/** One complete scan must stay within the ordinary 5,000-file attribution-work ceiling. */
-export const PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FILES = 5_000;
-/**
- * Pages remain independently bounded; this limit caps aggregate decoded work.
- * Real repositories can produce roughly 8x as many cached-fact bytes as
- * source bytes, so 256 MiB keeps ordinary exported TypeScript edits
- * incremental without making the scan unbounded.
- */
-export const PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FACT_BYTES = 256 * 1_048_576;
 export const PROJECT_RESOLUTION_CANDIDATE_SCAN_PAGE_MAX_FILES = 32;
 /** Matches the independent per-file cached-fact ceiling while keeping every decoded page bounded. */
 export const PROJECT_RESOLUTION_CANDIDATE_SCAN_PAGE_MAX_FACT_BYTES = CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM;
@@ -29,7 +20,7 @@ export const PROJECT_RESOLUTION_CANDIDATE_MAX_REEXPORT_LOOKUP_KEYS = 100_000;
 export const PROJECT_RESOLUTION_CANDIDATE_MAX_REEXPORT_KEY_BYTES = 8 * 1_048_576;
 const PROJECT_RESOLUTION_CANDIDATE_PROJECTION_RECORDS_PER_CHUNK = 65_536;
 const PROJECT_RESOLUTION_CANDIDATE_PROJECTION_RECORD_BYTES =
-  BigUint64Array.BYTES_PER_ELEMENT + Uint16Array.BYTES_PER_ELEMENT;
+  BigUint64Array.BYTES_PER_ELEMENT + Uint32Array.BYTES_PER_ELEMENT;
 /**
  * Deterministic typed-array payload ceiling for the one-pass projection. The
  * projection grows in chunks and never retains lookup strings or per-identity
@@ -53,8 +44,6 @@ export type ProjectResolutionCandidateScanFallbackDetail =
   | 'candidate-reexport-key-bytes'
   | 'candidate-reexport-lookup-keys'
   | 'candidate-reexports'
-  | 'candidate-scan-fact-bytes'
-  | 'candidate-scan-files'
   | 'candidate-selected-files';
 
 export interface ProjectResolutionCandidateScanPage {
@@ -68,13 +57,6 @@ export type ProjectResolutionCandidateScanPlan =
       readonly files: number;
       readonly mode: 'eligible';
       readonly pages: readonly ProjectResolutionCandidateScanPage[];
-    }
-  | {
-      readonly detail: 'candidate-scan-fact-bytes' | 'candidate-scan-files';
-      readonly limit: number;
-      readonly mode: 'fallback';
-      readonly observed: number;
-      readonly reason: 'project-closure-unbounded';
     }
   | {
       readonly mode: 'fallback';
@@ -108,40 +90,71 @@ export type ProjectResolutionCandidateClosure =
 
 export interface ProjectResolutionCandidateFactPage {
   readonly bytesByPath: ReadonlyMap<string, number>;
+  /**
+   * Paths served from the degraded parser generation. A later parse of the
+   * same content can observe more references, so evidence that includes them
+   * is never handed to `onIndex`.
+   */
+  readonly degradedPaths?: ReadonlySet<string>;
   readonly facts: ReadonlyMap<string, CodeGraphFileFacts>;
   /** A second attribution version shares the same path ordinal and every projection cap. */
   readonly previousFacts?: ReadonlyMap<string, CodeGraphFileFacts>;
 }
 
+/**
+ * Repository-wide resolver evidence for one attribution context. It is exactly
+ * what the full scan observes: every reference lookup identity with the file
+ * that carries it, every symbol lookup identity, and every static reexport
+ * hyperedge in scan order. Fingerprints are the scan's own, so collisions can
+ * only widen a closure, never narrow it.
+ */
+export interface ProjectResolutionCandidateIndex {
+  readonly paths: readonly string[];
+  /** One entry per distinct fingerprint within a file, aligned with `referenceOrdinals`. */
+  readonly referenceFingerprints: BigUint64Array;
+  readonly referenceOrdinals: Uint32Array;
+  /** One entry per observed symbol lookup identity; duplicates are allowed. */
+  readonly symbolFingerprints: BigUint64Array;
+  readonly reexports: readonly ProjectResolutionReexportKeys[];
+}
+
+export interface ProjectResolutionCandidateIndexMatches {
+  /** Distinct paths whose references carry a requested fingerprint; more than the maximum only signals overflow. */
+  readonly referencePaths: ReadonlySet<string>;
+  readonly symbolFingerprints: ReadonlySet<bigint>;
+}
+
+/**
+ * `indexed`: complete evidence for the exact context. `missing`: the owner is
+ * ready, so evidence collected now can be recorded. `unavailable`: no ready
+ * owner (or a database that predates the tables); nothing can be recorded.
+ */
+export type CodeGraphResolutionCandidateIndexState =
+  | {readonly reexports: readonly ProjectResolutionReexportKeys[]; readonly state: 'indexed'}
+  | {readonly state: 'missing'}
+  | {readonly state: 'unavailable'};
+
+/** Resolves fingerprints against one evidence source; `undefined` means the evidence is no longer available. */
+export type ProjectResolutionCandidateIndexLookup<E> = (query: {
+  readonly maximumReferencePaths: number;
+  readonly referenceFingerprints: ReadonlySet<bigint>;
+  readonly symbolFingerprints: ReadonlySet<bigint>;
+}) => Effect.Effect<ProjectResolutionCandidateIndexMatches | undefined, E>;
+
 export function planProjectResolutionCandidateScan(input: {
   readonly bytesByPath: ReadonlyMap<string, number>;
   readonly files: readonly CodeGraphInventoryFile[];
-  readonly maximumFactBytes?: number;
-  readonly maximumFiles?: number;
   readonly pageMaximumFactBytes?: number;
   readonly pageMaximumFiles?: number;
 }): ProjectResolutionCandidateScanPlan {
-  const maximumFiles = input.maximumFiles ?? PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FILES;
-  const maximumFactBytes = input.maximumFactBytes ?? PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FACT_BYTES;
   const pageMaximumFiles = input.pageMaximumFiles ?? PROJECT_RESOLUTION_CANDIDATE_SCAN_PAGE_MAX_FILES;
   const pageMaximumFactBytes = input.pageMaximumFactBytes ?? PROJECT_RESOLUTION_CANDIDATE_SCAN_PAGE_MAX_FACT_BYTES;
   if (
-    !isNonNegativeSafeInteger(maximumFiles) ||
-    !isNonNegativeSafeInteger(maximumFactBytes) ||
     !isPositiveSafeInteger(pageMaximumFiles) ||
     !isPositiveSafeInteger(pageMaximumFactBytes) ||
     new Set(EffectArray.map(input.files, file => file.path)).size !== input.files.length
   ) {
     return {mode: 'fallback', reason: 'cache-incomplete'};
-  }
-  if (input.files.length > maximumFiles) {
-    return {
-      detail: 'candidate-scan-files',
-      limit: maximumFiles,
-      mode: 'fallback',
-      observed: input.files.length,
-      reason: 'project-closure-unbounded',
-    };
   }
   const ordered = [...input.files].sort((left, right) => compareCodeUnits(left.path, right.path));
   const pages: ProjectResolutionCandidateScanPage[] = [];
@@ -152,15 +165,6 @@ export function planProjectResolutionCandidateScan(input: {
     const bytes = input.bytesByPath.get(file.path);
     if (bytes === undefined || !Number.isSafeInteger(bytes) || bytes < 0) {
       return {mode: 'fallback', reason: 'cache-incomplete'};
-    }
-    if (factBytes > maximumFactBytes - bytes) {
-      return {
-        detail: 'candidate-scan-fact-bytes',
-        limit: maximumFactBytes,
-        mode: 'fallback',
-        observed: factBytes + bytes,
-        reason: 'project-closure-unbounded',
-      };
     }
     const pageFull = page.length > 0 && (page.length >= pageMaximumFiles || pageBytes > pageMaximumFactBytes - bytes);
     if (pageFull) {
@@ -204,6 +208,8 @@ export const scanProjectResolutionCandidateClosure = Effect.fn('codeGraph.scanPr
     readonly loadPage: (
       files: readonly CodeGraphInventoryFile[],
     ) => Effect.Effect<ProjectResolutionCandidateFactPage, E>;
+    /** Receives the complete single-version evidence once every page has been observed without degraded facts. */
+    readonly onIndex?: (index: ProjectResolutionCandidateIndex) => void;
   }) {
     const maximumProjectionAssociations =
       input.maximumProjectionAssociations ?? PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_ASSOCIATIONS;
@@ -244,6 +250,7 @@ export const scanProjectResolutionCandidateClosure = Effect.fn('codeGraph.scanPr
     });
     const scannedPaths: string[] = [];
     let versioned = false;
+    let degraded = false;
     let reexportKeyBytes = 0;
     let reexportLookupKeys = 0;
     for (const reexport of input.additionalReexports ?? []) {
@@ -256,6 +263,7 @@ export const scanProjectResolutionCandidateClosure = Effect.fn('codeGraph.scanPr
     for (const page of input.plan.pages) {
       const loaded = yield* input.loadPage(page.files);
       if (!completePage(page, loaded)) return {mode: 'fallback', reason: 'cache-incomplete'} as const;
+      if ((loaded.degradedPaths?.size ?? 0) > 0) degraded = true;
       for (const file of page.files) {
         const fileOrdinal = scannedPaths.length;
         scannedPaths.push(file.path);
@@ -301,42 +309,124 @@ export const scanProjectResolutionCandidateClosure = Effect.fn('codeGraph.scanPr
       }
     }
     if (scannedPaths.length !== input.plan.files) return {mode: 'fallback', reason: 'cache-incomplete'} as const;
-    const finalizedKeys = input.finalizeLookupKeys?.() ?? [];
-    const lookupKeys = resolutionCandidateLookupKeyClosure([...initialLookupKeys, ...finalizedKeys], reexports);
-    if (lookupKeys.mode === 'fallback') return lookupKeys;
+    if (!versioned && !degraded) input.onIndex?.(projection.index(scannedPaths, baseReexports));
+    return yield* resolveObservedResolutionCandidateClosure({
+      baseReexports,
+      factBytes: input.plan.factBytes,
+      fingerprint: projection.fingerprint,
+      lookup: query => Effect.succeed(projection.match(query, scannedPaths)),
+      lookupKeys: [...initialLookupKeys, ...(input.finalizeLookupKeys?.() ?? [])],
+      maximumSelectedFiles: input.maximumSelectedFiles,
+      ...(versioned ? {observation: projection.observation()} : {}),
+      reexports,
+      scannedFiles: input.plan.files,
+    });
+  },
+);
 
-    const resolvedProjection = projection.resolve(lookupKeys.identities, reexports);
-    if (resolvedProjection.mode === 'fallback') return resolvedProjection;
-    const selectedPaths = new Set<string>();
-    const directAliasSymbolConflictIdentities = new Set<string>();
-    for (const reexport of reexports) {
+/**
+ * Resolve the same closure as the full scan from previously collected evidence.
+ * Only fingerprints reachable from the edit are looked up, so the work is
+ * proportional to the affected references rather than to the repository.
+ */
+export const resolveIndexedProjectResolutionCandidateClosure = Effect.fn(
+  'codeGraph.resolveIndexedProjectResolutionCandidateClosure',
+)(function* <E>(input: {
+  readonly additionalReexports?: readonly ProjectResolutionReexportKeys[];
+  readonly initialLookupKeys: readonly ProjectResolutionLookupKey[];
+  readonly lookup: ProjectResolutionCandidateIndexLookup<E>;
+  readonly maximumSelectedFiles: number;
+  /** Must match the fingerprint that collected the evidence. */
+  readonly projectionFingerprint?: (identity: string) => bigint;
+  /** Base reexports in the order the collecting scan retained them. */
+  readonly reexports: readonly ProjectResolutionReexportKeys[];
+}) {
+  if (
+    EffectArray.some(input.initialLookupKeys, value => !validResolutionLookupKey(value)) ||
+    !isNonNegativeSafeInteger(input.maximumSelectedFiles)
+  ) {
+    return {mode: 'fallback', reason: 'cache-incomplete'} as const;
+  }
+  const initialLookupKeys = uniqueResolutionLookupKeys(input.initialLookupKeys);
+  if (initialLookupKeys.length > PROJECT_RESOLUTION_CANDIDATE_MAX_LOOKUP_KEYS) {
+    return unbounded('candidate-lookup-keys', initialLookupKeys.length, PROJECT_RESOLUTION_CANDIDATE_MAX_LOOKUP_KEYS);
+  }
+  // Retain in the scan's order so every reexport cap observes the same totals.
+  const reexports: ProjectResolutionReexportKeys[] = [];
+  let reexportKeyBytes = 0;
+  let reexportLookupKeys = 0;
+  for (const reexport of [...(input.additionalReexports ?? []), ...input.reexports]) {
+    const retained = retainReexport(reexport, reexports.length, reexportLookupKeys, reexportKeyBytes);
+    if (retained.mode === 'fallback') return retained;
+    reexports.push(retained.reexport);
+    reexportKeyBytes = retained.totalKeyBytes;
+    reexportLookupKeys = retained.totalLookupKeys;
+  }
+  const fingerprint = input.projectionFingerprint ?? resolutionCandidateIdentityFingerprint;
+  return yield* resolveObservedResolutionCandidateClosure({
+    baseReexports: input.reexports,
+    factBytes: 0,
+    fingerprint: identity => validProjectionFingerprint(fingerprint(identity)),
+    lookup: input.lookup,
+    lookupKeys: initialLookupKeys,
+    maximumSelectedFiles: input.maximumSelectedFiles,
+    reexports,
+    scannedFiles: 0,
+  });
+});
+
+const resolveObservedResolutionCandidateClosure = Effect.fn('codeGraph.resolveObservedResolutionCandidateClosure')(
+  function* <E>(input: {
+    readonly baseReexports: readonly ProjectResolutionReexportKeys[];
+    readonly factBytes: number;
+    readonly fingerprint: (identity: string) => bigint | undefined;
+    readonly lookup: ProjectResolutionCandidateIndexLookup<E>;
+    readonly lookupKeys: readonly ProjectResolutionLookupKey[];
+    readonly maximumSelectedFiles: number;
+    readonly observation?: {readonly projectionObservations: number; readonly projectionObservedKeyBytes: number};
+    readonly reexports: readonly ProjectResolutionReexportKeys[];
+    readonly scannedFiles: number;
+  }) {
+    const lookupKeys = resolutionCandidateLookupKeyClosure(input.lookupKeys, input.reexports);
+    if (lookupKeys.mode === 'fallback') return lookupKeys;
+    const referenceFingerprints = new Set<bigint>();
+    for (const identity of lookupKeys.identities) {
+      const fingerprint = input.fingerprint(identity);
+      if (fingerprint === undefined) return {mode: 'fallback', reason: 'cache-incomplete'} as const;
+      referenceFingerprints.add(fingerprint);
+    }
+    const aliasFingerprints = new Map<string, bigint>();
+    for (const reexport of input.reexports) {
       for (const alias of reexport.aliases) {
         const identity = resolutionLookupKeyIdentity(alias.resolutionDomain, alias.key);
-        const fingerprint = projection.fingerprint(identity);
+        const fingerprint = input.fingerprint(identity);
         if (fingerprint === undefined) return {mode: 'fallback', reason: 'cache-incomplete'} as const;
-        if (resolvedProjection.symbolConflictFingerprints.has(fingerprint)) {
-          directAliasSymbolConflictIdentities.add(identity);
-        }
+        aliasFingerprints.set(identity, fingerprint);
       }
     }
-    for (const ordinal of resolvedProjection.referenceOrdinals) {
-      const path = scannedPaths[ordinal];
-      if (path === undefined) return {mode: 'fallback', reason: 'cache-incomplete'} as const;
-      selectedPaths.add(path);
-      if (selectedPaths.size > input.maximumSelectedFiles) {
-        return unbounded('candidate-selected-files', selectedPaths.size, input.maximumSelectedFiles);
-      }
+    const matches = yield* input.lookup({
+      maximumReferencePaths: input.maximumSelectedFiles,
+      referenceFingerprints,
+      symbolFingerprints: new Set(aliasFingerprints.values()),
+    });
+    if (matches === undefined) return {mode: 'fallback', reason: 'cache-incomplete'} as const;
+    if (matches.referencePaths.size > input.maximumSelectedFiles) {
+      return unbounded('candidate-selected-files', input.maximumSelectedFiles + 1, input.maximumSelectedFiles);
+    }
+    const directAliasSymbolConflictIdentities = new Set<string>();
+    for (const [identity, fingerprint] of aliasFingerprints) {
+      if (matches.symbolFingerprints.has(fingerprint)) directAliasSymbolConflictIdentities.add(identity);
     }
     return {
       affectedAliasLookupIdentities: lookupKeys.aliasIdentities,
       directAliasSymbolConflictIdentities,
-      factBytes: input.plan.factBytes,
+      factBytes: input.factBytes,
       lookupKeys: lookupKeys.identities.size,
       mode: 'eligible',
-      paths: [...selectedPaths].sort(compareCodeUnits),
-      reexports: baseReexports,
-      scannedFiles: input.plan.files,
-      ...(versioned ? projection.observation() : {}),
+      paths: [...matches.referencePaths].sort(compareCodeUnits),
+      reexports: input.baseReexports,
+      scannedFiles: input.scannedFiles,
+      ...input.observation,
     } as const;
   },
 );
@@ -494,7 +584,7 @@ function createResolutionCandidateProjection(input: {
   readonly maximumObservedKeyBytes: number;
 }) {
   const recordHashes: BigUint64Array[] = [];
-  const recordKinds: Uint16Array[] = [];
+  const recordKinds: Uint32Array[] = [];
   let records = 0;
   let associations = 0;
   let observations = 0;
@@ -530,7 +620,7 @@ function createResolutionCandidateProjection(input: {
     const offset = records % PROJECT_RESOLUTION_CANDIDATE_PROJECTION_RECORDS_PER_CHUNK;
     if (recordHashes[chunkIndex] === undefined) {
       recordHashes.push(new BigUint64Array(PROJECT_RESOLUTION_CANDIDATE_PROJECTION_RECORDS_PER_CHUNK));
-      recordKinds.push(new Uint16Array(PROJECT_RESOLUTION_CANDIDATE_PROJECTION_RECORDS_PER_CHUNK));
+      recordKinds.push(new Uint32Array(PROJECT_RESOLUTION_CANDIDATE_PROJECTION_RECORDS_PER_CHUNK));
     }
     recordHashes[chunkIndex][offset] = fingerprint;
     recordKinds[chunkIndex][offset] = kind;
@@ -577,51 +667,59 @@ function createResolutionCandidateProjection(input: {
       append(observation.fingerprint, PROJECTION_SYMBOL_RECORD);
       return undefined;
     },
-    resolve: (
-      affectedIdentities: ReadonlySet<string>,
-      reexports: readonly ProjectResolutionReexportKeys[],
-    ):
-      | {
-          readonly mode: 'eligible';
-          readonly referenceOrdinals: ReadonlySet<number>;
-          readonly symbolConflictFingerprints: ReadonlySet<bigint>;
-        }
-      | Extract<ProjectResolutionCandidateClosure, {readonly mode: 'fallback'}> => {
-      const affectedFingerprints = new Set<bigint>();
-      for (const identity of affectedIdentities) {
-        const fingerprint = validProjectionFingerprint(input.fingerprint(identity));
-        if (fingerprint === undefined) return {mode: 'fallback', reason: 'cache-incomplete'};
-        affectedFingerprints.add(fingerprint);
-      }
-      const aliasFingerprints = new Set<bigint>();
-      for (const reexport of reexports) {
-        for (const alias of reexport.aliases) {
-          const fingerprint = validProjectionFingerprint(
-            input.fingerprint(resolutionLookupKeyIdentity(alias.resolutionDomain, alias.key)),
-          );
-          if (fingerprint === undefined) return {mode: 'fallback', reason: 'cache-incomplete'};
-          aliasFingerprints.add(fingerprint);
-        }
-      }
-      const referenceOrdinals = new Set<number>();
-      const symbolConflictFingerprints = new Set<bigint>();
+    match: (
+      query: {
+        readonly referenceFingerprints: ReadonlySet<bigint>;
+        readonly symbolFingerprints: ReadonlySet<bigint>;
+      },
+      paths: readonly string[],
+    ): ProjectResolutionCandidateIndexMatches | undefined => {
+      const referencePaths = new Set<string>();
+      const symbolFingerprints = new Set<bigint>();
       for (let record = 0; record < records; record += 1) {
         const chunkIndex = Math.floor(record / PROJECT_RESOLUTION_CANDIDATE_PROJECTION_RECORDS_PER_CHUNK);
         const offset = record % PROJECT_RESOLUTION_CANDIDATE_PROJECTION_RECORDS_PER_CHUNK;
         const fingerprint = recordHashes[chunkIndex][offset];
         const kind = recordKinds[chunkIndex][offset];
         if (kind === PROJECTION_SYMBOL_RECORD) {
-          if (aliasFingerprints.has(fingerprint)) symbolConflictFingerprints.add(fingerprint);
-        } else if (affectedFingerprints.has(fingerprint)) {
-          referenceOrdinals.add(kind);
+          if (query.symbolFingerprints.has(fingerprint)) symbolFingerprints.add(fingerprint);
+        } else if (query.referenceFingerprints.has(fingerprint)) {
+          const path = paths[kind];
+          if (path === undefined) return undefined;
+          referencePaths.add(path);
         }
       }
-      return {mode: 'eligible', referenceOrdinals, symbolConflictFingerprints};
+      return {referencePaths, symbolFingerprints};
+    },
+    index: (
+      paths: readonly string[],
+      reexports: readonly ProjectResolutionReexportKeys[],
+    ): ProjectResolutionCandidateIndex => {
+      const referenceFingerprints = new BigUint64Array(associations);
+      const referenceOrdinals = new Uint32Array(associations);
+      const symbolFingerprints = new BigUint64Array(records - associations);
+      let references = 0;
+      let symbols = 0;
+      for (let record = 0; record < records; record += 1) {
+        const chunkIndex = Math.floor(record / PROJECT_RESOLUTION_CANDIDATE_PROJECTION_RECORDS_PER_CHUNK);
+        const offset = record % PROJECT_RESOLUTION_CANDIDATE_PROJECTION_RECORDS_PER_CHUNK;
+        const kind = recordKinds[chunkIndex][offset];
+        if (kind === PROJECTION_SYMBOL_RECORD) {
+          symbolFingerprints[symbols] = recordHashes[chunkIndex][offset];
+          symbols += 1;
+        } else {
+          referenceFingerprints[references] = recordHashes[chunkIndex][offset];
+          referenceOrdinals[references] = kind;
+          references += 1;
+        }
+      }
+      return {paths, referenceFingerprints, referenceOrdinals, reexports, symbolFingerprints};
     },
   };
 }
 
-const PROJECTION_SYMBOL_RECORD = 0xffff;
+/** File ordinals share the record kind; 32 bits admit every inventory the scan can page through. */
+const PROJECTION_SYMBOL_RECORD = 0xffff_ffff;
 const PROJECTION_FINGERPRINT_MAXIMUM = 0xffff_ffff_ffff_ffffn;
 const PROJECTION_FINGERPRINT_SEED = 0x85eb_ca6b_27d4_eb2fn;
 

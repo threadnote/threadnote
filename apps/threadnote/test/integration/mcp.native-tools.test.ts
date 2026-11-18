@@ -32,6 +32,7 @@ import {memoryIdentityAlias} from '@threadnote/memory/identity-alias';
 import {isDeferredCodeAnchorIntentFilename} from '@threadnote/threadnote/memory/deferred/code_anchor';
 import {runEffect} from '../helpers/effect-runtime.js';
 import {loadRecallIndexData, recallIndexDatabaseFilename} from '@threadnote/recall/index';
+import {codeGraphCommittedFileContentHash} from '@threadnote/graph/content_identity';
 import {
   parseContextBriefJsonText,
   parseContextBriefV1,
@@ -2098,8 +2099,9 @@ describe('Threadnote MCP toolsets', () => {
       },
       {toolset: 'core'},
     );
-  }, 40000);
-  it('returns complete body and compact metadata once in the default read_context agent format', async () => {
+  }, 40_000);
+
+  it('returns the complete body as text with no metadata-only structured content in the default read_context agent format', async () => {
     await withMcpClient(
       async (client, fixture) => {
         const uri = 'threadnote://user/test-user/memories/durable/projects/threadnote/text-read.md';
@@ -2138,7 +2140,6 @@ describe('Threadnote MCP toolsets', () => {
         );
         expect(result.isError, JSON.stringify(result)).not.toBe(true);
         const output = isReadonlyArray(result.content) ? result.content : [];
-        const structured = decodeJsonObject(result.structuredContent);
         const text = readTextAt(output, 0) ?? '';
         expect(text).toContain('TN-MEMORY/1');
         expect(text).toContain('Memory: kind=durable; status=active; project=threadnote; topic=text-read');
@@ -2147,15 +2148,9 @@ describe('Threadnote MCP toolsets', () => {
           `Code evidence [remote:${Effect.pipe(citation.repositoryId, EffectString.slice(0, 12))} @ ${citation.sourceCommit}]: packages/memory/src/read/projection.ts`,
         );
         expect(text).not.toContain('source_agent_client:');
-        expect(structured).toMatchObject({
-          complete: true,
-          contentBytes: Buffer.byteLength(content),
-          contentChannel: 'agent',
-          type: 'threadnote-read',
-          version: 2,
-        });
-        expect(structured).not.toHaveProperty('uri');
-        expect(structured).not.toHaveProperty('content');
+        expect(result.structuredContent).toBeUndefined();
+        expect(result._meta).toMatchObject({'threadnote.io/read': {contentIndex: 0, type: 'threadnote-read'}});
+
         const canonical = await client.callTool(
           {arguments: {responseFormat: 'text', uri}, name: 'read_context'},
           undefined,
@@ -4203,7 +4198,7 @@ describe('Threadnote MCP toolsets', () => {
           await rm(graphLock, {force: true});
         }
         indexCodeGraph(fixture, repository);
-        await callCodeGraphUntilReady(client, {
+        const finalizedGraph = await callCodeGraphUntilReady(client, {
           callerCwd: repository,
           operation: 'query',
           query: 'addedAfterPull',
@@ -4215,6 +4210,29 @@ describe('Threadnote MCP toolsets', () => {
         const finalizedCitation = finalizedMemory?.metadata.codeCitations?.[0];
         if (!finalizedCitation)
           throw TestError.make({message: 'Automatic finalization did not attach the expected citation.'});
+        const finalizedCommit = EffectString.trim(
+          execFileSync('git', ['rev-parse', 'HEAD'], {cwd: repository, encoding: 'utf8'}),
+        );
+        const objectFormat = Schema.decodeUnknownSync(Schema.Literals(['sha1', 'sha256']))(
+          EffectString.trim(
+            execFileSync('git', ['rev-parse', '--show-object-format'], {cwd: repository, encoding: 'utf8'}),
+          ),
+        );
+        expect(finalizedGraph.structuredContent).toMatchObject({
+          snapshot: {commit: finalizedCommit, id: expect.any(String)},
+        });
+        expect(finalizedCitation).toMatchObject({
+          fileContentHash: {
+            algorithm: 'sha256',
+            value: codeGraphCommittedFileContentHash(objectFormat, await readFile(join(repository, 'src', 'index.ts'))),
+          },
+          sourceCommit: finalizedCommit,
+          sourceDirty: false,
+          sourceSnapshotId: optionalRecordField(
+            optionalRecordField(finalizedGraph.structuredContent, 'snapshot'),
+            'id',
+          ),
+        });
         const automaticBacklink = await client.callTool(
           {
             arguments: {
@@ -4245,8 +4263,22 @@ describe('Threadnote MCP toolsets', () => {
             ),
         );
         expect(automaticMemoryMatches).toHaveLength(1);
+        const automaticMemory = automaticMemoryMatches[0];
+        const automaticReceipt = automaticMemory.citationReceipts?.[0];
+        if (automaticReceipt?.status === 'unknown') {
+          expect(automaticMemory.citationReceipts).toHaveLength(1);
+          expect(automaticReceipt).toMatchObject({
+            citationId: finalizedCitation.id,
+            reason: 'citation-limit',
+          });
+          expect(automaticMemory.citationSummary).toMatchObject({coverage: 'incomplete', exact: 0, unknown: 1});
+          expect(automaticBrief.coverage.gaps).toContain('memory-freshness-unknown');
+        } else {
+          expect(automaticMemory.citationReceipts).toBeUndefined();
+          expect(automaticMemory.citationSummary).toMatchObject({coverage: 'current-complete', exact: 1, unknown: 0});
+        }
         expect(
-          automaticMemoryMatches[0],
+          automaticMemory,
           Effect.pipe(
             JSON.stringify({
               citationReceipts: automaticMemoryMatches[0]?.citationReceipts,
@@ -4261,7 +4293,7 @@ describe('Threadnote MCP toolsets', () => {
               anchorOrdinal: 0,
               citationId: finalizedCitation.id,
               kind: 'file',
-              status: 'exact',
+              status: automaticReceipt?.status ?? 'exact',
             },
           ],
           selectionBasis: 'code-citation',
@@ -5672,13 +5704,15 @@ describe('Threadnote MCP toolsets', () => {
           client.callTool({arguments: {uri}, name: 'read'}),
         ]);
         expect(aliasRead.content).toEqual(primaryRead.content);
-        if (!aliasRead.structuredContent || !primaryRead.structuredContent)
-          throw new Error('A successful canonical read must include structured content.');
-        const {warnings: aliasWarnings, ...aliasStableProjection} = aliasRead.structuredContent;
-        const {warnings: primaryWarnings, ...primaryStableProjection} = primaryRead.structuredContent;
-        expect(aliasStableProjection).toEqual(primaryStableProjection);
-        for (const warnings of [primaryWarnings, aliasWarnings]) {
-          if (!EffectArray.isArray(warnings)) throw new Error('A canonical read must retain warning diagnostics.');
+        expect(primaryRead.structuredContent).toBeUndefined();
+        const warningBlocks = (read: typeof primaryRead) =>
+          EffectArray.flatMap(textContents(read.content), block =>
+            Effect.pipe(block.text, EffectString.startsWith('Warning: '))
+              ? [Effect.pipe(block.text, EffectString.slice(9))]
+              : [],
+          );
+        for (const warnings of [warningBlocks(primaryRead), warningBlocks(aliasRead)]) {
+          expect(warnings.length).toBeGreaterThan(0);
           expect(
             EffectArray.every(
               warnings,

@@ -1538,12 +1538,7 @@ describe('native code graph lifecycle', () => {
                 yield* assessReusableCleanBaseCompatibility({...input, candidate: invalid}, workspace, changed),
               ).toMatchObject({mode: 'fallback', reason: 'workspace-changed'});
             }
-            for (const fault of [
-              'missing',
-              'oversize-skipped-row',
-              'aggregate-skipped-bytes',
-              'metadata-files',
-            ] as const) {
+            for (const fault of ['missing', 'oversize-skipped-row'] as const) {
               let rawDecodes = 0;
               const metadataStore = CodeGraphStore.of({
                 ...store,
@@ -1562,9 +1557,7 @@ describe('native code graph lifecycle', () => {
                           Effect2.pipe(file.path, EffectString.startsWith('config-'))
                             ? fault === 'oversize-skipped-row'
                               ? CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM + 1
-                              : fault === 'aggregate-skipped-bytes'
-                                ? CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM
-                                : 1
+                              : 1
                             : 1,
                         ] as const,
                     );
@@ -1576,22 +1569,8 @@ describe('native code graph lifecycle', () => {
                     };
                   }),
               });
-              const extra =
-                fault === 'metadata-files'
-                  ? Array.from({length: 5_001}, (_, index) => ({
-                      ...EffectOption.getOrUndefined(
-                        EffectArray.findFirst(inventory.files, file => file.path === 'config-0.json'),
-                      )!,
-                      path: `extra-${index}.json`,
-                    }))
-                  : [];
               const result = yield* assessReusableCleanBaseCompatibility(
-                {
-                  ...input,
-                  store: metadataStore,
-                  candidate: {...candidate, files: [...candidate.files, ...extra]},
-                  inventory: {...inventory, files: [...inventory.files, ...extra]},
-                },
+                {...input, store: metadataStore},
                 workspace,
                 changed,
               );

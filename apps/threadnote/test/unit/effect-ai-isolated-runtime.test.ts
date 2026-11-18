@@ -5,11 +5,13 @@ import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {expect, it as effectIt} from '@effect/vitest';
 import {Cause, Effect, Exit, Fiber, Layer, Schema} from 'effect';
-import {describe, vi} from 'vitest';
+import {describe, it, vi} from 'vitest';
 import {
   isolatedLocalModelRuntimeLayer,
   localModelWorkerSpawnOptions,
   serveWorker,
+  LocalModelWorkerTransportError,
+  projectLocalModelWorkerExitObservation,
   type LocalModelWorkerProcess,
   type LocalModelWorkerSpawnOptions,
   type LocalModelWorkerSpawner,
@@ -51,11 +53,39 @@ const backgroundAuthority = {
 };
 
 describe('isolated local model runtime', () => {
-  effectIt.effect('bounded transport timeout remains effective after response arrival while write is unsettled', () => {
+  it('projects only bounded OS exit facts and finite transport stages', () => {
+    expect(
+      projectLocalModelWorkerExitObservation({
+        stage: 'process-exit',
+        exitCode: -1073741819,
+        signal: null,
+        body: 'PRIVATE_BODY',
+      }),
+    ).toEqual({stage: 'process-exit', exitCode: -1073741819, signal: null});
+    expect(
+      projectLocalModelWorkerExitObservation({stage: 'process-exit', exitCode: 3221225477, signal: 'SIGABRT'}),
+    ).toEqual({stage: 'process-exit', exitCode: 3221225477, signal: 'SIGABRT'});
+    expect(projectLocalModelWorkerExitObservation({stage: 'stdout-eof', signal: 9})).toEqual({
+      stage: 'stdout-eof',
+      signal: 9,
+    });
+    expect(
+      projectLocalModelWorkerExitObservation({
+        stage: 'PRIVATE_STAGE',
+        exitCode: 4294967296,
+        signal: 'PRIVATE_SIGNAL',
+        stderr: 'PRIVATE_STDERR',
+      }),
+    ).toBeUndefined();
+    expect(projectLocalModelWorkerExitObservation({exitCode: -2147483649, signal: 65})).toBeUndefined();
+    expect(projectLocalModelWorkerExitObservation({exitCode: NaN, signal: 1.5})).toBeUndefined();
+  });
+  effectIt.effect('bounded transport timeout survives clean exit and response arrival while write is unsettled', () => {
     const written = Promise.withResolvers<void>();
     const writing = Promise.withResolvers<void>();
     const worker = new FakeWorkerProcess(
       request => {
+        worker.exit(0);
         worker.respond(request, {backend: 'pending-write', buildType: 'prebuilt', cpuMathCores: 1});
         written.resolve();
       },
@@ -82,6 +112,121 @@ describe('isolated local model runtime', () => {
         }),
     );
   });
+
+  effectIt.effect('drains a large buffered reply after clean exit and replaces the retired worker', () => {
+    const processes: FakeWorkerProcess[] = [];
+    let responseBytes = 0;
+    const manifest = {...embeddingManifest, dimensions: 384};
+    const spawn: LocalModelWorkerSpawner = () => {
+      const worker = new FakeWorkerProcess(request => {
+        const response = `${JSON.stringify({
+          id: request.id,
+          protocol: request.protocol,
+          ok: true,
+          result: EffectArray.map(fakeRequestInputs(request), () => new Array<number>(384).fill(0.1234567890123456)),
+        })}\n`;
+        responseBytes = response.length;
+        worker.exit(0);
+        queueMicrotask(() => {
+          for (let start = 0; start < response.length; start += 8192)
+            worker.stdoutFeed.push(EffectString.slice(start, start + 8192)(response));
+          worker.stdoutFeed.end();
+          worker.stderrFeed.end();
+        });
+      });
+      processes.push(worker);
+      return worker;
+    };
+    return Effect.gen(function* () {
+      const runtime = yield* LocalModelRuntime;
+      const vectors = yield* runtime.embedMany({
+        inputs: new Array<string>(32).fill('synthetic'),
+        manifest,
+        modelPath: '/fixture/model.gguf',
+      });
+      expect(responseBytes).toBeGreaterThan(65_536);
+      expect(vectors).toHaveLength(32);
+      expect(vectors[31]).toEqual(new Array<number>(384).fill(0.1234567890123456));
+      expect(yield* runtime.embedMany({inputs: ['later'], manifest, modelPath: '/fixture/model.gguf'})).toHaveLength(1);
+      expect(processes).toHaveLength(2);
+    }).pipe(provideTestLayer(runtimeLayer(spawn, 1000, 1024 * 1024)));
+  });
+
+  effectIt.effect('lets a complete EOF reply await its write before retiring the connection', () => {
+    const written = Promise.withResolvers<void>();
+    const writing = Promise.withResolvers<void>();
+    const worker = new FakeWorkerProcess(
+      request => {
+        worker.respond(request, [[1, 2]]);
+        worker.stdoutFeed.end();
+        worker.stderrFeed.end();
+        written.resolve();
+      },
+      () => writing.promise,
+    );
+    return Effect.gen(function* () {
+      const runtime = yield* LocalModelRuntime;
+      const reader = yield* runtime
+        .embedMany({inputs: ['synthetic'], manifest: embeddingManifest, modelPath: '/fixture/model.gguf'})
+        .pipe(Effect.forkScoped);
+      yield* Effect.promise(() => written.promise);
+      yield* Effect.yieldNow;
+      expect(reader.pollUnsafe()).toBeUndefined();
+      expect(worker.killed).toBe(false);
+      writing.resolve();
+      expect(yield* Fiber.join(reader)).toEqual([[1, 2]]);
+      expect(worker.killed).toBe(true);
+    }).pipe(provideTestLayer(runtimeLayer(() => worker)), Effect.ensuring(Effect.sync(() => writing.resolve())));
+  });
+
+  for (const scenario of ['nonzero', 'missing', 'truncated', 'malformed'] as const) {
+    effectIt.effect(`rejects ${scenario} worker termination without accepting buffered output`, () => {
+      const processes: FakeWorkerProcess[] = [];
+      const spawn: LocalModelWorkerSpawner = () => {
+        const worker = new FakeWorkerProcess(request => {
+          worker.exit(scenario === 'nonzero' ? 3221225477 : 0, scenario === 'nonzero' ? 'SIGABRT' : null);
+          queueMicrotask(() => {
+            if (scenario === 'nonzero') worker.respond(request, [[1, 2]]);
+            if (scenario === 'truncated') worker.stdoutFeed.push('{"id":');
+            if (scenario === 'malformed') worker.stdoutFeed.push('{"invalid":true}\n');
+            worker.stdoutFeed.end();
+            worker.stderrFeed.end();
+          });
+        });
+        processes.push(worker);
+        return worker;
+      };
+      return Effect.gen(function* () {
+        const runtime = yield* LocalModelRuntime;
+        const result = yield* Effect.exit(
+          runtime.embedMany({inputs: ['synthetic'], manifest: embeddingManifest, modelPath: '/fixture/model.gguf'}),
+        );
+        expect(Exit.isFailure(result)).toBe(true);
+        if (Exit.isFailure(result))
+          expect(anonymousTelemetryDiagnosticFromError(Cause.squash(result.cause))).toMatchObject({
+            errorType: 'EmbeddingFailed',
+            reason: scenario === 'nonzero' || scenario === 'missing' ? 'exit' : 'protocol',
+          });
+        if (Exit.isFailure(result) && (scenario === 'nonzero' || scenario === 'missing')) {
+          const failure = Cause.squash(result.cause);
+          expect(Schema.is(EmbeddingFailed)(failure)).toBe(true);
+          if (Schema.is(EmbeddingFailed)(failure)) {
+            expect(Schema.is(LocalModelWorkerTransportError)(failure.cause)).toBe(true);
+            if (Schema.is(LocalModelWorkerTransportError)(failure.cause)) {
+              expect(failure.cause.exitObservation).toEqual(
+                scenario === 'nonzero'
+                  ? {stage: 'process-exit', exitCode: 3221225477, signal: 'SIGABRT'}
+                  : {stage: 'stdout-eof', exitCode: 0, signal: null},
+              );
+              expect(Object.getOwnPropertyDescriptor(failure.cause, 'exitObservation')?.enumerable).toBe(false);
+              expect(JSON.stringify(failure.cause)).not.toContain('exitObservation');
+            }
+          }
+        }
+        expect(processes).toHaveLength(2);
+      }).pipe(provideTestLayer(runtimeLayer(spawn)));
+    });
+  }
 
   effectIt.effect('cancelling a caller waiting for the permit does not cancel the active owner', () => {
     const received = Promise.withResolvers<FakeRequest>();
@@ -212,6 +357,7 @@ describe('isolated local model runtime', () => {
         const writing = Promise.withResolvers<void>();
         const worker = new FakeWorkerProcess(
           request => {
+            worker.exit(0);
             worker.respond(request, {backend: 'late', buildType: 'prebuilt', cpuMathCores: 1});
             written.resolve();
           },
@@ -827,6 +973,13 @@ describe('isolated local model runtime', () => {
       expect(Exit.isFailure(exit)).toBe(true);
       expect(processes).toHaveLength(2);
       expect(EffectArray.every(processes, worker => worker.killed)).toBe(true);
+      if (Exit.isFailure(exit)) {
+        const failure = Cause.squash(exit.cause);
+        if (Schema.is(EmbeddingFailed)(failure) && Schema.is(LocalModelWorkerTransportError)(failure.cause))
+          expect(failure.cause.exitObservation).toBeUndefined();
+        else expect.fail('Expected the typed transport cause');
+      }
+      expect(processes[0].readExitStatus()).toEqual({exitCode: 137, signal: 'SIGKILL'});
     }).pipe(provideTestLayer(runtimeLayer(spawn, 10)));
   });
 
@@ -856,46 +1009,59 @@ describe('isolated local model runtime', () => {
     }).pipe(provideTestLayer(runtimeLayer(spawn, 1_000, 64)));
   });
 
-  effectIt.effect('reuses one worker across embedding batches and subsequent calls', () => {
-    const processes: FakeWorkerProcess[] = [];
-    const spawn: LocalModelWorkerSpawner = (_options: LocalModelWorkerSpawnOptions) => {
-      const worker = new FakeWorkerProcess(request => {
-        worker.respond(
-          request,
-          EffectArray.map(fakeRequestInputs(request), (input: string) => [input.length, 2]),
-        );
-      });
-      processes.push(worker);
-      return Promise.resolve(worker);
-    };
-    const inputs = Array.from({length: 40}, (_, index) => `input-${index}`);
+  effectIt.effect(
+    'reuses live workers across embedding batches and replaces an idle exited worker before pipe EOF',
+    () => {
+      const processes: FakeWorkerProcess[] = [];
+      const spawn: LocalModelWorkerSpawner = (_options: LocalModelWorkerSpawnOptions) => {
+        const worker = new FakeWorkerProcess(request => {
+          worker.respond(
+            request,
+            EffectArray.map(fakeRequestInputs(request), (input: string) => [input.length, 2]),
+          );
+        });
+        processes.push(worker);
+        return Promise.resolve(worker);
+      };
+      const inputs = Array.from({length: 40}, (_, index) => `input-${index}`);
 
-    return Effect.gen(function* () {
-      const runtime = yield* LocalModelRuntime;
-      const first = yield* runtime.embedMany({
-        embeddingContextPoolSize: 8,
-        inputs,
-        manifest: embeddingManifest,
-        modelPath: '/models/embedding.gguf',
-      });
-      const second = yield* runtime.embedMany({
-        inputs: ['later'],
-        manifest: embeddingManifest,
-        modelPath: '/models/embedding.gguf',
-      });
+      return Effect.gen(function* () {
+        const runtime = yield* LocalModelRuntime;
+        const first = yield* runtime.embedMany({
+          embeddingContextPoolSize: 8,
+          inputs,
+          manifest: embeddingManifest,
+          modelPath: '/models/embedding.gguf',
+        });
+        const second = yield* runtime.embedMany({
+          inputs: ['later'],
+          manifest: embeddingManifest,
+          modelPath: '/models/embedding.gguf',
+        });
 
-      expect(first).toHaveLength(40);
-      expect(second).toEqual([[5, 2]]);
-      expect(processes).toHaveLength(1);
-      expect(EffectArray.map(processes[0].writes, request => fakeRequestInputs(request).length)).toEqual([32, 8, 1]);
-      expect(EffectArray.map(processes[0].writes, request => request.payload.embeddingContextPoolSize)).toEqual([
-        8,
-        8,
-        undefined,
-      ]);
-      expect(new Set(EffectArray.map(processes[0].writes, request => request.id)).size).toBe(3);
-    }).pipe(provideTestLayer(runtimeLayer(spawn)));
-  });
+        expect(first).toHaveLength(40);
+        expect(second).toEqual([[5, 2]]);
+        expect(processes).toHaveLength(1);
+        expect(EffectArray.map(processes[0].writes, request => fakeRequestInputs(request).length)).toEqual([32, 8, 1]);
+        expect(EffectArray.map(processes[0].writes, request => request.payload.embeddingContextPoolSize)).toEqual([
+          8,
+          8,
+          undefined,
+        ]);
+        expect(new Set(EffectArray.map(processes[0].writes, request => request.id)).size).toBe(3);
+        processes[0].exit(0);
+        yield* Effect.yieldNow;
+        expect(
+          yield* runtime.embedMany({
+            inputs: ['after-exit'],
+            manifest: embeddingManifest,
+            modelPath: '/models/embedding.gguf',
+          }),
+        ).toEqual([[10, 2]]);
+        expect(processes).toHaveLength(2);
+      }).pipe(provideTestLayer(runtimeLayer(spawn)));
+    },
+  );
 
   effectIt.effect('evicts an idle worker and lazily respawns exactly one worker for concurrent requests', () => {
     const processes: FakeWorkerProcess[] = [];
@@ -1213,6 +1379,11 @@ class FakeWorkerProcess implements LocalModelWorkerProcess {
   inputClosed = false;
   killed = false;
   private resolveExit = (_code: number) => {};
+  private exitStatus: {exitCode: number | null; signal: NodeJS.Signals | number | null} = {
+    exitCode: null,
+    signal: null,
+  };
+  readExitStatus = () => this.exitStatus;
 
   constructor(
     private readonly onWrite: (request: FakeRequest) => void,
@@ -1229,8 +1400,14 @@ class FakeWorkerProcess implements LocalModelWorkerProcess {
     const result = this.closeInputResult?.();
     this.stderrFeed.end();
     this.stdoutFeed.end();
-    this.resolveExit(0);
+    this.exit(0);
     return result;
+  }
+
+  exit(code: number, signal: NodeJS.Signals | number | null = null): void {
+    if (this.exitStatus.exitCode === null && this.exitStatus.signal === null)
+      this.exitStatus = {exitCode: code, signal};
+    this.resolveExit(code);
   }
 
   kill(): void {
@@ -1238,7 +1415,7 @@ class FakeWorkerProcess implements LocalModelWorkerProcess {
     this.killed = true;
     this.stderrFeed.end();
     this.stdoutFeed.end();
-    this.resolveExit(137);
+    this.exit(137, 'SIGKILL');
   }
 
   respond(request: FakeRequest, result: unknown): void {

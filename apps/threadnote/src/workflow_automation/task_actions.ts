@@ -40,7 +40,7 @@ import {
 } from 'effect';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
-import {gitValue} from '../utils.js';
+import {gitValue, resolveRepoName} from '../utils.js';
 import {inspectWorkflowJournal, withWorkflowLock} from '../workflow_memory/journal.js';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {validateWorkflowGraphProject} from '../workflow_memory/graph_scope.js';
@@ -405,9 +405,10 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
     const checkout = yield* fs
       .realPath(reportedCheckout)
       .pipe(Effect.mapError(() => fail('workspace-not-found', 'The Git checkout root could not be resolved.')));
+    const repositoryName = (yield* resolveRepoName(checkout)) ?? path.basename(checkout);
     const project = yield* Effect.try({
-      try: () => workflowTitleSlug(path.basename(checkout)),
-      catch: () => fail('invalid-project', 'The checkout directory cannot be used as a workflow project name.'),
+      try: () => workflowTitleSlug(repositoryName),
+      catch: () => fail('invalid-project', 'The repository name cannot be used as a workflow project name.'),
     });
     const featureId = yield* Effect.try({
       try: () => workflowTitleSlug(request.featureName),

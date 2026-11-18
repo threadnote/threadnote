@@ -1,3 +1,5 @@
+import {SystemInfo} from '@threadnote/platform/system';
+import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {mkdtemp, readFile, readdir, rm} from '@threadnote/testing/node-fs-promises';
@@ -6,7 +8,7 @@ import {join} from '@threadnote/testing/node-path';
 import {fileURLToPath} from '@threadnote/testing/node-url';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Array as EffectArray, Clock, Effect, FileSystem, Path} from 'effect';
+import {Array as EffectArray, Clock, Effect, FileSystem, Path, Layer, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
 import {parseCodeGraphBenchmarkRunCheckpoint, startExternalSampler} from '../../../../scripts/benchmark-code-graph.js';
@@ -113,10 +115,18 @@ describe('production-large benchmark failure telemetry', () => {
           path.join(root, 'not-created.sqlite'),
           checkpoint,
           'bootstrap',
+          false,
+          process.platform === 'win32',
         );
         const before = parseCodeGraphBenchmarkSamplerCheckpoint(
           JSON.parse(yield* fileSystem.readFileString(checkpoint)),
         );
+        const readiness = yield* Schema.decodeUnknownEffect(
+          Schema.Struct({
+            windowsHelper: Schema.optionalKey(Schema.Struct({processId: Schema.Finite, startIdentity: Schema.String})),
+          }),
+        )(JSON.parse(yield* fileSystem.readFileString(path.join(root, 'sampler', 'bootstrap.ready'))));
+        const system = yield* SystemInfo;
         const startedAt = yield* Clock.currentTimeMillis;
         const exit = yield* Effect.exit(sampler.stop());
         const elapsedMilliseconds = (yield* Clock.currentTimeMillis) - startedAt;
@@ -128,11 +138,15 @@ describe('production-large benchmark failure telemetry', () => {
           JSON.parse(yield* fileSystem.readFileString(checkpoint)),
         );
 
+        if (process.platform === 'win32') {
+          expect(readiness.windowsHelper).toBeDefined();
+          expect(system.isProcessRunning(readiness.windowsHelper!.processId)).toBe(false);
+        }
         expect(before.state).toBe('running');
         expect(exit._tag).toBe('Failure');
         expect(elapsedMilliseconds).toBeLessThan(3_000);
         expect(stable.sampler.samples).toBe(after.sampler.samples);
-      }).pipe(provideTestLayer(BunServices.layer), TestClock.withLive),
+      }).pipe(provideTestLayer(Layer.merge(BunServices.layer, TestSystemInfoLayer)), TestClock.withLive),
     ),
   );
 });

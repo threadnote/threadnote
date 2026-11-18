@@ -34,7 +34,7 @@ import {AuthoringRootSchema, decodeAuthoringArtifact} from './authoring_artifact
 import {validateWorkflowGraphProject} from '../workflow_memory/graph_scope.js';
 import {requireWorkflowGraphReady} from './graph.js';
 import {workflowTitleSlug} from '@threadnote/workflow-automations/naming';
-import {gitValue} from '../utils.js';
+import {gitValue, resolveRepoName} from '../utils.js';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {nativeWorkflowError} from './memory.js';
@@ -228,8 +228,9 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
           ? yield* decodeNativeAuthoringTaskRef(request.authoringRef)
           : undefined;
     const suppliedJob = request.command === 'job' ? yield* decodeNativeAuthoringJobRef(request.jobRef) : undefined;
+    const repositoryName = (yield* resolveRepoName(checkout)) ?? path.basename(checkout);
     const project = yield* Effect.try({
-      try: () => workflowTitleSlug(path.basename(checkout)),
+      try: () => workflowTitleSlug(repositoryName),
       catch: nativeWorkflowError,
     });
     const featureId =
