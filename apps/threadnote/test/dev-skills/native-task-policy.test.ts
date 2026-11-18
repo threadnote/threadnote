@@ -555,9 +555,16 @@ describe('standard-profile delivery of a dirty-recorded tree', () => {
         expect(uncommitted.message).toMatch(/commit/iu);
         yield* f.git(['commit', '-qam', 'phase one']);
         const head = EffectString.trim(String((yield* f.git(['rev-parse', 'HEAD'])).stdout));
-        expect(yield* task('deliver-local', {validationRef: validated.validationRef})).toMatchObject({
+        const delivered = yield* task('deliver-local', {validationRef: validated.validationRef});
+        expect(delivered).toMatchObject({
           status: 'delivered',
+          replayed: false,
           receipt: {headSha: head, validatedTree: snapshot.tree},
+        });
+        // Delivery moved the validation to the commit; the reference from before it still replays the delivery.
+        expect(yield* task('deliver-local', {validationRef: validated.validationRef})).toEqual({
+          ...delivered,
+          replayed: true,
         });
         expect((yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo})).next).toMatchObject({
           action: 'complete',

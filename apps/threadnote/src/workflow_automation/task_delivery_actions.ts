@@ -1079,13 +1079,18 @@ export const runNativeTaskLocalDelivery = (
     if (state.plan.delivery !== 'local')
       return yield* fail('delivery-scope', 'This task operation supports local delivery only.');
     const proof = state.phases[ref.phaseId];
-    const validationDigest = proof?.validation ? sha256HexSync(stableJson(proof.validation)) : undefined;
+    // Delivery moves the validation to the commit that carries its tree, so a reference minted before it names the
+    // validation at the snapshot head.
+    const validations = proof?.validation
+      ? [proof.validation, ...(proof.delivery ? [{...proof.validation, head: ref.sourceHead}] : [])]
+      : [];
     if (
       !proof?.validation ||
       proof.phaseHash !== ref.phaseHash ||
       proof.head !== (proof.validation.head ?? ref.sourceHead) ||
       proof.tree !== ref.sourceTree ||
-      (ref.kind === 'validation' && validationDigest !== ref.payloadDigest)
+      (ref.kind === 'validation' &&
+        !EffectArray.some(validations, validation => sha256HexSync(stableJson(validation)) === ref.payloadDigest))
     )
       return yield* fail('stale-validation-ref', 'The reference does not match current canonical phase validation.');
     const snapshots = EffectArray.filter(
