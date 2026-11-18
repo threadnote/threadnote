@@ -55,10 +55,57 @@ export class CodeGraphFactValidationError extends Schema.TaggedError<
   message: Schema.String,
 }) {}
 
+interface FactShape {
+  /** Every allowed key, mapped to whether it is required. */
+  readonly keys: ReadonlyMap<string, boolean>;
+  readonly required: readonly string[];
+}
+
+// Shapes are built once: replaying stored facts validates millions of objects.
+function factShape(required: readonly string[], optional: readonly string[]): FactShape {
+  return {
+    keys: new Map([
+      ...EffectArray.map(required, key => [key, true] as const),
+      ...EffectArray.map(optional, key => [key, false] as const),
+    ]),
+    required,
+  };
+}
+
+const FILE_FACTS_SHAPE = factShape(
+  ['diagnostics', 'edges', 'path', 'symbols'],
+  ['derivationInputs', 'monikers', 'references'],
+);
+const SYMBOL_SHAPE = factShape(
+  ['contentHash', 'exported', 'id', 'kind', 'language', 'name', 'path', 'qualifiedName', 'span'],
+  ['arity', 'documentation', 'lookupKeys', 'packageName', 'resolutionDomain', 'resolutionScopeId', 'signature'],
+);
+const EDGE_SHAPE = factShape(
+  ['confidence', 'evidencePath', 'evidenceSpan', 'id', 'provenance', 'relation', 'sourceName', 'targetName'],
+  ['sourceId', 'targetId'],
+);
+const REFERENCE_SHAPE = factShape(
+  [
+    'edgeId',
+    'evidencePath',
+    'evidenceSpan',
+    'lookupTiers',
+    'provenance',
+    'relation',
+    'resolutionDomain',
+    'sourceName',
+    'targetName',
+  ],
+  ['aliasLookupKeys', 'arity', 'exportedOnly', 'sourceId'],
+);
+const DERIVATION_INPUTS_SHAPE = factShape([], ['rationale']);
+const RATIONALE_SHAPE = factShape(['documentation', 'line', 'marker', 'name'], []);
+const SPAN_SHAPE = factShape(['column', 'endColumn', 'endLine', 'line'], []);
+
 /** Exact recursive validator for parser facts crossing a durable or portable boundary. */
 export function parseCodeGraphFileFacts(value: unknown): CodeGraphFileFacts {
   const input = object(value, 'Code graph file facts');
-  exactKeys(input, ['diagnostics', 'edges', 'path', 'symbols'], ['derivationInputs', 'monikers', 'references']);
+  exactKeys(input, FILE_FACTS_SHAPE);
   const path = repositoryPath(input.path, 'File-fact path');
   const diagnostics = stringArray(input.diagnostics, 'File-fact diagnostics', TEXT_LENGTH_MAXIMUM);
   const symbols = EffectArray.map(array(input.symbols, 'File-fact symbols'), parseSymbol);
@@ -92,11 +139,7 @@ export function parseCodeGraphFileFacts(value: unknown): CodeGraphFileFacts {
 
 function parseSymbol(value: unknown, index: number): CodeGraphSymbol {
   const input = object(value, `File-fact symbol ${index}`);
-  exactKeys(
-    input,
-    ['contentHash', 'exported', 'id', 'kind', 'language', 'name', 'path', 'qualifiedName', 'span'],
-    ['arity', 'documentation', 'lookupKeys', 'packageName', 'resolutionDomain', 'resolutionScopeId', 'signature'],
-  );
+  exactKeys(input, SYMBOL_SHAPE);
   return {
     ...(input.arity === undefined ? {} : {arity: nonnegativeInteger(input.arity, 'Symbol arity')}),
     contentHash: digest(input.contentHash, 'Symbol content hash'),
@@ -127,11 +170,7 @@ function parseSymbol(value: unknown, index: number): CodeGraphSymbol {
 
 function parseEdge(value: unknown, index: number): CodeGraphEdge {
   const input = object(value, `File-fact edge ${index}`);
-  exactKeys(
-    input,
-    ['confidence', 'evidencePath', 'evidenceSpan', 'id', 'provenance', 'relation', 'sourceName', 'targetName'],
-    ['sourceId', 'targetId'],
-  );
+  exactKeys(input, EDGE_SHAPE);
   return {
     confidence: finiteRange(input.confidence, 'Edge confidence', 0, 1),
     evidencePath: repositoryPath(input.evidencePath, 'Edge evidence path'),
@@ -148,21 +187,7 @@ function parseEdge(value: unknown, index: number): CodeGraphEdge {
 
 function parseReference(value: unknown, index: number): CodeGraphReference {
   const input = object(value, `File-fact reference ${index}`);
-  exactKeys(
-    input,
-    [
-      'edgeId',
-      'evidencePath',
-      'evidenceSpan',
-      'lookupTiers',
-      'provenance',
-      'relation',
-      'resolutionDomain',
-      'sourceName',
-      'targetName',
-    ],
-    ['aliasLookupKeys', 'arity', 'exportedOnly', 'sourceId'],
-  );
+  exactKeys(input, REFERENCE_SHAPE);
   return {
     ...(input.aliasLookupKeys === undefined
       ? {}
@@ -188,11 +213,11 @@ function parseReference(value: unknown, index: number): CodeGraphReference {
 
 function parseDerivationInputs(value: unknown): CodeGraphDerivationInputs {
   const input = object(value, 'File-fact derivation inputs');
-  exactKeys(input, [], ['rationale']);
+  exactKeys(input, DERIVATION_INPUTS_SHAPE);
   if (input.rationale === undefined) return {};
   const rationale = EffectArray.map(array(input.rationale, 'File-fact rationale inputs'), (value, index) => {
     const rationale = object(value, `File-fact rationale ${index}`);
-    exactKeys(rationale, ['documentation', 'line', 'marker', 'name'], []);
+    exactKeys(rationale, RATIONALE_SHAPE);
     return {
       documentation: text(rationale.documentation, 'Rationale documentation'),
       line: positiveInteger(rationale.line, 'Rationale line'),
@@ -205,7 +230,7 @@ function parseDerivationInputs(value: unknown): CodeGraphDerivationInputs {
 
 function parseSpan(value: unknown, label: string): CodeGraphSpan {
   const input = object(value, label);
-  exactKeys(input, ['column', 'endColumn', 'endLine', 'line'], []);
+  exactKeys(input, SPAN_SHAPE);
   const column = positiveInteger(input.column, `${label} column`);
   const endColumn = positiveInteger(input.endColumn, `${label} end column`);
   const endLine = positiveInteger(input.endLine, `${label} end line`);
@@ -230,16 +255,23 @@ function array(value: unknown, label: string): readonly unknown[] {
   return value;
 }
 
-function exactKeys(input: Record<string, unknown>, required: readonly string[], optional: readonly string[]): void {
-  const allowed = new Set([...required, ...optional]);
-  for (const key of required) {
-    if (!EffectRecord.has(input, key))
-      throw CodeGraphFactValidationError.make({message: `Code graph facts are missing ${key}.`});
-  }
+/** One pass over the input's keys; a missing required key is reported before an unknown one. */
+function exactKeys(input: Record<string, unknown>, shape: FactShape): void {
+  let required = 0;
+  let unknown: string | undefined;
   for (const key of EffectRecord.keys(input)) {
-    if (!allowed.has(key))
-      throw CodeGraphFactValidationError.make({message: `Code graph facts contain unknown field ${key}.`});
+    const isRequired = shape.keys.get(key);
+    if (isRequired === true) required += 1;
+    else if (isRequired === undefined) unknown ??= key;
   }
+  if (required < shape.required.length) {
+    for (const key of shape.required) {
+      if (!EffectRecord.has(input, key))
+        throw CodeGraphFactValidationError.make({message: `Code graph facts are missing ${key}.`});
+    }
+  }
+  if (unknown !== undefined)
+    throw CodeGraphFactValidationError.make({message: `Code graph facts contain unknown field ${unknown}.`});
 }
 
 function text(value: unknown, label: string, maximum = TEXT_LENGTH_MAXIMUM): string {
