@@ -1311,15 +1311,16 @@ function streamLexical<E, R>(
       sql.unsafe<LexicalRow>(
         `SELECT term.term, symbol.symbol_id, posting.weight
          FROM lexical_compact_snapshots AS compact
-         JOIN lexical_compact_postings AS posting ON posting.snapshot_key = compact.snapshot_key
-         JOIN lexical_compact_terms AS term
-           ON term.snapshot_key = compact.snapshot_key AND term.term_key = posting.term_key
-         JOIN lexical_compact_symbols AS symbol
+         CROSS JOIN lexical_compact_terms AS term ON term.snapshot_key = compact.snapshot_key
+         CROSS JOIN lexical_compact_postings AS posting
+           ON posting.snapshot_key = compact.snapshot_key AND posting.term_key = term.term_key
+         CROSS JOIN lexical_compact_symbols AS symbol
            ON symbol.snapshot_key = compact.snapshot_key AND symbol.symbol_key = posting.symbol_key
-         WHERE compact.snapshot_id = ? AND (? IS NULL OR (term.term, symbol.symbol_id) > (?, ?))
+         WHERE compact.snapshot_id = ?
+           ${cursor === undefined ? '' : 'AND term.term >= ? AND (term.term, symbol.symbol_id) > (?, ?)'}
          ORDER BY term.term COLLATE BINARY, symbol.symbol_id COLLATE BINARY
          LIMIT ?`,
-        [snapshotId, cursor?.[0] ?? null, ...(cursor ?? ['', '']), pageSize],
+        cursor === undefined ? [snapshotId, pageSize] : [snapshotId, cursor[0], ...cursor, pageSize],
       ),
     row => [row.term, row.symbol_id],
     rows =>
