@@ -6,12 +6,11 @@ import {telemetryChildEnvironmentPolicyLayer} from '../telemetry/session.js';
 import {RECALL_READY_READ_WORKER_ARGUMENT} from '../worker_protocol.js';
 import {makeReadyRecallReadWorkerProgram, readyRecallReadWorkerLayer} from './ready_read_main.js';
 
-if (import.meta.main) {
-  const arguments_ = process.argv.slice(2);
+/** Shared by the source entry and the standalone executable's early dispatch. */
+export function runReadyRecallReadWorker(arguments_: readonly string[]) {
   if (arguments_[0] !== RECALL_READY_READ_WORKER_ARGUMENT)
     throw new Error('Expected the private ready-read worker role.');
-  const runSignalTransparentMain = Runtime.makeRunMain(signalTransparentTeardown);
-  runSignalTransparentMain(
+  Runtime.makeRunMain(signalTransparentTeardown)(
     makeReadyRecallReadWorkerProgram(arguments_, process.env).pipe(
       Effect.provide(
         readyRecallReadWorkerLayer.pipe(
@@ -23,3 +22,5 @@ if (import.meta.main) {
     {disableErrorReporting: true},
   );
 }
+
+if (import.meta.main) runReadyRecallReadWorker(process.argv.slice(2));

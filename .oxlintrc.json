@@ -235,7 +235,7 @@
       }
     },
     {
-      "files": ["apps/threadnote/src/standalone.ts"],
+      "files": ["apps/threadnote/src/standalone_cli.ts"],
       "rules": {
         "effecttsgo/strict-effect-provide": "off",
         "threadnote/no-effect-runtime": "off"
