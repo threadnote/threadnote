@@ -225,6 +225,14 @@ describe('code graph checkpoint pack', () => {
     expect(() => decodeCodeGraphCheckpointPackV1(concatenated)).toThrow(/concatenated gzip members/u);
   });
 
+  it('stops inflation at the declared uncompressed size', () => {
+    const pack = fixturePack();
+    const understated = rewriteFirstChunk(pack, firstChunkPayload(pack), pack.header.chunks[0].uncompressedBytes - 1);
+
+    expect(inspectCodeGraphCheckpointPackV1(understated).verification).toBe('artifact-and-framing');
+    expect(() => decodeCodeGraphCheckpointPackV1(understated)).toThrow(/expands beyond its declared size/u);
+  });
+
   it('rejects truncation, trailing bytes, descriptor mismatch, invalid magic, and hostile declared bounds', () => {
     const pack = fixturePack();
     expect(() => inspectCodeGraphCheckpointPackV1(pack.bytes.subarray(0, pack.bytes.byteLength - 1))).toThrow(
@@ -425,14 +433,26 @@ function fixturePack(): CodeGraphCheckpointEncodedPackV1 {
 }
 
 function concatenateFirstGzipMember(pack: CodeGraphCheckpointEncodedPackV1): Uint8Array {
+  const payload = firstChunkPayload(pack);
+  return rewriteFirstChunk(pack, join([payload, payload]), pack.header.chunks[0].uncompressedBytes);
+}
+
+function firstChunkPayload(pack: CodeGraphCheckpointEncodedPackV1): Uint8Array {
+  return pack.bytes.subarray(24 + UTF8.encode(canonicalJson(pack.header)).byteLength + 52);
+}
+
+/** Rebuild a single-chunk pack whose framing and descriptors are consistent with the replacement payload. */
+function rewriteFirstChunk(
+  pack: CodeGraphCheckpointEncodedPackV1,
+  payload: Uint8Array,
+  uncompressedBytes: number,
+): Uint8Array {
   const originalHeaderBytes = UTF8.encode(canonicalJson(pack.header)).byteLength;
   const payloadOffset = 24 + originalHeaderBytes + 52;
-  const originalPayload = pack.bytes.subarray(payloadOffset);
-  const payload = join([originalPayload, originalPayload]);
   const chunk = pack.header.chunks[0];
   const header: CodeGraphCheckpointHeaderV1 = {
     ...pack.header,
-    chunks: [{...chunk, compressedBytes: payload.byteLength}],
+    chunks: [{...chunk, compressedBytes: payload.byteLength, uncompressedBytes}],
   };
   const headerBytes = UTF8.encode(canonicalJson(header));
   const prelude = new Uint8Array(24);
@@ -442,7 +462,9 @@ function concatenateFirstGzipMember(pack: CodeGraphCheckpointEncodedPackV1): Uin
   preludeView.setUint32(20, headerBytes.byteLength, false);
   const frame = new Uint8Array(52);
   frame.set(pack.bytes.subarray(24 + originalHeaderBytes, payloadOffset));
-  new DataView(frame.buffer).setUint32(8, payload.byteLength, false);
+  const frameView = new DataView(frame.buffer);
+  frameView.setUint32(8, payload.byteLength, false);
+  frameView.setUint32(12, uncompressedBytes, false);
   return join([prelude, headerBytes, frame, payload]);
 }
 

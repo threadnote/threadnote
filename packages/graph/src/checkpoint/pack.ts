@@ -1,6 +1,7 @@
 import {Array as EffectArray} from 'effect';
-import {Schema} from 'effect';
-import {Gunzip, gzipSync} from 'fflate';
+import {Predicate, Schema} from 'effect';
+import {gzipSync} from 'fflate';
+import {inflateRawSync} from 'node:zlib';
 import {canonicalJson, parseCanonicalJson} from './canonical_json.js';
 import {
   CODE_GRAPH_CHECKPOINT_FORMAT_VERSION,
@@ -899,27 +900,28 @@ function validateHeaderBounds(header: CodeGraphCheckpointHeaderV1, limits: CodeG
   }
 }
 
+const GZIP_HEADER_BYTES = 10;
+const GZIP_TRAILER_BYTES = 8;
+
+/**
+ * The encoder writes a fixed 10-byte gzip header with no optional fields, so
+ * the decoder inflates the raw DEFLATE body natively and checks the trailer.
+ */
 function inflateSingleMember(compressed: Uint8Array, expectedBytes: number): Uint8Array {
-  if (compressed.byteLength < 18)
+  if (compressed.byteLength < GZIP_HEADER_BYTES + GZIP_TRAILER_BYTES)
     throw CodeGraphCheckpointPackError.make({message: 'Checkpoint gzip member is truncated.'});
-  const output = new Uint8Array(expectedBytes);
-  let offset = 0;
-  let final = false;
-  const gunzip = new Gunzip((data, isFinal) => {
-    if (data.byteLength > output.byteLength - offset) {
+  if (compressed[0] !== 0x1f || compressed[1] !== 0x8b || compressed[2] !== 8 || compressed[3] !== 0) {
+    throw CodeGraphCheckpointPackError.make({message: 'Checkpoint gzip member header is invalid.'});
+  }
+  const body = compressed.subarray(GZIP_HEADER_BYTES, compressed.byteLength - GZIP_TRAILER_BYTES);
+  let inflated: unknown;
+  try {
+    // With `info`, the runtime returns the output buffer and the engine that reports consumed input.
+    inflated = inflateRawSync(body, {info: true, maxOutputLength: Math.max(1, expectedBytes)});
+  } catch (cause) {
+    if (Predicate.hasProperty(cause, 'code') && cause.code === 'ERR_BUFFER_TOO_LARGE') {
       throw CodeGraphCheckpointPackError.make({message: 'Checkpoint gzip member expands beyond its declared size.'});
     }
-    output.set(data, offset);
-    offset += data.byteLength;
-    final = isFinal;
-  });
-  gunzip.onmember = () => {
-    throw CodeGraphCheckpointPackError.make({message: 'Checkpoint chunk contains concatenated gzip members.'});
-  };
-  try {
-    gunzip.push(compressed, true);
-  } catch (cause) {
-    if (Schema.is(CodeGraphCheckpointPackError)(cause)) throw cause;
     throw CodeGraphCheckpointPackError.make({
       message:
         cause instanceof Error
@@ -927,23 +929,27 @@ function inflateSingleMember(compressed: Uint8Array, expectedBytes: number): Uin
           : 'Checkpoint gzip member is invalid.',
     });
   }
-  if (!final || offset !== expectedBytes) {
+  if (
+    !Predicate.hasProperty(inflated, 'buffer') ||
+    !(inflated.buffer instanceof Uint8Array) ||
+    !Predicate.hasProperty(inflated, 'engine') ||
+    !Predicate.hasProperty(inflated.engine, 'bytesWritten') ||
+    typeof inflated.engine.bytesWritten !== 'number'
+  ) {
+    throw CodeGraphCheckpointPackError.make({message: 'Checkpoint gzip inflation returned an unexpected result.'});
+  }
+  if (inflated.engine.bytesWritten !== body.byteLength) {
+    throw CodeGraphCheckpointPackError.make({message: 'Checkpoint chunk contains concatenated gzip members.'});
+  }
+  const output = new Uint8Array(inflated.buffer.buffer, inflated.buffer.byteOffset, inflated.buffer.byteLength);
+  if (output.byteLength !== expectedBytes) {
     throw CodeGraphCheckpointPackError.make({message: 'Checkpoint gzip member size does not match its descriptor.'});
   }
-  const trailer = dataView(compressed, compressed.byteLength - 8, 8);
-  if (trailer.getUint32(0, true) !== crc32(output) || trailer.getUint32(4, true) !== output.byteLength >>> 0) {
+  const trailer = dataView(compressed, compressed.byteLength - GZIP_TRAILER_BYTES, GZIP_TRAILER_BYTES);
+  if (trailer.getUint32(0, true) !== Bun.hash.crc32(output) || trailer.getUint32(4, true) !== output.byteLength >>> 0) {
     throw CodeGraphCheckpointPackError.make({message: 'Checkpoint gzip member checksum or size is invalid.'});
   }
   return output;
-}
-
-function crc32(bytes: Uint8Array): number {
-  let value = 0xffff_ffff;
-  for (const byte of bytes) {
-    value ^= byte;
-    for (let bit = 0; bit < 8; bit += 1) value = (value >>> 1) ^ (0xedb8_8320 & -(value & 1));
-  }
-  return (value ^ 0xffff_ffff) >>> 0;
 }
 
 function chunkDigest(ordinal: number, recordCount: number, bytes: Uint8Array): CodeGraphCheckpointDigestV1 {
