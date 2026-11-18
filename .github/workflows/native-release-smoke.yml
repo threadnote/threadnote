@@ -377,6 +377,8 @@ jobs:
         id: restore
         shell: bash
         run: |
+          # Linux payloads are built in a root container; return the workspace to the runner user.
+          if [ "$RUNNER_OS" = Linux ]; then sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE"; fi
           rm -rf dist
           mkdir -p dist
           tar -xzf artifacts/threadnote-${{ inputs.target }}.tar.gz -C dist
