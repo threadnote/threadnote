@@ -7,13 +7,13 @@ import {
   decideGate,
   nativeGates,
   nativeNextCommand,
-  nativeTaskViewNext,
+  nativeNext,
   nativeWaivableGateIds,
   nativeWorkflowPolicyOf,
   type GateId,
 } from '../src/gates.js';
 
-const next = nativeTaskViewNext('run-1', '/checkout');
+const next = nativeNext.view({runId: 'run-1', callerCwd: '/checkout'});
 const violation = {files: ['docs/unplanned.md']};
 const waiver = {id: 'waiver-1'};
 

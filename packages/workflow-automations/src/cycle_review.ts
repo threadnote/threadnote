@@ -278,7 +278,6 @@ export const nativeCycleReviewRecordingMode = (snapshot: NativeCycleSnapshot): '
 /** A finding that blocks acceptance until it is resolved or a `review.blocking` waiver covers the tree. */
 export const nativeCycleBlockingFinding = (finding: NativeCycleReview['findings'][number]) =>
   ['critical', 'important'].includes(finding.severity) && ['new', 'carried'].includes(finding.state);
-const blocking = nativeCycleBlockingFinding;
 const safePath = (value: string) =>
   value.length > 0 &&
   !/[\\:]/u.test(value) &&
@@ -414,7 +413,8 @@ export function validateNativeCycleReviewHistory(
     seen.add(finding.id);
     const old = prior.get(finding.id);
     if (
-      (['resolved', 'rejected'].includes(finding.state) || (old && blocking(old) && !blocking(finding))) &&
+      (['resolved', 'rejected'].includes(finding.state) ||
+        (old && nativeCycleBlockingFinding(old) && !nativeCycleBlockingFinding(finding))) &&
       !Effect.pipe(finding.reason, effectOptionalString =>
         effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
       )
@@ -424,7 +424,8 @@ export function validateNativeCycleReviewHistory(
       fail('Prior findings must retain their identity and disposition.');
   }
   for (const finding of prior.values())
-    if (blocking(finding) && !seen.has(finding.id)) fail('A prior blocker disappeared without a disposition.');
+    if (nativeCycleBlockingFinding(finding) && !seen.has(finding.id))
+      fail('A prior blocker disappeared without a disposition.');
   const active = EffectArrayPipe(review.findings, __effectArrayValues =>
     EffectArray.filter(
       __effectArrayValues,
@@ -438,7 +439,7 @@ export function validateNativeCycleReviewHistory(
       snapshotId: snapshot.snapshotId,
       snapshotTree: snapshot.tree,
       phaseHash: snapshot.phaseHash,
-      blockingIssueCount: EffectArray.filter(active, blocking).length,
+      blockingIssueCount: EffectArray.filter(active, nativeCycleBlockingFinding).length,
       counts: EffectRecord.fromEntries(
         EffectArray.map(['critical', 'important', 'minor', 'informational'], severity => [
           severity,

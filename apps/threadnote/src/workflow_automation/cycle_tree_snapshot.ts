@@ -14,7 +14,7 @@ import {
   nativeCycleSnapshotIsCurrentIteration,
   type NativeCycleRuntime,
 } from '@threadnote/workflow-automations/cycle-runtime';
-import {nativeTaskViewNext, nativeRefusal} from '@threadnote/workflow-automations/gates';
+import {nativeNext, nativeRefusal} from '@threadnote/workflow-automations/gates';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {
@@ -134,7 +134,7 @@ export const recordNativeCycleTreeSnapshot = Effect.fn('workflowAutomation.cycle
   const {repo, bindingId, runtime, phase} = input;
   const state = runtime.state;
   const next = nextNativeCycle(state);
-  const view = nativeTaskViewNext(input.runId, repo);
+  const view = nativeNext.view({runId: input.runId, callerCwd: repo});
   if (next.action === 'deliver' && next.phaseId !== phase.id)
     return yield* nativeRefusal('delivery-pending', 'Deliver the accepted prior phase before the next snapshot.', {
       next: view,

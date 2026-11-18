@@ -79,7 +79,6 @@ import type {NativeAuthoringCall} from './authoring_artifacts.js';
 import {readNativeCycleIncoming, recordNativeCycleTreeSnapshot} from './cycle_tree_snapshot.js';
 import {
   decideGate,
-  nativeTaskViewNext,
   nativeWorkflowPolicyOf,
   nativeRefusal,
   nativeNext,
@@ -430,7 +429,7 @@ export const runNativeCycle = <R>(
               return yield* nativeRefusal(
                 full.code,
                 'This run already retains its maximum history; deliver the reviewed work and continue in a new task.',
-                {detail: {limit: full.limit}, next: nativeTaskViewNext(request.runId, repo)},
+                {detail: {limit: full.limit}, next: nativeNext.view({runId: request.runId, callerCwd: repo})},
               );
             const canonical = yield* from(() => decodeNativeCycleRuntime(JSON.parse(stableJson(value))));
             return (yield* writeNativeWorkflowState(config, {...stored.state, cycle: canonical}, stored.revision))
@@ -617,8 +616,8 @@ export const runNativeCycle = <R>(
           if (!gate)
             return yield* nativeRefusal(
               'invalid-waiver',
-              'Only an integrity or advisory gate can be waived; intent changes need a confirmation.',
-              {next: nativeTaskViewNext(request.runId, repo)},
+              'Only review.required and review.blocking take a waiver; intent changes need a confirmation.',
+              {next: nativeNext.view({runId: request.runId, callerCwd: repo})},
             );
           if (snapshot.phaseId !== selected.id)
             return yield* fail('invalid-waiver', 'A waiver covers a snapshot of its own phase.');
@@ -634,8 +633,8 @@ export const runNativeCycle = <R>(
             reason: yield* from(() => required(request.reason, 'a concrete waiver reason')),
             userAuthority: yield* from(() => required(request.userAuthority, 'the explicit human authority')),
           };
-          // A waiver of this gate that already covers the tree under the same intent replays, whatever snapshot of
-          // that tree it was first recorded for.
+          // A waiver that already covers the target replays: a review.required waiver for any snapshot of its tree
+          // under the same intent, a review.blocking waiver only for the review it accepted.
           const existing = nativeCycleWaiverFor(runtime, gate, target);
           if (existing) return {status: 'ok', revision: stored.revision, replayed: true, waiver: existing};
           const id = nativeCycleWaiverId(fields);
@@ -1341,7 +1340,7 @@ export const runNativeCycle = <R>(
             'scope.out-of-plan',
             ownershipOutside.length > 0 ? {files: ownershipOutside} : undefined,
             undefined,
-            nativeTaskViewNext(request.runId, repo),
+            nativeNext.view({runId: request.runId, callerCwd: repo}),
           );
           if (ownershipDecision._tag === 'refuse')
             return yield* nativeRefusal(
@@ -1416,7 +1415,7 @@ export const runNativeCycle = <R>(
             'scope.out-of-plan',
             entry.snapshot.version === 4 && outOfPlan.length > 0 ? {files: outOfPlan} : undefined,
             undefined,
-            nativeTaskViewNext(request.runId, repo),
+            nativeNext.view({runId: request.runId, callerCwd: repo}),
           );
           if (scopeDecision._tag === 'refuse')
             return yield* nativeRefusal('phase-scope', 'Changed paths exceed allowed scope.', scopeDecision);

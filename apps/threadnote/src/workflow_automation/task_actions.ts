@@ -3,7 +3,6 @@ import {
   nativeWorkflowPolicyOf,
   fillNativeNext,
   nativeNextForTaskAction,
-  nativeTaskViewNext,
   withNativeNext,
   nativeRefusal,
   decideGate,
@@ -700,7 +699,7 @@ const withTaskNext = (config: RuntimeConfig, input: unknown, cause: unknown) =>
     const next =
       error.next ??
       (!view
-        ? nativeTaskViewNext(runId, callerCwd)
+        ? nativeNext.view({runId, callerCwd})
         : reopenPhase
           ? nativeNext.reopen({runId, callerCwd}, reopenPhase)
           : nativeNextForTaskAction(view.next.action, runId, callerCwd, stored?.state.cycle?.state.plan.delivery));

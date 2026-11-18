@@ -914,7 +914,7 @@ export function makeNativeTaskActionCommands<E, R>(
     {
       runId: requiredString('run-id', 'Existing native workflow run identifier'),
       callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
-      gate: requiredChoice('gate', nativeWaivableGateIds, 'Integrity or advisory gate to waive for the current tree'),
+      gate: requiredChoice('gate', nativeWaivableGateIds, 'Review gate to waive for the current tree'),
       reason: requiredString('reason', 'Concrete reason this gate is waived'),
       userAuthority: requiredString(
         'user-authority',

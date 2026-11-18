@@ -221,9 +221,6 @@ export const nativeNext = {
     ),
 } as const;
 
-/** The default next step for a mechanical refusal: reread the current task card. */
-export const nativeTaskViewNext = (runId: string, callerCwd: string) => nativeNext.view({runId, callerCwd});
-
 /** Every refusal names its rule and the next legal command; the type makes `next` mandatory. */
 export const nativeRefusal = (
   code: string,
@@ -270,7 +267,7 @@ export const nativeNextForTaskAction = (
         userAuthority: '<userAuthority>',
       });
     default:
-      return nativeTaskViewNext(runId, callerCwd);
+      return nativeNext.view({runId: runId, callerCwd: callerCwd});
   }
 };
 

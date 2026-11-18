@@ -3,7 +3,7 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
   nativeControlNext,
   nativeRefusal,
-  nativeTaskViewNext,
+  nativeNext,
   nativeWorkflowPolicyOf,
 } from '@threadnote/workflow-automations/gates';
 import {readNativeWorkflowState, withNativeWorkflowLock, writeNativeWorkflowState} from './store.js';
@@ -38,7 +38,7 @@ export const runNativeTaskWaiver = (
         'waiver-target-missing',
         'A waiver covers the recorded snapshot of the current phase.',
         {
-          next: nativeTaskViewNext(request.runId, checkout),
+          next: nativeNext.view({runId: request.runId, callerCwd: checkout}),
         },
       );
     const recorded = unwrapCycle(
@@ -122,7 +122,7 @@ export const runNativeTaskSetProfile = (
         const latest = yield* readNativeWorkflowState(config, request.runId);
         if (!latest || latest.revision !== stored.revision)
           return yield* nativeRefusal('state-conflict', 'The run changed while switching its profile; retry.', {
-            next: nativeTaskViewNext(request.runId, checkout),
+            next: nativeNext.view({runId: request.runId, callerCwd: checkout}),
           });
         return yield* writeNativeWorkflowState(config, {...latest.state, policy}, latest.revision);
       }),

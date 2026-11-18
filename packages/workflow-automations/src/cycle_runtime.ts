@@ -73,7 +73,7 @@ export const NativeCycleReviewAttemptSchema = Schema.Struct({
   report: Schema.String.check(Schema.isMaxLength(65_536)),
   authority: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
 });
-/** An audited, caller-asserted waiver of one non-intent gate for one exact tree. */
+/** An audited, caller-asserted waiver of one integrity gate for one exact tree. */
 export const NativeCycleWaiverSchema = Schema.Struct({
   id: Schema.String.check(Schema.isPattern(/^waiver-[a-f0-9]{48}$/u)),
   gate: Schema.Literals(nativeWaivableGateIds),
