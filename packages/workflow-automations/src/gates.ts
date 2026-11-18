@@ -1,4 +1,4 @@
-import {Array as EffectArray, String as EffectString} from 'effect';
+import {Array as EffectArray, Predicate, String as EffectString} from 'effect';
 import * as EffectRecord from 'effect/Record';
 import {WorkflowAutomationError, type WorkflowNextCommand, type WorkflowRefusalDetail} from './contracts.js';
 
@@ -83,6 +83,36 @@ export function nativeNextCommand(
     command,
     cli: EffectArray.join(['threadnote workflow-automation', cli.command, ...flags], ' '),
     arguments: mcpArguments,
+  };
+}
+
+/** Fill each `<name>` placeholder of a next command whose value the caller already holds. */
+export function fillNativeNext(
+  next: WorkflowNextCommand,
+  values: Readonly<Record<string, string | undefined>>,
+): WorkflowNextCommand {
+  const known = (value: string) => {
+    const name = /^<([A-Za-z]+)>$/u.exec(value)?.[1];
+    return name === undefined ? undefined : values[name];
+  };
+  const fill = (value: unknown): unknown =>
+    typeof value === 'string'
+      ? (known(value) ?? value)
+      : EffectArray.isArray(value)
+        ? EffectArray.map(value, fill)
+        : Predicate.isObject(value)
+          ? EffectRecord.map(value, fill)
+          : value;
+  return {
+    ...next,
+    cli: EffectArray.join(
+      EffectArray.map(EffectString.split(next.cli, ' '), token => {
+        const value = known(token);
+        return value === undefined ? token : cliValue(value);
+      }),
+      ' ',
+    ),
+    arguments: EffectRecord.map(next.arguments, fill),
   };
 }
 
@@ -173,6 +203,8 @@ export const nativeNext = {
       },
       {...scope, presentedIntentHash: '<intentHash>', userDecision: '<userDecision>', userResponse: '<userResponse>'},
     ),
+  reopen: (scope: NativeNextScope, phaseId: string) =>
+    nativeControlNext(scope, 'reopen', {phaseId, reason: '<reason>'}),
   waive: (scope: NativeNextScope, gate: NativeWaivableGateId) =>
     nativeControlNext(scope, 'waive', {gate, reason: '<reason>', userAuthority: '<userAuthority>'}, false),
   authoringRead: (callerCwd: string, authoringRef: string) =>
@@ -237,15 +269,13 @@ export const nativeNextForTaskAction = (
   }
 };
 
-/** Attach a next command to a refusal that does not name one yet. */
+/** The refusal with this next command. */
 export const withNativeNext = (error: WorkflowAutomationError, next: WorkflowNextCommand) =>
-  error.next !== undefined
-    ? error
-    : WorkflowAutomationError.make({
-        code: error.code,
-        message: error.message,
-        ...(error.retryable === undefined ? {} : {retryable: error.retryable}),
-        ...(error.gate === undefined ? {} : {gate: error.gate}),
-        ...(error.detail === undefined ? {} : {detail: error.detail}),
-        next,
-      });
+  WorkflowAutomationError.make({
+    code: error.code,
+    message: error.message,
+    ...(error.retryable === undefined ? {} : {retryable: error.retryable}),
+    ...(error.gate === undefined ? {} : {gate: error.gate}),
+    ...(error.detail === undefined ? {} : {detail: error.detail}),
+    next,
+  });

@@ -1,6 +1,6 @@
 import {Array as EffectArray, Effect} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import {nativeRefusal, nativeTaskViewNext} from '@threadnote/workflow-automations/gates';
+import {nativeNext, nativeNextForTaskAction, nativeRefusal} from '@threadnote/workflow-automations/gates';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {readNativeWorkflowState} from './store.js';
 import {readNativeTaskView} from './task.js';
@@ -34,11 +34,18 @@ export const recordNativeTaskTreeSnapshot = (
   Effect.gen(function* () {
     const view = yield* readNativeTaskView(config, {runId: request.runId, callerCwd: checkout, role: 'implementation'});
     const phaseId = view.next.phaseId;
+    const scope = {runId: request.runId, callerCwd: checkout};
+    if (view.next.action === 'deliver' && phaseId)
+      return yield* nativeRefusal(
+        'task-not-ready',
+        `Phase ${phaseId} is validated and waits for delivery; reopen it to record a changed tree.`,
+        {next: nativeNext.reopen(scope, phaseId)},
+      );
     if (view.status !== 'ready' || !phaseId || !recordableActions.has(view.next.action))
       return yield* nativeRefusal(
         'task-not-ready',
-        EffectArray.join(view.missingInputs, ' ') || 'Follow the current native task action before recording source.',
-        {next: nativeTaskViewNext(request.runId, checkout)},
+        `The current task card asks for ${view.next.action}, not a new source snapshot.`,
+        {next: nativeNextForTaskAction(view.next.action, request.runId, checkout, view.delivery)},
       );
     const before = EffectArray.filter(runtime.snapshots, entry => entry.snapshot.phaseId === phaseId).at(-1);
     yield* inCheckout(

@@ -979,7 +979,7 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
 
 /** Every authoring refusal names its next legal command: reread the current authoring card. */
 const withAuthoringNext = (error: WorkflowAutomationError, input: unknown) =>
-  !Predicate.isObject(input) || typeof input.callerCwd !== 'string'
+  error.next !== undefined || !Predicate.isObject(input) || typeof input.callerCwd !== 'string'
     ? error
     : withNativeNext(
         error,

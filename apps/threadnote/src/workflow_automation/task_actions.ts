@@ -1,6 +1,7 @@
 import {runNativeTaskWaiver, withNativeTaskWaivers, runNativeTaskSetProfile} from './task_policy_actions.js';
 import {
   nativeWorkflowPolicyOf,
+  fillNativeNext,
   nativeNextForTaskAction,
   nativeTaskViewNext,
   withNativeNext,
@@ -673,30 +674,39 @@ const standardRefusedRecoveries = new Set<string>([
 export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
   runNativeTaskActionCore(config, input).pipe(Effect.catch(error => withTaskNext(config, input, error)));
 
-/** A refusal without a named next command points at the action on the current task card. */
+/** Refusals that mean the validated source or its declared base changed after validation. */
+const sourceChangedCodes = new Set(['source-drift', 'review-stale']);
+
+/**
+ * A refusal without a named next command points at the action on the current task card, or at reopen when a deliver
+ * card's source changed. Placeholders the card or the request already answer are filled.
+ */
 const withTaskNext = (config: RuntimeConfig, input: unknown, cause: unknown) =>
   Effect.gen(function* () {
     const error = nativeWorkflowError(cause);
-    if (
-      error.next !== undefined ||
-      !Predicate.isObject(input) ||
-      typeof input.runId !== 'string' ||
-      typeof input.callerCwd !== 'string'
-    )
+    if (!Predicate.isObject(input) || typeof input.runId !== 'string' || typeof input.callerCwd !== 'string')
       return yield* error;
     const {runId, callerCwd} = input;
     // Project the card from stored state only: a refusal must not reach providers or watches.
     const current = yield* readNativeWorkflowState(config, runId).pipe(Effect.exit);
+    const stored = current._tag === 'Success' ? current.value : undefined;
+    const view = stored ? projectNativeTaskView(stored.state, stored.revision) : undefined;
+    const reopenPhase =
+      view?.next.action === 'deliver' && sourceChangedCodes.has(error.code) ? view.next.phaseId : undefined;
+    const next =
+      error.next ??
+      (!view
+        ? nativeTaskViewNext(runId, callerCwd)
+        : reopenPhase
+          ? nativeNext.reopen({runId, callerCwd}, reopenPhase)
+          : nativeNextForTaskAction(view.next.action, runId, callerCwd, stored?.state.cycle?.state.plan.delivery));
     return yield* withNativeNext(
       error,
-      current._tag === 'Success' && current.value
-        ? nativeNextForTaskAction(
-            projectNativeTaskView(current.value.state, current.value.revision).next.action,
-            runId,
-            callerCwd,
-            current.value.state.cycle?.state.plan.delivery,
-          )
-        : nativeTaskViewNext(runId, callerCwd),
+      fillNativeNext(next, {
+        taskRef: view?.taskRef,
+        snapshotRef: view?.phase?.snapshot?.snapshotRef,
+        validationRef: typeof input.validationRef === 'string' ? input.validationRef : undefined,
+      }),
     );
   });
 

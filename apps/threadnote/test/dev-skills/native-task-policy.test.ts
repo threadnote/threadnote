@@ -359,6 +359,40 @@ describe('standard-profile reconcile of a phase with proof', () => {
     }).pipe(runCycle),
   );
 
+  effectIt.effect('names reopen as the recovery when the validated source or base changed before delivery', () =>
+    Effect.gen(function* () {
+      const {f, task, view, validated} = yield* setup();
+      const deliver = () => task('deliver-local', {validationRef: String(validated.validationRef)}).pipe(Effect.flip);
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = 2;\n');
+      yield* f.git(['commit', '-qam', 'late fix']);
+      const card = yield* view();
+      expect(card.next).toMatchObject({action: 'deliver', phaseId: 'one'});
+      const reopen = {
+        tool: 'workflow_task_control',
+        command: 'reopen',
+        arguments: {taskRef: card.taskRef, control: {command: 'reopen', phaseId: 'one'}},
+      };
+      expect(yield* deliver()).toMatchObject({code: 'source-drift', next: reopen});
+      const snapshot = yield* task('record-snapshot').pipe(Effect.flip);
+      expect(snapshot).toMatchObject({code: 'task-not-ready', next: reopen});
+      expect(snapshot.message).not.toMatch(/validation reference/iu);
+      yield* f.git(['checkout', '-q', 'main']);
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'upstream.md'), 'Upstream work.\n');
+      yield* f.git(['add', 'upstream.md']);
+      yield* f.git(['commit', '-qm', 'upstream']);
+      yield* f.git(['checkout', '-q', 'feature/one']);
+      const moved = yield* deliver();
+      expect(moved).toMatchObject({code: 'review-stale', next: reopen});
+      expect(moved.next?.cli).toContain('--phase-id one');
+      expect(
+        yield* task('reopen', {taskRef: card.taskRef, phaseId: 'one', reason: 'The source changed after validation.'}),
+      ).toMatchObject({status: 'reopened'});
+      yield* task('resume', {taskRef: (yield* view()).taskRef, reason: 'Record the changed tree.'});
+      yield* task('record-snapshot');
+      expect((yield* view()).next).toMatchObject({action: 'review', phaseId: 'one'});
+    }).pipe(runCycle),
+  );
+
   effectIt.effect('keeps a validated phase deliverable across an undelivered base-only reconcile', () =>
     Effect.gen(function* () {
       const {f, task, validated} = yield* setup();
