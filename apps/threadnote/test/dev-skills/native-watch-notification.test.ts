@@ -472,6 +472,25 @@ describe('native watch notification transport', () => {
     expect(() => Schema.decodeUnknownSync(nativeWatchWakeupSchema)(request)).toThrow();
   });
 
+  it('registers a Claude Code session only through an absolute claude launcher', () => {
+    const registration = {
+      host: 'claude-code',
+      executable: '/home/user/.local/bin/claude',
+      sessionId: target.threadId,
+      workspace: '/trusted/workspace',
+      exclusiveSession: true,
+    };
+    expect(Schema.decodeUnknownSync(nativeWatchWakeupRequestSchema)(registration)).toEqual(registration);
+    expect(Schema.decodeUnknownSync(nativeWatchWakeupSchema)(registration)).toEqual(registration);
+    for (const executable of [
+      'claude',
+      '/bin/sh',
+      '/tmp/claude.cmd',
+      '/home/user/.local/share/claude/versions/2.1.327',
+    ])
+      expect(() => Schema.decodeUnknownSync(nativeWatchWakeupSchema)({...registration, executable})).toThrow();
+  });
+
   it('bounds ID-only messages and rejects executable injection configuration', () => {
     for (const executable of ['codex', '/bin/sh', '/tmp/codex.cmd', '/tmp/codex\n']) {
       const input: unknown = {...target, executable};
@@ -1316,14 +1335,28 @@ const cursorReply = {
     result: 'fixture completion',
   }),
 };
-const useCursor = Effect.fn('test.watchNotification.cursor')(function* (f: Effect.Success<ReturnType<typeof fixture>>) {
+const claudeTarget = {
+  host: 'claude-code' as const,
+  executable: '/trusted/claude',
+  sessionId: target.threadId,
+  workspace: '/trusted/workspace',
+  exclusiveSession: true as const,
+};
+const useTarget = Effect.fn('test.watchNotification.target')(function* (
+  f: Effect.Success<ReturnType<typeof fixture>>,
+  wakeup: unknown,
+) {
   const stored = yield* f.read();
   yield* writeNativeWatch(
     f.config,
-    {...stored.envelope, notification: {...stored.envelope.notification!, target: cursorTarget}},
+    decodeNativeWatchEnvelope({
+      ...stored.envelope,
+      notification: {...stored.envelope.notification!, target: wakeup},
+    }),
     stored.revision,
   );
 });
+const useCursor = (f: Effect.Success<ReturnType<typeof fixture>>) => useTarget(f, cursorTarget);
 
 effectIt.effect(
   'runs one exclusive Cursor continuation asynchronously and validates its exact completion session',
@@ -1433,14 +1466,52 @@ effectIt.effect('Cursor scope interruption cleans up its owned command and never
   }).pipe(provide),
 );
 
-effectIt.effect('refuses mismatched or unsuccessful Cursor completion receipts without claiming delivery', () =>
+effectIt.effect('resumes the exact Claude Code session in its workspace and records its completion receipt', () =>
   Effect.gen(function* () {
-    for (const response of [
-      {type: 'result', subtype: 'success', is_error: false, session_id: receipt},
-      {type: 'result', subtype: 'error', is_error: true, session_id: cursorTarget.sessionId},
-    ]) {
+    const f = yield* fixture(1);
+    yield* useTarget(f, claudeTarget);
+    const calls: {executable: string; args: readonly string[]; options?: CommandOptions}[] = [];
+    yield* f.drain().pipe(
+      commandLayer((executable, args, options) =>
+        Effect.sync(() => {
+          calls.push({executable, args, ...(options ? {options} : {})});
+          return {
+            ...success,
+            stdout: JSON.stringify({
+              type: 'result',
+              subtype: 'success',
+              is_error: false,
+              session_id: claudeTarget.sessionId,
+              result: 'fixture completion',
+            }),
+          };
+        }),
+      ),
+    );
+    expect(calls).toHaveLength(1);
+    const [call] = calls;
+    expect(call.executable).toBe(claudeTarget.executable);
+    expect(call.args.slice(0, -1)).toEqual(['--print', '--resume', claudeTarget.sessionId, '--output-format', 'json']);
+    expect(call.args.at(-1)).toMatch(/^Threadnote watch event\. Route=/u);
+    expect(call.options).toMatchObject({cwd: claudeTarget.workspace, timeoutMs: 0});
+    expect((yield* f.read()).envelope.notification).toMatchObject({
+      notifiedThrough: 1,
+      outbox: null,
+      lastReceipt: {kind: 'cli-session-completed', receipt: claudeTarget.sessionId},
+    });
+  }).pipe(provide, TestClock.withLive),
+);
+
+effectIt.effect('refuses mismatched or unsuccessful session completion receipts without claiming delivery', () =>
+  Effect.gen(function* () {
+    for (const [wakeup, response] of [
+      [cursorTarget, {type: 'result', subtype: 'success', is_error: false, session_id: receipt}],
+      [cursorTarget, {type: 'result', subtype: 'error', is_error: true, session_id: cursorTarget.sessionId}],
+      // Claude Code reports a signed-out or failed turn as subtype success with is_error true.
+      [claudeTarget, {type: 'result', subtype: 'success', is_error: true, session_id: claudeTarget.sessionId}],
+    ] as const) {
       const f = yield* fixture(1);
-      yield* useCursor(f);
+      yield* useTarget(f, wakeup);
       yield* f.drain().pipe(
         commandLayer(() => Effect.succeed({...success, stdout: JSON.stringify(response)})),
         TestClock.withLive,
