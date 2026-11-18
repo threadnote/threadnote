@@ -62,6 +62,7 @@ import {
 import {
   currentRecallCorpusGeneration,
   loadRecallIndexData,
+  RecallIndexSourceChanged,
   recallIndexStatus,
   type RecallIndexProgress,
   type RecallIndexStatus,
@@ -222,7 +223,7 @@ export function recallIndexMaintenanceShouldRetry(error: unknown, completedRetri
     Number.isSafeInteger(completedRetries) &&
     completedRetries >= 0 &&
     completedRetries < RECALL_INDEX_MAINTENANCE_GENERATION_RETRY_LIMIT &&
-    Schema.is(VectorCorpusGenerationChanged)(error)
+    (Schema.is(VectorCorpusGenerationChanged)(error) || Schema.is(RecallIndexSourceChanged)(error))
   );
 }
 
