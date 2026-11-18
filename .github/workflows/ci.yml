@@ -16,6 +16,11 @@ on:
 permissions:
   contents: read
 
+# A newer push to a pull request supersedes its older run; main and manual runs always finish.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   BUN_VERSION: 1.4.4
 
@@ -313,22 +318,10 @@ jobs:
           if-no-files-found: ignore
 
   standalone-targets:
-    name: Bytecode compile · ${{ matrix.target }}
+    name: Bytecode compile · every standalone target
     needs: bazel-plan
     if: needs.bazel-plan.outputs.compile_targets == 'true'
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - bun-darwin-arm64
-          - bun-darwin-x64
-          - bun-linux-arm64
-          - bun-linux-arm64-musl
-          - bun-linux-x64-baseline
-          - bun-linux-x64-baseline-musl
-          - bun-windows-arm64
-          - bun-windows-x64-baseline
 
     steps:
       - uses: actions/checkout@v7
@@ -336,9 +329,8 @@ jobs:
         with:
           bun-version: ${{ env.BUN_VERSION }}
       - run: bun install --frozen-lockfile
+      # Without THREADNOTE_BUILD_TARGET the script cross-compiles every BUN_STANDALONE_TARGETS entry.
       - run: bun run compile:targets
-        env:
-          THREADNOTE_BUILD_TARGET: ${{ matrix.target }}
 
   self-contained-distribution:
     name: Self-contained Bun release · ${{ matrix.os }}

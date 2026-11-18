@@ -725,7 +725,6 @@ describe('platform benchmark workflow', () => {
     const ratchetWorkflow = decodeWorkflow(
       load(readFileSync('.github/workflows/code-graph-production-ratchet.yml', 'utf8'), {schema: JSON_SCHEMA}),
     );
-    const classifier = ratchetWorkflow.jobs.classify;
     const job = ratchetWorkflow.jobs.ratchet;
     const command =
       Option.getOrUndefined(
@@ -746,17 +745,18 @@ describe('platform benchmark workflow', () => {
     expectBroadPullRequestTrigger(ratchetWorkflow);
     expect(job['runs-on']).toBe('ubuntu-24.04');
     expect(job['timeout-minutes']).toBe(40);
-    expect(job.needs).toBe('classify');
-    expect(job.if).toBe("always() && github.event_name == 'pull_request'");
-    expect(classifier.outputs?.run_benchmark).toBe('${{ steps.scope.outputs.run_benchmark }}');
+    expect(EffectRecord.keys(ratchetWorkflow.jobs)).not.toContain('classify');
+    expect(job.needs).toBeUndefined();
+    expect(job.if).toBe("github.event_name == 'pull_request'");
     expect(
       Option.getOrUndefined(
-        Option.map(Option.fromNullishOr(classifier.steps), findArray =>
+        Option.map(Option.fromNullishOr(job.steps), findArray =>
           Option.getOrUndefined(EffectArray.findFirst(findArray, step => step.id === 'scope')),
         ),
       ),
     ).toMatchObject({
       name: 'Classify the production-ratchet diff',
+      'continue-on-error': true,
       run: 'bun tools/ci/code-graph-production-ratchet-scope.ts --base "$BASE_SHA" --head "$HEAD_SHA"',
     });
     const guardedSteps = Option.getOrUndefined(
@@ -765,17 +765,15 @@ describe('platform benchmark workflow', () => {
           __effectArrayValues,
           (step, __effectArrayIndex) =>
             __effectArrayIndex in __effectArrayValues &&
-            (step.uses === 'actions/checkout@v7' ||
-              step.uses === 'oven-sh/setup-bun@v2' ||
-              step.run === 'bun install --frozen-lockfile' ||
+            (step.run === 'bun install --frozen-lockfile' ||
               step.name === 'Measure the governed reduced production profile' ||
               step.name === 'Enforce the reviewed static ratchet'),
         ),
       ),
     );
-    expect(guardedSteps).toHaveLength(5);
+    expect(guardedSteps).toHaveLength(3);
     for (const step of guardedSteps ?? []) {
-      expect(step.if).toBe("needs.classify.result != 'success' || needs.classify.outputs.run_benchmark != 'false'");
+      expect(step.if).toBe("steps.scope.outcome != 'success' || steps.scope.outputs.run_benchmark != 'false'");
     }
     expect(
       Option.getOrUndefined(
@@ -855,7 +853,7 @@ describe('platform benchmark workflow', () => {
           ),
         ),
       )?.if,
-    ).toContain("needs.classify.result != 'success' || needs.classify.outputs.run_benchmark != 'false'");
+    ).toContain("steps.scope.outcome != 'success' || steps.scope.outputs.run_benchmark != 'false'");
     expect(
       Effect.pipe(
         command,

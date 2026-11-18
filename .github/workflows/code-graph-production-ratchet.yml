@@ -15,56 +15,39 @@ env:
   BUN_VERSION: 1.4.4
 
 jobs:
-  classify:
+  ratchet:
+    name: Governed reduced production profile · Linux
     if: github.event_name == 'pull_request'
-    name: Classify production ratchet scope
-    runs-on: ubuntu-latest
-    outputs:
-      run_benchmark: ${{ steps.scope.outputs.run_benchmark }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
 
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          fetch-depth: '0'
 
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
 
+      # A classifier failure fails open: the governed benchmark still runs.
       - id: scope
         name: Classify the production-ratchet diff
+        continue-on-error: true
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: bun tools/ci/code-graph-production-ratchet-scope.ts --base "$BASE_SHA" --head "$HEAD_SHA"
 
-  ratchet:
-    name: Governed reduced production profile · Linux
-    needs: classify
-    if: always() && github.event_name == 'pull_request'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
-
-    steps:
       - name: Record scoped skip
-        if: needs.classify.result == 'success' && needs.classify.outputs.run_benchmark == 'false'
+        if: steps.scope.outcome == 'success' && steps.scope.outputs.run_benchmark == 'false'
         run: echo 'Governed benchmark skipped because the diff has no production-ratchet-relevant paths.'
 
-      - uses: actions/checkout@v7
-        if: needs.classify.result != 'success' || needs.classify.outputs.run_benchmark != 'false'
-        with:
-          fetch-depth: '0'
-
-      - uses: oven-sh/setup-bun@v2
-        if: needs.classify.result != 'success' || needs.classify.outputs.run_benchmark != 'false'
-        with:
-          bun-version: ${{ env.BUN_VERSION }}
-
       - run: bun install --frozen-lockfile
-        if: needs.classify.result != 'success' || needs.classify.outputs.run_benchmark != 'false'
+        if: steps.scope.outcome != 'success' || steps.scope.outputs.run_benchmark != 'false'
 
       - name: Measure the governed reduced production profile
-        if: needs.classify.result != 'success' || needs.classify.outputs.run_benchmark != 'false'
+        if: steps.scope.outcome != 'success' || steps.scope.outputs.run_benchmark != 'false'
         env:
           THREADNOTE_BENCHMARK_RUNNER_CLASS: github-hosted-ubuntu-24.04-${{ runner.arch }}
           THREADNOTE_BENCHMARK_RUNNER_ID: ${{ runner.name }}
@@ -82,7 +65,7 @@ jobs:
 
       - id: static-ratchet
         name: Enforce the reviewed static ratchet
-        if: needs.classify.result != 'success' || needs.classify.outputs.run_benchmark != 'false'
+        if: steps.scope.outcome != 'success' || steps.scope.outputs.run_benchmark != 'false'
         continue-on-error: true
         run: >-
           bun tools/ci/code-graph-production-ratchet-gate.ts
@@ -146,7 +129,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: >-
           always() &&
-          (needs.classify.result != 'success' || needs.classify.outputs.run_benchmark != 'false')
+          (steps.scope.outcome != 'success' || steps.scope.outputs.run_benchmark != 'false')
         with:
           name: code-graph-production-ratchet-Linux-${{ runner.arch }}
           path: artifacts/

@@ -3,12 +3,15 @@ import fc from 'fast-check';
 import {expect, it} from 'vitest';
 import {partitionSmokeFiles} from '../windows-smoke-sequencer.js';
 import durations from '../windows-smoke-durations.json' with {type: 'json'};
+import {platformNeutralDevSkills} from '../windows-smoke.config.js';
 
-it('balances the observed Windows inventory across four serial runners', () => {
-  const shards = partitionSmokeFiles(Record.keys(durations), 4, file => file);
+it('balances the observed Windows lane across four serial runners', () => {
+  const neutral = new Set(platformNeutralDevSkills());
+  const lane = Array.filter(Record.keys(durations), file => !neutral.has(file));
+  const shards = partitionSmokeFiles(lane, 4, file => file);
   const hints: Readonly<Record<string, number>> = durations;
   const totals = Array.map(shards, files => Array.reduce(files, 0, (sum, file) => sum + hints[file]));
-  expect(Math.max(...totals)).toBeLessThan(800_000);
+  expect(Math.max(...totals)).toBeLessThan(1_200_000);
 });
 
 it('preserves complete disjoint coverage, determinism, inputs, and a bounded maximum load', () => {

@@ -570,6 +570,8 @@ export const createTargetSpecs = async (root = defaultRoot) => {
         'tools/ci/selection.mjs',
         'tools/ci/bazel-run-selected.mjs',
         'tools/ci/bazel-select.mjs',
+        // The Windows smoke config classifies dev-skills tests by their source.
+        ...testFilesBelow('apps/threadnote/test/dev-skills'),
       ],
       dataRoots: ['.github/workflows'],
     },
