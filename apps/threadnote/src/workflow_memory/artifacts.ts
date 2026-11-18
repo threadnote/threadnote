@@ -501,9 +501,11 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
     const promotion =
       (role === 'authoring-root' && (yield* CurrentNativeJobReadyPromotion)) ||
       Effect2.pipe(role, EffectString.startsWith('closeout-'));
-    // Admitted views record the checkout storage that the bound path names.
+    // Admitted views and collected witnesses record the checkout storage that the bound path names.
     const boundRepo =
-      admitted || foregroundAdmitted ? yield* (yield* FileSystem.FileSystem).realPath(state.binding.repo) : undefined;
+      admitted || foregroundAdmitted || foregroundCollector
+        ? yield* (yield* FileSystem.FileSystem).realPath(state.binding.repo)
+        : undefined;
     if (admitted && admitted.repo !== boundRepo)
       return yield* workflowError(
         'binding-drift',
@@ -548,7 +550,7 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
     if (captured.ok && foregroundCollector && role === 'authoring-validation') {
       foregroundCollector.witness = {
         bindingId: state.binding.bindingId,
-        repo: state.binding.repo,
+        repo: boundRepo ?? state.binding.repo,
         citationRefs: [...(request.codeRefs ?? [])],
         citations: captured.citations,
       };
