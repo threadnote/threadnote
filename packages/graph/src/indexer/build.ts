@@ -1150,9 +1150,7 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
     }
     const batches = factMaterializationBatches(input.inventory.files, cachedMetadata.bytesByPath);
     const cachedFactBytesTotal = cachedMetadata.bytes;
-    const materializedShardCacheWriteAdmission = codeGraphMaterializedShardCacheWriteAdmission(cachedFactBytesTotal, {
-      dirty: input.inventory.dirty,
-    });
+    const materializedShardCacheWriteAdmission = codeGraphMaterializedShardCacheWriteAdmission(cachedFactBytesTotal);
     const committedHashesByPath = new Map(
       EffectArray.map(input.inventory.committedFiles, file => [file.path, file.contentHash]),
     );

@@ -1,10 +1,11 @@
 import {CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM} from './fact/budget.js';
 
 /**
- * Materialized shards are the only attributed per-file facts that checkpoint
- * export reads, so every clean build keeps them. A dirty build cannot be
- * exported, so it skips duplicating more than 32 maximum-size parser facts; a
- * later rebuild falls back to raw parser facts or ordinary extraction.
+ * Derived materialized shards are a non-authoritative restart optimization.
+ * Keep them for bounded builds, but do not duplicate more than 32 maximum-size
+ * parser facts while a repository-wide direct build is already persisting the
+ * authoritative graph. A later rebuild still falls back to raw parser facts or
+ * ordinary extraction if cache maintenance has reclaimed them.
  */
 export const CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM =
   32 * CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM;
@@ -20,9 +21,8 @@ export interface CodeGraphMaterializedShardCacheBatchPlan {
 /** @internal Exact, fail-closed admission used by the cache-write property. */
 export function codeGraphMaterializedShardCacheWriteAdmission(
   rawFactBytes: number,
-  build: {readonly dirty: boolean},
 ): CodeGraphMaterializedShardCacheWriteAdmission {
-  if (!build.dirty || !Number.isSafeInteger(rawFactBytes) || rawFactBytes < 0) return 'persist';
+  if (!Number.isSafeInteger(rawFactBytes) || rawFactBytes < 0) return 'persist';
   return rawFactBytes > CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM ? 'defer' : 'persist';
 }
 

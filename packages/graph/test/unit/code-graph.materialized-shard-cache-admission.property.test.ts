@@ -10,11 +10,11 @@ import {
 describe('materialized shard cache write admission', () => {
   fcProp(
     it,
-    'persists every clean build so checkpoint export can read its facts, and bounds only dirty builds',
-    {dirty: FC.boolean(), rawFactBytes: FC.integer({max: Number.MAX_SAFE_INTEGER, min: 0})},
-    ({dirty, rawFactBytes}) => {
-      expect(codeGraphMaterializedShardCacheWriteAdmission(rawFactBytes, {dirty})).toBe(
-        dirty && rawFactBytes > CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM ? 'defer' : 'persist',
+    'is an exact monotonic boundary over valid raw-fact byte counts',
+    {rawFactBytes: FC.integer({max: Number.MAX_SAFE_INTEGER, min: 0})},
+    ({rawFactBytes}) => {
+      expect(codeGraphMaterializedShardCacheWriteAdmission(rawFactBytes)).toBe(
+        rawFactBytes > CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM ? 'defer' : 'persist',
       );
     },
     {fastCheck: {numRuns: 100}},
@@ -36,22 +36,17 @@ describe('materialized shard cache write admission', () => {
     {fastCheck: {numRuns: 50}},
   );
 
-  it('persists at the dirty boundary and fails closed for malformed observations', () => {
-    const dirty = {dirty: true};
+  it('persists at the boundary and fails closed for malformed observations', () => {
     expect(
-      codeGraphMaterializedShardCacheWriteAdmission(
-        CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM,
-        dirty,
-      ),
+      codeGraphMaterializedShardCacheWriteAdmission(CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM),
     ).toBe('persist');
     expect(
       codeGraphMaterializedShardCacheWriteAdmission(
         CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM + 1,
-        dirty,
       ),
     ).toBe('defer');
     for (const malformed of [-1, 0.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1]) {
-      expect(codeGraphMaterializedShardCacheWriteAdmission(malformed, dirty)).toBe('persist');
+      expect(codeGraphMaterializedShardCacheWriteAdmission(malformed)).toBe('persist');
     }
   });
 });
