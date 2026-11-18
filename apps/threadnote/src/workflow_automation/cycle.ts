@@ -75,7 +75,8 @@ import {
 } from './cycle_merge.js';
 import {bindNativeCycleDeliveryBase, verifyNativeCyclePrDeliveryIdentity} from './cycle_delivery.js';
 import {verifyNativeCycleSnapshotEvidence, verifyNativeCycleUnreviewedRebase} from './cycle_recovery.js';
-import type {NativeAuthoringCall} from './authoring_artifacts.js';
+import {nativeLegacyPathOnlyPhases, type NativeAuthoringCall} from './authoring_artifacts.js';
+import {decodeNativeAuthoringDocument, type NativeAuthoringDocument} from '@threadnote/workflow-automations/authoring';
 import {readNativeCycleIncoming, recordNativeCycleTreeSnapshot} from './cycle_tree_snapshot.js';
 import {
   decideGate,
@@ -307,6 +308,7 @@ export const runNativeCycle = <R>(
     });
     yield* call(base('inspect'));
     let verifiedPlan: ReturnType<typeof decodeNativeCyclePlan> | undefined;
+    let reconciledDocument: NativeAuthoringDocument | undefined;
     if (request.command === 'init' || request.command === 'reconcile' || request.command === 'validate-plan') {
       verifiedPlan = yield* from(() => decodeNativeCyclePlan(request.plan));
       const plan = verifiedPlan;
@@ -328,6 +330,23 @@ export const runNativeCycle = <R>(
         return yield* fail('plan-drift', 'The plan differs from its verified ready native authoring export.');
       if (request.command === 'validate-plan')
         return {status: 'ok', valid: true, source: plan.source, phaseCount: plan.phases.length};
+      // Only the plan document shows whether a first standard export changed a strict phase in its paths alone.
+      if (request.command === 'reconcile' && EffectArray.some(plan.phases, p => p.intentDefinitionHash !== undefined)) {
+        const loaded = yield* authoring({
+          protocolVersion: 1,
+          executorVersion: 1,
+          action: 'authoring',
+          command: 'load',
+          runId: plan.source.binding.runId,
+          generation: plan.source.binding.generation,
+          uri: plan.source.root.uri,
+          detail: 'document',
+        });
+        const loadedAuthoring = isJsonObject(loaded) ? loaded.authoring : undefined;
+        reconciledDocument = yield* from(() =>
+          decodeNativeAuthoringDocument(isJsonObject(loadedAuthoring) ? loadedAuthoring.document : undefined),
+        );
+      }
     }
     const livePlanCommands = [
       'next',
@@ -557,6 +576,7 @@ export const runNativeCycle = <R>(
               verifiedPlan!,
               required(request.reason, 'a concrete reconciliation reason'),
               nativeWorkflowPolicyOf(stored.state),
+              reconciledDocument ? nativeLegacyPathOnlyPhases(reconciledDocument, state.plan, verifiedPlan!) : [],
             ),
           );
           return {

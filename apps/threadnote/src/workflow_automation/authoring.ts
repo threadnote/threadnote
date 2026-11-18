@@ -70,6 +70,7 @@ import {
   encodeAuthoringArtifact,
   encodeAuthoringDocument,
   makeAuthoringArtifacts,
+  nativePlanPhaseDefinitionHash,
   splitAuthoringText,
   authoringRelations,
   verifiedAuthoringRoot,
@@ -1929,7 +1930,7 @@ const exportAuthoring = Effect.fn('workflowAutomation.authoring.export')(functio
       return yield* fail('invalid-request', 'Phase branches must be explicit bounded Git references.');
     phases.push({
       id: phase.id,
-      definitionHash: sha256HexSync('threadnote.native-cycle.phase-definition.v1\n' + stableJson(phase)),
+      definitionHash: nativePlanPhaseDefinitionHash(phase),
       ...(derivedOwnership
         ? {
             intentDefinitionHash: sha256HexSync(

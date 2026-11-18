@@ -3,6 +3,11 @@ import {Effect, Schema} from 'effect';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {WorkflowAutomationError, type WorkflowArtifact} from '@threadnote/workflow-automations/contracts';
 import {renderNativeDocument, type NativeDocumentEnvelope} from '@threadnote/workflow-automations/documents';
+import {
+  type NativeAuthoringDocument,
+  type NativeAuthoringPlanDocumentSchema,
+} from '@threadnote/workflow-automations/authoring';
+import type {NativeCyclePlan} from '@threadnote/workflow-automations/cycle';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {nativeWorkflowError} from './memory.js';
 import * as EffectString from 'effect/String';
@@ -135,6 +140,40 @@ export function verifiedAuthoringRoot(
     ),
   )?.artifact?.body;
   return body === undefined ? undefined : decodeAuthoringArtifact(body, AuthoringRootSchema);
+}
+type NativePlanPhase = (typeof NativeAuthoringPlanDocumentSchema.Type)['phases'][number];
+/** The definition hash a native cycle plan records for an approved plan phase. */
+export const nativePlanPhaseDefinitionHash = (phase: NativePlanPhase): string =>
+  sha256HexSync('threadnote.native-cycle.phase-definition.v1\n' + stableJson(phase));
+/**
+ * Phases of `old`, exported before the standard profile, that `plan` changes only in their paths: the phase in
+ * `document` (the one `plan` was exported from) reproduces the recorded definition hash with the recorded paths.
+ */
+export function nativeLegacyPathOnlyPhases(
+  document: NativeAuthoringDocument,
+  old: NativeCyclePlan,
+  plan: NativeCyclePlan,
+): readonly string[] {
+  if (document.kind !== 'plan') return [];
+  const phase = (from: NativeCyclePlan, id: string) =>
+    Effect2.Option.getOrUndefined(EffectArray.findFirst(from.phases, item => item.id === id));
+  const pathOnly = EffectArray.filter(document.phases, current => {
+    const before = phase(old, current.id);
+    if (!before || before.intentDefinitionHash !== undefined) return false;
+    if (phase(plan, current.id)?.definitionHash !== nativePlanPhaseDefinitionHash(current)) return false;
+    // The plan records affectedPaths then newPaths as one list, so each split point is a candidate.
+    const paths = before.allowedPaths;
+    return EffectArray.some(
+      EffectArray.makeBy(paths.length + 1, split => split),
+      split =>
+        nativePlanPhaseDefinitionHash({
+          ...current,
+          affectedPaths: paths.slice(0, split),
+          newPaths: paths.slice(split),
+        }) === before.definitionHash,
+    );
+  });
+  return EffectArray.map(pathOnly, current => current.id);
 }
 export const artifactReference = (artifact: WorkflowArtifact): AuthoringReference => ({
   uri: artifact.uri,

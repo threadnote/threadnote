@@ -408,6 +408,95 @@ describe('standard-profile reconcile of a phase with proof', () => {
   );
 });
 
+describe('reconcile of strict proof after a switch to standard', () => {
+  type Phase = Effect.Success<ReturnType<typeof cycleFixture>>['document']['phases'][number];
+  const reconcileAfterSwitch = (delivered: boolean, change: (phase: Phase) => Partial<Phase>) =>
+    Effect.gen(function* () {
+      const f = yield* cycleFixture(['one'], 'local');
+      yield* f.mutate('begin-phase', {phaseId: 'one'});
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = 1;\n');
+      const recorded = yield* f.mutate('snapshot', {phaseId: 'one', snapshotId: 'strict-1'});
+      const snapshot = object(object(recorded.snapshot).snapshot);
+      yield* f.mutate('validate-review', {
+        snapshotId: snapshot.snapshotId,
+        attemptId: 'a1',
+        report: {
+          snapshotId: snapshot.snapshotId,
+          phaseHash: snapshot.phaseHash,
+          snapshotTree: snapshot.tree,
+          status: 'complete',
+          mode: 'full',
+          selected: ['correctness', 'simplicity'],
+          lanes: [
+            {name: 'correctness', status: 'complete'},
+            {name: 'simplicity', status: 'complete'},
+          ],
+          findings: [],
+        },
+      });
+      yield* f.mutate('ready', {
+        phaseId: 'one',
+        snapshotId: snapshot.snapshotId,
+        validation: {
+          snapshotTree: snapshot.tree,
+          reviewTree: snapshot.tree,
+          status: 'passed',
+          productState: 'working',
+          checks: [{command: 'private flow', result: 'passed', evidence: 'Actual scoped source fixture.'}],
+          acceptance: [{criterion: 'one works', result: 'passed', evidence: 'Source readback.'}],
+        },
+      });
+      yield* f.git(['commit', '-qam', 'phase one']);
+      if (delivered)
+        yield* f.mutate('record-delivery', {
+          phaseId: 'one',
+          delivery: {
+            phaseId: 'one',
+            phaseHash: snapshot.phaseHash,
+            delivery: 'local',
+            headSha: EffectString.trim(String((yield* f.git(['rev-parse', 'HEAD'])).stdout)),
+            validatedTree: snapshot.tree,
+          },
+        });
+      yield* runNativeTaskAction(f.config, {
+        command: 'set-profile',
+        runId: 'native-run',
+        callerCwd: f.repo,
+        profile: 'standard',
+        reason: 'Loosen the running task.',
+        userAuthority: 'User: loosen this run.',
+      });
+      const plan = yield* f.revise({
+        phases: EffectArray.map(f.document.phases, phase => ({...phase, ...change(phase)})),
+      });
+      const reconciled = yield* f.mutate('reconcile', {plan, reason: 'Revise the plan.'});
+      const phase = (yield* readNativeWorkflowState(f.config, 'native-run'))?.state.cycle?.state.phases.one;
+      return {affected: reconciled.affected, status: phase?.status, proof: phase?.validation !== undefined};
+    });
+  const intentAndPaths = (phase: Phase) => ({
+    outcome: 'Phase works and also does something materially different.',
+    acceptance: EffectArray.map(phase.acceptance, item => ({...item, verification: 'Exercise another flow.'})),
+    affectedPaths: [...phase.affectedPaths, 'notes.md'],
+  });
+
+  for (const delivered of [false, true])
+    effectIt.effect(
+      `retires ${delivered ? 'delivered' : 'validated'} proof when the intent changed beside a path edit`,
+      () =>
+        reconcileAfterSwitch(delivered, intentAndPaths).pipe(
+          Effect.map(result => expect(result).toEqual({affected: ['one'], status: 'stale', proof: false})),
+          runCycle,
+        ),
+    );
+
+  effectIt.effect('keeps validated proof across a path-only edit', () =>
+    reconcileAfterSwitch(false, phase => ({affectedPaths: [...phase.affectedPaths, 'notes.md']})).pipe(
+      Effect.map(result => expect(result).toEqual({affected: [], status: 'validated', proof: true})),
+      runCycle,
+    ),
+  );
+});
+
 describe('standard-profile delivery of a dirty-recorded tree', () => {
   for (const [label, bindings] of [
     ['a phase branch', undefined],

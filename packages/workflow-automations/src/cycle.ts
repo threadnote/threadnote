@@ -575,10 +575,14 @@ export function nativeCyclePhaseIntentHash(plan: NativeCyclePlan, phaseId: strin
 }
 /**
  * Whether a phase keeps its business intent across a reconcile. A plan exported before the standard profile has no
- * path-free definition, so both plans are compared on what each carries, and a changed definition that the paths do
- * not explain is intent.
+ * path-free definition, so its changed definition is intent unless `pathOnly` names the phase.
  */
-function samePhaseIntent(old: NativeCyclePlan, plan: NativeCyclePlan, phaseId: string): boolean {
+function samePhaseIntent(
+  old: NativeCyclePlan,
+  plan: NativeCyclePlan,
+  phaseId: string,
+  pathOnly: readonly string[],
+): boolean {
   const before = EffectOption.getOrUndefined(EffectArray.findFirst(old.phases, x => x.id === phaseId));
   const after = EffectOption.getOrUndefined(EffectArray.findFirst(plan.phases, x => x.id === phaseId));
   if (!before || !after) return false;
@@ -586,7 +590,7 @@ function samePhaseIntent(old: NativeCyclePlan, plan: NativeCyclePlan, phaseId: s
     return nativeCyclePhaseIntentHash(old, phaseId) === nativeCyclePhaseIntentHash(plan, phaseId);
   return (
     phaseIntentDigest(old, before) === phaseIntentDigest(plan, after) &&
-    (before.definitionHash === after.definitionHash || canonical(before.allowedPaths) !== canonical(after.allowedPaths))
+    (before.definitionHash === after.definitionHash || pathOnly.includes(phaseId))
   );
 }
 export function initializeNativeCycle(value: NativeCyclePlan): NativeCycleState {
@@ -881,11 +885,16 @@ export function invalidateNativeCycle(value: NativeCycleState, idValue: string, 
   }
   return {...s, phases};
 }
+/**
+ * `pathOnly` names the phases of a plan exported before the standard profile whose current definition, recomputed
+ * with their recorded paths, reproduces their recorded definition hash. Only the authoring owner can check that.
+ */
 export function reconcileNativeCyclePlan(
   value: NativeCycleState,
   newValue: NativeCyclePlan,
   reason: string,
   policy: 'standard' | 'strict' = 'strict',
+  pathOnly: readonly string[] = [],
 ): {readonly state: NativeCycleState; readonly affected: readonly string[]} {
   const s = decodeNativeCycleState(value),
     plan = decodeNativeCyclePlan(newValue),
@@ -910,7 +919,7 @@ export function reconcileNativeCyclePlan(
     const material =
       policy === 'standard'
         ? !before ||
-          !samePhaseIntent(old, plan, p.id) ||
+          !samePhaseIntent(old, plan, p.id, pathOnly) ||
           (before.baseBranch !== p.baseBranch && s.phases[p.id]?.delivery !== undefined)
         : !before ||
           before.baseBranch !== p.baseBranch ||
