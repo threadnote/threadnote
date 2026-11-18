@@ -454,7 +454,7 @@
   },
   "dependencies": {
     "@effect/platform-bun": "4.1.2",
-    "@effect/sql-sqlite-bun": "4.1.2",
+    "@effect/sql-sqlite-bun": "4.1.4",
     "@threadnote/inference": "workspace:*",
     "@threadnote/platform": "workspace:*",
     "@threadnote/protocol": "workspace:*",
