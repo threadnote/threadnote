@@ -239,7 +239,9 @@ const currentSnapshot = Effect.fn('workflowAutomation.cycle.checkSnapshot')(func
           ),
         );
     const branch = EffectString.trim(yield* git(repo, ['branch', '--show-current']));
-    if (base !== snapshot.declaredBaseHead || branch !== phase.branch)
+    // A phase on its own base branch advances that base with the commit it accepts; the tree check below binds it.
+    const acceptedOwnBase = phase.baseBranch === phase.branch && acceptedHead !== undefined && base === acceptedHead;
+    if ((base !== snapshot.declaredBaseHead && !acceptedOwnBase) || branch !== phase.branch)
       return yield* fail(
         'review-stale',
         'Snapshot belongs to a different declared base or phase branch; requalify current source.',
@@ -1559,11 +1561,11 @@ export const runNativeCycle = <R>(
               );
             const liveHead = EffectString.trim(yield* git(repo, ['rev-parse', 'HEAD']));
             const current = yield* currentSnapshot(repo, source.snapshot, liveHead, selected);
-            if (
-              current.tree !== proof.tree ||
-              Effect2.pipe(yield* git(repo, ['rev-parse', 'HEAD^{tree}']), EffectString.trim) !== proof.tree
-            )
-              return yield* fail('source-drift', 'Publish the clean exact validated tree.');
+            if (current.tree !== proof.tree) return yield* fail('source-drift', 'Publish the exact validated tree.');
+            if (Effect2.pipe(yield* git(repo, ['rev-parse', 'HEAD^{tree}']), EffectString.trim) !== proof.tree)
+              return yield* nativeRefusal('source-drift', 'Commit the exact validated tree, then deliver it.', {
+                next: nativeNext.deliver({runId: request.runId, callerCwd: repo}, state.plan.delivery),
+              });
             if (Effect2.pipe(yield* git(repo, ['branch', '--show-current']), EffectString.trim) !== selected.branch)
               return yield* fail('branch-drift', 'Publish from the declared phase branch.');
             currentHead = current.head;

@@ -1099,27 +1099,38 @@ export const runNativeTaskLocalDelivery = (
     );
     if (snapshots.length !== 1)
       return yield* fail('snapshot-ambiguous', 'Local delivery needs one unique canonical source snapshot.');
-    const receipt = {
-      phaseId: ref.phaseId,
-      phaseHash: ref.phaseHash,
-      delivery: 'local' as const,
-      headSha: proof.head,
-      validatedTree: proof.tree,
+    const {phaseId, phaseHash, sourceTree} = ref;
+    const receiptAt = (headSha: string) => {
+      const receipt = {phaseId, phaseHash, delivery: 'local' as const, headSha, validatedTree: sourceTree};
+      const payloadDigest = sha256HexSync(stableJson(receipt));
+      return {
+        receipt,
+        payloadDigest,
+        deliveryRef: encodeNativeTaskActionRef({...ref, kind: 'delivery', payloadDigest}),
+      };
     };
-    const deliveryDigest = sha256HexSync(stableJson(receipt));
-    if (ref.kind === 'delivery' && ref.payloadDigest !== deliveryDigest)
-      return yield* fail('delivery-conflict', 'The delivery reference is bound to different receipt content.');
-    const deliveryRef = encodeNativeTaskActionRef({...ref, kind: 'delivery', payloadDigest: deliveryDigest});
     if (proof.delivery) {
+      const {receipt, payloadDigest, deliveryRef} = receiptAt(proof.head);
       if (
         stableJson(proof.delivery) !== stableJson(receipt) ||
-        (ref.kind === 'delivery' && ref.payloadDigest !== deliveryDigest)
+        (ref.kind === 'delivery' && ref.payloadDigest !== payloadDigest)
       )
         return yield* fail('delivery-conflict', 'The phase already has a different canonical delivery receipt.');
       return {status: 'delivered', replayed: true, deliveryRef, receipt: proof.delivery};
     }
     if (ref.kind === 'delivery')
       return yield* fail('stale-delivery-ref', 'This delivery reference has no matching canonical receipt.');
+    // As for commit delivery, the receipt names the commit that carries the validated tree, which a tree recorded dirty
+    // gets only once it is committed.
+    const ready = unwrapCycle(
+      yield* inCheckout(
+        runWorkflowAutomation(config, cycleRequest(stored, {command: 'publication-ready', phaseId: ref.phaseId})),
+        checkout,
+      ),
+    );
+    if (ready.revision !== stored.revision || typeof ready.head !== 'string' || ready.tree !== proof.tree)
+      return yield* fail('source-drift', 'Local delivery requires the exact clean validated source tree and branch.');
+    const {receipt, deliveryRef} = receiptAt(ready.head);
     unwrapCycle(
       yield* inCheckout(
         runWorkflowAutomation(

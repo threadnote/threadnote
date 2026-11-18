@@ -374,6 +374,75 @@ describe('standard-profile reconcile of a phase with proof', () => {
   );
 });
 
+describe('standard-profile delivery of a dirty-recorded tree', () => {
+  for (const [label, bindings] of [
+    ['a phase branch', undefined],
+    ['the base branch itself', {one: {branch: 'feature/one', baseBranch: 'feature/one'}}],
+  ] as const)
+    effectIt.effect(`delivers a validated dirty tree on ${label} once that exact tree is committed`, () =>
+      Effect.gen(function* () {
+        const f = yield* cycleFixture(
+          ['one'],
+          'local',
+          false,
+          false,
+          true,
+          bindings,
+          undefined,
+          {},
+          {policy: 'standard'},
+        );
+        const task = (command: string, fields: Record<string, unknown> = {}) =>
+          runNativeTaskAction(f.config, {command, runId: 'native-run', callerCwd: f.repo, ...fields}).pipe(
+            Effect.map(object),
+          );
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = 1;\n');
+        const recorded = yield* task('record-snapshot');
+        const snapshot = object(object(recorded.snapshot).snapshot);
+        expect(snapshot.dirty).toBe(true);
+        yield* f.mutate('validate-review', {
+          snapshotId: snapshot.snapshotId,
+          attemptId: 'a1',
+          report: {
+            snapshotId: snapshot.snapshotId,
+            phaseHash: snapshot.phaseHash,
+            snapshotTree: snapshot.tree,
+            status: 'complete',
+            mode: 'full',
+            selected: ['correctness', 'simplicity'],
+            lanes: [
+              {name: 'correctness', status: 'complete'},
+              {name: 'simplicity', status: 'complete'},
+            ],
+            findings: [],
+          },
+        });
+        const validated = yield* task('record-validation', {
+          snapshotRef: recorded.snapshotRef,
+          validation: {
+            checks: [{command: 'private flow', result: 'passed', evidence: 'Actual scoped source fixture.'}],
+            acceptance: [{criterion: 'one works', result: 'passed', evidence: 'Source readback.'}],
+          },
+        });
+        const uncommitted = yield* task('deliver-local', {validationRef: validated.validationRef}).pipe(Effect.flip);
+        expect(uncommitted).toMatchObject({
+          code: 'source-drift',
+          next: {tool: 'workflow_task_deliver', command: 'deliver-local'},
+        });
+        expect(uncommitted.message).toMatch(/commit/iu);
+        yield* f.git(['commit', '-qam', 'phase one']);
+        const head = EffectString.trim(String((yield* f.git(['rev-parse', 'HEAD'])).stdout));
+        expect(yield* task('deliver-local', {validationRef: validated.validationRef})).toMatchObject({
+          status: 'delivered',
+          receipt: {headSha: head, validatedTree: snapshot.tree},
+        });
+        expect((yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo})).next).toMatchObject({
+          action: 'complete',
+        });
+      }).pipe(runCycle),
+    );
+});
+
 describe('actionable refusals', () => {
   effectIt.effect('points a review without a review card at the action on the current card', () =>
     Effect.gen(function* () {
