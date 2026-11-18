@@ -904,7 +904,7 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
         sameBusinessContent &&
         nativeSpecIntentDigest(
           document,
-          nativePlanIntentPolicyForSave(stored?.state ?? {}, document, priorConfirmation.intentHash),
+          nativePlanIntentPolicyForSave(stored?.state ?? {}, sourceExisting?.root, priorConfirmation.intentHash),
         ) === priorConfirmation.intentHash
           ? priorConfirmation
           : priorConfirmation &&

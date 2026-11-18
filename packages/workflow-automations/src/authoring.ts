@@ -628,23 +628,23 @@ export function isNativeMermaidDiagram(value: string): boolean {
 }
 
 /**
- * The plan-intent policy a saved plan records: the one under which its retained confirmation holds, so a confirmed
- * root keeps its recorded policy until the next confirmation after a switch to standard; otherwise the run's policy.
+ * The plan-intent policy a saved plan records. A save that keeps the prior root's confirmation keeps the policy that
+ * root recorded with it, so a confirmed root stays confirmed until the next confirmation after a switch to standard;
+ * any other save takes the run's policy.
  */
 export function nativePlanIntentPolicyForSave(
   state: {readonly policy?: {readonly mode: 'standard' | 'strict'}},
-  document: NativeAuthoringDocument,
+  prior:
+    | {
+        readonly confirmation?: {readonly intentHash: string};
+        readonly planIntentPolicyVersion?: NativePlanIntentPolicyVersion;
+      }
+    | undefined,
   confirmedIntentHash: string | undefined,
 ): NativePlanIntentPolicyVersion {
-  const current = nativePlanIntentPolicyFor(state);
-  if (confirmedIntentHash === undefined || document.kind !== 'plan') return current;
-  const candidates: readonly NativePlanIntentPolicyVersion[] =
-    current === NativeDerivedOwnershipPlanIntentPolicyVersion ? [current, NativePlanIntentPolicyVersion, 1] : [current];
-  return (
-    EffectOption.getOrUndefined(
-      EffectArray.findFirst(candidates, version => nativeSpecIntentDigest(document, version) === confirmedIntentHash),
-    ) ?? current
-  );
+  return confirmedIntentHash !== undefined && prior?.confirmation?.intentHash === confirmedIntentHash
+    ? (prior.planIntentPolicyVersion ?? 1)
+    : nativePlanIntentPolicyFor(state);
 }
 
 export function nativeSpecIntentDigest(

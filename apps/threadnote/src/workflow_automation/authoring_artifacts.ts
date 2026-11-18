@@ -119,6 +119,23 @@ export function decodeAuthoringArtifact<A>(body: string, schema: Schema.Constrai
     throw failure('The native authoring artifact is malformed. No legacy record was imported.');
   }
 }
+/** The root of this kind the run last wrote, read from its own verified write receipt. */
+export function verifiedAuthoringRoot(
+  operations: readonly {
+    readonly status: string;
+    readonly intent: {readonly artifactKey: string};
+    readonly artifact?: {readonly body: string};
+  }[],
+  kind: string,
+) {
+  const body = Effect2.Option.getOrUndefined(
+    EffectArray.findLast(
+      operations,
+      operation => operation.status === 'verified' && operation.intent.artifactKey === 'author-root-' + kind,
+    ),
+  )?.artifact?.body;
+  return body === undefined ? undefined : decodeAuthoringArtifact(body, AuthoringRootSchema);
+}
 export const artifactReference = (artifact: WorkflowArtifact): AuthoringReference => ({
   uri: artifact.uri,
   memoryId: artifact.memoryId,

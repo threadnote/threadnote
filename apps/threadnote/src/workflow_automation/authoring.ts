@@ -72,6 +72,7 @@ import {
   makeAuthoringArtifacts,
   splitAuthoringText,
   authoringRelations,
+  verifiedAuthoringRoot,
   type AuthoringReference,
   type AuthoringRoot,
   type NativeAuthoringCall,
@@ -1001,7 +1002,14 @@ export const runNativeAuthoring = <R>(
     yield* admitLinkedSpec(document);
     const planIntentPolicyVersion =
       request.command === 'save'
-        ? nativePlanIntentPolicyForSave(state, document, request.confirmation?.intentHash)
+        ? nativePlanIntentPolicyForSave(
+            state,
+            yield* Effect.try({
+              try: () => verifiedAuthoringRoot(state.operations, document.kind),
+              catch: nativeWorkflowError,
+            }),
+            request.confirmation?.intentHash,
+          )
         : nativePlanIntentPolicyFor(state);
     const validation = yield* Effect.try({
       try: () => validateNativeAuthoring(document, {...request, planIntentPolicyVersion}),
