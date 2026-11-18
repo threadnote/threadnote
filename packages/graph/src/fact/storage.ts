@@ -17,7 +17,6 @@ export const CODE_GRAPH_STORED_FACT_MINIMUM_SAVINGS_RATIO = 0.1;
 const storedFactDecoder = new TextDecoder('utf-8', {fatal: true});
 const storedFactEncoder = new TextEncoder();
 const SHA256_HEX = /^[0-9a-f]{64}$/u;
-const CANONICAL_BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
 
 interface StoredCodeGraphFactEnvelope {
   readonly codec: typeof CODE_GRAPH_STORED_FACT_CODEC;
@@ -134,15 +133,31 @@ function isStoredCodeGraphFactEnvelope(value: unknown): value is StoredCodeGraph
   );
 }
 
+/**
+ * Strict decoding rejects other alphabets, misplaced or missing padding, and
+ * nonzero padding bits, but skips ASCII whitespace. Whitespace is excluded by
+ * length: with a padded length that is a multiple of four, any skipped
+ * whitespace removes at least three decoded bytes, more than padding can.
+ */
 function decodeCanonicalBase64(value: string): Uint8Array {
-  if (value.length % 4 !== 0 || !CANONICAL_BASE64.test(value)) {
-    throw new Error('Stored code graph fact envelope payload is not canonical base64.');
-  }
-  const decoded = Buffer.from(value, 'base64');
-  if (decoded.toString('base64') !== value) {
+  const padding = Effect.pipe(value, EffectString.endsWith('=='))
+    ? 2
+    : Effect.pipe(value, EffectString.endsWith('='))
+      ? 1
+      : 0;
+  const decoded = value.length % 4 === 0 ? strictBase64(value) : undefined;
+  if (decoded === undefined || decoded.byteLength !== (value.length / 4) * 3 - padding) {
     throw new Error('Stored code graph fact envelope payload is not canonical base64.');
   }
   return decoded;
+}
+
+function strictBase64(value: string): Uint8Array | undefined {
+  try {
+    return Uint8Array.fromBase64(value, {lastChunkHandling: 'strict'});
+  } catch {
+    return undefined;
+  }
 }
 
 function serializedPathOccurrences(json: string, path: string): number {
