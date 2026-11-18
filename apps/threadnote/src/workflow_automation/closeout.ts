@@ -35,6 +35,7 @@ import {
   nativeCloseoutPlannedOperationIds,
 } from './closeout_capacity.js';
 import {captureNativeCycleSource} from './cycle_git.js';
+import {nativeCycleCoverage, nativeCycleCoverageAccepts} from '@threadnote/workflow-automations/cycle-runtime';
 import {decodeJournal, nativeCloseoutRequestSchema, type Journal} from './closeout_request_schema.js';
 export {nativeCloseoutRequestSchema} from './closeout_request_schema.js';
 import {assertNativeJobLiveSource, CurrentNativeJobBoundary, CurrentNativeJobSourceView} from './native_jobs.js';
@@ -140,22 +141,18 @@ const freshReadmission = Effect.fn('workflowAutomation.closeout.freshReadmission
     carried && hash(carried.source) === hash(source) && carried.cycleRuntimeDigest === hash(runtime)
       ? carried
       : previous.recovery;
-  const oldAttempts = new Set(baseline.acceptedAttemptIds);
   const oldSnapshots = new Set(baseline.snapshotIds);
-  const snapshots = new Map(EffectArray.map(runtime.snapshots, entry => [entry.snapshot.snapshotId, entry.snapshot]));
+  // A snapshot recorded after the superseded admission is fresh once its tree is covered: reviewed, reused or waived.
   const fresh = new Set(
     pipe(
-      runtime.attempts,
+      runtime.snapshots,
       EffectArray.filter(
-        item =>
-          item.status === 'accepted' &&
-          !oldAttempts.has(item.id) &&
-          !oldSnapshots.has(item.snapshotId) &&
-          EffectArray.some(runtime.reviews, review => review.snapshotId === item.snapshotId),
+        ({snapshot}) =>
+          !oldSnapshots.has(snapshot.snapshotId) &&
+          snapshot.tree === source.tree &&
+          nativeCycleCoverageAccepts(nativeCycleCoverage(runtime, snapshot)),
       ),
-      EffectArray.map(item => snapshots.get(item.snapshotId)),
-      EffectArray.filter((item): item is NonNullable<typeof item> => !!item && item.tree === source.tree),
-      EffectArray.map(item => item.phaseId),
+      EffectArray.map(({snapshot}) => snapshot.phaseId),
     ),
   );
   const qualified = new Set(
@@ -367,7 +364,7 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
               inputs.source,
             );
           const admission = yield* attempt(() =>
-            prepareNativeCloseout(inputs.cycle, inputs.plan, request.proposal, inputs.spec),
+            prepareNativeCloseout(inputs.cycle, inputs.plan, request.proposal, inputs.spec, inputs.waivers),
           );
           // Admit every final document before any knowledge write or retirement.
           yield* attempt(() =>
@@ -452,6 +449,7 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
             plan: inputs.plan,
             ...(inputs.spec ? {spec: inputs.spec} : {}),
             proposal: request.proposal,
+            ...(inputs.waivers.length ? {waivers: inputs.waivers} : {}),
             owned,
             documents,
             documentDigest: hash(documents),
@@ -692,7 +690,7 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
           journal.owned,
         );
         const admission = yield* attempt(() =>
-          prepareNativeCloseout(journal.cycle, journal.plan, journal.proposal, journal.spec),
+          prepareNativeCloseout(journal.cycle, journal.plan, journal.proposal, journal.spec, journal.waivers),
         );
         const journalState = yield* withWorkflowLock(
           config,

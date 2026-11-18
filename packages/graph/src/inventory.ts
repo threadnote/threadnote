@@ -27,7 +27,16 @@ import {
 import {CodeGraphInventoryError} from './inventory/error.js';
 import {parseNameStatus, parsePorcelainV1Status} from './inventory/porcelain.js';
 import {worktreeStatusWithPrivateCache} from './git/status_cache.js';
-import {committedOverlayBasis, parseGitTree, policyExclusionsForEntries} from './inventory/committed_overlay_basis.js';
+import {
+  committedOverlayBasis,
+  declaredSourceRootsCacheKey,
+  isZeroObjectId,
+  observeRawDirtyOverlayPaths,
+  parseGitTree,
+  policyExclusionsForEntries,
+  readCachedDeclaredSourceRoots,
+  writeCachedDeclaredSourceRoots,
+} from './inventory/committed_overlay_basis.js';
 import {
   codeGraphAttributionContextFilesForReceipt,
   codeGraphInventoryReuseContract,
@@ -70,6 +79,7 @@ import type {
   CodeGraphInventory,
   CodeGraphInventoryOptions,
   CodeGraphOverlayObservation,
+  CodeGraphRawDirtyOverlayPaths,
   CodeGraphObservedOverlayFile,
   CodeGraphBuildRequestObservation,
 } from './inventory/models.js';
@@ -79,11 +89,13 @@ import * as Effect2 from 'effect';
 
 import {
   CODE_GRAPH_INVENTORY_PREVIEW_VERSION,
+  compileRepositoryRootPrefixes,
   summarizeCodeGraphInventoryPreview,
   isPotentialOverlayCandidate,
   isInventoryPolicyExtension,
   repositoryPathExclusionReason,
   normalizeRepositoryPath,
+  type CompiledRepositoryRootPrefixes,
 } from './inventory/preview.js';
 import type {
   GitTreeEntry,
@@ -91,7 +103,13 @@ import type {
   CodeGraphInventoryPreviewOptions,
   PolicyExclusionEntry,
 } from './inventory/preview.js';
-export {CODE_GRAPH_INVENTORY_PREVIEW_VERSION, summarizeCodeGraphInventoryPreview} from './inventory/preview.js';
+export {
+  CODE_GRAPH_INVENTORY_PREVIEW_VERSION,
+  compileRepositoryRootPrefixes,
+  repositoryPathExclusionReason,
+  summarizeCodeGraphInventoryPreview,
+  type CompiledRepositoryRootPrefixes,
+} from './inventory/preview.js';
 export type {
   GitTreeEntry,
   CodeGraphInventoryPreviewDisposition,
@@ -104,11 +122,16 @@ export type {
   CodeGraphInventoryPreviewOptions,
   PolicyExclusionEntry,
 } from './inventory/preview.js';
-export {codeGraphInventoryScopeEvidence, observeCodeGraphIndexScope} from './inventory/scope.js';
+export {
+  codeGraphInventoryScopeEvidence,
+  observeCodeGraphIndexScope,
+  observeCodeGraphStatusScope,
+} from './inventory/scope.js';
 export type {
   CodeGraphInventory,
   CodeGraphInventoryOptions,
   CodeGraphOverlayObservation,
+  CodeGraphRawDirtyOverlayPaths,
   CodeGraphObservedOverlayFile,
   CodeGraphBuildRequestObservation,
   CodeGraphContentBatchContext,
@@ -117,7 +140,13 @@ export type {
 export {codeGraphInventoryExclusionReason} from './inventory/policy.js';
 export {codeGraphCatFileBatches} from './inventory/batching.js';
 export {parseNameStatus} from './inventory/porcelain.js';
-export {parseGitTree, policyExclusionsForEntries} from './inventory/committed_overlay_basis.js';
+export {
+  EMPTY_RAW_DIRTY_OVERLAY_PATHS,
+  isZeroObjectId,
+  observeRawDirtyOverlayPaths,
+  parseGitTree,
+  policyExclusionsForEntries,
+} from './inventory/committed_overlay_basis.js';
 export {readContainedStableRegularFile, type ContainedReadInterlock} from './inventory/contained_file.js';
 export {shouldOmitRepositoryContent} from './inventory/content.js';
 export {
@@ -146,6 +175,13 @@ export const inventoryRepository = Effect.fn('codeGraph.inventoryRepository')(fu
   // registration timing remains limited to lock and database setup.
   yield* options.onProgress?.(CODE_GRAPH_SCANNING_STARTED_PROGRESS) ?? Effect.void;
   const reuseEnvironment = yield* readCodeGraphInventoryReuseEnvironment(identity, fs, path);
+  const sharedOverlayPaths =
+    options.includeOverlay === false
+      ? undefined
+      : (options.overlayObservation ?? (yield* observeRawDirtyOverlayPaths(identity)));
+  const hasAnyOverlayChange =
+    sharedOverlayPaths !== undefined &&
+    (sharedOverlayPaths.changedPaths.length > 0 || sharedOverlayPaths.deletedPaths.length > 0);
   const allTreeEntries = isZeroObjectId(identity.headCommit)
     ? []
     : parseGitTree(
@@ -155,7 +191,9 @@ export const inventoryRepository = Effect.fn('codeGraph.inventoryRepository')(fu
         })).stdout,
       );
   const committedPolicyExclusions = policyExclusionsForEntries(allTreeEntries);
-  const committedTreeEntries = new Map(EffectArray.map(allTreeEntries, entry => [entry.path, entry]));
+  const committedTreeEntries = hasAnyOverlayChange
+    ? new Map(EffectArray.map(allTreeEntries, entry => [entry.path, entry]))
+    : new Map<string, GitTreeEntry>();
   const policyAdmittedTreeEntries = EffectArray.filter(
     allTreeEntries,
     (entry, __effectArrayIndex) => __effectArrayIndex in allTreeEntries && !committedPolicyExclusions.has(entry.path),
@@ -166,13 +204,16 @@ export const inventoryRepository = Effect.fn('codeGraph.inventoryRepository')(fu
     reuseEnvironment.threadnoteIgnoreLocal,
   );
   const scopeObservation =
-    options.project?.graph === undefined
+    options.project === undefined || (!options.onCommittedScopeBasis && options.project.graph === undefined)
       ? undefined
       : yield* observeCodeGraphIndexScope(identity, options.project, {
           includeOverlay: options.includeOverlay,
           languagePacks,
+          overlayObservation: sharedOverlayPaths,
           committed: {
             entries: allTreeEntries,
+            policyExcluded: committedPolicyExclusions,
+            treeEntries: committedTreeEntries,
             declared: declaredWorkspace,
             ignoreSources: {
               committed: reuseEnvironment.threadnoteIgnore,
@@ -196,7 +237,12 @@ export const inventoryRepository = Effect.fn('codeGraph.inventoryRepository')(fu
         );
       }),
     ) ?? declaredWorkspace.sourceRoots;
-  const acceptedByPolicy = EffectArray.filter(policyAdmittedTreeEntries, entry =>
+  const compiledAdmissionRoots = compileRepositoryRootPrefixes(admissionProjectRoots, admissionSourceRoots);
+  const candidateTreeEntries =
+    options.statusScopeObservationOnly && scope !== undefined
+      ? EffectArray.filter(policyAdmittedTreeEntries, entry => codeGraphScopeAdmitsPath(scope, entry.path))
+      : policyAdmittedTreeEntries;
+  const acceptedByPolicy = EffectArray.filter(candidateTreeEntries, entry =>
     acceptsRepositoryPathWithRules(
       entry.path,
       ignoreRules,
@@ -204,32 +250,50 @@ export const inventoryRepository = Effect.fn('codeGraph.inventoryRepository')(fu
       admissionProjectRoots,
       admissionSourceRoots,
       includeOpaqueCorpusAssets,
+      compiledAdmissionRoots,
     ),
   );
-  const deferredOpaqueEntries = !includeOpaqueCorpusAssets
-    ? EffectArray.filter(
-        policyAdmittedTreeEntries,
-        entry =>
-          isOpaqueCorpusMediaPath(entry.path) &&
-          acceptsRepositoryPathWithRules(
-            entry.path,
-            ignoreRules,
-            languagePacks,
-            admissionProjectRoots,
-            admissionSourceRoots,
-            true,
-          ),
-      )
-    : [];
+  const deferredOpaqueEntries =
+    !includeOpaqueCorpusAssets && !options.statusScopeObservationOnly
+      ? EffectArray.filter(
+          candidateTreeEntries,
+          entry =>
+            isOpaqueCorpusMediaPath(entry.path) &&
+            acceptsRepositoryPathWithRules(
+              entry.path,
+              ignoreRules,
+              languagePacks,
+              admissionProjectRoots,
+              admissionSourceRoots,
+              true,
+              compiledAdmissionRoots,
+            ),
+        )
+      : [];
   const ignoredByGit = yield* ignoredPaths(
     identity.repoRoot,
     EffectArray.map([...acceptedByPolicy, ...deferredOpaqueEntries], entry => entry.path),
   );
   const admitted = EffectArray.filter(acceptedByPolicy, entry => !ignoredByGit.has(entry.path));
-  const scopeExcluded = EffectArray.filter(admitted, entry => !codeGraphScopeAdmitsPath(scope, entry.path));
-  const accepted = EffectArray.filter(admitted, entry => codeGraphScopeAdmitsPath(scope, entry.path));
+  const scopeExcluded = options.statusScopeObservationOnly
+    ? []
+    : EffectArray.filter(admitted, entry => !codeGraphScopeAdmitsPath(scope, entry.path));
+  const accepted = options.statusScopeObservationOnly
+    ? admitted
+    : EffectArray.filter(admitted, entry => codeGraphScopeAdmitsPath(scope, entry.path));
   const acceptedPaths = new Set(EffectArray.map(accepted, entry => entry.path));
   const excluded = allTreeEntries.length - accepted.length;
+  if (scopeObservation !== undefined) {
+    options.onCommittedScopeBasis?.({
+      accepted,
+      acceptedPaths,
+      admissionProjectRoots,
+      admissionSourceRoots,
+      allTreeEntries,
+      committedPolicyExclusions,
+      scopeObservation,
+    });
+  }
 
   const committed = yield* readCommittedFiles(
     identity,
@@ -305,7 +369,7 @@ export const inventoryRepository = Effect.fn('codeGraph.inventoryRepository')(fu
                 })
             : undefined,
           options.onOverlayStart,
-          options.overlayObservation,
+          sharedOverlayPaths,
           scope === undefined ? undefined : relative => codeGraphScopeAdmitsPath(scope, relative),
         );
   const filesByPath = new Map(EffectArray.map(committed.files, file => [file.path, file]));
@@ -318,7 +382,7 @@ export const inventoryRepository = Effect.fn('codeGraph.inventoryRepository')(fu
   const diagnostics = policyExclusions.files === 0 ? [] : [formatPolicyExclusionDiagnostic(policyExclusions)];
   if (scopeExcluded.length > 0)
     diagnostics.push(`Excluded ${scopeExcluded.length} admitted file(s) outside the selected graph scope.`);
-  if (!includeOpaqueCorpusAssets) {
+  if (!includeOpaqueCorpusAssets && !options.statusScopeObservationOnly) {
     const deferred = EffectArray.filter(deferredOpaqueEntries, entry => !ignoredByGit.has(entry.path));
     if (deferred.length > 0) {
       diagnostics.push(
@@ -326,8 +390,10 @@ export const inventoryRepository = Effect.fn('codeGraph.inventoryRepository')(fu
       );
     }
   }
-  const attributionFiles = codeGraphAttributionContextFilesForReceipt(committed.files, languagePacks);
-  return {
+  const attributionFiles = options.statusScopeObservationOnly
+    ? undefined
+    : codeGraphAttributionContextFilesForReceipt(committed.files, languagePacks);
+  const inventory: CodeGraphInventory & {readonly diagnostics: readonly string[]} = {
     ...codeGraphInventoryScopeMetadata(scopeObservation, options, accepted, scopeExcluded, overlay.fingerprint),
     committedFiles: [...committed.files].sort((left, right) => compareCodeUnits(left.path, right.path)),
     committedParsedFiles: EffectArray.reduce(
@@ -356,18 +422,21 @@ export const inventoryRepository = Effect.fn('codeGraph.inventoryRepository')(fu
           },
         }),
     skipped,
-    ...(scopeObservation !== undefined
-      ? {
-          workspace: scopedCodeGraphWorkspace(scopeObservation.catalog.workspace, scopeObservation.scope),
-        }
-      : EffectArray.some([...overlay.changed], relative => languagePacks.isResolutionContext(relative)) ||
-          workspaceHasUninventoriedMonikerEvidence(
-            declaredWorkspace.workspace,
-            new Set(EffectArray.map(files, file => file.path)),
-          )
-        ? {}
-        : {workspace: declaredWorkspace.workspace}),
-  } satisfies CodeGraphInventory;
+    ...(options.statusScopeObservationOnly
+      ? {}
+      : scopeObservation !== undefined
+        ? {
+            workspace: scopedCodeGraphWorkspace(scopeObservation.catalog.workspace, scopeObservation.scope),
+          }
+        : EffectArray.some([...overlay.changed], relative => languagePacks.isResolutionContext(relative)) ||
+            workspaceHasUninventoriedMonikerEvidence(
+              declaredWorkspace.workspace,
+              new Set(EffectArray.map(files, file => file.path)),
+            )
+          ? {}
+          : {workspace: declaredWorkspace.workspace}),
+  };
+  return inventory;
 });
 
 /**
@@ -593,6 +662,7 @@ export const previewCodeGraphInventory = Effect.fn('codeGraph.previewInventory')
           declaredWorkspace.projectRoots,
           declaredWorkspace.sourceRoots,
         );
+  const compiledEffectiveRoots = compileRepositoryRootPrefixes(effectiveRoots.projectRoots, effectiveRoots.sourceRoots);
   const gitIgnoreCandidates = EffectArray.map(
     EffectArray.filter(
       tree.entries,
@@ -605,6 +675,7 @@ export const previewCodeGraphInventory = Effect.fn('codeGraph.previewInventory')
           effectiveRoots.projectRoots,
           effectiveRoots.sourceRoots,
           options.includeOpaqueCorpusAssets !== false,
+          compiledEffectiveRoots,
         ) === undefined,
     ),
     entry => entry.path,
@@ -979,15 +1050,18 @@ export const discoverDeclaredSourceRoots = Effect.fn('codeGraph.discoverDeclared
         Effect2.pipe(directory, EffectString.toLowerCase) === 'node_modules',
     );
   });
+  const cacheKeyValue = declaredSourceRootsCacheKey(identity, contexts);
+  const cachedDiscovery = yield* readCachedDeclaredSourceRoots(languagePacks, cacheKeyValue);
+  if (cachedDiscovery !== undefined) return cachedDiscovery;
   if (contexts.length === 0) {
     const catalog = yield* resolveCodeGraphWorkspaceCatalog([], languagePacks);
-    return {
+    return yield* writeCachedDeclaredSourceRoots(languagePacks, cacheKeyValue, {
       catalog,
       files: new Map<string, CodeGraphInventoryFile>(),
       projectRoots: [],
       sourceRoots: [],
       workspace: catalog.workspace,
-    };
+    });
   }
 
   const files: CodeGraphInventoryFile[] = [];
@@ -1051,13 +1125,13 @@ export const discoverDeclaredSourceRoots = Effect.fn('codeGraph.discoverDeclared
       ),
     ),
   ].sort(compareCodeUnits);
-  return {
+  return yield* writeCachedDeclaredSourceRoots(languagePacks, cacheKeyValue, {
     catalog,
     files: new Map(EffectArray.map(files, file => [file.path, file])),
     projectRoots,
     sourceRoots,
     workspace,
-  };
+  });
 });
 
 const discoverOverlaySourceRoots = Effect.fn('codeGraph.discoverOverlaySourceRoots')(function* (
@@ -1183,13 +1257,14 @@ export function acceptsRepositoryPath(
   );
 }
 
-function acceptsRepositoryPathWithRules(
+export function acceptsRepositoryPathWithRules(
   value: string,
   ignoreRules: readonly CompiledIgnoreRule[],
   languagePacks: CodeGraphLanguagePackRegistryShape,
   declaredProjectRoots: readonly string[] = [],
   declaredSourceRoots: readonly string[] = [],
   includeOpaqueCorpusAssets = true,
+  compiledRoots?: CompiledRepositoryRootPrefixes,
 ): boolean {
   return (
     repositoryPathExclusionReason(
@@ -1199,6 +1274,7 @@ function acceptsRepositoryPathWithRules(
       declaredProjectRoots,
       declaredSourceRoots,
       includeOpaqueCorpusAssets,
+      compiledRoots,
     ) === undefined
   );
 }
@@ -1546,63 +1622,36 @@ export const readDirtyOverlay = Effect.fn('codeGraph.readDirtyOverlay')(function
   includeOpaqueCorpusAssets = true,
   onContentBatch?: CodeGraphInventoryOptions['onContentBatch'],
   onOverlayStart?: CodeGraphInventoryOptions['onOverlayStart'],
-  overlayObservation?: CodeGraphOverlayObservation,
+  overlayObservation?: CodeGraphRawDirtyOverlayPaths,
   includePath?: (path: string) => boolean,
 ) {
-  const fs = yield* FileSystem.FileSystem;
-  const repositoryRoot = yield* fs.realPath(identity.repoRoot);
-  const unborn = isZeroObjectId(identity.headCommit);
-  let changes: ReturnType<typeof parseNameStatus>;
-  let untracked: Set<string>;
-  if (overlayObservation !== undefined) {
-    changes = {
-      added: new Set(overlayObservation.addedPaths),
-      changed: new Set(overlayObservation.changedPaths),
-      deleted: new Set(overlayObservation.deletedPaths),
-    };
-    untracked = new Set(overlayObservation.untrackedPaths);
-  } else {
-    const [diffOutput, untrackedOutput] = unborn
-      ? [
-          '',
-          (yield* runCommandEffect(
-            'git',
-            ['-C', identity.repoRoot, 'ls-files', '-z', '--cached', '--others', '--exclude-standard'],
-            {
-              maxOutputBytes: 0,
-              timeoutMs: 0,
-            },
-          )).stdout,
-        ]
-      : yield* Effect.all(
-          [
-            runCommandEffect(
-              'git',
-              ['-C', identity.repoRoot, 'diff', '--name-status', '-z', '--find-renames', identity.headCommit, '--'],
-              {maxOutputBytes: 0, timeoutMs: 0},
-            ).pipe(Effect.map(result => result.stdout)),
-            runCommandEffect('git', ['-C', identity.repoRoot, 'ls-files', '-z', '--others', '--exclude-standard'], {
-              maxOutputBytes: 0,
-              timeoutMs: 0,
-            }).pipe(Effect.map(result => result.stdout)),
-          ],
-          {concurrency: 2},
-        );
-    changes = parseNameStatus(diffOutput);
-    untracked = new Set(
-      EffectArray.map(
-        EffectArray.filter(Effect2.pipe(untrackedOutput, EffectString.split('\0')), Boolean),
-        normalizeRepositoryPath,
-      ),
-    );
-    for (const value of untracked) changes.changed.add(value);
-  }
+  const observed = overlayObservation ?? (yield* observeRawDirtyOverlayPaths(identity));
+  const changes = {
+    added: new Set(observed.addedPaths),
+    changed: new Set(observed.changedPaths),
+    deleted: new Set(observed.deletedPaths),
+  };
+  const untracked = new Set(observed.untrackedPaths);
   if (includePath !== undefined) {
     for (const paths of [changes.changed, changes.deleted, changes.added, untracked]) {
       for (const relative of paths) if (!includePath(relative)) paths.delete(relative);
     }
   }
-  if (changes.changed.size > 0 || changes.deleted.size > 0) yield* onOverlayStart?.() ?? Effect.void;
+  if (changes.changed.size === 0 && changes.deleted.size === 0) {
+    return {
+      changed: new Set<string>(),
+      dirty: false,
+      files: [],
+      fingerprint: undefined,
+      parsedPaths: new Set<string>(),
+      policyExclusions: committedPolicyExclusions,
+      policySkippedDelta: 0,
+      skipped: 0,
+    };
+  }
+  const fs = yield* FileSystem.FileSystem;
+  const repositoryRoot = yield* fs.realPath(identity.repoRoot);
+  yield* onOverlayStart?.() ?? Effect.void;
   const relevantChangedPaths = EffectArray.filter([...new Set([...changes.changed, ...changes.deleted])], relative =>
     isPotentialOverlayCandidate(relative, languagePacks),
   );
@@ -1613,6 +1662,7 @@ export const readDirtyOverlay = Effect.fn('codeGraph.readDirtyOverlay')(function
     identity.repoRoot,
     EffectArray.filter(relevantChangedPaths, relative => !threadnoteIgnoredChangedPaths.has(relative)),
   );
+  const compiledDeclaredRoots = compileRepositoryRootPrefixes(declaredProjectRoots, declaredSourceRoots);
   const committedPathWasAccepted = (relative: string): boolean => {
     if (knownCommittedAcceptedPaths !== undefined) return knownCommittedAcceptedPaths.has(relative);
     const entry = committedTreeEntries.get(relative);
@@ -1627,6 +1677,7 @@ export const readDirtyOverlay = Effect.fn('codeGraph.readDirtyOverlay')(function
         declaredProjectRoots,
         declaredSourceRoots,
         includeOpaqueCorpusAssets,
+        compiledDeclaredRoots,
       )
     );
   };
@@ -1663,6 +1714,10 @@ export const readDirtyOverlay = Effect.fn('codeGraph.readDirtyOverlay')(function
   );
   const effectiveDeclaredProjectRoots = overlayRoots.projectRoots;
   const effectiveDeclaredSourceRoots = overlayRoots.sourceRoots;
+  const compiledEffectiveRoots = compileRepositoryRootPrefixes(
+    effectiveDeclaredProjectRoots,
+    effectiveDeclaredSourceRoots,
+  );
   const files: CodeGraphInventoryFile[] = [];
   let skipped = 0;
   const parsedPaths = new Set<string>();
@@ -1769,6 +1824,7 @@ export const readDirtyOverlay = Effect.fn('codeGraph.readDirtyOverlay')(function
         effectiveDeclaredProjectRoots,
         effectiveDeclaredSourceRoots,
         includeOpaqueCorpusAssets,
+        compiledEffectiveRoots,
       )
     ) {
       if (previousPolicyExclusion !== undefined) {
@@ -1918,8 +1974,4 @@ const canonicalizePotentialPath = Effect.fn('codeGraph.canonicalizePotentialPath
 
 function cacheKey(path: string, contentHash: string, languagePacks: CodeGraphLanguagePackRegistryShape): string {
   return `${path}\0${contentHash}\0${Option.getOrElse(languagePacks.cacheIdentityForPath(path), () => 'unmatched')}`;
-}
-
-export function isZeroObjectId(value: string): boolean {
-  return /^0{40}(?:0{24})?$/.test(value);
 }

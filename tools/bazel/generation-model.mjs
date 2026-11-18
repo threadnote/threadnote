@@ -1,8 +1,6 @@
 import {Array as EffectArray} from 'effect';
 import {fileURLToPath} from 'node:url';
-// oxlint-disable-next-line effecttsgo/node-builtin-import -- Bun lacks synchronous directory/stat primitives for package-boundary discovery.
 import {existsSync, readdirSync, statSync} from 'node:fs';
-// oxlint-disable-next-line effecttsgo/node-builtin-import -- Build bootstrap uses Bun's path utilities without an Effect service layer.
 import {join, resolve} from 'node:path';
 import {bazelSourceLabel, packageExportPatterns, packageOwner} from './declaration-paths.mjs';
 import {allowedRepositoryPath, listRepositoryFiles, sourceRepositoryPathCandidates} from './repository-inputs.mjs';

@@ -1,4 +1,3 @@
-// oxlint-disable-next-line effecttsgo/node-builtin-import -- The test exercises Bun's native Worker boundary.
 import {resolve} from 'node:path';
 import {Resvg} from '@resvg/resvg-js';
 import {expect, it} from 'vitest';

@@ -1,3 +1,4 @@
+import {nativeWaivableGateIds} from '@threadnote/workflow-automations/gates';
 import {Array as EffectArray, Effect, Schema} from 'effect';
 import {Command, Flag} from 'effect/cli';
 import {withDefaultActionSubcommand} from './cli/help.js';
@@ -328,6 +329,7 @@ export function makeNativeTaskStartCommand<E, R>(
     readonly evidenceRefs: readonly string[];
     readonly reviewRequired: boolean;
     readonly reviewReason?: string;
+    readonly workflowProfile?: 'standard' | 'strict';
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
 ) {
   return Command.make(
@@ -358,6 +360,11 @@ export function makeNativeTaskStartCommand<E, R>(
       evidenceRefs: repeatedString('evidence-ref', 'Evidence URI for needs-planning; repeat as needed'),
       reviewRequired: boolean('review-required', 'Whether an independent authoring review is required'),
       reviewReason: optionalString('review-reason', 'Why review is or is not required'),
+      workflowProfile: optionalChoice(
+        'workflow-profile',
+        ['standard', 'strict'],
+        'Dev-cycle profile for a new task; strict keeps every bookkeeping gate',
+      ),
     },
     handler,
   ).pipe(Command.withDescription('Start or resume a bounded task from semantic intent'));
@@ -372,7 +379,7 @@ export function makeNativeTaskActionCommands<E, R>(
   snapshotHandler: (options: {
     readonly runId: string;
     readonly callerCwd: string;
-    readonly workRef: string;
+    readonly workRef?: string;
     readonly reason?: string;
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
   reviewHandler: (options: {
@@ -459,6 +466,20 @@ export function makeNativeTaskActionCommands<E, R>(
     readonly snapshotRef: string;
     readonly reason: string;
     readonly userAuthority: string;
+  }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
+  waiveHandler?: (options: {
+    readonly runId: string;
+    readonly callerCwd: string;
+    readonly gate: (typeof nativeWaivableGateIds)[number];
+    readonly reason: string;
+    readonly userAuthority: string;
+  }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
+  setProfileHandler?: (options: {
+    readonly runId: string;
+    readonly callerCwd: string;
+    readonly profile: 'standard' | 'strict';
+    readonly reason: string;
+    readonly userAuthority?: string;
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
 ) {
   const lifecycle = (options: Parameters<NonNullable<typeof lifecycleHandler>>[0]) =>
@@ -621,11 +642,14 @@ export function makeNativeTaskActionCommands<E, R>(
     {
       runId: requiredString('run-id', 'Existing native workflow run identifier'),
       callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
-      workRef: requiredString('work-ref', 'Opaque reference returned by workflow-automation task-action work'),
+      workRef: optionalString(
+        'work-ref',
+        'Work packet reference; required by the strict profile, ignored by standard tree snapshots',
+      ),
       reason: optionalString('reason', 'Concrete reason for another source iteration'),
     },
     snapshotHandler,
-  ).pipe(Command.withDescription('Record the current worker source for an admitted implementation packet'));
+  ).pipe(Command.withDescription('Record the current source tree for the phase on the task card'));
   const requalifyBaseSnapshot = Command.make(
     'requalify-base-snapshot',
     {
@@ -885,9 +909,49 @@ export function makeNativeTaskActionCommands<E, R>(
       'Record a caller-provided exact-intent response, then admit or reconcile the same canonical run; actor identity is not independently authenticated',
     ),
   );
+  const waive = Command.make(
+    'waive',
+    {
+      runId: requiredString('run-id', 'Existing native workflow run identifier'),
+      callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
+      gate: requiredChoice('gate', nativeWaivableGateIds, 'Review gate to waive for the current tree'),
+      reason: requiredString('reason', 'Concrete reason this gate is waived'),
+      userAuthority: requiredString(
+        'user-authority',
+        'Caller-provided human authority statement; actor identity is not independently authenticated',
+      ),
+    },
+    options =>
+      waiveHandler
+        ? waiveHandler(options)
+        : Effect.fail(
+            WorkflowAutomationError.make({code: 'unsupported-action', message: 'This task action is unavailable.'}),
+          ),
+  ).pipe(Command.withDescription('Record an audited waiver of one gate for the current phase tree'));
+  const setProfile = Command.make(
+    'set-profile',
+    {
+      runId: requiredString('run-id', 'Existing native workflow run identifier'),
+      callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
+      profile: requiredChoice('profile', ['standard', 'strict'], 'Dev-cycle profile for this run'),
+      reason: requiredString('reason', 'Why the run changes profile'),
+      userAuthority: optionalString(
+        'user-authority',
+        'Caller-provided human authority; required to loosen a run to the standard profile',
+      ),
+    },
+    options =>
+      setProfileHandler
+        ? setProfileHandler(options)
+        : Effect.fail(
+            WorkflowAutomationError.make({code: 'unsupported-action', message: 'This task action is unavailable.'}),
+          ),
+  ).pipe(Command.withDescription('Switch this run between the standard and strict dev-cycle profiles'));
   return Command.make('task-action', {}).pipe(
     Command.withSubcommands([
       work,
+      waive,
+      setProfile,
       begin,
       resume,
       reopen,

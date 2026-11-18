@@ -1,7 +1,6 @@
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
 import {fileURLToPath} from 'node:url';
-/* oxlint-disable effecttsgo/node-builtin-import -- Target discovery runs before the declared Bazel graph exists. */
 import {existsSync, statSync} from 'node:fs';
 import {join, resolve} from 'node:path';
 import {ciLongRunningTestGroups, ciRequiredLongRunningTestGroupNames} from '../ci/vitest-plan.ts';

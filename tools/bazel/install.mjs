@@ -1,5 +1,4 @@
 import {Array as EffectArray} from 'effect';
-/* oxlint-disable effecttsgo/node-builtin-import -- Dependency bootstrap cannot import packages before installing them. */
 import {existsSync, readFileSync, readdirSync, realpathSync, writeFileSync} from 'node:fs';
 import {dirname, join, relative, resolve} from 'node:path';
 import {dependencyClosure} from './dependency-closure.mjs';

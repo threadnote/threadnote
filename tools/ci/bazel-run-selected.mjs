@@ -1,5 +1,4 @@
 import {Array as EffectArray} from 'effect';
-/* oxlint-disable effecttsgo/node-builtin-import -- CI artifact and Bazel subprocess boundary. */
 import {readPreparedInventory} from '../bazel/prepare.mjs';
 import {resolve} from 'node:path';
 import {bazelPath} from '../bazel/cli-tools.mjs';

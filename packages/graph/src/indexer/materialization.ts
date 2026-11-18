@@ -34,11 +34,7 @@ import {
   serializeBoundedCodeGraphFact,
   type BoundedCodeGraphFact,
 } from '../fact/budget.js';
-import {
-  codeGraphContentIdentity,
-  codeGraphExtractorSetIdentityFromIdentities,
-  codeGraphExtractorSetIdentityFromPackProvenance,
-} from '../graph_identity.js';
+import {codeGraphContentIdentity, codeGraphExtractorSetIdentityFromPackProvenance} from '../graph_identity.js';
 import {CodeGraphIndexOperationError} from './shared.js';
 import {codeGraphFileProgressDimensions, emitContentProgress, type CodeGraphPendingCacheGroup} from './cache_flush.js';
 import type {CodeGraphIndexResourceGate} from './types.js';
@@ -763,17 +759,7 @@ export function codeGraphActiveParserCacheKey(key: string, storedIdentity: strin
 }
 
 export {verifyIndexInput} from './input/observation.js';
-
-export function extractorSetIdentity(
-  files: readonly {readonly contentHash: string; readonly path: string}[],
-  languagePacks: CodeGraphLanguagePackRegistryShape = BUILTIN_LANGUAGE_PACK_REGISTRY,
-): string {
-  const paths = EffectArray.map(files, file => file.path);
-  return codeGraphExtractorSetIdentityFromIdentities(
-    languagePacks.activeCacheIdentities(paths),
-    languagePacks.activeDerivationIdentities(paths),
-  );
-}
+export {extractorSetIdentity} from '../graph_identity.js';
 
 export function extractorSetIdentityFromPackProvenance(provenance: readonly CodeGraphLanguagePackProvenance[]): string {
   return codeGraphExtractorSetIdentityFromPackProvenance(provenance);

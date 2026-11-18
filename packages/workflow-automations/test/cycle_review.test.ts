@@ -421,6 +421,27 @@ describe('native cycle review validation', () => {
     ).toMatchObject({code: 'invalid-cycle-review'});
   });
 
+  it('names the findings and the broken half of the prior-identity rule', () => {
+    const full = snapshot({previous: undefined, previousTree: undefined, acceptedHead: undefined});
+    const fullReport = review(
+      {
+        mode: 'full',
+        findings: [
+          finding({id: 'finding-a', state: 'carried'}),
+          finding({id: 'finding-b', state: 'resolved', reason: 'Fixed in the handler.'}),
+        ],
+      },
+      full,
+    );
+    expect(caught(() => validateNativeCycleReview(full, fullReport))).toMatchObject({
+      code: 'invalid-cycle-review',
+      message: expect.stringMatching(/no predecessor review.*finding-a, finding-b/u),
+    });
+    expect(
+      caught(() => validateNativeCycleReview(snapshot(), review({findings: [finding({state: 'new'})]}), previous)),
+    ).toMatchObject({message: expect.stringMatching(/finding-1.*predecessor review/u)});
+  });
+
   it('requires and carries the prior finding ledger across a full source restart', () => {
     const restarted = snapshot({
       snapshotId: 'snapshot-restart',
@@ -634,5 +655,62 @@ describe('native cycle review validation', () => {
       ),
       {numRuns: 60},
     );
+  });
+});
+
+describe('tree-bound snapshot lineage', () => {
+  const tree = (overrides: Partial<NativeCycleSnapshot> = {}): NativeCycleSnapshot => {
+    const {previous: _previous, previousTree: _previousTree, ...legacy} = snapshot();
+    return {
+      ...legacy,
+      version: 4,
+      snapshotId: 'tree-2',
+      intentHash: hash('a'),
+      dirty: true,
+      outOfPlan: [],
+      ...overrides,
+    };
+  };
+  const decode = Schema.decodeUnknownExit(NativeCycleSnapshotSchema);
+
+  it('supersedes an unreviewed snapshot across a phase contract change', () => {
+    const superseding = tree({
+      phaseHash: hash('9'),
+      intentHash: hash('9'),
+      supersedes: 'snapshot-1',
+      unreviewedSupersession: {reason: 'The plan paths were reconciled.'},
+    });
+    expect(decode(superseding)._tag).toBe('Success');
+    expect(nativeCycleReviewRecordingMode(superseding)).toBe('full');
+    expect(() =>
+      validateNativeCycleReviewHistory(
+        superseding,
+        review({mode: 'full', findings: [finding({state: 'new'})]}, superseding),
+      ),
+    ).not.toThrow();
+  });
+
+  it('refuses legacy predecessor receipts and a missing intent on a tree snapshot', () => {
+    expect(decode(tree({previous: 'snapshot-1', previousTree: objectId('e')}))._tag).toBe('Failure');
+    const {intentHash: _intentHash, ...withoutIntent} = tree();
+    expect(decode(tree())._tag).toBe('Success');
+    expect(decode(withoutIntent)._tag).toBe('Failure');
+    expect(decode(snapshot({reviewBasis: {snapshotId: 'snapshot-1', tree: objectId('e')}}))._tag).toBe('Failure');
+    expect(decode(snapshot({changeDigest: hash('7')}))._tag).toBe('Failure');
+    expect(decode(tree({changeDigest: hash('7')}))._tag).toBe('Success');
+  });
+
+  it('reviews incrementally from a reviewed basis only under the same intent', () => {
+    const basis = {...previous, snapshot: {...priorSnapshot, intentHash: hash('a')}};
+    const incremental = tree({reviewBasis: {snapshotId: 'snapshot-1', tree: objectId('e')}});
+    expect(nativeCycleReviewRecordingMode(incremental)).toBe('incremental');
+    expect(() => validateNativeCycleReviewHistory(incremental, review({}, incremental), basis)).not.toThrow();
+    expect(caught(() => validateNativeCycleReviewHistory(incremental, review({}, incremental)))).toMatchObject({
+      code: 'invalid-cycle-review',
+    });
+    const otherIntent = {...basis, snapshot: {...basis.snapshot, intentHash: hash('f')}};
+    expect(
+      caught(() => validateNativeCycleReviewHistory(incremental, review({}, incremental), otherIntent)),
+    ).toMatchObject({code: 'invalid-cycle-review'});
   });
 });

@@ -1,7 +1,5 @@
 // Test-only Bun preload: substitute external I/O while the compiled application remains intact.
-// oxlint-disable-next-line effecttsgo/node-builtin-import -- Compiled-runtime preloads cannot resolve workspace test aliases; this is the fixture's native filesystem boundary.
 import {appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync} from 'node:fs';
-// oxlint-disable-next-line effecttsgo/node-builtin-import -- The independently bundled preload needs the native path boundary.
 import {join} from 'node:path';
 import {Array as EffectArray, pipe} from 'effect';
 import * as EffectString from 'effect/String';

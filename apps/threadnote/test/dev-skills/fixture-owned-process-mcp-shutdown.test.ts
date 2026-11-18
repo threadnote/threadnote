@@ -1,5 +1,4 @@
 import {EventEmitter} from 'node:events';
-// oxlint-disable-next-line effecttsgo/node-builtin-import -- Child-process writable events are the transport behavior under test.
 import {PassThrough} from 'node:stream';
 import {expect, it} from 'vitest';
 import {FixtureProcesses, FixtureStdioTransport} from '../../../../scripts/fixture-owned-process.js';

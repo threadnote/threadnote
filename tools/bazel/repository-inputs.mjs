@@ -1,5 +1,4 @@
 import {Array as EffectArray} from 'effect';
-/* oxlint-disable effecttsgo/node-builtin-import -- Input discovery runs before the declared Bazel graph exists. */
 import ts from 'typescript-compiler';
 import {posix} from 'node:path';
 import * as EffectString from 'effect/String';

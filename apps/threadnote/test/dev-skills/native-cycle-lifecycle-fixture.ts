@@ -163,7 +163,11 @@ export const fixture = Effect.fn('test.nativeCycle.fixture')(function* (
   initialBindings?: Record<string, {branch: string; baseBranch: string}>,
   beforeInit?: (repo: string) => Effect.Effect<void, unknown, FileSystem.FileSystem | Path.Path | CommandExecutor>,
   additionalAffectedPaths: Readonly<Record<string, readonly string[]>> = {},
-  binding: {readonly generation?: string; readonly project?: string} = {},
+  binding: {
+    readonly generation?: string;
+    readonly project?: string;
+    readonly policy?: 'standard' | 'strict';
+  } = {},
 ) {
   const diagnostics = yield* CycleDiagnostics;
   const graph = yield* GraphDiagnostics;
@@ -191,7 +195,7 @@ export const fixture = Effect.fn('test.nativeCycle.fixture')(function* (
   yield* git(['checkout', '-b', 'feature/' + phaseIds[0]]);
   if (beforeInit) yield* beforeInit(f.repo);
   const project = binding.project ?? 'fixture';
-  yield* f.init('native-run', generation, project);
+  yield* f.init('native-run', generation, project, binding.policy);
   const document = decodeNativeAuthoringDocument({
     format: 'threadnote-native-authoring',
     schemaVersion: 1,

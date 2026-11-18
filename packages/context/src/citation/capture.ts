@@ -205,6 +205,11 @@ export const captureMemoryCodeCitations = Effect.fn('memoryCodeCitation.capture'
     readonly refs?: readonly string[];
     /** Foreground adapters may bound lease writer waits; omitted preserves internal/background admission. */
     readonly writerWaitTimeoutMilliseconds?: number;
+    /**
+     * Accept a ready graph that is stale elsewhere: each cited file must still match its indexed bytes in the
+     * worktree, so only a changed cited file needs a current graph.
+     */
+    readonly allowStaleGraph?: boolean;
   },
 ) {
   const refs = yield* Effect.try({
@@ -290,6 +295,7 @@ export const captureMemoryCodeCitations = Effect.fn('memoryCodeCitation.capture'
         input.planOnly === true,
         input.retainedAt,
         input.writerWaitTimeoutMilliseconds,
+        input.allowStaleGraph === true,
       ),
     {concurrency: 4},
   );
@@ -378,6 +384,7 @@ const captureRepositoryGroup = Effect.fn('memoryCodeCitation.captureRepositoryGr
   planOnly = false,
   retainedAt?: string,
   writerWaitTimeoutMilliseconds?: number,
+  allowStaleGraph = false,
 ) {
   const query = yield* CodeGraphQueryService;
   const store = yield* CodeGraphStore;
@@ -395,7 +402,7 @@ const captureRepositoryGroup = Effect.fn('memoryCodeCitation.captureRepositoryGr
   if (expectedCallerIdentity) yield* requireExpectedCallerIdentity(before, expectedCallerIdentity);
   if (expectedProjectScope) yield* requireExpectedProjectScope(before, expectedProjectScope);
   const snapshot = yield* Effect.try({
-    try: () => requireExactCurrentSnapshot(before, captureGroupPreparation(targets)),
+    try: () => requireExactCurrentSnapshot(before, captureGroupPreparation(targets), allowStaleGraph),
     catch: cause => captureError(cwd, cause),
   });
   return yield* Effect.scoped(
@@ -456,7 +463,9 @@ const captureRepositoryGroup = Effect.fn('memoryCodeCitation.captureRepositoryGr
         EffectArray.flatMap(files, observation => (observation.file ? [[observation.path, observation.file]] : [])),
       );
       const symbolById = new Map(EffectArray.map(symbols, symbol => [symbol.id, symbol]));
+      const staleElsewhere = before.stale || before.freshness !== 'current';
       const sourceBytes = yield* readCodeGraphCitationSources({
+        ...(staleElsewhere ? {allowCommitFallback: false} : {}),
         objectFormat: before.identity.objectFormat,
         repositoryRoot,
         sourceCommit: snapshot.commit,
@@ -490,6 +499,13 @@ const captureRepositoryGroup = Effect.fn('memoryCodeCitation.captureRepositoryGr
           const bytes =
             cached?.bytes ?? sourceBytes.get(codeGraphCitationSourceKey({expectedContentHash, repositoryPath}));
           if (bytes === undefined) {
+            if (staleElsewhere) {
+              const preparation = captureGroupPreparation(targets);
+              return yield* MemoryCodeCitationCaptureError.of(
+                `The cited file ${repositoryPath} changed since the graph was indexed; ${captureRecoveryMessage(preparation)} No indexing was started.`,
+                captureRecovery(before, 'exact-current-evidence-unavailable', preparation),
+              );
+            }
             return yield* MemoryCodeCitationCaptureError.of(
               `Code citation source changed during capture: ${repositoryPath}.`,
             );
@@ -631,7 +647,7 @@ const captureRepositoryGroup = Effect.fn('memoryCodeCitation.captureRepositoryGr
           ? query.withStatusSession(config.agentContextHome, cwd, undefined, closingOptions, Effect.succeed)
           : query.status(config.agentContextHome, cwd, closingOptions)
       ).pipe(Effect.mapError(error => captureError(cwd, error)));
-      if (!sameExactSnapshot(before, after)) {
+      if (!sameExactSnapshot(before, after, allowStaleGraph)) {
         return yield* MemoryCodeCitationCaptureError.of(
           'Repository graph or worktree changed while code citations were captured.',
         );
@@ -763,6 +779,7 @@ function createCitation(input: Parameters<typeof createMemoryCodeCitation>[0]) {
 function requireExactCurrentSnapshot(
   status: CodeGraphStatus,
   preparation: MemoryCodeCitationGraphPreparationV1,
+  allowStaleGraph: boolean,
 ): NonNullable<CodeGraphStatus['readySnapshot']> {
   if (status.readySnapshot === undefined) {
     throw MemoryCodeCitationCaptureError.of(
@@ -770,7 +787,7 @@ function requireExactCurrentSnapshot(
       captureRecovery(status, 'ready-graph-unavailable', preparation),
     );
   }
-  if (status.stale || status.freshness !== 'current') {
+  if (!allowStaleGraph && (status.stale || status.freshness !== 'current')) {
     throw MemoryCodeCitationCaptureError.of(
       `Code citations require exact current graph evidence; ${captureRecoveryMessage(preparation)} No indexing was started.`,
       captureRecovery(status, 'exact-current-evidence-unavailable', preparation),
@@ -849,10 +866,9 @@ function captureRecoveryMessage(preparation: MemoryCodeCitationGraphPreparationV
     : `prepare the routed Workset ${JSON.stringify(preparation.arguments[0])} with \`${preparation.command} <workset>\`, then retry.`;
 }
 
-function sameExactSnapshot(before: CodeGraphStatus, after: CodeGraphStatus): boolean {
+function sameExactSnapshot(before: CodeGraphStatus, after: CodeGraphStatus, allowStaleGraph: boolean): boolean {
   return (
-    !after.stale &&
-    after.freshness === 'current' &&
+    (allowStaleGraph || (!after.stale && after.freshness === 'current')) &&
     before.databasePath === after.databasePath &&
     before.identity.repositoryId === after.identity.repositoryId &&
     before.identity.worktreeId === after.identity.worktreeId &&

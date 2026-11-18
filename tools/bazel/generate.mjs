@@ -1,4 +1,3 @@
-// oxlint-disable-next-line effecttsgo/node-builtin-import -- Build bootstrap uses Bun's path utilities without an Effect service layer.
 import {join, resolve} from 'node:path';
 import {buildGenerationModel} from './generation-model.mjs';
 import {prepareBazelWorkspace} from './prepare.mjs';

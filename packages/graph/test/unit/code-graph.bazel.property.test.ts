@@ -53,7 +53,7 @@ describe('Bazel workspace properties', () => {
       const expected = structuredClone(first);
       expect(
         Reflect.set(first.resolutionContextPaths, String(first.resolutionContextPaths.length), 'caller-mutation'),
-      ).toBe(true);
+      ).toBe(false);
       const second = yield* resolveCodeGraphWorkspaceCatalog([...files].reverse(), registry);
       expect(second).toEqual(expected);
       expect(discoveries).toBe(1);

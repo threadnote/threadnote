@@ -1,6 +1,7 @@
 import {Array as EffectArray} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {codeGraphInventorySha256Hex} from './inventory/identity.js';
+import {BUILTIN_LANGUAGE_PACK_REGISTRY, type CodeGraphLanguagePackRegistryShape} from './languages/registry.js';
 import {compareCodeUnits} from './ordering.js';
 import {codeGraphScopeIdentitySuffix, type CodeGraphScopeIdentity} from './scope/identity.js';
 import {CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION} from './store/build/core.js';
@@ -21,6 +22,17 @@ export interface CodeGraphContentIdentityAccumulator {
   readonly update: (file: CodeGraphContentIdentityFile) => void;
 }
 
+export function extractorSetIdentity(
+  files: readonly {readonly path: string}[],
+  languagePacks: CodeGraphLanguagePackRegistryShape = BUILTIN_LANGUAGE_PACK_REGISTRY,
+): string {
+  const paths = EffectArray.map(files, file => file.path);
+  return codeGraphExtractorSetIdentityFromIdentities(
+    languagePacks.activeCacheIdentities(paths),
+    languagePacks.activeDerivationIdentities(paths),
+  );
+}
+
 export function codeGraphExtractorSetIdentityFromPackProvenance(
   provenance: readonly CodeGraphLanguagePackProvenance[],
 ): string {
@@ -30,7 +42,7 @@ export function codeGraphExtractorSetIdentityFromPackProvenance(
   );
 }
 
-export function codeGraphExtractorSetIdentityFromIdentities(
+function codeGraphExtractorSetIdentityFromIdentities(
   cacheIdentities: readonly string[],
   derivationIdentities: readonly string[],
 ): string {

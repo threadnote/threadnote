@@ -1,4 +1,3 @@
-/* oxlint-disable effecttsgo/node-builtin-import -- This test exercises a shell and Git process boundary. */
 import {execFileSync, spawnSync} from 'node:child_process';
 import {mkdtempSync, mkdirSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';

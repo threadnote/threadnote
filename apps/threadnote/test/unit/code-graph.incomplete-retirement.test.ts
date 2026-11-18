@@ -160,7 +160,7 @@ describe('code graph incomplete snapshot retirement', () => {
   });
 
   effectIt.effect(
-    'drains required direct-build cleanup in bounded pages while yielding the writer gate',
+    'drains only the building worktree in bounded required pages while yielding the writer gate',
     () =>
       Effect.acquireUseRelease(
         Effect.promise(() => mkdtemp('threadnote-incomplete-reclaim-')),
@@ -179,6 +179,7 @@ describe('code graph incomplete snapshot retirement', () => {
             yield* store.markBuilding(databasePath, otherWorktree, siblingRetired);
             yield* Effect.sync(() => seedLargeInterruptedBuild(databasePath, stale.id));
             yield* Effect.sync(() => seedLargeInterruptedBuild(databasePath, siblingRetired.id));
+            const siblingRows = yield* Effect.sync(() => interruptedRowCount(databasePath, siblingRetired.id));
             const cleanupAcquisitions = yield* Ref.make(0);
             const cleanupPageAcquired = yield* Deferred.make<void>();
             const releaseCleanupPage = yield* Deferred.make<void>();
@@ -246,25 +247,42 @@ describe('code graph incomplete snapshot retirement', () => {
               pagesCompleted: 0,
               rowsDeleted: 0,
               snapshotsCompleted: 0,
-              snapshotsTotal: 2,
+              snapshotsTotal: 1,
             });
             expect(updates[1]?.pagesCompleted).toBe(1);
-            expect(EffectArray.every(updates, update => update.snapshotsTotal === 2)).toBe(true);
+            expect(EffectArray.every(updates, update => update.snapshotsTotal === 1)).toBe(true);
             expect(updates[1]?.rowsDeleted).toBeGreaterThan(0);
-            expect(updates[1]?.rowsDeleted).toBeLessThan(13_501);
+            expect(updates[1]?.rowsDeleted).toBeLessThan(13_500);
             expect(updates[1]?.snapshotsCompleted).toBe(0);
-            expect(updates.at(-1)?.snapshotsCompleted).toBe(2);
+            expect(updates.at(-1)?.snapshotsCompleted).toBe(1);
             yield* Effect.sync(() => {
               const database = new Database(databasePath, {readonly: true});
               try {
                 expect(database.query('SELECT state FROM snapshots WHERE id = ?').get(stale.id)).toBeNull();
-                expect(database.query('SELECT state FROM snapshots WHERE id = ?').get(siblingRetired.id)).toBeNull();
+                expect(
+                  database
+                    .query<{readonly state: string}, [string]>('SELECT state FROM snapshots WHERE id = ?')
+                    .get(siblingRetired.id),
+                ).toEqual({state: 'retired'});
                 expect(
                   database
                     .query<{readonly state: string}, [string]>('SELECT state FROM snapshots WHERE id = ?')
                     .get(foreground.id),
                 ).toEqual({state: 'building'});
                 expect(interruptedRowCount(databasePath, stale.id)).toBe(0);
+                expect(siblingRows).toBe(13_500);
+                expect(interruptedRowCount(databasePath, siblingRetired.id)).toBe(siblingRows);
+                expect(database.query('PRAGMA foreign_key_check').all()).toEqual([]);
+              } finally {
+                database.close();
+              }
+            });
+
+            yield* store.withSession(databasePath, store.pruneRetiredSnapshots(databasePath), {writerLockPath});
+            yield* Effect.sync(() => {
+              const database = new Database(databasePath, {readonly: true});
+              try {
+                expect(database.query('SELECT state FROM snapshots WHERE id = ?').get(siblingRetired.id)).toBeNull();
                 expect(interruptedRowCount(databasePath, siblingRetired.id)).toBe(0);
                 expect(database.query('PRAGMA foreign_key_check').all()).toEqual([]);
               } finally {

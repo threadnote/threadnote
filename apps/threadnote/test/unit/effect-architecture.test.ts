@@ -2,7 +2,6 @@ import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
 import {mkdir, mkdtemp, readFile, readdir, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {statSync} from '@threadnote/testing/node-fs';
-import {builtinModules} from '@threadnote/testing/node-module';
 import {dirname, join, relative} from '@threadnote/testing/node-path';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {fileURLToPath} from '@threadnote/testing/node-url';
@@ -71,12 +70,6 @@ async function scanSourceFiles(appSourceRoot: string, packagesRoot: string): Pro
   return (await Promise.all([codeFiles(appSourceRoot), ...EffectArray.map(packageRoots, codeFiles)])).flat();
 }
 
-const nodeBuiltinModules = new Set(
-  EffectArray.map(
-    EffectArray.filter(builtinModules, module => !Effect.pipe(module, EffectString.startsWith('bun:'))),
-    module => Effect.pipe(module, EffectString.replace(/^node:/, '')),
-  ),
-);
 const moduleSpecifierScanners = {
   js: new Bun.Transpiler({loader: 'js', logLevel: 'error'}),
   jsx: new Bun.Transpiler({loader: 'jsx', logLevel: 'error', tsconfig: {compilerOptions: {jsx: 'react'}}}),
@@ -93,13 +86,6 @@ function importedModuleSpecifiers(path: string, source: string): readonly string
         ? 'jsx'
         : 'js';
   return EffectArray.map(moduleSpecifierScanners[loader].scanImports(source), imported => imported.path);
-}
-
-function isNodeBuiltinSpecifier(specifier: string): boolean {
-  if (Effect.pipe(specifier, EffectString.startsWith('node:'))) return true;
-  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
-  const root = specifier.split('/', 1)[0];
-  return nodeBuiltinModules.has(specifier) || nodeBuiltinModules.has(root);
 }
 
 describe('Effect architecture boundaries', () => {
@@ -197,46 +183,6 @@ describe('Effect architecture boundaries', () => {
     for (const path of await sourceFiles()) {
       const source = await readFile(path, 'utf8');
       expect(source, relative(repoRoot, path)).not.toMatch(/Effect\.(?:runPromise|runFork)\s*\(/);
-    }
-  });
-
-  it('does not import or require Node built-ins in production source', async () => {
-    const importShapes = EffectArray.join(
-      [
-        "import '../helpers/node-fs.js';",
-        "import {readFile} from 'fs/promises';",
-        "export {join} from '../helpers/node-path.js';",
-        "void import('../helpers/node-url.js');",
-        "const os = require('os');",
-        "import fs = require('fs');",
-        "import external from 'external-package';",
-        "const ignored = `require('fs') ${`nested ${value}`}`;",
-        "import '../helpers/node-crypto.js';",
-      ],
-      '\n',
-    );
-    expect(
-      EffectArrayPipe(importedModuleSpecifiers('builtin-shapes.ts', importShapes), __effectArrayValues =>
-        EffectArray.filter(
-          __effectArrayValues,
-          (__effectArrayValue, __effectArrayIndex) =>
-            __effectArrayIndex in __effectArrayValues && isNodeBuiltinSpecifier(__effectArrayValue),
-        ),
-      ),
-    ).toEqual(['fs/promises', 'os', 'fs']);
-
-    for (const path of await sourceFiles()) {
-      const source = await readFile(path, 'utf8');
-      expect(
-        EffectArrayPipe(importedModuleSpecifiers(path, source), __effectArrayValues =>
-          EffectArray.filter(
-            __effectArrayValues,
-            (__effectArrayValue, __effectArrayIndex) =>
-              __effectArrayIndex in __effectArrayValues && isNodeBuiltinSpecifier(__effectArrayValue),
-          ),
-        ),
-        relative(repoRoot, path),
-      ).toEqual([]);
     }
   });
 

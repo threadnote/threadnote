@@ -1,4 +1,3 @@
-/* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- Private release engineering validates a protected system executable. */
 import type {Transport} from '@modelcontextprotocol/sdk/shared/transport.js';
 import type {EventEmitter} from 'node:events';
 import {Predicate} from 'effect';

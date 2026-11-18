@@ -23,7 +23,6 @@ const CACHED_FACT_BUDGET_DIAGNOSTIC =
 export const CODE_GRAPH_REFERENCE_CANDIDATE_BUDGET_DIAGNOSTIC =
   'A code graph relationship exceeded the per-reference resolution budget; the relationship was preserved as unresolved.';
 const boundedCodeGraphFactBrand: unique symbol = Symbol('threadnote/BoundedCodeGraphFact');
-const cachedFactEncoder = new TextEncoder();
 
 export interface MeasuredCodeGraphFact {
   readonly bytes: number;
@@ -39,7 +38,7 @@ export type CodeGraphCacheFactInput = CodeGraphFileFacts | BoundedCodeGraphFact;
 
 /** Exact UTF-8 bytes used by SQLite for the serialized fact JSON. */
 export function cachedCodeGraphFactBytes(facts: CodeGraphFileFacts): number {
-  return cachedFactEncoder.encode(JSON.stringify(facts)).byteLength;
+  return Buffer.byteLength(JSON.stringify(facts), 'utf8');
 }
 
 /**
@@ -477,17 +476,17 @@ function measureBoundedCodeGraphFactWithJson(
   // This boundary needs JSON anyway: reuse its exact bytes instead of walking
   // every property first to calculate a conservative serialization upper bound.
   const compactedJson = JSON.stringify(compacted);
-  const compactedBytes = cachedFactEncoder.encode(compactedJson).byteLength;
+  const compactedBytes = Buffer.byteLength(compactedJson, 'utf8');
   if (compactedBytes <= maximumBytes) return {bytes: compactedBytes, facts: compacted, json: compactedJson};
   const bounded = selectCachedCodeGraphFactsWithinBudget(compacted, maximumBytes);
   const json = JSON.stringify(bounded);
-  return {bytes: cachedFactEncoder.encode(json).byteLength, facts: bounded, json};
+  return {bytes: Buffer.byteLength(json, 'utf8'), facts: bounded, json};
 }
 
 function cachedFactArrayAppendBytes(currentLength: number, values: readonly unknown[]): number {
   if (values.length === 0) return 0;
   let bytes = currentLength === 0 ? values.length - 1 : values.length;
-  for (const value of values) bytes += cachedFactEncoder.encode(JSON.stringify(value) ?? 'null').byteLength;
+  for (const value of values) bytes += Buffer.byteLength(JSON.stringify(value) ?? 'null', 'utf8');
   return bytes;
 }
 

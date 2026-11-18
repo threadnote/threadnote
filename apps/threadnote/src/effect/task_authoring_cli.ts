@@ -1,9 +1,15 @@
-import {Console, Effect, FileSystem, Path, Record} from 'effect';
+import {Console, Effect, FileSystem, Path, Record, Schema} from 'effect';
 import {Command} from 'effect/cli';
 import {integerFlag, optional, optionalChoice, optionalString, requiredChoice, requiredString} from './cli/flags.js';
 import type {CliRuntimeRunner} from './cli.js';
 import {runNativeTaskAuthoring} from '../workflow_automation/task_authoring.js';
-import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
+import {WorkflowAutomationError, workflowAutomationErrorEnvelope} from '@threadnote/workflow-automations/contracts';
+
+/** An actionable refusal also prints its rule and next command as one JSON line before failing. */
+export const printWorkflowRefusal = (error: WorkflowAutomationError) =>
+  error.gate === undefined && error.detail === undefined && error.next === undefined
+    ? Effect.void
+    : Console.log(JSON.stringify(workflowAutomationErrorEnvelope(error)));
 
 export const makeNativeTaskAuthoringCommand = (withRuntime: CliRuntimeRunner) =>
   Command.make(
@@ -21,6 +27,11 @@ export const makeNativeTaskAuthoringCommand = (withRuntime: CliRuntimeRunner) =>
       saveMode: optionalChoice('save-mode', ['background'], 'Submit an exact save to the durable native job worker'),
       installationTarget: optionalString('installation-target', 'Required for start; installed target for job resume'),
       graphProject: optionalString('graph-project', 'Configured graph project for a new authoring task'),
+      workflowProfile: optionalChoice(
+        'workflow-profile',
+        ['standard', 'strict'],
+        'Dev-cycle profile for a new task; strict keeps every bookkeeping gate',
+      ),
       authoringRef: optionalString('authoring-ref', 'Opaque current authoring continuation'),
       team: optionalString('team', 'Writable shared team for plan publication'),
       jobRef: optionalString('job-ref', 'Opaque accepted semantic authoring job continuation'),
@@ -73,7 +84,11 @@ export const makeNativeTaskAuthoringCommand = (withRuntime: CliRuntimeRunner) =>
             ...(bindings === undefined ? {} : {bindings}),
           });
           yield* Console.log(JSON.stringify(result));
-        }),
+        }).pipe(
+          Effect.tapError(error =>
+            Schema.is(WorkflowAutomationError)(error) ? printWorkflowRefusal(error) : Effect.void,
+          ),
+        ),
       ),
   ).pipe(
     Command.withDescription(

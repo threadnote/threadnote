@@ -234,13 +234,13 @@ export class CodeGraphQueryService extends Context.Service<
       ) =>
         Effect.gen(function* () {
           if (!identityAlreadyObserved) yield* recordVerifiedCodeGraphLocalAssociation(threadnoteHome, identity);
-          const projectScope = yield* observeCodeGraphQueryScope(
-            threadnoteHome,
-            callerCwd,
-            identity,
-            languagePacks,
-            options ?? {},
-          );
+          const projectScope = yield* observeCodeGraphQueryScope(threadnoteHome, callerCwd, identity, languagePacks, {
+            ...options,
+            preobservedWorktreeChanged:
+              options?.observeWorktree === false || options?.afterIdentityObserved !== undefined
+                ? undefined
+                : preobservedWorktreeChanged,
+          });
           yield* options?.afterIdentityObserved?.(identity, projectScope?.project) ?? Effect.void;
           const scopeKey = projectScope?.scope?.scopeKey;
           const layout = codeGraphLayout(path, threadnoteHome, identity.checkoutId, identity.worktreeId, scopeKey);
@@ -889,19 +889,22 @@ export class CodeGraphQueryService extends Context.Service<
           ),
         status: (threadnoteHome, cwd, options) =>
           withRepositoryServices(
-            Effect.gen(function* () {
-              const {identity} = yield* withCodeGraphQueryTelemetryStage(
-                options?.telemetry,
-                'graph.query.status',
-                'query-repository-identity',
-                resolveAndRecordCodeGraphLocalAssociation(threadnoteHome, cwd),
-              );
-              const status = yield* statusForIdentity(threadnoteHome, identity, options, true, undefined, cwd);
-              if (options?.requestMaintenance !== false) {
-                yield* requestMaintenance(threadnoteHome, status.identity);
-              }
-              return status;
-            }),
+            Effect.scoped(
+              Effect.gen(function* () {
+                const {
+                  identity,
+                  worktreeChanged: changed,
+                  observeTogether,
+                } = yield* observeCodeGraphStatusSessionIdentity(threadnoteHome, cwd, undefined, options ?? {});
+                const status = yield* observeTogether(
+                  statusForIdentity(threadnoteHome, identity, options, true, changed, cwd),
+                );
+                if (options?.requestMaintenance !== false) {
+                  yield* requestMaintenance(threadnoteHome, status.identity);
+                }
+                return status;
+              }),
+            ),
           ),
         statusForIdentity: (threadnoteHome, identity, options) => {
           const status = statusForIdentity(threadnoteHome, identity, options);

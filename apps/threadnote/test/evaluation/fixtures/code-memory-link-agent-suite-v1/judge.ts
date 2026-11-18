@@ -1,7 +1,6 @@
 #!/usr/bin/env bun
 import {Array as EffectArray} from 'effect';
 
-/* oxlint-disable effecttsgo/node-builtin-import -- This copied sealed program must be self-contained. */
 import {createHash} from 'node:crypto';
 import {lstat, readFile, realpath} from 'node:fs/promises';
 import {isAbsolute, join, resolve, sep} from 'node:path';

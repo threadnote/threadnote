@@ -259,6 +259,7 @@ export const loadNativeCloseoutInputs = Effect.fn('workflowAutomation.closeout.l
     planRoot: loadedPlan.pin.root,
     ...(loadedSpec ? {spec: loadedSpec.document} : {}),
     owned,
+    waivers: runtime.waivers ?? [],
   };
 });
 export type NativeCloseoutInputs = Effect.Success<ReturnType<typeof loadNativeCloseoutInputs>>;

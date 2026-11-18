@@ -98,6 +98,40 @@ export interface PolicyExclusionEntry {
   readonly size: number;
 }
 
+export interface CompiledRepositoryRootPrefixes {
+  readonly declaredRootOrAncestorPrefixes: ReadonlySet<string>;
+  readonly declaredSourceRootSet: ReadonlySet<string>;
+}
+
+const EMPTY_COMPILED_REPOSITORY_ROOT_PREFIXES: CompiledRepositoryRootPrefixes = {
+  declaredRootOrAncestorPrefixes: new Set<string>(),
+  declaredSourceRootSet: new Set<string>(),
+};
+
+export function compileRepositoryRootPrefixes(
+  declaredProjectRoots: readonly string[] = [],
+  declaredSourceRoots: readonly string[] = [],
+): CompiledRepositoryRootPrefixes {
+  if (declaredProjectRoots.length === 0 && declaredSourceRoots.length === 0) {
+    return EMPTY_COMPILED_REPOSITORY_ROOT_PREFIXES;
+  }
+  const declaredRootOrAncestorPrefixes = new Set<string>();
+  for (const roots of [declaredProjectRoots, declaredSourceRoots]) {
+    for (const root of roots) {
+      declaredRootOrAncestorPrefixes.add(root);
+      for (let index = 0; index < root.length; index += 1) {
+        if (root[index] === '/') {
+          declaredRootOrAncestorPrefixes.add(Effect2.pipe(root, EffectString.slice(0, index)));
+        }
+      }
+    }
+  }
+  return {
+    declaredRootOrAncestorPrefixes,
+    declaredSourceRootSet: new Set(declaredSourceRoots),
+  };
+}
+
 const PRUNED_DIRECTORIES = new Set([
   'bazel-bin',
   'bazel-out',
@@ -139,6 +173,9 @@ export function summarizeCodeGraphInventoryPreview(
   const languagePacks = options.languagePacks ?? BUILTIN_LANGUAGE_PACK_REGISTRY;
   const ignoreRules = compileThreadnoteIgnore(options.threadnoteIgnore ?? '', options.threadnoteIgnoreLocal ?? '');
   const gitIgnoredPaths = options.gitIgnoredPaths ?? new Set<string>();
+  const declaredProjectRoots = options.declaredProjectRoots ?? [];
+  const declaredSourceRoots = options.declaredSourceRoots ?? [];
+  const compiledRoots = compileRepositoryRootPrefixes(declaredProjectRoots, declaredSourceRoots);
   const groups = new Map<string, CodeGraphInventoryPreviewGroup>();
   let eligibleBytes = 0;
   let eligibleFiles = 0;
@@ -167,9 +204,10 @@ export function summarizeCodeGraphInventoryPreview(
             path,
             ignoreRules,
             languagePacks,
-            options.declaredProjectRoots ?? [],
-            options.declaredSourceRoots ?? [],
+            declaredProjectRoots,
+            declaredSourceRoots,
             options.includeOpaqueCorpusAssets !== false,
+            compiledRoots,
           )
         : undefined;
     const reason = policyReason ?? pathReason ?? (gitIgnoredPaths.has(path) ? 'git-ignore' : 'admitted');
@@ -227,27 +265,22 @@ export function summarizeCodeGraphInventoryPreview(
 
 export function isPotentialOverlayCandidate(value: string, languagePacks: CodeGraphLanguagePackRegistryShape): boolean {
   const repositoryPath = normalizeRepositoryPath(value);
-  if (
-    !repositoryPath ||
-    Effect2.pipe(repositoryPath, EffectString.startsWith('/')) ||
-    EffectArray.some(
-      Effect2.pipe(repositoryPath, EffectString.split('/')),
-      segment => segment === '..' || segment === '',
-    )
-  ) {
+  if (!repositoryPath || Effect2.pipe(repositoryPath, EffectString.startsWith('/'))) {
     return false;
   }
-  const directories = Effect2.pipe(repositoryPath, EffectString.split('/')).slice(0, -1);
-  if (
-    EffectArray.some(directories, directory => {
-      const normalized = Effect2.pipe(directory, EffectString.toLowerCase);
-      return (
-        (Effect2.pipe(directory, EffectString.startsWith('.')) && !AUTHORED_DOT_DIRECTORIES.has(normalized)) ||
-        normalized === 'node_modules'
-      );
-    })
-  ) {
+  const segments: readonly string[] = Effect2.pipe(repositoryPath, EffectString.split('/'));
+  if (EffectArray.some(segments, segment => segment === '..' || segment === '')) {
     return false;
+  }
+  for (let index = 0; index < segments.length - 1; index += 1) {
+    const directory = segments[index];
+    const normalized = Effect2.pipe(directory, EffectString.toLowerCase);
+    if (
+      (Effect2.pipe(directory, EffectString.startsWith('.')) && !AUTHORED_DOT_DIRECTORIES.has(normalized)) ||
+      normalized === 'node_modules'
+    ) {
+      return false;
+    }
   }
   return isInventoryPolicyExtension(repositoryPath) || Option.isSome(languagePacks.match(repositoryPath));
 }
@@ -263,40 +296,39 @@ export function repositoryPathExclusionReason(
   declaredProjectRoots: readonly string[] = [],
   declaredSourceRoots: readonly string[] = [],
   includeOpaqueCorpusAssets = true,
+  compiledRoots?: CompiledRepositoryRootPrefixes,
 ): Exclude<CodeGraphInventoryPreviewReason, CodeGraphInventoryExclusionReason | 'admitted' | 'git-ignore'> | undefined {
   const path = normalizeRepositoryPath(value);
-  if (
-    !path ||
-    Effect2.pipe(path, EffectString.startsWith('/')) ||
-    EffectArray.some(Effect2.pipe(path, EffectString.split('/')), segment => segment === '..' || segment === '')
-  ) {
+  if (!path || Effect2.pipe(path, EffectString.startsWith('/'))) {
     return 'invalid-path';
   }
-  const directories = Effect2.pipe(path, EffectString.split('/')).slice(0, -1);
-  const declaredRoots = [...declaredProjectRoots, ...declaredSourceRoots];
-  for (let index = 0; index < directories.length; index += 1) {
-    const directory = directories[index];
+  const segments: readonly string[] = Effect2.pipe(path, EffectString.split('/'));
+  if (EffectArray.some(segments, segment => segment === '..' || segment === '')) {
+    return 'invalid-path';
+  }
+  const roots = compiledRoots ?? compileRepositoryRootPrefixes(declaredProjectRoots, declaredSourceRoots);
+  let prefix = '';
+  let insideDeclaredSourceRoot = false;
+  for (let index = 0; index < segments.length - 1; index += 1) {
+    const directory = segments[index];
+    const wasInsideDeclaredSourceRoot = insideDeclaredSourceRoot;
+    prefix = index === 0 ? directory : `${prefix}/${directory}`;
+    if (!insideDeclaredSourceRoot && roots.declaredSourceRootSet.has(prefix)) {
+      insideDeclaredSourceRoot = true;
+    }
     const normalizedDirectory = Effect2.pipe(directory, EffectString.toLowerCase);
     if (Effect2.pipe(directory, EffectString.startsWith('.')) && !AUTHORED_DOT_DIRECTORIES.has(normalizedDirectory)) {
       return 'hidden-directory';
     }
     const bazelOutputLink = Effect2.pipe(normalizedDirectory, EffectString.startsWith('bazel-'));
     if (!bazelOutputLink && !PRUNED_DIRECTORIES.has(normalizedDirectory)) continue;
-    const prefix = EffectArray.join(directories.slice(0, index + 1), '/');
     // A generated-looking directory is authored source only when a manifest
     // declares that directory itself (or one of its descendants) as a
     // project/source root. A broad source root must not re-include nested
     // output such as packages/app/dist or packages/app/build.
-    if (
-      EffectArray.some(
-        declaredRoots,
-        root => root === prefix || Effect2.pipe(root, EffectString.startsWith(`${prefix}/`)),
-      )
-    )
-      continue;
+    if (roots.declaredRootOrAncestorPrefixes.has(prefix)) continue;
     if (!bazelOutputLink && !GENERATED_DIRECTORIES.has(normalizedDirectory)) {
-      if (EffectArray.some(declaredSourceRoots, root => Effect2.pipe(prefix, EffectString.startsWith(`${root}/`))))
-        continue;
+      if (wasInsideDeclaredSourceRoot) continue;
       return 'vendor-directory';
     }
     return normalizedDirectory === 'node_modules' ? 'vendor-directory' : 'generated-directory';

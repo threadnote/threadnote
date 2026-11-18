@@ -12,7 +12,12 @@ import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-pol
 import * as Demand from '../../src/background/lexical-demand.js';
 import * as Mutation from '@threadnote/store/resource/mutation_generation';
 import {makeReadyRecallMaintenance, withReadyRecallMaintenanceScope} from '../../src/index/maintenance.js';
-import {readRecallExactMatches, readRecallIndexDataBatch, requestMissingRecallReadyDirectory} from '../../src/index.js';
+import {
+  readRecallExactMatches,
+  readRecallIndexDataBatch,
+  recallIndexDatabaseFilename,
+  requestMissingRecallReadyDirectory,
+} from '../../src/index.js';
 
 const platform = Layer.mergeAll(
   BunServices.layer,
@@ -34,7 +39,7 @@ const fixture = Effect.gen(function* () {
   const path = yield* Path.Path;
   const home = yield* fs.makeTempDirectoryScoped({prefix: 'ready-maintenance-'});
   const scope = {account: 'local', user: 'test', agentContextHome: home, includeInactive: false};
-  const database = path.join(home, 'indexes', 'lexical', 'active-v13.sqlite');
+  const database = path.join(home, 'indexes', 'lexical', recallIndexDatabaseFilename(true));
   const controls = {
     generation: '',
     fail: false,
@@ -214,7 +219,7 @@ effectIt.effect('reuses a real durable pending revision and persists stronger re
     const path = yield* Path.Path;
     const home = yield* fs.makeTempDirectoryScoped({prefix: 'real-ready-demand-'});
     const scope = {account: 'local', user: 'test', agentContextHome: home, includeInactive: false};
-    const database = path.join(home, 'indexes', 'lexical', 'active-v13.sqlite');
+    const database = path.join(home, 'indexes', 'lexical', recallIndexDatabaseFilename(true));
     const spy = yield* Effect.acquireRelease(
       Effect.sync(() => vi.spyOn(Demand, 'requestRecallLexicalRefresh')),
       value => Effect.sync(() => value.mockRestore()),
@@ -319,7 +324,7 @@ effectIt.effect('binds missing snapshots to physical homes while accepting an al
         yield* f.missing();
         expect(
           yield* makeReadyRecallMaintenance({...f.scope, agentContextHome: alias}).missing(
-            path.join(alias, 'indexes', 'lexical', 'active-v13.sqlite'),
+            path.join(alias, 'indexes', 'lexical', recallIndexDatabaseFilename(true)),
             13,
           ),
         ).toBe('queued');

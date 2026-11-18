@@ -1,14 +1,9 @@
 import {Array as EffectArray} from 'effect';
-import {Effect, Path} from 'effect';
+import {Effect, FileSystem, Path} from 'effect';
 import {USER_MANIFEST_NAME} from '@threadnote/workspace/constants';
 import type {ProjectManifest} from '@threadnote/workspace/config';
-import {
-  observeCodeGraphAdmissionEnvironment,
-  codeGraphSnapshotAdmissionCurrentForIdentity,
-} from '../admission_freshness.js';
-import {extractorSetIdentity} from '../indexer.js';
-import {inventoryRepository} from '../inventory.js';
-import {codeGraphInventoryScopeEvidence} from '../inventory/scope.js';
+import {codeGraphSnapshotAdmissionCurrentForIdentity} from '../admission_freshness.js';
+import {observeCodeGraphStatusScope} from '../inventory/scope.js';
 import {codeGraphIndexScopeMembershipDigest, type ResolvedCodeGraphIndexScope} from '../index_scope.js';
 import type {CodeGraphLanguagePackRegistryShape} from '../languages/registry.js';
 import type {CodeGraphLayout} from '../layout.js';
@@ -89,7 +84,12 @@ export const observeCodeGraphQueryScope = Effect.fn('codeGraph.observeQueryScope
   cwd: string,
   identity: RepositoryIdentity,
   languagePacks: CodeGraphLanguagePackRegistryShape,
-  options: {readonly project?: string; readonly manifestPath?: string},
+  options: {
+    readonly project?: string;
+    readonly manifestPath?: string;
+    readonly preobservedWorktreeChanged?:
+      boolean | Effect.Effect<boolean | undefined, unknown, FileSystem.FileSystem | Path.Path>;
+  },
 ) {
   const path = yield* Path.Path;
   const route = yield* resolveCodeGraphScopeRoute(
@@ -99,22 +99,16 @@ export const observeCodeGraphQueryScope = Effect.fn('codeGraph.observeQueryScope
   );
   if (route.state === 'full') return undefined;
   if (route.project.graph === undefined) return {project: route.project} satisfies CodeGraphQueryScope;
-  const inventory = yield* inventoryRepository(identity, {
-    project: route.project,
-    languagePacks,
+  const observed = yield* observeCodeGraphStatusScope(identity, route.project, {
     includeOpaqueCorpusAssets: false,
-    scopeObservationOnly: true,
+    languagePacks,
+    preobservedWorktreeChanged: options.preobservedWorktreeChanged,
+    threadnoteHome,
   });
-  const policy = yield* observeCodeGraphAdmissionEnvironment(identity);
   return {
     project: route.project,
-    scope: inventory.scope,
-    evidence: codeGraphInventoryScopeEvidence(
-      inventory,
-      identity,
-      extractorSetIdentity(inventory.files, languagePacks),
-      policy,
-    ),
+    scope: observed.scope,
+    evidence: observed.evidence,
   } satisfies CodeGraphQueryScope;
 });
 

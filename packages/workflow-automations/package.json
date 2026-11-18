@@ -6,6 +6,7 @@
     "./authoring": "./src/authoring.ts",
     "./contracts": "./src/contracts.ts",
     "./documents": "./src/documents.ts",
+    "./gates": "./src/gates.ts",
     "./naming": "./src/naming.ts",
     "./native": "./src/native.ts",
     "./scenarios": "./src/scenarios.ts",

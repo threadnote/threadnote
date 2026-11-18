@@ -1,4 +1,5 @@
 import {Array as EffectArray, Schema} from 'effect';
+import * as EffectRecord from 'effect/Record';
 import {Effect} from 'effect';
 import {ResourceNotFound, ResourceStore} from '@threadnote/store/resource-store';
 import {makeResourceIdScopeChecker, parseResourceId} from '@threadnote/store/resource-id';
@@ -16,6 +17,7 @@ import {
   memoryIdFromIdentityAlias,
 } from '@threadnote/memory/identity-alias';
 import {readMemoryWithRelocations} from '@threadnote/memory/relocation';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   prepareMemoryIdentityAliases,
   resolveMemoryIdentityAliases,
@@ -37,6 +39,12 @@ export interface AuthoredMemoryRelationTarget {
   readonly uri: string;
 }
 
+export interface OwnedActiveRelationArtifact {
+  readonly memoryId: string;
+  readonly revision: string;
+  readonly state: 'active' | 'archived';
+}
+
 export interface ResolvedAuthoredMemoryRelations {
   readonly relations?: readonly MemoryRelation[];
   /** Canonical target snapshots rechecked atomically by the writer. */
@@ -49,6 +57,38 @@ type RelationTargetSnapshot = {
   readonly memoryId?: string;
   readonly uri: string;
 };
+
+export type AuthorizedOwnedMemoryIdProofs = ReadonlyMap<string, string | false>;
+
+export const buildAuthorizedOwnedMemoryIdProofs = Effect.fn('memory.buildOwnedMemoryIdProofs')(function* (
+  config: Pick<RuntimeConfig, 'account' | 'agentContextHome' | 'manifestPath' | 'user'>,
+  allowedUriScopes: readonly string[],
+  ownedActiveArtifacts: Readonly<Record<string, OwnedActiveRelationArtifact>>,
+) {
+  const resourceIds = makeResourceIdScopeChecker();
+  const proofs = new Map<string, string | false>();
+  for (const [uri, artifact] of EffectRecord.toEntries(ownedActiveArtifacts)) {
+    if (artifact.state !== 'active') continue;
+    if (!EffectArray.some(allowedUriScopes, scope => resourceIds.isWithin(uri, scope))) continue;
+    const live = yield* readMemoryWithRelocations(config, uri, {allowedUriScopes}).pipe(
+      Effect.catchTag('MemoryPointerNotFound', () => Effect.void),
+    );
+    if (!live) continue;
+    if (!EffectArray.some(allowedUriScopes, scope => resourceIds.isWithin(live.canonicalUri, scope))) continue;
+    const record = parseMemoryDocument(live.canonicalUri, live.content);
+    if (!record || record.metadata.status !== 'active') continue;
+    const liveMemoryId = record.metadata.memoryId;
+    if (liveMemoryId === undefined) continue;
+    const existing = proofs.get(liveMemoryId);
+    if (existing === false) continue;
+    if (existing !== undefined) {
+      if (existing !== live.canonicalUri) proofs.set(liveMemoryId, false);
+    } else {
+      proofs.set(liveMemoryId, live.canonicalUri);
+    }
+  }
+  return proofs satisfies AuthorizedOwnedMemoryIdProofs;
+});
 
 export function memoryIdentityWriteLockKeys(
   sourceMemoryId: string | undefined,
@@ -139,6 +179,9 @@ export const resolveAuthoredMemoryRelations = Effect.fn('memory.resolveAuthoredR
   inputs: readonly RelationInput[],
   options: {
     readonly allowedUriScopes: readonly string[];
+    /** Direct verification also needs ownedMemoryIdProofs; artifacts alone take the recall identity check. */
+    readonly ownedActiveArtifacts?: Readonly<Record<string, OwnedActiveRelationArtifact>>;
+    readonly ownedMemoryIdProofs?: AuthorizedOwnedMemoryIdProofs;
     readonly sourceMemoryId?: string;
     readonly sourceUri?: string;
   },
@@ -205,22 +248,40 @@ export const resolveAuthoredMemoryRelations = Effect.fn('memory.resolveAuthoredR
     liveTargets,
     (target): target is (typeof liveTargets)[number] & {readonly memoryId: string} => target.memoryId !== undefined,
   );
+  const directlyVerifiedOwnedTargets = new Set<(typeof liveTargets)[number]>();
+  const recallIdentityTargets: typeof identityBearing = [];
+  for (const target of identityBearing) {
+    const owned = options.ownedActiveArtifacts?.[target.uri];
+    if (
+      owned !== undefined &&
+      owned.state === 'active' &&
+      memoryIdFromIdentityAlias(target.relation.uri) === undefined &&
+      target.uri === target.relation.uri &&
+      owned.memoryId === target.memoryId &&
+      sha256HexSync(target.content) === owned.revision &&
+      options.ownedMemoryIdProofs?.get(target.memoryId) === target.uri
+    ) {
+      directlyVerifiedOwnedTargets.add(target);
+      continue;
+    }
+    recallIdentityTargets.push(target);
+  }
   const identityChecks =
-    identityBearing.length === 0
+    recallIdentityTargets.length === 0
       ? []
       : yield* prepareMemoryIdentityAliases(
           config,
-          EffectArray.map(identityBearing, target => memoryIdentityAlias(target.memoryId)),
+          EffectArray.map(recallIdentityTargets, target => memoryIdentityAlias(target.memoryId)),
           allowedUriScopes,
         );
   const identityByMemoryId = new Map(
-    EffectArray.map(identityBearing, (target, index) => [target.memoryId, identityChecks[index]] as const),
+    EffectArray.map(recallIdentityTargets, (target, index) => [target.memoryId, identityChecks[index]] as const),
   );
   const output: MemoryRelation[] = [];
   const targets = new Map<string, AuthoredMemoryRelationTarget>();
   const seen = new Set<string>();
   for (const target of liveTargets) {
-    if (target.memoryId !== undefined) {
+    if (target.memoryId !== undefined && !directlyVerifiedOwnedTargets.has(target)) {
       const identity = identityByMemoryId.get(target.memoryId);
       if (identity === undefined || identity.canonicalUri !== target.uri) {
         return yield* relationError('Relation target identity changed during validation; refresh memory and retry.');

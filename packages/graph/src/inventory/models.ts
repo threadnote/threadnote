@@ -1,11 +1,22 @@
 import type {Effect} from 'effect';
 import type {ProjectManifest} from '@threadnote/workspace/config';
-import type {ResolvedCodeGraphIndexScope} from '../index_scope.js';
+import type {CodeGraphWorkspaceCatalog, ResolvedCodeGraphIndexScope} from '../index_scope.js';
 import type {CodeGraphWorkspace} from '../languages/types.js';
 import type {CodeGraphLanguagePackRegistryShape} from '../languages/registry.js';
 import type {CodeGraphInventoryFile, CodeGraphProgress} from '../types.js';
 import type {CodeGraphInventoryPolicyExclusionSummary, CodeGraphInventoryReuseReceipt} from '../store/models.js';
 import type {CodeGraphExtractionPlanMetrics} from '../progress/telemetry.js';
+import type {GitTreeEntry, PolicyExclusionEntry} from './preview.js';
+
+export interface CodeGraphCommittedScopeBasisCapture {
+  readonly accepted: readonly GitTreeEntry[];
+  readonly acceptedPaths: ReadonlySet<string>;
+  readonly admissionProjectRoots: readonly string[];
+  readonly admissionSourceRoots: readonly string[];
+  readonly allTreeEntries: readonly GitTreeEntry[];
+  readonly committedPolicyExclusions: ReadonlyMap<string, PolicyExclusionEntry>;
+  readonly scopeObservation: {readonly catalog: CodeGraphWorkspaceCatalog; readonly scope: ResolvedCodeGraphIndexScope};
+}
 
 export interface CodeGraphInventory {
   readonly scopeProject?: Pick<ProjectManifest, 'graph' | 'uri'>;
@@ -39,6 +50,11 @@ export interface CodeGraphOverlayObservation {
   readonly untrackedPaths: readonly string[];
 }
 
+export type CodeGraphRawDirtyOverlayPaths = Pick<
+  CodeGraphOverlayObservation,
+  'addedPaths' | 'changedPaths' | 'deletedPaths' | 'untrackedPaths'
+>;
+
 export interface CodeGraphObservedOverlayFile {
   readonly contentHash: string;
   readonly path: string;
@@ -55,6 +71,10 @@ export interface CodeGraphInventoryOptions {
   readonly project?: Pick<ProjectManifest, 'graph' | 'uri'>;
   /** @internal Metadata-only committed inputs for pre-admission applicability assessment. */
   readonly scopeObservationOnly?: boolean;
+  /** @internal Status/applicability-only scoped observation that omits repo-wide check-ignore and scopeExclusions. */
+  readonly statusScopeObservationOnly?: boolean;
+  /** @internal Captures committed scoped basis during a clean status observation pass. */
+  readonly onCommittedScopeBasis?: (basis: CodeGraphCommittedScopeBasisCapture) => void;
   readonly scopeObservation?: CodeGraphInventory;
   readonly cachedCommittedFileKeys?: ReadonlySet<string>;
   readonly includeOverlay?: boolean;
@@ -62,7 +82,7 @@ export interface CodeGraphInventoryOptions {
   readonly includeOpaqueCorpusAssets?: boolean;
   readonly languagePacks?: CodeGraphLanguagePackRegistryShape;
   /** Exact post-lock Git observation reused by inventory to avoid repeating diff and untracked scans. */
-  readonly overlayObservation?: CodeGraphOverlayObservation;
+  readonly overlayObservation?: CodeGraphRawDirtyOverlayPaths;
   readonly onContentBatch?: (
     files: readonly CodeGraphInventoryFile[],
     context: CodeGraphContentBatchContext,

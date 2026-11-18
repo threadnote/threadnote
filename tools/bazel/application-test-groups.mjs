@@ -1,5 +1,4 @@
 import {Array as EffectArray} from 'effect';
-/* oxlint-disable effecttsgo/node-builtin-import -- Target grouping runs before the declared Bazel graph exists. */
 import {posix} from 'node:path';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';

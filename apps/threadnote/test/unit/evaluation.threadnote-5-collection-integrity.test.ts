@@ -1,5 +1,4 @@
 import {Array as EffectArray, Predicate} from 'effect';
-/* oxlint-disable effecttsgo/node-builtin-import -- Regression tests exercise owned OS process boundaries. */
 import {appendFile, link, mkdtemp, realpath, rename, rm, symlink, writeFile} from 'node:fs/promises';
 import {EventEmitter} from 'node:events';
 import {tmpdir} from 'node:os';
