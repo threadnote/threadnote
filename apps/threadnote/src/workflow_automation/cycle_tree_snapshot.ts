@@ -111,9 +111,9 @@ const nativeCycleTreeSnapshotId = (identity: {
 }) => `tree-${EffectString.slice(0, 48)(sha256HexSync(stableJson(identity)))}`;
 
 /**
- * Record the current tree, clean or dirty, for the selected phase. The same tree under the same intent replays; a new
- * tree supersedes an unreviewed latest snapshot whatever its contract, and keeps the last reviewed snapshot of the same
- * intent as its review basis.
+ * Record the current tree, clean or dirty, for the selected phase. The same tree under the same intent and declared base
+ * replays; a new tree supersedes an unreviewed latest snapshot whatever its contract, and keeps the last reviewed
+ * snapshot of the same intent as its review basis.
  */
 export const recordNativeCycleTreeSnapshot = Effect.fn('workflowAutomation.cycle.treeSnapshot')(function* <
   E1,
@@ -179,6 +179,7 @@ export const recordNativeCycleTreeSnapshot = Effect.fn('workflowAutomation.cycle
     current?.snapshot.version === 4 &&
     current.snapshot.tree === captured.tree &&
     current.snapshot.scopeBase === scope.scopeBase &&
+    current.snapshot.declaredBaseHead === scope.declaredBaseHead &&
     current.snapshot.phaseHash === state.phases[phase.id].phaseHash
   )
     return {status: 'ok', revision: input.revision, replayed: true, snapshot: current};

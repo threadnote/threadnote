@@ -879,6 +879,33 @@ describe('incremental review by default', () => {
     }).pipe(runCycle),
   );
 
+  effectIt.effect('records the same tree again when the base moved without a rebase, then validates it', () =>
+    Effect.gen(function* () {
+      const {f, record, view, reviewed} = yield* setup();
+      expect((yield* view()).next).toMatchObject({action: 'implement'});
+      const again = yield* record();
+      expect(again.snapshotId).not.toBe(reviewed.snapshotId);
+      expect(again).toMatchObject({tree: reviewed.tree, scopeBase: reviewed.scopeBase});
+      expect(again.declaredBaseHead).not.toBe(reviewed.declaredBaseHead);
+      const card = yield* view();
+      expect(card.next).toMatchObject({action: 'validate', snapshotId: again.snapshotId});
+      const task = (command: string, fields: Record<string, unknown>) =>
+        runNativeTaskAction(f.config, {command, runId: 'native-run', callerCwd: f.repo, ...fields}).pipe(
+          Effect.map(object),
+        );
+      const validated = yield* task('record-validation', {
+        snapshotRef: card.phase?.snapshot?.snapshotRef,
+        validation: {
+          checks: [{command: 'private flow', result: 'passed', evidence: 'Actual scoped source fixture.'}],
+          acceptance: [{criterion: 'one works', result: 'passed', evidence: 'Source readback.'}],
+        },
+      });
+      expect(yield* task('deliver-local', {validationRef: validated.validationRef})).toMatchObject({
+        status: 'delivered',
+      });
+    }).pipe(runCycle),
+  );
+
   effectIt.effect('restarts with a full review when the rebased patch changed', () =>
     Effect.gen(function* () {
       const {f, record, view, reviewed} = yield* setup();
