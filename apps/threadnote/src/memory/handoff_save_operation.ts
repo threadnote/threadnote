@@ -6,6 +6,7 @@ import {
   Clock,
   Context,
   Effect,
+  Fiber,
   FileSystem,
   Option,
   Path,
@@ -178,6 +179,80 @@ const sameLiveOwner = Effect.fn('handoffSave.sameOwner')(function* (
   if (!system.isProcessRunning(value.processId)) return false;
   const observed = yield* observeCanonicalProcessInstanceIdentity(system, value.processId);
   return observed === undefined || observed === value.processStartIdentity;
+});
+/**
+ * Under the account intake lock: whether another live owner holds the account, and whether one more
+ * receipt fits once the oldest dead receipts retire.
+ */
+const reviewIntake = Effect.fn('handoffSave.reviewIntake')(function* (
+  config: RuntimeConfig,
+  scope: HandoffPrivateScope,
+  location: Pick<ReturnType<typeof paths>, 'directory' | 'owner'>,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  yield* scope.assert;
+  let previousOwner: string | undefined;
+  let liveOwner = false;
+  if (yield* fs.exists(location.owner)) {
+    const bytes = yield* fromPromise('handoffSave.owner', () =>
+      runtimeReadBoundedStableRegularFile(location.owner, 2048),
+    );
+    const parsed: unknown = yield* Effect.try(() => JSON.parse(new TextDecoder().decode(bytes)));
+    const owner = yield* Schema.decodeUnknownEffect(intakeOwnerSchema, {onExcessProperty: 'error'})(parsed);
+    liveOwner = yield* sameLiveOwner(owner);
+    if (!liveOwner && owner.user === config.user) previousOwner = owner.operationId;
+  }
+  const directory = yield* fromPromise('handoffSave.history', () =>
+    runtimeOpenTextDirectoryNameReader(location.directory, {entryKind: 'file'}),
+  );
+  let count = 0;
+  let pages = 0;
+  const names = new Set<string>();
+  const eligible: HandoffSaveReceipt[] = [];
+  try {
+    for (;;) {
+      if (++pages > 4) return {liveOwner, room: false};
+      const page = yield* fromPromise('handoffSave.historyPage', () => directory.readPage(64));
+      for (const name of page.names) {
+        names.add(name);
+        if (!/^[a-f0-9-]{36}\.json$/u.test(name)) continue;
+        if (++count > HANDOFF_SAVE_HISTORY_LIMIT) return {liveOwner, room: false};
+        const oldId = EffectString.slice(0, -5)(name);
+        const old = yield* readReceipt(config, oldId);
+        if (
+          old &&
+          old.operationId !== previousOwner &&
+          !(yield* sameLiveOwner(old)) &&
+          (terminal(old) || !old.goPossible) &&
+          !(yield* fs.exists(paths(path, config, oldId).decision))
+        )
+          eligible.push(old);
+      }
+      if (page.done) break;
+    }
+  } finally {
+    yield* fromPromise('handoffSave.closeHistory', () => directory.close());
+  }
+  // Retain recent results below capacity, including results not yet collected by their caller.
+  eligible.sort((left, right) => left.updatedAt - right.updatedAt || (left.operationId < right.operationId ? -1 : 1));
+  for (const old of EffectArray.take(eligible, 4)) {
+    if (count < HANDOFF_SAVE_HISTORY_LIMIT) break;
+    const previous = paths(path, config, old.operationId);
+    yield* scope.assert;
+    if (names.has(old.operationId + '.cancel')) {
+      const cancel = new TextDecoder().decode(
+        yield* fromPromise('handoffSave.retiredCancel', () =>
+          runtimeReadBoundedStableRegularFile(previous.cancel, 256),
+        ),
+      );
+      if (cancel !== old.operationId) continue;
+      yield* fs.remove(previous.cancel);
+    }
+    yield* fs.remove(previous.receipt);
+    count--;
+  }
+  return {liveOwner, room: count < HANDOFF_SAVE_HISTORY_LIMIT};
 });
 function resultForReceipt(value: HandoffSaveReceipt): CallToolResult {
   if (value.stage === 'complete' && value.response)
@@ -379,6 +454,79 @@ const anotherSaveInProgress = {
   ],
   structuredContent: {reason: 'another-save-in-progress'},
 } satisfies typeof handoffSaveResponseSchema.Type;
+const workerNotReady = {
+  content: [
+    {
+      type: 'text' as const,
+      text: 'Handoff save was not started because its save worker could not start or did not become ready. Nothing was written; retrying this save is safe.',
+    },
+  ],
+  structuredContent: {reason: 'worker-not-ready'},
+} satisfies typeof handoffSaveResponseSchema.Type;
+
+/**
+ * Only the parent sends go. Once a worker it never authorized has exited, nothing can still write for
+ * its operation, so the parent closes it as not started under the intake lock and history bound.
+ */
+const closeUnstarted = Effect.fn('handoffSave.closeUnstarted')(
+  function* (
+    config: RuntimeConfig,
+    operationId: string,
+    child: HandoffSaveChild,
+    basis: Pick<HandoffSaveReceipt, 'source' | 'intentDigest'>,
+  ) {
+    yield* fromPromise('handoffSave.workerExit', () => child.exited);
+    const scope = yield* privateScope(config);
+    if (!scope) return undefined;
+    const location = paths(yield* Path.Path, scope.config, operationId);
+    return yield* withExclusiveFileLock(
+      yield* FileSystem.FileSystem,
+      location.intake,
+      {...lockOptions, waitTimeoutMilliseconds: HANDOFF_SAVE_READY_MILLISECONDS},
+      Effect.gen(function* () {
+        const current = yield* readReceipt(scope.config, operationId);
+        if (
+          current ? terminal(current) || current.authorized : !(yield* reviewIntake(scope.config, scope, location)).room
+        )
+          return current;
+        const now = yield* Clock.currentTimeMillis;
+        const closed: HandoffSaveReceipt = current
+          ? {
+              ...current,
+              sequence: current.sequence + 1,
+              updatedAt: Math.max(now, current.updatedAt),
+              stage: 'not-started',
+              response: workerNotReady,
+            }
+          : {
+              format: 'threadnote-handoff-save',
+              version: 1,
+              operationId,
+              account: config.account,
+              user: config.user,
+              ...basis,
+              processId: child.pid,
+              processStartIdentity: '',
+              sequence: 0,
+              updatedAt: now,
+              stage: 'not-started',
+              goPossible: false,
+              authorized: false,
+              possiblyApplied: false,
+              canonicalObserved: false,
+              lexicalVerified: false,
+              response: workerNotReady,
+            };
+        yield* writeReceipt(scope.config, closed, scope, current);
+        return closed;
+      }),
+    );
+  },
+  Effect.catchCauseIf(
+    cause => !Cause.hasInterrupts(cause),
+    () => Effect.void,
+  ),
+);
 
 /** Pumps belong to the process supervisor, not the finished MCP request scope. */
 function superviseChildFrames(
@@ -439,7 +587,10 @@ function superviseChildFrames(
   return {ready, result, valid: () => valid};
 }
 
-/** No parent receipt writes. The in-memory authorization latch precedes the go frame. */
+/**
+ * The in-memory authorization latch precedes the go frame. The parent writes a receipt only to close an
+ * operation it never authorized, after that operation's worker has exited.
+ */
 export const launchOwnedHandoffSave = Effect.fn('handoffSave.launch')(function* (
   config: RuntimeConfig,
   args: Readonly<Record<string, unknown>>,
@@ -451,8 +602,10 @@ export const launchOwnedHandoffSave = Effect.fn('handoffSave.launch')(function* 
   const spawn = yield* CurrentHandoffSaveSpawn;
   const operationId = yield* (yield* SecureRandom.SecureRandom).uuidV4();
   let owned: {child: HandoffSaveChild; authorized: boolean} | undefined;
+  let stopped = false;
   const stopUnapproved = Effect.sync(() => {
-    if (owned && !owned.authorized) {
+    if (owned && !owned.authorized && !stopped) {
+      stopped = true;
       try {
         owned.child.stdin.end();
         owned.child.kill('SIGTERM');
@@ -514,9 +667,25 @@ export const launchOwnedHandoffSave = Effect.fn('handoffSave.launch')(function* 
       return yield* HandoffSaveOperationError.make({message: 'Handoff executable or process instance changed.'});
     return {owner, frames};
   });
+  const notStarted = Effect.gen(function* () {
+    if (!owned)
+      return {
+        content: [...workerNotReady.content],
+        structuredContent: {...workerNotReady.structuredContent, state: 'not-started', authorized: false},
+      } satisfies CallToolResult;
+    const child = owned.child;
+    yield* stopUnapproved;
+    // The close outlives this request when the worker exits after the wait, as a stopped worker does.
+    const closing = yield* closeUnstarted(config, operationId, child, {
+      source: identity,
+      intentDigest: sha256HexSync(JSON.stringify(args)),
+    }).pipe(Effect.forkDetach);
+    const closed = yield* Fiber.join(closing).pipe(Effect.timeoutOption(HANDOFF_SAVE_RESULT_MILLISECONDS));
+    return Option.isSome(closed) && closed.value ? resultForReceipt(closed.value) : pendingResult(operationId, false);
+  });
   return yield* Effect.gen(function* () {
     const ready = yield* prepare.pipe(Effect.timeoutOption(HANDOFF_SAVE_READY_MILLISECONDS));
-    if (Option.isNone(ready)) return pendingResult(operationId, false);
+    if (Option.isNone(ready)) return yield* notStarted;
     if (ready.value.refused) return resultForReceipt(ready.value.refused);
     const {owner, frames} = ready.value;
     // No await, mutation or durable I/O may intervene between the latch and go authorization.
@@ -531,7 +700,7 @@ export const launchOwnedHandoffSave = Effect.fn('handoffSave.launch')(function* 
   }).pipe(
     Effect.catchCauseIf(
       cause => !Cause.hasInterrupts(cause),
-      () => Effect.succeed(pendingResult(operationId, owned?.authorized === true)),
+      () => (owned?.authorized ? Effect.succeed(pendingResult(operationId, true)) : notStarted),
     ),
     Effect.ensuring(stopUnapproved),
   );
@@ -634,71 +803,9 @@ export const runHandoffSaveWorker = Effect.fn('handoffSave.worker')(function* ()
     location.intake,
     lockOptions,
     Effect.gen(function* () {
-      yield* scope.assert;
-      let previousOwner: string | undefined;
-      let liveOwner = false;
-      if (yield* fs.exists(location.owner)) {
-        const bytes = yield* fromPromise('handoffSave.owner', () =>
-          runtimeReadBoundedStableRegularFile(location.owner, 2048),
-        );
-        const parsed: unknown = yield* Effect.try(() => JSON.parse(new TextDecoder().decode(bytes)));
-        const owner = yield* Schema.decodeUnknownEffect(intakeOwnerSchema, {onExcessProperty: 'error'})(parsed);
-        liveOwner = yield* sameLiveOwner(owner);
-        if (!liveOwner && owner.user === config.user) previousOwner = owner.operationId;
-      }
-      const directory = yield* fromPromise('handoffSave.history', () =>
-        runtimeOpenTextDirectoryNameReader(location.directory, {entryKind: 'file'}),
-      );
-      let count = 0;
-      let pages = 0;
-      const names = new Set<string>();
-      const eligible: HandoffSaveReceipt[] = [];
-      try {
-        for (;;) {
-          if (++pages > 4) return false;
-          const page = yield* fromPromise('handoffSave.historyPage', () => directory.readPage(64));
-          for (const name of page.names) {
-            names.add(name);
-            if (!/^[a-f0-9-]{36}\.json$/u.test(name)) continue;
-            if (++count > HANDOFF_SAVE_HISTORY_LIMIT) return false;
-            const oldId = EffectString.slice(0, -5)(name);
-            const old = yield* readReceipt(config, oldId);
-            if (
-              old &&
-              old.operationId !== previousOwner &&
-              !(yield* sameLiveOwner(old)) &&
-              (terminal(old) || !old.goPossible) &&
-              !(yield* fs.exists(paths(path, config, oldId).decision))
-            )
-              eligible.push(old);
-          }
-          if (page.done) break;
-        }
-      } finally {
-        yield* fromPromise('handoffSave.closeHistory', () => directory.close());
-      }
-      // Retain recent results below capacity, including results not yet collected by their caller.
-      eligible.sort(
-        (left, right) => left.updatedAt - right.updatedAt || (left.operationId < right.operationId ? -1 : 1),
-      );
-      for (const old of EffectArray.take(eligible, 4)) {
-        if (count < HANDOFF_SAVE_HISTORY_LIMIT) break;
-        const previous = paths(path, config, old.operationId);
-        yield* scope.assert;
-        if (names.has(old.operationId + '.cancel')) {
-          const cancel = new TextDecoder().decode(
-            yield* fromPromise('handoffSave.retiredCancel', () =>
-              runtimeReadBoundedStableRegularFile(previous.cancel, 256),
-            ),
-          );
-          if (cancel !== old.operationId) continue;
-          yield* fs.remove(previous.cancel);
-        }
-        yield* fs.remove(previous.receipt);
-        count--;
-      }
-      if (count >= HANDOFF_SAVE_HISTORY_LIMIT) return false;
-      if (liveOwner) {
+      const intake = yield* reviewIntake(config, scope, location);
+      if (!intake.room) return false;
+      if (intake.liveOwner) {
         // One owned save runs per account. Record the refusal so status reports it instead of unknown.
         value = {...value, stage: 'not-started', response: anotherSaveInProgress};
         yield* writeReceipt(config, value, scope);
