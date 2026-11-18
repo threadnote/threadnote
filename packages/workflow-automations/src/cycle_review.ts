@@ -353,6 +353,8 @@ export function validateNativeCycleReviewHistory(
     ) ?? [],
   );
   const seen = new Set<string>();
+  const unmatched: string[] = [];
+  const reintroduced: string[] = [];
   for (const finding of review.findings) {
     if (
       seen.has(finding.id) ||
@@ -372,9 +374,19 @@ export function validateNativeCycleReviewHistory(
       )
     )
       fail('Resolving, rejecting or downgrading a finding requires evidence.');
-    if ((['resolved', 'carried'].includes(finding.state) && !old) || (finding.state === 'new' && old))
-      fail('Prior findings must retain their identity and disposition.');
+    if (['resolved', 'carried'].includes(finding.state) && !old) unmatched.push(finding.id);
+    if (finding.state === 'new' && old) reintroduced.push(finding.id);
   }
+  if (unmatched.length > 0)
+    fail(
+      previous
+        ? `Findings ${EffectArray.join(unmatched, ', ')} are resolved or carried but have no matching ID in the predecessor review. Reuse the prior finding ID, or report them as new or rejected.`
+        : `This ${review.mode} review has no predecessor review, so findings cannot be resolved or carried (${EffectArray.join(unmatched, ', ')}). Report open findings as new or rejected.`,
+    );
+  if (reintroduced.length > 0)
+    fail(
+      `Findings ${EffectArray.join(reintroduced, ', ')} already exist in the predecessor review. Report them as carried, resolved or rejected instead of new.`,
+    );
   for (const finding of prior.values())
     if (blocking(finding) && !seen.has(finding.id)) fail('A prior blocker disappeared without a disposition.');
   const active = EffectArrayPipe(review.findings, __effectArrayValues =>
