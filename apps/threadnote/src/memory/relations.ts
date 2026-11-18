@@ -90,15 +90,6 @@ export const buildAuthorizedOwnedMemoryIdProofs = Effect.fn('memory.buildOwnedMe
   return proofs satisfies AuthorizedOwnedMemoryIdProofs;
 });
 
-export function isAuthorizedOwnedMemoryIdOwner(
-  proofs: AuthorizedOwnedMemoryIdProofs,
-  memoryId: string,
-  canonicalUri: string,
-): boolean {
-  const ownerUri = proofs.get(memoryId);
-  return ownerUri !== undefined && ownerUri !== false && ownerUri === canonicalUri;
-}
-
 export function memoryIdentityWriteLockKeys(
   sourceMemoryId: string | undefined,
   targets: readonly {readonly memoryId?: string}[],
@@ -188,6 +179,7 @@ export const resolveAuthoredMemoryRelations = Effect.fn('memory.resolveAuthoredR
   inputs: readonly RelationInput[],
   options: {
     readonly allowedUriScopes: readonly string[];
+    /** Direct verification also needs ownedMemoryIdProofs; artifacts alone take the recall identity check. */
     readonly ownedActiveArtifacts?: Readonly<Record<string, OwnedActiveRelationArtifact>>;
     readonly ownedMemoryIdProofs?: AuthorizedOwnedMemoryIdProofs;
     readonly sourceMemoryId?: string;
@@ -252,11 +244,6 @@ export const resolveAuthoredMemoryRelations = Effect.fn('memory.resolveAuthoredR
     }),
   );
 
-  const ownedMemoryIdProofs =
-    options.ownedMemoryIdProofs ??
-    (options.ownedActiveArtifacts === undefined
-      ? undefined
-      : yield* buildAuthorizedOwnedMemoryIdProofs(config, allowedUriScopes, options.ownedActiveArtifacts));
   const identityBearing = EffectArray.filter(
     liveTargets,
     (target): target is (typeof liveTargets)[number] & {readonly memoryId: string} => target.memoryId !== undefined,
@@ -271,16 +258,11 @@ export const resolveAuthoredMemoryRelations = Effect.fn('memory.resolveAuthoredR
       memoryIdFromIdentityAlias(target.relation.uri) === undefined &&
       target.uri === target.relation.uri &&
       owned.memoryId === target.memoryId &&
-      sha256HexSync(target.content) === owned.revision
+      sha256HexSync(target.content) === owned.revision &&
+      options.ownedMemoryIdProofs?.get(target.memoryId) === target.uri
     ) {
-      const ownerProven =
-        ownedMemoryIdProofs === undefined
-          ? false
-          : isAuthorizedOwnedMemoryIdOwner(ownedMemoryIdProofs, target.memoryId, target.uri);
-      if (ownerProven) {
-        directlyVerifiedOwnedTargets.add(target);
-        continue;
-      }
+      directlyVerifiedOwnedTargets.add(target);
+      continue;
     }
     recallIdentityTargets.push(target);
   }

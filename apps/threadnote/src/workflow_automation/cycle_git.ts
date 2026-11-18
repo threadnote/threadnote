@@ -50,21 +50,7 @@ const statVerificationGitConfig = [
 ] as const;
 
 type GitIndexStagingPlan =
-  | {readonly mode: 'full-renormalize'}
-  | {
-      readonly mode: 'targeted';
-      readonly rehashPaths: readonly string[];
-      readonly renormalizePaths: readonly string[];
-    };
-
-interface GitIndexRegularFile {
-  readonly blobId: string;
-  readonly ctimeSec: number;
-  readonly mode: number;
-  readonly mtimeSec: number;
-  readonly path: string;
-  readonly size: number;
-}
+  {readonly mode: 'full-renormalize'} | {readonly mode: 'targeted'; readonly renormalizePaths: readonly string[]};
 
 function isGitAttributesPath(value: string): boolean {
   const lower = Effect2.pipe(value, EffectString.toLowerCase);
@@ -124,14 +110,7 @@ function walkGitIndex(
   index: Uint8Array,
   objectFormat: 'sha1' | 'sha256',
   verifyTrailer: boolean,
-  onEntry: (
-    entryStart: number,
-    ctimeSec: number,
-    mode: number,
-    flags: number,
-    extendedFlags: number,
-    pathBytes: Uint8Array,
-  ) => boolean,
+  onEntry: (ctimeSec: number, mode: number, flags: number, extendedFlags: number, pathBytes: Uint8Array) => boolean,
 ): boolean {
   const objectIdBytes = objectFormat === 'sha1' ? 20 : 32;
   if (index.byteLength < gitIndexHeaderBytes + objectIdBytes) return false;
@@ -193,7 +172,7 @@ function walkGitIndex(
 
     const declaredPathBytes = flags & gitIndexNameLengthMask;
     if (declaredPathBytes !== gitIndexNameLengthMask && declaredPathBytes !== pathBytes.byteLength) return false;
-    if (!onEntry(entryStart, ctimeSec, mode, flags, extendedFlags, pathBytes)) return false;
+    if (!onEntry(ctimeSec, mode, flags, extendedFlags, pathBytes)) return false;
   }
 
   while (offset < contentEnd) {
@@ -209,63 +188,6 @@ function walkGitIndex(
   return !verifyTrailer || validGitIndexTrailer(index, contentEnd, objectFormat);
 }
 
-function gitIndexObjectIdHex(index: Uint8Array, entryStart: number, objectIdBytes: number): string {
-  let hex = '';
-  for (
-    let offset = entryStart + gitIndexEntryStatBytes;
-    offset < entryStart + gitIndexEntryStatBytes + objectIdBytes;
-    offset++
-  ) {
-    hex += EffectString.padStart(2, '0')(index[offset].toString(16));
-  }
-  return hex;
-}
-
-interface GitIndexStagingInventory {
-  readonly files: readonly GitIndexRegularFile[];
-  readonly renormalizePaths: readonly string[];
-}
-
-function collectGitIndexStagingInventory(
-  index: Uint8Array,
-  objectFormat: 'sha1' | 'sha256',
-  recentCtimeFloorSec: number,
-): GitIndexStagingInventory | undefined {
-  const objectIdBytes = objectFormat === 'sha1' ? 20 : 32;
-  const decoder = new TextDecoder('utf-8', {fatal: true});
-  const files: GitIndexRegularFile[] = [];
-  const recentPaths: string[] = [];
-  const ok = walkGitIndex(index, objectFormat, true, (entryStart, ctimeSec, mode, flags, extendedFlags, pathBytes) => {
-    if ((flags & gitIndexHiddenOrUnmergedMask) !== 0 || (extendedFlags & ~gitIndexIntentToAddExtendedFlag) !== 0)
-      return false;
-    if (mode !== 0o100644 && mode !== 0o100755) return true;
-    if (files.length >= targetedRenormalizePathLimit) return false;
-    const view = new DataView(index.buffer, index.byteOffset, index.byteLength);
-    const mtimeSec = view.getUint32(entryStart + 12, false);
-    const size = view.getUint32(entryStart + 36, false);
-    try {
-      const path = decoder.decode(pathBytes);
-      if (!nativeCycleRelativePath(path)) return false;
-      files.push({
-        blobId: gitIndexObjectIdHex(index, entryStart, objectIdBytes),
-        ctimeSec,
-        mode,
-        mtimeSec,
-        path,
-        size,
-      });
-      if (ctimeSec >= recentCtimeFloorSec) {
-        if (recentPaths.length >= targetedRenormalizePathLimit) return false;
-        recentPaths.push(path);
-      }
-    } catch {
-      return false;
-    }
-    return true;
-  });
-  return ok ? {files, renormalizePaths: recentPaths} : undefined;
-}
-
 function inspectGitIndexForRenormalizeTargets(
   index: Uint8Array,
   objectFormat: 'sha1' | 'sha256',
@@ -273,7 +195,7 @@ function inspectGitIndexForRenormalizeTargets(
 ): readonly string[] | undefined {
   const decoder = new TextDecoder('utf-8', {fatal: true});
   const recentPaths: string[] = [];
-  const ok = walkGitIndex(index, objectFormat, true, (_entryStart, ctimeSec, mode, flags, extendedFlags, pathBytes) => {
+  const ok = walkGitIndex(index, objectFormat, true, (ctimeSec, mode, flags, extendedFlags, pathBytes) => {
     if ((flags & gitIndexHiddenOrUnmergedMask) !== 0 || (extendedFlags & ~gitIndexIntentToAddExtendedFlag) !== 0)
       return false;
     if ((mode === 0o100644 || mode === 0o100755) && ctimeSec >= recentCtimeFloorSec) {
@@ -291,69 +213,83 @@ function inspectGitIndexForRenormalizeTargets(
   return ok ? recentPaths : undefined;
 }
 
-const readGitConfigValue = Effect.fn('workflowAutomation.cycle.readGitConfig')(function* (
+const gitConfigFalse = (value: string) =>
+  EffectArray.contains(['', '0', 'false', 'no', 'off'], Effect2.pipe(value, EffectString.toLowerCase));
+const outOfTreeAttributesByteLimit = 65_536;
+const blobNeutralAttributes = new Set([
+  'conflict-marker-size',
+  'delta',
+  'diff',
+  'encoding',
+  'export-ignore',
+  'export-subst',
+  'merge',
+  'whitespace',
+]);
+
+/** Diff, merge and export attributes leave staged blob bytes alone; any other attribute may normalize them. */
+function attributesMayNormalize(content: string): boolean {
+  for (const line of Effect2.pipe(content, EffectString.split('\n'))) {
+    const fields = EffectArray.filter(Effect2.pipe(line, EffectString.trim, EffectString.split(/\s+/u)), Boolean);
+    if (fields.length === 0 || Effect2.pipe(fields[0], EffectString.startsWith('#'))) continue;
+    for (const field of fields.slice(1)) {
+      const name = Effect2.pipe(field, EffectString.replace(/^[-!]/u, ''), EffectString.split('='))[0];
+      if (!blobNeutralAttributes.has(name) && !Effect2.pipe(name, EffectString.startsWith('linguist-'))) return true;
+    }
+  }
+  return false;
+}
+
+/** An attributes file outside the index that may change normalization; unreadable files count as changing it. */
+const outOfTreeAttributesMayNormalize = Effect.fn('workflowAutomation.cycle.outOfTreeAttributes')(function* (
+  file: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  if (!(yield* fs.exists(file).pipe(Effect.orElseSucceed(() => true)))) return false;
+  const info = yield* fs.stat(file).pipe(Effect.option);
+  if (Option.isNone(info) || info.value.type !== 'File' || Number(info.value.size) > outOfTreeAttributesByteLimit)
+    return true;
+  const content = yield* fs.readFileString(file).pipe(Effect.option);
+  return Option.isNone(content) || attributesMayNormalize(content.value);
+});
+
+/** Effective config in one read; a system-scope origin locates the sibling system attributes file. */
+const readGitNormalizationConfig = Effect.fn('workflowAutomation.cycle.readNormalizationConfig')(function* (
   repo: string,
-  scope: 'global' | 'local',
-  key: string,
 ) {
   const result = yield* runCommandEffect(
     'git',
-    ['--no-optional-locks', '-C', repo, ...(scope === 'global' ? ['--global'] : []), 'config', '--get', key],
-    {allowFailure: true, maxOutputBytes: 4096, timeoutMs: 10_000},
+    ['--no-optional-locks', '-C', repo, 'config', '-z', '--list', '--show-scope', '--show-origin'],
+    {allowFailure: true, maxOutputBytes: outputLimit, timeoutMs: 10_000},
   );
-  if (result.exitCode !== 0) return '';
-  return Effect2.pipe(result.stdout, EffectString.trim);
-});
-
-const detectAmbiguousIndexPaths = Effect.fn('workflowAutomation.cycle.detectAmbiguousPaths')(function* (
-  root: string,
-  files: readonly GitIndexRegularFile[],
-) {
-  const worktreeDiffPaths = EffectArray.filter(
-    Effect2.pipe(
-      yield* runCommandEffect('git', ['--no-optional-locks', '-C', root, 'diff-files', '--name-only', '-z'], {
-        maxOutputBytes: outputLimit,
-        timeoutMs: stagingTimeoutMs,
-      }),
-      result => EffectString.split(result.stdout, '\0'),
-    ),
-    (path): path is string => path.length > 0 && nativeCycleRelativePath(path),
-  );
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const ambiguous: string[] = [];
-  for (const file of files) {
-    if (ambiguous.length >= targetedRenormalizePathLimit) return undefined;
-    const fullPath = path.join(root, file.path);
-    if (Option.isSome(yield* fs.readLink(fullPath).pipe(Effect.option))) continue;
-    const stat = yield* fs.stat(fullPath).pipe(Effect.option);
-    if (Option.isNone(stat) || stat.value.type !== 'File') continue;
-    const liveMtime = Option.match(stat.value.mtime, {
-      onNone: () => undefined,
-      onSome: value => Math.floor(value.getTime() / 1000),
-    });
-    const liveSize = Number(stat.value.size);
-    const statMatches = liveMtime === file.mtimeSec && liveSize === file.size;
-    let needsRehash = !statMatches || file.ctimeSec > file.mtimeSec;
-    if (statMatches) {
-      const hashResult = yield* runBinaryCommandEffect(
-        'git',
-        ['--no-optional-locks', '-C', root, 'hash-object', '--path', file.path, fullPath],
-        {maxOutputBytes: outputLimit, timeoutMs: stagingTimeoutMs},
+  const fields = Effect2.pipe(result.stdout, EffectString.split('\0'));
+  if (result.exitCode !== 0 || fields.length % 3 !== 1 || fields.at(-1) !== '') return undefined;
+  const values = new Map<string, string>();
+  const systemFiles: string[] = [];
+  for (let offset = 0; offset + 3 < fields.length; offset += 3) {
+    const [scope, origin, entry] = [fields[offset], fields[offset + 1], fields[offset + 2]];
+    const separator = Effect2.pipe(
+      entry,
+      EffectString.indexOf('\n'),
+      Option.getOrElse(() => -1),
+    );
+    // A key without "=" is an implicit boolean true.
+    if (separator < 0) values.set(entry, 'true');
+    else
+      values.set(
+        Effect2.pipe(entry, EffectString.slice(0, separator)),
+        Effect2.pipe(entry, EffectString.slice(separator + 1)),
       );
-      const hashed = EffectString.trim(new TextDecoder('utf-8', {fatal: true}).decode(hashResult.stdout));
-      needsRehash = hashed !== file.blobId;
-    }
-    if (needsRehash) ambiguous.push(file.path);
+    if (scope === 'system' && Effect2.pipe(origin, EffectString.startsWith('file:')))
+      systemFiles.push(Effect2.pipe(origin, EffectString.slice(5)));
   }
-  return [...new Set([...ambiguous, ...worktreeDiffPaths])].slice(0, targetedRenormalizePathLimit);
+  return {values, systemFiles};
 });
 
-const stageIndexedPathBatches = Effect.fn('workflowAutomation.cycle.stagePathBatches')(function* (
+const renormalizeIndexedPathBatches = Effect.fn('workflowAutomation.cycle.renormalizePathBatches')(function* (
   root: string,
   index: string,
   paths: readonly string[],
-  renormalize: boolean,
 ) {
   let offset = 0;
   while (offset < paths.length) {
@@ -367,12 +303,7 @@ const stageIndexedPathBatches = Effect.fn('workflowAutomation.cycle.stagePathBat
       argumentBytes += size;
       offset++;
     }
-    yield* git(
-      root,
-      [...statVerificationGitConfig, 'add', ...(renormalize ? ['--renormalize'] : []), '--', ...batch],
-      index,
-      stagingTimeoutMs,
-    );
+    yield* git(root, [...statVerificationGitConfig, 'add', '--renormalize', '--', ...batch], index, stagingTimeoutMs);
   }
 });
 
@@ -394,26 +325,21 @@ function filterTrackedRegularFilesInIndex(
     bucket.add(candidate);
   }
   const matched: string[] = [];
-  const ok = walkGitIndex(
-    index,
-    objectFormat,
-    false,
-    (_entryStart, _ctimeSec, mode, flags, extendedFlags, pathBytes) => {
-      if ((flags & gitIndexHiddenOrUnmergedMask) !== 0 || (extendedFlags & ~gitIndexIntentToAddExtendedFlag) !== 0) {
-        return false;
-      }
-      if (mode !== 0o100644 && mode !== 0o100755) return true;
-      const bucket = wantedByLength.get(pathBytes.byteLength);
-      if (!bucket) return true;
-      try {
-        const decoded = decoder.decode(pathBytes);
-        if (bucket.has(decoded)) matched.push(decoded);
-        return true;
-      } catch {
-        return false;
-      }
-    },
-  );
+  const ok = walkGitIndex(index, objectFormat, false, (_ctimeSec, mode, flags, extendedFlags, pathBytes) => {
+    if ((flags & gitIndexHiddenOrUnmergedMask) !== 0 || (extendedFlags & ~gitIndexIntentToAddExtendedFlag) !== 0) {
+      return false;
+    }
+    if (mode !== 0o100644 && mode !== 0o100755) return true;
+    const bucket = wantedByLength.get(pathBytes.byteLength);
+    if (!bucket) return true;
+    try {
+      const decoded = decoder.decode(pathBytes);
+      if (bucket.has(decoded)) matched.push(decoded);
+      return true;
+    } catch {
+      return false;
+    }
+  });
   return ok ? matched : undefined;
 }
 
@@ -570,12 +496,19 @@ export const captureNativeCycleSource = Effect.fn('workflowAutomation.cycle.capt
   const baseTree = yield* resolveObject(root, base, 'tree');
   if ((yield* git(root, ['ls-files', '--unmerged', '-z'])).length)
     return yield* fail('unmerged-index', 'Resolve index conflicts before taking a cycle snapshot.');
-  const platform = Option.match(yield* Effect.serviceOption(SystemInfo), {
+  const system = yield* Effect.serviceOption(SystemInfo);
+  const platform = Option.match(system, {
     onNone: () => runtimePlatform,
     onSome: info => info.platform,
   });
   const objectFormat = head.length === 64 ? 'sha256' : 'sha1';
-  const status = yield* git(root, ['status', '--porcelain=v2', '-z', '--ignore-submodules=none']);
+  const status = yield* git(root, [
+    'status',
+    '--porcelain=v2',
+    '-z',
+    '--ignore-submodules=none',
+    '--untracked-files=all',
+  ]);
   const statusRecords = Effect2.pipe(status, EffectString.split('\0'));
   let hasNormalizationBasisDrift = platform === 'win32';
   for (let index = 0; index < statusRecords.length; index++) {
@@ -613,6 +546,21 @@ export const captureNativeCycleSource = Effect.fn('workflowAutomation.cycle.capt
     )
       return yield* fail('dirty-submodule', 'Run a separate cycle for dirty submodule content.');
   }
+  // Status omits ignored files, yet Git still applies an ignored .gitattributes; --directory skips wholly ignored trees.
+  if (!hasNormalizationBasisDrift) {
+    const ignored = yield* git(root, [
+      'ls-files',
+      '--others',
+      '--ignored',
+      '--exclude-standard',
+      '--directory',
+      '-z',
+      '--',
+      ':(icase,glob).gitattributes',
+      ':(icase,glob)**/.gitattributes',
+    ]);
+    hasNormalizationBasisDrift = EffectArray.some(Effect2.pipe(ignored, EffectString.split('\0')), isGitAttributesPath);
+  }
   const gitPathLines = Effect2.pipe(
     yield* git(root, ['rev-parse', '--git-path', 'index', '--git-path', 'info/attributes']),
     EffectString.trimEnd,
@@ -640,55 +588,49 @@ export const captureNativeCycleSource = Effect.fn('workflowAutomation.cycle.capt
       hasNormalizationBasisDrift = true;
     }
   }
-  if (!hasNormalizationBasisDrift && platform !== 'win32') {
-    const localAutocrlf = yield* readGitConfigValue(root, 'local', 'core.autocrlf');
-    const globalAutocrlf = yield* readGitConfigValue(root, 'global', 'core.autocrlf');
-    if (
-      (localAutocrlf.length > 0 && localAutocrlf !== 'false') ||
-      (globalAutocrlf.length > 0 && globalAutocrlf !== 'false')
-    ) {
-      hasNormalizationBasisDrift = true;
+  // CRLF conversion, an index that ignores ctime, or attributes outside the index need full renormalization.
+  if (!hasNormalizationBasisDrift) {
+    const config = yield* readGitNormalizationConfig(root);
+    const environment = Option.getOrUndefined(Option.map(system, info => info.environment()));
+    const autocrlf = config?.values.get('core.autocrlf');
+    const trustCtime = config?.values.get('core.trustctime');
+    const attributesFile = config?.values.get('core.attributesfile');
+    const home = environment?.HOME;
+    const xdgConfigHome = environment?.XDG_CONFIG_HOME;
+    const configuredAttributes =
+      attributesFile === undefined
+        ? []
+        : path.isAbsolute(attributesFile)
+          ? [attributesFile]
+          : home && Effect2.pipe(attributesFile, EffectString.startsWith('~/'))
+            ? [path.join(home, Effect2.pipe(attributesFile, EffectString.slice(2)))]
+            : undefined;
+    hasNormalizationBasisDrift =
+      config === undefined ||
+      environment === undefined ||
+      configuredAttributes === undefined ||
+      (autocrlf !== undefined && !gitConfigFalse(autocrlf)) ||
+      (trustCtime !== undefined && gitConfigFalse(trustCtime));
+    for (const file of [
+      ...(configuredAttributes ?? []),
+      ...(xdgConfigHome ? [path.join(xdgConfigHome, 'git', 'attributes')] : []),
+      ...(home ? [path.join(home, '.config', 'git', 'attributes')] : []),
+      '/etc/gitattributes',
+      ...EffectArray.map(config?.systemFiles ?? [], file => path.join(path.dirname(file), 'gitattributes')),
+    ]) {
+      if (hasNormalizationBasisDrift) break;
+      hasNormalizationBasisDrift = yield* outOfTreeAttributesMayNormalize(file);
     }
   }
   const recentCtimeFloorSec = Math.max(0, captureStartSec - recentIndexCtimeWindowSeconds);
-  const localTrustCtime =
-    !hasNormalizationBasisDrift && originalIndex !== undefined
-      ? yield* readGitConfigValue(root, 'local', 'core.trustctime')
-      : undefined;
-  let indexStagingInventory: GitIndexStagingInventory | undefined;
-  let stagingPlan: GitIndexStagingPlan;
-  if (hasNormalizationBasisDrift) {
-    stagingPlan = {mode: 'full-renormalize'};
-  } else if (originalIndex) {
-    if (localTrustCtime === 'false') {
-      indexStagingInventory = collectGitIndexStagingInventory(originalIndex, objectFormat, recentCtimeFloorSec);
-      stagingPlan =
-        indexStagingInventory === undefined
-          ? {mode: 'full-renormalize'}
-          : {
-              mode: 'targeted',
-              rehashPaths: [],
-              renormalizePaths: indexStagingInventory.renormalizePaths,
-            };
-    } else {
-      const renormalizePaths = inspectGitIndexForRenormalizeTargets(originalIndex, objectFormat, recentCtimeFloorSec);
-      stagingPlan =
-        renormalizePaths === undefined
-          ? {mode: 'full-renormalize'}
-          : {mode: 'targeted', rehashPaths: [], renormalizePaths};
-    }
-  } else {
-    stagingPlan = {mode: 'targeted', rehashPaths: [], renormalizePaths: []};
-  }
-  if (stagingPlan.mode === 'targeted' && localTrustCtime === 'false') {
-    const inventoryFiles = indexStagingInventory?.files;
-    if (inventoryFiles === undefined) stagingPlan = {mode: 'full-renormalize'};
-    else {
-      const rehashPaths = yield* detectAmbiguousIndexPaths(root, inventoryFiles);
-      if (rehashPaths === undefined) stagingPlan = {mode: 'full-renormalize'};
-      else stagingPlan = {...stagingPlan, rehashPaths};
-    }
-  }
+  const renormalizePaths =
+    hasNormalizationBasisDrift || !originalIndex
+      ? []
+      : inspectGitIndexForRenormalizeTargets(originalIndex, objectFormat, recentCtimeFloorSec);
+  let stagingPlan: GitIndexStagingPlan =
+    hasNormalizationBasisDrift || renormalizePaths === undefined
+      ? {mode: 'full-renormalize'}
+      : {mode: 'targeted', renormalizePaths};
   if (stagingPlan.mode !== 'full-renormalize' && base !== 'HEAD') {
     const headTree = yield* resolveObject(root, head, 'tree');
     if (headTree !== baseTree) {
@@ -733,34 +675,28 @@ export const captureNativeCycleSource = Effect.fn('workflowAutomation.cycle.capt
           index,
           stagingTimeoutMs,
         );
-      } else if (stagingPlan.rehashPaths.length > 0 || stagingPlan.renormalizePaths.length > 0) {
-        const stageTrackedPaths = (paths: readonly string[], renormalize: boolean) =>
-          Effect.gen(function* () {
-            if (paths.length === 0) return;
-            const stagedIndexBytes = (yield* fs.exists(index)) ? yield* fs.readFile(index) : undefined;
-            const tracked = stagedIndexBytes
-              ? filterTrackedRegularFilesInIndex(stagedIndexBytes, objectFormat, paths)
-              : undefined;
-            if (tracked === undefined) {
-              yield* git(
-                root,
-                [...statVerificationGitConfig, 'add', '--renormalize', '--all', '--', '.'],
-                index,
-                stagingTimeoutMs,
-              );
-              return;
-            }
-            const livePaths: string[] = [];
-            for (const recentPath of tracked) {
-              const fullPath = path.join(root, recentPath);
-              if (Option.isSome(yield* fs.readLink(fullPath).pipe(Effect.option))) continue;
-              const stat = yield* fs.stat(fullPath).pipe(Effect.option);
-              if (Option.isSome(stat) && stat.value.type === 'File') livePaths.push(recentPath);
-            }
-            yield* stageIndexedPathBatches(root, index, livePaths, renormalize);
-          });
-        yield* stageTrackedPaths(stagingPlan.rehashPaths, false);
-        yield* stageTrackedPaths(stagingPlan.renormalizePaths, true);
+      } else if (stagingPlan.renormalizePaths.length > 0) {
+        const stagedIndexBytes = (yield* fs.exists(index)) ? yield* fs.readFile(index) : undefined;
+        const tracked = stagedIndexBytes
+          ? filterTrackedRegularFilesInIndex(stagedIndexBytes, objectFormat, stagingPlan.renormalizePaths)
+          : undefined;
+        if (tracked === undefined)
+          yield* git(
+            root,
+            [...statVerificationGitConfig, 'add', '--renormalize', '--all', '--', '.'],
+            index,
+            stagingTimeoutMs,
+          );
+        else {
+          const livePaths: string[] = [];
+          for (const recentPath of tracked) {
+            const fullPath = path.join(root, recentPath);
+            if (Option.isSome(yield* fs.readLink(fullPath).pipe(Effect.option))) continue;
+            const stat = yield* fs.stat(fullPath).pipe(Effect.option);
+            if (Option.isSome(stat) && stat.value.type === 'File') livePaths.push(recentPath);
+          }
+          yield* renormalizeIndexedPathBatches(root, index, livePaths);
+        }
       }
       const tree = Effect2.pipe(yield* git(root, ['write-tree'], index, stagingTimeoutMs), EffectString.trim);
       if (!objectId.test(tree)) return yield* fail('invalid-snapshot', 'Git did not return a snapshot tree.');

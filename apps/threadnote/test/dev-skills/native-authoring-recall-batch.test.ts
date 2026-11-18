@@ -15,7 +15,7 @@ import {SystemInfo} from '@threadnote/platform/system';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {workflowLocation} from '../../src/workflow_memory/journal.js';
-import {resolveAuthoredMemoryRelations} from '../../src/memory/relations.js';
+import {buildAuthorizedOwnedMemoryIdProofs, resolveAuthoredMemoryRelations} from '../../src/memory/relations.js';
 import {makeWorkflowRecallRefresh} from '../../src/workflow_memory/recall_refresh.js';
 import {runWorkflowAutomation} from '../../src/workflow_automation/index.js';
 import {CurrentNativeProgress} from './native-authoring-progress-diagnostics.js';
@@ -665,20 +665,23 @@ it.effect(
           state: 'active' as const,
         },
       };
-      const directRelationTrace = yield* traceRecallRefreshes(
-        resolveAuthoredMemoryRelations(unshared.config, [{type: 'references', uri: unsharedTarget.uri}], {
-          allowedUriScopes: [`threadnote://user/${unshared.config.user}/memories`],
-          ownedActiveArtifacts,
-        }),
-      );
+      const resolveOwnedRelation = (uri: string) =>
+        Effect.gen(function* () {
+          const allowedUriScopes = [`threadnote://user/${unshared.config.user}/memories`];
+          return yield* resolveAuthoredMemoryRelations(unshared.config, [{type: 'references', uri}], {
+            allowedUriScopes,
+            ownedActiveArtifacts,
+            ownedMemoryIdProofs: yield* buildAuthorizedOwnedMemoryIdProofs(
+              unshared.config,
+              allowedUriScopes,
+              ownedActiveArtifacts,
+            ),
+          });
+        });
+      const directRelationTrace = yield* traceRecallRefreshes(resolveOwnedRelation(unsharedTarget.uri));
       expect(directRelationTrace.identityAdmissionCalls).toBe(0);
 
-      const aliasRelationTrace = yield* traceRecallRefreshes(
-        resolveAuthoredMemoryRelations(unshared.config, [{type: 'references', uri: aliasUri}], {
-          allowedUriScopes: [`threadnote://user/${unshared.config.user}/memories`],
-          ownedActiveArtifacts,
-        }),
-      );
+      const aliasRelationTrace = yield* traceRecallRefreshes(resolveOwnedRelation(aliasUri));
       expect(aliasRelationTrace.identityAdmissionCalls).toBeGreaterThan(0);
 
       const aliasFenceFailure = yield* withStaleInjectionAtCommitFence(
@@ -715,12 +718,7 @@ it.effect(
       });
       expect(recordedRelocation).toBe(true);
 
-      const relocatedRelationTrace = yield* traceRecallRefreshes(
-        resolveAuthoredMemoryRelations(unshared.config, [{type: 'references', uri: relocatedFromUri}], {
-          allowedUriScopes: [`threadnote://user/${unshared.config.user}/memories`],
-          ownedActiveArtifacts,
-        }),
-      );
+      const relocatedRelationTrace = yield* traceRecallRefreshes(resolveOwnedRelation(relocatedFromUri));
       expect(relocatedRelationTrace.identityAdmissionCalls).toBeGreaterThan(0);
 
       const relocatedFenceFailure = yield* withStaleInjectionAtCommitFence(
@@ -780,12 +778,15 @@ it.effect('falls back to recall identity admission when another owned artifact r
       {mode: 'replace'},
     );
     const forgedRevision = sha256HexSync(yield* store.read(location, ownerB.uri));
+    const allowedUriScopes = [ownerA.uri, ownerB.uri];
+    const ownedActiveArtifacts = {
+      [ownerA.uri]: {memoryId: ownerA.memoryId, revision: ownerA.revision, state: 'active' as const},
+      [ownerB.uri]: {memoryId: ownerB.memoryId, revision: forgedRevision, state: 'active' as const},
+    };
     const relationFailure = yield* resolveAuthoredMemoryRelations(f.config, [{type: 'references', uri: ownerA.uri}], {
-      allowedUriScopes: [ownerA.uri, ownerB.uri],
-      ownedActiveArtifacts: {
-        [ownerA.uri]: {memoryId: ownerA.memoryId, revision: ownerA.revision, state: 'active'},
-        [ownerB.uri]: {memoryId: ownerB.memoryId, revision: forgedRevision, state: 'active'},
-      },
+      allowedUriScopes,
+      ownedActiveArtifacts,
+      ownedMemoryIdProofs: yield* buildAuthorizedOwnedMemoryIdProofs(f.config, allowedUriScopes, ownedActiveArtifacts),
     }).pipe(Effect.flip);
     expect(String(relationFailure)).toContain('identity');
   }).pipe(TestClock.withLive, provideNative),

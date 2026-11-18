@@ -1582,6 +1582,7 @@ const initializeRecallDatabase = Effect.fn('recall.initializeDatabase')(function
       value TEXT NOT NULL
     )
   `);
+  // candidate_json stays last so posting joins read logical_key and document_length without its overflow pages.
   yield* sql.unsafe(`
     CREATE TABLE IF NOT EXISTS documents (
       id INTEGER PRIMARY KEY,
@@ -1597,10 +1598,10 @@ const initializeRecallDatabase = Effect.fn('recall.initializeDatabase')(function
       uri_locator_digest TEXT NOT NULL,
       memory_id TEXT,
       content_hash TEXT,
-      candidate_json TEXT NOT NULL,
       logical_key TEXT NOT NULL,
       document_length INTEGER NOT NULL CHECK (document_length >= 0),
-      memory_links_truncated INTEGER NOT NULL CHECK (memory_links_truncated IN (0, 1))
+      memory_links_truncated INTEGER NOT NULL CHECK (memory_links_truncated IN (0, 1)),
+      candidate_json TEXT NOT NULL
     )
   `);
   yield* sql.unsafe(`
@@ -1656,6 +1657,11 @@ const initializeRecallDatabase = Effect.fn('recall.initializeDatabase')(function
     ) WITHOUT ROWID
   `);
   yield* sql.unsafe(`
+    CREATE TABLE IF NOT EXISTS oversized_sources (
+      uri TEXT PRIMARY KEY NOT NULL
+    ) WITHOUT ROWID
+  `);
+  yield* sql.unsafe(`
     CREATE TABLE IF NOT EXISTS term_statistics (
       term TEXT PRIMARY KEY NOT NULL,
       document_frequency INTEGER NOT NULL CHECK (document_frequency > 0)
@@ -1669,11 +1675,6 @@ const initializeRecallDatabase = Effect.fn('recall.initializeDatabase')(function
       tokenize = 'trigram'
     )
   `);
-  const documentColumns = yield* sql.unsafe<{readonly name: string}>("PRAGMA table_info('documents')");
-  if (!EffectArray.some(documentColumns, column => column.name === 'uri_locator_digest'))
-    return yield* RecallIndexSchemaIncompatible.make({
-      message: 'Lexical index documents predate persisted URI locator digests; rebuild from canonical files.',
-    });
   yield* sql.unsafe('CREATE INDEX IF NOT EXISTS documents_uri ON documents(uri)');
   yield* sql.unsafe('CREATE INDEX IF NOT EXISTS documents_logical_key ON documents(logical_key, document_length)');
   yield* RecallIndexIdentity.initializeRecallIdentityIndex(sql);
@@ -1713,7 +1714,14 @@ const initializeRecallDatabase = Effect.fn('recall.initializeDatabase')(function
     ON CONFLICT(key) DO NOTHING
   `;
   yield* sql`INSERT INTO metadata (key, value) VALUES ('mutation_sequence', '0') ON CONFLICT(key) DO NOTHING`;
-  for (const table of ['documents', 'postings', 'term_statistics', 'code_links', 'memory_links'] as const) {
+  for (const table of [
+    'documents',
+    'postings',
+    'term_statistics',
+    'code_links',
+    'memory_links',
+    'oversized_sources',
+  ] as const) {
     for (const operation of ['INSERT', 'UPDATE', 'DELETE'] as const) {
       yield* sql.unsafe(`
         CREATE TRIGGER IF NOT EXISTS ${table}_integrity_${Effect2.pipe(operation, EffectString.toLowerCase)}

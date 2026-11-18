@@ -47,7 +47,6 @@ import {
 } from '../memory/deferred/code_anchor.js';
 import {
   buildAuthorizedOwnedMemoryIdProofs,
-  isAuthorizedOwnedMemoryIdOwner,
   memoryIdentityWriteLockKeys,
   resolveAuthoredMemoryRelations,
   type AuthorizedOwnedMemoryIdProofs,
@@ -106,39 +105,67 @@ const ownedArtifacts = workflowOwnedArtifacts;
 const ownedArtifact = (state: WorkflowJournal, uri: string) =>
   EffectOption.getOrUndefined(EffectArray.findFirst(ownedArtifacts(state), artifact => artifact.canonicalUri === uri));
 
-function uniqueOwnedMemoryIds(state: WorkflowJournal): ReadonlyMap<string, number> {
-  const counts = new Map<string, number>();
-  for (const artifact of ownedArtifacts(state)) {
-    counts.set(artifact.memoryId, (counts.get(artifact.memoryId) ?? 0) + 1);
-  }
-  return counts;
+export interface WorkflowOwnedRelationState {
+  /** Committed artifacts a relation may name, keyed by canonical URI. */
+  readonly artifacts: Readonly<Record<string, OwnedActiveRelationArtifact>>;
+  /** Every owned artifact, pending writes included; a direct target's identity must be unique here. */
+  readonly owned: readonly {readonly canonicalUri: string; readonly memoryId: string}[];
 }
 
-function directOwnedRelationArtifacts(
-  state: WorkflowJournal,
-  sharedRoots: readonly string[],
-  evidenceRefs: readonly WorkflowEvidenceReference[] | undefined,
-  relationUris: readonly string[],
-): WorkflowJournal['artifacts'] | undefined {
-  if (sharedRoots.length > 0 || (evidenceRefs?.length ?? 0) > 0 || relationUris.length === 0) return undefined;
-  const counts = uniqueOwnedMemoryIds(state);
-  for (const uri of relationUris) {
-    if (memoryIdFromIdentityAlias(uri) !== undefined) return undefined;
-    const owned = state.artifacts[uri];
-    if (!owned || owned.state !== 'active' || (counts.get(owned.memoryId) ?? 0) !== 1) return undefined;
-  }
-  return state.artifacts;
+export interface DirectOwnedRelationScope {
+  readonly scopes: readonly string[];
+  readonly artifacts: Readonly<Record<string, OwnedActiveRelationArtifact>>;
+  readonly relationUris: ReadonlySet<string>;
 }
+
+/**
+ * Relations that name only active, uniquely identified artifacts of this workflow are proven from
+ * live bytes instead of the recall identity index. Evidence and configured shares keep the index path.
+ */
+export const directOwnedRelationScope = <E, R>(
+  state: WorkflowOwnedRelationState,
+  relationUris: readonly string[],
+  evidenceRefs: readonly unknown[] | undefined,
+  sharedRoots: Effect.Effect<readonly string[], E, R>,
+): Effect.Effect<DirectOwnedRelationScope | undefined, E, R> =>
+  Effect.gen(function* () {
+    if ((evidenceRefs?.length ?? 0) > 0 || relationUris.length === 0) return undefined;
+    const counts = new Map<string, number>();
+    for (const artifact of state.owned) counts.set(artifact.memoryId, (counts.get(artifact.memoryId) ?? 0) + 1);
+    const canonicalUris = new Set<string>();
+    for (const uri of relationUris) {
+      const canonical = EffectOption.getOrUndefined(
+        EffectOption.liftThrowable(() => parseResourceId(uri).canonicalUri)(),
+      );
+      const owned = canonical === undefined ? undefined : state.artifacts[canonical];
+      if (
+        canonical === undefined ||
+        memoryIdFromIdentityAlias(canonical) !== undefined ||
+        owned?.state !== 'active' ||
+        counts.get(owned.memoryId) !== 1
+      )
+        return undefined;
+      canonicalUris.add(canonical);
+    }
+    if ((yield* sharedRoots).length > 0) return undefined;
+    return {
+      scopes: EffectArray.map(state.owned, artifact => artifact.canonicalUri),
+      artifacts: EffectRecord.map(
+        EffectRecord.filter(state.artifacts, artifact => artifact.state === 'active'),
+        artifact => ({memoryId: artifact.memoryId, revision: artifact.revision, state: artifact.state}),
+      ),
+      relationUris: canonicalUris,
+    };
+  });
 
 function verifyDirectOwnedRelationArtifacts(
   proofs: AuthorizedOwnedMemoryIdProofs,
   artifacts: Readonly<Record<string, OwnedActiveRelationArtifact>>,
-  relationUris: readonly string[],
+  relationUris: Iterable<string>,
 ): boolean {
   for (const uri of relationUris) {
     const owned = artifacts[uri];
-    if (owned === undefined) return false;
-    if (!isAuthorizedOwnedMemoryIdOwner(proofs, owned.memoryId, uri)) return false;
+    if (owned === undefined || proofs.get(owned.memoryId) !== uri) return false;
   }
   return true;
 }
@@ -417,28 +444,27 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
         admitPrivateCandidate(state, candidate.canonicalUri, sharedRoots, request.evidenceRefs),
       );
     }
-    const ownedCandidate = directOwnedRelationArtifacts(state, sharedRoots, request.evidenceRefs, relationUris);
-    const relationScopeList = [
-      ...sharedRoots,
-      ...EffectArray.map(ownedArtifacts(state), artifact => artifact.canonicalUri),
-      ...EffectArray.map(candidates, candidate => candidate.canonicalUri),
-    ];
-    let ownedActiveArtifacts: Readonly<Record<string, OwnedActiveRelationArtifact>> | undefined;
-    let ownedMemoryIdProofs: AuthorizedOwnedMemoryIdProofs | undefined;
-    if (ownedCandidate !== undefined) {
-      const ownedActive = EffectRecord.map(ownedCandidate, artifact => ({
-        memoryId: artifact.memoryId,
-        revision: artifact.revision,
-        state: artifact.state,
-      }));
-      ownedMemoryIdProofs = yield* buildAuthorizedOwnedMemoryIdProofs(config, relationScopeList, ownedActive);
-      ownedActiveArtifacts = verifyDirectOwnedRelationArtifacts(ownedMemoryIdProofs, ownedActive, relationUris)
-        ? ownedActive
-        : undefined;
-    }
+    const directOwned = yield* directOwnedRelationScope(
+      {artifacts: state.artifacts, owned: ownedArtifacts(state)},
+      relationUris,
+      request.evidenceRefs,
+      Effect.succeed(sharedRoots),
+    );
+    const ownedMemoryIdProofs =
+      directOwned === undefined
+        ? undefined
+        : yield* buildAuthorizedOwnedMemoryIdProofs(config, directOwned.scopes, directOwned.artifacts);
     const resolvedRelations = yield* resolveAuthoredMemoryRelations(config, request.relations ?? [], {
-      allowedUriScopes: relationScopeList,
-      ...(ownedActiveArtifacts === undefined ? {} : {ownedActiveArtifacts, ownedMemoryIdProofs: ownedMemoryIdProofs!}),
+      allowedUriScopes: [
+        ...sharedRoots,
+        ...EffectArray.map(ownedArtifacts(state), artifact => artifact.canonicalUri),
+        ...EffectArray.map(candidates, candidate => candidate.canonicalUri),
+      ],
+      ...(directOwned === undefined ||
+      ownedMemoryIdProofs === undefined ||
+      !verifyDirectOwnedRelationArtifacts(ownedMemoryIdProofs, directOwned.artifacts, directOwned.relationUris)
+        ? {}
+        : {ownedActiveArtifacts: directOwned.artifacts, ownedMemoryIdProofs}),
       sourceMemoryId: memoryId,
       sourceUri,
     });
@@ -665,63 +691,23 @@ export const executeWorkflowOperation = Effect.fn('workflowMemory.executeOperati
           request: operation.deferredCodeAnchor,
         })
       : undefined;
-  const requestedDirectUris = new Set<string>();
-  const directOwnedCandidate =
-    !isArchive &&
-    (operation.request.evidenceRefs?.length ?? 0) === 0 &&
-    operation.relations.length > 0 &&
-    (operation.request.relations?.length ?? 0) > 0 &&
-    EffectArray.every(operation.request.relations ?? [], relation => {
-      try {
-        const canonical = parseResourceId(Effect2.pipe(relation.uri, EffectString.trim)).canonicalUri;
-        if (memoryIdFromIdentityAlias(canonical) !== undefined || initial.artifacts[canonical]?.state !== 'active') {
-          return false;
-        }
-        requestedDirectUris.add(canonical);
-        return true;
-      } catch {
-        return false;
-      }
-    });
-  const directOwnedSharedRoots = directOwnedCandidate ? yield* readWorkflowSharedRoots(config, initial.binding) : [];
-  const ownedCounts =
-    directOwnedCandidate && directOwnedSharedRoots.length === 0 ? uniqueOwnedMemoryIds(prepared) : undefined;
-  const ownedBypassScopes =
-    ownedCounts === undefined
-      ? undefined
-      : EffectArray.map(ownedArtifacts(prepared), artifact => artifact.canonicalUri);
-  const ownedBypassArtifacts =
-    ownedCounts === undefined
-      ? undefined
-      : EffectRecord.fromEntries(
-          EffectArray.flatMap(ownedArtifacts(prepared), ownedArtifactEntry => {
-            const owned = initial.artifacts[ownedArtifactEntry.canonicalUri];
-            return owned === undefined || owned.state !== 'active'
-              ? []
-              : [
-                  [
-                    ownedArtifactEntry.canonicalUri,
-                    {
-                      memoryId: owned.memoryId,
-                      revision: owned.revision,
-                      state: owned.state,
-                    },
-                  ] as const,
-                ];
-          }),
-        );
-  const relationUrisForOwnedProof = EffectArray.map(operation.relations, target => target.uri);
+  const directOwned =
+    !isArchive && operation.relations.length > 0
+      ? yield* directOwnedRelationScope(
+          {artifacts: prepared.artifacts, owned: ownedArtifacts(prepared)},
+          EffectArray.map(operation.request.relations ?? [], relation => relation.uri),
+          operation.request.evidenceRefs,
+          readWorkflowSharedRoots(config, initial.binding),
+        )
+      : undefined;
   const directOwnedBypass =
-    ownedCounts !== undefined &&
+    directOwned !== undefined &&
     EffectArray.every(operation.relations, target => {
-      const owned = initial.artifacts[target.uri];
+      const owned = directOwned.artifacts[target.uri];
       return (
-        requestedDirectUris.has(target.uri) &&
+        directOwned.relationUris.has(target.uri) &&
         owned !== undefined &&
-        owned.state === 'active' &&
-        target.memoryId !== undefined &&
         owned.memoryId === target.memoryId &&
-        (ownedCounts.get(owned.memoryId) ?? 0) === 1 &&
         sha256HexSync(target.content) === owned.revision
       );
     });
@@ -746,9 +732,15 @@ export const executeWorkflowOperation = Effect.fn('workflowMemory.executeOperati
           ...memoryIdentityWriteLockKeys(artifact.memoryId, operation.relations),
         ],
         Effect.gen(function* () {
-          if (directOwnedBypass && ownedBypassScopes !== undefined && ownedBypassArtifacts !== undefined) {
-            const proofs = yield* buildAuthorizedOwnedMemoryIdProofs(config, ownedBypassScopes, ownedBypassArtifacts);
-            if (!verifyDirectOwnedRelationArtifacts(proofs, ownedBypassArtifacts, relationUrisForOwnedProof))
+          if (directOwnedBypass) {
+            const proofs = yield* buildAuthorizedOwnedMemoryIdProofs(config, directOwned.scopes, directOwned.artifacts);
+            if (
+              !verifyDirectOwnedRelationArtifacts(
+                proofs,
+                directOwned.artifacts,
+                EffectArray.map(operation.relations, target => target.uri),
+              )
+            )
               return yield* workflowError(
                 'identity-conflict',
                 'Owned relation targets changed before commit; refresh before mutating.',

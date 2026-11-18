@@ -1,4 +1,4 @@
-import {Array as EffectArray, Effect, Record as EffectRecord, Schema} from 'effect';
+import {Effect, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {withRecallIdentityPreparation} from '@threadnote/recall/index';
 import {
@@ -7,7 +7,6 @@ import {
   requiredText,
   validateWorkflowInput,
   type WorkflowRequest,
-  stableJson,
   type WorkflowJournal,
   type WorkflowOperation,
   workflowError,
@@ -21,28 +20,12 @@ import {
   readWorkflowArtifact,
   type ForegroundAuthoringCitationWitness,
 } from './artifacts.js';
-import {workflowOwnedArtifacts} from './journal_validation.js';
 import {WorkflowPublicationRequestSchema} from './publication_contract.js';
 import {assertWorkflowArchivePublication, runWorkflowPublication} from './publication.js';
 import {inspectWorkflowOperation} from './inspection.js';
 import {CurrentNativeJobReadyPromotion, CurrentNativeJobSourceView} from '../workflow_automation/native_jobs.js';
 
 export {readWorkflowReadiness} from './profile.js';
-
-function workflowNativePreparedRevision(state: WorkflowJournal): string {
-  return stableJson({
-    artifacts: EffectArray.map(workflowOwnedArtifacts(state), artifact => [
-      artifact.canonicalUri,
-      artifact.memoryId,
-      artifact.revision,
-      artifact.state,
-    ]),
-    operations: EffectArray.map(EffectRecord.toEntries(state.operations), ([operationId, operation]) => [
-      operationId,
-      operation.status,
-    ]),
-  });
-}
 
 export const runWorkflowMemory = Effect.fn('workflowMemory.run')(function* (config: RuntimeConfig, input: unknown) {
   const request = yield* Schema.decodeUnknownEffect(
@@ -195,7 +178,6 @@ export const withNativeWorkflowMemorySession = <A, E, R>(
     let preparedCache:
       | {
           readonly stateRef: WorkflowJournal;
-          readonly journalRevision: string;
           readonly jobSourceView: Effect.Success<typeof CurrentNativeJobSourceView>;
           readonly jobReadyPromotion: boolean;
           readonly foregroundCitations: ForegroundAuthoringCitationWitness | undefined;
@@ -227,7 +209,6 @@ export const withNativeWorkflowMemorySession = <A, E, R>(
               const prepared = yield* prepareWorkflowOperation(config, state, request);
               preparedCache = {
                 stateRef: state,
-                journalRevision: workflowNativePreparedRevision(state),
                 jobSourceView,
                 jobReadyPromotion,
                 foregroundCitations,
@@ -243,7 +224,6 @@ export const withNativeWorkflowMemorySession = <A, E, R>(
               const foregroundCitations = yield* CurrentForegroundAuthoringCitations;
               const precomputed =
                 state === priorPrepared.stateRef &&
-                workflowNativePreparedRevision(state) === priorPrepared.journalRevision &&
                 jobSourceView === priorPrepared.jobSourceView &&
                 jobReadyPromotion === priorPrepared.jobReadyPromotion &&
                 foregroundCitations === priorPrepared.foregroundCitations

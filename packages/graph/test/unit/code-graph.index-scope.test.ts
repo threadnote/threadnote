@@ -528,7 +528,7 @@ describe('code graph index scope', () => {
   );
 
   it.effect(
-    'returns shallow-cloned workspace catalogs on warm hits without JSON.parse or re-discovery while isolating custom registries',
+    'returns frozen shared workspace catalogs on warm hits without JSON.parse or re-discovery while isolating custom registries',
     () =>
       Effect.Effect.gen(function* () {
         let discoveries = 0;
@@ -589,8 +589,9 @@ describe('code graph index scope', () => {
         expect(discoveries).toBe(1);
         expect(Object.isFrozen(cold.workspace.projects[0])).toBe(true);
         expect(Reflect.set(cold.resolutionContextPaths, String(cold.resolutionContextPaths.length), 'mutated')).toBe(
-          true,
+          false,
         );
+        expect(Reflect.set(cold.workspace, 'projects', [])).toBe(false);
 
         let jsonParseCalls = 0;
         const warm = yield* Effect.Effect.acquireUseRelease(
@@ -612,9 +613,8 @@ describe('code graph index scope', () => {
         expect(jsonParseCalls).toBe(0);
         expect(warm).toEqual(expected);
         const fingerprintHit = yield* resolveCodeGraphWorkspaceCatalog(inputs, registry, warm);
-        expect(fingerprintHit).not.toBe(warm);
         expect(fingerprintHit.fingerprint).toBe(warm.fingerprint);
-        expect(Reflect.set(fingerprintHit.resolutionContextPaths, 0, 'mutated')).toBe(true);
+        expect(Reflect.set(fingerprintHit.resolutionContextPaths, 0, 'mutated')).toBe(false);
         expect(warm.resolutionContextPaths[0]).not.toBe('mutated');
         const warmExternal = warm.workspace.projects[0]?.externalDependencies?.[0];
         const hitExternal = fingerprintHit.workspace.projects[0]?.externalDependencies?.[0];

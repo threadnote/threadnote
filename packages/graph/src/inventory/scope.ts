@@ -8,7 +8,7 @@ import type {
   CodeGraphRawDirtyOverlayPaths,
 } from './models.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import {codeGraphExtractorSetIdentityFromIdentities} from '../graph_identity.js';
+import {extractorSetIdentity} from '../graph_identity.js';
 import {worktreeStatusWithPrivateCache} from '../git/status_cache.js';
 import {codeGraphScopeAdmitsPath, type CodeGraphScopeApplicabilityEvidence} from '../scope/applicability.js';
 import type {RepositoryIdentity} from '../types.js';
@@ -244,17 +244,6 @@ const committedScopedBasisCache = createLanguagePackLruCache<CommittedScopedBasi
   maxEntries: COMMITTED_SCOPED_BASIS_CACHE_MAXIMUM,
 });
 
-function computeScopeExtractorSet(
-  files: readonly {readonly path: string}[],
-  languagePacks: CodeGraphLanguagePackRegistryShape,
-): string {
-  const paths = EffectArray.map(files, file => file.path);
-  return codeGraphExtractorSetIdentityFromIdentities(
-    languagePacks.activeCacheIdentities(paths),
-    languagePacks.activeDerivationIdentities(paths),
-  );
-}
-
 function committedScopedBasisCacheKey(
   identity: RepositoryIdentity,
   project: Pick<ProjectManifest, 'graph' | 'uri'>,
@@ -330,13 +319,6 @@ const digestApplicableLiveGitignoreFiles = Effect.fn('codeGraph.digestLiveGitign
     ),
   );
 });
-
-function readCachedCommittedScopedBasis(
-  languagePacks: CodeGraphLanguagePackRegistryShape,
-  key: string | undefined,
-): Effect.Effect<CommittedScopedBasis | undefined> {
-  return committedScopedBasisCache.get(languagePacks, key);
-}
 
 function writeCachedCommittedScopedBasis(
   languagePacks: CodeGraphLanguagePackRegistryShape,
@@ -421,7 +403,7 @@ export const observeCodeGraphStatusScope = Effect.fn('codeGraph.observeStatusSco
       evidence: codeGraphInventoryScopeEvidence(
         inventory,
         identity,
-        computeScopeExtractorSet(inventory.files, languagePacks),
+        extractorSetIdentity(inventory.files, languagePacks),
         reuseEnvironment.fingerprint,
       ),
     };
@@ -433,7 +415,7 @@ export const observeCodeGraphStatusScope = Effect.fn('codeGraph.observeStatusSco
     includeOpaqueCorpusAssets,
     languagePacks,
   );
-  let basis = yield* readCachedCommittedScopedBasis(languagePacks, basisKey);
+  let basis = yield* committedScopedBasisCache.get(languagePacks, basisKey);
   if (basis !== undefined) {
     const liveGitignoreDigest = yield* digestApplicableLiveGitignoreFiles(identity);
     if (basis.applicableGitignoreDigest !== liveGitignoreDigest) basis = undefined;
@@ -478,7 +460,7 @@ export const observeCodeGraphStatusScope = Effect.fn('codeGraph.observeStatusSco
       applicableGitignoreDigest,
       catalogFingerprint: captured!.scopeObservation.catalog.fingerprint,
       committedDigestRows,
-      committedExtractorSet: computeScopeExtractorSet(committedFiles, languagePacks),
+      committedExtractorSet: extractorSetIdentity(committedFiles, languagePacks),
       committedFiles,
       committedInventoryFingerprint: committedInventory.scopeCommittedInventoryFingerprint!,
       scope,
@@ -559,7 +541,7 @@ export const observeCodeGraphStatusScope = Effect.fn('codeGraph.observeStatusSco
       extractorSet:
         overlay.changed.size === 0 && overlay.files.length === 0
           ? basis.committedExtractorSet
-          : computeScopeExtractorSet(files, languagePacks),
+          : extractorSetIdentity(files, languagePacks),
       policyFingerprint: reuseEnvironment.fingerprint,
       observedCommit: identity.headCommit,
       catalogFingerprint: basis.catalogFingerprint,

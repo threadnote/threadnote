@@ -11,7 +11,12 @@ import {describe, expect} from 'vitest';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {ExternalSourcePolicy} from '@threadnote/store/external-resource';
 import {canonicalResourceUri} from '@threadnote/store/resource-id';
-import {RECALL_REFRESH_SOURCE_TABLE, scanRecallSources, stageRecallSources} from '@threadnote/recall/index/refresh';
+import {
+  RECALL_REFRESH_OVERSIZED_SOURCE_TABLE,
+  RECALL_REFRESH_SOURCE_TABLE,
+  scanRecallSources,
+  stageRecallSources,
+} from '@threadnote/recall/index/refresh';
 import {expireRecallIndexValidation, loadRecallIndexData, recallIndexDatabaseFilename} from '@threadnote/recall/index';
 import {recallResourceInvalidationLayer} from '@threadnote/recall/resource-invalidation';
 import {formatMemoryDocument} from '@threadnote/memory/document';
@@ -114,7 +119,16 @@ const seedPersistedInventory = (sql: SqlClient.SqlClient, skipped = 0) =>
       [String(skipped)],
     );
     yield* sql.unsafe(
-      `CREATE TABLE documents AS SELECT uri, source_path, source_modified_at, source_size, authority_policy_key FROM temp.${RECALL_REFRESH_SOURCE_TABLE}`,
+      `CREATE TABLE documents (
+        id INTEGER PRIMARY KEY, uri TEXT, source_path TEXT, source_modified_at TEXT, source_size INTEGER, authority_policy_key TEXT
+      )`,
+    );
+    yield* sql.unsafe(
+      `INSERT INTO documents (uri, source_path, source_modified_at, source_size, authority_policy_key)
+       SELECT uri, source_path, source_modified_at, source_size, authority_policy_key FROM temp.${RECALL_REFRESH_SOURCE_TABLE}`,
+    );
+    yield* sql.unsafe(
+      `CREATE TABLE oversized_sources AS SELECT uri FROM temp.${RECALL_REFRESH_OVERSIZED_SOURCE_TABLE}`,
     );
   });
 function expectTouchedStagingMatchesFullScanSubset(
@@ -418,7 +432,8 @@ describe('Recall source staging', () => {
           );
           yield* sql.unsafe(
             `CREATE TABLE documents (
-              uri TEXT, source_path TEXT, source_modified_at TEXT, source_size INTEGER, authority_policy_key TEXT
+              id INTEGER PRIMARY KEY, uri TEXT, source_path TEXT, source_modified_at TEXT, source_size INTEGER,
+              authority_policy_key TEXT
             )`,
           );
           for (const foreign of [
@@ -466,7 +481,6 @@ describe('Recall source staging', () => {
             });
             expect(result).toMatchObject({
               mode: 'full',
-              forceAllSources: false,
               scannedSourceCount: 1,
               skippedOversizedDocumentCount: 0,
             });
@@ -587,7 +601,6 @@ describe('Recall source staging', () => {
               mode: {kind: 'touched', contentGeneration: 'baseline'},
             });
             expect(result.mode).toBe(change === 'shrink' || change === 'delete-oversized' ? 'full' : 'touched');
-            expect(result.forceAllSources).toBe(false);
             const staged = yield* sql.unsafe<SourceRow>(
               `SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`,
             );
@@ -1044,21 +1057,31 @@ const legacyLinkFixture = Effect.fn('test.recallLegacyLinkFixture')(function* (o
       });
       return indexing;
     });
-  const legacyLinks = Effect.acquireUseRelease(
-    Effect.sync(
-      () => new Database(path.join(home, 'indexes', 'lexical', recallIndexDatabaseFilename(false)), {readonly: true}),
-    ),
-    database =>
-      Effect.sync(() =>
-        database
-          .query<{readonly source_uri: string; readonly target_memory_id: string}, []>(
-            `SELECT source_uri, target_memory_id FROM memory_links
-             WHERE target_locator_digest <> '' ORDER BY source_uri`,
-          )
-          .all(),
+  const query = <A>(read: (database: Database) => A) =>
+    Effect.acquireUseRelease(
+      Effect.sync(
+        () => new Database(path.join(home, 'indexes', 'lexical', recallIndexDatabaseFilename(false)), {readonly: true}),
       ),
-    database => Effect.sync(() => database.close()),
+      database => Effect.sync(() => read(database)),
+      database => Effect.sync(() => database.close()),
+    );
+  const legacyLinks = query(database =>
+    database
+      .query<{readonly source_uri: string; readonly target_memory_id: string}, []>(
+        `SELECT source_uri, target_memory_id FROM memory_links
+         WHERE target_locator_digest <> '' ORDER BY source_uri`,
+      )
+      .all(),
   );
+  const oversized = query(database => ({
+    count: database
+      .query<{readonly value: string}, []>("SELECT value FROM metadata WHERE key = 'oversized_document_count'")
+      .get()?.value,
+    uris: EffectArray.map(
+      database.query<{readonly uri: string}, []>('SELECT uri FROM oversized_sources ORDER BY uri').all(),
+      row => row.uri,
+    ),
+  }));
   if (options.oversizedResource) {
     const resources = path.join(home, 'data', 'local', 'resources');
     yield* fs.makeDirectory(resources, {recursive: true});
@@ -1068,7 +1091,7 @@ const legacyLinkFixture = Effect.fn('test.recallLegacyLinkFixture')(function* (o
   yield* write('a', 'tn_legacy_a', 'legacy source', uri('b'));
   yield* loadRecallIndexData(config, {includeInactive: false});
   expect(yield* legacyLinks).toEqual([{source_uri: uri('a'), target_memory_id: 'tn_legacy_b'}]);
-  return {uri, write, refresh, legacyLinks};
+  return {uri, write, refresh, legacyLinks, oversized};
 });
 
 describe('Recall refresh publication', () => {
@@ -1090,11 +1113,12 @@ describe('Recall refresh publication', () => {
         expect(yield* f.legacyLinks).toEqual([{source_uri: f.uri('a'), target_memory_id: ''}]);
       }).pipe(TestClock.withLive),
     );
-    it.effect('re-indexes only a new uri when an oversized document sends the touched pass to a full scan', () =>
+    it.effect('keeps a new memory beside an oversized document on the touched pass', () =>
       Effect.gen(function* () {
         const f = yield* legacyLinkFixture({oversizedResource: true});
         yield* f.write('c', 'tn_new_c', 'new memory beside an oversized resource');
-        expect(yield* f.refresh('touched')).toEqual({scanned: 3, total: 1});
+        expect(yield* f.refresh('touched')).toEqual({scanned: 1, total: 1});
+        expect(yield* f.oversized).toEqual({count: '1', uris: ['threadnote://resources/oversized.md']});
       }).pipe(TestClock.withLive),
     );
   });

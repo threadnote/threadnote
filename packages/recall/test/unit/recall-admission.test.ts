@@ -32,9 +32,7 @@ import {ResourceRecallInvalidation} from '@threadnote/store/resource/recall-inva
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {
   expireRecallIndexValidation,
-  readRecallMemoryIdentities,
   recallIndexDatabaseFilename,
-  RecallReadyReadUnavailable,
   withRecallIdentityAdmission,
 } from '@threadnote/recall/index';
 import {resolveMemoryIdentityAliases} from '@threadnote/recall/memory/identity';
@@ -415,112 +413,4 @@ effectIt.effect('releases admission publication locks when an admitted callback 
     yield* Fiber.interrupt(child);
     yield* withRecallIdentityAdmission(f.config, f.resolve.pipe(Effect.asVoid), check => f.fence(check));
   }).pipe(provide, TestClock.withLive),
-);
-
-effectIt.effect(
-  'fails closed on readyOnly for an unmigrated legacy v13 database and upgrades in place on writer admission',
-  () =>
-    Effect.gen(function* () {
-      const f = yield* fixture;
-      yield* withRecallIdentityAdmission(f.config, f.resolve.pipe(Effect.asVoid), check => f.fence(check));
-      yield* Effect.sync(() => {
-        const db = new Database(f.database);
-        try {
-          db.exec('PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;');
-          db.exec('DROP INDEX IF EXISTS documents_memory_identity');
-          db.exec(`
-            CREATE TABLE documents_legacy (
-              id INTEGER PRIMARY KEY,
-              uri TEXT UNIQUE NOT NULL,
-              project TEXT,
-              approved_authoritative INTEGER NOT NULL CHECK (approved_authoritative IN (0, 1)),
-              workspace_scope TEXT,
-              source_path TEXT NOT NULL,
-              source_modified_at TEXT,
-              recorded_at TEXT,
-              source_size INTEGER NOT NULL CHECK (source_size >= 0),
-              authority_policy_key TEXT,
-              uri_locator_digest TEXT NOT NULL,
-              candidate_json TEXT NOT NULL,
-              logical_key TEXT NOT NULL,
-              document_length INTEGER NOT NULL CHECK (document_length >= 0),
-              memory_links_truncated INTEGER NOT NULL CHECK (memory_links_truncated IN (0, 1))
-            )
-          `);
-          db.exec(`
-            INSERT INTO documents_legacy (
-              id, uri, project, approved_authoritative, workspace_scope, source_path, source_modified_at,
-              recorded_at, source_size, authority_policy_key, uri_locator_digest, candidate_json, logical_key, document_length,
-              memory_links_truncated
-            )
-            SELECT
-              id, uri, project, approved_authoritative, workspace_scope, source_path, source_modified_at,
-              recorded_at, source_size, authority_policy_key, uri_locator_digest, candidate_json, logical_key, document_length,
-              memory_links_truncated
-            FROM documents
-          `);
-          db.exec('DROP TABLE documents');
-          db.exec('ALTER TABLE documents_legacy RENAME TO documents');
-          db.exec('CREATE INDEX documents_uri ON documents(uri)');
-          db.exec('CREATE INDEX documents_logical_key ON documents(logical_key)');
-          db.exec(
-            `CREATE INDEX documents_memory_identity
-             ON documents(json_extract(candidate_json, '$.memoryId'), json_extract(candidate_json, '$.contentHash'))`,
-          );
-          db.exec(`
-            CREATE TRIGGER documents_integrity_update
-            AFTER UPDATE ON documents
-            BEGIN
-              UPDATE metadata
-              SET value = CAST(value AS INTEGER) + 1
-              WHERE key = 'mutation_sequence';
-            END
-          `);
-          db.exec("DELETE FROM metadata WHERE key = 'memory_identity_schema_version'");
-          db.exec(
-            "UPDATE metadata SET value = (SELECT value FROM metadata WHERE key = 'mutation_sequence') WHERE key = 'integrity_sequence'",
-          );
-          db.exec('COMMIT; PRAGMA foreign_keys = ON;');
-        } finally {
-          db.close();
-        }
-      });
-
-      const readyFailure = yield* readRecallMemoryIdentities(f.config, {
-        allowedUriScopes: ['threadnote://user/tester/memories'],
-        memoryIds: ['tn_fixture'],
-      }).pipe(Effect.flip);
-      expect(Schema.is(RecallReadyReadUnavailable)(readyFailure)).toBe(true);
-
-      const cutFailure = yield* readRecallIdentityAdmissionCut({
-        account: f.config.account,
-        home: f.home,
-        databasePath: Effect.succeed(f.database),
-        pointerPath: EffectString.replace(/\.sqlite$/, '.pointer.json')(f.database),
-        fixedDatabasePath: f.database,
-        schemaVersion: 15,
-        logicalScope: recallLogicalScope(f.config, false),
-      }).pipe(Effect.flip);
-      expect(cutFailure).toMatchObject({_tag: 'RecallIdentityAdmissionBusy'});
-
-      yield* withRecallIdentityAdmission(f.config, f.resolve.pipe(Effect.asVoid), check => f.fence(check));
-      const candidates = yield* readRecallMemoryIdentities(f.config, {
-        allowedUriScopes: ['threadnote://user/tester/memories'],
-        memoryIds: ['tn_fixture'],
-      });
-      expect(EffectArray.map(candidates, candidate => candidate.memoryId)).toEqual(['tn_fixture']);
-      yield* Effect.sync(() => {
-        const db = new Database(f.database, {readonly: true});
-        try {
-          const row = db
-            .query<{sql: string}, []>(
-              "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'documents_logical_key'",
-            )
-            .get();
-          expect(row?.sql).toContain('(logical_key, document_length)');
-        } finally {
-          db.close();
-        }
-      });
-    }).pipe(provide, TestClock.withLive),
 );

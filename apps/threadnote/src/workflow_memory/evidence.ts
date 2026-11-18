@@ -176,8 +176,8 @@ export function withWorkflowEvidenceAdmission<A, E, R>(
     Effect.andThen(verifyAuthoredMemoryRelationTargetBytes(config, pinnedTargets)),
   );
   if (
-    (!pinnedRefs.length && options.directOwnedBypass === true) ||
-    (!pinnedRefs.length &&
+    !pinnedRefs.length &&
+    (options.directOwnedBypass === true ||
       !EffectArray.some(pinnedTargets, target => !!(target.memoryId && target.allowedUriScopes?.length)))
   )
     return use(bytes);

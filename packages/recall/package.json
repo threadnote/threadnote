@@ -21,7 +21,6 @@
     "./index/lexical": "./src/index/lexical.ts",
     "./index/query": "./src/index/query.ts",
     "./index/refresh": "./src/index/refresh.ts",
-    "./index/refresh_database": "./src/index/refresh_database.ts",
     "./index/result": "./src/index/result.ts",
     "./index/scope": "./src/index/scope.ts",
     "./index/selection": "./src/index/selection.ts",

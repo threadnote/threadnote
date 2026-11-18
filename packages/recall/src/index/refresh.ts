@@ -1,5 +1,5 @@
 import {Array as EffectArray} from 'effect';
-import {Effect, FileSystem, Option, Path} from 'effect';
+import {Effect, FileSystem, Option, Order, Path} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {forEachFileWithinBoundary} from '@threadnote/platform/safe_scan';
 import {uriSegment} from '@threadnote/workspace/manifest';
@@ -92,6 +92,7 @@ export const RECALL_REFRESH_INDEXED_CODE_LINK_TABLE = 'recall_refresh_indexed_co
 export const RECALL_REFRESH_INDEXED_DOCUMENT_TABLE = 'recall_refresh_indexed_documents';
 export const RECALL_REFRESH_INDEXED_MEMORY_LINK_TABLE = 'recall_refresh_indexed_memory_links';
 export const RECALL_REFRESH_INDEXED_POSTING_TABLE = 'recall_refresh_indexed_postings';
+export const RECALL_REFRESH_OVERSIZED_SOURCE_TABLE = 'recall_refresh_oversized_sources';
 export const RECALL_REFRESH_REPLACED_DOCUMENT_TABLE = 'recall_refresh_replaced_documents';
 export const RECALL_REFRESH_SOURCE_TABLE = 'recall_refresh_sources';
 export const RECALL_REFRESH_LINK_IDENTITY_TABLE = 'recall_refresh_link_identities';
@@ -134,18 +135,19 @@ export const scanRecallSources = Effect.fn('recall.scanSources')(function* (
       },
       file =>
         Effect.gen(function* () {
-          if (file.size > MAX_INDEXED_FILE_BYTES) {
-            const input = yield* captureRecallSourceInput(file.path);
-            if (!input.info || Number(input.info.size) !== file.size) return yield* recallRefreshSuperseded();
-            omittedSourceInputs.set(file.path, input.key);
-            skippedOversizedDocumentCount += 1;
-            return;
-          }
           const relativeSegments = EffectArray.map(
             Effect2.pipe(path.relative(root.path, file.path), EffectString.split(path.sep)),
             segment => Effect2.pipe(segment, EffectString.normalize('NFC')),
           );
           const uri = canonicalResourceUri(rootId.namespace, [...rootId.segments, ...relativeSegments]);
+          if (file.size > MAX_INDEXED_FILE_BYTES) {
+            const input = yield* captureRecallSourceInput(file.path);
+            if (!input.info || Number(input.info.size) !== file.size) return yield* recallRefreshSuperseded();
+            omittedSourceInputs.set(file.path, input.key);
+            yield* stageRecallOversizedSource(sql, uri);
+            skippedOversizedDocumentCount += 1;
+            return;
+          }
           if (isExternalResourceUri(uri) && externalAccess[uri] === undefined) {
             omittedSourceInputs.set(file.path, (yield* captureRecallSourceInput(file.path)).key);
             return;
@@ -181,14 +183,16 @@ const queueRecallReplacedDocumentByUri = Effect.fn('recall.queueReplacedDocument
   sql: SqlClient.SqlClient,
   uri: string,
 ) {
-  const documentId = yield* sql.unsafe<{readonly name: string}>('PRAGMA table_info(documents)');
-  if (EffectArray.some(documentId, column => column.name === 'id'))
-    yield* sql.unsafe(
-      `INSERT OR IGNORE INTO temp.${RECALL_REFRESH_REPLACED_DOCUMENT_TABLE} (document_id)
-       SELECT id FROM documents WHERE uri = ?`,
-      [uri],
-    );
+  yield* sql.unsafe(
+    `INSERT OR IGNORE INTO temp.${RECALL_REFRESH_REPLACED_DOCUMENT_TABLE} (document_id)
+     SELECT id FROM documents WHERE uri = ?`,
+    [uri],
+  );
 });
+
+function stageRecallOversizedSource(sql: SqlClient.SqlClient, uri: string) {
+  return sql.unsafe(`INSERT OR IGNORE INTO temp.${RECALL_REFRESH_OVERSIZED_SOURCE_TABLE} (uri) VALUES (?)`, [uri]);
+}
 
 function insertRecallSourceMetadata(sql: SqlClient.SqlClient, sources: readonly RecallRefreshSourceInsert[]) {
   if (sources.length === 0) return Effect.void;
@@ -234,7 +238,7 @@ export const stageRecallSources = Effect.fn('recall.stageSources')(function* (
 ) {
   if (options.mode.kind === 'touched') {
     const touched = yield* tryStageTouchedRecallSources(sql, fs, path, config, options, options.mode.contentGeneration);
-    if (touched) return {...touched, mode: 'touched' as const, forceAllSources: false, inventoryComplete: false};
+    if (touched) return {...touched, mode: 'touched' as const};
   }
   return {
     ...(yield* scanRecallSources(
@@ -247,8 +251,6 @@ export const stageRecallSources = Effect.fn('recall.stageSources')(function* (
       options.invalidatedUris,
     )),
     mode: 'full' as const,
-    forceAllSources: false,
-    inventoryComplete: true,
   };
 });
 
@@ -300,17 +302,22 @@ const stageTouchedRecallSources = Effect.fn('recall.stageTouchedSources')(functi
     const id = parseResourceId(root.uri);
     return {...root, uri: id.canonicalUri, id};
   });
+  // Complement ranges keep the foreign-row probe on the URI index instead of a negated full scan.
+  const foreignRanges: (readonly [string, string])[] = [];
+  let covered = '';
+  for (const prefix of EffectArray.sort(
+    EffectArray.map(roots, root => `${root.uri}/`),
+    Order.String,
+  )) {
+    if (prefix > covered) foreignRanges.push([covered, prefix]);
+    const high = `${prefix}\u{10ffff}`;
+    if (high > covered) covered = high;
+  }
   const foreignInventory = yield* sql.unsafe<{readonly uri: string}>(
     `SELECT uri FROM documents
-     WHERE NOT (${EffectArray.join(
-       EffectArray.map(roots, () => '(uri >= ? AND uri < ?)'),
-       ' OR ',
-     )})
+     WHERE ${EffectArray.join([...EffectArray.map(foreignRanges, () => '(uri >= ? AND uri < ?)'), 'uri >= ?'], ' OR ')}
      LIMIT 1`,
-    EffectArray.flatMap(roots, root => {
-      const prefix = `${root.uri}/`;
-      return [prefix, `${prefix}\u{10ffff}`] as const;
-    }),
+    [...EffectArray.flatten(foreignRanges), covered],
   );
   if (foreignInventory.length > 0) return undefined;
   const selected = new Map<string, {readonly root: (typeof roots)[number]; readonly segments: readonly string[]}>();
@@ -363,6 +370,23 @@ const stageTouchedRecallSources = Effect.fn('recall.stageTouchedSources')(functi
       previous.set(prior.uri, prior);
     }
   }
+  // Oversized files have no documents row; touching one, or an ASCII case alias of one, needs the
+  // full scan to recount it. The persisted set is small and must match the published count.
+  const unknownUris = EffectArray.filter(selectedUriList, uri => !previous.has(uri));
+  if (skipped > 0 && unknownUris.length > 0) {
+    const persisted = yield* sql.unsafe<{readonly count: number}>('SELECT COUNT(*) AS count FROM oversized_sources');
+    if (persisted[0]?.count !== skipped) return undefined;
+    for (const batch of EffectArray.chunksOf(unknownUris, RECALL_REFRESH_SOURCE_PAGE_SIZE)) {
+      const oversized = yield* sql.unsafe<{readonly present: number}>(
+        `SELECT 1 AS present FROM oversized_sources WHERE uri COLLATE NOCASE IN (${EffectArray.join(
+          EffectArray.map(batch, () => '?'),
+          ', ',
+        )}) LIMIT 1`,
+        batch,
+      );
+      if (oversized.length > 0) return undefined;
+    }
+  }
   const aliasProbeTargets = EffectArray.filter(
     targets,
     ([uri, target]) =>
@@ -386,8 +410,6 @@ const stageTouchedRecallSources = Effect.fn('recall.stageTouchedSources')(functi
     );
     if (!aliasProbeOk) return undefined;
   }
-  // Oversized files have no documents row; unknown prior membership requires a full count.
-  if (skipped > 0 && EffectArray.some([...selected.keys()], uri => !previous.has(uri))) return undefined;
   for (const [uri, target] of selected)
     if (
       !previous.has(uri) &&
@@ -475,6 +497,7 @@ const stageTouchedRecallSources = Effect.fn('recall.stageTouchedSources')(functi
       if (!input.info || input.info.size !== info.success.size) return yield* recallRefreshSuperseded();
       if (prior) yield* queueRecallReplacedDocumentByUri(sql, uri);
       omittedSourceInputs.set(filename, input.key);
+      yield* stageRecallOversizedSource(sql, uri);
       skippedOversizedDocumentCount++;
       continue;
     }
@@ -643,7 +666,7 @@ export function countRecallSourceChanges(sql: SqlClient.SqlClient, forceRefresh:
          LEFT JOIN temp.${RECALL_REFRESH_SOURCE_TABLE} AS source ON source.uri = document.uri
          WHERE source.uri IS NULL AND ? = 1)
          + (SELECT COUNT(*) FROM temp.${RECALL_REFRESH_REPLACED_DOCUMENT_TABLE} AS replaced
-            INNER JOIN documents AS document ON document.id = replaced.document_id) AS removed_source_count`,
+            CROSS JOIN documents AS document ON document.id = replaced.document_id) AS removed_source_count`,
       [forceRefresh ? 1 : 0, inventoryComplete ? 1 : 0],
     )
     .pipe(
@@ -899,7 +922,7 @@ export function hashRecallRefreshGeneration(
     for (;;) {
       const tombstones = yield* sql.unsafe<{readonly uri: string}>(
         `SELECT document.uri FROM temp.${RECALL_REFRESH_REPLACED_DOCUMENT_TABLE} AS replaced
-         INNER JOIN documents AS document ON document.id = replaced.document_id
+         CROSS JOIN documents AS document ON document.id = replaced.document_id
          ${tombstoneCursor === undefined ? '' : 'WHERE document.uri COLLATE BINARY > ? COLLATE BINARY'}
          ORDER BY document.uri COLLATE BINARY LIMIT ?`,
         tombstoneCursor === undefined
@@ -953,9 +976,8 @@ export function stageRecallRefreshAffectedTerms(sql: SqlClient.SqlClient, invent
     );
     yield* sql.unsafe(`
       INSERT OR IGNORE INTO temp.${RECALL_REFRESH_AFFECTED_TERM_TABLE} (term)
-      SELECT posting.term FROM postings AS posting
-      INNER JOIN temp.${RECALL_REFRESH_REPLACED_DOCUMENT_TABLE} AS replaced
-        ON replaced.document_id = posting.document_id
+      SELECT posting.term FROM temp.${RECALL_REFRESH_REPLACED_DOCUMENT_TABLE} AS replaced
+      CROSS JOIN postings AS posting ON posting.document_id = replaced.document_id
     `);
     yield* sql.unsafe(`
       INSERT OR IGNORE INTO temp.${RECALL_REFRESH_AFFECTED_TERM_TABLE} (term)
@@ -975,6 +997,7 @@ export function dropRecallSourceScan(sql: SqlClient.SqlClient) {
       RECALL_REFRESH_INDEXED_DOCUMENT_TABLE,
       RECALL_REFRESH_LINK_IDENTITY_TABLE,
       RECALL_REFRESH_LINK_TARGET_TABLE,
+      RECALL_REFRESH_OVERSIZED_SOURCE_TABLE,
       RECALL_REFRESH_SOURCE_TABLE,
     ]) {
       yield* sql.unsafe(`DROP TABLE IF EXISTS temp.${table}`);
@@ -998,6 +1021,8 @@ function prepareRecallSourceScan(sql: SqlClient.SqlClient) {
       memory_id TEXT PRIMARY KEY NOT NULL) WITHOUT ROWID`);
     yield* sql.unsafe(`CREATE TEMP TABLE ${RECALL_REFRESH_LINK_TARGET_TABLE} (
       uri_locator_digest TEXT PRIMARY KEY NOT NULL) WITHOUT ROWID`);
+    yield* sql.unsafe(`CREATE TEMP TABLE ${RECALL_REFRESH_OVERSIZED_SOURCE_TABLE} (
+      uri TEXT PRIMARY KEY NOT NULL) WITHOUT ROWID`);
     yield* sql.unsafe(`CREATE TEMP TABLE ${RECALL_REFRESH_INDEXED_DOCUMENT_TABLE} (
       uri TEXT PRIMARY KEY NOT NULL, project TEXT,
       approved_authoritative INTEGER NOT NULL CHECK (approved_authoritative IN (0, 1)),

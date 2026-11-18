@@ -187,23 +187,21 @@ export function resolveCodeGraphWorkspaceCatalog(
     (file, __effectArrayIndex) => __effectArrayIndex in files && languagePacks.isResolutionContext(file.path),
   ).sort((left, right) => compareCodeUnits(left.path, right.path));
   const fingerprint = workspaceCatalogFingerprint(contexts);
-  if (cached?.fingerprint === fingerprint) return Effect.succeed(returnWorkspaceCatalog(cached));
+  if (cached?.fingerprint === fingerprint) return Effect.succeed(freezeWorkspaceCatalog(cached));
   return workspaceCatalogs.get(languagePacks, fingerprint).pipe(
-    Effect.flatMap(previous =>
-      previous !== undefined
-        ? Effect.succeed(returnWorkspaceCatalog(previous))
-        : languagePacks.discoverWorkspace(contexts).pipe(
-            Effect.flatMap(workspace => {
-              const catalog = freezeWorkspaceCatalogEntries({
-                fingerprint,
-                resolutionContextPaths: EffectArray.map(contexts, file => file.path),
-                workspace,
-              });
-              return workspaceCatalogs
-                .set(languagePacks, fingerprint, catalog, JSON.stringify(catalog).length * 2)
-                .pipe(Effect.map(returnWorkspaceCatalog));
-            }),
-          ),
+    Effect.filterOrElse(
+      (previous): previous is CodeGraphWorkspaceCatalog => previous !== undefined,
+      () =>
+        languagePacks.discoverWorkspace(contexts).pipe(
+          Effect.flatMap(workspace => {
+            const catalog = freezeWorkspaceCatalog({
+              fingerprint,
+              resolutionContextPaths: EffectArray.map(contexts, file => file.path),
+              workspace,
+            });
+            return workspaceCatalogs.set(languagePacks, fingerprint, catalog, JSON.stringify(catalog).length * 2);
+          }),
+        ),
     ),
   );
 }
@@ -519,58 +517,9 @@ function compareProjects(left: CodeGraphWorkspaceProject, right: CodeGraphWorksp
   );
 }
 
-function returnWorkspaceCatalog(catalog: CodeGraphWorkspaceCatalog): CodeGraphWorkspaceCatalog {
-  return freezeWorkspaceCatalogEntries(cloneWorkspaceCatalog(catalog));
-}
-
-function cloneWorkspaceCatalog(catalog: CodeGraphWorkspaceCatalog): CodeGraphWorkspaceCatalog {
-  return {
-    ...catalog,
-    resolutionContextPaths: [...catalog.resolutionContextPaths],
-    workspace: {
-      ...catalog.workspace,
-      diagnostics: [...catalog.workspace.diagnostics],
-      projects: EffectArray.map(catalog.workspace.projects, project => ({
-        ...project,
-        dependencies: [...project.dependencies],
-        dependencyDetails: EffectArray.map(project.dependencyDetails, detail => ({...detail})),
-        diagnostics: [...project.diagnostics],
-        languages: [...project.languages],
-        sourceRoots: [...project.sourceRoots],
-        workspaceRoots: [...project.workspaceRoots],
-        ...(project.externalDependencies === undefined
-          ? {}
-          : {
-              externalDependencies: EffectArray.map(project.externalDependencies, dependency => ({
-                ...dependency,
-                ...(dependency.evidence === undefined
-                  ? {}
-                  : {
-                      evidence: {
-                        ...dependency.evidence,
-                        ...(dependency.evidence.span === undefined ? {} : {span: {...dependency.evidence.span}}),
-                      },
-                    }),
-              })),
-            }),
-        ...(project.monikers === undefined
-          ? {}
-          : {
-              monikers: EffectArray.map(project.monikers, moniker => ({
-                ...moniker,
-                evidence: {
-                  ...moniker.evidence,
-                  span: {...moniker.evidence.span},
-                },
-              })),
-            }),
-      })),
-      workspaces: [...catalog.workspace.workspaces],
-    },
-  };
-}
-
-function freezeWorkspaceCatalogEntries(catalog: CodeGraphWorkspaceCatalog): CodeGraphWorkspaceCatalog {
+/** Cached catalogs are shared by every caller, so freeze the whole tree once. */
+function freezeWorkspaceCatalog(catalog: CodeGraphWorkspaceCatalog): CodeGraphWorkspaceCatalog {
+  if (Object.isFrozen(catalog)) return catalog;
   for (const project of catalog.workspace.projects) {
     Object.freeze(project.dependencies);
     for (const detail of project.dependencyDetails) Object.freeze(detail);
@@ -603,5 +552,10 @@ function freezeWorkspaceCatalogEntries(catalog: CodeGraphWorkspaceCatalog): Code
     Object.freeze(workspace.diagnostics);
     Object.freeze(workspace);
   }
-  return catalog;
+  Object.freeze(catalog.workspace.projects);
+  Object.freeze(catalog.workspace.workspaces);
+  Object.freeze(catalog.workspace.diagnostics);
+  Object.freeze(catalog.workspace);
+  Object.freeze(catalog.resolutionContextPaths);
+  return Object.freeze(catalog);
 }

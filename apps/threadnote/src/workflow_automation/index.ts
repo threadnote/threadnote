@@ -1,7 +1,5 @@
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {loadRecallMemoryIdentities, withRecallIdentityPreparation} from '@threadnote/recall/index';
-import {memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
-import {parseResourceId} from '@threadnote/store/resource-id';
 import {nativeRequestSchema} from './request_schema.js';
 import {nativeWorkflowFeatureVersions} from './features.js';
 import {Effect} from 'effect';
@@ -18,6 +16,8 @@ import {
 } from '@threadnote/workflow-automations/native';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {withNativeWorkflowMemorySession} from '../workflow_memory/index.js';
+import {directOwnedRelationScope} from '../workflow_memory/artifacts.js';
+import type {OwnedActiveRelationArtifact} from '../memory/relations.js';
 import {resolveWorkflowBinding} from '../workflow_memory/profile.js';
 import {bindWorkflow, inspectWorkflowJournal, withWorkflowLock} from '../workflow_memory/journal.js';
 import {readWorkflowSharedRoots} from '../workflow_memory/scopes.js';
@@ -316,31 +316,30 @@ const save = Effect.fn('workflowAutomation.save')(function* (
   if (existing && existing.intentDigest !== digest)
     return yield* issue('operation-intent-conflict', 'This operationId already belongs to different native intent.');
   if ((intent.relations?.length ?? 0) > 0 || (intent.evidenceRefs?.length ?? 0) > 0) {
-    const ownedCandidate =
-      (intent.evidenceRefs?.length ?? 0) === 0 &&
-      !stored.state.team &&
-      (intent.relations?.length ?? 0) > 0 &&
-      (() => {
-        const activeOwnedUris = new Set<string>();
-        for (const operation of stored.state.operations) {
-          if (operation.status !== 'verified' || !operation.artifact) continue;
-          if (operation.artifact.state === 'active') activeOwnedUris.add(operation.artifact.uri);
-          else {
-            activeOwnedUris.delete(operation.artifact.uri);
-            if (operation.intent.uri !== undefined) activeOwnedUris.delete(operation.intent.uri);
-          }
-        }
-        return EffectArray.every(intent.relations ?? [], relation => {
-          try {
-            const canonical = parseResourceId(EffectString.trim(relation.uri)).canonicalUri;
-            return memoryIdFromIdentityAlias(canonical) === undefined && activeOwnedUris.has(canonical);
-          } catch {
-            return false;
-          }
-        });
-      })();
-    const sharedRoots = ownedCandidate ? yield* readWorkflowSharedRoots(config, binding) : [];
-    if (!ownedCandidate || sharedRoots.length > 0)
+    const artifacts: Record<string, OwnedActiveRelationArtifact> = {};
+    for (const operation of stored.state.operations) {
+      if (operation.status !== 'verified' || !operation.artifact) continue;
+      if (operation.artifact.state === 'active') artifacts[operation.artifact.uri] = operation.artifact;
+      else {
+        delete artifacts[operation.artifact.uri];
+        if (operation.intent.uri !== undefined) delete artifacts[operation.intent.uri];
+      }
+    }
+    const directOwned = stored.state.team
+      ? undefined
+      : yield* directOwnedRelationScope(
+          {
+            artifacts,
+            owned: EffectArray.map(EffectRecord.toEntries(artifacts), ([canonicalUri, artifact]) => ({
+              canonicalUri,
+              memoryId: artifact.memoryId,
+            })),
+          },
+          EffectArray.map(intent.relations ?? [], relation => relation.uri),
+          intent.evidenceRefs,
+          readWorkflowSharedRoots(config, binding),
+        );
+    if (directOwned === undefined)
       yield* loadRecallMemoryIdentities(config, {allowedUriScopes: [], memoryIds: []}).pipe(
         withRecallIdentityPreparation,
       );

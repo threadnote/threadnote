@@ -9,8 +9,6 @@ import {describe, expect, it} from 'vitest';
 import {
   createRecallIdentityConflictLoader,
   initializeRecallIdentityIndex,
-  RECALL_IDENTITY_COLUMN_SCHEMA_VERSION,
-  recallIndexMetadataIsCurrent,
   rebuildRecallIdentityConflicts,
 } from '@threadnote/recall/index/identity';
 import {
@@ -211,7 +209,7 @@ describe('stable identity URI scope SQL', () => {
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* sql.unsafe(
-        'CREATE TABLE documents (id INTEGER PRIMARY KEY, uri TEXT NOT NULL, candidate_json TEXT NOT NULL, project TEXT, approved_authoritative INTEGER NOT NULL)',
+        'CREATE TABLE documents (id INTEGER PRIMARY KEY, uri TEXT NOT NULL, memory_id TEXT, content_hash TEXT, candidate_json TEXT NOT NULL, project TEXT, approved_authoritative INTEGER NOT NULL)',
       );
       yield* sql.unsafe('CREATE INDEX documents_uri ON documents(uri)');
       yield* initializeRecallIdentityIndex(sql);
@@ -283,126 +281,48 @@ describe('stable identity URI scope SQL', () => {
     }).pipe(withDatabase),
   );
 
-  effectIt.effect(
-    'uses covering indexes for full conflict rebuilds and document_length aggregates while upgrading legacy v13 indexes idempotently',
-    () =>
-      Effect.gen(function* () {
-        const sql = yield* SqlClient.SqlClient;
-        yield* sql.unsafe('CREATE TABLE metadata (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)');
-        yield* sql.unsafe(
-          "CREATE TABLE documents (id INTEGER PRIMARY KEY, uri TEXT UNIQUE NOT NULL, candidate_json TEXT NOT NULL, project TEXT, approved_authoritative INTEGER NOT NULL, logical_key TEXT NOT NULL DEFAULT 'k', document_length INTEGER NOT NULL DEFAULT 10)",
-        );
-        yield* sql.unsafe(`
-          CREATE TRIGGER documents_integrity_update
-          AFTER UPDATE ON documents
-          BEGIN
-            UPDATE metadata
-            SET value = CAST(value AS INTEGER) + 1
-            WHERE key = 'mutation_sequence';
-          END
-        `);
-        yield* sql.unsafe('CREATE INDEX documents_logical_key ON documents(logical_key)');
-        yield* sql.unsafe(
-          `CREATE INDEX documents_memory_identity
-           ON documents(json_extract(candidate_json, '$.memoryId'), json_extract(candidate_json, '$.contentHash'))`,
-        );
-        yield* sql.unsafe(
-          `INSERT INTO metadata (key, value) VALUES
-             ('content_generation', 'gen-legacy'),
-             ('memory_identity_conflict_generation', 'gen-legacy'),
-             ('mutation_sequence', '4'),
-             ('integrity_sequence', '4')`,
-        );
-        yield* sql.unsafe(
-          'INSERT INTO documents (uri, candidate_json, approved_authoritative, logical_key, document_length) VALUES (?, ?, 0, ?, ?)',
-          [target, JSON.stringify({uri: target, memoryId: 'tn_a', contentHash: 'a'}), 'k-a', 12],
-        );
-        yield* sql.unsafe(
-          'INSERT INTO documents (uri, candidate_json, approved_authoritative, logical_key, document_length) VALUES (?, ?, 0, ?, ?)',
-          [
-            `${root}/duplicate.md`,
-            JSON.stringify({uri: `${root}/duplicate.md`, memoryId: 'tn_a', contentHash: 'b'}),
-            'k-a',
-            18,
-          ],
-        );
-        yield* sql.unsafe(
-          'INSERT INTO documents (uri, candidate_json, approved_authoritative, logical_key, document_length) VALUES (?, ?, 0, ?, ?)',
-          [
-            `${root}/single.md`,
-            JSON.stringify({uri: `${root}/single.md`, memoryId: 'tn_b', contentHash: 'a'}),
-            'k-b',
-            7,
-          ],
-        );
-        yield* sql.unsafe(
-          'INSERT INTO documents (uri, candidate_json, approved_authoritative, logical_key, document_length) VALUES (?, ?, 0, ?, ?)',
-          [`${root}/plain.md`, JSON.stringify({uri: `${root}/plain.md`}), 'k-plain', 4],
-        );
-
-        const loadMetadata = sql
-          .unsafe<{key: string; value: string}>('SELECT key, value FROM metadata')
-          .pipe(Effect.map(rows => new Map(EffectArray.map(rows, row => [row.key, row.value] as const))));
-        expect(recallIndexMetadataIsCurrent(yield* loadMetadata)).toBe(false);
-
-        yield* initializeRecallIdentityIndex(sql);
-
-        const afterFirst = yield* loadMetadata;
-        expect(afterFirst.get('memory_identity_schema_version')).toBe(RECALL_IDENTITY_COLUMN_SCHEMA_VERSION);
-        expect(recallIndexMetadataIsCurrent(afterFirst)).toBe(true);
-        const migratedSequence = afterFirst.get('mutation_sequence');
-        expect(Number(migratedSequence)).toBeGreaterThan(4);
-
-        const indexRow = yield* sql.unsafe<{sql: string}>(
-          "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'documents_memory_identity'",
-        );
-        expect(indexRow[0]?.sql).toContain('(memory_id, content_hash, uri)');
-        expect(indexRow[0]?.sql).not.toContain('json_extract');
-        const logicalKeyIndexRow = yield* sql.unsafe<{sql: string}>(
-          "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'documents_logical_key'",
-        );
-        expect(logicalKeyIndexRow[0]?.sql).toContain('(logical_key, document_length)');
-
-        for (const aggregateQuery of [
-          'SELECT COUNT(*) AS document_count, COALESCE(SUM(document_length), 0) AS total_document_length FROM documents',
-          'SELECT COUNT(*) AS document_count, COALESCE(SUM(document_length), 0) AS total_document_length FROM (SELECT logical_key, MAX(document_length) AS document_length FROM documents GROUP BY logical_key)',
-        ]) {
-          const plan = yield* sql.unsafe<{detail: string}>(`EXPLAIN QUERY PLAN ${aggregateQuery}`);
-          expect(
-            EffectArray.some(plan, row =>
-              Effect2.pipe(row.detail, EffectString.includes('USING COVERING INDEX documents_logical_key')),
-            ),
-          ).toBe(true);
-        }
-
-        yield* initializeRecallIdentityIndex(sql);
-        const afterSecond = yield* loadMetadata;
-        expect(afterSecond.get('mutation_sequence')).toBe(migratedSequence);
-        expect(recallIndexMetadataIsCurrent(afterSecond)).toBe(true);
-
-        const capturedRebuild: string[] = [];
-        const observed = new Proxy(sql, {
-          get(target, property, receiver) {
-            if (property !== 'unsafe') return Reflect.get(target, property, receiver);
-            return <A extends object>(text: string, parameters: readonly unknown[] = []) => {
-              if (Effect2.pipe(text, EffectString.includes('INSERT INTO memory_identity_conflicts')))
-                capturedRebuild.push(text);
-              return target.unsafe<A>(text, parameters);
-            };
-          },
-        });
-        yield* rebuildRecallIdentityConflicts(observed);
-        expect(capturedRebuild).toHaveLength(1);
-        const rebuildPlan = yield* sql.unsafe<{detail: string}>(`EXPLAIN QUERY PLAN ${capturedRebuild[0]}`);
-        expect(
-          EffectArray.some(rebuildPlan, row =>
-            Effect2.pipe(row.detail, EffectString.includes('USING COVERING INDEX documents_memory_identity')),
-          ),
-        ).toBe(true);
-        const conflicts = yield* sql.unsafe<{memory_id: string}>(
-          'SELECT memory_id FROM memory_identity_conflicts ORDER BY memory_id',
-        );
-        expect(conflicts).toEqual([{memory_id: 'tn_a'}]);
-      }).pipe(withDatabase),
+  effectIt.effect('rebuilds identity conflicts through the covering identity index', () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql.unsafe(
+        'CREATE TABLE documents (id INTEGER PRIMARY KEY, uri TEXT UNIQUE NOT NULL, memory_id TEXT, content_hash TEXT, candidate_json TEXT NOT NULL)',
+      );
+      yield* initializeRecallIdentityIndex(sql);
+      for (const [uri, memoryId, contentHash] of [
+        [target, 'tn_a', 'a'],
+        [`${root}/duplicate.md`, 'tn_a', 'b'],
+        [`${root}/single.md`, 'tn_b', 'a'],
+        [`${root}/plain.md`, null, null],
+      ] as const)
+        yield* sql.unsafe('INSERT INTO documents (uri, memory_id, content_hash, candidate_json) VALUES (?, ?, ?, ?)', [
+          uri,
+          memoryId,
+          contentHash,
+          '{}',
+        ]);
+      const capturedRebuild: string[] = [];
+      const observed = new Proxy(sql, {
+        get(target, property, receiver) {
+          if (property !== 'unsafe') return Reflect.get(target, property, receiver);
+          return <A extends object>(text: string, parameters: readonly unknown[] = []) => {
+            if (Effect2.pipe(text, EffectString.includes('INSERT INTO memory_identity_conflicts')))
+              capturedRebuild.push(text);
+            return target.unsafe<A>(text, parameters);
+          };
+        },
+      });
+      yield* rebuildRecallIdentityConflicts(observed);
+      expect(capturedRebuild).toHaveLength(1);
+      const rebuildPlan = yield* sql.unsafe<{detail: string}>(`EXPLAIN QUERY PLAN ${capturedRebuild[0]}`);
+      expect(
+        EffectArray.some(rebuildPlan, row =>
+          Effect2.pipe(row.detail, EffectString.includes('USING COVERING INDEX documents_memory_identity')),
+        ),
+      ).toBe(true);
+      const conflicts = yield* sql.unsafe<{memory_id: string}>(
+        'SELECT memory_id FROM memory_identity_conflicts ORDER BY memory_id',
+      );
+      expect(conflicts).toEqual([{memory_id: 'tn_a'}]);
+    }).pipe(withDatabase),
   );
 });
