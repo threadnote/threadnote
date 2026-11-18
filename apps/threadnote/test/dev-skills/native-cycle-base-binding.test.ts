@@ -184,6 +184,56 @@ describe('native cycle remote base binding', () => {
       }).pipe(run),
   );
 
+  effectIt.effect('binds a remote whose fetch mapping is unset and names a nonstandard mapping', () =>
+    Effect.gen(function* () {
+      const f = yield* setup();
+      yield* git(f.repo, ['config', '--unset-all', 'remote.origin.fetch']);
+      const before = yield* f.inventory();
+      const bound = yield* bindNativeCycleDeliveryBase(f.repo, 'origin/main', f.delivery);
+      expect(bound.pr?.baseRefBinding).toEqual({
+        ref: 'refs/remotes/origin/main',
+        remote: 'origin',
+        repository: 'https://github.com/example/repo',
+      });
+      expect(yield* f.inventory()).toEqual(before);
+
+      yield* git(f.repo, ['config', '--add', 'remote.origin.fetch', '+refs/heads/main:refs/remotes/origin/main']);
+      const narrowed = yield* bindNativeCycleDeliveryBase(f.repo, 'origin/main', f.delivery).pipe(Effect.result);
+      expect(narrowed).toMatchObject({failure: {code: 'base-ref-unverified'}});
+      expect(JSON.stringify(narrowed)).toContain('remote.origin.fetch');
+    }).pipe(run),
+  );
+
+  effectIt.effect('binds an SSH host alias only when ssh resolves it to github.com', () =>
+    Effect.gen(function* () {
+      const f = yield* setup();
+      const executor = yield* CommandExecutor;
+      const sshHost = (hostname: string) =>
+        CommandExecutor.of({
+          ...executor,
+          execute: (executable, args, options) =>
+            executable === 'ssh'
+              ? Effect.succeed({exitCode: 0, stderr: '', stdout: `user git\nhostname ${hostname}\nport 22\n`})
+              : executor.execute(executable, args, options),
+        });
+      yield* git(f.repo, ['remote', 'set-url', 'origin', 'git@github.com-work:example/repo.git']);
+      const before = yield* f.inventory();
+      const bound = yield* bindNativeCycleDeliveryBase(f.repo, 'origin/main', f.delivery).pipe(
+        Effect.provideService(CommandExecutor, sshHost('github.com')),
+      );
+      expect(bound.pr?.baseRefBinding?.repository).toBe('https://github.com/example/repo');
+      expect(yield* f.inventory()).toEqual(before);
+
+      const elsewhere = yield* bindNativeCycleDeliveryBase(f.repo, 'origin/main', f.delivery).pipe(
+        Effect.provideService(CommandExecutor, sshHost('git.example.invalid')),
+        Effect.result,
+      );
+      expect(elsewhere).toMatchObject({failure: {code: 'base-ref-unverified'}});
+      expect(JSON.stringify(elsewhere)).toContain('Remote origin');
+      expect(JSON.stringify(elsewhere)).not.toContain('github.com-work');
+    }).pipe(run),
+  );
+
   effectIt.effect('rejects configuration drift between probes', () =>
     Effect.gen(function* () {
       const f = yield* setup();
