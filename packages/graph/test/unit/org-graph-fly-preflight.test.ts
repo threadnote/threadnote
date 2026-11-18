@@ -1,5 +1,4 @@
 import {Array as EffectArray} from 'effect';
-/* oxlint-disable effecttsgo/node-builtin-import -- These fixtures exercise native file modes, symlinks, and Ed25519 key material at the container boundary. */
 import {generateKeyPairSync} from 'node:crypto';
 import {chmodSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';

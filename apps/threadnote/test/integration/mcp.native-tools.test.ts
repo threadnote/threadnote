@@ -303,7 +303,7 @@ const WORKFLOW_TASK_MUTATING_TOOL_MAX_BYTES = {
   workflow_task_compact_expand: 800,
   workflow_task_compact_confirm: 2_500,
   workflow_task_work: 1_800,
-  workflow_task_control: 2_200,
+  workflow_task_control: 2_400,
   workflow_task_snapshot: 2_500,
   workflow_task_record_review: 2_300,
   workflow_task_record_validation: 1_300,
@@ -729,10 +729,15 @@ describe('Threadnote MCP toolsets', () => {
           'resume',
           'reopen',
           'reconcile',
+          'waive',
+          'set-profile',
           'extend-review-budget',
         ]);
+        expect(variantsByCommand.get('waive')?.required).toEqual(['command', 'gate', 'reason', 'userAuthority']);
+        expect(variantsByCommand.get('set-profile')?.required).toEqual(['command', 'profile', 'reason']);
         for (const field of ['runId', 'callerCwd', 'taskRef'])
           expect(controlProperties[field]).toMatchObject({type: 'string', minLength: 1});
+        expect(decodeJsonObject(workflowTaskControl?.inputSchema).required).toEqual(['runId', 'callerCwd', 'control']);
         expect(variantsByCommand.get('begin')?.required).toEqual(['command']);
         expect(variantsByCommand.get('resume')?.required).toEqual(['command', 'reason']);
         expect(variantsByCommand.get('resume')?.properties.reason).toMatchObject({type: 'string', minLength: 1});
@@ -790,7 +795,7 @@ describe('Threadnote MCP toolsets', () => {
           'requalify-base',
           'requalify-invalid-tail',
         ]);
-        expect(snapshotByCommand.get('record')?.required).toEqual(['command', 'workRef']);
+        expect(snapshotByCommand.get('record')?.required).toEqual(['command']);
         expect(snapshotByCommand.get('supersede-unreviewed')?.required).toEqual(['command', 'snapshotRef', 'reason']);
         expect(snapshotByCommand.get('recover-unreviewed-rebase')?.required).toEqual([
           'command',
@@ -881,9 +886,10 @@ describe('Threadnote MCP toolsets', () => {
         expect(Buffer.byteLength(JSON.stringify(status))).toBeLessThanOrEqual(500);
         expect(Buffer.byteLength(JSON.stringify(withoutWorkflowTaskTools))).toBeLessThanOrEqual(36_500);
         expect(Buffer.byteLength(JSON.stringify(withoutMutatingWorkflowTaskTools))).toBeLessThanOrEqual(37_200);
-        // Semantic task bootstrap adds one tool beyond compact authoring; keep the additive catalog budget explicit.
+        // Semantic task bootstrap adds one tool beyond compact authoring, and the review waiver and run profile add
+        // control variants; keep the additive catalog budget explicit.
         const totalCatalogBytes = Buffer.byteLength(JSON.stringify(tools.tools));
-        expect(totalCatalogBytes).toBeLessThanOrEqual(65_000);
+        expect(totalCatalogBytes).toBeLessThanOrEqual(65_200);
         expect(
           EffectOption.getOrUndefined(EffectArray.findFirst(tools.tools, tool => tool.name === 'recall_context'))
             ?.description,

@@ -57,7 +57,8 @@ export function recallPublishedRefreshOutcome(
   prepared: {
     readonly forceAllSources: boolean;
     readonly refreshCounts: {readonly changedSourceCount: number; readonly removedSourceCount: number};
-    readonly sourceScan: {readonly forceAllSources: boolean; readonly mode: 'full' | 'touched'};
+    readonly sourceScan: {readonly mode: 'full' | 'touched'};
+    readonly touchedFallback: boolean;
   },
   documentCount: number,
 ): RecallLexicalRefreshOutcome {
@@ -66,7 +67,7 @@ export function recallPublishedRefreshOutcome(
     reasons: [
       ...blockers,
       ...reasonIf(recovery, 'recovery'),
-      ...reasonIf(prepared.sourceScan.forceAllSources, 'touched-fallback'),
+      ...reasonIf(prepared.touchedFallback, 'touched-fallback'),
     ],
     invalidatedUriCount: marker?.invalidatedUris.length ?? 0,
     changedSourceCount: prepared.refreshCounts.changedSourceCount,

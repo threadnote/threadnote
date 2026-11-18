@@ -234,6 +234,7 @@ export const collectDevelopmentPayloadManifest = Effect.fn('developmentRuntime.c
       const entry = path.join(directory, name);
       const relative = relativeDirectory ? `${relativeDirectory}/${name}` : name;
       if (relative === DEVELOPMENT_INSTALL_RECEIPT) continue;
+      if (name === '.DS_Store') continue;
       if (!isPayloadPath(relative)) {
         return yield* ScriptError.make({message: 'The development payload contains an invalid relative path.'});
       }

@@ -20,10 +20,7 @@ export const initializeRecallIdentityIndex = Effect.fn('recall.initializeIdentit
       memory_id TEXT PRIMARY KEY NOT NULL
     ) WITHOUT ROWID
   `);
-  yield* sql.unsafe(
-    `CREATE INDEX IF NOT EXISTS documents_memory_identity
-     ON documents(json_extract(candidate_json, '$.memoryId'), json_extract(candidate_json, '$.contentHash'))`,
-  );
+  yield* sql.unsafe('CREATE INDEX IF NOT EXISTS documents_memory_identity ON documents(memory_id, content_hash, uri)');
 });
 
 export function recallIndexMetadataIsCurrent(metadata: ReadonlyMap<string, string>): boolean {
@@ -43,12 +40,12 @@ export const rebuildRecallIdentityConflicts = Effect.fn('recall.rebuildIdentityC
   yield* sql.unsafe('DELETE FROM memory_identity_conflicts');
   yield* sql.unsafe(`
     INSERT INTO memory_identity_conflicts (memory_id)
-    SELECT json_extract(candidate_json, '$.memoryId') AS memory_id
+    SELECT memory_id
     FROM documents
-    WHERE json_type(candidate_json, '$.memoryId') = 'text'
-      AND json_type(candidate_json, '$.contentHash') = 'text'
-    GROUP BY json_extract(candidate_json, '$.memoryId')
-    HAVING COUNT(DISTINCT json_extract(candidate_json, '$.contentHash')) > 1
+    WHERE memory_id IS NOT NULL
+      AND content_hash IS NOT NULL
+    GROUP BY memory_id
+    HAVING COUNT(DISTINCT content_hash) > 1
   `);
 });
 
@@ -71,7 +68,7 @@ export function createRecallIdentityConflictLoader(sql: SqlClient.SqlClient) {
 
     const scope = combineRecallSqlPredicates(
       recallIdentityUriScopePredicate('d', allowedUriScopes),
-      recallEligibilityPredicate('d', eligibility),
+      recallEligibilityPredicate('d', eligibility, 'd.content_hash'),
     );
     const rows: RecallIdentityConflictRow[] = [];
     for (let start = 0; start < memoryIds.length; start += IDENTITY_QUERY_BATCH_SIZE) {
@@ -90,14 +87,14 @@ export function createRecallIdentityConflictLoader(sql: SqlClient.SqlClient) {
               batch,
             )
           : yield* sql.unsafe<RecallIdentityConflictRow>(
-              `SELECT json_extract(d.candidate_json, '$.memoryId') AS memory_id
+              `SELECT d.memory_id AS memory_id
                FROM documents AS d
                WHERE ${scope.sql}
-                 AND json_extract(d.candidate_json, '$.memoryId') IN (${memoryIdParameters})
-                 AND json_type(d.candidate_json, '$.memoryId') = 'text'
-                 AND json_type(d.candidate_json, '$.contentHash') = 'text'
-               GROUP BY json_extract(d.candidate_json, '$.memoryId')
-               HAVING COUNT(DISTINCT json_extract(d.candidate_json, '$.contentHash')) > 1`,
+                 AND d.memory_id IN (${memoryIdParameters})
+                 AND d.memory_id IS NOT NULL
+                 AND d.content_hash IS NOT NULL
+               GROUP BY d.memory_id
+               HAVING COUNT(DISTINCT d.content_hash) > 1`,
               [...scope.params, ...batch],
             )),
       );

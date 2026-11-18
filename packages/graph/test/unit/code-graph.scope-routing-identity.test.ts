@@ -2,7 +2,6 @@ import {it as effectIt} from '@effect/vitest';
 import {Array as EffectArray, Effect, FileSystem, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
-// oxlint-disable-next-line effecttsgo/node-builtin-import -- Junctions keep directory-link fixtures unprivileged on Windows.
 import {symlinkSync} from 'node:fs';
 import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
 import {resolveCodeGraphScopeRoute} from '@threadnote/graph/scope/routing';

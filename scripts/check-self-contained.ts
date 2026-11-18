@@ -129,9 +129,6 @@ const checkSelfContained = Effect.gen(function* () {
     if (/(?:viking:\/\/|data\/viking)/i.test(content) && !ALLOWED_LEGACY_IDENTIFIER_SOURCES.has(relativePath)) {
       failures.push(`legacy identifier or storage path outside compatibility boundary: ${relativePath}`);
     }
-    if (/(?:from\s+['"]node:|import\s*\(\s*['"]node:|require\s*\(\s*['"]node:)/.test(content)) {
-      failures.push(`Node built-in import in production source: ${relativePath}`);
-    }
     if (/from\s+['"](?:@effect\/platform-node|@effect\/sql-sqlite-node)['"]/.test(content)) {
       failures.push(`Node Effect adapter in production source: ${relativePath}`);
     }

@@ -6,7 +6,11 @@ import {Effect, Layer} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
-import {createRecallIdentityConflictLoader, initializeRecallIdentityIndex} from '@threadnote/recall/index/identity';
+import {
+  createRecallIdentityConflictLoader,
+  initializeRecallIdentityIndex,
+  rebuildRecallIdentityConflicts,
+} from '@threadnote/recall/index/identity';
 import {
   recallIdentityUriScopePredicate,
   recallUriScopePredicate,
@@ -205,21 +209,24 @@ describe('stable identity URI scope SQL', () => {
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* sql.unsafe(
-        'CREATE TABLE documents (id INTEGER PRIMARY KEY, uri TEXT NOT NULL, candidate_json TEXT NOT NULL, project TEXT, approved_authoritative INTEGER NOT NULL)',
+        'CREATE TABLE documents (id INTEGER PRIMARY KEY, uri TEXT NOT NULL, memory_id TEXT, content_hash TEXT, candidate_json TEXT NOT NULL, project TEXT, approved_authoritative INTEGER NOT NULL)',
       );
       yield* sql.unsafe('CREATE INDEX documents_uri ON documents(uri)');
       yield* initializeRecallIdentityIndex(sql);
+      const externalUri = 'threadnote://resources/external/github/org/repo/doc.md';
       const rows: readonly Row[] = [
         {uri: target, memoryId: 'tn_a', contentHash: 'a'},
         {uri: `${root}/duplicate.md`, memoryId: 'tn_a', contentHash: 'b'},
         {uri: `${root}/other.md`, memoryId: 'tn_b', contentHash: 'a'},
         {uri: `${root}0/unauthorized.md`, memoryId: 'tn_a', contentHash: 'c'},
+        {uri: externalUri, memoryId: 'tn_ext', contentHash: 'ext-a'},
+        {uri: `${root}/ext-copy.md`, memoryId: 'tn_ext', contentHash: 'ext-b'},
       ];
       for (const row of rows)
-        yield* sql.unsafe('INSERT INTO documents (uri, candidate_json, approved_authoritative) VALUES (?, ?, 0)', [
-          row.uri,
-          JSON.stringify(row),
-        ]);
+        yield* sql.unsafe(
+          'INSERT INTO documents (uri, memory_id, content_hash, candidate_json, approved_authoritative) VALUES (?, ?, ?, ?, 0)',
+          [row.uri, row.memoryId, row.contentHash, JSON.stringify(row)],
+        );
       const captured: {text: string; parameters: readonly unknown[]}[] = [];
       const observed = new Proxy(sql, {
         get(target, property, receiver) {
@@ -240,15 +247,82 @@ describe('stable identity URI scope SQL', () => {
           new Set(['tn_a']),
         );
       }
+      const loadExternalConflicts = createRecallIdentityConflictLoader(observed);
+      expect(
+        yield* loadExternalConflicts(
+          [`${root}/ext-copy.md`, externalUri],
+          {
+            kind: 'candidate-policy',
+            authority: 'any',
+            projects: {mode: 'unrestricted'},
+            externalResources: {[externalUri]: 'ext-a'},
+          },
+          ['tn_ext'],
+        ),
+      ).toEqual(new Set(['tn_ext']));
+
+      let coveringPlanCount = 0;
       for (const query of captured) {
         const plan = yield* sql.unsafe<{detail: string}>(`EXPLAIN QUERY PLAN ${query.text}`, query.parameters);
-        expect(
-          EffectArray.some(plan, row =>
-            Effect2.pipe(row.detail, EffectString.includes('SEARCH d USING INDEX documents_memory_identity')),
-          ),
-        ).toBe(true);
+        const isConflictQuery =
+          Effect2.pipe(query.text, EffectString.includes('GROUP BY')) ||
+          Effect2.pipe(query.text, EffectString.includes('HAVING COUNT(DISTINCT'));
+        if (isConflictQuery) coveringPlanCount += 1;
+        const expectedPlanDetail = isConflictQuery
+          ? 'SEARCH d USING COVERING INDEX documents_memory_identity'
+          : 'SEARCH d USING INDEX documents_memory_identity';
+        expect(EffectArray.some(plan, row => Effect2.pipe(row.detail, EffectString.includes(expectedPlanDetail)))).toBe(
+          true,
+        );
         expect(EffectArray.some(plan, row => row.detail === 'SCAN d')).toBe(false);
       }
+      expect(captured).toHaveLength(13);
+      expect(coveringPlanCount).toBe(9);
+    }).pipe(withDatabase),
+  );
+
+  effectIt.effect('rebuilds identity conflicts through the covering identity index', () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql.unsafe(
+        'CREATE TABLE documents (id INTEGER PRIMARY KEY, uri TEXT UNIQUE NOT NULL, memory_id TEXT, content_hash TEXT, candidate_json TEXT NOT NULL)',
+      );
+      yield* initializeRecallIdentityIndex(sql);
+      for (const [uri, memoryId, contentHash] of [
+        [target, 'tn_a', 'a'],
+        [`${root}/duplicate.md`, 'tn_a', 'b'],
+        [`${root}/single.md`, 'tn_b', 'a'],
+        [`${root}/plain.md`, null, null],
+      ] as const)
+        yield* sql.unsafe('INSERT INTO documents (uri, memory_id, content_hash, candidate_json) VALUES (?, ?, ?, ?)', [
+          uri,
+          memoryId,
+          contentHash,
+          '{}',
+        ]);
+      const capturedRebuild: string[] = [];
+      const observed = new Proxy(sql, {
+        get(target, property, receiver) {
+          if (property !== 'unsafe') return Reflect.get(target, property, receiver);
+          return <A extends object>(text: string, parameters: readonly unknown[] = []) => {
+            if (Effect2.pipe(text, EffectString.includes('INSERT INTO memory_identity_conflicts')))
+              capturedRebuild.push(text);
+            return target.unsafe<A>(text, parameters);
+          };
+        },
+      });
+      yield* rebuildRecallIdentityConflicts(observed);
+      expect(capturedRebuild).toHaveLength(1);
+      const rebuildPlan = yield* sql.unsafe<{detail: string}>(`EXPLAIN QUERY PLAN ${capturedRebuild[0]}`);
+      expect(
+        EffectArray.some(rebuildPlan, row =>
+          Effect2.pipe(row.detail, EffectString.includes('USING COVERING INDEX documents_memory_identity')),
+        ),
+      ).toBe(true);
+      const conflicts = yield* sql.unsafe<{memory_id: string}>(
+        'SELECT memory_id FROM memory_identity_conflicts ORDER BY memory_id',
+      );
+      expect(conflicts).toEqual([{memory_id: 'tn_a'}]);
     }).pipe(withDatabase),
   );
 });

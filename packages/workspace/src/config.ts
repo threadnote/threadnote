@@ -17,6 +17,8 @@ export interface RuntimeConfig {
   readonly manifestSource?: RuntimeManifestSource;
   readonly user: string;
   readonly userSource?: RuntimeIdentitySource;
+  /** Dev-cycle policy for new workflow runs; absent keeps the strict behavior runs had before policies. */
+  readonly workflowPolicyDefault?: 'standard' | 'strict';
 }
 
 export interface ProjectManifest {

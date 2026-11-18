@@ -3,6 +3,27 @@ import {Context, Effect, Schema} from 'effect';
 /** Versioned executor contracts are independent from immutable skill provenance. */
 export const workflowAutomationProtocol = 1 as const;
 
+/**
+ * The next legal command for a refusal: MCP `arguments` for `tool` and the equivalent CLI line. An unknown value is a
+ * `<placeholder>` string.
+ */
+export const WorkflowNextCommandSchema = Schema.Struct({
+  tool: Schema.TemplateLiteral(['workflow_task_', Schema.String]),
+  command: Schema.String,
+  cli: Schema.String,
+  arguments: Schema.Record(Schema.String, Schema.Unknown),
+});
+export type WorkflowNextCommand = typeof WorkflowNextCommandSchema.Type;
+export const WorkflowRefusalDetailSchema = Schema.Struct({
+  path: Schema.optionalKey(Schema.String),
+  limit: Schema.optionalKey(Schema.Finite),
+  files: Schema.optionalKey(Schema.Array(Schema.String)),
+  issues: Schema.optionalKey(
+    Schema.Array(Schema.Struct({code: Schema.String, path: Schema.String, message: Schema.String})),
+  ),
+});
+export type WorkflowRefusalDetail = typeof WorkflowRefusalDetailSchema.Type;
+
 export class WorkflowAutomationError extends Schema.TaggedError<
   WorkflowAutomationError,
   {readonly brand: unique symbol}
@@ -10,7 +31,21 @@ export class WorkflowAutomationError extends Schema.TaggedError<
   code: Schema.String,
   message: Schema.String,
   retryable: Schema.optionalKey(Schema.Boolean),
+  gate: Schema.optionalKey(Schema.String),
+  detail: Schema.optionalKey(WorkflowRefusalDetailSchema),
+  next: Schema.optionalKey(WorkflowNextCommandSchema),
 }) {}
+
+/** The caller-visible refusal envelope shared by the CLI and MCP surfaces. */
+export const workflowAutomationErrorEnvelope = (error: WorkflowAutomationError) => ({
+  status: 'error' as const,
+  code: error.code,
+  message: error.message,
+  ...(error.retryable === undefined ? {} : {retryable: error.retryable}),
+  ...(error.gate === undefined ? {} : {gate: error.gate}),
+  ...(error.detail === undefined ? {} : {detail: error.detail}),
+  ...(error.next === undefined ? {} : {next: error.next}),
+});
 
 export interface WorkflowArtifact {
   readonly uri: string;

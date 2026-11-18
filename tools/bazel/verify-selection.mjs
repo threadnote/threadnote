@@ -1,5 +1,4 @@
 import {Array as EffectArray} from 'effect';
-/* oxlint-disable effecttsgo/node-builtin-import -- Integration test of Bazel's on-disk graph and native diff process. */
 import {mkdirSync, mkdtempSync, renameSync, rmSync} from 'node:fs';
 import {join, resolve} from 'node:path';
 import {bazelDiffPath, bazelPath} from './cli-tools.mjs';

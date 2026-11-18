@@ -1,8 +1,6 @@
 #!/usr/bin/env bun
 import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 
-/* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- This local finalizer owns sealed evidence-file boundaries. */
-
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import {createHash, randomUUID} from 'node:crypto';
 import {lstat, mkdir, readFile, realpath, rename, rm, writeFile} from 'node:fs/promises';

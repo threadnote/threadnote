@@ -690,7 +690,7 @@ describe('local recall index', () => {
     ).toBe(true);
     const identityPlan = queryDatabase<{readonly detail: string}>(`
       EXPLAIN QUERY PLAN
-      SELECT json_extract(d.candidate_json, '$.memoryId') AS memory_id
+      SELECT d.memory_id AS memory_id
       FROM documents AS d
       WHERE (
         d.uri = 'threadnote://user/me/memories/durable/projects/threadnote'
@@ -699,11 +699,11 @@ describe('local recall index', () => {
           AND d.uri < 'threadnote://user/me/memories/durable/projects/threadnote0'
         )
       )
-        AND json_extract(d.candidate_json, '$.memoryId') IN ('tn_global_conflict')
-        AND json_type(d.candidate_json, '$.memoryId') = 'text'
-        AND json_type(d.candidate_json, '$.contentHash') = 'text'
-      GROUP BY json_extract(d.candidate_json, '$.memoryId')
-      HAVING COUNT(DISTINCT json_extract(d.candidate_json, '$.contentHash')) > 1
+        AND d.memory_id IN ('tn_global_conflict')
+        AND d.memory_id IS NOT NULL
+        AND d.content_hash IS NOT NULL
+      GROUP BY d.memory_id
+      HAVING COUNT(DISTINCT d.content_hash) > 1
     `);
     expect(
       EffectArray.some(identityPlan, row =>

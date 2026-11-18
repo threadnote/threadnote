@@ -1,4 +1,3 @@
-/* oxlint-disable effecttsgo/node-builtin-import -- The sandbox runner executes before npm inputs are staged. */
 import {
   chmodSync,
   copyFileSync,

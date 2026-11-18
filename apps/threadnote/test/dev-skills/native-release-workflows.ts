@@ -5,7 +5,6 @@
 import assert from 'node:assert/strict';
 import {Array as EffectArray, Option as EffectOption, String as EffectString} from 'effect';
 // Bun 1.4.2 compile cannot bundle the testing builtin export-star wrappers.
-// oxlint-disable-next-line effecttsgo/node-builtin-import -- Independent checksum boundary in the compiled release controller.
 import {createHash} from 'node:crypto';
 import {
   accessSync,
@@ -21,7 +20,6 @@ import {
   rmSync,
   statSync,
   writeFileSync,
-  // oxlint-disable-next-line effecttsgo/node-builtin-import -- Required for the compiled host controller.
 } from 'node:fs';
 import {basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep} from '@threadnote/testing/node-path';
 import {gunzipSync} from 'node:zlib';

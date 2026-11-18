@@ -349,7 +349,7 @@ effectIt.effect('preserves programming defects in read-only readiness checks', (
       databasePath: Effect.die(defect),
       pointerPath: f.database + '.pointer.json',
       fixedDatabasePath: f.database,
-      schemaVersion: 13,
+      schemaVersion: 15,
       logicalScope: recallLogicalScope(f.config, false),
     }).pipe(Effect.exit);
     expect(Exit.isFailure(exit)).toBe(true);

@@ -148,6 +148,24 @@ function useDatabase<A>(filename: string, use: (db: Database) => A) {
   );
 }
 
+effectIt.effect('rebuilds the next lexical filename instead of adopting the previous database', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture(1);
+    const lexical = f.path.join(f.home, 'indexes', 'lexical');
+    const current = f.path.join(lexical, recallIndexDatabaseFilename(false));
+    const previous = f.path.join(lexical, 'active-v14.sqlite');
+    yield* f.fs.writeFileString(previous, 'v14-not-migrated');
+    yield* f.write(0, 'alpha rebuilt after version bump');
+    yield* f.refresh();
+    expect(yield* f.fs.exists(previous)).toBe(false);
+    expect(yield* f.fs.exists(current)).toBe(true);
+    expect(
+      yield* useDatabase(current, db => db.query("SELECT value FROM metadata WHERE key = 'schema_version'").get()),
+    ).toEqual({value: '15'});
+    expect(yield* f.fs.readFileString(current).pipe(Effect.option)).not.toEqual(Option.some('v14-not-migrated'));
+  }).pipe(provide, TestClock.withLive),
+);
+
 effectIt.effect('clears published invalidations when the configured home uses a filesystem alias', () =>
   Effect.gen(function* () {
     const f = yield* fixture(2);
@@ -155,7 +173,7 @@ effectIt.effect('clears published invalidations when the configured home uses a 
     const alias = f.path.join(aliasDirectory, 'home');
     yield* f.fs.symlink(f.home, alias);
     const config = {...f.config, agentContextHome: alias};
-    const markerPath = f.path.join(f.home, 'indexes', 'lexical', 'active-v13.sqlite');
+    const markerPath = f.path.join(f.home, 'indexes', 'lexical', recallIndexDatabaseFilename(false));
     for (let i = 0; i < 2; i++) {
       yield* f.write(0, `alpha updated ${i}`);
       const events: RecallIndexProgress[] = [];
@@ -314,7 +332,7 @@ effectIt.effect('reconciles legacy inactive inventory before admitting current w
       databasePath: Effect.succeed(database),
       fixedDatabasePath: database,
       pointerPath: EffectString.replace(/\.sqlite$/, '.pointer.json')(database),
-      schemaVersion: 13,
+      schemaVersion: 14,
       logicalScope: recallLogicalScope(f.config, false),
     });
     expect(yield* current.pipe(Effect.flip)).toMatchObject({_tag: 'RecallIdentityAdmissionBusy'});
@@ -334,7 +352,7 @@ effectIt.effect('reconciles legacy inactive inventory before admitting current w
         databasePath: Effect.succeed(database),
         fixedDatabasePath: database,
         pointerPath: EffectString.replace(/\.sqlite$/, '.pointer.json')(database),
-        schemaVersion: 13,
+        schemaVersion: 14,
         logicalScope: recallLogicalScope({...f.config, user: 'other'}, false),
       }).pipe(Effect.flip),
     ).toMatchObject({_tag: 'RecallIdentityAdmissionBusy'});

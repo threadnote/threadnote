@@ -1,5 +1,4 @@
 import {Array as EffectArray} from 'effect';
-// oxlint-disable-next-line effecttsgo/node-builtin-import -- Directory junctions keep caller-retarget fixtures usable without Windows symlink privilege.
 import {symlinkSync} from 'node:fs';
 import {it as effectIt} from '@effect/vitest';
 import {DateTime, Deferred, Effect, Fiber, FileSystem, Option, Path} from 'effect';

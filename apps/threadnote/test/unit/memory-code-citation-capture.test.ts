@@ -770,3 +770,41 @@ const CONFIG: RuntimeConfig = {
   manifestPath: '/manifest.yaml',
   user: 'test-user',
 };
+
+describe('stale-tolerant citation capture', () => {
+  const capture = (root: string, source: string) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      yield* fs.makeDirectory(path.join(root, 'src'), {recursive: true});
+      yield* fs.writeFileString(path.join(root, 'src', 'value.ts'), source);
+      const fixture = citationFixture(root, {freshness: 'stale', stale: true});
+      return yield* captureMemoryCodeCitations(CONFIG, {
+        callerCwd: root,
+        refs: ['src/value.ts'],
+        allowStaleGraph: true,
+      }).pipe(provideTestLayer(fixture.layer), Effect.result);
+    });
+
+  effectIt.effect('cites an unchanged file from a graph that is stale elsewhere', () =>
+    Effect.gen(function* () {
+      const root = yield* (yield* FileSystem.FileSystem).makeTempDirectoryScoped({prefix: 'threadnote-stale-cite-'});
+      const result = yield* capture(root, SOURCE);
+      expect(result).toMatchObject({
+        _tag: 'Success',
+        success: [{path: 'src/value.ts', fileContentHash: {value: SOURCE_HASH}}],
+      });
+    }).pipe(provideTestLayer(StandaloneBrokerLayer)),
+  );
+
+  effectIt.effect('refuses a changed cited file with the current-graph recovery', () =>
+    Effect.gen(function* () {
+      const root = yield* (yield* FileSystem.FileSystem).makeTempDirectoryScoped({prefix: 'threadnote-stale-cite-'});
+      const result = yield* capture(root, SOURCE + '// edited after indexing\n');
+      expect(result).toMatchObject({
+        _tag: 'Failure',
+        failure: {recovery: {code: 'exact-current-evidence-unavailable', indexingStarted: false}},
+      });
+    }).pipe(provideTestLayer(StandaloneBrokerLayer)),
+  );
+});

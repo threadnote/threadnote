@@ -67,7 +67,8 @@ describe('stable memory identity resolution', () => {
               FROM documents AS d
               WHERE d.uri >= 'threadnote://user/me/memories/'
                 AND d.uri < 'threadnote://user/me/memories0'
-                AND json_extract(d.candidate_json, '$.memoryId') IN ('tn_active_identity')
+                AND d.memory_id IN ('tn_active_identity')
+                AND d.memory_id IS NOT NULL
               ORDER BY d.uri
             `,
                 )

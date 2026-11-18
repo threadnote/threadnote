@@ -1,6 +1,5 @@
 import {Predicate} from 'effect';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
-/* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- Private release engineering coordinates bounded OS processes and retained artifacts. */
 import {chmod, copyFile, lstat, mkdir, mkdtemp, realpath, rm, symlink, writeFile} from 'node:fs/promises';
 import {basename, dirname, isAbsolute, relative, resolve, sep} from 'node:path';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
