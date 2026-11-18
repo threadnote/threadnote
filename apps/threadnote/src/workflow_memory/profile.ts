@@ -86,20 +86,31 @@ const resolveConfiguredWorkflowProfile = Effect.fn('workflowMemory.resolveConfig
   return {profile: detected, environment};
 });
 
+/**
+ * Keep a bound path that now resolves to the current home or checkout: that storage moved and left a link at the bound
+ * path. A copy, another checkout or another home resolves elsewhere and binds its own path.
+ */
+const boundLocation = Effect.fn('workflowMemory.boundLocation')(function* (bound: string | undefined, current: string) {
+  if (bound === undefined || bound === current) return current;
+  const resolved = yield* (yield* FileSystem.FileSystem).realPath(bound).pipe(Effect.option);
+  return Effect2.Option.contains(resolved, current) ? bound : current;
+});
+
 /** Bind only after configuration is validated; read-only status does not create a binding. */
 export const resolveWorkflowBinding = Effect.fn('workflowMemory.resolveBinding')(function* (
   config: RuntimeConfig,
   request: WorkflowRequest,
   graphProject?: string,
   bound = false,
+  location?: Pick<WorkflowBinding, 'home' | 'repo'>,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const system = yield* SystemInfo;
   const {profile: detected, environment} = yield* resolveConfiguredWorkflowProfile(config, request.profile);
-  const home = yield* fs.realPath(config.agentContextHome);
+  const home = yield* boundLocation(location?.home, yield* fs.realPath(config.agentContextHome));
   const repoRoot = yield* gitValue(['rev-parse', '--show-toplevel'], system.currentDirectory());
   if (!repoRoot) return yield* workflowError('repository-missing', 'Run the workflow from its Git checkout.');
-  const repo = yield* fs.realPath(repoRoot);
+  const repo = yield* boundLocation(location?.repo, yield* fs.realPath(repoRoot));
   const selectedGraphProject =
     graphProject === undefined
       ? undefined
@@ -179,7 +190,13 @@ export const verifyWorkflowBinding = Effect.fn('workflowMemory.verifyBinding')(f
   config: RuntimeConfig,
   binding: WorkflowBinding,
 ) {
-  const base = yield* resolveWorkflowBinding(config, {protocolVersion: 1, action: 'bind', ...binding});
+  const base = yield* resolveWorkflowBinding(
+    config,
+    {protocolVersion: 1, action: 'bind', ...binding},
+    undefined,
+    false,
+    binding,
+  );
   const {bindingId: _baseId, ...baseIdentity} = base;
   const identity =
     binding.graphProject === undefined ? baseIdentity : {...baseIdentity, graphProject: binding.graphProject};
@@ -187,7 +204,7 @@ export const verifyWorkflowBinding = Effect.fn('workflowMemory.verifyBinding')(f
   if (stableJson(current) !== stableJson(binding))
     return yield* workflowError(
       'binding-drift',
-      'Workflow identity, home, checkout, profile or share changed. Resume in the original context.',
+      'Workflow identity, home, checkout, profile or share changed. Resume in the original context; a moved home or checkout resumes through a link left at its original path.',
     );
 });
 

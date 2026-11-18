@@ -26,9 +26,13 @@ import {decodeNativeAuthoringDocument, validateNativeAuthoring} from '@threadnot
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
-import {inspectWorkflowJournal, readWorkflowProgressBinding, withWorkflowLock} from '../workflow_memory/journal.js';
+import {
+  inspectWorkflowJournal,
+  readWorkflowProgressBinding,
+  resolveExistingWorkflowBinding,
+  withWorkflowLock,
+} from '../workflow_memory/journal.js';
 import {stableJson} from '../workflow_memory/protocol.js';
-import {resolveWorkflowBinding} from '../workflow_memory/profile.js';
 import {captureMemoryCodeCitationsForMcp} from '../mcp/memory_code_citation.js';
 import {MemoryCodeCitationCaptureError} from '@threadnote/context/citation/capture';
 import {isMemoryCodeCitationRecovery} from '../memory/deferred/code_anchor_scope.js';
@@ -1533,8 +1537,7 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
     );
     if (
       journal.state.binding.bindingId !== stored.state.bindingId ||
-      journal.state.binding.graphProject !== stored.state.graphProject ||
-      journal.state.binding.repo !== (yield* (yield* FileSystem.FileSystem).realPath(journal.state.binding.repo))
+      journal.state.binding.graphProject !== stored.state.graphProject
     )
       return yield* fail('binding-drift', 'The original logical repository binding changed.');
     const witness = yield* captureWitness(
@@ -1620,7 +1623,7 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
       : undefined;
   const callerBinding = journalBinding
     ? journalBinding
-    : yield* resolveWorkflowBinding(
+    : yield* resolveExistingWorkflowBinding(
         config,
         {
           protocolVersion: 1,
@@ -1635,7 +1638,7 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
           ...(run.state.naming === undefined ? {} : {naming: run.state.naming}),
         },
         run.state.graphProject,
-        true,
+        run.state.bindingId,
       );
   if (callerBinding.bindingId !== run.state.bindingId)
     return yield* fail('binding-drift', 'Use the original checkout and workflow binding for this job.');
@@ -1649,7 +1652,11 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
   )
     return yield* fail('invalid-job-state', 'The immutable job input is outside its canonical run binding.');
   const witness = yield* Schema.decodeUnknownEffect(NativeJobSourceViewSchema)(admitted.witness);
-  if (witness.bindingId !== callerBinding.bindingId || witness.repo !== callerBinding.repo)
+  // The witness records the checkout storage the bound path named at admission.
+  if (
+    witness.bindingId !== callerBinding.bindingId ||
+    witness.repo !== (yield* (yield* FileSystem.FileSystem).realPath(callerBinding.repo))
+  )
     return yield* fail('binding-drift', 'Use the original checkout and workflow binding for this job.');
   if (request.command === 'status') return nativeJobStatus(stored.state);
   if (request.command === 'result') {

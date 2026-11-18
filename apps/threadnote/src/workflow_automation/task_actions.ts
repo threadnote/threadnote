@@ -767,7 +767,7 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
       withWorkflowLock(config, stored.state.bindingId, inspectWorkflowJournal(config, stored.state.bindingId)),
       checkout,
     );
-    if (journal.state.binding.repo !== checkout)
+    if ((yield* fs.realPath(journal.state.binding.repo)) !== checkout)
       return yield* fail('wrong-checkout', 'Use the checkout bound to this native run.');
     if (request.command === 'set-profile') return yield* runNativeTaskSetProfile(config, request, stored, checkout);
     // A standard run keeps one way to record source: the newest tree supersedes an unreviewed snapshot and a moved

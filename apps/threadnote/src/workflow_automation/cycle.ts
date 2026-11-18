@@ -1343,7 +1343,7 @@ export const runNativeCycle = <R>(
           if (
             stableJson(proof) !== stableJson(options.graphProof) ||
             proof['head'] !== captured.head ||
-            proof['repositoryRoot'] !== repo
+            proof['repositoryRoot'] !== (yield* (yield* FileSystem.FileSystem).realPath(repo))
           )
             return yield* fail('source-drift', 'Packet graph evidence does not match exact current checkout bytes.');
           const adapter = yield* makeWorkflowGitAdapter();

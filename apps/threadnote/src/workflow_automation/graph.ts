@@ -1,4 +1,4 @@
-import {Effect, Schema} from 'effect';
+import {Effect, FileSystem, Schema} from 'effect';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {CodeGraphQueryService, observationFromCodeGraphStatus} from '@threadnote/graph/query';
 import {CodeGraphStoreBusyError, CodeGraphStoreTransientIoError, type CodeGraphStatus} from '@threadnote/graph/types';
@@ -28,6 +28,7 @@ export const makeWorkflowGraphAdapter = Effect.fn('workflowAutomation.graphAdapt
 ) {
   const query = yield* CodeGraphQueryService;
   const indexer = yield* CodeGraphIndexer;
+  const fs = yield* FileSystem.FileSystem;
   // A memory project tag is not a graph scope selector.
   const route = yield* resolveWorkflowGraphScope(config, binding, options.recovery);
   const project = route.state === 'selected' ? route.project : undefined;
@@ -43,8 +44,10 @@ export const makeWorkflowGraphAdapter = Effect.fn('workflowAutomation.graphAdapt
             code: 'binding-drift',
             message: 'Graph preparation must use the native run checkout.',
           });
+        // The graph reports the checkout storage that the bound path names now.
+        const root = yield* fs.realPath(repo);
         let status = yield* query.status(config.agentContextHome, repo, statusOptions);
-        if (!isReady(status, repo, binding.graphProject)) {
+        if (!isReady(status, root, binding.graphProject)) {
           if (options.prepare === false)
             return yield* WorkflowAutomationError.make({
               code: 'evidence-unavailable',
@@ -59,7 +62,7 @@ export const makeWorkflowGraphAdapter = Effect.fn('workflowAutomation.graphAdapt
           });
           status = yield* query.status(config.agentContextHome, repo, statusOptions);
         }
-        if (!isReady(status, repo, binding.graphProject))
+        if (!isReady(status, root, binding.graphProject))
           return yield* WorkflowAutomationError.make({
             code: 'evidence-not-ready',
             message: 'Preparation did not yield exact current ready graph evidence. Discovery must remain blocked.',
