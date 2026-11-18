@@ -9,7 +9,7 @@ import {
   trimTrailingSlash,
 } from '../../utils.js';
 import {recallScoreThresholdPolicy} from '@threadnote/recall/threshold';
-import {exactRecallTerms, type ExactMatch, type RecallHit} from '@threadnote/recall/results';
+import {exactRecallTerms} from '@threadnote/recall/results';
 import {resolveEffectAiConfiguration} from '../../effect/ai/consolidator.js';
 import {jevConfiguration} from '../../effect/ai/jev.js';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -71,7 +71,6 @@ export function resolveRecallWorkspaceContext(config: RuntimeConfig, params: Rec
         : {source: 'call' as const, value: params.threshold};
     const threshold = thresholdPolicy.value;
     const thresholdConfigured = thresholdPolicy.source !== 'default';
-    const passes: Array<readonly RecallHit[]> = [];
     const scopedRecallUris = new Set(
       EffectArray.filter(
         [params.pinnedUri, ...(params.allowedUriScopes ?? [])],
@@ -128,10 +127,8 @@ export function resolveRecallWorkspaceContext(config: RuntimeConfig, params: Rec
       jev,
       eligibility,
       exactRead,
-      exactMatches: [] as readonly ExactMatch[],
       navigationOnly,
       operationalWarnings: [] as readonly RecallOperationalWarning[],
-      passes,
       query,
       recallProjectName,
       scopeProvenance: scope.provenance,

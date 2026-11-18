@@ -1,6 +1,6 @@
 import {recordUnavailableProductionPhase} from '../../effect/production_log.js';
 import {
-  prepareDefaultRecallSections,
+  readReadyRecallSections,
   requireRecallRefinementRead,
   warmRecallRerankerWindow,
 } from '@threadnote/recall/sections_read';
@@ -1159,12 +1159,10 @@ function runRecallTool(
         const recallProjectName = workspaceContext.recallProjectName;
         const threshold = workspaceContext.threshold;
         const thresholdConfigured = workspaceContext.thresholdConfigured;
-        const passes = workspaceContext.passes;
         const scopedRecallUris = workspaceContext.scopedRecallUris;
         const seededUri = workspaceContext.seededUri;
         const sections = workspaceContext.sections;
         const eligibility = workspaceContext.eligibility;
-        let exactMatches = workspaceContext.exactMatches;
         let operationalWarnings = workspaceContext.operationalWarnings;
         const effectAi = workspaceContext.effectAi;
         const selectRecallCandidates = makeMcpRecallCandidateSelector(config, effectAi, workspaceContext.jev, sections);
@@ -1194,7 +1192,7 @@ function runRecallTool(
             withProductionPhaseTiming(
               'recall.lexical-ranking',
               Effect.gen(function* () {
-                const prepared = yield* prepareDefaultRecallSections(config, {
+                const prepared = yield* readReadyRecallSections(config, {
                   ...(closingRead || refinementStarted || semanticPreflightModel === undefined
                     ? {}
                     : {semanticPreflightModel}),
@@ -1204,14 +1202,12 @@ function runRecallTool(
                   candidateUris,
                   closingCandidateUris: closingRead ? candidateUris : undefined,
                   eligibility,
-                  exactMatches: closingRead ? [] : exactMatches,
                   exact: closingRead ? undefined : workspaceContext.exactRead,
                   feedbackQuery: params.query,
                   includeInactive: params.includeArchived,
                   limit: recallLimit,
                   memoryRefs: params.memoryRefs,
                   minimumScore: hybridMinimumScore,
-                  passes: closingRead ? [] : passes,
                   preferredUriScopes: params.pinnedUri ? undefined : [...scopedRecallUris],
                   project: recallProjectName,
                   query,
@@ -1226,7 +1222,6 @@ function runRecallTool(
                   workspaceBranch,
                   workspaceScope: workspaceComponent?.scope,
                 });
-                if (!closingRead) exactMatches = prepared.exactMatches;
                 semanticResult = prepared.semanticResult;
                 operationalWarnings = mergeRecallOperationalWarnings(operationalWarnings, prepared.operationalWarnings);
                 appendSemanticWarning(semanticResult);
@@ -1296,8 +1291,18 @@ function runRecallTool(
                     baselineSections.expansionCandidates,
                     rerankerCache,
                   );
-                  if (Option.isSome(semanticResult.scores) || rerankerCache.scores.size > 0)
+                  if (Option.isSome(semanticResult.scores) || rerankerCache.scores.size > 0) {
                     recallSections = yield* refineSections();
+                    // Semantic-only hits enter with refinement; score them once before they compete for the window.
+                    const scoredCandidates = rerankerCache.scores.size;
+                    yield* warmRecallReranker(
+                      config.agentContextHome,
+                      query,
+                      recallSections.expansionCandidates,
+                      rerankerCache,
+                    );
+                    if (rerankerCache.scores.size > scoredCandidates) recallSections = yield* refineSections();
+                  }
                   const shouldAttemptAiExpansion = !navigationOnly && shouldExpandRecall(recallSections.confidence);
                   const indexSelectionCandidates = shouldAttemptAiExpansion
                     ? buildRecallIndexSelectionCandidates(
@@ -1387,7 +1392,6 @@ function runRecallTool(
                       );
                     }
                   }
-                  yield* warmRecallRerankerWindow(config, query, recallSections, recallLimit, rerankerCache);
                   return recallSections;
                 }),
               );
@@ -1401,6 +1405,11 @@ function runRecallTool(
                   expansionQueries.length = 0;
                   sections.length = baselineNoticeCount;
                   rerankerCache.scores.clear();
+                } else {
+                  // A warm-up that does not finish leaves fewer cached scores for closing; the refined window stands.
+                  yield* optionalReadyRecallRead(
+                    warmRecallRerankerWindow(config, query, refined.value, recallLimit, rerankerCache),
+                  );
                 }
                 recallSections = yield* prepareSections(
                   EffectArray.map(selectedSections.ranked.slice(0, recallLimit), hit => hit.uri),

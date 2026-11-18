@@ -176,7 +176,15 @@ Runtime.makeRunMain(({fiber, teardown}) => fiber.addObserver(exit => teardown(ex
     return {...system, developmentEntrypoint: built.outputs[0].path};
   });
 
-const fixture = (model: boolean) =>
+/** A memory that shares no term with the query, so only semantic search finds it. */
+interface SemanticOnlyMemory {
+  readonly name: string;
+  readonly vector: readonly number[];
+}
+const dot = (left: readonly number[], right: ArrayLike<number>) =>
+  EffectArray.reduce(left, 0, (sum, value, index) => sum + value * (right[index] ?? 0));
+
+const fixture = (model: boolean, semanticOnly: readonly SemanticOnlyMemory[] = []) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -224,6 +232,26 @@ const fixture = (model: boolean) =>
         `${query} FOREIGN_PRIVATE_SENTINEL`,
       ),
     );
+    const semanticOnlyUris = yield* Effect.forEach(semanticOnly, memory =>
+      Effect.gen(function* () {
+        yield* fs.writeFileString(
+          path.join(path.dirname(filename), `${memory.name}.md`),
+          formatMemoryDocument(
+            'MEMORY',
+            {
+              kind: 'durable',
+              status: 'active',
+              memoryId: `tn_admission_budget_${memory.name}`,
+              topic: `${memory.name} harbor ledger`,
+              sourceAgentClient: 'test',
+              timestamp: '2026-11-04T00:00:00.000Z',
+            },
+            `${memory.name} harbor ledger notes.`,
+          ),
+        );
+        return {uri: `threadnote://user/tester/memories/durable/${memory.name}.md`, vector: memory.vector};
+      }),
+    );
     const lexical = yield* loadRecallIndexData(config, {includeInactive: false});
     const installation = {
       bytes: embedding.size,
@@ -242,8 +270,20 @@ const fixture = (model: boolean) =>
     });
     if (model) {
       yield* selectLocalModel(home, yield* LocalModelCatalog, 'embedding', embedding.id);
+      const documentVector = (input: string, dimensions: number) =>
+        Option.match(
+          EffectArray.findFirst(semanticOnly, memory => EffectString.includes(`${memory.name} harbor`)(input)),
+          {
+            onNone: () => unitVector(dimensions),
+            onSome: memory => Array.from({length: dimensions}, (_, index) => memory.vector[index] ?? 0),
+          },
+        );
       yield* ensureVectorIndex(config, embedding, lexical.candidates, {corpusGeneration: lexical.generation}).pipe(
-        Effect.provideService(LocalModelRuntime, fastRuntime),
+        Effect.provideService(LocalModelRuntime, {
+          ...fastRuntime,
+          embedMany: ({inputs, manifest}) =>
+            Effect.succeed(EffectArray.map(inputs, input => documentVector(input, manifest.dimensions ?? 0))),
+        }),
         Effect.provideService(LocalModelStore, store),
       );
       if (!nativeVectorTestsEnabled) {
@@ -264,7 +304,13 @@ const fixture = (model: boolean) =>
                 return Promise.resolve({
                   status: 'success',
                   corpusCheckRequired: true,
-                  scores: [{uri, score: Math.max(0, queryVector?.[0] ?? 0)}],
+                  scores: [
+                    {uri, score: Math.max(0, queryVector?.[0] ?? 0)},
+                    ...EffectArray.map(semanticOnlyUris, memory => ({
+                      uri: memory.uri,
+                      score: Math.max(0, dot(memory.vector, queryVector ?? [])),
+                    })),
+                  ],
                 });
               },
             }),
@@ -280,26 +326,41 @@ type Surface = 'cli' | 'mcp';
 function invoke(
   surface: Surface,
   f: Effect.Success<ReturnType<typeof fixture>>,
-  options: {readonly query?: string; readonly project?: string} = {},
+  {nodeLimit, ...options}: {readonly query?: string; readonly project?: string; readonly nodeLimit?: number} = {},
 ) {
   const config = f.config;
   if (surface === 'cli')
-    return captureConsole(runRecall(config, {query, inferScope: false, ...options})).pipe(
+    return captureConsole(
+      runRecall(config, {
+        query,
+        inferScope: false,
+        ...options,
+        ...(nodeLimit === undefined ? {} : {nodeLimit: String(nodeLimit)}),
+      }),
+    ).pipe(
       Effect.map(result => ({output: result.output, isError: false, confidenceScore: result.value.confidence?.score})),
       Effect.provideService(SystemInfo, f.system),
     );
   const server = new EffectMcpServerRegistry();
   registerSearchTool(server, config, 'recall_context', 'Recall.', {heartbeatMilliseconds: 100});
-  return server.invokeTool('recall_context', {query, inferScope: false, responseFormat: 'dual', ...options}).pipe(
-    Effect.map(result => ({
-      output: JSON.stringify(result),
-      isError: result.isError === true,
-      confidenceScore: Schema.is(confidenceSchema)(result.structuredContent)
-        ? result.structuredContent.confidence.score
-        : undefined,
-    })),
-    Effect.provideService(SystemInfo, f.system),
-  );
+  return server
+    .invokeTool('recall_context', {
+      query,
+      inferScope: false,
+      responseFormat: 'dual',
+      ...options,
+      ...(nodeLimit === undefined ? {} : {nodeLimit}),
+    })
+    .pipe(
+      Effect.map(result => ({
+        output: JSON.stringify(result),
+        isError: result.isError === true,
+        confidenceScore: Schema.is(confidenceSchema)(result.structuredContent)
+          ? result.structuredContent.confidence.score
+          : undefined,
+      })),
+      Effect.provideService(SystemInfo, f.system),
+    );
 }
 
 // Selector continuation and deterministic mutation/currentness composition cases use this source-authority seam.
@@ -973,6 +1034,40 @@ describe('production recall caller admission', () => {
           expect(result.isError, result.output).toBe(false);
           expect(result.output).toContain('memories/durable/alpha.md');
           expect(result.output).toContain('output-limit');
+        }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+      {timeout: 15000},
+    );
+    effectIt.effect(
+      `${surface} composition reranks semantic-only refinement hits before it selects the window`,
+      () =>
+        Effect.gen(function* () {
+          // Semantic search ranks beta above gamma. Only the reranker prefers gamma.
+          const f = yield* fixture(true, [
+            {name: 'beta', vector: [1]},
+            {name: 'gamma', vector: [0.99, Math.sqrt(1 - 0.99 ** 2)]},
+          ]);
+          yield* selectLocalModel(
+            f.config.agentContextHome,
+            yield* LocalModelCatalog,
+            'reranker',
+            'jina-reranker-v1-turbo-en-f16',
+          );
+          const result = yield* invoke(surface, f, {nodeLimit: 2}).pipe(
+            Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}),
+            Effect.provideService(CommandExecutor, yield* selectorCompositionCommands(f.system)),
+            Effect.provideService(LocalModelRuntime, {
+              ...fastRuntime,
+              rerank: ({documents}) =>
+                Effect.succeed(
+                  EffectArray.map(documents, document => (EffectString.includes('gamma')(document) ? 1 : 0)),
+                ),
+            }),
+            Effect.provideService(LocalModelStore, f.store),
+          );
+          expect(result.isError, result.output).toBe(false);
+          expect(result.output).toContain('memories/durable/alpha.md');
+          expect(result.output).toContain('memories/durable/gamma.md');
+          expect(result.output).not.toContain('memories/durable/beta.md');
         }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
       {timeout: 15000},
     );

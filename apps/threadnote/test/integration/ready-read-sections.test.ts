@@ -16,7 +16,7 @@ import {
 import {
   decodeRecallReadySectionsResult,
   encodeRecallReadySectionsResult,
-  prepareDefaultRecallSections,
+  readReadyRecallSections,
   recallReadySectionsResultSchema,
   readyRecallRerankerScores,
   serveRecallSections as serveWireRecallSections,
@@ -422,11 +422,9 @@ describe('complete ready sections', () => {
             authority: 'any',
             projects: {mode: 'allow-projects-and-projectless', projects: ['allowed']},
           } as const,
-          exactMatches: [],
           feedbackQuery: query,
           includeInactive: false,
           limit: 4,
-          passes: [],
           // Five topical queries over two scope sets give ten selections, each pinning every semantic hit.
           preferredUriScopes: ['threadnote://user/test/memories'],
           query,
@@ -441,12 +439,14 @@ describe('complete ready sections', () => {
         const raw = yield* prepareRecallSections(config, {
           ...input,
           allowReranker: false,
+          exactMatches: [],
+          passes: [],
           readRecords: uris => readLocalMemoryRecordsByUri(config, uris),
         }).pipe(Effect.provideService(RecallReadyReadBoundary, boundary));
         expect(raw.operationalWarnings).toContainEqual(
           expect.objectContaining({code: 'lexical_read_failed', reason: 'output-limit'}),
         );
-        const refined = yield* prepareDefaultRecallSections(config, input).pipe(
+        const refined = yield* readReadyRecallSections(config, input).pipe(
           Effect.provideService(RecallReadyReadBoundary, boundary),
         );
         expect(refined.operationalWarnings).toEqual([]);

@@ -254,11 +254,11 @@ export const serveRecallSections = Effect.fn('recall.serveSections')(function* (
       : [];
   const semantic = input.semantic === undefined ? emptyRecallSemanticScoresResult() : semanticFromWire(input.semantic);
   const scores = new Map(input.rerankerScores ?? []);
+  // The worker never runs inference. Every read ranks with the parent's cached scores, so refinement keeps them.
   const prepared = yield* prepareRecallSectionsWithoutInference(
     config,
     {
       ...input,
-      allowReranker: false,
       closingCandidateUris: input.mode === 'closing' ? input.candidateUris : undefined,
       exactMatches,
       passes: [],
@@ -296,7 +296,13 @@ export type ReadyRecallSectionsInput = Omit<
   };
 };
 
-/** Closing ranks only its window with cached scores, so score that window, including semantic-only hits. */
+/** The window warm-up only adds cached scores, so it never holds a recall longer than this. */
+export const RECALL_RERANKER_WINDOW_WARM_MILLISECONDS = 2_000;
+
+/**
+ * Closing ranks only its window with cached scores, so score that window, including semantic-only hits.
+ * If the warm-up does not finish in time, closing uses the scores that are already cached.
+ */
 export function warmRecallRerankerWindow(
   config: Pick<RecallRuntimeConfig, 'agentContextHome'>,
   query: string,
@@ -310,7 +316,7 @@ export function warmRecallRerankerWindow(
     query,
     EffectArray.filter(sections.expansionCandidates, candidate => window.has(stripFragment(candidate.uri))),
     cache,
-  );
+  ).pipe(Effect.timeoutOption(RECALL_RERANKER_WINDOW_WARM_MILLISECONDS), Effect.asVoid);
 }
 
 /** Refinement is optional: a failed read abandons it, so closing proves the baseline instead of an empty window. */
@@ -322,18 +328,9 @@ export function requireRecallRefinementRead<
 }
 
 /**
- * App-owned defaults only: arbitrary callback-based preparation remains a separate API.
+ * Explicit app-owned canonical reader. Custom callback callers keep prepareRecallSections.
  * Every read, including refinement with parent model evidence, is one model-free sections read.
  */
-export const prepareDefaultRecallSections = Effect.fn('recall.prepareDefaultSections')(function* (
-  config: RecallRuntimeConfig,
-  input: ReadyRecallSectionsInput & Pick<PrepareRecallSectionsInput<never>, 'passes' | 'exactMatches'>,
-) {
-  const {passes: _passes, exactMatches: _exactMatches, ...ready} = input;
-  return yield* readReadyRecallSections(config, ready);
-});
-
-/** Explicit app-owned canonical reader. Custom callback callers keep prepareRecallSections. */
 export const readReadyRecallSections = Effect.fn('recall.readReadySections')(function* (
   config: RecallRuntimeConfig,
   input: ReadyRecallSectionsInput,
