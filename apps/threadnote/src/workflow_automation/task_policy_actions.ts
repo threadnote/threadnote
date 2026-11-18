@@ -1,5 +1,4 @@
-import {Array as EffectArray, Effect, String as EffectString} from 'effect';
-import {nativeCycleWaiverFor} from '@threadnote/workflow-automations/cycle-runtime';
+import {Array as EffectArray, Effect, Option, Predicate, String as EffectString} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
   nativeControlNext,
@@ -15,6 +14,7 @@ import {
   cycleRequest,
   fail,
   inCheckout,
+  unwrapCycle,
   type NativeTaskCycleRuntime,
   type NativeTaskStoredState,
 } from './task_action_helpers.js';
@@ -41,25 +41,28 @@ export const runNativeTaskWaiver = (
           next: nativeTaskViewNext(request.runId, checkout),
         },
       );
-    yield* inCheckout(
-      runWorkflowAutomation(
-        config,
-        cycleRequest(stored, {
-          command: 'waive',
-          phaseId,
-          snapshotId: latest.snapshot.snapshotId,
-          gate: request.gate,
-          reason: request.reason,
-          userAuthority: request.userAuthority,
-          expectedRevision: stored.revision,
-        }),
+    const recorded = unwrapCycle(
+      yield* inCheckout(
+        runWorkflowAutomation(
+          config,
+          cycleRequest(stored, {
+            command: 'waive',
+            phaseId,
+            snapshotId: latest.snapshot.snapshotId,
+            gate: request.gate,
+            reason: request.reason,
+            userAuthority: request.userAuthority,
+            expectedRevision: stored.revision,
+          }),
+        ),
+        checkout,
       ),
-      checkout,
     );
+    const recordedId = Predicate.isObject(recorded.waiver) ? recorded.waiver.id : undefined;
     const current = yield* readNativeWorkflowState(config, request.runId);
-    const waiver = current?.state.cycle
-      ? nativeCycleWaiverFor(current.state.cycle, request.gate, latest.snapshot)
-      : undefined;
+    const waiver = Option.getOrUndefined(
+      EffectArray.findFirst(current?.state.cycle?.waivers ?? [], item => item.id === recordedId),
+    );
     if (!waiver || !current) return yield* fail('waiver-not-recorded', 'The canonical waiver was not persisted.');
     return {
       status: 'waived',

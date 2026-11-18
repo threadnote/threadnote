@@ -86,9 +86,12 @@ export const NativeCycleWaiverSchema = Schema.Struct({
 });
 export type NativeCycleWaiver = typeof NativeCycleWaiverSchema.Type;
 
-/** Content-derived, so repeating the same waiver replays it. */
+/** Content-derived, so repeating the same waiver replays it; a review.blocking waiver also names its review. */
 export const nativeCycleWaiverId = (
-  waiver: Pick<NativeCycleWaiver, 'gate' | 'phaseId' | 'tree' | 'intentHash' | 'reason' | 'userAuthority'>,
+  waiver: Pick<
+    NativeCycleWaiver,
+    'gate' | 'phaseId' | 'snapshotId' | 'tree' | 'intentHash' | 'reason' | 'userAuthority'
+  >,
 ) =>
   'waiver-' +
   Effect.pipe(
@@ -100,16 +103,21 @@ export const nativeCycleWaiverId = (
         waiver.intentHash,
         waiver.reason,
         waiver.userAuthority,
+        ...(waiver.gate === 'review.blocking' ? [waiver.snapshotId] : []),
       ]),
     ),
     EffectString.slice(0, 48),
   );
 
-/** The waiver that covers this gate for this exact phase tree under the snapshot's own intent, if any. */
+/**
+ * The waiver that covers this gate for this exact phase tree under the snapshot's own intent, if any. A review.blocking
+ * waiver covers only the blocked review it accepted, so pass the reviewed snapshot; blockers a later review of the same
+ * tree records need their own waiver.
+ */
 export const nativeCycleWaiverFor = (
   runtime: {readonly waivers?: readonly NativeCycleWaiver[]},
   gate: NativeCycleWaiver['gate'],
-  snapshot: Pick<NativeCycleSnapshot, 'phaseId' | 'tree' | 'phaseHash' | 'intentHash'>,
+  snapshot: Pick<NativeCycleSnapshot, 'snapshotId' | 'phaseId' | 'tree' | 'phaseHash' | 'intentHash'>,
 ) =>
   EffectOption.getOrUndefined(
     EffectArray.findFirst(
@@ -118,7 +126,8 @@ export const nativeCycleWaiverFor = (
         waiver.gate === gate &&
         waiver.phaseId === snapshot.phaseId &&
         waiver.tree === snapshot.tree &&
-        waiver.intentHash === (snapshot.intentHash ?? snapshot.phaseHash),
+        waiver.intentHash === (snapshot.intentHash ?? snapshot.phaseHash) &&
+        (gate !== 'review.blocking' || waiver.snapshotId === snapshot.snapshotId),
     ),
   );
 
@@ -182,7 +191,7 @@ export function nativeCycleCoverage(
   const covering = nativeCycleCoveringReview(runtime, snapshot);
   if (covering) {
     const blocked = EffectArray.some(covering.review.findings, nativeCycleBlockingFinding);
-    const blockingWaiver = blocked ? nativeCycleWaiverFor(runtime, 'review.blocking', snapshot) : undefined;
+    const blockingWaiver = blocked ? nativeCycleWaiverFor(runtime, 'review.blocking', covering.snapshot) : undefined;
     return {_tag: 'reviewed', ...covering, blocked, ...(blockingWaiver ? {blockingWaiver} : {})};
   }
   const waiver = nativeCycleWaiverFor(runtime, 'review.required', snapshot);

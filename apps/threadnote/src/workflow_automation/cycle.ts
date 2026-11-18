@@ -621,18 +621,21 @@ export const runNativeCycle = <R>(
             );
           if (snapshot.phaseId !== selected.id)
             return yield* fail('invalid-waiver', 'A waiver covers a snapshot of its own phase.');
+          // A review.blocking waiver accepts the findings of the review that covers the tree.
+          const coverage = gate === 'review.blocking' ? nativeCycleCoverage(runtime, snapshot) : undefined;
+          const target = coverage?._tag === 'reviewed' ? coverage.snapshot : snapshot;
           const fields = {
             gate,
             phaseId: selected.id,
-            snapshotId: snapshot.snapshotId,
-            tree: snapshot.tree,
-            intentHash: snapshot.intentHash ?? snapshot.phaseHash,
+            snapshotId: target.snapshotId,
+            tree: target.tree,
+            intentHash: target.intentHash ?? target.phaseHash,
             reason: yield* from(() => required(request.reason, 'a concrete waiver reason')),
             userAuthority: yield* from(() => required(request.userAuthority, 'the explicit human authority')),
           };
           // A waiver of this gate that already covers the tree under the same intent replays, whatever snapshot of
           // that tree it was first recorded for.
-          const existing = nativeCycleWaiverFor(runtime, gate, snapshot);
+          const existing = nativeCycleWaiverFor(runtime, gate, target);
           if (existing) return {status: 'ok', revision: stored.revision, replayed: true, waiver: existing};
           const id = nativeCycleWaiverId(fields);
           const waiver = {id, ...fields};

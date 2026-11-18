@@ -1032,6 +1032,29 @@ describe('review coverage under one intent', () => {
       });
     }).pipe(runCycle),
   );
+
+  effectIt.effect('binds a review.blocking waiver to the blocked review it accepted', () =>
+    Effect.gen(function* () {
+      const {task, view, commit, review} = yield* setup();
+      const first = yield* commit('export const fixture = 1;\n');
+      yield* review(first.snapshot, 'a1', [blocker('f1')]);
+      const accept = {gate: 'review.blocking', reason: 'Accept the helper finding.', userAuthority: 'User: ship it.'};
+      const waived = yield* task('waive', accept);
+      yield* task('record-validation', {snapshotRef: first.ref, validation});
+      yield* task('reopen', {taskRef: (yield* view()).taskRef, phaseId: 'one', reason: 'Look again.'});
+      yield* task('resume', {taskRef: (yield* view()).taskRef, reason: 'Review the same tree again.'});
+      const again = yield* task('record-snapshot');
+      const second = object(object(again.snapshot).snapshot);
+      expect(second.tree).toBe(first.snapshot.tree);
+      yield* review(second, 'a2', [blocker('f1', 'carried'), blocker('f2')]);
+      const validate = () => task('record-validation', {snapshotRef: String(again.snapshotRef), validation});
+      expect(yield* validate().pipe(Effect.flip)).toMatchObject({code: 'review-blocked', gate: 'review.blocking'});
+      const rewaived = yield* task('waive', accept);
+      expect(rewaived).toMatchObject({status: 'waived', replayed: false});
+      expect(object(rewaived.waiver).id).not.toBe(object(waived.waiver).id);
+      expect(yield* validate()).toMatchObject({status: 'recorded'});
+    }).pipe(runCycle),
+  );
 });
 
 describe('incremental review by default', () => {
