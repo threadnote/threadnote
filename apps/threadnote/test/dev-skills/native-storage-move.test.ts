@@ -128,4 +128,19 @@ describe('native run storage moves', () => {
       ),
     {timeout: 60_000},
   );
+
+  effectIt.effect.skipIf(process.platform === 'win32')(
+    'saves revised authoring for a run whose checkout moved behind a link at its original path',
+    () =>
+      run(
+        Effect.gen(function* () {
+          const f = yield* fixture(['one'], 'local');
+          const movedRepo = f.path.join(f.root, 'moved-repo');
+          yield* f.fs.rename(f.repo, movedRepo).pipe(Effect.andThen(f.fs.symlink(movedRepo, f.repo)));
+          const revised = yield* f.revise({title: 'Cycle fixture after the move'});
+          expect(object(revised.source).root).toMatchObject({uri: expect.any(String)});
+        }),
+      ),
+    {timeout: 60_000},
+  );
 });
