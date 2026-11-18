@@ -228,7 +228,10 @@ export const NativeCyclePhaseProofSchema = Schema.Struct({
 });
 const phaseStateSchema = Schema.Struct({
   status: Schema.Literals(['pending', 'active', 'validated', 'published', 'merged', 'stale', 'blocked']),
+  /** The phase contract the current proof binds; the plan's own hash unless `planPhaseHash` says otherwise. */
   phaseHash: digest,
+  /** The current plan's phase hash, kept beside retained proof that a standard path-only reconcile left in place. */
+  planPhaseHash: Schema.optionalKey(digest),
   validation: Schema.optionalKey(validationSchema),
   head: Schema.optionalKey(gitObject),
   tree: Schema.optionalKey(gitObject),
@@ -438,7 +441,10 @@ export function decodeNativeCycleState(value: unknown): NativeCycleState {
     err('State phase keyset does not match plan.');
   for (const p of s.plan.phases) {
     const r = s.phases[p.id];
-    if (r.phaseHash !== nativeCyclePhaseHash(s.plan, p.id)) err('State phase hash is inconsistent.');
+    if ((r.planPhaseHash ?? r.phaseHash) !== nativeCyclePhaseHash(s.plan, p.id))
+      err('State phase hash is inconsistent.');
+    if (r.planPhaseHash !== undefined && (r.planPhaseHash === r.phaseHash || !r.validation))
+      err('Only retained proof keeps an earlier phase hash.');
     if (
       ['validated', 'published', 'merged'].includes(r.status) &&
       (!r.validation ||
@@ -713,7 +719,7 @@ export function validateNativeCyclePhase(
     v.snapshotTree !== snapshot.tree ||
     (v.head && v.head !== snapshot.head) ||
     (v.reviewTree && v.reviewTree !== ('reviewTree' in snapshot ? snapshot.reviewTree : snapshot.tree)) ||
-    r.phaseHash !== nativeCyclePhaseHash(s.plan, idValue)
+    (r.planPhaseHash ?? r.phaseHash) !== nativeCyclePhaseHash(s.plan, idValue)
   )
     err('Validation does not match snapshot.');
   if (!checkNativeCycleScope(p, snapshot.files)) err('Changed paths exceed allowed scope.');
@@ -750,7 +756,7 @@ export function recordNativeCycleDelivery(value: NativeCycleState, idValue: stri
     !r ||
     !['validated', 'published', 'merged'].includes(r.status) ||
     !r.validation ||
-    r.phaseHash !== nativeCyclePhaseHash(s.plan, idValue)
+    (r.planPhaseHash ?? r.phaseHash) !== nativeCyclePhaseHash(s.plan, idValue)
   )
     err('Phase has no current validation.');
   const d = decode(deliverySchema, input, 'Invalid delivery receipt.');
@@ -857,10 +863,11 @@ export function invalidateNativeCycle(value: NativeCycleState, idValue: string, 
   for (const k of affected) if (s.phases[k].status === 'merged') err('Merged history cannot be rewritten.');
   const phases = {...s.phases};
   for (const k of affected) {
-    const old = phases[k];
+    const {planPhaseHash, ...old} = phases[k];
     phases[k] = {
       ...old,
       status: 'stale',
+      phaseHash: planPhaseHash ?? old.phaseHash,
       history: withHistory(old),
       validation: undefined,
       delivery: undefined,
@@ -894,16 +901,12 @@ export function reconcileNativeCyclePlan(
   );
   for (const p of plan.phases) {
     const before = EffectOption.getOrUndefined(EffectArray.findFirst(old.phases, x => x.id === p.id));
-    // Under standard, paths and an undelivered base binding are derived bookkeeping, not material intent. Validation
-    // and delivery receipts bind the phase hash, so a path edit still retires them; the review of the same tree and
-    // intent covers the phase again.
+    // Under standard, paths and an undelivered base binding are derived bookkeeping, not material intent.
     const material =
       policy === 'standard'
         ? !before ||
           !samePhaseIntent(old, plan, p.id) ||
-          (before.baseBranch !== p.baseBranch && s.phases[p.id]?.delivery !== undefined) ||
-          (s.phases[p.id]?.validation !== undefined &&
-            nativeCyclePhaseHash(old, p.id) !== nativeCyclePhaseHash(plan, p.id))
+          (before.baseBranch !== p.baseBranch && s.phases[p.id]?.delivery !== undefined)
         : !before ||
           before.baseBranch !== p.baseBranch ||
           nativeCyclePhaseHash(old, p.id) !== nativeCyclePhaseHash(plan, p.id);
@@ -919,11 +922,15 @@ export function reconcileNativeCyclePlan(
       phases[p.id] = {status: 'stale', phaseHash, reason, ...(prior ? {history: withHistory(prior)} : {})};
     else {
       const before = EffectOption.getOrUndefined(EffectArray.findFirst(old.phases, x => x.id === p.id))!,
-        metadataChanged = before.branch !== p.branch || before.baseBranch !== p.baseBranch;
+        metadataChanged = before.branch !== p.branch || before.baseBranch !== p.baseBranch,
+        {planPhaseHash: _retired, ...kept} = prior,
+        // Proof keeps the contract it was produced under, so its snapshots, refs and receipts stay bound unchanged.
+        proofHash = prior.validation ? prior.phaseHash : phaseHash;
       if (metadataChanged && prior.status === 'merged') err('Merged delivery metadata cannot change.');
       phases[p.id] = {
-        ...prior,
-        phaseHash,
+        ...kept,
+        phaseHash: proofHash,
+        ...(proofHash === phaseHash ? {} : {planPhaseHash: phaseHash}),
         ...(metadataChanged && prior.delivery
           ? {
               history: withHistory(prior),

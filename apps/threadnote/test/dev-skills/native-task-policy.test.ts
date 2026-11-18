@@ -333,35 +333,29 @@ describe('standard-profile reconcile of a phase with proof', () => {
           affectedPaths: [...phase.affectedPaths, 'notes.md'],
         })),
       });
-      // A path-only edit retires the proof bound to the old phase hash; the review of the same tree still covers it.
-      const redeliver = () =>
-        Effect.gen(function* () {
-          yield* task('resume', {taskRef: (yield* view()).taskRef, reason: 'The plan paths were reconciled.'});
-          const again = yield* task('record-snapshot');
-          expect((yield* view()).next).toMatchObject({action: 'validate'});
-          const revalidated = yield* task('record-validation', {snapshotRef: String(again.snapshotRef), validation});
-          return yield* task('deliver-local', {validationRef: String(revalidated.validationRef)});
-        });
-      return {f, task, view, validated, pathOnly, redeliver};
+      return {f, task, view, validated, pathOnly};
     });
 
-  effectIt.effect('retires the validation of a path-only edit and reuses the review of the same tree', () =>
+  effectIt.effect('keeps a validated phase deliverable with its validation reference across a path-only edit', () =>
     Effect.gen(function* () {
-      const {f, view, pathOnly, redeliver} = yield* setup();
+      const {f, task, view, validated, pathOnly} = yield* setup();
       const reconciled = yield* f.mutate('reconcile', {plan: yield* pathOnly, reason: 'Own the notes file.'});
-      expect(reconciled.affected).toEqual(['one']);
-      expect((yield* view()).next).toMatchObject({action: 'blocked', phaseId: 'one'});
-      expect(yield* redeliver()).toMatchObject({status: 'delivered'});
+      expect(reconciled.affected).toEqual([]);
+      expect((yield* view()).next).toMatchObject({action: 'deliver', phaseId: 'one'});
+      expect(yield* task('deliver-local', {validationRef: String(validated.validationRef)})).toMatchObject({
+        status: 'delivered',
+      });
+      expect((yield* view()).next).toMatchObject({action: 'complete'});
     }).pipe(runCycle),
   );
 
-  effectIt.effect('reconciles a path-only edit of a delivered phase and delivers it again', () =>
+  effectIt.effect('keeps a delivered phase complete across a path-only edit', () =>
     Effect.gen(function* () {
-      const {f, task, validated, pathOnly, redeliver} = yield* setup();
+      const {f, task, view, validated, pathOnly} = yield* setup();
       yield* task('deliver-local', {validationRef: String(validated.validationRef)});
       const reconciled = yield* f.mutate('reconcile', {plan: yield* pathOnly, reason: 'Own the notes file.'});
-      expect(reconciled.affected).toEqual(['one']);
-      expect(yield* redeliver()).toMatchObject({status: 'delivered'});
+      expect(reconciled.affected).toEqual([]);
+      expect((yield* view()).next).toMatchObject({action: 'complete'});
     }).pipe(runCycle),
   );
 
