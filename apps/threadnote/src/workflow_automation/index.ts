@@ -11,6 +11,7 @@ import {
   decodeNativeWorkflowState,
   nativeWorkflowIntentDigest,
   nativeWorkflowOperationLimit,
+  nativeWorkflowStateVersion,
   type NativeWorkflowRequest,
   type NativeWorkflowState,
 } from '@threadnote/workflow-automations/native';
@@ -256,7 +257,7 @@ const initialize = Effect.fn('workflowAutomation.initialize')(function* (
   );
   const state: NativeWorkflowState = {
     format: 'threadnote-native-workflow',
-    stateVersion: 1,
+    stateVersion: nativeWorkflowStateVersion,
     executorVersion: 1,
     runId: request.runId,
     project: binding.project,
@@ -706,7 +707,7 @@ const runCoreNative = Effect.fn('workflowAutomation.run')(function* (config: Run
   if (request.action === 'capabilities')
     return {
       ...version,
-      stateVersion: 1,
+      stateVersion: nativeWorkflowStateVersion,
       namingPolicyVersion: 1,
       ...nativeWorkflowFeatureVersions,
       status: 'ok' as const,

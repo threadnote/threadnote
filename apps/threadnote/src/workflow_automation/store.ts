@@ -4,7 +4,11 @@ import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {FileLockTimeout, fileLockBusyMessage, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
-import {decodeNativeWorkflowState, type NativeWorkflowState} from '@threadnote/workflow-automations/native';
+import {
+  decodeNativeWorkflowState,
+  nativeWorkflowStateVersion,
+  type NativeWorkflowState,
+} from '@threadnote/workflow-automations/native';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {decodeBoundedWorkflowJson, encodeBoundedWorkflowJson} from '../workflow_memory/journal_codec.js';
 import {stableJson} from '../workflow_memory/protocol.js';
@@ -145,8 +149,10 @@ export const prepareNativeWorkflowStateWrite = Effect.fn('workflowAutomation.pre
   state: NativeWorkflowState,
 ) {
   const cache = yield* CurrentWorkflowReadCache;
+  // A run read at an earlier version may now hold fields only this schema knows; declare the schema that wrote it.
+  const current = {...state, stateVersion: nativeWorkflowStateVersion};
   const validated = yield* Effect.try({
-    try: () => (cache ? cache.decodeNative(state) : decodeNativeWorkflowState(state, sha256HexSync)),
+    try: () => (cache ? cache.decodeNative(current) : decodeNativeWorkflowState(current, sha256HexSync)),
     catch: error =>
       Schema.is(WorkflowAutomationError)(error)
         ? error
