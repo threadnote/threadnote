@@ -40,7 +40,7 @@ describe('Bun distribution contract', () => {
   it('uses Bun as the only application runtime and build toolchain', async () => {
     const manifest = parsePackageManifest(JSON.parse(await readFile(join(process.cwd(), 'package.json'), 'utf8')));
     const allDependencies = {...manifest.dependencies, ...manifest.devDependencies};
-    const effectVersion = '4.1.2';
+    const effectVersion = '4.1.4';
 
     expect(manifest.packageManager).toMatch(/^bun@/);
     expect(manifest.trustedDependencies).toEqual([]);
@@ -54,9 +54,9 @@ describe('Bun distribution contract', () => {
       expect(allDependencies[packageName]).toBe(effectVersion);
     }
     expect(manifest.overrides?.['@effect/platform-node-shared']).toBe(effectVersion);
-    expect(manifest.devDependencies?.['@effect/tsgo']).toBe('0.63.0');
-    expect(manifest.devDependencies?.oxlint).toBe('1.90.0');
-    expect(manifest.devDependencies?.['oxlint-tsgolint']).toBe('7.0.2005');
+    expect(manifest.devDependencies?.['@effect/tsgo']).toBe('0.70.0');
+    expect(manifest.devDependencies?.oxlint).toBe('1.94.0');
+    expect(manifest.devDependencies?.['oxlint-tsgolint']).toBe('7.0.2007');
     expect(allDependencies['@effect/platform-node']).toBeUndefined();
     expect(allDependencies['@effect/sql-sqlite-node']).toBeUndefined();
     expect(manifest.engines?.node).toBeUndefined();
