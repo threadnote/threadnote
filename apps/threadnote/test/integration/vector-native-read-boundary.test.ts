@@ -209,7 +209,9 @@ const productionReadyWorker = (f: Pick<Effect.Success<typeof fixture>, 'fs' | 'p
 
 // Required normal reads execute the already-built production worker. Explicit
 // observed shims and optional development fixtures keep their source entry.
-// Bundle the actual entry once before this example's read deadline. The setup
+// Compile the actual entry with bytecode, as releases do, before this example's
+// read deadline: an uncompiled source bundle spends its child allowance parsing
+// and evaluating modules the production executable loads as bytecode. The setup
 // command owns Bun.build's lifetime because its Promise has no cancellation API.
 const bundledReadyWorker = (f: Pick<Effect.Success<typeof fixture>, 'fs' | 'path' | 'home'>, entrypoint?: string) =>
   Effect.gen(function* () {
@@ -218,7 +220,7 @@ const bundledReadyWorker = (f: Pick<Effect.Success<typeof fixture>, 'fs' | 'path
     const system = yield* SystemInfo;
     const command = yield* CommandExecutor;
     const directory = f.path.join(f.home, 'ready-worker-bundle', f.path.basename(entrypoint));
-    const bundled = f.path.join(directory, 'ready-worker.js');
+    const compiled = f.path.join(directory, system.platform === 'win32' ? 'ready-worker.exe' : 'ready-worker');
     const [duration] = yield* command
       .execute(
         system.executablePath,
@@ -226,34 +228,51 @@ const bundledReadyWorker = (f: Pick<Effect.Success<typeof fixture>, 'fs' | 'path
           '--eval',
           `const result = await Bun.build(${JSON.stringify({
             entrypoints: [entrypoint],
-            outdir: directory,
-            naming: 'ready-worker.js',
+            compile: {
+              outfile: compiled,
+              autoloadBunfig: false,
+              autoloadDotenv: false,
+              autoloadPackageJson: false,
+              autoloadTsconfig: false,
+            },
+            bytecode: true,
             target: 'bun',
             format: 'esm',
             minify: true,
           })});
-if (!result.success || result.outputs.length !== 1) throw new Error('Ready worker bundle failed.');`,
+if (!result.success) throw new Error('Ready worker compile failed.');`,
         ],
         {
           env: {...system.environment(), THREADNOTE_HOME: f.home},
-          timeoutMs: 5000,
+          timeoutMs: 60_000,
           maxOutputBytes: 16 * 1024,
           forceKillAfterMilliseconds: 0,
           verifyOwnedProcessExit: system.platform === 'win32' ? 'leader' : 'group',
         },
       )
       .pipe(Effect.timed);
-    const content = yield* f.fs.readFileString(bundled);
-    const selected = {...system, developmentEntrypoint: bundled};
+    // macOS assesses a newly written executable on its first launch. Pay that
+    // once here, as the production worker's version probe does, rather than
+    // inside a request. The roleless launch exits without reading any state.
+    yield* command
+      .execute(compiled, [], {
+        env: {...system.environment(), THREADNOTE_HOME: f.home},
+        timeoutMs: 30_000,
+        maxOutputBytes: 16 * 1024,
+        forceKillAfterMilliseconds: 0,
+        verifyOwnedProcessExit: system.platform === 'win32' ? 'leader' : 'group',
+      })
+      .pipe(Effect.ignore);
+    const selected = {...system, executablePath: compiled};
     expect(readyReadWorkerInvocation(selected.executablePath, selected.developmentEntrypoint)).toEqual({
-      executable: system.executablePath,
-      arguments: [bundled, RECALL_READY_READ_WORKER_ARGUMENT],
+      executable: compiled,
+      arguments: [RECALL_READY_READ_WORKER_ARGUMENT],
     });
     return {
       system: selected,
       setupMilliseconds: Duration.toMillis(duration),
-      bundleBytes: new TextEncoder().encode(content).byteLength,
-      bundleSha256: sha256HexSync(content),
+      bundleBytes: Number((yield* f.fs.stat(compiled)).size),
+      bundleSha256: yield* sha256FileHex(compiled),
     };
   });
 
@@ -395,6 +414,7 @@ Runtime.makeRunMain(signalTransparentTeardown)(
 `,
     );
     const bundled = yield* bundledReadyWorker(f, script);
+    yield* f.fs.remove(stageFile, {force: true});
     return {...bundled, entered, timeoutFile, stageFile, native};
   });
 
