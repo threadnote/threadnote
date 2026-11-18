@@ -1,5 +1,5 @@
 import {Array as EffectArray, Predicate} from 'effect';
-/* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- This reviewed preflight owns exact Git and candidate CLI operating-system process boundaries. */
+/* oxlint-disable effecttsgo/node-builtin-import -- This reviewed preflight owns exact Git and candidate CLI operating-system process boundaries. */
 import {createHash} from 'node:crypto';
 import {mkdir, readFile, realpath, stat} from 'node:fs/promises';
 import {spawn} from 'node:child_process';

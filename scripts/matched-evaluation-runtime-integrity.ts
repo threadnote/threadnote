@@ -1,5 +1,5 @@
 import {Array as EffectArray} from 'effect';
-/* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- This evaluation boundary observes Git and owns local artifact CAS writes. */
+/* oxlint-disable effecttsgo/node-builtin-import -- This evaluation boundary observes Git and owns local artifact CAS writes. */
 
 import {createHash} from 'node:crypto';
 import {constants as fsConstants} from 'node:fs';

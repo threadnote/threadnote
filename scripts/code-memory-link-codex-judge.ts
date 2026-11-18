@@ -1,5 +1,5 @@
 import {Array as EffectArray, Predicate} from 'effect';
-/* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- This reviewed static-judge adapter owns disposable filesystem and child-process boundaries. */
+/* oxlint-disable effecttsgo/node-builtin-import -- This reviewed static-judge adapter owns disposable filesystem and child-process boundaries. */
 import {createHash} from 'node:crypto';
 import {chmod, mkdir, readFile, realpath, stat, writeFile} from 'node:fs/promises';
 import {dirname, join, resolve, sep} from 'node:path';

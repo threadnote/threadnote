@@ -2,7 +2,7 @@
 import {isSafeInteger as checkedIsSafeInteger} from '@threadnote/platform/validation';
 import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 
-/* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- This reviewed sequential harness owns exact OS ledger and child-process boundaries. */
+/* oxlint-disable effecttsgo/node-builtin-import -- This reviewed sequential harness owns exact OS ledger and child-process boundaries. */
 
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import {createHash} from 'node:crypto';

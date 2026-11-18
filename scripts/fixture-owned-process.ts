@@ -1,4 +1,4 @@
-// oxlint-disable-next-line threadnote/no-node-runtime, effecttsgo/node-builtin-import -- Direct child handles and close events are required for fixture-only producer exit proof.
+// oxlint-disable-next-line effecttsgo/node-builtin-import -- Direct child handles and close events are required for fixture-only producer exit proof.
 import {spawn, type ChildProcess} from 'node:child_process';
 import {dlopen} from 'bun:ffi';
 import {Array as EffectArray, Option, Console, Effect, FileSystem, Path} from 'effect';

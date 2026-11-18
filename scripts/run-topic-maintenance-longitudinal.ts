@@ -2,7 +2,7 @@
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import * as Schema from 'effect/Schema';
 
-/* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- The evaluation runner owns isolated process and filesystem boundaries. */
+/* oxlint-disable effecttsgo/node-builtin-import -- The evaluation runner owns isolated process and filesystem boundaries. */
 
 import {randomBytes} from 'node:crypto';
 import {appendFile, mkdir, mkdtemp, readFile, realpath, symlink, writeFile} from 'node:fs/promises';

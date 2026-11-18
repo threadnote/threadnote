@@ -2,7 +2,7 @@
 import {isSafeInteger as checkedIsSafeInteger} from '@threadnote/platform/validation';
 import {Array as EffectArray, Predicate} from 'effect';
 
-/* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- This reviewed MCP proxy owns one bounded candidate child-process boundary. */
+/* oxlint-disable effecttsgo/node-builtin-import -- This reviewed MCP proxy owns one bounded candidate child-process boundary. */
 
 import {createHash} from 'node:crypto';
 import {readFile, realpath, stat, unlink} from 'node:fs/promises';

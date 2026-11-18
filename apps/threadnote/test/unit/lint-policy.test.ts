@@ -4,11 +4,7 @@ import {fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import {antipattern, correctness, effectNative, style} from '@effect/tsgo/oxlint-presets';
 import * as FC from 'fast-check';
-import {
-  isEffectRuntimeMember,
-  isNodeBuiltinSpecifier,
-  isNodeEffectPackageSpecifier,
-} from '../../../../config/lint/threadnote-plugin.js';
+import {isEffectRuntimeMember, isNodeEffectPackageSpecifier} from '../../../../config/lint/threadnote-plugin.js';
 import {LINT_TARGETS, STRICT_LINT_ARGUMENTS, lint} from '../../../../scripts/lint.js';
 
 const EFFECT_PRESET_PATHS = [
@@ -158,14 +154,7 @@ describe('lint policy', () => {
     expect(packageJson.scripts?.precommit).toMatch(/^bun run lint(?:\s|&&)/);
   });
 
-  fcProp(it, 'recognizes every explicit node: import as Node-specific', {specifier: FC.string()}, ({specifier}) => {
-    expect(isNodeBuiltinSpecifier(`node:${specifier}`)).toBe(true);
-  });
-
-  it('recognizes bare built-ins and Effect Node adapters without rejecting ordinary packages', () => {
-    expect(isNodeBuiltinSpecifier('fs/promises')).toBe(true);
-    expect(isNodeBuiltinSpecifier('node:test/reporters')).toBe(true);
-    expect(isNodeBuiltinSpecifier('fs-extra')).toBe(false);
+  it('recognizes Effect Node adapters without rejecting Bun adapters', () => {
     expect(isNodeEffectPackageSpecifier('@effect/platform-node/NodeRuntime')).toBe(true);
     expect(isNodeEffectPackageSpecifier('@effect/platform-bun/BunRuntime')).toBe(false);
   });

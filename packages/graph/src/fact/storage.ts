@@ -1,4 +1,3 @@
-// oxlint-disable-next-line threadnote/no-node-runtime -- Bun exposes only raw, uncapped inflate; node:zlib bounds output and verifies the zlib trailer.
 import {inflateSync} from 'node:zlib';
 import {
   CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM,

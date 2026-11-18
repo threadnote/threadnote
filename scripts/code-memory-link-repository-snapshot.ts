@@ -1,5 +1,5 @@
 import {Array as EffectArray} from 'effect';
-/* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- This reviewed evaluation helper owns a disposable filesystem trust boundary. */
+/* oxlint-disable effecttsgo/node-builtin-import -- This reviewed evaluation helper owns a disposable filesystem trust boundary. */
 import {createHash} from 'node:crypto';
 import {chmod, lstat, mkdir, open, readdir, realpath, rm, writeFile} from 'node:fs/promises';
 import {basename, dirname, isAbsolute, join, relative, resolve, sep} from 'node:path';

@@ -1,6 +1,6 @@
 import {isSafeInteger as checkedIsSafeInteger} from '@threadnote/platform/validation';
 import {Array as EffectArray, Predicate} from 'effect';
-/* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- This reviewed isolation builder owns disposable OS filesystem and process boundaries. */
+/* oxlint-disable effecttsgo/node-builtin-import -- This reviewed isolation builder owns disposable OS filesystem and process boundaries. */
 import {createHash} from 'node:crypto';
 import {
   chmod,

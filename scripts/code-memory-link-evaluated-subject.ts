@@ -1,4 +1,4 @@
-/* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- This reviewed evaluator verifies an explicit executable boundary. */
+/* oxlint-disable effecttsgo/node-builtin-import -- This reviewed evaluator verifies an explicit executable boundary. */
 import {createHash} from 'node:crypto';
 import {spawn} from 'node:child_process';
 import {lstat, mkdtemp, readFile, realpath, rm} from 'node:fs/promises';

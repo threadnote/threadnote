@@ -2,7 +2,7 @@
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 
-/* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- This reviewed preparer owns disposable OS filesystem and exact child-process boundaries. */
+/* oxlint-disable effecttsgo/node-builtin-import -- This reviewed preparer owns disposable OS filesystem and exact child-process boundaries. */
 
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import {createHash} from 'node:crypto';
