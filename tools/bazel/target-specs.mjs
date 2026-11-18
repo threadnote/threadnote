@@ -326,7 +326,8 @@ export const createTargetSpecs = async (root = defaultRoot) => {
     const runtimeEntries = packageRuntimeTestEntries[directory]
       ? EffectArray.filter(
           entries,
-          (path, __effectArrayIndex) => __effectArrayIndex in entries && readSource(path).includes('standalone.ts'),
+          (path, __effectArrayIndex) =>
+            __effectArrayIndex in entries && /standalone(?:_cli)?\.ts/u.test(readSource(path)),
         )
       : [];
     const workspaceEntries = packageWorkspaceTestEntries[directory] ?? [];
