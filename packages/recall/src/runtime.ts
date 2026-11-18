@@ -536,13 +536,13 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
   if (Result.isFailure(exactResult) && isReadCleanupUnconfirmed(exactResult.failure))
     return yield* Effect.fail(exactResult.failure);
   const recallIndexes = Result.isSuccess(recallIndexResult) ? recallIndexResult.success : [];
-  const operationalWarnings = Result.isFailure(recallIndexResult)
-    ? [lexicalReadFailureWarning(recallIndexResult.failure)]
-    : [
-        ...mergeRecallOperationalWarnings(
-          ...EffectArray.map(recallIndexes, index => recallReadStateWarnings(index.readState)),
-        ),
-      ];
+  const operationalWarnings = [
+    ...mergeRecallOperationalWarnings(
+      Result.isFailure(recallIndexResult) ? [lexicalReadFailureWarning(recallIndexResult.failure)] : [],
+      ...EffectArray.map(recallIndexes, index => recallReadStateWarnings(index.readState)),
+      recallReadStateWarnings(memoryConnections?.readState),
+    ),
+  ];
   if (Result.isFailure(exactResult)) operationalWarnings.push(lexicalReadFailureWarning(exactResult.failure));
   const flattenedRecallIndexes = recallIndexes;
   const generations = [

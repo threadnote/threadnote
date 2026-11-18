@@ -2797,6 +2797,23 @@ effectIt.effect('routes distinct semantic proof inputs through CLI adapters', ()
       '--pr',
       'https://github.com/example/repo/pull/1',
     ]);
+    yield* invoke([
+      'watch-pr',
+      '--caller-cwd',
+      '/repo',
+      '--operation',
+      'start',
+      '--pr-url',
+      'https://github.com/example/repo/pull/1',
+      '--host',
+      'claude-code',
+      '--host-executable',
+      '/home/user/.local/bin/claude',
+      '--host-reference',
+      'cccccccc-cccc-4ccc-cccc-cccccccccccc',
+      '--workspace',
+      '/repo',
+    ]);
     expect(captured[0]).toMatchObject({
       taskRef: 'complete-ref',
       phaseId: 'one',
@@ -2812,6 +2829,15 @@ effectIt.effect('routes distinct semantic proof inputs through CLI adapters', ()
       snapshotRef: 'immutable-source',
       operation: 'start',
       pr: 'https://github.com/example/repo/pull/1',
+    });
+    expect(captured[3]).toMatchObject({
+      wakeup: {
+        host: 'claude-code',
+        executable: '/home/user/.local/bin/claude',
+        sessionId: 'cccccccc-cccc-4ccc-cccc-cccccccccccc',
+        workspace: '/repo',
+        exclusiveSession: true,
+      },
     });
   }).pipe(provideTestLayer(cliTestLayer)),
 );

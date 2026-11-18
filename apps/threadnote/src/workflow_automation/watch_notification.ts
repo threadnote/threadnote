@@ -19,9 +19,11 @@ import {
   withNativeWatchControlLock,
 } from './watch_store.js';
 import {
+  isNativeWatchSessionWakeup,
   nativeWatchNotice,
   stageNativeWatchNotification,
   type NativeWatchNotification,
+  type NativeWatchSessionWakeup,
 } from './watch_notification_state.js';
 import {
   claimNativeWatchHostSession,
@@ -101,7 +103,22 @@ export const discoverNativeWatchCodexExecutable = Effect.fn('nativeWatch.discove
   return compatible[0];
 });
 
-function cursorCompletionReceipt(stdout: string, sessionId: string): string | undefined {
+/** Each session host resumes the registered session for one headless turn and prints one JSON result. */
+const sessionResumeCommands: Record<
+  NativeWatchSessionWakeup['host'],
+  (target: NativeWatchSessionWakeup, notice: string) => {readonly args: readonly string[]; readonly cwd?: string}
+> = {
+  'cursor-cli': (target, notice) => ({
+    args: ['--print', '--resume', target.sessionId, '--workspace', target.workspace, '--output-format', 'json', notice],
+  }),
+  // Claude Code has no workspace flag; the resumed turn's tools run in the process directory.
+  'claude-code': (target, notice) => ({
+    args: ['--print', '--resume', target.sessionId, '--output-format', 'json', notice],
+    cwd: target.workspace,
+  }),
+};
+
+function sessionCompletionReceipt(stdout: string, sessionId: string): string | undefined {
   try {
     const parsed: unknown = JSON.parse(stdout);
     return parsed &&
@@ -128,8 +145,8 @@ const persistenceFailure = () =>
   });
 const hostClaim = (config: RuntimeConfig, notification: NativeWatchNotification): NativeWatchHostClaim => {
   const target = notification.target;
-  if (target.host !== 'cursor-cli' || !notification.outbox?.attemptId || !notification.outbox.collectorToken)
-    throw new Error('A Cursor host claim requires a retained attempt.');
+  if (!isNativeWatchSessionWakeup(target) || !notification.outbox?.attemptId || !notification.outbox.collectorToken)
+    throw new Error('A session host claim requires a retained attempt.');
   return {
     format: 'threadnote-native-watch-host-session',
     version: 1,
@@ -212,7 +229,7 @@ export const makeNativeWatchNotifier = Effect.fn('nativeWatch.notifier')(functio
             (!pending.consumedThrough || stored.envelope.state.acknowledged < pending.consumedThrough)
           )
             return;
-          if (notification.target.host === 'cursor-cli')
+          if (isNativeWatchSessionWakeup(notification.target))
             yield* releaseNativeWatchHostSession(userHome, hostClaim(config, notification), true);
           notification = {
             ...notification,
@@ -237,7 +254,7 @@ export const makeNativeWatchNotifier = Effect.fn('nativeWatch.notifier')(functio
         }
         if (notification.recoveryRequested) {
           // An explicit recovery confirms the previous host attempt is safe to retry; it cannot steal another watch's claim.
-          if (pending?.attemptId && notification.target.host === 'cursor-cli')
+          if (pending?.attemptId && isNativeWatchSessionWakeup(notification.target))
             yield* releaseNativeWatchHostSession(userHome, hostClaim(config, notification));
           notification = {
             ...notification,
@@ -310,7 +327,7 @@ export const makeNativeWatchNotifier = Effect.fn('nativeWatch.notifier')(functio
       );
     const delivery = Effect.gen(function* () {
       let claim: NativeWatchHostClaim | undefined;
-      if (target.host === 'cursor-cli') {
+      if (isNativeWatchSessionWakeup(target)) {
         claim = hostClaim(config, claimed.notification);
         const admitted = yield* claimNativeWatchHostSession(userHome, claim).pipe(Effect.result);
         if (admitted._tag === 'Failure') {
@@ -332,20 +349,12 @@ export const makeNativeWatchNotifier = Effect.fn('nativeWatch.notifier')(functio
         },
         outbox!,
       );
-      const args =
+      const command =
         target.host === 'codex'
-          ? ['queue', '--thread', target.threadId, '--message', notice]
-          : [
-              '--print',
-              '--resume',
-              target.sessionId,
-              '--workspace',
-              target.workspace,
-              '--output-format',
-              'json',
-              notice,
-            ];
-      const result = yield* runCommandEffect(target.executable, args, {
+          ? {args: ['queue', '--thread', target.threadId, '--message', notice]}
+          : sessionResumeCommands[target.host](target, notice);
+      const result = yield* runCommandEffect(target.executable, command.args, {
+        ...(command.cwd === undefined ? {} : {cwd: command.cwd}),
         timeoutMs: target.host === 'codex' ? 10_000 : 0,
         maxOutputBytes: target.host === 'codex' ? 4096 : 65_536,
       }).pipe(Effect.result);
@@ -358,13 +367,13 @@ export const makeNativeWatchNotifier = Effect.fn('nativeWatch.notifier')(functio
               '\\.$',
             'iu',
           ).exec(EffectString.trim(result.success.stdout))?.[1];
-        else receipt = cursorCompletionReceipt(result.success.stdout, target.sessionId);
+        else receipt = sessionCompletionReceipt(result.success.stdout, target.sessionId);
       }
       // A timeout, nonzero exit, or malformed receipt can follow host acceptance. Never retry automatically.
       yield* finish(receipt, 'host-delivery-ambiguous');
       if (claim) yield* releaseNativeWatchHostSession(userHome, claim);
     });
-    if (target.host === 'cursor-cli') {
+    if (isNativeWatchSessionWakeup(target)) {
       const outcome = yield* Deferred.make<Exit.Exit<void, unknown>>();
       yield* delivery.pipe(
         Effect.onInterrupt(() => finish(undefined, 'host-delivery-ambiguous')),

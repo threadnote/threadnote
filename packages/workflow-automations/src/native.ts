@@ -21,7 +21,13 @@ const NATIVE_WORKFLOW_CONTROL_CHARACTER = /[^\u0020-\u007e\u00a0-\u{10ffff}]/u;
 
 export const nativeWorkflowProtocolVersion = 1 as const;
 export const nativeWorkflowExecutorVersion = 1 as const;
-export const nativeWorkflowStateVersion = 1 as const;
+/**
+ * Version 2 stores run policies, review waivers and tree snapshots. Bump it with every stored-schema change so an older
+ * runtime refuses a newer run by version instead of reading it as corrupt.
+ */
+export const nativeWorkflowStateVersion = 2 as const;
+const readableStateVersions = [1, nativeWorkflowStateVersion] as const;
+const isReadableStateVersion = Schema.is(Schema.Literals(readableStateVersions));
 export const nativeWorkflowOperationLimit = 4096;
 
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
@@ -213,7 +219,7 @@ export const NativeCloseoutSaveReservationSchema = Schema.Struct({
 
 const nativeWorkflowStateFields = {
   format: Schema.Literal('threadnote-native-workflow'),
-  stateVersion: Schema.Literal(nativeWorkflowStateVersion),
+  stateVersion: Schema.Literals(readableStateVersions),
   executorVersion: Schema.Literal(nativeWorkflowExecutorVersion),
   runId: safeRunId,
   project: portableId,
@@ -441,18 +447,33 @@ export function decodeNativeWorkflowRequest(input: unknown): NativeWorkflowReque
   return request;
 }
 
+/** Only the version marker can tell a newer schema from corruption, so it is judged before the content. */
+function admitNativeWorkflowStateVersion(input: unknown): void {
+  const candidate = isJsonRecord(input) ? input : undefined;
+  const found = candidate?.stateVersion;
+  if (
+    candidate?.format === 'threadnote-native-workflow' &&
+    typeof found === 'number' &&
+    Number.isSafeInteger(found) &&
+    found > nativeWorkflowStateVersion
+  )
+    throw fail(
+      'state-version-mismatch',
+      `This native run uses workflow state version ${found}, but this Threadnote runtime reads versions up to ${nativeWorkflowStateVersion}. Continue it with the Threadnote runtime that wrote it, or upgrade Threadnote. The run was not changed.`,
+    );
+  if (
+    candidate?.format !== 'threadnote-native-workflow' ||
+    !isReadableStateVersion(found) ||
+    candidate.executorVersion !== nativeWorkflowExecutorVersion
+  )
+    throw fail('unsupported-state', 'This workflow state version is unsupported. Start a fresh native workflow run.');
+}
+
 export function decodeNativeWorkflowState(
   input: unknown,
   hash: (value: string) => string = sha256HexSync,
 ): NativeWorkflowState {
-  const candidate = isJsonRecord(input) ? input : undefined;
-  if (
-    candidate?.format !== 'threadnote-native-workflow' ||
-    candidate.stateVersion !== nativeWorkflowStateVersion ||
-    candidate.executorVersion !== nativeWorkflowExecutorVersion
-  ) {
-    throw fail('unsupported-state', 'This workflow state version is unsupported. Start a fresh native workflow run.');
-  }
+  admitNativeWorkflowStateVersion(input);
   const state = decode(NativeWorkflowStateSchema, input, 'invalid-state', 'The native workflow state is malformed.');
   validateNativeWorkflowState(state, hash);
   return state;
@@ -477,14 +498,7 @@ export function makeNativeWorkflowStateDecoder(
 ): (input: unknown) => NativeWorkflowState {
   const validatedOperations = new WeakMap<object, NativeWorkflowState['operations'][number]>();
   return input => {
-    const candidate = isJsonRecord(input) ? input : undefined;
-    if (
-      candidate?.format !== 'threadnote-native-workflow' ||
-      candidate.stateVersion !== nativeWorkflowStateVersion ||
-      candidate.executorVersion !== nativeWorkflowExecutorVersion
-    ) {
-      throw fail('unsupported-state', 'This workflow state version is unsupported. Start a fresh native workflow run.');
-    }
+    admitNativeWorkflowStateVersion(input);
     const decoded = decode(
       CachedNativeWorkflowStateSchema,
       input,

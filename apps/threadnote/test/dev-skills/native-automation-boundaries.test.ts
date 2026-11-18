@@ -58,39 +58,36 @@ describe('native workflow automation boundaries', () => {
       );
       const journalFile = f.journalPath(initialized.bindingId);
       const canonicalJournal = yield* f.fs.readFileString(journalFile);
+      const written = JSON.parse(yield* f.fs.readFileString(stateFile));
       const cases = [
-        '{"protocolVersion":1,"binding":{},"operations":{}}\n',
-        JSON.stringify({
-          format: 'threadnote-native-workflow',
-          stateVersion: 2,
-          executorVersion: 1,
-        }),
-        JSON.stringify({
-          format: 'python-workflow-run',
-          stateVersion: 1,
-          executorVersion: 1,
-        }),
-      ];
-      for (const bytes of cases) {
+        ['{"protocolVersion":1,"binding":{},"operations":{}}\n', 'unsupported-state'],
+        [
+          JSON.stringify({...written, stateVersion: written.stateVersion + 1, fieldAddedByNewerRuntime: true}),
+          'state-version-mismatch',
+        ],
+        [
+          JSON.stringify({
+            format: 'python-workflow-run',
+            stateVersion: 1,
+            executorVersion: 1,
+          }),
+          'unsupported-state',
+        ],
+      ] as const;
+      for (const [bytes, code] of cases) {
         yield* f.fs.writeFileString(stateFile, bytes);
         const inspect = yield* f.call(f.base('inspect')).pipe(Effect.result);
         expect(Result.isFailure(inspect)).toBe(true);
-        if (Result.isFailure(inspect))
-          expect(inspect.failure).toMatchObject({
-            code: 'unsupported-state',
-          });
+        if (Result.isFailure(inspect)) expect(inspect.failure).toMatchObject({code});
         expect(yield* f.fs.readFileString(stateFile)).toBe(bytes);
         expect(yield* f.fs.readFileString(journalFile)).toBe(canonicalJournal);
         const initialize = yield* f.init().pipe(Effect.result);
         expect(Result.isFailure(initialize)).toBe(true);
-        if (Result.isFailure(initialize))
-          expect(initialize.failure).toMatchObject({
-            code: 'unsupported-state',
-          });
+        if (Result.isFailure(initialize)) expect(initialize.failure).toMatchObject({code});
         expect(yield* f.fs.readFileString(stateFile)).toBe(bytes);
         const write = yield* f.call(f.write()).pipe(Effect.result);
         expect(Result.isFailure(write)).toBe(true);
-        if (Result.isFailure(write)) expect(write.failure).toMatchObject({code: 'unsupported-state'});
+        if (Result.isFailure(write)) expect(write.failure).toMatchObject({code});
         expect(yield* f.fs.readFileString(stateFile)).toBe(bytes);
         expect(yield* f.fs.readFileString(journalFile)).toBe(canonicalJournal);
       }
@@ -114,6 +111,24 @@ describe('native workflow automation boundaries', () => {
       if (Result.isFailure(unsafe)) expect(unsafe.failure).toMatchObject({code: 'unsafe-state'});
       expect(yield* f.fs.readFileString(external)).toBe(foreignBytes);
       expect(yield* f.fs.readFileString(journalFile)).toBe(canonicalJournal);
+    }).pipe(provideNative),
+  );
+
+  effectIt.effect('declares a state version newer than the policy-free first schema on every write', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      yield* f.init('native-run', 'skill-generation-v1', 'fixture', 'standard');
+      const capabilities = yield* f.call({protocolVersion: 1, executorVersion: 1, action: 'capabilities'});
+      const declared = () => f.fs.readFileString(f.statePath()).pipe(Effect.map(bytes => JSON.parse(bytes)));
+      const initialized = yield* declared();
+      expect(initialized.policy).toEqual({mode: 'standard'});
+      expect(initialized.stateVersion).toBeGreaterThan(1);
+      expect(capabilities).toMatchObject({stateVersion: initialized.stateVersion});
+      // A run an earlier runtime wrote at the first version stays readable and is re-declared when rewritten.
+      yield* f.fs.writeFileString(f.statePath(), JSON.stringify({...initialized, stateVersion: 1}) + '\n');
+      expect(yield* f.call(f.base('inspect'))).toMatchObject({status: 'ok', stateVersion: 1});
+      yield* f.call(f.write());
+      expect((yield* declared()).stateVersion).toBe(initialized.stateVersion);
     }).pipe(provideNative),
   );
 

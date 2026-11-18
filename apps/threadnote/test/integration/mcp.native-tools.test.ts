@@ -5495,7 +5495,7 @@ describe('Threadnote MCP toolsets', () => {
     );
   });
 
-  it('names replaceUri on rejected writes and preserves the canonical memory before a full URI replacement', async () => {
+  it('names replaceUri on rejected writes and accepts the compact and full pointers recall and read return', async () => {
     await withMcpClient(async (client, fixture) => {
       const compact = 'memories/handoffs/active/threadnote/uri-validation.md';
       const uri = `threadnote://user/test-user/${compact}`;
@@ -5505,11 +5505,7 @@ describe('Threadnote MCP toolsets', () => {
       const original = await readFile(memoryPath, 'utf8');
       const files = (await readdir(join(fixture.home, 'data'), {recursive: true})).sort();
 
-      for (const replaceUri of [
-        compact,
-        'https://example.invalid/status.md',
-        'threadnote://user/test-user/../status.md',
-      ]) {
+      for (const replaceUri of ['https://example.invalid/status.md', 'threadnote://user/test-user/../status.md']) {
         await expect(
           callErrorText(client, 'remember_context', {...input, replaceUri, text: 'Rejected synthetic replacement.'}),
         ).resolves.toContain('optional "replaceUri" must be a threadnote:// URI');
@@ -5517,10 +5513,15 @@ describe('Threadnote MCP toolsets', () => {
         expect((await readdir(join(fixture.home, 'data'), {recursive: true})).sort()).toEqual(files);
       }
 
+      await callText(client, 'remember_context', {...input, replaceUri: compact, text: 'Compact pointer replacement.'});
+      const compactReplaced = await readFile(memoryPath, 'utf8');
+      expect(compactReplaced).toContain('Compact pointer replacement.');
+      expect(compactReplaced).not.toContain('Original synthetic memory.');
+
       await callText(client, 'remember_context', {...input, replaceUri: uri, text: 'Accepted synthetic replacement.'});
       const replaced = await readFile(memoryPath, 'utf8');
       expect(replaced).toContain('Accepted synthetic replacement.');
-      expect(replaced).not.toContain('Original synthetic memory.');
+      expect(replaced).not.toContain('Compact pointer replacement.');
     });
   });
 

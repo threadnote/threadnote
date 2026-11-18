@@ -20,7 +20,7 @@ import {
   type WorkflowRequest,
   type WorkflowOperationInspectionRequest,
 } from './protocol.js';
-import {verifyWorkflowBinding} from './profile.js';
+import {resolveWorkflowBinding, verifyWorkflowBinding} from './profile.js';
 import {resolveWorkflowGraphScope} from './graph_scope.js';
 import {assertWorkflowJournalIntegrity, workflowArtifactsDigest} from './journal_validation.js';
 import {readWorkflowSharedRoots} from './scopes.js';
@@ -364,6 +364,19 @@ export const inspectWorkflowJournal = Effect.fn('workflowMemory.inspectJournal')
     ),
   );
   return {state, needsRecovery};
+});
+
+/** Resolve an existing run's binding, naming its home and checkout by their bound paths after a storage move. */
+export const resolveExistingWorkflowBinding = Effect.fn('workflowMemory.resolveExistingBinding')(function* (
+  config: RuntimeConfig,
+  request: WorkflowRequest,
+  graphProject: string | undefined,
+  bindingId: string,
+) {
+  const current = yield* resolveWorkflowBinding(config, request, graphProject, true);
+  if (current.bindingId === bindingId) return current;
+  const journal = yield* readJournalFile(config, bindingId);
+  return journal ? yield* resolveWorkflowBinding(config, request, graphProject, true, journal.binding) : current;
 });
 
 /** Retained job progress grants no artifact read or mutation capability. Validate only the atomic private image. */

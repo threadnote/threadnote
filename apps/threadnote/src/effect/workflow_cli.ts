@@ -17,6 +17,7 @@ import {
 } from './cli/flags.js';
 import {CONTEXT_BRIEF_CWD_OPTION, type runContextBrief} from '../context_brief/commands.js';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
+import {nativeWatchWakeupHosts, type NativeWatchWakeup} from '../workflow_automation/watch_notification_state.js';
 import type {runCompact} from '../memory/commands.js';
 import type {runRecallFeedback} from '../recall/feedback_commands.js';
 import type {runContextHealth} from '../memory/context/health_commands.js';
@@ -156,7 +157,7 @@ export function makeNativeTaskPrWatchCommand<E, R>(
       | 'work-disposition'
       | 'stop'
       | 'complete';
-    readonly host?: 'codex' | 'cursor-cli';
+    readonly host?: NativeWatchWakeup['host'];
     readonly executable?: string;
     readonly hostReference?: string;
     readonly workspace?: string;
@@ -208,10 +209,10 @@ export function makeNativeTaskPrWatchCommand<E, R>(
         ],
         'PR watch operation',
       ),
-      host: optionalChoice('host', ['codex', 'cursor-cli'], 'Registered wakeup host'),
+      host: optionalChoice('host', nativeWatchWakeupHosts, 'Registered wakeup host'),
       executable: optionalString('host-executable', 'Absolute registered host executable'),
-      hostReference: optionalString('host-reference', 'Codex thread ID or Cursor session ID'),
-      workspace: optionalString('workspace', 'Cursor workspace path'),
+      hostReference: optionalString('host-reference', 'Codex thread ID, or Cursor CLI or Claude Code session ID'),
+      workspace: optionalString('workspace', 'Cursor CLI or Claude Code session workspace path'),
       noticeRef: optionalString(
         'notice-ref',
         'Relay this current notice route, record its disposition, then ACK using the returned current refs',
@@ -289,7 +290,7 @@ export function makeNativeTaskPrWatchCommand<E, R>(
                       threadId: options.hostReference,
                     }
                   : {
-                      host: 'cursor-cli' as const,
+                      host: options.host,
                       executable: options.executable!,
                       sessionId: options.hostReference,
                       workspace: options.workspace ?? '',

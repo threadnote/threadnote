@@ -108,6 +108,8 @@ export interface RecallMemoryConnectionsResult {
   readonly coverage: RecallMemoryConnectionCoverageV1;
   readonly diagnostics: RecallMemoryConnectionDiagnostics;
   readonly premises: readonly RecallMemoryPremiseReceiptV1[];
+  /** Present when a degraded selector answered; currentness is then abstained. */
+  readonly readState?: RecallReadyReadState;
 }
 
 export interface RetrieveRecallMemoryConnectionsInput<R> extends RecallMemoryConnectionInput {
@@ -300,6 +302,12 @@ export function isConnectionResult(value: unknown): value is RecallMemoryConnect
     count(value.coverage.premiseCount) &&
     count(value.coverage.resultCount) &&
     typeof value.coverage.truncated === 'boolean' &&
+    (value.readState === undefined ||
+      (Predicate.isObject(value.readState) &&
+        value.readState.freshness === 'stale' &&
+        (value.readState.maintenance === 'queued' ||
+          value.readState.maintenance === 'unavailable' ||
+          value.readState.maintenance === 'unneeded'))) &&
     Predicate.isObject(value.diagnostics) &&
     count(value.diagnostics.canonicalMismatches) &&
     count(value.diagnostics.canonicalRereads) &&
@@ -322,10 +330,29 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
   if (input.allowedUriScopes.length === 0) {
     throw new Error('Recall memory connections require at least one authorized URI scope.');
   }
-  let unavailable = false;
+  let selectorReadState: RecallReadyReadState | undefined;
   const observeReadState = (state: RecallReadyReadState) => {
-    unavailable ||= state.freshness === 'stale';
+    if (state.freshness === 'stale') selectorReadState ??= state;
   };
+  // Writes keep only the active snapshot current; the with-inactive selector waits for background maintenance.
+  let selectorIncludesInactive = true;
+  const fromSelector = <O extends {readonly includeInactive: boolean}, A, E, R2>(
+    read: (config: RecallMemoryConnectionsConfig, options: O) => Effect.Effect<A, E, R2>,
+    options: O,
+  ) =>
+    read(config, selectorIncludesInactive ? options : {...options, includeInactive: false}).pipe(
+      Effect.catchIf(
+        error =>
+          selectorIncludesInactive &&
+          Schema.is(RecallReadyReadUnavailable)(error) &&
+          error.reason !== 'budget-exhausted',
+        () => {
+          selectorIncludesInactive = false;
+          observeReadState({freshness: 'stale', maintenance: 'queued'});
+          return read(config, {...options, includeInactive: false});
+        },
+      ),
+    );
   const now = input.now ?? (yield* DateTime.nowAsDate);
   const limit = boundedConnectionResultLimit(input.limit);
   const requestedCanonicalUris = EffectArray.filter(
@@ -353,7 +380,7 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
   const premiseIndex =
     requestedMemoryIds.length === 0
       ? undefined
-      : yield* readRecallIndexData(config, {
+      : yield* fromSelector(readRecallIndexData, {
           allowedUriScopes: input.allowedUriScopes,
           eligibility: input.eligibility,
           onReadState: observeReadState,
@@ -401,7 +428,7 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
   const rawLinks =
     premiseSeeds.length === 0
       ? []
-      : yield* readRecallMemoryLinks(config, {
+      : yield* fromSelector(readRecallMemoryLinks, {
           allowedUriScopes: input.allowedUriScopes,
           eligibility: input.eligibility,
           onReadState: observeReadState,
@@ -438,7 +465,7 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
   const index =
     allMemoryIds.length === 0
       ? undefined
-      : yield* readRecallIndexData(config, {
+      : yield* fromSelector(readRecallIndexData, {
           allowedUriScopes: input.allowedUriScopes,
           eligibility: input.eligibility,
           onReadState: observeReadState,
@@ -492,7 +519,7 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
   const witnessedSupersederLinks =
     witnessedPremiseSources.length === 0
       ? []
-      : yield* readRecallMemoryLinks(config, {
+      : yield* fromSelector(readRecallMemoryLinks, {
           allowedUriScopes: input.allowedUriScopes,
           directions: ['outgoing'],
           eligibility: input.eligibility,
@@ -527,7 +554,7 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
   const indexedSupersederLinks =
     currentnessIds.length === 0
       ? []
-      : yield* readRecallMemoryLinks(config, {
+      : yield* fromSelector(readRecallMemoryLinks, {
           allowedUriScopes: input.allowedUriScopes,
           eligibility: input.eligibility,
           onReadState: observeReadState,
@@ -586,7 +613,7 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
     ),
   ];
   if (missingSupersederIds.length > 0) {
-    const supersederIndex = yield* readRecallIndexData(config, {
+    const supersederIndex = yield* fromSelector(readRecallIndexData, {
       allowedUriScopes: input.allowedUriScopes,
       eligibility: input.eligibility,
       onReadState: observeReadState,
@@ -630,11 +657,6 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
     sources.add(link.sourceMemoryId);
     activeSupersedersByTarget.set(link.targetMemoryId, sources);
   }
-  // A stale selector cannot prove the absence of an active superseder.
-  if (unavailable)
-    return yield* RecallReadyReadUnavailable.make({
-      message: 'Memory connection currentness requires a current lexical snapshot.',
-    });
   const stateForId = (memoryId: string | undefined): RecallMemoryPremiseState => {
     if (!memoryId) return 'unresolved';
     if (conflictIds.has(memoryId)) return 'conflicted';
@@ -659,7 +681,8 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
       },
       now,
     );
-    return state;
+    // A degraded selector cannot prove the absence of an active superseder.
+    return selectorReadState && state === 'current' ? 'unresolved' : state;
   };
 
   const premises = EffectArray.map(
@@ -734,6 +757,7 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
       truncatedSeedOrdinals,
     },
     premises,
+    ...(selectorReadState ? {readState: selectorReadState} : {}),
   } satisfies RecallMemoryConnectionsResult;
 });
 

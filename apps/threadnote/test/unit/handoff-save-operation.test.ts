@@ -179,6 +179,7 @@ const fixture = Effect.gen(function* () {
     kill: () => {
       kills++;
       if (closeOnKill) close();
+      else resolveExit(143);
     },
     stdin: {
       write: (line: string) => {
@@ -212,7 +213,7 @@ const fixture = Effect.gen(function* () {
     close,
     go: () => go,
     kills: () => kills,
-    holdUnapprovedExit: () => {
+    holdUnapprovedPipe: () => {
       closeOnKill = false;
     },
     onIdentity: (fn: () => Effect.Effect<string>) => {
@@ -368,6 +369,22 @@ describe('owned handoff parent protocol', () => {
         }),
       ),
     );
+  effectIt.effect('a worker that cannot start is an explained not-started outcome with no operation to follow', () =>
+    withSource(
+      Effect.gen(function* () {
+        const home = yield* (yield* FileSystem.FileSystem).makeTempDirectoryScoped({prefix: 'handoff-no-worker-'});
+        const result = yield* launchOwnedHandoffSave(
+          {agentContextHome: home, account: 'local', user: 'tester', agentId: 'test', manifestPath: home + '/m.json'},
+          {kind: 'handoff', text: 'Never spawned.'},
+        ).pipe(
+          Effect.provideService(CurrentHandoffSaveSpawn, () => {
+            throw new Error('Executable is unavailable.');
+          }),
+        );
+        expect(result.structuredContent).toEqual({state: 'not-started', authorized: false, reason: 'worker-not-ready'});
+      }),
+    ),
+  );
   effectIt.effect('keeps shared, foreign and identity-alias replacements on the synchronous route', () =>
     Effect.sync(() => {
       const args = {kind: 'handoff', text: 'handoff'};
@@ -424,7 +441,7 @@ describe('owned handoff parent protocol', () => {
       withSource(
         Effect.gen(function* () {
           const f = yield* fixture;
-          f.holdUnapprovedExit();
+          f.holdUnapprovedPipe();
           const identityObserved = yield* Deferred.make<void>();
           const identityGate = yield* Deferred.make<string>();
           f.onIdentity(() =>
@@ -547,7 +564,7 @@ describe('owned handoff parent protocol', () => {
             yield* Fiber.join(parent);
           }
           yield* observe;
-          // A refused process is deliberately still alive here, so these frames reach its reader.
+          // A refused process's pipe deliberately stays open here, so buffered frames reach its reader.
           for (let index = 0; index < lateFrames; index++) {
             f.ready();
             f.emit({type: 'result', receipt: f.receipt()});
@@ -615,6 +632,19 @@ for (const hold of ['journal', 'metadata', 'prepared', 'authorized', 'uri-lock',
               expect((yield* Clock.currentTimeMillis) - started).toBeLessThan(preGo ? 3_750 : 4_750);
               expect(yield* fs.readFileString(home + '/fixture-held-stage')).toBe(hold);
               if (!preGo) expect(child?.exitCode).toBeNull();
+              else {
+                // The parent never sent go, so the stopped worker's operation is closed, never left unknown.
+                const {operationId} = yield* Schema.decodeUnknownEffect(Schema.Struct({operationId: Schema.String}))(
+                  result.structuredContent,
+                );
+                expect(result.structuredContent).toMatchObject({reason: 'worker-not-ready'});
+                expect((yield* inspectHandoffSaveOperation(config, operationId)).structuredContent).toMatchObject({
+                  state: 'not-started',
+                  authorized: false,
+                  possiblyApplied: false,
+                  reason: 'worker-not-ready',
+                });
+              }
             }),
           () =>
             Effect.promise(async () => {
@@ -1127,11 +1157,11 @@ const actualHandoff = Effect.gen(function* () {
       }
     }),
   );
-  const start = (environment: NodeJS.ProcessEnv = {}) =>
+  const start = (environment: NodeJS.ProcessEnv = {}, topic = 'protocol-history') =>
     launchOwnedHandoffSave(config, {
       kind: 'handoff',
       project: 'threadnote',
-      topic: 'protocol-history',
+      topic,
       text: 'Exact protocol-history canonical body.',
     }).pipe(
       Effect.provideService(CurrentHandoffSaveSpawn, options => {
@@ -1166,8 +1196,9 @@ for (const stage of ['prepared', 'canonical-observed'] as const)
         const before = yield* f.fs.readFileString(directory + '/' + operationId + '.json');
         const applied = stage === 'canonical-observed';
         for (let repeat = 0; repeat < 3; repeat++) {
+          // A crash before go is provably unwritten: only the parent can authorize, and it never sent go.
           expect((yield* inspectHandoffSaveOperation(f.config, operationId)).structuredContent).toMatchObject({
-            state: 'unknown',
+            state: applied ? 'unknown' : 'not-started',
             authorized: applied,
             possiblyApplied: applied,
             canonicalObserved: false,
@@ -1219,6 +1250,144 @@ effectIt.effect('simultaneous separate homes progress independently and cannot i
       }
     }),
   ),
+);
+
+effectIt.effect(
+  'a save refused while another owned save is live records a terminal explained outcome',
+  () =>
+    withSource(
+      Effect.gen(function* () {
+        const f = yield* actualHandoff;
+        const live = yield* f.start({THREADNOTE_TEST_HANDOFF_HOLD_STAGE: 'uri-lock'});
+        expect(live.structuredContent).toMatchObject({state: 'pending', authorized: true});
+        const refused = yield* f.start();
+        expect(refused.structuredContent).toMatchObject({
+          state: 'not-started',
+          authorized: false,
+          reason: 'another-save-in-progress',
+        });
+        const {operationId} = yield* Schema.decodeUnknownEffect(Schema.Struct({operationId: Schema.String}))(
+          refused.structuredContent,
+        );
+        // memory_write_status must not strand a refused save as unknown.
+        for (let repeat = 0; repeat < 2; repeat++)
+          expect((yield* inspectHandoffSaveOperation(f.config, operationId)).structuredContent).toMatchObject({
+            state: 'not-started',
+            authorized: false,
+            possiblyApplied: false,
+            reason: 'another-save-in-progress',
+          });
+        expect(f.children[0].exitCode).toBeNull();
+      }),
+    ),
+  {timeout: 15_000},
+);
+
+effectIt.effect(
+  'a worker that outlives the exit wait is closed as not started once it exits',
+  () =>
+    withSource(
+      Effect.gen(function* () {
+        const f = yield* actualHandoff;
+        // An earlier save owns the private operation history, as in any home that has saved before.
+        yield* f.start({}, 'earlier');
+        expect(yield* Effect.promise(() => f.children[0].exited).pipe(Effect.timeout('5 seconds'))).toBe(0);
+        const refused = yield* launchOwnedHandoffSave(f.config, {
+          kind: 'handoff',
+          project: 'threadnote',
+          topic: 'stopped',
+          text: 'Never authorized.',
+        }).pipe(
+          Effect.provideService(CurrentHandoffSaveSpawn, options => {
+            const child = Bun.spawn({
+              cmd: [
+                f.system.executablePath,
+                Bun.fileURLToPath(new URL('../fixtures/handoff-save-worker.ts', import.meta.url)),
+              ],
+              env: options.environment,
+              stdin: 'pipe',
+              stdout: 'pipe',
+              stderr: 'ignore',
+            });
+            f.children.push(child);
+            // Stopped before ready, and still alive after the parent's SIGTERM, as on Linux.
+            child.kill('SIGSTOP');
+            return {pid: child.pid, stdin: child.stdin, stdout: child.stdout, exited: child.exited, kill: () => {}};
+          }),
+        );
+        expect(refused.structuredContent).toMatchObject({state: 'not-started', authorized: false});
+        const {operationId} = yield* Schema.decodeUnknownEffect(Schema.Struct({operationId: Schema.String}))(
+          refused.structuredContent,
+        );
+        f.children[1].kill('SIGKILL');
+        yield* Effect.promise(() => f.children[1].exited);
+        let status = (yield* inspectHandoffSaveOperation(f.config, operationId)).structuredContent;
+        for (let turn = 0; turn < 50 && status?.state !== 'not-started'; turn++) {
+          yield* Effect.sleep(100);
+          status = (yield* inspectHandoffSaveOperation(f.config, operationId)).structuredContent;
+        }
+        expect(status).toMatchObject({
+          state: 'not-started',
+          authorized: false,
+          possiblyApplied: false,
+          reason: 'worker-not-ready',
+        });
+        expect(
+          yield* f.fs.exists(f.home + '/data/local/user/tester/memories/handoffs/active/threadnote/stopped.md'),
+        ).toBe(false);
+      }),
+    ),
+  {timeout: 20_000},
+);
+
+effectIt.effect(
+  'a history holding only dead uncertain receipts retires the oldest and admits the next save',
+  () =>
+    withSource(
+      Effect.gen(function* () {
+        const f = yield* actualHandoff;
+        const operationIdOf = (result: {structuredContent?: unknown}) =>
+          Schema.decodeUnknownEffect(Schema.Struct({operationId: Schema.String}))(result.structuredContent).pipe(
+            Effect.map(value => value.operationId),
+          );
+        const first = yield* operationIdOf(yield* f.start({}, 'earlier'));
+        expect(yield* Effect.promise(() => f.children[0].exited).pipe(Effect.timeout('5 seconds'))).toBe(0);
+        const directory = receiptDirectory(f.config);
+        const text = yield* f.fs.readFileString(directory + '/' + first + '.json');
+        const decoded: unknown = yield* Effect.try(() => JSON.parse(text));
+        const basis = yield* Schema.decodeUnknownEffect(handoffSaveReceiptSchema)(decoded);
+        const id = (index: number) => '00000000-0000-4000-8000-' + EffectString.padStart(12, '0')(String(index));
+        // Authorized saves whose workers failed or died mid-write: uncertain, and nothing will ever settle them.
+        for (let index = 1; index < 64; index++)
+          yield* f.fs.writeFileString(
+            directory + '/' + id(index) + '.json',
+            JSON.stringify({
+              ...basis,
+              operationId: id(index),
+              stage: index % 2 ? 'failed' : 'lexical',
+              canonicalObserved: false,
+              lexicalVerified: false,
+              response: undefined,
+              result: undefined,
+              updatedAt: basis.updatedAt - index,
+            }),
+          );
+        const next = yield* operationIdOf(yield* f.start());
+        expect(yield* Effect.promise(() => f.children[1].exited).pipe(Effect.timeout('5 seconds'))).toBe(0);
+        expect((yield* inspectHandoffSaveOperation(f.config, next)).structuredContent).toMatchObject({
+          state: 'complete',
+        });
+        const remaining = EffectArray.filter(yield* f.fs.readDirectory(directory), name =>
+          /^[a-f0-9-]{36}\.json$/u.test(name),
+        );
+        expect(remaining).toHaveLength(64);
+        // Only the oldest uncertain receipt made room; the previous owner's result stays.
+        expect(remaining).not.toContain(id(63) + '.json');
+        expect(remaining).toContain(id(62) + '.json');
+        expect(remaining).toContain(first + '.json');
+      }),
+    ),
+  {timeout: 15_000},
 );
 
 for (const observation of ['different-instance', 'unknown'] as const)
@@ -1289,8 +1458,9 @@ for (const observation of ['different-instance', 'unknown'] as const)
             state: allowed ? expect.stringMatching(/complete|pending/u) : 'not-started',
           });
           const exit = yield* Effect.promise(() => f.children[0].exited).pipe(Effect.timeout('5 seconds'));
-          // A refused pre-go child may exit itself or be terminated by its exact parent handle.
-          expect(allowed ? [0] : [0, 143]).toContain(exit);
+          // A refused pre-go child may exit itself or be terminated by its exact parent handle,
+          // including while the Effect runtime interrupts its cleanup (130).
+          expect(allowed ? [0] : [0, 130, 143]).toContain(exit);
           expect(
             yield* f.fs.exists(
               f.home + '/data/local/user/tester/memories/handoffs/active/threadnote/protocol-history.md',

@@ -155,6 +155,80 @@ describe('memory code citation capture and validation', () => {
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
+  effectIt.effect(
+    'registered remember_context applies the deferred subset rule before and after the graph is current',
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-registered-citation-defer-'});
+        const root = path.join(home, 'repository');
+        yield* fs.makeDirectory(path.join(root, 'src'), {recursive: true});
+        yield* fs.writeFileString(path.join(root, 'src', 'value.ts'), SOURCE);
+        const config = {...CONFIG, agentContextHome: home, manifestPath: path.join(home, 'manifest.yaml')};
+        yield* fs.writeFileString(config.manifestPath, 'version: 1\nprojects: []\n');
+        let current = false;
+        const fixture = citationFixture(root, {
+          statusFor: () => (current ? status : {...status, freshness: 'stale', stale: true}),
+        });
+        // Persisted routes require real identity-shaped digests, unlike capture-only fixtures.
+        const status: CodeGraphStatus = {
+          ...fixture.status,
+          identity: {...fixture.status.identity, worktreeId: Effect2.pipe('e', EffectString.repeat(64))},
+          readySnapshot: {...fixture.status.readySnapshot!, worktreeId: Effect2.pipe('e', EffectString.repeat(64))},
+        };
+        const scheduler = DeferredCodeAnchorRefreshScheduler.of({schedule: () => Effect.void});
+        const server = new EffectMcpServerAdapter('citation-defer-test', '1.0.0', '');
+        registerStoreTool(server, config, 'remember_context', 'Store memory.');
+        const store = yield* ResourceStore;
+        const remember = (topic: string, text: string, replaceUri?: string) =>
+          server
+            .invokeTool('remember_context', {
+              callerCwd: root,
+              citationPolicy: 'defer',
+              codeRefs: ['src/value.ts', 'ignored/data.json'],
+              kind: 'handoff',
+              text,
+              topic,
+              ...(replaceUri === undefined ? {} : {replaceUri}),
+            })
+            .pipe(
+              provideTestLayer(fixture.layer),
+              Effect.provideService(DeferredCodeAnchorRefreshScheduler, scheduler),
+            );
+        const stored = (result: Effect.Success<ReturnType<typeof remember>>) =>
+          Effect.gen(function* () {
+            expect(result.isError, JSON.stringify(result.content)).not.toBe(true);
+            const {memoryUri: uri} = yield* Schema.decodeUnknownEffect(Schema.Struct({memoryUri: Schema.String}))(
+              result.structuredContent,
+            );
+            const record = parseMemoryDocument(
+              uri,
+              yield* store.read({account: config.account, home, user: config.user}, uri),
+            );
+            return {uri, record, citedPaths: EffectArray.map(record?.metadata.codeCitations ?? [], item => item.path)};
+          });
+
+        const created = yield* remember('cited', 'Stale graph revision.');
+        expect(created.structuredContent).toMatchObject({memoryStored: true, pendingCodeRefs: 2});
+        const {uri} = yield* stored(created);
+
+        // The deferral schedules the refresh that makes the graph current. Deferred finalization then cites the
+        // present subset, so the receipt's documented recovery (the same codeRefs with replaceUri) must do the same.
+        current = true;
+        const replaced = yield* remember('cited', 'Current graph revision.', uri);
+        const replacement = yield* stored(replaced);
+        expect(replaced.structuredContent).toMatchObject({uncitedCodePaths: 1});
+        expect(replacement.uri).toBe(uri);
+        expect(replacement.record?.body).toContain('Current graph revision.');
+        expect(replacement.citedPaths).toEqual(['src/value.ts']);
+        expect(yield* listDeferredCodeAnchorIntents(config)).toEqual([]);
+
+        const fresh = yield* stored(yield* remember('fresh', 'New memory on the current graph.'));
+        expect(fresh.citedPaths).toEqual(['src/value.ts']);
+      }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
+
   effectIt.effect('MCP memory writes refuse a busy writer before reading citation evidence', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

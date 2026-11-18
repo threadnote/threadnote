@@ -11,6 +11,7 @@ import {
   decodeNativeWorkflowState,
   nativeWorkflowIntentDigest,
   nativeWorkflowOperationLimit,
+  nativeWorkflowStateVersion,
   type NativeWorkflowRequest,
   type NativeWorkflowState,
 } from '@threadnote/workflow-automations/native';
@@ -19,7 +20,12 @@ import {withNativeWorkflowMemorySession} from '../workflow_memory/index.js';
 import {directOwnedRelationScope} from '../workflow_memory/artifacts.js';
 import type {OwnedActiveRelationArtifact} from '../memory/relations.js';
 import {resolveWorkflowBinding} from '../workflow_memory/profile.js';
-import {bindWorkflow, inspectWorkflowJournal, withWorkflowLock} from '../workflow_memory/journal.js';
+import {
+  bindWorkflow,
+  inspectWorkflowJournal,
+  resolveExistingWorkflowBinding,
+  withWorkflowLock,
+} from '../workflow_memory/journal.js';
 import {readWorkflowSharedRoots} from '../workflow_memory/scopes.js';
 import {stableJson, type WorkflowBinding} from '../workflow_memory/protocol.js';
 import {makeWorkflowMemoryAdapter, nativeWorkflowError, workflowWriteRequest} from './memory.js';
@@ -104,7 +110,7 @@ const currentBinding = Effect.fn('workflowAutomation.currentBinding')(function* 
   config: RuntimeConfig,
   state: NativeWorkflowState,
 ) {
-  const binding = yield* resolveWorkflowBinding(
+  const binding = yield* resolveExistingWorkflowBinding(
     config,
     {
       ...bindingRequest(state),
@@ -112,12 +118,12 @@ const currentBinding = Effect.fn('workflowAutomation.currentBinding')(function* 
       ...(state.team ? {team: state.team} : {}),
     },
     state.graphProject,
-    true,
+    state.bindingId,
   );
   if (binding.bindingId !== state.bindingId)
     return yield* issue(
       'binding-drift',
-      'Native run identity, checkout, home or profile changed. Resume its original context.',
+      'Native run identity, checkout, home or profile changed. Resume its original context; a moved home or checkout resumes through a link left at its original path.',
     );
   return binding;
 });
@@ -256,7 +262,7 @@ const initialize = Effect.fn('workflowAutomation.initialize')(function* (
   );
   const state: NativeWorkflowState = {
     format: 'threadnote-native-workflow',
-    stateVersion: 1,
+    stateVersion: nativeWorkflowStateVersion,
     executorVersion: 1,
     runId: request.runId,
     project: binding.project,
@@ -706,7 +712,7 @@ const runCoreNative = Effect.fn('workflowAutomation.run')(function* (config: Run
   if (request.action === 'capabilities')
     return {
       ...version,
-      stateVersion: 1,
+      stateVersion: nativeWorkflowStateVersion,
       namingPolicyVersion: 1,
       ...nativeWorkflowFeatureVersions,
       status: 'ok' as const,

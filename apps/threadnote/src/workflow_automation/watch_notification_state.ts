@@ -29,27 +29,34 @@ export const nativeWatchCodexWakeupRequestSchema = Schema.Struct({
   ...codexWakeupFields,
   executable: Schema.optionalKey(codexExecutable),
 });
-export const nativeWatchWakeupRequestSchema = Schema.Union([
-  nativeWatchCodexWakeupRequestSchema,
-  Schema.Struct({
-    host: Schema.Literal('cursor-cli'),
-    executable: absolute.check(Schema.isPattern(/[\\/](?:agent|cursor-agent)(?:\.exe)?$/iu)),
-    sessionId: uuid,
-    workspace: absolute,
-    exclusiveSession: Schema.Literal(true),
-  }),
-]);
-export const nativeWatchWakeupSchema = Schema.Union([
-  Schema.Struct(codexWakeupFields),
-  Schema.Struct({
-    host: Schema.Literal('cursor-cli'),
-    executable: absolute.check(Schema.isPattern(/[\\/](?:agent|cursor-agent)(?:\.exe)?$/iu)),
-    sessionId: uuid,
-    workspace: absolute,
-    exclusiveSession: Schema.Literal(true),
-  }),
-]);
+/** A session host wakes by resuming one exclusive registered session for a headless turn. */
+const sessionHosts = ['cursor-cli', 'claude-code'] as const;
+const sessionHostExecutables: {readonly [Host in (typeof sessionHosts)[number]]: RegExp} = {
+  'cursor-cli': /[\\/](?:agent|cursor-agent)(?:\.exe)?$/iu,
+  'claude-code': /[\\/]claude(?:\.exe)?$/iu,
+};
+const sessionWakeupSchema = Schema.Struct({
+  host: Schema.Literals(sessionHosts),
+  executable: absolute,
+  sessionId: uuid,
+  workspace: absolute,
+  exclusiveSession: Schema.Literal(true),
+}).check(
+  Schema.makeFilter(value =>
+    sessionHostExecutables[value.host].test(value.executable)
+      ? undefined
+      : 'The executable is not the registered session host launcher.',
+  ),
+);
+export const nativeWatchWakeupHosts = ['codex', ...sessionHosts] as const;
+export const nativeWatchWakeupRequestSchema = Schema.Union([nativeWatchCodexWakeupRequestSchema, sessionWakeupSchema]);
+export const nativeWatchWakeupSchema = Schema.Union([Schema.Struct(codexWakeupFields), sessionWakeupSchema]);
 export type NativeWatchWakeup = typeof nativeWatchWakeupSchema.Type;
+export type NativeWatchSessionWakeup = typeof sessionWakeupSchema.Type;
+/** Codex queues into its live thread; every other host is a session host. */
+export const isNativeWatchSessionWakeup = <Wakeup extends {readonly host: string}>(
+  wakeup: Wakeup | undefined,
+): wakeup is Exclude<Wakeup, {readonly host: 'codex'}> => wakeup !== undefined && wakeup.host !== 'codex';
 export const nativeWatchNotificationSchema = Schema.Struct({
   consumerId: portable,
   wakeupId: portable,
@@ -139,8 +146,8 @@ export function validateNativeWatchNotification(value: NativeWatchNotification, 
       Number(first) < 1 ||
       Number(first) > Number(last) ||
       Number(last) > value.notifiedThrough ||
-      (value.target.host === 'cursor-cli') !== (value.lastReceipt.kind === 'cli-session-completed') ||
-      (value.target.host === 'cursor-cli' && value.lastReceipt.receipt !== value.target.sessionId)
+      isNativeWatchSessionWakeup(value.target) !== (value.lastReceipt.kind === 'cli-session-completed') ||
+      (isNativeWatchSessionWakeup(value.target) && value.lastReceipt.receipt !== value.target.sessionId)
     )
       throw new Error('Notification receipt mismatch.');
   }
@@ -164,7 +171,7 @@ export function validateNativeWatchNotification(value: NativeWatchNotification, 
               pending.consumedThrough < pending.last ||
               pending.consumedThrough >= state.nextSequence)))) ||
       (pending.status === 'completed' &&
-        (value.target.host !== 'cursor-cli' || pending.receipt !== value.target.sessionId)))
+        (!isNativeWatchSessionWakeup(value.target) || pending.receipt !== value.target.sessionId)))
   )
     throw new Error('Notification outbox mismatch.');
 }
