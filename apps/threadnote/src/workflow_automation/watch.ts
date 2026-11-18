@@ -36,6 +36,7 @@ import {launchNativeWatchProcess, nativeWatchCollectorAlive} from './watch_proce
 import {assertNativeWatchOutput, nativeWatchWorkList, nativeWatchWorkDetail} from './watch_output.js';
 import {
   consumeNativeWatchNotification,
+  isNativeWatchSessionWakeup,
   matchesTerminalNativeWatchArrival,
   nativeWatchWakeupSchema,
   type NativeWatchWakeup,
@@ -226,8 +227,8 @@ function attachNotification(
   const previous = envelope.notification;
   const sameOwner = previous?.consumerId === consumer.id && previous.wakeupId === consumer.wakeupId;
   const rebind = !sameOwner || (wakeup && stableJson(wakeup) !== stableJson(previous?.target));
-  const retainedCursorAttempt =
-    previous?.target.host === 'cursor-cli' &&
+  const retainedSessionAttempt =
+    isNativeWatchSessionWakeup(previous?.target) &&
     previous.outbox &&
     previous.outbox.attempts > 0 &&
     !(previous.outbox.status === 'failed' && previous.outbox.error === 'host-session-owned');
@@ -236,10 +237,10 @@ function attachNotification(
       'wakeup-recovery-required',
       'Consume and acknowledge the original Codex notice, or explicitly recover its ambiguous attempt before rebinding.',
     );
-  if (rebind && retainedCursorAttempt)
+  if (rebind && retainedSessionAttempt)
     throw fail(
       'wakeup-recovery-required',
-      'Recover or finalize the original Cursor attempt before changing its owner or target.',
+      'Recover or finalize the original session host attempt before changing its owner or target.',
     );
   if (
     previous?.outbox?.status === 'sending' &&
@@ -536,8 +537,8 @@ export const runNativeWatchCollector = Effect.fn('workflowWatch.collector')(func
             if (before.envelope.stopRequested) {
               yield* finish('stopped', 'stop-requested', 'watcher_stopped');
               if (
-                before.envelope.notification?.target.host !== 'cursor-cli' ||
-                before.envelope.notification.outbox?.status !== 'sending'
+                !isNativeWatchSessionWakeup(before.envelope.notification?.target) ||
+                before.envelope.notification?.outbox?.status !== 'sending'
               )
                 yield* drain();
               return;

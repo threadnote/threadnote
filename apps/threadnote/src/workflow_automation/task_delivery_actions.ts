@@ -24,7 +24,7 @@ import {
   resolveNativeTaskPrWatch,
 } from './task_pr_watch.js';
 import {discoverNativeWatchCodexExecutable} from './watch_notification.js';
-import type {NativeWatchWakeup} from './watch_notification_state.js';
+import {isNativeWatchSessionWakeup, type NativeWatchWakeup} from './watch_notification_state.js';
 import {readNativeWatch, withNativeWatchControlLock} from './watch_store.js';
 
 import type {NativeTaskCycleRuntime, NativeTaskStoredState} from './task_action_helpers.js';
@@ -391,7 +391,7 @@ export const runNativeTaskPrWatch = (
     let wakeup: NativeWatchWakeup | undefined;
     if (inputWakeup?.host === 'codex' && inputWakeup.executable) {
       wakeup = {host: 'codex', executable: inputWakeup.executable, threadId: inputWakeup.threadId};
-    } else if (inputWakeup?.host === 'cursor-cli') {
+    } else if (isNativeWatchSessionWakeup(inputWakeup)) {
       wakeup = inputWakeup;
     } else if (request.operation !== 'start' && inputWakeup?.host === 'codex') {
       return yield* fail(

@@ -20,7 +20,11 @@ import {
   type NativeWatchOwner,
   type NativeCandidateWatchOwner,
 } from './watch_store.js';
-import type {NativeWatchWakeup, nativeWatchWakeupRequestSchema} from './watch_notification_state.js';
+import {
+  isNativeWatchSessionWakeup,
+  type NativeWatchWakeup,
+  type nativeWatchWakeupRequestSchema,
+} from './watch_notification_state.js';
 import {discoverNativeWatchCodexExecutable} from './watch_notification.js';
 import {
   assertNativeWatchOutput,
@@ -99,7 +103,7 @@ export const runOwnedNativeTaskWatch = (
       const inputWakeup = request.wakeup;
       if (!inputWakeup) return yield* fail('host-registration-required', 'Start needs actual host registration.');
       let wakeup: NativeWatchWakeup;
-      if (inputWakeup.host === 'cursor-cli') wakeup = inputWakeup;
+      if (isNativeWatchSessionWakeup(inputWakeup)) wakeup = inputWakeup;
       else if (inputWakeup.executable !== undefined)
         wakeup = {host: 'codex', executable: inputWakeup.executable, threadId: inputWakeup.threadId};
       else if (watch) {
