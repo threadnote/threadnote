@@ -33,6 +33,7 @@ import {
   nativeCyclePhaseReviewUsage,
   nativeCycleCoverage,
   nativeCycleCoverageWaiver,
+  nativeCycleLatestSnapshot,
 } from '@threadnote/workflow-automations/cycle-runtime';
 import {workflowTitleSlug} from '@threadnote/workflow-automations/naming';
 import {
@@ -1528,7 +1529,15 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
           'snapshot-ambiguous',
           'Recovery requires one unique canonical snapshot for this validation.',
         );
-      const coverage = nativeCycleCoverage(runtime, entry.snapshot);
+      // The phase's latest snapshot decides coverage, as on the task card and at delivery.
+      const latestSource = nativeCycleLatestSnapshot(runtime, ref.phaseId, ref.phaseHash) ?? entry;
+      if (latestSource.snapshot.tree !== entry.snapshot.tree)
+        return yield* nativeRefusal(
+          'stale-snapshot-ref',
+          'A later snapshot of this phase recorded another tree. Read workflow_task_view for the current one.',
+          {next: nativeNext.view({runId: request.runId, callerCwd: checkout})},
+        );
+      const coverage = nativeCycleCoverage(runtime, latestSource.snapshot);
       const reviewDecision = decideGate(
         nativeWorkflowPolicyOf(stored.state),
         'review.required',

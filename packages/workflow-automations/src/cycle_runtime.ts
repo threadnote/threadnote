@@ -282,6 +282,16 @@ export function nativeCycleSnapshotIsCurrentIteration(
   return retiredIndex !== undefined && snapshotIndex > retiredIndex;
 }
 
+/** The newest snapshot of the phase's current iteration under `phaseHash`; validation and delivery judge its coverage. */
+export const nativeCycleLatestSnapshot = (runtime: NativeCycleRuntime, phaseId: string, phaseHash: string) =>
+  EffectArray.filter(
+    runtime.snapshots,
+    entry =>
+      entry.snapshot.phaseId === phaseId &&
+      entry.snapshot.phaseHash === phaseHash &&
+      nativeCycleSnapshotIsCurrentIteration(runtime, phaseId, entry.snapshot.snapshotId),
+  ).at(-1);
+
 /** Counts accepted reports continuously across every snapshot for the phase. */
 export function nativeCyclePhaseReviewUsage(runtime: NativeCycleRuntime, phaseId: string) {
   const count = EffectArray.filter(

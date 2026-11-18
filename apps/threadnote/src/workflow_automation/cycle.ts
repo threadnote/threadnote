@@ -39,6 +39,7 @@ import {
   nativeCycleReviewBasis,
   nativeCycleHasBasePlanTransition,
   nativeCycleSnapshotIsCurrentIteration,
+  nativeCycleLatestSnapshot,
   type NativeCycleRuntime,
   nativeCycleRuntimeLimits,
   nativeCycleWaiverFor,
@@ -1385,8 +1386,12 @@ export const runNativeCycle = <R>(
             return yield* fail('review-stale', 'Snapshot belongs to another material phase contract.');
           if (!nativeCycleSnapshotIsCurrentIteration(runtime, selected.id, entry.snapshot.snapshotId))
             return yield* fail('review-stale', 'Record a fresh snapshot and review after phase invalidation.');
+          // The phase's latest snapshot decides coverage, as on the task card and at publication.
+          const latest = nativeCycleLatestSnapshot(runtime, selected.id, entry.snapshot.phaseHash) ?? entry;
+          if (latest.snapshot.tree !== entry.snapshot.tree)
+            return yield* fail('review-stale', 'Validate the latest snapshot of this phase.');
           const current = yield* currentSnapshot(repo, entry.snapshot, request.acceptedHead, selected);
-          const coverage = nativeCycleCoverage(runtime, entry.snapshot);
+          const coverage = nativeCycleCoverage(runtime, latest.snapshot);
           const policy = nativeWorkflowPolicyOf(stored.state);
           const reviewDecision = decideGate(
             policy,
@@ -1567,13 +1572,7 @@ export const runNativeCycle = <R>(
               );
             incomingDelivery = checkedHistoricalBase;
           } else {
-            const source = EffectArray.filter(
-              runtime.snapshots,
-              entry =>
-                entry.snapshot.phaseId === selected.id &&
-                entry.snapshot.phaseHash === proof.phaseHash &&
-                nativeCycleSnapshotIsCurrentIteration(runtime, selected.id, entry.snapshot.snapshotId),
-            ).at(-1);
+            const source = nativeCycleLatestSnapshot(runtime, selected.id, proof.phaseHash);
             if (
               !source ||
               source.snapshot.tree !== proof.tree ||
@@ -1643,13 +1642,7 @@ export const runNativeCycle = <R>(
               if (afterHead !== currentHead || afterTree !== currentTree)
                 return yield* fail('source-drift', 'The published phase branch changed during base verification.');
             } else {
-              const source = EffectArray.filter(
-                runtime.snapshots,
-                entry =>
-                  entry.snapshot.phaseId === selected.id &&
-                  entry.snapshot.phaseHash === proof.phaseHash &&
-                  nativeCycleSnapshotIsCurrentIteration(runtime, selected.id, entry.snapshot.snapshotId),
-              ).at(-1);
+              const source = nativeCycleLatestSnapshot(runtime, selected.id, proof.phaseHash);
               if (!source) return yield* fail('review-pending', 'The current reviewed source is unavailable.');
               const after = yield* currentSnapshot(repo, source.snapshot, currentHead, selected);
               if (

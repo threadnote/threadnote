@@ -1084,7 +1084,7 @@ describe('review coverage under one intent', () => {
 
   effectIt.effect('does not let an earlier clean review answer for a later review that recorded a blocker', () =>
     Effect.gen(function* () {
-      const {task, view, commit, review} = yield* setup();
+      const {f, task, view, commit, review} = yield* setup();
       const first = yield* commit('export const helper = 1;\nexport const fixture = 1;\n');
       yield* review(first.snapshot, 'a1');
       const second = yield* commit('export const helper = 1;\nexport const fixture = 2;\n');
@@ -1092,11 +1092,36 @@ describe('review coverage under one intent', () => {
       const reverted = yield* commit('export const helper = 1;\nexport const fixture = 1;\n');
       expect(reverted.snapshot.tree).toBe(first.snapshot.tree);
       expect((yield* view()).next).toMatchObject({action: 'review', snapshotId: reverted.snapshot.snapshotId});
-      expect(yield* task('record-validation', {snapshotRef: reverted.ref, validation}).pipe(Effect.flip)).toMatchObject(
-        {
+      // The latest snapshot of the phase decides coverage, so the earlier snapshot of the same tree cannot validate it.
+      for (const ref of [reverted.ref, first.ref])
+        expect(yield* task('record-validation', {snapshotRef: ref, validation}).pipe(Effect.flip)).toMatchObject({
           code: 'review-pending',
-        },
-      );
+        });
+      const ready = yield* f
+        .mutate('ready', {
+          phaseId: 'one',
+          snapshotId: first.snapshot.snapshotId,
+          acceptedHead: EffectString.trim(String((yield* f.git(['rev-parse', 'HEAD'])).stdout)),
+          validation: {snapshotTree: first.snapshot.tree, status: 'passed', productState: 'working', ...validation},
+        })
+        .pipe(Effect.flip);
+      expect(ready).toMatchObject({code: 'review-pending'});
+    }).pipe(runCycle),
+  );
+
+  effectIt.effect('validates only the latest snapshot of a phase once a later one recorded another tree', () =>
+    Effect.gen(function* () {
+      const {f, task, commit, review} = yield* setup();
+      const first = yield* commit('export const fixture = 1;\n');
+      yield* review(first.snapshot, 'a1');
+      yield* commit('export const fixture = 2;\n');
+      // The source returns to the first tree without a new snapshot.
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = 1;\n');
+      yield* f.git(['commit', '-qam', 'revert']);
+      expect(yield* task('record-validation', {snapshotRef: first.ref, validation}).pipe(Effect.flip)).toMatchObject({
+        code: 'stale-snapshot-ref',
+        next: {command: 'view'},
+      });
     }).pipe(runCycle),
   );
 
