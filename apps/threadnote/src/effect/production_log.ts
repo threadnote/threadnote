@@ -92,6 +92,9 @@ export const PRODUCTION_LOG_PHASES = [
 
 export type ProductionLogPhase = (typeof PRODUCTION_LOG_PHASES)[number];
 export type ProductionLogPhaseOutcome = 'failure' | 'interrupted' | 'success' | 'timed-out' | 'unavailable';
+/** A successful Effect may still classify a degraded phase and name its closed, privacy-safe reason. */
+export type ProductionLogPhaseClassification =
+  ProductionLogPhaseOutcome | {readonly outcome: ProductionLogPhaseOutcome; readonly errorType?: string};
 
 export interface ProductionLogPhaseTiming {
   readonly durationMilliseconds: number;
@@ -105,7 +108,7 @@ interface ProductionLogPhaseRecorderShape {
   readonly time: <A, E, R>(
     phase: ProductionLogPhase,
     effect: Effect.Effect<A, E, R>,
-    successOutcome?: (value: A) => ProductionLogPhaseOutcome,
+    successOutcome?: (value: A) => ProductionLogPhaseClassification,
   ) => Effect.Effect<A, E, R>;
 }
 
@@ -276,7 +279,7 @@ export function withProductionLogging<A, E, R>(
       time: <PhaseValue, PhaseError, PhaseRequirements>(
         phase: ProductionLogPhase,
         phaseEffect: Effect.Effect<PhaseValue, PhaseError, PhaseRequirements>,
-        successOutcome?: (value: PhaseValue) => ProductionLogPhaseOutcome,
+        successOutcome?: (value: PhaseValue) => ProductionLogPhaseClassification,
       ) =>
         Effect.gen(function* () {
           const phaseStartedAt = yield* Clock.currentTimeMillis;
@@ -334,7 +337,7 @@ export function withProductionLogging<A, E, R>(
 export function withProductionPhaseTiming<A, E, R>(
   phase: ProductionLogPhase,
   effect: Effect.Effect<A, E, R>,
-  successOutcome?: (value: A) => ProductionLogPhaseOutcome,
+  successOutcome?: (value: A) => ProductionLogPhaseClassification,
 ): Effect.Effect<A, E, R> {
   return Effect.serviceOption(ProductionLogPhaseRecorder).pipe(
     Effect.flatMap(recorder =>
@@ -866,13 +869,21 @@ function completionFromExit<A, E>(
 function phaseTimingFromExit<A, E>(
   phase: ProductionLogPhase,
   exit: Exit.Exit<A, E>,
-  successOutcome: ((value: A) => ProductionLogPhaseOutcome) | undefined,
+  successOutcome: ((value: A) => ProductionLogPhaseClassification) | undefined,
   durationMilliseconds: number,
 ): ProductionLogPhaseTiming {
   if (Exit.isSuccess(exit)) {
     const classified = Result.try(() => successOutcome?.(exit.value) ?? 'success');
-    const outcome = Result.isSuccess(classified) ? classified.success : 'success';
-    return {durationMilliseconds, outcome, phase};
+    const value = Result.isSuccess(classified) ? classified.success : 'success';
+    const {outcome, errorType} = typeof value === 'string' ? {outcome: value, errorType: undefined} : value;
+    return {
+      durationMilliseconds,
+      ...(errorType === undefined
+        ? {}
+        : {errorType: safeDiagnosticLabel(errorType, PRODUCTION_LOG_UNKNOWN_ERROR_TYPE)}),
+      outcome,
+      phase,
+    };
   }
   if (Cause.hasInterruptsOnly(exit.cause)) {
     return {durationMilliseconds, outcome: 'interrupted', phase};

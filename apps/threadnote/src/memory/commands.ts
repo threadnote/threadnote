@@ -1,5 +1,9 @@
 import type {ExactMatch} from '@threadnote/recall/results';
-import {prepareDefaultRecallSections} from '@threadnote/recall/sections_read';
+import {
+  prepareDefaultRecallSections,
+  requireRecallRefinementRead,
+  warmRecallRerankerWindow,
+} from '@threadnote/recall/sections_read';
 import {readLocalMemoryRecordsByUri} from '@threadnote/memory/local-path';
 import {isReadCleanupUnconfirmed} from '@threadnote/platform/read_deadline';
 import {optionalReadyRecallRead, withReadyRecallReadBoundary} from '../recall/ready_read_boundary.js';
@@ -123,6 +127,7 @@ import {
 import {refreshRecallDerivedIndexesAfterCanonicalMutation} from '@threadnote/recall/mcp/refresh';
 import {resolveMemoryIdentityAliases, verifyResolvedMemoryIdentity} from '@threadnote/recall/memory/identity';
 import {
+  recallReadPhaseClassification,
   recallReadPhaseOutcome,
   mergeRecallOperationalWarnings,
   renderRecallOperationalWarning,
@@ -551,8 +556,9 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
     });
   if (Option.isSome(semanticResult)) yield* surfaceSemanticWarning(semanticResult.value);
   const rerankerCache = createRecallRerankerCache();
-  let allowReranker = false;
   const semanticPreflightModel = dryRun || navigationOnly ? undefined : yield* prepareRecallSemanticPreflight(config);
+  // Rejected admission performs no optional work, so its completed lexical proof can stand.
+  let refinementStarted = false;
   const prepareSections = (candidateUris?: readonly string[], closingRead = false) =>
     withAnonymousTelemetryPhase(
       'recall.lexical-ranking',
@@ -560,8 +566,9 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
         'recall.lexical-ranking',
         Effect.gen(function* () {
           const prepared = yield* prepareDefaultRecallSections(config, {
-            ...(closingRead || semanticPreflightModel === undefined ? {} : {semanticPreflightModel}),
-            allowReranker,
+            ...(closingRead || refinementStarted || semanticPreflightModel === undefined
+              ? {}
+              : {semanticPreflightModel}),
             allowExactRescue: !thresholdConfigured,
             allowSemanticRescue: !thresholdConfigured,
             allowedUriScopes: explicitUri ? [explicitUri] : undefined,
@@ -584,7 +591,6 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
             rerankerCache,
             seedUris: EffectArray.filter([inferredUri, seededUri], (uri): uri is string => uri !== undefined),
             semanticResult,
-            semanticGenerationMismatchPolicy: closingRead ? 'fallback' : undefined,
             workspaceBranch,
             workspaceScope: workspaceComponent?.scope,
           });
@@ -595,20 +601,19 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
           yield* surfaceSemanticWarning(prepared.semanticResult);
           return prepared;
         }),
-        prepared => recallReadPhaseOutcome(prepared.operationalWarnings),
+        prepared => recallReadPhaseClassification(prepared.operationalWarnings),
       ),
       prepared => recallReadPhaseOutcome(prepared.operationalWarnings),
     );
+  const refineSections = (candidateUris?: readonly string[]) =>
+    prepareSections(candidateUris).pipe(Effect.flatMap(requireRecallRefinementRead));
   let recallSections = yield* prepareSections();
   // Finish and retain the useful lexical baseline before querying optional models.
   const baselineSections = recallSections;
-  // Rejected admission performs no optional work, so its completed lexical proof can stand.
-  let refinementStarted = false;
   const refined = yield* optionalReadyRecallRead(
     Effect.gen(function* () {
       if (navigationOnly) return recallSections;
       refinementStarted = true;
-      allowReranker = true;
       const effectAi =
         dryRun || navigationOnly
           ? undefined
@@ -645,7 +650,7 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
         (Option.isSome(semanticResult) && Option.isSome(semanticResult.value.scores)) ||
         rerankerCache.scores.size > 0
       ) {
-        recallSections = yield* prepareSections();
+        recallSections = yield* refineSections();
       }
       const shouldAttemptAiExpansion = !dryRun && !navigationOnly && shouldExpandRecall(recallSections.confidence);
       const indexSelectionCandidates = shouldAttemptAiExpansion
@@ -713,7 +718,7 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
       for (const expansionQuery of proposedExpansionQueries) {
         expansionQueries.push(expansionQuery);
         hybridMinimumScore = recallHybridMinimumScore(Number(recallThreshold));
-        recallSections = yield* prepareSections();
+        recallSections = yield* refineSections();
       }
       if (expansionQueries.length > 0) {
         yield* Console.log(`Recall query expansion: evaluated ${expansionQueries.length} model rewrite(s).`);
@@ -732,18 +737,18 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
             selectedIds,
             recallSelectionAnchorIds(selectionCandidates, recallSections.ranked),
           );
-          recallSections = yield* prepareSections(selectedUris);
+          recallSections = yield* refineSections(selectedUris);
           yield* Console.log(
             `Recall local AI post-filter: kept ${selectedUris.length} of ${selectionCandidates.length} candidate(s).`,
           );
         }
       }
+      yield* warmRecallRerankerWindow(config, query, recallSections, recallLimit, rerankerCache);
       return recallSections;
     }),
   );
   if (refinementStarted) {
     const selectedSections = Option.getOrElse(refined, () => baselineSections);
-    allowReranker = false;
     if (Option.isNone(refined)) {
       semanticResult = Option.some(emptyRecallSemanticScoresResult());
       hybridMinimumScore = recallHybridMinimumScore(Number(recallThreshold));

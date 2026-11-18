@@ -8,16 +8,22 @@ import {formatMemoryDocument} from '@threadnote/memory/document';
 import {readLocalMemoryRecordsByUri} from '@threadnote/memory/local-path';
 import {loadRecallIndexData, readRecallExactMatches} from '@threadnote/recall/index';
 import {emptyRecallSemanticScoresResult, prepareRecallSections} from '@threadnote/recall/runtime';
-import {recallReadySectionsOptionsSchema, type RecallReadySectionsOptions} from '@threadnote/recall/read_boundary';
+import {
+  RecallReadyReadBoundary,
+  recallReadySectionsOptionsSchema,
+  type RecallReadySectionsOptions,
+} from '@threadnote/recall/read_boundary';
 import {
   decodeRecallReadySectionsResult,
   encodeRecallReadySectionsResult,
+  prepareDefaultRecallSections,
   recallReadySectionsResultSchema,
   readyRecallRerankerScores,
   serveRecallSections as serveWireRecallSections,
 } from '@threadnote/recall/sections_read';
 import type {RecallCandidate} from '@threadnote/recall/rank';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
+import {makeReadyRecallReadBoundary} from '../../src/recall/ready_read_boundary.js';
 import {RECALL_READY_READ_OUTPUT_BYTES, serveRecallReadyRead} from '../../src/recall/ready_read_worker.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 
@@ -371,6 +377,84 @@ describe('complete ready sections', () => {
       expect(calls).toBeGreaterThan(0);
       expect(direct.ranked).toEqual([]);
     }).pipe(fixedRankingTime, provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
+
+  effectIt.effect(
+    'refines semantic evidence in one actual worker read where every selection batch exceeds the output limit',
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fs.makeTempDirectoryScoped({prefix: 'ready-sections-refinement-'});
+        const config = {account: 'local', user: 'test', agentContextHome: home};
+        const filler = EffectString.repeat(12 * 1024)('zebra ');
+        const uris = yield* Effect.forEach(
+          Array.from({length: 32}, (_, index) => index),
+          index =>
+            Effect.gen(function* () {
+              const filename = path.join(home, `data/local/user/test/memories/durable/large-${index}.md`);
+              yield* fs.makeDirectory(path.dirname(filename), {recursive: true});
+              yield* fs.writeFileString(
+                filename,
+                formatMemoryDocument(
+                  'MEMORY',
+                  {
+                    kind: 'durable',
+                    status: 'active',
+                    project: 'allowed',
+                    topic: `${query} ${index}`,
+                    memoryId: `tn_sections_large_${index}`,
+                    sourceAgentClient: 'test',
+                    timestamp: '2026-11-04T00:00:00.000Z',
+                  },
+                  `${query} ${index} ${filler}`,
+                ),
+              );
+              return `threadnote://user/test/memories/durable/large-${index}.md`;
+            }),
+        );
+        const index = yield* loadRecallIndexData(config, {includeInactive: false});
+        const input = {
+          allowExactRescue: true,
+          allowSemanticRescue: true,
+          eligibility: {
+            kind: 'candidate-policy',
+            authority: 'any',
+            projects: {mode: 'allow-projects-and-projectless', projects: ['allowed']},
+          } as const,
+          exactMatches: [],
+          feedbackQuery: query,
+          includeInactive: false,
+          limit: 4,
+          passes: [],
+          // Five topical queries over two scope sets give ten selections, each pinning every semantic hit.
+          preferredUriScopes: ['threadnote://user/test/memories'],
+          query,
+          queryVariants: ['zebra alpha', 'zebra beta', 'zebra gamma', 'zebra delta'],
+          semanticResult: Option.some({
+            corpusGeneration: Option.fromUndefinedOr(index.generation),
+            scores: Option.some(new Map(EffectArray.map(uris, uri => [uri, 0.9] as const))),
+            warning: Option.none(),
+          }),
+        };
+        const boundary = yield* makeReadyRecallReadBoundary(undefined);
+        const raw = yield* prepareRecallSections(config, {
+          ...input,
+          allowReranker: false,
+          readRecords: uris => readLocalMemoryRecordsByUri(config, uris),
+        }).pipe(Effect.provideService(RecallReadyReadBoundary, boundary));
+        expect(raw.operationalWarnings).toContainEqual(
+          expect.objectContaining({code: 'lexical_read_failed', reason: 'output-limit'}),
+        );
+        const refined = yield* prepareDefaultRecallSections(config, input).pipe(
+          Effect.provideService(RecallReadyReadBoundary, boundary),
+        );
+        expect(refined.operationalWarnings).toEqual([]);
+        expect(Option.getOrUndefined(refined.semanticResult.scores)?.size).toBe(uris.length);
+        expect(refined.ranked.length).toBeGreaterThan(0);
+        expect(EffectArray.every(refined.ranked, hit => EffectArray.contains(uris, hit.uri))).toBe(true);
+      }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+    {timeout: 60000},
   );
 
   effectIt.effect('rejects executable options, excess fields and nonfinite score witnesses', () =>

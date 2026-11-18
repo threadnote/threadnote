@@ -118,21 +118,26 @@ export const recallReadySectionsSemanticSchema = Schema.Struct({
   scores: optional(Schema.Array(Schema.Tuple([text, Schema.Finite])).check(Schema.isMaxLength(4096))),
   warning: optional(text),
 });
+const rerankerScores = Schema.Array(
+  Schema.Tuple([Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)), Schema.Finite]),
+).check(Schema.isMaxLength(4096));
+/** Baseline also carries completed parent model evidence, so refinement stays one compact worker read. */
 export const recallReadySectionsOptionsSchema = Schema.Union([
   Schema.Struct({
     ...sectionsFields,
     mode: Schema.Literal('baseline'),
+    candidateUris: optional(strings),
     semanticPreflightModel: optional(vectorModel),
     exact: optional(Schema.Struct({terms: strings, uriScopes: strings, limitPerTerm: count})),
+    semantic: optional(recallReadySectionsSemanticSchema),
+    rerankerScores: optional(rerankerScores),
   }),
   Schema.Struct({
     ...sectionsFields,
     mode: Schema.Literal('closing'),
     candidateUris: strings,
     semantic: recallReadySectionsSemanticSchema,
-    rerankerScores: Schema.Array(
-      Schema.Tuple([Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)), Schema.Finite]),
-    ).check(Schema.isMaxLength(4096)),
+    rerankerScores,
   }),
 ]);
 export type RecallReadySectionsOptions = typeof recallReadySectionsOptionsSchema.Type;
@@ -280,6 +285,8 @@ export const recallReadyReadResponseSchema = Schema.Struct({
     'vector-scores',
   ]),
   outcome: Schema.Literals(['success', 'unavailable', 'failed']),
+  /** A failed worker names a closed transport reason only when it can bind one to the request. */
+  failure: optional(Schema.Literal('output-limit')),
   maintenanceRequested: Schema.Boolean,
   observations: Schema.Array(observation).check(Schema.isMaxLength(1024)),
   value: optional(Schema.Unknown),
@@ -291,7 +298,14 @@ export class RecallReadyReadBoundaryError extends Schema.TaggedError<
   RecallReadyReadBoundaryError,
   {readonly brand: unique symbol}
 >()('RecallReadyReadBoundaryError', {
-  reason: Schema.Literals(['budget-exhausted', 'invalid-protocol', 'worker-failed', 'cleanup-unconfirmed']),
+  reason: Schema.Literals([
+    'budget-exhausted',
+    'input-limit',
+    'output-limit',
+    'invalid-protocol',
+    'worker-failed',
+    'cleanup-unconfirmed',
+  ]),
 }) {}
 
 /** Optional application port: maintenance and the worker itself keep the direct implementation. */

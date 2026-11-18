@@ -2,15 +2,12 @@ import {Array as EffectArray, Effect, Option, Schema} from 'effect';
 import {readLocalMemoryRecordsByUri} from '@threadnote/memory/local-path';
 import {isReadCleanupUnconfirmed, ReadDeadlineExceeded} from '@threadnote/platform/read_deadline';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import {stripFragment} from '@threadnote/platform/string-boundaries';
 import {isExternalResourceMetadata} from '@threadnote/store/external-resource';
 import {recallCandidateIsValid} from './candidate_validation.js';
 import {readRecallExactMatches, RecallReadyReadUnavailable} from './index.js';
 import {withReadyRecallMaintenanceScope} from './index/maintenance.js';
-import {
-  isConnectionResult,
-  readRecallMemoryConnections,
-  type RecallMemoryConnectionsResult,
-} from './memory/connections.js';
+import {isConnectionResult, type RecallMemoryConnectionsResult} from './memory/connections.js';
 import {
   RecallReadyReadBoundary,
   RecallReadyReadBoundaryError,
@@ -23,13 +20,21 @@ import type {RecallCandidate} from './rank.js';
 import type {RecallHit} from './results.js';
 import {
   emptyRecallSemanticScoresResult,
-  prepareRecallSections,
   prepareRecallSectionsWithoutInference,
+  warmRecallReranker,
   type PrepareRecallSectionsInput,
+  type RecallRerankerCache,
   type RecallRuntimeConfig,
   type RecallSemanticScoresResult,
 } from './runtime.js';
-import {lexicalReadFailureWarning, mergeRecallOperationalWarnings, recallReadStateWarnings} from './warning.js';
+import {
+  lexicalReadFailureWarning,
+  mergeRecallOperationalWarnings,
+  RECALL_LEXICAL_READ_FAILURE_REASONS,
+  recallReadFailureReason,
+  recallReadStateWarnings,
+  type RecallOperationalWarning,
+} from './warning.js';
 
 const optional = Schema.optionalKey;
 const strings = Schema.Array(Schema.String).check(Schema.isMaxLength(4096));
@@ -103,17 +108,24 @@ export const recallReadySectionsResultSchema = Schema.Struct({
   ),
   memoryConnections: optional(Schema.declare<RecallMemoryConnectionsResult>(isConnectionResult)),
   operationalWarnings: Schema.Array(
-    Schema.Struct({
-      code: Schema.Literals([
-        'lexical_index_unavailable',
-        'lexical_index_stale',
-        'lexical_maintenance_unavailable',
-        'lexical_read_budget_exhausted',
-        'lexical_read_failed',
-      ]),
-      message: Schema.String,
-      remediation: Schema.String,
-    }),
+    Schema.Union([
+      Schema.Struct({
+        code: Schema.Literals([
+          'lexical_index_unavailable',
+          'lexical_index_stale',
+          'lexical_maintenance_unavailable',
+          'lexical_read_budget_exhausted',
+        ]),
+        message: Schema.String,
+        remediation: Schema.String,
+      }),
+      Schema.Struct({
+        code: Schema.Literal('lexical_read_failed'),
+        reason: Schema.Literals(RECALL_LEXICAL_READ_FAILURE_REASONS),
+        message: Schema.String,
+        remediation: Schema.String,
+      }),
+    ]),
   ).check(Schema.isMaxLength(4)),
   semantic: recallReadySectionsSemanticSchema,
   exactMatches: exactMatchesSchema,
@@ -240,14 +252,13 @@ export const serveRecallSections = Effect.fn('recall.serveSections')(function* (
           ),
         )
       : [];
-  const semantic = input.mode === 'closing' ? semanticFromWire(input.semantic) : emptyRecallSemanticScoresResult();
-  const scores = new Map(input.mode === 'closing' ? input.rerankerScores : []);
+  const semantic = input.semantic === undefined ? emptyRecallSemanticScoresResult() : semanticFromWire(input.semantic);
+  const scores = new Map(input.rerankerScores ?? []);
   const prepared = yield* prepareRecallSectionsWithoutInference(
     config,
     {
       ...input,
       allowReranker: false,
-      candidateUris: input.mode === 'closing' ? input.candidateUris : undefined,
       closingCandidateUris: input.mode === 'closing' ? input.candidateUris : undefined,
       exactMatches,
       passes: [],
@@ -271,7 +282,12 @@ export const serveRecallSections = Effect.fn('recall.serveSections')(function* (
 
 export type ReadyRecallSectionsInput = Omit<
   PrepareRecallSectionsInput<never>,
-  'readRecords' | 'readMemoryConnections' | 'passes' | 'exactMatches' | 'allowReranker'
+  | 'readRecords'
+  | 'readMemoryConnections'
+  | 'passes'
+  | 'exactMatches'
+  | 'allowReranker'
+  | 'semanticGenerationMismatchPolicy'
 > & {
   readonly exact?: {
     readonly terms: readonly string[];
@@ -280,21 +296,40 @@ export type ReadyRecallSectionsInput = Omit<
   };
 };
 
-/** App-owned defaults only: arbitrary callback-based preparation remains a separate API. */
+/** Closing ranks only its window with cached scores, so score that window, including semantic-only hits. */
+export function warmRecallRerankerWindow(
+  config: Pick<RecallRuntimeConfig, 'agentContextHome'>,
+  query: string,
+  sections: {readonly ranked: readonly RecallHit[]; readonly expansionCandidates: readonly RecallCandidate[]},
+  limit: number,
+  cache: RecallRerankerCache,
+) {
+  const window = new Set(EffectArray.map(sections.ranked.slice(0, limit), hit => stripFragment(hit.uri)));
+  return warmRecallReranker(
+    config.agentContextHome,
+    query,
+    EffectArray.filter(sections.expansionCandidates, candidate => window.has(stripFragment(candidate.uri))),
+    cache,
+  );
+}
+
+/** Refinement is optional: a failed read abandons it, so closing proves the baseline instead of an empty window. */
+export function requireRecallRefinementRead<
+  A extends {readonly operationalWarnings: readonly RecallOperationalWarning[]},
+>(prepared: A) {
+  const reason = recallReadFailureReason(prepared.operationalWarnings);
+  return reason === undefined ? Effect.succeed(prepared) : Effect.fail(RecallReadyReadBoundaryError.make({reason}));
+}
+
+/**
+ * App-owned defaults only: arbitrary callback-based preparation remains a separate API.
+ * Every read, including refinement with parent model evidence, is one model-free sections read.
+ */
 export const prepareDefaultRecallSections = Effect.fn('recall.prepareDefaultSections')(function* (
   config: RecallRuntimeConfig,
-  input: Omit<PrepareRecallSectionsInput<never>, 'readRecords' | 'readMemoryConnections'> &
-    Pick<ReadyRecallSectionsInput, 'exact'>,
+  input: ReadyRecallSectionsInput & Pick<PrepareRecallSectionsInput<never>, 'passes' | 'exactMatches'>,
 ) {
-  if (input.allowReranker !== false) {
-    const prepared = yield* prepareRecallSections(config, {
-      ...input,
-      readRecords: uris => readLocalMemoryRecordsByUri(config, uris),
-      readMemoryConnections: options => readRecallMemoryConnections(config, options),
-    });
-    return {...prepared, exactMatches: input.exactMatches, semanticPreflight: undefined};
-  }
-  const {allowReranker: _allowReranker, passes: _passes, exactMatches: _exactMatches, ...ready} = input;
+  const {passes: _passes, exactMatches: _exactMatches, ...ready} = input;
   return yield* readReadyRecallSections(config, ready);
 });
 
@@ -304,25 +339,21 @@ export const readReadyRecallSections = Effect.fn('recall.readReadySections')(fun
   input: ReadyRecallSectionsInput,
 ) {
   const invalid = () => RecallReadyReadBoundaryError.make({reason: 'invalid-protocol'});
-  const {
-    semanticResult,
-    rerankerCache,
-    closingCandidateUris,
-    candidateUris: _candidateUris,
-    semanticGenerationMismatchPolicy: _mismatchPolicy,
-    exact,
-    ...fields
-  } = input;
+  const {semanticResult, rerankerCache, closingCandidateUris, candidateUris, exact, ...fields} = input;
+  const semantic = semanticToWire(Option.getOrElse(semanticResult ?? Option.none(), emptyRecallSemanticScoresResult));
+  const rerankerScores = readyRecallRerankerScores({rerankerCache});
   const options =
     closingCandidateUris === undefined
-      ? {...fields, mode: 'baseline', exact}
-      : {
+      ? {
           ...fields,
-          mode: 'closing',
-          candidateUris: closingCandidateUris,
-          semantic: semanticToWire(Option.getOrElse(semanticResult ?? Option.none(), emptyRecallSemanticScoresResult)),
-          rerankerScores: readyRecallRerankerScores({rerankerCache}),
-        };
+          mode: 'baseline',
+          exact,
+          candidateUris,
+          // Only completed parent evidence crosses, so an initial baseline stays evidence-free.
+          ...(semantic.scores === undefined && semantic.warning === undefined ? {} : {semantic}),
+          ...(rerankerScores.length === 0 ? {} : {rerankerScores}),
+        }
+      : {...fields, mode: 'closing', candidateUris: closingCandidateUris, semantic, rerankerScores};
   const result = yield* Effect.gen(function* () {
     const request = yield* Schema.decodeUnknownEffect(recallReadyReadRequestSchema, {onExcessProperty: 'error'})(
       JSON.parse(

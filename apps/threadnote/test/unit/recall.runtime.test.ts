@@ -944,32 +944,33 @@ describe('recall runtime orchestration', () => {
       expect(recalled.output).toContain('threadnote repair');
     }),
   );
-  effectIt.effect('keeps unexpected ready worker failure distinct from unavailable snapshots', () =>
-    Effect.gen(function* () {
-      const home = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'threadnote-ready-operational-failure-')));
-      homes.push(home);
-      const recalled = yield* captureConsole(
-        runRecall(
-          {
-            account: 'local',
-            agentContextHome: home,
-            agentId: 'fixture',
-            manifestPath: join(home, 'manifest.yaml'),
-            user: 'tester',
-          },
-          {inferScope: false, query: 'operational failure anchor', threshold: '0.1'},
-        ),
-      ).pipe(
-        Effect.provideService(RecallReadyReadBoundary, {
-          read: () => Effect.fail(RecallReadyReadBoundaryError.make({reason: 'worker-failed'})),
-        }),
-      );
-      expect(recalled.value.warnings).toEqual([expect.objectContaining({code: 'lexical_read_failed'})]);
-      expect(recalled.output).toContain('ready lexical read failed');
-      expect(recalled.output).toContain('threadnote doctor --dry-run');
-      expect(recalled.output).not.toContain('threadnote repair');
-    }).pipe(provideTestLayer(ApplicationLayer)),
-  );
+  for (const reason of ['worker-failed', 'output-limit', 'input-limit', 'invalid-protocol'] as const) {
+    effectIt.effect(`keeps unexpected ready worker failure (${reason}) distinct from unavailable snapshots`, () =>
+      Effect.gen(function* () {
+        const home = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'threadnote-ready-operational-failure-')));
+        homes.push(home);
+        const recalled = yield* captureConsole(
+          runRecall(
+            {
+              account: 'local',
+              agentContextHome: home,
+              agentId: 'fixture',
+              manifestPath: join(home, 'manifest.yaml'),
+              user: 'tester',
+            },
+            {inferScope: false, query: 'operational failure anchor', threshold: '0.1'},
+          ),
+        ).pipe(
+          Effect.provideService(RecallReadyReadBoundary, {
+            read: () => Effect.fail(RecallReadyReadBoundaryError.make({reason})),
+          }),
+        );
+        expect(recalled.value.warnings).toEqual([expect.objectContaining({code: 'lexical_read_failed', reason})]);
+        expect(recalled.output).toContain('threadnote doctor --dry-run');
+        expect(recalled.output).not.toContain('threadnote repair');
+      }).pipe(provideTestLayer(ApplicationLayer)),
+    );
+  }
   effectIt.effect('uses a complete ranked expansion vocabulary without opening the lexical index', () =>
     Effect.gen(function* () {
       const root = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'threadnote-expansion-ranked-')));

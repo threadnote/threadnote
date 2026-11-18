@@ -65,6 +65,7 @@ import {
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {
   readyRecallReadWorkerLayer,
+  recallReadyReadBinding,
   serveRecallReadyRead,
   RECALL_READY_READ_INPUT_BYTES,
   RECALL_READY_READ_OUTPUT_BYTES,
@@ -80,6 +81,11 @@ const embedding = Option.getOrThrow(
   EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, value => value.id === 'bge-small-en-v1.5-q8'),
 );
 const operationSchema = Schema.fromJsonString(recallReadyReadRequestSchema);
+/** Refinement sends completed parent model evidence through a baseline-mode sections read. */
+const refinementSectionsRead = (request: typeof operationSchema.Type | undefined) =>
+  request?.operation === 'sections' &&
+  request.options.mode === 'baseline' &&
+  (request.options.semantic !== undefined || request.options.rerankerScores !== undefined);
 const confidenceSchema = Schema.Struct({confidence: Schema.Struct({score: Schema.Finite})});
 const phaseLogEntrySchema = Schema.fromJsonString(
   Schema.Struct({
@@ -571,7 +577,7 @@ describe('production recall caller admission', () => {
             const input = options?.input
               ? yield* Schema.decodeEffect(operationSchema)(new TextDecoder().decode(options.input)).pipe(Effect.orDie)
               : undefined;
-            if (input?.operation === 'sections') {
+            if (input?.operation === 'sections' && !refinementSectionsRead(input)) {
               windows.push(options!.timeoutMs!);
               yield* Deferred.succeed(input.options.mode === 'baseline' ? baseline : closing, undefined);
               yield* Effect.sleep(100);
@@ -688,7 +694,7 @@ describe('production recall caller admission', () => {
                   ).pipe(Effect.orDie);
                   if (
                     reranks > 0 &&
-                    (request.operation === 'batch' ||
+                    (refinementSectionsRead(request) ||
                       request.operation === 'memory-connections' ||
                       (request.operation === 'sections' && request.options.mode === 'closing'))
                   )
@@ -858,7 +864,9 @@ describe('production recall caller admission', () => {
           expect(modelCalls).toBe(1);
           expect(operations[0]).toBe('sections');
           expect(operations).toContain('vector-state');
-          expect(EffectArray.filter(operations, operation => operation === 'sections')).toHaveLength(2);
+          // Baseline, evidence-bearing refinement and closing proof are each one compact sections read.
+          expect(EffectArray.filter(operations, operation => operation === 'sections')).toHaveLength(3);
+          expect(operations).not.toContain('batch');
           expect(result.isError, result.output).toBe(false);
           expect(result.output).toContain('memories/durable/alpha.md');
         }).pipe(provideTestLayer(ApplicationLayer)),
@@ -910,6 +918,61 @@ describe('production recall caller admission', () => {
           expect(result.isError, result.output).toBe(false);
           expect(result.output).toContain('memories/durable/alpha.md');
           expect(result.confidenceScore).toBeGreaterThan(before.confidenceScore ?? 1);
+        }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+      {timeout: 15000},
+    );
+    effectIt.effect(
+      `${surface} composition keeps its proved baseline when an evidence-bearing refinement read exceeds the output limit`,
+      () =>
+        Effect.gen(function* () {
+          const f = yield* fixture(false);
+          const command = yield* selectorCompositionCommands(f.system);
+          yield* selectLocalModel(
+            f.config.agentContextHome,
+            yield* LocalModelCatalog,
+            'reranker',
+            'jina-reranker-v1-turbo-en-f16',
+          );
+          let refinementReads = 0;
+          // The worker's bound oversize reply; the parent's real decoding and reason mapping still run.
+          const observed = CommandExecutor.of({
+            ...command,
+            execute: (executable, args, options) =>
+              Effect.gen(function* () {
+                const request =
+                  options?.sensitiveOutput && options.input
+                    ? yield* Schema.decodeEffect(operationSchema)(new TextDecoder().decode(options.input)).pipe(
+                        Effect.orDie,
+                      )
+                    : undefined;
+                if (request === undefined || !refinementSectionsRead(request))
+                  return yield* command.execute(executable, args, options);
+                refinementReads++;
+                const reply = {
+                  protocol: 1,
+                  binding: recallReadyReadBinding(request),
+                  operation: 'sections',
+                  observations: [],
+                  maintenanceRequested: false,
+                  outcome: 'failed',
+                  failure: 'output-limit',
+                };
+                return {exitCode: 0, stdout: `${JSON.stringify(reply)}\n`, stderr: ''};
+              }),
+          });
+          const result = yield* invoke(surface, f).pipe(
+            Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}),
+            Effect.provideService(CommandExecutor, observed),
+            Effect.provideService(LocalModelRuntime, {
+              ...fastRuntime,
+              rerank: ({documents}) => Effect.succeed(EffectArray.map(documents, () => 1)),
+            }),
+            Effect.provideService(LocalModelStore, f.store),
+          );
+          expect(refinementReads).toBe(1);
+          expect(result.isError, result.output).toBe(false);
+          expect(result.output).toContain('memories/durable/alpha.md');
+          expect(result.output).toContain('output-limit');
         }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
       {timeout: 15000},
     );
@@ -971,7 +1034,7 @@ describe('production recall caller admission', () => {
                         }
                         if (
                           scored &&
-                          (request?.operation === 'batch' ||
+                          (refinementSectionsRead(request) ||
                             (request?.operation === 'sections' && request.options.mode === 'closing'))
                         )
                           refinedBatches++;
@@ -1377,7 +1440,10 @@ describe('production recall caller admission', () => {
                     expect(options.timeoutMs).toBe(0);
                     starts.push(options.timeoutMs!);
                     activeReads++;
-                    const readMode = request?.operation === 'sections' ? request.options.mode : undefined;
+                    const readMode =
+                      request?.operation === 'sections' && !refinementSectionsRead(request)
+                        ? request.options.mode
+                        : undefined;
                     if (deterministicSlowComposition && (readMode === 'baseline' || readMode === 'closing')) {
                       const startedAt = yield* Clock.monotonicTimeNanos;
                       if (readMode === 'baseline') baselineReadStartedAt = startedAt;
