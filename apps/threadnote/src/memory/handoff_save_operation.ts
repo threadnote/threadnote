@@ -209,7 +209,8 @@ const reviewIntake = Effect.fn('handoffSave.reviewIntake')(function* (
   let count = 0;
   let pages = 0;
   const names = new Set<string>();
-  const eligible: HandoffSaveReceipt[] = [];
+  const settled: HandoffSaveReceipt[] = [];
+  const uncertain: HandoffSaveReceipt[] = [];
   try {
     for (;;) {
       if (++pages > 4) return {liveOwner, room: false};
@@ -224,10 +225,9 @@ const reviewIntake = Effect.fn('handoffSave.reviewIntake')(function* (
           old &&
           old.operationId !== previousOwner &&
           !(yield* sameLiveOwner(old)) &&
-          (terminal(old) || !old.goPossible) &&
           !(yield* fs.exists(paths(path, config, oldId).decision))
         )
-          eligible.push(old);
+          (terminal(old) || !old.goPossible ? settled : uncertain).push(old);
       }
       if (page.done) break;
     }
@@ -235,8 +235,10 @@ const reviewIntake = Effect.fn('handoffSave.reviewIntake')(function* (
     yield* fromPromise('handoffSave.closeHistory', () => directory.close());
   }
   // Retain recent results below capacity, including results not yet collected by their caller.
-  eligible.sort((left, right) => left.updatedAt - right.updatedAt || (left.operationId < right.operationId ? -1 : 1));
-  for (const old of EffectArray.take(eligible, 4)) {
+  // A dead uncertain receipt retires only after every settled one; its status stays unknown either way.
+  const oldest = (left: HandoffSaveReceipt, right: HandoffSaveReceipt) =>
+    left.updatedAt - right.updatedAt || (left.operationId < right.operationId ? -1 : 1);
+  for (const old of EffectArray.take([...settled.sort(oldest), ...uncertain.sort(oldest)], 4)) {
     if (count < HANDOFF_SAVE_HISTORY_LIMIT) break;
     const previous = paths(path, config, old.operationId);
     yield* scope.assert;
