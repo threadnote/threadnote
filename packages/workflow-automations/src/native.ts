@@ -3,6 +3,7 @@ import {Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {workflowFamilyStem, workflowTitleSlug} from './naming.js';
 import {NativeCycleRuntimeSchema, decodeNativeCycleRuntime} from './cycle_runtime.js';
+import {nativeWorkflowPolicies} from './gates.js';
 import {
   WorkflowAutomationError,
   type WorkflowArtifact,
@@ -76,6 +77,13 @@ const relation = Schema.Struct({
   uri,
 });
 const profile = Schema.Literals(['desktop', 'codex-cloud-personal', 'cursor-cloud-personal']);
+const workflowPolicyMode = Schema.Literals(nativeWorkflowPolicies);
+/** Absent on runs created before policies; those keep strict behavior. */
+export const NativeWorkflowPolicyRecordSchema = Schema.Struct({
+  mode: workflowPolicyMode,
+  reason: Schema.optionalKey(nonEmpty(4096)),
+  userAuthority: Schema.optionalKey(nonEmpty(4096)),
+});
 const revisions = Schema.NullOr(digest);
 const nameFamily = Schema.Struct({policyVersion: Schema.Literal(1), slug: Schema.String, ordinal: Schema.Finite});
 
@@ -111,6 +119,7 @@ const actionSchemas = [
     generation,
     profile: Schema.optionalKey(profile),
     team: Schema.optionalKey(portableId),
+    policy: Schema.optionalKey(workflowPolicyMode),
   }),
   Schema.Struct({...requestBase, action: Schema.Literal('inspect'), ...commonRun}),
   Schema.Struct({
@@ -219,6 +228,7 @@ const nativeWorkflowStateFields = {
   authoringSave: Schema.optionalKey(NativeAuthoringSaveReservationSchema),
   closeoutSave: Schema.optionalKey(NativeCloseoutSaveReservationSchema),
   cycle: Schema.optionalKey(NativeCycleRuntimeSchema),
+  policy: Schema.optionalKey(NativeWorkflowPolicyRecordSchema),
 } as const;
 export const NativeWorkflowStateSchema = Schema.Struct({
   ...nativeWorkflowStateFields,

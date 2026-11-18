@@ -36,6 +36,9 @@ import {
   RECALL_REFRESH_INDEXED_DOCUMENT_TABLE,
   RECALL_REFRESH_INDEXED_MEMORY_LINK_TABLE,
   RECALL_REFRESH_INDEXED_POSTING_TABLE,
+  RECALL_REFRESH_LINK_IDENTITY_TABLE,
+  RECALL_REFRESH_LINK_TARGET_TABLE,
+  RECALL_REFRESH_OVERSIZED_SOURCE_TABLE,
   RECALL_REFRESH_REPLACED_DOCUMENT_TABLE,
   RECALL_REFRESH_SOURCE_TABLE,
   stageRecallRefreshAffectedTerms,
@@ -119,15 +122,14 @@ export const prepareRecallDatabase = Effect.fn('recall.prepareDatabase')(functio
             invalidatedUris,
           )),
           mode: 'full' as const,
-          forceAllSources: mode.kind === 'touched',
         }
-      : {...touched, mode: 'touched' as const, forceAllSources: false};
+      : {...touched, mode: 'touched' as const};
+  const inventoryComplete = sourceScan.mode === 'full';
   const forceAllSources =
     forceRefresh ||
-    sourceScan.forceAllSources ||
     forceFromMarker ||
     (canonicalMutationGenerationChanged && !canonicalMutationContinuityAllowsIncrementalRefresh);
-  const refreshCounts = yield* countRecallSourceChanges(sql, forceAllSources);
+  const refreshCounts = yield* countRecallSourceChanges(sql, forceAllSources, inventoryComplete);
   yield* onProgress?.({
     completed: 0,
     phase: 'indexing',
@@ -226,56 +228,59 @@ export const prepareRecallDatabase = Effect.fn('recall.prepareDatabase')(functio
   const contentGeneration =
     refreshCounts.changedSourceCount === 0 && refreshCounts.removedSourceCount === 0 && previousContentGeneration
       ? previousContentGeneration
-      : yield* hashRecallRefreshGeneration(sql, previousContentGeneration);
+      : yield* hashRecallRefreshGeneration(sql, previousContentGeneration, inventoryComplete);
   const previousValidatedAt = numericMetadata(previousMetadata, 'validated_at');
   const now = yield* Clock.currentTimeMillis;
   const rebindingScope =
-    sourceScan.mode === 'full' &&
+    inventoryComplete &&
     previousMetadata.has('logical_scope') &&
     previousMetadata.get('logical_scope') !== recallLogicalScope(config, includeInactive);
-  let removedCursor: string | undefined;
-  for (;;) {
-    const removed = yield* sql.unsafe<{readonly uri: string; readonly source_path: string}>(
-      `
+  if (inventoryComplete) {
+    let removedCursor: string | undefined;
+    for (;;) {
+      const removed = yield* sql.unsafe<{readonly uri: string; readonly source_path: string}>(
+        `
       SELECT d.uri,d.source_path FROM documents AS d
       LEFT JOIN temp.${RECALL_REFRESH_SOURCE_TABLE} AS s ON s.uri=d.uri
       WHERE s.uri IS NULL ${removedCursor === undefined ? '' : 'AND d.uri COLLATE BINARY > ? COLLATE BINARY'}
       ORDER BY d.uri COLLATE BINARY LIMIT 256`,
-      removedCursor === undefined ? [] : [removedCursor],
-    );
-    yield* Effect.forEach(
-      removed,
-      row =>
-        Effect.gen(function* () {
-          if (sourceInputs.has(row.source_path)) return;
-          const input = yield* captureRecallSourceInput(row.source_path);
-          if (input.info?.isFile()) {
-            const physical = rebindingScope ? yield* fs.realPath(row.source_path).pipe(Effect.option) : undefined;
-            const outsideReboundScope =
-              physical !== undefined &&
-              physical._tag === 'Some' &&
-              physical.value === path.normalize(row.source_path) &&
-              !recallSourceIsWithinIndexRoots(config, path, row.uri, physical.value);
-            if (
-              !outsideReboundScope &&
-              !recallSourceIsIntentionallyExcluded(config, path, includeInactive, row.uri, row.source_path)
-            )
-              return yield* recallRefreshSuperseded();
-          }
-          sourceInputs.set(row.source_path, input.key);
-        }),
-      {concurrency: 16, discard: true},
-    );
-    if (removed.length < 256) break;
-    removedCursor = removed.at(-1)!.uri;
+        removedCursor === undefined ? [] : [removedCursor],
+      );
+      yield* Effect.forEach(
+        removed,
+        row =>
+          Effect.gen(function* () {
+            if (sourceInputs.has(row.source_path)) return;
+            const input = yield* captureRecallSourceInput(row.source_path);
+            if (input.info?.isFile()) {
+              const physical = rebindingScope ? yield* fs.realPath(row.source_path).pipe(Effect.option) : undefined;
+              const outsideReboundScope =
+                physical !== undefined &&
+                physical._tag === 'Some' &&
+                physical.value === path.normalize(row.source_path) &&
+                !recallSourceIsWithinIndexRoots(config, path, row.uri, physical.value);
+              if (
+                !outsideReboundScope &&
+                !recallSourceIsIntentionallyExcluded(config, path, includeInactive, row.uri, row.source_path)
+              )
+                return yield* recallRefreshSuperseded();
+            }
+            sourceInputs.set(row.source_path, input.key);
+          }),
+        {concurrency: 16, discard: true},
+      );
+      if (removed.length < 256) break;
+      removedCursor = removed.at(-1)!.uri;
+    }
   }
-  yield* stageRecallRefreshAffectedTerms(sql);
+  yield* stageRecallRefreshAffectedTerms(sql, inventoryComplete);
   return {
     staleGeneration,
     canonicalMutationGeneration,
     policyInputProof: base.policyInputProof,
     sourceScan,
     forceAllSources,
+    touchedFallback: mode.kind === 'touched' && touched === undefined,
     refreshCounts,
     contentGeneration,
     previousValidatedAt,
@@ -295,6 +300,7 @@ export const publishPreparedRecallDatabase = Effect.fn('recall.publishPreparedDa
 ) {
   const {staleGeneration, canonicalMutationGeneration, sourceScan, contentGeneration, previousValidatedAt, now} =
     prepared;
+  yield* stageRemovedRecallLinkTargets(sql);
   yield* sql.unsafe(`
     DELETE FROM exact_search
     WHERE rowid IN (SELECT document_id FROM temp.${RECALL_REFRESH_REPLACED_DOCUMENT_TABLE})
@@ -314,6 +320,9 @@ export const publishPreparedRecallDatabase = Effect.fn('recall.publishPreparedDa
       recorded_at,
       source_size,
       authority_policy_key,
+      uri_locator_digest,
+      memory_id,
+      content_hash,
       candidate_json,
       logical_key,
       document_length,
@@ -329,6 +338,9 @@ export const publishPreparedRecallDatabase = Effect.fn('recall.publishPreparedDa
       indexed.recorded_at,
       source.source_size,
       source.authority_policy_key,
+      source.uri_locator_digest,
+      indexed.memory_id,
+      indexed.content_hash,
       indexed.candidate_json,
       indexed.logical_key,
       indexed.document_length,
@@ -392,8 +404,17 @@ export const publishPreparedRecallDatabase = Effect.fn('recall.publishPreparedDa
     INNER JOIN documents AS document ON document.uri = posting.uri
     ORDER BY posting.term COLLATE BINARY, document.id
   `);
+  if (sourceScan.mode === 'full')
+    yield* sql.unsafe(`
+      DELETE FROM oversized_sources
+      WHERE uri NOT IN (SELECT uri FROM temp.${RECALL_REFRESH_OVERSIZED_SOURCE_TABLE})
+    `);
+  yield* sql.unsafe(`
+    INSERT OR IGNORE INTO oversized_sources (uri)
+    SELECT uri FROM temp.${RECALL_REFRESH_OVERSIZED_SOURCE_TABLE}
+  `);
   yield* RecallIndexIdentity.rebuildRecallIdentityConflicts(sql);
-  yield* resolveLegacyRecallMemoryLinks(sql);
+  yield* resolveLegacyRecallMemoryLinks(sql, includeInactive);
   yield* sql.unsafe(`
     DELETE FROM term_statistics
     WHERE term IN (SELECT term FROM temp.${RECALL_REFRESH_AFFECTED_TERM_TABLE})
@@ -463,38 +484,104 @@ export const publishPreparedRecallDatabase = Effect.fn('recall.publishPreparedDa
   return documentCount;
 });
 
+const hasLegacyRecallMemoryLinks = (sql: SqlClient.SqlClient) =>
+  sql
+    .unsafe<{readonly present: number}>(
+      "SELECT 1 AS present FROM memory_links WHERE target_locator_digest <> '' LIMIT 1",
+    )
+    .pipe(Effect.map(rows => rows.length > 0));
+
 /**
- * Legacy URI edges retain only a locator digest. Re-resolve every such row
- * against the exact corpus staged for this database so target add/delete/move
- * operations converge with a clean rebuild even when the source is unchanged.
+ * Legacy URI edges keep only a target locator digest. Before replaced and removed documents are
+ * deleted, record their digests and memory identities so that edges from unchanged sources which
+ * point at them are re-resolved after publication.
+ */
+const stageRemovedRecallLinkTargets = Effect.fn('recall.stageRemovedLinkTargets')(function* (sql: SqlClient.SqlClient) {
+  if (!(yield* hasLegacyRecallMemoryLinks(sql))) return;
+  // CROSS JOIN keeps each small TEMP change set as the outer loop; TEMP tables carry no planner statistics.
+  yield* sql.unsafe(`
+    INSERT OR IGNORE INTO temp.${RECALL_REFRESH_LINK_TARGET_TABLE} (uri_locator_digest)
+    SELECT document.uri_locator_digest
+    FROM temp.${RECALL_REFRESH_REPLACED_DOCUMENT_TABLE} AS replaced
+    CROSS JOIN documents AS document ON document.id = replaced.document_id
+  `);
+  yield* sql.unsafe(`
+    INSERT OR IGNORE INTO temp.${RECALL_REFRESH_LINK_IDENTITY_TABLE} (memory_id)
+    SELECT document.memory_id
+    FROM temp.${RECALL_REFRESH_REPLACED_DOCUMENT_TABLE} AS replaced
+    CROSS JOIN documents AS document ON document.id = replaced.document_id
+    WHERE document.memory_id IS NOT NULL
+  `);
+});
+
+/**
+ * Re-resolve only the legacy edges whose answer can have changed: edges from re-indexed sources,
+ * and edges whose target digest belongs to an inserted, replaced or removed URI, or to any document
+ * that shares a memory identity with one, because uniqueness and conflict state follow the
+ * identity. Targets are read through the persisted URI digest, so unchanged documents resolve too.
  */
 const resolveLegacyRecallMemoryLinks = Effect.fn('recall.resolveLegacyMemoryLinks')(function* (
   sql: SqlClient.SqlClient,
+  includeInactive: boolean,
 ) {
-  const resolvedTarget = `(SELECT json_extract(target.candidate_json, '$.memoryId')
-    FROM temp.${RECALL_REFRESH_SOURCE_TABLE} AS target_source
-    INNER JOIN documents AS target ON target.uri = target_source.uri
-    WHERE target_source.uri_locator_digest = memory_links.target_locator_digest
-      AND json_type(target.candidate_json, '$.memoryId') = 'text'
+  if (!(yield* hasLegacyRecallMemoryLinks(sql))) return;
+  yield* sql.unsafe(`
+    INSERT OR IGNORE INTO temp.${RECALL_REFRESH_LINK_IDENTITY_TABLE} (memory_id)
+    SELECT memory_id FROM temp.${RECALL_REFRESH_INDEXED_DOCUMENT_TABLE} WHERE memory_id IS NOT NULL
+  `);
+  yield* sql.unsafe(`
+    INSERT OR IGNORE INTO temp.${RECALL_REFRESH_LINK_TARGET_TABLE} (uri_locator_digest)
+    SELECT source.uri_locator_digest
+    FROM temp.${RECALL_REFRESH_INDEXED_DOCUMENT_TABLE} AS indexed
+    CROSS JOIN temp.${RECALL_REFRESH_SOURCE_TABLE} AS source ON source.uri = indexed.uri
+  `);
+  yield* sql.unsafe(`
+    INSERT OR IGNORE INTO temp.${RECALL_REFRESH_LINK_TARGET_TABLE} (uri_locator_digest)
+    SELECT document.uri_locator_digest
+    FROM temp.${RECALL_REFRESH_LINK_IDENTITY_TABLE} AS identity
+    CROSS JOIN documents AS document ON document.memory_id = identity.memory_id
+  `);
+  const inactivePredicate = includeInactive
+    ? ''
+    : `
+      AND target.uri NOT LIKE '%/archived/%'
+      AND target.uri NOT LIKE '%/expired/%'
+      AND target.uri NOT LIKE '%/superseded/%'`;
+  const resolvedTarget = `COALESCE((SELECT target.memory_id
+    FROM documents AS target
+    WHERE target.uri_locator_digest = memory_links.target_locator_digest
+      AND target.memory_id IS NOT NULL
       AND COALESCE(json_extract(target.candidate_json, '$.status'), 'active') = 'active'
-      AND length(json_extract(target.candidate_json, '$.memoryId')) BETWEEN 4 AND 131
-      AND substr(json_extract(target.candidate_json, '$.memoryId'), 1, 3) = 'tn_'
-      AND substr(json_extract(target.candidate_json, '$.memoryId'), 4) NOT GLOB '*[^A-Za-z0-9_-]*'
+      ${inactivePredicate}
+      AND length(target.memory_id) BETWEEN 4 AND 131
+      AND substr(target.memory_id, 1, 3) = 'tn_'
+      AND substr(target.memory_id, 4) NOT GLOB '*[^A-Za-z0-9_-]*'
       AND NOT EXISTS (
         SELECT 1 FROM memory_identity_conflicts AS conflict
-        WHERE conflict.memory_id = json_extract(target.candidate_json, '$.memoryId')
+        WHERE conflict.memory_id = target.memory_id
       )
       AND (
         SELECT COUNT(*) FROM documents AS identity_document
-        WHERE json_extract(identity_document.candidate_json, '$.memoryId') =
-          json_extract(target.candidate_json, '$.memoryId')
+        WHERE identity_document.memory_id = target.memory_id
       ) = 1
     ORDER BY target.uri COLLATE BINARY
-    LIMIT 1)`;
+    LIMIT 1), '')`;
   yield* sql.unsafe(`
     UPDATE memory_links
-    SET target_memory_id = COALESCE(${resolvedTarget}, '')
+    SET target_memory_id = ${resolvedTarget}
     WHERE target_locator_digest <> ''
-      AND target_memory_id <> COALESCE(${resolvedTarget}, '')
+      AND target_locator_digest IN (SELECT uri_locator_digest FROM temp.${RECALL_REFRESH_LINK_TARGET_TABLE})
+      AND target_memory_id <> ${resolvedTarget}
+  `);
+  yield* sql.unsafe(`
+    UPDATE memory_links
+    SET target_memory_id = ${resolvedTarget}
+    WHERE target_locator_digest <> ''
+      AND source_document_id IN (
+        SELECT document.id
+        FROM temp.${RECALL_REFRESH_INDEXED_DOCUMENT_TABLE} AS indexed
+        CROSS JOIN documents AS document ON document.uri = indexed.uri
+      )
+      AND target_memory_id <> ${resolvedTarget}
   `);
 });

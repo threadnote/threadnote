@@ -2,6 +2,7 @@ import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Schema} from 'effect';
 import {WorkflowAutomationError} from './contracts.js';
 import {decodeNativeCycleState, nextNativeCycle, nativeCycleHasControl, type NativeCycleState} from './cycle.js';
+import type {NativeCycleWaiver} from './cycle_runtime.js';
 import {
   decodeNativeAuthoringDocument,
   isNativeMermaidDiagram,
@@ -148,6 +149,7 @@ export function prepareNativeCloseout(
   planDocument: NativeAuthoringDocument,
   rawProposal: unknown,
   specDocument?: NativeAuthoringDocument,
+  waivers: readonly NativeCycleWaiver[] = [],
 ) {
   const state = decodeNativeCycleState(input);
   if (nextNativeCycle(state).action !== 'complete')
@@ -323,7 +325,20 @@ export function prepareNativeCloseout(
         '\n\nCombined checks\n' +
         json(proposal.combinedChecks) +
         '\n\nPhase acceptance evidence\n' +
-        json(phaseEvidence),
+        json(phaseEvidence) +
+        (waivers.length
+          ? '\n\nAudited waivers\n' +
+            json(
+              EffectArray.map(waivers, ({id, gate, phaseId, tree, reason, userAuthority}) => ({
+                gate,
+                phaseId,
+                tree,
+                reason,
+                userAuthority,
+                coversDeliveredTree: state.phases[phaseId]?.validation?.waiverId === id,
+              })),
+            )
+          : ''),
       blockers:
         'Unknowns\n' +
         lines(proposal.architecture.unknowns) +

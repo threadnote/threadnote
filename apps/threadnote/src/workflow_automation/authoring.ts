@@ -1,3 +1,4 @@
+import {nativeWorkflowPolicyOf} from '@threadnote/workflow-automations/gates';
 import {isJsonObject} from '@threadnote/platform/json';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Effect, FileSystem, Path, Schema} from 'effect';
@@ -12,10 +13,13 @@ import {
   decodeNativeAuthoringDocument,
   isNativeMermaidDiagram,
   nativeAuthoringDigest,
-  NativePlanIntentPolicyVersion,
+  nativeAuthoringIssueSummary,
   nativeSpecIntentDigest,
   validateNativeAuthoring,
   type NativeAuthoringDocument,
+  nativePlanIntentPolicyFor,
+  nativePlanIntentPolicyForSave,
+  type NativePlanIntentPolicyVersion,
 } from '@threadnote/workflow-automations/authoring';
 import {
   decodeNativeDocument,
@@ -40,6 +44,11 @@ import {withWorkflowReadCache} from '../workflow_memory/read_cache.js';
 import {withWorkflowRecallRefreshBatch} from '../workflow_memory/recall_refresh.js';
 import {readWorkflowSharedRoots} from '../workflow_memory/scopes.js';
 import {assertWorkflowEvidenceSnapshot, verifyWorkflowEvidence} from '../workflow_memory/evidence.js';
+import {
+  CurrentForegroundAuthoringCitationCollector,
+  CurrentForegroundAuthoringCitations,
+  type ForegroundAuthoringCitationCollector,
+} from '../workflow_memory/artifacts.js';
 import {workflowArtifactUri} from '../workflow_memory/naming.js';
 import {nativeWorkflowError} from './memory.js';
 import {assertNativeJobLiveSource, CurrentNativeJobReadyPromotion, CurrentNativeJobSourceView} from './native_jobs.js';
@@ -61,8 +70,10 @@ import {
   encodeAuthoringArtifact,
   encodeAuthoringDocument,
   makeAuthoringArtifacts,
+  nativePlanPhaseDefinitionHash,
   splitAuthoringText,
   authoringRelations,
+  verifiedAuthoringRoot,
   type AuthoringReference,
   type AuthoringRoot,
   type NativeAuthoringCall,
@@ -990,8 +1001,19 @@ export const runNativeAuthoring = <R>(
         withRecallIdentityPreparation,
       );
     yield* admitLinkedSpec(document);
+    const planIntentPolicyVersion =
+      request.command === 'save'
+        ? nativePlanIntentPolicyForSave(
+            state,
+            yield* Effect.try({
+              try: () => verifiedAuthoringRoot(state.operations, document.kind),
+              catch: nativeWorkflowError,
+            }),
+            request.confirmation?.intentHash,
+          )
+        : nativePlanIntentPolicyFor(state);
     const validation = yield* Effect.try({
-      try: () => validateNativeAuthoring(document, request),
+      try: () => validateNativeAuthoring(document, {...request, planIntentPolicyVersion}),
       catch: nativeWorkflowError,
     });
     if (request.command === 'acceptance-packet') return acceptancePacket(document, validation, request.detail);
@@ -1105,7 +1127,14 @@ export const runNativeAuthoring = <R>(
       codeRefs: document.context.codeRefs,
       evidenceRefs: document.context.evidenceRefs,
     };
-    yield* call(preview);
+    const admittedJobSource = yield* CurrentNativeJobSourceView;
+    const foregroundCitationCollector: ForegroundAuthoringCitationCollector | undefined =
+      request.command === 'save' && admittedJobSource === undefined ? {} : undefined;
+    yield* foregroundCitationCollector
+      ? call(preview).pipe(
+          Effect.provideService(CurrentForegroundAuthoringCitationCollector, foregroundCitationCollector),
+        )
+      : call(preview);
     if (request.command === 'validate') return validation;
     if (request.command !== 'save')
       return yield* fail('invalid-request', 'This native authoring operation is unsupported.');
@@ -1115,10 +1144,11 @@ export const runNativeAuthoring = <R>(
       savingRequest,
       document,
       validation,
+      planIntentPolicyVersion,
       call,
       journal.state.binding.repo,
       admitLinkedSpec,
-    );
+    ).pipe(Effect.provideService(CurrentForegroundAuthoringCitations, foregroundCitationCollector?.witness));
     return {
       ...saved,
       requestedReadiness: request.ready ? 'ready' : 'draft',
@@ -1198,6 +1228,7 @@ const saveAuthoring = <R>(
   request: Request,
   document: NativeAuthoringDocument,
   validation: ReturnType<typeof validateNativeAuthoring>,
+  planIntentPolicyVersion: NativePlanIntentPolicyVersion,
   call: NativeAuthoringCall<R>,
   repo: string,
   admitLinkedSpec: (document: NativeAuthoringDocument) => Effect.Effect<unknown, WorkflowAutomationError, R>,
@@ -1542,10 +1573,11 @@ const saveAuthoring = <R>(
         );
       const structural = validateNativeAuthoring(document);
       if (structural.issues.length)
-        return yield* fail(
-          'invalid-document',
-          'Resolve the document’s structural/coverage/source issues before saving; readiness-only questions remain draftable.',
-        );
+        return yield* WorkflowAutomationError.make({
+          code: 'invalid-document',
+          message: `Resolve the document’s structural/coverage/source issues before saving; readiness-only questions remain draftable. Issues: ${nativeAuthoringIssueSummary(structural.issues)}`,
+          detail: {issues: structural.issues},
+        });
       const text = canonicalAuthoringJson(document);
       const views = EffectArray.map(documentViews(document), item => ({...item, document: boundedView(item.document)}));
       const encodedViews = yield* Effect.try({
@@ -1735,7 +1767,7 @@ const saveAuthoring = <R>(
         },
         documentHash: validation.documentHash,
         intentHash: validation.intentHash,
-        ...(document.kind === 'plan' ? {planIntentPolicyVersion: NativePlanIntentPolicyVersion} : {}),
+        ...(document.kind === 'plan' && planIntentPolicyVersion !== 1 ? {planIntentPolicyVersion} : {}),
         baseRevision: prior?.revision ?? null,
         readiness,
         data,
@@ -1771,6 +1803,7 @@ const saveAuthoring = <R>(
       });
       const artifact = yield* rootWrite.pipe(
         Effect.provideService(CurrentNativeJobReadyPromotion, readiness === 'ready'),
+        Effect.provideService(CurrentForegroundAuthoringCitations, undefined),
       );
       const admitted = yield* CurrentNativeJobSourceView;
       if (admitted && readiness === 'ready') yield* assertNativeJobLiveSource(admitted);
@@ -1883,6 +1916,7 @@ const exportAuthoring = Effect.fn('workflowAutomation.authoring.export')(functio
     EffectArray.join(EffectArray.map(document.phases, phase => phase.id).sort(), '\n')
   )
     return yield* fail('invalid-request', 'Branch bindings must cover exactly the approved phase IDs.');
+  const derivedOwnership = nativeWorkflowPolicyOf(state) === 'standard';
   const phases = [];
   for (const phase of document.phases) {
     const branch = request.bindings[phase.id];
@@ -1896,7 +1930,15 @@ const exportAuthoring = Effect.fn('workflowAutomation.authoring.export')(functio
       return yield* fail('invalid-request', 'Phase branches must be explicit bounded Git references.');
     phases.push({
       id: phase.id,
-      definitionHash: sha256HexSync('threadnote.native-cycle.phase-definition.v1\n' + stableJson(phase)),
+      definitionHash: nativePlanPhaseDefinitionHash(phase),
+      ...(derivedOwnership
+        ? {
+            intentDefinitionHash: sha256HexSync(
+              'threadnote.native-cycle.phase-intent-definition.v1\n' +
+                stableJson({...phase, affectedPaths: undefined, newPaths: undefined}),
+            ),
+          }
+        : {}),
       title: phase.title,
       dependsOn: phase.dependsOn,
       allowedPaths: [...phase.affectedPaths, ...phase.newPaths],

@@ -18,6 +18,7 @@ import {Command} from 'effect/cli';
 import {SecureRandom} from 'effect/crypto';
 import {it as effectIt} from '@effect/vitest';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
+import {CodeGraphStore} from '@threadnote/graph/store';
 import {
   ResourceStore,
   type ResourceStoreLocation,
@@ -427,7 +428,7 @@ const startSimulatedTaskWatch = (
       prUrl,
       expectedWatchId,
     );
-    if (!attempt.result.ok) return yield* Effect.fail(attempt.result.failure);
+    if (!attempt.result.ok) return yield* attempt.result.failure;
     const started = object(attempt.result.value);
     const startedWatch = attempt.startedWatch;
     if (!startedWatch) throw new Error('Expected the simulated task watch to persist.');
@@ -2173,6 +2174,143 @@ describe('native task actions', () => {
     }).pipe(run),
   );
 
+  effectIt.effect('records the next iteration over an unreviewed snapshot that a reconcile made stale', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(['one'], 'local');
+      yield* f.mutate('begin-phase', {phaseId: 'one'});
+      const work = (workPacket = packet) =>
+        Effect.map(
+          runNativeTaskAction(f.config, {command: 'work', runId: 'native-run', callerCwd: f.repo, packet: workPacket}),
+          result => String(object(result).workRef),
+        );
+      const firstWorkRef = yield* work();
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "before amendment";\n');
+      yield* f.git(['commit', '-am', 'Source before the amendment']);
+      const stale = object(
+        object(
+          object(
+            yield* runNativeTaskAction(f.config, {
+              command: 'record-snapshot',
+              runId: 'native-run',
+              callerCwd: f.repo,
+              workRef: firstWorkRef,
+            }),
+          ).snapshot,
+        ).snapshot,
+      );
+      const plan = yield* f.revise({
+        phases: EffectArray.map(f.document.phases, phase => ({...phase, outcome: 'Amended approved outcome.'})),
+      });
+      yield* f.mutate('reconcile', {plan, reason: 'The approved phase outcome changed before review.'});
+      yield* f.mutate('resume-phase', {phaseId: 'one', reason: 'Implement the amended contract.'});
+      const request = {
+        command: 'record-snapshot',
+        runId: 'native-run',
+        callerCwd: f.repo,
+        workRef: yield* work(),
+        reason: 'The amended contract retires the unreviewed snapshot; review the same source in full.',
+      } as const;
+      const recorded = object(yield* runNativeTaskAction(f.config, request));
+      const current = object(object(recorded.snapshot).snapshot);
+      expect(current).toMatchObject({
+        supersedes: stale.snapshotId,
+        unreviewedSupersession: {reason: request.reason},
+        tree: stale.tree,
+      });
+      expect(current.phaseHash).not.toBe(stale.phaseHash);
+      const afterRecord = yield* f.fs.readFileString(f.statePath());
+      expect(object(yield* runNativeTaskAction(f.config, request))).toMatchObject({replayed: true});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(afterRecord);
+      const review = {
+        selected: ['correctness', 'simplicity'],
+        lanes: [
+          {name: 'correctness', status: 'complete'},
+          {name: 'simplicity', status: 'complete'},
+        ],
+        findings: [],
+      };
+      const record = (mode: string) =>
+        runNativeTaskAction(f.config, {
+          command: 'record-review',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          snapshotRef: String(recorded.snapshotRef),
+          report: {...review, mode},
+        });
+      expect(object(yield* record('incremental'))).toMatchObject({status: 'invalid'});
+      expect(object(yield* record('full'))).toMatchObject({status: 'recorded'});
+      const runtime = (yield* readNativeWorkflowState(f.config, 'native-run'))?.state.cycle;
+      expect(runtime?.snapshots[0]?.snapshot).toEqual(stale);
+      expect(EffectArray.map(runtime?.reviews ?? [], item => item.snapshotId)).toEqual([current.snapshotId]);
+    }).pipe(run),
+  );
+
+  effectIt.effect('recovers a rebased unreviewed snapshot that a reconcile made stale', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(['one'], 'local');
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "feature";\n');
+      yield* f.git(['commit', '-am', 'Feature snapshot']);
+      const head = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
+      const stale = object(
+        object(
+          (yield* f.mutate('snapshot', {
+            phaseId: 'one',
+            snapshotId: 'before-rebase',
+            acceptedHead: head,
+            reason: 'Capture the feature before review.',
+          })).snapshot,
+        ).snapshot,
+      );
+      const snapshotRef = (yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo})).phase
+        ?.snapshot?.snapshotRef;
+      if (!snapshotRef) throw new Error('Expected the original review reference.');
+      yield* f.git(['checkout', 'main']);
+      yield* f.git(['commit', '--allow-empty', '-m', 'Advance the base']);
+      yield* f.git(['checkout', 'feature/one']);
+      yield* f.git(['rebase', 'main']);
+      const plan = yield* f.revise({
+        phases: EffectArray.map(f.document.phases, phase => ({...phase, outcome: 'Amended approved outcome.'})),
+      });
+      yield* f.mutate('reconcile', {plan, reason: 'The approved phase outcome changed after the rebase.'});
+      yield* f.mutate('resume-phase', {phaseId: 'one', reason: 'Recover the rebased source under the amendment.'});
+      const request = {
+        command: 'recover-unreviewed-rebase-snapshot',
+        runId: 'native-run',
+        callerCwd: f.repo,
+        snapshotRef,
+        reason: 'Recover the rebased source under the amended contract.',
+        userAuthority: 'Rebase this approved feature onto updated main.',
+      } as const;
+      const recovered = object(yield* runNativeTaskAction(f.config, request));
+      const current = object(object(recovered.snapshot).snapshot);
+      expect(current).toMatchObject({
+        supersedes: stale.snapshotId,
+        unreviewedSupersession: {reason: request.reason, rebaseRecovery: {authority: request.userAuthority}},
+      });
+      expect(current.phaseHash).not.toBe(stale.phaseHash);
+      expect(object(yield* runNativeTaskAction(f.config, request))).toMatchObject({replayed: true});
+      expect(
+        object(
+          yield* runNativeTaskAction(f.config, {
+            command: 'record-review',
+            runId: 'native-run',
+            callerCwd: f.repo,
+            snapshotRef: String(recovered.snapshotRef),
+            report: {
+              mode: 'full',
+              selected: ['correctness', 'simplicity'],
+              lanes: [
+                {name: 'correctness', status: 'complete'},
+                {name: 'simplicity', status: 'complete'},
+              ],
+              findings: [],
+            },
+          }),
+        ),
+      ).toMatchObject({status: 'recorded'});
+    }).pipe(run),
+  );
+
   effectIt.effect(
     'requalifies an exact reviewed predecessor on an approved divergent base through the consolidated snapshot action',
     () =>
@@ -2844,7 +2982,8 @@ describe('native task actions', () => {
       const config = {...f.config, agentContextHome: home, manifestPath: f.path.join(home, 'manifest.json')};
       const system = yield* SystemInfo;
       const testSystem = {...system, currentDirectory: () => repo, homeDirectory: home};
-      yield* runCommandEffect('git', ['-C', repo, 'add', 'source.ts']);
+      yield* f.fs.writeFileString(f.path.join(repo, 'unlisted.ts'), 'export const unlisted = true;\n');
+      yield* runCommandEffect('git', ['-C', repo, 'add', 'source.ts', 'unlisted.ts']);
       yield* runCommandEffect('git', [
         '-C',
         repo,
@@ -2945,6 +3084,29 @@ describe('native task actions', () => {
           },
         ],
       };
+      const outsideRefIndex = expansion.context.codeRefs.length;
+      const rejectedExpansion = yield* runNativeTaskAction(config, {
+        command: 'compact-expand',
+        runId,
+        callerCwd: repo,
+        document: {
+          ...expansion,
+          context: {...expansion.context, codeRefs: [...expansion.context.codeRefs, 'unlisted.ts']},
+        },
+      }).pipe(Effect.result);
+      expect(rejectedExpansion).toMatchObject({
+        failure: {
+          code: 'invalid-document',
+          detail: {
+            issues: expect.arrayContaining([
+              expect.objectContaining({
+                code: 'code-ref-out-of-snapshot',
+                path: `context.codeRefs[${outsideRefIndex}]`,
+              }),
+            ]),
+          },
+        },
+      });
       const firstExpansion = object(
         yield* runNativeTaskAction(config, {
           command: 'compact-expand',
@@ -6896,7 +7058,7 @@ describe('native task actions', () => {
   );
 
   // prettier-ignore
-  effectIt.effect('records a canonical snapshot and review with exact replay after source drift', () =>
+  effectIt.effect('replays an exact snapshot and review but refuses a snapshot replay after source drift', () =>
     Effect.gen(function* () {
       const f = yield* fixture(['one'], 'local');
       const readbackProposal = {
@@ -6934,21 +7096,30 @@ describe('native task actions', () => {
       const recorded = object(recordedEnvelope.structuredContent);
       expect(recorded).toMatchObject({status: 'recorded', replayed: false});
       const snapshotRef = String(recorded.snapshotRef);
+      const recordedTree = String(object(object(recorded.snapshot).snapshot).tree);
+      const recordSnapshot = runNativeTaskAction(f.config, {
+        command: 'record-snapshot',
+        runId: 'native-run',
+        callerCwd: f.repo,
+        workRef,
+      });
+      const failureMessage = (result: unknown) => String(object(object(result).failure).message);
       const beforeReplay = yield* f.fs.readFileString(f.statePath());
       yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "later drift";\n');
-      const replay = object(
-        yield* runNativeTaskAction(f.config, {
-          command: 'record-snapshot',
-          runId: 'native-run',
-          callerCwd: f.repo,
-          workRef,
-        }),
-      );
+      yield* f.git(['add', 'source.ts']);
+      const driftTree = EffectString.trim((yield* f.git(['write-tree'])).stdout);
+      const staleReplay = yield* recordSnapshot.pipe(Effect.result);
+      expect(staleReplay).toMatchObject({failure: {code: 'source-drift'}});
+      expect(failureMessage(staleReplay)).toContain(recordedTree);
+      expect(failureMessage(staleReplay)).toContain(driftTree);
+      expect(failureMessage(staleReplay)).toContain('supersede-unreviewed-snapshot');
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeReplay);
+      yield* f.git(['checkout', 'HEAD', '--', 'source.ts']);
+      const replay = object(yield* recordSnapshot);
       expect(replay).toMatchObject({status: 'recorded', replayed: true});
       expect(replay.snapshot).toEqual(recorded.snapshot);
       expect(object(object(replay.snapshot).snapshot).snapshotId).toBe(nativeTaskSnapshotId(workRef));
       expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeReplay);
-      yield* f.git(['checkout', '--', 'source.ts']);
       const report = {
         mode: 'full',
         selected: ['correctness', 'simplicity'],
@@ -6991,6 +7162,10 @@ describe('native task actions', () => {
         report: {...report, mode: 'incremental'},
       }).pipe(Effect.result);
       expect(changed).toMatchObject({failure: {code: 'review-conflict'}});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(afterReview);
+      const reviewedReplay = yield* recordSnapshot.pipe(Effect.result);
+      expect(reviewedReplay).toMatchObject({failure: {code: 'source-drift'}});
+      expect(failureMessage(reviewedReplay)).toContain('task-action work');
       expect(yield* f.fs.readFileString(f.statePath())).toBe(afterReview);
       yield* f.git(['checkout', '--', 'source.ts']);
       const validationEvidence = {
@@ -7567,7 +7742,10 @@ describe('native task actions', () => {
       expect(object(taskViewEnvelope.structuredContent).next).toMatchObject({
         action: 'deliver',
         tool: 'workflow_task_deliver',
-        guidance: 'Choose local, commit, or pr to match the approved plan.',
+        arguments: {
+          runId: 'native-run',
+          delivery: {command: 'commit', validationRef, commitEvidence: '<commitEvidence>'},
+        },
       });
       const evidence = 'Verified fixture commit ' + EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
       const beforeForeign = yield* f.fs.readFileString(f.statePath());
@@ -10012,6 +10190,108 @@ effectIt.effect('routes distinct semantic proof inputs through CLI adapters', ()
       pr: 'https://github.com/example/repo/pull/1',
     });
   }).pipe(provideTestLayer(cliTestLayer)),
+);
+
+effectIt.effect(
+  'captures foreground citations at most twice for workflow_task_start and workflow_task_compact_confirm',
+  () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      yield* runCommandEffect('git', ['-C', f.repo, 'add', 'source.ts']);
+      yield* runCommandEffect('git', [
+        '-C',
+        f.repo,
+        '-c',
+        'user.name=Fixture',
+        '-c',
+        'user.email=fixture@example.invalid',
+        'commit',
+        '-m',
+        'Fixture source',
+      ]);
+      const system = yield* SystemInfo;
+      const repo = yield* f.fs.realPath(f.repo);
+      const home = yield* f.fs.realPath(f.home);
+      const config = {...f.config, agentContextHome: home, manifestPath: f.path.join(home, 'manifest.json')};
+      const scopedSystem = {...system, currentDirectory: () => repo, homeDirectory: home};
+      yield* applyDevSkills(config, 'install', {agent: 'codex'}).pipe(Effect.provideService(SystemInfo, scopedSystem));
+      const indexer = yield* CodeGraphIndexer;
+      expect((yield* indexer.index({cwd: repo, threadnoteHome: home})).snapshot.state).toBe('ready');
+
+      const graphStore = yield* CodeGraphStore;
+      let evidenceReads = 0;
+      const observedGraphStore = CodeGraphStore.of({
+        ...graphStore,
+        ...(graphStore.readReadySnapshotCitationEvidence
+          ? {
+              readReadySnapshotCitationEvidence: (...args) =>
+                Effect.sync(() => {
+                  evidenceReads += 1;
+                }).pipe(Effect.andThen(graphStore.readReadySnapshotCitationEvidence!(...args))),
+            }
+          : {}),
+        effectiveSnapshotCitationEvidence: (...args) =>
+          Effect.sync(() => {
+            evidenceReads += 1;
+          }).pipe(Effect.andThen(graphStore.effectiveSnapshotCitationEvidence(...args))),
+      });
+      const countCaptures = <A, E, R>(program: Effect.Effect<A, E, R>) =>
+        Effect.gen(function* () {
+          evidenceReads = 0;
+          const value = yield* program.pipe(Effect.provideService(SystemInfo, scopedSystem));
+          return {value, captures: evidenceReads};
+        });
+
+      const mcp = new EffectMcpServerAdapter('test', '1', 'fixture');
+      yield* Effect.sync(() => {
+        registerWorkflowTaskTool(mcp, config);
+      }).pipe(Effect.provideService(CodeGraphStore, observedGraphStore));
+
+      const started = yield* countCaptures(
+        mcp
+          .invokeTool('workflow_task_start', {
+            featureName: 'Bounded citation count',
+            callerCwd: repo,
+            installationTarget: 'codex',
+            intent: {
+              title: 'Bounded citation count',
+              currentBehavior: 'Foreground compact start captures code citations per child artifact.',
+              desiredChange: 'Foreground compact start reuses opening citations and re-verifies root.',
+              affectedPaths: ['source.ts'],
+              acceptanceCriterion: 'At most two citation captures execute per foreground save.',
+              verification: 'Count snapshot citation evidence reads during foreground save.',
+              eligibilityRationale: 'Single bounded behavior with no open design questions.',
+              eligibility: {status: 'eligible'},
+              review: {required: false, reason: 'Synthetic verification test.'},
+            },
+          })
+          .pipe(Effect.provideService(CodeGraphStore, observedGraphStore)),
+      );
+      const startedResult = object(started.value);
+      expect(startedResult.isError).not.toBe(true);
+      expect(started.captures).toBe(2);
+
+      const structuredStart = object(startedResult.structuredContent);
+      const runId = String(structuredStart.taskRef);
+      const intentHash = String(structuredStart.intentHash);
+
+      const confirmed = yield* countCaptures(
+        mcp
+          .invokeTool('workflow_task_compact_confirm', {
+            runId,
+            callerCwd: repo,
+            presentedIntentHash: intentHash,
+            userResponse: 'Approve exact compact intent.',
+            userDecision: 'approve',
+            baseBranch: 'main',
+          })
+          .pipe(Effect.provideService(CodeGraphStore, observedGraphStore)),
+      );
+      const confirmedResult = object(confirmed.value);
+      expect(confirmedResult.isError).not.toBe(true);
+      expect(confirmed.captures).toBe(2);
+    }).pipe(run),
+  windowsRealGitFixtureTimeout,
 );
 
 effectIt.effect(

@@ -64,8 +64,19 @@ export const nativeFixture = Effect.fn('test.nativeAutomation.fixture')(function
     runId,
     generation,
   });
-  const init = (runId = 'native-run', generation = 'skill-generation-v1', project = 'fixture') =>
-    call({...base('init', runId, generation), project, featureId: 'feature', profile: 'desktop'}).pipe(
+  const init = (
+    runId = 'native-run',
+    generation = 'skill-generation-v1',
+    project = 'fixture',
+    policy?: 'standard' | 'strict',
+  ) =>
+    call({
+      ...base('init', runId, generation),
+      project,
+      featureId: 'feature',
+      profile: 'desktop',
+      ...(policy === undefined ? {} : {policy}),
+    }).pipe(
       Effect.map(result => {
         if (!('bindingId' in result)) throw new Error('Expected initialized native run');
         return result;

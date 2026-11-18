@@ -325,7 +325,7 @@ describe('ordinary merge native qualification', () => {
                 !(point === 'retained-pin'
                   ? pinRead
                   : point === 'source-renormalize'
-                    ? args.includes('--renormalize')
+                    ? args.includes('--renormalize') || args.includes('write-tree')
                     : args.includes(`${f.old.baselines.one.pinnedRef}^{tree}`))
               )
                 return;

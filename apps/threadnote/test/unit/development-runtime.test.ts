@@ -909,6 +909,43 @@ describe('exact-head development runtime', () => {
       }),
   );
 
+  effectIt.effect.skipIf(process.platform === 'win32')('ignores Finder .DS_Store metadata added after install', () =>
+    Effect.gen(function* () {
+      const result = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const baseSystem = yield* SystemInfo;
+          const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-development-ds-store-'});
+          const sourceCommit = Effect2.pipe('8', EffectString.repeat(40));
+          const version = developmentBuildVersion('4.0.0-beta.30', sourceCommit);
+          const releaseRoot = path.join(root, 'release');
+          const executableName = 'threadnote';
+          yield* writeDevelopmentReleaseFixture(
+            fs,
+            path,
+            releaseRoot,
+            version,
+            sourceCommit,
+            executableName,
+            'ds-store-marker',
+          );
+          const commandExecutor = versionCommandExecutor(version);
+          const validate = readDevelopmentReleaseEvidence(releaseRoot, sourceCommit).pipe(
+            Effect.provideService(CommandExecutor, commandExecutor),
+            Effect.provideService(SystemInfo, baseSystem),
+          );
+          yield* validate;
+          yield* fs.writeFileString(path.join(releaseRoot, '.DS_Store'), 'Bud1');
+          yield* validate;
+          yield* fs.writeFileString(path.join(releaseRoot, 'unexpected-after-install.txt'), 'extra\n');
+          return String(yield* validate.pipe(Effect.flip));
+        }),
+      ).pipe(provideTestLayer(ApplicationLayer));
+      expect(result).toContain('payload manifest does not match');
+    }),
+  );
+
   effectIt.effect('rejects an otherwise attested payload compiled for another host target', () =>
     Effect.gen(function* () {
       const failure = yield* Effect.scoped(

@@ -78,9 +78,22 @@ const unreviewedRebaseRecovery = Schema.Struct({
   receiptDigest: digest,
 });
 
+/** Version 4 identifies a source tree under one phase intent; the newest snapshot supersedes an unreviewed one. */
+const treeSnapshotFields = {
+  intentHash: Schema.optionalKey(digest),
+  dirty: Schema.optionalKey(Schema.Boolean),
+  outOfPlan: Schema.optionalKey(Schema.Array(text()).check(Schema.isMaxLength(8192))),
+  /** Digest of the raw path, mode and blob entries from the scope base, so a clean rebase can reuse a review. */
+  changeDigest: Schema.optionalKey(digest),
+  /** Legacy `git patch-id`; kept only so earlier tree snapshots decode, and never matched. */
+  patchId: Schema.optionalKey(gitObject),
+  reviewBasis: Schema.optionalKey(Schema.Struct({snapshotId: id, tree: gitObject})),
+} as const;
+
 export const NativeCycleSnapshotSchema = Schema.Struct({
   format: Schema.Literal('threadnote-native-cycle-snapshot'),
-  version: Schema.Literals([1, 2, 3]),
+  version: Schema.Literals([1, 2, 3, 4]),
+  ...treeSnapshotFields,
   snapshotId: id,
   phaseId: id,
   phaseHash: digest,
@@ -109,26 +122,41 @@ export const NativeCycleSnapshotSchema = Schema.Struct({
   pinnedRef: text(),
 }).check(
   Schema.makeFilter(snapshot =>
-    (snapshot.version === 3) !== !!snapshot.invalidTailMergeQualificationV1 ||
-    (snapshot.invalidTailMergeQualificationV1 &&
-      (snapshot.baseRequalification ||
-        snapshot.ordinaryMergeQualificationV1 ||
-        snapshot.unreviewedSupersession ||
-        !snapshot.previous ||
-        !snapshot.previousTree ||
-        snapshot.supersedes !== undefined)) ||
-    (snapshot.version === 2) !== !!snapshot.ordinaryMergeQualificationV1 ||
-    (snapshot.ordinaryMergeQualificationV1 && snapshot.baseRequalification)
-      ? 'Snapshot version must match its single dedicated qualification proof.'
-      : snapshot.unreviewedSupersession &&
-          (!snapshot.supersedes ||
-            snapshot.previous !== undefined ||
-            snapshot.previousTree !== undefined ||
-            snapshot.baseRequalification !== undefined ||
-            snapshot.ordinaryMergeQualificationV1 !== undefined ||
-            !Effect.pipe(snapshot.unreviewedSupersession.reason, EffectString.trim))
-        ? 'An unreviewed supersession requires one explicit superseded snapshot and reason.'
-        : undefined,
+    (snapshot.version === 4) !== (snapshot.intentHash !== undefined) ||
+    (snapshot.version !== 4 &&
+      (snapshot.dirty !== undefined ||
+        snapshot.outOfPlan !== undefined ||
+        snapshot.changeDigest !== undefined ||
+        snapshot.patchId !== undefined ||
+        snapshot.reviewBasis !== undefined)) ||
+    (snapshot.version === 4 &&
+      (snapshot.previous !== undefined ||
+        snapshot.previousTree !== undefined ||
+        snapshot.baseRequalification !== undefined ||
+        snapshot.ordinaryMergeQualificationV1 !== undefined ||
+        snapshot.invalidTailMergeQualificationV1 !== undefined ||
+        snapshot.unreviewedSupersession?.rebaseRecovery !== undefined))
+      ? 'A tree snapshot carries its intent and review basis instead of legacy predecessor receipts.'
+      : (snapshot.version === 3) !== !!snapshot.invalidTailMergeQualificationV1 ||
+          (snapshot.invalidTailMergeQualificationV1 &&
+            (snapshot.baseRequalification ||
+              snapshot.ordinaryMergeQualificationV1 ||
+              snapshot.unreviewedSupersession ||
+              !snapshot.previous ||
+              !snapshot.previousTree ||
+              snapshot.supersedes !== undefined)) ||
+          (snapshot.version === 2) !== !!snapshot.ordinaryMergeQualificationV1 ||
+          (snapshot.ordinaryMergeQualificationV1 && snapshot.baseRequalification)
+        ? 'Snapshot version must match its single dedicated qualification proof.'
+        : snapshot.unreviewedSupersession &&
+            (!snapshot.supersedes ||
+              snapshot.previous !== undefined ||
+              snapshot.previousTree !== undefined ||
+              snapshot.baseRequalification !== undefined ||
+              snapshot.ordinaryMergeQualificationV1 !== undefined ||
+              !Effect.pipe(snapshot.unreviewedSupersession.reason, EffectString.trim))
+          ? 'An unreviewed supersession requires one explicit superseded snapshot and reason.'
+          : undefined,
   ),
 );
 export type NativeCycleSnapshot = typeof NativeCycleSnapshotSchema.Type;
@@ -236,14 +264,19 @@ export type NativeCycleReview = typeof NativeCycleReviewSchema.Type;
 
 /** Review recording mode follows snapshot lineage; it never limits independent review scope. */
 export const nativeCycleReviewRecordingMode = (snapshot: NativeCycleSnapshot): 'full' | 'incremental' =>
-  snapshot.previous &&
-  !snapshot.baseRequalification &&
-  !snapshot.ordinaryMergeQualificationV1 &&
-  !snapshot.invalidTailMergeQualificationV1
-    ? 'incremental'
-    : 'full';
+  snapshot.version === 4
+    ? snapshot.reviewBasis
+      ? 'incremental'
+      : 'full'
+    : snapshot.previous &&
+        !snapshot.baseRequalification &&
+        !snapshot.ordinaryMergeQualificationV1 &&
+        !snapshot.invalidTailMergeQualificationV1
+      ? 'incremental'
+      : 'full';
 
-const blocking = (finding: NativeCycleReview['findings'][number]) =>
+/** A finding that blocks acceptance until it is resolved or a `review.blocking` waiver covers the tree. */
+export const nativeCycleBlockingFinding = (finding: NativeCycleReview['findings'][number]) =>
   ['critical', 'important'].includes(finding.severity) && ['new', 'carried'].includes(finding.state);
 const safePath = (value: string) =>
   value.length > 0 &&
@@ -303,9 +336,22 @@ export function validateNativeCycleReviewHistory(
     EffectArray.some([...selected], name => !lanes.has(name))
   )
     fail('Selected and completed review lanes differ.');
-  if ((snapshot.previous || snapshot.supersedes) && !previous && !snapshot.unreviewedSupersession)
+  if (snapshot.version === 4) {
+    const basis = snapshot.reviewBasis;
+    if (!!basis !== !!previous) fail('Prior review evidence is required.');
+    if (
+      basis &&
+      previous &&
+      (previous.snapshot.snapshotId !== basis.snapshotId ||
+        previous.snapshot.tree !== basis.tree ||
+        previous.snapshot.phaseId !== snapshot.phaseId ||
+        previous.snapshot.repo !== snapshot.repo ||
+        (previous.snapshot.intentHash ?? previous.snapshot.phaseHash) !== snapshot.intentHash)
+    )
+      fail('Review history does not match the review basis under the same phase intent.');
+  } else if ((snapshot.previous || snapshot.supersedes) && !previous && !snapshot.unreviewedSupersession)
     fail('Prior review evidence is required.');
-  if (snapshot.unreviewedSupersession && previous)
+  if (snapshot.version !== 4 && snapshot.unreviewedSupersession && previous)
     fail('Unreviewed supersession cannot claim a prior accepted review.');
   if (snapshot.previous && snapshot.supersedes) fail('A snapshot has one source predecessor.');
   const invalidTail = snapshot.invalidTailMergeQualificationV1;
@@ -330,6 +376,7 @@ export function validateNativeCycleReviewHistory(
     fail('Invalid-tail review requires its exact accepted ledger and witnessed source predecessor.');
   if (
     previous &&
+    snapshot.version !== 4 &&
     ((snapshot.invalidTailMergeQualificationV1?.basisSnapshotId ?? snapshot.previous ?? snapshot.supersedes) !==
       previous.snapshot.snapshotId ||
       (snapshot.previous &&
@@ -366,7 +413,8 @@ export function validateNativeCycleReviewHistory(
     seen.add(finding.id);
     const old = prior.get(finding.id);
     if (
-      (['resolved', 'rejected'].includes(finding.state) || (old && blocking(old) && !blocking(finding))) &&
+      (['resolved', 'rejected'].includes(finding.state) ||
+        (old && nativeCycleBlockingFinding(old) && !nativeCycleBlockingFinding(finding))) &&
       !Effect.pipe(finding.reason, effectOptionalString =>
         effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
       )
@@ -376,7 +424,8 @@ export function validateNativeCycleReviewHistory(
       fail('Prior findings must retain their identity and disposition.');
   }
   for (const finding of prior.values())
-    if (blocking(finding) && !seen.has(finding.id)) fail('A prior blocker disappeared without a disposition.');
+    if (nativeCycleBlockingFinding(finding) && !seen.has(finding.id))
+      fail('A prior blocker disappeared without a disposition.');
   const active = EffectArrayPipe(review.findings, __effectArrayValues =>
     EffectArray.filter(
       __effectArrayValues,
@@ -390,7 +439,7 @@ export function validateNativeCycleReviewHistory(
       snapshotId: snapshot.snapshotId,
       snapshotTree: snapshot.tree,
       phaseHash: snapshot.phaseHash,
-      blockingIssueCount: EffectArray.filter(active, blocking).length,
+      blockingIssueCount: EffectArray.filter(active, nativeCycleBlockingFinding).length,
       counts: EffectRecord.fromEntries(
         EffectArray.map(['critical', 'important', 'minor', 'informational'], severity => [
           severity,

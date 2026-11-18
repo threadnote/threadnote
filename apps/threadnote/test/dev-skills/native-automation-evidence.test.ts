@@ -178,60 +178,38 @@ describe('native workflow graph evidence contention', () => {
     }).pipe(run),
   );
 
-  effectIt.effect(
-    'keeps one prepared intent across bounded preparation contention and recovers it with citations',
-    () =>
-      Effect.gen(function* () {
-        const f = yield* readyFixture();
-        const graph = yield* CodeGraphStore;
-        let attempts = 0;
-        const busyAfterInitialPreflight = CodeGraphStore.of({
-          ...graph,
-          readReadySnapshotCitationEvidence: (
-            ...args: Parameters<NonNullable<typeof graph.readReadySnapshotCitationEvidence>>
-          ) => {
-            attempts++;
-            return attempts === 1
-              ? graph.readReadySnapshotCitationEvidence!(...args)
-              : Effect.fail(CodeGraphStoreBusyError.of('synthetic preparation reader contention'));
-          },
-        });
-        const request = citationWrite(f, 'resume-citations');
-        const denied = yield* failure(
-          f.f.call(request, f.config).pipe(Effect.provideService(CodeGraphStore, busyAfterInitialPreflight)),
-        );
-        expect(denied).toMatchObject(errorShape);
-        expect(attempts).toBe(2);
-        const stateBeforeRecovery = JSON.parse(yield* f.f.fs.readFileString(f.f.statePath()));
-        const prepared = stateBeforeRecovery.operations.filter(
+  effectIt.effect('reuses the preflight citation read for the following write and keeps the verified citations', () =>
+    Effect.gen(function* () {
+      const f = yield* readyFixture();
+      const graph = yield* CodeGraphStore;
+      let attempts = 0;
+      const countEvidenceReads = CodeGraphStore.of({
+        ...graph,
+        readReadySnapshotCitationEvidence: (
+          ...args: Parameters<NonNullable<typeof graph.readReadySnapshotCitationEvidence>>
+        ) => {
+          attempts++;
+          return graph.readReadySnapshotCitationEvidence!(...args);
+        },
+      });
+      const request = citationWrite(f, 'resume-citations');
+      const written = yield* f.f
+        .call(request, f.config)
+        .pipe(Effect.provideService(CodeGraphStore, countEvidenceReads));
+      assertArtifactContent(written);
+      expect(attempts).toBe(1);
+      expect(written.artifact.body).toBe(request.body);
+      const content = yield* f.f.store.read(f.f.location, written.artifact.uri);
+      const citation = checkedCitations(content)!;
+      expect(citation.fileContentHash.value).toMatch(/^[a-f0-9]{64}$/u);
+      const after = JSON.parse(yield* f.f.fs.readFileString(f.f.statePath()));
+      expect(
+        after.operations.find(
           (operation: {intent: {operationId: string}}) => operation.intent.operationId === 'resume-citations',
-        );
-        expect(prepared).toHaveLength(1);
-        expect(prepared[0]).toMatchObject({
-          status: 'prepared',
-          intent: {operationId: 'resume-citations', codeRefs: ['source.ts']},
-        });
-        expect(yield* f.f.store.read(f.f.location, f.rootUri)).toBe(f.rootBytes);
-        const recovered = yield* f.f.call({...f.f.base('recover'), operationId: 'resume-citations'}, f.config);
-        assertArtifactContent(recovered);
-        expect(recovered.artifact.body).toBe(request.body);
-        const content = yield* f.f.store.read(f.f.location, recovered.artifact.uri);
-        const citation = checkedCitations(content)!;
-        expect(citation.fileContentHash.value).toMatch(/^[a-f0-9]{64}$/u);
-        const after = JSON.parse(yield* f.f.fs.readFileString(f.f.statePath()));
-        expect(after.bindingId).toBe(f.initialized.bindingId);
-        expect(
-          after.operations.filter(
-            (operation: {intent: {operationId: string}}) => operation.intent.operationId === 'resume-citations',
-          ),
-        ).toHaveLength(1);
-        expect(
-          after.operations.find(
-            (operation: {intent: {operationId: string}}) => operation.intent.operationId === 'resume-citations',
-          ).status,
-        ).toBe('verified');
-        expect(yield* f.f.store.read(f.f.location, f.rootUri)).toBe(f.rootBytes);
-      }).pipe(run),
+        ).status,
+      ).toBe('verified');
+      expect(yield* f.f.store.read(f.f.location, f.rootUri)).toBe(f.rootBytes);
+    }).pipe(run),
   );
 
   effectIt.effect('retains the same prepared receipt when graph evidence is busy during post-write readback', () =>

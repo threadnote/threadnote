@@ -25,6 +25,8 @@ import * as Effect2 from 'effect';
 const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
 
 const RETIRED_ID = 'retired-fixture';
+const FOREIGN_RETIRED_ID = 'retired-foreign-worktree-fixture';
+const REPOSITORY_ID = Effect2.pipe('c', EffectString.repeat(64));
 const STOPPED = CodeGraphStoreError.of('stop at new snapshot boundary');
 const unusedEmbedding: CodeGraphEmbeddingIndexShape = {
   check: () => Effect.succeed({modelId: 'fixture', reused: 0, state: 'ready'}),
@@ -131,6 +133,23 @@ describe('ready snapshot reuse reclamation', () => {
       ),
     );
 
+    it.effect("drains only the building worktree's debt and leaves another worktree's retired snapshot in place", () =>
+      withFixture(15_001, fixture =>
+        Effect.gen(function* () {
+          yield* insertRetiredSnapshot(FOREIGN_RETIRED_ID, Effect2.pipe('9', EffectString.repeat(64)), 15_001);
+          yield* fixture.input('materialize').reclaimSnapshots('required');
+          expect(yield* fixture.remainingRows).toBe(0);
+          expect(yield* retiredRows(FOREIGN_RETIRED_ID)).toBe(15_001);
+          const sql = yield* SqlClient.SqlClient;
+          expect(
+            yield* sql.unsafe<{readonly state: string}>('SELECT state FROM snapshots WHERE id = ?', [
+              FOREIGN_RETIRED_ID,
+            ]),
+          ).toEqual([{state: 'retired'}]);
+        }),
+      ),
+    );
+
     fcEffectProp(
       it,
       'repeated ready reuse decreases finite debt and the next materialization drains the remainder',
@@ -161,6 +180,34 @@ describe('ready snapshot reuse reclamation', () => {
   });
 });
 
+function insertRetiredSnapshot(snapshotId: string, worktreeId: string, rows: number) {
+  return Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql.unsafe(
+      `INSERT INTO snapshots (id, repository_id, worktree_id, commit_id, extractor_set, dirty, state, file_count, symbol_count, edge_count, started_at)
+      VALUES (?, ?, ?, 'commit', 'extractor', 0, 'retired', 0, 0, 0, '')`,
+      [snapshotId, REPOSITORY_ID, worktreeId],
+    );
+    yield* sql.unsafe(
+      `WITH RECURSIVE rows(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM rows WHERE n < ?)
+      INSERT INTO snapshot_file_deletions (snapshot_id, path) SELECT ?, printf('file-%08d', n) FROM rows`,
+      [rows, snapshotId],
+    );
+  });
+}
+
+function retiredRows(snapshotId: string) {
+  return SqlClient.SqlClient.pipe(
+    Effect.flatMap(sql =>
+      sql.unsafe<{readonly count: number}>(
+        'SELECT COUNT(*) AS count FROM snapshot_file_deletions WHERE snapshot_id = ?',
+        [snapshotId],
+      ),
+    ),
+    Effect.map(result => result[0].count),
+  );
+}
+
 function withFixture<A, E, R>(rows: number, use: (fixture: Fixture) => Effect.Effect<A, E, R>) {
   return useDatabaseDirect(
     ':memory:',
@@ -178,7 +225,7 @@ function withFixture<A, E, R>(rows: number, use: (fixture: Fixture) => Effect.Ef
         headCommit: Effect2.pipe('b', EffectString.repeat(40)),
         objectFormat: 'sha1',
         repoRoot: home,
-        repositoryId: Effect2.pipe('c', EffectString.repeat(64)),
+        repositoryId: REPOSITORY_ID,
         worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
       };
       const languagePacks: CodeGraphLanguagePackRegistryShape = {
@@ -215,22 +262,8 @@ function withFixture<A, E, R>(rows: number, use: (fixture: Fixture) => Effect.Ef
         "INSERT INTO repositories (id, display_name, object_format, created_at, last_used_at) VALUES (?, 'fixture', 'sha1', '', '')",
         [identity.repositoryId],
       );
-      yield* sql.unsafe(
-        `INSERT INTO snapshots (id, repository_id, worktree_id, commit_id, extractor_set, dirty, state, file_count, symbol_count, edge_count, started_at)
-        VALUES (?, ?, ?, 'commit', 'extractor', 0, 'retired', 0, 0, 0, '')`,
-        [RETIRED_ID, identity.repositoryId, identity.worktreeId],
-      );
-      yield* sql.unsafe(
-        `WITH RECURSIVE rows(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM rows WHERE n < ?)
-        INSERT INTO snapshot_file_deletions (snapshot_id, path) SELECT ?, printf('file-%08d', n) FROM rows`,
-        [rows, RETIRED_ID],
-      );
-      const remainingRows = sql
-        .unsafe<{readonly count: number}>(
-          'SELECT COUNT(*) AS count FROM snapshot_file_deletions WHERE snapshot_id = ?',
-          [RETIRED_ID],
-        )
-        .pipe(Effect.map(result => result[0].count));
+      yield* insertRetiredSnapshot(RETIRED_ID, identity.worktreeId, rows);
+      const remainingRows = retiredRows(RETIRED_ID).pipe(Effect.provideService(SqlClient.SqlClient, sql));
       const cleanupModes: string[] = [];
       const writes: string[] = [];
       const capacityProtection: DirectPersistentCapacityProtection = {
