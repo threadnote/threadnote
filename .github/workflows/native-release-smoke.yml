@@ -54,6 +54,10 @@ jobs:
       - run: bun run check:self-contained
       - name: Platform process identity smoke
         run: bun --bun vitest run apps/threadnote/test/unit/effect-system.test.ts
+      - name: Checkpoint compression golden digests
+        run: >-
+          bun --bun vitest run packages/graph/test/unit/code-graph.checkpoint-pack.property.test.ts
+          -t "pins each compression profile"
       - name: Native workflow foundation smoke
         run: >-
           bun --bun vitest run

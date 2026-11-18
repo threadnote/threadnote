@@ -4,7 +4,6 @@ import {
   isFiniteNumber as checkedIsFiniteNumber,
 } from '@threadnote/platform/validation';
 import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
-/* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- This reviewed adapter owns Codex, Git worktree, credential-copy, and local evidence boundaries. */
 
 import {createHash, randomUUID} from 'node:crypto';
 import {constants as fsConstants} from 'node:fs';

@@ -1,5 +1,4 @@
 import {Database} from 'bun:sqlite';
-// oxlint-disable-next-line effecttsgo/node-builtin-import -- Probe the sandbox's declared input boundary.
 import {existsSync} from 'node:fs';
 import {it as effectIt} from '@effect/vitest';
 import {Effect} from 'effect';

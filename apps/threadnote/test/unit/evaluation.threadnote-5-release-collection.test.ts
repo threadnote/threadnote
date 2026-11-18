@@ -1,6 +1,5 @@
 import {Predicate} from 'effect';
 import {Array as EffectArray} from 'effect';
-/* oxlint-disable effecttsgo/node-builtin-import -- Tests of the private process/filesystem collection boundary. */
 import {
   copyFile,
   link,

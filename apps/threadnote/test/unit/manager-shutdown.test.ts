@@ -1,5 +1,4 @@
 import {createInterface} from 'node:readline';
-// oxlint-disable-next-line effecttsgo/node-builtin-import -- Node readline requires a Node stream at this child stdout callback boundary.
 import {Readable} from 'node:stream';
 import {Array as Arr, Option, Schema, String as Str} from 'effect';
 import fc from 'fast-check';

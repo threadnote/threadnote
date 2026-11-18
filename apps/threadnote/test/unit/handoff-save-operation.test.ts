@@ -39,7 +39,6 @@ import {
   type HandoffSaveReceipt,
 } from '../../src/memory/handoff_save_contract.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
-// oxlint-disable-next-line effecttsgo/node-builtin-import -- Drain the child stream's OS callback turn without advancing the Effect test clock.
 import {setImmediate} from 'node:timers';
 import fc from 'fast-check';
 

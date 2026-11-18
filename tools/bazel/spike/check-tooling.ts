@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-// oxlint-disable-next-line effecttsgo/node-builtin-import -- This fixture verifies native compiler files and processes.
 import {readFileSync} from 'node:fs';
 
 const execute = (args: string[]) => Bun.spawnSync([process.execPath, ...args], {stdout: 'pipe', stderr: 'pipe'});

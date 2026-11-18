@@ -1,57 +1,5 @@
-const NODE_BUILTIN_ROOTS = new Set([
-  'assert',
-  'async_hooks',
-  'buffer',
-  'child_process',
-  'cluster',
-  'console',
-  'constants',
-  'crypto',
-  'dgram',
-  'diagnostics_channel',
-  'dns',
-  'domain',
-  'events',
-  'fs',
-  'http',
-  'http2',
-  'https',
-  'inspector',
-  'module',
-  'net',
-  'os',
-  'path',
-  'perf_hooks',
-  'process',
-  'punycode',
-  'querystring',
-  'readline',
-  'repl',
-  'sqlite',
-  'stream',
-  'string_decoder',
-  'sys',
-  'test',
-  'timers',
-  'tls',
-  'trace_events',
-  'tty',
-  'url',
-  'util',
-  'v8',
-  'vm',
-  'wasi',
-  'worker_threads',
-  'zlib',
-]);
-
 const NODE_EFFECT_PACKAGES = new Set(['@effect/platform-node', '@effect/sql-sqlite-node']);
 const EFFECT_RUNNER = /^run(?:Callback|Fork|Promise|Sync)(?:Exit|With)?$/;
-
-export function isNodeBuiltinSpecifier(specifier) {
-  if (specifier.startsWith('node:')) return true;
-  return NODE_BUILTIN_ROOTS.has(specifier.split('/', 1)[0]);
-}
 
 export function isNodeEffectPackageSpecifier(specifier) {
   for (const packageName of NODE_EFFECT_PACKAGES) {
@@ -142,14 +90,14 @@ function makeNoEffectRuntimeRule(message) {
 const noNodeRuntime = {
   meta: {
     type: 'problem',
-    docs: {description: 'Use Bun or Effect platform services instead of Node-specific modules.'},
-    messages: {forbidden: 'Use Bun or Effect platform services instead of Node-specific module {{specifier}}.'},
+    docs: {description: 'Use Bun Effect platform packages instead of Node-specific Effect packages.'},
+    messages: {forbidden: 'Use the Bun Effect platform package instead of Node-specific Effect package {{specifier}}.'},
     schema: [],
   },
   create(context) {
     const reportSource = sourceNode => {
       const specifier = stringValue(sourceNode);
-      if (specifier && (isNodeBuiltinSpecifier(specifier) || isNodeEffectPackageSpecifier(specifier))) {
+      if (specifier && isNodeEffectPackageSpecifier(specifier)) {
         context.report({node: sourceNode, messageId: 'forbidden', data: {specifier}});
       }
     };

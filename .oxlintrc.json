@@ -130,6 +130,7 @@
     "effecttsgo/global-fetch": "off",
     "effecttsgo/global-timers": "off",
     "effecttsgo/missing-pipeable-signature": "off",
+    "effecttsgo/node-builtin-import": "off",
     "effecttsgo/prefer-schema-over-json": "off",
     "effecttsgo/map-map-error-to-map-both": "error",
     "effecttsgo/prefer-effect-array": "error",
@@ -238,17 +239,6 @@
       "rules": {
         "effecttsgo/strict-effect-provide": "off",
         "threadnote/no-effect-runtime": "off"
-      }
-    },
-    {
-      "files": [
-        "packages/testing/src/node-*.ts",
-        "apps/*/test/helpers/node-*.ts",
-        "packages/*/test/helpers/node-*.ts",
-        "infra/*/test/helpers/node-*.ts"
-      ],
-      "rules": {
-        "effecttsgo/node-builtin-import": "off"
       }
     },
     {

@@ -1,6 +1,7 @@
 import {Array as EffectArray} from 'effect';
-import {Schema} from 'effect';
-import {Gunzip, gzipSync} from 'fflate';
+import {Predicate, Schema} from 'effect';
+import {gzipSync} from 'fflate';
+import {inflateRawSync} from 'node:zlib';
 import {canonicalJson, parseCanonicalJson} from './canonical_json.js';
 import {
   CODE_GRAPH_CHECKPOINT_FORMAT_VERSION,
@@ -9,6 +10,7 @@ import {
   CODE_GRAPH_CHECKPOINT_RECORD_SCHEMA_VERSION,
   CODE_GRAPH_CHECKPOINT_SCHEMA,
   CODE_GRAPH_CHECKPOINT_COMPRESSION_PROFILE,
+  type CodeGraphCheckpointCompressionProfileV1,
   codeGraphCheckpointRecordOrderKey,
   compareCodeGraphCheckpointRecordOrderKeys,
   emptyCodeGraphCheckpointCounts,
@@ -91,6 +93,8 @@ export interface CodeGraphCheckpointDeltaEncodeV1 {
 }
 
 export interface CodeGraphCheckpointEncodeOptionsV1 {
+  /** Defaults to the current profile. Pass `threadnote-gzip-v1` to reproduce artifacts exported before v2. */
+  readonly compressionProfile?: CodeGraphCheckpointCompressionProfileV1;
   readonly delta?: CodeGraphCheckpointDeltaEncodeV1;
   readonly limits?: Partial<CodeGraphCheckpointPackLimits>;
   readonly packKind?: CodeGraphCheckpointPackKindV1;
@@ -201,6 +205,7 @@ export class CodeGraphCheckpointStreamEncoderV1 {
   readonly #packKind: CodeGraphCheckpointPackKindV1;
   readonly #spool = domainHasher(SPOOL_DOMAIN);
   readonly #chunkDescriptors: CodeGraphCheckpointChunkDescriptorV1[] = [];
+  readonly #compressionProfile: CodeGraphCheckpointCompressionProfileV1;
   #chunkBytes = 0;
   #chunkFrames: Uint8Array[] = [];
   #chunkRecords = 0;
@@ -214,6 +219,7 @@ export class CodeGraphCheckpointStreamEncoderV1 {
     this.#metadata = parseCodeGraphCheckpointMetadataV1(metadata);
     this.#attributionFiles = checkpointAttributionFiles(this.#metadata);
     this.#packKind = options.packKind ?? (options.delta === undefined ? 'checkpoint' : 'delta');
+    this.#compressionProfile = options.compressionProfile ?? CODE_GRAPH_CHECKPOINT_COMPRESSION_PROFILE;
     this.#delta = options.delta;
     if (this.#packKind === 'delta' && this.#delta === undefined) {
       throw CodeGraphCheckpointPackError.make({message: 'Delta pack encoding requires a base envelope.'});
@@ -282,7 +288,7 @@ export class CodeGraphCheckpointStreamEncoderV1 {
     const header = parseCodeGraphCheckpointHeaderV1({
       abi: {...abi, input: this.#metadata.abi},
       chunks: this.#chunkDescriptors,
-      compressionProfile: CODE_GRAPH_CHECKPOINT_COMPRESSION_PROFILE,
+      compressionProfile: this.#compressionProfile,
       counts: this.#counts,
       coverage: this.#metadata.coverage,
       formatVersion: CODE_GRAPH_CHECKPOINT_FORMAT_VERSION,
@@ -316,7 +322,7 @@ export class CodeGraphCheckpointStreamEncoderV1 {
     if (uncompressed.byteLength > this.#limits.maximumUncompressedChunkBytes) {
       throw CodeGraphCheckpointPackError.make({message: 'Checkpoint chunk exceeds the uncompressed-byte limit.'});
     }
-    const compressed = gzipSync(uncompressed, {level: 6, mtime: 0});
+    const compressed = compressCheckpointChunk(this.#compressionProfile, uncompressed);
     if (compressed.byteLength > this.#limits.maximumCompressedChunkBytes) {
       throw CodeGraphCheckpointPackError.make({message: 'Checkpoint chunk exceeds the compressed-byte limit.'});
     }
@@ -899,27 +905,37 @@ function validateHeaderBounds(header: CodeGraphCheckpointHeaderV1, limits: CodeG
   }
 }
 
+function compressCheckpointChunk(
+  profile: CodeGraphCheckpointCompressionProfileV1,
+  uncompressed: Uint8Array<ArrayBuffer>,
+): Uint8Array {
+  return profile === 'threadnote-gzip-v1'
+    ? gzipSync(uncompressed, {level: 6, mtime: 0})
+    : Bun.gzipSync(uncompressed, {level: 6, library: 'libdeflate'});
+}
+
+const GZIP_HEADER_BYTES = 10;
+const GZIP_TRAILER_BYTES = 8;
+
+/**
+ * The encoder writes a fixed 10-byte gzip header with no optional fields, so
+ * the decoder inflates the raw DEFLATE body natively and checks the trailer.
+ */
 function inflateSingleMember(compressed: Uint8Array, expectedBytes: number): Uint8Array {
-  if (compressed.byteLength < 18)
+  if (compressed.byteLength < GZIP_HEADER_BYTES + GZIP_TRAILER_BYTES)
     throw CodeGraphCheckpointPackError.make({message: 'Checkpoint gzip member is truncated.'});
-  const output = new Uint8Array(expectedBytes);
-  let offset = 0;
-  let final = false;
-  const gunzip = new Gunzip((data, isFinal) => {
-    if (data.byteLength > output.byteLength - offset) {
+  if (compressed[0] !== 0x1f || compressed[1] !== 0x8b || compressed[2] !== 8 || compressed[3] !== 0) {
+    throw CodeGraphCheckpointPackError.make({message: 'Checkpoint gzip member header is invalid.'});
+  }
+  const body = compressed.subarray(GZIP_HEADER_BYTES, compressed.byteLength - GZIP_TRAILER_BYTES);
+  let inflated: unknown;
+  try {
+    // With `info`, the runtime returns the output buffer and the engine that reports consumed input.
+    inflated = inflateRawSync(body, {info: true, maxOutputLength: Math.max(1, expectedBytes)});
+  } catch (cause) {
+    if (Predicate.hasProperty(cause, 'code') && cause.code === 'ERR_BUFFER_TOO_LARGE') {
       throw CodeGraphCheckpointPackError.make({message: 'Checkpoint gzip member expands beyond its declared size.'});
     }
-    output.set(data, offset);
-    offset += data.byteLength;
-    final = isFinal;
-  });
-  gunzip.onmember = () => {
-    throw CodeGraphCheckpointPackError.make({message: 'Checkpoint chunk contains concatenated gzip members.'});
-  };
-  try {
-    gunzip.push(compressed, true);
-  } catch (cause) {
-    if (Schema.is(CodeGraphCheckpointPackError)(cause)) throw cause;
     throw CodeGraphCheckpointPackError.make({
       message:
         cause instanceof Error
@@ -927,23 +943,27 @@ function inflateSingleMember(compressed: Uint8Array, expectedBytes: number): Uin
           : 'Checkpoint gzip member is invalid.',
     });
   }
-  if (!final || offset !== expectedBytes) {
+  if (
+    !Predicate.hasProperty(inflated, 'buffer') ||
+    !(inflated.buffer instanceof Uint8Array) ||
+    !Predicate.hasProperty(inflated, 'engine') ||
+    !Predicate.hasProperty(inflated.engine, 'bytesWritten') ||
+    typeof inflated.engine.bytesWritten !== 'number'
+  ) {
+    throw CodeGraphCheckpointPackError.make({message: 'Checkpoint gzip inflation returned an unexpected result.'});
+  }
+  if (inflated.engine.bytesWritten !== body.byteLength) {
+    throw CodeGraphCheckpointPackError.make({message: 'Checkpoint chunk contains concatenated gzip members.'});
+  }
+  const output = new Uint8Array(inflated.buffer.buffer, inflated.buffer.byteOffset, inflated.buffer.byteLength);
+  if (output.byteLength !== expectedBytes) {
     throw CodeGraphCheckpointPackError.make({message: 'Checkpoint gzip member size does not match its descriptor.'});
   }
-  const trailer = dataView(compressed, compressed.byteLength - 8, 8);
-  if (trailer.getUint32(0, true) !== crc32(output) || trailer.getUint32(4, true) !== output.byteLength >>> 0) {
+  const trailer = dataView(compressed, compressed.byteLength - GZIP_TRAILER_BYTES, GZIP_TRAILER_BYTES);
+  if (trailer.getUint32(0, true) !== Bun.hash.crc32(output) || trailer.getUint32(4, true) !== output.byteLength >>> 0) {
     throw CodeGraphCheckpointPackError.make({message: 'Checkpoint gzip member checksum or size is invalid.'});
   }
   return output;
-}
-
-function crc32(bytes: Uint8Array): number {
-  let value = 0xffff_ffff;
-  for (const byte of bytes) {
-    value ^= byte;
-    for (let bit = 0; bit < 8; bit += 1) value = (value >>> 1) ^ (0xedb8_8320 & -(value & 1));
-  }
-  return (value ^ 0xffff_ffff) >>> 0;
 }
 
 function chunkDigest(ordinal: number, recordCount: number, bytes: Uint8Array): CodeGraphCheckpointDigestV1 {
@@ -1150,7 +1170,7 @@ function checkedAdd(left: number, right: number, label: string): number {
   return left + right;
 }
 
-function joinBytes(parts: readonly Uint8Array[], expected?: number): Uint8Array {
+function joinBytes(parts: readonly Uint8Array[], expected?: number): Uint8Array<ArrayBuffer> {
   const length =
     expected ?? EffectArray.reduce(parts, 0, (total, part) => checkedAdd(total, part.byteLength, 'Byte sequence'));
   const output = new Uint8Array(length);

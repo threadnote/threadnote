@@ -1,8 +1,6 @@
 #!/usr/bin/env bun
 import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 
-/* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- This local evidence preparer owns reviewed filesystem and child-process boundaries. */
-
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import {createHash} from 'node:crypto';
 import {chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, writeFile} from 'node:fs/promises';

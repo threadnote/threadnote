@@ -1,4 +1,3 @@
-/* oxlint-disable effecttsgo/node-builtin-import -- Disposable fixture directory lifecycle requires native OS filesystem primitives. */
 import {mkdtempSync, mkdirSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';

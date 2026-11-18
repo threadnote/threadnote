@@ -1,5 +1,4 @@
 import {Array as EffectArray} from 'effect';
-/* oxlint-disable effecttsgo/node-builtin-import -- Filesystem directory creation/removal and baseline capability probes are native OS boundaries; file contents use Bun. */
 import {existsSync, mkdirSync, mkdtempSync, renameSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';

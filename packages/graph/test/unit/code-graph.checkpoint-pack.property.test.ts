@@ -225,6 +225,41 @@ describe('code graph checkpoint pack', () => {
     expect(() => decodeCodeGraphCheckpointPackV1(concatenated)).toThrow(/concatenated gzip members/u);
   });
 
+  it('pins each compression profile to exact artifact bytes and decodes both to the same records', () => {
+    // A Bun or fflate upgrade that changes compressed bytes changes these digests and must be a deliberate format change.
+    const paths = ['src/a.ts', 'src/b.ts', 'src/c.ts'];
+    const encode = (compressionProfile: 'threadnote-gzip-v1' | 'threadnote-gzip-v2') =>
+      encodeCodeGraphCheckpointPackV1(
+        metadataFor(paths.length),
+        recordsFor(paths).sort(compareCodeGraphCheckpointRecords),
+        {compressionProfile},
+      );
+    const v1 = encode('threadnote-gzip-v1');
+    const v2 = encode('threadnote-gzip-v2');
+
+    expect(fixturePack().header.compressionProfile).toBe('threadnote-gzip-v2');
+    expect([v1.header.compressionProfile, v1.descriptor.digest]).toEqual([
+      'threadnote-gzip-v1',
+      'sha256:6d1da0425467cae75efaf11fa8088335bba64981f7810de7309094b25dc06c8e',
+    ]);
+    expect([v2.header.compressionProfile, v2.descriptor.digest]).toEqual([
+      'threadnote-gzip-v2',
+      'sha256:c14df516a24df6684def3e3bcd53d429b466ba1ca89460ba03f31c3bd7449687',
+    ]);
+    expect(v2.header.logical).toEqual(v1.header.logical);
+    expect(decodeCodeGraphCheckpointPackV1(v2.bytes).records).toEqual(
+      decodeCodeGraphCheckpointPackV1(v1.bytes).records,
+    );
+  });
+
+  it('stops inflation at the declared uncompressed size', () => {
+    const pack = fixturePack();
+    const understated = rewriteFirstChunk(pack, firstChunkPayload(pack), pack.header.chunks[0].uncompressedBytes - 1);
+
+    expect(inspectCodeGraphCheckpointPackV1(understated).verification).toBe('artifact-and-framing');
+    expect(() => decodeCodeGraphCheckpointPackV1(understated)).toThrow(/expands beyond its declared size/u);
+  });
+
   it('rejects truncation, trailing bytes, descriptor mismatch, invalid magic, and hostile declared bounds', () => {
     const pack = fixturePack();
     expect(() => inspectCodeGraphCheckpointPackV1(pack.bytes.subarray(0, pack.bytes.byteLength - 1))).toThrow(
@@ -425,14 +460,26 @@ function fixturePack(): CodeGraphCheckpointEncodedPackV1 {
 }
 
 function concatenateFirstGzipMember(pack: CodeGraphCheckpointEncodedPackV1): Uint8Array {
+  const payload = firstChunkPayload(pack);
+  return rewriteFirstChunk(pack, join([payload, payload]), pack.header.chunks[0].uncompressedBytes);
+}
+
+function firstChunkPayload(pack: CodeGraphCheckpointEncodedPackV1): Uint8Array {
+  return pack.bytes.subarray(24 + UTF8.encode(canonicalJson(pack.header)).byteLength + 52);
+}
+
+/** Rebuild a single-chunk pack whose framing and descriptors are consistent with the replacement payload. */
+function rewriteFirstChunk(
+  pack: CodeGraphCheckpointEncodedPackV1,
+  payload: Uint8Array,
+  uncompressedBytes: number,
+): Uint8Array {
   const originalHeaderBytes = UTF8.encode(canonicalJson(pack.header)).byteLength;
   const payloadOffset = 24 + originalHeaderBytes + 52;
-  const originalPayload = pack.bytes.subarray(payloadOffset);
-  const payload = join([originalPayload, originalPayload]);
   const chunk = pack.header.chunks[0];
   const header: CodeGraphCheckpointHeaderV1 = {
     ...pack.header,
-    chunks: [{...chunk, compressedBytes: payload.byteLength}],
+    chunks: [{...chunk, compressedBytes: payload.byteLength, uncompressedBytes}],
   };
   const headerBytes = UTF8.encode(canonicalJson(header));
   const prelude = new Uint8Array(24);
@@ -442,7 +489,9 @@ function concatenateFirstGzipMember(pack: CodeGraphCheckpointEncodedPackV1): Uin
   preludeView.setUint32(20, headerBytes.byteLength, false);
   const frame = new Uint8Array(52);
   frame.set(pack.bytes.subarray(24 + originalHeaderBytes, payloadOffset));
-  new DataView(frame.buffer).setUint32(8, payload.byteLength, false);
+  const frameView = new DataView(frame.buffer);
+  frameView.setUint32(8, payload.byteLength, false);
+  frameView.setUint32(12, uncompressedBytes, false);
   return join([prelude, headerBytes, frame, payload]);
 }
 

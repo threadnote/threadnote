@@ -48,7 +48,7 @@ const PARSER_WORKER_WARMUP_FILE: CodeGraphInventoryFile = {
   language: 'typescript',
   mode: '100644',
   path: '.threadnote/parser-warmup.ts',
-  size: new TextEncoder().encode(PARSER_WORKER_WARMUP_SOURCE).byteLength,
+  size: Buffer.byteLength(PARSER_WORKER_WARMUP_SOURCE, 'utf8'),
   source: 'worktree',
 };
 
@@ -713,9 +713,10 @@ class ParserWorkerSlot {
 class ParserWorkerConnection {
   private buffer = '';
   private bufferBytes = 0;
+  /** Buffer prefix already known to contain no newline. */
+  private scannedLength = 0;
   private isClosed = false;
   private readonly decoder = new TextDecoder();
-  private readonly encoder = new TextEncoder();
   private readonly reader: AsyncIterator<string | Uint8Array>;
   private stderrBytes = 0;
 
@@ -747,7 +748,7 @@ class ParserWorkerConnection {
   ): Promise<ParserWorkerResponse> {
     if (signal.aborted) throw ParserWorkerError.of('abort');
     const encoded = `${JSON.stringify(request)}\n`;
-    if (this.encoder.encode(encoded).byteLength > this.maxProtocolLineBytes) {
+    if (Buffer.byteLength(encoded, 'utf8') > this.maxProtocolLineBytes) {
       throw ParserWorkerError.of('protocol');
     }
     const response = await raceWorkerResponse(this.writeAndRead(encoded), timeoutMilliseconds, signal, () => {
@@ -796,17 +797,16 @@ class ParserWorkerConnection {
 
   private async readLine(): Promise<string> {
     for (;;) {
-      const newline = Effect2.pipe(
-        this.buffer,
-        EffectString.indexOf('\n'),
-        Effect2.Option.getOrElse(() => -1),
-      );
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Resuming the search position keeps framing linear; Effect String indexOf has no position parameter.
+      const newline = this.buffer.indexOf('\n', this.scannedLength);
       if (newline >= 0) {
         const line = Effect2.pipe(this.buffer, EffectString.slice(0, newline), EffectString.replace(/\r$/, ''));
         this.buffer = Effect2.pipe(this.buffer, EffectString.slice(newline + 1));
-        this.bufferBytes = this.encoder.encode(this.buffer).byteLength;
+        this.bufferBytes = Buffer.byteLength(this.buffer, 'utf8');
+        this.scannedLength = 0;
         return line;
       }
+      this.scannedLength = this.buffer.length;
       let chunk: IteratorResult<string | Uint8Array>;
       try {
         chunk = await this.reader.next();
@@ -814,8 +814,8 @@ class ParserWorkerConnection {
         throw ParserWorkerError.of('exit');
       }
       if (chunk.done) throw ParserWorkerError.of('exit');
-      const bytes = typeof chunk.value === 'string' ? this.encoder.encode(chunk.value) : chunk.value;
-      this.bufferBytes += bytes.byteLength;
+      this.bufferBytes +=
+        typeof chunk.value === 'string' ? Buffer.byteLength(chunk.value, 'utf8') : chunk.value.byteLength;
       if (this.bufferBytes > this.maxProtocolLineBytes) throw ParserWorkerError.of('protocol');
       this.buffer += typeof chunk.value === 'string' ? chunk.value : this.decoder.decode(chunk.value, {stream: true});
     }
@@ -824,8 +824,8 @@ class ParserWorkerConnection {
   private async consumeStderr(stream: AsyncIterable<string | Uint8Array>): Promise<void> {
     for await (const chunk of stream) {
       if (this.stderrBytes >= this.maxStderrBytes) continue;
-      const bytes = typeof chunk === 'string' ? this.encoder.encode(chunk) : chunk;
-      this.stderrBytes += Math.min(bytes.byteLength, this.maxStderrBytes - this.stderrBytes);
+      const bytes = typeof chunk === 'string' ? Buffer.byteLength(chunk, 'utf8') : chunk.byteLength;
+      this.stderrBytes += Math.min(bytes, this.maxStderrBytes - this.stderrBytes);
     }
   }
 
@@ -948,9 +948,9 @@ export const codeGraphParserWorkerServer: Effect.Effect<void, never, Stdio.Stdio
     const system = yield* SystemInfo;
     const treeSitter = yield* TreeSitterRuntime;
     const decoder = new TextDecoder();
-    const encoder = new TextEncoder();
     let buffered = '';
     let bufferedBytes = 0;
+    let scannedLength = 0;
 
     const writeResponse = (response: ParserWorkerResponse) =>
       Stream.run(Stream.make(encodeParserWorkerResponse(response)), stdio.stdout({endOnDone: false}));
@@ -964,21 +964,22 @@ export const codeGraphParserWorkerServer: Effect.Effect<void, never, Stdio.Stdio
           bufferedBytes += chunk.byteLength;
           buffered += decoder.decode(chunk, {stream: true});
           for (;;) {
-            const newline = Effect2.pipe(
-              buffered,
-              EffectString.indexOf('\n'),
-              Effect2.Option.getOrElse(() => -1),
-            );
-            if (newline < 0) break;
+            // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Resuming the search position keeps framing linear; Effect String indexOf has no position parameter.
+            const newline = buffered.indexOf('\n', scannedLength);
+            if (newline < 0) {
+              scannedLength = buffered.length;
+              break;
+            }
+            scannedLength = 0;
             const lineWithNewline = Effect2.pipe(buffered, EffectString.slice(0, newline + 1));
             const line = Effect2.pipe(lineWithNewline, __effectPipeInput => {
               const __effectPipeStage0 = Effect2.pipe(__effectPipeInput, EffectString.slice(0, -1));
               const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.replace(/\r$/, ''));
               return __effectPipeStage1;
             });
-            bufferedBytes -= encoder.encode(lineWithNewline).byteLength;
+            bufferedBytes -= Buffer.byteLength(lineWithNewline, 'utf8');
             buffered = Effect2.pipe(buffered, EffectString.slice(newline + 1));
-            if (encoder.encode(line).byteLength > MAX_PROTOCOL_LINE_BYTES) {
+            if (Buffer.byteLength(line, 'utf8') > MAX_PROTOCOL_LINE_BYTES) {
               return yield* ParserWorkerError.of('protocol');
             }
             if (line) yield* processLine(line);
@@ -991,7 +992,7 @@ export const codeGraphParserWorkerServer: Effect.Effect<void, never, Stdio.Stdio
     );
 
     buffered += decoder.decode();
-    if (encoder.encode(buffered).byteLength > MAX_PROTOCOL_LINE_BYTES) {
+    if (Buffer.byteLength(buffered, 'utf8') > MAX_PROTOCOL_LINE_BYTES) {
       return yield* ParserWorkerError.of('protocol');
     }
     if (Effect2.pipe(buffered, EffectString.trim)) yield* processLine(Effect2.pipe(buffered, EffectString.trim));
@@ -1354,9 +1355,10 @@ export function parserWorkerSuccessResponseBytes(
   facts: CodeGraphFileFacts,
   id = 'parser-worker-response-size',
 ): number {
-  return new TextEncoder().encode(
+  return Buffer.byteLength(
     `${JSON.stringify({degraded: false, facts, id, ok: true, parseMilliseconds: 0, protocol: PROTOCOL_VERSION, recycle: false})}\n`,
-  ).byteLength;
+    'utf8',
+  );
 }
 
 export function parserWorkerCapacity(input: ParserWorkerCapacityInput): number {
@@ -1393,7 +1395,7 @@ function currentHardwareConcurrency(): number {
 
 function encodeParserWorkerResponse(response: ParserWorkerResponse): string {
   const line = `${JSON.stringify(response)}\n`;
-  if (new TextEncoder().encode(line).byteLength <= CODE_GRAPH_PARSER_WORKER_RESPONSE_BYTES_MAXIMUM) return line;
+  if (Buffer.byteLength(line, 'utf8') <= CODE_GRAPH_PARSER_WORKER_RESPONSE_BYTES_MAXIMUM) return line;
   return `${JSON.stringify(protocolFailure(response.id, 'Parser worker response exceeded its protocol budget.'))}\n`;
 }
 

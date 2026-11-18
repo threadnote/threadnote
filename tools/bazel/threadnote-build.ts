@@ -1,5 +1,4 @@
 import {Array as EffectArray} from 'effect';
-/* oxlint-disable effecttsgo/node-builtin-import -- This file is the Bazel build process boundary. */
 import {cpSync, existsSync} from 'node:fs';
 import {resolve} from 'node:path';
 

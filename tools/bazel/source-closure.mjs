@@ -1,7 +1,6 @@
 import {Array as EffectArray} from 'effect';
 import ts from 'typescript-compiler';
 import {builtinModules} from 'node:module';
-// oxlint-disable-next-line effecttsgo/node-builtin-import -- Build declaration generation precedes the Effect dependency graph.
 import {posix} from 'node:path';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
