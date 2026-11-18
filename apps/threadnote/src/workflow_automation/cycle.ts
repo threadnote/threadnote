@@ -44,6 +44,7 @@ import {
   nativeCycleWaiverFor,
   nativeCycleWaiverId,
   nativeCycleCoverage,
+  nativeCycleCoverageWaiver,
   nativeCycleCoverageAccepts,
 } from '@threadnote/workflow-automations/cycle-runtime';
 import {nativeCycleTextPage} from '@threadnote/workflow-automations/cycle-output';
@@ -1426,6 +1427,7 @@ export const runNativeCycle = <R>(
               {
                 ...current,
                 reviewTree: coverage._tag === 'reviewed' ? coverage.snapshot.tree : undefined,
+                waiverId: nativeCycleCoverageWaiver(coverage)?.id,
                 files:
                   (entry.snapshot.ordinaryMergeQualificationV1 ?? entry.snapshot.invalidTailMergeQualificationV1)
                     ? (EffectOption.getOrUndefined(

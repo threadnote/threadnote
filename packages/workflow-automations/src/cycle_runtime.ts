@@ -202,6 +202,10 @@ export function nativeCycleCoverage(
 export const nativeCycleCoverageAccepts = (coverage: NativeCycleTreeCoverage) =>
   coverage._tag === 'waived' || (coverage._tag === 'reviewed' && (!coverage.blocked || !!coverage.blockingWaiver));
 
+/** The waiver whose decision lets this coverage through, if one does. */
+export const nativeCycleCoverageWaiver = (coverage: NativeCycleTreeCoverage) =>
+  coverage._tag === 'waived' ? coverage.waiver : coverage._tag === 'reviewed' ? coverage.blockingWaiver : undefined;
+
 /** History a run may retain; a write that would exceed one refuses before it is saved. */
 export const nativeCycleRuntimeLimits = {snapshots: 256, waivers: 128} as const;
 
@@ -719,6 +723,9 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
       fail('A waiver must name one retained snapshot tree, its intent, a reason and explicit authority.');
     waiverIds.add(waiver.id);
   }
+  for (const phase of EffectRecord.values(runtime.state.phases))
+    if (phase.validation?.waiverId !== undefined && !waiverIds.has(phase.validation.waiverId))
+      fail('A validation names a waiver this run does not retain.');
   const checksums = makeNativeHistoricalDigests(runtime.plans);
   for (const admission of admissions) {
     const {history, ...metadata} = admission;

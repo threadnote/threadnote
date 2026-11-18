@@ -228,12 +228,27 @@ describe('pure native closeout admission', () => {
       reason: 'The reviewer was unavailable for this fixture.',
       userAuthority: 'User: deliver without a review.',
     };
+    const earlier = {
+      ...waiver,
+      id: 'waiver-' + Effect.pipe('d', EffectString.repeat(48)),
+      tree: Effect.pipe('e', EffectString.repeat(40)),
+    };
+    const phase = f.state.phases[waiver.phaseId];
+    const waived = {
+      ...f.state,
+      phases: {
+        ...f.state.phases,
+        [waiver.phaseId]: {...phase, validation: {...phase.validation!, waiverId: waiver.id}},
+      },
+    };
     const handoff = renderNativeDocument(
-      prepareNativeCloseout(f.state, f.plan, f.proposal, undefined, [waiver]).documents.handoff,
+      prepareNativeCloseout(waived, f.plan, f.proposal, undefined, [earlier, waiver]).documents.handoff,
     );
     expect(handoff).toContain('Audited waivers');
     expect(handoff).toContain(waiver.reason);
     expect(handoff).toContain(waiver.userAuthority);
+    expect(handoff).toContain('"coversDeliveredTree": true');
+    expect(handoff).toContain('"coversDeliveredTree": false');
     expect(renderNativeDocument(prepareNativeCloseout(f.state, f.plan, f.proposal).documents.handoff)).not.toContain(
       'Audited waivers',
     );

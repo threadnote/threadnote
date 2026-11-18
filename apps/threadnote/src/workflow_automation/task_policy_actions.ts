@@ -72,9 +72,15 @@ export const runNativeTaskWaiver = (
     };
   });
 
-/** Delivery and closeout results list every audited waiver of the run. */
-export const withNativeTaskWaivers = <A extends object>(result: A, runtime: NativeTaskCycleRuntime) =>
-  runtime.waivers?.length ? {...result, waivers: runtime.waivers} : result;
+/** Delivery results list every audited waiver of the run and name the one that let the delivered tree through. */
+export const withNativeTaskWaivers = <A extends object>(result: A, runtime: NativeTaskCycleRuntime) => {
+  const receipt = 'receipt' in result && Predicate.isObject(result.receipt) ? result.receipt : undefined;
+  const coveringWaiverId =
+    typeof receipt?.phaseId === 'string' ? runtime.state.phases[receipt.phaseId]?.validation?.waiverId : undefined;
+  return runtime.waivers?.length
+    ? {...result, waivers: runtime.waivers, ...(coveringWaiverId ? {coveringWaiverId} : {})}
+    : result;
+};
 
 /**
  * Switch a run between the standard and strict profiles. Loosening to standard needs explicit caller authority;

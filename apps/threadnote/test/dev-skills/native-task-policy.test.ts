@@ -570,7 +570,12 @@ describe('audited waivers', () => {
           validationRef: String(validated.validationRef),
         }),
       );
-      expect(delivered).toMatchObject({status: 'delivered', waivers: [first.waiver]});
+      expect(object(validated.validation).waiverId).toBe(object(first.waiver).id);
+      expect(delivered).toMatchObject({
+        status: 'delivered',
+        waivers: [first.waiver],
+        coveringWaiverId: object(first.waiver).id,
+      });
     }).pipe(runCycle),
   );
 

@@ -329,12 +329,13 @@ export function prepareNativeCloseout(
         (waivers.length
           ? '\n\nAudited waivers\n' +
             json(
-              EffectArray.map(waivers, ({gate, phaseId, tree, reason, userAuthority}) => ({
+              EffectArray.map(waivers, ({id, gate, phaseId, tree, reason, userAuthority}) => ({
                 gate,
                 phaseId,
                 tree,
                 reason,
                 userAuthority,
+                coversDeliveredTree: state.phases[phaseId]?.validation?.waiverId === id,
               })),
             )
           : ''),

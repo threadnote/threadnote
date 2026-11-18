@@ -94,6 +94,8 @@ const validationSchema = Schema.Struct({
     Schema.Struct({criterion: text(), result: Schema.Literal('passed'), evidence: text()}),
   ).check(Schema.isBetweenLength(1, 128)),
   reviewTree: Schema.optionalKey(gitObject),
+  /** The audited waiver that let the validated tree through, when one did. */
+  waiverId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^waiver-[a-f0-9]{48}$/u))),
   head: Schema.optionalKey(gitObject),
 });
 export const NativeCycleValidationSchema = validationSchema;
@@ -676,6 +678,8 @@ export interface CycleSnapshot {
   readonly files: readonly string[];
   /** The tree the covering review reviewed, when it differs from `tree` or no review covers it. */
   readonly reviewTree?: string;
+  /** The audited waiver that lets the tree through, when one does. */
+  readonly waiverId?: string;
 }
 export function checkNativeCycleScope(phase: NativeCyclePlan['phases'][number], files: readonly string[]): boolean {
   return EffectArray.every(
@@ -719,6 +723,7 @@ export function validateNativeCyclePhase(
     v.snapshotTree !== snapshot.tree ||
     (v.head && v.head !== snapshot.head) ||
     (v.reviewTree && v.reviewTree !== ('reviewTree' in snapshot ? snapshot.reviewTree : snapshot.tree)) ||
+    v.waiverId !== snapshot.waiverId ||
     (r.planPhaseHash ?? r.phaseHash) !== nativeCyclePhaseHash(s.plan, idValue)
   )
     err('Validation does not match snapshot.');
