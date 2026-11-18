@@ -5843,7 +5843,11 @@ function missingMaterializationReplayEquations(
       deferredBytes === undefined
     ) {
       missing.push(`${prefix} materialized-shard cache admission`);
-    } else if (cachedFactBytesTotal > CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM) {
+    } else if (
+      // Only the same-overlay reference runs on a dirty worktree; clean builds always persist shards for export.
+      prefix === 'same-overlay-reference' &&
+      cachedFactBytesTotal > CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM
+    ) {
       if (attributedFiles === undefined || deferredFileCount !== attributedFiles || deferredBytes !== rawBytes) {
         missing.push(`${prefix} large-build materialized-shard cache deferral`);
       }
@@ -5856,7 +5860,7 @@ function missingMaterializationReplayEquations(
         missing.push(`${prefix} deferred materialized-shard physical-write exclusion`);
       }
     } else if (deferredFileCount !== 0 || deferredBytes !== 0) {
-      missing.push(`${prefix} bounded-build materialized-shard cache persistence`);
+      missing.push(`${prefix} materialized-shard cache persistence`);
     }
     return missing;
   });

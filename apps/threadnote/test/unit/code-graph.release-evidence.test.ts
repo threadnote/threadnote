@@ -1186,7 +1186,7 @@ describe('code graph release evidence', () => {
     );
   });
 
-  it('requires large full builds to defer the complete duplicate materialized-shard cache', () => {
+  it('requires clean builds to persist shards and large dirty builds to defer them', () => {
     const artifact = benchmarkArtifact(
       requiredReleaseMeasurements(PRODUCTION_RELEASE_EVIDENCE_MEASUREMENTS),
       {
@@ -1209,9 +1209,14 @@ describe('code graph release evidence', () => {
     expect(() => assertProductionReleaseEvidence(artifact)).not.toThrow();
     expect(() =>
       assertProductionReleaseEvidence(
-        withValues({'cold-materialization-materialized-shard-cache-deferred-files-n1': 0}),
+        withValues({'cold-materialization-materialized-shard-cache-deferred-files-n1': 1}),
       ),
-    ).toThrow(/cold large-build materialized-shard cache deferral/);
+    ).toThrow(/cold materialized-shard cache persistence/);
+    expect(() =>
+      assertProductionReleaseEvidence(
+        withValues({'same-overlay-reference-materialization-materialized-shard-cache-deferred-files-n1': 0}),
+      ),
+    ).toThrow(/same-overlay-reference large-build materialized-shard cache deferral/);
     expect(() =>
       assertProductionReleaseEvidence(
         withValues({
@@ -1239,7 +1244,7 @@ describe('code graph release evidence', () => {
                 'cold-materialization-raw-fact-replay-bytes-n1': deferredRawFactBytes,
               }),
             ),
-          ).toThrow(/cold bounded-build materialized-shard cache persistence/);
+          ).toThrow(/cold materialized-shard cache persistence/);
         },
       ),
       {numRuns: 50},
@@ -4258,44 +4263,49 @@ function requiredReleaseMeasurements(
     benchmarkMeasurement(measurement.name, measurement.unit, [
       measurement.name === 'cold-activation-observed-stages-n1'
         ? 3
-        : Effect.pipe(measurement.name, EffectString.endsWith('-materialization-cached-fact-replay-bytes-n1'))
-          ? CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM + 2
-          : Effect.pipe(measurement.name, EffectString.endsWith('-materialization-cached-fact-bytes-total-n1'))
-            ? CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM + 1
-            : Effect.pipe(measurement.name, EffectString.endsWith('-materialization-raw-fact-replay-bytes-n1')) ||
-                Effect.pipe(
-                  measurement.name,
-                  EffectString.endsWith('-materialized-shard-cache-deferred-raw-fact-bytes-n1'),
-                )
+        : // The clean cold build persists every shard; only the dirty same-overlay reference defers.
+          /^cold-materialization-materialized-shard-cache-deferred-/u.test(measurement.name)
+          ? 0
+          : Effect.pipe(measurement.name, EffectString.endsWith('-materialization-cached-fact-replay-bytes-n1'))
+            ? CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM + 2
+            : Effect.pipe(measurement.name, EffectString.endsWith('-materialization-cached-fact-bytes-total-n1'))
               ? CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM + 1
-              : /-materialization-subphase-shard-(?:association|persistence|serialization)-n1$/u.test(measurement.name)
-                ? 0
-                : Effect.pipe(measurement.name, EffectString.startsWith('production-shape-'))
-                  ? 100
-                  : Effect.pipe(measurement.name, EffectString.startsWith('cold-activation-copying-')) &&
-                      Effect.pipe(measurement.name, EffectString.endsWith('-observed-n1'))
-                    ? 0
-                    : Effect.pipe(measurement.name, EffectString.endsWith('-activation-observed-stages-n1'))
-                      ? 32
-                      : Effect.pipe(measurement.name, EffectString.endsWith('-external-sampler-version-n1'))
-                        ? 4
-                        : Effect.pipe(
-                              measurement.name,
-                              EffectString.endsWith('-materialization-sidecar-wal-high-water-n1'),
-                            )
-                          ? 0
+              : Effect.pipe(measurement.name, EffectString.endsWith('-materialization-raw-fact-replay-bytes-n1')) ||
+                  Effect.pipe(
+                    measurement.name,
+                    EffectString.endsWith('-materialized-shard-cache-deferred-raw-fact-bytes-n1'),
+                  )
+                ? CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM + 1
+                : /-materialization-subphase-shard-(?:association|persistence|serialization)-n1$/u.test(
+                      measurement.name,
+                    )
+                  ? 0
+                  : Effect.pipe(measurement.name, EffectString.startsWith('production-shape-'))
+                    ? 100
+                    : Effect.pipe(measurement.name, EffectString.startsWith('cold-activation-copying-')) &&
+                        Effect.pipe(measurement.name, EffectString.endsWith('-observed-n1'))
+                      ? 0
+                      : Effect.pipe(measurement.name, EffectString.endsWith('-activation-observed-stages-n1'))
+                        ? 32
+                        : Effect.pipe(measurement.name, EffectString.endsWith('-external-sampler-version-n1'))
+                          ? 4
                           : Effect.pipe(
                                 measurement.name,
-                                EffectString.endsWith('-external-process-tree-failures-n1'),
-                              ) ||
-                              Effect.pipe(
-                                measurement.name,
-                                EffectString.endsWith('-external-open-temp-process-tree-failures-n1'),
+                                EffectString.endsWith('-materialization-sidecar-wal-high-water-n1'),
                               )
                             ? 0
-                            : measurement.name === 'one-file-reindex-materialization-stage-restoring-indexes-n1'
+                            : Effect.pipe(
+                                  measurement.name,
+                                  EffectString.endsWith('-external-process-tree-failures-n1'),
+                                ) ||
+                                Effect.pipe(
+                                  measurement.name,
+                                  EffectString.endsWith('-external-open-temp-process-tree-failures-n1'),
+                                )
                               ? 0
-                              : 1,
+                              : measurement.name === 'one-file-reindex-materialization-stage-restoring-indexes-n1'
+                                ? 0
+                                : 1,
     ]),
   );
 }
