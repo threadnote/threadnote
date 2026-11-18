@@ -506,7 +506,9 @@ export const assembleNativeInference = Effect.fn('assembleNativeInference')(func
       ...(Bun.which('ninja') ? [['ninja', ['--version']] as const] : []),
       ...compilerCommands,
     ] as const) {
-      const result = yield* runCommandEffect(name, [...args], {timeoutMs: 10_000, maxOutputBytes: 16_384});
+      // A cold npm.cmd on hosted windows-11-arm runners has exceeded 10 s on half of recent runs.
+      const timeoutMs = process.platform === 'win32' ? 60_000 : 10_000;
+      const result = yield* runCommandEffect(name, [...args], {timeoutMs, maxOutputBytes: 16_384});
       toolchain[name] = result.stdout;
     }
     if (process.platform !== 'win32') {
