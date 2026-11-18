@@ -21,6 +21,7 @@ import {stableJson} from '../workflow_memory/protocol.js';
 import {gitValue} from '../utils.js';
 import {verifyNativeCycleBaseRequalification} from './cycle_git.js';
 import {readNativeWorkflowState} from './store.js';
+import {nativeNext, nativeRefusal, nativeWorkflowPolicyOf} from '@threadnote/workflow-automations/gates';
 
 export type NativeTaskStoredState = NonNullable<Effect.Success<ReturnType<typeof readNativeWorkflowState>>>;
 export type NativeTaskCycleRuntime = NonNullable<NativeTaskStoredState['state']['cycle']>;
@@ -89,7 +90,12 @@ export const taskActionSnapshotRef = (work: NativeTaskActionRef, entry: unknown)
   if (!Predicate.isObject(entry) || !Predicate.isObject(entry.snapshot))
     throw fail('invalid-state', 'Canonical snapshot evidence is unavailable.');
   const snapshot = entry.snapshot;
-  if (typeof snapshot.snapshotId !== 'string' || typeof snapshot.head !== 'string' || typeof snapshot.tree !== 'string')
+  if (
+    typeof snapshot.snapshotId !== 'string' ||
+    typeof snapshot.phaseHash !== 'string' ||
+    typeof snapshot.head !== 'string' ||
+    typeof snapshot.tree !== 'string'
+  )
     throw fail('invalid-state', 'Canonical snapshot identity is incomplete.');
   return encodeNativeTaskActionRef({
     version: 1,
@@ -97,7 +103,7 @@ export const taskActionSnapshotRef = (work: NativeTaskActionRef, entry: unknown)
     runId: work.runId,
     generationHash: work.generationHash,
     phaseId: work.phaseId,
-    phaseHash: work.phaseHash,
+    phaseHash: snapshot.phaseHash,
     baselineHead: work.baselineHead,
     baselineTree: work.baselineTree,
     baselineRef: work.baselineRef,
@@ -385,6 +391,13 @@ export const runNativeTaskSameLabelIntegration = (
       const checkout = yield* fs.realPath(request.callerCwd);
       const stored = yield* readNativeWorkflowState(config, request.runId);
       if (!stored?.state.cycle) return yield* fail('cycle-not-found', 'This run has no admitted native cycle.');
+      // Same-label integration is a strict recovery; a standard run records its current tree instead.
+      if (nativeWorkflowPolicyOf(stored.state) === 'standard')
+        return yield* nativeRefusal(
+          'standard-profile-recovery',
+          'A standard-profile run records the current tree with record-snapshot instead of this strict recovery.',
+          {next: nativeNext.snapshot({runId: request.runId, callerCwd: checkout})},
+        );
       const ref = decodeNativeTaskActionRef(request.snapshotRef);
       const generationHash = sha256HexSync(stored.state.generation);
       const matches = (runtime: NativeTaskCycleRuntime) => {

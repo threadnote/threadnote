@@ -100,12 +100,12 @@ import {
   selectTopRecallPostingsByTerms,
 } from './index/selection.js';
 import {dropRecallSourceScan} from './index/refresh.js';
+import {prepareRecallDatabase, publishPreparedRecallDatabase} from './index/refresh_database.js';
 import {
   initializeRecallDatabase,
   RECALL_INDEX_DATABASE_VERSION,
   RecallIndexSchemaIncompatible,
 } from './index/schema.js';
-import {prepareRecallDatabase, publishPreparedRecallDatabase} from './index/refresh_database.js';
 import {
   recallIncrementalRefreshBlockers,
   recallPublishedRefreshOutcome,

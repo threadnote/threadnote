@@ -1,3 +1,15 @@
+import {runNativeTaskWaiver, withNativeTaskWaivers, runNativeTaskSetProfile} from './task_policy_actions.js';
+import {
+  nativeWorkflowPolicyOf,
+  fillNativeNext,
+  nativeNextForTaskAction,
+  withNativeNext,
+  nativeRefusal,
+  decideGate,
+  nativeNext,
+  nativeWaivableGateIds,
+  nativeWorkflowPolicies,
+} from '@threadnote/workflow-automations/gates';
 import {runStandalonePrWatch} from './standalone_pr_watch.js';
 import {SystemInfo} from '@threadnote/platform/system';
 import {
@@ -7,6 +19,7 @@ import {
   nativeSpecIntentDigest,
   projectNativeCompactIntent,
   type NativeCompactIntent,
+  nativePlanIntentPolicyFor,
 } from '@threadnote/workflow-automations/authoring';
 import {NativeCloseoutProposalSchema} from '@threadnote/workflow-automations/closeout';
 import {
@@ -16,7 +29,12 @@ import {
 import {NativeCyclePacketOptionsSchema} from '@threadnote/workflow-automations/cycle-packet';
 import * as CycleOutput from '@threadnote/workflow-automations/cycle-output';
 import {NativeCycleReviewSchema} from '@threadnote/workflow-automations/cycle-review';
-import {nativeCyclePhaseReviewUsage} from '@threadnote/workflow-automations/cycle-runtime';
+import {
+  nativeCyclePhaseReviewUsage,
+  nativeCycleCoverage,
+  nativeCycleCoverageWaiver,
+  nativeCycleLatestSnapshot,
+} from '@threadnote/workflow-automations/cycle-runtime';
 import {workflowTitleSlug} from '@threadnote/workflow-automations/naming';
 import {
   decodeNativeTaskActionRef,
@@ -26,6 +44,7 @@ import {
   nativeTaskStartRunId,
   NativeTaskAnchorSchema,
   NativeTaskStartRequestSchema,
+  projectNativeTaskView,
 } from '@threadnote/workflow-automations/task';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
@@ -228,6 +247,22 @@ const requestSchema = Schema.Union([
     userAuthority: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
   }),
   Schema.Struct({
+    command: Schema.Literal('set-profile'),
+    runId: id,
+    callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    profile: Schema.Literals(nativeWorkflowPolicies),
+    reason: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    userAuthority: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
+  }),
+  Schema.Struct({
+    command: Schema.Literal('waive'),
+    runId: id,
+    callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    gate: Schema.Literals(nativeWaivableGateIds),
+    reason: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    userAuthority: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+  }),
+  Schema.Struct({
     command: Schema.Literal('work'),
     runId: id,
     callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
@@ -237,7 +272,7 @@ const requestSchema = Schema.Union([
     command: Schema.Literal('record-snapshot'),
     runId: id,
     callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
-    workRef: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    workRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
     reason: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
   }),
   Schema.Struct({
@@ -457,6 +492,11 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
           'task-identity-conflict',
           'This task name already belongs to different canonical intent. Resume its current task card or choose a new feature name.',
         );
+      if (request.workflowProfile !== undefined && request.workflowProfile !== nativeWorkflowPolicyOf(stored.state))
+        return yield* fail(
+          'workflow-profile-conflict',
+          'This task already runs under another workflow profile. Resume it without --workflow-profile or start a new feature name.',
+        );
       const storedProfile = stored.state.profile ?? 'desktop';
       const selectedTarget = yield* readNativeTaskInstalledTarget(config, request.installationTarget, checkout, [
         storedProfile,
@@ -581,6 +621,7 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
         profile: target.target.profile,
         title: request.intent.title,
         ...(graphProject === undefined ? {} : {graphProject}),
+        ...(request.workflowProfile === undefined ? {} : {policy: request.workflowProfile}),
       }),
     );
     const initResult: unknown = initialized;
@@ -619,8 +660,58 @@ const requireEffectValue = <A>(value: A | undefined, message: string): A => {
   return value;
 };
 
+const standardRefusedRecoveries = new Set<string>([
+  'supersede-unreviewed-snapshot',
+  'recover-unreviewed-rebase-snapshot',
+  'requalify-base-snapshot',
+  'requalify-invalid-tail',
+]);
+
 /** Typed task operations over the existing cycle state; references never authorize a mutation by themselves. */
 export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
+  runNativeTaskActionCore(config, input).pipe(Effect.catch(error => withTaskNext(config, input, error)));
+
+/** Refusals that mean the validated source or its declared base changed after validation. */
+const sourceChangedCodes = new Set(['source-drift', 'review-stale']);
+
+/**
+ * A refusal without a named next command points at the action on the current task card, or at reopen when a deliver
+ * card's source changed. Placeholders the card or the request already answer are filled; a refused reference is never
+ * one of them, so the card's current reference takes its place.
+ */
+const withTaskNext = (config: RuntimeConfig, input: unknown, cause: unknown) =>
+  Effect.gen(function* () {
+    const error = nativeWorkflowError(cause);
+    if (!Predicate.isObject(input) || typeof input.runId !== 'string' || typeof input.callerCwd !== 'string')
+      return yield* error;
+    const {runId, callerCwd} = input;
+    // Project the card from stored state only: a refusal must not reach providers or watches.
+    const current = yield* readNativeWorkflowState(config, runId).pipe(Effect.exit);
+    const stored = current._tag === 'Success' ? current.value : undefined;
+    const view = stored ? projectNativeTaskView(stored.state, stored.revision) : undefined;
+    const reopenPhase =
+      view?.next.action === 'deliver' && sourceChangedCodes.has(error.code) ? view.next.phaseId : undefined;
+    const next =
+      error.next ??
+      (!view
+        ? nativeNext.view({runId, callerCwd})
+        : reopenPhase
+          ? nativeNext.reopen({runId, callerCwd}, reopenPhase)
+          : nativeNextForTaskAction(view.next.action, runId, callerCwd, stored?.state.cycle?.state.plan.delivery));
+    return yield* withNativeNext(
+      error,
+      fillNativeNext(next, {
+        taskRef: view?.taskRef,
+        snapshotRef: view?.phase?.snapshot?.snapshotRef,
+        validationRef:
+          typeof input.validationRef === 'string' && !/-ref$/u.test(error.code)
+            ? input.validationRef
+            : view?.phase?.validationRef,
+      }),
+    );
+  });
+
+const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
   Effect.gen(function* () {
     const request = yield* Schema.decodeUnknownEffect(requestSchema, {onExcessProperty: 'error'})(input).pipe(
       Effect.mapError(error =>
@@ -673,6 +764,15 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
     );
     if (journal.state.binding.repo !== checkout)
       return yield* fail('wrong-checkout', 'Use the checkout bound to this native run.');
+    if (request.command === 'set-profile') return yield* runNativeTaskSetProfile(config, request, stored, checkout);
+    // A standard run keeps one way to record source: the newest tree supersedes an unreviewed snapshot and a moved
+    // base needs no requalification, so the strict recovery commands would only mix receipt lineages.
+    if (standardRefusedRecoveries.has(request.command) && nativeWorkflowPolicyOf(stored.state) === 'standard')
+      return yield* nativeRefusal(
+        'standard-profile-recovery',
+        'A standard-profile run records the current tree with record-snapshot instead of this strict recovery.',
+        {next: nativeNext.snapshot({runId: request.runId, callerCwd: checkout})},
+      );
 
     if (
       request.command === 'compact-start' ||
@@ -823,7 +923,7 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
       const current = yield* loadRoot();
       if (current.document.kind !== 'plan' || !current.document.compactOrigin)
         return yield* fail('compact-origin-required', 'This plan has no compact-origin confirmation obligation.');
-      const intentHash = nativeSpecIntentDigest(current.document);
+      const intentHash = nativeSpecIntentDigest(current.document, nativePlanIntentPolicyFor(stored.state));
       if (request.presentedIntentHash !== intentHash)
         return yield* fail(
           'stale-intent',
@@ -1129,7 +1229,14 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
       if (!Predicate.isObject(loadedValue) || !Predicate.isObject(loadedValue.document))
         return {status: 'needs-planning', missingInputs: ['The approved plan document readback']};
       const document = decodeNativeAuthoringDocument(loadedValue.document);
-      if (document.kind !== 'plan' || document.openQuestions.length > 0 || document.decisions.length === 0)
+      // A standard compact plan keeps its confirmed intent through a path-only edit, so it reconciles without decisions.
+      const confirmedCompact =
+        document.kind === 'plan' && !!document.compactOrigin && nativeWorkflowPolicyOf(stored.state) === 'standard';
+      if (
+        document.kind !== 'plan' ||
+        document.openQuestions.length > 0 ||
+        (document.decisions.length === 0 && !confirmedCompact)
+      )
         return {status: 'needs-planning', missingInputs: ['Resolved plan questions and a recorded design decision']};
       const suppliedBindings = request.bindings ?? {};
       // An admitted replay must reproduce the reconciled plan exactly. This also
@@ -1273,7 +1380,9 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
       return {status: 'extended', replayed: false, expansion, cycle, task: yield* taskView()};
     }
 
-    if (request.command === 'finish') return yield* runNativeTaskFinish(config, request, stored, checkout, state);
+    if (request.command === 'finish')
+      return withNativeTaskWaivers(yield* runNativeTaskFinish(config, request, stored, checkout, state), runtime);
+    if (request.command === 'waive') return yield* runNativeTaskWaiver(config, request, stored, checkout, runtime);
 
     if (request.command === 'record-review') {
       const ref = decodeNativeTaskActionRef(request.snapshotRef);
@@ -1419,16 +1528,36 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
           'snapshot-ambiguous',
           'Recovery requires one unique canonical snapshot for this validation.',
         );
-      const report = EffectOption.getOrUndefined(
-        EffectArray.findFirst(runtime.reviews, item => item.snapshotId === ref.snapshotId),
+      // The phase's latest snapshot decides coverage, as on the task card and at delivery.
+      const latestSource = nativeCycleLatestSnapshot(runtime, ref.phaseId, ref.phaseHash) ?? entry;
+      if (latestSource.snapshot.tree !== entry.snapshot.tree)
+        return yield* nativeRefusal(
+          'stale-snapshot-ref',
+          'A later snapshot of this phase recorded another tree. Read workflow_task_view for the current one.',
+          {next: nativeNext.view({runId: request.runId, callerCwd: checkout})},
+        );
+      const coverage = nativeCycleCoverage(runtime, latestSource.snapshot);
+      const reviewDecision = decideGate(
+        nativeWorkflowPolicyOf(stored.state),
+        'review.required',
+        coverage._tag === 'pending' ? {} : undefined,
+        coverage._tag === 'waived' ? coverage.waiver : undefined,
+        nativeNext.waive({runId: request.runId, callerCwd: checkout}, 'review.required'),
       );
-      if (!report) return yield* fail('review-pending', 'Record the complete accepted review before validation.');
+      if (reviewDecision._tag === 'refuse')
+        return yield* nativeRefusal(
+          'review-pending',
+          'Record the complete accepted review before validation.',
+          reviewDecision,
+        );
       const proof = state.phases[ref.phaseId];
       const head = proof?.validation ? proof.head : yield* gitValue(['rev-parse', 'HEAD'], checkout);
       if (!head) return yield* fail('source-unavailable', 'Could not read the current validation source head.');
+      const waiver = nativeCycleCoverageWaiver(coverage);
       const validation = {
         snapshotTree: entry.snapshot.tree,
-        reviewTree: entry.snapshot.tree,
+        ...(coverage._tag === 'reviewed' ? {reviewTree: coverage.snapshot.tree} : {}),
+        ...(waiver ? {waiverId: waiver.id} : {}),
         head,
         status: 'passed' as const,
         productState: 'working' as const,
@@ -1476,13 +1605,19 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
       return {status: 'recorded', replayed: false, validationRef, validation: accepted};
     }
     if (request.command === 'deliver-local')
-      return yield* runNativeTaskLocalDelivery(config, request, stored, checkout, runtime);
+      return withNativeTaskWaivers(
+        yield* runNativeTaskLocalDelivery(config, request, stored, checkout, runtime),
+        runtime,
+      );
 
     if (request.command === 'deliver-commit')
-      return yield* runNativeTaskCommitDelivery(config, request, stored, checkout, runtime);
+      return withNativeTaskWaivers(
+        yield* runNativeTaskCommitDelivery(config, request, stored, checkout, runtime),
+        runtime,
+      );
 
     if (request.command === 'deliver-pr')
-      return yield* runNativeTaskPrDelivery(config, request, stored, checkout, runtime);
+      return withNativeTaskWaivers(yield* runNativeTaskPrDelivery(config, request, stored, checkout, runtime), runtime);
 
     if (request.command === 'supplemental-publication')
       return yield* runNativeTaskSupplementalPublication(config, request, stored, checkout, runtime);

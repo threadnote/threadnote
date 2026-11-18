@@ -5,11 +5,13 @@ import {
   canonicalAuthoringJson,
   decodeNativeAuthoringDocument,
   nativeAuthoringDigest,
+  nativeAuthoringIssueSummary,
   NativeAuthoringPlanDocumentSchema,
   projectNativeCompactIntent,
   nativeSpecIntentDigest,
   validateNativeAuthoring,
   type NativeAuthoringDocument,
+  NativeDerivedOwnershipPlanIntentPolicyVersion,
 } from '../src/authoring.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
@@ -357,30 +359,54 @@ describe('native authoring documents', () => {
     );
   });
 
-  it('keeps unrelated, malformed and unknown-field failures generic without inventing alternatives diagnostics', () => {
+  it('names the failing field and constraint without authored content or invented alternatives diagnostics', () => {
     const input = alternativesPlan(2);
     const decision = input.decisions[0];
     if (!decision) throw new Error('Expected the decision fixture.');
     const marker = 'private-field-and-value';
-    for (const invalid of [
-      {...input, [marker]: marker},
-      {...input, context: {...input.context, codeRefs: Array.from({length: 9}, (_, i) => `src/${i}.ts`)}},
-      {...input, decisions: [{...decision, alternatives: {length: 3, [marker]: marker}}]},
-      {...input, decisions: [{...decision, alternatives: [{id: 'a', design: 0, tradeoffs: marker}]}]},
-      {
-        ...input,
-        decisions: [{...decision, alternatives: [{id: 'a', design: 0, tradeoffs: marker}, ...decision.alternatives]}],
-      },
-      {
-        ...input,
-        decisions: [{...decision, alternatives: [{id: 'a', design: marker, tradeoffs: marker, [marker]: marker}]}],
-      },
-    ]) {
+    const cases: ReadonlyArray<readonly [unknown, string, string]> = [
+      [
+        {...input, context: {...input.context, codeRefs: Array.from({length: 9}, (_, i) => `${marker}/${i}.ts`)}},
+        'context.codeRefs',
+        'at most 8',
+      ],
+      [
+        {...input, decisions: [{...decision, alternatives: {length: 3, [marker]: marker}}]},
+        'decisions[0].alternatives',
+        'array',
+      ],
+      [
+        {...input, decisions: [{...decision, alternatives: [{id: 'a', design: 0, tradeoffs: marker}]}]},
+        'decisions[0].alternatives[0].design',
+        'string',
+      ],
+      [
+        {
+          ...input,
+          decisions: [{...decision, alternatives: [{id: 'a', design: 0, tradeoffs: marker}, ...decision.alternatives]}],
+        },
+        'decisions[0].alternatives[0].design',
+        'string',
+      ],
+      [
+        {
+          ...input,
+          decisions: [{...decision, alternatives: [{id: 'a', design: marker, tradeoffs: marker, [marker]: marker}]}],
+        },
+        'decisions[0].alternatives[0]',
+        'unsupported field',
+      ],
+    ];
+    for (const [invalid, location, constraint] of cases) {
       const before = JSON.stringify(invalid);
-      expect(caught(() => decodeNativeAuthoringDocument(invalid))).toMatchObject({
-        code: 'invalid-document',
-        message: 'The native authoring document is malformed or contains unsupported fields.',
-      });
+      const error = caught(() => decodeNativeAuthoringDocument(invalid));
+      if (!(error instanceof Error)) throw new Error('Invalid document unexpectedly decoded.');
+      expect(error).toMatchObject({code: 'invalid-document', detail: {path: location}});
+      expect(error.message).toContain(location);
+      expect(error.message).toContain(constraint);
+      expect(error.message).not.toContain(marker);
+      expect(error.message).not.toContain('items; maximum');
+      expect(new TextEncoder().encode(error.message).byteLength).toBeLessThanOrEqual(256);
       expect(JSON.stringify(invalid)).toBe(before);
     }
   });
@@ -436,16 +462,20 @@ describe('native authoring documents', () => {
       expect(error.message).toContain('a trailing separator');
       expect(error.message).not.toContain('src/');
     }
-    const genericCases = [
-      {...base, unexpectedField: 'private-marker'},
-      {...base, phases: [{...base.phases[0], affectedPaths: [42]}, ...base.phases.slice(1)]},
-    ];
-    for (const input of genericCases) {
-      expect(caught(() => decodeNativeAuthoringDocument(input))).toMatchObject({
-        code: 'invalid-document',
-        message: 'The native authoring document is malformed or contains unsupported fields.',
-      });
-    }
+    expect(caught(() => decodeNativeAuthoringDocument({...base, unexpectedField: 'private-marker'}))).toMatchObject({
+      code: 'invalid-document',
+      message: 'The native authoring document is malformed or contains unsupported fields.',
+    });
+    const nonString = caught(() =>
+      decodeNativeAuthoringDocument({
+        ...base,
+        phases: [{...base.phases[0], affectedPaths: [42]}, ...base.phases.slice(1)],
+      }),
+    );
+    if (!(nonString instanceof Error)) throw new Error('Invalid path unexpectedly decoded.');
+    expect(nonString.message).toContain('phases[0].affectedPaths[0]');
+    expect(nonString.message).toContain('string');
+    expect(nonString.message).not.toContain('violates');
     const marker = 'private-marker-';
     fc.assert(
       fc.property(
@@ -592,6 +622,20 @@ describe('native authoring documents', () => {
       }),
       {numRuns: 60},
     );
+  });
+
+  it('summarizes computed issues by code and path with a bounded remainder', () => {
+    const issues = Array.from({length: 7}, (_, index) => ({
+      code: 'code-ref-out-of-snapshot',
+      path: `context.codeRefs[${index}]`,
+      message: 'Code references must name an inspected source path.',
+    }));
+    const summary = nativeAuthoringIssueSummary(issues);
+    expect(summary).toContain('code-ref-out-of-snapshot at context.codeRefs[0]');
+    expect(summary).toContain('context.codeRefs[4]');
+    expect(summary).not.toContain('context.codeRefs[5]');
+    expect(summary).toContain('and 2 more');
+    expect(nativeAuthoringIssueSummary(issues.slice(0, 1))).not.toContain('more');
   });
 
   it('reports spec semantic gaps and only marks an exact confirmed, reviewed spec ready', () => {
@@ -840,6 +884,33 @@ describe('native authoring documents', () => {
       },
     });
     expect(validation).toMatchObject({ready: true, issues: []});
+    const manyPaths = Array.from({length: 16}, (_, index) => `src/file-${index}.ts`);
+    const wide = projectNativeCompactIntent(
+      compactInput({affectedPaths: manyPaths}),
+      {featureId: 'cache-refresh', project: 'threadnote'},
+      {head: compactSource.head, files: EffectArray.map(manyPaths, path => ({path, sha256: hash}))},
+    );
+    expect(wide.status).toBe('eligible');
+    if (wide.status !== 'eligible' || wide.document.kind !== 'plan')
+      throw new Error('Expected a 16-path compact plan.');
+    expect(wide.document.context.codeRefs).toHaveLength(8);
+    expect(wide.document.phases[0]?.affectedPaths).toEqual(manyPaths);
+    fc.assert(
+      fc.property(fc.uniqueArray(fc.nat({max: 48}), {minLength: 1, maxLength: 16}), pathIndexes => {
+        const affectedPaths = EffectArray.map(pathIndexes, index => `src/file-${index}.ts`);
+        const projected = projectNativeCompactIntent(
+          compactInput({affectedPaths}),
+          {featureId: 'cache-refresh', project: 'threadnote'},
+          {head: compactSource.head, files: EffectArray.map(affectedPaths, path => ({path, sha256: hash}))},
+        );
+        expect(projected.status).toBe('eligible');
+        if (projected.status !== 'eligible' || projected.document.kind !== 'plan') return;
+        expect(projected.document.phases[0]?.affectedPaths).toEqual(affectedPaths);
+        expect(projected.document.context.codeRefs).toHaveLength(Math.min(8, affectedPaths.length));
+        expect(projected.document.context.codeRefs).toEqual(affectedPaths.slice(0, 8));
+      }),
+      {numRuns: 30},
+    );
     expect(
       validateNativeAuthoring(plan, {
         ready: true,
@@ -850,6 +921,16 @@ describe('native authoring documents', () => {
         },
       }).ready,
     ).toBe(false);
+  });
+
+  it('names the failing compact intent field and its constraint', () => {
+    expect(() =>
+      projectNativeCompactIntent(
+        compactInput({affectedPaths: EffectArray.makeBy(17, index => `src/file-${index}.ts`)}),
+        {featureId: 'cache-refresh', project: 'threadnote'},
+        compactSource,
+      ),
+    ).toThrow('affectedPaths: Expected a value with a length between 1 and 16');
   });
 
   it('returns the exact planning decision for ineligible compact intent without constructing a plan', () => {
@@ -911,5 +992,45 @@ describe('native authoring documents', () => {
       ),
       {numRuns: 40},
     );
+  });
+});
+
+describe('structured authoring refusals', () => {
+  it('names the field path and the size limit of a cap violation', () => {
+    const plan = validPlan();
+    expect(
+      caught(() =>
+        decodeNativeAuthoringDocument({
+          ...plan,
+          context: {...plan.context, codeRefs: EffectArray.makeBy(9, index => `src/file-${index}.ts`)},
+        }),
+      ),
+    ).toMatchObject({code: 'invalid-document', detail: {path: 'context.codeRefs', limit: 8}});
+  });
+});
+
+describe('derived-ownership plan intent', () => {
+  it('ignores phase path edits and binds acceptance changes', () => {
+    const plan = validPlan();
+    if (plan.kind !== 'plan') throw new Error('Expected a plan fixture.');
+    const repathed = validPlan({
+      phases: EffectArray.map(plan.phases, phase => ({
+        ...phase,
+        affectedPaths: [...phase.affectedPaths, 'docs/notes.md'],
+      })),
+    });
+    const reworded = validPlan({
+      phases: EffectArray.map(plan.phases, phase => ({
+        ...phase,
+        acceptance: EffectArray.map(phase.acceptance, item => ({
+          ...item,
+          criterion: item.criterion + ' within one second',
+        })),
+      })),
+    });
+    const v3 = NativeDerivedOwnershipPlanIntentPolicyVersion;
+    expect(nativeSpecIntentDigest(repathed, v3)).toBe(nativeSpecIntentDigest(plan, v3));
+    expect(nativeSpecIntentDigest(repathed)).not.toBe(nativeSpecIntentDigest(plan));
+    expect(nativeSpecIntentDigest(reworded, v3)).not.toBe(nativeSpecIntentDigest(plan, v3));
   });
 });

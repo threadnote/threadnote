@@ -30,6 +30,7 @@ import {
   currentRecallCorpusGeneration,
   expireRecallIndexValidation,
   loadRecallIndexData,
+  RecallIndexSourceChanged,
   recallIndexStatus,
   type RecallIndexStatus,
 } from '@threadnote/recall/index';
@@ -312,22 +313,25 @@ describe('development installer repair isolation', () => {
 
   fcEffectProp(
     effectIt,
-    'retries only bounded lexical corpus generation changes',
+    'retries only bounded concurrent corpus changes',
     {
       completedRetries: FC.integer({max: RECALL_INDEX_MAINTENANCE_GENERATION_RETRY_LIMIT + 3, min: -2}),
-      generationChanged: FC.boolean(),
+      failure: FC.constantFrom('vector-generation' as const, 'lexical-superseded' as const, 'unrelated' as const),
     },
-    ({completedRetries, generationChanged}) =>
+    ({completedRetries, failure}) =>
       Effect.sync(() => {
-        const error = generationChanged
-          ? VectorCorpusGenerationChanged.make({
-              message: 'The lexical recall corpus changed while vector work was in progress.',
-              modelId: embeddingManifest.id,
-              requestedGeneration: 'fixture-generation',
-            })
-          : new Error('unrelated repair failure');
+        const error =
+          failure === 'vector-generation'
+            ? VectorCorpusGenerationChanged.make({
+                message: 'The lexical recall corpus changed while vector work was in progress.',
+                modelId: embeddingManifest.id,
+                requestedGeneration: 'fixture-generation',
+              })
+            : failure === 'lexical-superseded'
+              ? RecallIndexSourceChanged.make({message: 'Lexical preparation was superseded.'})
+              : new Error('unrelated repair failure');
         expect(recallIndexMaintenanceShouldRetry(error, completedRetries)).toBe(
-          generationChanged &&
+          failure !== 'unrelated' &&
             completedRetries >= 0 &&
             completedRetries < RECALL_INDEX_MAINTENANCE_GENERATION_RETRY_LIMIT,
         );

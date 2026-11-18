@@ -419,7 +419,7 @@ effectIt.effect('selects a configured graph project on task-author start in an a
   }).pipe(TestClock.withLive, provideNative),
 );
 
-effectIt.effect('reports canonical path failures on task-author start and save without changing state', () =>
+effectIt.effect('reports field-specific schema failures on task-author start and save without changing state', () =>
   Effect.gen(function* () {
     const f = yield* setup;
     const validPlan = {
@@ -431,10 +431,17 @@ effectIt.effect('reports canonical path failures on task-author start and save w
       })),
     };
     const invalidPlan = {...validPlan, phases: [{...validPlan.phases[0], affectedPaths: ['src/']}]};
+    const marker = 'private-code-ref-marker';
+    const oversizedRefsPlan = {
+      ...validPlan,
+      context: {...validPlan.context, codeRefs: A.makeBy(9, index => `${marker}/${index}.ts`)},
+    };
     const invalidFile = f.path.join(f.root, 'invalid-plan.json');
     const validFile = f.path.join(f.root, 'valid-plan.json');
+    const oversizedRefsFile = f.path.join(f.root, 'oversized-refs-plan.json');
     yield* f.fs.writeFileString(invalidFile, JSON.stringify(invalidPlan));
     yield* f.fs.writeFileString(validFile, JSON.stringify(validPlan));
+    yield* f.fs.writeFileString(oversizedRefsFile, JSON.stringify(oversizedRefsPlan));
     const invalidStart = yield* f
       .author({
         command: 'start',
@@ -472,6 +479,17 @@ effectIt.effect('reports canonical path failures on task-author start and save w
     if (invalidSave._tag !== 'Failure') throw new Error('Invalid plan unexpectedly saved.');
     expect(JSON.stringify(invalidSave)).toContain('phases[0].affectedPaths[0]');
     expect(JSON.stringify(invalidSave)).toContain('a trailing separator');
+    const oversizedRefsSave = yield* f
+      .author({command: 'save', authoringRef: draft.authoringRef, contentFile: oversizedRefsFile})
+      .pipe(Effect.result);
+    expect(oversizedRefsSave).toMatchObject({
+      failure: {
+        code: 'invalid-content',
+        detail: {path: 'context.codeRefs', limit: 8},
+        next: {tool: 'workflow_task_author', command: 'read'},
+      },
+    });
+    expect(JSON.stringify(oversizedRefsSave)).not.toContain(marker);
     expect(yield* f.fs.readFileString(statePath)).toBe(before);
   }).pipe(TestClock.withLive, provideNative),
 );
@@ -2488,6 +2506,114 @@ effectIt.effect.each(['head', 'bytes'] as const)(
           bindings: {readback: {branch: 'main', baseBranch: 'main'}},
         }),
       ).toMatchObject({status: 'admitted'});
+    }).pipe(TestClock.withLive, provideNative),
+);
+
+effectIt.effect(
+  'keeps a confirmed compact plan and its phase through a path-only edit after a switch to standard',
+  () =>
+    Effect.gen(function* () {
+      const f = yield* setup;
+      const intent = {
+        title: 'Switch a running fixture',
+        currentBehavior: 'Fixture data is returned unchanged.',
+        desiredChange: 'Fixture data is trimmed before it is returned.',
+        affectedPaths: ['source.ts'],
+        acceptanceCriterion: 'Fixture data is trimmed before return.',
+        verification: 'Exercise padded fixture data and observe the trim.',
+        eligibilityRationale: 'One behavior and one inspected file are explicit with no unresolved decision.',
+        eligibility: {status: 'eligible' as const},
+        review: {required: false, reason: 'Routine operator maintenance.'},
+      };
+      const started = object(
+        yield* runNativeTaskStart(f.config, {
+          callerCwd: f.repo,
+          featureName: 'Running profile switch',
+          installationTarget: 'codex',
+          intent,
+        }).pipe(Effect.provideService(SystemInfo, f.scoped)),
+      );
+      const runId = String(started.taskRef);
+      const action = (input: Record<string, unknown>) =>
+        runNativeTaskAction(f.config, {runId, callerCwd: f.repo, ...input}).pipe(
+          Effect.provideService(SystemInfo, f.scoped),
+          Effect.map(object),
+        );
+      const view = () => readNativeTaskView(f.config, {runId, callerCwd: f.repo}).pipe(Effect.map(object));
+      const latestRoot = () =>
+        Effect.gen(function* () {
+          const state = yield* readNativeWorkflowState(f.config, runId);
+          const operation = A.findFirst(
+            [...(state?.state.operations ?? [])].reverse(),
+            item => item.status === 'verified' && item.intent.role === 'authoring-root',
+          );
+          return decodeAuthoringArtifact(Option.getOrThrow(operation).artifact!.body, AuthoringRootSchema);
+        });
+      const draft = yield* action({command: 'compact-start', intent});
+      yield* action({
+        command: 'compact-confirm',
+        presentedIntentHash: String(draft.intentHash),
+        userDecision: 'approve',
+        userResponse: 'I approve this exact compact trim intent.',
+        baseBranch: 'main',
+      });
+      expect((yield* latestRoot()).planIntentPolicyVersion).toBe(2);
+      expect(
+        yield* action({
+          command: 'set-profile',
+          profile: 'standard',
+          reason: 'Loosen the running task.',
+          userAuthority: 'User: loosen this running task.',
+        }),
+      ).toMatchObject({status: 'changed'});
+      const authoringRef = String(object(object((yield* view()).authoring).continuation).authoringRef);
+      const read = object(yield* f.author({command: 'read', authoringRef, detail: 'document'}));
+      const document = yield* Schema.decodeUnknownEffect(NativeAuthoringPlanDocumentSchema)(read.document);
+      const business: Record<string, unknown> = {
+        ...document,
+        phases: A.map(document.phases, phase => ({...phase, affectedPaths: [...phase.affectedPaths, 'notes.md']})),
+      };
+      for (const key of [
+        'format',
+        'schemaVersion',
+        'id',
+        'project',
+        'source',
+        'sourceFreeReason',
+        'kind',
+        'spec',
+        'compactOrigin',
+      ])
+        delete business[key];
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'notes.md'), 'Fixture notes.\n');
+      yield* runCommandEffect('git', ['-C', f.repo, 'add', 'notes.md']);
+      yield* runCommandEffect('git', [
+        '-C',
+        f.repo,
+        '-c',
+        'user.name=Fixture',
+        '-c',
+        'user.email=fixture@example.invalid',
+        'commit',
+        '-m',
+        'Fixture notes',
+      ]);
+      expect((yield* (yield* CodeGraphIndexer).index({cwd: f.repo, threadnoteHome: f.home})).snapshot.state).toBe(
+        'ready',
+      );
+      const contentFile = f.path.join(f.root, 'running-profile-switch.json');
+      yield* f.fs.writeFileString(contentFile, JSON.stringify(business));
+      expect(yield* f.author({command: 'save', authoringRef: String(read.authoringRef), contentFile})).toMatchObject({
+        status: 'ready',
+      });
+      const root = yield* latestRoot();
+      expect(root).toMatchObject({planIntentPolicyVersion: 3, confirmation: {decision: 'approved'}});
+      expect(root.confirmation?.intentHash).toBe(root.intentHash);
+      const card = yield* view();
+      expect(object(card.next)).toMatchObject({action: 'reconcile-plan'});
+      const reconciled = yield* action({command: 'reconcile', taskRef: String(card.taskRef), reason: 'Own the notes.'});
+      expect(object(reconciled.cycle).affected).toEqual([]);
+      expect(object((yield* view()).next)).toMatchObject({action: 'implement'});
     }).pipe(TestClock.withLive, provideNative),
 );
 

@@ -34,7 +34,8 @@ import {captureNativeCycleSource, nativeCycleIsAncestor, readNativeCycleTreeEntr
 
 export const nativeCycleSameLabelQualificationLimits = {
   elapsedMs: 30_000,
-  commands: 128,
+  // Each source capture also probes its normalization basis (ignored and configured attributes, #1068).
+  commands: 160,
   argumentBytes: 1_048_576,
   outputBytes: 8_388_608,
 } as const;

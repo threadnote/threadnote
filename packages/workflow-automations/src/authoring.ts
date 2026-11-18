@@ -7,7 +7,8 @@ import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 import {Option as EffectOption} from 'effect';
 
-const invalid = (message: string) => WorkflowAutomationError.make({code: 'invalid-document', message});
+const invalid = (message: string, detail?: {readonly path: string; readonly limit?: number}) =>
+  WorkflowAutomationError.make({code: 'invalid-document', message, ...(detail === undefined ? {} : {detail})});
 const AUTHORING_CONTROL_CHARACTER = /[^\u0020-\u007e\u00a0-\u{10ffff}]/u;
 const AUTHORING_TEXT_CONTROL_CHARACTER = /(?!\n)[^\u0020-\u007e\u00a0-\u{10ffff}]/u;
 const boundedText = (maximum: number, nonblank = false, singleLine = false) =>
@@ -258,7 +259,16 @@ export type NativeCompactIntent = typeof NativeCompactIntentSchema.Type;
 export const NativeCompactSourceSnapshotSchema = source;
 
 export const NativePlanIntentPolicyVersion = 2 as const;
-export type NativePlanIntentPolicyVersion = 1 | typeof NativePlanIntentPolicyVersion;
+/** Version 3 leaves ownership out of plan intent: phase paths and the compact expansion marker need no confirmation. */
+export const NativeDerivedOwnershipPlanIntentPolicyVersion = 3 as const;
+export type NativePlanIntentPolicyVersion =
+  1 | typeof NativePlanIntentPolicyVersion | typeof NativeDerivedOwnershipPlanIntentPolicyVersion;
+
+/** Standard-profile runs derive ownership, so their plans confirm intent without phase paths. */
+export const nativePlanIntentPolicyFor = (state: {
+  readonly policy?: {readonly mode: 'standard' | 'strict'};
+}): typeof NativePlanIntentPolicyVersion | typeof NativeDerivedOwnershipPlanIntentPolicyVersion =>
+  state.policy?.mode === 'standard' ? NativeDerivedOwnershipPlanIntentPolicyVersion : NativePlanIntentPolicyVersion;
 
 const alternativesDiagnostic = (issue: SchemaIssue.Issue, path: readonly PropertyKey[] = []): string | undefined => {
   if (
@@ -325,6 +335,11 @@ const combinedPhasePathsDiagnostic = (
   }
 };
 
+const issueLocation = (path: readonly PropertyKey[]) =>
+  EffectArray.reduce(path, '', (result, part) =>
+    typeof part === 'number' ? `${result}[${part}]` : result ? `${result}.${String(part)}` : String(part),
+  );
+
 const pathDiagnostic = (issue: SchemaIssue.Issue, path: readonly PropertyKey[] = []): string | undefined => {
   const validIndex = (value: PropertyKey | undefined) =>
     typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
@@ -369,10 +384,7 @@ const pathDiagnostic = (issue: SchemaIssue.Issue, path: readonly PropertyKey[] =
         rule = 'a parent path segment';
       else if (new TextEncoder().encode(value).byteLength > 4096) rule = 'the 4096-byte path limit';
       if (rule === undefined) return undefined;
-      const location = EffectArray.reduce(path, '', (result, part) =>
-        typeof part === 'number' ? `${result}[${part}]` : result ? `${result}.${String(part)}` : String(part),
-      );
-      const message = `${location} violates ${rule}.`;
+      const message = `${issueLocation(path)} violates ${rule}.`;
       return new TextEncoder().encode(message).byteLength <= 256 ? message : undefined;
     }
     default:
@@ -380,9 +392,109 @@ const pathDiagnostic = (issue: SchemaIssue.Issue, path: readonly PropertyKey[] =
   }
 };
 
-export const nativeAuthoringPathDiagnostic = (error: unknown): string | undefined => {
+const fieldDiagnostic = (path: readonly PropertyKey[], constraint: string): string | undefined => {
+  if (path.length === 0) return undefined;
+  const message = `${issueLocation(path)}: ${constraint}`;
+  return new TextEncoder().encode(message).byteLength <= 256 ? message : undefined;
+};
+
+/** First failing schema field and its declared constraint; never the rejected input or an unexpected key. */
+const schemaIssueDiagnostic = (issue: SchemaIssue.Issue, path: readonly PropertyKey[] = []): string | undefined => {
+  switch (issue._tag) {
+    case 'Pointer':
+      return schemaIssueDiagnostic(issue.issue, [...path, ...issue.path]);
+    case 'Encoding':
+      return schemaIssueDiagnostic(issue.issue, path);
+    case 'Composite':
+      return schemaIssueDiagnostic(issue.issues[0], path);
+    case 'AnyOf': {
+      const [first] = issue.issues;
+      return first
+        ? schemaIssueDiagnostic(first, path)
+        : fieldDiagnostic(path, SchemaIssue.defaultLeafHook(new SchemaIssue.InvalidType(issue.ast)));
+    }
+    case 'Filter':
+      return fieldDiagnostic(
+        path,
+        SchemaIssue.defaultCheckHook(issue) ??
+          `Expected ${String(issue.filter.annotations?.expected ?? 'a valid value')}`,
+      );
+    case 'InvalidType':
+      return fieldDiagnostic(path, SchemaIssue.defaultLeafHook(new SchemaIssue.InvalidType(issue.ast)));
+    case 'MissingKey':
+      return fieldDiagnostic(path, SchemaIssue.defaultLeafHook(issue));
+    case 'UnexpectedKey':
+      return fieldDiagnostic(path.slice(0, -1), 'contains an unsupported field');
+    default:
+      return fieldDiagnostic(path, 'Invalid value');
+  }
+};
+
+const schemaIssueLimit = (issue: SchemaIssue.Filter): number | undefined => {
+  const payload = issue.filter.annotations?.representation?.payload;
+  if (!Predicate.isObject(payload)) return undefined;
+  return typeof payload.maxLength === 'number'
+    ? payload.maxLength
+    : typeof payload.maximum === 'number'
+      ? payload.maximum
+      : undefined;
+};
+
+/** The first failing schema location and, for a size rule, its limit; the same walk as the bounded message. */
+const schemaIssueLocation = (
+  issue: SchemaIssue.Issue,
+  path: readonly PropertyKey[] = [],
+): {readonly path: readonly PropertyKey[]; readonly limit?: number} => {
+  switch (issue._tag) {
+    case 'Pointer':
+      return schemaIssueLocation(issue.issue, [...path, ...issue.path]);
+    case 'Encoding':
+      return schemaIssueLocation(issue.issue, path);
+    case 'Composite':
+      return schemaIssueLocation(issue.issues[0], path);
+    case 'AnyOf':
+      return issue.issues[0] ? schemaIssueLocation(issue.issues[0], path) : {path};
+    case 'Filter': {
+      const limit = schemaIssueLimit(issue);
+      return limit === undefined ? {path} : {path, limit};
+    }
+    case 'UnexpectedKey':
+      return {path: path.slice(0, -1)};
+    default:
+      return {path};
+  }
+};
+
+/** Structured refusal detail for a native authoring schema rejection: the field path and any size limit. */
+export const nativeAuthoringSchemaDetail = (
+  error: unknown,
+): {readonly path: string; readonly limit?: number} | undefined => {
   if (!Predicate.isObject(error) || !SchemaIssue.isIssue(error.issue)) return undefined;
-  return pathDiagnostic(error.issue);
+  try {
+    const location = schemaIssueLocation(error.issue);
+    if (location.path.length === 0) return undefined;
+    const path = issueLocation(location.path);
+    return location.limit === undefined ? {path} : {path, limit: location.limit};
+  } catch {
+    return undefined;
+  }
+};
+
+/** Bounded caller-facing diagnostic for a native authoring schema rejection, or undefined when none is safe. */
+export const nativeAuthoringSchemaDiagnostic = (error: unknown): string | undefined => {
+  if (!Predicate.isObject(error) || !SchemaIssue.isIssue(error.issue)) return undefined;
+  const issue = error.issue;
+  try {
+    return (
+      alternativesDiagnostic(issue) ??
+      combinedPhasePathsDiagnostic(issue) ??
+      pathDiagnostic(issue) ??
+      schemaIssueDiagnostic(issue)
+    );
+  } catch {
+    // Optional diagnostics must preserve the original rejection if projection fails.
+    return undefined;
+  }
 };
 
 export function decodeNativeAuthoringDocument(input: unknown): NativeAuthoringDocument {
@@ -392,18 +504,11 @@ export function decodeNativeAuthoringDocument(input: unknown): NativeAuthoringDo
       input,
     );
   } catch (error) {
-    let message = 'The native authoring document is malformed or contains unsupported fields.';
-    try {
-      if (Schema.isSchemaError(error))
-        message =
-          alternativesDiagnostic(error.issue) ??
-          combinedPhasePathsDiagnostic(error.issue) ??
-          pathDiagnostic(error.issue) ??
-          message;
-    } catch {
-      // Optional diagnostics must preserve the original rejection if projection fails.
-    }
-    throw invalid(message);
+    throw invalid(
+      nativeAuthoringSchemaDiagnostic(error) ??
+        'The native authoring document is malformed or contains unsupported fields.',
+      nativeAuthoringSchemaDetail(error),
+    );
   }
   if (new TextEncoder().encode(canonicalAuthoringJson(document)).byteLength > 1_000_000)
     throw invalid('The native authoring document exceeds 1000000 canonical UTF-8 bytes.');
@@ -433,8 +538,11 @@ export function projectNativeCompactIntent(
   let compact: NativeCompactIntent;
   try {
     compact = Schema.decodeUnknownSync(NativeCompactIntentSchema)(input);
-  } catch {
-    throw invalid('The compact task intent is malformed or exceeds its bounded input limits.');
+  } catch (error) {
+    throw invalid(
+      nativeAuthoringSchemaDiagnostic(error) ??
+        'The compact task intent is malformed or exceeds its bounded input limits.',
+    );
   }
   if (compact.eligibility.status === 'needs-planning')
     return {
@@ -460,7 +568,7 @@ export function projectNativeCompactIntent(
     title: compact.title,
     objective: `Implement the bounded change: ${compact.desiredChange}`,
     requirements: [{id: 'behavior', behavior: compact.desiredChange}],
-    context: {codeRefs: sourcePaths, evidenceRefs: [], note: ''},
+    context: {codeRefs: sourcePaths.slice(0, 8), evidenceRefs: [], note: ''},
     source: sourceSnapshot,
     current: {summary: compact.currentBehavior, components: [], contracts: [], diagram: ''},
     target: {summary: compact.desiredChange, components: [], contracts: [], diagram: ''},
@@ -519,6 +627,26 @@ export function isNativeMermaidDiagram(value: string): boolean {
   );
 }
 
+/**
+ * The plan-intent policy a saved plan records. A save that keeps the prior root's confirmation keeps the policy that
+ * root recorded with it, so a confirmed root stays confirmed until the next confirmation after a switch to standard;
+ * any other save takes the run's policy.
+ */
+export function nativePlanIntentPolicyForSave(
+  state: {readonly policy?: {readonly mode: 'standard' | 'strict'}},
+  prior:
+    | {
+        readonly confirmation?: {readonly intentHash: string};
+        readonly planIntentPolicyVersion?: NativePlanIntentPolicyVersion;
+      }
+    | undefined,
+  confirmedIntentHash: string | undefined,
+): NativePlanIntentPolicyVersion {
+  return confirmedIntentHash !== undefined && prior?.confirmation?.intentHash === confirmedIntentHash
+    ? (prior.planIntentPolicyVersion ?? 1)
+    : nativePlanIntentPolicyFor(state);
+}
+
 export function nativeSpecIntentDigest(
   document: NativeAuthoringDocument,
   planPolicyVersion: NativePlanIntentPolicyVersion = NativePlanIntentPolicyVersion,
@@ -537,7 +665,10 @@ export function nativeSpecIntentDigest(
       requirements: decoded.requirements,
       current: decoded.current,
       target: decoded.target,
-      phases: decoded.phases,
+      phases:
+        planPolicyVersion === NativeDerivedOwnershipPlanIntentPolicyVersion
+          ? EffectArray.map(decoded.phases, ({affectedPaths: _affected, newPaths: _new, ...phase}) => phase)
+          : decoded.phases,
       decisions: decoded.decisions,
       reviewRequired: decoded.review.required,
       ...(decoded.spec
@@ -549,10 +680,20 @@ export function nativeSpecIntentDigest(
             },
           }
         : {}),
-      ...(decoded.compactOrigin ? {compactOrigin: decoded.compactOrigin} : {}),
+      ...(decoded.compactOrigin
+        ? {
+            compactOrigin:
+              planPolicyVersion === NativeDerivedOwnershipPlanIntentPolicyVersion
+                ? {
+                    version: decoded.compactOrigin.version,
+                    eligibilityRationale: decoded.compactOrigin.eligibilityRationale,
+                  }
+                : decoded.compactOrigin,
+          }
+        : {}),
     };
     return sha256HexSync(
-      `threadnote.native-authoring.plan-intent.v${NativePlanIntentPolicyVersion}\n${canonicalAuthoringJson(intent)}`,
+      `threadnote.native-authoring.plan-intent.v${planPolicyVersion}\n${canonicalAuthoringJson(intent)}`,
     );
   }
   const intent = {
@@ -581,6 +722,17 @@ export interface NativeAuthoringIssue {
   readonly path: string;
   readonly message: string;
 }
+
+/** Lists at most `limit` computed issues by code, document path and fixed explanation. */
+export const nativeAuthoringIssueSummary = (issues: readonly NativeAuthoringIssue[], limit = 5): string => {
+  const listed = EffectArray.map(
+    EffectArray.take(issues, limit),
+    issue => `${issue.code} at ${issue.path} (${issue.message})`,
+  );
+  const remaining = issues.length - listed.length;
+  return EffectArray.join(remaining > 0 ? [...listed, `and ${remaining} more`] : listed, '; ');
+};
+
 export interface NativeAuthoringValidationOptions {
   readonly ready?: boolean;
   readonly planIntentPolicyVersion?: NativePlanIntentPolicyVersion;

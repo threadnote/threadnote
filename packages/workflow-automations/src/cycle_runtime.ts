@@ -1,3 +1,4 @@
+import {nativeWaivableGateIds} from './gates.js';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Schema} from 'effect';
 import {
@@ -15,6 +16,9 @@ import {
 } from './cycle.js';
 import {
   NativeCycleSnapshotSchema,
+  nativeCycleBlockingFinding,
+  type NativeCycleReview,
+  type NativeCycleSnapshot,
   nativeCycleUnreviewedRecoveryDigest,
   NativeCycleReviewSchema,
   validateNativeCycleReviewHistory,
@@ -73,19 +77,160 @@ export const NativeCycleReviewAttemptSchema = Schema.Struct({
   report: Schema.String.check(Schema.isMaxLength(65_536)),
   authority: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
 });
+/** An audited, caller-asserted waiver of one integrity gate for one exact tree. */
+export const NativeCycleWaiverSchema = Schema.Struct({
+  id: Schema.String.check(Schema.isPattern(/^waiver-[a-f0-9]{48}$/u)),
+  gate: Schema.Literals(nativeWaivableGateIds),
+  phaseId: id,
+  snapshotId: id,
+  tree: gitObject,
+  intentHash: digest,
+  reason: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+  userAuthority: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+});
+export type NativeCycleWaiver = typeof NativeCycleWaiverSchema.Type;
+
+/** Content-derived, so repeating the same waiver replays it; a review.blocking waiver also names its review. */
+export const nativeCycleWaiverId = (
+  waiver: Pick<
+    NativeCycleWaiver,
+    'gate' | 'phaseId' | 'snapshotId' | 'tree' | 'intentHash' | 'reason' | 'userAuthority'
+  >,
+) =>
+  'waiver-' +
+  Effect.pipe(
+    sha256HexSync(
+      nativeCycleCanonicalJson([
+        waiver.gate,
+        waiver.phaseId,
+        waiver.tree,
+        waiver.intentHash,
+        waiver.reason,
+        waiver.userAuthority,
+        ...(waiver.gate === 'review.blocking' ? [waiver.snapshotId] : []),
+      ]),
+    ),
+    EffectString.slice(0, 48),
+  );
+
+/**
+ * The waiver that covers this gate for this exact phase tree under the snapshot's own intent, if any. A review.blocking
+ * waiver covers only the blocked review it accepted, so pass the reviewed snapshot; blockers a later review of the same
+ * tree records need their own waiver.
+ */
+export const nativeCycleWaiverFor = (
+  runtime: {readonly waivers?: readonly NativeCycleWaiver[]},
+  gate: NativeCycleWaiver['gate'],
+  snapshot: Pick<NativeCycleSnapshot, 'snapshotId' | 'phaseId' | 'tree' | 'phaseHash' | 'intentHash'>,
+) =>
+  EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      runtime.waivers ?? [],
+      waiver =>
+        waiver.gate === gate &&
+        waiver.phaseId === snapshot.phaseId &&
+        waiver.tree === snapshot.tree &&
+        waiver.intentHash === (snapshot.intentHash ?? snapshot.phaseHash) &&
+        (gate !== 'review.blocking' || waiver.snapshotId === snapshot.snapshotId),
+    ),
+  );
+
+/**
+ * The accepted review that covers a snapshot: its own, or under the same intent the newest review of the same tree or,
+ * after the base moved, of the byte-identical change. A newer review that recorded a blocker ends the search, so an
+ * older clean review never answers for it. Derived on read; reviews[] stays the only owner of review state.
+ */
+export function nativeCycleCoveringReview(
+  runtime: NativeCycleRuntime,
+  snapshot: NativeCycleSnapshot,
+):
+  | {
+      readonly snapshot: NativeCycleSnapshot;
+      readonly review: NativeCycleReview;
+      readonly match: 'exact' | 'tree' | 'change';
+    }
+  | undefined {
+  const own = EffectOption.getOrUndefined(
+    EffectArray.findFirst(runtime.reviews, entry => entry.snapshotId === snapshot.snapshotId),
+  );
+  if (own) return {snapshot, review: own.report, match: 'exact'};
+  if (snapshot.version !== 4) return undefined;
+  const intent = snapshot.intentHash;
+  for (const entry of [...runtime.snapshots].reverse()) {
+    const candidate = entry.snapshot;
+    const review = EffectOption.getOrUndefined(
+      EffectArray.findFirst(runtime.reviews, item => item.snapshotId === candidate.snapshotId),
+    )?.report;
+    if (!review || candidate.phaseId !== snapshot.phaseId || (candidate.intentHash ?? candidate.phaseHash) !== intent)
+      continue;
+    if (candidate.tree === snapshot.tree) return {snapshot: candidate, review, match: 'tree'};
+    if (
+      snapshot.changeDigest &&
+      candidate.changeDigest === snapshot.changeDigest &&
+      candidate.scopeBase !== snapshot.scopeBase
+    )
+      return {snapshot: candidate, review, match: 'change'};
+    if (EffectArray.some(review.findings, nativeCycleBlockingFinding)) return undefined;
+  }
+  return undefined;
+}
+
+/** How a snapshot's tree is covered for validation and delivery; derived on read, never stored. */
+export type NativeCycleTreeCoverage =
+  | {
+      readonly _tag: 'reviewed';
+      readonly snapshot: NativeCycleSnapshot;
+      readonly review: NativeCycleReview;
+      readonly match: 'exact' | 'tree' | 'change';
+      readonly blocked: boolean;
+      readonly blockingWaiver?: NativeCycleWaiver;
+    }
+  | {readonly _tag: 'waived'; readonly waiver: NativeCycleWaiver}
+  | {readonly _tag: 'pending'};
+
+export function nativeCycleCoverage(
+  runtime: NativeCycleRuntime,
+  snapshot: NativeCycleSnapshot,
+): NativeCycleTreeCoverage {
+  const covering = nativeCycleCoveringReview(runtime, snapshot);
+  if (covering) {
+    const blocked = EffectArray.some(covering.review.findings, nativeCycleBlockingFinding);
+    const blockingWaiver = blocked ? nativeCycleWaiverFor(runtime, 'review.blocking', covering.snapshot) : undefined;
+    return {_tag: 'reviewed', ...covering, blocked, ...(blockingWaiver ? {blockingWaiver} : {})};
+  }
+  const waiver = nativeCycleWaiverFor(runtime, 'review.required', snapshot);
+  return waiver ? {_tag: 'waived', waiver} : {_tag: 'pending'};
+}
+
+/** A tree may go on to validation and delivery once reviewed with no unwaived blocker, or waived. */
+export const nativeCycleCoverageAccepts = (coverage: NativeCycleTreeCoverage) =>
+  coverage._tag === 'waived' || (coverage._tag === 'reviewed' && (!coverage.blocked || !!coverage.blockingWaiver));
+
+/** The waiver whose decision lets this coverage through, if one does. */
+export const nativeCycleCoverageWaiver = (coverage: NativeCycleTreeCoverage) =>
+  coverage._tag === 'waived' ? coverage.waiver : coverage._tag === 'reviewed' ? coverage.blockingWaiver : undefined;
+
+/** History a run may retain; a write that would exceed one refuses before it is saved. */
+export const nativeCycleRuntimeLimits = {snapshots: 256, waivers: 128} as const;
+
 export const NativeCycleRuntimeSchema = Schema.Struct({
   state: NativeCycleStateSchema,
   plans: Schema.Array(NativeCyclePlanSchema).check(Schema.isBetweenLength(1, 64)),
   baselines: Schema.Record(id, NativeCycleBaselineSchema),
   reviewLimits: Schema.Record(id, Schema.Finite.check(Schema.isInt(), Schema.isBetween({minimum: 5, maximum: 256}))),
   reviewExpansions: Schema.Array(NativeCycleReviewExpansionSchema).check(Schema.isMaxLength(256)),
-  snapshots: Schema.Array(NativeCycleStoredSnapshotSchema).check(Schema.isMaxLength(256)),
+  snapshots: Schema.Array(NativeCycleStoredSnapshotSchema).check(
+    Schema.isMaxLength(nativeCycleRuntimeLimits.snapshots),
+  ),
   /** For each invalidated phase, the last snapshot that predates its current repair iteration. */
   invalidatedThroughSnapshot: Schema.optionalKey(Schema.Record(id, id)),
   reviews: Schema.Array(Schema.Struct({snapshotId: id, report: NativeCycleReviewSchema})).check(
     Schema.isMaxLength(256),
   ),
   attempts: Schema.Array(NativeCycleReviewAttemptSchema).check(Schema.isMaxLength(512)),
+  waivers: Schema.optionalKey(
+    Schema.Array(NativeCycleWaiverSchema).check(Schema.isMaxLength(nativeCycleRuntimeLimits.waivers)),
+  ),
   historicalAdmission: Schema.optionalKey(
     Schema.Struct({
       version: Schema.Literal(1),
@@ -141,6 +286,16 @@ export function nativeCycleSnapshotIsCurrentIteration(
   return retiredIndex !== undefined && snapshotIndex > retiredIndex;
 }
 
+/** The newest snapshot of the phase's current iteration under `phaseHash`; validation and delivery judge its coverage. */
+export const nativeCycleLatestSnapshot = (runtime: NativeCycleRuntime, phaseId: string, phaseHash: string) =>
+  EffectArray.filter(
+    runtime.snapshots,
+    entry =>
+      entry.snapshot.phaseId === phaseId &&
+      entry.snapshot.phaseHash === phaseHash &&
+      nativeCycleSnapshotIsCurrentIteration(runtime, phaseId, entry.snapshot.snapshotId),
+  ).at(-1);
+
 /** Counts accepted reports continuously across every snapshot for the phase. */
 export function nativeCyclePhaseReviewUsage(runtime: NativeCycleRuntime, phaseId: string) {
   const count = EffectArray.filter(
@@ -194,7 +349,7 @@ export function nativeCycleLatestAcceptedReviewBasis(runtime: NativeCycleRuntime
       );
       return accepted.length === 1 ? {snapshot, review: report, attempt: accepted[0], digest} : undefined;
     }
-    const predecessor = snapshot.previous ?? snapshot.supersedes;
+    const predecessor = snapshot.reviewBasis?.snapshotId ?? snapshot.previous ?? snapshot.supersedes;
     current = EffectOption.getOrUndefined(
       EffectArray.findFirst(runtime.snapshots, entry => entry.snapshot.snapshotId === predecessor),
     )?.snapshot;
@@ -205,7 +360,9 @@ export function nativeCycleLatestAcceptedReviewBasis(runtime: NativeCycleRuntime
 /** Only the new witness changes the review ledger basis; ordinary direct predecessors remain strict. */
 export function nativeCycleReviewBasis(runtime: NativeCycleRuntime, snapshot: typeof NativeCycleSnapshotSchema.Type) {
   const predecessor =
-    snapshot.invalidTailMergeQualificationV1?.basisSnapshotId ?? snapshot.previous ?? snapshot.supersedes;
+    snapshot.version === 4
+      ? snapshot.reviewBasis?.snapshotId
+      : (snapshot.invalidTailMergeQualificationV1?.basisSnapshotId ?? snapshot.previous ?? snapshot.supersedes);
   const previous = EffectOption.getOrUndefined(
     EffectArray.findFirst(runtime.snapshots, entry => entry.snapshot.snapshotId === predecessor),
   )?.snapshot;
@@ -220,7 +377,8 @@ export function nativeCycleReviewContext(
   runtime: NativeCycleRuntime,
   snapshot: typeof NativeCycleSnapshotSchema.Type,
 ): ReturnType<typeof nativeCycleSourceReviewBasis> {
-  return snapshot.invalidTailMergeQualificationV1
+  // Tree snapshots bind their ledger through an explicit review basis rather than source ancestry.
+  return snapshot.invalidTailMergeQualificationV1 || snapshot.version === 4
     ? {previous: nativeCycleReviewBasis(runtime, snapshot)}
     : nativeCycleSourceReviewBasis(
         snapshot,
@@ -361,8 +519,10 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
         !prior ||
         latestSnapshotByPhase.get(snapshot.phaseId) !== prior.snapshot.snapshotId ||
         prior.snapshot.phaseId !== snapshot.phaseId ||
-        prior.snapshot.phaseHash !== snapshot.phaseHash ||
-        (prior.snapshot.tree === snapshot.tree && !snapshot.unreviewedSupersession.rebaseRecovery) ||
+        (snapshot.version !== 4 &&
+          prior.snapshot.tree === snapshot.tree &&
+          prior.snapshot.phaseHash === snapshot.phaseHash &&
+          !snapshot.unreviewedSupersession.rebaseRecovery) ||
         prior.snapshot.baseTree !== snapshot.baseTree ||
         reviews.has(prior.snapshot.snapshotId) ||
         !Effect.pipe(snapshot.unreviewedSupersession.reason, EffectString.trim)
@@ -555,6 +715,18 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
       )
         fail('Snapshot history is incomplete.');
     } else if (snapshot.previousTree) fail('Snapshot previous tree has no identity.');
+    if (snapshot.reviewBasis) {
+      const basis = snapshots.get(snapshot.reviewBasis.snapshotId)?.snapshot;
+      if (
+        !basis ||
+        !capturedSnapshots.has(basis.snapshotId) ||
+        !reviews.has(basis.snapshotId) ||
+        basis.tree !== snapshot.reviewBasis.tree ||
+        basis.phaseId !== snapshot.phaseId ||
+        (basis.intentHash ?? basis.phaseHash) !== snapshot.intentHash
+      )
+        fail('A tree snapshot review basis must be an earlier reviewed snapshot under the same phase intent.');
+    }
     if (snapshot.supersedes) {
       const prior = snapshots.get(snapshot.supersedes)?.snapshot;
       if (
@@ -562,9 +734,7 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
         snapshot.previous ||
         prior.phaseId !== snapshot.phaseId ||
         prior.baseTree !== snapshot.baseTree ||
-        (snapshot.unreviewedSupersession
-          ? prior.phaseHash !== snapshot.phaseHash
-          : prior.phaseHash === snapshot.phaseHash)
+        (!snapshot.unreviewedSupersession && prior.phaseHash === snapshot.phaseHash)
       )
         fail('Material review restart lacks its historical source boundary.');
     }
@@ -574,7 +744,11 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
     const snapshot = snapshots.get(snapshotId)?.snapshot;
     if (!snapshot) fail('Review snapshot is missing.');
     const basis = nativeCycleReviewContext(runtime, snapshot);
-    if ((snapshot.previous || snapshot.supersedes) && !basis.previous && !snapshot.unreviewedSupersession)
+    if (
+      snapshot.version === 4
+        ? snapshot.reviewBasis && !basis.previous
+        : (snapshot.previous || snapshot.supersedes) && !basis.previous && !snapshot.unreviewedSupersession
+    )
       fail('Review history lost its prior finding ledger.');
     (snapshot.sameLabelRebasedBaseIntegrationV1 ? validateNativeCycleReview : validateNativeCycleReviewHistory)(
       snapshot,
@@ -585,6 +759,25 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
   }
   if (EffectArray.some(runtime.attempts, attempt => !snapshots.has(attempt.snapshotId)))
     fail('Review attempt snapshot is missing.');
+  const waiverIds = new Set<string>();
+  for (const waiver of runtime.waivers ?? []) {
+    const snapshot = snapshots.get(waiver.snapshotId)?.snapshot;
+    if (
+      waiverIds.has(waiver.id) ||
+      waiver.id !== nativeCycleWaiverId(waiver) ||
+      !snapshot ||
+      snapshot.phaseId !== waiver.phaseId ||
+      snapshot.tree !== waiver.tree ||
+      (snapshot.intentHash ?? snapshot.phaseHash) !== waiver.intentHash ||
+      !EffectString.trim(waiver.reason) ||
+      !EffectString.trim(waiver.userAuthority)
+    )
+      fail('A waiver must name one retained snapshot tree, its intent, a reason and explicit authority.');
+    waiverIds.add(waiver.id);
+  }
+  for (const phase of EffectRecord.values(runtime.state.phases))
+    if (phase.validation?.waiverId !== undefined && !waiverIds.has(phase.validation.waiverId))
+      fail('A validation names a waiver this run does not retain.');
   const checksums = makeNativeHistoricalDigests(runtime.plans);
   for (const admission of admissions) {
     const {history, ...metadata} = admission;
@@ -706,15 +899,12 @@ function validateSupplementalInitialization(
   );
   const stored = EffectArray.filter(runtime.snapshots, item => item.snapshot.phaseId === init.phaseId).at(-1);
   const snapshot = stored?.snapshot;
-  const review = EffectOption.getOrUndefined(
-    EffectArray.findFirst(runtime.reviews, item => item.snapshotId === init.snapshotId),
-  );
   if (
     !context.localComplete ||
     !phase ||
     !definition ||
     !snapshot ||
-    !review ||
+    !nativeCycleCoverageAccepts(nativeCycleCoverage(runtime, snapshot)) ||
     phase.delivery?.delivery !== 'local' ||
     !phase.validation ||
     init.planDigest !== context.planDigest ||
@@ -736,12 +926,6 @@ function validateSupplementalInitialization(
       definition.baseBranch !== `${init.pr.baseRefBinding?.remote}/${init.pr.baseBranch}`)
   )
     supplementalFail('Supplemental attachment requires exact completed local proof and an existing matching PR.');
-  const reviewContext = nativeCycleReviewContext(runtime, snapshot);
-  if (
-    validateNativeCycleReviewHistory(snapshot, review.report, reviewContext.previous, reviewContext.findingBasis)
-      .summary.blockingIssueCount
-  )
-    supplementalFail('Supplemental attachment requires an accepted nonblocking source review.');
 }
 
 function validateSupplementalRecords(publication: NativeCycleSupplementalPublication): void {

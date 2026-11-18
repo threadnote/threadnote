@@ -57,6 +57,8 @@ const acceptanceRef = Schema.Struct({id, criterion: text(), requirements: refs, 
 const phaseSchema = Schema.Struct({
   id,
   definitionHash: digest,
+  /** The phase definition without its paths; present on plans exported for standard-profile runs. */
+  intentDefinitionHash: Schema.optionalKey(digest),
   title: text(256),
   dependsOn: refs,
   allowedPaths: Schema.Array(text()).check(Schema.isMaxLength(256)),
@@ -92,6 +94,8 @@ const validationSchema = Schema.Struct({
     Schema.Struct({criterion: text(), result: Schema.Literal('passed'), evidence: text()}),
   ).check(Schema.isBetweenLength(1, 128)),
   reviewTree: Schema.optionalKey(gitObject),
+  /** The audited waiver that let the validated tree through, when one did. */
+  waiverId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^waiver-[a-f0-9]{48}$/u))),
   head: Schema.optionalKey(gitObject),
 });
 export const NativeCycleValidationSchema = validationSchema;
@@ -226,7 +230,10 @@ export const NativeCyclePhaseProofSchema = Schema.Struct({
 });
 const phaseStateSchema = Schema.Struct({
   status: Schema.Literals(['pending', 'active', 'validated', 'published', 'merged', 'stale', 'blocked']),
+  /** The phase contract the current proof binds; the plan's own hash unless `planPhaseHash` says otherwise. */
   phaseHash: digest,
+  /** The current plan's phase hash, kept beside retained proof that a standard path-only reconcile left in place. */
+  planPhaseHash: Schema.optionalKey(digest),
   validation: Schema.optionalKey(validationSchema),
   head: Schema.optionalKey(gitObject),
   tree: Schema.optionalKey(gitObject),
@@ -436,7 +443,10 @@ export function decodeNativeCycleState(value: unknown): NativeCycleState {
     err('State phase keyset does not match plan.');
   for (const p of s.plan.phases) {
     const r = s.phases[p.id];
-    if (r.phaseHash !== nativeCyclePhaseHash(s.plan, p.id)) err('State phase hash is inconsistent.');
+    if ((r.planPhaseHash ?? r.phaseHash) !== nativeCyclePhaseHash(s.plan, p.id))
+      err('State phase hash is inconsistent.');
+    if (r.planPhaseHash !== undefined && (r.planPhaseHash === r.phaseHash || !r.validation))
+      err('Only retained proof keeps an earlier phase hash.');
     if (
       ['validated', 'published', 'merged'].includes(r.status) &&
       (!r.validation ||
@@ -545,6 +555,44 @@ export function nativeCyclePhaseHash(plan: NativeCyclePlan, phaseId: string): st
     `threadnote.native-cycle.phase.v1\n${canonical({objective: plan.objective, delivery: plan.delivery, featureId: plan.featureId, project: plan.project, spec: plan.spec, phase: {id: key, title, dependsOn, allowedPaths, acceptanceCriteria, acceptanceRefs, safeToMergeReason, definitionHash}})}`,
   );
 }
+type NativeCyclePlanPhase = NativeCyclePlan['phases'][number];
+const phaseIntentDigest = (plan: NativeCyclePlan, phase: NativeCyclePlanPhase, intentDefinitionHash?: string) => {
+  const {id: key, title, dependsOn, acceptanceCriteria, acceptanceRefs, safeToMergeReason} = phase;
+  return sha256HexSync(
+    `threadnote.native-cycle.phase-intent.v1\n${canonical({objective: plan.objective, delivery: plan.delivery, featureId: plan.featureId, project: plan.project, spec: plan.spec, phase: {id: key, title, dependsOn, acceptanceCriteria, acceptanceRefs, safeToMergeReason, intentDefinitionHash}})}`,
+  );
+};
+/**
+ * Business intent of a phase: everything but its owned paths and branch binding. A plan exported before the standard
+ * profile keeps its phase hash as the snapshot intent, so earlier reviews under that same plan still cover a tree.
+ */
+export function nativeCyclePhaseIntentHash(plan: NativeCyclePlan, phaseId: string): string {
+  const p = EffectOption.getOrUndefined(EffectArray.findFirst(plan.phases, x => x.id === phaseId));
+  if (!p) return err('Unknown phase.');
+  return p.intentDefinitionHash === undefined
+    ? nativeCyclePhaseHash(plan, phaseId)
+    : phaseIntentDigest(plan, p, p.intentDefinitionHash);
+}
+/**
+ * Whether a phase keeps its business intent across a reconcile. A plan exported before the standard profile has no
+ * path-free definition, so its changed definition is intent unless `pathOnly` names the phase.
+ */
+function samePhaseIntent(
+  old: NativeCyclePlan,
+  plan: NativeCyclePlan,
+  phaseId: string,
+  pathOnly: readonly string[],
+): boolean {
+  const before = EffectOption.getOrUndefined(EffectArray.findFirst(old.phases, x => x.id === phaseId));
+  const after = EffectOption.getOrUndefined(EffectArray.findFirst(plan.phases, x => x.id === phaseId));
+  if (!before || !after) return false;
+  if (before.intentDefinitionHash !== undefined && after.intentDefinitionHash !== undefined)
+    return nativeCyclePhaseIntentHash(old, phaseId) === nativeCyclePhaseIntentHash(plan, phaseId);
+  return (
+    phaseIntentDigest(old, before) === phaseIntentDigest(plan, after) &&
+    (before.definitionHash === after.definitionHash || pathOnly.includes(phaseId))
+  );
+}
 export function initializeNativeCycle(value: NativeCyclePlan): NativeCycleState {
   const plan = decodeNativeCyclePlan(value);
   return {
@@ -632,6 +680,10 @@ export interface CycleSnapshot {
   readonly head: string;
   readonly tree: string;
   readonly files: readonly string[];
+  /** The tree the covering review reviewed, when it differs from `tree` or no review covers it. */
+  readonly reviewTree?: string;
+  /** The audited waiver that lets the tree through, when one does. */
+  readonly waiverId?: string;
 }
 export function checkNativeCycleScope(phase: NativeCyclePlan['phases'][number], files: readonly string[]): boolean {
   return EffectArray.every(
@@ -674,8 +726,9 @@ export function validateNativeCyclePhase(
     !isGitObject(snapshot.tree) ||
     v.snapshotTree !== snapshot.tree ||
     (v.head && v.head !== snapshot.head) ||
-    (v.reviewTree && v.reviewTree !== snapshot.tree) ||
-    r.phaseHash !== nativeCyclePhaseHash(s.plan, idValue)
+    (v.reviewTree && v.reviewTree !== ('reviewTree' in snapshot ? snapshot.reviewTree : snapshot.tree)) ||
+    v.waiverId !== snapshot.waiverId ||
+    (r.planPhaseHash ?? r.phaseHash) !== nativeCyclePhaseHash(s.plan, idValue)
   )
     err('Validation does not match snapshot.');
   if (!checkNativeCycleScope(p, snapshot.files)) err('Changed paths exceed allowed scope.');
@@ -712,7 +765,7 @@ export function recordNativeCycleDelivery(value: NativeCycleState, idValue: stri
     !r ||
     !['validated', 'published', 'merged'].includes(r.status) ||
     !r.validation ||
-    r.phaseHash !== nativeCyclePhaseHash(s.plan, idValue)
+    (r.planPhaseHash ?? r.phaseHash) !== nativeCyclePhaseHash(s.plan, idValue)
   )
     err('Phase has no current validation.');
   const d = decode(deliverySchema, input, 'Invalid delivery receipt.');
@@ -819,10 +872,11 @@ export function invalidateNativeCycle(value: NativeCycleState, idValue: string, 
   for (const k of affected) if (s.phases[k].status === 'merged') err('Merged history cannot be rewritten.');
   const phases = {...s.phases};
   for (const k of affected) {
-    const old = phases[k];
+    const {planPhaseHash, ...old} = phases[k];
     phases[k] = {
       ...old,
       status: 'stale',
+      phaseHash: planPhaseHash ?? old.phaseHash,
       history: withHistory(old),
       validation: undefined,
       delivery: undefined,
@@ -831,11 +885,17 @@ export function invalidateNativeCycle(value: NativeCycleState, idValue: string, 
   }
   return {...s, phases};
 }
+/**
+ * `pathOnly` names the phases of a plan exported before the standard profile whose current definition, recomputed
+ * with their recorded paths, reproduces their recorded definition hash. Only the authoring owner can check that.
+ */
 export function reconcileNativeCyclePlan(
   value: NativeCycleState,
   newValue: NativeCyclePlan,
   reason: string,
   userAuthority?: string,
+  policy: 'standard' | 'strict' = 'strict',
+  pathOnly: readonly string[] = [],
 ): {readonly state: NativeCycleState; readonly affected: readonly string[]} {
   const s = decodeNativeCycleState(value),
     plan = decodeNativeCyclePlan(newValue),
@@ -873,12 +933,16 @@ export function reconcileNativeCyclePlan(
   );
   for (const p of plan.phases) {
     const before = EffectOption.getOrUndefined(EffectArray.findFirst(old.phases, x => x.id === p.id));
-    if (
-      !before ||
-      before.baseBranch !== p.baseBranch ||
-      nativeCyclePhaseHash(old, p.id) !== nativeCyclePhaseHash(plan, p.id)
-    )
-      seeds.push(p.id);
+    // Under standard, paths and an undelivered base binding are derived bookkeeping, not material intent.
+    const material =
+      policy === 'standard'
+        ? !before ||
+          !samePhaseIntent(old, plan, p.id, pathOnly) ||
+          (before.baseBranch !== p.baseBranch && s.phases[p.id]?.delivery !== undefined)
+        : !before ||
+          before.baseBranch !== p.baseBranch ||
+          nativeCyclePhaseHash(old, p.id) !== nativeCyclePhaseHash(plan, p.id);
+    if (material) seeds.push(p.id);
   }
   const affected = descendants([old, plan], seeds);
   for (const k of affected) if (s.phases[k]?.status === 'merged') err('Merged history cannot be rewritten.');
@@ -890,11 +954,15 @@ export function reconcileNativeCyclePlan(
       phases[p.id] = {status: 'stale', phaseHash, reason, ...(prior ? {history: withHistory(prior)} : {})};
     else {
       const before = EffectOption.getOrUndefined(EffectArray.findFirst(old.phases, x => x.id === p.id))!,
-        metadataChanged = before.branch !== p.branch || before.baseBranch !== p.baseBranch;
+        metadataChanged = before.branch !== p.branch || before.baseBranch !== p.baseBranch,
+        {planPhaseHash: _retired, ...kept} = prior,
+        // Proof keeps the contract it was produced under, so its snapshots, refs and receipts stay bound unchanged.
+        proofHash = prior.validation ? prior.phaseHash : phaseHash;
       if (metadataChanged && prior.status === 'merged') err('Merged delivery metadata cannot change.');
       phases[p.id] = {
-        ...prior,
-        phaseHash,
+        ...kept,
+        phaseHash: proofHash,
+        ...(proofHash === phaseHash ? {} : {planPhaseHash: phaseHash}),
         ...(metadataChanged && prior.delivery
           ? {
               history: withHistory(prior),

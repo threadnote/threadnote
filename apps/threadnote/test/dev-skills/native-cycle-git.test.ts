@@ -1,9 +1,10 @@
 import {it as effectIt} from '@effect/vitest';
 import {Array as EffectArray} from 'effect';
-import {Effect, FileSystem, Option, Result} from 'effect';
+import {Clock, Effect, FileSystem, Option, Path, Result} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
+import {SystemInfo} from '@threadnote/platform/system';
 import {
   captureNativeCycleSource,
   pinNativeCycleTree,
@@ -14,7 +15,43 @@ import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
-const run = <A, E, R>(program: Effect.Effect<A, E, R>) => program.pipe(TestClock.withLive, provideNative);
+/** Host Git config and attribute files would otherwise decide normalization for the fixture's Git children. */
+const withoutHostGit = <A, E, R>(program: Effect.Effect<A, E, R>) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const command = yield* CommandExecutor;
+    const system = yield* SystemInfo;
+    const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-cycle-git-home-'});
+    const isolation = {
+      GIT_ATTR_NOSYSTEM: '1',
+      GIT_CONFIG_GLOBAL: path.join(home, '.gitconfig'),
+      GIT_CONFIG_NOSYSTEM: '1',
+      HOME: home,
+      XDG_CONFIG_HOME: path.join(home, '.config'),
+    };
+    const environment = {...system.environment(), ...isolation};
+    const isolate = <O extends {readonly env?: NodeJS.ProcessEnv}>(options?: O) => ({
+      ...options,
+      env: {...(options?.env ?? environment), ...isolation},
+    });
+    const executeBytes = command.executeBytes;
+    return yield* program.pipe(
+      Effect.provideService(
+        CommandExecutor,
+        CommandExecutor.of({
+          ...command,
+          execute: (executable, args, options) => command.execute(executable, args, isolate(options)),
+          ...(executeBytes
+            ? {executeBytes: (executable, args, options) => executeBytes(executable, args, isolate(options))}
+            : {}),
+        }),
+      ),
+      Effect.provideService(SystemInfo, {...system, environment: () => environment}),
+    );
+  });
+const run = <A, E, R>(program: Effect.Effect<A, E, R>) =>
+  program.pipe(withoutHostGit, TestClock.withLive, provideNative);
 const git = (repo: string, ...args: string[]) =>
   runCommandEffect('git', ['--no-optional-locks', '-C', repo, ...args]).pipe(Effect.map(result => result.stdout));
 const commit = (repo: string) =>
@@ -201,9 +238,258 @@ describe('native cycle Git snapshots', () => {
         expect(result.failure.message).toContain('complete baseline-relative delta');
         expect(result.failure.message).not.toContain('requalify');
       }
-      expect(stagingCalls.length).toBeGreaterThanOrEqual(4);
+      expect(stagingCalls.length).toBeGreaterThanOrEqual(3);
       expect(EffectArray.every(stagingCalls, call => call.timeoutMs === 120_000)).toBe(true);
       expect(yield* f.fs.readFile(f.path.join(f.repo, '.git', 'index'))).toEqual(beforeIndex);
+    }).pipe(run),
+  );
+
+  effectIt.effect(
+    'skips full renormalization outside the racy ctime window while preserving restored-mtime edits and gitattributes normalization',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* nativeFixture();
+        yield* git(f.repo, 'config', 'core.autocrlf', 'false');
+
+        const sameSecondFile = f.path.join(f.repo, 'same-second.ts');
+        const agedFile = f.path.join(f.repo, 'aged.ts');
+        const rootCrlfFile = f.path.join(f.repo, 'crlf.txt');
+        const subDir = f.path.join(f.repo, 'sub');
+        const subCrlfFile = f.path.join(subDir, 'nested.txt');
+        yield* f.fs.makeDirectory(subDir);
+        yield* f.fs.writeFileString(f.path.join(f.repo, '.gitattributes'), '*.bin binary\n');
+        yield* git(f.repo, 'config', 'index.version', '4');
+        yield* git(f.repo, 'config', 'index.skipHash', 'true');
+        yield* f.fs.writeFileString(agedFile, 'export const agedVal = true;\n');
+        yield* f.fs.writeFile(rootCrlfFile, new TextEncoder().encode('alpha\r\nbeta\r\n'));
+        yield* f.fs.writeFile(subCrlfFile, new TextEncoder().encode('nested\r\nline\r\n'));
+        yield* git(f.repo, 'add', '.gitattributes', 'aged.ts', 'crlf.txt', 'sub/nested.txt', 'source.ts');
+        yield* commit(f.repo);
+        const agedStat = yield* f.fs.stat(agedFile);
+        const initialCommitSec = Math.floor((yield* Clock.currentTimeMillis) / 1000);
+        while (Math.floor((yield* Clock.currentTimeMillis) / 1000) <= initialCommitSec + 2) {
+          yield* Effect.sleep('150 millis');
+        }
+        yield* f.fs.writeFileString(sameSecondFile, 'export const sameSec = true;\n');
+        yield* f.fs.utimes(sameSecondFile, Option.getOrThrow(agedStat.atime), Option.getOrThrow(agedStat.mtime));
+        yield* git(f.repo, 'add', 'same-second.ts');
+        yield* commit(f.repo);
+        const commitSec = Math.floor((yield* Clock.currentTimeMillis) / 1000);
+        const baseline = Effect2.pipe(yield* git(f.repo, 'rev-parse', 'HEAD'), EffectString.trim);
+
+        const indexPath = f.path.join(f.repo, '.git', 'index');
+        const originalIndexBytes = yield* f.fs.readFile(indexPath);
+
+        const command = yield* CommandExecutor;
+        const executeBytes = command.executeBytes;
+        if (!executeBytes) throw new Error('Expected binary command execution support');
+        const recordedCalls: Array<{args: readonly string[]; timeoutMs?: number}> = [];
+        const recording = CommandExecutor.of({
+          ...command,
+          executeBytes: (executable, args, options) => {
+            recordedCalls.push({args, timeoutMs: options?.timeoutMs});
+            return executeBytes(executable, args, options);
+          },
+        });
+
+        // 1. Same-second in-place same-size edit with backdated mtime (< index mtime).
+        yield* f.fs.writeFileString(sameSecondFile, 'export const sameSec = null;\n');
+        yield* f.fs.utimes(sameSecondFile, Option.getOrThrow(agedStat.atime), Option.getOrThrow(agedStat.mtime));
+        const sameSecSnapshot = yield* captureNativeCycleSource(f.repo, 'HEAD').pipe(
+          Effect.provideService(CommandExecutor, recording),
+        );
+        expect(yield* git(f.repo, 'show', `${sameSecSnapshot.tree}:same-second.ts`)).toBe(
+          'export const sameSec = null;\n',
+        );
+        if (process.platform !== 'win32') {
+          const targetedCalls = EffectArray.filter(recordedCalls, call => call.args.includes('--renormalize'));
+          expect(targetedCalls).toHaveLength(1);
+          expect(targetedCalls[0]?.args).toContain(':(literal)same-second.ts');
+          expect(targetedCalls[0]?.args).not.toContain('--all');
+        }
+
+        // Advance past the 2-second racy index ctime window so untouched index entries need no --renormalize.
+        while (Math.floor((yield* Clock.currentTimeMillis) / 1000) <= commitSec + 2) {
+          yield* Effect.sleep('200 millis');
+        }
+
+        // 1b. Post-window same-size edit with restored mtime must still rehash without full renormalization on POSIX.
+        recordedCalls.length = 0;
+        yield* f.fs.writeFileString(sameSecondFile, 'export const sameSec = false;\n');
+        yield* f.fs.utimes(sameSecondFile, Option.getOrThrow(agedStat.atime), Option.getOrThrow(agedStat.mtime));
+        const delayedSnapshot = yield* captureNativeCycleSource(f.repo, 'HEAD').pipe(
+          Effect.provideService(CommandExecutor, recording),
+        );
+        expect(yield* git(f.repo, 'show', `${delayedSnapshot.tree}:same-second.ts`)).toBe(
+          'export const sameSec = false;\n',
+        );
+        if (process.platform !== 'win32')
+          expect(EffectArray.some(recordedCalls, call => call.args.includes('--renormalize'))).toBe(false);
+        yield* f.fs.writeFileString(sameSecondFile, 'export const sameSec = null;\n');
+        yield* f.fs.utimes(sameSecondFile, Option.getOrThrow(agedStat.atime), Option.getOrThrow(agedStat.mtime));
+
+        // 2. Post-second in-place same-size edit with restored atime/mtime:
+        // must rehash via explicit -c core.trustctime=true without invoking git add --renormalize on POSIX.
+        recordedCalls.length = 0;
+        yield* f.fs.utimes(sameSecondFile, Option.getOrThrow(agedStat.atime), Option.getOrThrow(agedStat.mtime));
+        yield* f.fs.writeFileString(agedFile, 'export const agedVal = 1234;\n');
+        yield* f.fs.utimes(agedFile, Option.getOrThrow(agedStat.atime), Option.getOrThrow(agedStat.mtime));
+
+        const agedSnapshot = yield* captureNativeCycleSource(f.repo, 'HEAD').pipe(
+          Effect.provideService(CommandExecutor, recording),
+        );
+        expect(yield* git(f.repo, 'show', `${agedSnapshot.tree}:same-second.ts`)).toBe(
+          'export const sameSec = null;\n',
+        );
+        expect(yield* git(f.repo, 'show', `${agedSnapshot.tree}:aged.ts`)).toBe('export const agedVal = 1234;\n');
+        expect(yield* git(f.repo, 'show', `${agedSnapshot.tree}:crlf.txt`)).toBe('alpha\r\nbeta\r\n');
+        expect(yield* git(f.repo, 'show', `${agedSnapshot.tree}:sub/nested.txt`)).toBe('nested\r\nline\r\n');
+        const fastStagingCalls = EffectArray.filter(
+          recordedCalls,
+          call => call.args.includes('add') || call.args.includes('write-tree') || call.args.includes('diff'),
+        );
+        expect(EffectArray.some(recordedCalls, call => call.args.includes('--renormalize'))).toBe(
+          process.platform === 'win32',
+        );
+        expect(fastStagingCalls).toHaveLength(process.platform === 'win32' ? 4 : 3);
+        expect(EffectArray.every(fastStagingCalls, call => call.timeoutMs === 120_000)).toBe(true);
+        expect(yield* f.fs.readFile(indexPath)).toEqual(originalIndexBytes);
+
+        // 3. .git/info/attributes triggers renormalization without touching real index.
+        recordedCalls.length = 0;
+        const infoDir = f.path.join(f.repo, '.git', 'info');
+        const infoAttributes = f.path.join(infoDir, 'attributes');
+        yield* f.fs.makeDirectory(infoDir, {recursive: true});
+        yield* f.fs.writeFileString(infoAttributes, 'crlf.txt text eol=lf\n');
+        const infoNormSnapshot = yield* captureNativeCycleSource(f.repo, 'HEAD').pipe(
+          Effect.provideService(CommandExecutor, recording),
+        );
+        expect(EffectArray.some(recordedCalls, call => call.args.includes('--renormalize'))).toBe(true);
+        expect(yield* git(f.repo, 'show', `${infoNormSnapshot.tree}:crlf.txt`)).toBe('alpha\nbeta\n');
+        expect(yield* git(f.repo, 'show', `${infoNormSnapshot.tree}:sub/nested.txt`)).toBe('nested\r\nline\r\n');
+        expect(yield* f.fs.readFile(indexPath)).toEqual(originalIndexBytes);
+        yield* f.fs.remove(infoAttributes);
+
+        // 4. Nested sub/.gitattributes addition triggers renormalization and normalizes sub/nested.txt without touching real index.
+        recordedCalls.length = 0;
+        const subAttributes = f.path.join(subDir, '.gitattributes');
+        yield* f.fs.writeFileString(subAttributes, '* text=auto eol=lf\n');
+        const subNormSnapshot = yield* captureNativeCycleSource(f.repo, 'HEAD').pipe(
+          Effect.provideService(CommandExecutor, recording),
+        );
+        expect(EffectArray.some(recordedCalls, call => call.args.includes('--renormalize'))).toBe(true);
+        expect(yield* git(f.repo, 'show', `${subNormSnapshot.tree}:sub/nested.txt`)).toBe('nested\nline\n');
+        expect(yield* git(f.repo, 'show', `${subNormSnapshot.tree}:crlf.txt`)).toBe('alpha\r\nbeta\r\n');
+        expect(yield* f.fs.readFile(indexPath)).toEqual(originalIndexBytes);
+        yield* f.fs.remove(subAttributes);
+
+        // 5. Root .gitattributes modification (and committed .gitattributes drift vs baseline) normalizes tracked CRLF blobs.
+        recordedCalls.length = 0;
+        yield* f.fs.writeFileString(f.path.join(f.repo, '.gitattributes'), '* text=auto eol=lf\n');
+        const rootNormSnapshot = yield* captureNativeCycleSource(f.repo, 'HEAD').pipe(
+          Effect.provideService(CommandExecutor, recording),
+        );
+        expect(EffectArray.some(recordedCalls, call => call.args.includes('--renormalize'))).toBe(true);
+        expect(yield* git(f.repo, 'show', `${rootNormSnapshot.tree}:crlf.txt`)).toBe('alpha\nbeta\n');
+        expect(yield* git(f.repo, 'show', `${rootNormSnapshot.tree}:sub/nested.txt`)).toBe('nested\nline\n');
+        expect(yield* f.fs.readFile(indexPath)).toEqual(originalIndexBytes);
+        expect(yield* f.fs.readFileString(rootCrlfFile)).toBe('alpha\r\nbeta\r\n');
+
+        // Commit ONLY .gitattributes so HEAD still holds CRLF blobs while baseline..HEAD changed .gitattributes.
+        yield* git(f.repo, 'add', '.gitattributes');
+        yield* commit(f.repo);
+        const afterAttrCommitSec = Math.floor((yield* Clock.currentTimeMillis) / 1000);
+        while (Math.floor((yield* Clock.currentTimeMillis) / 1000) <= afterAttrCommitSec + 2) {
+          yield* Effect.sleep('200 millis');
+        }
+        const committedAttrIndex = yield* f.fs.readFile(indexPath);
+        recordedCalls.length = 0;
+        const baselineDriftSnapshot = yield* captureNativeCycleSource(f.repo, baseline).pipe(
+          Effect.provideService(CommandExecutor, recording),
+        );
+        expect(EffectArray.some(recordedCalls, call => call.args.includes('--renormalize'))).toBe(true);
+        expect(yield* git(f.repo, 'show', `${baselineDriftSnapshot.tree}:crlf.txt`)).toBe('alpha\nbeta\n');
+        expect(yield* git(f.repo, 'show', `${baselineDriftSnapshot.tree}:sub/nested.txt`)).toBe('nested\nline\n');
+        expect(yield* f.fs.readFile(indexPath)).toEqual(committedAttrIndex);
+
+        // 6. Special index flags (--assume-unchanged / CE_VALID) force full renormalization so hidden edits are captured.
+        yield* git(f.repo, 'update-index', '--assume-unchanged', 'source.ts');
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const assumedEdited = true;\n');
+        const assumeIndexBefore = yield* f.fs.readFile(indexPath);
+        recordedCalls.length = 0;
+        const assumeSnapshot = yield* captureNativeCycleSource(f.repo, 'HEAD').pipe(
+          Effect.provideService(CommandExecutor, recording),
+        );
+        expect(
+          EffectArray.some(recordedCalls, call => call.args.includes('--renormalize') && call.args.includes('--all')),
+        ).toBe(true);
+        expect(yield* git(f.repo, 'show', `${assumeSnapshot.tree}:source.ts`)).toBe(
+          'export const assumedEdited = true;\n',
+        );
+        expect(yield* f.fs.readFile(indexPath)).toEqual(assumeIndexBefore);
+      }).pipe(run),
+    process.platform === 'win32' ? {timeout: 120_000} : {timeout: 60_000},
+  );
+
+  effectIt.effect('renormalizes fully when out-of-tree attributes or trustctime=false may change staged blobs', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      yield* git(f.repo, 'config', 'core.autocrlf', 'false');
+      yield* f.fs.writeFile(f.path.join(f.repo, 'crlf.txt'), new TextEncoder().encode('alpha\r\nbeta\r\n'));
+      yield* git(f.repo, 'add', '--all');
+      yield* commit(f.repo);
+      // Leave the racy ctime window and rewrite the index so only a full renormalization can restage CRLF bytes.
+      const commitSec = Math.floor((yield* Clock.currentTimeMillis) / 1000);
+      while (Math.floor((yield* Clock.currentTimeMillis) / 1000) <= commitSec + 2) yield* Effect.sleep('200 millis');
+      yield* git(f.repo, 'update-index', '--refresh', '--force-write-index');
+      const command = yield* CommandExecutor;
+      const system = yield* SystemInfo;
+      const executeBytes = command.executeBytes;
+      if (!executeBytes) throw new Error('Expected binary command execution support');
+      const capture = (environment = system.environment()) =>
+        Effect.gen(function* () {
+          let full = false;
+          const recording = CommandExecutor.of({
+            ...command,
+            executeBytes: (executable, args, options) => {
+              if (args.includes('--renormalize') && args.includes('--all')) full = true;
+              return executeBytes(executable, args, options);
+            },
+          });
+          const snapshot = yield* captureNativeCycleSource(f.repo, 'HEAD').pipe(
+            Effect.provideService(CommandExecutor, recording),
+            Effect.provideService(SystemInfo, {...system, environment: () => environment}),
+          );
+          return {full, crlf: yield* git(f.repo, 'show', `${snapshot.tree}:crlf.txt`)};
+        });
+      const posix = process.platform !== 'win32';
+      const normalizing = '*.txt text eol=lf\n';
+      expect(yield* capture()).toEqual({full: !posix, crlf: 'alpha\r\nbeta\r\n'});
+
+      const configured = f.path.join(f.home, 'attributes');
+      yield* f.fs.writeFileString(configured, '*.txt diff=text\n');
+      yield* git(f.repo, 'config', 'core.attributesFile', configured);
+      expect(yield* capture()).toEqual({full: !posix, crlf: 'alpha\r\nbeta\r\n'});
+      yield* f.fs.writeFileString(configured, normalizing);
+      expect(yield* capture()).toEqual({full: true, crlf: 'alpha\nbeta\n'});
+      yield* git(f.repo, 'config', '--unset', 'core.attributesFile');
+
+      const xdg = f.path.join(f.home, 'xdg');
+      yield* f.fs.makeDirectory(f.path.join(xdg, 'git'), {recursive: true});
+      yield* f.fs.writeFileString(f.path.join(xdg, 'git', 'attributes'), normalizing);
+      expect((yield* capture({...system.environment(), XDG_CONFIG_HOME: xdg})).full).toBe(true);
+
+      yield* git(f.repo, 'config', 'status.showUntrackedFiles', 'no');
+      yield* f.fs.writeFileString(f.path.join(f.repo, '.gitattributes'), normalizing);
+      expect(yield* capture()).toEqual({full: true, crlf: 'alpha\nbeta\n'});
+      // Status omits an ignored .gitattributes, but Git still applies it.
+      yield* f.fs.makeDirectory(f.path.join(f.repo, '.git', 'info'), {recursive: true});
+      yield* f.fs.writeFileString(f.path.join(f.repo, '.git', 'info', 'exclude'), '.gitattributes\n');
+      expect(yield* capture()).toEqual({full: true, crlf: 'alpha\nbeta\n'});
+      yield* f.fs.remove(f.path.join(f.repo, '.gitattributes'));
+
+      yield* git(f.repo, 'config', 'core.trustctime', 'false');
+      expect((yield* capture()).full).toBe(true);
     }).pipe(run),
   );
 

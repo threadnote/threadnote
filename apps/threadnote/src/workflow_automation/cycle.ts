@@ -18,7 +18,6 @@ import {
   reconcileNativeCyclePlan,
   type NativeCycleDelivery,
   NativeCycleDeliverySchema,
-  type NativeCycleState,
   type NativeCyclePlan,
 } from '@threadnote/workflow-automations/cycle';
 import {
@@ -47,7 +46,12 @@ import {
   nativeCycleReviewContext,
   nativeCycleHasBasePlanTransition,
   nativeCycleSnapshotIsCurrentIteration,
+  nativeCycleLatestSnapshot,
   type NativeCycleRuntime,
+  nativeCycleRuntimeLimits,
+  nativeCycleCoverage,
+  nativeCycleCoverageWaiver,
+  nativeCycleCoverageAccepts,
 } from '@threadnote/workflow-automations/cycle-runtime';
 import {nativeCycleTextPage} from '@threadnote/workflow-automations/cycle-output';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -69,20 +73,23 @@ import {
   verifyNativeCycleBaseRequalification,
   makeWorkflowGitAdapter,
   nativeCycleRelativePath,
-  readNativeCycleTreeEntries,
 } from './cycle_git.js';
 import {nativeWorkflowError} from './memory.js';
 import {
   prepareNativeCycleOrdinaryMerge,
   prepareNativeCycleSameLabelRebasedBase,
-  verifyNativeCycleSameLabelRebasedBaseSource,
   withNativeCycleSameLabelQualificationBudget,
   persistNativeCycleOrdinaryMerge,
   hasNativeCycleMergePlanBinding,
 } from './cycle_merge.js';
 import {bindNativeCycleDeliveryBase, verifyNativeCyclePrDeliveryIdentity} from './cycle_delivery.js';
 import {verifyNativeCycleSnapshotEvidence, verifyNativeCycleUnreviewedRebase} from './cycle_recovery.js';
-import type {NativeAuthoringCall} from './authoring_artifacts.js';
+import {nativeLegacyPathOnlyPhases, type NativeAuthoringCall} from './authoring_artifacts.js';
+import {decodeNativeAuthoringDocument, type NativeAuthoringDocument} from '@threadnote/workflow-automations/authoring';
+import {readNativeCycleIncoming, recordNativeCycleTreeSnapshot} from './cycle_tree_snapshot.js';
+import {currentNativeCycleSnapshot as currentSnapshot} from './cycle_current_source.js';
+import {recordNativeCycleWaiver} from './cycle_waiver.js';
+import {decideGate, nativeWorkflowPolicyOf, nativeRefusal, nativeNext} from '@threadnote/workflow-automations/gates';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -116,6 +123,7 @@ export const nativeCycleRequestSchema = Schema.Struct({
     'schema',
     'validate-plan',
     'check-phase',
+    'waive',
   ]),
   runId: id,
   generation: text,
@@ -124,6 +132,7 @@ export const nativeCycleRequestSchema = Schema.Struct({
   snapshotId: Schema.optionalKey(id),
   previous: Schema.optionalKey(id),
   supersedeUnreviewed: Schema.optionalKey(Schema.Boolean),
+  treeBound: Schema.optionalKey(Schema.Boolean),
   recoverUnreviewedRebase: Schema.optionalKey(Schema.Boolean),
   acceptedHead: Schema.optionalKey(text),
   rebase: Schema.optionalKey(NativeCycleRebaseInputSchema),
@@ -141,6 +150,7 @@ export const nativeCycleRequestSchema = Schema.Struct({
   attemptId: Schema.optionalKey(id),
   validation: Schema.optionalKey(Schema.Unknown),
   reviewSkipped: Schema.optionalKey(text),
+  gate: Schema.optionalKey(text),
   delivery: Schema.optionalKey(Schema.Unknown),
   publication: Schema.optionalKey(Schema.Unknown),
   packet: Schema.optionalKey(Schema.Unknown),
@@ -221,101 +231,6 @@ const git = (repo: string, args: readonly string[], maximum = 1_000_000) =>
     maxOutputBytes: maximum,
   }).pipe(Effect.map(result => result.stdout));
 
-const readOnlyIncoming = Effect.fn('workflowAutomation.cycle.incoming')(function* (
-  repo: string,
-  phase: NativeCycleState['plan']['phases'][number],
-  captured: Effect.Success<ReturnType<typeof captureNativeCycleSource>>,
-  baseline: NativeCycleRuntime['baselines'][string],
-) {
-  const base = Effect2.pipe(
-    yield* git(repo, ['rev-parse', '--verify', '--end-of-options', phase.baseBranch + '^{commit}']),
-    EffectString.trim,
-  );
-  const common = Effect2.pipe(yield* git(repo, ['merge-base', base, captured.head]), EffectString.trim);
-  const scope = yield* captureNativeCycleSource(repo, common);
-  if (scope.head !== captured.head || scope.tree !== captured.tree)
-    return yield* fail('source-drift', 'Source changed during declared-base scope verification.');
-  const files = [...new Set([...EffectRecord.keys(captured.files), ...EffectRecord.keys(scope.files)])].sort();
-  const paths = EffectArray.filter(files, file => !checkNativeCycleScope(phase, [file]));
-  const preservedPaths = new Set(baseline.preservedFiles);
-  const preservedEntries = yield* readNativeCycleTreeEntries(
-    repo,
-    baseline.tree,
-    EffectArray.filter(paths, file => preservedPaths.has(file)),
-  );
-  const upstreamEntries = yield* readNativeCycleTreeEntries(
-    repo,
-    common,
-    EffectArray.filter(paths, file => !preservedPaths.has(file)),
-  );
-  const incoming = [];
-  for (const file of paths) {
-    const actual = captured.entries[file] ?? scope.entries[file];
-    const preserved = preservedPaths.has(file);
-    const expected = (preserved ? preservedEntries : upstreamEntries)[file];
-    if (!actual || expected.blob !== actual.blob || expected.mode !== actual.mode)
-      return yield* fail(
-        'phase-scope',
-        'Unowned source differs from its original preserved work or declared upstream base: ' + file,
-      );
-    incoming.push({
-      path: file,
-      ...expected,
-      source: preserved ? ('preserved' as const) : ('upstream' as const),
-      tree: preserved ? baseline.tree : scope.baseTree,
-      commit: preserved ? baseline.head : common,
-    });
-  }
-  return {
-    files,
-    incoming,
-    scopeBase: scope.baseTree,
-    declaredBaseHead: base,
-    scopeFiles: EffectRecord.keys(scope.files).sort(),
-  };
-});
-
-const currentSnapshot = Effect.fn('workflowAutomation.cycle.checkSnapshot')(function* (
-  repo: string,
-  snapshot: NativeCycleSnapshot,
-  acceptedHead?: string,
-  phase?: NativeCycleState['plan']['phases'][number],
-  historicalComparison = false,
-) {
-  yield* verifyNativeCycleSameLabelRebasedBaseSource(repo, snapshot);
-  yield* verifyNativeCycleSnapshotEvidence(repo, snapshot);
-  const current = yield* captureNativeCycleSource(repo, snapshot.baseTree);
-  if (phase) {
-    const base = historicalComparison
-      ? snapshot.declaredBaseHead
-      : EffectString.trim(
-          yield* git(repo, ['rev-parse', '--verify', '--end-of-options', phase.baseBranch + '^{commit}']).pipe(
-            Effect.mapError(() =>
-              fail(
-                'review-stale',
-                'The current declared base is unavailable; restore its approved binding before validation or publication.',
-              ),
-            ),
-          ),
-        );
-    const branch = EffectString.trim(yield* git(repo, ['branch', '--show-current']));
-    if (base !== snapshot.declaredBaseHead || branch !== phase.branch)
-      return yield* fail(
-        'review-stale',
-        'Snapshot belongs to a different declared base or phase branch; requalify current source.',
-      );
-  }
-  if (
-    current.tree !== snapshot.tree ||
-    (current.head !== snapshot.head &&
-      (acceptedHead !== current.head ||
-        Effect2.pipe(yield* git(repo, ['rev-parse', 'HEAD^{tree}']), EffectString.trim) !== snapshot.tree ||
-        !(yield* nativeCycleIsAncestor(repo, snapshot.head, current.head))))
-  )
-    return yield* fail('source-drift', 'Current HEAD/tree differs from the immutable review snapshot.');
-  return current;
-});
-
 /** Native cycle state is an owned extension of the run's CAS journal, never a caller-selected file. */
 const runNativeCycleRequest = <R>(
   config: RuntimeConfig,
@@ -393,6 +308,7 @@ const runNativeCycleRequest = <R>(
     });
     yield* call(base('inspect'));
     let verifiedPlan: ReturnType<typeof decodeNativeCyclePlan> | undefined;
+    let reconciledDocument: NativeAuthoringDocument | undefined;
     if (request.command === 'init' || request.command === 'reconcile' || request.command === 'validate-plan') {
       verifiedPlan = yield* from(() => decodeNativeCyclePlan(request.plan));
       const plan = verifiedPlan;
@@ -414,6 +330,23 @@ const runNativeCycleRequest = <R>(
         return yield* fail('plan-drift', 'The plan differs from its verified ready native authoring export.');
       if (request.command === 'validate-plan')
         return {status: 'ok', valid: true, source: plan.source, phaseCount: plan.phases.length};
+      // Only the plan document shows whether a first standard export changed a strict phase in its paths alone.
+      if (request.command === 'reconcile' && EffectArray.some(plan.phases, p => p.intentDefinitionHash !== undefined)) {
+        const loaded = yield* authoring({
+          protocolVersion: 1,
+          executorVersion: 1,
+          action: 'authoring',
+          command: 'load',
+          runId: plan.source.binding.runId,
+          generation: plan.source.binding.generation,
+          uri: plan.source.root.uri,
+          detail: 'document',
+        });
+        const loadedAuthoring = isJsonObject(loaded) ? loaded.authoring : undefined;
+        reconciledDocument = yield* from(() =>
+          decodeNativeAuthoringDocument(isJsonObject(loadedAuthoring) ? loadedAuthoring.document : undefined),
+        );
+      }
     }
     const livePlanCommands = [
       'next',
@@ -519,6 +452,18 @@ const runNativeCycleRequest = <R>(
         const save = (value: NativeCycleRuntime) =>
           Effect.gen(function* () {
             if (stableJson(value) === stableJson(stored.state.cycle)) return stored.revision;
+            const full =
+              value.snapshots.length > nativeCycleRuntimeLimits.snapshots
+                ? {code: 'snapshot-capacity', limit: nativeCycleRuntimeLimits.snapshots}
+                : (value.waivers?.length ?? 0) > nativeCycleRuntimeLimits.waivers
+                  ? {code: 'waiver-capacity', limit: nativeCycleRuntimeLimits.waivers}
+                  : undefined;
+            if (full)
+              return yield* nativeRefusal(
+                full.code,
+                'This run already retains its maximum history; deliver the reviewed work and continue in a new task.',
+                {detail: {limit: full.limit}, next: nativeNext.view({runId: request.runId, callerCwd: repo})},
+              );
             const canonical = yield* from(() => decodeNativeCycleRuntime(JSON.parse(stableJson(value))));
             return (yield* writeNativeWorkflowState(config, {...stored.state, cycle: canonical}, stored.revision))
               .revision;
@@ -645,6 +590,8 @@ const runNativeCycleRequest = <R>(
               verifiedPlan!,
               required(request.reason, 'a concrete reconciliation reason'),
               request.userAuthority,
+              nativeWorkflowPolicyOf(stored.state),
+              reconciledDocument ? nativeLegacyPathOnlyPhases(reconciledDocument, state.plan, verifiedPlan!) : [],
             ),
           );
           return {
@@ -694,6 +641,31 @@ const runNativeCycleRequest = <R>(
             ...(EffectRecord.keys(invalidatedThroughSnapshot).length > 0 ? {invalidatedThroughSnapshot} : {}),
           };
           return {status: 'ok', revision: yield* save(marked), next: nextNativeCycle(updated)};
+        }
+        if (request.command === 'waive')
+          return yield* recordNativeCycleWaiver({
+            repo,
+            request,
+            runtime,
+            revision: stored.revision,
+            phase: yield* from(getPhase),
+            snapshot: (yield* from(getSnapshot)).snapshot,
+            save,
+          });
+        if (request.command === 'snapshot' && request.treeBound) {
+          if (nativeWorkflowPolicyOf(stored.state) !== 'standard')
+            return yield* fail('invalid-request', 'Tree-bound snapshots belong to standard-profile runs.');
+          return yield* recordNativeCycleTreeSnapshot({
+            repo,
+            bindingId: stored.state.bindingId,
+            runId: request.runId,
+            revision: stored.revision,
+            runtime,
+            phase: yield* from(getPhase),
+            reason: request.reason,
+            pinBaseline,
+            save,
+          });
         }
         if (request.command === 'snapshot') {
           const selected = yield* from(getPhase);
@@ -834,7 +806,6 @@ const runNativeCycleRequest = <R>(
               prior.snapshotId !== last.snapshotId ||
               reviewed.has(prior.snapshotId) ||
               state.phases[selected.id].status !== 'pending' ||
-              prior.phaseHash !== state.phases[selected.id].phaseHash ||
               !EffectString.trim(request.reason ?? '') ||
               request.baseRequalification !== undefined ||
               request.ordinaryMergeQualificationV1 !== undefined ||
@@ -842,7 +813,7 @@ const runNativeCycleRequest = <R>(
           )
             return yield* fail(
               'review-history',
-              'Explicitly supersede only the latest unreviewed snapshot under the unchanged phase contract.',
+              'Explicitly supersede only the latest unreviewed snapshot of a pending phase.',
             );
           if (last && prior?.snapshotId !== last.snapshotId) {
             const priorIndex = EffectOption.getOrElse(
@@ -871,7 +842,12 @@ const runNativeCycleRequest = <R>(
           if (!baseline) return yield* fail('baseline-required', 'Run begin-phase before implementation.');
           const captured = yield* captureNativeCycleSource(repo, baseline.tree);
           if (resolveSameLabel) request = {...request, acceptedHead: captured.head};
-          if (request.supersedeUnreviewed && !request.recoverUnreviewedRebase && prior?.tree === captured.tree)
+          if (
+            request.supersedeUnreviewed &&
+            !request.recoverUnreviewedRebase &&
+            prior?.tree === captured.tree &&
+            prior.phaseHash === state.phases[selected.id].phaseHash
+          )
             return yield* fail(
               'review-history',
               'The superseding source tree must differ from the unreviewed snapshot.',
@@ -986,7 +962,7 @@ const runNativeCycleRequest = <R>(
               sameLabelRebasedBaseIntegrationV1: rewritten.input,
             }).pipe(Effect.mapError(() => fail('invalid-request', 'Resolve a closed protocol3 snapshot request.')));
           }
-          const scope = rewritten ?? merge ?? (yield* readOnlyIncoming(repo, selected, captured, baseline));
+          const scope = rewritten ?? merge ?? (yield* readNativeCycleIncoming(repo, selected, captured, baseline));
           let rebase: Omit<NonNullable<NativeCycleSnapshot['rebase']>, 'receiptDigest'> | undefined;
           if (request.rebase) {
             const reason = yield* from(() => required(request.reason, 'the exact rebase reconciliation reason'));
@@ -1562,8 +1538,23 @@ const runNativeCycleRequest = <R>(
             )
               return yield* fail('anchor-drift', 'Packet anchor bytes or literal symbol changed.');
           }
-          if (!checkNativeCycleScope(selected, options.ownership))
-            return yield* fail('phase-scope', 'Worker ownership exceeds the approved phase scope.');
+          const ownershipOutside = EffectArray.filter(
+            options.ownership,
+            path => !checkNativeCycleScope(selected, [path]),
+          );
+          const ownershipDecision = decideGate(
+            nativeWorkflowPolicyOf(stored.state),
+            'scope.out-of-plan',
+            ownershipOutside.length > 0 ? {files: ownershipOutside} : undefined,
+            undefined,
+            nativeNext.view({runId: request.runId, callerCwd: repo}),
+          );
+          if (ownershipDecision._tag === 'refuse')
+            return yield* nativeRefusal(
+              'phase-scope',
+              'Worker ownership exceeds the approved phase scope.',
+              ownershipDecision,
+            );
           const after = yield* captureNativeCycleSource(repo, 'HEAD');
           if (after.head !== captured.head || after.tree !== captured.tree)
             return yield* fail('source-drift', 'Source changed while preparing the implementation packet.');
@@ -1581,30 +1572,69 @@ const runNativeCycleRequest = <R>(
             return yield* fail('review-stale', 'Snapshot belongs to another material phase contract.');
           if (!nativeCycleSnapshotIsCurrentIteration(runtime, selected.id, entry.snapshot.snapshotId))
             return yield* fail('review-stale', 'Record a fresh snapshot and review after phase invalidation.');
+          // The phase's latest snapshot decides coverage, as on the task card and at publication.
+          const latest = nativeCycleLatestSnapshot(runtime, selected.id, entry.snapshot.phaseHash) ?? entry;
+          if (latest.snapshot.tree !== entry.snapshot.tree)
+            return yield* fail('review-stale', 'Validate the latest snapshot of this phase.');
           const current = yield* currentSnapshot(repo, entry.snapshot, request.acceptedHead, selected);
-          const report = EffectOption.getOrUndefined(
-            EffectArray.findFirst(runtime.reviews, item => item.snapshotId === entry.snapshot.snapshotId),
-          )?.report;
-          if (!report)
-            return yield* fail('review-pending', 'A complete immutable source review is required before acceptance.');
-          const reviewed = yield* from(() => {
-            const basis = nativeCycleReviewContext(runtime, entry.snapshot);
-            return validateNativeCycleReview(entry.snapshot, report, basis.previous, basis.findingBasis);
-          });
-          if (reviewed.summary.blockingIssueCount)
-            return yield* fail('review-blocked', 'Resolve the recorded blockers before accepting this phase.');
+          const coverage = nativeCycleCoverage(runtime, latest.snapshot);
+          const policy = nativeWorkflowPolicyOf(stored.state);
+          const reviewDecision = decideGate(
+            policy,
+            'review.required',
+            coverage._tag === 'pending' ? {} : undefined,
+            coverage._tag === 'waived' ? coverage.waiver : undefined,
+            nativeNext.waive({runId: request.runId, callerCwd: repo}, 'review.required'),
+          );
+          if (reviewDecision._tag === 'refuse')
+            return yield* nativeRefusal(
+              'review-pending',
+              'A complete immutable source review is required before acceptance.',
+              reviewDecision,
+            );
+          if (coverage._tag === 'reviewed')
+            yield* from(() => {
+              const basis = nativeCycleReviewContext(runtime, coverage.snapshot);
+              return validateNativeCycleReview(coverage.snapshot, coverage.review, basis.previous, basis.findingBasis);
+            });
+          const blockingDecision = decideGate(
+            policy,
+            'review.blocking',
+            coverage._tag === 'reviewed' && coverage.blocked ? {} : undefined,
+            coverage._tag === 'reviewed' ? coverage.blockingWaiver : undefined,
+            nativeNext.waive({runId: request.runId, callerCwd: repo}, 'review.blocking'),
+          );
+          if (blockingDecision._tag === 'refuse')
+            return yield* nativeRefusal(
+              'review-blocked',
+              'Resolve the recorded blockers before accepting this phase.',
+              blockingDecision,
+            );
           if (state.plan.delivery !== 'local' && EffectArray.some(entry.incoming, item => item.source === 'preserved'))
             return yield* fail(
               'preserved-work-publication',
               'Preserve unowned existing work outside the phase commit. Use a clean isolated phase checkout.',
             );
           const incoming = new Set(EffectArray.map(entry.incoming, item => item.path));
+          const changed = EffectArray.filter(entry.snapshot.files, file => !incoming.has(file));
+          const outOfPlan = EffectArray.filter(changed, file => !checkNativeCycleScope(selected, [file]));
+          const scopeDecision = decideGate(
+            nativeWorkflowPolicyOf(stored.state),
+            'scope.out-of-plan',
+            entry.snapshot.version === 4 && outOfPlan.length > 0 ? {files: outOfPlan} : undefined,
+            undefined,
+            nativeNext.view({runId: request.runId, callerCwd: repo}),
+          );
+          if (scopeDecision._tag === 'refuse')
+            return yield* nativeRefusal('phase-scope', 'Changed paths exceed allowed scope.', scopeDecision);
           const updated = yield* from(() =>
             validateNativeCyclePhase(
               state,
               selected.id,
               {
                 ...current,
+                reviewTree: coverage._tag === 'reviewed' ? coverage.snapshot.tree : undefined,
+                waiverId: nativeCycleCoverageWaiver(coverage)?.id,
                 files:
                   (entry.snapshot.ordinaryMergeQualificationV1 ??
                   entry.snapshot.sameLabelRebasedBaseIntegrationV1 ??
@@ -1617,12 +1647,19 @@ const runNativeCycleRequest = <R>(
                           owner => owner.phaseId === selected.id,
                         ),
                       )?.paths ?? [])
-                    : EffectArray.filter(entry.snapshot.files, file => !incoming.has(file)),
+                    : scopeDecision._tag === 'warn'
+                      ? EffectArray.filter(changed, file => !outOfPlan.includes(file))
+                      : changed,
               },
               request.validation,
             ),
           );
-          return {status: 'ok', revision: yield* save({...runtime, state: updated}), next: nextNativeCycle(updated)};
+          return {
+            status: 'ok',
+            revision: yield* save({...runtime, state: updated}),
+            next: nextNativeCycle(updated),
+            ...(scopeDecision._tag === 'warn' ? {warnings: [scopeDecision]} : {}),
+          };
         }
         if (request.command === 'publication-ready' || request.command === 'record-delivery') {
           const selected = yield* from(getPhase);
@@ -1722,33 +1759,11 @@ const runNativeCycleRequest = <R>(
               );
             incomingDelivery = checkedHistoricalBase;
           } else {
-            const source = EffectArray.filter(
-              runtime.snapshots,
-              entry =>
-                entry.snapshot.phaseId === selected.id &&
-                entry.snapshot.phaseHash === proof.phaseHash &&
-                nativeCycleSnapshotIsCurrentIteration(runtime, selected.id, entry.snapshot.snapshotId),
-            ).at(-1);
-            const review = source
-              ? EffectOption.getOrUndefined(
-                  EffectArray.findFirst(
-                    runtime.reviews,
-                    entry =>
-                      entry.snapshotId === source.snapshot.snapshotId &&
-                      entry.report.phaseHash === proof.phaseHash &&
-                      entry.report.snapshotTree === proof.tree,
-                  ),
-                )?.report
-              : undefined;
+            const source = nativeCycleLatestSnapshot(runtime, selected.id, proof.phaseHash);
             if (
               !source ||
               source.snapshot.tree !== proof.tree ||
-              !review ||
-              EffectArray.some(
-                review.findings,
-                finding =>
-                  ['critical', 'important'].includes(finding.severity) && ['new', 'carried'].includes(finding.state),
-              )
+              !nativeCycleCoverageAccepts(nativeCycleCoverage(runtime, source.snapshot))
             )
               return yield* fail(
                 'review-pending',
@@ -1756,11 +1771,11 @@ const runNativeCycleRequest = <R>(
               );
             const liveHead = EffectString.trim(yield* git(repo, ['rev-parse', 'HEAD']));
             const current = yield* currentSnapshot(repo, source.snapshot, liveHead, selected);
-            if (
-              current.tree !== proof.tree ||
-              Effect2.pipe(yield* git(repo, ['rev-parse', 'HEAD^{tree}']), EffectString.trim) !== proof.tree
-            )
-              return yield* fail('source-drift', 'Publish the clean exact validated tree.');
+            if (current.tree !== proof.tree) return yield* fail('source-drift', 'Publish the exact validated tree.');
+            if (Effect2.pipe(yield* git(repo, ['rev-parse', 'HEAD^{tree}']), EffectString.trim) !== proof.tree)
+              return yield* nativeRefusal('source-drift', 'Commit the exact validated tree, then deliver it.', {
+                next: nativeNext.deliver({runId: request.runId, callerCwd: repo}, state.plan.delivery),
+              });
             if (Effect2.pipe(yield* git(repo, ['branch', '--show-current']), EffectString.trim) !== selected.branch)
               return yield* fail('branch-drift', 'Publish from the declared phase branch.');
             if (
@@ -1844,13 +1859,7 @@ const runNativeCycleRequest = <R>(
               if (afterHead !== currentHead || afterTree !== currentTree)
                 return yield* fail('source-drift', 'The published phase branch changed during base verification.');
             } else {
-              const source = EffectArray.filter(
-                runtime.snapshots,
-                entry =>
-                  entry.snapshot.phaseId === selected.id &&
-                  entry.snapshot.phaseHash === proof.phaseHash &&
-                  nativeCycleSnapshotIsCurrentIteration(runtime, selected.id, entry.snapshot.snapshotId),
-              ).at(-1);
+              const source = nativeCycleLatestSnapshot(runtime, selected.id, proof.phaseHash);
               if (!source) return yield* fail('review-pending', 'The current reviewed source is unavailable.');
               const after = yield* currentSnapshot(repo, source.snapshot, currentHead, selected);
               if (

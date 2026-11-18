@@ -365,7 +365,7 @@ describe('ordinary merge native qualification', () => {
                 !(point === 'retained-pin'
                   ? pinRead
                   : point === 'source-renormalize'
-                    ? args.includes('--renormalize')
+                    ? args.includes('--renormalize') || args.includes('write-tree')
                     : args.includes(`${f.old.baselines.one.pinnedRef}^{tree}`))
               )
                 return;
@@ -1596,11 +1596,12 @@ effectIt.effect('bounds aggregate command, argument, output and deadline acquisi
         }),
       executeStreaming: () => Effect.succeed(empty),
     });
+    const half = nativeCycleSameLabelQualificationLimits.commands / 2;
     const commands = Effect.gen(function* () {
-      for (let i = 0; i < 64; i++) yield* runCommandEffect('git', ['read']);
+      for (let i = 0; i < half; i++) yield* runCommandEffect('git', ['read']);
       yield* withNativeCycleSameLabelQualificationBudget(
         Effect.gen(function* () {
-          for (let i = 0; i < 64; i++) yield* runCommandEffect('git', ['nested-read']);
+          for (let i = 0; i < half; i++) yield* runCommandEffect('git', ['nested-read']);
         }),
       );
       yield* runCommandEffect('git', ['update-ref', '--stdin']);
@@ -1611,7 +1612,7 @@ effectIt.effect('bounds aggregate command, argument, output and deadline acquisi
         Effect.result,
       ),
     );
-    expect(executed).toBe(128);
+    expect(executed).toBe(nativeCycleSameLabelQualificationLimits.commands);
     expect(mutations).toBe(0);
     executed = 0;
     refused(

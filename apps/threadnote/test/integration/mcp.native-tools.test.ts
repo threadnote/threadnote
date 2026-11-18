@@ -286,7 +286,7 @@ const WORKFLOW_TASK_MUTATING_TOOL_MAX_BYTES = {
   workflow_task_compact_expand: 800,
   workflow_task_compact_confirm: 2_500,
   workflow_task_work: 1_800,
-  workflow_task_control: 2_200,
+  workflow_task_control: 2_400,
   workflow_task_snapshot: 2_500,
   workflow_task_record_review: 2_300,
   workflow_task_record_validation: 1_300,
@@ -795,10 +795,15 @@ describe('Threadnote MCP toolsets', () => {
           'resume',
           'reopen',
           'reconcile',
+          'waive',
+          'set-profile',
           'extend-review-budget',
         ]);
+        expect(variantsByCommand.get('waive')?.required).toEqual(['command', 'gate', 'reason', 'userAuthority']);
+        expect(variantsByCommand.get('set-profile')?.required).toEqual(['command', 'profile', 'reason']);
         for (const field of ['runId', 'callerCwd', 'taskRef'])
           expect(controlProperties[field]).toMatchObject({type: 'string', minLength: 1});
+        expect(decodeJsonObject(workflowTaskControl?.inputSchema).required).toEqual(['runId', 'callerCwd', 'control']);
         expect(variantsByCommand.get('begin')?.required).toEqual(['command']);
         expect(variantsByCommand.get('resume')?.required).toEqual(['command', 'reason']);
         expect(variantsByCommand.get('resume')?.properties.reason).toMatchObject({type: 'string', minLength: 1});
@@ -861,7 +866,7 @@ describe('Threadnote MCP toolsets', () => {
           'integrate-same-label-base',
           'requalify-invalid-tail',
         ]);
-        expect(snapshotByCommand.get('record')?.required).toEqual(['command', 'workRef']);
+        expect(snapshotByCommand.get('record')?.required).toEqual(['command']);
         expect(snapshotByCommand.get('supersede-unreviewed')?.required).toEqual(['command', 'snapshotRef', 'reason']);
         expect(snapshotByCommand.get('recover-unreviewed-rebase')?.required).toEqual([
           'command',
@@ -1091,7 +1096,9 @@ describe('Threadnote MCP toolsets', () => {
         // Remove only the local command literal; preserve every other received descriptor field.
         const baselineCatalogBytes = Buffer.byteLength(JSON.stringify(baselineCatalog));
         expect(baselineCatalog.length).toBeGreaterThan(0);
-        expect(baselineCatalogBytes).toBeLessThanOrEqual(65_000);
+        // Semantic task bootstrap adds one tool beyond compact authoring, and the review waiver and run profile add
+        // control variants; with Threadnote 6's workflow fields, keep the additive baseline catalog budget explicit.
+        expect(baselineCatalogBytes).toBeLessThanOrEqual(65_250);
         const snapshotBytes = Buffer.byteLength(JSON.stringify(workflowTaskSnapshot));
         const sameLabelBranchBytes = snapshotBytes - Buffer.byteLength(JSON.stringify(baselineSnapshot));
         expect(sameLabelBranchBytes).toBeGreaterThan(0);
@@ -1099,7 +1106,7 @@ describe('Threadnote MCP toolsets', () => {
         // The unchanged 2,500-byte full snapshot guard above bounds this exact delta, including its comma.
         // Each added semantic descriptor contributes one comma to the nonempty compact JSON array.
         const composedCatalogLimit =
-          65_000 +
+          65_250 +
           sameLabelBranchBytes +
           EffectArray.reduce(semanticDescriptorBudgets, 0, (total, [, maximum]) => total + maximum) +
           semanticDescriptorBudgets.length;

@@ -8,14 +8,22 @@ import {
   validateWorkflowInput,
   type WorkflowRequest,
   type WorkflowJournal,
+  type WorkflowOperation,
   workflowError,
 } from './protocol.js';
 import {resolveWorkflowBinding} from './profile.js';
 import {bindWorkflow, loadWorkflowJournal, withWorkflowLock, withWorkflowJournalSession} from './journal.js';
-import {executeWorkflowOperation, prepareWorkflowOperation, readWorkflowArtifact} from './artifacts.js';
+import {
+  CurrentForegroundAuthoringCitations,
+  executeWorkflowOperation,
+  prepareWorkflowOperation,
+  readWorkflowArtifact,
+  type ForegroundAuthoringCitationWitness,
+} from './artifacts.js';
 import {WorkflowPublicationRequestSchema} from './publication_contract.js';
 import {assertWorkflowArchivePublication, runWorkflowPublication} from './publication.js';
 import {inspectWorkflowOperation} from './inspection.js';
+import {CurrentNativeJobReadyPromotion, CurrentNativeJobSourceView} from '../workflow_automation/native_jobs.js';
 
 export {readWorkflowReadiness} from './profile.js';
 
@@ -115,6 +123,16 @@ const runBoundRequest = Effect.fn('workflowMemory.boundRequest')(function* (
   return yield* runLoadedRequest(config, state, request);
 });
 
+const preflightResponse = (request: WorkflowRequest, prepared: WorkflowOperation) => ({
+  protocolVersion: 1 as const,
+  status: 'ok' as const,
+  canonicalUri: prepared.artifact.canonicalUri,
+  beforeRevision: request.expectedRevision ?? null,
+  bodySha256: prepared.artifact.bodySha256,
+  storageKind: prepared.artifact.storageKind,
+  role: prepared.artifact.role,
+});
+
 const runLoadedRequest = Effect.fn('workflowMemory.loadedRequest')(function* (
   config: RuntimeConfig,
   state: WorkflowJournal,
@@ -129,15 +147,7 @@ const runLoadedRequest = Effect.fn('workflowMemory.loadedRequest')(function* (
     );
   if (request.action === 'preflight') {
     const prepared = yield* prepareWorkflowOperation(config, state, request);
-    return {
-      protocolVersion: 1 as const,
-      status: 'ok' as const,
-      canonicalUri: prepared.artifact.canonicalUri,
-      beforeRevision: request.expectedRevision ?? null,
-      bodySha256: prepared.artifact.bodySha256,
-      storageKind: prepared.artifact.storageKind,
-      role: prepared.artifact.role,
-    };
+    return preflightResponse(request, prepared);
   }
   if (
     state.binding.profile !== 'desktop' &&
@@ -165,8 +175,19 @@ export const withNativeWorkflowMemorySession = <A, E, R>(
   ) => Effect.Effect<A, E, R>,
 ) =>
   withWorkflowJournalSession(config, bindingId, session => {
+    let preparedCache:
+      | {
+          readonly stateRef: WorkflowJournal;
+          readonly jobSourceView: Effect.Success<typeof CurrentNativeJobSourceView>;
+          readonly jobReadyPromotion: boolean;
+          readonly foregroundCitations: ForegroundAuthoringCitationWitness | undefined;
+          readonly prepared: WorkflowOperation;
+        }
+      | undefined;
     const call: NativeSessionCall = input =>
       Effect.gen(function* () {
+        const priorPrepared = preparedCache;
+        preparedCache = undefined;
         const request = yield* Schema.decodeUnknownEffect(
           Schema.Union([WorkflowRequestSchema, WorkflowOperationInspectionRequestSchema]),
         )(input, {onExcessProperty: 'error'});
@@ -180,6 +201,37 @@ export const withNativeWorkflowMemorySession = <A, E, R>(
         return yield* session.run(request, state => {
           if (request.action === 'recover' && state.operations[request.operationId ?? '']?.request.action === 'archive')
             return Effect.fail(workflowError('invalid-request', 'Native child sessions cannot recover archives.'));
+          if (request.action === 'preflight') {
+            return Effect.gen(function* () {
+              const jobSourceView = yield* CurrentNativeJobSourceView;
+              const jobReadyPromotion = yield* CurrentNativeJobReadyPromotion;
+              const foregroundCitations = yield* CurrentForegroundAuthoringCitations;
+              const prepared = yield* prepareWorkflowOperation(config, state, request);
+              preparedCache = {
+                stateRef: state,
+                jobSourceView,
+                jobReadyPromotion,
+                foregroundCitations,
+                prepared,
+              };
+              return preflightResponse(request, prepared);
+            });
+          }
+          if ((request.action === 'create' || request.action === 'replace') && priorPrepared !== undefined) {
+            return Effect.gen(function* () {
+              const jobSourceView = yield* CurrentNativeJobSourceView;
+              const jobReadyPromotion = yield* CurrentNativeJobReadyPromotion;
+              const foregroundCitations = yield* CurrentForegroundAuthoringCitations;
+              const precomputed =
+                state === priorPrepared.stateRef &&
+                jobSourceView === priorPrepared.jobSourceView &&
+                jobReadyPromotion === priorPrepared.jobReadyPromotion &&
+                foregroundCitations === priorPrepared.foregroundCitations
+                  ? priorPrepared.prepared
+                  : undefined;
+              return yield* executeWorkflowOperation(config, state, request, precomputed);
+            });
+          }
           return runLoadedRequest(config, state, request);
         });
       });

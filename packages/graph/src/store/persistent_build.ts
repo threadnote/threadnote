@@ -277,8 +277,8 @@ const retireIncompleteWorktreeSnapshots = Effect.fn('codeGraph.retireIncompleteW
         // A ready snapshot may have retired the logical or direct sibling that
         // appears in the next run's candidate set; keeping that already-retired
         // row would leak its full graph forever across mode switches.
-        const reclaimable = yield* sql<{readonly id: string}>`
-          SELECT id
+        const reclaimable = yield* sql<{readonly id: string; readonly worktree_id: string}>`
+          SELECT id, worktree_id
           FROM snapshots AS candidate
           WHERE candidate.repository_id = ${repositoryId}
             AND candidate.scope_id = ${scopeId}
@@ -303,17 +303,26 @@ const retireIncompleteWorktreeSnapshots = Effect.fn('codeGraph.retireIncompleteW
         for (const snapshotIds of chunk(reclaimableIds, 100)) {
           yield* sql`DELETE FROM snapshot_build_owners WHERE ${sql.in('snapshot_id', snapshotIds)}`;
         }
-        return {reclaimable: reclaimableIds, retired: retired.length};
+        const ownIds = new Set(
+          EffectArray.flatMap(reclaimable, snapshot => (snapshot.worktree_id === worktreeId ? [snapshot.id] : [])),
+        );
+        return {
+          ownReclaimable: EffectArray.filter(reclaimableIds, id => ownIds.has(id)),
+          reclaimable: reclaimableIds,
+          retired: retired.length,
+        };
       }),
     ),
   );
-  const targets = cleanupMode === 'required' ? result.reclaimable : result.reclaimable.slice(0, 100);
+  // A required drain pays only for this worktree's debt; other worktrees' debt stays with deferred cleanup.
+  const pending = cleanupMode === 'required' ? result.ownReclaimable : result.reclaimable;
+  const targets = cleanupMode === 'required' ? pending : pending.slice(0, 100);
   if (targets.length > 0) {
     yield* onProgress?.({
       pagesCompleted: 0,
       rowsDeleted: 0,
       snapshotsCompleted: 0,
-      snapshotsTotal: result.reclaimable.length,
+      snapshotsTotal: pending.length,
     }) ?? Effect.void;
     let pagesCompleted = 0;
     let rowsDeleted = 0;
@@ -329,7 +338,7 @@ const retireIncompleteWorktreeSnapshots = Effect.fn('codeGraph.retireIncompleteW
           pagesCompleted,
           rowsDeleted,
           snapshotsCompleted,
-          snapshotsTotal: result.reclaimable.length,
+          snapshotsTotal: pending.length,
         }) ?? Effect.void;
         if (page.complete || cleanupMode === 'deferred') break;
         yield* Effect.yieldNow;

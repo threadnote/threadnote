@@ -1,6 +1,9 @@
+import {nativeWorkflowPolicyOf} from '@threadnote/workflow-automations/gates';
+import {readNativeWorkflowState} from '../workflow_automation/store.js';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
-import {DateTime, Effect, FileSystem, Path, Schema} from 'effect';
+import {Context, DateTime, Effect, FileSystem, Path, Schema} from 'effect';
 import {sha256Hex} from '@threadnote/platform/digest';
+import {sha256HexSync} from './native_digest.js';
 import {ResourceStore, ResourceNotFound, type ResourceStoreMutation} from '@threadnote/store/resource-store';
 import {withCanonicalMutationLock} from '@threadnote/store/resource/mutation_generation';
 import {resourceAccountMutationLockPolicy} from '@threadnote/store/resource/lock';
@@ -32,6 +35,7 @@ import {
   CurrentNativeJobSourceView,
 } from '../workflow_automation/native_jobs.js';
 import {MemoryCodeCitationCaptureError, withLocalMemoryCodeCitations} from '@threadnote/context/citation/capture';
+import type {MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import {readWorkflowSharedRoots} from './scopes.js';
 import {assertWorkflowEvidenceSnapshot, verifyWorkflowEvidence, withWorkflowEvidenceAdmission} from './evidence.js';
 import {
@@ -43,7 +47,13 @@ import {
   withDeferredCodeAnchorMutationLocks,
   type DeferredCodeAnchorWriteRequest,
 } from '../memory/deferred/code_anchor.js';
-import {resolveAuthoredMemoryRelations, memoryIdentityWriteLockKeys} from '../memory/relations.js';
+import {
+  buildAuthorizedOwnedMemoryIdProofs,
+  memoryIdentityWriteLockKeys,
+  resolveAuthoredMemoryRelations,
+  type AuthorizedOwnedMemoryIdProofs,
+  type OwnedActiveRelationArtifact,
+} from '../memory/relations.js';
 import {
   readOptionalResource,
   workflowLocation,
@@ -70,11 +80,98 @@ import {
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+
+export interface ForegroundAuthoringCitationWitness {
+  readonly bindingId: string;
+  readonly repo: string;
+  readonly citationRefs: readonly string[];
+  readonly citations: readonly MemoryCodeCitationV1[];
+}
+
+export interface ForegroundAuthoringCitationCollector {
+  witness?: ForegroundAuthoringCitationWitness;
+}
+
+export const CurrentForegroundAuthoringCitations = Context.Reference<ForegroundAuthoringCitationWitness | undefined>(
+  'threadnote/CurrentForegroundAuthoringCitations',
+  {defaultValue: () => undefined},
+);
+
+export const CurrentForegroundAuthoringCitationCollector = Context.Reference<
+  ForegroundAuthoringCitationCollector | undefined
+>('threadnote/CurrentForegroundAuthoringCitationCollector', {defaultValue: () => undefined});
+
 const prefix = (state: WorkflowJournal) => `workflow-${state.binding.bindingId}-`;
 const nativeRoot = (config: RuntimeConfig) => `threadnote://user/${uriSegment(config.user)}/memories`;
 const ownedArtifacts = workflowOwnedArtifacts;
 const ownedArtifact = (state: WorkflowJournal, uri: string) =>
   EffectOption.getOrUndefined(EffectArray.findFirst(ownedArtifacts(state), artifact => artifact.canonicalUri === uri));
+
+export interface WorkflowOwnedRelationState {
+  /** Committed artifacts a relation may name, keyed by canonical URI. */
+  readonly artifacts: Readonly<Record<string, OwnedActiveRelationArtifact>>;
+  /** Every owned artifact, pending writes included; a direct target's identity must be unique here. */
+  readonly owned: readonly {readonly canonicalUri: string; readonly memoryId: string}[];
+}
+
+export interface DirectOwnedRelationScope {
+  readonly scopes: readonly string[];
+  readonly artifacts: Readonly<Record<string, OwnedActiveRelationArtifact>>;
+  readonly relationUris: ReadonlySet<string>;
+}
+
+/**
+ * Relations that name only active, uniquely identified artifacts of this workflow are proven from
+ * live bytes instead of the recall identity index. Evidence and configured shares keep the index path.
+ */
+export const directOwnedRelationScope = <E, R>(
+  state: WorkflowOwnedRelationState,
+  relationUris: readonly string[],
+  evidenceRefs: readonly unknown[] | undefined,
+  sharedRoots: Effect.Effect<readonly string[], E, R>,
+): Effect.Effect<DirectOwnedRelationScope | undefined, E, R> =>
+  Effect.gen(function* () {
+    if ((evidenceRefs?.length ?? 0) > 0 || relationUris.length === 0) return undefined;
+    const counts = new Map<string, number>();
+    for (const artifact of state.owned) counts.set(artifact.memoryId, (counts.get(artifact.memoryId) ?? 0) + 1);
+    const canonicalUris = new Set<string>();
+    for (const uri of relationUris) {
+      const canonical = EffectOption.getOrUndefined(
+        EffectOption.liftThrowable(() => parseResourceId(uri).canonicalUri)(),
+      );
+      const owned = canonical === undefined ? undefined : state.artifacts[canonical];
+      if (
+        canonical === undefined ||
+        memoryIdFromIdentityAlias(canonical) !== undefined ||
+        owned?.state !== 'active' ||
+        counts.get(owned.memoryId) !== 1
+      )
+        return undefined;
+      canonicalUris.add(canonical);
+    }
+    if ((yield* sharedRoots).length > 0) return undefined;
+    return {
+      scopes: EffectArray.map(state.owned, artifact => artifact.canonicalUri),
+      artifacts: EffectRecord.map(
+        EffectRecord.filter(state.artifacts, artifact => artifact.state === 'active'),
+        artifact => ({memoryId: artifact.memoryId, revision: artifact.revision, state: artifact.state}),
+      ),
+      relationUris: canonicalUris,
+    };
+  });
+
+function verifyDirectOwnedRelationArtifacts(
+  proofs: AuthorizedOwnedMemoryIdProofs,
+  artifacts: Readonly<Record<string, OwnedActiveRelationArtifact>>,
+  relationUris: Iterable<string>,
+): boolean {
+  for (const uri of relationUris) {
+    const owned = artifacts[uri];
+    if (owned === undefined || proofs.get(owned.memoryId) !== uri) return false;
+  }
+  return true;
+}
+
 function admitPrivateCandidate(
   state: WorkflowJournal,
   uri: string,
@@ -256,6 +353,7 @@ export const prepareWorkflowOperation = (config: RuntimeConfig, state: WorkflowJ
                 expectedProjectScope: {kind: 'selected-project' as const, project: state.binding.graphProject},
               }),
           refs: request.codeRefs ?? [],
+          ...((yield* standardProfileBinding(config, state.binding.workflowRunId)) ? {allowStaleGraph: true} : {}),
         },
         'workflow-memory',
       );
@@ -297,6 +395,7 @@ export function withWorkflowProjectionCitations<A, E, R>(
           : {
               expectedProjectScope: {kind: 'selected-project' as const, project: binding.graphProject},
             }),
+        ...((yield* standardProfileBinding(config, binding.workflowRunId)) ? {allowStaleGraph: true} : {}),
       },
       citations =>
         Effect.gen(function* () {
@@ -437,12 +536,27 @@ const prepareWorkflowOperationWithCapture = Effect.fn('workflowMemory.prepareOpe
         admitPrivateCandidate(state, candidate.canonicalUri, sharedRoots, request.evidenceRefs),
       );
     }
+    const directOwned = yield* directOwnedRelationScope(
+      {artifacts: state.artifacts, owned: ownedArtifacts(state)},
+      relationUris,
+      request.evidenceRefs,
+      Effect.succeed(sharedRoots),
+    );
+    const ownedMemoryIdProofs =
+      directOwned === undefined
+        ? undefined
+        : yield* buildAuthorizedOwnedMemoryIdProofs(config, directOwned.scopes, directOwned.artifacts);
     const resolvedRelations = yield* resolveAuthoredMemoryRelations(config, request.relations ?? [], {
       allowedUriScopes: [
         ...sharedRoots,
         ...EffectArray.map(ownedArtifacts(state), artifact => artifact.canonicalUri),
         ...EffectArray.map(candidates, candidate => candidate.canonicalUri),
       ],
+      ...(directOwned === undefined ||
+      ownedMemoryIdProofs === undefined ||
+      !verifyDirectOwnedRelationArtifacts(ownedMemoryIdProofs, directOwned.artifacts, directOwned.relationUris)
+        ? {}
+        : {ownedActiveArtifacts: directOwned.artifacts, ownedMemoryIdProofs}),
       sourceMemoryId: memoryId,
       sourceUri,
     });
@@ -472,6 +586,8 @@ const prepareWorkflowOperationWithCapture = Effect.fn('workflowMemory.prepareOpe
     }
     relations = resolvedRelations.targets;
     const admitted = yield* CurrentNativeJobSourceView;
+    const foregroundAdmitted = admitted ? undefined : yield* CurrentForegroundAuthoringCitations;
+    const foregroundCollector = admitted ? undefined : yield* CurrentForegroundAuthoringCitationCollector;
     const promotion =
       (role === 'authoring-root' && (yield* CurrentNativeJobReadyPromotion)) ||
       Effect2.pipe(role, EffectString.startsWith('closeout-'));
@@ -482,7 +598,34 @@ const prepareWorkflowOperationWithCapture = Effect.fn('workflowMemory.prepareOpe
       );
     if (admitted && !promotion && stableJson(request.codeRefs ?? []) !== stableJson(admitted.citationRefs))
       return yield* workflowError('citation-drift', 'Child code references differ from the admitted citation witness.');
-    const captured = admitted && !promotion ? {ok: true as const, citations: admitted.citations} : yield* capture();
+    const foregroundReusable =
+      foregroundAdmitted !== undefined &&
+      role !== 'authoring-root' &&
+      !Effect2.pipe(role, EffectString.startsWith('closeout-'));
+    if (
+      foregroundReusable &&
+      (foregroundAdmitted.bindingId !== state.binding.bindingId || foregroundAdmitted.repo !== state.binding.repo)
+    )
+      return yield* workflowError(
+        'binding-drift',
+        'Admitted foreground citation witness does not belong to this workflow binding.',
+      );
+    if (foregroundReusable && stableJson(request.codeRefs ?? []) !== stableJson(foregroundAdmitted.citationRefs))
+      return yield* workflowError('citation-drift', 'Child code references differ from the admitted citation witness.');
+    const captured =
+      admitted && !promotion
+        ? {ok: true as const, citations: admitted.citations}
+        : foregroundReusable
+          ? {ok: true as const, citations: foregroundAdmitted.citations}
+          : yield* capture();
+    if (captured.ok && foregroundCollector && role === 'authoring-validation') {
+      foregroundCollector.witness = {
+        bindingId: state.binding.bindingId,
+        repo: state.binding.repo,
+        citationRefs: [...(request.codeRefs ?? [])],
+        citations: captured.citations,
+      };
+    }
     if (!captured.ok) {
       if (Schema.is(MemoryCodeCitationCaptureError)(captured.failure) && captured.failure.retryable)
         return yield* Effect.fail(workflowCitationCaptureError(captured.failure));
@@ -564,6 +707,7 @@ export const executeWorkflowOperation = Effect.fn('workflowMemory.executeOperati
   config: RuntimeConfig,
   initial: WorkflowJournal,
   request: WorkflowRequest,
+  precomputed?: WorkflowOperation,
 ) {
   const operationId = yield* validateWorkflowInput(() => portableKey(request.operationId, 'operationId'));
   const existing = initial.operations[operationId];
@@ -575,7 +719,8 @@ export const executeWorkflowOperation = Effect.fn('workflowMemory.executeOperati
   const intentDigest = yield* sha256Hex(stableJson({...request, mutation: undefined}));
   if (existing && request.action !== 'recover' && existing.intentDigest !== intentDigest)
     return yield* workflowError('operation-intent-conflict', 'This operationId already belongs to different intent.');
-  const original = existing ?? (yield* prepareWorkflowOperation(config, initial, request));
+  const reusable = !existing && precomputed && precomputed.intentDigest === intentDigest ? precomputed : undefined;
+  const original = existing ?? reusable ?? (yield* prepareWorkflowOperation(config, initial, request));
   const prepared = {...initial, operations: {...initial.operations, [operationId]: original}};
   const store = yield* ResourceStore;
   const fs = yield* FileSystem.FileSystem;
@@ -621,6 +766,26 @@ export const executeWorkflowOperation = Effect.fn('workflowMemory.executeOperati
           request: operation.deferredCodeAnchor,
         })
       : undefined;
+  const directOwned =
+    !isArchive && operation.relations.length > 0
+      ? yield* directOwnedRelationScope(
+          {artifacts: prepared.artifacts, owned: ownedArtifacts(prepared)},
+          EffectArray.map(operation.request.relations ?? [], relation => relation.uri),
+          operation.request.evidenceRefs,
+          readWorkflowSharedRoots(config, initial.binding),
+        )
+      : undefined;
+  const directOwnedBypass =
+    directOwned !== undefined &&
+    EffectArray.every(operation.relations, target => {
+      const owned = directOwned.artifacts[target.uri];
+      return (
+        directOwned.relationUris.has(target.uri) &&
+        owned !== undefined &&
+        owned.memoryId === target.memoryId &&
+        sha256HexSync(target.content) === owned.revision
+      );
+    });
   let staged: Effect.Success<ReturnType<typeof persistPreparedDeferredCodeAnchorIntent>> | undefined;
   yield* withWorkflowEvidenceAdmission(
     config,
@@ -642,6 +807,20 @@ export const executeWorkflowOperation = Effect.fn('workflowMemory.executeOperati
           ...memoryIdentityWriteLockKeys(artifact.memoryId, operation.relations),
         ],
         Effect.gen(function* () {
+          if (directOwnedBypass) {
+            const proofs = yield* buildAuthorizedOwnedMemoryIdProofs(config, directOwned.scopes, directOwned.artifacts);
+            if (
+              !verifyDirectOwnedRelationArtifacts(
+                proofs,
+                directOwned.artifacts,
+                EffectArray.map(operation.relations, target => target.uri),
+              )
+            )
+              return yield* workflowError(
+                'identity-conflict',
+                'Owned relation targets changed before commit; refresh before mutating.',
+              );
+          }
           const current = yield* readOptionalResource(config, artifact.canonicalUri);
           if (
             original.deferredCodeAnchor &&
@@ -770,6 +949,7 @@ export const executeWorkflowOperation = Effect.fn('workflowMemory.executeOperati
             );
         }),
       ),
+    {directOwnedBypass},
   );
   if (deferred) yield* schedulePreparedDeferredCodeAnchorIntent(config, deferred.intent);
   if (!needsReceipt) return {...(yield* readWorkflowArtifact(config, prepared, artifact.canonicalUri)), operationId};
@@ -777,3 +957,12 @@ export const executeWorkflowOperation = Effect.fn('workflowMemory.executeOperati
   yield* refreshWorkflowRecall(config, [artifact.canonicalUri, ...(operation.sourceUri ? [operation.sourceUri] : [])]);
   return {...(yield* readWorkflowArtifact(config, updated, artifact.canonicalUri)), operationId};
 });
+
+/** A standard-profile dev-cycle run cites only what it cites: a stale graph elsewhere does not refuse the write. */
+const standardProfileBinding = (config: RuntimeConfig, workflowRunId: string) =>
+  Effect2.pipe(workflowRunId, EffectString.startsWith('native-v1-'))
+    ? readNativeWorkflowState(config, Effect2.pipe(workflowRunId, EffectString.slice('native-v1-'.length))).pipe(
+        Effect.map(stored => stored !== undefined && nativeWorkflowPolicyOf(stored.state) === 'standard'),
+        Effect.orElseSucceed(() => false),
+      )
+    : Effect.succeed(false);

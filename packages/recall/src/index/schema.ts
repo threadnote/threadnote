@@ -11,7 +11,7 @@ import type {RecallMetadataRow} from './read_policy.js';
  * files into that new file. Older filenames are not opened or migrated in place,
  * so a previous binary cannot write the current database.
  */
-export const RECALL_INDEX_DATABASE_VERSION = 13;
+export const RECALL_INDEX_DATABASE_VERSION = 15;
 
 export class RecallIndexSchemaIncompatible extends Schema.TaggedError<
   RecallIndexSchemaIncompatible,
@@ -30,6 +30,7 @@ export const initializeRecallDatabase = Effect.fn('recall.initializeDatabase')(f
       value TEXT NOT NULL
     )
   `);
+  // candidate_json stays last so posting joins read logical_key and document_length without its overflow pages.
   yield* sql.unsafe(`
     CREATE TABLE IF NOT EXISTS documents (
       id INTEGER PRIMARY KEY,
@@ -42,10 +43,13 @@ export const initializeRecallDatabase = Effect.fn('recall.initializeDatabase')(f
       recorded_at TEXT,
       source_size INTEGER NOT NULL CHECK (source_size >= 0),
       authority_policy_key TEXT,
-      candidate_json TEXT NOT NULL,
+      uri_locator_digest TEXT NOT NULL,
+      memory_id TEXT,
+      content_hash TEXT,
       logical_key TEXT NOT NULL,
       document_length INTEGER NOT NULL CHECK (document_length >= 0),
-      memory_links_truncated INTEGER NOT NULL CHECK (memory_links_truncated IN (0, 1))
+      memory_links_truncated INTEGER NOT NULL CHECK (memory_links_truncated IN (0, 1)),
+      candidate_json TEXT NOT NULL
     )
   `);
   yield* sql.unsafe(`
@@ -101,6 +105,11 @@ export const initializeRecallDatabase = Effect.fn('recall.initializeDatabase')(f
     ) WITHOUT ROWID
   `);
   yield* sql.unsafe(`
+    CREATE TABLE IF NOT EXISTS oversized_sources (
+      uri TEXT PRIMARY KEY NOT NULL
+    ) WITHOUT ROWID
+  `);
+  yield* sql.unsafe(`
     CREATE TABLE IF NOT EXISTS term_statistics (
       term TEXT PRIMARY KEY NOT NULL,
       document_frequency INTEGER NOT NULL CHECK (document_frequency > 0)
@@ -115,8 +124,11 @@ export const initializeRecallDatabase = Effect.fn('recall.initializeDatabase')(f
     )
   `);
   yield* sql.unsafe('CREATE INDEX IF NOT EXISTS documents_uri ON documents(uri)');
-  yield* sql.unsafe('CREATE INDEX IF NOT EXISTS documents_logical_key ON documents(logical_key)');
+  yield* sql.unsafe('CREATE INDEX IF NOT EXISTS documents_logical_key ON documents(logical_key, document_length)');
   yield* RecallIndexIdentity.initializeRecallIdentityIndex(sql);
+  yield* sql.unsafe(
+    'CREATE INDEX IF NOT EXISTS documents_uri_locator_digest ON documents(uri_locator_digest, uri, memory_id)',
+  );
   yield* sql.unsafe('CREATE INDEX IF NOT EXISTS documents_modified_uri ON documents(source_modified_at DESC, uri)');
   yield* sql.unsafe(
     'CREATE INDEX IF NOT EXISTS documents_project_modified_uri ON documents(project, source_modified_at DESC, uri)',
@@ -150,7 +162,14 @@ export const initializeRecallDatabase = Effect.fn('recall.initializeDatabase')(f
     ON CONFLICT(key) DO NOTHING
   `;
   yield* sql`INSERT INTO metadata (key, value) VALUES ('mutation_sequence', '0') ON CONFLICT(key) DO NOTHING`;
-  for (const table of ['documents', 'postings', 'term_statistics', 'code_links', 'memory_links'] as const) {
+  for (const table of [
+    'documents',
+    'postings',
+    'term_statistics',
+    'code_links',
+    'memory_links',
+    'oversized_sources',
+  ] as const) {
     for (const operation of ['INSERT', 'UPDATE', 'DELETE'] as const) {
       yield* sql.unsafe(`
         CREATE TRIGGER IF NOT EXISTS ${table}_integrity_${Effect2.pipe(operation, EffectString.toLowerCase)}

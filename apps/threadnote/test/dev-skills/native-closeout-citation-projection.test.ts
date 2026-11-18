@@ -282,7 +282,8 @@ it.effect(
           }),
         )
         .pipe(f.apply);
-      expect(f.counts).toEqual({opening: 4, closing: 4, leases: 4, releases: 4});
+      // The write's create reuses its own preflight preparation (#1068), so one fresh capture serves both.
+      expect(f.counts).toEqual({opening: 3, closing: 3, leases: 3, releases: 3});
     }).pipe(provideNative, TestClock.withLive),
 );
 fcEffectProp(

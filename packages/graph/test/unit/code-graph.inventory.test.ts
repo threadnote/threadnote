@@ -1,11 +1,19 @@
-import {Array as EffectArray, Option as EffectOption} from 'effect';
+import {Array as EffectArray, Effect, FileSystem, Option as EffectOption, Path, pipe} from 'effect';
+import {it as effectIt} from '@effect/vitest';
+import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
+import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
+import {makeIdempotentFixtureTempDirectoryScoped} from '@threadnote/testing/fixture-temp-directory';
 import {
   acceptsRepositoryPath,
   codeGraphCatFileBatches,
   codeGraphInventoryExclusionReason,
+  compileRepositoryRootPrefixes,
+  compileThreadnoteIgnore,
+  inventoryRepository,
   parseGitTree,
   parseNameStatus,
+  repositoryPathExclusionReason,
   shouldOmitRepositoryContent,
   summarizeCodeGraphInventoryPreview,
 } from '@threadnote/graph/inventory';
@@ -14,6 +22,10 @@ import {
   CODE_GRAPH_HIGH_SIGNAL_JSON_HARD_CAP_BYTES,
 } from '@threadnote/graph/inventory/policy';
 import {CORPUS_EXTRACTION_SOURCE_BYTES_LIMIT} from '@threadnote/graph/languages/corpus/policy';
+import {BUILTIN_LANGUAGE_PACK_REGISTRY} from '@threadnote/graph/languages/registry';
+import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
+import {citationPlatformLayer} from '../helpers/citation-platform.js';
+import * as EffectString from 'effect/String';
 
 describe('native code graph inventory policy', () => {
   it('packs up to 512 small blobs into one Git cat-file process without weakening the byte ceiling', () => {
@@ -346,5 +358,164 @@ describe('native code graph inventory policy', () => {
         ),
       ),
     ).toMatchObject({files: 1});
+  });
+
+  it('matches precompiled root-prefix exclusion across nested build, dist, bazel-*, node_modules, and declared roots', () => {
+    const projectRoots = ['pods', 'apps/pods', 'packages/app', 'services/out/api'];
+    const sourceRoots = [
+      'apps/pods/src/main/java',
+      'packages/app',
+      'packages/app/dist/authored',
+      'services/out/api/src',
+    ];
+    const compiled = compileRepositoryRootPrefixes(projectRoots, sourceRoots);
+    const ignoreRules = compileThreadnoteIgnore('ignored/**\n');
+
+    const cases: readonly [string, ReturnType<typeof repositoryPathExclusionReason>][] = [
+      ['pods/src/Service.kt', undefined],
+      ['pods/build/generated/Out.kt', 'generated-directory'],
+      ['apps/pods/src/main/java/io/coda/pods/Service.java', undefined],
+      ['apps/pods/Pods/Vendor.swift', 'vendor-directory'],
+      ['packages/app/src/index.ts', undefined],
+      ['packages/app/build/out.ts', 'generated-directory'],
+      ['packages/app/dist/bundle.js', undefined],
+      ['packages/app/dist/build/bundle.js', 'generated-directory'],
+      ['packages/app/dist/authored/keep.ts', undefined],
+      ['packages/app/dist/authored/build/nested.ts', 'generated-directory'],
+      ['packages/app/bazel-bin/out.ts', 'generated-directory'],
+      ['packages/app/bazel-out/k8-fastbuild/bin/out.ts', 'generated-directory'],
+      ['packages/app/bazel-custom/out.ts', 'generated-directory'],
+      ['packages/app/node_modules/pkg/index.ts', 'vendor-directory'],
+      ['services/out/api/src/handler.ts', undefined],
+      ['services/out/other/handler.ts', undefined],
+      ['services/other/out/handler.ts', 'generated-directory'],
+      ['.aspect/workflows/config.axl', undefined],
+      ['packages/.hidden/secret.ts', 'hidden-directory'],
+      ['ignored/file.ts', 'threadnote-ignore'],
+      ['../escape.ts', 'invalid-path'],
+    ];
+
+    for (const [candidate, expected] of cases) {
+      const uncompiledResult = repositoryPathExclusionReason(
+        candidate,
+        ignoreRules,
+        BUILTIN_LANGUAGE_PACK_REGISTRY,
+        projectRoots,
+        sourceRoots,
+        true,
+      );
+      const compiledResult = repositoryPathExclusionReason(
+        candidate,
+        ignoreRules,
+        BUILTIN_LANGUAGE_PACK_REGISTRY,
+        projectRoots,
+        sourceRoots,
+        true,
+        compiled,
+      );
+      expect(uncompiledResult, candidate).toBe(expected);
+      expect(compiledResult, candidate).toBe(expected);
+    }
+  });
+
+  effectIt.layer(citationPlatformLayer)(it => {
+    it.effect(
+      'preserves exact scopeExclusions on full and scopeObservationOnly runs while avoiding double overlay scans',
+      () =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const executor = yield* CommandExecutor;
+          const root = yield* makeIdempotentFixtureTempDirectoryScoped(fs, 'threadnote-inventory-scope-opt-');
+          const write = (relative: string, content: string) =>
+            fs
+              .makeDirectory(path.dirname(path.join(root, relative)), {recursive: true})
+              .pipe(Effect.andThen(fs.writeFileString(path.join(root, relative), content)));
+          const git = (args: readonly string[]) => runCommandEffect('git', ['-C', root, ...args]);
+
+          yield* git(['init', '-q']);
+          yield* write('package.json', JSON.stringify({private: true, workspaces: ['apps/*', 'shared/*']}));
+          yield* write(
+            'apps/a/package.json',
+            JSON.stringify({name: '@fixture/a', dependencies: {'@fixture/core': 'workspace:*'}}),
+          );
+          yield* write('apps/a/index.ts', "export const a = 'a';\n");
+          yield* write('apps/b/package.json', JSON.stringify({name: '@fixture/b'}));
+          yield* write('apps/b/index.ts', "export const b = 'b';\n");
+          yield* write('apps/b/helper.ts', "export const helper = 'helper';\n");
+          yield* write('shared/core/package.json', JSON.stringify({name: '@fixture/core'}));
+          yield* write('shared/core/index.ts', "export const core = 'core';\n");
+          yield* git(['add', '.']);
+          yield* git(['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'init']);
+          yield* write('apps/a/index.ts', "export const a = 'dirty';\n");
+
+          const identity = yield* resolveRepositoryIdentity(root);
+          const project = {
+            uri: 'threadnote://resources/repos/a',
+            graph: {closure: 'dependencies' as const, roots: ['apps/a']},
+          };
+
+          let diffCalls = 0;
+          let untrackedCalls = 0;
+          const countOverlayExecutor: typeof executor = {
+            ...executor,
+            execute: (command, args, options) => {
+              if (command === 'git' && args.includes('diff')) diffCalls += 1;
+              if (command === 'git' && args.includes('ls-files') && args.includes('--others')) untrackedCalls += 1;
+              return executor.execute(command, args, options);
+            },
+          };
+
+          const full = yield* inventoryRepository(identity, {project}).pipe(
+            Effect.provideService(CommandExecutor, countOverlayExecutor),
+          );
+          expect(diffCalls).toBe(1);
+          expect(untrackedCalls).toBe(1);
+          expect(full.scopeExclusions?.files).toBe(3);
+
+          diffCalls = 0;
+          untrackedCalls = 0;
+          const indexerScopeObs = yield* inventoryRepository(identity, {
+            project,
+            scopeObservationOnly: true,
+          }).pipe(Effect.provideService(CommandExecutor, countOverlayExecutor));
+          expect(diffCalls).toBe(1);
+          expect(untrackedCalls).toBe(1);
+          expect(indexerScopeObs.scopeExclusions).toEqual(full.scopeExclusions);
+          expect(indexerScopeObs.scopeInventoryFingerprint).toBe(full.scopeInventoryFingerprint);
+          expect(indexerScopeObs.overlayFingerprint).toBe(full.overlayFingerprint);
+
+          const checkIgnoreInputs: string[][] = [];
+          const statusScopeObs = yield* inventoryRepository(identity, {
+            project,
+            scopeObservationOnly: true,
+            statusScopeObservationOnly: true,
+          }).pipe(
+            Effect.provideService(CommandExecutor, {
+              ...executor,
+              execute: (command, args, options) => {
+                if (command === 'git' && args.includes('check-ignore') && options?.input instanceof Uint8Array) {
+                  const text = new TextDecoder().decode(options.input);
+                  checkIgnoreInputs.push(EffectArray.filter(pipe(text, EffectString.split('\0')), Boolean));
+                }
+                return executor.execute(command, args, options);
+              },
+            }),
+          );
+          expect(statusScopeObs.scopeExclusions).toBeUndefined();
+          expect(statusScopeObs.scope).toEqual(full.scope);
+          expect(statusScopeObs.scopeInventoryFingerprint).toBe(full.scopeInventoryFingerprint);
+          expect(statusScopeObs.overlayFingerprint).toBe(full.overlayFingerprint);
+          expect(EffectArray.map(statusScopeObs.files, file => file.path)).toEqual(
+            EffectArray.map(full.files, file => file.path),
+          );
+          // The second check-ignore call checks admitted committed candidates; with statusScopeObservationOnly
+          // it must never check out-of-scope ordinary source files like apps/b/index.ts.
+          for (const batch of checkIgnoreInputs) {
+            expect(batch).not.toContain('apps/b/index.ts');
+            expect(batch).not.toContain('apps/b/helper.ts');
+          }
+        }).pipe(TestClock.withLive),
+    );
   });
 });

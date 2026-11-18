@@ -1034,3 +1034,123 @@ describe('supplemental local publication proof', () => {
     ).toThrow();
   });
 });
+
+describe('standard-profile plan reconciliation', () => {
+  const withIntent = (allowedPaths: readonly string[], baseBranch = 'main', acceptance = 'works') =>
+    decodeNativeCyclePlan(
+      makePlan(
+        EffectArray.map(makePlan().phases, phase => ({
+          ...phase,
+          intentDefinitionHash: Effect.pipe('9', EffectString.repeat(64)),
+          ...(phase.id === 'one' ? {allowedPaths: [...allowedPaths], baseBranch} : {}),
+          ...(phase.id === 'one' && acceptance !== 'works'
+            ? {
+                acceptanceCriteria: [acceptance],
+                acceptanceRefs: [{id: 'a1', criterion: acceptance, requirements: ['req'], specScenarios: []}],
+              }
+            : {}),
+        })),
+      ),
+    );
+
+  it('keeps an undelivered phase pending across a path-only or base-only change under standard only', () => {
+    const before = initializeNativeCycle(withIntent(['src/']));
+    for (const plan of [withIntent(['src/', 'docs/']), withIntent(['src/'], 'release')]) {
+      expect(reconcileNativeCyclePlan(before, plan, 'Paths changed', undefined, 'standard')).toMatchObject({
+        affected: [],
+        state: {phases: {one: {status: 'pending', phaseHash: nativeCyclePhaseHash(plan, 'one')}}},
+      });
+      expect(reconcileNativeCyclePlan(before, plan, 'Paths changed').state.phases.one.status).toBe('stale');
+    }
+    expect(
+      reconcileNativeCyclePlan(
+        before,
+        withIntent(['src/'], 'main', 'works faster'),
+        'Intent changed',
+        undefined,
+        'standard',
+      ).state.phases.one.status,
+    ).toBe('stale');
+  });
+
+  it('retires proof of a plan exported before a switch to standard unless its old paths explain the change', () => {
+    const validated = validateFirst();
+    const published = recordNativeCycleDelivery(validated, 'one', prDelivery('open'));
+    const reexport = (one: {readonly allowedPaths?: string[]; readonly definitionHash?: string} = {}) =>
+      decodeNativeCyclePlan(
+        makePlan(
+          EffectArray.map(makePlan().phases, phase => ({
+            ...phase,
+            intentDefinitionHash: Effect.pipe('9', EffectString.repeat(64)),
+            ...(phase.id === 'one' ? one : {}),
+          })),
+        ),
+      );
+    const widened = reexport({
+      allowedPaths: ['src/', 'docs/'],
+      definitionHash: Effect.pipe('3', EffectString.repeat(64)),
+    });
+    for (const before of [validated, published]) {
+      expect(
+        reconcileNativeCyclePlan(before, reexport(), 'Switched to standard', undefined, 'standard').affected,
+      ).toEqual([]);
+      // The definition changed beside the paths, and nothing showed that the paths alone changed it.
+      const changed = reconcileNativeCyclePlan(before, widened, 'Outcome and paths changed', undefined, 'standard');
+      expect(changed.affected).toEqual(['one', 'two']);
+      expect(changed.state.phases.one).toMatchObject({status: 'stale'});
+      expect(changed.state.phases.one).not.toHaveProperty('validation');
+      expect(changed.state.phases.one).not.toHaveProperty('delivery');
+      expect(reconcileNativeCyclePlan(before, widened, 'Own the docs', undefined, 'standard', ['one'])).toMatchObject({
+        affected: [],
+        state: {phases: {one: {status: before.phases.one.status, validation}}},
+      });
+    }
+  });
+
+  it('keeps validated, published and merged proof under its own phase hash across a path-only change', () => {
+    const plan = withIntent(['src/']);
+    const widened = withIntent(['src/', 'docs/']);
+    const validated = validateNativeCyclePhase(initializeNativeCycle(plan), 'one', snapshot(), validation);
+    const proofHash = validated.phases.one.phaseHash;
+    const publication = {
+      state: 'published' as const,
+      team: 'default',
+      uri: 'threadnote://memories/shared/default/durable/pr-publication',
+      revision: digest,
+      currentHead: gitSha,
+      remoteCommit: gitSha,
+      evidence: 'The current source was published with this exact reviewed receipt.',
+    };
+    const published = recordNativeCycleDelivery(validated, 'one', {...prDelivery('open'), phaseHash: proofHash});
+    const merged = recordNativeCycleDelivery(validated, 'one', {
+      ...prDelivery('merged'),
+      phaseHash: proofHash,
+      publication,
+    });
+    for (const before of [validated, published, merged]) {
+      const reconciled = reconcileNativeCyclePlan(before, widened, 'Own the docs', undefined, 'standard');
+      expect(reconciled.affected).toEqual([]);
+      expect(reconciled.state.phases).toEqual({
+        one: {...before.phases.one, planPhaseHash: nativeCyclePhaseHash(widened, 'one')},
+        two: {...before.phases.two, phaseHash: nativeCyclePhaseHash(widened, 'two')},
+      });
+      expect(
+        reconcileNativeCyclePlan(reconciled.state, plan, 'Revert the docs', undefined, 'standard').state.phases.one,
+      ).toEqual(before.phases.one);
+    }
+    expect(reconcileNativeCyclePlan(validated, widened, 'Own the docs').affected).toEqual(['one', 'two']);
+    const kept = reconcileNativeCyclePlan(validated, widened, 'Own the docs', undefined, 'standard').state;
+    expect(
+      recordNativeCycleDelivery(kept, 'one', {...prDelivery('open'), phaseHash: proofHash}).phases.one,
+    ).toMatchObject({status: 'published', phaseHash: proofHash});
+    const reopened = invalidateNativeCycle(kept, 'one', 'Late fix').phases.one;
+    expect(reopened).toMatchObject({status: 'stale', phaseHash: nativeCyclePhaseHash(widened, 'one')});
+    expect(reopened.planPhaseHash).toBeUndefined();
+    expect(() =>
+      decodeNativeCycleState({...kept, phases: {...kept.phases, two: {...kept.phases.two, planPhaseHash: digest}}}),
+    ).toThrow();
+    expect(
+      reconcileNativeCyclePlan(validated, withIntent(['src/'], 'release'), 'Base changed', undefined, 'standard'),
+    ).toMatchObject({affected: [], state: {phases: {one: {status: 'validated', validation}}}});
+  });
+});

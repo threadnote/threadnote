@@ -16,8 +16,11 @@ import {
 } from '@threadnote/workflow-automations/native';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {withNativeWorkflowMemorySession} from '../workflow_memory/index.js';
+import {directOwnedRelationScope} from '../workflow_memory/artifacts.js';
+import type {OwnedActiveRelationArtifact} from '../memory/relations.js';
 import {resolveWorkflowBinding} from '../workflow_memory/profile.js';
 import {bindWorkflow, inspectWorkflowJournal, withWorkflowLock} from '../workflow_memory/journal.js';
+import {readWorkflowSharedRoots} from '../workflow_memory/scopes.js';
 import {stableJson, type WorkflowBinding} from '../workflow_memory/protocol.js';
 import {makeWorkflowMemoryAdapter, nativeWorkflowError, workflowWriteRequest} from './memory.js';
 import {makeWorkflowGraphAdapter} from './graph.js';
@@ -38,6 +41,7 @@ import {decodeJournal} from './closeout_request_schema.js';
 import {readNativeCloseoutJournal} from './closeout_store.js';
 import {CurrentNativeJobBoundary, CurrentNativeJobProgress, runNativeJob} from './native_jobs.js';
 import {boundNativeCycleOutput} from '@threadnote/workflow-automations/cycle-output';
+import {nativeWorkflowPolicyOf} from '@threadnote/workflow-automations/gates';
 import {
   CurrentWorkflowReadCache,
   immutableWorkflowImage,
@@ -65,6 +69,7 @@ const summary = (state: NativeWorkflowState) => ({
   featureId: state.featureId,
   ...(state.naming ? {naming: state.naming, title: state.title} : {}),
   profile: state.profile,
+  ...(state.policy ? {policy: state.policy.mode} : {}),
   ...(state.team ? {team: state.team} : {}),
   operations: EffectArray.map(state.operations, operation => ({
     operationId: operation.intent.operationId,
@@ -220,7 +225,8 @@ const initialize = Effect.fn('workflowAutomation.initialize')(function* (
       state.generation !== request.generation ||
       (request.title !== undefined && state.title !== request.title) ||
       (request.profile !== undefined && state.profile !== request.profile) ||
-      (request.team !== undefined && state.team !== request.team)
+      (request.team !== undefined && state.team !== request.team) ||
+      (request.policy !== undefined && nativeWorkflowPolicyOf(state) !== request.policy)
     )
       return yield* issue('binding-drift', 'This run ID already belongs to different native intent.');
     const binding = yield* currentBinding(config, state);
@@ -236,6 +242,7 @@ const initialize = Effect.fn('workflowAutomation.initialize')(function* (
     request.graphProject,
   );
   const title = request.title ?? request.featureId;
+  const policy = request.policy ?? config.workflowPolicyDefault;
   const naming = yield* reserveWorkflowNameFamily(config, baseBinding, title);
   const binding = yield* resolveWorkflowBinding(
     config,
@@ -261,6 +268,7 @@ const initialize = Effect.fn('workflowAutomation.initialize')(function* (
     profile: binding.profile,
     ...(binding.team ? {team: binding.team} : {}),
     bindingId: binding.bindingId,
+    ...(policy === undefined ? {} : {policy: {mode: policy}}),
     operations: [],
   };
   // Admission must finish before a canonical binding journal or manifest is created.
@@ -294,6 +302,7 @@ const resumeWrite = (memory: Memory, intent: WorkflowWriteIntent) =>
 const save = Effect.fn('workflowAutomation.save')(function* (
   config: RuntimeConfig,
   stored: Stored,
+  binding: WorkflowBinding,
   memory: Memory,
   request: WriteRequest,
 ) {
@@ -311,10 +320,35 @@ const save = Effect.fn('workflowAutomation.save')(function* (
   );
   if (existing && existing.intentDigest !== digest)
     return yield* issue('operation-intent-conflict', 'This operationId already belongs to different native intent.');
-  if ((intent.relations?.length ?? 0) > 0 || (intent.evidenceRefs?.length ?? 0) > 0)
-    yield* loadRecallMemoryIdentities(config, {allowedUriScopes: [], memoryIds: []}).pipe(
-      withRecallIdentityPreparation,
-    );
+  if ((intent.relations?.length ?? 0) > 0 || (intent.evidenceRefs?.length ?? 0) > 0) {
+    const artifacts: Record<string, OwnedActiveRelationArtifact> = {};
+    for (const operation of stored.state.operations) {
+      if (operation.status !== 'verified' || !operation.artifact) continue;
+      if (operation.artifact.state === 'active') artifacts[operation.artifact.uri] = operation.artifact;
+      else {
+        delete artifacts[operation.artifact.uri];
+        if (operation.intent.uri !== undefined) delete artifacts[operation.intent.uri];
+      }
+    }
+    const directOwned = stored.state.team
+      ? undefined
+      : yield* directOwnedRelationScope(
+          {
+            artifacts,
+            owned: EffectArray.map(EffectRecord.toEntries(artifacts), ([canonicalUri, artifact]) => ({
+              canonicalUri,
+              memoryId: artifact.memoryId,
+            })),
+          },
+          EffectArray.map(intent.relations ?? [], relation => relation.uri),
+          intent.evidenceRefs,
+          readWorkflowSharedRoots(config, binding),
+        );
+    if (directOwned === undefined)
+      yield* loadRecallMemoryIdentities(config, {allowedUriScopes: [], memoryIds: []}).pipe(
+        withRecallIdentityPreparation,
+      );
+  }
   if (request.action === 'preflight' && existing) {
     if (existing.status !== 'verified' || !existing.artifact)
       return yield* issue(
@@ -666,10 +700,15 @@ const runBound = Effect.fn('workflowAutomation.bound')(function* (
           artifact: yield* memory.read(binding.bindingId, request.uri, request.evidenceRefs),
         };
       if (request.action === 'recover') return yield* recover(config, stored, memory, request.operationId, admission);
-      return yield* save(config, stored, memory, request);
+      return yield* save(config, stored, binding, memory, request);
     }),
   );
 });
+
+const ensureWorkflowReadCache = <A, E, R>(program: Effect.Effect<A, E, R>) =>
+  Effect.gen(function* () {
+    return (yield* CurrentWorkflowReadCache) !== undefined ? yield* program : yield* withWorkflowReadCache(program);
+  });
 
 const runCoreNative = Effect.fn('workflowAutomation.run')(function* (config: RuntimeConfig, input: unknown) {
   const request = yield* Effect.try({try: () => decodeNativeWorkflowRequest(input), catch: nativeWorkflowError});
@@ -709,7 +748,7 @@ const runCoreNative = Effect.fn('workflowAutomation.run')(function* (config: Run
     return {...version, status: 'ok' as const, graph: yield* graph.ready(binding.repo)};
   }
   return yield* withNativeWorkflowLock(config, request.runId, false, runBound(config, request));
-});
+}, ensureWorkflowReadCache);
 
 const dispatchNative = Effect.fn('workflowAutomation.dispatch')(function* (
   config: RuntimeConfig,
@@ -818,11 +857,13 @@ export const readNativeTaskInspection = (
   detail: 'summary' | 'packet',
   outputKey?: string,
 ) =>
-  withNativeWorkflowLock(
-    config,
-    runId,
-    false,
-    runBound(config, {...version, action: 'inspect', runId, generation}, detail, outputKey),
+  ensureWorkflowReadCache(
+    withNativeWorkflowLock(
+      config,
+      runId,
+      false,
+      runBound(config, {...version, action: 'inspect', runId, generation}, detail, outputKey),
+    ),
   ).pipe(
     withNativeFileLockWaitBudget,
     Effect.catchDefect(error => Effect.fail(nativeWorkflowError(error))),

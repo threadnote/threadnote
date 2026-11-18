@@ -3,10 +3,13 @@ import {Effect, FileSystem, Result, Schema} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
+import {CodeGraphIndexer} from '@threadnote/graph/indexer';
+import {CodeGraphStore} from '@threadnote/graph/store';
 import {parseMemoryDocument} from '@threadnote/memory/document';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {loadRecallIndexData, recallIndexStatus} from '@threadnote/recall/index';
 import {runCommandEffect} from '@threadnote/platform/command';
+import {SystemInfo} from '@threadnote/platform/system';
 import {
   decodeNativeAuthoringDocument,
   nativeAuthoringDigest,
@@ -14,7 +17,9 @@ import {
   type NativeAuthoringDocument,
 } from '@threadnote/workflow-automations/authoring';
 import {sha256HexSync} from '../../src/workflow_memory/native_digest.js';
+import {runWorkflowAutomation} from '../../src/workflow_automation/index.js';
 import {CurrentNativeOperationLimit} from '../../src/workflow_automation/store.js';
+import {CurrentNativeProgress} from './native-authoring-progress-diagnostics.js';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
 import {
   AuthoringRootSchema,
@@ -2295,6 +2300,193 @@ describe('native authoring lifecycle', () => {
       );
       expect(JSON.stringify(decisionAlternatives)).toContain('No better alternative identified.');
     }).pipe(run),
+  );
+
+  effectIt.effect(
+    'captures foreground code citations at most twice per multi-view authoring save while preserving citations on child and root artifacts',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* nativeFixture();
+        const sourceBytes = 'export const fixture = true;\n';
+        yield* runCommandEffect('git', ['-C', f.repo, 'add', 'source.ts']);
+        yield* runCommandEffect('git', [
+          '-C',
+          f.repo,
+          '-c',
+          'user.name=Fixture',
+          '-c',
+          'user.email=fixture@example.invalid',
+          'commit',
+          '-m',
+          'Fixture source',
+        ]);
+        const head = Effect2.pipe(
+          (yield* runCommandEffect('git', ['-C', f.repo, 'rev-parse', 'HEAD'])).stdout,
+          EffectString.trim,
+        );
+        const indexer = yield* CodeGraphIndexer;
+        expect((yield* indexer.index({cwd: f.repo, threadnoteHome: f.home})).snapshot.state).toBe('ready');
+        yield* f.init();
+
+        const {sourceFreeReason: _sourceFreeReason, ...basePlan} = smallPlan();
+        const planWithCodeRefs = decodeNativeAuthoringDocument({
+          ...basePlan,
+          context: {
+            ...context,
+            codeRefs: ['source.ts'],
+          },
+          source: {
+            head,
+            files: [{path: 'source.ts', sha256: sha256HexSync(sourceBytes)}],
+          },
+          phases: [
+            {
+              id: 'phase-save',
+              title: 'Save the document',
+              outcome: 'The native document can be saved and reloaded.',
+              dependsOn: [],
+              affectedPaths: ['source.ts'],
+              newPaths: [],
+              contracts: ['Keep the existing native root identity.'],
+              acceptance: [
+                {
+                  id: 'accept-load',
+                  criterion: 'The saved document reloads completely.',
+                  verification: 'Read the document by its verified root.',
+                  requirementIds: ['req-read'],
+                },
+              ],
+              safeBoundary: 'Do not change unrelated artifacts.',
+            },
+          ],
+        });
+
+        const system = yield* SystemInfo;
+        const graphStore = yield* CodeGraphStore;
+        const progress = yield* CurrentNativeProgress;
+        if (!progress) throw new Error('Expected native progress diagnostics');
+        const directAuthoringSave = (changes: ObjectValue) =>
+          runWorkflowAutomation(f.config, {...f.base('authoring'), command: 'save', ...changes}).pipe(
+            Effect.provideService(SystemInfo, {...system, currentDirectory: () => f.repo}),
+          );
+        const countCaptures = <A, E, R>(program: Effect.Effect<A, E, R>) =>
+          Effect.gen(function* () {
+            let captures = 0;
+            const beforePrepares = progress.snapshot().totals['workflowMemory.prepareOperation']?.started ?? 0;
+            const observedStore = CodeGraphStore.of({
+              ...graphStore,
+              ...(graphStore.readReadySnapshotCitationEvidence
+                ? {
+                    readReadySnapshotCitationEvidence: (...args) =>
+                      Effect.sync(() => {
+                        captures += 1;
+                      }).pipe(Effect.andThen(graphStore.readReadySnapshotCitationEvidence!(...args))),
+                  }
+                : {}),
+              effectiveSnapshotCitationEvidence: (...args) =>
+                Effect.sync(() => {
+                  captures += 1;
+                }).pipe(Effect.andThen(graphStore.effectiveSnapshotCitationEvidence(...args))),
+            });
+            const value = yield* program.pipe(Effect.provideService(CodeGraphStore, observedStore));
+            const afterPrepares = progress.snapshot().totals['workflowMemory.prepareOperation']?.started ?? 0;
+            return {value, captures, prepares: afterPrepares - beforePrepares};
+          });
+
+        const draftSave = yield* countCaptures(
+          directAuthoringSave({
+            document: planWithCodeRefs,
+            ready: false,
+            expectedRevision: null,
+          }),
+        );
+        expect(draftSave.captures).toBe(2);
+        // 1 preview preflight + 7 single-prepared writes (source, index, 4 views, root) = 8 prepares total.
+        expect(draftSave.prepares).toBe(8);
+
+        const draftResult = authoring(draftSave.value);
+        const draftRootRef = reference(draftResult.root);
+        const draftRootContent = yield* f.store.read(f.location, draftRootRef.uri);
+        const parsedDraftRoot = parseMemoryDocument(draftRootRef.uri, draftRootContent);
+        expect(parsedDraftRoot?.metadata.codeCitations?.length).toBeGreaterThan(0);
+        expect(parsedDraftRoot?.metadata.codeCitations?.[0]?.path).toBe('source.ts');
+        expect(parsedDraftRoot?.metadata.codeCitations?.[0]?.sourceCommit).toBe(head);
+
+        const readySave = yield* countCaptures(
+          directAuthoringSave({
+            document: planWithCodeRefs,
+            ready: true,
+            uri: draftRootRef.uri,
+            expectedRevision: draftRootRef.revision,
+          }),
+        );
+        expect(readySave.captures).toBe(2);
+        // 1 preview preflight + 2 newly prepared writes (history, root) while unchanged child operationIds reuse existing verified receipts = 3 prepares total.
+        expect(readySave.prepares).toBe(3);
+
+        const readyResult = authoring(readySave.value);
+        expect(readyResult.readiness).toBe('ready');
+        const readyRootRef = reference(readyResult.root);
+        const readyRootContentBeforeInjection = yield* f.store.read(f.location, readyRootRef.uri);
+
+        const state = decodeJson(PendingAuthoringStateSchema, JSON.parse(yield* f.fs.readFileString(f.statePath())));
+        const activeUris = new Set<string>([readyRootRef.uri]);
+        for (const operation of state.operations) {
+          if (operation.status !== 'verified') continue;
+          const recordObj = object(operation);
+          if (typeof recordObj.artifact === 'object' && recordObj.artifact !== null) {
+            const art = object(recordObj.artifact);
+            if (art.state === 'active' && typeof art.uri === 'string') activeUris.add(art.uri);
+          }
+        }
+        expect(activeUris.size).toBeGreaterThanOrEqual(7);
+        for (const uri of activeUris) {
+          const parsed = parseMemoryDocument(uri, yield* f.store.read(f.location, uri));
+          expect(parsed?.metadata.codeCitations?.length, uri).toBeGreaterThan(0);
+          expect(parsed?.metadata.codeCitations?.[0]?.path, uri).toBe('source.ts');
+          expect(parsed?.metadata.codeCitations?.[0]?.sourceCommit, uri).toBe(head);
+        }
+
+        // Failure injection on the closing authoring-root citation read (capture #2) fails closed with
+        // evidence-unavailable rather than reusing the preview witness or publishing a stale root.
+        let injectedCaptures = 0;
+        const failOnClosingRootStore = CodeGraphStore.of({
+          ...graphStore,
+          ...(graphStore.readReadySnapshotCitationEvidence
+            ? {
+                readReadySnapshotCitationEvidence: (...args) =>
+                  Effect.gen(function* () {
+                    injectedCaptures += 1;
+                    if (injectedCaptures === 2) return undefined;
+                    return yield* graphStore.readReadySnapshotCitationEvidence!(...args);
+                  }),
+              }
+            : {}),
+          effectiveSnapshotCitationEvidence: (...args) =>
+            Effect.gen(function* () {
+              injectedCaptures += 1;
+              const actual = yield* graphStore.effectiveSnapshotCitationEvidence(...args);
+              return injectedCaptures === 2 ? {...actual, filesByPaths: []} : actual;
+            }),
+        });
+        const closingRootFailure = yield* failure(
+          directAuthoringSave({
+            document: {
+              ...planWithCodeRefs,
+              objective: 'Updated objective requiring a fresh closing authoring-root citation read.',
+            },
+            ready: true,
+            uri: readyRootRef.uri,
+            expectedRevision: readyRootRef.revision,
+          }).pipe(Effect.provideService(CodeGraphStore, failOnClosingRootStore)),
+        );
+        expect(injectedCaptures).toBe(2);
+        expect(Result.isFailure(closingRootFailure)).toBe(true);
+        if (Result.isFailure(closingRootFailure)) {
+          expect(closingRootFailure.failure).toMatchObject({code: 'evidence-unavailable'});
+        }
+        expect(yield* f.store.read(f.location, readyRootRef.uri)).toBe(readyRootContentBeforeInjection);
+      }).pipe(run),
   );
 
   // Manual full-history qualification on every platform; standard CI retains the fast functional cases.

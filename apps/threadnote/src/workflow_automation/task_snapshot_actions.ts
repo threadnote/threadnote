@@ -1,9 +1,17 @@
 import {Array as EffectArray, Option as EffectOption, Effect, String as EffectString} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {decodeNativeTaskActionRef, nativeTaskSnapshotId} from '@threadnote/workflow-automations/task';
+import {
+  nativeNext,
+  nativeNextCommand,
+  nativeRefusal,
+  nativeWorkflowPolicyOf,
+} from '@threadnote/workflow-automations/gates';
+import {recordNativeTaskTreeSnapshot} from './task_tree_snapshot_action.js';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {gitValue} from '../utils.js';
+import {captureNativeCycleSource} from './cycle_git.js';
 import {readNativeWorkflowState} from './store.js';
 import {readNativeTaskView} from './task.js';
 import {runWorkflowAutomation} from './index.js';
@@ -91,7 +99,6 @@ export const runNativeTaskSnapshotAction = (
         baseline.head !== ref.baselineHead ||
         baseline.tree !== ref.baselineTree ||
         baseline.pinnedRef !== ref.baselineRef ||
-        state.phases[ref.phaseId]?.phaseHash !== ref.phaseHash ||
         state.phases[ref.phaseId]?.status !== 'pending' ||
         (latest?.snapshot.snapshotId !== ref.snapshotId && !exactReplay)
       )
@@ -103,18 +110,21 @@ export const runNativeTaskSnapshotAction = (
         callerCwd: checkout,
         role: 'review',
       });
+      const next = currentTask.next;
+      const staleContract = state.phases[ref.phaseId]?.phaseHash !== ref.phaseHash && !exactReplay;
       if (
         currentTask.revision !== stored.revision ||
         currentTask.status !== 'ready' ||
-        currentTask.next.action !== 'review' ||
-        currentTask.next.phaseId !== ref.phaseId ||
-        (currentTask.next.snapshotId !== ref.snapshotId &&
-          !(exactReplay && currentTask.next.snapshotId === snapshotId)) ||
-        currentTask.phase?.snapshot?.snapshotId !== currentTask.next.snapshotId
+        next.phaseId !== ref.phaseId ||
+        (staleContract
+          ? next.action !== 'implement'
+          : next.action !== 'review' ||
+            (next.snapshotId !== ref.snapshotId && !(exactReplay && next.snapshotId === snapshotId)) ||
+            currentTask.phase?.snapshot?.snapshotId !== next.snapshotId)
       )
         return yield* fail(
           'stale-snapshot-ref',
-          'Recovery requires the exact unreviewed snapshot on the current phase review card.',
+          'Recovery requires the exact unreviewed snapshot on the current phase card.',
         );
       const head = yield* gitValue(['rev-parse', 'HEAD'], checkout);
       if (!head) return yield* fail('source-unavailable', 'Could not read the current source head.');
@@ -144,6 +154,16 @@ export const runNativeTaskSnapshotAction = (
       };
     }
 
+    if (nativeWorkflowPolicyOf(stored.state) === 'standard')
+      return yield* recordNativeTaskTreeSnapshot(config, request, stored, checkout, runtime);
+    if (request.workRef === undefined)
+      return yield* nativeRefusal(
+        'invalid-work-ref',
+        'A strict-profile snapshot records the source of an admitted work packet; prepare one first.',
+        {
+          next: nativeNext.work({runId: request.runId, callerCwd: checkout}),
+        },
+      );
     const ref = decodeNativeTaskActionRef(request.workRef);
     if (
       !ref ||
@@ -167,6 +187,38 @@ export const runNativeTaskSnapshotAction = (
           'snapshot-conflict',
           'This task reference is already bound to different canonical snapshot evidence.',
         );
+      // One work packet records one snapshot, so a replay is only truthful for that snapshot's exact source.
+      const current = yield* captureNativeCycleSource(checkout, admitted.snapshot.baseTree);
+      if (current.tree !== admitted.snapshot.tree) {
+        const latest = EffectArray.filter(runtime.snapshots, item => item.snapshot.phaseId === ref.phaseId).at(-1);
+        const supersedable =
+          latest?.snapshot.snapshotId === snapshotId &&
+          !EffectArray.some(runtime.reviews, item => item.snapshotId === snapshotId);
+        const scope = {runId: request.runId, callerCwd: checkout};
+        return yield* nativeRefusal(
+          'source-drift',
+          `Source changed after this work packet recorded snapshot ${snapshotId}: snapshot tree ${admitted.snapshot.tree}, current tree ${current.tree}. ` +
+            (supersedable
+              ? 'Supersede it with supersede-unreviewed-snapshot, using its snapshotRef from the task view and a concrete reason.'
+              : 'Prepare a new work packet with task-action work, then record it with a concrete reason.'),
+          {
+            next: supersedable
+              ? nativeNextCommand(
+                  'workflow_task_snapshot',
+                  'supersede-unreviewed',
+                  {
+                    command: 'task-action supersede-unreviewed-snapshot',
+                    flags: {...scope, snapshotRef: '<snapshotRef>', reason: '<reason>'},
+                  },
+                  {
+                    ...scope,
+                    snapshot: {command: 'supersede-unreviewed', snapshotRef: '<snapshotRef>', reason: '<reason>'},
+                  },
+                )
+              : nativeNext.work(scope),
+          },
+        );
+      }
       return {
         status: 'recorded',
         replayed: true,
@@ -205,6 +257,10 @@ export const runNativeTaskSnapshotAction = (
     )?.snapshot;
     if (previous && !request.reason)
       return yield* fail('review-history', 'Give a concrete reason before recording another source iteration.');
+    const supersedeStale =
+      previous !== undefined &&
+      previous.phaseHash !== ref.phaseHash &&
+      !EffectArray.some(runtime.reviews, item => item.snapshotId === previous.snapshotId);
     yield* inCheckout(
       runWorkflowAutomation(
         config,
@@ -214,6 +270,7 @@ export const runNativeTaskSnapshotAction = (
           snapshotId,
           acceptedHead: head,
           ...(previous ? {previous: previous.snapshotId} : {}),
+          ...(supersedeStale ? {supersedeUnreviewed: true} : {}),
           reason: request.reason ?? 'Record the exact worker source result for this implementation packet.',
           expectedRevision: stored.revision,
         }),
