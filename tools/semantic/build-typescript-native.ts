@@ -392,8 +392,8 @@ async function assertCanonical(path: string, label: string): Promise<void> {
     throw new Error(`Native TypeScript ${label} must be a canonical absolute path; resolve symlinks before calling.`);
 }
 const hostKey = () => `${process.platform}-${process.arch}`;
-/** The one host archive lookup shared by construction and receipt readback. */
-function hostToolchainArchive() {
+/** The one host archive lookup shared by construction, receipt readback and the CI construction workflow. */
+export function hostToolchainArchive() {
   const os = process.platform === 'win32' ? 'windows' : process.platform;
   const arch = process.arch === 'x64' ? 'amd64' : process.arch;
   return typescriptNativeBuildRecipe.toolchain.archives.find(item => item.os === os && item.arch === arch);
@@ -415,8 +415,14 @@ function hermeticGitEnvironment(ceiling?: string): NodeJS.ProcessEnv {
     ...(process.platform === 'win32' ? {SystemRoot: process.env.SystemRoot} : {}),
   };
 }
-/** Leading Git arguments: patched and checked-out bytes are never line-ending converted. */
-const hermeticGitArguments = ['-c', 'core.autocrlf=false', '-c', 'core.eol=lf'] as const;
+/** Leading Git arguments: patched and checked-out bytes are never line-ending converted; Windows allows long paths. */
+const hermeticGitArguments = [
+  '-c',
+  'core.autocrlf=false',
+  '-c',
+  'core.eol=lf',
+  ...(process.platform === 'win32' ? ['-c', 'core.longpaths=true'] : []),
+] as const;
 
 /** Read-only refusal before clean, generation or release staging can alter a supplied asset. */
 export async function assertNativeTypeScriptAssetOutsideReleaseOutput(
@@ -608,10 +614,13 @@ async function command(
     }
     if (pumpFailure !== undefined || overflow)
       throw new Error('Native TypeScript build output was incomplete or excessive.');
-    if (!observation.stdioClosed || observation.leaderExitCode !== 0)
+    if (!observation.stdioClosed || observation.leaderExitCode !== 0) {
+      // Bounded, leniently decoded tail of the combined output so a CI failure names its cause.
+      const tail = new TextDecoder().decode(new TextEncoder().encode(stdout + stderr).slice(-8 * 1024)).trim();
       throw new Error(
-        `Native TypeScript build command failed: ${basename(executable)} (${observation.leaderExitCode ?? 'unknown'}).`,
+        `Native TypeScript build command failed: ${basename(executable)} (${observation.leaderExitCode ?? 'unknown'}).${tail ? `\n${tail}` : ''}`,
       );
+    }
     runtimeCloseOwnedProviderTree(owner.handle);
     return stdout + stderr;
   } catch (error) {

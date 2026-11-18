@@ -59,6 +59,13 @@ provider-eligible.
   succeeds only beside its sibling `payload`. A schema-v1 payload stores an absolute probe command and is refused once
   moved; schema-v2 commands are relative to `payload`.
 - Cache `payload` and `prepared` together as one unit so the prepared asset stays verifiable.
+- `.github/workflows/native-typescript-construction.yml` runs `--prepare` and both verifiers on the six GitHub-hosted
+  targets on manual dispatch and for same-repository pull requests into `main` or a ci.yml release base that touch
+  the builder, its overlays, `packages/platform`, `bun.lock`, `.gitattributes` or the workflow and its helper. It
+  uploads `payload` and `prepared` as one mode-preserving tar, re-verified after extraction, with a summary retained
+  for 14 days. These artifacts are unreviewed construction evidence, not pins.
+- A reviewed host binary pin is a separate change. It may come only from a trusted run of a reviewed commit on this
+  repository, never a fork pull request, and the summary's `threadnoteCommit` must match that commit.
 - `THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR` names a raw `payload` for `bun run build`, which stages
   `dist/runtime/typescript` only for a reviewed host binary pin.
 - To label a local stage, set `THREADNOTE_DEVELOPMENT_BUILD_VERSION` to a SHA-bound version such as
