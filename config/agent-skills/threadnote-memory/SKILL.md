@@ -46,6 +46,23 @@ Maintenance: `threadnote context check --project <name>` checks direct citations
 `complete_activation_retrieval_proof`, and `threadnote_guide`; procedures never auto-execute and tool-returned actions guide
 uncommon recovery.
 
+## Write stored memories in the Threadnote STE profile
+
+Apply these rules to every stored memory body: durable memories, handoffs and decisions.
+
+- Apply: write one topic in each sentence. Keep a procedural sentence to 20 words or fewer and a descriptive sentence to
+  25 words or fewer. Keep a paragraph to 6 sentences or fewer, with one topic.
+- Apply: use the active voice and a simple tense. Start an instruction with the imperative verb. Write the condition
+  first ("If X, do Y").
+- Apply: keep the articles. Use no more than 3 words in a noun cluster. Use one term for one thing in all of the text.
+  Use a plain verb, not an -ing form, a phrasal verb, a contraction or a noun as a verb.
+- Apply: in a warning, write the command first and then the reason. Label each claim as measured, inferred or unknown.
+- Relax: use the simplest common word with one clear meaning, not only STE dictionary words. Tradeoff and risk text can
+  be descriptive, with one topic in each sentence.
+- Exempt: keep code identifiers, paths, commands, flags, error codes, technical names and URLs verbatim in backticks.
+  Keep product names and quoted text verbatim.
+- Keep Markdown headings, lists and tables. Do not compress the text into telegraphic fragments.
+
 Do not store secrets, credentials, customer data, or raw production logs. Never publish handoffs/preferences;
 conflicting writes or forced synchronization need explicit approval.
 
