@@ -421,6 +421,27 @@ describe('native cycle review validation', () => {
     ).toMatchObject({code: 'invalid-cycle-review'});
   });
 
+  it('names the findings and the broken half of the prior-identity rule', () => {
+    const full = snapshot({previous: undefined, previousTree: undefined, acceptedHead: undefined});
+    const fullReport = review(
+      {
+        mode: 'full',
+        findings: [
+          finding({id: 'finding-a', state: 'carried'}),
+          finding({id: 'finding-b', state: 'resolved', reason: 'Fixed in the handler.'}),
+        ],
+      },
+      full,
+    );
+    expect(caught(() => validateNativeCycleReview(full, fullReport))).toMatchObject({
+      code: 'invalid-cycle-review',
+      message: expect.stringMatching(/no predecessor review.*finding-a, finding-b/u),
+    });
+    expect(
+      caught(() => validateNativeCycleReview(snapshot(), review({findings: [finding({state: 'new'})]}), previous)),
+    ).toMatchObject({message: expect.stringMatching(/finding-1.*predecessor review/u)});
+  });
+
   it('requires and carries the prior finding ledger across a full source restart', () => {
     const restarted = snapshot({
       snapshotId: 'snapshot-restart',
