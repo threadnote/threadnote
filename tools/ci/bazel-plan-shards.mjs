@@ -1,5 +1,4 @@
 import {Array as EffectArray} from 'effect';
-/* oxlint-disable effecttsgo/node-builtin-import -- Directory creation and removal are native OS primitives; artifact contents use Bun. */
 import {mkdirSync, rmSync} from 'node:fs';
 import {readPreparedInventory} from '../bazel/prepare.mjs';
 import {resolve} from 'node:path';

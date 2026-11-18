@@ -1,8 +1,6 @@
 #!/usr/bin/env bun
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 
-/* oxlint-disable effecttsgo/node-builtin-import -- Isolated native CLI evaluation adapter. */
-
 import {appendFile, mkdir, readFile, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {topicGenerationUsage} from '@threadnote/memory/topic-maintenance-draft';

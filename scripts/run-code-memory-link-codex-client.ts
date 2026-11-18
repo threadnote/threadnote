@@ -1,8 +1,6 @@
 #!/usr/bin/env bun
 import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 
-/* oxlint-disable effecttsgo/node-builtin-import -- This reviewed outer adapter is the trusted operating-system isolation boundary. */
-
 import {createHash} from 'node:crypto';
 import {lstat, mkdtemp, readFile, realpath, rm, stat} from 'node:fs/promises';
 import {join, resolve} from 'node:path';

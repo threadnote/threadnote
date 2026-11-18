@@ -1,8 +1,6 @@
 #!/usr/bin/env bun
 import {Array as EffectArray, Predicate} from 'effect';
 
-/* oxlint-disable effecttsgo/node-builtin-import -- This reviewed MCP proxy owns one bounded pinned Threadnote child process. */
-
 import {createHash} from 'node:crypto';
 import {readFile, realpath, stat, unlink} from 'node:fs/promises';
 import {dirname, isAbsolute, relative, resolve, sep} from 'node:path';

@@ -1,8 +1,6 @@
 #!/usr/bin/env bun
 import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 
-/* oxlint-disable effecttsgo/node-builtin-import -- This local sealer owns reviewed evidence-file boundaries. */
-
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import {createHash} from 'node:crypto';
 import {lstat, mkdir, readFile, realpath, rename, writeFile} from 'node:fs/promises';

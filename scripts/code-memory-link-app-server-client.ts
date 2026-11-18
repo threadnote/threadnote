@@ -1,7 +1,6 @@
 import {isSafeInteger as checkedIsSafeInteger} from '@threadnote/platform/validation';
 import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
-/* oxlint-disable effecttsgo/node-builtin-import -- This reviewed JSONL client is an explicit operating-system child-process boundary. */
 import {spawn, type ChildProcessWithoutNullStreams} from 'node:child_process';
 import {isAbsolute, relative, resolve, sep} from 'node:path';
 import {createInterface, type Interface as ReadlineInterface} from 'node:readline';

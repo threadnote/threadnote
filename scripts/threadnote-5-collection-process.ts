@@ -1,6 +1,5 @@
 import {Predicate} from 'effect';
 import {Array as EffectArray} from 'effect';
-/* oxlint-disable effecttsgo/node-builtin-import -- Private release engineering owns real CLI process groups and binary payloads. */
 import {createHash} from 'node:crypto';
 import {spawn} from 'node:child_process';
 import type {Writable} from 'node:stream';

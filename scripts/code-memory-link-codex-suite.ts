@@ -1,5 +1,4 @@
 import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
-/* oxlint-disable effecttsgo/node-builtin-import -- This reviewed sealed-suite loader verifies raw filesystem identity before exposing bytes to Effect-free protocol parsers. */
 import {createHash} from 'node:crypto';
 import {lstat, readFile, realpath, stat} from 'node:fs/promises';
 import {isAbsolute, join, posix, resolve, sep} from 'node:path';

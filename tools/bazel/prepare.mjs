@@ -1,9 +1,7 @@
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 // Bun's fs compatibility API supplies atomic rename, link metadata and synchronous
 // stat checks. Content I/O, hashing, spawning and publication locking use Bun APIs.
-// oxlint-disable-next-line effecttsgo/node-builtin-import
 import {lstatSync, readlinkSync, renameSync, statSync} from 'node:fs';
-// oxlint-disable-next-line effecttsgo/node-builtin-import -- Build bootstrap uses Bun's path utilities without an Effect service layer.
 import {join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {Database} from 'bun:sqlite';

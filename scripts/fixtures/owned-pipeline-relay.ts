@@ -1,7 +1,5 @@
 /** Private smoke pipeline endpoint. stdout remains the shell pipeline, never diagnostics. */
-// oxlint-disable-next-line effecttsgo/node-builtin-import -- The pipeline relay must observe its direct OS child's exit and close events.
 import {spawn} from 'node:child_process';
-// oxlint-disable-next-line effecttsgo/node-builtin-import -- The relay publishes its private receipt using an exclusive OS file creation.
 import {writeFile} from 'node:fs/promises';
 
 const [receipt, token, executable, ...args] = process.argv.slice(2);

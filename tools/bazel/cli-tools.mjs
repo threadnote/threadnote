@@ -1,4 +1,3 @@
-/* oxlint-disable effecttsgo/node-builtin-import -- Verified tool bootstrap runs before npm installation. */
 import {chmodSync, existsSync, mkdirSync, renameSync, rmSync} from 'node:fs';
 import {dirname, resolve} from 'node:path';
 import * as EffectString from 'effect/String';

@@ -1,7 +1,6 @@
 import {Array as EffectArray} from 'effect';
 // Compiled test provider/proxy; copied outside the checkout before release isolation.
 // Bun 1.4.2 compile cannot bundle the testing node-fs export-star wrapper.
-// oxlint-disable-next-line effecttsgo/node-builtin-import
 import {closeSync, existsSync, openSync, writeSync} from 'node:fs';
 import {join} from '@threadnote/testing/node-path';
 import {parseMemoryDocument} from '@threadnote/memory/document';

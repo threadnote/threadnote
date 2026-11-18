@@ -1,4 +1,3 @@
-/* oxlint-disable effecttsgo/node-builtin-import -- This reviewed evaluation helper owns explicit operating-system process-group boundaries. */
 import {spawn, type ChildProcess} from 'node:child_process';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';

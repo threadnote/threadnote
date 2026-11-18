@@ -22,6 +22,7 @@ const EFFECT_APPLICATION_BOUNDARY_RULES = [
   'effecttsgo/global-fetch',
   'effecttsgo/global-timers',
   'effecttsgo/missing-pipeable-signature',
+  'effecttsgo/node-builtin-import',
   'effecttsgo/prefer-schema-over-json',
   'effecttsgo/process-env',
   'effecttsgo/schema-sync',
@@ -113,7 +114,6 @@ describe('lint policy', () => {
     expect(EffectArray.filter(EFFECT_APPLICATION_BOUNDARY_RULES, rule => baseConfig.rules?.[rule] !== 'off')).toEqual(
       [],
     );
-    expect(strictConfig.rules?.['effecttsgo/node-builtin-import']).toBe('error');
     expect(strictConfig.rules?.['effecttsgo/global-date-in-effect']).toBe('error');
     expect(strictConfig.rules?.['effecttsgo/process-env-in-effect']).toBe('error');
     expect(baseConfig.rules?.['typescript/no-unsafe-type-assertion']).toBe('error');

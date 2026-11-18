@@ -1,6 +1,5 @@
 /** Test-only raw POSIX socket boundary: Bun's socket APIs replace denial errno with ECONNREFUSED. */
 // Bun's standalone compiler cannot bundle the testing builtin export-star wrappers.
-// oxlint-disable-next-line effecttsgo/node-builtin-import
 import {constants as filesystemConstants} from 'node:fs';
 import {constants as systemConstants} from 'node:os';
 

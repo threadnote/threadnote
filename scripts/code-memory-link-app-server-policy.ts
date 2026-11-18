@@ -1,6 +1,5 @@
 import {Array as EffectArray, Predicate} from 'effect';
 import {Schema} from 'effect';
-/* oxlint-disable effecttsgo/node-builtin-import -- This reviewed adapter validates app-server actions before execution. */
 import {createHash} from 'node:crypto';
 import {realpathSync} from 'node:fs';
 import {isAbsolute, relative, resolve, sep} from 'node:path';
