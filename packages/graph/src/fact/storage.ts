@@ -1,4 +1,5 @@
-import {unzlibSync} from 'fflate';
+// oxlint-disable-next-line threadnote/no-node-runtime -- Bun exposes only raw, uncapped inflate; node:zlib bounds output and verifies the zlib trailer.
+import {inflateSync} from 'node:zlib';
 import {
   CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM,
   serializeBoundedCodeGraphFact,
@@ -82,9 +83,9 @@ export function decodeStoredCodeGraphFact(json: string, expectedPath?: string): 
     throw new Error('Stored code graph fact envelope path does not match its cache key.');
   }
   const compressed = decodeCanonicalBase64(parsed.payload);
-  // Keep the caller-owned output buffer: Bun's synchronous inflate API does
-  // not currently expose an equivalent decompressed-byte ceiling.
-  const raw = unzlibSync(compressed, {out: new Uint8Array(parsed.rawBytes)});
+  // Native zlib verifies the header and Adler-32 trailer; the output ceiling
+  // rejects payloads that expand beyond their declared size before allocation.
+  const raw = inflateSync(compressed, {maxOutputLength: parsed.rawBytes});
   if (raw.byteLength !== parsed.rawBytes || storedFactSha256Hex(raw) !== parsed.sha256) {
     throw new Error('Stored code graph fact envelope failed integrity validation.');
   }
