@@ -10,6 +10,7 @@ import type {MaterializationStorageTelemetry} from './materialization.js';
 import type {CodeGraphWorkspace} from '../languages/types.js';
 import type {CodeGraphLanguagePackRegistryShape} from '../languages/registry.js';
 import type {CodeGraphLayout} from '../layout.js';
+import type {CodeGraphMaterializedShardPolicy} from '../materialized_shard_cache_admission.js';
 import type {CodeGraphBuilderAdmissionClass} from '../builder/admission.js';
 import type {CodeGraphEmbeddingIndexShape} from '../embedding.js';
 import type {CodeGraphResolutionPublicationAssessment} from '../resolution/surface.js';
@@ -59,6 +60,8 @@ export interface CodeGraphIndexOptions extends CodeGraphInventoryOptions {
   readonly sourceVerification?: CodeGraphSourceVerification;
   /** Internal benchmark/correctness escape hatch; normal indexing keeps this enabled. */
   readonly incrementalOverlay?: boolean;
+  /** @internal Full clean builds honor 'all'; checkpoint export requests it to rebuild deferred shards. */
+  readonly materializedShards?: CodeGraphMaterializedShardPolicy;
   /** @internal Records read-back PRAGMA values for controlled benchmark evidence. */
   readonly onSqliteWriterConfigured?: (settings: CodeGraphSqliteWriterSettings) => Effect.Effect<void, never>;
   /** @internal Opaque background-demand claim for in-process watcher refreshes. */
@@ -197,6 +200,7 @@ export interface CodeGraphBuildAndActivateInput {
   readonly languagePacks: CodeGraphLanguagePackRegistryShape;
   readonly legacyBuildAdmission?: CodeGraphIndexResourceGate;
   readonly layout: CodeGraphLayout;
+  readonly materializedShards?: CodeGraphMaterializedShardPolicy;
   readonly onProgress?: (progress: CodeGraphProgress) => Effect.Effect<void, unknown>;
   readonly persistentMaterializationTransactionBatchLimit?: 1 | 4;
   readonly persistentOwnerToken?: string;

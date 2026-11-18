@@ -1056,6 +1056,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                           languagePacks,
                           layout,
                           logicalSnapshotId,
+                          materializedShards: options.materializedShards,
                           onProgress: options.onProgress,
                           persistentMaterializationTransactionBatchLimit:
                             options.persistentMaterializationTransactionBatchLimit,

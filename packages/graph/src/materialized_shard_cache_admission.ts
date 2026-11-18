@@ -12,6 +12,12 @@ export const CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM =
 
 export type CodeGraphMaterializedShardCacheWriteAdmission = 'defer' | 'persist';
 
+/**
+ * Ordinary indexing keeps the raw-fact bound. Checkpoint export reads attributed file facts only from
+ * materialized shards, so it rebuilds a deferred snapshot with every shard persisted.
+ */
+export type CodeGraphMaterializedShardPolicy = 'bounded' | 'all';
+
 export interface CodeGraphMaterializedShardCacheBatchPlan {
   readonly associate: boolean;
   readonly cacheFallback: boolean;
@@ -21,8 +27,9 @@ export interface CodeGraphMaterializedShardCacheBatchPlan {
 /** @internal Exact, fail-closed admission used by the cache-write property. */
 export function codeGraphMaterializedShardCacheWriteAdmission(
   rawFactBytes: number,
+  policy: CodeGraphMaterializedShardPolicy,
 ): CodeGraphMaterializedShardCacheWriteAdmission {
-  if (!Number.isSafeInteger(rawFactBytes) || rawFactBytes < 0) return 'persist';
+  if (policy === 'all' || !Number.isSafeInteger(rawFactBytes) || rawFactBytes < 0) return 'persist';
   return rawFactBytes > CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM ? 'defer' : 'persist';
 }
 
