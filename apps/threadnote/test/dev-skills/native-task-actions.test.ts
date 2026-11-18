@@ -7744,7 +7744,7 @@ describe('native task actions', () => {
         tool: 'workflow_task_deliver',
         arguments: {
           runId: 'native-run',
-          delivery: {command: 'commit', validationRef: '<validationRef>', commitEvidence: '<commitEvidence>'},
+          delivery: {command: 'commit', validationRef, commitEvidence: '<commitEvidence>'},
         },
       });
       const evidence = 'Verified fixture commit ' + EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);

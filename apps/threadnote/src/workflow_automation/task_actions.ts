@@ -683,7 +683,8 @@ const sourceChangedCodes = new Set(['source-drift', 'review-stale']);
 
 /**
  * A refusal without a named next command points at the action on the current task card, or at reopen when a deliver
- * card's source changed. Placeholders the card or the request already answer are filled.
+ * card's source changed. Placeholders the card or the request already answer are filled; a refused reference is never
+ * one of them, so the card's current reference takes its place.
  */
 const withTaskNext = (config: RuntimeConfig, input: unknown, cause: unknown) =>
   Effect.gen(function* () {
@@ -709,7 +710,10 @@ const withTaskNext = (config: RuntimeConfig, input: unknown, cause: unknown) =>
       fillNativeNext(next, {
         taskRef: view?.taskRef,
         snapshotRef: view?.phase?.snapshot?.snapshotRef,
-        validationRef: typeof input.validationRef === 'string' ? input.validationRef : undefined,
+        validationRef:
+          typeof input.validationRef === 'string' && !/-ref$/u.test(error.code)
+            ? input.validationRef
+            : view?.phase?.validationRef,
       }),
     );
   });

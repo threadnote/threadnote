@@ -215,6 +215,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
       const next = fillNativeNext(nativeNextForTaskAction(result.next.action, runId, callerCwd, result.delivery), {
         taskRef: result.taskRef,
         snapshotRef: result.phase?.snapshot?.snapshotRef,
+        validationRef: result.phase?.validationRef,
       });
       const response =
         next.tool === 'workflow_task_view'

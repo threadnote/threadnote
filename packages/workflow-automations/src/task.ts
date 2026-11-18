@@ -1,6 +1,6 @@
 import {nativeWorkflowPolicies} from './gates.js';
 import {Array as EffectArray, Option as EffectOption, Schema, String as EffectString, pipe as EffectPipe} from 'effect';
-import {nativeCycleParentsReady, nextNativeCycle as cycleNext} from './cycle.js';
+import {nativeCycleCanonicalJson, nativeCycleParentsReady, nextNativeCycle as cycleNext} from './cycle.js';
 import {NativeCycleDeliverySchema} from './cycle.js';
 import {
   nativeCyclePhaseReviewUsage,
@@ -9,6 +9,7 @@ import {
   nativeCycleSupplementalRevision,
   nativeCycleCoverage,
   nativeCycleCoverageAccepts,
+  nativeCycleLatestSnapshot,
 } from './cycle_runtime.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {NativeWorkflowState} from './native.js';
@@ -85,6 +86,8 @@ export interface NativeTaskView {
     readonly scope: readonly string[];
     readonly acceptance: readonly string[];
     readonly acceptanceRefs: readonly string[];
+    /** The current validation reference of a phase waiting for delivery. */
+    readonly validationRef?: string;
     readonly snapshot?: {
       readonly snapshotId: string;
       readonly head: string;
@@ -685,6 +688,30 @@ function projectNativeTaskCoreView(
         ...(!currentProof?.delivery?.watch ? ['host-registration'] : []),
       ]
     : [];
+  const deliverySource =
+    next.action === 'deliver' && phase && currentProof?.validation
+      ? nativeCycleLatestSnapshot(runtime, phase.id, currentProof.phaseHash)?.snapshot
+      : undefined;
+  const deliveryBaseline = deliverySource ? runtime.baselines[deliverySource.phaseId] : undefined;
+  // The same reference workflow_task_record_validation returned for this proof's latest snapshot.
+  const validationRef =
+    deliverySource && deliveryBaseline && currentProof?.validation && deliverySource.tree === currentProof.tree
+      ? encodeNativeTaskActionRef({
+          version: 1,
+          kind: 'validation',
+          runId: state.runId,
+          generationHash: sha256HexSync(state.generation),
+          phaseId: deliverySource.phaseId,
+          phaseHash: deliverySource.phaseHash,
+          baselineHead: deliveryBaseline.head,
+          baselineTree: deliveryBaseline.tree,
+          baselineRef: deliveryBaseline.pinnedRef,
+          snapshotId: deliverySource.snapshotId,
+          sourceHead: deliverySource.head,
+          sourceTree: deliverySource.tree,
+          payloadDigest: sha256HexSync(nativeCycleCanonicalJson(currentProof.validation)),
+        })
+      : undefined;
   const scope = phase?.allowedPaths ?? [];
   const acceptance = phase?.acceptanceCriteria ?? [];
   const acceptanceRefs = phase ? EffectArray.map(phase.acceptanceRefs, item => item.id) : [];
@@ -730,7 +757,9 @@ function projectNativeTaskCoreView(
     : validationWork
       ? [`Passed check and acceptance evidence for snapshot ${validationWork.snapshot.snapshot.snapshotId}`]
       : localDelivery && next.action === 'deliver'
-        ? ['The validation reference returned by workflow_task_record_validation']
+        ? validationRef
+          ? []
+          : ['The validation reference returned by workflow_task_record_validation']
         : phase
           ? [
               ...(scope.length ? [] : ['Implementation scope paths']),
@@ -773,6 +802,7 @@ function projectNativeTaskCoreView(
             scope: page(scope, offset),
             acceptance: page(acceptance, offset),
             acceptanceRefs: page(acceptanceRefs, offset),
+            ...(validationRef ? {validationRef} : {}),
             ...(snapshot
               ? {
                   snapshot: {

@@ -1160,6 +1160,30 @@ describe('review coverage under one intent', () => {
     }).pipe(runCycle),
   );
 
+  effectIt.effect('answers a stale validation reference with the current one the deliver card carries', () =>
+    Effect.gen(function* () {
+      const {task, view, commit, review} = yield* setup();
+      const first = yield* commit('export const fixture = 1;\n');
+      yield* review(first.snapshot, 'a1');
+      const earlier = yield* task('record-validation', {snapshotRef: first.ref, validation});
+      expect((yield* view()).phase?.validationRef).toBe(earlier.validationRef);
+      yield* task('reopen', {taskRef: (yield* view()).taskRef, phaseId: 'one', reason: 'Look again.'});
+      yield* task('resume', {taskRef: (yield* view()).taskRef, reason: 'Validate again.'});
+      const again = yield* task('record-snapshot');
+      const current = yield* task('record-validation', {
+        snapshotRef: again.snapshotRef,
+        validation: {...validation, checks: [{...validation.checks[0], evidence: 'A second scoped run.'}]},
+      });
+      expect((yield* view()).phase?.validationRef).toBe(current.validationRef);
+      const stale = yield* task('deliver-local', {validationRef: earlier.validationRef}).pipe(Effect.flip);
+      expect(stale).toMatchObject({
+        code: 'stale-validation-ref',
+        next: {command: 'deliver-local', arguments: {delivery: {validationRef: current.validationRef}}},
+      });
+      expect(yield* task('deliver-local', {validationRef: current.validationRef})).toMatchObject({status: 'delivered'});
+    }).pipe(runCycle),
+  );
+
   effectIt.effect('refuses a review.blocking waiver until a recorded review of the tree has blockers', () =>
     Effect.gen(function* () {
       const {f, task, commit, review} = yield* setup();
