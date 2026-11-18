@@ -40,7 +40,7 @@
     "@effect/platform-bun": "4.1.2",
     "@threadnote/testing": "workspace:*",
     "@effect/vitest": "4.1.2",
-    "vitest": "5.0.5",
+    "vitest": "5.1.0",
     "fast-check": "4.10.2"
   },
   "scripts": {
