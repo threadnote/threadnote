@@ -9,7 +9,7 @@
     "./site-prepared-metadata": "./tools/site-prepared-metadata.ts"
   },
   "dependencies": {
-    "@effect/platform-bun": "4.1.2",
+    "@effect/platform-bun": "4.1.4",
     "@threadnote/evidence": "workspace:*",
     "@threadnote/integrations": "workspace:*",
     "@threadnote/platform": "workspace:*",
