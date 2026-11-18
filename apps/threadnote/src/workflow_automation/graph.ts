@@ -10,10 +10,10 @@ import {resolveWorkflowBinding} from '../workflow_memory/profile.js';
 import {nativeWorkflowError} from './memory.js';
 import {shellQuote} from '../utils.js';
 
-const isReady = (status: CodeGraphStatus, repo: string, selectedProject?: string) =>
+const isReady = (status: CodeGraphStatus, roots: readonly string[], selectedProject?: string) =>
   status.freshness === 'current' &&
   !status.stale &&
-  status.identity.repoRoot === repo &&
+  roots.includes(status.identity.repoRoot) &&
   (selectedProject === undefined ||
     observationFromCodeGraphStatus(status)?.projectScope?.project.name === selectedProject) &&
   status.readySnapshot?.state === 'ready' &&
@@ -44,10 +44,10 @@ export const makeWorkflowGraphAdapter = Effect.fn('workflowAutomation.graphAdapt
             code: 'binding-drift',
             message: 'Graph preparation must use the native run checkout.',
           });
-        // The graph reports the checkout storage that the bound path names now.
-        const root = yield* fs.realPath(repo);
+        // Either the bound path or the checkout storage it now names identifies this checkout.
+        const roots = [repo, yield* fs.realPath(repo)];
         let status = yield* query.status(config.agentContextHome, repo, statusOptions);
-        if (!isReady(status, root, binding.graphProject)) {
+        if (!isReady(status, roots, binding.graphProject)) {
           if (options.prepare === false)
             return yield* WorkflowAutomationError.make({
               code: 'evidence-unavailable',
@@ -62,7 +62,7 @@ export const makeWorkflowGraphAdapter = Effect.fn('workflowAutomation.graphAdapt
           });
           status = yield* query.status(config.agentContextHome, repo, statusOptions);
         }
-        if (!isReady(status, root, binding.graphProject))
+        if (!isReady(status, roots, binding.graphProject))
           return yield* WorkflowAutomationError.make({
             code: 'evidence-not-ready',
             message: 'Preparation did not yield exact current ready graph evidence. Discovery must remain blocked.',
