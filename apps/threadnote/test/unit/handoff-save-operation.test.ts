@@ -1320,8 +1320,9 @@ for (const observation of ['different-instance', 'unknown'] as const)
             state: allowed ? expect.stringMatching(/complete|pending/u) : 'not-started',
           });
           const exit = yield* Effect.promise(() => f.children[0].exited).pipe(Effect.timeout('5 seconds'));
-          // A refused pre-go child may exit itself or be terminated by its exact parent handle.
-          expect(allowed ? [0] : [0, 143]).toContain(exit);
+          // A refused pre-go child may exit itself or be terminated by its exact parent handle,
+          // including while the Effect runtime interrupts its cleanup (130).
+          expect(allowed ? [0] : [0, 130, 143]).toContain(exit);
           expect(
             yield* f.fs.exists(
               f.home + '/data/local/user/tester/memories/handoffs/active/threadnote/protocol-history.md',

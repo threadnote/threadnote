@@ -191,11 +191,24 @@ function resultForReceipt(value: HandoffSaveReceipt): CallToolResult {
       content: [{type: 'text', text: `Stored memory: ${value.result.memoryUri}`}],
       structuredContent: {...value.result, operationId: value.operationId, state: 'complete'},
     };
+  if (value.stage === 'not-started' && value.response)
+    return {
+      content: [...value.response.content],
+      structuredContent: {
+        ...value.response.structuredContent,
+        operationId: value.operationId,
+        state: 'not-started',
+        authorized: false,
+      },
+    };
   return {
     content: [
       {
         type: 'text',
-        text: `Handoff save ${value.stage === 'not-started' ? 'was not started' : 'has no verified complete result'}. Inspect memory_write_status; do not resubmit an uncertain save.`,
+        text:
+          value.stage === 'not-started'
+            ? 'Handoff save was not started and nothing was written. Retrying this save is safe.'
+            : 'Handoff save has no verified complete result. Inspect memory_write_status; do not resubmit an uncertain save.',
       },
     ],
     structuredContent: {
@@ -357,6 +370,15 @@ const pendingResult = (operationId: string, authorized: boolean): CallToolResult
   ],
   structuredContent: {operationId, state: authorized ? 'pending' : 'not-started', authorized},
 });
+const anotherSaveInProgress = {
+  content: [
+    {
+      type: 'text' as const,
+      text: 'Handoff save was not started because another handoff save is still running. Nothing was written; retrying this save is safe once that save finishes.',
+    },
+  ],
+  structuredContent: {reason: 'another-save-in-progress'},
+} satisfies typeof handoffSaveResponseSchema.Type;
 
 /** Pumps belong to the process supervisor, not the finished MCP request scope. */
 function superviseChildFrames(
@@ -370,7 +392,7 @@ function superviseChildFrames(
     promise: ready,
     resolve: readyResolve,
     reject: readyReject,
-  } = Promise.withResolvers<Extract<typeof parentFrameSchema.Type, {type: 'ready'}>>();
+  } = Promise.withResolvers<typeof parentFrameSchema.Type>();
   const {promise: result, resolve: resultResolve, reject: resultReject} = Promise.withResolvers<HandoffSaveReceipt>();
   void ready.catch(() => {});
   void result.catch(() => {});
@@ -390,14 +412,20 @@ function superviseChildFrames(
         readyResolve(frame);
       } else {
         const receipt = frame.receipt;
+        // Before go, the only valid result is the worker's own recorded refusal.
+        const refused = !owned.authorized && !seenReady && receipt.stage === 'not-started';
         if (
-          !owned.authorized ||
+          (!owned.authorized && !refused) ||
           receipt.operationId !== operationId ||
           receipt.account !== config.account ||
           receipt.user !== config.user ||
           receipt.processId !== child.pid
         )
           throw new Error('Handoff result scope changed.');
+        if (refused) {
+          readyResolve(frame);
+          return;
+        }
         await child.exited;
         resultResolve(receipt);
         return;
@@ -473,6 +501,7 @@ export const launchOwnedHandoffSave = Effect.fn('handoffSave.launch')(function* 
       await child.stdin.flush();
     });
     const frame = yield* fromPromise('handoffSave.ready', () => frames.ready);
+    if (frame.type === 'result') return {refused: frame.receipt};
     const observed = yield* observeCanonicalProcessInstanceIdentity(system, child.pid);
     const after = yield* fs.stat(system.executablePath);
     if (
@@ -488,6 +517,7 @@ export const launchOwnedHandoffSave = Effect.fn('handoffSave.launch')(function* 
   return yield* Effect.gen(function* () {
     const ready = yield* prepare.pipe(Effect.timeoutOption(HANDOFF_SAVE_READY_MILLISECONDS));
     if (Option.isNone(ready)) return pendingResult(operationId, false);
+    if (ready.value.refused) return resultForReceipt(ready.value.refused);
     const {owner, frames} = ready.value;
     // No await, mutation or durable I/O may intervene between the latch and go authorization.
     owner.authorized = true;
@@ -606,14 +636,15 @@ export const runHandoffSaveWorker = Effect.fn('handoffSave.worker')(function* ()
     Effect.gen(function* () {
       yield* scope.assert;
       let previousOwner: string | undefined;
+      let liveOwner = false;
       if (yield* fs.exists(location.owner)) {
         const bytes = yield* fromPromise('handoffSave.owner', () =>
           runtimeReadBoundedStableRegularFile(location.owner, 2048),
         );
         const parsed: unknown = yield* Effect.try(() => JSON.parse(new TextDecoder().decode(bytes)));
         const owner = yield* Schema.decodeUnknownEffect(intakeOwnerSchema, {onExcessProperty: 'error'})(parsed);
-        if (yield* sameLiveOwner(owner)) return false;
-        if (owner.user === config.user) previousOwner = owner.operationId;
+        liveOwner = yield* sameLiveOwner(owner);
+        if (!liveOwner && owner.user === config.user) previousOwner = owner.operationId;
       }
       const directory = yield* fromPromise('handoffSave.history', () =>
         runtimeOpenTextDirectoryNameReader(location.directory, {entryKind: 'file'}),
@@ -667,6 +698,12 @@ export const runHandoffSaveWorker = Effect.fn('handoffSave.worker')(function* ()
         count--;
       }
       if (count >= HANDOFF_SAVE_HISTORY_LIMIT) return false;
+      if (liveOwner) {
+        // One owned save runs per account. Record the refusal so status reports it instead of unknown.
+        value = {...value, stage: 'not-started', response: anotherSaveInProgress};
+        yield* writeReceipt(config, value, scope);
+        return false;
+      }
       yield* writeReceipt(config, value, scope);
       const temporary =
         location.owner + '.' + operationId + '.' + (yield* (yield* SecureRandom.SecureRandom).uuidV4()) + '.tmp';
@@ -683,11 +720,14 @@ export const runHandoffSaveWorker = Effect.fn('handoffSave.worker')(function* ()
       return true;
     }),
   );
-  if (!admitted) return;
   const send = (frame: object) =>
     fromPromise('handoffSave.send', async () => {
       await Bun.write(Bun.stdout, JSON.stringify({...frame, operationId, source: identity}) + '\n');
     });
+  if (!admitted) {
+    if (value.stage === 'not-started') yield* send({type: 'result', receipt: value});
+    return;
+  }
   const observerContext = yield* Effect.context<import('../effect/runtime.js').ApplicationServices>();
   const gate = (prepared: import('../mcp/server/memory.js').PreparedPersonalMemoryWrite) =>
     Effect.gen(function* () {
