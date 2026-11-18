@@ -1,1 +1,2 @@
 assets/models/licenses/bge-small-en-v1.5.LICENSE text eol=lf
+scripts/native-inference-workflow-seccomp.json text eol=lf

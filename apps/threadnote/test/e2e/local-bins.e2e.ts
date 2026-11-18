@@ -1432,8 +1432,8 @@ describe('built self-contained distribution', () => {
     await runCli(['source', 'remove', sourceId, '--apply']);
   });
 
-  it('loads only the prebuilt node-llama runtime', async () => {
-    await expect(runCli(['models', 'runtime'])).resolves.toMatch(/node-llama-cpp:\s+prebuilt/i);
+  it('loads only the bundled node-llama runtime', async () => {
+    await expect(runCli(['models', 'runtime'])).resolves.toMatch(/node-llama-cpp:\s+(?:prebuilt|localBuild)/i);
   });
 
   it('serves native core and full MCP toolsets over stdio', async ({signal}) => {

@@ -162,10 +162,13 @@ describe('standalone release workflows', () => {
       const signedWindowsArchive = workflow.indexOf('THREADNOTE_RELEASE_TARGET: windows-', authenticode);
 
       expect(signing).toBeGreaterThan(0);
-      expect(notarization).toBeGreaterThan(signing);
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Search after signing to bind finalization to the macOS job; Effect String has no position argument.
+      const finalization = workflow.indexOf('bun scripts/finalize-native-vector-reader.ts', signing);
+      expect(finalization).toBeGreaterThan(signing);
+      expect(notarization).toBeGreaterThan(finalization);
       expect(macArchive).toBeGreaterThan(notarization);
       expect(workflow).not.toContain('codesign --deep');
-      expect(workflow).toContain('find dist/runtime -type f -print0');
+      expect(workflow).toContain('find dist/runtime dist/llama -type f -print0');
       expect(workflow).toContain('azure/artifact-signing-action@v2');
       expect(workflow).toContain('timestamp-rfc3161: http://timestamp.acs.microsoft.com');
       expect(unsignedWindowsArchive).toBeGreaterThan(macArchive);
@@ -460,7 +463,25 @@ describe('standalone release workflows', () => {
           EffectString.match(/test\/e2e\/local-bins\.e2e\.ts/g),
           Effect2.Option.getOrElse(() => null),
         ),
-      ).toHaveLength(3);
+      ).toHaveLength(4);
+      const document: unknown = load(workflow, {schema: JSON_SCHEMA});
+      const jobs = property(document, 'jobs');
+      const profiles = EffectArray.flatMap(['linux', 'macos', 'windows-build'], name => {
+        const matrix = property(property(property(jobs, name), 'strategy'), 'matrix');
+        return EffectArray.map(arrayProperty(matrix, 'include') ?? [], profile =>
+          requiredStringProperty(profile, 'target'),
+        );
+      });
+      expect(profiles.sort()).toEqual([
+        'bun-darwin-arm64',
+        'bun-darwin-x64',
+        'bun-linux-arm64',
+        'bun-linux-arm64-musl',
+        'bun-linux-x64-baseline',
+        'bun-linux-x64-baseline-musl',
+        'bun-windows-arm64',
+        'bun-windows-x64-baseline',
+      ]);
     }),
   );
 

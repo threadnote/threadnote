@@ -514,13 +514,9 @@ describe('SystemInfo disk capacity parsing', () => {
         yield* Effect.acquireUseRelease(
           Effect.sync(() => {
             const root = mkdtempSync(join(tmpdir(), 'threadnote-windows-disk-worker-'));
-            const processIdPath = join(root, 'process.pid');
             const workerPath = join(root, 'worker.ts');
-            writeFileSync(
-              workerPath,
-              `await Bun.write(${JSON.stringify(processIdPath)}, String(process.pid));\nfor await (const _chunk of process.stdin) await Bun.sleep(30_000);\n`,
-            );
-            return {processIdPath, root, workerPath};
+            writeFileSync(workerPath, 'for await (const _chunk of process.stdin) await Bun.sleep(30_000);\n');
+            return {root, spawn: vi.spyOn(Bun, 'spawn'), workerPath};
           }),
           fixture =>
             Effect.scoped(
@@ -548,15 +544,27 @@ describe('SystemInfo disk capacity parsing', () => {
                   },
                   750,
                 ).pipe(Effect.forkChild({startImmediately: true}));
-                const processId = yield* waitForRecordedProcessId(fixture.processIdPath, PROCESS_START_WAIT_MS);
 
                 expect(yield* Fiber.join(fiber)).toBe(16_384);
                 expect(fallbackInvocations).toBe(1);
                 expect((yield* Clock.currentTimeMillis) - startedAt).toBeLessThan(2_000);
+                expect(fixture.spawn).toHaveBeenCalledOnce();
+                const spawned = fixture.spawn.mock.results[0];
+                if (spawned?.type !== 'return')
+                  return yield* TestError.make({message: 'The blocked capacity worker was not spawned.'});
+                // A bounded worker can be killed before its own startup code runs.
+                // The real spawn result identifies that exact child regardless.
+                const processId = spawned.value.pid;
+                expect(Number.isSafeInteger(processId)).toBe(true);
+                expect(processId).toBeGreaterThan(0);
                 yield* waitForProcessExit(processId, 2_000);
               }),
             ),
-          fixture => Effect.sync(() => rmSync(fixture.root, {force: true, recursive: true})),
+          fixture =>
+            Effect.sync(() => {
+              fixture.spawn.mockRestore();
+              rmSync(fixture.root, {force: true, recursive: true});
+            }),
         );
       }),
     ),

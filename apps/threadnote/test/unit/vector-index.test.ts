@@ -1,10 +1,11 @@
+import {nativeVectorTestsEnabled} from '@threadnote/testing/native-vector-fixture';
 import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {join} from '@threadnote/testing/node-path';
-import {Effect, Layer, Option, Result} from 'effect';
+import {Deferred, Effect, Fiber, Layer, Option, Result} from 'effect';
 import {describe, expect, it} from 'vitest';
 import {InferenceInterrupted} from '@threadnote/inference/engine/errors';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
@@ -80,52 +81,56 @@ describe('vector index generations', () => {
     }
   });
 
-  it('activates a complete fake-embedding generation and supports semantic query lookup', async () => {
-    const home = await mkdtemp('threadnote-vector-index-');
-    try {
-      const runtimeLayer = fakeRuntimeLayer(input =>
-        Effect2.pipe(input, EffectString.toLowerCase, EffectString.includes('alpha')) ? 0 : 1,
-      );
-      const effect = Effect.gen(function* () {
-        const catalog = yield* LocalModelCatalog;
-        yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
-        const rebuilt = yield* rebuildVectorIndex({agentContextHome: home}, manifest, [
-          {
-            equivalentUris: ['threadnote://user/me/memories/shared/team-b/durable/projects/demo/a.md'],
-            text: '# Alpha\n\nThe release semaphore controls deployment.',
-            uri: 'threadnote://resources/repos/a.md',
-          },
-          {
-            equivalentUris: Array.from(
-              {length: 250},
-              (_, index) => `threadnote://user/me/memories/shared/team-${index}/durable/projects/demo/irrelevant.md`,
-            ),
-            text: '# Beta\n\nThe orchard contains pear trees.',
-            uri: 'threadnote://resources/repos/b.md',
-          },
-        ]);
-        const scores = yield* selectedSemanticScores({agentContextHome: home}, 'alpha deployment', {limit: 1});
-        return {rebuilt, scores};
-      }).pipe(provideTestLayer(runtimeLayer), provideTestLayer(modelStoreLayer));
-      const {rebuilt, scores} = await runEffect(effect);
-      expect(rebuilt.ready).toBe(true);
-      expect(rebuilt.chunkCount).toBe(2);
-      expect(scores?.get('threadnote://resources/repos/a.md')).toBeCloseTo(1);
-      expect(scores?.get('threadnote://user/me/memories/shared/team-b/durable/projects/demo/a.md')).toBeCloseTo(1);
-      expect(scores?.has('threadnote://resources/repos/b.md')).toBe(false);
-      expect(
-        EffectArray.some(
-          [...(scores?.keys() ?? [])],
-          __effectArrayValue =>
-            !!(uri =>
-              Effect2.pipe(uri, EffectString.includes('/shared/team-')) &&
-              Effect2.pipe(uri, EffectString.endsWith('/irrelevant.md')))(__effectArrayValue),
-        ),
-      ).toBe(false);
-    } finally {
-      await rm(home, {force: true, recursive: true});
-    }
-  });
+  effectIt.effect.skipIf(!nativeVectorTestsEnabled)(
+    'activates a complete fake-embedding generation and supports semantic query lookup',
+    () =>
+      Effect.gen(function* () {
+        const home = yield* Effect.acquireRelease(
+          Effect.promise(() => mkdtemp('threadnote-vector-index-')),
+          home => Effect.promise(() => rm(home, {force: true, recursive: true})),
+        );
+
+        const runtimeLayer = fakeRuntimeLayer(input =>
+          Effect2.pipe(input, EffectString.toLowerCase, EffectString.includes('alpha')) ? 0 : 1,
+        );
+        const effect = Effect.gen(function* () {
+          const catalog = yield* LocalModelCatalog;
+          yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
+          const rebuilt = yield* rebuildVectorIndex({agentContextHome: home}, manifest, [
+            {
+              equivalentUris: ['threadnote://user/me/memories/shared/team-b/durable/projects/demo/a.md'],
+              text: '# Alpha\n\nThe release semaphore controls deployment.',
+              uri: 'threadnote://resources/repos/a.md',
+            },
+            {
+              equivalentUris: Array.from(
+                {length: 250},
+                (_, index) => `threadnote://user/me/memories/shared/team-${index}/durable/projects/demo/irrelevant.md`,
+              ),
+              text: '# Beta\n\nThe orchard contains pear trees.',
+              uri: 'threadnote://resources/repos/b.md',
+            },
+          ]);
+          const scores = yield* selectedSemanticScores({agentContextHome: home}, 'alpha deployment', {limit: 1});
+          return {rebuilt, scores};
+        }).pipe(provideTestLayer(runtimeLayer), provideTestLayer(modelStoreLayer));
+        const {rebuilt, scores} = yield* effect;
+        expect(rebuilt.ready).toBe(true);
+        expect(rebuilt.chunkCount).toBe(2);
+        expect(scores?.get('threadnote://resources/repos/a.md')).toBeCloseTo(1);
+        expect(scores?.get('threadnote://user/me/memories/shared/team-b/durable/projects/demo/a.md')).toBeCloseTo(1);
+        expect(scores?.has('threadnote://resources/repos/b.md')).toBe(false);
+        expect(
+          EffectArray.some(
+            [...(scores?.keys() ?? [])],
+            __effectArrayValue =>
+              !!(uri =>
+                Effect2.pipe(uri, EffectString.includes('/shared/team-')) &&
+                Effect2.pipe(uri, EffectString.endsWith('/irrelevant.md')))(__effectArrayValue),
+          ),
+        ).toBe(false);
+      }).pipe(provideTestLayer(ApplicationLayer)),
+  );
 
   it('stores vectors as bounded SQLite rows and removes legacy sidecar artifacts after activation', async () => {
     const home = await mkdtemp('threadnote-vector-sqlite-');
@@ -296,57 +301,53 @@ describe('vector index generations', () => {
     }
   });
 
-  it('reports corrupt vector rows and repairs only the affected chunk on rebuild', async () => {
-    const home = await mkdtemp('threadnote-vector-row-recovery-');
-    const candidates = [
-      {text: '# Alpha\n\nStable canonical content.', uri: 'threadnote://resources/repos/a.md'},
-      {text: '# Beta\n\nRepair this vector row.', uri: 'threadnote://resources/repos/b.md'},
-    ];
-    try {
-      const runtimeLayer = fakeRuntimeLayer(input =>
-        Effect2.pipe(input, EffectString.toLowerCase, EffectString.includes('alpha')) ? 0 : 1,
-      );
-      await runEffect(
-        Effect.gen(function* () {
+  effectIt.effect.skipIf(!nativeVectorTestsEnabled)(
+    'reports corrupt vector rows and repairs only the affected chunk on rebuild',
+    () =>
+      Effect.gen(function* () {
+        const home = yield* Effect.acquireRelease(
+          Effect.promise(() => mkdtemp('threadnote-vector-row-recovery-')),
+          home => Effect.promise(() => rm(home, {force: true, recursive: true})),
+        );
+
+        const candidates = [
+          {text: '# Alpha\n\nStable canonical content.', uri: 'threadnote://resources/repos/a.md'},
+          {text: '# Beta\n\nRepair this vector row.', uri: 'threadnote://resources/repos/b.md'},
+        ];
+        const runtimeLayer = fakeRuntimeLayer(input =>
+          Effect2.pipe(input, EffectString.toLowerCase, EffectString.includes('alpha')) ? 0 : 1,
+        );
+        yield* Effect.gen(function* () {
           const catalog = yield* LocalModelCatalog;
           yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
           yield* rebuildVectorIndex({agentContextHome: home}, manifest, candidates);
-        }).pipe(provideTestLayer(runtimeLayer), provideTestLayer(modelStoreLayer)),
-      );
-      const corrupted = new Database(vectorDatabasePath(home));
-      corrupted.exec(`
+        }).pipe(provideTestLayer(runtimeLayer), provideTestLayer(modelStoreLayer));
+        const corrupted = new Database(vectorDatabasePath(home));
+        corrupted.exec(`
         UPDATE vector_values
         SET vector = zeroblob(4)
         WHERE id = (SELECT vector_id FROM vector_chunks ORDER BY chunk_id LIMIT 1)
       `);
-      corrupted.close();
-
-      const status = await runEffect(vectorIndexStatus(home, manifest));
-      const failedSearch = await runEffect(
-        selectedSemanticScores({agentContextHome: home}, 'alpha').pipe(
+        corrupted.close();
+        const status = yield* vectorIndexStatus(home, manifest);
+        const failedSearch = yield* selectedSemanticScores({agentContextHome: home}, 'alpha').pipe(
           provideTestLayer(runtimeLayer),
           provideTestLayer(modelStoreLayer),
           Effect.as('unexpected'),
           Effect.catchCause(() => Effect.succeed('failed')),
-        ),
-      );
-      const repaired = await runEffect(
-        rebuildVectorIndex({agentContextHome: home}, manifest, candidates).pipe(
+        );
+        const repaired = yield* rebuildVectorIndex({agentContextHome: home}, manifest, candidates).pipe(
           provideTestLayer(runtimeLayer),
           provideTestLayer(modelStoreLayer),
-        ),
-      );
+        );
+        expect(status.ready).toBe(false);
+        expect(status.reason).toContain('corrupt');
+        expect(failedSearch).toBe('failed');
+        expect(repaired).toMatchObject({chunkCount: 2, embeddedChunkCount: 1, ready: true, reusedChunkCount: 1});
+      }).pipe(provideTestLayer(ApplicationLayer)),
+  );
 
-      expect(status.ready).toBe(false);
-      expect(status.reason).toContain('corrupt');
-      expect(failedSearch).toBe('failed');
-      expect(repaired).toMatchObject({chunkCount: 2, embeddedChunkCount: 1, ready: true, reusedChunkCount: 1});
-    } finally {
-      await rm(home, {force: true, recursive: true});
-    }
-  });
-
-  effectIt.effect(
+  effectIt.effect.skipIf(!nativeVectorTestsEnabled)(
     'keeps corrupt vectors unchanged during recall and permits explicit rebuild before semantic scoring',
     () =>
       Effect.acquireUseRelease(
@@ -407,50 +408,48 @@ describe('vector index generations', () => {
       ).pipe(provideTestLayer(ApplicationLayer)),
   );
 
-  it('keeps MCP semantic retrieval read-only when the active vector is corrupt', async () => {
-    const home = await mkdtemp('threadnote-vector-mcp-read-only-');
-    const config = {account: 'local', agentContextHome: home, user: 'me'};
-    const resourcePath = join(home, 'data', 'local', 'resources', 'repos', 'threadnote', 'alpha.md');
-    const embeddedBatches: number[] = [];
-    const runtimeLayer = fakeRuntimeLayer(
-      () => 0,
-      inputs => embeddedBatches.push(inputs.length),
-    );
-    try {
-      await mkdir(join(resourcePath, '..'), {recursive: true});
-      await writeFile(resourcePath, '# Alpha\n\nRead-only semantic fallback content.', 'utf8');
-      await runEffect(
-        Effect.gen(function* () {
+  effectIt.effect.skipIf(!nativeVectorTestsEnabled)(
+    'keeps MCP semantic retrieval read-only when the active vector is corrupt',
+    () =>
+      Effect.gen(function* () {
+        const home = yield* Effect.acquireRelease(
+          Effect.promise(() => mkdtemp('threadnote-vector-mcp-read-only-')),
+          home => Effect.promise(() => rm(home, {force: true, recursive: true})),
+        );
+
+        const config = {account: 'local', agentContextHome: home, user: 'me'};
+        const resourcePath = join(home, 'data', 'local', 'resources', 'repos', 'threadnote', 'alpha.md');
+        const embeddedBatches: number[] = [];
+        const runtimeLayer = fakeRuntimeLayer(
+          () => 0,
+          inputs => embeddedBatches.push(inputs.length),
+        );
+        yield* Effect.promise(() => mkdir(join(resourcePath, '..'), {recursive: true}));
+        yield* Effect.promise(() => writeFile(resourcePath, '# Alpha\n\nRead-only semantic fallback content.', 'utf8'));
+        yield* Effect.gen(function* () {
           const catalog = yield* LocalModelCatalog;
           yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
           const index = yield* loadRecallIndexData(config, {forceRefresh: true, includeInactive: false});
           yield* rebuildVectorIndex(config, manifest, index.candidates, {corpusGeneration: index.generation});
-        }).pipe(provideTestLayer(runtimeLayer), provideTestLayer(modelStoreLayer)),
-      );
-      const corrupted = new Database(vectorDatabasePath(home));
-      corrupted.exec('UPDATE vector_values SET vector = zeroblob(4)');
-      corrupted.close();
-
-      const result = await runEffect(
-        loadMcpRecallSemanticScoresResult(config, 'alpha read-only fallback', 5).pipe(
+        }).pipe(provideTestLayer(runtimeLayer), provideTestLayer(modelStoreLayer));
+        const corrupted = new Database(vectorDatabasePath(home));
+        corrupted.exec('UPDATE vector_values SET vector = zeroblob(4)');
+        corrupted.close();
+        const result = yield* loadMcpRecallSemanticScoresResult(config, 'alpha read-only fallback', 5).pipe(
           provideTestLayer(runtimeLayer),
           provideTestLayer(modelStoreLayer),
-        ),
-      );
-
-      expect(result.status).toBe('failed');
-      expect(Option.getOrUndefined(result.result.warning)).toContain('deterministic lexical recall continued');
-      expect(embeddedBatches).toEqual([1, 1]);
-      const unchanged = new Database(vectorDatabasePath(home), {readonly: true});
-      try {
-        expect(unchanged.query('SELECT length(vector) AS bytes FROM vector_values').get()).toEqual({bytes: 4});
-      } finally {
-        unchanged.close();
-      }
-    } finally {
-      await rm(home, {force: true, recursive: true});
-    }
-  });
+        );
+        expect(result.status).toBe('failed');
+        expect(Option.getOrUndefined(result.result.warning)).toContain('deterministic lexical recall continued');
+        expect(embeddedBatches).toEqual([1, 1]);
+        const unchanged = new Database(vectorDatabasePath(home), {readonly: true});
+        try {
+          expect(unchanged.query('SELECT length(vector) AS bytes FROM vector_values').get()).toEqual({bytes: 4});
+        } finally {
+          unchanged.close();
+        }
+      }).pipe(provideTestLayer(ApplicationLayer)),
+  );
 
   it('keeps the active generation when a replacement embedding run is interrupted', async () => {
     const home = await mkdtemp('threadnote-vector-interrupt-');
@@ -812,98 +811,85 @@ describe('vector index generations', () => {
     }
   });
 
-  it('rejects semantic scores when the vector generation changes during query inference', async () => {
-    const home = await mkdtemp('threadnote-vector-score-generation-fence-');
-    let currentGeneration = 'lexical-generation-1';
-    let delayQuery = false;
-    let releaseQuery!: () => void;
-    let reportQueryStarted!: () => void;
-    const queryStarted = new Promise<void>(resolve => {
-      reportQueryStarted = resolve;
-    });
-    const generationFence = () => Effect.succeedSome(currentGeneration);
-    const runtimeLayer = Layer.succeed(
-      LocalModelRuntime,
-      LocalModelRuntime.of({
-        diagnostics: Effect.succeed({backend: 'fake', buildType: 'prebuilt', cpuMathCores: 4}),
-        embedMany: ({inputs, manifest: requested}) => {
-          const vectors = EffectArray.map(inputs, () => unitVector(requested.dimensions ?? 0, 0));
-          if (
-            !delayQuery ||
-            !EffectArray.some(inputs, input => Effect2.pipe(input, EffectString.includes('generation-race-query')))
-          ) {
-            return Effect.succeed(vectors);
-          }
-          return Effect.promise(
-            () =>
-              new Promise<readonly (readonly number[])[]>(resolve => {
-                reportQueryStarted();
-                releaseQuery = () => resolve(vectors);
+  effectIt.effect.skipIf(!nativeVectorTestsEnabled)(
+    'rejects semantic scores when the vector generation changes during query inference',
+    () =>
+      Effect.gen(function* () {
+        const home = yield* Effect.acquireRelease(
+          Effect.promise(() => mkdtemp('threadnote-vector-score-generation-fence-')),
+          home => Effect.promise(() => rm(home, {force: true, recursive: true})),
+        );
+        let currentGeneration = 'lexical-generation-1';
+        let delayQuery = false;
+        const queryStarted = yield* Deferred.make<void>();
+        const releaseQuery = yield* Deferred.make<void>();
+        const runtimeLayer = Layer.succeed(
+          LocalModelRuntime,
+          LocalModelRuntime.of({
+            diagnostics: Effect.succeed({backend: 'fake', buildType: 'prebuilt', cpuMathCores: 4}),
+            embedMany: ({inputs, manifest: requested}) =>
+              Effect.gen(function* () {
+                if (
+                  delayQuery &&
+                  EffectArray.some(inputs, input => Effect2.pipe(input, EffectString.includes('generation-race-query')))
+                ) {
+                  yield* Deferred.succeed(queryStarted, undefined);
+                  yield* Deferred.await(releaseQuery);
+                }
+                return EffectArray.map(inputs, () => unitVector(requested.dimensions ?? 0, 0));
               }),
-          );
-        },
-        generate: () => Effect.die(TestError.make({message: 'Unexpected generation'})),
-        rerank: () => Effect.die(TestError.make({message: 'Unexpected reranking'})),
-      }),
-    );
-    const withRuntime = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-      effect.pipe(provideTestLayer(runtimeLayer), provideTestLayer(modelStoreLayer));
-
-    try {
-      const prepared = withRuntime(
-        Effect.gen(function* () {
-          const catalog = yield* LocalModelCatalog;
-          yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
-          yield* rebuildVectorIndex(
+            generate: () => Effect.die(TestError.make({message: 'Unexpected generation'})),
+            rerank: () => Effect.die(TestError.make({message: 'Unexpected reranking'})),
+          }),
+        );
+        const withRuntime = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+          effect.pipe(provideTestLayer(runtimeLayer), provideTestLayer(modelStoreLayer));
+        const generationFence = () => Effect.succeedSome(currentGeneration);
+        yield* withRuntime(
+          Effect.gen(function* () {
+            yield* selectLocalModel(home, yield* LocalModelCatalog, 'embedding', manifest.id);
+            yield* rebuildVectorIndex(
+              {agentContextHome: home},
+              manifest,
+              [
+                {
+                  text: '# First generation\n\nConsistent semantic content.',
+                  uri: 'threadnote://resources/repos/generation.md',
+                },
+              ],
+              {corpusGeneration: currentGeneration, currentCorpusGeneration: generationFence},
+            );
+          }),
+        );
+        delayQuery = true;
+        const scoring = yield* withRuntime(
+          selectedSemanticScores({agentContextHome: home}, 'generation-race-query', {
+            corpusGeneration: currentGeneration,
+            currentCorpusGeneration: generationFence,
+          }).pipe(Effect.result),
+        ).pipe(Effect.forkChild);
+        yield* Deferred.await(queryStarted);
+        currentGeneration = 'lexical-generation-2';
+        yield* withRuntime(
+          rebuildVectorIndex(
             {agentContextHome: home},
             manifest,
             [
               {
-                text: '# First generation\n\nConsistent semantic content.',
+                text: '# Second generation\n\nNewer semantic content.',
                 uri: 'threadnote://resources/repos/generation.md',
               },
             ],
             {corpusGeneration: currentGeneration, currentCorpusGeneration: generationFence},
-          );
-        }),
-      );
-      await runEffect(prepared);
-
-      delayQuery = true;
-      const scoringProgram = withRuntime(
-        selectedSemanticScores({agentContextHome: home}, 'generation-race-query', {
-          corpusGeneration: 'lexical-generation-1',
-          currentCorpusGeneration: generationFence,
-        }).pipe(Effect.result),
-      );
-      const scoring = runEffect(scoringProgram);
-      await queryStarted;
-      currentGeneration = 'lexical-generation-2';
-      const rebuild = withRuntime(
-        rebuildVectorIndex(
-          {agentContextHome: home},
-          manifest,
-          [
-            {
-              text: '# Second generation\n\nNewer consistent semantic content.',
-              uri: 'threadnote://resources/repos/generation.md',
-            },
-          ],
-          {corpusGeneration: currentGeneration, currentCorpusGeneration: generationFence},
-        ),
-      );
-      await runEffect(rebuild);
-      releaseQuery();
-
-      const result = await scoring;
-      expect(Result.isFailure(result)).toBe(true);
-      if (Result.isFailure(result)) expect(result.failure).toBeInstanceOf(VectorCorpusGenerationChanged);
-      expect(await runEffect(vectorIndexMatchesGeneration(home, manifest, currentGeneration))).toBe(true);
-    } finally {
-      releaseQuery?.();
-      await rm(home, {force: true, recursive: true});
-    }
-  });
+          ),
+        );
+        yield* Deferred.succeed(releaseQuery, undefined);
+        const result = yield* Fiber.join(scoring);
+        expect(Result.isFailure(result)).toBe(true);
+        if (Result.isFailure(result)) expect(result.failure).toBeInstanceOf(VectorCorpusGenerationChanged);
+        expect(yield* vectorIndexMatchesGeneration(home, manifest, currentGeneration)).toBe(true);
+      }).pipe(provideTestLayer(ApplicationLayer)),
+  );
 
   it('resumes an interrupted rebuild from its checksummed staging checkpoint', async () => {
     const home = await mkdtemp('threadnote-vector-resume-');

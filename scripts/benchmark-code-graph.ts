@@ -3974,6 +3974,7 @@ export const startExternalSampler = Effect.fn('benchmarkCodeGraph.startExternalS
   checkpointPath: string,
   name: 'bootstrap' | 'cold' | 'incremental' | 'same-overlay-reference',
   rssPeakDiagnostics = false,
+  windowsProcessTree = false,
 ) {
   yield* fs.makeDirectory(samplerRoot, {recursive: true});
   const phasePath = path.join(samplerRoot, `${name}.phase`);
@@ -4016,12 +4017,13 @@ export const startExternalSampler = Effect.fn('benchmarkCodeGraph.startExternalS
       '--ready',
       readyPath,
       ...(rssPeakDiagnostics ? ['--rss-peak-diagnostics', 'true'] : []),
+      ...(windowsProcessTree ? ['--windows-process-tree', 'true'] : []),
     ],
     stderr: 'pipe',
     stdout: 'ignore',
   });
   yield* waitForExternalSamplerReady(fs, readyPath, subprocess).pipe(
-    Effect.onError(() => terminateExternalSampler(subprocess)),
+    Effect.onError(() => terminateExternalSampler(subprocess, readyPath, fs).pipe(Effect.orDie)),
   );
   let currentPhase = name === 'bootstrap' ? 'preparing-fixture' : 'start';
   let stopped = false;
@@ -4042,7 +4044,7 @@ export const startExternalSampler = Effect.fn('benchmarkCodeGraph.startExternalS
           yield* fs.writeFileString(phasePath, 'finish').pipe(Effect.ignore);
           const stopSignal = yield* Effect.exit(fs.writeFileString(stopPath, state));
           if (Exit.isFailure(stopSignal)) {
-            yield* terminateExternalSampler(subprocess);
+            yield* terminateExternalSampler(subprocess, readyPath, fs);
             return yield* ScriptError.make({
               message: 'Could not signal the code graph benchmark sampler to stop; it was terminated.',
             });
@@ -4051,7 +4053,7 @@ export const startExternalSampler = Effect.fn('benchmarkCodeGraph.startExternalS
         }
         let exitCode = yield* Effect.promise(() => subprocessExitWithin(subprocess, EXTERNAL_SAMPLER_STOP_TIMEOUT_MS));
         if (exitCode === undefined) {
-          yield* terminateExternalSampler(subprocess);
+          yield* terminateExternalSampler(subprocess, readyPath, fs);
           exitCode = yield* Effect.promise(() =>
             subprocessExitWithin(subprocess, EXTERNAL_SAMPLER_TERMINATE_TIMEOUT_MS),
           );
@@ -4080,7 +4082,9 @@ const waitForExternalSamplerReady = Effect.fn('benchmarkCodeGraph.waitForExterna
   const startedAt = yield* Clock.currentTimeMillis;
   while (!(yield* fs.exists(readyPath))) {
     if (subprocess.exitCode !== null) {
-      return yield* ScriptError.make({message: `Code graph benchmark sampler exited before becoming ready.`});
+      return yield* ScriptError.make({
+        message: `Code graph benchmark sampler exited before becoming ready.`,
+      });
     }
     if ((yield* Clock.currentTimeMillis) - startedAt >= EXTERNAL_SAMPLER_READY_TIMEOUT_MS) {
       return yield* ScriptError.make({
@@ -4093,16 +4097,72 @@ const waitForExternalSamplerReady = Effect.fn('benchmarkCodeGraph.waitForExterna
 
 const terminateExternalSampler = Effect.fn('benchmarkCodeGraph.terminateExternalSampler')(function* (
   subprocess: ReturnType<typeof Bun.spawn>,
+  readyPath: string,
+  fs: FileSystem.FileSystem,
 ) {
-  if (subprocess.exitCode !== null) return;
-  subprocess.kill();
-  if (
-    (yield* Effect.promise(() => subprocessExitWithin(subprocess, EXTERNAL_SAMPLER_TERMINATE_TIMEOUT_MS))) !== undefined
-  ) {
-    return;
-  }
-  subprocess.kill(9);
-  yield* Effect.promise(() => subprocessExitWithin(subprocess, EXTERNAL_SAMPLER_TERMINATE_TIMEOUT_MS));
+  yield* Effect.gen(function* () {
+    const system = Option.getOrUndefined(yield* Effect.serviceOption(SystemInfo));
+    if (process.platform === 'win32' && system === undefined)
+      return yield* ScriptError.make({message: 'Windows sampler cleanup requires SystemInfo.'});
+    if (system?.platform === 'win32' && readyPath !== undefined) {
+      const receipt = yield* fs.readFileString(readyPath).pipe(
+        Effect.map(text => {
+          try {
+            return JSON.parse(text) as unknown;
+          } catch {
+            return undefined;
+          }
+        }),
+        Effect.orElseSucceed(() => undefined),
+      );
+      if (typeof receipt === 'object' && receipt !== null && 'windowsHelper' in receipt) {
+        const helper = receipt.windowsHelper;
+        if (
+          typeof helper === 'object' &&
+          helper !== null &&
+          'processId' in helper &&
+          'startIdentity' in helper &&
+          typeof helper.processId === 'number' &&
+          Number.isSafeInteger(helper.processId) &&
+          helper.processId > 0 &&
+          typeof helper.startIdentity === 'string'
+        ) {
+          const identity = yield* system.processStartIdentity(helper.processId);
+          if (identity === helper.startIdentity) system.signalProcess(helper.processId, 'SIGTERM');
+          const started = yield* Clock.currentTimeMillis;
+          while (
+            system.isProcessRunning(helper.processId) &&
+            (yield* system.processStartIdentity(helper.processId)) === helper.startIdentity
+          ) {
+            if ((yield* Clock.currentTimeMillis) - started >= EXTERNAL_SAMPLER_TERMINATE_TIMEOUT_MS)
+              return yield* ScriptError.make({
+                message: 'Windows sampler helper cleanup could not confirm exit.',
+              });
+            yield* Effect.sleep(10);
+          }
+          if (identity === undefined && system.isProcessRunning(helper.processId))
+            return yield* ScriptError.make({
+              message: 'Windows sampler helper cleanup identity was unavailable.',
+            });
+        }
+      }
+    }
+  }).pipe(
+    Effect.ensuring(
+      Effect.gen(function* () {
+        if (subprocess.exitCode !== null) return;
+        subprocess.kill();
+        if (
+          (yield* Effect.promise(() => subprocessExitWithin(subprocess, EXTERNAL_SAMPLER_TERMINATE_TIMEOUT_MS))) !==
+          undefined
+        ) {
+          return;
+        }
+        subprocess.kill(9);
+        yield* Effect.promise(() => subprocessExitWithin(subprocess, EXTERNAL_SAMPLER_TERMINATE_TIMEOUT_MS));
+      }),
+    ),
+  );
 });
 
 function subprocessExitWithin(

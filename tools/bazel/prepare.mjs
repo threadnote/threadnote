@@ -264,14 +264,26 @@ export const readPreparedInventory = async ({
   const text = await Bun.file(join(root, 'tools/bazel/targets.json')).text();
   if (generation && generationDigest(text) !== generation.inventoryDigest)
     throw new Error('Bazel inventory changed after preparation; retry');
-  if (
-    expectedGeneration &&
-    EffectArray.some(
-      ['headSha', 'sourceDigest', 'inventoryDigest'],
-      key => generation?.[key] !== expectedGeneration[key],
-    )
-  )
-    throw new Error('Bazel generation mismatch: worker differs from planner');
+  const mismatches = expectedGeneration
+    ? EffectArray.filter(
+        ['headSha', 'sourceDigest', 'inventoryDigest'],
+        key => generation?.[key] !== expectedGeneration[key],
+      )
+    : [];
+  if (mismatches.length > 0) {
+    const fingerprint = (key, value) =>
+      value === undefined
+        ? '<missing>'
+        : typeof value === 'string' && value.length === (key === 'headSha' ? 40 : 64) && /^[a-f0-9]+$/u.test(value)
+          ? value
+          : '<invalid>';
+    const details = EffectArray.map(mismatches, key => ({
+      field: key,
+      expected: fingerprint(key, expectedGeneration[key]),
+      actual: fingerprint(key, generation?.[key]),
+    }));
+    throw new Error(`Bazel generation mismatch: worker differs from planner; fingerprints=${JSON.stringify(details)}`);
+  }
   const inventory = JSON.parse(text);
   if (inventory?.version !== 1 || !EffectArray.isArray(inventory.targets) || !EffectArray.isArray(inventory.testSuites))
     throw new Error('Invalid Bazel target inventory');

@@ -66,6 +66,8 @@ const system = SystemInfo.layer.pipe(
 const platform = Layer.mergeAll(BunServices.layer, cryptoLayer, system);
 // oxlint-disable-next-line effecttsgo/strict-effect-provide -- This is the scoped test entry point with one focused platform layer.
 const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect.pipe(Effect.provide(platform), TestClock.withLive);
+// oxlint-disable-next-line effecttsgo/strict-effect-provide -- Same entry point; the test clock keeps production bounds from expiring on loaded hosts.
+const provideTestClock = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect.pipe(Effect.provide(platform));
 const body = (
   project = 'allowed',
   status: 'active' | 'archived' = 'active',
@@ -178,7 +180,7 @@ effectIt.effect('retains selector reconciliation when a later callback fails', (
     expect(failed).toMatchObject({_tag: 'Failure', failure: {_tag: 'RecallIndexOperationError'}});
     expect(yield* readRecallLexicalDemand({...f.config, includeInactive: false})).toMatchObject({reconcile: true});
     expect(yield* recallIndexStatus(f.config)).toEqual(f.before);
-  }).pipe(provide),
+  }).pipe(provideTestClock),
 );
 
 effectIt.effect('does not enqueue maintenance when interrupted after a selector mismatch', () =>

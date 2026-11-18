@@ -8,7 +8,7 @@ import {
 } from '@threadnote/recall/background/lexical-demand';
 import {runEffect} from '../helpers/effect-runtime.js';
 import {runShareSync} from '@threadnote/threadnote/effect/share';
-import {Array as EffectArray, Schema} from 'effect';
+import {Array as EffectArray, Console, Effect, Schema} from 'effect';
 import * as EffectString from 'effect/String';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -19,10 +19,100 @@ import {access, mkdir, mkdtemp, readFile, realpath, rm, writeFile} from '@thread
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import {promisify} from '@threadnote/testing/node-util';
-import {describe, expect, it} from 'vitest';
+import {describe, expect, it, vi} from 'vitest';
 import * as EffectRecord from 'effect/Record';
 
 const execFilePromise = promisify(execFile);
+type CursorChildPhase =
+  | 'seed-bare'
+  | 'seed-init'
+  | 'seed-add'
+  | 'seed-commit'
+  | 'seed-remote'
+  | 'seed-push'
+  | 'bootstrap'
+  | 'start-discovered'
+  | 'start-cli-team'
+  | 'verify';
+interface CursorChildLifetime {
+  readonly deadline: number;
+  closureKnown: boolean;
+}
+interface CursorChildOperation<A> extends Promise<A> {
+  readonly child: {
+    once(event: 'close', listener: () => void): unknown;
+    removeListener(event: 'close', listener: () => void): unknown;
+  };
+}
+
+/** Join the actual direct child within the caller's original absolute lifetime. */
+async function awaitCursorChild<A>(
+  start: () => CursorChildOperation<A>,
+  lifetime: CursorChildLifetime | undefined,
+  phase: CursorChildPhase,
+): Promise<A> {
+  if (lifetime?.closureKnown === false) throw new Error('Cursor Cloud child closure remains unknown.');
+  const attemptStartedAt = performance.now();
+  const caseRemainingMsAtAttempt = lifetime
+    ? Math.round(Math.max(0, Math.min(30_000, lifetime.deadline - attemptStartedAt)))
+    : 0;
+  let operation: CursorChildOperation<A>;
+  try {
+    operation = start();
+  } catch (error) {
+    if (lifetime) {
+      lifetime.closureKnown = false;
+      const attemptElapsedMs = Math.round(Math.max(0, Math.min(30_000, performance.now() - attemptStartedAt)));
+      // oxlint-disable-next-line threadnote/no-effect-runtime-in-tests -- Synchronous Promise/OS boundary logging; Exit preserves the original child failure.
+      Effect.runSyncExit(
+        Console.error(
+          `Cursor Cloud child failure: ${JSON.stringify({phase, close: 'unknown', caseRemainingMsAtAttempt, attemptElapsedMs})}`,
+        ),
+      );
+    }
+    throw error;
+  }
+  if (!lifetime) return operation;
+  let onClose!: () => void;
+  const closed = new Promise<void>(resolve => {
+    onClose = resolve;
+    operation.child.once('close', onClose);
+  });
+  let result: {readonly ok: true; readonly value: A} | {readonly ok: false; readonly error: unknown} | undefined;
+  const settled = operation.then(
+    value => {
+      result = {ok: true, value};
+    },
+    error => {
+      result = {ok: false, error};
+    },
+  );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const known = await Promise.race([
+    Promise.all([settled, closed]).then(() => true),
+    new Promise<false>(resolve => {
+      timer = setTimeout(() => resolve(false), Math.max(0, lifetime.deadline - performance.now()));
+    }),
+  ]);
+  clearTimeout(timer);
+  operation.child.removeListener('close', onClose);
+  if (!known) lifetime.closureKnown = false;
+  if (!known || result?.ok === false) {
+    const attemptElapsedMs = Math.round(Math.max(0, Math.min(30_000, performance.now() - attemptStartedAt)));
+    // oxlint-disable-next-line threadnote/no-effect-runtime-in-tests -- Synchronous Promise/OS boundary logging; Exit preserves the original child failure.
+    Effect.runSyncExit(
+      Console.error(
+        `Cursor Cloud child failure: ${JSON.stringify({phase, close: known ? 'closed' : 'unknown', caseRemainingMsAtAttempt, attemptElapsedMs})}`,
+      ),
+    );
+  }
+  if (!known || result === undefined)
+    throw new Error('Cursor Cloud child close was not confirmed.', {
+      cause: result?.ok === false ? result.error : undefined,
+    });
+  if (!result.ok) throw result.error;
+  return result.value;
+}
 const CLOUD_TOOL_NAMES = [
   'complete_activation_retrieval_proof',
   'recall_context',
@@ -63,6 +153,71 @@ const expectColdUnavailableWarnings = (value: unknown): void => {
 };
 
 describe('Cursor Cloud integration', () => {
+  it('joins actual child close and preserves unknown closure without extending the case deadline', async () => {
+    const original = new Error('original abort');
+    const output = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      let close!: () => void;
+      const operation = Object.assign(Promise.reject(original), {
+        child: {
+          once: (_event: 'close', listener: () => void) => {
+            close = listener;
+          },
+          removeListener: () => {},
+        },
+      });
+      const lifetime = {deadline: performance.now() + 1000, closureKnown: true};
+      let returned = false;
+      const observed = awaitCursorChild(() => operation, lifetime, 'verify').catch(error => {
+        returned = true;
+        return error;
+      });
+      await Promise.resolve();
+      expect(returned).toBe(false);
+      close();
+      expect(await observed).toBe(original);
+      expect(lifetime.closureKnown).toBe(true);
+
+      const unknown = {deadline: performance.now(), closureKnown: true};
+      const pending = Object.assign(Promise.reject(original), {
+        child: {once: () => {}, removeListener: () => {}},
+      });
+      await expect(awaitCursorChild(() => pending, unknown, 'start-discovered')).rejects.toMatchObject({
+        cause: original,
+      });
+      expect(unknown.closureKnown).toBe(false);
+      const spawn = {deadline: performance.now() + 1000, closureKnown: true};
+      await expect(
+        awaitCursorChild(
+          () => {
+            throw original;
+          },
+          spawn,
+          'seed-bare',
+        ),
+      ).rejects.toBe(original);
+      expect(spawn.closureKnown).toBe(false);
+      const markers = EffectArray.map(output.mock.calls, ([message]) =>
+        JSON.parse(EffectString.replace(/^[^{]*/, '')(String(message))),
+      );
+      const timing = {caseRemainingMsAtAttempt: expect.any(Number), attemptElapsedMs: expect.any(Number)};
+      expect(markers).toEqual([
+        {phase: 'verify', close: 'closed', ...timing},
+        {phase: 'start-discovered', close: 'unknown', ...timing, caseRemainingMsAtAttempt: 0},
+        {phase: 'seed-bare', close: 'unknown', ...timing},
+      ]);
+      for (const marker of markers) {
+        for (const value of [marker.caseRemainingMsAtAttempt, marker.attemptElapsedMs]) {
+          expect(Number.isInteger(value)).toBe(true);
+          expect(value).toBeGreaterThanOrEqual(0);
+          expect(value).toBeLessThanOrEqual(30_000);
+        }
+      }
+    } finally {
+      output.mockRestore();
+    }
+  });
+
   it('rejects a failed terminal lexical demand before fixture publication', () => {
     const before: RecallLexicalDemand = {
       version: 2,
@@ -134,6 +289,17 @@ describe('Cursor Cloud integration', () => {
       expect(error.message).toContain(JSON.stringify({phase, revisionPresent: true, failures: 1, completed: false}));
       expect(error.message).not.toContain('private-');
       expect(error.message).not.toContain(failed.revision);
+      const timeout = lexicalSyncFenceFailure(
+        'Deferred lexical synchronization timed out; last observed demand state.',
+        scope,
+        failed,
+      );
+      expect(timeout.message).toContain(JSON.stringify({phase, revisionPresent: true, failures: 1, completed: false}));
+      expect(timeout.message).not.toContain('private-');
+      expect(timeout.message).not.toContain(failed.revision);
+      expect(lexicalSyncFenceFailure('Last observed demand unavailable.', scope).message).toContain(
+        JSON.stringify({phase}),
+      );
     },
   );
 
@@ -461,12 +627,23 @@ describe('Cursor Cloud integration', () => {
           arguments: {
             callerCwd: process.cwd(),
             query: 'bootstrap race sentinel',
+            budgetTokens: 700,
             responseFormat: 'dual',
           },
         });
         expect(recall.isError).not.toBe(true);
         expectColdUnavailableWarnings(recall.structuredContent);
-        expect(JSON.stringify(recall)).toContain('Automatic synchronization is queued in the background');
+        expect(recall.structuredContent).toMatchObject({
+          memoryScope: {
+            type: 'threadnote-memory-scope',
+            version: 2,
+            mode: 'shared-read-write',
+            memoryRoots: ['memories/shared/docs', 'memories/shared/engineering'],
+            teams: ['docs', 'engineering'],
+          },
+          nextAction: {tool: 'read_context', uris: []},
+          output: {budgetTokens: 700, returnedResults: 0, totalResults: 0, truncated: false},
+        });
         await expect(
           client.readResource({
             uri: 'threadnote://user/cloud-user/memories/shared/engineering/durable/projects/threadnote/bootstrap.md',
@@ -479,24 +656,31 @@ describe('Cursor Cloud integration', () => {
   });
 
   it('starts and verifies the discovered set with CLI restrictions taking precedence over environment selectors', async () => {
-    const fixture = await cloudFixture();
-    const docsRemote = await seedRemote(fixture.root, 'command-docs-share');
+    const lifetime: CursorChildLifetime = {deadline: performance.now() + 30_000, closureKnown: true};
+    const signal = AbortSignal.timeout(25_000);
+    const fixture = await cloudFixture(signal, lifetime);
     const environment = {HOME: fixture.userHome, THREADNOTE_CURSOR_CLOUD_TEAM: '', THREADNOTE_CURSOR_CLOUD_TEAMS: ''};
     const command = async (name: 'start' | 'verify', extra: readonly string[] = [], env: Record<string, string> = {}) =>
       JSON.parse(
         (
-          await runCli(['cloud', 'cursor', name, '--home', fixture.home, '--cwd', process.cwd(), '--json', ...extra], {
-            ...environment,
-            ...env,
-          })
+          await runCli(
+            ['cloud', 'cursor', name, '--home', fixture.home, '--cwd', process.cwd(), '--json', ...extra],
+            {
+              ...environment,
+              ...env,
+            },
+            signal,
+            lifetime,
+          )
         ).stdout,
       );
     try {
+      const docsRemote = await seedRemote(fixture.root, 'command-docs-share', signal, lifetime);
       await expect(command('verify')).rejects.toMatchObject({
         stderr: expect.stringContaining('No writable Cursor Cloud memory shares'),
       });
-      await bootstrap(fixture);
-      await bootstrap(fixture, 'docs', docsRemote);
+      await bootstrap(fixture, undefined, undefined, true, signal, lifetime);
+      await bootstrap(fixture, 'docs', docsRemote, true, signal, lifetime);
       expect((await command('verify')).teams).toEqual(['docs', 'engineering']);
       const registryPath = join(fixture.home, 'share', 'teams.json');
       const registry = JSON.parse(await readFile(registryPath, 'utf8'));
@@ -517,7 +701,11 @@ describe('Cursor Cloud integration', () => {
         });
       }
     } finally {
-      await rm(fixture.root, {force: true, recursive: true});
+      if (lifetime.closureKnown) await rm(fixture.root, {force: true, recursive: true});
+      else {
+        // oxlint-disable-next-line threadnote/no-effect-runtime-in-tests -- Synchronous Promise/OS cleanup logging; Exit cannot mask the original case failure.
+        Effect.runSyncExit(Console.error('Cursor Cloud fixture retained: child closure unknown.'));
+      }
     }
   });
 
@@ -1336,49 +1524,50 @@ interface CloudFixture {
   readonly userHome: string;
 }
 
-async function cloudFixture(signal?: AbortSignal): Promise<CloudFixture> {
+async function cloudFixture(signal?: AbortSignal, lifetime?: CursorChildLifetime): Promise<CloudFixture> {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'threadnote-cursor-cloud-')));
   try {
-    const remote = await seedRemote(root, 'memory-share', signal);
+    const remote = await seedRemote(root, 'memory-share', signal, lifetime);
     const home = join(root, 'home');
     const userHome = join(root, 'user-home');
     await mkdir(userHome, {recursive: true});
     return {home, remote, root, userHome};
   } catch (error) {
-    await rm(root, {force: true, recursive: true});
+    if (lifetime?.closureKnown !== false) await rm(root, {force: true, recursive: true});
+    else {
+      // oxlint-disable-next-line threadnote/no-effect-runtime-in-tests -- Synchronous Promise/OS cleanup logging; Exit cannot mask the original seed failure.
+      Effect.runSyncExit(Console.error('Cursor Cloud fixture retained: child closure unknown.'));
+    }
     throw error;
   }
 }
 
-async function seedRemote(root: string, name: string, signal?: AbortSignal): Promise<string> {
+async function seedRemote(
+  root: string,
+  name: string,
+  signal?: AbortSignal,
+  lifetime?: CursorChildLifetime,
+): Promise<string> {
   const remote = join(root, `${name}.git`);
   const source = join(root, `${name}-seed`);
   await mkdir(source, {recursive: true});
-  await execFilePromise('git', ['init', '--bare', '--initial-branch=main', remote], {
-    env: {...process.env, ...gitIdentityEnvironment},
-    ...(signal ? {signal, timeout: 20_000, killSignal: 'SIGKILL' as const} : {}),
-  });
-  await execFilePromise('git', ['-C', source, 'init', '--initial-branch=main'], {
-    env: {...process.env, ...gitIdentityEnvironment},
-    ...(signal ? {signal, timeout: 20_000, killSignal: 'SIGKILL' as const} : {}),
-  });
+  const git = (phase: CursorChildPhase, args: readonly string[]) =>
+    awaitCursorChild(
+      () =>
+        execFilePromise('git', args, {
+          env: {...process.env, ...gitIdentityEnvironment},
+          ...(signal ? {signal, timeout: 20_000, killSignal: 'SIGKILL' as const} : {}),
+        }),
+      lifetime,
+      phase,
+    );
+  await git('seed-bare', ['init', '--bare', '--initial-branch=main', remote]);
+  await git('seed-init', ['-C', source, 'init', '--initial-branch=main']);
   await writeFile(join(source, 'README.md'), '# Cursor Cloud memory share\n');
-  await execFilePromise('git', ['-C', source, 'add', 'README.md'], {
-    env: {...process.env, ...gitIdentityEnvironment},
-    ...(signal ? {signal, timeout: 20_000, killSignal: 'SIGKILL' as const} : {}),
-  });
-  await execFilePromise('git', ['-C', source, 'commit', '-m', 'seed memory share'], {
-    env: {...process.env, ...gitIdentityEnvironment},
-    ...(signal ? {signal, timeout: 20_000, killSignal: 'SIGKILL' as const} : {}),
-  });
-  await execFilePromise('git', ['-C', source, 'remote', 'add', 'origin', remote], {
-    env: {...process.env, ...gitIdentityEnvironment},
-    ...(signal ? {signal, timeout: 20_000, killSignal: 'SIGKILL' as const} : {}),
-  });
-  await execFilePromise('git', ['-C', source, 'push', '-u', 'origin', 'main'], {
-    env: {...process.env, ...gitIdentityEnvironment},
-    ...(signal ? {signal, timeout: 20_000, killSignal: 'SIGKILL' as const} : {}),
-  });
+  await git('seed-add', ['-C', source, 'add', 'README.md']);
+  await git('seed-commit', ['-C', source, 'commit', '-m', 'seed memory share']);
+  await git('seed-remote', ['-C', source, 'remote', 'add', 'origin', remote]);
+  await git('seed-push', ['-C', source, 'push', '-u', 'origin', 'main']);
   return remote;
 }
 
@@ -1422,6 +1611,7 @@ function bootstrap(
   remote = fixture.remote,
   sync = true,
   signal?: AbortSignal,
+  lifetime?: CursorChildLifetime,
 ) {
   return runCli(
     [
@@ -1442,32 +1632,51 @@ function bootstrap(
     ],
     {HOME: fixture.userHome},
     signal,
+    lifetime,
   );
 }
 
-function runCli(args: readonly string[], environment: Readonly<Record<string, string>> = {}, signal?: AbortSignal) {
+function runCli(
+  args: readonly string[],
+  environment: Readonly<Record<string, string>> = {},
+  signal?: AbortSignal,
+  lifetime?: CursorChildLifetime,
+) {
   const started = performance.now();
-  return execFilePromise(
-    process.execPath,
-    [
-      'apps/threadnote/src/standalone.ts',
-      ...args,
-      ...(process.platform !== 'linux' &&
-      args[0] === 'cloud' &&
-      args[1] === 'cursor' &&
-      args[2] === 'bootstrap' &&
-      !args.includes('--mode')
-        ? ['--no-dev-skills']
-        : []),
-    ],
-    {
-      cwd: process.cwd(),
-      env: {...process.env, ...gitIdentityEnvironment, ...environment, NO_COLOR: '1'},
-      ...(signal ? {signal, timeout: 20_000, killSignal: 'SIGKILL' as const} : {}),
-      maxBuffer: 1_048_576,
-    },
+  const phase =
+    args[2] === 'start'
+      ? EffectArray.contains(args, '--team')
+        ? 'start-cli-team'
+        : 'start-discovered'
+      : args[2] === 'verify'
+        ? 'verify'
+        : 'bootstrap';
+  return awaitCursorChild(
+    () =>
+      execFilePromise(
+        process.execPath,
+        [
+          'apps/threadnote/src/standalone.ts',
+          ...args,
+          ...(process.platform !== 'linux' &&
+          args[0] === 'cloud' &&
+          args[1] === 'cursor' &&
+          args[2] === 'bootstrap' &&
+          !args.includes('--mode')
+            ? ['--no-dev-skills']
+            : []),
+        ],
+        {
+          cwd: process.cwd(),
+          env: {...process.env, ...gitIdentityEnvironment, ...environment, NO_COLOR: '1'},
+          ...(signal ? {signal, timeout: 20_000, killSignal: 'SIGKILL' as const} : {}),
+          maxBuffer: 1_048_576,
+        },
+      ),
+    lifetime,
+    phase,
   ).catch((error: unknown) => {
-    if (signal && error instanceof Error) {
+    if (signal && !lifetime && error instanceof Error) {
       const stage = EffectArray.join(args.slice(0, args[0] === 'cloud' ? 3 : 1), ' ');
       const stderr =
         'stderr' in error && typeof error.stderr === 'string' ? EffectString.slice(-2048)(error.stderr) : '';
@@ -1562,14 +1771,14 @@ function raceLexicalFenceFailure<A>(operation: Promise<A>, failure: Promise<neve
   return Promise.race([operation, failure]);
 }
 
-function lexicalSyncFenceFailure(message: string, scope: RecallLexicalScope, demand: RecallLexicalDemand): Error {
+function lexicalSyncFenceFailure(message: string, scope: RecallLexicalScope, demand?: RecallLexicalDemand): Error {
   const phase = scope.work?.kind === 'synchronize' ? 'synchronization' : (scope.work?.kind ?? 'lexical-publication');
   return new Error(
     `${message} Demand observation: ${JSON.stringify({
       phase,
-      revisionPresent: demand.revision !== undefined,
-      failures: demand.failures,
-      completed: demand.completedAt !== undefined,
+      revisionPresent: demand === undefined ? undefined : demand.revision !== undefined,
+      failures: demand?.failures,
+      completed: demand === undefined ? undefined : demand.completedAt !== undefined,
     })}`,
   );
 }
@@ -1595,7 +1804,7 @@ async function armLexicalSyncCompletionFence(
   let observedActive = false;
   let inspecting = false;
   let dirty = false;
-  let lastObserved = 'before=unread';
+  let lastObserved: RecallLexicalDemand | undefined;
   let observerError: Error | undefined;
   let closed = false;
   let watcher: ReturnType<typeof watch> | undefined;
@@ -1642,7 +1851,13 @@ async function armLexicalSyncCompletionFence(
   };
   const timer = setTimeout(
     () =>
-      fail(new Error(`Deferred lexical synchronization timed out; last demand state: ${lastObserved ?? 'unread'}.`)),
+      fail(
+        lexicalSyncFenceFailure(
+          'Deferred lexical synchronization timed out; last observed demand state.',
+          scope,
+          lastObserved,
+        ),
+      ),
     Math.max(0, deadline - performance.now()),
   );
   void wait.catch(() => undefined);
@@ -1652,7 +1867,7 @@ async function armLexicalSyncCompletionFence(
   const awaitForeground = <A>(operation: Promise<A>) => raceLexicalFenceFailure(operation, failure);
   try {
     before = await awaitForeground(readScopedDemand());
-    lastObserved = `before=${before?.completedAt ?? 'absent'}`;
+    lastObserved = before;
     await awaitForeground(mkdir(directory, {recursive: true, mode: 0o700}));
     requestedAt = Date.now();
     watcher = watch(directory, {persistent: false}, (_event, changedFile) => {
@@ -1674,9 +1889,7 @@ async function armLexicalSyncCompletionFence(
         while (dirty && !(waitSettled && settlementSettled)) {
           dirty = false;
           const current = await awaitForeground(readScopedDemand());
-          lastObserved = current
-            ? JSON.stringify({revision: current.revision, completedAt: current.completedAt, failures: current.failures})
-            : 'absent';
+          lastObserved = current;
           if (!current) {
             if (before !== undefined || observedActive) {
               fail(new Error('Lexical synchronization demand disappeared before successful completion.'));

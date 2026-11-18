@@ -270,7 +270,8 @@ describe('doctor report resilience', () => {
         expect(report.output).toContain('FAIL embedding model:');
         expect(report.output).toContain('FAIL vector recall index:');
         expect(report.output).toContain('FAIL lexical recall index:');
-        expect(report.output).toContain('Summary: 4 failure(s)');
+        expect(report.output).toContain('FAIL native vector reader:');
+        expect(report.output).toContain('Summary: 5 failure(s)');
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );

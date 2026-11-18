@@ -27,6 +27,8 @@
     "bazel:check": "bun tools/bazel/prepare.mjs && bun tools/bazel/generate.mjs --check && bun tools/bazel/run.ts build --nobuild //... && bun tools/bazel/run.ts test //:tooling_test",
     "bazel:generate": "bun tools/bazel/generate.mjs",
     "build": "bun scripts/check-embedded-core-model.ts && bun run generate:code-graph-languages && bun run clean && bun scripts/build.ts",
+    "build:release": "bun run build && bun scripts/assemble-native-vector-reader.ts && bun scripts/assemble-native-inference.ts",
+    "native:bootstrap": "bun scripts/assemble-native-vector-reader.ts --development",
     "check:repo": "bun run bazel:check && bun run lint && bun run format:check && bun run typecheck",
     "check:self-contained": "bun scripts/check-embedded-core-model.ts && bun scripts/check-self-contained.ts",
     "clean": "bun scripts/clean.ts",

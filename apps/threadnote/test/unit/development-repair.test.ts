@@ -3,13 +3,17 @@ import {it as effectIt} from '@effect/vitest';
 import {Clock, Console, Deferred, Effect, Fiber, FileSystem, Path, Result} from 'effect';
 import type {SecureRandom} from 'effect/crypto';
 import * as FC from 'fast-check';
-import {describe, expect} from 'vitest';
+import {describe, expect, it} from 'vitest';
+import {classifySqliteError, SqlError} from 'effect/sql/SqlError';
+import {attachAnonymousTelemetryDiagnostic} from '@threadnote/threadnote/telemetry/diagnostic';
+import {LocalModelWorkerTransportError} from '@threadnote/threadnote/effect/ai/isolated-local-model-runtime';
 import {captureConsole} from '@threadnote/threadnote/effect/console';
 import {LocalModelRuntime, type LocalModelRuntimeShape} from '@threadnote/inference/engine/local-model-runtime';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {SystemInfo} from '@threadnote/platform/system';
 import {
   recallIndexMaintenanceShouldRetry,
+  recallIndexRepairFailureDiagnostic,
   RECALL_INDEX_MAINTENANCE_GENERATION_RETRY_LIMIT,
   runDevelopmentInstallIntegrationActivation,
   runDevelopmentInstallRepair,
@@ -38,7 +42,7 @@ import {
 } from '@threadnote/recall/vector-index';
 import {readRecallEmbeddingDemand} from '@threadnote/recall/background/demand';
 import {writeModelSelection} from '@threadnote/inference/models/selection';
-import {InferenceInterrupted} from '@threadnote/inference/engine/errors';
+import {EmbeddingFailed, InferenceInterrupted, ModelLoadFailed} from '@threadnote/inference/engine/errors';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   ExternalSourcePolicy,
@@ -171,6 +175,71 @@ const fixture = Effect.gen(function* () {
 });
 
 describe('development installer repair isolation', () => {
+  it('projects typed recall failures without private error fields', () => {
+    const privateText = 'PRIVATE_MESSAGE_PATH_SQL_BODY_TOKEN';
+    const model = ModelLoadFailed.make({cause: new Error(privateText), message: privateText, modelId: privateText});
+    expect(recallIndexRepairFailureDiagnostic(model)).toEqual({errorType: 'ModelLoadFailed'});
+    const worker = attachAnonymousTelemetryDiagnostic(
+      EmbeddingFailed.make({cause: new Error(privateText), message: privateText, modelId: privateText}),
+      {errorType: 'EmbeddingFailed', domain: 'model-worker', operation: 'embed-many', reason: 'crash'},
+    );
+    expect(recallIndexRepairFailureDiagnostic(worker)).toEqual({
+      errorType: 'EmbeddingFailed',
+      domain: 'model-worker',
+      operation: 'embed-many',
+      reason: 'crash',
+    });
+    const transport = LocalModelWorkerTransportError.make({
+      message: privateText,
+      operation: 'embedMany',
+      reason: 'exit',
+    });
+    Object.defineProperty(transport, 'exitObservation', {
+      value: {stage: 'process-exit', exitCode: -1073741819, signal: null, body: privateText},
+      enumerable: false,
+    });
+    const exitedWorker = attachAnonymousTelemetryDiagnostic(
+      EmbeddingFailed.make({cause: transport, message: privateText, modelId: privateText}),
+      {errorType: 'EmbeddingFailed', domain: 'model-worker', operation: 'embed-many', reason: 'exit'},
+    );
+    expect(recallIndexRepairFailureDiagnostic(exitedWorker)).toEqual({
+      errorType: 'EmbeddingFailed',
+      domain: 'model-worker',
+      operation: 'embed-many',
+      reason: 'exit',
+      exitObservation: {stage: 'process-exit', exitCode: -1073741819, signal: null},
+    });
+    expect(JSON.stringify(recallIndexRepairFailureDiagnostic(exitedWorker))).not.toContain(privateText);
+    const busy = SqlError.make({
+      reason: classifySqliteError(
+        {code: 'SQLITE_BUSY', message: privateText},
+        {message: privateText, operation: privateText},
+      ),
+    });
+    expect(recallIndexRepairFailureDiagnostic(busy)).toEqual({
+      errorType: 'SqlError',
+      sqlReason: 'LockTimeoutError',
+      sqliteCode: 'SQLITE_BUSY',
+    });
+    const constraint = SqlError.make({
+      reason: classifySqliteError({code: 'SQLITE_CONSTRAINT_UNIQUE', message: privateText}),
+    });
+    expect(recallIndexRepairFailureDiagnostic(constraint)).toEqual({
+      errorType: 'SqlError',
+      sqlReason: 'UniqueViolation',
+      sqliteCode: 'SQLITE_CONSTRAINT_UNIQUE',
+    });
+    const unknownSql = SqlError.make({reason: classifySqliteError({code: privateText, message: privateText})});
+    expect(recallIndexRepairFailureDiagnostic(unknownSql)).toEqual({errorType: 'SqlError', sqlReason: 'UnknownError'});
+    expect(recallIndexRepairFailureDiagnostic({_tag: privateText, cause: model, code: 'SQLITE_BUSY'})).toEqual({
+      errorType: 'UnknownError',
+    });
+    expect(
+      JSON.stringify(
+        EffectArray.map([model, worker, busy, constraint, unknownSql], recallIndexRepairFailureDiagnostic),
+      ),
+    ).not.toContain(privateText);
+  });
   effectIt.effect('makes the lexical status the final readiness fence after observing the vector generation', () =>
     Effect.gen(function* () {
       const requestedGeneration = 'requested-generation';
@@ -456,6 +525,13 @@ describe('development installer repair isolation', () => {
           expect(result.value.failure).toMatchObject({
             message: expect.stringContaining('Recall index repair failed'),
           });
+        if (failure === 'inference') {
+          expect(result.output).toContain('Recall repair failure diagnostic: {"errorType":"InferenceInterrupted"}');
+          if (Result.isFailure(result.value))
+            expect(result.value.failure).toMatchObject({
+              message: 'Recall index repair failed: Synthetic embedding failure',
+            });
+        }
         if (failure === 'authorization') {
           if (Result.isFailure(result.value))
             expect(result.value.failure).toMatchObject({

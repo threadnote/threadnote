@@ -9,6 +9,7 @@ Direct runtime software and packages bundled into the published JavaScript retai
 
 - `node-llama-cpp` (MIT), used in a supervised local worker with prebuilt `llama.cpp` binaries for GGUF inference
 - Bun (MIT), embedded into each compiled executable
+- Native vector reader: `napi`/`napi-derive` (MIT), `rusqlite` (MIT), and bundled SQLite 3.54.1 (public domain); built from pinned Cargo dependencies with Rust 1.89.0. SQLite is privately linked into the required addon and does not replace Bun SQLite. The crate also uses `sha2` 0.11.1 (MIT OR Apache-2.0) for private prepared-request validation. The Bun/WebKit legacy numeric ordering attribution and upstream notice are shipped at `runtime/vector-reader/NOTICE`.
 - `effect`, `@effect/platform-bun`, `@effect/ai-openai-compat`, `@effect/sql-sqlite-bun`, and `@effect/vitest` (MIT)
 - `@modelcontextprotocol/sdk` 1.32.2 (MIT), pinned for the Streamable HTTP and stdio MCP protocol boundary
 - `jose` 6.2.13 (MIT), used for OAuth and Cursor workload JWT/JWKS verification
@@ -61,6 +62,18 @@ IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR 
 INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN
 AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
 PERFORMANCE OF THIS SOFTWARE.
+
+## CI-built inference runtime libraries
+
+Portable Linux inference payloads include the compiler-resolved `libstdc++.so.6`
+and `libgcc_s.so.1` needed by their genuine local-build closure. These GCC runtime
+libraries use GPL version 3 with the GCC Runtime Library Exception, version 3.1.
+The release inference descriptor identifies the pinned build image, actual compiler,
+sysroot, installed package closure and final library hashes. Alpine package sources
+are available in [Alpine aports](https://gitlab.alpinelinux.org/alpine/aports/-/tree/3.17-stable/main/gcc);
+the GNU builder is the pinned [manylinux2014 image](https://github.com/pypa/manylinux).
+Consult the [GCC runtime license and exception](https://gcc.gnu.org/onlinedocs/libstdc++/manual/license.html)
+for the authoritative terms and corresponding source distribution obligations.
 
 ## Public website
 

@@ -22,7 +22,7 @@ import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {writeFinalCliOutput} from '../effect/cli/output.js';
 import {getJsonEffect, HttpService} from '@threadnote/platform/http';
 import {sha256FileHex} from '@threadnote/platform/digest';
-import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
+import {runtimeLinuxLibc, SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
 import {
   activeInstalledVersion,
   activateStandaloneRelease,
@@ -536,7 +536,7 @@ const findFilesRecursively = Effect.fn('update.findFilesRecursively')(function* 
   return files.sort();
 });
 
-export function releaseArtifactName(system: Pick<SystemInfoShape, 'architecture' | 'platform'>): string {
+export function releaseArtifactName(system: Pick<SystemInfoShape, 'architecture' | 'platform' | 'libc'>): string {
   const platform = system.platform === 'win32' ? 'windows' : system.platform === 'darwin' ? 'darwin' : system.platform;
   const architecture = system.architecture === 'aarch64' ? 'arm64' : system.architecture;
   if (!['darwin', 'linux', 'windows'].includes(platform) || !['arm64', 'x64'].includes(architecture)) {
@@ -544,7 +544,11 @@ export function releaseArtifactName(system: Pick<SystemInfoShape, 'architecture'
       message: `No standalone Threadnote artifact is available for ${platform}-${architecture}.`,
     });
   }
-  return `threadnote-${platform}-${architecture}.tar.gz`;
+  const hostLibc = platform === 'linux' ? (system.libc?.() ?? runtimeLinuxLibc()) : undefined;
+  if (platform === 'linux' && hostLibc === undefined)
+    throw UpdateOperationError.make({message: 'Cannot identify Linux libc for release selection.'});
+  const libc = hostLibc === 'musl' ? '-musl' : '';
+  return `threadnote-${platform}-${architecture}${libc}.tar.gz`;
 }
 
 function releaseRequestHeaders(): Readonly<Record<string, string>> {

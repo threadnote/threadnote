@@ -1060,7 +1060,7 @@ const buildAndStageDevelopmentRelease = Effect.fn('developmentInstall.buildAndSt
     maxOutputBytes: 2 * 1024 * 1024,
     timeoutMs: COMMAND_TIMEOUT_MILLISECONDS,
   });
-  yield* runCommandEffect(system.executablePath, ['run', 'build'], {
+  yield* runCommandEffect(system.executablePath, ['run', 'build:release'], {
     cwd: input.sourceRoot,
     env: {...system.environment(), THREADNOTE_DEVELOPMENT_BUILD_VERSION: input.version},
     maxOutputBytes: 2 * 1024 * 1024,

@@ -173,3 +173,35 @@ a debugging handoff. Use `bun run bazel -- test <label>` for focused execution;
 byte-stable regeneration, and target analysis without running every product test.
 It compares generated output with the current authored model, without requiring
 a generated Git diff.
+
+## Required native vector reader
+
+The recall package owns `native-vector-reader/`, a pinned Rust 1.89.0 crate with
+private bundled SQLite. Ordinary `bun run build`, Bazel actions, and all eight
+`compile:targets` contracts remain Bun-only. These commands produce JavaScript
+compilation outputs; `bun run build:release` additionally assembles the required
+reader and inference assets on the exact target OS, architecture and libc host.
+End users require neither Cargo nor external SQLite. Requests never build or
+download native code, and missing or incompatible native capability fails clearly.
+
+All eight profiles retain distinct native identities: Darwin ARM64/x64, Windows
+ARM64/x64, and Linux GNU/musl ARM64/x64. The six existing archive names remain;
+Linux musl archives add `-musl`. The installer and updater select the host libc.
+Linux CI builds run on native hardware in pinned glibc 2.17 or musl 1.2.3
+containers. Genuine upstream local-build inference closures include the complete
+Release directory, metadata and completion marker. The inference overlay descriptor
+binds source/header/lock inputs, build tools and every final payload file; the same
+verified overlay can be staged into the private TS66 comparison distribution.
+
+Release assembly requires clean HEAD and matching `release.json.sourceIdentity`.
+The reader manifest binds source, lockfile, toolchain, target, N-API and binary
+identity. Publishing finalizes native descriptors after macOS signing and before
+notarization/archive. Actual native-host load/model smoke and the unchanged full
+performance qualification gates are required on every profile before shipping.
+Descriptors record artifact identity; they do not self-attest qualification.
+
+For explicit developer bootstrap, run `bun run native:bootstrap`, then set
+`THREADNOTE_NATIVE_VECTOR_READER_MANIFEST` to the absolute manifest path under
+`.context/native-vector-reader`. This source-only artifact binds actual native
+inputs and base Git identity. Dirty diagnostics do not establish qualification.
+The pinned Rust toolchain is required only for this explicit assembly operation.

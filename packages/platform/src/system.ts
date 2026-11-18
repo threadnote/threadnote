@@ -178,6 +178,25 @@ export async function* runtimeTextDirectoryNames(path: string): AsyncGenerator<s
 /** Host facts and Bun's Node-compatible structural adapters stay inside SystemInfo's runtime boundary. */
 export const runtimeArchitecture = process.arch;
 export const runtimePlatform = process.platform;
+
+export type LinuxLibc = 'glibc' | 'musl';
+export function linuxLibcFromReport(value: unknown): LinuxLibc | undefined {
+  if (typeof value !== 'object' || value === null || !('header' in value)) return undefined;
+  const header = value.header;
+  if (typeof header !== 'object' || header === null) return undefined;
+  return 'glibcVersionRuntime' in header &&
+    typeof header.glibcVersionRuntime === 'string' &&
+    header.glibcVersionRuntime.length > 0
+    ? 'glibc'
+    : 'musl';
+}
+let cachedLinuxLibc: LinuxLibc | undefined;
+/** Lazy host ABI fact: do not inspect a full process report on unrelated request paths. */
+export function runtimeLinuxLibc(): LinuxLibc | undefined {
+  if (runtimePlatform !== 'linux') return undefined;
+  return (cachedLinuxLibc ??= linuxLibcFromReport(process.report.getReport()));
+}
+
 const nativeOperatingSystemModule = process.getBuiltinModule('os') as NativeOperatingSystemModuleShape;
 export const runtimeOperatingSystemRelease = nativeOperatingSystemModule.release();
 const nativeFileSystemModule = process.getBuiltinModule('fs');
@@ -678,6 +697,7 @@ export function runtimeTextDirectoryNamePage(
 
 export interface SystemInfoShape {
   readonly architecture: string;
+  readonly libc?: () => LinuxLibc | undefined;
   readonly availableDiskBytes: (path: string) => Effect.Effect<number | undefined, unknown>;
   /** Versioned cross-observer identity; optional for legacy injected SystemInfo adapters. */
   readonly canonicalProcessStartIdentity?: (processId: number) => Effect.Effect<string | undefined>;
@@ -844,6 +864,7 @@ export class SystemInfo extends Context.Service<SystemInfo, SystemInfoShape>()(
       const username = yield* Config.option(Config.String('USERNAME')).pipe(Effect.orElseSucceed(() => Option.none()));
       return SystemInfo.of({
         architecture: runtimeArchitecture,
+        libc: runtimeLinuxLibc,
         availableDiskBytes: path => availableDiskBytes(path, runtimePlatform, process.env, diskCapacityProbeAdapters),
         canonicalProcessStartIdentity,
         cpuTimes: Effect.try(() => {
