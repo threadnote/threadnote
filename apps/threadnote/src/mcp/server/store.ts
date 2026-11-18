@@ -289,9 +289,16 @@ export function registerStoreTool(
         const effectiveCitationPolicy =
           citationPolicy ??
           (requestedCodeRefs.length > 0 && !sharedTarget && metadata.status === 'active' ? 'defer' : 'require-current');
+        // Private defer cites the subset present in an exact-current graph, as deferred finalization does.
+        const citesPresentSubset = effectiveCitationPolicy === 'defer' && !sharedTarget;
         const captured = yield* captureMemoryCodeCitationsForMcp(
           config,
-          {callerCwd: callerCwd!, ...(project === undefined ? {} : {project}), refs: requestedCodeRefs},
+          {
+            callerCwd: callerCwd!,
+            ...(project === undefined ? {} : {project}),
+            refs: requestedCodeRefs,
+            omitUnresolved: citesPresentSubset,
+          },
           name,
         );
         const deferredCodeAnchor: DeferredCodeAnchorWriteRequest | undefined =
@@ -438,10 +445,13 @@ export function registerStoreTool(
             : relationReceiptResult;
         const citationReceiptResult = deferredCodeAnchor
           ? withDeferredCodeAnchorWriteReceipt(keywordReceiptResult, deferredCodeAnchor)
-          : withClearedCodeCitationReceipt(
-              keywordReceiptResult,
-              replaceTarget?.metadata.codeCitations?.length,
-              codeCitations.length,
+          : withUncitedCodePathReceipt(
+              withClearedCodeCitationReceipt(
+                keywordReceiptResult,
+                replaceTarget?.metadata.codeCitations?.length,
+                codeCitations.length,
+              ),
+              citesPresentSubset ? uncitedCodePathCount(requestedCodeRefs, codeCitations) : 0,
             );
         return withHandoffResumeReceipt(citationReceiptResult, {
           capturedCodeCitationCount: codeCitations.length,
@@ -524,6 +534,28 @@ function withClearedCodeCitationReceipt(
       ...(result.structuredContent ?? {}),
       clearedCodeCitations: previousCount,
     },
+  };
+}
+
+/** Symbol handles carry no requested path, so only path references are counted. */
+function uncitedCodePathCount(refs: readonly string[], citations: readonly {readonly path: string}[]): number {
+  const cited = new Set(EffectArray.map(citations, citation => citation.path));
+  const paths = EffectArray.filter(EffectArray.map(refs, EffectString.trim), ref => !/^cg[rs]_/u.test(ref));
+  return new Set(EffectArray.filter(paths, path => !cited.has(path))).size;
+}
+
+function withUncitedCodePathReceipt(result: CallToolResult, uncitedCodePaths: number): CallToolResult {
+  if (result.isError === true || uncitedCodePaths === 0) return result;
+  return {
+    ...result,
+    content: [
+      ...result.content,
+      {
+        type: 'text',
+        text: `${uncitedCodePaths} code path(s) are absent from the exact current graph and were not cited.`,
+      },
+    ],
+    structuredContent: {...(result.structuredContent ?? {}), uncitedCodePaths},
   };
 }
 

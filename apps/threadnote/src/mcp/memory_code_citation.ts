@@ -17,6 +17,7 @@ export function captureMemoryCodeCitationsForMcp(
     readonly expectedProjectScope?: MemoryCodeCitationCaptureScopeExpectationV1;
     readonly refs: readonly string[];
     readonly allowStaleGraph?: boolean;
+    readonly omitUnresolved?: boolean;
   },
   operation: string,
 ) {

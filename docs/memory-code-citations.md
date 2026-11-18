@@ -128,8 +128,10 @@ Pass that payload to `remember_context`. Supported references are:
 
 Callers supply locators, not hashes, status, snapshot data, or raw citation JSON. Threadnote first tries to resolve every
 reference against an exact-current ready graph and derives citations internally. Capture is deduplicated and atomic.
-Invalid, absent, ambiguous, or racing references fail the write; a retryable graph-readiness failure follows the
-private store-now/anchor-later policy below.
+Invalid, absent, ambiguous, or racing references fail a strict write; a retryable graph-readiness failure follows the
+private store-now/anchor-later policy below. That policy applies one rule whether it captures now or finalizes later:
+it cites the references present in the exact-current graph and leaves absent paths and local handles uncited. The
+receipt reports `uncitedCodePaths` when it leaves a path uncited.
 
 Path references are graph locators, not arbitrary tracked-file readers. A tracked file that is outside the graph
 inventory cannot be cited by path; choose a path or stable handle that is present in the exact-current graph.
