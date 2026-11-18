@@ -5,7 +5,7 @@ import {Effect, Schema} from 'effect';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import {NativeAuthoringDocumentSchema} from '@threadnote/workflow-automations/authoring';
 import {NativeCycleStateSchema} from '@threadnote/workflow-automations/cycle';
-import {NativeCycleWaiverSchema} from '@threadnote/workflow-automations/cycle-runtime';
+import {NativeCycleWaiverSchema, nativeCycleRuntimeLimits} from '@threadnote/workflow-automations/cycle-runtime';
 import {NativeCloseoutSaveReservationSchema} from '@threadnote/workflow-automations/native';
 import {prepareNativeCloseout, NativeCloseoutProposalSchema} from '@threadnote/workflow-automations/closeout';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -68,7 +68,9 @@ const journalFields = {
   plan: NativeAuthoringDocumentSchema,
   spec: Schema.optionalKey(NativeAuthoringDocumentSchema),
   proposal: NativeCloseoutProposalSchema,
-  waivers: Schema.optionalKey(Schema.Array(NativeCycleWaiverSchema).check(Schema.isMaxLength(128))),
+  waivers: Schema.optionalKey(
+    Schema.Array(NativeCycleWaiverSchema).check(Schema.isMaxLength(nativeCycleRuntimeLimits.waivers)),
+  ),
   owned: Schema.Array(ownedSchema).check(Schema.isMaxLength(4096)),
   documents: Schema.Array(
     Schema.Struct({
