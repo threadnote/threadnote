@@ -10,6 +10,7 @@ import {
   CODE_GRAPH_CHECKPOINT_RECORD_SCHEMA_VERSION,
   CODE_GRAPH_CHECKPOINT_SCHEMA,
   CODE_GRAPH_CHECKPOINT_COMPRESSION_PROFILE,
+  type CodeGraphCheckpointCompressionProfileV1,
   codeGraphCheckpointRecordOrderKey,
   compareCodeGraphCheckpointRecordOrderKeys,
   emptyCodeGraphCheckpointCounts,
@@ -92,6 +93,8 @@ export interface CodeGraphCheckpointDeltaEncodeV1 {
 }
 
 export interface CodeGraphCheckpointEncodeOptionsV1 {
+  /** Defaults to the current profile. Pass `threadnote-gzip-v1` to reproduce artifacts exported before v2. */
+  readonly compressionProfile?: CodeGraphCheckpointCompressionProfileV1;
   readonly delta?: CodeGraphCheckpointDeltaEncodeV1;
   readonly limits?: Partial<CodeGraphCheckpointPackLimits>;
   readonly packKind?: CodeGraphCheckpointPackKindV1;
@@ -202,6 +205,7 @@ export class CodeGraphCheckpointStreamEncoderV1 {
   readonly #packKind: CodeGraphCheckpointPackKindV1;
   readonly #spool = domainHasher(SPOOL_DOMAIN);
   readonly #chunkDescriptors: CodeGraphCheckpointChunkDescriptorV1[] = [];
+  readonly #compressionProfile: CodeGraphCheckpointCompressionProfileV1;
   #chunkBytes = 0;
   #chunkFrames: Uint8Array[] = [];
   #chunkRecords = 0;
@@ -215,6 +219,7 @@ export class CodeGraphCheckpointStreamEncoderV1 {
     this.#metadata = parseCodeGraphCheckpointMetadataV1(metadata);
     this.#attributionFiles = checkpointAttributionFiles(this.#metadata);
     this.#packKind = options.packKind ?? (options.delta === undefined ? 'checkpoint' : 'delta');
+    this.#compressionProfile = options.compressionProfile ?? CODE_GRAPH_CHECKPOINT_COMPRESSION_PROFILE;
     this.#delta = options.delta;
     if (this.#packKind === 'delta' && this.#delta === undefined) {
       throw CodeGraphCheckpointPackError.make({message: 'Delta pack encoding requires a base envelope.'});
@@ -283,7 +288,7 @@ export class CodeGraphCheckpointStreamEncoderV1 {
     const header = parseCodeGraphCheckpointHeaderV1({
       abi: {...abi, input: this.#metadata.abi},
       chunks: this.#chunkDescriptors,
-      compressionProfile: CODE_GRAPH_CHECKPOINT_COMPRESSION_PROFILE,
+      compressionProfile: this.#compressionProfile,
       counts: this.#counts,
       coverage: this.#metadata.coverage,
       formatVersion: CODE_GRAPH_CHECKPOINT_FORMAT_VERSION,
@@ -317,7 +322,7 @@ export class CodeGraphCheckpointStreamEncoderV1 {
     if (uncompressed.byteLength > this.#limits.maximumUncompressedChunkBytes) {
       throw CodeGraphCheckpointPackError.make({message: 'Checkpoint chunk exceeds the uncompressed-byte limit.'});
     }
-    const compressed = gzipSync(uncompressed, {level: 6, mtime: 0});
+    const compressed = compressCheckpointChunk(this.#compressionProfile, uncompressed);
     if (compressed.byteLength > this.#limits.maximumCompressedChunkBytes) {
       throw CodeGraphCheckpointPackError.make({message: 'Checkpoint chunk exceeds the compressed-byte limit.'});
     }
@@ -900,6 +905,15 @@ function validateHeaderBounds(header: CodeGraphCheckpointHeaderV1, limits: CodeG
   }
 }
 
+function compressCheckpointChunk(
+  profile: CodeGraphCheckpointCompressionProfileV1,
+  uncompressed: Uint8Array<ArrayBuffer>,
+): Uint8Array {
+  return profile === 'threadnote-gzip-v1'
+    ? gzipSync(uncompressed, {level: 6, mtime: 0})
+    : Bun.gzipSync(uncompressed, {level: 6, library: 'libdeflate'});
+}
+
 const GZIP_HEADER_BYTES = 10;
 const GZIP_TRAILER_BYTES = 8;
 
@@ -1156,7 +1170,7 @@ function checkedAdd(left: number, right: number, label: string): number {
   return left + right;
 }
 
-function joinBytes(parts: readonly Uint8Array[], expected?: number): Uint8Array {
+function joinBytes(parts: readonly Uint8Array[], expected?: number): Uint8Array<ArrayBuffer> {
   const length =
     expected ?? EffectArray.reduce(parts, 0, (total, part) => checkedAdd(total, part.byteLength, 'Byte sequence'));
   const output = new Uint8Array(length);

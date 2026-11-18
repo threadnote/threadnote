@@ -28,7 +28,14 @@ export {
   CODE_GRAPH_CHECKPOINT_RECORD_SCHEMA_VERSION,
   CODE_GRAPH_CHECKPOINT_SEMANTIC_VERSION,
 };
-export const CODE_GRAPH_CHECKPOINT_COMPRESSION_PROFILE = 'threadnote-gzip-v1' as const;
+/**
+ * Chunk compression profiles. Both are single-member gzip with a fixed 10-byte header, so one decoder reads both.
+ * v1 is fflate level 6. v2 is Bun's pinned libdeflate level 6, which changes artifact bytes and digests.
+ */
+export const CODE_GRAPH_CHECKPOINT_COMPRESSION_PROFILES = ['threadnote-gzip-v1', 'threadnote-gzip-v2'] as const;
+export type CodeGraphCheckpointCompressionProfileV1 = (typeof CODE_GRAPH_CHECKPOINT_COMPRESSION_PROFILES)[number];
+/** The profile new exports use. */
+export const CODE_GRAPH_CHECKPOINT_COMPRESSION_PROFILE: CodeGraphCheckpointCompressionProfileV1 = 'threadnote-gzip-v2';
 export const CODE_GRAPH_CHECKPOINT_PATH_POLICY = 'repository-relative-posix-v1' as const;
 export const CODE_GRAPH_CHECKPOINT_ATTRIBUTION_FILES_MAXIMUM = 10_000;
 export const CODE_GRAPH_CHECKPOINT_ATTRIBUTION_CONTENT_BYTES_MAXIMUM = 16 * 1_048_576;
@@ -212,7 +219,7 @@ export interface CodeGraphCheckpointHeaderV1 {
   readonly abi: CodeGraphCheckpointAbiV1;
   readonly base?: CodeGraphCheckpointDeltaBaseV1;
   readonly chunks: readonly CodeGraphCheckpointChunkDescriptorV1[];
-  readonly compressionProfile: typeof CODE_GRAPH_CHECKPOINT_COMPRESSION_PROFILE;
+  readonly compressionProfile: CodeGraphCheckpointCompressionProfileV1;
   readonly counts: CodeGraphCheckpointCountsV1;
   readonly coverage: CodeGraphCheckpointCoverageV1;
   readonly deletions?: readonly CodeGraphCheckpointRecordOrderKeyV1[];
@@ -478,7 +485,11 @@ export function parseCodeGraphCheckpointHeaderV1(value: unknown): CodeGraphCheck
   literal(input.mediaType, CODE_GRAPH_CHECKPOINT_MEDIA_TYPE, 'Checkpoint media type');
   literal(input.formatVersion, CODE_GRAPH_CHECKPOINT_FORMAT_VERSION, 'Checkpoint format version');
   literal(input.recordSchemaVersion, CODE_GRAPH_CHECKPOINT_RECORD_SCHEMA_VERSION, 'Checkpoint record schema version');
-  literal(input.compressionProfile, CODE_GRAPH_CHECKPOINT_COMPRESSION_PROFILE, 'Checkpoint compression profile');
+  const compressionProfile = oneOf(
+    input.compressionProfile,
+    CODE_GRAPH_CHECKPOINT_COMPRESSION_PROFILES,
+    'Checkpoint compression profile',
+  );
   const packKind = parsePackKind(input.packKind);
   const abi = parseAbi(input.abi);
   const metadata = parseCodeGraphCheckpointMetadataV1({
@@ -513,7 +524,7 @@ export function parseCodeGraphCheckpointHeaderV1(value: unknown): CodeGraphCheck
   return {
     abi,
     chunks,
-    compressionProfile: CODE_GRAPH_CHECKPOINT_COMPRESSION_PROFILE,
+    compressionProfile,
     counts,
     coverage: metadata.coverage,
     formatVersion: CODE_GRAPH_CHECKPOINT_FORMAT_VERSION,

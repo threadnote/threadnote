@@ -225,6 +225,33 @@ describe('code graph checkpoint pack', () => {
     expect(() => decodeCodeGraphCheckpointPackV1(concatenated)).toThrow(/concatenated gzip members/u);
   });
 
+  it('pins each compression profile to exact artifact bytes and decodes both to the same records', () => {
+    // A Bun or fflate upgrade that changes compressed bytes changes these digests and must be a deliberate format change.
+    const paths = ['src/a.ts', 'src/b.ts', 'src/c.ts'];
+    const encode = (compressionProfile: 'threadnote-gzip-v1' | 'threadnote-gzip-v2') =>
+      encodeCodeGraphCheckpointPackV1(
+        metadataFor(paths.length),
+        recordsFor(paths).sort(compareCodeGraphCheckpointRecords),
+        {compressionProfile},
+      );
+    const v1 = encode('threadnote-gzip-v1');
+    const v2 = encode('threadnote-gzip-v2');
+
+    expect(fixturePack().header.compressionProfile).toBe('threadnote-gzip-v2');
+    expect([v1.header.compressionProfile, v1.descriptor.digest]).toEqual([
+      'threadnote-gzip-v1',
+      'sha256:6d1da0425467cae75efaf11fa8088335bba64981f7810de7309094b25dc06c8e',
+    ]);
+    expect([v2.header.compressionProfile, v2.descriptor.digest]).toEqual([
+      'threadnote-gzip-v2',
+      'sha256:c14df516a24df6684def3e3bcd53d429b466ba1ca89460ba03f31c3bd7449687',
+    ]);
+    expect(v2.header.logical).toEqual(v1.header.logical);
+    expect(decodeCodeGraphCheckpointPackV1(v2.bytes).records).toEqual(
+      decodeCodeGraphCheckpointPackV1(v1.bytes).records,
+    );
+  });
+
   it('stops inflation at the declared uncompressed size', () => {
     const pack = fixturePack();
     const understated = rewriteFirstChunk(pack, firstChunkPayload(pack), pack.header.chunks[0].uncompressedBytes - 1);
