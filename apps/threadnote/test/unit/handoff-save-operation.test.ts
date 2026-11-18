@@ -1340,6 +1340,56 @@ effectIt.effect(
   {timeout: 20_000},
 );
 
+effectIt.effect(
+  'a history holding only dead uncertain receipts retires the oldest and admits the next save',
+  () =>
+    withSource(
+      Effect.gen(function* () {
+        const f = yield* actualHandoff;
+        const operationIdOf = (result: {structuredContent?: unknown}) =>
+          Schema.decodeUnknownEffect(Schema.Struct({operationId: Schema.String}))(result.structuredContent).pipe(
+            Effect.map(value => value.operationId),
+          );
+        const first = yield* operationIdOf(yield* f.start({}, 'earlier'));
+        expect(yield* Effect.promise(() => f.children[0].exited).pipe(Effect.timeout('5 seconds'))).toBe(0);
+        const directory = receiptDirectory(f.config);
+        const text = yield* f.fs.readFileString(directory + '/' + first + '.json');
+        const decoded: unknown = yield* Effect.try(() => JSON.parse(text));
+        const basis = yield* Schema.decodeUnknownEffect(handoffSaveReceiptSchema)(decoded);
+        const id = (index: number) => '00000000-0000-4000-8000-' + EffectString.padStart(12, '0')(String(index));
+        // Authorized saves whose workers failed or died mid-write: uncertain, and nothing will ever settle them.
+        for (let index = 1; index < 64; index++)
+          yield* f.fs.writeFileString(
+            directory + '/' + id(index) + '.json',
+            JSON.stringify({
+              ...basis,
+              operationId: id(index),
+              stage: index % 2 ? 'failed' : 'lexical',
+              canonicalObserved: false,
+              lexicalVerified: false,
+              response: undefined,
+              result: undefined,
+              updatedAt: basis.updatedAt - index,
+            }),
+          );
+        const next = yield* operationIdOf(yield* f.start());
+        expect(yield* Effect.promise(() => f.children[1].exited).pipe(Effect.timeout('5 seconds'))).toBe(0);
+        expect((yield* inspectHandoffSaveOperation(f.config, next)).structuredContent).toMatchObject({
+          state: 'complete',
+        });
+        const remaining = EffectArray.filter(yield* f.fs.readDirectory(directory), name =>
+          /^[a-f0-9-]{36}\.json$/u.test(name),
+        );
+        expect(remaining).toHaveLength(64);
+        // Only the oldest uncertain receipt made room; the previous owner's result stays.
+        expect(remaining).not.toContain(id(63) + '.json');
+        expect(remaining).toContain(id(62) + '.json');
+        expect(remaining).toContain(first + '.json');
+      }),
+    ),
+  {timeout: 15_000},
+);
+
 for (const observation of ['different-instance', 'unknown'] as const)
   effectIt.effect(`pre-go status cancellation never signals a ${observation} process`, () =>
     withSource(
