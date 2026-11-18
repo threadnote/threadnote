@@ -10,7 +10,6 @@ const outcome = await Effect.runPromise(
   getRuntimeConfig().pipe(
     Effect.flatMap(config => probeSuperhumanTools(undefined, {admissionConfig: config})),
     Effect.match({onFailure: error => ({error}), onSuccess: catalog => ({catalog})}),
-    // oxlint-disable-next-line effecttsgo/strict-effect-provide -- This script is the application entry point.
     Effect.provide(
       ApplicationLayer.pipe(Layer.provide(Layer.merge(runtimeEntrypointLayer, telemetryChildEnvironmentPolicyLayer))),
     ),

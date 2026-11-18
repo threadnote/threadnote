@@ -3,8 +3,9 @@ import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import fc from 'fast-check';
 import {CodeGraphStoreBusyError, CodeGraphStoreError} from '@threadnote/graph/types';
 import {TestError} from '@threadnote/testing/test-error';
-import {Cause, Clock, Deferred, Effect, Exit, Fiber, Layer, Schema} from 'effect';
+import {Context, Cause, Clock, Deferred, Effect, Exit, Fiber, Layer, Schema} from 'effect';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {SqlError} from 'effect/sql/SqlError';
 import {describe, expect, it} from '@effect/vitest';
 import {TestClock} from 'effect/testing';
@@ -797,7 +798,7 @@ function leasedAnalysisStore(base: CodeGraphAnalysisStore, events: string[]): Co
         Effect.gen(function* () {
           yield* Effect.sync(() => void events.push('session'));
           const context = yield* Layer.build(SqliteClient.layer({filename: ':memory:'}));
-          return yield* Effect.provideContext(effect, context);
+          return yield* Effect.provideService(effect, SqlClient.SqlClient, Context.get(context, SqlClient.SqlClient));
         }),
       ).pipe(Effect.mapError(error => (Schema.is(SqlError)(error) ? CodeGraphStoreError.of(error.message) : error))),
   };

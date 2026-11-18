@@ -2,7 +2,7 @@ import {VECTOR_SCOPE_MAPPING_VERSION} from './vector/negative-readiness.js';
 import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
-import {Clock, DateTime, Effect, FileSystem, Layer, Option, Path, Result, Schema} from 'effect';
+import {Clock, Context, DateTime, Effect, FileSystem, Layer, Option, Path, Result, Schema} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 import {sha256Hex} from '@threadnote/platform/digest';
@@ -1745,7 +1745,9 @@ function useVectorDatabase<A, E, R>(
 ): Effect.Effect<A, E, Exclude<R, SqlClient.SqlClient>> {
   return Effect.scoped(
     Layer.build(SqliteClient.layer({filename: databasePath}).pipe(Layer.orDie)).pipe(
-      Effect.flatMap(context => effect.pipe(Effect.provide(context))),
+      Effect.flatMap(context =>
+        effect.pipe(Effect.provideService(SqlClient.SqlClient, Context.get(context, SqlClient.SqlClient))),
+      ),
     ),
   );
 }
@@ -1764,7 +1766,11 @@ function useVectorDatabaseReadOnly<A, E, R>(
         readonly: true,
         readwrite: false,
       }).pipe(Layer.orDie),
-    ).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))),
+    ).pipe(
+      Effect.flatMap(context =>
+        effect.pipe(Effect.provideService(SqlClient.SqlClient, Context.get(context, SqlClient.SqlClient))),
+      ),
+    ),
   );
 }
 

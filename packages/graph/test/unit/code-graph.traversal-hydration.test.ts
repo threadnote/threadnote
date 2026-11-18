@@ -41,7 +41,6 @@ function fixture(edges: readonly CodeGraphEdge[], expiredAt?: 'adjacency' | 'sym
     node,
   );
   const store = {
-    // oxlint-disable-next-line effecttsgo/effect-succeed-with-void -- The store requires an undefined edge; Effect.void returns void and cannot satisfy its result type.
     directEdgeBetweenNodes: () => Effect.succeed<CodeGraphEdge | undefined>(undefined),
     findSymbolsByPathAndName: () => Effect.succeed([]),
     edgesByIds: (_databasePath: string, snapshotId: string, ids: readonly string[]) =>

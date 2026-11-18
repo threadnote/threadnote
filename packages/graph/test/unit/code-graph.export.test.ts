@@ -1,7 +1,7 @@
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {it as effectIt} from '@effect/vitest';
-import {Cause, Deferred, Effect, Exit, Fiber, Layer, Schema} from 'effect';
+import {Context, Cause, Deferred, Effect, Exit, Fiber, Layer, Schema} from 'effect';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {SqlError} from 'effect/sql/SqlError';
@@ -401,7 +401,9 @@ function exportFixture(): Fixture {
     withSession: <A, E, R>(_databasePath: string, effect: Effect.Effect<A, E, R | SqlClient.SqlClient>) =>
       Effect.scoped(
         Layer.build(SqliteClient.layer({filename: ':memory:'})).pipe(
-          Effect.flatMap(context => Effect.provide(effect, context)),
+          Effect.flatMap(context =>
+            Effect.provideService(effect, SqlClient.SqlClient, Context.get(context, SqlClient.SqlClient)),
+          ),
           Effect.mapError(error => (Schema.is(SqlError)(error) ? CodeGraphStoreError.of(error.message) : error)),
         ),
       ),

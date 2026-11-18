@@ -27,7 +27,6 @@ try {
       const fetch = yield* admittedSourceFetch('superhuman', token, undefined, config);
       return yield* Effect.tryPromise(() => probeSuperhumanRestPage(token, selectedUrl, {expectedDocumentId, fetch}));
     }).pipe(
-      // oxlint-disable-next-line effecttsgo/strict-effect-provide -- This script is the application entry point.
       Effect.provide(
         ApplicationLayer.pipe(Layer.provide(Layer.merge(runtimeEntrypointLayer, telemetryChildEnvironmentPolicyLayer))),
       ),

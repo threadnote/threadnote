@@ -1,7 +1,5 @@
 #!/usr/bin/env bun
 
-/* oxlint-disable effecttsgo/strict-effect-provide -- Evaluation entry point uses the pinned application inference layer. */
-
 import {Array as EffectArray, Effect, Schema} from 'effect';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {LocalModelStore} from '@threadnote/inference/models/store';
