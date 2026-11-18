@@ -156,12 +156,14 @@ export const initializeRecallDatabase = Effect.fn('recall.initializeDatabase')(f
   yield* sql.unsafe(
     "CREATE INDEX IF NOT EXISTS memory_links_locator ON memory_links(target_locator_digest, relation_type, source_document_id, relation_origin, relation_ordinal) WHERE target_locator_digest <> ''",
   );
-  yield* sql`
-    INSERT INTO metadata (key, value)
-    VALUES ('schema_version', ${String(RECALL_INDEX_DATABASE_VERSION)})
-    ON CONFLICT(key) DO NOTHING
-  `;
-  yield* sql`INSERT INTO metadata (key, value) VALUES ('mutation_sequence', '0') ON CONFLICT(key) DO NOTHING`;
+  // A no-op upsert still takes the write lock, so opening behind a long publication would hit busy_timeout.
+  const seeded = yield* sql`SELECT key FROM metadata WHERE key IN ('schema_version', 'mutation_sequence')`;
+  if (seeded.length < 2)
+    yield* sql`
+      INSERT INTO metadata (key, value)
+      VALUES ('schema_version', ${String(RECALL_INDEX_DATABASE_VERSION)}), ('mutation_sequence', '0')
+      ON CONFLICT(key) DO NOTHING
+    `;
   for (const table of [
     'documents',
     'postings',

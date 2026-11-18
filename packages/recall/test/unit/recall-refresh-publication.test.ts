@@ -210,6 +210,29 @@ effectIt.effect('preserves hydration permission failures and programming defects
   }),
 );
 
+effectIt.effect('reads a current index while another connection holds the write lock', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture(1);
+    const database = f.path.join(f.home, 'indexes', 'lexical', recallIndexDatabaseFilename(false));
+    const data = yield* Effect.acquireUseRelease(
+      Effect.sync(() => {
+        const db = new Database(database, {create: false});
+        db.exec('BEGIN IMMEDIATE');
+        return db;
+      }),
+      () => loadRecallIndexData(f.config, {includeInactive: false, query: 'alpha'}),
+      db =>
+        Effect.sync(() => {
+          db.exec('ROLLBACK');
+          db.close();
+        }),
+    );
+    expect(EffectArray.map(data.candidates, candidate => candidate.uri)).toContain(
+      'threadnote://user/me/memories/durable/0.md',
+    );
+  }).pipe(provide, TestClock.withLive),
+);
+
 effectIt.effect('keeps a later client WAL after activating a recovered generation', () =>
   Effect.gen(function* () {
     const f = yield* fixture(1);
