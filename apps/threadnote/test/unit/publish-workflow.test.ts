@@ -7,6 +7,7 @@ import {JSON_SCHEMA, load} from 'js-yaml';
 import {BUILTIN_MODEL_MANIFESTS, CORE_EMBEDDING_MODEL_ID} from '@threadnote/inference/models/builtin';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {BUN_STANDALONE_TARGETS} from '../../../../scripts/release-targets.js';
 
 const property = (value: unknown, key: string): unknown => (Predicate.isObject(value) ? value[key] : undefined);
 const stringProperty = (value: unknown, key: string): string | undefined => {
@@ -543,7 +544,11 @@ describe('standalone release workflows', () => {
   it.effect('bytecode-compiles every base target Bun supports in ordinary CI', () =>
     Effect.gen(function* () {
       const workflow = yield* readProjectFile('.github/workflows/ci.yml');
-      for (const target of [
+      const document: unknown = load(workflow, {schema: JSON_SCHEMA});
+      const compileJob = JSON.stringify(property(property(document, 'jobs'), 'standalone-targets'));
+      expect(compileJob).toContain('"run":"bun run compile:targets"');
+      expect(compileJob).not.toContain('THREADNOTE_BUILD_TARGET');
+      expect([...BUN_STANDALONE_TARGETS].sort()).toEqual([
         'bun-darwin-arm64',
         'bun-darwin-x64',
         'bun-linux-arm64',
@@ -552,9 +557,7 @@ describe('standalone release workflows', () => {
         'bun-linux-x64-baseline-musl',
         'bun-windows-arm64',
         'bun-windows-x64-baseline',
-      ]) {
-        expect(workflow).toContain(target);
-      }
+      ]);
     }),
   );
 

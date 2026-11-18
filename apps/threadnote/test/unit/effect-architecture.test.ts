@@ -256,6 +256,7 @@ describe('Effect architecture boundaries', () => {
       'apps/threadnote/src/effect/mcp_broker_process.ts',
       'packages/platform/src/system.ts',
       'apps/threadnote/src/standalone.ts',
+      'apps/threadnote/src/standalone_cli.ts',
       'apps/threadnote/src/recall/ready_read_entry.ts',
     ]);
     for (const path of await sourceFiles()) {
@@ -359,7 +360,8 @@ describe('Effect architecture boundaries', () => {
   });
 
   it('keeps standalone worker dispatch independent from application entry modules', async () => {
-    const standalone = await readFile(join(sourceRoot, 'standalone.ts'), 'utf8');
+    const entry = await readFile(join(sourceRoot, 'standalone.ts'), 'utf8');
+    const standalone = await readFile(join(sourceRoot, 'standalone_cli.ts'), 'utf8');
     const workerProtocol = await readFile(join(sourceRoot, 'worker_protocol.ts'), 'utf8');
     const processLease = await readFile(join(sourceRoot, 'process', 'standalone_lease.ts'), 'utf8');
 
@@ -371,6 +373,8 @@ describe('Effect architecture boundaries', () => {
     expect(standalone).toContain("import('./effect/ai/isolated-local-model-runtime.js')");
     expect(standalone).toContain("import('./effect/runtime.js')");
     expect(standalone).toContain("import('./mcp/server/index.js')");
+    expect(entry).not.toMatch(/^import\s(?!\{RECALL_READY_READ_WORKER_ARGUMENT\} from '\.\/worker_protocol\.js';$)/m);
+    expect(entry).toContain("import('./standalone_cli.js')");
     expect(workerProtocol).not.toMatch(/^import\s/m);
     expect(processLease).not.toContain("from './installations.js'");
     expect(processLease).not.toContain("from './utils.js'");
