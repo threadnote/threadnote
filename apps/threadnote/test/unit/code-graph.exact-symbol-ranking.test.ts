@@ -30,6 +30,29 @@ effectIt.effect('keeps an exact variable match in a full page of boosted mutatio
   ).pipe(provideTestLayer(ApplicationLayer)),
 );
 
+effectIt.effect('ranks a declaration above a file module that matches only by its directory names', () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const store = yield* CodeGraphStore;
+      const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-graph-module-ranking-'});
+      const databasePath = path.join(root, 'graph-v3.sqlite');
+      yield* store.initialize(databasePath);
+      yield* Effect.sync(() => insertPathNamedModuleFixture(databasePath));
+
+      const results = yield* store.searchSymbols(
+        databasePath,
+        snapshotId,
+        'Why does the MCP server spawn a context child?',
+        2,
+      );
+
+      expect(EffectArray.map(results, result => result.name)).toEqual(['spawnChild', modulePath]);
+    }),
+  ).pipe(provideTestLayer(ApplicationLayer)),
+);
+
 fcEffectProp(
   effectIt,
   'keeps exact identity in bounded result pages above the lexical candidate floor',
@@ -65,29 +88,36 @@ const queryExactSymbolRanking = Effect.fn('test.queryExactSymbolRanking')(functi
   return yield* store.searchSymbols(databasePath, snapshotId, exactSymbol, limit);
 });
 
+function insertRankingSnapshot(database: Database, symbolCount: number) {
+  database
+    .query(
+      `INSERT INTO repositories (id, display_name, object_format, created_at, last_used_at)
+       VALUES (?, 'exact-symbol-ranking', 'sha1', ?, ?)`,
+    )
+    .run(repositoryId, timestamp, timestamp);
+  database
+    .query(
+      `INSERT INTO snapshots (
+         id, repository_id, worktree_id, commit_id, extractor_set, dirty, overlay_fingerprint,
+         state, file_count, symbol_count, edge_count, started_at, completed_at, failure_summary
+       ) VALUES (?, ?, ?, 'commit', 'exact-symbol-ranking', 0, NULL, 'ready', 0, ?, 0, ?, ?, NULL)`,
+    )
+    .run(snapshotId, repositoryId, worktreeId, symbolCount, timestamp, timestamp);
+  return {
+    insertSymbol: database.query(`INSERT INTO symbols (
+      snapshot_id, id, content_hash, kind, name, qualified_name, path, language, arity,
+      lookup_keys_json, resolution_domain, resolution_scope_id, package_name, exported,
+      signature, documentation, span_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'typescript', NULL, '[]', 'typescript', NULL, NULL, 1, NULL, NULL, ?)`),
+    insertTerm: database.query('INSERT INTO symbol_terms (snapshot_id, term, symbol_id, weight) VALUES (?, ?, ?, ?)'),
+  };
+}
+
 function insertExactSymbolRankingFixture(databasePath: string, distractorCount: number): void {
   const database = new Database(databasePath, {strict: true});
   try {
     database.transaction(() => {
-      database
-        .query(
-          `INSERT INTO repositories (id, display_name, object_format, created_at, last_used_at)
-           VALUES (?, 'exact-symbol-ranking', 'sha1', ?, ?)`,
-        )
-        .run(repositoryId, timestamp, timestamp);
-      database
-        .query(
-          `INSERT INTO snapshots (
-             id, repository_id, worktree_id, commit_id, extractor_set, dirty, overlay_fingerprint,
-             state, file_count, symbol_count, edge_count, started_at, completed_at, failure_summary
-           ) VALUES (?, ?, ?, 'commit', 'exact-symbol-ranking', 0, NULL, 'ready', 0, ?, 0, ?, ?, NULL)`,
-        )
-        .run(snapshotId, repositoryId, worktreeId, distractorCount + 1, timestamp, timestamp);
-      const insertSymbol = database.query(`INSERT INTO symbols (
-        snapshot_id, id, content_hash, kind, name, qualified_name, path, language, arity,
-        lookup_keys_json, resolution_domain, resolution_scope_id, package_name, exported,
-        signature, documentation, span_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'typescript', NULL, '[]', 'typescript', NULL, NULL, 1, NULL, NULL, ?)`);
+      const {insertSymbol, insertTerm} = insertRankingSnapshot(database, distractorCount + 1);
       insertSymbol.run(
         snapshotId,
         'exact-symbol',
@@ -97,9 +127,6 @@ function insertExactSymbolRankingFixture(databasePath: string, distractorCount: 
         exactSymbol,
         'src/code_graph/isolated/index.ts',
         spanJson,
-      );
-      const insertTerm = database.query(
-        'INSERT INTO symbol_terms (snapshot_id, term, symbol_id, weight) VALUES (?, ?, ?, ?)',
       );
       for (let index = 0; index < distractorCount; index += 1) {
         const id = `mutation-owner-${index}`;
@@ -117,6 +144,44 @@ function insertExactSymbolRankingFixture(databasePath: string, distractorCount: 
         for (const term of ['code', 'graph', 'index', 'isolated', 'run', 'snapshot']) {
           insertTerm.run(snapshotId, term, id, 5);
         }
+      }
+    })();
+  } finally {
+    database.close(false);
+  }
+}
+
+const modulePath = 'src/mcp/server/context/health.ts';
+
+/** Term weights mirror the index: a module's name is its path, so each segment carries name weight. */
+function insertPathNamedModuleFixture(databasePath: string): void {
+  const database = new Database(databasePath, {strict: true});
+  try {
+    database.transaction(() => {
+      const {insertSymbol, insertTerm} = insertRankingSnapshot(database, 2);
+      insertSymbol.run(snapshotId, 'module', 'hash-module', 'module', modulePath, modulePath, modulePath, spanJson);
+      for (const term of ['src', 'mcp', 'server', 'context', 'health.ts', 'health', 'ts']) {
+        insertTerm.run(snapshotId, term, 'module', 5);
+      }
+      insertSymbol.run(
+        snapshotId,
+        'declaration',
+        'hash-declaration',
+        'function',
+        'spawnChild',
+        'runner.spawnChild',
+        'src/process/runner.ts',
+        spanJson,
+      );
+      for (const [term, weight] of [
+        ['spawn', 5],
+        ['child', 5],
+        ['runner', 4],
+        ['src', 3],
+        ['process', 3],
+        ['ts', 3],
+      ] as const) {
+        insertTerm.run(snapshotId, term, 'declaration', weight);
       }
     })();
   } finally {
