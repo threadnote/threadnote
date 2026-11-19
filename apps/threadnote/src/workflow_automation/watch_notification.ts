@@ -279,17 +279,22 @@ export const makeNativeWatchNotifier = Effect.fn('nativeWatch.notifier')(functio
         let notification = stored.envelope.notification;
         let pending = notification.outbox;
         if (pending?.status === 'queued' || pending?.status === 'completed') {
+          const {acknowledged, nextSequence} = stored.envelope.state;
           // Queue acceptance is not notice arrival. ACK by an already-active consumer cannot release this gate.
+          // After arrival, a later event releases it so a partial ACK cannot block every later wake.
           if (
             pending.status === 'queued' &&
-            (!pending.consumedThrough || stored.envelope.state.acknowledged < pending.consumedThrough)
+            (!pending.consumedThrough ||
+              (acknowledged < pending.consumedThrough && nextSequence - 1 <= pending.consumedThrough))
           )
             return;
           if (isNativeWatchSessionWakeup(notification.target))
             yield* releaseNativeWatchHostSession(userHome, hostClaim(config, notification), true);
           notification = {
             ...notification,
-            notifiedThrough: Math.max(pending.last, stored.envelope.state.acknowledged),
+            // Only ACK proves handling. When this attempt ACKed part of its range, wake again for the rest; an
+            // attempt without ACK progress waits for a new event, whose range then starts after ACK.
+            notifiedThrough: acknowledged >= pending.first ? acknowledged : pending.last,
             recoveryRequested: false,
             outbox: null,
             lastReceipt: {

@@ -167,7 +167,7 @@ export function validateNativeWatchNotification(value: NativeWatchNotification, 
       !Number.isSafeInteger(Number(first)) ||
       Number(first) < 1 ||
       Number(first) > Number(last) ||
-      Number(last) > value.notifiedThrough ||
+      Number(last) >= state.nextSequence ||
       isNativeWatchSessionWakeup(value.target) !== (value.lastReceipt.kind === 'cli-session-completed') ||
       (isNativeWatchSessionWakeup(value.target) && value.lastReceipt.receipt !== value.target.sessionId)
     )
@@ -222,7 +222,7 @@ export function consumeNativeWatchNotification(
   return {...value, outbox: {...pending, consumedThrough: state.nextSequence - 1}};
 }
 
-/** Only newly appended durable sequences create work; pending feedback and unresolved work do not. */
+/** Only newly appended durable sequences create work. A new range starts after ACK, so it carries unacknowledged backlog. */
 export function stageNativeWatchNotification(
   value: NativeWatchNotification,
   state: NativeWatchState,
@@ -231,19 +231,25 @@ export function stageNativeWatchNotification(
   let notification = value;
   const pending = value.outbox;
   if (pending) {
-    // Only a never-invoked range can be suppressed or trimmed. Invoked ambiguity and host receipts stay retained.
-    if (pending.status !== 'pending' || pending.attempts !== 0 || state.acknowledged < pending.first) return value;
+    // Only a never-invoked range can be suppressed or rebased onto ACK. Invoked ambiguity and host receipts stay retained.
+    if (pending.status !== 'pending' || pending.attempts !== 0 || pending.first === state.acknowledged + 1)
+      return value;
     notification = {...value, notifiedThrough: Math.max(value.notifiedThrough, state.acknowledged), outbox: null};
     if (state.acknowledged < pending.last) {
       const first = state.acknowledged + 1;
-      return {...notification, outbox: {...pending, first, key: `${state.watchId}:${first}:${pending.last}`}};
+      return {
+        ...notification,
+        notifiedThrough: state.acknowledged,
+        outbox: {...pending, first, key: `${state.watchId}:${first}:${pending.last}`},
+      };
     }
   } else if (state.acknowledged > value.notifiedThrough) notification = {...value, notifiedThrough: state.acknowledged};
   if (notification.notifiedThrough === state.nextSequence - 1) return notification;
-  const first = notification.notifiedThrough + 1;
+  const first = state.acknowledged + 1;
   const last = state.nextSequence - 1;
   return {
     ...notification,
+    notifiedThrough: state.acknowledged,
     outbox: {
       key: `${state.watchId}:${first}:${last}`,
       first,
