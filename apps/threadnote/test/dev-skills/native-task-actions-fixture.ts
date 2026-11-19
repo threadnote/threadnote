@@ -98,7 +98,8 @@ export const runNativeTaskAction = (...args: Parameters<typeof runNativeTaskActi
               headRepository: 'example/repo',
               baseBranch: pr.baseBranch,
               headBranch: pr.branch,
-              headSha: pr.headSha,
+              // A merged PR reports the final head its watch observed.
+              headSha: (merged ? watch?.envelope.state.head : undefined) ?? pr.headSha,
               state: merged ? 'closed' : 'open',
               merged,
             }),
@@ -266,7 +267,7 @@ export const attemptSimulatedTaskWatch = (
               state: 'open',
               merged: false,
               baseBranch: remoteBaseBranch,
-              headBranch: `feature/${phaseId}`,
+              headBranch: decodeNativeTaskActionRef(deliveryRef)?.delivery?.pr?.branch ?? `feature/${phaseId}`,
             }),
           });
         }
@@ -518,6 +519,7 @@ export const publishOpenHistoricalPhase = (
   prNumber: number,
   beginPhase = true,
   followup?: {readonly watchId: string; readonly source: string; readonly ambiguousRecovery?: boolean},
+  branch = `feature/${phaseId}`,
 ) =>
   Effect.gen(function* () {
     if (beginPhase) yield* f.mutate('begin-phase', {phaseId});
@@ -588,7 +590,7 @@ export const publishOpenHistoricalPhase = (
         pr: {
           url: prUrl,
           headSha,
-          branch: `feature/${phaseId}`,
+          branch,
           baseBranch: baseBranch === 'origin/main' ? 'main' : baseBranch,
           state: 'open' as const,
         },

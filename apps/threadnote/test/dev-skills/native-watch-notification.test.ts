@@ -38,6 +38,7 @@ import {
   decodeNativeWatchEnvelope,
   readNativeWatch,
   writeNativeWatch,
+  withNativeWatchCollectorLock,
   withNativeWatchControlLock,
 } from '../../src/workflow_automation/watch_store.js';
 import {
@@ -1957,6 +1958,196 @@ effectIt.effect(
       yield* call({wakeup: dedicated, wakeupId: 'new-wakeup'});
       expect((yield* f.read()).envelope.notification?.target).toEqual(dedicated);
       expect(calls).toBe(1);
+    }).pipe(provide, TestClock.withLive),
+);
+
+/** A Cursor-hosted renew whose provider reads succeed and whose host replies come from `host`. */
+const renewCursorWatch =
+  (f: Effect.Success<ReturnType<typeof fixture>>, host: () => CommandResult) => (fields: Record<string, unknown>) =>
+    Effect.gen(function* () {
+      const system = yield* SystemInfo;
+      return yield* runNativeWatch(f.config, {
+        protocolVersion: 1,
+        executorVersion: 1,
+        action: 'watch',
+        command: 'renew',
+        watchId: 'watch-1',
+        pr: 'https://github.com/test/repo/pull/1',
+        consumerId: 'consumer',
+        wakeupId: 'wakeup',
+        wakeup: cursorTarget,
+        baseBranch: 'main',
+        headBranch: 'feature/one',
+        ...fields,
+      }).pipe(
+        Effect.provideService(SystemInfo, {...system, homeDirectory: f.userHome}),
+        commandLayer(executable =>
+          Effect.sync(() =>
+            executable === 'gh'
+              ? {
+                  exitCode: 0,
+                  stderr: '',
+                  stdout: JSON.stringify({
+                    number: 1,
+                    url: 'https://github.com/test/repo/pull/1',
+                    baseRepository: 'test/repo',
+                    baseBranch: 'main',
+                    headBranch: 'feature/one',
+                  }),
+                }
+              : host(),
+          ),
+        ),
+      );
+    });
+
+effectIt.effect('same-host renewal recovers an ambiguous wake after merge without replaying acknowledged events', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture(2);
+    yield* useCursor(f);
+    const staged = yield* f.read();
+    // Event 1 woke the host; the wake for event 2 became ambiguous when its collector stopped.
+    const lastReceipt = {
+      key: 'watch-1:1:1',
+      receipt: cursorTarget.sessionId,
+      attemptId: token,
+      kind: 'cli-session-completed' as const,
+      at: 0,
+    };
+    const notification = stageNativeWatchNotification(
+      {...staged.envelope.notification!, notifiedThrough: 1, lastReceipt},
+      staged.envelope.state,
+      0,
+    );
+    const relay = relayNativeWatch(staged.envelope.state, 'consumer', 0);
+    yield* writeNativeWatch(
+      f.config,
+      {
+        ...staged.envelope,
+        state: {
+          ...acknowledgeNativeWatch(
+            recordNativeWatchDispositions(
+              relay.state,
+              'consumer',
+              relay.delivery!.id,
+              Array.map(relay.delivery!.events, event => ({
+                eventId: event.id,
+                status: 'resolved' as const,
+                reason: 'handled by polling',
+                evidence: 'fixture',
+              })),
+              0,
+            ),
+            'consumer',
+            relay.delivery!.id,
+            0,
+          ),
+          prState: 'merged',
+        },
+        collector: {...staged.envelope.collector!, status: 'terminal', pid: 0},
+        notification: {
+          ...notification,
+          outbox: {
+            ...notification.outbox!,
+            status: 'failed',
+            error: 'host-delivery-ambiguous',
+            attempts: 1,
+            attemptId: receipt,
+            collectorToken: token,
+          },
+        },
+      },
+      staged.revision,
+    );
+    yield* claimNativeWatchHostSession(f.userHome, {
+      format: 'threadnote-native-watch-host-session',
+      version: 1,
+      sessionId: cursorTarget.sessionId,
+      home: f.config.agentContextHome,
+      watchId: 'watch-1',
+      consumerId: 'consumer',
+      wakeupId: 'wakeup',
+      attemptId: receipt,
+      collectorToken: token,
+    });
+    let hostCalls = 0;
+    const renew = renewCursorWatch(f, () => {
+      hostCalls++;
+      return cursorReply;
+    });
+    expect(yield* renew({takeover: true}).pipe(Effect.result)).toMatchObject({failure: {code: 'invalid-request'}});
+    yield* renew({});
+    expect((yield* f.read()).envelope.notification?.outbox).toMatchObject({error: 'host-delivery-ambiguous'});
+    yield* renew({recoverWakeup: true});
+    const after = yield* f.read();
+    expect(hostCalls).toBe(0);
+    expect(after.envelope.notification).toMatchObject({notifiedThrough: 2, outbox: null, lastReceipt});
+    expect(
+      yield* (yield* FileSystem.FileSystem).exists(
+        f.userHome + '/.threadnote/native-watch-host-sessions-v1/cursor-' + cursorTarget.sessionId + '.json',
+      ),
+    ).toBe(false);
+  }).pipe(provide, TestClock.withLive),
+);
+
+effectIt.effect(
+  'same-host recovery after merge waits for an owned attempt, then wakes once for unacknowledged events',
+  () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(2);
+      yield* useCursor(f);
+      const staged = yield* f.read();
+      const notification = stageNativeWatchNotification(staged.envelope.notification!, staged.envelope.state, 0);
+      // The collector stopped while it was sending the wake for both events.
+      yield* writeNativeWatch(
+        f.config,
+        {
+          ...staged.envelope,
+          state: {...staged.envelope.state, prState: 'merged'},
+          collector: {...staged.envelope.collector!, status: 'terminal', pid: 0},
+          notification: {
+            ...notification,
+            outbox: {
+              ...notification.outbox!,
+              status: 'sending',
+              attempts: 1,
+              attemptId: receipt,
+              collectorToken: token,
+            },
+          },
+        },
+        staged.revision,
+      );
+      yield* claimNativeWatchHostSession(f.userHome, {
+        format: 'threadnote-native-watch-host-session',
+        version: 1,
+        sessionId: cursorTarget.sessionId,
+        home: f.config.agentContextHome,
+        watchId: 'watch-1',
+        consumerId: 'consumer',
+        wakeupId: 'wakeup',
+        attemptId: receipt,
+        collectorToken: token,
+      });
+      let hostCalls = 0;
+      const recover = renewCursorWatch(f, () => {
+        hostCalls++;
+        return cursorReply;
+      })({recoverWakeup: true});
+      // Another recovery holds the collector lock and owns the sending attempt.
+      expect(yield* withNativeWatchCollectorLock(f.config, 'watch-1', recover.pipe(Effect.result))).toMatchObject({
+        failure: {code: 'wakeup-in-flight'},
+      });
+      expect(hostCalls).toBe(0);
+      yield* recover;
+      expect(hostCalls).toBe(1);
+      expect((yield* f.read()).envelope.notification).toMatchObject({
+        notifiedThrough: 2,
+        outbox: null,
+        lastReceipt: {receipt: cursorTarget.sessionId},
+      });
+      yield* recover;
+      expect(hostCalls).toBe(1);
     }).pipe(provide, TestClock.withLive),
 );
 

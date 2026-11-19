@@ -264,6 +264,9 @@ export function prepareNativeCloseout(
       phase.acceptanceCriteria,
       'acceptance evidence',
     );
+    // When the PR merged above this phase's reviewed head, the record names both ends of that range.
+    const delivery = state.phases[phase.id]?.delivery;
+    const mergedHead = delivery?.pr?.state === 'merged' ? delivery.watch?.headSha : undefined;
     return {
       ...evidence,
       acceptance: EffectArray.map(phase.acceptanceCriteria, criterion => {
@@ -273,6 +276,9 @@ export function prepareNativeCloseout(
         if (!item) return fail('Missing criterion evidence.');
         return item;
       }),
+      ...(delivery && mergedHead && mergedHead !== delivery.headSha
+        ? {mergedAbovePhaseHead: {phaseHead: delivery.headSha, mergedHead}}
+        : {}),
     };
   });
   exactMembership(

@@ -1,5 +1,6 @@
 import {Array as EffectArray, Clock, Effect, Option} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import type {NativeCycleDelivery} from '@threadnote/workflow-automations/cycle';
 import {inspectNativeJobsForRun} from './native_jobs.js';
 import {readNativeWorkflowState} from './store.js';
 import {
@@ -9,6 +10,10 @@ import {
   nativeTaskWatchIdentityForConsumer,
 } from './task_pr_watch.js';
 import {nativeWatchCollectorAlive} from './watch_process.js';
+
+/** A merged receipt's terminal watch keeps the final PR head, which can be above the phase's delivered head. */
+const watchedHead = (delivery: NativeCycleDelivery) =>
+  delivery.pr?.state === 'merged' && delivery.watch?.state === 'terminal' ? delivery.watch.headSha : delivery.headSha;
 
 export const inspectOldBindingOwners = (
   config: RuntimeConfig,
@@ -103,7 +108,9 @@ export const inspectOldBindingOwners = (
             EffectArray.findFirst(
               deliveries,
               item =>
-                item.delivery === 'pr' && item.pr?.url === envelope.state.pr && item.headSha === envelope.state.head,
+                item.delivery === 'pr' &&
+                item.pr?.url === envelope.state.pr &&
+                watchedHead(item) === envelope.state.head,
             ),
           ) ??
           Option.getOrUndefined(
@@ -114,7 +121,7 @@ export const inspectOldBindingOwners = (
             : undefined);
         if (delivery?.delivery === 'pr' && delivery.pr?.url && envelope.state.pr !== delivery.pr.url)
           reasons.push('watch-pr-binding-mismatch');
-        if (delivery?.delivery === 'pr' && envelope.state.head !== delivery.headSha)
+        if (delivery?.delivery === 'pr' && envelope.state.head !== watchedHead(delivery))
           reasons.push('watch-source-head-mismatch');
         const collectorAlive = yield* nativeWatchCollectorAlive(envelope.collector).pipe(Effect.result);
         if (collectorAlive._tag === 'Failure' || collectorAlive.success)

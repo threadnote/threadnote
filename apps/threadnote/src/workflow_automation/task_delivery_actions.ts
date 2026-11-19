@@ -732,6 +732,9 @@ export const runNativeTaskPrWatch = (
       const consumer = state.consumer;
       const terminal = state.prState === 'merged';
       const hostReceipt = notification?.lastReceipt?.receipt ?? notification?.outbox?.receipt;
+      // The watch head is the last sweep. A merged head can descend from the delivered head; record-delivery
+      // verifies that ancestry. Fresh provider verification binds an open PR head before its receipt.
+      const head = terminal ? state.head : embeddedDelivery.headSha;
       const completeSources =
         state.sources.length === requiredWatchSources.length &&
         EffectArray.every(requiredWatchSources, source =>
@@ -743,8 +746,7 @@ export const runNativeTaskPrWatch = (
       if (
         (state.prState !== 'open' && !terminal) ||
         state.pr !== referencedPr.url ||
-        // The watch head is the last sweep. Fresh provider verification binds an open PR head before its receipt.
-        (terminal && state.head !== embeddedDelivery.headSha) ||
+        head === undefined ||
         (terminal && (candidate.envelope.collector?.status !== 'terminal' || !completeSources || !hostReceipt)) ||
         !consumer ||
         consumer.id !== consumerId ||
@@ -755,7 +757,7 @@ export const runNativeTaskPrWatch = (
         notification.wakeupId !== consumer.wakeupId
       )
         return undefined;
-      return {consumer, hostReceipt};
+      return {consumer, hostReceipt, head};
     };
     const recordWatchedDelivery = (watch: StoredWatch, providerVerified = false) =>
       Effect.gen(function* () {
@@ -769,7 +771,7 @@ export const runNativeTaskPrWatch = (
               ? 'A merged PR needs its terminal source-complete watch, live consumer and actual host receipt before delivery.'
               : 'An open PR needs a started watch with its live consumer and host wakeup registration before delivery.',
           );
-        const {consumer, hostReceipt} = bound;
+        const {consumer, hostReceipt, head} = bound;
         const current = yield* readNativeWorkflowState(config, request.runId);
         if (!current?.state.cycle) return yield* fail('cycle-not-found', 'This run no longer has its canonical cycle.');
         const cycleState = current.state.cycle.state;
@@ -836,7 +838,7 @@ export const runNativeTaskPrWatch = (
           : `native-watch-revision:${watch.revision};consumer:${consumer.id};wakeup:${consumer.wakeupId}`;
         const watchEvidence = {
           prUrl: referencedPr.url,
-          headSha: embeddedDelivery.headSha,
+          headSha: head,
           state: terminal ? ('terminal' as const) : ('active' as const),
           stateDir,
           consumerKind: 'orchestrator' as const,
@@ -871,7 +873,8 @@ export const runNativeTaskPrWatch = (
           };
         }
         const previouslyPublished = canonicalReceipt?.delivery === 'pr' && canonicalPr?.state === 'open';
-        if (previouslyPublished) {
+        // Record-delivery checks the branch of a merged published phase against its reviewed-to-merged range.
+        if (previouslyPublished && !terminal) {
           const branchHead = yield* runCommandEffect(
             'git',
             [
@@ -908,7 +911,20 @@ export const runNativeTaskPrWatch = (
               'source-drift',
               'The immutable published phase branch no longer matches its reviewed source.',
             );
-        } else {
+          return {
+            status: 'delivered',
+            replayed: true,
+            deliveryRef: encodeNativeTaskActionRef({
+              ...deliveryAction,
+              kind: 'delivery',
+              payloadDigest: sha256HexSync(stableJson(canonicalReceipt)),
+              delivery: canonicalReceipt,
+            }),
+            receipt: canonicalReceipt,
+            next: nextNativeCycle(cycleState),
+          };
+        }
+        if (!previouslyPublished) {
           const ready = unwrapCycle(
             yield* inCheckout(
               runWorkflowAutomation(
@@ -925,19 +941,6 @@ export const runNativeTaskPrWatch = (
           if (ready.head !== embeddedDelivery.headSha || ready.tree !== validation.sourceTree)
             return yield* fail('source-drift', 'The current source no longer matches the reviewed PR snapshot.');
         }
-        if (previouslyPublished && !terminal)
-          return {
-            status: 'delivered',
-            replayed: true,
-            deliveryRef: encodeNativeTaskActionRef({
-              ...deliveryAction,
-              kind: 'delivery',
-              payloadDigest: sha256HexSync(stableJson(canonicalReceipt)),
-              delivery: canonicalReceipt,
-            }),
-            receipt: canonicalReceipt,
-            next: nextNativeCycle(cycleState),
-          };
         if (!canonicalReceipt && !(providerVerified && !terminal))
           yield* verifyNativeCyclePrDeliveryIdentity(checkout, embeddedDelivery, {allowMerged: terminal});
         const finalReceiptPr = finalReceipt.pr;
@@ -1126,12 +1129,10 @@ export const runNativeTaskPrWatch = (
     )
       return {status: 'terminal-empty', watchId, prUrl: watch.envelope.state.pr, revision: watch.revision};
     if (request.operation === 'renew') {
-      if (request.takeover || request.recoverWakeup)
-        return yield* fail(
-          'invalid-request',
-          'Renewal preserves the exact host and does not allow takeover or wake recovery.',
-        );
-      if (terminalEmpty)
+      if (request.takeover)
+        return yield* fail('invalid-request', 'Renewal preserves the exact host and does not allow takeover.');
+      // recoverWakeup settles an ambiguous attempt of this same registered host, even after the PR merged.
+      if (terminalEmpty && !(request.recoverWakeup && watch.envelope.notification?.outbox))
         return {status: 'terminal-empty', watchId, prUrl: watch.envelope.state.pr, revision: watch.revision};
       yield* verifyNativeCycleDeliveryRepository(checkout, embeddedDelivery);
       if (phase.delivery === undefined) {
@@ -1156,6 +1157,7 @@ export const runNativeTaskPrWatch = (
         wakeup: wakeup ?? watch.envelope.notification?.target,
         baseBranch: embeddedDelivery.pr.baseBranch,
         headBranch: embeddedDelivery.pr.branch,
+        ...(request.recoverWakeup === true ? {recoverWakeup: true} : {}),
       });
       return {status: 'watching', watchId, prUrl: embeddedDelivery.pr.url, consumerId, watch: renewed};
     }

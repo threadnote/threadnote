@@ -256,6 +256,33 @@ describe('native cycle pure domain', () => {
     );
   });
 
+  it('lets only a phase published while its PR was open merge above its delivered head', () => {
+    const mergedHead = Effect.pipe('d', EffectString.repeat(40));
+    const merged = {
+      ...prDelivery('merged'),
+      watch: {
+        prUrl: 'https://example.test/pr/1',
+        headSha: mergedHead,
+        state: 'terminal',
+        stateDir: '/private/test-watch',
+        consumerKind: 'worker',
+        consumerId: 'watcher',
+        evidence: 'Canonical private watch readback.',
+      },
+    };
+    expect(() => recordNativeCycleDelivery(validateFirst(), 'one', merged)).toThrow('published while its PR was open');
+    const advanced = recordNativeCycleDelivery(
+      recordNativeCycleDelivery(validateFirst(), 'one', prDelivery('open')),
+      'one',
+      merged,
+    );
+    expect(advanced.phases.one).toMatchObject({
+      status: 'merged',
+      delivery: {headSha: gitSha, pr: {headSha: gitSha}, watch: {headSha: mergedHead}},
+    });
+    expect(decodeNativeCycleState(JSON.parse(JSON.stringify(advanced)))).toEqual(advanced);
+  });
+
   it('preserves all non-delivery state through generated base mappings and serialization', () => {
     const word = fc
       .array(fc.constantFrom('a', 'b', 'c', 'x', '1'), {minLength: 1, maxLength: 10})
