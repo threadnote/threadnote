@@ -60,6 +60,8 @@ export interface ContextMaintenanceWorkerQuiet {
    * not read at wake time.
    */
   readonly retryAt?: string;
+  /** The tick saw a persisted failed state; the next successful tick counts its recovery as progress. */
+  readonly failed?: true;
 }
 
 export interface ContextMaintenanceReceiptV2 {

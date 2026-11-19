@@ -208,7 +208,6 @@ async function contextMaintenanceWorkerProgram(args: readonly string[]) {
         () => import('./memory/context/maintenance_backoff.js'),
         cause => cause,
       );
-      // The maintain command reports a failed run only through the process exit code.
       yield* backoff.recordContextMaintenanceWorkerTick(config, process.exitCode);
     }).pipe(Effect.provideService(ContextMaintenanceWorkerMode, true));
     const status = yield* runContextMaintenanceWorker(config.agentContextHome, owner, work);

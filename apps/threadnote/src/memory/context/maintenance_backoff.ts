@@ -16,6 +16,7 @@ import {readRawState, readState, withStateLock, writeState} from './maintenance.
 
 const WAKE_INTERVAL_MS = 30_000;
 const MAX_WAKE_INTERVAL_MS = 30 * 60_000;
+const MAX_FAILED_WAKE_INTERVAL_MS = 5 * 60_000;
 const STATE_LOCK = {retryIntervalMilliseconds: 25, staleAfterMilliseconds: 60_000};
 /** A worker tick serves one phase of the work schedule, so one quiet tick per phase is a full rotation. */
 const ROTATING_WORK_PHASES = EffectRecord.size({
@@ -82,7 +83,7 @@ function pendingDeadlineFloor(streak: number, at: number): number {
   return streak < ROTATING_WORK_PHASES ? Number.NEGATIVE_INFINITY : at;
 }
 
-/** The streak restarts when progress or a canonical mutation appears. */
+/** The streak restarts when progress, a canonical mutation, or recovery from a failed state appears. */
 export function nextContextMaintenanceWorkerQuiet(
   state: MaintenanceState,
   requests: readonly ContextMaintenanceEvidenceRequest[],
@@ -92,7 +93,10 @@ export function nextContextMaintenanceWorkerQuiet(
 ): ContextMaintenanceWorkerQuiet {
   const fingerprint = contextMaintenanceProgressFingerprint(state, requests);
   const previous = state.workerQuiet;
-  const quiet = previous?.fingerprint === fingerprint && previous.canonicalGeneration === canonicalGeneration;
+  const quiet =
+    previous?.failed !== true &&
+    previous?.fingerprint === fingerprint &&
+    previous.canonicalGeneration === canonicalGeneration;
   const streak = quiet ? previous.streak + 1 : 0;
   const retryAt = earliestDeadlineAfter(
     [
@@ -109,14 +113,20 @@ export function nextContextMaintenanceWorkerQuiet(
   };
 }
 
-/** A tick serves one phase, so a pending deadline already due at the last wake keeps the thirty-second interval. */
+/**
+ * A tick serves one phase, so a pending deadline already due at the last wake keeps the thirty-second interval.
+ * A failed state cannot serve deadlines or mutations, so it only backs off, and the cap keeps the retry regular.
+ */
 export function contextMaintenanceWakeIntervalMs(
-  state: Pick<MaintenanceState, 'cases' | 'checkpoints' | 'workerQuiet'>,
+  state: Pick<MaintenanceState, 'state' | 'cases' | 'checkpoints' | 'workerQuiet'>,
   lastWakeAt: number,
   canonicalGeneration: string | undefined,
 ): number {
   const quiet = state.workerQuiet;
-  if (quiet === undefined || quiet.canonicalGeneration !== canonicalGeneration) return WAKE_INTERVAL_MS;
+  if (state.state === 'failed')
+    return Math.min(WAKE_INTERVAL_MS * 2 ** (quiet?.streak ?? 0), MAX_FAILED_WAKE_INTERVAL_MS);
+  if (quiet === undefined || quiet.failed === true || quiet.canonicalGeneration !== canonicalGeneration)
+    return WAKE_INTERVAL_MS;
   const deadline = earliestDeadlineAfter(
     [
       quiet.retryAt,
@@ -149,27 +159,36 @@ export const contextMaintenanceWakeDue = Effect.fn('contextMaintenance.wakeDue')
 
 /**
  * Only the guarded worker records its ticks; a foreground run is compared at the next worker tick.
- * The maintain command reports failure through its exit code or a persisted failed state. A failed tick leaves the
- * streak unchanged.
+ * The maintain command reports failure through its exit code or a persisted failed state. A persisted failed state
+ * advances the streak and marks the record failed, so the next successful tick restarts the streak.
  */
 export const recordContextMaintenanceWorkerTick = Effect.fn('contextMaintenance.recordWorkerTick')(
   function* (config: RuntimeConfig, tickExitCode: number | string | null | undefined) {
     if (Number(tickExitCode ?? 0) !== 0) return;
     const {requests} = yield* readContextMaintenanceEvidenceRequestPage(config);
     // The same worker runs draft generation, which retries without a canonical mutation.
-    const draftNextEligibleAt = yield* readDraftQueueNextEligibleAt(config);
+    const draftNextEligibleAt = yield* readDraftQueueNextEligibleAt(config).pipe(Effect.orElseSucceed(() => undefined));
     yield* withStateLock(
       config,
       Effect.gen(function* () {
         const state = yield* readState(config);
-        if (state.paused || state.state === 'failed') return;
-        const workerQuiet = nextContextMaintenanceWorkerQuiet(
-          state,
-          requests,
-          yield* currentCanonicalGeneration(config),
-          yield* Clock.currentTimeMillis,
-          draftNextEligibleAt,
-        );
+        if (state.paused) return;
+        const previous = state.workerQuiet;
+        const workerQuiet: ContextMaintenanceWorkerQuiet =
+          state.state === 'failed'
+            ? {
+                fingerprint: previous?.fingerprint ?? '',
+                canonicalGeneration: previous?.canonicalGeneration ?? '',
+                streak: (previous?.streak ?? 0) + 1,
+                failed: true,
+              }
+            : nextContextMaintenanceWorkerQuiet(
+                state,
+                requests,
+                yield* currentCanonicalGeneration(config),
+                yield* Clock.currentTimeMillis,
+                draftNextEligibleAt,
+              );
         yield* writeState(config, {...state, workerQuiet});
       }),
       {...STATE_LOCK, waitTimeoutMilliseconds: 10_000},

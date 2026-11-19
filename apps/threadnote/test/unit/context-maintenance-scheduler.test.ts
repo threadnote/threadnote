@@ -421,9 +421,76 @@ describe('context maintenance wake backoff', () => {
       yield* recordContextMaintenanceWorkerTick(config, undefined);
       expect(yield* streak).toBe(0);
       // An unreadable inventory persists a failed state and still exits zero.
+      const succeeded = yield* readRawState(config);
+      yield* writeState(config, {...succeeded, state: 'failed'});
+      yield* recordContextMaintenanceWorkerTick(config, 0);
+      expect((yield* readRawState(config)).workerQuiet).toEqual({...succeeded.workerQuiet, streak: 1, failed: true});
+    }).pipe(provideTestLayer(Layer.mergeAll(BunServices.layer, TestSystemInfoLayer))),
+  );
+
+  effectIt.effect('restarts the streak when a successful tick follows failed ticks, so overdue work wakes again', () =>
+    Effect.gen(function* () {
+      const config = yield* fixture();
+      yield* setContextMaintenancePaused(config, false);
+      const quietState = readRawState(config).pipe(Effect.map(state => state.workerQuiet));
+      const setState = (state: MaintenanceState['state']) =>
+        readRawState(config).pipe(Effect.flatMap(current => writeState(config, {...current, state})));
+      yield* recordContextMaintenanceWorkerTick(config, 0);
+      yield* recordContextMaintenanceWorkerTick(config, 0);
+      yield* setState('failed');
+      for (const _ of EffectArray.range(1, 4)) yield* recordContextMaintenanceWorkerTick(config, 0);
+      expect((yield* quietState)?.streak).toBe(5);
+      yield* setState('idle');
+      yield* recordContextMaintenanceWorkerTick(config, 0);
+      const recovered = yield* readRawState(config);
+      expect(recovered.workerQuiet?.streak).toBe(0);
+      expect(recovered.workerQuiet).not.toHaveProperty('failed');
+      const lastWakeAt = Date.parse(T0);
+      const overdue = {cases: [maintenanceCase('pending', {nextAttemptAt: at(lastWakeAt - 1)})]};
+      expect(
+        contextMaintenanceWakeIntervalMs(
+          {...recovered, ...overdue},
+          lastWakeAt,
+          recovered.workerQuiet?.canonicalGeneration,
+        ),
+      ).toBe(30_000);
+    }).pipe(provideTestLayer(Layer.mergeAll(BunServices.layer, TestSystemInfoLayer))),
+  );
+
+  effectIt.effect('backs off a persistent failed state to five minutes and then follows the normal rules', () =>
+    Effect.gen(function* () {
+      const config = yield* fixture();
+      yield* setContextMaintenancePaused(config, false);
       yield* writeState(config, {...(yield* readRawState(config)), state: 'failed'});
+      const overdue = {cases: [maintenanceCase('pending', {nextAttemptAt: at(-1)})]};
+      const intervals: number[] = [];
+      for (const _ of EffectArray.range(1, 6)) {
+        yield* recordContextMaintenanceWorkerTick(config, 0);
+        const state = yield* readRawState(config);
+        intervals.push(contextMaintenanceWakeIntervalMs({...state, ...overdue}, 0, 'v1:changed'));
+      }
+      expect(intervals).toEqual([60_000, 120_000, 240_000, 300_000, 300_000, 300_000]);
+      yield* writeState(config, {...(yield* readRawState(config)), state: 'idle'});
+      const streak = readRawState(config).pipe(Effect.map(state => state.workerQuiet?.streak));
       yield* recordContextMaintenanceWorkerTick(config, 0);
       expect(yield* streak).toBe(0);
+      yield* recordContextMaintenanceWorkerTick(config, 0);
+      expect(yield* streak).toBe(1);
+    }).pipe(provideTestLayer(Layer.mergeAll(BunServices.layer, TestSystemInfoLayer))),
+  );
+
+  effectIt.effect('records the tick without a draft deadline when the draft queue is unreadable', () =>
+    Effect.gen(function* () {
+      const config = yield* fixture();
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* draftQueueObservationDirectory(config);
+      yield* setContextMaintenancePaused(config, false);
+      yield* fs.makeDirectory(root, {recursive: true});
+      yield* fs.writeFileString((yield* Path.Path).join(root, 'queue.json'), '{');
+      yield* recordContextMaintenanceWorkerTick(config, 0);
+      const quietState = (yield* readRawState(config)).workerQuiet;
+      expect(quietState?.streak).toBe(0);
+      expect(quietState).not.toHaveProperty('retryAt');
     }).pipe(provideTestLayer(Layer.mergeAll(BunServices.layer, TestSystemInfoLayer))),
   );
 
