@@ -1563,30 +1563,37 @@ const selectSearchSymbolsWithSql = Effect.fn('codeGraph.selectSearchSymbolsWithS
     const statement = codeGraphExactSymbolQueryStatement(snapshotId, baseSnapshotId, selector, safeLimit);
     exactRows.push(...(yield* sql.unsafe<SearchSymbolRow>(statement.text, statement.parameters)));
   }
-  const candidateLimit = Math.min(2_000, Math.max(100, safeLimit * 20));
-  const termStatement =
-    terms.length === 0
-      ? undefined
-      : codeGraphTermCandidateQueryStatement(snapshotId, baseSnapshotId, terms, candidateLimit);
-  const termCandidates =
-    termStatement === undefined
-      ? []
-      : yield* sql.unsafe<{readonly score: number; readonly symbol_id: string}>(
-          termStatement.text,
-          termStatement.parameters,
-        );
-  const candidateScores = new Map(
-    EffectArray.map(termCandidates, candidate => [candidate.symbol_id, Number(candidate.score)]),
-  );
-  const termRows = EffectArray.map(
-    yield* selectSymbolsByIdsWithSql(
-      sql,
-      snapshotId,
-      baseSnapshotId,
-      EffectArray.map(termCandidates, candidate => candidate.symbol_id),
-    ),
-    row => ({...row, score: pathNamedModuleTermScore(row, candidateScores.get(row.id) ?? 0)}),
-  );
+  // Module correction lowers scores after SQL ranks the page, so widen the page until enough corrected
+  // rows reach its lowest raw score: no unfetched candidate can score above that floor.
+  let candidateLimit = Math.min(2_000, Math.max(100, safeLimit * 20));
+  let termRows: readonly (SymbolRow & {readonly score: number})[] = [];
+  while (terms.length > 0) {
+    const termStatement = codeGraphTermCandidateQueryStatement(snapshotId, baseSnapshotId, terms, candidateLimit);
+    const termCandidates = yield* sql.unsafe<{readonly score: number; readonly symbol_id: string}>(
+      termStatement.text,
+      termStatement.parameters,
+    );
+    const candidateScores = new Map(
+      EffectArray.map(termCandidates, candidate => [candidate.symbol_id, Number(candidate.score)]),
+    );
+    termRows = EffectArray.map(
+      yield* selectSymbolsByIdsWithSql(
+        sql,
+        snapshotId,
+        baseSnapshotId,
+        EffectArray.map(termCandidates, candidate => candidate.symbol_id),
+      ),
+      row => ({...row, score: pathNamedModuleTermScore(row, candidateScores.get(row.id) ?? 0)}),
+    );
+    const floor = Number(termCandidates.at(-1)?.score ?? 0);
+    if (
+      termCandidates.length < candidateLimit ||
+      candidateLimit >= 2_000 ||
+      EffectArray.filter(termRows, row => row.score >= floor).length >= safeLimit
+    )
+      break;
+    candidateLimit = Math.min(2_000, candidateLimit * 4);
+  }
   const termScores = new Map(EffectArray.map(termRows, row => [row.id, row.score]));
   const exactEvidence = new Map<string, Pick<SearchSymbolRow, 'exact_rank' | 'score'>>();
   for (const row of exactRows) {

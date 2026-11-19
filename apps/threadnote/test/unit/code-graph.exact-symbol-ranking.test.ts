@@ -30,7 +30,7 @@ effectIt.effect('keeps an exact variable match in a full page of boosted mutatio
   ).pipe(provideTestLayer(ApplicationLayer)),
 );
 
-effectIt.effect('ranks a declaration above a file module that matches only by its directory names', () =>
+effectIt.effect('ranks a declaration above more path-matched file modules than the lexical candidate page', () =>
   Effect.scoped(
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -39,7 +39,7 @@ effectIt.effect('ranks a declaration above a file module that matches only by it
       const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-graph-module-ranking-'});
       const databasePath = path.join(root, 'graph-v3.sqlite');
       yield* store.initialize(databasePath);
-      yield* Effect.sync(() => insertPathNamedModuleFixture(databasePath));
+      yield* Effect.sync(() => insertPathNamedModuleFixture(databasePath, 120));
 
       const results = yield* store.searchSymbols(
         databasePath,
@@ -48,7 +48,7 @@ effectIt.effect('ranks a declaration above a file module that matches only by it
         2,
       );
 
-      expect(EffectArray.map(results, result => result.name)).toEqual(['spawnChild', modulePath]);
+      expect(EffectArray.map(results, result => result.kind)).toEqual(['function', 'module']);
     }),
   ).pipe(provideTestLayer(ApplicationLayer)),
 );
@@ -151,17 +151,19 @@ function insertExactSymbolRankingFixture(databasePath: string, distractorCount: 
   }
 }
 
-const modulePath = 'src/mcp/server/context/health.ts';
-
 /** Term weights mirror the index: a module's name is its path, so each segment carries name weight. */
-function insertPathNamedModuleFixture(databasePath: string): void {
+function insertPathNamedModuleFixture(databasePath: string, moduleCount: number): void {
   const database = new Database(databasePath, {strict: true});
   try {
     database.transaction(() => {
-      const {insertSymbol, insertTerm} = insertRankingSnapshot(database, 2);
-      insertSymbol.run(snapshotId, 'module', 'hash-module', 'module', modulePath, modulePath, modulePath, spanJson);
-      for (const term of ['src', 'mcp', 'server', 'context', 'health.ts', 'health', 'ts']) {
-        insertTerm.run(snapshotId, term, 'module', 5);
+      const {insertSymbol, insertTerm} = insertRankingSnapshot(database, moduleCount + 1);
+      for (let index = 0; index < moduleCount; index += 1) {
+        const id = `module-${index}`;
+        const path = `src/mcp/server/context/module-${index}.ts`;
+        insertSymbol.run(snapshotId, id, `hash-${id}`, 'module', path, path, path, spanJson);
+        for (const term of ['src', 'mcp', 'server', 'context', `module-${index}.ts`, 'module', 'ts']) {
+          insertTerm.run(snapshotId, term, id, 5);
+        }
       }
       insertSymbol.run(
         snapshotId,
