@@ -444,13 +444,15 @@ describe('completed-local supplemental publication', () => {
   );
 
   effectIt.effect(
-    'a supplemental watch start stops the standalone watch for the same checkout and PR',
+    'a supplemental watch start stops the standalone watch for the same PR only while it monitors the PR',
     () =>
       Effect.gen(function* () {
         const {f, view, pr} = yield* completed;
         const commands = yield* CommandExecutor;
         const context = yield* Effect.context<FileSystem.FileSystem | Path.Path | SecureRandom.SecureRandom>();
         const codex = '/usr/bin/codex';
+        const live = new Set<number>();
+        let nextPid = 77777;
         // Only GitHub, the host probe and the collector spawn are simulated; both watches start for real.
         const provider = CommandExecutor.of({
           ...commands,
@@ -477,9 +479,11 @@ describe('completed-local supplemental publication', () => {
             Effect.gen(function* () {
               const starting = yield* readNativeWatch(f.config, args[args.indexOf('--watch-id') + 1]);
               if (!starting?.envelope.collector) return false;
+              const pid = nextPid++;
+              live.add(pid);
               yield* writeNativeWatch(
                 f.config,
-                {...starting.envelope, collector: {...starting.envelope.collector, pid: 77777, status: 'running'}},
+                {...starting.envelope, collector: {...starting.envelope.collector, pid, status: 'running'}},
                 starting.revision,
               );
               return true;
@@ -489,7 +493,7 @@ describe('completed-local supplemental publication', () => {
         const act = (request: object) =>
           runNativeTaskAction(f.config, {callerCwd: f.repo, ...request}).pipe(
             Effect.provideService(CommandExecutor, provider),
-            Effect.provideService(SystemInfo, SystemInfo.of({...system, isProcessRunning: pid => pid === 77777})),
+            Effect.provideService(SystemInfo, SystemInfo.of({...system, isProcessRunning: pid => live.has(pid)})),
           );
         const wakeup = {host: 'codex', executable: codex, threadId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'};
         const standalone = object(yield* act({command: 'watch-pr', operation: 'start', prUrl: pr.url, wakeup}));
@@ -520,6 +524,24 @@ describe('completed-local supplemental publication', () => {
           stopReason: 'superseded',
           supersededBy: started.watchId,
         });
+        // After a reboot the supplemental collector is dead but still `running`; the standalone watch takes over.
+        live.clear();
+        expect(object(yield* act({command: 'watch-pr', operation: 'start', prUrl: pr.url, wakeup}))).toMatchObject({
+          status: 'watching',
+          watchId: standalone.watchId,
+        });
+        const replayed = object(
+          yield* act({
+            command: 'watch-pr',
+            operation: 'start',
+            runId: 'native-run',
+            supplementalRef: attached.supplementalRef,
+            wakeup,
+          }),
+        );
+        expect(replayed).toMatchObject({status: 'watch-updated', watchId: started.watchId});
+        expect(replayed.supersededStandaloneWatchId).toBeUndefined();
+        expect((yield* readNativeWatch(f.config, String(standalone.watchId)))?.envelope.stopRequested).toBe(false);
       }).pipe(run),
     windowsCycleFixtureTimeout ?? {timeout: 60000},
   );

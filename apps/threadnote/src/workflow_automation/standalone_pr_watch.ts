@@ -11,7 +11,7 @@ import {runNativePrWatchOperation} from './task_pr_watch.js';
 import {runNativeWatch} from './watch.js';
 import {nativeWatchWakeupSchema} from './watch_notification_state.js';
 import {nativeWatchPullRequest} from './watch_provider.js';
-import {readNativeWatch} from './watch_store.js';
+import {readNativeWatch, type NativeWatchEnvelope} from './watch_store.js';
 import {nativeWatchCollectorAlive} from './watch_process.js';
 
 const text = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096));
@@ -44,6 +44,16 @@ const bindingIdentity = (binding: typeof bindingSchema.Type) => {
   };
 };
 
+/** A watch monitors a PR only while it is unstopped, bound to a consumer, open on that PR and has a live collector. */
+const nativeWatchMonitorsPr = (watch: {readonly envelope: NativeWatchEnvelope} | undefined, prUrl: string) =>
+  watch !== undefined &&
+  !watch.envelope.stopRequested &&
+  Predicate.isNotNullish(watch.envelope.state.consumer) &&
+  watch.envelope.state.prState === 'open' &&
+  watch.envelope.state.pr === prUrl
+    ? nativeWatchCollectorAlive(watch.envelope.collector)
+    : Effect.succeed(false);
+
 /**
  * Stops the standalone watch a workflow-bound watch replaces, so one PR wakes the session once. Both routes store
  * GitHub's exact html_url, so the identity derives from the same checkout and URL. The stop names the replacing
@@ -56,6 +66,8 @@ export const stopSupersededStandalonePrWatch = (
   supersededBy: string,
 ) =>
   Effect.gen(function* () {
+    // A replacement that does not monitor the PR must not stop the only watch that does.
+    if (!(yield* nativeWatchMonitorsPr(yield* readNativeWatch(config, supersededBy), prUrl))) return undefined;
     const watchId = standaloneWatchId(checkout, prUrl);
     const watch = yield* readNativeWatch(config, watchId);
     const consumer = watch?.envelope.state.consumer;
@@ -231,15 +243,7 @@ export const runStandalonePrWatch = (
     const successor = successorId
       ? yield* readNativeWatch(config, successorId).pipe(Effect.orElseSucceed(() => undefined))
       : undefined;
-    if (
-      request.operation === 'start' &&
-      successor &&
-      !successor.envelope.stopRequested &&
-      successor.envelope.state.consumer &&
-      successor.envelope.state.prState === 'open' &&
-      successor.envelope.state.pr === binding.prUrl &&
-      (yield* nativeWatchCollectorAlive(successor.envelope.collector))
-    )
+    if (request.operation === 'start' && (yield* nativeWatchMonitorsPr(successor, binding.prUrl)))
       return yield* fail(
         'watch-superseded',
         `The workflow-bound watch ${successorId} monitors this PR and wakes its session. Continue with that watch. A standalone start restarts this watch after that watch stops.`,
