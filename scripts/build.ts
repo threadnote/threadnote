@@ -477,6 +477,18 @@ export function validDevSkillPath(value: unknown): value is string {
   );
 }
 
+/** Local destinations of `](file)` and `](<file>)` Markdown links, without their fragments. */
+export const localMarkdownLinks = (markdown: string): ReadonlyArray<string> =>
+  EffectArray.flatMap(
+    EffectArray.fromIterable(Effect2.pipe(markdown, EffectString.matchAll(/\]\((?:<([^<>\n]+)>|([^)\s]+))/gu))),
+    ([, angle, plain]) => {
+      const target = angle ?? plain ?? '';
+      return /^(?:[a-z][a-z0-9+.-]*:|#)/u.test(target)
+        ? []
+        : [EffectArray.headNonEmpty(Effect2.pipe(target, EffectString.split('#')))];
+    },
+  );
+
 /** Validate the exact release closure and bind its content to this runtime release. */
 export const buildDevSkillsManifest = Effect.fn('build.devSkillsManifest')(function* (root: string, version: string) {
   const fs = yield* FileSystem.FileSystem;
@@ -565,6 +577,36 @@ export const buildDevSkillsManifest = Effect.fn('build.devSkillsManifest')(funct
     }
     for (const relative of member.files) {
       files[`${member.id}/${relative}`] = yield* sha256Hex(yield* fs.readFile(path.join(directory, relative)));
+    }
+  }
+  // Hosts discover only the rendered SKILL.md; every other file stays raw in the generation, so a raw SKILL.md copy
+  // keeps its placeholders. Every link must reach a shipped file that is not a SKILL.md, and a SKILL.md link must
+  // resolve through a rendered root.
+  const skillsRoot = path.join(canonicalRoot, 'config', 'agent-skills');
+  for (const member of members) {
+    for (const relative of member.files) {
+      if (!Effect2.pipe(relative, EffectString.endsWith('.md'))) continue;
+      for (const file of localMarkdownLinks(yield* fs.readFileString(path.join(skillsRoot, member.id, relative)))) {
+        const key =
+          relative === 'SKILL.md'
+            ? Effect2.pipe(
+                file,
+                EffectString.replace(/^\{\{THREADNOTE_SKILL_ROOT\}\}\//u, `${member.id}/`),
+                EffectString.replace(/^\{\{THREADNOTE_BUNDLE_ROOT\}\}\//u, ''),
+              )
+            : EffectArray.join(
+                Effect2.pipe(
+                  path.relative(skillsRoot, path.resolve(skillsRoot, member.id, path.dirname(relative), file)),
+                  EffectString.split(path.sep),
+                ),
+                '/',
+              );
+        if (key === file || !(key in files) || Effect2.pipe(key, EffectString.endsWith('/SKILL.md'))) {
+          return yield* ScriptError.make({
+            message: `${member.id}/${relative} must link to a shipped file that is not a SKILL.md${relative === 'SKILL.md' ? ' through {{THREADNOTE_SKILL_ROOT}} or {{THREADNOTE_BUNDLE_ROOT}}' : ''}: ${file}`,
+          });
+        }
+      }
     }
   }
   const writingProfiles = EffectArray.map(members, member => files[`${member.id}/references/writing.md`]);

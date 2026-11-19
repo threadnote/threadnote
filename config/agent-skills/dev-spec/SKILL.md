@@ -7,7 +7,8 @@ description: Define and approve feature behavior, requirements, acceptance scena
 
 Use Threadnote's current task authoring contract. Prefer MCP `workflow_task_author`; the CLI equivalent is `threadnote workflow-automation task-author`. Check `threadnote workflow-automation task-author --help` for the current operation options. Do not call raw workflow-automation JSON, invent fields, or create metadata, receipts, hashes, or version copies; provide substantive business content and use returned opaque references.
 
-Write all workflow outputs in the [Threadnote STE profile](references/writing.md). These outputs are user-facing reports, task-card business inputs, review findings, PR bodies and handoffs.
+<!-- prettier-ignore -->
+Write all workflow outputs in the [Threadnote STE profile](<{{THREADNOTE_SKILL_ROOT}}/references/writing.md>). These outputs are user-facing reports, task-card business inputs, review findings, PR bodies and handoffs.
 
 Start/resume authoring with `start`, then `read` the current document. Save changes against its current `authoringRef`; use `job` only when the current capability advertises it, retain its returned `jobRef`, inspect `status` and `result`, and independently read back completed output. On ambiguity, inspect/resume that same reference; do not retry as a new mutation.
 

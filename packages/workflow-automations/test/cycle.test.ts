@@ -297,6 +297,14 @@ describe('native cycle pure domain', () => {
     );
   });
 
+  it('names the stored criterion that a near-miss acceptance entry fails to cover', () => {
+    const state = initializeNativeCycle(decodeNativeCyclePlan(makePlan()));
+    const nearMiss = {...validation, acceptance: [{criterion: 'work', result: 'passed', evidence: 'ok'}]};
+    expect(() => validateNativeCyclePhase(state, 'one', snapshot(), nearMiss)).toThrow(
+      /Missing stored criteria: "works"\..*match no stored criterion: "work"\./u,
+    );
+  });
+
   it('admits zero-write phases while retaining the path cardinality and text bounds', () => {
     const input = makePlan();
     const withPaths = (allowedPaths: string[]) => decodeNativeCyclePlan(makePlan([{...input.phases[0], allowedPaths}]));

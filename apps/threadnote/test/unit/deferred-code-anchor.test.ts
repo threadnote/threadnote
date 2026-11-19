@@ -1,6 +1,6 @@
 import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
-import {Deferred, Effect, Fiber, FileSystem, Option, Path, PlatformError, Ref} from 'effect';
+import {Cause, Deferred, Effect, Fiber, FileSystem, Option, Path, PlatformError, Ref, Result} from 'effect';
 import {TestClock} from 'effect/testing';
 import * as Schema from 'effect/Schema';
 import {fcProp} from '@threadnote/testing/fast-check-property';
@@ -14,6 +14,7 @@ import {CodeGraphStore} from '@threadnote/graph/store';
 import {CodeGraphStoreBusyError, type CodeGraphInventoryFile, type CodeGraphStatus} from '@threadnote/graph/types';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {sha256Hex} from '@threadnote/platform/digest';
+import {withNativeFileLockWaitBudget} from '@threadnote/platform/file/lock';
 import {ResourceIoFailed, ResourceStore} from '@threadnote/store/resource-store';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {
@@ -1289,21 +1290,7 @@ describe('deferred code-anchor outbox', () => {
           fixture.path.join(fixture.repository, 'src', 'deadline.ts'),
           'export const deadline = "committed";\n',
         );
-        yield* runCommandEffect('git', ['add', '.'], {cwd: fixture.repository}).pipe(TestClock.withLive);
-        yield* runCommandEffect(
-          'git',
-          [
-            '-c',
-            'user.name=Threadnote Test',
-            '-c',
-            'user.email=test@threadnote.local',
-            'commit',
-            '--quiet',
-            '--message',
-            'add deadline fixture',
-          ],
-          {cwd: fixture.repository},
-        ).pipe(TestClock.withLive);
+        yield* commitFixtureSources(fixture.repository, 'add deadline fixture').pipe(TestClock.withLive);
         const store = yield* ResourceStore;
         const indexer = yield* CodeGraphIndexer;
         // Publish first so wrap-heal cannot consume the later-staged intent.
@@ -1359,6 +1346,99 @@ describe('deferred code-anchor outbox', () => {
         });
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('lets a native foreground writer take the account mutation lock between heal commits', () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* makeFixture();
+        yield* fixture.fs.makeDirectory(fixture.path.join(fixture.repository, 'src'));
+        const uris = EffectArray.makeBy(
+          4,
+          index => `threadnote://user/tester/memories/durable/projects/threadnote/convoy-${index}.md`,
+        );
+        for (let index = 0; index < uris.length; index += 1) {
+          yield* fixture.fs.writeFileString(
+            fixture.path.join(fixture.repository, 'src', `convoy-${index}.ts`),
+            `export const convoy${index} = ${index};\n`,
+          );
+        }
+        yield* commitFixtureSources(fixture.repository, 'add convoy fixture');
+        const indexer = yield* CodeGraphIndexer;
+        yield* indexer.index({
+          cwd: fixture.repository,
+          ensureVectors: false,
+          threadnoteHome: fixture.config.agentContextHome,
+        });
+        const store = yield* ResourceStore;
+        for (const [index, uri] of uris.entries()) {
+          const metadata = {...fixture.metadata, memoryId: `tn_convoy_${index}`, topic: `convoy-${index}`};
+          const content = memoryContent(metadata, `Convoy revision ${index}.`);
+          yield* stageDeferredCodeAnchorIntent(fixture.config, {
+            memoryContent: content,
+            memoryMetadata: metadata,
+            memoryUri: uri,
+            request: deferredRequest(fixture.repository, [`src/convoy-${index}.ts`]),
+          });
+          yield* store.write(resourceStoreLocation(fixture.config), uri, content, {mode: 'create'});
+        }
+        const [intentPath] = yield* fixtureIntentPaths(fixture);
+        const intent = yield* Schema.decodeUnknownEffect(IntentRouteSchema)(
+          JSON.parse(yield* fixture.fs.readFileString(intentPath)),
+        ).pipe(Effect.orDie);
+
+        // The first heal commit holds the account lock until the native writer waits.
+        // A later heal commit that wins the lock first holds it until the writer
+        // gives up, so the writer succeeds only if the heal hands the lock over.
+        const firstCommitEntered = yield* Deferred.make<void>();
+        const releaseFirstCommit = yield* Deferred.make<void>();
+        const writerDone = yield* Deferred.make<void>();
+        let healCommits = 0;
+        const heldStore = ResourceStore.of({
+          ...store,
+          write: (location, uri, value, options) =>
+            uris.includes(uri)
+              ? Effect.suspend(() =>
+                  (healCommits++ === 0
+                    ? Deferred.succeed(firstCommitEntered, undefined).pipe(
+                        Effect.andThen(Deferred.await(releaseFirstCommit)),
+                      )
+                    : Deferred.await(writerDone).pipe(Effect.timeoutOption('3 seconds'), Effect.asVoid)
+                  ).pipe(Effect.andThen(store.write(location, uri, value, options))),
+                )
+              : store.write(location, uri, value, options),
+        });
+        const heal = yield* finalizeDeferredCodeAnchorsForRoute(
+          fixture.config,
+          {
+            callerCwd: fixture.repository,
+            kind: 'repository',
+            repositoryId: intent.repositoryId,
+            worktreeId: intent.worktreeId,
+          },
+          {limit: uris.length, passTimeoutMilliseconds: 5_000},
+        ).pipe(Effect.provideService(ResourceStore, heldStore), Effect.forkScoped);
+        yield* Deferred.await(firstCommitEntered);
+        // Let the remaining heal items finish graph capture and queue for commit.
+        yield* Effect.sleep('300 millis');
+
+        const writer = yield* withNativeFileLockWaitBudget(
+          withDeferredCodeAnchorMutationLocks(
+            fixture.fs,
+            fixture.config,
+            ['threadnote://user/tester/memories/durable/projects/threadnote/native-write.md'],
+            Effect.void,
+          ),
+        ).pipe(Effect.result, Effect.ensuring(Deferred.succeed(writerDone, undefined)), Effect.forkScoped);
+        yield* Effect.sleep('50 millis');
+        yield* Deferred.succeed(releaseFirstCommit, undefined);
+
+        const written = yield* Fiber.join(writer);
+        expect(Result.isSuccess(written) ? 'acquired' : Cause.pretty(Cause.fail(written.failure))).toBe('acquired');
+        expect(yield* Fiber.join(heal)).toMatchObject({finalizedCount: uris.length, state: 'completed'});
+        expect(yield* fixtureIntentPaths(fixture)).toEqual([]);
+      }),
+    ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
   effectIt.effect('cleans a crash-orphaned opaque route marker without deriving intent deletion authority', () =>
@@ -2367,6 +2447,27 @@ const fixtureRepositoryRouteMarkerPath = Effect.fn('deferredCodeAnchorTest.repos
   );
   if (relative === undefined) return yield* Effect.die(new Error('Repository route marker fixture is missing.'));
   return fixture.path.join(fixture.outbox, relative);
+});
+
+const commitFixtureSources = Effect.fn('deferredCodeAnchorTest.commitFixtureSources')(function* (
+  repository: string,
+  message: string,
+) {
+  yield* runCommandEffect('git', ['add', '.'], {cwd: repository});
+  yield* runCommandEffect(
+    'git',
+    [
+      '-c',
+      'user.name=Threadnote Test',
+      '-c',
+      'user.email=test@threadnote.local',
+      'commit',
+      '--quiet',
+      '--message',
+      message,
+    ],
+    {cwd: repository},
+  );
 });
 
 const makeFixture = Effect.fn('deferredCodeAnchorTest.makeFixture')(function* () {

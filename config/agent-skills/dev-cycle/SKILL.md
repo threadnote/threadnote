@@ -7,7 +7,8 @@ description: Implement, independently review, validate, and deliver planned or b
 
 Start or resume with `workflow_task_start`, then follow `workflow_task_view` and its current card. For a bounded, clear, low-risk fix, use compact intent; expand when behavior is unresolved, phases depend on one another, or design risk is material. Registered MCP tools are `workflow_task_compact_start`, `workflow_task_compact_expand`, and `workflow_task_compact_confirm`; `workflow_task_author` handles standard spec/plan authoring. The CLI equivalents are under `threadnote workflow-automation`: `task-start`, `task-view`, `task-action`, `task-author`, and `watch-pr`. Check the relevant command's `--help` for current options. Start needs no ready code graph. Provide business content and semantic judgments, never raw workflow-automation JSON or fabricated metadata.
 
-Write all workflow outputs in the [Threadnote STE profile](references/writing.md).
+<!-- prettier-ignore -->
+Write all workflow outputs in the [Threadnote STE profile](<{{THREADNOTE_SKILL_ROOT}}/references/writing.md>).
 
 Affected and allowed paths are a declared starting scope, not a lock. Under the default `standard` profile, out-of-plan paths are advisory: fold a discovered dogfood or tooling fix into the current phase and record it in the snapshot, where review and validation cover it. Reconcile the plan only under `strict` or when requirements actually change. Closeout records every phase's actual changed paths and marks drift.
 Routine fixes within approved requirements need a fresh source snapshot and review, not repeated business-plan rewrites.

@@ -1,9 +1,10 @@
 import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
-import {Effect} from 'effect';
+import {Effect, Path} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
-import {buildDevSkillsManifest} from '../../../../scripts/build.js';
+import {buildDevSkillsManifest, localMarkdownLinks} from '../../../../scripts/build.js';
+import {generationRoot, renderEntrypoints} from '../../src/dev_skills/inspection.js';
 import {loadDevSkillsBundleAt, parseDevSkillsManifest, validDevSkillPath} from '../../src/dev_skills/manifest.js';
 import {consumerId, parseHomeIndex, parseRuntimeIndex, parseReceipt} from '../../src/dev_skills/registry.js';
 import type {DevSkillsTarget} from '../../src/dev_skills/contract.js';
@@ -37,6 +38,51 @@ describe('runtime development bundle manifest', () => {
       expect(yield* snapshot(f.root)).toEqual(before);
       yield* f.fs.writeFileString(f.manifest, JSON.stringify(bundle.manifest));
       expect((yield* loadDevSkillsBundleAt(f.source, '5.3.0-beta.4', true)).manifest).toEqual(bundle.manifest);
+    }).pipe(provideTestLayer(devSkillsTestLayer)),
+  );
+  effectIt.effect('rejects a skill link that does not resolve from its rendered generation', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      for (const [relative, target, accepted] of [
+        ['SKILL.md', 'references/notes.md', false],
+        ['SKILL.md', '<references/notes.md>', false],
+        ['SKILL.md', '{{THREADNOTE_SKILL_ROOT}}/references/missing.md', false],
+        ['SKILL.md', '<{{THREADNOTE_SKILL_ROOT}}/references/notes.md#part>', true],
+        ['SKILL.md', '{{THREADNOTE_BUNDLE_ROOT}}/watch-pr/SKILL.md', false],
+        ['SKILL.md', 'https://example.com/guide', true],
+        ['references/notes.md', '../../watch-pr/SKILL.md', false],
+        ['references/notes.md', '../scripts/helper.py', true],
+      ] as const) {
+        const file = f.path.join(f.source, 'config/agent-skills/dev-plan', relative);
+        const base = yield* f.fs.readFileString(file);
+        yield* f.fs.writeFileString(file, `${base}[link](${target})\n`);
+        const built = yield* buildDevSkillsManifest(f.source, '5.3.0-beta.4').pipe(Effect.result);
+        yield* f.fs.writeFileString(file, base);
+        expect(built._tag, `${relative}: ${target}`).toBe(accepted ? 'Success' : 'Failure');
+      }
+    }).pipe(provideTestLayer(devSkillsTestLayer)),
+  );
+  effectIt.effect('renders the shipped writing link to a generation file under a skill root with a space', () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const bundle = yield* loadDevSkillsBundleAt(process.cwd(), '5.3.0-beta.7', false);
+      const skillRoot = path.resolve('Application Support', 'skills');
+      const generation = generationRoot(path, skillRoot, bundle.manifest.digest);
+      const target: DevSkillsTarget = {
+        surfaceId: 'claude-code',
+        agentId: 'claude',
+        profile: 'desktop',
+        scope: 'user',
+        skillRoot,
+        discoveryRoots: [skillRoot],
+        layout: 'directory',
+      };
+      const [writing] = EffectArray.filter(
+        localMarkdownLinks(renderEntrypoints(path, target, bundle)['dev-plan/SKILL.md']),
+        link => Effect2.pipe(link, EffectString.endsWith('references/writing.md')),
+      );
+      expect(writing).toBe(path.join(generation, 'dev-plan/references/writing.md'));
+      expect(bundle.manifest.hashes).toHaveProperty(['dev-plan/references/writing.md']);
     }).pipe(provideTestLayer(devSkillsTestLayer)),
   );
   effectIt.effect('rejects stripped release metadata, incompatible versions and corrupted/extra/missing payload', () =>

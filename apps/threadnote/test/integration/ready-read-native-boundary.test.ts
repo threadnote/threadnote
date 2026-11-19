@@ -431,7 +431,6 @@ describe('owned native ready-read boundary', () => {
           expect(cache.scores.size).toBeGreaterThan(0);
           const closed = yield* prepareRecallSections(f.config, {
             allowExactRescue: true,
-            allowReranker: true,
             exactMatches: [],
             feedbackQuery: 'alpha bounded',
             includeInactive: false,

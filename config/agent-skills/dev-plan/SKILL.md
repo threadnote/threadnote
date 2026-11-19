@@ -7,7 +7,8 @@ description: Turn approved feature intent into a code-grounded architecture and 
 
 Use Threadnote's current task authoring contract. Prefer MCP `workflow_task_author`; the CLI equivalent is `threadnote workflow-automation task-author`. Check `threadnote workflow-automation task-author --help` for the current operation options. Do not use raw workflow-automation JSON or invent fields. Supply substantive plan content; runtime owns metadata and receipts, while returned opaque references carry continuations.
 
-Write all workflow outputs in the [Threadnote STE profile](references/writing.md). These outputs are user-facing reports, task-card business inputs, review findings, PR bodies and handoffs.
+<!-- prettier-ignore -->
+Write all workflow outputs in the [Threadnote STE profile](<{{THREADNOTE_SKILL_ROOT}}/references/writing.md>). These outputs are user-facing reports, task-card business inputs, review findings, PR bodies and handoffs.
 
 Read the exact approved spec revision and current relevant source. Preserve requirements, acceptance, constraints, decisions, and exclusions. Describe current and target architecture, dependencies, phase outcomes, owned scope, acceptance, and checks. Make each acceptance criterion and validation check provable at its stage; place future PR CI and merge gates in PR delivery and watch, after local validation. Keep routine implementation choices open; record material alternatives and rationale. Use the design challenge when risk warrants it, capturing the evidence-based judgment. Diagrams are optional.
 

@@ -76,6 +76,8 @@ describe('recall runtime orchestration', () => {
     [FC.integer({min: 0, max: 1024}), FC.integer({min: 1, max: 4})],
     ([suffix, count]) =>
       Effect.gen(function* () {
+        // No selected reranker model.
+        inference.rerank.mockReturnValue(Effect.void);
         const home = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'threadnote-closing-exact-')));
         homes.push(home);
         const config = {
@@ -116,7 +118,6 @@ describe('recall runtime orchestration', () => {
         });
         const input = {
           allowExactRescue: false,
-          allowReranker: false,
           feedbackQuery: needle,
           includeInactive: false,
           limit: count,

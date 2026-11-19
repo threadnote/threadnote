@@ -5,7 +5,8 @@ description: Hand an authorized GitHub pull request to Threadnote's event-driven
 
 # Watch PR
 
-Write all workflow outputs in the [Threadnote STE profile](references/writing.md).
+<!-- prettier-ignore -->
+Write all workflow outputs in the [Threadnote STE profile](<{{THREADNOTE_SKILL_ROOT}}/references/writing.md>).
 
 Use `workflow_task_watch_pr` for the current task/watch contract and read only its registered schema/help. The CLI equivalent is `threadnote workflow-automation watch-pr`; check `threadnote workflow-automation watch-pr --help` for current options. Choose one setup route:
 
