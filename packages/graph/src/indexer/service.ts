@@ -1,6 +1,8 @@
 import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import {observeCodeGraphSemanticStatus} from '../vector/status.js';
+import {readCodeGraphEmbeddingDemandLane} from '../vector/demand.js';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {completeCodeGraphDeferredVectors, withCodeGraphDeferredCompletionReporter} from '../vector/publication.js';
 import {
   CODE_GRAPH_EXPECTED_SCOPE_ID_ENV,
@@ -284,12 +286,13 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
         attempt = 0,
         bypassCachedFacts = false,
       ): Effect.Effect<CodeGraphIndexSummary, unknown> => {
-        let publishedBackgroundDemand = false;
+        let publishedEmbeddingDemand = false;
         const vectorPolicy = codeGraphIndexVectorPolicy(request);
         // Intercept only indexing publications. Read attachment, startup, exact reuse and
         // historical ensureCommit never pass this boundary and cannot authorize demand.
+        // A structural-only publication requests nothing, but promotion may carry the view's live demand.
         const publicationStore =
-          vectorPolicy !== 'background'
+          vectorPolicy === 'wait'
             ? unobservedStore
             : {
                 ...unobservedStore,
@@ -302,11 +305,33 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                       identity.worktreeId,
                       candidate?.scopeId,
                     );
-                    yield* unobservedStore.promote(databasePath, identity, snapshotId, {
-                      ...promotionOptions,
-                      backgroundEmbeddingDemand: true,
-                    });
-                    if (previous?.id !== snapshotId) publishedBackgroundDemand = true;
+                    yield* unobservedStore.promote(
+                      databasePath,
+                      identity,
+                      snapshotId,
+                      vectorPolicy === 'background'
+                        ? {...promotionOptions, backgroundEmbeddingDemand: true}
+                        : promotionOptions,
+                    );
+                    if (previous?.id === snapshotId) return;
+                    if (vectorPolicy === 'background') {
+                      publishedEmbeddingDemand = true;
+                      return;
+                    }
+                    // The promotion has committed; an unreadable lane only skips the best-effort wake.
+                    const lane = yield* unobservedStore
+                      .withSession(
+                        databasePath,
+                        Effect.gen(function* () {
+                          return yield* readCodeGraphEmbeddingDemandLane(yield* SqlClient.SqlClient, {
+                            worktreeId: identity.worktreeId,
+                            ...(candidate?.scopeId === undefined ? {} : {scopeId: candidate.scopeId}),
+                          });
+                        }),
+                        {readOnly: true},
+                      )
+                      .pipe(Effect.orElseSucceed(() => undefined));
+                    publishedEmbeddingDemand = lane?.snapshotId === snapshotId && lane.state !== 'cancelled';
                   }),
               };
         return Effect.scoped(
@@ -1589,7 +1614,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
           // Run after the indexing scope releases database sessions, leases and locks.
           Effect.ensuring(
             Effect.suspend(() =>
-              publishedBackgroundDemand && Option.isSome(embeddingWorker)
+              publishedEmbeddingDemand && Option.isSome(embeddingWorker)
                 ? embeddingWorker.value.wake(request.threadnoteHome).pipe(Effect.ignoreCause)
                 : Effect.void,
             ),

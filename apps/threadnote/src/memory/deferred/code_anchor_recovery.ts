@@ -9,9 +9,9 @@ import {finalizeDeferredCodeAnchorsForRoute, type DeferredCodeAnchorFinalization
 const AUTOMATIC_DEFERRED_CODE_ANCHOR_FINALIZE_LIMIT = 8;
 // A first cold publication may need to open the graph, memory store, and recall
 // invalidation boundary before it can commit the citation. Keep the ordinary
-// Context Brief pass short, but give an explicit preparation command enough
-// bounded time to complete the recovery it just made possible.
-const AUTOMATIC_DEFERRED_CODE_ANCHOR_PASS_TIMEOUT_MILLISECONDS = 5_000;
+// Context Brief pass short, but give an explicit preparation command and the
+// background recall worker enough bounded time to complete the recovery.
+export const AUTOMATIC_DEFERRED_CODE_ANCHOR_PASS_TIMEOUT_MILLISECONDS = 5_000;
 
 /** Fail-soft product hook for an already-published exact repository graph. */
 export const healAnchorsAfterGraphIndex = Effect.fn('memoryCodeAnchor.healAfterGraphIndex')(function* (

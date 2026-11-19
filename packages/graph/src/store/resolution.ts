@@ -1,5 +1,5 @@
 import {Array as EffectArray} from 'effect';
-import {enqueueCodeGraphEmbeddingDemandSql} from '../vector/demand.js';
+import {enqueueCodeGraphEmbeddingDemandSql, readCodeGraphEmbeddingDemandLane} from '../vector/demand.js';
 import {Clock, Effect, Option} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import type {CodeGraphDirectPersistentCapacityBoundary} from '../disk/capacity.js';
@@ -991,7 +991,17 @@ const promoteSnapshot = Effect.fn('codeGraph.promoteSnapshot')(function* (
       // owns an active pointer, carry retirement to its final release after
       // displacement. Clean snapshots remain bounded warm-cache candidates.
       yield* markSnapshotLeaseRetirementBaton(sql, snapshotId, now, true);
-      if (backgroundEmbeddingDemand)
+      // Semantic demand belongs to the view, so a structural-only builder keeps the displaced view's live demand.
+      const displacedDemand =
+        backgroundEmbeddingDemand || displacedSnapshotId === undefined
+          ? undefined
+          : yield* readCodeGraphEmbeddingDemandLane(sql, {worktreeId: identity.worktreeId, scopeId});
+      if (
+        backgroundEmbeddingDemand ||
+        (displacedDemand !== undefined &&
+          displacedDemand.snapshotId === displacedSnapshotId &&
+          displacedDemand.state !== 'cancelled')
+      )
         yield* enqueueCodeGraphEmbeddingDemandSql(sql, {
           worktreeId: identity.worktreeId,
           scopeId,

@@ -20,7 +20,6 @@ import {
   type ContextBriefCitationSummaryV2,
   type ContextBriefContextIssueV1,
   type ContextBriefCitationValidationReceiptV2,
-  type ContextBriefCodeAnchorCoverageV3,
   type ContextBriefFollowUpV1,
   type ContextBriefFreshness,
   type ContextBriefGraphEvidenceV1,
@@ -230,7 +229,7 @@ export function assembleContextBriefLogicalResult(input: {
       },
     },
     durableDecisions,
-    recommendedFollowUps: exactFollowUps(input.graph, memories, input.plan, input.memory.codeAnchorCoverage),
+    recommendedFollowUps: exactFollowUps(input.graph, memories, input.plan),
     graph: input.graph,
     activeHandoffs: handoffs,
     stalenessAndConflicts: issues,
@@ -433,19 +432,14 @@ function exactFollowUps(
   graph: ContextBriefGraphEvidenceV1,
   memories: readonly ContextBriefMemoryEvidenceV1[],
   plan: ContextBriefPlanV1,
-  codeAnchorCoverage?: ContextBriefCodeAnchorCoverageV3,
 ): readonly ContextBriefFollowUpV1[] {
   const followUps: ContextBriefFollowUpV1[] = [];
-  const staleRepositoryAnchors =
-    plan.scope.kind === 'repository' &&
-    plan.codeAnchors.codeRefs.length > 0 &&
-    graph.coverage.readyRepositories > 0 &&
-    scopeFreshness(graph) === 'stale' &&
-    codeAnchorCoverage?.complete === false;
+  const staleReadyRepository =
+    plan.scope.kind === 'repository' && graph.coverage.readyRepositories > 0 && scopeFreshness(graph) === 'stale';
   const graphStatusRequired =
     graph.coverage.readyRepositories === 0 ||
     graph.gaps.includes('graph-repository-read-failed') ||
-    staleRepositoryAnchors;
+    staleReadyRepository;
   if (
     graphStatusRequired &&
     (plan.scope.kind === 'workset' || new TextEncoder().encode(plan.scope.callerCwd).byteLength <= 128)
