@@ -7,6 +7,7 @@ import {compileContextBriefWith} from '../../src/compiler.js';
 import {unavailableContextBriefGraphEvidence} from '../../src/graph/evidence.js';
 import {projectContextBrief} from '../../src/projector.js';
 import type {
+  ContextBriefGraphEvidenceV1,
   ContextBriefLogicalResultV1,
   ContextBriefMemoryCandidateV1,
   ContextBriefMemoryRetrievalV1,
@@ -117,6 +118,37 @@ describe('Context Brief shared elapsed budgets', () => {
       yield* Fiber.join(fiber);
       expect(logical?.coverage.gaps).toContain('graph-read-budget-exhausted');
       expect(logical?.durableDecisions[0]?.uri).toBe(candidate.uri);
+    }),
+  );
+
+  effectIt.effect('an agent locate brief without graph evidence keeps retrieved memory within its budget', () =>
+    Effect.gen(function* () {
+      const readyWithoutEvidence: ContextBriefGraphEvidenceV1 = {
+        ...unavailableContextBriefGraphEvidence('graph-query-unavailable', 1),
+        coverage: {
+          complete: true,
+          consideredRepositories: 1,
+          readyRepositories: 1,
+          requestedRepositories: 1,
+          states: {},
+        },
+        gaps: [],
+      };
+      const graphReads: ReadonlyArray<Effect.Effect<ContextBriefGraphEvidenceV1>> = [
+        Effect.never,
+        Effect.succeed(unavailableContextBriefGraphEvidence('graph-ready-snapshot-missing', 1, {missing: 1})),
+        Effect.succeed(readyWithoutEvidence),
+      ];
+      for (const graphRead of graphReads) {
+        const fiber = yield* compileContextBriefWith(
+          {graphEvidence: () => graphRead, memoryEvidence: () => Effect.succeed(memory())},
+          {...request, responseFormat: 'agent'},
+        ).pipe(Effect.forkScoped);
+        yield* TestClock.adjust(5000);
+        const result = yield* Fiber.join(fiber);
+        expect(result.structuredContent.durableDecisions[0]?.uri).toBe(candidate.uri);
+        expect(result.measurement.totalBytes).toBeLessThanOrEqual(result.maximumBytes);
+      }
     }),
   );
 
