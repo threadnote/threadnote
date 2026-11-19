@@ -1034,8 +1034,11 @@ export const readLiveAutomaticPreparation = Effect.fn('automaticPreparation.read
     root = sourceCwd;
   }
   const {refs, omittedSources: omittedSelectors} = selectAutomaticMemorySourceReferences(record);
-  // The detached tick reads ready identities only; foreground review prepares the lexical index.
-  const readyOnly = Option.isSome(yield* Effect.serviceOption(ContextMaintenanceWorkerMode));
+  const workerMode = yield* ContextMaintenanceWorkerMode;
+  const resolveIdentityAliases = workerMode ? resolveMemoryIdentityAliases : prepareMemoryIdentityAliases;
+  const verifyRelationTargetIdentities = workerMode
+    ? verifyAuthoredMemoryRelationTargetIdentities
+    : prepareAuthoredMemoryRelationTargetIdentities;
   const sources: MemoryRecord[] = [];
   const locators = new Map<string, ApprovedSourceDescriptorV1['locator']>();
   const portableReads = new Map<
@@ -1052,6 +1055,12 @@ export const readLiveAutomaticPreparation = Effect.fn('automaticPreparation.read
   // Approved paths and authored aliases can name the same source. Resolve the
   // bounded selectors before spending the budget on distinct canonical reads.
   const allowedUriScopes = automaticMemorySourceUriScopes(config, record);
+  const relationTarget = (sourceUri: string, source: MemoryRecord) => ({
+    content: source.content,
+    memoryId: source.metadata.memoryId,
+    uri: sourceUri,
+    allowedUriScopes,
+  });
   const visited = new Set([uri]);
   const liveSources = new Map<string, MemoryRecord>();
   let omittedSources = omittedSelectors;
@@ -1070,12 +1079,7 @@ export const readLiveAutomaticPreparation = Effect.fn('automaticPreparation.read
         : undefined;
     const route = portable
       ? undefined
-      : yield* (readyOnly ? resolveMemoryIdentityAliases : prepareMemoryIdentityAliases)(
-          config,
-          [ref],
-          allowedUriScopes,
-          {validateNow: true},
-        ).pipe(Effect.result);
+      : yield* resolveIdentityAliases(config, [ref], allowedUriScopes, {validateNow: true}).pipe(Effect.result);
     if (route && Result.isFailure(route)) {
       omittedSources++;
       omissions.push('related-source-unreadable');
@@ -1144,6 +1148,19 @@ export const readLiveAutomaticPreparation = Effect.fn('automaticPreparation.read
       omissions.push('related-source-policy');
       continue;
     }
+    if (
+      workerMode &&
+      !portable &&
+      Result.isFailure(
+        yield* verifyRelationTargetIdentities(config, [relationTarget(selected.success.actualUri, source)]).pipe(
+          Effect.result,
+        ),
+      )
+    ) {
+      omittedSources++;
+      omissions.push('related-source-unreadable');
+      continue;
+    }
     if (isSharedMemoryUri(source.uri)) {
       const descriptor = memoryMaintenanceFragmentSource(source, 0);
       const locator = portable?.locator ?? (yield* authorizeAutomaticSharedMemorySource(config, descriptor));
@@ -1189,19 +1206,10 @@ export const readLiveAutomaticPreparation = Effect.fn('automaticPreparation.read
       : (yield* readContextMaintenanceCanonicalRecord(config, read.uri)).hash;
     if (actual !== read.hash) return yield* AutomaticPreparationError.make({reason: 'memory-fence-changed'});
   }
-  yield* (readyOnly ? verifyAuthoredMemoryRelationTargetIdentities : prepareAuthoredMemoryRelationTargetIdentities)(
+  yield* verifyRelationTargetIdentities(
     config,
     EffectArray.flatMap([...liveSources], ([sourceUri, source]) =>
-      portableReads.has(sourceUri)
-        ? []
-        : [
-            {
-              content: source.content,
-              memoryId: source.metadata.memoryId,
-              uri: sourceUri,
-              allowedUriScopes,
-            },
-          ],
+      portableReads.has(sourceUri) ? [] : [relationTarget(sourceUri, source)],
     ),
   );
   const identity =
