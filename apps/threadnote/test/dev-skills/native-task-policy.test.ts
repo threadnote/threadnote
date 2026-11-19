@@ -175,6 +175,45 @@ describe('standard-profile tree snapshots', () => {
     }).pipe(runCycle),
   );
 
+  effectIt.effect('records a fixed tree after two invalid reviews and asks for its review', () =>
+    Effect.gen(function* () {
+      const f = yield* standard();
+      const write = (text: string) => f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), text);
+      const view = () => readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo});
+      yield* write('export const fixture = 1;\n');
+      yield* f.git(['commit', '-qam', 'phase one']);
+      const first = yield* record(f);
+      for (const [attemptId, lane] of [
+        ['invalid-first', 'simplicity'],
+        ['invalid-second', 'orchestrator'],
+      ])
+        yield* f.mutate('validate-review', {
+          snapshotId: first.snapshotId,
+          attemptId,
+          report: {
+            snapshotId: first.snapshotId,
+            phaseHash: first.phaseHash,
+            snapshotTree: first.tree,
+            status: 'complete',
+            mode: 'full',
+            selected: [lane],
+            lanes: [{name: lane, status: 'complete'}],
+            findings: [],
+          },
+        });
+      expect(yield* view()).toMatchObject({status: 'blocked', next: {action: 'resolve-review-failure'}});
+      yield* write('export const fixture = 2;\n');
+      yield* f.git(['commit', '-qam', 'fix phase one']);
+      const fixed = yield* record(f, 'Fix the source after the failed reviews.');
+      expect(fixed).toMatchObject({
+        supersedes: first.snapshotId,
+        unreviewedSupersession: {reason: 'Fix the source after the failed reviews.'},
+      });
+      expect(fixed.tree).not.toBe(first.tree);
+      expect(yield* view()).toMatchObject({status: 'ready', next: {action: 'review', snapshotId: fixed.snapshotId}});
+    }).pipe(runCycle),
+  );
+
   effectIt.effect('keeps the work-packet precondition for a strict run', () =>
     Effect.gen(function* () {
       const f = yield* cycleFixture(['one'], 'local');

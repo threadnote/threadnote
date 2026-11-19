@@ -17,13 +17,9 @@ import {
 } from './task_action_helpers.js';
 
 const outOfPlanPreviewLimit = 20;
-const recordableActions = new Set([
-  'implement',
-  'review',
-  'validate',
-  'resolve-review-failure',
-  'expand-review-budget',
-]);
+const recordableActions = new Set(['implement', 'review', 'validate']);
+// A new tree replaces the blocked review target. The per-phase review budget still counts every accepted review.
+const reviewRecoveryActions = new Set(['resolve-review-failure', 'expand-review-budget']);
 
 /** Standard profile: record the current tree for the phase on the task card, with no packet precondition. */
 export const recordNativeTaskTreeSnapshot = (
@@ -43,7 +39,10 @@ export const recordNativeTaskTreeSnapshot = (
         `Phase ${phaseId} is validated and waits for delivery; reopen it to record a changed tree.`,
         {next: nativeNext.reopen(scope, phaseId)},
       );
-    if (view.status !== 'ready' || !phaseId || !recordableActions.has(view.next.action))
+    const recordable =
+      reviewRecoveryActions.has(view.next.action) ||
+      (view.status === 'ready' && recordableActions.has(view.next.action));
+    if (!phaseId || !recordable)
       return yield* nativeRefusal(
         'task-not-ready',
         `The current task card asks for ${view.next.action}, not a new source snapshot.`,

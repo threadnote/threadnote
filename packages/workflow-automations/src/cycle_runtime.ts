@@ -67,7 +67,7 @@ export const NativeCycleBaselineSchema = Schema.Struct({
   repo: Schema.String,
   head: gitObject,
   tree: gitObject,
-  preservedFiles: Schema.Array(Schema.String).check(Schema.isMaxLength(8192)),
+  preservedFiles: Schema.Array(Schema.String).check(Schema.isMaxLength(nativeCycleSnapshotFileLimit)),
   pinnedRef: Schema.String,
 });
 export const NativeCycleReviewExpansionSchema = Schema.Struct({
