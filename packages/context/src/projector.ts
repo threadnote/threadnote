@@ -1486,7 +1486,7 @@ function requiredAgentGraphEvidenceItems(
           EffectArray.findFirst(logical.recommendedFollowUps, followUp => followUp.id === recoveryItem.id),
         )
       : undefined;
-  if (recovery?.operation === 'graph-status') return [];
+  if (recovery?.operation === 'graph-status' && logical.coverage.memory.codeAnchors?.complete === false) return [];
   const primaryCard =
     recovery?.operation === 'inspect-node'
       ? EffectOption.getOrUndefined(EffectArray.findFirst(logical.graph.cards, card => card.ref === recovery.ref))
@@ -1527,7 +1527,7 @@ function requiredAgentGraphEvidenceItems(
 /**
  * A projected graph page that drops cards cannot expose its upstream cursor: doing so would skip
  * the omitted part of the current page. Reserve the planner's first exact card selector instead.
- * If the ready snapshot itself could not be read, reserve the bounded graph-query retry.
+ * If the ready snapshot is stale or could not be read, reserve the graph-status follow-up.
  * Every successful partial response therefore gives both MCP channels one next action.
  */
 function requiredGraphRecoveryItem(
@@ -1537,12 +1537,9 @@ function requiredGraphRecoveryItem(
   const graphStatus = EffectOption.getOrUndefined(
     EffectArray.findFirst(logical.recommendedFollowUps, candidate => candidate.operation === 'graph-status'),
   );
-  const staleRepositoryAnchors =
-    logical.scope.kind === 'repository' &&
-    logical.scope.freshness === 'stale' &&
-    logical.scope.readyRepositories > 0 &&
-    logical.coverage.memory.codeAnchors?.complete === false;
-  if (staleRepositoryAnchors && graphStatus !== undefined) {
+  const staleReadyRepository =
+    logical.scope.kind === 'repository' && logical.scope.freshness === 'stale' && logical.scope.readyRepositories > 0;
+  if (staleReadyRepository && graphStatus !== undefined) {
     return EffectOption.getOrUndefined(
       EffectArray.findFirst(items, item => item.lane === 'follow-up' && item.id === graphStatus.id),
     );
