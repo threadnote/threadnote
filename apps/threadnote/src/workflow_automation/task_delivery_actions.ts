@@ -338,13 +338,15 @@ export const runNativeTaskPrDelivery = (
         commitEvidence: request.commitEvidence,
         next: {
           action: 'watch-pr',
+          operation: 'start',
           runId: request.runId,
           phaseId: phase.id,
           validationRef: request.validationRef,
+          deliveryRef,
           prUrl: request.pr.url,
           headSha: proof.head,
           expectedConsumer:
-            'A current task-bound watch route must claim this exact PR head before delivery is recorded.',
+            'Start a task-bound watch on this exact PR head, then complete it with the same refs to record delivery.',
         },
       };
     }
@@ -749,6 +751,18 @@ export const runNativeTaskPrWatch = (
         hostReceipt: readback.envelope.notification?.lastReceipt ?? outbox?.receipt ?? null,
         ...(noticeRef ? {noticeRef} : {}),
         ...(supersededStandaloneWatchId ? {supersededStandaloneWatchId} : {}),
+        ...(phase.delivery === undefined
+          ? {
+              next: {
+                action: 'watch-pr',
+                operation: 'complete',
+                runId: request.runId,
+                phaseId: validation.phaseId,
+                validationRef,
+                deliveryRef,
+              },
+            }
+          : {}),
       };
     }
     const watch = yield* readNativeWatch(config, watchId);

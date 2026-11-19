@@ -81,7 +81,8 @@ describe('runtime development bundle manifest', () => {
         localMarkdownLinks(renderEntrypoints(path, target, bundle)['dev-plan/SKILL.md']),
         link => Effect2.pipe(link, EffectString.endsWith('references/writing.md')),
       );
-      expect(writing).toBe(path.join(generation, 'dev-plan/references/writing.md'));
+      expect(path.isAbsolute(writing)).toBe(true);
+      expect(path.resolve(writing)).toBe(path.join(generation, 'dev-plan/references/writing.md'));
       expect(bundle.manifest.hashes).toHaveProperty(['dev-plan/references/writing.md']);
     }).pipe(provideTestLayer(devSkillsTestLayer)),
   );

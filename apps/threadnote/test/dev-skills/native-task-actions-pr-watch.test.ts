@@ -295,8 +295,9 @@ describe('native task actions', () => {
       const watchCard = object(watchEnvelope.structuredContent);
       expect(watchCard).toMatchObject({
         status: 'watch-required',
-        next: {action: 'watch-pr', prUrl: openPr.url, headSha},
+        next: {action: 'watch-pr', operation: 'start', validationRef, prUrl: openPr.url, headSha},
       });
+      expect(object(watchCard.next).deliveryRef).toBe(watchCard.deliveryRef);
       expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeOpen);
       const provisionalRef = decodeNativeTaskActionRef(String(watchCard.deliveryRef));
       if (!provisionalRef?.delivery?.pr) throw new Error('Expected the provisional PR delivery locator.');
@@ -2114,7 +2115,14 @@ describe('native task actions', () => {
           wakeup,
         }).pipe(Effect.provideService(CommandExecutor, fakeCommands), Effect.provideService(SystemInfo, fakeSystem)),
       );
-      expect(started).toMatchObject({status: 'watching', watchId, prUrl: pr.url, consumerId, hostReceipt: null});
+      expect(started).toMatchObject({
+        status: 'watching',
+        watchId,
+        prUrl: pr.url,
+        consumerId,
+        hostReceipt: null,
+        next: {action: 'watch-pr', operation: 'complete', runId: 'native-run', validationRef, deliveryRef},
+      });
       expect(spawnCalls).toBe(1);
       expect(preflightCalls).toBe(1);
       let startedWatch = yield* readNativeWatch(f.config, watchId);
@@ -3445,6 +3453,8 @@ describe('native task actions', () => {
           ok: true,
           value: {watchId: expectedWatchId, consumerId: next.consumerId},
         });
+        // The phase already holds a canonical PR receipt, so the replayed start needs no follow-up complete.
+        expect(restarted.result).not.toHaveProperty(['value', 'next']);
         expect(yield* f.fs.readFileString(watchFile(old.watchId))).toBe(afterOld);
         const projected = yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo});
         expect(projected.historicalWatches).toMatchObject([{phaseId: 'one', prUrl: next.prUrl}]);
