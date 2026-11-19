@@ -110,6 +110,18 @@ interface Transaction {
   put: (checkpoint: DraftQueueTarget) => void;
 }
 
+function readQueueFile<A>(fs: FileSystem.FileSystem, file: string, schema: Schema.ConstraintDecoder<A, never>) {
+  return Effect.gen(function* () {
+    if (!(yield* fs.exists(file))) return undefined;
+    if ((yield* fs.readLink(file).pipe(Effect.option))._tag === 'Some') return yield* invalid();
+    const info = yield* fs.stat(file);
+    if (info.type !== 'File' || Number(info.size) > 10_000_000) return yield* invalid();
+    const json = yield* fs.readFileString(file);
+    const value: unknown = yield* Effect.try({try: () => JSON.parse(json), catch: invalid});
+    return yield* check(schema, value);
+  });
+}
+
 // Every state/checkpoint change has a replayable write-ahead record. In particular a
 // crash between the quota reservation and checkpoint publication cannot refund use.
 function transaction<A, E, R>(config: Config, use: (tx: Transaction) => Effect.Effect<A, E, R>) {
@@ -133,16 +145,6 @@ function transaction<A, E, R>(config: Config, use: (tx: Transaction) => Effect.E
     }
     const statePath = path.join(root, 'queue.json');
     const targetPath = (key: string) => path.join(root, `target-${key}.json`);
-    const read = <A>(file: string, schema: Schema.ConstraintDecoder<A, never>) =>
-      Effect.gen(function* () {
-        if (!(yield* fs.exists(file))) return undefined;
-        if ((yield* fs.readLink(file).pipe(Effect.option))._tag === 'Some') return yield* invalid();
-        const info = yield* fs.stat(file);
-        if (info.type !== 'File' || Number(info.size) > 10_000_000) return yield* invalid();
-        const json = yield* fs.readFileString(file);
-        const value: unknown = yield* Effect.try({try: () => JSON.parse(json), catch: invalid});
-        return yield* check(schema, value);
-      });
     const write = (file: string, value: unknown) =>
       Effect.gen(function* () {
         const temporary = `${file}.${yield* (yield* SecureRandom.SecureRandom).uuidV4()}.tmp`;
@@ -164,7 +166,7 @@ function transaction<A, E, R>(config: Config, use: (tx: Transaction) => Effect.E
       },
       Effect.uninterruptible(
         Effect.gen(function* () {
-          const saved = yield* read(statePath, stateSchema);
+          const saved = yield* readQueueFile(fs, statePath, stateSchema);
           const original = saved === undefined ? undefined : JSON.stringify(saved);
           const state: State = saved ?? {
             version: 1,
@@ -187,7 +189,8 @@ function transaction<A, E, R>(config: Config, use: (tx: Transaction) => Effect.E
           const tx: Transaction = {
             state,
             now: yield* Clock.currentTimeMillis,
-            read: key => (staged.has(key) ? Effect.succeed(staged.get(key)) : read(targetPath(key), checkpointSchema)),
+            read: key =>
+              staged.has(key) ? Effect.succeed(staged.get(key)) : readQueueFile(fs, targetPath(key), checkpointSchema),
             put: cp => {
               staged.set(cp.targetKey, cp);
             },
@@ -701,6 +704,29 @@ function status(tx: Transaction) {
 export function readDraftQueueStatus(config: Config) {
   return transaction(config, tx => status(tx));
 }
+/**
+ * Lock-free scheduling hint that never creates, recovers or writes queue state. Unreplayed write-ahead checkpoints
+ * take precedence over target files, as the next transaction would replay them. An expired lease stays due.
+ */
+export const readDraftQueueNextEligibleAt = Effect.fn('draftQueue.nextEligibleAt')(function* (config: Config) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const root = yield* draftQueueObservationDirectory(config);
+  const saved = yield* readQueueFile(fs, path.join(root, 'queue.json'), stateSchema);
+  if (saved === undefined) return undefined;
+  const now = yield* Clock.currentTimeMillis;
+  const pending = new Map(EffectArray.map(saved.pending, cp => [cp.targetKey, cp] as const));
+  const snapshot: Transaction = {
+    state: {...saved, backgroundReservations: EffectArray.filter(saved.backgroundReservations, r => r.at > now - HOUR)},
+    now,
+    read: key =>
+      pending.has(key)
+        ? Effect.succeed(pending.get(key))
+        : readQueueFile(fs, path.join(root, `target-${key}.json`), checkpointSchema),
+    put: () => {},
+  };
+  return (yield* status(snapshot)).nextEligibleAt;
+});
 export function setDraftQueuePolicy(
   config: Config,
   input: {paused?: boolean; provider?: Policy['provider']; remoteGrant?: Policy['remoteGrant'] | null},

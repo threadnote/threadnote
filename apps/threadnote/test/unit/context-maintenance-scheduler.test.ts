@@ -8,6 +8,7 @@ import {contextHealthCaseIdV2} from '@threadnote/context/health_maintenance';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {succeedUndefined} from '@threadnote/platform/optional';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {resourceAccountMutationGenerationPath} from '@threadnote/store/resource/lock';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
@@ -28,6 +29,12 @@ import {
   nextContextMaintenanceWorkerQuiet,
   recordContextMaintenanceWorkerTick,
 } from '../../src/memory/context/maintenance_backoff.js';
+import {
+  claimDraftWork,
+  draftQueueObservationDirectory,
+  enqueueDraftWork,
+  finishDraftWork,
+} from '../../src/memory/context/maintenance_draft_queue.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {CONTEXT_MAINTENANCE_WORKER_ARGUMENT} from '../../src/memory/context/maintenance_worker.js';
@@ -226,10 +233,7 @@ describe('context maintenance wake backoff', () => {
         maintenanceCase('pending', {nextAttemptAt: at(lastWakeAt + 300_000)}),
         maintenanceCase('closed', {disposition: 'resolved', nextAttemptAt: at(lastWakeAt + 60_000)}),
       ],
-      checkpoints: {
-        'tn_a:0': {revision: 'r', checkedAt: T0, retryAt: at(lastWakeAt - 1)},
-        'tn_b:0': {revision: 'r', checkedAt: T0, retryAt: at(lastWakeAt + 600_000)},
-      },
+      checkpoints: {'tn_b:0': {revision: 'r', checkedAt: T0, retryAt: at(lastWakeAt + 600_000)}},
     });
     expect(contextMaintenanceWakeIntervalMs(state, lastWakeAt, '')).toBe(300_000);
     const requestRetryAt = at(lastWakeAt + 120_000);
@@ -243,6 +247,23 @@ describe('context maintenance wake backoff', () => {
         '',
       ),
     ).toBe(30_000);
+  });
+
+  it('keeps thirty seconds while any pending deadline is overdue at the last wake', () => {
+    const lastWakeAt = Date.parse(T0);
+    const overdue = at(lastWakeAt - 1);
+    const backedOff = maintenanceState({
+      workerQuiet: quiet(10),
+      cases: [maintenanceCase('closed', {disposition: 'resolved', nextAttemptAt: overdue})],
+    });
+    expect(contextMaintenanceWakeIntervalMs(backedOff, lastWakeAt, '')).toBe(1_800_000);
+    for (const pending of [
+      {checkpoints: {'tn_a:0': {revision: 'r', checkedAt: T0, retryAt: overdue}}},
+      {cases: [maintenanceCase('pending', {nextAttemptAt: overdue})]},
+      {workerQuiet: {...quiet(10), requestRetryAt: overdue}},
+      {workerQuiet: {...quiet(10), draftRetryAt: overdue}},
+    ])
+      expect(contextMaintenanceWakeIntervalMs({...backedOff, ...pending}, lastWakeAt, '')).toBe(30_000);
   });
 
   it('returns to thirty seconds when the canonical generation changed or is unreadable', () => {
@@ -336,12 +357,7 @@ describe('context maintenance wake backoff', () => {
     const recorded = EffectArray.map(ticks, request => {
       state = {
         ...state,
-        workerQuiet: nextContextMaintenanceWorkerQuiet(
-          state,
-          [{project: 'threadnote', cwd: '/repo', ...request}],
-          '',
-          now,
-        ),
+        workerQuiet: nextContextMaintenanceWorkerQuiet(state, [{project: 'threadnote', cwd: '/repo', ...request}], ''),
       };
       return [state.workerQuiet?.streak, state.workerQuiet?.requestRetryAt];
     });
@@ -350,7 +366,7 @@ describe('context maintenance wake backoff', () => {
       [0, T1],
       [0, T1],
       [1, T1],
-      [0, undefined],
+      [0, at(now - 1)],
     ]);
   });
 
@@ -374,6 +390,41 @@ describe('context maintenance wake backoff', () => {
       yield* fs.writeFileString(generation, 'v1:00000000-0000-4000-8000-000000000001');
       yield* recordContextMaintenanceWorkerTick(config, undefined);
       expect(yield* streak).toBe(0);
+      // An unreadable inventory persists a failed state and still exits zero.
+      yield* writeState(config, {...(yield* readRawState(config)), state: 'failed'});
+      yield* recordContextMaintenanceWorkerTick(config, 0);
+      expect(yield* streak).toBe(0);
+    }).pipe(provideTestLayer(Layer.mergeAll(BunServices.layer, TestSystemInfoLayer))),
+  );
+
+  effectIt.effect('bounds owner-bound wakes by the draft retry time it reads without creating the queue', () =>
+    Effect.gen(function* () {
+      const config = yield* fixture();
+      yield* setContextMaintenancePaused(config, false);
+      yield* recordContextMaintenanceWorkerTick(config, 0);
+      expect(yield* (yield* FileSystem.FileSystem).exists(yield* draftQueueObservationDirectory(config))).toBe(false);
+      expect((yield* readRawState(config)).workerQuiet).not.toHaveProperty('draftRetryAt');
+      yield* enqueueDraftWork(config, {
+        identity: sha256HexSync('identity'),
+        targetKey: sha256HexSync('target'),
+        targetUri: 'threadnote://memory/target',
+        materialRevision: sha256HexSync('material'),
+        backend: 'local-ai',
+        providerIdentity: sha256HexSync('provider'),
+        modelId: 'model',
+        purpose: 'automatic',
+        foreground: true,
+        expectedContentHash: sha256HexSync('content'),
+      });
+      const admitted = yield* claimDraftWork(config);
+      if (admitted.state !== 'claimed') return yield* Effect.die('The queued draft work was not claimed.');
+      yield* finishDraftWork(config, admitted.claim, {state: 'failed', transient: true});
+      yield* recordContextMaintenanceWorkerTick(config, 0);
+      const quietState = (yield* readRawState(config)).workerQuiet;
+      expect(quietState?.draftRetryAt).toBe(at(300_000));
+      expect(
+        contextMaintenanceWakeIntervalMs(maintenanceState({workerQuiet: {...quietState!, streak: 10}}), 0, ''),
+      ).toBe(300_000);
     }).pipe(provideTestLayer(Layer.mergeAll(BunServices.layer, TestSystemInfoLayer))),
   );
 
