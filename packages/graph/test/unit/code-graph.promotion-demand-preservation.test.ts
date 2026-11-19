@@ -77,6 +77,21 @@ const fixture = Effect.gen(function* () {
   return {store, layout, identity, snapshot, claim, now, observe};
 });
 
+const replacementSnapshot = (snapshot: CodeGraphSnapshot): CodeGraphSnapshot => ({
+  ...snapshot,
+  id: 'cgsn_' + EffectString.repeat(40)('9'),
+  completedAt: '2026-11-01T00:01:00.000Z',
+});
+
+const demandLanes = (store: CodeGraphStore['Service'], databasePath: string) =>
+  store.withSession(
+    databasePath,
+    Effect.gen(function* () {
+      return yield* readCodeGraphEmbeddingDemandPage(yield* SqlClient.SqlClient);
+    }),
+    {readOnly: true},
+  );
+
 effectIt.layer(dependencies)(it => {
   it.effect.prop(
     'repeated structural or background promotion preserves the exact active embedding claim',
@@ -130,6 +145,40 @@ effectIt.layer(dependencies)(it => {
       const after = yield* f.observe;
       expect(after.claimValid).toBe(false);
       expect(Date.parse(String(after.active[0]?.activated_at))).toBeGreaterThan(Date.parse(f.claim.activatedAt));
+    }).pipe(TestClock.withLive),
+  );
+
+  it.effect("a structural promotion of a new snapshot keeps the view's live embedding demand", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const next = replacementSnapshot(f.snapshot);
+      yield* f.store.activate(f.layout.databasePath, f.identity, next, [], [], [], []);
+      yield* f.store.promote(f.layout.databasePath, f.identity, next.id);
+
+      expect(yield* demandLanes(f.store, f.layout.databasePath)).toEqual([
+        expect.objectContaining({snapshotId: next.id, state: 'queued'}),
+      ]);
+      expect((yield* f.observe).claimValid).toBe(false);
+    }).pipe(TestClock.withLive),
+  );
+
+  it.effect('a structural promotion creates no embedding demand for a view that never requested it', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const path = yield* Path.Path;
+      const worktreeId = EffectString.repeat(63)('c') + '0';
+      const layout = codeGraphLayout(path, f.identity.repoRoot, f.identity.checkoutId, worktreeId);
+      const identity = {...f.identity, worktreeId};
+      const first = {...f.snapshot, worktreeId: identity.worktreeId, id: 'cgsn_' + EffectString.repeat(40)('7')};
+      const next = {...replacementSnapshot(first), id: 'cgsn_' + EffectString.repeat(40)('8')};
+      for (const snapshot of [first, next]) {
+        yield* f.store.activate(layout.databasePath, identity, snapshot, [], [], [], []);
+        yield* f.store.promote(layout.databasePath, identity, snapshot.id);
+      }
+
+      expect(yield* demandLanes(f.store, layout.databasePath)).toEqual([
+        expect.objectContaining({worktreeId: f.identity.worktreeId}),
+      ]);
     }).pipe(TestClock.withLive),
   );
 });

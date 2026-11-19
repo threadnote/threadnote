@@ -11,6 +11,7 @@ import {
   deferredCodeAnchorRouteHasPending,
   finalizeDeferredCodeAnchorsForRoute,
 } from '../memory/deferred/code_anchor.js';
+import {AUTOMATIC_DEFERRED_CODE_ANCHOR_PASS_TIMEOUT_MILLISECONDS} from '../memory/deferred/code_anchor_recovery.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 
 export class RecallReadMaintenanceUnavailable extends Schema.TaggedError<
@@ -76,7 +77,12 @@ const run = Effect.fn('recall.readMaintenance')(function* (scope: RecallLexicalS
       repositoryId: scope.work.repositoryId,
       worktreeId: scope.work.worktreeId,
     },
-    {limit: 4, preferredCodeRefs: scope.work.codeRefs, waitTimeoutMilliseconds: 0},
+    {
+      limit: 4,
+      passTimeoutMilliseconds: AUTOMATIC_DEFERRED_CODE_ANCHOR_PASS_TIMEOUT_MILLISECONDS,
+      preferredCodeRefs: scope.work.codeRefs,
+      waitTimeoutMilliseconds: 0,
+    },
   );
   return receipt.state === 'completed' && receipt.pendingCount === 0 ? ('complete' as const) : ('pending' as const);
 });

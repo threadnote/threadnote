@@ -21,7 +21,30 @@ import {provideTestLayer} from '../helpers/effect-layer.js';
 
 import {recallReadMaintenanceLayer} from '../../src/recall/read_maintenance.js';
 import {runRecallLexicalWorkerUnit} from '../../src/recall/embedding_worker.js';
-import {recallLexicalDemandKey, readRecallLexicalScope} from '@threadnote/recall/background/lexical-demand';
+import {
+  readRecallLexicalDemand,
+  recallLexicalDemandKey,
+  readRecallLexicalScope,
+  type RecallLexicalScope,
+} from '@threadnote/recall/background/lexical-demand';
+
+/**
+ * A reader gives its durable enqueue a bounded budget and a worker defers a contended route, so a
+ * loaded runner may need another read or another worker turn. Poll for the observable outcome.
+ */
+function eventually<A, E, R, R2>(
+  attempt: Effect.Effect<A, E, R>,
+  settled: (value: A) => Effect.Effect<boolean, never, R2>,
+) {
+  return Effect.gen(function* () {
+    let value = yield* attempt;
+    for (let tries = 1; tries < 80 && !(yield* settled(value)); tries += 1) {
+      yield* Effect.sleep('250 millis');
+      value = yield* attempt;
+    }
+    return value;
+  });
+}
 
 describe('Context Brief deferred code-anchor recovery', () => {
   for (const interruptFirstAdmission of [false, true]) {
@@ -160,17 +183,30 @@ describe('Context Brief deferred code-anchor recovery', () => {
               Effect.provideService(CodeGraphQueryService, liveQuery),
               Effect.timeout('2 seconds'),
             );
-            const first = yield* firstRetrieve;
+            const directory = path.join(home, 'recall', 'lexical-demand-v1');
+            const readScopes = Effect.gen(function* () {
+              if (!(yield* fs.exists(directory))) return [];
+              return yield* Effect.forEach(yield* fs.readDirectory(directory), filename =>
+                readRecallLexicalScope(home, filename),
+              );
+            });
+            const pendingDemand = (scope: RecallLexicalScope | undefined) =>
+              scope === undefined
+                ? Effect.succeed(false)
+                : readRecallLexicalDemand(scope).pipe(
+                    Effect.map(demand => demand?.revision !== undefined),
+                    Effect.orElseSucceed(() => false),
+                  );
+            const anchorScope = (scopes: readonly (RecallLexicalScope | undefined)[]) =>
+              Option.getOrUndefined(EffectArray.findFirst(scopes, scope => scope?.work?.kind === 'anchors'));
+            const {brief: first, scopes} = yield* eventually(
+              Effect.all({brief: firstRetrieve, scopes: readScopes}),
+              ({scopes}) => Effect.succeed(anchorScope(scopes) !== undefined),
+            );
             expect(first.candidates).toEqual([]);
             expect(first.gaps).toContain('code-anchor-recall-unavailable');
             expect(interruptedAdmission).toBe(false);
-            const directory = path.join(home, 'recall', 'lexical-demand-v1');
-            const scopes = yield* Effect.forEach(yield* fs.readDirectory(directory), filename =>
-              readRecallLexicalScope(home, filename),
-            );
-            const scope = Option.getOrUndefined(
-              EffectArray.findFirst(scopes, scope => scope?.work?.kind === 'anchors'),
-            );
+            const scope = anchorScope(scopes);
             expect(scope).toBeDefined();
             const isSameAnchorRouteScope = (candidate: typeof scope) =>
               candidate !== undefined &&
@@ -195,8 +231,10 @@ describe('Context Brief deferred code-anchor recovery', () => {
               yield* Deferred.await(entered);
               yield* Fiber.interrupt(worker);
             }
-            const completed = yield* runRecallLexicalWorkerUnit(scope!).pipe(Effect.provide(port));
-            expect(completed.state).toBe('complete');
+            const completed = yield* eventually(runRecallLexicalWorkerUnit(scope!).pipe(Effect.provide(port)), result =>
+              Effect.succeed(result.state !== 'deferred'),
+            );
+            expect(completed, JSON.stringify(completed)).toMatchObject({state: 'complete'});
             // The home host gives the newly enqueued lexical work its own turn.
             yield* runRecallLexicalWorkerUnit({...config, includeInactive: false});
             expect(
@@ -216,7 +254,14 @@ describe('Context Brief deferred code-anchor recovery', () => {
               visibility: metadata.visibility,
             });
 
-            const second = yield* retrieveContextBriefCodeLinkedMemoryEvidence(config, plan.codeAnchors);
+            const healedRead = (uri: string) =>
+              eventually(retrieveContextBriefCodeLinkedMemoryEvidence(config, plan.codeAnchors), brief =>
+                Effect.succeed(
+                  EffectArray.some(brief.candidates, candidate => candidate.uri === uri) &&
+                    !brief.gaps.includes('code-anchor-recall-unavailable'),
+                ),
+              );
+            const second = yield* healedRead(memoryUri);
             expect(EffectArray.map(second.candidates, candidate => candidate.uri)).toEqual([memoryUri]);
             expect(second.gaps).not.toContain('code-anchor-recall-unavailable');
             expect(
@@ -238,20 +283,26 @@ describe('Context Brief deferred code-anchor recovery', () => {
               memoryMetadata: laterMetadata,
               memoryUri: laterUri,
             });
-            const pendingAgain = yield* retrieveContextBriefCodeLinkedMemoryEvidence(config, plan.codeAnchors);
-            expect(pendingAgain.gaps).toContain('code-anchor-recall-unavailable');
-            const laterScopes = yield* Effect.forEach(yield* fs.readDirectory(directory), filename =>
-              readRecallLexicalScope(home, filename),
+            const {brief: pendingAgain, scopes: laterScopes} = yield* eventually(
+              Effect.all({
+                brief: retrieveContextBriefCodeLinkedMemoryEvidence(config, plan.codeAnchors),
+                scopes: readScopes,
+              }),
+              ({scopes}) =>
+                pendingDemand(EffectArray.findFirst(scopes, isSameAnchorRouteScope).pipe(Option.getOrUndefined)),
             );
+            expect(pendingAgain.gaps).toContain('code-anchor-recall-unavailable');
             const laterRouteScopes = EffectArray.filter(laterScopes, isSameAnchorRouteScope);
             expect(laterRouteScopes).toHaveLength(1);
             const laterScope = laterRouteScopes[0];
             expect(recallLexicalDemandKey(laterScope!)).toBe(recallLexicalDemandKey(scope!));
-            expect(yield* runRecallLexicalWorkerUnit(laterScope!).pipe(Effect.provide(port))).toMatchObject({
-              state: 'complete',
-            });
+            expect(
+              yield* eventually(runRecallLexicalWorkerUnit(laterScope!).pipe(Effect.provide(port)), result =>
+                Effect.succeed(result.state !== 'deferred'),
+              ),
+            ).toMatchObject({state: 'complete'});
             yield* runRecallLexicalWorkerUnit({...config, includeInactive: false});
-            const healedAgain = yield* retrieveContextBriefCodeLinkedMemoryEvidence(config, plan.codeAnchors);
+            const healedAgain = yield* healedRead(laterUri);
             expect(EffectArray.map(healedAgain.candidates, candidate => candidate.uri)).toContain(laterUri);
             expect(healedAgain.gaps).not.toContain('code-anchor-recall-unavailable');
           }),

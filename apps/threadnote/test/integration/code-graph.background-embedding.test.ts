@@ -516,6 +516,23 @@ for (const scoped of [false, true])
         yield* resumeExistingCodeGraphEmbeddingDemand(home);
         expect(wakes).toBe(beforeWakes);
         expect(inference).toBe(beforeOffInference);
+        // A structural refresh that publishes a new view keeps the view's demand and wakes a worker for it.
+        wake = () => Effect.succeed(true);
+        yield* fs.writeFileString(
+          path.join(repository, scoped ? 'apps/web/carried.ts' : 'carried.ts'),
+          'export function gamma() { return 3; }\n',
+        );
+        const carried = yield* indexer.index({
+          cwd: repository,
+          threadnoteHome: home,
+          vectorPolicy: 'off',
+          ...(route.state === 'selected' ? {project: route.project} : {}),
+        });
+        expect(carried.snapshot.id).not.toBe(pending.readySnapshot?.id);
+        expect(
+          EffectArray.map(yield* readOriginalLanes, lane => ({snapshotId: lane.snapshotId, state: lane.state})),
+        ).toEqual([{snapshotId: carried.snapshot.id, state: 'queued'}]);
+        expect(wakes, 'carried structural demand').toBe(beforeWakes + 1);
       });
       return Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
