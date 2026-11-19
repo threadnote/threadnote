@@ -934,13 +934,14 @@ export async function execute(root: string, checkout: string, enforced: boolean,
       files: EffectRecord.keys(manifest.hashes).length,
       nativeOnly: true,
     };
+    const portableGeneration = Effect2.pipe(generation, EffectString.replaceAll(sep, '/'));
     for (const skill of manifest.skills) {
       const content = fs.readFileSync(join(skills, skill.id, 'SKILL.md'), 'utf8');
       const template = fs.readFileSync(join(generation, skill.id, 'SKILL.md'), 'utf8');
       const expected = Effect2.pipe(
         template,
-        EffectString.replaceAll('{{THREADNOTE_SKILL_ROOT}}', join(generation, skill.id)),
-        EffectString.replaceAll('{{THREADNOTE_BUNDLE_ROOT}}', generation),
+        EffectString.replaceAll('{{THREADNOTE_SKILL_ROOT}}', `${portableGeneration}/${skill.id}`),
+        EffectString.replaceAll('{{THREADNOTE_BUNDLE_ROOT}}', portableGeneration),
       );
       requireCondition(
         content === expected &&

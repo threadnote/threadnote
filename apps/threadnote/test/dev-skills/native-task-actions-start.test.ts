@@ -1158,8 +1158,9 @@ describe('native task actions', () => {
         expect(startResponse.isError).not.toBe(true);
         const started = object(startResponse.structuredContent);
         expect(started.status).toBe('awaiting-user-confirmation');
-        expect(typeof started.taskRef).toBe('string');
-        const runId = String(started.taskRef);
+        expect(typeof started.runId).toBe('string');
+        expect(started.taskRef).toBe(started.runId);
+        const runId = String(started.runId);
         const statePath = f.path.join(canonicalHome, 'workflow-automations', 'native-v1', runId + '.json');
         const savedState = yield* f.fs.readFileString(statePath);
         const resumed = object(
@@ -1168,8 +1169,20 @@ describe('native task actions', () => {
             Effect.provideService(ResourceStore, interruptedStore),
           ),
         );
-        expect(resumed.status).toBe('resumed');
-        expect(resumed.taskRef).toBe(runId);
+        expect(resumed).toMatchObject({status: 'resumed', runId, taskRef: runId});
+        const {intent: _intent, ...withoutIntent} = base;
+        const resumeWithoutIntent = yield* runNativeTaskStart(config, {...withoutIntent, taskRef: runId}).pipe(
+          Effect.result,
+        );
+        expect(resumeWithoutIntent).toMatchObject({
+          failure: {code: 'invalid-request', message: expect.stringContaining('resume requires intent')},
+        });
+        const viewByFeatureName = yield* readNativeTaskView(config, {runId: 'fixture-refresh', callerCwd: f.repo}).pipe(
+          Effect.result,
+        );
+        expect(viewByFeatureName).toMatchObject({
+          failure: {code: 'run-not-found', message: expect.stringContaining('runId that workflow_task_start returned')},
+        });
         expect(yield* f.fs.readFileString(statePath)).toBe(savedState);
 
         let cliResult: Record<string, unknown> | undefined;
@@ -2626,12 +2639,23 @@ describe('native task actions', () => {
           },
         },
       });
+      // The runtime fills format, identity, source hashes and compact origin from the run and checkout.
+      const {
+        format: _format,
+        schemaVersion: _schemaVersion,
+        id: _id,
+        project: _project,
+        source: _source,
+        kind: _kind,
+        compactOrigin: _compactOrigin,
+        ...expansionBusiness
+      } = expansion;
       const firstExpansion = object(
         yield* runNativeTaskAction(config, {
           command: 'compact-expand',
           runId,
           callerCwd: repo,
-          document: expansion,
+          document: expansionBusiness,
         }),
       );
       expect(firstExpansion.status).toBe('awaiting-user-confirmation');
@@ -3198,6 +3222,20 @@ describe('native task actions', () => {
         ],
         review: {required: true, reason: 'The expanded scope adds a dependent persistence check.'},
       };
+      // The MCP shape passes an unknown item key on, so the strict runtime decode refuses it instead of dropping it.
+      const misspelled = yield* mcp
+        .invokeTool('workflow_task_compact_expand', {
+          runId: 'native-run',
+          callerCwd: f.repo,
+          document: {
+            ...expandedDocument,
+            phases: [{...expandedDocument.phases[0], acceptance: [{...firstAcceptance, scenarioId: ['typo']}]}],
+          },
+        })
+        .pipe(Effect.result);
+      expect(misspelled).toMatchObject({
+        failure: {code: 'invalid-document', message: expect.stringContaining('acceptance[0]')},
+      });
       const expanded = object(
         yield* mcp.invokeTool('workflow_task_compact_expand', {
           runId: 'native-run',

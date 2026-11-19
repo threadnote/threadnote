@@ -12,7 +12,6 @@ import {registerWorkflowTaskTool} from '../../src/mcp/server/workflow.js';
 import {runNativeTaskAction as runNativeTaskActionCore} from '../../src/workflow_automation/task_actions.js';
 import {readNativeWatch, writeNativeWatch} from '../../src/workflow_automation/watch_store.js';
 import {SystemInfo} from '@threadnote/platform/system';
-import {readNativeWorkflowState} from '../../src/workflow_automation/store.js';
 import {sha256HexSync} from '../../src/workflow_memory/native_digest.js';
 import {runNativeJobWorker} from '../../src/workflow_automation/native_jobs.js';
 import {readNativeCloseoutJournal} from '../../src/workflow_automation/closeout_store.js';
@@ -213,6 +212,7 @@ export const attemptSimulatedTaskWatch = (
   deliveryRef: string,
   prUrl: string,
   expectedWatchId?: string,
+  onCollectorSpawn: Effect.Effect<void> = Effect.void,
 ) =>
   Effect.gen(function* () {
     const identity =
@@ -227,7 +227,8 @@ export const attemptSimulatedTaskWatch = (
       threadId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
     };
     const commands = yield* CommandExecutor;
-    const taskProof = (yield* readNativeWorkflowState(f.config, runId))?.state.cycle?.state.phases[phaseId];
+    // The simulated provider reports the commit checked out at start, as a pushed PR head would.
+    const providerHead = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
     const system = yield* SystemInfo;
     const processAdapterContext = yield* Effect.context<
       FileSystem.FileSystem | Path.Path | SecureRandom.SecureRandom
@@ -261,7 +262,7 @@ export const attemptSimulatedTaskWatch = (
               headRepository: EffectArray.some(args, arg => EffectString.includes('headSha: .head.sha')(arg))
                 ? `${owner}/${repo}`
                 : `fixture-fork/${repo}`,
-              headSha: taskProof?.head,
+              headSha: providerHead,
               state: 'open',
               merged: false,
               baseBranch: remoteBaseBranch,
@@ -275,6 +276,7 @@ export const attemptSimulatedTaskWatch = (
         Effect.gen(function* () {
           collectorSpawns += 1;
           collectorAlive = true;
+          yield* onCollectorSpawn;
           const starting = yield* readNativeWatch(f.config, watchId);
           if (!starting?.envelope.collector) return false;
           yield* writeNativeWatch(
@@ -649,7 +651,7 @@ export const publishOpenHistoricalPhase = (
           validationRef: String(validation.validationRef),
           deliveryRef: legacyRef,
         }).pipe(Effect.result),
-      ).toMatchObject({failure: {code: 'user-authority-required'}});
+      ).toMatchObject({failure: {code: 'stale-delivery-ref'}});
       expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeLegacy);
     }
     yield* runNativeTaskAction(f.config, {

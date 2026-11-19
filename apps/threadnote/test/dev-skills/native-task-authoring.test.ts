@@ -55,6 +55,8 @@ import {readNativeTaskView} from '../../src/workflow_automation/task.js';
 import {runNativeTaskAction, runNativeTaskStart} from '../../src/workflow_automation/task_actions.js';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
 import {ResourceStore} from '@threadnote/store/resource-store';
+import {uriSegment} from '@threadnote/store/resource-segment';
+import {formatMemoryDocument} from '@threadnote/memory/document';
 import {sha256HexSync} from '../../src/workflow_memory/native_digest.js';
 import {AuthoringRootSchema, decodeAuthoringArtifact} from '../../src/workflow_automation/authoring_artifacts.js';
 import {inspectNativeSourcePaths} from '../../src/workflow_automation/authoring.js';
@@ -2442,6 +2444,71 @@ effectIt.effect(
         )(sha256HexSync(workflowTitleSlug(f.path.basename(f.repo)) + '\n' + workflowTitleSlug(featureNames[1])));
       expect(yield* readNativeWorkflowState(f.config, detailRunId)).toBeUndefined();
     }).pipe(TestClock.withLive, provideNative),
+);
+
+effectIt.effect('pins a plain threadnote:// evidence URI to its memory identity and revision', () =>
+  Effect.gen(function* () {
+    const f = yield* setup;
+    const project = workflowTitleSlug(f.path.basename(f.repo));
+    const directory = `threadnote://user/${uriSegment(f.config.user)}/memories/durable/projects/${project}`;
+    const uri = `${directory}/fixture-evidence.md`;
+    const content = formatMemoryDocument(
+      'MEMORY',
+      {
+        kind: 'durable',
+        status: 'active',
+        project,
+        topic: 'fixture-evidence',
+        memoryId: 'tn_fixture_evidence',
+        sourceAgentClient: 'fixture',
+        timestamp: '2026-11-19T00:00:00.000Z',
+      },
+      'The fixture reader owns saved-value readback.\n',
+    );
+    const store = yield* ResourceStore;
+    const location = {account: f.config.account, home: f.config.agentContextHome, user: f.config.user};
+    yield* store.makeDirectory(location, directory);
+    yield* store.write(location, uri, content, {mode: 'create'});
+    const contentFile = f.path.join(f.root, 'uri-evidence.json');
+    yield* f.fs.writeFileString(
+      contentFile,
+      JSON.stringify({...specBusiness, context: {...specBusiness.context, evidenceRefs: [uri]}}),
+    );
+    const draft = yield* f.author({
+      command: 'start',
+      featureName: 'URI evidence fixture',
+      kind: 'spec',
+      contentFile,
+      installationTarget: 'codex',
+    });
+    expect(draft.status).toBe('draft');
+    const read = yield* f.author({command: 'read', authoringRef: draft.authoringRef, detail: 'document'});
+    const spec = yield* Schema.decodeUnknownEffect(NativeAuthoringSpecDocumentSchema)(read.document);
+    expect(spec.context.evidenceRefs).toEqual([
+      {uri, memoryId: 'tn_fixture_evidence', revision: sha256HexSync(content)},
+    ]);
+    const foreignFile = f.path.join(f.root, 'foreign-evidence.json');
+    yield* f.fs.writeFileString(
+      foreignFile,
+      JSON.stringify({
+        ...specBusiness,
+        context: {
+          ...specBusiness.context,
+          evidenceRefs: [EffectString.replace(`/projects/${project}/`, '/projects/other/')(uri)],
+        },
+      }),
+    );
+    const foreign = yield* f
+      .author({
+        command: 'start',
+        featureName: 'Foreign evidence fixture',
+        kind: 'spec',
+        contentFile: foreignFile,
+        installationTarget: 'codex',
+      })
+      .pipe(Effect.result);
+    expect(foreign).toMatchObject({failure: {code: 'out-of-scope'}});
+  }).pipe(TestClock.withLive, provideNative),
 );
 
 effectIt.effect.each(['head', 'bytes'] as const)(

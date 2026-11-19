@@ -310,7 +310,7 @@ export function validateNativeCycleReview(
     fail('Select the required correctness review lane and include its complete report.');
   if (!review.selected.includes('simplicity'))
     fail('Select the required simplicity review lane and include its complete report.');
-  return validateNativeCycleReviewHistory(snapshot, review, previous);
+  return checkNativeCycleReviewHistory(snapshot, review, previous);
 }
 
 const decodeNativeCycleReview = (input: unknown): NativeCycleReview => {
@@ -322,12 +322,17 @@ const decodeNativeCycleReview = (input: unknown): NativeCycleReview => {
 };
 
 /** Revalidate stored evidence without applying later submission requirements to its immutable history. */
-export function validateNativeCycleReviewHistory(
+export const validateNativeCycleReviewHistory = (
   snapshot: NativeCycleSnapshot,
   input: unknown,
   previous?: {readonly snapshot: NativeCycleSnapshot; readonly review: NativeCycleReview},
+) => checkNativeCycleReviewHistory(snapshot, decodeNativeCycleReview(input), previous);
+
+function checkNativeCycleReviewHistory(
+  snapshot: NativeCycleSnapshot,
+  review: NativeCycleReview,
+  previous?: {readonly snapshot: NativeCycleSnapshot; readonly review: NativeCycleReview},
 ) {
-  const review = decodeNativeCycleReview(input);
   if (
     review.snapshotId !== snapshot.snapshotId ||
     review.phaseHash !== snapshot.phaseHash ||

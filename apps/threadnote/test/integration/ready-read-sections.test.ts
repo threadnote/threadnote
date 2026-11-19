@@ -244,7 +244,6 @@ describe('complete ready sections', () => {
         });
         const direct = yield* prepareRecallSections(f.config, {
           ...options,
-          allowReranker: false,
           passes: [],
           exactMatches,
           semanticResult: Option.some(emptyRecallSemanticScoresResult()),
@@ -364,7 +363,6 @@ describe('complete ready sections', () => {
       let calls = 0;
       const direct = yield* prepareRecallSections(f.config, {
         ...f.options,
-        allowReranker: false,
         passes: [],
         exactMatches: [],
         semanticResult: Option.some(emptyRecallSemanticScoresResult()),
@@ -438,7 +436,6 @@ describe('complete ready sections', () => {
         const boundary = yield* makeReadyRecallReadBoundary(undefined);
         const raw = yield* prepareRecallSections(config, {
           ...input,
-          allowReranker: false,
           exactMatches: [],
           passes: [],
           readRecords: uris => readLocalMemoryRecordsByUri(config, uris),
@@ -463,7 +460,6 @@ describe('complete ready sections', () => {
       const {exact: _exact, ...common} = f.options;
       const closing = {...common, mode: 'closing', candidateUris: [f.uri], semantic: {}, rerankerScores: []};
       for (const extra of [
-        {allowReranker: true},
         {readRecords: 'callback'},
         {semantic: {scores: [[f.uri, Infinity]]}},
         {rerankerScores: [[EffectString.repeat(64)('0'), NaN]]},

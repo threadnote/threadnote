@@ -9,7 +9,12 @@ import {fail} from './task_action_helpers.js';
 import type {NativeTaskActionRequest} from './task_actions.js';
 import {runNativePrWatchOperation} from './task_pr_watch.js';
 import {runNativeWatch} from './watch.js';
-import {nativeWatchWakeupSchema} from './watch_notification_state.js';
+import {
+  isNativeWatchSessionWakeup,
+  nativeWatchWakeupMatches,
+  nativeWatchWakeupSchema,
+} from './watch_notification_state.js';
+import {resolveNativeWatchSessionWakeup} from './watch_notification.js';
 import {nativeWatchPullRequest} from './watch_provider.js';
 import {readNativeWatch, type NativeWatchEnvelope} from './watch_store.js';
 import {nativeWatchCollectorAlive} from './watch_process.js';
@@ -202,7 +207,7 @@ export const runStandalonePrWatch = (
       if (
         binding.checkout !== checkout ||
         (request.prUrl !== undefined && request.prUrl !== binding.prUrl) ||
-        (request.wakeup !== undefined && stableJson(request.wakeup) !== stableJson(binding.wakeup))
+        (request.wakeup !== undefined && !nativeWatchWakeupMatches(request.wakeup, binding.wakeup))
       )
         return yield* fail(
           'watch-identity-conflict',
@@ -214,7 +219,10 @@ export const runStandalonePrWatch = (
           'standalone-watch-input-required',
           'Start with an explicit prUrl and actual host registration; resume with the returned watchRef.',
         );
-      const wakeup = yield* Schema.decodeUnknownEffect(nativeWatchWakeupSchema)(request.wakeup).pipe(
+      const requestedWakeup = isNativeWatchSessionWakeup(request.wakeup)
+        ? yield* resolveNativeWatchSessionWakeup(request.wakeup, checkout)
+        : request.wakeup;
+      const wakeup = yield* Schema.decodeUnknownEffect(nativeWatchWakeupSchema)(requestedWakeup).pipe(
         Effect.mapError(() => fail('invalid-request', 'Standalone start requires the actual host executable.')),
       );
       const truth = yield* observePr(request.prUrl);

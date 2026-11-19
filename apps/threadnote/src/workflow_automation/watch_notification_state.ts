@@ -1,5 +1,6 @@
 import * as Array from 'effect/Array';
 import * as Option from 'effect/Option';
+import * as Record from 'effect/Record';
 import * as Schema from 'effect/Schema';
 import * as EffectString from 'effect/String';
 import type {NativeWatchState} from '@threadnote/workflow-automations/watch';
@@ -35,7 +36,7 @@ const sessionHostExecutables: {readonly [Host in (typeof sessionHosts)[number]]:
   'cursor-cli': /[\\/](?:agent|cursor-agent)(?:\.exe)?$/iu,
   'claude-code': /[\\/]claude(?:\.exe)?$/iu,
 };
-const sessionWakeupSchema = Schema.Struct({
+export const nativeWatchSessionWakeupSchema = Schema.Struct({
   host: Schema.Literals(sessionHosts),
   executable: absolute,
   sessionId: uuid,
@@ -48,15 +49,36 @@ const sessionWakeupSchema = Schema.Struct({
       : 'The executable is not the registered session host launcher.',
   ),
 );
+/** A start request can omit the fields the runtime derives; the resolved registration is decoded strictly. */
+const sessionWakeupRequestSchema = Schema.Struct({
+  host: Schema.Literals(sessionHosts),
+  executable: Schema.optionalKey(absolute),
+  sessionId: Schema.optionalKey(uuid),
+  workspace: Schema.optionalKey(absolute),
+  exclusiveSession: Schema.optionalKey(Schema.Literal(true)),
+});
 export const nativeWatchWakeupHosts = ['codex', ...sessionHosts] as const;
-export const nativeWatchWakeupRequestSchema = Schema.Union([nativeWatchCodexWakeupRequestSchema, sessionWakeupSchema]);
-export const nativeWatchWakeupSchema = Schema.Union([Schema.Struct(codexWakeupFields), sessionWakeupSchema]);
+export const nativeWatchWakeupRequestSchema = Schema.Union([
+  nativeWatchCodexWakeupRequestSchema,
+  sessionWakeupRequestSchema,
+]);
+export type NativeWatchSessionWakeupRequest = typeof sessionWakeupRequestSchema.Type;
+export const nativeWatchWakeupSchema = Schema.Union([Schema.Struct(codexWakeupFields), nativeWatchSessionWakeupSchema]);
 export type NativeWatchWakeup = typeof nativeWatchWakeupSchema.Type;
-export type NativeWatchSessionWakeup = typeof sessionWakeupSchema.Type;
+export type NativeWatchSessionWakeup = typeof nativeWatchSessionWakeupSchema.Type;
 /** Codex queues into its live thread; every other host is a session host. */
 export const isNativeWatchSessionWakeup = <Wakeup extends {readonly host: string}>(
   wakeup: Wakeup | undefined,
 ): wakeup is Exclude<Wakeup, {readonly host: 'codex'}> => wakeup !== undefined && wakeup.host !== 'codex';
+/** A resumed or renewed watch keeps its registered host; each field the request names must equal that registration. */
+export const nativeWatchWakeupMatches = (
+  requested: typeof nativeWatchWakeupRequestSchema.Type,
+  registered: NativeWatchWakeup,
+) =>
+  Array.every(
+    Record.toEntries<string, unknown>(requested),
+    ([key, value]) => value === (registered as {readonly [key: string]: unknown})[key],
+  );
 export const nativeWatchNotificationSchema = Schema.Struct({
   consumerId: portable,
   wakeupId: portable,

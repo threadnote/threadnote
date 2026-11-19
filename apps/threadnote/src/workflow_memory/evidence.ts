@@ -27,6 +27,30 @@ import {
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
+/** Whether a URI is an exact private memory of this user and project, the only memories workflow evidence reads. */
+export function workflowEvidenceUriInScope(
+  scope: {readonly user: string; readonly project: string},
+  uri: string,
+): boolean {
+  const root = 'threadnote://user/' + uriSegment(scope.user) + '/memories/';
+  const roots = [
+    root + 'handoffs/active/' + uriSegment(scope.project),
+    root + 'durable/projects/' + uriSegment(scope.project),
+  ];
+  const resource = parseResourceId(uri);
+  return (
+    resource.canonicalUri === uri &&
+    resource.anchor === undefined &&
+    EffectArray.some(
+      roots,
+      item => resourceIdIsWithin(uri, item) && resource.segments.length === parseResourceId(item).segments.length + 1,
+    ) &&
+    Effect2.pipe(resource.segments.at(-1), effectOptionalString =>
+      effectOptionalString == null ? false : Effect2.pipe(effectOptionalString, EffectString.endsWith('.md')),
+    )
+  );
+}
+
 /** Per-intent exact read scopes; this never changes the run's binding or owned artifacts. */
 export function workflowEvidenceScopes(
   binding: WorkflowBinding,
@@ -36,27 +60,10 @@ export function workflowEvidenceScopes(
     throw workflowError('invalid-request', 'A workflow can admit at most sixteen evidence references.');
   if (refs.length && binding.profile !== 'desktop')
     throw workflowError('out-of-scope', 'Private cross-run evidence is available only to desktop workflows.');
-  const root = 'threadnote://user/' + uriSegment(binding.user) + '/memories/';
-  const roots = [
-    root + 'handoffs/active/' + uriSegment(binding.project),
-    root + 'durable/projects/' + uriSegment(binding.project),
-  ];
   const uris = new Set<string>();
   const identities = new Set<string>();
   for (const ref of refs) {
-    const resource = parseResourceId(ref.uri);
-    if (
-      resource.canonicalUri !== ref.uri ||
-      resource.anchor !== undefined ||
-      !EffectArray.some(
-        roots,
-        scope =>
-          resourceIdIsWithin(ref.uri, scope) && resource.segments.length === parseResourceId(scope).segments.length + 1,
-      ) ||
-      !Effect2.pipe(resource.segments.at(-1), effectOptionalString =>
-        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.endsWith('.md')),
-      )
-    )
+    if (!workflowEvidenceUriInScope(binding, ref.uri))
       throw workflowError('out-of-scope', 'Evidence must be an exact private memory in this user and project.');
     if (!isMemoryId(ref.memoryId) || !/^[a-f0-9]{64}$/u.test(ref.revision))
       throw workflowError('invalid-request', 'Evidence must pin a native memory identity and revision.');

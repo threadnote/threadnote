@@ -707,6 +707,30 @@ export function checkNativeCycleScope(phase: NativeCyclePlan['phases'][number], 
       }),
   );
 }
+const quotedList = (items: ReadonlyArray<string>) => {
+  const shown = EffectArray.join(
+    EffectArray.map(EffectArray.take(items, 3), item =>
+      JSON.stringify(item.length > 80 ? `${Effect.pipe(item, EffectString.slice(0, 79))}…` : item),
+    ),
+    ', ',
+  );
+  return items.length > 3 ? `${shown} and ${items.length - 3} more` : shown;
+};
+/** Name what differs so the caller can copy the exact stored criterion text. */
+function acceptanceCoverageMessage(stored: ReadonlyArray<string>, covered: ReadonlyArray<string>): string {
+  const missing = EffectArray.filter(stored, x => !covered.includes(x)),
+    duplicate = EffectArray.dedupe(EffectArray.filter(covered, (x, i) => covered.indexOf(x) !== i)),
+    extra = EffectArray.dedupe(EffectArray.filter(covered, x => !stored.includes(x)));
+  return EffectArray.join(
+    [
+      'Acceptance criteria coverage is incomplete.',
+      ...(missing.length > 0 ? [`Missing stored criteria: ${quotedList(missing)}.`] : []),
+      ...(duplicate.length > 0 ? [`Duplicate entries: ${quotedList(duplicate)}.`] : []),
+      ...(extra.length > 0 ? [`Entries that match no stored criterion: ${quotedList(extra)}.`] : []),
+    ],
+    ' ',
+  );
+}
 /** Under a standard policy, out-of-plan paths are drift the reviewed snapshot covers, not a scope violation. */
 export function validateNativeCyclePhase(
   value: NativeCycleState,
@@ -742,7 +766,7 @@ export function validateNativeCyclePhase(
     covered.length !== p.acceptanceCriteria.length ||
     EffectArray.some(p.acceptanceCriteria, x => !covered.includes(x))
   )
-    err('Acceptance criteria coverage is incomplete.');
+    err(acceptanceCoverageMessage(p.acceptanceCriteria, covered));
   if (r.head === snapshot.head && r.tree === snapshot.tree && canonical(r.validation ?? null) === canonical(v))
     return s;
   return {

@@ -343,7 +343,13 @@ export const runNativeSharedPlanStart = Effect.fn('workflowAutomation.runNativeS
         if (admitted.status !== 'admitted')
           return yield* fail('portable-plan-conflict', 'The recipient plan was not admitted.');
         const view = yield* readNativeTaskView(config, {runId: admitted.runId, callerCwd: checkout, detail: 'packet'});
-        return {status: 'admitted' as const, taskRef: admitted.runId, sharedPlanRef: request.sharedPlanRef, view};
+        return {
+          status: 'admitted' as const,
+          runId: admitted.runId,
+          taskRef: admitted.runId,
+          sharedPlanRef: request.sharedPlanRef,
+          view,
+        };
       }),
     stage => fs.remove(stage, {recursive: true, force: true}),
   );

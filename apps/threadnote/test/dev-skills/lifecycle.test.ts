@@ -185,7 +185,9 @@ describe('development skills lifecycle', () => {
       const entrypoints = renderEntrypoints(f.path, result.target, bundle);
       for (const [relative, content] of EffectRecord.toEntries(entrypoints))
         expect(yield* f.fs.readFileString(f.path.join(result.target.skillRoot, relative))).toBe(content);
-      expect(yield* f.fs.readFileString(f.path.join(result.target.skillRoot, 'dev-plan/SKILL.md'))).toContain(root);
+      expect(yield* f.fs.readFileString(f.path.join(result.target.skillRoot, 'dev-plan/SKILL.md'))).toContain(
+        EffectString.replaceAll(f.path.sep, '/')(root),
+      );
       const before = yield* snapshot(f.root);
       expect((yield* f.run(applyDevSkills(f.config, 'install', selector))).applied).toBe(false);
       expect(yield* snapshot(f.root)).toEqual(before);

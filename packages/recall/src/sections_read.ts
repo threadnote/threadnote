@@ -282,12 +282,7 @@ export const serveRecallSections = Effect.fn('recall.serveSections')(function* (
 
 export type ReadyRecallSectionsInput = Omit<
   PrepareRecallSectionsInput<never>,
-  | 'readRecords'
-  | 'readMemoryConnections'
-  | 'passes'
-  | 'exactMatches'
-  | 'allowReranker'
-  | 'semanticGenerationMismatchPolicy'
+  'readRecords' | 'readMemoryConnections' | 'passes' | 'exactMatches' | 'semanticGenerationMismatchPolicy'
 > & {
   readonly exact?: {
     readonly terms: readonly string[];

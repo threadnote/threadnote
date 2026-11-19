@@ -1,7 +1,8 @@
-import {Effect, Option} from 'effect';
+import {Array as EffectArray, Effect, Option} from 'effect';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import type {MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import {canonicalMemoryDocumentContent, parseMemoryDocument, type MemoryRecord} from '@threadnote/memory/document';
 
 export interface DeferredMemoryObservation {
@@ -57,4 +58,10 @@ export function memoryContentHash(content: string) {
 
 export function resourceStoreLocation(config: Pick<RuntimeConfig, 'account' | 'agentContextHome' | 'user'>) {
   return {account: config.account, home: config.agentContextHome, user: config.user} as const;
+}
+
+/** The shared source commit of a citation set, or undefined when citations span commits. */
+export function commonCitationSourceCommit(citations: readonly MemoryCodeCitationV1[]): string | undefined {
+  const commits = new Set(EffectArray.map(citations, citation => citation.sourceCommit));
+  return commits.size === 1 ? citations[0]?.sourceCommit : undefined;
 }
