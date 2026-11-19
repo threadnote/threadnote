@@ -1,6 +1,6 @@
 import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Layer, Path} from 'effect';
+import {Effect, FileSystem, Layer, Path, PlatformError} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {CodeGraphWatcher} from '@threadnote/graph/watcher';
@@ -31,6 +31,7 @@ import * as Effect2 from 'effect';
 
 const PRESENT_URI = 'threadnote://user/tester/memories/durable/projects/threadnote/present.md';
 const MISSING_URI = 'threadnote://user/tester/memories/durable/projects/threadnote/missing.md';
+const SECOND_URI = 'threadnote://user/tester/memories/durable/projects/threadnote/second.md';
 
 describe('deferred code-anchor workspace refresh', () => {
   effectIt.effect('lists still-present matching worktrees and skips a deleted checkout', () =>
@@ -161,6 +162,107 @@ describe('deferred code-anchor workspace refresh', () => {
     ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
+  effectIt.effect('skips a repeated startup refresh until the refresh targets change or ten minutes pass', () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* makeRefreshFixture().pipe(TestClock.withLive);
+        const {refresh, scheduled} = recordScheduledRefreshes(fixture.config);
+        yield* stageDeferredCodeAnchorIntent(fixture.config, {
+          memoryContent: memoryContent(fixture.metadata, 'Present workspace.'),
+          memoryMetadata: fixture.metadata,
+          memoryUri: PRESENT_URI,
+          request: deferredRequest(fixture.present),
+        });
+
+        yield* refresh;
+        yield* TestClock.adjust('9 minutes');
+        yield* refresh;
+        expect(scheduled).toEqual([fixture.present]);
+
+        const secondMetadata = {...fixture.metadata, memoryId: 'tn_second', topic: 'second'};
+        yield* stageDeferredCodeAnchorIntent(fixture.config, {
+          memoryContent: memoryContent(secondMetadata, 'Second intent in another workspace.'),
+          memoryMetadata: secondMetadata,
+          memoryUri: SECOND_URI,
+          request: deferredRequest(fixture.missing),
+        });
+        yield* refresh;
+        yield* refresh;
+        expect(scheduled).toEqual([fixture.present, fixture.present, fixture.missing]);
+
+        yield* TestClock.adjust('10 minutes');
+        yield* refresh;
+        expect(scheduled).toEqual([
+          fixture.present,
+          fixture.present,
+          fixture.missing,
+          fixture.present,
+          fixture.missing,
+        ]);
+      }),
+    ).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('refreshes again when an unobserved checkout becomes present with the same intents', () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* makeRefreshFixture();
+        const {refresh, scheduled} = recordScheduledRefreshes(fixture.config);
+        yield* stageDeferredCodeAnchorIntent(fixture.config, {
+          memoryContent: memoryContent(fixture.metadata, 'Present workspace.'),
+          memoryMetadata: fixture.metadata,
+          memoryUri: PRESENT_URI,
+          request: deferredRequest(fixture.present),
+        });
+        const secondMetadata = {...fixture.metadata, memoryId: 'tn_second', topic: 'second'};
+        yield* stageDeferredCodeAnchorIntent(fixture.config, {
+          memoryContent: memoryContent(secondMetadata, 'Temporarily unobserved workspace.'),
+          memoryMetadata: secondMetadata,
+          memoryUri: SECOND_URI,
+          request: deferredRequest(fixture.missing),
+        });
+        const unobservedFs = FileSystem.FileSystem.of({
+          ...fixture.fs,
+          realPath: target =>
+            Effect2.pipe(target, EffectString.endsWith('/missing'))
+              ? Effect.fail(
+                  PlatformError.systemError({
+                    _tag: 'PermissionDenied',
+                    description: 'permission denied',
+                    method: 'realPath',
+                    module: 'FileSystem',
+                    pathOrDescriptor: target,
+                  }),
+                )
+              : fixture.fs.realPath(target),
+        });
+
+        yield* refresh.pipe(Effect.provideService(FileSystem.FileSystem, unobservedFs));
+        expect(scheduled).toEqual([fixture.present]);
+        yield* refresh;
+        expect(scheduled).toEqual([fixture.present, fixture.present, fixture.missing]);
+      }),
+    ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
+
+  effectIt.effect('lets only one of two concurrent startup refreshes schedule', () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* makeRefreshFixture();
+        const {refresh, scheduled} = recordScheduledRefreshes(fixture.config);
+        yield* stageDeferredCodeAnchorIntent(fixture.config, {
+          memoryContent: memoryContent(fixture.metadata, 'Present workspace.'),
+          memoryMetadata: fixture.metadata,
+          memoryUri: PRESENT_URI,
+          request: deferredRequest(fixture.present),
+        });
+
+        yield* Effect.all([refresh, refresh], {concurrency: 'unbounded'});
+        expect(scheduled).toEqual([fixture.present]);
+      }),
+    ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
+
   effectIt.effect('schedules still-present worktrees as structural-only background builder admission', () =>
     Effect.gen(function* () {
       const fixture = yield* makeRefreshFixture();
@@ -286,6 +388,17 @@ const initializeGitCheckout = Effect.fn('deferredCodeAnchorRefreshTest.initGit')
     {cwd},
   );
 });
+
+function recordScheduledRefreshes(config: RuntimeConfig) {
+  const scheduled: string[] = [];
+  const refresh = refreshPendingDeferredCodeAnchorWorkspaces(config).pipe(
+    Effect.provideService(
+      DeferredCodeAnchorRefreshScheduler,
+      DeferredCodeAnchorRefreshScheduler.of({schedule: options => Effect.sync(() => scheduled.push(options.cwd))}),
+    ),
+  );
+  return {refresh, scheduled};
+}
 
 function deferredRequest(callerCwd: string): DeferredCodeAnchorWriteRequest {
   return {

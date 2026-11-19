@@ -110,6 +110,41 @@ interface Transaction {
   put: (checkpoint: DraftQueueTarget) => void;
 }
 
+function readQueueFile<A>(fs: FileSystem.FileSystem, file: string, schema: Schema.ConstraintDecoder<A, never>) {
+  return Effect.gen(function* () {
+    if (!(yield* fs.exists(file))) return undefined;
+    if ((yield* fs.readLink(file).pipe(Effect.option))._tag === 'Some') return yield* invalid();
+    const info = yield* fs.stat(file);
+    if (info.type !== 'File' || Number(info.size) > 10_000_000) return yield* invalid();
+    const json = yield* fs.readFileString(file);
+    const value: unknown = yield* Effect.try({try: () => JSON.parse(json), catch: invalid});
+    return yield* check(schema, value);
+  });
+}
+
+/**
+ * The queue as a transaction sees it after write-ahead replay: staged checkpoints shadow target files, and background
+ * reservations lapse after an hour. Only `put` stages a checkpoint; the caller decides what is written.
+ */
+function queueView(
+  fs: FileSystem.FileSystem,
+  targetPath: (key: string) => string,
+  state: State,
+  now: number,
+  staged: Map<string, DraftQueueTarget>,
+): Transaction {
+  state.backgroundReservations = EffectArray.filter(state.backgroundReservations, r => r.at > now - HOUR);
+  return {
+    state,
+    now,
+    read: key =>
+      staged.has(key) ? Effect.succeed(staged.get(key)) : readQueueFile(fs, targetPath(key), checkpointSchema),
+    put: cp => {
+      staged.set(cp.targetKey, cp);
+    },
+  };
+}
+
 // Every state/checkpoint change has a replayable write-ahead record. In particular a
 // crash between the quota reservation and checkpoint publication cannot refund use.
 function transaction<A, E, R>(config: Config, use: (tx: Transaction) => Effect.Effect<A, E, R>) {
@@ -133,16 +168,6 @@ function transaction<A, E, R>(config: Config, use: (tx: Transaction) => Effect.E
     }
     const statePath = path.join(root, 'queue.json');
     const targetPath = (key: string) => path.join(root, `target-${key}.json`);
-    const read = <A>(file: string, schema: Schema.ConstraintDecoder<A, never>) =>
-      Effect.gen(function* () {
-        if (!(yield* fs.exists(file))) return undefined;
-        if ((yield* fs.readLink(file).pipe(Effect.option))._tag === 'Some') return yield* invalid();
-        const info = yield* fs.stat(file);
-        if (info.type !== 'File' || Number(info.size) > 10_000_000) return yield* invalid();
-        const json = yield* fs.readFileString(file);
-        const value: unknown = yield* Effect.try({try: () => JSON.parse(json), catch: invalid});
-        return yield* check(schema, value);
-      });
     const write = (file: string, value: unknown) =>
       Effect.gen(function* () {
         const temporary = `${file}.${yield* (yield* SecureRandom.SecureRandom).uuidV4()}.tmp`;
@@ -164,7 +189,7 @@ function transaction<A, E, R>(config: Config, use: (tx: Transaction) => Effect.E
       },
       Effect.uninterruptible(
         Effect.gen(function* () {
-          const saved = yield* read(statePath, stateSchema);
+          const saved = yield* readQueueFile(fs, statePath, stateSchema);
           const original = saved === undefined ? undefined : JSON.stringify(saved);
           const state: State = saved ?? {
             version: 1,
@@ -184,15 +209,7 @@ function transaction<A, E, R>(config: Config, use: (tx: Transaction) => Effect.E
           for (const cp of state.pending) yield* write(targetPath(cp.targetKey), cp);
           state.pending = [];
           const staged = new Map<string, DraftQueueTarget>();
-          const tx: Transaction = {
-            state,
-            now: yield* Clock.currentTimeMillis,
-            read: key => (staged.has(key) ? Effect.succeed(staged.get(key)) : read(targetPath(key), checkpointSchema)),
-            put: cp => {
-              staged.set(cp.targetKey, cp);
-            },
-          };
-          state.backgroundReservations = EffectArray.filter(state.backgroundReservations, r => r.at > tx.now - HOUR);
+          const tx = queueView(fs, targetPath, state, yield* Clock.currentTimeMillis, staged);
           yield* recover(tx);
           const result = yield* use(tx);
           state.pending = [...staged.values()];
@@ -701,6 +718,25 @@ function status(tx: Transaction) {
 export function readDraftQueueStatus(config: Config) {
   return transaction(config, tx => status(tx));
 }
+/**
+ * Lock-free scheduling hint that never creates, recovers or writes queue state. Unreplayed write-ahead checkpoints
+ * stay staged, as the next transaction would replay them. An expired lease stays due.
+ */
+export const readDraftQueueNextEligibleAt = Effect.fn('draftQueue.nextEligibleAt')(function* (config: Config) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const root = yield* draftQueueObservationDirectory(config);
+  const saved = yield* readQueueFile(fs, path.join(root, 'queue.json'), stateSchema);
+  if (saved === undefined) return undefined;
+  const view = queueView(
+    fs,
+    key => path.join(root, `target-${key}.json`),
+    {...saved, pending: []},
+    yield* Clock.currentTimeMillis,
+    new Map(EffectArray.map(saved.pending, cp => [cp.targetKey, cp] as const)),
+  );
+  return (yield* status(view)).nextEligibleAt;
+});
 export function setDraftQueuePolicy(
   config: Config,
   input: {paused?: boolean; provider?: Policy['provider']; remoteGrant?: Policy['remoteGrant'] | null},

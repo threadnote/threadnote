@@ -1,6 +1,9 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Effect, Layer} from 'effect';
+import {Clock, Effect, FileSystem, Layer, Option, Path, Schema} from 'effect';
 import {CodeGraphWatcher} from '@threadnote/graph/watcher';
+import {sha256Hex} from '@threadnote/platform/digest';
+import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
   finalizeDeferredCodeAnchors,
@@ -119,6 +122,67 @@ export const deferredCodeAnchorRefreshSchedulerLayer = Layer.effect(
   }),
 );
 
+/** MCP respawns inside this window skip the workspace refresh while the selected target set is unchanged. */
+const DEFERRED_CODE_ANCHOR_STARTUP_REFRESH_WINDOW_MILLISECONDS = 10 * 60 * 1_000;
+const STARTUP_REFRESH_LOCK_OPTIONS = {
+  retryIntervalMilliseconds: 25,
+  staleAfterMilliseconds: 30_000,
+  waitTimeoutMilliseconds: 2_000,
+} as const;
+const StartupRefreshStamp = Schema.fromJsonString(
+  Schema.Struct({fingerprint: Schema.String, startedAtMilliseconds: Schema.Finite, version: Schema.Literal(1)}),
+);
+
+/**
+ * Claims the per-home startup refresh for one refresh-target fingerprint. Concurrent starts serialize on the lock, so
+ * one writes the stamp and the others read it. Lock contention skips; any other stamp failure runs the refresh.
+ */
+const claimStartupWorkspaceRefresh = Effect.fn('memoryCodeAnchor.claimStartupWorkspaceRefresh')(function* (
+  home: string,
+  fingerprint: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const crypto = yield* SecureRandom.SecureRandom;
+  const directory = path.join(home, 'locks', 'deferred-code-anchors');
+  const stampPath = path.join(directory, 'startup-refresh-v1.json');
+  return yield* withExclusiveFileLock(
+    fs,
+    path.join(directory, 'startup-refresh.lock'),
+    STARTUP_REFRESH_LOCK_OPTIONS,
+    Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis;
+      const previous = yield* fs.readFileString(stampPath).pipe(
+        Effect.map(content => Schema.decodeOption(StartupRefreshStamp)(content)),
+        Effect.orElseSucceed(() => Option.none()),
+      );
+      if (
+        Option.isSome(previous) &&
+        previous.value.fingerprint === fingerprint &&
+        now >= previous.value.startedAtMilliseconds &&
+        now - previous.value.startedAtMilliseconds < DEFERRED_CODE_ANCHOR_STARTUP_REFRESH_WINDOW_MILLISECONDS
+      ) {
+        return false;
+      }
+      const temporary = `${stampPath}.${yield* crypto.uuidV4()}.tmp`;
+      yield* fs
+        .writeFileString(temporary, `${JSON.stringify({fingerprint, startedAtMilliseconds: now, version: 1})}\n`, {
+          flag: 'wx',
+          mode: 0o600,
+        })
+        .pipe(
+          Effect.andThen(fs.rename(temporary, stampPath)),
+          Effect.ensuring(fs.remove(temporary, {force: true}).pipe(Effect.ignore)),
+        );
+      return true;
+    }),
+  ).pipe(Effect.catch(error => Effect.succeed(!isFileLockTimeout(error))));
+});
+
+/**
+ * MCP startup pass. Missing-checkout finalization runs on every start so a deleted checkout is discarded promptly.
+ * Only the costly workspace-refresh scheduling is throttled, keyed on the targets this pass selects.
+ */
 export const refreshPendingDeferredCodeAnchorWorkspaces = Effect.fn('memoryCodeAnchor.refreshPendingWorkspaces')(
   function* (config: RuntimeConfig) {
     const intents = EffectArray.flatMap(yield* listDeferredCodeAnchorIntents(config), entry =>
@@ -139,8 +203,18 @@ export const refreshPendingDeferredCodeAnchorWorkspaces = Effect.fn('memoryCodeA
         uris: missingUris,
       }).pipe(Effect.ignoreCause);
     }
+    const targets = selectDeferredCodeAnchorWorkspaceRefreshTargets(intents, observationByCwd);
+    if (targets.length === 0) return;
+    const fingerprint = yield* sha256Hex(
+      JSON.stringify([
+        config.account,
+        config.user,
+        ...EffectArray.map(targets, target => JSON.stringify(target)).sort(),
+      ]),
+    );
+    if (!(yield* claimStartupWorkspaceRefresh(config.agentContextHome, fingerprint))) return;
     yield* Effect.forEach(
-      selectDeferredCodeAnchorWorkspaceRefreshTargets(intents, observationByCwd),
+      targets,
       target => scheduleDeferredCodeAnchorWorkspaceRefresh(config, target).pipe(Effect.ignoreCause),
       {concurrency: 1},
     );

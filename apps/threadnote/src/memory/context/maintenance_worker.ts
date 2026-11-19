@@ -61,8 +61,9 @@ export function runContextMaintenanceWorker<A, E, R>(
           if (owner && !(yield* ownerCurrent(owner))) return 'owner-gone' as const;
           // Cancellation does not release the lease until the whole scope and
           // its finalizers return. Never admit a replacement during cleanup.
-          const run = Effect.scoped(work).pipe(Effect.as('completed' as const));
-          return yield* (owner ? Effect.raceFirst(run, awaitOwnerExit(owner)) : run).pipe(
+          // A started tick outlives its owner; interrupting it only discards finished work.
+          return yield* Effect.scoped(work).pipe(
+            Effect.as('completed' as const),
             Effect.timeoutOrElse({
               duration: CONTEXT_MAINTENANCE_WORKER_BUDGET_MS,
               orElse: () => Effect.succeed('deadline' as const),
@@ -83,9 +84,4 @@ const ownerCurrent = Effect.fn('contextMaintenance.ownerCurrent')(function* (own
   const system = yield* SystemInfo;
   if (!system.isProcessRunning(owner.processId) || !system.canonicalProcessStartIdentity) return false;
   return (yield* system.canonicalProcessStartIdentity(owner.processId)) === owner.startIdentity;
-});
-
-const awaitOwnerExit = Effect.fn('contextMaintenance.awaitOwnerExit')(function* (owner: ContextMaintenanceWorkerOwner) {
-  while (yield* ownerCurrent(owner)) yield* Effect.sleep('1 second');
-  return 'owner-gone' as const;
 });

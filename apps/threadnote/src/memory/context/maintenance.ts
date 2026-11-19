@@ -5,6 +5,7 @@ import {
   readMaintenanceControl,
   readContextMaintenanceControl,
 } from './maintenance_control.js';
+import {contextMaintenanceWakeDue} from './maintenance_backoff.js';
 export {
   withMaintenanceControlPauseFence,
   contextMaintenanceControlPath,
@@ -1698,7 +1699,7 @@ export const wakeContextMaintenance = Effect.fn('contextMaintenance.wake')(funct
     Effect.gen(function* () {
       const state = yield* readState(config);
       const now = yield* Clock.currentTimeMillis;
-      if (state.paused || (state.lastWakeAt !== undefined && now - Date.parse(state.lastWakeAt) < 30_000)) return false;
+      if (state.paused || !(yield* contextMaintenanceWakeDue(config, state, now, options.bindToParent))) return false;
       yield* writeState(config, {...state, lastWakeAt: DateTime.formatIso(DateTime.makeUnsafe(now))});
       return true;
     }),
@@ -1779,9 +1780,9 @@ const statePath = contextMaintenanceStatePath;
 const receiptPath = Effect.fn('contextMaintenance.receiptPath')(function* (config: RuntimeConfig, id: string) {
   return (yield* Path.Path).join(config.agentContextHome, 'context-maintenance', 'receipts', `${id}.json`);
 });
-export function withStateLock<A, E, R>(config: RuntimeConfig, effect: Effect.Effect<A, E, R>) {
+export function withStateLock<A, E, R>(config: RuntimeConfig, effect: Effect.Effect<A, E, R>, lock = LOCK) {
   return Effect.gen(function* () {
-    return yield* withExclusiveFileLock(yield* FileSystem.FileSystem, `${yield* statePath(config)}.lock`, LOCK, effect);
+    return yield* withExclusiveFileLock(yield* FileSystem.FileSystem, `${yield* statePath(config)}.lock`, lock, effect);
   });
 }
 export const readRawState = Effect.fn('contextMaintenance.readRawState')(function* (config: RuntimeConfig) {

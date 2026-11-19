@@ -17,6 +17,7 @@ import {
   decodeContextMaintenanceWorkerRequest,
   runContextMaintenanceWorker,
 } from './memory/context/maintenance_worker.js';
+import {ContextMaintenanceWorkerMode} from './memory/context/maintenance_worker_mode.js';
 import {
   CODE_GRAPH_EMBEDDING_WORKER_ARGUMENT,
   CODE_GRAPH_EMBEDDING_WORKER_PROTOCOL_VERSION,
@@ -203,7 +204,12 @@ async function contextMaintenanceWorkerProgram(args: readonly string[]) {
         cause => cause,
       );
       yield* command;
-    });
+      const backoff = yield* fromPromiseInterruptibleAwaiting(
+        () => import('./memory/context/maintenance_backoff.js'),
+        cause => cause,
+      );
+      yield* backoff.recordContextMaintenanceWorkerTick(config, process.exitCode);
+    }).pipe(Effect.provideService(ContextMaintenanceWorkerMode, true));
     const status = yield* runContextMaintenanceWorker(config.agentContextHome, owner, work);
     if (status === 'deadline') process.exitCode = 1;
   }).pipe(Effect.provide(runtime.StandaloneBrokerLayer));
