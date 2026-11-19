@@ -13,15 +13,22 @@ import {Option as EffectOption} from 'effect';
 
 export const generationRoot = (path: Path.Path, skillRoot: string, digest: string) =>
   path.join(physicalDirectory(path, skillRoot), 'generations', digest);
-export function renderEntrypoints(path: Path.Path, target: DevSkillsTarget, bundle: DevSkillsBundle) {
-  const root = generationRoot(path, target.skillRoot, bundle.manifest.digest);
+/**
+ * Renders root placeholders with `/` separators: a Windows backslash is a CommonMark escape in a link destination.
+ * Pass `path.sep` to reproduce the native rendering that receipts written before this rule still hold.
+ */
+export function renderEntrypoints(path: Path.Path, target: DevSkillsTarget, bundle: DevSkillsBundle, separator = '/') {
+  const root = EffectString.replaceAll(
+    path.sep,
+    separator,
+  )(generationRoot(path, target.skillRoot, bundle.manifest.digest));
   const entries: Record<string, string> = {};
   for (const skill of bundle.manifest.skills) {
     const content = Buffer.from(bundle.files[`${skill.id}/SKILL.md`], 'base64').toString('utf8');
     entries[entrypointPath(target.layout, skill.id)] = Effect2.pipe(content, __effectPipeInput => {
       const __effectPipeStage0 = Effect2.pipe(
         __effectPipeInput,
-        EffectString.replaceAll('{{THREADNOTE_SKILL_ROOT}}', path.join(root, skill.id)),
+        EffectString.replaceAll('{{THREADNOTE_SKILL_ROOT}}', `${root}${separator}${skill.id}`),
       );
       const __effectPipeStage1 = Effect2.pipe(
         __effectPipeStage0,
@@ -32,6 +39,16 @@ export function renderEntrypoints(path: Path.Path, target: DevSkillsTarget, bund
   }
   return entries;
 }
+/** Every rendering an owned receipt may hold for a generation; POSIX has only one. */
+export const ownedRenderings = (path: Path.Path, target: DevSkillsTarget, bundle: DevSkillsBundle) =>
+  EffectArray.map([...new Set(['/', path.sep])], separator => renderEntrypoints(path, target, bundle, separator));
+export const isOwnedRendering = (
+  path: Path.Path,
+  target: DevSkillsTarget,
+  bundle: DevSkillsBundle,
+  entrypoints: Readonly<Record<string, string>>,
+) =>
+  EffectArray.some(ownedRenderings(path, target, bundle), rendered => stableJson(rendered) === stableJson(entrypoints));
 export const verifyGeneration = Effect.fn('devSkills.verifyGeneration')(function* (
   root: string,
   manifest: DevSkillsManifest,
@@ -90,9 +107,7 @@ export const verifyReceiptProjection = Effect.fn('devSkills.verifyReceiptProject
       return yield* fail('historical-ownership-conflict', 'Historical skill discovery aliases are not owned.');
     files[relative] = Buffer.from(bytes).toString('base64');
   }
-  if (
-    stableJson(renderEntrypoints(path, target, {manifest: receipt.manifest, files})) !== stableJson(receipt.entrypoints)
-  )
+  if (!isOwnedRendering(path, target, {manifest: receipt.manifest, files}, receipt.entrypoints))
     return yield* fail(
       'historical-ownership-conflict',
       'Historical entrypoint ownership differs from its verified rendering.',

@@ -342,7 +342,13 @@ describe('native task actions', () => {
           openPr.url,
         );
         // The workflow-bound watch replaces the standalone one, so the session is woken once per PR event.
-        expect(watch.result).toMatchObject({ok: true, value: {supersededStandaloneWatchId: standalone.watchId}});
+        expect(watch.result).toMatchObject({
+          ok: true,
+          value: {
+            supersededStandaloneWatchId: standalone.watchId,
+            receipt: {pr: {state: 'open'}, watch: {state: 'active'}},
+          },
+        });
         expect((yield* readNativeWatch(f.config, String(standalone.watchId)))?.envelope).toMatchObject({
           stopRequested: true,
           stopReason: 'superseded',
@@ -379,7 +385,8 @@ describe('native task actions', () => {
         );
         expect(provisionalPhase?.delivery).toBeUndefined();
         expect(retainedProofs.length).toBeGreaterThan(0);
-        expect(EffectArray.every(retainedProofs, proof => proof.delivery === undefined)).toBe(true);
+        // The watch start recorded the open PR delivery before the CI change.
+        expect(EffectArray.some(retainedProofs, proof => proof.delivery?.watch?.state === 'active')).toBe(true);
 
         const watchRequest = {
           runId: 'native-run',
@@ -439,8 +446,9 @@ describe('native task actions', () => {
           delivery: retargeted,
           payloadDigest: sha256HexSync(stableJson(retargeted)),
         });
+        // The retained canonical receipt binds the base, so a retargeted reference is stale.
         expect(yield* renew({deliveryRef: retargetedRef}).pipe(Effect.result)).toMatchObject({
-          failure: {code: 'base-ref-unverified'},
+          failure: {code: 'stale-delivery-ref'},
         });
         watch.setRemoteBase('main');
         expect(yield* f.fs.readFileString(watchPath)).toBe(beforeRejectedRenew);
@@ -568,8 +576,8 @@ describe('native task actions', () => {
           ...watchRequest,
           deliveryRef: forgedDeliveryRef,
         }).pipe(Effect.provideService(CommandExecutor, readOnlyCommands), Effect.result);
-        // Retained provisional proof does not bind this different PR: its qualified slot is absent.
-        expect(forgedResult).toMatchObject({failure: {code: 'watch-not-found'}});
+        // The retained canonical receipt names another PR, so the forged route fails before any lookup or effect.
+        expect(forgedResult).toMatchObject({failure: {code: 'stale-delivery-ref'}});
         expect(effects).toEqual({provider: 0, host: 0, spawn: 0});
         expect(yield* storedWatchBytes()).toEqual(beforeForgedWatches);
         expect((yield* readNativeWatch(f.config, watchId))?.revision).toBe(beforeForgedRevision);
@@ -814,6 +822,131 @@ describe('native task actions', () => {
   );
 
   effectIt.effect('maintains an existing PR watch through unvalidated CI source changes', () => prReceiptCase(true));
+
+  effectIt.effect('delivers a PR whose commit carries a dirty-validated tree after a failed start record', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(['one'], 'pr', false, false, true, undefined, undefined, {}, {policy: 'standard'});
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "dirty validated";\n');
+      const snapshotRef = String(
+        object(
+          yield* runNativeTaskAction(f.config, {
+            command: 'record-snapshot',
+            runId: 'native-run',
+            callerCwd: f.repo,
+          }),
+        ).snapshotRef,
+      );
+      yield* runNativeTaskAction(f.config, {
+        command: 'record-review',
+        runId: 'native-run',
+        callerCwd: f.repo,
+        snapshotRef,
+        report: {
+          mode: 'full',
+          selected: ['correctness', 'simplicity'],
+          lanes: [
+            {name: 'correctness', status: 'complete'},
+            {name: 'simplicity', status: 'complete'},
+          ],
+          findings: [],
+        },
+      });
+      const validationRef = String(
+        object(
+          yield* runNativeTaskAction(f.config, {
+            command: 'record-validation',
+            runId: 'native-run',
+            callerCwd: f.repo,
+            snapshotRef,
+            validation: {
+              checks: [{command: 'private PR check', result: 'passed', evidence: 'The scoped test fixture passed.'}],
+              acceptance: [
+                {criterion: 'one works', result: 'passed', evidence: 'The implementation meets acceptance.'},
+              ],
+            },
+          }),
+        ).validationRef,
+      );
+      const validatedHead = (yield* readNativeWorkflowState(f.config, 'native-run'))?.state.cycle?.state.phases.one
+        ?.head;
+      yield* f.git(['add', 'source.ts']);
+      yield* f.git(['commit', '-m', 'Commit the validated tree']);
+      const headSha = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
+      expect(headSha).not.toBe(validatedHead);
+      // Recording the committed, unchanged tree does not reopen the validated phase.
+      expect(
+        object(
+          yield* runNativeTaskAction(f.config, {
+            command: 'record-snapshot',
+            runId: 'native-run',
+            callerCwd: f.repo,
+          }),
+        ),
+      ).toMatchObject({status: 'unchanged', phaseId: 'one'});
+      const pr = {
+        url: 'https://github.com/example/repo/pull/5',
+        headSha,
+        branch: 'feature/one',
+        baseBranch: 'main',
+        state: 'open' as const,
+      };
+      const delivered = object(
+        yield* runNativeTaskAction(f.config, {
+          command: 'deliver-pr',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          validationRef,
+          commitEvidence: `Private fixture commit ${headSha}`,
+          pr,
+          publication: {exemption: 'small-fix', reason: 'Private bounded fixture publication authority.'},
+        }),
+      );
+      expect(delivered).toMatchObject({status: 'watch-required', next: {operation: 'start', headSha}});
+      const deliveryRef = String(delivered.deliveryRef);
+      const source = f.path.join(f.repo, 'source.ts');
+      // The source drifts after the watch starts, so the start cannot record the delivery.
+      const watch = yield* attemptSimulatedTaskWatch(
+        f,
+        'native-run',
+        'one',
+        validationRef,
+        deliveryRef,
+        pr.url,
+        undefined,
+        f.fs.writeFileString(source, 'export const fixture = "drift";\n').pipe(Effect.orDie),
+      );
+      expect(watch.result).toMatchObject({
+        ok: true,
+        value: {
+          status: 'watching',
+          hostReceipt: null,
+          delivery: {recorded: false, code: 'source-drift'},
+          next: {action: 'watch-pr', operation: 'complete', validationRef, deliveryRef},
+        },
+      });
+      const route = {command: 'watch-pr', runId: 'native-run', callerCwd: f.repo, validationRef, deliveryRef};
+      // The running watch stays usable with the start refs before its delivery is recorded.
+      expect(object(yield* runNativeTaskAction(f.config, {...route, operation: 'inspect'}))).toMatchObject({
+        status: 'watch-updated',
+      });
+      yield* f.git(['checkout', '--', 'source.ts']);
+      const completed = object(yield* runNativeTaskAction(f.config, {...route, operation: 'complete'}));
+      expect(completed).toMatchObject({status: 'delivered', replayed: false, receipt: {headSha, pr: {headSha}}});
+      const phase = (yield* readNativeWorkflowState(f.config, 'native-run'))?.state.cycle?.state.phases.one;
+      expect(phase).toMatchObject({status: 'published', head: headSha, delivery: {headSha, watch: {state: 'active'}}});
+      expect(phase?.delivery?.watch?.evidence).toContain(`consumer:${watch.consumerId}`);
+      // The validation reference from before the commit still routes the recorded watch.
+      expect(
+        object(
+          yield* runNativeTaskAction(f.config, {
+            ...route,
+            operation: 'inspect',
+            deliveryRef: String(completed.deliveryRef),
+          }),
+        ),
+      ).toMatchObject({status: 'watch-updated'});
+    }).pipe(run),
+  );
 
   effectIt.effect('refuses provisional watches for a local plan or a phase without validation', () =>
     Effect.gen(function* () {
@@ -1350,6 +1483,15 @@ describe('native task actions', () => {
         publishedP1.deliveryRef,
         publishedP1.pr.url,
       );
+      // A started watch records the open PR delivery at once, so P2 can begin without a PR event.
+      expect(p1Watch.result).toMatchObject({
+        ok: true,
+        value: {
+          status: 'watching',
+          receipt: {pr: {...publishedP1.pr, state: 'open'}, watch: {state: 'active'}},
+          next: {action: 'implement', phaseId: 'two'},
+        },
+      });
       yield* writeSimulatedTaskWatch(f, p1Watch.startedWatch, p1Watch, publishedP1.pr.url, publishedP1.headSha, false);
       const provisionalWatchPath = f.path.join(
         f.config.agentContextHome,
@@ -1366,8 +1508,9 @@ describe('native task actions', () => {
       );
       const refusedProvisionalStart = yield* attemptSimulatedTaskWatch(f, 'native-run', 'one', publishedP1.validationRef, publishedP1.deliveryRef, publishedP1.pr.url);
       expect(refusedProvisionalStart.result).toMatchObject({ok: false, failure: {code: 'source-drift'}});
-      expect(yield* runNativeTaskAction(f.config, {command: 'watch-pr', operation: 'complete', runId: 'native-run', callerCwd: f.repo,
-        validationRef: publishedP1.validationRef, deliveryRef: publishedP1.deliveryRef}).pipe(Effect.result)).toMatchObject({failure: {code: 'source-drift'}});
+      // The start recorded the open PR delivery, so complete only reads back that receipt.
+      expect(object(yield* runNativeTaskAction(f.config, {command: 'watch-pr', operation: 'complete', runId: 'native-run', callerCwd: f.repo,
+        validationRef: publishedP1.validationRef, deliveryRef: publishedP1.deliveryRef}))).toMatchObject({status: 'delivered', replayed: true});
       expect(object(yield* runNativeTaskAction(f.config, {command: 'watch-pr', operation: 'inspect', runId: 'native-run', callerCwd: f.repo,
         validationRef: publishedP1.validationRef, deliveryRef: publishedP1.deliveryRef}))).toMatchObject({status: 'watch-updated'});
       expect(yield* f.fs.readFileString(provisionalWatchPath)).toBe(provisionalWatchBytes);
@@ -2104,6 +2247,7 @@ describe('native task actions', () => {
         processStartIdentity: () => Effect.succeed(EffectOption.getOrUndefined(EffectOption.none<string>())),
         canonicalProcessStartIdentity: () => Effect.succeed(EffectOption.getOrUndefined(EffectOption.none<string>())),
       });
+      const runBytesBeforeStart = yield* f.fs.readFileString(f.statePath());
       const started = object(
         yield* runNativeTaskAction(f.config, {
           command: 'watch-pr',
@@ -2121,7 +2265,7 @@ describe('native task actions', () => {
         prUrl: pr.url,
         consumerId,
         hostReceipt: null,
-        next: {action: 'watch-pr', operation: 'complete', runId: 'native-run', validationRef, deliveryRef},
+        receipt: {pr: {state: 'open'}, watch: {state: 'active'}},
       });
       expect(spawnCalls).toBe(1);
       expect(preflightCalls).toBe(1);
@@ -2131,6 +2275,8 @@ describe('native task actions', () => {
       expect(startedWatch.envelope.state.consumer).toMatchObject({id: consumerId, wakeupId});
       expect(startedWatch.envelope.notification?.target).toEqual(wakeup);
       expect(startedWatch.envelope.collector).toMatchObject({status: 'running', pid: 77777});
+      // Simulate a start that stopped after the watch started and before it recorded the delivery.
+      yield* f.fs.writeFileString(f.statePath(), runBytesBeforeStart);
       const provisionalState = yield* readNativeWorkflowState(taskConfig, 'native-run');
       expect(provisionalState?.state.cycle?.state.phases.one?.delivery).toBeUndefined();
       const recoveryInput = {runId: 'native-run', callerCwd: repo, phaseId: 'one'};

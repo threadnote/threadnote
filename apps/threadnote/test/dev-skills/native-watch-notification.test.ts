@@ -45,6 +45,7 @@ import {
   makeNativeWatchNotifier,
   maintainNativeWatchSubscription,
   nativeWatchCodexCandidatePaths,
+  resolveNativeWatchSessionWakeup,
 } from '../../src/workflow_automation/watch_notification.js';
 import {
   matchesTerminalNativeWatchArrival,
@@ -459,6 +460,34 @@ effectIt.effect('refuses a skipped-probe binding that changed concurrently befor
     ).toMatchObject({failure: {code: 'watch-state-conflict'}});
     expect(raced).toBe(true);
     expect((yield* f.read()).envelope).toEqual(changed);
+  }).pipe(provide),
+);
+
+effectIt.effect('completes a Claude Code wakeup from PATH and the checkout but never guesses the session', () =>
+  Effect.gen(function* () {
+    const system = yield* SystemInfo;
+    const fs = yield* FileSystem.FileSystem;
+    const bin = yield* fs.makeTempDirectoryScoped({prefix: 'native-watch-path-'});
+    const launcher = bin + '/claude';
+    yield* fs.writeFileString(launcher, '#!/bin/sh\n');
+    const withPath = Effect.provideService(SystemInfo, {
+      ...system,
+      platform: 'darwin' as const,
+      environment: () => ({PATH: '/missing-bin:' + bin}),
+    });
+    const resolve = (input: Parameters<typeof resolveNativeWatchSessionWakeup>[0]) =>
+      resolveNativeWatchSessionWakeup(input, '/trusted/workspace').pipe(withPath);
+    expect(yield* resolve({host: 'claude-code', sessionId: target.threadId})).toEqual({
+      host: 'claude-code',
+      executable: launcher,
+      sessionId: target.threadId,
+      workspace: '/trusted/workspace',
+      exclusiveSession: true,
+    });
+    for (const input of [{host: 'claude-code' as const}, {host: 'cursor-cli' as const, sessionId: target.threadId}])
+      expect(yield* resolve(input).pipe(Effect.result)).toMatchObject({
+        failure: {code: 'host-registration-required'},
+      });
   }).pipe(provide),
 );
 

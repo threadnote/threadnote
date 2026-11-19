@@ -18,9 +18,12 @@ import {
   writeNativeWatch,
   withNativeWatchControlLock,
 } from './watch_store.js';
+import * as Schema from 'effect/Schema';
 import {
   isNativeWatchSessionWakeup,
   nativeWatchNotice,
+  nativeWatchSessionWakeupSchema,
+  type NativeWatchSessionWakeupRequest,
   stageNativeWatchNotification,
   type NativeWatchNotification,
   type NativeWatchSessionWakeup,
@@ -45,6 +48,60 @@ export const nativeWatchCodexCandidatePaths = (platform: NodeJS.Platform, homeDi
   if (platform === 'linux') return [homeDirectory + '/.local/bin/codex', '/usr/local/bin/codex', '/usr/bin/codex'];
   return [];
 };
+
+/** How a host agent finds each wakeup field; the runtime derives only what it can read safely. */
+export const nativeWatchHostRegistrationHint =
+  'Pass the wakeup of the host that runs this chat. Codex: host codex with its threadId. ' +
+  'Claude Code: host claude-code with the sessionId that `printenv CLAUDE_CODE_SESSION_ID` prints in a shell tool; ' +
+  'the runtime uses `claude` on PATH (`command -v claude`) as the executable and the verified checkout as the workspace when you omit them. ' +
+  'Cursor CLI: host cursor-cli with its sessionId and the absolute `agent` executable; the workspace defaults to the verified checkout. ' +
+  'Never guess a session ID.';
+
+const pathLauncher = Effect.fn('nativeWatch.pathLauncher')(function* (name: string) {
+  const system = yield* SystemInfo;
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const names = system.platform === 'win32' ? [name + '.exe', name] : [name];
+  for (const directory of EffectString.split(
+    system.environment().PATH ?? '',
+    system.platform === 'win32' ? ';' : ':',
+  )) {
+    if (!directory || !path.isAbsolute(directory)) continue;
+    for (const candidate of names) {
+      const file = path.join(directory, candidate);
+      const info = yield* Effect.option(fs.stat(file));
+      if (Option.isSome(info) && info.value.type === 'File') return file;
+    }
+  }
+  return undefined;
+});
+
+/** Complete a session-host wakeup request: workspace defaults to the verified checkout, and Claude Code finds its launcher. */
+export const resolveNativeWatchSessionWakeup = Effect.fn('nativeWatch.resolveSessionWakeup')(function* (
+  input: NativeWatchSessionWakeupRequest,
+  checkout: string,
+) {
+  const refuse = (message: string) =>
+    WorkflowAutomationError.make({
+      code: 'host-registration-required',
+      message: `${message} ${nativeWatchHostRegistrationHint}`,
+    });
+  if (input.sessionId === undefined) return yield* refuse(`The ${input.host} wakeup needs its sessionId.`);
+  const executable = input.executable ?? (input.host === 'claude-code' ? yield* pathLauncher('claude') : undefined);
+  if (executable === undefined)
+    return yield* refuse(
+      input.host === 'claude-code'
+        ? 'No `claude` launcher is on PATH; pass the absolute path that `command -v claude` prints.'
+        : `The ${input.host} wakeup needs its absolute executable.`,
+    );
+  return yield* Schema.decodeEffect(nativeWatchSessionWakeupSchema)({
+    host: input.host,
+    executable,
+    sessionId: input.sessionId,
+    workspace: input.workspace ?? checkout,
+    exclusiveSession: true,
+  }).pipe(Effect.mapError(() => refuse(`The ${input.host} wakeup is not a valid absolute registration.`)));
+});
 
 /** Read-only capability admission for an explicitly selected executable; never queue a probe message. */
 export const preflightNativeWatchCodexQueue = Effect.fn('nativeWatch.preflightCodexQueue')(function* (

@@ -70,9 +70,10 @@ import {makeWorkflowGitAdapter} from './cycle_git.js';
 import {requireWorkflowGraphScope} from './graph.js';
 import {readNativeTaskInstalledTarget} from './task_admission.js';
 import {runCompactOriginAuthoringSave, runWorkflowAutomation} from './index.js';
+import {nativePlanDocumentFromBusiness} from './task_authoring.js';
 import {nativeWorkflowError} from './memory.js';
 import {readNativeWorkflowState} from './store.js';
-import {readNativeTaskView, verifyNativeTaskReopen} from './task.js';
+import {nativeRunNotFoundMessage, readNativeTaskView, verifyNativeTaskReopen} from './task.js';
 import {inspectOldBindingOwners} from './task_binding_transition.js';
 import {NativeTaskPrWatchFieldsSchema} from './task_pr_watch.js';
 import {
@@ -409,19 +410,27 @@ const compactIntentMatchesDocument = (intent: NativeCompactIntent, value: unknow
     intent.eligibility.status === 'eligible'
   );
 };
-export {readNativeTaskInstalledTarget} from './task_admission.js';
-/** Names the fields that do not belong to the chosen start shape; delivery is chosen at compact confirmation. */
+/** Names the fields that do not belong to, or are missing from, the chosen start shape. */
 const nativeTaskStartShapeMessage = (input: unknown) => {
   const fields = Predicate.isObject(input) ? EffectRecord.keys(input) : [];
   const shared = EffectArray.contains(fields, 'sharedPlanRef');
   const [compact, sharedPlan] = NativeTaskStartRequestSchema.members;
-  const shape = new Set<string>(shared ? EffectRecord.keys(sharedPlan.fields) : EffectRecord.keys(compact.fields));
-  const foreign = EffectArray.filter(fields, field => !shape.has(field));
-  if (!foreign.length)
+  const shapeFields: Readonly<Record<string, Schema.Top>> = shared ? sharedPlan.fields : compact.fields;
+  const label = shared ? 'A shared-plan' : 'A compact';
+  const foreign = EffectArray.filter(fields, field => !(field in shapeFields));
+  if (foreign.length) {
+    const confirmTime =
+      !shared && EffectArray.some(foreign, field => ['delivery', 'bindings', 'baseBranch'].includes(field));
+    return `${label} start does not accept ${EffectArray.join(foreign, ', ')}.${confirmTime ? ' Choose delivery and branch bindings at compact-confirm.' : ''}`;
+  }
+  const missing = EffectArray.filter(
+    EffectRecord.keys(shapeFields),
+    field => !shapeFields[field].ast.context?.isOptional && !EffectArray.contains(fields, field),
+  );
+  if (!missing.length)
     return 'Provide a feature name, absolute checkout path, bounded compact intent, and an optional installed target or task reference.';
-  const confirmTime =
-    !shared && EffectArray.some(foreign, field => ['delivery', 'bindings', 'baseBranch'].includes(field));
-  return `${shared ? 'A shared-plan' : 'A compact'} start does not accept ${EffectArray.join(foreign, ', ')}.${confirmTime ? ' Choose delivery and branch bindings at compact-confirm.' : ''}`;
+  const resume = !shared && EffectArray.contains(fields, 'taskRef');
+  return `${label} ${resume ? 'resume' : 'start'} requires ${EffectArray.join(missing, ', ')}.${resume ? ' A resume repeats the original featureName and intent with the taskRef.' : ''}`;
 };
 export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
   Effect.gen(function* () {
@@ -526,6 +535,7 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
         return {
           status: 'binding-transition' as const,
           outcome,
+          runId,
           taskRef: runId,
           binding: {
             runId: stored.state.runId,
@@ -566,7 +576,7 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
             'task-intent-conflict',
             'The saved task has different business intent. Continue its current task or choose a new feature name; existing intent was not overwritten.',
           );
-        return {status: 'resumed' as const, taskRef: runId, view};
+        return {status: 'resumed' as const, runId, taskRef: runId, view};
       }
       // Only the initial compact save continues here; the saver verifies its complete digest and receipt prefix.
       const pendingCompactSave = reservation?.operationStart === 0 && reservation.rootUri === null;
@@ -598,10 +608,13 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
         callerCwd: checkout,
         intent: request.intent,
       });
-      return {...started, taskRef: runId, resumed: true, ...(pendingCompactSave ? {recovered: true} : {})};
+      return {...started, runId, taskRef: runId, resumed: true, ...(pendingCompactSave ? {recovered: true} : {})};
     }
     if (request.taskRef)
-      return yield* fail('run-not-found', 'The supplied task reference does not resolve to an existing native task.');
+      return yield* fail(
+        'run-not-found',
+        'The supplied taskRef does not resolve to an existing native task. Use the runId that workflow_task_start returned.',
+      );
     if (request.intent.eligibility.status === 'needs-planning')
       return {
         status: 'needs-planning' as const,
@@ -641,7 +654,7 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
       callerCwd: checkout,
       intent: request.intent,
     });
-    return {...started, taskRef: runId};
+    return {...started, runId, taskRef: runId};
   }).pipe(
     Effect.catchDefect(error => Effect.fail(nativeWorkflowError(error))),
     Effect.mapError(nativeWorkflowError),
@@ -777,7 +790,7 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
     if (request.runId === undefined) return yield* fail('invalid-request', 'Use the workflow run identifier.');
     const runId = request.runId;
     const stored = yield* readNativeWorkflowState(config, request.runId);
-    if (!stored) return yield* fail('run-not-found', 'Start a fresh native run before using task actions.');
+    if (!stored) return yield* fail('run-not-found', nativeRunNotFoundMessage);
     const journal = yield* inCheckout(
       withWorkflowLock(config, stored.state.bindingId, inspectWorkflowJournal(config, stored.state.bindingId)),
       checkout,
@@ -900,10 +913,23 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
         const previous = yield* loadRoot();
         if (previous.document.kind !== 'plan' || !previous.document.compactOrigin)
           return yield* fail('compact-origin-required', 'Only a compact-origin plan can be expanded in place.');
-        const supplied = yield* Effect.try({
-          try: () => decodeNativeAuthoringDocument(request.document),
-          catch: nativeWorkflowError,
-        });
+        const previousPlan = previous.document;
+        // Business JSON is the contract; a complete document with runtime metadata stays accepted.
+        const supplied =
+          Predicate.isObject(request.document) && 'format' in request.document
+            ? yield* Effect.try({
+                try: () => decodeNativeAuthoringDocument(request.document),
+                catch: nativeWorkflowError,
+              })
+            : yield* inCheckout(
+                nativePlanDocumentFromBusiness(config, request.document, {
+                  checkout,
+                  featureId: stored.state.featureId,
+                  project: stored.state.project,
+                  previous: previousPlan,
+                }),
+                checkout,
+              );
         if (
           supplied.kind !== 'plan' ||
           supplied.id !== stored.state.featureId ||

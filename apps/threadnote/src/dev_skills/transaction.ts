@@ -15,7 +15,13 @@ import {
   statOptional,
   stableJson,
 } from './files.js';
-import {generationRoot, renderEntrypoints, verifyGeneration, verifyHistoricalProjection} from './inspection.js';
+import {
+  generationRoot,
+  isOwnedRendering,
+  ownedRenderings,
+  verifyGeneration,
+  verifyHistoricalProjection,
+} from './inspection.js';
 import {DEV_SKILLS_MAX_HISTORICAL_SUPPORT_MEMBERS, parseHistoricalDevSkillsManifest} from './manifest.js';
 import {
   consumerId,
@@ -88,7 +94,7 @@ function assertTransition(journal: Journal, path: Path.Path) {
     requireValue(
       stableJson(after.consumers[id]) === stableJson(consumer) &&
         stableJson(after.manifest) === stableJson(generation.manifest) &&
-        stableJson(after.entrypoints) === stableJson(renderEntrypoints(path, target, generation)) &&
+        isOwnedRendering(path, target, generation, after.entrypoints) &&
         stableJson(after.generations) ===
           stableJson({...before?.generations, [generation.manifest.digest]: generation.manifest}),
       'Installed postimage differs from its captured generation or consumer.',
@@ -186,7 +192,7 @@ function parseJournal(value: unknown, path: Path.Path): Journal {
     for (const relative of EffectRecord.keys(receipt.entrypoints))
       entrypoints.add(path.join(target.skillRoot, relative));
   }
-  const projected = generation ? renderEntrypoints(path, target, generation) : undefined;
+  const projected = generation ? ownedRenderings(path, target, generation) : [];
   const changes: FileChange[] = [];
   for (const item of value.changes) {
     requireValue(
@@ -220,17 +226,17 @@ function parseJournal(value: unknown, path: Path.Path): Journal {
           );
         }
       }
-    else if (item.after !== null)
+    else if (item.after !== null) {
+      const relative = EffectArray.join(
+        Effect2.pipe(path.relative(target.skillRoot, item.path), EffectString.split(path.sep)),
+        '/',
+      );
+      const after = item.after;
       requireValue(
-        projected &&
-          projected[
-            EffectArray.join(
-              Effect2.pipe(path.relative(target.skillRoot, item.path), EffectString.split(path.sep)),
-              '/',
-            )
-          ] === item.after,
+        EffectArray.some(projected, rendered => rendered[relative] === after),
         'Transaction entrypoint differs from the immutable generation.',
       );
+    }
     changes.push({path: item.path, before: item.before, after: item.after});
   }
   requireValue(

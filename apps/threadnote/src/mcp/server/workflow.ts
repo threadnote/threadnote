@@ -15,7 +15,7 @@ import {NativeCyclePacketOptionsSchema} from '@threadnote/workflow-automations/c
 import {NativeCycleReviewSchema} from '@threadnote/workflow-automations/cycle-review';
 import {NativeCycleValidationSchema} from '@threadnote/workflow-automations/cycle';
 import {NativeTaskAnchorSchema} from '@threadnote/workflow-automations/task';
-import {NativeCompactIntentSchema} from '@threadnote/workflow-automations/authoring';
+import {NativeCompactIntentSchema, NativePlanBusinessShapeSchema} from '@threadnote/workflow-automations/authoring';
 import {
   fillNativeNext,
   nativeNextForTaskAction,
@@ -38,7 +38,9 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
         callerCwd: McpInput.requiredString('Absolute original checkout'),
         featureName: McpInput.string('Feature name for start'),
         kind: Schema.optionalKey(Schema.Literals(['spec', 'plan'])),
-        contentFile: McpInput.string('Business JSON file; omit format/id/project/source/spec/compactOrigin metadata'),
+        contentFile: McpInput.string(
+          'Business JSON file; omit format/id/project/source/spec/compactOrigin metadata; evidenceRefs may be URIs',
+        ),
         saveMode: Schema.optionalKey(Schema.Literal('background')),
         installationTarget: McpInput.string('Required for start; installed target for authoring job resume'),
         graphProject: McpInput.string('New task graph project'),
@@ -143,11 +145,11 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     'workflow_task_compact_expand',
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
-      description: 'Prepare an expanded native plan on the same compact-origin authoring root.',
+      description: 'Prepare an expanded plan from workflow_task_author plan business JSON on the compact-origin root.',
       inputSchema: {
-        runId: McpInput.requiredString(),
+        runId: McpInput.requiredString('runId from workflow_task_start'),
         callerCwd: McpInput.requiredString(),
-        document: Schema.Unknown,
+        document: NativePlanBusinessShapeSchema,
       },
     },
     Effect.fn('mcp_server.workflowTaskCompactExpand')(function* ({runId, callerCwd, document}) {

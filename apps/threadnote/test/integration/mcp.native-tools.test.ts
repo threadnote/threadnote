@@ -300,7 +300,7 @@ const WORKFLOW_TASK_MUTATING_TOOL_MAX_BYTES = {
   workflow_task_author: 3_200,
   workflow_task_start: 3_200,
   workflow_task_compact_start: 2_500,
-  workflow_task_compact_expand: 800,
+  workflow_task_compact_expand: 2_300,
   workflow_task_compact_confirm: 2_500,
   workflow_task_work: 1_800,
   workflow_task_control: 2_400,
@@ -894,9 +894,10 @@ describe('Threadnote MCP toolsets', () => {
         expect(Buffer.byteLength(JSON.stringify(withoutWorkflowTaskTools))).toBeLessThanOrEqual(36_500);
         expect(Buffer.byteLength(JSON.stringify(withoutMutatingWorkflowTaskTools))).toBeLessThanOrEqual(37_200);
         // Semantic task bootstrap adds one tool beyond compact authoring, and the review waiver and run profile add
-        // control variants; keep the additive catalog budget explicit.
+        // control variants, and compact expansion declares its phase and decision shapes; keep the additive catalog
+        // budget explicit.
         const totalCatalogBytes = Buffer.byteLength(JSON.stringify(tools.tools));
-        expect(totalCatalogBytes).toBeLessThanOrEqual(65_200);
+        expect(totalCatalogBytes).toBeLessThanOrEqual(67_100);
         expect(
           EffectOption.getOrUndefined(EffectArray.findFirst(tools.tools, tool => tool.name === 'recall_context'))
             ?.description,

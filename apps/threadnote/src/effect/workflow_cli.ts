@@ -861,7 +861,7 @@ export function makeNativeTaskActionCommands<E, R>(
       callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
       document: requiredString(
         'document',
-        'Complete expanded native plan JSON; compact origin is retained by the runtime',
+        'Expanded plan business JSON, as for authoring save; the runtime fills identity, source hashes and compact origin',
       ),
     },
     options =>
