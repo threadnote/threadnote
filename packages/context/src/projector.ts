@@ -233,7 +233,7 @@ function projectContextBriefCore(
   const suppressOptionalAgentLocate =
     responseFormat === 'agent' &&
     logical.mode === 'locate' &&
-    (logical.graph.cards.length > 0 || logical.graph.contracts.length > 0) &&
+    EffectArray.some(requiredItems, item => item.lane === 'graph-card' || item.lane === 'graph-contract') &&
     logical.coverage.memory.codeAnchors === undefined &&
     (logical.graph.sourceExcerpts?.length ?? 0) === 0;
   const requiredKeys = new Set(EffectArray.map(requiredItems, projectionItemKey));
