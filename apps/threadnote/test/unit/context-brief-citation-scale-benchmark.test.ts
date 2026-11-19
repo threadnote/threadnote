@@ -994,6 +994,81 @@ describe('Context Brief citation scale benchmark', () => {
     expect(evaluated.failures).toContain('workset-50 observation 0 made 16/32 active-view fence observations');
   });
 
+  it('tolerates declared recall-budget exhaustion only in the sustained external RSS pass', () => {
+    const profile = Option.getOrUndefined(
+      EffectArray.findFirst(budget.profiles, candidate => candidate.id === 'workset-50'),
+    )!;
+    const observations = Array.from({length: 11}, (_, ordinal) =>
+      scaleObservation(profile, {}, {}, {observationId: `workset-50-${ordinal}`, ordinal}),
+    );
+    const cold = observations[0].memoryWorkload;
+    const exhausted = recallExhaustedWorkload(profile);
+    const withRssWorkload = (ordinals: readonly number[], workload: ContextBriefCitationScaleObservationV2) =>
+      EffectArray.map(observations, (observation, ordinal) =>
+        ordinals.includes(ordinal) ? {...observation, memoryWorkload: workload} : observation,
+      );
+
+    const tolerated = evaluateContextBriefCitationScaleProfile(
+      budget,
+      profile.id,
+      cold,
+      withRssWorkload([3], exhausted),
+    );
+    expect(tolerated.failures).toEqual([]);
+    expect(tolerated.result.recallBudgetExhaustedObservations).toBe(1);
+
+    expect(
+      evaluateContextBriefCitationScaleProfile(budget, profile.id, cold, withRssWorkload([3, 7], exhausted)).failures,
+    ).toEqual([
+      'workset-50 declared memory-recall-budget-exhausted in 2/10 external RSS-pass observations; allowed at most 10%',
+    ]);
+
+    const undeclared = evaluateContextBriefCitationScaleProfile(
+      budget,
+      profile.id,
+      cold,
+      withRssWorkload([3], {...exhausted, recallBudgetExhausted: false}),
+    );
+    expect(undeclared.failures).toContain(
+      'workset-50 observation 3 selected 0/16 memories during the external RSS pass',
+    );
+    expect(undeclared.result.recallBudgetExhaustedObservations).toBe(0);
+
+    const timed = EffectArray.map(observations, (observation, ordinal) =>
+      ordinal === 2
+        ? {...exhausted, memory: observation.memory, memoryWorkload: observation.memoryWorkload}
+        : observation,
+    );
+    expect(evaluateContextBriefCitationScaleProfile(budget, profile.id, cold, timed).failures).toEqual([
+      'workset-50 observation 3 declared memory-recall-budget-exhausted; strict observations require completed memory recall',
+    ]);
+
+    expect(
+      evaluateContextBriefCitationScaleProfile(budget, profile.id, exhausted, withRssWorkload([0], exhausted)).failures,
+    ).toEqual([
+      'workset-50 observation 0 declared memory-recall-budget-exhausted; strict observations require completed memory recall',
+    ]);
+  });
+
+  it('round-trips declared RSS-pass recall exhaustion through the v2 artifact and its rederived gate', () => {
+    const artifact = releaseScaleArtifact('threadnote-4.6.0', 'bun/1.3.14', [5, 50]);
+    expect(parseContextBriefCitationScaleArtifactV2(artifact, budget)).toEqual(artifact);
+    expect(EffectArray.map(artifact.profiles, profile => profile.recallBudgetExhaustedObservations)).toEqual(
+      EffectArray.map(artifact.profiles, () => 2),
+    );
+    expect(() =>
+      parseContextBriefCitationScaleArtifactV2(
+        {
+          ...artifact,
+          profiles: EffectArray.map(artifact.profiles, (profile, index) =>
+            index === 0 ? {...profile, recallBudgetExhaustedObservations: 0} : profile,
+          ),
+        },
+        budget,
+      ),
+    ).toThrow();
+  });
+
   it('keeps aggregation invariant under sample order while enforcing fan-out counters', () => {
     const profile = Option.getOrUndefined(
       EffectArray.findFirst(budget.profiles, candidate => candidate.id === 'workset-50'),
@@ -1342,12 +1417,24 @@ function scaleArtifact(): ContextBriefCitationScaleArtifactV2 {
   };
 }
 
-function releaseScaleArtifact(sourceVersion: string, runtime = 'bun/1.3.14'): ContextBriefCitationScaleArtifactV2 {
+function releaseScaleArtifact(
+  sourceVersion: string,
+  runtime = 'bun/1.3.14',
+  recallExhaustedOrdinals: readonly number[] = [],
+): ContextBriefCitationScaleArtifactV2 {
   const base = scaleArtifact();
   const profiles = EffectArray.map(budget.profiles, profile => {
-    const observations = Array.from({length: CONTEXT_BRIEF_CITATION_SCALE_RELEASE_SAMPLES}, (_, ordinal) =>
-      scaleObservation(profile, {}, {}, {observationId: `context-rss-${profile.id}-${ordinal}`, ordinal}),
-    );
+    const observations = Array.from({length: CONTEXT_BRIEF_CITATION_SCALE_RELEASE_SAMPLES}, (_, ordinal) => {
+      const observation = scaleObservation(
+        profile,
+        {},
+        {},
+        {observationId: `context-rss-${profile.id}-${ordinal}`, ordinal},
+      );
+      return recallExhaustedOrdinals.includes(ordinal)
+        ? {...observation, memoryWorkload: recallExhaustedWorkload(profile)}
+        : observation;
+    });
     return evaluateContextBriefCitationScaleProfile(budget, profile.id, observations[0].memoryWorkload, observations)
       .result;
   });
@@ -1486,6 +1573,24 @@ function tamperScaleArtifact(
   };
 }
 
+/** The workload a brief yields when the lexical read deadline interrupts memory recall: no memories, no citation work. */
+function recallExhaustedWorkload(profile: ContextBriefCitationScaleProfileV1): ContextBriefCitationScaleObservationV2 {
+  return scaleObservation(
+    profile,
+    {
+      activeViewFenceObservations: 0,
+      distinctGraphDatabasePaths: 0,
+      effectiveEvidenceBatches: 0,
+      peakLeaseBalance: 0,
+      productionStoreSessionCalls: 0,
+      snapshotLeaseAcquisitions: 0,
+      snapshotLeaseReleases: 0,
+      statusObservations: 0,
+    },
+    {exactValidationReceipts: 0, recallBudgetExhausted: true, selectedMemories: 0, validationReceipts: 0},
+  ).memoryWorkload;
+}
+
 function scaleObservation(
   profile: ContextBriefCitationScaleProfileV1,
   counters: Partial<ContextBriefCitationScaleCountersV1> = {},
@@ -1518,6 +1623,7 @@ function scaleObservation(
     exactValidationReceipts: profile.citationCount,
     memoryRetrievalMilliseconds: 5,
     profile: profile.id,
+    recallBudgetExhausted: false,
     selectedMemories: profile.selectedMemories,
     validationMilliseconds: 4,
     validationReceipts: profile.citationCount,

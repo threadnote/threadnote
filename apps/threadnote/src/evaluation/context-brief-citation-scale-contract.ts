@@ -199,6 +199,8 @@ export interface ContextBriefCitationScaleObservationV2 {
   readonly exactValidationReceipts: number;
   readonly memoryRetrievalMilliseconds: number;
   readonly profile: ContextBriefCitationScaleProfileId;
+  /** True when the compiler's lexical read deadline interrupted memory recall before it returned evidence. */
+  readonly recallBudgetExhausted: boolean;
   readonly selectedMemories: number;
   readonly validationMilliseconds: number;
   readonly validationReceipts: number;
@@ -259,6 +261,8 @@ export interface ContextBriefCitationScaleProfileResultV2 {
   };
   readonly observations: readonly ContextBriefCitationScaleMeasuredObservationV2[];
   readonly profile: ContextBriefCitationScaleProfileV1;
+  /** External RSS-pass observations after ordinal 0 whose memory recall declared the lexical deadline. */
+  readonly recallBudgetExhaustedObservations: number;
   readonly samples: number;
 }
 
@@ -640,6 +644,14 @@ export function evaluateContextBriefCitationScaleProfile(
     maximumProductionStoreSessionCalls: maximum(all, observation => observation.counters.productionStoreSessionCalls),
     maximumStatusObservations: maximum(all, observation => observation.counters.statusObservations),
   };
+  // RSS ordinal 0 is the cold observation, which the strict `all` loop already judges.
+  const rssRecallExhaustion = (observation: ContextBriefCitationScaleMeasuredObservationV2) =>
+    observation.memory.ordinal > 0 || coldReadyGraphObservation.recallBudgetExhausted ? 'tolerated' : 'strict';
+  const sustainedRssObservations = EffectArray.filter(observations, observation => observation.memory.ordinal > 0);
+  const recallBudgetExhaustedObservations = EffectArray.filter(
+    sustainedRssObservations,
+    observation => observation.memoryWorkload.recallBudgetExhausted,
+  ).length;
   const failures = EffectArray.filter(
     [
       ...EffectArray.flatMap(all, (observation, index) =>
@@ -650,10 +662,19 @@ export function evaluateContextBriefCitationScaleProfile(
       ),
       ...EffectArray.flatMap(observations, (observation, index) =>
         EffectArray.map(
-          contextBriefCitationScaleObservationFailures(profile, budget, observation.memoryWorkload, index),
+          contextBriefCitationScaleObservationFailures(
+            profile,
+            budget,
+            observation.memoryWorkload,
+            index,
+            rssRecallExhaustion(observation),
+          ),
           failure => `${failure} during the external RSS pass`,
         ),
       ),
+      recallBudgetExhaustedObservations <= sustainedRssObservations.length * 0.1
+        ? ''
+        : `${profile.id} declared memory-recall-budget-exhausted in ${recallBudgetExhaustedObservations}/${sustainedRssObservations.length} external RSS-pass observations; allowed at most 10%`,
       JSON.stringify(memoryOrdinals) === JSON.stringify(expectedMemoryOrdinals)
         ? ''
         : `${profile.id} memory ordinals are not the complete measured range`,
@@ -663,6 +684,7 @@ export function evaluateContextBriefCitationScaleProfile(
       descendantObservationCount >= minimumDescendantObservations
         ? ''
         : `${profile.id} observed workload descendants in ${descendantObservationCount}/${observations.length} memory observations; ${descendantCoverageRequirement}`,
+      coldReadyGraphObservation.recallBudgetExhausted ||
       coldReadyGraphObservation.counters.effectiveEvidenceBatches === profile.citedRepositories
         ? ''
         : `${profile.id} cold ready-graph evidence batches ${coldReadyGraphObservation.counters.effectiveEvidenceBatches}; expected ${profile.citedRepositories}`,
@@ -687,6 +709,7 @@ export function evaluateContextBriefCitationScaleProfile(
       memoryCoverage,
       observations,
       profile,
+      recallBudgetExhaustedObservations,
       samples: observations.length,
     },
   };
@@ -1063,6 +1086,7 @@ function parseArtifactProfileResult(
     'memoryCoverage',
     'observations',
     'profile',
+    'recallBudgetExhaustedObservations',
     'samples',
   ]);
   const profile = parseProfile(result.profile);
@@ -1086,6 +1110,10 @@ function parseArtifactProfileResult(
     memoryCoverage: parseMemoryCoverage(result.memoryCoverage, profile.id),
     observations,
     profile,
+    recallBudgetExhaustedObservations: nonNegativeSafeInteger(
+      result.recallBudgetExhaustedObservations,
+      `${profile.id} recall-budget-exhausted observations`,
+    ),
     samples: positiveInteger(result.samples, `${profile.id} samples`),
   };
   const evaluated = evaluateContextBriefCitationScaleProfile(
@@ -1256,6 +1284,7 @@ const OBSERVATION_KEYS = [
   'exactValidationReceipts',
   'memoryRetrievalMilliseconds',
   'profile',
+  'recallBudgetExhausted',
   'selectedMemories',
   'validationMilliseconds',
   'validationReceipts',
@@ -1307,6 +1336,7 @@ function parseTimingObservationRecord(
       `${label} memory retrieval milliseconds`,
     ),
     profile: parseProfileId(observation.profile, `${label} profile`),
+    recallBudgetExhausted: booleanValue(observation.recallBudgetExhausted, `${label} recall budget exhausted`),
     selectedMemories: nonNegativeSafeInteger(observation.selectedMemories, `${label} selected memories`),
     validationMilliseconds: nonNegativeFinite(observation.validationMilliseconds, `${label} validation milliseconds`),
     validationReceipts: nonNegativeSafeInteger(observation.validationReceipts, `${label} validation receipts`),
@@ -1667,52 +1697,61 @@ export function contextBriefCitationScaleObservationFailures(
   budget: ContextBriefCitationScaleBudgetV1,
   observation: ContextBriefCitationScaleObservationV2,
   index: number,
+  recallExhaustion: 'strict' | 'tolerated' = 'strict',
 ): readonly string[] {
   const prefix = `${profile.id} observation ${index}`;
   const counters = observation.counters;
   const expectedStatusObservations = profile.citedRepositories * (profile.id === 'local-100k' ? 2 : 1);
   const expectedActiveViewFenceObservations = profile.id === 'local-100k' ? 0 : profile.citedRepositories * 2;
-  return EffectArray.filter(
-    [
-      observation.profile === profile.id ? '' : `${prefix} has wrong profile ${observation.profile}`,
-      observation.selectedMemories === profile.selectedMemories
-        ? ''
-        : `${prefix} selected ${observation.selectedMemories}/${profile.selectedMemories} memories`,
-      observation.validationReceipts === profile.citationCount
-        ? ''
-        : `${prefix} returned ${observation.validationReceipts}/${profile.citationCount} validation receipts`,
-      observation.exactValidationReceipts === profile.citationCount
-        ? ''
-        : `${prefix} returned ${observation.exactValidationReceipts}/${profile.citationCount} exact validation receipts`,
-      observation.estimatedTokens <= budget.maximumEstimatedTokens
-        ? ''
-        : `${prefix} emitted ${observation.estimatedTokens}/${budget.maximumEstimatedTokens} estimated tokens`,
-      counters.productionStoreSessionCalls === profile.citedRepositories
-        ? ''
-        : `${prefix} opened ${counters.productionStoreSessionCalls} production graph-store sessions; expected ${profile.citedRepositories} (one per cited repository)`,
-      counters.distinctGraphDatabasePaths === profile.citedRepositories
-        ? ''
-        : `${prefix} touched ${counters.distinctGraphDatabasePaths}/${profile.citedRepositories} cited graph databases`,
-      counters.effectiveEvidenceBatches === profile.citedRepositories
-        ? ''
-        : `${prefix} issued ${counters.effectiveEvidenceBatches}/${profile.citedRepositories} repository evidence batches`,
-      counters.statusObservations === expectedStatusObservations
-        ? ''
-        : `${prefix} made ${counters.statusObservations}/${expectedStatusObservations} snapshot status observations`,
-      counters.activeViewFenceObservations === expectedActiveViewFenceObservations
-        ? ''
-        : `${prefix} made ${counters.activeViewFenceObservations}/${expectedActiveViewFenceObservations} active-view fence observations`,
-      counters.snapshotLeaseAcquisitions === profile.citedRepositories &&
-      counters.snapshotLeaseReleases === profile.citedRepositories &&
-      counters.leaseBalance === 0
-        ? ''
-        : `${prefix} acquired/released ${counters.snapshotLeaseAcquisitions}/${counters.snapshotLeaseReleases} snapshot leases; expected ${profile.citedRepositories}/${profile.citedRepositories}`,
-      counters.peakLeaseBalance <= 4 ? '' : `${prefix} exceeded validator concurrency 4`,
-      counters.coldGraphBuilds === 0 ? '' : `${prefix} started cold graph indexing`,
-      counters.maintenanceRequests === 0 ? '' : `${prefix} requested graph maintenance`,
-    ],
-    Boolean,
-  );
+  const safety = [
+    observation.profile === profile.id ? '' : `${prefix} has wrong profile ${observation.profile}`,
+    observation.estimatedTokens <= budget.maximumEstimatedTokens
+      ? ''
+      : `${prefix} emitted ${observation.estimatedTokens}/${budget.maximumEstimatedTokens} estimated tokens`,
+    counters.peakLeaseBalance <= 4 ? '' : `${prefix} exceeded validator concurrency 4`,
+    counters.coldGraphBuilds === 0 ? '' : `${prefix} started cold graph indexing`,
+    counters.maintenanceRequests === 0 ? '' : `${prefix} requested graph maintenance`,
+  ];
+  // Interrupted recall yields no memory evidence, so no citation work is expected; only safety bounds still apply.
+  const work = observation.recallBudgetExhausted
+    ? [
+        counters.leaseBalance === 0 ? '' : `${prefix} leaked ${counters.leaseBalance} snapshot leases`,
+        recallExhaustion === 'tolerated'
+          ? ''
+          : `${prefix} declared memory-recall-budget-exhausted; strict observations require completed memory recall`,
+      ]
+    : [
+        observation.selectedMemories === profile.selectedMemories
+          ? ''
+          : `${prefix} selected ${observation.selectedMemories}/${profile.selectedMemories} memories`,
+        observation.validationReceipts === profile.citationCount
+          ? ''
+          : `${prefix} returned ${observation.validationReceipts}/${profile.citationCount} validation receipts`,
+        observation.exactValidationReceipts === profile.citationCount
+          ? ''
+          : `${prefix} returned ${observation.exactValidationReceipts}/${profile.citationCount} exact validation receipts`,
+        counters.productionStoreSessionCalls === profile.citedRepositories
+          ? ''
+          : `${prefix} opened ${counters.productionStoreSessionCalls} production graph-store sessions; expected ${profile.citedRepositories} (one per cited repository)`,
+        counters.distinctGraphDatabasePaths === profile.citedRepositories
+          ? ''
+          : `${prefix} touched ${counters.distinctGraphDatabasePaths}/${profile.citedRepositories} cited graph databases`,
+        counters.effectiveEvidenceBatches === profile.citedRepositories
+          ? ''
+          : `${prefix} issued ${counters.effectiveEvidenceBatches}/${profile.citedRepositories} repository evidence batches`,
+        counters.statusObservations === expectedStatusObservations
+          ? ''
+          : `${prefix} made ${counters.statusObservations}/${expectedStatusObservations} snapshot status observations`,
+        counters.activeViewFenceObservations === expectedActiveViewFenceObservations
+          ? ''
+          : `${prefix} made ${counters.activeViewFenceObservations}/${expectedActiveViewFenceObservations} active-view fence observations`,
+        counters.snapshotLeaseAcquisitions === profile.citedRepositories &&
+        counters.snapshotLeaseReleases === profile.citedRepositories &&
+        counters.leaseBalance === 0
+          ? ''
+          : `${prefix} acquired/released ${counters.snapshotLeaseAcquisitions}/${counters.snapshotLeaseReleases} snapshot leases; expected ${profile.citedRepositories}/${profile.citedRepositories}`,
+      ];
+  return EffectArray.filter([...safety, ...work], Boolean);
 }
 
 function memoryObservationFailures(

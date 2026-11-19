@@ -469,6 +469,7 @@ const runObservation = Effect.fn('evaluation.contextBriefCitationScaleObservatio
   let selectedMemories = 0;
   let validationReceipts = 0;
   let exactValidationReceipts = 0;
+  let memoryRecallCompleted = false;
   const observeRss = () => {
     if (!options.captureBoundaryRss) return;
     boundaryPeakRss = Math.max(boundaryPeakRss, system.memoryUsage().rss);
@@ -501,6 +502,7 @@ const runObservation = Effect.fn('evaluation.contextBriefCitationScaleObservatio
         Effect.gen(function* () {
           const phaseStarted = yield* Clock.currentTimeNanos;
           const evidence = yield* retrieveContextBriefMemoryEvidence(fixture.config, plan);
+          memoryRecallCompleted = true;
           const phaseFinished = yield* Clock.currentTimeNanos;
           memoryRetrievalMilliseconds = Number(phaseFinished - phaseStarted) / 1_000_000;
           selectedMemories = evidence.candidates.length;
@@ -531,6 +533,7 @@ const runObservation = Effect.fn('evaluation.contextBriefCitationScaleObservatio
     exactValidationReceipts,
     memoryRetrievalMilliseconds,
     profile: profileId,
+    recallBudgetExhausted: !memoryRecallCompleted,
     selectedMemories,
     validationMilliseconds,
     validationReceipts,

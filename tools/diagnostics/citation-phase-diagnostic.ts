@@ -75,6 +75,8 @@ function isContextBriefCitationScaleObservation(value: unknown): value is Contex
     'profile' in value &&
     typeof value.profile === 'string' &&
     EffectArray.some(CONTEXT_BRIEF_CITATION_SCALE_PROFILE_IDS, profile => profile === value.profile) &&
+    'recallBudgetExhausted' in value &&
+    typeof value.recallBudgetExhausted === 'boolean' &&
     'selectedMemories' in value &&
     typeof value.selectedMemories === 'number' &&
     'validationMilliseconds' in value &&
