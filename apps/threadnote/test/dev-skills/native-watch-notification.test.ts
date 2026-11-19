@@ -162,10 +162,11 @@ const arrive = Effect.fn('test.watchNotification.arrive')(function* (
 });
 const acknowledge = Effect.fn('test.watchNotification.acknowledge')(function* (
   f: Effect.Success<ReturnType<typeof fixture>>,
+  limit?: number,
 ) {
   const stored = yield* f.read();
   const at = yield* Clock.currentTimeMillis;
-  const relay = relayNativeWatch(stored.envelope.state, 'consumer', at);
+  const relay = relayNativeWatch(stored.envelope.state, 'consumer', at, limit);
   const state = acknowledgeNativeWatch(
     recordNativeWatchDispositions(
       relay.state,
@@ -621,6 +622,30 @@ describe('native watch notification transport', () => {
       }),
       {numRuns: 30},
     );
+  });
+
+  it('rebases a never-sent range that skips unacknowledged backlog', () => {
+    let state = attachNativeWatchConsumer(
+      initializeNativeWatch('watch-1', 'https://github.com/test/repo/pull/1', 0),
+      {id: 'consumer', wakeupId: 'wakeup'},
+      0,
+    );
+    for (let index = 0; index < 2; index++)
+      state = recordNativeWatchLifecycle(state, 'watcher_error', 'error-' + index, 0);
+    const staged = stageNativeWatchNotification(
+      {
+        consumerId: 'consumer',
+        wakeupId: 'wakeup',
+        target,
+        lastConsumerAt: 0,
+        notifiedThrough: 1,
+        outbox: {key: 'watch-1:2:2', first: 2, last: 2, createdAt: 0, attempts: 0, nextAttemptAt: 0, status: 'pending'},
+      },
+      state,
+      0,
+    );
+    expect(staged).toMatchObject({notifiedThrough: 0, outbox: {key: 'watch-1:1:2', first: 1, last: 2}});
+    expect(stageNativeWatchNotification(staged, state, 1)).toBe(staged);
   });
 });
 
@@ -1539,6 +1564,77 @@ effectIt.effect('resumes the exact Claude Code session in its workspace and reco
       lastReceipt: {kind: 'cli-session-completed', receipt: claudeTarget.sessionId},
     });
   }).pipe(provide, TestClock.withLive),
+);
+
+effectIt.effect(
+  'wakes a session again until it acknowledges every event, including events behind a pinned delivery',
+  () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(1);
+      yield* useTarget(f, claudeTarget);
+      const keys: string[] = [];
+      const completion = {
+        ...success,
+        stdout: JSON.stringify({
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          session_id: claudeTarget.sessionId,
+        }),
+      };
+      const turn = <R>(work: Effect.Effect<void, unknown, R>) =>
+        f.drain().pipe(
+          commandLayer((_executable, args) =>
+            Effect.gen(function* () {
+              keys.push(JSON.parse(/Route=(\{.*?\})\. /u.exec(args.at(-1)!)![1]).eventKey);
+              yield* work;
+              return completion;
+            }),
+          ),
+        );
+      // The first turn relays and pins a delivery but ends before ACK.
+      yield* turn(
+        Effect.gen(function* () {
+          const stored = yield* f.read();
+          const relay = relayNativeWatch(stored.envelope.state, 'consumer', yield* Clock.currentTimeMillis);
+          yield* writeNativeWatch(f.config, {...stored.envelope, state: relay.state}, stored.revision);
+        }).pipe(Effect.orDie),
+      );
+      expect(keys).toEqual(['watch-1:1:1']);
+      const stored = yield* f.read();
+      const state = recordNativeWatchLifecycle(stored.envelope.state, 'watcher_error', 'new-review-comment', 0);
+      yield* writeNativeWatch(f.config, {...stored.envelope, state}, stored.revision);
+      // Each later turn acknowledges only the delivery that relay returns, which starts with the pinned older event.
+      yield* turn(acknowledge(f).pipe(Effect.orDie));
+      expect(keys).toEqual(['watch-1:1:1', 'watch-1:1:2', 'watch-1:2:2']);
+      const after = yield* f.read();
+      expect(after.envelope.state.acknowledged).toBe(2);
+      expect(after.envelope.notification).toMatchObject({notifiedThrough: 2, outbox: null});
+    }).pipe(provide, TestClock.withLive),
+);
+
+effectIt.effect('an arrived Codex notice with a partial ACK does not block wakes for later events', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture(2);
+    const keys: string[] = [];
+    const dispatch = f.dispatch().pipe(
+      commandLayer((_executable, args) => {
+        keys.push(JSON.parse(/Route=(\{.*?\})\. /u.exec(args[4])![1]).eventKey);
+        return Effect.succeed(success);
+      }),
+    );
+    yield* dispatch;
+    yield* arrive(f, {relayLimit: 1});
+    yield* acknowledge(f);
+    yield* dispatch;
+    expect(keys).toEqual(['watch-1:1:2']);
+    const stored = yield* f.read();
+    const state = recordNativeWatchLifecycle(stored.envelope.state, 'watcher_error', 'new-review-comment', 0);
+    yield* writeNativeWatch(f.config, {...stored.envelope, state}, stored.revision);
+    yield* dispatch;
+    yield* dispatch;
+    expect(keys).toEqual(['watch-1:1:2', 'watch-1:2:3']);
+  }).pipe(provide),
 );
 
 effectIt.effect('refuses mismatched or unsuccessful session completion receipts without claiming delivery', () =>
