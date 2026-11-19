@@ -1,10 +1,11 @@
-import {Array as EffectArray, DateTime, Effect, FileSystem, Path} from 'effect';
+import {Array as EffectArray, Clock, DateTime, Effect, FileSystem, Path} from 'effect';
 import * as EffectRecord from 'effect/Record';
 import {errorMessage} from '@threadnote/platform/errors';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {readCanonicalMutationGeneration} from '@threadnote/store/resource/mutation_generation';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import type {ContextMaintenanceWorkerQuiet, MaintenanceState} from './maintenance_contracts.js';
+import type {MaintenanceWorkSchedule} from './maintenance_decisions.js';
 import {readDraftQueueNextEligibleAt} from './maintenance_draft_queue.js';
 import {
   contextMaintenanceEvidenceRequestKey,
@@ -16,6 +17,13 @@ import {readRawState, readState, withStateLock, writeState} from './maintenance.
 const WAKE_INTERVAL_MS = 30_000;
 const MAX_WAKE_INTERVAL_MS = 30 * 60_000;
 const STATE_LOCK = {retryIntervalMilliseconds: 25, staleAfterMilliseconds: 60_000};
+/** A worker tick serves one phase of the work schedule, so one quiet tick per phase is a full rotation. */
+const ROTATING_WORK_PHASES = EffectRecord.size({
+  records: true,
+  semantic: true,
+  requested: true,
+  topic: true,
+} satisfies Record<MaintenanceWorkSchedule['nextPhase'], true>);
 
 /**
  * Rotating cursors, timestamps and retry times are excluded: a tick that only moves them made no progress.
@@ -59,38 +67,49 @@ export function contextMaintenanceProgressFingerprint(
   );
 }
 
-function earliestDeadline(deadlines: readonly (string | undefined)[]): number {
+function earliestDeadlineAfter(deadlines: readonly (string | number | undefined)[], after: number): number {
   return EffectArray.reduce(deadlines, Number.POSITIVE_INFINITY, (earliest, deadline) => {
-    const at = deadline === undefined ? Number.NaN : Date.parse(deadline);
-    return at < earliest ? at : earliest;
+    const at = typeof deadline === 'string' ? Date.parse(deadline) : (deadline ?? Number.NaN);
+    return at > after && at < earliest ? at : earliest;
   });
 }
 
-const iso = (at: number) => DateTime.formatIso(DateTime.makeUnsafe(at));
+/**
+ * An overdue deadline waits for its phase, so it counts as pending until one full rotation of quiet ticks. After that
+ * rotation it belongs to work that maintenance cannot complete, and only deadlines after `at` are pending.
+ */
+function pendingDeadlineFloor(streak: number, at: number): number {
+  return streak < ROTATING_WORK_PHASES ? Number.NEGATIVE_INFINITY : at;
+}
 
-/** The streak restarts when progress or a canonical mutation appears. Overdue deferrals stay recorded. */
+/** The streak restarts when progress or a canonical mutation appears. */
 export function nextContextMaintenanceWorkerQuiet(
   state: MaintenanceState,
   requests: readonly ContextMaintenanceEvidenceRequest[],
   canonicalGeneration: string,
+  now: number,
   draftNextEligibleAt?: number,
 ): ContextMaintenanceWorkerQuiet {
   const fingerprint = contextMaintenanceProgressFingerprint(state, requests);
   const previous = state.workerQuiet;
   const quiet = previous?.fingerprint === fingerprint && previous.canonicalGeneration === canonicalGeneration;
-  const requestRetryAt = earliestDeadline(
-    EffectArray.flatMap(requests, request => EffectArray.map(request.uris, uri => request.deferredUntil?.[uri])),
+  const streak = quiet ? previous.streak + 1 : 0;
+  const retryAt = earliestDeadlineAfter(
+    [
+      ...EffectArray.flatMap(requests, request => EffectArray.map(request.uris, uri => request.deferredUntil?.[uri])),
+      draftNextEligibleAt,
+    ],
+    pendingDeadlineFloor(streak, now),
   );
   return {
     fingerprint,
     canonicalGeneration,
-    streak: quiet ? previous.streak + 1 : 0,
-    ...(Number.isFinite(requestRetryAt) ? {requestRetryAt: iso(requestRetryAt)} : {}),
-    ...(draftNextEligibleAt === undefined ? {} : {draftRetryAt: iso(draftNextEligibleAt)}),
+    streak,
+    ...(Number.isFinite(retryAt) ? {retryAt: DateTime.formatIso(DateTime.makeUnsafe(retryAt))} : {}),
   };
 }
 
-/** A tick serves one phase, so a deadline already due at the last wake keeps the thirty-second interval. */
+/** A tick serves one phase, so a pending deadline already due at the last wake keeps the thirty-second interval. */
 export function contextMaintenanceWakeIntervalMs(
   state: Pick<MaintenanceState, 'cases' | 'checkpoints' | 'workerQuiet'>,
   lastWakeAt: number,
@@ -98,15 +117,17 @@ export function contextMaintenanceWakeIntervalMs(
 ): number {
   const quiet = state.workerQuiet;
   if (quiet === undefined || quiet.canonicalGeneration !== canonicalGeneration) return WAKE_INTERVAL_MS;
-  const deadline = earliestDeadline([
-    quiet.requestRetryAt,
-    quiet.draftRetryAt,
-    ...EffectArray.map(EffectRecord.values(state.checkpoints), item => item.retryAt),
-    ...EffectArray.map(
-      EffectArray.filter(state.cases, item => item.disposition === 'waiting-evidence'),
-      item => item.nextAttemptAt,
-    ),
-  ]);
+  const deadline = earliestDeadlineAfter(
+    [
+      quiet.retryAt,
+      ...EffectArray.map(EffectRecord.values(state.checkpoints), item => item.retryAt),
+      ...EffectArray.map(
+        EffectArray.filter(state.cases, item => item.disposition === 'waiting-evidence'),
+        item => item.nextAttemptAt,
+      ),
+    ],
+    pendingDeadlineFloor(quiet.streak, lastWakeAt),
+  );
   const backoff = Math.min(WAKE_INTERVAL_MS * 2 ** quiet.streak, MAX_WAKE_INTERVAL_MS);
   return Math.max(WAKE_INTERVAL_MS, Math.min(backoff, deadline - lastWakeAt));
 }
@@ -146,6 +167,7 @@ export const recordContextMaintenanceWorkerTick = Effect.fn('contextMaintenance.
           state,
           requests,
           yield* currentCanonicalGeneration(config),
+          yield* Clock.currentTimeMillis,
           draftNextEligibleAt,
         );
         yield* writeState(config, {...state, workerQuiet});

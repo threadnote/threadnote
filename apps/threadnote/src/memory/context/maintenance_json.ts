@@ -527,8 +527,7 @@ export function isMaintenanceState(value: unknown): value is MaintenanceState {
         isString(quiet.fingerprint) &&
         isString(quiet.canonicalGeneration) &&
         isNonNegativeInteger(quiet.streak) &&
-        optional(quiet, 'requestRetryAt', isString) &&
-        optional(quiet, 'draftRetryAt', isString),
+        optional(quiet, 'retryAt', isString),
     )
   )
     return false;

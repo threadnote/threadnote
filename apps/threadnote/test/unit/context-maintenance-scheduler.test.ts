@@ -233,13 +233,16 @@ describe('context maintenance wake backoff', () => {
         maintenanceCase('pending', {nextAttemptAt: at(lastWakeAt + 300_000)}),
         maintenanceCase('closed', {disposition: 'resolved', nextAttemptAt: at(lastWakeAt + 60_000)}),
       ],
-      checkpoints: {'tn_b:0': {revision: 'r', checkedAt: T0, retryAt: at(lastWakeAt + 600_000)}},
+      checkpoints: {
+        'tn_a:0': {revision: 'r', checkedAt: T0, retryAt: at(lastWakeAt - 1)},
+        'tn_b:0': {revision: 'r', checkedAt: T0, retryAt: at(lastWakeAt + 600_000)},
+      },
     });
     expect(contextMaintenanceWakeIntervalMs(state, lastWakeAt, '')).toBe(300_000);
-    const requestRetryAt = at(lastWakeAt + 120_000);
-    expect(
-      contextMaintenanceWakeIntervalMs({...state, workerQuiet: {...quiet(10), requestRetryAt}}, lastWakeAt, ''),
-    ).toBe(120_000);
+    const retryAt = at(lastWakeAt + 120_000);
+    expect(contextMaintenanceWakeIntervalMs({...state, workerQuiet: {...quiet(10), retryAt}}, lastWakeAt, '')).toBe(
+      120_000,
+    );
     expect(
       contextMaintenanceWakeIntervalMs(
         {...state, checkpoints: {'tn_c:0': {revision: 'r', checkedAt: T0, retryAt: at(lastWakeAt + 10_000)}}},
@@ -249,21 +252,43 @@ describe('context maintenance wake backoff', () => {
     ).toBe(30_000);
   });
 
-  it('keeps thirty seconds while any pending deadline is overdue at the last wake', () => {
+  it('keeps thirty seconds while any pending deadline is overdue within the first quiet rotation', () => {
     const lastWakeAt = Date.parse(T0);
     const overdue = at(lastWakeAt - 1);
     const backedOff = maintenanceState({
-      workerQuiet: quiet(10),
+      workerQuiet: quiet(3),
       cases: [maintenanceCase('closed', {disposition: 'resolved', nextAttemptAt: overdue})],
     });
-    expect(contextMaintenanceWakeIntervalMs(backedOff, lastWakeAt, '')).toBe(1_800_000);
+    expect(contextMaintenanceWakeIntervalMs(backedOff, lastWakeAt, '')).toBe(240_000);
     for (const pending of [
       {checkpoints: {'tn_a:0': {revision: 'r', checkedAt: T0, retryAt: overdue}}},
       {cases: [maintenanceCase('pending', {nextAttemptAt: overdue})]},
-      {workerQuiet: {...quiet(10), requestRetryAt: overdue}},
-      {workerQuiet: {...quiet(10), draftRetryAt: overdue}},
+      {workerQuiet: {...quiet(3), retryAt: overdue}},
     ])
       expect(contextMaintenanceWakeIntervalMs({...backedOff, ...pending}, lastWakeAt, '')).toBe(30_000);
+  });
+
+  it('backs off after one quiet rotation while a deadline stays overdue, without hiding a later retry', () => {
+    let now = Date.parse(T0);
+    const overdue = at(now - 1);
+    const draftNextEligibleAt = now + 36_000_000;
+    const requests = [{project: 'threadnote', cwd: '/repo', uris: ['a'], deferredUntil: {a: overdue}}];
+    let state = maintenanceState({cases: [maintenanceCase('topic', {nextAttemptAt: overdue})]});
+    const recorded = EffectArray.map(EffectArray.range(0, 6), () => {
+      state = {...state, workerQuiet: nextContextMaintenanceWorkerQuiet(state, requests, '', now, draftNextEligibleAt)};
+      const interval = contextMaintenanceWakeIntervalMs(state, now, '');
+      now += interval;
+      return [state.workerQuiet?.streak, interval, state.workerQuiet?.retryAt];
+    });
+    expect(recorded).toEqual([
+      [0, 30_000, overdue],
+      [1, 30_000, overdue],
+      [2, 30_000, overdue],
+      [3, 30_000, overdue],
+      [4, 480_000, at(draftNextEligibleAt)],
+      [5, 960_000, at(draftNextEligibleAt)],
+      [6, 1_800_000, at(draftNextEligibleAt)],
+    ]);
   });
 
   it('returns to thirty seconds when the canonical generation changed or is unreadable', () => {
@@ -357,9 +382,14 @@ describe('context maintenance wake backoff', () => {
     const recorded = EffectArray.map(ticks, request => {
       state = {
         ...state,
-        workerQuiet: nextContextMaintenanceWorkerQuiet(state, [{project: 'threadnote', cwd: '/repo', ...request}], ''),
+        workerQuiet: nextContextMaintenanceWorkerQuiet(
+          state,
+          [{project: 'threadnote', cwd: '/repo', ...request}],
+          '',
+          now,
+        ),
       };
-      return [state.workerQuiet?.streak, state.workerQuiet?.requestRetryAt];
+      return [state.workerQuiet?.streak, state.workerQuiet?.retryAt];
     });
     expect(recorded).toEqual([
       [0, undefined],
@@ -403,7 +433,7 @@ describe('context maintenance wake backoff', () => {
       yield* setContextMaintenancePaused(config, false);
       yield* recordContextMaintenanceWorkerTick(config, 0);
       expect(yield* (yield* FileSystem.FileSystem).exists(yield* draftQueueObservationDirectory(config))).toBe(false);
-      expect((yield* readRawState(config)).workerQuiet).not.toHaveProperty('draftRetryAt');
+      expect((yield* readRawState(config)).workerQuiet).not.toHaveProperty('retryAt');
       yield* enqueueDraftWork(config, {
         identity: sha256HexSync('identity'),
         targetKey: sha256HexSync('target'),
@@ -421,7 +451,7 @@ describe('context maintenance wake backoff', () => {
       yield* finishDraftWork(config, admitted.claim, {state: 'failed', transient: true});
       yield* recordContextMaintenanceWorkerTick(config, 0);
       const quietState = (yield* readRawState(config)).workerQuiet;
-      expect(quietState?.draftRetryAt).toBe(at(300_000));
+      expect(quietState?.retryAt).toBe(at(300_000));
       expect(
         contextMaintenanceWakeIntervalMs(maintenanceState({workerQuiet: {...quietState!, streak: 10}}), 0, ''),
       ).toBe(300_000);

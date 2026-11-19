@@ -159,7 +159,7 @@ describe('maintenance status semantic checkpoint compatibility', () => {
       {...workerQuiet, streak: -1},
       {...workerQuiet, streak: 1.5},
       {...workerQuiet, fingerprint: 1},
-      {...workerQuiet, requestRetryAt: 1},
+      {...workerQuiet, retryAt: 1},
       {fingerprint: 'fingerprint', streak: 0},
       'quiet',
     ])

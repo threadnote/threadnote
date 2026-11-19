@@ -122,6 +122,29 @@ function readQueueFile<A>(fs: FileSystem.FileSystem, file: string, schema: Schem
   });
 }
 
+/**
+ * The queue as a transaction sees it after write-ahead replay: staged checkpoints shadow target files, and background
+ * reservations lapse after an hour. Only `put` stages a checkpoint; the caller decides what is written.
+ */
+function queueView(
+  fs: FileSystem.FileSystem,
+  targetPath: (key: string) => string,
+  state: State,
+  now: number,
+  staged: Map<string, DraftQueueTarget>,
+): Transaction {
+  state.backgroundReservations = EffectArray.filter(state.backgroundReservations, r => r.at > now - HOUR);
+  return {
+    state,
+    now,
+    read: key =>
+      staged.has(key) ? Effect.succeed(staged.get(key)) : readQueueFile(fs, targetPath(key), checkpointSchema),
+    put: cp => {
+      staged.set(cp.targetKey, cp);
+    },
+  };
+}
+
 // Every state/checkpoint change has a replayable write-ahead record. In particular a
 // crash between the quota reservation and checkpoint publication cannot refund use.
 function transaction<A, E, R>(config: Config, use: (tx: Transaction) => Effect.Effect<A, E, R>) {
@@ -186,16 +209,7 @@ function transaction<A, E, R>(config: Config, use: (tx: Transaction) => Effect.E
           for (const cp of state.pending) yield* write(targetPath(cp.targetKey), cp);
           state.pending = [];
           const staged = new Map<string, DraftQueueTarget>();
-          const tx: Transaction = {
-            state,
-            now: yield* Clock.currentTimeMillis,
-            read: key =>
-              staged.has(key) ? Effect.succeed(staged.get(key)) : readQueueFile(fs, targetPath(key), checkpointSchema),
-            put: cp => {
-              staged.set(cp.targetKey, cp);
-            },
-          };
-          state.backgroundReservations = EffectArray.filter(state.backgroundReservations, r => r.at > tx.now - HOUR);
+          const tx = queueView(fs, targetPath, state, yield* Clock.currentTimeMillis, staged);
           yield* recover(tx);
           const result = yield* use(tx);
           state.pending = [...staged.values()];
@@ -706,7 +720,7 @@ export function readDraftQueueStatus(config: Config) {
 }
 /**
  * Lock-free scheduling hint that never creates, recovers or writes queue state. Unreplayed write-ahead checkpoints
- * take precedence over target files, as the next transaction would replay them. An expired lease stays due.
+ * stay staged, as the next transaction would replay them. An expired lease stays due.
  */
 export const readDraftQueueNextEligibleAt = Effect.fn('draftQueue.nextEligibleAt')(function* (config: Config) {
   const fs = yield* FileSystem.FileSystem;
@@ -714,18 +728,14 @@ export const readDraftQueueNextEligibleAt = Effect.fn('draftQueue.nextEligibleAt
   const root = yield* draftQueueObservationDirectory(config);
   const saved = yield* readQueueFile(fs, path.join(root, 'queue.json'), stateSchema);
   if (saved === undefined) return undefined;
-  const now = yield* Clock.currentTimeMillis;
-  const pending = new Map(EffectArray.map(saved.pending, cp => [cp.targetKey, cp] as const));
-  const snapshot: Transaction = {
-    state: {...saved, backgroundReservations: EffectArray.filter(saved.backgroundReservations, r => r.at > now - HOUR)},
-    now,
-    read: key =>
-      pending.has(key)
-        ? Effect.succeed(pending.get(key))
-        : readQueueFile(fs, path.join(root, `target-${key}.json`), checkpointSchema),
-    put: () => {},
-  };
-  return (yield* status(snapshot)).nextEligibleAt;
+  const view = queueView(
+    fs,
+    key => path.join(root, `target-${key}.json`),
+    {...saved, pending: []},
+    yield* Clock.currentTimeMillis,
+    new Map(EffectArray.map(saved.pending, cp => [cp.targetKey, cp] as const)),
+  );
+  return (yield* status(view)).nextEligibleAt;
 });
 export function setDraftQueuePolicy(
   config: Config,

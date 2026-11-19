@@ -55,10 +55,11 @@ export interface ContextMaintenanceWorkerQuiet {
   readonly fingerprint: string;
   readonly canonicalGeneration: string;
   readonly streak: number;
-  /** Earliest deferral of a pending evidence request, kept when overdue; request files are not read at wake time. */
-  readonly requestRetryAt?: string;
-  /** Next draft-queue eligibility at the tick; the queue is not read at wake time. */
-  readonly draftRetryAt?: string;
+  /**
+   * Earliest pending evidence-request deferral or draft-queue eligibility at the tick. Request files and the queue are
+   * not read at wake time.
+   */
+  readonly retryAt?: string;
 }
 
 export interface ContextMaintenanceReceiptV2 {
