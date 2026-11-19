@@ -11,7 +11,12 @@ import {FileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/
 import {describe, expect, vi} from 'vitest';
 import fc from 'fast-check';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
-import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import {ApplicationLayer, applicationLayerForHome} from '@threadnote/threadnote/effect/runtime';
+import {wakeBackgroundWorker} from '@threadnote/inference/background/worker-control';
+import {readRecallIndexData} from '@threadnote/recall/index';
+import {readRecallLexicalDemand, requestRecallLexicalRefresh} from '@threadnote/recall/background/lexical-demand';
+import {advanceCanonicalMutationGeneration} from '@threadnote/store/resource/mutation_generation';
+import {getThreadnoteVersion} from '@threadnote/workspace/runtime-version';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
@@ -63,6 +68,9 @@ import {
 } from '../../src/memory/context/maintenance_draft.js';
 import {readPreparedMemory} from '../../src/memory/context/maintenance_preparation_state.js';
 import {readDraftQueueStatus, readDraftQueueTarget} from '../../src/memory/context/maintenance_draft_queue.js';
+import {withContextMaintenanceWorkerMode} from '../../src/memory/context/maintenance_worker_mode.js';
+import {recallEmbeddingWorkerPaths} from '../../src/recall/embedding_worker_process.js';
+import {RECALL_EMBEDDING_WORKER_PROTOCOL_VERSION} from '../../src/worker_protocol.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
@@ -2291,6 +2299,61 @@ try {
           expect(yield* f.fs.readFileString(f.targetPath)).toBe(f.content);
         }).pipe(Effect.provideService(LocalModelStore, f.installed));
       }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+  effectIt.effect('prepares a worker tick from ready identities without refreshing a stale lexical index', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      yield* f.prepare.pipe(Effect.provideService(LocalModelStore, f.installed));
+      yield* advanceCanonicalMutationGeneration(f.fs, f.path, f.home, f.config.account);
+      const freshness = readRecallIndexData(f.config, {includeInactive: false, query: 'timeout'}).pipe(
+        Effect.map(data => data.readState?.freshness),
+      );
+      expect(yield* freshness).toBe('stale');
+      const input = {uri: f.uri, expectedContentHash: hash(f.content)};
+      const background = yield* withContextMaintenanceWorkerMode(requestAutomaticMemoryReview(f.config, input));
+      if ('reviewId' in background) return yield* Effect.die('Expected ordinary packet.');
+      expect(background.omissions).toContain('related-source-unreadable');
+      expect(background.reviewEvidence).toEqual([]);
+      expect(background.basis.assessment.coverage.omittedSources).toBe(1);
+      expect(yield* freshness).toBe('stale');
+      const sources = (packet: ReturnType<typeof automaticReviewPacket>) =>
+        EffectArray.map(packet.reviewEvidence, entry => entry.descriptor.source);
+      const related = [expect.objectContaining({kind: 'memory', uri: f.sourceUri, memoryId: f.sourceId})];
+      const foreground = yield* requestAutomaticMemoryReview(f.config, input);
+      if ('reviewId' in foreground) return yield* Effect.die('Expected ordinary packet.');
+      expect(foreground.omissions).not.toContain('related-source-unreadable');
+      expect(sources(foreground)).toEqual(related);
+      expect(yield* freshness).toBe('current');
+      // A current snapshot serves the worker's alias and relation-target reads.
+      const ready = yield* withContextMaintenanceWorkerMode(requestAutomaticMemoryReview(f.config, input));
+      if ('reviewId' in ready) return yield* Effect.die('Expected ordinary packet.');
+      expect(sources(ready)).toEqual(related);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+  effectIt.effect('a worker tick records recall demand without resuming or waking the embedding worker', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'worker-mode-wake-'}));
+      const scope = {account: 'local', agentContextHome: home, user: 'tester', includeInactive: false};
+      const paths = recallEmbeddingWorkerPaths(path, home);
+      const launchFile = `${paths.receiptPath}.launch-v2.json`;
+      // An unexpired start claim lets an ordinary wake advance the launch file without spawning a worker.
+      yield* wakeBackgroundWorker({
+        home,
+        ...paths,
+        version: yield* getThreadnoteVersion(),
+        protocol: RECALL_EMBEDDING_WORKER_PROTOCOL_VERSION,
+        launch: () => Effect.succeed(true),
+      });
+      const seeded = yield* fs.readFileString(launchFile);
+      const request = requestRecallLexicalRefresh(scope).pipe(provideTestLayer(applicationLayerForHome(home, 'cli')));
+      const revision = yield* withContextMaintenanceWorkerMode(request);
+      expect(yield* fs.readFileString(launchFile)).toBe(seeded);
+      expect((yield* readRecallLexicalDemand(scope))?.revision).toBe(revision);
+      yield* request;
+      expect(yield* fs.readFileString(launchFile)).not.toBe(seeded);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
   effectIt.effect(
     'leaves an uncited note without current evidence assessed and waiting without model dispatch or enrollment',

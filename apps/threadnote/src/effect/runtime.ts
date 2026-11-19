@@ -8,7 +8,7 @@ import {recallEmbeddingWakeLayer, resumeExistingRecallEmbeddingDemand} from '../
 import {codeGraphRuntimeAdapters} from '../code_graph/runtime_adapters.js';
 import * as BunHttpClient from '@effect/platform-bun/BunHttpClient';
 import * as BunServices from '@effect/platform-bun/BunServices';
-import {Cause, Effect, Layer} from 'effect';
+import {Cause, Effect, Layer, Option} from 'effect';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {threadnoteCliFormatterLayer} from './cli/help.js';
 import {CliOutput} from './cli/output.js';
@@ -34,6 +34,7 @@ import {
   withDeferredCodeAnchorIndexHeal,
 } from '../memory/deferred/code_anchor_index_heal.js';
 import {deferredCodeAnchorRefreshSchedulerLayer} from '../memory/deferred/code_anchor_refresh.js';
+import {ContextMaintenanceWorkerMode} from '../memory/context/maintenance_worker_mode.js';
 import {recallResourceInvalidationLayer} from '@threadnote/recall/resource-invalidation';
 import {emitRecallDiagnostic, recallDiagnosticScope} from '@threadnote/recall/diagnostics';
 import {productionRecallDiagnosticsLayer} from './production_log.js';
@@ -171,20 +172,28 @@ export const HandoffSaveWorkerLayer = recallEmbeddingWakeLayer.pipe(Layer.provid
 /**
  * Runtime application layer with explicit-consent anonymous telemetry. The
  * static ApplicationLayer remains telemetry-free for focused tests.
+ * The detached maintenance tick builds it without embedding resume or wake.
  */
 export function applicationLayerForHome(home: string, entrypoint: 'cli' | 'mcp') {
-  return telemetryLayerForHome(home, entrypoint === 'cli' ? 'invocation' : 'broker').pipe(
-    Layer.provideMerge(readyRecallReadWorkerAdmissionLayer),
-    Layer.provideMerge(
-      deferredCodeAnchorRefreshSchedulerLayer.pipe(
+  return Layer.unwrap(
+    Effect.map(Effect.serviceOption(ContextMaintenanceWorkerMode), workerMode =>
+      telemetryLayerForHome(home, entrypoint === 'cli' ? 'invocation' : 'broker').pipe(
+        Layer.provideMerge(readyRecallReadWorkerAdmissionLayer),
         Layer.provideMerge(
-          Layer.effectDiscard(
-            Effect.forkScoped(
-              Effect.all([resumeExistingCodeGraphEmbeddingDemand(home), resumeExistingRecallEmbeddingDemand(home)], {
-                concurrency: 2,
-              }).pipe(Effect.asVoid),
+          deferredCodeAnchorRefreshSchedulerLayer.pipe(
+            Layer.provideMerge(
+              Option.isSome(workerMode)
+                ? ApplicationLayer
+                : Layer.effectDiscard(
+                    Effect.forkScoped(
+                      Effect.all(
+                        [resumeExistingCodeGraphEmbeddingDemand(home), resumeExistingRecallEmbeddingDemand(home)],
+                        {concurrency: 2},
+                      ).pipe(Effect.asVoid),
+                    ),
+                  ).pipe(Layer.provideMerge(recallEmbeddingWakeLayer.pipe(Layer.provideMerge(ApplicationLayer)))),
             ),
-          ).pipe(Layer.provideMerge(recallEmbeddingWakeLayer.pipe(Layer.provideMerge(ApplicationLayer)))),
+          ),
         ),
       ),
     ),

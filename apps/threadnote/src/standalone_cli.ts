@@ -17,6 +17,7 @@ import {
   decodeContextMaintenanceWorkerRequest,
   runContextMaintenanceWorker,
 } from './memory/context/maintenance_worker.js';
+import {withContextMaintenanceWorkerMode} from './memory/context/maintenance_worker_mode.js';
 import {
   CODE_GRAPH_EMBEDDING_WORKER_ARGUMENT,
   CODE_GRAPH_EMBEDDING_WORKER_PROTOCOL_VERSION,
@@ -176,6 +177,7 @@ async function contextMaintenanceWorkerProgram(args: readonly string[]) {
   const runtime = await import('./effect/runtime-bootstrap.js');
   return Effect.gen(function* () {
     const {config, owner} = yield* decodeContextMaintenanceWorkerRequest(args);
+    // Worker mode reaches the preparation and the application layer that the maintain command builds.
     const work = Effect.gen(function* () {
       // Started imports must settle on interruption before releasing the lease.
       const maintenance = yield* fromPromiseInterruptibleAwaiting(
@@ -209,7 +211,7 @@ async function contextMaintenanceWorkerProgram(args: readonly string[]) {
       );
       // The maintain command reports a failed run only through the process exit code.
       yield* backoff.recordContextMaintenanceWorkerTick(config, process.exitCode);
-    });
+    }).pipe(withContextMaintenanceWorkerMode);
     const status = yield* runContextMaintenanceWorker(config.agentContextHome, owner, work);
     if (status === 'deadline') process.exitCode = 1;
   }).pipe(Effect.provide(runtime.StandaloneBrokerLayer));

@@ -12,8 +12,16 @@ import {
 } from '../../git_proposal/topic_maintenance_commands.js';
 import type {ApprovedSourceDescriptorV1} from '@threadnote/memory/reviewed-support';
 import {readSeedManifest, uriSegment} from '@threadnote/workspace/manifest';
-import {prepareMemoryIdentityAliases, verifyResolvedMemoryIdentity} from '@threadnote/recall/memory/identity';
-import {prepareAuthoredMemoryRelationTargetIdentities} from '../relations.js';
+import {
+  prepareMemoryIdentityAliases,
+  resolveMemoryIdentityAliases,
+  verifyResolvedMemoryIdentity,
+} from '@threadnote/recall/memory/identity';
+import {
+  prepareAuthoredMemoryRelationTargetIdentities,
+  verifyAuthoredMemoryRelationTargetIdentities,
+} from '../relations.js';
+import {ContextMaintenanceWorkerMode} from './maintenance_worker_mode.js';
 import {expandPath} from '@threadnote/platform/paths';
 import {
   isAgentArtifactUri,
@@ -1026,6 +1034,8 @@ export const readLiveAutomaticPreparation = Effect.fn('automaticPreparation.read
     root = sourceCwd;
   }
   const {refs, omittedSources: omittedSelectors} = selectAutomaticMemorySourceReferences(record);
+  // The detached tick reads ready identities only; foreground review prepares the lexical index.
+  const readyOnly = Option.isSome(yield* Effect.serviceOption(ContextMaintenanceWorkerMode));
   const sources: MemoryRecord[] = [];
   const locators = new Map<string, ApprovedSourceDescriptorV1['locator']>();
   const portableReads = new Map<
@@ -1060,9 +1070,12 @@ export const readLiveAutomaticPreparation = Effect.fn('automaticPreparation.read
         : undefined;
     const route = portable
       ? undefined
-      : yield* prepareMemoryIdentityAliases(config, [ref], allowedUriScopes, {
-          validateNow: true,
-        }).pipe(Effect.result);
+      : yield* (readyOnly ? resolveMemoryIdentityAliases : prepareMemoryIdentityAliases)(
+          config,
+          [ref],
+          allowedUriScopes,
+          {validateNow: true},
+        ).pipe(Effect.result);
     if (route && Result.isFailure(route)) {
       omittedSources++;
       omissions.push('related-source-unreadable');
@@ -1176,7 +1189,7 @@ export const readLiveAutomaticPreparation = Effect.fn('automaticPreparation.read
       : (yield* readContextMaintenanceCanonicalRecord(config, read.uri)).hash;
     if (actual !== read.hash) return yield* AutomaticPreparationError.make({reason: 'memory-fence-changed'});
   }
-  yield* prepareAuthoredMemoryRelationTargetIdentities(
+  yield* (readyOnly ? verifyAuthoredMemoryRelationTargetIdentities : prepareAuthoredMemoryRelationTargetIdentities)(
     config,
     EffectArray.flatMap([...liveSources], ([sourceUri, source]) =>
       portableReads.has(sourceUri)
