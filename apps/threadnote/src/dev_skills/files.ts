@@ -33,18 +33,33 @@ export const statOptional = Effect.fn('devSkills.statOptional')(function* (file:
   const fs = yield* FileSystem.FileSystem;
   return yield* fs.stat(file).pipe(Effect.catchIf(missing, () => Effect.void));
 });
+/** Inspect the entry itself with lstat and never follow a symbolic link. */
+export const isSymbolicLink = Effect.fn('devSkills.isSymbolicLink')(function* (file: string) {
+  const fs = yield* FileSystem.FileSystem;
+  return (yield* fs.lstat(file).pipe(Effect.catchIf(missing, () => Effect.void)))?.type === 'SymbolicLink';
+});
+/** The path and each of its ancestors, filesystem root first. */
+const ancestors = (path: Path.Path, absolute: string) => {
+  const parents: string[] = [];
+  for (let current = absolute; ; current = path.dirname(current)) {
+    parents.push(current);
+    if (path.dirname(current) === current) break;
+  }
+  return parents.reverse();
+};
+/** Stops at the first link from the top, so no lstat ever resolves through one. */
+export const hasSymlinkAncestor = Effect.fn('devSkills.hasSymlinkAncestor')(function* (file: string) {
+  const path = yield* Path.Path;
+  for (const current of ancestors(path, path.resolve(file))) if (yield* isSymbolicLink(current)) return true;
+  return false;
+});
 /** Check existing ancestors too, including dangling symbolic links. Never turn I/O failures into absence. */
 export const assertSafePath = Effect.fn('devSkills.safePath')(function* (file: string) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const absolute = path.resolve(file);
   if (absolute !== file) return yield* fail('unsafe-path', `Expected a canonical absolute path: ${file}`);
-  const parents: string[] = [];
-  for (let current = absolute; ; current = path.dirname(current)) {
-    parents.push(current);
-    if (path.dirname(current) === current) break;
-  }
-  parents.reverse();
+  const parents = ancestors(path, absolute);
   const check = Effect.gen(function* () {
     for (const current of parents) {
       const link = yield* fs.readLink(current).pipe(Effect.result);
