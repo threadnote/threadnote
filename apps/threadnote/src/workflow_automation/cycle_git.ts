@@ -859,6 +859,7 @@ export const resolveNativeCycleBase = Effect.fn('workflowAutomation.cycle.resolv
     return {commit: tracked.value, comparisonRef: upstream};
   return (yield* nativeCycleIsAncestor(repo, tracked.value, commit)) ? {commit} : {commit, divergedUpstream: upstream};
 });
+export type NativeCycleBase = Effect.Success<ReturnType<typeof resolveNativeCycleBase>>;
 
 export const verifyNativeCycleBaseRequalification = Effect.fn('workflowAutomation.cycle.verifyBaseRequalification')(
   function* (

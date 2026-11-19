@@ -694,11 +694,11 @@ describe('native cycle pure domain', () => {
     expect(tooSmall.acceptanceCriteria).toBeUndefined();
     expect(nativeCyclePacket(state, 'one', {...packetOptions, budgetBytes: 512})).toMatchObject({
       available: false,
-      reason: 'graph-or-anchor-proof-unavailable',
+      reason: 'anchor-proof-unavailable',
     });
     expect(
       nativeCyclePacket(state, 'one', {...packetOptions, anchors: [{...packetOptions.anchors[0], path: '../secret'}]}),
-    ).toMatchObject({available: false, reason: 'graph-or-anchor-proof-unavailable'});
+    ).toMatchObject({available: false, reason: 'anchor-proof-unavailable'});
     expect(() =>
       validateNativeCycleCapacityRecord({...packetOptions.capacity, selection: 'escalation', risk: 'settled'}),
     ).toThrow();

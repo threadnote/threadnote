@@ -48,6 +48,20 @@ export const NativeCycleStoredSnapshotSchema = Schema.Struct({
     }),
   ).check(Schema.isMaxLength(8192)),
 });
+export type NativeCycleStoredSnapshot = typeof NativeCycleStoredSnapshotSchema.Type;
+
+/** The paths a snapshot's phase owns: a merge receipt names them, else the files minus exact upstream incoming content. */
+export const nativeCyclePhaseOwnedPaths = ({snapshot, incoming}: NativeCycleStoredSnapshot): readonly string[] => {
+  const merge = snapshot.ordinaryMergeQualificationV1 ?? snapshot.invalidTailMergeQualificationV1;
+  if (merge)
+    return (
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(merge.phaseOwnedPaths, owner => owner.phaseId === snapshot.phaseId),
+      )?.paths ?? []
+    );
+  const upstream = new Set(EffectArray.map(incoming, item => item.path));
+  return EffectArray.filter(snapshot.files, file => !upstream.has(file));
+};
 export const NativeCycleBaselineSchema = Schema.Struct({
   repo: Schema.String,
   head: gitObject,

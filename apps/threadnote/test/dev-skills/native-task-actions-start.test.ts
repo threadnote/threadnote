@@ -2380,6 +2380,20 @@ describe('native task actions', () => {
         }).pipe(Effect.provideService(SystemInfo, testSystem)),
       ).toMatchObject({status: 'admitted'});
       expect((yield* readNativeWorkflowState(config, standardRunId))?.state.cycle?.state.plan.delivery).toBe('pr');
+      // The approved delivery stays with the run: another mode refuses early, and a replay keeps the approved mode.
+      const confirmStandard = (fields: object) =>
+        runNativeTaskAction(config, {
+          command: 'compact-confirm',
+          runId: standardRunId,
+          callerCwd: repo,
+          presentedIntentHash: String(standardStart.intentHash),
+          ...fields,
+        }).pipe(Effect.provideService(SystemInfo, testSystem));
+      expect(yield* confirmStandard({delivery: 'local'}).pipe(Effect.result)).toMatchObject({
+        failure: {code: 'delivery-conflict'},
+      });
+      expect(yield* confirmStandard({})).toMatchObject({status: 'admitted'});
+      expect((yield* readNativeWorkflowState(config, standardRunId))?.state.cycle?.state.plan.delivery).toBe('pr');
       expect(
         (yield* (yield* CodeGraphIndexer).index({cwd: repo, threadnoteHome: home, ensureVectors: false})).snapshot
           .state,

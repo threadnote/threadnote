@@ -58,6 +58,8 @@ export interface NativeWatchEnvelope {
   stopRequested: boolean;
   /** Set only by the stop that hands a standalone watch over to a workflow-bound watch; any other stop clears it. */
   stopReason?: 'superseded';
+  /** The workflow-bound watch that replaced a superseded standalone watch. */
+  supersededBy?: string;
   notification?: NativeWatchNotification;
   metrics: {
     requests: number;
@@ -420,6 +422,7 @@ const envelopeSchema = Schema.Struct({
   ),
   stopRequested: Schema.Boolean,
   stopReason: Schema.optionalKey(Schema.Literal('superseded')),
+  supersededBy: Schema.optionalKey(text(128)),
   notification: Schema.optionalKey(nativeWatchNotificationSchema),
   metrics: Schema.Struct({
     requests: integer,

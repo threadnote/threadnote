@@ -116,7 +116,7 @@ export function nativeCyclePacket(
   try {
     options = Schema.decodeUnknownSync(NativeCyclePacketOptionsSchema, {onExcessProperty: 'error'})(input);
   } catch {
-    return {available: false, reason: 'graph-or-anchor-proof-unavailable'};
+    return {available: false, reason: 'anchor-proof-unavailable'};
   }
   if (
     EffectArray.some(
@@ -131,7 +131,7 @@ export function nativeCyclePacket(
         ),
     )
   )
-    return {available: false, reason: 'graph-or-anchor-proof-unavailable'};
+    return {available: false, reason: 'anchor-proof-unavailable'};
   const packet = {
     phaseId,
     phaseHash: state.phases[phaseId].phaseHash,

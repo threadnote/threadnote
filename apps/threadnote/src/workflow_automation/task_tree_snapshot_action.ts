@@ -1,8 +1,7 @@
-import {Array as EffectArray, Effect, Option} from 'effect';
+import {Array as EffectArray, Effect} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {nativeNext, nativeNextForTaskAction, nativeRefusal} from '@threadnote/workflow-automations/gates';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
-import {resolveNativeCycleBase} from './cycle_git.js';
 import {readNativeWorkflowState} from './store.js';
 import {readNativeTaskView} from './task.js';
 import {runWorkflowAutomation} from './index.js';
@@ -73,21 +72,17 @@ export const recordNativeTaskTreeSnapshot = (
     const more = outOfPlan.length - outOfPlanPreviewLimit;
     // The canonical snapshot keeps every path; the response names the first paths and counts the rest.
     const detail = {files: outOfPlan.slice(0, outOfPlanPreviewLimit), ...(more > 0 ? {more} : {})};
-    const phase = Option.getOrUndefined(
-      EffectArray.findFirst(latest?.state.plan.phases ?? [], item => item.id === phaseId),
-    );
     // A diverged local base keeps its own commit, so the snapshot can include upstream-only changes.
-    const base = phase ? yield* resolveNativeCycleBase(checkout, phase.baseBranch).pipe(Effect.option) : Option.none();
-    const diverged = Option.getOrUndefined(base)?.divergedUpstream;
+    const comparison = recorded.snapshot.comparisonEvidence;
     return {
       status: 'recorded',
       replayed: recorded.snapshot.snapshotId === before?.snapshot.snapshotId,
       ...(outOfPlan.length > 0
         ? {warnings: [{_tag: 'warn' as const, gate: 'scope.out-of-plan' as const, detail}]}
         : {}),
-      ...(diverged
+      ...(comparison?.divergedUpstream
         ? {
-            note: `The local branch ${phase?.baseBranch} has diverged from ${diverged}. The snapshot compares against the local branch.`,
+            note: `The local branch ${comparison.baseBranch} has diverged from ${comparison.divergedUpstream}. The snapshot compares against the local branch.`,
           }
         : {}),
       snapshot: nativeTaskSnapshotSummary(recorded),

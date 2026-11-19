@@ -1,4 +1,10 @@
-import {nativeWorkflowPolicies, nativeNext, withNativeNext} from '@threadnote/workflow-automations/gates';
+import {
+  nativeWorkflowPolicies,
+  nativeWorkflowPolicyOf,
+  nativeNext,
+  resolveNativeWorkflowPolicy,
+  withNativeNext,
+} from '@threadnote/workflow-automations/gates';
 import {
   Array as A,
   Effect,
@@ -867,7 +873,7 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
             featureId,
             generation: target.installedDigest,
             profile: target.target.profile,
-            policy: request.workflowProfile ?? config.workflowPolicyDefault ?? 'strict',
+            policy: nativeWorkflowPolicyOf(resolveNativeWorkflowPolicy(config, request.workflowProfile)),
             ...(graphProject === undefined ? {} : {graphProject}),
             recovery: 'same-task',
           }),

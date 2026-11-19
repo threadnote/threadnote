@@ -66,6 +66,8 @@ const comparisonEvidence = Schema.Struct({
   baseBranch: text(),
   /** The remote-tracking upstream that answered for a stale local `baseBranch`; the PR still targets `baseBranch`. */
   comparisonRef: Schema.optionalKey(text()),
+  /** The remote-tracking upstream that a local `baseBranch` diverged from; the local commit answered. */
+  divergedUpstream: Schema.optionalKey(text()),
   baseTree: gitObject,
   sourceRef: retainedCommitRef,
   baseRef: retainedCommitRef,
@@ -92,6 +94,8 @@ const treeSnapshotFields = {
   reviewBasis: Schema.optionalKey(Schema.Struct({snapshotId: id, tree: gitObject})),
 } as const;
 
+/** The most changed paths one snapshot may record. */
+export const nativeCycleSnapshotFileLimit = 8192;
 export const NativeCycleSnapshotSchema = Schema.Struct({
   format: Schema.Literal('threadnote-native-cycle-snapshot'),
   version: Schema.Literals([1, 2, 3, 4]),
@@ -120,7 +124,7 @@ export const NativeCycleSnapshotSchema = Schema.Struct({
   baseRequalification: Schema.optionalKey(baseRequalificationReceipt),
   ordinaryMergeQualificationV1: Schema.optionalKey(NativeCycleOrdinaryMergeReceiptSchema),
   invalidTailMergeQualificationV1: Schema.optionalKey(NativeCycleInvalidTailMergeReceiptSchema),
-  files: Schema.Array(text()).check(Schema.isMaxLength(8192)),
+  files: Schema.Array(text()).check(Schema.isMaxLength(nativeCycleSnapshotFileLimit)),
   pinnedRef: text(),
 }).check(
   Schema.makeFilter(snapshot =>

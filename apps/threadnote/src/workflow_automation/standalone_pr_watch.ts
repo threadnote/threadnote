@@ -46,9 +46,15 @@ const bindingIdentity = (binding: typeof bindingSchema.Type) => {
 
 /**
  * Stops the standalone watch a workflow-bound watch replaces, so one PR wakes the session once. Both routes store
- * GitHub's exact html_url, so the identity derives from the same checkout and URL. A later standalone start revives it.
+ * GitHub's exact html_url, so the identity derives from the same checkout and URL. The stop names the replacing
+ * watch; a later standalone start revives the standalone watch only after that watch stops monitoring the PR.
  */
-export const stopSupersededStandalonePrWatch = (config: RuntimeConfig, checkout: string, prUrl: string) =>
+export const stopSupersededStandalonePrWatch = (
+  config: RuntimeConfig,
+  checkout: string,
+  prUrl: string,
+  supersededBy: string,
+) =>
   Effect.gen(function* () {
     const watchId = standaloneWatchId(checkout, prUrl);
     const watch = yield* readNativeWatch(config, watchId);
@@ -71,6 +77,7 @@ export const stopSupersededStandalonePrWatch = (config: RuntimeConfig, checkout:
       wakeupId: consumer.wakeupId,
       expectedRevision: watch.revision,
       stopReason: 'superseded',
+      supersededBy,
     });
     return watchId;
   });
@@ -217,6 +224,23 @@ export const runStandalonePrWatch = (
       stored.envelope.state.consumer?.id === consumerId &&
       stored.envelope.state.consumer.wakeupId === consumerId &&
       stableJson(stored.envelope.notification?.target) === stableJson(binding.wakeup);
+    // A superseded watch stays stopped while the workflow-bound watch that replaced it monitors the PR.
+    const successorId = watch?.envelope.stopReason === 'superseded' ? watch.envelope.supersededBy : undefined;
+    const successor = successorId
+      ? yield* readNativeWatch(config, successorId).pipe(Effect.orElseSucceed(() => undefined))
+      : undefined;
+    if (
+      request.operation === 'start' &&
+      successor &&
+      !successor.envelope.stopRequested &&
+      successor.envelope.state.consumer &&
+      successor.envelope.state.prState === 'open' &&
+      successor.envelope.state.pr === binding.prUrl
+    )
+      return yield* fail(
+        'watch-superseded',
+        `The workflow-bound watch ${successorId} monitors this PR and wakes its session. Continue with that watch. A standalone start restarts this watch after that watch stops.`,
+      );
     // Only a failed admission or a workflow-bound handover may be revived; an explicit stop stays stopped.
     const retryFailedAdmission =
       request.operation === 'start' &&

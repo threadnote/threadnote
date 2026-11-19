@@ -331,6 +331,53 @@ describe('standard-profile derived ownership', () => {
     }).pipe(runCycle),
   );
 
+  effectIt.effect('records a diverged local base and compares against the local branch', () =>
+    Effect.gen(function* () {
+      // Local main and origin/main each carry a commit that the other lacks.
+      const divergedBase = (repo: string) =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const git = (args: readonly string[]) => runCommandEffect('git', ['-C', repo, ...args]);
+          yield* git(['checkout', '-q', 'main']);
+          yield* fs.writeFileString(`${repo}/upstream.md`, 'Merged upstream.\n');
+          yield* git(['add', 'upstream.md']);
+          yield* git(['commit', '-qm', 'Upstream work']);
+          yield* git(['update-ref', 'refs/remotes/origin/main', 'HEAD']);
+          yield* git(['config', 'remote.origin.url', repo]);
+          yield* git(['config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*']);
+          yield* git(['config', 'branch.main.remote', 'origin']);
+          yield* git(['config', 'branch.main.merge', 'refs/heads/main']);
+          yield* git(['reset', '-q', '--hard', 'HEAD~1']);
+          yield* fs.writeFileString(`${repo}/local.md`, 'Local only.\n');
+          yield* git(['add', 'local.md']);
+          yield* git(['commit', '-qm', 'Local work']);
+          yield* git(['checkout', '-q', '-B', 'feature/one', 'main']);
+        });
+      const f = yield* cycleFixture(
+        ['one'],
+        'local',
+        false,
+        false,
+        true,
+        undefined,
+        divergedBase,
+        {},
+        {policy: 'standard'},
+      );
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = 1;\n');
+      yield* f.git(['commit', '-qam', 'Phase work']);
+      const recorded = object(
+        yield* runNativeTaskAction(f.config, {command: 'record-snapshot', runId: 'native-run', callerCwd: f.repo}),
+      );
+      expect(recorded.note).toEqual(expect.stringContaining('refs/remotes/origin/main'));
+      expect(yield* storedSnapshot(f.config)).toMatchObject({
+        files: ['source.ts'],
+        declaredBaseHead: EffectString.trim((yield* f.git(['rev-parse', 'main'])).stdout),
+        comparisonEvidence: {baseBranch: 'main', divergedUpstream: 'refs/remotes/origin/main'},
+      });
+    }).pipe(runCycle),
+  );
+
   effectIt.effect('keeps the phase pending across a path-only reconcile', () =>
     Effect.gen(function* () {
       const f = yield* cycleFixture(

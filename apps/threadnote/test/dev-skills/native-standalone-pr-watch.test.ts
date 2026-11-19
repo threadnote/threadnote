@@ -455,29 +455,46 @@ describe('standalone PR watches', () => {
     }).pipe(run),
   );
 
-  effectIt.effect('revives a watch superseded by a workflow-bound start but never an explicit stop', () =>
-    Effect.gen(function* () {
-      const f = yield* setup;
-      const watchRef = String(object(yield* f.call({operation: 'start', prUrl, wakeup})).watchRef);
-      const supersede = stopSupersededStandalonePrWatch(f.config, yield* f.fs.realPath(f.repo), prUrl).pipe(
-        Effect.provideService(CommandExecutor, f.commands),
-        Effect.provideService(SystemInfo, f.system),
-      );
-      expect(yield* supersede).toBe(f.getWatchId());
-      expect(yield* supersede).toBeUndefined();
-      yield* f.exitCollector;
-      const revived = object(yield* f.call({operation: 'start', prUrl, wakeup}));
-      expect(revived).toMatchObject({status: 'watching', watchRef, authority: 'monitor-only'});
-      expect(object(revived.result)).toMatchObject({stopRequested: false, collector: {alive: true}});
-      expect(f.spawns()).toBe(2);
+  effectIt.effect(
+    'revives a superseded watch after its workflow-bound successor stops, but never an explicit stop',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* setup;
+        const watchRef = String(object(yield* f.call({operation: 'start', prUrl, wakeup})).watchRef);
+        const successorId = 'pr-' + EffectString.repeat(48)('b');
+        const supersede = stopSupersededStandalonePrWatch(
+          f.config,
+          yield* f.fs.realPath(f.repo),
+          prUrl,
+          successorId,
+        ).pipe(Effect.provideService(CommandExecutor, f.commands), Effect.provideService(SystemInfo, f.system));
+        expect(yield* supersede).toBe(f.getWatchId());
+        expect(yield* supersede).toBeUndefined();
+        yield* f.exitCollector;
+        // The successor stands in for the workflow-bound watch: same PR, an attached consumer, not stopped.
+        const standalone = yield* readNativeWatch(f.config, f.getWatchId());
+        if (!standalone) throw new Error('Expected the superseded standalone watch');
+        const {stopReason: _stopReason, supersededBy: _supersededBy, ...envelope} = standalone.envelope;
+        const successor = {...envelope, state: {...envelope.state, watchId: successorId}, stopRequested: false};
+        yield* writeNativeWatch(f.config, successor, null);
+        expect(yield* f.call({operation: 'start', prUrl, wakeup}).pipe(Effect.result)).toMatchObject({
+          failure: {code: 'watch-superseded', message: expect.stringContaining(successorId)},
+        });
+        expect(f.spawns()).toBe(1);
+        const active = yield* readNativeWatch(f.config, successorId);
+        yield* writeNativeWatch(f.config, {...successor, stopRequested: true}, active?.revision ?? null);
+        const revived = object(yield* f.call({operation: 'start', prUrl, wakeup}));
+        expect(revived).toMatchObject({status: 'watching', watchRef, authority: 'monitor-only'});
+        expect(object(revived.result)).toMatchObject({stopRequested: false, collector: {alive: true}});
+        expect(f.spawns()).toBe(2);
 
-      // An explicit stop after a handover withdraws revival.
-      expect(yield* supersede).toBe(f.getWatchId());
-      yield* f.call({operation: 'stop', watchRef});
-      yield* f.exitCollector;
-      expect(object(yield* f.call({operation: 'start', prUrl, wakeup})).status).toBe('watch-stopped');
-      expect(f.spawns()).toBe(2);
-    }).pipe(run),
+        // An explicit stop after a handover withdraws revival.
+        expect(yield* supersede).toBe(f.getWatchId());
+        yield* f.call({operation: 'stop', watchRef});
+        yield* f.exitCollector;
+        expect(object(yield* f.call({operation: 'start', prUrl, wakeup})).status).toBe('watch-stopped');
+        expect(f.spawns()).toBe(2);
+      }).pipe(run),
   );
 
   effectIt.effect('reports a stop observed during setup inspection from the same fresh health result', () =>

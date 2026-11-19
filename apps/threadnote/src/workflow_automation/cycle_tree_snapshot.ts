@@ -24,6 +24,7 @@ import {
   readNativeCycleTreeEntries,
   nativeCycleChangeDigest,
   resolveNativeCycleBase,
+  type NativeCycleBase,
 } from './cycle_git.js';
 
 type Phase = NativeCycleState['plan']['phases'][number];
@@ -46,9 +47,10 @@ export const readNativeCycleIncoming = Effect.fn('workflowAutomation.cycle.incom
   phase: Phase,
   captured: Captured,
   baseline: Baseline,
+  declared: NativeCycleBase,
   outOfPlan?: string[],
 ) {
-  const {commit: base, comparisonRef} = yield* resolveNativeCycleBase(repo, phase.baseBranch);
+  const {commit: base, comparisonRef, divergedUpstream} = declared;
   const common = yield* git(repo, ['merge-base', base, captured.head]);
   const scope = yield* captureNativeCycleSource(repo, common);
   if (scope.head !== captured.head || scope.tree !== captured.tree)
@@ -95,6 +97,7 @@ export const readNativeCycleIncoming = Effect.fn('workflowAutomation.cycle.incom
     scopeBase: scope.baseTree,
     declaredBaseHead: base,
     ...(comparisonRef ? {comparisonRef} : {}),
+    ...(divergedUpstream ? {divergedUpstream} : {}),
     scopeFiles: EffectRecord.keys(scope.files).sort(),
   };
 });
@@ -151,12 +154,12 @@ export const recordNativeCycleTreeSnapshot = Effect.fn('workflowAutomation.cycle
       next: view,
     });
   const pinned = runtime.baselines[phase.id];
+  const declared = yield* resolveNativeCycleBase(repo, phase.baseBranch);
   // A phase without a baseline begins at HEAD when clean, otherwise at its merge-base with the declared base.
   let baseline = pinned;
   if (!baseline && EffectRecord.isEmptyRecord((yield* captureNativeCycleSource(repo, 'HEAD')).files))
     baseline = yield* input.pinBaseline(phase.id);
   if (!baseline) {
-    const declared = yield* resolveNativeCycleBase(repo, phase.baseBranch);
     const head = yield* git(repo, ['merge-base', declared.commit, 'HEAD']);
     const tree = yield* git(repo, ['rev-parse', head + '^{tree}']);
     baseline = {
@@ -169,7 +172,7 @@ export const recordNativeCycleTreeSnapshot = Effect.fn('workflowAutomation.cycle
   }
   const captured = yield* captureNativeCycleSource(repo, baseline.tree);
   const outOfPlan: string[] = [];
-  const scope = yield* readNativeCycleIncoming(repo, phase, captured, baseline, outOfPlan);
+  const scope = yield* readNativeCycleIncoming(repo, phase, captured, baseline, declared, outOfPlan);
   const intentHash = nativeCyclePhaseIntentHash(state.plan, phase.id);
   const phaseSnapshots = EffectArray.filter(runtime.snapshots, entry => entry.snapshot.phaseId === phase.id);
   // A snapshot retired by an invalidation never answers for the next iteration, even for the same tree.
@@ -232,6 +235,7 @@ export const recordNativeCycleTreeSnapshot = Effect.fn('workflowAutomation.cycle
       version: 1,
       baseBranch: phase.baseBranch,
       ...(scope.comparisonRef ? {comparisonRef: scope.comparisonRef} : {}),
+      ...(scope.divergedUpstream ? {divergedUpstream: scope.divergedUpstream} : {}),
       baseTree: yield* git(repo, ['rev-parse', scope.declaredBaseHead + '^{tree}']),
       sourceRef: yield* pinNativeCycleCommit(repo, bindingId, snapshotId, captured.head, 'snapshot-head'),
       baseRef: yield* pinNativeCycleCommit(repo, bindingId, snapshotId, scope.declaredBaseHead, 'snapshot-base'),

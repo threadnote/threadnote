@@ -60,15 +60,18 @@ describe('native cycle lifecycle', () => {
         .call({...f.base('cycle'), command: 'packet', phaseId: 'one', packet: {...options, ownership: ['outside.ts']}})
         .pipe(Effect.result);
       expect(scope).toMatchObject({failure: {code: 'phase-scope'}});
-      // A packet is dispatched from committed source: an uncommitted file outside every anchor is still drift.
+      // A packet is dispatched from committed source: an uncommitted file outside every anchor still refuses.
       yield* f.fs.writeFileString(f.path.join(f.repo, 'unrelated.ts'), 'export const unrelated = true;\n');
       expect(
         yield* f.call({...f.base('cycle'), command: 'packet', phaseId: 'one', packet: options}).pipe(Effect.result),
-      ).toMatchObject({failure: {code: 'source-drift'}});
+      ).toMatchObject({failure: {code: 'working-tree-dirty'}});
       yield* f.fs.remove(f.path.join(f.repo, 'unrelated.ts'));
+      // A caller that bound its reference to an earlier head gets no packet of a later head.
+      const boundHead = Effect2.pipe((yield* f.git(['rev-parse', 'HEAD'])).stdout, EffectString.trim);
       yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const changed = true;\n');
+      yield* f.git(['commit', '-qam', 'Move the head']);
       const drift = yield* f
-        .call({...f.base('cycle'), command: 'packet', phaseId: 'one', packet: options})
+        .call({...f.base('cycle'), command: 'packet', phaseId: 'one', acceptedHead: boundHead, packet: options})
         .pipe(Effect.result);
       expect(drift).toMatchObject({failure: {code: 'source-drift'}});
     }).pipe(run),

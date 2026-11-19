@@ -17,6 +17,7 @@ import {
   type NativeAuthoringDocument,
 } from './authoring.js';
 import {createNativeDocument} from './templates.js';
+import {nativeDocumentRenderLimitBytes, renderNativeDocument} from './documents.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
@@ -149,38 +150,68 @@ const lines = (values: readonly string[]) =>
       )
     : 'None recorded.';
 
-/** Each phase's paths as its validated snapshot changed them; the runtime derives it, never the proposal. */
+/**
+ * Each phase's paths as its validated snapshot changed them; the runtime derives it, never the proposal. A bounded
+ * row from an earlier admission is valid input too: it lists drift first and counts unlisted paths in `more`.
+ */
 export interface NativeCloseoutPhaseChanges {
   readonly phaseId: string;
+  readonly drift?: readonly string[];
   readonly paths: readonly string[];
+  readonly more?: number;
 }
 const actualChangesBudgetBytes = 8192;
-/** Drift (outside allowedPaths) is listed first; whatever exceeds the byte budget is counted, never dropped silently. */
-const actualChangeRows = (state: NativeCycleState, changes: readonly NativeCloseoutPhaseChanges[]) => {
-  const byPhase = new Map(EffectArray.map(changes, change => [change.phaseId, change.paths] as const));
+const actualChangesHeading = '\n\nActual changes\n';
+const utf8Bytes = (value: string) => new TextEncoder().encode(value).byteLength;
+/**
+ * Rows whose two-space JSON fits `limitBytes` and the fixed budget, with drift (outside allowedPaths) first. A path
+ * that does not fit is counted in `more`, never dropped silently. Bounded rows bound to the same rows again, so a
+ * stored admission renders the same document.
+ */
+const actualChangeRows = (
+  state: NativeCycleState,
+  changes: readonly NativeCloseoutPhaseChanges[],
+  limitBytes: number,
+) => {
+  const byPhase = new Map(EffectArray.map(changes, change => [change.phaseId, change] as const));
   if (byPhase.size !== changes.length || EffectArray.some(changes, change => !state.phases[change.phaseId]))
     fail('Actual changes must name each cycle phase at most once.');
-  let budget = actualChangesBudgetBytes;
-  return EffectArray.map(state.plan.phases, phase => {
-    const paths = [...new Set(byPhase.get(phase.id) ?? [])].sort();
-    const row = {phaseId: phase.id, drift: [] as string[], paths: [] as string[], more: 0};
-    for (const [drift, path] of [
-      ...EffectArray.map(
-        EffectArray.filter(paths, path => !checkNativeCycleScope(phase, [path])),
-        path => [true, path] as const,
+  const phases = EffectArray.map(state.plan.phases, phase => {
+    const change = byPhase.get(phase.id);
+    const paths = [...new Set([...(change?.drift ?? []), ...(change?.paths ?? [])])].sort();
+    return {phase, paths, more: change?.more ?? 0};
+  });
+  // Empty rows with their largest possible `more` are the fixed cost; each listed path adds its exact JSON bytes.
+  let budget =
+    Math.min(actualChangesBudgetBytes, limitBytes) -
+    utf8Bytes(
+      json(
+        EffectArray.map(phases, ({phase, paths, more}) => ({
+          phaseId: phase.id,
+          drift: [],
+          paths: [],
+          more: more + paths.length,
+        })),
       ),
-      ...EffectArray.map(
-        EffectArray.filter(paths, path => checkNativeCycleScope(phase, [path])),
-        path => [false, path] as const,
-      ),
-    ]) {
-      const bytes = new TextEncoder().encode(path).byteLength + 8;
-      if (bytes > budget) row.more++;
-      else {
-        budget -= bytes;
-        (drift ? row.drift : row.paths).push(path);
+    );
+  return EffectArray.map(phases, ({phase, paths, more}) => {
+    const row = {phaseId: phase.id, drift: [] as string[], paths: [] as string[], more};
+    const drift: string[] = [];
+    const inScope: string[] = [];
+    for (const path of paths) (checkNativeCycleScope(phase, [path]) ? inScope : drift).push(path);
+    for (const [listed, candidates] of [
+      [row.drift, drift],
+      [row.paths, inScope],
+    ] as const)
+      for (const path of candidates) {
+        // At indent 6: the quoted path, its indent and separator; the first item also opens the empty brackets.
+        const bytes = utf8Bytes(JSON.stringify(path)) + 8 + (listed.length ? 0 : 4);
+        if (bytes > budget) row.more++;
+        else {
+          budget -= bytes;
+          listed.push(path);
+        }
       }
-    }
     return row;
   });
 };
@@ -286,33 +317,42 @@ export function prepareNativeCloseout(
           return {scenario, evidence: evidence.evidence};
         })
       : [];
-  const changeRows = actualChanges === undefined ? undefined : actualChangeRows(state, actualChanges);
   const titleFor = (suffix: string) =>
     Effect.pipe(plan.title, EffectString.slice(0, 256 - suffix.length), EffectString.replace(/[\uD800-\uDBFF]$/u, '')) +
     suffix;
-  const architecture = createNativeDocument({
-    kind: 'architecture-current',
-    title: titleFor(' — Implemented architecture'),
-    sections: {
-      summary: proposal.architecture.summary,
-      components: lines(proposal.architecture.components),
-      contracts: lines(proposal.architecture.contracts),
-      constraints:
-        'Invariants\n' +
-        lines(proposal.architecture.invariants) +
-        '\n\nUnknowns\n' +
-        lines(proposal.architecture.unknowns) +
-        '\n\nDeviations\n' +
-        lines(proposal.architecture.deviations) +
-        '\n\nRetained unresolved PR watch work\n' +
-        json(proposal.watchWork ?? []),
-      ...(proposal.architecture.diagram === undefined ? {} : {diagram: proposal.architecture.diagram}),
-      'data-flow':
-        'Source references\n' +
-        lines(proposal.architecture.codeRefs) +
-        (changeRows ? '\n\nActual changes\n' + json(changeRows) : ''),
-    },
-  });
+  const architectureDocument = (dataFlowSuffix: string) =>
+    createNativeDocument({
+      kind: 'architecture-current',
+      title: titleFor(' — Implemented architecture'),
+      sections: {
+        summary: proposal.architecture.summary,
+        components: lines(proposal.architecture.components),
+        contracts: lines(proposal.architecture.contracts),
+        constraints:
+          'Invariants\n' +
+          lines(proposal.architecture.invariants) +
+          '\n\nUnknowns\n' +
+          lines(proposal.architecture.unknowns) +
+          '\n\nDeviations\n' +
+          lines(proposal.architecture.deviations) +
+          '\n\nRetained unresolved PR watch work\n' +
+          json(proposal.watchWork ?? []),
+        ...(proposal.architecture.diagram === undefined ? {} : {diagram: proposal.architecture.diagram}),
+        'data-flow': 'Source references\n' + lines(proposal.architecture.codeRefs) + dataFlowSuffix,
+      },
+    });
+  // The rows replace the `[]` placeholder, so they may use the room it leaves plus its own 2 bytes.
+  const changeRows =
+    actualChanges === undefined
+      ? undefined
+      : actualChangeRows(
+          state,
+          actualChanges,
+          nativeDocumentRenderLimitBytes +
+            2 -
+            utf8Bytes(renderNativeDocument(architectureDocument(actualChangesHeading + '[]'))),
+        );
+  const architecture = architectureDocument(changeRows ? actualChangesHeading + json(changeRows) : '');
   // Separate documents preserve complete original decisions; any individual overflow rejects before mutation.
   const decisionDocuments = EffectArray.map(decisions, item =>
     createNativeDocument({

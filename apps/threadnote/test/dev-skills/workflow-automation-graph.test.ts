@@ -238,9 +238,14 @@ describe('native workflow graph adapter', () => {
         const commands = yield* CommandExecutor;
         const system = yield* SystemInfo;
         let status: CodeGraphStatus = graphStatus(f.repo, {stale: true});
-        const spawned: {readonly executable: string; readonly args: readonly string[]; readonly cwd?: string}[] = [];
-        let spawn = (executable: string, args: readonly string[], cwd?: string) =>
-          Effect.sync(() => spawned.push({executable, args, cwd})).pipe(Effect.as(true));
+        const spawned: {
+          readonly executable: string;
+          readonly args: readonly string[];
+          readonly cwd?: string;
+          readonly home?: string;
+        }[] = [];
+        let spawn = (executable: string, args: readonly string[], cwd?: string, home?: string) =>
+          Effect.sync(() => spawned.push({executable, args, cwd, home})).pipe(Effect.as(true));
         const scope = (policy: 'standard' | 'strict') =>
           requireWorkflowGraphScope(f.config, {
             checkout: f.repo,
@@ -266,7 +271,8 @@ describe('native workflow graph adapter', () => {
               CommandExecutor,
               CommandExecutor.of({
                 ...commands,
-                spawnDetached: (executable, args, options) => spawn(executable, args, options?.cwd),
+                spawnDetached: (executable, args, options) =>
+                  spawn(executable, args, options?.cwd, options?.env?.THREADNOTE_HOME),
               }),
             ),
             Effect.provideService(SystemInfo, {...system, currentDirectory: () => f.repo}),
@@ -277,18 +283,31 @@ describe('native workflow graph adapter', () => {
         expect(yield* provide(scope('strict')).pipe(Effect.result)).toMatchObject({
           failure: {code: 'evidence-unavailable'},
         });
-        build.standalone = true;
-        yield* start.pipe(Effect.ensuring(Effect.sync(() => (build.standalone = false))));
+        const released = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+          Effect.sync(() => (build.standalone = true)).pipe(
+            Effect.andThen(effect),
+            Effect.ensuring(Effect.sync(() => (build.standalone = false))),
+          );
+        // A spawn failure never fails start, and it does not hold back the next warm-up.
+        const succeed = spawn;
+        spawn = () => Effect.die('spawn failed');
+        yield* released(start);
+        spawn = succeed;
+        yield* released(start);
         expect(spawned).toEqual([
           {
             executable: system.executablePath,
             args: ['graph', 'index', '--no-vectors', '--project', projectName],
             cwd: f.repo,
+            home: f.config.agentContextHome,
           },
         ]);
-        build.standalone = true;
-        spawn = () => Effect.die('spawn failed');
-        yield* start.pipe(Effect.ensuring(Effect.sync(() => (build.standalone = false))));
+        // Repeated starts in the same 30 seconds share the first background index.
+        yield* released(start);
+        expect(spawned).toHaveLength(1);
+        expect(yield* scope('strict').pipe(provide, released, Effect.result)).toMatchObject({
+          failure: {code: 'evidence-unavailable', retryable: true},
+        });
         expect(spawned).toHaveLength(1);
         status = attachCodeGraphStatusObservation(graphStatus(f.repo), {
           identity: status.identity,
@@ -296,8 +315,7 @@ describe('native workflow graph adapter', () => {
           projectScope: {project: {name: projectName, uri: 'threadnote://resources/repos/alpha'}},
         });
         spawn = () => Effect.die('a ready graph needs no warm-up');
-        build.standalone = true;
-        yield* start.pipe(Effect.ensuring(Effect.sync(() => (build.standalone = false))));
+        yield* released(start);
         yield* provide(scope('strict'));
       }).pipe(run),
   );

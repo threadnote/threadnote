@@ -47,6 +47,7 @@ import {
   nativeCycleCoverage,
   nativeCycleCoverageWaiver,
   nativeCycleCoverageAccepts,
+  nativeCyclePhaseOwnedPaths,
 } from '@threadnote/workflow-automations/cycle-runtime';
 import {nativeCycleTextPage} from '@threadnote/workflow-automations/cycle-output';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -872,7 +873,15 @@ export const runNativeCycle = <R>(
           const rebaseRecovery = request.recoverUnreviewedRebase
             ? yield* verifyNativeCycleUnreviewedRebase(repo, prior!, runtime, selected, request.userAuthority ?? '')
             : undefined;
-          const scope = merge ?? (yield* readNativeCycleIncoming(repo, selected, captured, baseline));
+          const scope =
+            merge ??
+            (yield* readNativeCycleIncoming(
+              repo,
+              selected,
+              captured,
+              baseline,
+              yield* resolveNativeCycleBase(repo, selected.baseBranch),
+            ));
           let baseRequalification:
             Omit<NonNullable<NativeCycleSnapshot['baseRequalification']>, 'receiptDigest'> | undefined;
           if (request.baseRequalification) {
@@ -1312,7 +1321,13 @@ export const runNativeCycle = <R>(
           // Capture writes the whole working tree, so a packet is dispatched only from committed, clean source.
           const captured = yield* captureNativeCycleSource(repo, 'HEAD');
           if (captured.tree !== captured.baseTree)
-            return yield* fail('source-drift', 'Commit or discard working-tree changes before preparing the packet.');
+            return yield* fail(
+              'working-tree-dirty',
+              'Commit or discard working-tree changes before preparing the packet.',
+            );
+          // A caller that binds its reference to a head gets a packet of that exact head.
+          if (request.acceptedHead !== undefined && captured.head !== request.acceptedHead)
+            return yield* fail('source-drift', 'Source changed while preparing the implementation packet.');
           const adapter = yield* makeWorkflowGitAdapter();
           const source = yield* adapter.inspect(repo, [
             ...new Set(EffectArray.map(options.anchors, anchor => anchor.path)),
@@ -1410,8 +1425,7 @@ export const runNativeCycle = <R>(
               'preserved-work-publication',
               'Preserve unowned existing work outside the phase commit. Use a clean isolated phase checkout.',
             );
-          const incoming = new Set(EffectArray.map(entry.incoming, item => item.path));
-          const changed = EffectArray.filter(entry.snapshot.files, file => !incoming.has(file));
+          const changed = nativeCyclePhaseOwnedPaths(entry);
           const outOfPlan = EffectArray.filter(changed, file => !checkNativeCycleScope(selected, [file]));
           const scopeDecision = decideGate(
             nativeWorkflowPolicyOf(stored.state),
@@ -1430,16 +1444,7 @@ export const runNativeCycle = <R>(
                 ...current,
                 reviewTree: coverage._tag === 'reviewed' ? coverage.snapshot.tree : undefined,
                 waiverId: nativeCycleCoverageWaiver(coverage)?.id,
-                files:
-                  (entry.snapshot.ordinaryMergeQualificationV1 ?? entry.snapshot.invalidTailMergeQualificationV1)
-                    ? (EffectOption.getOrUndefined(
-                        EffectArray.findFirst(
-                          (entry.snapshot.ordinaryMergeQualificationV1 ??
-                            entry.snapshot.invalidTailMergeQualificationV1)!.phaseOwnedPaths,
-                          owner => owner.phaseId === selected.id,
-                        ),
-                      )?.paths ?? [])
-                    : changed,
+                files: changed,
               },
               request.validation,
               nativeWorkflowPolicyOf(stored.state),

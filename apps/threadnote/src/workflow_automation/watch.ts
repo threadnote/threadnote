@@ -93,6 +93,8 @@ export const nativeWatchRequestSchema = Schema.Struct({
   sourceDigest: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
   offsetBytes: Schema.optionalKey(Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 65536}))),
   stopReason: Schema.optionalKey(Schema.Literal('superseded')),
+  /** The workflow-bound watch that replaces a superseded watch. */
+  supersededBy: Schema.optionalKey(id),
 });
 const version = {protocolVersion: 1 as const, executorVersion: 1 as const};
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
@@ -747,6 +749,8 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (
   );
   if (request.stopReason && request.command !== 'stop')
     return yield* fail('invalid-request', 'Only stop records a stop reason.');
+  if ((request.stopReason === 'superseded') !== (request.supersededBy !== undefined))
+    return yield* fail('invalid-request', 'A superseded stop names the workflow-bound watch that replaces it.');
   if (
     (request.wakeup || request.recoverWakeup) &&
     request.command !== 'start' &&
@@ -888,7 +892,7 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (
           };
         }
         const token = yield* (yield* SecureRandom.SecureRandom).uuidV4();
-        const {stopReason: _stopReason, ...admitted} = envelope;
+        const {stopReason: _stopReason, supersededBy: _supersededBy, ...admitted} = envelope;
         const saved = yield* writeNativeWatch(
           config,
           {
@@ -950,11 +954,12 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (
         let output: Record<string, unknown> = {};
         let arrivalOnly = false;
         if (request.command === 'stop') {
-          const {stopReason: _stopReason, ...current} = envelope;
+          const {stopReason: _stopReason, supersededBy: _supersededBy, ...current} = envelope;
           envelope = {
             ...current,
             stopRequested: true,
             ...(request.stopReason ? {stopReason: request.stopReason} : {}),
+            ...(request.supersededBy ? {supersededBy: request.supersededBy} : {}),
             ...(envelope.collector && envelope.state.prState === 'open' && envelope.collector.status !== 'terminal'
               ? {collector: {...envelope.collector, reason: 'explicit-stop'}}
               : {}),

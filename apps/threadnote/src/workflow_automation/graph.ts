@@ -1,6 +1,7 @@
-import {Array as EffectArray, Effect, FileSystem, Schema} from 'effect';
+import {Array as EffectArray, Clock, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {runDetachedCommandEffect} from '@threadnote/platform/command';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SystemInfo} from '@threadnote/platform/system';
 import {CodeGraphQueryService, observationFromCodeGraphStatus} from '@threadnote/graph/query';
 import {CodeGraphStoreBusyError, CodeGraphStoreTransientIoError, type CodeGraphStatus} from '@threadnote/graph/types';
@@ -87,6 +88,35 @@ export const makeWorkflowGraphAdapter = Effect.fn('workflowAutomation.graphAdapt
   });
 });
 
+const graphWarmIntervalMillis = 30_000;
+
+/**
+ * Start a background graph index for a released build, at most once for each checkout every 30 seconds. A recent
+ * start counts as warming. A spawn failure never fails the caller.
+ */
+const warmWorkflowGraph = Effect.fn('workflowAutomation.warmGraph')(
+  function* (config: RuntimeConfig, checkout: string, args: readonly string[]) {
+    if (!isStandaloneThreadnoteBuild()) return false;
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const system = yield* SystemInfo;
+    const marker = path.join(config.agentContextHome, 'runtime', 'graph-warm', `${sha256HexSync(checkout)}.txt`);
+    const now = yield* Clock.currentTimeMillis;
+    const last = yield* fs.readFileString(marker).pipe(Effect.map(Number), Effect.option);
+    if (Option.isSome(last) && now - last.value < graphWarmIntervalMillis) return true;
+    const started = yield* runDetachedCommandEffect(system.executablePath, args, {
+      cwd: checkout,
+      env: {...system.environment(), THREADNOTE_HOME: config.agentContextHome},
+    });
+    if (started) {
+      yield* fs.makeDirectory(path.dirname(marker), {recursive: true});
+      yield* fs.writeFileString(marker, String(now));
+    }
+    return started;
+  },
+  Effect.catchCause(() => Effect.succeed(false)),
+);
+
 /**
  * Check a proposed native run's graph scope before init creates its binding or reserves its name. A missing or stale
  * graph is warmed in the background by a released build; a standard run starts without it and defers its code
@@ -134,11 +164,7 @@ export const requireWorkflowGraphScope = Effect.fn('workflowAutomation.requireGr
     return isReady(status, [input.checkout, yield* fs.realPath(input.checkout)], binding.graphProject);
   }).pipe(Effect.orElseSucceed(() => false));
   if (ready) return;
-  const warming =
-    isStandaloneThreadnoteBuild() &&
-    (yield* runDetachedCommandEffect((yield* SystemInfo).executablePath, indexArgs, {cwd: input.checkout}).pipe(
-      Effect.catchCause(() => Effect.succeed(false)),
-    ));
+  const warming = yield* warmWorkflowGraph(config, input.checkout, indexArgs);
   if (input.policy === 'strict')
     return yield* WorkflowAutomationError.make({
       code: 'evidence-unavailable',

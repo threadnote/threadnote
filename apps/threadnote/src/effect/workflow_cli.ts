@@ -181,7 +181,7 @@ export function makeNativeTaskPrWatchCommand<E, R>(
   return Command.make(
     'watch-pr',
     {
-      runId: optionalString('run-id', 'Workflow run; omit for standalone monitoring'),
+      runId: optionalString('run-id', 'With prUrl or watchRef, runId is ignored and the watch is monitor-only.'),
       prUrl: optionalString('pr-url', 'Explicit GitHub PR URL for standalone setup'),
       watchRef: optionalString('watch-ref', 'Opaque standalone watch identity returned by setup'),
       callerCwd: requiredString('caller-cwd', 'Bound checkout path'),

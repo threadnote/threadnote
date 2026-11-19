@@ -283,6 +283,30 @@ describe('pure native closeout admission', () => {
     ).toThrow();
     expect(prepareNativeCloseout(f.state, f.plan, f.proposal).actualChanges).toBeUndefined();
   });
+  it('fits actual changes in the room the architecture leaves and renders a stored admission again exactly', () => {
+    const f = fixture();
+    const [first] = EffectArray.map(f.state.plan.phases, phase => phase.id);
+    // Seven long components leave only a few kilobytes of the 60000-byte architecture document for the rows.
+    const proposal = {
+      ...f.proposal,
+      architecture: {
+        ...f.proposal.architecture,
+        components: EffectArray.makeBy(7, index => `Component ${index} ` + Effect.pipe('x', EffectString.repeat(8000))),
+      },
+    };
+    const paths = EffectArray.makeBy(5000, index => `src/generated/file-${index}.ts`);
+    const result = prepareNativeCloseout(f.state, f.plan, proposal, undefined, [], [{phaseId: first, paths}]);
+    expect(
+      new TextEncoder().encode(renderNativeDocument(result.documents.architecture)).byteLength,
+    ).toBeLessThanOrEqual(60_000);
+    const row = result.actualChanges?.[0];
+    expect(row?.paths.length).toBeGreaterThan(0);
+    expect((row?.paths.length ?? 0) + (row?.more ?? 0)).toBe(paths.length);
+    // The journal keeps the bounded rows, and the same rows render the same document again.
+    const replay = prepareNativeCloseout(f.state, f.plan, proposal, undefined, [], result.actualChanges);
+    expect(replay.actualChanges).toEqual(result.actualChanges);
+    expect(replay.documents.architecture).toEqual(result.documents.architecture);
+  });
   it('requires completed cycle and exact pinned plan identity/hash', () => {
     const f = fixture();
     expect(() => prepareNativeCloseout(f.initial, f.plan, f.proposal)).toThrow();

@@ -239,13 +239,18 @@ describe('native closeout lifecycle', () => {
         fc.boolean(),
         fc.boolean(),
         fc.boolean(),
-        (paths, repairFresh, otherFresh, driftReviewed) => {
+        fc.constantFrom('standard' as const, 'strict' as const),
+        (paths, repairFresh, otherFresh, driftReviewed, policy) => {
           const qualified = new Set([...(repairFresh ? ['repair'] : []), ...(otherFresh ? ['other'] : [])]);
-          // Out-of-plan drift counts only when the fresh phase's reviewed snapshot actually changed it.
+          // Out-of-plan drift counts only under standard, and only when the phase's reviewed snapshot changed it.
           const reviewed = new Map(driftReviewed ? [['repair', new Set(['source.ts', 'unowned.ts'])]] : []);
-          const coverage = freshCloseoutChangedPathCoverage(paths, phases, qualified, reviewed);
+          const coverage = freshCloseoutChangedPathCoverage(paths, phases, qualified, reviewed, policy);
           const complete = EffectArray.every(paths, path =>
-            path === 'other.ts' ? otherFresh : path === 'source.ts' ? repairFresh : repairFresh && driftReviewed,
+            path === 'other.ts'
+              ? otherFresh
+              : path === 'source.ts'
+                ? repairFresh
+                : repairFresh && driftReviewed && policy === 'standard',
           );
           expect(coverage !== undefined).toBe(complete);
           if (coverage) {

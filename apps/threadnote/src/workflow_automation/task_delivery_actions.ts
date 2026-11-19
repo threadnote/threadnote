@@ -737,6 +737,7 @@ export const runNativeTaskPrWatch = (
         config,
         checkout,
         embeddedDelivery.pr.url,
+        watchId,
       ).pipe(Effect.orElseSucceed(() => undefined));
       return {
         status: 'watching',

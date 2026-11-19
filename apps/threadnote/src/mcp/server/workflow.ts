@@ -585,16 +585,16 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Monitor standalone or canonical/candidate/supplemental PR watches with distinct proof. Standalone is monitor-only. Relay noticeRefs only; persist dispositions before ACK with current refs.',
+        'Monitor standalone or canonical/candidate/supplemental PR watches with distinct proof. Relay noticeRefs only; persist dispositions before ACK with current refs.',
       inputSchema: {
-        runId: McpInput.string(),
+        runId: McpInput.string('With prUrl or watchRef, runId is ignored and the watch is monitor-only.'),
         prUrl: McpInput.string(),
         watchRef: McpInput.string(),
         callerCwd: McpInput.requiredString(),
         validationRef: McpInput.string(),
         deliveryRef: McpInput.string('PR delivery ref; provisional inspect/stop may omit'),
         ...Struct.omit(NativeTaskPrWatchFieldsSchema.fields, ['noticeRef']),
-        noticeRef: McpInput.string('Relay only; persist dispositions before ACK with current refs.'),
+        noticeRef: McpInput.string(),
         snapshotRef: McpInput.string('Candidate snapshot; diagnostics only'),
         candidateWatchRef: McpInput.string(),
         supplementalRef: McpInput.string('Completed-local publication owner'),
