@@ -1,10 +1,11 @@
-import {Clock, Effect} from 'effect';
+import {Clock, Effect, Option} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import {runDetachedCommandEffect} from '@threadnote/platform/command';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
   readNativeWatch,
+  readNativeWatchCollectorLockOwner,
   writeNativeWatch,
   withNativeWatchControlLock,
   type NativeWatchEnvelope,
@@ -42,15 +43,22 @@ export function nativeWatchInvocation(
     ],
   };
 }
-export const nativeWatchCollectorAlive = Effect.fn('nativeWatch.collectorAlive')(function* (
-  collector: NativeWatchEnvelope['collector'],
-) {
-  if (!collector || collector.pid <= 0) return false;
+const processAlive = Effect.fn('nativeWatch.processAlive')(function* (pid: number, startIdentity?: string) {
+  if (pid <= 0) return false;
   const system = yield* SystemInfo;
-  if (!system.isProcessRunning(collector.pid)) return false;
-  const actual = yield* system.canonicalProcessStartIdentity?.(collector.pid) ??
-    system.processStartIdentity(collector.pid);
-  return !collector.startIdentity || actual === undefined || actual === collector.startIdentity;
+  if (!system.isProcessRunning(pid)) return false;
+  const actual = yield* system.canonicalProcessStartIdentity?.(pid) ?? system.processStartIdentity(pid);
+  return !startIdentity || actual === undefined || actual === startIdentity;
+});
+export const nativeWatchCollectorAlive = (collector: NativeWatchEnvelope['collector']) =>
+  collector ? processAlive(collector.pid, collector.startIdentity) : Effect.succeed(false);
+/** A live collector lock owner is still running a collector or a terminal notification recovery. */
+export const nativeWatchCollectorLockHeld = Effect.fn('nativeWatch.collectorLockHeld')(function* (
+  config: RuntimeConfig,
+  id: string,
+) {
+  const owner = yield* readNativeWatchCollectorLockOwner(config, id);
+  return Option.isSome(owner) && (yield* processAlive(owner.value.processId, owner.value.processStartIdentity));
 });
 export const launchNativeWatchProcess = Effect.fn('nativeWatch.launch')(function* (
   config: RuntimeConfig,

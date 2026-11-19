@@ -8,6 +8,7 @@ import {it as effectIt} from '@effect/vitest';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {describe, expect} from 'vitest';
 import {decodeNativeTaskActionRef, encodeNativeTaskActionRef} from '@threadnote/workflow-automations/task';
+import {recordNativeWatchLifecycle} from '@threadnote/workflow-automations/watch';
 import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
 import {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
 import {registerWorkflowTaskTool} from '../../src/mcp/server/workflow.js';
@@ -2022,6 +2023,212 @@ describe('native task actions', () => {
         consumerId: p2Watch.consumerId,
       });
     }).pipe(run),
+    windowsRealGitFixtureTimeout,
+  );
+
+  effectIt.effect(
+    'completes and closes out every phase of one PR merged above the last phase head',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture(['one', 'two'], 'pr', false, false, false, {
+          one: {branch: 'feature/one', baseBranch: 'main'},
+          two: {branch: 'feature/one', baseBranch: 'main'},
+        });
+        const head = () => f.git(['rev-parse', 'HEAD']).pipe(Effect.map(result => EffectString.trim(result.stdout)));
+        const p1 = yield* publishOpenHistoricalPhase(f, 'one', 'main', 75);
+        const p1Head = yield* head();
+        yield* f.mutate('begin-phase', {phaseId: 'two'});
+        const p2 = yield* publishOpenHistoricalPhase(f, 'two', 'main', 75, false, undefined, 'feature/one');
+        const p2Head = yield* head();
+        // The final PR commit was pushed elsewhere, so the local branch stays at the phase two head.
+        const mergedHead = EffectString.trim(
+          (yield* f.git(['commit-tree', `${p2Head}^{tree}`, '-p', p2Head, '-m', 'Pushed from elsewhere'])).stdout,
+        );
+        for (const phase of [p1, p2]) {
+          const current = yield* readNativeWatch(f.config, phase.watchId);
+          if (!current?.envelope.collector) throw new Error('Expected each phase watch.');
+          yield* writeNativeWatch(
+            f.config,
+            {
+              ...current.envelope,
+              state: {...current.envelope.state, head: mergedHead, prState: 'merged'},
+              collector: {...current.envelope.collector, status: 'terminal', reason: 'merged'},
+            },
+            current.revision,
+          );
+          expect(
+            object(
+              yield* runNativeTaskAction(f.config, {
+                command: 'watch-pr',
+                operation: 'complete',
+                runId: 'native-run',
+                callerCwd: f.repo,
+                validationRef: phase.validationRef,
+                deliveryRef: phase.deliveryRef,
+              }),
+            ),
+          ).toMatchObject({status: 'delivered', receipt: {watch: {headSha: mergedHead, state: 'terminal'}}});
+        }
+        const phases = (yield* readNativeWorkflowState(f.config, 'native-run'))?.state.cycle?.state.phases;
+        expect(phases?.one?.delivery?.headSha).toBe(p1Head);
+        expect(phases?.two?.delivery?.headSha).toBe(p2Head);
+        const closeout = object(
+          yield* runNativeTaskAction(f.config, {
+            command: 'finish',
+            runId: 'native-run',
+            callerCwd: f.repo,
+            proposal: {
+              ...proposal,
+              phaseEvidence: [
+                ...proposal.phaseEvidence,
+                {id: 'two', acceptance: [{criterion: 'two works', evidence: 'Observed the committed P2 source.'}]},
+              ],
+            },
+          }).pipe(Effect.provideService(CurrentNativeJobAutoLaunch, false)),
+        );
+        expect(closeout).toMatchObject({status: 'pending', stage: 'prepare'});
+      }).pipe(run),
+    windowsRealGitFixtureTimeout,
+  );
+
+  effectIt.effect(
+    'completes and closes out a merged PR whose head descends from the delivered phase head',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture(['one'], 'pr');
+        const published = yield* publishOpenHistoricalPhase(f, 'one', 'main', 74);
+        const head = () => f.git(['rev-parse', 'HEAD']).pipe(Effect.map(result => EffectString.trim(result.stdout)));
+        const deliveredHead = yield* head();
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "maintenance";\n');
+        yield* f.git(['commit', '-am', 'Reviewed maintenance after delivery']);
+        const mergedHead = yield* head();
+        const mergeAt = (watchHead: string, ambiguousLaterWake = false) =>
+          Effect.gen(function* () {
+            const current = yield* readNativeWatch(f.config, published.watchId);
+            const outbox = current?.envelope.notification?.outbox;
+            if (!current?.envelope.collector || !current.envelope.notification || !outbox?.receipt || !outbox.attemptId)
+              throw new Error('Expected the published phase watch and its queued host receipt.');
+            const state = {...current.envelope.state, head: watchHead, prState: 'merged' as const};
+            // The earlier wake has a real receipt; a later wake became ambiguous when its collector stopped.
+            const later = recordNativeWatchLifecycle(state, 'watcher_stopped', 'collector-replaced', outbox.createdAt);
+            yield* writeNativeWatch(
+              f.config,
+              {
+                ...current.envelope,
+                state: ambiguousLaterWake ? later : state,
+                collector: {...current.envelope.collector, status: 'terminal', reason: 'merged'},
+                ...(ambiguousLaterWake
+                  ? {
+                      notification: {
+                        ...current.envelope.notification,
+                        notifiedThrough: outbox.last,
+                        lastReceipt: {
+                          key: outbox.key,
+                          receipt: outbox.receipt,
+                          attemptId: outbox.attemptId,
+                          kind: 'queued-message' as const,
+                          at: outbox.createdAt,
+                        },
+                        outbox: {
+                          key: `${published.watchId}:${later.nextSequence - 1}:${later.nextSequence - 1}`,
+                          first: later.nextSequence - 1,
+                          last: later.nextSequence - 1,
+                          createdAt: outbox.createdAt,
+                          attempts: 1,
+                          nextAttemptAt: outbox.createdAt,
+                          attemptId: outbox.attemptId,
+                          collectorToken: current.envelope.collector.token,
+                          status: 'failed' as const,
+                          error: 'host-delivery-ambiguous' as const,
+                          consumedThrough: 0,
+                        },
+                      },
+                    }
+                  : {}),
+              },
+              current.revision,
+            );
+          });
+        const complete = runNativeTaskAction(f.config, {
+          command: 'watch-pr',
+          operation: 'complete',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          validationRef: published.validationRef,
+          deliveryRef: published.deliveryRef,
+        });
+        const unrelated = EffectString.trim(
+          (yield* f.git(['commit-tree', `${deliveredHead}^{tree}`, '-p', `${deliveredHead}^`, '-m', 'Rewritten PR']))
+            .stdout,
+        );
+        yield* mergeAt(unrelated);
+        const before = yield* f.fs.readFileString(f.statePath());
+        expect(yield* complete.pipe(Effect.result)).toMatchObject({failure: {code: 'merged-head-mismatch'}});
+        const missing = EffectString.repeat(40)('f');
+        yield* mergeAt(missing);
+        const unavailable = yield* complete.pipe(Effect.result);
+        expect(unavailable).toMatchObject({failure: {code: 'merged-head-unavailable'}});
+        expect(JSON.stringify(unavailable)).toContain(missing);
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
+
+        // The task route recovers the ambiguous wake of the merged watch with exactly one host notice.
+        yield* mergeAt(mergedHead, true);
+        published.setCollectorAlive(false);
+        let hostNotices = 0;
+        const host = CommandExecutor.of({
+          ...published.commands,
+          execute: (executable, args, options) => {
+            if (executable !== published.wakeup.executable || args[0] !== 'queue' || args[1] === '--help')
+              return published.commands.execute(executable, args, options);
+            hostNotices += 1;
+            return Effect.succeed({
+              exitCode: 0,
+              stderr: '',
+              stdout: `Queued message dddddddd-dddd-4ddd-8ddd-dddddddddddd for thread ${published.wakeup.threadId}.\n`,
+            });
+          },
+        });
+        const recovered = object(
+          yield* runNativeTaskAction(f.config, {
+            command: 'watch-pr',
+            operation: 'renew',
+            recoverWakeup: true,
+            runId: 'native-run',
+            callerCwd: f.repo,
+            validationRef: published.validationRef,
+            deliveryRef: published.deliveryRef,
+          }).pipe(Effect.provideService(CommandExecutor, host), Effect.provideService(SystemInfo, published.system)),
+        );
+        expect(recovered).toMatchObject({status: 'watching'});
+        expect(hostNotices).toBe(1);
+        expect((yield* readNativeWatch(f.config, published.watchId))?.envelope.notification?.outbox).toMatchObject({
+          status: 'queued',
+          receipt: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+        });
+        expect(object(yield* complete)).toMatchObject({
+          status: 'delivered',
+          receipt: {
+            headSha: deliveredHead,
+            pr: {headSha: deliveredHead, state: 'merged'},
+            watch: {headSha: mergedHead, state: 'terminal'},
+          },
+        });
+        // A resumed binding compares the merged receipt with its terminal watch head, not the phase head.
+        const owners = yield* inspectOldBindingOwners(
+          f.config,
+          (yield* readNativeWorkflowState(f.config, 'native-run'))!,
+        );
+        expect(JSON.stringify(owners.unresolved)).not.toContain('watch-source-head-mismatch');
+        const closeout = object(
+          yield* runNativeTaskAction(f.config, {
+            command: 'finish',
+            runId: 'native-run',
+            callerCwd: f.repo,
+            proposal,
+          }).pipe(Effect.provideService(CurrentNativeJobAutoLaunch, false)),
+        );
+        expect(closeout).toMatchObject({status: 'pending', stage: 'prepare'});
+      }).pipe(run),
     windowsRealGitFixtureTimeout,
   );
 

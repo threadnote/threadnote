@@ -214,6 +214,60 @@ export const verifyNativePrRepository = Effect.fn('workflowAutomation.verifyPrRe
   return {repository};
 });
 
+/** Ancestry reads ignore replace refs and never fetch, so they see only this checkout's real history. */
+const ancestryGit = (checkout: string, args: readonly string[]) =>
+  Effect.gen(function* () {
+    const system = yield* SystemInfo;
+    return yield* runCommandEffect('git', ['--no-optional-locks', '--no-replace-objects', '-C', checkout, ...args], {
+      timeoutMs: 30_000,
+      maxOutputBytes: 4096,
+      allowFailure: true,
+      env: {...system.environment(), GIT_NO_LAZY_FETCH: '1'},
+    });
+  });
+
+/** Whether `ancestor` is `descendant` or one of its ancestors. Threadnote never fetches a missing commit. */
+export const nativeCommitDescends = Effect.fn('workflowAutomation.cycle.commitDescends')(function* (
+  checkout: string,
+  ancestor: string,
+  descendant: string,
+) {
+  if (ancestor === descendant) return true;
+  const shallow = yield* ancestryGit(checkout, ['rev-parse', '--is-shallow-repository']);
+  if (shallow.exitCode !== 0 || EffectString.trim(shallow.stdout) !== 'false')
+    return yield* fail(
+      'merged-head-unavailable',
+      'This checkout is shallow, so its commit ancestry is incomplete. Run git fetch --unshallow, then retry; Threadnote does not fetch.',
+    );
+  for (const commit of [ancestor, descendant])
+    if ((yield* ancestryGit(checkout, ['cat-file', '-e', `${commit}^{commit}`])).exitCode !== 0)
+      return yield* fail(
+        'merged-head-unavailable',
+        `Commit ${commit} of the merged PR is not in this checkout. Run git fetch, then retry; Threadnote does not fetch.`,
+      );
+  const {exitCode} = yield* ancestryGit(checkout, ['merge-base', '--is-ancestor', ancestor, descendant]);
+  if (exitCode > 1)
+    return yield* fail('merged-head-unavailable', 'git merge-base could not compare the phase and merged PR heads.');
+  return exitCode === 0;
+});
+
+/**
+ * A merged PR can end above a phase's own delivered head when later phases or reviewed maintenance pushed to the
+ * same PR. The receipt keeps the delivered head and its terminal watch keeps the merged head, which must descend
+ * from it in this checkout.
+ */
+export const verifyNativeMergedPhaseHead = Effect.fn('workflowAutomation.cycle.verifyMergedPhaseHead')(function* (
+  checkout: string,
+  deliveredHead: string,
+  mergedHead: string,
+) {
+  if (!(yield* nativeCommitDescends(checkout, deliveredHead, mergedHead)))
+    return yield* fail(
+      'merged-head-mismatch',
+      `The phase head ${deliveredHead} is not an ancestor of the merged PR head ${mergedHead}.`,
+    );
+});
+
 /** Caller fields and opaque refs are evidence to compare, never proof that this observation occurred. */
 export const verifyNativeCyclePrDeliveryIdentity = (
   checkout: string,
@@ -233,9 +287,14 @@ export const verifyNativeCyclePrDeliveryIdentity = (
       );
     yield* verifyNativeCycleDeliveryRepository(checkout, receipt);
     const identity = yield* verifyNativeWatchPullIdentity(receipt.pr.url);
+    // A merged PR reports its final head, which a terminal receipt keeps on its watch.
+    const providerHead =
+      allowMerged && identity.state === 'merged' && receipt.watch?.state === 'terminal'
+        ? receipt.watch.headSha
+        : receipt.headSha;
     if (
       EffectString.toLowerCase(identity.headRepository) !== EffectString.toLowerCase(identity.baseRepository) ||
-      identity.headSha !== receipt.headSha ||
+      identity.headSha !== providerHead ||
       identity.headBranch !== receipt.pr.branch ||
       identity.baseBranch !== receipt.pr.baseBranch ||
       (identity.state !== receipt.pr.state && !(allowMerged && identity.state === 'merged'))
@@ -244,11 +303,15 @@ export const verifyNativeCyclePrDeliveryIdentity = (
         'pr-source-mismatch',
         'The remote PR repository, branches, state and exact head must match the validated phase.',
       );
+    if (providerHead !== receipt.headSha) yield* verifyNativeMergedPhaseHead(checkout, receipt.headSha, providerHead);
     const retainedIdentity = receipt.providerIdentity;
     if (
       retainedIdentity &&
-      stableJson({...identity, state: allowMerged ? retainedIdentity.state : identity.state}) !==
-        stableJson(retainedIdentity)
+      stableJson({
+        ...identity,
+        headSha: receipt.headSha,
+        state: allowMerged ? retainedIdentity.state : identity.state,
+      }) !== stableJson(retainedIdentity)
     )
       return yield* fail('pr-source-mismatch', 'The provider identity changed from its exact provisional evidence.');
     return identity;

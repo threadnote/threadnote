@@ -76,7 +76,11 @@ import {
   persistNativeCycleOrdinaryMerge,
   hasNativeCycleMergePlanBinding,
 } from './cycle_merge.js';
-import {bindNativeCycleDeliveryBase, verifyNativeCyclePrDeliveryIdentity} from './cycle_delivery.js';
+import {
+  bindNativeCycleDeliveryBase,
+  nativeCommitDescends,
+  verifyNativeCyclePrDeliveryIdentity,
+} from './cycle_delivery.js';
 import {verifyNativeCycleSnapshotEvidence, verifyNativeCycleUnreviewedRebase} from './cycle_recovery.js';
 import {nativeLegacyPathOnlyPhases, type NativeAuthoringCall} from './authoring_artifacts.js';
 import {decodeNativeAuthoringDocument, type NativeAuthoringDocument} from '@threadnote/workflow-automations/authoring';
@@ -1485,6 +1489,7 @@ export const runNativeCycle = <R>(
             priorDelivery.pr?.state === 'open';
           let currentHead: string;
           let currentTree: string;
+          let historicalMergedHead: string | undefined;
           let incomingDelivery: NativeCycleDelivery | undefined;
           if (historicalMergeCandidate) {
             if (priorDelivery?.delivery !== 'pr' || priorDelivery.pr?.state !== 'open' || !priorDelivery.pr)
@@ -1518,7 +1523,6 @@ export const runNativeCycle = <R>(
               priorDelivery.watch.prUrl !== priorPr.url ||
               priorDelivery.watch.headSha !== proof.head ||
               incomingDelivery.watch.prUrl !== priorPr.url ||
-              incomingDelivery.watch.headSha !== proof.head ||
               incomingDelivery.watch.consumerId !== priorDelivery.watch.consumerId ||
               incomingDelivery.watch.stateDir !== priorDelivery.watch.stateDir ||
               incomingDelivery.watch.consumerKind !== priorDelivery.watch.consumerKind
@@ -1527,16 +1531,9 @@ export const runNativeCycle = <R>(
                 'delivery-conflict',
                 'Historical PR completion must preserve the exact published source, authority, and watch consumer.',
               );
-            currentHead = Effect2.pipe(
-              yield* git(repo, ['rev-parse', '--verify', '--end-of-options', `refs/heads/${selected.branch}^{commit}`]),
-              EffectString.trim,
-            );
-            currentTree = Effect2.pipe(
-              yield* git(repo, ['rev-parse', '--verify', '--end-of-options', `refs/heads/${selected.branch}^{tree}`]),
-              EffectString.trim,
-            );
-            if (currentHead !== proof.head || currentTree !== proof.tree)
-              return yield* fail('source-drift', 'The published phase branch no longer matches its reviewed source.');
+            historicalMergedHead = incomingDelivery.watch.headSha;
+            currentHead = proof.head;
+            currentTree = proof.tree;
             const {baseRefBinding: _baseRefBinding, ...unboundIncomingPr} = incomingPr;
             const unboundDelivery: NativeCycleDelivery = {
               ...incomingDelivery,
@@ -1606,34 +1603,30 @@ export const runNativeCycle = <R>(
               requireEvidence: priorDelivery === undefined,
               allowMerged: delivery.pr?.state === 'merged',
             });
-          if (delivery.delivery === 'pr' || delivery.pr?.baseRefBinding) {
-            if (historicalMergeCandidate) {
-              const afterHead = Effect2.pipe(
-                yield* git(repo, [
-                  'rev-parse',
-                  '--verify',
-                  '--end-of-options',
-                  `refs/heads/${selected.branch}^{commit}`,
-                ]),
-                EffectString.trim,
+          if (historicalMergedHead !== undefined) {
+            // After the merge, the local branch can stand at any commit from the reviewed head to the merged head.
+            const branchHead = Effect2.pipe(
+              yield* git(repo, ['rev-parse', '--verify', '--end-of-options', `refs/heads/${selected.branch}^{commit}`]),
+              EffectString.trim,
+            );
+            if (
+              !(yield* nativeCommitDescends(repo, currentHead, branchHead)) ||
+              !(yield* nativeCommitDescends(repo, branchHead, historicalMergedHead))
+            )
+              return yield* fail(
+                'source-drift',
+                `Branch ${selected.branch} is at ${branchHead}, outside the reviewed range from ${currentHead} to the merged PR head ${historicalMergedHead}. Point the branch at a commit in that range, then retry.`,
               );
-              const afterTree = Effect2.pipe(
-                yield* git(repo, ['rev-parse', '--verify', '--end-of-options', `refs/heads/${selected.branch}^{tree}`]),
-                EffectString.trim,
-              );
-              if (afterHead !== currentHead || afterTree !== currentTree)
-                return yield* fail('source-drift', 'The published phase branch changed during base verification.');
-            } else {
-              const source = nativeCycleLatestSnapshot(runtime, selected.id, proof.phaseHash);
-              if (!source) return yield* fail('review-pending', 'The current reviewed source is unavailable.');
-              const after = yield* currentSnapshot(repo, source.snapshot, currentHead, selected);
-              if (
-                after.head !== currentHead ||
-                after.tree !== currentTree ||
-                Effect2.pipe(yield* git(repo, ['branch', '--show-current']), EffectString.trim) !== selected.branch
-              )
-                return yield* fail('source-drift', 'Source changed during delivery base verification.');
-            }
+          } else if (delivery.delivery === 'pr' || delivery.pr?.baseRefBinding) {
+            const source = nativeCycleLatestSnapshot(runtime, selected.id, proof.phaseHash);
+            if (!source) return yield* fail('review-pending', 'The current reviewed source is unavailable.');
+            const after = yield* currentSnapshot(repo, source.snapshot, currentHead, selected);
+            if (
+              after.head !== currentHead ||
+              after.tree !== currentTree ||
+              Effect2.pipe(yield* git(repo, ['branch', '--show-current']), EffectString.trim) !== selected.branch
+            )
+              return yield* fail('source-drift', 'Source changed during delivery base verification.');
           }
           const updated = yield* from(() => recordNativeCycleDelivery(accepted, selected.id, delivery));
           return {status: 'ok', revision: yield* save({...runtime, state: updated}), next: nextNativeCycle(updated)};

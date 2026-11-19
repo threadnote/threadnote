@@ -518,11 +518,11 @@ export function decodeNativeCycleState(value: unknown): NativeCycleState {
           ))
       )
         err('Open PR receipt lacks matching watch evidence.');
+      // A terminal watch keeps the merged head; the application verifies it descends from the delivered head.
       if (
         pr.state === 'merged' &&
         r.delivery.watch &&
         (r.delivery.watch.prUrl !== pr.url ||
-          r.delivery.watch.headSha !== pr.headSha ||
           r.delivery.watch.state !== 'terminal' ||
           !nativeCycleAbsolutePath(r.delivery.watch.stateDir) ||
           !Effect.pipe(r.delivery.watch.consumerId, EffectString.trim) ||
@@ -854,8 +854,19 @@ export function recordNativeCycleDelivery(value: NativeCycleState, idValue: stri
       )
         err('Open PR requires a matching watch.');
     } else {
-      if (d.watch && (d.watch.state !== 'terminal' || d.watch.prUrl !== pr.url || d.watch.headSha !== d.headSha))
+      if (d.watch && (d.watch.state !== 'terminal' || d.watch.prUrl !== pr.url))
         err('Merged PR watch evidence is not a matching terminal readback.');
+      // Only a phase whose open PR had an active watch at its head saw the commits that later moved that head.
+      const prior = r.delivery;
+      if (
+        d.watch &&
+        d.watch.headSha !== d.headSha &&
+        (r.status !== 'published' ||
+          prior?.pr?.state !== 'open' ||
+          prior.watch?.state !== 'active' ||
+          prior.watch.headSha !== d.headSha)
+      )
+        err('Only a phase published while its PR was open can merge above its delivered head.');
       status = 'merged';
     }
   }
