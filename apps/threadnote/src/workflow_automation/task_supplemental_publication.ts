@@ -281,6 +281,7 @@ export const runNativeTaskSupplementalPublication = (
       watchId,
       consumerId,
       wakeupId: consumerId,
+      checkout,
       refBase: {
         version: 1 as const,
         kind: 'delivery' as const,

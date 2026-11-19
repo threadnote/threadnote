@@ -4,6 +4,7 @@ import {SecureRandom} from 'effect/crypto';
 import {
   CommandCleanupUnconfirmed,
   CommandExecutor,
+  CommandOutputLimitExceeded,
   CommandTimedOut,
   type CommandOptions,
 } from '@threadnote/platform/command';
@@ -122,7 +123,7 @@ export const makeReadyRecallReadBoundary = Effect.fn('recall.makeReadyReadBounda
           catch: () => RecallReadyReadBoundaryError.make({reason: 'invalid-protocol'}),
         });
         if (input.byteLength > RECALL_READY_READ_INPUT_BYTES)
-          return yield* RecallReadyReadBoundaryError.make({reason: 'invalid-protocol'});
+          return yield* RecallReadyReadBoundaryError.make({reason: 'input-limit'});
         if (
           request.operation === 'sections' &&
           request.options.mode === 'baseline' &&
@@ -203,7 +204,9 @@ export const makeReadyRecallReadBoundary = Effect.fn('recall.makeReadyReadBounda
                   ? 'cleanup-unconfirmed'
                   : Schema.is(CommandTimedOut)(error)
                     ? 'budget-exhausted'
-                    : 'worker-failed',
+                    : Schema.is(CommandOutputLimitExceeded)(error)
+                      ? 'output-limit'
+                      : 'worker-failed',
               }),
             ),
           );
@@ -213,6 +216,8 @@ export const makeReadyRecallReadBoundary = Effect.fn('recall.makeReadyReadBounda
         })(result.stdout).pipe(Effect.mapError(() => RecallReadyReadBoundaryError.make({reason: 'invalid-protocol'})));
         if (response.binding !== recallReadyReadBinding(request) || response.operation !== request.operation)
           return yield* RecallReadyReadBoundaryError.make({reason: 'invalid-protocol'});
+        if (response.outcome === 'failed' && response.failure !== undefined)
+          return yield* RecallReadyReadBoundaryError.make({reason: response.failure});
         yield* wakeQueuedMaintenance(request, response.maintenanceRequested);
         if (deadline !== undefined && (yield* readDeadlineRemaining(deadline)) <= 0)
           return yield* RecallReadyReadBoundaryError.make({reason: 'budget-exhausted'});

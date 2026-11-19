@@ -1,12 +1,7 @@
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Schema} from 'effect';
 import {WorkflowAutomationError} from './contracts.js';
-import {
-  decodeNativeCycleState,
-  nativeCycleAbsolutePath,
-  nativeCycleHasControl,
-  type NativeCycleState,
-} from './cycle.js';
+import {decodeNativeCycleState, nativeCycleHasControl, type NativeCycleState} from './cycle.js';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 
@@ -96,19 +91,9 @@ export function validateNativeCycleFeaturePublication(
   return true;
 }
 
-const graphSchema = Schema.Struct({
-  state: Schema.Literal('ready'),
-  head: gitObject,
-  tree: gitObject,
-  dirty: Schema.Boolean,
-  snapshotId: text(128),
-  graphContentId: text(128),
-  repositoryRoot: text(4096),
-});
 const anchorSchema = Schema.Struct({path: text(4096), sha256: digest, pattern: text(256)});
 export const NativeCyclePacketOptionsSchema = Schema.Struct({
   capacity: capacitySchema,
-  graphProof: graphSchema,
   anchors: Schema.Array(anchorSchema).check(Schema.isBetweenLength(1, 128)),
   ownership: Schema.Array(text(4096)).check(Schema.isBetweenLength(1, 128)),
   checks: Schema.Array(text(1024)).check(Schema.isBetweenLength(1, 32)),
@@ -131,10 +116,9 @@ export function nativeCyclePacket(
   try {
     options = Schema.decodeUnknownSync(NativeCyclePacketOptionsSchema, {onExcessProperty: 'error'})(input);
   } catch {
-    return {available: false, reason: 'graph-or-anchor-proof-unavailable'};
+    return {available: false, reason: 'anchor-proof-unavailable'};
   }
   if (
-    !nativeCycleAbsolutePath(options.graphProof.repositoryRoot) ||
     EffectArray.some(
       options.anchors,
       anchor =>
@@ -147,7 +131,7 @@ export function nativeCyclePacket(
         ),
     )
   )
-    return {available: false, reason: 'graph-or-anchor-proof-unavailable'};
+    return {available: false, reason: 'anchor-proof-unavailable'};
   const packet = {
     phaseId,
     phaseHash: state.phases[phaseId].phaseHash,
@@ -166,7 +150,6 @@ export function nativeCyclePacket(
     acceptanceCriteria: phase.acceptanceCriteria,
     acceptanceRefs: phase.acceptanceRefs,
     capacity: validateNativeCycleCapacityRecord(options.capacity),
-    graphProof: options.graphProof,
     anchors: options.anchors,
     ownership: options.ownership,
     checks: options.checks,

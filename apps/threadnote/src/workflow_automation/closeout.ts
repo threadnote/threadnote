@@ -35,7 +35,16 @@ import {
   nativeCloseoutPlannedOperationIds,
 } from './closeout_capacity.js';
 import {captureNativeCycleSource} from './cycle_git.js';
-import {nativeCycleCoverage, nativeCycleCoverageAccepts} from '@threadnote/workflow-automations/cycle-runtime';
+import {
+  nativeCycleCoverage,
+  nativeCycleCoverageAccepts,
+  nativeCyclePhaseOwnedPaths,
+} from '@threadnote/workflow-automations/cycle-runtime';
+import {
+  nativeGateRefuses,
+  nativeWorkflowPolicyOf,
+  type NativeWorkflowPolicy,
+} from '@threadnote/workflow-automations/gates';
 import {decodeJournal, nativeCloseoutRequestSchema, type Journal} from './closeout_request_schema.js';
 export {nativeCloseoutRequestSchema} from './closeout_request_schema.js';
 import {assertNativeJobLiveSource, CurrentNativeJobBoundary, CurrentNativeJobSourceView} from './native_jobs.js';
@@ -113,15 +122,27 @@ const summary = (journal: Journal, revision: string) => ({
   },
 });
 
-/** Every changed path needs a newly accepted current phase; historical merged owners may overlap it. */
+/**
+ * Every changed path needs a newly accepted current phase that allows it. Where the policy lets out-of-plan drift
+ * through, the phase's reviewed snapshot may own the path instead; a path no reviewed snapshot contains is unreviewed
+ * source. Historical merged owners may overlap it.
+ */
 export const freshCloseoutChangedPathCoverage = (
   changed: readonly string[],
   phases: Journal['cycle']['plan']['phases'],
   qualified: ReadonlySet<string>,
+  reviewedFiles: ReadonlyMap<string, ReadonlySet<string>>,
+  policy: NativeWorkflowPolicy,
 ): string[] | undefined => {
+  const reviewedDrift = !nativeGateRefuses(policy, 'scope.out-of-plan');
   const covered = new Set<string>();
   for (const path of changed) {
-    const owners = EffectArray.filter(phases, phase => qualified.has(phase.id) && checkNativeCycleScope(phase, [path]));
+    const owners = EffectArray.filter(
+      phases,
+      phase =>
+        qualified.has(phase.id) &&
+        (checkNativeCycleScope(phase, [path]) || (reviewedDrift && reviewedFiles.get(phase.id)?.has(path) === true)),
+    );
     if (!owners.length) return undefined;
     for (const owner of owners) covered.add(owner.id);
   }
@@ -143,18 +164,20 @@ const freshReadmission = Effect.fn('workflowAutomation.closeout.freshReadmission
       : previous.recovery;
   const oldSnapshots = new Set(baseline.snapshotIds);
   // A snapshot recorded after the superseded admission is fresh once its tree is covered: reviewed, reused or waived.
-  const fresh = new Set(
-    pipe(
-      runtime.snapshots,
-      EffectArray.filter(
-        ({snapshot}) =>
-          !oldSnapshots.has(snapshot.snapshotId) &&
-          snapshot.tree === source.tree &&
-          nativeCycleCoverageAccepts(nativeCycleCoverage(runtime, snapshot)),
-      ),
-      EffectArray.map(({snapshot}) => snapshot.phaseId),
-    ),
+  const freshSnapshots = EffectArray.filter(
+    runtime.snapshots,
+    ({snapshot}) =>
+      !oldSnapshots.has(snapshot.snapshotId) &&
+      snapshot.tree === source.tree &&
+      nativeCycleCoverageAccepts(nativeCycleCoverage(runtime, snapshot)),
   );
+  const fresh = new Set(EffectArray.map(freshSnapshots, ({snapshot}) => snapshot.phaseId));
+  const reviewedFiles = new Map<string, Set<string>>();
+  for (const entry of freshSnapshots) {
+    const files = reviewedFiles.get(entry.snapshot.phaseId) ?? new Set<string>();
+    for (const file of nativeCyclePhaseOwnedPaths(entry)) files.add(file);
+    reviewedFiles.set(entry.snapshot.phaseId, files);
+  }
   const qualified = new Set(
     EffectArray.filter(
       [...fresh],
@@ -190,7 +213,13 @@ const freshReadmission = Effect.fn('workflowAutomation.closeout.freshReadmission
             Boolean,
           );
     if (changed.length) {
-      const coverage = freshCloseoutChangedPathCoverage(changed, runtime.state.plan.phases, qualified);
+      const coverage = freshCloseoutChangedPathCoverage(
+        changed,
+        runtime.state.plan.phases,
+        qualified,
+        reviewedFiles,
+        nativeWorkflowPolicyOf(current.state),
+      );
       if (!coverage)
         return yield* fail(
           'closeout-acceptance-stale',
@@ -364,7 +393,14 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
               inputs.source,
             );
           const admission = yield* attempt(() =>
-            prepareNativeCloseout(inputs.cycle, inputs.plan, request.proposal, inputs.spec, inputs.waivers),
+            prepareNativeCloseout(
+              inputs.cycle,
+              inputs.plan,
+              request.proposal,
+              inputs.spec,
+              inputs.waivers,
+              inputs.actualChanges,
+            ),
           );
           // Admit every final document before any knowledge write or retirement.
           yield* attempt(() =>
@@ -450,6 +486,7 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
             ...(inputs.spec ? {spec: inputs.spec} : {}),
             proposal: request.proposal,
             ...(inputs.waivers.length ? {waivers: inputs.waivers} : {}),
+            ...(admission.actualChanges ? {actualChanges: admission.actualChanges} : {}),
             owned,
             documents,
             documentDigest: hash(documents),
@@ -690,7 +727,14 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
           journal.owned,
         );
         const admission = yield* attempt(() =>
-          prepareNativeCloseout(journal.cycle, journal.plan, journal.proposal, journal.spec, journal.waivers),
+          prepareNativeCloseout(
+            journal.cycle,
+            journal.plan,
+            journal.proposal,
+            journal.spec,
+            journal.waivers,
+            journal.actualChanges,
+          ),
         );
         const journalState = yield* withWorkflowLock(
           config,

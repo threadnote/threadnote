@@ -6,6 +6,7 @@ import {WorkflowAutomationError} from '@threadnote/workflow-automations/contract
 import {NativeAuthoringDocumentSchema} from '@threadnote/workflow-automations/authoring';
 import {NativeCycleStateSchema} from '@threadnote/workflow-automations/cycle';
 import {NativeCycleWaiverSchema, nativeCycleRuntimeLimits} from '@threadnote/workflow-automations/cycle-runtime';
+import {nativeCycleSnapshotFileLimit} from '@threadnote/workflow-automations/cycle-review';
 import {NativeCloseoutSaveReservationSchema} from '@threadnote/workflow-automations/native';
 import {prepareNativeCloseout, NativeCloseoutProposalSchema} from '@threadnote/workflow-automations/closeout';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -18,6 +19,7 @@ const text = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)
 const digest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
 const gitObject = Schema.String.check(Schema.isPattern(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u));
 const reference = Schema.Struct({uri: text, memoryId: text, revision: digest});
+const changedPaths = Schema.Array(text).check(Schema.isMaxLength(nativeCycleSnapshotFileLimit));
 export const nativeCloseoutRequestSchema = Schema.Struct({
   protocolVersion: Schema.Literal(1),
   executorVersion: Schema.Literal(1),
@@ -70,6 +72,17 @@ const journalFields = {
   proposal: NativeCloseoutProposalSchema,
   waivers: Schema.optionalKey(
     Schema.Array(NativeCycleWaiverSchema).check(Schema.isMaxLength(nativeCycleRuntimeLimits.waivers)),
+  ),
+  // The bounded rows that the admission rendered, never the raw snapshot lists.
+  actualChanges: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        phaseId: id,
+        drift: changedPaths,
+        paths: changedPaths,
+        more: Schema.Int.check(Schema.isBetween({minimum: 0, maximum: nativeCycleSnapshotFileLimit})),
+      }),
+    ).check(Schema.isMaxLength(256)),
   ),
   owned: Schema.Array(ownedSchema).check(Schema.isMaxLength(4096)),
   documents: Schema.Array(
@@ -135,7 +148,14 @@ export const decodeJournal = (input: unknown): Journal => {
   )
     throw fail('invalid-closeout-state', 'Retained admissions changed identity or reused a transaction.');
   for (const admission of [value, ...(value.history ?? [])]) {
-    prepareNativeCloseout(admission.cycle, admission.plan, admission.proposal, admission.spec, admission.waivers);
+    prepareNativeCloseout(
+      admission.cycle,
+      admission.plan,
+      admission.proposal,
+      admission.spec,
+      admission.waivers,
+      admission.actualChanges,
+    );
     if (admission.documentDigest !== hash(admission.documents))
       throw fail('invalid-closeout-state', 'Admitted final document bytes changed.');
     if (

@@ -218,7 +218,7 @@ describe('native closeout lifecycle', () => {
       }).pipe(runCloseout),
   );
 
-  it('covers every changed path with fresh phases despite overlapping merged owners', () => {
+  it('covers every changed path with fresh phases or their reviewed drift despite overlapping merged owners', () => {
     const phase = {
       id: 'merged',
       definitionHash: EffectString.repeat(64)('1'),
@@ -238,17 +238,25 @@ describe('native closeout lifecycle', () => {
         fc.uniqueArray(fc.constantFrom('source.ts', 'other.ts', 'unowned.ts'), {minLength: 1, maxLength: 3}),
         fc.boolean(),
         fc.boolean(),
-        (paths, repairFresh, otherFresh) => {
+        fc.boolean(),
+        fc.constantFrom('standard' as const, 'strict' as const),
+        (paths, repairFresh, otherFresh, driftReviewed, policy) => {
           const qualified = new Set([...(repairFresh ? ['repair'] : []), ...(otherFresh ? ['other'] : [])]);
-          const coverage = freshCloseoutChangedPathCoverage(paths, phases, qualified);
+          // Out-of-plan drift counts only under standard, and only when the phase's reviewed snapshot changed it.
+          const reviewed = new Map(driftReviewed ? [['repair', new Set(['source.ts', 'unowned.ts'])]] : []);
+          const coverage = freshCloseoutChangedPathCoverage(paths, phases, qualified, reviewed, policy);
           const complete = EffectArray.every(paths, path =>
-            path === 'source.ts' ? repairFresh : path === 'other.ts' ? otherFresh : false,
+            path === 'other.ts'
+              ? otherFresh
+              : path === 'source.ts'
+                ? repairFresh
+                : repairFresh && driftReviewed && policy === 'standard',
           );
           expect(coverage !== undefined).toBe(complete);
           if (coverage) {
             expect(coverage).not.toContain('merged');
             expect(new Set(coverage)).toEqual(
-              new Set(EffectArray.map(paths, path => (path === 'source.ts' ? 'repair' : 'other'))),
+              new Set(EffectArray.map(paths, path => (path === 'other.ts' ? 'other' : 'repair'))),
             );
           }
         },

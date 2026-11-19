@@ -1,4 +1,10 @@
-import {nativeWorkflowPolicies, nativeNext, withNativeNext} from '@threadnote/workflow-automations/gates';
+import {
+  nativeWorkflowPolicies,
+  nativeWorkflowPolicyOf,
+  nativeNext,
+  resolveNativeWorkflowPolicy,
+  withNativeNext,
+} from '@threadnote/workflow-automations/gates';
 import {
   Array as A,
   Effect,
@@ -38,7 +44,7 @@ import {encodeNativeAuthoringTaskRef} from './task.js';
 export {encodeNativeAuthoringTaskRef} from './task.js';
 import {AuthoringRootSchema, decodeAuthoringArtifact} from './authoring_artifacts.js';
 import {validateWorkflowGraphProject} from '../workflow_memory/graph_scope.js';
-import {requireWorkflowGraphReady} from './graph.js';
+import {requireWorkflowGraphScope} from './graph.js';
 import {workflowTitleSlug} from '@threadnote/workflow-automations/naming';
 import {gitValue, resolveRepoName} from '../utils.js';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
@@ -860,13 +866,14 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
           'cursor-cloud-personal',
         ]);
         yield* inCheckout(
-          requireWorkflowGraphReady(config, {
+          requireWorkflowGraphScope(config, {
             checkout,
             runId,
             project,
             featureId,
             generation: target.installedDigest,
             profile: target.target.profile,
+            policy: nativeWorkflowPolicyOf(resolveNativeWorkflowPolicy(config, request.workflowProfile)),
             ...(graphProject === undefined ? {} : {graphProject}),
             recovery: 'same-task',
           }),

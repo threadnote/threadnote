@@ -1,4 +1,4 @@
-import {Array as EffectArray, Effect, FileSystem, Path, Record as EffectRecord, Schema} from 'effect';
+import {Array as EffectArray, Deferred, Effect, FileSystem, Fiber, Path, Record as EffectRecord, Schema} from 'effect';
 import * as EffectString from 'effect/String';
 import {Command} from 'effect/cli';
 import {it as effectIt} from '@effect/vitest';
@@ -24,6 +24,7 @@ import {
 } from '@threadnote/workflow-automations/authoring';
 import {decodeNativeCycleRuntime} from '@threadnote/workflow-automations/cycle-runtime';
 import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
+import {sha256Hex} from '@threadnote/platform/digest';
 import {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
 import {registerWorkflowTaskTool} from '../../src/mcp/server/workflow.js';
 import {readNativeTaskView} from '../../src/workflow_automation/task.js';
@@ -43,6 +44,8 @@ import {DevSkillsSource, loadDevSkillsBundleAt} from '../../src/dev_skills/manif
 import {enrollmentContext} from '../../src/dev_skills/registry.js';
 import {SystemInfo} from '@threadnote/platform/system';
 import {readNativeWorkflowState, serializeNativeWorkflowState} from '../../src/workflow_automation/store.js';
+import {withDeferredCodeAnchorMutationLocks} from '../../src/memory/deferred/code_anchor.js';
+import {healAnchorsAfterGraphIndex} from '../../src/memory/deferred/code_anchor_recovery.js';
 import {runWorkflowAutomation} from '../../src/workflow_automation/index.js';
 import {sha256HexSync} from '../../src/workflow_memory/native_digest.js';
 import {GraphDiagnostics, object, run} from './native-cycle-lifecycle-fixture.js';
@@ -868,6 +871,114 @@ describe('native task actions', () => {
     }).pipe(run),
   );
 
+  effectIt.effect('resumes a graph-free standard compact save that a busy memory lock stopped', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      yield* runCommandEffect('git', ['-C', f.repo, 'add', 'source.ts']);
+      yield* runCommandEffect('git', [
+        '-C',
+        f.repo,
+        '-c',
+        'user.name=Fixture',
+        '-c',
+        'user.email=fixture@example.invalid',
+        'commit',
+        '-m',
+        'Fixture source',
+      ]);
+      const system = yield* SystemInfo;
+      const repo = yield* f.fs.realPath(f.repo);
+      const home = yield* f.fs.realPath(f.home);
+      const config = {...f.config, agentContextHome: home, manifestPath: f.path.join(home, 'manifest.json')};
+      const scopedSystem = {...system, currentDirectory: () => repo, homeDirectory: home};
+      yield* applyDevSkills(config, 'install', {agent: 'codex'}).pipe(Effect.provideService(SystemInfo, scopedSystem));
+      // No graph is published, so the standard start writes its first children without code citations.
+      const start = {
+        featureName: 'Busy graph-free start',
+        callerCwd: repo,
+        installationTarget: 'codex',
+        workflowProfile: 'standard' as const,
+        intent: {
+          title: 'Busy graph-free start',
+          currentBehavior: 'Expired fixture data is returned.',
+          desiredChange: 'Expired fixture data is refreshed before return.',
+          affectedPaths: ['source.ts'],
+          acceptanceCriterion: 'The refreshed fixture value is returned.',
+          verification: 'Read an expired fixture.',
+          eligibilityRationale: 'One source-bound fixture behavior with no unresolved decisions.',
+          eligibility: {status: 'eligible' as const},
+          review: {required: false, reason: 'Bounded fixture correction.'},
+        },
+      };
+      const runId = nativeTaskStartRunId(undefined, 'repo', workflowTitleSlug(start.featureName));
+      const testScope = yield* Effect.scope;
+      const actualFs = yield* FileSystem.FileSystem;
+      const indexer = yield* CodeGraphIndexer;
+      const statePath = f.path.join(home, 'workflow-automations', 'native-v1', runId + '.json');
+      const release = yield* Deferred.make<void>();
+      let holder: Fiber.Fiber<void, unknown> | undefined;
+      const healMemoryLocks: string[] = [];
+      // After the first child is verified, a graph index publishes and heals deferred anchors, as the start's
+      // warm-up does. Then another writer holds the memory lock, so the next child exhausts its lock budget.
+      const faultFs = {
+        ...actualFs,
+        rename: (from: string, to: string) =>
+          actualFs.rename(from, to).pipe(
+            Effect.tap(() =>
+              Effect.gen(function* () {
+                if (holder || to !== statePath) return;
+                if ((yield* readNativeWorkflowState(config, runId))?.state.operations[0]?.status !== 'verified') return;
+                const summary = yield* indexer.index({cwd: repo, threadnoteHome: home, ensureVectors: false});
+                yield* healAnchorsAfterGraphIndex(config, repo, summary.identity).pipe(
+                  Effect.provideService(FileSystem.FileSystem, {
+                    ...actualFs,
+                    writeFileString: (path, data, options) => {
+                      if (EffectString.includes('memory-locks')(path)) healMemoryLocks.push(path);
+                      return actualFs.writeFileString(path, data, options);
+                    },
+                  }),
+                );
+                const acquired = yield* Deferred.make<void>();
+                holder = yield* withDeferredCodeAnchorMutationLocks(
+                  actualFs,
+                  config,
+                  [],
+                  Deferred.succeed(acquired, undefined).pipe(Effect.andThen(Deferred.await(release))),
+                ).pipe(Effect.asVoid, Effect.forkIn(testScope));
+                yield* Deferred.await(acquired);
+              }).pipe(Effect.provideService(FileSystem.FileSystem, actualFs)),
+            ),
+          ),
+      };
+      const stopped = yield* runNativeTaskStart(config, start).pipe(
+        Effect.provideService(SystemInfo, scopedSystem),
+        Effect.provideService(FileSystem.FileSystem, faultFs),
+        Effect.result,
+      );
+      expect(stopped).toMatchObject({failure: {code: 'memory-busy', retryable: true}});
+      yield* Deferred.succeed(release, undefined);
+      if (holder) yield* Fiber.join(holder);
+      // The run queues no deferred anchor, so the warm-up heal took no memory lock and left the child unchanged.
+      expect(healMemoryLocks).toEqual([]);
+      const first = (yield* readNativeWorkflowState(config, runId))?.state.operations[0]?.artifact;
+      if (!first) throw new Error('Expected the verified first child.');
+      expect(yield* f.store.read(f.location, first.uri).pipe(Effect.flatMap(sha256Hex))).toBe(first.revision);
+      const resumed = object(
+        yield* runNativeTaskStart(config, start).pipe(Effect.provideService(SystemInfo, scopedSystem)),
+      );
+      expect(resumed.status).toBe('awaiting-user-confirmation');
+      const complete = yield* readNativeWorkflowState(config, runId);
+      expect(complete?.state.authoringSave).toBeUndefined();
+      expect(EffectArray.map(complete?.state.operations ?? [], item => [item.intent.nameHint, item.status])).toEqual([
+        ['source', 'verified'],
+        ['index', 'verified'],
+        ['plan-overview', 'verified'],
+        ['decisions', 'verified'],
+        ['plan', 'verified'],
+      ]);
+    }).pipe(run),
+  );
+
   effectIt.effect(
     'starts a semantic task from a verified local installed bundle and safely replays or refuses changed intent',
     () =>
@@ -1359,7 +1470,11 @@ describe('native task actions', () => {
       );
       const firstSnapshot = object(object(firstResult.snapshot).snapshot);
       const firstSnapshotRef = String(firstResult.snapshotRef);
-      expect(new TextEncoder().encode(JSON.stringify(firstResult.snapshot)).byteLength).toBeGreaterThan(16_384);
+      const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
+      const storedFirst = (yield* readNativeWorkflowState(f.config, 'native-run'))?.state.cycle?.snapshots.at(-1);
+      expect(bytes(storedFirst)).toBeGreaterThan(16_384);
+      expect(object(firstResult.snapshot).counts).toMatchObject({files: affectedPaths.length + 1});
+      expect(bytes(firstResult.snapshot)).toBeLessThan(4_096);
       expect(decodeNativeTaskActionRef(firstSnapshotRef)).toMatchObject({
         snapshotId: firstSnapshot.snapshotId,
         sourceHead: firstSnapshot.head,
@@ -1408,6 +1523,7 @@ describe('native task actions', () => {
       const recovered = object(recoveryResponse.structuredContent);
       expect(recovered).toMatchObject({status: 'recorded', replayed: false});
       const secondSnapshot = object(object(recovered.snapshot).snapshot);
+      const storedSecond = (yield* readNativeWorkflowState(f.config, 'native-run'))?.state.cycle?.snapshots.at(-1);
       expect(secondSnapshot).toMatchObject({
         snapshotId: expect.stringMatching(/^superseded-/u),
         supersedes: firstSnapshot.snapshotId,
@@ -1416,7 +1532,8 @@ describe('native task actions', () => {
         baseTree: firstSnapshot.baseTree,
       });
       expect(secondSnapshot.tree).not.toBe(firstSnapshot.tree);
-      expect(new TextEncoder().encode(JSON.stringify(recovered.snapshot)).byteLength).toBeGreaterThan(16_384);
+      expect(object(recovered.snapshot).counts).toMatchObject({files: affectedPaths.length + 1});
+      expect(bytes(recoveryResponse)).toBeLessThan(8_192);
       expect(decodeNativeTaskActionRef(String(recovered.snapshotRef))).toMatchObject({
         snapshotId: secondSnapshot.snapshotId,
         sourceHead: secondSnapshot.head,
@@ -1487,8 +1604,8 @@ describe('native task actions', () => {
       expect(review.status).toBe('recorded');
       const runtime = (yield* readNativeWorkflowState(f.config, 'native-run'))?.state.cycle;
       expect(runtime?.snapshots).toHaveLength(2);
-      expect(runtime?.snapshots[0]?.snapshot).toEqual(firstSnapshot);
-      expect(runtime?.snapshots[1]?.snapshot).toEqual(secondSnapshot);
+      expect(runtime?.snapshots[0]?.snapshot).toEqual(storedFirst?.snapshot);
+      expect(runtime?.snapshots[1]?.snapshot).toEqual(storedSecond?.snapshot);
       expect(EffectArray.map(runtime?.reviews ?? [], item => item.report.mode)).toEqual(['full']);
     }).pipe(run),
   );
@@ -1517,6 +1634,9 @@ describe('native task actions', () => {
           ).snapshot,
         ).snapshot,
       );
+      const staleStored = (yield* readNativeWorkflowState(f.config, 'native-run'))?.state.cycle?.snapshots.at(
+        -1,
+      )?.snapshot;
       const plan = yield* f.revise({
         phases: EffectArray.map(f.document.phases, phase => ({...phase, outcome: 'Amended approved outcome.'})),
       });
@@ -1559,7 +1679,7 @@ describe('native task actions', () => {
       expect(object(yield* record('incremental'))).toMatchObject({status: 'invalid'});
       expect(object(yield* record('full'))).toMatchObject({status: 'recorded'});
       const runtime = (yield* readNativeWorkflowState(f.config, 'native-run'))?.state.cycle;
-      expect(runtime?.snapshots[0]?.snapshot).toEqual(stale);
+      expect(runtime?.snapshots[0]?.snapshot).toEqual(staleStored);
       expect(EffectArray.map(runtime?.reviews ?? [], item => item.snapshotId)).toEqual([current.snapshotId]);
     }).pipe(run),
   );
@@ -1662,6 +1782,9 @@ describe('native task actions', () => {
           }),
         );
         const prior = object(object(priorResult.snapshot).snapshot);
+        const priorStored = (yield* readNativeWorkflowState(f.config, 'native-run'))?.state.cycle?.snapshots.at(
+          -1,
+        )?.snapshot;
         const predecessorRef = String(priorResult.snapshotRef);
         const priorFinding = {
           id: 'F1011',
@@ -1934,7 +2057,7 @@ describe('native task actions', () => {
         expect(beforeReviewState.state.cycle.reviewLimits).toEqual(reviewLimits);
         expect(beforeReviewState.state.cycle.reviews[0]).toEqual(historicalReviews[0]);
         expect(beforeReviewState.state.cycle.attempts.slice(0, historicalAttempts.length)).toEqual(historicalAttempts);
-        expect(beforeReviewState.state.cycle.snapshots[0]?.snapshot).toEqual(prior);
+        expect(beforeReviewState.state.cycle.snapshots[0]?.snapshot).toEqual(priorStored);
         const requalifiedFullReport = {
           ...priorReview,
           findings: [{...priorFinding, state: 'carried', reason: 'Retained and rechecked after base requalification.'}],
@@ -2335,6 +2458,83 @@ describe('native task actions', () => {
       ).toMatchObject({
         failure: {code: 'evidence-unavailable'},
       });
+      const mixedShape = yield* runNativeTaskStart(config, {
+        ...startInput,
+        delivery: 'pr',
+        bindings: {compact: {branch: 'main', baseBranch: 'main'}},
+      }).pipe(Effect.provideService(SystemInfo, testSystem), Effect.result);
+      if (mixedShape._tag !== 'Failure') throw new Error('A compact start must refuse shared-plan fields.');
+      expect(mixedShape.failure).toMatchObject({code: 'invalid-request'});
+      expect(mixedShape.failure.message).toContain('delivery');
+      expect(mixedShape.failure.message).toContain('bindings');
+      // A standard run needs no published graph: it starts in a fresh checkout and stores its artifacts uncited.
+      const standardStart = object(
+        yield* runNativeTaskStart(config, {
+          ...startInput,
+          featureName: 'Standard ' + intent.title,
+          workflowProfile: 'standard',
+        }).pipe(Effect.provideService(SystemInfo, testSystem)),
+      );
+      expect(standardStart.status).toBe('awaiting-user-confirmation');
+      const standardRunId = String(standardStart.taskRef);
+      // Compact confirmation chooses the first admission's delivery.
+      expect(
+        yield* runNativeTaskAction(config, {
+          command: 'compact-confirm',
+          runId: standardRunId,
+          callerCwd: repo,
+          presentedIntentHash: String(standardStart.intentHash),
+          userDecision: 'approve',
+          userResponse: 'I approve this exact fixture change delivered as a PR.',
+          baseBranch: 'main',
+          delivery: 'pr',
+        }).pipe(Effect.provideService(SystemInfo, testSystem)),
+      ).toMatchObject({status: 'admitted'});
+      expect((yield* readNativeWorkflowState(config, standardRunId))?.state.cycle?.state.plan.delivery).toBe('pr');
+      // The approved delivery stays with the run: another mode refuses early, and a replay keeps the approved mode.
+      const confirmStandard = (fields: object) =>
+        runNativeTaskAction(config, {
+          command: 'compact-confirm',
+          runId: standardRunId,
+          callerCwd: repo,
+          presentedIntentHash: String(standardStart.intentHash),
+          ...fields,
+        }).pipe(Effect.provideService(SystemInfo, testSystem));
+      expect(yield* confirmStandard({delivery: 'local'}).pipe(Effect.result)).toMatchObject({
+        failure: {code: 'delivery-conflict'},
+      });
+      expect(yield* confirmStandard({})).toMatchObject({status: 'admitted'});
+      expect((yield* readNativeWorkflowState(config, standardRunId))?.state.cycle?.state.plan.delivery).toBe('pr');
+      // Before admission, a replay that names another delivery needs the user's new response.
+      const reviewedStart = object(
+        yield* runNativeTaskStart(config, {
+          ...startInput,
+          featureName: 'Reviewed ' + intent.title,
+          workflowProfile: 'standard',
+          intent: {...intent, review: {required: true, reason: 'The fixture change needs one plan review.'}},
+        }).pipe(Effect.provideService(SystemInfo, testSystem)),
+      );
+      const confirmReviewed = (fields: object) =>
+        runNativeTaskAction(config, {
+          command: 'compact-confirm',
+          runId: String(reviewedStart.taskRef),
+          callerCwd: repo,
+          presentedIntentHash: String(reviewedStart.intentHash),
+          baseBranch: 'main',
+          ...fields,
+        }).pipe(Effect.provideService(SystemInfo, testSystem));
+      expect(
+        yield* confirmReviewed({
+          userDecision: 'approve',
+          userResponse: 'I approve this exact fixture change delivered as a PR.',
+          delivery: 'pr',
+        }),
+      ).toMatchObject({status: 'awaiting-review'});
+      expect(yield* confirmReviewed({delivery: 'local'}).pipe(Effect.result)).toMatchObject({
+        failure: {code: 'delivery-not-confirmed'},
+      });
+      expect(yield* confirmReviewed({delivery: 'pr'})).toMatchObject({status: 'awaiting-review'});
+      expect((yield* readNativeWorkflowState(config, String(reviewedStart.taskRef)))?.state.cycle).toBeUndefined();
       expect(
         (yield* (yield* CodeGraphIndexer).index({cwd: repo, threadnoteHome: home, ensureVectors: false})).snapshot
           .state,

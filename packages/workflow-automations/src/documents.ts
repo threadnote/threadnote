@@ -51,6 +51,8 @@ export const NativeDocumentEnvelopeSchema = Schema.Struct({
 export type NativeDocumentEnvelope = typeof NativeDocumentEnvelopeSchema.Type;
 export type NativeDocumentKind = NativeDocumentEnvelope['kind'];
 
+/** The most UTF-8 bytes one rendered native document may hold. */
+export const nativeDocumentRenderLimitBytes = 60_000;
 const renderedBytes = (document: NativeDocumentEnvelope): number =>
   new TextEncoder().encode(renderDecoded(document)).byteLength;
 const renderDecoded = (document: NativeDocumentEnvelope): string =>
@@ -71,8 +73,8 @@ export function decodeNativeDocument(input: unknown): NativeDocumentEnvelope {
   }
   if (new Set(EffectArray.map(document.sections, section => section.id)).size !== document.sections.length)
     throw invalidDocument('Native document section identifiers must be unique.');
-  if (renderedBytes(document) > 60_000)
-    throw invalidDocument('The rendered native document exceeds 60000 UTF-8 bytes.');
+  if (renderedBytes(document) > nativeDocumentRenderLimitBytes)
+    throw invalidDocument(`The rendered native document exceeds ${nativeDocumentRenderLimitBytes} UTF-8 bytes.`);
   return document;
 }
 

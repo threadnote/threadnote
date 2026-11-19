@@ -65,6 +65,7 @@ import {
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {
   readyRecallReadWorkerLayer,
+  recallReadyReadBinding,
   serveRecallReadyRead,
   RECALL_READY_READ_INPUT_BYTES,
   RECALL_READY_READ_OUTPUT_BYTES,
@@ -80,6 +81,11 @@ const embedding = Option.getOrThrow(
   EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, value => value.id === 'bge-small-en-v1.5-q8'),
 );
 const operationSchema = Schema.fromJsonString(recallReadyReadRequestSchema);
+/** Refinement sends completed parent model evidence through a baseline-mode sections read. */
+const refinementSectionsRead = (request: typeof operationSchema.Type | undefined) =>
+  request?.operation === 'sections' &&
+  request.options.mode === 'baseline' &&
+  (request.options.semantic !== undefined || request.options.rerankerScores !== undefined);
 const confidenceSchema = Schema.Struct({confidence: Schema.Struct({score: Schema.Finite})});
 const phaseLogEntrySchema = Schema.fromJsonString(
   Schema.Struct({
@@ -170,7 +176,15 @@ Runtime.makeRunMain(({fiber, teardown}) => fiber.addObserver(exit => teardown(ex
     return {...system, developmentEntrypoint: built.outputs[0].path};
   });
 
-const fixture = (model: boolean) =>
+/** A memory that shares no term with the query, so only semantic search finds it. */
+interface SemanticOnlyMemory {
+  readonly name: string;
+  readonly vector: readonly number[];
+}
+const dot = (left: readonly number[], right: ArrayLike<number>) =>
+  EffectArray.reduce(left, 0, (sum, value, index) => sum + value * (right[index] ?? 0));
+
+const fixture = (model: boolean, semanticOnly: readonly SemanticOnlyMemory[] = []) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -218,6 +232,26 @@ const fixture = (model: boolean) =>
         `${query} FOREIGN_PRIVATE_SENTINEL`,
       ),
     );
+    const semanticOnlyUris = yield* Effect.forEach(semanticOnly, memory =>
+      Effect.gen(function* () {
+        yield* fs.writeFileString(
+          path.join(path.dirname(filename), `${memory.name}.md`),
+          formatMemoryDocument(
+            'MEMORY',
+            {
+              kind: 'durable',
+              status: 'active',
+              memoryId: `tn_admission_budget_${memory.name}`,
+              topic: `${memory.name} harbor ledger`,
+              sourceAgentClient: 'test',
+              timestamp: '2026-11-04T00:00:00.000Z',
+            },
+            `${memory.name} harbor ledger notes.`,
+          ),
+        );
+        return {uri: `threadnote://user/tester/memories/durable/${memory.name}.md`, vector: memory.vector};
+      }),
+    );
     const lexical = yield* loadRecallIndexData(config, {includeInactive: false});
     const installation = {
       bytes: embedding.size,
@@ -236,8 +270,20 @@ const fixture = (model: boolean) =>
     });
     if (model) {
       yield* selectLocalModel(home, yield* LocalModelCatalog, 'embedding', embedding.id);
+      const documentVector = (input: string, dimensions: number) =>
+        Option.match(
+          EffectArray.findFirst(semanticOnly, memory => EffectString.includes(`${memory.name} harbor`)(input)),
+          {
+            onNone: () => unitVector(dimensions),
+            onSome: memory => Array.from({length: dimensions}, (_, index) => memory.vector[index] ?? 0),
+          },
+        );
       yield* ensureVectorIndex(config, embedding, lexical.candidates, {corpusGeneration: lexical.generation}).pipe(
-        Effect.provideService(LocalModelRuntime, fastRuntime),
+        Effect.provideService(LocalModelRuntime, {
+          ...fastRuntime,
+          embedMany: ({inputs, manifest}) =>
+            Effect.succeed(EffectArray.map(inputs, input => documentVector(input, manifest.dimensions ?? 0))),
+        }),
         Effect.provideService(LocalModelStore, store),
       );
       if (!nativeVectorTestsEnabled) {
@@ -258,7 +304,13 @@ const fixture = (model: boolean) =>
                 return Promise.resolve({
                   status: 'success',
                   corpusCheckRequired: true,
-                  scores: [{uri, score: Math.max(0, queryVector?.[0] ?? 0)}],
+                  scores: [
+                    {uri, score: Math.max(0, queryVector?.[0] ?? 0)},
+                    ...EffectArray.map(semanticOnlyUris, memory => ({
+                      uri: memory.uri,
+                      score: Math.max(0, dot(memory.vector, queryVector ?? [])),
+                    })),
+                  ],
                 });
               },
             }),
@@ -274,26 +326,41 @@ type Surface = 'cli' | 'mcp';
 function invoke(
   surface: Surface,
   f: Effect.Success<ReturnType<typeof fixture>>,
-  options: {readonly query?: string; readonly project?: string} = {},
+  {nodeLimit, ...options}: {readonly query?: string; readonly project?: string; readonly nodeLimit?: number} = {},
 ) {
   const config = f.config;
   if (surface === 'cli')
-    return captureConsole(runRecall(config, {query, inferScope: false, ...options})).pipe(
+    return captureConsole(
+      runRecall(config, {
+        query,
+        inferScope: false,
+        ...options,
+        ...(nodeLimit === undefined ? {} : {nodeLimit: String(nodeLimit)}),
+      }),
+    ).pipe(
       Effect.map(result => ({output: result.output, isError: false, confidenceScore: result.value.confidence?.score})),
       Effect.provideService(SystemInfo, f.system),
     );
   const server = new EffectMcpServerRegistry();
   registerSearchTool(server, config, 'recall_context', 'Recall.', {heartbeatMilliseconds: 100});
-  return server.invokeTool('recall_context', {query, inferScope: false, responseFormat: 'dual', ...options}).pipe(
-    Effect.map(result => ({
-      output: JSON.stringify(result),
-      isError: result.isError === true,
-      confidenceScore: Schema.is(confidenceSchema)(result.structuredContent)
-        ? result.structuredContent.confidence.score
-        : undefined,
-    })),
-    Effect.provideService(SystemInfo, f.system),
-  );
+  return server
+    .invokeTool('recall_context', {
+      query,
+      inferScope: false,
+      responseFormat: 'dual',
+      ...options,
+      ...(nodeLimit === undefined ? {} : {nodeLimit}),
+    })
+    .pipe(
+      Effect.map(result => ({
+        output: JSON.stringify(result),
+        isError: result.isError === true,
+        confidenceScore: Schema.is(confidenceSchema)(result.structuredContent)
+          ? result.structuredContent.confidence.score
+          : undefined,
+      })),
+      Effect.provideService(SystemInfo, f.system),
+    );
 }
 
 // Selector continuation and deterministic mutation/currentness composition cases use this source-authority seam.
@@ -571,7 +638,7 @@ describe('production recall caller admission', () => {
             const input = options?.input
               ? yield* Schema.decodeEffect(operationSchema)(new TextDecoder().decode(options.input)).pipe(Effect.orDie)
               : undefined;
-            if (input?.operation === 'sections') {
+            if (input?.operation === 'sections' && !refinementSectionsRead(input)) {
               windows.push(options!.timeoutMs!);
               yield* Deferred.succeed(input.options.mode === 'baseline' ? baseline : closing, undefined);
               yield* Effect.sleep(100);
@@ -688,7 +755,7 @@ describe('production recall caller admission', () => {
                   ).pipe(Effect.orDie);
                   if (
                     reranks > 0 &&
-                    (request.operation === 'batch' ||
+                    (refinementSectionsRead(request) ||
                       request.operation === 'memory-connections' ||
                       (request.operation === 'sections' && request.options.mode === 'closing'))
                   )
@@ -858,7 +925,9 @@ describe('production recall caller admission', () => {
           expect(modelCalls).toBe(1);
           expect(operations[0]).toBe('sections');
           expect(operations).toContain('vector-state');
-          expect(EffectArray.filter(operations, operation => operation === 'sections')).toHaveLength(2);
+          // Baseline, evidence-bearing refinement and closing proof are each one compact sections read.
+          expect(EffectArray.filter(operations, operation => operation === 'sections')).toHaveLength(3);
+          expect(operations).not.toContain('batch');
           expect(result.isError, result.output).toBe(false);
           expect(result.output).toContain('memories/durable/alpha.md');
         }).pipe(provideTestLayer(ApplicationLayer)),
@@ -910,6 +979,95 @@ describe('production recall caller admission', () => {
           expect(result.isError, result.output).toBe(false);
           expect(result.output).toContain('memories/durable/alpha.md');
           expect(result.confidenceScore).toBeGreaterThan(before.confidenceScore ?? 1);
+        }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+      {timeout: 15000},
+    );
+    effectIt.effect(
+      `${surface} composition keeps its proved baseline when an evidence-bearing refinement read exceeds the output limit`,
+      () =>
+        Effect.gen(function* () {
+          const f = yield* fixture(false);
+          const command = yield* selectorCompositionCommands(f.system);
+          yield* selectLocalModel(
+            f.config.agentContextHome,
+            yield* LocalModelCatalog,
+            'reranker',
+            'jina-reranker-v1-turbo-en-f16',
+          );
+          let refinementReads = 0;
+          // The worker's bound oversize reply; the parent's real decoding and reason mapping still run.
+          const observed = CommandExecutor.of({
+            ...command,
+            execute: (executable, args, options) =>
+              Effect.gen(function* () {
+                const request =
+                  options?.sensitiveOutput && options.input
+                    ? yield* Schema.decodeEffect(operationSchema)(new TextDecoder().decode(options.input)).pipe(
+                        Effect.orDie,
+                      )
+                    : undefined;
+                if (request === undefined || !refinementSectionsRead(request))
+                  return yield* command.execute(executable, args, options);
+                refinementReads++;
+                const reply = {
+                  protocol: 1,
+                  binding: recallReadyReadBinding(request),
+                  operation: 'sections',
+                  observations: [],
+                  maintenanceRequested: false,
+                  outcome: 'failed',
+                  failure: 'output-limit',
+                };
+                return {exitCode: 0, stdout: `${JSON.stringify(reply)}\n`, stderr: ''};
+              }),
+          });
+          const result = yield* invoke(surface, f).pipe(
+            Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}),
+            Effect.provideService(CommandExecutor, observed),
+            Effect.provideService(LocalModelRuntime, {
+              ...fastRuntime,
+              rerank: ({documents}) => Effect.succeed(EffectArray.map(documents, () => 1)),
+            }),
+            Effect.provideService(LocalModelStore, f.store),
+          );
+          expect(refinementReads).toBe(1);
+          expect(result.isError, result.output).toBe(false);
+          expect(result.output).toContain('memories/durable/alpha.md');
+          expect(result.output).toContain('output-limit');
+        }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+      {timeout: 15000},
+    );
+    effectIt.effect(
+      `${surface} composition reranks semantic-only refinement hits before it selects the window`,
+      () =>
+        Effect.gen(function* () {
+          // Semantic search ranks beta above gamma. Only the reranker prefers gamma.
+          const f = yield* fixture(true, [
+            {name: 'beta', vector: [1]},
+            {name: 'gamma', vector: [0.99, Math.sqrt(1 - 0.99 ** 2)]},
+          ]);
+          yield* selectLocalModel(
+            f.config.agentContextHome,
+            yield* LocalModelCatalog,
+            'reranker',
+            'jina-reranker-v1-turbo-en-f16',
+          );
+          const result = yield* invoke(surface, f, {nodeLimit: 2}).pipe(
+            Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}),
+            Effect.provideService(CommandExecutor, yield* selectorCompositionCommands(f.system)),
+            Effect.provideService(LocalModelRuntime, {
+              ...fastRuntime,
+              rerank: ({documents}) =>
+                Effect.succeed(
+                  EffectArray.map(documents, document => (EffectString.includes('gamma')(document) ? 1 : 0)),
+                ),
+            }),
+            Effect.provideService(LocalModelStore, f.store),
+          );
+          expect(result.isError, result.output).toBe(false);
+          expect(result.output).toContain('memories/durable/alpha.md');
+          expect(result.output).toContain('memories/durable/gamma.md');
+          expect(result.output).not.toContain('memories/durable/beta.md');
         }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
       {timeout: 15000},
     );
@@ -971,7 +1129,7 @@ describe('production recall caller admission', () => {
                         }
                         if (
                           scored &&
-                          (request?.operation === 'batch' ||
+                          (refinementSectionsRead(request) ||
                             (request?.operation === 'sections' && request.options.mode === 'closing'))
                         )
                           refinedBatches++;
@@ -1377,7 +1535,10 @@ describe('production recall caller admission', () => {
                     expect(options.timeoutMs).toBe(0);
                     starts.push(options.timeoutMs!);
                     activeReads++;
-                    const readMode = request?.operation === 'sections' ? request.options.mode : undefined;
+                    const readMode =
+                      request?.operation === 'sections' && !refinementSectionsRead(request)
+                        ? request.options.mode
+                        : undefined;
                     if (deterministicSlowComposition && (readMode === 'baseline' || readMode === 'closing')) {
                       const startedAt = yield* Clock.monotonicTimeNanos;
                       if (readMode === 'baseline') baselineReadStartedAt = startedAt;

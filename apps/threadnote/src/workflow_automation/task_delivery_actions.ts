@@ -14,6 +14,7 @@ import {
   verifyNativeCyclePrDeliveryIdentity,
 } from './cycle_delivery.js';
 import {runWorkflowAutomation} from './index.js';
+import {stopSupersededStandalonePrWatch} from './standalone_pr_watch.js';
 import {readNativeWorkflowState} from './store.js';
 import {readNativeTaskView} from './task.js';
 import {runNativeWatch} from './watch.js';
@@ -380,6 +381,9 @@ export const runNativeTaskPrDelivery = (
     return {status: 'delivered', replayed: false, deliveryRef: persistedRef, receipt: persisted, next: result.next};
   });
 
+const standaloneWatchRoute =
+  'To monitor the PR now, call watch-pr with prUrl and the host wakeup (runId optional) for a monitor-only standalone watch.';
+
 export const runNativeTaskPrWatch = (
   config: RuntimeConfig,
   request: Extract<NativeTaskActionRequest, {command: 'watch-pr'}> & {readonly runId: string},
@@ -405,7 +409,7 @@ export const runNativeTaskPrWatch = (
       if ((request.operation !== 'inspect' && request.operation !== 'stop') || !request.phaseId)
         return yield* fail(
           'invalid-delivery-ref',
-          'Provisional watch recovery needs a phaseId and is limited to inspect or stop.',
+          `Provisional watch recovery needs a phaseId and is limited to inspect or stop. ${standaloneWatchRoute}`,
         );
       const runtime = stored.state.cycle;
       const cycle = runtime?.state;
@@ -432,7 +436,7 @@ export const runNativeTaskPrWatch = (
       )
         return yield* fail(
           'provisional-watch-not-eligible',
-          'No current validated provisional PR phase matches this run. Git publication alone cannot arm a watch; read the task card for missing source, independent review and validation before existing-PR delivery and host registration.',
+          `No current validated provisional PR phase matches this run; Git publication alone cannot arm a workflow watch. ${standaloneWatchRoute}`,
         );
       const snapshots = EffectArray.filter(
         runtime.snapshots,
@@ -447,7 +451,7 @@ export const runNativeTaskPrWatch = (
       if (snapshots.length !== 1 || !snapshot || !nativeCycleCoverageAccepts(nativeCycleCoverage(runtime, snapshot)))
         return yield* fail(
           'provisional-watch-not-eligible',
-          'The current provisional phase lacks unique reviewed source proof.',
+          `The current provisional phase lacks unique reviewed source proof. ${standaloneWatchRoute}`,
         );
       const watchIds = yield* readNativeTaskPhaseWatchIds(config, request.runId, request.phaseId);
       if (watchIds.length !== 1)
@@ -511,7 +515,7 @@ export const runNativeTaskPrWatch = (
     if (!request.validationRef || !request.deliveryRef)
       return yield* fail(
         'invalid-delivery-ref',
-        'Use both exact current validation and PR delivery references. Git publication alone supplies neither; follow the task card through source recovery, review, validation and verified existing-PR delivery.',
+        `Workflow watches need the exact current validation and PR delivery references; Git publication supplies neither. ${standaloneWatchRoute}`,
       );
     const validationRef = request.validationRef;
     const deliveryRef = request.deliveryRef;
@@ -728,6 +732,13 @@ export const runNativeTaskPrWatch = (
               watchAttemptId: outbox.attemptId,
             })
           : undefined;
+      // The started workflow watch is authoritative; a failed handover must not report it as unstarted.
+      const supersededStandaloneWatchId = yield* stopSupersededStandalonePrWatch(
+        config,
+        checkout,
+        embeddedDelivery.pr.url,
+        watchId,
+      ).pipe(Effect.orElseSucceed(() => undefined));
       return {
         status: 'watching',
         watchId,
@@ -737,6 +748,7 @@ export const runNativeTaskPrWatch = (
         revision: readback.revision,
         hostReceipt: readback.envelope.notification?.lastReceipt ?? outbox?.receipt ?? null,
         ...(noticeRef ? {noticeRef} : {}),
+        ...(supersededStandaloneWatchId ? {supersededStandaloneWatchId} : {}),
       };
     }
     const watch = yield* readNativeWatch(config, watchId);

@@ -1,9 +1,14 @@
-import {Effect, FileSystem, Schema} from 'effect';
+import {Array as EffectArray, Clock, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
+import {runDetachedCommandEffect} from '@threadnote/platform/command';
+import {sha256HexSync} from '@threadnote/platform/sha256';
+import {SystemInfo} from '@threadnote/platform/system';
 import {CodeGraphQueryService, observationFromCodeGraphStatus} from '@threadnote/graph/query';
 import {CodeGraphStoreBusyError, CodeGraphStoreTransientIoError, type CodeGraphStatus} from '@threadnote/graph/types';
 import {WorkflowAutomationError, WorkflowGraph} from '@threadnote/workflow-automations/contracts';
+import type {NativeWorkflowPolicy} from '@threadnote/workflow-automations/gates';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import {isStandaloneThreadnoteBuild} from '@threadnote/workspace/runtime-version';
 import type {WorkflowBinding} from '../workflow_memory/protocol.js';
 import {requireWorkflowGraphProjectHint, resolveWorkflowGraphScope} from '../workflow_memory/graph_scope.js';
 import {resolveWorkflowBinding} from '../workflow_memory/profile.js';
@@ -24,13 +29,12 @@ const isReady = (status: CodeGraphStatus, roots: readonly string[], selectedProj
 export const makeWorkflowGraphAdapter = Effect.fn('workflowAutomation.graphAdapter')(function* (
   config: RuntimeConfig,
   binding: WorkflowBinding,
-  options: {readonly prepare?: boolean; readonly recovery?: 'fresh-run' | 'same-task' | 'new-task'} = {},
 ) {
   const query = yield* CodeGraphQueryService;
   const indexer = yield* CodeGraphIndexer;
   const fs = yield* FileSystem.FileSystem;
   // A memory project tag is not a graph scope selector.
-  const route = yield* resolveWorkflowGraphScope(config, binding, options.recovery);
+  const route = yield* resolveWorkflowGraphScope(config, binding);
   const project = route.state === 'selected' ? route.project : undefined;
   const statusOptions = {
     manifestPath: config.manifestPath,
@@ -48,12 +52,6 @@ export const makeWorkflowGraphAdapter = Effect.fn('workflowAutomation.graphAdapt
         const roots = [repo, yield* fs.realPath(repo)];
         let status = yield* query.status(config.agentContextHome, repo, statusOptions);
         if (!isReady(status, roots, binding.graphProject)) {
-          if (options.prepare === false)
-            return yield* WorkflowAutomationError.make({
-              code: 'evidence-unavailable',
-              message: `Code citations require an already-published ready graph; run \`threadnote graph index --no-vectors${project ? ` --project ${shellQuote(project.name)}` : ''}\` from callerCwd, then retry. No indexing was started.`,
-              retryable: false,
-            });
           yield* indexer.index({
             cwd: repo,
             threadnoteHome: config.agentContextHome,
@@ -90,8 +88,42 @@ export const makeWorkflowGraphAdapter = Effect.fn('workflowAutomation.graphAdapt
   });
 });
 
-/** Check a proposed native run before init creates its binding or reserves its name. */
-export const requireWorkflowGraphReady = Effect.fn('workflowAutomation.requireGraphReady')(function* (
+const graphWarmIntervalMillis = 30_000;
+
+/**
+ * Start a background graph index for a released build, at most once for each checkout every 30 seconds. A recent
+ * start counts as warming. A spawn failure never fails the caller.
+ */
+const warmWorkflowGraph = Effect.fn('workflowAutomation.warmGraph')(
+  function* (config: RuntimeConfig, checkout: string, args: readonly string[]) {
+    if (!isStandaloneThreadnoteBuild()) return false;
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const system = yield* SystemInfo;
+    const marker = path.join(config.agentContextHome, 'runtime', 'graph-warm', `${sha256HexSync(checkout)}.txt`);
+    const now = yield* Clock.currentTimeMillis;
+    const last = yield* fs.readFileString(marker).pipe(Effect.map(Number), Effect.option);
+    if (Option.isSome(last) && now - last.value < graphWarmIntervalMillis) return true;
+    const started = yield* runDetachedCommandEffect(system.executablePath, args, {
+      cwd: checkout,
+      env: {...system.environment(), THREADNOTE_HOME: config.agentContextHome},
+    });
+    // The marker only spaces out warm-ups; a failed write must not report a started index as not started.
+    if (started)
+      yield* fs
+        .makeDirectory(path.dirname(marker), {recursive: true})
+        .pipe(Effect.andThen(fs.writeFileString(marker, String(now))), Effect.ignoreCause);
+    return started;
+  },
+  Effect.catchCause(() => Effect.succeed(false)),
+);
+
+/**
+ * Check a proposed native run's graph scope before init creates its binding or reserves its name. A missing or stale
+ * graph is warmed in the background by a released build; a standard run starts without it and stores artifacts
+ * written before the graph is ready without code citations, while a strict run still requires exact current evidence.
+ */
+export const requireWorkflowGraphScope = Effect.fn('workflowAutomation.requireGraphScope')(function* (
   config: RuntimeConfig,
   input: {
     readonly checkout: string;
@@ -100,6 +132,7 @@ export const requireWorkflowGraphReady = Effect.fn('workflowAutomation.requireGr
     readonly featureId: string;
     readonly generation: string;
     readonly profile: WorkflowBinding['profile'];
+    readonly policy: NativeWorkflowPolicy;
     readonly team?: string;
     readonly graphProject?: string;
     readonly recovery?: 'same-task' | 'new-task';
@@ -119,7 +152,24 @@ export const requireWorkflowGraphReady = Effect.fn('workflowAutomation.requireGr
     },
     input.graphProject,
   );
-  const graph = yield* makeWorkflowGraphAdapter(config, binding, {prepare: false, recovery: input.recovery});
+  const route = yield* resolveWorkflowGraphScope(config, binding, input.recovery);
   yield* requireWorkflowGraphProjectHint(config, binding, input.recovery);
-  return yield* graph.ready(input.checkout);
+  const project = route.state === 'selected' ? route.project.name : undefined;
+  const indexArgs = ['graph', 'index', '--no-vectors', ...(project ? ['--project', project] : [])];
+  const ready = yield* Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const status = yield* (yield* CodeGraphQueryService).status(config.agentContextHome, input.checkout, {
+      manifestPath: config.manifestPath,
+      ...(project ? {project} : {}),
+    });
+    return isReady(status, [input.checkout, yield* fs.realPath(input.checkout)], binding.graphProject);
+  }).pipe(Effect.orElseSucceed(() => false));
+  if (ready) return;
+  const warming = yield* warmWorkflowGraph(config, input.checkout, indexArgs);
+  if (input.policy === 'strict')
+    return yield* WorkflowAutomationError.make({
+      code: 'evidence-unavailable',
+      message: `A strict run requires an already-published ready graph; ${warming ? 'a background index started; run `threadnote graph status` from callerCwd to see when it is done, then retry' : `run \`threadnote ${EffectArray.join(EffectArray.map(indexArgs, shellQuote), ' ')}\` from callerCwd, then retry`}. No run was created.`,
+      retryable: warming,
+    });
 });

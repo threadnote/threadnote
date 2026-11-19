@@ -102,9 +102,9 @@ describe('native cycle text paging', () => {
 describe('native cycle output budgeting', () => {
   it('reserves the response envelope for the full packet ceiling and preserves packet failure codes', () => {
     expect(nativeCyclePacketRequestOptions(65_536)).toEqual({maxBytes: 66_048});
-    expect(nativeCyclePacketFailure({available: false, reason: 'graph-or-anchor-proof-unavailable'})).toEqual({
+    expect(nativeCyclePacketFailure({available: false, reason: 'anchor-proof-unavailable'})).toEqual({
       code: 'packet-unavailable',
-      message: 'graph-or-anchor-proof-unavailable',
+      message: 'anchor-proof-unavailable',
     });
     expect(nativeCyclePacketFailure({available: false})).toEqual({
       code: 'packet-unavailable',

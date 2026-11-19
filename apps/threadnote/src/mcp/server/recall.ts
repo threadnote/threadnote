@@ -1,5 +1,9 @@
 import {recordUnavailableProductionPhase} from '../../effect/production_log.js';
-import {prepareDefaultRecallSections} from '@threadnote/recall/sections_read';
+import {
+  readReadyRecallSections,
+  requireRecallRefinementRead,
+  warmRecallRerankerWindow,
+} from '@threadnote/recall/sections_read';
 import {deferRecallReadMaintenance} from '../../recall/read_maintenance.js';
 import {isReadCleanupUnconfirmed} from '@threadnote/platform/read_deadline';
 import {optionalReadyRecallRead, withReadyRecallReadBoundary} from '../../recall/ready_read_boundary.js';
@@ -114,7 +118,11 @@ import {
   RECALL_MCP_RESPONSE_MAXIMUM_ESTIMATED_TOKENS,
   RECALL_MCP_RESPONSE_MINIMUM_ESTIMATED_TOKENS,
 } from '@threadnote/recall/mcp/response';
-import {recallReadPhaseOutcome, mergeRecallOperationalWarnings} from '@threadnote/recall/warning';
+import {
+  recallReadPhaseClassification,
+  recallReadPhaseOutcome,
+  mergeRecallOperationalWarnings,
+} from '@threadnote/recall/warning';
 import {withProductionPhaseTiming} from '../../effect/production_log.js';
 import {withAnonymousTelemetryPhase} from '../../effect/telemetry.js';
 import type {ApplyMemoryCandidateInput} from '../../memory/candidate_apply_contract.js';
@@ -1151,12 +1159,10 @@ function runRecallTool(
         const recallProjectName = workspaceContext.recallProjectName;
         const threshold = workspaceContext.threshold;
         const thresholdConfigured = workspaceContext.thresholdConfigured;
-        const passes = workspaceContext.passes;
         const scopedRecallUris = workspaceContext.scopedRecallUris;
         const seededUri = workspaceContext.seededUri;
         const sections = workspaceContext.sections;
         const eligibility = workspaceContext.eligibility;
-        let exactMatches = workspaceContext.exactMatches;
         let operationalWarnings = workspaceContext.operationalWarnings;
         const effectAi = workspaceContext.effectAi;
         const selectRecallCandidates = makeMcpRecallCandidateSelector(config, effectAi, workspaceContext.jev, sections);
@@ -1176,8 +1182,9 @@ function runRecallTool(
         };
         appendSemanticWarning(semanticResult);
         const rerankerCache = createRecallRerankerCache();
-        let allowReranker = false;
         const semanticPreflightModel = navigationOnly ? undefined : yield* prepareRecallSemanticPreflight(config);
+        // Rejected admission performs no optional work, so its completed lexical proof can stand.
+        let refinementStarted = false;
         let lexicalProgressPending = true;
         const prepareSections = (candidateUris?: readonly string[], closingRead = false) => {
           const work = withAnonymousTelemetryPhase(
@@ -1185,23 +1192,22 @@ function runRecallTool(
             withProductionPhaseTiming(
               'recall.lexical-ranking',
               Effect.gen(function* () {
-                const prepared = yield* prepareDefaultRecallSections(config, {
-                  ...(closingRead || semanticPreflightModel === undefined ? {} : {semanticPreflightModel}),
-                  allowReranker,
+                const prepared = yield* readReadyRecallSections(config, {
+                  ...(closingRead || refinementStarted || semanticPreflightModel === undefined
+                    ? {}
+                    : {semanticPreflightModel}),
                   allowExactRescue: !thresholdConfigured,
                   allowSemanticRescue: !thresholdConfigured,
                   allowedUriScopes: params.allowedUriScopes ?? (params.pinnedUri ? [params.pinnedUri] : undefined),
                   candidateUris,
                   closingCandidateUris: closingRead ? candidateUris : undefined,
                   eligibility,
-                  exactMatches: closingRead ? [] : exactMatches,
                   exact: closingRead ? undefined : workspaceContext.exactRead,
                   feedbackQuery: params.query,
                   includeInactive: params.includeArchived,
                   limit: recallLimit,
                   memoryRefs: params.memoryRefs,
                   minimumScore: hybridMinimumScore,
-                  passes: closingRead ? [] : passes,
                   preferredUriScopes: params.pinnedUri ? undefined : [...scopedRecallUris],
                   project: recallProjectName,
                   query,
@@ -1212,18 +1218,16 @@ function runRecallTool(
                     [params.pinnedUri, seededUri],
                     (uri): uri is string => uri !== undefined,
                   ),
-                  semanticGenerationMismatchPolicy: 'fallback',
                   semanticResult: Option.some(semanticResult),
                   workspaceBranch,
                   workspaceScope: workspaceComponent?.scope,
                 });
-                if (!closingRead) exactMatches = prepared.exactMatches;
                 semanticResult = prepared.semanticResult;
                 operationalWarnings = mergeRecallOperationalWarnings(operationalWarnings, prepared.operationalWarnings);
                 appendSemanticWarning(semanticResult);
                 return prepared;
               }),
-              prepared => recallReadPhaseOutcome(prepared.operationalWarnings),
+              prepared => recallReadPhaseClassification(prepared.operationalWarnings),
             ),
             prepared => recallReadPhaseOutcome(prepared.operationalWarnings),
           );
@@ -1236,11 +1240,11 @@ function runRecallTool(
             progressTiming.heartbeatMilliseconds,
           );
         };
+        const refineSections = (candidateUris?: readonly string[]) =>
+          prepareSections(candidateUris).pipe(Effect.flatMap(requireRecallRefinementRead));
         let recallSections = yield* prepareSections();
         const baselineSections = recallSections;
         const baselineNoticeCount = sections.length;
-        // Rejected admission performs no optional work, so its completed lexical proof can stand.
-        let refinementStarted = false;
         let semanticPhaseOutcome: 'success' | 'unavailable' | 'timed-out' | 'failure' = 'unavailable';
         yield* withMcpProgressHeartbeat(
           progress,
@@ -1252,7 +1256,6 @@ function runRecallTool(
                 Effect.gen(function* () {
                   if (navigationOnly) return recallSections;
                   refinementStarted = true;
-                  allowReranker = true;
                   const semanticRetrieval = yield* withProductionPhaseTiming(
                     'recall.semantic-retrieval',
                     loadMcpRecallSemanticScoresResult(
@@ -1288,8 +1291,18 @@ function runRecallTool(
                     baselineSections.expansionCandidates,
                     rerankerCache,
                   );
-                  if (Option.isSome(semanticResult.scores) || rerankerCache.scores.size > 0)
-                    recallSections = yield* prepareSections();
+                  if (Option.isSome(semanticResult.scores) || rerankerCache.scores.size > 0) {
+                    recallSections = yield* refineSections();
+                    // Semantic-only hits enter with refinement; score them once before they compete for the window.
+                    const scoredCandidates = rerankerCache.scores.size;
+                    yield* warmRecallReranker(
+                      config.agentContextHome,
+                      query,
+                      recallSections.expansionCandidates,
+                      rerankerCache,
+                    );
+                    if (rerankerCache.scores.size > scoredCandidates) recallSections = yield* refineSections();
+                  }
                   const shouldAttemptAiExpansion = !navigationOnly && shouldExpandRecall(recallSections.confidence);
                   const indexSelectionCandidates = shouldAttemptAiExpansion
                     ? buildRecallIndexSelectionCandidates(
@@ -1354,7 +1367,7 @@ function runRecallTool(
                   for (const expansionQuery of proposedExpansionQueries) {
                     expansionQueries.push(expansionQuery);
                     hybridMinimumScore = recallHybridMinimumScore(Number(threshold));
-                    recallSections = yield* prepareSections();
+                    recallSections = yield* refineSections();
                   }
                   if (expansionQueries.length > 0) {
                     sections.push(`Recall query expansion: evaluated ${expansionQueries.length} model rewrite(s).`);
@@ -1373,7 +1386,7 @@ function runRecallTool(
                         selectedIds,
                         recallSelectionAnchorIds(selectionCandidates, recallSections.ranked),
                       );
-                      recallSections = yield* prepareSections(selectedUris);
+                      recallSections = yield* refineSections(selectedUris);
                       sections.push(
                         `Recall local AI post-filter: kept ${selectedUris.length} of ${selectionCandidates.length} candidate(s).`,
                       );
@@ -1386,13 +1399,17 @@ function runRecallTool(
                 yield* recordUnavailableProductionPhase('recall.semantic-retrieval');
               if (refinementStarted) {
                 const selectedSections = Option.getOrElse(refined, () => baselineSections);
-                allowReranker = false;
                 if (Option.isNone(refined)) {
                   semanticResult = {corpusGeneration: Option.none(), scores: Option.none(), warning: Option.none()};
                   hybridMinimumScore = recallHybridMinimumScore(Number(threshold));
                   expansionQueries.length = 0;
                   sections.length = baselineNoticeCount;
                   rerankerCache.scores.clear();
+                } else {
+                  // A warm-up that does not finish leaves fewer cached scores for closing; the refined window stands.
+                  yield* optionalReadyRecallRead(
+                    warmRecallRerankerWindow(config, query, refined.value, recallLimit, rerankerCache),
+                  );
                 }
                 recallSections = yield* prepareSections(
                   EffectArray.map(selectedSections.ranked.slice(0, recallLimit), hit => hit.uri),

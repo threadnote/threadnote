@@ -253,6 +253,60 @@ describe('pure native closeout admission', () => {
       'Audited waivers',
     );
   });
+  it('records every runtime-derived phase change, marking drift and counting what exceeds the bound', () => {
+    const f = fixture();
+    const [first, ...others] = EffectArray.map(f.state.plan.phases, phase => phase.id);
+    const many = Array.from({length: 400}, (_, index) => `src/generated/file-${index}.ts`);
+    const result = prepareNativeCloseout(
+      f.state,
+      f.plan,
+      f.proposal,
+      undefined,
+      [],
+      [{phaseId: first, paths: ['src/reader.ts', 'tools/discovered-fix.ts', ...many]}],
+    );
+    const dataFlow = EffectArray.findFirst(
+      result.documents.architecture.sections,
+      section => section.id === 'data-flow',
+    );
+    if (dataFlow._tag === 'None') throw new Error('Expected the data-flow section.');
+    const rows = JSON.parse(EffectString.split(dataFlow.value.body, 'Actual changes\n')[1]) as unknown;
+    expect(rows).toEqual(result.actualChanges);
+    expect(result.actualChanges?.[0]).toMatchObject({phaseId: first, drift: ['tools/discovered-fix.ts']});
+    expect(result.actualChanges?.[0]?.paths[0]).toBe(many[0]);
+    const listed = (result.actualChanges?.[0]?.paths.length ?? 0) + (result.actualChanges?.[0]?.drift.length ?? 0);
+    expect(result.actualChanges?.[0]?.more).toBe(402 - listed);
+    expect(result.actualChanges?.[0]?.more).toBeGreaterThan(0);
+    expect(EffectArray.map(result.actualChanges?.slice(1) ?? [], row => row.phaseId)).toEqual(others);
+    expect(() =>
+      prepareNativeCloseout(f.state, f.plan, f.proposal, undefined, [], [{phaseId: 'unknown', paths: []}]),
+    ).toThrow();
+    expect(prepareNativeCloseout(f.state, f.plan, f.proposal).actualChanges).toBeUndefined();
+  });
+  it('fits actual changes in the room the architecture leaves and renders a stored admission again exactly', () => {
+    const f = fixture();
+    const [first] = EffectArray.map(f.state.plan.phases, phase => phase.id);
+    // Seven long components leave only a few kilobytes of the 60000-byte architecture document for the rows.
+    const proposal = {
+      ...f.proposal,
+      architecture: {
+        ...f.proposal.architecture,
+        components: EffectArray.makeBy(7, index => `Component ${index} ` + Effect.pipe('x', EffectString.repeat(8000))),
+      },
+    };
+    const paths = EffectArray.makeBy(5000, index => `src/generated/file-${index}.ts`);
+    const result = prepareNativeCloseout(f.state, f.plan, proposal, undefined, [], [{phaseId: first, paths}]);
+    expect(
+      new TextEncoder().encode(renderNativeDocument(result.documents.architecture)).byteLength,
+    ).toBeLessThanOrEqual(60_000);
+    const row = result.actualChanges?.[0];
+    expect(row?.paths.length).toBeGreaterThan(0);
+    expect((row?.paths.length ?? 0) + (row?.more ?? 0)).toBe(paths.length);
+    // The journal keeps the bounded rows, and the same rows render the same document again.
+    const replay = prepareNativeCloseout(f.state, f.plan, proposal, undefined, [], result.actualChanges);
+    expect(replay.actualChanges).toEqual(result.actualChanges);
+    expect(replay.documents.architecture).toEqual(result.documents.architecture);
+  });
   it('requires completed cycle and exact pinned plan identity/hash', () => {
     const f = fixture();
     expect(() => prepareNativeCloseout(f.initial, f.plan, f.proposal)).toThrow();

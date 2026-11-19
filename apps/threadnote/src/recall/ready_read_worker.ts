@@ -291,10 +291,23 @@ const readRequest = Effect.gen(function* () {
 /** Signal-transparent one-shot worker; the parent owns its process and every pipe. */
 export const recallReadyReadWorkerProgram = Effect.gen(function* () {
   const request = yield* readRequest;
-  const response = yield* serveRecallReadyRead(request);
-  const bytes = new TextEncoder().encode(`${JSON.stringify(response)}\n`);
-  if (bytes.byteLength > RECALL_READY_READ_OUTPUT_BYTES)
-    return yield* RecallReadyReadBoundaryError.make({reason: 'invalid-protocol'});
+  const served = yield* serveRecallReadyRead(request);
+  const encode = (value: RecallReadyReadResponse) => new TextEncoder().encode(`${JSON.stringify(value)}\n`);
+  const complete = encode(served);
+  // An oversize result stays bound to its request and names its reason instead of failing opaquely.
+  const response: RecallReadyReadResponse =
+    complete.byteLength <= RECALL_READY_READ_OUTPUT_BYTES
+      ? served
+      : {
+          protocol: served.protocol,
+          binding: served.binding,
+          operation: served.operation,
+          observations: [],
+          maintenanceRequested: served.maintenanceRequested,
+          outcome: 'failed',
+          failure: 'output-limit',
+        };
+  const bytes = response === served ? complete : encode(response);
   yield* Schema.decodeEffect(recallReadyReadResponseSchema)(response);
   const stdio = yield* Stdio.Stdio;
   yield* Stream.run(Stream.make(bytes), stdio.stdout({endOnDone: false}));

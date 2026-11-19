@@ -46,6 +46,22 @@ export const nativeWorkflowPolicyOf = (state: {
   readonly policy?: {readonly mode: NativeWorkflowPolicy};
 }): NativeWorkflowPolicy => state.policy?.mode ?? 'strict';
 
+/**
+ * The policy fields a new run records: the request, else the configured default. A run with neither records none,
+ * and `nativeWorkflowPolicyOf` reads it as strict.
+ */
+export const resolveNativeWorkflowPolicy = (
+  config: {readonly workflowPolicyDefault?: NativeWorkflowPolicy},
+  requested?: NativeWorkflowPolicy,
+): {readonly policy?: {readonly mode: NativeWorkflowPolicy}} => {
+  const mode = requested ?? config.workflowPolicyDefault;
+  return mode === undefined ? {} : {policy: {mode}};
+};
+
+/** Pure. The one rule for every gate: a waived integrity or a standard advisory violation proceeds, others refuse. */
+export const nativeGateRefuses = (policy: NativeWorkflowPolicy, gate: GateId, waived = false): boolean =>
+  nativeGates[gate].class === 'integrity' ? !waived : policy !== 'standard';
+
 /** Pure. A waived integrity violation warns, an advisory violation warns under standard, anything else refuses. */
 export function decideGate(
   policy: NativeWorkflowPolicy,
@@ -55,10 +71,13 @@ export function decideGate(
   next: WorkflowNextCommand,
 ): GateDecision {
   if (violation === undefined) return {_tag: 'pass'};
-  const gateClass: NativeGateClass = nativeGates[gate].class;
-  if (gateClass === 'integrity' && waiver) return {_tag: 'warn', gate, detail: violation, waiverId: waiver.id};
-  if (gateClass === 'advisory' && policy === 'standard') return {_tag: 'warn', gate, detail: violation};
-  return {_tag: 'refuse', gate, detail: violation, next};
+  if (nativeGateRefuses(policy, gate, waiver !== undefined)) return {_tag: 'refuse', gate, detail: violation, next};
+  return {
+    _tag: 'warn',
+    gate,
+    detail: violation,
+    ...(nativeGates[gate].class === 'integrity' && waiver ? {waiverId: waiver.id} : {}),
+  };
 }
 
 const cliFlag = (key: string) => '--' + EffectString.replaceAll('_', '-')(EffectString.camelToSnake(key));

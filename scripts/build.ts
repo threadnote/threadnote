@@ -567,6 +567,12 @@ export const buildDevSkillsManifest = Effect.fn('build.devSkillsManifest')(funct
       files[`${member.id}/${relative}`] = yield* sha256Hex(yield* fs.readFile(path.join(directory, relative)));
     }
   }
+  const writingProfiles = EffectArray.map(members, member => files[`${member.id}/references/writing.md`]);
+  if (EffectArray.some(writingProfiles, digest => digest !== writingProfiles[0])) {
+    return yield* ScriptError.make({
+      message: 'Every development skill must ship the same references/writing.md, or none of them may ship it.',
+    });
+  }
   const manifest = {
     schemaVersion: 2 as const,
     nativeRequirements: parseNativeRequirements(value.nativeRequirements),

@@ -3,6 +3,7 @@ import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {WorkflowAutomationError} from './contracts.js';
+import {nativeGateRefuses, type NativeWorkflowPolicy} from './gates.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
@@ -706,11 +707,13 @@ export function checkNativeCycleScope(phase: NativeCyclePlan['phases'][number], 
       }),
   );
 }
+/** Under a standard policy, out-of-plan paths are drift the reviewed snapshot covers, not a scope violation. */
 export function validateNativeCyclePhase(
   value: NativeCycleState,
   idValue: string,
   snapshot: CycleSnapshot,
   evidence: unknown,
+  policy: NativeWorkflowPolicy = 'strict',
 ): NativeCycleState {
   const s = decodeNativeCycleState(value),
     r = s.phases[idValue],
@@ -731,7 +734,8 @@ export function validateNativeCyclePhase(
     (r.planPhaseHash ?? r.phaseHash) !== nativeCyclePhaseHash(s.plan, idValue)
   )
     err('Validation does not match snapshot.');
-  if (!checkNativeCycleScope(p, snapshot.files)) err('Changed paths exceed allowed scope.');
+  if (!checkNativeCycleScope(p, snapshot.files) && nativeGateRefuses(policy, 'scope.out-of-plan'))
+    err('Changed paths exceed allowed scope.');
   const covered = EffectArray.map(v.acceptance, x => x.criterion);
   if (
     new Set(covered).size !== covered.length ||

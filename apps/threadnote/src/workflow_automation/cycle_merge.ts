@@ -18,7 +18,12 @@ import {
   writePreparedNativeWorkflowState,
   type PreparedNativeWorkflowStateWrite,
 } from './store.js';
-import {captureNativeCycleSource, nativeCycleIsAncestor, readNativeCycleTreeEntries} from './cycle_git.js';
+import {
+  captureNativeCycleSource,
+  nativeCycleIsAncestor,
+  readNativeCycleTreeEntries,
+  resolveNativeCycleBase,
+} from './cycle_git.js';
 
 const fail = (message: string) => WorkflowAutomationError.make({code: 'invalid-ordinary-merge', message});
 const git = (repo: string, args: readonly string[]) =>
@@ -74,6 +79,7 @@ export const prepareNativeCycleOrdinaryMerge = Effect.fn('workflowAutomation.cyc
   input: NativeCycleOrdinaryMergeInput,
   identity: {bindingId: string; snapshotId: string; expectedRevision: string; reason: string; authority: string},
 ) {
+  const base = yield* resolveNativeCycleBase(repo, phase.baseBranch);
   if (
     !EffectString.trim(identity.reason) ||
     !EffectString.trim(identity.authority) ||
@@ -83,7 +89,7 @@ export const prepareNativeCycleOrdinaryMerge = Effect.fn('workflowAutomation.cyc
     baseline.preservedFiles.length ||
     (yield* resolve(repo, baseline.head, 'tree')) !== baseline.tree ||
     (yield* resolve(repo, captured.head, 'tree')) !== captured.tree ||
-    (yield* resolve(repo, phase.baseBranch, 'commit')) !== input.currentBaseHead ||
+    base.commit !== input.currentBaseHead ||
     (yield* git(repo, ['branch', '--show-current'])) !== phase.branch
   )
     return yield* fail(
@@ -143,6 +149,7 @@ export const prepareNativeCycleOrdinaryMerge = Effect.fn('workflowAutomation.cyc
     files,
     scopeBase: scope.baseTree,
     declaredBaseHead: input.currentBaseHead,
+    ...(base.comparisonRef ? {comparisonRef: base.comparisonRef} : {}),
     scopeFiles: changed,
     incoming: EffectArray.map(
       EffectArray.filter(inherited, path => !phase.allowedPaths.includes(path)),
@@ -204,7 +211,7 @@ const prepareMergeRetention = Effect.fn('workflowAutomation.cycle.prepareMergeRe
   if (
     closing.head !== snapshot.head ||
     closing.tree !== snapshot.tree ||
-    (yield* resolve(repo, phase.baseBranch, 'commit')) !== snapshot.declaredBaseHead ||
+    (yield* resolveNativeCycleBase(repo, phase.baseBranch)).commit !== snapshot.declaredBaseHead ||
     (yield* git(repo, ['branch', '--show-current'])) !== phase.branch ||
     (yield* resolve(repo, prior.pinnedRef, 'tree')) !== prior.tree ||
     (yield* resolve(repo, baseline.pinnedRef, 'tree')) !== baseline.tree
@@ -342,7 +349,7 @@ export const verifyNativeCycleInvalidTailMergeSource = Effect.fn(
     (yield* git(repo, ['status', '--porcelain=v1', '--untracked-files=all'])) ||
     (yield* resolve(repo, 'HEAD', 'commit')) !== snapshot.head ||
     (yield* resolve(repo, 'HEAD', 'tree')) !== snapshot.tree ||
-    (yield* resolve(repo, phase.baseBranch, 'commit')) !== snapshot.declaredBaseHead ||
+    (yield* resolveNativeCycleBase(repo, phase.baseBranch)).commit !== snapshot.declaredBaseHead ||
     (yield* git(repo, ['branch', '--show-current'])) !== phase.branch ||
     (yield* resolve(repo, baseline.pinnedRef, 'tree')) !== baseline.tree
   )

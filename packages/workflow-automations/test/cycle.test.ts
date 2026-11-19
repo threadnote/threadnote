@@ -104,15 +104,6 @@ const packetOptions = {
     reason: 'Routine bounded work',
     catalogEvidence: 'Available model supports the task.',
   },
-  graphProof: {
-    state: 'ready',
-    head: gitSha,
-    tree: gitTree,
-    dirty: true,
-    snapshotId: 'snapshot-1',
-    graphContentId: 'graph-1',
-    repositoryRoot: 'C:\\repo',
-  },
   anchors: [
     {path: 'packages/workflow-automations/src/cycle.ts', sha256: digest, pattern: 'phase state and validation'},
   ],
@@ -317,6 +308,11 @@ describe('native cycle pure domain', () => {
     expect(checkNativeCycleScope(plan.phases[0], ['src/a.ts'])).toBe(false);
     expect(validateNativeCyclePhase(state, 'one', snapshot([]), validation).phases.one.status).toBe('validated');
     expect(() => validateNativeCyclePhase(state, 'one', snapshot(['src/a.ts']), validation)).toThrow();
+    // Declared scope is not a lock under standard: the reviewed snapshot's drift validates; strict still refuses.
+    expect(
+      validateNativeCyclePhase(state, 'one', snapshot(['src/a.ts']), validation, 'standard').phases.one.status,
+    ).toBe('validated');
+    expect(() => validateNativeCyclePhase(state, 'one', snapshot(['src/a.ts']), validation, 'strict')).toThrow();
     for (const count of [129, 162, 256]) {
       const allowedPaths = Array.from({length: count}, (_, index) => `src/file-${index}.ts`);
       const phase = withPaths(allowedPaths).phases[0];
@@ -698,11 +694,11 @@ describe('native cycle pure domain', () => {
     expect(tooSmall.acceptanceCriteria).toBeUndefined();
     expect(nativeCyclePacket(state, 'one', {...packetOptions, budgetBytes: 512})).toMatchObject({
       available: false,
-      reason: 'graph-or-anchor-proof-unavailable',
+      reason: 'anchor-proof-unavailable',
     });
     expect(
-      nativeCyclePacket(state, 'one', {...packetOptions, graphProof: {...packetOptions.graphProof, tree: 'bad'}}),
-    ).toMatchObject({available: false, reason: 'graph-or-anchor-proof-unavailable'});
+      nativeCyclePacket(state, 'one', {...packetOptions, anchors: [{...packetOptions.anchors[0], path: '../secret'}]}),
+    ).toMatchObject({available: false, reason: 'anchor-proof-unavailable'});
     expect(() =>
       validateNativeCycleCapacityRecord({...packetOptions.capacity, selection: 'escalation', risk: 'settled'}),
     ).toThrow();

@@ -10,18 +10,16 @@ import {
   cycleRequest,
   fail,
   inCheckout,
+  nativeTaskSnapshotSummary,
   taskActionSnapshotRef,
   type NativeTaskCycleRuntime,
   type NativeTaskStoredState,
 } from './task_action_helpers.js';
 
-const recordableActions = new Set([
-  'implement',
-  'review',
-  'validate',
-  'resolve-review-failure',
-  'expand-review-budget',
-]);
+const outOfPlanPreviewLimit = 20;
+const recordableActions = new Set(['implement', 'review', 'validate']);
+// A new tree replaces the blocked review target. The per-phase review budget still counts every accepted review.
+const reviewRecoveryActions = new Set(['resolve-review-failure', 'expand-review-budget']);
 
 /** Standard profile: record the current tree for the phase on the task card, with no packet precondition. */
 export const recordNativeTaskTreeSnapshot = (
@@ -41,7 +39,10 @@ export const recordNativeTaskTreeSnapshot = (
         `Phase ${phaseId} is validated and waits for delivery; reopen it to record a changed tree.`,
         {next: nativeNext.reopen(scope, phaseId)},
       );
-    if (view.status !== 'ready' || !phaseId || !recordableActions.has(view.next.action))
+    const recordable =
+      reviewRecoveryActions.has(view.next.action) ||
+      (view.status === 'ready' && recordableActions.has(view.next.action));
+    if (!phaseId || !recordable)
       return yield* nativeRefusal(
         'task-not-ready',
         `The current task card asks for ${view.next.action}, not a new source snapshot.`,
@@ -67,13 +68,23 @@ export const recordNativeTaskTreeSnapshot = (
     if (!recorded || !baseline)
       return yield* fail('snapshot-not-recorded', 'The canonical snapshot was not persisted.');
     const outOfPlan = recorded.snapshot.outOfPlan ?? [];
+    const more = outOfPlan.length - outOfPlanPreviewLimit;
+    // The canonical snapshot keeps every path; the response names the first paths and counts the rest.
+    const detail = {files: outOfPlan.slice(0, outOfPlanPreviewLimit), ...(more > 0 ? {more} : {})};
+    // A diverged local base keeps its own commit, so the snapshot can include upstream-only changes.
+    const comparison = recorded.snapshot.comparisonEvidence;
     return {
       status: 'recorded',
       replayed: recorded.snapshot.snapshotId === before?.snapshot.snapshotId,
       ...(outOfPlan.length > 0
-        ? {warnings: [{_tag: 'warn' as const, gate: 'scope.out-of-plan' as const, detail: {files: outOfPlan}}]}
+        ? {warnings: [{_tag: 'warn' as const, gate: 'scope.out-of-plan' as const, detail}]}
         : {}),
-      snapshot: recorded,
+      ...(comparison?.divergedUpstream
+        ? {
+            note: `The local branch ${comparison.baseBranch} has diverged from ${comparison.divergedUpstream}. The snapshot compares against the local branch.`,
+          }
+        : {}),
+      snapshot: nativeTaskSnapshotSummary(recorded),
       snapshotRef: taskActionSnapshotRef(
         {
           version: 1,
