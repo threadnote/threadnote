@@ -1,6 +1,6 @@
 # Threadnote STE profile
 
-<!-- dev-spec, dev-plan, dev-cycle and watch-pr each ship an identical copy of this file. `scripts/build.ts` rejects the bundle if the copies differ. threadnote-memory/SKILL.md has a compact copy of the Apply, Relax and Exempt rules. Change all copies together. -->
+<!-- dev-spec, dev-plan, dev-cycle and watch-pr each ship an identical copy of this file. `scripts/build.ts` rejects the bundle if the copies differ. threadnote-memory/SKILL.md has a short summary. Change all copies and the summary together. -->
 
 This profile is a practical subset of ASD-STE100 Simplified Technical English (STE). Use it for all workflow outputs. These outputs are user-facing reports, task-card business inputs, review findings, PR bodies, handoffs and stored memories. A human or an agent must understand the text on the first read.
 
