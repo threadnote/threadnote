@@ -125,7 +125,7 @@ describe('automatic maintenance whole-worker ownership', () => {
   );
 
   effectIt.effect.each(['dead', 'reused', 'unknown'] as const)(
-    'stops only its work when the MCP owner becomes %s',
+    'finishes a started tick when the MCP owner becomes %s',
     mode =>
       Effect.gen(function* () {
         const {home, fs, lock} = yield* fixture;
@@ -133,6 +133,7 @@ describe('automatic maintenance whole-worker ownership', () => {
         let current = true;
         let finished = false;
         const started = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
         const injected = {
           ...system,
           isProcessRunning: (pid: number) =>
@@ -149,7 +150,7 @@ describe('automatic maintenance whole-worker ownership', () => {
           home,
           owner,
           Deferred.succeed(started, undefined).pipe(
-            Effect.andThen(Effect.never),
+            Effect.andThen(Deferred.await(release)),
             Effect.ensuring(
               Effect.sync(() => {
                 finished = true;
@@ -159,8 +160,11 @@ describe('automatic maintenance whole-worker ownership', () => {
         ).pipe(Effect.provideService(SystemInfo, injected), Effect.forkScoped);
         yield* Deferred.await(started);
         current = false;
-        yield* TestClock.adjust('1 second');
-        expect(yield* Fiber.join(worker)).toBe('owner-gone');
+        yield* TestClock.adjust('1 minute');
+        expect(finished).toBe(false);
+        expect(yield* runContextMaintenanceWorker(home, undefined, unexpectedWork)).toBe('busy');
+        yield* Deferred.succeed(release, undefined);
+        expect(yield* Fiber.join(worker)).toBe('completed');
         expect(finished).toBe(true);
         expect(yield* fs.exists(lock)).toBe(false);
       }).pipe(provideTestLayer(layer)),

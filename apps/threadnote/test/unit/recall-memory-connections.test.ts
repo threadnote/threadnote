@@ -9,6 +9,7 @@ import {MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
 import {formatMemoryDocument, type MemoryMetadata, type MemoryRelation} from '@threadnote/memory/document';
 import {memoryIdentityAlias} from '@threadnote/memory/identity-alias';
 import {recordMemoryRelocation} from '@threadnote/memory/relocation';
+import {advanceCanonicalMutationGeneration} from '@threadnote/store/resource/mutation_generation';
 import {
   classifyRecallMemoryPremiseState,
   parseRecallMemoryConnectionInput,
@@ -553,14 +554,17 @@ describe('recall memory connections', () => {
 
       const scope = {...config, includeInactive: true};
       const beforeRead = yield* recallIndexStatus(config, true);
-      const unavailable = yield* retrieveRecallMemoryConnections(config, {
+      const deferred = yield* retrieveRecallMemoryConnections(config, {
         allowedUriScopes: [memoryRoot(config.user)],
         memoryRefs: [seed],
         now: CURRENT,
         readRecords: uris => readMemoryRecordsByUri(config, uris),
         relationTypes: ['related_to'],
-      }).pipe(Effect.result);
-      expect(unavailable).toMatchObject({_tag: 'Failure', failure: {_tag: 'RecallReadyReadUnavailable'}});
+      });
+      expect(deferred).toMatchObject({
+        premises: [{state: 'unresolved', uri: seed}],
+        readState: {freshness: 'stale'},
+      });
       expect(yield* recallIndexStatus(config, true)).toEqual(beforeRead);
       expect(yield* readRecallLexicalDemand(scope)).toMatchObject({reconcile: true});
       expect((yield* runRecallLexicalWorkerUnit(scope)).state).toBe('complete');
@@ -781,7 +785,63 @@ describe('recall memory connections', () => {
       ).toEqual([target]);
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
+
+  // Writes refresh the active snapshot in the foreground; the with-inactive selector waits for background maintenance.
+  effectIt.effect('answers stable-id premises from a stale with-inactive selector without claiming currentness', () =>
+    expectDegradedSelectorPremises('threadnote-memory-stale-selector-', (fs, path, config) =>
+      prepareConnectionFixture(config).pipe(
+        Effect.andThen(advanceCanonicalMutationGeneration(fs, path, config.agentContextHome, config.account)),
+        Effect.andThen(loadRecallIndexData(config, {forceRefresh: true, includeInactive: false})),
+      ),
+    ).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('answers stable-id premises from the active snapshot when the with-inactive selector is absent', () =>
+    expectDegradedSelectorPremises('threadnote-memory-absent-selector-', (_fs, _path, config) =>
+      loadRecallIndexData(config, {forceRefresh: true, includeInactive: false}),
+    ).pipe(provideTestLayer(ApplicationLayer)),
+  );
 });
+
+function expectDegradedSelectorPremises<E, R>(
+  prefix: string,
+  prepareIndexes: (
+    fs: FileSystem.FileSystem,
+    path: Path.Path,
+    config: ReturnType<typeof runtimeConfig>,
+  ) => Effect.Effect<unknown, E, R>,
+) {
+  return Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const home = yield* fs.makeTempDirectoryScoped({prefix});
+    const config = runtimeConfig(home, 'degraded-selector-user');
+    const target = yield* writeMemory(fs, path, config, 'target', 'tn_degraded_target');
+    const seed = yield* writeMemory(fs, path, config, 'seed', 'tn_degraded_seed', [
+      {type: 'depends_on', uri: 'threadnote://memory/tn_degraded_target'},
+    ]);
+    yield* prepareIndexes(fs, path, config);
+
+    const prepared = yield* prepareRecallSections(config, {
+      allowExactRescue: false,
+      exactMatches: [],
+      feedbackQuery: '',
+      includeInactive: false,
+      limit: 5,
+      memoryRefs: ['threadnote://memory/tn_degraded_seed', 'threadnote://memory/tn_degraded_target'],
+      passes: [],
+      query: '',
+      readRecords: uris => readMemoryRecordsByUri(config, uris),
+      semanticResult: Option.none(),
+    });
+
+    expect(prepared.memoryConnections?.premises).toEqual([
+      expect.objectContaining({memoryId: 'tn_degraded_seed', state: 'unresolved', uri: seed}),
+      expect.objectContaining({memoryId: 'tn_degraded_target', state: 'unresolved', uri: target}),
+    ]);
+    expect(prepared.operationalWarnings).toEqual([expect.objectContaining({code: 'lexical_index_stale'})]);
+  });
+}
 
 function candidate(uri: string, text: string, overrides: Partial<RecallCandidate> = {}): RecallCandidate {
   return {

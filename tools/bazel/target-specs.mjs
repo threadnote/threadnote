@@ -1,7 +1,6 @@
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
 import {fileURLToPath} from 'node:url';
-/* oxlint-disable effecttsgo/node-builtin-import -- Target discovery runs before the declared Bazel graph exists. */
 import {existsSync, statSync} from 'node:fs';
 import {join, resolve} from 'node:path';
 import {ciLongRunningTestGroups, ciRequiredLongRunningTestGroupNames} from '../ci/vitest-plan.ts';
@@ -331,7 +330,8 @@ export const createTargetSpecs = async (root = defaultRoot) => {
     const runtimeEntries = packageRuntimeTestEntries[directory]
       ? EffectArray.filter(
           entries,
-          (path, __effectArrayIndex) => __effectArrayIndex in entries && readSource(path).includes('standalone.ts'),
+          (path, __effectArrayIndex) =>
+            __effectArrayIndex in entries && /standalone(?:_cli)?\.ts/u.test(readSource(path)),
         )
       : [];
     const workspaceEntries = packageWorkspaceTestEntries[directory] ?? [];
@@ -587,6 +587,8 @@ export const createTargetSpecs = async (root = defaultRoot) => {
         'tools/ci/selection.mjs',
         'tools/ci/bazel-run-selected.mjs',
         'tools/ci/bazel-select.mjs',
+        // The Windows smoke config classifies dev-skills tests by their source.
+        ...testFilesBelow('apps/threadnote/test/dev-skills'),
       ],
       dataRoots: ['.github/workflows'],
     },

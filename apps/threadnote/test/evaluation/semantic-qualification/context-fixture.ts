@@ -1,4 +1,3 @@
-/* oxlint-disable effecttsgo/node-builtin-import -- Qualification owns only an authored private source fixture and exact byte checks. */
 import {strict as assert} from 'node:assert';
 import {createHash} from 'node:crypto';
 import {readFile, writeFile} from 'node:fs/promises';

@@ -6,7 +6,7 @@ import * as Option from 'effect/Option';
 import * as Path from 'effect/Path';
 import * as Schema from 'effect/Schema';
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
-import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
+import {readExclusiveFileLockOwner, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import {
@@ -56,6 +56,10 @@ export interface NativeWatchEnvelope {
     consecutiveErrors: number;
   };
   stopRequested: boolean;
+  /** Set only by the stop that hands a standalone watch over to a workflow-bound watch; any other stop clears it. */
+  stopReason?: 'superseded';
+  /** The workflow-bound watch that replaced a superseded standalone watch. */
+  supersededBy?: string;
   notification?: NativeWatchNotification;
   metrics: {
     requests: number;
@@ -417,6 +421,8 @@ const envelopeSchema = Schema.Struct({
     }),
   ),
   stopRequested: Schema.Boolean,
+  stopReason: Schema.optionalKey(Schema.Literal('superseded')),
+  supersededBy: Schema.optionalKey(text(128)),
   notification: Schema.optionalKey(nativeWatchNotificationSchema),
   metrics: Schema.Struct({
     requests: integer,
@@ -880,6 +886,15 @@ function watchLock<A, E, R>(config: RuntimeConfig, id: string, collector: boolea
 }
 export const withNativeWatchControlLock = <A, E, R>(config: RuntimeConfig, id: string, body: Effect.Effect<A, E, R>) =>
   watchLock(config, id, false, body);
+/** The recorded owner of this watch's collector lock: its collector, or a terminal notification recovery. */
+export const readNativeWatchCollectorLockOwner = Effect.fn('workflowAutomation.watchCollectorLockOwner')(function* (
+  config: RuntimeConfig,
+  id: string,
+) {
+  const file = yield* statePath(config, id);
+  if (file === undefined) return Option.none();
+  return yield* readExclusiveFileLockOwner(yield* FileSystem.FileSystem, file + '.collector.lock');
+});
 export const withNativeWatchCollectorLock = <A, E, R>(
   config: RuntimeConfig,
   id: string,

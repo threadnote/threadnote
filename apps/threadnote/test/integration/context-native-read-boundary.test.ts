@@ -13,12 +13,14 @@ import {loadRecallCodeLinks} from '@threadnote/recall/index';
 import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
 import {planContextBrief} from '@threadnote/context/planner';
 import {projectContextBrief} from '@threadnote/context/projector';
-import {CommandExecutor, CommandSpawnFailed, runCommandEffect} from '@threadnote/platform/command';
+import {compileContextBriefWith} from '@threadnote/context/compiler';
+import {CommandExecutor, CommandSpawnFailed, CommandTimedOut, runCommandEffect} from '@threadnote/platform/command';
 import {makeReadDeadline, ReadDeadlineExceeded} from '@threadnote/platform/read_deadline';
 import {SystemInfo} from '@threadnote/platform/system';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {ReadyRecallReadWorkerAdmission} from '../../src/recall/ready_read_boundary.js';
 import {
+  CONTEXT_BRIEF_NATIVE_READ_STATUS_PROGRESS,
   contextBriefNativeReadBinding,
   ContextBriefNativeReadFailed,
   withNativeContextBriefReadSources,
@@ -29,6 +31,7 @@ import {
   compileSemanticContextKnowledge,
   type ContextBriefRuntimeCompilerSources,
 } from '../../src/context_brief/index.js';
+import type {ContextBriefGraphReadBudget} from '@threadnote/context/graph/evidence';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {withProductionLogging, withProductionPhaseTiming} from '../../src/effect/production_log.js';
 
@@ -180,9 +183,14 @@ describe('whole native Context Brief read boundary', () => {
           mode: 'locate',
           task: 'boundedAnswer',
         });
-        const budget = {remaining: 2, primaryRemaining: 17, deadline: yield* makeReadDeadline(5000)};
+        const budget: ContextBriefGraphReadBudget = {
+          remaining: 2,
+          primaryRemaining: 17,
+          deadline: yield* makeReadDeadline(5000),
+        };
         const graph = yield* native.graphEvidence(plan.graph, budget);
         expect(graph.cards.length).toBeGreaterThan(0);
+        expect(budget.statusObserved).toBe(true);
         expect(graph.resolvedSnapshots[0]?.dirty).toBe(false);
         expect(graph.citationValidationFence?.kind).toBe('repository');
         expect(graph.sourceExcerpts?.[0]?.content).toContain('boundedAnswer');
@@ -388,17 +396,16 @@ describe('whole native Context Brief read boundary', () => {
         expect(empty).toEqual([]);
         expect(invocations).toBe(0);
         const deadline = yield* makeReadDeadline(1600);
+        const budget: ContextBriefGraphReadBudget = {remaining: 2, primaryRemaining: 17, deadline};
         const start = yield* Clock.monotonicTimeNanos;
         const result = yield* withProductionLogging(
           f.home,
           {component: 'cli', operation: 'context.brief'},
-          withProductionPhaseTiming(
-            'context.brief.graph',
-            native.graphEvidence(plan.graph, {remaining: 2, primaryRemaining: 17, deadline}),
-          ),
+          withProductionPhaseTiming('context.brief.graph', native.graphEvidence(plan.graph, budget)),
         ).pipe(Effect.result);
         expect(result._tag).toBe('Failure');
         if (result._tag === 'Failure') expect(Schema.is(ReadDeadlineExceeded)(result.failure)).toBe(true);
+        expect(budget.statusObserved).toBeUndefined();
         expect(Number((yield* Clock.monotonicTimeNanos) - start) / 1_000_000).toBeLessThan(1600);
         const second = yield* native.citationValidation(plan.scope, [], undefined, deadline).pipe(Effect.result);
         expect(second._tag).toBe('Failure');
@@ -415,6 +422,72 @@ describe('whole native Context Brief read boundary', () => {
         TestClock.withLive,
       ),
     {timeout: 10000},
+  );
+
+  effectIt.effect(
+    'a real worker that prints progress and then stalls inside a large response reports inspection expiry',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const system = yield* SystemInfo;
+        const script = f.path.join(f.root, 'progress-then-stall.ts');
+        yield* f.fs.writeFileString(
+          script,
+          `process.stdout.write(${JSON.stringify(`${CONTEXT_BRIEF_NATIVE_READ_STATUS_PROGRESS}\n`)}); process.stdout.write('{"protocol":1,"value":"' + 'x'.repeat(1024 * 1024)); setTimeout(() => undefined, 10000);`,
+        );
+        const native = yield* withNativeContextBriefReadSources(f.config, sources).pipe(
+          Effect.provideService(SystemInfo, {...system, developmentEntrypoint: script}),
+        );
+        const brief = yield* compileContextBriefWith(native, {
+          mode: 'locate',
+          responseFormat: 'dual',
+          scope: {kind: 'repository', callerCwd: f.repo},
+          task: 'answer',
+        });
+        expect(brief.structuredContent.coverage.gaps).toContain('graph-read-budget-exhausted');
+        expect(brief.structuredContent.coverage.gaps).not.toContain('graph-status-deadline-exceeded');
+      }).pipe(
+        Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}),
+        provideTestLayer(ApplicationLayer),
+        TestClock.withLive,
+      ),
+    {timeout: 10000},
+  );
+
+  effectIt.effect('a worker timeout reports the status gap unless it printed the exact progress line', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const command = yield* CommandExecutor;
+      const progress = CONTEXT_BRIEF_NATIVE_READ_STATUS_PROGRESS;
+      const gapsFor = (lines: readonly string[]) =>
+        Effect.gen(function* () {
+          const native = yield* withNativeContextBriefReadSources(f.config, sources).pipe(
+            Effect.provideService(CommandExecutor, {
+              ...command,
+              execute: (_executable, _args, options) =>
+                Effect.suspend(() => {
+                  for (const line of lines) options?.onStdoutLine?.(line);
+                  return Effect.fail(
+                    CommandTimedOut.make({args: [], executable: '<test>', message: 'worker timed out', timeoutMs: 1}),
+                  );
+                }),
+            }),
+          );
+          const brief = yield* compileContextBriefWith(native, {
+            mode: 'locate',
+            responseFormat: 'dual',
+            scope: {kind: 'repository', callerCwd: f.repo},
+            task: 'answer',
+          });
+          return brief.structuredContent.coverage.gaps;
+        });
+      expect(yield* gapsFor([progress])).toContain('graph-read-budget-exhausted');
+      for (const lines of [[], [''], ['{"protocol":1}'], [`${progress} `]]) {
+        const gaps = yield* gapsFor(lines);
+        expect(gaps).toContain('graph-status-deadline-exceeded');
+        expect(gaps).not.toContain('graph-read-budget-exhausted');
+      }
+    }).pipe(Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}), provideTestLayer(ApplicationLayer)),
   );
 
   effectIt.effect(

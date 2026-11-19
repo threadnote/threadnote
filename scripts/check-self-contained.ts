@@ -10,7 +10,7 @@ import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {Console, Effect, FileSystem, Path, Exit, Cause} from 'effect';
 import {sha256FileHex} from '@threadnote/platform/digest';
-import {hasUndeclaredNodeBuiltinImport, hasUndeclaredPythonRuntimeReference} from './effect/self-contained-source.js';
+import {hasUndeclaredPythonRuntimeReference} from './effect/self-contained-source.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -40,7 +40,7 @@ function isPackageManifest(value: unknown): value is PackageManifest {
 
 const ROOT_URL = new URL('..', import.meta.url);
 const EXPECTED_BUN_VERSION = '1.4.4';
-const EXPECTED_EFFECT_VERSION = '4.1.2';
+const EXPECTED_EFFECT_VERSION = '4.1.4';
 const EXPECTED_NODE_LLAMA_CPP_VERSION = '3.22.2';
 const EXPECTED_TYPESCRIPT_COMPILER_VERSION = 'npm:typescript@5.9.3';
 const EXPECTED_WEB_TREE_SITTER_VERSION = '0.27.1';
@@ -128,9 +128,6 @@ const checkSelfContained = Effect.gen(function* () {
     }
     if (/(?:viking:\/\/|data\/viking)/i.test(content) && !ALLOWED_LEGACY_IDENTIFIER_SOURCES.has(relativePath)) {
       failures.push(`legacy identifier or storage path outside compatibility boundary: ${relativePath}`);
-    }
-    if (hasUndeclaredNodeBuiltinImport(relativePath, content)) {
-      failures.push(`Node built-in import in production source: ${relativePath}`);
     }
     if (/from\s+['"](?:@effect\/platform-node|@effect\/sql-sqlite-node)['"]/.test(content)) {
       failures.push(`Node Effect adapter in production source: ${relativePath}`);

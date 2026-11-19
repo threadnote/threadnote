@@ -1160,7 +1160,11 @@ function useVectorDatabase<A, E, R>(
         filename: databasePath,
         ...(readOnly ? {readonly: true, create: false, readwrite: false, busyTimeout: 100} : {}),
       }).pipe(Layer.orDie),
-    ).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))),
+    ).pipe(
+      Effect.flatMap(context =>
+        effect.pipe(Effect.provideService(SqlClient.SqlClient, Context.get(context, SqlClient.SqlClient))),
+      ),
+    ),
   );
 }
 

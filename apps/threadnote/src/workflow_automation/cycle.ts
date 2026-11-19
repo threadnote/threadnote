@@ -1,7 +1,7 @@
 import {pipe as EffectArrayPipe} from 'effect';
 import {isJsonObject} from '@threadnote/platform/json';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
-import {Effect, FileSystem, Option, Path, Schema} from 'effect';
+import {Effect, FileSystem, Path, Schema} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import {
@@ -52,6 +52,7 @@ import {
   nativeCycleCoverage,
   nativeCycleCoverageWaiver,
   nativeCycleCoverageAccepts,
+  nativeCyclePhaseOwnedPaths,
 } from '@threadnote/workflow-automations/cycle-runtime';
 import {nativeCycleTextPage} from '@threadnote/workflow-automations/cycle-output';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -73,6 +74,7 @@ import {
   verifyNativeCycleBaseRequalification,
   makeWorkflowGitAdapter,
   nativeCycleRelativePath,
+  resolveNativeCycleBase,
 } from './cycle_git.js';
 import {nativeWorkflowError} from './memory.js';
 import {
@@ -82,7 +84,11 @@ import {
   persistNativeCycleOrdinaryMerge,
   hasNativeCycleMergePlanBinding,
 } from './cycle_merge.js';
-import {bindNativeCycleDeliveryBase, verifyNativeCyclePrDeliveryIdentity} from './cycle_delivery.js';
+import {
+  bindNativeCycleDeliveryBase,
+  nativeCommitDescends,
+  verifyNativeCyclePrDeliveryIdentity,
+} from './cycle_delivery.js';
 import {verifyNativeCycleSnapshotEvidence, verifyNativeCycleUnreviewedRebase} from './cycle_recovery.js';
 import {nativeLegacyPathOnlyPhases, type NativeAuthoringCall} from './authoring_artifacts.js';
 import {decodeNativeAuthoringDocument, type NativeAuthoringDocument} from '@threadnote/workflow-automations/authoring';
@@ -388,35 +394,6 @@ const runNativeCycleRequest = <R>(
         checkedPlanSource = stableJson(plan.source);
       }
     }
-    // Graph preparation can index and must never run while holding a native run lock.
-    let sourceBeforeGraph: Effect.Success<ReturnType<typeof captureNativeCycleSource>> | undefined;
-    if (request.command === 'packet') {
-      const state = yield* readNativeWorkflowState(config, request.runId);
-      if (!state) return yield* fail('run-not-found', 'Start the native run first.');
-      if (!state.state.cycle?.baselines[request.phaseId ?? ''])
-        return yield* fail('baseline-required', 'Run begin-phase before preparing an implementation packet.');
-      const journal = yield* withWorkflowLock(
-        config,
-        state.state.bindingId,
-        inspectWorkflowJournal(config, state.state.bindingId),
-      );
-      sourceBeforeGraph = yield* captureNativeCycleSource(journal.state.binding.repo, 'HEAD');
-      // Preserve later eligibility/schema errors, but do not index a valid proof's contradicted source.
-      const packet = yield* Schema.decodeUnknownEffect(NativeCyclePacketOptionsSchema, {
-        onExcessProperty: 'error',
-      })(request.packet).pipe(Effect.option);
-      const next = nextNativeCycle(state.state.cycle.state);
-      if (
-        next.action === 'implement' &&
-        next.phaseId === request.phaseId &&
-        Option.isSome(packet) &&
-        (packet.value.graphProof.head !== sourceBeforeGraph.head ||
-          packet.value.graphProof.tree !== sourceBeforeGraph.tree ||
-          packet.value.graphProof.repositoryRoot !== journal.state.binding.repo)
-      )
-        return yield* fail('source-drift', 'Packet graph evidence does not match exact current checkout bytes.');
-    }
-    const graph = request.command === 'packet' ? yield* call(base('graph-ready')) : undefined;
     return yield* withNativeWorkflowLock(
       config,
       request.runId,
@@ -962,7 +939,16 @@ const runNativeCycleRequest = <R>(
               sameLabelRebasedBaseIntegrationV1: rewritten.input,
             }).pipe(Effect.mapError(() => fail('invalid-request', 'Resolve a closed protocol3 snapshot request.')));
           }
-          const scope = rewritten ?? merge ?? (yield* readNativeCycleIncoming(repo, selected, captured, baseline));
+          const scope =
+            rewritten ??
+            merge ??
+            (yield* readNativeCycleIncoming(
+              repo,
+              selected,
+              captured,
+              baseline,
+              yield* resolveNativeCycleBase(repo, selected.baseBranch),
+            ));
           let rebase: Omit<NonNullable<NativeCycleSnapshot['rebase']>, 'receiptDigest'> | undefined;
           if (request.rebase) {
             const reason = yield* from(() => required(request.reason, 'the exact rebase reconciliation reason'));
@@ -1073,6 +1059,7 @@ const runNativeCycleRequest = <R>(
             comparisonEvidence: {
               version: 1,
               baseBranch: selected.baseBranch,
+              ...(scope.comparisonRef ? {comparisonRef: scope.comparisonRef} : {}),
               baseTree:
                 rewritten?.proof.currentBaseTree ??
                 EffectString.trim(yield* git(repo, ['rev-parse', scope.declaredBaseHead + '^{tree}'])),
@@ -1122,9 +1109,7 @@ const runNativeCycleRequest = <R>(
             : sourceSnapshot;
           if (rebase || baseRequalification || rebaseRecovery) {
             const closing = yield* captureNativeCycleSource(repo, baseline.tree);
-            const declared = EffectString.trim(
-              yield* git(repo, ['rev-parse', '--verify', '--end-of-options', selected.baseBranch + '^{commit}']),
-            );
+            const declared = (yield* resolveNativeCycleBase(repo, selected.baseBranch)).commit;
             const branch = EffectString.trim(yield* git(repo, ['branch', '--show-current']));
             if (
               closing.head !== captured.head ||
@@ -1501,26 +1486,16 @@ const runNativeCycleRequest = <R>(
               fail('invalid-cycle-packet', 'Provide bounded source anchors, ownership, checks and capacity evidence.'),
             ),
           );
-          const observedGraphValue = isJsonObject(graph) ? graph.graph : undefined;
+          // Capture writes the whole working tree, so a packet is dispatched only from committed, clean source.
           const captured = yield* captureNativeCycleSource(repo, 'HEAD');
-          if (
-            !sourceBeforeGraph ||
-            sourceBeforeGraph.head !== captured.head ||
-            sourceBeforeGraph.tree !== captured.tree
-          )
+          if (captured.tree !== captured.baseTree)
             return yield* fail(
-              'source-drift',
-              'Source changed around ready-graph preparation. Retry with current evidence.',
+              'working-tree-dirty',
+              'Commit or discard working-tree changes before preparing the packet.',
             );
-          if (!isJsonObject(observedGraphValue))
-            return yield* fail('source-drift', 'Packet graph evidence does not match exact current checkout bytes.');
-          const proof: Record<string, unknown> = {...observedGraphValue, tree: captured.tree};
-          if (
-            stableJson(proof) !== stableJson(options.graphProof) ||
-            proof['head'] !== captured.head ||
-            proof['repositoryRoot'] !== repo
-          )
-            return yield* fail('source-drift', 'Packet graph evidence does not match exact current checkout bytes.');
+          // A caller that binds its reference to a head gets a packet of that exact head.
+          if (request.acceptedHead !== undefined && captured.head !== request.acceptedHead)
+            return yield* fail('source-drift', 'Source changed while preparing the implementation packet.');
           const adapter = yield* makeWorkflowGitAdapter();
           const source = yield* adapter.inspect(repo, [
             ...new Set(EffectArray.map(options.anchors, anchor => anchor.path)),
@@ -1615,8 +1590,7 @@ const runNativeCycleRequest = <R>(
               'preserved-work-publication',
               'Preserve unowned existing work outside the phase commit. Use a clean isolated phase checkout.',
             );
-          const incoming = new Set(EffectArray.map(entry.incoming, item => item.path));
-          const changed = EffectArray.filter(entry.snapshot.files, file => !incoming.has(file));
+          const changed = nativeCyclePhaseOwnedPaths(entry);
           const outOfPlan = EffectArray.filter(changed, file => !checkNativeCycleScope(selected, [file]));
           const scopeDecision = decideGate(
             nativeWorkflowPolicyOf(stored.state),
@@ -1635,23 +1609,10 @@ const runNativeCycleRequest = <R>(
                 ...current,
                 reviewTree: coverage._tag === 'reviewed' ? coverage.snapshot.tree : undefined,
                 waiverId: nativeCycleCoverageWaiver(coverage)?.id,
-                files:
-                  (entry.snapshot.ordinaryMergeQualificationV1 ??
-                  entry.snapshot.sameLabelRebasedBaseIntegrationV1 ??
-                  entry.snapshot.invalidTailMergeQualificationV1)
-                    ? (EffectOption.getOrUndefined(
-                        EffectArray.findFirst(
-                          (entry.snapshot.ordinaryMergeQualificationV1 ??
-                            entry.snapshot.sameLabelRebasedBaseIntegrationV1 ??
-                            entry.snapshot.invalidTailMergeQualificationV1)!.phaseOwnedPaths,
-                          owner => owner.phaseId === selected.id,
-                        ),
-                      )?.paths ?? [])
-                    : scopeDecision._tag === 'warn'
-                      ? EffectArray.filter(changed, file => !outOfPlan.includes(file))
-                      : changed,
+                files: changed,
               },
               request.validation,
+              nativeWorkflowPolicyOf(stored.state),
             ),
           );
           return {
@@ -1690,6 +1651,7 @@ const runNativeCycleRequest = <R>(
             priorDelivery.pr?.state === 'open';
           let currentHead: string;
           let currentTree: string;
+          let historicalMergedHead: string | undefined;
           let incomingDelivery: NativeCycleDelivery | undefined;
           if (historicalMergeCandidate) {
             if (priorDelivery?.delivery !== 'pr' || priorDelivery.pr?.state !== 'open' || !priorDelivery.pr)
@@ -1723,7 +1685,6 @@ const runNativeCycleRequest = <R>(
               priorDelivery.watch.prUrl !== priorPr.url ||
               priorDelivery.watch.headSha !== proof.head ||
               incomingDelivery.watch.prUrl !== priorPr.url ||
-              incomingDelivery.watch.headSha !== proof.head ||
               incomingDelivery.watch.consumerId !== priorDelivery.watch.consumerId ||
               incomingDelivery.watch.stateDir !== priorDelivery.watch.stateDir ||
               incomingDelivery.watch.consumerKind !== priorDelivery.watch.consumerKind
@@ -1732,16 +1693,9 @@ const runNativeCycleRequest = <R>(
                 'delivery-conflict',
                 'Historical PR completion must preserve the exact published source, authority, and watch consumer.',
               );
-            currentHead = Effect2.pipe(
-              yield* git(repo, ['rev-parse', '--verify', '--end-of-options', `refs/heads/${selected.branch}^{commit}`]),
-              EffectString.trim,
-            );
-            currentTree = Effect2.pipe(
-              yield* git(repo, ['rev-parse', '--verify', '--end-of-options', `refs/heads/${selected.branch}^{tree}`]),
-              EffectString.trim,
-            );
-            if (currentHead !== proof.head || currentTree !== proof.tree)
-              return yield* fail('source-drift', 'The published phase branch no longer matches its reviewed source.');
+            historicalMergedHead = incomingDelivery.watch.headSha;
+            currentHead = proof.head;
+            currentTree = proof.tree;
             const {baseRefBinding: _baseRefBinding, ...unboundIncomingPr} = incomingPr;
             const unboundDelivery: NativeCycleDelivery = {
               ...incomingDelivery,
@@ -1841,34 +1795,30 @@ const runNativeCycleRequest = <R>(
               requireEvidence: priorDelivery === undefined,
               allowMerged: delivery.pr?.state === 'merged',
             });
-          if (delivery.delivery === 'pr' || delivery.pr?.baseRefBinding) {
-            if (historicalMergeCandidate) {
-              const afterHead = Effect2.pipe(
-                yield* git(repo, [
-                  'rev-parse',
-                  '--verify',
-                  '--end-of-options',
-                  `refs/heads/${selected.branch}^{commit}`,
-                ]),
-                EffectString.trim,
+          if (historicalMergedHead !== undefined) {
+            // After the merge, the local branch can stand at any commit from the reviewed head to the merged head.
+            const branchHead = Effect2.pipe(
+              yield* git(repo, ['rev-parse', '--verify', '--end-of-options', `refs/heads/${selected.branch}^{commit}`]),
+              EffectString.trim,
+            );
+            if (
+              !(yield* nativeCommitDescends(repo, currentHead, branchHead)) ||
+              !(yield* nativeCommitDescends(repo, branchHead, historicalMergedHead))
+            )
+              return yield* fail(
+                'source-drift',
+                `Branch ${selected.branch} is at ${branchHead}, outside the reviewed range from ${currentHead} to the merged PR head ${historicalMergedHead}. Point the branch at a commit in that range, then retry.`,
               );
-              const afterTree = Effect2.pipe(
-                yield* git(repo, ['rev-parse', '--verify', '--end-of-options', `refs/heads/${selected.branch}^{tree}`]),
-                EffectString.trim,
-              );
-              if (afterHead !== currentHead || afterTree !== currentTree)
-                return yield* fail('source-drift', 'The published phase branch changed during base verification.');
-            } else {
-              const source = nativeCycleLatestSnapshot(runtime, selected.id, proof.phaseHash);
-              if (!source) return yield* fail('review-pending', 'The current reviewed source is unavailable.');
-              const after = yield* currentSnapshot(repo, source.snapshot, currentHead, selected);
-              if (
-                after.head !== currentHead ||
-                after.tree !== currentTree ||
-                Effect2.pipe(yield* git(repo, ['branch', '--show-current']), EffectString.trim) !== selected.branch
-              )
-                return yield* fail('source-drift', 'Source changed during delivery base verification.');
-            }
+          } else if (delivery.delivery === 'pr' || delivery.pr?.baseRefBinding) {
+            const source = nativeCycleLatestSnapshot(runtime, selected.id, proof.phaseHash);
+            if (!source) return yield* fail('review-pending', 'The current reviewed source is unavailable.');
+            const after = yield* currentSnapshot(repo, source.snapshot, currentHead, selected);
+            if (
+              after.head !== currentHead ||
+              after.tree !== currentTree ||
+              Effect2.pipe(yield* git(repo, ['branch', '--show-current']), EffectString.trim) !== selected.branch
+            )
+              return yield* fail('source-drift', 'Source changed during delivery base verification.');
           }
           const updated = yield* from(() => recordNativeCycleDelivery(accepted, selected.id, delivery));
           return {status: 'ok', revision: yield* save({...runtime, state: updated}), next: nextNativeCycle(updated)};

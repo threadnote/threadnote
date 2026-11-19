@@ -18,7 +18,6 @@ import {cryptoLayer} from '@threadnote/platform/crypto';
 import {captureConsole} from '@threadnote/threadnote/effect/console';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {EventEmitter} from 'node:events';
-// oxlint-disable-next-line effecttsgo/node-builtin-import -- Drain the child pipe callback turn before delivering its later stderr event.
 import {setImmediate} from 'node:timers';
 import {PassThrough} from '@threadnote/testing/node-stream';
 import {expect, it, vi} from 'vitest';

@@ -34,6 +34,7 @@ import {
   withDeferredCodeAnchorIndexHeal,
 } from '../memory/deferred/code_anchor_index_heal.js';
 import {deferredCodeAnchorRefreshSchedulerLayer} from '../memory/deferred/code_anchor_refresh.js';
+import {ContextMaintenanceWorkerMode} from '../memory/context/maintenance_worker_mode.js';
 import {recallResourceInvalidationLayer} from '@threadnote/recall/resource-invalidation';
 import {emitRecallDiagnostic, recallDiagnosticScope} from '@threadnote/recall/diagnostics';
 import {productionRecallDiagnosticsLayer} from './production_log.js';
@@ -168,6 +169,18 @@ export const ApplicationLayer = applicationLayerWithCommands();
 
 export const HandoffSaveWorkerLayer = recallEmbeddingWakeLayer.pipe(Layer.provideMerge(ApplicationLayer));
 
+function embeddingDemandLayer(home: string, workerMode: boolean) {
+  return workerMode
+    ? ApplicationLayer
+    : Layer.effectDiscard(
+        Effect.forkScoped(
+          Effect.all([resumeExistingCodeGraphEmbeddingDemand(home), resumeExistingRecallEmbeddingDemand(home)], {
+            concurrency: 2,
+          }).pipe(Effect.asVoid),
+        ),
+      ).pipe(Layer.provideMerge(recallEmbeddingWakeLayer.pipe(Layer.provideMerge(ApplicationLayer))));
+}
+
 /**
  * Runtime application layer with explicit-consent anonymous telemetry. The
  * static ApplicationLayer remains telemetry-free for focused tests.
@@ -178,13 +191,11 @@ export function applicationLayerForHome(home: string, entrypoint: 'cli' | 'mcp')
     Layer.provideMerge(
       deferredCodeAnchorRefreshSchedulerLayer.pipe(
         Layer.provideMerge(
-          Layer.effectDiscard(
-            Effect.forkScoped(
-              Effect.all([resumeExistingCodeGraphEmbeddingDemand(home), resumeExistingRecallEmbeddingDemand(home)], {
-                concurrency: 2,
-              }).pipe(Effect.asVoid),
+          Layer.unwrap(
+            Effect.map(Effect.service(ContextMaintenanceWorkerMode), workerMode =>
+              embeddingDemandLayer(home, workerMode),
             ),
-          ).pipe(Layer.provideMerge(recallEmbeddingWakeLayer.pipe(Layer.provideMerge(ApplicationLayer)))),
+          ),
         ),
       ),
     ),

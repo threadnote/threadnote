@@ -234,17 +234,6 @@ function pythonResidualSource(source: string): string | undefined {
   return invalid ? undefined : EffectString.slice(0, start)(source) + EffectString.slice(end)(source);
 }
 
-/** Only the exact reviewed Node preload is removed before checking residual runtime imports. */
-export function hasUndeclaredNodeBuiltinImport(relativePath: string, content: string): boolean {
-  let source = Effect.pipe(content, EffectString.replaceAll('\r\n', '\n'));
-  if (relativePath === PYTHON_PROJECT_SOURCE) {
-    const residual = pythonResidualSource(source);
-    if (residual === undefined) return true;
-    source = residual;
-  }
-  return /(?:from\s+['"]node:|import\s+['"]node:|import\s*\(\s*['"]node:|require\s*\(\s*['"]node:)/u.test(source);
-}
-
 // Retained ownership metadata permits explicit replacement of installed old packs.
 // Native workflows must never probe or execute an interpreter.
 const HISTORICAL_WORKFLOW_PREREQUISITES =

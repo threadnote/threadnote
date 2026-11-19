@@ -8,6 +8,7 @@ import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {decodeJournal} from './closeout_request_schema.js';
 import {readNativeCloseoutJournal} from './closeout_store.js';
+import {verifyNativeMergedPhaseHead} from './cycle_delivery.js';
 import {runWorkflowAutomation} from './index.js';
 import {nativeJobId} from './native_jobs.js';
 import {
@@ -122,11 +123,10 @@ export const runNativeTaskFinish = (
           pr?.state !== 'merged' ||
           receipt.watch?.state !== 'terminal' ||
           receipt.watch.prUrl !== pr.url ||
-          receipt.watch.headSha !== pr.headSha ||
           !watch ||
           watch.envelope.state.pr !== pr.url ||
           watch.envelope.state.prState !== 'merged' ||
-          watch.envelope.state.head !== pr.headSha ||
+          watch.envelope.state.head !== receipt.watch.headSha ||
           watch.envelope.collector?.status !== 'terminal' ||
           !completeSources ||
           !notification ||
@@ -142,6 +142,8 @@ export const runNativeTaskFinish = (
             'finish-scope',
             'PR closeout requires each exact merged PR, terminal source-complete watch, live consumer record, and host receipt.',
           );
+        // Later phases or maintenance can merge the PR above this phase's own delivered head.
+        yield* verifyNativeMergedPhaseHead(checkout, pr.headSha, receipt.watch.headSha);
         const watchIds = new Set(yield* readNativeTaskPhaseWatchIds(config, request.runId, planPhase.id));
         if (!resolved) return yield* fail('finish-scope', 'The canonical watch identity is unavailable.');
         watchIds.add(resolved.watchId);

@@ -2,7 +2,6 @@ import * as OverlayArray from 'effect/Array';
 import * as OverlayString from 'effect/String';
 import * as OverlayRecord from 'effect/Record';
 import * as OverlayOption from 'effect/Option';
-/* oxlint-disable effecttsgo/node-builtin-import, threadnote/no-node-runtime -- Offline compiler/archive construction is a Node/CLI boundary. */
 import {createHash} from 'node:crypto';
 import {
   chmodSync,

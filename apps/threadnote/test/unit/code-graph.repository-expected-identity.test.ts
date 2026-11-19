@@ -1,7 +1,6 @@
 import {Array as EffectArray} from 'effect';
 import {TestCommandExecutorLayer} from '../helpers/system-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
-// oxlint-disable-next-line effecttsgo/node-builtin-import -- Effect's symlink API lacks the junction type required for unprivileged Windows fixtures.
 import {symlinkSync} from 'node:fs';
 import {it as effectIt} from '@effect/vitest';
 import * as BunServices from '@effect/platform-bun/BunServices';

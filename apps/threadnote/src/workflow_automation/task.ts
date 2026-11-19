@@ -71,6 +71,9 @@ export const encodeNativeAuthoringTaskRef = (ref: {
   )(EffectString.replaceAll('+', '-')(EffectString.replace(/=+$/u, '')(btoa(stableJson(ref)))));
 
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
+/** Callers often pass the feature name; the run ID is the `runId` field of the start response. */
+export const nativeRunNotFoundMessage =
+  'No native run has this runId. Use the runId that workflow_task_start returned; a feature name is not a runId.';
 
 const historicalPhaseProof = (
   stored: NonNullable<Effect.Success<ReturnType<typeof readNativeWorkflowState>>>,
@@ -510,7 +513,7 @@ export const readNativeTaskView = (config: RuntimeConfig, input: unknown) =>
         Effect.mapError(() => fail('workspace-not-found', 'The Git checkout root must resolve to an existing path.')),
       );
     const stored = yield* readNativeWorkflowState(config, request.runId);
-    if (!stored) return yield* fail('run-not-found', 'This native run does not exist.');
+    if (!stored) return yield* fail('run-not-found', nativeRunNotFoundMessage);
     const system = yield* SystemInfo;
     const inspected = yield* readNativeTaskInspection(
       config,

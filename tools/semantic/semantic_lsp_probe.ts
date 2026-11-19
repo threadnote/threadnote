@@ -2,7 +2,6 @@ import * as Schema from 'effect/Schema';
 import * as EffectArray from 'effect/Array';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
-/* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- Tests exercise the real JSON-RPC child-process boundary, not an Effect program. */
 import {spawn} from 'node:child_process';
 import {ownedProbeGroup, releaseProbeHandles, withinProbeDeadline} from './semantic_probe_process.js';
 type Message = Record<string, unknown>;

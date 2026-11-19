@@ -20,6 +20,7 @@ import {
   type CodeGraphCheckpointMetadataV1,
   type CodeGraphCheckpointRecordV1,
 } from '@threadnote/graph/checkpoint/schema';
+import {runCodeGraphCheckpointExport} from '@threadnote/graph/checkpoint/operations';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {codeGraphLayout} from '@threadnote/graph/layout';
 import {CodeGraphStore} from '@threadnote/graph/store';
@@ -158,6 +159,74 @@ describe('code graph checkpoint projection', () => {
       );
     },
     60_000,
+  );
+
+  effectIt.effect(
+    'rebuilds a ready snapshot without materialized shards once, then exports it',
+    () => {
+      let fixtureRoot: string | undefined;
+      return Effect.gen(function* () {
+        const fixture = createRepository();
+        fixtureRoot = fixture.root;
+        const indexer = yield* CodeGraphIndexer;
+        const path = yield* Path.Path;
+        const store = yield* CodeGraphStore;
+        const indexed = yield* indexer.index({
+          cwd: fixture.repository,
+          ensureVectors: false,
+          threadnoteHome: fixture.home,
+        });
+        const databasePath = codeGraphLayout(
+          path,
+          fixture.home,
+          indexed.identity.checkoutId,
+          indexed.identity.worktreeId,
+        ).databasePath;
+        const config = {
+          account: 'local' as const,
+          agentContextHome: fixture.home,
+          agentId: 'threadnote',
+          manifestPath: join(fixture.home, 'seed-manifest.yaml'),
+          user: 'local',
+        };
+        const exportTo = (name: string) =>
+          runCodeGraphCheckpointExport(config, {
+            cwd: fixture.repository,
+            output: join(fixture.root, name),
+            quiet: true,
+          });
+        const activeSnapshotId = store
+          .readySnapshot(databasePath, indexed.identity.worktreeId)
+          .pipe(Effect.map(snapshot => snapshot?.id));
+        const control = yield* exportTo('control.cgcp');
+        // A build above the shard admission bound publishes its files without shard associations.
+        yield* store.withSession(
+          databasePath,
+          Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient;
+            yield* sql`DELETE FROM snapshot_file_shards WHERE snapshot_id = ${indexed.snapshot.id}`;
+          }),
+        );
+
+        const rebuilt = yield* exportTo('rebuilt.cgcp');
+        const rebuiltSnapshotId = yield* activeSnapshotId;
+        expect(rebuilt.artifact).toEqual(control.artifact);
+        expect(rebuiltSnapshotId).not.toBe(indexed.snapshot.id);
+
+        const repeated = yield* exportTo('repeated.cgcp');
+        expect(repeated.artifact).toEqual(control.artifact);
+        expect(yield* activeSnapshotId).toBe(rebuiltSnapshotId);
+      }).pipe(
+        Effect.ensuring(
+          Effect.sync(() =>
+            fixtureRoot === undefined ? undefined : rmSync(fixtureRoot, {force: true, recursive: true}),
+          ),
+        ),
+        provideTestLayer(ApplicationLayer),
+        TestClock.withLive,
+      );
+    },
+    120_000,
   );
 
   effectIt.effect(

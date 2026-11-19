@@ -1,4 +1,10 @@
-import {nativeWorkflowPolicies, nativeNext, withNativeNext} from '@threadnote/workflow-automations/gates';
+import {
+  nativeWorkflowPolicies,
+  nativeWorkflowPolicyOf,
+  nativeNext,
+  resolveNativeWorkflowPolicy,
+  withNativeNext,
+} from '@threadnote/workflow-automations/gates';
 import {
   Array as A,
   Effect,
@@ -14,6 +20,7 @@ import {
 import {SystemInfo} from '@threadnote/platform/system';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {ResourceStore} from '@threadnote/store/resource-store';
+import {parseMemoryDocument} from '@threadnote/memory/document';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import {
   NativeAuthoringSpecDocumentSchema,
@@ -33,15 +40,16 @@ import {
 import {readNativeWorkflowState} from './store.js';
 import {runWorkflowAutomation} from './index.js';
 import {inspectNativeSourcePaths, nativeAuthoringSourceOrigins} from './authoring.js';
-import {readNativeTaskInstalledTarget} from './task_actions.js';
+import {readNativeTaskInstalledTarget} from './task_admission.js';
 import {encodeNativeAuthoringTaskRef} from './task.js';
 export {encodeNativeAuthoringTaskRef} from './task.js';
 import {AuthoringRootSchema, decodeAuthoringArtifact} from './authoring_artifacts.js';
 import {validateWorkflowGraphProject} from '../workflow_memory/graph_scope.js';
-import {requireWorkflowGraphReady} from './graph.js';
+import {requireWorkflowGraphScope} from './graph.js';
 import {workflowTitleSlug} from '@threadnote/workflow-automations/naming';
 import {gitValue, resolveRepoName} from '../utils.js';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
+import {workflowEvidenceUriInScope} from '../workflow_memory/evidence.js';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {nativeWorkflowError} from './memory.js';
 import {portableEvidenceBody, publishPortablePlanPayload, type PortablePlanPayload} from './portable_plan.js';
@@ -192,22 +200,141 @@ const contentOf = (document: NativeAuthoringDocument) =>
   document.kind === 'spec'
     ? Struct.omit(document, [...metadata, 'kind'])
     : Struct.omit(document, [...metadata, 'kind', 'spec', 'compactOrigin']);
+const evidenceRefsShape = 'an array of threadnote:// URIs or {uri,memoryId,revision} references';
 const evidenceRefsIssue = (value: unknown) => {
   if (!Predicate.isObject(value) || !Predicate.isObject(value.context)) return undefined;
   const refs = value.context.evidenceRefs;
-  if (refs === undefined) return 'context.evidenceRefs must be an array of {uri,memoryId,revision} references.';
-  if (!A.isArray(refs)) return 'context.evidenceRefs must be an array of {uri,memoryId,revision} references.';
+  if (refs === undefined || !A.isArray(refs)) return `context.evidenceRefs must be ${evidenceRefsShape}.`;
   if (refs.length > maximumEvidenceRefs)
     return `context.evidenceRefs must contain at most ${maximumEvidenceRefs} references.`;
   for (const [index, reference] of refs.entries()) {
     try {
       Schema.decodeUnknownSync(evidenceRefsSchema, {onExcessProperty: 'error'})([reference]);
     } catch {
-      return `context.evidenceRefs[${index}] must have the {uri,memoryId,revision} reference shape.`;
+      return `context.evidenceRefs[${index}] must be a threadnote:// URI or a {uri,memoryId,revision} reference.`;
     }
   }
   return undefined;
 };
+const evidenceUriInScope = (scope: {readonly user: string; readonly project: string}, uri: string) => {
+  try {
+    return workflowEvidenceUriInScope(scope, uri);
+  } catch {
+    return false;
+  }
+};
+/** Pins each plain threadnote:// evidence URI to the memory identity and revision it has now. */
+const pinEvidenceRefUris = (config: RuntimeConfig, project: string, raw: unknown) =>
+  Effect.gen(function* () {
+    if (!Predicate.isObject(raw) || !Predicate.isObject(raw.context)) return raw;
+    const refs = raw.context.evidenceRefs;
+    if (!A.isArray(refs) || refs.length > maximumEvidenceRefs || !A.some(refs, Predicate.isString)) return raw;
+    const store = yield* ResourceStore;
+    const location = {account: config.account, home: config.agentContextHome, user: config.user};
+    const evidenceRefs = yield* Effect.forEach(refs, (reference: unknown, index) => {
+      if (!Predicate.isString(reference) || !S.startsWith('threadnote://')(reference)) return Effect.succeed(reference);
+      const unresolved = fail(
+        'invalid-content',
+        `context.evidenceRefs[${index}] must name a readable Threadnote memory with a native identity.`,
+      );
+      // Read only the memories that workflow evidence admits, so a refusal reveals nothing about other URIs.
+      if (!evidenceUriInScope({user: config.user, project}, reference))
+        return Effect.fail(
+          fail(
+            'out-of-scope',
+            `context.evidenceRefs[${index}] must be an exact private memory of this user and project.`,
+          ),
+        );
+      return store.read(location, reference).pipe(
+        Effect.mapError(() => unresolved),
+        Effect.flatMap(content => {
+          const memoryId = parseMemoryDocument(reference, content)?.metadata.memoryId;
+          return memoryId === undefined
+            ? Effect.fail(unresolved)
+            : Effect.succeed({uri: reference, memoryId, revision: sha256HexSync(content)});
+        }),
+      );
+    });
+    return {...raw, context: {...raw.context, evidenceRefs}};
+  });
+/** Decodes caller business JSON; metadata, source evidence and export fields stay runtime-owned. */
+const decodeBusinessContent = (config: RuntimeConfig, project: string, documentKind: 'spec' | 'plan', input: unknown) =>
+  Effect.gen(function* () {
+    const raw = yield* pinEvidenceRefUris(config, project, input);
+    const evidenceIssue = evidenceRefsIssue(raw);
+    if (evidenceIssue) return yield* fail('invalid-content', evidenceIssue);
+    return yield* Schema.decodeUnknownEffect(documentKind === 'spec' ? specContent : planContent, {
+      onExcessProperty: 'error',
+      reportInput: true,
+    })(raw).pipe(
+      Effect.mapError(error => {
+        const detail = nativeAuthoringSchemaDetail(error);
+        return WorkflowAutomationError.make({
+          code: 'invalid-content',
+          message:
+            nativeAuthoringSchemaDiagnostic(error) ??
+            'Business content must match spec/plan fields; omit format, id, project, source, spec export and compact-origin metadata.',
+          ...(detail === undefined ? {} : {detail}),
+        });
+      }),
+    );
+  });
+type BusinessContent = Effect.Success<ReturnType<typeof decodeBusinessContent>>;
+const normalizeBusinessContent = (content: BusinessContent, requirements: unknown) =>
+  'phases' in content
+    ? {
+        ...content,
+        current: {...content.current, diagram: content.current.diagram ?? ''},
+        target: {...content.target, diagram: content.target.diagram ?? ''},
+        requirements,
+      }
+    : content;
+/** The checkout paths whose current hashes become the document source, each with its first content origin. */
+const businessSourceOrigins = (content: BusinessContent) => {
+  const entries = [
+    ...A.map(content.context.codeRefs, (sourcePath, index) => [sourcePath, `context.codeRefs[${index}]`] as const),
+    ...('phases' in content
+      ? A.flatMap(content.phases, (phase, phaseIndex) =>
+          A.map(
+            phase.affectedPaths,
+            (sourcePath, pathIndex) => [sourcePath, `phases[${phaseIndex}].affectedPaths[${pathIndex}]`] as const,
+          ),
+        )
+      : []),
+  ];
+  const origins = new Map<string, string>();
+  for (const [sourcePath, origin] of entries) if (!origins.has(sourcePath)) origins.set(sourcePath, origin);
+  return {paths: [...origins.keys()], origins: [...origins.values()]};
+};
+/**
+ * Builds a complete native plan from the same business JSON that authoring save accepts. Identity comes from the run
+ * and source hashes from the checkout; the caller supplies neither.
+ */
+export const nativePlanDocumentFromBusiness = (
+  config: RuntimeConfig,
+  input: unknown,
+  base: {
+    readonly checkout: string;
+    readonly featureId: string;
+    readonly project: string;
+    readonly previous: Extract<NativeAuthoringDocument, {readonly kind: 'plan'}>;
+  },
+) =>
+  Effect.gen(function* () {
+    const content = yield* decodeBusinessContent(config, base.project, 'plan', input);
+    const {paths, origins} = businessSourceOrigins(content);
+    const source = yield* inspectNativeSourcePaths(base.checkout, paths, origins);
+    return decodeNativeAuthoringDocument({
+      ...normalizeBusinessContent(content, content.requirements ?? base.previous.requirements),
+      format: 'threadnote-native-authoring',
+      schemaVersion: 1,
+      kind: 'plan',
+      id: base.featureId,
+      project: base.project,
+      source,
+      ...(base.previous.spec ? {spec: base.previous.spec} : {}),
+    });
+  });
 
 /** Business authoring over native receipts. Continuations are projections, not permissions or stored tickets. */
 export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
@@ -711,23 +838,7 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
           }),
         ),
       );
-      const evidenceIssue = evidenceRefsIssue(raw);
-      if (evidenceIssue) return yield* fail('invalid-content', evidenceIssue);
-      const content = yield* Schema.decodeUnknownEffect(documentKind === 'spec' ? specContent : planContent, {
-        onExcessProperty: 'error',
-        reportInput: true,
-      })(raw).pipe(
-        Effect.mapError(error => {
-          const detail = nativeAuthoringSchemaDetail(error);
-          return WorkflowAutomationError.make({
-            code: 'invalid-content',
-            message:
-              nativeAuthoringSchemaDiagnostic(error) ??
-              'Business content must match spec/plan fields; omit format, id, project, source, spec export and compact-origin metadata.',
-            ...(detail === undefined ? {} : {detail}),
-          });
-        }),
-      );
+      const content = yield* decodeBusinessContent(config, project, documentKind, raw);
       let spec: unknown;
       let requirements: unknown = content.requirements;
       if (request.command === 'start' && request.specRef) {
@@ -766,36 +877,8 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
         spec = existing.document.spec;
         if (spec && requirements === undefined) requirements = existing.document.requirements;
       }
-      const normalized =
-        documentKind === 'plan'
-          ? {
-              ...content,
-              current: {...object(object(content).current), diagram: object(object(content).current).diagram ?? ''},
-              target: {...object(object(content).target), diagram: object(object(content).target).diagram ?? ''},
-              requirements,
-            }
-          : content;
-      const sourceEntries =
-        'phases' in content
-          ? [
-              ...A.map(
-                content.context.codeRefs,
-                (sourcePath, index) => [sourcePath, `context.codeRefs[${index}]`] as const,
-              ),
-              ...A.flatMap(content.phases, (phase, phaseIndex) =>
-                A.map(
-                  phase.affectedPaths,
-                  (sourcePath, pathIndex) => [sourcePath, `phases[${phaseIndex}].affectedPaths[${pathIndex}]`] as const,
-                ),
-              ),
-            ]
-          : A.map(content.context.codeRefs, (sourcePath, index) => [sourcePath, `context.codeRefs[${index}]`] as const);
-      const sourceOrigins = new Map<string, string>();
-      for (const [sourcePath, origin] of sourceEntries) {
-        if (!sourceOrigins.has(sourcePath)) sourceOrigins.set(sourcePath, origin);
-      }
-      const paths = [...sourceOrigins.keys()];
-      const origins = [...sourceOrigins.values()];
+      const normalized = normalizeBusinessContent(content, requirements);
+      const {paths, origins} = businessSourceOrigins(content);
       // A reserved save must replay its exact admitted source and metadata. Inspecting
       // live source here could turn recovery into a different CAS intent.
       const source =
@@ -860,13 +943,14 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
           'cursor-cloud-personal',
         ]);
         yield* inCheckout(
-          requireWorkflowGraphReady(config, {
+          requireWorkflowGraphScope(config, {
             checkout,
             runId,
             project,
             featureId,
             generation: target.installedDigest,
             profile: target.target.profile,
+            policy: nativeWorkflowPolicyOf(resolveNativeWorkflowPolicy(config, request.workflowProfile)),
             ...(graphProject === undefined ? {} : {graphProject}),
             recovery: 'same-task',
           }),

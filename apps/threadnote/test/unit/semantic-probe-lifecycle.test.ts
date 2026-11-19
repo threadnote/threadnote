@@ -6,7 +6,6 @@ import * as EffectOption from 'effect/Option';
 import * as EffectString from 'effect/String';
 import {Effect} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
-/* oxlint-disable effecttsgo/node-builtin-import -- Integration regressions exercise actual runner processes and OS signals. */
 import {spawn} from 'node:child_process';
 import {access, chmod, mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';

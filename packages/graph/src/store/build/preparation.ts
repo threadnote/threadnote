@@ -987,7 +987,6 @@ const replaceStagedModifiedFiles = Effect.fn('codeGraph.replaceStagedModifiedFil
 const prepareSnapshotPromotionCapacity = Effect.fn('codeGraph.prepareSnapshotPromotionCapacity')(function* (
   identity: RepositoryIdentity,
   snapshotId: string,
-  backgroundEmbeddingDemand = false,
 ) {
   const sql = yield* SqlClient.SqlClient;
   yield* configureConnection(sql);
@@ -1012,15 +1011,16 @@ const prepareSnapshotPromotionCapacity = Effect.fn('codeGraph.prepareSnapshotPro
   return {
     activatedAt,
     boundary: {
-      finalFactBytes: saturatingCapacityAdd(saturatingCapacityAdd(fixedFactBytes, leaseCapacity.factBytes), backgroundEmbeddingDemand ? 8192 : 0),
+      finalFactBytes: saturatingCapacityAdd(saturatingCapacityAdd(fixedFactBytes, leaseCapacity.factBytes), 8192),
       operation: 'promote ready code graph snapshot',
       // One pointer upsert, one exact tombstone delete, one cleanup-epoch
       // delete, every currently observed incoming lease flag, at most one
-      // removed-view lease baton, and at most one exact
-      // displaced-leaf retirement.
+      // removed-view lease baton, at most one exact displaced-leaf
+      // retirement, and at most one embedding demand row, requested or
+      // carried from the displaced view.
       // Non-leaf history remains routine maintenance because proving a whole
       // descendant closure is not transaction-bounded.
-      rowCount: saturatingCapacityAdd(leaseCapacity.rows, backgroundEmbeddingDemand ? 6 : 5),
+      rowCount: saturatingCapacityAdd(leaseCapacity.rows, 6),
     },
     maximumLeaseFactBytes: leaseCapacity.factBytes,
     maximumLeaseRows: leaseCapacity.rows,

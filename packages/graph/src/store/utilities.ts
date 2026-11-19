@@ -52,11 +52,14 @@ const upsertRepository = Effect.fn('codeGraph.upsertRepository')(function* (
   `;
 });
 
+export const CODE_GRAPH_NAME_TERM_WEIGHT = 5;
+export const CODE_GRAPH_PATH_TERM_WEIGHT = 3;
+
 function symbolTerms(symbol: CodeGraphSymbol): readonly (readonly [string, number])[] {
   const weighted = new Map<string, number>();
-  addTerms(weighted, symbol.name, 5);
+  addTerms(weighted, symbol.name, CODE_GRAPH_NAME_TERM_WEIGHT);
   addTerms(weighted, symbol.qualifiedName, 4);
-  addTerms(weighted, symbol.path, 3);
+  addTerms(weighted, symbol.path, CODE_GRAPH_PATH_TERM_WEIGHT);
   addTerms(weighted, symbol.packageName ?? '', 3);
   addTerms(weighted, symbol.signature ?? '', 2);
   addTerms(weighted, symbol.documentation ?? '', 1);

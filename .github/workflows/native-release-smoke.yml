@@ -18,9 +18,9 @@ env:
 
 jobs:
   build:
-    name: Build native payload
+    name: Build and qualify native release
     runs-on: ${{ inputs.runner }}
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
         with:
@@ -93,6 +93,10 @@ jobs:
       - run: bun run check:self-contained
       - name: Platform process identity smoke
         run: bun --bun vitest run apps/threadnote/test/unit/effect-system.test.ts
+      - name: Checkpoint compression golden digests
+        run: >-
+          bun --bun vitest run packages/graph/test/unit/code-graph.checkpoint-pack.property.test.ts
+          -t "pins each compression profile"
       - name: Native workflow foundation smoke
         run: >-
           bun --bun vitest run
@@ -430,63 +434,18 @@ jobs:
           name: native-release-${{ inputs.target }}
           path: artifacts/threadnote-${{ inputs.target }}.tar.gz*
           if-no-files-found: error
-      - name: Remove owned Linux temporary storage
-        if: always() && runner.os == 'Linux' && env.THREADNOTE_CI_TEST_TMPDIR != ''
-        shell: bash
-        run: |
-          bun --eval 'import {lstatSync,realpathSync,rmSync} from "node:fs";
-          const root=Bun.env.THREADNOTE_CI_TEST_TMPDIR;
-          if(!/^\/tmp\/threadnote-ci-[A-Za-z0-9]+$/.test(root)||realpathSync(root)!==root)throw new Error("Owned CI temporary root changed");
-          const stat=lstatSync(root); if(!stat.isDirectory()||stat.uid!==process.getuid()||(stat.mode&0o077)!==0)throw new Error("Owned CI temporary root changed");
-          rmSync(root,{recursive:true});'
-
-  installed-e2e:
-    if: ${{ !endsWith(inputs.target, '-musl') }}
-    name: Installed release E2E
-    needs: build
-    runs-on: ${{ inputs.runner }}
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.sha }}
-      - name: Route Bun caches outside the source checkout
-        shell: bash
-        env:
-          BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/threadnote-bun-install
-          BUN_RUNTIME_TRANSPILER_CACHE_PATH: ${{ runner.temp }}/threadnote-bun-transpiler
-        run: |
-          printf '%s\n' "BUN_INSTALL_CACHE_DIR=$BUN_INSTALL_CACHE_DIR" >> "$GITHUB_ENV"
-          printf '%s\n' "BUN_RUNTIME_TRANSPILER_CACHE_PATH=$BUN_RUNTIME_TRANSPILER_CACHE_PATH" >> "$GITHUB_ENV"
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: ${{ env.BUN_VERSION }}
-      - run: bun install --frozen-lockfile
-      - name: Linux workflow prerequisites
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ripgrep bubblewrap
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - name: macOS workflow prerequisites
-        if: runner.os == 'macOS'
-        run: command -v rg || brew install ripgrep
-      - name: Windows workflow prerequisites
-        if: runner.os == 'Windows'
-        shell: pwsh
-        timeout-minutes: 5
-        run: bun tools/ci/windows-workflow-prerequisites.ts
-      - uses: actions/download-artifact@v8
-        with:
-          name: native-release-${{ inputs.target }}
-          path: artifacts
+      # Consumers below qualify the archive exactly as published, so the build tree is replaced by it.
       - name: Restore the verified native payload
+        id: restore
         shell: bash
         run: |
+          # Linux payloads are built in a root container; return the workspace to the runner user.
+          if [ "$RUNNER_OS" = Linux ]; then sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE"; fi
+          rm -rf dist
           mkdir -p dist
           tar -xzf artifacts/threadnote-${{ inputs.target }}.tar.gz -C dist
       - name: Real predecessor upgrade and model setup admission
-        if: inputs.runner == 'macos-15'
+        if: ${{ !cancelled() && steps.restore.outcome == 'success' && inputs.runner == 'macos-15' }}
         env:
           GH_TOKEN: ${{ github.token }}
           THREADNOTE_QUALIFY_OLD_UPGRADE: ephemeral-macos-real-predecessor
@@ -510,27 +469,66 @@ jobs:
           path: ${{ runner.temp }}/threadnote-upgrade-receipts
           if-no-files-found: error
       - name: Installed release E2E
+        if: ${{ !cancelled() && steps.restore.outcome == 'success' && !endsWith(inputs.target, '-musl') }}
         run: >-
           bun --bun vitest run --config vitest.e2e.config.ts
           --reporter=default --reporter=json --outputFile=.context/installed-e2e/results.json
       - name: Preserve installed E2E timings
-        if: always()
+        if: ${{ always() && !endsWith(inputs.target, '-musl') }}
         uses: actions/upload-artifact@v7
         with:
           name: installed-e2e-${{ inputs.target }}
           path: .context/installed-e2e/
           include-hidden-files: true
           if-no-files-found: ignore
+      - name: Extracted release and installed workflow lifecycle
+        if: ${{ !cancelled() && steps.restore.outcome == 'success' && !endsWith(inputs.target, '-musl') }}
+        run: >-
+          bun --bun vitest run apps/threadnote/test/dev-skills/release-artifact.test.ts
+          --reporter=default --reporter=json --outputFile=.context/release-artifact/timings.json
+        env:
+          THREADNOTE_RELEASE_ARCHIVE: artifacts/threadnote-${{ inputs.target }}.tar.gz
+          THREADNOTE_RELEASE_PROFILE: ${{ inputs.runner == 'macos-15-intel' && 'desktop' || 'all' }}
+      - name: Workflow journal persistence smoke
+        if: ${{ !cancelled() && steps.restore.outcome == 'success' && !endsWith(inputs.target, '-musl') }}
+        run: bun --bun vitest run apps/threadnote/test/dev-skills/workflow-journal-validation.test.ts
+      - name: Extracted musl release and installed workflow lifecycle
+        if: ${{ !cancelled() && steps.restore.outcome == 'success' && endsWith(inputs.target, '-musl') }}
+        run: >-
+          bun scripts/assemble-native-inference.ts --musl-container --workflow-runtime
+          --container-command-json '["bash","-ec","set -euo pipefail; command -v git; command -v rg; command -v bwrap; test -s .context/release-artifact/capabilities.json; bun --bun vitest run apps/threadnote/test/dev-skills/release-artifact.test.ts --reporter=default --reporter=json --outputFile=.context/release-artifact/timings.json; bun --bun vitest run apps/threadnote/test/dev-skills/workflow-journal-validation.test.ts"]'
+        env:
+          THREADNOTE_RELEASE_ARCHIVE: artifacts/threadnote-${{ inputs.target }}.tar.gz
+          THREADNOTE_RELEASE_PROFILE: ${{ inputs.runner == 'macos-15-intel' && 'desktop' || 'all' }}
+      - name: Preserve bounded release evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dev-skills-release-${{ inputs.target }}-${{ inputs.runner == 'macos-15-intel' && 'desktop' || 'all' }}
+          path: .context/release-artifact/
+          include-hidden-files: true
+          if-no-files-found: ignore
+      - name: Remove owned Linux temporary storage
+        if: always() && runner.os == 'Linux' && env.THREADNOTE_CI_TEST_TMPDIR != ''
+        shell: bash
+        run: |
+          bun --eval 'import {lstatSync,realpathSync,rmSync} from "node:fs";
+          const root=Bun.env.THREADNOTE_CI_TEST_TMPDIR;
+          if(!/^\/tmp\/threadnote-ci-[A-Za-z0-9]+$/.test(root)||realpathSync(root)!==root)throw new Error("Owned CI temporary root changed");
+          const stat=lstatSync(root); if(!stat.isDirectory()||stat.uid!==process.getuid()||(stat.mode&0o077)!==0)throw new Error("Owned CI temporary root changed");
+          rmSync(root,{recursive:true});'
 
+  # macOS Intel splits its catalog profiles so the slowest host keeps a short critical path.
   extracted-workflows:
     name: Extracted workflows · ${{ matrix.profile }}
+    if: inputs.runner == 'macos-15-intel'
     needs: build
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        profile: ${{ fromJSON(inputs.runner == 'macos-15-intel' && '["desktop","cursor-cloud-personal"]' || '["all"]') }}
+        profile: ['cursor-cloud-personal']
     steps:
       - uses: actions/checkout@v7
         with:
@@ -547,20 +545,8 @@ jobs:
         with:
           bun-version: ${{ env.BUN_VERSION }}
       - run: bun install --frozen-lockfile
-      - name: Linux workflow prerequisites
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ripgrep bubblewrap
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: macOS workflow prerequisites
-        if: runner.os == 'macOS'
         run: command -v rg || brew install ripgrep
-      - name: Windows workflow prerequisites
-        if: runner.os == 'Windows'
-        shell: pwsh
-        timeout-minutes: 5
-        run: bun tools/ci/windows-workflow-prerequisites.ts
       - uses: actions/download-artifact@v8
         with:
           name: native-release-${{ inputs.target }}
@@ -571,21 +557,9 @@ jobs:
           mkdir -p dist
           tar -xzf artifacts/threadnote-${{ inputs.target }}.tar.gz -C dist
       - name: Extracted release and installed workflow lifecycle
-        if: ${{ !endsWith(inputs.target, '-musl') }}
         run: >-
           bun --bun vitest run apps/threadnote/test/dev-skills/release-artifact.test.ts
           --reporter=default --reporter=json --outputFile=.context/release-artifact/timings.json
-        env:
-          THREADNOTE_RELEASE_ARCHIVE: artifacts/threadnote-${{ inputs.target }}.tar.gz
-          THREADNOTE_RELEASE_PROFILE: ${{ matrix.profile }}
-      - name: Workflow journal persistence smoke
-        if: ${{ !endsWith(inputs.target, '-musl') && (matrix.profile == 'all' || matrix.profile == 'desktop') }}
-        run: bun --bun vitest run apps/threadnote/test/dev-skills/workflow-journal-validation.test.ts
-      - name: Extracted musl release and installed workflow lifecycle
-        if: endsWith(inputs.target, '-musl')
-        run: >-
-          bun scripts/assemble-native-inference.ts --musl-container --workflow-runtime
-          --container-command-json '["bash","-ec","set -euo pipefail; command -v git; command -v rg; command -v bwrap; test -s .context/release-artifact/capabilities.json; bun --bun vitest run apps/threadnote/test/dev-skills/release-artifact.test.ts --reporter=default --reporter=json --outputFile=.context/release-artifact/timings.json; bun --bun vitest run apps/threadnote/test/dev-skills/workflow-journal-validation.test.ts"]'
         env:
           THREADNOTE_RELEASE_ARCHIVE: artifacts/threadnote-${{ inputs.target }}.tar.gz
           THREADNOTE_RELEASE_PROFILE: ${{ matrix.profile }}
@@ -717,8 +691,8 @@ jobs:
               bun --eval 'import {runtimeOpenPrivateWriterDirectory,runtimeClosePrivateWriterDirectory} from "@threadnote/platform/system"; const handle=runtimeOpenPrivateWriterDirectory(Bun.env.TMPDIR); runtimeClosePrivateWriterDirectory(handle); console.log("Native private musl temporary storage proof passed; production qualification remains false");'
               test "$acl_diagnostic_status" -eq 0
               bun --bun vitest run packages/platform/test/system-stable-read.test.ts packages/platform/test/writer-system/linux-acl.test.ts packages/platform/test/writer-system/provider-process.test.ts apps/threadnote/test/unit/semantic-runtime.test.ts apps/threadnote/test/unit/semantic-writer-process.test.ts apps/threadnote/test/unit/semantic-operations.test.ts apps/threadnote/test/unit/semantic-mcp-cli.test.ts apps/threadnote/test/unit/semantic-python.test.ts apps/threadnote/test/unit/semantic-go-rust.test.ts apps/threadnote/test/unit/semantic-java-preparation.test.ts --reporter=default --reporter=json --outputFile=.context/semantic-platform/components.json
-              # Musl release build, smoke, archive and extracted lifecycle run in the build and
-              # extracted-workflows jobs through the pinned native musl containers.
+              # Musl release build, smoke, archive and extracted lifecycle run in the build job
+              # through the pinned native musl containers.
           MUSL
       - name: Preserve native musl evidence
         if: always()

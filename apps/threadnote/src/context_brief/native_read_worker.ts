@@ -30,6 +30,7 @@ import {loadPublishedProcedureCandidates} from '../procedure/repository.js';
 import {
   CONTEXT_BRIEF_NATIVE_READ_INPUT_BYTES,
   CONTEXT_BRIEF_NATIVE_READ_OUTPUT_BYTES,
+  CONTEXT_BRIEF_NATIVE_READ_STATUS_PROGRESS,
   contextBriefNativeReadBinding,
   contextBriefNativeReadRequestSchema,
   contextBriefNativeReadResponseSchema,
@@ -116,12 +117,14 @@ export function nativeContextReadCommands(
 
 export const serveContextBriefNativeRead = Effect.fn('contextBrief.serveNativeRead')(function* (
   request: ContextBriefNativeReadRequest,
+  onStatusObserved?: () => Effect.Effect<void>,
 ) {
   const deadline = yield* makeReadDeadline(request.remainingMilliseconds);
   const budget = {
     remaining: request.operation === 'graph' ? request.counters.remaining : 0,
     primaryRemaining: request.operation === 'graph' ? request.counters.primaryRemaining : 0,
     deadline,
+    ...(onStatusObserved === undefined ? {} : {onStatusObserved}),
   };
   let cleanupUnconfirmed = false;
   const program = Effect.gen(function* () {
@@ -306,10 +309,23 @@ const readRequest = Effect.gen(function* () {
 
 export const contextBriefNativeReadWorkerProgram = Effect.gen(function* () {
   const request = yield* readRequest;
-  const response = yield* serveContextBriefNativeRead(request);
+  const stdout = (yield* Stdio.Stdio).stdout({endOnDone: false});
+  const progress = new TextEncoder().encode(`${CONTEXT_BRIEF_NATIVE_READ_STATUS_PROGRESS}\n`);
+  let progressBytes = 0;
+  // The parent observes this line as it arrives, so it survives a later deadline expiry.
+  const response = yield* serveContextBriefNativeRead(request, () =>
+    Stream.run(Stream.make(progress), stdout).pipe(
+      Effect.tap(() =>
+        Effect.sync(() => {
+          progressBytes = progress.byteLength;
+        }),
+      ),
+      Effect.ignore,
+    ),
+  );
   yield* Schema.decodeEffect(contextBriefNativeReadResponseSchema)(response);
   const bytes = new TextEncoder().encode(`${JSON.stringify(response)}\n`);
-  if (bytes.byteLength > CONTEXT_BRIEF_NATIVE_READ_OUTPUT_BYTES)
+  if (progressBytes + bytes.byteLength > CONTEXT_BRIEF_NATIVE_READ_OUTPUT_BYTES)
     return yield* ContextBriefNativeReadFailed.make({reason: 'invalid-protocol'});
-  yield* Stream.run(Stream.make(bytes), (yield* Stdio.Stdio).stdout({endOnDone: false}));
+  yield* Stream.run(Stream.make(bytes), stdout);
 }).pipe(Effect.catchCause(() => Effect.fail(ContextBriefNativeReadFailed.make({reason: 'worker-failed'}))));

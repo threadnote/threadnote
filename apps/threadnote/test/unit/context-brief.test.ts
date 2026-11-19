@@ -530,6 +530,26 @@ describe('Context Brief compiler', () => {
       }),
   );
 
+  effectIt.effect('recommends graph refresh first when a task-only brief reads a stale ready snapshot', () =>
+    Effect.gen(function* () {
+      const graph = minimalGraphEvidence();
+      const result = yield* compile(
+        {
+          ...graph,
+          coverage: {...graph.coverage, states: {stale: 1}},
+          resolvedSnapshots: [{...SNAPSHOT, freshness: 'stale'}],
+        },
+        memoryEvidence(),
+        1_250,
+      );
+      const recovery = result.structuredContent.recommendedFollowUps[0];
+
+      expect(result.structuredContent.scope).toMatchObject({freshness: 'stale', readyRepositories: 1});
+      expect(recovery).toMatchObject({operation: 'graph-status', rank: 0, scope: 'repository'});
+      expect(projectContextBriefAgentView(result.structuredContent, true).recommendedFollowUps?.[0]).toEqual(recovery);
+    }),
+  );
+
   effectIt.effect(
     'preserves the highest-ranked source relationship in trace and impact under maximum-budget code-linked pressure',
     () =>

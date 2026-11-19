@@ -1,4 +1,3 @@
-/* oxlint-disable effecttsgo/node-builtin-import -- Qualification verifies explicit local artifacts and disposable fixture bytes. */
 import {createHash} from 'node:crypto';
 import {readFile, mkdir, writeFile, lstat, readdir, statfs} from 'node:fs/promises';
 import {join, relative, isAbsolute} from 'node:path';

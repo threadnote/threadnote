@@ -346,6 +346,7 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
               ...(options.userResponse === undefined ? {} : {userResponse: options.userResponse}),
               ...(options.userDecision === undefined ? {} : {userDecision: options.userDecision}),
               ...(options.baseBranch === undefined ? {} : {baseBranch: options.baseBranch}),
+              ...(options.delivery === undefined ? {} : {delivery: options.delivery}),
               ...(options.reconcileReason === undefined ? {} : {reconcileReason: options.reconcileReason}),
               ...(options.bindings === undefined ? {} : {bindings: options.bindings}),
               ...(options.review === undefined ? {} : {review: options.review}),

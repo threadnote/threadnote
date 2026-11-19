@@ -1,7 +1,13 @@
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Schema} from 'effect';
 import {WorkflowAutomationError} from './contracts.js';
-import {decodeNativeCycleState, nextNativeCycle, nativeCycleHasControl, type NativeCycleState} from './cycle.js';
+import {
+  checkNativeCycleScope,
+  decodeNativeCycleState,
+  nextNativeCycle,
+  nativeCycleHasControl,
+  type NativeCycleState,
+} from './cycle.js';
 import type {NativeCycleWaiver} from './cycle_runtime.js';
 import {
   decodeNativeAuthoringDocument,
@@ -11,6 +17,7 @@ import {
   type NativeAuthoringDocument,
 } from './authoring.js';
 import {createNativeDocument} from './templates.js';
+import {nativeDocumentRenderLimitBytes, renderNativeDocument} from './documents.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
@@ -143,6 +150,72 @@ const lines = (values: readonly string[]) =>
       )
     : 'None recorded.';
 
+/**
+ * Each phase's paths as its validated snapshot changed them; the runtime derives it, never the proposal. A bounded
+ * row from an earlier admission is valid input too: it lists drift first and counts unlisted paths in `more`.
+ */
+export interface NativeCloseoutPhaseChanges {
+  readonly phaseId: string;
+  readonly drift?: readonly string[];
+  readonly paths: readonly string[];
+  readonly more?: number;
+}
+const actualChangesBudgetBytes = 8192;
+const actualChangesHeading = '\n\nActual changes\n';
+const utf8Bytes = (value: string) => new TextEncoder().encode(value).byteLength;
+/**
+ * Rows whose two-space JSON fits `limitBytes` and the fixed budget, with drift (outside allowedPaths) first. A path
+ * that does not fit is counted in `more`, never dropped silently. Bounded rows bound to the same rows again, so a
+ * stored admission renders the same document.
+ */
+const actualChangeRows = (
+  state: NativeCycleState,
+  changes: readonly NativeCloseoutPhaseChanges[],
+  limitBytes: number,
+) => {
+  const byPhase = new Map(EffectArray.map(changes, change => [change.phaseId, change] as const));
+  if (byPhase.size !== changes.length || EffectArray.some(changes, change => !state.phases[change.phaseId]))
+    fail('Actual changes must name each cycle phase at most once.');
+  const phases = EffectArray.map(state.plan.phases, phase => {
+    const change = byPhase.get(phase.id);
+    const paths = [...new Set([...(change?.drift ?? []), ...(change?.paths ?? [])])].sort();
+    return {phase, paths, more: change?.more ?? 0};
+  });
+  // Empty rows with their largest possible `more` are the fixed cost; each listed path adds its exact JSON bytes.
+  let budget =
+    Math.min(actualChangesBudgetBytes, limitBytes) -
+    utf8Bytes(
+      json(
+        EffectArray.map(phases, ({phase, paths, more}) => ({
+          phaseId: phase.id,
+          drift: [],
+          paths: [],
+          more: more + paths.length,
+        })),
+      ),
+    );
+  return EffectArray.map(phases, ({phase, paths, more}) => {
+    const row = {phaseId: phase.id, drift: [] as string[], paths: [] as string[], more};
+    const drift: string[] = [];
+    const inScope: string[] = [];
+    for (const path of paths) (checkNativeCycleScope(phase, [path]) ? inScope : drift).push(path);
+    for (const [listed, candidates] of [
+      [row.drift, drift],
+      [row.paths, inScope],
+    ] as const)
+      for (const path of candidates) {
+        // At indent 6: the quoted path, its indent and separator; the first item also opens the empty brackets.
+        const bytes = utf8Bytes(JSON.stringify(path)) + 8 + (listed.length ? 0 : 4);
+        if (bytes > budget) row.more++;
+        else {
+          budget -= bytes;
+          listed.push(path);
+        }
+      }
+    return row;
+  });
+};
+
 /** Pure admission only: the application must independently verify roots, Git and publication authority. */
 export function prepareNativeCloseout(
   input: NativeCycleState,
@@ -150,6 +223,7 @@ export function prepareNativeCloseout(
   rawProposal: unknown,
   specDocument?: NativeAuthoringDocument,
   waivers: readonly NativeCycleWaiver[] = [],
+  actualChanges?: readonly NativeCloseoutPhaseChanges[],
 ) {
   const state = decodeNativeCycleState(input);
   if (nextNativeCycle(state).action !== 'complete')
@@ -190,6 +264,9 @@ export function prepareNativeCloseout(
       phase.acceptanceCriteria,
       'acceptance evidence',
     );
+    // When the PR merged above this phase's reviewed head, the record names both ends of that range.
+    const delivery = state.phases[phase.id]?.delivery;
+    const mergedHead = delivery?.pr?.state === 'merged' ? delivery.watch?.headSha : undefined;
     return {
       ...evidence,
       acceptance: EffectArray.map(phase.acceptanceCriteria, criterion => {
@@ -199,6 +276,9 @@ export function prepareNativeCloseout(
         if (!item) return fail('Missing criterion evidence.');
         return item;
       }),
+      ...(delivery && mergedHead && mergedHead !== delivery.headSha
+        ? {mergedAbovePhaseHead: {phaseHead: delivery.headSha, mergedHead}}
+        : {}),
     };
   });
   exactMembership(
@@ -246,26 +326,39 @@ export function prepareNativeCloseout(
   const titleFor = (suffix: string) =>
     Effect.pipe(plan.title, EffectString.slice(0, 256 - suffix.length), EffectString.replace(/[\uD800-\uDBFF]$/u, '')) +
     suffix;
-  const architecture = createNativeDocument({
-    kind: 'architecture-current',
-    title: titleFor(' — Implemented architecture'),
-    sections: {
-      summary: proposal.architecture.summary,
-      components: lines(proposal.architecture.components),
-      contracts: lines(proposal.architecture.contracts),
-      constraints:
-        'Invariants\n' +
-        lines(proposal.architecture.invariants) +
-        '\n\nUnknowns\n' +
-        lines(proposal.architecture.unknowns) +
-        '\n\nDeviations\n' +
-        lines(proposal.architecture.deviations) +
-        '\n\nRetained unresolved PR watch work\n' +
-        json(proposal.watchWork ?? []),
-      ...(proposal.architecture.diagram === undefined ? {} : {diagram: proposal.architecture.diagram}),
-      'data-flow': 'Source references\n' + lines(proposal.architecture.codeRefs),
-    },
-  });
+  const architectureDocument = (dataFlowSuffix: string) =>
+    createNativeDocument({
+      kind: 'architecture-current',
+      title: titleFor(' — Implemented architecture'),
+      sections: {
+        summary: proposal.architecture.summary,
+        components: lines(proposal.architecture.components),
+        contracts: lines(proposal.architecture.contracts),
+        constraints:
+          'Invariants\n' +
+          lines(proposal.architecture.invariants) +
+          '\n\nUnknowns\n' +
+          lines(proposal.architecture.unknowns) +
+          '\n\nDeviations\n' +
+          lines(proposal.architecture.deviations) +
+          '\n\nRetained unresolved PR watch work\n' +
+          json(proposal.watchWork ?? []),
+        ...(proposal.architecture.diagram === undefined ? {} : {diagram: proposal.architecture.diagram}),
+        'data-flow': 'Source references\n' + lines(proposal.architecture.codeRefs) + dataFlowSuffix,
+      },
+    });
+  // The rows replace the `[]` placeholder, so they may use the room it leaves plus its own 2 bytes.
+  const changeRows =
+    actualChanges === undefined
+      ? undefined
+      : actualChangeRows(
+          state,
+          actualChanges,
+          nativeDocumentRenderLimitBytes +
+            2 -
+            utf8Bytes(renderNativeDocument(architectureDocument(actualChangesHeading + '[]'))),
+        );
+  const architecture = architectureDocument(changeRows ? actualChangesHeading + json(changeRows) : '');
   // Separate documents preserve complete original decisions; any individual overflow rejects before mutation.
   const decisionDocuments = EffectArray.map(decisions, item =>
     createNativeDocument({
@@ -366,6 +459,7 @@ export function prepareNativeCloseout(
       scenarios,
       ...(proposal.behaviorVerification === undefined ? {} : {behaviorVerification: proposal.behaviorVerification}),
       watchWork: proposal.watchWork ?? [],
+      ...(changeRows ? {actualChanges: changeRows} : {}),
       documents: {architecture, decisions: decisionDocuments, handoff, ...(behavior ? {behavior} : {})},
     }),
   );

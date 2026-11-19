@@ -32,6 +32,7 @@ permissions:
 concurrency:
   group: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.redeploy_production == true)) && 'telemetry-production-gateway' || format('telemetry-gateway-{0}', github.run_id) }}
   queue: max
+  # With queue: max, a cancel-in-progress expression made every pull-request run fail as a workflow file issue.
   cancel-in-progress: false
 
 jobs:

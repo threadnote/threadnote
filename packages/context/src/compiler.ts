@@ -100,7 +100,7 @@ export const compileContextBriefWith = Effect.fn('contextBrief.compileWith')(fun
     plan.graph.codeRefs.length === 0;
   const lexicalDeadline = yield* makeReadDeadline(2_000);
   const graphDeadline = yield* makeReadDeadline(5_000);
-  const readBudget = {remaining: 2, primaryRemaining: 17, deadline: graphDeadline};
+  const readBudget: ContextBriefGraphReadBudget = {remaining: 2, primaryRemaining: 17, deadline: graphDeadline};
   const readGraph = (graphPlan: ContextBriefPlanV1['graph']) =>
     withinReadDeadline(
       graphDeadline,
@@ -108,7 +108,12 @@ export const compileContextBriefWith = Effect.fn('contextBrief.compileWith')(fun
     ).pipe(
       Effect.catchIf(Schema.is(ReadDeadlineExceeded), () =>
         Effect.succeed(
-          unavailableContextBriefGraphEvidence('graph-read-budget-exhausted', plan.scope.kind === 'repository' ? 1 : 0),
+          plan.scope.kind !== 'repository'
+            ? unavailableContextBriefGraphEvidence('graph-read-budget-exhausted', 0)
+            : unavailableContextBriefGraphEvidence(
+                readBudget.statusObserved === true ? 'graph-read-budget-exhausted' : 'graph-status-deadline-exceeded',
+                1,
+              ),
         ),
       ),
     );

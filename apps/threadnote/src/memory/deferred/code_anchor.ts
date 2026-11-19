@@ -25,9 +25,10 @@ import {
   type MemoryCodeCitationCaptureRecoveryV1,
   normalizeMemoryCodeRefs,
 } from '@threadnote/context/citation/capture';
-import {MEMORY_SCHEMA_VERSION, type MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
+import {MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
 import {discardMemoryRelocation} from '@threadnote/memory/relocation';
 import {classifyDeferredCodeAnchorCallerCheckoutAdmission} from './code_anchor_checkout.js';
+import {makeDeferredCodeAnchorCommitGate, type DeferredCodeAnchorCommitGate} from './code_anchor_commit_gate.js';
 import {deferredCodeAnchorCaptureFailureItem} from './code_anchor_failure.js';
 import {
   deferredCodeAnchorIntentId,
@@ -51,6 +52,7 @@ import {
 } from './code_anchor_names.js';
 export {isDeferredCodeAnchorIntentFilename} from './code_anchor_names.js';
 import {
+  commonCitationSourceCommit,
   deferredCodeAnchorFinalizationVerified,
   memoryContentHash,
   readDeferredMemoryObservation,
@@ -544,6 +546,7 @@ export const finalizeDeferredCodeAnchors = Effect.fn('memoryCodeAnchor.finalize'
     requestedUris.size === 0
       ? yield* selectDeferredCodeAnchorFinalizationWindow(config, matching, limit)
       : matching.slice(0, limit);
+  const commitGate = yield* makeDeferredCodeAnchorCommitGate;
   const items = yield* Effect.forEach(
     stored,
     entry => {
@@ -554,7 +557,7 @@ export const finalizeDeferredCodeAnchors = Effect.fn('memoryCodeAnchor.finalize'
           state: 'failed' as const,
         } satisfies DeferredCodeAnchorFinalizeItemV1);
       }
-      return finalizeDeferredCodeAnchor(config, entry).pipe(
+      return finalizeDeferredCodeAnchor(config, entry, commitGate).pipe(
         Effect.result,
         Effect.map((finalized): DeferredCodeAnchorFinalizeItemV1 =>
           Result.isSuccess(finalized)
@@ -667,13 +670,14 @@ export const finalizeDeferredCodeAnchorsForRoute = Effect.fn('memoryCodeAnchor.f
             );
           }
           const selected = prioritizeDeferredCodeAnchorEntries(matching, preferredCodeRefs).slice(0, limit);
+          const commitGate = yield* makeDeferredCodeAnchorCommitGate;
           const items = yield* Effect.forEach(
             selected,
             entry =>
               Effect.gen(function* () {
                 if (options.onAttemptedUri)
                   safelyNotifyDeferredCodeAnchorUri(options.onAttemptedUri, entry.intent.memoryUri);
-                const finalized = yield* finalizeDeferredCodeAnchor(config, entry).pipe(Effect.result);
+                const finalized = yield* finalizeDeferredCodeAnchor(config, entry, commitGate).pipe(Effect.result);
                 const item: DeferredCodeAnchorFinalizeItemV1 = Result.isSuccess(finalized)
                   ? finalized.success
                   : ({
@@ -739,6 +743,7 @@ export function deferredCodeAnchorIntentMatchesFinalizationRoute(
 const finalizeDeferredCodeAnchor = Effect.fn('memoryCodeAnchor.finalizeOne')(function* (
   config: RuntimeConfig,
   entry: StoredDeferredCodeAnchorIntent,
+  commitGate: DeferredCodeAnchorCommitGate,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const admission = yield* withMemoryUriLocks(
@@ -888,7 +893,7 @@ const finalizeDeferredCodeAnchor = Effect.fn('memoryCodeAnchor.finalizeOne')(fun
         ),
       );
     }),
-  );
+  ).pipe(commitGate);
 });
 
 export const listDeferredCodeAnchorIntents = Effect.fn('memoryCodeAnchor.listIntents')(function* (
@@ -1992,9 +1997,4 @@ function deferredCodeAnchorRouteReceipt(
     type: 'threadnote-deferred-code-anchor-route-finalization',
     version: DEFERRED_CODE_ANCHOR_ROUTE_FINALIZATION_VERSION,
   };
-}
-
-function commonCitationSourceCommit(citations: readonly MemoryCodeCitationV1[]): string | undefined {
-  const commits = new Set(EffectArray.map(citations, citation => citation.sourceCommit));
-  return commits.size === 1 ? citations[0]?.sourceCommit : undefined;
 }

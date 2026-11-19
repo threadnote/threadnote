@@ -92,7 +92,10 @@ const databaseLayer = (path: string) =>
     ),
   ).pipe(Layer.orDie);
 const body = <A, E, R>(effect: Effect.Effect<A, E, R | SqlClient.SqlClient>, context: DatabaseContext) =>
-  effect.pipe(Effect.provide(context), Effect.withSpan('recall.databaseBody'));
+  effect.pipe(
+    Effect.provideService(SqlClient.SqlClient, Context.get(context, SqlClient.SqlClient)),
+    Effect.withSpan('recall.databaseBody'),
+  );
 export function useRecallDatabase<A, E, R>(
   path: string,
   effect: Effect.Effect<A, E, R | SqlClient.SqlClient>,

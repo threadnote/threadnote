@@ -1,4 +1,4 @@
-import {unzlibSync} from 'fflate';
+import {inflateSync} from 'node:zlib';
 import {
   CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM,
   serializeBoundedCodeGraphFact,
@@ -17,7 +17,6 @@ export const CODE_GRAPH_STORED_FACT_MINIMUM_SAVINGS_RATIO = 0.1;
 const storedFactDecoder = new TextDecoder('utf-8', {fatal: true});
 const storedFactEncoder = new TextEncoder();
 const SHA256_HEX = /^[0-9a-f]{64}$/u;
-const CANONICAL_BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
 
 interface StoredCodeGraphFactEnvelope {
   readonly codec: typeof CODE_GRAPH_STORED_FACT_CODEC;
@@ -82,9 +81,9 @@ export function decodeStoredCodeGraphFact(json: string, expectedPath?: string): 
     throw new Error('Stored code graph fact envelope path does not match its cache key.');
   }
   const compressed = decodeCanonicalBase64(parsed.payload);
-  // Keep the caller-owned output buffer: Bun's synchronous inflate API does
-  // not currently expose an equivalent decompressed-byte ceiling.
-  const raw = unzlibSync(compressed, {out: new Uint8Array(parsed.rawBytes)});
+  // Native zlib verifies the header and Adler-32 trailer; the output ceiling
+  // rejects payloads that expand beyond their declared size before allocation.
+  const raw = inflateSync(compressed, {maxOutputLength: parsed.rawBytes});
   if (raw.byteLength !== parsed.rawBytes || storedFactSha256Hex(raw) !== parsed.sha256) {
     throw new Error('Stored code graph fact envelope failed integrity validation.');
   }
@@ -134,15 +133,31 @@ function isStoredCodeGraphFactEnvelope(value: unknown): value is StoredCodeGraph
   );
 }
 
+/**
+ * Strict decoding rejects other alphabets, misplaced or missing padding, and
+ * nonzero padding bits, but skips ASCII whitespace. Whitespace is excluded by
+ * length: with a padded length that is a multiple of four, any skipped
+ * whitespace removes at least three decoded bytes, more than padding can.
+ */
 function decodeCanonicalBase64(value: string): Uint8Array {
-  if (value.length % 4 !== 0 || !CANONICAL_BASE64.test(value)) {
-    throw new Error('Stored code graph fact envelope payload is not canonical base64.');
-  }
-  const decoded = Buffer.from(value, 'base64');
-  if (decoded.toString('base64') !== value) {
+  const padding = Effect.pipe(value, EffectString.endsWith('=='))
+    ? 2
+    : Effect.pipe(value, EffectString.endsWith('='))
+      ? 1
+      : 0;
+  const decoded = value.length % 4 === 0 ? strictBase64(value) : undefined;
+  if (decoded === undefined || decoded.byteLength !== (value.length / 4) * 3 - padding) {
     throw new Error('Stored code graph fact envelope payload is not canonical base64.');
   }
   return decoded;
+}
+
+function strictBase64(value: string): Uint8Array | undefined {
+  try {
+    return Uint8Array.fromBase64(value, {lastChunkHandling: 'strict'});
+  } catch {
+    return undefined;
+  }
 }
 
 function serializedPathOccurrences(json: string, path: string): number {

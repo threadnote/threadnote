@@ -9,14 +9,7 @@ import {CommandExecutor} from '@threadnote/platform/command';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import * as Effect2 from 'effect';
-import {
-  captureNativeCycleSource,
-  completeLocalPhase,
-  fixture,
-  object,
-  reviewed,
-  run,
-} from './native-cycle-lifecycle-fixture.js';
+import {completeLocalPhase, fixture, object, reviewed, run} from './native-cycle-lifecycle-fixture.js';
 describe('native cycle lifecycle', () => {
   effectIt.effect('preserves immutable legacy evidence and readiness while refusing current self-review', () =>
     Effect.gen(function* () {
@@ -1148,11 +1141,9 @@ describe('native cycle lifecycle', () => {
       expect(() => decodeNativeCycleRuntime({...runtime, reviewLimits: {one: 99}})).toThrow();
     }).pipe(run),
   );
-  effectIt.effect('verifies ready graph, actual anchors, ownership and packet budgets before routine dispatch', () =>
+  effectIt.effect('verifies actual anchors, ownership and packet budgets before routine dispatch', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
-      const graph = object(object(yield* f.call(f.base('graph-ready'))).graph);
-      const captured = yield* captureNativeCycleSource(f.repo, 'HEAD');
       const options = {
         capacity: {
           model: 'advertised-cheap-model',
@@ -1162,7 +1153,6 @@ describe('native cycle lifecycle', () => {
           reason: 'Bounded established implementation with verified anchors.',
           catalogEvidence: 'Test host advertises low effort.',
         },
-        graphProof: {...graph, tree: captured.tree},
         anchors: [
           {
             path: 'source.ts',
@@ -1221,7 +1211,8 @@ describe('native cycle lifecycle', () => {
         }),
         Effect.result,
       );
-      expect(drift).toMatchObject({failure: {code: 'source-drift'}});
+      // Packets carry no graph proof: uncommitted source refuses before any graph observation or preparation.
+      expect(drift).toMatchObject({failure: {code: 'working-tree-dirty'}});
       expect(graphObservations).toBe(0);
       expect(graphPreparations).toBe(0);
     }).pipe(run),

@@ -14,14 +14,12 @@ import {provideScriptLayer, scriptError, ScriptError} from './effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {ScriptCommandExecutorLayer, ScriptSystemInfoLayer} from './effect/system-layer.js';
-/* oxlint-disable threadnote/no-node-runtime -- This diagnostic boundary records whole-host CPU deltas and pressure outside inference clocks; Bun/SystemInfo have no equivalent CPU-delta API. */
 import {
   cpus as diagnosticCpus,
   freemem as diagnosticFreeMemory,
   totalmem as diagnosticTotalMemory,
   loadavg as diagnosticLoadAverage,
 } from 'node:os';
-/* oxlint-enable threadnote/no-node-runtime */
 import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {
   Clock,

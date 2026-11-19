@@ -1,4 +1,3 @@
-/* oxlint-disable effecttsgo/node-builtin-import -- Authorized fixed fixture uses native private credential staging and actual CLI/MCP boundaries. */
 import {createHash, randomBytes} from 'node:crypto';
 import {readFile, lstat} from 'node:fs/promises';
 import {join} from 'node:path';

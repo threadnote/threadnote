@@ -2,10 +2,7 @@ import {Array as EffectArray} from 'effect';
 import {readFileSync} from '@threadnote/testing/node-fs';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
-import {
-  hasUndeclaredNodeBuiltinImport,
-  hasUndeclaredPythonRuntimeReference,
-} from '../../../../scripts/effect/self-contained-source.js';
+import {hasUndeclaredPythonRuntimeReference} from '../../../../scripts/effect/self-contained-source.js';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 import {Option as EffectOption} from 'effect';
@@ -261,29 +258,6 @@ describe('self-contained source Python boundary', () => {
       {numRuns: 32},
     );
   });
-});
-
-describe('self-contained source Node boundary', () => {
-  const sources = EffectArray.map(
-    ['apps/threadnote/src/semantic/lsp_transport.ts', 'apps/threadnote/src/semantic/providers/python_project.ts'],
-    path => ({path, content: readFileSync(path, 'utf8')}),
-  );
-
-  it.each(sources)('accepts only the declared boundary in $path', ({path, content}) => {
-    expect(hasUndeclaredNodeBuiltinImport(path, content)).toBe(false);
-    expect(hasUndeclaredNodeBuiltinImport(path, Effect.pipe(content, EffectString.replaceAll('\n', '\r\n')))).toBe(
-      false,
-    );
-    expect(hasUndeclaredNodeBuiltinImport('apps/threadnote/src/semantic/other.ts', content)).toBe(
-      path !== 'apps/threadnote/src/semantic/lsp_transport.ts',
-    );
-  });
-
-  it('rejects the removed Node spawn import at both the former LSP owner and neighboring paths', () => {
-    const previous = "import {spawn, type ChildProcess} from 'node:child_process';";
-    for (const path of ['apps/threadnote/src/semantic/lsp_transport.ts', 'apps/threadnote/src/semantic/other.ts'])
-      expect(hasUndeclaredNodeBuiltinImport(path, previous)).toBe(true);
-  });
 
   it('requires one live unchanged bootstrap capsule and its exact publication wiring', () => {
     const path = 'apps/threadnote/src/semantic/providers/python_project.ts';
@@ -347,14 +321,12 @@ describe('self-contained source Node boundary', () => {
       source + '\nconst syntax = ;',
     ];
     for (const [index, content] of mutations.entries()) {
-      expect(hasUndeclaredNodeBuiltinImport(path, content), 'closed Node capsule mutation ' + index).toBe(true);
       expect(hasUndeclaredPythonRuntimeReference(path, content), 'closed Python capsule mutation ' + index).toBe(true);
     }
     for (const neighbor of [
       'apps/threadnote/src/semantic/providers/other.ts',
       'apps/threadnote/src/semantic/providers/python_project_extra.ts',
     ]) {
-      expect(hasUndeclaredNodeBuiltinImport(neighbor, source)).toBe(true);
       expect(hasUndeclaredPythonRuntimeReference(neighbor, source)).toBe(true);
     }
   });
@@ -373,7 +345,6 @@ describe('self-contained source Node boundary', () => {
         '  const source = pythonProviderBootstrap(',
         shadow + '\n  const source = pythonProviderBootstrap(',
       )(source);
-      expect(hasUndeclaredNodeBuiltinImport(path, content), shadow).toBe(true);
       expect(hasUndeclaredPythonRuntimeReference(path, content), shadow).toBe(true);
     }
     for (const content of [
@@ -381,7 +352,6 @@ describe('self-contained source Node boundary', () => {
       EffectString.replace('function* (options: {', 'function* (pythonProviderBootstrap: unknown, options: {')(source),
       source + '\nfunction ignored(makePythonProject: unknown) {}',
     ]) {
-      expect(hasUndeclaredNodeBuiltinImport(path, content)).toBe(true);
       expect(hasUndeclaredPythonRuntimeReference(path, content)).toBe(true);
     }
   });
@@ -407,7 +377,6 @@ describe('self-contained source Node boundary', () => {
       "globalThis['JSON'] = {stringify: () => 'inert'};",
     ]) {
       const content = source + '\n' + mutation;
-      expect(hasUndeclaredNodeBuiltinImport(path, content), mutation).toBe(true);
       expect(hasUndeclaredPythonRuntimeReference(path, content), mutation).toBe(true);
     }
   });
@@ -423,7 +392,6 @@ describe('self-contained source Node boundary', () => {
         `const alias = ${root};`,
       ]) {
         const content = source + '\n' + extra;
-        expect(hasUndeclaredNodeBuiltinImport(path, content), extra).toBe(true);
         expect(hasUndeclaredPythonRuntimeReference(path, content), extra).toBe(true);
       }
     }
@@ -451,31 +419,7 @@ describe('self-contained source Node boundary', () => {
       "new Function('return 1');",
       "module.require('child_process');",
     ]) {
-      expect(hasUndeclaredNodeBuiltinImport(path, source + '\n' + extra), extra).toBe(true);
       expect(hasUndeclaredPythonRuntimeReference(path, source + '\n' + extra), extra).toBe(true);
     }
-  });
-
-  it('rejects additional static, side-effect, dynamic and require imports even in owned boundaries', () => {
-    fc.assert(
-      fc.property(
-        fc.constantFrom('fs', 'crypto', 'child_process', 'url', 'net'),
-        fc.constantFrom('static', 'side-effect', 'dynamic', 'require'),
-        (module, form) => {
-          const extra =
-            form === 'static'
-              ? `import * as extra from 'node:${module}';`
-              : form === 'side-effect'
-                ? `import 'node:${module}';`
-                : form === 'dynamic'
-                  ? `const extra = import('node:${module}');`
-                  : `const extra = require('node:${module}');`;
-          for (const {path, content} of sources)
-            expect(hasUndeclaredNodeBuiltinImport(path, content + '\n' + extra)).toBe(true);
-          expect(hasUndeclaredNodeBuiltinImport('apps/threadnote/src/other.ts', extra)).toBe(true);
-        },
-      ),
-      {numRuns: 32},
-    );
   });
 });

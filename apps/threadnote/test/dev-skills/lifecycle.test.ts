@@ -185,7 +185,9 @@ describe('development skills lifecycle', () => {
       const entrypoints = renderEntrypoints(f.path, result.target, bundle);
       for (const [relative, content] of EffectRecord.toEntries(entrypoints))
         expect(yield* f.fs.readFileString(f.path.join(result.target.skillRoot, relative))).toBe(content);
-      expect(yield* f.fs.readFileString(f.path.join(result.target.skillRoot, 'dev-plan/SKILL.md'))).toContain(root);
+      expect(yield* f.fs.readFileString(f.path.join(result.target.skillRoot, 'dev-plan/SKILL.md'))).toContain(
+        EffectString.replaceAll(f.path.sep, '/')(root),
+      );
       const before = yield* snapshot(f.root);
       expect((yield* f.run(applyDevSkills(f.config, 'install', selector))).applied).toBe(false);
       expect(yield* snapshot(f.root)).toEqual(before);
@@ -429,6 +431,94 @@ describe('development skills lifecycle', () => {
       });
       expect(yield* snapshot(f.root)).toEqual(before);
     }).pipe(testLayer),
+  );
+  effectIt.effect.skipIf(process.platform === 'win32')(
+    'reports symlinked bundled names without reading through any foreign symlink',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        const outside = f.path.join(f.root, 'outside');
+        const codex = f.path.join(f.host, '.codex/skills');
+        const owned = f.path.join(f.host, '.agents/skills');
+        const real = f.path.join(codex, 'renamed/SKILL.md');
+        const linkedCycle = f.path.join(codex, 'dev-cycle');
+        const linkedPlan = f.path.join(owned, 'dev-plan.md');
+        const links = [
+          [f.path.join(codex, 'my-skill'), 'my-skill'],
+          [linkedCycle, 'dev-cycle'],
+          [linkedPlan, 'dev-plan'],
+          [f.path.join(owned, 'threadnote-packs'), 'packs'],
+          [f.path.join(codex, 'threadnote-packs/default/linked'), 'pack'],
+        ] as const;
+        for (const [link, name] of links) {
+          yield* f.fs.makeDirectory(f.path.join(outside, name), {recursive: true});
+          yield* f.fs.writeFileString(f.path.join(outside, name, 'SKILL.md'), `---\nname: dev-spec\n---\n`);
+          yield* f.fs.makeDirectory(f.path.dirname(link), {recursive: true});
+          yield* f.fs.symlink(f.path.join(outside, name), link);
+        }
+        const linkedEntry = f.path.join(codex, 'watch-pr/SKILL.md');
+        const entryLinks = [f.path.join(codex, 'my-entry/SKILL.md'), linkedEntry];
+        for (const link of entryLinks) {
+          yield* f.fs.makeDirectory(f.path.dirname(link), {recursive: true});
+          yield* f.fs.symlink(f.path.join(outside, 'my-skill/SKILL.md'), link);
+        }
+        yield* f.fs.makeDirectory(f.path.dirname(real), {recursive: true});
+        yield* f.fs.writeFileString(real, '---\nname: dev-cycle\n---\nmanual');
+        const followed = (file: string) =>
+          EffectArray.some(
+            [...EffectArray.map(links, ([link]) => link), ...entryLinks, outside],
+            prefix => file === prefix || Effect2.pipe(file, EffectString.startsWith(`${prefix}/`)),
+          );
+        const guard =
+          <A>(read: (file: string) => A) =>
+          (file: string) => {
+            expect(followed(file), file).toBe(false);
+            return read(file);
+          };
+        const guarded = FileSystem.FileSystem.of({
+          ...f.fs,
+          stat: guard(f.fs.stat),
+          readDirectory: guard(f.fs.readDirectory),
+          readFileString: guard(f.fs.readFileString),
+          realPath: guard(f.fs.realPath),
+        });
+        const preview = yield* f
+          .run(previewDevSkills(f.config, 'install', selector))
+          .pipe(Effect.provideService(FileSystem.FileSystem, guarded));
+        const duplicates = EffectArray.filter(preview.issues, issue => issue.code === 'duplicate');
+        expect(EffectArray.map(duplicates, issue => issue.path).sort()).toEqual(
+          [linkedCycle, linkedPlan, linkedEntry, real].sort(),
+        );
+        expect(EffectArray.findFirst(duplicates, issue => issue.path === linkedCycle)).toMatchObject({
+          _tag: 'Some',
+          value: {message: expect.stringContaining('symbolic link')},
+        });
+      }).pipe(testLayer),
+  );
+  effectIt.effect.skipIf(process.platform === 'win32')(
+    'skips a symlinked foreign discovery root but refuses a symlinked owned skill root',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        const outside = f.path.join(f.root, 'outside');
+        yield* f.fs.makeDirectory(f.path.join(outside, 'codex/dev-cycle'), {recursive: true});
+        yield* f.fs.makeDirectory(f.path.join(outside, 'agents'));
+        yield* f.fs.writeFileString(f.path.join(outside, 'codex/dev-cycle/SKILL.md'), '---\nname: dev-cycle\n---\n');
+        for (const parent of ['.codex', '.agents']) yield* f.fs.makeDirectory(f.path.join(f.host, parent));
+        yield* f.fs.symlink(f.path.join(outside, 'codex'), f.path.join(f.host, '.codex/skills'));
+        const preview = yield* f.run(previewDevSkills(f.config, 'install', selector));
+        expect(EffectArray.filter(preview.issues, issue => issue.code === 'duplicate')).toEqual([]);
+        yield* f.fs.remove(f.path.join(f.host, '.codex'), {recursive: true});
+        yield* f.fs.symlink(outside, f.path.join(f.host, '.codex'));
+        yield* f.fs.rename(f.path.join(outside, 'codex'), f.path.join(outside, 'skills'));
+        const parent = yield* f.run(previewDevSkills(f.config, 'install', selector));
+        expect(EffectArray.filter(parent.issues, issue => issue.code === 'duplicate')).toEqual([]);
+        yield* f.fs.symlink(f.path.join(outside, 'agents'), f.path.join(f.host, '.agents/skills'));
+        expect(yield* f.run(previewDevSkills(f.config, 'install', selector)).pipe(Effect.result)).toMatchObject({
+          _tag: 'Failure',
+          failure: {code: 'unsafe-path'},
+        });
+      }).pipe(testLayer),
   );
   effectIt.effect('preserves modified immutable resources and never rehashes them into ownership', () =>
     Effect.gen(function* () {

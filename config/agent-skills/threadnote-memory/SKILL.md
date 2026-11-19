@@ -25,12 +25,11 @@ Close out in order:
    `sourceCommit`, `sourceSessionId`, or an evidence pointer.
 3. Treat the Knowledge Delta and returned candidates as one optional review lifecycle. Present them and call
    `apply_memory_candidates` only after explicit `approve` (optionally with `editedText`), `defer`, or `reject`; without a
-   user decision leave candidates unapplied. If no reusable durable delta exists, stop after the handoff. Never auto-apply
-   or auto-share proposals.
+   user decision leave candidates unapplied.
 
-Use `kind: durable` for reusable decisions/contracts and `kind: handoff` for status/checks/blockers/next steps. Stable
-identities + `replaceUri` prevent duplicates. Confirm before durable sharing. Author `relations` only from read memories or
-explicit review evidence; a replacement supplies the complete set, so carry forward every still-valid relation.
+Use `kind: durable` for reusable decisions/contracts and `kind: handoff` for status/checks/blockers/next steps. Confirm
+before durable sharing. Author `relations` only from read memories or explicit review evidence; a replacement supplies
+the complete set, so carry forward every still-valid relation.
 
 For code-work handoffs, put 1-4 key changed paths or graph handles in `codeRefs`; without citations compact exact-current
 resume cannot activate. Cite verification. Current writes use `citationPolicy: "require-current"` or
@@ -45,6 +44,9 @@ Maintenance: `threadnote context check --project <name>` checks direct citations
 `threadnote procedure verify <manifest>`. Use `threadnote guidance import`, `threadnote guidance project`,
 `complete_activation_retrieval_proof`, and `threadnote_guide`; procedures never auto-execute and tool-returned actions guide
 uncommon recovery.
+
+Write stored memories in the Threadnote STE profile: short active sentences with one topic, condition first. Keep code,
+paths and names verbatim in backticks.
 
 Do not store secrets, credentials, customer data, or raw production logs. Never publish handoffs/preferences;
 conflicting writes or forced synchronization need explicit approval.

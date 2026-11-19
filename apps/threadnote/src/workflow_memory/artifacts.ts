@@ -591,7 +591,12 @@ const prepareWorkflowOperationWithCapture = Effect.fn('workflowMemory.prepareOpe
     const promotion =
       (role === 'authoring-root' && (yield* CurrentNativeJobReadyPromotion)) ||
       Effect2.pipe(role, EffectString.startsWith('closeout-'));
-    if (admitted && admitted.repo !== state.binding.repo)
+    // Admitted views and collected witnesses record the checkout storage that the bound path names.
+    const boundRepo =
+      admitted || foregroundAdmitted || foregroundCollector
+        ? yield* (yield* FileSystem.FileSystem).realPath(state.binding.repo)
+        : undefined;
+    if (admitted && admitted.repo !== boundRepo)
       return yield* workflowError(
         'binding-drift',
         'Admitted source view does not belong to the original logical repository.',
@@ -604,7 +609,7 @@ const prepareWorkflowOperationWithCapture = Effect.fn('workflowMemory.prepareOpe
       !Effect2.pipe(role, EffectString.startsWith('closeout-'));
     if (
       foregroundReusable &&
-      (foregroundAdmitted.bindingId !== state.binding.bindingId || foregroundAdmitted.repo !== state.binding.repo)
+      (foregroundAdmitted.bindingId !== state.binding.bindingId || foregroundAdmitted.repo !== boundRepo)
     )
       return yield* workflowError(
         'binding-drift',
@@ -612,6 +617,9 @@ const prepareWorkflowOperationWithCapture = Effect.fn('workflowMemory.prepareOpe
       );
     if (foregroundReusable && stableJson(request.codeRefs ?? []) !== stableJson(foregroundAdmitted.citationRefs))
       return yield* workflowError('citation-drift', 'Child code references differ from the admitted citation witness.');
+    // A standard run never waits for a graph: stale evidence is accepted and missing evidence leaves the artifact
+    // uncited. It queues no deferred anchor, because an outside finalizer would rewrite bytes this run's receipts pin.
+    const standardRun = yield* standardProfileBinding(config, state.binding.workflowRunId);
     const captured =
       admitted && !promotion
         ? {ok: true as const, citations: admitted.citations}
@@ -621,7 +629,7 @@ const prepareWorkflowOperationWithCapture = Effect.fn('workflowMemory.prepareOpe
     if (captured.ok && foregroundCollector && role === 'authoring-validation') {
       foregroundCollector.witness = {
         bindingId: state.binding.bindingId,
-        repo: state.binding.repo,
+        repo: boundRepo ?? state.binding.repo,
         citationRefs: [...(request.codeRefs ?? [])],
         citations: captured.citations,
       };
@@ -631,17 +639,18 @@ const prepareWorkflowOperationWithCapture = Effect.fn('workflowMemory.prepareOpe
         return yield* Effect.fail(workflowCitationCaptureError(captured.failure));
       if (
         state.binding.graphProject !== undefined ||
-        request.citationPolicy !== 'defer' ||
+        (request.citationPolicy !== 'defer' && !standardRun) ||
         !Schema.is(MemoryCodeCitationCaptureError)(captured.failure) ||
         !captured.failure.recovery
       )
         return yield* captured.failure;
-      deferredCodeAnchor = {
-        callerCwd: state.binding.repo,
-        project: state.binding.project,
-        codeRefs: request.codeRefs ?? [],
-        recovery: captured.failure.recovery,
-      };
+      if (request.citationPolicy === 'defer')
+        deferredCodeAnchor = {
+          callerCwd: state.binding.repo,
+          project: state.binding.project,
+          codeRefs: request.codeRefs ?? [],
+          recovery: captured.failure.recovery,
+        };
     }
     metadata = {
       kind: storageKind,

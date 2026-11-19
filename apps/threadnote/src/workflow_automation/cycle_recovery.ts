@@ -7,7 +7,7 @@ import {
   type NativeCycleRuntime,
 } from '@threadnote/workflow-automations/cycle-runtime';
 import type {NativeCycleSnapshot} from '@threadnote/workflow-automations/cycle-review';
-import {verifyNativeCycleBaseRequalification} from './cycle_git.js';
+import {resolveNativeCycleBase, verifyNativeCycleBaseRequalification} from './cycle_git.js';
 
 const fail = (message: string) => WorkflowAutomationError.make({code: 'invalid-rebase-recovery', message});
 const readGit = (repo: string, args: readonly string[]) =>
@@ -63,7 +63,7 @@ export const verifyNativeCycleUnreviewedRebase = Effect.fn('workflowAutomation.v
     return yield* fail('Provide explicit caller-provided userAuthority for rebase recovery.');
   yield* verifyNativeCycleSnapshotEvidence(repo, prior);
   const head = yield* readGit(repo, ['rev-parse', '--verify', 'HEAD^{commit}']);
-  const base = yield* readGit(repo, ['rev-parse', '--verify', '--end-of-options', phase.baseBranch + '^{commit}']);
+  const base = (yield* resolveNativeCycleBase(repo, phase.baseBranch)).commit;
   const branch = yield* readGit(repo, ['branch', '--show-current']);
   if (
     branch !== phase.branch ||

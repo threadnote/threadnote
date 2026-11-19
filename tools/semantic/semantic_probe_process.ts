@@ -1,5 +1,4 @@
 import {isJsonObject} from '@threadnote/platform/json';
-/* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- Disposable process probes own and reap their spawned OS process group. */
 import type {ChildProcess} from 'node:child_process';
 
 export async function withinProbeDeadline<T>(promise: Promise<T>, milliseconds: number): Promise<T | undefined> {

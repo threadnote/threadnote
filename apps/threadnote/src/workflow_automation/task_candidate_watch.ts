@@ -11,6 +11,7 @@ import {stableJson} from '../workflow_memory/protocol.js';
 import {fail, type NativeTaskStoredState, type NativeTaskCycleRuntime} from './task_action_helpers.js';
 import {runNativeWatch, invalidateNativeCandidateWatch} from './watch.js';
 import {nativeWorkflowError} from './memory.js';
+import {stopSupersededStandalonePrWatch} from './standalone_pr_watch.js';
 import {
   readNativeWatch,
   verifyNativeCandidateWatchOwner,
@@ -20,8 +21,17 @@ import {
   type NativeWatchOwner,
   type NativeCandidateWatchOwner,
 } from './watch_store.js';
-import type {NativeWatchWakeup, nativeWatchWakeupRequestSchema} from './watch_notification_state.js';
-import {discoverNativeWatchCodexExecutable} from './watch_notification.js';
+import {
+  isNativeWatchSessionWakeup,
+  nativeWatchWakeupMatches,
+  type NativeWatchWakeup,
+  type nativeWatchWakeupRequestSchema,
+} from './watch_notification_state.js';
+import {
+  discoverNativeWatchCodexExecutable,
+  nativeWatchHostRegistrationHint,
+  resolveNativeWatchSessionWakeup,
+} from './watch_notification.js';
 import {
   assertNativeWatchOutput,
   nativeWatchOutputLimit,
@@ -48,6 +58,7 @@ export interface OwnedNativeTaskWatchRequest {
   readonly sourceDigest?: string;
 }
 export interface OwnedNativeTaskWatchBinding {
+  readonly checkout: string;
   readonly owner: NativeWatchOwner;
   readonly watchId: string;
   readonly consumerId: string;
@@ -65,7 +76,7 @@ export const runOwnedNativeTaskWatch = (
   binding: OwnedNativeTaskWatchBinding,
 ) =>
   Effect.gen(function* () {
-    const {owner, watchId, consumerId, wakeupId, refBase} = binding;
+    const {checkout, owner, watchId, consumerId, wakeupId, refBase} = binding;
     const candidate = owner.kind === 'candidate-pr';
     const kinds = candidate
       ? ({
@@ -95,15 +106,41 @@ export const runOwnedNativeTaskWatch = (
       return yield* fail('watch-owner-conflict', 'This watch belongs to another immutable owner.');
     if (request.operation !== 'start' && request.wakeup?.host === 'codex' && !request.wakeup.executable)
       return yield* fail('invalid-request', 'Only a new watch start can discover a Codex executable.');
+    // A started owned watch is authoritative; a failed handover must not report it as unstarted.
+    const started = (result: unknown) =>
+      Effect.gen(function* () {
+        const supersededStandaloneWatchId = yield* stopSupersededStandalonePrWatch(
+          config,
+          checkout,
+          owner.prUrl,
+          watchId,
+        ).pipe(Effect.orElseSucceed(() => undefined));
+        return {
+          status: 'watch-updated' as const,
+          operation: request.operation,
+          watchId,
+          result,
+          ...(supersededStandaloneWatchId ? {supersededStandaloneWatchId} : {}),
+        };
+      });
     if (request.operation === 'start') {
       const inputWakeup = request.wakeup;
-      if (!inputWakeup) return yield* fail('host-registration-required', 'Start needs actual host registration.');
+      if (!inputWakeup)
+        return yield* fail(
+          'host-registration-required',
+          `Start needs a host wakeup. ${nativeWatchHostRegistrationHint}`,
+        );
       let wakeup: NativeWatchWakeup;
-      if (inputWakeup.host === 'cursor-cli') wakeup = inputWakeup;
+      const registered = watch?.envelope.notification?.target;
+      // A replay keeps the registered host when every supplied field matches it; only a new start derives fields.
+      if (isNativeWatchSessionWakeup(inputWakeup))
+        wakeup =
+          registered && nativeWatchWakeupMatches(inputWakeup, registered)
+            ? registered
+            : yield* resolveNativeWatchSessionWakeup(inputWakeup, checkout);
       else if (inputWakeup.executable !== undefined)
         wakeup = {host: 'codex', executable: inputWakeup.executable, threadId: inputWakeup.threadId};
       else if (watch) {
-        const registered = watch.envelope.notification?.target;
         if (registered?.host !== 'codex' || registered.threadId !== inputWakeup.threadId)
           return yield* fail('watch-owner-conflict', 'Replay requires the exact registered host.');
         wakeup = registered;
@@ -151,7 +188,8 @@ export const runOwnedNativeTaskWatch = (
           },
           owner,
         );
-        return {status: 'watch-updated' as const, operation: request.operation, watchId, result};
+        // A replay repairs a duplicate standalone watch only while this watch monitors the PR.
+        return yield* started(result);
       }
       const result = yield* runNativeWatch(
         config,
@@ -168,7 +206,7 @@ export const runOwnedNativeTaskWatch = (
         },
         owner,
       );
-      return {status: 'watch-updated' as const, operation: request.operation, watchId, result};
+      return yield* started(result);
     }
     if (!watch) return yield* fail('watch-not-found', 'Start this owned watch explicitly.');
     const consumer = watch.envelope.state.consumer;
@@ -511,6 +549,7 @@ export const runNativeTaskCandidateWatch = (
         );
     }
     const result = yield* runOwnedNativeTaskWatch(config, request, {
+      checkout,
       owner,
       watchId,
       consumerId: refBase.consumerId!,

@@ -1,4 +1,4 @@
-// oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import, effecttsgo/prefer-effect-array, effecttsgo/prefer-effect-string -- This explicitly invoked offline construction tool owns raw Git/Go process and private filesystem boundaries; no product runtime imports it.
+// oxlint-disable effecttsgo/prefer-effect-array, effecttsgo/prefer-effect-string -- This explicitly invoked offline construction tool owns raw Git/Go process and private filesystem boundaries; no product runtime imports it.
 import {createHash} from 'node:crypto';
 import {chmod, copyFile, cp, lstat, mkdir, mkdtemp, readdir, realpath, rm, stat, writeFile} from 'node:fs/promises';
 import {basename, delimiter, dirname, isAbsolute, join, parse, relative, resolve, sep} from 'node:path';

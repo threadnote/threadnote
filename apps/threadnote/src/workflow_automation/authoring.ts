@@ -159,7 +159,9 @@ const inspectSource = Effect.fn('workflowAutomation.authoring.inspectSource')(fu
 ) {
   const admitted = live ? undefined : yield* CurrentNativeJobSourceView;
   if (admitted) {
-    if (admitted.repo !== repo || paths.length < 1 || paths.length > 128 || new Set(paths).size !== paths.length)
+    // The admitted view records the checkout storage that the bound path names.
+    const root = yield* (yield* FileSystem.FileSystem).realPath(repo);
+    if (admitted.repo !== root || paths.length < 1 || paths.length > 128 || new Set(paths).size !== paths.length)
       return yield* fail('invalid-scope', 'Admitted source view differs from the original bound source scope.');
     const files = [] as {path: string; sha256: string}[];
     for (const relative of paths) {

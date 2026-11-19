@@ -9,7 +9,7 @@ const repositoryRoot = process.cwd();
 
 describe('standalone broker bootstrap', () => {
   it('selects the broker runtime before importing the application runtime', () => {
-    const standaloneSource = readSource('apps/threadnote/src/standalone.ts');
+    const standaloneSource = readSource('apps/threadnote/src/standalone_cli.ts');
     const applicationProgramStart = Effect.pipe(
       standaloneSource,
       EffectString.indexOf('async function applicationProgram'),

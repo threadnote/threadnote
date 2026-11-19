@@ -24,6 +24,7 @@ import {describe, expect} from 'vitest';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
 import {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
 import {registerWorkflowTaskTool} from '../../src/mcp/server/workflow.js';
+import {stopSupersededStandalonePrWatch} from '../../src/workflow_automation/standalone_pr_watch.js';
 import {runNativeTaskAction} from '../../src/workflow_automation/task_actions.js';
 import {runNativeWatch} from '../../src/workflow_automation/watch.js';
 import {readNativeWatch, writeNativeWatch} from '../../src/workflow_automation/watch_store.js';
@@ -67,6 +68,8 @@ const setup = Effect.gen(function* () {
   let watchId = '';
   let spawns = 0;
   let spawnSucceeds = true;
+  let collectorAlive = true;
+  const livePids = new Set<number>();
   let remoteBase = 'main';
   let remoteRepository = 'example/repo';
   const commands = CommandExecutor.of({
@@ -101,6 +104,7 @@ const setup = Effect.gen(function* () {
         const index = args.indexOf('--watch-id');
         watchId = args[index + 1];
         if (!spawnSucceeds) return false;
+        collectorAlive = true;
         const stored = yield* readNativeWatch(config, watchId);
         if (!stored?.envelope.collector) return false;
         yield* writeNativeWatch(
@@ -113,7 +117,7 @@ const setup = Effect.gen(function* () {
   });
   const fakeSystem = SystemInfo.of({
     ...system,
-    isProcessRunning: pid => pid === 77777,
+    isProcessRunning: pid => (pid === 77777 && collectorAlive) || livePids.has(pid),
     processStartIdentity: () => succeedUndefined,
     canonicalProcessStartIdentity: () => succeedUndefined,
   });
@@ -134,6 +138,22 @@ const setup = Effect.gen(function* () {
     setSpawnSucceeds: (succeeds: boolean) => {
       spawnSucceeds = succeeds;
     },
+    /** Marks another collector process, such as a workflow-bound successor's, as running or exited. */
+    setProcessAlive: (pid: number, alive: boolean) => {
+      if (alive) livePids.add(pid);
+      else livePids.delete(pid);
+    },
+    /** Simulates the collector's own exit after a stop, which overwrites its collector reason. */
+    exitCollector: Effect.gen(function* () {
+      const stored = yield* readNativeWatch(config, watchId);
+      if (!stored?.envelope.collector) throw new Error('Expected a collector');
+      yield* writeNativeWatch(
+        config,
+        {...stored.envelope, collector: {...stored.envelope.collector, status: 'stopped', reason: 'stop-requested'}},
+        stored.revision,
+      );
+      collectorAlive = false;
+    }),
     setRemoteBase: (base: string) => {
       remoteBase = base;
     },
@@ -299,11 +319,21 @@ describe('standalone PR watches', () => {
           {operation: 'inspect', wakeup: {...wakeup, threadId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'}},
           {operation: 'renew', takeover: true},
           {operation: 'complete'},
-          {operation: 'inspect', runId: 'fake-run'},
+          {operation: 'inspect', runId: 'fake-run', phaseId: 'one'},
           {operation: 'start', wakeup: {...wakeup, threadId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'}},
         ]) {
           expect((yield* f.call({watchRef, ...fields}).pipe(Effect.result))._tag).toBe('Failure');
         }
+        // A run identifier without workflow proof never blocks or upgrades standalone monitoring.
+        expect(yield* f.call({operation: 'inspect', watchRef, runId: 'task-without-delivery'})).toMatchObject({
+          watchId: started.watchId,
+          authority: 'monitor-only',
+        });
+        expect(yield* f.call({operation: 'start', prUrl, wakeup, runId: 'task-without-delivery'})).toMatchObject({
+          status: 'watching',
+          watchRef,
+          authority: 'monitor-only',
+        });
         const foreign = f.path.join(f.home, 'foreign');
         yield* f.fs.makeDirectory(foreign);
         yield* runCommandEffect('git', ['init', foreign]);
@@ -429,6 +459,79 @@ describe('standalone PR watches', () => {
       });
       expect(stoppedFixture.spawns()).toBe(1);
     }).pipe(run),
+  );
+
+  effectIt.effect(
+    'revives a superseded watch after its workflow-bound successor stops or exits, but never an explicit stop',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* setup;
+        const watchRef = String(object(yield* f.call({operation: 'start', prUrl, wakeup})).watchRef);
+        const successorId = 'pr-' + EffectString.repeat(48)('b');
+        const checkout = yield* f.fs.realPath(f.repo);
+        const supersede = (by: string) =>
+          stopSupersededStandalonePrWatch(f.config, checkout, prUrl, by).pipe(
+            Effect.provideService(CommandExecutor, f.commands),
+            Effect.provideService(SystemInfo, f.system),
+          );
+        // A successor stands in for a workflow-bound watch: same PR, an attached consumer, a live collector.
+        const started = yield* readNativeWatch(f.config, f.getWatchId());
+        const collector = started?.envelope.collector;
+        if (!started || !collector) throw new Error('Expected the started standalone watch');
+        const successorOf = (id: string, pid: number) => ({
+          ...started.envelope,
+          state: {...started.envelope.state, watchId: id},
+          collector: {...collector, pid, status: 'running' as const},
+        });
+        const successor = successorOf(successorId, 88888);
+        // A successor that does not exist or whose collector is dead does not monitor the PR.
+        expect(yield* supersede(successorId)).toBeUndefined();
+        yield* writeNativeWatch(f.config, successor, null);
+        expect(yield* supersede(successorId)).toBeUndefined();
+        f.setProcessAlive(88888, true);
+        expect(yield* supersede(successorId)).toBe(f.getWatchId());
+        expect(yield* supersede(successorId)).toBeUndefined();
+        // A later workflow-bound watch replaces the recorded successor.
+        const laterId = 'pr-' + EffectString.repeat(48)('c');
+        yield* writeNativeWatch(f.config, successorOf(laterId, 88889), null);
+        f.setProcessAlive(88889, true);
+        expect(yield* supersede(laterId)).toBe(f.getWatchId());
+        expect((yield* readNativeWatch(f.config, f.getWatchId()))?.envelope).toMatchObject({
+          stopRequested: true,
+          stopReason: 'superseded',
+          supersededBy: laterId,
+        });
+        expect(yield* supersede(successorId)).toBe(f.getWatchId());
+        yield* f.exitCollector;
+        expect(yield* f.call({operation: 'start', prUrl, wakeup}).pipe(Effect.result)).toMatchObject({
+          failure: {code: 'watch-superseded', message: expect.stringContaining(successorId)},
+        });
+        expect(f.spawns()).toBe(1);
+        // A successor whose collector exited no longer monitors the PR.
+        f.setProcessAlive(88888, false);
+        const afterExit = object(yield* f.call({operation: 'start', prUrl, wakeup}));
+        expect(afterExit).toMatchObject({status: 'watching', watchRef, authority: 'monitor-only'});
+        expect(f.spawns()).toBe(2);
+
+        f.setProcessAlive(88888, true);
+        expect(yield* supersede(successorId)).toBe(f.getWatchId());
+        yield* f.exitCollector;
+        const active = yield* readNativeWatch(f.config, successorId);
+        yield* writeNativeWatch(f.config, {...successor, stopRequested: true}, active?.revision ?? null);
+        const revived = object(yield* f.call({operation: 'start', prUrl, wakeup}));
+        expect(revived).toMatchObject({status: 'watching', watchRef, authority: 'monitor-only'});
+        expect(object(revived.result)).toMatchObject({stopRequested: false, collector: {alive: true}});
+        expect(f.spawns()).toBe(3);
+
+        // An explicit stop after a handover withdraws revival.
+        const stoppedSuccessor = yield* readNativeWatch(f.config, successorId);
+        yield* writeNativeWatch(f.config, successor, stoppedSuccessor?.revision ?? null);
+        expect(yield* supersede(successorId)).toBe(f.getWatchId());
+        yield* f.call({operation: 'stop', watchRef});
+        yield* f.exitCollector;
+        expect(object(yield* f.call({operation: 'start', prUrl, wakeup})).status).toBe('watch-stopped');
+        expect(f.spawns()).toBe(3);
+      }).pipe(run),
   );
 
   effectIt.effect('reports a stop observed during setup inspection from the same fresh health result', () =>

@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@threadnote/platform": "workspace:*",
-    "effect": "4.1.2"
+    "effect": "4.1.4"
   },
   "devDependencies": {
     "@threadnote/testing": "workspace:*",

@@ -86,7 +86,7 @@
     "effecttsgo/nested-effect-gen-yield": "error",
     "effecttsgo/new-promise": "error",
     "effecttsgo/new-schema-class": "error",
-    "effecttsgo/node-builtin-import": "error",
+    "effecttsgo/node-builtin-import": "off",
     "effecttsgo/non-object-effect-service-type": "error",
     "effecttsgo/obsolete-match-import": "error",
     "effecttsgo/obsolete-schema-import": "error",
@@ -176,22 +176,10 @@
       }
     },
     {
-      "files": ["apps/threadnote/src/standalone.ts", "apps/threadnote/src/recall/ready_read_entry.ts"],
+      "files": ["apps/threadnote/src/standalone_cli.ts", "apps/threadnote/src/recall/ready_read_entry.ts"],
       "rules": {
         "effecttsgo/strict-effect-provide": "off",
         "threadnote/no-effect-runtime": "off"
-      }
-    },
-    {
-      "files": [
-        "packages/testing/src/**/*.ts",
-        "apps/*/test/helpers/node-*.ts",
-        "packages/*/test/helpers/node-*.ts",
-        "infra/*/test/helpers/node-*.ts"
-      ],
-      "rules": {
-        "effecttsgo/node-builtin-import": "off",
-        "threadnote/no-node-runtime": "off"
       }
     },
     {

@@ -32,6 +32,7 @@ import {
   recallIndexDatabaseFilename,
 } from '@threadnote/recall/index';
 import {RecallReadyReadBoundary, RecallReadyReadBoundaryError} from '@threadnote/recall/read_boundary';
+import {RECALL_RERANKER_WINDOW_WARM_MILLISECONDS, warmRecallRerankerWindow} from '@threadnote/recall/sections_read';
 import {formatMemoryDocument} from '@threadnote/memory/document';
 import {buildRecallTopicalCorpusStatistics} from '@threadnote/recall/rank';
 import {
@@ -75,6 +76,8 @@ describe('recall runtime orchestration', () => {
     [FC.integer({min: 0, max: 1024}), FC.integer({min: 1, max: 4})],
     ([suffix, count]) =>
       Effect.gen(function* () {
+        // No selected reranker model.
+        inference.rerank.mockReturnValue(Effect.void);
         const home = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'threadnote-closing-exact-')));
         homes.push(home);
         const config = {
@@ -115,7 +118,6 @@ describe('recall runtime orchestration', () => {
         });
         const input = {
           allowExactRescue: false,
-          allowReranker: false,
           feedbackQuery: needle,
           includeInactive: false,
           limit: count,
@@ -579,6 +581,30 @@ describe('recall runtime orchestration', () => {
       expect(inference.rerank).toHaveBeenCalledTimes(1);
     }),
   );
+  effectIt.effect('stops a reranker window warm-up that does not finish and keeps the cached scores', () =>
+    Effect.gen(function* () {
+      inference.rerank.mockReturnValue(Effect.never);
+      const uri = 'threadnote://user/tester/memories/durable/window.md';
+      const cache = createRecallRerankerCache();
+      // A score cached by an earlier pass for another candidate.
+      const cachedKey = 'threadnote://user/tester/memories/durable/cached.md\u0000cached anchor';
+      cache.scores.set(cachedKey, 0.75);
+      const warm = yield* warmRecallRerankerWindow(
+        {agentContextHome: '/unused'},
+        'window anchor',
+        {
+          ranked: [{category: 'memories', contextType: 'memory', score: 0, snippet: '', uri}],
+          expansionCandidates: [{text: 'window anchor', uri}],
+        },
+        1,
+        cache,
+      ).pipe(Effect.forkChild);
+      yield* TestClock.adjust(RECALL_RERANKER_WINDOW_WARM_MILLISECONDS);
+      yield* Fiber.join(warm);
+      expect(inference.rerank).toHaveBeenCalledTimes(1);
+      expect(cache).toEqual({scores: new Map([[cachedKey, 0.75]]), unavailable: false});
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
   effectIt.effect('drops stale semantic scores when the ranked lexical snapshot has advanced', () =>
     Effect.gen(function* () {
       const home = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'threadnote-recall-semantic-generation-')));
@@ -944,32 +970,40 @@ describe('recall runtime orchestration', () => {
       expect(recalled.output).toContain('threadnote repair');
     }),
   );
-  effectIt.effect('keeps unexpected ready worker failure distinct from unavailable snapshots', () =>
-    Effect.gen(function* () {
-      const home = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'threadnote-ready-operational-failure-')));
-      homes.push(home);
-      const recalled = yield* captureConsole(
-        runRecall(
-          {
-            account: 'local',
-            agentContextHome: home,
-            agentId: 'fixture',
-            manifestPath: join(home, 'manifest.yaml'),
-            user: 'tester',
-          },
-          {inferScope: false, query: 'operational failure anchor', threshold: '0.1'},
-        ),
-      ).pipe(
-        Effect.provideService(RecallReadyReadBoundary, {
-          read: () => Effect.fail(RecallReadyReadBoundaryError.make({reason: 'worker-failed'})),
-        }),
-      );
-      expect(recalled.value.warnings).toEqual([expect.objectContaining({code: 'lexical_read_failed'})]);
-      expect(recalled.output).toContain('ready lexical read failed');
-      expect(recalled.output).toContain('threadnote doctor --dry-run');
-      expect(recalled.output).not.toContain('threadnote repair');
-    }).pipe(provideTestLayer(ApplicationLayer)),
-  );
+  // Doctor can inspect an operational failure, but not a size limit.
+  for (const [reason, remediation] of [
+    ['worker-failed', 'threadnote doctor --dry-run'],
+    ['invalid-protocol', 'threadnote doctor --dry-run'],
+    ['output-limit', 'threadnote report-issue'],
+    ['input-limit', 'threadnote report-issue'],
+  ] as const) {
+    effectIt.effect(`keeps unexpected ready worker failure (${reason}) distinct from unavailable snapshots`, () =>
+      Effect.gen(function* () {
+        const home = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'threadnote-ready-operational-failure-')));
+        homes.push(home);
+        const recalled = yield* captureConsole(
+          runRecall(
+            {
+              account: 'local',
+              agentContextHome: home,
+              agentId: 'fixture',
+              manifestPath: join(home, 'manifest.yaml'),
+              user: 'tester',
+            },
+            {inferScope: false, query: 'operational failure anchor', threshold: '0.1'},
+          ),
+        ).pipe(
+          Effect.provideService(RecallReadyReadBoundary, {
+            read: () => Effect.fail(RecallReadyReadBoundaryError.make({reason})),
+          }),
+        );
+        expect(recalled.value.warnings).toEqual([expect.objectContaining({code: 'lexical_read_failed', reason})]);
+        for (const command of ['threadnote doctor --dry-run', 'threadnote report-issue'])
+          expect(EffectString.includes(command)(recalled.output), command).toBe(command === remediation);
+        expect(recalled.output).not.toContain('threadnote repair');
+      }).pipe(provideTestLayer(ApplicationLayer)),
+    );
+  }
   effectIt.effect('uses a complete ranked expansion vocabulary without opening the lexical index', () =>
     Effect.gen(function* () {
       const root = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'threadnote-expansion-ranked-')));

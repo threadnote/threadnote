@@ -15,7 +15,7 @@ import {NativeCyclePacketOptionsSchema} from '@threadnote/workflow-automations/c
 import {NativeCycleReviewSchema} from '@threadnote/workflow-automations/cycle-review';
 import {NativeCycleValidationSchema} from '@threadnote/workflow-automations/cycle';
 import {NativeTaskAnchorSchema} from '@threadnote/workflow-automations/task';
-import {NativeCompactIntentSchema} from '@threadnote/workflow-automations/authoring';
+import {NativeCompactIntentSchema, NativePlanBusinessShapeSchema} from '@threadnote/workflow-automations/authoring';
 import {
   fillNativeNext,
   nativeNextForTaskAction,
@@ -38,7 +38,9 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
         callerCwd: McpInput.requiredString('Absolute original checkout'),
         featureName: McpInput.string('Start feature name'),
         kind: Schema.optionalKey(Schema.Literals(['spec', 'plan'])),
-        contentFile: McpInput.string('Business JSON file; omit format/id/project/source/spec/compactOrigin'),
+        contentFile: McpInput.string(
+          'Business JSON file; omit format/id/project/source/spec/compactOrigin; evidenceRefs may be URIs',
+        ),
         saveMode: Schema.optionalKey(Schema.Literal('background')),
         installationTarget: McpInput.string('Required for start; installed target for authoring job resume'),
         graphProject: McpInput.string('New task graph project'),
@@ -143,11 +145,11 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     'workflow_task_compact_expand',
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
-      description: 'Expand native plan on the same compact-origin root.',
+      description: 'Expand workflow_task_author plan business JSON on the compact-origin root.',
       inputSchema: {
-        runId: McpInput.requiredString(),
+        runId: McpInput.requiredString('runId from workflow_task_start'),
         callerCwd: McpInput.requiredString(),
-        document: Schema.Unknown,
+        document: NativePlanBusinessShapeSchema,
       },
     },
     Effect.fn('mcp_server.workflowTaskCompactExpand')(function* ({runId, callerCwd, document}) {
@@ -167,7 +169,8 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
         presentedIntentHash: McpInput.requiredString('Complete approval packet intent hash'),
         userResponse: McpInput.string('Actual displayed exact-intent response'),
         userDecision: Schema.optionalKey(Schema.Literals(['approve', 'reject', 'defer'])),
-        baseBranch: McpInput.string('Exact base branch for a new local cycle'),
+        baseBranch: McpInput.string('Exact base branch for a new cycle'),
+        delivery: Schema.optionalKey(Schema.Literals(['local', 'commit', 'pr'])),
         reconcileReason: McpInput.string('Reconciliation reason'),
         bindings: Schema.optionalKey(
           Schema.Record(Schema.String, Schema.Struct({branch: Schema.String, baseBranch: Schema.String})),
@@ -581,16 +584,16 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Monitor standalone or canonical/candidate/supplemental PR watches with distinct proof. Standalone grants no delivery/merge authority. Relay noticeRefs only; persist dispositions before ACK with current refs.',
+        'Monitor standalone or canonical/candidate/supplemental PR watches with distinct proof. Relay noticeRefs only; persist dispositions before ACK with current refs.',
       inputSchema: {
-        runId: McpInput.string('Omit for standalone'),
+        runId: McpInput.string('With prUrl or watchRef, runId is ignored and the watch is monitor-only.'),
         prUrl: McpInput.string(),
         watchRef: McpInput.string(),
         callerCwd: McpInput.requiredString(),
         validationRef: McpInput.string(),
         deliveryRef: McpInput.string('PR delivery ref; provisional inspect/stop may omit'),
         ...Struct.omit(NativeTaskPrWatchFieldsSchema.fields, ['noticeRef']),
-        noticeRef: McpInput.string('Relay only; retain event disposition; ACK current refs.'),
+        noticeRef: McpInput.string(),
         snapshotRef: McpInput.string('Candidate snapshot; diagnostics only'),
         candidateWatchRef: McpInput.string(),
         supplementalRef: McpInput.string('Completed-local publication owner'),

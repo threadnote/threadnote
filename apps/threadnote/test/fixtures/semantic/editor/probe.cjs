@@ -1,4 +1,4 @@
-/* oxlint-disable typescript/no-require-imports, effecttsgo/node-builtin-import -- VS Code extension tests load CommonJS and the host filesystem APIs; Bun/Effect are not present in the editor runtime. */
+/* oxlint-disable typescript/no-require-imports -- VS Code extension tests load CommonJS and the host filesystem APIs; Bun/Effect are not present in the editor runtime. */
 /* oxlint-disable eslint/no-undef -- CommonJS exports/require are supplied by the real VS Code extension host. */
 /* oxlint-disable effecttsgo/prefer-effect-array -- This standalone extension fixture declares no Effect dependency and runs in the real editor host. */
 /* Disposable extension-host feasibility experiment. Never loaded by the product. */

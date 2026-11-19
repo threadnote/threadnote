@@ -11,6 +11,8 @@ const confirmation = Schema.Struct({
   intentHash: digest,
   decision: Schema.Literal('approved'),
   response: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+  /** The compact delivery that the response approved; an approval without it approved local delivery. */
+  delivery: Schema.optionalKey(Schema.Literals(['commit', 'pr'])),
 });
 const review = Schema.Struct({
   documentHash: digest,

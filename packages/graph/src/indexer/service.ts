@@ -8,6 +8,8 @@ import {
 import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import {observeCodeGraphSemanticStatus} from '../vector/status.js';
+import {readCodeGraphEmbeddingDemandLane} from '../vector/demand.js';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {completeCodeGraphDeferredVectors, withCodeGraphDeferredCompletionReporter} from '../vector/publication.js';
 import {
   CODE_GRAPH_EXPECTED_SCOPE_ID_ENV,
@@ -138,7 +140,6 @@ import {
 } from '../runtime_ports.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
-
 export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGraphIndexerShape>()(
   '@threadnote/graph/indexer/service/CodeGraphIndexer',
 ) {
@@ -291,10 +292,10 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
         attempt = 0,
         bypassCachedFacts = false,
       ): Effect.Effect<CodeGraphIndexSummary, unknown> => {
-        let publishedBackgroundDemand = false;
+        let publishedEmbeddingDemand = false;
         const vectorPolicy = codeGraphIndexVectorPolicy(request);
         const publicationStore =
-          vectorPolicy !== 'background'
+          vectorPolicy === 'wait'
             ? unobservedStore
             : {
                 ...unobservedStore,
@@ -307,11 +308,33 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                       identity.worktreeId,
                       candidate?.scopeId,
                     );
-                    yield* unobservedStore.promote(databasePath, identity, snapshotId, {
-                      ...promotionOptions,
-                      backgroundEmbeddingDemand: true,
-                    });
-                    if (previous?.id !== snapshotId) publishedBackgroundDemand = true;
+                    yield* unobservedStore.promote(
+                      databasePath,
+                      identity,
+                      snapshotId,
+                      vectorPolicy === 'background'
+                        ? {...promotionOptions, backgroundEmbeddingDemand: true}
+                        : promotionOptions,
+                    );
+                    if (previous?.id === snapshotId) return;
+                    if (vectorPolicy === 'background') {
+                      publishedEmbeddingDemand = true;
+                      return;
+                    }
+                    // The promotion has committed; an unreadable lane only skips the best-effort wake.
+                    const lane = yield* unobservedStore
+                      .withSession(
+                        databasePath,
+                        Effect.gen(function* () {
+                          return yield* readCodeGraphEmbeddingDemandLane(yield* SqlClient.SqlClient, {
+                            worktreeId: identity.worktreeId,
+                            ...(candidate?.scopeId === undefined ? {} : {scopeId: candidate.scopeId}),
+                          });
+                        }),
+                        {readOnly: true},
+                      )
+                      .pipe(Effect.orElseSucceed(() => undefined));
+                    publishedEmbeddingDemand = lane?.snapshotId === snapshotId && lane.state !== 'cancelled';
                   }),
               };
         return Effect.scoped(
@@ -1049,6 +1072,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                           languagePacks,
                           layout,
                           logicalSnapshotId,
+                          materializedShards: options.materializedShards,
                           onProgress: options.onProgress,
                           persistentMaterializationTransactionBatchLimit:
                             options.persistentMaterializationTransactionBatchLimit,
@@ -1592,7 +1616,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
           ),
           Effect.ensuring(
             Effect.suspend(() =>
-              publishedBackgroundDemand && Option.isSome(embeddingWorker)
+              publishedEmbeddingDemand && Option.isSome(embeddingWorker)
                 ? embeddingWorker.value.wake(request.threadnoteHome).pipe(Effect.ignoreCause)
                 : Effect.void,
             ),
@@ -1949,10 +1973,8 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
     }),
   );
 }
-
 const CODE_GRAPH_SYNCHRONOUS_RECLAMATION_MINIMUM_FILES = 512;
 const CODE_GRAPH_SYNCHRONOUS_RECLAMATION_MINIMUM_RETAINED_SOURCE_BYTES = 16 * 1_048_576;
-
 /** @internal Keeps the synchronous GC barrier tied to source bytes that inventory actually retained. */
 export function codeGraphInventoryNeedsSynchronousReclamation(
   files: readonly Pick<CodeGraphInventoryFile, 'bytes' | 'content' | 'size'>[],
@@ -1966,7 +1988,6 @@ export function codeGraphInventoryNeedsSynchronousReclamation(
   }
   return false;
 }
-
 function codeGraphBuilderAdmissionClass(
   options: Pick<CodeGraphIndexOptions, 'admissionClass'>,
   environment: Readonly<Record<string, string | undefined>>,

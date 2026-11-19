@@ -4,7 +4,7 @@ import {runCommandEffect} from '@threadnote/platform/command';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import type {NativeCycleState} from '@threadnote/workflow-automations/cycle';
 import type {NativeCycleSnapshot} from '@threadnote/workflow-automations/cycle-review';
-import {captureNativeCycleSource, nativeCycleIsAncestor} from './cycle_git.js';
+import {captureNativeCycleSource, nativeCycleIsAncestor, resolveNativeCycleBase} from './cycle_git.js';
 import {verifyNativeCycleSameLabelRebasedBaseSource} from './cycle_merge.js';
 import {verifyNativeCycleSnapshotEvidence} from './cycle_recovery.js';
 
@@ -29,16 +29,14 @@ export const currentNativeCycleSnapshot = Effect.fn('workflowAutomation.cycle.ch
   if (phase) {
     const base = historicalComparison
       ? snapshot.declaredBaseHead
-      : EffectString.trim(
-          yield* git(repo, ['rev-parse', '--verify', '--end-of-options', phase.baseBranch + '^{commit}']).pipe(
-            Effect.mapError(() =>
-              fail(
-                'review-stale',
-                'The current declared base is unavailable; restore its approved binding before validation or publication.',
-              ),
+      : (yield* resolveNativeCycleBase(repo, phase.baseBranch).pipe(
+          Effect.mapError(() =>
+            fail(
+              'review-stale',
+              'The current declared base is unavailable; restore its approved binding before validation or publication.',
             ),
           ),
-        );
+        )).commit;
     const branch = EffectString.trim(yield* git(repo, ['branch', '--show-current']));
     // A phase on its own base branch advances that base with the commit it accepts; the tree check below binds it.
     const acceptedOwnBase = phase.baseBranch === phase.branch && acceptedHead !== undefined && base === acceptedHead;

@@ -1,4 +1,3 @@
-/* oxlint-disable effecttsgo/node-builtin-import -- Only disposable coordinator bootstrap files are removed; ledger PIDs are observed and never signalled. */
 import {createHash} from 'node:crypto';
 import {lstat, readFile, readdir, rm} from 'node:fs/promises';
 import {join} from 'node:path';

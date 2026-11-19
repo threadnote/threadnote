@@ -309,10 +309,17 @@ describe('compact code graph fact storage', () => {
     expect(() =>
       decodeStoredCodeGraphFact(JSON.stringify({...envelope, sha256: Effect.pipe('0', EffectString.repeat(64))})),
     ).toThrow(/integrity/);
-    expect(() => decodeStoredCodeGraphFact(JSON.stringify({...envelope, rawBytes: 1_024}))).toThrow();
+    // The declared size bounds decompression instead of only failing after full expansion.
+    expect(() => decodeStoredCodeGraphFact(JSON.stringify({...envelope, rawBytes: 1_024}))).toThrow(
+      /larger than 1024 bytes/,
+    );
     expect(() =>
       decodeStoredCodeGraphFact(JSON.stringify({...envelope, payload: `${requireString(envelope.payload)}\n`})),
     ).toThrow(/malformed|base64/);
+    // Lenient readers decode each of these; only the canonical spelling is accepted.
+    for (const payload of ['QR==', 'QUJD    QQ==', 'QUJDQQ==    ', '-_-_', 'QQ', 'QQ==QUJD']) {
+      expect(() => decodeStoredCodeGraphFact(JSON.stringify({...envelope, payload}))).toThrow(/base64/);
+    }
   });
 
   it('rejects malformed nested fact shapes at both persistence and decode boundaries', () => {

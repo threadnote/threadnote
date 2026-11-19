@@ -17,7 +17,7 @@ import {
   nativeTaskCardRef,
 } from '@threadnote/workflow-automations/task';
 import {stableJson} from '../workflow_memory/protocol.js';
-import {captureNativeCycleSource} from './cycle_git.js';
+import {captureNativeCycleSource, resolveNativeCycleBase} from './cycle_git.js';
 import {readNativeTaskView} from './task.js';
 import {
   persistNativeCycleOrdinaryMerge,
@@ -108,12 +108,7 @@ export const requalifyInvalidNativeTaskTail = (config: RuntimeConfig, input: unk
           return yield* fail(
             'References must bind this exact run, generation, checkout, phase, baseline and invalid source.',
           );
-        const liveBaseHead = yield* git(checkout, [
-          'rev-parse',
-          '--verify',
-          '--end-of-options',
-          phase.baseBranch + '^{commit}',
-        ]);
+        const liveBaseHead = (yield* resolveNativeCycleBase(checkout, phase.baseBranch)).commit;
         const captured = yield* captureNativeCycleSource(checkout, baseline.tree);
         const operationDigest = sha256HexSync(
           stableJson([

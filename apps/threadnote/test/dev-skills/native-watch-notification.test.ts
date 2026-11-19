@@ -38,6 +38,7 @@ import {
   decodeNativeWatchEnvelope,
   readNativeWatch,
   writeNativeWatch,
+  withNativeWatchCollectorLock,
   withNativeWatchControlLock,
 } from '../../src/workflow_automation/watch_store.js';
 import {
@@ -45,6 +46,7 @@ import {
   makeNativeWatchNotifier,
   maintainNativeWatchSubscription,
   nativeWatchCodexCandidatePaths,
+  resolveNativeWatchSessionWakeup,
 } from '../../src/workflow_automation/watch_notification.js';
 import {
   matchesTerminalNativeWatchArrival,
@@ -160,10 +162,11 @@ const arrive = Effect.fn('test.watchNotification.arrive')(function* (
 });
 const acknowledge = Effect.fn('test.watchNotification.acknowledge')(function* (
   f: Effect.Success<ReturnType<typeof fixture>>,
+  limit?: number,
 ) {
   const stored = yield* f.read();
   const at = yield* Clock.currentTimeMillis;
-  const relay = relayNativeWatch(stored.envelope.state, 'consumer', at);
+  const relay = relayNativeWatch(stored.envelope.state, 'consumer', at, limit);
   const state = acknowledgeNativeWatch(
     recordNativeWatchDispositions(
       relay.state,
@@ -462,6 +465,43 @@ effectIt.effect('refuses a skipped-probe binding that changed concurrently befor
   }).pipe(provide),
 );
 
+effectIt.effect('completes a Claude Code wakeup from PATH and the checkout but never guesses the session', () =>
+  Effect.gen(function* () {
+    const system = yield* SystemInfo;
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const shimBin = yield* fs.makeTempDirectoryScoped({prefix: 'native-watch-shim-'});
+    const bin = yield* fs.makeTempDirectoryScoped({prefix: 'native-watch-path-'});
+    // An extensionless npm shell shim earlier on PATH must not win on Windows, where it cannot be spawned.
+    yield* fs.writeFileString(path.join(shimBin, 'claude'), '#!/bin/sh\n');
+    // A drive-letter PATH entry cannot be split on ':', so the POSIX case runs only off Windows.
+    const platforms = system.platform === 'win32' ? (['win32'] as const) : (['win32', 'linux'] as const);
+    for (const platform of platforms) {
+      const launcher = path.join(bin, platform === 'win32' ? 'claude.exe' : 'claude');
+      yield* fs.writeFileString(launcher, '#!/bin/sh\n');
+      const withPath = Effect.provideService(SystemInfo, {
+        ...system,
+        platform,
+        environment: () => ({PATH: platform === 'win32' ? `${shimBin};${bin}` : `/missing-bin:${bin}`}),
+      });
+      const resolve = (input: Parameters<typeof resolveNativeWatchSessionWakeup>[0]) =>
+        resolveNativeWatchSessionWakeup(input, '/trusted/workspace').pipe(withPath);
+      expect(yield* resolve({host: 'claude-code', sessionId: target.threadId})).toEqual({
+        host: 'claude-code',
+        executable: launcher,
+        sessionId: target.threadId,
+        workspace: '/trusted/workspace',
+        exclusiveSession: true,
+      });
+      for (const input of [{host: 'claude-code' as const}, {host: 'cursor-cli' as const, sessionId: target.threadId}])
+        expect(yield* resolve(input).pipe(Effect.result)).toMatchObject({
+          failure: {code: 'host-registration-required'},
+        });
+      yield* fs.remove(launcher);
+    }
+  }).pipe(provide),
+);
+
 describe('native watch notification transport', () => {
   it('allows omitted Codex executables only on request input, never in persisted watch state', () => {
     const request = {
@@ -470,6 +510,25 @@ describe('native watch notification transport', () => {
     };
     expect(Schema.decodeUnknownSync(nativeWatchWakeupRequestSchema)(request)).toEqual(request);
     expect(() => Schema.decodeUnknownSync(nativeWatchWakeupSchema)(request)).toThrow();
+  });
+
+  it('registers a Claude Code session only through an absolute claude launcher', () => {
+    const registration = {
+      host: 'claude-code',
+      executable: '/home/user/.local/bin/claude',
+      sessionId: target.threadId,
+      workspace: '/trusted/workspace',
+      exclusiveSession: true,
+    };
+    expect(Schema.decodeUnknownSync(nativeWatchWakeupRequestSchema)(registration)).toEqual(registration);
+    expect(Schema.decodeUnknownSync(nativeWatchWakeupSchema)(registration)).toEqual(registration);
+    for (const executable of [
+      'claude',
+      '/bin/sh',
+      '/tmp/claude.cmd',
+      '/home/user/.local/share/claude/versions/2.1.327',
+    ])
+      expect(() => Schema.decodeUnknownSync(nativeWatchWakeupSchema)({...registration, executable})).toThrow();
   });
 
   it('bounds ID-only messages and rejects executable injection configuration', () => {
@@ -563,6 +622,30 @@ describe('native watch notification transport', () => {
       }),
       {numRuns: 30},
     );
+  });
+
+  it('rebases a never-sent range that skips unacknowledged backlog', () => {
+    let state = attachNativeWatchConsumer(
+      initializeNativeWatch('watch-1', 'https://github.com/test/repo/pull/1', 0),
+      {id: 'consumer', wakeupId: 'wakeup'},
+      0,
+    );
+    for (let index = 0; index < 2; index++)
+      state = recordNativeWatchLifecycle(state, 'watcher_error', 'error-' + index, 0);
+    const staged = stageNativeWatchNotification(
+      {
+        consumerId: 'consumer',
+        wakeupId: 'wakeup',
+        target,
+        lastConsumerAt: 0,
+        notifiedThrough: 1,
+        outbox: {key: 'watch-1:2:2', first: 2, last: 2, createdAt: 0, attempts: 0, nextAttemptAt: 0, status: 'pending'},
+      },
+      state,
+      0,
+    );
+    expect(staged).toMatchObject({notifiedThrough: 0, outbox: {key: 'watch-1:1:2', first: 1, last: 2}});
+    expect(stageNativeWatchNotification(staged, state, 1)).toBe(staged);
   });
 });
 
@@ -1316,14 +1399,28 @@ const cursorReply = {
     result: 'fixture completion',
   }),
 };
-const useCursor = Effect.fn('test.watchNotification.cursor')(function* (f: Effect.Success<ReturnType<typeof fixture>>) {
+const claudeTarget = {
+  host: 'claude-code' as const,
+  executable: '/trusted/claude',
+  sessionId: target.threadId,
+  workspace: '/trusted/workspace',
+  exclusiveSession: true as const,
+};
+const useTarget = Effect.fn('test.watchNotification.target')(function* (
+  f: Effect.Success<ReturnType<typeof fixture>>,
+  wakeup: unknown,
+) {
   const stored = yield* f.read();
   yield* writeNativeWatch(
     f.config,
-    {...stored.envelope, notification: {...stored.envelope.notification!, target: cursorTarget}},
+    decodeNativeWatchEnvelope({
+      ...stored.envelope,
+      notification: {...stored.envelope.notification!, target: wakeup},
+    }),
     stored.revision,
   );
 });
+const useCursor = (f: Effect.Success<ReturnType<typeof fixture>>) => useTarget(f, cursorTarget);
 
 effectIt.effect(
   'runs one exclusive Cursor continuation asynchronously and validates its exact completion session',
@@ -1433,14 +1530,123 @@ effectIt.effect('Cursor scope interruption cleans up its owned command and never
   }).pipe(provide),
 );
 
-effectIt.effect('refuses mismatched or unsuccessful Cursor completion receipts without claiming delivery', () =>
+effectIt.effect('resumes the exact Claude Code session in its workspace and records its completion receipt', () =>
   Effect.gen(function* () {
-    for (const response of [
-      {type: 'result', subtype: 'success', is_error: false, session_id: receipt},
-      {type: 'result', subtype: 'error', is_error: true, session_id: cursorTarget.sessionId},
-    ]) {
+    const f = yield* fixture(1);
+    yield* useTarget(f, claudeTarget);
+    const calls: {executable: string; args: readonly string[]; options?: CommandOptions}[] = [];
+    yield* f.drain().pipe(
+      commandLayer((executable, args, options) =>
+        Effect.sync(() => {
+          calls.push({executable, args, ...(options ? {options} : {})});
+          return {
+            ...success,
+            stdout: JSON.stringify({
+              type: 'result',
+              subtype: 'success',
+              is_error: false,
+              session_id: claudeTarget.sessionId,
+              result: 'fixture completion',
+            }),
+          };
+        }),
+      ),
+    );
+    expect(calls).toHaveLength(1);
+    const [call] = calls;
+    expect(call.executable).toBe(claudeTarget.executable);
+    expect(call.args.slice(0, -1)).toEqual(['--print', '--resume', claudeTarget.sessionId, '--output-format', 'json']);
+    expect(call.args.at(-1)).toMatch(/^Threadnote watch event\. Route=/u);
+    expect(call.options).toMatchObject({cwd: claudeTarget.workspace, timeoutMs: 0});
+    expect((yield* f.read()).envelope.notification).toMatchObject({
+      notifiedThrough: 1,
+      outbox: null,
+      lastReceipt: {kind: 'cli-session-completed', receipt: claudeTarget.sessionId},
+    });
+  }).pipe(provide, TestClock.withLive),
+);
+
+effectIt.effect(
+  'wakes a session again until it acknowledges every event, including events behind a pinned delivery',
+  () =>
+    Effect.gen(function* () {
       const f = yield* fixture(1);
-      yield* useCursor(f);
+      yield* useTarget(f, claudeTarget);
+      const keys: string[] = [];
+      const completion = {
+        ...success,
+        stdout: JSON.stringify({
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          session_id: claudeTarget.sessionId,
+        }),
+      };
+      const turn = <R>(work: Effect.Effect<void, unknown, R>) =>
+        f.drain().pipe(
+          commandLayer((_executable, args) =>
+            Effect.gen(function* () {
+              keys.push(JSON.parse(/Route=(\{.*?\})\. /u.exec(args.at(-1)!)![1]).eventKey);
+              yield* work;
+              return completion;
+            }),
+          ),
+        );
+      // The first turn relays and pins a delivery but ends before ACK.
+      yield* turn(
+        Effect.gen(function* () {
+          const stored = yield* f.read();
+          const relay = relayNativeWatch(stored.envelope.state, 'consumer', yield* Clock.currentTimeMillis);
+          yield* writeNativeWatch(f.config, {...stored.envelope, state: relay.state}, stored.revision);
+        }).pipe(Effect.orDie),
+      );
+      expect(keys).toEqual(['watch-1:1:1']);
+      const stored = yield* f.read();
+      const state = recordNativeWatchLifecycle(stored.envelope.state, 'watcher_error', 'new-review-comment', 0);
+      yield* writeNativeWatch(f.config, {...stored.envelope, state}, stored.revision);
+      // Each later turn acknowledges only the delivery that relay returns, which starts with the pinned older event.
+      yield* turn(acknowledge(f).pipe(Effect.orDie));
+      expect(keys).toEqual(['watch-1:1:1', 'watch-1:1:2', 'watch-1:2:2']);
+      const after = yield* f.read();
+      expect(after.envelope.state.acknowledged).toBe(2);
+      expect(after.envelope.notification).toMatchObject({notifiedThrough: 2, outbox: null});
+    }).pipe(provide, TestClock.withLive),
+);
+
+effectIt.effect('an arrived Codex notice with a partial ACK does not block wakes for later events', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture(2);
+    const keys: string[] = [];
+    const dispatch = f.dispatch().pipe(
+      commandLayer((_executable, args) => {
+        keys.push(JSON.parse(/Route=(\{.*?\})\. /u.exec(args[4])![1]).eventKey);
+        return Effect.succeed(success);
+      }),
+    );
+    yield* dispatch;
+    yield* arrive(f, {relayLimit: 1});
+    yield* acknowledge(f);
+    yield* dispatch;
+    expect(keys).toEqual(['watch-1:1:2']);
+    const stored = yield* f.read();
+    const state = recordNativeWatchLifecycle(stored.envelope.state, 'watcher_error', 'new-review-comment', 0);
+    yield* writeNativeWatch(f.config, {...stored.envelope, state}, stored.revision);
+    yield* dispatch;
+    yield* dispatch;
+    expect(keys).toEqual(['watch-1:1:2', 'watch-1:2:3']);
+  }).pipe(provide),
+);
+
+effectIt.effect('refuses mismatched or unsuccessful session completion receipts without claiming delivery', () =>
+  Effect.gen(function* () {
+    for (const [wakeup, response] of [
+      [cursorTarget, {type: 'result', subtype: 'success', is_error: false, session_id: receipt}],
+      [cursorTarget, {type: 'result', subtype: 'error', is_error: true, session_id: cursorTarget.sessionId}],
+      // Claude Code reports a signed-out or failed turn as subtype success with is_error true.
+      [claudeTarget, {type: 'result', subtype: 'success', is_error: true, session_id: claudeTarget.sessionId}],
+    ] as const) {
+      const f = yield* fixture(1);
+      yield* useTarget(f, wakeup);
       yield* f.drain().pipe(
         commandLayer(() => Effect.succeed({...success, stdout: JSON.stringify(response)})),
         TestClock.withLive,
@@ -1848,6 +2054,196 @@ effectIt.effect(
       yield* call({wakeup: dedicated, wakeupId: 'new-wakeup'});
       expect((yield* f.read()).envelope.notification?.target).toEqual(dedicated);
       expect(calls).toBe(1);
+    }).pipe(provide, TestClock.withLive),
+);
+
+/** A Cursor-hosted renew whose provider reads succeed and whose host replies come from `host`. */
+const renewCursorWatch =
+  (f: Effect.Success<ReturnType<typeof fixture>>, host: () => CommandResult) => (fields: Record<string, unknown>) =>
+    Effect.gen(function* () {
+      const system = yield* SystemInfo;
+      return yield* runNativeWatch(f.config, {
+        protocolVersion: 1,
+        executorVersion: 1,
+        action: 'watch',
+        command: 'renew',
+        watchId: 'watch-1',
+        pr: 'https://github.com/test/repo/pull/1',
+        consumerId: 'consumer',
+        wakeupId: 'wakeup',
+        wakeup: cursorTarget,
+        baseBranch: 'main',
+        headBranch: 'feature/one',
+        ...fields,
+      }).pipe(
+        Effect.provideService(SystemInfo, {...system, homeDirectory: f.userHome}),
+        commandLayer(executable =>
+          Effect.sync(() =>
+            executable === 'gh'
+              ? {
+                  exitCode: 0,
+                  stderr: '',
+                  stdout: JSON.stringify({
+                    number: 1,
+                    url: 'https://github.com/test/repo/pull/1',
+                    baseRepository: 'test/repo',
+                    baseBranch: 'main',
+                    headBranch: 'feature/one',
+                  }),
+                }
+              : host(),
+          ),
+        ),
+      );
+    });
+
+effectIt.effect('same-host renewal recovers an ambiguous wake after merge without replaying acknowledged events', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture(2);
+    yield* useCursor(f);
+    const staged = yield* f.read();
+    // Event 1 woke the host; the wake for event 2 became ambiguous when its collector stopped.
+    const lastReceipt = {
+      key: 'watch-1:1:1',
+      receipt: cursorTarget.sessionId,
+      attemptId: token,
+      kind: 'cli-session-completed' as const,
+      at: 0,
+    };
+    const notification = stageNativeWatchNotification(
+      {...staged.envelope.notification!, notifiedThrough: 1, lastReceipt},
+      staged.envelope.state,
+      0,
+    );
+    const relay = relayNativeWatch(staged.envelope.state, 'consumer', 0);
+    yield* writeNativeWatch(
+      f.config,
+      {
+        ...staged.envelope,
+        state: {
+          ...acknowledgeNativeWatch(
+            recordNativeWatchDispositions(
+              relay.state,
+              'consumer',
+              relay.delivery!.id,
+              Array.map(relay.delivery!.events, event => ({
+                eventId: event.id,
+                status: 'resolved' as const,
+                reason: 'handled by polling',
+                evidence: 'fixture',
+              })),
+              0,
+            ),
+            'consumer',
+            relay.delivery!.id,
+            0,
+          ),
+          prState: 'merged',
+        },
+        collector: {...staged.envelope.collector!, status: 'terminal', pid: 0},
+        notification: {
+          ...notification,
+          outbox: {
+            ...notification.outbox!,
+            status: 'failed',
+            error: 'host-delivery-ambiguous',
+            attempts: 1,
+            attemptId: receipt,
+            collectorToken: token,
+          },
+        },
+      },
+      staged.revision,
+    );
+    yield* claimNativeWatchHostSession(f.userHome, {
+      format: 'threadnote-native-watch-host-session',
+      version: 1,
+      sessionId: cursorTarget.sessionId,
+      home: f.config.agentContextHome,
+      watchId: 'watch-1',
+      consumerId: 'consumer',
+      wakeupId: 'wakeup',
+      attemptId: receipt,
+      collectorToken: token,
+    });
+    let hostCalls = 0;
+    const renew = renewCursorWatch(f, () => {
+      hostCalls++;
+      return cursorReply;
+    });
+    expect(yield* renew({takeover: true}).pipe(Effect.result)).toMatchObject({failure: {code: 'invalid-request'}});
+    yield* renew({});
+    expect((yield* f.read()).envelope.notification?.outbox).toMatchObject({error: 'host-delivery-ambiguous'});
+    yield* renew({recoverWakeup: true});
+    const after = yield* f.read();
+    expect(hostCalls).toBe(0);
+    expect(after.envelope.notification).toMatchObject({notifiedThrough: 2, outbox: null, lastReceipt});
+    expect(
+      yield* (yield* FileSystem.FileSystem).exists(
+        f.userHome + '/.threadnote/native-watch-host-sessions-v1/cursor-' + cursorTarget.sessionId + '.json',
+      ),
+    ).toBe(false);
+  }).pipe(provide, TestClock.withLive),
+);
+
+effectIt.effect(
+  'same-host recovery after merge waits for an owned attempt, then wakes once for unacknowledged events',
+  () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(2);
+      yield* useCursor(f);
+      const staged = yield* f.read();
+      const notification = stageNativeWatchNotification(staged.envelope.notification!, staged.envelope.state, 0);
+      // The collector stopped while it was sending the wake for both events.
+      yield* writeNativeWatch(
+        f.config,
+        {
+          ...staged.envelope,
+          state: {...staged.envelope.state, prState: 'merged'},
+          collector: {...staged.envelope.collector!, status: 'terminal', pid: 0},
+          notification: {
+            ...notification,
+            outbox: {
+              ...notification.outbox!,
+              status: 'sending',
+              attempts: 1,
+              attemptId: receipt,
+              collectorToken: token,
+            },
+          },
+        },
+        staged.revision,
+      );
+      yield* claimNativeWatchHostSession(f.userHome, {
+        format: 'threadnote-native-watch-host-session',
+        version: 1,
+        sessionId: cursorTarget.sessionId,
+        home: f.config.agentContextHome,
+        watchId: 'watch-1',
+        consumerId: 'consumer',
+        wakeupId: 'wakeup',
+        attemptId: receipt,
+        collectorToken: token,
+      });
+      let hostCalls = 0;
+      const recover = renewCursorWatch(f, () => {
+        hostCalls++;
+        return cursorReply;
+      })({recoverWakeup: true});
+      // Another recovery holds the collector lock and owns the sending attempt.
+      expect(yield* withNativeWatchCollectorLock(f.config, 'watch-1', recover.pipe(Effect.result))).toMatchObject({
+        failure: {code: 'wakeup-in-flight'},
+      });
+      expect(hostCalls).toBe(0);
+      yield* recover;
+      expect(hostCalls).toBe(1);
+      expect((yield* f.read()).envelope.notification).toMatchObject({
+        notifiedThrough: 2,
+        outbox: null,
+        lastReceipt: {receipt: cursorTarget.sessionId},
+      });
+      yield* recover;
+      expect(hostCalls).toBe(1);
     }).pipe(provide, TestClock.withLive),
 );
 

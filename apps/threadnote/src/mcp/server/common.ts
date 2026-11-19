@@ -231,6 +231,7 @@ export function optionalResourceUri(
   value: string | undefined,
   toolName: string,
   fieldName = 'uri',
+  options: {readonly personalMemoryUser?: string} = {},
 ): CheckedOptionalText {
   const normalized = Effect2.pipe(value, effectOptionalString =>
     effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
@@ -239,11 +240,14 @@ export function optionalResourceUri(
     return {ok: true, value: undefined};
   }
   try {
-    return {ok: true, value: parseResourceId(normalized).canonicalUri};
+    return {
+      ok: true,
+      value: parseResourceId(expandPersonalMemoryReference(normalized, options.personalMemoryUser)).canonicalUri,
+    };
   } catch {
     return {
       error: argumentError(
-        `Threadnote MCP tool "${toolName}" optional "${fieldName}" must be a threadnote:// URI. Received: ${normalized}`,
+        `Threadnote MCP tool "${toolName}" optional "${fieldName}" must be a threadnote:// URI${options.personalMemoryUser === undefined ? '' : ' or a compact memories/ path returned by Threadnote'}. Received: ${normalized}`,
       ),
       ok: false,
     };

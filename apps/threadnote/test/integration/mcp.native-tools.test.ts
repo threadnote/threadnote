@@ -283,7 +283,7 @@ const WORKFLOW_TASK_MUTATING_TOOL_MAX_BYTES = {
   workflow_task_author: 3_200,
   workflow_task_start: 3_200,
   workflow_task_compact_start: 2_500,
-  workflow_task_compact_expand: 800,
+  workflow_task_compact_expand: 2_300,
   workflow_task_compact_confirm: 2_500,
   workflow_task_work: 1_800,
   workflow_task_control: 2_400,
@@ -557,51 +557,60 @@ describe('Threadnote MCP toolsets', () => {
     const word = fc.stringMatching(/^[a-z]{1,8}$/u);
     const topic = fc.stringMatching(/^[a-z][a-z0-9-]{0,12}$/u);
     fc.assert(
-      fc.property(word, word, word, topic, (first, last, foreign, memoryTopic) => {
-        const currentUser = `${Effect.pipe(first, EffectString.toUpperCase)}.${last} ${first}`;
-        const canonicalUser = `${first}.${last}-${first}`;
-        const rawCurrentUri = `threadnote://user/${encodeURIComponent(currentUser)}/memories/durable/projects/threadnote/${memoryTopic}.md`;
-        const canonicalCurrentUri = `threadnote://user/${canonicalUser}/memories/durable/projects/threadnote/${memoryTopic}.md`;
-        const foreignUri = `threadnote://user/${encodeURIComponent(foreign)}/memories/durable/projects/threadnote/${memoryTopic}.md`;
-        const input = EffectArray.join(
-          [rawCurrentUri, canonicalCurrentUri, foreignUri, 'threadnote://memory/tn_stable'],
-          '\n',
-        );
-        const expected = EffectArray.join(
-          [
-            `memories/durable/projects/threadnote/${memoryTopic}.md`,
-            `memories/durable/projects/threadnote/${memoryTopic}.md`,
-            foreignUri,
-            'threadnote://memory/tn_stable',
-          ],
-          '\n',
-        );
-        const compacted = compactPersonalMemoryReferences(input, currentUser);
-        expect(compacted).toBe(expected);
-        expect(compactPersonalMemoryReferences(compacted, currentUser)).toBe(expected);
-        const sharedCurrentUri = Effect.pipe(
-          rawCurrentUri,
-          EffectString.replace('/memories/', '/memories/shared/default/'),
-        );
-        const structured = {
-          nested: [{uri: rawCurrentUri}, {uri: sharedCurrentUri}, {uri: foreignUri}],
-          text: `Read ${canonicalCurrentUri} first.`,
-        };
-        const original = JSON.stringify(structured);
-        const compactedStructured = compactPersonalMemoryStructuredReferences(structured, currentUser);
-        expect(compactedStructured).toEqual({
-          nested: [
-            {uri: `memories/durable/projects/threadnote/${memoryTopic}.md`},
-            {uri: `memories/shared/default/durable/projects/threadnote/${memoryTopic}.md`},
-            {uri: foreignUri},
-          ],
-          text: `Read memories/durable/projects/threadnote/${memoryTopic}.md first.`,
-        });
-        expect(JSON.stringify(structured)).toBe(original);
-        expect(compactPersonalMemoryStructuredReferences(compactedStructured, currentUser)).toEqual(
-          compactedStructured,
-        );
-      }),
+      // A user segment named like a Windows device (prn.a-prn) is rejected by the resource parser.
+      fc.property(
+        word.filter(value => !/^(?:con|prn|aux|nul)$/u.test(value)),
+        word,
+        word,
+        topic,
+        (first, last, foreign, memoryTopic) => {
+          const currentUser = `${Effect.pipe(first, EffectString.toUpperCase)}.${last} ${first}`;
+          const canonicalUser = `${first}.${last}-${first}`;
+          const rawCurrentUri = `threadnote://user/${encodeURIComponent(currentUser)}/memories/durable/projects/threadnote/${memoryTopic}.md`;
+          const canonicalCurrentUri = `threadnote://user/${canonicalUser}/memories/durable/projects/threadnote/${memoryTopic}.md`;
+          const foreignUri = `threadnote://user/${encodeURIComponent(foreign)}/memories/durable/projects/threadnote/${memoryTopic}.md`;
+          const input = EffectArray.join(
+            [rawCurrentUri, canonicalCurrentUri, foreignUri, 'threadnote://memory/tn_stable'],
+            '\n',
+          );
+          const expected = EffectArray.join(
+            [
+              `memories/durable/projects/threadnote/${memoryTopic}.md`,
+              `memories/durable/projects/threadnote/${memoryTopic}.md`,
+              foreignUri,
+              'threadnote://memory/tn_stable',
+            ],
+            '\n',
+          );
+
+          const compacted = compactPersonalMemoryReferences(input, currentUser);
+          expect(compacted).toBe(expected);
+          expect(compactPersonalMemoryReferences(compacted, currentUser)).toBe(expected);
+
+          const sharedCurrentUri = Effect.pipe(
+            rawCurrentUri,
+            EffectString.replace('/memories/', '/memories/shared/default/'),
+          );
+          const structured = {
+            nested: [{uri: rawCurrentUri}, {uri: sharedCurrentUri}, {uri: foreignUri}],
+            text: `Read ${canonicalCurrentUri} first.`,
+          };
+          const original = JSON.stringify(structured);
+          const compactedStructured = compactPersonalMemoryStructuredReferences(structured, currentUser);
+          expect(compactedStructured).toEqual({
+            nested: [
+              {uri: `memories/durable/projects/threadnote/${memoryTopic}.md`},
+              {uri: `memories/shared/default/durable/projects/threadnote/${memoryTopic}.md`},
+              {uri: foreignUri},
+            ],
+            text: `Read memories/durable/projects/threadnote/${memoryTopic}.md first.`,
+          });
+          expect(JSON.stringify(structured)).toBe(original);
+          expect(compactPersonalMemoryStructuredReferences(compactedStructured, currentUser)).toEqual(
+            compactedStructured,
+          );
+        },
+      ),
       {numRuns: 50},
     );
   });
@@ -1097,8 +1106,10 @@ describe('Threadnote MCP toolsets', () => {
         const baselineCatalogBytes = Buffer.byteLength(JSON.stringify(baselineCatalog));
         expect(baselineCatalog.length).toBeGreaterThan(0);
         // Semantic task bootstrap adds one tool beyond compact authoring, and the review waiver and run profile add
-        // control variants; with Threadnote 6's workflow fields, keep the additive baseline catalog budget explicit.
-        expect(baselineCatalogBytes).toBeLessThanOrEqual(65_250);
+        // control variants, compact expansion declares its phase and decision shapes, and Threadnote 6 adds workflow
+        // fields; keep the additive baseline catalog budget explicit. Both caps mirror main's approved +1,900 raise
+        // for #1106 (65,200 -> 67,100): baseline 65,250 -> 67,150 and whole catalog 70,192 -> 72,092.
+        expect(baselineCatalogBytes).toBeLessThanOrEqual(67_150);
         const snapshotBytes = Buffer.byteLength(JSON.stringify(workflowTaskSnapshot));
         const sameLabelBranchBytes = snapshotBytes - Buffer.byteLength(JSON.stringify(baselineSnapshot));
         expect(sameLabelBranchBytes).toBeGreaterThan(0);
@@ -1106,14 +1117,14 @@ describe('Threadnote MCP toolsets', () => {
         // The unchanged 2,500-byte full snapshot guard above bounds this exact delta, including its comma.
         // Each added semantic descriptor contributes one comma to the nonempty compact JSON array.
         const composedCatalogLimit =
-          65_250 +
+          67_150 +
           sameLabelBranchBytes +
           EffectArray.reduce(semanticDescriptorBudgets, 0, (total, [, maximum]) => total + maximum) +
           semanticDescriptorBudgets.length;
         const fullCatalogBytes = Buffer.byteLength(JSON.stringify(tools.tools));
         expect(fullCatalogBytes).toBeLessThanOrEqual(composedCatalogLimit);
         // Published D57 already includes this branch and retains the stronger whole-catalog bound.
-        expect(fullCatalogBytes).toBeLessThanOrEqual(70_192);
+        expect(fullCatalogBytes).toBeLessThanOrEqual(72_092);
         process.stdout.write(
           `MCP_CATALOG_COMPOSITION ${JSON.stringify({baselineCatalogBytes, sameLabelBranchBytes, snapshotBytes, composedCatalogLimit, fullCatalogBytes})}\n`,
         );
@@ -5545,7 +5556,7 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'full'},
     );
   });
-  it('names replaceUri on rejected writes and preserves the canonical memory before a full URI replacement', async () => {
+  it('names replaceUri on rejected writes and accepts the compact and full pointers recall and read return', async () => {
     await withMcpClient(async (client, fixture) => {
       const compact = 'memories/handoffs/active/threadnote/uri-validation.md';
       const uri = `threadnote://user/test-user/${compact}`;
@@ -5554,21 +5565,21 @@ describe('Threadnote MCP toolsets', () => {
       await callText(client, 'remember_context', {...input, text: 'Original synthetic memory.'});
       const original = await readFile(memoryPath, 'utf8');
       const files = (await readdir(join(fixture.home, 'data'), {recursive: true})).sort();
-      for (const replaceUri of [
-        compact,
-        'https://example.invalid/status.md',
-        'threadnote://user/test-user/../status.md',
-      ]) {
+      for (const replaceUri of ['https://example.invalid/status.md', 'threadnote://user/test-user/../status.md']) {
         await expect(
           callErrorText(client, 'remember_context', {...input, replaceUri, text: 'Rejected synthetic replacement.'}),
         ).resolves.toContain('optional "replaceUri" must be a threadnote:// URI');
         await expect(readFile(memoryPath, 'utf8')).resolves.toBe(original);
         expect((await readdir(join(fixture.home, 'data'), {recursive: true})).sort()).toEqual(files);
       }
+      await callText(client, 'remember_context', {...input, replaceUri: compact, text: 'Compact pointer replacement.'});
+      const compactReplaced = await readFile(memoryPath, 'utf8');
+      expect(compactReplaced).toContain('Compact pointer replacement.');
+      expect(compactReplaced).not.toContain('Original synthetic memory.');
       await callText(client, 'remember_context', {...input, replaceUri: uri, text: 'Accepted synthetic replacement.'});
       const replaced = await readFile(memoryPath, 'utf8');
       expect(replaced).toContain('Accepted synthetic replacement.');
-      expect(replaced).not.toContain('Original synthetic memory.');
+      expect(replaced).not.toContain('Compact pointer replacement.');
     });
   });
   it('requires remember_context replaceUri for same-topic schema rewrites and citation clearing', async () => {

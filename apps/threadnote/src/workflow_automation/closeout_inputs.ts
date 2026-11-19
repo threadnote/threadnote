@@ -1,6 +1,7 @@
-import {Effect, Schema} from 'effect';
+import {Array as EffectArray, Effect, Schema} from 'effect';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import {decodeNativeCycleState, nextNativeCycle} from '@threadnote/workflow-automations/cycle';
+import {nativeCyclePhaseOwnedPaths} from '@threadnote/workflow-automations/cycle-runtime';
 import {
   decodeNativeAuthoringDocument,
   nativeAuthoringDigest,
@@ -260,6 +261,15 @@ export const loadNativeCloseoutInputs = Effect.fn('workflowAutomation.closeout.l
     ...(loadedSpec ? {spec: loadedSpec.document} : {}),
     owned,
     waivers: runtime.waivers ?? [],
+    // What each phase's validated snapshot actually changed and owns.
+    actualChanges: EffectArray.flatMap(cycle.plan.phases, phase => {
+      const tree = cycle.phases[phase.id]?.validation?.snapshotTree ?? cycle.phases[phase.id]?.tree;
+      const entry = EffectArray.findLast(
+        runtime.snapshots,
+        item => item.snapshot.phaseId === phase.id && item.snapshot.tree === tree,
+      );
+      return entry._tag === 'None' ? [] : [{phaseId: phase.id, paths: nativeCyclePhaseOwnedPaths(entry.value)}];
+    }),
   };
 });
 export type NativeCloseoutInputs = Effect.Success<ReturnType<typeof loadNativeCloseoutInputs>>;

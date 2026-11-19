@@ -258,6 +258,52 @@ export const NativeCompactIntentSchema = NativeCompactIntentInputSchema;
 export type NativeCompactIntent = typeof NativeCompactIntentSchema.Type;
 export const NativeCompactSourceSnapshotSchema = source;
 
+const shapeText = Schema.String;
+const shapeList = Schema.Array(shapeText);
+/** Unknown item keys pass through, so the strict runtime decode refuses them instead of the MCP adapter dropping them. */
+const shapeItem = <const Fields extends Schema.Struct.Fields>(fields: Fields) =>
+  Schema.StructWithRest(Schema.Struct(fields), [Schema.Record(Schema.String, Schema.Unknown)]);
+// `satisfies` keeps each shape's field names equal to the bounded runtime schema above.
+const acceptanceShape = {
+  id: shapeText,
+  criterion: shapeText,
+  verification: shapeText,
+  requirementIds: shapeList,
+  scenarioIds: Schema.optionalKey(shapeList),
+} satisfies {readonly [Key in keyof typeof acceptance.fields]: Schema.Top};
+const phaseShape = {
+  id: shapeText,
+  title: shapeText,
+  outcome: shapeText,
+  dependsOn: shapeList,
+  affectedPaths: shapeList,
+  newPaths: shapeList,
+  contracts: shapeList,
+  acceptance: Schema.Array(shapeItem(acceptanceShape)),
+  safeBoundary: shapeText,
+} satisfies {readonly [Key in keyof typeof phase.fields]: Schema.Top};
+const alternativeShape = {id: shapeText, design: shapeText, tradeoffs: shapeText} satisfies {
+  readonly [Key in keyof typeof alternative.fields]: Schema.Top;
+};
+const decisionShape = {
+  id: shapeText,
+  question: shapeText,
+  selection: decision.fields.selection,
+  selected: shapeText,
+  alternatives: Schema.Array(shapeItem(alternativeShape)).check(decisionAlternativesLimit),
+  rationale: shapeText,
+  affectedPhases: shapeList,
+  authority: decision.fields.authority,
+} satisfies {readonly [Key in keyof typeof decision.fields]: Schema.Top};
+/**
+ * MCP preflight shape for plan business JSON: it names the phase and decision fields so callers can check them before
+ * the call. Other keys pass through, and the runtime still applies the bounded plan schema above.
+ */
+export const NativePlanBusinessShapeSchema = Schema.StructWithRest(
+  Schema.Struct({phases: Schema.Array(shapeItem(phaseShape)), decisions: Schema.Array(shapeItem(decisionShape))}),
+  [Schema.Record(Schema.String, Schema.Unknown)],
+);
+
 export const NativePlanIntentPolicyVersion = 2 as const;
 /** Version 3 leaves ownership out of plan intent: phase paths and the compact expansion marker need no confirmation. */
 export const NativeDerivedOwnershipPlanIntentPolicyVersion = 3 as const;

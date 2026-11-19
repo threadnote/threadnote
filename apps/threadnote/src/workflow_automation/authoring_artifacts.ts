@@ -80,7 +80,12 @@ export const AuthoringRootSchema = Schema.Struct({
   ).check(Schema.isMaxLength(8)),
   previous: Schema.optionalKey(AuthoringReferenceSchema),
   confirmation: Schema.optionalKey(
-    Schema.Struct({intentHash: digest, decision: Schema.Literal('approved'), response: Schema.String}),
+    Schema.Struct({
+      intentHash: digest,
+      decision: Schema.Literal('approved'),
+      response: Schema.String,
+      delivery: Schema.optionalKey(Schema.Literals(['commit', 'pr'])),
+    }),
   ),
   review: Schema.optionalKey(
     Schema.Struct({

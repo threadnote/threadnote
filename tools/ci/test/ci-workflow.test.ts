@@ -34,7 +34,7 @@ interface Job {
   readonly 'timeout-minutes'?: number;
   readonly strategy?: {
     readonly 'fail-fast'?: boolean;
-    readonly matrix?: string | {readonly shard?: readonly string[]; readonly profile?: string};
+    readonly matrix?: string | {readonly shard?: readonly string[]; readonly profile?: string | readonly string[]};
   };
   readonly uses?: string;
   readonly with?: Readonly<Record<string, unknown>>;
@@ -75,7 +75,7 @@ const JobSchema = Schema.Struct({
           Schema.String,
           Schema.Struct({
             shard: Schema.optionalKey(Schema.Array(Schema.String)),
-            profile: Schema.optionalKey(Schema.String),
+            profile: Schema.optionalKey(Schema.Union([Schema.String, Schema.Array(Schema.String)])),
           }),
         ]),
       ),
@@ -117,7 +117,7 @@ it('routes native Bun caches through step-scoped runner paths before the first B
     BUN_RUNTIME_TRANSPILER_CACHE_PATH: '${{ runner.temp }}/threadnote-bun-transpiler',
   };
   const setup = step(releaseJobs.build, 'Route Bun caches outside the source checkout');
-  for (const name of ['build', 'installed-e2e', 'extracted-workflows']) {
+  for (const name of ['build', 'extracted-workflows']) {
     const job = releaseJobs[name];
     const caches = step(job, 'Route Bun caches outside the source checkout');
     const steps = job?.steps ?? [];
@@ -258,8 +258,13 @@ it('routes platform and quality lanes from Bazel outputs', () => {
   expect(jobs['self-contained-distribution']?.if).toBe("needs.bazel-plan.outputs.release_matrix == 'true'");
 });
 
-it('builds each native release once and fans its archive out to independent required consumers', () => {
-  for (const name of ['build', 'installed-e2e', 'extracted-workflows']) {
+const CONSUMER_GUARD = "!cancelled() && steps.restore.outcome == 'success'";
+const INLINE_PROFILE = "${{ inputs.runner == 'macos-15-intel' && 'desktop' || 'all' }}";
+
+it('builds each native release once and qualifies its archive on the same runner', () => {
+  // Threadnote 6's musl-native job proves native ownership in musl userspace; it never builds a release.
+  expect(EffectRecord.keys(releaseJobs)).toEqual(['build', 'extracted-workflows', 'musl-native']);
+  for (const name of ['build', 'extracted-workflows', 'musl-native']) {
     const checkout = EffectArray.findFirst(
       releaseJobs[name]?.steps ?? [],
       candidate => candidate.uses === 'actions/checkout@v7',
@@ -276,57 +281,76 @@ it('builds each native release once and fans its archive out to independent requ
     candidate => candidate.run === 'bun run build:release',
   );
   expect(builds).toHaveLength(1);
-  expect(step(releaseJobs.build, 'Self-contained native smoke')?.run).toBe('bun scripts/smoke-self-contained.ts');
-  expect(step(releaseJobs.build, 'Archive the native release')?.env).toEqual({
-    THREADNOTE_RELEASE_TARGET: '${{ inputs.target }}',
-  });
-  for (const name of ['installed-e2e', 'extracted-workflows']) {
-    const consumer = releaseJobs[name];
-    expect(consumer?.needs).toBe('build');
-    expect(consumer?.steps).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          uses: 'actions/download-artifact@v8',
-          with: {
-            name: 'native-release-${{ inputs.target }}',
-            path: 'artifacts',
-          },
-        }),
-      ]),
-    );
-    expect(step(consumer, 'Restore the verified native payload')?.run).toContain(
-      'tar -xzf artifacts/threadnote-${{ inputs.target }}.tar.gz -C dist',
-    );
-    expect(
-      EffectArray.some(consumer?.steps ?? [], candidate =>
-        /bun run (?:build|test:e2e:local-bins|test:smoke:self-contained)/u.test(candidate.run ?? ''),
-      ),
-    ).toBe(false);
+  const build = releaseJobs.build;
+  const steps = build?.steps ?? [];
+  expect(step(build, 'Self-contained native smoke')?.run).toBe('bun scripts/smoke-self-contained.ts');
+  expect(step(build, 'Archive the native release')?.env).toEqual({THREADNOTE_RELEASE_TARGET: '${{ inputs.target }}'});
+
+  // Consumers replace the build tree with the archive and still run after one another fails.
+  const restore = step(build, 'Restore the verified native payload');
+  expect(restore?.id).toBe('restore');
+  expect(restore?.run).toContain('rm -rf dist');
+  expect(restore?.run).toContain('tar -xzf artifacts/threadnote-${{ inputs.target }}.tar.gz -C dist');
+  expect(steps.indexOf(restore!)).toBeGreaterThan(steps.indexOf(step(build, 'Archive the native release')!));
+  for (const name of [
+    'Real predecessor upgrade and model setup admission',
+    'Installed release E2E',
+    'Extracted release and installed workflow lifecycle',
+    'Workflow journal persistence smoke',
+    'Extracted musl release and installed workflow lifecycle',
+  ]) {
+    const consumer = step(build, name);
+    expect(consumer?.if).toContain(CONSUMER_GUARD);
+    expect(steps.indexOf(consumer!)).toBeGreaterThan(steps.indexOf(restore!));
   }
-  expect(step(releaseJobs['installed-e2e'], 'Installed release E2E')?.run).toContain('--config vitest.e2e.config.ts');
-  expect(step(releaseJobs['installed-e2e'], 'Real predecessor upgrade and model setup admission')?.if).toBe(
-    "inputs.runner == 'macos-15'",
+  expect(
+    EffectArray.some(steps.slice(steps.indexOf(restore!)), candidate =>
+      /bun run (?:build|test:e2e:local-bins|test:smoke:self-contained)/u.test(candidate.run ?? ''),
+    ),
+  ).toBe(false);
+  expect(step(build, 'Installed release E2E')?.run).toContain('--config vitest.e2e.config.ts');
+  expect(step(build, 'Installed release E2E')?.if).toBe(
+    `\${{ ${CONSUMER_GUARD} && !endsWith(inputs.target, '-musl') }}`,
   );
-  expect(step(releaseJobs['extracted-workflows'], 'Extracted release and installed workflow lifecycle')?.env).toEqual({
+  expect(step(build, 'Real predecessor upgrade and model setup admission')?.if).toBe(
+    `\${{ ${CONSUMER_GUARD} && inputs.runner == 'macos-15' }}`,
+  );
+  expect(step(build, 'Extracted release and installed workflow lifecycle')?.env).toEqual({
+    THREADNOTE_RELEASE_ARCHIVE: 'artifacts/threadnote-${{ inputs.target }}.tar.gz',
+    THREADNOTE_RELEASE_PROFILE: INLINE_PROFILE,
+  });
+  expect(step(build, 'Workflow journal persistence smoke')?.if).toBe(
+    `\${{ ${CONSUMER_GUARD} && !endsWith(inputs.target, '-musl') }}`,
+  );
+
+  const split = releaseJobs['extracted-workflows'];
+  expect(split?.needs).toBe('build');
+  expect(split?.if).toBe("inputs.runner == 'macos-15-intel'");
+  expect(split?.steps).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        uses: 'actions/download-artifact@v8',
+        with: {name: 'native-release-${{ inputs.target }}', path: 'artifacts'},
+      }),
+    ]),
+  );
+  expect(step(split, 'Extracted release and installed workflow lifecycle')?.env).toEqual({
     THREADNOTE_RELEASE_ARCHIVE: 'artifacts/threadnote-${{ inputs.target }}.tar.gz',
     THREADNOTE_RELEASE_PROFILE: '${{ matrix.profile }}',
   });
-  expect(step(releaseJobs['extracted-workflows'], 'Workflow journal persistence smoke')?.if).toBe(
-    "${{ !endsWith(inputs.target, '-musl') && (matrix.profile == 'all' || matrix.profile == 'desktop') }}",
-  );
 });
 
 it('executes musl extracted archives and their compiled harness inside the native musl container', () => {
-  const consumer = releaseJobs['extracted-workflows'];
+  const consumer = releaseJobs.build;
   expect(consumer?.if).toBeUndefined();
   expect(step(consumer, 'Extracted release and installed workflow lifecycle')?.if).toBe(
-    "${{ !endsWith(inputs.target, '-musl') }}",
+    `\${{ ${CONSUMER_GUARD} && !endsWith(inputs.target, '-musl') }}`,
   );
   const musl = step(consumer, 'Extracted musl release and installed workflow lifecycle');
-  expect(musl?.if).toBe("endsWith(inputs.target, '-musl')");
+  expect(musl?.if).toBe(`\${{ ${CONSUMER_GUARD} && endsWith(inputs.target, '-musl') }}`);
   expect(musl?.env).toEqual({
     THREADNOTE_RELEASE_ARCHIVE: 'artifacts/threadnote-${{ inputs.target }}.tar.gz',
-    THREADNOTE_RELEASE_PROFILE: '${{ matrix.profile }}',
+    THREADNOTE_RELEASE_PROFILE: INLINE_PROFILE,
   });
   expect(musl?.run).toContain('assemble-native-inference.ts --musl-container --workflow-runtime');
   const builder = step(releaseJobs.build, 'Build musl payload at the preserved libc floor');
@@ -394,11 +418,10 @@ it('partitions only catalog-supported macOS profiles while other platforms retai
       ? [skills.profile]
       : [];
   });
-  const profiles = ['desktop', ...new Set(cloudProfiles)];
+  // The build job qualifies desktop inline on macOS Intel; every other catalog profile gets its own job there.
+  expect(INLINE_PROFILE).toContain("'macos-15-intel' && 'desktop'");
   const matrix = releaseJobs['extracted-workflows']?.strategy?.matrix;
-  expect(typeof matrix === 'object' ? matrix.profile : undefined).toBe(
-    "${{ fromJSON(inputs.runner == 'macos-15-intel' && '" + JSON.stringify(profiles) + "' || '[\"all\"]') }}",
-  );
+  expect(typeof matrix === 'object' ? matrix.profile : undefined).toEqual([...new Set(cloudProfiles)]);
 });
 
 it('keeps the stable aggregate check and requires the planner plus every selected shard', () => {
@@ -608,36 +631,33 @@ it.each(['success', 'failure', 'cancelled', 'skipped'])(
 
 const prerequisite = step(jobs['bazel-shards'], 'Install workflow inspection prerequisite');
 
-it.each(['windows-smoke', 'build', 'installed-e2e', 'extracted-workflows'])(
-  'admits %s through the verified Windows prerequisite',
-  name => {
-    const job = name === 'windows-smoke' ? jobs[name] : releaseJobs[name];
-    const setup = step(
-      job,
-      name === 'windows-smoke' ? 'Install workflow inspection prerequisite' : 'Windows workflow prerequisites',
-    );
-    expect(setup).toMatchObject({
-      shell: 'pwsh',
-      'timeout-minutes': 5,
-      run: 'bun tools/ci/windows-workflow-prerequisites.ts',
-    });
-    const steps = job?.steps ?? [];
-    expect(steps.indexOf(setup!)).toBeGreaterThan(
-      EffectOption.getOrElse(
-        EffectArray.findFirstIndex(steps, candidate => candidate.uses === 'oven-sh/setup-bun@v2'),
-        () => -1,
-      ),
-    );
-    expect(steps.indexOf(setup!)).toBeGreaterThan(
-      EffectOption.getOrElse(
-        EffectArray.findFirstIndex(steps, candidate => candidate.run === 'bun install --frozen-lockfile'),
-        () => -1,
-      ),
-    );
-    expect(job?.['timeout-minutes']).toBe(name === 'windows-smoke' ? 60 : 45);
-    if (job?.strategy) expect(job.strategy['fail-fast']).toBe(false);
-  },
-);
+it.each(['windows-smoke', 'build'])('admits %s through the verified Windows prerequisite', name => {
+  const job = name === 'windows-smoke' ? jobs[name] : releaseJobs[name];
+  const setup = step(
+    job,
+    name === 'windows-smoke' ? 'Install workflow inspection prerequisite' : 'Windows workflow prerequisites',
+  );
+  expect(setup).toMatchObject({
+    shell: 'pwsh',
+    'timeout-minutes': 5,
+    run: 'bun tools/ci/windows-workflow-prerequisites.ts',
+  });
+  const steps = job?.steps ?? [];
+  expect(steps.indexOf(setup!)).toBeGreaterThan(
+    EffectOption.getOrElse(
+      EffectArray.findFirstIndex(steps, candidate => candidate.uses === 'oven-sh/setup-bun@v2'),
+      () => -1,
+    ),
+  );
+  expect(steps.indexOf(setup!)).toBeGreaterThan(
+    EffectOption.getOrElse(
+      EffectArray.findFirstIndex(steps, candidate => candidate.run === 'bun install --frozen-lockfile'),
+      () => -1,
+    ),
+  );
+  expect(job?.['timeout-minutes']).toBe(name === 'windows-smoke' ? 60 : 90);
+  if (job?.strategy) expect(job.strategy['fail-fast']).toBe(false);
+});
 
 function runPrerequisite(
   initial: 'working' | 'missing' | 'broken',

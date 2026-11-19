@@ -10,22 +10,13 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {CommandExecutor} from '@threadnote/platform/command';
 
 import * as Effect2 from 'effect';
-import {
-  captureNativeCycleSource,
-  fixture,
-  object,
-  reviewed,
-  run,
-  windowsCycleFixtureTimeout,
-} from './native-cycle-lifecycle-fixture.js';
+import {fixture, object, reviewed, run, windowsCycleFixtureTimeout} from './native-cycle-lifecycle-fixture.js';
 
 describe('native cycle lifecycle', () => {
   // prettier-ignore
-  effectIt.effect('verifies ready graph, actual anchors, ownership and packet budgets before routine dispatch', () =>
+  effectIt.effect('verifies clean source, actual anchors, ownership and packet budgets without a code graph', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
-      const graph = object(object(yield* f.call(f.base('graph-ready'))).graph);
-      const captured = yield* captureNativeCycleSource(f.repo, 'HEAD');
       const options = {
         capacity: {
           model: 'advertised-cheap-model',
@@ -35,7 +26,6 @@ describe('native cycle lifecycle', () => {
           reason: 'Bounded established implementation with verified anchors.',
           catalogEvidence: 'Test host advertises low effort.',
         },
-        graphProof: {...graph, tree: captured.tree},
         anchors: [
           {
             path: 'source.ts',
@@ -70,9 +60,18 @@ describe('native cycle lifecycle', () => {
         .call({...f.base('cycle'), command: 'packet', phaseId: 'one', packet: {...options, ownership: ['outside.ts']}})
         .pipe(Effect.result);
       expect(scope).toMatchObject({failure: {code: 'phase-scope'}});
+      // A packet is dispatched from committed source: an uncommitted file outside every anchor still refuses.
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'unrelated.ts'), 'export const unrelated = true;\n');
+      expect(
+        yield* f.call({...f.base('cycle'), command: 'packet', phaseId: 'one', packet: options}).pipe(Effect.result),
+      ).toMatchObject({failure: {code: 'working-tree-dirty'}});
+      yield* f.fs.remove(f.path.join(f.repo, 'unrelated.ts'));
+      // A caller that bound its reference to an earlier head gets no packet of a later head.
+      const boundHead = Effect2.pipe((yield* f.git(['rev-parse', 'HEAD'])).stdout, EffectString.trim);
       yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const changed = true;\n');
+      yield* f.git(['commit', '-qam', 'Move the head']);
       const drift = yield* f
-        .call({...f.base('cycle'), command: 'packet', phaseId: 'one', packet: options})
+        .call({...f.base('cycle'), command: 'packet', phaseId: 'one', acceptedHead: boundHead, packet: options})
         .pipe(Effect.result);
       expect(drift).toMatchObject({failure: {code: 'source-drift'}});
     }).pipe(run),

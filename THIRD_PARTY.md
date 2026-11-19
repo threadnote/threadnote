@@ -12,7 +12,7 @@ Direct runtime software and packages bundled into the published JavaScript retai
 - Native vector reader: `napi`/`napi-derive` (MIT), `rusqlite` (MIT), and bundled SQLite 3.54.1 (public domain); built from pinned Cargo dependencies with Rust 1.89.0. SQLite is privately linked into the required addon and does not replace Bun SQLite. The crate also uses `sha2` 0.11.1 (MIT OR Apache-2.0) for private prepared-request validation. The Bun/WebKit legacy numeric ordering attribution and upstream notice are shipped at `runtime/vector-reader/NOTICE`.
 - `effect`, `@effect/platform-bun`, `@effect/ai-openai-compat`, `@effect/sql-sqlite-bun`, and `@effect/vitest` (MIT)
 - `@modelcontextprotocol/sdk` 1.32.2 (MIT), pinned for the Streamable HTTP and stdio MCP protocol boundary
-- `jose` 6.2.13 (MIT), used for OAuth and Cursor workload JWT/JWKS verification
+- `jose` 6.2.17 (MIT), used for OAuth and Cursor workload JWT/JWKS verification
 - `pxpipe-proxy` 0.15.1 (MIT), used to render optional MCP memory PNG pages
 - `postgres` 3.4.9 (MIT), used by the managed remote-memory PostgreSQL service and operator
 - `zod` 4.6.7 (MIT), retained transitively by `@modelcontextprotocol/sdk` for its protocol implementation

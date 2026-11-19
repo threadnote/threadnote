@@ -30,6 +30,8 @@ import {
   recordUnavailableProductionPhase,
 } from '@threadnote/threadnote/effect/production_log';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import {RecallReadyReadBoundaryError} from '@threadnote/recall/read_boundary';
+import {lexicalReadFailureWarning, recallReadPhaseClassification} from '@threadnote/recall/warning';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {loadRecallIndexData, recallIndexDatabaseFilename} from '@threadnote/recall/index';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -48,6 +50,7 @@ interface ParsedProductionLogEntry {
   readonly outcome?: string;
   readonly phaseTimings?: readonly {
     readonly durationMilliseconds: number;
+    readonly errorType?: string;
     readonly outcome: string;
     readonly phase: string;
   }[];
@@ -267,6 +270,11 @@ describe('production log writer', () => {
               Effect.succeed({privateQuery, status: 'timed-out' as const}),
               result => result.status,
             );
+            yield* withProductionPhaseTiming(
+              'recall.lexical-ranking',
+              Effect.succeed([lexicalReadFailureWarning(RecallReadyReadBoundaryError.make({reason: 'output-limit'}))]),
+              recallReadPhaseClassification,
+            );
           }),
         );
 
@@ -276,6 +284,12 @@ describe('production log writer', () => {
         expect(entries[1]?.phaseTimings).toEqual([
           {durationMilliseconds: 25, outcome: 'success', phase: 'recall.shared-sync'},
           {durationMilliseconds: 0, outcome: 'timed-out', phase: 'recall.semantic-retrieval'},
+          {
+            durationMilliseconds: 0,
+            errorType: 'lexical_read_failed.output-limit',
+            outcome: 'failure',
+            phase: 'recall.lexical-ranking',
+          },
         ]);
         expect(content).not.toContain(privateQuery);
       }),
@@ -813,6 +827,7 @@ const isProductionLogEntry = Schema.is(
       Schema.Array(
         Schema.Struct({
           durationMilliseconds: Schema.Finite,
+          errorType: Schema.optionalKey(Schema.String),
           outcome: Schema.String,
           phase: Schema.String,
         }),

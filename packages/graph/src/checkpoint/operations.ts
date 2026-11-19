@@ -4,7 +4,7 @@ import type {CodeGraphCheckpointImportVerification} from '../store/models.js';
 import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import {checkpointTerminalText} from './terminal_text.js';
-import {Effect, FileSystem, Option, Path, Schema} from 'effect';
+import {Console, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {runBinaryCommandEffect, runCommandEffect} from '@threadnote/platform/command';
@@ -51,6 +51,7 @@ import {
 } from '@threadnote/graph/checkpoint/pack';
 import {
   codeGraphCheckpointGitPathBatches,
+  codeGraphCheckpointShardRebuild,
   parseGitTreeEntries,
   projectCodeGraphCheckpointV1,
 } from '@threadnote/graph/checkpoint/projection';
@@ -160,19 +161,41 @@ export const runCodeGraphCheckpointExport = Effect.fn('codeGraph.checkpoint.expo
   const identity = yield* resolveRepositoryIdentity(cwd);
   const layout = codeGraphLayout(path, config.agentContextHome, identity.checkoutId, identity.worktreeId);
   const store = yield* CodeGraphStore;
-  const snapshot = yield* store.readySnapshot(layout.databasePath, identity.worktreeId);
-  if (
-    snapshot === undefined ||
-    (options.expectedSnapshotId !== undefined && snapshot.id !== options.expectedSnapshotId) ||
-    snapshot.state !== 'ready' ||
-    snapshot.dirty ||
-    snapshot.commit !== identity.headCommit ||
-    snapshot.graphContentId === undefined ||
-    (yield* observeCleanRepositoryWorktree(identity.repoRoot)) === undefined
-  ) {
-    return yield* checkpointFailure(
-      'Checkpoint export requires an exact clean ready root for the current commit. Run `threadnote graph index` after cleaning the worktree.',
-    );
+  const exportableSnapshot = Effect.gen(function* () {
+    const snapshot = yield* store.readySnapshot(layout.databasePath, identity.worktreeId);
+    if (
+      snapshot === undefined ||
+      (options.expectedSnapshotId !== undefined && snapshot.id !== options.expectedSnapshotId) ||
+      snapshot.state !== 'ready' ||
+      snapshot.dirty ||
+      snapshot.commit !== identity.headCommit ||
+      snapshot.graphContentId === undefined ||
+      (yield* observeCleanRepositoryWorktree(identity.repoRoot)) === undefined
+    ) {
+      return yield* checkpointFailure(
+        'Checkpoint export requires an exact clean ready root for the current commit. Run `threadnote graph index` after cleaning the worktree.',
+      );
+    }
+    return snapshot;
+  });
+  let snapshot = yield* exportableSnapshot;
+  const rebuild = yield* codeGraphCheckpointShardRebuild(layout.databasePath, snapshot.id);
+  if (rebuild !== undefined) {
+    // Ordinary builds above the shard admission bound defer the shards that file-fact projection reads.
+    if (options.quiet !== true) yield* Console.error('Rebuilding the code graph with checkpoint shards.');
+    const indexer = yield* CodeGraphIndexer;
+    yield* indexer.index({
+      cwd,
+      force: true,
+      materializedShards: 'all',
+      threadnoteHome: config.agentContextHome,
+      // Inventory keeps opaque corpus assets only when indexing waits for vectors.
+      vectorPolicy: rebuild.includeOpaqueCorpusAssets ? 'wait' : 'off',
+    });
+    snapshot = yield* exportableSnapshot;
+    if ((yield* codeGraphCheckpointShardRebuild(layout.databasePath, snapshot.id)) !== undefined) {
+      return yield* checkpointFailure('The rebuilt graph is still missing checkpoint file-fact shards.');
+    }
   }
   const provenance = yield* store.snapshotPackProvenance(layout.databasePath, snapshot.id);
   if (provenance === undefined) {

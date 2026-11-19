@@ -74,7 +74,7 @@ describe('anonymous telemetry OTLP transport', () => {
             contentType: 'application/x-protobuf',
             path: '/v1/traces',
             traceparent: null,
-            userAgent: 'OTel-OTLP-Exporter-JavaScript-Effect-OtlpTracer/4.1.2',
+            userAgent: 'OTel-OTLP-Exporter-JavaScript-Effect-OtlpTracer/4.1.4',
           });
           const envelope = decodeTelemetryEnvelope(requests[0].body);
           expect(envelope.resourceAttributes).toEqual({
@@ -92,7 +92,7 @@ describe('anonymous telemetry OTLP transport', () => {
           expect(envelope.spanId).toHaveLength(8);
           expect(envelope.startTimeUnixNano).toBeGreaterThan(0n);
           expect(envelope.endTimeUnixNano).toBeGreaterThanOrEqual(envelope.startTimeUnixNano);
-          expect(envelope.status).toEqual({code: 1});
+          expect(envelope.status).toEqual({code: 0});
           expect(EffectRecord.keys(envelope.spanAttributes).sort()).toEqual([
             'error.type',
             'threadnote.component',

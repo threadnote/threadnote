@@ -17,6 +17,7 @@ import {
 } from './cli/flags.js';
 import {CONTEXT_BRIEF_CWD_OPTION, type runContextBrief} from '../context_brief/commands.js';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
+import {nativeWatchWakeupHosts, type NativeWatchWakeup} from '../workflow_automation/watch_notification_state.js';
 import type {runCompact} from '../memory/commands.js';
 import type {runRecallFeedback} from '../recall/feedback_commands.js';
 import type {runContextHealth} from '../memory/context/health_commands.js';
@@ -156,7 +157,7 @@ export function makeNativeTaskPrWatchCommand<E, R>(
       | 'work-disposition'
       | 'stop'
       | 'complete';
-    readonly host?: 'codex' | 'cursor-cli';
+    readonly host?: NativeWatchWakeup['host'];
     readonly executable?: string;
     readonly hostReference?: string;
     readonly workspace?: string;
@@ -180,7 +181,10 @@ export function makeNativeTaskPrWatchCommand<E, R>(
   return Command.make(
     'watch-pr',
     {
-      runId: optionalString('run-id', 'Workflow run; omit for standalone monitoring'),
+      runId: optionalString(
+        'run-id',
+        'Workflow run for a workflow-bound watch. With prUrl or watchRef and no proof fields, runId is ignored.',
+      ),
       prUrl: optionalString('pr-url', 'Explicit GitHub PR URL for standalone setup'),
       watchRef: optionalString('watch-ref', 'Opaque standalone watch identity returned by setup'),
       callerCwd: requiredString('caller-cwd', 'Bound checkout path'),
@@ -208,10 +212,10 @@ export function makeNativeTaskPrWatchCommand<E, R>(
         ],
         'PR watch operation',
       ),
-      host: optionalChoice('host', ['codex', 'cursor-cli'], 'Registered wakeup host'),
+      host: optionalChoice('host', nativeWatchWakeupHosts, 'Registered wakeup host'),
       executable: optionalString('host-executable', 'Absolute registered host executable'),
-      hostReference: optionalString('host-reference', 'Codex thread ID or Cursor session ID'),
-      workspace: optionalString('workspace', 'Cursor workspace path'),
+      hostReference: optionalString('host-reference', 'Codex thread ID, or Cursor CLI or Claude Code session ID'),
+      workspace: optionalString('workspace', 'Cursor CLI or Claude Code session workspace path'),
       noticeRef: optionalString(
         'notice-ref',
         'Relay this current notice route, record its disposition, then ACK using the returned current refs',
@@ -289,7 +293,7 @@ export function makeNativeTaskPrWatchCommand<E, R>(
                       threadId: options.hostReference,
                     }
                   : {
-                      host: 'cursor-cli' as const,
+                      host: options.host,
                       executable: options.executable!,
                       sessionId: options.hostReference,
                       workspace: options.workspace ?? '',
@@ -426,6 +430,7 @@ export function makeNativeTaskActionCommands<E, R>(
     readonly userResponse?: string;
     readonly userDecision?: 'approve' | 'reject' | 'defer';
     readonly baseBranch?: string;
+    readonly delivery?: 'local' | 'commit' | 'pr';
     readonly reconcileReason?: string;
     readonly bindings?: unknown;
     readonly review?: unknown;
@@ -888,7 +893,7 @@ export function makeNativeTaskActionCommands<E, R>(
       callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
       document: requiredString(
         'document',
-        'Complete expanded native plan JSON; compact origin is retained by the runtime',
+        'Expanded plan business JSON, as for authoring save; the runtime fills identity, source hashes and compact origin',
       ),
     },
     options =>
@@ -906,7 +911,8 @@ export function makeNativeTaskActionCommands<E, R>(
       presentedIntentHash: requiredString('intent-hash', 'Exact intent hash from the complete approval packet'),
       userResponse: optionalString('user-response', 'Caller-provided response to the displayed exact-intent packet'),
       userDecision: optionalChoice('user-decision', ['approve', 'reject', 'defer'], 'Caller-provided user decision'),
-      baseBranch: optionalString('base-branch', 'Exact base branch for a new local cycle'),
+      baseBranch: optionalString('base-branch', 'Exact base branch for a new cycle'),
+      delivery: optionalChoice('delivery', ['local', 'commit', 'pr'], 'Approved delivery for the first admission'),
       reconcileReason: optionalString('reconcile-reason', 'Concrete reason for reconciling an existing cycle'),
       bindings: optionalString('bindings', 'Exact phase-to-branch/base-branch map as JSON'),
       review: optionalString('review', 'Accepted exact-document independent review as JSON, when required'),

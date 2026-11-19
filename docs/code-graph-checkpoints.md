@@ -23,6 +23,11 @@ for the artifact, every chunk, the logical record stream, and its runtime ABI. E
 transaction in bounded pages, verifies committed file identities against Git, and fences the repository before and
 after projection. Re-exporting the same compatible graph produces the same bytes and digest.
 
+Each header names the compression profile of its chunks. New exports use `threadnote-gzip-v2`, which compresses with
+Bun's bundled libdeflate. Checkpoints exported before this profile use `threadnote-gzip-v1`, which compresses with
+fflate. Both profiles decode the same way, and the logical digest does not depend on the profile. The artifact digest
+does depend on it, so re-exporting an unchanged graph with v2 gives a new artifact digest.
+
 ## Inspect and verify
 
 `inspect` authenticates the exact artifact bytes against an expected digest and validates its bounded framing without
@@ -79,6 +84,9 @@ Repeated imports reuse the same logical snapshot instead of duplicating it. An e
 Checkpoint compatibility is explicit. The ABI binds the graph schema, checkpoint semantics, lexical format, inventory
 policy, workspace model, reference-resolution surface, and exact language-pack derivation identities. An incompatible
 runtime fails before staging rather than guessing that its rows are equivalent.
+
+Releases before `threadnote-gzip-v2` reject a v2 checkpoint or shared delta at header validation. Upgrade the receiver
+before importing an artifact from a newer exporter. A newer receiver still imports v1 artifacts.
 
 Portable checkpoints affect only Threadnote's disposable native code-graph store. Existing schema-v1 memories,
 uncited legacy memories, canonical `threadnote://` URIs, recall indexing, and team memory files are neither migrated nor

@@ -1,4 +1,3 @@
-/* oxlint-disable effecttsgo/node-builtin-import -- Deferred-client inventory writes a private operator receipt only. */
 import {writeFile} from 'node:fs/promises';
 import {parseArgs} from 'node:util';
 import {activeSafetyObligations} from './inventory.js';

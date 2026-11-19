@@ -303,6 +303,12 @@ export const runManagerContextConnections = Effect.fn('managerContext.connection
     readRecords: uris => readMemoryRecordsByUri(config, uris),
     relationTypes,
   }).pipe(Effect.mapError(cause => managerContextOperationError(cause, 'connections-unavailable')));
+  // A stale selector cannot prove currentness; Manager retries until background maintenance catches up.
+  if (result.readState !== undefined)
+    return yield* managerContextOperationError(
+      RecallReadyReadUnavailable.make({message: 'Memory connection currentness requires a current lexical snapshot.'}),
+      'connections-unavailable',
+    );
   const records = yield* readMemoryRecordsByUri(
     config,
     EffectArray.map(result.candidates, candidate => candidate.uri),

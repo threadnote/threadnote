@@ -145,20 +145,28 @@ export const mcpServerEffect = withAnonymousTelemetry(
           const runtime = yield* LocalModelRuntime;
           yield* runtime.diagnostics.pipe(Effect.catch(() => Effect.void));
         }
+        const home = config.agentContextHome;
         if (!memoryScope && toolset !== CURSOR_CLOUD_LOCAL_MCP_TOOLSET) {
-          yield* startAutomaticModelSetupScheduler(config.agentContextHome);
-          yield* Effect.forkScoped(runContextMaintenanceScheduler(config));
-        }
-        if (!memoryScope && toolset !== CURSOR_CLOUD_LOCAL_MCP_TOOLSET) {
-          yield* Effect.forkScoped(monitorSharedRepositories(config));
+          // The model setup scheduler forks its loop into the ambient scope; a local scope ties it to this task.
+          yield* forkStartupTask(
+            home,
+            'model-setup',
+            Effect.scoped(Effect.andThen(startAutomaticModelSetupScheduler(home), Effect.never)),
+          );
+          yield* forkStartupTask(home, 'context-maintenance', runContextMaintenanceScheduler(config));
+          yield* forkStartupTask(home, 'shared-repository-monitor', monitorSharedRepositories(config));
         }
         if (mcpToolCapabilities(toolset).graphLocal) {
-          yield* Effect.forkScoped(runCodeGraphAutomaticCompactionScheduler(config.agentContextHome));
-          yield* Effect.forkScoped(monitorGraphShareContributions(config.agentContextHome));
-          yield* Effect.forkScoped(monitorGraphShareSignedContributions(config.agentContextHome));
+          yield* forkStartupTask(home, 'graph-compaction', runCodeGraphAutomaticCompactionScheduler(home));
+          yield* forkStartupTask(home, 'graph-share-contributions', monitorGraphShareContributions(home));
+          yield* forkStartupTask(home, 'graph-share-signed-contributions', monitorGraphShareSignedContributions(home));
         }
         if (mcpToolCapabilities(toolset).memoryRead && mcpToolCapabilities(toolset).graphLocal) {
-          yield* Effect.forkScoped(refreshPendingDeferredCodeAnchorWorkspaces(config));
+          yield* forkStartupTask(
+            home,
+            'deferred-code-anchor-refresh',
+            refreshPendingDeferredCodeAnchorWorkspaces(config),
+          );
         }
         yield* Console.error('Threadnote local MCP adapter running');
         return yield* server.run();
@@ -173,6 +181,26 @@ export const mcpServerEffect = withAnonymousTelemetry(
     Effect.provideService(Logger.LogToStderr, true),
   ),
 );
+
+const MCP_STARTUP_TASK_LOG_WRITE_TIMEOUT_MILLISECONDS = 500;
+
+/**
+ * Forks one automatic startup task with production-log start and finish events. The operation name is the only
+ * task-specific field, so a CPU report can name the busy task without paths or memory content.
+ */
+function forkStartupTask<A, E, R>(home: string, task: string, effect: Effect.Effect<A, E, R>) {
+  return Effect.forkScoped(
+    withProductionLogging(
+      home,
+      {
+        component: 'mcp',
+        operation: `mcp-startup.${task}`,
+        writeTimeoutMilliseconds: MCP_STARTUP_TASK_LOG_WRITE_TIMEOUT_MILLISECONDS,
+      },
+      effect,
+    ),
+  );
+}
 
 function registerResources(
   server: EffectMcpServerAdapter,

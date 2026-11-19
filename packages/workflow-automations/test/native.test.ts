@@ -9,6 +9,7 @@ import {
   nativeAuthoringPrefixDigest,
   nativeWorkflowOperationLimit,
   nativeWorkflowIntentDigest,
+  nativeWorkflowStateVersion,
   decodeNativeWorkflowRequest,
   decodeNativeWorkflowState,
   makeNativeWorkflowStateDecoder,
@@ -383,14 +384,38 @@ describe('native workflow state', () => {
   it('rejects unknown and Python state markers or versions with fresh-run guidance', () => {
     for (const input of [
       {format: 'python-workflow-state', stateVersion: 1, executorVersion: 1},
+      {format: 'python-workflow-state', stateVersion: nativeWorkflowStateVersion + 1, executorVersion: 1},
       {...stateBase, format: 'unknown-native-format'},
-      {...stateBase, stateVersion: 2},
+      {...stateBase, stateVersion: 0},
+      {...stateBase, stateVersion: String(nativeWorkflowStateVersion + 1)},
+      {...stateBase, stateVersion: nativeWorkflowStateVersion + 0.5},
       {...stateBase, executorVersion: 2},
     ])
       expect(caught(() => decodeNativeWorkflowState(input))).toMatchObject({
         code: 'unsupported-state',
         message: expect.stringContaining('fresh native workflow run'),
       });
+  });
+
+  it('reports a well-formed state from a newer schema as a version mismatch and corruption as malformed', () => {
+    const found = nativeWorkflowStateVersion + 1;
+    const newer = {...stateBase, stateVersion: found, fieldAddedByNewerRuntime: {mode: 'future'}};
+    for (const decode of [(input: unknown) => decodeNativeWorkflowState(input), makeNativeWorkflowStateDecoder()]) {
+      const mismatch = caught(() => decode(newer));
+      expect(mismatch).toMatchObject({code: 'state-version-mismatch'});
+      expect(mismatch).toMatchObject({message: expect.stringContaining(String(found))});
+      expect(mismatch).toMatchObject({message: expect.stringContaining(String(nativeWorkflowStateVersion))});
+      expect(caught(() => decode({...stateBase, fieldAddedByNewerRuntime: {mode: 'future'}}))).toMatchObject({
+        code: 'invalid-state',
+        message: 'The native workflow state is malformed.',
+      });
+    }
+  });
+
+  it('keeps reading runs written at the first state version', () => {
+    const firstVersion = {...stateBase, stateVersion: 1, policy: {mode: 'standard'}};
+    expect(decodeNativeWorkflowState(firstVersion)).toEqual(firstVersion);
+    expect(makeNativeWorkflowStateDecoder()(firstVersion)).toEqual(firstVersion);
   });
 
   it('detects tampered intents, digests, bindings, source runs, duplicate IDs, and status artifacts', () => {

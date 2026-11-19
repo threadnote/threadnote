@@ -1,7 +1,8 @@
-import {Array as EffectArray, Effect, Predicate, String as EffectString} from 'effect';
+import {Array as EffectArray, Effect, FileSystem, Predicate, String as EffectString} from 'effect';
 import * as EffectRecord from 'effect/Record';
 import {TestClock} from 'effect/testing';
 import {it as effectIt} from '@effect/vitest';
+import {runCommandEffect} from '@threadnote/platform/command';
 import {describe, expect} from 'vitest';
 import {EffectMcpServerAdapter, mcpToolFailureResult} from '../../src/effect/ai/mcp.js';
 import {registerWorkflowTaskTool} from '../../src/mcp/server/workflow.js';
@@ -14,6 +15,10 @@ import {readNativeTaskView} from '../../src/workflow_automation/task.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 
 const run = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect.pipe(TestClock.withLive, provideNative);
+const storedSnapshot = (config: RuntimeConfig) =>
+  readNativeWorkflowState(config, 'native-run').pipe(
+    Effect.map(stored => stored?.state.cycle?.snapshots.at(-1)?.snapshot),
+  );
 
 describe('dev-cycle workflow policy', () => {
   effectIt.effect('records the configured default policy on a new run and keeps it on replay', () =>
@@ -69,7 +74,7 @@ describe('standard-profile tree snapshots', () => {
       const write = (text: string) => f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), text);
       yield* write('export const fixture = 1;\n');
       const first = yield* record(f, 'r1');
-      expect(first).toMatchObject({version: 4, dirty: true, outOfPlan: []});
+      expect(first).toMatchObject({version: 4, dirty: true});
       expect(first).not.toHaveProperty('supersedes');
       yield* write('export const fixture = 2;\n');
       const second = yield* record(f, 'r2');
@@ -174,6 +179,45 @@ describe('standard-profile tree snapshots', () => {
     }).pipe(runCycle),
   );
 
+  effectIt.effect('records a fixed tree after two invalid reviews and asks for its review', () =>
+    Effect.gen(function* () {
+      const f = yield* standard();
+      const write = (text: string) => f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), text);
+      const view = () => readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo});
+      yield* write('export const fixture = 1;\n');
+      yield* f.git(['commit', '-qam', 'phase one']);
+      const first = yield* record(f);
+      for (const [attemptId, lane] of [
+        ['invalid-first', 'simplicity'],
+        ['invalid-second', 'orchestrator'],
+      ])
+        yield* f.mutate('validate-review', {
+          snapshotId: first.snapshotId,
+          attemptId,
+          report: {
+            snapshotId: first.snapshotId,
+            phaseHash: first.phaseHash,
+            snapshotTree: first.tree,
+            status: 'complete',
+            mode: 'full',
+            selected: [lane],
+            lanes: [{name: lane, status: 'complete'}],
+            findings: [],
+          },
+        });
+      expect(yield* view()).toMatchObject({status: 'blocked', next: {action: 'resolve-review-failure'}});
+      yield* write('export const fixture = 2;\n');
+      yield* f.git(['commit', '-qam', 'fix phase one']);
+      const fixed = yield* record(f, 'Fix the source after the failed reviews.');
+      expect(fixed).toMatchObject({
+        supersedes: first.snapshotId,
+        unreviewedSupersession: {reason: 'Fix the source after the failed reviews.'},
+      });
+      expect(fixed.tree).not.toBe(first.tree);
+      expect(yield* view()).toMatchObject({status: 'ready', next: {action: 'review', snapshotId: fixed.snapshotId}});
+    }).pipe(runCycle),
+  );
+
   effectIt.effect('keeps the work-packet precondition for a strict run', () =>
     Effect.gen(function* () {
       const f = yield* cycleFixture(['one'], 'local');
@@ -228,8 +272,15 @@ describe('standard-profile derived ownership', () => {
         yield* runNativeTaskAction(f.config, {command: 'record-snapshot', runId: 'native-run', callerCwd: f.repo}),
       );
       expect(recorded.warnings).toEqual([{_tag: 'warn', gate: 'scope.out-of-plan', detail: {files: ['notes.md']}}]);
-      const snapshot = object(object(recorded.snapshot).snapshot);
-      expect(snapshot.outOfPlan).toEqual(['notes.md']);
+      const summary = object(recorded.snapshot);
+      expect(summary.counts).toEqual({files: 2, scopeFiles: 2, outOfPlan: 1, incoming: 0});
+      const snapshot = object(summary.snapshot);
+      for (const paths of ['files', 'scopeFiles', 'outOfPlan']) expect(snapshot).not.toHaveProperty(paths);
+      expect(yield* storedSnapshot(f.config)).toMatchObject({
+        snapshotId: snapshot.snapshotId,
+        files: ['notes.md', 'source.ts'],
+        outOfPlan: ['notes.md'],
+      });
       yield* f.mutate('validate-review', {snapshotId: snapshot.snapshotId, attemptId: 'a1', report: review(snapshot)});
       const ready = yield* f.mutate('ready', {
         phaseId: 'one',
@@ -239,6 +290,133 @@ describe('standard-profile derived ownership', () => {
       expect(ready).toMatchObject({
         status: 'ok',
         warnings: [{_tag: 'warn', gate: 'scope.out-of-plan', detail: {files: ['notes.md']}}],
+      });
+    }).pipe(runCycle),
+  );
+
+  effectIt.effect('names the first 20 out-of-plan paths and counts the rest', () =>
+    Effect.gen(function* () {
+      const f = yield* cycleFixture(
+        ['one'],
+        'local',
+        false,
+        false,
+        true,
+        undefined,
+        undefined,
+        {},
+        {policy: 'standard'},
+      );
+      const unplanned = EffectArray.makeBy(23, index => `note-${EffectString.padStart(2, '0')(String(index))}.md`);
+      for (const path of unplanned) yield* f.fs.writeFileString(f.path.join(f.repo, path), 'Unplanned note.\n');
+      const recorded = object(
+        yield* runNativeTaskAction(f.config, {command: 'record-snapshot', runId: 'native-run', callerCwd: f.repo}),
+      );
+      expect(recorded.warnings).toEqual([
+        {_tag: 'warn', gate: 'scope.out-of-plan', detail: {files: unplanned.slice(0, 20), more: 3}},
+      ]);
+      expect(object(recorded.snapshot).counts).toMatchObject({outOfPlan: 23});
+      expect((yield* storedSnapshot(f.config))?.outOfPlan).toEqual(unplanned);
+    }).pipe(runCycle),
+  );
+
+  effectIt.effect('compares a stale local base with its upstream and leaves the local branch in place', () =>
+    Effect.gen(function* () {
+      // Local main stays one commit behind origin/main, and the phase branch starts from origin/main.
+      const staleBase = (repo: string) =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const git = (args: readonly string[]) => runCommandEffect('git', ['-C', repo, ...args]);
+          yield* git(['checkout', '-q', 'main']);
+          yield* fs.writeFileString(`${repo}/upstream.md`, 'Merged upstream.\n');
+          yield* git(['add', 'upstream.md']);
+          yield* git(['commit', '-qm', 'Upstream work']);
+          yield* git(['update-ref', 'refs/remotes/origin/main', 'HEAD']);
+          yield* git(['config', 'remote.origin.url', repo]);
+          yield* git(['config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*']);
+          yield* git(['config', 'branch.main.remote', 'origin']);
+          yield* git(['config', 'branch.main.merge', 'refs/heads/main']);
+          yield* git(['reset', '-q', '--hard', 'HEAD~1']);
+          yield* git(['checkout', '-q', '--no-track', '-B', 'feature/one', 'refs/remotes/origin/main']);
+        });
+      const f = yield* cycleFixture(
+        ['one'],
+        'local',
+        false,
+        false,
+        true,
+        undefined,
+        staleBase,
+        {},
+        {policy: 'standard'},
+      );
+      const rev = (ref: string) =>
+        f.git(['rev-parse', ref]).pipe(Effect.map(result => EffectString.trim(result.stdout)));
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = 1;\n');
+      yield* f.git(['commit', '-qam', 'Phase work']);
+      const recorded = object(
+        yield* runNativeTaskAction(f.config, {command: 'record-snapshot', runId: 'native-run', callerCwd: f.repo}),
+      );
+      expect(recorded).not.toHaveProperty('warnings');
+      const snapshot = object(yield* storedSnapshot(f.config));
+      expect(snapshot).toMatchObject({
+        files: ['source.ts'],
+        outOfPlan: [],
+        declaredBaseHead: yield* rev('refs/remotes/origin/main'),
+        comparisonEvidence: {baseBranch: 'main', comparisonRef: 'refs/remotes/origin/main'},
+      });
+      expect(yield* rev('main')).toBe(yield* rev('refs/remotes/origin/main~1'));
+      // Review and validation resolve the same base, so the recorded snapshot stays current.
+      yield* f.mutate('validate-review', {snapshotId: snapshot.snapshotId, attemptId: 'a1', report: review(snapshot)});
+      expect(
+        yield* f.mutate('ready', {phaseId: 'one', snapshotId: snapshot.snapshotId, validation: validation(snapshot)}),
+      ).toMatchObject({status: 'ok'});
+    }).pipe(runCycle),
+  );
+
+  effectIt.effect('records a diverged local base and compares against the local branch', () =>
+    Effect.gen(function* () {
+      // Local main and origin/main each carry a commit that the other lacks.
+      const divergedBase = (repo: string) =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const git = (args: readonly string[]) => runCommandEffect('git', ['-C', repo, ...args]);
+          yield* git(['checkout', '-q', 'main']);
+          yield* fs.writeFileString(`${repo}/upstream.md`, 'Merged upstream.\n');
+          yield* git(['add', 'upstream.md']);
+          yield* git(['commit', '-qm', 'Upstream work']);
+          yield* git(['update-ref', 'refs/remotes/origin/main', 'HEAD']);
+          yield* git(['config', 'remote.origin.url', repo]);
+          yield* git(['config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*']);
+          yield* git(['config', 'branch.main.remote', 'origin']);
+          yield* git(['config', 'branch.main.merge', 'refs/heads/main']);
+          yield* git(['reset', '-q', '--hard', 'HEAD~1']);
+          yield* fs.writeFileString(`${repo}/local.md`, 'Local only.\n');
+          yield* git(['add', 'local.md']);
+          yield* git(['commit', '-qm', 'Local work']);
+          yield* git(['checkout', '-q', '-B', 'feature/one', 'main']);
+        });
+      const f = yield* cycleFixture(
+        ['one'],
+        'local',
+        false,
+        false,
+        true,
+        undefined,
+        divergedBase,
+        {},
+        {policy: 'standard'},
+      );
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = 1;\n');
+      yield* f.git(['commit', '-qam', 'Phase work']);
+      const recorded = object(
+        yield* runNativeTaskAction(f.config, {command: 'record-snapshot', runId: 'native-run', callerCwd: f.repo}),
+      );
+      expect(recorded.note).toEqual(expect.stringContaining('refs/remotes/origin/main'));
+      expect(yield* storedSnapshot(f.config)).toMatchObject({
+        files: ['source.ts'],
+        declaredBaseHead: EffectString.trim((yield* f.git(['rev-parse', 'main'])).stdout),
+        comparisonEvidence: {baseBranch: 'main', divergedUpstream: 'refs/remotes/origin/main'},
       });
     }).pipe(runCycle),
   );
@@ -1388,12 +1566,16 @@ describe('issue #1074 acceptance', () => {
             runId: 'native-run',
             callerCwd: f.repo,
             reason,
-          }).pipe(Effect.map(result => object(object(object(result).snapshot).snapshot)));
+          }).pipe(Effect.map(object));
+        const snapshotOf = (result: Record<string, unknown>) => object(object(result.snapshot).snapshot);
+        const outOfPlanNotes = [{_tag: 'warn', gate: 'scope.out-of-plan', detail: {files: ['notes.md']}}];
         yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = 1;\n');
-        const first = yield* record('first source');
+        const first = snapshotOf(yield* record('first source'));
         yield* f.fs.writeFileString(f.path.join(f.repo, 'notes.md'), 'Outside the planned paths.\n');
-        const second = yield* record('edit outside the plan');
-        expect(second).toMatchObject({supersedes: first.snapshotId, outOfPlan: ['notes.md']});
+        const recordedSecond = yield* record('edit outside the plan');
+        const second = snapshotOf(recordedSecond);
+        expect(second).toMatchObject({supersedes: first.snapshotId});
+        expect(recordedSecond.warnings).toEqual(outOfPlanNotes);
         yield* f.git(['add', '-A']);
         yield* f.git(['commit', '-m', 'phase work']);
         yield* f.git(['checkout', '-q', 'main']);
@@ -1402,8 +1584,10 @@ describe('issue #1074 acceptance', () => {
         yield* f.git(['commit', '-m', 'move the base']);
         yield* f.git(['checkout', '-q', 'feature/one']);
         yield* f.git(['rebase', '-q', 'main']);
-        const third = yield* record('rebased onto the moved base');
-        expect(third).toMatchObject({version: 4, supersedes: second.snapshotId, outOfPlan: ['notes.md']});
+        const recordedThird = yield* record('rebased onto the moved base');
+        const third = snapshotOf(recordedThird);
+        expect(third).toMatchObject({version: 4, supersedes: second.snapshotId});
+        expect(recordedThird.warnings).toEqual(outOfPlanNotes);
         expect(third.scopeBase).not.toBe(second.scopeBase);
       }).pipe(runCycle),
   );

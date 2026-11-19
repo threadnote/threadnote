@@ -3,6 +3,7 @@ import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {WorkflowAutomationError} from './contracts.js';
+import {nativeGateRefuses, type NativeWorkflowPolicy} from './gates.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
@@ -517,11 +518,11 @@ export function decodeNativeCycleState(value: unknown): NativeCycleState {
           ))
       )
         err('Open PR receipt lacks matching watch evidence.');
+      // A terminal watch keeps the merged head; the application verifies it descends from the delivered head.
       if (
         pr.state === 'merged' &&
         r.delivery.watch &&
         (r.delivery.watch.prUrl !== pr.url ||
-          r.delivery.watch.headSha !== pr.headSha ||
           r.delivery.watch.state !== 'terminal' ||
           !nativeCycleAbsolutePath(r.delivery.watch.stateDir) ||
           !Effect.pipe(r.delivery.watch.consumerId, EffectString.trim) ||
@@ -706,11 +707,37 @@ export function checkNativeCycleScope(phase: NativeCyclePlan['phases'][number], 
       }),
   );
 }
+const quotedList = (items: ReadonlyArray<string>) => {
+  const shown = EffectArray.join(
+    EffectArray.map(EffectArray.take(items, 3), item =>
+      JSON.stringify(item.length > 80 ? `${Effect.pipe(item, EffectString.slice(0, 79))}…` : item),
+    ),
+    ', ',
+  );
+  return items.length > 3 ? `${shown} and ${items.length - 3} more` : shown;
+};
+/** Name what differs so the caller can copy the exact stored criterion text. */
+function acceptanceCoverageMessage(stored: ReadonlyArray<string>, covered: ReadonlyArray<string>): string {
+  const missing = EffectArray.filter(stored, x => !covered.includes(x)),
+    duplicate = EffectArray.dedupe(EffectArray.filter(covered, (x, i) => covered.indexOf(x) !== i)),
+    extra = EffectArray.dedupe(EffectArray.filter(covered, x => !stored.includes(x)));
+  return EffectArray.join(
+    [
+      'Acceptance criteria coverage is incomplete.',
+      ...(missing.length > 0 ? [`Missing stored criteria: ${quotedList(missing)}.`] : []),
+      ...(duplicate.length > 0 ? [`Duplicate entries: ${quotedList(duplicate)}.`] : []),
+      ...(extra.length > 0 ? [`Entries that match no stored criterion: ${quotedList(extra)}.`] : []),
+    ],
+    ' ',
+  );
+}
+/** Under a standard policy, out-of-plan paths are drift the reviewed snapshot covers, not a scope violation. */
 export function validateNativeCyclePhase(
   value: NativeCycleState,
   idValue: string,
   snapshot: CycleSnapshot,
   evidence: unknown,
+  policy: NativeWorkflowPolicy = 'strict',
 ): NativeCycleState {
   const s = decodeNativeCycleState(value),
     r = s.phases[idValue],
@@ -731,14 +758,15 @@ export function validateNativeCyclePhase(
     (r.planPhaseHash ?? r.phaseHash) !== nativeCyclePhaseHash(s.plan, idValue)
   )
     err('Validation does not match snapshot.');
-  if (!checkNativeCycleScope(p, snapshot.files)) err('Changed paths exceed allowed scope.');
+  if (!checkNativeCycleScope(p, snapshot.files) && nativeGateRefuses(policy, 'scope.out-of-plan'))
+    err('Changed paths exceed allowed scope.');
   const covered = EffectArray.map(v.acceptance, x => x.criterion);
   if (
     new Set(covered).size !== covered.length ||
     covered.length !== p.acceptanceCriteria.length ||
     EffectArray.some(p.acceptanceCriteria, x => !covered.includes(x))
   )
-    err('Acceptance criteria coverage is incomplete.');
+    err(acceptanceCoverageMessage(p.acceptanceCriteria, covered));
   if (r.head === snapshot.head && r.tree === snapshot.tree && canonical(r.validation ?? null) === canonical(v))
     return s;
   return {
@@ -826,8 +854,19 @@ export function recordNativeCycleDelivery(value: NativeCycleState, idValue: stri
       )
         err('Open PR requires a matching watch.');
     } else {
-      if (d.watch && (d.watch.state !== 'terminal' || d.watch.prUrl !== pr.url || d.watch.headSha !== d.headSha))
+      if (d.watch && (d.watch.state !== 'terminal' || d.watch.prUrl !== pr.url))
         err('Merged PR watch evidence is not a matching terminal readback.');
+      // Only a phase whose open PR had an active watch at its head saw the commits that later moved that head.
+      const prior = r.delivery;
+      if (
+        d.watch &&
+        d.watch.headSha !== d.headSha &&
+        (r.status !== 'published' ||
+          prior?.pr?.state !== 'open' ||
+          prior.watch?.state !== 'active' ||
+          prior.watch.headSha !== d.headSha)
+      )
+        err('Only a phase published while its PR was open can merge above its delivered head.');
       status = 'merged';
     }
   }

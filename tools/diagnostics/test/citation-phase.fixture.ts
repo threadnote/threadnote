@@ -187,6 +187,7 @@ function scaleObservation(
     exactValidationReceipts: profile.citationCount,
     memoryRetrievalMilliseconds: 5,
     profile: profile.id,
+    recallBudgetExhausted: false,
     selectedMemories: profile.selectedMemories,
     validationMilliseconds: 4,
     validationReceipts: profile.citationCount,

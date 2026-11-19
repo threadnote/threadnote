@@ -6,7 +6,6 @@ import {javaRuntimePinsForHost} from '../../../src/semantic/providers/java_runti
 import {JavaPreparationDiagnostic, LspFault} from '../../../src/semantic/lsp_transport.js';
 import {runtimeNativePlatformTarget} from '@threadnote/platform/system';
 import {BUN_STANDALONE_TARGETS} from '../../../../../scripts/release-targets.js';
-/* oxlint-disable effecttsgo/node-builtin-import -- Candidate qualification owns explicit process and private evidence-file boundaries. */
 import {createHash} from 'node:crypto';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';

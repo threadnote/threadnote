@@ -3,7 +3,7 @@ import {relative} from '@threadnote/testing/node-path';
 import {BaseSequencer, type TestSpecification} from 'vitest/node';
 import observedDurations from './windows-smoke-durations.json' with {type: 'json'};
 
-// CI run 41039873225; split lifecycle files use the sum of their original examples.
+// CI run 44278733008; split files share their original file's duration in proportion to local runtime.
 const durations: Readonly<Record<string, number>> = observedDurations;
 const comparePaths = (left: string, right: string) => (left < right ? -1 : left > right ? 1 : 0);
 

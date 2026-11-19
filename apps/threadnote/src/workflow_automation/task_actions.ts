@@ -9,6 +9,7 @@ import {
   nativeNext,
   nativeWaivableGateIds,
   nativeWorkflowPolicies,
+  resolveNativeWorkflowPolicy,
 } from '@threadnote/workflow-automations/gates';
 import {runStandalonePrWatch} from './standalone_pr_watch.js';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -66,12 +67,13 @@ import {validateWorkflowGraphProject} from '../workflow_memory/graph_scope.js';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {inspectNativeSourcePaths} from './authoring.js';
 import {makeWorkflowGitAdapter} from './cycle_git.js';
-import {requireWorkflowGraphReady} from './graph.js';
+import {requireWorkflowGraphScope} from './graph.js';
 import {readNativeTaskInstalledTarget} from './task_admission.js';
 import {runCompactOriginAuthoringSave, runWorkflowAutomation} from './index.js';
+import {nativePlanDocumentFromBusiness} from './task_authoring.js';
 import {nativeWorkflowError} from './memory.js';
 import {readNativeWorkflowState} from './store.js';
-import {readNativeTaskView, verifyNativeTaskReopen} from './task.js';
+import {nativeRunNotFoundMessage, readNativeTaskView, verifyNativeTaskReopen} from './task.js';
 import {inspectOldBindingOwners} from './task_binding_transition.js';
 import {NativeTaskPrWatchFieldsSchema} from './task_pr_watch.js';
 import {
@@ -196,6 +198,7 @@ const requestSchema = Schema.Union([
     userResponse: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
     userDecision: Schema.optionalKey(Schema.Literals(['approve', 'reject', 'defer'])),
     baseBranch: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256))),
+    delivery: Schema.optionalKey(Schema.Literals(['local', 'commit', 'pr'])),
     reconcileReason: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
     bindings: Schema.optionalKey(Schema.Record(id, Schema.Struct({branch: Schema.String, baseBranch: Schema.String}))),
     review: Schema.optionalKey(compactReviewSchema),
@@ -411,19 +414,33 @@ const compactIntentMatchesDocument = (intent: NativeCompactIntent, value: unknow
     intent.eligibility.status === 'eligible'
   );
 };
-export {readNativeTaskInstalledTarget} from './task_admission.js';
+/** Names the fields that do not belong to, or are missing from, the chosen start shape. */
+const nativeTaskStartShapeMessage = (input: unknown) => {
+  const fields = Predicate.isObject(input) ? EffectRecord.keys(input) : [];
+  const shared = EffectArray.contains(fields, 'sharedPlanRef');
+  const [compact, sharedPlan] = NativeTaskStartRequestSchema.members;
+  const shapeFields: Readonly<Record<string, Schema.Top>> = shared ? sharedPlan.fields : compact.fields;
+  const label = shared ? 'A shared-plan' : 'A compact';
+  const foreign = EffectArray.filter(fields, field => !(field in shapeFields));
+  if (foreign.length) {
+    const confirmTime =
+      !shared && EffectArray.some(foreign, field => ['delivery', 'bindings', 'baseBranch'].includes(field));
+    return `${label} start does not accept ${EffectArray.join(foreign, ', ')}.${confirmTime ? ' Choose delivery and branch bindings at compact-confirm.' : ''}`;
+  }
+  const missing = EffectArray.filter(
+    EffectRecord.keys(shapeFields),
+    field => !shapeFields[field].ast.context?.isOptional && !EffectArray.contains(fields, field),
+  );
+  if (!missing.length)
+    return 'Provide a feature name, absolute checkout path, bounded compact intent, and an optional installed target or task reference.';
+  const resume = !shared && EffectArray.contains(fields, 'taskRef');
+  return `${label} ${resume ? 'resume' : 'start'} requires ${EffectArray.join(missing, ', ')}.${resume ? ' A resume repeats the original featureName and intent with the taskRef.' : ''}`;
+};
 export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
   Effect.gen(function* () {
     const request = yield* Schema.decodeUnknownEffect(NativeTaskStartRequestSchema, {onExcessProperty: 'error'})(
       input,
-    ).pipe(
-      Effect.mapError(() =>
-        fail(
-          'invalid-request',
-          'Provide a feature name, absolute checkout path, bounded compact intent, and an optional installed target or task reference.',
-        ),
-      ),
-    );
+    ).pipe(Effect.mapError(() => fail('invalid-request', nativeTaskStartShapeMessage(input))));
     if ('sharedPlanRef' in request) return yield* runNativeSharedPlanStart(config, request);
     const taskStartReference = request.taskRef ? decodeNativeTaskStartReference(request.taskRef) : undefined;
     if (request.taskRef && !taskStartReference)
@@ -459,18 +476,19 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
       request.graphProject === undefined
         ? undefined
         : yield* validateWorkflowGraphProject(config, checkout, request.graphProject);
-    const requireGraphReady = (
+    const requireGraphScope = (
       generation: string,
       profile: 'desktop' | 'codex-cloud-personal' | 'cursor-cloud-personal',
       team?: string,
     ) =>
-      requireWorkflowGraphReady(config, {
+      requireWorkflowGraphScope(config, {
         checkout,
         runId,
         project,
         featureId,
         generation,
         profile,
+        policy: nativeWorkflowPolicyOf(stored?.state ?? resolveNativeWorkflowPolicy(config, request.workflowProfile)),
         recovery: stored ? 'new-task' : 'same-task',
         ...(team === undefined ? {} : {team}),
         ...((stored?.state.graphProject ?? graphProject) === undefined
@@ -521,6 +539,7 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
         return {
           status: 'binding-transition' as const,
           outcome,
+          runId,
           taskRef: runId,
           binding: {
             runId: stored.state.runId,
@@ -561,7 +580,7 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
             'task-intent-conflict',
             'The saved task has different business intent. Continue its current task or choose a new feature name; existing intent was not overwritten.',
           );
-        return {status: 'resumed' as const, taskRef: runId, view};
+        return {status: 'resumed' as const, runId, taskRef: runId, view};
       }
       // Only the initial compact save continues here; the saver verifies its complete digest and receipt prefix.
       const pendingCompactSave = reservation?.operationStart === 0 && reservation.rootUri === null;
@@ -586,17 +605,20 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
       const source = yield* inCallerCheckout(inspectNativeSourcePaths(checkout, request.intent.affectedPaths));
       const projected = projectNativeCompactIntent(request.intent, identity, source);
       if (projected.status !== 'eligible') return projected;
-      yield* requireGraphReady(stored.state.generation, stored.state.profile, stored.state.team);
+      yield* requireGraphScope(stored.state.generation, stored.state.profile, stored.state.team);
       const started = yield* runNativeTaskAction(config, {
         command: 'compact-start',
         runId,
         callerCwd: checkout,
         intent: request.intent,
       });
-      return {...started, taskRef: runId, resumed: true, ...(pendingCompactSave ? {recovered: true} : {})};
+      return {...started, runId, taskRef: runId, resumed: true, ...(pendingCompactSave ? {recovered: true} : {})};
     }
     if (request.taskRef)
-      return yield* fail('run-not-found', 'The supplied task reference does not resolve to an existing native task.');
+      return yield* fail(
+        'run-not-found',
+        'The supplied taskRef does not resolve to an existing native task. Use the runId that workflow_task_start returned.',
+      );
     if (request.intent.eligibility.status === 'needs-planning')
       return {
         status: 'needs-planning' as const,
@@ -608,7 +630,7 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
     const source = yield* inCallerCheckout(inspectNativeSourcePaths(checkout, request.intent.affectedPaths));
     const projected = projectNativeCompactIntent(request.intent, identity, source);
     if (projected.status !== 'eligible') return projected;
-    yield* requireGraphReady(target.installedDigest, target.target.profile);
+    yield* requireGraphScope(target.installedDigest, target.target.profile);
     const initialized = yield* inCallerCheckout(
       runWorkflowAutomation(config, {
         protocolVersion: 1,
@@ -636,7 +658,7 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
       callerCwd: checkout,
       intent: request.intent,
     });
-    return {...started, taskRef: runId};
+    return {...started, runId, taskRef: runId};
   }).pipe(
     Effect.catchDefect(error => Effect.fail(nativeWorkflowError(error))),
     Effect.mapError(nativeWorkflowError),
@@ -733,10 +755,9 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
     const checkout = yield* fs
       .realPath(reportedCheckout)
       .pipe(Effect.mapError(() => fail('workspace-not-found', 'The Git checkout root could not be resolved.')));
-    if (
-      request.command === 'watch-pr' &&
-      request.runId === undefined &&
-      EffectArray.some(
+    if (request.command === 'watch-pr') {
+      // An explicit PR identity always selects monitor-only standalone monitoring; runId alone never grants it proof.
+      const workflowProof = EffectArray.some(
         [
           request.validationRef,
           request.deliveryRef,
@@ -747,22 +768,29 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
           request.pr,
         ],
         value => value !== undefined,
-      )
-    )
-      return yield* fail('invalid-request', 'Standalone monitoring cannot use workflow proof fields.');
-    if (request.command === 'watch-pr' && request.runId === undefined)
-      return yield* runStandalonePrWatch(config, request, checkout);
-    if (request.command === 'watch-pr' && (request.watchRef !== undefined || request.prUrl !== undefined))
-      return yield* fail('invalid-request', 'Workflow-bound watches cannot use standalone watch identities.');
+      );
+      const standalone = request.prUrl !== undefined || request.watchRef !== undefined || request.runId === undefined;
+      if (standalone && workflowProof)
+        return yield* fail(
+          'invalid-request',
+          request.prUrl !== undefined || request.watchRef !== undefined
+            ? 'Remove prUrl and watchRef for a workflow-bound watch, or remove the workflow proof fields for a monitor-only standalone watch.'
+            : 'Add runId for a workflow-bound watch, or use prUrl without workflow proof fields for a monitor-only standalone watch.',
+        );
+      if (standalone) {
+        const {runId: _runId, ...standaloneRequest} = request;
+        return yield* runStandalonePrWatch(config, standaloneRequest, checkout);
+      }
+    }
     if (request.runId === undefined) return yield* fail('invalid-request', 'Use the workflow run identifier.');
     const runId = request.runId;
     const stored = yield* readNativeWorkflowState(config, request.runId);
-    if (!stored) return yield* fail('run-not-found', 'Start a fresh native run before using task actions.');
+    if (!stored) return yield* fail('run-not-found', nativeRunNotFoundMessage);
     const journal = yield* inCheckout(
       withWorkflowLock(config, stored.state.bindingId, inspectWorkflowJournal(config, stored.state.bindingId)),
       checkout,
     );
-    if (journal.state.binding.repo !== checkout)
+    if ((yield* fs.realPath(journal.state.binding.repo)) !== checkout)
       return yield* fail('wrong-checkout', 'Use the checkout bound to this native run.');
     if (request.command === 'set-profile') return yield* runNativeTaskSetProfile(config, request, stored, checkout);
     // A standard run keeps one way to record source: the newest tree supersedes an unreviewed snapshot and a moved
@@ -880,10 +908,23 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
         const previous = yield* loadRoot();
         if (previous.document.kind !== 'plan' || !previous.document.compactOrigin)
           return yield* fail('compact-origin-required', 'Only a compact-origin plan can be expanded in place.');
-        const supplied = yield* Effect.try({
-          try: () => decodeNativeAuthoringDocument(request.document),
-          catch: nativeWorkflowError,
-        });
+        const previousPlan = previous.document;
+        // Business JSON is the contract; a complete document with runtime metadata stays accepted.
+        const supplied =
+          Predicate.isObject(request.document) && 'format' in request.document
+            ? yield* Effect.try({
+                try: () => decodeNativeAuthoringDocument(request.document),
+                catch: nativeWorkflowError,
+              })
+            : yield* inCheckout(
+                nativePlanDocumentFromBusiness(config, request.document, {
+                  checkout,
+                  featureId: stored.state.featureId,
+                  project: stored.state.project,
+                  previous: previousPlan,
+                }),
+                checkout,
+              );
         if (
           supplied.kind !== 'plan' ||
           supplied.id !== stored.state.featureId ||
@@ -930,6 +971,11 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
           'The displayed compact intent changed. Run workflow_task_view for this run to retrieve the current packet, then present that packet before confirming.',
         );
       const existingCycle = stored.state.cycle?.state;
+      if (existingCycle && request.delivery !== undefined && request.delivery !== existingCycle.plan.delivery)
+        return yield* fail(
+          'delivery-conflict',
+          `This run admitted ${existingCycle.plan.delivery} delivery, and an admitted cycle keeps its delivery. Omit delivery, or start a new task for ${request.delivery} delivery.`,
+        );
       const currentBranch = yield* gitValue(['branch', '--show-current'], checkout);
       if (!existingCycle && !request.baseBranch)
         return {status: 'missing-input', intentHash, missingInputs: ['baseBranch for the local cycle']};
@@ -972,14 +1018,25 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
           : undefined;
       // Implicit replay requires no new response and a stored approval for the exact current intent.
       const implicitReplay = request.userDecision === undefined && request.userResponse === undefined;
+      // The approval covers the delivery mode, so a replay cannot change the mode the user approved.
+      // An older binary stored no delivery in the confirmation, so an admitted cycle supplies the approved mode.
+      const approvedMode =
+        priorResponse === undefined ? undefined : (existingConfirmation?.delivery ?? existingCycle?.plan.delivery);
+      const approvedDelivery = approvedMode === 'commit' || approvedMode === 'pr' ? approvedMode : 'local';
+      if (implicitReplay && priorResponse && request.delivery !== undefined && request.delivery !== approvedDelivery)
+        return yield* fail(
+          'delivery-not-confirmed',
+          `The stored approval covers ${approvedDelivery} delivery. Present ${request.delivery} delivery with the compact-intent packet and record the user’s new response.`,
+        );
+      const delivery = request.delivery ?? existingCycle?.plan.delivery ?? approvedDelivery;
       const userDecision = request.userDecision ?? (implicitReplay && priorResponse ? 'approve' : undefined);
       const userResponse = request.userResponse ?? (implicitReplay ? priorResponse : undefined);
       if (!userDecision || !userResponse || (request.userDecision !== undefined && !request.userResponse))
         return {
           status: 'awaiting-user-confirmation',
           intentHash,
-          missingDecision:
-            'Provide the user’s actual response and an explicit approve/reject/defer decision for the displayed compact-intent packet.',
+          delivery,
+          missingDecision: `Provide the user’s actual response and an explicit approve/reject/defer decision for the displayed compact-intent packet with ${delivery} delivery.`,
           actorIdentity: 'caller-asserted; not independently verified by this local command boundary',
         };
       const confirmationResult = yield* authoring('confirm', {
@@ -996,12 +1053,13 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
           actorIdentity: 'caller-asserted; not independently verified by this local command boundary',
         };
 
+      const confirmation = {...confirmationResult.confirmation, ...(delivery === 'local' ? {} : {delivery})};
       const saved = yield* authoring('save', {
         document: current.document,
         ready: true,
         uri: current.uri,
         expectedRevision: current.revision,
-        confirmation: confirmationResult.confirmation,
+        confirmation,
         ...(request.review ? {review: request.review} : {}),
       });
       if (saved.readiness !== 'ready')
@@ -1010,12 +1068,12 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
           intentHash,
           root: saved.root,
           blockers: saved.readinessBlockers ?? [],
-          confirmation: confirmationResult.confirmation,
+          confirmation,
           actorIdentity: 'caller-asserted; not independently verified by this local command boundary',
         };
       const exportPacket = yield* authoring('export-dev-cycle', {
         uri: current.uri,
-        delivery: existingCycle?.plan.delivery ?? 'local',
+        delivery,
         bindings,
       });
       const latest = yield* readNativeWorkflowState(config, request.runId);
@@ -1659,30 +1717,9 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
         current = yield* readNativeWorkflowState(config, request.runId);
       }
       if (!current?.state.cycle) return yield* fail('cycle-not-found', 'This run has no admitted native cycle.');
-      const proofResult = yield* inCheckout(
-        runWorkflowAutomation(config, {
-          protocolVersion: 1,
-          executorVersion: 1,
-          action: 'graph-ready',
-          runId: current.state.runId,
-          generation: current.state.generation,
-        }),
-        checkout,
-      );
-      const proofValue: unknown = proofResult;
-      if (!Predicate.isObject(proofValue) || proofValue.status !== 'ok' || !Predicate.isObject(proofValue.graph))
-        return yield* fail(
-          'graph-not-ready',
-          'A current ready graph proof is required before dispatching implementation.',
-        );
-      const graph = proofValue.graph;
-      if (graph.state !== 'ready' || graph.dirty !== false || typeof graph.head !== 'string')
-        return yield* fail(
-          'graph-not-ready',
-          'A clean current ready graph proof is required before dispatching implementation.',
-        );
+      const head = yield* gitValue(['rev-parse', 'HEAD'], checkout);
       const tree = yield* gitValue(['rev-parse', 'HEAD^{tree}'], checkout);
-      if (!tree) return yield* fail('source-unavailable', 'Could not read the current source tree.');
+      if (!head || !tree) return yield* fail('source-unavailable', 'Could not read the current source tree.');
       const source = yield* inCheckout(
         Effect.gen(function* () {
           const git = yield* makeWorkflowGitAdapter();
@@ -1692,7 +1729,7 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
         }),
         checkout,
       );
-      if (source.head !== graph.head || source.tree !== tree)
+      if (source.head !== head || source.tree !== tree)
         return yield* fail('source-drift', 'Source changed while deriving task anchor evidence.');
       const packetAnchors = EffectArray.map(request.packet.anchors, anchor => {
         const sha256 = source.files[anchor.path];
@@ -1706,8 +1743,9 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
             cycleRequest(current, {
               command: 'packet',
               phaseId,
+              acceptedHead: head,
               ...CycleOutput.nativeCyclePacketRequestOptions(request.packet.budgetBytes),
-              packet: {...request.packet, anchors: packetAnchors, graphProof: {...graph, tree}},
+              packet: {...request.packet, anchors: packetAnchors},
             }),
           ),
           checkout,
@@ -1737,7 +1775,7 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
         baselineHead: baseline.head,
         baselineTree: baseline.tree,
         baselineRef: baseline.pinnedRef,
-        sourceHead: graph.head,
+        sourceHead: head,
         sourceTree: tree,
         payloadDigest: sha256HexSync(JSON.stringify(request.packet)),
       });

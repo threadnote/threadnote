@@ -10,9 +10,10 @@ import {
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {nativeWorkflowError} from './memory.js';
 import {nativeCycleHasControl} from '@threadnote/workflow-automations/cycle';
-import type {
-  NativeCycleBaseRequalificationInput,
-  NativeCycleRebaseInput,
+import {
+  nativeCycleSnapshotFileLimit,
+  type NativeCycleBaseRequalificationInput,
+  type NativeCycleRebaseInput,
 } from '@threadnote/workflow-automations/cycle-review';
 import {
   readPathFileSystemAuthority,
@@ -26,7 +27,7 @@ import * as Effect2 from 'effect';
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
 const objectId = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 const outputLimit = 4 * 1_048_576;
-const snapshotPathLimit = 8192;
+const snapshotPathLimit = nativeCycleSnapshotFileLimit;
 const stagingTimeoutMs = 120_000;
 const recentIndexCtimeWindowSeconds = 2;
 const targetedRenormalizePathLimit = 512;
@@ -396,7 +397,8 @@ export const readNativeCycleTreeEntries = Effect.fn('workflowAutomation.cycle.re
   reference: string,
   files: readonly string[],
 ) {
-  if (files.length > 8192) return yield* fail('snapshot-capacity', 'Tree lookup exceeds the bounded file manifest.');
+  if (files.length > snapshotPathLimit)
+    return yield* fail('snapshot-capacity', 'Tree lookup exceeds the bounded file manifest.');
   for (const file of files)
     if (!nativeCycleRelativePath(file)) return yield* fail('invalid-scope', 'Source paths must be relative.');
   const entries: Record<string, {mode: string; blob: string}> = Object.create(null);
@@ -869,6 +871,32 @@ export const nativeCycleIsAncestor = Effect.fn('workflowAutomation.cycle.isAnces
   if (result.exitCode === 1) return false;
   return yield* fail('invalid-base-requalification', 'Git could not verify source ancestry.');
 });
+
+/**
+ * The commit a declared base compares against. A local branch that is a strict ancestor of its remote-tracking
+ * upstream is a stale label, so the upstream answers and the declared name stays the PR target. A diverged branch
+ * keeps its own commit. No ref moves.
+ */
+export const resolveNativeCycleBase = Effect.fn('workflowAutomation.cycle.resolveBase')(function* (
+  repo: string,
+  baseBranch: string,
+) {
+  const commit = yield* resolveObject(repo, baseBranch, 'commit');
+  // A remote-tracking, ambiguous or non-branch name resolves elsewhere and keeps its own commit.
+  const [tip, upstream] = EffectString.split(
+    EffectString.trim(
+      yield* git(repo, ['for-each-ref', '--format=%(objectname) %(upstream)', `refs/heads/${baseBranch}`]),
+    ),
+    ' ',
+  );
+  if (tip !== commit || !upstream || !EffectString.startsWith('refs/remotes/')(upstream)) return {commit};
+  const tracked = yield* resolveObject(repo, upstream, 'commit').pipe(Effect.option);
+  if (Option.isNone(tracked) || tracked.value === commit) return {commit};
+  if (yield* nativeCycleIsAncestor(repo, commit, tracked.value))
+    return {commit: tracked.value, comparisonRef: upstream};
+  return (yield* nativeCycleIsAncestor(repo, tracked.value, commit)) ? {commit} : {commit, divergedUpstream: upstream};
+});
+export type NativeCycleBase = Effect.Success<ReturnType<typeof resolveNativeCycleBase>>;
 
 export const verifyNativeCycleBaseRequalification = Effect.fn('workflowAutomation.cycle.verifyBaseRequalification')(
   function* (

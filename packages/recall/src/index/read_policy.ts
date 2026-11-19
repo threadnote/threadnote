@@ -1,4 +1,5 @@
 import {
+  Context,
   Array as EffectArray,
   Effect,
   FileSystem,
@@ -73,7 +74,7 @@ export function useRecallDatabaseReadOnly<A, E, R>(
         Effect.gen(function* () {
           const sql = yield* SqlClient.SqlClient;
           return yield* sql.withTransaction(effect);
-        }).pipe(Effect.provide(context)),
+        }).pipe(Effect.provideService(SqlClient.SqlClient, Context.get(context, SqlClient.SqlClient))),
       ),
     ),
   );

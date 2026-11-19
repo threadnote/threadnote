@@ -32,10 +32,11 @@ import {
   verifyNativeCandidateSourceFence,
   nativeCandidateWatchFailureIsDrift,
 } from './watch_store.js';
-import {launchNativeWatchProcess, nativeWatchCollectorAlive} from './watch_process.js';
+import {launchNativeWatchProcess, nativeWatchCollectorAlive, nativeWatchCollectorLockHeld} from './watch_process.js';
 import {assertNativeWatchOutput, nativeWatchWorkList, nativeWatchWorkDetail} from './watch_output.js';
 import {
   consumeNativeWatchNotification,
+  isNativeWatchSessionWakeup,
   matchesTerminalNativeWatchArrival,
   nativeWatchWakeupSchema,
   type NativeWatchWakeup,
@@ -91,6 +92,9 @@ export const nativeWatchRequestSchema = Schema.Struct({
   eventId: Schema.optionalKey(text),
   sourceDigest: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
   offsetBytes: Schema.optionalKey(Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 65536}))),
+  stopReason: Schema.optionalKey(Schema.Literal('superseded')),
+  /** The workflow-bound watch that replaces a superseded watch. */
+  supersededBy: Schema.optionalKey(id),
 });
 const version = {protocolVersion: 1 as const, executorVersion: 1 as const};
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
@@ -226,8 +230,8 @@ function attachNotification(
   const previous = envelope.notification;
   const sameOwner = previous?.consumerId === consumer.id && previous.wakeupId === consumer.wakeupId;
   const rebind = !sameOwner || (wakeup && stableJson(wakeup) !== stableJson(previous?.target));
-  const retainedCursorAttempt =
-    previous?.target.host === 'cursor-cli' &&
+  const retainedSessionAttempt =
+    isNativeWatchSessionWakeup(previous?.target) &&
     previous.outbox &&
     previous.outbox.attempts > 0 &&
     !(previous.outbox.status === 'failed' && previous.outbox.error === 'host-session-owned');
@@ -236,10 +240,10 @@ function attachNotification(
       'wakeup-recovery-required',
       'Consume and acknowledge the original Codex notice, or explicitly recover its ambiguous attempt before rebinding.',
     );
-  if (rebind && retainedCursorAttempt)
+  if (rebind && retainedSessionAttempt)
     throw fail(
       'wakeup-recovery-required',
-      'Recover or finalize the original Cursor attempt before changing its owner or target.',
+      'Recover or finalize the original session host attempt before changing its owner or target.',
     );
   if (
     previous?.outbox?.status === 'sending' &&
@@ -536,8 +540,8 @@ export const runNativeWatchCollector = Effect.fn('workflowWatch.collector')(func
             if (before.envelope.stopRequested) {
               yield* finish('stopped', 'stop-requested', 'watcher_stopped');
               if (
-                before.envelope.notification?.target.host !== 'cursor-cli' ||
-                before.envelope.notification.outbox?.status !== 'sending'
+                !isNativeWatchSessionWakeup(before.envelope.notification?.target) ||
+                before.envelope.notification?.outbox?.status !== 'sending'
               )
                 yield* drain();
               return;
@@ -743,6 +747,10 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (
   const request = yield* from(() =>
     Schema.decodeUnknownSync(nativeWatchRequestSchema, {onExcessProperty: 'error'})(input),
   );
+  if (request.stopReason && request.command !== 'stop')
+    return yield* fail('invalid-request', 'Only stop records a stop reason.');
+  if ((request.stopReason === 'superseded') !== (request.supersededBy !== undefined))
+    return yield* fail('invalid-request', 'A superseded stop names the workflow-bound watch that replaces it.');
   if (
     (request.wakeup || request.recoverWakeup) &&
     request.command !== 'start' &&
@@ -798,11 +806,23 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (
       throw fail('watch-state-conflict', 'The host binding changed during admission; retry the explicit attachment.');
   };
   const now = yield* Clock.currentTimeMillis;
+  const plainRenew = request.command === 'renew' && !request.recoverWakeup;
+  // A live collector or another terminal recovery still owns a sending attempt; recovery would wake the host twice.
+  const assertNoOwnedAttempt = (envelope: NativeWatchEnvelope) =>
+    Effect.gen(function* () {
+      if (
+        request.recoverWakeup &&
+        envelope.notification?.outbox?.status === 'sending' &&
+        ((yield* nativeWatchCollectorAlive(envelope.collector)) ||
+          (yield* nativeWatchCollectorLockHeld(config, request.watchId)))
+      )
+        return yield* fail('wakeup-in-flight', 'Wait for the owned host attempt to finish before requesting recovery.');
+    });
   if (request.command === 'renew') {
-    if (request.takeover || request.recoverWakeup || !request.wakeup)
+    if (request.takeover || !request.wakeup)
       return yield* fail(
         'invalid-request',
-        'Renewal requires the unchanged registered host and does not allow takeover or wake recovery.',
+        'Renewal requires the unchanged registered host and does not allow takeover.',
       );
     const existing = yield* load(config, request.watchId);
     if (existing.envelope.state.pr !== request.pr)
@@ -843,8 +863,11 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (
             return yield* fail('watch-identity-conflict', 'This watch belongs to another PR.');
           if (existing.envelope.stopRequested)
             return yield* fail('watch-stopped', 'An explicitly stopped watch cannot be renewed.');
+          yield* assertNoOwnedAttempt(existing.envelope);
           const state = existing.envelope.state;
+          // Recovery of the same host still has a retained attempt and its host claim to settle.
           if (
+            !(request.recoverWakeup && existing.envelope.notification?.outbox) &&
             state.prState !== 'open' &&
             state.events.length === 0 &&
             state.delivery === null &&
@@ -863,10 +886,9 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (
         const state = yield* from(() =>
           attachNativeWatchConsumer(envelope.state, {id: consumerId, wakeupId}, now, {takeover: request.takeover}),
         );
-        envelope =
-          request.command === 'renew'
-            ? envelope
-            : yield* from(() => attachNotification(envelope, state, request.wakeup, now, request.recoverWakeup));
+        envelope = plainRenew
+          ? envelope
+          : yield* from(() => attachNotification(envelope, state, request.wakeup, now, request.recoverWakeup));
         const collector = envelope.collector;
         if (collector && (yield* nativeWatchCollectorAlive(collector))) {
           if (request.command !== 'renew')
@@ -880,14 +902,15 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (
           return {
             stored: saved,
             token: null,
-            recoveryToken: request.command === 'renew' ? undefined : collector?.token,
+            recoveryToken: plainRenew ? undefined : collector?.token,
           };
         }
         const token = yield* (yield* SecureRandom.SecureRandom).uuidV4();
+        const {stopReason: _stopReason, supersededBy: _supersededBy, ...admitted} = envelope;
         const saved = yield* writeNativeWatch(
           config,
           {
-            ...envelope,
+            ...admitted,
             state,
             stopRequested: false,
             collector: {
@@ -944,25 +967,20 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (
         let envelope = stored.envelope;
         let output: Record<string, unknown> = {};
         let arrivalOnly = false;
-        if (request.command === 'stop')
+        if (request.command === 'stop') {
+          const {stopReason: _stopReason, supersededBy: _supersededBy, ...current} = envelope;
           envelope = {
-            ...envelope,
+            ...current,
             stopRequested: true,
+            ...(request.stopReason ? {stopReason: request.stopReason} : {}),
+            ...(request.supersededBy ? {supersededBy: request.supersededBy} : {}),
             ...(envelope.collector && envelope.state.prState === 'open' && envelope.collector.status !== 'terminal'
               ? {collector: {...envelope.collector, reason: 'explicit-stop'}}
               : {}),
           };
-        else if (request.command === 'consumer') {
+        } else if (request.command === 'consumer') {
           yield* from(() => assertQualifiedBinding(envelope));
-          if (
-            request.recoverWakeup &&
-            envelope.notification?.outbox?.status === 'sending' &&
-            (yield* nativeWatchCollectorAlive(envelope.collector))
-          )
-            return yield* fail(
-              'wakeup-in-flight',
-              'Wait for the owned host attempt to finish before requesting recovery.',
-            );
+          yield* assertNoOwnedAttempt(envelope);
           const state = yield* from(() =>
             attachNativeWatchConsumer(
               envelope.state,

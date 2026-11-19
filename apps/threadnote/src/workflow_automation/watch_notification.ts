@@ -18,10 +18,15 @@ import {
   writeNativeWatch,
   withNativeWatchControlLock,
 } from './watch_store.js';
+import * as Schema from 'effect/Schema';
 import {
+  isNativeWatchSessionWakeup,
   nativeWatchNotice,
+  nativeWatchSessionWakeupSchema,
+  type NativeWatchSessionWakeupRequest,
   stageNativeWatchNotification,
   type NativeWatchNotification,
+  type NativeWatchSessionWakeup,
 } from './watch_notification_state.js';
 import {
   claimNativeWatchHostSession,
@@ -43,6 +48,59 @@ export const nativeWatchCodexCandidatePaths = (platform: NodeJS.Platform, homeDi
   if (platform === 'linux') return [homeDirectory + '/.local/bin/codex', '/usr/local/bin/codex', '/usr/bin/codex'];
   return [];
 };
+
+/** How a host agent finds each wakeup field; the runtime derives only what it can read safely. */
+export const nativeWatchHostRegistrationHint =
+  'Pass the wakeup of the host that runs this chat. Codex: host codex with its threadId. ' +
+  'Claude Code: host claude-code with the sessionId that `printenv CLAUDE_CODE_SESSION_ID` prints in a shell tool; ' +
+  'the runtime uses `claude` on PATH (`command -v claude`) as the executable and the verified checkout as the workspace when you omit them. ' +
+  'Cursor CLI: host cursor-cli with its sessionId and the absolute `agent` executable; the workspace defaults to the verified checkout. ' +
+  'Never guess a session ID.';
+
+const pathLauncher = Effect.fn('nativeWatch.pathLauncher')(function* (name: string) {
+  const system = yield* SystemInfo;
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  // Windows cannot spawn an extensionless npm shell shim, and a .cmd shim needs a shell; only the native .exe runs.
+  const candidate = system.platform === 'win32' ? name + '.exe' : name;
+  for (const directory of EffectString.split(
+    system.environment().PATH ?? '',
+    system.platform === 'win32' ? ';' : ':',
+  )) {
+    if (!directory || !path.isAbsolute(directory)) continue;
+    const file = path.join(directory, candidate);
+    const info = yield* Effect.option(fs.stat(file));
+    if (Option.isSome(info) && info.value.type === 'File') return file;
+  }
+  return undefined;
+});
+
+/** Complete a session-host wakeup request: workspace defaults to the verified checkout, and Claude Code finds its launcher. */
+export const resolveNativeWatchSessionWakeup = Effect.fn('nativeWatch.resolveSessionWakeup')(function* (
+  input: NativeWatchSessionWakeupRequest,
+  checkout: string,
+) {
+  const refuse = (message: string) =>
+    WorkflowAutomationError.make({
+      code: 'host-registration-required',
+      message: `${message} ${nativeWatchHostRegistrationHint}`,
+    });
+  if (input.sessionId === undefined) return yield* refuse(`The ${input.host} wakeup needs its sessionId.`);
+  const executable = input.executable ?? (input.host === 'claude-code' ? yield* pathLauncher('claude') : undefined);
+  if (executable === undefined)
+    return yield* refuse(
+      input.host === 'claude-code'
+        ? 'No `claude` launcher is on PATH; pass the absolute path that `command -v claude` prints.'
+        : `The ${input.host} wakeup needs its absolute executable.`,
+    );
+  return yield* Schema.decodeEffect(nativeWatchSessionWakeupSchema)({
+    host: input.host,
+    executable,
+    sessionId: input.sessionId,
+    workspace: input.workspace ?? checkout,
+    exclusiveSession: true,
+  }).pipe(Effect.mapError(() => refuse(`The ${input.host} wakeup is not a valid absolute registration.`)));
+});
 
 /** Read-only capability admission for an explicitly selected executable; never queue a probe message. */
 export const preflightNativeWatchCodexQueue = Effect.fn('nativeWatch.preflightCodexQueue')(function* (
@@ -101,7 +159,22 @@ export const discoverNativeWatchCodexExecutable = Effect.fn('nativeWatch.discove
   return compatible[0];
 });
 
-function cursorCompletionReceipt(stdout: string, sessionId: string): string | undefined {
+/** Each session host resumes the registered session for one headless turn and prints one JSON result. */
+const sessionResumeCommands: Record<
+  NativeWatchSessionWakeup['host'],
+  (target: NativeWatchSessionWakeup, notice: string) => {readonly args: readonly string[]; readonly cwd?: string}
+> = {
+  'cursor-cli': (target, notice) => ({
+    args: ['--print', '--resume', target.sessionId, '--workspace', target.workspace, '--output-format', 'json', notice],
+  }),
+  // Claude Code has no workspace flag; the resumed turn's tools run in the process directory.
+  'claude-code': (target, notice) => ({
+    args: ['--print', '--resume', target.sessionId, '--output-format', 'json', notice],
+    cwd: target.workspace,
+  }),
+};
+
+function sessionCompletionReceipt(stdout: string, sessionId: string): string | undefined {
   try {
     const parsed: unknown = JSON.parse(stdout);
     return parsed &&
@@ -128,8 +201,8 @@ const persistenceFailure = () =>
   });
 const hostClaim = (config: RuntimeConfig, notification: NativeWatchNotification): NativeWatchHostClaim => {
   const target = notification.target;
-  if (target.host !== 'cursor-cli' || !notification.outbox?.attemptId || !notification.outbox.collectorToken)
-    throw new Error('A Cursor host claim requires a retained attempt.');
+  if (!isNativeWatchSessionWakeup(target) || !notification.outbox?.attemptId || !notification.outbox.collectorToken)
+    throw new Error('A session host claim requires a retained attempt.');
   return {
     format: 'threadnote-native-watch-host-session',
     version: 1,
@@ -206,17 +279,22 @@ export const makeNativeWatchNotifier = Effect.fn('nativeWatch.notifier')(functio
         let notification = stored.envelope.notification;
         let pending = notification.outbox;
         if (pending?.status === 'queued' || pending?.status === 'completed') {
+          const {acknowledged, nextSequence} = stored.envelope.state;
           // Queue acceptance is not notice arrival. ACK by an already-active consumer cannot release this gate.
+          // After arrival, a later event releases it so a partial ACK cannot block every later wake.
           if (
             pending.status === 'queued' &&
-            (!pending.consumedThrough || stored.envelope.state.acknowledged < pending.consumedThrough)
+            (!pending.consumedThrough ||
+              (acknowledged < pending.consumedThrough && nextSequence - 1 <= pending.consumedThrough))
           )
             return;
-          if (notification.target.host === 'cursor-cli')
+          if (isNativeWatchSessionWakeup(notification.target))
             yield* releaseNativeWatchHostSession(userHome, hostClaim(config, notification), true);
           notification = {
             ...notification,
-            notifiedThrough: Math.max(pending.last, stored.envelope.state.acknowledged),
+            // Only ACK proves handling. When this attempt ACKed part of its range, wake again for the rest; an
+            // attempt without ACK progress waits for a new event, whose range then starts after ACK.
+            notifiedThrough: acknowledged >= pending.first ? acknowledged : pending.last,
             recoveryRequested: false,
             outbox: null,
             lastReceipt: {
@@ -237,7 +315,7 @@ export const makeNativeWatchNotifier = Effect.fn('nativeWatch.notifier')(functio
         }
         if (notification.recoveryRequested) {
           // An explicit recovery confirms the previous host attempt is safe to retry; it cannot steal another watch's claim.
-          if (pending?.attemptId && notification.target.host === 'cursor-cli')
+          if (pending?.attemptId && isNativeWatchSessionWakeup(notification.target))
             yield* releaseNativeWatchHostSession(userHome, hostClaim(config, notification));
           notification = {
             ...notification,
@@ -310,7 +388,7 @@ export const makeNativeWatchNotifier = Effect.fn('nativeWatch.notifier')(functio
       );
     const delivery = Effect.gen(function* () {
       let claim: NativeWatchHostClaim | undefined;
-      if (target.host === 'cursor-cli') {
+      if (isNativeWatchSessionWakeup(target)) {
         claim = hostClaim(config, claimed.notification);
         const admitted = yield* claimNativeWatchHostSession(userHome, claim).pipe(Effect.result);
         if (admitted._tag === 'Failure') {
@@ -332,20 +410,12 @@ export const makeNativeWatchNotifier = Effect.fn('nativeWatch.notifier')(functio
         },
         outbox!,
       );
-      const args =
+      const command =
         target.host === 'codex'
-          ? ['queue', '--thread', target.threadId, '--message', notice]
-          : [
-              '--print',
-              '--resume',
-              target.sessionId,
-              '--workspace',
-              target.workspace,
-              '--output-format',
-              'json',
-              notice,
-            ];
-      const result = yield* runCommandEffect(target.executable, args, {
+          ? {args: ['queue', '--thread', target.threadId, '--message', notice]}
+          : sessionResumeCommands[target.host](target, notice);
+      const result = yield* runCommandEffect(target.executable, command.args, {
+        ...(command.cwd === undefined ? {} : {cwd: command.cwd}),
         timeoutMs: target.host === 'codex' ? 10_000 : 0,
         maxOutputBytes: target.host === 'codex' ? 4096 : 65_536,
       }).pipe(Effect.result);
@@ -358,13 +428,13 @@ export const makeNativeWatchNotifier = Effect.fn('nativeWatch.notifier')(functio
               '\\.$',
             'iu',
           ).exec(EffectString.trim(result.success.stdout))?.[1];
-        else receipt = cursorCompletionReceipt(result.success.stdout, target.sessionId);
+        else receipt = sessionCompletionReceipt(result.success.stdout, target.sessionId);
       }
       // A timeout, nonzero exit, or malformed receipt can follow host acceptance. Never retry automatically.
       yield* finish(receipt, 'host-delivery-ambiguous');
       if (claim) yield* releaseNativeWatchHostSession(userHome, claim);
     });
-    if (target.host === 'cursor-cli') {
+    if (isNativeWatchSessionWakeup(target)) {
       const outcome = yield* Deferred.make<Exit.Exit<void, unknown>>();
       yield* delivery.pipe(
         Effect.onInterrupt(() => finish(undefined, 'host-delivery-ambiguous')),

@@ -3,7 +3,6 @@ import {it as effectIt} from '@effect/vitest';
 import {Array as EffectArray, Config, Effect, FileSystem, Layer, Option, Path} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
-/* oxlint-disable effecttsgo/node-builtin-import -- The construction receipt readback is a Promise filesystem boundary. */
 import {mkdir, mkdtemp, realpath, rename, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';

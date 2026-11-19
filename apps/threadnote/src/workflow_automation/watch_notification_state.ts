@@ -1,5 +1,6 @@
 import * as Array from 'effect/Array';
 import * as Option from 'effect/Option';
+import * as Record from 'effect/Record';
 import * as Schema from 'effect/Schema';
 import * as EffectString from 'effect/String';
 import type {NativeWatchState} from '@threadnote/workflow-automations/watch';
@@ -29,27 +30,55 @@ export const nativeWatchCodexWakeupRequestSchema = Schema.Struct({
   ...codexWakeupFields,
   executable: Schema.optionalKey(codexExecutable),
 });
+/** A session host wakes by resuming one exclusive registered session for a headless turn. */
+const sessionHosts = ['cursor-cli', 'claude-code'] as const;
+const sessionHostExecutables: {readonly [Host in (typeof sessionHosts)[number]]: RegExp} = {
+  'cursor-cli': /[\\/](?:agent|cursor-agent)(?:\.exe)?$/iu,
+  'claude-code': /[\\/]claude(?:\.exe)?$/iu,
+};
+export const nativeWatchSessionWakeupSchema = Schema.Struct({
+  host: Schema.Literals(sessionHosts),
+  executable: absolute,
+  sessionId: uuid,
+  workspace: absolute,
+  exclusiveSession: Schema.Literal(true),
+}).check(
+  Schema.makeFilter(value =>
+    sessionHostExecutables[value.host].test(value.executable)
+      ? undefined
+      : 'The executable is not the registered session host launcher.',
+  ),
+);
+/** A start request can omit the fields the runtime derives; the resolved registration is decoded strictly. */
+const sessionWakeupRequestSchema = Schema.Struct({
+  host: Schema.Literals(sessionHosts),
+  executable: Schema.optionalKey(absolute),
+  sessionId: Schema.optionalKey(uuid),
+  workspace: Schema.optionalKey(absolute),
+  exclusiveSession: Schema.optionalKey(Schema.Literal(true)),
+});
+export const nativeWatchWakeupHosts = ['codex', ...sessionHosts] as const;
 export const nativeWatchWakeupRequestSchema = Schema.Union([
   nativeWatchCodexWakeupRequestSchema,
-  Schema.Struct({
-    host: Schema.Literal('cursor-cli'),
-    executable: absolute.check(Schema.isPattern(/[\\/](?:agent|cursor-agent)(?:\.exe)?$/iu)),
-    sessionId: uuid,
-    workspace: absolute,
-    exclusiveSession: Schema.Literal(true),
-  }),
+  sessionWakeupRequestSchema,
 ]);
-export const nativeWatchWakeupSchema = Schema.Union([
-  Schema.Struct(codexWakeupFields),
-  Schema.Struct({
-    host: Schema.Literal('cursor-cli'),
-    executable: absolute.check(Schema.isPattern(/[\\/](?:agent|cursor-agent)(?:\.exe)?$/iu)),
-    sessionId: uuid,
-    workspace: absolute,
-    exclusiveSession: Schema.Literal(true),
-  }),
-]);
+export type NativeWatchSessionWakeupRequest = typeof sessionWakeupRequestSchema.Type;
+export const nativeWatchWakeupSchema = Schema.Union([Schema.Struct(codexWakeupFields), nativeWatchSessionWakeupSchema]);
 export type NativeWatchWakeup = typeof nativeWatchWakeupSchema.Type;
+export type NativeWatchSessionWakeup = typeof nativeWatchSessionWakeupSchema.Type;
+/** Codex queues into its live thread; every other host is a session host. */
+export const isNativeWatchSessionWakeup = <Wakeup extends {readonly host: string}>(
+  wakeup: Wakeup | undefined,
+): wakeup is Exclude<Wakeup, {readonly host: 'codex'}> => wakeup !== undefined && wakeup.host !== 'codex';
+/** A resumed or renewed watch keeps its registered host; each field the request names must equal that registration. */
+export const nativeWatchWakeupMatches = (
+  requested: typeof nativeWatchWakeupRequestSchema.Type,
+  registered: NativeWatchWakeup,
+) =>
+  Array.every(
+    Record.toEntries<string, unknown>(requested),
+    ([key, value]) => value === (registered as {readonly [key: string]: unknown})[key],
+  );
 export const nativeWatchNotificationSchema = Schema.Struct({
   consumerId: portable,
   wakeupId: portable,
@@ -138,9 +167,9 @@ export function validateNativeWatchNotification(value: NativeWatchNotification, 
       !Number.isSafeInteger(Number(first)) ||
       Number(first) < 1 ||
       Number(first) > Number(last) ||
-      Number(last) > value.notifiedThrough ||
-      (value.target.host === 'cursor-cli') !== (value.lastReceipt.kind === 'cli-session-completed') ||
-      (value.target.host === 'cursor-cli' && value.lastReceipt.receipt !== value.target.sessionId)
+      Number(last) >= state.nextSequence ||
+      isNativeWatchSessionWakeup(value.target) !== (value.lastReceipt.kind === 'cli-session-completed') ||
+      (isNativeWatchSessionWakeup(value.target) && value.lastReceipt.receipt !== value.target.sessionId)
     )
       throw new Error('Notification receipt mismatch.');
   }
@@ -164,7 +193,7 @@ export function validateNativeWatchNotification(value: NativeWatchNotification, 
               pending.consumedThrough < pending.last ||
               pending.consumedThrough >= state.nextSequence)))) ||
       (pending.status === 'completed' &&
-        (value.target.host !== 'cursor-cli' || pending.receipt !== value.target.sessionId)))
+        (!isNativeWatchSessionWakeup(value.target) || pending.receipt !== value.target.sessionId)))
   )
     throw new Error('Notification outbox mismatch.');
 }
@@ -193,7 +222,7 @@ export function consumeNativeWatchNotification(
   return {...value, outbox: {...pending, consumedThrough: state.nextSequence - 1}};
 }
 
-/** Only newly appended durable sequences create work; pending feedback and unresolved work do not. */
+/** Only newly appended durable sequences create work. A new range starts after ACK, so it carries unacknowledged backlog. */
 export function stageNativeWatchNotification(
   value: NativeWatchNotification,
   state: NativeWatchState,
@@ -202,19 +231,25 @@ export function stageNativeWatchNotification(
   let notification = value;
   const pending = value.outbox;
   if (pending) {
-    // Only a never-invoked range can be suppressed or trimmed. Invoked ambiguity and host receipts stay retained.
-    if (pending.status !== 'pending' || pending.attempts !== 0 || state.acknowledged < pending.first) return value;
+    // Only a never-invoked range can be suppressed or rebased onto ACK. Invoked ambiguity and host receipts stay retained.
+    if (pending.status !== 'pending' || pending.attempts !== 0 || pending.first === state.acknowledged + 1)
+      return value;
     notification = {...value, notifiedThrough: Math.max(value.notifiedThrough, state.acknowledged), outbox: null};
     if (state.acknowledged < pending.last) {
       const first = state.acknowledged + 1;
-      return {...notification, outbox: {...pending, first, key: `${state.watchId}:${first}:${pending.last}`}};
+      return {
+        ...notification,
+        notifiedThrough: state.acknowledged,
+        outbox: {...pending, first, key: `${state.watchId}:${first}:${pending.last}`},
+      };
     }
   } else if (state.acknowledged > value.notifiedThrough) notification = {...value, notifiedThrough: state.acknowledged};
   if (notification.notifiedThrough === state.nextSequence - 1) return notification;
-  const first = notification.notifiedThrough + 1;
+  const first = state.acknowledged + 1;
   const last = state.nextSequence - 1;
   return {
     ...notification,
+    notifiedThrough: state.acknowledged,
     outbox: {
       key: `${state.watchId}:${first}:${last}`,
       first,

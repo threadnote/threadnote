@@ -95,7 +95,7 @@ export const claimNativeWatchHostSession = Effect.fn('nativeWatch.claimHostSessi
       if (yield* readClaim(file))
         return yield* failure(
           'host-session-owned',
-          'This Cursor CLI session has an unresolved native host claim. Recover its exact owning watch explicitly.',
+          'This host session has an unresolved native host claim. Recover its exact owning watch explicitly.',
         );
       const fs = yield* FileSystem.FileSystem;
       const bytes = stableJson(claim) + '\n';
@@ -127,7 +127,7 @@ export const releaseNativeWatchHostSession = Effect.fn('nativeWatch.releaseHostS
       if (!current) return;
       if (stableJson(current) !== stableJson(claim)) {
         if (completedOnly) return;
-        return yield* failure('host-session-owned', 'Another native attempt owns this Cursor CLI session.');
+        return yield* failure('host-session-owned', 'Another native attempt owns this host session.');
       }
       yield* (yield* FileSystem.FileSystem).remove(file);
     }),

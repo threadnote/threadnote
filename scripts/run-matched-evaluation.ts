@@ -1,8 +1,6 @@
 #!/usr/bin/env bun
 import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 
-/* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- This evaluation runner owns pinned local executable, artifact, and process-group boundaries. */
-
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';

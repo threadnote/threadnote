@@ -4,6 +4,7 @@ import {BUILTIN_LANGUAGE_PACK_REGISTRY, type CodeGraphLanguagePackRegistryShape}
 import {CORPUS_EXTRACTION_SOURCE_BYTES_LIMIT} from '../languages/corpus/policy.js';
 import {isLowSignalStructuredPath} from '../languages/schemas/policy.js';
 import type {CodeGraphInventoryFile} from '../types.js';
+import {stripJsonCommentsAndTrailingCommas} from '../workspace/node.js';
 import {xcodeNativeTargetNames} from '../workspace/xcode.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
@@ -94,7 +95,10 @@ function compactResolutionContext(name: string, content: string): string | undef
   if (name === 'project.pbxproj') return compactXcodeProject(content);
   if (name !== 'package.json' && name !== 'tsconfig.json') return undefined;
   try {
-    const parsed: unknown = JSON.parse(content);
+    // TypeScript reads tsconfig as JSONC, and workspace discovery parses it the same way.
+    const parsed: unknown = JSON.parse(
+      name === 'tsconfig.json' ? stripJsonCommentsAndTrailingCommas(content) : content,
+    );
     if (!Predicate.isObject(parsed)) return undefined;
     if (name === 'package.json') {
       const entry = packageEntryForResolution(parsed.exports, parsed.main);

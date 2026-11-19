@@ -3,7 +3,6 @@ import * as EffectArray from 'effect/Array';
 import * as EffectOption from 'effect/Option';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
-/* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- Disposable qualification harness owns explicit OS process and evidence-file boundaries. */
 import {createHash} from 'node:crypto';
 import {spawn} from 'node:child_process';
 import {copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile} from 'node:fs/promises';

@@ -43,7 +43,11 @@ import {makeReadDeadline} from '@threadnote/platform/read_deadline';
 import {SystemInfo} from '@threadnote/platform/system';
 import {CommandExecutor, type CommandExecutionError} from '@threadnote/platform/command';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
-import {makeReadyRecallReadBoundary, readyReadWorkerInvocation} from '../../src/recall/ready_read_boundary.js';
+import {
+  makeReadyRecallReadBoundary,
+  readyReadWorkerInvocation,
+  RECALL_READY_READ_MILLISECONDS,
+} from '../../src/recall/ready_read_boundary.js';
 import {RECALL_READY_READ_WORKER_ARGUMENT} from '../../src/worker_protocol.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestError} from '@threadnote/testing/test-error';
@@ -209,7 +213,9 @@ const productionReadyWorker = (f: Pick<Effect.Success<typeof fixture>, 'fs' | 'p
 
 // Required normal reads execute the already-built production worker. Explicit
 // observed shims and optional development fixtures keep their source entry.
-// Bundle the actual entry once before this example's read deadline. The setup
+// Compile the actual entry with bytecode, as releases do, before this example's
+// read deadline: an uncompiled source bundle spends its child allowance parsing
+// and evaluating modules the production executable loads as bytecode. The setup
 // command owns Bun.build's lifetime because its Promise has no cancellation API.
 const bundledReadyWorker = (f: Pick<Effect.Success<typeof fixture>, 'fs' | 'path' | 'home'>, entrypoint?: string) =>
   Effect.gen(function* () {
@@ -218,7 +224,7 @@ const bundledReadyWorker = (f: Pick<Effect.Success<typeof fixture>, 'fs' | 'path
     const system = yield* SystemInfo;
     const command = yield* CommandExecutor;
     const directory = f.path.join(f.home, 'ready-worker-bundle', f.path.basename(entrypoint));
-    const bundled = f.path.join(directory, 'ready-worker.js');
+    const compiled = f.path.join(directory, system.platform === 'win32' ? 'ready-worker.exe' : 'ready-worker');
     const [duration] = yield* command
       .execute(
         system.executablePath,
@@ -226,34 +232,51 @@ const bundledReadyWorker = (f: Pick<Effect.Success<typeof fixture>, 'fs' | 'path
           '--eval',
           `const result = await Bun.build(${JSON.stringify({
             entrypoints: [entrypoint],
-            outdir: directory,
-            naming: 'ready-worker.js',
+            compile: {
+              outfile: compiled,
+              autoloadBunfig: false,
+              autoloadDotenv: false,
+              autoloadPackageJson: false,
+              autoloadTsconfig: false,
+            },
+            bytecode: true,
             target: 'bun',
             format: 'esm',
             minify: true,
           })});
-if (!result.success || result.outputs.length !== 1) throw new Error('Ready worker bundle failed.');`,
+if (!result.success) throw new Error('Ready worker compile failed.');`,
         ],
         {
           env: {...system.environment(), THREADNOTE_HOME: f.home},
-          timeoutMs: 5000,
+          timeoutMs: 60_000,
           maxOutputBytes: 16 * 1024,
           forceKillAfterMilliseconds: 0,
           verifyOwnedProcessExit: system.platform === 'win32' ? 'leader' : 'group',
         },
       )
       .pipe(Effect.timed);
-    const content = yield* f.fs.readFileString(bundled);
-    const selected = {...system, developmentEntrypoint: bundled};
+    // macOS assesses a newly written executable on its first launch. Pay that
+    // once here, as the production worker's version probe does, rather than
+    // inside a request. The roleless launch exits without reading any state.
+    yield* command
+      .execute(compiled, [], {
+        env: {...system.environment(), THREADNOTE_HOME: f.home},
+        timeoutMs: 30_000,
+        maxOutputBytes: 16 * 1024,
+        forceKillAfterMilliseconds: 0,
+        verifyOwnedProcessExit: system.platform === 'win32' ? 'leader' : 'group',
+      })
+      .pipe(Effect.ignore);
+    const selected = {...system, executablePath: compiled};
     expect(readyReadWorkerInvocation(selected.executablePath, selected.developmentEntrypoint)).toEqual({
-      executable: system.executablePath,
-      arguments: [bundled, RECALL_READY_READ_WORKER_ARGUMENT],
+      executable: compiled,
+      arguments: [RECALL_READY_READ_WORKER_ARGUMENT],
     });
     return {
       system: selected,
       setupMilliseconds: Duration.toMillis(duration),
-      bundleBytes: new TextEncoder().encode(content).byteLength,
-      bundleSha256: sha256HexSync(content),
+      bundleBytes: Number((yield* f.fs.stat(compiled)).size),
+      bundleSha256: yield* sha256FileHex(compiled),
     };
   });
 
@@ -299,6 +322,10 @@ effectIt.effect.skipIf(!nativeVectorTestsRequired)(
       expect(starts).toBe(0);
     }).pipe(provideTestLayer(ApplicationLayer)),
 );
+
+// Examples that compile a source worker include that compile in their timeout;
+// it is setup before any read deadline starts.
+const compiledWorkerExampleMilliseconds = 30_000;
 
 const installSynchronousScoringStall = (database: string, stall = true) =>
   Effect.sync(() => {
@@ -395,6 +422,7 @@ Runtime.makeRunMain(signalTransparentTeardown)(
 `,
     );
     const bundled = yield* bundledReadyWorker(f, script);
+    yield* f.fs.remove(stageFile, {force: true});
     return {...bundled, entered, timeoutFile, stageFile, native};
   });
 
@@ -414,6 +442,12 @@ const awaitNativePid = (f: Effect.Success<typeof fixture>, entered: string) =>
     return pid;
   });
 
+// Functional examples prove authorization, freshness, scope and redaction
+// through the actual worker and Rust reader. They run under caller cancellation
+// so a shared-runner stall cannot fail a correct read. The stall and caller
+// cancellation examples below own the production read deadline.
+const functionalReadBoundary = () => makeReadyRecallReadBoundary(undefined);
+
 describe.skipIf(!nativeVectorTestsEnabled)('bundled native vector capability', () => {
   effectIt.effect(
     'executes the actual production worker with canonical validation through Rust SQLite',
@@ -432,7 +466,7 @@ describe.skipIf(!nativeVectorTestsEnabled)('bundled native vector capability', (
             let allowance: number | undefined;
             let commandStartedAt: number | undefined;
             yield* f.fs.remove(bundled.stageFile, {force: true});
-            const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
+            const boundary = yield* functionalReadBoundary().pipe(
               Effect.provideService(SystemInfo, bundled.system),
               Effect.provideService(
                 CommandExecutor,
@@ -506,7 +540,7 @@ describe.skipIf(!nativeVectorTestsEnabled)('bundled native vector capability', (
         const nativePid = yield* awaitNativePid(f, bundled.entered);
         expect(bundled.system.isProcessRunning(nativePid)).toBe(false);
       }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
-    {timeout: 15000},
+    {timeout: compiledWorkerExampleMilliseconds},
   );
 });
 
@@ -517,17 +551,13 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
       Effect.gen(function* () {
         const f = yield* fixture;
         const bundled = yield* bundledReadyWorker(f);
-        const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
-          Effect.provideService(SystemInfo, bundled.system),
-        );
+        const boundary = yield* functionalReadBoundary().pipe(Effect.provideService(SystemInfo, bundled.system));
         const reply = yield* boundary.read({operation: 'vector-state', config: f.config, options: {model}});
         const proof = yield* Schema.decodeUnknownEffect(recallVectorQueryStateSchema)(reply.value);
         if (proof.readiness !== 'current') return yield* Effect.die('Missing closing-fence opening proof');
         yield* installSynchronousScoringStall(f.database, false);
         const observed = yield* observedWorker(f, true);
-        const scoring = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
-          Effect.provideService(SystemInfo, observed.system),
-        );
+        const scoring = yield* functionalReadBoundary().pipe(Effect.provideService(SystemInfo, observed.system));
         const result = yield* scoring.read({
           operation: 'vector-scores',
           config: f.config,
@@ -541,16 +571,14 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
         if (!observed.native)
           expect(JSON.parse(yield* f.fs.readFileString(observed.timeoutFile))).toEqual({timeout: 50});
         // Verifying the new generation is a separate request after the scoring
-        // worker has exited, with its own unchanged production allowance.
-        const currentRead = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
-          Effect.provideService(SystemInfo, observed.system),
-        );
+        // worker has exited.
+        const currentRead = yield* functionalReadBoundary().pipe(Effect.provideService(SystemInfo, observed.system));
         const current = yield* currentRead.read({operation: 'vector-state', config: f.config, options: {model}});
         const closing = yield* Schema.decodeUnknownEffect(recallVectorQueryStateSchema)(current.value);
         expect(closing.readiness).toBe('current');
         if (closing.readiness === 'current') expect(closing.state.generation).not.toBe(proof.state.generation);
       }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
-    {timeout: 15000},
+    {timeout: compiledWorkerExampleMilliseconds},
   );
   effectIt.effect(
     'rejects a replaced vector generation and a newly published lexical corpus',
@@ -562,9 +590,7 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
         // Each keeps the production allowance; fixture publication is not read work.
         const read = (request: RecallReadyReadRequest) =>
           Effect.gen(function* () {
-            const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
-              Effect.provideService(SystemInfo, bundled.system),
-            );
+            const boundary = yield* functionalReadBoundary().pipe(Effect.provideService(SystemInfo, bundled.system));
             return yield* boundary.read(request);
           });
         const reply = yield* read({operation: 'vector-state', config: f.config, options: {model}});
@@ -665,7 +691,7 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
         const read = (request: RecallReadyReadRequest) =>
           Effect.gen(function* () {
             readOrdinal++;
-            const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
+            const boundary = yield* functionalReadBoundary().pipe(
               Effect.provideService(SystemInfo, bundled.system),
               Effect.provideService(
                 CommandExecutor,
@@ -724,7 +750,10 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
   );
 
   const scopePropertyRuns = 8;
-  const scopePropertyExampleMilliseconds = 15_000;
+  // Each draw builds its own fixture; this guards only against hangs, since reads run under caller cancellation.
+  // Hosted Windows runners exceeded 15 s on fixture setup in 2 of 3 runs.
+  const scopePropertyExampleMilliseconds = process.platform === 'win32' ? 45_000 : 15_000;
+  let scopeWorker: Effect.Success<ReturnType<typeof bundledReadyWorker>> | undefined;
   fcEffectProp(
     effectIt,
     'score export is the intersection of independent project and URI scopes',
@@ -733,18 +762,22 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
       Effect.gen(function* () {
         const f = yield* fixture;
         // Opening is setup for this authorization oracle; only the actual Rust
-        // scoring child consumes its bounded request allowance.
+        // scoring child is under test.
         const state = yield* readSelectedSemanticVectorState(f.config, model, {
           corpusGeneration: f.lexical.generation,
         });
         if (state === undefined) return yield* Effect.die('Missing property opening proof');
-        const bundled = yield* bundledReadyWorker(f);
+        // Every draw runs the same release executable: validate it once. An
+        // optional source worker is compiled into each draw's scoped home.
+        const bundled = nativeVectorTestsRequired
+          ? (scopeWorker ??= yield* bundledReadyWorker(f))
+          : yield* bundledReadyWorker(f);
         const command = yield* CommandExecutor;
         let commandOutcome: 'not-invoked' | 'running' | 'completed' | 'failed' = 'not-invoked';
         let allowance: number | undefined;
         let commandFailure:
           {tag: CommandExecutionError['_tag']; elapsedMilliseconds: number; exitCode?: number} | undefined;
-        const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
+        const boundary = yield* functionalReadBoundary().pipe(
           Effect.provideService(SystemInfo, bundled.system),
           Effect.provideService(
             CommandExecutor,
@@ -814,7 +847,7 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
       }).pipe(provideTestLayer(ApplicationLayer), Effect.timeout(scopePropertyExampleMilliseconds), TestClock.withLive),
     {
       fastCheck: {numRuns: scopePropertyRuns},
-      // Each draw owns setup and scoped cleanup; the request itself still has 2s.
+      // Each draw owns its fixture and scoped cleanup.
       timeout: scopePropertyRuns * scopePropertyExampleMilliseconds,
     },
   );
@@ -828,7 +861,7 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
         const bundled = yield* bundledReadyWorker(f);
         const read = (request: RecallReadyReadRequest) =>
           Effect.gen(function* () {
-            const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
+            const boundary = yield* functionalReadBoundary().pipe(
               Effect.provideService(SystemInfo, bundled.system),
               Effect.provideService(RecallEmbeddingWakePort, () =>
                 Effect.sync(() => {
@@ -906,7 +939,7 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
             let commandTimeoutMilliseconds: number | undefined;
             let commandElapsedMilliseconds: number | undefined;
             let commandFailureTag: CommandExecutionError['_tag'] | undefined;
-            const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
+            const boundary = yield* functionalReadBoundary().pipe(
               Effect.provideService(SystemInfo, bundled.system),
               Effect.provideService(
                 CommandExecutor,
@@ -1019,7 +1052,7 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
         if (state === undefined) return yield* Effect.die('Vector opening proof unavailable.');
         yield* installSynchronousScoringStall(f.database);
         const observed = yield* observedWorker(f);
-        const deadline = yield* makeReadDeadline(1800);
+        const deadline = yield* makeReadDeadline(RECALL_READY_READ_MILLISECONDS);
         const boundary = yield* makeReadyRecallReadBoundary(deadline).pipe(
           Effect.provideService(SystemInfo, observed.system),
         );
@@ -1043,7 +1076,7 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
             'budget-exhausted',
           );
         const requestElapsedMilliseconds = Number((yield* Clock.monotonicTimeNanos) - start) / 1_000_000;
-        expect(requestElapsedMilliseconds).toBeLessThan(1800);
+        expect(requestElapsedMilliseconds).toBeLessThan(RECALL_READY_READ_MILLISECONDS);
         if (!(yield* f.fs.exists(observed.entered))) {
           const stages = yield* Effect.gen(function* () {
             const stat = yield* f.fs.stat(observed.stageFile);
@@ -1090,7 +1123,7 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
           .pipe(Effect.result);
         expect(later._tag).toBe('Failure');
       }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
-    {timeout: 10000},
+    {timeout: compiledWorkerExampleMilliseconds},
   );
 
   effectIt.effect(
@@ -1099,7 +1132,7 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
       Effect.gen(function* () {
         const f = yield* fixture;
         const bundled = yield* bundledReadyWorker(f);
-        const proofReply = yield* (yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
+        const proofReply = yield* (yield* functionalReadBoundary().pipe(
           Effect.provideService(SystemInfo, bundled.system),
         )).read({
           operation: 'vector-state',
@@ -1110,9 +1143,9 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
         if (proof.readiness !== 'current') return yield* Effect.die('Vector opening proof unavailable.');
         yield* installSynchronousScoringStall(f.database);
         const observed = yield* observedWorker(f);
-        const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
-          Effect.provideService(SystemInfo, observed.system),
-        );
+        const boundary = yield* makeReadyRecallReadBoundary(
+          yield* makeReadDeadline(RECALL_READY_READ_MILLISECONDS),
+        ).pipe(Effect.provideService(SystemInfo, observed.system));
         const child = yield* boundary
           .read({
             operation: 'vector-scores',
@@ -1143,6 +1176,6 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
         if (!observed.native)
           expect(JSON.parse(yield* f.fs.readFileString(observed.timeoutFile))).toEqual({timeout: 50});
       }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
-    {timeout: 10000},
+    {timeout: compiledWorkerExampleMilliseconds},
   );
 });

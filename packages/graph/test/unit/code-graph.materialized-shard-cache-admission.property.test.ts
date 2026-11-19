@@ -10,14 +10,25 @@ import {
 describe('materialized shard cache write admission', () => {
   fcProp(
     it,
-    'is an exact monotonic boundary over valid raw-fact byte counts',
-    {rawFactBytes: FC.integer({max: Number.MAX_SAFE_INTEGER, min: 0})},
-    ({rawFactBytes}) => {
-      expect(codeGraphMaterializedShardCacheWriteAdmission(rawFactBytes)).toBe(
-        rawFactBytes > CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM ? 'defer' : 'persist',
+    'bounds ordinary builds exactly and persists every shard when all are requested',
+    {
+      policy: FC.constantFrom('bounded' as const, 'all' as const),
+      rawFactBytes: FC.oneof(
+        FC.integer({max: Number.MAX_SAFE_INTEGER, min: 0}),
+        FC.integer({
+          max: CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM + 2,
+          min: CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM - 2,
+        }),
+      ),
+    },
+    ({policy, rawFactBytes}) => {
+      expect(codeGraphMaterializedShardCacheWriteAdmission(rawFactBytes, policy)).toBe(
+        policy === 'bounded' && rawFactBytes > CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM
+          ? 'defer'
+          : 'persist',
       );
     },
-    {fastCheck: {numRuns: 100}},
+    {fastCheck: {numRuns: 200}},
   );
 
   fcProp(
@@ -38,15 +49,19 @@ describe('materialized shard cache write admission', () => {
 
   it('persists at the boundary and fails closed for malformed observations', () => {
     expect(
-      codeGraphMaterializedShardCacheWriteAdmission(CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM),
+      codeGraphMaterializedShardCacheWriteAdmission(
+        CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM,
+        'bounded',
+      ),
     ).toBe('persist');
     expect(
       codeGraphMaterializedShardCacheWriteAdmission(
         CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM + 1,
+        'bounded',
       ),
     ).toBe('defer');
     for (const malformed of [-1, 0.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1]) {
-      expect(codeGraphMaterializedShardCacheWriteAdmission(malformed)).toBe('persist');
+      expect(codeGraphMaterializedShardCacheWriteAdmission(malformed, 'bounded')).toBe('persist');
     }
   });
 });

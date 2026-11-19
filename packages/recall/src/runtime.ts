@@ -98,8 +98,6 @@ export interface RecallRuntimeConfig {
 export interface PrepareRecallSectionsInput<R> {
   readonly semanticPreflightModel?: RecallVectorReadModel;
   readonly allowExactRescue: boolean;
-  /** Deterministic baseline retrieval precedes optional model refinement. */
-  readonly allowReranker?: boolean;
   readonly allowSemanticRescue?: boolean;
   readonly allowedUriScopes?: readonly string[];
   readonly candidateUris?: readonly string[];
@@ -536,13 +534,13 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
   if (Result.isFailure(exactResult) && isReadCleanupUnconfirmed(exactResult.failure))
     return yield* Effect.fail(exactResult.failure);
   const recallIndexes = Result.isSuccess(recallIndexResult) ? recallIndexResult.success : [];
-  const operationalWarnings = Result.isFailure(recallIndexResult)
-    ? [lexicalReadFailureWarning(recallIndexResult.failure)]
-    : [
-        ...mergeRecallOperationalWarnings(
-          ...EffectArray.map(recallIndexes, index => recallReadStateWarnings(index.readState)),
-        ),
-      ];
+  const operationalWarnings = [
+    ...mergeRecallOperationalWarnings(
+      Result.isFailure(recallIndexResult) ? [lexicalReadFailureWarning(recallIndexResult.failure)] : [],
+      ...EffectArray.map(recallIndexes, index => recallReadStateWarnings(index.readState)),
+      recallReadStateWarnings(memoryConnections?.readState),
+    ),
+  ];
   if (Result.isFailure(exactResult)) operationalWarnings.push(lexicalReadFailureWarning(exactResult.failure));
   const flattenedRecallIndexes = recallIndexes;
   const generations = [
@@ -707,11 +705,7 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
       recencyReserve: RECALL_RECENCY_CANDIDATE_RESERVE,
     },
   );
-  const indexedCandidates = closingRead
-    ? yield* rerank(semanticCandidates)
-    : input.allowReranker === false || navigationOnly
-      ? semanticCandidates
-      : yield* rerank(semanticCandidates);
+  const indexedCandidates = navigationOnly && !closingRead ? semanticCandidates : yield* rerank(semanticCandidates);
   const unreadIndexedMemoryUris = unreadIndexedMemoryRecordUris(indexedCandidates, records);
   const extraRecords = unreadIndexedMemoryUris.length > 0 ? yield* input.readRecords(unreadIndexedMemoryUris) : [];
   const liveRecords = extraRecords.length > 0 ? [...records, ...extraRecords] : records;

@@ -7,7 +7,13 @@ import {
   nativeSpecIntentDigest,
   type NativeAuthoringDocument,
 } from '../src/authoring.js';
-import {decodeNativeCyclePlan, initializeNativeCycle, validateNativeCyclePhase} from '../src/cycle.js';
+import {
+  decodeNativeCyclePlan,
+  initializeNativeCycle,
+  recordNativeCycleDelivery,
+  validateNativeCyclePhase,
+  type NativeCycleState,
+} from '../src/cycle.js';
 import {decodeNativeCloseoutProposal, prepareNativeCloseout} from '../src/closeout.js';
 import {renderNativeDocument} from '../src/documents.js';
 import * as EffectString from 'effect/String';
@@ -56,6 +62,7 @@ const spec = () =>
 function fixture(
   withSpec = false,
   change?: (plan: Extract<NativeAuthoringDocument, {kind: 'plan'}>) => Extract<NativeAuthoringDocument, {kind: 'plan'}>,
+  deliver?: (state: NativeCycleState, phaseId: string) => NativeCycleState,
 ) {
   let proposalPlan = decodeNativeAuthoringDocument({
     ...common,
@@ -114,7 +121,7 @@ function fixture(
     featureId: plan.id,
     project: plan.project,
     objective: plan.objective,
-    delivery: 'local',
+    delivery: deliver ? 'pr' : 'local',
     source: {
       root: {uri: 'threadnote://user/test/plan', memoryId: 'tn_plan', revision: digest},
       binding: {bindingId: digest, runId: 'run', generation: 'gen', profile: 'desktop'},
@@ -142,7 +149,7 @@ function fixture(
   });
   const initial = initializeNativeCycle(cyclePlan);
   let state = initial;
-  for (const phase of cyclePlan.phases)
+  for (const phase of cyclePlan.phases) {
     state = validateNativeCyclePhase(
       state,
       phase.id,
@@ -163,6 +170,8 @@ function fixture(
         })),
       },
     );
+    if (deliver) state = deliver(state, phase.id);
+  }
   const proposal = decodeNativeCloseoutProposal({
     architecture: {
       ...architecture,
@@ -196,6 +205,43 @@ function fixture(
 }
 
 describe('pure native closeout admission', () => {
+  it('names both heads of a phase whose PR merged above its delivered head', () => {
+    const head = Effect.pipe('a', EffectString.repeat(40));
+    const mergedHead = Effect.pipe('d', EffectString.repeat(40));
+    const receipt = (cycle: NativeCycleState, id: string, state: 'open' | 'merged', watchHead = head) => ({
+      phaseId: id,
+      phaseHash: cycle.phases[id].phaseHash,
+      delivery: 'pr',
+      headSha: head,
+      validatedTree: Effect.pipe('b', EffectString.repeat(40)),
+      commitEvidence: 'Verified fixture commit.',
+      pr: {url: 'https://example.test/pr/1', headSha: head, branch: 'feature/' + id, baseBranch: 'main', state},
+      watch: {
+        prUrl: 'https://example.test/pr/1',
+        headSha: watchHead,
+        state: state === 'open' ? 'active' : 'terminal',
+        stateDir: '/private/test-watch',
+        consumerKind: 'worker',
+        consumerId: 'watcher',
+        evidence: 'Fixture watch readback.',
+      },
+    });
+    // Phase one was published while open and merged above its head; phase two merged at its own head.
+    const f = fixture(false, undefined, (cycle, id) =>
+      id === 'one'
+        ? recordNativeCycleDelivery(
+            recordNativeCycleDelivery(cycle, id, receipt(cycle, id, 'open')),
+            id,
+            receipt(cycle, id, 'merged', mergedHead),
+          )
+        : recordNativeCycleDelivery(cycle, id, receipt(cycle, id, 'merged')),
+    );
+    const result = prepareNativeCloseout(f.state, f.plan, f.proposal);
+    expect(result.phaseEvidence[0]).toMatchObject({mergedAbovePhaseHead: {phaseHead: head, mergedHead}});
+    expect(result.phaseEvidence[1]).not.toHaveProperty('mergedAbovePhaseHead');
+    expect(renderNativeDocument(result.documents.handoff)).toContain(mergedHead);
+  });
+
   it('bounds composed display titles and retains complete maximum-length feature titles and rationale', () => {
     for (const title of [
       Effect.pipe('x', EffectString.repeat(256)),
@@ -252,6 +298,60 @@ describe('pure native closeout admission', () => {
     expect(renderNativeDocument(prepareNativeCloseout(f.state, f.plan, f.proposal).documents.handoff)).not.toContain(
       'Audited waivers',
     );
+  });
+  it('records every runtime-derived phase change, marking drift and counting what exceeds the bound', () => {
+    const f = fixture();
+    const [first, ...others] = EffectArray.map(f.state.plan.phases, phase => phase.id);
+    const many = Array.from({length: 400}, (_, index) => `src/generated/file-${index}.ts`);
+    const result = prepareNativeCloseout(
+      f.state,
+      f.plan,
+      f.proposal,
+      undefined,
+      [],
+      [{phaseId: first, paths: ['src/reader.ts', 'tools/discovered-fix.ts', ...many]}],
+    );
+    const dataFlow = EffectArray.findFirst(
+      result.documents.architecture.sections,
+      section => section.id === 'data-flow',
+    );
+    if (dataFlow._tag === 'None') throw new Error('Expected the data-flow section.');
+    const rows = JSON.parse(EffectString.split(dataFlow.value.body, 'Actual changes\n')[1]) as unknown;
+    expect(rows).toEqual(result.actualChanges);
+    expect(result.actualChanges?.[0]).toMatchObject({phaseId: first, drift: ['tools/discovered-fix.ts']});
+    expect(result.actualChanges?.[0]?.paths[0]).toBe(many[0]);
+    const listed = (result.actualChanges?.[0]?.paths.length ?? 0) + (result.actualChanges?.[0]?.drift.length ?? 0);
+    expect(result.actualChanges?.[0]?.more).toBe(402 - listed);
+    expect(result.actualChanges?.[0]?.more).toBeGreaterThan(0);
+    expect(EffectArray.map(result.actualChanges?.slice(1) ?? [], row => row.phaseId)).toEqual(others);
+    expect(() =>
+      prepareNativeCloseout(f.state, f.plan, f.proposal, undefined, [], [{phaseId: 'unknown', paths: []}]),
+    ).toThrow();
+    expect(prepareNativeCloseout(f.state, f.plan, f.proposal).actualChanges).toBeUndefined();
+  });
+  it('fits actual changes in the room the architecture leaves and renders a stored admission again exactly', () => {
+    const f = fixture();
+    const [first] = EffectArray.map(f.state.plan.phases, phase => phase.id);
+    // Seven long components leave only a few kilobytes of the 60000-byte architecture document for the rows.
+    const proposal = {
+      ...f.proposal,
+      architecture: {
+        ...f.proposal.architecture,
+        components: EffectArray.makeBy(7, index => `Component ${index} ` + Effect.pipe('x', EffectString.repeat(8000))),
+      },
+    };
+    const paths = EffectArray.makeBy(5000, index => `src/generated/file-${index}.ts`);
+    const result = prepareNativeCloseout(f.state, f.plan, proposal, undefined, [], [{phaseId: first, paths}]);
+    expect(
+      new TextEncoder().encode(renderNativeDocument(result.documents.architecture)).byteLength,
+    ).toBeLessThanOrEqual(60_000);
+    const row = result.actualChanges?.[0];
+    expect(row?.paths.length).toBeGreaterThan(0);
+    expect((row?.paths.length ?? 0) + (row?.more ?? 0)).toBe(paths.length);
+    // The journal keeps the bounded rows, and the same rows render the same document again.
+    const replay = prepareNativeCloseout(f.state, f.plan, proposal, undefined, [], result.actualChanges);
+    expect(replay.actualChanges).toEqual(result.actualChanges);
+    expect(replay.documents.architecture).toEqual(result.documents.architecture);
   });
   it('requires completed cycle and exact pinned plan identity/hash', () => {
     const f = fixture();

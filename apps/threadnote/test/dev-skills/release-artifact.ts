@@ -2,13 +2,9 @@ import {Predicate} from 'effect';
 import {Array as EffectArray} from 'effect';
 /** Compiled host controller: drive the extracted native CLI outside the checkout. */
 // Bun 1.4.2 compile cannot bundle the testing builtin export-star wrappers.
-// oxlint-disable-next-line effecttsgo/node-builtin-import
 import * as fs from 'node:fs';
-// oxlint-disable-next-line effecttsgo/node-builtin-import
 import {spawn, spawnSync, type ChildProcess} from 'node:child_process';
-// oxlint-disable-next-line effecttsgo/node-builtin-import
 import {createHash, randomBytes} from 'node:crypto';
-// oxlint-disable-next-line effecttsgo/node-builtin-import
 import {request as httpRequest} from 'node:http';
 import {constants, devNull, tmpdir} from 'node:os';
 import {basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep} from '@threadnote/testing/node-path';
@@ -938,13 +934,14 @@ export async function execute(root: string, checkout: string, enforced: boolean,
       files: EffectRecord.keys(manifest.hashes).length,
       nativeOnly: true,
     };
+    const portableGeneration = Effect2.pipe(generation, EffectString.replaceAll(sep, '/'));
     for (const skill of manifest.skills) {
       const content = fs.readFileSync(join(skills, skill.id, 'SKILL.md'), 'utf8');
       const template = fs.readFileSync(join(generation, skill.id, 'SKILL.md'), 'utf8');
       const expected = Effect2.pipe(
         template,
-        EffectString.replaceAll('{{THREADNOTE_SKILL_ROOT}}', join(generation, skill.id)),
-        EffectString.replaceAll('{{THREADNOTE_BUNDLE_ROOT}}', generation),
+        EffectString.replaceAll('{{THREADNOTE_SKILL_ROOT}}', `${portableGeneration}/${skill.id}`),
+        EffectString.replaceAll('{{THREADNOTE_BUNDLE_ROOT}}', portableGeneration),
       );
       requireCondition(
         content === expected &&

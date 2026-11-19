@@ -25,7 +25,6 @@ import {fileURLToPath, pathToFileURL} from 'node:url';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {Array as EffectArray, Record as EffectRecord, Schema, String as EffectString} from 'effect';
-/* oxlint-disable effecttsgo/node-builtin-import -- Qualification exercises private evidence files and refuses a mismatched executable before spawning it. */
 import {readFileSync} from 'node:fs';
 import {mkdtemp, mkdir, readFile, realpath, rm, writeFile, stat, lstat} from 'node:fs/promises';
 import {tmpdir} from 'node:os';

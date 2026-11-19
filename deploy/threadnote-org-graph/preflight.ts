@@ -1,4 +1,3 @@
-/* oxlint-disable effecttsgo/node-builtin-import -- This container preflight verifies raw volume files and native Ed25519 key identity before starting Effect services. */
 import * as Effect from 'effect';
 import * as EffectString from 'effect/String';
 import {canonicalOAuthUrl, sameOriginOAuthEndpoint} from '@threadnote/graph/sharing/oauth/m2m_config';

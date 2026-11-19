@@ -55,6 +55,8 @@ import {readNativeTaskView} from '../../src/workflow_automation/task.js';
 import {runNativeTaskAction, runNativeTaskStart} from '../../src/workflow_automation/task_actions.js';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
 import {ResourceStore} from '@threadnote/store/resource-store';
+import {uriSegment} from '@threadnote/store/resource-segment';
+import {formatMemoryDocument} from '@threadnote/memory/document';
 import {sha256HexSync} from '../../src/workflow_memory/native_digest.js';
 import {AuthoringRootSchema, decodeAuthoringArtifact} from '../../src/workflow_automation/authoring_artifacts.js';
 import {inspectNativeSourcePaths} from '../../src/workflow_automation/authoring.js';
@@ -142,6 +144,7 @@ const planBusiness = {
 };
 const setupWithCleanup = Effect.fn('test.nativeAuthoring.setup')(function* (
   cleanupRoot?: (root: string) => Effect.Effect<void>,
+  indexed = true,
 ) {
   const f = yield* nativeFixture({}, cleanupRoot);
   yield* runCommandEffect('git', ['-C', f.repo, 'add', 'source.ts']);
@@ -162,7 +165,8 @@ const setupWithCleanup = Effect.fn('test.nativeAuthoring.setup')(function* (
   const config = {...f.config, agentContextHome: home, manifestPath: f.path.join(home, 'manifest.json')};
   const scoped = {...system, currentDirectory: () => repo, homeDirectory: home};
   yield* applyDevSkills(config, 'install', {agent: 'codex'}).pipe(Effect.provideService(SystemInfo, scoped));
-  expect((yield* (yield* CodeGraphIndexer).index({cwd: repo, threadnoteHome: home})).snapshot.state).toBe('ready');
+  if (indexed)
+    expect((yield* (yield* CodeGraphIndexer).index({cwd: repo, threadnoteHome: home})).snapshot.state).toBe('ready');
   const mcp = new EffectMcpServerAdapter('test', '1', 'private authoring fixture');
   registerWorkflowTaskTool(mcp, config);
   const author = (input: object) =>
@@ -178,6 +182,32 @@ const setupWithCleanup = Effect.fn('test.nativeAuthoring.setup')(function* (
 });
 
 const setup = setupWithCleanup();
+
+effectIt.effect('starts standard authoring without a published graph while strict still refuses before init', () =>
+  Effect.gen(function* () {
+    const f = yield* setupWithCleanup(undefined, false);
+    const contentFile = f.path.join(f.root, 'spec-business.json');
+    yield* f.fs.writeFileString(contentFile, JSON.stringify(specBusiness));
+    const request = {
+      command: 'start',
+      callerCwd: f.repo,
+      featureName: 'Graphless fixture',
+      kind: 'spec',
+      contentFile,
+      installationTarget: 'codex',
+    } as const;
+    expect(
+      yield* runNativeTaskAuthoring(f.config, {...request, workflowProfile: 'strict'}).pipe(
+        Effect.provideService(SystemInfo, f.scoped),
+        Effect.result,
+      ),
+    ).toMatchObject({failure: {code: 'evidence-unavailable'}});
+    const started = yield* runNativeTaskAuthoring(f.config, {...request, workflowProfile: 'standard'}).pipe(
+      Effect.provideService(SystemInfo, f.scoped),
+    );
+    expect(started).toMatchObject({status: 'draft'});
+  }).pipe(TestClock.withLive, provideNative),
+);
 
 const snapshotAuthoringJobFiles = Effect.fn('test.snapshotAuthoringJobFiles')(function* (
   f: Effect.Success<typeof setup>,
@@ -2414,6 +2444,71 @@ effectIt.effect(
         )(sha256HexSync(workflowTitleSlug(f.path.basename(f.repo)) + '\n' + workflowTitleSlug(featureNames[1])));
       expect(yield* readNativeWorkflowState(f.config, detailRunId)).toBeUndefined();
     }).pipe(TestClock.withLive, provideNative),
+);
+
+effectIt.effect('pins a plain threadnote:// evidence URI to its memory identity and revision', () =>
+  Effect.gen(function* () {
+    const f = yield* setup;
+    const project = workflowTitleSlug(f.path.basename(f.repo));
+    const directory = `threadnote://user/${uriSegment(f.config.user)}/memories/durable/projects/${project}`;
+    const uri = `${directory}/fixture-evidence.md`;
+    const content = formatMemoryDocument(
+      'MEMORY',
+      {
+        kind: 'durable',
+        status: 'active',
+        project,
+        topic: 'fixture-evidence',
+        memoryId: 'tn_fixture_evidence',
+        sourceAgentClient: 'fixture',
+        timestamp: '2026-11-19T00:00:00.000Z',
+      },
+      'The fixture reader owns saved-value readback.\n',
+    );
+    const store = yield* ResourceStore;
+    const location = {account: f.config.account, home: f.config.agentContextHome, user: f.config.user};
+    yield* store.makeDirectory(location, directory);
+    yield* store.write(location, uri, content, {mode: 'create'});
+    const contentFile = f.path.join(f.root, 'uri-evidence.json');
+    yield* f.fs.writeFileString(
+      contentFile,
+      JSON.stringify({...specBusiness, context: {...specBusiness.context, evidenceRefs: [uri]}}),
+    );
+    const draft = yield* f.author({
+      command: 'start',
+      featureName: 'URI evidence fixture',
+      kind: 'spec',
+      contentFile,
+      installationTarget: 'codex',
+    });
+    expect(draft.status).toBe('draft');
+    const read = yield* f.author({command: 'read', authoringRef: draft.authoringRef, detail: 'document'});
+    const spec = yield* Schema.decodeUnknownEffect(NativeAuthoringSpecDocumentSchema)(read.document);
+    expect(spec.context.evidenceRefs).toEqual([
+      {uri, memoryId: 'tn_fixture_evidence', revision: sha256HexSync(content)},
+    ]);
+    const foreignFile = f.path.join(f.root, 'foreign-evidence.json');
+    yield* f.fs.writeFileString(
+      foreignFile,
+      JSON.stringify({
+        ...specBusiness,
+        context: {
+          ...specBusiness.context,
+          evidenceRefs: [EffectString.replace(`/projects/${project}/`, '/projects/other/')(uri)],
+        },
+      }),
+    );
+    const foreign = yield* f
+      .author({
+        command: 'start',
+        featureName: 'Foreign evidence fixture',
+        kind: 'spec',
+        contentFile: foreignFile,
+        installationTarget: 'codex',
+      })
+      .pipe(Effect.result);
+    expect(foreign).toMatchObject({failure: {code: 'out-of-scope'}});
+  }).pipe(TestClock.withLive, provideNative),
 );
 
 effectIt.effect.each(['head', 'bytes'] as const)(

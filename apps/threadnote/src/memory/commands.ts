@@ -1,5 +1,8 @@
-import type {ExactMatch} from '@threadnote/recall/results';
-import {prepareDefaultRecallSections} from '@threadnote/recall/sections_read';
+import {
+  readReadyRecallSections,
+  requireRecallRefinementRead,
+  warmRecallRerankerWindow,
+} from '@threadnote/recall/sections_read';
 import {readLocalMemoryRecordsByUri} from '@threadnote/memory/local-path';
 import {isReadCleanupUnconfirmed} from '@threadnote/platform/read_deadline';
 import {optionalReadyRecallRead, withReadyRecallReadBoundary} from '../recall/ready_read_boundary.js';
@@ -123,6 +126,7 @@ import {
 import {refreshRecallDerivedIndexesAfterCanonicalMutation} from '@threadnote/recall/mcp/refresh';
 import {resolveMemoryIdentityAliases, verifyResolvedMemoryIdentity} from '@threadnote/recall/memory/identity';
 import {
+  recallReadPhaseClassification,
   recallReadPhaseOutcome,
   mergeRecallOperationalWarnings,
   renderRecallOperationalWarning,
@@ -445,14 +449,12 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
         };
   const recallThreshold = thresholdPolicy.value;
   const thresholdConfigured = thresholdPolicy.source !== 'default';
-  // Scope selection feeds the native postings/vector indexes directly. The
-  // passes array remains as a compatibility input to the existing explainable
-  // ranker; no background process or HTTP service is queried.
+  // Scope selection feeds the native postings/vector indexes directly; no
+  // background process or HTTP service is queried.
   if (inferredUri) {
     yield* Console.log(`Recall scope: ${inferredUri}`);
   }
   const includeArchived = options.includeArchived === true;
-  const passes: Array<readonly RecallHit[]> = [];
   if (dryRun) {
     yield* Console.log(
       navigationOnly
@@ -520,7 +522,6 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
           uriScopes: explicitUri ? [explicitUri] : exactMemoryScopes(config, includeArchived, query),
           limitPerTerm: 25,
         };
-  let exactMatches: readonly ExactMatch[] = [];
   let operationalWarnings: readonly RecallOperationalWarning[] = [];
   let hybridMinimumScore = recallHybridMinimumScore(Number(recallThreshold));
   const expansionQueries: string[] = [];
@@ -551,23 +552,24 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
     });
   if (Option.isSome(semanticResult)) yield* surfaceSemanticWarning(semanticResult.value);
   const rerankerCache = createRecallRerankerCache();
-  let allowReranker = false;
   const semanticPreflightModel = dryRun || navigationOnly ? undefined : yield* prepareRecallSemanticPreflight(config);
+  // Rejected admission performs no optional work, so its completed lexical proof can stand.
+  let refinementStarted = false;
   const prepareSections = (candidateUris?: readonly string[], closingRead = false) =>
     withAnonymousTelemetryPhase(
       'recall.lexical-ranking',
       withProductionPhaseTiming(
         'recall.lexical-ranking',
         Effect.gen(function* () {
-          const prepared = yield* prepareDefaultRecallSections(config, {
-            ...(closingRead || semanticPreflightModel === undefined ? {} : {semanticPreflightModel}),
-            allowReranker,
+          const prepared = yield* readReadyRecallSections(config, {
+            ...(closingRead || refinementStarted || semanticPreflightModel === undefined
+              ? {}
+              : {semanticPreflightModel}),
             allowExactRescue: !thresholdConfigured,
             allowSemanticRescue: !thresholdConfigured,
             allowedUriScopes: explicitUri ? [explicitUri] : undefined,
             candidateUris,
             closingCandidateUris: closingRead ? candidateUris : undefined,
-            exactMatches: closingRead ? [] : exactMatches,
             exact: closingRead ? undefined : exactRead,
             eligibility,
             feedbackQuery: query,
@@ -575,7 +577,6 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
             limit: recallLimit,
             memoryRefs: memoryConnections?.memoryRefs,
             minimumScore: hybridMinimumScore,
-            passes: closingRead ? [] : passes,
             preferredUriScopes: explicitUri ? undefined : [...scopedRecallUris],
             project: recallProjectName,
             query,
@@ -584,31 +585,28 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
             rerankerCache,
             seedUris: EffectArray.filter([inferredUri, seededUri], (uri): uri is string => uri !== undefined),
             semanticResult,
-            semanticGenerationMismatchPolicy: closingRead ? 'fallback' : undefined,
             workspaceBranch,
             workspaceScope: workspaceComponent?.scope,
           });
-          if (!closingRead) exactMatches = prepared.exactMatches;
           semanticResult = Option.some(prepared.semanticResult);
           operationalWarnings = mergeRecallOperationalWarnings(operationalWarnings, prepared.operationalWarnings);
           yield* surfaceOperationalWarnings(prepared.operationalWarnings);
           yield* surfaceSemanticWarning(prepared.semanticResult);
           return prepared;
         }),
-        prepared => recallReadPhaseOutcome(prepared.operationalWarnings),
+        prepared => recallReadPhaseClassification(prepared.operationalWarnings),
       ),
       prepared => recallReadPhaseOutcome(prepared.operationalWarnings),
     );
+  const refineSections = (candidateUris?: readonly string[]) =>
+    prepareSections(candidateUris).pipe(Effect.flatMap(requireRecallRefinementRead));
   let recallSections = yield* prepareSections();
   // Finish and retain the useful lexical baseline before querying optional models.
   const baselineSections = recallSections;
-  // Rejected admission performs no optional work, so its completed lexical proof can stand.
-  let refinementStarted = false;
   const refined = yield* optionalReadyRecallRead(
     Effect.gen(function* () {
       if (navigationOnly) return recallSections;
       refinementStarted = true;
-      allowReranker = true;
       const effectAi =
         dryRun || navigationOnly
           ? undefined
@@ -645,7 +643,11 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
         (Option.isSome(semanticResult) && Option.isSome(semanticResult.value.scores)) ||
         rerankerCache.scores.size > 0
       ) {
-        recallSections = yield* prepareSections();
+        recallSections = yield* refineSections();
+        // Semantic-only hits enter with refinement; score them once before they compete for the window.
+        const scoredCandidates = rerankerCache.scores.size;
+        yield* warmRecallReranker(config.agentContextHome, query, recallSections.expansionCandidates, rerankerCache);
+        if (rerankerCache.scores.size > scoredCandidates) recallSections = yield* refineSections();
       }
       const shouldAttemptAiExpansion = !dryRun && !navigationOnly && shouldExpandRecall(recallSections.confidence);
       const indexSelectionCandidates = shouldAttemptAiExpansion
@@ -713,7 +715,7 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
       for (const expansionQuery of proposedExpansionQueries) {
         expansionQueries.push(expansionQuery);
         hybridMinimumScore = recallHybridMinimumScore(Number(recallThreshold));
-        recallSections = yield* prepareSections();
+        recallSections = yield* refineSections();
       }
       if (expansionQueries.length > 0) {
         yield* Console.log(`Recall query expansion: evaluated ${expansionQueries.length} model rewrite(s).`);
@@ -732,7 +734,7 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
             selectedIds,
             recallSelectionAnchorIds(selectionCandidates, recallSections.ranked),
           );
-          recallSections = yield* prepareSections(selectedUris);
+          recallSections = yield* refineSections(selectedUris);
           yield* Console.log(
             `Recall local AI post-filter: kept ${selectedUris.length} of ${selectionCandidates.length} candidate(s).`,
           );
@@ -743,12 +745,16 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
   );
   if (refinementStarted) {
     const selectedSections = Option.getOrElse(refined, () => baselineSections);
-    allowReranker = false;
     if (Option.isNone(refined)) {
       semanticResult = Option.some(emptyRecallSemanticScoresResult());
       hybridMinimumScore = recallHybridMinimumScore(Number(recallThreshold));
       expansionQueries.length = 0;
       rerankerCache.scores.clear();
+    } else {
+      // A warm-up that does not finish leaves fewer cached scores for closing; the refined window stands.
+      yield* optionalReadyRecallRead(
+        warmRecallRerankerWindow(config, query, refined.value, recallLimit, rerankerCache),
+      );
     }
     recallSections = yield* prepareSections(
       EffectArray.map(selectedSections.ranked.slice(0, recallLimit), hit => hit.uri),

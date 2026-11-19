@@ -1,6 +1,5 @@
 import * as EffectString from 'effect/String';
 import {ProbeFrameDecoder, encodeProbeFrame} from '../../../../../tools/semantic/semantic_lsp_probe.js';
-/* oxlint-disable effecttsgo/node-builtin-import -- Fixture deliberately leaves an owned child alive to exercise process cleanup. */
 import {spawn} from 'node:child_process';
 import {closeSync, writeFileSync} from 'node:fs';
 const mode = process.argv[2];

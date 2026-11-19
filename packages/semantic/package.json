@@ -11,10 +11,10 @@
     "./journal": "./src/journal.ts"
   },
   "dependencies": {
-    "effect": "4.1.2"
+    "effect": "4.1.4"
   },
   "devDependencies": {
-    "@effect/vitest": "4.1.2",
+    "@effect/vitest": "4.1.4",
     "vitest": "5.0.5",
     "fast-check": "4.10.2"
   },

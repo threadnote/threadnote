@@ -3,7 +3,6 @@ import * as EffectOption from 'effect/Option';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import {fileURLToPath} from 'node:url';
-// oxlint-disable-next-line effecttsgo/node-builtin-import -- Static checked-in fixture bytes for the inventory contract.
 import {readFileSync} from 'node:fs';
 import {probeGuardedExchange} from '../fixtures/semantic/editor/proposal-wire.cjs';
 import {describe, expect, it, vi} from 'vitest';

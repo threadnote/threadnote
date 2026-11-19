@@ -145,7 +145,9 @@ class RecallIndexOperationError extends Schema.TaggedError<
   RecallIndexOperationError,
   {readonly brand: unique symbol}
 >()('RecallIndexOperationError', {
-  reason: Schema.optionalKey(Schema.Literals(['invalid-protocol', 'worker-failed', 'cleanup-unconfirmed'])),
+  reason: Schema.optionalKey(
+    Schema.Literals(['input-limit', 'output-limit', 'invalid-protocol', 'worker-failed', 'cleanup-unconfirmed']),
+  ),
   cause: Schema.optionalKey(Schema.Defect()),
   message: Schema.String,
 }) {}

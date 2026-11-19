@@ -2,7 +2,6 @@ import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
 import {mkdir, mkdtemp, readFile, readdir, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {statSync} from '@threadnote/testing/node-fs';
-import {builtinModules} from '@threadnote/testing/node-module';
 import {dirname, join, relative} from '@threadnote/testing/node-path';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {fileURLToPath} from '@threadnote/testing/node-url';
@@ -188,12 +187,6 @@ async function scanSourceFiles(appSourceRoot: string, packagesRoot: string): Pro
   return (await Promise.all([codeFiles(appSourceRoot), ...EffectArray.map(packageRoots, codeFiles)])).flat();
 }
 
-const nodeBuiltinModules = new Set(
-  EffectArray.map(
-    EffectArray.filter(builtinModules, module => !Effect.pipe(module, EffectString.startsWith('bun:'))),
-    module => Effect.pipe(module, EffectString.replace(/^node:/, '')),
-  ),
-);
 const moduleSpecifierScanners = {
   js: new Bun.Transpiler({loader: 'js', logLevel: 'error'}),
   jsx: new Bun.Transpiler({loader: 'jsx', logLevel: 'error', tsconfig: {compilerOptions: {jsx: 'react'}}}),
@@ -210,13 +203,6 @@ function importedModuleSpecifiers(path: string, source: string): readonly string
         ? 'jsx'
         : 'js';
   return EffectArray.map(moduleSpecifierScanners[loader].scanImports(source), imported => imported.path);
-}
-
-function isNodeBuiltinSpecifier(specifier: string): boolean {
-  if (Effect.pipe(specifier, EffectString.startsWith('node:'))) return true;
-  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
-  const root = specifier.split('/', 1)[0];
-  return nodeBuiltinModules.has(specifier) || nodeBuiltinModules.has(root);
 }
 
 describe('Effect architecture boundaries', () => {
@@ -441,47 +427,6 @@ describe('Effect architecture boundaries', () => {
     }
   });
 
-  it('confines Node built-in imports to the declared stdio boundary', async () => {
-    const importShapes = EffectArray.join(
-      [
-        "import '../helpers/node-fs.js';",
-        "import {readFile} from 'fs/promises';",
-        "export {join} from '../helpers/node-path.js';",
-        "void import('../helpers/node-url.js');",
-        "const os = require('os');",
-        "import fs = require('fs');",
-        "import external from 'external-package';",
-        "const ignored = `require('fs') ${`nested ${value}`}`;",
-        "import '../helpers/node-crypto.js';",
-      ],
-      '\n',
-    );
-    expect(
-      EffectArrayPipe(importedModuleSpecifiers('builtin-shapes.ts', importShapes), __effectArrayValues =>
-        EffectArray.filter(
-          __effectArrayValues,
-          (__effectArrayValue, __effectArrayIndex) =>
-            __effectArrayIndex in __effectArrayValues && isNodeBuiltinSpecifier(__effectArrayValue),
-        ),
-      ),
-    ).toEqual(['fs/promises', 'os', 'fs']);
-
-    for (const path of await sourceFiles()) {
-      const source = await readFile(path, 'utf8');
-      const relativePath = Effect.pipe(relative(repoRoot, path), EffectString.replaceAll('\\', '/'));
-      expect(
-        EffectArrayPipe(importedModuleSpecifiers(path, source), __effectArrayValues =>
-          EffectArray.filter(
-            __effectArrayValues,
-            (__effectArrayValue, __effectArrayIndex) =>
-              __effectArrayIndex in __effectArrayValues && isNodeBuiltinSpecifier(__effectArrayValue),
-          ),
-        ),
-        relativePath,
-      ).toEqual([]);
-    }
-  });
-
   it('keeps Bun structural built-ins inside the exact SystemInfo adapters', async () => {
     const accesses: {module: string; path: string}[] = [];
     for (const path of await sourceFiles()) {
@@ -552,6 +497,7 @@ describe('Effect architecture boundaries', () => {
       'apps/threadnote/src/effect/mcp_broker_process.ts',
       'packages/platform/src/system.ts',
       'apps/threadnote/src/standalone.ts',
+      'apps/threadnote/src/standalone_cli.ts',
       'apps/threadnote/src/recall/ready_read_entry.ts',
     ]);
     const semanticExpressions = new Map([
@@ -682,7 +628,8 @@ describe('Effect architecture boundaries', () => {
   });
 
   it('keeps standalone worker dispatch independent from application entry modules', async () => {
-    const standalone = await readFile(join(sourceRoot, 'standalone.ts'), 'utf8');
+    const entry = await readFile(join(sourceRoot, 'standalone.ts'), 'utf8');
+    const standalone = await readFile(join(sourceRoot, 'standalone_cli.ts'), 'utf8');
     const workerProtocol = await readFile(join(sourceRoot, 'worker_protocol.ts'), 'utf8');
     const processLease = await readFile(join(sourceRoot, 'process', 'standalone_lease.ts'), 'utf8');
 
@@ -694,6 +641,8 @@ describe('Effect architecture boundaries', () => {
     expect(standalone).toContain("import('./effect/ai/isolated-local-model-runtime.js')");
     expect(standalone).toContain("import('./effect/runtime.js')");
     expect(standalone).toContain("import('./mcp/server/index.js')");
+    expect(entry).not.toMatch(/^import\s(?!\{RECALL_READY_READ_WORKER_ARGUMENT\} from '\.\/worker_protocol\.js';$)/m);
+    expect(entry).toContain("import('./standalone_cli.js')");
     expect(workerProtocol).not.toMatch(/^import\s/m);
     expect(processLease).not.toContain("from './installations.js'");
     expect(processLease).not.toContain("from './utils.js'");

@@ -4,7 +4,17 @@ import type {DevSkillsBundle, DevSkillsIssue, DevSkillsManifest, DevSkillsTarget
 import {AGENT_SKILLS} from '../agent_integration/skills.js';
 import type {PhysicalReceipt} from './registry.js';
 import {entrypointPath, physicalDirectory} from './registry.js';
-import {assertSafePath, enumerateFiles, fail, hash, readOptional, statOptional, stableJson} from './files.js';
+import {
+  assertSafePath,
+  enumerateFiles,
+  fail,
+  hash,
+  hasSymlinkAncestor,
+  isSymbolicLink,
+  readOptional,
+  statOptional,
+  stableJson,
+} from './files.js';
 import {hasHistoricalDevSkillsMembers} from './manifest.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
@@ -13,15 +23,22 @@ import {Option as EffectOption} from 'effect';
 
 export const generationRoot = (path: Path.Path, skillRoot: string, digest: string) =>
   path.join(physicalDirectory(path, skillRoot), 'generations', digest);
-export function renderEntrypoints(path: Path.Path, target: DevSkillsTarget, bundle: DevSkillsBundle) {
-  const root = generationRoot(path, target.skillRoot, bundle.manifest.digest);
+/**
+ * Renders root placeholders with `/` separators: a Windows backslash is a CommonMark escape in a link destination.
+ * Pass `path.sep` to reproduce the native rendering that receipts written before this rule still hold.
+ */
+export function renderEntrypoints(path: Path.Path, target: DevSkillsTarget, bundle: DevSkillsBundle, separator = '/') {
+  const root = EffectString.replaceAll(
+    path.sep,
+    separator,
+  )(generationRoot(path, target.skillRoot, bundle.manifest.digest));
   const entries: Record<string, string> = {};
   for (const skill of bundle.manifest.skills) {
     const content = Buffer.from(bundle.files[`${skill.id}/SKILL.md`], 'base64').toString('utf8');
     entries[entrypointPath(target.layout, skill.id)] = Effect2.pipe(content, __effectPipeInput => {
       const __effectPipeStage0 = Effect2.pipe(
         __effectPipeInput,
-        EffectString.replaceAll('{{THREADNOTE_SKILL_ROOT}}', path.join(root, skill.id)),
+        EffectString.replaceAll('{{THREADNOTE_SKILL_ROOT}}', `${root}${separator}${skill.id}`),
       );
       const __effectPipeStage1 = Effect2.pipe(
         __effectPipeStage0,
@@ -32,6 +49,16 @@ export function renderEntrypoints(path: Path.Path, target: DevSkillsTarget, bund
   }
   return entries;
 }
+/** Every rendering an owned receipt may hold for a generation; POSIX has only one. */
+export const ownedRenderings = (path: Path.Path, target: DevSkillsTarget, bundle: DevSkillsBundle) =>
+  EffectArray.map([...new Set(['/', path.sep])], separator => renderEntrypoints(path, target, bundle, separator));
+export const isOwnedRendering = (
+  path: Path.Path,
+  target: DevSkillsTarget,
+  bundle: DevSkillsBundle,
+  entrypoints: Readonly<Record<string, string>>,
+) =>
+  EffectArray.some(ownedRenderings(path, target, bundle), rendered => stableJson(rendered) === stableJson(entrypoints));
 export const verifyGeneration = Effect.fn('devSkills.verifyGeneration')(function* (
   root: string,
   manifest: DevSkillsManifest,
@@ -90,9 +117,7 @@ export const verifyReceiptProjection = Effect.fn('devSkills.verifyReceiptProject
       return yield* fail('historical-ownership-conflict', 'Historical skill discovery aliases are not owned.');
     files[relative] = Buffer.from(bytes).toString('base64');
   }
-  if (
-    stableJson(renderEntrypoints(path, target, {manifest: receipt.manifest, files})) !== stableJson(receipt.entrypoints)
-  )
+  if (!isOwnedRendering(path, target, {manifest: receipt.manifest, files}, receipt.entrypoints))
     return yield* fail(
       'historical-ownership-conflict',
       'Historical entrypoint ownership differs from its verified rendering.',
@@ -164,7 +189,22 @@ export const inspectDuplicates = Effect.fn('devSkills.inspectDuplicates')(functi
   const issues: DevSkillsIssue[] = [];
   const ids = new Set(['dev-spec', 'dev-plan', 'dev-cycle', 'watch-pr']);
   let visited = 0;
-  const inspect = Effect.fn('devSkills.inspectDuplicate')(function* (file: string, directoryName?: string) {
+  /**
+   * Every walk level below a discovery root calls this before it descends or reads. A foreign link is never
+   * followed; a link named with a bundled id still blocks installation.
+   */
+  const follow = Effect.fn('devSkills.followDiscoveryEntry')(function* (file: string, name: string) {
+    if (!(yield* isSymbolicLink(file))) return true;
+    const id = Effect2.pipe(name, EffectString.replace(/\.md$/u, ''));
+    if (ids.has(id))
+      issues.push({
+        code: 'duplicate',
+        message: `A discoverable ${id} is a symbolic link. Migrate it explicitly.`,
+        path: file,
+      });
+    return false;
+  });
+  const read = Effect.fn('devSkills.inspectDuplicate')(function* (file: string, directoryName: string) {
     if (++visited > 1024)
       return yield* fail(
         'discovery-limit',
@@ -173,13 +213,17 @@ export const inspectDuplicates = Effect.fn('devSkills.inspectDuplicates')(functi
     const content = yield* readOptional(file, 300_000);
     if (content === null) return;
     const name = /^---\r?\n[\s\S]*?^name:\s*["']?([a-z-]+)["']?\s*$/mu.exec(content)?.[1] ?? directoryName;
-    if (!name || !ids.has(name)) return;
+    if (!ids.has(name)) return;
     if (file === path.join(target.skillRoot, entrypointPath(target.layout, name))) return;
     issues.push({
       code: 'duplicate',
       message: `A manual or legacy ${name} is also discoverable. Migrate it explicitly.`,
       path: file,
     });
+  });
+  const skill = Effect.fn('devSkills.inspectSkillDirectory')(function* (directory: string, name: string) {
+    const file = path.join(directory, 'SKILL.md');
+    if (yield* follow(file, name)) yield* read(file, name);
   });
   const directories = Effect.fn('devSkills.discoveryDirectories')(function* (root: string) {
     yield* assertSafePath(root);
@@ -190,7 +234,10 @@ export const inspectDuplicates = Effect.fn('devSkills.inspectDuplicates')(functi
     if (names.length > 256) return yield* fail('discovery-limit', `Too many native skill entries: ${root}`);
     return names;
   });
+  const isDirectory = (file: string) => Effect.map(statOptional(file), info => info?.type === 'Directory');
   for (const root of target.discoveryRoots) {
+    // A foreign root behind any link is skipped; the owned root reaches `assertSafePath` and is refused.
+    if (path.resolve(root) !== path.resolve(target.skillRoot) && (yield* hasSymlinkAncestor(root))) continue;
     for (const name of yield* directories(root)) {
       if (
         Effect2.pipe(name, EffectString.startsWith('.')) ||
@@ -199,22 +246,24 @@ export const inspectDuplicates = Effect.fn('devSkills.inspectDuplicates')(functi
       )
         continue;
       const file = path.join(root, name);
-      const info = yield* statOptional(file);
-      if (info?.type === 'Directory') yield* inspect(path.join(file, 'SKILL.md'), name);
+      if (!(yield* follow(file, name))) continue;
+      if (yield* isDirectory(file)) yield* skill(file, name);
       else if (Effect2.pipe(name, EffectString.endsWith('.md')))
-        yield* inspect(file, Effect2.pipe(name, EffectString.slice(0, -3)));
+        yield* read(file, Effect2.pipe(name, EffectString.slice(0, -3)));
     }
     for (const namespace of ['threadnote', 'threadnote-packs']) {
       const base = path.join(root, namespace);
+      if (!(yield* follow(base, namespace))) continue;
       for (const team of yield* directories(base)) {
         const teamRoot = path.join(base, team);
-        if ((yield* statOptional(teamRoot))?.type !== 'Directory') continue;
+        if (!(yield* follow(teamRoot, team)) || !(yield* isDirectory(teamRoot))) continue;
         for (const pack of yield* directories(teamRoot)) {
           const packRoot = path.join(teamRoot, pack);
-          if ((yield* statOptional(packRoot))?.type !== 'Directory') continue;
-          yield* inspect(path.join(packRoot, 'SKILL.md'), pack);
+          if (!(yield* follow(packRoot, pack)) || !(yield* isDirectory(packRoot))) continue;
+          yield* skill(packRoot, pack);
           if (namespace === 'threadnote-packs')
-            for (const id of ids) yield* inspect(path.join(packRoot, id, 'SKILL.md'), id);
+            for (const id of ids)
+              if (yield* follow(path.join(packRoot, id), id)) yield* skill(path.join(packRoot, id), id);
         }
       }
     }

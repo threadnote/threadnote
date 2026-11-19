@@ -113,6 +113,7 @@ import {makeCodeGraphMaterializedShardWriteQueue} from './materialized_shard_wri
 import {
   codeGraphMaterializedShardCacheBatchPlan,
   codeGraphMaterializedShardCacheWriteAdmission,
+  type CodeGraphMaterializedShardPolicy,
 } from '../materialized_shard_cache_admission.js';
 import {assessCodeGraphLanguagePackDelta} from '../languages/provenance.js';
 import type {CodeGraphLanguagePackRegistryShape} from '../languages/registry.js';
@@ -182,6 +183,7 @@ export const buildOwnedCleanSnapshot = Effect.fn('codeGraph.buildOwnedCleanSnaps
   readonly legacyBuildAdmission?: CodeGraphIndexResourceGate;
   readonly layout: CodeGraphLayout;
   readonly logicalSnapshotId: string;
+  readonly materializedShards?: CodeGraphMaterializedShardPolicy;
   readonly onProgress?: (progress: CodeGraphProgress) => Effect.Effect<void, unknown>;
   readonly persistentMaterializationTransactionBatchLimit?: 1 | 4;
   readonly preparationGate?: CodeGraphIndexResourceGate;
@@ -1123,7 +1125,10 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
     }
     const batches = factMaterializationBatches(input.inventory.files, cachedMetadata.bytesByPath);
     const cachedFactBytesTotal = cachedMetadata.bytes;
-    const materializedShardCacheWriteAdmission = codeGraphMaterializedShardCacheWriteAdmission(cachedFactBytesTotal);
+    const materializedShardCacheWriteAdmission = codeGraphMaterializedShardCacheWriteAdmission(
+      cachedFactBytesTotal,
+      input.materializedShards ?? 'bounded',
+    );
     const committedHashesByPath = new Map(
       EffectArray.map(input.inventory.committedFiles, file => [file.path, file.contentHash]),
     );

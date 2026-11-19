@@ -1,8 +1,6 @@
 /** Host-only OS boundary. Product commands always use the extracted executable. */
 // Bun 1.4.2 compile cannot bundle the testing builtin export-star wrappers.
-// oxlint-disable-next-line effecttsgo/node-builtin-import
 import {spawnSync} from 'node:child_process';
-// oxlint-disable-next-line effecttsgo/node-builtin-import -- Same compiled host-boundary requirement.
 import {writeFileSync} from 'node:fs';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
