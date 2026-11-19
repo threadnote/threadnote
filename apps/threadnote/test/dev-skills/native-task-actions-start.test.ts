@@ -1,4 +1,4 @@
-import {Array as EffectArray, Effect, FileSystem, Path, Record as EffectRecord, Schema} from 'effect';
+import {Array as EffectArray, Deferred, Effect, FileSystem, Fiber, Path, Record as EffectRecord, Schema} from 'effect';
 import * as EffectString from 'effect/String';
 import {Command} from 'effect/cli';
 import {it as effectIt} from '@effect/vitest';
@@ -24,6 +24,7 @@ import {
 } from '@threadnote/workflow-automations/authoring';
 import {decodeNativeCycleRuntime} from '@threadnote/workflow-automations/cycle-runtime';
 import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
+import {sha256Hex} from '@threadnote/platform/digest';
 import {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
 import {registerWorkflowTaskTool} from '../../src/mcp/server/workflow.js';
 import {readNativeTaskView} from '../../src/workflow_automation/task.js';
@@ -43,6 +44,8 @@ import {DevSkillsSource, loadDevSkillsBundleAt} from '../../src/dev_skills/manif
 import {enrollmentContext} from '../../src/dev_skills/registry.js';
 import {SystemInfo} from '@threadnote/platform/system';
 import {readNativeWorkflowState, serializeNativeWorkflowState} from '../../src/workflow_automation/store.js';
+import {withDeferredCodeAnchorMutationLocks} from '../../src/memory/deferred/code_anchor.js';
+import {healAnchorsAfterGraphIndex} from '../../src/memory/deferred/code_anchor_recovery.js';
 import {runWorkflowAutomation} from '../../src/workflow_automation/index.js';
 import {sha256HexSync} from '../../src/workflow_memory/native_digest.js';
 import {GraphDiagnostics, object, run} from './native-cycle-lifecycle-fixture.js';
@@ -865,6 +868,114 @@ describe('native task actions', () => {
       );
       expect(confirmed, cut).toMatchObject({status: 'admitted', taskReadiness: 'ready'});
       expect((yield* observe())?.state.authoringSave).toBeUndefined();
+    }).pipe(run),
+  );
+
+  effectIt.effect('resumes a graph-free standard compact save that a busy memory lock stopped', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      yield* runCommandEffect('git', ['-C', f.repo, 'add', 'source.ts']);
+      yield* runCommandEffect('git', [
+        '-C',
+        f.repo,
+        '-c',
+        'user.name=Fixture',
+        '-c',
+        'user.email=fixture@example.invalid',
+        'commit',
+        '-m',
+        'Fixture source',
+      ]);
+      const system = yield* SystemInfo;
+      const repo = yield* f.fs.realPath(f.repo);
+      const home = yield* f.fs.realPath(f.home);
+      const config = {...f.config, agentContextHome: home, manifestPath: f.path.join(home, 'manifest.json')};
+      const scopedSystem = {...system, currentDirectory: () => repo, homeDirectory: home};
+      yield* applyDevSkills(config, 'install', {agent: 'codex'}).pipe(Effect.provideService(SystemInfo, scopedSystem));
+      // No graph is published, so the standard start writes its first children without code citations.
+      const start = {
+        featureName: 'Busy graph-free start',
+        callerCwd: repo,
+        installationTarget: 'codex',
+        workflowProfile: 'standard' as const,
+        intent: {
+          title: 'Busy graph-free start',
+          currentBehavior: 'Expired fixture data is returned.',
+          desiredChange: 'Expired fixture data is refreshed before return.',
+          affectedPaths: ['source.ts'],
+          acceptanceCriterion: 'The refreshed fixture value is returned.',
+          verification: 'Read an expired fixture.',
+          eligibilityRationale: 'One source-bound fixture behavior with no unresolved decisions.',
+          eligibility: {status: 'eligible' as const},
+          review: {required: false, reason: 'Bounded fixture correction.'},
+        },
+      };
+      const runId = nativeTaskStartRunId(undefined, 'repo', workflowTitleSlug(start.featureName));
+      const testScope = yield* Effect.scope;
+      const actualFs = yield* FileSystem.FileSystem;
+      const indexer = yield* CodeGraphIndexer;
+      const statePath = f.path.join(home, 'workflow-automations', 'native-v1', runId + '.json');
+      const release = yield* Deferred.make<void>();
+      let holder: Fiber.Fiber<void, unknown> | undefined;
+      const healMemoryLocks: string[] = [];
+      // After the first child is verified, a graph index publishes and heals deferred anchors, as the start's
+      // warm-up does. Then another writer holds the memory lock, so the next child exhausts its lock budget.
+      const faultFs = {
+        ...actualFs,
+        rename: (from: string, to: string) =>
+          actualFs.rename(from, to).pipe(
+            Effect.tap(() =>
+              Effect.gen(function* () {
+                if (holder || to !== statePath) return;
+                if ((yield* readNativeWorkflowState(config, runId))?.state.operations[0]?.status !== 'verified') return;
+                const summary = yield* indexer.index({cwd: repo, threadnoteHome: home, ensureVectors: false});
+                yield* healAnchorsAfterGraphIndex(config, repo, summary.identity).pipe(
+                  Effect.provideService(FileSystem.FileSystem, {
+                    ...actualFs,
+                    writeFileString: (path, data, options) => {
+                      if (EffectString.includes('memory-locks')(path)) healMemoryLocks.push(path);
+                      return actualFs.writeFileString(path, data, options);
+                    },
+                  }),
+                );
+                const acquired = yield* Deferred.make<void>();
+                holder = yield* withDeferredCodeAnchorMutationLocks(
+                  actualFs,
+                  config,
+                  [],
+                  Deferred.succeed(acquired, undefined).pipe(Effect.andThen(Deferred.await(release))),
+                ).pipe(Effect.asVoid, Effect.forkIn(testScope));
+                yield* Deferred.await(acquired);
+              }).pipe(Effect.provideService(FileSystem.FileSystem, actualFs)),
+            ),
+          ),
+      };
+      const stopped = yield* runNativeTaskStart(config, start).pipe(
+        Effect.provideService(SystemInfo, scopedSystem),
+        Effect.provideService(FileSystem.FileSystem, faultFs),
+        Effect.result,
+      );
+      expect(stopped).toMatchObject({failure: {code: 'memory-busy', retryable: true}});
+      yield* Deferred.succeed(release, undefined);
+      if (holder) yield* Fiber.join(holder);
+      // The run queues no deferred anchor, so the warm-up heal took no memory lock and left the child unchanged.
+      expect(healMemoryLocks).toEqual([]);
+      const first = (yield* readNativeWorkflowState(config, runId))?.state.operations[0]?.artifact;
+      if (!first) throw new Error('Expected the verified first child.');
+      expect(yield* f.store.read(f.location, first.uri).pipe(Effect.flatMap(sha256Hex))).toBe(first.revision);
+      const resumed = object(
+        yield* runNativeTaskStart(config, start).pipe(Effect.provideService(SystemInfo, scopedSystem)),
+      );
+      expect(resumed.status).toBe('awaiting-user-confirmation');
+      const complete = yield* readNativeWorkflowState(config, runId);
+      expect(complete?.state.authoringSave).toBeUndefined();
+      expect(EffectArray.map(complete?.state.operations ?? [], item => [item.intent.nameHint, item.status])).toEqual([
+        ['source', 'verified'],
+        ['index', 'verified'],
+        ['plan-overview', 'verified'],
+        ['decisions', 'verified'],
+        ['plan', 'verified'],
+      ]);
     }).pipe(run),
   );
 
@@ -2356,7 +2467,7 @@ describe('native task actions', () => {
       expect(mixedShape.failure).toMatchObject({code: 'invalid-request'});
       expect(mixedShape.failure.message).toContain('delivery');
       expect(mixedShape.failure.message).toContain('bindings');
-      // A standard run needs no published graph: it starts in a fresh checkout and defers its code citations.
+      // A standard run needs no published graph: it starts in a fresh checkout and stores its artifacts uncited.
       const standardStart = object(
         yield* runNativeTaskStart(config, {
           ...startInput,

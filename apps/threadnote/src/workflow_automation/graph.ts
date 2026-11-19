@@ -120,8 +120,8 @@ const warmWorkflowGraph = Effect.fn('workflowAutomation.warmGraph')(
 
 /**
  * Check a proposed native run's graph scope before init creates its binding or reserves its name. A missing or stale
- * graph is warmed in the background by a released build; a standard run starts without it and defers its code
- * citations, while a strict run still requires exact current evidence before init.
+ * graph is warmed in the background by a released build; a standard run starts without it and stores artifacts
+ * written before the graph is ready without code citations, while a strict run still requires exact current evidence.
  */
 export const requireWorkflowGraphScope = Effect.fn('workflowAutomation.requireGraphScope')(function* (
   config: RuntimeConfig,
