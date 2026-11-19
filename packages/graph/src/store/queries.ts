@@ -40,6 +40,8 @@ import {
 import {edgeFromRow, snapshotFromRow, symbolFromRow} from './rows.js';
 import {CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION} from './build/core.js';
 import {
+  CODE_GRAPH_NAME_TERM_WEIGHT,
+  CODE_GRAPH_PATH_TERM_WEIGHT,
   boundedPageLimit,
   chunk,
   codeGraphIdentitySelectors,
@@ -1512,6 +1514,17 @@ const selectSymbolsByIdsWithSql = Effect.fn('codeGraph.selectSymbolsByIdsWithSql
   return output;
 });
 
+/**
+ * A file module is named by its path, so its path segments are indexed at symbol-name weight.
+ * Score those terms at path weight, or a long query that shares directory names outranks the
+ * declarations that implement it.
+ */
+function pathNamedModuleTermScore(row: Pick<SymbolRow, 'kind' | 'name' | 'path'>, score: number): number {
+  return row.kind === 'module' && row.name === row.path
+    ? (score * CODE_GRAPH_PATH_TERM_WEIGHT) / CODE_GRAPH_NAME_TERM_WEIGHT
+    : score;
+}
+
 const selectSearchSymbolsWithSql = Effect.fn('codeGraph.selectSearchSymbolsWithSql')(function* (
   sql: SqlClient.SqlClient,
   snapshotId: string,
@@ -1562,7 +1575,7 @@ const selectSearchSymbolsWithSql = Effect.fn('codeGraph.selectSearchSymbolsWithS
           termStatement.text,
           termStatement.parameters,
         );
-  const termScores = new Map(
+  const candidateScores = new Map(
     EffectArray.map(termCandidates, candidate => [candidate.symbol_id, Number(candidate.score)]),
   );
   const termRows = EffectArray.map(
@@ -1572,8 +1585,9 @@ const selectSearchSymbolsWithSql = Effect.fn('codeGraph.selectSearchSymbolsWithS
       baseSnapshotId,
       EffectArray.map(termCandidates, candidate => candidate.symbol_id),
     ),
-    row => ({...row, score: termScores.get(row.id) ?? 0}),
+    row => ({...row, score: pathNamedModuleTermScore(row, candidateScores.get(row.id) ?? 0)}),
   );
+  const termScores = new Map(EffectArray.map(termRows, row => [row.id, row.score]));
   const exactEvidence = new Map<string, Pick<SearchSymbolRow, 'exact_rank' | 'score'>>();
   for (const row of exactRows) {
     const current = exactEvidence.get(row.id);
