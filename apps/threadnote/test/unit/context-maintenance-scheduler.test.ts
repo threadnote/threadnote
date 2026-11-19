@@ -1,18 +1,33 @@
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Deferred, Effect, FileSystem, Layer, Path} from 'effect';
+import {Array as EffectArray, Deferred, Effect, FileSystem, Layer, Path} from 'effect';
 import {TestClock} from 'effect/testing';
-import {describe, expect} from 'vitest';
+import * as EffectRecord from 'effect/Record';
+import {describe, expect, it} from 'vitest';
+import {contextHealthCaseIdV2} from '@threadnote/context/health_maintenance';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {succeedUndefined} from '@threadnote/platform/optional';
+import {resourceAccountMutationGenerationPath} from '@threadnote/store/resource/lock';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {
+  readRawState,
+  runContextMaintenance,
   runContextMaintenanceScheduler,
   setContextMaintenancePaused,
   readContextMaintenanceControl,
   wakeContextMaintenance,
+  writeState,
+  type ContextMaintenanceCaseV2,
+  type MaintenanceState,
 } from '@threadnote/threadnote/memory/context/maintenance';
+import {
+  contextMaintenanceProgressFingerprint,
+  contextMaintenanceWakeIntervalMs,
+  nextContextMaintenanceWorkerQuiet,
+  recordContextMaintenanceWorkerTick,
+} from '../../src/memory/context/maintenance_backoff.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {CONTEXT_MAINTENANCE_WORKER_ARGUMENT} from '../../src/memory/context/maintenance_worker.js';
@@ -150,5 +165,276 @@ describe('context maintenance scheduler containment', () => {
         ),
       ).toBe(false);
     }).pipe(provideTestLayer(Layer.mergeAll(BunServices.layer, TestSystemInfoLayer))),
+  );
+});
+
+const T0 = '2026-11-01T00:00:00.000Z';
+const T1 = '2026-11-01T00:05:00.000Z';
+const at = (milliseconds: number) => new Date(milliseconds).toISOString();
+const quiet = (streak: number, canonicalGeneration = '') => ({fingerprint: 'quiet', canonicalGeneration, streak});
+
+function maintenanceCase(
+  slot: string,
+  overrides: Partial<ContextMaintenanceCaseV2> = {},
+  family = 'citation',
+): ContextMaintenanceCaseV2 {
+  const identity = {project: 'threadnote', memoryId: family === 'candidate' ? 'candidate' : 'tn_a', family, slot};
+  return {
+    ...identity,
+    caseId: contextHealthCaseIdV2(identity),
+    evidenceRevision: 'evidence-1',
+    disposition: 'waiting-evidence',
+    reason: 'citation-unknown',
+    firstSeen: T0,
+    lastSeen: T0,
+    lastChecked: T0,
+    attemptCount: 1,
+    events: [],
+    ...overrides,
+  };
+}
+
+function maintenanceState(overrides: Partial<MaintenanceState> = {}): MaintenanceState {
+  return {
+    version: 2,
+    paused: false,
+    state: 'idle',
+    generation: 'generation',
+    projects: [],
+    cases: [],
+    receipts: [],
+    checkpoints: {},
+    ...overrides,
+  };
+}
+
+describe('context maintenance wake backoff', () => {
+  it('doubles the owner-bound interval after each quiet tick up to thirty minutes', () => {
+    expect(
+      EffectArray.map([0, 1, 2, 5, 6, 40, 2_000], streak =>
+        contextMaintenanceWakeIntervalMs(maintenanceState({workerQuiet: quiet(streak)}), 0, ''),
+      ),
+    ).toEqual([30_000, 60_000, 120_000, 960_000, 1_800_000, 1_800_000, 1_800_000]);
+    expect(contextMaintenanceWakeIntervalMs(maintenanceState(), 0, '')).toBe(30_000);
+  });
+
+  it('never waits past the earliest pending retry or below thirty seconds', () => {
+    const lastWakeAt = Date.parse(T0);
+    const state = maintenanceState({
+      workerQuiet: quiet(10),
+      cases: [
+        maintenanceCase('pending', {nextAttemptAt: at(lastWakeAt + 300_000)}),
+        maintenanceCase('closed', {disposition: 'resolved', nextAttemptAt: at(lastWakeAt + 60_000)}),
+      ],
+      checkpoints: {
+        'tn_a:0': {revision: 'r', checkedAt: T0, retryAt: at(lastWakeAt - 1)},
+        'tn_b:0': {revision: 'r', checkedAt: T0, retryAt: at(lastWakeAt + 600_000)},
+      },
+    });
+    expect(contextMaintenanceWakeIntervalMs(state, lastWakeAt, '')).toBe(300_000);
+    const requestRetryAt = at(lastWakeAt + 120_000);
+    expect(
+      contextMaintenanceWakeIntervalMs({...state, workerQuiet: {...quiet(10), requestRetryAt}}, lastWakeAt, ''),
+    ).toBe(120_000);
+    expect(
+      contextMaintenanceWakeIntervalMs(
+        {...state, checkpoints: {'tn_c:0': {revision: 'r', checkedAt: T0, retryAt: at(lastWakeAt + 10_000)}}},
+        lastWakeAt,
+        '',
+      ),
+    ).toBe(30_000);
+  });
+
+  it('returns to thirty seconds when the canonical generation changed or is unreadable', () => {
+    const state = maintenanceState({workerQuiet: quiet(10, 'v1:before')});
+    expect(contextMaintenanceWakeIntervalMs(state, 0, 'v1:before')).toBe(1_800_000);
+    expect(contextMaintenanceWakeIntervalMs(state, 0, 'v1:after')).toBe(30_000);
+    expect(contextMaintenanceWakeIntervalMs(state, 0, undefined)).toBe(30_000);
+  });
+
+  it('ignores rotating cursors and timestamps but sees each progress signal', () => {
+    const progress = {
+      version: 2 as const,
+      analyzerVersion: 2,
+      generation: 'semantic',
+      cursor: 1,
+      totalBatches: 3,
+      eligibleRecords: 2,
+      records: [],
+      comparison: {pairCursor: 1, claimCursor: 0, seenCaseIds: []},
+      dirty: [],
+      comparedClaimPairs: 1,
+      churnCount: 0,
+      outputOmittedFindings: 0,
+    };
+    const item = maintenanceCase('slot');
+    const checkpoint = {revision: 'r', memoryHash: 'h', checkedAt: T0};
+    const receipt = {
+      receiptId: 'maintenance-receipt',
+      project: 'threadnote',
+      subjectUri: 'memory',
+      postHash: 'post',
+      timestamp: T0,
+      state: 'applied' as const,
+    };
+    const discovery = {namesHash: 'names', scanned: 0, scopedPending: true};
+    const base = maintenanceState({
+      cases: [item],
+      receipts: [receipt],
+      checkpoints: {'tn_a:0': checkpoint},
+      semanticProgress: {threadnote: progress},
+      workSchedule: {nextPhase: 'records', requestDiscovery: discovery},
+    });
+    const fingerprint = contextMaintenanceProgressFingerprint(base, []);
+    const rotated = maintenanceState({
+      ...base,
+      lastProgressAt: T1,
+      lastWakeAt: T1,
+      lastTaskByProject: {threadnote: 'tn_a:0'},
+      cases: [{...item, lastChecked: T1, attemptCount: 2, nextAttemptAt: T1, events: [{at: T1, reason: 'x'}]}],
+      checkpoints: {'tn_a:0': {...checkpoint, checkedAt: T1, retryAt: T1}},
+      workSchedule: {
+        nextPhase: 'topic',
+        lastSemanticProject: 'threadnote',
+        lastRequestedRoot: '/requested',
+        requestDiscovery: {...discovery, scanned: 3, lastFile: 'request-3.json'},
+      },
+    });
+    expect(contextMaintenanceProgressFingerprint(rotated, [])).toBe(fingerprint);
+    for (const progressed of [
+      {...base, cases: [item, maintenanceCase('review', {disposition: 'needs-decision'}, 'candidate')]},
+      {...base, cases: [{...item, disposition: 'resolved' as const}]},
+      {...base, cases: [{...item, reason: 'citation-changed'}]},
+      {...base, cases: [{...item, evidenceRevision: 'evidence-2'}]},
+      {...base, receipts: [{...receipt, state: 'undone' as const}]},
+      {...base, workSchedule: {nextPhase: 'records' as const, requestDiscovery: {...discovery, namesHash: 'other'}}},
+      {...base, semanticProgress: {threadnote: {...progress, comparison: {...progress.comparison, pairCursor: 2}}}},
+      {...base, checkpoints: {'tn_a:0': {...checkpoint, revision: 'r2'}}},
+      {...base, checkpoints: {'tn_a:0': {...checkpoint, memoryHash: 'h2'}}},
+    ])
+      expect(contextMaintenanceProgressFingerprint(progressed, [])).not.toBe(fingerprint);
+  });
+
+  it('counts each newly attempted evidence-request URI as progress and a repeated deferral as quiet', () => {
+    const now = Date.parse(T0);
+    const uris = ['a', 'b', 'c', 'd', 'e', 'f'];
+    const deferred = (until: string, ...keys: string[]) =>
+      EffectRecord.fromEntries(EffectArray.map(keys, uri => [uri, until] as const));
+    // Each tick of the requested phase selects four eligible URIs from the cursor, then clears or defers each one.
+    const ticks = [
+      {uris},
+      {uris, cursor: 'd', deferredUntil: deferred(T1, 'a', 'b', 'c', 'd')},
+      {uris, cursor: 'f', deferredUntil: deferred(T1, 'a', 'b', 'c', 'd', 'e', 'f')},
+      {
+        uris,
+        cursor: 'd',
+        deferredUntil: {...deferred(T1, 'e', 'f'), ...deferred(at(now + 600_000), 'a', 'b', 'c', 'd')},
+      },
+      {uris: uris.slice(1), cursor: 'f', deferredUntil: deferred(at(now - 1), 'b', 'c', 'd', 'e', 'f')},
+    ];
+    let state = maintenanceState();
+    const recorded = EffectArray.map(ticks, request => {
+      state = {
+        ...state,
+        workerQuiet: nextContextMaintenanceWorkerQuiet(
+          state,
+          [{project: 'threadnote', cwd: '/repo', ...request}],
+          '',
+          now,
+        ),
+      };
+      return [state.workerQuiet?.streak, state.workerQuiet?.requestRetryAt];
+    });
+    expect(recorded).toEqual([
+      [0, undefined],
+      [0, T1],
+      [0, T1],
+      [1, T1],
+      [0, undefined],
+    ]);
+  });
+
+  effectIt.effect('records only a successful worker tick and never fails the worker on unreadable input', () =>
+    Effect.gen(function* () {
+      const config = yield* fixture();
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      yield* setContextMaintenancePaused(config, false);
+      const streak = readRawState(config).pipe(Effect.map(state => state.workerQuiet?.streak));
+      yield* recordContextMaintenanceWorkerTick(config, undefined);
+      yield* recordContextMaintenanceWorkerTick(config, 0);
+      expect(yield* streak).toBe(1);
+      yield* recordContextMaintenanceWorkerTick(config, 1);
+      expect(yield* streak).toBe(1);
+      const generation = resourceAccountMutationGenerationPath(path, config.agentContextHome, config.account);
+      yield* fs.makeDirectory(path.dirname(generation), {recursive: true});
+      yield* fs.writeFileString(generation, 'malformed');
+      yield* recordContextMaintenanceWorkerTick(config, undefined);
+      expect(yield* streak).toBe(1);
+      yield* fs.writeFileString(generation, 'v1:00000000-0000-4000-8000-000000000001');
+      yield* recordContextMaintenanceWorkerTick(config, undefined);
+      expect(yield* streak).toBe(0);
+    }).pipe(provideTestLayer(Layer.mergeAll(BunServices.layer, TestSystemInfoLayer))),
+  );
+
+  effectIt.effect('holds owner-bound wakes for the backoff while CLI wakes, mutations and resume do not wait', () =>
+    Effect.gen(function* () {
+      const config = yield* fixture();
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      yield* setContextMaintenancePaused(config, false);
+      let calls = 0;
+      const command = CommandExecutor.of({
+        execute: unavailableCommand,
+        executeStreaming: unavailableCommand,
+        spawnDetached: () =>
+          Effect.sync(() => {
+            calls++;
+            return true;
+          }),
+      });
+      const owned = wakeContextMaintenance(config, {bindToParent: true}).pipe(
+        Effect.provideService(CommandExecutor, command),
+      );
+      const cli = wakeContextMaintenance(config).pipe(Effect.provideService(CommandExecutor, command));
+      const recordQuiet = (streak: number, generation = '') =>
+        readRawState(config).pipe(
+          Effect.flatMap(state => writeState(config, {...state, workerQuiet: quiet(streak, generation)})),
+        );
+      expect(yield* owned).toBe(true);
+      yield* recordQuiet(2);
+      yield* TestClock.adjust('119 seconds');
+      expect(yield* owned).toBe(false);
+      yield* TestClock.adjust('1 second');
+      expect(yield* owned).toBe(true);
+      yield* TestClock.adjust('30 seconds');
+      expect(yield* cli).toBe(true);
+      yield* TestClock.adjust('30 seconds');
+      expect(yield* owned).toBe(false);
+      const generation = resourceAccountMutationGenerationPath(path, config.agentContextHome, config.account);
+      yield* fs.makeDirectory(path.dirname(generation), {recursive: true});
+      yield* fs.writeFileString(generation, 'v1:00000000-0000-4000-8000-000000000001');
+      expect(yield* owned).toBe(true);
+      yield* recordQuiet(6, 'v1:00000000-0000-4000-8000-000000000001');
+      yield* TestClock.adjust('30 seconds');
+      expect(yield* owned).toBe(false);
+      yield* setContextMaintenancePaused(config, false);
+      expect((yield* readRawState(config)).workerQuiet).toBeUndefined();
+      expect(yield* owned).toBe(true);
+      yield* writeState(config, {...(yield* readRawState(config)), lastWakeAt: 'unreadable', workerQuiet: quiet(10)});
+      expect(yield* owned).toBe(true);
+      expect(calls).toBe(6);
+    }).pipe(provideTestLayer(Layer.mergeAll(BunServices.layer, TestSystemInfoLayer))),
+  );
+
+  effectIt.effect('leaves the worker streak unchanged after a foreground maintenance run', () =>
+    Effect.gen(function* () {
+      const config = yield* fixture();
+      yield* (yield* FileSystem.FileSystem).writeFileString(config.manifestPath, 'version: 1\nprojects: []\n');
+      yield* setContextMaintenancePaused(config, false);
+      yield* writeState(config, {...(yield* readRawState(config)), workerQuiet: quiet(3)});
+      yield* runContextMaintenance(config, {cwd: config.agentContextHome});
+      expect((yield* readRawState(config)).workerQuiet).toEqual(quiet(3));
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
 });

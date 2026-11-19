@@ -203,6 +203,12 @@ async function contextMaintenanceWorkerProgram(args: readonly string[]) {
         cause => cause,
       );
       yield* command;
+      const backoff = yield* fromPromiseInterruptibleAwaiting(
+        () => import('./memory/context/maintenance_backoff.js'),
+        cause => cause,
+      );
+      // The maintain command reports a failed run only through the process exit code.
+      yield* backoff.recordContextMaintenanceWorkerTick(config, process.exitCode);
     });
     const status = yield* runContextMaintenanceWorker(config.agentContextHome, owner, work);
     if (status === 'deadline') process.exitCode = 1;

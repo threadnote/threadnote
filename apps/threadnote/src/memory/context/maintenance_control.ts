@@ -2,6 +2,7 @@ import {Effect, FileSystem, Path, Schema} from 'effect';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {ManagerLiveChangeHints} from '../../manager/live_sources.js';
+import {clearContextMaintenanceWorkerQuiet} from './maintenance_backoff.js';
 import {ContextMaintenanceBusy, MaintenancePauseFenceBusy} from './maintenance_contracts.js';
 import {ContextMaintenanceError, readRawState, readState, readJson, atomicJson} from './maintenance.js';
 import {publicStatus} from './maintenance_projection.js';
@@ -78,6 +79,7 @@ export const setContextMaintenanceControl = Effect.fn('contextMaintenance.setCon
     ContextMaintenanceBusy.make({}),
     2_000,
   );
+  if (!paused) yield* clearContextMaintenanceWorkerQuiet(config);
   yield* (yield* ManagerLiveChangeHints).maintenance.pipe(Effect.ignoreCause);
   return {paused};
 });

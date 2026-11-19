@@ -518,7 +518,17 @@ export function isMaintenanceState(value: unknown): value is MaintenanceState {
     !optional(value, 'lastWakeAt', isString) ||
     !optional(value, 'lastTaskByProject', isStringRecord) ||
     !optional(value, 'policyOverrides', isStringRecord) ||
-    !optional(value, 'decisionCheckpoints', isStringRecord)
+    !optional(value, 'decisionCheckpoints', isStringRecord) ||
+    !optional(
+      value,
+      'workerQuiet',
+      quiet =>
+        isRecord(quiet) &&
+        isString(quiet.fingerprint) &&
+        isString(quiet.canonicalGeneration) &&
+        isNonNegativeInteger(quiet.streak) &&
+        optional(quiet, 'requestRetryAt', isString),
+    )
   )
     return false;
   if (

@@ -47,6 +47,16 @@ export interface MaintenanceState extends ContextMaintenanceStatusV2 {
   readonly semanticProgress?: Readonly<Record<string, MaintenanceSemanticProgress | LegacyMaintenanceSemanticProgress>>;
   readonly workSchedule?: MaintenanceWorkSchedule;
   readonly topicCheckpoints?: Readonly<Record<string, TopicMaintenanceCheckpoint>>;
+  readonly workerQuiet?: ContextMaintenanceWorkerQuiet;
+}
+
+/** Progress observed after the last worker tick; owner-bound wakes back off while it repeats. */
+export interface ContextMaintenanceWorkerQuiet {
+  readonly fingerprint: string;
+  readonly canonicalGeneration: string;
+  readonly streak: number;
+  /** Earliest future deferral of a pending evidence request; request files are not read at wake time. */
+  readonly requestRetryAt?: string;
 }
 
 export interface ContextMaintenanceReceiptV2 {

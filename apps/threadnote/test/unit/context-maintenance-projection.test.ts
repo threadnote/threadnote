@@ -13,6 +13,7 @@ import {LocalModelStore} from '@threadnote/inference/models/store';
 import {StandaloneBrokerLayer} from '../../src/effect/runtime-bootstrap.js';
 import {handleManagerAttentionAction} from '../../src/manager/attention_actions.js';
 import type {MaintenanceState} from '../../src/memory/context/maintenance.js';
+import {isMaintenanceState} from '../../src/memory/context/maintenance_json.js';
 import {publicStatus, renderContextMaintenanceStatus} from '../../src/memory/context/maintenance_projection.js';
 import {maintenanceSnapshotFailure} from '../../src/memory/context/maintenance_snapshot.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -148,6 +149,21 @@ describe('maintenance status semantic checkpoint compatibility', () => {
       ),
       {numRuns: 100},
     );
+  });
+
+  it('accepts only a well-formed private worker streak and keeps it out of public status', () => {
+    const workerQuiet = {fingerprint: 'fingerprint', canonicalGeneration: '', streak: 3};
+    expect(isMaintenanceState({...state(), workerQuiet})).toBe(true);
+    expect(publicStatus({...state(), workerQuiet})).not.toHaveProperty('workerQuiet');
+    for (const malformed of [
+      {...workerQuiet, streak: -1},
+      {...workerQuiet, streak: 1.5},
+      {...workerQuiet, fingerprint: 1},
+      {...workerQuiet, requestRetryAt: 1},
+      {fingerprint: 'fingerprint', streak: 0},
+      'quiet',
+    ])
+      expect(isMaintenanceState({...state(), workerQuiet: malformed})).toBe(false);
   });
 
   it('retains detailed current checkpoint coverage', () => {
