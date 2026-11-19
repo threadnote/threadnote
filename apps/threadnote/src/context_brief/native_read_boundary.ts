@@ -20,6 +20,8 @@ import {CONTEXT_BRIEF_NATIVE_READ_WORKER_ARGUMENT} from '../worker_protocol.js';
 export const CONTEXT_BRIEF_NATIVE_READ_INPUT_BYTES = 2 * 1024 * 1024;
 export const CONTEXT_BRIEF_NATIVE_READ_OUTPUT_BYTES = 2 * 1024 * 1024;
 const CLEANUP_AND_DECODE_RESERVE_MILLISECONDS = 1_100;
+/** The only line a worker may print before its response: its graph status and attach reads completed. */
+export const CONTEXT_BRIEF_NATIVE_READ_STATUS_PROGRESS = JSON.stringify({protocol: 1, progress: 'status-observed'});
 const text = Schema.String.check(Schema.isMaxLength(64 * 1024));
 const shortText = Schema.String.check(Schema.isMaxLength(4096));
 const count = Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 1_000_000}));
@@ -440,7 +442,7 @@ const makeNativeReadExecutor = Effect.fn('contextBrief.makeNativeReadExecutor')(
     ...(name === 'bun' || name === 'bun.exe' ? [system.developmentEntrypoint] : []),
     CONTEXT_BRIEF_NATIVE_READ_WORKER_ARGUMENT,
   ];
-  return (request: ContextBriefNativeReadRequest, deadline: ReadDeadline) =>
+  return (request: ContextBriefNativeReadRequest, deadline: ReadDeadline, onStdoutLine?: (line: string) => void) =>
     Effect.gen(function* () {
       const input = yield* Effect.try({
         try: () => new TextEncoder().encode(JSON.stringify(request)),
@@ -459,6 +461,7 @@ const makeNativeReadExecutor = Effect.fn('contextBrief.makeNativeReadExecutor')(
           forceKillAfterMilliseconds: 0,
           sensitiveOutput: true,
           verifyOwnedProcessExit: system.platform === 'win32' ? 'leader' : 'group',
+          ...(onStdoutLine === undefined ? {} : {onStdoutLine}),
         })
         .pipe(
           Effect.mapError(error =>
@@ -471,9 +474,11 @@ const makeNativeReadExecutor = Effect.fn('contextBrief.makeNativeReadExecutor')(
                   }),
           ),
         );
+      // A graph worker prints its progress line first; the response is always the last line.
+      const final = EffectString.split('\n')(EffectString.trimEnd(result.stdout)).at(-1) ?? '';
       const response = yield* Schema.decodeEffect(Schema.fromJsonString(contextBriefNativeReadResponseSchema), {
         onExcessProperty: 'error',
-      })(result.stdout).pipe(
+      })(final).pipe(
         Effect.mapError(() =>
           ContextBriefNativeReadFailed.make({
             reason: system.platform === 'win32' ? 'cleanup-unconfirmed' : 'invalid-protocol',
@@ -534,7 +539,9 @@ export const withNativeContextBriefReadSources = Effect.fn('contextBrief.withNat
           budget.remaining = 0;
           budget.primaryRemaining = 0;
         }
-        const response = yield* execute(request, remaining.deadline);
+        const response = yield* execute(request, remaining.deadline, line => {
+          if (budget && line === CONTEXT_BRIEF_NATIVE_READ_STATUS_PROGRESS) budget.statusObserved = true;
+        });
         if (response.operation !== 'graph')
           return yield* ContextBriefNativeReadFailed.make({reason: 'invalid-protocol'});
         if (budget) {

@@ -3,7 +3,8 @@ import {TestError} from '@threadnote/testing/test-error';
 import {mkdtemp, readFile, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
-import {Clock, Effect, Fiber, FileSystem, Path, Result, Schema} from 'effect';
+import {Array as EffectArray, Clock, Effect, Fiber, FileSystem, Path, Result, Schema} from 'effect';
+import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
 import {
   runBinaryCommandEffect,
@@ -87,6 +88,30 @@ describe('Effect CommandExecutor', () => {
       expect(result.failure.timeoutMs).toBe(25);
     }
   });
+
+  effectIt.effect('observes complete stdout lines before a timeout and keeps no stdout on the error', () =>
+    Effect.gen(function* () {
+      const script = EffectArray.join(
+        [
+          'const p = "pri" + "vate-"; process.stdout.write(p + "alpha\\n" + p + "be");',
+          'setTimeout(() => process.stdout.write("ta\\n" + "x".repeat(6000) + "\\n" + p + "omega\\nunfinished"), 100);',
+          'setTimeout(() => undefined, 5000);',
+        ],
+        ' ',
+      );
+      const lines: string[] = [];
+      const error = yield* runCommandEffect(process.execPath, ['-e', script], {
+        onStdoutLine: line => lines.push(line),
+        sensitiveOutput: true,
+        timeoutMs: 1000,
+      }).pipe(Effect.flip);
+      expect(error._tag).toBe('CommandTimedOut');
+      // Lines arrive whole across chunks; an over-long line and the unfinished tail are never delivered.
+      expect(lines).toEqual(['private-alpha', 'private-beta', 'private-omega']);
+      // The arguments build the text at runtime, so only captured stdout could contain it.
+      expect(JSON.stringify(error)).not.toContain('private');
+    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
 
   effectIt.effect('explicit zero selects caller-owned command execution while still returning captured data', () =>
     runCommandEffect(process.execPath, ['-e', 'process.stdout.write("caller-owned")'], {timeoutMs: 0}).pipe(

@@ -51,6 +51,10 @@ export interface ContextBriefGraphReadBudget {
   remaining: number;
   primaryRemaining: number;
   readonly deadline?: ReadDeadline;
+  /** Sticky: a repository read finished its status and attach phase before any deadline expiry. */
+  statusObserved?: boolean;
+  /** Native worker only: report the completed status phase to the parent before inspection starts. */
+  readonly onStatusObserved?: () => Effect.Effect<void>;
 }
 
 /** Read only ready graph state. This boundary may borrow compatible shared evidence, but never builds or requests maintenance. */
@@ -107,6 +111,10 @@ const retrieveRepositoryGraphEvidence = Effect.fn('contextBrief.retrieveReposito
       allowBorrowedStale: true,
       requestMaintenance: false,
     });
+  }
+  if (readBudget !== undefined) {
+    readBudget.statusObserved = true;
+    if (readBudget.onStatusObserved !== undefined) yield* readBudget.onStatusObserved();
   }
   const readySnapshot = status.readySnapshot;
   if (readySnapshot === undefined) {

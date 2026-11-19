@@ -27,6 +27,11 @@ export interface CommandOptions {
   readonly sensitiveOutput?: boolean;
   /** @internal Refuse native-read results until scoped cleanup has observed actual owned exit. */
   readonly verifyOwnedProcessExit?: 'leader' | 'group';
+  /**
+   * @internal `execute` only: observe each complete stdout line as it arrives, before any timeout.
+   * Lines longer than `COMMAND_STDOUT_LINE_OBSERVER_CHARACTERS` are skipped. No line is kept on any error.
+   */
+  readonly onStdoutLine?: (line: string) => void;
 }
 
 export interface BinaryCommandResult {
@@ -94,6 +99,8 @@ export class CommandTimedOut extends Schema.TaggedError<CommandTimedOut, {readon
     timeoutMs: Schema.Finite,
   },
 ) {}
+
+const COMMAND_STDOUT_LINE_OBSERVER_CHARACTERS = 4096;
 
 export class CommandOutputLimitExceeded extends Schema.TaggedError<
   CommandOutputLimitExceeded,
@@ -269,9 +276,12 @@ const executeCommand = Effect.fn('CommandExecutor.execute')(function* (
       ownedProcessId = Number(handle.pid);
       const [stdout, stderr, exitCode] = yield* Effect.all(
         [
-          collectCommandOutput(handle.stdout, maxOutputBytes, outputExceeded).pipe(
-            Effect.mapError(cause => (Schema.is(CommandOutputLimitExceeded)(cause) ? cause : spawnFailed(cause))),
-          ),
+          collectCommandOutput(
+            handle.stdout,
+            maxOutputBytes,
+            outputExceeded,
+            options.onStdoutLine === undefined ? undefined : stdoutLineObserver(options.onStdoutLine),
+          ).pipe(Effect.mapError(cause => (Schema.is(CommandOutputLimitExceeded)(cause) ? cause : spawnFailed(cause)))),
           collectCommandOutput(handle.stderr, maxOutputBytes, outputExceeded).pipe(
             Effect.mapError(cause => (Schema.is(CommandOutputLimitExceeded)(cause) ? cause : spawnFailed(cause))),
           ),
@@ -543,6 +553,7 @@ function collectCommandOutput(
   stream: Stream.Stream<Uint8Array, unknown>,
   maxOutputBytes: number,
   outputExceeded: CommandOutputLimitExceeded,
+  observeChunk?: (chunk: string) => void,
 ) {
   const encoder = new TextEncoder();
   return stream.pipe(
@@ -550,6 +561,7 @@ function collectCommandOutput(
     Stream.runFoldEffect(
       () => ({chunks: [] as string[], size: 0}),
       (current, chunk) => {
+        observeChunk?.(chunk);
         const size = current.size + encoder.encode(chunk).byteLength;
         if (maxOutputBytes > 0 && size > maxOutputBytes) return Effect.fail(outputExceeded);
         current.chunks.push(chunk);
@@ -558,6 +570,28 @@ function collectCommandOutput(
     ),
     Effect.map(output => EffectArray.join(output.chunks, '')),
   );
+}
+
+/** Splits decoded chunks into complete lines and holds at most one bounded partial line. */
+function stdoutLineObserver(onLine: (line: string) => void): (chunk: string) => void {
+  let pending = '';
+  let overflow = false;
+  return chunk => {
+    const parts = EffectString.split('\n')(chunk);
+    const last = parts.pop() ?? '';
+    for (const part of parts) {
+      const line = `${pending}${part}`;
+      if (!overflow && line.length <= COMMAND_STDOUT_LINE_OBSERVER_CHARACTERS) onLine(line);
+      pending = '';
+      overflow = false;
+    }
+    if (overflow) return;
+    pending = `${pending}${last}`;
+    if (pending.length > COMMAND_STDOUT_LINE_OBSERVER_CHARACTERS) {
+      pending = '';
+      overflow = true;
+    }
+  };
 }
 
 function collectCommandBytes(
