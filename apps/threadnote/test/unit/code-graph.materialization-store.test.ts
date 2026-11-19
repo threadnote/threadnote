@@ -5596,18 +5596,18 @@ describe('code graph full-build materialization store', () => {
       expect(result.pause).toHaveLength(1);
       expect(result.pause[0]).toMatchObject({
         operation: 'promote ready code graph snapshot',
-        rowCount: 6,
+        rowCount: 7,
       });
       expect(result.pause[0].finalFactBytes).toBeLessThan(leaseCount * snapshot.id.length);
       expect(result.afterPause).toEqual({active: 0, flags: 0, state: 'ready'});
       expect(result.resumed).toHaveLength(2);
       expect(result.resumed[0]).toMatchObject({
         operation: 'promote ready code graph snapshot',
-        rowCount: 6,
+        rowCount: 7,
       });
       expect(result.resumed[1]).toMatchObject({
         operation: 'promote ready code graph snapshot',
-        rowCount: 6,
+        rowCount: 7,
       });
       expect(result.resumed[1].finalFactBytes).toBeGreaterThan(result.resumed[0].finalFactBytes);
       expect(result.afterResume).toEqual({

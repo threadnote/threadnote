@@ -688,10 +688,7 @@ export function makeCodeGraphStoreLifecycleMethods(runtime: CodeGraphStoreRuntim
           }),
         );
         for (;;) {
-          const plan = yield* useDatabase(
-            databasePath,
-            prepareSnapshotPromotionCapacity(identity, snapshotId, options?.backgroundEmbeddingDemand === true),
-          );
+          const plan = yield* useDatabase(databasePath, prepareSnapshotPromotionCapacity(identity, snapshotId));
           const transaction = withWriterGate(
             databasePath,
             useDatabase(
