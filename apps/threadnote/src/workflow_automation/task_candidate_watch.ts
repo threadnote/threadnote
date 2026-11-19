@@ -11,6 +11,7 @@ import {stableJson} from '../workflow_memory/protocol.js';
 import {fail, type NativeTaskStoredState, type NativeTaskCycleRuntime} from './task_action_helpers.js';
 import {runNativeWatch, invalidateNativeCandidateWatch} from './watch.js';
 import {nativeWorkflowError} from './memory.js';
+import {stopSupersededStandalonePrWatch} from './standalone_pr_watch.js';
 import {
   readNativeWatch,
   verifyNativeCandidateWatchOwner,
@@ -52,6 +53,7 @@ export interface OwnedNativeTaskWatchRequest {
   readonly sourceDigest?: string;
 }
 export interface OwnedNativeTaskWatchBinding {
+  readonly checkout: string;
   readonly owner: NativeWatchOwner;
   readonly watchId: string;
   readonly consumerId: string;
@@ -69,7 +71,7 @@ export const runOwnedNativeTaskWatch = (
   binding: OwnedNativeTaskWatchBinding,
 ) =>
   Effect.gen(function* () {
-    const {owner, watchId, consumerId, wakeupId, refBase} = binding;
+    const {checkout, owner, watchId, consumerId, wakeupId, refBase} = binding;
     const candidate = owner.kind === 'candidate-pr';
     const kinds = candidate
       ? ({
@@ -99,6 +101,22 @@ export const runOwnedNativeTaskWatch = (
       return yield* fail('watch-owner-conflict', 'This watch belongs to another immutable owner.');
     if (request.operation !== 'start' && request.wakeup?.host === 'codex' && !request.wakeup.executable)
       return yield* fail('invalid-request', 'Only a new watch start can discover a Codex executable.');
+    // A started owned watch is authoritative; a failed handover must not report it as unstarted.
+    const started = (result: unknown, monitoring: boolean) =>
+      Effect.gen(function* () {
+        const supersededStandaloneWatchId = monitoring
+          ? yield* stopSupersededStandalonePrWatch(config, checkout, owner.prUrl, watchId).pipe(
+              Effect.orElseSucceed(() => undefined),
+            )
+          : undefined;
+        return {
+          status: 'watch-updated' as const,
+          operation: request.operation,
+          watchId,
+          result,
+          ...(supersededStandaloneWatchId ? {supersededStandaloneWatchId} : {}),
+        };
+      });
     if (request.operation === 'start') {
       const inputWakeup = request.wakeup;
       if (!inputWakeup) return yield* fail('host-registration-required', 'Start needs actual host registration.');
@@ -155,7 +173,8 @@ export const runOwnedNativeTaskWatch = (
           },
           owner,
         );
-        return {status: 'watch-updated' as const, operation: request.operation, watchId, result};
+        // A replay repairs a duplicate standalone watch, but a stopped owned watch never displaces it.
+        return yield* started(result, !watch.envelope.stopRequested);
       }
       const result = yield* runNativeWatch(
         config,
@@ -172,7 +191,7 @@ export const runOwnedNativeTaskWatch = (
         },
         owner,
       );
-      return {status: 'watch-updated' as const, operation: request.operation, watchId, result};
+      return yield* started(result, true);
     }
     if (!watch) return yield* fail('watch-not-found', 'Start this owned watch explicitly.');
     const consumer = watch.envelope.state.consumer;
@@ -515,6 +534,7 @@ export const runNativeTaskCandidateWatch = (
         );
     }
     const result = yield* runOwnedNativeTaskWatch(config, request, {
+      checkout,
       owner,
       watchId,
       consumerId: refBase.consumerId!,

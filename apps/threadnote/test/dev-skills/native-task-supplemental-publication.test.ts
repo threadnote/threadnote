@@ -1,9 +1,15 @@
-import {Effect, Array as EffectArray, String as EffectString} from 'effect';
+import {Effect, Array as EffectArray, FileSystem, Path, String as EffectString} from 'effect';
 import * as Clock from 'effect/Clock';
+import {SecureRandom} from 'effect/crypto';
 import {initializeNativeWatch, attachNativeWatchConsumer} from '@threadnote/workflow-automations/watch';
 import {decodeNativeTaskActionRef} from '@threadnote/workflow-automations/task';
 import {sha256HexSync} from '../../src/workflow_memory/native_digest.js';
-import {writeNativeWatch, withNativeWatchControlLock} from '../../src/workflow_automation/watch_store.js';
+import {
+  readNativeWatch,
+  writeNativeWatch,
+  withNativeWatchControlLock,
+} from '../../src/workflow_automation/watch_store.js';
+import {SystemInfo} from '@threadnote/platform/system';
 import {it as effectIt} from '@effect/vitest';
 import {describe, expect} from 'vitest';
 import {CommandExecutor} from '@threadnote/platform/command';
@@ -433,6 +439,87 @@ describe('completed-local supplemental publication', () => {
         );
         expect(inspected).toMatchObject({watchId, noticeRef: expect.any(String)});
         expect(yield* f.fs.readFileString(f.statePath())).toBe(nativeBytes);
+      }).pipe(run),
+    windowsCycleFixtureTimeout ?? {timeout: 60000},
+  );
+
+  effectIt.effect(
+    'a supplemental watch start stops the standalone watch for the same checkout and PR',
+    () =>
+      Effect.gen(function* () {
+        const {f, view, pr} = yield* completed;
+        const commands = yield* CommandExecutor;
+        const context = yield* Effect.context<FileSystem.FileSystem | Path.Path | SecureRandom.SecureRandom>();
+        const codex = '/usr/bin/codex';
+        // Only GitHub, the host probe and the collector spawn are simulated; both watches start for real.
+        const provider = CommandExecutor.of({
+          ...commands,
+          execute: (executable, args, options) =>
+            executable === codex
+              ? Effect.succeed({exitCode: 0, stderr: '', stdout: 'Usage: codex queue\n --thread <T>\n --message <M>\n'})
+              : executable === 'gh'
+                ? Effect.succeed({
+                    exitCode: 0,
+                    stderr: '',
+                    stdout: JSON.stringify({
+                      number: 1,
+                      url: pr.url,
+                      baseRepository: 'example/repo',
+                      baseBranch: pr.baseBranch,
+                      headBranch: pr.branch,
+                      headSha: pr.headSha,
+                      state: 'open',
+                      merged: false,
+                    }),
+                  })
+                : commands.execute(executable, args, options),
+          spawnDetached: (_executable, args) =>
+            Effect.gen(function* () {
+              const starting = yield* readNativeWatch(f.config, args[args.indexOf('--watch-id') + 1]);
+              if (!starting?.envelope.collector) return false;
+              yield* writeNativeWatch(
+                f.config,
+                {...starting.envelope, collector: {...starting.envelope.collector, pid: 77777, status: 'running'}},
+                starting.revision,
+              );
+              return true;
+            }).pipe(Effect.provide(context), Effect.orDie),
+        });
+        const system = yield* SystemInfo;
+        const act = (request: object) =>
+          runNativeTaskAction(f.config, {callerCwd: f.repo, ...request}).pipe(
+            Effect.provideService(CommandExecutor, provider),
+            Effect.provideService(SystemInfo, SystemInfo.of({...system, isProcessRunning: pid => pid === 77777})),
+          );
+        const wakeup = {host: 'codex', executable: codex, threadId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'};
+        const standalone = object(yield* act({command: 'watch-pr', operation: 'start', prUrl: pr.url, wakeup}));
+        expect(standalone).toMatchObject({status: 'watching', authority: 'monitor-only'});
+        const attached = object(
+          yield* act({
+            command: 'supplemental-publication',
+            operation: 'attach',
+            runId: 'native-run',
+            taskRef: view.taskRef,
+            phaseId: 'one',
+            pr,
+            userAuthority: 'Attach this authorized existing PR.',
+          }),
+        );
+        const started = object(
+          yield* act({
+            command: 'watch-pr',
+            operation: 'start',
+            runId: 'native-run',
+            supplementalRef: attached.supplementalRef,
+            wakeup,
+          }),
+        );
+        expect(started).toMatchObject({status: 'watch-updated', supersededStandaloneWatchId: standalone.watchId});
+        expect((yield* readNativeWatch(f.config, String(standalone.watchId)))?.envelope).toMatchObject({
+          stopRequested: true,
+          stopReason: 'superseded',
+          supersededBy: started.watchId,
+        });
       }).pipe(run),
     windowsCycleFixtureTimeout ?? {timeout: 60000},
   );
