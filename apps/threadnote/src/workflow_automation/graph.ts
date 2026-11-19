@@ -108,10 +108,11 @@ const warmWorkflowGraph = Effect.fn('workflowAutomation.warmGraph')(
       cwd: checkout,
       env: {...system.environment(), THREADNOTE_HOME: config.agentContextHome},
     });
-    if (started) {
-      yield* fs.makeDirectory(path.dirname(marker), {recursive: true});
-      yield* fs.writeFileString(marker, String(now));
-    }
+    // The marker only spaces out warm-ups; a failed write must not report a started index as not started.
+    if (started)
+      yield* fs
+        .makeDirectory(path.dirname(marker), {recursive: true})
+        .pipe(Effect.andThen(fs.writeFileString(marker, String(now))), Effect.ignoreCause);
     return started;
   },
   Effect.catchCause(() => Effect.succeed(false)),
@@ -168,7 +169,7 @@ export const requireWorkflowGraphScope = Effect.fn('workflowAutomation.requireGr
   if (input.policy === 'strict')
     return yield* WorkflowAutomationError.make({
       code: 'evidence-unavailable',
-      message: `A strict run requires an already-published ready graph; ${warming ? 'a background index started, so retry once it finishes' : `run \`threadnote ${EffectArray.join(EffectArray.map(indexArgs, shellQuote), ' ')}\` from callerCwd, then retry`}. No run was created.`,
+      message: `A strict run requires an already-published ready graph; ${warming ? 'a background index started; run `threadnote graph status` from callerCwd to see when it is done, then retry' : `run \`threadnote ${EffectArray.join(EffectArray.map(indexArgs, shellQuote), ' ')}\` from callerCwd, then retry`}. No run was created.`,
       retryable: warming,
     });
 });

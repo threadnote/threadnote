@@ -224,7 +224,7 @@ describe('native workflow graph adapter', () => {
     'admits a standard run without a ready graph, warms it in the background and keeps strict exact',
     () =>
       Effect.gen(function* () {
-        const f = yield* nativeFixture();
+        const f = yield* nativeFixture().pipe(TestClock.withLive);
         const projectName = 'Alpha Beta;printf injected';
         yield* f.fs.writeFileString(
           f.config.manifestPath,
@@ -309,6 +309,10 @@ describe('native workflow graph adapter', () => {
           failure: {code: 'evidence-unavailable', retryable: true},
         });
         expect(spawned).toHaveLength(1);
+        // After 30 seconds a start warms the graph again.
+        yield* TestClock.adjust(30_001);
+        yield* released(start);
+        expect(spawned).toHaveLength(2);
         status = attachCodeGraphStatusObservation(graphStatus(f.repo), {
           identity: status.identity,
           projectScopeObserved: true,
@@ -317,7 +321,7 @@ describe('native workflow graph adapter', () => {
         spawn = () => Effect.die('a ready graph needs no warm-up');
         yield* released(start);
         yield* provide(scope('strict'));
-      }).pipe(run),
+      }).pipe(provideNative),
   );
 
   effectIt.effect('uses exact current ready source identity without indexing', () =>

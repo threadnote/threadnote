@@ -16,6 +16,7 @@ import {
 } from './cycle.js';
 import {
   NativeCycleSnapshotSchema,
+  nativeCycleSnapshotFileLimit,
   nativeCycleBlockingFinding,
   type NativeCycleReview,
   type NativeCycleSnapshot,
@@ -46,7 +47,7 @@ export const NativeCycleStoredSnapshotSchema = Schema.Struct({
       blob: gitObject,
       commit: gitObject,
     }),
-  ).check(Schema.isMaxLength(8192)),
+  ).check(Schema.isMaxLength(nativeCycleSnapshotFileLimit)),
 });
 export type NativeCycleStoredSnapshot = typeof NativeCycleStoredSnapshotSchema.Type;
 

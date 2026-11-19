@@ -59,10 +59,12 @@ export const stopSupersededStandalonePrWatch = (
     const watchId = standaloneWatchId(checkout, prUrl);
     const watch = yield* readNativeWatch(config, watchId);
     const consumer = watch?.envelope.state.consumer;
+    // A superseded watch records its latest replacement; any other stop stays as it is.
     if (
       !watch ||
       !consumer ||
-      watch.envelope.stopRequested ||
+      (watch.envelope.stopRequested &&
+        (watch.envelope.stopReason !== 'superseded' || watch.envelope.supersededBy === supersededBy)) ||
       watch.envelope.owner ||
       watch.envelope.state.pr !== prUrl
     )
@@ -224,7 +226,7 @@ export const runStandalonePrWatch = (
       stored.envelope.state.consumer?.id === consumerId &&
       stored.envelope.state.consumer.wakeupId === consumerId &&
       stableJson(stored.envelope.notification?.target) === stableJson(binding.wakeup);
-    // A superseded watch stays stopped while the workflow-bound watch that replaced it monitors the PR.
+    // A superseded watch stays stopped while the live workflow-bound watch that replaced it monitors the PR.
     const successorId = watch?.envelope.stopReason === 'superseded' ? watch.envelope.supersededBy : undefined;
     const successor = successorId
       ? yield* readNativeWatch(config, successorId).pipe(Effect.orElseSucceed(() => undefined))
@@ -235,7 +237,8 @@ export const runStandalonePrWatch = (
       !successor.envelope.stopRequested &&
       successor.envelope.state.consumer &&
       successor.envelope.state.prState === 'open' &&
-      successor.envelope.state.pr === binding.prUrl
+      successor.envelope.state.pr === binding.prUrl &&
+      (yield* nativeWatchCollectorAlive(successor.envelope.collector))
     )
       return yield* fail(
         'watch-superseded',

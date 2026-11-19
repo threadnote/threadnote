@@ -299,18 +299,27 @@ export function validateNativeCycleReview(
   input: unknown,
   previous?: {readonly snapshot: NativeCycleSnapshot; readonly review: NativeCycleReview},
 ) {
-  const result = validateNativeCycleReviewHistory(snapshot, input, previous);
+  const review = decodeNativeCycleReview(input);
+  // A missing required lane is reported before any source or history mismatch.
   if (
-    result.review.selected.includes(nativeCycleOrchestratorLane) ||
-    EffectArray.some(result.review.lanes, lane => lane.name === nativeCycleOrchestratorLane)
+    review.selected.includes(nativeCycleOrchestratorLane) ||
+    EffectArray.some(review.lanes, lane => lane.name === nativeCycleOrchestratorLane)
   )
     fail('The orchestrator must not review source. Use independent correctness and simplicity review lanes.');
-  if (!result.review.selected.includes(nativeCycleCorrectnessLane))
+  if (!review.selected.includes(nativeCycleCorrectnessLane))
     fail('Select the required correctness review lane and include its complete report.');
-  if (!result.review.selected.includes('simplicity'))
+  if (!review.selected.includes('simplicity'))
     fail('Select the required simplicity review lane and include its complete report.');
-  return result;
+  return validateNativeCycleReviewHistory(snapshot, review, previous);
 }
+
+const decodeNativeCycleReview = (input: unknown): NativeCycleReview => {
+  try {
+    return Schema.decodeUnknownSync(NativeCycleReviewSchema, {onExcessProperty: 'error'})(input);
+  } catch {
+    return fail('Every selected review lane and finding must have a complete valid report.');
+  }
+};
 
 /** Revalidate stored evidence without applying later submission requirements to its immutable history. */
 export function validateNativeCycleReviewHistory(
@@ -318,19 +327,20 @@ export function validateNativeCycleReviewHistory(
   input: unknown,
   previous?: {readonly snapshot: NativeCycleSnapshot; readonly review: NativeCycleReview},
 ) {
-  let review: NativeCycleReview;
-  try {
-    review = Schema.decodeUnknownSync(NativeCycleReviewSchema, {onExcessProperty: 'error'})(input);
-  } catch {
-    return fail('Every selected review lane and finding must have a complete valid report.');
-  }
+  const review = decodeNativeCycleReview(input);
   if (
     review.snapshotId !== snapshot.snapshotId ||
     review.phaseHash !== snapshot.phaseHash ||
-    review.snapshotTree !== snapshot.tree ||
-    review.mode !== nativeCycleReviewRecordingMode(snapshot)
+    review.snapshotTree !== snapshot.tree
   )
-    fail('Review source or mode does not match its immutable snapshot.');
+    fail('The review names another snapshot, tree or phase. Review the current immutable snapshot.');
+  const mode = nativeCycleReviewRecordingMode(snapshot);
+  if (review.mode !== mode)
+    fail(
+      mode === 'incremental'
+        ? 'This snapshot has a reviewed basis, so record mode incremental.'
+        : 'This snapshot needs a full review, so record mode full.',
+    );
   const selected = new Set(review.selected),
     lanes = new Set(EffectArray.map(review.lanes, lane => lane.name));
   if (!selected.has(nativeCycleOrchestratorLane) && !selected.has(nativeCycleCorrectnessLane))
@@ -441,9 +451,17 @@ export function validateNativeCycleReviewHistory(
     fail(
       `Findings ${EffectArray.join(reintroduced, ', ')} already exist in the predecessor review. Report them as carried, resolved or rejected instead of new.`,
     );
-  for (const finding of prior.values())
-    if (nativeCycleBlockingFinding(finding) && !seen.has(finding.id))
-      fail('A prior blocker disappeared without a disposition.');
+  const missing = EffectArray.filter(
+    [...prior.values()],
+    finding => nativeCycleBlockingFinding(finding) && !seen.has(finding.id),
+  );
+  if (missing.length > 0)
+    fail(
+      `Prior blocking findings ${EffectArray.join(
+        EffectArray.map(missing, finding => finding.id),
+        ', ',
+      )} have no disposition. Report each one as carried, resolved or rejected with a reason.`,
+    );
   const active = EffectArrayPipe(review.findings, __effectArrayValues =>
     EffectArray.filter(
       __effectArrayValues,

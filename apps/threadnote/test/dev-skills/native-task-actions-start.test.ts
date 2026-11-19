@@ -2394,6 +2394,36 @@ describe('native task actions', () => {
       });
       expect(yield* confirmStandard({})).toMatchObject({status: 'admitted'});
       expect((yield* readNativeWorkflowState(config, standardRunId))?.state.cycle?.state.plan.delivery).toBe('pr');
+      // Before admission, a replay that names another delivery needs the user's new response.
+      const reviewedStart = object(
+        yield* runNativeTaskStart(config, {
+          ...startInput,
+          featureName: 'Reviewed ' + intent.title,
+          workflowProfile: 'standard',
+          intent: {...intent, review: {required: true, reason: 'The fixture change needs one plan review.'}},
+        }).pipe(Effect.provideService(SystemInfo, testSystem)),
+      );
+      const confirmReviewed = (fields: object) =>
+        runNativeTaskAction(config, {
+          command: 'compact-confirm',
+          runId: String(reviewedStart.taskRef),
+          callerCwd: repo,
+          presentedIntentHash: String(reviewedStart.intentHash),
+          baseBranch: 'main',
+          ...fields,
+        }).pipe(Effect.provideService(SystemInfo, testSystem));
+      expect(
+        yield* confirmReviewed({
+          userDecision: 'approve',
+          userResponse: 'I approve this exact fixture change delivered as a PR.',
+          delivery: 'pr',
+        }),
+      ).toMatchObject({status: 'awaiting-review'});
+      expect(yield* confirmReviewed({delivery: 'local'}).pipe(Effect.result)).toMatchObject({
+        failure: {code: 'delivery-not-confirmed'},
+      });
+      expect(yield* confirmReviewed({delivery: 'pr'})).toMatchObject({status: 'awaiting-review'});
+      expect((yield* readNativeWorkflowState(config, String(reviewedStart.taskRef)))?.state.cycle).toBeUndefined();
       expect(
         (yield* (yield* CodeGraphIndexer).index({cwd: repo, threadnoteHome: home, ensureVectors: false})).snapshot
           .state,

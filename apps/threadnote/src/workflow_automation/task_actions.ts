@@ -998,7 +998,9 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
       // Implicit replay requires no new response and a stored approval for the exact current intent.
       const implicitReplay = request.userDecision === undefined && request.userResponse === undefined;
       // The approval covers the delivery mode, so a replay cannot change the mode the user approved.
-      const approvedMode = priorResponse === undefined ? undefined : existingConfirmation?.delivery;
+      // An older binary stored no delivery in the confirmation, so an admitted cycle supplies the approved mode.
+      const approvedMode =
+        priorResponse === undefined ? undefined : (existingConfirmation?.delivery ?? existingCycle?.plan.delivery);
       const approvedDelivery = approvedMode === 'commit' || approvedMode === 'pr' ? approvedMode : 'local';
       if (implicitReplay && priorResponse && request.delivery !== undefined && request.delivery !== approvedDelivery)
         return yield* fail(

@@ -10,7 +10,10 @@ import {
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {nativeWorkflowError} from './memory.js';
 import {nativeCycleHasControl} from '@threadnote/workflow-automations/cycle';
-import type {NativeCycleBaseRequalificationInput} from '@threadnote/workflow-automations/cycle-review';
+import {
+  nativeCycleSnapshotFileLimit,
+  type NativeCycleBaseRequalificationInput,
+} from '@threadnote/workflow-automations/cycle-review';
 import {
   readPathFileSystemAuthority,
   runtimePlatform,
@@ -24,7 +27,7 @@ import * as Effect2 from 'effect';
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
 const objectId = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 const outputLimit = 4 * 1_048_576;
-const snapshotPathLimit = 8192;
+const snapshotPathLimit = nativeCycleSnapshotFileLimit;
 const stagingTimeoutMs = 120_000;
 const recentIndexCtimeWindowSeconds = 2;
 const targetedRenormalizePathLimit = 512;
@@ -396,7 +399,8 @@ export const readNativeCycleTreeEntries = Effect.fn('workflowAutomation.cycle.re
   reference: string,
   files: readonly string[],
 ) {
-  if (files.length > 8192) return yield* fail('snapshot-capacity', 'Tree lookup exceeds the bounded file manifest.');
+  if (files.length > snapshotPathLimit)
+    return yield* fail('snapshot-capacity', 'Tree lookup exceeds the bounded file manifest.');
   for (const file of files)
     if (!nativeCycleRelativePath(file)) return yield* fail('invalid-scope', 'Source paths must be relative.');
   const entries: Record<string, {mode: string; blob: string}> = Object.create(null);

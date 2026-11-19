@@ -585,6 +585,9 @@ describe('recall runtime orchestration', () => {
       inference.rerank.mockReturnValue(Effect.never);
       const uri = 'threadnote://user/tester/memories/durable/window.md';
       const cache = createRecallRerankerCache();
+      // A score cached by an earlier pass for another candidate.
+      const cachedKey = 'threadnote://user/tester/memories/durable/cached.md\u0000cached anchor';
+      cache.scores.set(cachedKey, 0.75);
       const warm = yield* warmRecallRerankerWindow(
         {agentContextHome: '/unused'},
         'window anchor',
@@ -598,7 +601,7 @@ describe('recall runtime orchestration', () => {
       yield* TestClock.adjust(RECALL_RERANKER_WINDOW_WARM_MILLISECONDS);
       yield* Fiber.join(warm);
       expect(inference.rerank).toHaveBeenCalledTimes(1);
-      expect(cache).toEqual({scores: new Map(), unavailable: false});
+      expect(cache).toEqual({scores: new Map([[cachedKey, 0.75]]), unavailable: false});
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
   effectIt.effect('drops stale semantic scores when the ranked lexical snapshot has advanced', () =>
