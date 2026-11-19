@@ -16,6 +16,12 @@ import {
   type ContextBriefGraphEvidenceV1,
   type ContextBriefScopeV1,
 } from '../context_brief/index.js';
+import type {
+  ContextBriefCitationValidationFenceV2,
+  ContextBriefMemoryRetrievalV1,
+  ContextBriefPlanV1,
+  ContextBriefRequestV1,
+} from '@threadnote/context/types';
 import {getThreadnoteVersion} from '@threadnote/workspace/runtime-version';
 import {
   CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3,
@@ -464,57 +470,18 @@ const runObservation = Effect.fn('evaluation.contextBriefCitationScaleObservatio
   if (options.prepare) prepareContextBriefCitationScaleObservation(graph);
   const rssBefore = options.captureBoundaryRss ? system.memoryUsage().rss : 0;
   let boundaryPeakRss = rssBefore;
-  let memoryRetrievalMilliseconds = 0;
-  let validationMilliseconds = 0;
-  let selectedMemories = 0;
-  let validationReceipts = 0;
-  let exactValidationReceipts = 0;
-  let memoryRecallCompleted = false;
   const observeRss = () => {
     if (!options.captureBoundaryRss) return;
     boundaryPeakRss = Math.max(boundaryPeakRss, system.memoryUsage().rss);
   };
   const started = yield* Clock.currentTimeNanos;
-  const brief = yield* compileContextBriefWith(
+  const brief = yield* compileContextBriefCitationScaleBrief(
     {
       citationValidation: (scope, candidates, fence) =>
-        Effect.gen(function* () {
-          const phaseStarted = yield* Clock.currentTimeNanos;
-          const validations = yield* validateContextBriefMemoryCitations(fixture.config, scope, candidates, fence);
-          const phaseFinished = yield* Clock.currentTimeNanos;
-          validationMilliseconds = Number(phaseFinished - phaseStarted) / 1_000_000;
-          validationReceipts = EffectArray.reduce(
-            validations,
-            0,
-            (total, validation) => total + validation.receipts.length,
-          );
-          exactValidationReceipts = EffectArray.reduce(
-            validations,
-            0,
-            (total, validation) =>
-              total + EffectArray.filter(validation.receipts, receipt => receipt.status === 'exact').length,
-          );
-          observeRss();
-          return validations;
-        }),
-      graphEvidence: () => Effect.succeed(scaleGraphEvidence(prepared)),
-      memoryEvidence: plan =>
-        Effect.gen(function* () {
-          const phaseStarted = yield* Clock.currentTimeNanos;
-          const evidence = yield* retrieveContextBriefMemoryEvidence(fixture.config, plan);
-          memoryRecallCompleted = true;
-          const phaseFinished = yield* Clock.currentTimeNanos;
-          memoryRetrievalMilliseconds = Number(phaseFinished - phaseStarted) / 1_000_000;
-          selectedMemories = evidence.candidates.length;
-          observeRss();
-          return evidence;
-        }),
-      projection: (logical, maximumEstimatedTokens) =>
-        Effect.sync(() => {
-          const projected = projectContextBrief(logical, maximumEstimatedTokens);
-          observeRss();
-          return projected;
-        }),
+        validateContextBriefMemoryCitations(fixture.config, scope, candidates, fence),
+      graphEvidence: scaleGraphEvidence(prepared),
+      memoryEvidence: plan => retrieveContextBriefMemoryEvidence(fixture.config, plan),
+      observeRss,
     },
     {
       budgetTokens: fixtureBudgetTokens(prepared),
@@ -529,15 +496,96 @@ const runObservation = Effect.fn('evaluation.contextBriefCitationScaleObservatio
     boundaryAddedRssBytes: Math.max(0, boundaryPeakRss - rssBefore),
     contextBriefMilliseconds: Number(finished - started) / 1_000_000,
     counters: graph.snapshot(),
+    estimatedTokens: brief.estimatedTokens,
+    exactValidationReceipts: brief.exactValidationReceipts,
+    memoryRetrievalMilliseconds: brief.memoryRetrievalMilliseconds,
+    profile: profileId,
+    recallBudgetExhausted: brief.recallBudgetExhausted,
+    selectedMemories: brief.selectedMemories,
+    validationMilliseconds: brief.validationMilliseconds,
+    validationReceipts: brief.validationReceipts,
+  } satisfies ContextBriefCitationScaleObservationV2;
+});
+
+export interface ContextBriefCitationScaleBriefReads<MemoryR, CitationR> {
+  readonly citationValidation: (
+    scope: ContextBriefPlanV1['scope'],
+    candidates: ContextBriefMemoryRetrievalV1['candidates'],
+    fence: ContextBriefCitationValidationFenceV2 | undefined,
+  ) => Effect.Effect<NonNullable<ContextBriefMemoryRetrievalV1['citationValidations']>, unknown, CitationR>;
+  readonly graphEvidence: ContextBriefGraphEvidenceV1;
+  readonly memoryEvidence: (
+    plan: ContextBriefPlanV1['memory'],
+  ) => Effect.Effect<ContextBriefMemoryRetrievalV1, unknown, MemoryR>;
+  readonly observeRss: () => void;
+}
+
+/**
+ * Compiles one scale brief and records only the memory work the compiler kept. A recall that returns
+ * after the lexical deadline is discarded by the compiler, so it counts as exhausted with no memories.
+ */
+export const compileContextBriefCitationScaleBrief = Effect.fn('evaluation.contextBriefCitationScaleBrief')(function* <
+  MemoryR,
+  CitationR,
+>(reads: ContextBriefCitationScaleBriefReads<MemoryR, CitationR>, request: ContextBriefRequestV1) {
+  let memoryRetrievalMilliseconds = 0;
+  let validationMilliseconds = 0;
+  let retrievedMemories = 0;
+  let validationReceipts = 0;
+  let exactValidationReceipts = 0;
+  let recallBudgetExhausted = false;
+  const brief = yield* compileContextBriefWith(
+    {
+      citationValidation: (scope, candidates, fence) =>
+        Effect.gen(function* () {
+          const phaseStarted = yield* Clock.currentTimeNanos;
+          const validations = yield* reads.citationValidation(scope, candidates, fence);
+          const phaseFinished = yield* Clock.currentTimeNanos;
+          validationMilliseconds = Number(phaseFinished - phaseStarted) / 1_000_000;
+          validationReceipts = EffectArray.reduce(
+            validations,
+            0,
+            (total, validation) => total + validation.receipts.length,
+          );
+          exactValidationReceipts = EffectArray.reduce(
+            validations,
+            0,
+            (total, validation) =>
+              total + EffectArray.filter(validation.receipts, receipt => receipt.status === 'exact').length,
+          );
+          reads.observeRss();
+          return validations;
+        }),
+      graphEvidence: () => Effect.succeed(reads.graphEvidence),
+      memoryEvidence: plan =>
+        Effect.gen(function* () {
+          const phaseStarted = yield* Clock.currentTimeNanos;
+          const evidence = yield* reads.memoryEvidence(plan);
+          const phaseFinished = yield* Clock.currentTimeNanos;
+          memoryRetrievalMilliseconds = Number(phaseFinished - phaseStarted) / 1_000_000;
+          retrievedMemories = evidence.candidates.length;
+          reads.observeRss();
+          return evidence;
+        }),
+      projection: (logical, maximumEstimatedTokens) =>
+        Effect.sync(() => {
+          recallBudgetExhausted = logical.coverage.gaps.includes('memory-recall-budget-exhausted');
+          const projected = projectContextBrief(logical, maximumEstimatedTokens);
+          reads.observeRss();
+          return projected;
+        }),
+    },
+    request,
+  );
+  return {
     estimatedTokens: brief.measurement.estimatedTokens,
     exactValidationReceipts,
     memoryRetrievalMilliseconds,
-    profile: profileId,
-    recallBudgetExhausted: !memoryRecallCompleted,
-    selectedMemories,
+    recallBudgetExhausted,
+    selectedMemories: recallBudgetExhausted ? 0 : retrievedMemories,
     validationMilliseconds,
     validationReceipts,
-  } satisfies ContextBriefCitationScaleObservationV2;
+  };
 });
 
 function prepareContextBriefCitationScaleObservation(graph: ContextBriefCitationScaleGraphInstrumentationShape): void {

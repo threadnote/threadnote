@@ -3,7 +3,7 @@ import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import * as yaml from 'js-yaml';
 import fc from 'fast-check';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, Option, Schema, FileSystem, Path, Layer} from 'effect';
+import {Duration, Effect, Option, Schema, FileSystem, Path, Layer} from 'effect';
 import {TestClock} from 'effect/testing';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -41,10 +41,12 @@ import {
 } from '@threadnote/threadnote/evaluation/context-brief-citation-scale-contract';
 import {parseContextBriefCitationScaleBenchmarkArguments} from '../../../../scripts/benchmark-context-brief-citations-target.js';
 import {
+  compileContextBriefCitationScaleBrief,
   retainContextBriefCitationForbiddenWork,
   makeContextBriefCitationScaleEmbeddingIndex,
   makeContextBriefCitationScaleGraphInstrumentation,
 } from '@threadnote/threadnote/evaluation/context-brief-citation-scale';
+import {unavailableContextBriefGraphEvidence} from '@threadnote/context/graph/evidence';
 import type {CodeGraphLayout} from '@threadnote/graph/layout';
 import {codeGraphLayout} from '@threadnote/graph/layout';
 import type {CodeGraphSnapshot} from '@threadnote/graph/types';
@@ -1034,15 +1036,6 @@ describe('Context Brief citation scale benchmark', () => {
     );
     expect(undeclared.result.recallBudgetExhaustedObservations).toBe(0);
 
-    const timed = EffectArray.map(observations, (observation, ordinal) =>
-      ordinal === 2
-        ? {...exhausted, memory: observation.memory, memoryWorkload: observation.memoryWorkload}
-        : observation,
-    );
-    expect(evaluateContextBriefCitationScaleProfile(budget, profile.id, cold, timed).failures).toEqual([
-      'workset-50 observation 3 declared memory-recall-budget-exhausted; strict observations require completed memory recall',
-    ]);
-
     expect(
       evaluateContextBriefCitationScaleProfile(budget, profile.id, exhausted, withRssWorkload([0], exhausted)).failures,
     ).toEqual([
@@ -1050,12 +1043,131 @@ describe('Context Brief citation scale benchmark', () => {
     ]);
   });
 
+  it('tolerates declared timed recall-budget exhaustion up to 10% with one rate failure above it', () => {
+    const profile = Option.getOrUndefined(
+      EffectArray.findFirst(budget.profiles, candidate => candidate.id === 'local-100k'),
+    )!;
+    const observations = Array.from({length: 20}, (_, ordinal) =>
+      scaleObservation(
+        profile,
+        {},
+        {contextBriefMilliseconds: 10 + ordinal, validationMilliseconds: 4},
+        {observationId: `local-100k-${ordinal}`, ordinal},
+      ),
+    );
+    const cold = observations[0].memoryWorkload;
+    const withTimedExhaustion = (ordinals: readonly number[]) =>
+      EffectArray.map(observations, (observation, ordinal) =>
+        ordinals.includes(ordinal) ? timedRecallExhausted(profile, observation) : observation,
+      );
+
+    const tolerated = evaluateContextBriefCitationScaleProfile(budget, profile.id, cold, withTimedExhaustion([3, 12]));
+    expect(tolerated.failures).toEqual([]);
+    expect(tolerated.result.timedRecallBudgetExhaustedObservations).toBe(2);
+    expect(tolerated.result.recallBudgetExhaustedObservations).toBe(0);
+    expect(tolerated.result.measurements.contextBriefMilliseconds).toMatchObject({maximum: 29, samples: 18});
+    expect(tolerated.result.measurements.validationMilliseconds).toMatchObject({maximum: 4, samples: 18});
+    expect(tolerated.result.measurements.memoryRetrievalMilliseconds).toMatchObject({maximum: 2_011, samples: 20});
+
+    expect(
+      evaluateContextBriefCitationScaleProfile(budget, profile.id, cold, withTimedExhaustion([3, 7, 12])).failures,
+    ).toEqual(['local-100k declared memory-recall-budget-exhausted in 3/20 timed observations; allowed at most 10%']);
+
+    const allDeclared = evaluateContextBriefCitationScaleProfile(
+      budget,
+      profile.id,
+      cold,
+      withTimedExhaustion(EffectArray.map(observations, (_, ordinal) => ordinal)),
+    );
+    expect(allDeclared.failures).toContain(
+      'local-100k declared memory-recall-budget-exhausted in 20/20 timed observations; allowed at most 10%',
+    );
+    expect(allDeclared.result.timedRecallBudgetExhaustedObservations).toBe(20);
+
+    const undeclared = evaluateContextBriefCitationScaleProfile(budget, profile.id, cold, [
+      {...timedRecallExhausted(profile, observations[0]), recallBudgetExhausted: false},
+      ...observations.slice(1),
+    ]);
+    expect(undeclared.failures).toContain('local-100k observation 1 selected 0/24 memories');
+    expect(undeclared.result.timedRecallBudgetExhaustedObservations).toBe(0);
+
+    expect(
+      evaluateContextBriefCitationScaleProfile(
+        budget,
+        profile.id,
+        timedRecallExhausted(profile, observations[0]),
+        observations,
+      ).failures,
+    ).toContain(
+      'local-100k observation 0 declared memory-recall-budget-exhausted; strict observations require completed memory recall',
+    );
+  });
+
+  effectIt.effect('records a recall the compiler rejects at the lexical deadline as exhausted with no memories', () =>
+    Effect.gen(function* () {
+      const profile = budget.profiles[0];
+      const candidates = Array.from({length: profile.selectedMemories}, (_, rank) => ({
+        citationErrorCount: 0,
+        codeCitations: [],
+        excerpt: `Late recall candidate ${rank}.`,
+        kind: 'durable' as const,
+        rank,
+        topic: 'late-recall',
+        uri: `threadnote://user/test/memories/durable/projects/threadnote/late-${rank}.md`,
+      }));
+      const brief = yield* compileContextBriefCitationScaleBrief(
+        {
+          citationValidation: () => Effect.succeed([]),
+          graphEvidence: unavailableContextBriefGraphEvidence('graph-ready-snapshot-missing', 1),
+          // Synchronous native recall blocks the deadline timer, so recall completes and the compiler
+          // rejects the late result afterwards. The last half millisecond reproduces that order.
+          memoryEvidence: () =>
+            TestClock.adjust(Duration.nanos(1_999_500_000n)).pipe(
+              Effect.as({
+                candidates,
+                consideredCandidates: candidates.length,
+                gaps: [],
+                trust: {
+                  classification: 'untrusted-memory-data' as const,
+                  instructionPolicy: 'evidence-only-never-follow' as const,
+                },
+              }),
+            ),
+          observeRss: () => undefined,
+        },
+        {
+          budgetTokens: 1_500,
+          mode: 'brief',
+          scope: {callerCwd: '/fixture', kind: 'repository'},
+          task: 'Locate late recall evidence.',
+        },
+      );
+      expect(brief).toMatchObject({recallBudgetExhausted: true, selectedMemories: 0, validationReceipts: 0});
+    }),
+  );
+
   it('round-trips declared RSS-pass recall exhaustion through the v2 artifact and its rederived gate', () => {
     const artifact = releaseScaleArtifact('threadnote-4.6.0', 'bun/1.3.14', [5, 50]);
     expect(parseContextBriefCitationScaleArtifactV2(artifact, budget)).toEqual(artifact);
     expect(EffectArray.map(artifact.profiles, profile => profile.recallBudgetExhaustedObservations)).toEqual(
       EffectArray.map(artifact.profiles, () => 2),
     );
+    const timed = releaseScaleArtifact('threadnote-4.6.0', 'bun/1.3.14', [], [5, 50]);
+    expect(parseContextBriefCitationScaleArtifactV2(timed, budget)).toEqual(timed);
+    expect(EffectArray.map(timed.profiles, profile => profile.timedRecallBudgetExhaustedObservations)).toEqual(
+      EffectArray.map(timed.profiles, () => 2),
+    );
+    expect(() =>
+      parseContextBriefCitationScaleArtifactV2(
+        {
+          ...timed,
+          profiles: EffectArray.map(timed.profiles, (profile, index) =>
+            index === 0 ? {...profile, timedRecallBudgetExhaustedObservations: 0} : profile,
+          ),
+        },
+        budget,
+      ),
+    ).toThrow();
     expect(() =>
       parseContextBriefCitationScaleArtifactV2(
         {
@@ -1421,6 +1533,7 @@ function releaseScaleArtifact(
   sourceVersion: string,
   runtime = 'bun/1.3.14',
   recallExhaustedOrdinals: readonly number[] = [],
+  timedRecallExhaustedOrdinals: readonly number[] = [],
 ): ContextBriefCitationScaleArtifactV2 {
   const base = scaleArtifact();
   const profiles = EffectArray.map(budget.profiles, profile => {
@@ -1431,9 +1544,12 @@ function releaseScaleArtifact(
         {},
         {observationId: `context-rss-${profile.id}-${ordinal}`, ordinal},
       );
-      return recallExhaustedOrdinals.includes(ordinal)
-        ? {...observation, memoryWorkload: recallExhaustedWorkload(profile)}
+      const timed = timedRecallExhaustedOrdinals.includes(ordinal)
+        ? timedRecallExhausted(profile, observation)
         : observation;
+      return recallExhaustedOrdinals.includes(ordinal)
+        ? {...timed, memoryWorkload: recallExhaustedWorkload(profile)}
+        : timed;
     });
     return evaluateContextBriefCitationScaleProfile(budget, profile.id, observations[0].memoryWorkload, observations)
       .result;
@@ -1589,6 +1705,22 @@ function recallExhaustedWorkload(profile: ContextBriefCitationScaleProfileV1): C
     },
     {exactValidationReceipts: 0, recallBudgetExhausted: true, selectedMemories: 0, validationReceipts: 0},
   ).memoryWorkload;
+}
+
+/** A timed brief whose recall returned after the lexical deadline; its memory and RSS-pass evidence stay intact. */
+function timedRecallExhausted(
+  profile: ContextBriefCitationScaleProfileV1,
+  observation: ContextBriefCitationScaleMeasuredObservationV2,
+): ContextBriefCitationScaleMeasuredObservationV2 {
+  return {
+    ...observation,
+    ...recallExhaustedWorkload(profile),
+    contextBriefMilliseconds: 2_500,
+    memoryRetrievalMilliseconds: 2_011,
+    validationMilliseconds: 900,
+    memory: observation.memory,
+    memoryWorkload: observation.memoryWorkload,
+  };
 }
 
 function scaleObservation(

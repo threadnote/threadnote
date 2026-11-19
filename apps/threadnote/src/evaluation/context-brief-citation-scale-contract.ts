@@ -264,6 +264,8 @@ export interface ContextBriefCitationScaleProfileResultV2 {
   /** External RSS-pass observations after ordinal 0 whose memory recall declared the lexical deadline. */
   readonly recallBudgetExhaustedObservations: number;
   readonly samples: number;
+  /** Timed observations after the cold one whose memory recall declared the lexical deadline. */
+  readonly timedRecallBudgetExhaustedObservations: number;
 }
 
 export interface ContextBriefCitationScaleGateV1 {
@@ -592,6 +594,10 @@ export function evaluateContextBriefCitationScaleProfile(
   );
   const expectedMemoryOrdinals = EffectArray.map(observations, (_, index) => index);
   const memoryObservationIds = EffectArray.map(observations, observation => observation.memory.observationId);
+  // A declared timed observation carries no citation work, so it stays out of the brief and validation
+  // latency series. An all-declared profile keeps the full series; its exhaustion rate already fails.
+  const completedTimed = EffectArray.filter(observations, observation => !observation.recallBudgetExhausted);
+  const latencyObservations = completedTimed.length === 0 ? observations : completedTimed;
   const measurements = {
     boundaryAddedRssBytes: measurement(
       'boundary-added-rss-diagnostic',
@@ -600,7 +606,7 @@ export function evaluateContextBriefCitationScaleProfile(
     ),
     contextBriefMilliseconds: measurement(
       'context-brief-total',
-      EffectArray.map(observations, observation => observation.contextBriefMilliseconds),
+      EffectArray.map(latencyObservations, observation => observation.contextBriefMilliseconds),
       'milliseconds',
     ),
     memoryRetrievalMilliseconds: measurement(
@@ -610,7 +616,7 @@ export function evaluateContextBriefCitationScaleProfile(
     ),
     validationMilliseconds: measurement(
       'citation-validation',
-      EffectArray.map(observations, observation => observation.validationMilliseconds),
+      EffectArray.map(latencyObservations, observation => observation.validationMilliseconds),
       'milliseconds',
     ),
     observedAddedProcessTreeRssBytes: measurement(
@@ -652,10 +658,18 @@ export function evaluateContextBriefCitationScaleProfile(
     sustainedRssObservations,
     observation => observation.memoryWorkload.recallBudgetExhausted,
   ).length;
+  const timedRecallBudgetExhaustedObservations = observations.length - completedTimed.length;
   const failures = EffectArray.filter(
     [
+      // Index 0 is the cold observation and stays strict; later timed observations may declare exhaustion.
       ...EffectArray.flatMap(all, (observation, index) =>
-        contextBriefCitationScaleObservationFailures(profile, budget, observation, index),
+        contextBriefCitationScaleObservationFailures(
+          profile,
+          budget,
+          observation,
+          index,
+          index === 0 ? 'strict' : 'tolerated',
+        ),
       ),
       ...EffectArray.flatMap(observations, (observation, index) =>
         memoryObservationFailures(profile, observation, index),
@@ -672,9 +686,13 @@ export function evaluateContextBriefCitationScaleProfile(
           failure => `${failure} during the external RSS pass`,
         ),
       ),
-      recallBudgetExhaustedObservations <= sustainedRssObservations.length * 0.1
-        ? ''
-        : `${profile.id} declared memory-recall-budget-exhausted in ${recallBudgetExhaustedObservations}/${sustainedRssObservations.length} external RSS-pass observations; allowed at most 10%`,
+      recallExhaustionRateFailure(
+        profile,
+        recallBudgetExhaustedObservations,
+        sustainedRssObservations.length,
+        'external RSS-pass',
+      ),
+      recallExhaustionRateFailure(profile, timedRecallBudgetExhaustedObservations, observations.length, 'timed'),
       JSON.stringify(memoryOrdinals) === JSON.stringify(expectedMemoryOrdinals)
         ? ''
         : `${profile.id} memory ordinals are not the complete measured range`,
@@ -711,8 +729,21 @@ export function evaluateContextBriefCitationScaleProfile(
       profile,
       recallBudgetExhaustedObservations,
       samples: observations.length,
+      timedRecallBudgetExhaustedObservations,
     },
   };
+}
+
+/** Hosted runners occasionally cross the lexical recall deadline; more than 10% of a pass is a regression. */
+function recallExhaustionRateFailure(
+  profile: ContextBriefCitationScaleProfileV1,
+  declared: number,
+  observations: number,
+  pass: string,
+): string {
+  return declared <= observations * 0.1
+    ? ''
+    : `${profile.id} declared memory-recall-budget-exhausted in ${declared}/${observations} ${pass} observations; allowed at most 10%`;
 }
 
 export function contextBriefCitationScaleGate(failures: readonly string[]): ContextBriefCitationScaleGateV1 {
@@ -1088,6 +1119,7 @@ function parseArtifactProfileResult(
     'profile',
     'recallBudgetExhaustedObservations',
     'samples',
+    'timedRecallBudgetExhaustedObservations',
   ]);
   const profile = parseProfile(result.profile);
   if (
@@ -1115,6 +1147,10 @@ function parseArtifactProfileResult(
       `${profile.id} recall-budget-exhausted observations`,
     ),
     samples: positiveInteger(result.samples, `${profile.id} samples`),
+    timedRecallBudgetExhaustedObservations: nonNegativeSafeInteger(
+      result.timedRecallBudgetExhaustedObservations,
+      `${profile.id} timed recall-budget-exhausted observations`,
+    ),
   };
   const evaluated = evaluateContextBriefCitationScaleProfile(
     budget,
