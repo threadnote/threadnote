@@ -467,27 +467,36 @@ effectIt.effect('completes a Claude Code wakeup from PATH and the checkout but n
   Effect.gen(function* () {
     const system = yield* SystemInfo;
     const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const shimBin = yield* fs.makeTempDirectoryScoped({prefix: 'native-watch-shim-'});
     const bin = yield* fs.makeTempDirectoryScoped({prefix: 'native-watch-path-'});
-    const launcher = bin + '/claude';
-    yield* fs.writeFileString(launcher, '#!/bin/sh\n');
-    const withPath = Effect.provideService(SystemInfo, {
-      ...system,
-      platform: 'darwin' as const,
-      environment: () => ({PATH: '/missing-bin:' + bin}),
-    });
-    const resolve = (input: Parameters<typeof resolveNativeWatchSessionWakeup>[0]) =>
-      resolveNativeWatchSessionWakeup(input, '/trusted/workspace').pipe(withPath);
-    expect(yield* resolve({host: 'claude-code', sessionId: target.threadId})).toEqual({
-      host: 'claude-code',
-      executable: launcher,
-      sessionId: target.threadId,
-      workspace: '/trusted/workspace',
-      exclusiveSession: true,
-    });
-    for (const input of [{host: 'claude-code' as const}, {host: 'cursor-cli' as const, sessionId: target.threadId}])
-      expect(yield* resolve(input).pipe(Effect.result)).toMatchObject({
-        failure: {code: 'host-registration-required'},
+    // An extensionless npm shell shim earlier on PATH must not win on Windows, where it cannot be spawned.
+    yield* fs.writeFileString(path.join(shimBin, 'claude'), '#!/bin/sh\n');
+    // A drive-letter PATH entry cannot be split on ':', so the POSIX case runs only off Windows.
+    const platforms = system.platform === 'win32' ? (['win32'] as const) : (['win32', 'linux'] as const);
+    for (const platform of platforms) {
+      const launcher = path.join(bin, platform === 'win32' ? 'claude.exe' : 'claude');
+      yield* fs.writeFileString(launcher, '#!/bin/sh\n');
+      const withPath = Effect.provideService(SystemInfo, {
+        ...system,
+        platform,
+        environment: () => ({PATH: platform === 'win32' ? `${shimBin};${bin}` : `/missing-bin:${bin}`}),
       });
+      const resolve = (input: Parameters<typeof resolveNativeWatchSessionWakeup>[0]) =>
+        resolveNativeWatchSessionWakeup(input, '/trusted/workspace').pipe(withPath);
+      expect(yield* resolve({host: 'claude-code', sessionId: target.threadId})).toEqual({
+        host: 'claude-code',
+        executable: launcher,
+        sessionId: target.threadId,
+        workspace: '/trusted/workspace',
+        exclusiveSession: true,
+      });
+      for (const input of [{host: 'claude-code' as const}, {host: 'cursor-cli' as const, sessionId: target.threadId}])
+        expect(yield* resolve(input).pipe(Effect.result)).toMatchObject({
+          failure: {code: 'host-registration-required'},
+        });
+      yield* fs.remove(launcher);
+    }
   }).pipe(provide),
 );
 

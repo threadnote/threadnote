@@ -61,17 +61,16 @@ const pathLauncher = Effect.fn('nativeWatch.pathLauncher')(function* (name: stri
   const system = yield* SystemInfo;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const names = system.platform === 'win32' ? [name + '.exe', name] : [name];
+  // Windows cannot spawn an extensionless npm shell shim, and a .cmd shim needs a shell; only the native .exe runs.
+  const candidate = system.platform === 'win32' ? name + '.exe' : name;
   for (const directory of EffectString.split(
     system.environment().PATH ?? '',
     system.platform === 'win32' ? ';' : ':',
   )) {
     if (!directory || !path.isAbsolute(directory)) continue;
-    for (const candidate of names) {
-      const file = path.join(directory, candidate);
-      const info = yield* Effect.option(fs.stat(file));
-      if (Option.isSome(info) && info.value.type === 'File') return file;
-    }
+    const file = path.join(directory, candidate);
+    const info = yield* Effect.option(fs.stat(file));
+    if (Option.isSome(info) && info.value.type === 'File') return file;
   }
   return undefined;
 });
