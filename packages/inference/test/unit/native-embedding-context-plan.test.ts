@@ -26,7 +26,20 @@ describe('native embedding context planning', () => {
     }
   });
 
-  it('retains explicit caps, other core partitions, and serial GPU or unknown offload', () => {
+  it('caps foreground GPU pools at four contexts with default threads', () => {
+    for (const [requestedContexts, contexts] of [
+      [2, 2],
+      [4, 4],
+      [8, 4],
+    ] as const) {
+      expect(nativeEmbeddingContextPlan({cpuMathCores: 12, modelGpuLayers: 25, requestedContexts})).toEqual({
+        contexts,
+        threadCounts: Array.from({length: contexts}, () => undefined),
+      });
+    }
+  });
+
+  it('retains explicit caps, other core partitions, and serial unknown offload', () => {
     expect(nativeEmbeddingContextPlan({cpuMathCores: 3, modelGpuLayers: 0, requestedContexts: 2})).toEqual({
       contexts: 2,
       threadCounts: [2, 1],
@@ -61,12 +74,10 @@ describe('native embedding context planning', () => {
         threadCounts: [undefined],
       });
     }
-    for (const modelGpuLayers of [1, undefined]) {
-      expect(nativeEmbeddingContextPlan({cpuMathCores: 3, modelGpuLayers, requestedContexts: 8})).toEqual({
-        contexts: 1,
-        threadCounts: [undefined],
-      });
-    }
+    expect(nativeEmbeddingContextPlan({cpuMathCores: 3, modelGpuLayers: undefined, requestedContexts: 8})).toEqual({
+      contexts: 1,
+      threadCounts: [undefined],
+    });
   });
 
   it('conserves explicit CPU threads, bounds contexts, and balances allocations', () => {
