@@ -331,6 +331,12 @@ export const typescriptNativeBuildRecipe = {
     /** Release staging accepts only these separately reviewed host binaries; a receipt cannot opt out. */
     reviewedHostBinaries: [
       {host: 'darwin-arm64', sha256: '6453082c0e4fa16b78a37106fce911d0df9b79192025a1b4fdecdf92286e3c47'},
+      // Reviewed construction identities, not qualification: trusted same-repository run 44645978175 of reviewed
+      // commit db499c1b3 (deadline multiplier 3), artifact native-typescript-construction-<host>. Its darwin-arm64
+      // artifact reproduced the pin above.
+      {host: 'darwin-x64', sha256: '0bff3b247bf35c5cc8f7544c665cd5cfaaacfa424400ca6e956d777ca3397458'},
+      {host: 'linux-x64', sha256: 'e822fbf40a9454e0f3dcb2e088d7b8b3dabf59f7d857c258a2c255abc305dfda'},
+      {host: 'linux-arm64', sha256: '294a3396080820b44e223d741eb040dfbd2d4c9b36855497f7df6ccdaaebacee'},
     ],
     attribution: [
       {file: 'TYPESCRIPT_LICENSE.txt', sha256: 'a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47'},
