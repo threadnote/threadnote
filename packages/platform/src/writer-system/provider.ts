@@ -1,5 +1,5 @@
 import {runtimeCurrentPlatform} from '../system.js';
-import {ownedProviderTreeBrand} from './provider-contract.js';
+import {ownedProviderMaxProcesses, ownedProviderTreeBrand} from './provider-contract.js';
 import type {
   OwnedProviderBackend,
   RuntimeOwnedProviderTree,
@@ -33,6 +33,7 @@ export function runtimeSpawnOwnedProviderTree(options: RuntimeOwnedProviderLaunc
   )
     return fail('unsupported-platform');
   if (liveNativeOwners.size >= 64) return fail('identity');
+  ownedProviderMaxProcesses(options.maxProcesses);
   const instance = runtimeCurrentPlatform() === 'win32' ? spawnWindowsProvider(options) : spawnPosixProvider(options);
   liveNativeOwners.add(instance);
   const handle: RuntimeOwnedProviderTree = Object.freeze({[ownedProviderTreeBrand]: true as const});

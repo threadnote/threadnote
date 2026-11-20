@@ -17,8 +17,10 @@ import {
 } from './windows-native.js';
 import {
   OwnedProviderResourceLedger,
+  ownedProviderMaxProcesses,
   type OwnedProviderBackend,
   type RuntimeOwnedProviderLaunch,
+  type RuntimeOwnedProviderLossCategory,
   type RuntimeOwnedProviderResourceObservation,
 } from './provider-contract.js';
 
@@ -250,6 +252,8 @@ interface DebugJob {
   readonly handle: bigint;
   readonly sid: string;
   readonly pipes: readonly Pipe[];
+  /** Lifetime member cap: the CREATE refusal, Job accounting bound and resource ledger capacity. */
+  readonly maxProcesses: number;
   usable: boolean;
   readonly threads: WindowsDebugThreadLedger;
   readonly members: DebugMember[];
@@ -263,6 +267,7 @@ interface DebugJob {
   launchAllowed: boolean;
   state: 'active' | 'closing' | 'quarantined' | 'closed';
   unknown: boolean;
+  loss?: RuntimeOwnedProviderLossCategory;
   deadline: number;
   total: number;
   generation: number;
@@ -317,6 +322,9 @@ class WindowsDebugDispatcher {
   private pending = false;
   private pumping = false;
   private poisoned = false;
+  /** Category of the refusal currently in flight, and the first poison cause; bookkeeping only. */
+  private cause: RuntimeOwnedProviderLossCategory | undefined;
+  private poisonCause: RuntimeOwnedProviderLossCategory | undefined;
   private processSlots = 0;
   private quarantineEvents = 0;
   constructor() {
@@ -334,8 +342,23 @@ class WindowsDebugDispatcher {
       fail('identity');
     }
   }
-  private poison(): void {
+  private refuse(category: RuntimeOwnedProviderLossCategory): never {
+    this.cause = category;
+    return fail('identity');
+  }
+  private ledger(operation: () => void): void {
+    try {
+      operation();
+    } catch {
+      this.refuse('thread-ledger');
+    }
+  }
+  loss(job: DebugJob): RuntimeOwnedProviderLossCategory {
+    return this.poisonCause ?? job.loss ?? 'other';
+  }
+  private poison(category: RuntimeOwnedProviderLossCategory = 'other'): void {
     if (this.poisoned) return;
+    this.poisonCause = category;
     this.poisoned = true;
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
@@ -345,7 +368,7 @@ class WindowsDebugDispatcher {
       if (job.usable) job.lib.symbols.TerminateJobObject(job.handle, 1);
     }
   }
-  reserve(lib: Kernel, handle: bigint, sid: string, pipes: readonly Pipe[]): DebugJob {
+  reserve(lib: Kernel, handle: bigint, sid: string, pipes: readonly Pipe[], maxProcesses: number): DebugJob {
     // A poisoned singleton may retain a library whose close result is uncertain.
     if (this.poisoned) return fail('identity');
     this.affinity();
@@ -361,10 +384,11 @@ class WindowsDebugDispatcher {
       handle,
       sid,
       pipes,
+      maxProcesses,
       usable: true,
       threads: new WindowsDebugThreadLedger(this.resources),
       members: [],
-      memory: new OwnedProviderResourceLedger(256),
+      memory: new OwnedProviderResourceLedger(maxProcesses),
       live: new Map(),
       pi: new BigUint64Array(3),
       piProcess: 0n,
@@ -471,7 +495,8 @@ class WindowsDebugDispatcher {
     if (final && job.deadline === 0) job.deadline = performance.now() + 2000;
     this.schedule();
   }
-  quarantine(job: DebugJob): void {
+  quarantine(job: DebugJob, category: RuntimeOwnedProviderLossCategory = 'other'): void {
+    job.loss ??= category;
     job.unknown = true;
     job.state = 'quarantined';
     this.schedule();
@@ -516,6 +541,7 @@ class WindowsDebugDispatcher {
     if (!EffectArray.some([...this.jobs], job => job.state === 'active' || job.state === 'closing')) return;
     this.pumping = true;
     try {
+      this.cause = undefined;
       this.affinity();
       const start = performance.now();
       for (let count = 0; count < 32 && performance.now() - start < 2 && this.hasDebugLifetimes(); count++) {
@@ -537,7 +563,7 @@ class WindowsDebugDispatcher {
         this.dispatch();
       }
     } catch {
-      this.poison();
+      this.poison(this.cause ?? 'other');
     } finally {
       this.pumping = false;
     }
@@ -573,10 +599,10 @@ class WindowsDebugDispatcher {
           fail('identity');
         member = root;
       } else {
+        if (job.members.length >= job.maxProcesses) this.refuse('member-cap');
+        if (this.processSlots >= 4096) this.refuse('slot-total');
         if (
           job.live.has(pid) ||
-          job.members.length >= 256 ||
-          this.processSlots >= 4096 ||
           EffectArray.some(job.members, prior => prior.pid === pid && prior.identity === identity)
         )
           fail('identity');
@@ -606,7 +632,9 @@ class WindowsDebugDispatcher {
         this.lib.symbols.GetProcessIdOfThread(borrowedThread) !== pid
       )
         fail('identity');
-      job.threads.create(member, tid, member === root);
+      const threads = job.threads,
+        created = member;
+      this.ledger(() => threads.create(created, tid, created === root));
       member.created = true;
       if (member === root) {
         // A same-value PI role transfers to system lifetime. Distinct PI roles are explicitly closed once.
@@ -650,14 +678,14 @@ class WindowsDebugDispatcher {
         first = this.view.getUint32(168, true);
       if (first !== 0 && first !== 1) fail('identity');
       if (member.startup) {
-        if (exception !== 0x80000003 || first !== 1 || tid !== member.primaryTid) fail('identity');
+        if (exception !== 0x80000003 || first !== 1 || tid !== member.primaryTid) this.refuse('startup-mismatch');
         member.startup = false;
       } else status = 0x80010001; // genuine exceptions are never swallowed
     } else if (kind === 2) {
       const borrowed = windowsHandle(this.view.getBigUint64(16, true));
       if (this.lib.symbols.GetThreadId(borrowed) !== tid || this.lib.symbols.GetProcessIdOfThread(borrowed) !== pid)
         fail('identity');
-      job.threads.create(member, tid);
+      this.ledger(() => job.threads.create(member, tid));
     } else if (kind === 6) this.closeImage(job);
     else if (kind === 5) {
       member.exitCode = this.view.getUint32(16, true);
@@ -669,10 +697,10 @@ class WindowsDebugDispatcher {
     this.pending = false;
     this.affinity();
     // Only successful continuation retires borrowed system handles/bookkeeping.
-    if (kind === 4) job.threads.exitThread(member, tid);
+    if (kind === 4) this.ledger(() => job.threads.exitThread(member, tid));
     if (kind === 5) {
       member.exitContinued = true;
-      job.threads.exitProcess(member);
+      this.ledger(() => job.threads.exitProcess(member));
       job.live.delete(pid);
     }
     job.generation++;
@@ -694,7 +722,7 @@ class WindowsDebugDispatcher {
     const view = new DataView(bytes.buffer),
       total = view.getUint32(36, true),
       active = view.getUint32(40, true);
-    if (total < job.total || total > 256 || active > total) fail('identity');
+    if (total < job.total || total > job.maxProcesses || active > total) this.refuse('accounting');
     job.total = total;
     return {active, total};
   }
@@ -735,6 +763,7 @@ class WindowsDebugDispatcher {
     this.pump();
     if (this.poisoned || job.unknown) return 'unknown';
     try {
+      this.cause = undefined;
       this.affinity();
       const first = this.accounting(job),
         generation = job.generation;
@@ -765,7 +794,7 @@ class WindowsDebugDispatcher {
         ? 'drained'
         : 'running';
     } catch {
-      this.quarantine(job);
+      this.quarantine(job, this.cause ?? 'other');
       return 'unknown';
     }
   }
@@ -803,6 +832,7 @@ function dispatcher(): WindowsDebugDispatcher {
 
 /** Atomic Job assignment and restricted inheritance precede all debuggee user execution. */
 export function spawnWindowsProvider(options: RuntimeOwnedProviderLaunch): OwnedProviderBackend {
+  const maxProcesses = ownedProviderMaxProcesses(options.maxProcesses);
   const debug = dispatcher();
   const principal = windowsTokenPrincipal();
   const lib = kernel();
@@ -873,7 +903,7 @@ export function spawnWindowsProvider(options: RuntimeOwnedProviderLaunch): Owned
       view.setUint32(16, inherit, true);
     }
     job = windowsHandle(lib.symbols.CreateJobObjectW(null, null));
-    debugJob = debug.reserve(lib, job, principal.sid, pipes);
+    debugJob = debug.reserve(lib, job, principal.sid, pipes, maxProcesses);
     const limits = new BigUint64Array(18);
     new DataView(limits.buffer).setUint32(16, 0x00002000, true); // KILL_ON_JOB_CLOSE, no breakaway flags.
     if (lib.symbols.SetInformationJobObject(job, 9, limits, 144) === 0) fail('unsupported-platform');
@@ -962,7 +992,7 @@ export function spawnWindowsProvider(options: RuntimeOwnedProviderLaunch): Owned
         }
         if (!settled) {
           // Keep hidden failed pipe ownership in the same bounded native domain.
-          debugJob ??= debug.reserve(lib, job, principal.sid, pipes);
+          debugJob ??= debug.reserve(lib, job, principal.sid, pipes, maxProcesses);
           debug.failed(debugJob);
         } else {
           try {
@@ -1189,18 +1219,15 @@ function makeOwnedWindows(input: {
       unknown = true;
       debug.quarantine(debugJob);
     }
-    return {
-      state:
-        unknown || native === 'unknown'
-          ? ('unknown' as const)
-          : native === 'drained' &&
-              stdioClosed &&
-              EffectArray.every(pipes, pipe => !pipe.busy && !pipe.connectionPending)
-            ? ('drained' as const)
-            : ('running' as const),
-      leaderExitCode,
-      stdioClosed,
-    };
+    const state =
+      unknown || native === 'unknown'
+        ? ('unknown' as const)
+        : native === 'drained' && stdioClosed && EffectArray.every(pipes, pipe => !pipe.busy && !pipe.connectionPending)
+          ? ('drained' as const)
+          : ('running' as const);
+    return state === 'unknown'
+      ? {state, leaderExitCode, stdioClosed, lossCategory: debug.loss(debugJob)}
+      : {state, leaderExitCode, stdioClosed};
   };
   return {
     pid,

@@ -59,8 +59,10 @@ provider-eligible.
   tests, race tests and build 240 s each. On a slower host, `THREADNOTE_TYPESCRIPT_NATIVE_DEADLINE_MULTIPLIER` (one
   digit from 1 to 4) scales exactly these; the frontend patch's fixed `git apply` deadlines and Go's test `-timeout`
   do not scale. The multiplier does not change the constructed bytes or receipt, and the workflow records it in
-  `summary.json`. A timeout and an undrained process tree fail with distinct errors that name the command, elapsed
-  time and an output tail.
+  `summary.json`. A timeout, an undrained process tree and lost process-tree ownership fail with distinct errors that
+  name the command, elapsed time and an output tail.
+- A cold Go test or build spawns hundreds of processes, so the Go commands raise the owned Windows Job's lifetime
+  process cap from the platform default of 256 to 2048 (the platform maximum is 4096); POSIX has no such cap.
 - `--verify-construction PAYLOAD` re-checks a payload on its own and prints the executable to run; take the probe
   executable from this output. `--verify-prepared PREPARED` re-checks a prepared asset, including POSIX modes, and
   succeeds only beside its sibling `payload`. A schema-v1 payload stores an absolute probe command and is refused once

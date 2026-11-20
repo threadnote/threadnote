@@ -575,8 +575,9 @@ async function command(
   cwd: string,
   environment: NodeJS.ProcessEnv,
   milliseconds: number,
+  maxProcesses?: number,
 ): Promise<string> {
-  const owner = runtimeSpawnOwnedProviderTree({command: executable, args, cwd, environment});
+  const owner = runtimeSpawnOwnedProviderTree({command: executable, args, cwd, environment, maxProcesses});
   let bytes = 0,
     overflow = false,
     pumpFailure: unknown,
@@ -610,17 +611,21 @@ async function command(
   try {
     await owner.closeInput();
     let observation = runtimeObserveOwnedProviderTree(owner.handle);
-    while (observation.state !== 'drained' && performance.now() < deadline) {
+    // Lost ownership is terminal on every provider: `unknown` never returns to `drained`, so stop at once.
+    while (observation.state === 'running' && performance.now() < deadline) {
       if (pumpFailure !== undefined) throw new Error('Native TypeScript build output pump failed.');
       await wait(20);
       observation = runtimeObserveOwnedProviderTree(owner.handle);
     }
+    // An output-pump failure can also surface as lost ownership; keep its own message.
+    if (pumpFailure !== undefined) throw new Error('Native TypeScript build output pump failed.');
     if (observation.state !== 'drained') {
-      // A running leader at the deadline is a timeout; anything else held the tree or stdio after the leader.
+      // A running leader at the deadline is a timeout; a running tree after the leader exited did not drain.
+      const loss = observation.lossCategory === undefined ? '' : ` (${observation.lossCategory})`;
       const detail = `${commandSummary(executable, args)}; elapsed ${Math.round(performance.now() - started)} ms of ${milliseconds} ms; tree ${observation.state}, leader exit ${observation.leaderExitCode ?? 'none'}, stdio ${observation.stdioClosed ? 'closed' : 'open'}`;
       const tail = outputTail(new TextDecoder().decode(Buffer.concat([...stdoutChunks, ...stderrChunks])));
       throw new Error(
-        `${observation.state === 'running' && observation.leaderExitCode === null ? 'Native TypeScript build command exceeded its deadline' : 'Native TypeScript build command did not drain'}: ${detail}.${tail ? `\n${tail}` : ''}`,
+        `${observation.state === 'unknown' ? `Native TypeScript build command lost process-tree ownership${loss}` : observation.leaderExitCode === null ? 'Native TypeScript build command exceeded its deadline' : 'Native TypeScript build command did not drain'}: ${detail}.${tail ? `\n${tail}` : ''}`,
       );
     }
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1010,7 +1015,11 @@ export async function buildTypeScriptNativeAsset(input: TypeScriptNativeBuildInp
     cwd: string,
     environment: NodeJS.ProcessEnv,
     milliseconds: number,
-  ) => command(executable, args, cwd, environment, milliseconds * multiplier);
+    maxProcesses?: number,
+  ) => command(executable, args, cwd, environment, milliseconds * multiplier, maxProcesses);
+  // A cold Go test or build spawns about 360 processes in one tree (285 packages, assembly, link, vet and test
+  // binaries); 2048 leaves headroom for cgo compiler children and race variants within the 4096 platform bound.
+  const goProcesses = 2048;
   const root = await realpath(input.privateRoot);
   const related = await Promise.all(
     [input.officialSource, input.toolchainArchive, input.repositoryRoot, input.moduleCache]
@@ -1165,10 +1174,11 @@ export async function buildTypeScriptNativeAsset(input: TypeScriptNativeBuildInp
       ? {...env, GOFLAGS: ''}
       : {...env, GOFLAGS: '', GOPROXY: 'https://proxy.golang.org', GOSUMDB: 'sum.golang.org'},
     120000,
+    goProcesses,
   );
   await writeFile(join(module, 'go.sum'), originalGoSum);
   await exact(join(module, 'go.sum'), upstream.goSumSha256);
-  await run(go, offlineCommands.modules.slice(1), module, env, 60000);
+  await run(go, offlineCommands.modules.slice(1), module, env, 60000, goProcesses);
   // The upstream API/IPC tests create another private socket below TMPDIR.
   // Keep only those tests under a short 0700 path; long SSD artifact roots can
   // exceed Darwin's sockaddr_un bound before any test assertion runs.
@@ -1184,12 +1194,12 @@ export async function buildTypeScriptNativeAsset(input: TypeScriptNativeBuildInp
       throw new Error('Native TypeScript short test temp is not private.');
   }
   const testEnv = windows ? {...env, TMPDIR: testTemp, TEMP: testTemp, TMP: testTemp} : {...env, TMPDIR: testTemp};
-  await run(go, offlineCommands.focused.slice(1), module, testEnv, 240000);
+  await run(go, offlineCommands.focused.slice(1), module, testEnv, 240000, goProcesses);
   const raceSupported = hostRaceSupported();
-  if (raceSupported) await run(go, offlineCommands.race.slice(1), module, testEnv, 240000);
+  if (raceSupported) await run(go, offlineCommands.race.slice(1), module, testEnv, 240000, goProcesses);
   const executable = typescriptNativeBuildRecipe.runtimeAsset.executableName();
   const binary = join(payload, executable);
-  await run(go, [...offlineCommands.build.slice(1, -2), binary, './cmd/tsc'], module, env, 240000);
+  await run(go, [...offlineCommands.build.slice(1, -2), binary, './cmd/tsc'], module, env, 240000, goProcesses);
   const output = (await run(binary, ['--version'], module, env, 10000)).trim();
   if (output !== `Version ${upstream.version}`) throw new Error('Native TypeScript binary version differs.');
   const bytes = await runtimeReadBoundedStableRegularFile(binary, 128 * 1024 * 1024);

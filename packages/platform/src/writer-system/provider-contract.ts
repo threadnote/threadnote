@@ -1,3 +1,4 @@
+import {writerFail} from './fault.js';
 export const ownedProviderTreeBrand: unique symbol = Symbol('owned-provider-tree');
 /** Capability minted by this runtime only; a persisted PID is never a replacement. */
 export interface RuntimeOwnedProviderTree {
@@ -8,11 +9,28 @@ export interface RuntimeOwnedProviderLaunch {
   readonly args: readonly string[];
   readonly cwd: string;
   readonly environment: NodeJS.ProcessEnv;
+  /**
+   * Lifetime process cap for one owned Windows Job: an integer from 1 to 4096, default 256. It is bounded by the
+   * dispatcher-wide 4096-process total, which is shared and not reserved at admission, so concurrent large caps can
+   * still meet that total. POSIX observes the live process group and validates but ignores it.
+   */
+  readonly maxProcesses?: number;
 }
+/** Validated per-launch Windows Job lifetime process cap; refused before any native resource is created. */
+export function ownedProviderMaxProcesses(value: number | undefined): number {
+  const limit = value ?? 256;
+  // 'identity' is the existing refusal for every owned-tree capacity bound (owner, Job and slot limits).
+  return Number.isSafeInteger(limit) && limit >= 1 && limit <= 4096 ? limit : writerFail('identity');
+}
+/** Closed, bounded cause of lost Windows tree ownership; never a PID, handle, path or count. */
+export type RuntimeOwnedProviderLossCategory =
+  'member-cap' | 'slot-total' | 'thread-ledger' | 'accounting' | 'startup-mismatch' | 'other';
 export interface RuntimeOwnedProviderObservation {
   readonly state: 'running' | 'drained' | 'unknown';
   readonly leaderExitCode: number | null;
   readonly stdioClosed: boolean;
+  /** Windows only, and only with `state: 'unknown'`: the first recorded cause. POSIX never reports one. */
+  readonly lossCategory?: RuntimeOwnedProviderLossCategory;
 }
 /** Process counters do not attest a complete historical POSIX descendant census. */
 export type RuntimeOwnedProviderResourceObservation =

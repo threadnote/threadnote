@@ -6,10 +6,12 @@ import {windowsProviderCommandLine, WindowsDebugThreadLedger} from '../../src/wr
 import * as EffectString from 'effect/String';
 import * as EffectArray from 'effect/Array';
 import * as EffectRecord from 'effect/Record';
+import {Schema} from 'effect';
 import {expect, it, vi} from 'vitest';
 import fc from 'fast-check';
 import {decodeUnreapedPosixExitStatus} from '../../src/writer-system/provider-posix.js';
-import {OwnedProviderResourceLedger} from '../../src/writer-system/provider-contract.js';
+import {OwnedProviderResourceLedger, ownedProviderMaxProcesses} from '../../src/writer-system/provider-contract.js';
+import {RuntimeWriterFault} from '../../src/writer-system/fault.js';
 import {
   runtimeSpawnOwnedProviderTree,
   runtimeObserveOwnedProviderTree,
@@ -204,6 +206,22 @@ it('keeps invalid, regressing and overflowing resource evidence unknown without 
   overflow.capture({}, 0, Number.MAX_SAFE_INTEGER);
   overflow.capture({}, 0, 1);
   expect(overflow.observe('complete-captured-tree')).toEqual({state: 'unknown'});
+});
+
+const faultReason = (launch: () => unknown): string | undefined => {
+  try {
+    launch();
+  } catch (error) {
+    return Schema.is(RuntimeWriterFault)(error) ? error.reason : undefined;
+  }
+  return undefined;
+};
+
+it('bounds the per-launch Windows Job process cap and keeps the 256 default', () => {
+  expect(ownedProviderMaxProcesses(undefined)).toBe(256);
+  for (const valid of [1, 256, 2048, 4096]) expect(ownedProviderMaxProcesses(valid)).toBe(valid);
+  for (const invalid of [0, -1, 1.5, 4097, NaN, Infinity])
+    expect(faultReason(() => ownedProviderMaxProcesses(invalid))).toBe('identity');
 });
 
 const childOutputLimit = 65536,
@@ -1684,6 +1702,33 @@ it.skipIf(!supported)('allows finite cancellation while an actual provider conti
     );
   } finally {
     clearTimeout(timer);
+    await stop(provider);
+  }
+});
+
+it.skipIf(!supported)('refuses an invalid process cap before launch and runs a launch at the bound', async () => {
+  const launch = (source: string, maxProcesses: number) =>
+    runtimeSpawnOwnedProviderTree({
+      command: process.execPath,
+      args: ['-e', source],
+      cwd: process.cwd(),
+      environment: process.env,
+      maxProcesses,
+    });
+  for (const invalid of [0, 4097, 1.5]) expect(faultReason(() => launch('process.exit(9)', invalid))).toBe('identity');
+  const provider = launch('process.stdout.write("capped")', 4096);
+  const output = new Response(provider.stdout).text(),
+    errors = new Response(provider.stderr).text();
+  try {
+    expect(await output).toBe('capped');
+    await errors;
+    await provider.closeInput();
+    const final = await until(
+      () => runtimeObserveOwnedProviderTree(provider.handle),
+      o => o.state === 'drained',
+    );
+    expect(final.leaderExitCode).toBe(0);
+  } finally {
     await stop(provider);
   }
 });
