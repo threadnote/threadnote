@@ -2,6 +2,7 @@ import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Option, Path} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
+import {codeGraphSqlEpochMilliseconds} from './generation.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
 import {
@@ -1307,14 +1308,12 @@ const observeVectorRetirementAdmission = Effect.fn('codeGraph.observeVectorRetir
     generationRevision,
     pointerPresent: false,
   } satisfies CodeGraphVectorRetirementAdmissionObservation;
-  const versions = yield* sql.unsafe<{readonly user_version: number}>('PRAGMA user_version');
   const hasProgress =
-    versions[0]?.user_version === 3 &&
+    (yield* progressTablePresent(sql)) &&
     (yield* sql.unsafe('SELECT 1 FROM vector_generation_progress LIMIT 1')).length !== 0;
-  if (
-    (admissionScanRevision !== undefined && admissionScanRevision !== generationRevision) ||
-    (!hasProgress && cursor === undefined && cleanGenerationRevision === generationRevision)
-  ) {
+  // A revision change mid-scan does not stop the pass; it only forbids a clean claim when that pass wraps.
+  // Progress checkpoints bump the revision continually, so restarting at once would never admit anything.
+  if (!hasProgress && cursor === undefined && cleanGenerationRevision === generationRevision) {
     return revisionState;
   }
   const rows = yield* sql.unsafe<{readonly generation: unknown}>(
@@ -1363,7 +1362,11 @@ const observeVectorRetirementAdmission = Effect.fn('codeGraph.observeVectorRetir
     cursor,
     generationRevision,
     ...(marker === undefined ? {} : {marker}),
-    pointerPresent: pointers.length !== 0 || (yield* liveGenerationClaim(sql, generation)),
+    // Retained work: a pointer, a live claim or pin, or an unfinished generation still inside its grace period.
+    pointerPresent:
+      pointers.length !== 0 ||
+      (yield* liveGenerationClaim(sql, generation)) ||
+      (candidate.state === 'building' && (yield* buildingGenerationInGrace(sql, generation))),
   } satisfies CodeGraphVectorRetirementAdmissionObservation;
 });
 
@@ -1411,9 +1414,11 @@ const applyVectorRetirementAdmissionObservation = Effect.fn('codeGraph.applyVect
       observed.generationRevision,
     ] as const;
     if (
+      observed.candidate === undefined &&
       observed.admissionScanRevision !== undefined &&
       observed.admissionScanRevision !== observed.generationRevision
     ) {
+      // The pass wrapped, but the generation set changed during it: start a new pass instead of claiming clean.
       yield* sql.unsafe(
         `UPDATE vector_retirement_state
          SET admission_cursor = NULL,
@@ -1923,16 +1928,44 @@ export const admitOneCodeGraphVectorRetirement = Effect.fn('codeGraph.admitVecto
   );
 });
 
+/** An unfinished generation is retained this long after its creation or its last claim expiry. */
+export const CODE_GRAPH_VECTOR_BUILDING_GRACE_MILLISECONDS = 60 * 60_000;
+const SQL_NOW_MILLISECONDS = codeGraphSqlEpochMilliseconds("'now'");
+
+/** Progress rows exist only in the v3 vector database. */
+const progressTablePresent = Effect.fn('codeGraph.vectorProgressTablePresent')(function* (sql: SqlClient.SqlClient) {
+  const versions = yield* sql.unsafe<{readonly user_version: number}>('PRAGMA user_version');
+  return versions[0]?.user_version === 3;
+});
+
+const buildingGenerationInGrace = Effect.fn('codeGraph.buildingGenerationInGrace')(function* (
+  sql: SqlClient.SqlClient,
+  generation: string,
+) {
+  const created = yield* sql.unsafe(
+    `SELECT 1 FROM vector_generations WHERE generation = ?
+      AND ${codeGraphSqlEpochMilliseconds('created_at')} > ${SQL_NOW_MILLISECONDS} - ? LIMIT 1`,
+    [generation, CODE_GRAPH_VECTOR_BUILDING_GRACE_MILLISECONDS],
+  );
+  if (created.length !== 0) return true;
+  if (!(yield* progressTablePresent(sql))) return false;
+  const claimed = yield* sql.unsafe(
+    `SELECT 1 FROM vector_generation_progress
+    WHERE generation = ? AND expires_at > ${SQL_NOW_MILLISECONDS} - ? LIMIT 1`,
+    [generation, CODE_GRAPH_VECTOR_BUILDING_GRACE_MILLISECONDS],
+  );
+  return claimed.length !== 0;
+});
+
 const liveGenerationClaim = Effect.fn('codeGraph.liveGenerationClaim')(function* (
   sql: SqlClient.SqlClient,
   generation: string,
 ) {
-  const versions = yield* sql.unsafe<{readonly user_version: number}>('PRAGMA user_version');
-  if (versions[0]?.user_version !== 3) return false;
+  if (!(yield* progressTablePresent(sql))) return false;
   const rows = yield* sql.unsafe(
     `SELECT 1 FROM vector_generation_progress
     WHERE (generation = ? OR reusable_generation = ?)
-      AND expires_at > CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER) LIMIT 1`,
+      AND expires_at > ${SQL_NOW_MILLISECONDS} LIMIT 1`,
     [generation, generation],
   );
   return rows.length !== 0;
