@@ -199,7 +199,7 @@ export interface ContextBriefCitationScaleObservationV2 {
   readonly exactValidationReceipts: number;
   readonly memoryRetrievalMilliseconds: number;
   readonly profile: ContextBriefCitationScaleProfileId;
-  /** True when the compiler's lexical read deadline interrupted memory recall before it returned evidence. */
+  /** True when the compiler's brief read deadline interrupted memory recall before it returned evidence. */
   readonly recallBudgetExhausted: boolean;
   readonly selectedMemories: number;
   readonly validationMilliseconds: number;
@@ -261,10 +261,10 @@ export interface ContextBriefCitationScaleProfileResultV2 {
   };
   readonly observations: readonly ContextBriefCitationScaleMeasuredObservationV2[];
   readonly profile: ContextBriefCitationScaleProfileV1;
-  /** External RSS-pass observations after ordinal 0 whose memory recall declared the lexical deadline. */
+  /** External RSS-pass observations after ordinal 0 whose memory recall declared the brief read deadline. */
   readonly recallBudgetExhaustedObservations: number;
   readonly samples: number;
-  /** Timed observations after the cold one whose memory recall declared the lexical deadline. */
+  /** Timed observations after the cold one whose memory recall declared the brief read deadline. */
   readonly timedRecallBudgetExhaustedObservations: number;
 }
 
@@ -734,7 +734,7 @@ export function evaluateContextBriefCitationScaleProfile(
   };
 }
 
-/** Hosted runners occasionally cross the lexical recall deadline; more than 10% of a pass is a regression. */
+/** Hosted runners occasionally cross the brief read deadline; more than 10% of a pass is a regression. */
 function recallExhaustionRateFailure(
   profile: ContextBriefCitationScaleProfileV1,
   declared: number,

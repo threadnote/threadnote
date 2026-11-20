@@ -41,9 +41,11 @@ import {
   RecallReadyReadBoundaryError,
   type RecallReadyReadRequest,
 } from '@threadnote/recall/read_boundary';
+import {CONTEXT_BRIEF_READ_MILLISECONDS} from '@threadnote/context/compiler';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {
   makeReadyRecallReadBoundary,
+  RECALL_READY_READ_MILLISECONDS,
   withReadyRecallReadBoundary,
   readyRecallReadRequestBinding,
   readyReadWorkerInvocation,
@@ -299,6 +301,25 @@ describe('owned native ready-read boundary', () => {
       expect(yield* readDeadlineRemaining(deadline)).toBe(1100);
       expect(f.starts).toEqual([]);
       expect(yield* readRecallLexicalDemand({...f.request.config, includeInactive: false})).toBeUndefined();
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('an explicit read budget sets the native compute allowance and the default stays two seconds', () =>
+    Effect.gen(function* () {
+      const f = yield* coldFixture;
+      const read = readRecallIndexData(f.request.config, {includeInactive: false, query: 'x'});
+      yield* withReadyRecallReadBoundary(read, {readMilliseconds: CONTEXT_BRIEF_READ_MILLISECONDS}).pipe(
+        Effect.provideService(CommandExecutor, f.observed),
+        Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}),
+        Effect.exit,
+      );
+      yield* withReadyRecallReadBoundary(read).pipe(
+        Effect.provideService(CommandExecutor, f.observed),
+        Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}),
+        Effect.exit,
+      );
+      // The private cleanup and decode reserve is 1100 ms.
+      expect(f.starts).toEqual([CONTEXT_BRIEF_READ_MILLISECONDS - 1100, RECALL_READY_READ_MILLISECONDS - 1100]);
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 

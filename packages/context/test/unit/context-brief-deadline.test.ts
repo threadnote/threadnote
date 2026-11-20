@@ -316,7 +316,29 @@ describe('Context Brief shared elapsed budgets', () => {
     }),
   );
 
-  effectIt.effect('lexical expiration does not cancel useful graph evidence or gain a new two second window', () =>
+  effectIt.effect('memory recall finishing after two seconds but before five keeps its evidence', () =>
+    Effect.gen(function* () {
+      let logical: ContextBriefLogicalResultV1 | undefined;
+      const fiber = yield* compileContextBriefWith(
+        {
+          graphEvidence: () => Effect.succeed(unavailableContextBriefGraphEvidence('graph-ready-snapshot-missing', 1)),
+          memoryEvidence: () => Effect.sleep(3000).pipe(Effect.as(memory())),
+          projection: (value, budget, format) =>
+            Effect.sync(() => {
+              logical = value;
+              return projectContextBrief(value, budget, format);
+            }),
+        },
+        request,
+      ).pipe(Effect.forkScoped);
+      yield* TestClock.adjust(3000);
+      yield* Fiber.join(fiber);
+      expect(logical?.durableDecisions[0]?.uri).toBe(candidate.uri);
+      expect(logical?.coverage.gaps).not.toContain('memory-recall-budget-exhausted');
+    }),
+  );
+
+  effectIt.effect('memory expiry at five seconds does not cancel earlier graph evidence or gain a new window', () =>
     Effect.gen(function* () {
       let completed = false;
       let logical: ContextBriefLogicalResultV1 | undefined;
@@ -325,7 +347,7 @@ describe('Context Brief shared elapsed budgets', () => {
           graphEvidence: () =>
             Effect.sleep(2500).pipe(Effect.as(unavailableContextBriefGraphEvidence('graph-ready-snapshot-missing', 1))),
           memoryEvidence: () =>
-            Effect.sleep(3000).pipe(
+            Effect.sleep(6000).pipe(
               Effect.tap(() =>
                 Effect.sync(() => {
                   completed = true;
@@ -341,9 +363,10 @@ describe('Context Brief shared elapsed budgets', () => {
         },
         request,
       ).pipe(Effect.forkScoped);
-      yield* TestClock.adjust(2500);
+      yield* TestClock.adjust(5000);
       yield* Fiber.join(fiber);
       expect(completed).toBe(false);
+      expect(logical?.coverage.gaps).toContain('graph-ready-snapshot-missing');
       expect(logical?.coverage.gaps).toContain('memory-recall-budget-exhausted');
       expect(logical?.durableDecisions).toEqual([]);
     }),
