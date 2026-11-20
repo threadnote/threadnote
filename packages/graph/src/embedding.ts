@@ -13,6 +13,7 @@ import {
   renewCodeGraphGenerationClaim,
   readCodeGraphGenerationProgress,
   releaseCodeGraphGenerationClaim,
+  selectCodeGraphPredecessorGeneration,
   type CodeGraphGenerationProgress,
 } from './vector/generation.js';
 import {inspectVectorPageStorageSql} from './vector/retirement/inspection.js';
@@ -455,9 +456,6 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
             WHERE generation.snapshot_id = ? AND generation.model_sha256 = ? AND generation.dimensions = ?
               AND generation.template_version = ? AND generation.state = 'building' AND progress.request_epoch = ?
               AND NOT EXISTS (SELECT 1 FROM vector_generation_retirements WHERE generation = generation.generation)
-              AND (progress.reusable_generation IS NULL OR EXISTS (
-                SELECT 1 FROM vector_generations AS reusable WHERE reusable.generation = progress.reusable_generation AND reusable.state = 'ready'
-                  AND NOT EXISTS (SELECT 1 FROM vector_generation_retirements WHERE generation = reusable.generation)))
             ORDER BY generation.created_at DESC LIMIT 1`,
                     [
                       input.snapshot.id,
@@ -467,9 +465,10 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
                       requestEpoch,
                     ],
                   );
+                  // A resumed generation's dead pin does not exclude it here; its claim clears that pin.
                   generation = candidates[0];
                 }
-                let reusable: VectorGenerationRow | undefined;
+                let reusable: string | undefined;
                 if (!generation) {
                   if (!input.force && !atomicReuse) {
                     const active = yield* selectActiveGeneration(sql, worktreeId);
@@ -477,9 +476,18 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
                       active?.model_sha256 === selected.manifest.sha256 &&
                       active.template_version === graphEmbeddingTemplateVersion(selected.manifest) &&
                       active.dimensions === selected.manifest.dimensions
-                        ? active
+                        ? active.generation
                         : undefined;
                   }
+                  // Carry unfinished work forward: a superseded predecessor stays pinned, and so reusable,
+                  // while this generation's claim is live. Select it before the new row exists.
+                  if (!input.force && reusable === undefined)
+                    reusable = yield* selectCodeGraphPredecessorGeneration(sql, {
+                      modelId: selected.manifest.id,
+                      modelSha256: selected.manifest.sha256,
+                      dimensions: selected.manifest.dimensions!,
+                      templateVersion: graphEmbeddingTemplateVersion(selected.manifest),
+                    });
                   const id = `${yield* Clock.currentTimeMillis}-${yield* crypto.uuidV4()}`;
                   yield* sql`INSERT INTO vector_generations (generation, snapshot_id, model_id, model_sha256, dimensions, template_version, count, state, created_at)
             VALUES (${id}, ${input.snapshot.id}, ${selected.manifest.id}, ${selected.manifest.sha256}, ${selected.manifest.dimensions!},
@@ -499,19 +507,12 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
                   return yield* CodeGraphVectorOwnerExpired.make({
                     message: 'Vector generation ownership expired; a fresh validated owner is required.',
                   });
-                let progress = yield* claimCodeGraphGeneration(sql, {
+                const progress = yield* claimCodeGraphGeneration(sql, {
                   generation: generation.generation,
                   ownerToken,
                   requestEpoch,
-                  reusableGeneration: reusable?.generation,
+                  reusableGeneration: reusable,
                 });
-                if (progress && atomicReuse && progress.reusable_generation !== null) {
-                  yield* sql.unsafe(
-                    'UPDATE vector_generation_progress SET reusable_generation = NULL WHERE generation = ? AND owner_token = ?',
-                    [generation.generation, ownerToken],
-                  );
-                  progress = yield* readCodeGraphGenerationProgress(sql, generation.generation);
-                }
                 return progress ? {generation, progress} : undefined;
               }),
             ),
@@ -770,6 +771,7 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
             );
             if (ready.length !== 1)
               return yield* CodeGraphEmbeddingError.make({message: 'Code graph generation is not complete.'});
+            // The pin, kept for the whole build, releases its predecessor for retirement only here.
             yield* sql.unsafe(
               'UPDATE vector_generation_progress SET reusable_generation = NULL WHERE generation = ? AND owner_token = ?',
               [generation, ownerToken],

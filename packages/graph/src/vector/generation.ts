@@ -24,6 +24,15 @@ export interface CodeGraphGenerationProgress {
 
 export const CODE_GRAPH_GENERATION_LEASE_MILLISECONDS = 5 * 60_000;
 
+/** SQLite wall-clock epoch milliseconds, as the retirement guard triggers compute them. */
+export const codeGraphSqlEpochMilliseconds = (value: string) =>
+  `CAST((julianday(${value}) - 2440587.5) * 86400000 AS INTEGER)`;
+
+/** A pin is usable while it names an unretired generation that is unfinished or ready. Binds the pin twice. */
+const USABLE_PIN_SQL = `EXISTS (SELECT 1 FROM vector_generations AS pin WHERE pin.generation = ?
+  AND pin.state IN ('building', 'ready')
+  AND NOT EXISTS (SELECT 1 FROM vector_generation_retirements WHERE generation = ?))`;
+
 /** Exact metadata validation is read-only, including on released v2 databases. */
 export const requireCodeGraphGenerationSchema = Effect.fn('codeGraph.requireGenerationSchema')(function* (
   sql: SqlClient.SqlClient,
@@ -93,12 +102,13 @@ export const claimCodeGraphGeneration = Effect.fn('codeGraph.claimGeneration')(f
   const now = yield* Clock.currentTimeMillis;
   return yield* sql.withTransaction(
     Effect.gen(function* () {
+      // A pin may name an unfinished predecessor; its (symbol, fingerprint) rows are as reusable as ready ones.
+      const pin = input.reusableGeneration ?? null;
       const valid = yield* sql.unsafe<{readonly state: string}>(
         `SELECT state FROM vector_generations WHERE generation = ?
       AND NOT EXISTS (SELECT 1 FROM vector_generation_retirements WHERE generation = ?)
-      AND (? IS NULL OR EXISTS (SELECT 1 FROM vector_generations AS reusable WHERE reusable.generation = ? AND reusable.state = 'ready'
-        AND NOT EXISTS (SELECT 1 FROM vector_generation_retirements WHERE generation = reusable.generation)))`,
-        [input.generation, input.generation, input.reusableGeneration ?? null, input.reusableGeneration ?? null],
+      AND (? IS NULL OR (? <> generation AND ${USABLE_PIN_SQL}))`,
+        [input.generation, input.generation, pin, pin, pin, pin],
       );
       if (valid.length !== 1) return undefined;
       const prior = yield* readCodeGraphGenerationProgress(sql, input.generation);
@@ -107,17 +117,17 @@ export const claimCodeGraphGeneration = Effect.fn('codeGraph.claimGeneration')(f
         yield* requireCodeGraphGenerationClaim(sql, input.generation, input.ownerToken);
         return prior;
       }
-      // Revalidate the persisted input too; a reclaimed input invalidates resumability.
       if (prior?.owner_token === input.ownerToken && prior.expires_at <= now) return undefined;
       const ready = valid[0]?.state === 'ready';
-      if (!ready && prior?.reusable_generation) {
-        const reusable = yield* sql.unsafe(
-          `SELECT 1 FROM vector_generations WHERE generation = ? AND state = 'ready'
-        AND NOT EXISTS (SELECT 1 FROM vector_generation_retirements WHERE generation = ?)`,
-          [prior.reusable_generation, prior.reusable_generation],
-        );
-        if (reusable.length !== 1) return undefined;
-      }
+      // Revalidate the persisted pin too. A retired or missing pin is only an optimization that is gone:
+      // clear it and keep the durable cursor, so the generation stays claimable.
+      const clearPin =
+        ready ||
+        (!!prior?.reusable_generation &&
+          (yield* sql.unsafe<{readonly usable: number}>(`SELECT ${USABLE_PIN_SQL} AS usable`, [
+            prior.reusable_generation,
+            prior.reusable_generation,
+          ]))[0]?.usable !== 1);
       yield* sql.unsafe(
         `INSERT INTO vector_generation_progress
       (generation, owner_token, expires_at, reusable_generation, request_epoch) VALUES (?, ?, ?, ?, ?)
@@ -129,7 +139,7 @@ export const claimCodeGraphGeneration = Effect.fn('codeGraph.claimGeneration')(f
           now + CODE_GRAPH_GENERATION_LEASE_MILLISECONDS,
           ready ? null : (input.reusableGeneration ?? null),
           input.requestEpoch,
-          ready ? 1 : 0,
+          clearPin ? 1 : 0,
         ],
       );
       return yield* readCodeGraphGenerationProgress(sql, input.generation);
@@ -144,18 +154,12 @@ export const requireCodeGraphGenerationClaim = Effect.fn('codeGraph.requireGener
 ) {
   const now = yield* Clock.currentTimeMillis;
   const progress = yield* readCodeGraphGenerationProgress(sql, generation);
+  const pin = progress?.reusable_generation ?? null;
   const valid = yield* sql.unsafe(
     `SELECT 1 FROM vector_generations WHERE generation = ?
     AND NOT EXISTS (SELECT 1 FROM vector_generation_retirements WHERE generation = ?)
-    AND (? IS NULL OR EXISTS (SELECT 1 FROM vector_generations WHERE generation = ? AND state = 'ready'
-      AND NOT EXISTS (SELECT 1 FROM vector_generation_retirements WHERE generation = ?)))`,
-    [
-      generation,
-      generation,
-      progress?.reusable_generation ?? null,
-      progress?.reusable_generation ?? null,
-      progress?.reusable_generation ?? null,
-    ],
+    AND (? IS NULL OR ${USABLE_PIN_SQL})`,
+    [generation, generation, pin, pin, pin],
   );
   if (!progress || progress.owner_token !== ownerToken || progress.expires_at <= now || valid.length !== 1) {
     return yield* CodeGraphGenerationClaimError.make({
@@ -250,6 +254,38 @@ export const CODE_GRAPH_REUSE_CANDIDATES = 8;
 export const CODE_GRAPH_REUSE_BYTE_LIMIT = 4 * 1024 * 1024;
 export const CODE_GRAPH_REUSE_PAYLOAD_ROWS = 400;
 
+/**
+ * The newest compatible, unretired unfinished generation from a bounded raw window, preferring one without a live
+ * claim. A successor pins it so its vectors stay reusable, and the retirement guards keep it while the successor's
+ * claim is live. A generation with its own live claim is already protected, so it is chosen only as a fallback.
+ */
+export const selectCodeGraphPredecessorGeneration = Effect.fn('codeGraph.selectPredecessorGeneration')(function* (
+  sql: SqlClient.SqlClient,
+  input: {
+    readonly modelId: string;
+    readonly modelSha256: string;
+    readonly dimensions: number;
+    readonly templateVersion: number;
+  },
+) {
+  // Bounds apply to raw indexed metadata BEFORE compatibility filtering.
+  const rows = yield* sql.unsafe<{readonly generation: string}>(
+    `SELECT recent.generation FROM (
+       SELECT generation, state, model_id, model_sha256, dimensions, template_version
+       FROM vector_generations ORDER BY generation DESC LIMIT ?
+     ) AS recent
+     WHERE recent.state = 'building'
+       AND recent.model_id = ? AND recent.model_sha256 = ? AND recent.dimensions = ? AND recent.template_version = ?
+       AND NOT EXISTS (SELECT 1 FROM vector_generation_retirements WHERE generation = recent.generation)
+     ORDER BY EXISTS (SELECT 1 FROM vector_generation_progress AS claim WHERE claim.generation = recent.generation
+         AND claim.expires_at > ${codeGraphSqlEpochMilliseconds("'now'")}),
+       recent.generation DESC
+     LIMIT 1`,
+    [CODE_GRAPH_REUSE_GENERATION_WINDOW, input.modelId, input.modelSha256, input.dimensions, input.templateVersion],
+  );
+  return rows[0]?.generation;
+});
+
 export function estimateCodeGraphCompatibleCopyBytes(
   raw: readonly {id: string; fingerprint?: string; cursor: string}[],
   dimensions: number,
@@ -299,17 +335,20 @@ export const copyCodeGraphCompatiblePrefix = Effect.fn('codeGraph.copyCompatible
         'SELECT generation FROM vector_pointers ORDER BY worktree_id LIMIT ?',
         [CODE_GRAPH_REUSE_POINTER_WINDOW],
       );
+      // Generation ids start with their creation time, so the newest raw window holds the likeliest
+      // predecessors, including unfinished generations that a newer snapshot superseded.
       const generations = yield* sql.unsafe<{readonly generation: string}>(
-        'SELECT generation FROM vector_generations ORDER BY generation LIMIT ?',
+        'SELECT generation FROM vector_generations ORDER BY generation DESC LIMIT ?',
         [CODE_GRAPH_REUSE_GENERATION_WINDOW],
       );
+      const pinned = progress.reusable_generation === null ? [] : [{generation: progress.reusable_generation}];
       const candidates: string[] = [];
-      const inspected = new Set<string>();
-      for (const reference of [...own, ...pointers, ...generations]) {
+      const inspected = new Set<string>([input.generation]);
+      for (const reference of [...pinned, ...own, ...pointers, ...generations]) {
         if (inspected.has(reference.generation)) continue;
         inspected.add(reference.generation);
         const compatible = yield* sql.unsafe(
-          `SELECT 1 FROM vector_generations WHERE generation = ? AND state = 'ready'
+          `SELECT 1 FROM vector_generations WHERE generation = ? AND state IN ('building', 'ready')
           AND model_id = ? AND model_sha256 = ? AND dimensions = ? AND template_version = ?
           AND NOT EXISTS (SELECT 1 FROM vector_generation_retirements WHERE generation = ?)`,
           [

@@ -961,7 +961,7 @@ describe('code graph vector retirement schema', () => {
       ),
     );
 
-    layerIt.effect('restarts an active admission scan after insert, update, or authorized delete', () =>
+    layerIt.effect('finishes an active admission pass after insert, update, or authorized delete, then restarts', () =>
       Effect.scoped(
         Effect.gen(function* () {
           const fs = yield* FileSystem.FileSystem;
@@ -1021,6 +1021,19 @@ describe('code graph vector retirement schema', () => {
               }),
             );
 
+            // The changed revision does not stop the pass: it continues from its cursor.
+            if (scenario === 'update') {
+              expect(
+                yield* admitOneCodeGraphVectorRetirementWithCapacity(databasePath, capacityOptions),
+                scenario,
+              ).toMatchObject({generation: 'generation-z', state: 'advanced'});
+              expect(yield* Effect.sync(() => readRetirementDataState(databasePath).state[0]), scenario).toMatchObject({
+                admission_cursor: 'generation-z',
+                admission_scan_revision: 0,
+                generation_revision: 1,
+              });
+            }
+            // At wrap, a pass whose revision changed restarts instead of claiming clean.
             const resetPlan = yield* planCodeGraphVectorRetirementAdmission(databasePath);
             expect(resetPlan.state, scenario).toBe('planned');
             if (resetPlan.state !== 'planned')
@@ -1037,6 +1050,15 @@ describe('code graph vector retirement schema', () => {
             });
             expect((yield* planCodeGraphVectorRetirementAdmission(databasePath)).state, scenario).toBe('planned');
             expect(yield* inspectCodeGraphVectorRetirementWork(databasePath), scenario).toEqual({state: 'admission'});
+            // The next pass visits the generation inserted before the old cursor.
+            expect(
+              yield* admitOneCodeGraphVectorRetirementWithCapacity(databasePath, capacityOptions),
+              scenario,
+            ).toMatchObject(
+              scenario === 'insert'
+                ? {generation: 'generation-0', state: 'admitted'}
+                : {generation: 'generation-a', state: 'advanced'},
+            );
           }
         }),
       ),
