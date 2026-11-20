@@ -44,6 +44,7 @@ import {applyDevSkills, statusDevSkills} from '../../src/dev_skills/index.js';
 import {DevSkillsSource, loadDevSkillsBundleAt} from '../../src/dev_skills/manifest.js';
 import {enrollmentContext} from '../../src/dev_skills/registry.js';
 import {SystemInfo} from '@threadnote/platform/system';
+import {FileLockTimeout} from '@threadnote/platform/file/lock';
 import {readNativeWorkflowState, serializeNativeWorkflowState} from '../../src/workflow_automation/store.js';
 import {withDeferredCodeAnchorMutationLocks} from '../../src/memory/deferred/code_anchor.js';
 import {healAnchorsAfterGraphIndex} from '../../src/memory/deferred/code_anchor_recovery.js';
@@ -978,6 +979,82 @@ describe('native task actions', () => {
         ['plan', 'verified'],
       ]);
     }).pipe(run),
+  );
+
+  effectIt.effect(
+    'retries a start that a briefly held admission lock refused, then surfaces a persistent refusal',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* nativeFixture();
+        yield* runCommandEffect('git', ['-C', f.repo, 'add', 'source.ts']);
+        yield* runCommandEffect('git', [
+          '-C',
+          f.repo,
+          '-c',
+          'user.name=Fixture',
+          '-c',
+          'user.email=fixture@example.invalid',
+          'commit',
+          '-m',
+          'Fixture source',
+        ]);
+        const system = yield* SystemInfo;
+        const repo = yield* f.fs.realPath(f.repo);
+        const home = yield* f.fs.realPath(f.home);
+        const config = {...f.config, agentContextHome: home, manifestPath: f.path.join(home, 'manifest.json')};
+        const scopedSystem = {...system, currentDirectory: () => repo, homeDirectory: home};
+        yield* applyDevSkills(config, 'install', {agent: 'codex'}).pipe(
+          Effect.provideService(SystemInfo, scopedSystem),
+        );
+        const start = {
+          featureName: 'Admission retry start',
+          callerCwd: repo,
+          installationTarget: 'codex',
+          workflowProfile: 'standard' as const,
+          intent: {
+            title: 'Admission retry start',
+            currentBehavior: 'Expired fixture data is returned.',
+            desiredChange: 'Expired fixture data is refreshed before return.',
+            affectedPaths: ['source.ts'],
+            acceptanceCriterion: 'The refreshed fixture value is returned.',
+            verification: 'Read an expired fixture.',
+            eligibilityRationale: 'One source-bound fixture behavior with no unresolved decisions.',
+            eligibility: {status: 'eligible' as const},
+            review: {required: false, reason: 'Bounded fixture correction.'},
+          },
+        };
+        const actualFs = yield* FileSystem.FileSystem;
+        let refusals = 0;
+        // Another process holds the non-memory lock: the canonical run write is refused before it lands.
+        const refusingFs = (limit: number) => ({
+          ...actualFs,
+          rename: (from: string, to: string) =>
+            EffectString.includes('native-v1')(to) && EffectString.endsWith('.json')(to) && refusals < limit
+              ? Effect.suspend(() => {
+                  refusals += 1;
+                  return Effect.fail(FileLockTimeout.of(f.path.join(home, 'recall-index.lock')));
+                })
+              : actualFs.rename(from, to),
+        });
+        const transient = yield* runNativeTaskStart(config, start).pipe(
+          Effect.provideService(SystemInfo, scopedSystem),
+          Effect.provideService(FileSystem.FileSystem, refusingFs(1)),
+        );
+        expect(refusals).toBe(1);
+        expect(object(transient).status).toBe('awaiting-user-confirmation');
+        refusals = 0;
+        const persistent = yield* runNativeTaskStart(config, {
+          ...start,
+          featureName: 'Admission retry persistent',
+        }).pipe(
+          Effect.provideService(SystemInfo, scopedSystem),
+          Effect.provideService(FileSystem.FileSystem, refusingFs(Number.POSITIVE_INFINITY)),
+          Effect.result,
+        );
+        expect(persistent).toMatchObject({failure: {code: 'admission-busy', retryable: true}});
+        // One attempt plus the bounded retries, and no more.
+        expect(refusals).toBe(4);
+      }).pipe(run),
   );
 
   effectIt.effect('leaves a path that the ready graph does not index uncited in a standard compact start', () =>

@@ -214,6 +214,7 @@ export const attemptSimulatedTaskWatch = (
   prUrl: string,
   expectedWatchId?: string,
   onCollectorSpawn: Effect.Effect<void> = Effect.void,
+  startFields: Readonly<Record<string, unknown>> = {},
 ) =>
   Effect.gen(function* () {
     const identity =
@@ -312,6 +313,7 @@ export const attemptSimulatedTaskWatch = (
       callerCwd: f.repo,
       validationRef,
       deliveryRef,
+      ...startFields,
       wakeup,
     }).pipe(
       Effect.match({

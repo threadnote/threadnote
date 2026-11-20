@@ -362,10 +362,7 @@ export const runNativeTaskPrDelivery = (
           phaseId: phase.id,
           validationRef: request.validationRef,
           deliveryRef,
-          prUrl: request.pr.url,
-          headSha: deliveryHead,
-          expectedConsumer:
-            'Start a task-bound watch on this exact PR head with the host wakeup. A successful start records the delivery.',
+          expectedConsumer: `Start a task-bound watch with these fields and the host wakeup; the PR and head are in pr. A successful start records the delivery. ${nativeWatchHostRegistrationHint}`,
         },
       };
     }
