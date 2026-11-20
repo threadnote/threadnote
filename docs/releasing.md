@@ -54,6 +54,13 @@ provider-eligible.
 - `bun tools/semantic/build-typescript-native.ts --prepare OFFICIAL_SOURCE GO_ARCHIVE PRIVATE_ROOT REPOSITORY_ROOT`
   writes `PRIVATE_ROOT/native-ts71-*/payload` (binary, notices, `probe-config.json`, `construction-receipt.json`) and
   the sibling `prepared` runtime asset, then verifies both.
+- The nine construction commands have finite deadlines: Go archive extraction 60 s (300 s on Windows), each Git
+  command 30 s, `go version` and `tsc --version` 10 s, module download 120 s, module verify 60 s, and the focused
+  tests, race tests and build 240 s each. On a slower host, `THREADNOTE_TYPESCRIPT_NATIVE_DEADLINE_MULTIPLIER` (one
+  digit from 1 to 4) scales exactly these; the frontend patch's fixed `git apply` deadlines and Go's test `-timeout`
+  do not scale. The multiplier does not change the constructed bytes or receipt, and the workflow records it in
+  `summary.json`. A timeout and an undrained process tree fail with distinct errors that name the command, elapsed
+  time and an output tail.
 - `--verify-construction PAYLOAD` re-checks a payload on its own and prints the executable to run; take the probe
   executable from this output. `--verify-prepared PREPARED` re-checks a prepared asset, including POSIX modes, and
   succeeds only beside its sibling `payload`. A schema-v1 payload stores an absolute probe command and is refused once

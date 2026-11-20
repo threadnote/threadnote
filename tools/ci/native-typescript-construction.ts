@@ -87,6 +87,9 @@ async function summarize(): Promise<void> {
     throw new Error('Construction, prepared and extracted verification disagree on the executable.');
   const receiptBytes = await Bun.file(`${portable(prepared.payloadDirectory)}/construction-receipt.json`).bytes();
   const receipt = Schema.decodeUnknownSync(ConstructionReceipt)(JSON.parse(new TextDecoder().decode(receiptBytes)));
+  const multiplier = process.env.THREADNOTE_TYPESCRIPT_NATIVE_DEADLINE_MULTIPLIER;
+  if (multiplier !== undefined && !/^[1-4]$/u.test(multiplier))
+    throw new Error('THREADNOTE_TYPESCRIPT_NATIVE_DEADLINE_MULTIPLIER must be an integer from 1 to 4.');
   const commit = required('THREADNOTE_COMMIT');
   if (!/^[a-f0-9]{40}$/u.test(commit)) throw new Error('THREADNOTE_COMMIT is not a full commit SHA.');
   const pin = EffectOption.getOrUndefined(
@@ -103,6 +106,7 @@ async function summarize(): Promise<void> {
     imageOS: process.env.ImageOS ?? null,
     imageVersion: process.env.ImageVersion ?? null,
     bun: Bun.version,
+    deadlineMultiplier: multiplier === undefined ? 1 : Number(multiplier),
     threadnoteCommit: commit,
     upstreamCommit: receipt.sourceCommit,
     goArchiveSha256: receipt.goArchiveSha256,

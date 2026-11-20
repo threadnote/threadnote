@@ -297,7 +297,7 @@ export const typescriptNativeBuildRecipe = {
     ],
     version: ['DERIVED_EXECUTABLE', '--version'],
     bounds:
-      'Use existing owned-process controls; compile/build and race commands were bounded at240s externally, test execution60s. Observe original child/group termination and pipeEOF; timeout/forced/unknown is failure, not success. No build before focused/race pass.',
+      'Use existing owned-process controls; compile/build and race commands are bounded at240s, test execution60s. An explicit integer deadline multiplier from 1 to 4 scales the nine construction command deadlines, never the test -timeout. Observe original child/group termination and pipeEOF; timeout/forced/unknown is failure, not success. No build before focused/race pass.',
   },
   provenanceRequired: [
     'Base commit/tree, actual source overlay and file digests, exact toolchain archive/executable, Go module graph/checksums and bundled library digests.',
@@ -467,6 +467,11 @@ export interface TypeScriptNativeBuildInput {
   /** Fresh caller-owned root. No default home or shared Go cache is used. */
   readonly privateRoot: string;
   readonly repositoryRoot: string;
+  /**
+   * Integer 1-4 (default 1) scaling every construction command deadline for slower hosts, such as cold CI runners.
+   * Deadlines stay finite and the constructed bytes, receipt and digests are unchanged.
+   */
+  readonly deadlineMultiplier?: number;
 }
 
 const hash = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
@@ -552,6 +557,16 @@ async function assertExtractedGoToolchainInventory(extraction: string, executabl
     throw new Error('Native TypeScript extracted Go executable is invalid.');
 }
 const wait = (milliseconds: number) => new Promise<void>(done => setTimeout(done, milliseconds));
+/** Bounded, leniently decoded output tail so a CI failure names its cause. */
+const outputTail = (text: string) => new TextDecoder().decode(new TextEncoder().encode(text).slice(-8 * 1024)).trim();
+/** Bounded diagnostic command name: leading `-c key=value` Git configuration is omitted, then at most four arguments. */
+function commandSummary(executable: string, args: readonly string[]): string {
+  let start = 0;
+  while (args[start] === '-c' && start + 1 < args.length) start += 2;
+  const shown = args.slice(start, start + 4).map(arg => (arg.length > 80 ? `${arg.slice(0, 77)}...` : arg));
+  const rest = args.length - start - shown.length;
+  return [basename(executable), ...shown, ...(rest > 0 ? [`(+${rest} more)`] : [])].join(' ');
+}
 
 /** A command owns its original native process tree, both pipes and its finite deadline. */
 async function command(
@@ -566,9 +581,10 @@ async function command(
     overflow = false,
     pumpFailure: unknown,
     pumpSettled = false;
-  const collect = async (stream: ReadableStream<Uint8Array>) => {
+  const stdoutChunks: Uint8Array[] = [];
+  const stderrChunks: Uint8Array[] = [];
+  const collect = async (stream: ReadableStream<Uint8Array>, chunks: Uint8Array[]) => {
     const reader = stream.getReader();
-    const chunks: Uint8Array[] = [];
     while (true) {
       const next = await reader.read();
       if (next.done) break;
@@ -578,7 +594,7 @@ async function command(
     }
     return new TextDecoder().decode(Buffer.concat(chunks));
   };
-  const output = Promise.all([collect(owner.stdout), collect(owner.stderr)]).then(
+  const output = Promise.all([collect(owner.stdout, stdoutChunks), collect(owner.stderr, stderrChunks)]).then(
     value => {
       pumpSettled = true;
       return value;
@@ -589,7 +605,8 @@ async function command(
       return ['', ''] as [string, string];
     },
   );
-  const deadline = performance.now() + milliseconds;
+  const started = performance.now();
+  const deadline = started + milliseconds;
   try {
     await owner.closeInput();
     let observation = runtimeObserveOwnedProviderTree(owner.handle);
@@ -598,7 +615,14 @@ async function command(
       await wait(20);
       observation = runtimeObserveOwnedProviderTree(owner.handle);
     }
-    if (observation.state !== 'drained') throw new Error('Native TypeScript build command did not drain.');
+    if (observation.state !== 'drained') {
+      // A running leader at the deadline is a timeout; anything else held the tree or stdio after the leader.
+      const detail = `${commandSummary(executable, args)}; elapsed ${Math.round(performance.now() - started)} ms of ${milliseconds} ms; tree ${observation.state}, leader exit ${observation.leaderExitCode ?? 'none'}, stdio ${observation.stdioClosed ? 'closed' : 'open'}`;
+      const tail = outputTail(new TextDecoder().decode(Buffer.concat([...stdoutChunks, ...stderrChunks])));
+      throw new Error(
+        `${observation.state === 'running' && observation.leaderExitCode === null ? 'Native TypeScript build command exceeded its deadline' : 'Native TypeScript build command did not drain'}: ${detail}.${tail ? `\n${tail}` : ''}`,
+      );
+    }
     let timer: ReturnType<typeof setTimeout> | undefined;
     const expired = new Promise<never>((_, reject) => {
       timer = setTimeout(
@@ -615,8 +639,7 @@ async function command(
     if (pumpFailure !== undefined || overflow)
       throw new Error('Native TypeScript build output was incomplete or excessive.');
     if (!observation.stdioClosed || observation.leaderExitCode !== 0) {
-      // Bounded, leniently decoded tail of the combined output so a CI failure names its cause.
-      const tail = new TextDecoder().decode(new TextEncoder().encode(stdout + stderr).slice(-8 * 1024)).trim();
+      const tail = outputTail(stdout + stderr);
       throw new Error(
         `Native TypeScript build command failed: ${basename(executable)} (${observation.leaderExitCode ?? 'unknown'}).${tail ? `\n${tail}` : ''}`,
       );
@@ -978,6 +1001,16 @@ export async function buildTypeScriptNativeAsset(input: TypeScriptNativeBuildInp
     throw new Error('Native TypeScript build host or input paths are unsupported.');
   const archive = hostToolchainArchive();
   if (!archive) throw new Error('Native TypeScript toolchain has no pinned host archive.');
+  const multiplier = input.deadlineMultiplier ?? 1;
+  if (!Number.isInteger(multiplier) || multiplier < 1 || multiplier > 4)
+    throw new Error('Native TypeScript deadline multiplier must be an integer from 1 to 4.');
+  const run = (
+    executable: string,
+    args: readonly string[],
+    cwd: string,
+    environment: NodeJS.ProcessEnv,
+    milliseconds: number,
+  ) => command(executable, args, cwd, environment, milliseconds * multiplier);
   const root = await realpath(input.privateRoot);
   const related = await Promise.all(
     [input.officialSource, input.toolchainArchive, input.repositoryRoot, input.moduleCache]
@@ -1033,18 +1066,11 @@ export async function buildTypeScriptNativeAsset(input: TypeScriptNativeBuildInp
     GOPATH: join(staging, 'gopath'),
     ...hermeticGitEnvironment(),
   };
-  const gitIn = (cwd: string, args: readonly string[]) =>
-    command(git, [...hermeticGitArguments, ...args], cwd, env, 30000);
+  const gitIn = (cwd: string, args: readonly string[]) => run(git, [...hermeticGitArguments, ...args], cwd, env, 30000);
   const privateArchive = join(staging, archive.filename);
   await writeFile(privateArchive, toolchainBytes, {mode: 0o400});
   await mkdir(extraction, {mode: 0o700});
-  await command(
-    tar,
-    [windows ? '-xf' : '-xzf', privateArchive, '-C', extraction],
-    staging,
-    env,
-    windows ? 300000 : 60000,
-  );
+  await run(tar, [windows ? '-xf' : '-xzf', privateArchive, '-C', extraction], staging, env, windows ? 300000 : 60000);
   await assertExtractedGoToolchainInventory(extraction, goExecutable);
   if ((await realpath(go)) !== go || !(await stat(go)).isFile())
     throw new Error('Native TypeScript extracted Go executable is invalid.');
@@ -1126,12 +1152,12 @@ export async function buildTypeScriptNativeAsset(input: TypeScriptNativeBuildInp
     )
   )
     throw new Error('Native TypeScript overlay introduced untracked or ignored source.');
-  const version = (await command(go, ['version'], candidate, env, 10000)).trim();
+  const version = (await run(go, ['version'], candidate, env, 10000)).trim();
   if (version !== `go version ${toolchain.version} ${archive.os}/${archive.arch}`)
     throw new Error('Native TypeScript Go toolchain version differs.');
   const module = join(candidate, upstream.moduleDirectory);
   const originalGoSum = await runtimeReadBoundedStableRegularFile(join(module, 'go.sum'), 1024 * 1024);
-  await command(
+  await run(
     go,
     ['mod', 'download', '-json', 'all'],
     module,
@@ -1142,7 +1168,7 @@ export async function buildTypeScriptNativeAsset(input: TypeScriptNativeBuildInp
   );
   await writeFile(join(module, 'go.sum'), originalGoSum);
   await exact(join(module, 'go.sum'), upstream.goSumSha256);
-  await command(go, offlineCommands.modules.slice(1), module, env, 60000);
+  await run(go, offlineCommands.modules.slice(1), module, env, 60000);
   // The upstream API/IPC tests create another private socket below TMPDIR.
   // Keep only those tests under a short 0700 path; long SSD artifact roots can
   // exceed Darwin's sockaddr_un bound before any test assertion runs.
@@ -1158,13 +1184,13 @@ export async function buildTypeScriptNativeAsset(input: TypeScriptNativeBuildInp
       throw new Error('Native TypeScript short test temp is not private.');
   }
   const testEnv = windows ? {...env, TMPDIR: testTemp, TEMP: testTemp, TMP: testTemp} : {...env, TMPDIR: testTemp};
-  await command(go, offlineCommands.focused.slice(1), module, testEnv, 240000);
+  await run(go, offlineCommands.focused.slice(1), module, testEnv, 240000);
   const raceSupported = hostRaceSupported();
-  if (raceSupported) await command(go, offlineCommands.race.slice(1), module, testEnv, 240000);
+  if (raceSupported) await run(go, offlineCommands.race.slice(1), module, testEnv, 240000);
   const executable = typescriptNativeBuildRecipe.runtimeAsset.executableName();
   const binary = join(payload, executable);
-  await command(go, [...offlineCommands.build.slice(1, -2), binary, './cmd/tsc'], module, env, 240000);
-  const output = (await command(binary, ['--version'], module, env, 10000)).trim();
+  await run(go, [...offlineCommands.build.slice(1, -2), binary, './cmd/tsc'], module, env, 240000);
+  const output = (await run(binary, ['--version'], module, env, 10000)).trim();
   if (output !== `Version ${upstream.version}`) throw new Error('Native TypeScript binary version differs.');
   const bytes = await runtimeReadBoundedStableRegularFile(binary, 128 * 1024 * 1024);
   if (bytes.byteLength === 0) throw new Error('Native TypeScript binary exceeds its bound.');
@@ -1335,7 +1361,12 @@ if (import.meta.main) {
     const [officialSource, toolchainArchive, privateRoot, repositoryRoot, moduleCache] = values;
     if (!officialSource || !toolchainArchive || !privateRoot || !repositoryRoot)
       throw new Error(`Usage: bun build-typescript-native.ts ${usage}`);
-    return {officialSource, toolchainArchive, privateRoot, repositoryRoot, moduleCache};
+    // Explicit opt-in for slower hosts: exactly one digit from 1 to 4.
+    const multiplier = process.env.THREADNOTE_TYPESCRIPT_NATIVE_DEADLINE_MULTIPLIER;
+    if (multiplier !== undefined && !/^[1-4]$/u.test(multiplier))
+      throw new Error('THREADNOTE_TYPESCRIPT_NATIVE_DEADLINE_MULTIPLIER must be an integer from 1 to 4.');
+    const deadlineMultiplier = multiplier === undefined ? undefined : Number(multiplier);
+    return {officialSource, toolchainArchive, privateRoot, repositoryRoot, moduleCache, deadlineMultiplier};
   };
   if (mode === '--verify-construction') {
     if (!rest[0]) throw new Error('Usage: bun build-typescript-native.ts --verify-construction PAYLOAD');

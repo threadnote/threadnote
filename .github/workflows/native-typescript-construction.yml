@@ -54,6 +54,9 @@ jobs:
         shell: bash
     env:
       THREADNOTE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+      # Cold runners need more than the local deadlines: the 30 s Git checkout cap failed on darwin-x64. The builder
+      # bounds this to 1-4 and the summary records it; the step and job timeouts remain the outer limits.
+      THREADNOTE_TYPESCRIPT_NATIVE_DEADLINE_MULTIPLIER: '3'
     steps:
       - name: Check out the Threadnote source under test
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -110,7 +113,7 @@ jobs:
           test -s "$ARCHIVE"
           test "$(wc -c < "$ARCHIVE" | tr -d '[:space:]')" = "$ARCHIVE_SIZE"
       - name: Construct and prepare the native TypeScript asset
-        timeout-minutes: 50
+        timeout-minutes: 60
         env:
           SOURCE: ${{ steps.inputs.outputs.source }}
           ARCHIVE: ${{ steps.inputs.outputs.archive }}
@@ -119,7 +122,12 @@ jobs:
           EVIDENCE: ${{ steps.inputs.outputs.evidence }}
         run: |
           set -euo pipefail
-          mkdir -m 700 "$PRIVATE_ROOT" "$EVIDENCE"
+          # The builder checks POSIX modes only off Windows; Git Bash cannot chmod a Windows ACL directory.
+          if [ "$RUNNER_OS" = Windows ]; then
+            mkdir "$PRIVATE_ROOT" "$EVIDENCE"
+          else
+            mkdir -m 700 "$PRIVATE_ROOT" "$EVIDENCE"
+          fi
           # No module cache argument: the builder acquires the pinned module graph once.
           bun tools/semantic/build-typescript-native.ts --prepare "$SOURCE" "$ARCHIVE" "$PRIVATE_ROOT" \
             "$REPOSITORY_ROOT" > "$EVIDENCE/prepare.json"
@@ -151,7 +159,7 @@ jobs:
           set -euo pipefail
           # A tar keeps the POSIX modes --verify-prepared checks; artifact ZIPs drop them. Relative -f operands avoid
           # GNU tar reading a Windows drive letter as a remote host. macOS bsdtar omits AppleDouble and xattr metadata.
-          mkdir -m 700 "$EXTRACTED"
+          if [ "$RUNNER_OS" = Windows ]; then mkdir "$EXTRACTED"; else mkdir -m 700 "$EXTRACTED"; fi
           (
             cd "$EVIDENCE"
             if [ "$RUNNER_OS" = macOS ]; then
