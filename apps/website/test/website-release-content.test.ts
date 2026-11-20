@@ -59,8 +59,11 @@ describe('website release-content producers', () => {
       'must contain a complete first sentence',
     );
     expect(() =>
-      releaseHeadlineFromSummary(`Threadnote 4.7 ${Effect.pipe('long ', EffectString.repeat(60))}.`),
-    ).toThrow('social-card headline of at most 240 characters');
+      releaseHeadlineFromSummary(`Threadnote 4.7 ${Effect.pipe('word ', EffectString.repeat(150))}done.`),
+    ).toThrow('does not fit the bounded image layout');
+    const longOpening =
+      'Threadnote 5.4.0 makes development workflows up to 45× faster, adds a lighter default dev-cycle profile, moves semantic reads into native code, makes code-graph indexing and checkpoints much cheaper on large repositories, and stops background maintenance from using CPU all the time.';
+    expect(releaseHeadlineFromSummary(longOpening).length).toBeGreaterThan(240);
 
     const releases = loadLatestMajorWebsiteReleases(root);
     expect(releases.length).toBeGreaterThan(0);
