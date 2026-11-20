@@ -59,13 +59,13 @@ function identities(scope?: CodeGraphScopeIdentity) {
 }
 
 describe('scope-bound graph identities', () => {
-  it('preserves every legacy full-repository identity byte for byte', () => {
+  it('preserves legacy logical full-repository identities and versions physical build coordination', () => {
     const expected = {
       snapshot: 'cgsn_a4c917d4dc9e1769f62eba609b29873f08299334',
       content: 'cgc_12b506b3abbfbc2188ca3719e3aaad36bf45cc5e',
       sparseSnapshot: 'cgsn_9f2d7685baa60d382ff6e1c8718b0bcfebd21307',
       sparseContent: 'cgc_c30b1bbfb3e0a77e420d5fcd18afce1f03ac91d4',
-      request: 'ab2a9ef5c2c905222ab7bcb36bb92357e108a7bc03946ba53bbddf876834e102',
+      request: '97b6ca054d20f2c5b5fe12a26957ca373d892c3f20901e1fc2457bf49cb60e4c',
     };
     expect(identities()).toEqual(expected);
     expect(identities(full)).toEqual(expected);

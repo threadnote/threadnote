@@ -1,3 +1,4 @@
+import {CODE_GRAPH_SNAPSHOT_ID_PATTERN} from './store/lexical_projection.js';
 import {Effect, FileSystem, Option, Path, PlatformError, Schema} from 'effect';
 import {
   captureCodeGraphLocalProvenanceCleanupEvidence,
@@ -26,7 +27,7 @@ export class CodeGraphViewRemovalError extends Schema.TaggedError<
 }) {}
 
 const HASH_ID = /^[0-9a-f]{64}$/;
-const SNAPSHOT_ID = /^cgsn_[0-9a-f]{40}(?:-direct|-full-[0-9a-f]{16})?$/;
+const SNAPSHOT_ID = CODE_GRAPH_SNAPSHOT_ID_PATTERN;
 
 export type CodeGraphViewRemovalWarningCode = CodeGraphVectorCleanupWarningCode | 'provenance-cleanup-unavailable';
 

@@ -12,9 +12,10 @@ import {
   nativeVectorReaderHostProfile,
   nativeVectorReaderTarget,
 } from '@threadnote/recall/vector/native-reader-payload';
-import {releaseTargetForBunTarget} from '../../../../scripts/release-targets.js';
+import {BUN_STANDALONE_TARGETS, releaseTargetForBunTarget} from '../../../../scripts/release-targets.js';
 import {NATIVE_INFERENCE_LLAMA_COMMIT} from '../../../../scripts/native-inference-payload.js';
 import {archiveRelease} from '../../../../scripts/archive-release.js';
+import {ScriptError} from '../../../../scripts/effect/errors.js';
 import {extractGzipTar} from '../../src/effect/archive.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestCommandExecutorLayer, TestSystemInfoLayer} from '../helpers/system-layer.js';
@@ -175,6 +176,66 @@ const verifyRoundtrip = Effect.fn('test.releaseArchive.verifyRoundtrip')(functio
 });
 
 describe('production release archives', () => {
+  effectIt.effect('archives all eight canonical targets under distinct names with exact extracted bytes', () =>
+    Effect.gen(function* () {
+      const paths = [];
+      for (const target of [
+        'darwin-arm64',
+        'darwin-x64',
+        'linux-arm64',
+        'linux-x64',
+        'windows-arm64',
+        'windows-x64',
+        'linux-arm64-musl',
+        'linux-x64-musl',
+      ]) {
+        // Each archive target needs release, vector-reader and inference metadata for its own Bun target.
+        const bunTarget = EffectArray.findFirst(
+          BUN_STANDALONE_TARGETS,
+          candidate => releaseTargetForBunTarget(candidate) === target,
+        );
+        expect(bunTarget._tag).toBe('Some');
+        if (bunTarget._tag !== 'Some') continue;
+        const f = yield* fixture([{name: 'payload.bin', bytes: Uint8Array.from([0, 255, 10])}], {
+          bunTarget: bunTarget.value,
+        });
+        expect(f.target).toBe(target);
+        const archive = yield* verifyRoundtrip(f);
+        expect(f.path.basename(archive.artifactPath)).toBe('threadnote-' + target + '.tar.gz');
+        expect(yield* f.fs.exists(archive.artifactPath)).toBe(true);
+        paths.push(f.path.basename(archive.artifactPath));
+      }
+      expect(new Set(paths).size).toBe(8);
+    }).pipe(testLayer),
+  );
+  effectIt.effect('rejects compile-target and foreign-libc aliases before any filesystem access', () =>
+    Effect.gen(function* () {
+      let accesses = 0;
+      const untouched = FileSystem.makeNoop({
+        exists: () =>
+          Effect.sync(() => {
+            accesses++;
+          }).pipe(Effect.andThen(Effect.die('Unexpected archive filesystem access'))),
+      });
+      for (const target of [
+        '',
+        'bun-linux-arm64-musl',
+        'linux-x64-baseline',
+        'linux-x64-baseline-musl',
+        'windows-x64-musl',
+        'darwin-arm64-musl',
+        'linux-arm64-musl-extra',
+        '../../escape',
+      ]) {
+        const error = yield* archiveRelease({root: '/nonexistent-private-archive-fixture', target}).pipe(
+          Effect.provideService(FileSystem.FileSystem, untouched),
+          Effect.flip,
+        );
+        expect(Schema.is(ScriptError)(error)).toBe(true);
+      }
+      expect(accesses).toBe(0);
+    }).pipe(provideTestLayer(archiveTestLayer)),
+  );
   effectIt.effect('rejects stale same-target native commit or tree before creating outputs', () =>
     Effect.gen(function* () {
       for (const source of [

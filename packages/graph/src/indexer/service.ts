@@ -1,3 +1,10 @@
+import {completedLegacyCheckpointBase} from './incremental.js';
+import {isLexicalV2Snapshot} from '../store/lexical_projection.js';
+import {
+  lexicalViewBindingFor,
+  lexicalPhysicalSnapshotIdentity,
+  lexicalSnapshotLogicalIdentity,
+} from '../store/lexical_projection.js';
 import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import {observeCodeGraphSemanticStatus} from '../vector/status.js';
@@ -133,7 +140,6 @@ import {
 } from '../runtime_ports.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
-
 export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGraphIndexerShape>()(
   '@threadnote/graph/indexer/service/CodeGraphIndexer',
 ) {
@@ -288,9 +294,6 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
       ): Effect.Effect<CodeGraphIndexSummary, unknown> => {
         let publishedEmbeddingDemand = false;
         const vectorPolicy = codeGraphIndexVectorPolicy(request);
-        // Intercept only indexing publications. Read attachment, startup, exact reuse and
-        // historical ensureCommit never pass this boundary and cannot authorize demand.
-        // A structural-only publication requests nothing, but promotion may carry the view's live demand.
         const publicationStore =
           vectorPolicy === 'wait'
             ? unobservedStore
@@ -417,8 +420,6 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                   admissionEnvironment,
                   scope,
                 );
-            // A demand token is carried only by an isolated background child.
-            // It must adopt the exact observed target before any retry can use it.
             const refreshDemandToken =
               request.refreshDemandToken ?? codeGraphRefreshDemandFromEnvironment(system.environment());
             const refreshDemandIdentity = {
@@ -454,7 +455,6 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                             }),
                       ),
                     );
-            // Equivalent scoped observations update only applicability authority: no reporter, builder slot, or fact build.
             if (
               !request.force &&
               scopeEvidence !== undefined &&
@@ -528,8 +528,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
               );
               if (reused !== undefined) {
                 if (system.environment()[CODE_GRAPH_ISOLATED_BUILDER_ENV] !== '1') return reused;
-                // Even a structural no-op child owes its parent an exact, owned policy receipt.
-                // Keep vector waiting outside the structural scope and report success only afterward.
+                // Even no-op children owe an owned policy receipt; wait for vectors outside the structural scope.
                 const reporter = yield* withCodeGraphMaintenanceRegistration(
                   request.threadnoteHome,
                   makeCodeGraphBuildReporter(initialIdentity, layout, requestKey ? {key: requestKey} : undefined),
@@ -726,10 +725,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                               requestedOverlay,
                               scopedObservation,
                             );
-                            // Completed-concurrent promotion changes the ready authority.
                             yield* beginDemandPublication();
-                            // This result is already materialized. Make bounded cleanup progress;
-                            // another full drain is required only before creating new graph payload.
                             yield* store.retireIncompleteWorktreeSnapshots(
                               layout.databasePath,
                               identity.repositoryId,
@@ -931,9 +927,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                       } satisfies CodeGraphInventory;
                       yield* anonymousTelemetry.observeInventory(inventory);
                       yield* anonymousTelemetry.observeExtractedFactBytes(yield* cacheCoalescer.extractedFactBytes);
-                      // Bulk inventory and extraction build large, short-lived maps and Git payloads. Reclaim them
-                      // synchronously before SQLite activation so their heap high-water does not overlap the writer
-                      // page cache. Small graphs avoid a stop-the-world collection whose pause exceeds their live heap.
+                      // Reclaim large inventory/extraction heaps before activation overlaps the writer page cache.
                       yield* Effect.sync(() => {
                         if (codeGraphInventoryNeedsSynchronousReclamation(inventory.files)) {
                           Bun.gc(true);
@@ -942,9 +936,8 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                       });
                       yield* Effect.yieldNow;
                       const extractorSet = extractorSetIdentity(inventory.files, languagePacks);
-                      // Compose dirty graph content from the canonical committed graph plus the exact overlay.
-                      // Sparse admission already has those two inputs, so full and proportional routes publish
-                      // the same content identity without forcing the sparse route to hydrate every base row.
+                      // Canonical committed content plus the exact overlay gives full and sparse routes the same identity,
+                      // without hydrating every base row for sparse admission.
                       const graphContentId =
                         inventory.dirty && inventory.overlayFingerprint !== undefined
                           ? sparseOverlayGraphContentIdentity(
@@ -970,6 +963,15 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                         : undefined;
                       const forcedSnapshotId = forcedSnapshotIdentity(logicalSnapshotId, forceGeneration);
                       const directSnapshotId = directFullSnapshotIdentity(logicalSnapshotId);
+                      const flatSnapshotId = lexicalPhysicalSnapshotIdentity(logicalSnapshotId, 'full');
+                      const existing = yield* store.readySnapshot(
+                        layout.databasePath,
+                        identity.worktreeId,
+                        scope?.scopeKey,
+                      );
+                      const overlaySnapshotId = existing?.baseSnapshotId
+                        ? lexicalPhysicalSnapshotIdentity(logicalSnapshotId, 'overlay', existing.baseSnapshotId)
+                        : flatSnapshotId;
                       const resumedForcedBuild =
                         options.force && options.sourceVerification === undefined
                           ? yield* store.resumableForcedBuild(layout.databasePath, logicalSnapshotId)
@@ -977,13 +979,8 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                       const readyCandidateIds = inventory.dirty
                         ? options.incrementalOverlay === false
                           ? [directSnapshotId]
-                          : [logicalSnapshotId, directSnapshotId]
-                        : [logicalSnapshotId];
-                      const existing = yield* store.readySnapshot(
-                        layout.databasePath,
-                        identity.worktreeId,
-                        scope?.scopeKey,
-                      );
+                          : [overlaySnapshotId, flatSnapshotId, directSnapshotId]
+                        : [flatSnapshotId];
                       const reusableExisting = existing
                         ? yield* store.currentLexicalReadySnapshotById(layout.databasePath, existing.id)
                         : undefined;
@@ -992,9 +989,6 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                           ? reusableExisting
                           : yield* firstReadySnapshotById(store, layout.databasePath, readyCandidateIds)
                         : undefined;
-                      // Exact cgsn_* can miss when inventory source/provenance differs slightly
-                      // from the shared clean row while graph content is identical. Prefer promote
-                      // of a HEAD-matching clean ready snapshot over rematerializing.
                       const reusableReady =
                         reusableReadyById ??
                         (!options.force && !inventory.dirty
@@ -1008,19 +1002,15 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                               store,
                             })
                           : undefined);
-                      // A ready candidate wins this request. Do not preserve an
-                      // interrupted logical/direct sibling that cannot be used on
-                      // the early-return path: a repository-sized persistent build
-                      // would otherwise remain reachable forever unless the user
-                      // explicitly selected that other materialization mode again.
+                      // A ready return cannot resume interrupted siblings; retire them rather than retaining
+                      // repository-sized payloads until their materialization mode is explicitly selected again.
                       const retainedSnapshotIds = reusableReady
                         ? new Set<string>()
                         : options.force
                           ? new Set([resumedForcedBuild?.id ?? forcedSnapshotId])
                           : inventory.dirty
                             ? new Set(readyCandidateIds)
-                            : new Set([logicalSnapshotId]);
-                      // Inventory is complete; every remaining route can promote or materialize.
+                            : new Set([flatSnapshotId]);
                       yield* beginDemandPublication();
                       const reclaimSnapshots = (cleanupMode: 'deferred' | 'required') =>
                         store
@@ -1074,6 +1064,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                           existing,
                           fallbackSnapshotId: forcedSnapshotId,
                           force: options.force === true,
+                          forceGeneration,
                           sourceVerification: options.sourceVerification,
                           fs,
                           identity,
@@ -1120,27 +1111,29 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                       let incrementalPrepared = false;
                       let building: CodeGraphSnapshot;
                       let persistentOwnerToken: string | undefined;
+                      // Every persistent claim binds its physical lexical view to the claimed snapshot.
+                      const claimPersistentBuild = (snapshot: CodeGraphSnapshot) =>
+                        store.claimPersistentBuild(layout.databasePath, identity, snapshot, {
+                          logicalSnapshotId,
+                          owner: reporter.ownerIdentity,
+                          lexicalBinding: lexicalViewBindingFor(
+                            snapshot.id,
+                            logicalSnapshotId,
+                            snapshot.baseSnapshotId,
+                            forceGeneration,
+                          ),
+                        });
                       if (resumedForcedBuild) {
                         building = resumedForcedBuild;
                         incrementalAssessment = {mode: 'fallback', reason: 'forced-full-rebuild'};
-                        persistentOwnerToken = yield* store.claimPersistentBuild(
-                          layout.databasePath,
-                          identity,
-                          building,
-                          {logicalSnapshotId, owner: reporter.ownerIdentity},
-                        );
+                        persistentOwnerToken = yield* claimPersistentBuild(building);
                       } else if (resumableDirectBuild) {
                         building = resumableDirectBuild;
                         incrementalAssessment = {
                           mode: 'fallback',
                           reason: options.incrementalOverlay === false ? 'disabled' : 'staging-unavailable',
                         };
-                        persistentOwnerToken = yield* store.claimPersistentBuild(
-                          layout.databasePath,
-                          identity,
-                          building,
-                          {logicalSnapshotId, owner: reporter.ownerIdentity},
-                        );
+                        persistentOwnerToken = yield* claimPersistentBuild(building);
                       } else if (!inventory.dirty && !options.force) {
                         building = {
                           commit: identity.headCommit,
@@ -1149,19 +1142,14 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                           extractorSet,
                           fileCount: 0,
                           graphContentId,
-                          id: logicalSnapshotId,
+                          id: flatSnapshotId,
                           repositoryId: identity.repositoryId,
                           scopeId: scope?.scopeKey,
                           state: 'building',
                           symbolCount: 0,
                           worktreeId: identity.worktreeId,
                         };
-                        persistentOwnerToken = yield* store.claimPersistentBuild(
-                          layout.databasePath,
-                          identity,
-                          building,
-                          {logicalSnapshotId, owner: reporter.ownerIdentity},
-                        );
+                        persistentOwnerToken = yield* claimPersistentBuild(building);
                       } else if (!canAttemptIncrementalOverlay) {
                         building = {
                           commit: identity.headCommit,
@@ -1186,12 +1174,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                               ? 'workspace-changed'
                               : 'disabled',
                         };
-                        persistentOwnerToken = yield* store.claimPersistentBuild(
-                          layout.databasePath,
-                          identity,
-                          building,
-                          {logicalSnapshotId, owner: reporter.ownerIdentity},
-                        );
+                        persistentOwnerToken = yield* claimPersistentBuild(building);
                       } else {
                         const reusableDirtyBase = yield* attemptReusableDirtyBase(
                           {
@@ -1218,18 +1201,35 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                           committedBase = reusableDirtyBase.value.committedBase;
                           preassessment = reusableDirtyBase.value.preassessment;
                         } else {
+                          // Persisted evidence belongs to the ready committed row, whichever lexical view
+                          // activated it (full, or an alias of an equivalent snapshot), as in build.ts.
+                          const committedLogicalId = snapshotIdentity(
+                            identity,
+                            false,
+                            extractorSet,
+                            inventory.committedFiles,
+                            inventory.scope,
+                          );
+                          const committedCommitReady = yield* store.readySnapshotForCommit(
+                            layout.databasePath,
+                            identity.repositoryId,
+                            identity.headCommit,
+                            extractorSet,
+                            inventory.scope?.scopeKey,
+                          );
+                          const committedReady =
+                            (yield* store.currentLexicalReadySnapshotById(
+                              layout.databasePath,
+                              lexicalPhysicalSnapshotIdentity(committedLogicalId, 'full'),
+                            )) ??
+                            (committedCommitReady &&
+                            lexicalSnapshotLogicalIdentity(committedCommitReady) === committedLogicalId
+                              ? committedCommitReady
+                              : undefined);
                           preassessment = yield* assessIncrementalOverlayCompatibility(
                             {
-                              // The committed snapshot identity is exact for this inventory;
-                              // persisted evidence is used only if that snapshot is ready. The
-                              // assessment rejects a committed extractor set other than this one.
-                              baseSnapshotId: snapshotIdentity(
-                                identity,
-                                false,
-                                extractorSet,
-                                inventory.committedFiles,
-                                inventory.scope,
-                              ),
+                              // The assessment rejects a committed extractor set other than this one.
+                              ...(committedReady ? {baseSnapshotId: committedReady.id} : {}),
                               extractorSet,
                               inventory,
                               languagePacks,
@@ -1288,6 +1288,11 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                         }
                         if (preassessment.mode === 'fallback') {
                           incrementalAssessment = preassessment;
+                        } else if (
+                          !isLexicalV2Snapshot(committedBase!.snapshot.id) &&
+                          !(yield* completedLegacyCheckpointBase(store, layout.databasePath, committedBase!.snapshot))
+                        ) {
+                          incrementalAssessment = {mode: 'fallback', reason: 'staging-identity-mismatch'};
                         } else {
                           incrementalBuilding = {
                             baseSnapshotId: committedBase!.snapshot.id,
@@ -1297,7 +1302,13 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                             extractorSet,
                             fileCount: 0,
                             graphContentId,
-                            id: logicalSnapshotId,
+                            id: isLexicalV2Snapshot(committedBase!.snapshot.id)
+                              ? lexicalPhysicalSnapshotIdentity(
+                                  logicalSnapshotId,
+                                  'overlay',
+                                  committedBase!.snapshot.id,
+                                )
+                              : logicalSnapshotId,
                             overlayFingerprint: inventory.overlayFingerprint,
                             repositoryId: identity.repositoryId,
                             scopeId: scope?.scopeKey,
@@ -1416,20 +1427,12 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                             worktreeId: identity.worktreeId,
                           };
                           committedBase = undefined;
-                          persistentOwnerToken = yield* store.claimPersistentBuild(
-                            layout.databasePath,
-                            identity,
-                            building,
-                            {logicalSnapshotId, owner: reporter.ownerIdentity},
-                          );
+                          persistentOwnerToken = yield* claimPersistentBuild(building);
                         }
                       }
                       if (incrementalPrepared) {
-                        // The prepared delta already contains attributed facts
-                        // and a staged workspace catalog. Retaining thousands
-                        // of project/dependency objects through activation only
-                        // makes one-file overlays overlap full-workspace memory
-                        // with SQLite's effective-graph scans.
+                        // Facts and workspace catalog are staged. Release project/dependency objects before
+                        // activation overlaps full-workspace memory with effective-graph scans.
                         workspace = {
                           diagnostics: workspace.diagnostics,
                           fingerprint: workspace.fingerprint,
@@ -1611,7 +1614,6 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
               embedding,
             }).pipe(Effect.map(semantic => ({...summary, semantic}))),
           ),
-          // Run after the indexing scope releases database sessions, leases and locks.
           Effect.ensuring(
             Effect.suspend(() =>
               publishedEmbeddingDemand && Option.isSome(embeddingWorker)
@@ -1971,10 +1973,8 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
     }),
   );
 }
-
 const CODE_GRAPH_SYNCHRONOUS_RECLAMATION_MINIMUM_FILES = 512;
 const CODE_GRAPH_SYNCHRONOUS_RECLAMATION_MINIMUM_RETAINED_SOURCE_BYTES = 16 * 1_048_576;
-
 /** @internal Keeps the synchronous GC barrier tied to source bytes that inventory actually retained. */
 export function codeGraphInventoryNeedsSynchronousReclamation(
   files: readonly Pick<CodeGraphInventoryFile, 'bytes' | 'content' | 'size'>[],
@@ -1988,7 +1988,6 @@ export function codeGraphInventoryNeedsSynchronousReclamation(
   }
   return false;
 }
-
 function codeGraphBuilderAdmissionClass(
   options: Pick<CodeGraphIndexOptions, 'admissionClass'>,
   environment: Readonly<Record<string, string | undefined>>,

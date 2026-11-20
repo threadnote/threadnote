@@ -9,7 +9,7 @@ import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 
 export const CODE_GRAPH_STORED_FACT_CODEC = 'zlib-base64-v1' as const;
-export const CODE_GRAPH_STORED_FACT_COMPRESSION_LEVEL = 3 as const;
+export const CODE_GRAPH_STORED_FACT_COMPRESSION_LEVEL = 6 as const;
 export const CODE_GRAPH_STORED_FACT_COMPRESSION_MINIMUM_BYTES = 1_024;
 export const CODE_GRAPH_STORED_FACT_MINIMUM_SAVINGS_BYTES = 256;
 export const CODE_GRAPH_STORED_FACT_MINIMUM_SAVINGS_RATIO = 0.1;
@@ -179,7 +179,7 @@ function storedFactSha256Hex(value: Uint8Array): string {
 }
 
 function compressStoredFact(raw: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
-  // Bun's libdeflate path emits raw DEFLATE. Add the canonical level-3 zlib
+  // Bun's libdeflate path emits raw DEFLATE. Add the canonical level-6 zlib
   // header and Adler-32 trailer so existing zlib-base64-v1 readers stay valid.
   const body = Bun.deflateSync(raw, {
     level: CODE_GRAPH_STORED_FACT_COMPRESSION_LEVEL,
@@ -187,7 +187,7 @@ function compressStoredFact(raw: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffe
   });
   const output = new Uint8Array(body.byteLength + 6);
   output[0] = 0x78;
-  output[1] = 0x5e;
+  output[1] = 0x9c;
   output.set(body, 2);
   new DataView(output.buffer).setUint32(output.byteLength - 4, Bun.hash.adler32(raw) >>> 0, false);
   return output;

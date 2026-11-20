@@ -126,6 +126,23 @@ export const CODE_GRAPH_MATERIALIZATION_SPOOL_SURFACES = [
     orderBy: 'id',
   },
   {
+    columns: ['scope_ordinal', 'path', 'content_hash', 'package_name', 'path_sort', 'package_present', 'package_sort'],
+    name: 'lexical_scopes',
+    orderBy: 'path_sort,content_hash,package_present,package_sort',
+  },
+  {
+    columns: ['scope_ordinal', 'member_ordinal', 'symbol_id'],
+    name: 'lexical_members',
+    orderBy: 'scope_ordinal,member_ordinal',
+  },
+  {
+    columns: ['term', 'origin_mask', 'scope_ordinal', 'member_ordinal', 'metadata_weight'],
+    name: 'lexical_owners',
+    orderBy: 'term,origin_mask,scope_ordinal,member_ordinal',
+  },
+  {columns: ['term', 'scope_ordinal'], name: 'lexical_shared', orderBy: 'term,scope_ordinal'},
+  {columns: ['batch_index', 'logical_posting_count'], name: 'lexical_counts', orderBy: 'batch_index'},
+  {
     columns: ['term', 'symbol_id', 'weight'],
     name: 'symbol_terms',
     orderBy: 'term, symbol_id',
@@ -223,6 +240,16 @@ export function initializeCodeGraphMaterializationSpoolSurfaces(database: Databa
       evidence_path TEXT NOT NULL,
       evidence_span_json TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS materialization_raw_lexical_scopes (
+      scope_ordinal INTEGER NOT NULL,path TEXT NOT NULL,content_hash TEXT NOT NULL,package_name TEXT,
+      path_sort BLOB NOT NULL,package_present INTEGER NOT NULL,package_sort BLOB NOT NULL);
+    CREATE TABLE IF NOT EXISTS materialization_raw_lexical_members (
+      scope_ordinal INTEGER NOT NULL,member_ordinal INTEGER NOT NULL,symbol_id TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS materialization_raw_lexical_owners (
+      term TEXT NOT NULL,origin_mask INTEGER NOT NULL,scope_ordinal INTEGER NOT NULL,
+      member_ordinal INTEGER NOT NULL,metadata_weight INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS materialization_raw_lexical_shared (term TEXT NOT NULL,scope_ordinal INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS materialization_raw_lexical_counts (batch_index INTEGER NOT NULL,logical_posting_count INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS materialization_raw_symbol_terms (
       term TEXT NOT NULL,
       symbol_id TEXT NOT NULL,
@@ -271,7 +298,7 @@ export function readCodeGraphMaterializationSpoolSurfaceCapacities(
       lexicalTermBytes < 0 ||
       !Number.isSafeInteger(rowCount) ||
       rowCount < 0 ||
-      (row.surface_name !== 'symbol_terms' && lexicalTermBytes !== 0)
+      (!['symbol_terms', 'lexical_owners', 'lexical_shared'].includes(row.surface_name) && lexicalTermBytes !== 0)
     ) {
       throw new Error('Code graph materialization spool surface capacity metadata is missing or corrupt.');
     }
@@ -301,7 +328,9 @@ export function recordCodeGraphMaterializationSpoolSurfaceCapacity(
     EffectArray.map(surface.columns, column => `COALESCE(LENGTH(CAST(${column} AS BLOB)), 0)`),
     ' + ',
   );
-  const lexicalTermBytes = surface.name === 'symbol_terms' ? 'COALESCE(SUM(LENGTH(CAST(term AS BLOB))), 0)' : '0';
+  const lexicalTermBytes = ['symbol_terms', 'lexical_owners', 'lexical_shared'].includes(surface.name)
+    ? 'COALESCE(SUM(LENGTH(CAST(term AS BLOB))), 0)'
+    : '0';
   const delta = codeGraphSqliteGet<{
     readonly bytes: bigint | number;
     readonly lexicalTermBytes: bigint | number;
@@ -375,10 +404,37 @@ export function sortCodeGraphMaterializationSpoolSurface(
   surface: CodeGraphMaterializationSpoolSurface,
 ): void {
   const distinct = surface.distinct ? 'DISTINCT ' : '';
+  const dictionarySources = ['materialization_raw_symbol_terms'];
+  if (surface.name === 'symbol_terms') {
+    const available = new Set(
+      EffectArray.map(
+        codeGraphSqliteAll<{readonly name: string}>(
+          database,
+          "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('materialization_raw_lexical_owners','materialization_ordered_lexical_owners','materialization_raw_lexical_shared','materialization_ordered_lexical_shared')",
+        ),
+        row => row.name,
+      ),
+    );
+    for (const name of ['lexical_owners', 'lexical_shared']) {
+      const ordered = `materialization_ordered_${name}`;
+      const raw = `materialization_raw_${name}`;
+      if (available.has(ordered) && available.has(raw))
+        throw new Error('Code graph dictionary contributor state is ambiguous.');
+      if (available.has(ordered)) dictionarySources.push(ordered);
+      else if (available.has(raw)) dictionarySources.push(raw);
+    }
+  }
   const lexicalTerms =
     surface.name === 'symbol_terms'
       ? 'CREATE TABLE materialization_ordered_terms AS ' +
-        'SELECT DISTINCT term FROM materialization_raw_symbol_terms ORDER BY term; '
+        EffectArray.join(
+          EffectArray.map(
+            dictionarySources,
+            table => `SELECT ${dictionarySources.length === 1 ? 'DISTINCT ' : ''}term FROM ${table}`,
+          ),
+          ' UNION ',
+        ) +
+        ' ORDER BY term; '
       : '';
   database.exec(
     lexicalTerms +

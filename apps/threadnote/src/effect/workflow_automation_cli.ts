@@ -373,6 +373,12 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
           ),
         options =>
           withRuntime(config =>
+            runNativeTaskAction(config, {command: 'integrate-same-label-base-snapshot', ...options}).pipe(
+              printTaskResult,
+            ),
+          ),
+        options =>
+          withRuntime(config =>
             runNativeTaskAction(config, {
               command: 'recover-unreviewed-rebase-snapshot',
               ...options,

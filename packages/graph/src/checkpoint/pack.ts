@@ -465,6 +465,43 @@ export function assembleCodeGraphCheckpointPackV1(
  * Bounded streaming verifier. It retains at most the visible header and one compressed/uncompressed logical chunk.
  * `onVerifiedChunk` means the chunk digest and records are valid; whole-artifact logical verification completes at finish.
  */
+const completeVerifications = new WeakMap<
+  object,
+  {readonly image: string; readonly value: CodeGraphCheckpointVerificationV1}
+>();
+
+export function requireFullCheckpointVerification(value: unknown): CodeGraphCheckpointVerificationV1 {
+  const proof = typeof value === 'object' && value !== null ? completeVerifications.get(value) : undefined;
+  if (!proof || JSON.stringify(value) !== proof.image) {
+    throw CodeGraphCheckpointPackError.make({message: 'An unchanged full checkpoint decoder result is required.'});
+  }
+  return structuredClone(proof.value);
+}
+
+/** Same framed logical digest as the encoder/decoder, without compression or retained record arrays. */
+export function checkpointLogicalRecordDigest(header: CodeGraphCheckpointHeaderV1) {
+  const anchor = canonicalBytes(
+    metadataFromHeader(header),
+    DEFAULT_CODE_GRAPH_CHECKPOINT_PACK_LIMITS.maximumHeaderBytes,
+    'Checkpoint logical metadata',
+  );
+  const digest = domainHasher(LOGICAL_DOMAIN);
+  digest.update(u32(anchor.length));
+  digest.update(anchor);
+  return {
+    accept: (record: CodeGraphCheckpointRecordV1) => {
+      const bytes = canonicalBytes(
+        parseCodeGraphCheckpointRecordV1(record),
+        DEFAULT_CODE_GRAPH_CHECKPOINT_PACK_LIMITS.maximumRecordBytes,
+        'Checkpoint record',
+      );
+      digest.update(u32(bytes.length));
+      digest.update(bytes);
+    },
+    finish: () => digestHex(digest),
+  };
+}
+
 export class CodeGraphCheckpointStreamDecoderV1 {
   readonly #artifact = domainlessHasher();
   readonly #counts = emptyCodeGraphCheckpointCounts();
@@ -548,7 +585,11 @@ export class CodeGraphCheckpointStreamDecoderV1 {
     }
     const resultDescriptor = descriptor(this.#artifactBytes, digestHex(this.#artifact));
     verifyExpectedArtifact(resultDescriptor, this.#expectedDescriptor, this.#expectedDigest);
-    return {descriptor: resultDescriptor, header: this.#header, verification: 'full'};
+    const result = {descriptor: resultDescriptor, header: this.#header, verification: 'full' as const};
+    if (this.#header.packKind !== 'delta') {
+      completeVerifications.set(result, {image: JSON.stringify(result), value: structuredClone(result)});
+    }
+    return result;
   }
 
   #drain(): void {
@@ -1227,4 +1268,18 @@ class ByteQueue {
     }
     return output;
   }
+}
+
+/** Conservative complete canonical payload/row envelope for publisher-held verification and its TEMP sorts. */
+export function checkpointCompletionCapacity(value: unknown) {
+  const {header} = requireFullCheckpointVerification(value);
+  const bytes = EffectArray.reduce(header.chunks, 512, (total, chunk) => total + chunk.uncompressedBytes);
+  const rows = EffectArray.reduce(
+    EffectRecord.values(header.counts),
+    header.counts.lexical + 1,
+    (total, count) => total + count,
+  );
+  if (!Number.isSafeInteger(bytes) || !Number.isSafeInteger(rows))
+    throw CodeGraphCheckpointPackError.make({message: 'Checkpoint completion capacity is invalid.'});
+  return {bytes, rows};
 }

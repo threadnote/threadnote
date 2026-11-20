@@ -19,6 +19,8 @@ import type {
 } from '../types.js';
 
 export interface PendingMaterializationBatch extends PersistentMaterializationTransactionCandidate {
+  readonly lexicalFileOrdinals?: ReadonlyMap<string, number>;
+  readonly bodyDiscovery?: readonly import('../types.js').CodeGraphBodyDiscovery[];
   readonly attributionMilliseconds: number;
   readonly batchCachedFactBytes: number;
   readonly batchFiles: readonly CodeGraphInventoryFile[];

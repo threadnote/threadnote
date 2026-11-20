@@ -1,3 +1,6 @@
+import * as EffectString from 'effect/String';
+import {runCodeGraphCheckpointExport, importCodeGraphCheckpointSnapshot} from '@threadnote/graph/checkpoint/operations';
+import {codeGraphEffectiveSymbolTermsQueryStatement} from '@threadnote/graph/store/queries';
 import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
@@ -17,7 +20,13 @@ import {compareCodeUnits} from '@threadnote/graph/ordering';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
-import {CodeGraphStore, type CodeGraphVisualizationCatalog, type StoredCodeGraph} from '@threadnote/graph/store';
+import {
+  CodeGraphStore,
+  isLexicalV2Snapshot,
+  type CodeGraphVisualizationCatalog,
+  type StoredCodeGraph,
+} from '@threadnote/graph/store';
+import {CODE_GRAPH_MATERIALIZATION_SPOOL_FORMAT_VERSION} from '@threadnote/graph/materialization/spool';
 import type {CodeGraphMaterializationMetrics, CodeGraphQueryResult} from '@threadnote/graph/types';
 import {runEffect} from '../helpers/effect-runtime.js';
 
@@ -86,6 +95,159 @@ const unpublishedSurfaceChangeScenarioArbitrary = surfaceChangeScenarioArbitrary
 );
 
 describe('code graph incremental-overlay differential properties', () => {
+  fcEffectProp(
+    it,
+    'preserves imported compact alias/replacement parity and the original deletion fallback without losing weighted body rows',
+    {scenario: scenarioArbitrary},
+    ({scenario}) =>
+      Effect.acquireUseRelease(
+        Effect.sync(() => createRepository(scenario)),
+        root =>
+          Effect.gen(function* () {
+            const homes = `${root}-import-homes`,
+              sourceHome = join(homes, 'source'),
+              importedHome = join(homes, 'imported'),
+              fullHome = join(homes, 'full');
+            yield* Effect.sync(() => {
+              git(root, ['remote', 'add', 'origin', 'https://github.com/acme/imported-property.git']);
+              writeFileSync(
+                join(root, 'src', 'é-leaf.ts'),
+                'export function caféLeaf() { const bodyOnlyToken = "秘密"; return bodyOnlyToken; }',
+              );
+              git(root, ['add', '.']);
+              git(root, [
+                '-c',
+                'user.name=Fixture',
+                '-c',
+                'user.email=fixture@example.invalid',
+                'commit',
+                '-qm',
+                'independent body leaf',
+              ]);
+            });
+            const indexer = yield* CodeGraphIndexer,
+              store = yield* CodeGraphStore,
+              path = yield* Path.Path;
+            const source = yield* indexer.index({cwd: root, threadnoteHome: sourceHome});
+            expect(isLexicalV2Snapshot(source.snapshot.id)).toBe(true);
+            const config = (home: string) => ({
+              account: 'fixture',
+              agentContextHome: home,
+              agentId: 'fixture',
+              manifestPath: join(homes, 'manifest.yaml'),
+              user: 'fixture',
+            });
+            const artifact = join(homes, 'original.cgcp');
+            yield* runCodeGraphCheckpointExport(config(sourceHome), {cwd: root, output: artifact});
+            const imported = yield* importCodeGraphCheckpointSnapshot(config(importedHome), {
+              cwd: root,
+              input: artifact,
+              followOnIndex: false,
+            });
+            expect(isLexicalV2Snapshot(imported.snapshot.id)).toBe(false);
+            const layout = codeGraphLayout(
+              path,
+              importedHome,
+              imported.identity.checkoutId,
+              imported.identity.worktreeId,
+            );
+            const receiptBefore = yield* store.checkpointImportReceipt(layout.databasePath, imported.snapshot.id);
+            expect(receiptBefore?.completionSha256).toMatch(/^[a-f0-9]{64}$/u);
+            const originalGraph = yield* store.loadGraph(layout.databasePath, imported.snapshot.id);
+            yield* Effect.sync(() =>
+              git(root, [
+                '-c',
+                'user.name=Fixture',
+                '-c',
+                'user.email=fixture@example.invalid',
+                'commit',
+                '--allow-empty',
+                '-qm',
+                'unchanged source alias',
+              ]),
+            );
+            const alias = yield* indexer.index({cwd: root, threadnoteHome: importedHome});
+            expect(alias.snapshot.baseSnapshotId).toBe(imported.snapshot.id);
+            expect(isLexicalV2Snapshot(alias.snapshot.id)).toBe(false);
+            yield* Effect.sync(() => applyDirtyScenario(root, scenario));
+            const incremental = yield* indexer.index({cwd: root, threadnoteHome: importedHome});
+            const full = yield* indexer.index({cwd: root, threadnoteHome: fullHome, incrementalOverlay: false});
+            expect(incremental.materialization?.mode, JSON.stringify(incremental.materialization)).toBe(
+              'incremental-overlay',
+            );
+            expect(incremental.snapshot.baseSnapshotId).toBe(imported.snapshot.id);
+            expect(isLexicalV2Snapshot(incremental.snapshot.id)).toBe(false);
+            expect(isLexicalV2Snapshot(full.snapshot.id)).toBe(true);
+            const fullLayout = codeGraphLayout(path, fullHome, full.identity.checkoutId, full.identity.worktreeId);
+            expect(normalizeGraph(yield* store.loadGraph(layout.databasePath, incremental.snapshot.id))).toEqual(
+              normalizeGraph(yield* store.loadGraph(fullLayout.databasePath, full.snapshot.id)),
+            );
+            const relation = (databasePath: string, snapshotId: string, baseSnapshotId?: string) => {
+              const database = new Database(databasePath, {readonly: true, strict: true});
+              try {
+                const statement = codeGraphEffectiveSymbolTermsQueryStatement(snapshotId, baseSnapshotId);
+                return database.query(statement.text).all(...statement.parameters);
+              } finally {
+                database.close(false);
+              }
+            };
+            const actual = yield* Effect.sync(() =>
+              relation(layout.databasePath, incremental.snapshot.id, incremental.snapshot.baseSnapshotId),
+            );
+            const reference = yield* Effect.sync(() =>
+              relation(fullLayout.databasePath, full.snapshot.id, full.snapshot.baseSnapshotId),
+            );
+            expect(actual).toEqual(reference);
+            expect(
+              EffectArray.some(
+                reference,
+                row =>
+                  typeof row === 'object' &&
+                  row !== null &&
+                  'term' in row &&
+                  typeof row.term === 'string' &&
+                  EffectString.startsWith('~body:v1:')(row.term),
+              ),
+            ).toBe(true);
+            expect(yield* store.checkpointImportReceipt(layout.databasePath, imported.snapshot.id)).toEqual(
+              receiptBefore,
+            );
+            expect(yield* store.loadGraph(layout.databasePath, imported.snapshot.id)).toEqual(originalGraph);
+            yield* Effect.sync(() => rmSync(join(root, 'src', 'é-leaf.ts')));
+            const deleted = yield* indexer.index({cwd: root, threadnoteHome: importedHome});
+            const deletedReference = yield* indexer.index({
+              cwd: root,
+              threadnoteHome: fullHome,
+              incrementalOverlay: false,
+            });
+            expect(deleted.materialization).toMatchObject({mode: 'full', fallbackReason: 'file-set-changed'});
+            expect(isLexicalV2Snapshot(deleted.snapshot.id)).toBe(true);
+            expect(normalizeGraph(yield* store.loadGraph(layout.databasePath, deleted.snapshot.id))).toEqual(
+              normalizeGraph(yield* store.loadGraph(fullLayout.databasePath, deletedReference.snapshot.id)),
+            );
+            expect(
+              yield* Effect.sync(() =>
+                relation(layout.databasePath, deleted.snapshot.id, deleted.snapshot.baseSnapshotId),
+              ),
+            ).toEqual(
+              yield* Effect.sync(() =>
+                relation(
+                  fullLayout.databasePath,
+                  deletedReference.snapshot.id,
+                  deletedReference.snapshot.baseSnapshotId,
+                ),
+              ),
+            );
+          }),
+        root =>
+          Effect.sync(() => {
+            rmSync(root, {recursive: true, force: true});
+            rmSync(`${root}-import-homes`, {recursive: true, force: true});
+          }),
+      ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+    {fastCheck: {numRuns: 4}, timeout: 130000},
+  );
+
   fcEffectProp(
     it,
     'matches a full rebuild after randomized body-only edits change multi-file references',
@@ -549,16 +711,24 @@ describe('code graph incremental-overlay differential properties', () => {
       const result = await runEffect(
         Effect.gen(function* () {
           const indexer = yield* CodeGraphIndexer;
+          const path = yield* Path.Path;
           const incremental = yield* indexer.index({cwd: root, threadnoteHome: home});
           const direct = yield* indexer.index({cwd: root, incrementalOverlay: false, threadnoteHome: home});
-          return {direct, incremental};
+          const databasePath = codeGraphLayout(
+            path,
+            home,
+            direct.identity.checkoutId,
+            direct.identity.worktreeId,
+          ).databasePath;
+          return {databasePath, direct, incremental};
         }),
       );
 
       expect(result.incremental.materialization?.mode).toBe('incremental-overlay');
       expect(result.incremental.snapshot.baseSnapshotId).toBeDefined();
       expect(result.direct.materialization).toMatchObject({fallbackReason: 'disabled', mode: 'full'});
-      expect(result.direct.snapshot.id).toMatch(/-direct$/);
+      expect(isLexicalV2Snapshot(result.direct.snapshot.id)).toBe(true);
+      expect(persistedLexicalLayoutMode(result.databasePath, result.direct.snapshot.id)).toBe('direct');
       expect(result.direct.snapshot.id).not.toBe(result.incremental.snapshot.id);
       expect(result.direct.snapshot.baseSnapshotId).toBeUndefined();
     } finally {
@@ -604,7 +774,8 @@ describe('code graph incremental-overlay differential properties', () => {
           expect(interrupted.logical.snapshot.baseSnapshotId).toBeDefined();
           expect(interrupted.exit._tag).toBe('Failure');
           const direct = persistedBuildingSnapshot(interrupted.databasePath);
-          expect(direct.id).toMatch(/-direct$/);
+          expect(isLexicalV2Snapshot(direct.id)).toBe(true);
+          expect(persistedLexicalLayoutMode(interrupted.databasePath, direct.id)).toBe('direct');
           expect(Option.isNone(direct.baseSnapshotId)).toBe(true);
           expect(persistedSnapshotRowCount(interrupted.databasePath, direct.id, 'symbols')).toBe(0);
           expect(persistedMaterializationSpoolBatchCount(interrupted.databasePath, direct.id)).toBe(1);
@@ -651,7 +822,8 @@ describe('code graph incremental-overlay differential properties', () => {
       );
 
       expect(result.explicit.snapshot.dirty).toBe(false);
-      expect(result.explicit.snapshot.id).not.toMatch(/-direct$/);
+      expect(isLexicalV2Snapshot(result.explicit.snapshot.id)).toBe(true);
+      expect(persistedLexicalLayoutMode(result.databasePath, result.explicit.snapshot.id)).toBe('full');
       expect(result.normal.snapshot.id).toBe(result.explicit.snapshot.id);
       expect(persistedSnapshots(result.databasePath)).toEqual([
         {
@@ -687,6 +859,7 @@ describe('code graph incremental-overlay differential properties', () => {
       const result = await runEffect(
         Effect.gen(function* () {
           const indexer = yield* CodeGraphIndexer;
+          const path = yield* Path.Path;
           const [defaultRequest, directRequest] = yield* Effect.all(
             [
               indexer.index({cwd: root, threadnoteHome: home}),
@@ -694,11 +867,19 @@ describe('code graph incremental-overlay differential properties', () => {
             ],
             {concurrency: 2},
           );
-          return {defaultRequest, directRequest};
+          const databasePath = codeGraphLayout(
+            path,
+            home,
+            directRequest.identity.checkoutId,
+            directRequest.identity.worktreeId,
+          ).databasePath;
+          return {databasePath, defaultRequest, directRequest};
         }),
       );
 
-      expect(result.directRequest.snapshot.id).toMatch(/-direct$/);
+      expect(isLexicalV2Snapshot(result.directRequest.snapshot.id)).toBe(true);
+      expect(result.directRequest.materialization?.mode).toBe('full');
+      expect(persistedLexicalLayoutMode(result.databasePath, result.directRequest.snapshot.id)).toBe('direct');
       expect(result.directRequest.snapshot.baseSnapshotId).toBeUndefined();
       if (result.defaultRequest.snapshot.baseSnapshotId !== undefined) {
         expect(result.defaultRequest.snapshot.id).not.toBe(result.directRequest.snapshot.id);
@@ -741,14 +922,16 @@ describe('code graph incremental-overlay differential properties', () => {
           expect(exit._tag).toBe('Failure');
           const databasePath = codeGraphLayout(path, home, identity.checkoutId, identity.worktreeId).databasePath;
           const interrupted = persistedBuildingSnapshot(databasePath);
-          expect(interrupted.id).toMatch(/-direct$/);
+          expect(isLexicalV2Snapshot(interrupted.id)).toBe(true);
+          expect(persistedLexicalLayoutMode(databasePath, interrupted.id)).toBe('direct');
           expect(persistedMaterializationSpoolBatchCount(databasePath, interrupted.id)).toBeGreaterThan(0);
           yield* Effect.sync(() => restoreCleanScenario(root, scenario));
 
           const clean = yield* indexer.index({cwd: root, threadnoteHome: home});
 
           expect(clean.snapshot.dirty).toBe(false);
-          expect(clean.snapshot.id).not.toMatch(/-direct$/);
+          expect(isLexicalV2Snapshot(clean.snapshot.id)).toBe(true);
+          expect(persistedLexicalLayoutMode(databasePath, clean.snapshot.id)).toBe('full');
           expect(persistedSnapshotState(databasePath, interrupted.id)).toBeUndefined();
           expect(persistedSnapshotRowCount(databasePath, interrupted.id, 'symbols')).toBe(0);
           expect(existsSync(materializationSpoolPath(databasePath, interrupted.id))).toBe(false);
@@ -825,7 +1008,8 @@ describe('code graph incremental-overlay differential properties', () => {
       );
 
       expect(direct.snapshot.id).not.toBe(incremental.id);
-      expect(direct.snapshot.id).toMatch(/-direct$/);
+      expect(isLexicalV2Snapshot(direct.snapshot.id)).toBe(true);
+      expect(persistedLexicalLayoutMode(databasePath, direct.snapshot.id)).toBe('direct');
       expect(direct.snapshot.baseSnapshotId).toBeUndefined();
       expect(persistedSnapshotState(databasePath, incremental.id)).toBeUndefined();
       expect(storageObservations.at(-1)).toMatchObject({
@@ -872,7 +1056,8 @@ describe('code graph incremental-overlay differential properties', () => {
         }),
       );
       const checkpoint = persistedBuildingSnapshot(databasePath);
-      expect(checkpoint.id).toMatch(/-direct$/);
+      expect(isLexicalV2Snapshot(checkpoint.id)).toBe(true);
+      expect(persistedLexicalLayoutMode(databasePath, checkpoint.id)).toBe('direct');
       const startedAt = persistedSnapshotStartedAt(databasePath, checkpoint.id);
 
       const resumed = await runEffect(
@@ -1127,7 +1312,21 @@ function persistedForcedBuildCheckpoint(databasePath: string): {
 }
 
 function materializationSpoolPath(databasePath: string, snapshotId: string): string {
-  return join(dirname(databasePath), `materialization-spool-v2-${snapshotId}.sqlite`);
+  return join(
+    dirname(databasePath),
+    `materialization-spool-v${CODE_GRAPH_MATERIALIZATION_SPOOL_FORMAT_VERSION}-${snapshotId}.sqlite`,
+  );
+}
+
+function persistedLexicalLayoutMode(databasePath: string, snapshotId: string): string | undefined {
+  const database = new Database(databasePath, {readonly: true});
+  try {
+    return database
+      .query<{readonly layout_mode: string}, [string]>('SELECT layout_mode FROM lexical_v2_views WHERE snapshot_id = ?')
+      .get(snapshotId)?.layout_mode;
+  } finally {
+    database.close();
+  }
 }
 
 function persistedMaterializationSpoolBatchCount(databasePath: string, snapshotId: string): number {

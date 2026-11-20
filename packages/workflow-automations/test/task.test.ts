@@ -125,30 +125,45 @@ describe('native task projection', () => {
     expect(decodeNativeTaskStartReference(EffectString.repeat(129)('r'))).toBeUndefined();
   });
 
-  it('round-trips opaque action references and rejects malformed or extended values', () => {
-    const reference = {
-      version: 1 as const,
-      kind: 'work' as const,
-      runId: 'run',
-      generationHash: EffectString.repeat(64)('a'),
-      stateRevision: EffectString.repeat(64)('b'),
-      phaseId: 'phase-one',
-      phaseHash: EffectString.repeat(64)('c'),
-      baselineHead: EffectString.repeat(40)('d'),
-      baselineTree: EffectString.repeat(40)('e'),
-      baselineRef: 'refs/threadnote/cycle/baseline/phase-one',
-    };
-    const encoded = encodeNativeTaskActionRef(reference);
-    expect(encoded).toMatch(/^taskref-v1\./u);
-    expect(decodeNativeTaskActionRef(encoded)).toEqual(reference);
-    expect(decodeNativeTaskActionRef('taskref-v1.not-base64-json')).toBeUndefined();
-    const withUnknown = btoa(JSON.stringify({...reference, hidden: true}));
-    expect(
-      decodeNativeTaskActionRef(
-        `taskref-v1.${EffectString.replaceAll('=', '')(EffectString.replaceAll('/', '_')(EffectString.replaceAll('+', '-')(withUnknown)))}`,
-      ),
-    ).toBeUndefined();
-  });
+  it.each(['work', 'snapshot'] as const)(
+    'round-trips opaque %s references and rejects malformed or extended values',
+    kind => {
+      const reference = {
+        version: 1 as const,
+        kind,
+        runId: 'run',
+        generationHash: EffectString.repeat(64)('a'),
+        stateRevision: EffectString.repeat(64)('b'),
+        phaseId: 'phase-one',
+        phaseHash: EffectString.repeat(64)('c'),
+        baselineHead: EffectString.repeat(40)('d'),
+        baselineTree: EffectString.repeat(40)('e'),
+        baselineRef: 'refs/threadnote/cycle/baseline/phase-one',
+        ...(kind === 'snapshot'
+          ? {
+              snapshotId: 'historical-predecessor',
+              sourceHead: EffectString.repeat(40)('f'),
+              sourceTree: EffectString.repeat(40)('a'),
+            }
+          : {}),
+      };
+      const encoded = encodeNativeTaskActionRef(reference);
+      expect(encoded).toMatch(/^taskref-v1\./u);
+      expect(decodeNativeTaskActionRef(encoded)).toEqual(reference);
+      expect(decodeNativeTaskStartReference(encoded)).toBeUndefined();
+      if (kind === 'snapshot') {
+        expect(() => encodeNativeTaskActionRef({...reference, sourceHead: 'invalid-object-id'})).toThrow();
+        expect(() => encodeNativeTaskActionRef({...reference, phaseHash: 'invalid-phase-hash'})).toThrow();
+      }
+      expect(decodeNativeTaskActionRef('taskref-v1.not-base64-json')).toBeUndefined();
+      const withUnknown = btoa(JSON.stringify({...reference, hidden: true}));
+      expect(
+        decodeNativeTaskActionRef(
+          `taskref-v1.${EffectString.replaceAll('=', '')(EffectString.replaceAll('/', '_')(EffectString.replaceAll('+', '-')(withUnknown)))}`,
+        ),
+      ).toBeUndefined();
+    },
+  );
 
   it('round-trips retained work references and rejects incomplete or mixed reference closures', () => {
     const ref = {
@@ -644,7 +659,7 @@ describe('native task projection', () => {
         'phase-one': {
           repo: '/repo',
           head: EffectString.repeat(40)('b'),
-          tree: EffectString.repeat(40)('c'),
+          tree: snapshot.baseTree,
           preservedFiles: [],
           pinnedRef: 'refs/heads/main',
         },
@@ -675,6 +690,19 @@ describe('native task projection', () => {
       next: {action: 'validate', phaseId: 'phase-one', snapshotId: 'reviewed-one'},
       phase: {snapshot: {snapshotRef: expect.any(String)}},
     });
+    const blockingFinding = {
+      id: 'blocking-finding',
+      file: 'src/task.ts',
+      line: 1,
+      body: 'The acceptance behavior is incomplete.',
+      trigger: 'Run the phase check.',
+      impact: 'The phase cannot be accepted yet.',
+      evidence: 'The reviewed source still omits the behavior.',
+      severity: 'important' as const,
+      category: 'correctness' as const,
+      confidence: 95,
+      state: 'new' as const,
+    };
     const blockedReview = projectNativeTaskView(
       {
         ...state,
@@ -685,21 +713,7 @@ describe('native task projection', () => {
               ...runtime.reviews[0],
               report: {
                 ...runtime.reviews[0].report,
-                findings: [
-                  {
-                    id: 'blocking-finding',
-                    file: 'src/task.ts',
-                    line: 1,
-                    body: 'The acceptance behavior is incomplete.',
-                    trigger: 'Run the phase check.',
-                    impact: 'The phase cannot be accepted yet.',
-                    evidence: 'The reviewed source still omits the behavior.',
-                    severity: 'important' as const,
-                    category: 'correctness' as const,
-                    confidence: 95,
-                    state: 'new' as const,
-                  },
-                ],
+                findings: [blockingFinding],
               },
             },
           ],
@@ -711,6 +725,62 @@ describe('native task projection', () => {
     expect(
       projectNativeTaskView({...state, cycle: runtime}, 'review-revision', {acceptedSnapshotCurrent: false}),
     ).toMatchObject({status: 'ready', next: {action: 'implement', phaseId: 'phase-one'}});
+    const ancestorReview = {
+      ...runtime.reviews[0],
+      report: {...runtime.reviews[0].report, findings: [blockingFinding]},
+    };
+    const pending: NativeCycleSnapshot = {
+      ...snapshot,
+      snapshotId: 'unreviewed-successor',
+      previous: snapshot.snapshotId,
+      previousTree: snapshot.tree,
+      tree: EffectString.repeat(40)('1'),
+      pinnedRef: 'refs/threadnote/snapshot/unreviewed-successor',
+    };
+    const supersession: NativeCycleSnapshot = {
+      ...snapshot,
+      snapshotId: 'reviewed-supersession',
+      supersedes: pending.snapshotId,
+      unreviewedSupersession: {reason: 'Correct the unreviewed source.'},
+      tree: EffectString.repeat(40)('2'),
+      pinnedRef: 'refs/threadnote/snapshot/reviewed-supersession',
+    };
+    const supersessionRuntime = {
+      ...runtime,
+      snapshots: [...runtime.snapshots, {snapshot: pending, incoming: []}, {snapshot: supersession, incoming: []}],
+      reviews: [
+        ancestorReview,
+        {
+          snapshotId: supersession.snapshotId,
+          report: {
+            ...ancestorReview.report,
+            snapshotId: supersession.snapshotId,
+            snapshotTree: supersession.tree,
+            findings: EffectArray.map(ancestorReview.report.findings, finding => ({
+              ...finding,
+              state: 'resolved' as const,
+              reason: 'Verified the corrected acceptance behavior.',
+            })),
+          },
+        },
+      ],
+    };
+    const retainedBefore = JSON.stringify(supersessionRuntime);
+    const canonical = decodeNativeCycleRuntime(supersessionRuntime);
+    const superseded = projectNativeTaskView({...state, cycle: canonical}, 'supersession-revision');
+    expect(superseded).toMatchObject({
+      status: 'ready',
+      next: {action: 'validate', phaseId: 'phase-one', snapshotId: supersession.snapshotId},
+      phase: {status: 'pending', snapshot: {snapshotId: supersession.snapshotId, snapshotRef: expect.any(String)}},
+    });
+    expect(decodeNativeTaskActionRef(superseded.phase!.snapshot!.snapshotRef)).toMatchObject({
+      kind: 'snapshot',
+      snapshotId: supersession.snapshotId,
+      sourceHead: supersession.head,
+      sourceTree: supersession.tree,
+      baselineTree: snapshot.baseTree,
+    });
+    expect(JSON.stringify(supersessionRuntime)).toBe(retainedBefore);
     const validation = {
       snapshotTree: tree,
       reviewTree: tree,
@@ -875,6 +945,84 @@ describe('native task projection', () => {
     expect(publications[0].revision).toBe(sharedRevision);
     expect(publications[1].revision).toBe(sharedRevision);
   });
+  it.each([
+    {version: 1, previous: undefined, reviewMode: 'full'},
+    {version: 1, previous: 'predecessor', reviewMode: 'incremental'},
+    {version: 3, previous: 'predecessor', reviewMode: 'full'},
+  ] as const)(
+    'projects manifest $version review mode $reviewMode with predecessor $previous across pages',
+    ({version, previous, reviewMode}) => {
+      const cycleState = state.cycle!.state;
+      const snapshot: NativeCycleSnapshot = {
+        format: 'threadnote-native-cycle-snapshot',
+        version,
+        ...(previous ? {previous} : {}),
+        snapshotId: 'review-one',
+        phaseId: 'phase-one',
+        phaseHash: cycleState.phases['phase-one'].phaseHash,
+        repo: '/repo',
+        head: Effect.pipe('a', EffectString.repeat(40)),
+        baseTree: Effect.pipe('b', EffectString.repeat(40)),
+        scopeBase: Effect.pipe('c', EffectString.repeat(40)),
+        declaredBaseHead: Effect.pipe('d', EffectString.repeat(40)),
+        scopeFiles: ['src/task.ts'],
+        tree: Effect.pipe('e', EffectString.repeat(40)),
+        files: EffectArray.map(
+          Array.from({length: 18}, (_, index) => index),
+          index => `src/file-${index}.ts`,
+        ),
+        pinnedRef: 'refs/threadnote/snapshot/review-one',
+      };
+      const runtime = {
+        ...state.cycle!,
+        baselines: {
+          ...state.cycle!.baselines,
+          'phase-one': {
+            repo: '/repo',
+            head: EffectString.repeat(40)('b'),
+            tree: EffectString.repeat(40)('c'),
+            preservedFiles: [],
+            pinnedRef: 'refs/heads/main',
+          },
+        },
+        snapshots: [{snapshot, incoming: []}],
+      };
+      const input = {...state, cycle: runtime};
+      const before = structuredClone(input);
+      const view = projectNativeTaskView(input, Effect.pipe('f', EffectString.repeat(64)));
+      expect(view).toMatchObject({
+        status: 'ready',
+        role: 'review',
+        next: {action: 'review', phaseId: 'phase-one', snapshotId: 'review-one'},
+        phase: {
+          snapshot: {
+            snapshotId: 'review-one',
+            reviewMode,
+            requiredReviewLanes: ['correctness', 'simplicity'],
+            files: Array.from({length: 16}, (_, index) => `src/file-${index}.ts`),
+          },
+        },
+        page: {offset: 0, limit: 16, nextOffset: 16},
+        counts: {snapshotFiles: 18, snapshotScopeFiles: 1},
+        missingInputs: [
+          'A complete independent review for snapshot review-one',
+          'Correctness and simplicity review lanes with complete reports',
+        ],
+      });
+      const continuation = decodeNativeTaskCursor(view.page.nextCursor!);
+      expect(continuation && nativeTaskCursorMatches(continuation, view)).toBe(true);
+      const nextPage = projectNativeTaskView(input, Effect.pipe('f', EffectString.repeat(64)), {offset: 16});
+      expect(nextPage.phase?.snapshot?.files).toEqual(['src/file-16.ts', 'src/file-17.ts']);
+      expect(nextPage.phase?.snapshot).toMatchObject({
+        snapshotId: 'review-one',
+        reviewMode,
+        requiredReviewLanes: ['correctness', 'simplicity'],
+      });
+      expect(nextPage.next).toEqual(view.next);
+      expect(nextPage.taskRef).toBe(view.taskRef);
+      expect(input).toEqual(before);
+    },
+  );
 
   it('keeps canonical invalidation blocking ahead of stale snapshot review hints', () => {
     const cycleState = state.cycle!.state;

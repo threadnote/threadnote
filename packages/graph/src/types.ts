@@ -124,7 +124,28 @@ export interface CodeGraphEdge {
   readonly targetName: string;
 }
 
+export interface CodeGraphNavigationProof {
+  readonly ownerId: string;
+  readonly ownerSpan: CodeGraphSpan;
+  readonly callEdgeId: string;
+  readonly module: 'node:fs/promises';
+  readonly imported: 'writeFile';
+  readonly local: string;
+  readonly importSpan: CodeGraphSpan;
+  readonly callSpan: CodeGraphSpan;
+  readonly calleeSpan: CodeGraphSpan;
+  readonly targetSpan: CodeGraphSpan;
+  readonly guard: {readonly span: CodeGraphSpan; readonly branch: 'then' | 'else'};
+}
+
+export interface CodeGraphNavigationFacts {
+  readonly version: 1;
+  readonly proofs: readonly CodeGraphNavigationProof[];
+  readonly omitted: boolean;
+}
+
 export interface CodeGraphFileFacts {
+  readonly navigationFacts?: CodeGraphNavigationFacts;
   /** Compact parser-time inputs retained for derivations that run after source content is released. */
   readonly derivationInputs?: CodeGraphDerivationInputs;
   readonly diagnostics: readonly string[];
@@ -136,7 +157,26 @@ export interface CodeGraphFileFacts {
 }
 
 export interface CodeGraphDerivationInputs {
+  readonly bodyDiscovery?: CodeGraphBodyDiscovery;
   readonly rationale?: readonly CodeGraphRationaleInput[];
+}
+
+/** Private candidate evidence. Textual overlap never establishes a binding or effect. */
+export interface CodeGraphBodyDiscovery {
+  readonly version: 1;
+  readonly policy: string;
+  readonly path: string;
+  readonly contentHash: string;
+  readonly workBytes: number;
+  readonly omissions: readonly string[];
+  readonly records: readonly CodeGraphBodyDiscoveryRecord[];
+}
+
+export interface CodeGraphBodyDiscoveryRecord {
+  readonly ownerId: string;
+  readonly ownerSpan: CodeGraphSpan;
+  readonly window: CodeGraphSpan;
+  readonly terms: readonly string[];
 }
 
 export interface CodeGraphRationaleInput {

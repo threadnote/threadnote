@@ -1,3 +1,4 @@
+import {CODE_GRAPH_SNAPSHOT_ID_PATTERN} from '../store/lexical_projection.js';
 import {SecureRandom} from 'effect/crypto';
 import {isOneOf} from '@threadnote/platform/validation';
 import {Array as EffectArray} from 'effect';
@@ -42,7 +43,6 @@ const CODE_GRAPH_IMPACT_QUERY_SEED_LIMIT = 200;
 const CODE_GRAPH_REFRESH_CONTINUITY_OBSERVATION_TIMEOUT_MILLISECONDS = 1_000;
 const CODE_GRAPH_IMPACT_QUERY_CHANGED_PATHS_SELECTOR = 'changed paths';
 const GIT_OBJECT_ID_PATTERN = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
-const CODE_GRAPH_SNAPSHOT_ID_PATTERN = /^cgsn_[0-9a-f]{40}(?:-direct|-full-[0-9a-f]{16})?$/u;
 export const CODE_GRAPH_IMPACT_QUERY_TIMEOUT_MILLISECONDS = 20_000;
 export const CODE_GRAPH_ISOLATED_QUERY_TIMEOUT_MILLISECONDS = 50_000;
 

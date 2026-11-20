@@ -1,3 +1,5 @@
+import {validateBodyDiscovery} from '../languages/body_discovery.js';
+import {parseNavigationFacts} from '../navigation_facts.js';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Predicate, Schema} from 'effect';
 import {parseCodeGraphMonikerV1} from '../cross_repository/monikers.js';
@@ -74,7 +76,7 @@ function factShape(required: readonly string[], optional: readonly string[]): Fa
 
 const FILE_FACTS_SHAPE = factShape(
   ['diagnostics', 'edges', 'path', 'symbols'],
-  ['derivationInputs', 'monikers', 'references'],
+  ['derivationInputs', 'monikers', 'references', 'navigationFacts'],
 );
 const SYMBOL_SHAPE = factShape(
   ['contentHash', 'exported', 'id', 'kind', 'language', 'name', 'path', 'qualifiedName', 'span'],
@@ -98,7 +100,7 @@ const REFERENCE_SHAPE = factShape(
   ],
   ['aliasLookupKeys', 'arity', 'exportedOnly', 'sourceId'],
 );
-const DERIVATION_INPUTS_SHAPE = factShape([], ['rationale']);
+const DERIVATION_INPUTS_SHAPE = factShape([], ['rationale', 'bodyDiscovery']);
 const RATIONALE_SHAPE = factShape(['documentation', 'line', 'marker', 'name'], []);
 const SPAN_SHAPE = factShape(['column', 'endColumn', 'endLine', 'line'], []);
 
@@ -131,8 +133,11 @@ export function parseCodeGraphFileFacts(value: unknown): CodeGraphFileFacts {
           }
         });
   const derivationInputs =
-    input.derivationInputs === undefined ? undefined : parseDerivationInputs(input.derivationInputs);
+    input.derivationInputs === undefined ? undefined : parseDerivationInputs(input.derivationInputs, path, symbols);
+  const navigationFacts =
+    input.navigationFacts === undefined ? undefined : parseFileNavigationFacts(input.navigationFacts, symbols, edges);
   return {
+    ...(navigationFacts === undefined ? {} : {navigationFacts}),
     ...(derivationInputs === undefined ? {} : {derivationInputs}),
     diagnostics,
     edges,
@@ -217,10 +222,16 @@ function parseReference(value: unknown, index: number, paths: Set<string>): Code
   };
 }
 
-function parseDerivationInputs(value: unknown): CodeGraphDerivationInputs {
+function parseDerivationInputs(
+  value: unknown,
+  path: string,
+  symbols: readonly CodeGraphSymbol[],
+): CodeGraphDerivationInputs {
   const input = object(value, 'File-fact derivation inputs');
   exactKeys(input, DERIVATION_INPUTS_SHAPE);
-  if (input.rationale === undefined) return {};
+  const bodyDiscovery =
+    input.bodyDiscovery === undefined ? undefined : validateBodyDiscovery(input.bodyDiscovery, path, symbols);
+  if (input.rationale === undefined) return bodyDiscovery === undefined ? {} : {bodyDiscovery};
   const rationale = EffectArray.map(array(input.rationale, 'File-fact rationale inputs'), (value, index) => {
     const rationale = object(value, `File-fact rationale ${index}`);
     exactKeys(rationale, RATIONALE_SHAPE);
@@ -231,7 +242,7 @@ function parseDerivationInputs(value: unknown): CodeGraphDerivationInputs {
       name: boundedNonEmptyText(rationale.name, 'Rationale name'),
     };
   });
-  return {rationale};
+  return {rationale, ...(bodyDiscovery === undefined ? {} : {bodyDiscovery})};
 }
 
 function parseSpan(value: unknown, label: string): CodeGraphSpan {
@@ -403,4 +414,16 @@ function relation(value: unknown, label: string): CodeGraphRelation {
     throw CodeGraphFactValidationError.make({message: `${label} is invalid.`});
   }
   return matched;
+}
+
+function parseFileNavigationFacts(
+  value: unknown,
+  symbols: readonly CodeGraphSymbol[],
+  edges: readonly CodeGraphEdge[],
+) {
+  try {
+    return parseNavigationFacts(value, symbols, edges);
+  } catch (cause) {
+    throw CodeGraphFactValidationError.make({cause, message: 'File-fact navigation proof is invalid.'});
+  }
 }

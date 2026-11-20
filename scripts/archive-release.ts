@@ -37,7 +37,8 @@ export const archiveRelease = Effect.fn('archiveRelease')(function* (options: Ar
   const target = options.target;
   if (!target || !ARCHIVE_TARGET_PATTERN.test(target)) {
     return yield* ScriptError.make({
-      message: 'THREADNOTE_RELEASE_TARGET must be one of darwin|linux|windows combined with arm64|x64.',
+      message:
+        'THREADNOTE_RELEASE_TARGET must be a canonical darwin, windows or linux arm64/x64 archive target; only Linux accepts the -musl suffix.',
     });
   }
 

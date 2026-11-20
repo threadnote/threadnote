@@ -1,3 +1,5 @@
+import {completedLegacyCheckpointBase} from './incremental.js';
+import {isLexicalV2Snapshot, lexicalPhysicalSnapshotIdentity} from '../store/lexical_projection.js';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Option} from 'effect';
@@ -182,6 +184,9 @@ export const attemptSparseReusableOverlay = Effect.fn('codeGraph.attemptSparseRe
   // that slice, turning one-file indexing into repository-sized pause time.
   yield* Effect.yieldNow;
 
+  const factored = isLexicalV2Snapshot(base.snapshot.id);
+  if (!factored && !(yield* completedLegacyCheckpointBase(input.store, input.layout.databasePath, base.snapshot)))
+    return Option.none<CodeGraphIndexSummary>();
   const logicalSnapshotId = sparseOverlaySnapshotIdentity(
     input.identity,
     base.snapshot.id,
@@ -189,6 +194,9 @@ export const attemptSparseReusableOverlay = Effect.fn('codeGraph.attemptSparseRe
     admission.overlayFingerprint,
     input.scopeObservation?.scope,
   );
+  const physicalSnapshotId = factored
+    ? lexicalPhysicalSnapshotIdentity(logicalSnapshotId, 'overlay', base.snapshot.id)
+    : logicalSnapshotId;
   const existing = yield* input.store.readySnapshot(
     input.layout.databasePath,
     input.identity.worktreeId,
@@ -196,7 +204,7 @@ export const attemptSparseReusableOverlay = Effect.fn('codeGraph.attemptSparseRe
   );
   const reusableReady = yield* input.store.currentLexicalReadySnapshotById(
     input.layout.databasePath,
-    logicalSnapshotId,
+    physicalSnapshotId,
   );
   if (reusableReady !== undefined) {
     yield* verifyIndexInput(input.identity, true, input.options.threadnoteHome, input.requestedOverlay, inventory);
@@ -277,7 +285,7 @@ export const attemptSparseReusableOverlay = Effect.fn('codeGraph.attemptSparseRe
           admission.overlayFingerprint,
           input.scopeObservation?.scope,
         ),
-        id: logicalSnapshotId,
+        id: physicalSnapshotId,
         overlayFingerprint: admission.overlayFingerprint,
         repositoryId: input.identity.repositoryId,
         scopeId: input.scopeObservation?.scope?.scopeKey,

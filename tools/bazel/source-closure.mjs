@@ -32,7 +32,7 @@ export function sourceImports(path, content) {
 
 /**
  * A supplied graph is a cache for one fixed source snapshot, workspace map,
- * virtual-module set and import reader. Reuse it only within that model; create
+ * virtual/host-module declarations and import reader. Reuse it only within that model; create
  * a fresh Map when any resolver input changes.
  * @param {ReadonlyArray<string>} entries
  * @param {{
@@ -40,13 +40,14 @@ export function sourceImports(path, content) {
  *   exists: (path: string) => boolean,
  *   workspaces: ReadonlyMap<string, {path: string, manifest: {exports?: Record<string, unknown>}}>,
  *   virtualModules?: ReadonlyArray<string>,
+ *   hostModules?: Readonly<Record<string, ReadonlyArray<string>>>,
  *   imports?: (path: string, content: string) => ReadonlyArray<string>,
  *   graph?: Map<string, {files: string[], npm: string[]}>
  * }} options
  */
 export function collectSourceClosure(
   entries,
-  {read, exists, workspaces, virtualModules = [], imports = sourceImports, graph},
+  {read, exists, workspaces, virtualModules = [], hostModules = {}, imports = sourceImports, graph},
 ) {
   const files = new Set();
   const npm = new Set();
@@ -95,7 +96,8 @@ export function collectSourceClosure(
         Effect.pipe(specifier, EffectString.startsWith('node:')) ||
         Effect.pipe(specifier, EffectString.startsWith('bun:')) ||
         builtins.has(specifier) ||
-        virtualModules.includes(specifier)
+        virtualModules.includes(specifier) ||
+        hostModules[path]?.includes(specifier)
       )
         continue;
       const clean = Effect.pipe(specifier, EffectString.split('?'))[0];

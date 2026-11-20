@@ -1,3 +1,6 @@
+import {codeGraphEffectiveSymbolTermsQueryStatement} from '@threadnote/graph/store/queries';
+import {taskHeaderStatement, taskPostingStatement} from '@threadnote/graph/store/query/core';
+import {parseLexicalViewBinding, lexicalPhysicalSnapshotIdentity} from '@threadnote/graph/store/utilities';
 import {TestError} from '@threadnote/testing/test-error';
 import {Array as EffectArray} from 'effect';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -621,6 +624,70 @@ describe('cross-session code graph increments', () => {
         expect(projectGraph(yield* loadGraphEffect(root, home, committed))).toEqual(
           projectGraph(yield* loadGraphEffect(root, home, dirtyRoot)),
         );
+
+        const path = yield* Path.Path;
+        const store = yield* CodeGraphStore;
+        const databasePath = codeGraphLayout(
+          path,
+          home,
+          committed.identity.checkoutId,
+          committed.identity.worktreeId,
+        ).databasePath;
+        const database = new Database(databasePath, {readonly: true, strict: true});
+        try {
+          const weighted = (summary: CodeGraphIndexSummary) => {
+            const statement = codeGraphEffectiveSymbolTermsQueryStatement(
+              summary.snapshot.id,
+              summary.snapshot.baseSnapshotId,
+            );
+            return database
+              .query<{term: string; symbol_id: string; weight: number}, SQLQueryBindings[]>(statement.text)
+              .all(...statement.parameters);
+          };
+          const dirtyTerms = weighted(dirtyRoot);
+          expect(dirtyTerms.length).toBeGreaterThan(0);
+          expect(weighted(committed)).toEqual(dirtyTerms);
+          expect(EffectArray.some(dirtyTerms, row => row.term === '~body:v1:verbatim' && row.weight === 1)).toBe(true);
+          expect(EffectArray.some(dirtyTerms, row => row.term === 'helper' && row.weight === 5)).toBe(true);
+          const header = taskHeaderStatement(committed.snapshot.id);
+          const receipt = database
+            .query<Record<string, unknown>, SQLQueryBindings[]>(header.text)
+            .get(...header.parameters)!;
+          expect(receipt).toMatchObject({compact_current: 2, compact_base: 2, row_valid: 1, transfer_valid: 1});
+          const binding = parseLexicalViewBinding(receipt.layout_current);
+          expect(binding).toMatchObject({mode: 'alias', baseSnapshotId: dirtyRoot.snapshot.id, orderRevision: 1});
+          expect(committed.snapshot.id).toBe(
+            lexicalPhysicalSnapshotIdentity(binding!.logicalSnapshotId, 'alias', dirtyRoot.snapshot.id),
+          );
+          const body = taskPostingStatement(
+            committed.snapshot.id,
+            committed.snapshot.baseSnapshotId,
+            ['~body:v1:verbatim'],
+            128,
+          );
+          const admitted = database
+            .query<Record<string, unknown>, SQLQueryBindings[]>(body.text)
+            .all(...body.parameters);
+          expect(admitted.length).toBeGreaterThan(0);
+          const functionOwner = database
+            .query<{id: string}, [string]>("SELECT id FROM symbols WHERE snapshot_id=? AND name='useHelper'")
+            .get(dirtyRoot.snapshot.id)!;
+          expect(EffectArray.some(admitted, row => row.id === functionOwner.id)).toBe(true);
+          expect(
+            EffectArray.every(admitted, row => row.weight === 1 && row.eligible === 1 && row.row_valid === 1),
+          ).toBe(true);
+        } finally {
+          database.close();
+        }
+        expect(
+          (yield* store.searchSymbols(databasePath, committed.snapshot.id, 'useHelper', 20)).length,
+        ).toBeGreaterThan(0);
+        const publicAlias = yield* store.searchSymbols(databasePath, committed.snapshot.id, 'verbatim', 20);
+        const publicRoot = yield* store.searchSymbols(databasePath, dirtyRoot.snapshot.id, 'verbatim', 20);
+        expect(publicAlias).toEqual(publicRoot);
+        // The variable's literal is legitimate signature metadata. The enclosing
+        // function receives this term only through its independent private body.
+        expect(EffectArray.some(publicAlias, symbol => symbol.name === 'useHelper')).toBe(false);
 
         // Keep the import/re-export evidence stable while changing only the
         // function body. This exercises persisted re-export lookup against the

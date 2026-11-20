@@ -35,6 +35,7 @@ import type {
   CodeGraphCheckpointImportBuildBindingResult,
   CodeGraphCheckpointImportBuildInput,
   CodeGraphCheckpointImportFinalizeOptions,
+  CodeGraphCheckpointImportVerification,
   CodeGraphCheckpointImportReceipt,
   CodeGraphCheckpointImportReceiptInput,
   CodeGraphCheckpointImportReceiptRecordResult,
@@ -142,6 +143,15 @@ export interface CodeGraphStoreShape {
     snapshot: CodeGraphSnapshot,
     ownerToken: string,
     input: CodeGraphCheckpointImportReceiptInput,
+    options?: CodeGraphCheckpointImportFinalizeOptions,
+  ) => Effect.Effect<void, CodeGraphStoreFailure>;
+  readonly completeVerifiedCheckpointImport: (
+    databasePath: string,
+    identity: RepositoryIdentity,
+    snapshotId: string,
+    input: CodeGraphCheckpointImportReceiptInput,
+    verification: CodeGraphCheckpointImportVerification,
+    leaseToken: string,
     options?: CodeGraphCheckpointImportFinalizeOptions,
   ) => Effect.Effect<void, CodeGraphStoreFailure>;
   readonly readySnapshotByLogicalDigest: (

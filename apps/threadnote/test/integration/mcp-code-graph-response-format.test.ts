@@ -33,6 +33,7 @@ const graphResponseProjectionSchema = Schema.Struct({
   output: Schema.Struct({returnedEdges: Schema.Finite, returnedNodes: Schema.Finite}),
   repository: Schema.Unknown,
   snapshot: Schema.Unknown,
+  sourceVersion: Schema.Finite,
   trust: Schema.Unknown,
 });
 
@@ -186,6 +187,7 @@ describe('MCP code graph response format', () => {
           operation: dualProjection.operation,
           repository: dualProjection.repository,
           snapshot: dualProjection.snapshot,
+          sourceVersion: dualProjection.sourceVersion,
           trust: dualProjection.trust,
         });
         expect(parsed.nodes).toEqual(expect.arrayContaining([...dualProjection.nodes]));
@@ -242,6 +244,14 @@ describe('MCP code graph response format', () => {
         }).totalBytes;
         const measuredTextBytes = measureAgentToolResponse({text: textOnly}).totalBytes;
         const measuredAgentBytes = measureAgentToolResponse({text: agentOnly}).totalBytes;
+        if (query.id === 'documentation-recovery') {
+          expect(dual.structuredContent).toMatchObject({
+            output: {returnedEdges: 1, returnedNodes: 1, totalEdges: 12, totalNodes: 8, truncated: true},
+            warnings: expect.arrayContaining(['Budget truncated.']),
+          });
+          expect(parsed.output).toMatchObject({returnedEdges: 2, returnedNodes: 2});
+          expect(measuredDualBytes).toBeLessThanOrEqual(800 * 3);
+        }
         dualBytes += measuredDualBytes;
         textBytes += measuredTextBytes;
         agentBytes += measuredAgentBytes;

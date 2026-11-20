@@ -1,3 +1,4 @@
+import {lexicalUtf16SortKey, type LexicalProjection} from '../../store/lexical_projection.js';
 import {Array as EffectArray} from 'effect';
 import type {Database} from 'bun:sqlite';
 import type {CodeGraphMonikerV1} from '../../cross_repository/types.js';
@@ -20,12 +21,13 @@ import type {CodeGraphReusableReexport} from '../../store/models.js';
 import {codeGraphSqliteGet, codeGraphSqliteRun} from '../../sqlite_statement.js';
 import type {CodeGraphEdge, CodeGraphReference, CodeGraphSymbol} from '../../types.js';
 import {recordCodeGraphMaterializationSpoolSurfaceCapacity} from './surfaces.js';
-import * as EffectRecord from 'effect/Record';
 
 const SPOOL_INSERT_PARAMETER_MAXIMUM = 32_000;
 const SPOOL_INSERT_ROW_MAXIMUM = 4_000;
 
 export interface CodeGraphMaterializationSpoolFactBatch {
+  readonly lexicalProjection?: LexicalProjection;
+  readonly batchIndex?: number;
   readonly directEdges: readonly CodeGraphEdge[];
   readonly monikers: readonly CodeGraphMonikerV1[];
   readonly referenceEdges: ReadonlyMap<string, CodeGraphEdge>;
@@ -35,6 +37,24 @@ export interface CodeGraphMaterializationSpoolFactBatch {
 }
 
 export interface PreparedCodeGraphMaterializationSpoolFactBatch {
+  readonly lexicalScopes?: readonly {
+    scopeOrdinal: number;
+    path: string;
+    contentHash: string;
+    packageName: string | null;
+    pathSort: Uint8Array;
+    packageSort: Uint8Array;
+  }[];
+  readonly lexicalMembers?: LexicalProjection['members'];
+  readonly lexicalOwners?: readonly {
+    term: string;
+    originMask: number;
+    scopeOrdinal: number;
+    memberOrdinal: number;
+    metadataWeight: number;
+  }[];
+  readonly lexicalShared?: readonly {term: string; scopeOrdinal: number}[];
+  readonly lexicalCounts?: readonly (readonly [number, number])[];
   readonly edges: readonly CodeGraphMaterializationEdgeRow[];
   readonly lookup: readonly CodeGraphMaterializationSymbolLookupRow[];
   readonly monikers: readonly CodeGraphMaterializationMonikerRow[];
@@ -54,12 +74,45 @@ export function prepareCodeGraphMaterializationSpoolFactBatch(
     monikers: codeGraphMaterializationMonikerRows(batch.monikers),
     references: codeGraphMaterializationReferenceRows(batch.references, batch.referenceEdges),
     reexports: codeGraphMaterializationReexportRows(batch.references),
-    symbolTerms: codeGraphMaterializationSymbolTermRows(batch.symbols, batch.termsBySymbol),
+    symbolTerms: batch.lexicalProjection
+      ? []
+      : codeGraphMaterializationSymbolTermRows(batch.symbols, batch.termsBySymbol),
     symbols: codeGraphMaterializationSymbolRows(batch.symbols),
+    ...(batch.lexicalProjection
+      ? {
+          lexicalScopes: EffectArray.map(batch.lexicalProjection.scopes, scope => ({
+            ...scope,
+            pathSort: lexicalUtf16SortKey(scope.path),
+            packageSort: lexicalUtf16SortKey(scope.packageName ?? ''),
+          })),
+          lexicalMembers: batch.lexicalProjection.members,
+          lexicalOwners: EffectArray.map(batch.lexicalProjection.owners, owner => ({
+            ...owner,
+            term: batch.lexicalProjection!.terms[owner.termOrdinal],
+          })),
+          lexicalShared: EffectArray.map(batch.lexicalProjection.shared, shared => ({
+            term: batch.lexicalProjection!.terms[shared.termOrdinal],
+            scopeOrdinal: shared.scopeOrdinal,
+          })),
+          lexicalCounts: [[batch.batchIndex ?? 0, batch.lexicalProjection.logicalPostingCount] as const],
+        }
+      : {}),
   };
   return {
     ...prepared,
-    rowCount: EffectArray.reduce(EffectRecord.values(prepared), 0, (total, rows) => total + rows.length),
+    rowCount:
+      prepared.edges.length +
+      prepared.lookup.length +
+      prepared.monikers.length +
+      prepared.references.length +
+      prepared.reexports.length +
+      prepared.symbolTerms.length +
+      prepared.symbols.length +
+      (prepared.lexicalScopes?.length ?? 0) +
+      (prepared.lexicalMembers?.length ?? 0) +
+      (prepared.lexicalOwners?.length ?? 0) +
+      (prepared.lexicalShared?.length ?? 0) +
+      (prepared.lexicalCounts?.length ?? 0),
   };
 }
 
@@ -147,6 +200,29 @@ export function appendCodeGraphMaterializationSpoolFactBatch(
     row.evidencePath,
     row.evidenceSpanJson,
   ]);
+  insertRows(database, 'lexical_scopes', 7, batch.lexicalScopes ?? [], row => [
+    row.scopeOrdinal,
+    row.path,
+    row.contentHash,
+    row.packageName,
+    row.pathSort,
+    row.packageName === null ? 0 : 1,
+    row.packageSort,
+  ]);
+  insertRows(database, 'lexical_members', 3, batch.lexicalMembers ?? [], row => [
+    row.scopeOrdinal,
+    row.memberOrdinal,
+    row.symbolId,
+  ]);
+  insertRows(database, 'lexical_owners', 5, batch.lexicalOwners ?? [], row => [
+    row.term,
+    row.originMask,
+    row.scopeOrdinal,
+    row.memberOrdinal,
+    row.metadataWeight,
+  ]);
+  insertRows(database, 'lexical_shared', 2, batch.lexicalShared ?? [], row => [row.term, row.scopeOrdinal]);
+  insertRows(database, 'lexical_counts', 2, batch.lexicalCounts ?? [], row => row);
   insertRows(database, 'symbol_terms', 3, batch.symbolTerms, row => [row.term, row.symbolId, row.weight]);
 }
 
@@ -155,7 +231,7 @@ function insertRows<Row>(
   surface: string,
   columnCount: number,
   rows: readonly Row[],
-  parameters: (row: Row) => readonly (number | string | null)[],
+  parameters: (row: Row) => readonly (number | string | null | Uint8Array)[],
 ): void {
   if (rows.length === 0) return;
   const previous = codeGraphSqliteGet<{readonly rowid: bigint | number}>(

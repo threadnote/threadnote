@@ -470,7 +470,7 @@ describe('native cycle pure domain', () => {
     );
   });
 
-  it('preserves historical amendments in ordinary transitions while rejecting new specification changes', () => {
+  it('preserves historical amendments while requiring new authority for another specification change', () => {
     const state = amendedState();
     const original = JSON.stringify(state);
     const validated = validateNativeCyclePhase(state, 'one', snapshot(), validation);
@@ -492,7 +492,7 @@ describe('native cycle pure domain', () => {
         }),
         'Historical authority does not authorize a new amendment',
       ),
-    ).toThrow('Plan reconciliation changes identity or spec.');
+    ).toThrow('Record bounded reconciliation reason and explicit user authority for the specification amendment.');
     expect(JSON.stringify(state)).toBe(original);
   });
 
@@ -1087,15 +1087,20 @@ describe('standard-profile plan reconciliation', () => {
   it('keeps an undelivered phase pending across a path-only or base-only change under standard only', () => {
     const before = initializeNativeCycle(withIntent(['src/']));
     for (const plan of [withIntent(['src/', 'docs/']), withIntent(['src/'], 'release')]) {
-      expect(reconcileNativeCyclePlan(before, plan, 'Paths changed', 'standard')).toMatchObject({
+      expect(reconcileNativeCyclePlan(before, plan, 'Paths changed', undefined, 'standard')).toMatchObject({
         affected: [],
         state: {phases: {one: {status: 'pending', phaseHash: nativeCyclePhaseHash(plan, 'one')}}},
       });
       expect(reconcileNativeCyclePlan(before, plan, 'Paths changed').state.phases.one.status).toBe('stale');
     }
     expect(
-      reconcileNativeCyclePlan(before, withIntent(['src/'], 'main', 'works faster'), 'Intent changed', 'standard').state
-        .phases.one.status,
+      reconcileNativeCyclePlan(
+        before,
+        withIntent(['src/'], 'main', 'works faster'),
+        'Intent changed',
+        undefined,
+        'standard',
+      ).state.phases.one.status,
     ).toBe('stale');
   });
 
@@ -1117,14 +1122,16 @@ describe('standard-profile plan reconciliation', () => {
       definitionHash: Effect.pipe('3', EffectString.repeat(64)),
     });
     for (const before of [validated, published]) {
-      expect(reconcileNativeCyclePlan(before, reexport(), 'Switched to standard', 'standard').affected).toEqual([]);
+      expect(
+        reconcileNativeCyclePlan(before, reexport(), 'Switched to standard', undefined, 'standard').affected,
+      ).toEqual([]);
       // The definition changed beside the paths, and nothing showed that the paths alone changed it.
-      const changed = reconcileNativeCyclePlan(before, widened, 'Outcome and paths changed', 'standard');
+      const changed = reconcileNativeCyclePlan(before, widened, 'Outcome and paths changed', undefined, 'standard');
       expect(changed.affected).toEqual(['one', 'two']);
       expect(changed.state.phases.one).toMatchObject({status: 'stale'});
       expect(changed.state.phases.one).not.toHaveProperty('validation');
       expect(changed.state.phases.one).not.toHaveProperty('delivery');
-      expect(reconcileNativeCyclePlan(before, widened, 'Own the docs', 'standard', ['one'])).toMatchObject({
+      expect(reconcileNativeCyclePlan(before, widened, 'Own the docs', undefined, 'standard', ['one'])).toMatchObject({
         affected: [],
         state: {phases: {one: {status: before.phases.one.status, validation}}},
       });
@@ -1152,18 +1159,18 @@ describe('standard-profile plan reconciliation', () => {
       publication,
     });
     for (const before of [validated, published, merged]) {
-      const reconciled = reconcileNativeCyclePlan(before, widened, 'Own the docs', 'standard');
+      const reconciled = reconcileNativeCyclePlan(before, widened, 'Own the docs', undefined, 'standard');
       expect(reconciled.affected).toEqual([]);
       expect(reconciled.state.phases).toEqual({
         one: {...before.phases.one, planPhaseHash: nativeCyclePhaseHash(widened, 'one')},
         two: {...before.phases.two, phaseHash: nativeCyclePhaseHash(widened, 'two')},
       });
-      expect(reconcileNativeCyclePlan(reconciled.state, plan, 'Revert the docs', 'standard').state.phases.one).toEqual(
-        before.phases.one,
-      );
+      expect(
+        reconcileNativeCyclePlan(reconciled.state, plan, 'Revert the docs', undefined, 'standard').state.phases.one,
+      ).toEqual(before.phases.one);
     }
     expect(reconcileNativeCyclePlan(validated, widened, 'Own the docs').affected).toEqual(['one', 'two']);
-    const kept = reconcileNativeCyclePlan(validated, widened, 'Own the docs', 'standard').state;
+    const kept = reconcileNativeCyclePlan(validated, widened, 'Own the docs', undefined, 'standard').state;
     expect(
       recordNativeCycleDelivery(kept, 'one', {...prDelivery('open'), phaseHash: proofHash}).phases.one,
     ).toMatchObject({status: 'published', phaseHash: proofHash});
@@ -1174,7 +1181,7 @@ describe('standard-profile plan reconciliation', () => {
       decodeNativeCycleState({...kept, phases: {...kept.phases, two: {...kept.phases.two, planPhaseHash: digest}}}),
     ).toThrow();
     expect(
-      reconcileNativeCyclePlan(validated, withIntent(['src/'], 'release'), 'Base changed', 'standard'),
+      reconcileNativeCyclePlan(validated, withIntent(['src/'], 'release'), 'Base changed', undefined, 'standard'),
     ).toMatchObject({affected: [], state: {phases: {one: {status: 'validated', validation}}}});
   });
 });

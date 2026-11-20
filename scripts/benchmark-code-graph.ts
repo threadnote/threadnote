@@ -1,3 +1,4 @@
+import {lexicalV2PhysicalCountStatement, isLexicalV2Snapshot} from '@threadnote/graph/store';
 import {CodeGraphLanguagePackRegistry} from '@threadnote/graph/languages/registry';
 import {TreeSitterRuntime, TREE_SITTER_RUNTIME_CACHE_IDENTITY} from '@threadnote/graph/tree_sitter/runtime';
 import type {Query} from 'web-tree-sitter';
@@ -1582,7 +1583,8 @@ const benchmarkCodeGraph = Effect.scoped(
     }
 
     const storage = yield* codeGraphStorageTelemetry(fs, path, analysisStatus.databasePath, databaseRoot);
-    const coldLexicalTermRows = sqliteLexicalTermRowCount(analysisStatus.databasePath, cold.snapshot.id);
+    const coldLexicalPostings = sqliteLexicalPostingCounts(analysisStatus.databasePath, cold.snapshot.id);
+    const coldLexicalTermRows = coldLexicalPostings.physicalRows;
     const sqliteVersion = sqliteVersionString(analysisStatus.databasePath);
     const sqlitePageSizeBytes = sqlitePageSize(analysisStatus.databasePath);
     yield* runCheckpoint?.mark('structural-parity') ?? Effect.void;
@@ -1936,7 +1938,7 @@ const benchmarkCodeGraph = Effect.scoped(
               files: cold.snapshot.fileCount,
               skipped: cold.skippedFiles,
               symbols: cold.snapshot.symbolCount,
-              terms: coldLexicalTermRows,
+              terms: coldLexicalPostings.logicalPostings,
             })
           : []),
       ],
@@ -4254,9 +4256,44 @@ function sqliteRowCount(databasePath: string, query: string, ...parameters: read
   }
 }
 
-function sqliteLexicalTermRowCount(databasePath: string, snapshotId: string): number {
+/**
+ * Physical rows are the storage cost of the snapshot's lexical layout. Logical
+ * postings are the layout-independent symbol/term workload the production
+ * fixture targets, so factoring storage changes only the former.
+ */
+function sqliteLexicalPostingCounts(
+  databasePath: string,
+  snapshotId: string,
+): {readonly logicalPostings: number; readonly physicalRows: number} {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
+    if (isLexicalV2Snapshot(snapshotId)) {
+      const statement = lexicalV2PhysicalCountStatement(snapshotId);
+      const row = database
+        .query<Record<string, number>, SQLQueryBindings[]>(statement.text)
+        .get(...statement.parameters);
+      if (!row || row.obsolete_count !== 0 || row.format_count !== 1 || row.view_count !== 1)
+        throw ScriptError.make({message: 'Factored lexical physical accounting is incomplete.'});
+      const count =
+        row.owner_count +
+        row.shared_count +
+        row.symbol_count +
+        row.scope_count +
+        row.term_count +
+        row.format_count +
+        row.view_count +
+        1;
+      const receipt = database
+        .query<{logical_posting_count: number; posting_count: number}, [string]>(
+          'SELECT posting_count,logical_posting_count FROM lexical_v2_formats WHERE snapshot_id=?',
+        )
+        .get(snapshotId);
+      if (!Number.isSafeInteger(count) || count < 0 || receipt?.posting_count !== count)
+        throw ScriptError.make({message: 'Factored lexical physical row count differs from its receipt.'});
+      if (!Number.isSafeInteger(receipt.logical_posting_count) || receipt.logical_posting_count < 0)
+        throw ScriptError.make({message: 'Factored lexical logical posting count is invalid.'});
+      return {logicalPostings: receipt.logical_posting_count, physicalRows: count};
+    }
     const compact = database
       .query<{readonly count?: bigint | number} | null, SQLQueryBindings[]>(
         'SELECT posting_count AS count FROM lexical_storage_formats WHERE snapshot_id = ? LIMIT 1',
@@ -4276,7 +4313,7 @@ function sqliteLexicalTermRowCount(databasePath: string, snapshotId: string): nu
     if (!Number.isSafeInteger(count) || count < 0) {
       throw ScriptError.make({message: `Invalid SQLite lexical term row count for ${databasePath}.`});
     }
-    return count;
+    return {logicalPostings: count, physicalRows: count};
   } finally {
     database.close(false);
   }

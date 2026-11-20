@@ -9,6 +9,7 @@ import {makeContextRuntimeCommand} from './context_cli.js';
 import {makeCompactCommand, makeRecallFeedbackCommand, makeValueCommand} from './workflow_cli.js';
 import * as hooksCli from './hooks_cli.js';
 import {agentsCommandMetadata, makeAgentsCommand} from './agents_cli.js';
+import {makeSemanticCommand} from './semantic_cli.js';
 import {makeSetupCommand, setupCommandMetadata} from './setup_cli.js';
 import {guidanceCommandMetadata, makeGuidanceCommand} from './guidance_cli.js';
 import {makeDevelopmentInstallRepairCommand} from './development_install_cli.js';
@@ -1873,6 +1874,7 @@ const topLevelCommandRegistrations = [
   registerTopLevelCommand('activate', makeActivationCommand(withScopedRuntime)),
   registerTopLevelCommand('guidance', makeGuidanceCommand(withScopedRuntime), guidanceCommandMetadata),
   registerTopLevelCommand('agents', makeAgentsCommand(withScopedRuntime), agentsCommandMetadata),
+  registerTopLevelCommand('semantic', makeSemanticCommand(withRuntimeEffect), {productionLog: {mode: 'never'}}),
   registerTopLevelCommand('manage', manage),
   registerTopLevelCommand('memory-preview', makeMemoryPreviewCommand(withRuntimeEffect), {
     productionLog: {mode: 'never'},

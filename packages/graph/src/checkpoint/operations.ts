@@ -1,3 +1,6 @@
+import {checkpointCompletionCapacity} from './pack.js';
+import {verifyCheckpointCompletionInPublishingTransaction} from './authority.js';
+import type {CodeGraphCheckpointImportVerification} from '../store/models.js';
 import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import {checkpointTerminalText} from './terminal_text.js';
@@ -290,7 +293,7 @@ export const importCodeGraphCheckpointSnapshot = Effect.fn('codeGraph.checkpoint
         ),
       );
       const attribution = checkpointAttributionRecordVerifier(inspection.header);
-      yield* withCodeGraphCheckpointAuthorityVerification(inspection.header, accept =>
+      const verifiedArtifact = yield* withCodeGraphCheckpointAuthorityVerification(inspection.header, accept =>
         decodeCheckpointInput(input, inspection, chunk =>
           Effect.gen(function* () {
             for (const record of chunk.records) {
@@ -307,10 +310,15 @@ export const importCodeGraphCheckpointSnapshot = Effect.fn('codeGraph.checkpoint
         );
       }
       yield* admission.verifyEnvironment;
-      return {input, inspection, admission};
+      return {input, inspection, admission, verifiedArtifact};
     }),
   );
   const receipt = checkpointImportReceipt(validated.inspection, options.expectedDigest !== undefined);
+  const verification: CodeGraphCheckpointImportVerification = {
+    artifactVerification: validated.verifiedArtifact,
+    context:
+      yield* Effect.context<Effect.Services<ReturnType<typeof verifyCheckpointCompletionInPublishingTransaction>>>(),
+  };
   const reusableBaseReceipt = yield* hydrateCodeGraphCheckpointReusableBaseReceipt(
     identity,
     validated.inspection.header,
@@ -334,6 +342,7 @@ export const importCodeGraphCheckpointSnapshot = Effect.fn('codeGraph.checkpoint
     layout,
     threadnoteHome: config.agentContextHome,
   });
+  const importCapacity = yield* attemptCheckpoint(() => checkpointCompletionCapacity(validated.verifiedArtifact));
   const imported = yield* withCodeGraphProcessLock(
     fs,
     layout.lockPath,
@@ -347,7 +356,31 @@ export const importCodeGraphCheckpointSnapshot = Effect.fn('codeGraph.checkpoint
         validated.inspection.header.logical.digest,
         validated.inspection.header.abi.digest,
       );
-      if (reusable !== undefined) return {mode: 'reused' as const, snapshot: reusable};
+      if (reusable !== undefined) {
+        const existing = yield* store.checkpointImportReceipt(layout.databasePath, reusable.id);
+        if (!existing) return yield* checkpointFailure('Reusable checkpoint has no original import receipt.');
+        const {
+          completionSha256: _completion,
+          importedAt: _importedAt,
+          snapshotId: _snapshotId,
+          ...originalReceipt
+        } = existing;
+        const lease = yield* store.acquireSnapshotLease(layout.databasePath, reusable.id, 30 * 60_000);
+        yield* store
+          .completeVerifiedCheckpointImport(
+            layout.databasePath,
+            identity,
+            reusable.id,
+            originalReceipt,
+            verification,
+            lease,
+            {
+              persistentCapacityProtector,
+            },
+          )
+          .pipe(Effect.ensuring(store.releaseSnapshotLease(layout.databasePath, lease).pipe(Effect.ignore)));
+        return {mode: 'reused' as const, snapshot: reusable};
+      }
       const ownerToken = yield* store.claimPersistentBuild(layout.databasePath, identity, building, {
         logicalSnapshotId: snapshotId,
         owner: {buildId: yield* crypto.uuidV4(), processId: system.processId},
@@ -365,18 +398,24 @@ export const importCodeGraphCheckpointSnapshot = Effect.fn('codeGraph.checkpoint
               return yield* checkpointFailure('Checkpoint input changed before staging.');
             }
             yield* decodeCheckpointInput(input, validated.inspection, chunk =>
-              store
-                .stageCheckpointImportRecordPage(layout.databasePath, snapshotId, ownerToken, {
+              persistentCapacityProtector(
+                {
+                  operation: 'stage persistent code graph facts',
+                  finalFactBytes: importCapacity.bytes,
+                  rowCount: importCapacity.rows,
+                },
+                store.stageCheckpointImportRecordPage(layout.databasePath, snapshotId, ownerToken, {
                   batchIndex: chunk.descriptor.ordinal,
                   digest: chunk.descriptor.digest,
                   records: chunk.records,
-                })
-                .pipe(Effect.asVoid),
+                }),
+              ).pipe(Effect.asVoid),
             );
           }),
         );
         yield* store.finalizeCheckpointImport(layout.databasePath, identity, building, ownerToken, receipt, {
           persistentCapacityProtector,
+          verification,
           ...(reusableBaseReceipt === undefined ? {} : {reusableBaseReceipt}),
         });
         const ready = yield* store.readySnapshotById(layout.databasePath, snapshotId);

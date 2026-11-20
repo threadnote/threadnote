@@ -45,6 +45,7 @@ Avoid creating a new package until it has a clear owner and dependency direction
 | `packages/recall`                 | Ranking, eligibility, lexical and vector indexes, and memory connections                   |
 | `packages/inference`              | Model catalog, selection, local inference engines, and vector search                       |
 | `packages/graph`                  | Graph parsing, indexing, querying, schema, workers, and maintenance                        |
+| `packages/semantic`               | Semantic observations, query views, capability and guarded change contracts                |
 | `packages/context`                | Context Brief compiler, evidence projection, citation validation, and procedure contracts  |
 | `packages/manager`                | Manager UI, presentation, HTTP protocol, static files, and response contracts              |
 | `packages/remote-memory`          | Remote memory storage, transactions, migrations, and service contracts                     |

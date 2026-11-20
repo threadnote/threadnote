@@ -15,6 +15,10 @@ import {Console, Effect, FileSystem, Path, Schema} from 'effect';
 import {javascriptStringLiteral, optionalNativePackageFallbackModule} from './effect/javascript.js';
 import {isDevelopmentBuildVersion} from './development-runtime.js';
 import {sha256Hex} from '@threadnote/platform/digest';
+import {
+  assertNativeTypeScriptAssetOutsideReleaseOutput,
+  stageReviewedNativeTypeScriptRuntimeAsset,
+} from '../tools/semantic/build-typescript-native.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -40,6 +44,10 @@ const build = Effect.gen(function* () {
   const path = yield* Path.Path;
   const root = yield* path.fromFileUrl(ROOT_URL);
   const outputRoot = path.join(root, 'dist');
+  yield* Effect.tryPromise({
+    try: () => assertNativeTypeScriptAssetOutsideReleaseOutput(Bun.env.THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR, root),
+    catch: cause => ScriptError.make({message: 'Native TypeScript release input preflight failed.', cause}),
+  });
   const manifest = yield* readPackageManifest(fs, path.join(root, 'package.json'));
   if (manifest.packageManager !== `bun@${Bun.version}`) {
     return yield* ScriptError.make({
@@ -164,6 +172,7 @@ const build = Effect.gen(function* () {
   );
 
   const nativeRuntimeRoot = path.join(outputRoot, 'runtime');
+  const typescriptNativeAsset = yield* stageTypeScriptNativeAsset(fs, path, root, outputRoot);
   if (Effect2.pipe(target, EffectString.includes('darwin'))) {
     yield* fs.makeDirectory(nativeRuntimeRoot, {recursive: true});
     const keychainLibrary = path.join(nativeRuntimeRoot, 'graph-keychain.dylib');
@@ -212,6 +221,7 @@ const build = Effect.gen(function* () {
   );
   yield* fs.remove(path.join(nativeRuntimeRoot, 'native'), {recursive: true, force: true});
   yield* fs.remove(path.join(outputRoot, 'llama', 'localBuilds'), {recursive: true, force: true});
+  yield* fs.remove(path.join(nativeRuntimeRoot, 'LLAMA-CPP-LICENSE'), {force: true});
   if (nativePackageRoot) {
     yield* fs.copy(path.join(nativePackageRoot, 'bins'), path.join(nativeRuntimeRoot, 'native'), {overwrite: true});
     yield* fs.copyFile(path.join(nativePackageRoot, 'LICENSE'), path.join(nativeRuntimeRoot, 'NATIVE-LICENSE'));
@@ -242,6 +252,7 @@ const build = Effect.gen(function* () {
         executable: executableName,
         devSkills: {digest: devSkills.digest, manifest: 'config/dev-skills.json', protocol: devSkills.workflowProtocol},
         nativeRuntime: `runtime/${NATIVE_RUNTIME_PACKAGE}.js`,
+        ...(typescriptNativeAsset ? {typescriptNativeAsset} : {}),
         nativeRuntimePackage: nativePackage ?? 'portable-local-build',
         runtime: `bun-${Bun.version}`,
         target,
@@ -253,6 +264,44 @@ const build = Effect.gen(function* () {
     )}\n`,
   );
   yield* Console.log(`Built standalone Threadnote ${version} for ${target}: ${executablePath}`);
+});
+
+/** A release input is a verified derivative payload, never the old npm native binary. */
+export const stageTypeScriptNativeAsset = Effect.fn('build.stageTypeScriptNativeAsset')(function* (
+  fs: FileSystem.FileSystem,
+  path: Path.Path,
+  root: string,
+  outputRoot: string,
+) {
+  const staged = path.join(outputRoot, 'runtime', 'typescript');
+  const assetRoot = Bun.env.THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR;
+  if (!assetRoot) {
+    if (yield* fs.exists(staged)) yield* fs.remove(staged, {recursive: true});
+    return undefined;
+  }
+  // The release-output preflight owns source/output separation, including aliased staged paths; assembly owns
+  // canonical paths and output freshness. Both receive the real paths resolved here.
+  yield* Effect.tryPromise({
+    try: () => assertNativeTypeScriptAssetOutsideReleaseOutput(assetRoot, root),
+    catch: cause => ScriptError.make({message: 'Native TypeScript release input preflight failed.', cause}),
+  });
+  const sourceReal = yield* fs.realPath(path.resolve(assetRoot));
+  const rootReal = yield* fs.realPath(root);
+  if (yield* fs.exists(staged)) yield* fs.remove(staged, {recursive: true});
+  yield* fs.makeDirectory(path.dirname(staged), {recursive: true});
+  const stagedReal = path.join(yield* fs.realPath(path.dirname(staged)), path.basename(staged));
+  const manifest = yield* Effect.tryPromise({
+    try: () => stageReviewedNativeTypeScriptRuntimeAsset(sourceReal, stagedReal, rootReal),
+    catch: cause => ScriptError.make({message: 'Could not stage the reviewed native TypeScript asset.', cause}),
+  });
+  return {
+    manifest: 'runtime/typescript/manifest.json',
+    sdk: 'runtime/typescript/sdk',
+    frontend: 'runtime/typescript/frontend',
+    sdkTreeDigest: manifest.frontend.derivedSdkTreeSha256,
+    version: manifest.version,
+    provenance: manifest.provenance.kind,
+  };
 });
 
 function readPackageManifest(fs: FileSystem.FileSystem, path: string) {

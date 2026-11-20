@@ -157,7 +157,11 @@ describe('standard-profile tree snapshots', () => {
         yield* runNativeTaskAction(f.config, {command: 'record-snapshot', runId: 'native-run', callerCwd: f.repo}),
       );
       const before = yield* f.fs.readFileString(f.statePath());
-      for (const command of ['supersede-unreviewed-snapshot', 'requalify-base-snapshot'])
+      for (const command of [
+        'supersede-unreviewed-snapshot',
+        'requalify-base-snapshot',
+        'integrate-same-label-base-snapshot',
+      ])
         expect(
           yield* runNativeTaskAction(f.config, {
             command,
@@ -165,7 +169,7 @@ describe('standard-profile tree snapshots', () => {
             callerCwd: f.repo,
             snapshotRef: String(recorded.snapshotRef),
             reason: 'Try the strict recovery.',
-            ...(command === 'requalify-base-snapshot' ? {userAuthority: 'User: requalify.'} : {}),
+            ...(command === 'supersede-unreviewed-snapshot' ? {} : {userAuthority: 'User: requalify.'}),
           }).pipe(Effect.flip),
         ).toMatchObject({
           code: 'standard-profile-recovery',

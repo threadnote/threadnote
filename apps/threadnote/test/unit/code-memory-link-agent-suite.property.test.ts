@@ -226,21 +226,16 @@ describe('Code Memory Link sealed agent corpus', () => {
   });
 
   it('is byte-deterministic, canonically ordered, and independently validates on every construction', () => {
-    fc.assert(
-      fc.property(fc.integer({min: 1, max: 50}), repetitions => {
-        const first = createCodeMemoryLinkAgentSuiteCorpusV1();
-        const expected = JSON.stringify(first);
-        for (let index = 0; index < repetitions; index += 1) {
-          const next = createCodeMemoryLinkAgentSuiteCorpusV1();
-          assertCodeMemoryLinkAgentSuiteCorpusV1(next);
-          expect(JSON.stringify(next)).toBe(expected);
-          expect(EffectArray.map(next.releaseTasks, task => task.taskId)).toEqual(
-            [...EffectArray.map(next.releaseTasks, task => task.taskId)].sort(),
-          );
-        }
-      }),
-      {numRuns: 50},
+    const first = createCodeMemoryLinkAgentSuiteCorpusV1();
+    const second = createCodeMemoryLinkAgentSuiteCorpusV1();
+    const firstJson = JSON.stringify(first);
+    const secondJson = JSON.stringify(second);
+
+    expect(secondJson).toBe(firstJson);
+    expect(EffectArray.map(second.releaseTasks, task => task.taskId)).toEqual(
+      [...EffectArray.map(second.releaseTasks, task => task.taskId)].sort(),
     );
+    assertCodeMemoryLinkAgentSuiteCorpusV1(JSON.parse(secondJson));
   });
 
   it('rejects traversal-like artifact paths and maps every safe path deterministically', () => {

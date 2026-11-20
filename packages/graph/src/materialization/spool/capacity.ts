@@ -38,9 +38,27 @@ export function observeCodeGraphSpoolSortCapacity(database: Database): CodeGraph
       row => row.name,
     ),
   );
-  const loads = EffectArray.flatMap(readCodeGraphMaterializationSpoolSurfaceCapacities(database), surface =>
+  const capacities = readCodeGraphMaterializationSpoolSurfaceCapacities(database);
+  // The last surface creates the dictionary from both raw and already sorted
+  // postings. Append counters survive interruption and bound all contributors.
+  const lexical = EffectArray.filter(capacities, surface =>
+    ['symbol_terms', 'lexical_owners', 'lexical_shared'].includes(surface.name),
+  );
+  const dictionaryBytes = EffectArray.reduce(lexical, 0, (total, surface) =>
+    saturatingCapacityAdd(total, surface.lexicalTermBytes),
+  );
+  const dictionaryRows = EffectArray.reduce(lexical, 0, (total, surface) => saturatingCapacityAdd(total, surface.rows));
+  const loads = EffectArray.flatMap(capacities, surface =>
     pending.has(`materialization_raw_${surface.name}`)
-      ? [{bytes: surface.bytes, lexicalTermBytesUpperBound: surface.lexicalTermBytes, rows: surface.rows}]
+      ? [
+          {
+            // finalFactBytes also drives TEMP spill admission. A dictionary
+            // still consumes its retained payload after raw postings are gone.
+            bytes: surface.name === 'symbol_terms' ? Math.max(surface.bytes, dictionaryBytes) : surface.bytes,
+            lexicalTermBytesUpperBound: surface.name === 'symbol_terms' ? dictionaryBytes : surface.lexicalTermBytes,
+            rows: surface.name === 'symbol_terms' ? Math.max(surface.rows, dictionaryRows) : surface.rows,
+          },
+        ]
       : [],
   );
   return codeGraphSpoolSortCapacityBoundary(loads);

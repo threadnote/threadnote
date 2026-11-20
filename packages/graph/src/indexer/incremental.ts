@@ -1,3 +1,4 @@
+import {isLexicalV2Snapshot} from '../store/lexical_projection.js';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
 import {Effect, Option} from 'effect';
@@ -194,6 +195,7 @@ export const assessIncrementalOverlay = Effect.fn('codeGraph.assessIncrementalOv
   }
   const facts = EffectArray.flatMap(finalBatches, batch => EffectArray.map(batch, value => value.facts));
   const work = measureCodeGraphIncrementalWork({
+    lexicalRepresentation: isLexicalV2Snapshot(input.building.id) ? 'factored' : 'compact',
     deletedPaths: preassessment.deletedPaths,
     facts,
     files: preassessment.files,
@@ -1411,3 +1413,25 @@ export function overlayFallbackDescription(reason: CodeGraphOverlayFallbackReaso
       return 'workspace attribution changed';
   }
 }
+
+/** Only an actual completed original import may retain compact representation for a new child. */
+export const completedLegacyCheckpointBase = Effect.fn('codeGraph.completedLegacyCheckpointBase')(function* (
+  store: CodeGraphStoreShape,
+  databasePath: string,
+  snapshot: CodeGraphSnapshot,
+) {
+  if (
+    isLexicalV2Snapshot(snapshot.id) ||
+    snapshot.state !== 'ready' ||
+    snapshot.dirty ||
+    snapshot.baseSnapshotId !== undefined
+  )
+    return false;
+  const receipt = yield* store.checkpointImportReceipt(databasePath, snapshot.id);
+  return (
+    receipt?.completionSha256 !== undefined &&
+    receipt.source.repositoryId === snapshot.repositoryId &&
+    receipt.source.commit === snapshot.commit &&
+    receipt.source.graphContentId === snapshot.graphContentId
+  );
+});

@@ -3,6 +3,9 @@ import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {FileLockTimeout, fileLockBusyMessage, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {resourceAccountMutationLockPath} from '@threadnote/store/resource/lock';
+import type {RecallIndexConfig} from '../index.js';
+import {useRecallDatabaseReadOnly} from './read_policy.js';
+import {captureRecallRefreshCut, recallRefreshSuperseded, verifyRecallSourceInputs} from './refresh_cut.js';
 import {failFastIdentityPreparation, RecallIdentityAdmissionBusy} from './admission.js';
 import {recallPublicationFenceHeld, withRecallPublicationLock} from './stale_marker.js';
 
@@ -82,4 +85,55 @@ export function withCanonicalResourceMutationLock<A, E, R>(
       effect,
     );
   });
+}
+
+export interface RecallIndexActivation {
+  readonly expectedActiveDatabasePath: string;
+  readonly relativeDatabasePath: string;
+  publication?: {
+    readonly seal: string;
+    readonly sourceInputs: ReadonlyMap<string, string>;
+  };
+}
+
+/** Activate only after private writers and the final readonly validation scope close. */
+export function withVerifiedRecallIndexActivation<A, E, R>(
+  fs: FileSystem.FileSystem,
+  path: Path.Path,
+  config: RecallIndexConfig,
+  includeInactive: boolean,
+  location: {
+    readonly lockPath: string;
+    readonly databasePath: string;
+    readonly activeDatabasePath: string;
+    readonly pointerPath: string;
+    readonly staleMarkerBasePath: string;
+  },
+  publication: RecallIndexActivation['publication'],
+  publish: Effect.Effect<A, E, R>,
+) {
+  return withRecallIndexLock(
+    fs,
+    location.lockPath,
+    () =>
+      withCanonicalResourceMutationLock(
+        fs,
+        path,
+        config.agentContextHome,
+        config.account,
+        Effect.gen(function* () {
+          if (!publication) return yield* recallRefreshSuperseded();
+          yield* verifyRecallSourceInputs(publication.sourceInputs);
+          const cut = yield* useRecallDatabaseReadOnly(
+            location.databasePath,
+            Effect.flatMap(SqlClient.SqlClient, sql =>
+              captureRecallRefreshCut(sql, fs, path, config, includeInactive, location),
+            ),
+          );
+          if (cut.seal !== publication.seal) return yield* recallRefreshSuperseded();
+          return yield* publish;
+        }),
+      ),
+    config.account,
+  );
 }

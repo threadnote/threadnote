@@ -26,7 +26,7 @@
     "bazel:affected": "bun tools/ci/bazel-select.mjs --base origin/main",
     "bazel:check": "bun tools/bazel/prepare.mjs && bun tools/bazel/generate.mjs --check && bun tools/bazel/run.ts build --nobuild //... && bun tools/bazel/run.ts test //:tooling_test",
     "bazel:generate": "bun tools/bazel/generate.mjs",
-    "build": "bun scripts/check-embedded-core-model.ts && bun run generate:code-graph-languages && bun run clean && bun scripts/build.ts",
+    "build": "bun scripts/clean.ts --preflight-native-asset && bun scripts/check-embedded-core-model.ts && bun run generate:code-graph-languages && bun run clean && bun scripts/build.ts",
     "build:release": "bun run build && bun scripts/assemble-native-vector-reader.ts && bun scripts/assemble-native-inference.ts",
     "native:bootstrap": "bun scripts/assemble-native-vector-reader.ts --development",
     "check:repo": "bun run bazel:check && bun run lint && bun run format:check && bun run typecheck",
@@ -168,7 +168,7 @@
     "tree-sitter-objc": "3.0.2",
     "tree-sitter-scala": "0.24.0",
     "tree-sitter-systemverilog": "0.4.1",
-    "typescript": "7.0.2",
+    "typescript": "7.1.0-beta",
     "vite": "8.3.8",
     "vitest": "5.0.5"
   },

@@ -1,0 +1,187 @@
+name: Native TypeScript construction
+
+# Phase 1 of host pinning: construct the private source-overlay native tsc on every supported host and retain the
+# receipt as unreviewed build evidence. This workflow never edits reviewedHostBinaries, never marks an asset qualified
+# and is not a required gate; reviewed pins are a separate, independent change taken only from trusted runs.
+on:
+  pull_request:
+    branches: [main, codex/4.0.0, release/5.0.0, release/5.1.0]
+    # The builder, its pinned overlays, its import closure (@threadnote/platform/system), the installed SDK
+    # (bun.lock, enforced by --frozen-lockfile), checkout attributes and this workflow with its helper.
+    paths:
+      - tools/semantic/build-typescript-native.ts
+      - tools/semantic/typescript-native-*.patch
+      - tools/ci/native-typescript-construction.ts
+      - packages/platform/src/**
+      - packages/platform/package.json
+      - .gitattributes
+      - bun.lock
+      - .github/workflows/native-typescript-construction.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-typescript-construction-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUN_VERSION: 1.4.4
+
+jobs:
+  construct:
+    name: Construct native TypeScript · ${{ matrix.host }}
+    # PR-controlled code produces this evidence; fork pull requests never run it.
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      # Hosts use the builder's process.platform-process.arch labels. Every one has a pinned Go archive in
+      # typescriptNativeBuildRecipe.toolchain.archives and is accepted by the builder, so none is excluded.
+      # win32-arm64 has no Go race detector: the builder records race-unsupported-windows-arm64 instead of race-go.
+      matrix:
+        include:
+          - {os: macos-15, host: darwin-arm64}
+          - {os: macos-15-intel, host: darwin-x64}
+          - {os: ubuntu-latest, host: linux-x64}
+          - {os: ubuntu-24.04-arm, host: linux-arm64}
+          - {os: windows-latest, host: win32-x64}
+          - {os: windows-11-arm, host: win32-arm64}
+    defaults:
+      run:
+        shell: bash
+    env:
+      THREADNOTE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+      # Cold runners need more than the local deadlines: the 30 s Git checkout cap failed on darwin-x64. The builder
+      # bounds this to 1-4 and the summary records it; the step and job timeouts remain the outer limits.
+      THREADNOTE_TYPESCRIPT_NATIVE_DEADLINE_MULTIPLIER: '3'
+    steps:
+      - name: Check out the Threadnote source under test
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.THREADNOTE_COMMIT }}
+          persist-credentials: false
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: Install exact dependencies
+        timeout-minutes: 10
+        run: bun install --frozen-lockfile
+      - name: Resolve pinned construction inputs from the recipe
+        id: inputs
+        timeout-minutes: 2
+        env:
+          EXPECTED_HOST: ${{ matrix.host }}
+        run: bun tools/ci/native-typescript-construction.ts inputs
+      - name: Acquire the exact official TypeScript source
+        timeout-minutes: 15
+        env:
+          REPOSITORY: ${{ steps.inputs.outputs.repository }}
+          COMMIT: ${{ steps.inputs.outputs.commit }}
+          TREE: ${{ steps.inputs.outputs.tree }}
+          SOURCE: ${{ steps.inputs.outputs.source }}
+        run: |
+          set -euo pipefail
+          test ! -e "$SOURCE"
+          git init --quiet "$SOURCE"
+          # No line-ending conversion; longpaths only matters on Windows. Submodules are never fetched.
+          git -C "$SOURCE" config core.autocrlf false
+          git -C "$SOURCE" config core.eol lf
+          git -C "$SOURCE" config core.longpaths true
+          git -C "$SOURCE" remote add origin "$REPOSITORY"
+          git -C "$SOURCE" fetch --quiet --depth=1 --no-tags --no-recurse-submodules origin "$COMMIT"
+          git -C "$SOURCE" -c advice.detachedHead=false checkout --quiet --detach FETCH_HEAD
+          test "$(git -C "$SOURCE" rev-parse HEAD)" = "$COMMIT"
+          test "$(git -C "$SOURCE" rev-parse 'HEAD^{tree}')" = "$TREE"
+          test ! -e "$SOURCE/.gitmodules"
+          test -z "$(git -C "$SOURCE" status --porcelain)"
+      - name: Download the pinned host Go archive
+        timeout-minutes: 5
+        env:
+          ARCHIVE: ${{ steps.inputs.outputs.archive }}
+          ARCHIVE_URL: ${{ steps.inputs.outputs.archive_url }}
+          ARCHIVE_SIZE: ${{ steps.inputs.outputs.archive_size }}
+        run: |
+          set -euo pipefail
+          mkdir "$(dirname "$ARCHIVE")"
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 3 \
+            --output "$ARCHIVE" "$ARCHIVE_URL"
+          # The builder is the SHA-256 and size boundary; this only fails early on a missing or truncated download.
+          test -s "$ARCHIVE"
+          test "$(wc -c < "$ARCHIVE" | tr -d '[:space:]')" = "$ARCHIVE_SIZE"
+      - name: Construct and prepare the native TypeScript asset
+        timeout-minutes: 60
+        env:
+          SOURCE: ${{ steps.inputs.outputs.source }}
+          ARCHIVE: ${{ steps.inputs.outputs.archive }}
+          PRIVATE_ROOT: ${{ steps.inputs.outputs.private_root }}
+          REPOSITORY_ROOT: ${{ steps.inputs.outputs.repository_root }}
+          EVIDENCE: ${{ steps.inputs.outputs.evidence }}
+        run: |
+          set -euo pipefail
+          # The builder checks POSIX modes only off Windows; Git Bash cannot chmod a Windows ACL directory.
+          if [ "$RUNNER_OS" = Windows ]; then
+            mkdir "$PRIVATE_ROOT" "$EVIDENCE"
+          else
+            mkdir -m 700 "$PRIVATE_ROOT" "$EVIDENCE"
+          fi
+          # No module cache argument: the builder acquires the pinned module graph once.
+          bun tools/semantic/build-typescript-native.ts --prepare "$SOURCE" "$ARCHIVE" "$PRIVATE_ROOT" \
+            "$REPOSITORY_ROOT" > "$EVIDENCE/prepare.json"
+          cat "$EVIDENCE/prepare.json"
+      - name: Locate the constructed payload and prepared asset
+        id: output
+        env:
+          EVIDENCE: ${{ steps.inputs.outputs.evidence }}
+        run: bun tools/ci/native-typescript-construction.ts locate
+      - name: Verify the construction payload and prepared asset
+        timeout-minutes: 10
+        env:
+          PAYLOAD: ${{ steps.output.outputs.payload }}
+          PREPARED: ${{ steps.output.outputs.prepared }}
+          EVIDENCE: ${{ steps.inputs.outputs.evidence }}
+        run: |
+          set -euo pipefail
+          bun tools/semantic/build-typescript-native.ts --verify-construction "$PAYLOAD" > "$EVIDENCE/verify-construction.json"
+          bun tools/semantic/build-typescript-native.ts --verify-prepared "$PREPARED" > "$EVIDENCE/verify-prepared.json"
+          cat "$EVIDENCE/verify-construction.json" "$EVIDENCE/verify-prepared.json"
+      - name: Archive payload and prepared together and verify the extracted copy
+        timeout-minutes: 10
+        env:
+          CONSTRUCTION: ${{ steps.output.outputs.construction }}
+          EVIDENCE: ${{ steps.inputs.outputs.evidence }}
+          EXTRACTED: ${{ steps.inputs.outputs.extracted }}
+          COPYFILE_DISABLE: '1'
+        run: |
+          set -euo pipefail
+          # A tar keeps the POSIX modes --verify-prepared checks; artifact ZIPs drop them. Relative -f operands avoid
+          # GNU tar reading a Windows drive letter as a remote host. macOS bsdtar omits AppleDouble and xattr metadata.
+          if [ "$RUNNER_OS" = Windows ]; then mkdir "$EXTRACTED"; else mkdir -m 700 "$EXTRACTED"; fi
+          (
+            cd "$EVIDENCE"
+            if [ "$RUNNER_OS" = macOS ]; then
+              tar --no-mac-metadata -C "$CONSTRUCTION" -cf native-typescript-construction.tar payload prepared
+            else
+              tar -C "$CONSTRUCTION" -cf native-typescript-construction.tar payload prepared
+            fi
+            tar -C "$EXTRACTED" -xf native-typescript-construction.tar
+          )
+          bun tools/semantic/build-typescript-native.ts --verify-prepared "$EXTRACTED/prepared" > "$EVIDENCE/verify-extracted.json"
+          cat "$EVIDENCE/verify-extracted.json"
+      - name: Summarize the unreviewed construction evidence
+        env:
+          EVIDENCE: ${{ steps.inputs.outputs.evidence }}
+          MATRIX_RUNNER: ${{ matrix.os }}
+        run: bun tools/ci/native-typescript-construction.ts summarize
+      - name: Upload the construction evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: native-typescript-construction-${{ matrix.host }}
+          path: |
+            ${{ steps.inputs.outputs.evidence }}/native-typescript-construction.tar
+            ${{ steps.inputs.outputs.evidence }}/summary.json
+          if-no-files-found: error
+          retention-days: 14

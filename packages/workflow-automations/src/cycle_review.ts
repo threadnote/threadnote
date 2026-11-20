@@ -7,6 +7,7 @@ import {nativeCycleCanonicalJson, nativeCycleHasControl} from './cycle.js';
 import {
   NativeCycleInvalidTailMergeReceiptSchema,
   NativeCycleOrdinaryMergeReceiptSchema,
+  NativeCycleSameLabelRebasedBaseReceiptSchema,
   nativeCycleInvalidTailMergeReceiptDigest,
 } from './cycle_merge.js';
 import * as EffectRecord from 'effect/Record';
@@ -15,6 +16,11 @@ import * as Effect from 'effect';
 import {Option as EffectOption} from 'effect';
 
 export {
+  NativeCycleSameLabelRebasedBaseInputSchema,
+  nativeCycleQualificationEvidenceDigest,
+  nativeCycleQualificationHistory,
+  nativeCycleSameLabelRebasedBaseReceiptDigest,
+  validateNativeCycleSameLabelRebasedBaseReceipt,
   NativeCycleOrdinaryMergeInputSchema,
   NativeCycleInvalidTailMergeReceiptSchema,
   nativeCycleInvalidTailMergeReceiptDigest,
@@ -24,6 +30,8 @@ export {
   validateNativeCycleMergeReceipt,
 } from './cycle_merge.js';
 export type {
+  NativeCycleSameLabelRebasedBaseInput,
+  NativeCycleSameLabelRebasedBaseReceipt,
   NativeCycleInvalidTailMergeReceipt,
   NativeCycleOrdinaryMergeInput,
   NativeCycleOrdinaryMergeReceipt,
@@ -36,6 +44,21 @@ const digest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
 const fail = (message: string): never => {
   throw WorkflowAutomationError.make({code: 'invalid-cycle-review', message});
 };
+
+export const NativeCycleRebaseInputSchema = Schema.Struct({
+  preRebaseHead: gitObject,
+  ontoHead: gitObject,
+  rebasedHead: gitObject,
+});
+export type NativeCycleRebaseInput = typeof NativeCycleRebaseInputSchema.Type;
+const rebaseReceipt = Schema.Struct({
+  ...NativeCycleRebaseInputSchema.fields,
+  reason: text(),
+  authority: text(),
+  receiptDigest: digest,
+  beforeRef: Schema.String.check(Schema.isPattern(/^refs\/threadnote\/cycles\/rebase-before\/[a-f0-9]{64}$/u)),
+  afterRef: Schema.String.check(Schema.isPattern(/^refs\/threadnote\/cycles\/rebase-after\/[a-f0-9]{64}$/u)),
+});
 
 export const NativeCycleBaseRequalificationInputSchema = Schema.Struct({
   preRebaseHead: gitObject,
@@ -121,7 +144,9 @@ export const NativeCycleSnapshotSchema = Schema.Struct({
     }),
   ),
   acceptedHead: Schema.optionalKey(gitObject),
+  rebase: Schema.optionalKey(rebaseReceipt),
   baseRequalification: Schema.optionalKey(baseRequalificationReceipt),
+  sameLabelRebasedBaseIntegrationV1: Schema.optionalKey(NativeCycleSameLabelRebasedBaseReceiptSchema),
   ordinaryMergeQualificationV1: Schema.optionalKey(NativeCycleOrdinaryMergeReceiptSchema),
   invalidTailMergeQualificationV1: Schema.optionalKey(NativeCycleInvalidTailMergeReceiptSchema),
   files: Schema.Array(text()).check(Schema.isMaxLength(nativeCycleSnapshotFileLimit)),
@@ -138,34 +163,76 @@ export const NativeCycleSnapshotSchema = Schema.Struct({
     (snapshot.version === 4 &&
       (snapshot.previous !== undefined ||
         snapshot.previousTree !== undefined ||
+        snapshot.rebase !== undefined ||
         snapshot.baseRequalification !== undefined ||
+        snapshot.sameLabelRebasedBaseIntegrationV1 !== undefined ||
         snapshot.ordinaryMergeQualificationV1 !== undefined ||
         snapshot.invalidTailMergeQualificationV1 !== undefined ||
         snapshot.unreviewedSupersession?.rebaseRecovery !== undefined))
       ? 'A tree snapshot carries its intent and review basis instead of legacy predecessor receipts.'
-      : (snapshot.version === 3) !== !!snapshot.invalidTailMergeQualificationV1 ||
-          (snapshot.invalidTailMergeQualificationV1 &&
-            (snapshot.baseRequalification ||
+      : (snapshot.version === 3) !==
+            !!(snapshot.sameLabelRebasedBaseIntegrationV1 || snapshot.invalidTailMergeQualificationV1) ||
+          (snapshot.sameLabelRebasedBaseIntegrationV1 &&
+            (snapshot.invalidTailMergeQualificationV1 ||
               snapshot.ordinaryMergeQualificationV1 ||
+              snapshot.baseRequalification ||
+              snapshot.rebase ||
+              snapshot.unreviewedSupersession)) ||
+          (snapshot.invalidTailMergeQualificationV1 &&
+            (snapshot.sameLabelRebasedBaseIntegrationV1 ||
+              snapshot.baseRequalification ||
+              snapshot.ordinaryMergeQualificationV1 ||
+              snapshot.rebase ||
               snapshot.unreviewedSupersession ||
               !snapshot.previous ||
               !snapshot.previousTree ||
               snapshot.supersedes !== undefined)) ||
           (snapshot.version === 2) !== !!snapshot.ordinaryMergeQualificationV1 ||
-          (snapshot.ordinaryMergeQualificationV1 && snapshot.baseRequalification)
-        ? 'Snapshot version must match its single dedicated qualification proof.'
+          (snapshot.ordinaryMergeQualificationV1 && (snapshot.baseRequalification || snapshot.rebase)) ||
+          (snapshot.rebase && snapshot.baseRequalification)
+        ? 'Use the dedicated manifest version for each mutually exclusive snapshot qualification.'
         : snapshot.unreviewedSupersession &&
             (!snapshot.supersedes ||
               snapshot.previous !== undefined ||
               snapshot.previousTree !== undefined ||
               snapshot.baseRequalification !== undefined ||
               snapshot.ordinaryMergeQualificationV1 !== undefined ||
+              snapshot.sameLabelRebasedBaseIntegrationV1 !== undefined ||
               !Effect.pipe(snapshot.unreviewedSupersession.reason, EffectString.trim))
           ? 'An unreviewed supersession requires one explicit superseded snapshot and reason.'
           : undefined,
   ),
 );
 export type NativeCycleSnapshot = typeof NativeCycleSnapshotSchema.Type;
+
+export function nativeCycleRebaseReceiptDigest(
+  snapshot: NativeCycleSnapshot,
+  receipt: Omit<NonNullable<NativeCycleSnapshot['rebase']>, 'receiptDigest'>,
+): string {
+  return sha256HexSync(
+    JSON.stringify([
+      'threadnote-native-initial-rebase-v1',
+      snapshot.snapshotId,
+      snapshot.phaseId,
+      snapshot.phaseHash,
+      snapshot.repo,
+      snapshot.head,
+      snapshot.baseTree,
+      snapshot.tree,
+      snapshot.scopeBase,
+      snapshot.declaredBaseHead,
+      snapshot.files,
+      snapshot.scopeFiles,
+      receipt.preRebaseHead,
+      receipt.ontoHead,
+      receipt.rebasedHead,
+      receipt.reason,
+      receipt.authority,
+      receipt.beforeRef,
+      receipt.afterRef,
+    ]),
+  );
+}
 
 export function nativeCycleBaseRequalificationReceiptDigest(
   snapshot: NativeCycleSnapshot,
@@ -267,6 +334,64 @@ export const NativeCycleReviewSchema = Schema.Struct({
   findings: Schema.Array(findingSchema).check(Schema.isMaxLength(512)),
 });
 export type NativeCycleReview = typeof NativeCycleReviewSchema.Type;
+export type NativeCycleAcceptedReview = {
+  readonly snapshot: NativeCycleSnapshot;
+  readonly review: NativeCycleReview;
+};
+
+/** Resolve source ancestry separately from the most recent accepted finding ledger. */
+export function nativeCycleReviewBasis(
+  snapshot: NativeCycleSnapshot,
+  retained: readonly NativeCycleSnapshot[],
+  accepted: readonly {readonly snapshotId: string; readonly report: NativeCycleReview}[],
+): {readonly previous?: NativeCycleAcceptedReview; readonly findingBasis?: NativeCycleAcceptedReview | null} {
+  const snapshots = new Map(EffectArray.map(retained, (item, index) => [item.snapshotId, {item, index}]));
+  const reviews = new Map(EffectArray.map(accepted, entry => [entry.snapshotId, entry.report]));
+  if (snapshots.size !== retained.length || reviews.size !== accepted.length)
+    return fail('Review ancestry contains duplicate retained identities.');
+  const visited = new Set([snapshot.snapshotId]);
+  let current = snapshot;
+  let currentIndex = snapshots.get(snapshot.snapshotId)?.index ?? retained.length;
+  while (current.previous || current.supersedes) {
+    const predecessor = current.previous ?? current.supersedes;
+    const entry = predecessor ? snapshots.get(predecessor) : undefined;
+    if (!entry || visited.has(entry.item.snapshotId) || entry.index >= currentIndex)
+      return fail('Review ancestry requires an acyclic retained source chain.');
+    const prior = entry.item;
+    if (
+      (current.previous && current.supersedes) ||
+      // A reconciled phase contract may retire its stale unreviewed snapshot even with an unchanged tree (#1073).
+      (current.unreviewedSupersession &&
+        !current.unreviewedSupersession.rebaseRecovery &&
+        current.tree === prior.tree &&
+        current.phaseHash === prior.phaseHash) ||
+      current.phaseId !== prior.phaseId ||
+      current.baseTree !== prior.baseTree ||
+      current.repo !== prior.repo ||
+      (current.previous && (current.previousTree !== prior.tree || current.phaseHash !== prior.phaseHash)) ||
+      (current.supersedes && !current.unreviewedSupersession && current.phaseHash === prior.phaseHash) ||
+      (current.head !== prior.head && current.acceptedHead !== current.head)
+    )
+      return fail('Review ancestry does not match its retained source boundaries.');
+    const report = reviews.get(prior.snapshotId);
+    if (report) {
+      if (
+        current.unreviewedSupersession ||
+        report.snapshotId !== prior.snapshotId ||
+        report.snapshotTree !== prior.tree ||
+        report.phaseHash !== prior.phaseHash
+      )
+        return fail('Accepted review basis does not match its retained source.');
+      const basis = {snapshot: prior, review: report};
+      return snapshot.unreviewedSupersession ? {findingBasis: basis} : {previous: basis};
+    }
+    if (!snapshot.unreviewedSupersession) return fail('Prior review evidence is required.');
+    visited.add(prior.snapshotId);
+    current = prior;
+    currentIndex = entry.index;
+  }
+  return snapshot.unreviewedSupersession ? {findingBasis: null} : {};
+}
 
 /** Review recording mode follows snapshot lineage; it never limits independent review scope. */
 export const nativeCycleReviewRecordingMode = (snapshot: NativeCycleSnapshot): 'full' | 'incremental' =>
@@ -275,8 +400,10 @@ export const nativeCycleReviewRecordingMode = (snapshot: NativeCycleSnapshot): '
       ? 'incremental'
       : 'full'
     : snapshot.previous &&
+        snapshot.version !== 3 &&
         !snapshot.baseRequalification &&
         !snapshot.ordinaryMergeQualificationV1 &&
+        !snapshot.sameLabelRebasedBaseIntegrationV1 &&
         !snapshot.invalidTailMergeQualificationV1
       ? 'incremental'
       : 'full';
@@ -297,7 +424,8 @@ export const nativeCycleCorrectnessLane = 'correctness';
 export function validateNativeCycleReview(
   snapshot: NativeCycleSnapshot,
   input: unknown,
-  previous?: {readonly snapshot: NativeCycleSnapshot; readonly review: NativeCycleReview},
+  previous?: NativeCycleAcceptedReview,
+  findingBasis?: NativeCycleAcceptedReview | null,
 ) {
   const review = decodeNativeCycleReview(input);
   // A missing required lane is reported before any source or history mismatch.
@@ -310,7 +438,12 @@ export function validateNativeCycleReview(
     fail('Select the required correctness review lane and include its complete report.');
   if (!review.selected.includes('simplicity'))
     fail('Select the required simplicity review lane and include its complete report.');
-  return checkNativeCycleReviewHistory(snapshot, review, previous);
+  if (
+    snapshot.version === 3 &&
+    (review.selected.includes('self') || EffectArray.some(review.lanes, lane => lane.name === 'self'))
+  )
+    fail('Same-label qualification requires independent current-source reviewers.');
+  return checkNativeCycleReviewHistory(snapshot, review, previous, findingBasis);
 }
 
 const decodeNativeCycleReview = (input: unknown): NativeCycleReview => {
@@ -325,13 +458,15 @@ const decodeNativeCycleReview = (input: unknown): NativeCycleReview => {
 export const validateNativeCycleReviewHistory = (
   snapshot: NativeCycleSnapshot,
   input: unknown,
-  previous?: {readonly snapshot: NativeCycleSnapshot; readonly review: NativeCycleReview},
-) => checkNativeCycleReviewHistory(snapshot, decodeNativeCycleReview(input), previous);
+  previous?: NativeCycleAcceptedReview,
+  findingBasis?: NativeCycleAcceptedReview | null,
+) => checkNativeCycleReviewHistory(snapshot, decodeNativeCycleReview(input), previous, findingBasis);
 
 function checkNativeCycleReviewHistory(
   snapshot: NativeCycleSnapshot,
   review: NativeCycleReview,
-  previous?: {readonly snapshot: NativeCycleSnapshot; readonly review: NativeCycleReview},
+  previous?: NativeCycleAcceptedReview,
+  findingBasis?: NativeCycleAcceptedReview | null,
 ) {
   if (
     review.snapshotId !== snapshot.snapshotId ||
@@ -374,6 +509,9 @@ function checkNativeCycleReviewHistory(
     fail('Prior review evidence is required.');
   if (snapshot.version !== 4 && snapshot.unreviewedSupersession && previous)
     fail('Unreviewed supersession cannot claim a prior accepted review.');
+  // A tree snapshot's ledger is its explicit review basis; legacy unreviewed supersession retains its ancestor's.
+  if (snapshot.version !== 4 && snapshot.unreviewedSupersession && findingBasis === undefined)
+    fail('Unreviewed supersession requires its retained ancestral finding basis.');
   if (snapshot.previous && snapshot.supersedes) fail('A snapshot has one source predecessor.');
   const invalidTail = snapshot.invalidTailMergeQualificationV1;
   // Admission binds the current source phase to the invalid leaf; this argument is its accepted finding ledger.
@@ -413,9 +551,18 @@ function checkNativeCycleReviewHistory(
       (snapshot.head !== previous.snapshot.head && snapshot.acceptedHead !== snapshot.head))
   )
     fail('Review history does not match the source predecessor.');
+  if (
+    findingBasis &&
+    (!snapshot.unreviewedSupersession ||
+      findingBasis.snapshot.phaseId !== snapshot.phaseId ||
+      findingBasis.snapshot.baseTree !== snapshot.baseTree ||
+      findingBasis.snapshot.repo !== snapshot.repo)
+  )
+    fail('An ancestral finding ledger belongs only to its source-bound unreviewed supersession.');
+  const ledger = findingBasis ?? previous;
   const prior = new Map(
     EffectOption.getOrUndefined(
-      EffectOption.map(EffectOption.fromNullishOr(previous?.review.findings), __effectArrayReceiver =>
+      EffectOption.map(EffectOption.fromNullishOr(ledger?.review.findings), __effectArrayReceiver =>
         EffectArray.map(__effectArrayReceiver, finding => [finding.id, finding]),
       ),
     ) ?? [],

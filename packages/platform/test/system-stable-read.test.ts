@@ -1,13 +1,738 @@
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {DateTime, Effect, FileSystem, Path} from 'effect';
-import {expect, vi} from 'vitest';
+import {DateTime, Effect, FileSystem, Path, Schema, String as EffectString} from 'effect';
+import {expect, it as boundaryIt, vi} from 'vitest';
 import {fromPromise} from '../src/errors.js';
 import {
   runtimeLstat,
   runtimeReadBoundedRegularFileAttempt,
   runtimeReadBoundedStableRegularFile,
+  runtimeReadStableOsUserIdentity,
+  runtimeOpenWriterRoot,
+  runtimeOpenGuardedDiskTarget,
+  runtimeInspectGuardedDiskTarget,
+  runtimeCommitGuardedDiskTarget,
+  runtimeCloseGuardedDiskTarget,
+  runtimeCloseWriterRoot,
+  runtimeOpenPrivateWriterDirectory,
+  runtimeClosePrivateWriterDirectory,
+  runtimeReadPrivateWriterFile,
+  runtimePublishPrivateWriterFile,
+  runtimeReadWriterProcessIdentity,
+  runtimeAssertPrivateProviderPath,
+  RuntimeWriterFault,
 } from '../src/system.js';
+
+const posixWriterHost =
+  (process.platform === 'darwin' || process.platform === 'linux') &&
+  (process.arch === 'arm64' || process.arch === 'x64');
+
+for (const cut of [3, 5] as const) {
+  effectIt.layer(BunServices.layer)(it => {
+    it.effect.skipIf(!posixWriterHost)(
+      `re-resolves a provider ancestor after ${cut === 3 ? 'named-before' : 'named-after'} observation without rejecting sibling activity`,
+      () =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const native = process.getBuiltinModule('fs');
+          for (const mutation of ['sibling', 'ancestor-replacement'] as const) {
+            const folder = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'provider-late-name-'}));
+            yield* Effect.sync(() => {
+              const ancestor = `${folder}/ancestor`,
+                vault = `${ancestor}/vault`,
+                file = `${vault}/private.json`,
+                detached = `${folder}/detached`;
+              native.mkdirSync(vault, {recursive: true, mode: 0o700});
+              native.writeFileSync(file, 'owned original', {mode: 0o600});
+              const identity = native.statSync(ancestor, {bigint: true});
+              const original = native.fstatSync.bind(native);
+              const descriptors: number[] = [];
+              let changed = false;
+              const probe = vi.spyOn(native, 'fstatSync').mockImplementation((fd, options) => {
+                const observed = original(fd, options);
+                if (observed.dev === identity.dev && observed.ino === identity.ino) {
+                  descriptors.push(fd);
+                  if (descriptors.length === cut) {
+                    changed = true;
+                    if (mutation === 'sibling') native.mkdirSync(`${ancestor}/owned-sibling`, {mode: 0o700});
+                    else {
+                      native.renameSync(ancestor, detached);
+                      native.mkdirSync(vault, {recursive: true, mode: 0o700});
+                      native.writeFileSync(file, 'foreign replacement', {mode: 0o600});
+                    }
+                  }
+                }
+                // Mutate after the genuine observation on the already-open named descriptor, without replacing it.
+                return observed;
+              });
+              let accepted = false;
+              let refusal: unknown;
+              try {
+                runtimeAssertPrivateProviderPath(file, {kind: 'file'});
+                accepted = true;
+              } catch (error) {
+                refusal = error;
+              } finally {
+                probe.mockRestore();
+              }
+              expect(changed).toBe(true);
+              // Initial chain and retained-before observations share a descriptor; named-before uses a fresh one.
+              expect(descriptors[0]).toBe(descriptors[1]);
+              expect(descriptors[2]).not.toBe(descriptors[0]);
+              if (cut === 5) expect(descriptors[4]).toBe(descriptors[2]);
+              expect(accepted).toBe(mutation === 'sibling');
+              if (mutation === 'ancestor-replacement') {
+                expect(refusal).toBeInstanceOf(RuntimeWriterFault);
+                expect(native.readFileSync(`${detached}/vault/private.json`, 'utf8')).toBe('owned original');
+                expect(native.readFileSync(file, 'utf8')).toBe('foreign replacement');
+                expect(native.readdirSync(`${detached}/vault`)).toEqual(['private.json']);
+              } else expect(native.readFileSync(file, 'utf8')).toBe('owned original');
+              expect(native.readdirSync(vault)).toEqual(['private.json']);
+            });
+          }
+        }),
+    );
+  });
+}
+
+effectIt.layer(BunServices.layer)(it => {
+  it.effect.prop(
+    'distinguishes real ancestor sibling churn from replaced names and target mutations',
+    [Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 3}))],
+    ([every]) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const native = process.getBuiltinModule('fs');
+        for (const boundary of ['writer', 'provider'] as const)
+          for (const mutation of ['sibling', 'ancestor-replacement', 'unsafe-mode'] as const) {
+            const folder = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'writer-real-ancestor-'}));
+            const ancestor = `${folder}/ancestor`,
+              vault = `${ancestor}/vault`,
+              file = `${vault}/private.json`,
+              detached = `${folder}/detached`;
+            native.mkdirSync(vault, {recursive: true, mode: 0o700});
+            native.writeFileSync(file, 'owned original', {mode: 0o600});
+            const originalAncestor = native.statSync(ancestor, {bigint: true});
+            yield* Effect.acquireUseRelease(
+              Effect.sync(() => runtimeOpenPrivateWriterDirectory(vault)),
+              directory =>
+                Effect.sync(() => {
+                  const original = native.fstatSync.bind(native);
+                  let samples = 0,
+                    mutations = 0;
+                  const probe = vi.spyOn(native, 'fstatSync').mockImplementation((fd, options) => {
+                    const observed = original(fd, options);
+                    if (observed.dev === originalAncestor.dev && observed.ino === originalAncestor.ino) {
+                      samples++;
+                      if (mutation === 'sibling' && samples % every === 0) {
+                        native.mkdirSync(`${ancestor}/sibling-${++mutations}`, {mode: 0o700});
+                      } else if (!mutations && mutation !== 'sibling') {
+                        mutations++;
+                        if (mutation === 'ancestor-replacement') {
+                          native.renameSync(ancestor, detached);
+                          native.mkdirSync(vault, {recursive: true, mode: 0o700});
+                          native.writeFileSync(file, 'foreign replacement', {mode: 0o600});
+                        } else native.chmodSync(ancestor, 0o777);
+                      }
+                    }
+                    // Return the exact original native observation; every change above is a real filesystem operation.
+                    return observed;
+                  });
+                  let accepted = false;
+                  let refusal = 'none';
+                  try {
+                    if (boundary === 'provider') {
+                      runtimeAssertPrivateProviderPath(file, {kind: 'file'});
+                      accepted = true;
+                    } else {
+                      accepted =
+                        runtimePublishPrivateWriterFile(
+                          directory,
+                          'new.json',
+                          new TextEncoder().encode('private publication'),
+                          {
+                            mode: 'exclusive',
+                            nonce: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                            assertCurrentSync: () => undefined,
+                          },
+                        ).status === 'published';
+                    }
+                  } catch (error) {
+                    accepted = false;
+                    refusal = Schema.is(RuntimeWriterFault)(error)
+                      ? error.reason +
+                        (/^directory-coherence:(private|ancestor):[0-9]+:[a-zA-Z.,-]*$/u.test(error.message)
+                          ? ':' + error.message
+                          : '')
+                      : 'native-operation';
+                  } finally {
+                    probe.mockRestore();
+                  }
+                  expect(mutations).toBeGreaterThan(0);
+                  if (mutation === 'sibling') {
+                    const current = native.statSync(ancestor, {bigint: true});
+                    expect([
+                      current.dev,
+                      current.ino,
+                      current.birthtimeNs,
+                      current.uid,
+                      current.gid,
+                      current.mode,
+                    ]).toEqual([
+                      originalAncestor.dev,
+                      originalAncestor.ino,
+                      originalAncestor.birthtimeNs,
+                      originalAncestor.uid,
+                      originalAncestor.gid,
+                      originalAncestor.mode,
+                    ]);
+                    expect(
+                      current.ctimeNs !== originalAncestor.ctimeNs || current.nlink !== originalAncestor.nlink,
+                    ).toBe(true);
+                  }
+                  const surviving = mutation === 'ancestor-replacement' ? `${detached}/vault/private.json` : file;
+                  expect(native.readFileSync(surviving, 'utf8')).toBe('owned original');
+                  if (mutation === 'ancestor-replacement')
+                    expect(native.readFileSync(file, 'utf8')).toBe('foreign replacement');
+                  // Only directory entry churn is outside the selected private object's authority/content image.
+                  expect(accepted, refusal).toBe(mutation === 'sibling');
+                  expect(native.existsSync(`${vault}/new.json`)).toBe(boundary === 'writer' && mutation === 'sibling');
+                  if (mutation === 'ancestor-replacement')
+                    expect(native.existsSync(`${detached}/vault/new.json`)).toBe(false);
+                }),
+              directory => Effect.sync(() => runtimeClosePrivateWriterDirectory(directory)),
+            );
+          }
+      }),
+    {skip: !posixWriterHost, arbitrary: {runs: 12}},
+  );
+});
+
+effectIt.layer(BunServices.layer)(it => {
+  it.effect.prop(
+    'keeps retained target content and identity strict after real replacement or same-byte rewriting',
+    [Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 32}))],
+    ([value]) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const native = process.getBuiltinModule('fs');
+        for (const mutation of ['replacement', 'content', 'same-byte-rewrite'] as const) {
+          const folder = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'writer-real-target-'}));
+          const file = `${folder}/source.txt`,
+            original = `source-${value}`;
+          native.writeFileSync(file, original, {mode: 0o600});
+          const identity = native.statSync(file, {bigint: true});
+          yield* Effect.acquireUseRelease(
+            Effect.sync(() => runtimeOpenWriterRoot(folder, native.statSync(folder, {bigint: true}))),
+            root =>
+              Effect.acquireUseRelease(
+                Effect.sync(() =>
+                  runtimeOpenGuardedDiskTarget(
+                    root,
+                    ['source.txt'],
+                    JSON.stringify([String(identity.dev), String(identity.ino)]),
+                    128,
+                  ),
+                ),
+                target =>
+                  Effect.sync(() => {
+                    const before = runtimeInspectGuardedDiskTarget(target);
+                    const current = mutation === 'same-byte-rewrite' ? original : `later-${value}`;
+                    if (mutation === 'replacement') native.renameSync(file, `${folder}/original.txt`);
+                    native.writeFileSync(file, current, {mode: 0o600});
+                    expect(
+                      runtimeCommitGuardedDiskTarget(target, {
+                        before,
+                        afterBytes: new TextEncoder().encode('must not be written'),
+                        assertCurrentSync: () => undefined,
+                      }).status,
+                    ).toBe('conflict');
+                    expect(native.readFileSync(file, 'utf8')).toBe(current);
+                    if (mutation === 'replacement')
+                      expect(native.readFileSync(`${folder}/original.txt`, 'utf8')).toBe(original);
+                  }),
+                target => Effect.sync(() => runtimeCloseGuardedDiskTarget(target)),
+              ),
+            root => Effect.sync(() => runtimeCloseWriterRoot(root)),
+          );
+        }
+      }),
+    {skip: !posixWriterHost, arbitrary: {runs: 12}},
+  );
+});
+
+for (const boundary of ['writer', 'provider'] as const) {
+  for (const ace of ['allow write,execute,delete_child', 'deny delete_child'] as const) {
+    effectIt.layer(BunServices.layer)(it => {
+      it.effect.skipIf(process.platform !== 'darwin' || (process.arch !== 'arm64' && process.arch !== 'x64'))(
+        `refuses a real late ancestor ACL ${EffectString.startsWith('allow')(ace) ? 'grant' : 'change'} before ${boundary} admission or private bytes`,
+        () =>
+          Effect.gen(function* () {
+            const fs = yield* FileSystem.FileSystem;
+            const native = process.getBuiltinModule('fs');
+            const folder = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'writer-late-ancestor-acl-'}));
+            const ancestor = `${folder}/ancestor`,
+              vault = `${ancestor}/vault`,
+              file = `${vault}/private.json`;
+            native.mkdirSync(vault, {recursive: true, mode: 0o700});
+            native.writeFileSync(file, 'owned original', {mode: 0o600});
+            const identity = native.statSync(ancestor, {bigint: true});
+            yield* Effect.acquireUseRelease(
+              Effect.sync(() => runtimeOpenPrivateWriterDirectory(vault)),
+              directory =>
+                Effect.sync(() => {
+                  const original = native.fstatSync.bind(native);
+                  let samples = 0,
+                    granted = false;
+                  const probe = vi.spyOn(native, 'fstatSync').mockImplementation((fd, options) => {
+                    const observed = original(fd, options);
+                    if (observed.dev === identity.dev && observed.ino === identity.ino && ++samples === 5) {
+                      const chmod = Bun.spawnSync(['/bin/chmod', '+a', 'everyone ' + ace, ancestor], {
+                        stdout: 'pipe',
+                        stderr: 'pipe',
+                        timeout: 5000,
+                      });
+                      expect(chmod.exitCode).toBe(0);
+                      granted = true;
+                    }
+                    return observed;
+                  });
+                  let accepted = false;
+                  try {
+                    if (boundary === 'provider') {
+                      runtimeAssertPrivateProviderPath(file, {kind: 'file'});
+                      accepted = true;
+                    } else
+                      accepted =
+                        runtimePublishPrivateWriterFile(
+                          directory,
+                          'new.json',
+                          new TextEncoder().encode('PRIVATE_SENTINEL'),
+                          {
+                            mode: 'exclusive',
+                            nonce: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                            assertCurrentSync: () => undefined,
+                          },
+                        ).status === 'published';
+                  } catch {
+                    accepted = false;
+                  } finally {
+                    probe.mockRestore();
+                    if (granted && EffectString.startsWith('deny')(ace)) {
+                      // Restore only the known ACE injected into this uniquely owned fixture, so ordinary scoped deletion can finish.
+                      const removed = Bun.spawnSync(['/bin/chmod', '-a', 'everyone ' + ace, ancestor], {
+                        stdout: 'pipe',
+                        stderr: 'pipe',
+                        timeout: 5000,
+                      });
+                      expect(removed.exitCode).toBe(0);
+                    }
+                  }
+                  expect(granted).toBe(true);
+                  expect(accepted).toBe(false);
+                  expect(native.existsSync(`${vault}/new.json`)).toBe(false);
+                  expect(native.readFileSync(file, 'utf8')).toBe('owned original');
+                }),
+              directory => Effect.sync(() => runtimeClosePrivateWriterDirectory(directory)),
+            );
+          }),
+      );
+    });
+  }
+}
+
+effectIt.layer(BunServices.layer)(it => {
+  it.effect.skipIf(process.platform !== 'darwin' || (process.arch !== 'arm64' && process.arch !== 'x64'))(
+    'refuses actual inheritable ACL grants on an already opened private directory before publishing bytes',
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const folder = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'writer-private-acl-'}));
+        const native = process.getBuiltinModule('fs');
+        yield* Effect.acquireUseRelease(
+          Effect.sync(() => runtimeOpenPrivateWriterDirectory(folder)),
+          directory =>
+            Effect.sync(() => {
+              const chmod = Bun.spawnSync(
+                ['/bin/chmod', '+a', 'everyone allow read,write,execute,file_inherit,directory_inherit', folder],
+                {stdout: 'pipe', stderr: 'pipe', timeout: 5000},
+              );
+              expect(chmod.exitCode).toBe(0);
+              expect(native.statSync(folder).mode & 0o777).toBe(0o700);
+              expect(() =>
+                runtimePublishPrivateWriterFile(
+                  directory,
+                  'private.json',
+                  new TextEncoder().encode('FIXTURE_PRIVATE_SOURCE_SENTINEL'),
+                  {
+                    mode: 'exclusive',
+                    nonce: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                    assertCurrentSync: () => undefined,
+                  },
+                ),
+              ).toThrow();
+              expect(native.existsSync(`${folder}/private.json`)).toBe(false);
+              expect(() => runtimeAssertPrivateProviderPath(folder, {kind: 'directory'})).toThrow();
+              // Existing unexpected ACLs were refused, never silently repaired.
+              expect(() => runtimeOpenPrivateWriterDirectory(folder)).toThrow();
+            }),
+          directory => Effect.sync(() => runtimeClosePrivateWriterDirectory(directory)),
+        );
+      }),
+  );
+});
+
+for (const boundary of ['ancestor', 'existing-file', 'new-file'] as const) {
+  effectIt.layer(BunServices.layer)(it => {
+    it.effect.skipIf(process.platform !== 'darwin' || (process.arch !== 'arm64' && process.arch !== 'x64'))(
+      `refuses actual unsafe ACL state at the private ${boundary} boundary`,
+      () =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const folder = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'writer-acl-boundary-'}));
+          const native = process.getBuiltinModule('fs');
+          const child = `${folder}/vault`;
+          native.mkdirSync(child, {mode: 0o700});
+          const file = `${child}/private.json`;
+          const grant = (path: string, permissions: string) => {
+            const result = Bun.spawnSync(['/bin/chmod', '+a', `everyone allow ${permissions}`, path], {
+              stdout: 'pipe',
+              stderr: 'pipe',
+              timeout: 5000,
+            });
+            expect(result.exitCode).toBe(0);
+          };
+          if (boundary === 'ancestor') {
+            grant(folder, 'write,execute,delete_child');
+            expect(native.statSync(child).mode & 0o777).toBe(0o700);
+            expect(() => runtimeOpenPrivateWriterDirectory(child)).toThrow();
+            expect(native.existsSync(file)).toBe(false);
+            return;
+          }
+          yield* Effect.acquireUseRelease(
+            Effect.sync(() => runtimeOpenPrivateWriterDirectory(child)),
+            directory =>
+              Effect.sync(() => {
+                const options = {
+                  mode: 'exclusive' as const,
+                  nonce: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                  assertCurrentSync: () => undefined,
+                };
+                if (boundary === 'existing-file') {
+                  native.writeFileSync(file, 'existing fixture', {mode: 0o600});
+                  grant(file, 'read,write');
+                  const read = vi.spyOn(native, 'readSync');
+                  try {
+                    expect(() => runtimeReadPrivateWriterFile(directory, 'private.json', 128)).toThrow();
+                    expect(read).not.toHaveBeenCalled();
+                    expect(
+                      runtimePublishPrivateWriterFile(
+                        directory,
+                        'private.json',
+                        new TextEncoder().encode('replacement fixture'),
+                        {...options, mode: 'replace'},
+                      ).status,
+                    ).toBe('unknown');
+                  } finally {
+                    read.mockRestore();
+                  }
+                  expect(native.readFileSync(file, 'utf8')).toBe('existing fixture');
+                  expect(native.statSync(file).mode & 0o777).toBe(0o600);
+                } else {
+                  const original = native.fstatSync.bind(native);
+                  let injected = false;
+                  const probe = vi.spyOn(native, 'fstatSync').mockImplementation((fd, options) => {
+                    if (!injected && native.existsSync(file)) {
+                      injected = true;
+                      grant(file, 'read,write');
+                    }
+                    return original(fd, options);
+                  });
+                  try {
+                    expect(
+                      runtimePublishPrivateWriterFile(
+                        directory,
+                        'private.json',
+                        new TextEncoder().encode('FIXTURE_PRIVATE_SOURCE_SENTINEL'),
+                        options,
+                      ).status,
+                    ).toBe('unknown');
+                  } finally {
+                    probe.mockRestore();
+                  }
+                  expect(injected).toBe(true);
+                  expect(native.statSync(file).size).toBe(0);
+                  expect(native.statSync(file).mode & 0o777).toBe(0o600);
+                  expect(() => runtimeReadPrivateWriterFile(directory, 'private.json', 128)).toThrow();
+                }
+              }),
+            directory => Effect.sync(() => runtimeClosePrivateWriterDirectory(directory)),
+          );
+        }),
+    );
+  });
+}
+
+effectIt.layer(BunServices.layer)(it => {
+  it.effect.skipIf(!posixWriterHost)(
+    'conditionally writes through actual rooted descriptors and synchronizes the acknowledged source',
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const directory = yield* fs.makeTempDirectoryScoped({prefix: 'writer-descriptor-'});
+        const canonical = yield* fs.realPath(directory);
+        const filename = `${canonical}/a.ts`;
+        yield* fs.writeFileString(filename, 'old');
+        const native = process.getBuiltinModule('fs');
+        const parent = native.statSync(canonical, {bigint: true});
+        const original = native.statSync(filename, {bigint: true});
+        yield* Effect.acquireUseRelease(
+          Effect.sync(() => runtimeOpenWriterRoot(canonical, parent)),
+          root =>
+            Effect.acquireUseRelease(
+              Effect.sync(() =>
+                runtimeOpenGuardedDiskTarget(
+                  root,
+                  ['a.ts'],
+                  JSON.stringify([String(original.dev), String(original.ino)]),
+                  16,
+                ),
+              ),
+              target =>
+                Effect.sync(() => {
+                  let assertions = 0;
+                  const before = runtimeInspectGuardedDiskTarget(target);
+                  const result = runtimeCommitGuardedDiskTarget(target, {
+                    before,
+                    afterBytes: new TextEncoder().encode('new text'),
+                    assertCurrentSync: () => {
+                      assertions++;
+                    },
+                  });
+                  expect(result.status).toBe('applied');
+                  if (result.status === 'applied')
+                    expect(new TextDecoder().decode(result.current.bytes)).toBe('new text');
+                  expect(assertions).toBeGreaterThanOrEqual(3);
+                  expect(native.readFileSync(filename, 'utf8')).toBe('new text');
+                }),
+              target => Effect.sync(() => runtimeCloseGuardedDiskTarget(target)),
+            ),
+          root => Effect.sync(() => runtimeCloseWriterRoot(root)),
+        );
+      }),
+  );
+});
+
+boundaryIt.skipIf(!posixWriterHost)(
+  'reads one OS account home across actual processes with different configured homes',
+  async () => {
+    const identity = runtimeReadStableOsUserIdentity();
+    expect(runtimeReadWriterProcessIdentity(process.pid)).toBe(runtimeReadWriterProcessIdentity(process.pid));
+    const childSource = `import {runtimeReadStableOsUserIdentity} from ${JSON.stringify(new URL('../src/system.ts', import.meta.url).href)};
+      const actual = runtimeReadStableOsUserIdentity();
+      const hash = value => new Bun.CryptoHasher('sha256').update(value).digest('hex');
+      process.stdout.write(JSON.stringify({uid:actual.userId,home:hash(actual.accountHome),builtin:hash(process.getBuiltinModule('os').userInfo().homedir)})+String.fromCharCode(10));`;
+    const rows: {uid: number; home: string; builtin: string}[] = [];
+    for (const marker of ['/tmp/threadnote-identity-A', '/tmp/threadnote-identity-B']) {
+      const child = Bun.spawn([process.execPath, '-e', childSource], {
+        env: {...process.env, HOME: marker, USERPROFILE: marker, THREADNOTE_HOME: marker},
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      const timeout = setTimeout(() => child.kill('SIGKILL'), 5_000);
+      try {
+        const [output, errors, code] = await Promise.all([
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+          child.exited,
+        ]);
+        expect(code).toBe(0);
+        expect(errors).toBe('');
+        expect(output.length).toBeLessThan(1_024);
+        rows.push(JSON.parse(output));
+      } finally {
+        clearTimeout(timeout);
+        if (child.exitCode === null) {
+          child.kill('SIGKILL');
+          await child.exited;
+        }
+      }
+    }
+    expect(rows[0].uid).toBe(identity.userId);
+    expect(rows[1].uid).toBe(identity.userId);
+    expect(rows[0].home).toBe(rows[1].home);
+    if (process.platform === 'darwin') expect(rows[0].builtin).not.toBe(rows[1].builtin);
+  },
+);
+
+effectIt.layer(BunServices.layer)(it => {
+  it.effect.skipIf(!posixWriterHost)(
+    'durably publishes private journal revisions through pinned native directories',
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({prefix: 'writer-private-journal-'});
+        const canonical = yield* fs.realPath(root);
+        yield* Effect.acquireUseRelease(
+          Effect.sync(() => runtimeOpenPrivateWriterDirectory(canonical)),
+          directory =>
+            Effect.sync(() => {
+              const options = {
+                mode: 'exclusive' as const,
+                nonce: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                assertCurrentSync: () => undefined,
+              };
+              expect(runtimeReadPrivateWriterFile(directory, 'journal.json', 128)).toBeUndefined();
+              expect(
+                runtimePublishPrivateWriterFile(
+                  directory,
+                  'journal.json',
+                  new TextEncoder().encode('{"revision":1}'),
+                  options,
+                ).status,
+              ).toBe('published');
+              const replaced = runtimePublishPrivateWriterFile(
+                directory,
+                'journal.json',
+                new TextEncoder().encode('{"revision":2}'),
+                {...options, mode: 'replace'},
+              );
+              expect(replaced.status).toBe('published');
+              const read = runtimeReadPrivateWriterFile(directory, 'journal.json', 128);
+              expect(new TextDecoder().decode(read?.bytes)).toBe('{"revision":2}');
+              expect(read?.identity.mode && read.identity.mode & 0o077n).toBe(0n);
+              expect(
+                runtimePublishPrivateWriterFile(directory, 'journal.json', new Uint8Array([0]), options).status,
+              ).toBe('unknown');
+              expect(
+                new TextDecoder().decode(runtimeReadPrivateWriterFile(directory, 'journal.json', 128)?.bytes),
+              ).toBe('{"revision":2}');
+            }),
+          directory => Effect.sync(() => runtimeClosePrivateWriterDirectory(directory)),
+        );
+      }),
+  );
+});
+
+for (const failure of ['source', 'readonly', 'hardlink', 'parent-symlink', 'lease', 'short-write'] as const) {
+  effectIt.layer(BunServices.layer)(it => {
+    it.effect.skipIf(!posixWriterHost)(
+      `preserves native guarded targets across ${failure} before or during mutation`,
+      () =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const directory = yield* fs.makeTempDirectoryScoped({prefix: 'writer-native-conflict-'});
+          const canonical = yield* fs.realPath(directory);
+          const native = process.getBuiltinModule('fs');
+          native.mkdirSync(`${canonical}/project`);
+          native.mkdirSync(`${canonical}/project/sub`);
+          native.mkdirSync(`${canonical}/outside`);
+          const filename = `${canonical}/project/sub/a.ts`;
+          native.writeFileSync(filename, 'old');
+          native.writeFileSync(`${canonical}/outside/a.ts`, 'outside');
+          const parent = native.statSync(`${canonical}/project`, {bigint: true});
+          const source = native.statSync(filename, {bigint: true});
+          yield* Effect.acquireUseRelease(
+            Effect.sync(() => runtimeOpenWriterRoot(`${canonical}/project`, parent)),
+            root =>
+              Effect.acquireUseRelease(
+                Effect.sync(() =>
+                  runtimeOpenGuardedDiskTarget(
+                    root,
+                    ['sub', 'a.ts'],
+                    JSON.stringify([String(source.dev), String(source.ino)]),
+                    32,
+                  ),
+                ),
+                target =>
+                  Effect.sync(() => {
+                    const before = runtimeInspectGuardedDiskTarget(target);
+                    if (failure === 'source') native.writeFileSync(filename, 'user');
+                    if (failure === 'readonly') native.chmodSync(filename, 0o400);
+                    if (failure === 'hardlink') native.linkSync(filename, `${canonical}/alias`);
+                    if (failure === 'parent-symlink') {
+                      native.renameSync(`${canonical}/project/sub`, `${canonical}/project/detached`);
+                      native.symlinkSync(`${canonical}/outside`, `${canonical}/project/sub`);
+                    }
+                    const originalWrite = native.writeSync.bind(native);
+                    let calls = 0;
+                    const spy =
+                      failure === 'short-write'
+                        ? vi.spyOn(native, 'writeSync').mockImplementation((...args: unknown[]) => {
+                            const [fd, buffer, offset, length, position] = args;
+                            if (
+                              typeof fd !== 'number' ||
+                              !(buffer instanceof Uint8Array) ||
+                              typeof offset !== 'number' ||
+                              typeof length !== 'number' ||
+                              typeof position !== 'number'
+                            )
+                              throw new Error('Unexpected native descriptor-write arguments');
+                            if (++calls > 1) throw new Error('bounded injected disk failure');
+                            return originalWrite(fd, buffer, offset, 1, position);
+                          })
+                        : undefined;
+                    try {
+                      const apply = () =>
+                        runtimeCommitGuardedDiskTarget(target, {
+                          before,
+                          afterBytes: new TextEncoder().encode('new'),
+                          assertCurrentSync: () => {
+                            if (failure === 'lease') throw new Error('lease lost');
+                          },
+                        });
+                      if (failure === 'lease') expect(apply).toThrow('lease lost');
+                      else expect(apply().status).toBe(failure === 'short-write' ? 'unknown' : 'conflict');
+                      if (failure === 'short-write') expect(calls).toBe(2);
+                    } finally {
+                      spy?.mockRestore();
+                    }
+                    expect(native.readFileSync(`${canonical}/outside/a.ts`, 'utf8')).toBe('outside');
+                    const surviving = failure === 'parent-symlink' ? `${canonical}/project/detached/a.ts` : filename;
+                    expect(native.readFileSync(surviving, 'utf8')).toBe(
+                      failure === 'source' ? 'user' : failure === 'short-write' ? 'nld' : 'old',
+                    );
+                  }),
+                target => Effect.sync(() => runtimeCloseGuardedDiskTarget(target)),
+              ),
+            root => Effect.sync(() => runtimeCloseWriterRoot(root)),
+          );
+        }),
+    );
+  });
+}
+
+effectIt.layer(BunServices.layer)(it => {
+  it.effect.prop(
+    'rejects generated unsafe relative components without changing any source',
+    [Schema.Literals(['../', 'a/', 'a\\', '\0']), Schema.String.check(Schema.isMaxLength(16))],
+    ([prefix, suffix]) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const folder = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'writer-component-property-'}));
+        const native = process.getBuiltinModule('fs');
+        native.writeFileSync(`${folder}/a.ts`, 'source');
+        const before = native.statSync(`${folder}/a.ts`, {bigint: true});
+        yield* Effect.acquireUseRelease(
+          Effect.sync(() => runtimeOpenWriterRoot(folder, native.statSync(folder, {bigint: true}))),
+          root =>
+            Effect.sync(() => {
+              expect(() =>
+                runtimeOpenGuardedDiskTarget(
+                  root,
+                  [prefix + suffix],
+                  JSON.stringify([String(before.dev), String(before.ino)]),
+                  32,
+                ),
+              ).toThrow();
+              expect(native.readFileSync(`${folder}/a.ts`, 'utf8')).toBe('source');
+            }),
+          root => Effect.sync(() => runtimeCloseWriterRoot(root)),
+        );
+      }),
+    {skip: !posixWriterHost, arbitrary: {runs: 20}},
+  );
+});
 
 effectIt.layer(BunServices.layer)(it => {
   it.effect('binds a bounded read to its earlier file proof despite restored size and mtime', () =>
