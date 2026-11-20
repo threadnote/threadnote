@@ -296,9 +296,11 @@ describe('native task actions', () => {
       const watchCard = object(watchEnvelope.structuredContent);
       expect(watchCard).toMatchObject({
         status: 'watch-required',
-        next: {action: 'watch-pr', operation: 'start', validationRef, prUrl: openPr.url, headSha},
+        next: {action: 'watch-pr', operation: 'start', validationRef},
       });
       expect(object(watchCard.next).deliveryRef).toBe(watchCard.deliveryRef);
+      expect(object(watchCard.next)).not.toHaveProperty('prUrl');
+      expect(object(watchCard.next)).not.toHaveProperty('headSha');
       expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeOpen);
       const provisionalRef = decodeNativeTaskActionRef(String(watchCard.deliveryRef));
       if (!provisionalRef?.delivery?.pr) throw new Error('Expected the provisional PR delivery locator.');
@@ -902,8 +904,10 @@ describe('native task actions', () => {
           publication: {exemption: 'small-fix', reason: 'Private bounded fixture publication authority.'},
         }),
       );
-      expect(delivered).toMatchObject({status: 'watch-required', next: {operation: 'start', headSha}});
+      expect(delivered).toMatchObject({status: 'watch-required', next: {operation: 'start'}});
       const deliveryRef = String(delivered.deliveryRef);
+      // The hint's own arguments plus a wakeup must be a valid task-bound start, not a standalone-mode mix.
+      const {action: _action, expectedConsumer: _consumer, ...hintFields} = object(delivered.next);
       const source = f.path.join(f.repo, 'source.ts');
       // The source drifts after the watch starts, so the start cannot record the delivery.
       const watch = yield* attemptSimulatedTaskWatch(
@@ -915,6 +919,7 @@ describe('native task actions', () => {
         pr.url,
         undefined,
         f.fs.writeFileString(source, 'export const fixture = "drift";\n').pipe(Effect.orDie),
+        hintFields,
       );
       expect(watch.result).toMatchObject({
         ok: true,
@@ -1464,7 +1469,7 @@ describe('native task actions', () => {
               publication,
             }),
           );
-          expect(delivered).toMatchObject({status: 'watch-required', next: {action: 'watch-pr', headSha}});
+          expect(delivered).toMatchObject({status: 'watch-required', next: {action: 'watch-pr'}});
           return {
             validationRef: String(validation.validationRef),
             deliveryRef: String(delivered.deliveryRef),
