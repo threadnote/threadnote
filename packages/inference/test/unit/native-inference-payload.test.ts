@@ -64,7 +64,7 @@ effectIt.layer(Layer.mergeAll(BunServices.layer, host))(it => {
               });
               expect(service.diagnostics.embeddingContextPlan).toMatchObject({
                 requestedContexts: 4,
-                effectiveContexts: 1,
+                effectiveContexts: 4,
                 modelGpuLayers: 5,
               });
             }).pipe(Effect.provide(context)),
