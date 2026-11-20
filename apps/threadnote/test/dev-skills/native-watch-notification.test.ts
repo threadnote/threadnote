@@ -1555,7 +1555,15 @@ effectIt.effect('resumes the exact Claude Code session in its workspace and reco
     expect(calls).toHaveLength(1);
     const [call] = calls;
     expect(call.executable).toBe(claudeTarget.executable);
-    expect(call.args.slice(0, -1)).toEqual(['--print', '--resume', claudeTarget.sessionId, '--output-format', 'json']);
+    expect(call.args.slice(0, -1)).toEqual([
+      '--print',
+      '--resume',
+      claudeTarget.sessionId,
+      '--allowedTools',
+      'mcp__threadnote__workflow_task_watch_pr',
+      '--output-format',
+      'json',
+    ]);
     expect(call.args.at(-1)).toMatch(/^Threadnote watch event\. Route=/u);
     expect(call.options).toMatchObject({cwd: claudeTarget.workspace, timeoutMs: 0});
     expect((yield* f.read()).envelope.notification).toMatchObject({
@@ -1563,6 +1571,30 @@ effectIt.effect('resumes the exact Claude Code session in its workspace and reco
       outbox: null,
       lastReceipt: {kind: 'cli-session-completed', receipt: claudeTarget.sessionId},
     });
+  }).pipe(provide, TestClock.withLive),
+);
+
+effectIt.effect('records a Claude Code turn that was denied the watch tool as an unhandled delivery', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture(1);
+    yield* useTarget(f, claudeTarget);
+    yield* f.drain().pipe(
+      commandLayer(() =>
+        Effect.succeed({
+          ...success,
+          stdout: JSON.stringify({
+            type: 'result',
+            subtype: 'success',
+            is_error: false,
+            session_id: claudeTarget.sessionId,
+            permission_denials: [{tool_name: 'mcp__threadnote__workflow_task_watch_pr', tool_use_id: 'toolu_1'}],
+          }),
+        }),
+      ),
+    );
+    const notification = (yield* f.read()).envelope.notification;
+    expect(notification?.outbox).toMatchObject({status: 'failed', error: 'host-permission-denied', attempts: 1});
+    expect(notification?.lastReceipt).toBeUndefined();
   }).pipe(provide, TestClock.withLive),
 );
 

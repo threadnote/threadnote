@@ -7,6 +7,7 @@ import * as Path from 'effect/Path';
 import * as Exit from 'effect/Exit';
 import * as Option from 'effect/Option';
 import * as EffectString from 'effect/String';
+import * as EffectArray from 'effect/Array';
 import {SystemInfo} from '@threadnote/platform/system';
 import {attachNativeWatchConsumer} from '@threadnote/workflow-automations/watch';
 import {runCommandEffect} from '@threadnote/platform/command';
@@ -34,6 +35,17 @@ import {
   type NativeWatchHostClaim,
 } from './watch_host_session.js';
 import {stableJson} from '../workflow_memory/protocol.js';
+import {THREADNOTE_MCP_NAME} from '../constants.js';
+import {readAgentIntegrationRegistry} from '../agent_integration/registry.js';
+
+/** The one tool a woken turn needs to inspect, relay, dispose and acknowledge the notice it received. */
+const nativeWatchToolSuffix = '__workflow_task_watch_pr';
+/** Claude Code names MCP tools after the registered server; a malformed stored name falls back to the default. */
+const claudeNativeWatchToolName = Effect.fn('nativeWatch.claudeToolName')(function* (config: RuntimeConfig) {
+  const registry = yield* readAgentIntegrationRegistry(config).pipe(Effect.orElseSucceed(() => undefined));
+  const name = registry?.hosts.claude?.mcp.name;
+  return `mcp__${name !== undefined && /^[A-Za-z0-9_-]{1,64}$/u.test(name) ? name : THREADNOTE_MCP_NAME}${nativeWatchToolSuffix}`;
+});
 
 export const nativeWatchCodexCandidatePaths = (platform: NodeJS.Platform, homeDirectory: string): readonly string[] => {
   const macBundle = 'Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex';
@@ -162,18 +174,48 @@ export const discoverNativeWatchCodexExecutable = Effect.fn('nativeWatch.discove
 /** Each session host resumes the registered session for one headless turn and prints one JSON result. */
 const sessionResumeCommands: Record<
   NativeWatchSessionWakeup['host'],
-  (target: NativeWatchSessionWakeup, notice: string) => {readonly args: readonly string[]; readonly cwd?: string}
+  (
+    target: NativeWatchSessionWakeup,
+    notice: string,
+    watchTool: string,
+  ) => {readonly args: readonly string[]; readonly cwd?: string}
 > = {
   'cursor-cli': (target, notice) => ({
     args: ['--print', '--resume', target.sessionId, '--workspace', target.workspace, '--output-format', 'json', notice],
   }),
-  // Claude Code has no workspace flag; the resumed turn's tools run in the process directory.
-  'claude-code': (target, notice) => ({
-    args: ['--print', '--resume', target.sessionId, '--output-format', 'json', notice],
+  // Claude Code has no workspace flag; the resumed turn's tools run in the process directory. A headless turn cannot
+  // ask for permission, so it is allowed only the watch tool that its notice requires; every other tool keeps the
+  // user's settings. The variadic allow list ends at the next option, before the notice.
+  'claude-code': (target, notice, watchTool) => ({
+    args: ['--print', '--resume', target.sessionId, '--allowedTools', watchTool, '--output-format', 'json', notice],
     cwd: target.workspace,
   }),
 };
 
+/** A completed turn that was still denied the watch tool did not handle its notice. */
+function deniedNativeWatchTool(stdout: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(stdout);
+    return (
+      parsed !== null &&
+      typeof parsed === 'object' &&
+      'permission_denials' in parsed &&
+      EffectArray.isArray(parsed.permission_denials) &&
+      EffectArray.some(
+        parsed.permission_denials,
+        denial =>
+          denial !== null &&
+          typeof denial === 'object' &&
+          'tool_name' in denial &&
+          typeof denial.tool_name === 'string' &&
+          EffectString.startsWith('mcp__')(denial.tool_name) &&
+          EffectString.endsWith(nativeWatchToolSuffix)(denial.tool_name),
+      )
+    );
+  } catch {
+    return false;
+  }
+}
 function sessionCompletionReceipt(stdout: string, sessionId: string): string | undefined {
   try {
     const parsed: unknown = JSON.parse(stdout);
@@ -359,7 +401,10 @@ export const makeNativeWatchNotifier = Effect.fn('nativeWatch.notifier')(functio
     );
     if (!claimed) return;
     const {target, outbox} = claimed.notification;
-    const finish = (receipt: string | undefined, error: 'host-delivery-ambiguous' | 'host-session-owned') =>
+    const finish = (
+      receipt: string | undefined,
+      error: 'host-delivery-ambiguous' | 'host-session-owned' | 'host-permission-denied',
+    ) =>
       withNativeWatchControlLock(
         config,
         watchId,
@@ -413,13 +458,18 @@ export const makeNativeWatchNotifier = Effect.fn('nativeWatch.notifier')(functio
       const command =
         target.host === 'codex'
           ? {args: ['queue', '--thread', target.threadId, '--message', notice]}
-          : sessionResumeCommands[target.host](target, notice);
+          : sessionResumeCommands[target.host](
+              target,
+              notice,
+              target.host === 'claude-code' ? yield* claudeNativeWatchToolName(config) : '',
+            );
       const result = yield* runCommandEffect(target.executable, command.args, {
         ...(command.cwd === undefined ? {} : {cwd: command.cwd}),
         timeoutMs: target.host === 'codex' ? 10_000 : 0,
         maxOutputBytes: target.host === 'codex' ? 4096 : 65_536,
       }).pipe(Effect.result);
       let receipt: string | undefined;
+      let error: 'host-delivery-ambiguous' | 'host-permission-denied' = 'host-delivery-ambiguous';
       if (result._tag === 'Success' && result.success.exitCode === 0) {
         if (target.host === 'codex')
           receipt = new RegExp(
@@ -428,10 +478,16 @@ export const makeNativeWatchNotifier = Effect.fn('nativeWatch.notifier')(functio
               '\\.$',
             'iu',
           ).exec(EffectString.trim(result.success.stdout))?.[1];
-        else receipt = sessionCompletionReceipt(result.success.stdout, target.sessionId);
+        else {
+          receipt = sessionCompletionReceipt(result.success.stdout, target.sessionId);
+          if (receipt && target.host === 'claude-code' && deniedNativeWatchTool(result.success.stdout)) {
+            receipt = undefined;
+            error = 'host-permission-denied';
+          }
+        }
       }
       // A timeout, nonzero exit, or malformed receipt can follow host acceptance. Never retry automatically.
-      yield* finish(receipt, 'host-delivery-ambiguous');
+      yield* finish(receipt, error);
       if (claim) yield* releaseNativeWatchHostSession(userHome, claim);
     });
     if (isNativeWatchSessionWakeup(target)) {
