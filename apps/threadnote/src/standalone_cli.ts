@@ -799,9 +799,15 @@ async function applicationProgram(arguments_: readonly string[], isMcpServer: bo
         : previewMemory
           ? runtime.ApplicationLayer
           : runtime.applicationLayerForHome(home, 'cli');
-      return (isStaticVersionRequest ? Effect.scoped(command) : processLease.withStandaloneProcessLease(command)).pipe(
-        Effect.provide(applicationLayer),
-      );
+      return (
+        isStaticVersionRequest
+          ? Effect.scoped(command)
+          : processLease.withStandaloneProcessLease(command, {
+              // A PR watch collector serves an idle session and stops only on terminal completion or an explicit
+              // stop, so retiring superseded processes after an install must not kill it.
+              retirementPolicy: isWatchCollector ? 'preserve-session' : 'terminate',
+            })
+      ).pipe(Effect.provide(applicationLayer));
     }),
     Effect.provide(runtime.StandaloneBrokerLayer),
   );

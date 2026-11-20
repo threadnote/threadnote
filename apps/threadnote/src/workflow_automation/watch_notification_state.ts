@@ -107,6 +107,7 @@ export const nativeWatchNotificationSchema = Schema.Struct({
           'host-session-interrupted',
           'host-delivery-ambiguous',
           'host-session-owned',
+          'host-permission-denied',
         ]),
       ),
     }),
