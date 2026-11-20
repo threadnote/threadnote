@@ -272,7 +272,7 @@ export const installLocalStandalone = Effect.fn('developmentInstall.run')(functi
     );
     if (result.preservedMcpSessionProcesses > 0) {
       yield* Console.log(
-        `${result.preservedMcpSessionProcesses} live MCP session process(es) remain safely pinned and will promote behind their stable transport.`,
+        `${result.preservedMcpSessionProcesses} live session process(es) remain pinned to their prior release. MCP transports promote behind their stable transport; PR watch collectors keep their release until the watch ends.`,
       );
     }
     const processStateUnknown = EffectArray.some(
@@ -720,8 +720,9 @@ export const activateLocalStandaloneRelease = Effect.fn('developmentInstall.acti
         [...live.value.verified, ...live.value.unverified],
         lease => lease.version !== input.version,
       );
-      // The benchmark/runtime preflight permits only the stable transport that
-      // explicitly opted into session preservation. Its versioned MCP runtime
+      // The benchmark/runtime preflight permits only leases that explicitly
+      // opted into session preservation: the stable transport and PR watch
+      // collectors. The transport's versioned MCP runtime
       // and workers remain terminate-policy leases, so report them as pending
       // retirement even before an explicit cleanup is requested.
       const preservedProcessIds = explicitlyPreservedStandaloneProcessIds(superseded);

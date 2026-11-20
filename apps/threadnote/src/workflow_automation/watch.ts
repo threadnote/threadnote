@@ -135,7 +135,8 @@ const health = Effect.fn('workflowWatch.health')(function* (
     prState: envelope.state.prState,
     collector: {
       alive,
-      status: envelope.collector?.status ?? 'absent',
+      // A collector killed without its own final write still records `running`.
+      status: envelope.collector?.status === 'running' && !alive ? 'exited' : (envelope.collector?.status ?? 'absent'),
       pid: envelope.collector?.pid ?? null,
       lastSeenAt: envelope.collector?.lastSeenAt ?? null,
       nextPollAt: envelope.collector?.nextPollAt ?? null,

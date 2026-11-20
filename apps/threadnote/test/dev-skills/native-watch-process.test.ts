@@ -417,6 +417,7 @@ process.stdout.write('Queued message bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb for th
     process.kill(firstPid, 'SIGKILL');
     await dead(firstPid);
     owned.delete(firstPid);
+    expect((await cli('inspect')).result.collector).toEqual({alive: false, status: 'exited', pid: firstPid});
     stage('collector-restart');
     const restarted = (await cli('start', start)).result;
     const nextPid = required(restarted.collector.pid);
