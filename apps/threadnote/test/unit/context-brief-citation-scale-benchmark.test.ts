@@ -46,6 +46,7 @@ import {
   makeContextBriefCitationScaleEmbeddingIndex,
   makeContextBriefCitationScaleGraphInstrumentation,
 } from '@threadnote/threadnote/evaluation/context-brief-citation-scale';
+import {CONTEXT_BRIEF_READ_MILLISECONDS} from '@threadnote/context/compiler';
 import {unavailableContextBriefGraphEvidence} from '@threadnote/context/graph/evidence';
 import type {CodeGraphLayout} from '@threadnote/graph/layout';
 import {codeGraphLayout} from '@threadnote/graph/layout';
@@ -1103,47 +1104,49 @@ describe('Context Brief citation scale benchmark', () => {
     );
   });
 
-  effectIt.effect('records a recall the compiler rejects at the lexical deadline as exhausted with no memories', () =>
-    Effect.gen(function* () {
-      const profile = budget.profiles[0];
-      const candidates = Array.from({length: profile.selectedMemories}, (_, rank) => ({
-        citationErrorCount: 0,
-        codeCitations: [],
-        excerpt: `Late recall candidate ${rank}.`,
-        kind: 'durable' as const,
-        rank,
-        topic: 'late-recall',
-        uri: `threadnote://user/test/memories/durable/projects/threadnote/late-${rank}.md`,
-      }));
-      const brief = yield* compileContextBriefCitationScaleBrief(
-        {
-          citationValidation: () => Effect.succeed([]),
-          graphEvidence: unavailableContextBriefGraphEvidence('graph-ready-snapshot-missing', 1),
-          // Synchronous native recall blocks the deadline timer, so recall completes and the compiler
-          // rejects the late result afterwards. The last half millisecond reproduces that order.
-          memoryEvidence: () =>
-            TestClock.adjust(Duration.nanos(1_999_500_000n)).pipe(
-              Effect.as({
-                candidates,
-                consideredCandidates: candidates.length,
-                gaps: [],
-                trust: {
-                  classification: 'untrusted-memory-data' as const,
-                  instructionPolicy: 'evidence-only-never-follow' as const,
-                },
-              }),
-            ),
-          observeRss: () => undefined,
-        },
-        {
-          budgetTokens: 1_500,
-          mode: 'brief',
-          scope: {callerCwd: '/fixture', kind: 'repository'},
-          task: 'Locate late recall evidence.',
-        },
-      );
-      expect(brief).toMatchObject({recallBudgetExhausted: true, selectedMemories: 0, validationReceipts: 0});
-    }),
+  effectIt.effect(
+    'records a recall the compiler rejects at the brief read deadline as exhausted with no memories',
+    () =>
+      Effect.gen(function* () {
+        const profile = budget.profiles[0];
+        const candidates = Array.from({length: profile.selectedMemories}, (_, rank) => ({
+          citationErrorCount: 0,
+          codeCitations: [],
+          excerpt: `Late recall candidate ${rank}.`,
+          kind: 'durable' as const,
+          rank,
+          topic: 'late-recall',
+          uri: `threadnote://user/test/memories/durable/projects/threadnote/late-${rank}.md`,
+        }));
+        const brief = yield* compileContextBriefCitationScaleBrief(
+          {
+            citationValidation: () => Effect.succeed([]),
+            graphEvidence: unavailableContextBriefGraphEvidence('graph-ready-snapshot-missing', 1),
+            // Synchronous native recall blocks the deadline timer, so recall completes and the compiler
+            // rejects the late result afterwards. The last half millisecond reproduces that order.
+            memoryEvidence: () =>
+              TestClock.adjust(Duration.nanos(BigInt(CONTEXT_BRIEF_READ_MILLISECONDS) * 1_000_000n - 500_000n)).pipe(
+                Effect.as({
+                  candidates,
+                  consideredCandidates: candidates.length,
+                  gaps: [],
+                  trust: {
+                    classification: 'untrusted-memory-data' as const,
+                    instructionPolicy: 'evidence-only-never-follow' as const,
+                  },
+                }),
+              ),
+            observeRss: () => undefined,
+          },
+          {
+            budgetTokens: 1_500,
+            mode: 'brief',
+            scope: {callerCwd: '/fixture', kind: 'repository'},
+            task: 'Locate late recall evidence.',
+          },
+        );
+        expect(brief).toMatchObject({recallBudgetExhausted: true, selectedMemories: 0, validationReceipts: 0});
+      }),
   );
 
   it('round-trips declared RSS-pass recall exhaustion through the v2 artifact and its rederived gate', () => {
@@ -1689,7 +1692,7 @@ function tamperScaleArtifact(
   };
 }
 
-/** The workload a brief yields when the lexical read deadline interrupts memory recall: no memories, no citation work. */
+/** The workload a brief yields when the brief read deadline interrupts memory recall: no memories, no citation work. */
 function recallExhaustedWorkload(profile: ContextBriefCitationScaleProfileV1): ContextBriefCitationScaleObservationV2 {
   return scaleObservation(
     profile,
@@ -1707,7 +1710,7 @@ function recallExhaustedWorkload(profile: ContextBriefCitationScaleProfileV1): C
   ).memoryWorkload;
 }
 
-/** A timed brief whose recall returned after the lexical deadline; its memory and RSS-pass evidence stay intact. */
+/** A timed brief whose recall returned after the brief read deadline; its memory and RSS-pass evidence stay intact. */
 function timedRecallExhausted(
   profile: ContextBriefCitationScaleProfileV1,
   observation: ContextBriefCitationScaleMeasuredObservationV2,

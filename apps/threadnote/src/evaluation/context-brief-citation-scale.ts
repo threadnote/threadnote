@@ -522,7 +522,7 @@ export interface ContextBriefCitationScaleBriefReads<MemoryR, CitationR> {
 
 /**
  * Compiles one scale brief and records only the memory work the compiler kept. A recall that returns
- * after the lexical deadline is discarded by the compiler, so it counts as exhausted with no memories.
+ * after the brief read deadline is discarded by the compiler, so it counts as exhausted with no memories.
  */
 export const compileContextBriefCitationScaleBrief = Effect.fn('evaluation.contextBriefCitationScaleBrief')(function* <
   MemoryR,

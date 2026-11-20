@@ -1,5 +1,9 @@
 import {Array as EffectArray} from 'effect';
-import {compileContextBriefWith, type ContextBriefCompilerDependencies} from '@threadnote/context/compiler';
+import {
+  CONTEXT_BRIEF_READ_MILLISECONDS,
+  compileContextBriefWith,
+  type ContextBriefCompilerDependencies,
+} from '@threadnote/context/compiler';
 export {compileContextBriefWith, type ContextBriefCompilerDependencies} from '@threadnote/context/compiler';
 import {Clock, DateTime, Effect, Exit, Schema} from 'effect';
 import {CodeGraphScopeRoutingError} from '@threadnote/graph/scope/routing';
@@ -329,7 +333,7 @@ const compileContextBriefRuntime = Effect.fn('contextBrief.compileRuntime')(func
       },
     );
   });
-  return yield* withReadyRecallReadBoundary(compilation).pipe(
+  return yield* withReadyRecallReadBoundary(compilation, {readMilliseconds: CONTEXT_BRIEF_READ_MILLISECONDS}).pipe(
     Effect.onExit(exit =>
       Clock.currentTimeMillis.pipe(
         Effect.flatMap(completedAt =>

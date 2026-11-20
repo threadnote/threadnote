@@ -237,14 +237,18 @@ export const makeReadyRecallReadBoundary = Effect.fn('recall.makeReadyReadBounda
 /** Owned reads use an explicit bounded policy or foreground caller cancellation. */
 export function withReadyRecallReadBoundary<A, E, R>(
   effect: Effect.Effect<A, E, R>,
-  options: {readonly boundProgram?: boolean; readonly callerCancellation?: boolean} = {},
+  options: {
+    readonly boundProgram?: boolean;
+    readonly callerCancellation?: boolean;
+    readonly readMilliseconds?: number;
+  } = {},
 ) {
   const program = Effect.gen(function* () {
     if (Option.isSome(yield* Effect.serviceOption(RecallReadyReadBoundary))) return yield* effect;
     if (Option.isNone(yield* Effect.serviceOption(ReadyRecallReadWorkerAdmission))) return yield* effect;
     const deadline = (yield* CallerReadCancellation)
       ? undefined
-      : yield* makeReadDeadline(RECALL_READY_READ_MILLISECONDS);
+      : yield* makeReadDeadline(options.readMilliseconds ?? RECALL_READY_READ_MILLISECONDS);
     const boundary = yield* makeReadyRecallReadBoundary(deadline);
     return yield* (options.boundProgram && deadline !== undefined ? withinReadDeadline(deadline, effect) : effect).pipe(
       Effect.provideService(RecallReadyReadBoundary, boundary),
