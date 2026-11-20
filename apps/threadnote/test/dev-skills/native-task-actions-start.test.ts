@@ -25,6 +25,7 @@ import {
 import {decodeNativeCycleRuntime} from '@threadnote/workflow-automations/cycle-runtime';
 import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
 import {sha256Hex} from '@threadnote/platform/digest';
+import {parseMemoryDocument} from '@threadnote/memory/document';
 import {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
 import {registerWorkflowTaskTool} from '../../src/mcp/server/workflow.js';
 import {readNativeTaskView} from '../../src/workflow_automation/task.js';
@@ -976,6 +977,73 @@ describe('native task actions', () => {
         ['decisions', 'verified'],
         ['plan', 'verified'],
       ]);
+    }).pipe(run),
+  );
+
+  effectIt.effect('leaves a path that the ready graph does not index uncited in a standard compact start', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      const workflowPath = '.github/workflows/publish.yml';
+      yield* f.fs.makeDirectory(f.path.join(f.repo, '.github', 'workflows'), {recursive: true});
+      yield* f.fs.writeFileString(f.path.join(f.repo, workflowPath), 'name: publish\n');
+      yield* runCommandEffect('git', ['-C', f.repo, 'add', 'source.ts', workflowPath]);
+      yield* runCommandEffect('git', [
+        '-C',
+        f.repo,
+        '-c',
+        'user.name=Fixture',
+        '-c',
+        'user.email=fixture@example.invalid',
+        'commit',
+        '-m',
+        'Fixture source',
+      ]);
+      const system = yield* SystemInfo;
+      const repo = yield* f.fs.realPath(f.repo);
+      const home = yield* f.fs.realPath(f.home);
+      const config = {...f.config, agentContextHome: home, manifestPath: f.path.join(home, 'manifest.json')};
+      const scopedSystem = {...system, currentDirectory: () => repo, homeDirectory: home};
+      yield* applyDevSkills(config, 'install', {agent: 'codex'}).pipe(Effect.provideService(SystemInfo, scopedSystem));
+      const graph = yield* GraphDiagnostics;
+      expect(
+        (yield* graph.prepare(
+          Effect.flatMap(CodeGraphIndexer, indexer => indexer.index({cwd: repo, threadnoteHome: home})),
+        )).snapshot.state,
+      ).toBe('ready');
+      const featureName = 'Unindexed workflow path';
+      const started = object(
+        yield* runNativeTaskStart(config, {
+          featureName,
+          callerCwd: repo,
+          installationTarget: 'codex',
+          workflowProfile: 'standard' as const,
+          intent: {
+            title: featureName,
+            currentBehavior: 'The publish workflow skips a check.',
+            desiredChange: 'The publish workflow runs the check.',
+            affectedPaths: ['source.ts', workflowPath],
+            acceptanceCriterion: 'The publish workflow runs the check.',
+            verification: 'Read the publish workflow.',
+            eligibilityRationale: 'One bounded workflow correction with no unresolved decisions.',
+            eligibility: {status: 'eligible' as const},
+            review: {required: false, reason: 'Bounded fixture correction.'},
+          },
+        }).pipe(Effect.provideService(SystemInfo, scopedSystem)),
+      );
+      expect(started.status).toBe('awaiting-user-confirmation');
+      const runId = nativeTaskStartRunId(undefined, 'repo', workflowTitleSlug(featureName));
+      const operations = (yield* readNativeWorkflowState(config, runId))?.state.operations ?? [];
+      const cited = new Set<string>();
+      for (const operation of operations) {
+        if (!operation.artifact) continue;
+        const record = parseMemoryDocument(
+          operation.artifact.uri,
+          yield* f.store.read(f.location, operation.artifact.uri),
+        );
+        for (const citation of record?.metadata.codeCitations ?? []) cited.add(citation.path);
+      }
+      expect(cited.has('source.ts')).toBe(true);
+      expect(cited.has(workflowPath)).toBe(false);
     }).pipe(run),
   );
 
