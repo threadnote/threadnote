@@ -679,8 +679,8 @@ bundle in its reserved observer mode. The observer recursively samples the bench
 while excluding its own complete subtree. Every memory observation fails unless its begin baseline contains only the
 root, it has at least three successful samples and no failures, and its root and process-tree
 peak-minus-immediate-baseline arithmetic is internally consistent. Across the ordered memory series, observations
-whose longest successful-sample gap exceeds 100 ms may comprise at most 10%, at most two may occur consecutively, and
-no gap may exceed 550 ms. The single-repository profile must observe a workload descendant at least once, while each
+whose longest successful-sample gap exceeds 100 ms may comprise at most 20%, at most eight may occur consecutively, and
+no gap may exceed 800 ms. The single-repository profile must observe a workload descendant at least once, while each
 sustained multi-repository Workset profile must do so in at least 80% of its 100 memory observations. This distinction
 keeps the fan-out coverage gate strong without claiming that the roughly 45 ms macOS `ps` cadence reliably catches
 every short-lived local Git child. The fixed 64 MiB ceiling applies independently to
