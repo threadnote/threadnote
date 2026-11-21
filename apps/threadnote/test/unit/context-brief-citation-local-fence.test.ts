@@ -143,7 +143,7 @@ const scenario = (
         citedRepositories: 1,
         id: 'local-100k',
         maximumBriefP95Milliseconds: 1_500,
-        maximumValidationP95Milliseconds: 250,
+        maximumValidationP95Milliseconds: 500,
         selectedMemories: 1,
         worksetMembers: 1,
       },

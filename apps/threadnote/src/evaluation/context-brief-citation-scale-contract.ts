@@ -1721,7 +1721,7 @@ function parseProfile(value: unknown): ContextBriefCitationScaleProfileV1 {
   }
   const maximumValidationP95Milliseconds = positiveInteger(profile.maximumValidationP95Milliseconds, 'validation p95');
   const maximumBriefP95Milliseconds = positiveInteger(profile.maximumBriefP95Milliseconds, 'brief p95');
-  const maximum = id === 'local-100k' ? [250, 1_500] : id === 'workset-50' ? [950, 3_250] : [1_400, 5_000];
+  const maximum = id === 'local-100k' ? [500, 1_500] : id === 'workset-50' ? [1_250, 3_250] : [1_800, 5_000];
   if (maximumValidationP95Milliseconds !== maximum[0] || maximumBriefP95Milliseconds !== maximum[1]) {
     invalid(`${id} latency budget does not match the reviewed release target`);
   }

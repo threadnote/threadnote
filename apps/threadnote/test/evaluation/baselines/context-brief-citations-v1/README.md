@@ -19,6 +19,9 @@ For a ceiling that the three-run sample exceeded or left with less than the pros
 10% above the largest observation, rounded up to the next 50 ms. Existing ceilings with more headroom are retained;
 this calibration does not tighten them from a small sample.
 
+A later recalibration from 15 hosted release-class artifacts increased the validation ceilings to 500 / 1,250 /
+1,800 ms and kept the brief ceilings. `docs/releasing.md` records the measured spread.
+
 The same runs recorded maximum successful-sample gaps of 138, 172, and 100 ms. Their `>100 ms` breach patterns were
 4/75 with at most two consecutive observations, 2/75 with no consecutive observations, and 0/75. The initial v1
 quality policy therefore bounded the raw maximum at 250 ms while retaining a 10% breach-rate ceiling and at most two

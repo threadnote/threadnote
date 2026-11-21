@@ -163,6 +163,10 @@ and unsafe-integer version components. Stable tags follow the same protected-mai
    that binding retains the historical `threadnote-4.6.0`/`bun/1.3.14` validation contract and rejects later versions.
    Do not substitute a pass from the heterogeneous Ubuntu x64
    pool or normalize two failed absolute observations through a parent-relative comparison.
+   The validation p95 budgets are 500 ms for `local-100k`, 1,250 ms for `workset-50`, and 1,800 ms for `workset-128`.
+   These budgets are above the measured spread of 15 release-class artifacts on this runner class. Their maximum
+   validation p95 values were 454, 1,130, and 1,608 ms, and two runs of one commit on this runner class differed by up
+   to 1.8x with identical work counters. Thus, a budget breach shows a regression of approximately 2x or more.
    Also require `bun run eval:code-memory-link-bench` to pass on that SHA for changes to code-anchored retrieval. Treat
    its 256-noise-memory latency result as the deterministic CI smoke only; do not relabel it as the 100,000-memory
    inverse-selector scale gate.

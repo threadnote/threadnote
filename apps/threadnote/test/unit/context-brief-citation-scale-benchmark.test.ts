@@ -363,7 +363,7 @@ describe('Context Brief citation scale benchmark', () => {
           citedRepositories: 1,
           id: 'local-100k',
           maximumBriefP95Milliseconds: 1_500,
-          maximumValidationP95Milliseconds: 250,
+          maximumValidationP95Milliseconds: 500,
           worksetMembers: 1,
         },
         {
@@ -371,7 +371,7 @@ describe('Context Brief citation scale benchmark', () => {
           citedRepositories: 16,
           id: 'workset-50',
           maximumBriefP95Milliseconds: 3_250,
-          maximumValidationP95Milliseconds: 950,
+          maximumValidationP95Milliseconds: 1_250,
           worksetMembers: 50,
         },
         {
@@ -379,7 +379,7 @@ describe('Context Brief citation scale benchmark', () => {
           citedRepositories: 32,
           id: 'workset-128',
           maximumBriefP95Milliseconds: 5_000,
-          maximumValidationP95Milliseconds: 1_400,
+          maximumValidationP95Milliseconds: 1_800,
           worksetMembers: 128,
         },
       ],
