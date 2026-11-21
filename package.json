@@ -182,7 +182,7 @@
     "js-yaml": "^5.5.0",
     "jsonc-parser": "3.3.1",
     "node-llama-cpp": "3.22.2",
-    "postgres": "3.4.9",
+    "postgres": "4.1.1",
     "pxpipe-proxy": "0.15.1",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
