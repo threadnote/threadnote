@@ -2,7 +2,7 @@ import {Effect} from 'effect';
 import type {CodeGraphDirectPersistentCapacityBoundary} from '../disk/capacity.js';
 import type {CodeGraphQueryResult, CodeGraphStatus, RepositoryIdentity} from '../types.js';
 import {worktreeOverlayState} from '../inventory.js';
-import type {CodeGraphQueryScope} from './scope.js';
+import type {CodeGraphQueryScope, CodeGraphReadyScopeReceipt} from './scope.js';
 
 export function sameCodeGraphRepositoryIdentity(left: RepositoryIdentity, right: RepositoryIdentity): boolean {
   return (
@@ -70,6 +70,8 @@ export function codeGraphInspectionObservation(
 export interface CodeGraphStatusOptions {
   readonly project?: string;
   readonly manifestPath?: string;
+  /** @internal Observe compatible stored scope evidence before full applicability verification. */
+  readonly onScopedReadyStatus?: (status: CodeGraphStatus) => Effect.Effect<void>;
   /** @internal Run after the owned identity resolution and before reading graph status. */
   readonly afterIdentityObserved?: (
     identity: RepositoryIdentity,
@@ -145,6 +147,8 @@ export interface CodeGraphStatusObservation {
   readonly borrowedSnapshotId?: string;
   /** Exact ready snapshot selected by the parent status pass. */
   readonly readySnapshotId?: string;
+  /** Ready scope provenance without current applicability. */
+  readonly unverifiedScope?: CodeGraphReadyScopeReceipt;
   readonly identity: RepositoryIdentity;
   /** Present only when status performed an exact worktree observation. */
   readonly overlay?: {readonly dirty: boolean; readonly fingerprint?: string};

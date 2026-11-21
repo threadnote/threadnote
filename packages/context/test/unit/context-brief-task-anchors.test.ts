@@ -13,6 +13,7 @@ import {fromRepositoryQuery} from '../../src/graph/evidence.js';
 import {planContextBrief} from '../../src/planner.js';
 import type {ContextBriefSourceEvidenceRequest} from '../../src/graph/source_evidence.js';
 import {CodeGraphQueryService, type CodeGraphInspectOptions} from '@threadnote/graph/query';
+import {attachCodeGraphStatusObservation} from '@threadnote/graph/query/contract';
 import type {CodeGraphEdge, CodeGraphQueryNode, CodeGraphQueryResult, CodeGraphStatus} from '@threadnote/graph/types';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {compileContextBriefWith} from '../../src/compiler.js';
@@ -492,6 +493,70 @@ describe('task-aligned ordinary Context Brief anchors', () => {
       expect(calls).toHaveLength(17);
       expect(EffectArray.filter(calls, call => call.operation === 'impact')).toHaveLength(8);
       expect(EffectArray.filter(calls, call => call.operation === 'neighbors')).toHaveLength(8);
+    }),
+  );
+
+  effectIt.effect('attempts one exact preview without retries or consuming the strict counters', () =>
+    Effect.gen(function* () {
+      const calls: CodeGraphInspectOptions[] = [];
+      const ready = attachCodeGraphStatusObservation(
+        {...STATUS, freshness: 'stale', stale: true},
+        {
+          identity: STATUS.identity,
+          projectScopeObserved: true,
+          unverifiedScope: {
+            scope: {
+              closureDigest: 'closure',
+              definitionDigest: 'definition',
+              membershipDigest: 'members',
+              scopeKey: 'scope',
+            },
+          },
+        },
+      );
+      const query = Layer.mock(CodeGraphQueryService, {
+        status: (_home, _cwd, options) =>
+          (options?.onScopedReadyStatus?.(ready) ?? Effect.void).pipe(Effect.as(STATUS)),
+        inspect: call =>
+          Effect.suspend(() => {
+            calls.push(call);
+            if (call.statusObservation?.unverifiedScope !== undefined)
+              return Effect.fail(CodeGraphStoreTransientIoError.of('preview contention'));
+            const path = call.query ?? WORKFLOW;
+            return Effect.succeed(
+              queryResult({
+                edges: [],
+                nodes: [sourceNode(`cgs_${Effect2.pipe('d', EffectString.repeat(32))}`, path, path, 'module')],
+                operation: call.operation ?? 'query',
+              }),
+            );
+          }),
+      });
+      const plan = planContextBrief({
+        task: TASK,
+        scope: {kind: 'repository', callerCwd: '/workspace/effect'},
+        codeRefs: [WORKFLOW, INCIDENTAL],
+        mode: 'locate',
+      });
+      const budget = {
+        remaining: 2,
+        primaryRemaining: 17,
+        onScopedReadyEvidence: () => Effect.die('No preview evidence on contention'),
+      };
+      const services = yield* Layer.build(query);
+      yield* retrieveContextBriefGraphEvidence(CONFIG, plan.graph, undefined, budget).pipe(
+        Effect.provide(services),
+        provideFixtureServices,
+      );
+      expect(EffectArray.map(calls, call => call.query)).toEqual([WORKFLOW, WORKFLOW, INCIDENTAL]);
+      expect(calls[0]).toMatchObject({
+        depth: 0,
+        operation: 'impact',
+        seedQueries: [WORKFLOW],
+        seedQueryCount: 1,
+        statusObservation: {unverifiedScope: {scope: {scopeKey: 'scope'}}},
+      });
+      expect(budget).toMatchObject({remaining: 2, primaryRemaining: 15});
     }),
   );
 

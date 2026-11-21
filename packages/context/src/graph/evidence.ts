@@ -55,6 +55,8 @@ export interface ContextBriefGraphReadBudget {
   statusObserved?: boolean;
   /** Native worker only: report the completed status phase to the parent before inspection starts. */
   readonly onStatusObserved?: () => Effect.Effect<void>;
+  /** Native worker only: send separately bounded evidence while current applicability is pending. */
+  readonly onScopedReadyEvidence?: (evidence: ContextBriefGraphEvidenceV1) => Effect.Effect<void>;
 }
 
 /** Read only ready graph state. This boundary may borrow compatible shared evidence, but never builds or requests maintenance. */
@@ -105,7 +107,20 @@ const retrieveRepositoryGraphEvidence = Effect.fn('contextBrief.retrieveReposito
   const callerCwd = plan.scope.callerCwd;
   const query = yield* CodeGraphQueryService;
   const scopeOptions = {project: plan.scope.project, manifestPath: config.manifestPath};
-  let status = yield* query.status(config.agentContextHome, callerCwd, {...scopeOptions, requestMaintenance: false});
+  const emitScopedReady = readBudget?.onScopedReadyEvidence;
+  let status = yield* query.status(config.agentContextHome, callerCwd, {
+    ...scopeOptions,
+    requestMaintenance: false,
+    ...(emitScopedReady === undefined || readBudget === undefined
+      ? {}
+      : {
+          onScopedReadyStatus: ready =>
+            Effect.gen(function* () {
+              const evidence = yield* retrieveScopedReadyPreview(query, config, plan, callerCwd, ready, readBudget);
+              if (evidence !== undefined) yield* emitScopedReady(evidence);
+            }).pipe(Effect.ignore),
+        }),
+  });
   if (status.readySnapshot === undefined) {
     status = yield* query.attachSharedReadySnapshot(config.agentContextHome, status.identity, status, {
       allowBorrowedStale: true,
@@ -116,6 +131,95 @@ const retrieveRepositoryGraphEvidence = Effect.fn('contextBrief.retrieveReposito
     readBudget.statusObserved = true;
     if (readBudget.onStatusObserved !== undefined) yield* readBudget.onStatusObserved();
   }
+  return yield* retrieveReadyRepositoryGraphEvidence(
+    query,
+    config,
+    plan,
+    callerCwd,
+    status,
+    sourceEvidence,
+    readBudget,
+  );
+});
+
+const retrieveScopedReadyPreview = Effect.fn('contextBrief.retrieveScopedReadyPreview')(function* (
+  query: ReturnType<typeof CodeGraphQueryService.of>,
+  config: RuntimeConfig,
+  plan: ContextBriefPlanV1['graph'],
+  callerCwd: string,
+  status: CodeGraphStatus,
+  budget: ContextBriefGraphReadBudget,
+) {
+  const observation = observationFromCodeGraphStatus(status);
+  if (observation?.unverifiedScope === undefined || status.readySnapshot === undefined || budget.primaryRemaining <= 0)
+    return undefined;
+  if (budget.deadline !== undefined && (yield* readDeadlineRemaining(budget.deadline)) <= 0) return undefined;
+  const ref = plan.codeRefs[0];
+  const stableId = ref !== undefined && EffectString.startsWith('cgs_')(ref);
+  // Preview only one positive lookup. The full plan owns all anchors, relationships, and retries.
+  const result = yield* query.inspect({
+    cwd: callerCwd,
+    depth: 0,
+    edgeLimit: 1,
+    nodeLimit: Math.min(plan.nodeLimit, 8),
+    ...(stableId
+      ? {operation: 'node', nodeId: ref}
+      : ref === undefined
+        ? {operation: 'query', query: plan.query}
+        : {operation: 'impact', query: ref, seedQueries: [ref], seedQueryCount: 1}),
+    refresh: false,
+    requestMaintenance: false,
+    statusObservation: observation,
+    strictFreshness: false,
+    threadnoteHome: config.agentContextHome,
+  });
+  if (
+    result.repository.repositoryId !== status.identity.repositoryId ||
+    result.snapshot.id !== status.readySnapshot.id ||
+    result.freshness !== 'stale'
+  )
+    return undefined;
+  const seed = ref !== undefined && !stableId ? contextBriefResolvedPathTraceSeed(result, ref) : undefined;
+  const nodes =
+    ref === undefined
+      ? result.nodes
+      : stableId
+        ? EffectArray.filter(result.nodes, node => node.id === ref)
+        : seed === undefined
+          ? []
+          : [seed];
+  if (nodes.length === 0) return undefined;
+  const {citationValidationFence: _fence, ...evidence} = fromRepositoryQuery({...result, nodes, edges: []});
+  return {
+    ...evidence,
+    projectCoverage: status.projectCoverage,
+    coverage: {...evidence.coverage, complete: false},
+    gaps: stableGraphStrings([
+      ...evidence.gaps,
+      'graph-scoped-applicability-unverified',
+      ...(plan.detail === 'source' ? ['graph-source-snapshot-not-current'] : []),
+    ]),
+    warnings: stableGraphStrings([
+      ...evidence.warnings,
+      'Current project graph applicability could not be verified within the read deadline.',
+    ]).slice(0, 16),
+  };
+});
+
+const retrieveReadyRepositoryGraphEvidence = Effect.fn('contextBrief.retrieveReadyRepositoryGraphEvidence')(function* <
+  R = never,
+>(
+  query: ReturnType<typeof CodeGraphQueryService.of>,
+  config: RuntimeConfig,
+  plan: ContextBriefPlanV1['graph'],
+  callerCwd: string,
+  status: CodeGraphStatus,
+  sourceEvidence?: (
+    request: ContextBriefSourceEvidenceRequest,
+  ) => Effect.Effect<ContextBriefSourceEvidenceResult, unknown, R>,
+  readBudget?: ContextBriefGraphReadBudget,
+) {
+  const scopeOptions = {project: plan.scope.project, manifestPath: config.manifestPath};
   const readySnapshot = status.readySnapshot;
   if (readySnapshot === undefined) {
     return withSourceGapIfRequested(

@@ -343,22 +343,48 @@ export function codeGraphExactSymbolQueryStatement(
   baseSnapshotId: string | undefined,
   query: string,
   limit: number,
+  boundedPreview = false,
 ): CodeGraphSqlQueryStatement {
+  const samples: string[] = [];
+  const sampleParameters: Array<number | string> = [];
   const branches: string[] = [];
   const parameters: Array<number | string> = [];
   for (const field of EXACT_SYMBOL_FIELDS) {
+    const currentSample = `current_${field.column}_sample`;
+    const baseSample = `base_${field.column}_sample`;
+    if (boundedPreview) {
+      for (const [sample, id] of [
+        [currentSample, snapshotId],
+        [baseSample, baseSnapshotId ?? ''],
+      ] as const) {
+        // Cap index hits before base suppression or rank, even when every base hit is shadowed.
+        samples.push(`${sample} AS MATERIALIZED (
+          SELECT * FROM symbols INDEXED BY ${field.index}
+          WHERE snapshot_id = ? AND ${field.column} = ? COLLATE NOCASE LIMIT 8
+        )`);
+        sampleParameters.push(id, query);
+      }
+    }
     branches.push(`SELECT current_symbols.*,
         CASE WHEN current_symbols.${field.column} = ? THEN ${field.sensitiveRank} ELSE ${field.insensitiveRank} END AS exact_rank
-      FROM symbols AS current_symbols INDEXED BY ${field.index}
+      FROM ${
+        boundedPreview
+          ? `${currentSample} AS current_symbols`
+          : `symbols AS current_symbols INDEXED BY ${field.index}
       WHERE current_symbols.snapshot_id = ?
-        AND current_symbols.${field.column} = ? COLLATE NOCASE`);
-    parameters.push(query, snapshotId, query);
+        AND current_symbols.${field.column} = ? COLLATE NOCASE`
+      }`);
+    parameters.push(query, ...(boundedPreview ? [] : [snapshotId, query]));
     branches.push(`SELECT base_symbols.*,
         CASE WHEN base_symbols.${field.column} = ? THEN ${field.sensitiveRank} ELSE ${field.insensitiveRank} END AS exact_rank
-      FROM symbols AS base_symbols INDEXED BY ${field.index}
+      FROM ${
+        boundedPreview
+          ? `${baseSample} AS base_symbols WHERE`
+          : `symbols AS base_symbols INDEXED BY ${field.index}
       WHERE base_symbols.snapshot_id = ?
-        AND base_symbols.${field.column} = ? COLLATE NOCASE
-        AND NOT EXISTS (
+        AND base_symbols.${field.column} = ? COLLATE NOCASE AND`
+      }
+        NOT EXISTS (
           SELECT 1 FROM symbols AS overrides
           WHERE overrides.snapshot_id = ? AND overrides.id = base_symbols.id
         )
@@ -366,12 +392,12 @@ export function codeGraphExactSymbolQueryStatement(
           SELECT 1 FROM snapshot_symbol_deletions AS deletions
           WHERE deletions.snapshot_id = ? AND deletions.symbol_id = base_symbols.id
         )`);
-    parameters.push(query, baseSnapshotId ?? '', query, snapshotId, snapshotId);
+    parameters.push(query, ...(boundedPreview ? [] : [baseSnapshotId ?? '', query]), snapshotId, snapshotId);
   }
   parameters.push(Math.max(1, Math.min(500, Math.floor(limit))));
   return {
-    parameters,
-    text: `WITH exact_candidates AS (
+    parameters: [...sampleParameters, ...parameters],
+    text: `WITH ${samples.length === 0 ? '' : `${EffectArray.join(samples, ',\n')},\n`}exact_candidates AS (
         ${EffectArray.join(branches, '\n        UNION ALL\n        ')}
       ),
       ranked_exact_symbols AS (

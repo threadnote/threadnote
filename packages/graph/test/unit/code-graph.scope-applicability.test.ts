@@ -20,10 +20,11 @@ import {
 } from '@threadnote/graph/languages/registry';
 import {CodeGraphMaintenanceCoordinator} from '@threadnote/graph/maintenance/coordinator';
 import {CodeGraphQueryService, observationFromCodeGraphStatus} from '@threadnote/graph/query';
-import {observeCodeGraphQueryScope} from '@threadnote/graph/query/scope';
+import {observeCodeGraphQueryScope, readCodeGraphReadyScopeReceipt} from '@threadnote/graph/query/scope';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {assessCodeGraphScopeApplicability, codeGraphScopeAdmitsPath} from '@threadnote/graph/scope/applicability';
 import {CodeGraphStore} from '@threadnote/graph/store';
+import type {CodeGraphSnapshot, RepositoryIdentity} from '@threadnote/graph/types';
 import {citationPlatformLayer} from '../helpers/citation-platform.js';
 
 const recordedGitSubcommands: string[][] = [];
@@ -132,6 +133,67 @@ describe('scoped applicability', () => {
   );
 
   it.layer(queryTestLayer)(it => {
+    it.effect('admits stored scope provenance only for the selected repository, definition, and active snapshot', () =>
+      Effect.gen(function* () {
+        const store = yield* CodeGraphStore;
+        const identity: RepositoryIdentity = {
+          caseMode: 'sensitive',
+          checkoutId: 'checkout',
+          displayName: 'fixture',
+          gitCommonDirectory: '/fixture/.git',
+          headCommit: 'new',
+          objectFormat: 'sha1',
+          repoRoot: '/fixture',
+          repositoryId: evidence.repositoryId,
+          worktreeId: evidence.worktreeId,
+        };
+        const snapshot: CodeGraphSnapshot = {
+          commit: 'old',
+          dirty: false,
+          edgeCount: 0,
+          extractorSet: evidence.extractorSet,
+          fileCount: 1,
+          id: 'ready',
+          repositoryId: evidence.repositoryId,
+          scopeId: evidence.scopeKey,
+          state: 'ready',
+          symbolCount: 1,
+          worktreeId: evidence.worktreeId,
+        };
+        const receipt = {
+          closureDigest: evidence.closureDigest,
+          completeness: 'complete' as const,
+          definitionDigest: evidence.definitionDigest,
+          includedProjectIds: ['root'],
+          rootProjectIds: ['root'],
+          scopeKey: evidence.scopeKey,
+          snapshotId: snapshot.id,
+        };
+        const active = {...evidence, snapshotId: snapshot.id};
+        const read = (selected = snapshot, definition = evidence, applicability = active) =>
+          readCodeGraphReadyScopeReceipt(
+            {
+              ...store,
+              loadSnapshotScopeReceipt: () => Effect.succeed(receipt),
+              loadScopeApplicability: () => Effect.succeed(applicability),
+            },
+            'fixture.sqlite',
+            identity,
+            selected,
+            definition,
+          );
+        expect((yield* read())?.selection).toMatchObject({
+          scope: {scopeKey: evidence.scopeKey, definitionDigest: evidence.definitionDigest},
+        });
+        expect((yield* read())?.selection).not.toHaveProperty('evidence');
+        expect(yield* read({...snapshot, repositoryId: 'another'})).toBeUndefined();
+        expect(yield* read({...snapshot, scopeId: 'another'})).toBeUndefined();
+        expect(yield* read(snapshot, {...evidence, definitionDigest: 'changed'})).toBeUndefined();
+        expect(yield* read(snapshot, evidence, {...active, snapshotId: 'replacement'})).toBeUndefined();
+        expect(yield* read(snapshot, evidence, {...active, closureDigest: 'changed'})).toBeUndefined();
+      }),
+    );
+
     it.effect(
       'preserves byte-identical scoped status evidence across clean, dirty, manifest, and ignore changes while skipping warm Git tree scans',
       () =>

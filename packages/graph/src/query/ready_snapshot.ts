@@ -4,7 +4,7 @@ import type {CodeGraphSnapshot, RepositoryIdentity} from '../types.js';
 import {
   codeGraphQueryScopeSnapshotCompatible,
   type CodeGraphQueryScope,
-  type CodeGraphQueryScopeReceipt,
+  type CodeGraphReadyScopeReceipt,
 } from './scope.js';
 
 export const selectCompatibleReadyCodeGraphSnapshot = Effect.fn('codeGraph.selectCompatibleReadySnapshot')(
@@ -12,7 +12,7 @@ export const selectCompatibleReadyCodeGraphSnapshot = Effect.fn('codeGraph.selec
     readonly borrowedSnapshotId?: string;
     readonly databasePath: string;
     readonly identity: RepositoryIdentity;
-    readonly projectScope?: CodeGraphQueryScope | CodeGraphQueryScopeReceipt;
+    readonly projectScope?: CodeGraphQueryScope | CodeGraphReadyScopeReceipt;
     readonly store: CodeGraphStoreShape;
   }) {
     const preferredSnapshot = input.borrowedSnapshotId
