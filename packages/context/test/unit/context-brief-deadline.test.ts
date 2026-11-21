@@ -5,8 +5,8 @@ import {describe, expect} from 'vitest';
 import {readDeadlineRemaining, type ReadDeadline} from '@threadnote/platform/read_deadline';
 import {
   compileContextBriefWith,
-  CONTEXT_BRIEF_CITATION_VALIDATION_RESERVE_MILLISECONDS as reserve,
-  CONTEXT_BRIEF_READ_MILLISECONDS as readMilliseconds,
+  CONTEXT_BRIEF_CITATION_VALIDATION_RESERVE_MILLISECONDS,
+  CONTEXT_BRIEF_READ_MILLISECONDS,
   type ContextBriefCompilerDependencies,
 } from '../../src/compiler.js';
 import {unavailableContextBriefGraphEvidence} from '../../src/graph/evidence.js';
@@ -321,13 +321,13 @@ describe('Context Brief shared elapsed budgets', () => {
     }),
   );
 
-  effectIt.effect('memory recall finishing after two seconds but before five keeps its evidence', () =>
+  effectIt.effect('memory recall finishing before its reserved cut keeps its evidence', () =>
     Effect.gen(function* () {
       let logical: ContextBriefLogicalResultV1 | undefined;
       const fiber = yield* compileContextBriefWith(
         {
           graphEvidence: () => Effect.succeed(unavailableContextBriefGraphEvidence('graph-ready-snapshot-missing', 1)),
-          memoryEvidence: () => Effect.sleep(3000).pipe(Effect.as(memory())),
+          memoryEvidence: () => Effect.sleep(2500).pipe(Effect.as(memory())),
           projection: (value, budget, format) =>
             Effect.sync(() => {
               logical = value;
@@ -336,45 +336,49 @@ describe('Context Brief shared elapsed budgets', () => {
         },
         request,
       ).pipe(Effect.forkScoped);
-      yield* TestClock.adjust(3000);
+      yield* TestClock.adjust(2500);
       yield* Fiber.join(fiber);
       expect(logical?.durableDecisions[0]?.uri).toBe(candidate.uri);
       expect(logical?.coverage.gaps).not.toContain('memory-recall-budget-exhausted');
     }),
   );
 
-  effectIt.effect('memory expiry at five seconds does not cancel earlier graph evidence or gain a new window', () =>
-    Effect.gen(function* () {
-      let completed = false;
-      let logical: ContextBriefLogicalResultV1 | undefined;
-      const fiber = yield* compileContextBriefWith(
-        {
-          graphEvidence: () =>
-            Effect.sleep(2500).pipe(Effect.as(unavailableContextBriefGraphEvidence('graph-ready-snapshot-missing', 1))),
-          memoryEvidence: () =>
-            Effect.sleep(6000).pipe(
-              Effect.tap(() =>
-                Effect.sync(() => {
-                  completed = true;
-                }),
+  effectIt.effect(
+    'memory recall cut before the shared deadline does not cancel earlier graph evidence or gain a new window',
+    () =>
+      Effect.gen(function* () {
+        let completed = false;
+        let logical: ContextBriefLogicalResultV1 | undefined;
+        const fiber = yield* compileContextBriefWith(
+          {
+            graphEvidence: () =>
+              Effect.sleep(2500).pipe(
+                Effect.as(unavailableContextBriefGraphEvidence('graph-ready-snapshot-missing', 1)),
               ),
-              Effect.as(memory()),
-            ),
-          projection: (value, budget, format) =>
-            Effect.sync(() => {
-              logical = value;
-              return projectContextBrief(value, budget, format);
-            }),
-        },
-        request,
-      ).pipe(Effect.forkScoped);
-      yield* TestClock.adjust(5000);
-      yield* Fiber.join(fiber);
-      expect(completed).toBe(false);
-      expect(logical?.coverage.gaps).toContain('graph-ready-snapshot-missing');
-      expect(logical?.coverage.gaps).toContain('memory-recall-budget-exhausted');
-      expect(logical?.durableDecisions).toEqual([]);
-    }),
+            memoryEvidence: () =>
+              Effect.sleep(6000).pipe(
+                Effect.tap(() =>
+                  Effect.sync(() => {
+                    completed = true;
+                  }),
+                ),
+                Effect.as(memory()),
+              ),
+            projection: (value, budget, format) =>
+              Effect.sync(() => {
+                logical = value;
+                return projectContextBrief(value, budget, format);
+              }),
+          },
+          request,
+        ).pipe(Effect.forkScoped);
+        yield* TestClock.adjust(5000);
+        yield* Fiber.join(fiber);
+        expect(completed).toBe(false);
+        expect(logical?.coverage.gaps).toContain('graph-ready-snapshot-missing');
+        expect(logical?.coverage.gaps).toContain('memory-recall-budget-exhausted');
+        expect(logical?.durableDecisions).toEqual([]);
+      }),
   );
 
   effectIt.effect('memory recall expiry leaves the citation validation reserve on the shared deadline', () =>
@@ -411,11 +415,13 @@ describe('Context Brief shared elapsed budgets', () => {
         request,
       ).pipe(Effect.forkScoped);
       const start = yield* Clock.currentTimeMillis;
-      yield* TestClock.adjust(readMilliseconds);
+      yield* TestClock.adjust(CONTEXT_BRIEF_READ_MILLISECONDS);
       yield* Fiber.join(fiber);
       expect(logical?.coverage.gaps).toContain('memory-recall-budget-exhausted');
-      expect(recallCutAt).toBe(start + readMilliseconds - reserve);
-      expect(validationRemaining).toBeGreaterThanOrEqual(reserve);
+      expect(recallCutAt).toBe(
+        start + CONTEXT_BRIEF_READ_MILLISECONDS - CONTEXT_BRIEF_CITATION_VALIDATION_RESERVE_MILLISECONDS,
+      );
+      expect(validationRemaining).toBeGreaterThanOrEqual(CONTEXT_BRIEF_CITATION_VALIDATION_RESERVE_MILLISECONDS);
     }),
   );
 });

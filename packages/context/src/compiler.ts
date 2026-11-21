@@ -69,8 +69,12 @@ export interface ContextBriefCompilerDependencies<
 /** One shared elapsed read budget for every brief lane. */
 export const CONTEXT_BRIEF_READ_MILLISECONDS = 5_000;
 
-/** Memory recall ends this long before the shared brief deadline so the later citation validation keeps time. */
-export const CONTEXT_BRIEF_CITATION_VALIDATION_RESERVE_MILLISECONDS = 1_500;
+/**
+ * Memory recall ends this long before the shared brief deadline so the later citation validation keeps time. It
+ * covers about 1 s of validation (above the 950 ms workset validation gate) plus the native read boundary's 1.1 s
+ * cleanup reserve, so recall ends at 2.9 s, still later than the old 2 s lexical cut.
+ */
+export const CONTEXT_BRIEF_CITATION_VALIDATION_RESERVE_MILLISECONDS = 2_100;
 
 /** Deterministic compiler core with injected read boundaries for focused tests and alternate clients. */
 export const compileContextBriefWith = Effect.fn('contextBrief.compileWith')(function* <
