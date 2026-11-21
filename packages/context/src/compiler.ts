@@ -70,9 +70,8 @@ export interface ContextBriefCompilerDependencies<
 export const CONTEXT_BRIEF_READ_MILLISECONDS = 5_000;
 
 /**
- * Memory recall ends this long before the shared brief deadline so the later citation validation keeps time. It
- * covers about 1 s of validation (above the 950 ms workset validation gate) plus the native read boundary's 1.1 s
- * cleanup reserve, so recall ends at 2.9 s, still later than the old 2 s lexical cut.
+ * Memory recall ends this long before the shared brief deadline, so citation validation, which runs after recall,
+ * keeps about 1 s plus the native read boundary's 1.1 s cleanup-and-decode reserve.
  */
 export const CONTEXT_BRIEF_CITATION_VALIDATION_RESERVE_MILLISECONDS = 2_100;
 
