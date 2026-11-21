@@ -69,6 +69,9 @@ export interface ContextBriefCompilerDependencies<
 /** One shared elapsed read budget for every brief lane. */
 export const CONTEXT_BRIEF_READ_MILLISECONDS = 5_000;
 
+/** Memory recall ends this long before the shared brief deadline so the later citation validation keeps time. */
+export const CONTEXT_BRIEF_CITATION_VALIDATION_RESERVE_MILLISECONDS = 1_500;
+
 /** Deterministic compiler core with injected read boundaries for focused tests and alternate clients. */
 export const compileContextBriefWith = Effect.fn('contextBrief.compileWith')(function* <
   GraphR = never,
@@ -85,6 +88,10 @@ export const compileContextBriefWith = Effect.fn('contextBrief.compileWith')(fun
     (plan.mode === 'brief' || plan.mode === 'explain') &&
     plan.graph.codeRefs.length === 0;
   const readDeadline = yield* makeReadDeadline(CONTEXT_BRIEF_READ_MILLISECONDS);
+  const memoryReadDeadline: ReadDeadline = Object.freeze({
+    expiresAtNanos:
+      readDeadline.expiresAtNanos - BigInt(CONTEXT_BRIEF_CITATION_VALIDATION_RESERVE_MILLISECONDS) * 1_000_000n,
+  });
   const readBudget: ContextBriefGraphReadBudget = {remaining: 2, primaryRemaining: 17, deadline: readDeadline};
   const readGraph = (graphPlan: ContextBriefPlanV1['graph']) =>
     withinReadDeadline(
@@ -139,8 +146,8 @@ export const compileContextBriefWith = Effect.fn('contextBrief.compileWith')(fun
     [
       plan.mode === 'resume' ? succeedUndefined : readGraph(plan.graph),
       withinReadDeadline(
-        readDeadline,
-        Effect.suspend(() => dependencies.memoryEvidence(plan.memory, readDeadline)),
+        memoryReadDeadline,
+        Effect.suspend(() => dependencies.memoryEvidence(plan.memory, memoryReadDeadline)),
       ).pipe(
         Effect.catchIf(Schema.is(ReadDeadlineExceeded), () =>
           Effect.succeed({...unavailableContextBriefMemoryEvidence(), gaps: ['memory-recall-budget-exhausted']}),

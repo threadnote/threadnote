@@ -1,9 +1,14 @@
 import {it as effectIt} from '@effect/vitest';
-import {Effect, Fiber, String as EffectString} from 'effect';
+import {Clock, Effect, Fiber, String as EffectString} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
-import type {ReadDeadline} from '@threadnote/platform/read_deadline';
-import {compileContextBriefWith, type ContextBriefCompilerDependencies} from '../../src/compiler.js';
+import {readDeadlineRemaining, type ReadDeadline} from '@threadnote/platform/read_deadline';
+import {
+  compileContextBriefWith,
+  CONTEXT_BRIEF_CITATION_VALIDATION_RESERVE_MILLISECONDS as reserve,
+  CONTEXT_BRIEF_READ_MILLISECONDS as readMilliseconds,
+  type ContextBriefCompilerDependencies,
+} from '../../src/compiler.js';
 import {unavailableContextBriefGraphEvidence} from '../../src/graph/evidence.js';
 import {projectContextBrief} from '../../src/projector.js';
 import type {
@@ -369,6 +374,48 @@ describe('Context Brief shared elapsed budgets', () => {
       expect(logical?.coverage.gaps).toContain('graph-ready-snapshot-missing');
       expect(logical?.coverage.gaps).toContain('memory-recall-budget-exhausted');
       expect(logical?.durableDecisions).toEqual([]);
+    }),
+  );
+
+  effectIt.effect('memory recall expiry leaves the citation validation reserve on the shared deadline', () =>
+    Effect.gen(function* () {
+      let recallCutAt: number | undefined;
+      let validationRemaining: number | undefined;
+      let logical: ContextBriefLogicalResultV1 | undefined;
+      const fiber = yield* compileContextBriefWith(
+        {
+          graphEvidence: () => Effect.succeed(unavailableContextBriefGraphEvidence('graph-ready-snapshot-missing', 1)),
+          memoryEvidence: () =>
+            Effect.never.pipe(
+              Effect.onInterrupt(() =>
+                Clock.currentTimeMillis.pipe(
+                  Effect.tap(now =>
+                    Effect.sync(() => {
+                      recallCutAt = now;
+                    }),
+                  ),
+                ),
+              ),
+            ),
+          citationValidation: (_scope, _candidates, _fence, deadline) =>
+            Effect.gen(function* () {
+              validationRemaining = yield* readDeadlineRemaining(deadline!);
+              return [];
+            }),
+          projection: (value, budget, format) =>
+            Effect.sync(() => {
+              logical = value;
+              return projectContextBrief(value, budget, format);
+            }),
+        },
+        request,
+      ).pipe(Effect.forkScoped);
+      const start = yield* Clock.currentTimeMillis;
+      yield* TestClock.adjust(readMilliseconds);
+      yield* Fiber.join(fiber);
+      expect(logical?.coverage.gaps).toContain('memory-recall-budget-exhausted');
+      expect(recallCutAt).toBe(start + readMilliseconds - reserve);
+      expect(validationRemaining).toBeGreaterThanOrEqual(reserve);
     }),
   );
 });
