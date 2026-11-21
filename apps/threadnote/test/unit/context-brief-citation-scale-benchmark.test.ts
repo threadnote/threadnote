@@ -10,7 +10,7 @@ import * as BunServices from '@effect/platform-bun/BunServices';
 import {describe, expect, it} from 'vitest';
 import {benchmarkMeasurement} from '@threadnote/evidence/benchmark';
 import {
-  CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3,
+  CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4,
   CONTEXT_BRIEF_CITATION_RSS_SAMPLING_SCHEDULE,
   CONTEXT_BRIEF_CITATION_SCALE_ARTIFACT_SUITE,
   CONTEXT_BRIEF_CITATION_SCALE_EXECUTION_V2,
@@ -599,7 +599,7 @@ describe('Context Brief citation scale benchmark', () => {
     );
   });
 
-  it('rederives the v3 sample-gap ceiling from retained hosted-runner calibration evidence', () => {
+  it('rederives the v3 sample-gap evidence and keeps the v4 ceilings above it', () => {
     expect(sampleGapCalibration.runs).toHaveLength(5);
     expect(new Set(EffectArray.map(sampleGapCalibration.runs, run => run.rawArtifactSha256)).size).toBe(5);
     expect(new Set(EffectArray.map(sampleGapCalibration.runs, run => run.artifactId)).size).toBe(5);
@@ -656,16 +656,16 @@ describe('Context Brief citation scale benchmark', () => {
       p99Milliseconds: percentile(0.99),
     }).toEqual(sampleGapCalibration.expected);
     expect(sampleGapCalibration.breachThresholdMilliseconds).toBe(
-      CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.breachThresholdMilliseconds,
+      CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.breachThresholdMilliseconds,
     );
-    expect(derivedHardMaximumMilliseconds).toBe(
-      CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.hardMaximumGapMilliseconds,
+    expect(CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.hardMaximumGapMilliseconds).toBeGreaterThanOrEqual(
+      derivedHardMaximumMilliseconds,
     );
     expect(
       sampleGapCalibration.expected.breachCount / sampleGapCalibration.expected.observationCount,
-    ).toBeLessThanOrEqual(CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.maximumBreachRate);
+    ).toBeLessThanOrEqual(CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.maximumBreachRate);
     expect(maximumConsecutiveBreachesWithinRun).toBeLessThanOrEqual(
-      CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.maximumConsecutiveBreaches,
+      CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.maximumConsecutiveBreaches,
     );
   });
 
@@ -724,13 +724,13 @@ describe('Context Brief citation scale benchmark', () => {
   fcEffectProp(
     effectIt,
     'derives and gates sample-gap rate, consecutive runs, and hard maximum from observation order',
-    {gaps: fc.array(fc.integer({max: 700, min: 0}), {maxLength: 300, minLength: 1})},
+    {gaps: fc.array(fc.integer({max: 1_000, min: 0}), {maxLength: 300, minLength: 1})},
     ({gaps}) =>
       Effect.sync(() => {
         const summary = contextBriefCitationRssSampleGapSummary(gaps);
         const breaches = EffectArray.map(
           gaps,
-          gap => gap > CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.breachThresholdMilliseconds,
+          gap => gap > CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.breachThresholdMilliseconds,
         );
         const breachCount = EffectArray.filter(breaches, Boolean).length;
         let run = 0;
@@ -747,40 +747,45 @@ describe('Context Brief citation scale benchmark', () => {
           sampleGapBreachRate: breachCount / breaches.length,
         });
         const shouldPass =
-          breachCount / breaches.length <= CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.maximumBreachRate &&
-          maximumRun <= CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.maximumConsecutiveBreaches &&
-          Math.max(...gaps) <= CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.hardMaximumGapMilliseconds;
+          breachCount / breaches.length <= CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.maximumBreachRate &&
+          maximumRun <= CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.maximumConsecutiveBreaches &&
+          Math.max(...gaps) <= CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.hardMaximumGapMilliseconds;
         expect(contextBriefCitationRssSampleGapFailures(summary, breaches.length).length === 0).toBe(shouldPass);
       }),
     {fastCheck: {numRuns: 100}},
   );
 
   it('accepts bounded hosted stalls and rejects rate, consecutive, and hard-maximum violations independently', () => {
-    const pass = contextBriefCitationRssSampleGapSummary([481, 115, ...Array.from({length: 73}, () => 100)]);
+    const pass = contextBriefCitationRssSampleGapSummary([
+      800,
+      ...Array.from({length: 7}, () => 101),
+      100,
+      ...Array.from({length: 7}, () => 101),
+      ...Array.from({length: 59}, () => 100),
+    ]);
+    expect(pass).toMatchObject({maximumConsecutiveSampleGapBreaches: 8, sampleGapBreachCount: 15});
     expect(contextBriefCitationRssSampleGapFailures(pass, 75)).toEqual([]);
 
     const excessiveRate = contextBriefCitationRssSampleGapSummary([
-      ...Array.from({length: 8}, () => 101),
-      ...Array.from({length: 67}, () => 100),
+      ...Array.from({length: 16}, () => [101, 100]).flat(),
+      ...Array.from({length: 43}, () => 100),
     ]);
-    expect(contextBriefCitationRssSampleGapFailures(excessiveRate, 75)).toEqual(
-      expect.arrayContaining([expect.stringContaining('breach rate 8/75')]),
-    );
+    expect(contextBriefCitationRssSampleGapFailures(excessiveRate, 75)).toEqual([
+      expect.stringContaining('breach rate 16/75'),
+    ]);
 
     const excessiveRun = contextBriefCitationRssSampleGapSummary([
-      101,
-      101,
-      101,
-      ...Array.from({length: 72}, () => 100),
+      ...Array.from({length: 9}, () => 101),
+      ...Array.from({length: 66}, () => 100),
     ]);
-    expect(contextBriefCitationRssSampleGapFailures(excessiveRun, 75)).toEqual(
-      expect.arrayContaining([expect.stringContaining('3 consecutive')]),
-    );
+    expect(contextBriefCitationRssSampleGapFailures(excessiveRun, 75)).toEqual([
+      expect.stringContaining('9 consecutive'),
+    ]);
 
-    const hardMaximum = contextBriefCitationRssSampleGapSummary([551, ...Array.from({length: 74}, () => 100)]);
-    expect(contextBriefCitationRssSampleGapFailures(hardMaximum, 75)).toEqual(
-      expect.arrayContaining([expect.stringContaining('551ms exceeds hard maximum 550ms')]),
-    );
+    const hardMaximum = contextBriefCitationRssSampleGapSummary([801, ...Array.from({length: 74}, () => 100)]);
+    expect(contextBriefCitationRssSampleGapFailures(hardMaximum, 75)).toEqual([
+      expect.stringContaining('801ms exceeds hard maximum 800ms'),
+    ]);
   });
 
   it('fails closed on every derived sample-gap summary and reviewed schedule dimension', () => {
@@ -1515,7 +1520,7 @@ function scaleArtifact(): ContextBriefCitationScaleArtifactV2 {
       rootStartIdentity: 'root-start',
       sampleGapBreachCount: 0,
       sampleGapBreachRate: 0,
-      sampleGapPolicy: CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3,
+      sampleGapPolicy: CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4,
       sampleAttempts: 10,
       sampleFailures: 0,
       scope: 'recursive-process-tree',

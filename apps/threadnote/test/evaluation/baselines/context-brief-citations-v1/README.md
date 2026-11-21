@@ -53,6 +53,12 @@ descendant coverage, and RSS budgets unchanged. The canonical `sample-gap-calibr
 the complete cohort and new raw/ZIP provenance; its verifier re-derives the aggregate and ceiling after artifacts
 expire.
 
+The v4 policy keeps the 100 ms threshold and sets a 20% breach-rate ceiling, an eight-consecutive ceiling, and an
+800 ms hard maximum. These bounds are above the measured spread of 16 GitHub-hosted macOS 15 ARM64 artifacts, which
+had a maximum breach rate of 15% (45/300), a maximum of 5 consecutive breaches, and a maximum gap of 566 ms. Four of
+those runs failed the v3 policy while their latency and correctness gates passed. The v3 projection remains the
+retained re-derivable cohort; its verifier now checks that the v4 ceilings are not below it.
+
 The later `validation-quantile-calibration-v1.json` and matching rationale preserve the five-run evidence used to
 increase release sampling from 25 to 100 without changing the reviewed latency ceilings. Its verifier re-derives the
 pooled and latest-four-run quantiles and the four-versus-five upper-tail boundary.
