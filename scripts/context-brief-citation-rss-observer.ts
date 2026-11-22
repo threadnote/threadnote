@@ -2,7 +2,7 @@ import {Array as EffectArray} from 'effect';
 import {Clock, Effect, FileSystem, Option} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import {
-  CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3,
+  CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4,
   CONTEXT_BRIEF_CITATION_RSS_SAMPLING_SCHEDULE,
   CONTEXT_BRIEF_CITATION_SCALE_PROFILE_IDS,
   CONTEXT_BRIEF_CITATION_SCALE_RELEASE_SAMPLES,
@@ -104,7 +104,7 @@ export interface ContextBriefCitationRssArtifactV2 extends ContextBriefCitationR
   readonly processCountPeakObserved: number;
   readonly rootIdentityValidation: ContextBriefCitationRssRootIdentityValidation;
   readonly rootStartIdentity: string;
-  readonly sampleGapPolicy: typeof CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3;
+  readonly sampleGapPolicy: typeof CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4;
   readonly sampleAttempts: number;
   readonly sampleFailures: number;
   readonly scope: 'recursive-process-tree';
@@ -329,7 +329,7 @@ export function parseContextBriefCitationRssArtifact(value: unknown): ContextBri
     ...expected,
     finalSample,
     observations,
-    sampleGapPolicy: CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3,
+    sampleGapPolicy: CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4,
   };
 }
 
@@ -508,7 +508,7 @@ export function contextBriefCitationRssArtifact(
     observerExcluded: true,
     rootIdentityValidation: state.rootIdentityValidation,
     rootStartIdentity: state.rootStartIdentity,
-    sampleGapPolicy: CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3,
+    sampleGapPolicy: CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4,
     scope: 'recursive-process-tree',
     samplingSchedule: state.samplingSchedule,
     source: state.source,
@@ -950,11 +950,11 @@ function parseSampleGapPolicy(value: unknown): void {
   );
   if (
     policy.breachThresholdMilliseconds !==
-      CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.breachThresholdMilliseconds ||
-    policy.hardMaximumGapMilliseconds !== CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.hardMaximumGapMilliseconds ||
-    policy.maximumBreachRate !== CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.maximumBreachRate ||
-    policy.maximumConsecutiveBreaches !== CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.maximumConsecutiveBreaches ||
-    policy.version !== CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.version
+      CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.breachThresholdMilliseconds ||
+    policy.hardMaximumGapMilliseconds !== CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.hardMaximumGapMilliseconds ||
+    policy.maximumBreachRate !== CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.maximumBreachRate ||
+    policy.maximumConsecutiveBreaches !== CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.maximumConsecutiveBreaches ||
+    policy.version !== CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.version
   ) {
     invalid('RSS observer sample-gap policy is invalid.');
   }

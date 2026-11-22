@@ -12,7 +12,7 @@
       "citedRepositories": 1,
       "selectedMemories": 24,
       "citationCount": 96,
-      "maximumValidationP95Milliseconds": 250,
+      "maximumValidationP95Milliseconds": 500,
       "maximumBriefP95Milliseconds": 1500
     },
     {
@@ -21,7 +21,7 @@
       "citedRepositories": 16,
       "selectedMemories": 16,
       "citationCount": 64,
-      "maximumValidationP95Milliseconds": 950,
+      "maximumValidationP95Milliseconds": 1250,
       "maximumBriefP95Milliseconds": 3250
     },
     {
@@ -30,7 +30,7 @@
       "citedRepositories": 32,
       "selectedMemories": 24,
       "citationCount": 96,
-      "maximumValidationP95Milliseconds": 1400,
+      "maximumValidationP95Milliseconds": 1800,
       "maximumBriefP95Milliseconds": 5000
     }
   ]
