@@ -355,6 +355,79 @@ describe('standalone PR watches', () => {
       }).pipe(run, provideTestLayer(cliLayer)),
   );
 
+  effectIt.effect('drains an issued notice after a standalone watch stops and its consumer lease expires', () =>
+    Effect.gen(function* () {
+      const f = yield* setup;
+      const started = object(yield* f.call({operation: 'start', prUrl, wakeup}));
+      const watchRef = String(started.watchRef);
+      yield* populateEvent(f);
+      yield* f.call({operation: 'stop', watchRef});
+      yield* f.exitCollector;
+      const stopped = yield* readNativeWatch(f.config, f.getWatchId());
+      if (!stopped?.envelope.state.consumer) throw new Error('Expected stopped watch consumer');
+      const now = yield* Clock.currentTimeMillis;
+      const consumer = stopped.envelope.state.consumer;
+      const expired = {
+        ...consumer,
+        lastSeenAt: now - consumer.leaseMilliseconds - 1,
+        leaseUntil: now - 1,
+      };
+      const before = yield* writeNativeWatch(
+        f.config,
+        {...stopped.envelope, state: {...stopped.envelope.state, consumer: expired}},
+        stopped.revision,
+      );
+      const inspected = object(yield* f.call({operation: 'inspect', watchRef}));
+      expect(inspected.result).toMatchObject({
+        stopRequested: true,
+        pending: 1,
+        consumer: {live: false},
+        collector: {alive: false, status: 'stopped'},
+        deliveryId: null,
+      });
+      const noticeRef = String(inspected.noticeRef);
+      const marker = 'threadnote-standalone-event-v1:';
+      const notice = object(
+        JSON.parse(Buffer.from(EffectString.slice(marker.length)(noticeRef), 'base64url').toString()),
+      );
+      for (const change of [{wakeupId: 'foreign-wakeup'}, {watchAttemptId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'}]) {
+        const foreign = marker + Buffer.from(JSON.stringify({...notice, ...change})).toString('base64url');
+        expect(yield* f.call({operation: 'relay', watchRef, noticeRef: foreign}).pipe(Effect.result)).toMatchObject({
+          failure: {code: 'foreign-notice-route'},
+        });
+      }
+      expect(yield* f.call({operation: 'relay', watchRef}).pipe(Effect.result)).toMatchObject({
+        failure: {code: 'invalid-watch'},
+      });
+      expect(yield* f.call({operation: 'renew', watchRef}).pipe(Effect.result)).toMatchObject({
+        failure: {code: 'watch-stopped'},
+      });
+      expect((yield* readNativeWatch(f.config, f.getWatchId()))?.revision).toBe(before.revision);
+
+      const delivered = object(yield* f.call({operation: 'relay', watchRef, noticeRef}));
+      const watchDeliveryRef = String(delivered.watchDeliveryRef);
+      const eventRefs = yield* Schema.decodeUnknownEffect(Schema.Array(Schema.String))(delivered.eventRefs);
+      expect(eventRefs).toHaveLength(1);
+      expect(yield* f.call({operation: 'ack', watchRef, watchDeliveryRef}).pipe(Effect.result)).toMatchObject({
+        failure: {code: 'invalid-watch', message: expect.stringContaining('durable disposition')},
+      });
+      yield* f.call({
+        operation: 'disposition',
+        watchRef,
+        watchDeliveryRef,
+        dispositions: [{eventRef: eventRefs[0], status: 'open', reason: 'Needs a repair', evidence: 'Fixture'}],
+      });
+      yield* f.call({operation: 'ack', watchRef, watchDeliveryRef});
+      const after = yield* readNativeWatch(f.config, f.getWatchId());
+      expect(after?.envelope).toMatchObject({
+        stopRequested: true,
+        state: {consumer: expired, acknowledged: 1, delivery: null, events: [], work: [{status: 'open'}]},
+      });
+      expect(after?.envelope.collector).toEqual(stopped.envelope.collector);
+      expect(f.spawns()).toBe(1);
+    }).pipe(run),
+  );
+
   effectIt.effect(
     'routes exact notices and event dispositions before ACK, retains work, and drains terminal watches',
     () =>
