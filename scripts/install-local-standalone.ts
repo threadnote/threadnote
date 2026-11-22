@@ -6,7 +6,7 @@ import {ScriptSystemInfoLayer} from './effect/system-layer.js';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import * as BunServices from '@effect/platform-bun/BunServices';
-import {Cause, Console, DateTime, Effect, Exit, FileSystem, Layer, Option, Path} from 'effect';
+import {Cause, Console, DateTime, Effect, Exit, FileSystem, Layer, Option, Path, Schema} from 'effect';
 import {
   commandLauncherPath,
   installCommandShim,
@@ -19,7 +19,12 @@ import {
 import {runCommandEffect} from '@threadnote/platform/command';
 import {captureConsole} from '@threadnote/threadnote/effect/console';
 import {sha256FileHex, sha256Hex} from '@threadnote/platform/digest';
+import {expandPath} from '@threadnote/platform/paths';
 import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
+import {codeGraphDatabasePaths} from '@threadnote/graph/maintenance';
+import {assertCodeGraphRuntimeSchemaCompatible} from '@threadnote/graph/store/schema/metadata';
+import {useReadOnlyDatabase} from '@threadnote/graph/store/session';
+import {CodeGraphRuntimeReconnectRequiredError} from '@threadnote/graph/types';
 import {
   activateStandaloneRelease,
   activeInstalledVersion,
@@ -115,6 +120,7 @@ export interface LocalStandaloneActivationInput {
   readonly sourceCheckoutId: string;
   readonly stagedRoot: Option.Option<string>;
   readonly terminateSuperseded: boolean;
+  readonly threadnoteHome: string;
   readonly version: string;
 }
 
@@ -239,6 +245,7 @@ export const installLocalStandalone = Effect.fn('developmentInstall.run')(functi
         }),
       );
   yield* verifyCleanSourceState(sourceRoot, commit);
+  const threadnoteHome = yield* expandPath(system.environment().THREADNOTE_HOME ?? '~/.threadnote');
   const activation = activateLocalStandaloneRelease({
     canonicalInstallRoot: roots.installRoot,
     canonicalVersionsRoot: roots.versionsRoot,
@@ -250,6 +257,7 @@ export const installLocalStandalone = Effect.fn('developmentInstall.run')(functi
     sourceCheckoutId,
     stagedRoot,
     terminateSuperseded: options.terminateSuperseded,
+    threadnoteHome,
     version,
   });
   const result = options.json ? (yield* captureConsole(activation)).value : yield* activation;
@@ -535,6 +543,35 @@ const writeDevelopmentRuntimeOwner = Effect.fn('developmentInstall.writeRuntimeO
   return nextOwner;
 });
 
+const requireCompatibleGraphStorage = Effect.fn('developmentInstall.requireCompatibleGraphStorage')(function* (
+  threadnoteHome: string,
+) {
+  const databases = yield* codeGraphDatabasePaths(threadnoteHome).pipe(Effect.orElseSucceed(() => []));
+  yield* Effect.forEach(
+    databases,
+    database =>
+      // Doctor retains responsibility for missing, unreadable, or otherwise unhealthy stores.
+      useReadOnlyDatabase(database, assertCodeGraphRuntimeSchemaCompatible()).pipe(
+        Effect.catchCauseIf(
+          cause => !Cause.hasInterrupts(cause),
+          cause => {
+            const failure = Option.getOrUndefined(Cause.findErrorOption(cause));
+            return Schema.is(CodeGraphRuntimeReconnectRequiredError)(failure)
+              ? Effect.fail(
+                  ScriptError.make({
+                    cause: failure,
+                    message:
+                      'The code graph requires a newer Threadnote runtime. Use a development build that supports the stored schema.',
+                  }),
+                )
+              : Effect.void;
+          },
+        ),
+      ),
+    {discard: true},
+  );
+});
+
 /**
  * The complete managed-release mutation is one installation-lock critical
  * section. Activation is the commit point: a later health-repair failure keeps
@@ -593,6 +630,7 @@ export const activateLocalStandaloneRelease = Effect.fn('developmentInstall.acti
         ),
       );
       yield* requireEvidenceVersion(releaseEvidence, input.version);
+      yield* requireCompatibleGraphStorage(input.threadnoteHome);
       const doctor = yield* runCommandEffect(executable, ['doctor', '--dry-run'], {
         env: {...system.environment(), THREADNOTE_INSTALL_ROOT: installRoot},
         maxOutputBytes: 2 * 1024 * 1024,
