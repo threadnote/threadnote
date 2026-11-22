@@ -137,11 +137,16 @@ export function mergeRecallOperationalWarnings(
   ...warningSets: readonly (readonly RecallOperationalWarning[])[]
 ): readonly RecallOperationalWarning[] {
   const byCode = new Map<RecallOperationalWarning['code'], RecallOperationalWarning>();
+  let maintenanceUnconfirmed = false;
   for (const warning of warningSets.flat()) {
+    // A capped merge can retain the unconfirmed stale warning without the separate maintenance warning.
+    maintenanceUnconfirmed ||=
+      warning.code === 'lexical_maintenance_unavailable' ||
+      (warning.code === 'lexical_index_stale' && warning.remediation === LEXICAL_MAINTENANCE_UNCONFIRMED);
     if (!byCode.has(warning.code)) byCode.set(warning.code, warning);
   }
   const stale = byCode.get('lexical_index_stale');
-  if (stale && byCode.has('lexical_maintenance_unavailable')) {
+  if (stale && maintenanceUnconfirmed) {
     byCode.set(stale.code, {...stale, remediation: LEXICAL_MAINTENANCE_UNCONFIRMED});
   }
   return [...byCode.values()].slice(0, RECALL_OPERATIONAL_WARNING_LIMIT);

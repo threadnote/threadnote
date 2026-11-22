@@ -284,6 +284,7 @@ describe('ready lexical readers', () => {
 
     expect(capped).toEqual([unavailable[0], indexUnavailable, readBudgetExhausted, readFailed]);
     expect(indexUnavailable.remediation).toContain('`threadnote repair`');
+    expect(mergeRecallOperationalWarnings(queued, capped)).toEqual(capped);
   });
 
   effectIt.effect('fills the eligible ranked quota after date exclusion without counting pinned results', () =>
