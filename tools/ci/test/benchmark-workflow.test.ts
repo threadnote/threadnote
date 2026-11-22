@@ -242,17 +242,54 @@ describe('platform benchmark workflow', () => {
       job.steps ?? [],
       step =>
         step.run !== undefined &&
+        step['timeout-minutes'] === 40 &&
         (EffectString.includes('run.sh')(step.run) ||
           EffectString.includes('--musl-container')(step.run) ||
           EffectString.includes('--gnu-container')(step.run)),
     );
-    expect(EffectArray.filter(captureSteps, step => step['timeout-minutes'] === 40)).toHaveLength(3);
-    expect(
+    expect(captureSteps).toHaveLength(3);
+    const prepareCapture = Option.getOrThrow(
+      EffectArray.findFirst(steps, step => step.id === 'prepare-native-vector-capture'),
+    );
+    expect(prepareCapture.run).toContain('if [[ "$RUNNER_OS" == Linux ]]; then');
+    expect(prepareCapture.run).toContain('mkdir -p -- "$git_dir/worktrees"');
+    expect(prepareCapture.run).toContain('printf \'workspace=%s\\n\' "$workspace" >> "$GITHUB_OUTPUT"');
+    const handoff = Option.getOrThrow(
+      EffectArray.findFirst(steps, step => step.name === 'Return Linux capture paths to the runner'),
+    );
+    expect(handoff).toMatchObject({
+      if: "${{ always() && (matrix.gnu || matrix.musl) && steps.prepare-native-vector-capture.outcome == 'success' }}",
+      shell: 'bash',
+      env: {CAPTURE_WORKSPACE: '${{ steps.prepare-native-vector-capture.outputs.workspace }}'},
+    });
+    expect(handoff.run).toContain(
+      'for capture_path in "$capture_parent/native-vector-capture" "$capture_parent/frozen-ts66" "$worktree_parent/frozen-ts66"',
+    );
+    expect(handoff.run).toContain('sudo chown -hRP -- "$runner_owner" "$capture_path"');
+    const handoffScript = handoff.run ?? '';
+    const chownIndex = Option.getOrElse(EffectString.indexOf('sudo chown')(handoffScript), () => -1);
+    for (const guard of [
+      'test "$(pwd -P)" = "$CAPTURE_WORKSPACE"',
+      'test "$(cd -- "$capture_parent" && pwd -P)" = "$capture_parent"',
+      'test "$(cd -- "$worktree_parent" && pwd -P)" = "$worktree_parent"',
+    ]) {
+      const guardIndex = Option.getOrElse(EffectString.indexOf(guard)(handoffScript), () => -1);
+      expect(guardIndex).toBeGreaterThanOrEqual(0);
+      expect(guardIndex).toBeLessThan(chownIndex);
+    }
+    const upload = Option.getOrThrow(
       EffectArray.findFirst(
-        job.steps ?? [],
+        steps,
         step => step.uses !== undefined && EffectString.startsWith('actions/upload-artifact@')(step.uses),
       ),
-    ).toMatchObject({value: {if: 'always()'}});
+    );
+    expect(upload.if).toBe('always()');
+    const cleanup = Option.getOrThrow(
+      EffectArray.findFirst(steps, step => step.name === 'Remove owned benchmark workspace'),
+    );
+    for (const capture of captureSteps) expect(steps.indexOf(capture)).toBeLessThan(steps.indexOf(handoff));
+    expect(steps.indexOf(handoff)).toBeLessThan(steps.indexOf(upload));
+    expect(steps.indexOf(upload)).toBeLessThan(steps.indexOf(cleanup));
   });
   it('preserves raw extension fields while normalizing empty YAML triggers and accepting scalar env values', () => {
     fc.assert(
