@@ -1,0 +1,62 @@
+name: Windows frozen R5 checkout probe
+
+on:
+  push:
+    branches: [codex/diagnose-windows-r5-frozen-checkout]
+
+permissions:
+  contents: read
+
+jobs:
+  frozen-checkout:
+    runs-on: windows-2025
+    timeout-minutes: 10
+    env:
+      THREADNOTE_BUILD_TARGET: bun-windows-x64-baseline
+      THREADNOTE_DEVELOPMENT_BUILD_VERSION: 5.3.6-local.g66f4c1d8baed033ec484f4db2895ea2252b4e2d0
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.4'
+      - name: Reproduce the rejected catalog and prove the clean checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          workspace="$(pwd -P)"
+          ts66=66f4c1d8baed033ec484f4db2895ea2252b4e2d0
+          catalog=packages/graph/src/languages/catalog.generated.ts
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.autocrlf GIT_CONFIG_VALUE_0=true
+          mkdir -p .context
+          git worktree add --detach "$workspace/.context/crlf-control" "$ts66"
+          (
+            cd "$workspace/.context/crlf-control"
+            bun install --frozen-lockfile --ignore-scripts
+            test -z "$(git status --porcelain=v1 --untracked-files=normal)"
+            git ls-files --eol "$catalog"
+            bun run generate:code-graph-languages
+            changed="$(git status --porcelain=v1 --untracked-files=normal)"
+            printf 'Original checkout status after generation:\n%s\n' "$changed"
+            grep -Fx " M $catalog" <<< "$changed"
+          )
+          git -c core.autocrlf=false -c core.eol=lf worktree add --detach "$workspace/.context/lf-repair" "$ts66"
+          (
+            cd "$workspace/.context/lf-repair"
+            bun install --frozen-lockfile --ignore-scripts
+            test -z "$(git status --porcelain=v1 --untracked-files=normal)"
+            git ls-files --eol "$catalog"
+            bun run build
+            changed="$(git status --porcelain=v1 --untracked-files=normal)"
+            printf 'Corrected checkout status after build:\n%s\n' "$changed"
+            test -z "$changed"
+            test -f dist/threadnote.exe
+          )
+          bun install --frozen-lockfile
+          bun scripts/benchmark-recall-vectors.ts --write-baseline-provenance \
+            --baseline-source-root "$workspace/.context/lf-repair" \
+            --baseline-distribution-root "$workspace/.context/lf-repair/dist" \
+            --baseline-install-command 'bun install --frozen-lockfile --ignore-scripts'
+          test -f "$workspace/.context/lf-repair/dist/baseline-build-provenance.json"
