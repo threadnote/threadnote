@@ -1,6 +1,6 @@
 import {Array as EffectArray} from 'effect';
 import {ScriptError} from './effect/errors.js';
-import {websiteReleaseSocialImageTemplateRevision} from './site-release-social-image.js';
+import {layoutReleaseSocialHeadline, websiteReleaseSocialImageTemplateRevision} from './site-release-social-image.js';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 
@@ -30,7 +30,6 @@ interface WebsiteReleaseSource extends PublishedReleaseRef {
 }
 
 const STABLE_RELEASE = /^v(\d+)\.(\d+)\.(\d+)$/;
-const releaseHeadlineMaximumLength = 240;
 
 export function parseStableReleaseVersion(version: string): StableReleaseVersion | undefined {
   const match = STABLE_RELEASE.exec(version);
@@ -167,11 +166,7 @@ export function releaseHeadlineFromSummary(summary: string): string {
     : sentence;
   if (!Effect.pipe(headline, EffectString.trim))
     throw ScriptError.make({message: 'The release-note opening sentence must contain a social-card headline.'});
-  if (headline.length > releaseHeadlineMaximumLength) {
-    throw ScriptError.make({
-      message: `The release-note opening sentence must produce a social-card headline of at most ${releaseHeadlineMaximumLength} characters.`,
-    });
-  }
+  layoutReleaseSocialHeadline(headline);
   return headline;
 }
 
