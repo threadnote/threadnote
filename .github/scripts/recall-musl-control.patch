@@ -1,0 +1,192 @@
+--- a/scripts/benchmark-recall-vectors.ts
++++ b/scripts/benchmark-recall-vectors.ts
+@@ -705,7 +705,7 @@
+   };
+ });
+ 
+-type ProductionBackend = 'baseline' | 'candidate';
++type ProductionBackend = 'baseline' | 'candidate' | 'control';
+ interface ProductionQuerySample {
+   readonly sample: number;
+   readonly milliseconds: number;
+@@ -1256,7 +1256,7 @@
+     });
+     if (nativeManifest.development)
+       return yield* ScriptError.make({message: 'Production capture requires a strict standalone payload.'});
+-    const release = yield* Schema.decodeUnknownEffect(
++    const decodeRelease = Schema.decodeUnknownEffect(
+       Schema.Struct({
+         executable: Schema.String,
+         sourceIdentity: Schema.Struct({
+@@ -1266,7 +1266,8 @@
+           bun: Schema.String,
+         }),
+       }),
+-    )(JSON.parse(yield* fs.readFileString(path.join(distributionRoot, 'release.json'))));
++    );
++    const release = yield* decodeRelease(JSON.parse(yield* fs.readFileString(path.join(distributionRoot, 'release.json'))));
+     if (
+       release.sourceIdentity.commit !== nativeManifest.buildInfo.sourceCommit ||
+       release.sourceIdentity.tree !== nativeManifest.buildInfo.sourceTree ||
+@@ -1286,6 +1287,38 @@
+       return yield* ScriptError.make({
+         message: 'Staged inference target/Bun differs from the native semantic candidate.',
+       });
++    // Disposable same-host diagnostic only. Keep one parent, one fixture, and one frozen TS66 build.
++    const controlPath = system.environment().THREADNOTE_RECALL_AB_CONTROL_DIST;
++    if (!controlPath) return yield* ScriptError.make({message: 'The same-host diagnostic requires a built Rust control.'});
++    const controlDistributionRoot = path.resolve(controlPath);
++    const controlNativeManifest = yield* Effect.tryPromise({
++      try: () =>
++        verifyNativeVectorReaderPayload(path.join(controlDistributionRoot, 'runtime', 'vector-reader', 'manifest.json')),
++      catch: scriptError,
++    });
++    const controlRelease = yield* decodeRelease(
++      JSON.parse(yield* fs.readFileString(path.join(controlDistributionRoot, 'release.json'))),
++    );
++    const controlOverlay = yield* verifyNativeInferenceOverlay(controlDistributionRoot);
++    if (
++      (yield* fs.realPath(controlDistributionRoot)) === (yield* fs.realPath(distributionRoot)) ||
++      (yield* fs.realPath(controlDistributionRoot)) === (yield* fs.realPath(baselineDistributionRoot)) ||
++      controlNativeManifest.development ||
++      controlRelease.sourceIdentity.commit !== 'e0a458cf1c0565e2bda310ebe0297f1083a04f89' ||
++      controlRelease.sourceIdentity.tree !== 'bf7faf8464c8df5c957d9dd7bcb49aed950bf1b1' ||
++      controlRelease.sourceIdentity.commit !== controlNativeManifest.buildInfo.sourceCommit ||
++      controlRelease.sourceIdentity.tree !== controlNativeManifest.buildInfo.sourceTree ||
++      controlRelease.sourceIdentity.target !== controlNativeManifest.bunTarget ||
++      controlRelease.sourceIdentity.target !== release.sourceIdentity.target ||
++      controlRelease.sourceIdentity.bun !== Bun.version ||
++      controlNativeManifest.buildInfo.sqliteSourceId !== nativeManifest.buildInfo.sqliteSourceId ||
++      controlOverlay.bunTarget !== inferenceOverlay.bunTarget ||
++      controlOverlay.bunVersion !== inferenceOverlay.bunVersion ||
++      JSON.stringify(controlOverlay.files) !== JSON.stringify(inferenceOverlay.files)
++    )
++      return yield* ScriptError.make({message: 'The independent Rust control must match its pinned source, target, Bun, SQLite engine and candidate inference closure.'});
++    const comparisonBackends = ['baseline', 'control', 'candidate'] as const;
++    const controlInputInventory = yield* productionDistributionInventory(controlDistributionRoot);
+     const inputInventory = yield* productionDistributionInventory(distributionRoot);
+     const baselineInputInventory = baselineEvidence.finalInventory;
+     for (const file of inferenceOverlay.files) {
+@@ -1300,10 +1333,12 @@
+     const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-vector-production-'});
+     const candidateRoot = path.join(home, 'candidate');
+     const baselineRoot = path.join(home, 'baseline');
++    const controlRoot = path.join(home, 'control');
+     // Physical private copies never alter hard-link counts of a globally installed baseline.
+     for (const [sourceRoot, destinationRoot, inventory] of [
+       [distributionRoot, candidateRoot, inputInventory],
+       [baselineDistributionRoot, baselineRoot, baselineInputInventory],
++      [controlDistributionRoot, controlRoot, controlInputInventory],
+     ] as const) {
+       for (const entry of inventory) {
+         const source = path.join(sourceRoot, entry.path);
+@@ -1313,20 +1348,24 @@
+         if (system.platform !== 'win32') yield* fs.chmod(destination, (yield* fs.stat(source)).mode & 0o777);
+       }
+     }
++    const controlInventory = yield* productionDistributionInventory(controlRoot);
+     const candidateInventory = yield* productionDistributionInventory(candidateRoot);
+     const baselineInventory = yield* productionDistributionInventory(baselineRoot);
+     if (
++      JSON.stringify(controlInputInventory) !== JSON.stringify(controlInventory) ||
+       JSON.stringify(inputInventory) !== JSON.stringify(candidateInventory) ||
+       JSON.stringify(baselineInputInventory) !== JSON.stringify(baselineInventory)
+     )
+       return yield* ScriptError.make({
+         message: 'An independent frozen distribution changed while creating capture arms.',
+       });
+-    const executableFor = (backend: ProductionBackend) =>
+-      path.join(
++    const executableFor = (backend: ProductionBackend) => {
++      if (backend === 'control') return path.join(controlRoot, controlRelease.executable);
++      return path.join(
+         backend === 'candidate' ? candidateRoot : baselineRoot,
+         backend === 'candidate' ? release.executable : baselineEvidence.release.executable,
+       );
++    };
+     const distributionSetupMilliseconds =
+       Number((yield* Clock.currentTimeNanos) - preflightStartedAt) / NANOSECONDS_PER_MILLISECOND;
+     const setupStarted = yield* Clock.currentTimeNanos;
+@@ -1383,6 +1422,9 @@
+       format: 'threadnote-native-vector-production-v2',
+       captureStartedAt,
+       capturedCandidate: release.sourceIdentity,
++      capturedControl: controlRelease.sourceIdentity,
++      controlNativeManifest,
++      controlInventory,
+       capturedBaseline: baselineEvidence,
+       inferenceOverlay,
+       sharedParentInference: {
+@@ -1560,7 +1602,7 @@
+       });
+     yield* Effect.gen(function* () {
+       // Release/install setup verifies executable startup separately from semantic requests.
+-      for (const backend of ['baseline', 'candidate'] as const) {
++      for (const backend of comparisonBackends) {
+         const started = yield* Clock.currentTimeNanos;
+         const verification = yield* command
+           .execute(executableFor(backend), ['--version'], {
+@@ -1595,7 +1637,7 @@
+       });
+       firstUse.modelMilliseconds = Number((yield* Clock.currentTimeNanos) - modelStarted) / NANOSECONDS_PER_MILLISECOND;
+       parentRuntimeDiagnostics = yield* runtime.diagnostics;
+-      for (const backend of ['baseline', 'candidate'] as const) {
++      for (const backend of comparisonBackends) {
+         firstUse.requests.push({backend, result: yield* executeQuery(backend, fixture, 0)});
+       }
+       const discriminatorStartedAt = yield* Clock.currentTimeNanos;
+@@ -1629,12 +1671,17 @@
+           JSON.stringify([...scalarOracleScores(proofFixture.databasePath, proofVector[0], 'fixture_vector_values')]),
+         ),
+       };
+-      for (const backend of ['baseline', 'candidate'] as const)
++      for (const backend of comparisonBackends)
+         proof.push({backend, result: yield* executeQuery(backend, proofFixture, 0, proofExpected)});
+       discriminatorSetupMilliseconds =
+         Number((yield* Clock.currentTimeNanos) - discriminatorStartedAt) / NANOSECONDS_PER_MILLISECOND;
+       yield* writeCapture();
+-      if (proof[0]?.result.success || proof[0]?.result.reason !== 'worker-failed' || !proof[1]?.result.success)
++      if (
++        proof[0]?.result.success ||
++        proof[0]?.result.reason !== 'worker-failed' ||
++        !proof[1]?.result.success ||
++        !proof[2]?.result.success
++      )
+         return yield* ScriptError.make({
+           message: 'Actual compiled native/TypeScript engine proof failed; capture is unqualified.',
+         });
+@@ -1654,7 +1701,7 @@
+       oracleSetupMilliseconds = Number((yield* Clock.currentTimeNanos) - oracleStartedAt) / NANOSECONDS_PER_MILLISECOND;
+       for (let pair = 1; pair <= options.pairs; pair++) {
+         const order: readonly ProductionBackend[] =
+-          pair % 2 === 1 ? ['baseline', 'candidate'] : ['candidate', 'baseline'];
++          pair % 2 === 1 ? ['baseline', 'control', 'candidate'] : ['candidate', 'control', 'baseline'];
+         for (const backend of order) {
+           Bun.gc(true);
+           const arm: ProductionArmCapture = {pair, backend, samples: [], parentMemoryAtArmStart: process.memoryUsage()};
+@@ -1674,7 +1721,7 @@
+                 ? `${options.output}.pair-${pair}-${backend}.sampler.json`
+                 : path.join(samplerRoot, 'checkpoint.json'),
+               'cold',
+-              false,
++              true,
+               system.platform === 'win32',
+             ),
+             handle => handle.stop('aborted').pipe(Effect.ignore),
+@@ -1749,13 +1796,15 @@
+         databaseSha256 === sha256HexSync(yield* fs.readFile(fixture.databasePath)) &&
+         JSON.stringify(lexicalDatabaseHashes) === JSON.stringify(yield* readLexicalDatabaseHashes());
+       distributionStable =
++        JSON.stringify(controlInventory) === JSON.stringify(yield* productionDistributionInventory(controlRoot)) &&
++        JSON.stringify(controlInputInventory) === JSON.stringify(yield* productionDistributionInventory(controlDistributionRoot)) &&
+         JSON.stringify(candidateInventory) === JSON.stringify(yield* productionDistributionInventory(candidateRoot)) &&
+         JSON.stringify(baselineInventory) === JSON.stringify(yield* productionDistributionInventory(baselineRoot)) &&
+         JSON.stringify(inputInventory) === JSON.stringify(yield* productionDistributionInventory(distributionRoot)) &&
+         JSON.stringify(baselineInputInventory) ===
+           JSON.stringify(yield* productionDistributionInventory(baselineDistributionRoot));
+       modelStable = manifest.sha256 === sha256HexSync(yield* fs.readFile(modelPath));
+-      const firstUsePassed = EffectArray.every(firstUse.requests, value => value.result.success);
++      const firstUsePassed = EffectArray.every(firstUse.requests, value => value.backend === 'control' || value.result.success);
+       caseGatesPassed =
+         openingSource.runtimeAndHarnessMatchCandidate &&
+         sourceStable &&

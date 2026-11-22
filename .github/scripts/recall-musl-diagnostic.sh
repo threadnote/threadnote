@@ -2,9 +2,11 @@
 set -euo pipefail
 workspace="$(pwd -P)"
 baseline_root="$workspace/.context/frozen-ts66"
+control_root="$workspace/.context/rust-control"
 output_dir="$workspace/.context/native-vector-capture"
 model_file="$workspace/apps/threadnote/embedded/models/bge-small-en-v1.5-q8/f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804.gguf"
-candidate=e0a458cf1c0565e2bda310ebe0297f1083a04f89
+candidate=924f22749399cd8665299be99615426acc2fe3f0
+control=e0a458cf1c0565e2bda310ebe0297f1083a04f89
 baseline=66f4c1d8baed033ec484f4db2895ea2252b4e2d0
 
 test "$(uname -m)" = aarch64
@@ -13,9 +15,10 @@ test "$(git rev-parse HEAD)" = "$candidate"
 test -f "$model_file"
 test -z "$(git status --porcelain=v1 --untracked-files=normal)"
 {
-  printf 'mode=diagnostic\ncandidate=%s\nbaseline=%s\n' "$candidate" "$baseline"
+  printf 'mode=same-host-and-fixture-diagnostic\ncandidate=%s\ncontrol=%s\nbaseline=%s\n' "$candidate" "$control" "$baseline"
   printf 'candidate_tree=%s\n' "$(git rev-parse 'HEAD^{tree}')"
   printf 'baseline_tree=%s\n' "$(git rev-parse "$baseline^{tree}")"
+  printf 'control_tree=%s\n' "$(git rev-parse "$control^{tree}")"
   printf 'image=%s\nsysroot=%s\n' "$THREADNOTE_NATIVE_BUILD_IMAGE" "$THREADNOTE_NATIVE_SYSROOT_IDENTITY"
   uname -m
   bun --version
@@ -40,16 +43,27 @@ bun scripts/verify-native-vector-reader.ts --required
 test -z "$(git status --porcelain=v1 --untracked-files=normal)"
 bun scripts/assemble-native-inference.ts --stage-overlay "$workspace/dist" --distribution-root "$baseline_root/dist"
 
-# Keep the exact native build intact. Restore the released dual-index harness after build and opt in to existing peak attribution.
+git worktree add --detach "$control_root" "$control"
+(
+  cd "$control_root"
+  bun -e '
+    const {MUSL_BUILD_DEPENDENCY_INSTALL} = await import(process.argv[1]);
+    const child = Bun.spawn(["sh", "-ec", MUSL_BUILD_DEPENDENCY_INSTALL], {
+      stdout: "inherit", stderr: "inherit", stdin: "inherit",
+    });
+    if (await child.exited) throw Error("Pinned musl dependency preparation failed.");
+  ' "$workspace/scripts/assemble-native-inference.ts"
+  test "$(git rev-parse HEAD)" = "$control"
+  test -z "$(git status --porcelain=v1 --untracked-files=normal)"
+  bun run build:release
+  bun scripts/verify-native-vector-reader.ts --required
+  test -z "$(git status --porcelain=v1 --untracked-files=normal)"
+)
+export THREADNOTE_RECALL_AB_CONTROL_DIST="$control_root/dist"
+
+# Keep both exact native builds intact. Restore the released dual-index fixture and add one diagnostic control arm.
 git apply .context/native-vector-capture/frozen-lexical.patch
-bun -e '
-  import fs from "node:fs";
-  const path = "scripts/benchmark-recall-vectors.ts";
-  const original = fs.readFileSync(path, "utf8");
-  const start = "\n              '\''cold'\'',\n              false,\n              system.platform === '\''win32'\'',";
-  if (original.split(start).length !== 2) throw Error("Expected one production sampler call.");
-  fs.writeFileSync(path, original.replace(start, start.replace("false", "true")));
-'
+git apply .context/native-vector-capture/control-arm.patch
 test "$(git diff --name-only)" = scripts/benchmark-recall-vectors.ts
 git diff --binary -- scripts/benchmark-recall-vectors.ts > "$output_dir/diagnostic-harness.patch"
 sha256sum scripts/benchmark-recall-vectors.ts >> "$output_dir/input-identities.txt"
@@ -63,5 +77,5 @@ capture() {
     2>&1 | tee "$output_dir/$stem.log"
 }
 capture 2 dense 1 1 setup-smoke
-capture 10000 tied 3 30 tied-10000
-capture 100000 dense 3 12 dense-100000
+capture 10000 tied 4 30 tied-10000
+capture 100000 dense 4 12 dense-100000
