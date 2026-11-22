@@ -156,6 +156,17 @@
         "candidateControlMatchedOracle": true,
         "pairedWarmSamples": 0
       }
-    ]
+    ],
+    "qualification": {
+      "status": "unqualified",
+      "adoptionDecision": "rollback-required",
+      "candidateSource": "18f102c69d4d6418d412c8e0c64974d3f98c34b1",
+      "runId": 45044682108,
+      "terminalNativeJobs": 8,
+      "completeComparisons": 10,
+      "requiredComparisons": 32,
+      "platformEvidence": "../native-vector-reader-production/platform-results.json",
+      "rollbackScope": "A separate planned change in packages/recall."
+    }
   }
 }
