@@ -3,7 +3,7 @@ set -euo pipefail
 
 proof_root="$RUNNER_TEMP/dev-install-proof"
 evidence="$proof_root/evidence"
-recall_commit=8e8828c6b3e16f69e56ee8d8e39deb8c3e14cb28
+recall_commit=126a7cb27f612dee6c46bb1b2aac98a540a375ee
 mkdir -p "$evidence" "$proof_root/repo"
 
 if command -v codex >/dev/null || command -v claude >/dev/null; then
