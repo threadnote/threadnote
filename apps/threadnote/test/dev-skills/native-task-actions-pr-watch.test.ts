@@ -2179,13 +2179,13 @@ describe('native task actions', () => {
         // The task route recovers the ambiguous wake of the merged watch with exactly one host notice.
         yield* mergeAt(mergedHead, true);
         published.setCollectorAlive(false);
-        let hostNotices = 0;
+        const hostNotices: string[] = [];
         const host = CommandExecutor.of({
           ...published.commands,
           execute: (executable, args, options) => {
             if (executable !== published.wakeup.executable || args[0] !== 'queue' || args[1] === '--help')
               return published.commands.execute(executable, args, options);
-            hostNotices += 1;
+            hostNotices.push(args[4] ?? '');
             return Effect.succeed({
               exitCode: 0,
               stderr: '',
@@ -2205,11 +2205,41 @@ describe('native task actions', () => {
           }).pipe(Effect.provideService(CommandExecutor, host), Effect.provideService(SystemInfo, published.system)),
         );
         expect(recovered).toMatchObject({status: 'watching'});
-        expect(hostNotices).toBe(1);
+        expect(hostNotices).toHaveLength(1);
         expect((yield* readNativeWatch(f.config, published.watchId))?.envelope.notification?.outbox).toMatchObject({
           status: 'queued',
           receipt: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
         });
+        const noticed = yield* readNativeWatch(f.config, published.watchId);
+        const arrivedRoute = /^Threadnote watch event\. Route=(\{[^}]+\})\./u.exec(hostNotices[0]);
+        if (!noticed || !arrivedRoute) throw new Error('Expected the exact route sent to the host.');
+        const noticeRoute = object(JSON.parse(arrivedRoute[1]));
+        const mcp = new EffectMcpServerAdapter('test', '1', 'fixture');
+        registerWorkflowTaskTool(mcp, f.config);
+        const viewRequest = {runId: 'native-run', callerCwd: f.repo, phaseId: 'one', noticeRoute};
+        const exactNotice = () => mcp.invokeTool('workflow_task_view', viewRequest);
+        const recoveredNotice = yield* exactNotice();
+        expect(recoveredNotice.structuredContent).toMatchObject({
+          status: 'notice-recovered',
+          continuation: {
+            action: 'watch-pr',
+            validationRef: published.validationRef,
+            noticeRef: expect.any(String),
+          },
+        });
+        for (const foreign of [
+          {...noticeRoute, eventKey: String(noticeRoute.eventKey) + ':foreign'},
+          {...noticeRoute, attemptId: 'another-attempt'},
+          {...noticeRoute, home: f.repo},
+        ]) {
+          const foreignNotice = yield* mcp
+            .invokeTool('workflow_task_view', {...viewRequest, noticeRoute: foreign})
+            .pipe(Effect.result);
+          expect(foreignNotice).toMatchObject({failure: {code: 'foreign-notice-route'}});
+        }
+        expect((yield* readNativeWatch(f.config, published.watchId))?.revision).toBe(noticed?.revision);
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
+
         expect(object(yield* complete)).toMatchObject({
           status: 'delivered',
           receipt: {
@@ -2217,6 +2247,20 @@ describe('native task actions', () => {
             pr: {headSha: deliveredHead, state: 'merged'},
             watch: {headSha: mergedHead, state: 'terminal'},
           },
+        });
+        const mergedNotice = object((yield* exactNotice()).structuredContent);
+        expect(mergedNotice.status).toBe('notice-recovered');
+        const continuation = object(mergedNotice.continuation);
+        const watchRequest = {
+          command: 'watch-pr' as const,
+          runId: viewRequest.runId,
+          callerCwd: viewRequest.callerCwd,
+          validationRef: String(continuation.validationRef),
+          deliveryRef: String(continuation.deliveryRef),
+        };
+        expect(object(yield* runNativeTaskAction(f.config, {...watchRequest, operation: 'inspect'}))).toMatchObject({
+          status: 'watch-updated',
+          watchId: published.watchId,
         });
         // A resumed binding compares the merged receipt with its terminal watch head, not the phase head.
         const owners = yield* inspectOldBindingOwners(
@@ -2233,6 +2277,44 @@ describe('native task actions', () => {
           }).pipe(Effect.provideService(CurrentNativeJobAutoLaunch, false)),
         );
         expect(closeout).toMatchObject({status: 'pending', stage: 'prepare'});
+        const relayed = object(
+          yield* runNativeTaskAction(f.config, {
+            ...watchRequest,
+            operation: 'relay',
+            noticeRef: String(continuation.noticeRef),
+          }),
+        );
+        expect(relayed).toMatchObject({
+          status: 'watch-updated',
+          watchId: published.watchId,
+          watchDeliveryRef: expect.any(String),
+          eventRefs: expect.arrayContaining([expect.any(String)]),
+        });
+        const pending = yield* readNativeWatch(f.config, published.watchId);
+        if (!pending) throw new Error('Expected the terminal watch before simulating a drained arrival.');
+        const drained = yield* writeNativeWatch(
+          f.config,
+          {
+            ...pending.envelope,
+            state: {
+              ...pending.envelope.state,
+              events: [],
+              delivery: null,
+              work: [],
+              acknowledged: pending.envelope.state.nextSequence - 1,
+            },
+          },
+          pending.revision,
+        );
+        const terminalRun = yield* f.fs.readFileString(f.statePath());
+        expect((yield* exactNotice()).structuredContent).toEqual({
+          status: 'terminal-empty',
+          watchId: published.watchId,
+          prUrl: noticed.envelope.state.pr,
+          revision: drained.revision,
+        });
+        expect((yield* readNativeWatch(f.config, published.watchId))?.revision).toBe(drained.revision);
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(terminalRun);
       }).pipe(run),
     windowsRealGitFixtureTimeout,
   );

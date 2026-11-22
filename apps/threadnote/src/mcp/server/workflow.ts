@@ -1,7 +1,11 @@
 import {runNativeTaskAuthoring} from '../../workflow_automation/task_authoring.js';
 import {Effect, Schema, Struct} from 'effect';
 import {McpInput} from '../../effect/ai/mcp.js';
-import {readNativeTaskView} from '../../workflow_automation/task.js';
+import {
+  NativeTaskWatchNoticeRouteSchema,
+  readNativeTaskNoticeView,
+  readNativeTaskView,
+} from '../../workflow_automation/task.js';
 import {
   NativeTaskPrDeliveryFieldsSchema,
   NativeTaskSupplementalAttachFieldsSchema,
@@ -194,19 +198,30 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     'workflow_task_view',
     {
       annotations: {readOnlyHint: true, destructiveHint: false},
-      description: 'Read a task summary or packet (detail=packet).',
+      description:
+        'Read a task summary or packet (detail=packet), or recover a specific arrived canonical PR watch notice.',
       inputSchema: {
         runId: McpInput.requiredString(),
         callerCwd: McpInput.requiredString('Absolute path'),
         role: McpInput.string('Role'),
         cursor: McpInput.string('Cursor'),
-        phaseId: McpInput.string('Listed historical phase ID for its PR watch'),
+        phaseId: McpInput.string('Historical watch phase or known canonical notice phase'),
+        noticeRoute: Schema.optionalKey(NativeTaskWatchNoticeRouteSchema),
         detail: Schema.optionalKey(Schema.Literals(['summary', 'packet'])),
         outputKey: McpInput.string('Listed closeout body key; detail=packet'),
       },
     },
-    Effect.fn('mcp_server.workflowTaskView')(function* ({runId, callerCwd, role, cursor, phaseId, detail, outputKey}) {
-      const result = yield* readNativeTaskView(config, {
+    Effect.fn('mcp_server.workflowTaskView')(function* ({
+      runId,
+      callerCwd,
+      role,
+      cursor,
+      phaseId,
+      noticeRoute,
+      detail,
+      outputKey,
+    }) {
+      const input = {
         runId,
         callerCwd,
         ...(role === undefined ? {} : {role}),
@@ -214,7 +229,12 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
         ...(phaseId === undefined ? {} : {phaseId}),
         ...(detail === undefined ? {} : {detail}),
         ...(outputKey === undefined ? {} : {outputKey}),
-      });
+      };
+      if (noticeRoute !== undefined) {
+        const recovered = yield* readNativeTaskNoticeView(config, {...input, noticeRoute});
+        return {content: [{type: 'text' as const, text: JSON.stringify(recovered)}], structuredContent: recovered};
+      }
+      const result = yield* readNativeTaskView(config, input);
       const next = fillNativeNext(nativeNextForTaskAction(result.next.action, runId, callerCwd, result.delivery), {
         taskRef: result.taskRef,
         snapshotRef: result.phase?.snapshot?.snapshotRef,
