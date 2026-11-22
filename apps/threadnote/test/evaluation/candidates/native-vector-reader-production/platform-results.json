@@ -1,67 +1,2009 @@
 {
   "schemaVersion": 1,
-  "status": "pending",
+  "status": "unqualified",
   "qualified": false,
   "baselineCommit": "66f4c1d8baed033ec484f4db2895ea2252b4e2d0",
-  "capturedCandidate": null,
+  "baselineTree": "6a2fe890e271866b797f2c4279bae8f2b2326ea4",
+  "modelSha256": "f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804",
+  "capturedCandidate": {
+    "commit": "18f102c69d4d6418d412c8e0c64974d3f98c34b1",
+    "tree": "70645cd2155b227603a1da65c4931f986603e510",
+    "githubRunId": 45044682108
+  },
   "profiles": [
     {
       "target": "bun-darwin-arm64",
-      "status": "not-run",
+      "status": "incomplete-qualification-evidence",
       "qualified": false,
-      "completedCases": [],
-      "captures": []
+      "jobId": 137276580544,
+      "jobConclusion": "success",
+      "failedSteps": [],
+      "artifactId": 14763757032,
+      "setupSmoke": {
+        "file": "setup-smoke.json",
+        "sha256": "2f4f63286b1127f696227054ec6a75048416ccb20d4b157b6f236a2f6a7ef5dd",
+        "engineProofPassed": true,
+        "captureCompleted": true
+      },
+      "completedCases": ["10000-dense", "10000-tied"],
+      "captures": [
+        {
+          "case": "100000-dense",
+          "artifactId": 14763757032,
+          "file": "recall-vector-100000-dense-production.json",
+          "sha256": "d5808a2e78e49ae31b059ae8e41a62272aae681485c51628e806edbbfe254b60",
+          "identityVerified": true,
+          "fixture": {
+            "corpusGeneration": "c4bf799fd21c8e8a715f9e1be4c29cc2c71b74e89e4279f7bb3ebae237c223c1",
+            "databaseSha256": "738bc85054ee67519762d99888af98a9423570254f7992a6afdfa1b37322cf2c",
+            "lexicalDatabaseHashes": {
+              "baseline": "7d842a6b98d1ea9949ed47ad7f81cf8ea8510853bb107f4e13c1d281083a2297",
+              "candidate": "c6ccdc74f8ff6926547b421e465ba4b8f866865d3878748eff70434f180aaabd"
+            }
+          },
+          "nativeBinarySha256": "338ab07f940ed975a2d068bf0851649642ba3b47be8486e682752af2d8d06ac4",
+          "captureIntegrityPassed": true,
+          "engineDiscriminatorPassed": true,
+          "engineProof": {
+            "baseline": {
+              "success": false,
+              "reason": "worker-failed"
+            },
+            "candidate": {
+              "success": true
+            }
+          },
+          "warmSamples": {
+            "baseline": 90,
+            "candidate": 90
+          },
+          "warmFailures": {
+            "baseline": {
+              "budget-exhausted": 90
+            },
+            "candidate": {
+              "budget-exhausted": 51
+            }
+          },
+          "firstUse": {
+            "baseline": {
+              "success": false,
+              "milliseconds": 922.278667,
+              "reason": "budget-exhausted"
+            },
+            "candidate": {
+              "success": false,
+              "milliseconds": 911.638459,
+              "reason": "budget-exhausted"
+            }
+          },
+          "completeComparison": false,
+          "completeResourceEvidence": true,
+          "caseGatesPassed": false,
+          "measuredGateFailures": {
+            "latencyPairs": [],
+            "rssPairs": []
+          },
+          "pairs": [
+            {
+              "pair": 1,
+              "latencyPassed": false,
+              "rssPassed": true,
+              "complete": false,
+              "sampledTreePeakRssBytes": {
+                "baseline": 2152857600,
+                "candidate": 2054635520
+              }
+            },
+            {
+              "pair": 2,
+              "latencyPassed": false,
+              "rssPassed": true,
+              "complete": false,
+              "sampledTreePeakRssBytes": {
+                "candidate": 2028519424,
+                "baseline": 1986117632
+              }
+            },
+            {
+              "pair": 3,
+              "latencyPassed": false,
+              "rssPassed": true,
+              "complete": false,
+              "sampledTreePeakRssBytes": {
+                "baseline": 1969881088,
+                "candidate": 1891188736
+              }
+            }
+          ]
+        },
+        {
+          "case": "100000-tied",
+          "artifactId": 14763757032,
+          "file": "recall-vector-100000-tied-production.json",
+          "sha256": "6b944309c7867d5a43aead4e5a261d4c1584b916b580ce3d2964e3a604e42b65",
+          "identityVerified": true,
+          "fixture": {
+            "corpusGeneration": "c4bf799fd21c8e8a715f9e1be4c29cc2c71b74e89e4279f7bb3ebae237c223c1",
+            "databaseSha256": "496f1908c5a99323490e0b26247f7d7ca24b77c477bffac10b06451c30608767",
+            "lexicalDatabaseHashes": {
+              "baseline": "6b3037a0b2a54c38cf71bc0cb04c010de845e1250e903b4ecb645c52d9659e08",
+              "candidate": "e306097d49f9da472e8cbc9fce7ff1c467b07a1ff4858e236423054d68b596df"
+            }
+          },
+          "nativeBinarySha256": "338ab07f940ed975a2d068bf0851649642ba3b47be8486e682752af2d8d06ac4",
+          "captureIntegrityPassed": true,
+          "engineDiscriminatorPassed": true,
+          "engineProof": {
+            "baseline": {
+              "success": false,
+              "reason": "worker-failed"
+            },
+            "candidate": {
+              "success": true
+            }
+          },
+          "warmSamples": {
+            "baseline": 90,
+            "candidate": 90
+          },
+          "warmFailures": {
+            "baseline": {
+              "budget-exhausted": 81
+            },
+            "candidate": {
+              "budget-exhausted": 25
+            }
+          },
+          "firstUse": {
+            "baseline": {
+              "success": false,
+              "milliseconds": 915.320208,
+              "reason": "budget-exhausted"
+            },
+            "candidate": {
+              "success": false,
+              "milliseconds": 925.365917,
+              "reason": "budget-exhausted"
+            }
+          },
+          "completeComparison": false,
+          "completeResourceEvidence": true,
+          "caseGatesPassed": false,
+          "measuredGateFailures": {
+            "latencyPairs": [],
+            "rssPairs": []
+          },
+          "pairs": [
+            {
+              "pair": 1,
+              "latencyPassed": false,
+              "rssPassed": true,
+              "complete": false,
+              "sampledTreePeakRssBytes": {
+                "baseline": 2186510336,
+                "candidate": 2116681728
+              }
+            },
+            {
+              "pair": 2,
+              "latencyPassed": false,
+              "rssPassed": true,
+              "complete": false,
+              "sampledTreePeakRssBytes": {
+                "candidate": 2117566464,
+                "baseline": 2199863296
+              }
+            },
+            {
+              "pair": 3,
+              "latencyPassed": false,
+              "rssPassed": true,
+              "complete": false,
+              "sampledTreePeakRssBytes": {
+                "baseline": 2198421504,
+                "candidate": 2118172672
+              }
+            }
+          ]
+        },
+        {
+          "case": "10000-dense",
+          "artifactId": 14763757032,
+          "file": "recall-vector-10000-dense-production.json",
+          "sha256": "df3dd6381100111906ef83d3ab46d7632e3f8f89de06dd6dd6e82dfe5d95bca0",
+          "identityVerified": true,
+          "fixture": {
+            "corpusGeneration": "1c5a578f68d01f19eadb2115668177fa918e277d430b9d4fb22cb9ba9fe7d152",
+            "databaseSha256": "cefa578b0c0610f1db6d24d18356ae4520900c9f44c037f97d9351e966e4b618",
+            "lexicalDatabaseHashes": {
+              "baseline": "5edb76aff367b5bfc963482b7dcea92119484f18c49a52c694649cda690a61ec",
+              "candidate": "a47adcb8d57e0f09365393138d9e0516670e0223e49e152799e85cd7b3ec3f69"
+            }
+          },
+          "nativeBinarySha256": "338ab07f940ed975a2d068bf0851649642ba3b47be8486e682752af2d8d06ac4",
+          "captureIntegrityPassed": true,
+          "engineDiscriminatorPassed": true,
+          "engineProof": {
+            "baseline": {
+              "success": false,
+              "reason": "worker-failed"
+            },
+            "candidate": {
+              "success": true
+            }
+          },
+          "warmSamples": {
+            "baseline": 90,
+            "candidate": 90
+          },
+          "warmFailures": {
+            "baseline": {},
+            "candidate": {}
+          },
+          "firstUse": {
+            "baseline": {
+              "success": true,
+              "milliseconds": 279.086916
+            },
+            "candidate": {
+              "success": true,
+              "milliseconds": 186.688458
+            }
+          },
+          "completeComparison": true,
+          "completeResourceEvidence": true,
+          "caseGatesPassed": false,
+          "measuredGateFailures": {
+            "latencyPairs": [3],
+            "rssPairs": []
+          },
+          "pairs": [
+            {
+              "pair": 1,
+              "baselineP95": 299.888709,
+              "candidateP95": 292.7425,
+              "latencyPassed": true,
+              "rssPassed": true,
+              "complete": true,
+              "sampledTreePeakRssBytes": {
+                "baseline": 1580449792,
+                "candidate": 1541013504
+              }
+            },
+            {
+              "pair": 2,
+              "baselineP95": 265.511542,
+              "candidateP95": 210.554667,
+              "latencyPassed": true,
+              "rssPassed": true,
+              "complete": true,
+              "sampledTreePeakRssBytes": {
+                "candidate": 1540390912,
+                "baseline": 1584136192
+              }
+            },
+            {
+              "pair": 3,
+              "baselineP95": 273.5025,
+              "candidateP95": 338.411584,
+              "latencyPassed": false,
+              "rssPassed": true,
+              "complete": true,
+              "sampledTreePeakRssBytes": {
+                "baseline": 1582497792,
+                "candidate": 1540210688
+              }
+            }
+          ]
+        },
+        {
+          "case": "10000-tied",
+          "artifactId": 14763757032,
+          "file": "recall-vector-10000-tied-production.json",
+          "sha256": "528744d4555ef5153de7ec4cd19beac89d1bd07277b3c62507426fcc3f4b7aa3",
+          "identityVerified": true,
+          "fixture": {
+            "corpusGeneration": "1c5a578f68d01f19eadb2115668177fa918e277d430b9d4fb22cb9ba9fe7d152",
+            "databaseSha256": "37a437b44010622de684342b79f726c001f094a530e9b784d7122e4bd71430ed",
+            "lexicalDatabaseHashes": {
+              "baseline": "2c95047deb6d9a7df28fafbb08710b29628843ad1adb4a317e98ceb3f9f3cd85",
+              "candidate": "14131a9f4a984103346ef2c26f9b9e2c5881ad74a4eb6990c174866a7a190961"
+            }
+          },
+          "nativeBinarySha256": "338ab07f940ed975a2d068bf0851649642ba3b47be8486e682752af2d8d06ac4",
+          "captureIntegrityPassed": true,
+          "engineDiscriminatorPassed": true,
+          "engineProof": {
+            "baseline": {
+              "success": false,
+              "reason": "worker-failed"
+            },
+            "candidate": {
+              "success": true
+            }
+          },
+          "warmSamples": {
+            "baseline": 90,
+            "candidate": 90
+          },
+          "warmFailures": {
+            "baseline": {},
+            "candidate": {}
+          },
+          "firstUse": {
+            "baseline": {
+              "success": true,
+              "milliseconds": 399.688458
+            },
+            "candidate": {
+              "success": true,
+              "milliseconds": 193.697916
+            }
+          },
+          "completeComparison": true,
+          "completeResourceEvidence": true,
+          "caseGatesPassed": true,
+          "measuredGateFailures": {
+            "latencyPairs": [],
+            "rssPairs": []
+          },
+          "pairs": [
+            {
+              "pair": 1,
+              "baselineP95": 383.749667,
+              "candidateP95": 260.944792,
+              "latencyPassed": true,
+              "rssPassed": true,
+              "complete": true,
+              "sampledTreePeakRssBytes": {
+                "baseline": 1170587648,
+                "candidate": 1128628224
+              }
+            },
+            {
+              "pair": 2,
+              "baselineP95": 355.513125,
+              "candidateP95": 297.106625,
+              "latencyPassed": true,
+              "rssPassed": true,
+              "complete": true,
+              "sampledTreePeakRssBytes": {
+                "candidate": 1127956480,
+                "baseline": 1172701184
+              }
+            },
+            {
+              "pair": 3,
+              "baselineP95": 403.372625,
+              "candidateP95": 339.198625,
+              "latencyPassed": true,
+              "rssPassed": true,
+              "complete": true,
+              "sampledTreePeakRssBytes": {
+                "baseline": 1168130048,
+                "candidate": 1127104512
+              }
+            }
+          ]
+        }
+      ]
     },
     {
       "target": "bun-darwin-x64",
-      "status": "not-run",
+      "status": "incomplete-qualification-evidence",
       "qualified": false,
+      "jobId": 137276580886,
+      "jobConclusion": "failure",
+      "failedSteps": ["Capture serial production pairs without a required timing gate"],
+      "artifactId": 14764172963,
+      "setupSmoke": {
+        "file": "setup-smoke.json",
+        "sha256": "c15a9720214970694fae52317d129c47ec1134cc2dcb8314408e8dc17ef26be7",
+        "engineProofPassed": true,
+        "captureCompleted": true
+      },
       "completedCases": [],
-      "captures": []
+      "captures": [
+        {
+          "case": "100000-dense",
+          "artifactId": 14764172963,
+          "file": "recall-vector-100000-dense-production.json",
+          "sha256": "6912af1dfe6aa87950bcc9ae8fce8e3c32c0b23cdacb86a73bb92835de7aa6d4",
+          "identityVerified": true,
+          "fixture": {
+            "corpusGeneration": "c4bf799fd21c8e8a715f9e1be4c29cc2c71b74e89e4279f7bb3ebae237c223c1",
+            "databaseSha256": "b8b0f7fea1551677fe9eb524f3af83f30bf515df6ac46596c7a077df5101e7ff",
+            "lexicalDatabaseHashes": {
+              "baseline": "945c22afde83ae3ae07ea7b7a3b84fbbffae6072584da2fb6f93dbdc4810717a",
+              "candidate": "45b3b06a9ee9d3a7f2f808a8aa840e17f88521b932eb5df9a722905e35dd672a"
+            }
+          },
+          "nativeBinarySha256": "2b5cd05d5c90f4010a17f3cd8e6f42e0999e5fe13987a0c95baa4aebaeedd554",
+          "captureIntegrityPassed": false,
+          "engineDiscriminatorPassed": false,
+          "engineProof": {
+            "baseline": {
+              "success": false,
+              "reason": "worker-failed"
+            },
+            "candidate": {
+              "success": false,
+              "reason": "budget-exhausted"
+            }
+          },
+          "warmSamples": {
+            "baseline": 0,
+            "candidate": 0
+          },
+          "warmFailures": {
+            "baseline": {},
+            "candidate": {}
+          },
+          "firstUse": {
+            "baseline": {
+              "success": false,
+              "milliseconds": 974.391743,
+              "reason": "budget-exhausted"
+            },
+            "candidate": {
+              "success": false,
+              "milliseconds": 976.923769,
+              "reason": "budget-exhausted"
+            }
+          },
+          "completeComparison": false,
+          "completeResourceEvidence": false,
+          "caseGatesPassed": false,
+          "measuredGateFailures": {
+            "latencyPairs": [],
+            "rssPairs": []
+          },
+          "pairs": []
+        }
+      ],
+      "failureDetail": "After the setup smoke, the 100,000-vector dense case stopped at the native execution discriminator. The candidate request exhausted its deadline before warm sampling began."
     },
     {
       "target": "bun-linux-arm64",
-      "status": "not-run",
+      "status": "incomplete-qualification-evidence",
       "qualified": false,
-      "completedCases": [],
-      "captures": []
+      "jobId": 137276580985,
+      "jobConclusion": "success",
+      "failedSteps": [],
+      "artifactId": 14764509220,
+      "setupSmoke": {
+        "file": "setup-smoke.json",
+        "sha256": "bed7606559036c0b629afb7511681f51b33619fd147c636e3c659191b202301b",
+        "engineProofPassed": true,
+        "captureCompleted": true
+      },
+      "completedCases": ["10000-dense", "10000-tied"],
+      "captures": [
+        {
+          "case": "100000-dense",
+          "artifactId": 14764509220,
+          "file": "recall-vector-100000-dense-production.json",
+          "sha256": "db94d378ef5914235727cd4ac794413c615531d2b2418bf67461f11191c84987",
+          "identityVerified": true,
+          "fixture": {
+            "corpusGeneration": "c4bf799fd21c8e8a715f9e1be4c29cc2c71b74e89e4279f7bb3ebae237c223c1",
+            "databaseSha256": "bc10377b7a0e1ef6ed6eab4a4aff84bc6a7fff584ed200bf7a67080204a535a5",
+            "lexicalDatabaseHashes": {
+              "baseline": "7f285fd8ed3a0ee1d91d40b479f179f96298a1f8ac0c0af130464fe89e45d43d",
+              "candidate": "ca969cd3a69cba510baa556579471d7848f248a415a8d51bcdee62c0b168675f"
+            }
+          },
+          "nativeBinarySha256": "b4c387fa0f506bc1ac707d14351e8bf53b08cab957443b10ec176002dbb1d842",
+          "captureIntegrityPassed": true,
+          "engineDiscriminatorPassed": true,
+          "engineProof": {
+            "baseline": {
+              "success": false,
+              "reason": "worker-failed"
+            },
+            "candidate": {
+              "success": true
+            }
+          },
+          "warmSamples": {
+            "baseline": 90,
+            "candidate": 90
+          },
+          "warmFailures": {
+            "baseline": {
+              "budget-exhausted": 90
+            },
+            "candidate": {}
+          },
+          "firstUse": {
+            "baseline": {
+              "success": false,
+              "milliseconds": 919.948488,
+              "reason": "budget-exhausted"
+            },
+            "candidate": {
+              "success": true,
+              "milliseconds": 715.794123
+            }
+          },
+          "completeComparison": false,
+          "completeResourceEvidence": true,
+          "caseGatesPassed": false,
+          "measuredGateFailures": {
+            "latencyPairs": [],
+            "rssPairs": []
+          },
+          "pairs": [
+            {
+              "pair": 1,
+              "candidateP95": 740.536278,
+              "latencyPassed": false,
+              "rssPassed": true,
+              "complete": false,
+              "sampledTreePeakRssBytes": {
+                "baseline": 841900032,
+                "candidate": 801968128
+              }
+            },
+            {
+              "pair": 2,
+              "candidateP95": 740.459176,
+              "latencyPassed": false,
+              "rssPassed": true,
+              "complete": false,
+              "sampledTreePeakRssBytes": {
+                "candidate": 784842752,
+                "baseline": 854319104
+              }
+            },
+            {
+              "pair": 3,
+              "candidateP95": 746.624879,
+              "latencyPassed": false,
+              "rssPassed": true,
+              "complete": false,
+              "sampledTreePeakRssBytes": {
+                "baseline": 865103872,
+                "candidate": 804249600
+              }
+            }
+          ]
+        },
+        {
+          "case": "100000-tied",
+          "artifactId": 14764509220,
+          "file": "recall-vector-100000-tied-production.json",
+          "sha256": "531071b66c8d147793cff19483b88625160b1bf08b0ed3e1ce665801df05c33f",
+          "identityVerified": true,
+          "fixture": {
+            "corpusGeneration": "c4bf799fd21c8e8a715f9e1be4c29cc2c71b74e89e4279f7bb3ebae237c223c1",
+            "databaseSha256": "2fd6416ea81b9221236455d84cf547e30d58aa07c9a789591b37f39757eab938",
+            "lexicalDatabaseHashes": {
+              "baseline": "7aeb78df26d98d9a8d50ab23299c7e2e38e22af098b438bacbb5fd9c4785b2d4",
+              "candidate": "ed9a9a00f79dd5e5b1fd1c72d5bb298b578471d979d981be366fab0edc798478"
+            }
+          },
+          "nativeBinarySha256": "b4c387fa0f506bc1ac707d14351e8bf53b08cab957443b10ec176002dbb1d842",
+          "captureIntegrityPassed": true,
+          "engineDiscriminatorPassed": true,
+          "engineProof": {
+            "baseline": {
+              "success": false,
+              "reason": "worker-failed"
+            },
+            "candidate": {
+              "success": true
+            }
+          },
+          "warmSamples": {
+            "baseline": 90,
+            "candidate": 90
+          },
+          "warmFailures": {
+            "baseline": {
+              "budget-exhausted": 90
+            },
+            "candidate": {}
+          },
+          "firstUse": {
+            "baseline": {
+              "success": false,
+              "milliseconds": 921.878677,
+              "reason": "budget-exhausted"
+            },
+            "candidate": {
+              "success": true,
+              "milliseconds": 757.839431
+            }
+          },
+          "completeComparison": false,
+          "completeResourceEvidence": true,
+          "caseGatesPassed": false,
+          "measuredGateFailures": {
+            "latencyPairs": [],
+            "rssPairs": []
+          },
+          "pairs": [
+            {
+              "pair": 1,
+              "candidateP95": 778.382649,
+              "latencyPassed": false,
+              "rssPassed": true,
+              "complete": false,
+              "sampledTreePeakRssBytes": {
+                "baseline": 846569472,
+                "candidate": 806027264
+              }
+            },
+            {
+              "pair": 2,
+              "candidateP95": 781.288388,
+              "latencyPassed": false,
+              "rssPassed": true,
+              "complete": false,
+              "sampledTreePeakRssBytes": {
+                "candidate": 784396288,
+                "baseline": 860889088
+              }
+            },
+            {
+              "pair": 3,
+              "candidateP95": 776.811394,
+              "latencyPassed": false,
+              "rssPassed": true,
+              "complete": false,
+              "sampledTreePeakRssBytes": {
+                "baseline": 864043008,
+                "candidate": 799899648
+              }
+            }
+          ]
+        },
+        {
+          "case": "10000-dense",
+          "artifactId": 14764509220,
+          "file": "recall-vector-10000-dense-production.json",
+          "sha256": "36b0089bdc01985cc68ff17dc7d0504517cc129cbca304a1eec1fbff1bc09956",
+          "identityVerified": true,
+          "fixture": {
+            "corpusGeneration": "1c5a578f68d01f19eadb2115668177fa918e277d430b9d4fb22cb9ba9fe7d152",
+            "databaseSha256": "0cd21df6c95b2fa1c922a5e82b9589776e170f9a8e88224763310687d3dc3469",
+            "lexicalDatabaseHashes": {
+              "baseline": "bfc7b6c6b33d5254ca959604edb8e801e5ab53b9608bb19e8f8f7e5488b0e0f7",
+              "candidate": "ecd7fd9f24afd3036dcee04d1fe0a082bd18cab40d192bc7b2076b6d173b80e9"
+            }
+          },
+          "nativeBinarySha256": "b4c387fa0f506bc1ac707d14351e8bf53b08cab957443b10ec176002dbb1d842",
+          "captureIntegrityPassed": true,
+          "engineDiscriminatorPassed": true,
+          "engineProof": {
+            "baseline": {
+              "success": false,
+              "reason": "worker-failed"
+            },
+            "candidate": {
+              "success": true
+            }
+          },
+          "warmSamples": {
+            "baseline": 90,
+            "candidate": 90
+          },
+          "warmFailures": {
+            "baseline": {},
+            "candidate": {}
+          },
+          "firstUse": {
+            "baseline": {
+              "success": true,
+              "milliseconds": 374.733935
+            },
+            "candidate": {
+              "success": true,
+              "milliseconds": 272.175457
+            }
+          },
+          "completeComparison": true,
+          "completeResourceEvidence": true,
+          "caseGatesPassed": true,
+          "measuredGateFailures": {
+            "latencyPairs": [],
+            "rssPairs": []
+          },
+          "pairs": [
+            {
+              "pair": 1,
+              "baselineP95": 376.677705,
+              "candidateP95": 283.841769,
+              "latencyPassed": true,
+              "rssPassed": true,
+              "complete": true,
+              "sampledTreePeakRssBytes": {
+                "baseline": 514547712,
+                "candidate": 477728768
+              }
+            },
+            {
+              "pair": 2,
+              "baselineP95": 376.331167,
+              "candidateP95": 283.608883,
+              "latencyPassed": true,
+              "rssPassed": true,
+              "complete": true,
+              "sampledTreePeakRssBytes": {
+                "candidate": 474333184,
+                "baseline": 536461312
+              }
+            },
+            {
+              "pair": 3,
+              "baselineP95": 381.660517,
+              "candidateP95": 292.245388,
+              "latencyPassed": true,
+              "rssPassed": true,
+              "complete": true,
+              "sampledTreePeakRssBytes": {
+                "baseline": 548851712,
+                "candidate": 510513152
+              }
+            }
+          ]
+        },
+        {
+          "case": "10000-tied",
+          "artifactId": 14764509220,
+          "file": "recall-vector-10000-tied-production.json",
+          "sha256": "9d19ede7d274fedb69a54b5474efa2d9a1eb86124c2606db5613225127bc6efd",
+          "identityVerified": true,
+          "fixture": {
+            "corpusGeneration": "1c5a578f68d01f19eadb2115668177fa918e277d430b9d4fb22cb9ba9fe7d152",
+            "databaseSha256": "b38c499b34093ccf927f6135e852f953ec3e9fae51ad7f3c1f032272e78a2b95",
+            "lexicalDatabaseHashes": {
+              "baseline": "e6b99503cafcfc6e81ddf0c904ed009bc683b8d592f7b1237aa524f17e04ef9c",
+              "candidate": "cd3c9aad2b9f97e46648485480e35741d148697e26196021451632c1622ed554"
+            }
+          },
+          "nativeBinarySha256": "b4c387fa0f506bc1ac707d14351e8bf53b08cab957443b10ec176002dbb1d842",
+          "captureIntegrityPassed": true,
+          "engineDiscriminatorPassed": true,
+          "engineProof": {
+            "baseline": {
+              "success": false,
+              "reason": "worker-failed"
+            },
+            "candidate": {
+              "success": true
+            }
+          },
+          "warmSamples": {
+            "baseline": 90,
+            "candidate": 90
+          },
+          "warmFailures": {
+            "baseline": {},
+            "candidate": {}
+          },
+          "firstUse": {
+            "baseline": {
+              "success": true,
+              "milliseconds": 410.768987
+            },
+            "candidate": {
+              "success": true,
+              "milliseconds": 307.277276
+            }
+          },
+          "completeComparison": true,
+          "completeResourceEvidence": true,
+          "caseGatesPassed": true,
+          "measuredGateFailures": {
+            "latencyPairs": [],
+            "rssPairs": []
+          },
+          "pairs": [
+            {
+              "pair": 1,
+              "baselineP95": 401.365063,
+              "candidateP95": 298.206373,
+              "latencyPassed": true,
+              "rssPassed": true,
+              "complete": true,
+              "sampledTreePeakRssBytes": {
+                "baseline": 503439360,
+                "candidate": 470413312
+              }
+            },
+            {
+              "pair": 2,
+              "baselineP95": 397.034136,
+              "candidateP95": 295.341068,
+              "latencyPassed": true,
+              "rssPassed": true,
+              "complete": true,
+              "sampledTreePeakRssBytes": {
+                "candidate": 470118400,
+                "baseline": 520462336
+              }
+            },
+            {
+              "pair": 3,
+              "baselineP95": 398.926392,
+              "candidateP95": 304.312984,
+              "latencyPassed": true,
+              "rssPassed": true,
+              "complete": true,
+              "sampledTreePeakRssBytes": {
+                "baseline": 526143488,
+                "candidate": 476139520
+              }
+            }
+          ]
+        }
+      ]
     },
     {
       "target": "bun-linux-arm64-musl",
-      "status": "not-run",
+      "status": "incomplete-qualification-evidence",
       "qualified": false,
-      "completedCases": [],
-      "captures": []
+      "jobId": 137276581038,
+      "jobConclusion": "success",
+      "failedSteps": [],
+      "artifactId": 14766302296,
+      "setupSmoke": {
+        "file": "setup-smoke.json",
+        "sha256": "943b3eaced94545ea66a53f045867db12a74e8d57887f276352c640030ad223e",
+        "engineProofPassed": true,
+        "captureCompleted": true
+      },
+      "completedCases": ["10000-dense", "10000-tied"],
+      "captures": [
+        {
+          "case": "100000-dense",
+          "artifactId": 14766302296,
+          "file": "recall-vector-100000-dense-production.json",
+          "sha256": "a01baa356cd115d0d25cd245e5c83b8fa484a9f33928e5b5b89095e1ec47a864",
+          "identityVerified": true,
+          "fixture": {
+            "corpusGeneration": "c4bf799fd21c8e8a715f9e1be4c29cc2c71b74e89e4279f7bb3ebae237c223c1",
+            "databaseSha256": "9b6686afef68923ffa2e3ce12d9646a750cc633f842716debcb3e5f10d04965a",
+            "lexicalDatabaseHashes": {
+              "baseline": "e0c846e6857b961f0c1f9e4d1b28921c2fb3bc29691bd51ac76b888070c570f2",
+              "candidate": "4a947d958ea45af962256032fc5e0298e3b0f98852083071bbba9d7dbda10cde"
+            }
+          },
+          "nativeBinarySha256": "31617367871a0ff166cb0042493ac550a13d55ab354f8d584dbd41cabfbe2b6d",
+          "captureIntegrityPassed": true,
+          "engineDiscriminatorPassed": true,
+          "engineProof": {
+            "baseline": {
+              "success": false,
+              "reason": "worker-failed"
+            },
+            "candidate": {
+              "success": true
+            }
+          },
+          "warmSamples": {
+            "baseline": 90,
+            "candidate": 90
+          },
+          "warmFailures": {
+            "baseline": {
+              "budget-exhausted": 90
+            },
+            "candidate": {}
+          },
+          "firstUse": {
+            "baseline": {
+              "success": false,
+              "milliseconds": 933.928522,
+              "reason": "budget-exhausted"
+            },
+            "candidate": {
+              "success": true,
+              "milliseconds": 800.243619
+            }
+          },
+          "completeComparison": false,
+          "completeResourceEvidence": true,
+          "caseGatesPassed": false,
+          "measuredGateFailures": {
+            "latencyPairs": [],
+            "rssPairs": []
+          },
+          "pairs": [
+            {
+              "pair": 1,
+              "candidateP95": 820.405622,
+              "latencyPassed": false,
+              "rssPassed": true,
+              "complete": false,
+              "sampledTreePeakRssBytes": {
+                "baseline": 846172160,
+                "candidate": 809558016
+              }
+            },
+            {
+              "pair": 2,
+              "candidateP95": 820.947044,
+              "latencyPassed": false,
+              "rssPassed": true,
+              "complete": false,
+              "sampledTreePeakRssBytes": {
+                "candidate": 782831616,
+                "baseline": 868081664
+              }
+            },
+            {
+              "pair": 3,
+              "candidateP95": 819.657442,
+              "latencyPassed": false,
+              "rssPassed": true,
+              "complete": false,
+              "sampledTreePeakRssBytes": {
+                "baseline": 1204637696,
+                "candidate": 793231360
+              }
+            }
+          ]
+        },
+        {
+          "case": "100000-tied",
+          "artifactId": 14766302296,
+          "file": "recall-vector-100000-tied-production.json",
+          "sha256": "70a36a3129ae5989e996e2592772331883c92b1d61047f22fc8dafa212b45054",
+          "identityVerified": true,
+          "fixture": {
+            "corpusGeneration": "c4bf799fd21c8e8a715f9e1be4c29cc2c71b74e89e4279f7bb3ebae237c223c1",
+            "databaseSha256": "60ff90e7dcd5f84d3fac9e75e15f52f09dfbeabf1d6c1c004607eea1aaebb173",
+            "lexicalDatabaseHashes": {
+              "baseline": "ffde91efeb49b716ac35f9aa28aa82b95f2a09eeb5076544dd80b17d5f0fed8b",
+              "candidate": "c0fef93b909c1023578497eae27fd45354c0b99390c461badbb8e5a34ecd1db8"
+            }
+          },
+          "nativeBinarySha256": "31617367871a0ff166cb0042493ac550a13d55ab354f8d584dbd41cabfbe2b6d",
+          "captureIntegrityPassed": true,
+          "engineDiscriminatorPassed": true,
+          "engineProof": {
+            "baseline": {
+              "success": false,
+              "reason": "worker-failed"
+            },
+            "candidate": {
+              "success": true
+            }
+          },
+          "warmSamples": {
+            "baseline": 90,
+            "candidate": 90
+          },
+          "warmFailures": {
+            "baseline": {
+              "budget-exhausted": 90
+            },
+            "candidate": {}
+          },
+          "firstUse": {
+            "baseline": {
+              "success": false,
+              "milliseconds": 932.741155,
+              "reason": "budget-exhausted"
+            },
+            "candidate": {
+              "success": true,
+              "milliseconds": 811.033601
+            }
+          },
+          "completeComparison": false,
+          "completeResourceEvidence": true,
+          "caseGatesPassed": false,
+          "measuredGateFailures": {
+            "latencyPairs": [],
+            "rssPairs": []
+          },
+          "pairs": [
+            {
+              "pair": 1,
+              "candidateP95": 875.398698,
+              "latencyPassed": false,
+              "rssPassed": true,
+              "complete": false,
+              "sampledTreePeakRssBytes": {
+                "baseline": 846487552,
+                "candidate": 810037248
+              }
+            },
+            {
+              "pair": 2,
+              "candidateP95": 840.592703,
+              "latencyPassed": false,
+              "rssPassed": false,
+              "complete": false,
+              "sampledTreePeakRssBytes": {
+                "candidate": 1200603136,
+                "baseline": 867127296
+              }
+            },
+            {
+              "pair": 3,
+              "candidateP95": 838.277531,
+              "latencyPassed": false,
+              "rssPassed": true,
+              "complete": false,
+              "sampledTreePeakRssBytes": {
+                "baseline": 864956416,
+                "candidate": 792432640
+              }
+            }
+          ]
+        },
+        {
+          "case": "10000-dense",
+          "artifactId": 14766302296,
+          "file": "recall-vector-10000-dense-production.json",
+          "sha256": "74c03031b9e58835ea2957486a1d3f500b7df1d62a0d487210e210d721f1afd5",
+          "identityVerified": true,
+          "fixture": {
+            "corpusGeneration": "1c5a578f68d01f19eadb2115668177fa918e277d430b9d4fb22cb9ba9fe7d152",
+            "databaseSha256": "881851ab4098898fb04dbb5d6e8531a0ed510c5618098872fe0f842c334d6a3b",
+            "lexicalDatabaseHashes": {
+              "baseline": "ea1763152cc928ab4b6bdd763dd04b8d8e5f3e0206793219cf915075e559cdc5",
+              "candidate": "d023c0363dba6d0fab7d4651d3445ffbf6e58d8523ac258fff916c264dac166e"
+            }
+          },
+          "nativeBinarySha256": "31617367871a0ff166cb0042493ac550a13d55ab354f8d584dbd41cabfbe2b6d",
+          "captureIntegrityPassed": true,
+          "engineDiscriminatorPassed": true,
+          "engineProof": {
+            "baseline": {
+              "success": false,
+              "reason": "worker-failed"
+            },
+            "candidate": {
+              "success": true
+            }
+          },
+          "warmSamples": {
+            "baseline": 90,
+            "candidate": 90
+          },
+          "warmFailures": {
+            "baseline": {},
+            "candidate": {}
+          },
+          "firstUse": {
+            "baseline": {
+              "success": true,
+              "milliseconds": 486.421265
+            },
+            "candidate": {
+              "success": true,
+              "milliseconds": 339.315026
+            }
+          },
+          "completeComparison": true,
+          "completeResourceEvidence": true,
+          "caseGatesPassed": true,
+          "measuredGateFailures": {
+            "latencyPairs": [],
+            "rssPairs": []
+          },
+          "pairs": [
+            {
+              "pair": 1,
+              "baselineP95": 469.20129,
+              "candidateP95": 348.854808,
+              "latencyPassed": true,
+              "rssPassed": true,
+              "complete": true,
+              "sampledTreePeakRssBytes": {
+                "baseline": 575533056,
+                "candidate": 473014272
+              }
+            },
+            {
+              "pair": 2,
+              "baselineP95": 463.872058,
+              "candidateP95": 346.498495,
+              "latencyPassed": true,
+              "rssPassed": true,
+              "complete": true,
+              "sampledTreePeakRssBytes": {
+                "candidate": 483495936,
+                "baseline": 526331904
+              }
+            },
+            {
+              "pair": 3,
+              "baselineP95": 471.108885,
+              "candidateP95": 340.024025,
+              "latencyPassed": true,
+              "rssPassed": true,
+              "complete": true,
+              "sampledTreePeakRssBytes": {
+                "baseline": 521773056,
+                "candidate": 502628352
+              }
+            }
+          ]
+        },
+        {
+          "case": "10000-tied",
+          "artifactId": 14766302296,
+          "file": "recall-vector-10000-tied-production.json",
+          "sha256": "7ee7501a0aa4c6263a7d9c6bcb5de1082ff3d237c8207a07885a5713d2e6d336",
+          "identityVerified": true,
+          "fixture": {
+            "corpusGeneration": "1c5a578f68d01f19eadb2115668177fa918e277d430b9d4fb22cb9ba9fe7d152",
+            "databaseSha256": "c3fdf7df2e7887594407bd8a2e13681d75feb49e105b51b21547792488d629f2",
+            "lexicalDatabaseHashes": {
+              "baseline": "6e17e35ef8cc234da521f9c8b97fc1c7d78959db69ea6338974995147bdac240",
+              "candidate": "553ca9e7d9b91dcd8574848e323f6ec53e14524eaa874d96b99cda7c52bd5fd9"
+            }
+          },
+          "nativeBinarySha256": "31617367871a0ff166cb0042493ac550a13d55ab354f8d584dbd41cabfbe2b6d",
+          "captureIntegrityPassed": true,
+          "engineDiscriminatorPassed": true,
+          "engineProof": {
+            "baseline": {
+              "success": false,
+              "reason": "worker-failed"
+            },
+            "candidate": {
+              "success": true
+            }
+          },
+          "warmSamples": {
+            "baseline": 90,
+            "candidate": 90
+          },
+          "warmFailures": {
+            "baseline": {},
+            "candidate": {}
+          },
+          "firstUse": {
+            "baseline": {
+              "success": true,
+              "milliseconds": 477.178318
+            },
+            "candidate": {
+              "success": true,
+              "milliseconds": 350.657712
+            }
+          },
+          "completeComparison": true,
+          "completeResourceEvidence": true,
+          "caseGatesPassed": false,
+          "measuredGateFailures": {
+            "latencyPairs": [],
+            "rssPairs": [1]
+          },
+          "pairs": [
+            {
+              "pair": 1,
+              "baselineP95": 466.398004,
+              "candidateP95": 354.236565,
+              "latencyPassed": true,
+              "rssPassed": false,
+              "complete": true,
+              "sampledTreePeakRssBytes": {
+                "baseline": 514408448,
+                "candidate": 577699840
+              }
+            },
+            {
+              "pair": 2,
+              "baselineP95": 466.331971,
+              "candidateP95": 374.542872,
+              "latencyPassed": true,
+              "rssPassed": true,
+              "complete": true,
+              "sampledTreePeakRssBytes": {
+                "candidate": 488353792,
+                "baseline": 543961088
+              }
+            },
+            {
+              "pair": 3,
+              "baselineP95": 461.038419,
+              "candidateP95": 354.658663,
+              "latencyPassed": true,
+              "rssPassed": true,
+              "complete": true,
+              "sampledTreePeakRssBytes": {
+                "baseline": 531681280,
+                "candidate": 466731008
+              }
+            }
+          ]
+        }
+      ]
     },
     {
       "target": "bun-linux-x64-baseline",
-      "status": "not-run",
+      "status": "incomplete-qualification-evidence",
       "qualified": false,
-      "completedCases": [],
-      "captures": []
+      "jobId": 137276580993,
+      "jobConclusion": "success",
+      "failedSteps": [],
+      "artifactId": 14766946460,
+      "setupSmoke": {
+        "file": "setup-smoke.json",
+        "sha256": "2a74889bb5c552144ed668b1699e85b2fb9ce026ce6842ca6a3534231cf83c1e",
+        "engineProofPassed": true,
+        "captureCompleted": true
+      },
+      "completedCases": ["10000-dense", "10000-tied"],
+      "captures": [
+        {
+          "case": "100000-dense",
+          "artifactId": 14766946460,
+          "file": "recall-vector-100000-dense-production.json",
+          "sha256": "5dbb3fb63f80a8454cfbdcbff4ffd6d189d39dd6b2f9d2cb028e770e9754067e",
+          "identityVerified": true,
+          "fixture": {
+            "corpusGeneration": "c4bf799fd21c8e8a715f9e1be4c29cc2c71b74e89e4279f7bb3ebae237c223c1",
+            "databaseSha256": "43cafb6fcc6dca907cf0a24639baa6d70375828660ad5508d40032b0bc499f53",
+            "lexicalDatabaseHashes": {
+              "baseline": "417928391ca86e29330965ef7972da6555978ef095fe8040364ca2712f4eadba",
+              "candidate": "c4f0a390f0dd00f2d72dfb41b86474f285102811ff21f2b21d5f450deed8ec73"
+            }
+          },
+          "nativeBinarySha256": "bd08f0634a32eaf76dd2b42b00e985cc43dbed488c23457a0b85bdac40501236",
+          "captureIntegrityPassed": true,
+          "engineDiscriminatorPassed": true,
+          "engineProof": {
+            "baseline": {
+              "success": false,
+              "reason": "worker-failed"
+            },
+            "candidate": {
+              "success": true
+            }
+          },
+          "warmSamples": {
+            "baseline": 90,
+            "candidate": 90
+          },
+          "warmFailures": {
+            "baseline": {
+              "budget-exhausted": 83
+            },
+            "candidate": {
+              "budget-exhausted": 6
+            }
+          },
+          "firstUse": {
+            "baseline": {
+              "success": false,
+              "milliseconds": 910.919974,
+              "reason": "budget-exhausted"
+            },
+            "candidate": {
+              "success": true,
+              "milliseconds": 627.347477
+            }
+          },
+          "completeComparison": false,
+          "completeResourceEvidence": true,
+          "caseGatesPassed": false,
+          "measuredGateFailures": {
+            "latencyPairs": [],
+            "rssPairs": []
+          },
+          "pairs": [
+            {
+              "pair": 1,
+              "candidateP95": 646.023908,
+              "latencyPassed": false,
+              "rssPassed": true,
+              "complete": false,
+              "sampledTreePeakRssBytes": {
+                "baseline": 854482944,
+                "candidate": 815435776
+              }
+            },
+            {
+              "pair": 2,
+              "candidateP95": 647.975467,
+              "latencyPassed": false,
+              "rssPassed": true,
+              "complete": false,
+              "sampledTreePeakRssBytes": {
+                "candidate": 805306368,
+                "baseline": 857645056
+              }
+            },
+            {
+              "pair": 3,
+              "latencyPassed": false,
+              "rssPassed": true,
+              "complete": false,
+              "sampledTreePeakRssBytes": {
+                "baseline": 885538816,
+                "candidate": 784887808
+              }
+            }
+          ]
+        },
+        {
+          "case": "100000-tied",
+          "artifactId": 14766946460,
+          "file": "recall-vector-100000-tied-production.json",
+          "sha256": "ced1b346eb4cd7cc18bcb66de40792aa848999e71a0a3a1b079fa9438c77a0b7",
+          "identityVerified": true,
+          "fixture": {
+            "corpusGeneration": "c4bf799fd21c8e8a715f9e1be4c29cc2c71b74e89e4279f7bb3ebae237c223c1",
+            "databaseSha256": "de3811ccb7c83245cf7828cdf213bfd8457c59813b50d555992b29339d0d6569",
+            "lexicalDatabaseHashes": {
+              "baseline": "95581f8bf7be3c476fe91626204ead23fb6868d5affb830aca712bab672b0ddf",
+              "candidate": "90d32b9aa777931a030fd21efdd453c9a015b8ae2bc2a956ffdb64a8a35ba525"
+            }
+          },
+          "nativeBinarySha256": "bd08f0634a32eaf76dd2b42b00e985cc43dbed488c23457a0b85bdac40501236",
+          "captureIntegrityPassed": true,
+          "engineDiscriminatorPassed": true,
+          "engineProof": {
+            "baseline": {
+              "success": false,
+              "reason": "worker-failed"
+            },
+            "candidate": {
+              "success": true
+            }
+          },
+          "warmSamples": {
+            "baseline": 90,
+            "candidate": 90
+          },
+          "warmFailures": {
+            "baseline": {
+              "budget-exhausted": 89
+            },
+            "candidate": {}
+          },
+          "firstUse": {
+            "baseline": {
+              "success": false,
+              "milliseconds": 913.111629,
+              "reason": "budget-exhausted"
+            },
+            "candidate": {
+              "success": true,
+              "milliseconds": 667.763231
+            }
+          },
+          "completeComparison": false,
+          "completeResourceEvidence": true,
+          "caseGatesPassed": false,
+          "measuredGateFailures": {
+            "latencyPairs": [],
+            "rssPairs": []
+          },
+          "pairs": [
+            {
+              "pair": 1,
+              "candidateP95": 679.796689,
+              "latencyPassed": false,
+              "rssPassed": true,
+              "complete": false,
+              "sampledTreePeakRssBytes": {
+                "baseline": 855695360,
+                "candidate": 816582656
+              }
+            },
+            {
+              "pair": 2,
+              "candidateP95": 675.639947,
+              "latencyPassed": false,
+              "rssPassed": true,
+              "complete": false,
+              "sampledTreePeakRssBytes": {
+                "candidate": 802701312,
+                "baseline": 859873280
+              }
+            },
+            {
+              "pair": 3,
+              "candidateP95": 693.491347,
+              "latencyPassed": false,
+              "rssPassed": true,
+              "complete": false,
+              "sampledTreePeakRssBytes": {
+                "baseline": 882434048,
+                "candidate": 782884864
+              }
+            }
+          ]
+        },
+        {
+          "case": "10000-dense",
+          "artifactId": 14766946460,
+          "file": "recall-vector-10000-dense-production.json",
+          "sha256": "a46ab4914df741eedc667b788c6072c34db6b9af2a5ca9e4e8c41968a9650436",
+          "identityVerified": true,
+          "fixture": {
+            "corpusGeneration": "1c5a578f68d01f19eadb2115668177fa918e277d430b9d4fb22cb9ba9fe7d152",
+            "databaseSha256": "6f3f74e389e1773fb2c0468feef2df36106a96d1419d4004159d9c333816c939",
+            "lexicalDatabaseHashes": {
+              "baseline": "c3a475669b099f6fe3e27ba69eb9a2ec6a49dbb9fe4f9caae3786ec7f24f50dd",
+              "candidate": "733523c84546040ee88b569a29ab8de600f76a04873dce033f6c55262da4f1f2"
+            }
+          },
+          "nativeBinarySha256": "bd08f0634a32eaf76dd2b42b00e985cc43dbed488c23457a0b85bdac40501236",
+          "captureIntegrityPassed": true,
+          "engineDiscriminatorPassed": true,
+          "engineProof": {
+            "baseline": {
+              "success": false,
+              "reason": "worker-failed"
+            },
+            "candidate": {
+              "success": true
+            }
+          },
+          "warmSamples": {
+            "baseline": 90,
+            "candidate": 90
+          },
+          "warmFailures": {
+            "baseline": {},
+            "candidate": {}
+          },
+          "firstUse": {
+            "baseline": {
+              "success": true,
+              "milliseconds": 397.707054
+            },
+            "candidate": {
+              "success": true,
+              "milliseconds": 272.209732
+            }
+          },
+          "completeComparison": true,
+          "completeResourceEvidence": true,
+          "caseGatesPassed": true,
+          "measuredGateFailures": {
+            "latencyPairs": [],
+            "rssPairs": []
+          },
+          "pairs": [
+            {
+              "pair": 1,
+              "baselineP95": 400.039412,
+              "candidateP95": 294.308226,
+              "latencyPassed": true,
+              "rssPassed": true,
+              "complete": true,
+              "sampledTreePeakRssBytes": {
+                "baseline": 520200192,
+                "candidate": 483528704
+              }
+            },
+            {
+              "pair": 2,
+              "baselineP95": 393.122213,
+              "candidateP95": 287.014724,
+              "latencyPassed": true,
+              "rssPassed": true,
+              "complete": true,
+              "sampledTreePeakRssBytes": {
+                "candidate": 480096256,
+                "baseline": 543166464
+              }
+            },
+            {
+              "pair": 3,
+              "baselineP95": 393.876015,
+              "candidateP95": 297.738006,
+              "latencyPassed": true,
+              "rssPassed": true,
+              "complete": true,
+              "sampledTreePeakRssBytes": {
+                "baseline": 532967424,
+                "candidate": 505466880
+              }
+            }
+          ]
+        },
+        {
+          "case": "10000-tied",
+          "artifactId": 14766946460,
+          "file": "recall-vector-10000-tied-production.json",
+          "sha256": "1678aea929869ea51da20e426dfc64942b8f52c30f41d9d3e398f27877928176",
+          "identityVerified": true,
+          "fixture": {
+            "corpusGeneration": "1c5a578f68d01f19eadb2115668177fa918e277d430b9d4fb22cb9ba9fe7d152",
+            "databaseSha256": "eb7e82677ca154e4469eb920996b1d909363967165c9ff60af2ca8e76845701e",
+            "lexicalDatabaseHashes": {
+              "baseline": "047574943682eca1affd58a36e9816350ceaa5165985e56b8ecee6bbfc695c96",
+              "candidate": "1d1141a76d9cbc3860cfd604cf145e937e9c94f796f70369308804941d8a2018"
+            }
+          },
+          "nativeBinarySha256": "bd08f0634a32eaf76dd2b42b00e985cc43dbed488c23457a0b85bdac40501236",
+          "captureIntegrityPassed": true,
+          "engineDiscriminatorPassed": true,
+          "engineProof": {
+            "baseline": {
+              "success": false,
+              "reason": "worker-failed"
+            },
+            "candidate": {
+              "success": true
+            }
+          },
+          "warmSamples": {
+            "baseline": 90,
+            "candidate": 90
+          },
+          "warmFailures": {
+            "baseline": {},
+            "candidate": {}
+          },
+          "firstUse": {
+            "baseline": {
+              "success": true,
+              "milliseconds": 388.305547
+            },
+            "candidate": {
+              "success": true,
+              "milliseconds": 292.771317
+            }
+          },
+          "completeComparison": true,
+          "completeResourceEvidence": true,
+          "caseGatesPassed": true,
+          "measuredGateFailures": {
+            "latencyPairs": [],
+            "rssPairs": []
+          },
+          "pairs": [
+            {
+              "pair": 1,
+              "baselineP95": 399.791623,
+              "candidateP95": 302.24522,
+              "latencyPassed": true,
+              "rssPassed": true,
+              "complete": true,
+              "sampledTreePeakRssBytes": {
+                "baseline": 523034624,
+                "candidate": 484728832
+              }
+            },
+            {
+              "pair": 2,
+              "baselineP95": 384.056138,
+              "candidateP95": 294.303814,
+              "latencyPassed": true,
+              "rssPassed": true,
+              "complete": true,
+              "sampledTreePeakRssBytes": {
+                "candidate": 483094528,
+                "baseline": 550178816
+              }
+            },
+            {
+              "pair": 3,
+              "baselineP95": 383.851701,
+              "candidateP95": 294.782341,
+              "latencyPassed": true,
+              "rssPassed": true,
+              "complete": true,
+              "sampledTreePeakRssBytes": {
+                "baseline": 553578496,
+                "candidate": 509145088
+              }
+            }
+          ]
+        }
+      ]
     },
     {
       "target": "bun-linux-x64-baseline-musl",
-      "status": "not-run",
+      "status": "incomplete-qualification-evidence",
       "qualified": false,
-      "completedCases": [],
-      "captures": []
+      "jobId": 137276580784,
+      "jobConclusion": "success",
+      "failedSteps": [],
+      "artifactId": 14767109300,
+      "setupSmoke": {
+        "file": "setup-smoke.json",
+        "sha256": "ea0503fc32d9bc5718e3937f5218ab8e6428c6cb2248d52b7f8686719d0d1663",
+        "engineProofPassed": true,
+        "captureCompleted": true
+      },
+      "completedCases": ["10000-dense", "10000-tied"],
+      "captures": [
+        {
+          "case": "100000-dense",
+          "artifactId": 14767109300,
+          "file": "recall-vector-100000-dense-production.json",
+          "sha256": "901a9aef96d399501477c77db122c18e4af9c325dd8048108b8f7f5d68cc664a",
+          "identityVerified": true,
+          "fixture": {
+            "corpusGeneration": "c4bf799fd21c8e8a715f9e1be4c29cc2c71b74e89e4279f7bb3ebae237c223c1",
+            "databaseSha256": "e285b623e8b2ad32e2d6c29f098741b923e4e05c3621fa781bc4de91fdb87efd",
+            "lexicalDatabaseHashes": {
+              "baseline": "86bb90957c35cc344c2f84cf28b01c8a47683dce07a0063f48785b5e44f7ed3f",
+              "candidate": "e118daa03c03fd2660de849eb90c199088feaee32415676c2ae606a8a57b3ef5"
+            }
+          },
+          "nativeBinarySha256": "9c717e3cce1c74784079589c5367e3af8b895820d3292f8b2e8915ded50cc4ec",
+          "captureIntegrityPassed": true,
+          "engineDiscriminatorPassed": true,
+          "engineProof": {
+            "baseline": {
+              "success": false,
+              "reason": "worker-failed"
+            },
+            "candidate": {
+              "success": true
+            }
+          },
+          "warmSamples": {
+            "baseline": 90,
+            "candidate": 90
+          },
+          "warmFailures": {
+            "baseline": {
+              "budget-exhausted": 90
+            },
+            "candidate": {}
+          },
+          "firstUse": {
+            "baseline": {
+              "success": false,
+              "milliseconds": 914.660912,
+              "reason": "budget-exhausted"
+            },
+            "candidate": {
+              "success": true,
+              "milliseconds": 744.297002
+            }
+          },
+          "completeComparison": false,
+          "completeResourceEvidence": true,
+          "caseGatesPassed": false,
+          "measuredGateFailures": {
+            "latencyPairs": [],
+            "rssPairs": []
+          },
+          "pairs": [
+            {
+              "pair": 1,
+              "candidateP95": 774.451706,
+              "latencyPassed": false,
+              "rssPassed": true,
+              "complete": false,
+              "sampledTreePeakRssBytes": {
+                "baseline": 824651776,
+                "candidate": 788807680
+              }
+            },
+            {
+              "pair": 2,
+              "candidateP95": 777.762584,
+              "latencyPassed": false,
+              "rssPassed": true,
+              "complete": false,
+              "sampledTreePeakRssBytes": {
+                "candidate": 767262720,
+                "baseline": 842162176
+              }
+            },
+            {
+              "pair": 3,
+              "candidateP95": 774.934703,
+              "latencyPassed": false,
+              "rssPassed": true,
+              "complete": false,
+              "sampledTreePeakRssBytes": {
+                "baseline": 846942208,
+                "candidate": 754614272
+              }
+            }
+          ]
+        },
+        {
+          "case": "100000-tied",
+          "artifactId": 14767109300,
+          "file": "recall-vector-100000-tied-production.json",
+          "sha256": "3ec27711c45aad885fa58603ee61a1afe9e3606be4c3e7509b474511c90b0795",
+          "identityVerified": true,
+          "fixture": {
+            "corpusGeneration": "c4bf799fd21c8e8a715f9e1be4c29cc2c71b74e89e4279f7bb3ebae237c223c1",
+            "databaseSha256": "bb9b1e9559f3a60bcb598162a2faa9f92a5fa7fedff1171d280de36255f4458f",
+            "lexicalDatabaseHashes": {
+              "baseline": "d6f9e6dcf5e7674373363e6ca61ca12c6be131d75e6334e1088f9996d7b3df4c",
+              "candidate": "e7f6d08d7761f84b00eca007ff2cd83341282e8d0caee75048a5c340efeed877"
+            }
+          },
+          "nativeBinarySha256": "9c717e3cce1c74784079589c5367e3af8b895820d3292f8b2e8915ded50cc4ec",
+          "captureIntegrityPassed": true,
+          "engineDiscriminatorPassed": true,
+          "engineProof": {
+            "baseline": {
+              "success": false,
+              "reason": "worker-failed"
+            },
+            "candidate": {
+              "success": true
+            }
+          },
+          "warmSamples": {
+            "baseline": 90,
+            "candidate": 90
+          },
+          "warmFailures": {
+            "baseline": {
+              "budget-exhausted": 90
+            },
+            "candidate": {}
+          },
+          "firstUse": {
+            "baseline": {
+              "success": false,
+              "milliseconds": 919.550314,
+              "reason": "budget-exhausted"
+            },
+            "candidate": {
+              "success": true,
+              "milliseconds": 789.280539
+            }
+          },
+          "completeComparison": false,
+          "completeResourceEvidence": true,
+          "caseGatesPassed": false,
+          "measuredGateFailures": {
+            "latencyPairs": [],
+            "rssPairs": []
+          },
+          "pairs": [
+            {
+              "pair": 1,
+              "candidateP95": 813.283289,
+              "latencyPassed": false,
+              "rssPassed": true,
+              "complete": false,
+              "sampledTreePeakRssBytes": {
+                "baseline": 825495552,
+                "candidate": 786214912
+              }
+            },
+            {
+              "pair": 2,
+              "candidateP95": 816.115978,
+              "latencyPassed": false,
+              "rssPassed": true,
+              "complete": false,
+              "sampledTreePeakRssBytes": {
+                "candidate": 763396096,
+                "baseline": 843558912
+              }
+            },
+            {
+              "pair": 3,
+              "candidateP95": 808.376376,
+              "latencyPassed": false,
+              "rssPassed": true,
+              "complete": false,
+              "sampledTreePeakRssBytes": {
+                "baseline": 843653120,
+                "candidate": 769400832
+              }
+            }
+          ]
+        },
+        {
+          "case": "10000-dense",
+          "artifactId": 14767109300,
+          "file": "recall-vector-10000-dense-production.json",
+          "sha256": "127d0b768e1ad2819fbcfdfcb25affa98649b3a6872e09043a5b8cc1cbcd9371",
+          "identityVerified": true,
+          "fixture": {
+            "corpusGeneration": "1c5a578f68d01f19eadb2115668177fa918e277d430b9d4fb22cb9ba9fe7d152",
+            "databaseSha256": "71ad1abdd4da4f64bf0678dc0200290eea3be1a58def0ce09643b8757c9db5f8",
+            "lexicalDatabaseHashes": {
+              "baseline": "bd89a5bd57cc698f0452ad0854cb7224e2f9fb206eae0e7b4e0fca0baedb03f2",
+              "candidate": "a606926ec5645cf594db3446c14cc2b149138a8a9d9b4bbd1ea3780aec30348d"
+            }
+          },
+          "nativeBinarySha256": "9c717e3cce1c74784079589c5367e3af8b895820d3292f8b2e8915ded50cc4ec",
+          "captureIntegrityPassed": true,
+          "engineDiscriminatorPassed": true,
+          "engineProof": {
+            "baseline": {
+              "success": false,
+              "reason": "worker-failed"
+            },
+            "candidate": {
+              "success": true
+            }
+          },
+          "warmSamples": {
+            "baseline": 90,
+            "candidate": 90
+          },
+          "warmFailures": {
+            "baseline": {},
+            "candidate": {}
+          },
+          "firstUse": {
+            "baseline": {
+              "success": true,
+              "milliseconds": 383.55965
+            },
+            "candidate": {
+              "success": true,
+              "milliseconds": 270.837476
+            }
+          },
+          "completeComparison": true,
+          "completeResourceEvidence": true,
+          "caseGatesPassed": true,
+          "measuredGateFailures": {
+            "latencyPairs": [],
+            "rssPairs": []
+          },
+          "pairs": [
+            {
+              "pair": 1,
+              "baselineP95": 397.254406,
+              "candidateP95": 286.315196,
+              "latencyPassed": true,
+              "rssPassed": true,
+              "complete": true,
+              "sampledTreePeakRssBytes": {
+                "baseline": 486424576,
+                "candidate": 451821568
+              }
+            },
+            {
+              "pair": 2,
+              "baselineP95": 389.776278,
+              "candidateP95": 299.740488,
+              "latencyPassed": true,
+              "rssPassed": true,
+              "complete": true,
+              "sampledTreePeakRssBytes": {
+                "candidate": 450875392,
+                "baseline": 501940224
+              }
+            },
+            {
+              "pair": 3,
+              "baselineP95": 393.9381,
+              "candidateP95": 292.509537,
+              "latencyPassed": true,
+              "rssPassed": true,
+              "complete": true,
+              "sampledTreePeakRssBytes": {
+                "baseline": 502857728,
+                "candidate": 467582976
+              }
+            }
+          ]
+        },
+        {
+          "case": "10000-tied",
+          "artifactId": 14767109300,
+          "file": "recall-vector-10000-tied-production.json",
+          "sha256": "3ac55cbfc6cdda7871ad32e215fd78edf9cf3dc7623daabdbc8b666f8b93b6c4",
+          "identityVerified": true,
+          "fixture": {
+            "corpusGeneration": "1c5a578f68d01f19eadb2115668177fa918e277d430b9d4fb22cb9ba9fe7d152",
+            "databaseSha256": "8d7badcb45783a8f2aa63ac74fab94d4be360075c38d4d7eb5da2b47156cda8d",
+            "lexicalDatabaseHashes": {
+              "baseline": "d10b93ee4667d91bd4f95d6deb0f6202e5a2ea1b1605d7523286231e36192384",
+              "candidate": "4d8d0644d0260c6943694e1c029a32c287b484462d7e16f3f8261091c2d48f8c"
+            }
+          },
+          "nativeBinarySha256": "9c717e3cce1c74784079589c5367e3af8b895820d3292f8b2e8915ded50cc4ec",
+          "captureIntegrityPassed": true,
+          "engineDiscriminatorPassed": true,
+          "engineProof": {
+            "baseline": {
+              "success": false,
+              "reason": "worker-failed"
+            },
+            "candidate": {
+              "success": true
+            }
+          },
+          "warmSamples": {
+            "baseline": 90,
+            "candidate": 90
+          },
+          "warmFailures": {
+            "baseline": {},
+            "candidate": {}
+          },
+          "firstUse": {
+            "baseline": {
+              "success": true,
+              "milliseconds": 393.494173
+            },
+            "candidate": {
+              "success": true,
+              "milliseconds": 297.557751
+            }
+          },
+          "completeComparison": true,
+          "completeResourceEvidence": true,
+          "caseGatesPassed": true,
+          "measuredGateFailures": {
+            "latencyPairs": [],
+            "rssPairs": []
+          },
+          "pairs": [
+            {
+              "pair": 1,
+              "baselineP95": 399.077828,
+              "candidateP95": 306.99558,
+              "latencyPassed": true,
+              "rssPassed": true,
+              "complete": true,
+              "sampledTreePeakRssBytes": {
+                "baseline": 489381888,
+                "candidate": 452194304
+              }
+            },
+            {
+              "pair": 2,
+              "baselineP95": 390.455982,
+              "candidateP95": 297.122857,
+              "latencyPassed": true,
+              "rssPassed": true,
+              "complete": true,
+              "sampledTreePeakRssBytes": {
+                "candidate": 452857856,
+                "baseline": 518688768
+              }
+            },
+            {
+              "pair": 3,
+              "baselineP95": 403.631525,
+              "candidateP95": 301.089833,
+              "latencyPassed": true,
+              "rssPassed": true,
+              "complete": true,
+              "sampledTreePeakRssBytes": {
+                "baseline": 519340032,
+                "candidate": 473546752
+              }
+            }
+          ]
+        }
+      ]
     },
     {
       "target": "bun-windows-arm64",
-      "status": "not-run",
+      "status": "incomplete-qualification-evidence",
       "qualified": false,
+      "jobId": 137276580795,
+      "jobConclusion": "failure",
+      "failedSteps": ["Capture serial production pairs without a required timing gate"],
+      "artifactId": 14767948109,
+      "setupSmoke": null,
       "completedCases": [],
-      "captures": []
+      "captures": [],
+      "failureDetail": "The Windows process-tree helper missed its ready-frame deadline. The failure-telemetry test also found no helper record in its checkpoint. The artifact contains only the driver script."
     },
     {
       "target": "bun-windows-x64-baseline",
-      "status": "not-run",
+      "status": "incomplete-qualification-evidence",
       "qualified": false,
+      "jobId": 137276581079,
+      "jobConclusion": "failure",
+      "failedSteps": ["Capture serial production pairs without a required timing gate"],
+      "artifactId": 14768337251,
+      "setupSmoke": null,
       "completedCases": [],
-      "captures": []
+      "captures": [],
+      "failureDetail": "The Windows process-tree helper missed its ready-frame deadline. The failure-telemetry integration test passed. The artifact contains only the driver script."
     }
   ],
   "requiredCases": ["100000-dense", "100000-tied", "10000-dense", "10000-tied"],
-  "reason": "All eight profiles require actual matching native-host evidence, exact baseline/candidate/query/oracle provenance, three paired runs of thirty warm requests per arm, separate first use and complete recursive process-tree RSS. Workflow declarations and cross-compiles do not qualify."
+  "reason": "Qualification needs all four cases on every target. Complete comparisons include exact identity, worker proof, first-use and warm parity. Measured gate failures require a complete comparison and the relevant paired measurements."
 }

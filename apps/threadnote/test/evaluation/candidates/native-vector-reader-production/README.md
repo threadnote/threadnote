@@ -1,8 +1,10 @@
 # Native vector reader production evidence
 
-Status: **unqualified**. The native-only all-eight rollout remains blocked by the approved R5 gates. Historical optional-native diagnostics are preserved without relabeling. The earlier SQLite/Rust pilot and the source-mode diagnostic are supporting experiments, not production qualification.
+The frozen 6.0.0 candidate contains the shipped Rust vector reader. All eight native jobs finished, and ten of 32 required comparisons completed. Two of those missed the R5 limits, so the decision is `rollback-required`. [R5 capture run], [R5 decision].
 
-The reusable capture is a mode of the existing vector benchmark:
+The 100,000-vector cases lacked complete paired timings. Intel macOS stopped at the execution discriminator, and both Windows jobs stopped at the process-tree sampler pretest. The release headline limit separately stopped Bazel preflight and was fixed after this candidate was frozen. [Profile ledger], [PR 1142].
+
+Run the capture from the recorded 6.0.0 candidate checkout:
 
 ```sh
 bun scripts/benchmark-recall-vectors.ts \
@@ -11,12 +13,15 @@ bun scripts/benchmark-recall-vectors.ts \
   --model-file /absolute/path/to/the/pinned/bge-small-en-v1.5-q8.gguf \
   --distribution-root /absolute/path/to/frozen/native-dist \
   --baseline-distribution-root /absolute/path/to/frozen/ts66-dist \
+  --baseline-source-root /absolute/path/to/clean/ts66-checkout \
   --output /absolute/path/to/capture.json
 ```
 
 Run the four cases serially: `100000/dense`, `100000/tied`, `10000/dense`, and `10000/tied`. The workflow owns model-cache availability and building a strict compiled candidate; the benchmark never downloads a model or builds native code. The model must match the builtin BGE SHA256. `--output` is required. Smaller `--documents`, `--samples` and `--pairs` support bounded setup smokes and discriminators, and are marked diagnostic.
 
 Both input distributions must remain frozen throughout capture. The TypeScript semantic baseline is independently built from commit `66f4c1d8baed033ec484f4db2895ea2252b4e2d0`; candidate and baseline have separate executable/source/asset identities. Owned physical copies retain complete before/after inventories. The harness never hardlinks a globally installed payload or executes its original path. Private homes and install roots isolate worker execution.
+
+The release capture prepares the v13 and v15 lexical indexes with each arm's writer. Both indexes must report the same ready corpus generation and document count. The compiled workers share one vector database, and the capture records both lexical database hashes.
 
 The original Darwin development installation can be authenticated with its genuine receipt and complete payload inventory; its old release metadata has no `sourceIdentity` and is never rewritten. A CI baseline build records benchmark-only provenance, not an installation receipt. Before staging an inference overlay, record the clean original build using:
 
@@ -29,7 +34,7 @@ bun scripts/benchmark-recall-vectors.ts --write-baseline-provenance \
 
 CI baseline dependency installation disables lifecycle scripts to prevent an implicit llama build/download. Musl baseline builds additionally use `--libc=glibc` to stage the original GNU optional package as build input only; provenance records that exact command, and the GNU closure is replaced before runtime capture. Candidate installation stays native to its target.
 
-For a private clone of the genuine installed Darwin baseline, omit `--baseline-source-root`; the command verifies its original receipt and records origin `verified-development-install` with that unchanged receipt before overlay staging. Keep an untouched original clone separately. This records existing evidence and does not invent a clean CI build.
+For a private clone of the genuine installed Darwin baseline, the provenance command accepts omission of `--baseline-source-root`. It verifies the original receipt and records origin `verified-development-install` with that receipt before overlay staging. Keep an untouched original clone separately. The production capture requires the clean TS66 source to build the v13 lexical index.
 
 Stage the candidate's genuine hash-verified inference overlay into the private baseline using the owning inference assembler, then freeze both inputs. Original source/executable/release identity, original component inventory, shared overlay and final assembled inventory remain distinct. Both arms must have identical verified inference bytes. The shared warm parent loads the staged module from the frozen candidate input path using the existing engine host/environment foreground, context and GPU policy; its native module remains available for the whole runtime lifetime, including Windows DLL loading. Missing real inference on any profile blocks that profile.
 
@@ -50,6 +55,11 @@ R5 remains unchanged:
 - No process-tree sampled peak RSS growth larger than 10%.
 - Exact output/query/scalar-oracle parity, separately reported first use, and all existing deadlines and ownership/freshness/authorization fences.
 
-Each capture reports only its case gates. Its `qualified` field stays false because a single case cannot establish all eight profiles and all controls. `decision.json` records the overall adoption decision; `platform-results.json` lists every required profile as pending until native-host evidence is captured. `local-results.json` currently contains diagnostic observations and failures; `linux-results.json` explicitly records the unrun qualification. No formal R5 pass is claimed.
+Each capture reports its own case gates. The profile ledger binds each available capture by artifact ID, file name, SHA-256, target and job ID. It reports missing or incomplete comparisons and preserves the first-use and warm failure counts. The aggregate decision requires all four cases on every profile. `local-results.json` and `linux-results.json` retain the earlier diagnostic observations.
 
 A two-document Darwin correctness probe confirmed that the unchanged TS66 executable accepts a genuine shared inference overlay, retains its original receipt, runs real staged BGE inference and the actual owned worker under the unchanged 2s deadline, and matches exact ordered scalar/query results. Original and hybrid inventories remained unchanged. `local-results.json` records that compatibility proof separately; it contains no performance qualification.
+
+[R5 capture run]: https://github.com/threadnote/threadnote/actions/runs/45044682108
+[R5 decision]: decision.json
+[Profile ledger]: platform-results.json
+[PR 1142]: https://github.com/threadnote/threadnote/pull/1142

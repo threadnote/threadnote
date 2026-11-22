@@ -150,6 +150,7 @@ import {
   parseCodeGraphBenchmarkSamplerArtifact,
   type CodeGraphBenchmarkSamplerArtifact,
 } from './code-graph-benchmark-sampler.js';
+import {WINDOWS_PROCESS_TREE_COLD_READY_TIMEOUT_MS} from './windows-process-tree-sampler.js';
 import {
   verifyManagedDevelopmentRuntimeForSourceCheckout,
   type DevelopmentRuntimeEvidence,
@@ -4020,7 +4021,10 @@ export const startExternalSampler = Effect.fn('benchmarkCodeGraph.startExternalS
     stderr: 'pipe',
     stdout: 'ignore',
   });
-  yield* waitForExternalSamplerReady(fs, readyPath, subprocess).pipe(
+  const readyTimeoutMs =
+    EXTERNAL_SAMPLER_READY_TIMEOUT_MS +
+    (windowsProcessTree && process.platform === 'win32' ? WINDOWS_PROCESS_TREE_COLD_READY_TIMEOUT_MS : 0);
+  yield* waitForExternalSamplerReady(fs, readyPath, subprocess, readyTimeoutMs).pipe(
     Effect.onError(() => terminateExternalSampler(subprocess, readyPath, fs).pipe(Effect.orDie)),
   );
   let currentPhase = name === 'bootstrap' ? 'preparing-fixture' : 'start';
@@ -4076,6 +4080,7 @@ const waitForExternalSamplerReady = Effect.fn('benchmarkCodeGraph.waitForExterna
   fs: FileSystem.FileSystem,
   readyPath: string,
   subprocess: ReturnType<typeof Bun.spawn>,
+  readyTimeoutMs: number,
 ) {
   const startedAt = yield* Clock.currentTimeMillis;
   while (!(yield* fs.exists(readyPath))) {
@@ -4084,9 +4089,9 @@ const waitForExternalSamplerReady = Effect.fn('benchmarkCodeGraph.waitForExterna
         message: `Code graph benchmark sampler exited before becoming ready.`,
       });
     }
-    if ((yield* Clock.currentTimeMillis) - startedAt >= EXTERNAL_SAMPLER_READY_TIMEOUT_MS) {
+    if ((yield* Clock.currentTimeMillis) - startedAt >= readyTimeoutMs) {
       return yield* ScriptError.make({
-        message: `Code graph benchmark sampler was not ready within ${EXTERNAL_SAMPLER_READY_TIMEOUT_MS} ms.`,
+        message: `Code graph benchmark sampler was not ready within ${readyTimeoutMs} ms.`,
       });
     }
     yield* Effect.sleep(10);
