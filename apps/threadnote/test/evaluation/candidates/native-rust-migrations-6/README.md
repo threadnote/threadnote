@@ -21,10 +21,12 @@ paired comparison before it can qualify.
 3. Qualify the already-shipped [PR 1049] recall reader against the frozen TS66
    executable. Both Darwin profiles in the [first capture workflow run] hit
    the same setup failure. TS66 expects a v13 lexical index and the fixture
-   only built v15. The run stopped before paired measurement. Build both
-   schemas over the same canonical corpus, then rerun the matrix. A measured
-   failure invokes the rollback decision in the original plan, with rollback
-   scoped separately.
+   only built v15. The release capture builds both lexical schemas over the
+   same canonical corpus and includes fixes for Linux artifact ownership and
+   Windows checkout byte stability. Two complete 10,000-vector comparisons
+   missed the latency or memory limit. The resulting decision is
+   `rollback-required`, with the executable rollback scoped separately.
+   [Release capture], [R5 profile ledger].
 4. Use the evidence to decide which graph candidates merit an experiment.
    Require all eight recall profiles to qualify before expanding native vector
    scoring to graph search. Require stage attribution before proposing any
@@ -73,5 +75,7 @@ stay outside this candidate set.
 [PR 1079]: https://github.com/threadnote/threadnote/pull/1079
 [PR 1094]: https://github.com/threadnote/threadnote/pull/1094
 [first capture workflow run]: https://github.com/threadnote/threadnote/actions/runs/45013759793
+[release capture]: https://github.com/threadnote/threadnote/actions/runs/45044682108
+[R5 profile ledger]: ../native-vector-reader-production/platform-results.json
 [decision.json]: decision.json
 [p4-decisions.json]: p4-decisions.json
