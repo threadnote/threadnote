@@ -1,0 +1,39 @@
+name: Disposable stopped-watch installer proof
+on:
+  push:
+    branches: [codex/stopped-watch-install-proof]
+
+permissions:
+  contents: read
+
+jobs:
+  macos-proof:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: e0d1082394bb2d899cb1e6d816e4cb6ae9a6a220
+          path: candidate-source
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install 1.89.0 --profile minimal
+      - name: Verify exact install and stopped-watch drain
+        env:
+          WATCH_PROOF_COMMIT: e0d1082394bb2d899cb1e6d816e4cb6ae9a6a220
+          RUSTUP_TOOLCHAIN: '1.89.0'
+          CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP: 'false'
+        run: bash .github/scripts/stopped-watch-install-proof.sh
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: stopped-watch-install-proof
+          path: ${{ runner.temp }}/stopped-watch-install-proof/evidence/
+          retention-days: 7
+          if-no-files-found: warn
