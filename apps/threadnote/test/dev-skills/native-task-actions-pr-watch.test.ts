@@ -18,6 +18,7 @@ import {resolveNativeTaskPrWatch} from '../../src/workflow_automation/task_pr_wa
 import {makeNativeTaskPrWatchCommand} from '../../src/effect/workflow_cli.js';
 import {runNativeTaskAction as runNativeTaskActionCore} from '../../src/workflow_automation/task_actions.js';
 import {readNativeWatch, writeNativeWatch} from '../../src/workflow_automation/watch_store.js';
+import {nativeWatchNotice} from '../../src/workflow_automation/watch_notification_state.js';
 import {applyDevSkills, statusDevSkills} from '../../src/dev_skills/index.js';
 import {SystemInfo} from '@threadnote/platform/system';
 import {nativeCloseoutJournalPath, readNativeWorkflowState} from '../../src/workflow_automation/store.js';
@@ -3948,7 +3949,37 @@ describe('native task actions', () => {
         const currentHead = canonical.state.cycle?.state.phases.one?.head;
         if (!currentHead) throw new Error('Expected the current canonical head.');
         const currentWatch = yield* readNativeWatch(f.config, expectedWatchId);
-        if (!currentWatch) throw new Error('Expected the qualified watch.');
+        const notification = currentWatch?.envelope.notification;
+        if (!currentWatch || !notification?.outbox) throw new Error('Expected the qualified watch notice.');
+        const notice = nativeWatchNotice(
+          {
+            home: f.config.agentContextHome,
+            watchId: expectedWatchId,
+            consumerId: notification.consumerId,
+            wakeupId: notification.wakeupId,
+          },
+          notification.outbox,
+        );
+        const arrivedRoute = /^Threadnote watch event\. Route=(\{[^}]+\})\./u.exec(notice);
+        if (!arrivedRoute) throw new Error('Expected the qualified notice route.');
+        const mcp = new EffectMcpServerAdapter('test', '1', 'fixture');
+        registerWorkflowTaskTool(mcp, f.config);
+        const runBeforeNotice = yield* f.fs.readFileString(f.statePath());
+        const watchBeforeNotice = yield* f.fs.readFileString(watchFile(expectedWatchId));
+        const recovered = yield* mcp.invokeTool('workflow_task_view', {
+          runId: updatedRoute.runId,
+          callerCwd: updatedRoute.callerCwd,
+          phaseId: 'one',
+          noticeRoute: object(JSON.parse(arrivedRoute[1])),
+        });
+        expect(recovered.structuredContent).toMatchObject({
+          status: 'notice-recovered',
+          continuation: {validationRef: updated.validationRef, noticeRef: expect.any(String)},
+        });
+        const continuation = object(object(recovered.structuredContent).continuation);
+        expect(decodeNativeTaskActionRef(String(continuation.deliveryRef))?.delivery?.headSha).toBe(currentHead);
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(runBeforeNotice);
+        expect(yield* f.fs.readFileString(watchFile(expectedWatchId))).toBe(watchBeforeNotice);
         yield* writeSimulatedTaskWatch(f, currentWatch, updated, updated.prUrl, currentHead, true);
         yield* runNativeTaskAction(f.config, {command: 'watch-pr', operation: 'complete', ...updatedRoute});
         const beforeFinish = yield* f.fs.readFileString(f.statePath());

@@ -290,7 +290,7 @@ export const readNativeTaskNoticeView = (config: RuntimeConfig, input: unknown) 
     const phase = stored.state.cycle?.state.phases[phaseId];
     const proofs = [
       ...(phase && (phase.status === 'published' || phase.status === 'merged') ? [phase] : []),
-      ...(phase?.history ?? []),
+      ...[...(phase?.history ?? [])].reverse(),
     ];
     const stateDir = path.join(home, 'workflow-automations', 'native-watch-v1');
     const candidates = EffectArray.flatMap(proofs, proof => {
@@ -302,17 +302,25 @@ export const readNativeTaskNoticeView = (config: RuntimeConfig, input: unknown) 
         ? [candidate]
         : [];
     });
-    if (candidates.length !== 1) return yield* foreignRoute;
-    const candidate = candidates[0];
-    if ((yield* fs.realPath(candidate.baseline.repo)) !== checkout)
+    const [eligible] = candidates;
+    if (!eligible) return yield* foreignRoute;
+    if ((yield* fs.realPath(eligible.baseline.repo)) !== checkout)
       return yield* fail('wrong-checkout', 'Use the checkout bound to this canonical watch.');
-    const {watch, wakeupId} = yield* readNativeTaskPhaseWatch(config, runId, phaseId, candidate.watchId);
+    const {watch, wakeupId} = yield* readNativeTaskPhaseWatch(config, runId, phaseId, eligible.watchId);
     const {state, notification, collector, stopRequested} = watch.envelope;
     const outbox = notification?.outbox;
+    // A new reviewed head of the same PR reuses its existing watch and consumer.
+    const candidate = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        candidates,
+        item =>
+          state.pr === item.prUrl &&
+          (item.delivery.pr?.state !== 'merged' ||
+            (state.prState === 'merged' && state.head === item.delivery.watch?.headSha)),
+      ),
+    );
     if (
-      state.pr !== candidate.prUrl ||
-      (candidate.delivery.pr?.state === 'merged' &&
-        (state.prState !== 'merged' || state.head !== candidate.delivery.watch?.headSha)) ||
+      !candidate ||
       state.consumer?.id !== candidate.consumerId ||
       noticeRoute.wakeupId !== wakeupId ||
       notification?.consumerId !== candidate.consumerId ||
