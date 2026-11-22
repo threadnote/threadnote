@@ -1,51 +1,47 @@
-name: Native workflow manual stress
-
+name: Windows ARM installed recall diagnostic
 on:
   workflow_dispatch:
-  workflow_call:
-
 permissions:
+  actions: read
   contents: read
-
 jobs:
-  authoring-history:
-    name: H100 full history (${{ matrix.os }})
+  recall:
+    runs-on: windows-11-arm
+    timeout-minutes: 18
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30 # Qualification budget, not a completion SLA.
+        lane: [1, 2, 3]
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.2
-      - run: bun install --frozen-lockfile
-      - name: Run 100 real saves and 100-root history traversal
-        shell: bash
-        env:
-          THREADNOTE_NATIVE_WORKFLOW_LOAD: manual-v1
+          bun-version: 1.4.4
+      - name: Install the original dependencies and Windows prerequisites
+        shell: pwsh
         run: |
-          echo "Source: $GITHUB_SHA; platform: $RUNNER_OS; start: $(date -u +%FT%TZ)"
-          bun --bun vitest run apps/threadnote/test/dev-skills/native-authoring-lifecycle.test.ts --testNamePattern 'retains and navigates 100 same-length revisions'
-          echo "Source: $GITHUB_SHA; platform: $RUNNER_OS; completed: $(date -u +%FT%TZ); saves: 100; history roots: 100"
-
-  windows-cloud-closeout:
-    name: Windows cloud publication and recovery
-    runs-on: windows-latest
-    timeout-minutes: 50 # Four cases, 10 minutes each; qualification budget only.
-    steps:
-      - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
+          bun install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          bun tools/ci/windows-workflow-prerequisites.ts
+      - name: Download the exact retained release payload
+        uses: actions/download-artifact@v8
         with:
-          bun-version: 1.4.2
-      - run: bun install --frozen-lockfile
-      - name: Run four real private Git cloud cases
+          artifact-ids: 14776927205
+          github-token: ${{ github.token }}
+          run-id: 45078542399
+          path: artifacts
+          merge-multiple: true
+      - name: Verify and unpack the ARM archive
         shell: bash
-        env:
-          THREADNOTE_NATIVE_WORKFLOW_CLOUD: manual-v1
         run: |
-          echo "Source: $GITHUB_SHA; platform: $RUNNER_OS; start: $(date -u +%FT%TZ)"
-          bun --bun vitest run apps/threadnote/test/dev-skills/native-closeout-cloud.test.ts
-          echo "Source: $GITHUB_SHA; platform: $RUNNER_OS; completed: $(date -u +%FT%TZ); cloud cases: 4"
+          find artifacts -maxdepth 2 -type f
+          (cd artifacts && sha256sum -c threadnote-windows-arm64.tar.gz.sha256)
+          mkdir -p dist
+          tar -xzf artifacts/threadnote-windows-arm64.tar.gz -C dist
+      - name: First fresh installed E2E fixture
+        run: bun --bun vitest run --config vitest.e2e.config.ts apps/threadnote/test/e2e/local-bins.e2e.ts --reporter=default
+      - name: Second fresh installed E2E fixture
+        if: ${{ !cancelled() && hashFiles('dist/threadnote.exe') != '' }}
+        run: bun --bun vitest run --config vitest.e2e.config.ts apps/threadnote/test/e2e/local-bins.e2e.ts --reporter=default

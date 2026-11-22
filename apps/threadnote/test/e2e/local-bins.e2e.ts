@@ -1529,6 +1529,35 @@ describe('built self-contained distribution', () => {
         arguments: {query: 'MCP-OBSIDIAN-881'},
         name: 'recall_context',
       });
+      if (requested.isError === true) {
+        const previous = new Set(parseProductionLog(productionLog).map(entry => entry.invocationId));
+        const latest = await readFile(join(home, 'logs', 'threadnote.log'), 'utf8');
+        const entries = latest.trim().split('\n').flatMap(line => {
+          try { return [JSON.parse(line)]; } catch { return []; }
+        }).filter(entry => entry.component === 'mcp' && entry.operation === 'recall_context' &&
+          !previous.has(entry.invocationId) && Date.parse(entry.timestamp) >= requestedAt);
+        const direct = (requested.content as {type: string; text?: string}[]).filter(item => item.type === 'text')
+          .map(item => item.text ?? '').join(' ').slice(0, 8192);
+        // Only checked-in error vocabulary and codes are published.
+        const sources = await execute('git', ['grep', '-h', '-E', 'message:|throw |failed|timed out|timeout|unavailable|deadline|failed to|could not', '--', 'apps/threadnote/src', 'packages/*/src'], {maxBuffer: 32 * 1024 * 1024});
+        const phrases = new Set<string>();
+        for (const match of sources.stdout.matchAll(/['"` ]([A-Za-z][A-Za-z0-9 ,._-]{15,180})['"`$]/g)) {
+          const phrase = match[1].trim();
+          if (phrase && direct.toLowerCase().includes(phrase.toLowerCase())) phrases.add(phrase);
+        }
+        const vocabulary = /\b(?:SQLITE_[A-Z_]+|SQLITE|EACCES|EAGAIN|EBUSY|EPERM|ENOENT|EEXIST|UNKNOWN|locked|busy|permission|denied|expired|timeout|timed out|budget|deadline|invalid|unavailable|not found|binding|resource|input|output|filesystem|lock|canonical|schema|sqlite|serialize|atomic|manifest|synchronize|maintenance|rename|read|write|worker|protocol|argument|corrupt|index|lexical|semantic|vector|missing|snapshot|operation|overload|interrupt|embedding|model|generation|database|queue|capacity|Cannot|failed|error)\b/gi;
+        console.log('ARM_RECALL_DIRECT_FAILURE', JSON.stringify({
+          phrases: [...phrases].sort((a,b) => b.length-a.length).slice(0, 8),
+          keywords: [...new Set(direct.match(vocabulary) ?? [])].slice(0, 45),
+          phases: entries.filter(entry => entry.event === 'invocation.finished').map(entry => ({
+            outcome: entry.outcome, errorType: entry.errorType, duration: entry.durationMilliseconds,
+            phases: (entry.phaseTimings ?? []).map((phase: {phase: string; outcome: string; errorType?: string}) =>
+              ({phase: phase.phase, outcome: phase.outcome, errorType: phase.errorType})),
+          })),
+        }));
+      } else {
+        console.log('ARM_RECALL_DIRECT_SUCCESS', Date.now() - requestedAt);
+      }
       expect(requested.isError, requested.isError === true ? await recallFailureStages('mcp') : undefined).not.toBe(
         true,
       );
