@@ -1,4 +1,4 @@
-name: Disposable ARM64 musl recall A/B
+name: Disposable ARM64 musl recall peak
 on:
   push:
     branches: [codex/recall-musl-rss-ab-diagnostic]
@@ -32,6 +32,7 @@ jobs:
           cp ../.github/scripts/recall-musl-diagnostic.sh .context/native-vector-capture/run.sh
           cp ../.github/scripts/recall-musl-frozen-lexical.patch .context/native-vector-capture/frozen-lexical.patch
           cp ../.github/scripts/recall-musl-control.patch .context/native-vector-capture/control-arm.patch
+          cp ../.github/scripts/recall-musl-linux-peak.patch .context/native-vector-capture/linux-peak.patch
           bun install --frozen-lockfile
       - name: Collect paired recall and per-process peak evidence
         working-directory: candidate
@@ -52,7 +53,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: recall-arm64-musl-same-host-ab
+          name: recall-arm64-musl-linux-peak
           path: candidate/.context/native-vector-capture/
           retention-days: 7
           if-no-files-found: warn

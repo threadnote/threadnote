@@ -15,7 +15,7 @@ test "$(git rev-parse HEAD)" = "$candidate"
 test -f "$model_file"
 test -z "$(git status --porcelain=v1 --untracked-files=normal)"
 {
-  printf 'mode=same-host-and-fixture-diagnostic\ncandidate=%s\ncontrol=%s\nbaseline=%s\n' "$candidate" "$control" "$baseline"
+  printf 'mode=same-host-linux-peak-diagnostic\ncandidate=%s\ncontrol=%s\nbaseline=%s\n' "$candidate" "$control" "$baseline"
   printf 'candidate_tree=%s\n' "$(git rev-parse 'HEAD^{tree}')"
   printf 'baseline_tree=%s\n' "$(git rev-parse "$baseline^{tree}")"
   printf 'control_tree=%s\n' "$(git rev-parse "$control^{tree}")"
@@ -78,9 +78,11 @@ export THREADNOTE_RECALL_AB_CONTROL_DIST="$control_root/dist"
 # Keep both exact native builds intact. Restore the released dual-index fixture and add one diagnostic control arm.
 git apply .context/native-vector-capture/frozen-lexical.patch
 git apply .context/native-vector-capture/control-arm.patch
-test "$(git diff --name-only)" = scripts/benchmark-recall-vectors.ts
-git diff --binary -- scripts/benchmark-recall-vectors.ts > "$output_dir/diagnostic-harness.patch"
-sha256sum scripts/benchmark-recall-vectors.ts >> "$output_dir/input-identities.txt"
+git apply .context/native-vector-capture/linux-peak.patch
+test "$(git diff --name-only | paste -sd ' ' -)" = 'scripts/benchmark-recall-vectors.ts scripts/code-graph-benchmark-sampler.ts'
+git diff --binary -- scripts/benchmark-recall-vectors.ts scripts/code-graph-benchmark-sampler.ts > "$output_dir/diagnostic-harness.patch"
+sha256sum scripts/benchmark-recall-vectors.ts scripts/code-graph-benchmark-sampler.ts >> "$output_dir/input-identities.txt"
+export THREADNOTE_RECALL_PEAK_LINUX=1
 
 capture() {
   local documents="$1" distribution="$2" pairs="$3" samples="$4" stem="$5"
@@ -92,4 +94,3 @@ capture() {
 }
 capture 2 dense 1 1 setup-smoke
 capture 10000 tied 4 30 tied-10000
-capture 100000 dense 4 12 dense-100000

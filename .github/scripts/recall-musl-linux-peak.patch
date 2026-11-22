@@ -1,0 +1,318 @@
+--- a/scripts/benchmark-recall-vectors.ts
++++ b/scripts/benchmark-recall-vectors.ts
+@@ -706,6 +706,14 @@
+ });
+ 
+ type ProductionBackend = 'baseline' | 'candidate' | 'control';
++const monotonicMicroseconds = () => Number(process.hrtime.bigint() / 1_000n);
++interface ProductionChildWindow {
++  readonly operation: string;
++  readonly milliseconds: number;
++  readonly timeoutMs: number | undefined;
++  readonly startMicroseconds: number;
++  readonly endMicroseconds: number;
++}
+ interface ProductionQuerySample {
+   readonly sample: number;
+   readonly milliseconds: number;
+@@ -713,7 +721,7 @@
+   readonly reason?: string;
+   readonly querySha256?: string;
+   readonly scoresSha256?: string;
+-  readonly children: readonly {operation: string; milliseconds: number; timeoutMs: number | undefined}[];
++  readonly children: readonly ProductionChildWindow[];
+ }
+ interface ProductionArmCapture {
+   readonly pair: number;
+@@ -726,6 +734,7 @@
+   resourceEvidenceComplete?: boolean;
+   samplerSetupMilliseconds?: number;
+   samplerStopMilliseconds?: number;
++  samplerLaunchWindow?: {startMicroseconds: number; readyMicroseconds: number};
+ }
+ 
+ const productionSourcePaths = [
+@@ -1530,13 +1539,15 @@
+           executablePath: executableFor(backend),
+           environment: () => environment,
+         };
+-        const children: {operation: string; milliseconds: number; timeoutMs: number | undefined}[] = [];
++        const children: ProductionChildWindow[] = [];
+         const observedCommands = CommandExecutor.of({
+           ...command,
+           execute: (executable, args, requestOptions) =>
+             Effect.gen(function* () {
+               const started = yield* Clock.currentTimeNanos;
++              const startMicroseconds = monotonicMicroseconds();
+               const reply = yield* command.execute(executable, args, requestOptions).pipe(Effect.result);
++              const endMicroseconds = monotonicMicroseconds();
+               const operation = requestOptions?.input
+                 ? (yield* Schema.decodeUnknownEffect(Schema.Struct({operation: Schema.String}))(
+                     JSON.parse(new TextDecoder().decode(requestOptions.input)),
+@@ -1546,6 +1557,8 @@
+                 operation,
+                 milliseconds: Number((yield* Clock.currentTimeNanos) - started) / NANOSECONDS_PER_MILLISECOND,
+                 timeoutMs: requestOptions?.timeoutMs,
++                startMicroseconds,
++                endMicroseconds,
+               });
+               return yield* reply._tag === 'Failure' ? Effect.fail(reply.failure) : Effect.succeed(reply.success);
+             }),
+@@ -1709,7 +1722,9 @@
+           const samplerRoot = path.join(home, `sampler-${pair}-${backend}`);
+           const sampledTemporaryRoot = path.join(samplerRoot, 'temp');
+           yield* fs.makeDirectory(sampledTemporaryRoot, {recursive: true});
++          yield* fs.writeFileString(path.join(samplerRoot, 'linux-worker-image'), yield* fs.realPath(executableFor(backend)));
+           const samplerStartedAt = yield* Clock.currentTimeNanos;
++          const samplerStartMicroseconds = monotonicMicroseconds();
+           const sampler = yield* Effect.acquireRelease(
+             startExternalSampler(
+               fs,
+@@ -1726,6 +1741,7 @@
+             ),
+             handle => handle.stop('aborted').pipe(Effect.ignore),
+           );
++          arm.samplerLaunchWindow = {startMicroseconds: samplerStartMicroseconds, readyMicroseconds: monotonicMicroseconds()};
+           arm.samplerSetupMilliseconds =
+             Number((yield* Clock.currentTimeNanos) - samplerStartedAt) / NANOSECONDS_PER_MILLISECOND;
+           yield* sampler.markPhase('production-query');
+--- a/scripts/code-graph-benchmark-sampler.ts
++++ b/scripts/code-graph-benchmark-sampler.ts
+@@ -17,6 +17,71 @@
+ import * as EffectRecord from 'effect/Record';
+ import * as EffectString from 'effect/String';
+ import * as Effect2 from 'effect';
++import {readFileSync, readlinkSync} from 'node:fs';
++
++const monotonicMicroseconds = () => Number(process.hrtime.bigint() / 1_000n);
++type LinuxImageClass = 'parent-bun-image' | 'installed-worker' | 'other' | 'unavailable';
++type LinuxWitnessConfig = {
++  parentImage: string;
++  workerImage: string;
++  uptimeOffsetMicroseconds: number;
++};
++
++function linuxExecutable(processId: number) {
++  try {
++    return readlinkSync(`/proc/${processId}/exe`);
++  } catch {
++    return undefined;
++  }
++}
++
++function linuxMemoryFields(text: string, fields: readonly string[]) {
++  return Object.fromEntries(
++    fields.flatMap(field => {
++      const match = new RegExp(`^${field}:\\s+(\\d+)\\s+kB$`, 'm').exec(text);
++      return match ? [[field, Number(match[1]) * 1024]] : [];
++    }),
++  );
++}
++
++function observeLinuxStatus(processId: number, config: LinuxWitnessConfig) {
++  const classify = (image: string | undefined): LinuxImageClass =>
++    image === undefined ? 'unavailable' : image === config.parentImage ? 'parent-bun-image'
++      : image === config.workerImage ? 'installed-worker' : 'other';
++  const executableBefore = linuxExecutable(processId);
++  const startMicroseconds = monotonicMicroseconds();
++  const text = readFileSync(`/proc/${processId}/status`, 'utf8');
++  const endMicroseconds = monotonicMicroseconds();
++  const executableAfter = linuxExecutable(processId);
++  const rss = linuxMemoryFields(text, ['VmRSS', 'RssAnon', 'RssFile', 'RssShmem']);
++  const stableImage = executableBefore !== undefined && executableBefore === executableAfter;
++  // High contributors only. The rollup is ancillary to, and never replaces, the original VmRSS sample.
++  let rollup: {startMicroseconds: number; endMicroseconds: number; bytes: Record<string, number>} | undefined;
++  if (stableImage && (rss.VmRSS ?? 0) >= 190 * 1024 * 1024) {
++    try {
++      const rollupStart = monotonicMicroseconds();
++      const detail = readFileSync(`/proc/${processId}/smaps_rollup`, 'utf8');
++      const rollupEnd = monotonicMicroseconds();
++      if (linuxExecutable(processId) === executableAfter) {
++        rollup = {
++          startMicroseconds: rollupStart,
++          endMicroseconds: rollupEnd,
++          bytes: linuxMemoryFields(detail, ['Rss', 'Pss', 'Pss_Anon', 'Shared_Clean', 'Shared_Dirty', 'Private_Clean', 'Private_Dirty']),
++        };
++      }
++    } catch {}
++  }
++  return {text, witness: {
++    imageBefore: classify(executableBefore), imageAfter: classify(executableAfter), stableImage,
++    startMicroseconds, endMicroseconds, rss, rollup,
++  }};
++}
++
++type LinuxProcessWitness = NonNullable<ReturnType<typeof observeLinuxStatus>['witness']> & {
++  token: string;
++  estimatedAgeMilliseconds: number;
++  ageResolutionMilliseconds: number;
++};
+ 
+ const MAX_DARWIN_LSOF_BYTES = 8 * 1024 * 1024;
+ const DARWIN_OPEN_FILE_SAMPLE_INTERVAL_MILLISECONDS = 1_000;
+@@ -269,7 +334,7 @@
+ export function createRssDiagnosticRun(
+   enabled: boolean,
+   sources?: {readonly randomKey: () => Uint8Array; readonly now: () => bigint},
+-): {readonly tokenize: RssDiagnosticTokenizer; readonly offsetMicroseconds: () => number} | undefined {
++): {readonly tokenize: RssDiagnosticTokenizer; readonly offsetMicroseconds: () => number; readonly originMicroseconds: number} | undefined {
+   if (!enabled) return undefined;
+   const key = sources?.randomKey() ?? crypto.getRandomValues(new Uint8Array(32));
+   const now = sources?.now ?? (() => process.hrtime.bigint());
+@@ -277,6 +342,7 @@
+   return {
+     tokenize: createRssDiagnosticTokenizer(key),
+     offsetMicroseconds: () => Number((now() - origin) / 1_000n),
++    originMicroseconds: Number(origin / 1_000n),
+   };
+ }
+ 
+@@ -765,6 +831,18 @@
+   const diagnosticTokenizer = diagnosticRun?.tokenize;
+   const diagnosticOffset = diagnosticRun?.offsetMicroseconds;
+   let rssPeakDiagnostic: BenchmarkRssPeakDiagnostic | undefined;
++  let linuxPeak: {rssPeak: BenchmarkRssPeakDiagnostic; observations: readonly LinuxProcessWitness[]} | undefined;
++  let linuxWitness: LinuxWitnessConfig | undefined;
++  if (system.platform === 'linux' && system.environment().THREADNOTE_RECALL_PEAK_LINUX === '1') {
++    const parentImage = linuxExecutable(options.processId);
++    const workerImage = yield* readText(hostPath.join(hostPath.dirname(options.phasePath), 'linux-worker-image'));
++    const uptimeStart = monotonicMicroseconds();
++    const uptime = Number((yield* readText('/proc/uptime'))?.trim().split(/\s+/)[0]);
++    const uptimeFinished = monotonicMicroseconds();
++    if (!parentImage || !workerImage || !Number.isFinite(uptime) || diagnosticRun === undefined)
++      throw new Error('Linux peak witness initialization failed.');
++    linuxWitness = {parentImage, workerImage, uptimeOffsetMicroseconds: uptime * 1_000_000 - (uptimeStart + uptimeFinished) / 2};
++  }
+   const canonicalTemporaryRoot = yield* canonicalDirectory(options.temporaryRoot);
+   const clockTicksPerSecond = yield* linuxClockTicksPerSecond();
+   const windowsResult =
+@@ -787,7 +865,9 @@
+               entries === undefined ? undefined : aggregateProcessTree(entries, pid, undefined, exclusions, tokenizer),
+             ),
+           )
+-      : readProcessTreeSample(pid, ticks, exclusions, tokenizer);
++      : linuxWitness
++        ? readLinuxProcessTreeSample(pid, ticks, exclusions, tokenizer, linuxWitness)
++        : readProcessTreeSample(pid, ticks, exclusions, tokenizer);
+   const processSampleIntervalMilliseconds =
+     system.platform === 'win32' && options.windowsProcessTree === true
+       ? WINDOWS_PROCESS_TREE_INTERVAL_MS
+@@ -917,11 +997,18 @@
+     if (windowsSampler?.failure !== undefined) processTelemetry.diagnostic = windowsSampler.failure;
+     const telemetrySample = processTelemetry.availability === 'available' && !parentExited ? processSample : undefined;
+     if (diagnosticTokenizer !== undefined) {
++      const previousPeak = rssPeakDiagnostic;
+       rssPeakDiagnostic = recordRssPeakDiagnostic(
+         rssPeakDiagnostic,
+         telemetrySample ?? undefined,
+         cachedInitial ? {provenance: 'cached-initial-unknown'} : acquisition,
+       );
++      if (linuxWitness && rssPeakDiagnostic && rssPeakDiagnostic !== previousPeak) {
++        const observations = (telemetrySample?.linuxWitnesses ?? []).filter(witness =>
++          rssPeakDiagnostic?.contributors.some(contributor => contributor.token === witness.token),
++        );
++        linuxPeak = {rssPeak: rssPeakDiagnostic, observations};
++      }
+     }
+     const current = phases.get(phase) ?? {
+       cpuMilliseconds: 0,
+@@ -1024,6 +1111,12 @@
+     options.windowsProcessTree === true,
+   );
+   yield* atomicWriteFile(options.outputPath, `${JSON.stringify(artifact)}\n`);
++  if (linuxWitness) {
++    yield* atomicWriteFile(
++      `${options.checkpointPath}.peak-linux.json`,
++      `${JSON.stringify({originMicroseconds: diagnosticRun?.originMicroseconds, peak: linuxPeak})}\n`,
++    );
++  }
+ });
+ 
+ export function samplerArtifact(
+@@ -1146,6 +1239,7 @@
+   readonly rootStartIdentity: string;
+   readonly rssBytes: number;
+   readonly rssContributors?: BenchmarkRssContributors;
++  readonly linuxWitnesses?: readonly LinuxProcessWitness[];
+ }
+ 
+ export interface BenchmarkProcessTreeDelta {
+@@ -1340,19 +1434,34 @@
+   clockTicksPerSecond: number,
+   excludedDescendantRootProcessIds: readonly number[],
+   diagnosticTokenizer?: RssDiagnosticTokenizer,
++  linuxWitness?: LinuxWitnessConfig,
+ ) {
+   const pending: Array<{readonly expectedParent?: number; readonly processId: number}> = [{processId: rootProcessId}];
+   const entries: BenchmarkProcessTreeEntry[] = [];
+   const visited = new Set<number>();
++  const witnesses: LinuxProcessWitness[] = [];
+   while (pending.length > 0) {
+     const next = pending.shift();
+     if (!next || visited.has(next.processId)) continue;
+     visited.add(next.processId);
+-    const observed = yield* readLinuxProcessEntry(next.processId, clockTicksPerSecond);
++    const candidateWitness = next.expectedParent !== undefined && !excludedDescendantRootProcessIds.includes(next.processId)
++      ? linuxWitness : undefined;
++    const observed = yield* readLinuxProcessEntry(next.processId, clockTicksPerSecond, candidateWitness);
+     if (!observed || (next.expectedParent !== undefined && observed.entry.parentProcessId !== next.expectedParent)) {
+       continue;
+     }
+     entries.push(observed.entry);
++    if (observed.witness && candidateWitness && diagnosticTokenizer) {
++      const {startIdentity} = observed.entry;
++      const sampleMicroseconds = (observed.witness.startMicroseconds + observed.witness.endMicroseconds) / 2;
++      witnesses.push({
++        ...observed.witness,
++        token: diagnosticTokenizer(next.processId, startIdentity),
++        estimatedAgeMilliseconds: Math.max(0, (sampleMicroseconds + candidateWitness.uptimeOffsetMicroseconds) / 1_000
++          - Number(startIdentity) * 1_000 / clockTicksPerSecond),
++        ageResolutionMilliseconds: 10 + 1_000 / clockTicksPerSecond,
++      });
++    }
+     pending.push(
+       ...EffectArray.map(observed.childProcessIds, processId => ({
+         expectedParent: observed.entry.processId,
+@@ -1360,21 +1469,25 @@
+       })),
+     );
+   }
+-  return aggregateProcessTree(entries, rootProcessId, undefined, excludedDescendantRootProcessIds, diagnosticTokenizer);
++  const tree = aggregateProcessTree(entries, rootProcessId, undefined, excludedDescendantRootProcessIds, diagnosticTokenizer);
++  return tree && linuxWitness ? {...tree, linuxWitnesses: witnesses} : tree;
+ });
+ 
+ const readLinuxProcessEntry = Effect.fn('codeGraphBenchmarkSampler.readLinuxProcessEntry')(function* (
+   processId: number,
+   clockTicksPerSecond: number,
++  linuxWitness?: LinuxWitnessConfig,
+ ) {
+   const fs = yield* FileSystem.FileSystem;
+   return yield* Effect.gen(function* () {
+     const firstStatText = yield* fs.readFileString(`/proc/${processId}/stat`);
+     const firstStat = parseLinuxProcessStat(firstStatText);
+     if (!firstStat) return undefined;
+-    const [statusText, ioText, childrenText, validatedStatText] = yield* Effect.all(
++    const [status, ioText, childrenText, validatedStatText] = yield* Effect.all(
+       [
+-        fs.readFileString(`/proc/${processId}/status`),
++        linuxWitness
++          ? Effect.try({try: () => observeLinuxStatus(processId, linuxWitness), catch: scriptError})
++          : fs.readFileString(`/proc/${processId}/status`).pipe(Effect.map(text => ({text, witness: undefined}))),
+         readText(`/proc/${processId}/io`),
+         readText(`/proc/${processId}/task/${processId}/children`),
+         fs.readFileString(`/proc/${processId}/stat`),
+@@ -1383,11 +1496,12 @@
+     );
+     const validatedStat = parseLinuxProcessStat(validatedStatText);
+     if (!validatedStat || validatedStat.startIdentity !== firstStat.startIdentity) return undefined;
+-    const rssMatch = /^VmRSS:\s+(\d+)\s+kB$/m.exec(statusText);
++    const rssMatch = /^VmRSS:\s+(\d+)\s+kB$/m.exec(status.text);
+     const rssKilobytes = Number(rssMatch?.[1]);
+     if (!rssMatch || !Number.isSafeInteger(rssKilobytes) || rssKilobytes < 0) return undefined;
+     const io = ioText === undefined ? undefined : parseLinuxProcessIo(ioText);
+     return {
++      witness: status.witness,
+       childProcessIds: parseLinuxChildProcessIds(childrenText ?? ''),
+       entry: {
+         cpuMilliseconds: ((validatedStat.userTicks + validatedStat.systemTicks) * 1_000) / clockTicksPerSecond,
