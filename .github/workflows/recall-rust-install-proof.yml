@@ -1,0 +1,35 @@
+name: Installed Rust recall proof
+on:
+  push:
+    branches: [codex/recall-rust-install-proof]
+permissions:
+  contents: read
+jobs:
+  install:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: 924f22749399cd8665299be99615426acc2fe3f0
+          path: candidate-source
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - run: rustup toolchain install 1.89.0 --profile minimal
+      - name: Install the reviewed revision and exercise its Rust reader
+        env:
+          PROOF_COMMIT: 924f22749399cd8665299be99615426acc2fe3f0
+          RUSTUP_TOOLCHAIN: '1.89.0'
+          CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP: none
+        run: bash .github/scripts/recall-rust-install-proof.sh
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: installed-recall-proof
+          path: ${{ runner.temp }}/recall-proof/evidence
+          retention-days: 7
