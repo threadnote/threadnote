@@ -1115,6 +1115,7 @@ jobs:
           bun scripts/benchmark-recall-vectors.ts --production-path --pairs 1 --samples 1 \
             --documents 2 --distribution dense --model-file "$model_file" \
             --distribution-root "$workspace/dist" --baseline-distribution-root "$baseline_root/dist" \
+            --baseline-source-root "$baseline_root" \
             --output "$output_dir/setup-smoke.json" 2>&1 | tee "$output_dir/setup-smoke.log"
           for case in 100000-dense 100000-tied 10000-dense 10000-tied; do
             documents="${case%-*}"
@@ -1124,7 +1125,8 @@ jobs:
               --production-path --pairs 3 --samples 30 \
               --documents "$documents" --distribution "$distribution" \
               --model-file "$model_file" --distribution-root "$workspace/dist" \
-              --baseline-distribution-root "$baseline_root/dist" --output "$output" 2>&1 | tee "$output.log"
+              --baseline-distribution-root "$baseline_root/dist" --baseline-source-root "$baseline_root" \
+              --output "$output" 2>&1 | tee "$output.log"
           done
           CAPTURE
 

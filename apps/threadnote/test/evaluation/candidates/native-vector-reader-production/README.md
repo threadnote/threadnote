@@ -11,6 +11,7 @@ bun scripts/benchmark-recall-vectors.ts \
   --model-file /absolute/path/to/the/pinned/bge-small-en-v1.5-q8.gguf \
   --distribution-root /absolute/path/to/frozen/native-dist \
   --baseline-distribution-root /absolute/path/to/frozen/ts66-dist \
+  --baseline-source-root /absolute/path/to/clean/ts66-checkout \
   --output /absolute/path/to/capture.json
 ```
 
@@ -29,7 +30,9 @@ bun scripts/benchmark-recall-vectors.ts --write-baseline-provenance \
 
 CI baseline dependency installation disables lifecycle scripts to prevent an implicit llama build/download. Musl baseline builds additionally use `--libc=glibc` to stage the original GNU optional package as build input only; provenance records that exact command, and the GNU closure is replaced before runtime capture. Candidate installation stays native to its target.
 
-For a private clone of the genuine installed Darwin baseline, omit `--baseline-source-root`; the command verifies its original receipt and records origin `verified-development-install` with that unchanged receipt before overlay staging. Keep an untouched original clone separately. This records existing evidence and does not invent a clean CI build.
+The capture also requires the clean exact TS66 checkout with its frozen dependencies installed. Before timing any request, the candidate and TS66 production lexical writers index the same canonical files. The harness requires both lexical indexes to report the same ready corpus generation and expected document count. Both compiled workers read one shared vector database and use their own lexical schema for readiness and authorization. The capture checks both lexical database hashes alongside the vector database hash.
+
+When recording provenance for a private clone of the genuine installed Darwin baseline, omit `--baseline-source-root` from the `--write-baseline-provenance` command. That command verifies the original receipt and records origin `verified-development-install` with the unchanged receipt before overlay staging. Keep an untouched original clone separately. The production capture command requires the clean TS66 checkout for lexical preparation.
 
 Stage the candidate's genuine hash-verified inference overlay into the private baseline using the owning inference assembler, then freeze both inputs. Original source/executable/release identity, original component inventory, shared overlay and final assembled inventory remain distinct. Both arms must have identical verified inference bytes. The shared warm parent loads the staged module from the frozen candidate input path using the existing engine host/environment foreground, context and GPU policy; its native module remains available for the whole runtime lifetime, including Windows DLL loading. Missing real inference on any profile blocks that profile.
 
