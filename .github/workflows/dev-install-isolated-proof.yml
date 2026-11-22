@@ -1,0 +1,48 @@
+name: Disposable development installer proof
+on:
+  push:
+    branches: [codex/dev-install-isolated-proof]
+
+permissions:
+  contents: read
+
+jobs:
+  macos-proof:
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: 1d8e57c0ca3278c9a2e96cf8c54057703895f9fb
+          path: recall-source
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: 1286e561ecdc1b359a3b8395fe21fa0e80cec2a3
+          path: preflight-source
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: 51ae33d45f4f5e07a4aff2eb40188280d49c0243
+          path: release-source
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install 1.89.0 --profile minimal
+      - name: Verify installed entrypoints and schema preflight
+        env:
+          RUSTUP_TOOLCHAIN: '1.89.0'
+          CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP: 'false'
+        run: bash .github/scripts/dev-install-isolated-proof.sh
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: dev-install-isolated-proof
+          path: ${{ runner.temp }}/dev-install-proof/evidence/
+          retention-days: 7
+          if-no-files-found: warn
