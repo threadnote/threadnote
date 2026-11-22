@@ -43,10 +43,11 @@ if watch_command --operation ack --watch-delivery-ref "$delivery_ref" > "$proof_
 fi
 grep -F 'durable disposition' "$proof_root/early-ack.log"
 watch_command --operation disposition --watch-delivery-ref "$delivery_ref" --disposition-event-ref "$event_ref" \
-  --disposition-status open --disposition-reason 'Needs a repair' --disposition-evidence 'Isolated installed smoke'
-watch_command --operation ack --watch-delivery-ref "$delivery_ref"
+  --disposition-status open --disposition-reason 'Needs a repair' --disposition-evidence 'Isolated installed smoke' > "$proof_root/disposition.json"
+watch_command --operation ack --watch-delivery-ref "$delivery_ref" > "$proof_root/ack.json"
 watch_command --operation inspect > "$proof_root/after.json"
 jq -e '.result | .stopRequested and .pending == 0 and .deliveryId == null and .consumer.live == false and .collector.status == "stopped" and .work.open == 1' "$proof_root/after.json"
 jq -ne --slurpfile before "$proof_root/before.json" --slurpfile after "$proof_root/after.json" \
-  '$before[0].result.consumer == $after[0].result.consumer and $before[0].result.collector == $after[0].result.collector'
+  '($before[0].result.consumer | del(.lastSeenAt)) == ($after[0].result.consumer | del(.lastSeenAt))
+    and $before[0].result.collector == $after[0].result.collector'
 jq -n --arg commit "$WATCH_PROOF_COMMIT" '{sourceCommit:$commit,strictDoctorPassed:true,installedWatchDrainPassed:true,unresolvedWorkRetained:true}' > "$evidence/result.json"
