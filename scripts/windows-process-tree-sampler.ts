@@ -5,6 +5,8 @@ import type {BenchmarkProcessTreeEntry} from './code-graph-benchmark-sampler.js'
 
 export const WINDOWS_PROCESS_TREE_INTERVAL_MS = 250;
 export const WINDOWS_PROCESS_TREE_REQUEST_TIMEOUT_MS = 1000;
+// Cold PowerShell startup can take several seconds on hosted Windows runners.
+export const WINDOWS_PROCESS_TREE_COLD_READY_TIMEOUT_MS = 10_000;
 const FRAME_LIMIT = 1024 * 1024;
 const ENTRY_LIMIT = 4096;
 export interface WindowsSamplerIdentity {
@@ -117,8 +119,13 @@ export const makeWindowsProcessTreeSampler = Effect.fn('windowsProcessTreeSample
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
   const script = yield* path.fromFileUrl(new URL('./windows-process-tree-sampler.ps1', import.meta.url));
+  // Windows PowerShell stalled while serializing the ready frame on hosted Windows ARM64.
+  const powerShell =
+    system.platform === 'win32' && system.architecture === 'arm64'
+      ? (Bun.which('pwsh.exe') ?? 'powershell.exe')
+      : 'powershell.exe';
   const child = Bun.spawn({
-    cmd: ['powershell.exe', '-NoLogo', '-NoProfile', '-NonInteractive', '-File', script],
+    cmd: [powerShell, '-NoLogo', '-NoProfile', '-NonInteractive', '-File', script],
     stdin: 'pipe',
     stdout: 'pipe',
     stderr: 'pipe',
@@ -168,7 +175,7 @@ export const makeWindowsProcessTreeSampler = Effect.fn('windowsProcessTreeSample
   };
   yield* Effect.addFinalizer(() => Effect.tryPromise({try: dispose, catch: scriptError}).pipe(Effect.orDie));
   const ready = yield* Effect.tryPromise({
-    try: () => frames.read(3000),
+    try: () => frames.read(WINDOWS_PROCESS_TREE_COLD_READY_TIMEOUT_MS),
     catch: cause =>
       ScriptError.make({cause, message: `Windows sampler startup failed: ${String(cause)} ${stderrText}`}),
   });
