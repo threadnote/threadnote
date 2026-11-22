@@ -50,7 +50,7 @@ describe('MCP doctor checks', () => {
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
 
-  it.effect('reports a configured Codex MCP broker', () =>
+  it.effect('reports setup for an inferred Codex broker without a physical receipt', () =>
     Effect.scoped(
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
@@ -75,9 +75,11 @@ describe('MCP doctor checks', () => {
           Effect.provideService(SystemInfo, testSystem),
         );
         expect(checks).toContainEqual({
-          detail: 'threadnote broker configured',
+          detail: expect.stringContaining(
+            'Set CODEX_HOME to the intended Codex home, then run `threadnote mcp-install codex --apply --name threadnote`',
+          ),
           name: 'codex MCP',
-          status: 'ok',
+          status: 'warn',
         });
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
@@ -127,8 +129,14 @@ describe('MCP doctor checks', () => {
 
         const checks = yield* mcpConfigurationChecks(testRuntime).pipe(Effect.provideService(SystemInfo, testSystem));
 
-        expect(checks).toEqual([{detail: 'team-memory broker configured', name: 'codex MCP', status: 'ok'}]);
-        expect(yield* fs.readFileString(calls)).toContain('mcp get team-memory');
+        expect(checks).toEqual([
+          {
+            detail: expect.stringContaining('threadnote mcp-install codex --apply --name team-memory'),
+            name: 'codex MCP',
+            status: 'warn',
+          },
+        ]);
+        expect(yield* fs.exists(calls)).toBe(false);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
@@ -173,7 +181,12 @@ describe('MCP doctor checks', () => {
         const checks = yield* mcpConfigurationChecks(runtime(path.join(user, '.threadnote'))).pipe(
           Effect.provideService(SystemInfo, testSystem),
         );
-        for (const name of ['codex MCP', 'cursor MCP', 'omp MCP']) {
+        expect(checks).toContainEqual({
+          detail: expect.stringContaining('has no receipt for a physical Codex home'),
+          name: 'codex MCP',
+          status: 'warn',
+        });
+        for (const name of ['cursor MCP', 'omp MCP']) {
           expect(checks).toContainEqual({
             detail: expect.stringContaining('legacy direct server command'),
             name,

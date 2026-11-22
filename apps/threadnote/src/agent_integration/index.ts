@@ -313,6 +313,7 @@ export const installAgentIntegrationInTransaction = Effect.fn('agentIntegrations
   const previousPlan =
     (mcp.cwd === undefined) === (previous?.mcp.cwd === undefined) &&
     previousRootMatchesScope &&
+    plan.hostRoot !== undefined &&
     previous?.mcp.hostRoot !== undefined &&
     previous.mcp.hostRoot !== plan.hostRoot
       ? yield* agentArtifacts(agent, previous.mcp.artifactProfile, previous.mcp.hostRoot)

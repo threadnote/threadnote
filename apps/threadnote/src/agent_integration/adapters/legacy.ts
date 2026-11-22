@@ -68,16 +68,21 @@ function defineLegacyAgentAdapter(id: string, legacyClient: AgentClient): AgentA
         return yield* AgentAdapterActionError.make({
           message: `No receipt for ${adapter.catalog.id}; use agents install.`,
         });
-      yield* runMcpInstall(config, legacyClient, {
-        apply: options.apply,
-        name: current.mcp.name,
-        hostRoot: current.mcp.hostRoot,
-        cwd: current.mcp.cwd,
-        project: current.mcp.cwd,
-        scope: current.mcp.scope,
-        setupLockHeld: options.setupLockHeld,
-        toolset: current.mcp.toolset,
-      });
+      yield* runMcpInstall(
+        config,
+        legacyClient,
+        {
+          apply: options.apply,
+          name: current.mcp.name,
+          hostRoot: current.mcp.hostRoot,
+          cwd: current.mcp.cwd,
+          project: current.mcp.cwd,
+          scope: current.mcp.scope,
+          setupLockHeld: options.setupLockHeld,
+          toolset: current.mcp.toolset,
+        },
+        'repair',
+      );
     });
   return {
     actions: {

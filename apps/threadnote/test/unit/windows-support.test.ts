@@ -1,8 +1,98 @@
 import {describe, expect, it} from 'vitest';
-import {isGitExecutable, resolveCommandInvocation} from '@threadnote/platform/command';
-import {resolveHomeDirectory} from '@threadnote/platform/system';
+import * as BunServices from '@effect/platform-bun/BunServices';
+import {it as effectIt} from '@effect/vitest';
+import {Effect, FileSystem, Layer, Path, Result} from 'effect';
+import {TestClock} from 'effect/testing';
+import {fromPromise} from '@threadnote/platform/errors';
+import {isGitExecutable, resolveCommandInvocation, runCommandEffect} from '@threadnote/platform/command';
+import {resolveHomeDirectory, runtimeLstat, SystemInfo} from '@threadnote/platform/system';
 import {validatePortableSegment} from '@threadnote/store/resource-id';
 import {executableNames} from '@threadnote/threadnote/utils';
+
+import {publishStagedCodexConfiguration, stageCodexConfiguration} from '../../src/mcp/codex_configuration_write.js';
+import {TestCommandExecutorLayer, TestSystemInfoLayer} from '../helpers/system-layer.js';
+
+const codexWriteLayer = TestCommandExecutorLayer.pipe(
+  Layer.provideMerge(TestSystemInfoLayer),
+  Layer.provideMerge(BunServices.layer),
+);
+
+effectIt.layer(codexWriteLayer)(windows => {
+  windows.effect('creates and updates a Codex config while preserving the explicit Windows DACL and owner', () =>
+    Effect.gen(function* () {
+      const system = yield* SystemInfo;
+      if (system.platform !== 'win32') return;
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.makeTempDirectoryScoped({
+        prefix: 'codex config & [rotation]-',
+      });
+      const target = path.join(home, 'config.toml');
+      const initial = yield* stageCodexConfiguration(home, target, undefined, 'first');
+      expect(yield* publishStagedCodexConfiguration(target, initial, false, Effect.succeed(true))).toBe(true);
+      expect(yield* fs.readFileString(target)).toBe('first');
+
+      const environment = system.environment();
+      const root = environment.SystemRoot ?? environment.SYSTEMROOT ?? 'C:\\Windows';
+      const powershell = path.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+      const inspect = `
+$ErrorActionPreference = 'Stop'
+$file = $env:THREADNOTE_TEST_CODEX_TARGET
+$sections = [Security.AccessControl.AccessControlSections]'Owner, Group, Access'
+$acl = [IO.File]::GetAccessControl($file, $sections)
+if ($env:THREADNOTE_TEST_CODEX_RESTRICT -eq '1') {
+  $acl.SetAccessRuleProtection($true, $true)
+  [IO.File]::SetAccessControl($file, $acl)
+  $acl = [IO.File]::GetAccessControl($file, $sections)
+}
+[Console]::Out.Write($acl.GetSecurityDescriptorSddlForm($sections))
+`;
+      const descriptor = (restrict: boolean) =>
+        runCommandEffect(powershell, ['-NoProfile', '-NonInteractive', '-Command', inspect], {
+          timeoutMs: 5000,
+          env: {
+            ...environment,
+            THREADNOTE_TEST_CODEX_TARGET: target,
+            THREADNOTE_TEST_CODEX_RESTRICT: restrict ? '1' : '0',
+          },
+        });
+      const expected = (yield* descriptor(true)).stdout;
+      expect(expected).toMatch(/D:P/u);
+      const before = yield* fromPromise('test.readWindowsCodexConfigStat', () => runtimeLstat(target));
+      const next = yield* stageCodexConfiguration(home, target, before, 'updated');
+      expect(yield* publishStagedCodexConfiguration(target, next, true, Effect.succeed(true))).toBe(true);
+      expect(yield* fs.readFileString(target)).toBe('updated');
+      expect((yield* descriptor(false)).stdout).toBe(expected);
+
+      const labeled = path.join(home, 'with-integrity-label.toml');
+      yield* fs.writeFileString(labeled, 'original integrity label');
+      const icacls = path.join(root, 'System32', 'icacls.exe');
+      const setLabel = yield* runCommandEffect(icacls, [labeled, '/setintegritylevel', 'L'], {
+        timeoutMs: 5000,
+        allowFailure: true,
+      });
+      if (setLabel.exitCode === 0) {
+        const labelBefore = yield* runCommandEffect(icacls, [labeled], {timeoutMs: 5000});
+        expect(labelBefore.exitCode).toBe(0);
+        const stats = yield* fromPromise('test.readLabeledCodexConfigStat', () => runtimeLstat(labeled));
+        const mismatch = yield* stageCodexConfiguration(home, labeled, stats, 'would remove label').pipe(Effect.result);
+        expect(Result.isFailure(mismatch) && mismatch.failure.message).toBe(
+          'Windows Codex configuration integrity labels differ.',
+        );
+        expect(yield* fs.readFileString(labeled)).toBe('original integrity label');
+        expect((yield* runCommandEffect(icacls, [labeled], {timeoutMs: 5000})).stdout).toBe(labelBefore.stdout);
+      }
+
+      const stream = `${target}:threadnote-test`;
+      yield* fs.writeFileString(stream, 'existing NTFS stream');
+      const after = yield* fromPromise('test.readWindowsCodexConfigStat', () => runtimeLstat(target));
+      const unsupported = yield* stageCodexConfiguration(home, target, after, 'would lose stream').pipe(Effect.result);
+      expect(Result.isFailure(unsupported)).toBe(true);
+      expect(yield* fs.readFileString(stream)).toBe('existing NTFS stream');
+      expect(yield* fs.readFileString(target)).toBe('updated');
+    }).pipe(TestClock.withLive),
+  );
+});
 
 describe('Windows platform contracts', () => {
   it('expands PATHEXT for extensionless commands and preserves explicit launchers', () => {

@@ -1,0 +1,511 @@
+import {Array as EffectArray, Effect, Equal, FileSystem, Path} from 'effect';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import {parse, stringify, TomlDate, type TomlTable, type TomlValue} from 'smol-toml';
+import {fromPromise} from '@threadnote/platform/errors';
+import {expandPath} from '@threadnote/platform/paths';
+import {
+  runtimeLstat,
+  runtimeReadBoundedStableRegularFile,
+  SystemInfo,
+  type RuntimeBigIntStats,
+} from '@threadnote/platform/system';
+import {activeInstalledVersion} from '../installations.js';
+import {commandLauncherPath} from '../command-shim.js';
+import type {JsonObject} from '@threadnote/platform/json';
+import type {RuntimeConfig} from '@threadnote/workspace/config';
+import {
+  type AgentIntegrationMcpReceipt,
+  isLocalCodexMcpReceipt,
+  readAgentIntegrationRegistry,
+  withAgentIntegrationLock,
+} from '../agent_integration/registry.js';
+import {mcpAdapterCommand} from './adapter-command.js';
+import {
+  publishStagedCodexConfiguration,
+  stageCodexConfiguration,
+  withCodexConfigurationLock,
+} from './codex_configuration_write.js';
+import {MCP_TOOLSET_ENV} from './toolset.js';
+
+export const CODEX_MCP_RELEASE_ENV = 'THREADNOTE_MCP_RELEASE';
+
+const MAX_CONFIG_BYTES = 4 * 1024 * 1024;
+
+export const resolveCodexSetupHome = Effect.fn('mcp.codexSetupHome')(function* () {
+  const system = yield* SystemInfo;
+  return yield* expandPath(system.environment().CODEX_HOME || '~/.codex');
+});
+
+export function codexApplyArguments(
+  name: string,
+  options: {readonly toolset?: string; readonly noDevSkills?: boolean} = {},
+) {
+  return [
+    'mcp-install',
+    'codex',
+    '--apply',
+    '--name',
+    name,
+    ...(options.toolset ? ['--toolset', options.toolset] : []),
+    ...(options.noDevSkills ? ['--no-dev-skills'] : []),
+  ];
+}
+
+export const codexMcpCommands = Effect.fn('mcp.codexCommands')(function* () {
+  const command = yield* mcpAdapterCommand();
+  return {command, legacyCommand: [...command.slice(0, -1), yield* commandLauncherPath('cli'), 'mcp-server']};
+});
+
+interface CodexConfiguration {
+  readonly content: string;
+  readonly info: RuntimeBigIntStats;
+}
+
+const readConfiguration = Effect.fn('mcp.readCodexRotationConfig')(function* (configPath: string) {
+  return yield* fromPromise('mcp.readCodexRotationConfig', async () => {
+    let info: RuntimeBigIntStats;
+    try {
+      info = await runtimeLstat(configPath);
+    } catch (cause) {
+      if (typeof cause === 'object' && cause !== null && 'code' in cause && cause.code === 'ENOENT') return undefined;
+      throw cause;
+    }
+    if ('nlink' in info && info.nlink !== 1n) throw new Error('Codex config has multiple links.');
+    const bytes = await runtimeReadBoundedStableRegularFile(configPath, MAX_CONFIG_BYTES, info);
+    return {content: new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(bytes), info};
+  });
+});
+
+function sameConfiguration(before: CodexConfiguration, after: CodexConfiguration | undefined): boolean {
+  return (
+    after !== undefined &&
+    before.content === after.content &&
+    before.info.dev === after.info.dev &&
+    before.info.ino === after.info.ino &&
+    before.info.mode === after.info.mode &&
+    before.info.mtimeNs === after.info.mtimeNs &&
+    before.info.ctimeNs === after.info.ctimeNs
+  );
+}
+
+interface CodexEntryOptions {
+  readonly name: string;
+  readonly command: readonly string[];
+  readonly legacyCommand?: readonly string[];
+  readonly environment: JsonObject;
+  readonly mode: 'setup' | 'repair';
+  readonly updateToolset?: boolean;
+}
+
+const deferred = (reason: string) => ({state: 'deferred', reason}) as const;
+const generationChanged = () =>
+  ({...deferred('the active release changed during reconciliation'), retryGeneration: true}) as const;
+const skipped = (reason: string) => ({state: 'skipped', reason}) as const;
+
+export interface CodexMcpConfigurationTarget {
+  readonly hostRoot: string;
+  readonly name: string;
+  readonly release: string;
+}
+
+type RegisteredReconcileResult =
+  | ({readonly state: 'current' | 'saved'} & CodexMcpConfigurationTarget)
+  | {readonly state: 'skipped' | 'deferred'; readonly reason: string};
+
+type CodexOwner = Pick<RuntimeConfig, 'agentContextHome'>;
+
+function table(value: TomlValue | undefined): TomlTable | undefined {
+  return value && typeof value === 'object' && !EffectArray.isArray(value) && !(value instanceof TomlDate)
+    ? value
+    : undefined;
+}
+
+function parseConfiguration(value: string): TomlTable | undefined {
+  try {
+    return parse(value, {integersAsBigInt: 'asNeeded'});
+  } catch {
+    return undefined;
+  }
+}
+
+function ownedEntry(entry: TomlTable, command: readonly string[], environment: JsonObject): boolean {
+  return (
+    (entry.enabled === undefined || entry.enabled === true) &&
+    entry.url === undefined &&
+    entry.command === command[0] &&
+    Equal.equals(entry.args ?? [], command.slice(1)) &&
+    table(entry.env)?.THREADNOTE_HOME === environment.THREADNOTE_HOME
+  );
+}
+
+const lineEnding = (content: string) => (EffectString.includes('\r\n')(content) ? '\r\n' : '\n');
+
+function appendTable(content: string, addition: string): string {
+  const newline = lineEnding(content);
+  const prefix = !content || EffectString.endsWith('\n')(content) ? content : `${content}${newline}`;
+  return `${prefix}${prefix ? newline : ''}${EffectString.replaceAll('\n', newline)(addition)}`;
+}
+
+// Use a complete TOML parse as the boundary for a source splice. A lookalike in
+// a string, profile, or unrelated table cannot pass the whole-document check.
+function patchEnvironmentString(content: string, name: string, key: string, value: string): string | undefined {
+  const parsed = parseConfiguration(content);
+  const servers = table(parsed?.mcp_servers);
+  const entry = table(servers?.[name]);
+  const environment = table(entry?.env);
+  if (!parsed || !servers || !entry || !environment) return undefined;
+  if (environment[key] === value) return content;
+  const expected = {
+    ...parsed,
+    mcp_servers: {...servers, [name]: {...entry, env: {...environment, [key]: value}}},
+  };
+  const encoded = JSON.stringify(value);
+  const newline = lineEnding(content);
+  // Configs written by Codex use a nested env table. Also handle dotted keys,
+  // quoted keys, and inline env tables without reserializing user content.
+  const entryPath = `${segment('mcp_servers')}[ \t]*\\.[ \t]*${segment(name)}`;
+  const envSection = new RegExp(
+    `^([ \t]*\\[[ \t]*${entryPath}[ \t]*\\.[ \t]*${segment('env')}[ \t]*\\][^\\r\\n]*(?:\\r?\\n|$))`,
+    'gm',
+  );
+  const entrySection = new RegExp(`^([ \t]*\\[[ \t]*${entryPath}[ \t]*\\][^\\r\\n]*(?:\\r?\\n|$))`, 'gm');
+  const inlineEnv = new RegExp(`(${segment('env')}[ \t]*=[ \t]*\\{)([ \t]*)(?=[^ \t])`, 'g');
+  const envDotted = EffectArray.map([entryPath, segment(name)], prefix => {
+    const envPath = `${prefix}[ \t]*\\.[ \t]*${segment('env')}[ \t]*\\.[ \t]*`;
+    return {
+      pattern: new RegExp(
+        `^([ \t]*${envPath})${segment('THREADNOTE_HOME')}[ \t]*=[ \t]*(?:${stringLiteral})[ \t]*(?:#[^\\r\\n]*)?(?:\\r?\\n|$)`,
+        'gm',
+      ),
+      insert: (match: RegExpMatchArray) =>
+        `${match[0]}${EffectString.endsWith('\n')(match[0]) ? '' : newline}${match[1]}${key} = ${encoded}${newline}`,
+    };
+  });
+
+  const candidates =
+    environment[key] === undefined
+      ? [
+          {
+            pattern: envSection,
+            insert: (match: RegExpMatchArray) =>
+              `${match[0]}${EffectString.endsWith('\n')(match[0]) ? '' : newline}${key} = ${encoded}${newline}`,
+          },
+          {
+            pattern: entrySection,
+            insert: (match: RegExpMatchArray) =>
+              `${match[0]}${EffectString.endsWith('\n')(match[0]) ? '' : newline}env.${key} = ${encoded}${newline}`,
+          },
+          {
+            pattern: inlineEnv,
+            insert: (match: RegExpMatchArray) =>
+              `${match[0]}${key} = ${encoded}${EffectRecord.isEmptyRecord(environment) ? '' : ', '}`,
+          },
+          ...envDotted,
+        ]
+      : [replaceProperty(key, stringLiteral, value)];
+  return tryTextPatches(content, expected, candidates);
+}
+
+interface TextPatch {
+  readonly pattern: RegExp;
+  readonly insert: (match: RegExpMatchArray) => string;
+}
+
+const segment = (word: string) => `(?:${word}|"${word}"|'${word}')`;
+const stringLiteral = String.raw`"(?:[^"\\\r\n]|\\.)*"|'[^'\r\n]*'`;
+
+function replaceProperty(key: string, valuePattern: string, value: unknown): TextPatch {
+  return {
+    pattern: new RegExp(`(${segment(key)}[ \t]*=[ \t]*)(${valuePattern})(?=[ \t]*(?:[,}#\\r\\n]|$))`, 'g'),
+    insert: match => `${match[1]}${JSON.stringify(value)}`,
+  };
+}
+
+function tryTextPatches(content: string, expected: TomlTable, candidates: readonly TextPatch[]): string | undefined {
+  for (const {pattern, insert} of candidates) {
+    let inspected = 0;
+    for (const match of EffectString.matchAll(pattern)(content)) {
+      if (++inspected > 16) break;
+      const start = match.index;
+      if (start === undefined) continue;
+      const candidate = `${EffectString.slice(0, start)(content)}${insert(match)}${EffectString.slice(start + match[0].length)(content)}`;
+      if (Equal.equals(parseConfiguration(candidate), expected)) return candidate;
+    }
+  }
+  return undefined;
+}
+
+function migrateLegacyCommand(
+  content: string,
+  parsed: TomlTable,
+  servers: TomlTable,
+  entry: TomlTable,
+  options: CodexEntryOptions,
+): string | undefined {
+  const [command, ...args] = options.command;
+  const documentWith = (properties: TomlTable) => ({
+    ...parsed,
+    mcp_servers: {...servers, [options.name]: {...entry, ...properties}},
+  });
+  const next =
+    entry.command === command
+      ? content
+      : tryTextPatches(content, documentWith({command}), [replaceProperty('command', stringLiteral, command)]);
+  if (next === undefined) return undefined;
+  // Preserve the trivia inside an args array while changing only its owned
+  // string/separator tokens. The expected document verifies the whole splice.
+  const array = String.raw`\[(?:${stringLiteral}|#[^\r\n]*\r?\n|[, \t\r\n])*\]`;
+  const argumentTokens = new RegExp(`#[^\\r\\n]*|${stringLiteral}|,`, 'g');
+  return tryTextPatches(next, documentWith({command, args}), [
+    {
+      pattern: new RegExp(`(${segment('args')}[ \t]*=[ \t]*)(${array})(?=[ \t]*(?:[,}#\\r\\n]|$))`, 'g'),
+      insert: match => {
+        const source = match[2] ?? '';
+        let offset = 0;
+        let position = 0;
+        let rewritten = match[1] ?? '';
+        for (const tokenMatch of EffectString.matchAll(argumentTokens)(source)) {
+          if (tokenMatch.index === undefined) continue;
+          const token = tokenMatch[0];
+          rewritten += EffectString.slice(offset, tokenMatch.index)(source);
+          offset = tokenMatch.index + token.length;
+          if (EffectString.startsWith('#')(token)) rewritten += token;
+          else if (token === ',') rewritten += position > 0 && position <= args.length ? token : '';
+          else {
+            const argument = args[position++];
+            if (argument !== undefined) rewritten += JSON.stringify(argument);
+          }
+        }
+        return rewritten + EffectString.slice(offset)(source);
+      },
+    },
+  ]);
+}
+
+function renderConfiguration(content: string, options: CodexEntryOptions, release: string | undefined) {
+  const parsed = parseConfiguration(content);
+  if (!parsed) return undefined;
+  const servers = table(parsed.mcp_servers);
+  if (!servers && parsed.mcp_servers !== undefined) return undefined;
+  const existing = servers && EffectRecord.has(servers, options.name) ? servers[options.name] : undefined;
+  if (existing === undefined) {
+    if (options.mode === 'repair') return undefined;
+    const [command, ...args] = options.command;
+    const server = {
+      command,
+      args,
+      env: {...options.environment, ...(release === undefined ? {} : {[CODEX_MCP_RELEASE_ENV]: release})},
+    };
+    const candidate = appendTable(content, stringify({mcp_servers: {[options.name]: server}}));
+    return Equal.equals(parseConfiguration(candidate), {...parsed, mcp_servers: {...servers, [options.name]: server}})
+      ? candidate
+      : undefined;
+  }
+  const entry = table(existing);
+  if (!entry || !servers) return undefined;
+  let proposed: string | undefined = content;
+  if (!ownedEntry(entry, options.command, options.environment)) {
+    if (!options.legacyCommand || !ownedEntry(entry, options.legacyCommand, options.environment)) return undefined;
+    proposed = migrateLegacyCommand(content, parsed, servers, entry, options);
+  }
+  if (options.mode === 'setup') {
+    for (const [key, value] of EffectRecord.toEntries(options.environment)) {
+      if (typeof value !== 'string' || (key === MCP_TOOLSET_ENV && !options.updateToolset)) continue;
+      if (proposed === undefined) return undefined;
+      proposed = patchEnvironmentString(proposed, options.name, key, value);
+    }
+  }
+  return proposed === undefined || release === undefined
+    ? proposed
+    : patchEnvironmentString(proposed, options.name, CODEX_MCP_RELEASE_ENV, release);
+}
+
+export const inspectRegisteredCodexMcp = Effect.fn('mcp.inspectRegisteredCodex')(function* (
+  config: CodexOwner,
+  receipt: AgentIntegrationMcpReceipt | undefined,
+) {
+  if (!receipt || !isLocalCodexMcpReceipt(receipt) || !receipt.hostRoot) return {state: 'unpinned'} as const;
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const hostRoot = receipt.hostRoot;
+  return yield* Effect.gen(function* () {
+    if (!path.isAbsolute(hostRoot) || (yield* fs.realPath(hostRoot)) !== hostRoot)
+      return {state: 'redirected'} as const;
+    const snapshot = yield* readConfiguration(path.join(hostRoot, 'config.toml'));
+    if (!snapshot) return {state: 'missing', hostRoot} as const;
+    const parsed = parseConfiguration(snapshot.content);
+    if (!parsed) return {state: 'ambiguous', hostRoot} as const;
+    const rawEntry = table(parsed.mcp_servers)?.[receipt.name];
+    if (rawEntry === undefined) return {state: 'missing', hostRoot} as const;
+    const entry = table(rawEntry);
+    if (!entry) return {state: 'ambiguous', hostRoot} as const;
+    if (entry.enabled === false) return {state: 'disabled', hostRoot} as const;
+    const commands = yield* codexMcpCommands();
+    const environment = {THREADNOTE_HOME: config.agentContextHome};
+    const legacy = ownedEntry(entry, commands.legacyCommand, environment);
+    if (!legacy && !ownedEntry(entry, commands.command, environment)) return {state: 'ambiguous', hostRoot} as const;
+    const release = yield* activeInstalledVersion();
+    if (release === undefined) return {state: 'no-release', hostRoot} as const;
+    if (legacy || table(entry.env)?.[CODEX_MCP_RELEASE_ENV] !== release) {
+      const canReconcile =
+        renderConfiguration(
+          snapshot.content,
+          {...commands, environment, name: receipt.name, mode: 'repair'},
+          release,
+        ) !== undefined;
+      return {state: canReconcile ? (legacy ? 'legacy' : 'stale') : 'ambiguous', hostRoot, release} as const;
+    }
+    return {state: 'current', hostRoot, release} as const;
+  }).pipe(Effect.orElseSucceed(() => ({state: 'unreadable', hostRoot}) as const));
+});
+
+export const reconcileCodexMcpConfiguration = Effect.fn('mcp.reconcileCodexConfiguration')(function* (
+  home: string,
+  options: CodexEntryOptions,
+  expectedRelease?: string,
+) {
+  if (!/^[A-Za-z0-9_-]+$/.test(options.name) || options.name === 'threadnote-org') {
+    return deferred('this entry name is reserved or unsupported');
+  }
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  return yield* Effect.gen(function* () {
+    if (options.mode === 'setup') yield* fs.makeDirectory(home, {recursive: true, mode: 0o700});
+    if (!path.isAbsolute(home)) return deferred('the receipt does not specify an absolute Codex home');
+    const hostRoot = yield* fs.realPath(home);
+    if (options.mode === 'repair' && home !== hostRoot) return deferred('the recorded Codex home was redirected');
+    const homeInfo = yield* fromPromise('mcp.statCodexHome', () => runtimeLstat(hostRoot));
+    const sameHost = Effect.gen(function* () {
+      if ((yield* fs.realPath(home)) !== hostRoot) return false;
+      const current = yield* fromPromise('mcp.statCodexHome', () => runtimeLstat(hostRoot));
+      return current.isDirectory() && homeInfo.dev === current.dev && homeInfo.ino === current.ino;
+    });
+    const target = path.join(hostRoot, 'config.toml');
+    const reconcile = Effect.gen(function* () {
+      const release = yield* activeInstalledVersion();
+      if (options.mode === 'repair' && release === undefined) return deferred('no validated active release was found');
+      if (expectedRelease !== undefined && release !== expectedRelease) {
+        return deferred('the expected release is no longer active');
+      }
+      const before = yield* readConfiguration(target);
+      const next = renderConfiguration(before?.content ?? '', options, release);
+      if (next === undefined) return deferred('the entry is disabled, unmanaged, or cannot be safely edited');
+      const location = {hostRoot, name: options.name, release};
+      if (next === before?.content) {
+        if (!(yield* sameHost)) return deferred('the recorded Codex home changed during reconciliation');
+        if ((yield* activeInstalledVersion()) !== release) return generationChanged();
+        return {state: 'current', ...location} as const;
+      }
+      const staged = yield* stageCodexConfiguration(hostRoot, target, before?.info, next);
+      const published = yield* publishStagedCodexConfiguration(
+        target,
+        staged,
+        before !== undefined,
+        Effect.gen(function* () {
+          if (!(yield* sameHost) || (yield* activeInstalledVersion()) !== release) return false;
+          const latest = yield* readConfiguration(target);
+          return before === undefined ? latest === undefined : sameConfiguration(before, latest);
+        }),
+      );
+      if ((yield* activeInstalledVersion()) !== release) return generationChanged();
+      if (!(yield* sameHost)) return deferred('the recorded Codex home changed during reconciliation');
+      if (!published) return deferred('Codex config changed during reconciliation');
+      return {state: 'saved', ...location} as const;
+    });
+    const result = yield* withCodexConfigurationLock(
+      hostRoot,
+      Effect.gen(function* () {
+        const first = yield* Effect.scoped(reconcile);
+        return first.state === 'deferred' && 'retryGeneration' in first && expectedRelease === undefined
+          ? yield* Effect.scoped(reconcile)
+          : first;
+      }),
+    );
+    if (result.state === 'deferred') return result;
+    if (!(yield* sameHost)) return deferred('the recorded Codex home changed during reconciliation');
+    return (yield* activeInstalledVersion()) === result.release ? result : generationChanged();
+  }).pipe(Effect.orElseSucceed(() => deferred('Codex config could not be read or safely written')));
+});
+
+export const reconcileRegisteredCodexMcpInTransaction = Effect.fn('mcp.reconcileRegisteredCodexInTransaction')(
+  function* (config: CodexOwner, expectedRelease?: string, dryRun = false) {
+    const receipt = (yield* readAgentIntegrationRegistry(config))?.hosts.codex?.mcp;
+    if (!receipt) return skipped('no Codex receipt is registered');
+    if (
+      receipt.external ||
+      receipt.transport === 'cli' ||
+      (receipt.artifactProfile !== undefined && receipt.artifactProfile !== 'default')
+    ) {
+      return skipped('the Codex receipt belongs to a non-local integration');
+    }
+    if (!isLocalCodexMcpReceipt(receipt) || !receipt.hostRoot) {
+      return deferred('run threadnote mcp-install codex --apply to register the intended home');
+    }
+    if (dryRun) {
+      const release = yield* activeInstalledVersion();
+      return skipped(
+        `would reconcile Codex MCP ${receipt.name} in ${receipt.hostRoot} for release ${release ?? '(no validated active release)'}`,
+      );
+    }
+    const result = yield* reconcileCodexMcpConfiguration(
+      receipt.hostRoot,
+      {
+        name: receipt.name,
+        ...(yield* codexMcpCommands()),
+        environment: {THREADNOTE_HOME: config.agentContextHome},
+        mode: 'repair',
+      },
+      expectedRelease,
+    );
+    if (result.state === 'deferred') return result;
+    if (result.release === undefined) return deferred('no validated active release was found');
+    return {...result, release: result.release} satisfies RegisteredReconcileResult;
+  },
+);
+
+/** The activation owner may already hold the installation lock. */
+export function reconcileRegisteredCodexMcp(config: CodexOwner, expectedRelease?: string) {
+  return withAgentIntegrationLock(config, reconcileRegisteredCodexMcpInTransaction(config, expectedRelease)).pipe(
+    Effect.flatMap(result =>
+      Effect.gen(function* () {
+        if (result.state === 'current' || result.state === 'saved') {
+          if ((yield* activeInstalledVersion()) !== result.release) return generationChanged();
+        }
+        return result;
+      }),
+    ),
+    Effect.orElseSucceed(() => deferred('Codex ownership could not be verified')),
+  );
+}
+
+export const verifyRegisteredCodexMcp = Effect.fn('mcp.verifyRegisteredCodex')(function* (
+  config: CodexOwner,
+  target: CodexMcpConfigurationTarget,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const receiptMatches = Effect.gen(function* () {
+    const receipt = (yield* readAgentIntegrationRegistry(config))?.hosts.codex?.mcp;
+    return (
+      receipt !== undefined &&
+      isLocalCodexMcpReceipt(receipt) &&
+      receipt.name === target.name &&
+      receipt.hostRoot === target.hostRoot
+    );
+  });
+  return yield* Effect.gen(function* () {
+    if ((yield* activeInstalledVersion()) !== target.release || !(yield* receiptMatches)) return false;
+    if (!path.isAbsolute(target.hostRoot) || (yield* fs.realPath(target.hostRoot)) !== target.hostRoot) return false;
+    const snapshot = yield* readConfiguration(path.join(target.hostRoot, 'config.toml'));
+    const servers = snapshot && table(parseConfiguration(snapshot.content)?.mcp_servers);
+    const entry = table(servers?.[target.name]);
+    return (
+      entry !== undefined &&
+      ownedEntry(entry, yield* mcpAdapterCommand(), {THREADNOTE_HOME: config.agentContextHome}) &&
+      table(entry.env)?.[CODEX_MCP_RELEASE_ENV] === target.release &&
+      (yield* activeInstalledVersion()) === target.release &&
+      (yield* receiptMatches)
+    );
+  }).pipe(Effect.orElseSucceed(() => false));
+});
