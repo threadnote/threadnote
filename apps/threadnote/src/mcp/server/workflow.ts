@@ -1,11 +1,7 @@
 import {runNativeTaskAuthoring} from '../../workflow_automation/task_authoring.js';
 import {Effect, Schema, Struct} from 'effect';
 import {McpInput} from '../../effect/ai/mcp.js';
-import {
-  NativeTaskWatchNoticeRouteSchema,
-  readNativeTaskNoticeView,
-  readNativeTaskView,
-} from '../../workflow_automation/task.js';
+import {readNativeTaskNoticeView, readNativeTaskView} from '../../workflow_automation/task.js';
 import {
   NativeTaskPrDeliveryFieldsSchema,
   NativeTaskSupplementalAttachFieldsSchema,
@@ -198,15 +194,14 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     'workflow_task_view',
     {
       annotations: {readOnlyHint: true, destructiveHint: false},
-      description:
-        'Read a task summary or packet (detail=packet), or recover a specific arrived canonical PR watch notice.',
+      description: 'Read a task or recover an exact PR watch notice.',
       inputSchema: {
         runId: McpInput.requiredString(),
         callerCwd: McpInput.requiredString('Absolute path'),
         role: McpInput.string('Role'),
         cursor: McpInput.string('Cursor'),
-        phaseId: McpInput.string('Historical watch phase or known canonical notice phase'),
-        noticeRoute: Schema.optionalKey(NativeTaskWatchNoticeRouteSchema),
+        phaseId: McpInput.string('Watch phase'),
+        noticeRoute: McpInput.string('Exact notice Route JSON'),
         detail: Schema.optionalKey(Schema.Literals(['summary', 'packet'])),
         outputKey: McpInput.string('Listed closeout body key; detail=packet'),
       },

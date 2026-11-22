@@ -53,7 +53,7 @@ const requestSchema = Schema.Struct({
 
 const noticeRouteField = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256));
 
-export const NativeTaskWatchNoticeRouteSchema = Schema.Struct({
+const noticeRouteSchema = Schema.Struct({
   home: requestSchema.fields.callerCwd,
   watchId: noticeRouteField,
   consumerId: noticeRouteField,
@@ -66,7 +66,7 @@ const noticeViewRequestSchema = Schema.Struct({
   runId: requestSchema.fields.runId,
   callerCwd: requestSchema.fields.callerCwd,
   phaseId: noticeRouteField,
-  noticeRoute: NativeTaskWatchNoticeRouteSchema,
+  noticeRoute: Schema.fromJsonString(noticeRouteSchema),
 });
 
 export const encodeNativeAuthoringTaskRef = (ref: {

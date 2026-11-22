@@ -124,12 +124,7 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
               ...(options.outputKey === undefined ? {} : {outputKey: options.outputKey}),
             };
             if (noticeRoute === undefined) return yield* readNativeTaskView(config, input);
-            const route = yield* Effect.try({
-              try: () => JSON.parse(noticeRoute) as unknown,
-              catch: () =>
-                WorkflowAutomationError.make({code: 'invalid-json', message: 'Provide the exact notice Route JSON.'}),
-            });
-            return yield* readNativeTaskNoticeView(config, {...input, noticeRoute: route});
+            return yield* readNativeTaskNoticeView(config, {...input, noticeRoute});
           }).pipe(printTaskResult),
         ),
       ),

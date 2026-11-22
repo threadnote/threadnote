@@ -2217,7 +2217,7 @@ describe('native task actions', () => {
         const noticeRoute = object(JSON.parse(arrivedRoute[1]));
         const mcp = new EffectMcpServerAdapter('test', '1', 'fixture');
         registerWorkflowTaskTool(mcp, f.config);
-        const viewRequest = {runId: 'native-run', callerCwd: f.repo, phaseId: 'one', noticeRoute};
+        const viewRequest = {runId: 'native-run', callerCwd: f.repo, phaseId: 'one', noticeRoute: arrivedRoute[1]};
         const exactNotice = () => mcp.invokeTool('workflow_task_view', viewRequest);
         const recoveredNotice = yield* exactNotice();
         expect(recoveredNotice.structuredContent).toMatchObject({
@@ -2234,10 +2234,14 @@ describe('native task actions', () => {
           {...noticeRoute, home: f.repo},
         ]) {
           const foreignNotice = yield* mcp
-            .invokeTool('workflow_task_view', {...viewRequest, noticeRoute: foreign})
+            .invokeTool('workflow_task_view', {...viewRequest, noticeRoute: JSON.stringify(foreign)})
             .pipe(Effect.result);
           expect(foreignNotice).toMatchObject({failure: {code: 'foreign-notice-route'}});
         }
+        const malformed = yield* mcp
+          .invokeTool('workflow_task_view', {...viewRequest, noticeRoute: '{'})
+          .pipe(Effect.result);
+        expect(malformed).toMatchObject({failure: {code: 'invalid-request'}});
         expect((yield* readNativeWatch(f.config, published.watchId))?.revision).toBe(noticed?.revision);
         expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
 
@@ -3970,7 +3974,7 @@ describe('native task actions', () => {
           runId: updatedRoute.runId,
           callerCwd: updatedRoute.callerCwd,
           phaseId: 'one',
-          noticeRoute: object(JSON.parse(arrivedRoute[1])),
+          noticeRoute: arrivedRoute[1],
         });
         expect(recovered.structuredContent).toMatchObject({
           status: 'notice-recovered',
