@@ -137,36 +137,92 @@ jobs:
           retention-days: 14
 
   capture-baseline:
-    name: Capture a governed baseline candidate
+    name: Same-runner main and 6.0.0 graph CPU comparison
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
-      - run: bun install --frozen-lockfile
-      - name: Capture three exact-source observations and generate a candidate
-        env:
-          THREADNOTE_BENCHMARK_RUNNER_CLASS: github-hosted-ubuntu-24.04-${{ runner.arch }}
-          THREADNOTE_BENCHMARK_RUNNER_ID: ${{ runner.name }}
-          THREADNOTE_CODE_GRAPH_PARSER_WORKERS: '4'
+      - name: Capture exact main, release, and main again
+        shell: bash
         run: |
           set -euo pipefail
-          for sample in 1 2 3; do
-            bun run bench:code-graph -- \
-              --profile production-large --profile-files 3000 --profile-symbols 110000 \
-              --minimum-free-gib 20 --samples 1 --warmups 0 --quiet \
-              --output "artifacts/production-ratchet-observation-$sample.json"
+
+          # Run inside one real GitHub Actions ubuntu-24.04 x64 job, after
+          # actions/checkout with fetch-depth 0 and setup-bun 1.4.4.
+          : "${RUNNER_TEMP:?}" "${RUNNER_NAME:?}"
+          test "${GITHUB_ACTIONS:-}" = true
+          test "${RUNNER_ENVIRONMENT:-}" = github-hosted
+          test "${RUNNER_OS:-}" = Linux
+          test "${RUNNER_ARCH:-}" = X64
+          test "$(bun --version)" = 1.4.4
+
+          repo="$(git rev-parse --show-toplevel)"
+          main_sha=02c2971e312eb2954f6ebf546d9194070693858f
+          release_sha=76f0b8b37f6251efd737916d44e4b2941ba9db53
+          compare_root="$(mktemp -d "$RUNNER_TEMP/threadnote-main-release.XXXXXX")"
+          artifact_root="$RUNNER_TEMP/threadnote-main-release-evidence"
+          mkdir -p -- "$artifact_root"
+          cleanup() {
+            local role
+            for role in main release; do
+              if [[ -d "$compare_root/$role" ]]; then
+                git -C "$repo" worktree remove --force -- "$compare_root/$role" || true
+              fi
+            done
+            rmdir -- "$compare_root" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          git -C "$repo" cat-file -e "$main_sha^{commit}"
+          git -C "$repo" cat-file -e "$release_sha^{commit}"
+
+          prepare() {
+            local role="$1" sha="$2" checkout
+            checkout="$compare_root/$role"
+            git -C "$repo" worktree add --detach "$checkout" "$sha"
+            (cd "$checkout" && bun install --frozen-lockfile)
+            test "$(git -C "$checkout" rev-parse HEAD)" = "$sha"
+            test -z "$(git -C "$checkout" status --porcelain --untracked-files=no)"
+          }
+
+          capture() (
+            local role="$1" sha="$2" label="$3" checkout
+            checkout="$compare_root/$role"
+            cd "$checkout"
+            # Same provenance rebinding used by the existing protected-base control.
+            GITHUB_WORKSPACE="$checkout" GITHUB_SHA="$sha" \
+              THREADNOTE_BENCHMARK_RUNNER_CLASS=github-hosted-ubuntu-24.04-X64 \
+              THREADNOTE_BENCHMARK_RUNNER_ID="$RUNNER_NAME" \
+              THREADNOTE_CODE_GRAPH_PARSER_WORKERS=4 \
+              bun run bench:code-graph -- \
+                --profile production-large --profile-files 3000 --profile-symbols 110000 \
+                --minimum-free-gib 20 --samples 1 --warmups 0 --quiet \
+                --output "$artifact_root/$label.json"
+          )
+
+          prepare main "$main_sha"
+          prepare release "$release_sha"
+          capture main "$main_sha" main-before
+          capture release "$release_sha" release
+          capture main "$main_sha" main-after
+
+          for label in main-before release main-after; do
+            jq -c '{source: .metadata.benchmarkMeasuredSourceCommit, runner: .metadata.runnerIdentity, runnerKey: .metadata.sameRunnerComparisonKey, governed: .metadata.benchmarkGoverned, dirty: .environment.dirty, fixtureHash: .environment.fixtureHash, cold: [.metadata.coldFiles,.metadata.coldSymbols,.metadata.coldEdges], digests: [.metadata.primaryQueryStructuralDigestCold,.metadata.primaryQueryStructuralDigestIncremental,.metadata.primaryQueryStructuralDigestSameOverlayReference], metrics: [.measurements[] | select(.name == "hot-deferred-ready-query-orchestration-process-cpu" or .name == "mcp-query-duration") | {name,p95,unit}]}' "$artifact_root/$label.json"
           done
-          bun scripts/generate-code-graph-production-ratchet.ts \
-            artifacts/production-ratchet-observation-{1,2,3}.json \
-            --output artifacts/production-ratchet-candidate.json
+          sha256sum "$artifact_root/main-before.json" "$artifact_root/release.json" "$artifact_root/main-after.json"
+          printf 'Retain diagnostic artifacts under %s\n' "$artifact_root"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: production-ratchet-candidate-${{ github.sha }}
-          path: artifacts/
+          name: main-release-graph-cpu-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/threadnote-main-release-evidence/*.json
           if-no-files-found: error
-          retention-days: 90
+          retention-days: 14
