@@ -1499,24 +1499,33 @@ export function codeGraphTermCandidateQueryStatement(
 ): CodeGraphSqlQueryStatement {
   const uniqueTerms = [...new Set(terms)].slice(0, 24);
   if (isLexicalV2Snapshot(snapshotId)) {
-    const relation = lexicalV2CandidateRelationSql();
-    const current = `WITH input(snapshot_id,terms_json) AS (VALUES (?,?)) ${relation}`;
     const termsJson = JSON.stringify(uniqueTerms);
-    const effective =
-      baseSnapshotId === undefined
-        ? current
-        : `WITH current_terms AS (${current}), base_terms AS (${current})
+    const candidateLimit = Math.max(1, Math.min(2_000, Math.floor(limit)));
+    if (baseSnapshotId === undefined) {
+      // Member keys and symbol IDs map one-to-one within a snapshot. Resolve IDs once per scored member.
+      return {
+        parameters: [snapshotId, termsJson, candidateLimit],
+        text: `WITH input(snapshot_id,terms_json) AS (VALUES (?,?)),
+          matching_members AS (${lexicalV2CandidateRelationSql('member-key')}),
+          member_scores AS (
+            SELECT snapshot_key, scope_ordinal, member_ordinal, SUM(weight) AS score
+            FROM matching_members GROUP BY snapshot_key, scope_ordinal, member_ordinal
+          )
+          SELECT member.symbol_id, scores.score FROM member_scores scores
+          CROSS JOIN lexical_v2_members member
+          WHERE member.snapshot_key=scores.snapshot_key AND member.scope_ordinal=scores.scope_ordinal
+            AND member.member_ordinal=scores.member_ordinal
+          ORDER BY scores.score DESC, member.symbol_id LIMIT ?`,
+      };
+    }
+    const current = `WITH input(snapshot_id,terms_json) AS (VALUES (?,?)) ${lexicalV2CandidateRelationSql()}`;
+    const effective = `WITH current_terms AS (${current}), base_terms AS (${current})
           SELECT term,symbol_id,weight FROM current_terms
           UNION ALL SELECT term,symbol_id,weight FROM base_terms base
           WHERE NOT EXISTS(SELECT 1 FROM symbols replacement WHERE replacement.snapshot_id=? AND replacement.id=base.symbol_id)
             AND NOT EXISTS(SELECT 1 FROM snapshot_symbol_deletions deletion WHERE deletion.snapshot_id=? AND deletion.symbol_id=base.symbol_id)`;
     return {
-      parameters: [
-        snapshotId,
-        termsJson,
-        ...(baseSnapshotId === undefined ? [] : [baseSnapshotId, termsJson, snapshotId, snapshotId]),
-        Math.max(1, Math.min(2_000, Math.floor(limit))),
-      ],
+      parameters: [snapshotId, termsJson, baseSnapshotId, termsJson, snapshotId, snapshotId, candidateLimit],
       text: `WITH effective_terms AS (${effective}) SELECT symbol_id,SUM(weight) AS score
         FROM effective_terms GROUP BY symbol_id ORDER BY score DESC,symbol_id LIMIT ?`,
     };
