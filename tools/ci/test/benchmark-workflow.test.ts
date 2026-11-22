@@ -225,6 +225,14 @@ describe('platform benchmark workflow', () => {
       'test -f "$model_file"',
     ])
       expect(commands).toContain(token);
+    const productionCaptures = EffectArray.filter(
+      EffectString.split('\n')(EffectString.replaceAll('\\\n', '')(commands)),
+      line =>
+        EffectString.includes('bun scripts/benchmark-recall-vectors.ts')(line) &&
+        EffectString.includes('--production-path')(line),
+    );
+    expect(productionCaptures).toHaveLength(2);
+    for (const capture of productionCaptures) expect(capture).toContain('--baseline-source-root "$baseline_root"');
     expect(commands).not.toContain('--fail-on-budget');
     expect(commands).not.toMatch(/model(?:s)? (?:install|download)/u);
     expect(Option.getOrElse(EffectString.indexOf('--write-baseline-provenance')(commands), () => -1)).toBeLessThan(
