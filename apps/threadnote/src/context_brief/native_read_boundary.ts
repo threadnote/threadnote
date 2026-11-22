@@ -1,4 +1,4 @@
-import {Effect, Option, Record as EffectRecord, Schema} from 'effect';
+import {Array as EffectArray, Effect, Option, Record as EffectRecord, Schema} from 'effect';
 import * as EffectString from 'effect/String';
 import {assertMemoryCodeCitation, type MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import {CodeGraphProjectCoverageSchema} from '@threadnote/graph/types';
@@ -20,8 +20,11 @@ import {CONTEXT_BRIEF_NATIVE_READ_WORKER_ARGUMENT} from '../worker_protocol.js';
 export const CONTEXT_BRIEF_NATIVE_READ_INPUT_BYTES = 2 * 1024 * 1024;
 export const CONTEXT_BRIEF_NATIVE_READ_OUTPUT_BYTES = 2 * 1024 * 1024;
 const CLEANUP_AND_DECODE_RESERVE_MILLISECONDS = 1_100;
-/** The only line a worker may print before its response: its graph status and attach reads completed. */
+/** The graph status and attach reads completed. */
 export const CONTEXT_BRIEF_NATIVE_READ_STATUS_PROGRESS = JSON.stringify({protocol: 1, progress: 'status-observed'});
+const scopedReadyPrefix = 'scoped-ready:';
+const scopedReadyEnd = 'scoped-ready-complete';
+const scopedReadyOutputBytes = CONTEXT_BRIEF_NATIVE_READ_OUTPUT_BYTES / 2;
 const text = Schema.String.check(Schema.isMaxLength(64 * 1024));
 const shortText = Schema.String.check(Schema.isMaxLength(4096));
 const count = Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 1_000_000}));
@@ -281,6 +284,77 @@ const graphEvidence = Schema.Struct({
   }),
   warnings: strings,
 });
+const scopedReadyProgress = Schema.Struct({
+  binding: shortText,
+  value: graphEvidence,
+});
+const decodeScopedReadyProgress = Schema.decodeUnknownOption(Schema.fromJsonString(scopedReadyProgress), {
+  onExcessProperty: 'error',
+});
+
+export function encodeContextBriefScopedReadyProgress(
+  request: ContextBriefNativeReadRequest,
+  value: typeof graphEvidence.Type,
+): Uint8Array | undefined {
+  const payload = JSON.stringify({binding: contextBriefNativeReadBinding(request), value});
+  // The command observer only forwards complete, bounded lines. Split between code points.
+  const chunks = Option.getOrElse(EffectString.match(/[\s\S]{1,1000}/gu)(payload), () => []);
+  const output = new TextEncoder().encode(
+    `${EffectArray.join(
+      EffectArray.map(chunks, chunk => scopedReadyPrefix + chunk),
+      '\n',
+    )}\n${scopedReadyEnd}\n`,
+  );
+  return output.byteLength <= scopedReadyOutputBytes ? output : undefined;
+}
+
+function observeScopedReadyProgress(request: ContextBriefNativeReadRequest, onStatusObserved: () => void) {
+  const chunks: string[] = [];
+  let size = 0;
+  let unavailable = false;
+  let completed = false;
+  return {
+    line(line: string) {
+      if (line === CONTEXT_BRIEF_NATIVE_READ_STATUS_PROGRESS) {
+        onStatusObserved();
+        unavailable = true;
+      }
+      if (unavailable) return;
+      if (line === scopedReadyEnd && !completed) {
+        completed = true;
+      } else if (EffectString.startsWith(scopedReadyPrefix)(line) && !completed) {
+        size += new TextEncoder().encode(line).byteLength + 1;
+        if (size <= scopedReadyOutputBytes) chunks.push(EffectString.slice(scopedReadyPrefix.length)(line));
+        else unavailable = true;
+      } else if (!completed || line === scopedReadyEnd || EffectString.startsWith(scopedReadyPrefix)(line)) {
+        unavailable = true;
+      }
+    },
+    evidence() {
+      if (unavailable || !completed || request.operation !== 'graph' || request.plan.scope.kind !== 'repository')
+        return undefined;
+      const decoded = Option.getOrUndefined(decodeScopedReadyProgress(EffectArray.join(chunks, '')));
+      const value = decoded?.value;
+      if (
+        decoded?.binding !== contextBriefNativeReadBinding(request) ||
+        value === undefined ||
+        value.cards.length === 0 ||
+        value.citationValidationFence !== undefined ||
+        value.sourceExcerpts !== undefined ||
+        value.resolvedSnapshots.length !== 1 ||
+        value.resolvedSnapshots[0]?.freshness !== 'stale' ||
+        value.coverage.complete ||
+        value.coverage.readyRepositories !== 1 ||
+        value.coverage.states.stale !== 1 ||
+        value.projectCoverage?.kind !== 'project' ||
+        value.projectCoverage.completeness !== 'partial' ||
+        value.projectCoverage.negativeProof !== 'unavailable'
+      )
+        return undefined;
+      return value;
+    },
+  };
+}
 const receipt = Schema.Struct({
   candidateCount: count,
   citationId: shortText,
@@ -442,7 +516,11 @@ const makeNativeReadExecutor = Effect.fn('contextBrief.makeNativeReadExecutor')(
     ...(name === 'bun' || name === 'bun.exe' ? [system.developmentEntrypoint] : []),
     CONTEXT_BRIEF_NATIVE_READ_WORKER_ARGUMENT,
   ];
-  return (request: ContextBriefNativeReadRequest, deadline: ReadDeadline, onStdoutLine?: (line: string) => void) =>
+  return (
+    request: ContextBriefNativeReadRequest,
+    deadline: ReadDeadline,
+    progress?: {readonly line: (line: string) => void; readonly joinedDeadline: () => void},
+  ) =>
     Effect.gen(function* () {
       const input = yield* Effect.try({
         try: () => new TextEncoder().encode(JSON.stringify(request)),
@@ -461,18 +539,21 @@ const makeNativeReadExecutor = Effect.fn('contextBrief.makeNativeReadExecutor')(
           forceKillAfterMilliseconds: 0,
           sensitiveOutput: true,
           verifyOwnedProcessExit: system.platform === 'win32' ? 'leader' : 'group',
-          ...(onStdoutLine === undefined ? {} : {onStdoutLine}),
+          ...(progress === undefined ? {} : {onStdoutLine: progress.line}),
         })
         .pipe(
-          Effect.mapError(error =>
-            Schema.is(CommandCleanupUnconfirmed)(error)
-              ? ContextBriefNativeReadFailed.make({reason: 'cleanup-unconfirmed'})
-              : Schema.is(CommandTimedOut)(error)
-                ? ReadDeadlineExceeded.make({})
-                : ContextBriefNativeReadFailed.make({
-                    reason: system.platform === 'win32' ? 'cleanup-unconfirmed' : 'worker-failed',
-                  }),
-          ),
+          Effect.mapError(error => {
+            if (Schema.is(CommandCleanupUnconfirmed)(error))
+              return ContextBriefNativeReadFailed.make({reason: 'cleanup-unconfirmed'});
+            if (Schema.is(CommandTimedOut)(error)) {
+              // A Windows watchdog confirms only the worker leader. Its Git descendants may still be running.
+              if (system.platform !== 'win32') progress?.joinedDeadline();
+              return ReadDeadlineExceeded.make({});
+            }
+            return ContextBriefNativeReadFailed.make({
+              reason: system.platform === 'win32' ? 'cleanup-unconfirmed' : 'worker-failed',
+            });
+          }),
         );
       // A graph worker prints its progress line first; the response is always the last line.
       const final = EffectString.split('\n')(EffectString.trimEnd(result.stdout)).at(-1) ?? '';
@@ -489,7 +570,10 @@ const makeNativeReadExecutor = Effect.fn('contextBrief.makeNativeReadExecutor')(
         return yield* ContextBriefNativeReadFailed.make({reason: 'invalid-protocol'});
       if ((yield* readDeadlineRemaining(deadline)) <= 0) return yield* ReadDeadlineExceeded.make({});
       if (!response.ok) {
-        if (response.failure === 'budget-exhausted') return yield* ReadDeadlineExceeded.make({});
+        if (response.failure === 'budget-exhausted') {
+          progress?.joinedDeadline();
+          return yield* ReadDeadlineExceeded.make({});
+        }
         if (response.routing !== undefined) return yield* CodeGraphScopeRoutingError.make(response.routing);
         return yield* ContextBriefNativeReadFailed.make({reason: 'worker-failed'});
       }
@@ -539,16 +623,37 @@ export const withNativeContextBriefReadSources = Effect.fn('contextBrief.withNat
           budget.remaining = 0;
           budget.primaryRemaining = 0;
         }
-        const response = yield* execute(request, remaining.deadline, line => {
-          if (budget && line === CONTEXT_BRIEF_NATIVE_READ_STATUS_PROGRESS) budget.statusObserved = true;
+        const progress = observeScopedReadyProgress(request, () => {
+          if (budget) budget.statusObserved = true;
         });
-        if (response.operation !== 'graph')
+        let joinedDeadline = false;
+        const response = yield* execute(request, remaining.deadline, {
+          line: progress.line,
+          joinedDeadline: () => {
+            joinedDeadline = true;
+          },
+        }).pipe(Effect.result);
+        if (response._tag === 'Failure') {
+          if (
+            joinedDeadline &&
+            Schema.is(ReadDeadlineExceeded)(response.failure) &&
+            (yield* readDeadlineRemaining(remaining.deadline)) > 0
+          ) {
+            const ready = progress.evidence();
+            if (ready !== undefined) return ready;
+          }
+          return yield* response.failure;
+        }
+        if (response.success.operation !== 'graph')
           return yield* ContextBriefNativeReadFailed.make({reason: 'invalid-protocol'});
         if (budget) {
-          budget.remaining = Math.min(admittedCounters.remaining, response.counters.remaining);
-          budget.primaryRemaining = Math.min(admittedCounters.primaryRemaining, response.counters.primaryRemaining);
+          budget.remaining = Math.min(admittedCounters.remaining, response.success.counters.remaining);
+          budget.primaryRemaining = Math.min(
+            admittedCounters.primaryRemaining,
+            response.success.counters.primaryRemaining,
+          );
         }
-        return response.value;
+        return response.success.value;
       }),
     ...(sources.codeLinkedMemoryEvidence === undefined
       ? {}

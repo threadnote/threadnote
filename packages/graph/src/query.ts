@@ -51,6 +51,7 @@ import {
   outsideCodeGraphProjectPaths,
   type CodeGraphQueryScope,
   type CodeGraphQueryScopeReceipt,
+  type CodeGraphReadyScopeReceipt,
 } from './query/scope.js';
 import {codeGraphScopeAdmitsPath} from './scope/applicability.js';
 import {isCodeGraphCapacityPause} from './disk/capacity.js';
@@ -69,6 +70,7 @@ import {
   codeGraphLanguagePackStatuses,
   observeCodeGraphStatusSessionIdentity,
   postPromotionObservation,
+  readScopedReadyStatus,
   resolvePublishedRepositoryIdentityObservation,
 } from './query/status_helpers.js';
 export {observationFromCodeGraphStatus, shouldAttachSharedReadySnapshot} from './query/contract.js';
@@ -236,6 +238,11 @@ export class CodeGraphQueryService extends Context.Service<
           if (!identityAlreadyObserved) yield* recordVerifiedCodeGraphLocalAssociation(threadnoteHome, identity);
           const projectScope = yield* observeCodeGraphQueryScope(threadnoteHome, callerCwd, identity, languagePacks, {
             ...options,
+            onScopedRoute:
+              options?.onScopedReadyStatus === undefined
+                ? undefined
+                : project =>
+                    readScopedReadyStatus(path, store, languagePacks, threadnoteHome, identity, project, options),
             preobservedWorktreeChanged:
               options?.observeWorktree === false || options?.afterIdentityObserved !== undefined
                 ? undefined
@@ -718,7 +725,9 @@ export class CodeGraphQueryService extends Context.Service<
                         options,
                       )
                     : undefined;
-              const scopeReceipt = options.readyScopeReceipt ?? codeGraphQueryScopeReceipt(projectScope);
+              const unverifiedScope = statusObservation?.unverifiedScope;
+              const scopeReceipt =
+                unverifiedScope ?? options.readyScopeReceipt ?? codeGraphQueryScopeReceipt(projectScope);
               const layout = codeGraphLayout(
                 path,
                 options.threadnoteHome,
@@ -749,6 +758,11 @@ export class CodeGraphQueryService extends Context.Service<
               const strictFreshness =
                 options.strictFreshness ??
                 (options.refresh === true || options.operation === 'impact' || options.operation === 'path');
+              if (unverifiedScope !== undefined && (options.refresh !== false || strictFreshness)) {
+                return yield* CodeGraphSnapshotUnavailable.make({
+                  message: 'Scoped ready evidence has no current applicability observation.',
+                });
+              }
               const observeBeforeRead = options.refresh !== false || strictFreshness;
               const overlay =
                 statusObservation?.overlay !== undefined
@@ -795,6 +809,8 @@ export class CodeGraphQueryService extends Context.Service<
                       borrowedSnapshotId: rebuilt ? undefined : statusObservation?.borrowedSnapshotId,
                       embedding,
                       expectedRepositoryId: identity.repositoryId,
+                      expectedReadySnapshotId:
+                        unverifiedScope === undefined ? undefined : statusObservation?.readySnapshotId,
                       layout,
                       languagePacks,
                       deferWorktreeObservation: overlay === undefined && !rebuilt,
@@ -983,7 +999,7 @@ export const traversalQuery = Effect.fn('codeGraph.traversalQuery')(function* (
   edgeLimit: number,
   depth: number,
   allowedProvenances: readonly CodeGraphProvenance[],
-  embedding: CodeGraphTraversalQueryEmbedding,
+  embedding: CodeGraphTraversalQueryEmbedding | undefined,
   threadnoteHome: string,
   layout: CodeGraphLayout,
   impact: boolean,
@@ -1100,6 +1116,7 @@ export const traversalQuery = Effect.fn('codeGraph.traversalQuery')(function* (
         .sort((left, right) => right.score - left.score || compareCodeUnits(left.id, right.id))
         .slice(0, seedLimit);
   const semanticEligible =
+    embedding !== undefined &&
     !timedOut &&
     !(impact && seedQueries?.length) &&
     !structuredImpactSelector &&
@@ -1504,6 +1521,7 @@ const inspectReadyGraph = Effect.fn('codeGraph.inspectReadyGraph')(function* (in
   readonly deferWorktreeObservation: boolean;
   readonly embedding: CodeGraphEmbeddingIndexShape;
   readonly expectedRepositoryId: string;
+  readonly expectedReadySnapshotId?: string;
   readonly layout: CodeGraphLayout;
   readonly languagePacks: CodeGraphLanguagePackRegistryShape;
   readonly observation?: {
@@ -1512,7 +1530,7 @@ const inspectReadyGraph = Effect.fn('codeGraph.inspectReadyGraph')(function* (in
   };
   readonly options: CodeGraphInspectOptions;
   readonly projectScope?: CodeGraphQueryScope;
-  readonly projectScopeReceipt?: CodeGraphQueryScopeReceipt;
+  readonly projectScopeReceipt?: CodeGraphReadyScopeReceipt;
   readonly store: CodeGraphStoreShape;
   readonly strictFreshness: boolean;
 }) {
@@ -1549,7 +1567,10 @@ const inspectReadyGraph = Effect.fn('codeGraph.inspectReadyGraph')(function* (in
       projectScope: input.projectScopeReceipt,
       store: input.store,
     });
-    if (!storedSnapshot) {
+    if (
+      !storedSnapshot ||
+      (input.expectedReadySnapshotId !== undefined && storedSnapshot.id !== input.expectedReadySnapshotId)
+    ) {
       return yield* CodeGraphSnapshotUnavailable.make({
         message: incompatibleSnapshotObserved
           ? 'The ready graph has a different project definition or dependency closure. Rebuild the selected project graph.'
@@ -1574,6 +1595,7 @@ const inspectReadyGraph = Effect.fn('codeGraph.inspectReadyGraph')(function* (in
       8,
     );
     const allowedProvenances = selectedProvenances(input.options);
+    const embedding = input.expectedReadySnapshotId === undefined ? input.embedding : undefined;
     const outsidePaths = input.options.deferProjectScopePresentation
       ? []
       : outsideCodeGraphProjectPaths(input.options, input.projectScope?.scope);
@@ -1635,7 +1657,7 @@ const inspectReadyGraph = Effect.fn('codeGraph.inspectReadyGraph')(function* (in
                 edgeLimit,
                 depth,
                 allowedProvenances,
-                input.embedding,
+                embedding,
                 input.options.threadnoteHome,
                 input.layout,
                 true,
@@ -1656,7 +1678,7 @@ const inspectReadyGraph = Effect.fn('codeGraph.inspectReadyGraph')(function* (in
                 edgeLimit,
                 Math.max(1, depth),
                 allowedProvenances,
-                input.embedding,
+                embedding,
                 input.options.threadnoteHome,
                 input.layout,
                 false,
@@ -1664,6 +1686,17 @@ const inspectReadyGraph = Effect.fn('codeGraph.inspectReadyGraph')(function* (in
                 undefined,
               );
             case 'query':
+              if (input.expectedReadySnapshotId !== undefined) {
+                return input.store
+                  .searchSymbols(
+                    input.layout.databasePath,
+                    snapshot.id,
+                    required(input.options.query, 'query'),
+                    nodeLimit,
+                    'exact-preview',
+                  )
+                  .pipe(Effect.map(nodes => ({nodes, edges: [], warnings: []})));
+              }
               return traversalQuery(
                 input.store,
                 input.layout.databasePath,
@@ -1674,7 +1707,7 @@ const inspectReadyGraph = Effect.fn('codeGraph.inspectReadyGraph')(function* (in
                 edgeLimit,
                 Math.min(1, depth),
                 allowedProvenances,
-                input.embedding,
+                embedding,
                 input.options.threadnoteHome,
                 input.layout,
                 false,

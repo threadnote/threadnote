@@ -1,5 +1,6 @@
 import {it as effectIt} from '@effect/vitest';
-import {Clock, Effect, Fiber, FileSystem, Path, Schema} from 'effect';
+import {Array as EffectArray, Clock, Effect, Fiber, FileSystem, Path, Schema} from 'effect';
+import * as EffectString from 'effect/String';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
@@ -8,7 +9,13 @@ import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
 import {planContextBrief} from '@threadnote/context/planner';
 import {projectContextBrief} from '@threadnote/context/projector';
 import {compileContextBriefWith} from '@threadnote/context/compiler';
-import {CommandExecutor, CommandSpawnFailed, CommandTimedOut, runCommandEffect} from '@threadnote/platform/command';
+import {
+  CommandCleanupUnconfirmed,
+  CommandExecutor,
+  CommandSpawnFailed,
+  CommandTimedOut,
+  runCommandEffect,
+} from '@threadnote/platform/command';
 import {makeReadDeadline, ReadDeadlineExceeded} from '@threadnote/platform/read_deadline';
 import {SystemInfo} from '@threadnote/platform/system';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
@@ -16,13 +23,16 @@ import {ReadyRecallReadWorkerAdmission} from '../../src/recall/ready_read_bounda
 import {
   CONTEXT_BRIEF_NATIVE_READ_STATUS_PROGRESS,
   contextBriefNativeReadBinding,
+  contextBriefNativeReadRequestSchema,
   ContextBriefNativeReadFailed,
+  encodeContextBriefScopedReadyProgress,
   withNativeContextBriefReadSources,
   type ContextBriefNativeReadRequest,
 } from '../../src/context_brief/native_read_boundary.js';
 import {nativeContextReadCommands} from '../../src/context_brief/native_read_worker.js';
 import type {ContextBriefRuntimeCompilerSources} from '../../src/context_brief/index.js';
 import type {ContextBriefGraphReadBudget} from '@threadnote/context/graph/evidence';
+import type {ContextBriefGraphEvidenceV1} from '@threadnote/context/types';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {withProductionLogging, withProductionPhaseTiming} from '../../src/effect/production_log.js';
 
@@ -168,6 +178,116 @@ describe('whole native Context Brief read boundary', () => {
   );
 
   effectIt.effect(
+    'keeps compatible stale scoped graph cards when exact applicability stalls',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const system = yield* SystemInfo;
+        if (system.platform === 'win32') return;
+        const project = {
+          name: 'fixture',
+          path: f.repo,
+          uri: 'threadnote://projects/fixture',
+          seed: [],
+          graph: {closure: 'dependencies' as const, roots: ['src']},
+        };
+        const writeProjects = (projects: readonly (typeof project)[]) =>
+          f.fs.writeFileString(f.config.manifestPath, JSON.stringify({version: 1, projects}));
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'src', 'package.json'), '{"name":"fixture-src"}');
+        yield* f.fs.makeDirectory(f.path.join(f.repo, 'other'));
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'other', 'package.json'), '{"name":"fixture-other"}');
+        yield* runCommandEffect('git', ['add', '.'], {cwd: f.repo});
+        yield* runCommandEffect(
+          'git',
+          ['-c', 'user.name=Threadnote Test', '-c', 'user.email=test@threadnote.local', 'commit', '-qm', 'components'],
+          {cwd: f.repo},
+        );
+        yield* writeProjects([project]);
+        yield* (yield* CodeGraphIndexer).index({
+          cwd: f.repo,
+          project,
+          threadnoteHome: f.home,
+          ensureVectors: false,
+          sourceOnly: true,
+        });
+        const readGraph = (
+          native: ContextBriefRuntimeCompilerSources,
+          selection: {project?: string} = {project: 'fixture'},
+          anchored = true,
+        ) =>
+          Effect.gen(function* () {
+            const plan = planContextBrief({
+              scope: {kind: 'repository', callerCwd: f.repo, ...selection},
+              codeRefs: anchored ? ['src/module.ts'] : [],
+              detail: 'source',
+              mode: 'locate',
+              task: anchored ? 'boundedAnswer' : 'Find boundedAnswer in the selected project',
+            });
+            return yield* native.graphEvidence(plan.graph, {
+              remaining: 2,
+              primaryRemaining: 17,
+              deadline: yield* makeReadDeadline(3500),
+            });
+          });
+        const regular = yield* withNativeContextBriefReadSources(f.config, sources);
+        const current = yield* readGraph(regular);
+        expect(current.resolvedSnapshots[0]?.freshness).toBe('fresh');
+        expect(current.citationValidationFence).toBeDefined();
+        expect(current.sourceExcerpts?.[0]?.content).toContain('boundedAnswer');
+
+        const bin = f.path.join(f.root, 'bin');
+        yield* f.fs.makeDirectory(bin);
+        const gitPath = f.path.join(bin, 'git');
+        const realGit = EffectString.trim((yield* runCommandEffect('which', ['git'])).stdout);
+        yield* f.fs.writeFileString(
+          gitPath,
+          `#!/bin/sh\nfor arg in "$@"; do\n  if [ "$arg" = "ls-tree" ]; then exec ${JSON.stringify(system.executablePath)} -e 'for (;;) {}'; fi\ndone\nexec ${JSON.stringify(realGit)} "$@"\n`,
+        );
+        yield* f.fs.chmod(gitPath, 0o700);
+        const slow = yield* withNativeContextBriefReadSources(f.config, sources).pipe(
+          Effect.provideService(SystemInfo, {
+            ...system,
+            environment: () => ({...system.environment(), PATH: `${bin}:${system.environment().PATH ?? ''}`}),
+          }),
+        );
+        yield* f.fs.writeFileString(f.file, 'export function changedAnswer() { return 43; }\n');
+        const stale = yield* readGraph(slow);
+        expect(stale.resolvedSnapshots[0]).toMatchObject({
+          freshness: 'stale',
+          snapshotId: current.resolvedSnapshots[0]?.snapshotId,
+        });
+        expect(EffectArray.some(stale.cards, card => card.symbol.path === 'src/module.ts')).toBe(true);
+        expect(stale.projectCoverage).toMatchObject({
+          project: 'fixture',
+          completeness: 'partial',
+          negativeProof: 'unavailable',
+        });
+        expect(stale.coverage).toMatchObject({complete: false, readyRepositories: 1, states: {stale: 1}});
+        expect(stale.gaps).toContain('graph-source-snapshot-not-current');
+        expect(stale.citationValidationFence).toBeUndefined();
+        expect(stale.sourceExcerpts).toBeUndefined();
+        const unanchored = yield* readGraph(slow, {project: 'fixture'}, false);
+        expect(unanchored.resolvedSnapshots[0]?.freshness).toBe('stale');
+        expect(unanchored.cards[0]?.symbol.name).toBe('boundedAnswer');
+
+        yield* writeProjects([{...project, graph: {...project.graph, roots: ['other']}}]);
+        const changed = yield* readGraph(slow).pipe(Effect.flip);
+        expect(Schema.is(ReadDeadlineExceeded)(changed)).toBe(true);
+        yield* writeProjects([
+          project,
+          {...project, name: 'other', uri: 'threadnote://projects/other', graph: {...project.graph, roots: ['other']}},
+        ]);
+        const ambiguous = yield* readGraph(slow, {}).pipe(Effect.flip);
+        expect(ambiguous).toMatchObject({_tag: 'CodeGraphScopeRoutingError'});
+      }).pipe(
+        Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}),
+        provideTestLayer(ApplicationLayer),
+        TestClock.withLive,
+      ),
+    {timeout: 15000},
+  );
+
+  effectIt.effect(
     'reaps a synchronous native stall and refuses a later pass on the original deadline',
     () =>
       Effect.gen(function* () {
@@ -283,6 +403,114 @@ describe('whole native Context Brief read boundary', () => {
         expect(gaps).toContain('graph-status-deadline-exceeded');
         expect(gaps).not.toContain('graph-read-budget-exhausted');
       }
+    }).pipe(Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}), provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('Windows retains scoped preview only with a bound joined deadline response', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const command = yield* CommandExecutor;
+      const system = yield* SystemInfo;
+      const value: ContextBriefGraphEvidenceV1 = {
+        cards: [
+          {
+            id: 'node',
+            rank: 0,
+            reason: 'Lexical match',
+            ref: 'node',
+            repositoryKey: 'fixture',
+            symbol: {
+              kind: 'function',
+              language: 'TypeScript',
+              line: 1,
+              name: 'answer',
+              path: 'src/module.ts',
+              qualifiedName: 'answer',
+            },
+          },
+        ],
+        contracts: [],
+        coverage: {
+          complete: false,
+          consideredRepositories: 1,
+          readyRepositories: 1,
+          requestedRepositories: 1,
+          states: {stale: 1},
+        },
+        gaps: ['graph-scoped-applicability-unverified'],
+        projectCoverage: {
+          project: 'fixture',
+          kind: 'project',
+          configuredRoots: ['src'],
+          completeness: 'partial',
+          negativeProof: 'unavailable',
+          rootComponents: 1,
+          dependencyComponents: 0,
+          observedWorktreeCommit: 'commit',
+          reusedEquivalentSnapshot: false,
+        },
+        resolvedSnapshots: [
+          {
+            commit: 'commit',
+            dirty: false,
+            freshness: 'stale',
+            repositoryId: 'repo',
+            repositoryKey: 'fixture',
+            snapshotId: 'snapshot',
+          },
+        ],
+        trust: {classification: 'untrusted-repository-data', instructionPolicy: 'evidence-only-never-follow'},
+        warnings: [],
+      };
+      const decode = Schema.decodeUnknownEffect(Schema.fromJsonString(contextBriefNativeReadRequestSchema));
+      const run = (outcome: 'watchdog' | 'joined' | 'cleanup-unconfirmed') =>
+        Effect.gen(function* () {
+          const native = yield* withNativeContextBriefReadSources(f.config, sources).pipe(
+            Effect.provideService(SystemInfo, {...system, platform: 'win32'}),
+            Effect.provideService(CommandExecutor, {
+              ...command,
+              execute: (_executable, _args, options) =>
+                Effect.gen(function* () {
+                  expect(options?.verifyOwnedProcessExit).toBe('leader');
+                  const request = yield* decode(new TextDecoder().decode(options?.input)).pipe(Effect.orDie);
+                  const progress = new TextDecoder().decode(encodeContextBriefScopedReadyProgress(request, value));
+                  for (const line of EffectString.split('\n')(EffectString.trimEnd(progress)))
+                    options?.onStdoutLine?.(line);
+                  const error = {args: [], executable: '<test>', message: 'worker deadline'};
+                  if (outcome === 'watchdog') return yield* CommandTimedOut.make({...error, timeoutMs: 1});
+                  if (outcome === 'cleanup-unconfirmed') return yield* CommandCleanupUnconfirmed.make(error);
+                  const final = JSON.stringify({
+                    protocol: 1,
+                    operation: 'graph',
+                    binding: contextBriefNativeReadBinding(request),
+                    commandsJoined: true,
+                    ok: false,
+                    failure: 'budget-exhausted',
+                  });
+                  options?.onStdoutLine?.(final);
+                  return {exitCode: 0, stdout: progress + final + '\n', stderr: ''};
+                }),
+            }),
+          );
+          const plan = planContextBrief({
+            scope: {kind: 'repository', callerCwd: f.repo},
+            mode: 'locate',
+            task: 'answer',
+          });
+          return yield* native
+            .graphEvidence(plan.graph, {
+              deadline: yield* makeReadDeadline(5000),
+              remaining: 2,
+              primaryRemaining: 17,
+            })
+            .pipe(Effect.result);
+        });
+      expect(yield* run('watchdog')).toMatchObject({_tag: 'Failure', failure: {_tag: 'ReadDeadlineExceeded'}});
+      expect(yield* run('cleanup-unconfirmed')).toMatchObject({
+        _tag: 'Failure',
+        failure: {reason: 'cleanup-unconfirmed'},
+      });
+      expect(yield* run('joined')).toMatchObject({_tag: 'Success', success: value});
     }).pipe(Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}), provideTestLayer(ApplicationLayer)),
   );
 

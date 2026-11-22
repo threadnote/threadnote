@@ -43,9 +43,9 @@ type CodeGraphStoreStagingMethods = Pick<
 export function makeCodeGraphStoreStagingMethods(runtime: CodeGraphStoreRuntime): CodeGraphStoreStagingMethods {
   const {prepare, withWriterGate} = runtime;
   return {
-    searchSymbols: (databasePath, snapshotId, query, limit) =>
+    searchSymbols: (databasePath, snapshotId, query, limit, selection) =>
       prepare(databasePath).pipe(
-        Effect.andThen(useReadOnlyDatabase(databasePath, selectSearchSymbols(snapshotId, query, limit))),
+        Effect.andThen(useReadOnlyDatabase(databasePath, selectSearchSymbols(snapshotId, query, limit, selection))),
         Effect.mapError(cause => storeError('search code graph symbols', cause)),
       ),
     searchSymbolsMany: (databasePath, snapshotId, queries, limit) =>

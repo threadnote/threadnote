@@ -761,6 +761,7 @@ export interface CodeGraphStoreShape {
     snapshotId: string,
     query: string,
     limit: number,
+    selection?: 'exact-preview',
   ) => Effect.Effect<readonly CodeGraphQueryNode[], CodeGraphStoreFailure>;
   readonly searchSymbolsMany: (
     databasePath: string,

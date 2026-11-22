@@ -1,10 +1,18 @@
 import {Array as EffectArray} from 'effect';
-import {Deferred, Effect, Option} from 'effect';
+import {Deferred, Effect, Option, type Path} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
 import type {CodeGraphUntrackedStatusCacheOptions} from '../git/status_cache.js';
 import {worktreeOverlayState} from '../inventory.js';
 import {prepareCodeGraphLocalAssociationObservation} from '../local_provenance.js';
-import {withCodeGraphQueryTelemetryStage, type CodeGraphStatusOptions} from './contract.js';
+import {
+  attachCodeGraphStatusObservation,
+  withCodeGraphQueryTelemetryStage,
+  type CodeGraphStatusOptions,
+} from './contract.js';
+import {codeGraphProjectScopeIdentity} from '../index_scope.js';
+import {codeGraphLayout} from '../layout.js';
+import type {CodeGraphStoreShape} from '../store.js';
+import {readCodeGraphReadyScopeReceipt, type CodeGraphQueryScope} from './scope.js';
 import type {CodeGraphLanguagePackRegistryShape} from '../languages/registry.js';
 import {
   resolveRepositoryIdentityForExpectation,
@@ -154,3 +162,53 @@ export const observeCodeGraphStatusSessionIdentity = Effect.fn('codeGraph.observ
       'observeTogether' in observation ? observation.observeTogether : <A, E, R>(read: Effect.Effect<A, E, R>) => read,
   };
 });
+
+export const readScopedReadyStatus = Effect.fn('codeGraph.readScopedReadyStatus')(
+  function* (
+    path: Path.Path,
+    store: CodeGraphStoreShape,
+    languagePacks: CodeGraphLanguagePackRegistryShape,
+    threadnoteHome: string,
+    identity: RepositoryIdentity,
+    project: CodeGraphQueryScope['project'],
+    options: CodeGraphStatusOptions,
+  ) {
+    const definition = codeGraphProjectScopeIdentity(project);
+    const layout = codeGraphLayout(path, threadnoteHome, identity.checkoutId, identity.worktreeId, definition.scopeKey);
+    const snapshot = yield* store.readySnapshot(layout.databasePath, identity.worktreeId, definition.scopeKey);
+    if (snapshot === undefined) return;
+    const ready = yield* readCodeGraphReadyScopeReceipt(store, layout.databasePath, identity, snapshot, definition);
+    if (ready === undefined) return;
+    const {selection, receipt} = ready;
+    const status = attachCodeGraphStatusObservation(
+      {
+        databasePath: layout.databasePath,
+        freshness: 'stale',
+        identity,
+        languagePacks: codeGraphLanguagePackStatuses(languagePacks),
+        readySnapshot: snapshot,
+        stale: true,
+        projectCoverage: {
+          project: project.name,
+          kind: 'project',
+          configuredRoots: project.graph?.roots ?? [],
+          rootComponents: receipt.rootProjectIds.length,
+          dependencyComponents: receipt.includedProjectIds.length - receipt.rootProjectIds.length,
+          completeness: 'partial',
+          negativeProof: 'unavailable',
+          snapshotSourceCommit: snapshot.commit,
+          observedWorktreeCommit: identity.headCommit,
+          reusedEquivalentSnapshot: false,
+        },
+      },
+      {
+        identity,
+        projectScopeObserved: true,
+        unverifiedScope: selection,
+        manifestPath: options.manifestPath,
+      },
+    );
+    yield* options.onScopedReadyStatus?.(status) ?? Effect.void;
+  },
+  effect => Effect.ignore(effect),
+);
