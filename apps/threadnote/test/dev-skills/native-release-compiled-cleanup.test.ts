@@ -4,7 +4,7 @@ import * as EffectArray from 'effect/Array';
 import {mkdir, mkdtemp, readdir, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
-import {removeCompiledFixture} from './native-release-cleanup.js';
+import {removeCompiledFixture} from '../helpers/native-release-cleanup.js';
 
 it('retries transient removal errors with the existing bounded backoff', async () => {
   const delays: number[] = [];
