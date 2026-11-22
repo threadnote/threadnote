@@ -119,8 +119,13 @@ export const makeWindowsProcessTreeSampler = Effect.fn('windowsProcessTreeSample
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
   const script = yield* path.fromFileUrl(new URL('./windows-process-tree-sampler.ps1', import.meta.url));
+  // Windows PowerShell stalled while serializing the ready frame on hosted Windows ARM64.
+  const powerShell =
+    system.platform === 'win32' && system.architecture === 'arm64'
+      ? (Bun.which('pwsh.exe') ?? 'powershell.exe')
+      : 'powershell.exe';
   const child = Bun.spawn({
-    cmd: ['powershell.exe', '-NoLogo', '-NoProfile', '-NonInteractive', '-File', script],
+    cmd: [powerShell, '-NoLogo', '-NoProfile', '-NonInteractive', '-File', script],
     stdin: 'pipe',
     stdout: 'pipe',
     stderr: 'pipe',
