@@ -75,6 +75,41 @@ describe('native watch domain', () => {
     expect(errorCode(() => decodeNativeWatchState({...initial, pythonQueue: []}))).toBe('invalid-watch');
   });
 
+  it('keeps a stopped notice drain within its captured sequence range', () => {
+    const owned = withConsumer(
+      reconcileNativeWatch(
+        state(),
+        sweep({
+          sources: [{source: 'comments', complete: true, at: 1_000, items: [entity('a'), entity('b'), entity('c')]}],
+        }),
+      ),
+    );
+    const expiredAt = required(owned.consumer).leaseUntil + 1;
+    const liveDelivery = relayNativeWatch(owned, 'consumer-1', 20);
+    expect(() =>
+      acknowledgeNativeWatch(liveDelivery.state, 'consumer-1', required(liveDelivery.delivery).id, expiredAt, 2),
+    ).toThrow('exceeds the stopped notice watermark');
+
+    let drained = owned;
+    for (const sequence of [1, 2]) {
+      const relayed = relayNativeWatch(drained, 'consumer-1', expiredAt, 1, 2);
+      const delivery = required(relayed.delivery);
+      expect(delivery.events).toMatchObject([{sequence}]);
+      const recorded = recordNativeWatchDispositions(
+        relayed.state,
+        'consumer-1',
+        delivery.id,
+        [{eventId: delivery.events[0].id, status: 'ignored', reason: 'Fixture', evidence: 'Fixture'}],
+        expiredAt,
+        2,
+      );
+      drained = acknowledgeNativeWatch(recorded, 'consumer-1', delivery.id, expiredAt, 2);
+    }
+    expect(relayNativeWatch(drained, 'consumer-1', expiredAt, 32, 2).delivery).toBeNull();
+    expect(drained.events).toMatchObject([{sequence: 3}]);
+    expect(drained.consumer).toEqual(owned.consumer);
+  });
+
   it('reconciles exactly the new, changed, and removed entity set without repeating unchanged items', () => {
     const initial = reconcileNativeWatch(
       state(),
