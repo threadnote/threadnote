@@ -137,7 +137,7 @@ jobs:
           retention-days: 14
 
   capture-baseline:
-    name: Same-runner main and 6.0.0 graph CPU comparison
+    name: Same-runner main and 6.0.0 graph CPU attribution
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 35
@@ -149,7 +149,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
-      - name: Capture exact main, release, and main again
+      - name: Profile exact main, release, and main again
         shell: bash
         run: |
           set -euo pipefail
@@ -164,11 +164,12 @@ jobs:
           test "$(bun --version)" = 1.4.4
 
           repo="$(git rev-parse --show-toplevel)"
-          main_sha=02c2971e312eb2954f6ebf546d9194070693858f
+          main_sha=c8530b0606d496d1a0d83fa441605eae8c6fb2bb
           release_sha=76f0b8b37f6251efd737916d44e4b2941ba9db53
           compare_root="$(mktemp -d "$RUNNER_TEMP/threadnote-main-release.XXXXXX")"
+          raw_root="$compare_root/raw"
           artifact_root="$RUNNER_TEMP/threadnote-main-release-evidence"
-          mkdir -p -- "$artifact_root"
+          mkdir -p -- "$artifact_root" "$raw_root"
           cleanup() {
             local role
             for role in main release; do
@@ -176,6 +177,7 @@ jobs:
                 git -C "$repo" worktree remove --force -- "$compare_root/$role" || true
               fi
             done
+            rm -rf -- "$raw_root"
             rmdir -- "$compare_root" 2>/dev/null || true
           }
           trap cleanup EXIT
@@ -202,10 +204,15 @@ jobs:
               THREADNOTE_BENCHMARK_RUNNER_CLASS=github-hosted-ubuntu-24.04-X64 \
               THREADNOTE_BENCHMARK_RUNNER_ID="$RUNNER_NAME" \
               THREADNOTE_CODE_GRAPH_PARSER_WORKERS=4 \
-              bun run bench:code-graph -- \
+              bun --cpu-prof --cpu-prof-interval=1000 --cpu-prof-dir="$raw_root" \
+                --cpu-prof-name="$label.cpuprofile" scripts/benchmark-code-graph.ts \
                 --profile production-large --profile-files 3000 --profile-symbols 110000 \
                 --minimum-free-gib 20 --samples 1 --warmups 0 --quiet \
-                --output "$artifact_root/$label.json"
+                --output "$raw_root/$label.json"
+            python3 "$repo/.github/diagnostics/summarize-graph-ready-profile.py" \
+              "$raw_root/$label.cpuprofile" "$raw_root/$label.json" "$checkout" \
+              "$artifact_root/$label-profile-summary.json"
+            rm -f -- "$raw_root/$label.cpuprofile"
           )
 
           prepare main "$main_sha"
@@ -215,14 +222,16 @@ jobs:
           capture main "$main_sha" main-after
 
           for label in main-before release main-after; do
-            jq -c '{source: .metadata.benchmarkMeasuredSourceCommit, runner: .metadata.runnerIdentity, runnerKey: .metadata.sameRunnerComparisonKey, governed: .metadata.benchmarkGoverned, dirty: .environment.dirty, fixtureHash: .environment.fixtureHash, cold: [.metadata.coldFiles,.metadata.coldSymbols,.metadata.coldEdges], digests: [.metadata.primaryQueryStructuralDigestCold,.metadata.primaryQueryStructuralDigestIncremental,.metadata.primaryQueryStructuralDigestSameOverlayReference], metrics: [.measurements[] | select(.name == "hot-deferred-ready-query-orchestration-process-cpu" or .name == "mcp-query-duration") | {name,p95,unit}]}' "$artifact_root/$label.json"
+            jq -c . "$artifact_root/$label-profile-summary.json"
           done
-          sha256sum "$artifact_root/main-before.json" "$artifact_root/release.json" "$artifact_root/main-after.json"
-          printf 'Retain diagnostic artifacts under %s\n' "$artifact_root"
+          jq -se 'map({runner, runnerKey, fixtureHash, fixtureShape, queryDigests}) | unique | length == 1' \
+            "$artifact_root/main-before-profile-summary.json" "$artifact_root/release-profile-summary.json" \
+            "$artifact_root/main-after-profile-summary.json"
+          sha256sum "$artifact_root/"*-profile-summary.json
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: main-release-graph-cpu-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/threadnote-main-release-evidence/*.json
+          name: main-release-graph-cpu-profile-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/threadnote-main-release-evidence/*-profile-summary.json
           if-no-files-found: error
           retention-days: 14
