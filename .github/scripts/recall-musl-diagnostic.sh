@@ -55,10 +55,24 @@ git worktree add --detach "$control_root" "$control"
   ' "$workspace/scripts/assemble-native-inference.ts"
   test "$(git rev-parse HEAD)" = "$control"
   test -z "$(git status --porcelain=v1 --untracked-files=normal)"
-  bun run build:release
+  bun run build
+  bun scripts/assemble-native-vector-reader.ts
   bun scripts/verify-native-vector-reader.ts --required
   test -z "$(git status --porcelain=v1 --untracked-files=normal)"
 )
+
+control_payload_digests() (
+  cd "$control_root/dist"
+  sha256sum release.json threadnote
+  find runtime/vector-reader -type f -exec sha256sum {} + | sort
+)
+
+# Share the verified inference closure without replacing either independently built retrieval payload.
+control_payload_digests > "$output_dir/control-payload.sha256"
+bun scripts/assemble-native-inference.ts --stage-overlay "$workspace/dist" --distribution-root "$control_root/dist"
+control_payload_digests | cmp "$output_dir/control-payload.sha256" -
+cmp "$workspace/dist/native-inference.json" "$control_root/dist/native-inference.json"
+(cd "$control_root" && bun scripts/verify-native-vector-reader.ts --required)
 export THREADNOTE_RECALL_AB_CONTROL_DIST="$control_root/dist"
 
 # Keep both exact native builds intact. Restore the released dual-index fixture and add one diagnostic control arm.
