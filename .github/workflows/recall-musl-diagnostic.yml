@@ -1,0 +1,57 @@
+name: Disposable ARM64 musl recall attribution
+on:
+  push:
+    branches: [codex/recall-musl-rss-diagnostic]
+
+permissions:
+  contents: read
+
+jobs:
+  arm64-musl-recall:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: e0a458cf1c0565e2bda310ebe0297f1083a04f89
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - name: Prepare hosted ARM64 musl capture
+        working-directory: candidate
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = aarch64
+          mkdir -p .git/worktrees .context/native-vector-capture
+          cp ../.github/scripts/recall-musl-diagnostic.sh .context/native-vector-capture/run.sh
+          cp ../.github/scripts/recall-musl-frozen-lexical.patch .context/native-vector-capture/frozen-lexical.patch
+          bun install --frozen-lockfile
+      - name: Collect paired recall and per-process peak evidence
+        working-directory: candidate
+        timeout-minutes: 40
+        run: >-
+          bun scripts/assemble-native-inference.ts --musl-container
+          --container-command-json '["bash","-ec","exec bash .context/native-vector-capture/run.sh"]'
+      - name: Return owned capture files to the runner
+        if: always()
+        working-directory: candidate
+        run: |
+          set -euo pipefail
+          test "$(pwd -P)" = "$GITHUB_WORKSPACE/candidate"
+          if test -d .context/native-vector-capture; then
+            test "$(cd .context && pwd -P)" = "$GITHUB_WORKSPACE/candidate/.context"
+            sudo chown -hRP -- "$(id -u):$(id -g)" .context/native-vector-capture
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: recall-arm64-musl-attribution
+          path: candidate/.context/native-vector-capture/
+          retention-days: 7
+          if-no-files-found: warn
