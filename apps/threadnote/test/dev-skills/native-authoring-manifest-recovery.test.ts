@@ -15,6 +15,8 @@ import {isJsonObject} from '@threadnote/platform/json';
 import {ResourceIoFailed, ResourceStore} from '@threadnote/store/resource-store';
 import {decodeNativeAuthoringDocument} from '@threadnote/workflow-automations/authoring';
 import {readNativeWorkflowState} from '../../src/workflow_automation/store.js';
+import {runNativeTaskAction} from '../../src/workflow_automation/task_actions.js';
+import {verifiedAuthoringRoot} from '../../src/workflow_automation/authoring_artifacts.js';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {decodeWorkflowJournal} from '../../src/workflow_memory/journal_codec.js';
 import {decodeWorkflowJournalStorageImage} from '../../src/workflow_memory/journal_storage.js';
@@ -31,28 +33,30 @@ const reference = (value: unknown) => {
   return {uri: ref.uri, memoryId: ref.memoryId, revision: ref.revision};
 };
 
+const commitFixtureSource = Effect.fn('test.authoringManifest.commitSource')(function* (repo: string) {
+  yield* runCommandEffect('git', ['-C', repo, 'add', 'source.ts']);
+  yield* runCommandEffect('git', [
+    '-C',
+    repo,
+    '-c',
+    'user.name=Fixture',
+    '-c',
+    'user.email=fixture@example.invalid',
+    '-c',
+    'core.hooksPath=/dev/null',
+    'commit',
+    '--no-gpg-sign',
+    '-m',
+    'Fixture source',
+  ]);
+});
+
 const fixture = Effect.fn('test.authoringManifest.fixture')(function* (sourceBacked = false) {
   const f = yield* nativeFixture();
   const initialized = yield* f.init();
   const author = (command: string, fields: Record<string, unknown> = {}) =>
     f.call({...f.base('authoring'), command, ...fields}).pipe(Effect.map(value => object(object(value).authoring)));
-  if (sourceBacked) {
-    yield* runCommandEffect('git', ['-C', f.repo, 'add', 'source.ts']);
-    yield* runCommandEffect('git', [
-      '-C',
-      f.repo,
-      '-c',
-      'user.name=Fixture',
-      '-c',
-      'user.email=fixture@example.invalid',
-      '-c',
-      'core.hooksPath=/dev/null',
-      'commit',
-      '--no-gpg-sign',
-      '-m',
-      'Fixture source',
-    ]);
-  }
+  if (sourceBacked) yield* commitFixtureSource(f.repo);
   const source = sourceBacked
     ? (yield* author('scope-inspect', {paths: ['source.ts'], literalOnly: true})).source
     : null;
@@ -149,7 +153,23 @@ const fixture = Effect.fn('test.authoringManifest.fixture')(function* (sourceBac
   yield* author('from-spec', {document, packet});
   const first = yield* author('save', {document, ready: false, expectedRevision: null});
   const root = reference(first.root);
-  const journalFile = f.journalPath(initialized.bindingId);
+  const manifest = yield* manifestFixture(f, initialized.bindingId, root);
+  return {
+    ...f,
+    author,
+    document,
+    root,
+    ...manifest,
+    interrupt: (save: Record<string, unknown>) => manifest.interrupt(author('save', save)),
+  };
+});
+
+const manifestFixture = Effect.fn('test.authoringManifest.persistence')(function* (
+  f: Effect.Success<ReturnType<typeof nativeFixture>>,
+  bindingId: string,
+  root: ReturnType<typeof reference>,
+) {
+  const journalFile = f.journalPath(bindingId);
   const readJournal = () =>
     f.fs.readFileString(journalFile).pipe(
       Effect.flatMap(text => Effect.tryPromise(signal => decodeWorkflowJournal(text, signal))),
@@ -177,7 +197,10 @@ const fixture = Effect.fn('test.authoringManifest.fixture')(function* (sourceBac
       manifest: f.store.read(f.location, manifestUri),
       root: f.store.read(f.location, root.uri),
     });
-  const interrupt = (save: Record<string, unknown>) =>
+  const interrupt = <A, E, R>(
+    save: Effect.Effect<A, E, R>,
+    role: 'authoring-child' | 'authoring-history' = 'authoring-child',
+  ) =>
     Effect.gen(function* () {
       let interrupted = false;
       const prefix = (yield* readNativeWorkflowState(f.config, 'native-run'))!.state.operations.length;
@@ -193,7 +216,7 @@ const fixture = Effect.fn('test.authoringManifest.fixture')(function* (sourceBac
                 EffectRecord.values(current.operations).length > prefix &&
                 EffectArray.some(
                   EffectRecord.values(current.operations),
-                  operation => operation.status === 'verified' && operation.request.role === 'authoring-child',
+                  operation => operation.status === 'verified' && operation.request.role === role,
                 )
               ) {
                 interrupted = true;
@@ -208,7 +231,7 @@ const fixture = Effect.fn('test.authoringManifest.fixture')(function* (sourceBac
             return yield* f.store.write(location, uri, content, options);
           }),
       });
-      const failed = yield* author('save', save).pipe(Effect.provideService(ResourceStore, faulty), Effect.result);
+      const failed = yield* save.pipe(Effect.provideService(ResourceStore, faulty), Effect.result);
       expect(interrupted).toBe(true);
       expect(Result.isFailure(failed)).toBe(true);
       const pending = (yield* readNativeWorkflowState(f.config, 'native-run'))!.state;
@@ -216,14 +239,108 @@ const fixture = Effect.fn('test.authoringManifest.fixture')(function* (sourceBac
         EffectArray.findFirst(pending.operations, operation => operation.status === 'prepared'),
       );
       if (!child) throw new Error('Expected an interrupted child');
-      expect(child.intent.role).toBe('authoring-child');
+      expect(child.intent.role).toBe(role);
       const actual = yield* readJournal();
       expect(actual?.manifestCommitted).toBe(false);
       expect(actual?.operations[child.intent.operationId].status).toBe('verified');
       return {pending, child};
     });
-  return {...f, author, document, root, image, interrupt, manifestUri, journalFile};
+  return {image, interrupt, manifestUri, journalFile};
 });
+
+effectIt.effect(
+  'resumes the exact policy-3 ready compact PR approval after a child manifest interruption',
+  () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      yield* commitFixtureSource(f.repo);
+      yield* runCommandEffect('git', ['-C', f.repo, 'checkout', '-b', 'ready-recovery']);
+      const initialized = yield* f.init('native-run', 'skill-generation-v1', 'fixture', 'standard');
+      const scope = {runId: 'native-run', callerCwd: f.repo};
+      const draft = object(
+        yield* runNativeTaskAction(f.config, {
+          ...scope,
+          command: 'compact-start',
+          intent: {
+            title: 'Recover a pending ready save',
+            currentBehavior: 'An interrupted child save leaves the approval pending.',
+            desiredChange: 'An exact replay completes the approved save.',
+            affectedPaths: ['source.ts'],
+            acceptanceCriterion: 'The original ready save completes exactly once.',
+            verification: 'Interrupt a manifest write and resume the exact approval.',
+            eligibilityRationale: 'One known behavior, one source file, and no unresolved design.',
+            eligibility: {status: 'eligible'},
+            review: {required: true, reason: 'The approval includes independent review evidence.'},
+          },
+        }),
+      );
+      expect(draft.status).toBe('awaiting-user-confirmation');
+      const root = reference(draft.root);
+      const packet = object(draft.packet);
+      const proof = {
+        documentHash: String(packet.documentHash),
+        outcome: 'accepted',
+        blockingIssueCount: 0,
+      };
+      const approval = {
+        ...scope,
+        command: 'compact-confirm',
+        userDecision: 'approve',
+        userResponse: 'Approve this exact ready compact plan for PR delivery.',
+        presentedIntentHash: String(packet.intentHash),
+        baseBranch: 'main',
+        delivery: 'pr',
+        review: proof,
+      };
+      const manifest = yield* manifestFixture(f, initialized.bindingId, root);
+      const {pending, child} = yield* manifest.interrupt(runNativeTaskAction(f.config, approval), 'authoring-history');
+      const before = yield* manifest.image();
+      const save = {
+        ...f.base('authoring'),
+        command: 'recover',
+        document: decodeNativeAuthoringDocument(packet.document),
+        ready: true,
+        uri: root.uri,
+        expectedRevision: root.revision,
+        confirmation: {
+          intentHash: approval.presentedIntentHash,
+          decision: 'approved',
+          response: approval.userResponse,
+          delivery: approval.delivery,
+        },
+        review: proof,
+      };
+      const changed = yield* f
+        .call({
+          ...save,
+          confirmation: {...save.confirmation, response: 'Different approval text.'},
+        })
+        .pipe(Effect.result);
+      expect(changed).toMatchObject({failure: {code: 'pending-operation'}});
+      const direct = yield* f.call({...f.base('recover'), operationId: child.intent.operationId}).pipe(Effect.result);
+      expect(direct).toMatchObject({failure: {code: 'pending-operation'}});
+      expect(yield* manifest.image()).toEqual(before);
+
+      const saved = object(object(yield* f.call(save)).authoring);
+      expect(saved).toMatchObject({readiness: 'ready', confirmation: save.confirmation});
+      expect(yield* runNativeTaskAction(f.config, approval)).toMatchObject({status: 'admitted'});
+      const complete = (yield* readNativeWorkflowState(f.config, scope.runId))!.state;
+      expect(complete.authoringSave).toBeUndefined();
+      expect(verifiedAuthoringRoot(complete.operations, 'plan')).toMatchObject({
+        readiness: 'ready',
+        planIntentPolicyVersion: 3,
+        confirmation: save.confirmation,
+        review: proof,
+      });
+      expect(complete.cycle?.state.plan.delivery).toBe('pr');
+      const prefix = pending.authoringSave!.operationStart;
+      expect(complete.operations.slice(0, prefix)).toEqual(pending.operations.slice(0, prefix));
+      expect(
+        EffectArray.filter(complete.operations, operation => operation.intent.operationId === child.intent.operationId),
+      ).toMatchObject([{status: 'verified'}]);
+    }).pipe(TestClock.withLive, provideNative),
+  120000,
+);
 
 effectIt.effect.prop(
   'repairs an exact linked-plan child and makes retries idempotent',
