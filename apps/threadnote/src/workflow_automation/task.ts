@@ -17,7 +17,7 @@ import {
   projectNativeTaskView,
   encodeNativeTaskActionRef,
 } from '@threadnote/workflow-automations/task';
-import {nativeCyclePhaseHash} from '@threadnote/workflow-automations/cycle';
+import {nativeCyclePhaseHash, type NativeCyclePhaseProofSchema} from '@threadnote/workflow-automations/cycle';
 import {
   nativeCycleCoverage,
   nativeCycleCoverageAccepts,
@@ -28,7 +28,7 @@ import {WorkflowAutomationError} from '@threadnote/workflow-automations/contract
 import {nativeWorkflowPolicyOf} from '@threadnote/workflow-automations/gates';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {readNativeWorkflowState} from './store.js';
-import {nativeTaskWatchIdentityForConsumer} from './task_pr_watch.js';
+import {nativeTaskWatchIdentityForConsumer, readNativeTaskPhaseWatch} from './task_pr_watch.js';
 import {readNativeTaskInspection, runWorkflowAutomation} from './index.js';
 import {gitValue} from '../utils.js';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
@@ -51,6 +51,24 @@ const requestSchema = Schema.Struct({
   phaseId: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128))),
 });
 
+const noticeRouteField = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256));
+
+const noticeRouteSchema = Schema.Struct({
+  home: requestSchema.fields.callerCwd,
+  watchId: noticeRouteField,
+  consumerId: noticeRouteField,
+  wakeupId: noticeRouteField,
+  eventKey: noticeRouteField,
+  attemptId: Schema.optionalKey(noticeRouteField),
+});
+
+const noticeViewRequestSchema = Schema.Struct({
+  runId: requestSchema.fields.runId,
+  callerCwd: requestSchema.fields.callerCwd,
+  phaseId: noticeRouteField,
+  noticeRoute: Schema.fromJsonString(noticeRouteSchema),
+});
+
 export const encodeNativeAuthoringTaskRef = (ref: {
   readonly version: 1;
   readonly kind: 'spec' | 'plan';
@@ -71,16 +89,16 @@ const fail = (code: string, message: string) => WorkflowAutomationError.make({co
 export const nativeRunNotFoundMessage =
   'No native run has this runId. Use the runId that workflow_task_start returned; a feature name is not a runId.';
 
-const historicalPhaseProof = (
+const canonicalPhaseWatchProof = (
   stored: NonNullable<Effect.Success<ReturnType<typeof readNativeWorkflowState>>>,
   phaseId: string,
+  proof: Partial<typeof NativeCyclePhaseProofSchema.Type> | undefined,
 ) => {
   const runtime = stored.state.cycle;
   const cycle = runtime?.state;
   if (!runtime || !cycle || cycle.plan.delivery !== 'pr') return undefined;
   const phases = EffectArray.filter(cycle.plan.phases, phase => phase.id === phaseId);
   const phase = phases[0];
-  const proof = cycle.phases[phaseId];
   const baseline = runtime.baselines[phaseId];
   const receipt = proof?.delivery;
   const validation = proof?.validation;
@@ -88,7 +106,6 @@ const historicalPhaseProof = (
     phases.length !== 1 ||
     !phase ||
     !proof ||
-    proof.status !== 'published' ||
     !proof.head ||
     !proof.tree ||
     !validation ||
@@ -104,13 +121,13 @@ const historicalPhaseProof = (
     receipt.headSha !== proof.head ||
     receipt.validatedTree !== proof.tree ||
     !receipt.pr ||
-    receipt.pr.state !== 'open' ||
+    (receipt.pr.state !== 'open' && receipt.pr.state !== 'merged') ||
     receipt.pr.headSha !== proof.head ||
     receipt.pr.branch !== phase.branch ||
     !receipt.watch ||
-    receipt.watch.state !== 'active' ||
+    (receipt.pr.state === 'open' ? receipt.watch.state !== 'active' : receipt.watch.state !== 'terminal') ||
     receipt.watch.prUrl !== receipt.pr.url ||
-    receipt.watch.headSha !== proof.head ||
+    (receipt.pr.state === 'open' && receipt.watch.headSha !== proof.head) ||
     receipt.watch.consumerKind !== 'orchestrator' ||
     !receipt.watch.consumerId
   )
@@ -148,6 +165,16 @@ const historicalPhaseProof = (
     sourceTree: proof.tree,
     consumerId: receipt.watch.consumerId,
   };
+};
+
+const historicalPhaseProof = (
+  stored: NonNullable<Effect.Success<ReturnType<typeof readNativeWorkflowState>>>,
+  phaseId: string,
+) => {
+  const proof = stored.state.cycle?.state.phases[phaseId];
+  return proof?.status === 'published' && proof.delivery?.pr?.state === 'open'
+    ? canonicalPhaseWatchProof(stored, phaseId, proof)
+    : undefined;
 };
 
 const discoverHistoricalWatches = (
@@ -202,7 +229,7 @@ const discoverHistoricalWatches = (
     return candidates;
   });
 
-const historicalTaskRefs = (
+const phaseWatchTaskRefs = (
   stored: NonNullable<Effect.Success<ReturnType<typeof readNativeWorkflowState>>>,
   candidate: NonNullable<ReturnType<typeof historicalPhaseProof>>,
 ) => {
@@ -238,6 +265,111 @@ const historicalTaskRefs = (
     }),
   };
 };
+
+/** Recover maintenance references from a specific arrived notice without refreshing the watch or publication proof. */
+export const readNativeTaskNoticeView = (config: RuntimeConfig, input: unknown) =>
+  Effect.gen(function* () {
+    const {runId, callerCwd, phaseId, noticeRoute} = yield* Schema.decodeUnknownEffect(noticeViewRequestSchema, {
+      onExcessProperty: 'error',
+    })(input).pipe(
+      Effect.mapError(() => fail('invalid-request', 'Provide runId, callerCwd, phaseId and the full notice route.')),
+    );
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const foreignRoute = fail('foreign-notice-route', 'The notice does not match this canonical watch and attempt.');
+    if (!path.isAbsolute(callerCwd) || !path.isAbsolute(noticeRoute.home))
+      return yield* fail('invalid-request', 'The caller checkout and notice home must be absolute paths.');
+    const home = yield* fs.realPath(config.agentContextHome);
+    const routedHome = yield* fs.realPath(noticeRoute.home).pipe(Effect.mapError(() => foreignRoute));
+    if (routedHome !== home) return yield* foreignRoute;
+    const checkoutRoot = yield* gitValue(['rev-parse', '--show-toplevel'], callerCwd);
+    if (!checkoutRoot) return yield* fail('workspace-not-found', 'callerCwd must be inside a Git checkout.');
+    const checkout = yield* fs.realPath(checkoutRoot);
+    const stored = yield* readNativeWorkflowState(config, runId);
+    if (!stored) return yield* fail('run-not-found', nativeRunNotFoundMessage);
+    const phase = stored.state.cycle?.state.phases[phaseId];
+    const proofs = [
+      ...(phase && (phase.status === 'published' || phase.status === 'merged') ? [phase] : []),
+      ...[...(phase?.history ?? [])].reverse(),
+    ];
+    const stateDir = path.join(home, 'workflow-automations', 'native-watch-v1');
+    const candidates = EffectArray.flatMap(proofs, proof => {
+      const candidate = canonicalPhaseWatchProof(stored, phaseId, proof);
+      return candidate &&
+        candidate.watchId === noticeRoute.watchId &&
+        candidate.consumerId === noticeRoute.consumerId &&
+        candidate.delivery.watch?.stateDir === stateDir
+        ? [candidate]
+        : [];
+    });
+    const [eligible] = candidates;
+    if (!eligible) return yield* foreignRoute;
+    if ((yield* fs.realPath(eligible.baseline.repo)) !== checkout)
+      return yield* fail('wrong-checkout', 'Use the checkout bound to this canonical watch.');
+    const {watch, wakeupId} = yield* readNativeTaskPhaseWatch(config, runId, phaseId, eligible.watchId);
+    const {state, notification, collector, stopRequested} = watch.envelope;
+    const outbox = notification?.outbox;
+    // A new reviewed head of the same PR reuses its existing watch and consumer.
+    const candidate = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        candidates,
+        item =>
+          state.pr === item.prUrl &&
+          (item.delivery.pr?.state !== 'merged' ||
+            (state.prState === 'merged' && state.head === item.delivery.watch?.headSha)),
+      ),
+    );
+    if (
+      !candidate ||
+      state.consumer?.id !== candidate.consumerId ||
+      noticeRoute.wakeupId !== wakeupId ||
+      notification?.consumerId !== candidate.consumerId ||
+      notification.wakeupId !== wakeupId ||
+      !outbox ||
+      outbox.key !== noticeRoute.eventKey ||
+      outbox.attemptId !== noticeRoute.attemptId ||
+      outbox.attempts < 1 ||
+      outbox.status === 'pending'
+    )
+      return yield* foreignRoute;
+
+    const latest = yield* readNativeWorkflowState(config, runId);
+    const currentWatch = yield* readNativeWatch(config, candidate.watchId);
+    if (latest?.revision !== stored.revision || currentWatch?.revision !== watch.revision)
+      return yield* fail('inspection-failed', 'The run or watch changed; read the notice route again.');
+    const common = {watchId: state.watchId, prUrl: state.pr, revision: watch.revision};
+    const hasWork =
+      state.delivery !== null ||
+      state.events.length > 0 ||
+      state.acknowledged < state.nextSequence - 1 ||
+      EffectArray.some(state.work, item => item.status === 'open' || item.status === 'blocked');
+    if (!hasWork) {
+      const terminal =
+        stopRequested ||
+        state.prState !== 'open' ||
+        collector?.status === 'stopped' ||
+        collector?.status === 'terminal';
+      return {...common, status: terminal ? ('terminal-empty' as const) : ('notice-empty' as const)};
+    }
+    return {
+      ...common,
+      status: 'notice-recovered' as const,
+      continuation: {
+        ...phaseWatchTaskRefs(stored, candidate),
+        noticeRef: encodeNativeTaskActionRef({
+          version: 1,
+          kind: 'delivery',
+          runId,
+          generationHash: sha256HexSync(stored.state.generation),
+          watchId: state.watchId,
+          consumerId: candidate.consumerId,
+          wakeupId,
+          eventKey: outbox.key,
+          ...(outbox.attemptId === undefined ? {} : {watchAttemptId: outbox.attemptId}),
+        }),
+      },
+    };
+  });
 
 const baseRequalificationRoute = (
   config: RuntimeConfig,
@@ -790,7 +922,7 @@ export const readNativeTaskView = (config: RuntimeConfig, input: unknown) =>
       );
     return yield* withBaseRequalification({
       ...result,
-      historicalWatch: historicalTaskRefs(stored, selectedCandidate.value.candidate),
+      historicalWatch: phaseWatchTaskRefs(stored, selectedCandidate.value.candidate),
     });
   });
 

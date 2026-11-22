@@ -579,11 +579,22 @@ export function attachNativeWatchConsumer(
   });
 }
 
-function requireConsumer(state: NativeWatchState, consumerId: string, now: number): NativeWatchConsumer {
+// The controller can authorize only deliveries within a verified stopped notice's captured sequence range.
+function requireConsumer(
+  state: NativeWatchState,
+  consumerId: string,
+  now: number,
+  noticeThrough?: number,
+): NativeWatchConsumer {
   const consumer = state.consumer;
-  if (!consumer || consumer.id !== consumerId || consumer.leaseUntil <= now)
+  if (!consumer || consumer.id !== consumerId || (noticeThrough === undefined && consumer.leaseUntil <= now))
     return fail('Watch consumer does not own a live lease.');
   if (now < consumer.lastSeenAt) return fail('Consumer lease timestamps must not move backwards.');
+  if (noticeThrough !== undefined) {
+    parse(integerRange(1, state.nextSequence - 1), noticeThrough, 'Invalid stopped notice watermark.');
+    if (state.delivery && state.delivery.last > noticeThrough)
+      fail('The pending delivery exceeds the stopped notice watermark.');
+  }
   return consumer;
 }
 
@@ -592,6 +603,7 @@ export function relayNativeWatch(
   consumerId: string,
   now: number,
   maximum = 16,
+  noticeThrough?: number,
 ): {
   readonly state: NativeWatchState;
   readonly delivery:
@@ -599,16 +611,20 @@ export function relayNativeWatch(
   readonly work: readonly NativeWatchWork[];
 } {
   const state = decodeNativeWatchState(input);
-  const consumer = requireConsumer(state, consumerId, now);
+  const consumer = requireConsumer(state, consumerId, now, noticeThrough);
   parse(timestamp, now, 'Invalid relay timestamp.');
   parse(integerRange(1, 32), maximum, 'Invalid relay event limit.');
-  const refreshed = {...consumer, lastSeenAt: now, leaseUntil: now + consumer.leaseMilliseconds};
+  const refreshed =
+    noticeThrough === undefined
+      ? {...consumer, lastSeenAt: now, leaseUntil: now + consumer.leaseMilliseconds}
+      : consumer;
+  const limit = noticeThrough === undefined ? maximum : Math.min(maximum, noticeThrough - state.acknowledged);
   const delivery =
     state.delivery ??
     (() => {
-      const first = state.events[0]?.sequence;
+      const events = state.events.slice(0, Math.max(0, limit));
+      const first = events[0]?.sequence;
       if (first === undefined) return null;
-      const events = state.events.slice(0, maximum);
       const last = events.at(-1)!.sequence;
       return {id: `${first}:${last}`, first, last};
     })();
@@ -645,9 +661,10 @@ export function recordNativeWatchDispositions(
   deliveryId: string,
   items: readonly unknown[],
   now: number,
+  noticeThrough?: number,
 ): NativeWatchState {
   const state = decodeNativeWatchState(input);
-  requireConsumer(state, consumerId, now);
+  requireConsumer(state, consumerId, now, noticeThrough);
   const delivery = state.delivery;
   if (!delivery || delivery.id !== deliveryId)
     return fail('Disposition delivery does not match the current pending delivery.');
@@ -717,9 +734,10 @@ export function acknowledgeNativeWatch(
   consumerId: string,
   deliveryId: string,
   now: number,
+  noticeThrough?: number,
 ): NativeWatchState {
   const state = decodeNativeWatchState(input);
-  requireConsumer(state, consumerId, now);
+  requireConsumer(state, consumerId, now, noticeThrough);
   parse(timestamp, now, 'Invalid acknowledgement timestamp.');
   if (state.lastAck === deliveryId) return state;
   const delivery = state.delivery;
