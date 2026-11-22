@@ -307,6 +307,29 @@ const ownedAuthoringUris = (state: NativeWorkflowState) =>
     operation.status === 'verified' && operation.artifact?.state === 'active' ? [operation.artifact.uri] : [],
   );
 
+const validateAuthoringRequest = Effect.fn('workflowAutomation.authoring.validateRequest')(function* (
+  state: NativeWorkflowState,
+  request: Request,
+  document: NativeAuthoringDocument,
+) {
+  const planIntentPolicyVersion =
+    request.command === 'save'
+      ? nativePlanIntentPolicyForSave(
+          state,
+          yield* Effect.try({
+            try: () => verifiedAuthoringRoot(state.operations, document.kind),
+            catch: nativeWorkflowError,
+          }),
+          request.confirmation?.intentHash,
+        )
+      : nativePlanIntentPolicyFor(state);
+  const validation = yield* Effect.try({
+    try: () => validateNativeAuthoring(document, {...request, planIntentPolicyVersion}),
+    catch: nativeWorkflowError,
+  });
+  return {planIntentPolicyVersion, validation};
+});
+
 export const runNativeAuthoring = <R>(
   config: RuntimeConfig,
   input: unknown,
@@ -345,10 +368,7 @@ export const runNativeAuthoring = <R>(
       });
       if (document.id !== state.featureId || document.project !== state.project)
         return yield* fail('binding-drift', 'Authoring document identity must match its existing native binding.');
-      const validation = yield* Effect.try({
-        try: () => validateNativeAuthoring(document, request),
-        catch: nativeWorkflowError,
-      });
+      const {validation} = yield* validateAuthoringRequest(state, request, document);
       const saving = request.ready && !validation.ready ? {...request, ready: false} : request;
       if (yield* recoverAuthoringChild(config, saving, document, validation, call)) {
         const recovered = yield* readNativeWorkflowState(config, request.runId);
@@ -829,21 +849,7 @@ export const runNativeAuthoring = <R>(
         withRecallIdentityPreparation,
       );
     yield* admitLinkedSpec(document);
-    const planIntentPolicyVersion =
-      request.command === 'save'
-        ? nativePlanIntentPolicyForSave(
-            state,
-            yield* Effect.try({
-              try: () => verifiedAuthoringRoot(state.operations, document.kind),
-              catch: nativeWorkflowError,
-            }),
-            request.confirmation?.intentHash,
-          )
-        : nativePlanIntentPolicyFor(state);
-    const validation = yield* Effect.try({
-      try: () => validateNativeAuthoring(document, {...request, planIntentPolicyVersion}),
-      catch: nativeWorkflowError,
-    });
+    const {planIntentPolicyVersion, validation} = yield* validateAuthoringRequest(state, request, document);
     if (request.command === 'acceptance-packet') return acceptancePacket(document, validation, request.detail);
     if (request.command === 'confirm') {
       if (
