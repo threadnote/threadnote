@@ -50,6 +50,7 @@ import {
 } from '../../src/recall/ready_read_boundary.js';
 import {RECALL_READY_READ_WORKER_ARGUMENT} from '../../src/worker_protocol.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import {removeCompiledFixture} from '../helpers/native-release-cleanup.js';
 import {TestError} from '@threadnote/testing/test-error';
 import {advanceCanonicalMutationGeneration} from '@threadnote/store/resource/mutation_generation';
 import {
@@ -83,7 +84,11 @@ const vector = Array.from({length: manifest.dimensions}, (_, index) => (index ==
 const fixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-native-vector-'});
+  const system = yield* SystemInfo;
+  const options = {prefix: 'threadnote-native-vector-'};
+  const home = yield* system.platform === 'win32'
+    ? Effect.acquireRelease(fs.makeTempDirectory(options), home => Effect.promise(() => removeCompiledFixture(home)))
+    : fs.makeTempDirectoryScoped(options);
   const config = {
     account: 'local',
     user: 'test',
