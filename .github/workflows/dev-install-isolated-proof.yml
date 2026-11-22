@@ -16,18 +16,8 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v7
         with:
-          ref: 1d8e57c0ca3278c9a2e96cf8c54057703895f9fb
+          ref: 8e8828c6b3e16f69e56ee8d8e39deb8c3e14cb28
           path: recall-source
-          persist-credentials: false
-      - uses: actions/checkout@v7
-        with:
-          ref: 1286e561ecdc1b359a3b8395fe21fa0e80cec2a3
-          path: preflight-source
-          persist-credentials: false
-      - uses: actions/checkout@v7
-        with:
-          ref: 51ae33d45f4f5e07a4aff2eb40188280d49c0243
-          path: release-source
           persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:

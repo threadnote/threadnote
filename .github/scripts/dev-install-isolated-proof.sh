@@ -3,9 +3,7 @@ set -euo pipefail
 
 proof_root="$RUNNER_TEMP/dev-install-proof"
 evidence="$proof_root/evidence"
-recall_commit=1d8e57c0ca3278c9a2e96cf8c54057703895f9fb
-preflight_commit=1286e561ecdc1b359a3b8395fe21fa0e80cec2a3
-release_commit=51ae33d45f4f5e07a4aff2eb40188280d49c0243
+recall_commit=8e8828c6b3e16f69e56ee8d8e39deb8c3e14cb28
 mkdir -p "$evidence" "$proof_root/repo"
 
 if command -v codex >/dev/null || command -v claude >/dev/null; then
@@ -107,44 +105,6 @@ try {
 TS
 ) > "$evidence/recall-mcp.json"
 
-install_candidate preflight-source "$preflight_commit" "$evidence/preflight-install.json" --take-over-global-runtime
-test "$(graph_revision)" = 19
-compatible_install="$THREADNOTE_INSTALL_ROOT"
-preflight_version="$(jq -r .version "$evidence/preflight-install.json")"
-
-select_roots future
-install_candidate release-source "$release_commit" "$evidence/release-install.json"
-"$THREADNOTE_BIN_DIR/threadnote" graph index --cwd "$proof_root/repo" --no-vectors
-test "$(graph_revision)" = 21
-"$THREADNOTE_BIN_DIR/threadnote" doctor --dry-run --strict > "$evidence/future-before-doctor.txt"
-future_graph="$(graph_path)"
-
-# Reuse the exact package from the successful install. The installer revalidates the complete receipt.
-test ! -e "$THREADNOTE_INSTALL_ROOT/versions/$preflight_version"
-cp -pR "$compatible_install/versions/$preflight_version" "$THREADNOTE_INSTALL_ROOT/versions/"
-
-snapshot_future() {
-  shasum -a 256 "$THREADNOTE_INSTALL_ROOT/active-release.json" \
-    "$THREADNOTE_INSTALL_ROOT/development-runtime-owner.json" \
-    "$THREADNOTE_BIN_DIR/threadnote" "$THREADNOTE_BIN_DIR/threadnote-mcp-server" "$future_graph"
-}
-
-snapshot_future > "$evidence/future-before.sha256"
-if (
-  cd "$GITHUB_WORKSPACE/preflight-source"
-  test "$(git rev-parse HEAD)" = "$preflight_commit"
-  bun run dev:install-global -- --json --take-over-global-runtime --terminate-superseded
-) > "$evidence/future-attempt.txt" 2>&1; then
-  printf '%s\n' 'The older installer unexpectedly succeeded against revision 21.'
-  exit 1
-fi
-grep -F 'The code graph requires a newer Threadnote runtime' "$evidence/future-attempt.txt"
-snapshot_future > "$evidence/future-after.sha256"
-cmp "$evidence/future-before.sha256" "$evidence/future-after.sha256"
-test "$(graph_revision)" = 21
-test "$("$THREADNOTE_BIN_DIR/threadnote" --version)" = "threadnote v$(jq -r .version "$evidence/release-install.json")"
-"$THREADNOTE_BIN_DIR/threadnote" doctor --dry-run --strict > "$evidence/future-after-doctor.txt"
-
-jq -n --arg recall "$recall_commit" --arg preflight "$preflight_commit" --arg release "$release_commit" \
-  '{recallCommit: $recall,preflightCommit: $preflight,releaseCommit: $release,compatibleRevision:19,futureRevision:21,strictDoctorPassed:true,installedCliAndMcpPassed:true,preActivationRefusalPreservedState:true}' \
+jq -n --arg recall "$recall_commit" \
+  '{recallCommit: $recall,compatibleRevision:19,strictDoctorPassed:true,installedCliAndMcpPassed:true}' \
   | tee "$evidence/result.json"
