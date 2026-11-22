@@ -24,7 +24,7 @@ import type {
 } from '@threadnote/context/types';
 import {getThreadnoteVersion} from '@threadnote/workspace/runtime-version';
 import {
-  CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3,
+  CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4,
   CONTEXT_BRIEF_CITATION_RSS_SAMPLING_SCHEDULE,
   CONTEXT_BRIEF_CITATION_SCALE_EXECUTION_V2,
   CONTEXT_BRIEF_CITATION_SCALE_RELEASE_SAMPLES,
@@ -126,7 +126,7 @@ export interface ContextBriefCitationScaleRssArtifact {
   readonly rootStartIdentity: string;
   readonly sampleGapBreachCount: number;
   readonly sampleGapBreachRate: number;
-  readonly sampleGapPolicy: typeof CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3;
+  readonly sampleGapPolicy: typeof CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4;
   readonly sampleAttempts: number;
   readonly sampleFailures: number;
   readonly scope: 'recursive-process-tree';

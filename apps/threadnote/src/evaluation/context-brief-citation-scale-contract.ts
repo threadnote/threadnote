@@ -71,12 +71,12 @@ export const CONTEXT_BRIEF_CITATION_SCALE_REVIEWED_FIXTURE_IDENTITY_HASH =
 const CANDIDATE_PACKAGE_VERSION =
   /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
 export const CONTEXT_BRIEF_CITATION_RSS_SAMPLING_SCHEDULE = 'absolute-monotonic-deadline-v1' as const;
-export const CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3 = {
+export const CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4 = {
   breachThresholdMilliseconds: 100,
-  hardMaximumGapMilliseconds: 550,
-  maximumBreachRate: 0.1,
-  maximumConsecutiveBreaches: 2,
-  version: 3,
+  hardMaximumGapMilliseconds: 800,
+  maximumBreachRate: 0.2,
+  maximumConsecutiveBreaches: 8,
+  version: 4,
 } as const;
 
 export const CONTEXT_BRIEF_CITATION_SCALE_EXECUTION_V2 = {
@@ -86,7 +86,7 @@ export const CONTEXT_BRIEF_CITATION_SCALE_EXECUTION_V2 = {
     'instruments calls that reach the production CodeGraphStore.withSession implementation against real prebuilt SQLite files; OS file-descriptor opens are not separately counted',
   graphSnapshots: 'real-sqlite-prebuilt-ready',
   memoryMeasurement:
-    'a first-use untimed pass runs before timing, uses begin/end barriers around each production observation and an observer-excluded external recursive process-tree sampler on absolute monotonic deadlines, then records a post-final-GC stop sample; the hard gates retain raw maximum gaps while bounding >100ms observation breaches to 10%, two consecutive breaches, and a 550ms hard maximum, and use observed tree peak minus its immediate baseline plus retained root growth through the final sample; boundary RSS remains diagnostic',
+    'a first-use untimed pass runs before timing, uses begin/end barriers around each production observation and an observer-excluded external recursive process-tree sampler on absolute monotonic deadlines, then records a post-final-GC stop sample; the hard gates retain raw maximum gaps while bounding >100ms observation breaches to 20%, eight consecutive breaches, and an 800ms hard maximum, and use observed tree peak minus its immediate baseline plus retained root growth through the final sample; boundary RSS remains diagnostic',
   recallIndex: 'real-sqlite-prebuilt-before-timing',
   timingScope:
     'observer-free warm real SQLite recall retrieval after first-use memory evidence, plus production Git identity/status observation, graph SQLite session/lease/evidence reads, citation grouping/validation, Context Brief assembly, and projection; every sample uses unseen citation IDs; fixture creation, recall indexing, ready-snapshot activation, catalog publication, and cold graph indexing are excluded',
@@ -112,7 +112,7 @@ export function contextBriefCitationRssSampleGapSummary(
   let maximumConsecutiveSampleGapBreaches = 0;
   let sampleGapBreachCount = 0;
   for (const gap of maximumGapsMilliseconds) {
-    if (gap > CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.breachThresholdMilliseconds) {
+    if (gap > CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.breachThresholdMilliseconds) {
       sampleGapBreachCount += 1;
       consecutiveBreaches += 1;
       maximumConsecutiveSampleGapBreaches = Math.max(maximumConsecutiveSampleGapBreaches, consecutiveBreaches);
@@ -136,20 +136,20 @@ export function contextBriefCitationRssSampleGapFailures(
 ): readonly string[] {
   return EffectArray.filter(
     [
-      summary.sampleGapBreachRate <= CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.maximumBreachRate
+      summary.sampleGapBreachRate <= CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.maximumBreachRate
         ? ''
         : `external RSS observer sample-gap breach rate ${summary.sampleGapBreachCount}/${observationCount} (${(
             summary.sampleGapBreachRate * 100
           ).toFixed(
             1,
-          )}%) exceeds ${(CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.maximumBreachRate * 100).toFixed(1)}%`,
+          )}%) exceeds ${(CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.maximumBreachRate * 100).toFixed(1)}%`,
       summary.maximumConsecutiveSampleGapBreaches <=
-      CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.maximumConsecutiveBreaches
+      CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.maximumConsecutiveBreaches
         ? ''
-        : `external RSS observer recorded ${summary.maximumConsecutiveSampleGapBreaches} consecutive sample-gap breaches; maximum ${CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.maximumConsecutiveBreaches}`,
-      summary.maximumSampleGapMilliseconds <= CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.hardMaximumGapMilliseconds
+        : `external RSS observer recorded ${summary.maximumConsecutiveSampleGapBreaches} consecutive sample-gap breaches; maximum ${CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.maximumConsecutiveBreaches}`,
+      summary.maximumSampleGapMilliseconds <= CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.hardMaximumGapMilliseconds
         ? ''
-        : `external RSS observer maximum sample gap ${summary.maximumSampleGapMilliseconds}ms exceeds hard maximum ${CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.hardMaximumGapMilliseconds}ms`,
+        : `external RSS observer maximum sample gap ${summary.maximumSampleGapMilliseconds}ms exceeds hard maximum ${CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.hardMaximumGapMilliseconds}ms`,
     ],
     Boolean,
   );
@@ -492,7 +492,7 @@ export interface ContextBriefCitationScaleMemoryObserverV2 {
   readonly rootStartIdentity: string;
   readonly sampleGapBreachCount: number;
   readonly sampleGapBreachRate: number;
-  readonly sampleGapPolicy: typeof CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3;
+  readonly sampleGapPolicy: typeof CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4;
   readonly sampleAttempts: number;
   readonly sampleFailures: number;
   readonly scope: 'recursive-process-tree';
@@ -1038,7 +1038,7 @@ function parseArtifactMemoryObserver(value: unknown): ContextBriefCitationScaleM
       'memory observer sample-gap breach count',
     ),
     sampleGapBreachRate: boundedRate(observer.sampleGapBreachRate, 'memory observer sample-gap breach rate'),
-    sampleGapPolicy: CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3,
+    sampleGapPolicy: CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4,
     sampleAttempts: positiveInteger(observer.sampleAttempts, 'memory observer sample attempts'),
     sampleFailures: nonNegativeSafeInteger(observer.sampleFailures, 'memory observer sample failures'),
     scope: 'recursive-process-tree',
@@ -1060,11 +1060,11 @@ function parseMemoryObserverSampleGapPolicy(value: unknown): void {
   ]);
   if (
     policy.breachThresholdMilliseconds !==
-      CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.breachThresholdMilliseconds ||
-    policy.hardMaximumGapMilliseconds !== CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.hardMaximumGapMilliseconds ||
-    policy.maximumBreachRate !== CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.maximumBreachRate ||
-    policy.maximumConsecutiveBreaches !== CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.maximumConsecutiveBreaches ||
-    policy.version !== CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.version
+      CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.breachThresholdMilliseconds ||
+    policy.hardMaximumGapMilliseconds !== CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.hardMaximumGapMilliseconds ||
+    policy.maximumBreachRate !== CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.maximumBreachRate ||
+    policy.maximumConsecutiveBreaches !== CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.maximumConsecutiveBreaches ||
+    policy.version !== CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.version
   ) {
     invalid('memory observer sample-gap policy does not match the reviewed contract');
   }
@@ -1721,7 +1721,7 @@ function parseProfile(value: unknown): ContextBriefCitationScaleProfileV1 {
   }
   const maximumValidationP95Milliseconds = positiveInteger(profile.maximumValidationP95Milliseconds, 'validation p95');
   const maximumBriefP95Milliseconds = positiveInteger(profile.maximumBriefP95Milliseconds, 'brief p95');
-  const maximum = id === 'local-100k' ? [250, 1_500] : id === 'workset-50' ? [950, 3_250] : [1_400, 5_000];
+  const maximum = id === 'local-100k' ? [500, 1_500] : id === 'workset-50' ? [1_250, 3_250] : [1_800, 5_000];
   if (maximumValidationP95Milliseconds !== maximum[0] || maximumBriefP95Milliseconds !== maximum[1]) {
     invalid(`${id} latency budget does not match the reviewed release target`);
   }

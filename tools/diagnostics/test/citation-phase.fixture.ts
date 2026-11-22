@@ -3,7 +3,7 @@ import {Array as EffectArray} from 'effect';
 // No benchmark, generated memory corpus or hosted capture is executed by this helper.
 import {readFileSync} from '@threadnote/testing/node-fs';
 import {
-  CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3,
+  CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4,
   CONTEXT_BRIEF_CITATION_RSS_SAMPLING_SCHEDULE,
   CONTEXT_BRIEF_CITATION_SCALE_ARTIFACT_SUITE,
   CONTEXT_BRIEF_CITATION_SCALE_EXECUTION_V2,
@@ -91,7 +91,7 @@ function scaleArtifact(): ContextBriefCitationScaleArtifactV2 {
       rootStartIdentity: 'root-start',
       sampleGapBreachCount: 0,
       sampleGapBreachRate: 0,
-      sampleGapPolicy: CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3,
+      sampleGapPolicy: CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4,
       sampleAttempts: 10,
       sampleFailures: 0,
       scope: 'recursive-process-tree',
