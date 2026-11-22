@@ -137,36 +137,103 @@ jobs:
           retention-days: 14
 
   capture-baseline:
-    name: Capture a governed baseline candidate
+    name: Same-runner main and 6.0.0 lexical SQL attribution
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
-      - run: bun install --frozen-lockfile
-      - name: Capture three exact-source observations and generate a candidate
-        env:
-          THREADNOTE_BENCHMARK_RUNNER_CLASS: github-hosted-ubuntu-24.04-${{ runner.arch }}
-          THREADNOTE_BENCHMARK_RUNNER_ID: ${{ runner.name }}
-          THREADNOTE_CODE_GRAPH_PARSER_WORKERS: '4'
+      - name: Capture two exact clean source arms
+        shell: bash
         run: |
           set -euo pipefail
-          for sample in 1 2 3; do
-            bun run bench:code-graph -- \
-              --profile production-large --profile-files 3000 --profile-symbols 110000 \
-              --minimum-free-gib 20 --samples 1 --warmups 0 --quiet \
-              --output "artifacts/production-ratchet-observation-$sample.json"
-          done
-          bun scripts/generate-code-graph-production-ratchet.ts \
-            artifacts/production-ratchet-observation-{1,2,3}.json \
-            --output artifacts/production-ratchet-candidate.json
+          : "${RUNNER_TEMP:?}" "${RUNNER_NAME:?}"
+          test "${GITHUB_ACTIONS:-}" = true
+          test "${RUNNER_ENVIRONMENT:-}" = github-hosted
+          test "${RUNNER_OS:-}" = Linux
+          test "${RUNNER_ARCH:-}" = X64
+          test "$(bun --version)" = 1.4.4
+
+          repo="$(git rev-parse --show-toplevel)"
+          main_sha=c8530b0606d496d1a0d83fa441605eae8c6fb2bb
+          release_sha=18f102c69d4d6418d412c8e0c64974d3f98c34b1
+          compare_root="$(mktemp -d "$RUNNER_TEMP/threadnote-lexical-timing.XXXXXX")"
+          raw_root="$compare_root/raw"
+          artifact_root="$RUNNER_TEMP/threadnote-lexical-sql-evidence"
+          mkdir -p -- "$raw_root" "$artifact_root"
+          cleanup() {
+            for role in main release; do
+              if [[ -d "$compare_root/$role" ]]; then
+                git -C "$repo" worktree remove --force -- "$compare_root/$role" || true
+              fi
+            done
+            rm -rf -- "$raw_root"
+            rmdir -- "$compare_root" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+
+          capture() (
+            local role="$1" sha="$2" checkout status
+            checkout="$compare_root/$role"
+            git -C "$repo" worktree add --detach "$checkout" "$sha"
+            cd "$checkout"
+            bun install --frozen-lockfile
+            test "$(git rev-parse HEAD)" = "$sha"
+            test -z "$(git status --porcelain --untracked-files=no)"
+            if GITHUB_WORKSPACE="$checkout" GITHUB_SHA="$sha" \
+              THREADNOTE_BENCHMARK_RUNNER_CLASS=github-hosted-ubuntu-24.04-X64 \
+              THREADNOTE_BENCHMARK_RUNNER_ID="$RUNNER_NAME" \
+              THREADNOTE_CODE_GRAPH_PARSER_WORKERS=4 \
+              THREADNOTE_LEXICAL_STATEMENT_TIMINGS_OUT="$raw_root/$role-statements.json" \
+              bun --preload "$repo/.github/diagnostics/lexical-statement-timing-preload.mjs" \
+                scripts/benchmark-code-graph.ts \
+                --profile production-large --profile-files 3000 --profile-symbols 110000 \
+                --minimum-free-gib 20 --samples 1 --warmups 0 --quiet \
+                --output "$raw_root/$role.json"; then
+              :
+            else
+              status="$?"
+              jq -n --arg source "$sha" --argjson exitCode "$status" \
+                '{kind: "statement-timing-diagnostic-not-gate-evidence", $source, $exitCode, outcome: "capture-failed"}' \
+                > "$artifact_root/$role-summary.json"
+              return "$status"
+            fi
+            jq -ne --arg source "$sha" \
+              --slurpfile benchmark "$raw_root/$role.json" --slurpfile statements "$raw_root/$role-statements.json" '
+                $benchmark[0] as $b | $b.metadata as $m | $statements[0] as $s |
+                if $b.environment.commit != $source or $m.benchmarkMeasuredSourceCommit != $source or
+                  $b.environment.dirty or ($m.benchmarkGoverned | not) or
+                  $s.kind != "statement-timing-diagnostic" or $s.totals.termCandidates.calls <= 0 or
+                  $s.totals.symbolHydration.calls <= 0 then error("Incomplete source or statement evidence")
+                else {
+                  kind: "statement-timing-diagnostic-not-gate-evidence", $source,
+                  provenance: $m.benchmarkSourceValidationMode, dirty: $b.environment.dirty,
+                  runner: $m.runnerIdentity, runnerKey: $m.sameRunnerComparisonKey,
+                  fixtureHash: $b.environment.fixtureHash, fixtureShape: [$m.coldFiles,$m.coldSymbols,$m.coldEdges],
+                  queryDigests: [$m.primaryQueryStructuralDigestCold,$m.primaryQueryStructuralDigestIncremental,$m.primaryQueryStructuralDigestSameOverlayReference],
+                  totals: $s.totals, metrics: [$b.measurements[] |
+                    select(.name == "hot-query-process-cpu" or .name == "hot-deferred-ready-query-orchestration-process-cpu" or .name == "mcp-query-duration") |
+                    {name,p95,unit}]
+                } end' > "$artifact_root/$role-summary.json"
+          )
+
+          capture main "$main_sha"
+          capture release "$release_sha"
+          jq -se 'map({runner, runnerKey, fixtureHash, fixtureShape, queryDigests}) | unique | length == 1' \
+            "$artifact_root/main-summary.json" "$artifact_root/release-summary.json"
+          jq -c . "$artifact_root/main-summary.json" "$artifact_root/release-summary.json"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: production-ratchet-candidate-${{ github.sha }}
-          path: artifacts/
+          name: main-release-lexical-sql-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/threadnote-lexical-sql-evidence/*-summary.json
           if-no-files-found: error
-          retention-days: 90
+          retention-days: 14
