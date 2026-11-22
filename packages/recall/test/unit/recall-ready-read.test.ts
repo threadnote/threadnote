@@ -45,7 +45,12 @@ import {
 import {RecallEmbeddingWakePort} from '@threadnote/recall/background/demand';
 import {indexCandidate} from '@threadnote/recall/index/candidate';
 import {buildRecallSections} from '@threadnote/recall/results';
-import {mergeRecallOperationalWarnings, recallReadStateWarnings} from '@threadnote/recall/warning';
+import {
+  lexicalIndexUnavailableWarning,
+  lexicalReadFailureWarning,
+  mergeRecallOperationalWarnings,
+  recallReadStateWarnings,
+} from '@threadnote/recall/warning';
 import {advanceCanonicalMutationGeneration} from '@threadnote/store/resource/mutation_generation';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 
@@ -263,6 +268,22 @@ describe('ready lexical readers', () => {
     expect(mergeRecallOperationalWarnings(queued)).toEqual(queued);
     expect(mergeRecallOperationalWarnings(unavailable, queued)).toEqual(unavailable);
     expect(mergeRecallOperationalWarnings(queued, unavailable)).toEqual(unavailable);
+  });
+
+  it('retains repair guidance when other warnings reach the cap before maintenance unavailability', () => {
+    const queued = recallReadStateWarnings({freshness: 'stale', maintenance: 'queued'});
+    const unavailable = recallReadStateWarnings({freshness: 'stale', maintenance: 'unavailable'});
+    const indexUnavailable = lexicalIndexUnavailableWarning();
+    const readBudgetExhausted = lexicalIndexUnavailableWarning('budget-exhausted');
+    const readFailed = lexicalReadFailureWarning(undefined);
+    const capped = mergeRecallOperationalWarnings(
+      queued,
+      [indexUnavailable, readBudgetExhausted, readFailed],
+      unavailable,
+    );
+
+    expect(capped).toEqual([unavailable[0], indexUnavailable, readBudgetExhausted, readFailed]);
+    expect(indexUnavailable.remediation).toContain('`threadnote repair`');
   });
 
   effectIt.effect('fills the eligible ranked quota after date exclusion without counting pinned results', () =>
