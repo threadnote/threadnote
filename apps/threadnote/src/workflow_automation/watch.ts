@@ -39,6 +39,7 @@ import {
   isNativeWatchSessionWakeup,
   matchesTerminalNativeWatchArrival,
   nativeWatchWakeupSchema,
+  ownedQueuedNativeWatchReceipt,
   type NativeWatchWakeup,
 } from './watch_notification_state.js';
 import {
@@ -993,16 +994,39 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (
           envelope = yield* from(() => attachNotification(envelope, state, request.wakeup, at, request.recoverWakeup));
         } else {
           const consumerId = required(request.consumerId, 'consumerId');
+          const route =
+            request.eventKey === undefined
+              ? undefined
+              : {
+                  consumerId,
+                  wakeupId: required(request.wakeupId, 'wakeupId'),
+                  eventKey: request.eventKey,
+                  ...(request.attemptId === undefined ? {} : {attemptId: request.attemptId}),
+                };
+          const notification = envelope.notification;
+          const receipt =
+            envelope.stopRequested &&
+            notification &&
+            (request.command === 'relay' || request.command === 'disposition' || request.command === 'ack')
+              ? ownedQueuedNativeWatchReceipt(notification, envelope.state, {consumerId, wakeupId: request.wakeupId})
+              : undefined;
+          let noticeThrough: number | undefined;
+          // Stopping leaves the issued receipt in place. Its exact arrival claims a backlog once, with no lease change.
+          if (
+            notification &&
+            receipt &&
+            (route === undefined || (receipt.key === route.eventKey && receipt.attemptId === route.attemptId)) &&
+            (envelope.collector?.status === 'stopped' || envelope.collector?.status === 'terminal') &&
+            !(yield* nativeWatchCollectorAlive(envelope.collector))
+          ) {
+            const claimed = route ? consumeNativeWatchNotification(notification, envelope.state, route) : notification;
+            const through = claimed.outbox?.consumedThrough ?? 0;
+            if (through > 0 && (request.command !== 'relay' || through > envelope.state.acknowledged)) {
+              noticeThrough = through;
+              envelope = {...envelope, notification: claimed};
+            }
+          }
           if (request.command === 'relay' || request.command === 'wait') {
-            const route =
-              request.eventKey === undefined
-                ? undefined
-                : {
-                    consumerId,
-                    wakeupId: required(request.wakeupId, 'wakeupId'),
-                    eventKey: request.eventKey,
-                    ...(request.attemptId === undefined ? {} : {attemptId: request.attemptId}),
-                  };
             arrivalOnly =
               route !== undefined &&
               envelope.notification !== undefined &&
@@ -1018,7 +1042,7 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (
                 request.relayLimit ?? 32,
                 Math.max(1, boundedItems(envelope.state.events).items.length),
               );
-              const relay = yield* from(() => relayNativeWatch(envelope.state, consumerId, at, count));
+              const relay = yield* from(() => relayNativeWatch(envelope.state, consumerId, at, count, noticeThrough));
               envelope = {
                 ...envelope,
                 state: relay.state,
@@ -1046,6 +1070,7 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (
                   required(request.deliveryId, 'deliveryId'),
                   required(request.dispositions, 'dispositions'),
                   at,
+                  noticeThrough,
                 ),
               ),
             };
@@ -1060,7 +1085,13 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (
             envelope = {
               ...envelope,
               state: yield* from(() =>
-                acknowledgeNativeWatch(envelope.state, consumerId, required(request.deliveryId, 'deliveryId'), at),
+                acknowledgeNativeWatch(
+                  envelope.state,
+                  consumerId,
+                  required(request.deliveryId, 'deliveryId'),
+                  at,
+                  noticeThrough,
+                ),
               ),
             };
         }
