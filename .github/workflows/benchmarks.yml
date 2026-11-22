@@ -1081,10 +1081,19 @@ jobs:
         run: rustup toolchain install 1.89.0 --profile minimal
 
       - name: Prepare one serial native-host capture driver
+        id: prepare-native-vector-capture
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p .context/native-vector-capture
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            workspace="$(pwd -P)"
+            git_dir="$workspace/.git"
+            test "$(cd -- "$git_dir" && pwd -P)" = "$git_dir"
+            # Keep the parent of the container-created worktree metadata runner-owned.
+            mkdir -p -- "$git_dir/worktrees"
+            printf 'workspace=%s\n' "$workspace" >> "$GITHUB_OUTPUT"
+          fi
           cat > .context/native-vector-capture/run.sh <<'CAPTURE'
           set -euo pipefail
           workspace="$(pwd -P)"
@@ -1149,6 +1158,27 @@ jobs:
         run: >-
           bun scripts/assemble-native-inference.ts --musl-container
           --container-command-json '["bash","-ec","exec bash .context/native-vector-capture/run.sh"]'
+
+      - name: Return Linux capture paths to the runner
+        if: ${{ always() && (matrix.gnu || matrix.musl) && steps.prepare-native-vector-capture.outcome == 'success' }}
+        shell: bash
+        env:
+          CAPTURE_WORKSPACE: ${{ steps.prepare-native-vector-capture.outputs.workspace }}
+        run: |
+          set -euo pipefail
+          test -n "$CAPTURE_WORKSPACE"
+          test "$(pwd -P)" = "$CAPTURE_WORKSPACE"
+          capture_parent="$CAPTURE_WORKSPACE/.context"
+          worktree_parent="$CAPTURE_WORKSPACE/.git/worktrees"
+          # Recursive chown leaves symlink targets alone, but the path to each root must also stay physical.
+          test "$(cd -- "$capture_parent" && pwd -P)" = "$capture_parent"
+          test "$(cd -- "$worktree_parent" && pwd -P)" = "$worktree_parent"
+          runner_owner="$(id -u):$(id -g)"
+          for capture_path in "$capture_parent/native-vector-capture" "$capture_parent/frozen-ts66" "$worktree_parent/frozen-ts66"; do
+            if [[ -e "$capture_path" || -L "$capture_path" ]]; then
+              sudo chown -hRP -- "$runner_owner" "$capture_path"
+            fi
+          done
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
