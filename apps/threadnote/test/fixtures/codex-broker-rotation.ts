@@ -7,14 +7,14 @@ import {join} from '@threadnote/testing/node-path';
 import {Array as EffectArray, Option, Predicate, Record as EffectRecord, String as EffectString} from 'effect';
 
 const fixtureProgram = String.raw`
-import {appendFileSync, existsSync} from 'node:fs';
+import {appendFileSync, existsSync, writeSync} from 'node:fs';
 import {createInterface} from 'node:readline';
 import {join} from 'node:path';
 
 const [root, name] = process.argv.slice(2);
 const release = process.env.PROBE_RELEASE;
 const identity = {pid: process.pid, release};
-const send = (id, result) => console.log(JSON.stringify({jsonrpc: '2.0', id, result}));
+const send = (id, result) => writeSync(1, JSON.stringify({jsonrpc: '2.0', id, result})+'\n');
 const record = (event, token) => appendFileSync(join(root, 'events'), JSON.stringify({...identity, name, event, token})+'\n');
 record('launch');
 const incoming = createInterface({input: process.stdin});
