@@ -1101,7 +1101,8 @@ jobs:
           output_dir="$workspace/.context/native-vector-capture"
           model_file="$workspace/apps/threadnote/embedded/models/bge-small-en-v1.5-q8/f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804.gguf"
           test -f "$model_file"
-          git worktree add --detach "$baseline_root" 66f4c1d8baed033ec484f4db2895ea2252b4e2d0
+          # The frozen generator writes LF. Keep its input bytes stable on Windows.
+          git -c core.autocrlf=false -c core.eol=lf worktree add --detach "$baseline_root" 66f4c1d8baed033ec484f4db2895ea2252b4e2d0
           baseline_install=(bun install --frozen-lockfile --ignore-scripts)
           if [[ "$THREADNOTE_BUILD_TARGET" == *-musl ]]; then baseline_install+=(--libc=glibc); fi
           baseline_install_command="${baseline_install[*]}"
@@ -1110,7 +1111,11 @@ jobs:
             "${baseline_install[@]}"
             bun -e 'const fs=require("node:fs"),path=require("node:path");const root=fs.realpathSync(".")+path.sep;for(const name of fs.readdirSync("node_modules/@threadnote")){if(!fs.realpathSync(path.join("node_modules/@threadnote",name)).startsWith(root))throw Error("Baseline workspace link escaped its frozen checkout");}'
             THREADNOTE_DEVELOPMENT_BUILD_VERSION=5.3.6-local.g66f4c1d8baed033ec484f4db2895ea2252b4e2d0 bun run build
-            test -z "$(git status --porcelain=v1 --untracked-files=normal)"
+            baseline_status="$(git status --porcelain=v1 --untracked-files=normal)"
+            if [[ -n "$baseline_status" ]]; then
+              printf 'Frozen TS66 checkout changed during build:\n%s\n' "$baseline_status" >&2
+              exit 1
+            fi
           )
           bun scripts/benchmark-recall-vectors.ts --write-baseline-provenance \
             --baseline-source-root "$baseline_root" --baseline-distribution-root "$baseline_root/dist" \
