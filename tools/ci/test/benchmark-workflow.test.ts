@@ -201,11 +201,12 @@ describe('platform benchmark workflow', () => {
       EffectArray.map(job.steps ?? [], step => step.run ?? ''),
       '\n',
     );
+    const baselineStatus = 'baseline_status="$(git status --porcelain=v1 --untracked-files=normal)"';
     for (const token of [
-      'git worktree add --detach',
-      '66f4c1d8baed033ec484f4db2895ea2252b4e2d0',
+      'git -c core.autocrlf=false -c core.eol=lf worktree add --detach "$baseline_root" 66f4c1d8baed033ec484f4db2895ea2252b4e2d0',
       'THREADNOTE_DEVELOPMENT_BUILD_VERSION=',
       'bun run build',
+      baselineStatus,
       '--write-baseline-provenance',
       '--baseline-source-root',
       '--baseline-install-command',
@@ -235,9 +236,12 @@ describe('platform benchmark workflow', () => {
     for (const capture of productionCaptures) expect(capture).toContain('--baseline-source-root "$baseline_root"');
     expect(commands).not.toContain('--fail-on-budget');
     expect(commands).not.toMatch(/model(?:s)? (?:install|download)/u);
-    expect(Option.getOrElse(EffectString.indexOf('--write-baseline-provenance')(commands), () => -1)).toBeLessThan(
-      Option.getOrElse(EffectString.indexOf('--stage-overlay')(commands), () => -1),
-    );
+    expect(commands).toMatch(/if \[\[ -n "\$baseline_status" \]\]; then\n\s+printf [^\n]+ >&2\n\s+exit 1\n\s+fi/u);
+    const statusIndex = Option.getOrElse(EffectString.indexOf(baselineStatus)(commands), () => -1);
+    const provenanceIndex = Option.getOrElse(EffectString.indexOf('--write-baseline-provenance')(commands), () => -1);
+    expect(Option.getOrElse(EffectString.indexOf('bun run build')(commands), () => -1)).toBeLessThan(statusIndex);
+    expect(statusIndex).toBeLessThan(provenanceIndex);
+    expect(provenanceIndex).toBeLessThan(Option.getOrElse(EffectString.indexOf('--stage-overlay')(commands), () => -1));
     const captureSteps = EffectArray.filter(
       job.steps ?? [],
       step =>
