@@ -1,0 +1,161 @@
+{
+  "schemaVersion": 1,
+  "release": "6.0.0",
+  "releaseSource": "212b1afa5f5564fceebb06de8d16b52e9ae421b2",
+  "measurements": {
+    "graph": {
+      "evidenceClass": "source-mode-diagnostic",
+      "host": "Apple M1 Max, Darwin ARM64, Bun 1.4.4",
+      "requestedParserWorkers": 4,
+      "fixtureTree": "f149ba4d6412710b2dd8b6c6ee57fcdcff403632",
+      "fixtureSources": 3000,
+      "observedEligibleFiles": 4926,
+      "observedSymbols": 111794,
+      "observedEdges": 210903,
+      "probeSha256": "082215b8c7e6a6639d08430a866bfb32ba35797a5e8aa042b206a8621695270c",
+      "captureSha256": "d3d12907bc03db75b3ee143cb862edf703840729c022914fce5775f271978cdf",
+      "samplerSha256": "07c9b34e6396fadd70a685c27aa7ef7e772372dd9eab7efa0217b02c3d31e6f8",
+      "coldIndex": {
+        "wallMs": 69282,
+        "factLoadingMs": 2609,
+        "resolutionMs": 13991,
+        "matchingMs": 5961,
+        "sampledTreeCpuMs": 79440,
+        "sampledTreePeakRssBytes": 1875755008
+      },
+      "forcedCachedIndex": {
+        "wallMs": 72248,
+        "factLoadingMs": 2295,
+        "resolutionMs": 11434,
+        "matchingMs": 2611,
+        "sampledTreeCpuMs": 82110,
+        "sampledTreePeakRssBytes": 2472247296
+      },
+      "resolutionScope": "One cold and one cached index observation. Matching includes SQL preparation and lookup as well as TypeScript work.",
+      "factDecode": {
+        "rows": 4926,
+        "rawBytes": 336932213,
+        "warmPairs": 5,
+        "firstProductionDecodeMs": 1253.0,
+        "warmProductionMedianMs": 1257.1,
+        "warmProductionRangeMs": [1239.2, 1279.4],
+        "warmProductionMedianParentCpuMs": 1474.3,
+        "warmInstrumentedMedianMs": 1266.1,
+        "warmInstrumentedRangeMs": [1261.1, 1306.6],
+        "stageWallMediansMs": {
+          "outerJsonParse": 10.5,
+          "base64Decode": 10.0,
+          "boundedInflate": 186.0,
+          "integrity": 145.3,
+          "utf8AndInnerJsonParse": 294.8,
+          "validateFacts": 458.4,
+          "serializeAndBound": 141.4
+        },
+        "decodedOutputParity": true,
+        "sampledTreeCpuMs": 21230,
+        "sampledTreePeakRssBytes": 3215310848
+      },
+      "topology": {
+        "warmPairs": 5,
+        "firstUninstrumentedMs": 5728.9,
+        "warmUninstrumentedMedianMs": 5679.2,
+        "warmUninstrumentedRangeMs": [5492.9, 5746.6],
+        "medianLoaderUnionMs": 3497.4,
+        "medianLoaderSharePercent": 62.5,
+        "medianResidualMs": 2097.1,
+        "loaderScope": "SQLite paging and row decoding",
+        "residualScope": "Compute, projection and Effect control",
+        "fullCoverageAndOutputParity": true,
+        "sampledTreeCpuMs": 84090,
+        "sampledTreePeakRssBytes": 4544479232
+      }
+    },
+    "graphVectors": {
+      "evidenceClass": "synthetic-source-mode-diagnostic",
+      "host": "Apple M1 Max, Darwin ARM64, Bun 1.4.4",
+      "scope": "Production graph search with a synthetic 768-dimensional corpus and injected query vector. SQL timing uses span unions. The residual includes decoding, validation, scoring, merge and control overhead.",
+      "rssScope": "Bun process RSS at request boundaries and process-lifetime high-water mark including setup.",
+      "probeSha256": "fb8bdb95ba5bbb5a951361222597f132c65f9cf13048315c5cd06212b7913b73",
+      "warmPairsPerCase": 5,
+      "exactTop20Parity": true,
+      "cases": [
+        {
+          "vectors": 10000,
+          "captureSha256": "671304616fa68a32fe2fdf43cab6b582cc9b395dcb467fa4cd13596b6e2801ee",
+          "firstMs": 176.77,
+          "warmUninstrumentedMedianMs": 186.24,
+          "warmUninstrumentedRangeMs": [184.68, 191.24],
+          "warmInstrumentedMedianMs": 187.65,
+          "warmInstrumentedMedianCpuMs": 205.86,
+          "medianPageSqlMs": 26.07,
+          "medianAllSqlMs": 31.05,
+          "medianResidualMs": 159.81,
+          "processLifetimePeakRssKiB": 143632
+        },
+        {
+          "vectors": 100000,
+          "captureSha256": "dd1e014ab6c3bcde5c8ecd959d9862bf08b22ab9dc514933e9adf4323e9fc3ef",
+          "firstMs": 1778.45,
+          "warmUninstrumentedMedianMs": 1781.53,
+          "warmUninstrumentedRangeMs": [1762.11, 1791.93],
+          "warmInstrumentedMedianMs": 1790.09,
+          "warmInstrumentedMedianCpuMs": 1853.49,
+          "medianPageSqlMs": 244.97,
+          "medianAllSqlMs": 248.58,
+          "medianResidualMs": 1538.16,
+          "processLifetimePeakRssKiB": 183712
+        }
+      ]
+    }
+  },
+  "existingFactReplayBaseline": {
+    "status": "present-in-release-source",
+    "boundedInflateCommit": "e3bcd46fe36a2ea947e7d0f446f1d285249f0c4a",
+    "validationAndBase64Commit": "f976d60ee5bb15605fb2b71aa9f435c9065255d3",
+    "observations": [
+      {
+        "scope": "Inflate diagnostic on 4444 cached envelopes",
+        "reportedRuns": 5,
+        "previousMedianMs": 8084,
+        "currentMedianMs": 764,
+        "source": "https://github.com/threadnote/threadnote/pull/1079"
+      },
+      {
+        "scope": "Full decode of 4556 cached fact rows with exact decoded parity",
+        "pairs": 6,
+        "previousMedianMs": 4958,
+        "currentMedianMs": 3495,
+        "source": "https://github.com/threadnote/threadnote/pull/1094"
+      }
+    ],
+    "releaseVerification": {
+      "factStorageAndCheckpointTestsPassed": 28,
+      "checkpointCompressionProfiles": ["threadnote-gzip-v1", "threadnote-gzip-v2"]
+    }
+  },
+  "recallVectorReader": {
+    "status": "unqualified",
+    "baselineSource": "66f4c1d8baed033ec484f4db2895ea2252b4e2d0",
+    "runId": 45013759793,
+    "runDisposition": "cancelled after the same setup failure on both Darwin profiles",
+    "setupIncompatibility": "The frozen TS66 worker requires the v13 lexical index. The capture created only the v15 index for the same corpus.",
+    "setupFailures": [
+      {
+        "profile": "bun-darwin-arm64",
+        "jobId": 137181540194,
+        "artifactId": 14750966727,
+        "baselineFailure": "absent-result after vector-state",
+        "candidateControlMatchedOracle": true,
+        "pairedWarmSamples": 0
+      },
+      {
+        "profile": "bun-darwin-x64",
+        "jobId": 137181540305,
+        "artifactId": 14751361689,
+        "baselineFailure": "absent-result after vector-state",
+        "candidateControlMatchedOracle": true,
+        "pairedWarmSamples": 0
+      }
+    ]
+  }
+}
