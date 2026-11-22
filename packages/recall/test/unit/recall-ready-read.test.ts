@@ -45,6 +45,7 @@ import {
 import {RecallEmbeddingWakePort} from '@threadnote/recall/background/demand';
 import {indexCandidate} from '@threadnote/recall/index/candidate';
 import {buildRecallSections} from '@threadnote/recall/results';
+import {mergeRecallOperationalWarnings, recallReadStateWarnings} from '@threadnote/recall/warning';
 import {advanceCanonicalMutationGeneration} from '@threadnote/store/resource/mutation_generation';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 
@@ -255,6 +256,15 @@ effectIt.effect('reconciles a witnessed identity-less source retired before the 
 );
 
 describe('ready lexical readers', () => {
+  it('retains an unconfirmed maintenance enqueue regardless of lexical read order', () => {
+    const queued = recallReadStateWarnings({freshness: 'stale', maintenance: 'queued'});
+    const unavailable = recallReadStateWarnings({freshness: 'stale', maintenance: 'unavailable'});
+
+    expect(mergeRecallOperationalWarnings(queued)).toEqual(queued);
+    expect(mergeRecallOperationalWarnings(unavailable, queued)).toEqual(unavailable);
+    expect(mergeRecallOperationalWarnings(queued, unavailable)).toEqual(unavailable);
+  });
+
   effectIt.effect('fills the eligible ranked quota after date exclusion without counting pinned results', () =>
     Effect.gen(function* () {
       const {fs, path, config, filename, uri} = yield* fixture;
