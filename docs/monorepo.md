@@ -197,8 +197,10 @@ verified overlay can be staged into the private TS66 comparison distribution.
 Release assembly requires clean HEAD and matching `release.json.sourceIdentity`.
 The reader manifest binds source, lockfile, toolchain, target, N-API and binary
 identity. Publishing finalizes native descriptors after macOS signing and before
-notarization/archive. Actual native-host load/model smoke and the unchanged full
-performance qualification gates are required on every profile before shipping.
+notarization/archive. Release validation requires a native load and model smoke
+test on each profile. R5 uses local performance measurements and native CI
+contract tests. [R5 qualification](../apps/threadnote/test/evaluation/candidates/native-vector-reader-production/README.md#r5-qualification-for-600)
+
 Descriptors record artifact identity; they do not self-attest qualification.
 
 For explicit developer bootstrap, run `bun run native:bootstrap`, then set

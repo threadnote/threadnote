@@ -1,6 +1,29 @@
 # Native vector reader production evidence
 
-Status: **unqualified**. The native-only all-eight rollout remains blocked by the approved R5 gates. Historical optional-native diagnostics are preserved without relabeling. The earlier SQLite/Rust pilot and the source-mode diagnostic are supporting experiments, not production qualification.
+The approved release decision promotes the qualified reader and writer changes to 6.0.0 on all eight native targets.
+
+## R5 qualification for 6.0.0
+
+R5 uses local performance measurements and native CI contract tests. The performance comparison used candidate `305e147754fd3088dd0b8ce46c495840fe0affdf` and the independently built TypeScript baseline `66f4c1d8baed033ec484f4db2895ea2252b4e2d0` (TS66).
+The candidate orders vector writes by chunk ID and reduces Rust allocations for discarded hits.
+Both readers used identical verified inference bytes and the same candidate-built vector database for each case. [Frozen R5 report](https://github.com/threadnote/threadnote/blob/13d0581e4741cf7aff157974a65262b612c2bf45/apps/threadnote/test/evaluation/candidates/native-vector-reader-production/local-performance-platform-validation/results.md)
+
+The local runs covered dense and tied cases at 10,000 and 100,000 documents.
+Each case used three paired rounds of 30 warm requests per reader. All four cases passed on an Apple M1 Max. Both readers returned exact results within the original deadline on all 364 requests per reader.
+For 100K dense, Rust reduced warm p95 by 25.2%, 28.1%, and 31.4% across the three rounds.
+Rust took 8–64 ms longer on first use across the four cases. Rust used 2.9–4.4% less peak process-tree RSS across the twelve paired rounds.
+
+The local gates require at least 20% lower warm p95 in each 100K dense round.
+Each 10K case permits a p95 increase up to the greater of 5 ms and 5%.
+Each 100K tied round requires exact completion. Each pair permits up to 10% higher peak process-tree RSS.
+Every case requires exact query and scalar-oracle parity within the original deadline.
+
+All eight native release targets passed five numeric tests and eleven compiled worker tests on the frozen candidate.
+The first Windows x64 attempt reported `EBUSY` during temporary directory removal. The retry passed on the same source.
+These CI tests establish native reader compatibility and worker behavior. The measured latency and RSS apply to the M1 Max host.
+The release head requires its own CI results. [Native CI results](https://github.com/threadnote/threadnote/blob/13d0581e4741cf7aff157974a65262b612c2bf45/apps/threadnote/test/evaluation/candidates/native-vector-reader-production/local-performance-platform-validation/results.md#native-platform-checks)
+
+## Production capture method
 
 The reusable capture is a mode of the existing vector benchmark:
 
@@ -45,18 +68,20 @@ The existing external sampler observes the recursive parent/child process tree d
 
 Captures bind the actual compiled candidate commit/tree/target, strict native manifest and payload bytes, parent Bun version, executed benchmark source, relevant current runtime source, configuration, model and fixture hashes. Adding result JSON or prose afterward does not relabel the captured commit or require another feature build. Changed runtime, inference, harness or sampler code invalidates the relevant source binding.
 
-R5 remains unchanged:
+### Historical hosted campaign
 
-- At least three paired runs of 30 warm requests per arm, with dense and tied controls on every one of the eight native release profiles: Darwin ARM64/x64, Linux GNU and musl ARM64/x64, and Windows ARM64/x64.
-- At least 20% p95 improvement for the primary 100k dense case.
-- No 10k p95 regression larger than `max(5ms, 5%)`.
-- No process-tree sampled peak RSS growth larger than 10%.
-- Exact output/query/scalar-oracle parity, separately reported first use, and all existing deadlines and ownership/freshness/authorization fences.
+The earlier qualification plan required performance captures on all eight native profiles. The hosted campaign remains available for reference. [Hosted results](https://github.com/threadnote/threadnote/blob/5882dc7db71256f4d1151059fa6da527388f2515/apps/threadnote/test/evaluation/candidates/native-vector-reader-production/writer-qualification/results.md)
 
-Future captures also report `deadlineCompletion` version 1. For 100k dense only, the `candidate-only-deadline-completion` outcome requires three or more complete matched pairs, at least 30 exact warm sample IDs per arm in every pair, and exactly one sample-0 first-use observation per arm. Rust must return exact independent query and scalar-oracle digests within the original 2000ms deadline on every request. TS66 must exhaust that same budget on every first-use and warm request, as recorded from the typed ready-read boundary error. Both arms need complete process-tree RSS telemetry, executable and engine proof, verified provenance, and closing source, model, fixture and distribution fences.
+### Capture status fields
+
+The capture tool also reports `deadlineCompletion` version 1. For 100k dense only, the `candidate-only-deadline-completion` outcome requires three or more complete matched pairs, at least 30 exact warm sample IDs per arm in every pair, and exactly one sample-0 first-use observation per arm. Rust must return exact independent query and scalar-oracle digests within the original 2000ms deadline on every request. TS66 must exhaust that same budget on every first-use and warm request, as recorded from the typed ready-read boundary error. Both arms need complete process-tree RSS telemetry, executable and engine proof, verified provenance, and closing source, model, fixture and distribution fences.
 
 The deadline-completion outcome reports comparative p95 and comparable completed-work RSS as unavailable. The raw sampled process-tree peaks remain available for inspecting the workload that actually ran. This evidence has no effect on the numeric case gates, the exit status under `--fail-on-budget`, or the overall adoption decision.
 
-Each capture reports only its case gates. Its `qualified` field stays false because a single case cannot establish all eight profiles and all controls. `decision.json` records the overall adoption decision; `platform-results.json` lists every required profile as pending until native-host evidence is captured. `local-results.json` currently contains diagnostic observations and failures; `linux-results.json` explicitly records the unrun qualification. No formal R5 pass is claimed.
+Each capture reports its own case gates. The per-capture `qualified` field stays false because the capture covers only one case.
+
+### Historical capture files
+
+The root `platform-results.json`, `local-results.json`, and `linux-results.json` retain historical capture status. The current release decision is in `decision.json`.
 
 A two-document Darwin correctness probe confirmed that the unchanged TS66 executable accepts a genuine shared inference overlay, retains its original receipt, runs real staged BGE inference and the actual owned worker under the unchanged 2s deadline, and matches exact ordered scalar/query results. Original and hybrid inventories remained unchanged. `local-results.json` records that compatibility proof separately; it contains no performance qualification.
