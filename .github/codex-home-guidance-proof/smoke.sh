@@ -12,9 +12,9 @@ export THREADNOTE_BIN_DIR="$runner_state/bin"
 export THREADNOTE_USER=codex-guidance-smoke
 export THREADNOTE_TELEMETRY=off
 export THREADNOTE_AUTO_UPDATE=off
-export CODEX_HOME="$runner_state/codex"
-mkdir -p "$CODEX_HOME"
-[[ "$CODEX_HOME" == /home/* ]]
+CODEX_HOME="$(mktemp -d /private/tmp/threadnote-codex-home.XXXXXX)"
+export CODEX_HOME
+[[ "$CODEX_HOME" == /private/tmp/* ]]
 
 candidate="$runner_state/source"
 git worktree add --detach "$candidate" "$candidate_commit"

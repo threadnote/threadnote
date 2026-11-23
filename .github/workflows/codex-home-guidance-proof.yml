@@ -9,11 +9,11 @@ permissions:
   contents: read
 jobs:
   install:
-    name: Verify exact installed Linux CLI guidance
-    runs-on: ubuntu-24.04
+    name: Verify exact installed Darwin CLI guidance
+    runs-on: macos-15
     timeout-minutes: 25
     env:
-      THREADNOTE_BUILD_TARGET: bun-linux-x64-baseline
+      THREADNOTE_BUILD_TARGET: bun-darwin-arm64
     steps:
       - uses: actions/checkout@v7
         with:
