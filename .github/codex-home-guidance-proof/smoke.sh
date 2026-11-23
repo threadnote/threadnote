@@ -23,7 +23,10 @@ test "$(git rev-parse HEAD)" = "$candidate_commit"
 test -z "$(git status --porcelain=v1)"
 bun install --frozen-lockfile
 bun run dev:runtime-status -- --json > "$runner_state/runtime-before.json"
-bun run dev:install-global -- --terminate-superseded --json > "$runner_state/install.json"
+if ! bun run dev:install-global -- --terminate-superseded --json > "$runner_state/install.json"; then
+  tail -c 16384 "$runner_state/install.json" >&2
+  exit 1
+fi
 bun run dev:runtime-status -- --json > "$runner_state/runtime-after.json"
 
 export PATH="$THREADNOTE_BIN_DIR:$PATH"
