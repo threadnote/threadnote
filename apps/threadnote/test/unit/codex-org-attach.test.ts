@@ -1,12 +1,13 @@
 import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Path, PlatformError, Predicate} from 'effect';
-import {describe, expect, it} from 'vitest';
+import {Effect, FileSystem, Path, Predicate} from 'effect';
+import {describe, expect, it, vi} from 'vitest';
 import {parse} from 'smol-toml';
 import {captureConsole} from '@threadnote/threadnote/effect/console';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {ApplicationLayer, StandaloneBrokerLayer} from '@threadnote/threadnote/effect/runtime';
 import {SystemInfo} from '@threadnote/platform/system';
+import * as PlatformSystem from '@threadnote/platform/system';
 import {
   renderCodexOrgMcpConfig,
   runCodexOrgMcpInstall,
@@ -43,7 +44,7 @@ describe('Codex organization attach', () => {
         const path = yield* Path.Path;
         const baseSystem = yield* SystemInfo;
         const baseCommands = yield* CommandExecutor;
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'codex-org-install-'});
+        const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'codex-org-install-'}));
         const configPath = path.join(root, 'config.toml');
         const bin = path.join(root, 'bin');
         yield* fs.makeDirectory(bin);
@@ -51,10 +52,10 @@ describe('Codex organization attach', () => {
         yield* fs.writeFileString(configPath, original);
         yield* fs.chmod(configPath, 0o640);
         let configReads = 0;
-        const guardedFs = FileSystem.FileSystem.of({
-          ...fs,
-          readFileString: (file, encoding) =>
-            Effect.gen(function* () {
+        const readOriginal = PlatformSystem.runtimeReadBoundedStableRegularFile;
+        yield* Effect.acquireRelease(
+          Effect.sync(() =>
+            vi.spyOn(PlatformSystem, 'runtimeReadBoundedStableRegularFile').mockImplementation((file, ...args) => {
               if (file === configPath) {
                 configReads++;
                 if (
@@ -62,17 +63,14 @@ describe('Codex organization attach', () => {
                   (mode === 'unreadable-final' && configReads === 2) ||
                   mode === 'unreadable-always'
                 ) {
-                  return yield* PlatformError.systemError({
-                    _tag: 'PermissionDenied',
-                    module: 'FileSystem',
-                    method: 'readFileString',
-                    pathOrDescriptor: file,
-                  });
+                  return Promise.reject(Object.assign(new Error('Access denied to fixture config'), {code: 'EACCES'}));
                 }
               }
-              return yield* fs.readFileString(file, encoding);
+              return readOriginal(file, ...args);
             }),
-        });
+          ),
+          spy => Effect.sync(() => spy.mockRestore()),
+        );
         const calls: (readonly string[])[] = [];
         const commands = CommandExecutor.of({
           ...baseCommands,
@@ -92,7 +90,6 @@ describe('Codex organization attach', () => {
         const install = captureConsole(runCodexOrgMcpInstall(attach, true)).pipe(
           Effect.provideService(SystemInfo, system),
           Effect.provideService(CommandExecutor, commands),
-          Effect.provideService(FileSystem.FileSystem, guardedFs),
         );
         const result = yield* install.pipe(Effect.result);
         const after = yield* fs.readFileString(configPath);
@@ -108,7 +105,16 @@ describe('Codex organization attach', () => {
         }
         if (baseSystem.platform !== 'win32') expect((yield* fs.stat(configPath)).mode & 0o777).toBe(0o640);
         expect(EffectArray.every(calls, args => args.length === 1 && args[0] === '--version')).toBe(true);
-        if (mode === 'unreadable-initial' || mode === 'unreadable-always') expect(calls).toEqual([]);
+        if (mode === 'unreadable-initial' || mode === 'unreadable-final' || mode === 'unreadable-always') {
+          expect(result).toMatchObject({
+            _tag: 'Failure',
+            failure: {message: expect.stringContaining('Cannot read Codex config')},
+          });
+          const finalRead = mode === 'unreadable-final';
+          expect(configReads).toBe(finalRead ? 2 : 1);
+          if (finalRead) expect(calls.length).toBeGreaterThan(0);
+          else expect(calls).toEqual([]);
+        }
         expect(
           EffectArray.filter(
             yield* fs.readDirectory(root),
