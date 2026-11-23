@@ -416,6 +416,52 @@ const validationRefMatches = (
 };
 const requiredWatchSources = ['comments', 'reviews', 'threads', 'checks', 'statuses'];
 
+const watchWorkDrained = (state: StoredWatch['envelope']['state']) =>
+  state.events.length === 0 &&
+  state.delivery === null &&
+  state.acknowledged === state.nextSequence - 1 &&
+  !EffectArray.some(state.work, item => item.status === 'open' || item.status === 'blocked');
+
+/** Retain the host receipt for the acknowledged terminal range, even if the outbox is still queued. */
+const acknowledgedMergedWatchReceipt = ({state, collector, notification}: StoredWatch['envelope']) => {
+  if (
+    state.prState !== 'merged' ||
+    collector?.status !== 'terminal' ||
+    collector.reason !== 'merged' ||
+    !notification ||
+    notification.recoveryRequested ||
+    !state.lastAck ||
+    !watchWorkDrained(state)
+  )
+    return undefined;
+  const {outbox, lastReceipt} = notification;
+  const coversMergedRange = (first: number, last: number) =>
+    last === state.acknowledged &&
+    EffectArray.some(
+      state.work,
+      ({event}) =>
+        event.source === 'watch' &&
+        event.kind === 'merged' &&
+        event.key === state.watchId &&
+        !event.removed &&
+        event.head === state.head &&
+        event.sequence >= first &&
+        event.sequence <= last,
+    );
+  if (outbox) {
+    // An authenticated Codex arrival can claim backlog beyond its original notice range.
+    const through = outbox.status === 'queued' ? Math.max(outbox.last, outbox.consumedThrough ?? 0) : outbox.last;
+    return (outbox.status === 'queued' || outbox.status === 'completed') &&
+      !outbox.error &&
+      coversMergedRange(outbox.first, through)
+      ? outbox.receipt
+      : undefined;
+  }
+  if (!lastReceipt) return undefined;
+  const [, first, last] = EffectString.split(lastReceipt.key, ':');
+  return coversMergedRange(Number(first), Number(last)) ? lastReceipt.receipt : undefined;
+};
+
 const standaloneWatchRoute =
   'To monitor the PR now, call watch-pr with prUrl and the host wakeup (runId optional) for a monitor-only standalone watch.';
 
@@ -724,12 +770,19 @@ export const runNativeTaskPrWatch = (
         threadId: inputWakeup.threadId,
       };
     const validatedPhaseId = validation.phaseId;
-    const watchReady = (candidate: StoredWatch, now: number) => {
+    const watchReady = (candidate: StoredWatch, now: number, hasRetainedWatch = false) => {
       const state = candidate.envelope.state;
       const notification = candidate.envelope.notification;
       const consumer = state.consumer;
       const terminal = state.prState === 'merged';
-      const hostReceipt = notification?.lastReceipt?.receipt ?? notification?.outbox?.receipt;
+      const consumerExpired = consumer !== null && consumer.leaseUntil <= now;
+      const settledReceipt =
+        consumerExpired && hasRetainedWatch && terminal
+          ? acknowledgedMergedWatchReceipt(candidate.envelope)
+          : undefined;
+      const hostReceipt = consumerExpired
+        ? settledReceipt
+        : (notification?.lastReceipt?.receipt ?? notification?.outbox?.receipt);
       // The watch head is the last sweep. A merged head can descend from the delivered head; record-delivery
       // verifies that ancestry. Fresh provider verification binds an open PR head before its receipt.
       const head = terminal ? state.head : embeddedDelivery.headSha;
@@ -749,7 +802,7 @@ export const runNativeTaskPrWatch = (
         !consumer ||
         consumer.id !== consumerId ||
         consumer.wakeupId !== wakeupId ||
-        consumer.leaseUntil <= now ||
+        (consumerExpired && !settledReceipt) ||
         !notification ||
         notification.consumerId !== consumer.id ||
         notification.wakeupId !== consumer.wakeupId
@@ -761,15 +814,6 @@ export const runNativeTaskPrWatch = (
       Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis;
         const terminal = watch.envelope.state.prState === 'merged';
-        const bound = watchReady(watch, now);
-        if (!bound)
-          return yield* fail(
-            'watch-not-ready',
-            terminal
-              ? 'A merged PR needs its terminal source-complete watch, live consumer and actual host receipt before delivery.'
-              : 'An open PR needs a started watch with its live consumer and host wakeup registration before delivery.',
-          );
-        const {consumer, hostReceipt, head} = bound;
         const current = yield* readNativeWorkflowState(config, request.runId);
         if (!current?.state.cycle) return yield* fail('cycle-not-found', 'This run no longer has its canonical cycle.');
         const cycleState = current.state.cycle.state;
@@ -793,6 +837,19 @@ export const runNativeTaskPrWatch = (
           );
         const planPhase = planPhases[0];
         const canonicalReceipt = currentProof.delivery;
+        const hasRetainedWatch =
+          request.operation === 'complete' &&
+          canonicalReceipt?.delivery === 'pr' &&
+          canonicalReceipt.watch?.consumerId === consumerId;
+        const bound = watchReady(watch, now, hasRetainedWatch);
+        if (!bound)
+          return yield* fail(
+            'watch-not-ready',
+            terminal
+              ? 'A merged PR needs a source-complete terminal watch with a host receipt and either its live consumer or acknowledged, settled terminal work.'
+              : 'An open PR needs a started watch with its live consumer and host wakeup registration before delivery.',
+          );
+        const {consumer, hostReceipt, head} = bound;
         if (!canonicalReceipt && (!embeddedDelivery.userAuthority || !embeddedDelivery.providerIdentity))
           return yield* fail(
             'user-authority-required',
@@ -997,11 +1054,11 @@ export const runNativeTaskPrWatch = (
                             const currentTime = yield* Clock.currentTimeMillis;
                             if (
                               stableJson(delivery) !== stableJson(finalReceipt) ||
-                              !watchReady(latestWatch, currentTime)
+                              watchReady(latestWatch, currentTime, hasRetainedWatch)?.hostReceipt !== hostReceipt
                             )
                               return yield* fail(
                                 'watch-not-ready',
-                                'The exact terminal watch needs a live consumer and host receipt at delivery.',
+                                'The exact terminal watch needs its host receipt and either a live consumer or acknowledged, settled terminal work at delivery.',
                               );
                           })
                       : undefined,
@@ -1138,12 +1195,7 @@ export const runNativeTaskPrWatch = (
         return yield* fail('watch-identity-conflict', 'The supplied wakeup does not match the registered host.');
       wakeup = registered;
     }
-    const terminalEmpty =
-      watch.envelope.state.prState !== 'open' &&
-      watch.envelope.state.events.length === 0 &&
-      watch.envelope.state.delivery === null &&
-      watch.envelope.state.acknowledged === watch.envelope.state.nextSequence - 1 &&
-      !EffectArray.some(watch.envelope.state.work, item => item.status === 'open' || item.status === 'blocked');
+    const terminalEmpty = watch.envelope.state.prState !== 'open' && watchWorkDrained(watch.envelope.state);
     if (
       terminalEmpty &&
       (request.operation === 'relay' || request.operation === 'ack' || request.operation === 'disposition')

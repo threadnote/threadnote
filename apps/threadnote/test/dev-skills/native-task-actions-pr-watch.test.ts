@@ -8,7 +8,12 @@ import {it as effectIt} from '@effect/vitest';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {describe, expect} from 'vitest';
 import {decodeNativeTaskActionRef, encodeNativeTaskActionRef} from '@threadnote/workflow-automations/task';
-import {recordNativeWatchLifecycle} from '@threadnote/workflow-automations/watch';
+import {
+  acknowledgeNativeWatch,
+  recordNativeWatchDispositions,
+  recordNativeWatchLifecycle,
+  relayNativeWatch,
+} from '@threadnote/workflow-automations/watch';
 import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
 import {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
 import {registerWorkflowTaskTool} from '../../src/mcp/server/workflow.js';
@@ -18,7 +23,11 @@ import {resolveNativeTaskPrWatch} from '../../src/workflow_automation/task_pr_wa
 import {makeNativeTaskPrWatchCommand} from '../../src/effect/workflow_cli.js';
 import {runNativeTaskAction as runNativeTaskActionCore} from '../../src/workflow_automation/task_actions.js';
 import {readNativeWatch, writeNativeWatch} from '../../src/workflow_automation/watch_store.js';
-import {nativeWatchNotice} from '../../src/workflow_automation/watch_notification_state.js';
+import {
+  consumeNativeWatchNotification,
+  nativeWatchNotice,
+} from '../../src/workflow_automation/watch_notification_state.js';
+import {makeNativeWatchNotifier} from '../../src/workflow_automation/watch_notification.js';
 import {applyDevSkills, statusDevSkills} from '../../src/dev_skills/index.js';
 import {SystemInfo} from '@threadnote/platform/system';
 import {nativeCloseoutJournalPath, readNativeWorkflowState} from '../../src/workflow_automation/store.js';
@@ -2142,7 +2151,193 @@ describe('native task actions', () => {
             expect(result.failure.message).toContain(reason);
             expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
           });
+        const refuseExpirationDuringCompletion = (phase: (typeof phases)[number]) =>
+          Effect.gen(function* () {
+            const terminalWatch = yield* readNativeWatch(f.config, phase.watch.watchId);
+            const leaseUntil = terminalWatch?.envelope.state.consumer?.leaseUntil;
+            if (!leaseUntil) throw new Error('Expected a live consumer lease.');
+            const clock = yield* Clock.Clock;
+            let expired = false;
+            onRead = () => {
+              expired = true;
+            };
+            const beforeExpiration = yield* f.fs.readFileString(f.statePath());
+            expect(
+              yield* complete(phase).pipe(
+                Effect.provideService(Clock.Clock, {
+                  currentTimeMillisUnsafe: () => (expired ? leaseUntil : clock.currentTimeMillisUnsafe()),
+                  currentTimeMillis: Effect.suspend(() =>
+                    expired ? Effect.succeed(leaseUntil) : clock.currentTimeMillis,
+                  ),
+                  currentTimeNanosUnsafe: () => clock.currentTimeNanosUnsafe(),
+                  currentTimeNanos: clock.currentTimeNanos,
+                  monotonicTimeNanosUnsafe: () => clock.monotonicTimeNanosUnsafe(),
+                  monotonicTimeNanos: clock.monotonicTimeNanos,
+                  sleep: duration => clock.sleep(duration),
+                }),
+                Effect.result,
+              ),
+            ).toMatchObject({failure: {code: 'watch-not-ready'}});
+            expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeExpiration);
+            onRead = undefined;
+          });
+        const expiredTerminalWatch = (phase: (typeof phases)[number]) =>
+          Effect.gen(function* () {
+            const watch = yield* readNativeWatch(f.config, phase.watch.watchId);
+            const owner = watch?.envelope.state.consumer;
+            const notification = watch?.envelope.notification;
+            const outbox = notification?.outbox;
+            if (!watch || !owner || !notification || !outbox?.attemptId)
+              throw new Error('Expected the owned terminal watch and queued host receipt.');
+            const now = yield* Clock.currentTimeMillis;
+            const {state} = watch.envelope;
+            const event = state.events[0];
+            const sequence = state.nextSequence;
+            const terminal = {
+              ...event,
+              sequence,
+              id: `${state.watchId}:${sequence}`,
+              source: 'watch' as const,
+              kind: 'merged',
+              key: state.watchId,
+              version: sha256HexSync(`state:merged:${state.head}`),
+              head: state.head,
+            };
+            const relayed = relayNativeWatch(
+              {...state, events: [event, terminal], nextSequence: sequence + 1},
+              owner.id,
+              now,
+            );
+            if (!relayed.delivery) throw new Error('Expected the terminal merge event to be relayed.');
+            const resolved = recordNativeWatchDispositions(
+              relayed.state,
+              owner.id,
+              relayed.delivery.id,
+              [
+                {
+                  eventId: event.id,
+                  status: 'ignored',
+                  reason: 'The earlier comment needs no action.',
+                  evidence: phase.provider.url,
+                },
+                {
+                  eventId: terminal.id,
+                  status: 'resolved',
+                  reason: 'The PR merge is verified.',
+                  evidence: phase.provider.url,
+                },
+              ],
+              now,
+            );
+            const acknowledged = acknowledgeNativeWatch(resolved, owner.id, relayed.delivery.id, now);
+            const expired = {...owner, lastSeenAt: now - owner.leaseMilliseconds - 1, leaseUntil: now - 1};
+            const envelope = {
+              ...watch.envelope,
+              notification:
+                phase.id === 'three'
+                  ? consumeNativeWatchNotification(notification, resolved, {
+                      consumerId: owner.id,
+                      wakeupId: owner.wakeupId,
+                      eventKey: outbox.key,
+                      attemptId: outbox.attemptId,
+                    })
+                  : {
+                      ...notification,
+                      notifiedThrough: event.sequence,
+                      lastReceipt: {
+                        key: outbox.key,
+                        receipt: outbox.attemptId,
+                        attemptId: outbox.attemptId,
+                        kind: 'queued-message' as const,
+                        at: now,
+                      },
+                      outbox: {
+                        ...outbox,
+                        key: `${state.watchId}:${sequence}:${sequence}`,
+                        first: sequence,
+                        last: sequence,
+                      },
+                    },
+            };
+            return {
+              watch,
+              acknowledged: {...envelope, state: {...acknowledged, consumer: expired}},
+              unacknowledged: {...envelope, state: {...resolved, consumer: expired}},
+            };
+          });
+        const writeAcknowledgedExpiredWatch = (phase: (typeof phases)[number]) =>
+          Effect.gen(function* () {
+            const {watch, acknowledged} = yield* expiredTerminalWatch(phase);
+            let revision = watch.revision;
+            if (phase.id === 'three') {
+              const earlierNotice = watch.envelope.notification;
+              const covered = acknowledged.notification?.outbox;
+              expect(covered?.last).toBeLessThan(acknowledged.state.acknowledged);
+              expect(covered?.consumedThrough).toBe(acknowledged.state.acknowledged);
+              const before = yield* f.fs.readFileString(f.statePath());
+              const unchangedNotice = yield* writeNativeWatch(
+                f.config,
+                {...acknowledged, notification: earlierNotice},
+                revision,
+              );
+              revision = unchangedNotice.revision;
+              expect(yield* complete(phase).pipe(Effect.result)).toMatchObject({failure: {code: 'watch-not-ready'}});
+              expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
+            }
+            const pendingWork =
+              phase.id === 'three'
+                ? {
+                    ...acknowledged,
+                    state: {
+                      ...acknowledged.state,
+                      work: EffectArray.map(acknowledged.state.work, item =>
+                        item.event.kind === 'merged' ? item : {...item, status: 'blocked' as const},
+                      ),
+                    },
+                  }
+                : acknowledged;
+            yield* writeNativeWatch(f.config, pendingWork, revision);
+            const receipt = acknowledged.notification?.outbox?.receipt;
+            if (phase.id === 'three') {
+              const collector = watch.envelope.collector;
+              if (!collector) throw new Error('Expected the terminal collector receipt.');
+              const notifier = yield* makeNativeWatchNotifier(f.config, phase.watch.watchId, collector.token);
+              yield* notifier.tick();
+              const retained = yield* readNativeWatch(f.config, phase.watch.watchId);
+              const notification = retained?.envelope.notification;
+              const outbox = notification?.outbox;
+              if (!retained || !notification || !outbox?.receipt || !outbox.attemptId)
+                throw new Error('Expected the retained coalesced host receipt.');
+              expect(outbox).toEqual(acknowledged.notification?.outbox);
+              expect(yield* complete(phase).pipe(Effect.result)).toMatchObject({failure: {code: 'watch-not-ready'}});
+              const settled = yield* writeNativeWatch(f.config, acknowledged, retained.revision);
+              const legacy = yield* writeNativeWatch(
+                f.config,
+                {
+                  ...settled.envelope,
+                  notification: {
+                    ...notification,
+                    notifiedThrough: acknowledged.state.acknowledged,
+                    outbox: null,
+                    lastReceipt: {
+                      key: outbox.key,
+                      receipt: outbox.receipt,
+                      attemptId: outbox.attemptId,
+                      kind: 'queued-message',
+                      at: outbox.createdAt,
+                    },
+                  },
+                },
+                settled.revision,
+              );
+              expect(yield* complete(phase).pipe(Effect.result)).toMatchObject({failure: {code: 'watch-not-ready'}});
+              yield* writeNativeWatch(f.config, settled.envelope, legacy.revision);
+            }
+            return receipt;
+          });
         yield* refuse(second, 'no distinct canonical merged PR receipt');
+        yield* refuseExpirationDuringCompletion(first);
+        yield* writeAcknowledgedExpiredWatch(first);
         expect(object(yield* complete(first))).toMatchObject({
           status: 'delivered',
           receipt: {pr: {baseBranch: 'main', state: 'merged'}},
@@ -2200,31 +2395,33 @@ describe('native task actions', () => {
           [second.provider.number]: {headBranch: 'unrelated'},
         });
         yield* refuse(third, 'no distinct canonical merged PR receipt');
-        const terminalWatch = yield* readNativeWatch(f.config, second.watch.watchId);
-        const leaseUntil = terminalWatch?.envelope.state.consumer?.leaseUntil;
-        if (!leaseUntil) throw new Error('Expected a live consumer lease.');
-        const clock = yield* Clock.Clock;
-        let expired = false;
-        onRead = () => {
-          expired = true;
-        };
-        const beforeExpiration = yield* f.fs.readFileString(f.statePath());
-        expect(
-          yield* complete(second).pipe(
-            Effect.provideService(Clock.Clock, {
-              currentTimeMillisUnsafe: () => (expired ? leaseUntil : clock.currentTimeMillisUnsafe()),
-              currentTimeMillis: Effect.suspend(() => (expired ? Effect.succeed(leaseUntil) : clock.currentTimeMillis)),
-              currentTimeNanosUnsafe: () => clock.currentTimeNanosUnsafe(),
-              currentTimeNanos: clock.currentTimeNanos,
-              monotonicTimeNanosUnsafe: () => clock.monotonicTimeNanosUnsafe(),
-              monotonicTimeNanos: clock.monotonicTimeNanos,
-              sleep: duration => clock.sleep(duration),
-            }),
-            Effect.result,
-          ),
-        ).toMatchObject({failure: {code: 'watch-not-ready'}});
-        expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeExpiration);
-        onRead = undefined;
+        yield* refuseExpirationDuringCompletion(second);
+        const {watch: liveSecond, acknowledged, unacknowledged} = yield* expiredTerminalWatch(second);
+        const expiredSecond = yield* writeNativeWatch(f.config, unacknowledged, liveSecond.revision);
+        const beforeUnacknowledged = yield* f.fs.readFileString(f.statePath());
+        expect(yield* complete(second).pipe(Effect.result)).toMatchObject({failure: {code: 'watch-not-ready'}});
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeUnacknowledged);
+        const oldNotification = acknowledged.notification;
+        if (!oldNotification) throw new Error('Expected the terminal notice.');
+        let incompleteRevision = expiredSecond.revision;
+        for (const incomplete of [
+          {...acknowledged, notification: {...oldNotification, recoveryRequested: true}},
+          {
+            ...acknowledged,
+            state: {
+              ...acknowledged.state,
+              work: EffectArray.map(acknowledged.state.work, item =>
+                item.event.kind === 'merged' ? item : {...item, status: 'blocked' as const},
+              ),
+            },
+          },
+        ]) {
+          const storedIncomplete = yield* writeNativeWatch(f.config, incomplete, incompleteRevision);
+          incompleteRevision = storedIncomplete.revision;
+          expect(yield* complete(second).pipe(Effect.result)).toMatchObject({failure: {code: 'watch-not-ready'}});
+          expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeUnacknowledged);
+        }
+        yield* writeNativeWatch(f.config, acknowledged, incompleteRevision);
 
         for (const phase of [second, third]) {
           const predecessor = phase.id === 'two' ? first : second;
@@ -2236,6 +2433,11 @@ describe('native task actions', () => {
                 [second.provider.number]: {baseBranch: second.originalBase},
               }).pipe(Effect.result),
             ).toMatchObject({failure: {code: 'base-ref-unverified'}});
+          const receipt =
+            phase.id === 'two'
+              ? acknowledged.notification?.outbox?.receipt
+              : yield* writeAcknowledgedExpiredWatch(phase);
+          if (!receipt) throw new Error('Expected the merged terminal host receipt.');
           reads.length = 0;
           const before = (yield* readNativeWorkflowState(f.config, 'native-run'))?.state.cycle?.state.phases[phase.id]
             ?.delivery;
@@ -2247,7 +2449,12 @@ describe('native task actions', () => {
               pr: {...before?.pr, state: 'merged'},
               providerIdentity: before?.providerIdentity,
               userAuthority: before?.userAuthority,
-              watch: {state: 'terminal', consumerId: phase.watch.consumerId, headSha: phase.provider.headSha},
+              watch: {
+                state: 'terminal',
+                consumerId: phase.watch.consumerId,
+                headSha: phase.provider.headSha,
+                evidence: expect.stringContaining(`;host-receipt:${receipt}`),
+              },
             },
           });
           expect(reads).toEqual([phase.provider.number, predecessor.provider.number]);

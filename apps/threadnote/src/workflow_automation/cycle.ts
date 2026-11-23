@@ -1640,7 +1640,7 @@ export const runNativeCycle = <R>(
               return yield* fail('source-drift', 'Source changed during delivery base verification.');
           }
           const updated = yield* from(() => recordNativeCycleDelivery(accepted, selected.id, delivery));
-          const beforeCommit = retargeted ? terminalWatch?.(delivery) : undefined;
+          const beforeCommit = historicalMergeCandidate ? terminalWatch?.(delivery) : undefined;
           return {
             status: 'ok',
             revision: yield* save({...runtime, state: updated}, beforeCommit),
