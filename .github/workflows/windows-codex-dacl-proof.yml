@@ -6,14 +6,14 @@ on:
 permissions:
   contents: read
 jobs:
-  watch-retry:
-    name: Retry inherited native collector test on 761881c6
+  dacl-fixture:
+    name: Verify Codex DACL preservation on 76828a8
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: 761881c6a0646fd02102c22544a2b3dc93e0e28e
+          ref: 76828a87fb42fa77a1ad9b69f8f501942fe091f9
           persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
@@ -21,77 +21,13 @@ jobs:
       - name: Confirm immutable source and runtime
         shell: pwsh
         run: |
-          if ((git rev-parse HEAD) -ne '761881c6a0646fd02102c22544a2b3dc93e0e28e') { throw "Unexpected source" }
+          if ((git rev-parse HEAD) -ne '76828a87fb42fa77a1ad9b69f8f501942fe091f9') { throw "Unexpected source" }
           if ((bun --version) -ne '1.4.4') { throw "Unexpected Bun runtime" }
       - run: bun install --frozen-lockfile
-      - name: Install workflow inspection prerequisite
-        shell: pwsh
-        timeout-minutes: 5
-        run: bun tools/ci/windows-workflow-prerequisites.ts
-      - name: Run the exact timed-out native watch test
+      - name: Run the real Windows DACL and owner preservation test
         shell: pwsh
         run: >-
           bun --bun vitest run --no-file-parallelism --testTimeout=120000
           --config=tools/ci/windows-smoke.config.ts
-          apps/threadnote/test/dev-skills/native-watch-process.test.ts
-          -t 'keeps event delivery gated across real collector crash/restart and sends stop before exit'
-  link-lifetime:
-    name: Verify existing Windows link guard and scoped publication
-    runs-on: windows-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: 495a87f1b56300686f2de0a6c816c6c89a6c1482
-          persist-credentials: false
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: '1.4.4'
-      - name: Confirm immutable source and runtime
-        shell: pwsh
-        run: |
-          if ((git rev-parse HEAD) -ne '495a87f1b56300686f2de0a6c816c6c89a6c1482') { throw "Unexpected source" }
-          if ((bun --version) -ne '1.4.4') { throw "Unexpected Bun runtime" }
-      - run: bun install --frozen-lockfile
-      - name: Measure the fixture hardlink across its creation scope
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Path .context/dacl-diagnosis -Force
-          @'
-          import * as BunServices from '@effect/platform-bun/BunServices';
-          import {Effect, FileSystem, Layer, Path, Result} from 'effect';
-          import {runtimeLstat} from '@threadnote/platform/system';
-          import {TestCommandExecutorLayer, TestSystemInfoLayer} from '../../apps/threadnote/test/helpers/system-layer.ts';
-          import {publishStagedCodexConfiguration, stageCodexConfiguration} from '../../apps/threadnote/src/mcp/codex_configuration_write.ts';
-
-          const program = Effect.scoped(Effect.gen(function* () {
-            const fs = yield* FileSystem.FileSystem;
-            const path = yield* Path.Path;
-            const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-dacl-link-lifetime-'});
-            const target = path.join(home, 'config.toml');
-            let staging = '';
-            yield* Effect.scoped(Effect.gen(function* () {
-              staging = yield* stageCodexConfiguration(home, target, undefined, 'first');
-              if (!(yield* publishStagedCodexConfiguration(target, staging, false, Effect.succeed(true)))) {
-                return yield* Effect.die(new Error('Initial publish unexpectedly declined.'));
-              }
-              const before = yield* Effect.promise(() => runtimeLstat(target));
-              if (!before.isFile() || !('nlink' in before) || before.nlink !== 2n || !(yield* fs.exists(staging))) {
-                return yield* Effect.die(new Error('Expected a regular file with a live staging hardlink.'));
-              }
-              const rejected = yield* stageCodexConfiguration(home, target, before, 'unsafe').pipe(Effect.result);
-              if (Result.isSuccess(rejected) || rejected.failure.message !== 'Cannot preserve the access metadata on this Codex configuration.') {
-                return yield* Effect.die(new Error('Expected the existing production guard to reject a live staging hardlink.'));
-              }
-              console.log(JSON.stringify({regularFile: true, creationScopeLinkCount: String(before.nlink), existingGuardRejection: rejected.failure.message}));
-            }));
-            const after = yield* Effect.promise(() => runtimeLstat(target));
-            if (!after.isFile() || !('nlink' in after) || after.nlink !== 1n || (yield* fs.exists(staging)) || (yield* fs.readFileString(target)) !== 'first') {
-              return yield* Effect.die(new Error('Closing the create scope must leave the published regular single-link file.'));
-            }
-            console.log(JSON.stringify({regularFile: true, afterScopeLinkCount: String(after.nlink), aliasRemoved: true, bytesPreserved: true}));
-          }));
-          const layer = TestCommandExecutorLayer.pipe(Layer.provideMerge(TestSystemInfoLayer), Layer.provideMerge(BunServices.layer));
-          await Effect.runPromise(program.pipe(Effect.provide(layer)));
-          '@ | Set-Content .context/dacl-diagnosis/link-lifetime.ts
-          bun .context/dacl-diagnosis/link-lifetime.ts
+          apps/threadnote/test/unit/windows-support.test.ts
+          -t 'creates and updates a Codex config while preserving the explicit Windows DACL and owner'
