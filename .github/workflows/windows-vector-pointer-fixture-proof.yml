@@ -1,0 +1,75 @@
+name: Windows vector pointer fixture proof
+
+on:
+  push:
+    branches: [codex/windows-vector-pointer-fixture-proof]
+
+permissions:
+  contents: read
+
+jobs:
+  stock-main:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    env:
+      STOCK_COMMIT: eae9080bf270331d2fd9ff0633fe2b4b22764aff
+    steps:
+      - name: Preserve committed bytes
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify the stock parent and test file
+        run: |
+          test "$(git rev-parse HEAD^)" = "$STOCK_COMMIT"
+          test "$(git diff --name-status HEAD^ HEAD)" = $'A\t.github/workflows/windows-vector-pointer-fixture-proof.yml'
+          file=apps/threadnote/test/unit/code-graph.embedding.test.ts
+          blob="$(git rev-parse "$STOCK_COMMIT:$file")"
+          test "$(git hash-object --no-filters "$file")" = "$blob"
+          printf 'stock=%s\nfixture_blob=%s\n' "$STOCK_COMMIT" "$blob"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.4
+          bun-download-url: https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-windows-x64-baseline.zip
+      - name: Verify native runtime
+        run: bun -e 'if (process.platform !== "win32" || process.arch !== "x64") process.exit(1)'
+      - run: bun install --frozen-lockfile
+      - name: Isolate the SQLite handle lifetime
+        run: |
+          bun - <<'TS'
+          import {Database} from 'bun:sqlite';
+          import {mkdtempSync, renameSync, rmSync} from 'node:fs';
+          import {tmpdir} from 'node:os';
+          import {join} from 'node:path';
+          const root = mkdtempSync(join(tmpdir(), 'threadnote-vector-handle-'));
+          try {
+            const source = join(root, 'source.sqlite');
+            const target = join(root, 'renamed.sqlite');
+            const db = new Database(source);
+            db.exec('CREATE TABLE sample (value)');
+            const statement = db.prepare('INSERT INTO sample VALUES (1)');
+            statement.run();
+            db.close(false);
+            try {
+              renameSync(source, target);
+              console.log('Rename succeeded while the statement remained live.');
+            } catch (error) {
+              if (error.code !== 'EBUSY' && error.code !== 'EPERM' && error.code !== 'EACCES') throw error;
+              console.log('Rename with live statement failed:', error.code);
+              statement.finalize();
+              renameSync(source, target);
+              console.log('Rename succeeded after statement finalization.');
+            }
+          } finally {
+            rmSync(root, {force: true, recursive: true});
+          }
+          TS
+      - name: Run the unchanged stock main test
+        run: >-
+          bun --bun vitest run apps/threadnote/test/unit/code-graph.embedding.test.ts
+          -t 'prepares the released pointer index without pruning or admitting under the embedding lock'
