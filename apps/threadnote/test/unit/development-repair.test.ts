@@ -2,6 +2,7 @@ import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Clock, Console, Deferred, Effect, Fiber, FileSystem, Path, Result} from 'effect';
 import type {SecureRandom} from 'effect/crypto';
+import {TestClock} from 'effect/testing';
 import * as FC from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {classifySqliteError, SqlError} from 'effect/sql/SqlError';
@@ -54,6 +55,7 @@ import {
 } from '@threadnote/store/external-resource';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import {writeCodexActivationFixture} from '../fixtures/codex-activation.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
 import * as EffectString from 'effect/String';
@@ -764,6 +766,43 @@ describe('development installer repair isolation', () => {
         expect(yield* f.fs.readFileString(f.path.join(f.installRoot, 'active-release.json'))).toBe(f.pointer);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('honors scoped MCP repair and recovers an interrupted Codex marker update', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const previousVersion = '4.6.6';
+      const codex = yield* f.provide(
+        writeCodexActivationFixture(f.home, f.path.join(f.user, 'pinned-codex'), previousVersion),
+      );
+      const repair = (mcp: string) =>
+        f.provide(
+          Effect.gen(function* () {
+            const system = yield* SystemInfo;
+            return yield* captureConsole(runRepair(f.config, {mcp, postUpdate: false})).pipe(
+              Effect.provideService(
+                SystemInfo,
+                SystemInfo.of({
+                  ...system,
+                  environment: () => ({
+                    ...system.environment(),
+                    PATH: f.path.join(f.user, 'empty-path'),
+                    CODEX_HOME: f.path.join(f.user, 'inactive-profile'),
+                  }),
+                }),
+              ),
+            );
+          }),
+        );
+      yield* repair('claude');
+      expect(yield* f.fs.readFileString(codex.file)).toBe(codex.content);
+      const recovered = yield* repair('codex');
+      expect(recovered.output).toContain(`Codex MCP configuration saved for Threadnote ${version}`);
+      expect(recovered.output).toContain('Live refresh pending');
+      expect(yield* f.fs.readFileString(codex.file)).toBe(
+        EffectString.replace(previousVersion, version)(codex.content),
+      );
+    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
   effectIt.effect('preserves customized markerless Copilot instructions', () =>

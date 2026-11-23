@@ -67,11 +67,13 @@ export const agentAdapterStatus = Effect.fn('agentAdapters.status')(function* (
 export const repairRegisteredAgentAdapters = Effect.fn('agentAdapters.repairRegistered')(function* (
   config: RuntimeConfig,
   dryRun: boolean,
+  options: {readonly skipCodexMcp?: boolean} = {},
 ) {
   const operation = Effect.gen(function* () {
     const registry = yield* readAgentIntegrationRegistry(config);
     for (const id of EffectRecord.keys(registry?.surfaces ?? {})) {
       const adapter = getAgentAdapter(id);
+      if (options.skipCodexMcp === true && adapter?.legacyClient === 'codex') continue;
       if (adapter)
         yield* adapter.actions.repair(config, adapter, {
           apply: !dryRun,

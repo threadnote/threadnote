@@ -22,7 +22,8 @@ import {
   installCursorCloudAgentIntegration,
   readAgentIntegrationRegistry,
 } from '@threadnote/threadnote/agent_integration/index';
-import {installCommandShim} from '@threadnote/threadnote/command-shim';
+import {commandLauncherPath, installCommandShim, renderCommandShim} from '@threadnote/threadnote/command-shim';
+import {hasActiveMcpLauncher} from '../../src/mcp/codex_broker_rotation.js';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {activateStandaloneRelease} from '@threadnote/threadnote/installations';
 import {CommandExecutor} from '@threadnote/platform/command';
@@ -42,6 +43,7 @@ import {
 } from '@threadnote/threadnote/agent_integration/registry';
 import {
   CODEX_MCP_RELEASE_ENV,
+  reconcileActivatedCodexMcp,
   reconcileRegisteredCodexMcp,
   verifyRegisteredCodexMcp,
 } from '@threadnote/threadnote/mcp/index';
@@ -1159,6 +1161,7 @@ const codexConfigurationFixture = Effect.gen(function* () {
         yield* fs.makeDirectory(releaseRoot, {recursive: true});
         yield* fs.writeFileString(path.join(releaseRoot, 'release.json'), JSON.stringify({version}));
         yield* activateStandaloneRelease(releaseRoot, false);
+        yield* installCommandShim(false, releaseRoot, config.agentContextHome);
       }),
     );
   return {
@@ -1179,6 +1182,30 @@ const firstCodexRelease = '6.4.1-dev.aaaaaaaaaaaa';
 const secondCodexRelease = '6.4.1-dev.bbbbbbbbbbbb';
 
 describe('Codex receipt-owned release marker', () => {
+  effectIt.effect('verifies the primary Windows CMD launcher without POSIX executable bits', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const base = yield* SystemInfo;
+      const bin = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-codex-cmd-launcher-'});
+      const release = path.join(bin, 'versions', firstCodexRelease);
+      const system = SystemInfo.of({
+        ...base,
+        environment: () => ({...base.environment(), THREADNOTE_BIN_DIR: bin}),
+        platform: 'win32',
+      });
+      yield* Effect.gen(function* () {
+        const cmd = yield* commandLauncherPath('mcp');
+        const posix = yield* commandLauncherPath('mcp', 'posix');
+        expect(cmd).toContain('threadnote-mcp-server.cmd');
+        yield* fs.writeFileString(posix, yield* renderCommandShim(release, 'mcp', 'posix'), {mode: 0o755});
+        expect(yield* hasActiveMcpLauncher(release)).toBe(false);
+        yield* fs.writeFileString(cmd, yield* renderCommandShim(release, 'mcp', 'cmd'), {mode: 0o600});
+        expect(yield* hasActiveMcpLauncher(release)).toBe(true);
+      }).pipe(Effect.provideService(SystemInfo, system));
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
   effectIt.effect.skipIf(process.platform === 'win32')(
     'pins fresh custom setup and updates only the marker in both repair entry points',
     () =>
@@ -1266,7 +1293,14 @@ describe('Codex receipt-owned release marker', () => {
         yield* fs.rename(hostRoot, oldRoot);
         yield* fs.symlink(alternateRoot, hostRoot);
         yield* activate(secondCodexRelease);
-        expect((yield* inFixture(reconcileRegisteredCodexMcp(config, secondCodexRelease))).state).toBe('deferred');
+        const redirected = yield* inFixture(reconcileActivatedCodexMcp(config, secondCodexRelease));
+        expect(redirected).toMatchObject({
+          configuration: 'deferred',
+          refresh: 'pending',
+          reason: expect.stringContaining(
+            'Set CODEX_HOME to the intended Codex home, then run `threadnote mcp-install codex --apply --name team-memory`',
+          ),
+        });
         expect(yield* fs.readFileString(alternateTarget)).toBe(modified);
         expect(yield* fs.readFileString(path.join(oldRoot, 'config.toml'))).toBe(modified);
       }).pipe(provideTestLayer(ApplicationLayer)),
@@ -1398,6 +1432,11 @@ describe('Codex receipt-owned release marker', () => {
         yield* fs.writeFileString(target, disabled);
         expect((yield* inFixture(reconcileRegisteredCodexMcp(config, secondCodexRelease))).state).toBe('deferred');
         expect(yield* fs.readFileString(target)).toBe(disabled);
+        expect(yield* inFixture(reconcileActivatedCodexMcp(config, secondCodexRelease))).toMatchObject({
+          configuration: 'deferred',
+          refresh: 'pending',
+          reason: expect.stringContaining('Enable it in Codex before running repair'),
+        });
 
         yield* fs.remove(target);
         const missing = yield* inFixture(mcpConfigurationChecks(config));
@@ -1409,6 +1448,13 @@ describe('Codex receipt-owned release marker', () => {
           status: 'warn',
         });
         expect((yield* inFixture(reconcileRegisteredCodexMcp(config, secondCodexRelease))).state).toBe('deferred');
+        expect(yield* inFixture(reconcileActivatedCodexMcp(config, secondCodexRelease))).toMatchObject({
+          configuration: 'deferred',
+          refresh: 'pending',
+          reason: expect.stringContaining(
+            `Set CODEX_HOME to ${hostRoot}, then run \`threadnote mcp-install codex --apply --name threadnote\``,
+          ),
+        });
         expect(yield* fs.exists(target)).toBe(false);
 
         yield* fs.writeFileString(target, original);
@@ -1440,6 +1486,89 @@ describe('Codex receipt-owned release marker', () => {
         );
         expect(result.state).toBe('deferred');
         expect(yield* fs.readFileString(target)).toBe(concurrent);
+      }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect.skipIf(process.platform === 'win32')(
+    'requires the active release launcher bytes at activation and publication',
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const {activate, bin, config, inFixture, installRoot, target} = yield* codexConfigurationFixture;
+        yield* activate(firstCodexRelease);
+        const launcher = yield* inFixture(commandLauncherPath('mcp'));
+        const previousLauncher = yield* fs.readFileString(launcher);
+        yield* inFixture(runMcpInstall(config, 'codex', {apply: true}));
+        const previousConfig = yield* fs.readFileString(target);
+        yield* activate(secondCodexRelease);
+        const currentLauncher = yield* fs.readFileString(launcher);
+        const copy = path.join(bin, 'foreign-copy');
+        const writeLauncher = (contents: string) => fs.writeFileString(launcher, contents, {mode: 0o755});
+        const reconcile = inFixture(reconcileActivatedCodexMcp(config, secondCodexRelease));
+        const deferred = {
+          configuration: 'deferred',
+          refresh: 'pending',
+          reason: expect.stringContaining('The MCP launcher does not match the active Threadnote release'),
+        };
+        yield* writeLauncher('unmanaged launcher\n');
+        expect(yield* reconcile).toMatchObject(deferred);
+        expect(yield* fs.readFileString(launcher)).toBe('unmanaged launcher\n');
+        yield* writeLauncher(previousLauncher);
+        expect(yield* reconcile).toMatchObject(deferred);
+        expect(yield* fs.readFileString(launcher)).toBe(previousLauncher);
+        yield* fs.writeFileString(copy, currentLauncher, {mode: 0o755});
+        yield* fs.remove(launcher);
+        yield* fs.symlink(copy, launcher);
+        expect(yield* reconcile).toMatchObject(deferred);
+        expect(yield* fs.readLink(launcher)).toBe(copy);
+        expect(yield* fs.readFileString(target)).toBe(previousConfig);
+
+        yield* fs.remove(launcher);
+        yield* writeLauncher(currentLauncher);
+        expect(
+          yield* reconcile.pipe(
+            Effect.provideService(FileSystem.FileSystem, {
+              ...fs,
+              writeFileString: (file, contents, options) =>
+                fs
+                  .writeFileString(file, contents, options)
+                  .pipe(
+                    Effect.tap(() =>
+                      EffectString.includes('.threadnote-mcp-')(file) ? writeLauncher(previousLauncher) : Effect.void,
+                    ),
+                  ),
+            }),
+          ),
+        ).toMatchObject(deferred);
+        expect(yield* fs.readFileString(target)).toBe(previousConfig);
+        yield* writeLauncher(currentLauncher);
+        expect(yield* reconcile).toMatchObject({
+          configuration: 'saved',
+          refresh: 'pending',
+          release: secondCodexRelease,
+        });
+        const installAlias = path.join(bin, 'installation-alias');
+        yield* fs.symlink(installRoot, installAlias);
+        yield* inFixture(
+          Effect.gen(function* () {
+            const system = yield* SystemInfo;
+            const aliasRelease = path.join(installAlias, 'versions', secondCodexRelease);
+            yield* writeLauncher(yield* renderCommandShim(aliasRelease, 'mcp'));
+            const check = hasActiveMcpLauncher(path.join(installRoot, 'versions', secondCodexRelease)).pipe(
+              Effect.provideService(
+                SystemInfo,
+                SystemInfo.of({
+                  ...system,
+                  environment: () => ({...system.environment(), THREADNOTE_INSTALL_ROOT: installAlias}),
+                }),
+              ),
+            );
+            expect(yield* check).toBe(true);
+            yield* fs.remove(installAlias);
+            expect(yield* check).toBe(false);
+          }),
+        );
       }).pipe(provideTestLayer(ApplicationLayer)),
   );
 });

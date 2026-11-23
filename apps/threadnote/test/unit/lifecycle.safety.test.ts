@@ -26,6 +26,7 @@ import {captureConsole} from '@threadnote/threadnote/effect/console';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 import {SystemInfo} from '@threadnote/platform/system';
 import {runDoctor, runInstall, runRepair} from '@threadnote/threadnote/lifecycle';
+import {writeCodexActivationFixture} from '../fixtures/codex-activation.js';
 import {activateStandaloneRelease, withStandaloneInstallationLock} from '@threadnote/threadnote/installations';
 import {installCommandShim} from '@threadnote/threadnote/command-shim';
 import {BUILTIN_MODEL_MANIFESTS, CORE_EMBEDDING_MODEL_ID} from '@threadnote/inference/models/builtin';
@@ -202,7 +203,7 @@ describe('read-only doctor', () => {
 });
 
 describe('repair failure propagation', () => {
-  effectIt.effect('dry-run install previews the candidate release without changing active routing', () =>
+  effectIt.effect('previews install without changing routing and reconciles Codex only after commit', () =>
     Effect.scoped(
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
@@ -238,6 +239,9 @@ describe('repair failure propagation', () => {
         });
         yield* activateStandaloneRelease(activeRoot, false).pipe(Effect.provideService(SystemInfo, testSystem));
         yield* installCommandShim(false).pipe(Effect.provideService(SystemInfo, testSystem));
+        const codex = yield* writeCodexActivationFixture(home, path.join(root, 'codex'), '66.4.0').pipe(
+          Effect.provideService(SystemInfo, testSystem),
+        );
         const activePointerBefore = yield* fs.readFileString(path.join(installRoot, 'active-release.json'));
         const cliBefore = yield* fs.readFileString(path.join(binDirectory, 'threadnote'));
         const mcpBefore = yield* fs.readFileString(path.join(binDirectory, 'threadnote-mcp-server'));
@@ -286,6 +290,28 @@ describe('repair failure propagation', () => {
         expect(yield* fs.readFileString(path.join(candidateRoot, 'release.json'))).toBe(candidateMetadata);
         expect(yield* fs.readFileString(path.join(binDirectory, 'threadnote'))).toBe(cliBefore);
         expect(yield* fs.readFileString(path.join(binDirectory, 'threadnote-mcp-server'))).toBe(mcpBefore);
+        expect(yield* fs.readFileString(codex.file)).toBe(codex.content);
+        const applied = yield* Effect.acquireUseRelease(
+          Effect.sync(() => vi.stubGlobal('THREADNOTE_STANDALONE', true)),
+          () =>
+            captureConsole(
+              runInstall(config, {
+                modelSetup: false,
+                printNextSteps: false,
+                skipRecallIndexes: true,
+                start: false,
+              }),
+            ).pipe(
+              Effect.provideService(LocalModelStore, {
+                ...modelStore,
+                install: () => Effect.succeed({...installation, resumed: false, sourceUrl: 'fixture://embedding'}),
+              }),
+              Effect.provideService(SystemInfo, testSystem),
+            ),
+          () => Effect.sync(() => vi.unstubAllGlobals()),
+        );
+        expect(applied.output).toContain('Codex MCP configuration saved for Threadnote 66.5.0.');
+        expect(yield* fs.readFileString(codex.file)).toBe(EffectString.replace('66.4.0', '66.5.0')(codex.content));
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
