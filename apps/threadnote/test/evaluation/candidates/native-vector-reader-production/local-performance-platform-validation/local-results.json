@@ -1,0 +1,1762 @@
+{
+  "100000-dense": {
+    "target": "bun-darwin-arm64",
+    "documents": 100000,
+    "distribution": "dense",
+    "candidate": "305e147754fd3088dd0b8ce46c495840fe0affdf",
+    "tree": "8cdbb3b7c5a7cb5edac7810a702baf8af8bf7903",
+    "baseline": "66f4c1d8baed033ec484f4db2895ea2252b4e2d0",
+    "fixture": {
+      "documents": 100000,
+      "corpusGeneration": "c4bf799fd21c8e8a715f9e1be4c29cc2c71b74e89e4279f7bb3ebae237c223c1",
+      "databaseSha256": "3094cefa90be0b013dd23262bff17641c35218b04d9649b962473b8a812a28b6",
+      "lexicalDatabaseHashes": {
+        "baseline": "323e224e1e679a9a728a834ce21634937434e512a506e9f1efc851740bdf3bdf",
+        "candidate": "b8758cce8a78e73fbd5f94ee7109186af1f110878517db08675e6144fa4b3f9a"
+      },
+      "setupMilliseconds": 114633.42475
+    },
+    "sha256": "9f85a4af957c1809c62378ef82d171d5c64c5c57ab05ae26eaeae0a22305e45a",
+    "deadlineCompletion": {
+      "version": 1,
+      "outcome": "not-established"
+    },
+    "numericGatesPassed": true,
+    "firstUse": {
+      "baseline": {
+        "sample": 0,
+        "milliseconds": 539.53,
+        "success": true,
+        "completedWithinFullDeadline": true,
+        "querySha256": "8b5ac424c06b1f004b7e65137e4d0180d52bcc7fe39e03efc446c8380d544095",
+        "scoresSha256": "6968f70b6a69cfaabbeb6281956f2d9e49e256c65c7cabe67ad80bdddf12bc49",
+        "children": [
+          {
+            "operation": "vector-state",
+            "milliseconds": 99.976584,
+            "timeoutMs": 896
+          },
+          {
+            "operation": "vector-scores",
+            "milliseconds": 429.684,
+            "timeoutMs": 790
+          }
+        ]
+      },
+      "candidate": {
+        "sample": 0,
+        "milliseconds": 547.531417,
+        "success": true,
+        "completedWithinFullDeadline": true,
+        "querySha256": "8b5ac424c06b1f004b7e65137e4d0180d52bcc7fe39e03efc446c8380d544095",
+        "scoresSha256": "6968f70b6a69cfaabbeb6281956f2d9e49e256c65c7cabe67ad80bdddf12bc49",
+        "children": [
+          {
+            "operation": "vector-state",
+            "milliseconds": 96.358792,
+            "timeoutMs": 899
+          },
+          {
+            "operation": "vector-scores",
+            "milliseconds": 442.095,
+            "timeoutMs": 795
+          }
+        ]
+      }
+    },
+    "warm": {
+      "baseline": {
+        "exact": 90,
+        "total": 90,
+        "failures": {},
+        "verifiedBudgetExhaustions": 0,
+        "withinDeadline": 90
+      },
+      "candidate": {
+        "exact": 90,
+        "total": 90,
+        "failures": {},
+        "verifiedBudgetExhaustions": 0,
+        "withinDeadline": 90
+      }
+    },
+    "pairs": [
+      {
+        "round": 1,
+        "baseline": {
+          "exact": 30,
+          "p95Ms": 544.585875,
+          "p95Sample": 20,
+          "p95Children": [
+            {
+              "operation": "vector-state",
+              "milliseconds": 98.890834,
+              "timeoutMs": 899
+            },
+            {
+              "operation": "vector-scores",
+              "milliseconds": 438.93075,
+              "timeoutMs": 794
+            }
+          ],
+          "rssBytes": 2500919296,
+          "rssComplete": true,
+          "warmMillisecondsBySample": [
+            530.235041,
+            526.222708,
+            535.270334,
+            535.046292,
+            537.408792,
+            539.531709,
+            531.340583,
+            539.009375,
+            534.069958,
+            532.130041,
+            539.906042,
+            627.038209,
+            530.2275,
+            537.109833,
+            530.201333,
+            529.763875,
+            535.072208,
+            531.386875,
+            537.0325,
+            532.923458,
+            544.585875,
+            533.977917,
+            532.650125,
+            536.302042,
+            534.548792,
+            536.802292,
+            532.851375,
+            531.495375,
+            529.773,
+            524.231
+          ],
+          "samplerSha256": "5ce9fe6f78001b8488d316b5fae699f5afb1f86bb019fb699e924d65e55fb0f2"
+        },
+        "candidate": {
+          "exact": 30,
+          "p95Ms": 407.596167,
+          "p95Sample": 7,
+          "p95Children": [
+            {
+              "operation": "vector-state",
+              "milliseconds": 89.729792,
+              "timeoutMs": 899
+            },
+            {
+              "operation": "vector-scores",
+              "milliseconds": 312.070792,
+              "timeoutMs": 804
+            }
+          ],
+          "rssBytes": 2396078080,
+          "rssComplete": true,
+          "warmMillisecondsBySample": [
+            398.27225,
+            397.13225,
+            389.183959,
+            397.6595,
+            388.726375,
+            394.1295,
+            408.525292,
+            407.596167,
+            390.482,
+            389.729375,
+            391.695791,
+            392.430208,
+            391.656416,
+            389.61325,
+            392.760792,
+            390.587041,
+            389.176709,
+            391.644292,
+            377.374584,
+            374.229208,
+            377.244375,
+            380.611625,
+            368.66425,
+            366.069083,
+            361.902042,
+            367.167584,
+            367.187375,
+            367.147667,
+            366.587458,
+            366.736584
+          ],
+          "samplerSha256": "5e50e9e870715636c2d8eea83cfd860f23d122aeb901c791db874ee63facaeea"
+        },
+        "latencyPassed": true,
+        "rssPassed": true
+      },
+      {
+        "round": 2,
+        "baseline": {
+          "exact": 30,
+          "p95Ms": 526.208083,
+          "p95Sample": 25,
+          "p95Children": [
+            {
+              "operation": "vector-state",
+              "milliseconds": 96.679416,
+              "timeoutMs": 899
+            },
+            {
+              "operation": "vector-scores",
+              "milliseconds": 416.053125,
+              "timeoutMs": 790
+            }
+          ],
+          "rssBytes": 2508701696,
+          "rssComplete": true,
+          "warmMillisecondsBySample": [
+            506.468875,
+            577.592,
+            517.264417,
+            503.974333,
+            499.07825,
+            498.36425,
+            509.753041,
+            497.763167,
+            498.99975,
+            514.5545,
+            517.723834,
+            501.517084,
+            504.60375,
+            496.009959,
+            498.050958,
+            500.151791,
+            509.313041,
+            517.937625,
+            506.037166,
+            503.645375,
+            494.3495,
+            498.524125,
+            503.948958,
+            498.857042,
+            504.657292,
+            526.208083,
+            508.00575,
+            503.486834,
+            495.941208,
+            494.692917
+          ],
+          "samplerSha256": "9c2656bbd02e3cec3f1e7281bbc805a690b885e2e0edf66d7e63f0a0457451f4"
+        },
+        "candidate": {
+          "exact": 30,
+          "p95Ms": 378.106417,
+          "p95Sample": 0,
+          "p95Children": [
+            {
+              "operation": "vector-state",
+              "milliseconds": 79.582292,
+              "timeoutMs": 899
+            },
+            {
+              "operation": "vector-scores",
+              "milliseconds": 291.483292,
+              "timeoutMs": 813
+            }
+          ],
+          "rssBytes": 2417360896,
+          "rssComplete": true,
+          "warmMillisecondsBySample": [
+            378.106417,
+            373.586375,
+            370.780416,
+            369.068375,
+            370.339584,
+            378.149791,
+            370.542334,
+            367.923625,
+            366.609833,
+            362.317666,
+            371.291916,
+            372.158708,
+            372.488584,
+            368.855125,
+            368.940666,
+            368.240334,
+            366.912583,
+            371.537958,
+            366.157083,
+            362.552958,
+            366.470375,
+            374.653625,
+            373.815083,
+            371.791083,
+            366.396167,
+            365.085583,
+            369.360958,
+            369.199333,
+            366.218334,
+            364.803708
+          ],
+          "samplerSha256": "51224119eec79bcbdf517461c34e5e8700e84da24a4e8988c1eb765200b7bed1"
+        },
+        "latencyPassed": true,
+        "rssPassed": true
+      },
+      {
+        "round": 3,
+        "baseline": {
+          "exact": 30,
+          "p95Ms": 548.522375,
+          "p95Sample": 3,
+          "p95Children": [
+            {
+              "operation": "vector-state",
+              "milliseconds": 98.138375,
+              "timeoutMs": 899
+            },
+            {
+              "operation": "vector-scores",
+              "milliseconds": 443.928083,
+              "timeoutMs": 795
+            }
+          ],
+          "rssBytes": 2506571776,
+          "rssComplete": true,
+          "warmMillisecondsBySample": [
+            497.578667,
+            495.507,
+            542.547959,
+            548.522375,
+            548.88675,
+            532.703333,
+            521.531583,
+            519.707541,
+            530.385917,
+            532.247958,
+            531.976,
+            548.330041,
+            535.047208,
+            522.623375,
+            514.696,
+            516.872084,
+            530.668791,
+            530.679667,
+            529.169708,
+            521.819625,
+            523.74925,
+            502.966666,
+            492.909,
+            494.380334,
+            491.521416,
+            514.282708,
+            508.102792,
+            496.397917,
+            496.318708,
+            497.9115
+          ],
+          "samplerSha256": "b24790cb9996880585284389aace8155b95a2fe45afd67ad3480ce3583b6b7a6"
+        },
+        "candidate": {
+          "exact": 30,
+          "p95Ms": 376.231666,
+          "p95Sample": 0,
+          "p95Children": [
+            {
+              "operation": "vector-state",
+              "milliseconds": 79.140333,
+              "timeoutMs": 898
+            },
+            {
+              "operation": "vector-scores",
+              "milliseconds": 289.773292,
+              "timeoutMs": 813
+            }
+          ],
+          "rssBytes": 2425307136,
+          "rssComplete": true,
+          "warmMillisecondsBySample": [
+            376.231666,
+            360.947291,
+            363.284708,
+            371.212958,
+            370.521167,
+            375.04375,
+            369.928125,
+            364.299708,
+            368.233333,
+            365.048166,
+            361.555833,
+            364.097584,
+            372.417334,
+            363.144833,
+            372.810959,
+            371.653708,
+            383.227375,
+            367.770583,
+            363.021208,
+            367.126875,
+            365.625584,
+            369.861542,
+            365.920667,
+            367.766375,
+            374.940875,
+            364.445667,
+            369.894375,
+            375.63075,
+            371.931209,
+            369.763125
+          ],
+          "samplerSha256": "35d7f310ef7b8c881a249b0c9237d555192cca018d0312b55fc5c7858bd5c84e"
+        },
+        "latencyPassed": true,
+        "rssPassed": true
+      }
+    ],
+    "modelSha256": "f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804",
+    "nativeBinarySha256": "7366b9a4157fde174d00c52a0f6cde42658542ef042ccb91465df6c955f0fd6b",
+    "harnessSha256": "5a6dd16876ae21e41cd18c558de66a59072409785c7865217e9b916c5ff8f5a2",
+    "armOrder": [
+      [
+        1,
+        "baseline"
+      ],
+      [
+        1,
+        "candidate"
+      ],
+      [
+        2,
+        "candidate"
+      ],
+      [
+        2,
+        "baseline"
+      ],
+      [
+        3,
+        "baseline"
+      ],
+      [
+        3,
+        "candidate"
+      ]
+    ]
+  },
+  "100000-tied": {
+    "target": "bun-darwin-arm64",
+    "documents": 100000,
+    "distribution": "tied",
+    "candidate": "305e147754fd3088dd0b8ce46c495840fe0affdf",
+    "tree": "8cdbb3b7c5a7cb5edac7810a702baf8af8bf7903",
+    "baseline": "66f4c1d8baed033ec484f4db2895ea2252b4e2d0",
+    "fixture": {
+      "documents": 100000,
+      "corpusGeneration": "c4bf799fd21c8e8a715f9e1be4c29cc2c71b74e89e4279f7bb3ebae237c223c1",
+      "databaseSha256": "863610724c8df10d08a64249ea6d807a0acc854d29e3a69f3240ce181f728aa7",
+      "lexicalDatabaseHashes": {
+        "baseline": "229bd7943dde477647eae3134b00a73087576bbcd447b6ed054ee1eeef73c098",
+        "candidate": "0b4da9b5c311867b9a6f3e3592ac8455506034b9f9fc3fd5781f253fc64abbf0"
+      },
+      "setupMilliseconds": 108182.275041
+    },
+    "sha256": "fefc132e5a3b9d32d43a4d7505948a2f3f61e6c8e99ef0a218c04ba12324b1d5",
+    "deadlineCompletion": {
+      "version": 1,
+      "outcome": "not-established"
+    },
+    "numericGatesPassed": true,
+    "firstUse": {
+      "baseline": {
+        "sample": 0,
+        "milliseconds": 594.615833,
+        "success": true,
+        "completedWithinFullDeadline": true,
+        "querySha256": "8b5ac424c06b1f004b7e65137e4d0180d52bcc7fe39e03efc446c8380d544095",
+        "scoresSha256": "41551331fc5bfbcdcf84a8a37041c91543f1cb0f8feebeeab01a0f55a271d362",
+        "children": [
+          {
+            "operation": "vector-state",
+            "milliseconds": 113.284166,
+            "timeoutMs": 896
+          },
+          {
+            "operation": "vector-scores",
+            "milliseconds": 467.020584,
+            "timeoutMs": 773
+          }
+        ]
+      },
+      "candidate": {
+        "sample": 0,
+        "milliseconds": 644.274375,
+        "success": true,
+        "completedWithinFullDeadline": true,
+        "querySha256": "8b5ac424c06b1f004b7e65137e4d0180d52bcc7fe39e03efc446c8380d544095",
+        "scoresSha256": "41551331fc5bfbcdcf84a8a37041c91543f1cb0f8feebeeab01a0f55a271d362",
+        "children": [
+          {
+            "operation": "vector-state",
+            "milliseconds": 87.02575,
+            "timeoutMs": 885
+          },
+          {
+            "operation": "vector-scores",
+            "milliseconds": 536.213709,
+            "timeoutMs": 792
+          }
+        ]
+      }
+    },
+    "warm": {
+      "baseline": {
+        "exact": 90,
+        "total": 90,
+        "failures": {},
+        "verifiedBudgetExhaustions": 0,
+        "withinDeadline": 90
+      },
+      "candidate": {
+        "exact": 90,
+        "total": 90,
+        "failures": {},
+        "verifiedBudgetExhaustions": 0,
+        "withinDeadline": 90
+      }
+    },
+    "pairs": [
+      {
+        "round": 1,
+        "baseline": {
+          "exact": 30,
+          "p95Ms": 557.002875,
+          "p95Sample": 27,
+          "p95Children": [
+            {
+              "operation": "vector-state",
+              "milliseconds": 104.038209,
+              "timeoutMs": 899
+            },
+            {
+              "operation": "vector-scores",
+              "milliseconds": 446.218292,
+              "timeoutMs": 789
+            }
+          ],
+          "rssBytes": 2726920192,
+          "rssComplete": true,
+          "warmMillisecondsBySample": [
+            527.034417,
+            526.890792,
+            523.200375,
+            535.372916,
+            525.4725,
+            530.192166,
+            524.36175,
+            522.104333,
+            519.9685,
+            521.855125,
+            513.852125,
+            528.651208,
+            542.239208,
+            536.030958,
+            533.934125,
+            658.669542,
+            540.764042,
+            528.186667,
+            528.045542,
+            527.078916,
+            527.179167,
+            527.432917,
+            529.584875,
+            542.585125,
+            534.862917,
+            534.208709,
+            552.446375,
+            557.002875,
+            508.077917,
+            495.573208
+          ],
+          "samplerSha256": "e1a3d26e13cf9db99c97891c83cf7bd476cf4b5ae113fa3ed10b7215601b4500"
+        },
+        "candidate": {
+          "exact": 30,
+          "p95Ms": 412.036125,
+          "p95Sample": 26,
+          "p95Children": [
+            {
+              "operation": "vector-state",
+              "milliseconds": 85.752667,
+              "timeoutMs": 899
+            },
+            {
+              "operation": "vector-scores",
+              "milliseconds": 320.649125,
+              "timeoutMs": 808
+            }
+          ],
+          "rssBytes": 2647621632,
+          "rssComplete": true,
+          "warmMillisecondsBySample": [
+            389.185083,
+            390.694125,
+            395.399625,
+            400.464917,
+            392.0295,
+            396.621584,
+            394.331583,
+            393.153125,
+            392.891584,
+            388.162959,
+            391.331041,
+            392.468125,
+            389.371083,
+            394.96375,
+            391.96925,
+            391.8555,
+            391.086875,
+            394.891083,
+            399.914958,
+            396.86925,
+            396.50475,
+            397.2605,
+            403.411541,
+            412.37075,
+            397.87325,
+            394.298041,
+            412.036125,
+            405.96225,
+            404.669042,
+            409.494584
+          ],
+          "samplerSha256": "c5daf636c69292aa992935279265e0f01c472a4c3864a893d0cdfba1ce3eeaea"
+        },
+        "latencyPassed": true,
+        "rssPassed": true
+      },
+      {
+        "round": 2,
+        "baseline": {
+          "exact": 30,
+          "p95Ms": 565.497583,
+          "p95Sample": 18,
+          "p95Children": [
+            {
+              "operation": "vector-state",
+              "milliseconds": 102.732833,
+              "timeoutMs": 899
+            },
+            {
+              "operation": "vector-scores",
+              "milliseconds": 456.569417,
+              "timeoutMs": 791
+            }
+          ],
+          "rssBytes": 2736701440,
+          "rssComplete": true,
+          "warmMillisecondsBySample": [
+            534.025958,
+            532.837,
+            531.077916,
+            531.086292,
+            523.709834,
+            527.670458,
+            531.674458,
+            530.730292,
+            506.401416,
+            488.57725,
+            512.534209,
+            528.64475,
+            534.92,
+            532.184709,
+            524.393959,
+            530.642666,
+            541.797167,
+            530.320458,
+            565.497583,
+            802.331334,
+            560.340792,
+            534.24925,
+            538.0105,
+            497.758375,
+            494.151833,
+            542.266375,
+            537.233208,
+            547.661417,
+            533.018584,
+            528.572833
+          ],
+          "samplerSha256": "9165a52f41102761fe14d8d3b25e33d6003450dacc43f7d8bf868a60286e2b97"
+        },
+        "candidate": {
+          "exact": 30,
+          "p95Ms": 411.616292,
+          "p95Sample": 10,
+          "p95Children": [
+            {
+              "operation": "vector-state",
+              "milliseconds": 87.725167,
+              "timeoutMs": 899
+            },
+            {
+              "operation": "vector-scores",
+              "milliseconds": 318.428417,
+              "timeoutMs": 807
+            }
+          ],
+          "rssBytes": 2645442560,
+          "rssComplete": true,
+          "warmMillisecondsBySample": [
+            403.305709,
+            402.296708,
+            401.107083,
+            407.898458,
+            399.98125,
+            403.287458,
+            401.8315,
+            397.268708,
+            402.546583,
+            410.380542,
+            411.616292,
+            395.886125,
+            401.125209,
+            413.495292,
+            399.574959,
+            393.359708,
+            407.2435,
+            399.067917,
+            410.277875,
+            410.873375,
+            402.513208,
+            395.681792,
+            403.663667,
+            402.648584,
+            401.093458,
+            401.684625,
+            401.0935,
+            402.450625,
+            409.085084,
+            408.573167
+          ],
+          "samplerSha256": "1c842a6ace40225f54ca81581f3830f67698cdf58187ab8ae6681ddcc3d87129"
+        },
+        "latencyPassed": true,
+        "rssPassed": true
+      },
+      {
+        "round": 3,
+        "baseline": {
+          "exact": 30,
+          "p95Ms": 543.174708,
+          "p95Sample": 4,
+          "p95Children": [
+            {
+              "operation": "vector-state",
+              "milliseconds": 106.375958,
+              "timeoutMs": 899
+            },
+            {
+              "operation": "vector-scores",
+              "milliseconds": 430.675792,
+              "timeoutMs": 787
+            }
+          ],
+          "rssBytes": 2738667520,
+          "rssComplete": true,
+          "warmMillisecondsBySample": [
+            530.762458,
+            532.923917,
+            526.677084,
+            539.301209,
+            543.174708,
+            531.506542,
+            519.099333,
+            521.048292,
+            527.207334,
+            526.703666,
+            516.627291,
+            523.796416,
+            533.394042,
+            527.214708,
+            534.761416,
+            526.291667,
+            513.969125,
+            520.873458,
+            518.903917,
+            525.721291,
+            546.22675,
+            526.429292,
+            525.387084,
+            526.922792,
+            532.235875,
+            531.111708,
+            519.910875,
+            535.255291,
+            516.370667,
+            527.129916
+          ],
+          "samplerSha256": "7a80bcf5a52d663301fa2fe4405b83f615d3d8e5cd9d1f56535a57d6b4208e81"
+        },
+        "candidate": {
+          "exact": 30,
+          "p95Ms": 424.989708,
+          "p95Sample": 2,
+          "p95Children": [
+            {
+              "operation": "vector-state",
+              "milliseconds": 85.157625,
+              "timeoutMs": 899
+            },
+            {
+              "operation": "vector-scores",
+              "milliseconds": 333.848375,
+              "timeoutMs": 809
+            }
+          ],
+          "rssBytes": 2652241920,
+          "rssComplete": true,
+          "warmMillisecondsBySample": [
+            417.498458,
+            427.176417,
+            424.989708,
+            408.950917,
+            414.93,
+            408.941667,
+            406.620583,
+            408.957375,
+            388.0945,
+            371.720125,
+            378.727334,
+            370.442917,
+            371.94775,
+            377.496875,
+            392.050042,
+            392.00575,
+            419.675917,
+            393.0815,
+            393.305209,
+            387.8385,
+            383.899125,
+            388.177125,
+            389.552083,
+            390.031291,
+            391.128458,
+            392.602917,
+            388.031792,
+            384.725917,
+            391.717167,
+            397.797875
+          ],
+          "samplerSha256": "b27eb72d99b4109ca4cf694c6a954def0f8b0fc75a3a2bfcba38445244923ca2"
+        },
+        "latencyPassed": true,
+        "rssPassed": true
+      }
+    ],
+    "modelSha256": "f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804",
+    "nativeBinarySha256": "7366b9a4157fde174d00c52a0f6cde42658542ef042ccb91465df6c955f0fd6b",
+    "harnessSha256": "5a6dd16876ae21e41cd18c558de66a59072409785c7865217e9b916c5ff8f5a2",
+    "armOrder": [
+      [
+        1,
+        "baseline"
+      ],
+      [
+        1,
+        "candidate"
+      ],
+      [
+        2,
+        "candidate"
+      ],
+      [
+        2,
+        "baseline"
+      ],
+      [
+        3,
+        "baseline"
+      ],
+      [
+        3,
+        "candidate"
+      ]
+    ]
+  },
+  "10000-dense": {
+    "target": "bun-darwin-arm64",
+    "documents": 10000,
+    "distribution": "dense",
+    "candidate": "305e147754fd3088dd0b8ce46c495840fe0affdf",
+    "tree": "8cdbb3b7c5a7cb5edac7810a702baf8af8bf7903",
+    "baseline": "66f4c1d8baed033ec484f4db2895ea2252b4e2d0",
+    "fixture": {
+      "documents": 10000,
+      "corpusGeneration": "1c5a578f68d01f19eadb2115668177fa918e277d430b9d4fb22cb9ba9fe7d152",
+      "databaseSha256": "039c37ce5bad0c16e0dec07f24a0c89182b3f14459e343c37ac48ff6d30872fb",
+      "lexicalDatabaseHashes": {
+        "baseline": "48ccc5d5f5606be9814f531565c730f77d2379f39812043513287919a469185b",
+        "candidate": "6fca90c43f246f6a8d677172d94d5fc9b252009527fcf9d45c7771b3f7b93d1e"
+      },
+      "setupMilliseconds": 11261.837333
+    },
+    "sha256": "1fa6d6fc3f1f05dd5a924b64a79345c0fcf4a29c5c51475e58c2eca1877ff588",
+    "deadlineCompletion": {
+      "version": 1,
+      "outcome": "not-established"
+    },
+    "numericGatesPassed": true,
+    "firstUse": {
+      "baseline": {
+        "sample": 0,
+        "milliseconds": 225.24675,
+        "success": true,
+        "completedWithinFullDeadline": true,
+        "querySha256": "8b5ac424c06b1f004b7e65137e4d0180d52bcc7fe39e03efc446c8380d544095",
+        "scoresSha256": "e9a4c0c1b80ab1e3d843a079ba47fee9cd25df36513e3a17630ad2467afac282",
+        "children": [
+          {
+            "operation": "vector-state",
+            "milliseconds": 74.252209,
+            "timeoutMs": 896
+          },
+          {
+            "operation": "vector-scores",
+            "milliseconds": 136.432167,
+            "timeoutMs": 811
+          }
+        ]
+      },
+      "candidate": {
+        "sample": 0,
+        "milliseconds": 258.183334,
+        "success": true,
+        "completedWithinFullDeadline": true,
+        "querySha256": "8b5ac424c06b1f004b7e65137e4d0180d52bcc7fe39e03efc446c8380d544095",
+        "scoresSha256": "e9a4c0c1b80ab1e3d843a079ba47fee9cd25df36513e3a17630ad2467afac282",
+        "children": [
+          {
+            "operation": "vector-state",
+            "milliseconds": 56.668,
+            "timeoutMs": 899
+          },
+          {
+            "operation": "vector-scores",
+            "milliseconds": 196.654209,
+            "timeoutMs": 838
+          }
+        ]
+      }
+    },
+    "warm": {
+      "baseline": {
+        "exact": 90,
+        "total": 90,
+        "failures": {},
+        "verifiedBudgetExhaustions": 0,
+        "withinDeadline": 90
+      },
+      "candidate": {
+        "exact": 90,
+        "total": 90,
+        "failures": {},
+        "verifiedBudgetExhaustions": 0,
+        "withinDeadline": 90
+      }
+    },
+    "pairs": [
+      {
+        "round": 1,
+        "baseline": {
+          "exact": 30,
+          "p95Ms": 220.250584,
+          "p95Sample": 4,
+          "p95Children": [
+            {
+              "operation": "vector-state",
+              "milliseconds": 76.957417,
+              "timeoutMs": 899
+            },
+            {
+              "operation": "vector-scores",
+              "milliseconds": 137.615959,
+              "timeoutMs": 817
+            }
+          ],
+          "rssBytes": 1158955008,
+          "rssComplete": true,
+          "warmMillisecondsBySample": [
+            205.729416,
+            212.5665,
+            210.297584,
+            209.239083,
+            220.250584,
+            213.475833,
+            214.200458,
+            218.909959,
+            208.813709,
+            217.357166,
+            208.824125,
+            211.397459,
+            212.724209,
+            212.327,
+            215.997333,
+            209.502333,
+            208.596167,
+            212.712584,
+            216.444583,
+            211.054,
+            214.567917,
+            217.5475,
+            214.093125,
+            219.997667,
+            213.755667,
+            220.956959,
+            217.8135,
+            214.528667,
+            214.366417,
+            210.8725
+          ],
+          "samplerSha256": "ce052c2a99856eeb10f16f5eb05ec4ca3763c81e99882ef852196c7cbf9d3f57"
+        },
+        "candidate": {
+          "exact": 30,
+          "p95Ms": 171.269625,
+          "p95Sample": 17,
+          "p95Children": [
+            {
+              "operation": "vector-state",
+              "milliseconds": 59.202417,
+              "timeoutMs": 899
+            },
+            {
+              "operation": "vector-scores",
+              "milliseconds": 103.497042,
+              "timeoutMs": 832
+            }
+          ],
+          "rssBytes": 1117356032,
+          "rssComplete": true,
+          "warmMillisecondsBySample": [
+            164.343417,
+            163.702333,
+            165.715708,
+            167.626583,
+            162.819166,
+            163.266125,
+            162.125875,
+            163.436917,
+            165.367334,
+            165.468458,
+            167.78675,
+            166.940334,
+            168.739916,
+            166.927375,
+            167.609667,
+            169.319459,
+            169.798625,
+            171.269625,
+            161.867334,
+            167.699125,
+            163.483417,
+            160.663667,
+            163.76475,
+            161.082583,
+            181.201584,
+            164.97325,
+            163.01125,
+            164.313917,
+            165.066292,
+            165.247917
+          ],
+          "samplerSha256": "891cec7132945b7f2a196489e12488452bd7f3fee8717fe2cab16498193485ab"
+        },
+        "latencyPassed": true,
+        "rssPassed": true
+      },
+      {
+        "round": 2,
+        "baseline": {
+          "exact": 30,
+          "p95Ms": 219.965375,
+          "p95Sample": 4,
+          "p95Children": [
+            {
+              "operation": "vector-state",
+              "milliseconds": 75.42075,
+              "timeoutMs": 899
+            },
+            {
+              "operation": "vector-scores",
+              "milliseconds": 136.12375,
+              "timeoutMs": 816
+            }
+          ],
+          "rssBytes": 1164591104,
+          "rssComplete": true,
+          "warmMillisecondsBySample": [
+            214.093667,
+            211.771083,
+            210.19725,
+            207.722667,
+            219.965375,
+            209.84075,
+            212.921584,
+            215.208458,
+            213.125875,
+            247.523,
+            216.8335,
+            211.021375,
+            212.577166,
+            213.9545,
+            215.006,
+            219.748584,
+            213.660459,
+            216.74775,
+            217.146833,
+            213.813708,
+            212.591083,
+            212.830833,
+            218.00525,
+            212.38275,
+            216.199292,
+            209.620292,
+            215.333417,
+            218.60925,
+            213.128208,
+            213.441208
+          ],
+          "samplerSha256": "bed64b8f20dffea7f1ffdee1474968a8827090d33bf9733b3a77a6fd39e8094d"
+        },
+        "candidate": {
+          "exact": 30,
+          "p95Ms": 169.586,
+          "p95Sample": 5,
+          "p95Children": [
+            {
+              "operation": "vector-state",
+              "milliseconds": 57.996917,
+              "timeoutMs": 899
+            },
+            {
+              "operation": "vector-scores",
+              "milliseconds": 105.150459,
+              "timeoutMs": 835
+            }
+          ],
+          "rssBytes": 1122353152,
+          "rssComplete": true,
+          "warmMillisecondsBySample": [
+            167.766292,
+            165.059,
+            168.91175,
+            167.295542,
+            164.062417,
+            169.586,
+            164.17975,
+            155.287084,
+            154.229375,
+            153.436583,
+            154.63175,
+            154.138875,
+            154.673625,
+            156.718833,
+            152.677917,
+            152.59325,
+            162.182625,
+            165.2295,
+            173.255625,
+            168.902666,
+            163.487375,
+            166.75725,
+            159.966375,
+            165.104084,
+            162.956208,
+            163.37175,
+            161.930666,
+            169.528834,
+            167.101625,
+            166.170834
+          ],
+          "samplerSha256": "f244abf8a484568553ac39df8fee59301f1b661109478a806c00064d88602e3a"
+        },
+        "latencyPassed": true,
+        "rssPassed": true
+      },
+      {
+        "round": 3,
+        "baseline": {
+          "exact": 30,
+          "p95Ms": 242.177083,
+          "p95Sample": 17,
+          "p95Children": [
+            {
+              "operation": "vector-state",
+              "milliseconds": 79.872292,
+              "timeoutMs": 899
+            },
+            {
+              "operation": "vector-scores",
+              "milliseconds": 140.571583,
+              "timeoutMs": 798
+            }
+          ],
+          "rssBytes": 1165377536,
+          "rssComplete": true,
+          "warmMillisecondsBySample": [
+            214.065958,
+            211.574125,
+            219.718666,
+            236.456167,
+            220.201791,
+            222.226458,
+            217.1065,
+            214.82875,
+            213.942209,
+            206.619959,
+            215.178541,
+            212.994625,
+            210.949375,
+            210.832917,
+            210.201292,
+            218.729042,
+            229.059917,
+            242.177083,
+            228.281875,
+            318.965709,
+            229.094833,
+            220.344625,
+            215.84125,
+            214.850042,
+            227.583083,
+            229.511125,
+            213.617292,
+            211.0905,
+            213.009125,
+            214.564208
+          ],
+          "samplerSha256": "0a31088049442076289a07a00e0cf0029705161347bb7b8c7146104fc8d001f5"
+        },
+        "candidate": {
+          "exact": 30,
+          "p95Ms": 202.801666,
+          "p95Sample": 28,
+          "p95Children": [
+            {
+              "operation": "vector-state",
+              "milliseconds": 59.175375,
+              "timeoutMs": 899
+            },
+            {
+              "operation": "vector-scores",
+              "milliseconds": 113.125666,
+              "timeoutMs": 810
+            }
+          ],
+          "rssBytes": 1120337920,
+          "rssComplete": true,
+          "warmMillisecondsBySample": [
+            203.259125,
+            192.41025,
+            168.345542,
+            167.950959,
+            158.821459,
+            150.000833,
+            160.067292,
+            159.194792,
+            156.855,
+            155.477625,
+            150.645709,
+            157.531792,
+            153.282208,
+            152.270958,
+            159.844167,
+            171.229459,
+            156.636167,
+            166.432584,
+            160.100916,
+            158.309333,
+            157.818458,
+            162.540542,
+            162.343166,
+            189.683125,
+            181.062041,
+            181.267333,
+            174.1935,
+            173.821709,
+            202.801666,
+            191.66525
+          ],
+          "samplerSha256": "a870f1943704c5f58ea67a1714f0b9a15eee6a7953d04d81a144d2103f42347a"
+        },
+        "latencyPassed": true,
+        "rssPassed": true
+      }
+    ],
+    "modelSha256": "f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804",
+    "nativeBinarySha256": "7366b9a4157fde174d00c52a0f6cde42658542ef042ccb91465df6c955f0fd6b",
+    "harnessSha256": "5a6dd16876ae21e41cd18c558de66a59072409785c7865217e9b916c5ff8f5a2",
+    "armOrder": [
+      [
+        1,
+        "baseline"
+      ],
+      [
+        1,
+        "candidate"
+      ],
+      [
+        2,
+        "candidate"
+      ],
+      [
+        2,
+        "baseline"
+      ],
+      [
+        3,
+        "baseline"
+      ],
+      [
+        3,
+        "candidate"
+      ]
+    ]
+  },
+  "10000-tied": {
+    "target": "bun-darwin-arm64",
+    "documents": 10000,
+    "distribution": "tied",
+    "candidate": "305e147754fd3088dd0b8ce46c495840fe0affdf",
+    "tree": "8cdbb3b7c5a7cb5edac7810a702baf8af8bf7903",
+    "baseline": "66f4c1d8baed033ec484f4db2895ea2252b4e2d0",
+    "fixture": {
+      "documents": 10000,
+      "corpusGeneration": "1c5a578f68d01f19eadb2115668177fa918e277d430b9d4fb22cb9ba9fe7d152",
+      "databaseSha256": "8819c70f3063cc2e92194cb481217b78880c1ae8fda319c2fefb34bda2e1d97d",
+      "lexicalDatabaseHashes": {
+        "baseline": "10beba5de27ac6f3be0249572037dcec56551cf4ba24ab3ccd00e6adcc2d68ca",
+        "candidate": "2b2750e21e6a0668c512b8af7fc1c5d6600a2d7573f648c5a953c1e05e69d68f"
+      },
+      "setupMilliseconds": 11002.383209
+    },
+    "sha256": "4dc661553ed6029af0a30735f146e3653d430c4715aa9aea2a3cceda985c76b6",
+    "deadlineCompletion": {
+      "version": 1,
+      "outcome": "not-established"
+    },
+    "numericGatesPassed": true,
+    "firstUse": {
+      "baseline": {
+        "sample": 0,
+        "milliseconds": 216.938375,
+        "success": true,
+        "completedWithinFullDeadline": true,
+        "querySha256": "8b5ac424c06b1f004b7e65137e4d0180d52bcc7fe39e03efc446c8380d544095",
+        "scoresSha256": "15713068758d3931bb3bc40eafbf7019ce7235f8fbce3b889263551da56263ab",
+        "children": [
+          {
+            "operation": "vector-state",
+            "milliseconds": 73.449375,
+            "timeoutMs": 897
+          },
+          {
+            "operation": "vector-scores",
+            "milliseconds": 132.916958,
+            "timeoutMs": 816
+          }
+        ]
+      },
+      "candidate": {
+        "sample": 0,
+        "milliseconds": 281.323875,
+        "success": true,
+        "completedWithinFullDeadline": true,
+        "querySha256": "8b5ac424c06b1f004b7e65137e4d0180d52bcc7fe39e03efc446c8380d544095",
+        "scoresSha256": "15713068758d3931bb3bc40eafbf7019ce7235f8fbce3b889263551da56263ab",
+        "children": [
+          {
+            "operation": "vector-state",
+            "milliseconds": 57.622667,
+            "timeoutMs": 895
+          },
+          {
+            "operation": "vector-scores",
+            "milliseconds": 214.772667,
+            "timeoutMs": 833
+          }
+        ]
+      }
+    },
+    "warm": {
+      "baseline": {
+        "exact": 90,
+        "total": 90,
+        "failures": {},
+        "verifiedBudgetExhaustions": 0,
+        "withinDeadline": 90
+      },
+      "candidate": {
+        "exact": 90,
+        "total": 90,
+        "failures": {},
+        "verifiedBudgetExhaustions": 0,
+        "withinDeadline": 90
+      }
+    },
+    "pairs": [
+      {
+        "round": 1,
+        "baseline": {
+          "exact": 30,
+          "p95Ms": 226.644292,
+          "p95Sample": 3,
+          "p95Children": [
+            {
+              "operation": "vector-state",
+              "milliseconds": 76.506291,
+              "timeoutMs": 899
+            },
+            {
+              "operation": "vector-scores",
+              "milliseconds": 145.049375,
+              "timeoutMs": 818
+            }
+          ],
+          "rssBytes": 1350533120,
+          "rssComplete": true,
+          "warmMillisecondsBySample": [
+            221.896666,
+            226.450375,
+            215.197042,
+            226.644292,
+            207.835291,
+            206.191167,
+            213.994875,
+            207.06275,
+            208.075541,
+            216.702667,
+            205.701833,
+            206.381333,
+            218.469167,
+            225.016416,
+            223.643375,
+            207.538917,
+            213.111292,
+            213.540459,
+            209.064542,
+            209.280333,
+            216.964833,
+            210.79075,
+            207.908416,
+            207.471458,
+            207.064,
+            212.062042,
+            209.862375,
+            206.726709,
+            226.73725,
+            208.763667
+          ],
+          "samplerSha256": "c7ee4492921acc0e7110fba20bed80f6699bb49059eb91090d718742f4552cc2"
+        },
+        "candidate": {
+          "exact": 30,
+          "p95Ms": 188.622292,
+          "p95Sample": 8,
+          "p95Children": [
+            {
+              "operation": "vector-state",
+              "milliseconds": 63.938208,
+              "timeoutMs": 899
+            },
+            {
+              "operation": "vector-scores",
+              "milliseconds": 104.469458,
+              "timeoutMs": 816
+            }
+          ],
+          "rssBytes": 1305247744,
+          "rssComplete": true,
+          "warmMillisecondsBySample": [
+            158.959,
+            154.930083,
+            151.330292,
+            156.258583,
+            190.069334,
+            154.82575,
+            164.399459,
+            167.445333,
+            188.622292,
+            162.453209,
+            165.698458,
+            165.605625,
+            168.432625,
+            162.881333,
+            163.296625,
+            159.968792,
+            163.68825,
+            167.6955,
+            163.197125,
+            163.210541,
+            178.033667,
+            165.293375,
+            164.205,
+            158.483208,
+            162.96125,
+            159.586708,
+            165.668042,
+            161.620042,
+            162.654542,
+            161.085292
+          ],
+          "samplerSha256": "b414d5b90dd8d528d37a3e9d2630cf5a898a448e02febc66ff6676f222f7bbb1"
+        },
+        "latencyPassed": true,
+        "rssPassed": true
+      },
+      {
+        "round": 2,
+        "baseline": {
+          "exact": 30,
+          "p95Ms": 215.077667,
+          "p95Sample": 24,
+          "p95Children": [
+            {
+              "operation": "vector-state",
+              "milliseconds": 68.130125,
+              "timeoutMs": 899
+            },
+            {
+              "operation": "vector-scores",
+              "milliseconds": 131.195,
+              "timeoutMs": 816
+            }
+          ],
+          "rssBytes": 1348550656,
+          "rssComplete": true,
+          "warmMillisecondsBySample": [
+            198.602,
+            198.827375,
+            190.870375,
+            194.555417,
+            196.898167,
+            212.342417,
+            212.965333,
+            208.677375,
+            204.857834,
+            214.029042,
+            207.195958,
+            206.979167,
+            210.173875,
+            210.798291,
+            210.852333,
+            223.685083,
+            209.993875,
+            211.77925,
+            211.020959,
+            208.570375,
+            208.434875,
+            207.278959,
+            205.324083,
+            211.267375,
+            215.077667,
+            212.914375,
+            210.4795,
+            206.314875,
+            206.316667,
+            210.391416
+          ],
+          "samplerSha256": "7be55f4574d4fc2fcb406035834e67f13bdb562df67f9df439a93b3303b738d9"
+        },
+        "candidate": {
+          "exact": 30,
+          "p95Ms": 174.888959,
+          "p95Sample": 3,
+          "p95Children": [
+            {
+              "operation": "vector-state",
+              "milliseconds": 58.813708,
+              "timeoutMs": 899
+            },
+            {
+              "operation": "vector-scores",
+              "milliseconds": 101.568042,
+              "timeoutMs": 827
+            }
+          ],
+          "rssBytes": 1289535488,
+          "rssComplete": true,
+          "warmMillisecondsBySample": [
+            163.3095,
+            163.3925,
+            165.906208,
+            174.888959,
+            167.585458,
+            175.244125,
+            159.278,
+            149.122334,
+            150.130333,
+            150.494833,
+            148.860083,
+            148.41025,
+            148.317666,
+            164.823916,
+            162.134041,
+            156.546666,
+            163.606334,
+            157.491958,
+            166.295209,
+            157.78375,
+            164.368167,
+            156.766375,
+            170.775,
+            166.932125,
+            160.017166,
+            161.807167,
+            160.097042,
+            164.783916,
+            156.588375,
+            159.338292
+          ],
+          "samplerSha256": "7524db70553d44b718f0595ad541b0597b472a6d71e13aa26fd70e86c5f48877"
+        },
+        "latencyPassed": true,
+        "rssPassed": true
+      },
+      {
+        "round": 3,
+        "baseline": {
+          "exact": 30,
+          "p95Ms": 216.091209,
+          "p95Sample": 26,
+          "p95Children": [
+            {
+              "operation": "vector-state",
+              "milliseconds": 73.532667,
+              "timeoutMs": 899
+            },
+            {
+              "operation": "vector-scores",
+              "milliseconds": 128.228209,
+              "timeoutMs": 812
+            }
+          ],
+          "rssBytes": 1340784640,
+          "rssComplete": true,
+          "warmMillisecondsBySample": [
+            209.870625,
+            211.603583,
+            215.267042,
+            211.57825,
+            219.197417,
+            211.914584,
+            212.27075,
+            212.946291,
+            205.270458,
+            204.876584,
+            212.724625,
+            203.770625,
+            202.809667,
+            209.897459,
+            201.0685,
+            210.774958,
+            214.733041,
+            204.090708,
+            208.720917,
+            206.429583,
+            204.754042,
+            214.336541,
+            212.251125,
+            207.841334,
+            212.879417,
+            206.929833,
+            216.091209,
+            211.321042,
+            207.280209,
+            209.7155
+          ],
+          "samplerSha256": "70eb24129b7ad31845eccade12ff269a0aa2f3a2bfb3f8cc827249cf0290ca5f"
+        },
+        "candidate": {
+          "exact": 30,
+          "p95Ms": 171.518916,
+          "p95Sample": 29,
+          "p95Children": [
+            {
+              "operation": "vector-state",
+              "milliseconds": 54.668042,
+              "timeoutMs": 899
+            },
+            {
+              "operation": "vector-scores",
+              "milliseconds": 100.95475,
+              "timeoutMs": 829
+            }
+          ],
+          "rssBytes": 1283457024,
+          "rssComplete": true,
+          "warmMillisecondsBySample": [
+            162.959625,
+            164.144458,
+            158.018458,
+            163.814542,
+            157.221667,
+            162.714791,
+            161.691209,
+            161.785542,
+            162.785708,
+            169.040667,
+            160.698125,
+            164.7945,
+            160.694125,
+            173.405542,
+            162.769583,
+            166.810375,
+            161.990667,
+            164.361542,
+            161.102708,
+            169.858916,
+            161.674625,
+            166.210833,
+            160.109125,
+            163.001958,
+            164.931333,
+            161.452792,
+            164.871542,
+            164.951375,
+            161.798125,
+            171.518916
+          ],
+          "samplerSha256": "46c3652ccfae85e36b5938aa78ddadf0dcc964a2ce949ea0f7c4b7655a4661c9"
+        },
+        "latencyPassed": true,
+        "rssPassed": true
+      }
+    ],
+    "modelSha256": "f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804",
+    "nativeBinarySha256": "7366b9a4157fde174d00c52a0f6cde42658542ef042ccb91465df6c955f0fd6b",
+    "harnessSha256": "5a6dd16876ae21e41cd18c558de66a59072409785c7865217e9b916c5ff8f5a2",
+    "armOrder": [
+      [
+        1,
+        "baseline"
+      ],
+      [
+        1,
+        "candidate"
+      ],
+      [
+        2,
+        "candidate"
+      ],
+      [
+        2,
+        "baseline"
+      ],
+      [
+        3,
+        "baseline"
+      ],
+      [
+        3,
+        "candidate"
+      ]
+    ]
+  }
+}

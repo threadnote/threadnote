@@ -1,0 +1,446 @@
+{
+  "run": 45229994337,
+  "candidate": "305e147754fd3088dd0b8ce46c495840fe0affdf",
+  "tree": "8cdbb3b7c5a7cb5edac7810a702baf8af8bf7903",
+  "targets": {
+    "bun-linux-arm64": {
+      "passed": true,
+      "jobId": 137886627166,
+      "jobConclusion": "success",
+      "artifactId": 14848005046,
+      "archiveDigest": "sha256:2ece898167801f7b21c7c4dc954a34020644b5c2ac9bb6f4cc6a63388e2d072d",
+      "nativeBinarySha256": "9a99dac5722518d56c79f650db102e8f507d83eefc1829351b8b8f487de6da77",
+      "suites": {
+        "numeric": {
+          "counts": {
+            "numPassedTests": 5,
+            "numFailedTests": 0,
+            "numPendingTests": 0,
+            "numTotalTests": 5,
+            "success": true
+          },
+          "tests": {
+            "matches 400/401/801 page topology, mixed NaN/finite scores, duplicate representatives and every top-k cutoff": "passed",
+            "preserves ordered non-FMA accumulation, signed infinities and UTF16 cutoff order": "passed",
+            "distinguishes lossless expected metadata from SQL surrogate replacement and embedded NUL parameters": "passed",
+            "validates prepared metadata against the pinned active corpus when no corpus is requested": "passed",
+            "validates all rows at coerced-zero cutoffs and preserves metadata/error precedence": "passed"
+          }
+        },
+        "worker": {
+          "counts": {
+            "numPassedTests": 11,
+            "numFailedTests": 0,
+            "numPendingTests": 0,
+            "numTotalTests": 11,
+            "success": true
+          },
+          "tests": {
+            "refuses a mismatched production worker release before starting a child": "passed",
+            "executes the actual production worker with canonical validation through Rust SQLite": "passed",
+            "the closing vector fence rejects promotion at the actual scoring boundary": "passed",
+            "rejects a replaced vector generation and a newly published lexical corpus": "passed",
+            "revokes actual external-source authorization after an opening proof": "passed",
+            "score export is the intersection of independent project and URI scopes": "passed",
+            "malformed private vectors remain redacted in errors and production logs without waking maintenance": "passed",
+            "readonly vector validation preserves the existing fifty-millisecond SQLite cap": "passed",
+            "exports only current canonical eligible URI scores and refuses logical-scope/source changes": "passed",
+            "a real vector SQLite stall is reaped inside the original request deadline": "passed",
+            "caller cancellation joins the actual model-free worker stalled inside vector scoring": "passed"
+          }
+        }
+      }
+    },
+    "bun-windows-x64-baseline": {
+      "passed": true,
+      "attempt": 2,
+      "jobId": 137892043081,
+      "jobConclusion": "success",
+      "artifactId": 14846443637,
+      "archiveDigest": "sha256:3caeb505a8c182b36b26f8417fd826e242f0e1ab397d7fd2b44cf31942b0f566",
+      "nativeBinarySha256": "e409a90b34d6c23ab5d22c5efa0fb58a0b4874349de7df47bf19f554da81232c",
+      "suites": {
+        "numeric": {
+          "counts": {
+            "numPassedTests": 5,
+            "numFailedTests": 0,
+            "numPendingTests": 0,
+            "numTotalTests": 5,
+            "success": true
+          },
+          "tests": {
+            "matches 400/401/801 page topology, mixed NaN/finite scores, duplicate representatives and every top-k cutoff": "passed",
+            "preserves ordered non-FMA accumulation, signed infinities and UTF16 cutoff order": "passed",
+            "distinguishes lossless expected metadata from SQL surrogate replacement and embedded NUL parameters": "passed",
+            "validates prepared metadata against the pinned active corpus when no corpus is requested": "passed",
+            "validates all rows at coerced-zero cutoffs and preserves metadata/error precedence": "passed"
+          }
+        },
+        "worker": {
+          "counts": {
+            "numPassedTests": 11,
+            "numFailedTests": 0,
+            "numPendingTests": 0,
+            "numTotalTests": 11,
+            "success": true
+          },
+          "tests": {
+            "refuses a mismatched production worker release before starting a child": "passed",
+            "executes the actual production worker with canonical validation through Rust SQLite": "passed",
+            "the closing vector fence rejects promotion at the actual scoring boundary": "passed",
+            "rejects a replaced vector generation and a newly published lexical corpus": "passed",
+            "revokes actual external-source authorization after an opening proof": "passed",
+            "score export is the intersection of independent project and URI scopes": "passed",
+            "malformed private vectors remain redacted in errors and production logs without waking maintenance": "passed",
+            "readonly vector validation preserves the existing fifty-millisecond SQLite cap": "passed",
+            "exports only current canonical eligible URI scores and refuses logical-scope/source changes": "passed",
+            "a real vector SQLite stall is reaped inside the original request deadline": "passed",
+            "caller cancellation joins the actual model-free worker stalled inside vector scoring": "passed"
+          }
+        }
+      }
+    },
+    "bun-linux-x64-baseline": {
+      "passed": true,
+      "jobId": 137886627537,
+      "jobConclusion": "success",
+      "artifactId": 14847526325,
+      "archiveDigest": "sha256:2cc7af9a2cf5dbea8438124bda12b5b448444f1c46d9af7266cef2235e48f926",
+      "nativeBinarySha256": "331350d429bfe17575e0b83540262d8b5b606bbb5d989ceaf120f0fa6a507ba6",
+      "suites": {
+        "numeric": {
+          "counts": {
+            "numPassedTests": 5,
+            "numFailedTests": 0,
+            "numPendingTests": 0,
+            "numTotalTests": 5,
+            "success": true
+          },
+          "tests": {
+            "matches 400/401/801 page topology, mixed NaN/finite scores, duplicate representatives and every top-k cutoff": "passed",
+            "preserves ordered non-FMA accumulation, signed infinities and UTF16 cutoff order": "passed",
+            "distinguishes lossless expected metadata from SQL surrogate replacement and embedded NUL parameters": "passed",
+            "validates prepared metadata against the pinned active corpus when no corpus is requested": "passed",
+            "validates all rows at coerced-zero cutoffs and preserves metadata/error precedence": "passed"
+          }
+        },
+        "worker": {
+          "counts": {
+            "numPassedTests": 11,
+            "numFailedTests": 0,
+            "numPendingTests": 0,
+            "numTotalTests": 11,
+            "success": true
+          },
+          "tests": {
+            "refuses a mismatched production worker release before starting a child": "passed",
+            "executes the actual production worker with canonical validation through Rust SQLite": "passed",
+            "the closing vector fence rejects promotion at the actual scoring boundary": "passed",
+            "rejects a replaced vector generation and a newly published lexical corpus": "passed",
+            "revokes actual external-source authorization after an opening proof": "passed",
+            "score export is the intersection of independent project and URI scopes": "passed",
+            "malformed private vectors remain redacted in errors and production logs without waking maintenance": "passed",
+            "readonly vector validation preserves the existing fifty-millisecond SQLite cap": "passed",
+            "exports only current canonical eligible URI scores and refuses logical-scope/source changes": "passed",
+            "a real vector SQLite stall is reaped inside the original request deadline": "passed",
+            "caller cancellation joins the actual model-free worker stalled inside vector scoring": "passed"
+          }
+        }
+      }
+    },
+    "bun-darwin-arm64": {
+      "passed": true,
+      "jobId": 137886627557,
+      "jobConclusion": "success",
+      "artifactId": 14847136927,
+      "archiveDigest": "sha256:9a9e34b5b89b1e0b642d72d348ebb1b481386a60f771a6e01f3c8e5f87a619d2",
+      "nativeBinarySha256": "386ac8ab1aea900dffea1337624f0b18b26e61e02fe9caa0daeef9f926f0b247",
+      "suites": {
+        "numeric": {
+          "counts": {
+            "numPassedTests": 5,
+            "numFailedTests": 0,
+            "numPendingTests": 0,
+            "numTotalTests": 5,
+            "success": true
+          },
+          "tests": {
+            "matches 400/401/801 page topology, mixed NaN/finite scores, duplicate representatives and every top-k cutoff": "passed",
+            "preserves ordered non-FMA accumulation, signed infinities and UTF16 cutoff order": "passed",
+            "distinguishes lossless expected metadata from SQL surrogate replacement and embedded NUL parameters": "passed",
+            "validates prepared metadata against the pinned active corpus when no corpus is requested": "passed",
+            "validates all rows at coerced-zero cutoffs and preserves metadata/error precedence": "passed"
+          }
+        },
+        "worker": {
+          "counts": {
+            "numPassedTests": 11,
+            "numFailedTests": 0,
+            "numPendingTests": 0,
+            "numTotalTests": 11,
+            "success": true
+          },
+          "tests": {
+            "refuses a mismatched production worker release before starting a child": "passed",
+            "executes the actual production worker with canonical validation through Rust SQLite": "passed",
+            "the closing vector fence rejects promotion at the actual scoring boundary": "passed",
+            "rejects a replaced vector generation and a newly published lexical corpus": "passed",
+            "revokes actual external-source authorization after an opening proof": "passed",
+            "score export is the intersection of independent project and URI scopes": "passed",
+            "malformed private vectors remain redacted in errors and production logs without waking maintenance": "passed",
+            "readonly vector validation preserves the existing fifty-millisecond SQLite cap": "passed",
+            "exports only current canonical eligible URI scores and refuses logical-scope/source changes": "passed",
+            "a real vector SQLite stall is reaped inside the original request deadline": "passed",
+            "caller cancellation joins the actual model-free worker stalled inside vector scoring": "passed"
+          }
+        }
+      }
+    },
+    "bun-linux-x64-baseline-musl": {
+      "passed": true,
+      "jobId": 137886627612,
+      "jobConclusion": "success",
+      "artifactId": 14846557721,
+      "archiveDigest": "sha256:fafb477e81c8dd3736e4fa21468518aae57ed192541e2c4e047ea76a0d82ccf4",
+      "nativeBinarySha256": "333716eb1f90769c50299fe80defa86f8d2d47039e8e945e8a0f39b00b98320a",
+      "suites": {
+        "numeric": {
+          "counts": {
+            "numPassedTests": 5,
+            "numFailedTests": 0,
+            "numPendingTests": 0,
+            "numTotalTests": 5,
+            "success": true
+          },
+          "tests": {
+            "matches 400/401/801 page topology, mixed NaN/finite scores, duplicate representatives and every top-k cutoff": "passed",
+            "preserves ordered non-FMA accumulation, signed infinities and UTF16 cutoff order": "passed",
+            "distinguishes lossless expected metadata from SQL surrogate replacement and embedded NUL parameters": "passed",
+            "validates prepared metadata against the pinned active corpus when no corpus is requested": "passed",
+            "validates all rows at coerced-zero cutoffs and preserves metadata/error precedence": "passed"
+          }
+        },
+        "worker": {
+          "counts": {
+            "numPassedTests": 11,
+            "numFailedTests": 0,
+            "numPendingTests": 0,
+            "numTotalTests": 11,
+            "success": true
+          },
+          "tests": {
+            "refuses a mismatched production worker release before starting a child": "passed",
+            "executes the actual production worker with canonical validation through Rust SQLite": "passed",
+            "the closing vector fence rejects promotion at the actual scoring boundary": "passed",
+            "rejects a replaced vector generation and a newly published lexical corpus": "passed",
+            "revokes actual external-source authorization after an opening proof": "passed",
+            "score export is the intersection of independent project and URI scopes": "passed",
+            "malformed private vectors remain redacted in errors and production logs without waking maintenance": "passed",
+            "readonly vector validation preserves the existing fifty-millisecond SQLite cap": "passed",
+            "exports only current canonical eligible URI scores and refuses logical-scope/source changes": "passed",
+            "a real vector SQLite stall is reaped inside the original request deadline": "passed",
+            "caller cancellation joins the actual model-free worker stalled inside vector scoring": "passed"
+          }
+        }
+      }
+    },
+    "bun-linux-arm64-musl": {
+      "passed": true,
+      "jobId": 137886627816,
+      "jobConclusion": "success",
+      "artifactId": 14846103430,
+      "archiveDigest": "sha256:88631ffdb4ff7377fe712628b2fb4e5463ee8558e5b7ad64471238764a575c9e",
+      "nativeBinarySha256": "2adc61e63e207bf06d9d97f96fa60f0b8cf9134f9a3976b4fc418a7e6c79c74a",
+      "suites": {
+        "numeric": {
+          "counts": {
+            "numPassedTests": 5,
+            "numFailedTests": 0,
+            "numPendingTests": 0,
+            "numTotalTests": 5,
+            "success": true
+          },
+          "tests": {
+            "matches 400/401/801 page topology, mixed NaN/finite scores, duplicate representatives and every top-k cutoff": "passed",
+            "preserves ordered non-FMA accumulation, signed infinities and UTF16 cutoff order": "passed",
+            "distinguishes lossless expected metadata from SQL surrogate replacement and embedded NUL parameters": "passed",
+            "validates prepared metadata against the pinned active corpus when no corpus is requested": "passed",
+            "validates all rows at coerced-zero cutoffs and preserves metadata/error precedence": "passed"
+          }
+        },
+        "worker": {
+          "counts": {
+            "numPassedTests": 11,
+            "numFailedTests": 0,
+            "numPendingTests": 0,
+            "numTotalTests": 11,
+            "success": true
+          },
+          "tests": {
+            "refuses a mismatched production worker release before starting a child": "passed",
+            "executes the actual production worker with canonical validation through Rust SQLite": "passed",
+            "the closing vector fence rejects promotion at the actual scoring boundary": "passed",
+            "rejects a replaced vector generation and a newly published lexical corpus": "passed",
+            "revokes actual external-source authorization after an opening proof": "passed",
+            "score export is the intersection of independent project and URI scopes": "passed",
+            "malformed private vectors remain redacted in errors and production logs without waking maintenance": "passed",
+            "readonly vector validation preserves the existing fifty-millisecond SQLite cap": "passed",
+            "exports only current canonical eligible URI scores and refuses logical-scope/source changes": "passed",
+            "a real vector SQLite stall is reaped inside the original request deadline": "passed",
+            "caller cancellation joins the actual model-free worker stalled inside vector scoring": "passed"
+          }
+        }
+      }
+    },
+    "bun-windows-arm64": {
+      "passed": true,
+      "jobId": 137886627957,
+      "jobConclusion": "success",
+      "artifactId": 14845602962,
+      "archiveDigest": "sha256:2a00a0f8295e1f4bb0938b67ab2df2fc91ef9bd2748378dcd52eb5381c189c82",
+      "nativeBinarySha256": "a3781c62b691e7f9cc54c92edd19c5d68eedbd32188762989543cf649f830c6e",
+      "suites": {
+        "numeric": {
+          "counts": {
+            "numPassedTests": 5,
+            "numFailedTests": 0,
+            "numPendingTests": 0,
+            "numTotalTests": 5,
+            "success": true
+          },
+          "tests": {
+            "matches 400/401/801 page topology, mixed NaN/finite scores, duplicate representatives and every top-k cutoff": "passed",
+            "preserves ordered non-FMA accumulation, signed infinities and UTF16 cutoff order": "passed",
+            "distinguishes lossless expected metadata from SQL surrogate replacement and embedded NUL parameters": "passed",
+            "validates prepared metadata against the pinned active corpus when no corpus is requested": "passed",
+            "validates all rows at coerced-zero cutoffs and preserves metadata/error precedence": "passed"
+          }
+        },
+        "worker": {
+          "counts": {
+            "numPassedTests": 11,
+            "numFailedTests": 0,
+            "numPendingTests": 0,
+            "numTotalTests": 11,
+            "success": true
+          },
+          "tests": {
+            "refuses a mismatched production worker release before starting a child": "passed",
+            "executes the actual production worker with canonical validation through Rust SQLite": "passed",
+            "the closing vector fence rejects promotion at the actual scoring boundary": "passed",
+            "rejects a replaced vector generation and a newly published lexical corpus": "passed",
+            "revokes actual external-source authorization after an opening proof": "passed",
+            "score export is the intersection of independent project and URI scopes": "passed",
+            "malformed private vectors remain redacted in errors and production logs without waking maintenance": "passed",
+            "readonly vector validation preserves the existing fifty-millisecond SQLite cap": "passed",
+            "exports only current canonical eligible URI scores and refuses logical-scope/source changes": "passed",
+            "a real vector SQLite stall is reaped inside the original request deadline": "passed",
+            "caller cancellation joins the actual model-free worker stalled inside vector scoring": "passed"
+          }
+        }
+      }
+    },
+    "bun-darwin-x64": {
+      "passed": true,
+      "jobId": 137886627506,
+      "jobConclusion": "success",
+      "artifactId": 14845254867,
+      "archiveDigest": "sha256:d1957c577e3b7690c54dbe8413e363a346b2e715fd4acd2b598ea74f7869f30a",
+      "nativeBinarySha256": "a1e3173366aeb3a98df648a38f91b4a0916d91c1374428f5409ac6c0afc61908",
+      "suites": {
+        "numeric": {
+          "counts": {
+            "numPassedTests": 5,
+            "numFailedTests": 0,
+            "numPendingTests": 0,
+            "numTotalTests": 5,
+            "success": true
+          },
+          "tests": {
+            "matches 400/401/801 page topology, mixed NaN/finite scores, duplicate representatives and every top-k cutoff": "passed",
+            "preserves ordered non-FMA accumulation, signed infinities and UTF16 cutoff order": "passed",
+            "distinguishes lossless expected metadata from SQL surrogate replacement and embedded NUL parameters": "passed",
+            "validates prepared metadata against the pinned active corpus when no corpus is requested": "passed",
+            "validates all rows at coerced-zero cutoffs and preserves metadata/error precedence": "passed"
+          }
+        },
+        "worker": {
+          "counts": {
+            "numPassedTests": 11,
+            "numFailedTests": 0,
+            "numPendingTests": 0,
+            "numTotalTests": 11,
+            "success": true
+          },
+          "tests": {
+            "refuses a mismatched production worker release before starting a child": "passed",
+            "executes the actual production worker with canonical validation through Rust SQLite": "passed",
+            "the closing vector fence rejects promotion at the actual scoring boundary": "passed",
+            "rejects a replaced vector generation and a newly published lexical corpus": "passed",
+            "revokes actual external-source authorization after an opening proof": "passed",
+            "score export is the intersection of independent project and URI scopes": "passed",
+            "malformed private vectors remain redacted in errors and production logs without waking maintenance": "passed",
+            "readonly vector validation preserves the existing fifty-millisecond SQLite cap": "passed",
+            "exports only current canonical eligible URI scores and refuses logical-scope/source changes": "passed",
+            "a real vector SQLite stall is reaped inside the original request deadline": "passed",
+            "caller cancellation joins the actual model-free worker stalled inside vector scoring": "passed"
+          }
+        }
+      }
+    }
+  },
+  "priorAttempts": {
+    "bun-windows-x64-baseline": [
+      {
+        "passed": false,
+        "jobId": 137886627900,
+        "jobConclusion": "failure",
+        "artifactId": 14847920082,
+        "archiveDigest": "sha256:e2fa2f9255cc72c940dcec16cabdaa75744d5c39df8a80e310839bc08eab448e",
+        "nativeBinarySha256": "3958aaa745b291d91e579c7f4550a78e479357635e98b5ea0f94101fe3fd9be1",
+        "suites": {
+          "numeric": {
+            "counts": {
+              "numPassedTests": 5,
+              "numFailedTests": 0,
+              "numPendingTests": 0,
+              "numTotalTests": 5,
+              "success": true
+            },
+            "tests": {
+              "matches 400/401/801 page topology, mixed NaN/finite scores, duplicate representatives and every top-k cutoff": "passed",
+              "preserves ordered non-FMA accumulation, signed infinities and UTF16 cutoff order": "passed",
+              "distinguishes lossless expected metadata from SQL surrogate replacement and embedded NUL parameters": "passed",
+              "validates prepared metadata against the pinned active corpus when no corpus is requested": "passed",
+              "validates all rows at coerced-zero cutoffs and preserves metadata/error precedence": "passed"
+            }
+          },
+          "worker": {
+            "counts": {
+              "numPassedTests": 10,
+              "numFailedTests": 1,
+              "numPendingTests": 0,
+              "numTotalTests": 11,
+              "success": false
+            },
+            "tests": {
+              "refuses a mismatched production worker release before starting a child": "passed",
+              "executes the actual production worker with canonical validation through Rust SQLite": "passed",
+              "the closing vector fence rejects promotion at the actual scoring boundary": "failed",
+              "rejects a replaced vector generation and a newly published lexical corpus": "passed",
+              "revokes actual external-source authorization after an opening proof": "passed",
+              "score export is the intersection of independent project and URI scopes": "passed",
+              "malformed private vectors remain redacted in errors and production logs without waking maintenance": "passed",
+              "readonly vector validation preserves the existing fifty-millisecond SQLite cap": "passed",
+              "exports only current canonical eligible URI scores and refuses logical-scope/source changes": "passed",
+              "a real vector SQLite stall is reaped inside the original request deadline": "passed",
+              "caller cancellation joins the actual model-free worker stalled inside vector scoring": "passed"
+            }
+          }
+        },
+        "attempt": 1,
+        "failure": "The scoped fixture reported EBUSY on rm. No scoring or worker-exit assertion reported a failure."
+      }
+    ]
+  }
+}

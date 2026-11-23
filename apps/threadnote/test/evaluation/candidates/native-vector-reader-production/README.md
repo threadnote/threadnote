@@ -1,5 +1,13 @@
 # Native vector reader production evidence
 
+## R5 results for the chunk-ordered writer
+
+Candidate `305e14775` passed all four local performance cases and the native reader checks on eight CI targets.
+This campaign used one Apple M1 Max for performance. Native CI checked the release payload and the compiled worker.
+The evidence applies to this experimental candidate. [Measurements and platform results](./local-performance-platform-validation/results.md)
+
+## Earlier production evidence
+
 Status: **unqualified**. The native-only all-eight rollout remains blocked by the approved R5 gates. Historical optional-native diagnostics are preserved without relabeling. The earlier SQLite/Rust pilot and the source-mode diagnostic are supporting experiments, not production qualification.
 
 The reusable capture is a mode of the existing vector benchmark:
