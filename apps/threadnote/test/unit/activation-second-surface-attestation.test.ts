@@ -13,6 +13,7 @@ import {CommandExecutor} from '@threadnote/platform/command';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {SystemInfo} from '@threadnote/platform/system';
 import {MCP_TOOLSET_ENV} from '@threadnote/threadnote/mcp/toolset';
+import {TEAMS_FILE_VERSION, teamsFilePath} from '@threadnote/threadnote/share/core';
 import {canonicalMemoryDocumentContent, parseMemoryDocument} from '@threadnote/memory/document';
 import {loadRecallIndexData} from '@threadnote/recall/index';
 import {createActivationPlanV1} from '@threadnote/threadnote/activation/planner';
@@ -171,6 +172,12 @@ describe('transport-attested second-surface proof', () => {
             observeCurrentActivationSurfaceV1(config, secondaryAdapter),
           ]);
         }).pipe(Effect.provideService(SystemInfo, setupSystem));
+        const teamsFile = yield* teamsFilePath(config);
+        yield* fs.makeDirectory(path.dirname(teamsFile), {recursive: true});
+        yield* fs.writeFileString(
+          teamsFile,
+          JSON.stringify({version: TEAMS_FILE_VERSION, defaultTeam: 'default', teams: {default: {remote: repository}}}),
+        );
         const memory = sharedMemory();
         const memoryPath = path.join(
           home,

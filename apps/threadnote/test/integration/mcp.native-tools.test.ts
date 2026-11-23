@@ -15,6 +15,7 @@ import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {AGENT_RESPONSE_ESTIMATED_BYTES_PER_TOKEN} from '@threadnote/protocol/agent-response';
 import {renderSessionStartRecallQueue} from '@threadnote/threadnote/hooks';
+import {TEAMS_FILE_VERSION} from '@threadnote/threadnote/share/core';
 import {
   createMemoryCodeCitation,
   MAX_MEMORY_CODE_CITATIONS,
@@ -1356,7 +1357,7 @@ describe('Threadnote MCP toolsets', () => {
           },
           nextAction: {tool: 'read_context', uris: expect.any(Array)},
           output: {budgetTokens: 1_500, explain: false, returnedResults: expect.any(Number)},
-          rankerVersion: 'hybrid-v8',
+          rankerVersion: 'hybrid-v8+body-rrf-v1',
           results: expect.any(Array),
         });
         const compact = decodeJsonObject(result.structuredContent);
@@ -1404,7 +1405,7 @@ describe('Threadnote MCP toolsets', () => {
         });
         expect(tooSmall).toContain('greater than or equal to 700');
       },
-      {toolset: 'core'},
+      {environment: {THREADNOTE_RECALL_RANKING: ''}, toolset: 'core'},
     );
   });
 
@@ -2295,6 +2296,13 @@ describe('Threadnote MCP toolsets', () => {
           'threadnote://user/test-user/memories/durable/projects/my-product/legacy-published-pointer.md';
         const canonicalUri =
           'threadnote://user/test-user/memories/shared/default/durable/projects/my-product/legacy-published-pointer.md';
+        const shareDirectory = join(fixture.home, 'share');
+        await mkdir(shareDirectory, {recursive: true});
+        await writeFile(
+          join(shareDirectory, 'teams.json'),
+          JSON.stringify({version: TEAMS_FILE_VERSION, teams: {default: {remote: fixture.root}}}),
+          'utf8',
+        );
         const content = Effect.pipe(
           canonicalMemoryContent(
             'legacy-published-pointer',
