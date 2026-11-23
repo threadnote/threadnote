@@ -1,0 +1,159 @@
+name: R5 native reader platform validation
+on:
+  push:
+    branches: [codex/r5-platform-validation]
+    paths: [.github/workflows/r5-platform-validation.yml]
+
+permissions:
+  contents: read
+
+env:
+  BUN_VERSION: 1.4.4
+  CODE_GRAPH_EMBEDDING_MODEL_ID: bge-small-en-v1.5-q8
+  CODE_GRAPH_EMBEDDING_MODEL_SHA256: f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804
+
+jobs:
+  recall-vector-native:
+    name: Recall vectors · ${{ matrix.target }} native reader contracts
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        include:
+          - target: bun-darwin-arm64
+            os: macos-15
+            musl: false
+            gnu: false
+          - target: bun-darwin-x64
+            os: macos-15-intel
+            musl: false
+            gnu: false
+          - target: bun-linux-arm64
+            os: ubuntu-24.04-arm
+            musl: false
+            gnu: true
+          - target: bun-linux-arm64-musl
+            os: ubuntu-24.04-arm
+            musl: true
+            gnu: false
+          - target: bun-linux-x64-baseline
+            os: ubuntu-24.04
+            musl: false
+            gnu: true
+          - target: bun-linux-x64-baseline-musl
+            os: ubuntu-24.04
+            musl: true
+            gnu: false
+          - target: bun-windows-arm64
+            os: windows-11-arm
+            musl: false
+            gnu: false
+          - target: bun-windows-x64-baseline
+            os: windows-2025
+            musl: false
+            gnu: false
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      THREADNOTE_BUILD_TARGET: ${{ matrix.target }}
+      MODEL_RELATIVE_PATH: apps/threadnote/embedded/models/bge-small-en-v1.5-q8/f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804.gguf
+
+    steps:
+      - name: Preserve committed bytes on Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: 305e147754fd3088dd0b8ce46c495840fe0affdf
+
+      - name: Verify the frozen candidate
+        shell: bash
+        run: |
+          test "$(git hash-object --no-filters scripts/verify-native-vector-reader.ts)" = "$(git rev-parse 'HEAD:scripts/verify-native-vector-reader.ts')"
+          test "$(git rev-parse HEAD)" = 305e147754fd3088dd0b8ce46c495840fe0affdf
+          test "$(git rev-parse 'HEAD^{tree}')" = 8cdbb3b7c5a7cb5edac7810a702baf8af8bf7903
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - run: bun install --frozen-lockfile
+
+      - name: Initialize native Windows C toolchain
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installation = & $vswhere -latest -products '*' -property installationPath
+          if (!$installation) { throw 'Visual Studio native build tools are required.' }
+          Import-Module "$installation\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          $architecture = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
+          Enter-VsDevShell -VsInstallPath $installation -SkipAutomaticLocation -DevCmdArguments "-arch=$architecture -host_arch=$architecture"
+          foreach ($name in @('PATH','INCLUDE','LIB','LIBPATH','VCToolsInstallDir','WindowsSdkDir','WindowsSDKVersion')) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            if ($value) { "$name=$value" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append }
+          }
+      - name: Verify Windows native tools in Bash
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          command -v cl
+          command -v dumpbin
+
+      - name: Install pinned native vector toolchain
+        if: ${{ !matrix.musl && !matrix.gnu }}
+        run: rustup toolchain install 1.89.0 --profile minimal
+
+      - name: Prepare native reader validation
+        shell: bash
+        run: |
+          mkdir -p .context/r5-platform
+          cat > .context/r5-platform/run.sh <<'SCRIPT'
+          set -euo pipefail
+          evidence=.context/r5-platform
+          bun run build:release
+          bun scripts/verify-native-vector-reader.ts --required
+          cp dist/runtime/vector-reader/manifest.json "$evidence/native-manifest.json"
+          export THREADNOTE_NATIVE_VECTOR_READER_REQUIRED=1
+          THREADNOTE_NATIVE_VECTOR_READER_SOURCE_ROOT="$(bun -e 'process.stdout.write(process.cwd())')"
+          THREADNOTE_NATIVE_VECTOR_READER_MANIFEST="$(bun -e 'process.stdout.write(require("node:path").resolve("dist/runtime/vector-reader/manifest.json"))')"
+          export THREADNOTE_NATIVE_VECTOR_READER_SOURCE_ROOT THREADNOTE_NATIVE_VECTOR_READER_MANIFEST
+          bun -e '
+            const m = await Bun.file(process.env.THREADNOTE_NATIVE_VECTOR_READER_MANIFEST).json();
+            if (m.bunTarget !== process.env.THREADNOTE_BUILD_TARGET ||
+                m.buildInfo.sourceCommit !== "305e147754fd3088dd0b8ce46c495840fe0affdf" ||
+                m.buildInfo.sourceTree !== "8cdbb3b7c5a7cb5edac7810a702baf8af8bf7903") throw Error("Native source or target mismatch");
+          '
+          bun --bun vitest run --maxWorkers=1 --no-file-parallelism \
+            --reporter=default --reporter=json --outputFile="$evidence/numeric.json" \
+            packages/recall/test/unit/native-vector-reader.test.ts
+          bun --bun vitest run --maxWorkers=1 --no-file-parallelism \
+            --reporter=default --reporter=json --outputFile="$evidence/worker.json" \
+            apps/threadnote/test/integration/vector-native-read-boundary.test.ts
+          SCRIPT
+
+      - name: Validate the reader on the native host
+        if: ${{ !matrix.musl && !matrix.gnu }}
+        shell: bash
+        run: bash .context/r5-platform/run.sh
+      - name: Validate the reader at the GNU compatibility floor
+        if: matrix.gnu
+        run: >-
+          bun scripts/assemble-native-inference.ts --gnu-container
+          --container-command-json '["bash","-ec","exec bash .context/r5-platform/run.sh"]'
+      - name: Validate the reader at the musl compatibility floor
+        if: matrix.musl
+        run: >-
+          bun scripts/assemble-native-inference.ts --musl-container
+          --container-command-json '["bash","-ec","exec bash .context/r5-platform/run.sh"]'
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: r5-platform-${{ matrix.target }}
+          path: .context/r5-platform/*.json
+          if-no-files-found: warn
+          retention-days: 30
