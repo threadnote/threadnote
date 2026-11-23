@@ -1,0 +1,40 @@
+name: Darwin ARM64 recall worker tail diagnosis
+on:
+  push:
+    branches: [codex/r5-darwin-tail-trace]
+    paths: ['.github/r5-darwin-tail-probe/**', '.github/workflows/r5-darwin-tail-trace.yml']
+permissions:
+  contents: read
+jobs:
+  trace:
+    name: Trace matched 10K dense worker phases
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      THREADNOTE_BUILD_TARGET: bun-darwin-arm64
+      BUN_VERSION: 1.4.4
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select the frozen candidate and retain the external probe
+        run: |
+          mkdir -p .context/darwin-recall-probe
+          cp .github/r5-darwin-tail-probe/* .context/darwin-recall-probe/
+          git switch --detach b6fc1ad36a4809a8cd0622664d254795a4b1f755
+          test "$(git rev-parse 'HEAD^{tree}')" = 979edfd2aeb3c92923a5d899179341814ba692f7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - run: rustup toolchain install 1.89.0 --profile minimal
+      - name: Build and measure the uninstrumented and traced workers
+        run: bash .context/darwin-recall-probe/run.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: darwin-recall-worker-tail-${{ github.run_id }}
+          path: .context/native-vector-capture/
+          retention-days: 30
+          if-no-files-found: warn
