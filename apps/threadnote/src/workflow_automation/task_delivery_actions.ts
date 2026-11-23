@@ -14,6 +14,7 @@ import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {
   bindNativeCycleDeliveryBase,
+  CurrentNativeTerminalDeliveryWatch,
   verifyNativeCycleDeliveryRepository,
   verifyNativeCyclePrDeliveryIdentity,
 } from './cycle_delivery.js';
@@ -945,7 +946,12 @@ export const runNativeTaskPrWatch = (
         const {baseRefBinding: _baseRefBinding, ...unboundReceiptPr} = finalReceiptPr;
         const baseRefReceipt =
           canonicalReceipt?.delivery === 'pr' ? {...finalReceipt, pr: unboundReceiptPr} : finalReceipt;
-        const checkedBaseReceipt = yield* bindNativeCycleDeliveryBase(checkout, planPhase.baseBranch, baseRefReceipt);
+        // Historical terminal delivery verifies the original base within the cycle. GitHub
+        // retargets can delete that ref, so only the cycle may admit the canonical binding.
+        const completesPublished = previouslyPublished && terminal;
+        const checkedBaseReceipt = completesPublished
+          ? finalReceipt
+          : yield* bindNativeCycleDeliveryBase(checkout, planPhase.baseBranch, baseRefReceipt);
         if (
           canonicalPr?.baseRefBinding &&
           stableJson(checkedBaseReceipt.pr?.baseRefBinding) !== stableJson(canonicalPr.baseRefBinding)
@@ -982,6 +988,24 @@ export const runNativeTaskPrWatch = (
                     publication: embeddedDelivery.publication,
                     expectedRevision: latest.revision,
                   }),
+                ).pipe(
+                  Effect.provideService(
+                    CurrentNativeTerminalDeliveryWatch,
+                    completesPublished
+                      ? delivery =>
+                          Effect.gen(function* () {
+                            const currentTime = yield* Clock.currentTimeMillis;
+                            if (
+                              stableJson(delivery) !== stableJson(finalReceipt) ||
+                              !watchReady(latestWatch, currentTime)
+                            )
+                              return yield* fail(
+                                'watch-not-ready',
+                                'The exact terminal watch needs a live consumer and host receipt at delivery.',
+                              );
+                          })
+                      : undefined,
+                  ),
                 ),
                 checkout,
               ),

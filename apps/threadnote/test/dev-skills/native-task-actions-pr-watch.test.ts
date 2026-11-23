@@ -2033,6 +2033,261 @@ describe('native task actions', () => {
   );
 
   effectIt.effect(
+    'finishes a three-phase PR stack after both dependent PRs retarget to the merge branch',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture(['one', 'two', 'three'], 'pr', false, false, true, {
+          one: {branch: 'feature/one', baseBranch: 'main'},
+          two: {branch: 'feature/two', baseBranch: 'origin/feature/one'},
+          three: {branch: 'feature/three', baseBranch: 'feature/two'},
+        });
+        const gitOutput = (args: readonly string[]) =>
+          f.git(args).pipe(Effect.map(result => EffectString.trim(result.stdout)));
+        const phases = yield* Effect.forEach(
+          [
+            ['one', 'main', 1158],
+            ['two', 'feature/one', 1161],
+            ['three', 'feature/two', 1162],
+          ] as const,
+          ([id, originalBase, number]) =>
+            Effect.gen(function* () {
+              const branch = `feature/${id}`;
+              if (id !== 'one') yield* f.git(['checkout', '-b', branch]);
+              if (id === 'two') yield* f.git(['update-ref', 'refs/remotes/origin/feature/one', 'feature/one']);
+              const watch = yield* publishOpenHistoricalPhase(f, id, originalBase, number);
+              const headSha = yield* gitOutput(['rev-parse', 'HEAD']);
+              const prUrl = `https://github.com/example/repo/pull/${number}`;
+              const current = yield* readNativeWatch(f.config, watch.watchId);
+              if (!current) throw new Error('Expected the active watch for the published phase.');
+              yield* writeSimulatedTaskWatch(f, current, watch, prUrl, headSha, true);
+              return {
+                id,
+                originalBase,
+                watch,
+                provider: {
+                  number,
+                  url: prUrl,
+                  baseRepository: 'example/repo',
+                  headRepository: 'example/repo',
+                  baseBranch: 'main',
+                  headBranch: branch,
+                  headSha,
+                  state: 'closed',
+                  merged: true,
+                  mergeCommit: '',
+                },
+              };
+            }),
+        );
+
+        const [first, second, third] = phases;
+        yield* f.git(['checkout', 'main']);
+        for (const phase of phases) {
+          yield* f.git(['merge', '--no-ff', phase.provider.headBranch, '-m', `Merge PR ${phase.provider.number}`]);
+          phase.provider.mergeCommit = yield* gitOutput(['rev-parse', 'HEAD']);
+        }
+        const commands = yield* CommandExecutor;
+        const reads: number[] = [];
+        let onRead: (() => void) | undefined;
+        const withProvider = <A, E, R>(program: Effect.Effect<A, E, R>, overrides: Readonly<Record<number, object>>) =>
+          program.pipe(
+            Effect.provideService(
+              CommandExecutor,
+              CommandExecutor.of({
+                ...commands,
+                execute: (executable, args, options) => {
+                  if (executable === 'gh') {
+                    const observed = EffectOption.getOrUndefined(
+                      EffectArray.findFirst(phases, candidate =>
+                        args.includes(`repos/example/repo/pulls/${candidate.provider.number}`),
+                      ),
+                    );
+                    if (observed) {
+                      reads.push(observed.provider.number);
+                      onRead?.();
+                      return Effect.succeed({
+                        exitCode: 0,
+                        stderr: '',
+                        stdout: JSON.stringify({...observed.provider, ...overrides[observed.provider.number]}),
+                      });
+                    }
+                  }
+                  return commands.execute(executable, args, options);
+                },
+              }),
+            ),
+          );
+        const complete = (phase: (typeof phases)[number], overrides: Readonly<Record<number, object>> = {}) =>
+          withProvider(
+            runNativeTaskActionCore(f.config, {
+              command: 'watch-pr',
+              operation: 'complete',
+              runId: 'native-run',
+              callerCwd: f.repo,
+              validationRef: phase.watch.validationRef,
+              deliveryRef: phase.watch.deliveryRef,
+            }),
+            overrides,
+          );
+        const refuse = (phase: (typeof phases)[number], reason: string, overrides?: Readonly<Record<number, object>>) =>
+          Effect.gen(function* () {
+            const before = yield* f.fs.readFileString(f.statePath());
+            expect(yield* complete(phase, overrides).pipe(Effect.result)).toMatchObject({
+              failure: {code: 'pr-source-mismatch', message: expect.stringContaining(reason)},
+            });
+            expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
+          });
+        yield* refuse(second, 'no distinct canonical merged PR receipt');
+        expect(object(yield* complete(first))).toMatchObject({
+          status: 'delivered',
+          receipt: {pr: {baseBranch: 'main', state: 'merged'}},
+        });
+
+        const workflow = yield* readNativeWorkflowState(f.config, 'native-run');
+        const canonical = workflow?.state.cycle?.state.phases.two.delivery;
+        if (!canonical?.pr || !canonical.watch) throw new Error('Expected the open PR delivery.');
+        const beforeRawDelivery = yield* f.fs.readFileString(f.statePath());
+        const raw = yield* withProvider(
+          f.mutate('record-delivery', {
+            phaseId: 'two',
+            publication: canonical.publication,
+            delivery: {
+              ...canonical,
+              pr: {...canonical.pr, state: 'merged'},
+              watch: {...canonical.watch, state: 'terminal', evidence: 'caller-controlled terminal watch'},
+            },
+          }),
+          {},
+        ).pipe(Effect.result);
+        expect(raw).toMatchObject({failure: {code: 'pr-source-mismatch'}});
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeRawDelivery);
+
+        const firstParent = yield* gitOutput(['rev-parse', first.provider.mergeCommit + '^1']);
+        const sideMerge = yield* gitOutput([
+          'commit-tree',
+          second.provider.mergeCommit + '^{tree}',
+          '-p',
+          firstParent,
+          '-p',
+          first.provider.mergeCommit,
+          '-m',
+          'Same result tree, predecessor only on side history',
+        ]);
+        yield* refuse(second, 'target-side history', {[second.provider.number]: {mergeCommit: sideMerge}});
+        yield* refuse(second, 'differs from the validated phase tree', {
+          [second.provider.number]: {mergeCommit: first.provider.mergeCommit},
+        });
+        yield* refuse(second, 'Git could not read commit', {
+          [second.provider.number]: {
+            mergeCommit: yield* gitOutput(['rev-parse', second.provider.mergeCommit + '^{tree}']),
+          },
+        });
+        yield* refuse(second, 'GitHub did not return the merge commit', {
+          [second.provider.number]: {mergeCommit: null},
+        });
+        yield* refuse(second, 'same GitHub repository and target branch', {
+          [second.provider.number]: {baseBranch: 'release'},
+        });
+        yield* refuse(second, 'GitHub did not return the merge commit for predecessor one', {
+          [first.provider.number]: {mergeCommit: null},
+        });
+        yield* refuse(second, 'remote PR repository, branches, state and exact head', {
+          [second.provider.number]: {headBranch: 'unrelated'},
+        });
+        yield* refuse(third, 'no distinct canonical merged PR receipt');
+        const terminalWatch = yield* readNativeWatch(f.config, second.watch.watchId);
+        const leaseUntil = terminalWatch?.envelope.state.consumer?.leaseUntil;
+        if (!leaseUntil) throw new Error('Expected a live consumer lease.');
+        const clock = yield* Clock.Clock;
+        let expired = false;
+        onRead = () => {
+          expired = true;
+        };
+        const beforeExpiration = yield* f.fs.readFileString(f.statePath());
+        expect(
+          yield* complete(second).pipe(
+            Effect.provideService(Clock.Clock, {
+              currentTimeMillisUnsafe: () => (expired ? leaseUntil : clock.currentTimeMillisUnsafe()),
+              currentTimeMillis: Effect.suspend(() => (expired ? Effect.succeed(leaseUntil) : clock.currentTimeMillis)),
+              currentTimeNanosUnsafe: () => clock.currentTimeNanosUnsafe(),
+              currentTimeNanos: clock.currentTimeNanos,
+              monotonicTimeNanosUnsafe: () => clock.monotonicTimeNanosUnsafe(),
+              monotonicTimeNanos: clock.monotonicTimeNanos,
+              sleep: duration => clock.sleep(duration),
+            }),
+            Effect.result,
+          ),
+        ).toMatchObject({failure: {code: 'watch-not-ready'}});
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeExpiration);
+        onRead = undefined;
+
+        for (const phase of [second, third]) {
+          const predecessor = phase.id === 'two' ? first : second;
+          const pruned = phase.id === 'two' ? 'refs/remotes/origin/feature/one' : 'refs/heads/feature/two';
+          yield* f.git(['update-ref', '-d', pruned]);
+          if (phase.id === 'two')
+            expect(
+              yield* complete(second, {
+                [second.provider.number]: {baseBranch: second.originalBase},
+              }).pipe(Effect.result),
+            ).toMatchObject({failure: {code: 'base-ref-unverified'}});
+          reads.length = 0;
+          const before = (yield* readNativeWorkflowState(f.config, 'native-run'))?.state.cycle?.state.phases[phase.id]
+            ?.delivery;
+          expect(before?.pr?.baseBranch).toBe(phase.originalBase);
+          expect(before?.pr?.state).toBe('open');
+          expect(object(yield* complete(phase))).toMatchObject({
+            status: 'delivered',
+            receipt: {
+              pr: {...before?.pr, state: 'merged'},
+              providerIdentity: before?.providerIdentity,
+              userAuthority: before?.userAuthority,
+              watch: {state: 'terminal', consumerId: phase.watch.consumerId, headSha: phase.provider.headSha},
+            },
+          });
+          expect(reads).toEqual([phase.provider.number, predecessor.provider.number]);
+          expect(object(yield* complete(phase))).toMatchObject({status: 'delivered', replayed: true});
+        }
+        const request = {
+          command: 'finish' as const,
+          runId: 'native-run',
+          callerCwd: f.repo,
+          proposal: {
+            ...proposal,
+            phaseEvidence: EffectArray.map(phases, phase => ({
+              id: phase.id,
+              acceptance: [{criterion: phase.id + ' works', evidence: 'The exact validated source merged.'}],
+            })),
+          },
+        };
+        const finish = (input: {prepareRef?: string; finishRef?: string}) => {
+          const {proposal: closeoutProposal, ...base} = request;
+          return runNativeTaskAction(f.config, {
+            ...base,
+            ...input,
+            ...(input.finishRef ? {} : {proposal: closeoutProposal}),
+          }).pipe(Effect.provideService(CurrentNativeJobAutoLaunch, false), Effect.map(object));
+        };
+        const prepare = yield* finish({});
+        expect(prepare).toMatchObject({status: 'pending', stage: 'prepare'});
+        const prepareRef = String(prepare.prepareRef);
+        const prepareJobId = decodeNativeTaskActionRef(prepareRef)?.jobId;
+        if (!prepareJobId) throw new Error('Expected a closeout prepare job.');
+        expect(object(yield* runNativeJobWorker(f.config, 'native-run', prepareJobId, f.call)).status).toBe(
+          'completed',
+        );
+        const finishing = yield* finish({prepareRef});
+        expect(finishing).toMatchObject({status: 'pending', stage: 'finish'});
+        const finishRef = String(finishing.finishRef);
+        const finishJobId = decodeNativeTaskActionRef(finishRef)?.jobId;
+        if (!finishJobId) throw new Error('Expected a closeout finish job.');
+        expect(object(yield* runNativeJobWorker(f.config, 'native-run', finishJobId, f.call)).status).toBe('completed');
+        expect(yield* finish({finishRef})).toMatchObject({status: 'complete'});
+      }).pipe(run),
+    windowsRealGitFixtureTimeout,
+  );
+
+  effectIt.effect(
     'completes and closes out every phase of one PR merged above the last phase head',
     () =>
       Effect.gen(function* () {

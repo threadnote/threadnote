@@ -172,6 +172,7 @@ export const writePreparedNativeWorkflowState = Effect.fn('workflowAutomation.wr
   config: RuntimeConfig,
   prepared: PreparedNativeWorkflowStateWrite,
   expectedRevision: string | null,
+  beforeCommit?: Effect.Effect<void, WorkflowAutomationError>,
 ) {
   const {state: validated, serialized, revision} = prepared;
   const cache = yield* CurrentWorkflowReadCache;
@@ -188,6 +189,7 @@ export const writePreparedNativeWorkflowState = Effect.fn('workflowAutomation.wr
         'state-conflict',
         'Native run state changed after it was read. Retry from its current receipt.',
       );
+    if (beforeCommit) yield* beforeCommit;
     yield* fs.rename(temporary, file);
     const result = {state: validated, revision};
     if (cache) cache.native = {file, bytes: serialized, ...result, state: immutableWorkflowImage(validated)};
@@ -200,9 +202,10 @@ export const writeNativeWorkflowState = Effect.fn('workflowAutomation.writeState
   config: RuntimeConfig,
   state: NativeWorkflowState,
   expectedRevision: string | null,
+  beforeCommit?: Effect.Effect<void, WorkflowAutomationError>,
 ) {
   const prepared = yield* prepareNativeWorkflowStateWrite(state);
-  return yield* writePreparedNativeWorkflowState(config, prepared, expectedRevision);
+  return yield* writePreparedNativeWorkflowState(config, prepared, expectedRevision, beforeCommit);
 });
 
 /** Lock order is native run -> native memory binding -> memory targets. Graph preparation stays outside. */
