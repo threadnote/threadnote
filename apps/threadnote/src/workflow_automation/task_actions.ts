@@ -76,7 +76,7 @@ import {nativeWorkflowError} from './memory.js';
 import {readNativeWorkflowState} from './store.js';
 import {nativeRunNotFoundMessage, readNativeTaskView, verifyNativeTaskReopen} from './task.js';
 import {inspectOldBindingOwners} from './task_binding_transition.js';
-import {NativeTaskPrWatchFieldsSchema} from './task_pr_watch.js';
+import {NativeTaskPrWatchFieldsSchema, validateNativeTaskWatchMaintenanceRoute} from './task_pr_watch.js';
 import {
   cycleRequest,
   currentNativeTaskRef,
@@ -343,6 +343,7 @@ const requestSchema = Schema.Union([
     callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
     validationRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
     deliveryRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(8192))),
+    maintenanceValidationRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
     ...NativeTaskPrWatchFieldsSchema.fields,
     snapshotRef: Schema.optionalKey(boundedRef),
     candidateWatchRef: Schema.optionalKey(boundedRef),
@@ -794,6 +795,7 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
         value => value !== undefined,
       );
       const standalone = request.prUrl !== undefined || request.watchRef !== undefined || request.runId === undefined;
+      yield* validateNativeTaskWatchMaintenanceRoute(request, standalone);
       if (standalone && workflowProof)
         return yield* fail(
           'invalid-request',

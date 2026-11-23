@@ -141,8 +141,8 @@ export interface NativeWatchPullIdentity {
   readonly state: 'open' | 'merged';
 }
 
-/** Fetches only bounded identity fields for adopting an already published PR. */
-export const verifyNativeWatchPullIdentity = Effect.fn('nativeWatch.verifyPullIdentity')(function* (pr: string) {
+/** Fetches bounded identity fields and the reported merge object for an existing PR. */
+export const observeNativeWatchPullIdentity = Effect.fn('nativeWatch.verifyPullIdentity')(function* (pr: string) {
   const target = yield* Effect.try({try: () => nativeWatchPullRequest(pr), catch: () => fail('invalid-pr')});
   const response = yield* runCommandEffect(
     'gh',
@@ -154,7 +154,7 @@ export const verifyNativeWatchPullIdentity = Effect.fn('nativeWatch.verifyPullId
       'GET',
       `repos/${target.owner}/${target.repo}/pulls/${target.number}`,
       '--jq',
-      '{number, url: .html_url, baseRepository: .base.repo.full_name, headRepository: .head.repo.full_name, baseBranch: .base.ref, headBranch: .head.ref, headSha: .head.sha, state, merged}',
+      '{number, url: .html_url, baseRepository: .base.repo.full_name, headRepository: .head.repo.full_name, baseBranch: .base.ref, headBranch: .head.ref, headSha: .head.sha, state, merged, mergeCommit: .merge_commit_sha}',
     ],
     {timeoutMs: 15_000, maxOutputBytes: 16_384, sensitiveOutput: true},
   ).pipe(Effect.mapError(() => fail('provider-transport', true)));
@@ -188,11 +188,18 @@ export const verifyNativeWatchPullIdentity = Effect.fn('nativeWatch.verifyPullId
         !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(normalized.headRepository)
       )
         throw fail('provider-shape');
-      return normalized;
+      // A merge object is required only for terminal retarget verification.
+      const mergeCommit =
+        normalized.state === 'merged' && typeof identity.mergeCommit === 'string' ? identity.mergeCommit : undefined;
+      return {identity: normalized, mergeCommit};
     },
     catch: error => (Schema.is(WorkflowAutomationError)(error) ? error : fail('provider-shape')),
   });
 });
+
+/** Existing consumers persist only the PR identity. */
+export const verifyNativeWatchPullIdentity = (pr: string) =>
+  observeNativeWatchPullIdentity(pr).pipe(Effect.map(observed => observed.identity));
 
 /** Renewal observes PR identity only; it neither validates nor adopts the current head. */
 export const verifyNativeWatchRenewalPr = Effect.fn('nativeWatch.verifyRenewalPr')(function* (

@@ -22,6 +22,7 @@ import {
 import * as Schema from 'effect/Schema';
 import {
   isNativeWatchSessionWakeup,
+  ownedQueuedNativeWatchReceipt,
   nativeWatchNotice,
   nativeWatchSessionWakeupSchema,
   type NativeWatchSessionWakeupRequest,
@@ -321,13 +322,31 @@ export const makeNativeWatchNotifier = Effect.fn('nativeWatch.notifier')(functio
         let notification = stored.envelope.notification;
         let pending = notification.outbox;
         if (pending?.status === 'queued' || pending?.status === 'completed') {
-          const {acknowledged, nextSequence} = stored.envelope.state;
+          const {state, collector} = stored.envelope;
+          const {acknowledged, nextSequence} = state;
           // Queue acceptance is not notice arrival. ACK by an already-active consumer cannot release this gate.
           // After arrival, a later event releases it so a partial ACK cannot block every later wake.
           if (
             pending.status === 'queued' &&
             (!pending.consumedThrough ||
               (acknowledged < pending.consumedThrough && nextSequence - 1 <= pending.consumedThrough))
+          )
+            return;
+          // Keep extended coverage after terminal ACK, including while retained dispositions still need resolution.
+          if (
+            state.prState === 'merged' &&
+            collector?.status === 'terminal' &&
+            collector.reason === 'merged' &&
+            state.lastAck &&
+            pending.status === 'queued' &&
+            !pending.error &&
+            !notification.recoveryRequested &&
+            pending.consumedThrough === acknowledged &&
+            pending.consumedThrough > pending.last &&
+            acknowledged === nextSequence - 1 &&
+            state.events.length === 0 &&
+            state.delivery === null &&
+            ownedQueuedNativeWatchReceipt(notification, state, notification)
           )
             return;
           if (isNativeWatchSessionWakeup(notification.target))

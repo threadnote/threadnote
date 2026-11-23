@@ -52,6 +52,27 @@ export const NativeTaskPrWatchFieldsSchema = Schema.Struct({
   ),
 });
 
+export function validateNativeTaskWatchMaintenanceRoute(
+  request: Extract<NativeTaskActionRequest, {command: 'watch-pr'}>,
+  standalone: boolean,
+) {
+  if (
+    request.maintenanceValidationRef !== undefined &&
+    (standalone ||
+      request.operation !== 'complete' ||
+      !request.validationRef ||
+      !request.deliveryRef ||
+      request.candidateWatchRef !== undefined ||
+      request.supplementalRef !== undefined ||
+      request.pr !== undefined)
+  )
+    return fail(
+      'invalid-request',
+      'Use maintenanceValidationRef with the workflow-bound watch completion and its validation and delivery references.',
+    );
+  return Effect.void;
+}
+
 // Preserve persisted legacy routes; the PR suffix qualifies only a different PR in the same phase.
 export const nativeTaskLegacyWatchIdentity = (runId: string, phaseId: string) => {
   const identity = EffectString.slice(0, 48)(sha256HexSync(`${runId}\n${phaseId}`));

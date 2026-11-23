@@ -147,6 +147,7 @@ export function makeNativeTaskPrWatchCommand<E, R>(
     readonly callerCwd: string;
     readonly validationRef?: string;
     readonly deliveryRef?: string;
+    readonly maintenanceValidationRef?: string;
     readonly snapshotRef?: string;
     readonly candidateWatchRef?: string;
     readonly supplementalRef?: string;
@@ -197,6 +198,10 @@ export function makeNativeTaskPrWatchCommand<E, R>(
       callerCwd: requiredString('caller-cwd', 'Bound checkout path'),
       validationRef: optionalString('validation-ref', 'Current opaque validation reference'),
       deliveryRef: optionalString('delivery-ref', 'Opaque open PR delivery reference'),
+      maintenanceValidationRef: optionalString(
+        'maintenance-validation-ref',
+        'Validation reference from a separate commit-delivered maintenance run for workflow-bound complete',
+      ),
       snapshotRef: optionalString('snapshot-ref', 'Candidate start immutable snapshot reference; diagnostics only'),
       candidateWatchRef: optionalString('candidate-watch-ref', 'Candidate continuation reference'),
       supplementalRef: optionalString('supplemental-ref', 'Completed-local publication reference'),

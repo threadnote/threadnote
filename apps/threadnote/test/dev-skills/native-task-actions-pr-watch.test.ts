@@ -8,20 +8,35 @@ import {it as effectIt} from '@effect/vitest';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {describe, expect} from 'vitest';
 import {decodeNativeTaskActionRef, encodeNativeTaskActionRef} from '@threadnote/workflow-automations/task';
-import {recordNativeWatchLifecycle} from '@threadnote/workflow-automations/watch';
+import {
+  acknowledgeNativeWatch,
+  recordNativeWatchDispositions,
+  recordNativeWatchLifecycle,
+  relayNativeWatch,
+} from '@threadnote/workflow-automations/watch';
 import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
 import {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
 import {registerWorkflowTaskTool} from '../../src/mcp/server/workflow.js';
 import {readNativeTaskView} from '../../src/workflow_automation/task.js';
+import {runWorkflowAutomation} from '../../src/workflow_automation/index.js';
+import {inCheckout} from '../../src/workflow_automation/task_action_helpers.js';
 import {inspectOldBindingOwners} from '../../src/workflow_automation/task_binding_transition.js';
 import {resolveNativeTaskPrWatch} from '../../src/workflow_automation/task_pr_watch.js';
 import {makeNativeTaskPrWatchCommand} from '../../src/effect/workflow_cli.js';
 import {runNativeTaskAction as runNativeTaskActionCore} from '../../src/workflow_automation/task_actions.js';
 import {readNativeWatch, writeNativeWatch} from '../../src/workflow_automation/watch_store.js';
-import {nativeWatchNotice} from '../../src/workflow_automation/watch_notification_state.js';
+import {
+  consumeNativeWatchNotification,
+  nativeWatchNotice,
+} from '../../src/workflow_automation/watch_notification_state.js';
+import {makeNativeWatchNotifier} from '../../src/workflow_automation/watch_notification.js';
 import {applyDevSkills, statusDevSkills} from '../../src/dev_skills/index.js';
 import {SystemInfo} from '@threadnote/platform/system';
-import {nativeCloseoutJournalPath, readNativeWorkflowState} from '../../src/workflow_automation/store.js';
+import {
+  nativeCloseoutJournalPath,
+  readNativeWorkflowState,
+  serializeNativeWorkflowState,
+} from '../../src/workflow_automation/store.js';
 import {sha256HexSync} from '../../src/workflow_memory/native_digest.js';
 import {CurrentNativeJobAutoLaunch, runNativeJobWorker} from '../../src/workflow_automation/native_jobs.js';
 import {readNativeCloseoutJournal} from '../../src/workflow_automation/closeout_store.js';
@@ -2030,6 +2045,732 @@ describe('native task actions', () => {
       });
     }).pipe(run),
     windowsRealGitFixtureTimeout,
+  );
+
+  effectIt.effect('parses the maintenance validation reference for workflow watch completion', () =>
+    Effect.gen(function* () {
+      const root = Command.make('workflow-automation').pipe(
+        Command.withSubcommands([
+          makeNativeTaskPrWatchCommand(options =>
+            Effect.sync(() => {
+              expect(options).toMatchObject({
+                operation: 'complete',
+                maintenanceValidationRef: 'opaque-maintenance-reference',
+              });
+            }),
+          ),
+        ]),
+      );
+      yield* Command.runWith(root, {version: 'fixture'})([
+        'watch-pr',
+        '--caller-cwd',
+        '/fixture',
+        '--operation',
+        'complete',
+        '--maintenance-validation-ref',
+        'opaque-maintenance-reference',
+      ]);
+    }).pipe(provideTestLayer(cliTestLayer)),
+  );
+
+  effectIt.effect(
+    'finishes a three-phase PR stack after both dependent PRs retarget to the merge branch',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture(['one', 'two', 'three'], 'pr', false, false, true, {
+          one: {branch: 'feature/one', baseBranch: 'main'},
+          two: {branch: 'feature/two', baseBranch: 'origin/feature/one'},
+          three: {branch: 'feature/three', baseBranch: 'feature/two'},
+        });
+        const gitOutput = (args: readonly string[]) =>
+          f.git(args).pipe(Effect.map(result => EffectString.trim(result.stdout)));
+        const phases = yield* Effect.forEach(
+          [
+            ['one', 'main', 1158],
+            ['two', 'feature/one', 1161],
+            ['three', 'feature/two', 1162],
+          ] as const,
+          ([id, originalBase, number]) =>
+            Effect.gen(function* () {
+              const branch = `feature/${id}`;
+              if (id !== 'one') yield* f.git(['checkout', '-b', branch]);
+              if (id === 'two') yield* f.git(['update-ref', 'refs/remotes/origin/feature/one', 'feature/one']);
+              const watch = yield* publishOpenHistoricalPhase(f, id, originalBase, number);
+              const headSha = yield* gitOutput(['rev-parse', 'HEAD']);
+              const prUrl = `https://github.com/example/repo/pull/${number}`;
+              const current = yield* readNativeWatch(f.config, watch.watchId);
+              if (!current) throw new Error('Expected the active watch for the published phase.');
+              yield* writeSimulatedTaskWatch(f, current, watch, prUrl, headSha, true);
+              return {
+                id,
+                originalBase,
+                watch,
+                provider: {
+                  number,
+                  url: prUrl,
+                  baseRepository: 'example/repo',
+                  headRepository: 'example/repo',
+                  baseBranch: 'main',
+                  headBranch: branch,
+                  headSha,
+                  state: 'closed',
+                  merged: true,
+                  mergeCommit: '',
+                },
+              };
+            }),
+        );
+
+        const [first, second, third] = phases;
+        yield* f.git(['checkout', 'main']);
+        const published = yield* readNativeWorkflowState(f.config, 'native-run');
+        for (const phase of phases) {
+          yield* f.git(['merge', '--no-ff', phase.provider.headBranch, '-m', `Merge PR ${phase.provider.number}`]);
+          phase.provider.mergeCommit = yield* gitOutput(['rev-parse', 'HEAD']);
+          expect(yield* gitOutput(['rev-parse', 'HEAD^{tree}']), `validated merge tree for phase ${phase.id}`).toBe(
+            published?.state.cycle?.state.phases[phase.id]?.delivery?.validatedTree,
+          );
+        }
+        const commands = yield* CommandExecutor;
+        const reads: number[] = [];
+        let onRead: (() => Effect.Effect<void>) | undefined;
+        const withProvider = <A, E, R>(program: Effect.Effect<A, E, R>, overrides: Readonly<Record<number, object>>) =>
+          program.pipe(
+            Effect.provideService(
+              CommandExecutor,
+              CommandExecutor.of({
+                ...commands,
+                execute: (executable, args, options) => {
+                  if (executable === 'gh') {
+                    const observed = EffectOption.getOrUndefined(
+                      EffectArray.findFirst(phases, candidate =>
+                        args.includes(`repos/example/repo/pulls/${candidate.provider.number}`),
+                      ),
+                    );
+                    if (observed) {
+                      reads.push(observed.provider.number);
+                      return (onRead?.() ?? Effect.void).pipe(
+                        Effect.as({
+                          exitCode: 0,
+                          stderr: '',
+                          stdout: JSON.stringify({...observed.provider, ...overrides[observed.provider.number]}),
+                        }),
+                      );
+                    }
+                  }
+                  return commands.execute(executable, args, options);
+                },
+              }),
+            ),
+          );
+        const completionRequest = (phase: (typeof phases)[number]) => ({
+          operation: 'complete' as const,
+          runId: 'native-run',
+          callerCwd: f.repo,
+          validationRef: phase.watch.validationRef,
+          deliveryRef: phase.watch.deliveryRef,
+        });
+        const complete = (
+          phase: (typeof phases)[number],
+          overrides: Readonly<Record<number, object>> = {},
+          maintenanceValidationRef?: string,
+        ) =>
+          withProvider(
+            runNativeTaskActionCore(f.config, {
+              command: 'watch-pr',
+              ...completionRequest(phase),
+              ...(maintenanceValidationRef === undefined ? {} : {maintenanceValidationRef}),
+            }),
+            overrides,
+          );
+        const refuse = (phase: (typeof phases)[number], reason: string, overrides?: Readonly<Record<number, object>>) =>
+          Effect.gen(function* () {
+            const before = yield* f.fs.readFileString(f.statePath());
+            const result = yield* complete(phase, overrides).pipe(Effect.result);
+            if (result._tag !== 'Failure') throw new Error(`Expected phase ${phase.id} delivery refusal: ${reason}.`);
+            expect(result.failure.code, result.failure.message).toBe('pr-source-mismatch');
+            expect(result.failure.message).toContain(reason);
+            expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
+          });
+        const refuseExpirationDuringCompletion = (phase: (typeof phases)[number]) =>
+          Effect.gen(function* () {
+            const terminalWatch = yield* readNativeWatch(f.config, phase.watch.watchId);
+            const leaseUntil = terminalWatch?.envelope.state.consumer?.leaseUntil;
+            if (!leaseUntil) throw new Error('Expected a live consumer lease.');
+            const clock = yield* Clock.Clock;
+            let expired = false;
+            onRead = () =>
+              Effect.sync(() => {
+                expired = true;
+              });
+            const beforeExpiration = yield* f.fs.readFileString(f.statePath());
+            expect(
+              yield* complete(phase).pipe(
+                Effect.provideService(Clock.Clock, {
+                  currentTimeMillisUnsafe: () => (expired ? leaseUntil : clock.currentTimeMillisUnsafe()),
+                  currentTimeMillis: Effect.suspend(() =>
+                    expired ? Effect.succeed(leaseUntil) : clock.currentTimeMillis,
+                  ),
+                  currentTimeNanosUnsafe: () => clock.currentTimeNanosUnsafe(),
+                  currentTimeNanos: clock.currentTimeNanos,
+                  monotonicTimeNanosUnsafe: () => clock.monotonicTimeNanosUnsafe(),
+                  monotonicTimeNanos: clock.monotonicTimeNanos,
+                  sleep: duration => clock.sleep(duration),
+                }),
+                Effect.result,
+              ),
+            ).toMatchObject({failure: {code: 'watch-not-ready'}});
+            expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeExpiration);
+            onRead = undefined;
+          });
+        const expiredTerminalWatch = (phase: (typeof phases)[number]) =>
+          Effect.gen(function* () {
+            const watch = yield* readNativeWatch(f.config, phase.watch.watchId);
+            const owner = watch?.envelope.state.consumer;
+            const notification = watch?.envelope.notification;
+            const outbox = notification?.outbox;
+            if (!watch || !owner || !notification || !outbox?.attemptId)
+              throw new Error('Expected the owned terminal watch and queued host receipt.');
+            const now = yield* Clock.currentTimeMillis;
+            const {state} = watch.envelope;
+            const event = state.events[0];
+            const sequence = state.nextSequence;
+            const terminal = {
+              ...event,
+              sequence,
+              id: `${state.watchId}:${sequence}`,
+              source: 'watch' as const,
+              kind: 'merged',
+              key: state.watchId,
+              version: sha256HexSync(`state:merged:${state.head}`),
+              head: state.head,
+            };
+            const relayed = relayNativeWatch(
+              {...state, events: [event, terminal], nextSequence: sequence + 1},
+              owner.id,
+              now,
+            );
+            if (!relayed.delivery) throw new Error('Expected the terminal merge event to be relayed.');
+            const resolved = recordNativeWatchDispositions(
+              relayed.state,
+              owner.id,
+              relayed.delivery.id,
+              [
+                {
+                  eventId: event.id,
+                  status: 'ignored',
+                  reason: 'The earlier comment needs no action.',
+                  evidence: phase.provider.url,
+                },
+                {
+                  eventId: terminal.id,
+                  status: 'resolved',
+                  reason: 'The PR merge is verified.',
+                  evidence: phase.provider.url,
+                },
+              ],
+              now,
+            );
+            const acknowledged = acknowledgeNativeWatch(resolved, owner.id, relayed.delivery.id, now);
+            const expired = {...owner, lastSeenAt: now - owner.leaseMilliseconds - 1, leaseUntil: now - 1};
+            const envelope = {
+              ...watch.envelope,
+              notification:
+                phase.id === 'three'
+                  ? consumeNativeWatchNotification(notification, resolved, {
+                      consumerId: owner.id,
+                      wakeupId: owner.wakeupId,
+                      eventKey: outbox.key,
+                      attemptId: outbox.attemptId,
+                    })
+                  : {
+                      ...notification,
+                      notifiedThrough: event.sequence,
+                      lastReceipt: {
+                        key: outbox.key,
+                        receipt: outbox.attemptId,
+                        attemptId: outbox.attemptId,
+                        kind: 'queued-message' as const,
+                        at: now,
+                      },
+                      outbox: {
+                        ...outbox,
+                        key: `${state.watchId}:${sequence}:${sequence}`,
+                        first: sequence,
+                        last: sequence,
+                      },
+                    },
+            };
+            return {
+              watch,
+              acknowledged: {...envelope, state: {...acknowledged, consumer: expired}},
+              unacknowledged: {...envelope, state: {...resolved, consumer: expired}},
+            };
+          });
+        const writeAcknowledgedExpiredWatch = (phase: (typeof phases)[number]) =>
+          Effect.gen(function* () {
+            const {watch, acknowledged} = yield* expiredTerminalWatch(phase);
+            let revision = watch.revision;
+            if (phase.id === 'three') {
+              const earlierNotice = watch.envelope.notification;
+              const covered = acknowledged.notification?.outbox;
+              expect(covered?.last).toBeLessThan(acknowledged.state.acknowledged);
+              expect(covered?.consumedThrough).toBe(acknowledged.state.acknowledged);
+              const before = yield* f.fs.readFileString(f.statePath());
+              const unchangedNotice = yield* writeNativeWatch(
+                f.config,
+                {...acknowledged, notification: earlierNotice},
+                revision,
+              );
+              revision = unchangedNotice.revision;
+              expect(yield* complete(phase).pipe(Effect.result)).toMatchObject({failure: {code: 'watch-not-ready'}});
+              expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
+            }
+            const pendingWork =
+              phase.id === 'three'
+                ? {
+                    ...acknowledged,
+                    state: {
+                      ...acknowledged.state,
+                      work: EffectArray.map(acknowledged.state.work, item =>
+                        item.event.kind === 'merged' ? item : {...item, status: 'blocked' as const},
+                      ),
+                    },
+                  }
+                : acknowledged;
+            yield* writeNativeWatch(f.config, pendingWork, revision);
+            const receipt = acknowledged.notification?.outbox?.receipt;
+            if (phase.id === 'three') {
+              const collector = watch.envelope.collector;
+              if (!collector) throw new Error('Expected the terminal collector receipt.');
+              const notifier = yield* makeNativeWatchNotifier(f.config, phase.watch.watchId, collector.token);
+              yield* notifier.tick();
+              const retained = yield* readNativeWatch(f.config, phase.watch.watchId);
+              const notification = retained?.envelope.notification;
+              const outbox = notification?.outbox;
+              if (!retained || !notification || !outbox?.receipt || !outbox.attemptId)
+                throw new Error('Expected the retained coalesced host receipt.');
+              expect(outbox).toEqual(acknowledged.notification?.outbox);
+              expect(yield* complete(phase).pipe(Effect.result)).toMatchObject({failure: {code: 'watch-not-ready'}});
+              const settled = yield* writeNativeWatch(f.config, acknowledged, retained.revision);
+              const legacy = yield* writeNativeWatch(
+                f.config,
+                {
+                  ...settled.envelope,
+                  notification: {
+                    ...notification,
+                    notifiedThrough: acknowledged.state.acknowledged,
+                    outbox: null,
+                    lastReceipt: {
+                      key: outbox.key,
+                      receipt: outbox.receipt,
+                      attemptId: outbox.attemptId,
+                      kind: 'queued-message',
+                      at: outbox.createdAt,
+                    },
+                  },
+                },
+                settled.revision,
+              );
+              expect(yield* complete(phase).pipe(Effect.result)).toMatchObject({failure: {code: 'watch-not-ready'}});
+              yield* writeNativeWatch(f.config, settled.envelope, legacy.revision);
+            }
+            return receipt;
+          });
+        yield* refuse(second, 'no distinct canonical merged PR receipt');
+        yield* refuseExpirationDuringCompletion(first);
+        yield* writeAcknowledgedExpiredWatch(first);
+        expect(object(yield* complete(first))).toMatchObject({
+          status: 'delivered',
+          receipt: {pr: {baseBranch: 'main', state: 'merged'}},
+        });
+
+        const workflow = yield* readNativeWorkflowState(f.config, 'native-run');
+        const canonical = workflow?.state.cycle?.state.phases.two.delivery;
+        if (!canonical?.pr || !canonical.watch) throw new Error('Expected the open PR delivery.');
+        const beforeRawDelivery = yield* f.fs.readFileString(f.statePath());
+        const raw = yield* withProvider(
+          f.mutate('record-delivery', {
+            phaseId: 'two',
+            publication: canonical.publication,
+            delivery: {
+              ...canonical,
+              pr: {...canonical.pr, state: 'merged'},
+              watch: {...canonical.watch, state: 'terminal', evidence: 'caller-controlled terminal watch'},
+            },
+          }),
+          {},
+        ).pipe(Effect.result);
+        expect(raw).toMatchObject({failure: {code: 'pr-source-mismatch'}});
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeRawDelivery);
+
+        const firstParent = yield* gitOutput(['rev-parse', first.provider.mergeCommit + '^1']);
+        const sideMerge = yield* gitOutput([
+          'commit-tree',
+          second.provider.mergeCommit + '^{tree}',
+          '-p',
+          firstParent,
+          '-p',
+          first.provider.mergeCommit,
+          '-m',
+          'Same result tree, predecessor only on side history',
+        ]);
+        yield* refuse(second, 'target-side history', {[second.provider.number]: {mergeCommit: sideMerge}});
+        yield* refuse(second, 'differs from the validated phase tree', {
+          [second.provider.number]: {mergeCommit: first.provider.mergeCommit},
+        });
+        yield* refuse(second, 'Git could not read commit', {
+          [second.provider.number]: {
+            mergeCommit: yield* gitOutput(['rev-parse', second.provider.mergeCommit + '^{tree}']),
+          },
+        });
+        yield* refuse(second, 'GitHub did not return the merge commit', {
+          [second.provider.number]: {mergeCommit: null},
+        });
+        yield* refuse(second, 'same GitHub repository and target branch', {
+          [second.provider.number]: {baseBranch: 'release'},
+        });
+        yield* refuse(second, 'GitHub did not return the merge commit for predecessor one', {
+          [first.provider.number]: {mergeCommit: null},
+        });
+        yield* refuse(second, 'remote PR repository, branches, state and exact head', {
+          [second.provider.number]: {headBranch: 'unrelated'},
+        });
+        yield* refuse(third, 'no distinct canonical merged PR receipt');
+        yield* refuseExpirationDuringCompletion(second);
+        const {watch: liveSecond, acknowledged, unacknowledged} = yield* expiredTerminalWatch(second);
+        const expiredSecond = yield* writeNativeWatch(f.config, unacknowledged, liveSecond.revision);
+        const beforeUnacknowledged = yield* f.fs.readFileString(f.statePath());
+        expect(yield* complete(second).pipe(Effect.result)).toMatchObject({failure: {code: 'watch-not-ready'}});
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeUnacknowledged);
+        const oldNotification = acknowledged.notification;
+        if (!oldNotification) throw new Error('Expected the terminal notice.');
+        let incompleteRevision = expiredSecond.revision;
+        for (const incomplete of [
+          {...acknowledged, notification: {...oldNotification, recoveryRequested: true}},
+          {
+            ...acknowledged,
+            state: {
+              ...acknowledged.state,
+              work: EffectArray.map(acknowledged.state.work, item =>
+                item.event.kind === 'merged' ? item : {...item, status: 'blocked' as const},
+              ),
+            },
+          },
+        ]) {
+          const storedIncomplete = yield* writeNativeWatch(f.config, incomplete, incompleteRevision);
+          incompleteRevision = storedIncomplete.revision;
+          expect(yield* complete(second).pipe(Effect.result)).toMatchObject({failure: {code: 'watch-not-ready'}});
+          expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeUnacknowledged);
+        }
+        yield* writeNativeWatch(f.config, acknowledged, incompleteRevision);
+
+        // Create independent canonical maintenance evidence on the final phase's original published head.
+        const deliverMaintenance = Effect.gen(function* () {
+          const runId = 'maintenance-run';
+          const phaseId = 'three';
+          const project = 'maintenance-fixture';
+          const baseBranch = 'maintenance-base';
+          const originalHead = third.provider.headSha;
+          yield* f.git(['branch', baseBranch, originalHead]);
+          const branch = 'maintenance-work';
+          const checkout = f.path.join(f.path.dirname(f.repo), 'maintenance-repo');
+          yield* f.git(['worktree', 'add', '-b', branch, checkout, originalHead]);
+          const call = (input: unknown) =>
+            inCheckout(runWorkflowAutomation(f.config, input), checkout).pipe(
+              Effect.map(result => ('cycle' in result ? result.cycle : result)),
+            );
+          yield* call({
+            ...f.base('init', runId),
+            project,
+            featureId: 'feature',
+            profile: 'desktop',
+          });
+          const authoring = f.base('authoring', runId);
+          const document = {
+            ...f.document,
+            project,
+            phases: EffectArray.filter(f.document.phases, phase => phase.id === phaseId),
+            decisions: EffectArray.map(f.document.decisions, decision => ({...decision, affectedPhases: [phaseId]})),
+          };
+          const saved = object(
+            object(yield* call({...authoring, command: 'save', document, ready: true, expectedRevision: null}))
+              .authoring,
+          );
+          const plan = object(
+            object(
+              yield* call({
+                ...authoring,
+                command: 'export-dev-cycle',
+                uri: object(saved.root).uri,
+                delivery: 'commit',
+                bindings: {[phaseId]: {branch, baseBranch}},
+              }),
+            ).authoring,
+          );
+          const cycle = f.base('cycle', runId);
+          const initialize = object(yield* call({...cycle, command: 'inspect'}));
+          const initialized = object(
+            yield* call({
+              ...cycle,
+              command: 'init',
+              plan,
+              expectedRevision: initialize.revision,
+            }),
+          );
+          yield* call({...cycle, command: 'begin-phase', phaseId, expectedRevision: initialized.revision});
+          const maintenanceAction = (fields: object) =>
+            runNativeTaskActionCore(f.config, {runId, callerCwd: checkout, ...fields}).pipe(Effect.map(object));
+          const work = yield* maintenanceAction({command: 'work', packet});
+          yield* f.fs.writeFileString(f.path.join(checkout, 'source.ts'), 'export const fixture = "maintained";\n');
+          yield* runCommandEffect('git', ['-C', checkout, 'commit', '-am', 'Maintenance after publication']);
+          const maintainedHead = yield* gitOutput(['rev-parse', branch]);
+          const snapshot = yield* maintenanceAction({command: 'record-snapshot', workRef: work.workRef});
+          const snapshotRef = snapshot.snapshotRef;
+          yield* maintenanceAction({
+            command: 'record-review',
+            snapshotRef,
+            report: {
+              mode: 'full',
+              selected: ['correctness', 'simplicity'],
+              lanes: [
+                {name: 'correctness', status: 'complete'},
+                {name: 'simplicity', status: 'complete'},
+              ],
+              findings: [],
+            },
+          });
+          const validation = yield* maintenanceAction({
+            command: 'record-validation',
+            snapshotRef,
+            validation: {
+              checks: [{command: 'private maintenance check', result: 'passed', evidence: 'The fixture check passed.'}],
+              acceptance: [
+                {criterion: 'three works', result: 'passed', evidence: 'The maintained source was reviewed.'},
+              ],
+            },
+          });
+          const validationRef = String(validation.validationRef);
+          const delivered = yield* maintenanceAction({
+            command: 'deliver-commit',
+            validationRef,
+            commitEvidence: `Verified private maintenance commit ${maintainedHead}`,
+          });
+          expect(delivered).toMatchObject({status: 'delivered', receipt: {headSha: maintainedHead}});
+          const originalMerge = third.provider.mergeCommit;
+          third.provider.headSha = maintainedHead;
+          third.provider.mergeCommit = yield* gitOutput([
+            'commit-tree',
+            maintainedHead + '^{tree}',
+            '-p',
+            second.provider.mergeCommit,
+            '-p',
+            maintainedHead,
+            '-m',
+            'Merge maintained PR',
+          ]);
+          const current = yield* readNativeWatch(f.config, third.watch.watchId);
+          if (!current) throw new Error('Expected the original PR watch.');
+          yield* writeSimulatedTaskWatch(f, current, third.watch, third.provider.url, maintainedHead, true);
+          return {
+            validationRef,
+            deliveryRef: String(delivered.deliveryRef),
+            originalMerge,
+            runId,
+            source: f.path.join(checkout, 'source.ts'),
+          };
+        });
+        for (const phase of [second, third]) {
+          const maintenance = phase.id === 'three' ? yield* deliverMaintenance : undefined;
+          const predecessor = phase.id === 'two' ? first : second;
+          const pruned = phase.id === 'two' ? 'refs/remotes/origin/feature/one' : 'refs/heads/feature/two';
+          yield* f.git(['update-ref', '-d', pruned]);
+          if (phase.id === 'two')
+            expect(
+              yield* complete(second, {
+                [second.provider.number]: {baseBranch: second.originalBase},
+              }).pipe(Effect.result),
+            ).toMatchObject({failure: {code: 'base-ref-unverified'}});
+          const receipt =
+            phase.id === 'two'
+              ? acknowledged.notification?.outbox?.receipt
+              : yield* writeAcknowledgedExpiredWatch(phase);
+          if (!receipt) throw new Error('Expected the merged terminal host receipt.');
+          reads.length = 0;
+          const before = (yield* readNativeWorkflowState(f.config, 'native-run'))?.state.cycle?.state.phases[phase.id]
+            ?.delivery;
+          expect(before?.pr?.baseBranch).toBe(phase.originalBase);
+          expect(before?.pr?.state).toBe('open');
+          if (maintenance) {
+            const beforeAttempt = yield* f.fs.readFileString(f.statePath());
+            expect(yield* complete(phase).pipe(Effect.result)).toMatchObject({
+              failure: {code: 'pr-source-mismatch'},
+            });
+            expect(yield* complete(phase, {}, maintenance.deliveryRef).pipe(Effect.result)).toMatchObject({
+              failure: {code: 'maintenance-proof-unverified'},
+            });
+            expect(
+              yield* complete(
+                phase,
+                {[phase.provider.number]: {mergeCommit: maintenance.originalMerge}},
+                maintenance.validationRef,
+              ).pipe(Effect.result),
+            ).toMatchObject({failure: {code: 'maintenance-proof-unverified'}});
+            const refuseProof = <R>(
+              attempt: Effect.Effect<unknown, {readonly code: string; readonly message: string}, R>,
+              reason: string,
+            ) =>
+              Effect.gen(function* () {
+                const result = yield* attempt.pipe(Effect.result);
+                if (result._tag !== 'Failure') throw new Error(`Expected maintenance proof refusal: ${reason}.`);
+                expect(result.failure.code, result.failure.message).toBe('maintenance-proof-unverified');
+                expect(result.failure.message).toContain(reason);
+                expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeAttempt);
+              });
+            const attempt = complete(phase, {}, maintenance.validationRef);
+            const donor = (yield* readNativeWorkflowState(f.config, maintenance.runId))?.state;
+            const cycle = donor?.cycle;
+            if (!donor || !cycle) throw new Error('Expected the commit-delivered donor run.');
+            const baseline = cycle.baselines[phase.id];
+            if (!baseline) throw new Error('Expected the maintenance snapshot baseline.');
+            const donorFile = f.statePath(maintenance.runId);
+            const donorBytes = yield* f.fs.readFileString(donorFile);
+            const foreign = f.path.join(f.path.dirname(f.repo), 'foreign-repo');
+            yield* f.git(['clone', '--quiet', f.repo, foreign]);
+            for (const [candidate, reason] of [
+              [
+                {
+                  ...cycle,
+                  snapshots: EffectArray.map(cycle.snapshots, entry => ({
+                    ...entry,
+                    snapshot: {...entry.snapshot, scopeBase: entry.snapshot.tree},
+                  })),
+                },
+                'original delivered PR head as its comparison base',
+              ],
+              [{...cycle, reviews: []}, 'independent review with no blocker or waiver'],
+              [
+                {
+                  ...cycle,
+                  baselines: {...cycle.baselines, [phase.id]: {...baseline, repo: foreign}},
+                  snapshots: EffectArray.map(cycle.snapshots, entry => ({
+                    ...entry,
+                    snapshot: {...entry.snapshot, repo: foreign},
+                  })),
+                },
+                'different Git repository',
+              ],
+            ] as const) {
+              yield* f.fs.writeFileString(donorFile, serializeNativeWorkflowState({...donor, cycle: candidate}));
+              yield* refuseProof(attempt, reason).pipe(
+                Effect.ensuring(f.fs.writeFileString(donorFile, donorBytes).pipe(Effect.orDie)),
+              );
+            }
+            const cleanSource = yield* f.fs.readFileString(maintenance.source);
+            const dirtyDonor = f.fs.writeFileString(maintenance.source, cleanSource + '// uncommitted edit\n');
+            const restoreDonor = f.fs.writeFileString(maintenance.source, cleanSource).pipe(Effect.orDie);
+            yield* dirtyDonor;
+            yield* refuseProof(attempt, 'maintenance checkout must remain clean').pipe(Effect.ensuring(restoreDonor));
+            reads.length = 0;
+            onRead = () => dirtyDonor.pipe(Effect.orDie);
+            yield* refuseProof(attempt, 'maintenance checkout must remain clean').pipe(
+              Effect.ensuring(restoreDonor),
+              Effect.ensuring(
+                Effect.sync(() => {
+                  onRead = undefined;
+                }),
+              ),
+            );
+            expect(reads).toEqual([phase.provider.number, predecessor.provider.number]);
+            reads.length = 0;
+          }
+          const completeOverMcp = (maintenanceValidationRef: string) =>
+            Effect.gen(function* () {
+              const mcp = new EffectMcpServerAdapter('test', '1', 'fixture');
+              registerWorkflowTaskTool(mcp, f.config);
+              const response = yield* withProvider(
+                mcp.invokeTool('workflow_task_watch_pr', {...completionRequest(phase), maintenanceValidationRef}),
+                {},
+              );
+              expect(response.isError, JSON.stringify(response.content)).not.toBe(true);
+              return object(response.structuredContent);
+            });
+          const completed = maintenance
+            ? yield* completeOverMcp(maintenance.validationRef)
+            : object(yield* complete(phase));
+          expect(completed).toMatchObject({
+            status: 'delivered',
+            receipt: {
+              headSha: before?.headSha,
+              validatedTree: before?.validatedTree,
+              pr: {...before?.pr, state: 'merged'},
+              providerIdentity: before?.providerIdentity,
+              userAuthority: before?.userAuthority,
+              watch: {
+                state: 'terminal',
+                consumerId: phase.watch.consumerId,
+                headSha: phase.provider.headSha,
+                evidence: expect.stringContaining(`;host-receipt:${receipt}`),
+              },
+            },
+          });
+          if (maintenance) {
+            expect(object(object(completed.receipt).watch).evidence).toContain(
+              ';maintenance-proof:maintenance-run:three:',
+            );
+          }
+          expect(reads).toEqual([phase.provider.number, predecessor.provider.number]);
+          const replay = maintenance
+            ? yield* completeOverMcp(maintenance.validationRef)
+            : object(yield* complete(phase));
+          expect(replay).toMatchObject({status: 'delivered', replayed: true, receipt: completed.receipt});
+          expect(reads).toEqual([phase.provider.number, predecessor.provider.number]);
+        }
+        const request = {
+          command: 'finish' as const,
+          runId: 'native-run',
+          callerCwd: f.repo,
+          proposal: {
+            ...proposal,
+            phaseEvidence: EffectArray.map(phases, phase => ({
+              id: phase.id,
+              acceptance: [
+                {
+                  criterion: phase.id + ' works',
+                  evidence:
+                    phase.id === 'three'
+                      ? 'The merge matches the independently reviewed maintenance tree.'
+                      : 'The exact validated source merged.',
+                },
+              ],
+            })),
+          },
+        };
+        const finish = (input: {prepareRef?: string; finishRef?: string}) => {
+          const {proposal: closeoutProposal, ...base} = request;
+          return runNativeTaskAction(f.config, {
+            ...base,
+            ...input,
+            ...(input.finishRef ? {} : {proposal: closeoutProposal}),
+          }).pipe(Effect.provideService(CurrentNativeJobAutoLaunch, false), Effect.map(object));
+        };
+        const prepare = yield* finish({});
+        expect(prepare).toMatchObject({status: 'pending', stage: 'prepare'});
+        const prepareRef = String(prepare.prepareRef);
+        const prepareJobId = decodeNativeTaskActionRef(prepareRef)?.jobId;
+        if (!prepareJobId) throw new Error('Expected a closeout prepare job.');
+        expect(object(yield* runNativeJobWorker(f.config, 'native-run', prepareJobId, f.call)).status).toBe(
+          'completed',
+        );
+        const finishing = yield* finish({prepareRef});
+        expect(finishing).toMatchObject({status: 'pending', stage: 'finish'});
+        const finishRef = String(finishing.finishRef);
+        const finishJobId = decodeNativeTaskActionRef(finishRef)?.jobId;
+        if (!finishJobId) throw new Error('Expected a closeout finish job.');
+        expect(object(yield* runNativeJobWorker(f.config, 'native-run', finishJobId, f.call)).status).toBe('completed');
+        expect(yield* finish({finishRef})).toMatchObject({status: 'complete'});
+      }).pipe(run),
+    process.platform === 'win32' ? {timeout: 180_000} : windowsRealGitFixtureTimeout,
   );
 
   effectIt.effect(

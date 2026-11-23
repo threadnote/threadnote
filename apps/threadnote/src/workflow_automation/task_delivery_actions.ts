@@ -1,25 +1,38 @@
 import {
   NativeCycleDeliverySchema,
+  type NativeCycleDelivery,
   nextNativeCycle,
   type NativeCycleValidation,
 } from '@threadnote/workflow-automations/cycle';
-import {nativeCycleCoverage, nativeCycleCoverageAccepts} from '@threadnote/workflow-automations/cycle-runtime';
+import {
+  nativeCycleCoverage,
+  nativeCycleCoverageAccepts,
+  nativeCycleLatestSnapshot,
+  nativeCycleReviewBasis,
+} from '@threadnote/workflow-automations/cycle-runtime';
+import {validateNativeCycleReview} from '@threadnote/workflow-automations/cycle-review';
 import {decodeNativeTaskActionRef, encodeNativeTaskActionRef} from '@threadnote/workflow-automations/task';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {runCommandEffect} from '@threadnote/platform/command';
-import {Effect, Array as EffectArray, FileSystem, Option, Path, Predicate, Schema} from 'effect';
+import {Cause, Effect, Array as EffectArray, FileSystem, Option, Path, Predicate, Schema} from 'effect';
 import * as Clock from 'effect/Clock';
 import * as EffectString from 'effect/String';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {
   bindNativeCycleDeliveryBase,
+  CurrentNativeMaintenanceProof,
+  CurrentNativeTerminalDeliveryWatch,
+  nativeMaintenanceProofError,
+  readNativeCycleGitProof,
   verifyNativeCycleDeliveryRepository,
+  verifyNativePrRepository,
   verifyNativeCyclePrDeliveryIdentity,
 } from './cycle_delivery.js';
+import {captureNativeCycleSource} from './cycle_git.js';
 import {runWorkflowAutomation} from './index.js';
 import {stopSupersededStandalonePrWatch} from './standalone_pr_watch.js';
-import {readNativeWorkflowState} from './store.js';
+import {readNativeWorkflowRevision, readNativeWorkflowState, withNativeWorkflowLock} from './store.js';
 import {readNativeTaskView} from './task.js';
 import {runNativeWatch} from './watch.js';
 import {
@@ -413,7 +426,214 @@ const validationRefMatches = (
     proof.delivery === undefined ? [proof.validation] : [proof.validation, unbound, {...unbound, head: sourceHead}];
   return EffectArray.some(forms, form => sha256HexSync(stableJson(form)) === digest);
 };
+const maintenanceMarker =
+  /;maintenance-proof:([A-Za-z0-9._-]+):([A-Za-z0-9._-]+):([A-Za-z0-9._-]+):([a-f0-9]{64}):[a-f0-9]{64}(?=;host-receipt:)/u;
+
+const verifyNativeTaskMaintenance = Effect.fn('workflowAutomation.task.verifyMaintenance')(function* (
+  config: RuntimeConfig,
+  originRunId: string,
+  checkout: string,
+  published: NativeCycleDelivery,
+  maintainedHead: string,
+  reference: string,
+) {
+  const invalid = nativeMaintenanceProofError;
+  const ref = decodeNativeTaskActionRef(reference);
+  if (
+    ref?.kind !== 'validation' ||
+    ref.runId === originRunId ||
+    !ref.phaseId ||
+    !ref.phaseHash ||
+    !ref.snapshotId ||
+    !ref.sourceHead ||
+    !ref.sourceTree ||
+    !published.pr
+  )
+    return yield* invalid('Use an exact validation reference from a separate reviewed maintenance task.');
+  const donor = yield* readNativeWorkflowState(config, ref.runId).pipe(
+    Effect.mapError(() => invalid('The canonical maintenance task state could not be read.')),
+  );
+  const runtime = donor?.state.cycle;
+  const phase = runtime?.state.phases[ref.phaseId];
+  if (
+    !donor ||
+    !runtime ||
+    ref.generationHash !== sha256HexSync(donor.state.generation) ||
+    runtime.state.plan.delivery !== 'commit' ||
+    phase?.delivery?.delivery !== 'commit' ||
+    phase.status !== 'published' ||
+    phase.phaseHash !== ref.phaseHash ||
+    phase.head !== maintainedHead ||
+    phase.head !== ref.sourceHead ||
+    phase.tree !== ref.sourceTree ||
+    phase.tree === published.validatedTree ||
+    phase.delivery.headSha !== maintainedHead ||
+    phase.delivery.validatedTree !== phase.tree ||
+    !phase.delivery.commitEvidence ||
+    !phase.validation ||
+    phase.validation.waiverId !== undefined ||
+    phase.validation.snapshotTree !== phase.tree ||
+    phase.validation.reviewTree !== phase.tree ||
+    !validationRefMatches(phase, ref.payloadDigest, ref.sourceHead)
+  )
+    return yield* invalid('The maintenance task does not retain the exact unwaived validation and commit delivery.');
+  const source = nativeCycleLatestSnapshot(runtime, ref.phaseId, ref.phaseHash);
+  const snapshot = source?.snapshot;
+  const comparison = snapshot?.comparisonEvidence;
+  if (
+    !source ||
+    !snapshot ||
+    snapshot.snapshotId !== ref.snapshotId ||
+    snapshot.head !== maintainedHead ||
+    snapshot.tree !== phase.tree ||
+    snapshot.dirty === true ||
+    source.incoming.length !== 0 ||
+    !snapshot.pinnedRef ||
+    !comparison ||
+    snapshot.declaredBaseHead !== published.headSha ||
+    snapshot.scopeBase !== comparison.baseTree ||
+    comparison.baseTree !== published.validatedTree
+  )
+    return yield* invalid(
+      'The current maintenance snapshot must pin the original delivered PR head as its comparison base.',
+    );
+  const coverage = nativeCycleCoverage(runtime, snapshot);
+  if (coverage._tag !== 'reviewed' || coverage.match !== 'exact' || coverage.blocked || coverage.blockingWaiver)
+    return yield* invalid('The exact maintenance snapshot needs independent review with no blocker or waiver.');
+  yield* Effect.try({
+    try: () => validateNativeCycleReview(snapshot, coverage.review, nativeCycleReviewBasis(runtime, snapshot)),
+    catch: () => invalid('The maintenance snapshot does not have a valid independent review.'),
+  });
+  const git = (repo: string, args: readonly string[], maxOutputBytes?: number) =>
+    readNativeCycleGitProof(repo, args, undefined, maxOutputBytes).pipe(
+      Effect.flatMap(result =>
+        result.exitCode !== 0 || EffectString.trim(result.stderr)
+          ? Effect.fail(invalid('Git could not verify the maintenance checkout.'))
+          : Effect.succeed(EffectString.trim(result.stdout)),
+      ),
+      Effect.mapError(() => invalid('Git could not verify the maintenance checkout.')),
+    );
+  const fs = yield* FileSystem.FileSystem;
+  const realPath = (path: string) =>
+    fs.realPath(path).pipe(Effect.mapError(() => invalid('The canonical maintenance checkout is unavailable.')));
+  const commonDir = (repo: string) =>
+    git(repo, ['rev-parse', '--path-format=absolute', '--git-common-dir']).pipe(Effect.flatMap(realPath));
+  const expectedCommonDir = yield* commonDir(checkout);
+  const sourceObjects = [
+    'HEAD',
+    'HEAD^{tree}',
+    comparison.baseRef,
+    published.headSha + '^{tree}',
+    comparison.sourceRef,
+    snapshot.pinnedRef,
+  ];
+  const expectedObjects = [
+    maintainedHead,
+    phase.tree,
+    published.headSha,
+    comparison.baseTree,
+    maintainedHead,
+    phase.tree,
+  ];
+  const verifyLocalSource = Effect.gen(function* () {
+    if ((yield* commonDir(snapshot.repo)) !== expectedCommonDir)
+      return yield* invalid('The maintenance checkout belongs to a different Git repository.');
+    // Git status can omit entries whose index flags mask worktree changes. Refuse that view.
+    const tracked = yield* git(snapshot.repo, ['-c', 'core.quotePath=true', 'ls-files', '-v'], 4 * 1024 * 1024);
+    if (/^(?:S|[a-z]) /mu.test(tracked))
+      return yield* invalid('The maintenance index must not mask tracked worktree changes.');
+    const status = yield* git(snapshot.repo, [
+      '-c',
+      'core.fsmonitor=false',
+      '-c',
+      'core.trustctime=true',
+      '-c',
+      'core.checkStat=default',
+      '-c',
+      'core.ignoreStat=false',
+      'status',
+      '--porcelain=v1',
+      '--untracked-files=all',
+      '--ignore-submodules=none',
+    ]);
+    if (status !== '') return yield* invalid('The maintenance checkout must remain clean.');
+    const objects = yield* git(snapshot.repo, ['rev-parse', '--revs-only', '--end-of-options', ...sourceObjects]);
+    if (EffectArray.join(EffectString.split(objects, /\r?\n/u), '\n') !== EffectArray.join(expectedObjects, '\n'))
+      return yield* invalid('The maintenance checkout must retain the exact pinned source, tree, and comparison base.');
+  });
+  yield* verifyLocalSource;
+  yield* verifyNativePrRepository(snapshot.repo, published.pr.url).pipe(
+    Effect.mapError(() => invalid('The maintenance checkout does not bind the same GitHub repository.')),
+  );
+  const captured = yield* captureNativeCycleSource(snapshot.repo, 'HEAD').pipe(
+    Effect.mapError(() => invalid('The maintenance checkout could not be independently captured.')),
+  );
+  if (captured.head !== maintainedHead || captured.tree !== phase.tree)
+    return yield* invalid('The maintenance checkout must remain clean at the reviewed committed source.');
+  // The caller holds the donor run lock across this fence and the target state write.
+  const recheck = Effect.gen(function* () {
+    const revision = yield* readNativeWorkflowRevision(config, ref.runId).pipe(
+      Effect.mapError(() => invalid('The canonical maintenance task state could not be read.')),
+    );
+    if (revision !== donor.revision)
+      return yield* invalid('The canonical maintenance validation changed before terminal delivery.');
+    yield* verifyLocalSource;
+  }).pipe(
+    Effect.timeout('10 seconds'),
+    Effect.catchIf(Cause.isTimeoutError, () => Effect.fail(invalid('The maintenance source recheck timed out.'))),
+  );
+  const digest = sha256HexSync(stableJson({revision: donor.revision, head: maintainedHead, tree: phase.tree}));
+  const marker = `;maintenance-proof:${ref.runId}:${ref.phaseId}:${ref.snapshotId}:${sha256HexSync(reference)}:${digest}`;
+  return {runId: ref.runId, head: maintainedHead, tree: phase.tree, marker, recheck};
+});
+
 const requiredWatchSources = ['comments', 'reviews', 'threads', 'checks', 'statuses'];
+
+const watchWorkDrained = (state: StoredWatch['envelope']['state']) =>
+  state.events.length === 0 &&
+  state.delivery === null &&
+  state.acknowledged === state.nextSequence - 1 &&
+  !EffectArray.some(state.work, item => item.status === 'open' || item.status === 'blocked');
+
+/** Retain the host receipt for the acknowledged terminal range, even if the outbox is still queued. */
+const acknowledgedMergedWatchReceipt = ({state, collector, notification}: StoredWatch['envelope']) => {
+  if (
+    state.prState !== 'merged' ||
+    collector?.status !== 'terminal' ||
+    collector.reason !== 'merged' ||
+    !notification ||
+    notification.recoveryRequested ||
+    !state.lastAck ||
+    !watchWorkDrained(state)
+  )
+    return undefined;
+  const {outbox, lastReceipt} = notification;
+  const coversMergedRange = (first: number, last: number) =>
+    last === state.acknowledged &&
+    EffectArray.some(
+      state.work,
+      ({event}) =>
+        event.source === 'watch' &&
+        event.kind === 'merged' &&
+        event.key === state.watchId &&
+        !event.removed &&
+        event.head === state.head &&
+        event.sequence >= first &&
+        event.sequence <= last,
+    );
+  if (outbox) {
+    // An authenticated Codex arrival can claim backlog beyond its original notice range.
+    const through = outbox.status === 'queued' ? Math.max(outbox.last, outbox.consumedThrough ?? 0) : outbox.last;
+    return (outbox.status === 'queued' || outbox.status === 'completed') &&
+      !outbox.error &&
+      coversMergedRange(outbox.first, through)
+      ? outbox.receipt
+      : undefined;
+  }
+  if (!lastReceipt) return undefined;
+  const [, first, last] = EffectString.split(lastReceipt.key, ':');
+  return coversMergedRange(Number(first), Number(last)) ? lastReceipt.receipt : undefined;
+};
 
 const standaloneWatchRoute =
   'To monitor the PR now, call watch-pr with prUrl and the host wakeup (runId optional) for a monitor-only standalone watch.';
@@ -723,12 +943,19 @@ export const runNativeTaskPrWatch = (
         threadId: inputWakeup.threadId,
       };
     const validatedPhaseId = validation.phaseId;
-    const watchReady = (candidate: StoredWatch, now: number) => {
+    const watchReady = (candidate: StoredWatch, now: number, hasRetainedWatch = false) => {
       const state = candidate.envelope.state;
       const notification = candidate.envelope.notification;
       const consumer = state.consumer;
       const terminal = state.prState === 'merged';
-      const hostReceipt = notification?.lastReceipt?.receipt ?? notification?.outbox?.receipt;
+      const consumerExpired = consumer !== null && consumer.leaseUntil <= now;
+      const settledReceipt =
+        consumerExpired && hasRetainedWatch && terminal
+          ? acknowledgedMergedWatchReceipt(candidate.envelope)
+          : undefined;
+      const hostReceipt = consumerExpired
+        ? settledReceipt
+        : (notification?.lastReceipt?.receipt ?? notification?.outbox?.receipt);
       // The watch head is the last sweep. A merged head can descend from the delivered head; record-delivery
       // verifies that ancestry. Fresh provider verification binds an open PR head before its receipt.
       const head = terminal ? state.head : embeddedDelivery.headSha;
@@ -748,7 +975,7 @@ export const runNativeTaskPrWatch = (
         !consumer ||
         consumer.id !== consumerId ||
         consumer.wakeupId !== wakeupId ||
-        consumer.leaseUntil <= now ||
+        (consumerExpired && !settledReceipt) ||
         !notification ||
         notification.consumerId !== consumer.id ||
         notification.wakeupId !== consumer.wakeupId
@@ -760,15 +987,6 @@ export const runNativeTaskPrWatch = (
       Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis;
         const terminal = watch.envelope.state.prState === 'merged';
-        const bound = watchReady(watch, now);
-        if (!bound)
-          return yield* fail(
-            'watch-not-ready',
-            terminal
-              ? 'A merged PR needs its terminal source-complete watch, live consumer and actual host receipt before delivery.'
-              : 'An open PR needs a started watch with its live consumer and host wakeup registration before delivery.',
-          );
-        const {consumer, hostReceipt, head} = bound;
         const current = yield* readNativeWorkflowState(config, request.runId);
         if (!current?.state.cycle) return yield* fail('cycle-not-found', 'This run no longer has its canonical cycle.');
         const cycleState = current.state.cycle.state;
@@ -792,6 +1010,19 @@ export const runNativeTaskPrWatch = (
           );
         const planPhase = planPhases[0];
         const canonicalReceipt = currentProof.delivery;
+        const hasRetainedWatch =
+          request.operation === 'complete' &&
+          canonicalReceipt?.delivery === 'pr' &&
+          canonicalReceipt.watch?.consumerId === consumerId;
+        const bound = watchReady(watch, now, hasRetainedWatch);
+        if (!bound)
+          return yield* fail(
+            'watch-not-ready',
+            terminal
+              ? 'A merged PR needs a source-complete terminal watch with a host receipt and either its live consumer or acknowledged, settled terminal work.'
+              : 'An open PR needs a started watch with its live consumer and host wakeup registration before delivery.',
+          );
+        const {consumer, hostReceipt, head} = bound;
         if (!canonicalReceipt && (!embeddedDelivery.userAuthority || !embeddedDelivery.providerIdentity))
           return yield* fail(
             'user-authority-required',
@@ -829,9 +1060,38 @@ export const runNativeTaskPrWatch = (
         const path = yield* Path.Path;
         const home = yield* fs.realPath(config.agentContextHome);
         const stateDir = path.join(home, 'workflow-automations', 'native-watch-v1');
+        const maintenanceRef = request.maintenanceValidationRef;
+        const retainedMarker =
+          canonicalPr?.state === 'merged' ? maintenanceMarker.exec(canonicalReceipt?.watch?.evidence ?? '') : null;
+        let maintenance: Effect.Success<ReturnType<typeof verifyNativeTaskMaintenance>> | undefined;
+        let recheckMaintenance: Effect.Effect<void, ReturnType<typeof nativeMaintenanceProofError>> | undefined;
+        if (maintenanceRef !== undefined) {
+          if (canonicalPr?.state === 'merged') {
+            if (retainedMarker?.[4] !== sha256HexSync(maintenanceRef))
+              return yield* nativeMaintenanceProofError('The merged receipt retains different maintenance evidence.');
+          } else {
+            if (!terminal || canonicalPr?.state !== 'open' || !canonicalReceipt)
+              return yield* nativeMaintenanceProofError(
+                'Maintenance evidence requires an already published PR and terminal watch.',
+              );
+            const verify = verifyNativeTaskMaintenance(
+              config,
+              request.runId,
+              checkout,
+              canonicalReceipt,
+              head,
+              maintenanceRef,
+            );
+            const verified = yield* verify;
+            maintenance = verified;
+            const services = yield* Effect.context<Effect.Services<typeof verified.recheck>>();
+            recheckMaintenance = verified.recheck.pipe(Effect.provideContext(services));
+          }
+        }
+        const marker = maintenance?.marker ?? retainedMarker?.[0] ?? '';
         // An open PR records its verified watch registration; only terminal completion has a host receipt to cite.
         const evidence = terminal
-          ? `native-watch-revision:${watch.revision};host-receipt:${hostReceipt}`
+          ? `native-watch-revision:${watch.revision}${marker};host-receipt:${hostReceipt}`
           : `native-watch-revision:${watch.revision};consumer:${consumer.id};wakeup:${consumer.wakeupId}`;
         const watchEvidence = {
           prUrl: referencedPr.url,
@@ -945,7 +1205,12 @@ export const runNativeTaskPrWatch = (
         const {baseRefBinding: _baseRefBinding, ...unboundReceiptPr} = finalReceiptPr;
         const baseRefReceipt =
           canonicalReceipt?.delivery === 'pr' ? {...finalReceipt, pr: unboundReceiptPr} : finalReceipt;
-        const checkedBaseReceipt = yield* bindNativeCycleDeliveryBase(checkout, planPhase.baseBranch, baseRefReceipt);
+        // Historical terminal delivery verifies the original base within the cycle. GitHub
+        // retargets can delete that ref, so only the cycle may admit the canonical binding.
+        const completesPublished = previouslyPublished && terminal;
+        const checkedBaseReceipt = completesPublished
+          ? finalReceipt
+          : yield* bindNativeCycleDeliveryBase(checkout, planPhase.baseBranch, baseRefReceipt);
         if (
           canonicalPr?.baseRefBinding &&
           stableJson(checkedBaseReceipt.pr?.baseRefBinding) !== stableJson(canonicalPr.baseRefBinding)
@@ -954,7 +1219,7 @@ export const runNativeTaskPrWatch = (
             'base-ref-unverified',
             'The historical PR base binding no longer matches its canonical receipt.',
           );
-        const recorded = yield* withNativeWatchControlLock(
+        const persist = withNativeWatchControlLock(
           config,
           watchId,
           Effect.gen(function* () {
@@ -982,6 +1247,26 @@ export const runNativeTaskPrWatch = (
                     publication: embeddedDelivery.publication,
                     expectedRevision: latest.revision,
                   }),
+                ).pipe(
+                  Effect.provideService(
+                    CurrentNativeTerminalDeliveryWatch,
+                    completesPublished
+                      ? delivery =>
+                          Effect.gen(function* () {
+                            if (recheckMaintenance) yield* recheckMaintenance;
+                            const currentTime = yield* Clock.currentTimeMillis;
+                            if (
+                              stableJson(delivery) !== stableJson(finalReceipt) ||
+                              watchReady(latestWatch, currentTime, hasRetainedWatch)?.hostReceipt !== hostReceipt
+                            )
+                              return yield* fail(
+                                'watch-not-ready',
+                                'The exact terminal watch needs its host receipt and either a live consumer or acknowledged, settled terminal work at delivery.',
+                              );
+                          })
+                      : undefined,
+                  ),
+                  Effect.provideService(CurrentNativeMaintenanceProof, maintenance),
                 ),
                 checkout,
               ),
@@ -999,6 +1284,10 @@ export const runNativeTaskPrWatch = (
             return {result, persisted};
           }),
         );
+        // Maintenance runs deliver commits, so the donor lock precedes the original PR run lock.
+        const recorded = maintenance
+          ? yield* withNativeWorkflowLock(config, maintenance.runId, false, persist)
+          : yield* persist;
         return {
           status: 'delivered',
           replayed: false,
@@ -1114,12 +1403,7 @@ export const runNativeTaskPrWatch = (
         return yield* fail('watch-identity-conflict', 'The supplied wakeup does not match the registered host.');
       wakeup = registered;
     }
-    const terminalEmpty =
-      watch.envelope.state.prState !== 'open' &&
-      watch.envelope.state.events.length === 0 &&
-      watch.envelope.state.delivery === null &&
-      watch.envelope.state.acknowledged === watch.envelope.state.nextSequence - 1 &&
-      !EffectArray.some(watch.envelope.state.work, item => item.status === 'open' || item.status === 'blocked');
+    const terminalEmpty = watch.envelope.state.prState !== 'open' && watchWorkDrained(watch.envelope.state);
     if (
       terminalEmpty &&
       (request.operation === 'relay' || request.operation === 'ack' || request.operation === 'disposition')
