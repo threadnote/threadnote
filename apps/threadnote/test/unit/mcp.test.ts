@@ -24,9 +24,10 @@ import {
 } from '@threadnote/threadnote/agent_integration/index';
 import {commandLauncherPath, installCommandShim, renderCommandShim} from '@threadnote/threadnote/command-shim';
 import {hasActiveMcpLauncher} from '../../src/mcp/codex_broker_rotation.js';
+import {describeCodexMcpConfiguration} from '../../src/mcp/install.js';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {activateStandaloneRelease} from '@threadnote/threadnote/installations';
-import {CommandExecutor} from '@threadnote/platform/command';
+import {CommandExecutor, formatShellCommand, shellQuote} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {repairRegisteredMcpClients, runUninstall} from '@threadnote/threadnote/lifecycle';
 import {
@@ -181,12 +182,18 @@ describe('MCP toolsets', () => {
       const testSystem = SystemInfo.of({
         ...baseSystem,
         platform: 'linux',
-        environment: () => ({...baseSystem.environment(), THREADNOTE_BIN_DIR: "/opt/threadnote's bin"}),
+        environment: () => ({
+          ...baseSystem.environment(),
+          CODEX_HOME: '/home/example/codex home',
+          THREADNOTE_BIN_DIR: "/opt/threadnote's bin",
+        }),
       });
       const preview = yield* captureConsole(runMcpInstall(config, 'codex', {name: 'team-memory'})).pipe(
         Effect.provideService(SystemInfo, testSystem),
       );
-      expect(preview.output).toContain('threadnote mcp-install codex --apply --name team-memory');
+      expect(preview.output).toContain(
+        'Set CODEX_HOME to the intended Codex home, then run `threadnote mcp-install codex --apply --name team-memory`',
+      );
       expect(preview.output).toContain('team-memory');
       expect(preview.output).not.toContain('codex mcp add');
       expect(preview.output).toContain(`'${join("/opt/threadnote'\"'\"'s bin", 'threadnote-mcp-server')}'`);
@@ -1182,6 +1189,17 @@ const firstCodexRelease = '6.4.1-dev.aaaaaaaaaaaa';
 const secondCodexRelease = '6.4.1-dev.bbbbbbbbbbbb';
 
 describe('Codex receipt-owned release marker', () => {
+  it.each([
+    {hostRoot: '/home/example/codex home', expectedHome: 'the recorded Codex home'},
+    {hostRoot: '/var/codex home', expectedHome: "'/var/codex home'"},
+  ])('describes the missing MCP entry for $hostRoot', ({hostRoot, expectedHome}) => {
+    expect(describeCodexMcpConfiguration('team-memory', {state: 'missing', hostRoot})).toEqual({
+      detail: `team-memory is missing from the recorded Codex home. Set CODEX_HOME to ${expectedHome}, then run \`threadnote mcp-install codex --apply --name team-memory\`.`,
+      name: 'codex MCP',
+      status: 'warn',
+    });
+  });
+
   effectIt.effect('verifies the primary Windows CMD launcher without POSIX executable bits', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -1439,11 +1457,12 @@ describe('Codex receipt-owned release marker', () => {
         });
 
         yield* fs.remove(target);
+        const formattedHome = formatShellCommand(hostRoot, []);
+        const expectedHome = formattedHome === shellQuote(hostRoot) ? formattedHome : 'the recorded Codex home';
+        const instruction = `Set CODEX_HOME to ${expectedHome}, then run \`threadnote mcp-install codex --apply --name threadnote\``;
         const missing = yield* inFixture(mcpConfigurationChecks(config));
         expect(missing).toContainEqual({
-          detail: expect.stringContaining(
-            `Set CODEX_HOME to ${hostRoot}, then run \`threadnote mcp-install codex --apply --name threadnote\``,
-          ),
+          detail: expect.stringContaining(instruction),
           name: 'codex MCP',
           status: 'warn',
         });
@@ -1451,9 +1470,7 @@ describe('Codex receipt-owned release marker', () => {
         expect(yield* inFixture(reconcileActivatedCodexMcp(config, secondCodexRelease))).toMatchObject({
           configuration: 'deferred',
           refresh: 'pending',
-          reason: expect.stringContaining(
-            `Set CODEX_HOME to ${hostRoot}, then run \`threadnote mcp-install codex --apply --name threadnote\``,
-          ),
+          reason: expect.stringContaining(instruction),
         });
         expect(yield* fs.exists(target)).toBe(false);
 
