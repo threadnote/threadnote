@@ -1,0 +1,163 @@
+name: Graph vector prototype functional validation
+
+on:
+  push:
+    branches: [codex/graph-vector-rust-prototype]
+
+permissions:
+  contents: read
+
+env:
+  BUN_VERSION: 1.4.4
+  RUST_VERSION: 1.89.0
+
+jobs:
+  functional:
+    name: Functional · ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {target: bun-darwin-arm64, os: macos-15, rust: aarch64-apple-darwin, bun: bun-darwin-aarch64}
+          - {target: bun-darwin-x64, os: macos-15-intel, rust: x86_64-apple-darwin, bun: bun-darwin-x64}
+          - {target: bun-linux-arm64, os: ubuntu-24.04-arm, rust: aarch64-unknown-linux-gnu, container: gnu}
+          - {target: bun-linux-arm64-musl, os: ubuntu-24.04-arm, rust: aarch64-unknown-linux-musl, container: musl}
+          - {target: bun-linux-x64-baseline, os: ubuntu-24.04, rust: x86_64-unknown-linux-gnu, container: gnu}
+          - {target: bun-linux-x64-baseline-musl, os: ubuntu-24.04, rust: x86_64-unknown-linux-musl, container: musl}
+          - {target: bun-windows-arm64, os: windows-11-arm, rust: aarch64-pc-windows-msvc, bun: bun-windows-aarch64}
+          - {target: bun-windows-x64-baseline, os: windows-2025, rust: x86_64-pc-windows-msvc, bun: bun-windows-x64-baseline}
+    defaults:
+      run:
+        shell: bash
+    env:
+      THREADNOTE_BUILD_TARGET: ${{ matrix.target }}
+      EXPECTED_COMMIT: ${{ github.sha }}
+      RUST_HOST: ${{ matrix.rust }}
+    steps:
+      - name: Preserve committed bytes on Windows
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Verify the exact push checkout
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
+          test -z "$(git status --porcelain)"
+          echo "Source commit $EXPECTED_COMMIT, tree $(git rev-parse 'HEAD^{tree}')"
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+          bun-download-url: ${{ matrix.bun && format('https://github.com/oven-sh/bun/releases/download/bun-v{0}/{1}.zip', env.BUN_VERSION, matrix.bun) || '' }}
+
+      - run: bun install --frozen-lockfile
+
+      - name: Initialize native Windows C toolchain
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installation = & $vswhere -latest -products '*' -property installationPath
+          if (!$installation) { throw 'Visual Studio native build tools are required.' }
+          Import-Module "$installation\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          $architecture = if ($env:RUST_HOST -like 'aarch64-*') { 'arm64' } else { 'x64' }
+          Enter-VsDevShell -VsInstallPath $installation -SkipAutomaticLocation -DevCmdArguments "-arch=$architecture -host_arch=$architecture"
+          foreach ($name in @('PATH','INCLUDE','LIB','LIBPATH','VCToolsInstallDir','WindowsSdkDir','WindowsSDKVersion')) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            if ($value) { "$name=$value" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append }
+          }
+
+      - name: Install pinned native Rust toolchain
+        if: matrix.container == ''
+        run: rustup toolchain install "$RUST_VERSION-$RUST_HOST" --profile minimal
+
+      - name: Prepare the functional command
+        run: |
+          mkdir -p .context/graph-vector-prototype
+          cat > .context/graph-vector-prototype/run.sh <<'SCRIPT'
+          set -euo pipefail
+          expected_commit=$1
+          rust_host=$2
+          rust_version=$3
+          bun_version=$4
+          toolchain="$rust_version-$rust_host"
+          evidence=.context/graph-vector-prototype
+          manifest=packages/graph/native-vector-page/Cargo.toml
+          fixture=packages/graph/test/experiments/native-vector-page.ts
+          cargo_target="$evidence/cargo-target"
+          test "$(git rev-parse HEAD)" = "$expected_commit"
+          case "$THREADNOTE_BUILD_TARGET" in
+            bun-darwin-arm64) runtime=darwin-arm64 ;;
+            bun-darwin-x64) runtime=darwin-x64 ;;
+            bun-linux-arm64*) runtime=linux-arm64 ;;
+            bun-linux-x64-*) runtime=linux-x64 ;;
+            bun-windows-arm64) runtime=win32-arm64 ;;
+            bun-windows-x64-baseline) runtime=win32-x64 ;;
+            *) exit 1 ;;
+          esac
+          actual_runtime="$(bun -e 'process.stdout.write(process.platform + "-" + process.arch)')"
+          test "$actual_runtime" = "$runtime"
+          test "$(bun --version)" = "$bun_version"
+          rust_info="$(rustc "+$toolchain" -vV)"
+          grep -Fx "host: $rust_host" <<< "$rust_info"
+          grep -Fx "release: $rust_version" <<< "$rust_info"
+          printf 'commit=%s\ntree=%s\ntarget=%s\nruntime=%s\nbun=%s\n%s\n' \
+            "$expected_commit" "$(git rev-parse 'HEAD^{tree}')" "$THREADNOTE_BUILD_TARGET" \
+            "$actual_runtime" "$bun_version" "$rust_info" > "$evidence/source-runtime.txt"
+          cargo "+$toolchain" test --locked --manifest-path "$manifest" --target-dir "$cargo_target"
+          cargo "+$toolchain" build --release --locked --manifest-path "$manifest" --target-dir "$cargo_target"
+          case "$runtime" in
+            darwin-*) library=libthreadnote_graph_vector_page.dylib ;;
+            linux-*) library=libthreadnote_graph_vector_page.so ;;
+            win32-*) library=threadnote_graph_vector_page.dll ;;
+          esac
+          absolute_library="$(bun -e 'process.stdout.write(require("node:path").resolve(process.argv[1]))' "$cargo_target/release/$library")"
+          bun "$fixture" --functional "$absolute_library" "$evidence/functional.json"
+          test -s "$evidence/functional.json"
+          SCRIPT
+
+      - name: Validate on the native host or compatibility floor
+        env:
+          COMPATIBILITY_CONTAINER: ${{ matrix.container }}
+        run: |
+          command=(bash .context/graph-vector-prototype/run.sh "$EXPECTED_COMMIT" "$RUST_HOST" "$RUST_VERSION" "$BUN_VERSION")
+          case "$COMPATIBILITY_CONTAINER" in
+            '') "${command[@]}" ;;
+            gnu|musl)
+              command_json="$(bun -e 'process.stdout.write(JSON.stringify(process.argv.slice(1)))' "${command[@]}")"
+              bun scripts/assemble-native-inference.ts "--$COMPATIBILITY_CONTAINER-container" \
+                --container-command-json "$command_json"
+              ;;
+            *) exit 1 ;;
+          esac
+
+      - name: Preserve the functional evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: graph-vector-prototype-${{ matrix.target }}
+          path: |
+            .context/graph-vector-prototype/source-runtime.txt
+            .context/graph-vector-prototype/functional.json
+            .context/native-inference-container/*-failure.json
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
+
+  all-targets:
+    name: Require all eight target results
+    if: ${{ always() }}
+    needs: functional
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Check the functional matrix conclusion
+        env:
+          MATRIX_RESULT: ${{ needs.functional.result }}
+        run: test "$MATRIX_RESULT" = success

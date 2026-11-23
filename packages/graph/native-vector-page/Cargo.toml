@@ -1,0 +1,10 @@
+[package]
+name = "threadnote-graph-vector-page"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.89.0"
+publish = false
+license = "AGPL-3.0-or-later"
+
+[lib]
+crate-type = ["cdylib"]
