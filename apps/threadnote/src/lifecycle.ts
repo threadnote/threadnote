@@ -744,6 +744,15 @@ export const repairRegisteredMcpClients = Effect.fn('lifecycle.repairRegisteredM
   );
   for (const client of mcpClients) {
     const receipt = registry?.hosts[client];
+    if (client === 'codex') {
+      yield* runMcpInstall(
+        config,
+        client,
+        {apply: !dryRun, dryRunApplyCommand: 'threadnote repair', name: receipt?.mcp.name},
+        'repair',
+      );
+      continue;
+    }
     if (!personalHome && (client === 'cursor' || client === 'copilot')) {
       yield* Console.log(`Skipping ${client} MCP repair for non-personal THREADNOTE_HOME.`);
       continue;
@@ -754,16 +763,21 @@ export const repairRegisteredMcpClients = Effect.fn('lifecycle.repairRegisteredM
       );
       continue;
     }
-    yield* runMcpInstall(config, client, {
-      apply: !dryRun,
-      cwd: receipt.mcp.cwd,
-      dryRunApplyCommand: 'threadnote repair',
-      hostRoot: receipt.mcp.hostRoot,
-      name: receipt.mcp.name,
-      project: client === 'cursor' || client === 'copilot' || client === 'omp' ? receipt.mcp.cwd : undefined,
-      scope: receipt.mcp.scope,
-      toolset: receipt.mcp.toolset,
-    });
+    yield* runMcpInstall(
+      config,
+      client,
+      {
+        apply: !dryRun,
+        cwd: receipt.mcp.cwd,
+        dryRunApplyCommand: 'threadnote repair',
+        hostRoot: receipt.mcp.hostRoot,
+        name: receipt.mcp.name,
+        project: client === 'cursor' || client === 'copilot' || client === 'omp' ? receipt.mcp.cwd : undefined,
+        scope: receipt.mcp.scope,
+        toolset: receipt.mcp.toolset,
+      },
+      'repair',
+    );
   }
 });
 

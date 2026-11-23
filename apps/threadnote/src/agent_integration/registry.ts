@@ -27,12 +27,24 @@ export interface AgentIntegrationMcpReceipt {
   readonly artifactProfile?: 'codex-cloud-personal' | 'cursor-cloud-personal' | 'default';
   readonly cwd?: string;
   readonly external?: boolean;
+  /** Physical configuration home on relocatable hosts. Desktop Codex sets it only after explicit setup. */
   readonly hostRoot?: string;
   readonly name: string;
   readonly repair: boolean;
   readonly scope?: ClaudeMcpScope;
   readonly toolset?: McpToolset;
   readonly transport?: 'cli';
+}
+
+export function isLocalCodexMcpReceipt(receipt: AgentIntegrationMcpReceipt): boolean {
+  return (
+    receipt.repair &&
+    !receipt.external &&
+    receipt.transport === undefined &&
+    (receipt.artifactProfile === undefined || receipt.artifactProfile === 'default') &&
+    (receipt.scope === undefined || receipt.scope === 'user') &&
+    receipt.name !== 'threadnote-org'
+  );
 }
 
 export interface AgentIntegrationHostReceipt {

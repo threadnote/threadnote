@@ -26,6 +26,15 @@ import {relocateManagedOmpHook} from '../omp_hooks.js';
 import {DEFAULT_MCP_TOOLSET, MCP_TOOLSET_ENV, type McpToolset} from './toolset.js';
 import {runCodexOrgMcpInstall} from './codex_org_attach.js';
 import {
+  codexApplyArguments,
+  codexMcpCommands,
+  inspectRegisteredCodexMcp,
+  reconcileCodexMcpConfiguration,
+  reconcileRegisteredCodexMcpInTransaction,
+  resolveCodexSetupHome,
+} from './codex_broker_rotation.js';
+import {activeInstalledVersion} from '../installations.js';
+import {
   ComposerAttachError,
   THREADNOTE_ORG_MCP_NAME,
   buildComposerHttpMcpEntry,
@@ -75,7 +84,12 @@ const isPersonalThreadnoteHomeEffect = Effect.fn('mcp.isPersonalHome')(function*
   return isPersonalThreadnoteHome(config.agentContextHome, system.homeDirectory, (...parts) => path.resolve(...parts));
 });
 
-export function runMcpInstall(config: RuntimeConfig, agent: AgentClient, options: McpInstallOptions) {
+export function runMcpInstall(
+  config: RuntimeConfig,
+  agent: AgentClient,
+  options: McpInstallOptions,
+  mode: 'setup' | 'repair' = 'setup',
+) {
   const operation = Effect.gen(function* () {
     const attach = yield* Effect.try({
       try: () => resolveComposerAttach(options),
@@ -102,7 +116,7 @@ export function runMcpInstall(config: RuntimeConfig, agent: AgentClient, options
     const install = Effect.gen(function* () {
       const registry = (yield* readAgentIntegrationRegistry(config)) ?? emptyAgentIntegrationRegistry(false);
       const setupCompletion = options.apply ? setupCompletionForSuccessfulInstall(registry, {host: agent}) : undefined;
-      yield* runMcpInstallInTransaction(config, agent, options);
+      yield* runMcpInstallInTransaction(config, agent, options, mode);
       return setupCompletion;
     });
     return yield* options.apply === true ? withAgentIntegrationLock(config, install) : install;
@@ -143,6 +157,7 @@ const runMcpInstallInTransaction = Effect.fn('mcp.runInstallInTransaction')(func
   config: RuntimeConfig,
   agent: AgentClient,
   options: McpInstallOptions,
+  mode: 'setup' | 'repair',
 ) {
   const name = options.name ?? THREADNOTE_MCP_NAME;
   const apply = options.apply === true;
@@ -270,8 +285,75 @@ const runMcpInstallInTransaction = Effect.fn('mcp.runInstallInTransaction')(func
     return;
   }
 
+  if (agent === 'codex') {
+    if (mode === 'repair') {
+      const result = yield* reconcileRegisteredCodexMcpInTransaction(config, undefined, !apply);
+      if (result.state === 'deferred') {
+        yield* Console.warn(`Codex MCP repair deferred: ${result.reason}.`);
+        const receipt = (yield* readAgentIntegrationRegistry(config))?.hosts.codex?.mcp;
+        const status = yield* codexConfigurationCheck(config, receipt?.name ?? name, receipt);
+        if (status.status === 'warn') yield* Console.warn(status.detail);
+      }
+      if (!apply && result.state === 'skipped') yield* Console.log(`Codex MCP repair: ${result.reason}.`);
+      return;
+    }
+    const receipt = (yield* readAgentIntegrationRegistry(config))?.hosts.codex?.mcp;
+    if (
+      receipt?.external ||
+      receipt?.transport === 'cli' ||
+      (receipt?.artifactProfile !== undefined && receipt.artifactProfile !== 'default')
+    ) {
+      return yield* McpOperationError.make({
+        message:
+          'This Threadnote home is registered to a non-local Codex integration. Use a separate THREADNOTE_HOME for local Codex setup.',
+      });
+    }
+    const hostRoot = yield* resolveCodexSetupHome();
+    const commands = yield* codexMcpCommands();
+    const setupToolset = options.toolset ?? receipt?.toolset ?? toolset;
+    if (!apply) {
+      const release = yield* activeInstalledVersion();
+      const fs = yield* FileSystem.FileSystem;
+      const destination = yield* fs.realPath(hostRoot).pipe(Effect.orElseSucceed(() => hostRoot));
+      const instruction = options.dryRunApplyCommand
+        ? `Run \`${options.dryRunApplyCommand}\` without \`--dry-run\``
+        : codexSetupInstruction(name, destination, options);
+      yield* Console.log(`Dry run. ${instruction}.`);
+      yield* Console.log(
+        `Codex MCP ${name} in ${destination} for release ${release ?? '(no validated active release)'}.`,
+      );
+      const [launcher, ...args] = commands.command;
+      if (launcher)
+        yield* Console.log(`Launcher ${formatShellCommand(launcher, args)} with ${MCP_TOOLSET_ENV}=${setupToolset}.`);
+      yield* finishAgentIntegrationInstall(config, agent, {apply, hostRoot: destination, name, toolset: setupToolset});
+      return;
+    }
+    yield* requiredMcpAgentExecutable(agent);
+    const result = yield* reconcileCodexMcpConfiguration(hostRoot, {
+      ...commands,
+      name,
+      environment: mcpEnvironmentObject(config, setupToolset, agent),
+      mode,
+      updateToolset: options.toolset !== undefined,
+    });
+    if (result.state === 'deferred') {
+      return yield* McpOperationError.make({message: `Codex MCP setup deferred: ${result.reason}.`});
+    }
+    yield* Console.log(
+      `${result.state === 'saved' ? 'Configured' : 'Already configured'}: Codex MCP ${name} in ${result.hostRoot}`,
+    );
+    yield* finishAgentIntegrationInstall(config, agent, {
+      apply,
+      hostRoot: result.hostRoot,
+      legacyInferredClients,
+      name,
+      toolset: setupToolset,
+    });
+    return;
+  }
+
   const agentExecutable = apply ? yield* requiredMcpAgentExecutable(agent) : agent;
-  const command = yield* buildMcpInstallCommand(config, agent, agentExecutable, name, {cwd, scope, toolset});
+  const command = yield* buildClaudeMcpInstallCommand(config, agentExecutable, name, {cwd, scope, toolset});
   const removeCommand = yield* buildMcpRemoveCommand(agent, agentExecutable, name, {cwd, scope});
 
   if (!apply) {
@@ -285,7 +367,7 @@ const runMcpInstallInTransaction = Effect.fn('mcp.runInstallInTransaction')(func
     }
     yield* Console.log(formatShellCommand(removeCommand.executable, removeCommand.args));
     yield* Console.log(formatShellCommand(command.executable, command.args));
-    yield* printMcpSnippet(config, agent, name, {scope, toolset});
+    yield* printClaudeMcpSnippet(config, name, {scope, toolset});
     yield* installAgentIntegration(config, agent, {
       cwd,
       dryRun: true,
@@ -297,7 +379,7 @@ const runMcpInstallInTransaction = Effect.fn('mcp.runInstallInTransaction')(func
   }
 
   if (
-    yield* cliMcpConfigurationMatches(config, agent, agentExecutable, name, {
+    yield* claudeCliMcpConfigurationMatches(config, agentExecutable, name, {
       cwd,
       scope,
       toolset,
@@ -360,6 +442,54 @@ class McpOperationError extends Schema.TaggedError<McpOperationError, {readonly 
   },
 ) {}
 
+function codexSetupInstruction(
+  name: string,
+  hostRoot?: string,
+  options?: {readonly toolset?: string; readonly noDevSkills?: boolean},
+) {
+  const command = formatShellCommand('threadnote', codexApplyArguments(name, options));
+  return `Set CODEX_HOME to ${hostRoot ? formatShellCommand(hostRoot, []) : 'the intended Codex home'}, then run \`${command}\``;
+}
+
+const codexConfigurationCheck = Effect.fn('mcp.codexConfigurationCheck')(function* (
+  config: RuntimeConfig,
+  name: string,
+  receipt: AgentIntegrationMcpReceipt | undefined,
+) {
+  const inspection = yield* inspectRegisteredCodexMcp(config, receipt);
+  let detail: string;
+  switch (inspection.state) {
+    case 'current':
+      detail = `${name} broker configured for release ${inspection.release} in ${inspection.hostRoot}`;
+      break;
+    case 'stale':
+      detail = `${name} has a stale release marker in ${inspection.hostRoot}. Run threadnote repair --mcp codex.`;
+      break;
+    case 'legacy':
+      detail = `${name} uses the owned legacy direct server command in ${inspection.hostRoot}. Run threadnote repair --mcp codex.`;
+      break;
+    case 'no-release':
+      detail = `${name} is in ${inspection.hostRoot} and no validated active Threadnote release is available.`;
+      break;
+    case 'disabled':
+      detail = `${name} is disabled in ${inspection.hostRoot}. Enable it in Codex before running repair.`;
+      break;
+    default: {
+      const description = {
+        unpinned: 'has no receipt for a physical Codex home',
+        redirected: 'has a receipt for a Codex home that was redirected',
+        missing: 'is missing from the recorded Codex home',
+        ambiguous: 'could not be attributed to Threadnote or edited safely. Review the existing entry first',
+        unreadable: 'could not be inspected',
+      }[inspection.state];
+      const hostRoot =
+        inspection.state === 'missing' || inspection.state === 'ambiguous' ? inspection.hostRoot : undefined;
+      detail = `${name} ${description}. ${codexSetupInstruction(name, hostRoot)}.`;
+    }
+  }
+  return {detail, name: 'codex MCP', status: inspection.state === 'current' ? 'ok' : 'warn'} satisfies DoctorCheck;
+});
+
 export const mcpConfigurationChecks = Effect.fn('mcp.configurationChecks')(function* (
   config: RuntimeConfig,
   inferredClients?: readonly AgentClient[],
@@ -387,6 +517,10 @@ export const mcpConfigurationChecks = Effect.fn('mcp.configurationChecks')(funct
         name: `${agent} MCP`,
         status: 'warn',
       });
+      continue;
+    }
+    if (agent === 'codex') {
+      checks.push(yield* codexConfigurationCheck(config, name, receipt?.mcp));
       continue;
     }
     if (!personalHome && (agent === 'cursor' || agent === 'copilot' || agent === 'omp')) {
@@ -584,9 +718,8 @@ function isBrokerMcpServerConfig(server: JsonObject): boolean {
   );
 }
 
-const cliMcpConfigurationMatches = Effect.fn('mcp.cliConfigurationMatches')(function* (
+const claudeCliMcpConfigurationMatches = Effect.fn('mcp.claudeCliConfigurationMatches')(function* (
   config: RuntimeConfig,
-  agent: 'claude' | 'codex',
   agentExecutable: string,
   name: string,
   options: {
@@ -595,41 +728,18 @@ const cliMcpConfigurationMatches = Effect.fn('mcp.cliConfigurationMatches')(func
     readonly toolset: McpToolset;
   },
 ) {
-  const result = yield* runCommandEffect(
-    agentExecutable,
-    agent === 'codex' ? ['mcp', 'get', name, '--json'] : ['mcp', 'get', name],
-    {
-      allowFailure: true,
-      maxOutputBytes: 64 * 1024,
-      timeoutMs: 5_000,
-      cwd: options.cwd,
-    },
-  ).pipe(Effect.option);
+  const result = yield* runCommandEffect(agentExecutable, ['mcp', 'get', name], {
+    allowFailure: true,
+    maxOutputBytes: 64 * 1024,
+    timeoutMs: 5_000,
+    cwd: options.cwd,
+  }).pipe(Effect.option);
   if (result._tag === 'None' || result.value.exitCode !== 0) return false;
 
   const command = yield* mcpAdapterCommand();
-  const environment = mcpEnvironmentObject(config, options.toolset, agent);
-  return agent === 'codex'
-    ? codexMcpConfigurationMatches(result.value.stdout, command, environment)
-    : claudeMcpConfigurationMatches(result.value.stdout, command, environment, options.scope ?? 'user');
+  const environment = mcpEnvironmentObject(config, options.toolset, 'claude');
+  return claudeMcpConfigurationMatches(result.value.stdout, command, environment, options.scope ?? 'user');
 });
-
-function codexMcpConfigurationMatches(output: string, command: readonly string[], environment: JsonObject): boolean {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(output);
-  } catch {
-    return false;
-  }
-  if (!isJsonObject(parsed) || parsed.enabled !== true || !isJsonObject(parsed.transport)) return false;
-  const transport = parsed.transport;
-  return (
-    transport.type === 'stdio' &&
-    transport.command === command[0] &&
-    stringArrayEquals(transport.args, command.slice(1)) &&
-    managedMcpEnvironmentMatches(transport.env, environment)
-  );
-}
 
 function claudeMcpConfigurationMatches(
   output: string,
@@ -985,9 +1095,22 @@ export const removeMcpConfigs = Effect.fn('mcp.removeConfigs')(function* (
       cwd: receipt?.cwd,
       scope: receipt?.scope,
     });
+    const codexHome = client === 'codex' ? receipt?.hostRoot : undefined;
+    if (codexHome) {
+      const path = yield* Path.Path;
+      const fs = yield* FileSystem.FileSystem;
+      const observedHome = yield* fs.realPath(codexHome).pipe(Effect.orElseSucceed(() => undefined));
+      if (!path.isAbsolute(codexHome) || observedHome !== codexHome) {
+        yield* Console.warn(
+          'Codex MCP removal deferred because the registered Codex home is unavailable or was redirected.',
+        );
+        continue;
+      }
+    }
     const result = yield* maybeRunEffect(dryRun, command.executable, command.args, {
       allowFailure: true,
       cwd: command.cwd,
+      env: codexHome ? {...(yield* SystemInfo).environment(), CODEX_HOME: codexHome} : undefined,
     });
     if (dryRun || result?.exitCode === 0) removed.push(client);
   }
@@ -1018,9 +1141,8 @@ export const removeMcpSnippets = Effect.fn('mcp.removeSnippets')(function* (conf
   );
 });
 
-const buildMcpInstallCommand = Effect.fn('mcp.buildInstallCommand')(function* (
+const buildClaudeMcpInstallCommand = Effect.fn('mcp.buildClaudeInstallCommand')(function* (
   config: RuntimeConfig,
-  agent: AgentClient,
   agentExecutable: string,
   name: string,
   options: {
@@ -1029,29 +1151,10 @@ const buildMcpInstallCommand = Effect.fn('mcp.buildInstallCommand')(function* (
     readonly toolset: McpToolset;
   },
 ) {
-  if (agent === 'cursor') {
-    return yield* McpOperationError.make({message: 'Cursor MCP config is written directly to ~/.cursor/mcp.json.'});
-  }
-  if (agent === 'copilot') {
-    return yield* McpOperationError.make({
-      message: 'GitHub Copilot MCP config is written directly to the VS Code user mcp.json file.',
-    });
-  }
-  if (agent === 'omp') {
-    return yield* McpOperationError.make({
-      message: 'omp MCP config is written directly to ~/.omp/agent/mcp.json.',
-    });
-  }
   const claudeCwd = options.cwd ?? (yield* getInvocationCwd());
   const claudeScope = options.scope ?? 'user';
   const command = yield* mcpAdapterCommand();
-  const env = mcpEnvironment(config, options.toolset, agent);
-  if (agent === 'codex') {
-    return {
-      executable: agentExecutable,
-      args: ['mcp', 'add', ...EffectArray.flatMap(env, value => ['--env', value]), name, '--', ...command],
-    };
-  }
+  const env = mcpEnvironment(config, options.toolset, 'claude');
   return {
     executable: agentExecutable,
     args: [
@@ -1378,43 +1481,17 @@ const removeOmpMcpConfigAtPath = Effect.fn('mcp.removeOmpConfigAtPath')(function
   return true;
 });
 
-const printMcpSnippet = Effect.fn('mcp.printSnippet')(function* (
+const printClaudeMcpSnippet = Effect.fn('mcp.printClaudeSnippet')(function* (
   config: RuntimeConfig,
-  agent: AgentClient,
   name: string,
   options: {
     readonly scope?: ClaudeMcpScope;
     readonly toolset: McpToolset;
   },
 ) {
-  if (agent === 'cursor') {
-    yield* printCursorMcpSnippet(config, name, {
-      toolset: options.toolset,
-    });
-    return;
-  }
-  if (agent === 'copilot') {
-    yield* printCopilotMcpSnippet(config, name, {
-      toolset: options.toolset,
-    });
-    return;
-  }
-  if (agent === 'omp') {
-    yield* printOmpMcpSnippet(config, name, {
-      toolset: options.toolset,
-    });
-    return;
-  }
   const path = yield* Path.Path;
-  const snippetPath = path.join(
-    config.agentContextHome,
-    'mcp',
-    `${name}.${agent}.${agent === 'codex' ? 'toml' : 'txt'}`,
-  );
-  const command = yield* buildMcpInstallCommand(config, agent, agent, name, {
-    scope: options.scope,
-    toolset: options.toolset,
-  });
+  const snippetPath = path.join(config.agentContextHome, 'mcp', `${name}.claude.txt`);
+  const command = yield* buildClaudeMcpInstallCommand(config, 'claude', name, options);
   const snippet = `${formatShellCommand(command.executable, command.args)}\n`;
   yield* Console.log(`\nSnippet (${snippetPath}):\n${snippet}`);
 });

@@ -8,7 +8,7 @@ export const maybeRunEffect = Effect.fn('maybeRunEffect')(function* (
   dryRun: boolean,
   executable: string,
   args: readonly string[],
-  options: Pick<CommandOptions, 'allowFailure' | 'cwd' | 'timeoutMs'> = {},
+  options: Pick<CommandOptions, 'allowFailure' | 'cwd' | 'env' | 'timeoutMs'> = {},
 ) {
   const cwdSuffix = options.cwd ? ` (cwd: ${options.cwd})` : '';
   const label = dryRun ? warning('Would run') : info('Running');

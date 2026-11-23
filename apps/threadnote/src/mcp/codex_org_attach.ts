@@ -3,7 +3,12 @@ import {Console, Effect, FileSystem, Path} from 'effect';
 import {parse, stringify} from 'smol-toml';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {fromPromise} from '@threadnote/platform/errors';
-import {runtimeLstat, SystemInfo, type RuntimeBigIntStats} from '@threadnote/platform/system';
+import {
+  runtimeLstat,
+  runtimeReadBoundedStableRegularFile,
+  SystemInfo,
+  type RuntimeBigIntStats,
+} from '@threadnote/platform/system';
 import {expandPath} from '@threadnote/platform/paths';
 import {findWorkingExecutable, formatShellCommand, isJsonObject} from '../utils.js';
 import {
@@ -13,6 +18,7 @@ import {
   THREADNOTE_ORG_MCP_NAME,
   type ComposerShareBinding,
 } from './composer_attach.js';
+import {withCodexConfigurationLock} from './codex_configuration_write.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -111,7 +117,6 @@ interface CodexConfiguration {
 }
 
 const readCodexConfiguration = Effect.fn('mcp.readCodexConfiguration')(function* (configPath: string) {
-  const fs = yield* FileSystem.FileSystem;
   const info = yield* fromPromise('mcp.lstatCodexConfiguration', () => runtimeLstat(configPath)).pipe(
     Effect.catch(({cause}) =>
       typeof cause === 'object' && cause !== null && 'code' in cause && cause.code === 'ENOENT'
@@ -135,7 +140,10 @@ const readCodexConfiguration = Effect.fn('mcp.readCodexConfiguration')(function*
       message: 'Codex config exceeds the 4 MiB attach limit; configure the organization entry manually.',
     });
   }
-  const content = yield* fs.readFileString(configPath).pipe(
+  const content = yield* fromPromise('mcp.readCodexConfigurationBytes', async () => {
+    const bytes = await runtimeReadBoundedStableRegularFile(configPath, 4 * 1024 * 1024, info);
+    return new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(bytes);
+  }).pipe(
     Effect.mapError(() =>
       ComposerAttachError.make({
         message: 'Cannot read Codex config; preserving it. Resolve filesystem access before retrying.',
@@ -209,36 +217,30 @@ export const runCodexOrgMcpInstall = Effect.fn('mcp.runCodexOrgInstall')(functio
     });
   }
   if (proposed !== current?.content) {
-    yield* Effect.scoped(
-      Effect.gen(function* () {
-        yield* fs.makeDirectory(path.dirname(configPath), {recursive: true});
-        const lockPath = path.join(path.dirname(configPath), '.threadnote-org-attach.lock');
-        yield* Effect.acquireRelease(
-          fs.makeDirectory(lockPath).pipe(
-            Effect.mapError(() =>
-              ComposerAttachError.make({
-                message:
-                  'Codex organization attach lock is unavailable. Finish any other attach; if it crashed, inspect and remove the stale .threadnote-org-attach.lock directory before retrying.',
-              }),
-            ),
-          ),
-          () => fs.remove(lockPath, {recursive: true}).pipe(Effect.orDie),
-        );
-        const temporaryDirectory = yield* fs.makeTempDirectoryScoped({
-          directory: path.dirname(configPath),
-          prefix: '.threadnote-org-',
-        });
-        const temporaryPath = path.join(temporaryDirectory, 'config.toml');
-        const mode = current ? Number(current.info.mode & 0o777n) : 0o600;
-        yield* fs.writeFileString(temporaryPath, proposed, {mode});
-        yield* fs.chmod(temporaryPath, mode);
-        if (!sameCodexConfiguration(current, yield* readCodexConfiguration(configPath))) {
-          return yield* ComposerAttachError.make({
-            message: 'Codex config changed during attach; preserving the concurrent edit. Retry the command.',
-          });
-        }
-        yield* fs.rename(temporaryPath, configPath);
-      }),
+    const home = path.dirname(configPath);
+    yield* fs.makeDirectory(home, {recursive: true});
+    const hostRoot = yield* fs.realPath(home);
+    const target = path.join(hostRoot, 'config.toml');
+    yield* withCodexConfigurationLock(
+      hostRoot,
+      Effect.scoped(
+        Effect.gen(function* () {
+          const temporary = yield* fs.makeTempDirectoryScoped({directory: hostRoot, prefix: '.threadnote-org-'});
+          const staging = path.join(temporary, 'config.toml');
+          const mode = current ? Number(current.info.mode & 0o777n) : 0o600;
+          yield* fs.writeFileString(staging, proposed, {mode});
+          yield* fs.chmod(staging, mode);
+          if (
+            (yield* fs.realPath(home)) !== hostRoot ||
+            !sameCodexConfiguration(current, yield* readCodexConfiguration(target))
+          ) {
+            return yield* ComposerAttachError.make({
+              message: 'Codex config changed during attach; preserving the concurrent edit. Retry the command.',
+            });
+          }
+          yield* fs.rename(staging, target);
+        }),
+      ),
     );
     yield* Console.log(`Added Codex threadnote-org: ${configPath}`);
   } else {
