@@ -35,6 +35,139 @@ export const NATIVE_PERFORMANCE_CONTRACT = {
   refresh: 'refresh after separately owned crypto lands; identical configuration apart from candidate change',
 } as const;
 
+export const NATIVE_VECTOR_FULL_QUERY_DEADLINE_MILLISECONDS = 2000;
+
+interface NativeVectorDeadlineDigests {
+  readonly querySha256: string;
+  readonly scoresSha256: string;
+}
+
+interface NativeVectorDeadlineObservation {
+  readonly sample: number;
+  readonly success: boolean;
+  readonly reason?: string;
+  readonly querySha256?: string;
+  readonly scoresSha256?: string;
+  readonly completedWithinFullDeadline?: boolean;
+  readonly deadlineExhaustion?: 'RecallReadyReadBoundaryError';
+}
+
+type NativeVectorDeadlineArm = 'baseline' | 'candidate';
+
+export function evaluateNativeVectorDeadlineCompletion(input: {
+  readonly documents: number;
+  readonly distribution: string;
+  readonly warmSamples: number;
+  readonly expectedPairs: number;
+  readonly fullQueryDeadlineMilliseconds: number;
+  readonly integrityVerified: boolean;
+  readonly executionVerified: boolean;
+  readonly oracleControls: readonly NativeVectorDeadlineDigests[];
+  readonly firstUse: readonly {
+    readonly backend: NativeVectorDeadlineArm;
+    readonly result: NativeVectorDeadlineObservation;
+  }[];
+  readonly arms: readonly {
+    readonly pair: number;
+    readonly backend: NativeVectorDeadlineArm;
+    readonly resourceEvidenceComplete?: boolean;
+    readonly sampledTreePeakRssBytes?: number;
+    readonly samples: readonly NativeVectorDeadlineObservation[];
+  }[];
+}) {
+  const matchesObservation = (arm: NativeVectorDeadlineArm, observation: NativeVectorDeadlineObservation) => {
+    if (arm === 'baseline') {
+      return (
+        observation.success === false &&
+        observation.reason === 'budget-exhausted' &&
+        observation.deadlineExhaustion === 'RecallReadyReadBoundaryError'
+      );
+    }
+    const expected = input.oracleControls[observation.sample];
+    return (
+      observation.success === true &&
+      observation.completedWithinFullDeadline === true &&
+      observation.deadlineExhaustion === undefined &&
+      expected !== undefined &&
+      expected.querySha256 === observation.querySha256 &&
+      expected.scoresSha256 === observation.scoresSha256
+    );
+  };
+  const warmSetIsComplete = (arm: (typeof input.arms)[number]) => {
+    if (arm.samples.length !== input.warmSamples) return false;
+    const ids = new Set<number>();
+    for (const sample of arm.samples) {
+      if (
+        sample === undefined ||
+        !Number.isInteger(sample.sample) ||
+        sample.sample < 0 ||
+        sample.sample >= input.warmSamples ||
+        ids.has(sample.sample) ||
+        !matchesObservation(arm.backend, sample)
+      )
+        return false;
+      ids.add(sample.sample);
+    }
+    return true;
+  };
+  const pairs = new Map<number, Set<NativeVectorDeadlineArm>>();
+  const firstUseArms = new Set(EffectArray.map(input.firstUse, value => value.backend));
+  const matched =
+    input.documents === 100_000 &&
+    input.distribution === 'dense' &&
+    input.fullQueryDeadlineMilliseconds === NATIVE_VECTOR_FULL_QUERY_DEADLINE_MILLISECONDS &&
+    input.integrityVerified &&
+    input.executionVerified &&
+    Number.isSafeInteger(input.warmSamples) &&
+    input.warmSamples >= NATIVE_PERFORMANCE_CONTRACT.minimumWarmVectorQueries &&
+    Number.isSafeInteger(input.expectedPairs) &&
+    input.expectedPairs >= NATIVE_PERFORMANCE_CONTRACT.minimumPairedRuns &&
+    input.oracleControls.length === input.warmSamples &&
+    EffectArray.every(
+      input.oracleControls,
+      value => /^[a-f0-9]{64}$/u.test(value.querySha256) && /^[a-f0-9]{64}$/u.test(value.scoresSha256),
+    ) &&
+    input.firstUse.length === 2 &&
+    firstUseArms.has('baseline') &&
+    firstUseArms.has('candidate') &&
+    EffectArray.every(
+      input.firstUse,
+      value => value.result.sample === 0 && matchesObservation(value.backend, value.result),
+    ) &&
+    input.arms.length === input.expectedPairs * 2 &&
+    EffectArray.every(input.arms, arm => {
+      if (
+        !Number.isSafeInteger(arm.pair) ||
+        arm.pair < 1 ||
+        arm.pair > input.expectedPairs ||
+        arm.resourceEvidenceComplete !== true ||
+        arm.sampledTreePeakRssBytes === undefined ||
+        !Number.isFinite(arm.sampledTreePeakRssBytes) ||
+        arm.sampledTreePeakRssBytes <= 0 ||
+        !warmSetIsComplete(arm)
+      )
+        return false;
+      const backends = pairs.get(arm.pair) ?? new Set<NativeVectorDeadlineArm>();
+      if (backends.has(arm.backend)) return false;
+      backends.add(arm.backend);
+      pairs.set(arm.pair, backends);
+      return true;
+    }) &&
+    pairs.size === input.expectedPairs &&
+    EffectArray.every([...pairs.values()], arms => arms.has('baseline') && arms.has('candidate'));
+
+  return matched
+    ? ({
+        version: 1,
+        outcome: 'candidate-only-deadline-completion',
+        matchedPairs: pairs.size,
+        warmObservationsPerArm: input.warmSamples,
+        comparativeP95: 'unavailable',
+        comparableCompletedWorkRss: 'unavailable',
+      } as const)
+    : ({version: 1, outcome: 'not-established'} as const);
+}
+
 export const NATIVE_PERFORMANCE_STAGES = [
   'sql-row-transport',
   'validation-scoring-top-k',

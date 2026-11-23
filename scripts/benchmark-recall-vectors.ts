@@ -38,6 +38,8 @@ import {benchmarkMeasurement, parseBenchmarkArtifactV1} from '@threadnote/eviden
 import {
   NATIVE_PERFORMANCE_CONTRACT,
   NATIVE_PERFORMANCE_STAGES,
+  NATIVE_VECTOR_FULL_QUERY_DEADLINE_MILLISECONDS,
+  evaluateNativeVectorDeadlineCompletion,
   parseNativePerformanceCapture,
   nativePerformanceSourceChanges,
   createNativeStageTracing,
@@ -711,6 +713,8 @@ interface ProductionQuerySample {
   readonly milliseconds: number;
   readonly success: boolean;
   readonly reason?: string;
+  readonly deadlineExhaustion?: 'RecallReadyReadBoundaryError';
+  readonly completedWithinFullDeadline?: boolean;
   readonly querySha256?: string;
   readonly scoresSha256?: string;
   readonly children: readonly {operation: string; milliseconds: number; timeoutMs: number | undefined}[];
@@ -1379,6 +1383,12 @@ const runProductionVectorBenchmark = Effect.scoped(
     let caseGatesPassed = false;
     let closingSource: typeof openingSource | undefined;
     let fatal: string | undefined;
+    const engineProofPassed = () =>
+      proof[0]?.backend === 'baseline' &&
+      !proof[0].result.success &&
+      proof[0].result.reason === 'worker-failed' &&
+      proof[1]?.backend === 'candidate' &&
+      proof[1].result.success;
     const capture = () => ({
       format: 'threadnote-native-vector-production-v2',
       captureStartedAt,
@@ -1413,7 +1423,7 @@ const runProductionVectorBenchmark = Effect.scoped(
         samples: options.samples,
         pairs: options.pairs,
         resultLimit: VECTOR_QUERY_RESULT_LIMIT,
-        fullQueryDeadlineMilliseconds: 2000,
+        fullQueryDeadlineMilliseconds: NATIVE_VECTOR_FULL_QUERY_DEADLINE_MILLISECONDS,
         cleanupReserveMilliseconds: 1100,
         processTreeRssPolicy: {
           minimumSuccessfulSamples: 2,
@@ -1462,6 +1472,30 @@ const runProductionVectorBenchmark = Effect.scoped(
       arms,
       pairGates,
       caseGatesPassed,
+      deadlineCompletion: evaluateNativeVectorDeadlineCompletion({
+        documents: options.documents,
+        distribution: options.distribution,
+        warmSamples: options.samples,
+        expectedPairs: options.pairs,
+        fullQueryDeadlineMilliseconds: NATIVE_VECTOR_FULL_QUERY_DEADLINE_MILLISECONDS,
+        integrityVerified:
+          openingSource.runtimeAndHarnessMatchCandidate &&
+          closingSource?.runtimeAndHarnessMatchCandidate === true &&
+          sourceStable &&
+          fixtureStable &&
+          distributionStable &&
+          modelStable,
+        executionVerified:
+          executableVerification.length === 2 &&
+          executableVerification[0]?.backend === 'baseline' &&
+          executableVerification[0].success &&
+          executableVerification[1]?.backend === 'candidate' &&
+          executableVerification[1].success &&
+          engineProofPassed(),
+        oracleControls,
+        firstUse: firstUse.requests,
+        arms,
+      }),
       fatal,
     });
     const writeCapture = () =>
@@ -1510,8 +1544,9 @@ const runProductionVectorBenchmark = Effect.scoped(
         });
         lastQueryVector = [];
         const started = yield* Clock.currentTimeNanos;
+        const deadline = yield* makeReadDeadline(NATIVE_VECTOR_FULL_QUERY_DEADLINE_MILLISECONDS);
         const result = yield* Effect.gen(function* () {
-          const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
+          const boundary = yield* makeReadyRecallReadBoundary(deadline).pipe(
             Effect.provideService(SystemInfo, selected),
             Effect.provideService(CommandExecutor, observedCommands),
           );
@@ -1525,11 +1560,21 @@ const runProductionVectorBenchmark = Effect.scoped(
           ).pipe(Effect.provideService(RecallReadyReadBoundary, boundary));
         }).pipe(Effect.result);
         const milliseconds = Number((yield* Clock.currentTimeNanos) - started) / NANOSECONDS_PER_MILLISECOND;
+        const completedWithinFullDeadline = (yield* Clock.monotonicTimeNanos) < deadline.expiresAtNanos;
         if (result._tag === 'Failure') {
           const reason = Schema.is(RecallReadyReadBoundaryError)(result.failure)
             ? result.failure.reason
             : 'semantic-failure';
-          return {sample, milliseconds, success: false, reason, children} satisfies ProductionQuerySample;
+          // The typed parent boundary owns budget exhaustion. The worker reply schema excludes it.
+          const deadlineExhaustion = reason === 'budget-exhausted' ? 'RecallReadyReadBoundaryError' : undefined;
+          return {
+            sample,
+            milliseconds,
+            success: false,
+            reason,
+            deadlineExhaustion,
+            children,
+          } satisfies ProductionQuerySample;
         }
         if (!result.success)
           return {
@@ -1552,6 +1597,7 @@ const runProductionVectorBenchmark = Effect.scoped(
           sample,
           milliseconds,
           success,
+          completedWithinFullDeadline,
           ...(success ? {} : {reason: 'query-or-scalar-oracle-mismatch'}),
           querySha256,
           scoresSha256,
@@ -1634,7 +1680,7 @@ const runProductionVectorBenchmark = Effect.scoped(
       discriminatorSetupMilliseconds =
         Number((yield* Clock.currentTimeNanos) - discriminatorStartedAt) / NANOSECONDS_PER_MILLISECOND;
       yield* writeCapture();
-      if (proof[0]?.result.success || proof[0]?.result.reason !== 'worker-failed' || !proof[1]?.result.success)
+      if (!engineProofPassed())
         return yield* ScriptError.make({
           message: 'Actual compiled native/TypeScript engine proof failed; capture is unqualified.',
         });
