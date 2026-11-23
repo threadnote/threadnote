@@ -25,7 +25,10 @@ import {
   expireRecallIndexValidation,
   loadRecallIndexData,
 } from '@threadnote/recall/index';
-import {refreshRecallDerivedIndexesAfterCanonicalMutation} from '@threadnote/recall/mcp/refresh';
+import {
+  ensureRecallEmbeddingsAfterLexical,
+  refreshRecallDerivedIndexesAfterCanonicalMutation,
+} from '@threadnote/recall/mcp/refresh';
 import {loadMcpRecallSemanticScoresResult, loadRecallSemanticScoresResult} from '@threadnote/recall/runtime';
 import {
   ensureVectorIndex,
@@ -142,6 +145,8 @@ describe('vector scope mapping upgrades', () => {
             const old = yield* ensureVectorIndex(config, manifest, index.candidates, {
               corpusGeneration: index.generation,
             });
+            yield* ensureRecallEmbeddingsAfterLexical(config, index.generation);
+            expect((yield* readRecallEmbeddingDemand(config))?.desired).toBeUndefined();
             yield* legacyScopeMapping(home);
             expect(yield* currentRecallCorpusGeneration(config)).toEqual(Option.some(index.generation));
             expect(yield* vectorIndexGenerationReadiness(home, manifest, index.generation)).toBe('stale');
@@ -153,16 +158,16 @@ describe('vector scope mapping upgrades', () => {
               authority: 'any' as const,
               projects: {mode: 'allow-projects-and-projectless' as const, projects: ['workspace-project']},
             };
-            const cli = yield* loadRecallSemanticScoresResult(config, 'brief sentences', 5, eligibility);
-            expect(Option.getOrUndefined(cli.warning)).toContain('background refresh is queued');
-            const pending = (yield* readRecallEmbeddingDemand(config))?.desired;
-            expect(pending).toBeDefined();
-            yield* loadRecallSemanticScoresResult(config, 'brief sentences', 5, eligibility);
-            expect((yield* readRecallEmbeddingDemand(config))?.desired).toEqual(pending);
             const first = yield* loadMcpRecallSemanticScoresResult(config, 'brief sentences', 5, eligibility);
             expect(first.status).toBe('unavailable');
             expect(Option.getOrUndefined(first.result.warning)).toContain('refresh');
-            expect((yield* readRecallEmbeddingDemand(config))?.desired).toBeDefined();
+            const pending = (yield* readRecallEmbeddingDemand(config))?.desired;
+            expect(pending).toBeDefined();
+            yield* loadMcpRecallSemanticScoresResult(config, 'brief sentences', 5, eligibility);
+            expect((yield* readRecallEmbeddingDemand(config))?.desired).toEqual(pending);
+            const cli = yield* loadRecallSemanticScoresResult(config, 'brief sentences', 5, eligibility);
+            expect(Option.getOrUndefined(cli.warning)).toContain('background refresh is queued');
+            expect((yield* readRecallEmbeddingDemand(config))?.desired).toEqual(pending);
             for (let unit = 0; unit < 50; unit++) {
               if ((yield* stepRecallVectorPreparation(config, manifest, Effect.succeed(true))).state === 'current')
                 break;

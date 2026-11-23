@@ -64,6 +64,7 @@ const demandSchema = Schema.Struct({
     Schema.Struct({
       ...desiredSchema.fields,
       revision: Schema.String.check(Schema.isPattern(/^[a-f0-9-]{36}$/u)),
+      corpusGeneration: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(256))),
     }),
   ),
 });
@@ -291,8 +292,7 @@ const updateDemand = <A>(
 const enqueueRecallEmbeddings = Effect.fn('recall.enqueueEmbeddings')(function* (
   scope: RecallEmbeddingScope,
   coalesce: boolean,
-  resetInvalid: boolean,
-  preservePending = false,
+  options: {readonly resetInvalid?: boolean; readonly preservePending?: boolean; readonly corpusGeneration?: string},
 ) {
   const crypto = yield* SecureRandom.SecureRandom;
   const revision = yield* crypto.uuidV4();
@@ -300,7 +300,12 @@ const enqueueRecallEmbeddings = Effect.fn('recall.enqueueEmbeddings')(function* 
     scope,
     state => {
       const sameConfiguration = coalesce && state.desired?.manifestPath === scope.manifestPath;
-      if (preservePending && sameConfiguration && state.desired)
+      if (
+        options.preservePending &&
+        sameConfiguration &&
+        state.desired &&
+        (options.corpusGeneration === undefined || state.desired.corpusGeneration === options.corpusGeneration)
+      )
         return {
           state,
           value: {
@@ -319,6 +324,7 @@ const enqueueRecallEmbeddings = Effect.fn('recall.enqueueEmbeddings')(function* 
           desired: {
             token: selectedToken,
             revision,
+            ...(options.corpusGeneration === undefined ? {} : {corpusGeneration: options.corpusGeneration}),
             ...(scope.manifestPath === undefined ? {} : {manifestPath: scope.manifestPath}),
           },
         },
@@ -329,7 +335,7 @@ const enqueueRecallEmbeddings = Effect.fn('recall.enqueueEmbeddings')(function* 
         } satisfies RecallEmbeddingDemandReceipt,
       };
     },
-    resetInvalid,
+    options.resetInvalid,
   );
   const wake = yield* RecallEmbeddingWakePort;
   if (wake)
@@ -344,15 +350,15 @@ const enqueueRecallEmbeddings = Effect.fn('recall.enqueueEmbeddings')(function* 
 
 /** Acknowledges this event only after the guarded durable update and original wake. */
 export const requestRecallEmbeddingsReceipt = (scope: RecallEmbeddingScope, coalesce = false) =>
-  enqueueRecallEmbeddings(scope, coalesce, false);
+  enqueueRecallEmbeddings(scope, coalesce, {});
 export const requestRecallEmbeddings = (scope: RecallEmbeddingScope, coalesce = false) =>
   requestRecallEmbeddingsReceipt(scope, coalesce).pipe(Effect.map(receipt => receipt.token));
-/** Readiness checks wake the existing generation work without invalidating its current unit. */
-export const ensureRecallEmbeddingsReceipt = (scope: RecallEmbeddingScope) =>
-  enqueueRecallEmbeddings(scope, true, false, true);
+/** Readiness checks reuse pending work. A lexical publication binds work to its proven generation. */
+export const ensureRecallEmbeddingsReceipt = (scope: RecallEmbeddingScope, corpusGeneration?: string) =>
+  enqueueRecallEmbeddings(scope, true, {preservePending: true, corpusGeneration});
 /** Explicit operator repair preserves the rejected control file before rebuilding demand. */
 export const repairRecallEmbeddingDemand = (scope: RecallEmbeddingScope) =>
-  enqueueRecallEmbeddings(scope, false, true).pipe(Effect.map(receipt => receipt.token));
+  enqueueRecallEmbeddings(scope, false, {resetInvalid: true}).pipe(Effect.map(receipt => receipt.token));
 
 /** Completion must observe the same event, including when configuration coalesces its token. */
 export const completeRecallEmbeddingDemand = (scope: RecallEmbeddingScope, token: string, revision: string) =>

@@ -1,7 +1,7 @@
 import {RECALL_INVENTORY_POLICY_CHANGED_REASON, RECALL_LOGICAL_SCOPE_CHANGED_REASON} from '../index/freshness.js';
 import {loadRecallVectorAuthorizationKey} from '../vector/preparation-identity.js';
 import * as EffectString from 'effect/String';
-import {Cause, Effect, Schema} from 'effect';
+import {Cause, Effect, Option, Schema} from 'effect';
 import {
   consumeResourceRecallInvalidationReceipt,
   type ResourceRecallInvalidationReceipt,
@@ -28,7 +28,7 @@ export type DerivedIndexRefreshOutcome =
   | {readonly state: 'unavailable'}
   | {readonly state: 'blocked'; readonly repair: string};
 
-import {deferRecallEmbeddings, requestRecallEmbeddingsReceipt} from '../background/demand.js';
+import {deferRecallEmbeddings, ensureRecallEmbeddingsReceipt} from '../background/demand.js';
 
 class McpRecallBackgroundRefreshBlocked extends Schema.TaggedError<
   McpRecallBackgroundRefreshBlocked,
@@ -43,7 +43,29 @@ export const scheduleMcpRecallBackgroundRefresh = Effect.fn('recall.scheduleMcpB
   config: McpRecallRefreshConfig,
   _manifest: LocalModelManifest,
 ) {
-  return (yield* requestRecallEmbeddingsReceipt(config, true)).disposition;
+  return (yield* ensureRecallEmbeddingsReceipt(config)).disposition;
+});
+
+/** Confirm vector handoff before acknowledging an active lexical refresh revision. */
+export const ensureRecallEmbeddingsAfterLexical = Effect.fn('recall.ensureEmbeddingsAfterLexical')(function* (
+  config: McpRecallRefreshConfig,
+  corpusGeneration: string,
+) {
+  const selection = yield* readModelSelection(config.agentContextHome);
+  const modelId = selectedEmbeddingModelId(selection, 'recall');
+  if (modelId === undefined) return;
+  const catalog = yield* Effect.serviceOption(LocalModelCatalog);
+  if (Option.isNone(catalog)) return;
+  const manifest = yield* catalog.value.get(modelId).pipe(Effect.option);
+  if (Option.isNone(manifest) || manifest.value.role !== 'embedding' || !manifest.value.dimensions) return;
+  const readiness = yield* vectorIndexGenerationReadiness(
+    config.agentContextHome,
+    manifest.value,
+    corpusGeneration,
+    yield* loadRecallVectorAuthorizationKey(config),
+    config,
+  );
+  if (readiness === 'missing' || readiness === 'stale') yield* ensureRecallEmbeddingsReceipt(config, corpusGeneration);
 });
 
 /** Canonical and lexical readiness complete now; document inference is durable idle demand. */

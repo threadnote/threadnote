@@ -1,7 +1,7 @@
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {Database} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
-import {Array as EffectArray, Effect, FileSystem, Layer, Path} from 'effect';
+import {Array as EffectArray, Effect, FileSystem, Layer, Path, PlatformError, String as EffectString} from 'effect';
 import {TestClock} from 'effect/testing';
 import {expect} from 'vitest';
 import {cryptoLayer} from '@threadnote/platform/crypto';
@@ -11,7 +11,14 @@ import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-pol
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {recallResourceInvalidationLayer} from '@threadnote/recall/resource-invalidation';
 import {writeModelSelection} from '@threadnote/inference/models/selection';
-import {ensureRecallEmbeddingsReceipt, readRecallEmbeddingDemand} from '@threadnote/recall/background/demand';
+import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
+import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
+import {readRecallLexicalDemand} from '@threadnote/recall/background/lexical-demand';
+import {
+  completeRecallEmbeddingDemand,
+  ensureRecallEmbeddingsReceipt,
+  readRecallEmbeddingDemand,
+} from '@threadnote/recall/background/demand';
 import {
   expireRecallIndexValidation,
   loadRecallIndexData,
@@ -32,7 +39,10 @@ const system = SystemInfo.layer.pipe(
   ),
 );
 const platform = Layer.mergeAll(BunServices.layer, cryptoLayer, system, recallResourceInvalidationLayer);
-const services = ResourceStore.layer.pipe(Layer.provideMerge(platform));
+const services = Layer.merge(
+  ResourceStore.layer.pipe(Layer.provideMerge(platform)),
+  LocalModelCatalog.layer(BUILTIN_MODEL_MANIFESTS),
+);
 
 effectIt.layer(services)(it => {
   it.effect('rebuilds an inactive snapshot that status cannot trust and clears its forced marker', () =>
@@ -83,7 +93,7 @@ effectIt.layer(services)(it => {
       expect(recallReadStateWarnings(recalled.readState)).toEqual([]);
     }).pipe(TestClock.withLive),
   );
-  it.effect('queues vector reuse after recall prepares a missing active schema', () =>
+  it.effect('retains the active upgrade revision until the new generation can queue vectors', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -102,14 +112,39 @@ effectIt.layer(services)(it => {
 
       const missed = yield* readRecallIndexData(scope, {includeInactive: false, query: 'Albatross'}).pipe(Effect.flip);
       expect(missed).toMatchObject({_tag: 'RecallReadyReadUnavailable'});
-      expect((yield* readRecallEmbeddingDemand(scope))?.desired).toBeUndefined();
-      expect(yield* runRecallLexicalWorkerUnit(scope)).toMatchObject({state: 'complete'});
-      expect(yield* recallIndexStatus(scope)).toMatchObject({ready: true, documentCount: 1});
+      const old = yield* ensureRecallEmbeddingsReceipt(scope, 'old-generation');
+      const lexical = (yield* readRecallLexicalDemand(scope))?.revision;
+      const denied = PlatformError.systemError({
+        _tag: 'PermissionDenied',
+        module: 'FileSystem',
+        method: 'rename',
+      });
+      const unavailable = FileSystem.FileSystem.of({
+        ...fs,
+        rename: (from, to) =>
+          EffectString.includes('embedding-demand-v1')(to) ? Effect.fail(denied) : fs.rename(from, to),
+      });
+      expect(
+        yield* runRecallLexicalWorkerUnit(scope).pipe(Effect.provideService(FileSystem.FileSystem, unavailable)),
+      ).toMatchObject({state: 'deferred', reason: 'embedding-demand-unavailable'});
+      const ready = yield* recallIndexStatus(scope);
+      expect(ready).toMatchObject({ready: true, documentCount: 1});
+      expect((yield* readRecallLexicalDemand(scope))?.revision).toBe(lexical);
+      expect((yield* readRecallEmbeddingDemand(scope))?.desired?.revision).toBe(old.revision);
 
+      yield* TestClock.adjust(2000);
+      expect(yield* runRecallLexicalWorkerUnit(scope)).toMatchObject({state: 'complete'});
+      expect((yield* readRecallLexicalDemand(scope))?.revision).toBeUndefined();
       const pending = (yield* readRecallEmbeddingDemand(scope))?.desired;
-      expect(pending).toBeDefined();
-      expect(yield* ensureRecallEmbeddingsReceipt(scope)).toMatchObject({...pending, disposition: 'coalesced'});
+      expect(pending).toMatchObject({corpusGeneration: ready.generation});
+      expect(pending?.revision).not.toBe(old.revision);
+      expect(yield* completeRecallEmbeddingDemand(scope, old.token, old.revision)).toBe(false);
+      expect(yield* ensureRecallEmbeddingsReceipt(scope)).toMatchObject({
+        token: pending?.token,
+        revision: pending?.revision,
+        disposition: 'coalesced',
+      });
       expect((yield* readRecallEmbeddingDemand(scope))?.desired).toEqual(pending);
-    }).pipe(TestClock.withLive),
+    }),
   );
 });

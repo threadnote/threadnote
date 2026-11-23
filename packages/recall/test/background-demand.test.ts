@@ -231,7 +231,7 @@ describe('durable recall embedding demand', () => {
         spy => Effect.sync(() => spy.mockRestore()),
       );
       expect(reads).toBe(1);
-      expect((yield* readRecallEmbeddingDemand(scope))?.desired?.revision).not.toBe(initial.revision);
+      expect((yield* readRecallEmbeddingDemand(scope))?.desired?.revision).toBe(initial.revision);
     }).pipe(provideFixtureLayer(platform)),
   );
 
