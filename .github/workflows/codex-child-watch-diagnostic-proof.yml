@@ -1,0 +1,33 @@
+name: Disposable Codex watch diagnostic proof
+on:
+  push:
+    branches: [codex/codex-child-watch-diagnostic-proof]
+    paths:
+      - .github/codex-child-watch-diagnostic-proof/**
+      - .github/workflows/codex-child-watch-diagnostic-proof.yml
+permissions:
+  contents: read
+jobs:
+  install:
+    name: Verify exact installed Darwin watch diagnostic
+    runs-on: macos-15
+    timeout-minutes: 25
+    env:
+      THREADNOTE_BUILD_TARGET: bun-darwin-arm64
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - run: rustup toolchain install 1.89.0 --profile minimal
+      - name: Exercise installed watch CLI against local fixtures
+        run: bash .github/codex-child-watch-diagnostic-proof/install-and-smoke.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: codex-child-watch-diagnostic-proof
+          path: ${{ runner.temp }}/codex-child-watch-diagnostic-output/
+          retention-days: 7
+          if-no-files-found: error
