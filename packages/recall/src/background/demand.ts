@@ -64,6 +64,7 @@ const demandSchema = Schema.Struct({
     Schema.Struct({
       ...desiredSchema.fields,
       revision: Schema.String.check(Schema.isPattern(/^[a-f0-9-]{36}$/u)),
+      completionClaim: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9-]{36}$/u))),
       corpusGeneration: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(256))),
     }),
   ),
@@ -305,15 +306,17 @@ const enqueueRecallEmbeddings = Effect.fn('recall.enqueueEmbeddings')(function* 
         sameConfiguration &&
         state.desired &&
         (options.corpusGeneration === undefined || state.desired.corpusGeneration === options.corpusGeneration)
-      )
+      ) {
+        const {completionClaim, ...desired} = state.desired;
         return {
-          state,
+          state: completionClaim === undefined ? state : {...state, desired},
           value: {
             token: state.desired.token,
             revision: state.desired.revision,
             disposition: 'coalesced',
           } satisfies RecallEmbeddingDemandReceipt,
         };
+      }
       // A same-generation hint cannot prove model/authorization equivalence.
       // Every admitted enqueue is a distinct event; only configuration coalesces.
       const selectedToken = sameConfiguration && state.desired ? state.desired.token : revision;
@@ -360,10 +363,33 @@ export const ensureRecallEmbeddingsReceipt = (scope: RecallEmbeddingScope, corpu
 export const repairRecallEmbeddingDemand = (scope: RecallEmbeddingScope) =>
   enqueueRecallEmbeddings(scope, false, {resetInvalid: true}).pipe(Effect.map(receipt => receipt.token));
 
-/** Completion must observe the same event, including when configuration coalesces its token. */
-export const completeRecallEmbeddingDemand = (scope: RecallEmbeddingScope, token: string, revision: string) =>
+/** Claim the final verification. A stale read cancels only this claim, preserving progress. */
+export const claimRecallEmbeddingCompletion = Effect.fn('recall.claimEmbeddingCompletion')(function* (
+  scope: RecallEmbeddingScope,
+  event: {token: string; revision: string},
+) {
+  const claim = yield* (yield* SecureRandom.SecureRandom).uuidV4();
+  return yield* updateDemand(scope, state => {
+    if (state.desired?.token !== event.token || state.desired.revision !== event.revision)
+      return {state, value: undefined};
+    return {state: {...state, desired: {...state.desired, completionClaim: claim}}, value: claim};
+  });
+});
+
+/** Both the event and its final verification must still belong to this worker. */
+export const completeRecallEmbeddingDemand = (
+  scope: RecallEmbeddingScope,
+  token: string,
+  revision: string,
+  claim?: string,
+) =>
   updateDemand(scope, state => {
-    if (state.desired?.token !== token || state.desired.revision !== revision) return {state, value: false};
+    if (
+      state.desired?.token !== token ||
+      state.desired.revision !== revision ||
+      state.desired.completionClaim !== claim
+    )
+      return {state, value: false};
     const {desired: _desired, observation: _observation, ...rest} = state;
     return {state: rest, value: true};
   });

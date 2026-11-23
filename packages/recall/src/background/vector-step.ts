@@ -36,6 +36,7 @@ export const stepRecallVectorPreparation = Effect.fn('recall.stepVectorPreparati
   config: RecallEmbeddingScope,
   manifest: LocalModelManifest,
   stillDesired: Effect.Effect<boolean, unknown, R>,
+  claimCompletion?: Effect.Effect<string | undefined, unknown, R>,
 ) {
   if (manifest.role !== 'embedding' || !manifest.dimensions) return yield* preparationChanged();
   const verify = Effect.gen(function* () {
@@ -320,10 +321,18 @@ export const stepRecallVectorPreparation = Effect.fn('recall.stepVectorPreparati
         }),
       ),
       () =>
-        verify.pipe(
-          Effect.andThen(source.fence),
-          Effect.as({state: 'current' as const, phase: target.phase, inferred: false, generation: target.generation}),
-        ),
+        Effect.gen(function* () {
+          const completionClaim = claimCompletion === undefined ? undefined : yield* claimCompletion;
+          yield* verify;
+          yield* source.fence;
+          return {
+            state: 'current' as const,
+            phase: target.phase,
+            inferred: false,
+            generation: target.generation,
+            completionClaim,
+          };
+        }),
       (previous, exit) =>
         Exit.isSuccess(exit)
           ? Effect.void
@@ -352,16 +361,17 @@ export const runRecallVectorPreparationBatch = Effect.fn('recall.prepareVectorBa
   config: RecallEmbeddingScope,
   manifest: LocalModelManifest,
   stillDesired: Effect.Effect<boolean, unknown, R>,
+  claimCompletion?: Effect.Effect<string | undefined, unknown, R>,
 ) {
   const started = yield* Clock.monotonicTimeNanos;
-  let result = yield* stepRecallVectorPreparation(config, manifest, stillDesired);
+  let result = yield* stepRecallVectorPreparation(config, manifest, stillDesired, claimCompletion);
   for (
     let step = 1;
     step < 32 && result.state !== 'current' && ['metadata', 'resolve', 'hydrate', 'retire'].includes(result.phase);
     step++
   ) {
     if ((yield* Clock.monotonicTimeNanos) - started >= 250_000_000n) break;
-    result = yield* stepRecallVectorPreparation(config, manifest, stillDesired);
+    result = yield* stepRecallVectorPreparation(config, manifest, stillDesired, claimCompletion);
   }
   const path = yield* Path.Path;
   const progress = yield* recallVectorStorage.read(

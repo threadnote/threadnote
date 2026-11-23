@@ -225,7 +225,7 @@ describe('durable recall embedding demand', () => {
           }),
         ),
         () =>
-          scheduleMcpRecallBackgroundRefresh(scope, manifest).pipe(
+          scheduleMcpRecallBackgroundRefresh(scope, manifest, 'readiness').pipe(
             Effect.tap(label => Effect.sync(() => expect(label).toBe('coalesced'))),
           ),
         spy => Effect.sync(() => spy.mockRestore()),

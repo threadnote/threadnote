@@ -3,7 +3,8 @@ import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Context, Deferred, Effect, Fiber, FileSystem, Layer, Path, PlatformError} from 'effect';
 import {TestClock} from 'effect/testing';
-import {describe, expect} from 'vitest';
+import {describe, expect, vi} from 'vitest';
+import * as ExternalResources from '@threadnote/store/external-resource';
 import {BackgroundInferenceAdmission, BackgroundInferenceDeferred} from '@threadnote/inference/background/admission';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
@@ -17,8 +18,9 @@ import {
   requestRecallEmbeddings,
 } from '@threadnote/recall/background/demand';
 import {loadRecallIndexData, recallIndexStatus} from '@threadnote/recall/index';
-import {vectorIndexGenerationReadiness} from '@threadnote/recall/vector-index';
+import {loadRecallVectorAuthorizationKey, vectorIndexGenerationReadiness} from '@threadnote/recall/vector-index';
 import {scheduleMcpRecallBackgroundRefresh} from '@threadnote/recall/mcp/refresh';
+import {loadMcpRecallSemanticScoresResult} from '@threadnote/recall/runtime';
 import {SystemInfo} from '@threadnote/platform/system';
 import {
   makeRecallEmbeddingWorker,
@@ -222,6 +224,61 @@ describe('recall embedding worker', () => {
         ).toBe('current');
         expect((yield* readRecallEmbeddingDemand(f.config))?.desired).toBeUndefined();
       }).pipe(TestClock.withLive, provideTestLayer(base)),
+  );
+  effectIt.effect('retains a stale read after external access expires across the final worker fence', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const access = {'synthetic-external-uri': 'fixture-hash'};
+      let expired = false;
+      yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          vi
+            .spyOn(ExternalResources, 'loadExternalResourceAccess')
+            .mockImplementation(() => Effect.succeed<Record<string, string>>(expired ? {} : access)),
+        ),
+        spy => Effect.sync(() => spy.mockRestore()),
+      );
+      const published = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const admission = BackgroundInferenceAdmission.of({
+        ...immediate,
+        runBatch: (_home, _domain, program) =>
+          program.pipe(
+            Effect.tap(value =>
+              typeof value === 'object' && value !== null && 'state' in value && value.state === 'current'
+                ? Deferred.succeed(published, undefined).pipe(Effect.andThen(Deferred.await(release)))
+                : Effect.void,
+            ),
+            Effect.map(value => ({state: 'completed' as const, value})),
+          ),
+      });
+      const worker = yield* f.run.pipe(
+        Effect.provideService(BackgroundInferenceAdmission, admission),
+        Effect.forkScoped,
+      );
+      yield* Deferred.await(published);
+      const pending = yield* readRecallEmbeddingDemand(f.config);
+      const generation = (yield* recallIndexStatus(f.config)).generation!;
+      expired = true;
+      const readiness = vectorIndexGenerationReadiness(
+        f.config.agentContextHome,
+        manifest,
+        generation,
+        yield* loadRecallVectorAuthorizationKey(f.config),
+      );
+      expect(yield* readiness).toBe('stale');
+      const read = yield* loadMcpRecallSemanticScoresResult(f.config, 'synthetic document', 1).pipe(
+        Effect.provideService(LocalModelStore, f.store),
+        Effect.provideService(LocalModelRuntime, f.runtime),
+      );
+      expect(read.status).toBe('unavailable');
+      expect((yield* readRecallEmbeddingDemand(f.config))?.desired?.revision).toBe(pending?.desired?.revision);
+      yield* Deferred.succeed(release, undefined);
+      expect(yield* Fiber.join(worker)).toEqual({state: 'complete'});
+      expect((yield* recallIndexStatus(f.config)).generation).toBe(generation);
+      expect(yield* readiness).toBe('current');
+      expect((yield* readRecallEmbeddingDemand(f.config))?.desired).toBeUndefined();
+    }).pipe(TestClock.withLive, provideTestLayer(base)),
   );
   effectIt.effect('does no lexical preparation or inference while foreground capacity denies the first unit', () =>
     Effect.gen(function* () {

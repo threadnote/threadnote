@@ -16,6 +16,7 @@ import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtim
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {readModelSelection, selectedEmbeddingModelId} from '@threadnote/inference/models/selection';
 import {
+  claimRecallEmbeddingCompletion,
   completeRecallEmbeddingDemand,
   observeRecallEmbeddingDemand,
   readRecallEmbeddingDemand,
@@ -224,7 +225,12 @@ export const makeRecallEmbeddingWorker = Effect.fn('recall.makeEmbeddingWorker')
               message: 'Lexical storage requires explicit repair before background embeddings.',
             });
           if (!lexical.ready) yield* loadRecallIndexData(config, {includeInactive: false, memoryIds: []});
-          const result = yield* runRecallVectorPreparationBatch(config, selected, current).pipe(
+          const result = yield* runRecallVectorPreparationBatch(
+            config,
+            selected,
+            current,
+            claimRecallEmbeddingCompletion(scope, desired),
+          ).pipe(
             Effect.provideService(LocalModelRuntime, observedRuntime),
             Effect.provideService(LocalModelCatalog, catalog),
             Effect.provideService(LocalModelStore, store),
@@ -249,9 +255,13 @@ export const makeRecallEmbeddingWorker = Effect.fn('recall.makeEmbeddingWorker')
       }
       if (
         outcome.success.value.state === 'current' &&
-        (yield* completeRecallEmbeddingDemand(scope, desired.token, desired.revision).pipe(
-          Effect.mapError(controlUnavailable),
-        ))
+        outcome.success.value.completionClaim !== undefined &&
+        (yield* completeRecallEmbeddingDemand(
+          scope,
+          desired.token,
+          desired.revision,
+          outcome.success.value.completionClaim,
+        ).pipe(Effect.mapError(controlUnavailable)))
       )
         return {state: 'complete', delay: 0};
       yield* observe('queued', 'checkpoint', 0);

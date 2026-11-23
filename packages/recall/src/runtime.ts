@@ -890,7 +890,7 @@ export const loadMcpRecallSemanticScoresResult = Effect.fn('recall.loadMcpSemant
     } satisfies McpRecallSemanticScoresResult;
   }
   if (attempt.value.state === 'refreshable') {
-    return yield* scheduleMcpRecallBackgroundRefresh(config, attempt.value.manifest).pipe(
+    return yield* scheduleMcpRecallBackgroundRefresh(config, attempt.value.manifest, 'readiness').pipe(
       Effect.map(schedule => ({
         result: emptyRecallSemanticScoresResult(Option.some(semanticRecallRefreshingWarning(schedule))),
         status: 'unavailable' as const,

@@ -28,7 +28,11 @@ export type DerivedIndexRefreshOutcome =
   | {readonly state: 'unavailable'}
   | {readonly state: 'blocked'; readonly repair: string};
 
-import {deferRecallEmbeddings, ensureRecallEmbeddingsReceipt} from '../background/demand.js';
+import {
+  deferRecallEmbeddings,
+  ensureRecallEmbeddingsReceipt,
+  requestRecallEmbeddingsReceipt,
+} from '../background/demand.js';
 
 class McpRecallBackgroundRefreshBlocked extends Schema.TaggedError<
   McpRecallBackgroundRefreshBlocked,
@@ -42,8 +46,13 @@ class McpRecallBackgroundRefreshBlocked extends Schema.TaggedError<
 export const scheduleMcpRecallBackgroundRefresh = Effect.fn('recall.scheduleMcpBackgroundRefresh')(function* (
   config: McpRecallRefreshConfig,
   _manifest: LocalModelManifest,
+  reason: 'request' | 'readiness' = 'request',
 ) {
-  return (yield* ensureRecallEmbeddingsReceipt(config)).disposition;
+  const receipt =
+    reason === 'readiness'
+      ? yield* ensureRecallEmbeddingsReceipt(config)
+      : yield* requestRecallEmbeddingsReceipt(config, true);
+  return receipt.disposition;
 });
 
 /** Confirm vector handoff before acknowledging an active lexical refresh revision. */
