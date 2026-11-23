@@ -1,0 +1,205 @@
+name: R5 optimized reader preflight
+on:
+  push:
+    branches: [codex/r5-optimized-preflight]
+    paths: [.github/workflows/r5-optimized-preflight.yml]
+
+permissions:
+  contents: read
+
+env:
+  BUN_VERSION: 1.4.4
+  CODE_GRAPH_EMBEDDING_MODEL_ID: bge-small-en-v1.5-q8
+  CODE_GRAPH_EMBEDDING_MODEL_SHA256: f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804
+
+jobs:
+  recall-vector-native:
+    name: Recall vectors · ${{ matrix.target }} native production capture
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - target: bun-darwin-arm64
+            os: macos-15
+            musl: false
+            gnu: false
+          - target: bun-linux-arm64-musl
+            os: ubuntu-24.04-arm
+            musl: true
+            gnu: false
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      THREADNOTE_BUILD_TARGET: ${{ matrix.target }}
+      MODEL_RELATIVE_PATH: apps/threadnote/embedded/models/bge-small-en-v1.5-q8/f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804.gguf
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: b6fc1ad36a4809a8cd0622664d254795a4b1f755
+
+      - name: Verify the frozen candidate
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = b6fc1ad36a4809a8cd0622664d254795a4b1f755
+          test "$(git rev-parse HEAD^{tree})" = 979edfd2aeb3c92923a5d899179341814ba692f7
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - run: bun install --frozen-lockfile
+
+      - name: Initialize native Windows C toolchain
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installation = & $vswhere -latest -products '*' -property installationPath
+          if (!$installation) { throw 'Visual Studio native build tools are required.' }
+          Import-Module "$installation\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          $architecture = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
+          Enter-VsDevShell -VsInstallPath $installation -SkipAutomaticLocation -DevCmdArguments "-arch=$architecture -host_arch=$architecture"
+          foreach ($name in @('PATH','INCLUDE','LIB','LIBPATH','VCToolsInstallDir','WindowsSdkDir','WindowsSDKVersion')) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            if ($value) { "$name=$value" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append }
+          }
+      - name: Verify Windows native tools in Bash
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          command -v cl
+          command -v dumpbin
+
+      - name: Install pinned native vector toolchain
+        if: ${{ !matrix.musl && !matrix.gnu }}
+        run: rustup toolchain install 1.89.0 --profile minimal
+
+      - name: Prepare one serial native-host capture driver
+        id: prepare-native-vector-capture
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .context/native-vector-capture
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            workspace="$(pwd -P)"
+            git_dir="$workspace/.git"
+            test "$(cd -- "$git_dir" && pwd -P)" = "$git_dir"
+            # Keep the parent of the container-created worktree metadata runner-owned.
+            mkdir -p -- "$git_dir/worktrees"
+            printf 'workspace=%s\n' "$workspace" >> "$GITHUB_OUTPUT"
+          fi
+          cat > .context/native-vector-capture/run.sh <<'CAPTURE'
+          set -euo pipefail
+          workspace="$(pwd -P)"
+          baseline_root="$workspace/.context/frozen-ts66"
+          output_dir="$workspace/.context/native-vector-capture"
+          model_file="$workspace/apps/threadnote/embedded/models/bge-small-en-v1.5-q8/f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804.gguf"
+          test -f "$model_file"
+          # The frozen generator writes LF. Keep its input bytes stable on Windows.
+          git -c core.autocrlf=false -c core.eol=lf worktree add --detach "$baseline_root" 66f4c1d8baed033ec484f4db2895ea2252b4e2d0
+          baseline_install=(bun install --frozen-lockfile --ignore-scripts)
+          if [[ "$THREADNOTE_BUILD_TARGET" == *-musl ]]; then baseline_install+=(--libc=glibc); fi
+          baseline_install_command="${baseline_install[*]}"
+          (
+            cd "$baseline_root"
+            "${baseline_install[@]}"
+            bun -e 'const fs=require("node:fs"),path=require("node:path");const root=fs.realpathSync(".")+path.sep;for(const name of fs.readdirSync("node_modules/@threadnote")){if(!fs.realpathSync(path.join("node_modules/@threadnote",name)).startsWith(root))throw Error("Baseline workspace link escaped its frozen checkout");}'
+            THREADNOTE_DEVELOPMENT_BUILD_VERSION=5.3.6-local.g66f4c1d8baed033ec484f4db2895ea2252b4e2d0 bun run build
+            baseline_status="$(git status --porcelain=v1 --untracked-files=normal)"
+            if [[ -n "$baseline_status" ]]; then
+              printf 'Frozen TS66 checkout changed during build:\n%s\n' "$baseline_status" >&2
+              exit 1
+            fi
+          )
+          bun scripts/benchmark-recall-vectors.ts --write-baseline-provenance \
+            --baseline-source-root "$baseline_root" --baseline-distribution-root "$baseline_root/dist" \
+            --baseline-install-command "$baseline_install_command"
+          bun run build:release
+          bun scripts/verify-native-vector-reader.ts --required
+          bun scripts/assemble-native-inference.ts --stage-overlay "$workspace/dist" --distribution-root "$baseline_root/dist"
+          if [[ "${OS:-}" == "Windows_NT" ]]; then
+            bun --bun vitest run apps/threadnote/test/unit/windows-process-tree-sampler.test.ts apps/threadnote/test/integration/code-graph.benchmark-failure.test.ts
+          fi
+          bun scripts/benchmark-recall-vectors.ts --production-path --pairs 1 --samples 1 \
+            --documents 2 --distribution dense --model-file "$model_file" \
+            --distribution-root "$workspace/dist" --baseline-distribution-root "$baseline_root/dist" \
+            --baseline-source-root "$baseline_root" \
+            --output "$output_dir/setup-smoke.json" 2>&1 | tee "$output_dir/setup-smoke.log"
+          case "$THREADNOTE_BUILD_TARGET" in
+            bun-darwin-arm64) cases=(10000-dense) ;;
+            bun-linux-arm64-musl) cases=(10000-tied 100000-dense) ;;
+            *) exit 1 ;;
+          esac
+          for case in "${cases[@]}"; do
+            documents="${case%-*}"
+            distribution="${case#*-}"
+            output="$output_dir/recall-vector-${case}-production.json"
+            bun scripts/benchmark-recall-vectors.ts \
+              --production-path --pairs 3 --samples 30 \
+              --documents "$documents" --distribution "$distribution" \
+              --model-file "$model_file" --distribution-root "$workspace/dist" \
+              --baseline-distribution-root "$baseline_root/dist" --baseline-source-root "$baseline_root" \
+              --output "$output" 2>&1 | tee "$output.log"
+          done
+          CAPTURE
+
+      - name: Capture serial production pairs without a required timing gate
+        if: ${{ !matrix.musl && !matrix.gnu }}
+        timeout-minutes: 40
+        shell: bash
+        run: bash .context/native-vector-capture/run.sh
+
+      - name: Capture in the pinned native GNU compatibility environment
+        if: matrix.gnu
+        timeout-minutes: 40
+        run: >-
+          bun scripts/assemble-native-inference.ts --gnu-container
+          --container-command-json '["bash","-ec","exec bash .context/native-vector-capture/run.sh"]'
+
+      - name: Capture in the pinned native musl environment
+        if: matrix.musl
+        timeout-minutes: 40
+        run: >-
+          bun scripts/assemble-native-inference.ts --musl-container
+          --container-command-json '["bash","-ec","exec bash .context/native-vector-capture/run.sh"]'
+
+      - name: Return Linux capture paths to the runner
+        if: ${{ always() && (matrix.gnu || matrix.musl) && steps.prepare-native-vector-capture.outcome == 'success' }}
+        shell: bash
+        env:
+          CAPTURE_WORKSPACE: ${{ steps.prepare-native-vector-capture.outputs.workspace }}
+        run: |
+          set -euo pipefail
+          test -n "$CAPTURE_WORKSPACE"
+          test "$(pwd -P)" = "$CAPTURE_WORKSPACE"
+          capture_parent="$CAPTURE_WORKSPACE/.context"
+          worktree_parent="$CAPTURE_WORKSPACE/.git/worktrees"
+          # Recursive chown leaves symlink targets alone, but the path to each root must also stay physical.
+          test "$(cd -- "$capture_parent" && pwd -P)" = "$capture_parent"
+          test "$(cd -- "$worktree_parent" && pwd -P)" = "$worktree_parent"
+          runner_owner="$(id -u):$(id -g)"
+          for capture_path in "$capture_parent/native-vector-capture" "$capture_parent/frozen-ts66" "$worktree_parent/frozen-ts66"; do
+            if [[ -e "$capture_path" || -L "$capture_path" ]]; then
+              sudo chown -hRP -- "$runner_owner" "$capture_path"
+            fi
+          done
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        timeout-minutes: 5
+        with:
+          name: recall-vector-native-${{ matrix.target }}-${{ github.run_id }}
+          path: .context/native-vector-capture/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Remove owned benchmark workspace
+        if: always()
+        shell: bash
+        run: |
+          git worktree remove --force "$GITHUB_WORKSPACE/.context/frozen-ts66" || true
+          rm -rf -- "$GITHUB_WORKSPACE/.context/native-vector-capture"
