@@ -1,0 +1,50 @@
+name: Verify the vector fixture on Windows
+
+on:
+  push:
+    branches: [codex/verify-1176-windows-arm]
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: windows-11-arm, arch: arm64, archive: bun-windows-aarch64}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    env:
+      FIXTURE_COMMIT: c914a500cfa5addc75cd225325d28a6f3728bd3a
+    steps:
+      - name: Preserve committed bytes
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify the candidate parent and test file
+        run: |
+          test "$(git rev-parse HEAD^)" = "$FIXTURE_COMMIT"
+          test "$(git diff --name-status HEAD^ HEAD)" = $'A\t.github/workflows/verify-1176-windows.yml'
+          file=apps/threadnote/test/unit/code-graph.embedding.test.ts
+          blob="$(git rev-parse "$FIXTURE_COMMIT:$file")"
+          test "$(git hash-object --no-filters "$file")" = "$blob"
+          printf 'candidate=%s\nfixture_blob=%s\n' "$FIXTURE_COMMIT" "$blob"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.4
+          bun-download-url: https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/${{ matrix.archive }}.zip
+      - name: Verify native runtime
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: bun -e 'if (process.platform !== "win32" || process.arch !== process.env.EXPECTED_ARCH) process.exit(1)'
+      - run: bun install --frozen-lockfile
+      - name: Exercise the full fixture suite
+        run: bun --bun vitest run apps/threadnote/test/unit/code-graph.embedding.test.ts --reporter=verbose
