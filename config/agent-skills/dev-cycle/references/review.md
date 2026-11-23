@@ -11,11 +11,17 @@ Before spawning reviewers, assess every specialist below against the acceptance 
 | `security`      | Trust boundaries, authorization, secrets, untrusted input, command construction/execution authority, or data exposure      | Abuse paths, permission checks, injection, and sensitive-data handling                                          |
 | `performance`   | Hot paths, material CPU/memory/I/O cost, indexing, batching, caching, concurrency, or resource lifetime                    | Scaling, contention, bounded work, cleanup, and evidence for performance claims                                 |
 | `architecture`  | Package/service boundaries, ownership, public contracts, persistence/schema evolution, or cross-component lifecycle        | Dependency direction, compatibility, invariants, and fit with existing architecture                             |
-| `quality`       | Non-trivial behavior gains or changes, new failure modes, or substantive changes to tests                                  | Whether tests would catch the relevant failure; independent assertions, boundary cases, and useful properties   |
+| `quality`       | Risk to the verification strategy, oracle design, difficult failure coverage, or a meaningful property                     | Whether tests would catch the relevant failure; independent assertions, boundary cases, and useful properties   |
 | `flaky-test`    | Tests or fixtures depend on timing, scheduling, retries, processes, shared state, network, or cleanup                      | Deterministic synchronization, isolation, realistic clocks, and reliable teardown                               |
 | `devex`         | CLI/MCP interfaces, setup/update or user-facing configuration, diagnostics, contributor tooling, or agent skills/workflows | Discoverability, actionable failures, compatibility, and whether a user or agent can complete the intended flow |
 
 Run every triggered specialist as a separate background review with its focused question and relevant source/evidence. Correctness mentioning a risk does not replace its specialist review. Diff size, a green test run, or token cost alone does not justify skipping an applicable lane; narrow its scope instead. Run only the base pair when every specialist has a concrete non-applicability reason, such as a static prose correction with no workflow or interface change. Do not add unrelated lanes to meet a reviewer-count quota. If reviewer capacity is limited, run the selected reviews in batches.
+
+Include `correctness`, `simplicity`, and every selected specialist in `selected`, with complete reports in `lanes`. Never invent review output or replace a missing report with the orchestrator's assessment. Native validation enforces the base pair and selected-lane completeness; it does not determine which specialist triggers apply. A schema-valid pair alone does not establish sufficient review coverage. Reassess selection when a delta introduces a new surface; retain prior findings and relevant specialist coverage during incremental review.
+
+Review the full snapshot first, then deltas and prior findings; expand only for evidence gaps. Resolve prior active findings by stable identity and evidence, not the fixer's claim. Missing or failed selected-lane output blocks acceptance; never substitute an empty clean review.
+
+Findings do not authorize changes, approve intent, permit publication or prove the whole product works. Record results for the exact snapshot; refresh after material source changes.
 
 ## Material scenarios
 
@@ -25,9 +31,3 @@ Run every triggered specialist as a separate background review with its focused 
 4. **Coordinator.** Record each scenario as `verified`, `finding` or `unverified` in the review evidence for the exact snapshot. Cite the reviewer report, source locations and available test results. Use `verified` when the evidence supports the expected result. Use `finding` for a concrete issue and `unverified` when evidence is missing. Before you complete the review, record the decision and reason for each material gap. Apply the existing finding gates. If a follow-up changes behavior, ask the independent reviewers to recheck the affected scenarios on the new snapshot.
 
 Keep this evidence in the existing review reports and artifacts. Use the current native review schema.
-
-Include `correctness`, `simplicity`, and every selected specialist in `selected`, with complete reports in `lanes`. Never invent review output or replace a missing report with the orchestrator's assessment. Native validation enforces the base pair and selected-lane completeness; it does not determine which specialist triggers apply. A schema-valid pair alone does not establish sufficient review coverage. Reassess selection when a delta introduces a new surface; retain prior findings and relevant specialist coverage during incremental review.
-
-Review the full snapshot first, then deltas and prior findings; expand only for evidence gaps. Resolve prior active findings by stable identity and evidence, not the fixer's claim. Missing or failed selected-lane output blocks acceptance; never substitute an empty clean review.
-
-Findings do not authorize changes, approve intent, permit publication or prove the whole product works. Record results for the exact snapshot; refresh after material source changes.
