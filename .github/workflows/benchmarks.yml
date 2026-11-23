@@ -1049,6 +1049,23 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Verify candidate recall vector harness bytes
+        shell: bash
+        run: |
+          harness=scripts/benchmark-recall-vectors.ts
+          if ! expected=$(git rev-parse --verify "HEAD:$harness"); then
+            echo "::error::Could not resolve the candidate harness blob in HEAD ($harness)." >&2
+            exit 1
+          fi
+          if ! actual=$(git hash-object --no-filters -- "$harness"); then
+            echo "::error::Could not hash the raw candidate harness bytes ($harness)." >&2
+            exit 1
+          fi
+          if [[ "$actual" != "$expected" ]]; then
+            echo "::error::Candidate harness bytes differ from HEAD ($harness). Expected $expected, got $actual." >&2
+            exit 1
+          fi
+
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}

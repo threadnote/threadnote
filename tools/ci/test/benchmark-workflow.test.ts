@@ -130,6 +130,7 @@ function captureSteps(workflow: BenchmarkWorkflow): readonly {readonly jobName: 
   return EffectArray.flatMap(Object.entries(workflow.jobs), ([jobName, job]) =>
     EffectArray.flatMap(job.steps ?? [], step =>
       step.run != null &&
+      step.name !== 'Verify candidate recall vector harness bytes' &&
       Boolean(
         // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Preserve optional chaining so the matching step narrows `run`.
         EffectArray.some(step.run.split('\n'), line => line.includes('bench:') || line.includes('scripts/benchmark-')),
@@ -141,6 +142,27 @@ function captureSteps(workflow: BenchmarkWorkflow): readonly {readonly jobName: 
 }
 
 describe('platform benchmark workflow', () => {
+  it('checks the raw candidate harness bytes before installing dependencies', () => {
+    const workflow = decodeWorkflow(
+      load(readFileSync('.github/workflows/benchmarks.yml', 'utf8'), {schema: JSON_SCHEMA}),
+    );
+    const steps = workflow.jobs['recall-vector-native'].steps ?? [];
+    const checkout = Option.getOrThrow(EffectArray.findFirst(steps, step => step.uses === 'actions/checkout@v7'));
+    const guard = Option.getOrThrow(
+      EffectArray.findFirst(steps, step => step.name === 'Verify candidate recall vector harness bytes'),
+    );
+    const install = Option.getOrThrow(
+      EffectArray.findFirst(steps, step => step.run === 'bun install --frozen-lockfile'),
+    );
+    expect(guard).toMatchObject({shell: 'bash'});
+    expect(guard.if).toBeUndefined();
+    expect(steps.indexOf(checkout)).toBeLessThan(steps.indexOf(guard));
+    expect(steps.indexOf(guard)).toBeLessThan(steps.indexOf(install));
+
+    expect(guard.run).toContain('git rev-parse --verify "HEAD:$harness"');
+    expect(guard.run).toContain('git hash-object --no-filters -- "$harness"');
+  });
+
   it('keeps native-only vector capture manual, serial and bound to all eight native hosts', () => {
     const workflow = decodeWorkflow(
       load(readFileSync('.github/workflows/benchmarks.yml', 'utf8'), {schema: JSON_SCHEMA}),
