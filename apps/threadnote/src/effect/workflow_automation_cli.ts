@@ -227,6 +227,9 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
             callerCwd: options.callerCwd,
             ...(options.validationRef === undefined ? {} : {validationRef: options.validationRef}),
             ...(options.deliveryRef === undefined ? {} : {deliveryRef: options.deliveryRef}),
+            ...(options.maintenanceValidationRef === undefined
+              ? {}
+              : {maintenanceValidationRef: options.maintenanceValidationRef}),
             ...(options.snapshotRef === undefined ? {} : {snapshotRef: options.snapshotRef}),
             ...(options.candidateWatchRef === undefined ? {} : {candidateWatchRef: options.candidateWatchRef}),
             ...(options.supplementalRef === undefined ? {} : {supplementalRef: options.supplementalRef}),

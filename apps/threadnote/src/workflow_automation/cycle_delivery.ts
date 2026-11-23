@@ -23,6 +23,13 @@ export const CurrentNativeTerminalDeliveryWatch = Context.Reference<
   ((delivery: NativeCycleDelivery) => Effect.Effect<void, WorkflowAutomationError>) | undefined
 >('threadnote/NativeTerminalDeliveryWatch', {defaultValue: () => undefined});
 
+/** Internal authority prepared from canonical maintenance validation, never from a cycle request. */
+export const CurrentNativeMaintenanceProof = Context.Reference<
+  {readonly head: string; readonly tree: string; readonly marker: string} | undefined
+>('threadnote/NativeMaintenanceProof', {defaultValue: () => undefined});
+
+export const nativeMaintenanceProofError = (message: string) => fail('maintenance-proof-unverified', message);
+
 const gitObjectId = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 const remoteName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const supportedURL =
@@ -280,7 +287,12 @@ export const verifyNativePrRepository = Effect.fn('workflowAutomation.verifyPrRe
 });
 
 /** Read commit objects directly, without grafts, replacements, a commit-graph cache or lazy fetching. */
-const ancestryGit = (checkout: string, args: readonly string[], input?: Uint8Array) =>
+export const readNativeCycleGitProof = (
+  checkout: string,
+  args: readonly string[],
+  input?: Uint8Array,
+  maxOutputBytes = 4096,
+) =>
   Effect.gen(function* () {
     const system = yield* SystemInfo;
     return yield* runCommandEffect(
@@ -298,7 +310,7 @@ const ancestryGit = (checkout: string, args: readonly string[], input?: Uint8Arr
       ],
       {
         timeoutMs: 30_000,
-        maxOutputBytes: 4096,
+        maxOutputBytes,
         allowFailure: true,
         // Git for Windows maps /dev/null to NUL. An empty path can warn during commit parsing.
         env: {...system.environment(), GIT_NO_LAZY_FETCH: '1', GIT_GRAFT_FILE: '/dev/null', GIT_TEST_COMMIT_GRAPH: '0'},
@@ -314,19 +326,19 @@ export const nativeCommitDescends = Effect.fn('workflowAutomation.cycle.commitDe
   descendant: string,
 ) {
   if (ancestor === descendant) return true;
-  const shallow = yield* ancestryGit(checkout, ['rev-parse', '--is-shallow-repository']);
+  const shallow = yield* readNativeCycleGitProof(checkout, ['rev-parse', '--is-shallow-repository']);
   if (shallow.exitCode !== 0 || EffectString.trim(shallow.stdout) !== 'false')
     return yield* fail(
       'merged-head-unavailable',
       'This checkout is shallow, so its commit ancestry is incomplete. Run git fetch --unshallow, then retry; Threadnote does not fetch.',
     );
   for (const commit of [ancestor, descendant])
-    if ((yield* ancestryGit(checkout, ['cat-file', '-e', `${commit}^{commit}`])).exitCode !== 0)
+    if ((yield* readNativeCycleGitProof(checkout, ['cat-file', '-e', `${commit}^{commit}`])).exitCode !== 0)
       return yield* fail(
         'merged-head-unavailable',
         `Commit ${commit} of the merged PR is not in this checkout. Run git fetch, then retry; Threadnote does not fetch.`,
       );
-  const {exitCode} = yield* ancestryGit(checkout, ['merge-base', '--is-ancestor', ancestor, descendant]);
+  const {exitCode} = yield* readNativeCycleGitProof(checkout, ['merge-base', '--is-ancestor', ancestor, descendant]);
   if (exitCode > 1)
     return yield* fail('merged-head-unavailable', 'git merge-base could not compare the phase and merged PR heads.');
   return exitCode === 0;
@@ -418,7 +430,7 @@ const mergedObject = (value: string | undefined) =>
   value !== undefined && gitObjectId.test(value) ? value : undefined;
 
 const requireRetargetCommit = (checkout: string, commit: string) =>
-  ancestryGit(
+  readNativeCycleGitProof(
     checkout,
     ['cat-file', '--batch-check=%(objectname) %(objecttype)'],
     new TextEncoder().encode(commit + '\n'),
@@ -439,7 +451,12 @@ const readMergeObject = Effect.fn('workflowAutomation.cycle.readMergeObject')(fu
   commit: string,
   suffix: '^{tree}' | '^1',
 ) {
-  const result = yield* ancestryGit(checkout, ['rev-parse', '--verify', '--end-of-options', commit + suffix]);
+  const result = yield* readNativeCycleGitProof(checkout, [
+    'rev-parse',
+    '--verify',
+    '--end-of-options',
+    commit + suffix,
+  ]);
   const object = mergedObject(EffectString.trim(result.stdout));
   if (result.exitCode !== 0 || EffectString.trim(result.stderr) || !object)
     return yield* unverifiedRetarget(
@@ -469,6 +486,7 @@ export const verifyNativeCyclePrDeliveryIdentity = (
   options: {
     readonly allowMerged?: boolean;
     readonly requireEvidence?: boolean;
+    readonly maintenance?: {readonly head: string; readonly tree: string};
     /** Canonical state, supplied only while closing a previously published PR. */
     readonly historicalState?: NativeCycleState;
   } = {},
@@ -477,14 +495,31 @@ export const verifyNativeCyclePrDeliveryIdentity = (
     const state = options.historicalState;
     const observed = yield* observeDeliveryIdentity(checkout, receipt, {...options, allowRetarget: !!state});
     const {identity} = observed;
-    if (!receipt?.pr || !state || !observed.retargeted) return identity;
+    if (!receipt?.pr || !state || !observed.retargeted) {
+      if (options.maintenance)
+        return yield* nativeMaintenanceProofError(
+          'Maintenance evidence applies only to terminal retargeted PR delivery.',
+        );
+      return identity;
+    }
     const targetBranch = identity.baseBranch;
     const targetRepository = EffectString.toLowerCase(identity.baseRepository);
     const commit = mergedObject(observed.mergeCommit);
     if (!commit) return yield* unverifiedRetarget('GitHub did not return the merge commit');
     yield* requireRetargetCommit(checkout, commit);
-    if ((yield* readMergeObject(checkout, commit, '^{tree}')) !== receipt.validatedTree)
+    const mergeTree = yield* readMergeObject(checkout, commit, '^{tree}');
+    if (options.maintenance) {
+      if (
+        mergeTree === receipt.validatedTree ||
+        options.maintenance.head !== identity.headSha ||
+        options.maintenance.tree !== mergeTree
+      )
+        return yield* nativeMaintenanceProofError(
+          'The retargeted merge result must match the exact reviewed maintenance head and tree and differ from the original tree.',
+        );
+    } else if (mergeTree !== receipt.validatedTree) {
       return yield* unverifiedRetarget('the merge result tree differs from the validated phase tree');
+    }
 
     const predecessor = yield* mergedPredecessor(state, receipt);
     const previous = yield* observeDeliveryIdentity(checkout, predecessor, {allowMerged: true, allowRetarget: true});
@@ -512,12 +547,17 @@ export const verifyNativeCyclePrDeliveryIdentity = (
     yield* requireRetargetCommit(checkout, previousCommit);
     const targetParent = yield* readMergeObject(checkout, commit, '^1');
     yield* requireRetargetCommit(checkout, targetParent);
-    const shallow = yield* ancestryGit(checkout, ['rev-parse', '--is-shallow-repository']);
+    const shallow = yield* readNativeCycleGitProof(checkout, ['rev-parse', '--is-shallow-repository']);
     if (shallow.exitCode !== 0 || EffectString.trim(shallow.stderr) || EffectString.trim(shallow.stdout) !== 'false')
       return yield* unverifiedRetarget(
         'this checkout does not have complete commit ancestry; run git fetch --unshallow, then retry',
       );
-    const ancestry = yield* ancestryGit(checkout, ['merge-base', '--is-ancestor', previousCommit, targetParent]);
+    const ancestry = yield* readNativeCycleGitProof(checkout, [
+      'merge-base',
+      '--is-ancestor',
+      previousCommit,
+      targetParent,
+    ]);
     if (ancestry.exitCode !== 0 || EffectString.trim(ancestry.stderr))
       return yield* unverifiedRetarget(
         `predecessor ${predecessor.phaseId} merge is absent from the merge result’s target-side history`,

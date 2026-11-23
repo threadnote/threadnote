@@ -106,6 +106,16 @@ const stateBytes = Effect.fn('workflowAutomation.stateBytes')(function* (file: s
   return bytes;
 });
 
+/** Check an already validated state image without decoding it a second time. */
+export const readNativeWorkflowRevision = Effect.fn('workflowAutomation.readRevision')(function* (
+  config: RuntimeConfig,
+  runId: string,
+) {
+  const file = yield* statePath(config, runId);
+  const bytes = file === undefined ? undefined : yield* stateBytes(file);
+  return bytes === undefined ? undefined : sha256HexSync(bytes);
+});
+
 export const readNativeWorkflowState = Effect.fn('workflowAutomation.readState')(function* (
   config: RuntimeConfig,
   runId: string,

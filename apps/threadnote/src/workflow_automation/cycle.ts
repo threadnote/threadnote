@@ -78,8 +78,10 @@ import {
 } from './cycle_merge.js';
 import {
   bindNativeCycleDeliveryBase,
+  CurrentNativeMaintenanceProof,
   CurrentNativeTerminalDeliveryWatch,
   nativeCommitDescends,
+  nativeMaintenanceProofError,
   verifyNativeCyclePrDeliveryIdentity,
   verifyNativeRetargetedBaseBinding,
 } from './cycle_delivery.js';
@@ -1589,12 +1591,25 @@ export const runNativeCycle = <R>(
             delivery = yield* bindNativeCycleDeliveryBase(repo, selected.baseBranch, request.delivery);
           }
           const terminalWatch = yield* CurrentNativeTerminalDeliveryWatch;
+          const maintenance = yield* CurrentNativeMaintenanceProof;
+          const evidence = delivery.watch?.evidence ?? '';
+          const hasMaintenanceMarker = EffectString.includes(';maintenance-proof:')(evidence);
+          if (
+            (hasMaintenanceMarker || maintenance) &&
+            (!historicalMergeCandidate ||
+              !terminalWatch ||
+              !maintenance ||
+              !EffectString.includes(maintenance.marker)(evidence))
+          )
+            return yield* nativeMaintenanceProofError(
+              'Terminal maintenance evidence requires the verified workflow task route.',
+            );
           let retargeted = false;
           if (delivery.delivery === 'pr') {
             const identity = yield* verifyNativeCyclePrDeliveryIdentity(repo, delivery, {
               requireEvidence: priorDelivery === undefined,
               allowMerged: delivery.pr?.state === 'merged',
-              ...(historicalMergeCandidate && terminalWatch ? {historicalState: state} : {}),
+              ...(historicalMergeCandidate && terminalWatch ? {historicalState: state, maintenance} : {}),
             });
             retargeted = identity.baseBranch !== delivery.pr?.baseBranch;
           }
