@@ -1,6 +1,6 @@
 import {Schema} from 'effect';
 import {parseWatchResponse, parseWatchWorkResponse} from './release-artifact.js';
-import {removeCompiledFixture} from './native-release-cleanup.js';
+import {removeCompiledFixture} from '../helpers/native-release-cleanup.js';
 import {Array as EffectArray} from 'effect';
 import {spawn, spawnSync} from '@threadnote/testing/node-child-process';
 import {resolve} from '@threadnote/testing/node-path';
