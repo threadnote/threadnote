@@ -1,7 +1,7 @@
 name: Darwin ARM64 ready-read startup diagnostic
 on:
   push:
-    branches: [codex/ready-startup-bench]
+    branches: [codex/ready-startup-bench, codex/ready-startup-q29-crossover]
     paths: ['.github/ready-startup-probe/**', '.github/workflows/ready-startup-bench.yml']
 permissions:
   contents: read
@@ -33,6 +33,7 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
   install:
+    if: github.ref_name == 'codex/ready-startup-bench'
     name: Smoke exact installed CLI and ready vector retrieval
     runs-on: macos-15
     timeout-minutes: 20

@@ -121,4 +121,14 @@ replace(
         return yield* ScriptError.make({message: 'Instrumented distribution changed during measurement.'});
       closingSource = yield* productionSourceFence(nativeManifest.buildInfo.sourceCommit);""",
 )
+replace(
+    """          for (let sample = 0; sample < options.samples; sample++) {
+            const result = yield* executeQuery(backend, fixture, sample, expected[sample]);""",
+    """          // Opposite orderings within each repeated Williams arm order. Both
+          // chronological halves contain two swaps and two unchanged rounds.
+          const swapQueries = options.samples === 30 && [2, 4, 5, 7].includes(pair);
+          for (let position = 0; position < options.samples; position++) {
+            const sample = swapQueries ? position === 14 ? 29 : position === 29 ? 14 : position : position;
+            const result = yield* executeQuery(backend, fixture, sample, expected[sample]);""",
+)
 Path("scripts/ready-startup-observe.ts").write_text(src)
