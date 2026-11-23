@@ -122,7 +122,13 @@ const health = Effect.fn('workflowWatch.health')(function* (
   const alive = yield* nativeWatchCollectorAlive(envelope.collector);
   const consumer = envelope.state.consumer;
   const consumerLive = consumer !== null && consumer.leaseUntil > now;
-  const receipt = envelope.notification?.outbox?.receipt ?? null;
+  const outbox = envelope.notification?.outbox;
+  const receipt = outbox?.receipt ?? null;
+  const ambiguous = outbox?.status === 'sending' && !alive;
+  const codexChildRefused =
+    envelope.notification?.target.host === 'codex' &&
+    outbox?.status === 'failed' &&
+    outbox.error === 'host-command-failed';
   const sourceErrors = Array.flatMap(envelope.state.sources, source =>
     source.error ? [{source: source.source, ...source.error}] : [],
   );
@@ -165,20 +171,24 @@ const health = Effect.fn('workflowWatch.health')(function* (
     notification: envelope.notification
       ? {
           host: envelope.notification.target.host,
-          status:
-            envelope.notification.outbox?.status === 'sending' && !alive
-              ? 'ambiguous'
-              : (envelope.notification.outbox?.status ?? 'idle'),
-          key: envelope.notification.outbox?.key ?? null,
-          attemptId: envelope.notification.outbox?.attemptId ?? null,
+          status: ambiguous ? 'ambiguous' : (outbox?.status ?? 'idle'),
+          key: outbox?.key ?? null,
+          attemptId: outbox?.attemptId ?? null,
           receipt,
-          consumedThrough: envelope.notification.outbox?.consumedThrough ?? null,
-          attempts: envelope.notification.outbox?.attempts ?? 0,
-          nextAttemptAt: envelope.notification.outbox?.nextAttemptAt ?? null,
-          error:
-            envelope.notification.outbox?.status === 'sending' && !alive
+          consumedThrough: outbox?.consumedThrough ?? null,
+          attempts: outbox?.attempts ?? 0,
+          nextAttemptAt: outbox?.nextAttemptAt ?? null,
+          error: codexChildRefused
+            ? 'host-codex-spawned-subagent'
+            : ambiguous
               ? 'host-delivery-ambiguous'
-              : (envelope.notification.outbox?.error ?? null),
+              : (outbox?.error ?? null),
+          ...(codexChildRefused
+            ? {
+                guidance:
+                  "Ask the owning top-level Codex conversation to register future watches. Preserve this watch's owner and retained events.",
+              }
+            : {}),
           notifiedThrough: envelope.notification.notifiedThrough,
           lastReceipt: envelope.notification.lastReceipt ?? null,
         }

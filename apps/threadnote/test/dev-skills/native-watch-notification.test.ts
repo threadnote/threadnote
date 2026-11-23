@@ -17,6 +17,7 @@ import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {
   CommandExecutor,
+  CommandFailed,
   CommandSpawnFailed,
   CommandTimedOut,
   type CommandExecutionError,
@@ -1301,6 +1302,74 @@ effectIt.effect('terminal notice survives lease expiry and explicit same-owner r
       expect.objectContaining({status: 'open', event: expect.objectContaining({kind: 'merged'})}),
     );
   }).pipe(withStoppedFixtureCollector, provide),
+);
+
+effectIt.effect('distinguishes an exact Codex child destination refusal without releasing retained work', () =>
+  Effect.gen(function* () {
+    const rejection =
+      'Error: failed to queue session message: thread/queue/add failed: direct app-server input is not allowed for unloaded spawned sub-agents (code -32600)';
+    const diagnostic = 'private command context';
+    for (const {exitCode, stdout, stderr, error} of [
+      {exitCode: 1, stdout: '', stderr: rejection + '\n', error: 'host-command-failed'},
+      {exitCode: 1, stdout: diagnostic, stderr: rejection + '\n', error: 'host-delivery-ambiguous'},
+      {exitCode: 1, stdout: '', stderr: rejection + '\n' + diagnostic, error: 'host-delivery-ambiguous'},
+      {exitCode: 2, stdout: '', stderr: rejection + '\n', error: 'host-delivery-ambiguous'},
+    ]) {
+      const f = yield* fixture(1);
+      let calls = 0;
+      const dispatch = f.dispatch().pipe(
+        Effect.provideService(CommandExecutor, {
+          execute: (executable, args) => {
+            calls++;
+            return Effect.fail(CommandFailed.make({executable, args, exitCode, stdout, stderr, message: diagnostic}));
+          },
+          executeStreaming: () => Effect.die(new Error('Unexpected streaming command')),
+        }),
+      );
+      yield* dispatch;
+      const failed = yield* f.read();
+      expect(failed.envelope.state).toEqual(f.envelope.state);
+      expect(failed.envelope.notification).toMatchObject({
+        target,
+        consumerId: 'consumer',
+        wakeupId: 'wakeup',
+        notifiedThrough: 0,
+        outbox: {status: 'failed', error, attempts: 1, first: 1, last: 1, consumedThrough: 0},
+      });
+      const inspected = yield* runNativeWatch(f.config, {
+        protocolVersion: 1,
+        executorVersion: 1,
+        action: 'watch',
+        command: 'inspect',
+        watchId: 'watch-1',
+      });
+      expect(inspected).toMatchObject({
+        consumer: {id: 'consumer', wakeupId: 'wakeup', wakeupVerification: 'native-host-delivery-pending'},
+        notification: {
+          status: 'failed',
+          error: error === 'host-command-failed' ? 'host-codex-spawned-subagent' : error,
+          receipt: null,
+          attempts: 1,
+          consumedThrough: 0,
+        },
+        pending: 1,
+        deliveryId: null,
+      });
+      if (error === 'host-command-failed')
+        expect(inspected).toHaveProperty(
+          'notification.guidance',
+          "Ask the owning top-level Codex conversation to register future watches. Preserve this watch's owner and retained events.",
+        );
+      else expect(inspected).not.toHaveProperty('notification.guidance');
+      const serialized = JSON.stringify({failed, inspected});
+      expect(serialized).not.toContain(rejection);
+      expect(serialized).not.toContain(diagnostic);
+      yield* TestClock.adjust(100_000);
+      yield* dispatch;
+      expect(calls).toBe(1);
+      expect((yield* f.read()).revision).toBe(failed.revision);
+    }
+  }).pipe(provide),
 );
 
 effectIt.effect('Codex crash ambiguity and lost receipts never automatically repeat an unchanged event', () =>
