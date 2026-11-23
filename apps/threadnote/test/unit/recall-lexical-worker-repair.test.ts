@@ -10,6 +10,8 @@ import {RuntimeEntrypoint} from '@threadnote/platform/runtime-entrypoint';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {recallResourceInvalidationLayer} from '@threadnote/recall/resource-invalidation';
+import {writeModelSelection} from '@threadnote/inference/models/selection';
+import {ensureRecallEmbeddingsReceipt, readRecallEmbeddingDemand} from '@threadnote/recall/background/demand';
 import {
   expireRecallIndexValidation,
   loadRecallIndexData,
@@ -79,6 +81,35 @@ effectIt.layer(services)(it => {
       const recalled = yield* readRecallIndexData(config, {includeInactive: true, memoryIds: ['tn_1']});
       expect(EffectArray.map(recalled.candidates, candidate => candidate.memoryId)).toEqual(['tn_1']);
       expect(recallReadStateWarnings(recalled.readState)).toEqual([]);
+    }).pipe(TestClock.withLive),
+  );
+  it.effect('queues vector reuse after recall prepares a missing active schema', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'lexical-worker-upgrade-'}));
+      const scope = {account: 'local', user: 'me', agentContextHome: home, includeInactive: false};
+      const memory = path.join(home, 'data', 'local', 'user', 'me', 'memories', 'durable');
+      yield* fs.makeDirectory(memory, {recursive: true});
+      yield* fs.writeFileString(
+        path.join(memory, 'evidence.md'),
+        'MEMORY\nkind: durable\nstatus: active\nmemory_id: tn_evidence\n\nAlbatross evidence',
+      );
+      yield* loadRecallIndexData(scope, {includeInactive: false, memoryIds: []});
+      const index = path.join(home, 'indexes', 'lexical', recallIndexDatabaseFilename(false));
+      yield* fs.rename(index, path.join(path.dirname(index), 'active-v15.sqlite'));
+      yield* writeModelSelection(home, {version: 1, roles: {}, purposes: {recall: 'bge-small-en-v1.5-q8'}});
+
+      const missed = yield* readRecallIndexData(scope, {includeInactive: false, query: 'Albatross'}).pipe(Effect.flip);
+      expect(missed).toMatchObject({_tag: 'RecallReadyReadUnavailable'});
+      expect((yield* readRecallEmbeddingDemand(scope))?.desired).toBeUndefined();
+      expect(yield* runRecallLexicalWorkerUnit(scope)).toMatchObject({state: 'complete'});
+      expect(yield* recallIndexStatus(scope)).toMatchObject({ready: true, documentCount: 1});
+
+      const pending = (yield* readRecallEmbeddingDemand(scope))?.desired;
+      expect(pending).toBeDefined();
+      expect(yield* ensureRecallEmbeddingsReceipt(scope)).toMatchObject({...pending, disposition: 'coalesced'});
+      expect((yield* readRecallEmbeddingDemand(scope))?.desired).toEqual(pending);
     }).pipe(TestClock.withLive),
   );
 });

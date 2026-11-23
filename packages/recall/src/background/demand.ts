@@ -292,6 +292,7 @@ const enqueueRecallEmbeddings = Effect.fn('recall.enqueueEmbeddings')(function* 
   scope: RecallEmbeddingScope,
   coalesce: boolean,
   resetInvalid: boolean,
+  preservePending = false,
 ) {
   const crypto = yield* SecureRandom.SecureRandom;
   const revision = yield* crypto.uuidV4();
@@ -299,6 +300,15 @@ const enqueueRecallEmbeddings = Effect.fn('recall.enqueueEmbeddings')(function* 
     scope,
     state => {
       const sameConfiguration = coalesce && state.desired?.manifestPath === scope.manifestPath;
+      if (preservePending && sameConfiguration && state.desired)
+        return {
+          state,
+          value: {
+            token: state.desired.token,
+            revision: state.desired.revision,
+            disposition: 'coalesced',
+          } satisfies RecallEmbeddingDemandReceipt,
+        };
       // A same-generation hint cannot prove model/authorization equivalence.
       // Every admitted enqueue is a distinct event; only configuration coalesces.
       const selectedToken = sameConfiguration && state.desired ? state.desired.token : revision;
@@ -337,6 +347,9 @@ export const requestRecallEmbeddingsReceipt = (scope: RecallEmbeddingScope, coal
   enqueueRecallEmbeddings(scope, coalesce, false);
 export const requestRecallEmbeddings = (scope: RecallEmbeddingScope, coalesce = false) =>
   requestRecallEmbeddingsReceipt(scope, coalesce).pipe(Effect.map(receipt => receipt.token));
+/** Readiness checks wake the existing generation work without invalidating its current unit. */
+export const ensureRecallEmbeddingsReceipt = (scope: RecallEmbeddingScope) =>
+  enqueueRecallEmbeddings(scope, true, false, true);
 /** Explicit operator repair preserves the rejected control file before rebuilding demand. */
 export const repairRecallEmbeddingDemand = (scope: RecallEmbeddingScope) =>
   enqueueRecallEmbeddings(scope, false, true).pipe(Effect.map(receipt => receipt.token));

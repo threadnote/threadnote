@@ -17,6 +17,7 @@ import {LocalModelStore} from '@threadnote/inference/models/store';
 import {readModelSelection, selectedEmbeddingModelId} from '@threadnote/inference/models/selection';
 import {
   completeRecallEmbeddingDemand,
+  ensureRecallEmbeddingsReceipt,
   observeRecallEmbeddingDemand,
   readRecallEmbeddingDemand,
   type RecallEmbeddingObservation,
@@ -70,7 +71,8 @@ export const runRecallLexicalWorkerUnit = Effect.fn('recall.lexicalWorkerUnit')(
   }
   // The snapshot is derived from canonical sources, so an untrusted one is rebuilt here.
   // `threadnote repair` covers only the active scope and would strand the inactive one.
-  const repair = lexicalRefreshDisposition(yield* recallIndexStatus(scope, scope.includeInactive)) === 'unsafe';
+  const initial = yield* recallIndexStatus(scope, scope.includeInactive);
+  const repair = lexicalRefreshDisposition(initial) === 'unsafe';
   const result = yield* loadRecallIndexData(scope, {
     includeInactive: scope.includeInactive,
     memoryIds: [],
@@ -93,6 +95,14 @@ export const runRecallLexicalWorkerUnit = Effect.fn('recall.lexicalWorkerUnit')(
     }
     // A concurrent canonical mutation retains demand for another pass.
     return {state: 'checkpointed' as const, reason: 'source-changed', delay: 50};
+  }
+  if (!scope.includeInactive && !initial.ready && refreshed.generation !== initial.generation) {
+    // A new active lexical generation needs a vector generation even when the
+    // recall that discovered the missing snapshot has already returned.
+    yield* Effect.gen(function* () {
+      const selection = yield* readModelSelection(scope.agentContextHome);
+      if (selectedEmbeddingModelId(selection, 'recall')) yield* ensureRecallEmbeddingsReceipt(scope);
+    }).pipe(Effect.catch(() => Effect.logWarning('Could not queue recall vectors after lexical preparation.')));
   }
   return (yield* completeRecallLexicalRefresh(scope, revision))
     ? {state: 'complete' as const, delay: 0}

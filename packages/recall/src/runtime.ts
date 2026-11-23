@@ -79,7 +79,7 @@ import {
   scheduleMcpRecallBackgroundRefresh,
   type McpRecallBackgroundRefreshSchedule,
 } from './mcp/refresh.js';
-import {RecallEmbeddingDemandUnavailable} from './background/demand.js';
+import {ensureRecallEmbeddingsReceipt, RecallEmbeddingDemandUnavailable} from './background/demand.js';
 import {
   retrieveRecallMemoryConnections,
   type RecallMemoryConnectionsResult,
@@ -1059,8 +1059,7 @@ export const loadRecallSemanticScoresResult = Effect.fn('recall.loadSemanticScor
         preflight,
       )
     ) {
-      yield* scheduleMcpRecallBackgroundRefresh(config, manifest);
-      return undefined;
+      return {refresh: (yield* ensureRecallEmbeddingsReceipt(config)).disposition};
     }
     const semanticLimit = recallIndexPreselectionLimit(limit);
     return yield* loadCurrentSemanticScores(config, manifest, query, semanticLimit, eligibility, allowedUriScopes);
@@ -1068,11 +1067,13 @@ export const loadRecallSemanticScoresResult = Effect.fn('recall.loadSemanticScor
     Effect.map(snapshot =>
       snapshot === undefined
         ? emptyRecallSemanticScoresResult()
-        : ({
-            corpusGeneration: Option.some(snapshot.corpusGeneration),
-            scores: Option.fromNullishOr(snapshot.scores),
-            warning: Option.none(),
-          } satisfies RecallSemanticScoresResult),
+        : snapshot.refresh !== undefined
+          ? emptyRecallSemanticScoresResult(Option.some(semanticRecallRefreshingWarning(snapshot.refresh)))
+          : ({
+              corpusGeneration: Option.some(snapshot.corpusGeneration),
+              scores: Option.fromNullishOr(snapshot.scores),
+              warning: Option.none(),
+            } satisfies RecallSemanticScoresResult),
     ),
     Effect.catchCauseIf(
       cause => !Cause.hasInterrupts(cause) && !hasReadCleanupUnconfirmed(cause),
@@ -1123,7 +1124,7 @@ const loadSemanticScoresAttempt = Effect.fn('recall.loadSemanticScoresAttempt')(
         message: 'Semantic ready storage failed read-only validation.',
       });
     if (snapshot?.readiness === 'missing' || snapshot?.readiness === 'stale')
-      yield* scheduleMcpRecallBackgroundRefresh(config, manifest);
+      return {refresh: (yield* ensureRecallEmbeddingsReceipt(config)).disposition};
     return snapshot?.corpusGeneration === undefined
       ? undefined
       : {corpusGeneration: snapshot.corpusGeneration, scores: snapshot.scores};
@@ -1144,19 +1145,18 @@ const loadSemanticScoresAttempt = Effect.fn('recall.loadSemanticScoresAttempt')(
       config,
     ))
   ) {
-    yield* scheduleMcpRecallBackgroundRefresh(config, manifest);
-    return {corpusGeneration, scores: undefined};
+    return {refresh: (yield* ensureRecallEmbeddingsReceipt(config)).disposition};
   }
-  return yield* selectedSemanticScores(config, query, {
+  const scores = yield* selectedSemanticScores(config, query, {
     allowedUriScopes,
     corpusGeneration,
     currentCorpusGeneration: fence,
     eligibility,
     limit,
-  }).pipe(
-    Effect.tap(scores => (scores === undefined ? scheduleMcpRecallBackgroundRefresh(config, manifest) : Effect.void)),
-    Effect.map(scores => ({corpusGeneration, scores})),
-  );
+  });
+  return scores === undefined
+    ? {refresh: (yield* ensureRecallEmbeddingsReceipt(config)).disposition}
+    : {corpusGeneration, scores};
 });
 
 export const loadRecallSemanticScores = Effect.fn('recall.loadSemanticScores')(function* (

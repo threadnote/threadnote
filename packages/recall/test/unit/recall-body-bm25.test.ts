@@ -127,11 +127,17 @@ describe('body-only BM25', () => {
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* initializeRecallDatabase(sql);
-      const filler = EffectArray.makeBy(513, index => memory(`${personal}/filler-${index}.md`, `coral ${index}`));
+      const filler = EffectArray.makeBy(513, index =>
+        memory(
+          `${personal}/filler-${index}.md`,
+          `coral ${index} ${index % 2 === 0 ? 'alpha alpha' : 'café'} ${index % 3 === 0 ? 'cafe sprout' : ''}`,
+        ),
+      );
       const target = memory(`${personal}/target.md`, 'albatross evidence');
       yield* publish(sql, [...filler, target]);
       const lookup = (query: string) => selectRecallBodyBm25(sql, 'reader', {query, includeInactive: false});
       expect(yield* lookup('albatross')).toEqual([target.uri]);
+      expect(yield* lookup('alpha café')).toEqual(yield* fts5Reference(sql, [...filler, target]));
       yield* sql`DELETE FROM documents WHERE uri = ${target.uri}`;
       yield* publish(sql, [memory(target.uri, 'plover evidence')]);
       expect(yield* lookup('albatross')).toEqual([]);

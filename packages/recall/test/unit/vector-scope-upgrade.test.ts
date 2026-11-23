@@ -26,7 +26,7 @@ import {
   loadRecallIndexData,
 } from '@threadnote/recall/index';
 import {refreshRecallDerivedIndexesAfterCanonicalMutation} from '@threadnote/recall/mcp/refresh';
-import {loadMcpRecallSemanticScoresResult} from '@threadnote/recall/runtime';
+import {loadMcpRecallSemanticScoresResult, loadRecallSemanticScoresResult} from '@threadnote/recall/runtime';
 import {
   ensureVectorIndex,
   selectedSemanticScores,
@@ -153,6 +153,12 @@ describe('vector scope mapping upgrades', () => {
               authority: 'any' as const,
               projects: {mode: 'allow-projects-and-projectless' as const, projects: ['workspace-project']},
             };
+            const cli = yield* loadRecallSemanticScoresResult(config, 'brief sentences', 5, eligibility);
+            expect(Option.getOrUndefined(cli.warning)).toContain('background refresh is queued');
+            const pending = (yield* readRecallEmbeddingDemand(config))?.desired;
+            expect(pending).toBeDefined();
+            yield* loadRecallSemanticScoresResult(config, 'brief sentences', 5, eligibility);
+            expect((yield* readRecallEmbeddingDemand(config))?.desired).toEqual(pending);
             const first = yield* loadMcpRecallSemanticScoresResult(config, 'brief sentences', 5, eligibility);
             expect(first.status).toBe('unavailable');
             expect(Option.getOrUndefined(first.result.warning)).toContain('refresh');

@@ -239,6 +239,13 @@ export const selectRecallBodyBm25 = Effect.fn('recall.selectBodyBm25')(function*
     recallWorkspaceScopePredicate('d', options.workspaceScope, options.workspaceScopeMode),
   );
   const now = yield* Clock.currentTimeMillis;
+  const score = `SUM(
+    idf.weight * (
+      p.term_frequency * 2.2 /
+      (p.term_frequency + 1.2 * (0.25 + 0.75 * e.document_length / corpus.avg_length))
+    )
+    ORDER BY idf.term COLLATE BINARY
+  )`;
   const rows = yield* sql.unsafe<{readonly uri: string}>(
     `WITH eligible AS MATERIALIZED (
        -- SQLite takes bare columns from the row with the minimum URI.
@@ -254,44 +261,59 @@ export const selectRecallBodyBm25 = Effect.fn('recall.selectBodyBm25')(function*
        SELECT COUNT(*) AS n, AVG(document_length) AS avg_length FROM eligible
      ), terms AS MATERIALIZED (
        SELECT value AS term FROM json_each(?)
-     ), matches AS MATERIALIZED (
-       -- A narrow authorized corpus can probe the primary key directly.
-       SELECT e.id, p.term, p.term_frequency AS tf
+     ), frequencies AS MATERIALIZED (
+       SELECT q.term, CASE WHEN corpus.n <= 64 THEN (
+         SELECT COUNT(*)
+         FROM eligible AS e
+         CROSS JOIN body_bm25_postings AS p ON p.term = q.term AND p.document_id = e.id
+       ) ELSE (
+         SELECT COUNT(*)
+         FROM body_bm25_postings AS p
+         CROSS JOIN eligible AS e ON e.id = p.document_id
+         WHERE p.term = q.term
+       ) END AS df
+       FROM corpus
+       CROSS JOIN terms AS q
+     ), idf AS MATERIALIZED (
+       SELECT term, CASE WHEN 2 * df >= corpus.n THEN 0.000001
+         ELSE ln((corpus.n - df + 0.5) / (df + 0.5))
+       END AS weight
+       FROM frequencies
+       CROSS JOIN corpus
+       WHERE df > 0
+     ), narrow AS (
+       SELECT e.uri, ${score} AS score
        FROM corpus
        CROSS JOIN eligible AS e
-       CROSS JOIN terms AS q
-       CROSS JOIN body_bm25_postings AS p ON p.term = q.term AND p.document_id = e.id
+       CROSS JOIN idf
+       CROSS JOIN body_bm25_postings AS p ON p.term = idf.term AND p.document_id = e.id
        WHERE corpus.n <= 64
-       UNION ALL
-       SELECT e.id, p.term, p.term_frequency AS tf
+       GROUP BY e.id
+       ORDER BY score DESC, e.uri COLLATE BINARY
+       LIMIT ?
+     ), broad AS (
+       SELECT e.uri, ${score} AS score
        FROM corpus
-       CROSS JOIN terms AS q
-       CROSS JOIN body_bm25_postings AS p ON p.term = q.term
-       INNER JOIN eligible AS e ON e.id = p.document_id
+       CROSS JOIN idf
+       CROSS JOIN body_bm25_postings AS p ON p.term = idf.term
+       CROSS JOIN eligible AS e ON e.id = p.document_id
        WHERE corpus.n > 64
-     ), idf AS (
-       SELECT m.term,
-         CASE WHEN 2 * COUNT(*) >= corpus.n THEN 0.000001
-           ELSE ln((corpus.n - COUNT(*) + 0.5) / (COUNT(*) + 0.5))
-         END AS weight
-       FROM matches AS m
-       CROSS JOIN corpus
-       GROUP BY m.term
+       GROUP BY e.id
+       ORDER BY score DESC, e.uri COLLATE BINARY
+       LIMIT ?
      )
-     SELECT e.uri
-     FROM matches AS m
-     INNER JOIN idf ON idf.term = m.term
-     INNER JOIN eligible AS e ON e.id = m.id
-     CROSS JOIN corpus
-     GROUP BY m.id
-     ORDER BY SUM(
-       idf.weight * (
-         m.tf * 2.2 / (m.tf + 1.2 * (0.25 + 0.75 * e.document_length / corpus.avg_length))
-       )
-       ORDER BY m.term COLLATE BINARY
-     ) DESC, e.uri COLLATE BINARY
-     LIMIT ?`,
-    [...scope.params, now, now, JSON.stringify(EffectArray.map(terms, row => row.term)), RECALL_FUSION_WINDOW],
+     SELECT uri, score FROM narrow
+     UNION ALL
+     SELECT uri, score FROM broad
+     ORDER BY score DESC, uri COLLATE BINARY`,
+    [
+      ...scope.params,
+      now,
+      now,
+      JSON.stringify(EffectArray.map(terms, row => row.term)),
+      RECALL_FUSION_WINDOW,
+      RECALL_FUSION_WINDOW,
+    ],
   );
   return EffectArray.map(rows, row => row.uri);
 });
