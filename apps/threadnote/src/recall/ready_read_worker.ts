@@ -1,28 +1,28 @@
-import {readLocalMemoryRecordsByUri} from '@threadnote/memory/local-path';
-import {serveRecallSections} from '@threadnote/recall/sections_read';
-import {retrieveRecallMemoryConnections} from '@threadnote/recall/memory/connections';
-import {ResourceStore} from '@threadnote/store/resource-store';
-import {recallResourceInvalidationLayer} from '@threadnote/recall/resource-invalidation';
+import type {SecureRandom} from 'effect/crypto';
+import * as BunFileSystem from '@effect/platform-bun/BunFileSystem';
+import * as BunPath from '@effect/platform-bun/BunPath';
+import * as BunStdio from '@effect/platform-bun/BunStdio';
+import {succeedUndefined} from '@threadnote/platform/optional';
+import {ExternalSourcePolicy} from '@threadnote/store/external-resource';
 import {
   Array as EffectArray,
   Cause,
+  Context,
   DateTime,
   Effect,
+  FileSystem,
   Layer,
   Option,
-  Record as EffectRecord,
+  Path,
   Result,
   Schema,
+  Scope,
   Stdio,
   Stream,
 } from 'effect';
-import {isJsonObject} from '@threadnote/platform/json';
-import * as BunServices from '@effect/platform-bun/BunServices';
 import {cryptoLayer} from '@threadnote/platform/crypto';
 import {SystemInfo} from '@threadnote/platform/system';
 import {RecallEmbeddingWakePort} from '@threadnote/recall/background/demand';
-import {integrationExternalSourcePolicyLayer} from '../integrations/access-policy.js';
-import {sourceConfigurationLayer} from '../integrations/config.js';
 import {
   readRecallCodeLinks,
   readRecallExactMatches,
@@ -42,48 +42,145 @@ import {
   type RecallReadyReadRequest,
   type RecallReadyReadResponse,
 } from '@threadnote/recall/read_boundary';
-import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
+  recallVectorStorage,
   readSelectedSemanticVectorState,
   readSelectedSemanticVectorScores,
   vectorIndexGenerationReadiness,
-  recallVectorStorage,
   loadRecallVectorAuthorizationKey,
 } from '@threadnote/recall/vector-index';
-import {negativeSemanticReadinessHint} from '@threadnote/recall/vector/negative-readiness';
 import type {MemoryRecord} from '@threadnote/memory/document';
 import type {RecallIndexQueryDiagnostics, RecallReadyReadState} from '@threadnote/recall/index';
 import {CallerReadCancellation, hasReadCleanupUnconfirmed} from '@threadnote/platform/read_deadline';
-import {RECALL_PREFLIGHT_METADATA_MILLISECONDS} from '@threadnote/recall/runtime';
 import type {RecallSemanticPreflight} from '@threadnote/recall/read_boundary';
+import {negativeSemanticReadinessHint} from '@threadnote/recall/vector/negative-readiness';
 
-export const RECALL_READY_READ_INPUT_BYTES = 256 * 1024;
-export const RECALL_READY_READ_OUTPUT_BYTES = 16 * 1024 * 1024;
+import {
+  RECALL_READY_READ_INPUT_BYTES,
+  RECALL_READY_READ_OUTPUT_BYTES,
+  recallReadyReadBinding,
+} from './ready_read_protocol.js';
+export {RECALL_READY_READ_INPUT_BYTES, RECALL_READY_READ_OUTPUT_BYTES, recallReadyReadBinding};
 
-// Reuse production authorization/configuration without constructing graph or model services.
-const workerPlatform = Layer.mergeAll(BunServices.layer, cryptoLayer, SystemInfo.layer);
-const readWorkerDependencies = integrationExternalSourcePolicyLayer.pipe(
-  Layer.provideMerge(sourceConfigurationLayer.pipe(Layer.provideMerge(workerPlatform))),
+const readWorkerPolicyLayer = Layer.unwrap(
+  Effect.promise(async () => {
+    const [{integrationExternalSourcePolicyLayer}, {sourceConfigurationLayer}] = await Promise.all([
+      import('../integrations/access-policy.js'),
+      import('../integrations/config.js'),
+    ]);
+    return integrationExternalSourcePolicyLayer.pipe(Layer.provideMerge(sourceConfigurationLayer));
+  }),
+);
+const readWorkerResourceStoreLayer = Layer.unwrap(
+  Effect.promise(async () => {
+    const [{ResourceStore}, {recallResourceInvalidationLayer}] = await Promise.all([
+      import('@threadnote/store/resource-store'),
+      import('@threadnote/recall/resource-invalidation'),
+    ]);
+    return ResourceStore.layer.pipe(Layer.provideMerge(recallResourceInvalidationLayer));
+  }),
+);
+const workerPlatform = Layer.mergeAll(
+  BunFileSystem.layer,
+  BunPath.layer,
+  BunStdio.layer,
+  cryptoLayer,
+  SystemInfo.layer,
 );
 
-export const readyRecallReadWorkerLayer = ResourceStore.layer.pipe(
-  Layer.provideMerge(Layer.merge(readWorkerDependencies, recallResourceInvalidationLayer)),
-);
-
-export function recallReadyReadBinding(request: RecallReadyReadRequest): string {
-  return sha256HexSync(
-    JSON.stringify(Schema.encodeSync(recallReadyReadRequestSchema)(request), (_key, value: unknown) =>
-      isJsonObject(value)
-        ? EffectRecord.fromEntries(
-            EffectRecord.toEntries(value).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
-          )
-        : value,
+/** Full composition for callers supplying the worker's services directly. */
+export const readyRecallReadWorkerLayer = readWorkerResourceStoreLayer.pipe(
+  Layer.provideMerge(readWorkerPolicyLayer),
+  Layer.provideMerge(
+    Layer.mergeAll(
+      Layer.unwrap(Effect.promise(async () => (await import('@effect/platform-bun/BunServices')).layer)),
+      cryptoLayer,
+      SystemInfo.layer,
     ),
-  );
-}
+  ),
+);
+
+// External admission traverses the filesystem on every proof. Only defer constructing the policy
+// and its configuration services until a source is found. Every lookup still reads current configuration.
+export const readyRecallReadWorkerStartupLayer = Layer.effect(
+  ExternalSourcePolicy,
+  Effect.gen(function* () {
+    const platform = yield* Effect.context<
+      FileSystem.FileSystem | Path.Path | SystemInfo | SecureRandom.SecureRandom
+    >();
+    const scope = yield* Scope.Scope;
+    const policy = yield* Effect.cached(
+      Layer.buildWithScope(readWorkerPolicyLayer, scope).pipe(
+        Effect.map(Context.get(ExternalSourcePolicy)),
+        Effect.provide(platform),
+      ),
+    );
+    return ExternalSourcePolicy.of({
+      current: (location, sourceId, provider) =>
+        Effect.flatMap(policy, value => value.current(location, sourceId, provider)),
+      evidenceFingerprint: (location, sourceId, provider) =>
+        Effect.flatMap(policy, value => value.evidenceFingerprint?.(location, sourceId, provider) ?? succeedUndefined),
+    });
+  }),
+).pipe(Layer.provideMerge(workerPlatform));
+
+type ResourceReadRequest = Extract<RecallReadyReadRequest, {operation: 'sections' | 'memory-connections'}>;
+const serveResourceRead = Effect.fn('recall.serveReadyResourceRead')(function* (request: ResourceReadRequest) {
+  switch (request.operation) {
+    case 'sections': {
+      const [{serveRecallSections}, {RECALL_PREFLIGHT_METADATA_MILLISECONDS}] = yield* Effect.promise(() =>
+        Promise.all([import('@threadnote/recall/sections_read'), import('@threadnote/recall/runtime')]),
+      );
+      const model = request.options.mode === 'baseline' ? request.options.semanticPreflightModel : undefined;
+      const callerCancelled = yield* CallerReadCancellation;
+      const semanticPreflight =
+        model === undefined
+          ? undefined
+          : yield* Effect.gen(function* () {
+              const readiness = yield* negativeSemanticReadinessHint(request.config, model, recallVectorStorage);
+              return {model, readiness} satisfies RecallSemanticPreflight;
+            }).pipe(
+              Effect.catchCauseIf(
+                cause => !Cause.hasInterrupts(cause) && !hasReadCleanupUnconfirmed(cause),
+                () => Effect.succeed({model, readiness: 'unknown' as const}),
+              ),
+              work =>
+                callerCancelled
+                  ? work
+                  : work.pipe(
+                      Effect.timeoutOrElse({
+                        duration: RECALL_PREFLIGHT_METADATA_MILLISECONDS,
+                        orElse: () => Effect.succeed({model, readiness: 'unknown' as const}),
+                      }),
+                    ),
+            );
+      // Read-only preflight precedes the baseline's final canonical and permission proof.
+      const sections = yield* serveRecallSections(request.config, request.options);
+      return semanticPreflight === undefined ? sections : {...sections, semanticPreflight};
+    }
+    case 'memory-connections': {
+      const [{retrieveRecallMemoryConnections}, {readLocalMemoryRecordsByUri}] = yield* Effect.promise(() =>
+        Promise.all([import('@threadnote/recall/memory/connections'), import('@threadnote/memory/local-path')]),
+      );
+      const instant = DateTime.make(request.options.now);
+      if (Option.isNone(instant)) return yield* RecallReadyReadBoundaryError.make({reason: 'invalid-protocol'});
+      return yield* retrieveRecallMemoryConnections(request.config, {
+        ...request.options,
+        now: DateTime.toDateUtc(instant.value),
+        readRecords: uris => readLocalMemoryRecordsByUri(request.config, uris),
+      });
+    }
+  }
+});
 
 /** Complete direct ready reads, including their live canonical and external authorization fences. */
-export const serveRecallReadyRead = Effect.fn('recall.serveReadyRead')(function* (request: RecallReadyReadRequest) {
+type ResourceReadEffect = ReturnType<typeof serveResourceRead>;
+const serveRecallReadyReadWith = Effect.fn('recall.serveReadyRead')(function* <R>(
+  request: RecallReadyReadRequest,
+  serveResource: (
+    request: ResourceReadRequest,
+  ) => Effect.Effect<Effect.Success<ResourceReadEffect>, Effect.Error<ResourceReadEffect>, R>,
+) {
   const observations: RecallReadyReadObservation[] = [];
   let maintenanceRequested = false;
   const observe = (value: RecallReadyReadObservation) => {
@@ -96,43 +193,9 @@ export const serveRecallReadyRead = Effect.fn('recall.serveReadyRead')(function*
   const onCanonicalMismatch = (value: number) => observe({kind: 'mismatch', value});
   const program = Effect.gen(function* () {
     switch (request.operation) {
-      case 'sections': {
-        const model = request.options.mode === 'baseline' ? request.options.semanticPreflightModel : undefined;
-        const callerCancelled = yield* CallerReadCancellation;
-        const semanticPreflight =
-          model === undefined
-            ? undefined
-            : yield* Effect.gen(function* () {
-                const readiness = yield* negativeSemanticReadinessHint(request.config, model, recallVectorStorage);
-                return {model, readiness} satisfies RecallSemanticPreflight;
-              }).pipe(
-                Effect.catchCauseIf(
-                  cause => !Cause.hasInterrupts(cause) && !hasReadCleanupUnconfirmed(cause),
-                  () => Effect.succeed({model, readiness: 'unknown' as const}),
-                ),
-                work =>
-                  callerCancelled
-                    ? work
-                    : work.pipe(
-                        Effect.timeoutOrElse({
-                          duration: RECALL_PREFLIGHT_METADATA_MILLISECONDS,
-                          orElse: () => Effect.succeed({model, readiness: 'unknown' as const}),
-                        }),
-                      ),
-              );
-        // Read-only preflight precedes the baseline's final canonical and permission proof.
-        const sections = yield* serveRecallSections(request.config, request.options);
-        return semanticPreflight === undefined ? sections : {...sections, semanticPreflight};
-      }
-      case 'memory-connections': {
-        const instant = DateTime.make(request.options.now);
-        if (Option.isNone(instant)) return yield* RecallReadyReadBoundaryError.make({reason: 'invalid-protocol'});
-        return yield* retrieveRecallMemoryConnections(request.config, {
-          ...request.options,
-          now: DateTime.toDateUtc(instant.value),
-          readRecords: uris => readLocalMemoryRecordsByUri(request.config, uris),
-        });
-      }
+      case 'sections':
+      case 'memory-connections':
+        return yield* serveResource(request);
       case 'vector-readiness': {
         const corpus = yield* currentRecallCorpusGeneration(request.config);
         if (Option.isNone(corpus) || corpus.value !== request.options.corpusGeneration) return 'stale';
@@ -267,6 +330,15 @@ export const serveRecallReadyRead = Effect.fn('recall.serveReadyRead')(function*
   } satisfies RecallReadyReadResponse;
 });
 
+export const serveRecallReadyRead = (request: RecallReadyReadRequest) =>
+  serveRecallReadyReadWith(request, serveResourceRead);
+
+const serveReadyRecallReadWithDeferredStore = (request: RecallReadyReadRequest) =>
+  serveRecallReadyReadWith(request, resourceRequest =>
+    // oxlint-disable-next-line effecttsgo/strict-effect-provide -- The one-shot worker owns this layer for the selected request.
+    serveResourceRead(resourceRequest).pipe(Effect.provide(readWorkerResourceStoreLayer)),
+  );
+
 const readRequest = Effect.gen(function* () {
   const stdio = yield* Stdio.Stdio;
   const encoder = new TextEncoder();
@@ -289,26 +361,32 @@ const readRequest = Effect.gen(function* () {
 });
 
 /** Signal-transparent one-shot worker; the parent owns its process and every pipe. */
-export const recallReadyReadWorkerProgram = Effect.gen(function* () {
-  const request = yield* readRequest;
-  const served = yield* serveRecallReadyRead(request);
-  const encode = (value: RecallReadyReadResponse) => new TextEncoder().encode(`${JSON.stringify(value)}\n`);
-  const complete = encode(served);
-  // An oversize result stays bound to its request and names its reason instead of failing opaquely.
-  const response: RecallReadyReadResponse =
-    complete.byteLength <= RECALL_READY_READ_OUTPUT_BYTES
-      ? served
-      : {
-          protocol: served.protocol,
-          binding: served.binding,
-          operation: served.operation,
-          observations: [],
-          maintenanceRequested: served.maintenanceRequested,
-          outcome: 'failed',
-          failure: 'output-limit',
-        };
-  const bytes = response === served ? complete : encode(response);
-  yield* Schema.decodeEffect(recallReadyReadResponseSchema)(response);
-  const stdio = yield* Stdio.Stdio;
-  yield* Stream.run(Stream.make(bytes), stdio.stdout({endOnDone: false}));
-}).pipe(Effect.catchCause(() => Effect.fail(RecallReadyReadBoundaryError.make({reason: 'worker-failed'}))));
+const makeWorkerProgram = <R>(
+  serve: (request: RecallReadyReadRequest) => Effect.Effect<RecallReadyReadResponse, never, R>,
+) =>
+  Effect.gen(function* () {
+    const request = yield* readRequest;
+    const served = yield* serve(request);
+    const encode = (value: RecallReadyReadResponse) => new TextEncoder().encode(`${JSON.stringify(value)}\n`);
+    const complete = encode(served);
+    // An oversize result stays bound to its request and names its reason instead of failing opaquely.
+    const response: RecallReadyReadResponse =
+      complete.byteLength <= RECALL_READY_READ_OUTPUT_BYTES
+        ? served
+        : {
+            protocol: served.protocol,
+            binding: served.binding,
+            operation: served.operation,
+            observations: [],
+            maintenanceRequested: served.maintenanceRequested,
+            outcome: 'failed',
+            failure: 'output-limit',
+          };
+    const bytes = response === served ? complete : encode(response);
+    yield* Schema.decodeEffect(recallReadyReadResponseSchema)(response);
+    const stdio = yield* Stdio.Stdio;
+    yield* Stream.run(Stream.make(bytes), stdio.stdout({endOnDone: false}));
+  }).pipe(Effect.catchCause(() => Effect.fail(RecallReadyReadBoundaryError.make({reason: 'worker-failed'}))));
+
+export const recallReadyReadWorkerProgram = makeWorkerProgram(serveRecallReadyRead);
+export const recallReadyReadWorkerStartupProgram = makeWorkerProgram(serveReadyRecallReadWithDeferredStore);

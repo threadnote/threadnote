@@ -11,6 +11,14 @@ import {recallReadyReadWorkerProgram, readyRecallReadWorkerLayer} from './ready_
 export {readyRecallReadWorkerLayer};
 
 export function makeReadyRecallReadWorkerProgram(arguments_: readonly string[], environment: NodeJS.ProcessEnv) {
+  return withReadyRecallReadWorkerProcess(arguments_, environment, recallReadyReadWorkerProgram);
+}
+
+export function withReadyRecallReadWorkerProcess<R>(
+  arguments_: readonly string[],
+  environment: NodeJS.ProcessEnv,
+  program: Effect.Effect<void, RecallReadyReadBoundaryError, R>,
+) {
   const callerCancelled = arguments_.length === 2 && arguments_[1] === RECALL_READY_READ_CALLER_CANCELLATION_ARGUMENT;
   if (arguments_[0] !== RECALL_READY_READ_WORKER_ARGUMENT || (!callerCancelled && arguments_.length !== 1))
     return Effect.fail(RecallReadyReadBoundaryError.make({reason: 'invalid-protocol'}));
@@ -35,12 +43,7 @@ export function makeReadyRecallReadWorkerProgram(arguments_: readonly string[], 
     ),
     Effect.flatMap(home =>
       withStandaloneProcessLease(
-        withSignalTransparentThreadnoteWorkerRegistration(
-          home,
-          'recall-read-worker',
-          'ready-recall',
-          recallReadyReadWorkerProgram,
-        ),
+        withSignalTransparentThreadnoteWorkerRegistration(home, 'recall-read-worker', 'ready-recall', program),
       ),
     ),
     Effect.provideService(CommandExecutor, noChildren),

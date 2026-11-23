@@ -33,7 +33,7 @@ import {
   RECALL_READY_READ_INPUT_BYTES,
   RECALL_READY_READ_OUTPUT_BYTES,
   recallReadyReadBinding,
-} from './ready_read_worker.js';
+} from './ready_read_protocol.js';
 import {RECALL_READY_READ_WORKER_ARGUMENT, RECALL_READY_READ_CALLER_CANCELLATION_ARGUMENT} from '../worker_protocol.js';
 
 export const RECALL_READY_READ_MILLISECONDS = 2_000;
