@@ -27,6 +27,7 @@ import {recallResourceInvalidationLayer} from '@threadnote/recall/resource-inval
 import {
   loadRecallIndexData,
   readRecallIndexData,
+  readRecallBodyBm25,
   recallIndexDatabaseFilename,
   recallIndexStatus,
   expireRecallIndexValidation,
@@ -37,6 +38,7 @@ import {readRecallIdentityAdmissionCut} from '../../src/index/admission.js';
 import {readRecallLexicalDemand} from '@threadnote/recall/background/lexical-demand';
 import {normalizeRecallHydrationChanges} from '../../src/index/refresh_cut.js';
 import {readRecallStaleMarker} from '../../src/index/stale_marker.js';
+import {RECALL_INDEX_DATABASE_VERSION} from '../../src/index/schema.js';
 
 const system = SystemInfo.layer.pipe(
   Layer.provide(
@@ -148,21 +150,40 @@ function useDatabase<A>(filename: string, use: (db: Database) => A) {
   );
 }
 
-effectIt.effect('rebuilds the next lexical filename instead of adopting the previous database', () =>
+effectIt.effect('rebuilds the active lexical schema from canonical memories when v15 exists', () =>
   Effect.gen(function* () {
     const f = yield* fixture(1);
     const lexical = f.path.join(f.home, 'indexes', 'lexical');
     const current = f.path.join(lexical, recallIndexDatabaseFilename(false));
-    const previous = f.path.join(lexical, 'active-v14.sqlite');
-    yield* f.fs.writeFileString(previous, 'v14-not-migrated');
-    yield* f.write(0, 'alpha rebuilt after version bump');
+    const previous = f.path.join(lexical, 'active-v15.sqlite');
+    yield* f.fs.rename(current, previous);
+    // The v16 schema adds only the body tables and their dependent indexes and triggers.
+    yield* useDatabase(previous, db =>
+      db.exec(`
+        DROP TABLE body_bm25_postings;
+        DROP TABLE body_bm25_documents;
+        UPDATE metadata SET value = '15' WHERE key = 'schema_version';
+      `),
+    );
+    expect(yield* useDatabase(previous, db => db.query('SELECT COUNT(*) AS count FROM documents').get())).toEqual({
+      count: 2,
+    });
+    expect(yield* f.fs.exists(current)).toBe(false);
+    expect(
+      yield* readRecallIndexData(f.config, {includeInactive: false, query: 'alpha'}).pipe(Effect.flip),
+    ).toMatchObject({
+      _tag: 'RecallReadyReadUnavailable',
+    });
+
+    yield* f.write(0, 'albatross rebuilt after version bump');
     yield* f.refresh();
     expect(yield* f.fs.exists(previous)).toBe(false);
-    expect(yield* f.fs.exists(current)).toBe(true);
     expect(
       yield* useDatabase(current, db => db.query("SELECT value FROM metadata WHERE key = 'schema_version'").get()),
-    ).toEqual({value: '15'});
-    expect(yield* f.fs.readFileString(current).pipe(Effect.option)).not.toEqual(Option.some('v14-not-migrated'));
+    ).toEqual({value: String(RECALL_INDEX_DATABASE_VERSION)});
+    expect(yield* readRecallBodyBm25(f.config, {includeInactive: false, query: 'albatross'})).toMatchObject({
+      uris: ['threadnote://user/me/memories/durable/0.md'],
+    });
   }).pipe(provide, TestClock.withLive),
 );
 

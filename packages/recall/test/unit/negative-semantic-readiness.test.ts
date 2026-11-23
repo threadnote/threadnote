@@ -9,6 +9,7 @@ import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
 import {RECALL_CHUNKER_VERSION} from '../../src/chunker.js';
 import {recallIndexDatabaseFilename, readRecallPublishedGenerationHint} from '../../src/index.js';
+import {RECALL_INDEX_DATABASE_VERSION} from '../../src/index/schema.js';
 import {recallVectorStorage} from '../../src/vector-index.js';
 import {negativeSemanticReadinessHint} from '../../src/vector/negative-readiness.js';
 
@@ -34,7 +35,7 @@ const fixture = Effect.gen(function* () {
     db =>
       Effect.sync(() => {
         db.exec('CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT)');
-        db.query('INSERT INTO metadata VALUES (?, ?)').run('schema_version', '15');
+        db.query('INSERT INTO metadata VALUES (?, ?)').run('schema_version', String(RECALL_INDEX_DATABASE_VERSION));
         db.query('INSERT INTO metadata VALUES (?, ?)').run('initialized', 'true');
         db.query('INSERT INTO metadata VALUES (?, ?)').run('content_generation', 'new-corpus');
       }),
