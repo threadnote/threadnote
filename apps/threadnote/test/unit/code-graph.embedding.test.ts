@@ -754,7 +754,7 @@ describe('native code graph vector generations', () => {
               },
               source,
             );
-            const scores = yield* vectors.search(home, layout, 'snapshot-paged', 'paged symbol', 5);
+            const scores = yield* vectors.search(home, layout, 'snapshot-paged', 'paged symbol', 405);
             return {
               built,
               scores,
@@ -770,7 +770,9 @@ describe('native code graph vector generations', () => {
             ready: true,
             reused: 0,
           });
-          expect(result.scores.size).toBe(5);
+          expect(Array.from(result.scores.entries())).toEqual(
+            EffectArray.map(symbols.slice(0, 405), ({id}) => [id, 1]),
+          );
           expect(pageLimits).toEqual([400, 400, 400]);
           expect(Math.max(...embeddedBatches)).toBeLessThanOrEqual(128);
         } finally {

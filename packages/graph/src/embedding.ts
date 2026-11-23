@@ -16,6 +16,7 @@ import {
   selectCodeGraphPredecessorGeneration,
   type CodeGraphGenerationProgress,
 } from './vector/generation.js';
+import {bytesFromSqlBlob, CodeGraphEmbeddingError, decodeSearchVectorPage, isDecodableVector} from './vector/blob.js';
 import {inspectVectorPageStorageSql} from './vector/retirement/inspection.js';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {Cause, Clock, Context, DateTime, Effect, Exit, FileSystem, Layer, Path, Schema} from 'effect';
@@ -51,14 +52,6 @@ import {
 } from './vector/retirement.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
-
-class CodeGraphEmbeddingError extends Schema.TaggedError<CodeGraphEmbeddingError, {readonly brand: unique symbol}>()(
-  'CodeGraphEmbeddingError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
 
 class CodeGraphVectorOwnerExpired extends Schema.TaggedError<
   CodeGraphVectorOwnerExpired,
@@ -930,10 +923,7 @@ const searchGraphVectors = Effect.fn('codeGraph.searchVectors')(function* (input
           [active.generation, cursor, VECTOR_PAGE_SIZE],
         );
         if (rows.length === 0) break;
-        const records = EffectArray.map(rows, row => ({
-          id: row.symbol_id,
-          vector: decodeVector(row.vector, active.dimensions),
-        }));
+        const records = decodeSearchVectorPage(rows, active.dimensions);
         const pageMatches = searchExactVectors(queryVector, records, {
           dimensions: active.dimensions,
           limit: Math.min(boundedLimit, records.length),
@@ -1100,42 +1090,6 @@ function encodeVector(vector: readonly number[], dimensions: number): Uint8Array
     view.setFloat32(index * 4, component, true);
   }
   return bytes;
-}
-
-function decodeVector(value: unknown, dimensions: number): readonly number[] {
-  const bytes = bytesFromSqlBlob(value);
-  if (bytes.byteLength !== dimensions * 4) {
-    throw CodeGraphEmbeddingError.make({
-      message: `Stored vector has ${bytes.byteLength} bytes; expected ${dimensions * 4}.`,
-    });
-  }
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const vector = Array.from({length: dimensions}, (_, index) => view.getFloat32(index * 4, true));
-  if (EffectArray.some(vector, component => !Number.isFinite(component))) {
-    throw CodeGraphEmbeddingError.make({message: 'Stored vector contains a non-finite component.'});
-  }
-  const magnitude = Math.sqrt(EffectArray.reduce(vector, 0, (sum, component) => sum + component * component));
-  if (Math.abs(magnitude - 1) > 0.002)
-    throw CodeGraphEmbeddingError.make({message: 'Stored vector is not L2-normalized.'});
-  return vector;
-}
-
-function isDecodableVector(value: unknown, dimensions: number): boolean {
-  try {
-    decodeVector(value, dimensions);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function bytesFromSqlBlob(value: unknown): Uint8Array {
-  if (value instanceof Uint8Array) return value;
-  if (value instanceof ArrayBuffer) return new Uint8Array(value);
-  if (ArrayBuffer.isView(value)) {
-    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-  }
-  throw CodeGraphEmbeddingError.make({message: 'Stored vector is not a binary SQLite value.'});
 }
 
 function mergeSearchResults(

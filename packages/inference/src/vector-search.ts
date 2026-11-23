@@ -1,9 +1,11 @@
 import {Array as EffectArray} from 'effect';
 import {Context, Effect, Layer, Schema} from 'effect';
 
-export interface VectorRecord {
+type VectorValues = readonly number[] | Readonly<Float32Array>;
+
+export interface VectorRecord<Values extends VectorValues = readonly number[]> {
   readonly id: string;
-  readonly vector: readonly number[];
+  readonly vector: Values;
 }
 
 export interface VectorSearchResult {
@@ -22,7 +24,7 @@ export interface VectorSearchShape {
   readonly normalize: (vector: readonly number[]) => Effect.Effect<readonly number[], VectorInvalid>;
   readonly search: (
     query: readonly number[],
-    records: readonly VectorRecord[],
+    records: readonly VectorRecord<VectorValues>[],
     options: {readonly dimensions: number; readonly limit: number; readonly minimumScore?: number},
   ) => Effect.Effect<readonly VectorSearchResult[], VectorInvalid>;
 }
@@ -58,7 +60,7 @@ export function normalizeVector(vector: readonly number[]): readonly number[] {
 
 export function searchExactVectors(
   query: readonly number[],
-  records: readonly VectorRecord[],
+  records: readonly VectorRecord<VectorValues>[],
   options: {readonly dimensions: number; readonly limit: number; readonly minimumScore?: number},
 ): readonly VectorSearchResult[] {
   if (!Number.isInteger(options.dimensions) || options.dimensions <= 0) {
@@ -98,8 +100,8 @@ export function searchExactVectors(
   return results.sort(compareBestFirst);
 }
 
-function assertFiniteVector(vector: readonly number[]): void {
-  if (vector.length === 0 || EffectArray.some(vector, component => !Number.isFinite(component))) {
+function assertFiniteVector(vector: VectorValues): void {
+  if (vector.length === 0 || vector.some(component => !Number.isFinite(component))) {
     throw new Error('Vector must contain at least one finite component.');
   }
 }
