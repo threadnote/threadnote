@@ -657,7 +657,7 @@ describe('native code graph vector generations', () => {
               .all('');
             const details = EffectArray.map(plan, row => row.detail);
             expect(database.query('PRAGMA user_version').get()).toEqual({user_version: 3});
-            expect(Effect2.pipe(result.databasePath, EffectString.endsWith('/vectors-v2.sqlite'))).toBe(true);
+            expect(path.basename(result.databasePath)).toBe('vectors-v2.sqlite');
             expect(result.refreshed).toMatchObject({
               embedded: 0,
               ready: true,
@@ -967,7 +967,6 @@ function rebuildReleasedVectorPointerLoad(databasePath: string, pointerCount: nu
     create: true,
     strict: true,
   });
-  let sourceAttached = false;
   try {
     database.exec(CODE_GRAPH_VECTOR_GENERATIONS_TABLE_SQL);
     database.exec(CODE_GRAPH_VECTOR_POINTERS_TABLE_SQL);
@@ -975,7 +974,6 @@ function rebuildReleasedVectorPointerLoad(databasePath: string, pointerCount: nu
     database.exec(CODE_GRAPH_VECTOR_REUSE_INDEX_SQL);
     database.exec('PRAGMA user_version = 2');
     database.query('ATTACH DATABASE ? AS source').run(databasePath);
-    sourceAttached = true;
     const template = database
       .query<
         {
@@ -993,11 +991,11 @@ function rebuildReleasedVectorPointerLoad(databasePath: string, pointerCount: nu
       )
       .get();
     if (!template) throw TestError.make({message: 'Vector pointer load fixture has no generation template.'});
-    const insertGeneration = database.prepare(`INSERT INTO vector_generations (
+    using insertGeneration = database.prepare(`INSERT INTO vector_generations (
          generation, snapshot_id, model_id, model_sha256, dimensions,
          template_version, count, state, created_at
        ) VALUES (?, ?, ?, ?, ?, ?, 0, 'ready', ?)`);
-    const insertPointer = database.prepare('INSERT INTO vector_pointers (worktree_id, generation) VALUES (?, ?)');
+    using insertPointer = database.prepare('INSERT INTO vector_pointers (worktree_id, generation) VALUES (?, ?)');
     database.transaction(() => {
       database.exec(`INSERT INTO vector_generations (
            generation, snapshot_id, model_id, model_sha256, dimensions,
@@ -1036,7 +1034,6 @@ function rebuildReleasedVectorPointerLoad(databasePath: string, pointerCount: nu
       }
     })();
     database.exec('DETACH DATABASE source');
-    sourceAttached = false;
     const objects = database
       .query<
         {
@@ -1057,8 +1054,7 @@ function rebuildReleasedVectorPointerLoad(databasePath: string, pointerCount: nu
       throw TestError.make({message: 'Released vector v2 fixture unexpectedly contains retirement authority.'});
     }
   } finally {
-    if (sourceAttached) database.exec('DETACH DATABASE source');
-    database.close(false);
+    database.close(true);
   }
   rmSync(databasePath, {
     force: true,
