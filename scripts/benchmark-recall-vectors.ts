@@ -1566,10 +1566,7 @@ const runProductionVectorBenchmark = Effect.scoped(
             ? result.failure.reason
             : 'semantic-failure';
           // The typed parent boundary owns budget exhaustion. The worker reply schema excludes it.
-          const deadlineExhaustion =
-            result.failure instanceof RecallReadyReadBoundaryError && result.failure.reason === 'budget-exhausted'
-              ? 'RecallReadyReadBoundaryError'
-              : undefined;
+          const deadlineExhaustion = reason === 'budget-exhausted' ? 'RecallReadyReadBoundaryError' : undefined;
           return {
             sample,
             milliseconds,

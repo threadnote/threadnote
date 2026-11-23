@@ -517,8 +517,8 @@ type DeadlineObservation = DeadlineInput['arms'][number]['samples'][number];
 function deadlineCapture(): DeadlineInput {
   const warmSamples = 30;
   const oracleControls = Array.from({length: warmSamples}, (_, sample) => ({
-    querySha256: sample.toString(16).padStart(64, '0'),
-    scoresSha256: sample.toString(16).padStart(64, 'a'),
+    querySha256: EffectString.padStart(64, '0')(sample.toString(16)),
+    scoresSha256: EffectString.padStart(64, 'a')(sample.toString(16)),
   }));
   const observations = (backend: 'baseline' | 'candidate'): DeadlineObservation[] =>
     EffectArray.map(oracleControls, (digests, sample) =>
@@ -539,8 +539,8 @@ function deadlineCapture(): DeadlineInput {
       {backend: 'baseline', result: observations('baseline')[0]},
       {backend: 'candidate', result: observations('candidate')[0]},
     ],
-    arms: [1, 2, 3].flatMap(pair =>
-      (['baseline', 'candidate'] as const).map(backend => ({
+    arms: EffectArray.flatMap([1, 2, 3], pair =>
+      EffectArray.map(['baseline', 'candidate'] as const, backend => ({
         pair,
         backend,
         resourceEvidenceComplete: true,
