@@ -1,0 +1,161 @@
+name: Packed graph decoder functional validation
+
+on:
+  push:
+    branches: [codex/packed-graph-native-validation]
+
+permissions:
+  contents: read
+
+env:
+  BUN_VERSION: 1.4.4
+  PRODUCT_COMMIT: f09c3d5e326abf3ddb98ea6d536d5b42bba8a601
+
+jobs:
+  functional:
+    name: Functional · ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {target: bun-darwin-arm64, os: macos-15, runtime: darwin-arm64, bun: bun-darwin-aarch64}
+          - {target: bun-darwin-x64, os: macos-15-intel, runtime: darwin-x64, bun: bun-darwin-x64}
+          - {target: bun-linux-arm64, os: ubuntu-24.04-arm, runtime: linux-arm64, container: gnu}
+          - {target: bun-linux-arm64-musl, os: ubuntu-24.04-arm, runtime: linux-arm64, container: musl}
+          - {target: bun-linux-x64-baseline, os: ubuntu-24.04, runtime: linux-x64, container: gnu}
+          - {target: bun-linux-x64-baseline-musl, os: ubuntu-24.04, runtime: linux-x64, container: musl}
+          - {target: bun-windows-arm64, os: windows-11-arm, runtime: win32-arm64, bun: bun-windows-aarch64}
+          - {target: bun-windows-x64-baseline, os: windows-2025, runtime: win32-x64, bun: bun-windows-x64-baseline}
+    defaults:
+      run:
+        shell: bash
+    env:
+      EXPECTED_WORKFLOW_COMMIT: ${{ github.sha }}
+      THREADNOTE_BUILD_TARGET: ${{ matrix.target }}
+      EXPECTED_RUNTIME: ${{ matrix.runtime }}
+      COMPATIBILITY_CONTAINER: ${{ matrix.container }}
+    steps:
+      - name: Preserve committed bytes on Windows
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Verify the workflow commit contains the exact product candidate
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_WORKFLOW_COMMIT"
+          test "$(git rev-list --parents -n 1 HEAD)" = "$EXPECTED_WORKFLOW_COMMIT $PRODUCT_COMMIT"
+          test "$(git diff --name-status "$PRODUCT_COMMIT" HEAD)" = $'A\t.github/workflows/packed-graph-native-validation.yml'
+          test -z "$(git status --porcelain)"
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+          bun-download-url: ${{ matrix.bun && format('https://github.com/oven-sh/bun/releases/download/bun-v{0}/{1}.zip', env.BUN_VERSION, matrix.bun) || '' }}
+
+      - run: bun install --frozen-lockfile
+
+      - name: Prepare the functional command
+        run: |
+          mkdir -p .context/packed-graph-native-validation
+          cat > .context/packed-graph-native-validation/run.sh <<'SCRIPT'
+          set -euo pipefail
+          product_commit=$1
+          workflow_commit=$2
+          expected_target=$3
+          expected_runtime=$4
+          bun_version=$5
+          container=$6
+          evidence=.context/packed-graph-native-validation
+          file=packages/graph/src/embedding.ts
+          test "$(git rev-parse HEAD)" = "$workflow_commit"
+          test "$THREADNOTE_BUILD_TARGET" = "$expected_target"
+          test "$(bun --version)" = "$bun_version"
+          runtime="$(bun -e 'process.stdout.write(process.platform + "-" + process.arch)')"
+          test "$runtime" = "$expected_runtime"
+          case "$container" in
+            '') abi=native-host ;;
+            gnu)
+              test "$THREADNOTE_NATIVE_SYSROOT_IDENTITY" = manylinux2014-glibc2.17
+              abi="$(getconf GNU_LIBC_VERSION)"
+              test "$abi" = 'glibc 2.17'
+              ;;
+            musl)
+              test "$THREADNOTE_NATIVE_SYSROOT_IDENTITY" = alpine3.17.10-musl1.2.3
+              abi="$(ldd --version 2>&1 || true)"
+              grep -F 'musl libc' <<< "$abi"
+              grep -Fx 'Version 1.2.3' <<< "$abi"
+              ;;
+            *) exit 1 ;;
+          esac
+          blob="$(git rev-parse "$product_commit:$file")"
+          test "$(git hash-object --no-filters "$file")" = "$blob"
+          git diff --exit-code "$product_commit" -- . ':!.github/workflows/packed-graph-native-validation.yml'
+          printf 'product_commit=%s\nproduct_tree=%s\nworkflow_commit=%s\nfile=%s\nblob=%s\ntarget=%s\nruntime=%s\nbun=%s\nabi=%s\n' \
+            "$product_commit" "$(git rev-parse "$product_commit^{tree}")" "$workflow_commit" "$file" "$blob" \
+            "$expected_target" "$runtime" "$(bun --revision)" "$abi" | tee "$evidence/source-runtime.txt"
+          tests=(apps/threadnote/test/unit/code-graph.embedding.test.ts
+            packages/inference/test/vector-search.property.test.ts
+            packages/graph/test/unit/code-graph.vector-page.test.ts)
+          bun --bun vitest run --reporter=default --reporter=json --outputFile="$evidence/functional.json" "${tests[@]}"
+          bun -e '
+            import assert from "node:assert/strict";
+            import {relative, sep} from "node:path";
+            const [reportPath, ...expected] = process.argv.slice(1);
+            const report = await Bun.file(reportPath).json();
+            assert.equal(report.success, true);
+            assert(report.numPassedTestSuites > 0);
+            const paths = report.testResults.map(test => {
+              assert.equal(test.status, "passed");
+              assert(test.assertionResults.some(assertion => assertion.status === "passed"), test.name);
+              return relative(process.cwd(), test.name).split(sep).join("/");
+            });
+            assert.deepEqual(paths.sort(), expected.sort());
+            console.log("%d test files and %d tests passed.", paths.length, report.numPassedTests);
+          ' "$evidence/functional.json" "${tests[@]}"
+          SCRIPT
+
+      - name: Validate on the native host or compatibility floor
+        run: |
+          command=(bash .context/packed-graph-native-validation/run.sh "$PRODUCT_COMMIT" "$EXPECTED_WORKFLOW_COMMIT"
+            "$THREADNOTE_BUILD_TARGET" "$EXPECTED_RUNTIME" "$BUN_VERSION" "$COMPATIBILITY_CONTAINER")
+          case "$COMPATIBILITY_CONTAINER" in
+            '') "${command[@]}" ;;
+            gnu|musl)
+              command_json="$(bun -e 'process.stdout.write(JSON.stringify(process.argv.slice(1)))' "${command[@]}")"
+              bun scripts/assemble-native-inference.ts "--$COMPATIBILITY_CONTAINER-container" \
+                --container-command-json "$command_json"
+              ;;
+            *) exit 1 ;;
+          esac
+
+      - name: Preserve functional evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: packed-graph-native-${{ matrix.target }}
+          path: |
+            .context/packed-graph-native-validation/source-runtime.txt
+            .context/packed-graph-native-validation/functional.json
+            .context/native-inference-container/*-failure.json
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
+
+  all-targets:
+    name: Require all eight target results
+    if: ${{ always() }}
+    needs: functional
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Check the functional matrix conclusion
+        env:
+          MATRIX_RESULT: ${{ needs.functional.result }}
+        run: test "$MATRIX_RESULT" = success
