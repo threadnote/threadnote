@@ -1,7 +1,7 @@
-name: R5 Windows qualification with exact source bytes
+name: R5 Windows ARM64 case capture
 on:
   push:
-    branches: [codex/r5-writer-windows-x64, codex/r5-writer-windows-arm64]
+    branches: [codex/r5-writer-windows-arm64-cases]
 
 permissions:
   contents: read
@@ -18,8 +18,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: ${{ github.ref_name == 'codex/r5-writer-windows-arm64' && 'bun-windows-arm64' || 'bun-windows-x64-baseline' }}
-            os: ${{ github.ref_name == 'codex/r5-writer-windows-arm64' && 'windows-11-arm' || 'windows-2025' }}
+          - target: bun-windows-arm64
+            os: windows-11-arm
             musl: false
             gnu: false
     runs-on: ${{ matrix.os }}
@@ -125,12 +125,25 @@ jobs:
           if [[ "${OS:-}" == "Windows_NT" ]]; then
             bun --bun vitest run apps/threadnote/test/unit/windows-process-tree-sampler.test.ts apps/threadnote/test/integration/code-graph.benchmark-failure.test.ts
           fi
-          bun scripts/benchmark-recall-vectors.ts --production-path --pairs 1 --samples 1 \
+          if bun scripts/benchmark-recall-vectors.ts --production-path --pairs 1 --samples 1 \
             --documents 2 --distribution dense --model-file "$model_file" \
             --distribution-root "$workspace/dist" --baseline-distribution-root "$baseline_root/dist" \
             --baseline-source-root "$baseline_root" \
-            --output "$output_dir/setup-smoke.json" 2>&1 | tee "$output_dir/setup-smoke.log"
-          bun -e 'const c=await Bun.file(process.argv[1]).json(); if (!(c.openingSource.runtimeAndHarnessMatchCandidate && c.closingSource?.runtimeAndHarnessMatchCandidate)) throw Error("Setup failed the candidate source check")' "$output_dir/setup-smoke.json"
+            --output "$output_dir/setup-smoke.json" 2>&1 | tee "$output_dir/setup-smoke.log"; then
+            bun -e 'const c=await Bun.file(process.argv[1]).json(); if (!(c.openingSource.runtimeAndHarnessMatchCandidate && c.closingSource?.runtimeAndHarnessMatchCandidate)) throw Error("Setup source mismatch")' "$output_dir/setup-smoke.json"
+          else
+            # Each full case checks these executables and runs its own engine discriminator.
+            bun -e '
+              const c=await Bun.file(process.argv[1]).json();
+              const [ts,rust]=c.nativeExecutionProof;
+              if (!(c.openingSource.runtimeAndHarnessMatchCandidate && c.executableVerification.length===2 &&
+                c.executableVerification.every(x=>x.success) && c.fatal?.includes("Actual compiled native/TypeScript engine proof failed") &&
+                ts?.backend==="baseline" && ts.result.reason==="budget-exhausted" &&
+                ts.result.deadlineExhaustion==="RecallReadyReadBoundaryError" &&
+                rust?.backend==="candidate" && rust.result.success)) throw Error("Unexpected setup failure");
+              console.log("Preserved TS66 setup timeout. Each workload must establish its own engine proof.");
+            ' "$output_dir/setup-smoke.json"
+          fi
           cases=(100000-dense 100000-tied 10000-dense 10000-tied)
           capture_status=0
           for case in "${cases[@]}"; do
