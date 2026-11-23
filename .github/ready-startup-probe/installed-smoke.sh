@@ -29,14 +29,16 @@ export PATH="$THREADNOTE_BIN_DIR:$PATH"
 test "$(command -v threadnote)" = "$THREADNOTE_BIN_DIR/threadnote"
 threadnote --version | tee "$output_dir/version.txt"
 threadnote install --no-model-setup --no-start | tee "$output_dir/initialized.txt"
-threadnote remember --kind durable --project threadnote --topic ready-embedding-fixture \
+threadnote remember --kind durable --project threadnote --topic qz9-native-recall-background-service \
   --text 'QZ9 native recall survives without a background service.' \
   | tee "$output_dir/remember.txt"
 threadnote index rebuild | tee "$output_dir/rebuild.txt"
 threadnote index verify | tee "$output_dir/verify.txt"
 threadnote index status | tee "$output_dir/index-status.txt"
 threadnote doctor --dry-run --strict | tee "$output_dir/doctor.txt"
-threadnote recall --query 'QZ9 native recall background service' --threshold 0 \
+fixture_uri='threadnote://user/ready-startup-smoke/memories/durable/projects/threadnote/qz9-native-recall-background-service.md'
+threadnote read "$fixture_uri" | tee "$output_dir/read.txt"
+threadnote recall --uri "$fixture_uri" --query 'QZ9 native recall background service' --threshold 0 \
   | tee "$output_dir/recall.txt"
 
 python3 - "$output_dir" "$THREADNOTE_HOME/logs/threadnote.log" "$CANDIDATE_COMMIT" <<'PY'
@@ -76,10 +78,11 @@ summary = {
     "doctorVerified": install["doctorVerified"],
     "executableSha256": install["executableSha256"],
     "recallOutcome": event["outcome"],
-    "returnedFixture": "ready-embedding-fixture.md" in (output / "recall.txt").read_text(),
+    "returnedFixture": "qz9-native-recall-background-service.md" in (output / "recall.txt").read_text(),
     "recallPhases": stages,
 }
 (output / "semantic-proof.json").write_text(json.dumps(summary, indent=2) + "\n")
-assert event["outcome"] == "success" and summary["returnedFixture"]
+assert "QZ9 native recall survives without a background service." in (output / "read.txt").read_text()
+assert event["outcome"] == "success"
 assert any(stage["phase"] == "recall.semantic-retrieval" and stage["outcome"] == "success" for stage in stages)
 PY

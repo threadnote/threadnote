@@ -39,6 +39,10 @@ if [[ "$CANDIDATE_COMMIT" = "$STOCK_COMMIT" ]]; then
   cp -cR "$stock/dist" "$candidate/dist"
 else
   build_arm "$candidate" "$CANDIDATE_COMMIT"
+  # Both private executables use the identical verified inference closure.
+  # The stock and candidate executables and native vector addons stay exact.
+  (cd "$candidate" && bun scripts/assemble-native-inference.ts \
+    --stage-overlay "$candidate/dist" --distribution-root "$stock/dist")
 fi
 cp -cR "$stock/dist" "$stock_trace"
 cp -cR "$candidate/dist" "$candidate_trace"
