@@ -1,0 +1,22 @@
+name: Diagnose Windows RSS poll failures
+on:
+  push:
+    branches: [codex/r5-windows-rss-diagnosis]
+    paths: [.github/r5-windows-rss-probe/**, .github/workflows/r5-windows-rss-diagnosis.yml]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: windows-2025
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Observe a stable root with and without child churn
+        run: python .github/r5-windows-rss-probe/diagnose.py
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: windows-rss-poll-diagnosis
+          path: .context/rss-probe/result.json
