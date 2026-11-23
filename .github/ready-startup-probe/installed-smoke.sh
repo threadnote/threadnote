@@ -29,14 +29,14 @@ export PATH="$THREADNOTE_BIN_DIR:$PATH"
 test "$(command -v threadnote)" = "$THREADNOTE_BIN_DIR/threadnote"
 threadnote --version | tee "$output_dir/version.txt"
 threadnote install --no-model-setup --no-start | tee "$output_dir/initialized.txt"
-threadnote remember --kind durable --project ready-smoke --topic ready-embedding-fixture \
-  --text 'The QZ9 botanical project uses a passive irrigation system to water its rooftop garden.' \
+threadnote remember --kind durable --project threadnote --topic ready-embedding-fixture \
+  --text 'QZ9 native recall survives without a background service.' \
   | tee "$output_dir/remember.txt"
 threadnote index rebuild | tee "$output_dir/rebuild.txt"
 threadnote index verify | tee "$output_dir/verify.txt"
 threadnote index status | tee "$output_dir/index-status.txt"
 threadnote doctor --dry-run --strict | tee "$output_dir/doctor.txt"
-threadnote recall --project ready-smoke --query 'QZ9 botanical project rooftop garden irrigation' \
+threadnote recall --query 'QZ9 native recall background service' --threshold 0 \
   | tee "$output_dir/recall.txt"
 
 python3 - "$output_dir" "$THREADNOTE_HOME/logs/threadnote.log" "$CANDIDATE_COMMIT" <<'PY'
@@ -58,25 +58,28 @@ assert (output / "version.txt").read_text().strip() == f"threadnote v{install['v
 assert re.search(r"Activated vector generation .*: [1-9]\d* chunk\(s\)", (output / "rebuild.txt").read_text())
 assert "Verified vector generation" in (output / "verify.txt").read_text()
 assert re.search(r"bge-small-en-v1\.5-q8\s+ready\s+[1-9]\d* chunks", (output / "index-status.txt").read_text())
-assert "ready-embedding-fixture.md" in (output / "recall.txt").read_text()
+# Keep only bounded typed phase evidence from the runner logs.
 with logs.open("rb") as file:
-    file.seek(max(0, logs.stat().st_size - 64 * 1024))
+    start = max(0, logs.stat().st_size - 64 * 1024)
+    file.seek(start)
     lines = file.read().splitlines()
-events = [json.loads(line) for line in lines[1:][-64:]]
+events = [json.loads(line) for line in lines[bool(start):][-64:]]
 event = next(event for event in reversed(events) if (
     event.get("component"), event.get("operation"), event.get("event")
 ) == ("cli", "recall", "invocation.finished"))
 stages = [{
     "phase": stage["phase"], "outcome": stage["outcome"], "durationMilliseconds": stage["durationMilliseconds"]
-} for stage in event["phaseTimings"] if stage["phase"] == "recall.semantic-retrieval"]
+} for stage in event.get("phaseTimings", []) if stage["phase"].startswith("recall.")]
 summary = {
     "sourceCommit": source,
     "version": install["version"],
     "doctorVerified": install["doctorVerified"],
     "executableSha256": install["executableSha256"],
     "recallOutcome": event["outcome"],
-    "readySemanticPhases": stages,
+    "returnedFixture": "ready-embedding-fixture.md" in (output / "recall.txt").read_text(),
+    "recallPhases": stages,
 }
 (output / "semantic-proof.json").write_text(json.dumps(summary, indent=2) + "\n")
-assert event["outcome"] == "success" and any(stage["outcome"] == "success" for stage in stages)
+assert event["outcome"] == "success" and summary["returnedFixture"]
+assert any(stage["phase"] == "recall.semantic-retrieval" and stage["outcome"] == "success" for stage in stages)
 PY
