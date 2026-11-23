@@ -1,11 +1,14 @@
-import {Array as EffectArray, Effect, Option, Schema} from 'effect';
+import {Array as EffectArray, Effect, Option, Schema, String as EffectString} from 'effect';
 import {readLocalMemoryRecordsByUri} from '@threadnote/memory/local-path';
 import {isReadCleanupUnconfirmed, ReadDeadlineExceeded} from '@threadnote/platform/read_deadline';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {stripFragment} from '@threadnote/platform/string-boundaries';
+import {SystemInfo} from '@threadnote/platform/system';
 import {isExternalResourceMetadata} from '@threadnote/store/external-resource';
+import {resourceIdIsWithin} from '@threadnote/store/resource-id';
+import {uriSegment} from '@threadnote/workspace/manifest';
 import {recallCandidateIsValid} from './candidate_validation.js';
-import {readRecallExactMatches, RecallReadyReadUnavailable} from './index.js';
+import {readRecallBodyBm25, readRecallExactMatches, RecallReadyReadUnavailable} from './index.js';
 import {withReadyRecallMaintenanceScope} from './index/maintenance.js';
 import {isConnectionResult, type RecallMemoryConnectionsResult} from './memory/connections.js';
 import {
@@ -16,11 +19,13 @@ import {
   recallSemanticPreflightSchema,
   type RecallReadySectionsOptions,
 } from './read_boundary.js';
-import type {RecallCandidate} from './rank.js';
-import type {RecallHit} from './results.js';
+import {originalQueryRequestsRecency, type RecallCandidate} from './rank.js';
+import {reciprocalRankFusion, RECALL_FUSION_WINDOW} from './rank-fusion.js';
+import {formatRecallHits, type RecallHit, type RecallSections} from './results.js';
 import {
   emptyRecallSemanticScoresResult,
   prepareRecallSectionsWithoutInference,
+  recallCrossScopeLaneBudgets,
   warmRecallReranker,
   type PrepareRecallSectionsInput,
   type RecallRerankerCache,
@@ -32,9 +37,12 @@ import {
   mergeRecallOperationalWarnings,
   RECALL_LEXICAL_READ_FAILURE_REASONS,
   recallReadFailureReason,
+  recallReadPhaseOutcome,
   recallReadStateWarnings,
   type RecallOperationalWarning,
 } from './warning.js';
+
+export {RECALL_FUSION_WINDOW} from './rank-fusion.js';
 
 const optional = Schema.optionalKey;
 const strings = Schema.Array(Schema.String).check(Schema.isMaxLength(4096));
@@ -91,6 +99,7 @@ const hitSchema = Schema.Struct({
   uri: Schema.String,
 });
 export const recallReadySectionsResultSchema = Schema.Struct({
+  fused: optional(Schema.Boolean),
   semanticPreflight: optional(recallSemanticPreflightSchema),
   confidence: optional(
     Schema.Struct({
@@ -255,41 +264,210 @@ export const serveRecallSections = Effect.fn('recall.serveSections')(function* (
   const semantic = input.semantic === undefined ? emptyRecallSemanticScoresResult() : semanticFromWire(input.semantic);
   const scores = new Map(input.rerankerScores ?? []);
   // The worker never runs inference. Every read ranks with the parent's cached scores, so refinement keeps them.
-  const prepared = yield* prepareRecallSectionsWithoutInference(
-    config,
-    {
-      ...input,
-      closingCandidateUris: input.mode === 'closing' ? input.candidateUris : undefined,
-      exactMatches,
-      passes: [],
-      readRecords: uris => readLocalMemoryRecordsByUri(config, uris),
-    },
-    semantic,
-    candidates =>
-      EffectArray.map(candidates, candidate => {
-        const score = scores.get(sha256HexSync(`${candidate.uri}\u0000${candidate.text}`));
-        return score === undefined ? candidate : {...candidate, reranker: score};
-      }),
-  );
-  const {semanticResult: completedSemantic, ...sections} = prepared;
+  const prepare = (selection = input.candidateUris) =>
+    prepareRecallSectionsWithoutInference(
+      config,
+      {
+        ...input,
+        candidateUris: selection,
+        closingCandidateUris: input.mode === 'closing' ? selection : undefined,
+        exactMatches,
+        passes: [],
+        readRecords: uris => readLocalMemoryRecordsByUri(config, uris),
+      },
+      semantic,
+      candidates =>
+        EffectArray.map(candidates, candidate => {
+          const score = scores.get(sha256HexSync(`${candidate.uri}\u0000${candidate.text}`));
+          return score === undefined ? candidate : {...candidate, reranker: score};
+        }),
+    );
+  const initial = yield* prepare();
+  const fusion: FusedReadyRanks | undefined =
+    input.mode === 'closing' && input.fuseLocalMemories === true
+      ? yield* fuseReadyMemoryRanks(config, input, initial, prepare)
+      : undefined;
+  const prepared = fusion?.retryNative ? yield* prepare() : initial;
+  const fused = fusion?.ranked;
+  const {generations: _generations, semanticResult: completedSemantic, ...sections} = prepared;
   return encodeRecallReadySectionsResult({
     ...sections,
+    ...(fused === undefined
+      ? {}
+      : {fused: true, ranked: fused, semanticSection: formatRecallHits(fused, input.limit, sections.confidence)}),
     operationalWarnings: mergeRecallOperationalWarnings(warnings, prepared.operationalWarnings),
     semantic: semanticToWire(completedSemantic),
     exactMatches,
   });
 }, withReadyRecallMaintenanceScope);
 
+type PreparedRecallSections = Effect.Success<ReturnType<typeof prepareRecallSectionsWithoutInference>>;
+type FusedReadyRanks = {readonly ranked?: readonly RecallHit[]; readonly retryNative?: boolean};
+
+const fuseReadyMemoryRanks = Effect.fn('recall.fuseReadyMemoryRanks')(function* <R>(
+  config: RecallRuntimeConfig,
+  input: Extract<RecallReadySectionsOptions, {mode: 'closing'}>,
+  prepared: PreparedRecallSections,
+  prepare: (selection: readonly string[]) => Effect.Effect<PreparedRecallSections, unknown, R>,
+) {
+  const generation = prepared.generations[0];
+  // A body match cannot overrule the native whole-query abstention decision.
+  if (
+    prepared.confidence?.level === 'no_answer' ||
+    generation === undefined ||
+    prepared.generations.length !== 1 ||
+    prepared.operationalWarnings.length > 0
+  )
+    return undefined;
+  const localRoot = `threadnote://user/${uriSegment(config.user)}/memories/`;
+  const localUri = (uri: string) =>
+    EffectString.startsWith(localRoot)(uri) &&
+    (!EffectString.startsWith(`${localRoot}shared/`)(uri) ||
+      EffectArray.some(input.allowedSharedUriScopes ?? [], scope => resourceIdIsWithin(uri, scope)));
+  const isLocalMemory = (hit: RecallHit) => hit.category === 'memories' && localUri(hit.uri);
+  const native = EffectArray.filter(prepared.ranked, isLocalMemory);
+  if (native.length === 0) return undefined;
+
+  const readBody = (workspaceScopeMode?: 'hierarchy' | 'sibling') =>
+    readRecallBodyBm25(config, {
+      allowedSharedUriScopes: input.allowedSharedUriScopes,
+      allowedUriScopes: input.allowedUriScopes,
+      eligibility: input.eligibility,
+      includeInactive: false,
+      project: input.project,
+      query: input.feedbackQuery,
+      workspaceScope: input.workspaceScope,
+      workspaceScopeMode,
+    }).pipe(
+      Effect.catchIf(
+        error => !isReadCleanupUnconfirmed(error),
+        () => Effect.void,
+      ),
+    );
+  const body = yield* readBody();
+  if (body?.generation !== generation) return {retryNative: true} satisfies FusedReadyRanks;
+  const room = RECALL_FUSION_WINDOW - body.uris.length;
+  const siblings = input.workspaceScope && room > 0 ? yield* readBody('sibling') : undefined;
+  if (input.workspaceScope && room > 0 && siblings?.generation !== generation)
+    return {retryNative: true} satisfies FusedReadyRanks;
+  const bodyUris = [
+    ...body.uris,
+    ...(siblings?.uris.slice(0, Math.min(room, recallCrossScopeLaneBudgets(input.limit).crossScopeReserve)) ?? []),
+  ];
+  if (bodyUris.length === 0) return undefined;
+
+  const byUri = new Map(EffectArray.map(native, hit => [stripFragment(hit.uri), hit] as const));
+  const aliases = new Map<string, string>();
+  for (const hit of native) {
+    for (const uri of hit.equivalentUris ?? []) {
+      if (localUri(uri) && !byUri.has(uri)) aliases.set(uri, stripFragment(hit.uri));
+    }
+  }
+  const bodyRanks = EffectArray.map(bodyUris, uri => aliases.get(uri) ?? uri);
+  const additional = EffectArray.filter(bodyRanks, uri => !byUri.has(uri));
+  const nativeRanks = [...byUri.keys()];
+  if (additional.length > 0) {
+    // Check new candidates with the same canonical reads, scope and relevance gate as native results.
+    const admitted = yield* prepare([...new Set([...input.candidateUris, ...additional])]).pipe(
+      Effect.catchIf(
+        error => !isReadCleanupUnconfirmed(error),
+        () => Effect.void,
+      ),
+    );
+    if (
+      admitted?.generations.length !== 1 ||
+      admitted.generations[0] !== generation ||
+      admitted.operationalWarnings.length > 0
+    )
+      return {retryNative: true} satisfies FusedReadyRanks;
+    const nativeMemoryIds = new Set(EffectArray.map(native, hit => hit.memoryId));
+    const required = new Set(additional);
+    for (const hit of admitted.ranked) {
+      if (
+        !isLocalMemory(hit) ||
+        hit.identityConflict ||
+        (hit.memoryId !== undefined && nativeMemoryIds.has(hit.memoryId))
+      )
+        continue;
+      for (const uri of [stripFragment(hit.uri), ...(hit.equivalentUris ?? [])]) {
+        if (required.has(uri) && localUri(uri)) byUri.set(uri, hit);
+      }
+    }
+  }
+
+  const proximity = (hit: RecallHit) => (input.workspaceScope ? hit.rankSignals?.workspace : undefined);
+  const queues = new Map<number | undefined, RecallHit[]>();
+  for (const tier of new Set(EffectArray.map([...byUri.values()], proximity))) {
+    const inTier = (uri: string) => {
+      const hit = byUri.get(uri);
+      return hit !== undefined && proximity(hit) === tier;
+    };
+    const nativeTier = EffectArray.filter(nativeRanks, inTier);
+    const bodyTier = input.workspaceScope ? EffectArray.filter(bodyRanks, inTier) : bodyRanks;
+    const local = new Map<string, RecallHit>();
+    for (const uri of [...reciprocalRankFusion(nativeTier, bodyTier), ...nativeTier]) {
+      const hit = byUri.get(uri);
+      if (hit !== undefined) local.set(stripFragment(hit.uri), hit);
+    }
+    queues.set(tier, [...local.values()]);
+  }
+  // Preserve the native slots for workspace proximity and other evidence kinds.
+  const slots = EffectArray.map(prepared.ranked, hit =>
+    isLocalMemory(hit) ? (queues.get(proximity(hit))?.shift() ?? hit) : hit,
+  );
+  return {ranked: [...slots, ...EffectArray.flatMap([...queues.values()], hits => hits)]} satisfies FusedReadyRanks;
+});
+
 export type ReadyRecallSectionsInput = Omit<
   PrepareRecallSectionsInput<never>,
   'readRecords' | 'readMemoryConnections' | 'passes' | 'exactMatches' | 'semanticGenerationMismatchPolicy'
 > & {
+  readonly allowedSharedUriScopes?: readonly string[];
+  readonly fuseLocalMemories?: boolean;
   readonly exact?: {
     readonly terms: readonly string[];
     readonly uriScopes: readonly string[];
     readonly limitPerTerm: number;
   };
 };
+
+class InvalidRecallRanking extends Schema.TaggedError<InvalidRecallRanking, {readonly brand: unique symbol}>()(
+  'InvalidRecallRanking',
+  {
+    message: Schema.String,
+  },
+) {}
+
+export const shouldFuseLocalMemoryRecall = Effect.fn('recall.shouldFuseLocalMemoryRecall')(function* (options: {
+  readonly query: string;
+  readonly memoryRefs?: readonly string[];
+  readonly includeArchived?: boolean;
+  readonly pinnedOrRestricted?: boolean;
+  readonly workset?: string;
+}) {
+  const environment = (yield* SystemInfo).environment();
+  const configured = EffectString.trim(environment.THREADNOTE_RECALL_RANKING ?? '') || 'fusion';
+  if (configured !== 'fusion' && configured !== 'hybrid')
+    return yield* InvalidRecallRanking.make({message: 'THREADNOTE_RECALL_RANKING must be fusion or hybrid.'});
+  return (
+    configured === 'fusion' &&
+    options.query.length > 0 &&
+    !options.memoryRefs?.length &&
+    !options.includeArchived &&
+    !options.pinnedOrRestricted &&
+    !options.workset &&
+    !originalQueryRequestsRecency(options.query)
+  );
+});
+
+export const RECALL_BODY_FUSION_NOTICE = 'Memory order uses reciprocal rank fusion with body BM25.';
+
+export function limitRecallSectionDisplay<A extends Pick<RecallSections, 'confidence' | 'ranked' | 'semanticSection'>>(
+  sections: A,
+  limit: number,
+): A {
+  return {...sections, semanticSection: formatRecallHits(sections.ranked, limit, sections.confidence)};
+}
 
 /** The window warm-up only adds cached scores, so it never holds a recall longer than this. */
 export const RECALL_RERANKER_WINDOW_WARM_MILLISECONDS = 2_000;
@@ -331,7 +509,16 @@ export const readReadyRecallSections = Effect.fn('recall.readReadySections')(fun
   input: ReadyRecallSectionsInput,
 ) {
   const invalid = () => RecallReadyReadBoundaryError.make({reason: 'invalid-protocol'});
-  const {semanticResult, rerankerCache, closingCandidateUris, candidateUris, exact, ...fields} = input;
+  const {
+    allowedSharedUriScopes,
+    semanticResult,
+    rerankerCache,
+    closingCandidateUris,
+    candidateUris,
+    exact,
+    fuseLocalMemories,
+    ...fields
+  } = input;
   const semantic = semanticToWire(Option.getOrElse(semanticResult ?? Option.none(), emptyRecallSemanticScoresResult));
   const rerankerScores = readyRecallRerankerScores({rerankerCache});
   const options =
@@ -345,7 +532,15 @@ export const readReadyRecallSections = Effect.fn('recall.readReadySections')(fun
           ...(semantic.scores === undefined && semantic.warning === undefined ? {} : {semantic}),
           ...(rerankerScores.length === 0 ? {} : {rerankerScores}),
         }
-      : {...fields, mode: 'closing', candidateUris: closingCandidateUris, semantic, rerankerScores};
+      : {
+          ...fields,
+          mode: 'closing',
+          allowedSharedUriScopes,
+          candidateUris: closingCandidateUris,
+          fuseLocalMemories,
+          semantic,
+          rerankerScores,
+        };
   const result = yield* Effect.gen(function* () {
     const request = yield* Schema.decodeUnknownEffect(recallReadyReadRequestSchema, {onExcessProperty: 'error'})(
       JSON.parse(
@@ -403,6 +598,7 @@ export const readReadyRecallSections = Effect.fn('recall.readReadySections')(fun
                 })
               : error;
           return {
+            fused: undefined,
             semanticPreflight: undefined,
             ranked: [],
             expansionCandidates: [],
@@ -424,3 +620,18 @@ export const readReadyRecallSections = Effect.fn('recall.readReadySections')(fun
     semanticResult: semanticFromWire(result.semantic),
   };
 });
+
+/** A failed closing proof cannot publish an earlier candidate snapshot. */
+export function finalizeReadyRecallClosing(sections: Effect.Success<ReturnType<typeof readReadyRecallSections>>) {
+  if (recallReadPhaseOutcome(sections.operationalWarnings) === 'success') return sections;
+  return {
+    ...sections,
+    fused: undefined,
+    confidence: undefined,
+    ranked: [],
+    expansionCandidates: [],
+    semanticSection: undefined,
+    exactTail: undefined,
+    memoryConnections: undefined,
+  };
+}

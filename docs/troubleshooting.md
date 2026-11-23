@@ -260,6 +260,13 @@ stays on one context. Ordinary recall and semantic-query embeddings remain seria
 `THREADNOTE_EMBEDDING_CONTEXTS=1`, `2`, `4`, or `8` to override every embedding session in that process; prefix only
 the `threadnote graph index` command to limit the override to a graph build. `1` is the low-memory rollback.
 
+## Compare recall rankings
+
+Ordinary local recall combines the native hybrid ranking with BM25 scores from eligible memory bodies.
+Set `THREADNOTE_RECALL_RANKING=hybrid` to use the native hybrid ranking alone.
+Set `THREADNOTE_RECALL_RANKING=fusion` to select the default explicitly.
+Both modes apply the same recall threshold and verify the selected memories against their sources.
+
 ## An index rebuild was interrupted
 
 To prepare lexical and semantic recall immediately, run `threadnote index rebuild`. It refreshes lexical recall,

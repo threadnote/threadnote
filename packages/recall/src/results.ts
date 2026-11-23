@@ -648,8 +648,12 @@ export function applyExactMatchBoost(
   );
 }
 
-export function formatRecallHits(hits: readonly RecallHit[], maxHits: number): string | undefined {
-  return renderRecallHits(hits.slice(0, maxHits), Math.max(0, hits.length - maxHits));
+export function formatRecallHits(
+  hits: readonly RecallHit[],
+  maxHits: number,
+  confidence?: RecallConfidence,
+): string | undefined {
+  return renderRecallHits(hits.slice(0, maxHits), Math.max(0, hits.length - maxHits), confidence);
 }
 
 /**

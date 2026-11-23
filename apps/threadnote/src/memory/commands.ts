@@ -1,12 +1,18 @@
 import {
+  finalizeReadyRecallClosing,
+  limitRecallSectionDisplay,
   readReadyRecallSections,
+  RECALL_BODY_FUSION_NOTICE,
+  RECALL_FUSION_WINDOW,
   requireRecallRefinementRead,
+  shouldFuseLocalMemoryRecall,
   warmRecallRerankerWindow,
 } from '@threadnote/recall/sections_read';
 import {readLocalMemoryRecordsByUri} from '@threadnote/memory/local-path';
 import {isReadCleanupUnconfirmed} from '@threadnote/platform/read_deadline';
 import {optionalReadyRecallRead, withReadyRecallReadBoundary} from '../recall/ready_read_boundary.js';
 import {deferRecallReadMaintenance} from '../recall/read_maintenance.js';
+import {withRecallBodyShareScope} from '../recall/rank_fusion_scope.js';
 import {referencedContextSection, printRecallHygieneNudges} from './recall_followups.js';
 import {SecureRandom} from 'effect/crypto';
 import {parseThreadnotePack, canonicalPackRoot, packTargetForCurrentUser} from './pack.js';
@@ -525,7 +531,17 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
   let operationalWarnings: readonly RecallOperationalWarning[] = [];
   let hybridMinimumScore = recallHybridMinimumScore(Number(recallThreshold));
   const expansionQueries: string[] = [];
-  const recallLimit = nodeLimit ?? 12;
+  const requestedLimit = nodeLimit ?? 12;
+  const fuseLocalMemories =
+    !dryRun &&
+    (yield* shouldFuseLocalMemoryRecall({
+      query,
+      includeArchived,
+      memoryRefs: memoryConnections?.memoryRefs,
+      pinnedOrRestricted: explicitUri !== undefined,
+      workset: options.workset,
+    }));
+  const recallLimit = fuseLocalMemories ? Math.max(requestedLimit, RECALL_FUSION_WINDOW) : requestedLimit;
   let semanticResult = Option.some(emptyRecallSemanticScoresResult());
   const surfacedSemanticWarnings = new Set<string>();
   const surfacedOperationalWarningCodes = new Set<RecallOperationalWarning['code']>();
@@ -555,7 +571,11 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
   const semanticPreflightModel = dryRun || navigationOnly ? undefined : yield* prepareRecallSemanticPreflight(config);
   // Rejected admission performs no optional work, so its completed lexical proof can stand.
   let refinementStarted = false;
-  const prepareSections = (candidateUris?: readonly string[], closingRead = false) =>
+  const prepareSections = (
+    candidateUris?: readonly string[],
+    closingRead = false,
+    allowedSharedUriScopes?: readonly string[],
+  ) =>
     withAnonymousTelemetryPhase(
       'recall.lexical-ranking',
       withProductionPhaseTiming(
@@ -565,6 +585,7 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
             ...(closingRead || refinementStarted || semanticPreflightModel === undefined
               ? {}
               : {semanticPreflightModel}),
+            allowedSharedUriScopes,
             allowExactRescue: !thresholdConfigured,
             allowSemanticRescue: !thresholdConfigured,
             allowedUriScopes: explicitUri ? [explicitUri] : undefined,
@@ -573,6 +594,7 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
             exact: closingRead ? undefined : exactRead,
             eligibility,
             feedbackQuery: query,
+            fuseLocalMemories: closingRead && fuseLocalMemories,
             includeInactive: includeArchived,
             limit: recallLimit,
             memoryRefs: memoryConnections?.memoryRefs,
@@ -743,34 +765,28 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
       return recallSections;
     }),
   );
-  if (refinementStarted) {
+  if (refinementStarted || (fuseLocalMemories && baselineSections.ranked.length > 0)) {
     const selectedSections = Option.getOrElse(refined, () => baselineSections);
-    if (Option.isNone(refined)) {
+    if (refinementStarted && Option.isNone(refined)) {
       semanticResult = Option.some(emptyRecallSemanticScoresResult());
       hybridMinimumScore = recallHybridMinimumScore(Number(recallThreshold));
       expansionQueries.length = 0;
       rerankerCache.scores.clear();
-    } else {
+    } else if (refinementStarted && Option.isSome(refined)) {
       // A warm-up that does not finish leaves fewer cached scores for closing; the refined window stands.
       yield* optionalReadyRecallRead(
         warmRecallRerankerWindow(config, query, refined.value, recallLimit, rerankerCache),
       );
     }
-    recallSections = yield* prepareSections(
-      EffectArray.map(selectedSections.ranked.slice(0, recallLimit), hit => hit.uri),
-      true,
+    const closingUris = EffectArray.map(selectedSections.ranked.slice(0, recallLimit), hit => hit.uri);
+    const close = (allowedSharedUriScopes?: readonly string[], membershipChanged = false) =>
+      prepareSections(membershipChanged ? [] : closingUris, true, allowedSharedUriScopes);
+    recallSections = finalizeReadyRecallClosing(
+      yield* fuseLocalMemories ? withRecallBodyShareScope(config, close) : close(),
     );
-    if (recallReadPhaseOutcome(recallSections.operationalWarnings) !== 'success')
-      recallSections = {
-        ...recallSections,
-        confidence: undefined,
-        ranked: [],
-        expansionCandidates: [],
-        semanticSection: undefined,
-        exactTail: undefined,
-        memoryConnections: undefined,
-      };
   }
+  if (requestedLimit !== recallLimit) recallSections = limitRecallSectionDisplay(recallSections, requestedLimit);
+  if (recallSections.fused === true) yield* Console.log(RECALL_BODY_FUSION_NOTICE);
   const cliProjection = projectRecallCliResponse(recallSections, navigationOnly);
   for (const section of cliProjection.sections) {
     yield* Console.log(`\n${section}`);
@@ -791,7 +807,7 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
     ...(recallSections.memoryConnections ? {memoryConnections: recallSections.memoryConnections} : {}),
     ...(recallProjectName === undefined ? {} : {project: recallProjectName}),
     queryExpansions: expansionQueries,
-    ranked: recallSections.ranked.slice(0, recallLimit),
+    ranked: recallSections.ranked.slice(0, requestedLimit),
     totalRanked: recallSections.ranked.length,
     warnings: operationalWarnings,
   } satisfies RecallResult;

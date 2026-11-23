@@ -1,10 +1,16 @@
 import {recordUnavailableProductionPhase} from '../../effect/production_log.js';
 import {
+  finalizeReadyRecallClosing,
+  limitRecallSectionDisplay,
   readReadyRecallSections,
+  RECALL_BODY_FUSION_NOTICE,
+  RECALL_FUSION_WINDOW,
   requireRecallRefinementRead,
+  shouldFuseLocalMemoryRecall,
   warmRecallRerankerWindow,
 } from '@threadnote/recall/sections_read';
 import {deferRecallReadMaintenance} from '../../recall/read_maintenance.js';
+import {withRecallBodyShareScope} from '../../recall/rank_fusion_scope.js';
 import {isReadCleanupUnconfirmed} from '@threadnote/platform/read_deadline';
 import {optionalReadyRecallRead, withReadyRecallReadBoundary} from '../../recall/ready_read_boundary.js';
 import {Array as EffectArray} from 'effect';
@@ -1168,7 +1174,13 @@ function runRecallTool(
         const selectRecallCandidates = makeMcpRecallCandidateSelector(config, effectAi, workspaceContext.jev, sections);
         let hybridMinimumScore = recallHybridMinimumScore(Number(threshold));
         const expansionQueries: string[] = [];
-        const recallLimit = params.nodeLimit ?? 12;
+        const requestedLimit = params.nodeLimit ?? 12;
+        const fuseLocalMemories = yield* shouldFuseLocalMemoryRecall({
+          ...params,
+          query,
+          pinnedOrRestricted: params.pinnedUri !== undefined || memoryScope !== undefined,
+        });
+        const recallLimit = fuseLocalMemories ? Math.max(requestedLimit, RECALL_FUSION_WINDOW) : requestedLimit;
         let semanticResult: McpRecallSemanticScoresResult['result'] = {
           corpusGeneration: Option.none(),
           scores: Option.none(),
@@ -1186,7 +1198,11 @@ function runRecallTool(
         // Rejected admission performs no optional work, so its completed lexical proof can stand.
         let refinementStarted = false;
         let lexicalProgressPending = true;
-        const prepareSections = (candidateUris?: readonly string[], closingRead = false) => {
+        const prepareSections = (
+          candidateUris?: readonly string[],
+          closingRead = false,
+          allowedSharedUriScopes?: readonly string[],
+        ) => {
           const work = withAnonymousTelemetryPhase(
             'recall.lexical-ranking',
             withProductionPhaseTiming(
@@ -1196,6 +1212,7 @@ function runRecallTool(
                   ...(closingRead || refinementStarted || semanticPreflightModel === undefined
                     ? {}
                     : {semanticPreflightModel}),
+                  allowedSharedUriScopes,
                   allowExactRescue: !thresholdConfigured,
                   allowSemanticRescue: !thresholdConfigured,
                   allowedUriScopes: params.allowedUriScopes ?? (params.pinnedUri ? [params.pinnedUri] : undefined),
@@ -1204,6 +1221,7 @@ function runRecallTool(
                   eligibility,
                   exact: closingRead ? undefined : workspaceContext.exactRead,
                   feedbackQuery: params.query,
+                  fuseLocalMemories: closingRead && fuseLocalMemories,
                   includeInactive: params.includeArchived,
                   limit: recallLimit,
                   memoryRefs: params.memoryRefs,
@@ -1397,40 +1415,34 @@ function runRecallTool(
               );
               if (!refinementStarted && !navigationOnly)
                 yield* recordUnavailableProductionPhase('recall.semantic-retrieval');
-              if (refinementStarted) {
+              if (refinementStarted || (fuseLocalMemories && baselineSections.ranked.length > 0)) {
                 const selectedSections = Option.getOrElse(refined, () => baselineSections);
-                if (Option.isNone(refined)) {
+                if (refinementStarted && Option.isNone(refined)) {
                   semanticResult = {corpusGeneration: Option.none(), scores: Option.none(), warning: Option.none()};
                   hybridMinimumScore = recallHybridMinimumScore(Number(threshold));
                   expansionQueries.length = 0;
                   sections.length = baselineNoticeCount;
                   rerankerCache.scores.clear();
-                } else {
+                } else if (refinementStarted && Option.isSome(refined)) {
                   // A warm-up that does not finish leaves fewer cached scores for closing; the refined window stands.
                   yield* optionalReadyRecallRead(
                     warmRecallRerankerWindow(config, query, refined.value, recallLimit, rerankerCache),
                   );
                 }
-                recallSections = yield* prepareSections(
-                  EffectArray.map(selectedSections.ranked.slice(0, recallLimit), hit => hit.uri),
-                  true,
+                const closingUris = EffectArray.map(selectedSections.ranked.slice(0, recallLimit), hit => hit.uri);
+                const close = (allowedSharedUriScopes?: readonly string[], membershipChanged = false) =>
+                  prepareSections(membershipChanged ? [] : closingUris, true, allowedSharedUriScopes);
+                recallSections = finalizeReadyRecallClosing(
+                  yield* fuseLocalMemories ? withRecallBodyShareScope(config, close) : close(),
                 );
-                if (recallReadPhaseOutcome(recallSections.operationalWarnings) !== 'success')
-                  recallSections = {
-                    ...recallSections,
-                    confidence: undefined,
-                    ranked: [],
-                    expansionCandidates: [],
-                    semanticSection: undefined,
-                    exactTail: undefined,
-                    memoryConnections: undefined,
-                  };
               }
             }),
             () => semanticPhaseOutcome,
           ),
           progressTiming.heartbeatMilliseconds,
         );
+        if (requestedLimit !== recallLimit) recallSections = limitRecallSectionDisplay(recallSections, requestedLimit);
+        if (recallSections.fused === true) sections.push(RECALL_BODY_FUSION_NOTICE);
         const {semanticSection, exactTail} = recallSections;
         if (semanticSection) sections.push(semanticSection);
         if (exactTail) sections.push(exactTail);
@@ -1474,7 +1486,7 @@ function runRecallTool(
                 warnings: operationalWarnings,
                 queryExpansions: expansionQueries,
                 rankerVersion: RECALL_RANKER_VERSION,
-                results: recallSections.ranked.slice(0, params.nodeLimit ?? 12),
+                results: recallSections.ranked.slice(0, requestedLimit),
               },
               params,
             ),

@@ -135,7 +135,9 @@ export const recallReadySectionsOptionsSchema = Schema.Union([
   Schema.Struct({
     ...sectionsFields,
     mode: Schema.Literal('closing'),
+    allowedSharedUriScopes: optional(strings),
     candidateUris: strings,
+    fuseLocalMemories: optional(Schema.Boolean),
     semantic: recallReadySectionsSemanticSchema,
     rerankerScores,
   }),

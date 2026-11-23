@@ -9,6 +9,7 @@ import {ResourceStore} from '@threadnote/store/resource-store';
 import {loadRecallIndex} from '@threadnote/recall/index';
 import {formatMemoryDocument} from '@threadnote/memory/document';
 import {runCommandEffect} from '@threadnote/platform/command';
+import {SystemInfo} from '@threadnote/platform/system';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
 import {captureConsole} from '../../src/effect/console.js';
 import {runRecall} from '../../src/memory/commands.js';
@@ -95,6 +96,7 @@ effectIt.effect(
       registerSearchTool(registry, config, 'recall_context', 'Recall', {
         heartbeatMilliseconds: 10_000,
       });
+      const system = yield* SystemInfo;
       const base = {callerCwd: component, query: 'orbital gearbox calibration', nodeLimit: '3'};
       for (const query of [
         base.query,
@@ -108,6 +110,18 @@ effectIt.effect(
         expect(
           EffectArray.some(cli.value.ranked, hit => Effect2.pipe(hit.uri, EffectString.includes('/foreign/'))),
         ).toBe(false);
+        const native = yield* captureConsole(runRecall(config, {...base, query})).pipe(
+          Effect.provideService(
+            SystemInfo,
+            SystemInfo.of({
+              ...system,
+              environment: () => ({...system.environment(), THREADNOTE_RECALL_RANKING: 'hybrid'}),
+            }),
+          ),
+        );
+        expect(EffectArray.map(cli.value.ranked, hit => hit.uri)).toEqual(
+          EffectArray.map(native.value.ranked, hit => hit.uri),
+        );
         expect(cli.output).toContain('workspace-checkout');
         const mcp = yield* registry.invokeTool('recall_context', {
           ...base,

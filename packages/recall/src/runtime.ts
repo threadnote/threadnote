@@ -388,13 +388,19 @@ export const prepareRecallSectionsWithoutInference = Effect.fn('recall.prepareSe
     Effect.succeed(cachedScores(candidates)),
   );
   if (yield* semanticResultMatchesLexicalSnapshot(config, semanticResult, prepared.generations))
-    return {...prepared.sections, operationalWarnings: prepared.operationalWarnings, semanticResult};
+    return {
+      ...prepared.sections,
+      generations: prepared.generations,
+      operationalWarnings: prepared.operationalWarnings,
+      semanticResult,
+    };
   const lexical = emptyRecallSemanticScoresResult(semanticResult.warning);
   const fallback = yield* prepareRecallSectionsAttempt(config, input, lexical, candidates =>
     Effect.succeed(cachedScores(candidates)),
   );
   return {
     ...fallback.sections,
+    generations: fallback.generations,
     operationalWarnings: mergeRecallOperationalWarnings(prepared.operationalWarnings, fallback.operationalWarnings),
     semanticResult: lexical,
   };
