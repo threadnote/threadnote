@@ -32,3 +32,29 @@ jobs:
           include-hidden-files: true
           retention-days: 30
           if-no-files-found: warn
+  install:
+    name: Smoke exact installed CLI and ready vector retrieval
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      THREADNOTE_BUILD_TARGET: bun-darwin-arm64
+      BUN_VERSION: 1.4.4
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: rustup toolchain install 1.89.0 --profile minimal
+      - name: Exercise exact-head install and ready semantic recall
+        run: bash .github/ready-startup-probe/installed-smoke.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: darwin-ready-installed-${{ github.run_id }}
+          path: .context/ready-startup-installed-output/
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: warn

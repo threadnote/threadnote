@@ -7,6 +7,9 @@ const output = resolve(distribution, 'threadnote');
 const release = await Bun.file(resolve(distribution, 'release.json')).json();
 
 const workerFile = Bun.argv[3] ?? 'apps/threadnote/src/recall/ready_read_worker.ts';
+const workerSource = await Bun.file(resolve(root, workerFile)).text();
+const serveAnchor = 'const served = yield* serveRecallReadyRead(request);';
+const serve = workerSource.includes(serveAnchor) ? serveAnchor : 'const served = yield* serve(request);';
 const patches = new Map<string, [string, string][]>([
   ['apps/threadnote/src/standalone.ts', [
     ['if (process.argv[2] === RECALL_READY_READ_WORKER_ARGUMENT) {',
@@ -15,8 +18,7 @@ const patches = new Map<string, [string, string][]>([
   [workerFile, [
     ['  const request = yield* readRequest;',
       '  markProbe("read");\n  const request = yield* readRequest;\n  markProbe("decoded-" + request.operation);'],
-    ['  const served = yield* serveRecallReadyRead(request);',
-      '  const served = yield* serveRecallReadyRead(request);\n  markProbe("served");'],
+    [serve, serve + '\n  markProbe("served");'],
     ['  yield* Stream.run(Stream.make(bytes), stdio.stdout({endOnDone: false}));',
       '  yield* Stream.run(Stream.make(bytes), stdio.stdout({endOnDone: false}));\n  markProbe("written");'],
   ]],
