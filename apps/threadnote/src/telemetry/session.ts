@@ -3,8 +3,6 @@ import {Result} from 'effect';
 import {Base64Url} from 'effect/encoding';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {EnabledTelemetryConfiguration} from './config.js';
-import {Layer} from 'effect';
-import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
 import {
   clearThreadnoteSessionEnvironment as clearTelemetrySessionEnvironment,
   isAnonymousAgentSessionId,
@@ -14,8 +12,7 @@ import {
   THREADNOTE_PROVIDER_TOKEN_ENVIRONMENT_VARIABLE as TELEMETRY_PROVIDER_SESSION_TOKEN_ENVIRONMENT_VARIABLE,
   THREADNOTE_SESSION_GENERATION_ENVIRONMENT_VARIABLE as TELEMETRY_CONSENT_GENERATION_ENVIRONMENT_VARIABLE,
   THREADNOTE_SESSION_ID_ENVIRONMENT_VARIABLE as TELEMETRY_AGENT_SESSION_ENVIRONMENT_VARIABLE,
-  withCurrentThreadnoteSessionEnvironment,
-  withoutThreadnoteSessionEnvironment,
+  isTelemetryChildKind,
   type ThreadnoteChildKind as TelemetryChildKind,
 } from '../effect/child-environment.js';
 import * as EffectString from 'effect/String';
@@ -35,18 +32,7 @@ export {
   type ThreadnoteChildKind as TelemetryChildKind,
 } from '../effect/child-environment.js';
 
-export const telemetryChildEnvironmentPolicy = ChildEnvironmentPolicy.of({
-  preserveIntendedChild: (environment, childKind) =>
-    isTelemetryChildKind(childKind)
-      ? withCurrentThreadnoteSessionEnvironment(environment, childKind)
-      : withoutThreadnoteSessionEnvironment(environment),
-  sanitizeExternal: withoutThreadnoteSessionEnvironment,
-});
-
-export const telemetryChildEnvironmentPolicyLayer = Layer.succeed(
-  ChildEnvironmentPolicy,
-  telemetryChildEnvironmentPolicy,
-);
+export {telemetryChildEnvironmentPolicy, telemetryChildEnvironmentPolicyLayer} from '../effect/child-environment.js';
 
 const AGENT_SESSION_ID_PREFIX = 'tns_';
 const AGENT_SESSION_RANDOM_BYTES = 16;
@@ -261,17 +247,6 @@ function clearTelemetrySessionEnvironmentFailSoft(environment: NodeJS.ProcessEnv
       // Telemetry state must never make the owning runtime fail.
     }
   }
-}
-
-function isTelemetryChildKind(value: string | undefined): value is TelemetryChildKind {
-  return (
-    value === 'auto-update-worker' ||
-    value === 'graph-builder' ||
-    value === 'local-model-worker' ||
-    value === 'mcp-broker-runtime' ||
-    value === 'mcp-server' ||
-    value === 'parser-worker'
-  );
 }
 
 function concatenate(left: Uint8Array, right: Uint8Array): Uint8Array {

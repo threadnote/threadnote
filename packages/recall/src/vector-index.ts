@@ -4,12 +4,10 @@ import {Array as EffectArray} from 'effect';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {Clock, Context, DateTime, Effect, FileSystem, Layer, Option, Path, Result, Schema} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
-import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
-import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/models/catalog';
-import {LocalModelStore} from '@threadnote/inference/models/store';
-import {readModelSelection, selectedEmbeddingModelId} from '@threadnote/inference/models/selection';
+import type {LocalModelManifest} from '@threadnote/inference/models/catalog';
+import {fromPromise} from '@threadnote/platform/errors';
 import {recallIndexScopeProject, type RecallEligibilityPolicy} from './eligibility.js';
 import {recallApprovedAuthoritative, recallEligibilityPredicate} from './index/eligibility.js';
 import {
@@ -427,6 +425,12 @@ const rebuildVectorIndexUnlocked = Effect.fn('vectorIndex.rebuildUnlocked')(func
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const crypto = yield* SecureRandom.SecureRandom;
+  const [{LocalModelRuntime}, {LocalModelStore}] = yield* fromPromise('load recall vector embedding services', () =>
+    Promise.all([
+      import('@threadnote/inference/engine/local-model-runtime'),
+      import('@threadnote/inference/models/store'),
+    ]),
+  ).pipe(Effect.orDie);
   const runtime = yield* LocalModelRuntime;
   const store = yield* LocalModelStore;
   const installed = yield* store.verify(config.agentContextHome, manifest);
@@ -613,9 +617,17 @@ const rebuildVectorIndexUnlocked = Effect.fn('vectorIndex.rebuildUnlocked')(func
 export const selectedSemanticScoreSnapshot = Effect.fn('vectorIndex.selectedSemanticScoreSnapshot')(function* <
   R = never,
 >(config: VectorReadConfig, query: string, options: SemanticScoreOptions<R> = {}) {
+  const {readModelSelection, selectedEmbeddingModelId} = yield* fromPromise(
+    'load recall model selection',
+    () => import('@threadnote/inference/models/selection'),
+  ).pipe(Effect.orDie);
   const selection = yield* readModelSelection(config.agentContextHome);
   const modelId = selectedEmbeddingModelId(selection, 'recall');
   if (!modelId) return undefined;
+  const {LocalModelCatalog} = yield* fromPromise(
+    'load recall model catalog',
+    () => import('@threadnote/inference/models/catalog'),
+  ).pipe(Effect.orDie);
   const catalog = yield* LocalModelCatalog;
   const manifest = yield* catalog.get(modelId);
   if (!manifest.dimensions || manifest.role !== 'embedding') return undefined;
@@ -623,6 +635,12 @@ export const selectedSemanticScoreSnapshot = Effect.fn('vectorIndex.selectedSema
   const path = yield* Path.Path;
   const databasePath = vectorDatabasePath(path, config.agentContextHome, manifest.id);
   if (!(yield* fs.exists(databasePath))) return undefined;
+  const [{LocalModelRuntime}, {LocalModelStore}] = yield* fromPromise('load recall vector embedding services', () =>
+    Promise.all([
+      import('@threadnote/inference/engine/local-model-runtime'),
+      import('@threadnote/inference/models/store'),
+    ]),
+  ).pipe(Effect.orDie);
   const store = yield* LocalModelStore;
   const runtime = yield* LocalModelRuntime;
   const status = yield* store.status(config.agentContextHome, manifest);

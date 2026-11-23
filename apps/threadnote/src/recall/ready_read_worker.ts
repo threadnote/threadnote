@@ -2,6 +2,7 @@ import type {SecureRandom} from 'effect/crypto';
 import * as BunFileSystem from '@effect/platform-bun/BunFileSystem';
 import * as BunPath from '@effect/platform-bun/BunPath';
 import * as BunStdio from '@effect/platform-bun/BunStdio';
+import {fromPromise} from '@threadnote/platform/errors';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import {ExternalSourcePolicy} from '@threadnote/store/external-resource';
 import {
@@ -63,22 +64,22 @@ import {
 export {RECALL_READY_READ_INPUT_BYTES, RECALL_READY_READ_OUTPUT_BYTES, recallReadyReadBinding};
 
 const readWorkerPolicyLayer = Layer.unwrap(
-  Effect.promise(async () => {
+  fromPromise('load ready-read external policy', async () => {
     const [{integrationExternalSourcePolicyLayer}, {sourceConfigurationLayer}] = await Promise.all([
       import('../integrations/access-policy.js'),
       import('../integrations/config.js'),
     ]);
     return integrationExternalSourcePolicyLayer.pipe(Layer.provideMerge(sourceConfigurationLayer));
-  }),
+  }).pipe(Effect.orDie),
 );
 const readWorkerResourceStoreLayer = Layer.unwrap(
-  Effect.promise(async () => {
+  fromPromise('load ready-read store', async () => {
     const [{ResourceStore}, {recallResourceInvalidationLayer}] = await Promise.all([
       import('@threadnote/store/resource-store'),
       import('@threadnote/recall/resource-invalidation'),
     ]);
     return ResourceStore.layer.pipe(Layer.provideMerge(recallResourceInvalidationLayer));
-  }),
+  }).pipe(Effect.orDie),
 );
 const workerPlatform = Layer.mergeAll(
   BunFileSystem.layer,
@@ -93,7 +94,12 @@ export const readyRecallReadWorkerLayer = readWorkerResourceStoreLayer.pipe(
   Layer.provideMerge(readWorkerPolicyLayer),
   Layer.provideMerge(
     Layer.mergeAll(
-      Layer.unwrap(Effect.promise(async () => (await import('@effect/platform-bun/BunServices')).layer)),
+      Layer.unwrap(
+        fromPromise(
+          'load direct worker platform',
+          async () => (await import('@effect/platform-bun/BunServices')).layer,
+        ).pipe(Effect.orDie),
+      ),
       cryptoLayer,
       SystemInfo.layer,
     ),
@@ -128,9 +134,10 @@ type ResourceReadRequest = Extract<RecallReadyReadRequest, {operation: 'sections
 const serveResourceRead = Effect.fn('recall.serveReadyResourceRead')(function* (request: ResourceReadRequest) {
   switch (request.operation) {
     case 'sections': {
-      const [{serveRecallSections}, {RECALL_PREFLIGHT_METADATA_MILLISECONDS}] = yield* Effect.promise(() =>
-        Promise.all([import('@threadnote/recall/sections_read'), import('@threadnote/recall/runtime')]),
-      );
+      const [{serveRecallSections}, {RECALL_PREFLIGHT_METADATA_MILLISECONDS}] = yield* fromPromise(
+        'load ready recall sections',
+        () => Promise.all([import('@threadnote/recall/sections_read'), import('@threadnote/recall/runtime')]),
+      ).pipe(Effect.orDie);
       const model = request.options.mode === 'baseline' ? request.options.semanticPreflightModel : undefined;
       const callerCancelled = yield* CallerReadCancellation;
       const semanticPreflight =
@@ -159,9 +166,10 @@ const serveResourceRead = Effect.fn('recall.serveReadyResourceRead')(function* (
       return semanticPreflight === undefined ? sections : {...sections, semanticPreflight};
     }
     case 'memory-connections': {
-      const [{retrieveRecallMemoryConnections}, {readLocalMemoryRecordsByUri}] = yield* Effect.promise(() =>
-        Promise.all([import('@threadnote/recall/memory/connections'), import('@threadnote/memory/local-path')]),
-      );
+      const [{retrieveRecallMemoryConnections}, {readLocalMemoryRecordsByUri}] = yield* fromPromise(
+        'load ready memory connections',
+        () => Promise.all([import('@threadnote/recall/memory/connections'), import('@threadnote/memory/local-path')]),
+      ).pipe(Effect.orDie);
       const instant = DateTime.make(request.options.now);
       if (Option.isNone(instant)) return yield* RecallReadyReadBoundaryError.make({reason: 'invalid-protocol'});
       return yield* retrieveRecallMemoryConnections(request.config, {

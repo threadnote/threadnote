@@ -2,7 +2,7 @@ import {Effect, Layer, Runtime} from 'effect';
 import {withCliDiagnostics} from '../effect/cli/output.js';
 import {runtimeEntrypointLayer} from '../effect/runtime-entrypoint.js';
 import {signalTransparentTeardown} from '../process/signal_transparent_main.js';
-import {telemetryChildEnvironmentPolicyLayer} from '../telemetry/session.js';
+import {telemetryChildEnvironmentPolicyLayer} from '../effect/child-environment.js';
 import {RECALL_READY_READ_WORKER_ARGUMENT} from '../worker_protocol.js';
 import {withReadyRecallReadWorkerProcess} from './ready_read_main.js';
 import {readyRecallReadWorkerStartupLayer, recallReadyReadWorkerStartupProgram} from './ready_read_worker.js';

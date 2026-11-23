@@ -35,7 +35,7 @@ import {
   type CanonicalMutationGenerationTransition,
 } from '@threadnote/store/resource/mutation_generation';
 import {SystemInfo} from '@threadnote/platform/system';
-import {errorMessage} from '@threadnote/platform/errors';
+import {errorMessage, fromPromise} from '@threadnote/platform/errors';
 import {indexTerms, postingLexicalScore, selectQueryTerms, stripRecallAnchor} from './index/lexical.js';
 import {deduplicateLogicalRecallCandidates, type RecallCandidate, type RecallCorpusStatistics} from './rank.js';
 import {normalizeRecallSearchText} from './tokenize.js';
@@ -92,8 +92,6 @@ import {
   selectRecallRecentTopicalDocuments,
   selectTopRecallPostingsByTerms,
 } from './index/selection.js';
-import {dropRecallSourceScan} from './index/refresh.js';
-import {prepareRecallDatabase, publishPreparedRecallDatabase} from './index/refresh_database.js';
 import {
   initializeRecallDatabase,
   RECALL_INDEX_DATABASE_VERSION,
@@ -1617,6 +1615,10 @@ const ensureRecallDatabaseFresh = Effect.fn('recall.ensureDatabaseFresh')(functi
   const base = yield* fenced(capture());
   if (!activation && !required(base.metadata, base.staleMarker, base.canonicalMutationGeneration))
     return yield* skipped;
+  const [{dropRecallSourceScan}, {prepareRecallDatabase, publishPreparedRecallDatabase}] = yield* fromPromise(
+    'load recall index refresh',
+    () => Promise.all([import('./index/refresh.js'), import('./index/refresh_database.js')]),
+  ).pipe(Effect.orDie);
   const forceReasons = recallRefreshForceReasons(options.forceRefresh === true, base.metadata);
   const force = forceReasons.length > 0;
   yield* Effect.gen(function* () {

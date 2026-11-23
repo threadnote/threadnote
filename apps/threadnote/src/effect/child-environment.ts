@@ -1,3 +1,6 @@
+import {Layer} from 'effect';
+import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
+
 export const THREADNOTE_SESSION_ID_ENVIRONMENT_VARIABLE = 'THREADNOTE_TELEMETRY_SESSION_ID';
 export const THREADNOTE_SESSION_GENERATION_ENVIRONMENT_VARIABLE = 'THREADNOTE_TELEMETRY_CONSENT_GENERATION';
 export const THREADNOTE_CHILD_KIND_ENVIRONMENT_VARIABLE = 'THREADNOTE_TELEMETRY_CHILD';
@@ -67,3 +70,27 @@ export function isAnonymousAgentSessionId(value: string): boolean {
 export function isTelemetryConsentGeneration(value: string): boolean {
   return /^tng_[\da-f]{32}$/u.test(value);
 }
+
+export function isTelemetryChildKind(value: string | undefined): value is ThreadnoteChildKind {
+  return (
+    value === 'auto-update-worker' ||
+    value === 'graph-builder' ||
+    value === 'local-model-worker' ||
+    value === 'mcp-broker-runtime' ||
+    value === 'mcp-server' ||
+    value === 'parser-worker'
+  );
+}
+
+export const telemetryChildEnvironmentPolicy = ChildEnvironmentPolicy.of({
+  preserveIntendedChild: (environment, childKind) =>
+    isTelemetryChildKind(childKind)
+      ? withCurrentThreadnoteSessionEnvironment(environment, childKind)
+      : withoutThreadnoteSessionEnvironment(environment),
+  sanitizeExternal: withoutThreadnoteSessionEnvironment,
+});
+
+export const telemetryChildEnvironmentPolicyLayer = Layer.succeed(
+  ChildEnvironmentPolicy,
+  telemetryChildEnvironmentPolicy,
+);
