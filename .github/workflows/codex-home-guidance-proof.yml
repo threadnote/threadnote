@@ -1,0 +1,33 @@
+name: Disposable Codex home guidance proof
+on:
+  push:
+    branches: [codex/codex-home-guidance-proof]
+    paths:
+      - .github/codex-home-guidance-proof/**
+      - .github/workflows/codex-home-guidance-proof.yml
+permissions:
+  contents: read
+jobs:
+  install:
+    name: Verify exact installed Linux CLI guidance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      THREADNOTE_BUILD_TARGET: bun-linux-x64-baseline
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - run: rustup toolchain install 1.89.0 --profile minimal
+      - name: Exercise installed Codex doctor
+        run: bash .github/codex-home-guidance-proof/smoke.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: codex-home-guidance-proof
+          path: ${{ runner.temp }}/codex-home-guidance-output/
+          retention-days: 7
+          if-no-files-found: error
