@@ -35,15 +35,16 @@ effectIt.effect(
       const query = 'orbital gearbox calibration';
       const store = yield* ResourceStore;
       const target = 'threadnote://user/fixture/memories/durable/projects';
+      const projectlessUri = 'threadnote://user/fixture/memories/durable/projectless.md';
       const ids = Array.from({length: 14}, (_, index) => EffectString.padStart(2, '0')(String(index)));
       yield* store.mutate(
         {account: config.account, home, user: config.user},
         EffectArray.map([...ids, 'blocked'], id => {
-          const project = id === 'blocked' ? 'foreign' : 'space';
+          const project = id === '00' ? undefined : id === 'blocked' ? 'foreign' : 'space';
           const body = `# Orbital gearbox calibration\n\nStation ${id} stores its orbital gearbox calibration sheet.\n`;
           return {
             type: 'write' as const,
-            uri: `${target}/${project}/${id}.md`,
+            uri: project === undefined ? projectlessUri : `${target}/${project}/${id}.md`,
             options: {mode: 'create' as const},
             content: formatMemoryDocument(
               'MEMORY',
@@ -115,7 +116,8 @@ effectIt.effect(
       expect(hybrid.output).not.toContain(RECALL_BODY_FUSION_NOTICE);
       expect(enabled.output).toContain(RECALL_BODY_FUSION_NOTICE);
       expect(hybrid.value.ranked[0]?.uri).toBe(preferredUri);
-      expect(enabled.value.ranked[0]?.uri).toBe(`${target}/space/00.md`);
+      expect(EffectArray.map(enabled.value.ranked.slice(0, 10), hit => hit.uri)).toContain(projectlessUri);
+      expect(EffectArray.map(hybrid.value.ranked, hit => hit.uri)).not.toContain(projectlessUri);
       const explicit = yield* withRanking('fusion', captureConsole(runRecall(config, {...base, threshold: '1'})));
       expect(explicit.value.ranked).toHaveLength(0);
       expect(explicit.output).not.toContain(RECALL_BODY_FUSION_NOTICE);

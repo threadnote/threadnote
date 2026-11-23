@@ -334,7 +334,7 @@ const fuseReadyMemoryRanks = Effect.fn('recall.fuseReadyMemoryRanks')(function* 
       allowedUriScopes: input.allowedUriScopes,
       eligibility: input.eligibility,
       includeInactive: false,
-      project: input.project,
+      project: input.eligibility === undefined ? input.project : undefined,
       query: input.feedbackQuery,
       workspaceScope: input.workspaceScope,
       workspaceScopeMode,
