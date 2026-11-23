@@ -43,4 +43,18 @@ replace('      closingSource = yield* productionSourceFence(',
         """      if (JSON.stringify(traceInventory) !== JSON.stringify(yield* productionDistributionInventory(traceRoot)))
         return yield* ScriptError.make({message: 'Traced distribution changed during measurement.'});
       closingSource = yield* productionSourceFence(""")
+replace('let lastQueryVector: readonly number[] = [];',
+        'let lastQueryVector: readonly number[] = [];\nlet lastEmbeddingMilliseconds: number | undefined;')
+replace('? real.embedMany(request).pipe(', '''? Effect.suspend(() => {
+                  const begin = performance.now();
+                  return real.embedMany(request).pipe(
+                    Effect.ensuring(Effect.sync(() => { lastEmbeddingMilliseconds = performance.now() - begin; })),
+                  );
+                }).pipe(''')
+replace('        lastQueryVector = [];', '        lastQueryVector = [];\n        lastEmbeddingMilliseconds = undefined;')
+replace("        if (result._tag === 'Failure') {\n          const reason =",
+        '''        if (lastEmbeddingMilliseconds !== undefined)
+          children.push({operation: 'parent-embedding', milliseconds: lastEmbeddingMilliseconds, timeoutMs: undefined});
+        if (result._tag === 'Failure') {
+          const reason =''')
 Path('scripts/r5-darwin-tail-observe.ts').write_text(src)
