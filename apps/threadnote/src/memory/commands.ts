@@ -12,7 +12,7 @@ import {readLocalMemoryRecordsByUri} from '@threadnote/memory/local-path';
 import {isReadCleanupUnconfirmed} from '@threadnote/platform/read_deadline';
 import {optionalReadyRecallRead, withReadyRecallReadBoundary} from '../recall/ready_read_boundary.js';
 import {deferRecallReadMaintenance} from '../recall/read_maintenance.js';
-import {withRecallBodyShareScope} from '../recall/rank_fusion_scope.js';
+import {closeRecallWithShareScope} from '../recall/rank_fusion_scope.js';
 import {referencedContextSection, printRecallHygieneNudges} from './recall_followups.js';
 import {SecureRandom} from 'effect/crypto';
 import {parseThreadnotePack, canonicalPackRoot, packTargetForCurrentUser} from './pack.js';
@@ -765,6 +765,7 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
       return recallSections;
     }),
   );
+  let allowsShareUri: ((uri: string) => boolean) | undefined;
   if (refinementStarted || (fuseLocalMemories && baselineSections.ranked.length > 0)) {
     const selectedSections = Option.getOrElse(refined, () => baselineSections);
     if (refinementStarted && Option.isNone(refined)) {
@@ -778,12 +779,15 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
         warmRecallRerankerWindow(config, query, refined.value, recallLimit, rerankerCache),
       );
     }
-    const closingUris = EffectArray.map(selectedSections.ranked.slice(0, recallLimit), hit => hit.uri);
-    const close = (allowedSharedUriScopes?: readonly string[], membershipChanged = false) =>
-      prepareSections(membershipChanged ? [] : closingUris, true, allowedSharedUriScopes);
-    recallSections = finalizeReadyRecallClosing(
-      yield* fuseLocalMemories ? withRecallBodyShareScope(config, close) : close(),
+    const closed = yield* closeRecallWithShareScope(
+      config,
+      selectedSections.ranked,
+      recallLimit,
+      fuseLocalMemories,
+      prepareSections,
     );
+    allowsShareUri = closed.allowsUri;
+    recallSections = finalizeReadyRecallClosing(closed.result);
   }
   if (requestedLimit !== recallLimit) recallSections = limitRecallSectionDisplay(recallSections, requestedLimit);
   if (recallSections.fused === true) yield* Console.log(RECALL_BODY_FUSION_NOTICE);
@@ -793,7 +797,12 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
   }
   const referencedSection = Option.getOrUndefined(
     yield* optionalReadyRecallRead(
-      referencedContextSection(config.user, cliProjection.rankedContext, uris => readMemoryRecordsByUri(config, uris)),
+      referencedContextSection(
+        config.user,
+        cliProjection.rankedContext,
+        uris => readMemoryRecordsByUri(config, uris),
+        allowsShareUri,
+      ),
     ),
   );
   if (referencedSection) {

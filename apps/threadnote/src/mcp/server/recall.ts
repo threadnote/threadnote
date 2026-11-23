@@ -4,27 +4,22 @@ import {
   limitRecallSectionDisplay,
   readReadyRecallSections,
   RECALL_BODY_FUSION_NOTICE,
+  RECALL_FUSION_RANKER_VERSION,
   RECALL_FUSION_WINDOW,
   requireRecallRefinementRead,
   shouldFuseLocalMemoryRecall,
   warmRecallRerankerWindow,
 } from '@threadnote/recall/sections_read';
+import {referencedContextSection} from '../../memory/recall_followups.js';
 import {deferRecallReadMaintenance} from '../../recall/read_maintenance.js';
-import {withRecallBodyShareScope} from '../../recall/rank_fusion_scope.js';
+import {closeRecallWithShareScope} from '../../recall/rank_fusion_scope.js';
 import {isReadCleanupUnconfirmed} from '@threadnote/platform/read_deadline';
 import {optionalReadyRecallRead, withReadyRecallReadBoundary} from '../../recall/ready_read_boundary.js';
 import {Array as EffectArray} from 'effect';
-import {pipe as EffectArrayPipe} from 'effect';
 
 import type {CallToolResult} from '@modelcontextprotocol/sdk/types.js';
 import {DateTime, Effect, FileSystem, Option, Result, Schema} from 'effect';
-import {
-  activePersonalMemoryUrisFromText,
-  existingReferencedUris,
-  formatReferencedContextPointers,
-  recallHygieneNudges,
-  referencedUrisFromRecords,
-} from '@threadnote/memory/hygiene';
+import {activePersonalMemoryUrisFromText, recallHygieneNudges} from '@threadnote/memory/hygiene';
 import {applyScrubber} from '../../share/index.js';
 import {errorMessage} from '@threadnote/platform/errors';
 import {resolveWorkspaceRepoName} from '../../utils.js';
@@ -1181,6 +1176,7 @@ function runRecallTool(
           pinnedOrRestricted: params.pinnedUri !== undefined || memoryScope !== undefined,
         });
         const recallLimit = fuseLocalMemories ? Math.max(requestedLimit, RECALL_FUSION_WINDOW) : requestedLimit;
+        let allowsShareUri: ((uri: string) => boolean) | undefined;
         let semanticResult: McpRecallSemanticScoresResult['result'] = {
           corpusGeneration: Option.none(),
           scores: Option.none(),
@@ -1429,12 +1425,15 @@ function runRecallTool(
                     warmRecallRerankerWindow(config, query, refined.value, recallLimit, rerankerCache),
                   );
                 }
-                const closingUris = EffectArray.map(selectedSections.ranked.slice(0, recallLimit), hit => hit.uri);
-                const close = (allowedSharedUriScopes?: readonly string[], membershipChanged = false) =>
-                  prepareSections(membershipChanged ? [] : closingUris, true, allowedSharedUriScopes);
-                recallSections = finalizeReadyRecallClosing(
-                  yield* fuseLocalMemories ? withRecallBodyShareScope(config, close) : close(),
+                const closed = yield* closeRecallWithShareScope(
+                  config,
+                  selectedSections.ranked,
+                  recallLimit,
+                  fuseLocalMemories,
+                  prepareSections,
                 );
+                allowsShareUri = closed.allowsUri;
+                recallSections = finalizeReadyRecallClosing(closed.result);
               }
             }),
             () => semanticPhaseOutcome,
@@ -1448,7 +1447,15 @@ function runRecallTool(
         if (exactTail) sections.push(exactTail);
         const referencedContext = Option.getOrUndefined(
           yield* optionalReadyRecallRead(
-            referencedContextSection(config, semanticSection ?? '', params.allowedUriScopes),
+            referencedContextSection(
+              config.user,
+              semanticSection ?? '',
+              uris => readMemoryRecordsByUri(config, uris),
+              uri =>
+                (allowsShareUri?.(uri) ?? true) &&
+                (params.allowedUriScopes === undefined ||
+                  EffectArray.some(params.allowedUriScopes, scope => resourceIdIsWithin(uri, scope))),
+            ),
           ),
         );
         if (referencedContext) {
@@ -1485,7 +1492,7 @@ function runRecallTool(
                 notices: responseNotices,
                 warnings: operationalWarnings,
                 queryExpansions: expansionQueries,
-                rankerVersion: RECALL_RANKER_VERSION,
+                rankerVersion: recallSections.fused === true ? RECALL_FUSION_RANKER_VERSION : RECALL_RANKER_VERSION,
                 results: recallSections.ranked.slice(0, requestedLimit),
               },
               params,
@@ -1523,45 +1530,6 @@ const recallHygieneHintsSection = Effect.fn('mcpServer.recallHygieneHints')(func
     : undefined;
 });
 
-const MAX_REFERENCED_CONTEXT = 5;
-/**
- * Resolves the one-way `references:` pointers carried by the personal memories
- * recall just surfaced and appends bounded URI-only pointers. The caller can
- * explicitly read a relevant pointer without recall inlining unrelated text.
- */
-const referencedContextSection = Effect.fn('mcpServer.referencedContext')(function* (
-  config: RuntimeConfig,
-  recallText: string,
-  allowedUriScopes?: readonly string[],
-) {
-  const withinAllowedScope = (uri: string) =>
-    allowedUriScopes === undefined ||
-    EffectArray.some(allowedUriScopes, (scope): boolean => resourceIdIsWithin(uri, scope));
-  const surfacedUris = EffectArrayPipe(activePersonalMemoryUrisFromText(recallText, config.user), __effectArrayValues =>
-    EffectArray.filter(
-      __effectArrayValues,
-      (__effectArrayValue, __effectArrayIndex2) =>
-        __effectArrayIndex2 in __effectArrayValues && withinAllowedScope(__effectArrayValue),
-    ),
-  );
-  if (surfacedUris.length === 0) {
-    return undefined;
-  }
-  const surfaced = yield* readMemoryRecordsByUri(config, surfacedUris);
-  const referenced = EffectArrayPipe(referencedUrisFromRecords(surfaced, recallText), __effectArrayValues =>
-    EffectArray.filter(
-      __effectArrayValues,
-      (__effectArrayValue, __effectArrayIndex2) =>
-        __effectArrayIndex2 in __effectArrayValues && withinAllowedScope(__effectArrayValue),
-    ),
-  );
-  if (referenced.length === 0) {
-    return undefined;
-  }
-  const candidates = referenced.slice(0, MAX_REFERENCED_CONTEXT);
-  const existingRecords = yield* readMemoryRecordsByUri(config, candidates);
-  return formatReferencedContextPointers(existingReferencedUris(candidates, existingRecords), MAX_REFERENCED_CONTEXT);
-});
 export function registerReadTool(
   server: EffectMcpServerRegistry,
   config: RuntimeConfig,

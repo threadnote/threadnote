@@ -1,4 +1,4 @@
-import {Console, Effect} from 'effect';
+import {Array as EffectArray, Console, Effect} from 'effect';
 import {
   activePersonalMemoryUrisFromText,
   existingReferencedUris,
@@ -20,11 +20,12 @@ export const referencedContextSection = Effect.fn('memory.referencedContextSecti
   user: string,
   recallOutput: string,
   readRecords: ReadRecords<E, R>,
+  allowsUri: (uri: string) => boolean = () => true,
 ) {
-  const surfacedUris = activePersonalMemoryUrisFromText(recallOutput, user);
+  const surfacedUris = EffectArray.filter(activePersonalMemoryUrisFromText(recallOutput, user), allowsUri);
   if (surfacedUris.length === 0) return undefined;
   const surfaced = yield* readRecords(surfacedUris);
-  const referenced = referencedUrisFromRecords(surfaced, recallOutput);
+  const referenced = EffectArray.filter(referencedUrisFromRecords(surfaced, recallOutput), allowsUri);
   if (referenced.length === 0) return undefined;
   const candidates = referenced.slice(0, MAX_REFERENCED_CONTEXT);
   const existingRecords = yield* readRecords(candidates);
