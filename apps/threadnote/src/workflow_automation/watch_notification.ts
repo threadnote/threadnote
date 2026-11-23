@@ -40,6 +40,11 @@ import {readAgentIntegrationRegistry} from '../agent_integration/registry.js';
 
 /** The one tool a woken turn needs to inspect, relay, dispose and acknowledge the notice it received. */
 const nativeWatchToolSuffix = '__workflow_task_watch_pr';
+const codexSpawnedSubagentRejection =
+  'Error: failed to queue session message: thread/queue/add failed: direct app-server input is not allowed for unloaded spawned sub-agents (code -32600)';
+type NativeWatchDeliveryFailure =
+  'host-delivery-ambiguous' | 'host-session-owned' | 'host-permission-denied' | 'host-command-failed';
+
 /** Claude Code names MCP tools after the registered server; a malformed stored name falls back to the default. */
 const claudeNativeWatchToolName = Effect.fn('nativeWatch.claudeToolName')(function* (config: RuntimeConfig) {
   const registry = yield* readAgentIntegrationRegistry(config).pipe(Effect.orElseSucceed(() => undefined));
@@ -401,10 +406,7 @@ export const makeNativeWatchNotifier = Effect.fn('nativeWatch.notifier')(functio
     );
     if (!claimed) return;
     const {target, outbox} = claimed.notification;
-    const finish = (
-      receipt: string | undefined,
-      error: 'host-delivery-ambiguous' | 'host-session-owned' | 'host-permission-denied',
-    ) =>
+    const finish = (receipt: string | undefined, error: NativeWatchDeliveryFailure) =>
       withNativeWatchControlLock(
         config,
         watchId,
@@ -469,7 +471,7 @@ export const makeNativeWatchNotifier = Effect.fn('nativeWatch.notifier')(functio
         maxOutputBytes: target.host === 'codex' ? 4096 : 65_536,
       }).pipe(Effect.result);
       let receipt: string | undefined;
-      let error: 'host-delivery-ambiguous' | 'host-permission-denied' = 'host-delivery-ambiguous';
+      let error: NativeWatchDeliveryFailure = 'host-delivery-ambiguous';
       if (result._tag === 'Success' && result.success.exitCode === 0) {
         if (target.host === 'codex')
           receipt = new RegExp(
@@ -485,8 +487,18 @@ export const makeNativeWatchNotifier = Effect.fn('nativeWatch.notifier')(functio
             error = 'host-permission-denied';
           }
         }
+      } else if (
+        target.host === 'codex' &&
+        result._tag === 'Failure' &&
+        result.failure._tag === 'CommandFailed' &&
+        result.failure.exitCode === 1 &&
+        result.failure.stdout === '' &&
+        EffectString.replace(/\r?\n$/u, '')(result.failure.stderr) === codexSpawnedSubagentRejection
+      ) {
+        // Keep the v1 outbox readable by older runtimes. Inspect projects the Codex-specific error.
+        error = 'host-command-failed';
       }
-      // A timeout, nonzero exit, or malformed receipt can follow host acceptance. Never retry automatically.
+      // The Codex refusal is definitive. Other failures can follow acceptance. Retry requires explicit recovery.
       yield* finish(receipt, error);
       if (claim) yield* releaseNativeWatchHostSession(userHome, claim);
     });
