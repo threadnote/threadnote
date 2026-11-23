@@ -57,4 +57,14 @@ replace("        if (result._tag === 'Failure') {\n          const reason =",
           children.push({operation: 'parent-embedding', milliseconds: lastEmbeddingMilliseconds, timeoutMs: undefined});
         if (result._tag === 'Failure') {
           const reason =''')
+replace("    let phaseContext = 'setup';", """    let phaseContext = 'setup';
+    const scaleTraceRequests: ProductionQuerySample[] = [];""")
+replace('      traceInventory,','      traceInventory,\n      scaleTraceRequests,')
+replace('      const discriminatorStartedAt = yield* Clock.currentTimeNanos;', """      if (options.documents === 100_000) {
+        phaseContext = 'scale-diagnostic';
+        for (let sample = 0; sample < Math.min(6, options.samples); sample++)
+          scaleTraceRequests.push(yield* executeQuery('trace', fixture, sample));
+        phaseContext = 'setup';
+      }
+      const discriminatorStartedAt = yield* Clock.currentTimeNanos;""")
 Path('scripts/r5-darwin-tail-observe.ts').write_text(src)
