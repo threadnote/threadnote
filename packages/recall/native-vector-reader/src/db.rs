@@ -171,8 +171,8 @@ fn read_inner(
             }
         };
         // The id is needed in strict validation diagnostics even when limit is zero.
-        let id = text(row, 0)?;
-        let score = scoring::score_with_cancel(bytes, query, &id, || cancellation.is_cancelled())
+        let id = text_bytes(row, 0)?;
+        let score = scoring::score_with_cancel(bytes, query, id, || cancellation.is_cancelled())
             .map_err(Failure::corrupt)?;
         if score.is_nan() && limit > 0 {
             replay = true;
@@ -183,8 +183,9 @@ fn read_inner(
         if limit == 0 || (best.len() == limit && score < best.peek().unwrap().score) {
             continue;
         }
-        let uri = text(row, 1)?;
-        scoring::offer(&mut best, Hit::new(id, uri, score), limit);
+        // The URI type is still validated for all ties, including discarded hits.
+        let uri = text_bytes(row, 1)?;
+        scoring::offer(&mut best, id, uri, score, limit);
     }
     drop(rows);
     drop(stmt);
@@ -253,9 +254,10 @@ fn legacy_replay(
                     ))
                 }
             };
-            let score =
-                scoring::score_with_cancel(bytes, query, &id, || cancellation.is_cancelled())
-                    .map_err(Failure::corrupt)?;
+            let score = scoring::score_with_cancel(bytes, query, id.as_bytes(), || {
+                cancellation.is_cancelled()
+            })
+            .map_err(Failure::corrupt)?;
             next_cursor = id.clone();
             page.push(Hit::new(id, text(row, 1)?, score));
         }
@@ -423,8 +425,11 @@ impl Generation {
     }
 }
 fn text(row: &Row<'_>, column: usize) -> ReadResult<String> {
+    Ok(String::from_utf8_lossy(text_bytes(row, column)?).into_owned())
+}
+fn text_bytes<'a>(row: &'a Row<'_>, column: usize) -> ReadResult<&'a [u8]> {
     match row.get_ref(column)? {
-        ValueRef::Text(value) => Ok(String::from_utf8_lossy(value).into_owned()),
+        ValueRef::Text(value) => Ok(value),
         _ => Err(Failure::operation(
             "Invalid vector metadata or identity type.",
         )),
@@ -774,6 +779,26 @@ mod tests {
         let outcome = read(&request, Some(&[0.6, 0.8]), &CancellationState::default());
         assert_eq!(outcome.status, "success");
         assert!(outcome.scores.unwrap().is_empty());
+    }
+
+    #[test]
+    fn discarded_tie_still_validates_the_uri_type() {
+        let fixture = Fixture::new(false);
+        fixture
+            .db()
+            .execute_batch(
+                "INSERT INTO vector_chunks VALUES('1-ab','later',x'00','fingerprint',NULL,0,1);
+                 UPDATE vector_generations SET chunk_count=2;",
+            )
+            .unwrap();
+        let mut request = fixture.request();
+        request.limit = 1.0;
+        let outcome = read(&request, Some(&[0.6, 0.8]), &CancellationState::default());
+        assert_eq!(outcome.status, "operation-error");
+        assert_eq!(
+            outcome.message.as_deref(),
+            Some("Invalid vector metadata or identity type.")
+        );
     }
 
     #[test]
