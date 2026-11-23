@@ -110,14 +110,22 @@ jobs:
           printf 'commit=%s\ntree=%s\ntarget=%s\nruntime=%s\nbun=%s\n%s\n' \
             "$expected_commit" "$(git rev-parse 'HEAD^{tree}')" "$THREADNOTE_BUILD_TARGET" \
             "$actual_runtime" "$bun_version" "$rust_info" > "$evidence/source-runtime.txt"
-          cargo "+$toolchain" test --locked --manifest-path "$manifest" --target-dir "$cargo_target"
-          cargo "+$toolchain" build --release --locked --manifest-path "$manifest" --target-dir "$cargo_target"
+          set --
+          library_root="$cargo_target"
+          if [[ "$rust_host" == *-musl ]]; then
+            # Musl defaults to a static CRT. A loadable cdylib needs the dynamic CRT.
+            export CARGO_ENCODED_RUSTFLAGS=$'-C\x1ftarget-feature=-crt-static'
+            set -- --target "$rust_host"
+            library_root="$cargo_target/$rust_host"
+          fi
+          cargo "+$toolchain" test --locked --manifest-path "$manifest" --target-dir "$cargo_target" "$@"
+          cargo "+$toolchain" build --release --locked --manifest-path "$manifest" --target-dir "$cargo_target" "$@"
           case "$runtime" in
             darwin-*) library=libthreadnote_graph_vector_page.dylib ;;
             linux-*) library=libthreadnote_graph_vector_page.so ;;
             win32-*) library=threadnote_graph_vector_page.dll ;;
           esac
-          absolute_library="$(bun -e 'process.stdout.write(require("node:path").resolve(process.argv[1]))' "$cargo_target/release/$library")"
+          absolute_library="$(bun -e 'process.stdout.write(require("node:path").resolve(process.argv[1]))' "$library_root/release/$library")"
           bun "$fixture" --functional "$absolute_library" "$evidence/functional.json"
           test -s "$evidence/functional.json"
           SCRIPT
