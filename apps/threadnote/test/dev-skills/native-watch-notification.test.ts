@@ -1280,11 +1280,26 @@ effectIt.effect('terminal notice survives lease expiry and explicit same-owner r
     expect(renewed.envelope.state.consumer).toMatchObject({id: 'consumer', wakeupId: 'wakeup'});
     yield* arrive(f);
     yield* acknowledge(f);
+    const acknowledged = yield* f.read();
     yield* renew();
     const finished = yield* f.read();
-    expect(finished.envelope.notification).toMatchObject({outbox: null, lastReceipt: {receipt}});
-    expect(finished.envelope.state.events).toHaveLength(0);
-    expect(finished.envelope.state.work.length).toBeGreaterThan(0);
+    const finalSequence = state.nextSequence - 1;
+    expect(finished.envelope.notification).toMatchObject({
+      consumerId: 'consumer',
+      wakeupId: 'wakeup',
+      outbox: {...queued.envelope.notification?.outbox, consumedThrough: finalSequence},
+    });
+    expect(finished.envelope.notification?.lastReceipt).toBe(queued.envelope.notification?.lastReceipt);
+    expect(finished.envelope.state).toMatchObject({
+      prState: 'merged',
+      acknowledged: finalSequence,
+      delivery: null,
+      events: [],
+      work: acknowledged.envelope.state.work,
+    });
+    expect(finished.envelope.state.work).toContainEqual(
+      expect.objectContaining({status: 'open', event: expect.objectContaining({kind: 'merged'})}),
+    );
   }).pipe(withStoppedFixtureCollector, provide),
 );
 
