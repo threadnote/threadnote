@@ -8,6 +8,7 @@ import {isExternalResourceUri, loadExternalResourceAccess} from '@threadnote/sto
 import type {IndexedRecallCodeLink} from '../code_links.js';
 import {memoryLinkLocatorDigest, type IndexedRecallMemoryLink} from '../memory/links.js';
 import {recallIndexScopeProject} from '../eligibility.js';
+import {dropRecallBodyBm25Staging} from './body-bm25.js';
 import {recallApprovedAuthoritative} from './eligibility.js';
 import type {RecallIndexPosting} from './lexical.js';
 import {stripRecallAnchor} from './lexical.js';
@@ -988,6 +989,7 @@ export function stageRecallRefreshAffectedTerms(sql: SqlClient.SqlClient, invent
 
 export function dropRecallSourceScan(sql: SqlClient.SqlClient) {
   return Effect.gen(function* () {
+    yield* dropRecallBodyBm25Staging(sql);
     for (const table of [
       RECALL_REFRESH_REPLACED_DOCUMENT_TABLE,
       RECALL_REFRESH_AFFECTED_TERM_TABLE,

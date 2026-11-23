@@ -14,6 +14,12 @@ import {deriveIndexedRecallCodeLinks} from '../code_links.js';
 import {deriveIndexedRecallMemoryLinks} from '../memory/links.js';
 import {recallDocumentTerms} from '../rank.js';
 import {indexCandidate, recallExactSearchText} from './candidate.js';
+import {
+  initializeRecallBodyBm25Staging,
+  publishRecallBodyBm25,
+  stageRecallBodyBm25,
+  stageRecallBodyBm25TermFrequencies,
+} from './body-bm25.js';
 import {loadCanonicalResourcePolicy, verifyCanonicalResource} from './canonical_resource.js';
 import {
   recallIndexCanonicalMutationContinuityAllowsIncrementalRefresh,
@@ -137,6 +143,7 @@ export const prepareRecallDatabase = Effect.fn('recall.prepareDatabase')(functio
     total: refreshCounts.changedSourceCount,
   }) ?? Effect.void;
   let indexedSourceCount = 0;
+  yield* initializeRecallBodyBm25Staging(sql);
   const sourceInputs = new Map(sourceScan.omittedSourceInputs);
   yield* forEachChangedRecallSourcePage(sql, forceAllSources, page =>
     Effect.gen(function* () {
@@ -215,6 +222,11 @@ export const prepareRecallDatabase = Effect.fn('recall.prepareDatabase')(functio
         {concurrency: 16},
       );
       yield* insertIndexedRecallSources(sql, indexedSources);
+      yield* stageRecallBodyBm25(
+        sql,
+        config.user,
+        EffectArray.map(indexedSources, indexed => indexed.candidate),
+      );
       indexedSourceCount += indexedSources.length;
       yield* onProgress?.({
         completed: indexedSourceCount,
@@ -224,6 +236,7 @@ export const prepareRecallDatabase = Effect.fn('recall.prepareDatabase')(functio
       }) ?? Effect.void;
     }),
   );
+  yield* stageRecallBodyBm25TermFrequencies(sql);
   const previousContentGeneration = previousMetadata.get('content_generation');
   const contentGeneration =
     refreshCounts.changedSourceCount === 0 && refreshCounts.removedSourceCount === 0 && previousContentGeneration
@@ -349,6 +362,7 @@ export const publishPreparedRecallDatabase = Effect.fn('recall.publishPreparedDa
     INNER JOIN temp.${RECALL_REFRESH_SOURCE_TABLE} AS source ON source.uri = indexed.uri
     ORDER BY indexed.uri COLLATE BINARY
   `);
+  yield* publishRecallBodyBm25(sql);
   yield* sql.unsafe(`
     INSERT INTO exact_search (rowid, content)
     SELECT document.id, indexed.exact_search_text

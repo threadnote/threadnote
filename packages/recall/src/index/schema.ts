@@ -3,6 +3,7 @@ import * as Effect2 from 'effect';
 import * as EffectString from 'effect/String';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {failFastIdentityPreparation} from './admission.js';
+import {initializeRecallBodyBm25} from './body-bm25.js';
 import * as RecallIndexIdentity from './identity.js';
 import type {RecallMetadataRow} from './read_policy.js';
 
@@ -11,7 +12,7 @@ import type {RecallMetadataRow} from './read_policy.js';
  * files into that new file. Older filenames are not opened or migrated in place,
  * so a previous binary cannot write the current database.
  */
-export const RECALL_INDEX_DATABASE_VERSION = 15;
+export const RECALL_INDEX_DATABASE_VERSION = 16;
 
 export class RecallIndexSchemaIncompatible extends Schema.TaggedError<
   RecallIndexSchemaIncompatible,
@@ -123,6 +124,7 @@ export const initializeRecallDatabase = Effect.fn('recall.initializeDatabase')(f
       tokenize = 'trigram'
     )
   `);
+  yield* initializeRecallBodyBm25(sql);
   yield* sql.unsafe('CREATE INDEX IF NOT EXISTS documents_uri ON documents(uri)');
   yield* sql.unsafe('CREATE INDEX IF NOT EXISTS documents_logical_key ON documents(logical_key, document_length)');
   yield* RecallIndexIdentity.initializeRecallIdentityIndex(sql);
@@ -167,6 +169,8 @@ export const initializeRecallDatabase = Effect.fn('recall.initializeDatabase')(f
   for (const table of [
     'documents',
     'postings',
+    'body_bm25_documents',
+    'body_bm25_postings',
     'term_statistics',
     'code_links',
     'memory_links',

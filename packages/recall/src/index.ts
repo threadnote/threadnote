@@ -40,6 +40,7 @@ import {indexTerms, postingLexicalScore, selectQueryTerms, stripRecallAnchor} fr
 import {deduplicateLogicalRecallCandidates, type RecallCandidate, type RecallCorpusStatistics} from './rank.js';
 import {normalizeRecallSearchText} from './tokenize.js';
 import {recallIndexCandidateIsEligible} from './index/candidate.js';
+import {selectRecallBodyBm25, type RecallBodyBm25Options} from './index/body-bm25.js';
 import {removeLegacyRecallIndexArtifacts} from './index/cleanup.js';
 import {recallEligibilityPolicyRestrictsCandidates, type RecallEligibilityPolicy} from './eligibility.js';
 import {recallCandidateIsValid} from './candidate_validation.js';
@@ -1017,6 +1018,49 @@ export const readRecallPublishedGenerationHint = Effect.fn('recall.publishedGene
     pointerVersion: RECALL_INDEX_POINTER_VERSION,
     schemaVersion: RECALL_INDEX_DATABASE_VERSION,
   });
+});
+
+/** Worker-only read of the independently ranked, active local memory corpus. */
+export const readRecallBodyBm25 = Effect.fn('recall.readBodyBm25')(function* (
+  config: RecallIndexConfig,
+  options: RecallBodyBm25Options,
+) {
+  if (options.includeInactive) return undefined;
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  config = {...config, agentContextHome: yield* fs.realPath(config.agentContextHome)};
+  const databasePath = yield* resolveActiveRecallDatabasePath(fs, path, config.agentContextHome, false);
+  if (!(yield* fs.exists(databasePath))) return undefined;
+  const fixedPath = recallIndexDatabasePath(path, config.agentContextHome, false);
+  return yield* useRecallDatabaseReadOnly(
+    databasePath,
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const metadata = yield* loadRecallMetadata(sql);
+      const generation = metadata.get('content_generation');
+      if (
+        metadata.get('schema_version') !== String(RECALL_INDEX_DATABASE_VERSION) ||
+        !generation ||
+        !recallScopeIsCurrent(metadata, config, false) ||
+        !recallInventoryPolicyIsCurrent(metadata)
+      )
+        return undefined;
+      const isCurrent = Effect.gen(function* () {
+        const marker = yield* readStaleMarker(fs, fixedPath);
+        const canonical = yield* readCanonicalMutationGeneration(fs, path, config.agentContextHome, config.account);
+        return !recallIndexForegroundRefreshRequired(recallIndexForegroundFreshness(metadata, marker, canonical, {}));
+      });
+      if (!(yield* isCurrent)) return undefined;
+      const uris = yield* selectRecallBodyBm25(sql, config.user, options);
+      if (
+        uris === undefined ||
+        !(yield* isCurrent) ||
+        (yield* resolveActiveRecallDatabasePath(fs, path, config.agentContextHome, false)) !== databasePath
+      )
+        return undefined;
+      return {generation, uris};
+    }),
+  );
 });
 
 const directRecallIndexStatus = Effect.fn('recall.indexStatus')(function* (

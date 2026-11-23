@@ -12,6 +12,7 @@ import {formatMemoryDocument} from '@threadnote/memory/document';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {
   loadRecallMemoryIdentities,
+  readRecallBodyBm25,
   readRecallIndexData,
   recallIndexStatus,
   RecallReadyReadUnavailable,
@@ -83,10 +84,12 @@ const verifySequence = (order: readonly number[], useHomeAlias = false) =>
     for (const ordinal of order) {
       const scope = scopes[ordinal];
       const config = {...scope, agentContextHome: alias, manifestPath: shared.manifestPath};
+      const readBodies = () => readRecallBodyBm25(config, {includeInactive: false, query: 'scope-rebind-sentinel'});
       if (previous !== undefined && previous !== ordinal) {
         const before = yield* recallIndexStatus(config, false);
         const unavailable = yield* readRecallIndexData(config, {includeInactive: false}).pipe(Effect.flip);
         expect(Schema.is(RecallReadyReadUnavailable)(unavailable)).toBe(true);
+        expect(yield* readBodies()).toBeUndefined();
         expect(yield* recallIndexStatus(config, false)).toEqual(before);
       }
       yield* loadRecallMemoryIdentities(config, {allowedUriScopes: [], memoryIds: []});
@@ -107,6 +110,10 @@ const verifySequence = (order: readonly number[], useHomeAlias = false) =>
         ].sort(),
       );
       expect(yield* recallIndexStatus(config, false)).toMatchObject({ready: true, documentCount: 2});
+      expect(yield* readBodies()).toEqual({
+        generation: selected.generation,
+        uris: [`threadnote://user/${scope.user}/memories/durable/${scope.account}-${scope.user}.md`],
+      });
       previous = ordinal;
     }
   }).pipe(TestClock.withLive);
