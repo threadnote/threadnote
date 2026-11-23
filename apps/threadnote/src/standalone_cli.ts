@@ -710,7 +710,8 @@ async function applicationProgram(arguments_: readonly string[], isMcpServer: bo
   if (
     invocation.operation === 'dev-skills' ||
     invocation.operation === 'memory-archive' ||
-    invocation.observationalUpdate === true
+    invocation.observationalUpdate === true ||
+    invocation.observationalCodexRefresh === true
   ) {
     // The lifecycle service owns mutation locks after validation. Read-only and
     // rejected requests must not create process registrations or release leases.

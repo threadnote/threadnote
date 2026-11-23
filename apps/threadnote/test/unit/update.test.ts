@@ -4,6 +4,7 @@ import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {it as effectIt} from '@effect/vitest';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import {writeCodexActivationFixture} from '../fixtures/codex-activation.js';
 import {mkdtemp, rm} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
@@ -14,6 +15,14 @@ import {TestClock} from 'effect/testing';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {captureConsole} from '@threadnote/threadnote/effect/console';
 import {CommandExecutor} from '@threadnote/platform/command';
+import {commandLauncherPath} from '@threadnote/threadnote/command-shim';
+import {getAgentAdapter} from '@threadnote/threadnote/agent_integration/adapters';
+import {runAgentAdapterAction} from '@threadnote/threadnote/agent_integration/adapter_actions';
+import {
+  readAgentIntegrationRegistry,
+  withAgentIntegrationHost,
+  writeAgentIntegrationRegistry,
+} from '@threadnote/threadnote/agent_integration/registry';
 import {sha256FileHex} from '@threadnote/platform/digest';
 import {HttpService} from '@threadnote/platform/http';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
@@ -869,6 +878,7 @@ describe('standalone updater', () => {
         const temporaryRoot = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-update-lock-race-'});
         const installRoot = path.join(temporaryRoot, 'install');
         const binRoot = path.join(temporaryRoot, 'bin');
+        const config = runtimeConfig(path.join(temporaryRoot, 'home'));
         const selectedRoot = path.join(installRoot, 'versions', selectedVersion);
         const concurrentRoot = path.join(installRoot, 'versions', concurrentlyActivatedVersion);
         for (const [releaseRoot, version] of [
@@ -887,6 +897,11 @@ describe('standalone updater', () => {
           }),
         });
         yield* activateStandaloneRelease(selectedRoot, false).pipe(Effect.provideService(SystemInfo, testSystem));
+        const codex = yield* writeCodexActivationFixture(
+          config.agentContextHome,
+          path.join(temporaryRoot, 'codex'),
+          '4.2.0-beta.1',
+        ).pipe(Effect.provideService(SystemInfo, testSystem));
 
         const selectionStarted = yield* Deferred.make<void>();
         const allowSelection = yield* Deferred.make<void>();
@@ -910,11 +925,10 @@ describe('standalone updater', () => {
           getText: () => Effect.die('the stale target must not fetch checksums'),
         });
         const updater = yield* Effect.forkScoped(
-          runUpdate(runtimeConfig(path.join(temporaryRoot, 'home')), {
+          runUpdate(config, {
             beta: true,
             force: true,
             postUpdate: false,
-            repair: false,
           }).pipe(Effect.provideService(HttpService, http), Effect.provideService(SystemInfo, testSystem), Effect.flip),
         );
         yield* Deferred.await(selectionStarted);
@@ -934,6 +948,7 @@ describe('standalone updater', () => {
         expect(releaseFetches).toBe(1);
         expect(downloadAttempted).toBe(false);
         expect(active.version).toBe(concurrentlyActivatedVersion);
+        expect(yield* fs.readFileString(codex.file)).toBe(codex.content);
       }),
     ).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
@@ -1027,10 +1042,11 @@ describe('standalone updater', () => {
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
-  effectIt.effect('updates the active installation when a newer local development binary invokes the updater', () =>
+  effectIt.effect.each([
+    {scenario: 'a newer local binary', activeVersion: '4.0.0-beta.19', latestVersion: '4.0.0-beta.30', beta: true},
+    {scenario: 'an allowed rollback', activeVersion: '4.2.0-beta.1', latestVersion: '4.1.1', beta: false},
+  ])('publishes the committed Codex marker after $scenario', ({activeVersion, latestVersion, beta}) =>
     Effect.gen(function* () {
-      const activeVersion = '4.0.0-beta.19';
-      const latestVersion = '4.0.0-beta.30';
       vi.mocked(utils.currentPackageVersion).mockReturnValue(Effect.succeed(latestVersion));
       const result = yield* Effect.scoped(
         Effect.gen(function* () {
@@ -1040,6 +1056,9 @@ describe('standalone updater', () => {
           const temporaryRoot = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-local-update-test-'});
           const installRoot = path.join(temporaryRoot, 'install');
           const binRoot = path.join(temporaryRoot, 'bin');
+          const inactiveCodexHome = path.join(temporaryRoot, 'different-codex');
+          const userHome = path.join(temporaryRoot, 'user');
+          const config = runtimeConfig(path.join(userHome, '.threadnote'));
           const oldReleaseRoot = path.join(installRoot, 'versions', activeVersion);
           yield* fs.makeDirectory(oldReleaseRoot, {recursive: true});
           yield* fs.writeFileString(
@@ -1052,26 +1071,79 @@ describe('standalone updater', () => {
           yield* writeReleaseArchive(archivePath, artifactName, executableName, latestVersion);
           const checksum = yield* sha256FileHex(archivePath);
           const http = updateHttpService(fs, archivePath, checksum, artifactName, [
-            releaseResponse(latestVersion, true, artifactName),
+            releaseResponse(latestVersion, beta, artifactName),
           ]);
           const testSystem = SystemInfo.of({
             ...baseSystem,
             environment: () => ({
               ...baseSystem.environment(),
+              CODEX_HOME: inactiveCodexHome,
               THREADNOTE_BIN_DIR: binRoot,
               THREADNOTE_INSTALL_ROOT: installRoot,
+              XDG_CONFIG_HOME: path.join(temporaryRoot, 'xdg'),
             }),
+            homeDirectory: userHome,
           });
           yield* activateStandaloneRelease(oldReleaseRoot, false).pipe(Effect.provideService(SystemInfo, testSystem));
-
+          const codex = yield* writeCodexActivationFixture(
+            config.agentContextHome,
+            path.join(temporaryRoot, 'codex'),
+            activeVersion,
+          ).pipe(Effect.provideService(SystemInfo, testSystem));
+          const inactiveConfig = path.join(inactiveCodexHome, 'config.toml');
+          yield* fs.makeDirectory(inactiveCodexHome, {recursive: true});
+          yield* fs.writeFileString(inactiveConfig, codex.content);
+          let missingAmpArtifact: string | undefined;
+          if (!beta) {
+            const registry = (yield* readAgentIntegrationRegistry(config))!;
+            const codexHost = registry.hosts.codex!;
+            yield* writeAgentIntegrationRegistry(
+              config,
+              withAgentIntegrationHost(registry, 'claude', {
+                ...codexHost,
+                mcp: {name: 'claude-fixture', repair: true, toolset: 'core'},
+              }),
+            );
+            const amp = getAgentAdapter('amp-cli')!;
+            yield* runAgentAdapterAction(config, amp, 'install', true).pipe(
+              Effect.provideService(SystemInfo, testSystem),
+            );
+            const withAmp = (yield* readAgentIntegrationRegistry(config))!;
+            missingAmpArtifact = withAmp.surfaces?.['amp-cli']?.artifactDescriptors[0]?.path;
+            if (!missingAmpArtifact) return yield* TestError.make({message: 'Missing Amp test receipt'});
+            yield* fs.remove(missingAmpArtifact);
+          }
+          const commands = yield* CommandExecutor;
+          const repairObservations: {args: readonly string[]; marker: string; locked: boolean}[] = [];
+          const services = {
+            ...commands,
+            executeStreaming: (_exe: string, args: readonly string[]) =>
+              Effect.gen(function* () {
+                // An older installed binary could regenerate and overwrite the
+                // active entry if invoked without an explicit non-Codex scope.
+                if (!args.includes('--mcp') || args.includes('codex')) {
+                  yield* fs.writeFileString(codex.file, '# Old Codex mcp remove/add replaced the entry\n');
+                }
+                repairObservations.push({
+                  args,
+                  marker: yield* fs.readFileString(codex.file),
+                  locked: yield* fs.exists(path.join(installRoot, '.installation.lock')),
+                });
+                return {exitCode: 0, stderr: '', stdout: ''};
+              }).pipe(Effect.orDie),
+          };
           const captured = yield* captureConsole(
-            runUpdate(runtimeConfig(path.join(temporaryRoot, 'home')), {
+            runUpdate(config, {
               allowUntrustedSource: true,
-              beta: true,
+              ...(beta ? {beta: true} : {stable: true}),
+              modelSetup: false,
               postUpdate: false,
-              repair: false,
               source: 'http://127.0.0.1:4312/releases',
-            }).pipe(Effect.provideService(HttpService, http), Effect.provideService(SystemInfo, testSystem)),
+            }).pipe(
+              Effect.provideService(CommandExecutor, services),
+              Effect.provideService(HttpService, http),
+              Effect.provideService(SystemInfo, testSystem),
+            ),
           );
           const launcher = path.join(binRoot, baseSystem.platform === 'win32' ? 'threadnote.cmd' : 'threadnote');
           return {
@@ -1080,6 +1152,11 @@ describe('standalone updater', () => {
               JSON.parse(yield* fs.readFileString(path.join(installRoot, 'active-release.json'))),
             ),
             captured,
+            codexMarker: yield* fs.readFileString(codex.file),
+            expectedMarker: EffectString.replace(activeVersion, latestVersion)(codex.content),
+            inactiveUnchanged: (yield* fs.readFileString(inactiveConfig)) === codex.content,
+            ampRestored: missingAmpArtifact === undefined || (yield* fs.exists(missingAmpArtifact)),
+            repairObservations,
             launcher: yield* fs.readFileString(launcher),
           };
         }),
@@ -1089,6 +1166,18 @@ describe('standalone updater', () => {
       expect(result.captured.output).toContain(`Installed standalone Threadnote ${latestVersion}`);
       expect(result.active.version).toBe(latestVersion);
       expect(result.launcher).toContain(latestVersion);
+      expect(result.codexMarker).toBe(result.expectedMarker);
+      expect(result.repairObservations).toEqual([
+        {
+          args: ['repair', '--no-post-update', '--mcp', beta ? 'none' : 'claude'],
+          marker: result.expectedMarker,
+          locked: false,
+        },
+      ]);
+      expect(result.inactiveUnchanged).toBe(true);
+      expect(result.ampRestored).toBe(true);
+      expect(result.captured.output).toContain(`Codex MCP configuration saved for Threadnote ${latestVersion}`);
+      expect(result.captured.output).toContain('Live refresh pending');
     }).pipe(TestClock.withLive),
   );
 
@@ -1161,6 +1250,29 @@ describe('standalone updater', () => {
             getStatus: () => Effect.die('not used'),
             getText: () => Effect.die('not used'),
           });
+          const staleVersion = '4.0.0-beta.29';
+          const codex = yield* writeCodexActivationFixture(home, path.join(temporaryRoot, 'codex'), staleVersion).pipe(
+            Effect.provideService(SystemInfo, testSystem),
+          );
+          yield* runUpdate(runtimeConfig(home), {beta: true, dryRun: true}).pipe(
+            Effect.provideService(CommandExecutor, commands),
+            Effect.provideService(HttpService, http),
+            Effect.provideService(SystemInfo, testSystem),
+          );
+          expect(yield* fs.readFileString(codex.file)).toBe(codex.content);
+          const mcpLauncher = yield* commandLauncherPath('mcp').pipe(Effect.provideService(SystemInfo, testSystem));
+          yield* fs.writeFileString(mcpLauncher, 'unmanaged MCP launcher\n', {mode: 0o755});
+          const rejectedLauncher = yield* captureConsole(
+            runUpdate(runtimeConfig(home), {beta: true, modelSetup: false}),
+          ).pipe(
+            Effect.provideService(CommandExecutor, commands),
+            Effect.provideService(HttpService, http),
+            Effect.provideService(SystemInfo, testSystem),
+          );
+          expect(rejectedLauncher.output).toContain('The MCP launcher does not match the active Threadnote release');
+          expect(yield* fs.readFileString(mcpLauncher)).toBe('unmanaged MCP launcher\n');
+          expect(yield* fs.readFileString(codex.file)).toBe(codex.content);
+          yield* fs.remove(mcpLauncher);
           const captured = yield* captureConsole(
             runUpdate(runtimeConfig(home), {beta: true}).pipe(
               Effect.provideService(CommandExecutor, commands),
@@ -1168,6 +1280,10 @@ describe('standalone updater', () => {
               Effect.provideService(SystemInfo, testSystem),
             ),
           );
+          expect(yield* fs.readFileString(codex.file)).toBe(
+            EffectString.replace(staleVersion, latestVersion)(codex.content),
+          );
+          const currentInode = (yield* fs.stat(codex.file)).ino;
           workflowRefreshState.pending = true;
           const pending = yield* runUpdate(runtimeConfig(home), {beta: true}).pipe(
             Effect.provideService(CommandExecutor, commands),
@@ -1175,6 +1291,7 @@ describe('standalone updater', () => {
             Effect.provideService(SystemInfo, testSystem),
             Effect.result,
           );
+          expect((yield* fs.stat(codex.file)).ino).toEqual(currentInode);
           return {
             captured,
             pending,
@@ -1204,6 +1321,7 @@ describe('standalone updater', () => {
       }
       expect(result.captured.output).toContain('Threadnote is up to date.');
       expect(result.captured.output).toContain('Wrote command launcher:');
+      expect(result.captured.output).toContain('Codex MCP configuration saved');
       expect(result.launcher).toContain(latestVersion);
       expect(result.launcher).not.toContain('old-release');
     }),
@@ -1282,6 +1400,11 @@ describe('standalone updater', () => {
             }),
             homeDirectory: path.join(temporaryRoot, 'user-home'),
           });
+          const codex = yield* writeCodexActivationFixture(
+            config.agentContextHome,
+            path.join(temporaryRoot, 'codex'),
+            '4.0.0-beta.7',
+          ).pipe(Effect.provideService(SystemInfo, testSystem));
 
           const captured = yield* captureConsole(
             runUpdate(config, {
@@ -1303,6 +1426,7 @@ describe('standalone updater', () => {
           );
           return {
             captured,
+            codexUnchanged: (yield* fs.readFileString(codex.file)) === codex.content,
             activeRelease: yield* fs.readFileString(path.join(installRoot, 'active-release.json')),
             corruptContentsExist: yield* fs.exists(path.join(releaseRoot, 'corrupt.txt')),
             grammarAssetsExist: yield* fs.exists(
@@ -1329,6 +1453,7 @@ describe('standalone updater', () => {
       });
       expect(result.setupRequests[0].args.slice(0, 3)).toEqual(['model-setup-request', '--home', result.canonicalHome]);
       expect(result.executableExists).toBe(true);
+      expect(result.codexUnchanged).toBe(true);
       expect(result.grammarAssetsExist).toBe(true);
       expect(result.corruptContentsExist).toBe(false);
       expect(JSON.parse(result.activeRelease)).toMatchObject({version: RELEASE_VERSION});

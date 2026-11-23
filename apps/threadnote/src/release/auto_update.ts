@@ -193,6 +193,9 @@ export const runAutoUpdateStatusCommand = Effect.fn('autoUpdate.statusCommand')(
       `Last update: v${status.lastSuccess.fromVersion} -> v${status.lastSuccess.toVersion} · ${status.lastSuccess.completedAt}`,
     );
     yield* Console.log(`System notification: ${status.lastSuccess.notification}`);
+    yield* Console.log(
+      'Open Codex sessions may need a refresh or restart. Run threadnote doctor to check configuration.',
+    );
     if (status.lastSuccess.repairRequired)
       yield* Console.log(
         status.lastSuccess.repairScope === 'workflows'
@@ -474,7 +477,7 @@ function runOwnedAutoUpdate(config: RuntimeConfig) {
       const notification = yield* sendSystemNotification({
         body: repairRequired
           ? `Version ${toVersion} is active, but ${workflowOnly ? 'development workflow refresh' : 'local setup repair'} needs attention. Run threadnote update --status.`
-          : `Updated from ${fromVersion}. New CLI invocations and the next MCP request will use version ${toVersion}.`,
+          : `Version ${toVersion} is active. Open Codex sessions may need a refresh or restart.`,
         title: repairRequired ? 'Threadnote updated — action required' : `Threadnote updated to v${toVersion}`,
       });
       yield* writeAutoUpdateState(

@@ -3,6 +3,7 @@ import {Database} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import {writeCodexActivationFixture} from '../fixtures/codex-activation.js';
 import fc from 'fast-check';
 import {Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -1608,6 +1609,9 @@ describe('exact-head development runtime', () => {
             THREADNOTE_INSTALL_ROOT: installRoot,
           }),
         });
+        const codex = yield* writeCodexActivationFixture(threadnoteHome, path.join(root, 'codex'), priorVersion).pipe(
+          Effect.provideService(SystemInfo, testSystem),
+        );
         const graphDatabase =
           scenario !== 'unhealthy repair'
             ? path.join(
@@ -1685,6 +1689,7 @@ describe('exact-head development runtime', () => {
           Effect.provideService(SystemInfo, testSystem),
           Effect.flip,
         );
+        expect(yield* fs.readFileString(codex.file)).toBe(codex.content);
 
         if (scenario === 'newer graph schema' && graphDatabase !== undefined) {
           expect(String(failure)).toContain('newer Threadnote runtime');
@@ -1902,20 +1907,52 @@ describe('exact-head development runtime', () => {
             threadnoteHome: path.join(root, 'home'),
             version,
           } as const;
-          const preserved = yield* activateLocalStandaloneRelease(activation).pipe(
-            Effect.provideService(CommandExecutor, versionCommandExecutor(version)),
-            Effect.provideService(SystemInfo, testSystem),
+          const fixture = yield* writeCodexActivationFixture(
+            activation.threadnoteHome,
+            path.join(root, 'codex'),
+            supersededVersion,
+          ).pipe(Effect.provideService(SystemInfo, testSystem));
+          const systemCommands = yield* CommandExecutor;
+          const versionCommands = versionCommandExecutor(version);
+          const observedCodexLock: boolean[] = [];
+          const executor = CommandExecutor.of({
+            ...versionCommands,
+            execute: (command, args, options) =>
+              ['/bin/ls', '/bin/cp', 'getfacl'].includes(command) || options?.env?.THREADNOTE_CODEX_METADATA_SOURCE
+                ? Effect.gen(function* () {
+                    observedCodexLock.push(
+                      yield* fs.exists(path.join(installRoot, '.installation.lock')).pipe(Effect.orDie),
+                    );
+                    return yield* systemCommands.execute(command, args, options);
+                  })
+                : versionCommands.execute(command, args, options),
+          });
+          const activate = (terminateSuperseded: boolean) =>
+            activateLocalStandaloneRelease({...activation, terminateSuperseded}).pipe(
+              Effect.provideService(CommandExecutor, executor),
+              Effect.provideService(SystemInfo, testSystem),
+            );
+          const preserved = yield* activate(false);
+          expect(yield* fs.readFileString(fixture.file)).toBe(
+            EffectString.replace(supersededVersion, version)(fixture.content),
           );
+          expect(observedCodexLock.length).toBeGreaterThan(0);
+          expect(observedCodexLock).not.toContain(true);
+          const unpinned = yield* writeCodexActivationFixture(
+            activation.threadnoteHome,
+            path.join(root, 'codex'),
+            supersededVersion,
+            false,
+          ).pipe(Effect.provideService(SystemInfo, testSystem));
           terminationRequested = true;
-          const cleaned = yield* activateLocalStandaloneRelease({...activation, terminateSuperseded: true}).pipe(
-            Effect.provideService(CommandExecutor, versionCommandExecutor(version)),
-            Effect.provideService(SystemInfo, testSystem),
-          );
+          const cleaned = yield* activate(true);
+          expect(yield* fs.readFileString(unpinned.file)).toBe(unpinned.content);
           return {cleaned, preserved, running, signals};
         }),
       ).pipe(provideTestLayer(ApplicationLayer));
 
       expect(result.preserved).toMatchObject({
+        codexMcpRefresh: {configuration: 'saved', refresh: 'pending', release: result.preserved.version},
         cleanupComplete: false,
         cleanupIssues: [],
         preservedMcpSessionProcesses: 1,
@@ -1928,6 +1965,7 @@ describe('exact-head development runtime', () => {
         [45_003, 'SIGTERM'],
       ]);
       expect(result.cleaned).toMatchObject({
+        codexMcpRefresh: {configuration: 'deferred', refresh: 'pending'},
         cleanupComplete: true,
         cleanupIssues: [],
         preservedMcpSessionProcesses: 1,

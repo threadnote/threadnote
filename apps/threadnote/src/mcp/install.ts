@@ -287,7 +287,10 @@ const runMcpInstallInTransaction = Effect.fn('mcp.runInstallInTransaction')(func
 
   if (agent === 'codex') {
     if (mode === 'repair') {
-      const result = yield* reconcileRegisteredCodexMcpInTransaction(config, undefined, !apply);
+      const result = yield* reconcileRegisteredCodexMcpInTransaction(config, undefined, {
+        dryRun: !apply,
+        requireActiveMcpLauncher: true,
+      });
       if (result.state === 'deferred') {
         yield* Console.warn(`Codex MCP repair deferred: ${result.reason}.`);
         const receipt = (yield* readAgentIntegrationRegistry(config))?.hosts.codex?.mcp;
@@ -456,11 +459,17 @@ const codexConfigurationCheck = Effect.fn('mcp.codexConfigurationCheck')(functio
   name: string,
   receipt: AgentIntegrationMcpReceipt | undefined,
 ) {
-  const inspection = yield* inspectRegisteredCodexMcp(config, receipt);
+  return describeCodexMcpConfiguration(name, yield* inspectRegisteredCodexMcp(config, receipt));
+});
+
+export function describeCodexMcpConfiguration(
+  name: string,
+  inspection: Effect.Success<ReturnType<typeof inspectRegisteredCodexMcp>>,
+): DoctorCheck {
   let detail: string;
   switch (inspection.state) {
     case 'current':
-      detail = `${name} broker configured for release ${inspection.release} in ${inspection.hostRoot}`;
+      detail = `${name} broker configuration is current for release ${inspection.release} in ${inspection.hostRoot}. Live refresh is unverified.`;
       break;
     case 'stale':
       detail = `${name} has a stale release marker in ${inspection.hostRoot}. Run threadnote repair --mcp codex.`;
@@ -488,7 +497,7 @@ const codexConfigurationCheck = Effect.fn('mcp.codexConfigurationCheck')(functio
     }
   }
   return {detail, name: 'codex MCP', status: inspection.state === 'current' ? 'ok' : 'warn'} satisfies DoctorCheck;
-});
+}
 
 export const mcpConfigurationChecks = Effect.fn('mcp.configurationChecks')(function* (
   config: RuntimeConfig,
@@ -1647,6 +1656,11 @@ export const resolveMcpClients = Effect.fn('mcp.resolveClients')(function* (
 
   const clients: AgentClient[] = [];
   for (const client of requested) {
+    // Receipt-owned Codex repair works on the physical configuration directly.
+    if (client === 'codex' && action === 'repair' && receipts.codex) {
+      if (!clients.includes(client)) clients.push(client);
+      continue;
+    }
     if (action === 'remove' && receipts[client]?.transport === 'cli') {
       if (!clients.includes(client)) clients.push(client);
       continue;

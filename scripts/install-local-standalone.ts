@@ -18,6 +18,7 @@ import {
 } from '@threadnote/threadnote/command-shim';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {captureConsole} from '@threadnote/threadnote/effect/console';
+import {reconcileActivatedCodexMcp, type CodexMcpActivationStatus} from '@threadnote/threadnote/mcp/index';
 import {sha256FileHex, sha256Hex} from '@threadnote/platform/digest';
 import {expandPath} from '@threadnote/platform/paths';
 import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
@@ -88,6 +89,7 @@ export interface LocalStandaloneInstallOptions {
 
 export interface LocalStandaloneInstallResult extends DevelopmentRuntimeEvidence {
   readonly active: true;
+  readonly codexMcpRefresh?: Exclude<CodexMcpActivationStatus, {readonly configuration: 'skipped'}>;
   readonly cleanupComplete: boolean;
   readonly cleanupIssues: readonly LocalStandaloneCleanupIssue[];
   readonly doctorVerified: true;
@@ -804,13 +806,15 @@ export const activateLocalStandaloneRelease = Effect.fn('developmentInstall.acti
       terminatedSupersededProcesses,
     } satisfies LocalStandaloneInstallResult;
   });
-  return yield* withStandaloneInstallationLock(criticalSection).pipe(
+  const installed = yield* withStandaloneInstallationLock(criticalSection).pipe(
     Effect.ensuring(
       Option.isSome(input.stagedRoot)
         ? fs.remove(input.stagedRoot.value, {force: true, recursive: true}).pipe(Effect.ignore)
         : Effect.void,
     ),
   );
+  const codexMcpRefresh = yield* reconcileActivatedCodexMcp({agentContextHome: input.threadnoteHome}, input.version);
+  return codexMcpRefresh.configuration === 'skipped' ? installed : {...installed, codexMcpRefresh};
 });
 
 /** Refresh stale, enabled workflow targets after activation has crossed its rollback point. */

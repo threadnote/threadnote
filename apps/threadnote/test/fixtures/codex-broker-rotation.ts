@@ -67,6 +67,13 @@ export function isLive(pid: number): boolean {
   return EffectString.trim(stdout ?? '') === String(pid);
 }
 
+export function parentProcessId(pid: number): number {
+  const result = spawnSync('ps', ['-p', String(pid), '-o', 'ppid='], {timeout: 1000, encoding: 'utf8'});
+  const parent = Number(EffectString.trim(result.stdout ?? ''));
+  if (!Number.isSafeInteger(parent) || parent < 2) throw new Error('Missing fixture broker parent');
+  return parent;
+}
+
 class CodexClient {
   private nextId = 0;
   private failure: Error | undefined;
@@ -129,16 +136,21 @@ class CodexClient {
     this.send('initialized');
   }
 
-  async start(cwd: string) {
+  async start(cwd: string, ephemeral = true) {
     const result = await this.rpc('thread/start', {
       cwd,
-      ephemeral: true,
+      ephemeral,
       approvalPolicy: 'never',
       sandbox: 'read-only',
     });
     const id = jsonObject(result.thread).id;
     if (typeof id !== 'string') throw new Error('Missing started thread identity');
     return id;
+  }
+
+  async resume(threadId: string) {
+    const result = await this.rpc('thread/resume', {threadId});
+    return jsonObject(result.thread).id;
   }
 
   async turn(threadId: string) {
@@ -206,8 +218,9 @@ async function closeChild(child: ReturnType<typeof spawn>) {
 export async function withRotationProbe(
   codex: string,
   probe: (fixture: Awaited<ReturnType<typeof openRotationProbe>>) => Promise<void>,
+  temporaryParent = tmpdir(),
 ) {
-  const root = await mkdtemp(join(await realpath(tmpdir()), 'tn-r-'));
+  const root = await mkdtemp(join(await realpath(temporaryParent), 'tn-r-'));
   try {
     const fixture = await openRotationProbe(root, codex);
     const [result] = await Promise.allSettled([probe(fixture)]);
@@ -263,7 +276,7 @@ async function openRotationProbe(root: string, codex: string) {
   async function profile(name: string) {
     const home = join(root, name);
     const cwd = join(home, 'workspace');
-    await mkdir(cwd, {recursive: true});
+    await mkdir(cwd, {recursive: true, mode: 0o700});
     const socket = join(home, 'owner.sock');
     const env = {
       HOME: home,
@@ -283,7 +296,7 @@ async function openRotationProbe(root: string, codex: string) {
       `[mcp_servers.${server}.env]`,
       `PROBE_RELEASE = ${JSON.stringify(version)}`,
     ];
-    const config = (release: string, unrelated = 'unrelated') =>
+    const config = (release: string | undefined, unrelated = 'unrelated') =>
       writeFile(
         join(home, 'config.toml'),
         EffectArray.join(
@@ -294,7 +307,7 @@ async function openRotationProbe(root: string, codex: string) {
             'name = "probe"',
             `base_url = "http://127.0.0.1:${modelPort}/v1"`,
             'wire_api = "responses"',
-            ...mcpConfig('threadnote', release),
+            ...(release === undefined ? [] : mcpConfig('threadnote', release)),
             ...mcpConfig('unrelated', unrelated),
           ],
           '\n',
@@ -335,7 +348,12 @@ async function openRotationProbe(root: string, codex: string) {
         buffer = lines.pop() ?? '';
         EffectArray.forEach(lines, line => client.receive(line));
       });
-      return client;
+      return Object.assign(client, {
+        closeInput: async () => {
+          child.stdin.end();
+          return until(async () => child.exitCode ?? undefined, 'Codex stdio owner EOF');
+        },
+      });
     };
     const proxy = async (endpoint?: string) => {
       // Codex forwards raw bytes to the Unix control socket. Bridge the proxy's stdio
@@ -450,6 +468,7 @@ async function openRotationProbe(root: string, codex: string) {
     });
     return {
       cwd,
+      home,
       socket,
       serveIncompatibleProtocol,
       config,
@@ -462,6 +481,8 @@ async function openRotationProbe(root: string, codex: string) {
   }
   return {
     profile,
+    root,
+    mcpFixture: join(root, 'fixture.mjs'),
     close: async () => {
       model.closeAllConnections();
       const stopped = await Promise.allSettled([

@@ -12,6 +12,7 @@ import {agentsCommandMetadata, makeAgentsCommand} from './agents_cli.js';
 import {makeSetupCommand, setupCommandMetadata} from './setup_cli.js';
 import {guidanceCommandMetadata, makeGuidanceCommand} from './guidance_cli.js';
 import {makeDevelopmentInstallRepairCommand} from './development_install_cli.js';
+import {makeRepairCommand} from './repair_cli.js';
 import {runCursorHook} from '../cursor/hook_runner.js';
 import {Console, Effect, Schema} from 'effect';
 import {Argument, CliError, Command, Flag} from 'effect/cli';
@@ -22,13 +23,11 @@ import {
   runDevelopmentInstallMaintenance,
   runDoctor,
   runInstall,
-  runRepair,
   runStart,
   runStop,
   runUninstall,
 } from '../lifecycle.js';
 import {
-  ensureLocalAiStarted,
   readLocalAiSettings,
   runLocalAiDisable,
   runLocalAiEnable,
@@ -109,7 +108,6 @@ import {
 import {makeShareReconcileCommand, runShareReconcile} from '../share/reconcile.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {maybeNotifyUpdate, maybeRunPostUpdateAfterRepair, runPostUpdate} from '../release/index.js';
-import {errorMessage} from '@threadnote/platform/errors';
 import {runVersion} from '../release/version/command.js';
 import {runManage} from '../manager/index.js';
 import {makeMemoryPreviewCommand} from '../preview/dispatch.js';
@@ -395,36 +393,7 @@ const developmentInstallRepair = makeDevelopmentInstallRepairCommand(options =>
   ),
 );
 
-const repair = Command.make(
-  'repair',
-  {
-    coreOnly: boolean('core-only', 'Repair core state and indexes without host instructions, hooks, or MCP settings'),
-    deep: boolean('deep', 'Run explicit full SQLite integrity, foreign-key, and derived-state cleanup checks'),
-    dryRun: boolean('dry-run', 'Print the repair actions without making changes'),
-    mcp: defaultString(
-      'mcp',
-      'MCP clients: available, all, none, codex, claude, cursor, copilot, omp, or comma-separated list',
-      'available',
-    ),
-    postUpdate: negatedBoolean('post-update', 'Skip post-update migration prompts after repair'),
-  },
-  options =>
-    withRuntimeEffect(config =>
-      Effect.gen(function* () {
-        yield* runRepair(config, options);
-        if ((yield* readLocalAiSettings(config))?.enabled === true) {
-          if (options.dryRun) {
-            yield* runLocalAiStart(config, {dryRun: true});
-          } else {
-            yield* ensureLocalAiStarted(config).pipe(
-              Effect.catch(error => Console.warn(`WARN could not repair local AI health: ${errorMessage(error)}`)),
-            );
-          }
-        }
-        yield* maybeNotifyUpdate(config, {dryRun: options.dryRun});
-      }),
-    ),
-).pipe(Command.withDescription('Repair Threadnote storage, derived indexes, hooks, and MCP configuration'));
+const repair = makeRepairCommand(withRuntimeEffect);
 
 const start = Command.make(
   'start',

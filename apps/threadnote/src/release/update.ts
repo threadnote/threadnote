@@ -62,6 +62,9 @@ import {
 import {errorMessage} from '@threadnote/platform/errors';
 import {toolRoot} from '@threadnote/workspace/installation';
 import {prepareReleaseDevSkills, refreshReleaseDevSkills} from './dev_skills_update.js';
+import {reconcileActivatedCodexMcp} from '../mcp/codex_broker_activation.js';
+import {repairRegisteredAgentAdapters} from '../agent_integration/adapter_actions.js';
+import {readAgentIntegrationRegistry, repairableAgentClients} from '../agent_integration/registry.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -273,18 +276,24 @@ export const runUpdate = Effect.fn('runUpdate')(function* (config: RuntimeConfig
     return;
   }
 
+  const shouldRepair = options.repair !== false;
+  const dryRun = options.dryRun === true;
   if (!info.isUpdateAvailable && options.force !== true) {
     const current =
       info.installedVersion === undefined
-        ? {executable: system.executablePath, refresh: undefined}
+        ? {executable: system.executablePath, refresh: undefined, committedVersion: undefined}
         : yield* withStandaloneInstallationLock(
             Effect.gen(function* () {
               const path = yield* Path.Path;
               const mutationInstalledVersion = (yield* activeInstalledVersion()) ?? info.installedVersion!;
               const activeReleaseRoot = path.join(installationRoot(path, system), 'versions', mutationInstalledVersion);
-              yield* installCommandShim(options.dryRun === true, activeReleaseRoot, config.agentContextHome);
+              yield* installCommandShim(dryRun, activeReleaseRoot, config.agentContextHome);
               return {
                 executable: path.join(activeReleaseRoot, system.platform === 'win32' ? 'threadnote.exe' : 'threadnote'),
+                committedVersion:
+                  !dryRun && (yield* activeInstalledVersion()) === mutationInstalledVersion
+                    ? mutationInstalledVersion
+                    : undefined,
                 refresh:
                   options.dryRun === true
                     ? undefined
@@ -293,6 +302,9 @@ export const runUpdate = Effect.fn('runUpdate')(function* (config: RuntimeConfig
             }),
             options.dryRun === true,
           );
+    if (shouldRepair && current.committedVersion !== undefined) {
+      yield* reconcileActivatedCodexMcp(config, current.committedVersion);
+    }
     const workflowResult = current.refresh
       ? yield* Effect.result(refreshReleaseDevSkills(config, current.refresh))
       : undefined;
@@ -300,7 +312,9 @@ export const runUpdate = Effect.fn('runUpdate')(function* (config: RuntimeConfig
     if (workflowResult !== undefined && Result.isFailure(workflowResult)) return yield* workflowResult.failure;
     yield* Console.log(success('Threadnote is up to date.'));
     yield* Console.log(
-      'Managed launchers are current. If an MCP host still uses the legacy direct server command, run `threadnote repair`, then restart that host once.',
+      shouldRepair
+        ? 'Managed launchers are current. If an MCP host still uses the legacy direct server command, run `threadnote repair`, then restart that host once.'
+        : 'Managed launchers are current. MCP host configurations were not refreshed (--no-repair).',
     );
     return;
   }
@@ -309,8 +323,6 @@ export const runUpdate = Effect.fn('runUpdate')(function* (config: RuntimeConfig
     return yield* updateDowngradeError(info.currentVersion, latestVersion);
   }
 
-  const shouldRepair = options.repair !== false;
-  const dryRun = options.dryRun === true;
   const mutation = yield* withStandaloneInstallationLock(
     Effect.gen(function* () {
       const lockedInstalledVersion = yield* activeInstalledVersion();
@@ -327,11 +339,16 @@ export const runUpdate = Effect.fn('runUpdate')(function* (config: RuntimeConfig
       });
       yield* installCommandShim(dryRun, installed.releaseRoot, config.agentContextHome);
       yield* activateStandaloneRelease(installed.releaseRoot, dryRun);
-      return {currentVersion, ...installed};
+      const committedVersion =
+        !dryRun && (yield* activeInstalledVersion()) === latestVersion ? latestVersion : undefined;
+      return {currentVersion, committedVersion, ...installed};
     }),
     dryRun,
   );
   const {currentVersion: effectiveCurrentVersion, releaseRoot} = mutation;
+  if (shouldRepair && mutation.committedVersion !== undefined) {
+    yield* reconcileActivatedCodexMcp(config, mutation.committedVersion);
+  }
   // Independent of optional integration repair and migration prompts. A partial
   // refresh remains durable while the other maintenance stages still run.
   const workflowResult = mutation.refresh
@@ -369,7 +386,7 @@ export const runUpdate = Effect.fn('runUpdate')(function* (config: RuntimeConfig
   if (shouldRepair) {
     yield* Console.log('');
     yield* Console.log('Repairing local Threadnote setup after standalone update.');
-    yield* runStreamingSubcommand(dryRun, threadnoteCommand, ['repair', '--no-post-update']);
+    yield* runReleaseRepair(config, threadnoteCommand, dryRun);
   } else {
     yield* Console.log(
       'Skipping local integration repair because --no-repair was provided. MCP host configurations were not refreshed.',
@@ -384,11 +401,44 @@ export const runUpdate = Effect.fn('runUpdate')(function* (config: RuntimeConfig
   }
   yield* Console.log(
     shouldRepair
-      ? 'Update complete. Brokered MCP sessions will use the new version on their next request. Legacy direct-server sessions migrated by repair require one host restart.'
-      : 'Update complete. Brokered MCP sessions will use the new version on their next request. Hosts still using the legacy direct server command must run `threadnote repair` and restart once.',
+      ? 'Update complete. Active MCP calls can finish on their existing connection. Restart hosts whose configuration changed to establish a new connection.'
+      : 'Update complete. Active MCP calls can finish on their existing connection. Hosts still using the legacy direct server command must run `threadnote repair` and restart once.',
   );
   yield* printWhatsNewIfAvailable(info, !dryRun);
 }, Effect.asVoid);
+
+const runReleaseRepair = Effect.fn('update.runReleaseRepair')(function* (
+  config: RuntimeConfig,
+  executable: string,
+  dryRun: boolean,
+) {
+  const registry = yield* readAgentIntegrationRegistry(config).pipe(Effect.result);
+  const codex = registry._tag === 'Success' ? registry.success?.hosts.codex?.mcp : undefined;
+  const localCodex =
+    codex !== undefined &&
+    !codex.external &&
+    codex.transport === undefined &&
+    (codex.artifactProfile === undefined || codex.artifactProfile === 'default');
+  if (registry._tag === 'Failure' || localCodex) {
+    // An eligible target may predate receipt-owned Codex repair. Its old
+    // remove/add path can erase the release marker and other user options.
+    const legacyClients =
+      registry._tag === 'Success'
+        ? EffectArray.filter(repairableAgentClients(registry.success), client => client !== 'codex')
+        : [];
+    yield* runStreamingSubcommand(dryRun, executable, [
+      'repair',
+      '--no-post-update',
+      '--mcp',
+      EffectArray.join(legacyClients, ',') || 'none',
+    ]);
+    // An explicit legacy-client list bypasses the child’s registered adapter
+    // pass. Keep that work here while the old child repairs core state.
+    yield* repairRegisteredAgentAdapters(config, dryRun, {skipCodexMcp: true});
+  } else {
+    yield* runStreamingSubcommand(dryRun, executable, ['repair', '--no-post-update']);
+  }
+});
 
 function updateDowngradeError(currentVersion: string, targetVersion: string): UpdateOperationError {
   return UpdateOperationError.make({
