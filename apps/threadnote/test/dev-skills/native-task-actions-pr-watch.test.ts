@@ -2496,7 +2496,7 @@ describe('native task actions', () => {
         expect(object(yield* runNativeJobWorker(f.config, 'native-run', finishJobId, f.call)).status).toBe('completed');
         expect(yield* finish({finishRef})).toMatchObject({status: 'complete'});
       }).pipe(run),
-    windowsRealGitFixtureTimeout,
+    process.platform === 'win32' ? {timeout: 180_000} : windowsRealGitFixtureTimeout,
   );
 
   effectIt.effect(
