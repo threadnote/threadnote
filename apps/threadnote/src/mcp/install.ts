@@ -62,6 +62,7 @@ import {
   parseJsonConfigObject,
   readFileIfExists,
   removePathIfExists,
+  shellQuote,
 } from '../utils.js';
 import {expandPath, getInvocationCwd} from '@threadnote/platform/paths';
 import {withSetupMutationLock} from '../setup/lock.js';
@@ -320,7 +321,7 @@ const runMcpInstallInTransaction = Effect.fn('mcp.runInstallInTransaction')(func
       const destination = yield* fs.realPath(hostRoot).pipe(Effect.orElseSucceed(() => hostRoot));
       const instruction = options.dryRunApplyCommand
         ? `Run \`${options.dryRunApplyCommand}\` without \`--dry-run\``
-        : codexSetupInstruction(name, destination, options);
+        : codexSetupInstruction(name, {path: destination, kind: 'intended'}, options);
       yield* Console.log(`Dry run. ${instruction}.`);
       yield* Console.log(
         `Codex MCP ${name} in ${destination} for release ${release ?? '(no validated active release)'}.`,
@@ -447,11 +448,16 @@ class McpOperationError extends Schema.TaggedError<McpOperationError, {readonly 
 
 function codexSetupInstruction(
   name: string,
-  hostRoot?: string,
+  destination?: {readonly path: string; readonly kind: 'intended' | 'recorded'},
   options?: {readonly toolset?: string; readonly noDevSkills?: boolean},
 ) {
   const command = formatShellCommand('threadnote', codexApplyArguments(name, options));
-  return `Set CODEX_HOME to ${hostRoot ? formatShellCommand(hostRoot, []) : 'the intended Codex home'}, then run \`${command}\``;
+  let home = 'the intended Codex home';
+  if (destination?.path) {
+    const formatted = formatShellCommand(destination.path, []);
+    home = formatted === shellQuote(destination.path) ? formatted : `the ${destination.kind} Codex home`;
+  }
+  return `Set CODEX_HOME to ${home}, then run \`${command}\``;
 }
 
 const codexConfigurationCheck = Effect.fn('mcp.codexConfigurationCheck')(function* (
@@ -491,9 +497,11 @@ export function describeCodexMcpConfiguration(
         ambiguous: 'could not be attributed to Threadnote or edited safely. Review the existing entry first',
         unreadable: 'could not be inspected',
       }[inspection.state];
-      const hostRoot =
-        inspection.state === 'missing' || inspection.state === 'ambiguous' ? inspection.hostRoot : undefined;
-      detail = `${name} ${description}. ${codexSetupInstruction(name, hostRoot)}.`;
+      const destination =
+        inspection.state === 'missing' || inspection.state === 'ambiguous'
+          ? {path: inspection.hostRoot, kind: 'recorded' as const}
+          : undefined;
+      detail = `${name} ${description}. ${codexSetupInstruction(name, destination)}.`;
     }
   }
   return {detail, name: 'codex MCP', status: inspection.state === 'current' ? 'ok' : 'warn'} satisfies DoctorCheck;

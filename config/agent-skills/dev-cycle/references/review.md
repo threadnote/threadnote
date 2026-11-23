@@ -11,7 +11,7 @@ Before spawning reviewers, assess every specialist below against the acceptance 
 | `security`      | Trust boundaries, authorization, secrets, untrusted input, command construction/execution authority, or data exposure      | Abuse paths, permission checks, injection, and sensitive-data handling                                          |
 | `performance`   | Hot paths, material CPU/memory/I/O cost, indexing, batching, caching, concurrency, or resource lifetime                    | Scaling, contention, bounded work, cleanup, and evidence for performance claims                                 |
 | `architecture`  | Package/service boundaries, ownership, public contracts, persistence/schema evolution, or cross-component lifecycle        | Dependency direction, compatibility, invariants, and fit with existing architecture                             |
-| `quality`       | Non-trivial behavior gains or changes, new failure modes, or substantive changes to tests                                  | Whether tests would catch the relevant failure; independent assertions, boundary cases, and useful properties   |
+| `quality`       | Risk to the verification strategy, oracle design, difficult failure coverage, or a meaningful property                     | Whether tests would catch the relevant failure; independent assertions, boundary cases, and useful properties   |
 | `flaky-test`    | Tests or fixtures depend on timing, scheduling, retries, processes, shared state, network, or cleanup                      | Deterministic synchronization, isolation, realistic clocks, and reliable teardown                               |
 | `devex`         | CLI/MCP interfaces, setup/update or user-facing configuration, diagnostics, contributor tooling, or agent skills/workflows | Discoverability, actionable failures, compatibility, and whether a user or agent can complete the intended flow |
 
@@ -22,3 +22,12 @@ Include `correctness`, `simplicity`, and every selected specialist in `selected`
 Review the full snapshot first, then deltas and prior findings; expand only for evidence gaps. Resolve prior active findings by stable identity and evidence, not the fixer's claim. Missing or failed selected-lane output blocks acceptance; never substitute an empty clean review.
 
 Findings do not authorize changes, approve intent, permit publication or prove the whole product works. Record results for the exact snapshot; refresh after material source changes.
+
+## Material scenarios
+
+1. **Coordinator.** Select material scenarios from the diff and the acceptance criteria. Consider async state changes, existing data, retries, permissions and flows across components. State the risk and expected observable result for each scenario. Give the same scenarios to `correctness` and to `quality` when selected.
+2. **Correctness reviewer.** Trace each scenario from its actual production entry point. Record the initial state, the event order or failure, the observable result and the recovery. Trace alternate event orders when they can change the result. Cite the source that supports the trace.
+3. **Quality reviewer.** Map each scenario to named tests and cite the assertions that prove the expected behavior. Verify that the tests exercise the production path relevant to the risk. For a fix, verify that the same regression test fails for the expected reason on the broken snapshot. Verify that it passes on the fixed snapshot. Report missing evidence as a gap.
+4. **Coordinator.** Record each scenario as `verified`, `finding` or `unverified` in the review evidence for the exact snapshot. Cite the reviewer report, source locations and available test results. Use `verified` when the evidence supports the expected result. Use `finding` for a concrete issue and `unverified` when evidence is missing. Before you complete the review, record the decision and reason for each material gap. Apply the existing finding gates. If a follow-up changes behavior, ask the independent reviewers to recheck the affected scenarios on the new snapshot.
+
+Keep this evidence in the existing review reports and artifacts. Use the current native review schema.
