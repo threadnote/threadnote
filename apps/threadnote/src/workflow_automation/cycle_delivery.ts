@@ -285,12 +285,23 @@ const ancestryGit = (checkout: string, args: readonly string[], input?: Uint8Arr
     const system = yield* SystemInfo;
     return yield* runCommandEffect(
       'git',
-      ['--no-optional-locks', '--no-replace-objects', '-c', 'core.commitGraph=false', '-C', checkout, ...args],
+      [
+        '--no-optional-locks',
+        '--no-replace-objects',
+        '-c',
+        'core.commitGraph=false',
+        '-c',
+        'advice.graftFileDeprecated=false',
+        '-C',
+        checkout,
+        ...args,
+      ],
       {
         timeoutMs: 30_000,
         maxOutputBytes: 4096,
         allowFailure: true,
-        env: {...system.environment(), GIT_NO_LAZY_FETCH: '1', GIT_GRAFT_FILE: '', GIT_TEST_COMMIT_GRAPH: '0'},
+        // Git for Windows maps /dev/null to NUL. An empty path can warn during commit parsing.
+        env: {...system.environment(), GIT_NO_LAZY_FETCH: '1', GIT_GRAFT_FILE: '/dev/null', GIT_TEST_COMMIT_GRAPH: '0'},
         ...(input ? {input} : {}),
       },
     );

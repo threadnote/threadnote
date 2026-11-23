@@ -26,7 +26,7 @@ import {commandLauncherPath, installCommandShim, renderCommandShim} from '@threa
 import {hasActiveMcpLauncher} from '../../src/mcp/codex_broker_rotation.js';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {activateStandaloneRelease} from '@threadnote/threadnote/installations';
-import {CommandExecutor} from '@threadnote/platform/command';
+import {CommandExecutor, formatShellCommand} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {repairRegisteredMcpClients, runUninstall} from '@threadnote/threadnote/lifecycle';
 import {
@@ -1439,11 +1439,10 @@ describe('Codex receipt-owned release marker', () => {
         });
 
         yield* fs.remove(target);
+        const setupInstruction = `Set CODEX_HOME to ${formatShellCommand(hostRoot, [])}, then run \`threadnote mcp-install codex --apply --name threadnote\``;
         const missing = yield* inFixture(mcpConfigurationChecks(config));
         expect(missing).toContainEqual({
-          detail: expect.stringContaining(
-            `Set CODEX_HOME to ${hostRoot}, then run \`threadnote mcp-install codex --apply --name threadnote\``,
-          ),
+          detail: expect.stringContaining(setupInstruction),
           name: 'codex MCP',
           status: 'warn',
         });
@@ -1451,9 +1450,7 @@ describe('Codex receipt-owned release marker', () => {
         expect(yield* inFixture(reconcileActivatedCodexMcp(config, secondCodexRelease))).toMatchObject({
           configuration: 'deferred',
           refresh: 'pending',
-          reason: expect.stringContaining(
-            `Set CODEX_HOME to ${hostRoot}, then run \`threadnote mcp-install codex --apply --name threadnote\``,
-          ),
+          reason: expect.stringContaining(setupInstruction),
         });
         expect(yield* fs.exists(target)).toBe(false);
 

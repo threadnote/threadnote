@@ -2082,9 +2082,13 @@ describe('native task actions', () => {
 
         const [first, second, third] = phases;
         yield* f.git(['checkout', 'main']);
+        const published = yield* readNativeWorkflowState(f.config, 'native-run');
         for (const phase of phases) {
           yield* f.git(['merge', '--no-ff', phase.provider.headBranch, '-m', `Merge PR ${phase.provider.number}`]);
           phase.provider.mergeCommit = yield* gitOutput(['rev-parse', 'HEAD']);
+          expect(yield* gitOutput(['rev-parse', 'HEAD^{tree}']), `validated merge tree for phase ${phase.id}`).toBe(
+            published?.state.cycle?.state.phases[phase.id]?.delivery?.validatedTree,
+          );
         }
         const commands = yield* CommandExecutor;
         const reads: number[] = [];
@@ -2132,9 +2136,10 @@ describe('native task actions', () => {
         const refuse = (phase: (typeof phases)[number], reason: string, overrides?: Readonly<Record<number, object>>) =>
           Effect.gen(function* () {
             const before = yield* f.fs.readFileString(f.statePath());
-            expect(yield* complete(phase, overrides).pipe(Effect.result)).toMatchObject({
-              failure: {code: 'pr-source-mismatch', message: expect.stringContaining(reason)},
-            });
+            const result = yield* complete(phase, overrides).pipe(Effect.result);
+            if (result._tag !== 'Failure') throw new Error(`Expected phase ${phase.id} delivery refusal: ${reason}.`);
+            expect(result.failure.code, result.failure.message).toBe('pr-source-mismatch');
+            expect(result.failure.message).toContain(reason);
             expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
           });
         yield* refuse(second, 'no distinct canonical merged PR receipt');

@@ -28,8 +28,13 @@ effectIt.layer(codexWriteLayer)(windows => {
         prefix: 'codex config & [rotation]-',
       });
       const target = path.join(home, 'config.toml');
-      const initial = yield* stageCodexConfiguration(home, target, undefined, 'first');
-      expect(yield* publishStagedCodexConfiguration(target, initial, false, Effect.succeed(true))).toBe(true);
+      // Close the write scope so only the live name remains after publishing the hard link.
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const initial = yield* stageCodexConfiguration(home, target, undefined, 'first');
+          expect(yield* publishStagedCodexConfiguration(target, initial, false, Effect.succeed(true))).toBe(true);
+        }),
+      );
       expect(yield* fs.readFileString(target)).toBe('first');
 
       const environment = system.environment();
@@ -59,8 +64,13 @@ if ($env:THREADNOTE_TEST_CODEX_RESTRICT -eq '1') {
       const expected = (yield* descriptor(true)).stdout;
       expect(expected).toMatch(/D:P/u);
       const before = yield* fromPromise('test.readWindowsCodexConfigStat', () => runtimeLstat(target));
-      const next = yield* stageCodexConfiguration(home, target, before, 'updated');
-      expect(yield* publishStagedCodexConfiguration(target, next, true, Effect.succeed(true))).toBe(true);
+      expect(before).toHaveProperty('nlink', 1n);
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const next = yield* stageCodexConfiguration(home, target, before, 'updated');
+          expect(yield* publishStagedCodexConfiguration(target, next, true, Effect.succeed(true))).toBe(true);
+        }),
+      );
       expect(yield* fs.readFileString(target)).toBe('updated');
       expect((yield* descriptor(false)).stdout).toBe(expected);
 
