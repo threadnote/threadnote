@@ -6,8 +6,14 @@ Before creating a PR, recall user preferences and read any PR-description style 
 
 For multiphase features in GitHub repositories, prefer stacked phase PRs: target each dependent PR at its parent branch, with the root targeting the main branch. Keep each phase reviewable and preserve delivery history when a parent merges.
 
-When authorized, commit and open/update the phase PR, verify its delivery, and use the `watch-pr` skill to start or transfer the sole watch collector and leased consumer. A successful start records the PR delivery receipt. Continue the next eligible phase immediately. By default when addressing review comments, refresh feature memory as the author (see [feature memory](feature-memory.md)); do not rely on an independent reviewer to publish team knowledge. When no eligible work or actionable event remains, end the model turn and leave the watch running. Resume for meaningful delivered events instead of waiting or polling for CI, draft feedback, or merge.
+When authorized, commit the phase changes and open or update the PR. Verify its delivery against the exact source. Use the `watch-pr` skill to select one event-driven watch for the exact PR. Preserve the existing watch identity and pending work.
 
-Check the collector, consumer, exact host target and command capability during bounded setup. Do not wait for the first notification or host receipt before ending the turn: the start already recorded the delivery, and the host receipt can stay pending. Report an unsupported wake mechanism as a coverage gap and end the turn without substituting model polling. Keep existing watch identity and pending work when transferring from a periodic fallback.
+If the workflow requires a canonical delivery receipt and Threadnote supports the owning host, use the workflow-bound route. Verify its workflow-bound collector, leased consumer, exact host target, and command capability. If start returns `delivery.recorded: false`, follow the exact-reference `complete` recovery in the `watch-pr` skill. Then verify the canonical delivery receipt. The first notification and host receipt can remain pending.
+
+If the workflow requires a receipt and the workflow-bound route cannot start or record it, report the gap. Leave the phase pending. Preserve any separately authorized ordinary monitoring.
+
+Continue the next eligible phase after you verify any required canonical delivery receipt. When you address review comments, refresh the author-owned feature memory by default. See [feature memory](feature-memory.md).
+
+When no eligible work or actionable event remains, end the turn and leave the watch running. If no supported watch meets the requirements, report the coverage gap. Resume for delivered events. Do not substitute model polling.
 
 Do not claim a check passed unless it ran. A watch signal is evidence to investigate, not merge authority. Follow the watch flow and preserve unresolved work across acknowledgements.
