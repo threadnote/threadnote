@@ -931,14 +931,21 @@ export const managerGraphDiagram = Effect.fn('codeGraph.managerDiagram')(functio
             message: 'The snapshot does not belong to the selected graph view. Refresh the graph catalog.',
           });
         }
-        const checkedFreshness = yield* Effect.gen(function* () {
+        const checkedIdentity = yield* Effect.gen(function* () {
           const association = yield* managerGraphLocalAssociationForCatalog(threadnoteHome, checkoutId, catalog);
-          if (association.state !== 'verified' || !association.path) return 'unknown' as const;
-          const identity = yield* resolveRepositoryIdentityForExpectation(association.path, {
+          if (association.state !== 'verified' || !association.path) return undefined;
+          return yield* resolveRepositoryIdentityForExpectation(association.path, {
             checkoutId,
             repositoryId: repository.repositoryId,
             worktreeId: viewWorktreeId,
           });
+        }).pipe(
+          Effect.orElseSucceed(() => undefined),
+          Effect.timeoutOption(500),
+        );
+        const identity = Option.getOrUndefined(checkedIdentity);
+        const checkedFreshness = yield* Effect.gen(function* () {
+          if (!identity) return 'unknown' as const;
           if (identity.headCommit !== snapshot.commit) return 'stale' as const;
           if (viewScopeId !== undefined) return 'unknown' as const;
           const layout = codeGraphLayout(path, threadnoteHome, checkoutId, viewWorktreeId);
@@ -973,6 +980,7 @@ export const managerGraphDiagram = Effect.fn('codeGraph.managerDiagram')(functio
             commit: snapshot.commit,
           },
           freshness: Option.getOrElse(checkedFreshness, () => 'unknown'),
+          ...(identity === undefined ? {} : {sourceIdentity: identity}),
           partialProject: viewScopeId !== undefined && receipt?.completeness !== 'complete',
         });
       }),

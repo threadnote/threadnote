@@ -1,8 +1,19 @@
 import {Array as Arr, Clock, Effect, Option, Schema, String as Str} from 'effect';
+import {codeGraphCitationSourceKey, readCodeGraphCitationSources} from '../citation/source.js';
 import {compareCodeUnits} from '../ordering.js';
 import {withCodeGraphReadTransaction} from '../store/session.js';
 import type {CodeGraphStoreShape} from '../store.js';
-import type {CodeGraphEdge, CodeGraphQueryNode, CodeGraphRelation, CodeGraphStatus, CodeGraphSymbol} from '../types.js';
+import {TYPESCRIPT_FULL_TRAVERSAL_UTF8_BYTE_LIMIT} from '../typescript_runtime.js';
+import type {
+  CodeGraphEdge,
+  CodeGraphInventoryFile,
+  CodeGraphQueryNode,
+  CodeGraphRelation,
+  CodeGraphSnapshot,
+  CodeGraphStatus,
+  CodeGraphSymbol,
+  RepositoryIdentity,
+} from '../types.js';
 import {
   completeDiagramFact,
   completeDiagramSubject,
@@ -19,6 +30,7 @@ import {
   rankCodeGraphDiagramTopicFallback,
   renderCompleteCodeGraphDiagram,
   selectDiagramPath,
+  wantsSourceBackedSequence,
   type CodeGraphDiagramFact,
   type CodeGraphDiagramQuestion,
 } from './diagram.js';
@@ -42,6 +54,8 @@ interface DiagramSnapshotRequest extends CodeGraphDiagramRequest {
   readonly scope: CodeGraphDiagramScope;
   readonly freshness: CodeGraphDiagramFreshness;
   readonly partialProject?: boolean;
+  /** Identity verified for the caller's selected checkout. */
+  readonly sourceIdentity?: RepositoryIdentity;
 }
 
 type DiagramStore = Pick<
@@ -51,6 +65,7 @@ type DiagramStore = Pick<
   | 'diagramAdjacentCandidates'
   | 'diagramAdjacentPage'
   | 'diagramSubjectPage'
+  | 'effectiveSnapshotFilesByPaths'
   | 'symbolsByIds'
 >;
 type Boundary = CodeGraphDiagramCoverage['boundaries'][number];
@@ -253,7 +268,28 @@ function collectBridges(
   }
 }
 
-/** Read the authorized snapshot in one transaction. The selecting caller owns its snapshot lease. */
+const readVerifiedSequenceSource = Effect.fn('codeGraph.readVerifiedSequenceSource')(function* (
+  identity: RepositoryIdentity,
+  snapshot: CodeGraphSnapshot,
+  file: CodeGraphInventoryFile,
+) {
+  const committed = file.source === 'commit';
+  if (!committed && identity.worktreeId !== snapshot.worktreeId) return undefined;
+  const request = {expectedContentHash: file.contentHash, repositoryPath: file.path, requireBytes: true};
+  const verified = yield* readCodeGraphCitationSources({
+    allowCommitFallback: committed,
+    commitOnly: committed,
+    objectFormat: identity.objectFormat,
+    retainedBytesLimit: TYPESCRIPT_FULL_TRAVERSAL_UTF8_BYTE_LIMIT,
+    repositoryRoot: identity.repoRoot,
+    sourceCommit: snapshot.commit,
+    sources: [request],
+  });
+  const bytes = verified.get(codeGraphCitationSourceKey(request));
+  return bytes === undefined ? undefined : new Map([[file.path, bytes]]);
+});
+
+/** Read authorized graph facts in one transaction. The caller owns the lease through source reads. */
 export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function* (
   store: DiagramStore,
   databasePath: string,
@@ -292,7 +328,7 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
   }
   const deadline =
     (yield* Clock.currentTimeMillis) + Math.max(1, input.timeoutMilliseconds ?? READ_TIMEOUT_MILLISECONDS);
-  const withinRead = <A, E>(read: Effect.Effect<A, E>) =>
+  const withinRead = <A, E, R>(read: Effect.Effect<A, E, R>) =>
     Effect.gen(function* () {
       const remaining = deadline - (yield* Clock.currentTimeMillis);
       if (remaining <= 0) return yield* DiagramReadExpired.make({});
@@ -520,6 +556,7 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
       }
       return candidates.sort((left, right) => compareCodeUnits(left.id, right.id));
     });
+  let sequenceEvidence: {readonly snapshot: CodeGraphSnapshot; readonly file: CodeGraphInventoryFile} | undefined;
   const read = Effect.gen(function* () {
     const snapshot = yield* withinRead(store.readySnapshotById(databasePath, scope.snapshotId));
     if (snapshot?.repositoryId !== scope.repositoryId) {
@@ -707,6 +744,25 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
     if (!facts.size && !gaps.size) {
       gaps.set('relationships', {kind: 'missing-evidence', label: 'No source relationship supports the question.'});
     }
+    if (
+      facts.size &&
+      wantsSourceBackedSequence(question) &&
+      input.sourceIdentity?.repositoryId === snapshot.repositoryId
+    ) {
+      // Execution ordering is established within the selected subject's source.
+      const rows = yield* withinRead(
+        store.effectiveSnapshotFilesByPaths(databasePath, snapshot.id, [subject.path]),
+      ).pipe(Effect.orElseSucceed(() => []));
+      const file = rows[0]?.file;
+      if (
+        file &&
+        file.size <= TYPESCRIPT_FULL_TRAVERSAL_UTF8_BYTE_LIMIT &&
+        (file.language === 'typescript' || file.language === 'javascript') &&
+        (file.mode === '100644' || file.mode === '100755')
+      ) {
+        sequenceEvidence = {snapshot, file};
+      }
+    }
     return undefined;
   });
   const result = yield* withCodeGraphReadTransaction(store, databasePath, read).pipe(
@@ -717,6 +773,12 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
     }),
   );
   if (result) return result;
+  const sequenceSources =
+    input.sourceIdentity && sequenceEvidence
+      ? yield* withinRead(
+          readVerifiedSequenceSource(input.sourceIdentity, sequenceEvidence.snapshot, sequenceEvidence.file),
+        ).pipe(Effect.orElseSucceed(() => undefined))
+      : undefined;
   if (input.partialProject)
     gaps.set('scope', {kind: 'partial-project', label: scope.project ?? 'Selected graph project'});
   const acquired = [...facts.values()].sort((left, right) => compareCodeUnits(left.id, right.id));
@@ -730,6 +792,7 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
     }
   }
   const complete = coverage(gaps.size ? 'incomplete' : 'complete', boundaries, gaps, subject);
+  const hasSourceTime = sequenceSources !== undefined && (yield* Clock.currentTimeMillis) < deadline;
   return renderCompleteCodeGraphDiagram({
     question,
     scope,
@@ -738,6 +801,7 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
     nodes,
     boundaryIds,
     facts: selected,
+    ...(hasSourceTime ? {sequenceSources} : {}),
     ...(architectureAnchor === undefined ? {} : {architectureAnchor}),
     ...(pathTarget === undefined ? {} : {pathTarget}),
   });
@@ -800,12 +864,13 @@ export const readCodeGraphDiagramForStatus = Effect.fn('codeGraph.readDiagramFor
   const leaseOptions = {waitTimeoutMilliseconds: 250};
   return yield* Effect.acquireUseRelease(
     store.acquireSnapshotLease(databasePath, readySnapshot.id, duration, leaseOptions).pipe(Effect.option),
-    (lease): Effect.Effect<CodeGraphDiagramResult> =>
+    (lease): Effect.Effect<CodeGraphDiagramResult, never, Effect.Services<ReturnType<typeof readCodeGraphDiagram>>> =>
       Option.isSome(lease)
         ? readCodeGraphDiagram(store, databasePath, {
             ...request,
             scope,
             freshness,
+            sourceIdentity: identity,
             partialProject: projectCoverage?.completeness === 'partial',
           })
         : Effect.succeed({

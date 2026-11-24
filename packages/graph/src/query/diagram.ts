@@ -2,6 +2,7 @@ import {Array as Arr, Option, String as Str} from 'effect';
 import {codeGraphSymbolPathClass, codeGraphSymbolPathScoreMultiplier} from '../store/query/core.js';
 import {parseCodeGraphEndpointSelector} from './selector.js';
 import type {CodeGraphEdge, CodeGraphQueryNode, CodeGraphRelation, CodeGraphSpan} from '../types.js';
+import {renderSourceBackedSequence} from './diagram_sequence.js';
 import type {
   CodeGraphDiagramCoverage,
   CodeGraphDiagramFreshness,
@@ -252,6 +253,23 @@ function groupNodes(
     diagramId: `g${index + 1}`,
     label,
     members,
+  }));
+}
+
+function groupSequenceLifelines(
+  nodes: Diagram['evidence']['nodes'],
+  lifelines: NonNullable<ReturnType<typeof renderSourceBackedSequence>>['lifelines'],
+): Diagram['evidence']['groups'] {
+  const membersByFile = new Map<string, string[]>();
+  for (const node of nodes) {
+    const members = membersByFile.get(node.path) ?? [];
+    members.push(node.diagramId);
+    membersByFile.set(node.path, members);
+  }
+  return Arr.map(lifelines, ({diagramId, label, path}) => ({
+    diagramId,
+    label,
+    members: membersByFile.get(path) ?? [],
   }));
 }
 
@@ -587,6 +605,14 @@ export function describeCodeGraphDiagramQuestion(question: string, type: CodeGra
 
 export type CodeGraphDiagramQuestion = ReturnType<typeof describeCodeGraphDiagramQuestion>;
 
+export function wantsSourceBackedSequence(question: CodeGraphDiagramQuestion): boolean {
+  return (
+    question.path === undefined &&
+    question.domain === 'behavior' &&
+    (question.explicitType ?? question.preferred) === 'sequence'
+  );
+}
+
 export function rankCodeGraphDiagramTopicFallback(
   node: CodeGraphQueryNode,
   question: CodeGraphDiagramQuestion,
@@ -805,10 +831,12 @@ export function renderCompleteCodeGraphDiagram(input: {
   readonly nodes: ReadonlyMap<string, CodeGraphQueryNode>;
   readonly boundaryIds: ReadonlySet<string>;
   readonly facts: readonly Fact[];
+  readonly sequenceSources?: ReadonlyMap<string, Uint8Array>;
   readonly architectureAnchor?: Fact;
   readonly pathTarget?: CodeGraphQueryNode;
 }): CodeGraphDiagramResult {
-  const {question, scope, freshness, coverage, nodes, boundaryIds, facts, architectureAnchor, pathTarget} = input;
+  const {question, scope, freshness, nodes, boundaryIds, facts, architectureAnchor, pathTarget, sequenceSources} =
+    input;
   const limits = freshness === 'current' ? [] : [`Snapshot freshness is ${freshness}.`];
   if (architectureAnchor) {
     limits.push(
@@ -819,18 +847,48 @@ export function renderCompleteCodeGraphDiagram(input: {
     limits.push(
       `The diagram covers indexed paths to ${pathTarget.qualifiedName} at ${pathTarget.path}:${pathTarget.span.line}.`,
     );
+  const subject = input.coverage.subject ? nodes.get(input.coverage.subject.id) : undefined;
+  const sourceProjection =
+    subject && sequenceSources?.size && wantsSourceBackedSequence(question)
+      ? renderSourceBackedSequence({subject, facts, nodes, sources: sequenceSources, gaps: input.coverage.gaps})
+      : undefined;
+  const sequence = completeSequence(facts);
+  const discoveredGaps = sourceProjection?.discoveredGaps ?? [];
+  // Keep the simple linear path unless verified source adds control flow or exposes missing evidence.
+  const sourceSequence =
+    sourceProjection?.source &&
+    sourceProjection.orderedCalls > 0 &&
+    (sourceProjection.hasControls ||
+      discoveredGaps.length > 0 ||
+      sequence === undefined ||
+      input.coverage.completeness !== 'complete')
+      ? sourceProjection
+      : undefined;
+  const sourceGaps: CodeGraphDiagramCoverage['gaps'] = [
+    ...discoveredGaps,
+    ...(sourceSequence?.unorderedCalls
+      ? [
+          {
+            kind: 'missing-evidence' as const,
+            label: `Source does not establish the order of ${sourceSequence.unorderedCalls} indexed calls.`,
+          },
+        ]
+      : []),
+  ];
+  const coverage: CodeGraphDiagramCoverage = sourceGaps.length
+    ? {...input.coverage, completeness: 'incomplete', gaps: [...input.coverage.gaps, ...sourceGaps]}
+    : input.coverage;
   const base = {scope, freshness, coverage, limits};
   const classFit = question.domain === 'types' && canRepresentClassDiagram(facts, nodes);
   const architectureFit =
     question.domain === 'architecture' && canRepresentArchitectureDiagram(facts, nodes, boundaryIds);
-  const sequence = completeSequence(facts);
   const interrupted = Arr.some(coverage.gaps, gap => gap.kind === 'interrupted');
   const suitable =
     question.domain === 'types' && classFit
       ? 'class'
       : question.domain === 'architecture' && architectureFit
         ? 'architecture'
-        : (question.preferred === 'sequence' || pathTarget !== undefined) && sequence
+        : (question.preferred === 'sequence' || pathTarget !== undefined) && (sourceSequence || sequence)
           ? 'sequence'
           : 'flowchart';
   const diagramType = question.explicitType ?? suitable;
@@ -840,8 +898,9 @@ export function renderCompleteCodeGraphDiagram(input: {
       : diagramType === 'architecture'
         ? architectureFit
         : diagramType === 'sequence'
-          ? sequence !== undefined &&
-            (coverage.completeness === 'complete' || (pathTarget !== undefined && !interrupted))
+          ? sourceSequence !== undefined ||
+            (sequence !== undefined &&
+              (coverage.completeness === 'complete' || (pathTarget !== undefined && !interrupted)))
           : true;
   const unsupportedTypeMessage =
     diagramType === 'sequence'
@@ -852,9 +911,10 @@ export function renderCompleteCodeGraphDiagram(input: {
           : 'Incomplete coverage prevents a complete sequence diagram.'
       : `The ${diagramType} diagram cannot represent every relationship for this subject.`;
   const build = (type: DiagramType) => {
-    const drawn = type === 'sequence' ? sequence! : facts;
+    const drawn = type === 'sequence' && !sourceSequence ? sequence! : facts;
     const ids = new Set<string>();
-    if (type !== 'sequence' && coverage.subject) ids.add(architectureAnchor?.sourceId ?? coverage.subject.id);
+    if ((type !== 'sequence' || sourceSequence) && coverage.subject)
+      ids.add(architectureAnchor?.sourceId ?? coverage.subject.id);
     for (const edge of drawn) {
       ids.add(edge.sourceId);
       ids.add(edge.targetId);
@@ -874,11 +934,22 @@ export function renderCompleteCodeGraphDiagram(input: {
       path: edge.evidencePath,
       span: edge.evidenceSpan,
     }));
-    const groups = type === 'flowchart' || type === 'architecture' ? groupNodes(evidenceNodes, nodes, drawn) : [];
+    const groups =
+      type === 'sequence' && sourceSequence
+        ? groupSequenceLifelines(evidenceNodes, sourceSequence.lifelines)
+        : type === 'flowchart' || type === 'architecture'
+          ? groupNodes(evidenceNodes, nodes, drawn)
+          : [];
     const evidence = {nodes: evidenceNodes, edges, groups};
-    return {diagramType: type, source: sourceFor(type, evidence), inferred: type === 'sequence', evidence};
+    const source = type === 'sequence' && sourceSequence ? sourceSequence.source : sourceFor(type, evidence);
+    return {diagramType: type, source, inferred: type === 'sequence', evidence};
   };
-  if (diagramType === 'sequence' && fits) limits.push('The sequence shows an inferred path from static calls.');
+  if (diagramType === 'sequence' && fits)
+    limits.push(
+      sourceSequence
+        ? 'The sequence follows verified static source. Calls without proven order remain in the evidence.'
+        : 'The sequence shows an inferred path from static calls.',
+    );
   const example =
     diagramType === 'sequence' && !fits && !sequence && !pathTarget && coverage.subject
       ? sequenceExample(facts, nodes, coverage.subject.id)

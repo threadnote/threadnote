@@ -2,13 +2,16 @@ import {it as effectIt} from '@effect/vitest';
 import {Array as Arr, Effect, FileSystem, Layer, Option, Path, Schema, String as Str} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {TestClock} from 'effect/testing';
+import {runCommandEffect} from '@threadnote/platform/command';
 import {expect} from 'vitest';
 import {CodeGraphDiagramResultSchema, type CodeGraphDiagramResult} from '../../src/query/diagram_contract.js';
 import {readCodeGraphDiagram, readCodeGraphDiagramForStatus} from '../../src/query/diagram_evidence.js';
 import {extractRepositoryFacts, resolveExtractedRepositoryFacts} from '../../src/extractor.js';
+import {codeGraphCommittedContentHash} from '../../src/content_identity.js';
 import {extractBazelFacts} from '../../src/languages/bazel/extractor.js';
 import {codeGraphLayout} from '../../src/layout.js';
 import {CodeGraphStore} from '../../src/store.js';
+import {resolveRepositoryIdentity} from '../../src/repository.js';
 import {
   CodeGraphStoreError,
   type CodeGraphEdge,
@@ -141,6 +144,102 @@ const storedDiagramFixture = Effect.gen(function* () {
 });
 
 effectIt.layer(diagramStoreLayer)(it => {
+  it.effect('orders Sequence calls from the leased commit after the checkout changes', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const store = yield* CodeGraphStore;
+      const repository = yield* fs.makeTempDirectoryScoped({prefix: 'graph-sequence-'});
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'graph-sequence-home-'});
+      const git = (args: readonly string[]) => runCommandEffect('git', ['-C', repository, ...args]);
+      yield* git(['init', '--quiet']);
+      yield* git(['config', 'user.name', 'Test']);
+      yield* git(['config', 'user.email', 'test@example.invalid']);
+      const filename = 'pipeline.ts';
+      const source = Arr.join(
+        [
+          'function openInput() {}',
+          'function publishOutput() {}',
+          'export function runPipeline() {',
+          '  openInput();',
+          '  publishOutput();',
+          '}',
+          'export async function runWithCallback(callback: () => Promise<void>) {',
+          '  openInput();',
+          '  await callback();',
+          '}',
+          '',
+        ],
+        '\n',
+      );
+      yield* fs.writeFileString(path.join(repository, filename), source);
+      yield* git(['add', filename]);
+      yield* git(['commit', '--quiet', '-m', 'selected snapshot']);
+      const indexedIdentity = yield* resolveRepositoryIdentity(repository);
+      const {databasePath} = codeGraphLayout(path, home, indexedIdentity.checkoutId, indexedIdentity.worktreeId);
+      const blobId = Str.trim((yield* git(['rev-parse', `HEAD:${filename}`])).stdout);
+      const file = {
+        ...diagramSourceFile(filename, 'typescript', source),
+        blobId,
+        contentHash: codeGraphCommittedContentHash(indexedIdentity.objectFormat, blobId),
+      };
+      const [facts] = extractRepositoryFacts([file]);
+      expect(facts).toBeDefined();
+      if (facts === undefined) return;
+      const indexedEdges = Arr.filter(facts.edges, edge => edge.evidenceSpan.line !== 9);
+      const snapshot: CodeGraphSnapshot = {
+        id: 'cgsn_' + Str.repeat(40)('8'),
+        repositoryId: indexedIdentity.repositoryId,
+        worktreeId: indexedIdentity.worktreeId,
+        commit: indexedIdentity.headCommit,
+        extractorSet: 'fixture',
+        dirty: false,
+        fileCount: 1,
+        symbolCount: facts.symbols.length,
+        edgeCount: indexedEdges.length,
+        state: 'ready',
+      };
+      yield* store.activate(databasePath, indexedIdentity, snapshot, [file], facts.symbols, indexedEdges);
+      yield* fs.writeFileString(
+        path.join(repository, filename),
+        Str.replace('openInput();\n  publishOutput();', 'publishOutput();\n  openInput();')(source),
+      );
+      yield* git(['commit', '--quiet', '-am', 'change call order']);
+      const identity = yield* resolveRepositoryIdentity(repository);
+      expect(identity.headCommit).not.toBe(snapshot.commit);
+
+      const run = (subject: string) =>
+        readCodeGraphDiagramForStatus(
+          store,
+          {databasePath, identity, freshness: 'stale', languagePacks: [], readySnapshot: snapshot, stale: true},
+          {question: `How does ${subject} work?`, diagramType: 'sequence'},
+        );
+      const result = requireDiagram(yield* run('runPipeline'));
+      expect(result.scope.commit).toBe(snapshot.commit);
+      expect(result.source).toMatch(/->>[^\n]+openInput[^\n]*\n[^]*?->>[^\n]+publishOutput/u);
+      expect(result.evidence.edges).toHaveLength(2);
+      expect(result.evidence.groups).toEqual([
+        {diagramId: 'p1', label: filename, members: Arr.map(result.evidence.nodes, node => node.diagramId)},
+      ]);
+
+      const incomplete = yield* run('runWithCallback');
+      expect(incomplete).toMatchObject({
+        status: 'incomplete',
+        coverage: {
+          completeness: 'incomplete',
+          gaps: [{kind: 'unresolved-target', path: filename, span: {line: 9}}],
+        },
+        diagram: {
+          diagramType: 'sequence',
+          evidence: {
+            edges: [{relation: 'calls', path: filename, span: {line: 8}}],
+            groups: [{diagramId: 'p1', label: filename, members: ['n1', 'n2']}],
+          },
+        },
+      });
+    }).pipe(TestClock.withLive),
+  );
+
   it.effect('reads the full effective snapshot across pages and local ownership bridges', () =>
     Effect.gen(function* () {
       const f = yield* storedDiagramFixture;

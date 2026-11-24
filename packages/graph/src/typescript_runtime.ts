@@ -1,5 +1,9 @@
 import type ts from 'typescript-compiler';
 
+export const TYPESCRIPT_FULL_TRAVERSAL_CHARACTER_LIMIT = 2 * 1_024 * 1_024;
+// One UTF-16 code unit needs at most three UTF-8 bytes. Allow an optional BOM.
+export const TYPESCRIPT_FULL_TRAVERSAL_UTF8_BYTE_LIMIT = TYPESCRIPT_FULL_TRAVERSAL_CHARACTER_LIMIT * 3 + 3;
+
 /** Synchronous parser-only loading; the literal module specifier stays visible to Bun's bundler. */
 export function loadTypeScriptExtractionRuntime(): {
   readonly compiler: typeof ts;
