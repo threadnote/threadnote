@@ -8,7 +8,7 @@ import {
 } from '@threadnote/recall/background/lexical-demand';
 import {runEffect} from '../helpers/effect-runtime.js';
 import {runShareSync} from '@threadnote/threadnote/effect/share';
-import {Array as EffectArray, Console, Effect, Schema} from 'effect';
+import {Array as EffectArray, Console, Effect, Option, Schema} from 'effect';
 import * as EffectString from 'effect/String';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -1173,7 +1173,15 @@ describe('Cursor Cloud integration', () => {
         const tools = await client.listTools();
         expect(EffectArray.map(tools.tools, tool => tool.name)).toEqual(CLOUD_LOCAL_TOOL_NAMES);
         expect(EffectArray.map(tools.tools, tool => tool.name)).not.toContain('recall_context');
-        expect((await client.listResourceTemplates()).resourceTemplates).toEqual([]);
+        const graphTool = Option.getOrUndefined(
+          EffectArray.findFirst(tools.tools, tool => tool.name === 'inspect_code_graph'),
+        );
+        expect(graphTool?.inputSchema.properties?.output).toMatchObject({
+          anyOf: [{enum: ['mermaid'], type: 'string'}],
+        });
+        expect((await client.listResourceTemplates()).resourceTemplates).toEqual([
+          expect.objectContaining({uriTemplate: 'threadnote://graph-diagram/{id}/{part}'}),
+        ]);
 
         const status = await client.callTool({
           arguments: {callerCwd: process.cwd()},

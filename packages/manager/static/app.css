@@ -10810,3 +10810,124 @@ h4 {
 .health-source-next-step {
   margin-top: 16px;
 }
+
+.graph-diagram {
+  max-height: min(55vh, 620px);
+  overflow: auto;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.graph-diagram summary {
+  cursor: pointer;
+}
+
+.graph-diagram-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: end;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.graph-diagram-form label {
+  display: grid;
+  gap: 4px;
+}
+
+.graph-diagram-result {
+  overflow-wrap: anywhere;
+}
+
+.graph-diagram-result textarea {
+  display: block;
+  width: 100%;
+  font-family: monospace;
+}
+
+@media (max-width: 700px) {
+  .graph-diagram-form {
+    grid-template-columns: 1fr;
+  }
+}
+
+.mermaid-preview {
+  position: relative;
+}
+.mermaid-preview-open {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  display: flex;
+  align-items: start;
+  justify-content: end;
+  padding: 8px;
+  cursor: zoom-in;
+}
+.mermaid-preview-open:hover {
+  background: transparent;
+}
+.mermaid-preview-open span {
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+}
+.mermaid-viewer {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  color: var(--text);
+  background: var(--panel);
+}
+.mermaid-viewer[open] {
+  display: flex;
+  flex-direction: column;
+}
+.mermaid-viewer-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.mermaid-viewer-toolbar h3 {
+  margin: 0;
+}
+.mermaid-viewer-toolbar [role='group'] {
+  display: flex;
+  gap: 4px;
+}
+.mermaid-viewer-viewport {
+  flex: 1;
+  position: relative;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.mermaid-viewer-viewport p {
+  margin: 1rem;
+}
+.mermaid-viewer-canvas {
+  position: relative;
+}
+.mermaid-viewer-viewport iframe {
+  position: sticky;
+  inset: 0 auto auto 0;
+  pointer-events: none;
+  max-width: none;
+}

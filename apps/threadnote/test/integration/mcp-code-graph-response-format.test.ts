@@ -12,10 +12,24 @@ import {
   removePreparedCodeGraphWorksetFixture,
 } from '../../../../scripts/support/code-graph-workset-fixture.js';
 import {execFileSync} from '@threadnote/testing/node-child-process';
-import {cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync} from '@threadnote/testing/node-fs';
+import {
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from '@threadnote/testing/node-fs';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
+import {CodeGraphDiagramResultSchema} from '@threadnote/graph/query/diagram_contract';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
+import {CodeGraphQueryService, readCodeGraphDiagramForStatus} from '@threadnote/graph/query';
+import {CodeGraphStore} from '@threadnote/graph/store';
+import {sha256HexSync} from '@threadnote/platform/sha256';
+import {shellQuote} from '@threadnote/platform/command';
 import {
   codeGraphEvaluationFixtureHash,
   parseCodeGraphEvaluationFixtureV1,
@@ -74,6 +88,50 @@ function graphWorksetCursor(value: unknown): string | undefined {
     ),
   )(value);
   return projection.continuation?.cursor;
+}
+
+const diagramResourceSchema = Schema.Struct({
+  status: Schema.Literal('resource'),
+  resource: Schema.Struct({
+    uriPrefix: Schema.String,
+    partCount: Schema.Int,
+    bytes: Schema.Int,
+    sha256: Schema.String,
+  }),
+});
+
+function diagramResourceFromText(text: string) {
+  const sizes = /The complete result has (\d+) parts \((\d+) bytes, SHA-256 ([0-9a-f]{64})\)\./u.exec(text);
+  const prefix = /^Part URI prefix (threadnote:\/\/graph-diagram\/[0-9a-f]{64}\/)$/mu.exec(text);
+  if (!sizes || !prefix?.[1] || !sizes[3]) throw new Error('Missing the diagram resource text metadata.');
+  return {partCount: Number(sizes[1]), bytes: Number(sizes[2]), sha256: sizes[3], uriPrefix: prefix[1]};
+}
+
+async function fetchDiagramResource(client: Client, value: unknown, afterFirstPart?: () => Promise<void>) {
+  const resource =
+    typeof value === 'string'
+      ? diagramResourceFromText(value)
+      : Schema.decodeUnknownSync(diagramResourceSchema)(value).resource;
+  const parts: Buffer[] = [];
+  for (let part = 1; part <= resource.partCount; part += 1) {
+    const uri = `${resource.uriPrefix}${part}`;
+    const page = await client.readResource({uri});
+    const [content] = page.contents;
+    expect(page.contents).toHaveLength(1);
+    expect(content).toMatchObject({mimeType: 'application/octet-stream', uri});
+    if (content === undefined || !('blob' in content) || typeof content.blob !== 'string') {
+      throw new Error('Expected a base64 diagram resource part.');
+    }
+    const bytes = Buffer.from(content.blob, 'base64');
+    expect(bytes.byteLength).toBeLessThanOrEqual(32 * 1_024);
+    parts.push(bytes);
+    if (part === 1) await afterFirstPart?.();
+  }
+  const bytes = Buffer.concat(parts);
+  expect(bytes.byteLength).toBe(resource.bytes);
+  expect(sha256HexSync(bytes)).toBe(resource.sha256);
+  const text = new TextDecoder('utf-8', {fatal: true}).decode(bytes);
+  return {resource, diagram: Schema.decodeUnknownSync(CodeGraphDiagramResultSchema)(JSON.parse(text))};
 }
 
 describe('MCP code graph response format', () => {
@@ -142,11 +200,17 @@ describe('MCP code graph response format', () => {
       const tool = EffectOption.getOrUndefined(
         EffectArray.findFirst((await client.listTools()).tools, candidate => candidate.name === 'inspect_code_graph'),
       );
-      expect(JSON.stringify(tool?.inputSchema)).toContain('responseFormat');
-      expect(JSON.stringify(tool?.inputSchema)).not.toContain('readTimeoutMilliseconds');
-      expect(JSON.stringify(tool?.inputSchema)).toContain('impact agent defaults to 1250');
-      expect(JSON.stringify(tool?.inputSchema)).toContain('Ceiling:');
-      expect(JSON.stringify(tool?.inputSchema)).toContain('agent shows 3 unless set');
+      expect(tool?.inputSchema.properties).toMatchObject({
+        budgetTokens: {
+          description: expect.stringMatching(/\bimpact agent\b[^.\d]*\b1250\b/iu),
+          maximum: 1_500,
+          minimum: 1,
+          type: 'integer',
+        },
+        nodeLimit: {description: expect.stringMatching(/\bagent\b[^.\d]*\b3\b/iu)},
+        responseFormat: {enum: ['dual', 'text', 'agent']},
+      });
+      expect(tool?.inputSchema.properties).not.toHaveProperty('readTimeoutMilliseconds');
 
       let agentBytes = 0;
       let dualBytes = 0;
@@ -271,6 +335,416 @@ describe('MCP code graph response format', () => {
         ),
       ).toBe(comparison.savings.percent);
     } finally {
+      await client?.close();
+      rmSync(root, {recursive: true, force: true});
+    }
+  }, 120_000);
+
+  it('returns complete Mermaid and evidence for one scoped ready snapshot', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'threadnote-mcp-mermaid-'));
+    const home = join(root, 'home');
+    const manifestPath = join(home, 'seed-manifest.yaml');
+    const projects = EffectArray.map(['alpha', 'beta', 'stale', 'cold'], name => ({
+      name,
+      path: join(root, name),
+      seed: [],
+      uri: `threadnote://resources/repos/${name}`,
+      graph: {closure: 'dependencies' as const, roots: ['src']},
+    }));
+    let client: Client | undefined;
+    let olderBrokerChild: Client | undefined;
+    try {
+      mkdirSync(home);
+      writeFileSync(manifestPath, JSON.stringify({version: 1, projects}));
+      for (const project of projects) {
+        const git = (...args: string[]) => execFileSync('git', ['-C', project.path, ...args]);
+        mkdirSync(join(project.path, 'src'), {recursive: true});
+        writeFileSync(join(project.path, 'package.json'), JSON.stringify({private: true, workspaces: ['src']}));
+        writeFileSync(join(project.path, 'src', 'package.json'), JSON.stringify({name: project.name}));
+        writeFileSync(
+          join(project.path, 'src', `${project.name}.ts`),
+          'export interface AuthPort { validate(): boolean; }\n' +
+            'export class Authenticator implements AuthPort { validate() { return true; } }\n' +
+            (project.name === 'alpha'
+              ? 'export class A extends Authenticator {}\n' +
+                'export class B extends Authenticator {}\n' +
+                'export class C extends Authenticator {}\n' +
+                'export class D extends Authenticator {}\n'
+              : ''),
+        );
+        if (project.name === 'alpha') {
+          writeFileSync(
+            join(project.path, 'src', 'request.ts'),
+            'export function handleRequest() { return loadService(); }\n' +
+              'function loadService() { return readDatabase(); }\n' +
+              'function readDatabase() { return 42; }\n' +
+              'export function submitBatch() { return enqueue(); }\n' +
+              'function enqueue() { return transmit(); }\n' +
+              'function transmit() { return persist(); }\n' +
+              'function persist() { return 23; }\n',
+          );
+        }
+        mkdirSync(join(project.path, 'excluded'));
+        writeFileSync(join(project.path, 'excluded', 'hidden.ts'), 'export const hidden = true;\n');
+        git('init', '-q');
+        git('add', '.');
+        git('-c', 'user.name=Graph Test', '-c', 'user.email=test@example.test', 'commit', '-qm', 'fixture');
+      }
+      const [alpha, beta, staleProject, cold] = projects;
+      if (!alpha || !beta || !staleProject || !cold) throw new Error('The graph fixture requires four repositories.');
+      const snapshots = await runEffect(
+        Effect.gen(function* () {
+          const indexer = yield* CodeGraphIndexer;
+          return yield* Effect.forEach([alpha, beta, staleProject], project =>
+            indexer.index({cwd: project.path, project, threadnoteHome: home, ensureVectors: false}),
+          );
+        }),
+      );
+
+      writeFileSync(join(staleProject.path, 'src', 'tsconfig.json'), JSON.stringify({compilerOptions: {strict: true}}));
+      execFileSync('git', ['-C', staleProject.path, 'add', '.']);
+      execFileSync('git', [
+        '-C',
+        staleProject.path,
+        '-c',
+        'user.name=Graph Test',
+        '-c',
+        'user.email=test@example.test',
+        'commit',
+        '-qm',
+        'change scope',
+      ]);
+
+      const environment = {...process.env};
+      delete environment.THREADNOTE_MCP_BROKER_CHILD;
+      delete environment.THREADNOTE_MCP_DIAGRAM_OWNER_DIRECTORY;
+      const openClient = async (name: string, brokerChild = false) => {
+        const connected = new Client({name, version: '1'});
+        await connected.connect(
+          new StdioClientTransport({
+            command: process.execPath,
+            args: [join(process.cwd(), 'apps/threadnote/src/standalone.ts'), 'mcp-server'],
+            cwd: process.cwd(),
+            stderr: 'pipe',
+            env: {
+              ...environment,
+              ...(brokerChild ? {THREADNOTE_MCP_BROKER_CHILD: '1'} : {}),
+              TMPDIR: root,
+              THREADNOTE_HOME: home,
+              THREADNOTE_MANIFEST: manifestPath,
+              THREADNOTE_ACCOUNT: 'local',
+              THREADNOTE_USER: 'tester',
+              THREADNOTE_TELEMETRY: '0',
+              THREADNOTE_MCP_TOOLSET: 'core',
+            },
+          }),
+        );
+        return connected;
+      };
+      const connected = await openClient('graph-mermaid-test');
+      client = connected;
+      const tool = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          (await connected.listTools()).tools,
+          candidate => candidate.name === 'inspect_code_graph',
+        ),
+      );
+      expect(tool?.inputSchema.properties).toHaveProperty('diagramType');
+      expect(tool?.inputSchema.properties).toHaveProperty('output');
+
+      const call = (args: Record<string, unknown> = {}, target = connected) =>
+        target.callTool({
+          name: 'inspect_code_graph',
+          arguments: {
+            callerCwd: alpha.path,
+            project: alpha.name,
+            operation: 'query',
+            output: 'mermaid',
+            query: 'How does the Authenticator class implement its interface?',
+            budgetTokens: 1_500,
+            responseFormat: 'dual',
+            ...args,
+          },
+        });
+      const dual = await call();
+      expect(dual.isError).not.toBe(true);
+      const diagram = Schema.decodeUnknownSync(CodeGraphDiagramResultSchema)(dual.structuredContent);
+      expect(diagram.scope.snapshotId).toBe(snapshots[0]?.snapshot.id);
+      expect(diagram.freshness).toBe('current');
+      expect(diagram.status).toBe('diagram');
+      if (diagram.status !== 'diagram') throw new Error(JSON.stringify(diagram));
+      expect(diagram.diagramType).toBe('class');
+      expect(diagram.source).toMatch(/^classDiagram\n/u);
+      expect(firstText(dual.content)).toContain(`\`\`\`mermaid\n${diagram.source}\n\`\`\``);
+      const node = (label: string) =>
+        EffectOption.getOrUndefined(EffectArray.findFirst(diagram.evidence.nodes, item => item.label === label));
+      expect(diagram.evidence.edges).toContainEqual(
+        expect.objectContaining({
+          relation: 'implements',
+          source: node('Authenticator')?.diagramId,
+          target: node('AuthPort')?.diagramId,
+          path: 'src/alpha.ts',
+          span: expect.objectContaining({line: 2}),
+        }),
+      );
+
+      const reduced = await call({budgetTokens: 800});
+      expect(firstText(reduced.content)).toContain('when this stdio session ends');
+      expect((await fetchDiagramResource(connected, reduced.structuredContent)).diagram).toEqual(diagram);
+      expect(
+        measureAgentToolResponse({structuredContent: reduced.structuredContent, text: firstText(reduced.content)})
+          .estimatedTokens,
+      ).toBeLessThanOrEqual(800);
+
+      olderBrokerChild = await openClient('older-broker-first-child', true);
+      const runtimeBound = await call({budgetTokens: 800}, olderBrokerChild);
+      const recovery = 'Reconnect to the updated Threadnote MCP broker. Repeat the original inspect_code_graph query.';
+      expect(firstText(runtimeBound.content)).toContain('as soon as that runtime exits');
+      expect(firstText(runtimeBound.content)).toContain(recovery);
+      expect(runtimeBound.structuredContent).toMatchObject({
+        resource: {lifetime: 'current-runtime', nextAction: recovery},
+      });
+      const {resource: olderReference} = Schema.decodeUnknownSync(diagramResourceSchema)(
+        runtimeBound.structuredContent,
+      );
+      const olderUri = olderReference.uriPrefix + '1';
+      await expect(olderBrokerChild.readResource({uri: olderUri})).resolves.toMatchObject({
+        contents: [{uri: olderUri}],
+      });
+      await olderBrokerChild.close();
+      olderBrokerChild = await openClient('older-broker-replacement-child', true);
+      await expect(olderBrokerChild.readResource({uri: olderUri})).rejects.toMatchObject({
+        code: -32_002,
+        message: expect.stringContaining(recovery),
+      });
+
+      const flowchart = await call({diagramType: 'flowchart', responseFormat: 'text'});
+      expect(flowchart.structuredContent).toBeUndefined();
+      expect(firstText(flowchart.content)).toContain('```mermaid\nflowchart ');
+      const sequence = await call({query: 'What calls occur during handleRequest?'});
+      const sequenceResult = Schema.decodeUnknownSync(CodeGraphDiagramResultSchema)(sequence.structuredContent);
+      expect(sequenceResult.status).toBe('diagram');
+      if (sequenceResult.status !== 'diagram') throw new Error(JSON.stringify(sequenceResult));
+      expect(sequenceResult).toMatchObject({diagramType: 'sequence', inferred: true});
+      expect(sequenceResult.source).toMatch(/^sequenceDiagram\n/u);
+      const names = new Map(EffectArray.map(sequenceResult.evidence.nodes, item => [item.diagramId, item.label]));
+      expect(
+        EffectArray.map(sequenceResult.evidence.edges, edge => [
+          names.get(edge.source),
+          names.get(edge.target),
+          edge.relation,
+          edge.path,
+          edge.span.line,
+        ]),
+      ).toEqual([
+        ['handleRequest', 'loadService', 'calls', 'src/request.ts', 1],
+        ['loadService', 'readDatabase', 'calls', 'src/request.ts', 2],
+      ]);
+      const calls = EffectArray.map(sequenceResult.evidence.edges, edge => `${edge.source}->>${edge.target}: calls`);
+      expect(sequenceResult.source).toContain(EffectArray.join(calls, '\n  '));
+
+      const boundedSequence = await call({query: 'What calls occur during submitBatch?'});
+      const boundedResult = Schema.decodeUnknownSync(CodeGraphDiagramResultSchema)(boundedSequence.structuredContent);
+      expect(boundedResult.status).toBe('diagram');
+      if (boundedResult.status !== 'diagram') throw new Error(JSON.stringify(boundedResult));
+      expect(boundedResult.diagramType).toBe('sequence');
+      expect(EffectArray.map(boundedResult.evidence.nodes, item => item.label)).toEqual([
+        'submitBatch',
+        'enqueue',
+        'transmit',
+        'persist',
+      ]);
+      expect(EffectArray.map(boundedResult.evidence.edges, edge => edge.span.line)).toEqual([4, 5, 6]);
+      expect(boundedResult.coverage?.completeness).toBe('complete');
+
+      const other = await call({callerCwd: beta.path, project: beta.name});
+      const otherResult = Schema.decodeUnknownSync(CodeGraphDiagramResultSchema)(other.structuredContent);
+      expect(otherResult).toMatchObject({status: 'diagram', scope: {snapshotId: snapshots[1]?.snapshot.id}});
+      expect(otherResult.scope.repositoryId).not.toBe(diagram.scope.repositoryId);
+      expect(firstText(other.content)).toContain('src/beta.ts');
+      expect(firstText(other.content)).not.toContain('src/alpha.ts');
+      expect(
+        measureAgentToolResponse({structuredContent: other.structuredContent, text: firstText(other.content)})
+          .estimatedTokens,
+      ).toBeLessThanOrEqual(1_500);
+
+      const outside = await call({query: 'Diagram excluded/hidden.ts'});
+      expect(outside.structuredContent).toMatchObject({
+        status: 'unavailable',
+        nextAction: expect.stringContaining('graph'),
+      });
+      const coldResult = await call({callerCwd: cold.path, project: cold.name});
+      expect(coldResult.structuredContent).toMatchObject({state: 'unavailable', reason: 'no-ready-snapshot'});
+      expect(firstText(coldResult.content)).toContain('threadnote graph index');
+
+      const workset = await call({workset: 'example'});
+      expect(workset.isError).toBe(true);
+      expect(firstText(workset.content)).toContain('local operation=query');
+      const packageConflict = await call({package: 'alpha'});
+      expect(packageConflict.isError).toBe(true);
+      expect(firstText(packageConflict.content)).toContain('Name the package or a source path in query');
+      const conflicting = await call({nodeId: 'cgs_example'});
+      expect(conflicting.isError).toBe(true);
+      expect(firstText(conflicting.content)).toContain('Omit base, nodeId');
+
+      const stale = await call({callerCwd: staleProject.path, project: staleProject.name});
+      expect(stale.structuredContent).toMatchObject({
+        status: 'diagram',
+        freshness: 'stale',
+        scope: {snapshotId: snapshots[2]?.snapshot.id},
+        limits: expect.arrayContaining([
+          expect.stringContaining('Serving the existing stale ready snapshot'),
+          expect.stringContaining('Snapshot freshness is stale'),
+        ]),
+      });
+    } finally {
+      await olderBrokerChild?.close();
+      await client?.close();
+      rmSync(root, {recursive: true, force: true});
+    }
+  }, 30_000);
+
+  it('reconstructs more than 2 MiB from text and preserves broker parts across release changes', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'threadnote-mcp-large-diagram-'));
+    const home = join(root, 'home');
+    const repository = join(root, 'repository');
+    const manifestPath = join(home, 'seed-manifest.yaml');
+    const entry = join(process.cwd(), 'apps/threadnote/src/standalone.ts');
+    const install = join(root, 'install');
+    const childLog = join(root, 'child-launches');
+    const useBroker = process.platform !== 'win32';
+    const activate = (version: string) => {
+      const releaseRoot = join(install, 'versions', version);
+      mkdirSync(releaseRoot, {recursive: true});
+      writeFileSync(join(releaseRoot, 'release.json'), JSON.stringify({version}));
+      writeFileSync(
+        join(releaseRoot, 'threadnote'),
+        EffectArray.join(
+          [
+            '#!/bin/sh',
+            `printf '%s\\n' ${shellQuote(version)} >> ${shellQuote(childLog)}`,
+            `exec ${shellQuote(process.execPath)} ${shellQuote(entry)} "$@"`,
+          ],
+          '\n',
+        ) + '\n',
+        {mode: 0o700},
+      );
+      const candidate = join(install, 'next.json');
+      writeFileSync(candidate, JSON.stringify({version, releaseRoot}));
+      renameSync(candidate, join(install, 'active-release.json'));
+    };
+    const question = 'Which classes extend LargeDiagramRoot?';
+    const children = Array.from({length: 600}, (_, index) => `Relay${index}_${EffectString.repeat(420)('é')}`);
+    let client: Client | undefined;
+    let otherClient: Client | undefined;
+    const openClient = async (name: string) => {
+      const connected = new Client({name, version: '1'});
+      await connected.connect(
+        new StdioClientTransport({
+          command: process.execPath,
+          args: [entry, useBroker ? 'mcp-broker' : 'mcp-server'],
+          cwd: process.cwd(),
+          stderr: 'pipe',
+          env: {
+            ...process.env,
+            TMPDIR: root,
+            THREADNOTE_INSTALL_ROOT: install,
+            THREADNOTE_HOME: home,
+            THREADNOTE_MANIFEST: manifestPath,
+            THREADNOTE_ACCOUNT: 'local',
+            THREADNOTE_USER: 'tester',
+            THREADNOTE_TELEMETRY: '0',
+            THREADNOTE_MCP_TOOLSET: 'core',
+          },
+        }),
+      );
+      return connected;
+    };
+    try {
+      if (useBroker) activate('1.0.0');
+      mkdirSync(home);
+      mkdirSync(repository);
+      writeFileSync(manifestPath, 'version: 1\nprojects: []\n');
+      const git = (...args: string[]) => execFileSync('git', ['-C', repository, ...args]);
+      writeFileSync(join(repository, 'root.ts'), 'export class LargeDiagramRoot {}\n');
+      for (const [index, name] of children.entries()) {
+        writeFileSync(
+          join(repository, `relay${index}.ts`),
+          `import {LargeDiagramRoot} from './root';\nexport class ${name} extends LargeDiagramRoot {}\n`,
+        );
+      }
+      git('init', '-q');
+      git('add', '.');
+      git('-c', 'user.name=Graph Test', '-c', 'user.email=test@example.test', 'commit', '-qm', 'fixture');
+      const expected = await runEffect(
+        Effect.gen(function* () {
+          const indexer = yield* CodeGraphIndexer;
+          const query = yield* CodeGraphQueryService;
+          const store = yield* CodeGraphStore;
+          yield* indexer.index({cwd: repository, threadnoteHome: home, ensureVectors: false});
+          const status = yield* query.status(home, repository, {
+            manifestPath,
+            observeWorktree: false,
+            requestMaintenance: false,
+          });
+          return yield* readCodeGraphDiagramForStatus(store, status, {question, diagramType: 'class'});
+        }),
+      );
+      expect(expected.status).toBe('diagram');
+      if (expected.status !== 'diagram') throw new Error(JSON.stringify(expected));
+      expect(expected.coverage?.completeness).toBe('complete');
+      expect(expected.evidence.edges).toHaveLength(children.length);
+
+      client = await openClient('large-diagram-owner');
+      const result = await client.callTool({
+        name: 'inspect_code_graph',
+        arguments: {
+          callerCwd: repository,
+          operation: 'query',
+          output: 'mermaid',
+          diagramType: 'class',
+          query: question,
+        },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toBeUndefined();
+      expect(firstText(result.content)).toContain('when this stdio session ends');
+      const {resource, diagram} = await fetchDiagramResource(
+        client,
+        firstText(result.content),
+        useBroker
+          ? async () => {
+              expect(readFileSync(childLog, 'utf8')).toBe('1.0.0\n');
+              activate('1.0.1');
+              await client?.listTools();
+              expect(readFileSync(childLog, 'utf8')).toBe('1.0.0\n1.0.1\n');
+            }
+          : undefined,
+      );
+      expect(resource.bytes).toBeGreaterThan(2 * 1_024 * 1_024);
+      expect(diagram).toEqual(expected);
+      const directories = EffectArray.filter(readdirSync(root), EffectString.startsWith('threadnote-mcp-diagrams-'));
+      expect(directories).toHaveLength(1);
+      expect(readdirSync(join(root, directories[0]))).toEqual([expect.stringMatching(/^[0-9a-f]{64}\.json$/u)]);
+      await expect(client.listResources()).resolves.toEqual({resources: []});
+      await expect(client.readResource({uri: `${resource.uriPrefix}${resource.partCount + 1}`})).rejects.toMatchObject({
+        code: -32_002,
+        message: expect.stringContaining('Repeat the original inspect_code_graph query'),
+      });
+
+      otherClient = await openClient('large-diagram-other-session');
+      await expect(otherClient.readResource({uri: `${resource.uriPrefix}1`})).rejects.toMatchObject({
+        code: -32_002,
+        message: expect.stringContaining('Repeat the original inspect_code_graph query'),
+      });
+      await expect(client.readResource({uri: `${resource.uriPrefix}1`})).resolves.toMatchObject({
+        contents: [{uri: `${resource.uriPrefix}1`}],
+      });
+      await client.close();
+      client = undefined;
+      expect(EffectArray.filter(readdirSync(root), EffectString.startsWith('threadnote-mcp-diagrams-'))).toEqual([]);
+    } finally {
+      await otherClient?.close();
       await client?.close();
       rmSync(root, {recursive: true, force: true});
     }

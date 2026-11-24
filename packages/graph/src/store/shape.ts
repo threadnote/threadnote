@@ -110,6 +110,7 @@ import type {
   CodeGraphInventoryFile,
   CodeGraphProvenance,
   CodeGraphQueryNode,
+  CodeGraphRelation,
   CodeGraphReference,
   CodeGraphSnapshot,
   CodeGraphStoreFailure,
@@ -485,6 +486,34 @@ export interface CodeGraphStoreShape {
     limit: number,
     allowedProvenances: readonly CodeGraphProvenance[],
   ) => Effect.Effect<readonly CodeGraphEdge[], CodeGraphStoreFailure>;
+  readonly diagramAdjacentCandidates: (
+    databasePath: string,
+    snapshotId: string,
+    nodeIds: readonly string[],
+    direction: 'incoming' | 'outgoing',
+    relations: readonly CodeGraphRelation[],
+  ) => Effect.Effect<readonly string[], CodeGraphStoreFailure>;
+  readonly diagramAdjacentPage: (
+    databasePath: string,
+    snapshotId: string,
+    nodeId: string,
+    direction: 'incoming' | 'outgoing',
+    relations: readonly CodeGraphRelation[],
+    afterId: string,
+    limit: number,
+  ) => Effect.Effect<{readonly edges: readonly CodeGraphEdge[]; readonly nextCursor?: string}, CodeGraphStoreFailure>;
+  readonly diagramSubjectPage: (
+    databasePath: string,
+    snapshotId: string,
+    terms: readonly string[],
+    afterId: string,
+    limit: number,
+    match: 'exact' | 'fuzzy',
+    packageName?: string,
+  ) => Effect.Effect<
+    {readonly symbols: readonly CodeGraphSymbol[]; readonly nextCursor?: string},
+    CodeGraphStoreFailure
+  >;
   readonly traversalEdgesForNodes: (
     databasePath: string,
     snapshotId: string,

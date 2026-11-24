@@ -1,3 +1,4 @@
+import {CodeGraphDiagramResultSchema} from '@threadnote/graph/query/diagram_contract';
 import {Schema} from 'effect';
 
 const ApiSchema7505 = Schema.Struct({
@@ -305,3 +306,5 @@ export const isGraphNodeDetail = Schema.is(ApiSchema326);
 export const isGraphQueryVisualization = Schema.is(ApiSchema329);
 export const isContentResponse = Schema.is(ApiSchema332);
 export const isIntegrationResult = Schema.is(ApiSchema834);
+
+export const isGraphDiagramResult = Schema.is(CodeGraphDiagramResultSchema);

@@ -17,7 +17,11 @@ import {Option, Predicate} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {parseMarkdownHeadingLine, textLines} from '@threadnote/platform/string-boundaries';
 import {compareCodeUnits} from './ordering.js';
-import {loadTypeScriptExtractionRuntime, typeScriptKindForPath} from './typescript_runtime.js';
+import {
+  loadTypeScriptExtractionRuntime,
+  TYPESCRIPT_FULL_TRAVERSAL_CHARACTER_LIMIT,
+  typeScriptKindForPath,
+} from './typescript_runtime.js';
 import {documentLookupTiers, resolveLegacyDocumentReference, resolveLookupTiers} from './resolution/lookup.js';
 import type {
   CodeGraphEdge,
@@ -97,7 +101,6 @@ export interface ResolutionAliasIndex {
 
 const TYPESCRIPT_EXTENSIONS = /\.(?:[cm]?[jt]s|[jt]sx)$/i;
 export const TYPESCRIPT_DYNAMIC_RELATIONSHIP_LIMIT = 4_000;
-const TYPESCRIPT_FULL_TRAVERSAL_CHARACTER_LIMIT = 2 * 1_024 * 1_024;
 // Every compiler-dependent helper is private to extractTypeScript. Loading at
 // that boundary keeps attribution and non-TypeScript extraction compiler-free.
 let compiler: typeof ts;

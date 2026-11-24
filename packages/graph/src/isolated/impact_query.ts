@@ -5,7 +5,22 @@ import {Cause, Clock, Effect, Exit, FileSystem, Option, Path, Predicate, Schema,
 import {CommandExecutor, CommandTimedOut, type CommandExecutionError} from '@threadnote/platform/command';
 import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
 import {CODE_GRAPH_IMPACT_QUERY_WORKER_ARGUMENT} from '@threadnote/graph/worker_protocol';
-import {CodeGraphQueryService, observationFromCodeGraphStatus, type CodeGraphInspectOptions} from '../query.js';
+import {
+  CodeGraphQueryService,
+  observationFromCodeGraphStatus,
+  readCodeGraphDiagramForStatus,
+  type CodeGraphDiagramRequest,
+  type CodeGraphInspectOptions,
+} from '../query.js';
+import {
+  CODE_GRAPH_DIAGRAM_TYPES,
+  CodeGraphDiagramResultSchema,
+  type CodeGraphDiagramResult,
+  type CodeGraphDiagramScope,
+  type CodeGraphDiagramType,
+} from '../query/diagram_contract.js';
+import {CodeGraphStore} from '../store.js';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   codeGraphInspectionAllowsStaleReady,
   codeGraphInspectionNeedsReadyAttachment,
@@ -29,7 +44,12 @@ import {
 import {codeGraphScopeAdmitsPath} from '../scope/applicability.js';
 import {observeCodeGraphBackgroundDemand, type CodeGraphRefreshDemandIdentity} from '../refresh/demand.js';
 import {resolveRepositoryIdentity} from '../repository.js';
-import {CodeGraphSnapshotUnavailable, type CodeGraphQueryResult, type RepositoryIdentity} from '../types.js';
+import {
+  CodeGraphSnapshotUnavailable,
+  type CodeGraphQueryResult,
+  type CodeGraphStatus,
+  type RepositoryIdentity,
+} from '../types.js';
 import type {CodeGraphRefreshContinuity} from '../watcher.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -41,10 +61,14 @@ const CODE_GRAPH_IMPACT_QUERY_TEXT_BYTES_MAXIMUM = 64 * 1_024;
 const CODE_GRAPH_IMPACT_QUERY_SEED_LIMIT = 200;
 const CODE_GRAPH_REFRESH_CONTINUITY_OBSERVATION_TIMEOUT_MILLISECONDS = 1_000;
 const CODE_GRAPH_IMPACT_QUERY_CHANGED_PATHS_SELECTOR = 'changed paths';
+const DIAGRAM_SPOOL_DIRECTORY_PREFIX = 'threadnote-graph-diagram-';
+const DIAGRAM_SPOOL_ENV = 'THREADNOTE_GRAPH_DIAGRAM_SPOOL';
+const DIAGRAM_SPOOL_FILE = 'diagram.json';
 const GIT_OBJECT_ID_PATTERN = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
 const CODE_GRAPH_SNAPSHOT_ID_PATTERN = /^cgsn_[0-9a-f]{40}(?:-direct|-full-[0-9a-f]{16})?$/u;
 export const CODE_GRAPH_IMPACT_QUERY_TIMEOUT_MILLISECONDS = 20_000;
 export const CODE_GRAPH_ISOLATED_QUERY_TIMEOUT_MILLISECONDS = 50_000;
+export const CODE_GRAPH_DIAGRAM_INLINE_BYTES = 24 * 1_024;
 
 type CodeGraphIsolatedQueryOperation = CodeGraphQueryResult['operation'];
 
@@ -54,6 +78,7 @@ interface CodeGraphImpactQueryRequest {
   readonly baseCommit?: string;
   readonly borrowedSnapshotId?: string;
   readonly cwd: string;
+  readonly diagram?: {readonly type?: CodeGraphDiagramType; readonly timeoutMilliseconds: number};
   readonly depth?: number;
   readonly direction?: 'both' | 'incoming' | 'outgoing';
   /** Full-pipeline discovery: the worker runs status, selection, and read. Never combined with parent-selected snapshots. */
@@ -83,6 +108,19 @@ interface CodeGraphImpactQueryRequest {
   readonly overlay?: CodeGraphStatusObservation['overlay'];
 }
 
+interface CodeGraphDiagramManifest {
+  readonly bytes: number;
+  readonly sha256: string;
+  readonly scope: CodeGraphDiagramScope;
+  readonly freshness: CodeGraphDiagramResult['freshness'];
+  readonly status: CodeGraphDiagramResult['status'];
+}
+
+export interface VerifiedCodeGraphDiagram extends CodeGraphDiagramManifest {
+  readonly filename: string;
+  readonly inline?: CodeGraphDiagramResult;
+}
+
 type CodeGraphImpactQueryResponse =
   | {
       readonly ok: true;
@@ -90,6 +128,13 @@ type CodeGraphImpactQueryResponse =
       readonly result: CodeGraphQueryResult;
       /** Present only for discovery reads; reuse reads keep selection parent-side. */
       readonly status?: CodeGraphImpactQueryReadStatus;
+      readonly telemetry: readonly CodeGraphQueryTelemetryObservation[];
+    }
+  | {
+      readonly ok: true;
+      readonly protocol: typeof CODE_GRAPH_IMPACT_QUERY_PROTOCOL;
+      readonly diagram: CodeGraphDiagramManifest;
+      readonly status: CodeGraphImpactQueryReadStatus;
       readonly telemetry: readonly CodeGraphQueryTelemetryObservation[];
     }
   | {
@@ -109,6 +154,7 @@ type CodeGraphImpactQueryResponse =
     };
 
 export interface CodeGraphImpactQueryReadStatus {
+  readonly diagramScope?: CodeGraphDiagramScope;
   readonly refresh?: CodeGraphRefreshContinuity;
   readonly stale: boolean;
   readonly readySnapshotId?: string;
@@ -187,6 +233,11 @@ export interface IsolatedCodeGraphReadUnavailable {
   };
 }
 
+export interface IsolatedCodeGraphDiagramRead {
+  readonly diagram: VerifiedCodeGraphDiagram;
+  readonly status: CodeGraphImpactQueryReadStatus;
+}
+
 export class IsolatedCodeGraphImpactQueryError extends Schema.TaggedError<
   IsolatedCodeGraphImpactQueryError,
   {readonly brand: unique symbol}
@@ -206,6 +257,8 @@ export class IsolatedCodeGraphImpactQueryTimedOut extends Schema.TaggedError<
 const executeIsolatedQueryWorker = Effect.fn('codeGraph.executeIsolatedQuery')(function* (
   input: IsolatedCodeGraphQueryInput,
   options: {
+    readonly diagram?: CodeGraphImpactQueryRequest['diagram'];
+    readonly spoolDirectory?: string;
     readonly timeoutMilliseconds?: number;
   } = {},
 ) {
@@ -216,7 +269,7 @@ const executeIsolatedQueryWorker = Effect.fn('codeGraph.executeIsolatedQuery')(f
     CODE_GRAPH_ISOLATED_QUERY_TIMEOUT_MILLISECONDS,
   );
   const request = yield* Effect.try({
-    try: () => encodeImpactQueryRequest(input),
+    try: () => encodeImpactQueryRequest(input, options.diagram),
     catch: cause =>
       Schema.is(IsolatedCodeGraphImpactQueryError)(cause)
         ? cause
@@ -226,7 +279,10 @@ const executeIsolatedQueryWorker = Effect.fn('codeGraph.executeIsolatedQuery')(f
   const timeout = IsolatedCodeGraphImpactQueryTimedOut.make({message: 'Isolated code graph query timed out.'});
   return yield* command
     .execute(invocation.executable, invocation.arguments, {
-      env: impactQueryWorkerEnvironment(system.environment(), input.threadnoteHome),
+      env: {
+        ...impactQueryWorkerEnvironment(system.environment(), input.threadnoteHome),
+        ...(options.spoolDirectory === undefined ? {} : {[DIAGRAM_SPOOL_ENV]: options.spoolDirectory}),
+      },
       input: request,
       maxOutputBytes: CODE_GRAPH_IMPACT_QUERY_OUTPUT_BYTES_MAXIMUM,
       timeoutMs: timeoutMilliseconds,
@@ -258,7 +314,7 @@ export const inspectCodeGraphIsolated = Effect.fn('codeGraph.queryIsolated')(fun
     return yield* IsolatedCodeGraphImpactQueryError.make({message: 'Isolated code graph query failed.'});
   }
   yield* replayCodeGraphIsolatedQueryTelemetry(response.telemetry, options.onTelemetryObservation);
-  if (!response.ok || response.result.operation !== input.operation) {
+  if (!response.ok || !('result' in response) || response.result.operation !== input.operation) {
     return yield* IsolatedCodeGraphImpactQueryError.make({message: 'Isolated code graph query failed.'});
   }
   return response.result;
@@ -303,7 +359,7 @@ export const inspectCodeGraphReadIsolated = Effect.fn('codeGraph.readIsolated')(
     }
     return yield* IsolatedCodeGraphImpactQueryError.make({message: 'Isolated code graph query failed.'});
   }
-  if (response.result.operation !== input.operation) {
+  if (!('result' in response) || response.result.operation !== input.operation) {
     return yield* IsolatedCodeGraphImpactQueryError.make({message: 'Isolated code graph query failed.'});
   }
   if (response.status === undefined) {
@@ -314,14 +370,140 @@ export const inspectCodeGraphReadIsolated = Effect.fn('codeGraph.readIsolated')(
   return {result: response.result, status: response.status};
 });
 
-export const serveCodeGraphDiscoveryRead = Effect.fn('codeGraph.serveDiscoveryRead')(function* (
+export const inspectCodeGraphDiagramIsolated = Effect.fn('codeGraph.diagramIsolated')(
+  (
+    input: Pick<IsolatedCodeGraphReadInput, 'cwd' | 'manifestPath' | 'project' | 'threadnoteHome'>,
+    diagram: Pick<CodeGraphDiagramRequest, 'question' | 'diagramType'>,
+    options: {
+      readonly onTelemetryObservation?: (observation: CodeGraphQueryTelemetryObservation) => Effect.Effect<void>;
+      readonly timeoutMilliseconds: number;
+      readonly spoolRoot?: string;
+    },
+  ) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const spoolDirectory = yield* fs.makeTempDirectoryScoped({
+        directory: options.spoolRoot,
+        prefix: DIAGRAM_SPOOL_DIRECTORY_PREFIX,
+      });
+      const executed = yield* executeIsolatedQueryWorker(
+        {...input, discover: true, edgeLimit: 1, nodeLimit: 1, operation: 'query', query: diagram.question},
+        {
+          ...options,
+          diagram: {
+            ...(diagram.diagramType === undefined ? {} : {type: diagram.diagramType}),
+            timeoutMilliseconds: Math.max(1, Math.min(40_000, options.timeoutMilliseconds - 1_000)),
+          },
+          spoolDirectory,
+        },
+      );
+      const response = decodeImpactQueryResponse(executed.stdout);
+      if (response === undefined) return yield* invalidDiagramHandoff();
+      yield* replayCodeGraphIsolatedQueryTelemetry(response.telemetry, options.onTelemetryObservation);
+      if (!response.ok && 'unavailable' in response) {
+        return {unavailable: response.unavailable, identity: response.identity};
+      }
+      if (
+        !response.ok ||
+        !('diagram' in response) ||
+        response.diagram.scope.snapshotId !== response.status.readySnapshotId ||
+        !sameDiagramScope(response.diagram.scope, response.status.diagramScope)
+      ) {
+        return yield* invalidDiagramHandoff();
+      }
+      const result = yield* Effect.scoped(readDiagramHandoff(spoolDirectory, response.diagram));
+      return {diagram: result, status: response.status};
+    }).pipe(
+      Effect.map((read): IsolatedCodeGraphDiagramRead | IsolatedCodeGraphReadUnavailable => read),
+      Effect.catchTag('PlatformError', () => Effect.fail(invalidDiagramHandoff())),
+    ),
+);
+
+function invalidDiagramHandoff() {
+  return IsolatedCodeGraphImpactQueryError.make({
+    message: 'The isolated code graph diagram handoff could not be verified.',
+  });
+}
+
+const readDiagramHandoff = Effect.fn('codeGraph.readDiagramHandoff')(function* (
+  directory: string,
+  manifest: CodeGraphDiagramManifest,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const system = yield* SystemInfo;
+  const filename = path.join(directory, DIAGRAM_SPOOL_FILE);
+  const expectedSize = BigInt(manifest.bytes);
+  const beforeOpen = yield* fs.stat(filename);
+  if (beforeOpen.type !== 'File' || beforeOpen.size !== expectedSize) return yield* invalidDiagramHandoff();
+  const file = yield* fs.open(filename, {
+    flag: 'r',
+    ...(system.platform === 'win32' ? {} : {noFollow: true}),
+  });
+  const stat = yield* file.stat;
+  if (stat.type !== 'File' || stat.size !== expectedSize) return yield* invalidDiagramHandoff();
+  const buffer = new Uint8Array(Math.min(manifest.bytes, 64 * 1_024));
+  const retained = manifest.bytes <= CODE_GRAPH_DIAGRAM_INLINE_BYTES ? new Uint8Array(manifest.bytes) : undefined;
+  const hasher = new Bun.CryptoHasher('sha256');
+  let offset = 0;
+  while (offset < manifest.bytes) {
+    const count = yield* file.read(buffer.subarray(0, Math.min(buffer.byteLength, manifest.bytes - offset)));
+    if (count === 0) return yield* invalidDiagramHandoff();
+    const chunk = buffer.subarray(0, count);
+    hasher.update(chunk);
+    retained?.set(chunk, offset);
+    offset += count;
+  }
+  if (hasher.digest('hex') !== manifest.sha256 || (yield* file.read(buffer.subarray(0, 1))) !== 0) {
+    return yield* invalidDiagramHandoff();
+  }
+  if (retained === undefined) return {...manifest, filename} satisfies VerifiedCodeGraphDiagram;
+  const parsed = yield* Effect.try({
+    try: (): unknown => JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(retained)),
+    catch: invalidDiagramHandoff,
+  });
+  const diagram = yield* Schema.decodeUnknownEffect(CodeGraphDiagramResultSchema)(parsed).pipe(
+    Effect.mapError(invalidDiagramHandoff),
+  );
+  if (
+    !sameDiagramScope(diagram.scope, manifest.scope) ||
+    diagram.status !== manifest.status ||
+    diagram.freshness !== manifest.freshness
+  )
+    return yield* invalidDiagramHandoff();
+  return {...manifest, filename, inline: diagram} satisfies VerifiedCodeGraphDiagram;
+});
+
+function sameDiagramScope(scope: CodeGraphDiagramScope, selected: CodeGraphDiagramScope | undefined): boolean {
+  return (
+    selected !== undefined &&
+    scope.repositoryId === selected.repositoryId &&
+    scope.repositoryName === selected.repositoryName &&
+    scope.snapshotId === selected.snapshotId &&
+    scope.commit === selected.commit &&
+    scope.project === selected.project &&
+    scope.viewKey === selected.viewKey
+  );
+}
+
+interface DiscoveryReadOptions {
+  readonly observeRefresh?: (
+    identity: CodeGraphRefreshDemandIdentity,
+  ) => Effect.Effect<CodeGraphRefreshContinuity | undefined, unknown>;
+  readonly telemetry?: CodeGraphQueryTelemetryObserver;
+}
+
+type DiscoveryReadResult<A> =
+  | (IsolatedCodeGraphReadUnavailable & {readonly result?: never; readonly status?: never})
+  | {
+      readonly result: A;
+      readonly status: CodeGraphImpactQueryReadStatus;
+    };
+
+const serveCodeGraphDiscoveryReadWith = Effect.fn('codeGraph.serveDiscoveryRead')(function* <A, E, R>(
   request: CodeGraphImpactQueryRequest,
-  options: {
-    readonly observeRefresh?: (
-      identity: CodeGraphRefreshDemandIdentity,
-    ) => Effect.Effect<CodeGraphRefreshContinuity | undefined, unknown>;
-    readonly telemetry?: CodeGraphQueryTelemetryObserver;
-  } = {},
+  options: DiscoveryReadOptions,
+  inspect: (attached: CodeGraphStatus, observation: CodeGraphStatusObservation | undefined) => Effect.Effect<A, E, R>,
 ) {
   const query = yield* CodeGraphQueryService;
   const statusOptions = {
@@ -331,7 +513,7 @@ export const serveCodeGraphDiscoveryRead = Effect.fn('codeGraph.serveDiscoveryRe
     requestMaintenance: false,
     telemetry: options.telemetry,
   };
-  const read = (status: import('../types.js').CodeGraphStatus) =>
+  const read = (status: CodeGraphStatus) =>
     Effect.gen(function* () {
       const attached = codeGraphInspectionNeedsReadyAttachment(status)
         ? yield* query.attachSharedReadySnapshot(request.threadnoteHome, status.identity, status, {
@@ -347,57 +529,19 @@ export const serveCodeGraphDiscoveryRead = Effect.fn('codeGraph.serveDiscoveryRe
         };
       }
       const observation = codeGraphInspectionObservation(observationFromCodeGraphStatus(attached), request.operation);
-      const scopedSeedQueries = Option.getOrUndefined(
-        Option.map(Option.fromNullishOr(request.seedQueries), __effectSeedQueries =>
-          EffectArray.filter(
-            __effectSeedQueries,
-            (candidate, __effectSeedQueryIndex) =>
-              __effectSeedQueryIndex in __effectSeedQueries &&
-              codeGraphScopeAdmitsPath(observation?.projectScope?.scope, candidate),
-          ),
+      const inspected = yield* inspect(attached, observation).pipe(
+        Effect.map(result => ({result})),
+        Effect.catchIf(
+          (error: unknown) => Schema.is(CodeGraphSnapshotUnavailable)(error),
+          () =>
+            Effect.succeed({
+              unavailable: 'no-ready-snapshot' as const,
+              identity: {repoRoot: attached.identity.repoRoot, worktreeId: attached.identity.worktreeId},
+            }),
         ),
       );
-      const result = yield* query
-        .inspect({
-          project: request.project,
-          manifestPath: request.manifestPath,
-          ...(request.baseCommit === undefined ? {} : {baseCommit: request.baseCommit}),
-          ...(request.operation === 'impact' ? {baseCommitPolicy: 'ready-only' as const} : {}),
-          cwd: request.cwd,
-          depth: request.depth,
-          direction: request.direction,
-          edgeLimit: request.edgeLimit,
-          from: request.from,
-          includeHeuristic: request.includeHeuristic,
-          includeModelAssociations: request.includeModelAssociations,
-          nodeId: request.nodeId,
-          nodeLimit: request.nodeLimit,
-          operation: request.operation,
-          packageName: request.packageName,
-          query:
-            request.operation === 'impact'
-              ? impactQueryTransportSelector(request.query, request.seedQueries)
-              : request.query,
-          refresh: false,
-          requestMaintenance: false,
-          seedQueryCount: scopedSeedQueries?.length,
-          seedQueries: scopedSeedQueries,
-          ...(observation === undefined ? {} : {statusObservation: observation}),
-          symbol: request.symbol,
-          threadnoteHome: request.threadnoteHome,
-          to: request.to,
-        })
-        .pipe(
-          Effect.catchIf(
-            (error: unknown) => Schema.is(CodeGraphSnapshotUnavailable)(error),
-            () =>
-              Effect.succeed({
-                unavailable: 'no-ready-snapshot' as const,
-                identity: {repoRoot: attached.identity.repoRoot, worktreeId: attached.identity.worktreeId},
-              }),
-          ),
-        );
-      if (typeof result === 'object' && result !== null && 'unavailable' in result) return result;
+      if ('unavailable' in inspected) return inspected;
+      const {result} = inspected;
       const scopeId = observation?.projectScope?.scope?.scopeKey;
       const refresh =
         options.observeRefresh === undefined
@@ -415,6 +559,17 @@ export const serveCodeGraphDiscoveryRead = Effect.fn('codeGraph.serveDiscoveryRe
       return {
         result,
         status: {
+          ...(request.diagram === undefined
+            ? {}
+            : {
+                diagramScope: {
+                  repositoryId: attached.identity.repositoryId,
+                  repositoryName: attached.identity.displayName,
+                  snapshotId: attached.readySnapshot.id,
+                  commit: attached.readySnapshot.commit,
+                  ...(attached.projectCoverage?.kind === 'project' ? {project: attached.projectCoverage.project} : {}),
+                },
+              }),
           ...(refresh === undefined || refresh.state === 'idle' ? {} : {refresh}),
           stale: attached.stale,
           ...(attached.readySnapshot === undefined ? {} : {readySnapshotId: attached.readySnapshot.id}),
@@ -434,10 +589,96 @@ export const serveCodeGraphDiscoveryRead = Effect.fn('codeGraph.serveDiscoveryRe
           repoRoot: attached.identity.repoRoot,
         },
       };
-    });
+    }).pipe(Effect.map((result): DiscoveryReadResult<A> => result));
   return yield* query.withStatusSession === undefined
     ? query.status(request.threadnoteHome, request.cwd, statusOptions).pipe(Effect.flatMap(read))
     : query.withStatusSession(request.threadnoteHome, request.cwd, undefined, statusOptions, read);
+});
+
+export const serveCodeGraphDiscoveryRead = Effect.fn('codeGraph.serveDiscoveryQuery')(function* (
+  request: CodeGraphImpactQueryRequest,
+  options: DiscoveryReadOptions = {},
+) {
+  const query = yield* CodeGraphQueryService;
+  return yield* serveCodeGraphDiscoveryReadWith(request, options, (_attached, observation) => {
+    const scopedSeedQueries =
+      request.seedQueries === undefined
+        ? undefined
+        : EffectArray.filter(request.seedQueries, candidate =>
+            codeGraphScopeAdmitsPath(observation?.projectScope?.scope, candidate),
+          );
+    return query.inspect({
+      project: request.project,
+      manifestPath: request.manifestPath,
+      ...(request.baseCommit === undefined ? {} : {baseCommit: request.baseCommit}),
+      ...(request.operation === 'impact' ? {baseCommitPolicy: 'ready-only' as const} : {}),
+      cwd: request.cwd,
+      depth: request.depth,
+      direction: request.direction,
+      edgeLimit: request.edgeLimit,
+      from: request.from,
+      includeHeuristic: request.includeHeuristic,
+      includeModelAssociations: request.includeModelAssociations,
+      nodeId: request.nodeId,
+      nodeLimit: request.nodeLimit,
+      operation: request.operation,
+      packageName: request.packageName,
+      query:
+        request.operation === 'impact'
+          ? impactQueryTransportSelector(request.query, request.seedQueries)
+          : request.query,
+      refresh: false,
+      requestMaintenance: false,
+      seedQueryCount: scopedSeedQueries?.length,
+      seedQueries: scopedSeedQueries,
+      ...(observation === undefined ? {} : {statusObservation: observation}),
+      symbol: request.symbol,
+      threadnoteHome: request.threadnoteHome,
+      to: request.to,
+    });
+  });
+});
+
+const serveCodeGraphDiagram = Effect.fn('codeGraph.serveDiscoveryDiagram')(function* (
+  request: CodeGraphImpactQueryRequest,
+  diagram: NonNullable<CodeGraphImpactQueryRequest['diagram']>,
+  options: DiscoveryReadOptions,
+) {
+  const store = yield* CodeGraphStore;
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const system = yield* SystemInfo;
+  const directory = system.environment()[DIAGRAM_SPOOL_ENV];
+  if (
+    !directory ||
+    !path.isAbsolute(directory) ||
+    !EffectString.startsWith(DIAGRAM_SPOOL_DIRECTORY_PREFIX)(path.basename(directory))
+  ) {
+    return yield* invalidDiagramHandoff();
+  }
+  return yield* serveCodeGraphDiscoveryReadWith(request, options, attached =>
+    readCodeGraphDiagramForStatus(store, attached, {
+      question: request.query,
+      ...(diagram.type === undefined ? {} : {diagramType: diagram.type}),
+      timeoutMilliseconds: diagram.timeoutMilliseconds,
+    }).pipe(
+      Effect.flatMap(result =>
+        Effect.gen(function* () {
+          const bytes = new TextEncoder().encode(JSON.stringify(result));
+          const staging = path.join(directory, 'diagram.pending');
+          yield* fs.writeFile(staging, bytes, {flag: 'wx', mode: 0o600});
+          yield* fs.rename(staging, path.join(directory, DIAGRAM_SPOOL_FILE));
+          return {
+            bytes: bytes.byteLength,
+            sha256: sha256HexSync(bytes),
+            scope: result.scope,
+            freshness: result.freshness,
+            status: result.status,
+          } satisfies CodeGraphDiagramManifest;
+        }),
+      ),
+    ),
+  );
 });
 
 /** Internal standalone worker. Input and output are bounded one-document JSON over stdio. */
@@ -460,13 +701,18 @@ export const codeGraphImpactQueryWorkerProgram = (threadnoteHome: string) =>
         Effect.map(Option.getOrUndefined),
         Effect.orElseSucceed(() => undefined),
       );
+    const discoveryOptions = {observeRefresh, telemetry: codeGraphIsolatedQueryTelemetryRecorder(telemetry)};
     const response =
       request === undefined || request.threadnoteHome !== threadnoteHome
         ? ({ok: false, protocol: CODE_GRAPH_IMPACT_QUERY_PROTOCOL, telemetry} as const)
         : request.discover === true
-          ? yield* serveCodeGraphDiscoveryRead(request, {
-              observeRefresh,
-              telemetry: codeGraphIsolatedQueryTelemetryRecorder(telemetry),
+          ? yield* Effect.gen(function* () {
+              if (request.diagram === undefined) {
+                const served = yield* serveCodeGraphDiscoveryRead(request, discoveryOptions);
+                return 'unavailable' in served ? served : {result: served.result, status: served.status};
+              }
+              const served = yield* serveCodeGraphDiagram(request, request.diagram, discoveryOptions);
+              return 'unavailable' in served ? served : {diagram: served.result, status: served.status};
             }).pipe(
               Effect.match({
                 onFailure: () => ({ok: false, protocol: CODE_GRAPH_IMPACT_QUERY_PROTOCOL, telemetry}) as const,
@@ -482,8 +728,7 @@ export const codeGraphImpactQueryWorkerProgram = (threadnoteHome: string) =>
                     : {
                         ok: true,
                         protocol: CODE_GRAPH_IMPACT_QUERY_PROTOCOL,
-                        result: served.result,
-                        status: served.status,
+                        ...served,
                         telemetry,
                       },
               }),
@@ -549,7 +794,10 @@ export function impactQueryWorkerInspectOptions(
   };
 }
 
-function encodeImpactQueryRequest(input: IsolatedCodeGraphQueryInput): Uint8Array {
+function encodeImpactQueryRequest(
+  input: IsolatedCodeGraphQueryInput,
+  diagram?: CodeGraphImpactQueryRequest['diagram'],
+): Uint8Array {
   const seedQueries = input.seedQueries?.slice(0, CODE_GRAPH_IMPACT_QUERY_SEED_LIMIT);
   const projectScopeReceipt = codeGraphQueryScopeReceipt(input.projectScope);
   const request = {
@@ -558,6 +806,7 @@ function encodeImpactQueryRequest(input: IsolatedCodeGraphQueryInput): Uint8Arra
     ...(input.baseCommit === undefined ? {} : {baseCommit: input.baseCommit}),
     ...(input.borrowedSnapshotId === undefined ? {} : {borrowedSnapshotId: input.borrowedSnapshotId}),
     cwd: input.cwd,
+    ...(diagram === undefined ? {} : {diagram}),
     ...(input.depth === undefined ? {} : {depth: input.depth}),
     ...(input.direction === undefined ? {} : {direction: input.direction}),
     ...(input.discover === undefined ? {} : {discover: input.discover}),
@@ -689,6 +938,20 @@ function validImpactQueryRequest(value: unknown): value is CodeGraphImpactQueryR
     return false;
   }
   const seeds = record.seedQueries;
+  if (
+    record.diagram !== undefined &&
+    (!Predicate.isObject(record.diagram) ||
+      record.discover !== true ||
+      record.operation !== 'query' ||
+      !validProtocolText(record.query) ||
+      !boundedInteger(record.diagram.timeoutMilliseconds, 1, 40_000) ||
+      (record.diagram.type !== undefined && !isOneOf(CODE_GRAPH_DIAGRAM_TYPES, record.diagram.type)) ||
+      record.baseCommit !== undefined ||
+      record.packageName !== undefined ||
+      seeds !== undefined)
+  ) {
+    return false;
+  }
   if (seeds === undefined && record.seedQueryCount !== undefined) return false;
   if (seeds !== undefined) {
     if (
@@ -894,9 +1157,38 @@ function decodeImpactQueryResponse(content: string): CodeGraphImpactQueryRespons
         identity: {repoRoot: identity.repoRoot, worktreeId: identity.worktreeId},
       };
     }
-    if (!validImpactQueryResult(record.result)) return undefined;
     const status = decodeImpactQueryReadStatus(record.status);
     if (status === undefined && record.status !== undefined) return undefined;
+    if (record.diagram !== undefined) {
+      const diagram = record.diagram;
+      if (
+        record.result !== undefined ||
+        status === undefined ||
+        !Predicate.isObject(diagram) ||
+        !boundedInteger(diagram.bytes, 1, Number.MAX_SAFE_INTEGER) ||
+        typeof diagram.sha256 !== 'string' ||
+        !/^[0-9a-f]{64}$/u.test(diagram.sha256) ||
+        !isOneOf(['current', 'deferred', 'stale', 'unknown'], diagram.freshness) ||
+        !isOneOf(['diagram', 'incomplete', 'clarification', 'unavailable'], diagram.status)
+      )
+        return undefined;
+      const scope = decodeDiagramScope(diagram.scope);
+      if (scope === undefined) return undefined;
+      return {
+        ok: true,
+        protocol: CODE_GRAPH_IMPACT_QUERY_PROTOCOL,
+        diagram: {
+          bytes: diagram.bytes,
+          sha256: diagram.sha256,
+          scope,
+          freshness: diagram.freshness,
+          status: diagram.status,
+        },
+        status,
+        telemetry,
+      };
+    }
+    if (!validImpactQueryResult(record.result)) return undefined;
     return {
       ok: true,
       protocol: CODE_GRAPH_IMPACT_QUERY_PROTOCOL,
@@ -907,6 +1199,27 @@ function decodeImpactQueryResponse(content: string): CodeGraphImpactQueryRespons
   } catch {
     return undefined;
   }
+}
+
+function decodeDiagramScope(value: unknown): CodeGraphDiagramScope | undefined {
+  if (
+    !Predicate.isObject(value) ||
+    !validProtocolText(value.repositoryId) ||
+    !validProtocolText(value.repositoryName) ||
+    !validSnapshotId(value.snapshotId) ||
+    typeof value.commit !== 'string' ||
+    !GIT_OBJECT_ID_PATTERN.test(value.commit) ||
+    (value.project !== undefined && !validProtocolText(value.project)) ||
+    value.viewKey !== undefined
+  )
+    return undefined;
+  return {
+    repositoryId: value.repositoryId,
+    repositoryName: value.repositoryName,
+    snapshotId: value.snapshotId,
+    commit: value.commit,
+    ...(value.project === undefined ? {} : {project: value.project}),
+  };
 }
 
 function decodeImpactQueryReadStatus(value: unknown): CodeGraphImpactQueryReadStatus | undefined {
@@ -927,8 +1240,11 @@ function decodeImpactQueryReadStatus(value: unknown): CodeGraphImpactQueryReadSt
   }
   const refresh = decodeImpactQueryRefreshContinuity(value.refresh);
   if (value.refresh !== undefined && refresh === undefined) return undefined;
+  const diagramScope = decodeDiagramScope(value.diagramScope);
+  if (value.diagramScope !== undefined && diagramScope === undefined) return undefined;
   if (surface.selection === 'none') {
-    if (surface.freshness !== undefined || surface.snapshot !== undefined) return undefined;
+    if (surface.freshness !== undefined || surface.snapshot !== undefined || diagramScope !== undefined)
+      return undefined;
     return {
       ...(refresh === undefined ? {} : {refresh}),
       stale: value.stale,
@@ -950,6 +1266,7 @@ function decodeImpactQueryReadStatus(value: unknown): CodeGraphImpactQueryReadSt
     return undefined;
   }
   return {
+    ...(diagramScope === undefined ? {} : {diagramScope}),
     ...(refresh === undefined ? {} : {refresh}),
     stale: value.stale,
     ...(value.readySnapshotId === undefined ? {} : {readySnapshotId: value.readySnapshotId}),
