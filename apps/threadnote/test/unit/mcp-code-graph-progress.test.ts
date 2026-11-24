@@ -39,6 +39,8 @@ import {
 } from '@threadnote/graph/query/contract';
 import {measureAgentToolResponse} from '@threadnote/protocol/agent-response';
 import {formatCodeGraphMcpResponse} from '@threadnote/threadnote/mcp/code_graph_projection';
+import {codeGraphDiagramMcpResponse} from '../../src/mcp/code_graph_diagram_projection.js';
+import {codeGraphRefreshContinuityWarning} from '../../src/mcp/server/code_graph.js';
 import {
   analysisEdge,
   analysisSnapshot,
@@ -397,6 +399,21 @@ describe('MCP code graph indexing progress', () => {
     expect(continued.warnings[0].length).toBeLessThanOrEqual(320);
     expect(JSON.stringify(continued)).not.toContain('/Users/private');
     expect(codeGraphResultWithRefreshContinuity(continued, deferred)).toBe(continued);
+
+    const diagram = codeGraphDiagramMcpResponse(
+      result,
+      'Show the unknown subject.',
+      undefined,
+      800,
+      'dual',
+      codeGraphRefreshContinuityWarning(deferred),
+    );
+    expect(diagram.structuredContent).toMatchObject({
+      status: 'unavailable',
+      limits: expect.arrayContaining([expect.stringContaining('Free storage space')]),
+    });
+    expect(JSON.stringify(diagram)).toContain('no-space');
+    expect(JSON.stringify(diagram)).not.toContain('/Users/private');
   });
 
   it('labels stale ready evidence while indexing continues', () => {

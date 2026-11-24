@@ -15,6 +15,7 @@ import {execFileSync} from '@threadnote/testing/node-child-process';
 import {cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync} from '@threadnote/testing/node-fs';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
+import {CodeGraphDiagramResultSchema} from '@threadnote/graph/query/diagram_contract';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {
   codeGraphEvaluationFixtureHash,
@@ -275,6 +276,241 @@ describe('MCP code graph response format', () => {
       rmSync(root, {recursive: true, force: true});
     }
   }, 120_000);
+
+  it('returns complete Mermaid and evidence for one scoped ready snapshot', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'threadnote-mcp-mermaid-'));
+    const home = join(root, 'home');
+    const manifestPath = join(home, 'seed-manifest.yaml');
+    const projects = EffectArray.map(['alpha', 'beta', 'stale', 'cold'], name => ({
+      name,
+      path: join(root, name),
+      seed: [],
+      uri: `threadnote://resources/repos/${name}`,
+      graph: {closure: 'dependencies' as const, roots: ['src']},
+    }));
+    let client: Client | undefined;
+    try {
+      mkdirSync(home);
+      writeFileSync(manifestPath, JSON.stringify({version: 1, projects}));
+      for (const project of projects) {
+        const git = (...args: string[]) => execFileSync('git', ['-C', project.path, ...args]);
+        mkdirSync(join(project.path, 'src'), {recursive: true});
+        writeFileSync(join(project.path, 'package.json'), JSON.stringify({private: true, workspaces: ['src']}));
+        writeFileSync(join(project.path, 'src', 'package.json'), JSON.stringify({name: project.name}));
+        writeFileSync(
+          join(project.path, 'src', `${project.name}.ts`),
+          'export interface AuthPort { validate(): boolean; }\n' +
+            'export class Authenticator implements AuthPort { validate() { return true; } }\n' +
+            (project.name === 'alpha'
+              ? 'export class A extends Authenticator {}\n' +
+                'export class B extends Authenticator {}\n' +
+                'export class C extends Authenticator {}\n' +
+                'export class D extends Authenticator {}\n'
+              : ''),
+        );
+        if (project.name === 'alpha') {
+          writeFileSync(
+            join(project.path, 'src', 'request.ts'),
+            'export function handleRequest() { return loadService(); }\n' +
+              'function loadService() { return readDatabase(); }\n' +
+              'function readDatabase() { return 42; }\n' +
+              'export function submitBatch() { return enqueue(); }\n' +
+              'function enqueue() { return transmit(); }\n' +
+              'function transmit() { return persist(); }\n' +
+              'function persist() { return 23; }\n',
+          );
+        }
+        mkdirSync(join(project.path, 'excluded'));
+        writeFileSync(join(project.path, 'excluded', 'hidden.ts'), 'export const hidden = true;\n');
+        git('init', '-q');
+        git('add', '.');
+        git('-c', 'user.name=Graph Test', '-c', 'user.email=test@example.test', 'commit', '-qm', 'fixture');
+      }
+      const [alpha, beta, staleProject, cold] = projects;
+      if (!alpha || !beta || !staleProject || !cold) throw new Error('The graph fixture requires four repositories.');
+      const snapshots = await runEffect(
+        Effect.gen(function* () {
+          const indexer = yield* CodeGraphIndexer;
+          return yield* Effect.forEach([alpha, beta, staleProject], project =>
+            indexer.index({cwd: project.path, project, threadnoteHome: home, ensureVectors: false}),
+          );
+        }),
+      );
+
+      writeFileSync(join(staleProject.path, 'src', 'tsconfig.json'), JSON.stringify({compilerOptions: {strict: true}}));
+      execFileSync('git', ['-C', staleProject.path, 'add', '.']);
+      execFileSync('git', [
+        '-C',
+        staleProject.path,
+        '-c',
+        'user.name=Graph Test',
+        '-c',
+        'user.email=test@example.test',
+        'commit',
+        '-qm',
+        'change scope',
+      ]);
+
+      const transport = new StdioClientTransport({
+        command: process.execPath,
+        args: [join(process.cwd(), 'apps/threadnote/src/standalone.ts'), 'mcp-server'],
+        cwd: process.cwd(),
+        stderr: 'pipe',
+        env: {
+          ...process.env,
+          THREADNOTE_HOME: home,
+          THREADNOTE_MANIFEST: manifestPath,
+          THREADNOTE_ACCOUNT: 'local',
+          THREADNOTE_USER: 'tester',
+          THREADNOTE_TELEMETRY: '0',
+          THREADNOTE_MCP_TOOLSET: 'core',
+        },
+      });
+      const connected = new Client({name: 'graph-mermaid-test', version: '1'});
+      client = connected;
+      await connected.connect(transport);
+      const tool = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          (await connected.listTools()).tools,
+          candidate => candidate.name === 'inspect_code_graph',
+        ),
+      );
+      expect(tool?.inputSchema.properties).toHaveProperty('diagramType');
+      expect(tool?.inputSchema.properties).toHaveProperty('output');
+
+      const call = (args: Record<string, unknown> = {}) =>
+        connected.callTool({
+          name: 'inspect_code_graph',
+          arguments: {
+            callerCwd: alpha.path,
+            project: alpha.name,
+            operation: 'query',
+            output: 'mermaid',
+            query: 'How does the Authenticator class implement its interface?',
+            responseFormat: 'dual',
+            ...args,
+          },
+        });
+      const dual = await call();
+      expect(dual.isError).not.toBe(true);
+      const diagram = Schema.decodeUnknownSync(CodeGraphDiagramResultSchema)(dual.structuredContent);
+      expect(diagram.scope.snapshotId).toBe(snapshots[0]?.snapshot.id);
+      expect(diagram.freshness).toBe('current');
+      expect(diagram.status).toBe('diagram');
+      if (diagram.status !== 'diagram') throw new Error(JSON.stringify(diagram));
+      expect(diagram.diagramType).toBe('class');
+      expect(diagram.source).toMatch(/^classDiagram\n/u);
+      expect(firstText(dual.content)).toContain(`\`\`\`mermaid\n${diagram.source}\n\`\`\``);
+      const node = (label: string) =>
+        EffectOption.getOrUndefined(EffectArray.findFirst(diagram.evidence.nodes, item => item.label === label));
+      expect(diagram.evidence.edges).toContainEqual(
+        expect.objectContaining({
+          relation: 'implements',
+          source: node('Authenticator')?.diagramId,
+          target: node('AuthPort')?.diagramId,
+          path: 'src/alpha.ts',
+          span: expect.objectContaining({line: 2}),
+        }),
+      );
+
+      const reduced = await call({budgetTokens: 800});
+      const reducedDiagram = Schema.decodeUnknownSync(CodeGraphDiagramResultSchema)(reduced.structuredContent);
+      expect(reducedDiagram.status).toBe('diagram');
+      if (reducedDiagram.status !== 'diagram') throw new Error(JSON.stringify(reducedDiagram));
+      expect(reducedDiagram.evidence.edges.length).toBeLessThan(diagram.evidence.edges.length);
+      expect(firstText(reduced.content)).toContain(`\`\`\`mermaid\n${reducedDiagram.source}\n\`\`\``);
+      expect(reducedDiagram.limits).toContain('The diagram shows only part of the available connected evidence.');
+      expect(
+        measureAgentToolResponse({structuredContent: reduced.structuredContent, text: firstText(reduced.content)})
+          .estimatedTokens,
+      ).toBeLessThanOrEqual(800);
+
+      const flowchart = await call({diagramType: 'flowchart', responseFormat: 'text'});
+      expect(flowchart.structuredContent).toBeUndefined();
+      expect(firstText(flowchart.content)).toContain('```mermaid\nflowchart ');
+      const sequence = await call({query: 'What calls occur during handleRequest?'});
+      const sequenceResult = Schema.decodeUnknownSync(CodeGraphDiagramResultSchema)(sequence.structuredContent);
+      expect(sequenceResult.status).toBe('diagram');
+      if (sequenceResult.status !== 'diagram') throw new Error(JSON.stringify(sequenceResult));
+      expect(sequenceResult).toMatchObject({diagramType: 'sequence', inferred: true});
+      expect(sequenceResult.source).toMatch(/^sequenceDiagram\n/u);
+      const names = new Map(EffectArray.map(sequenceResult.evidence.nodes, item => [item.diagramId, item.label]));
+      expect(
+        EffectArray.map(sequenceResult.evidence.edges, edge => [
+          names.get(edge.source),
+          names.get(edge.target),
+          edge.relation,
+          edge.path,
+          edge.span.line,
+        ]),
+      ).toEqual([
+        ['handleRequest', 'loadService', 'calls', 'src/request.ts', 1],
+        ['loadService', 'readDatabase', 'calls', 'src/request.ts', 2],
+      ]);
+      const calls = EffectArray.map(sequenceResult.evidence.edges, edge => `${edge.source}->>${edge.target}: calls`);
+      expect(sequenceResult.source).toContain(EffectArray.join(calls, '\n  '));
+
+      const boundedSequence = await call({query: 'What calls occur during submitBatch?'});
+      const boundedResult = Schema.decodeUnknownSync(CodeGraphDiagramResultSchema)(boundedSequence.structuredContent);
+      expect(boundedResult.status).toBe('diagram');
+      if (boundedResult.status !== 'diagram') throw new Error(JSON.stringify(boundedResult));
+      expect(boundedResult.diagramType).toBe('sequence');
+      expect(EffectArray.map(boundedResult.evidence.nodes, item => item.label)).toEqual([
+        'submitBatch',
+        'enqueue',
+        'transmit',
+      ]);
+      expect(EffectArray.map(boundedResult.evidence.edges, edge => edge.span.line)).toEqual([4, 5]);
+      expect(boundedResult.limits).toContain(
+        'The graph read covers up to 2 relationship steps from its search matches.',
+      );
+      expect(firstText(boundedSequence.content)).toContain('up to 2 relationship steps');
+
+      const other = await call({callerCwd: beta.path, project: beta.name, budgetTokens: 800});
+      const otherResult = Schema.decodeUnknownSync(CodeGraphDiagramResultSchema)(other.structuredContent);
+      expect(otherResult).toMatchObject({status: 'diagram', scope: {snapshotId: snapshots[1]?.snapshot.id}});
+      expect(otherResult.scope.repositoryId).not.toBe(diagram.scope.repositoryId);
+      expect(firstText(other.content)).toContain('src/beta.ts');
+      expect(firstText(other.content)).not.toContain('src/alpha.ts');
+      expect(
+        measureAgentToolResponse({structuredContent: other.structuredContent, text: firstText(other.content)})
+          .estimatedTokens,
+      ).toBeLessThanOrEqual(800);
+
+      const outside = await call({query: 'Diagram excluded/hidden.ts'});
+      expect(outside.structuredContent).toMatchObject({
+        status: 'unavailable',
+        nextAction: expect.stringContaining('project'),
+      });
+      const coldResult = await call({callerCwd: cold.path, project: cold.name});
+      expect(coldResult.structuredContent).toMatchObject({state: 'unavailable', reason: 'no-ready-snapshot'});
+      expect(firstText(coldResult.content)).toContain('threadnote graph index');
+
+      const workset = await call({workset: 'example'});
+      expect(workset.isError).toBe(true);
+      expect(firstText(workset.content)).toContain('local operation=query');
+      const packageConflict = await call({package: 'alpha'});
+      expect(packageConflict.isError).toBe(true);
+      expect(firstText(packageConflict.content)).toContain('Name the package or a source path in query');
+      const conflicting = await call({nodeId: 'cgs_example'});
+      expect(conflicting.isError).toBe(true);
+      expect(firstText(conflicting.content)).toContain('Omit base, nodeId');
+
+      const stale = await call({callerCwd: staleProject.path, project: staleProject.name});
+      expect(stale.structuredContent).toMatchObject({
+        status: 'diagram',
+        freshness: 'stale',
+        scope: {snapshotId: snapshots[2]?.snapshot.id},
+        limits: expect.arrayContaining([
+          expect.stringContaining('Serving the existing stale ready snapshot'),
+          expect.stringContaining('Verify the cited source'),
+        ]),
+      });
+    } finally {
+      await client?.close();
+      rmSync(root, {recursive: true, force: true});
+    }
+  }, 30_000);
 
   it('defaults named Workset projections to lossless text while preserving explicit dual', async () => {
     const fixture = await prepareCodeGraphWorksetFixture({size: 1});

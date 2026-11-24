@@ -24,6 +24,13 @@ import {
   IsolatedCodeGraphImpactQueryTimedOut,
 } from '@threadnote/graph/isolated/impact_query';
 import type {CodeGraphQueryTelemetryObservation} from '@threadnote/graph/query/contract';
+import {CODE_GRAPH_DIAGRAM_EVIDENCE_LIMITS, prepareCodeGraphDiagramQuery} from '@threadnote/graph/query/diagram';
+import {CODE_GRAPH_DIAGRAM_TYPES} from '@threadnote/graph/query/diagram_contract';
+import {
+  codeGraphDiagramMcpResponse,
+  MCP_DIAGRAM_DEFAULT_TOKENS,
+  MCP_DIAGRAM_READ_DEPTH,
+} from '../code_graph_diagram_projection.js';
 import type {CodeGraphProgress, CodeGraphQueryResult} from '@threadnote/graph/types';
 import type {CodeGraphWorksetQueryResult} from '@threadnote/graph/workset/query';
 import {
@@ -235,7 +242,7 @@ export function registerCodeGraphTool(
       inputSchema: {
         base: McpInput.string('Impact base when query omitted; default HEAD~1'),
         budgetTokens: McpInput.integer(
-          'Ceiling: Workset query defaults to 1250 (min 1); local query defaults to 800; impact agent defaults to 1250; other local min 800.',
+          'Ceiling: Workset query defaults to 1250 (min 1); local query defaults to 800; Mermaid defaults to 1250; impact agent defaults to 1250; other local min 800.',
           {
             minimum: 1,
             maximum: 1_500,
@@ -243,6 +250,7 @@ export function registerCodeGraphTool(
         ),
         callerCwd: McpInput.string('Absolute checkout'),
         depth: McpInput.integer('Depth', {minimum: 0, maximum: 8}),
+        diagramType: McpInput.literals(CODE_GRAPH_DIAGRAM_TYPES, 'Mermaid diagram type; defaults to auto.'),
         direction: McpInput.literals(['both', 'incoming', 'outgoing'], 'Direction'),
         edgeLimit: McpInput.integer('Edges: local query default 12; others 40.', {
           minimum: 1,
@@ -261,6 +269,7 @@ export function registerCodeGraphTool(
           ['query', 'node', 'neighbors', 'explain', 'path', 'impact', 'topology'],
           'Operation',
         ),
+        output: McpInput.literals(['mermaid'], 'Opt in to a Mermaid diagram for a local query.'),
         package: McpInput.string('Exact query package'),
         project: McpInput.string(
           `${MCP_CODE_GRAPH_PROJECT_SELECTOR_DESCRIPTION}; preserve the project selected by context_brief`,
@@ -281,6 +290,7 @@ export function registerCodeGraphTool(
       callerCwd,
       cursor,
       depth,
+      diagramType,
       direction,
       edgeLimit,
       from,
@@ -289,6 +299,7 @@ export function registerCodeGraphTool(
       nodeId,
       nodeLimit,
       operation,
+      output,
       package: packageName,
       project,
       query,
@@ -326,6 +337,7 @@ export function registerCodeGraphTool(
           'inspect_code_graph requires operation. Example: {"operation":"query","callerCwd":"/workspace/project","query":"exclusive file lock"}',
         );
       }
+      const mermaid = output === 'mermaid';
       const effectiveRequest = codeGraphMcpRequestDefaults(operation, {
         budgetTokens,
         edgeLimit,
@@ -377,6 +389,36 @@ export function registerCodeGraphTool(
           operation !== 'query'
         ) {
           return argumentError('inspect_code_graph package is valid only for operation=query.');
+        }
+
+        if (diagramType !== undefined && !mermaid) {
+          return argumentError('inspect_code_graph diagramType requires output=mermaid.');
+        }
+        if (mermaid && (operation !== 'query' || workset !== undefined || cursor !== undefined)) {
+          return argumentError(
+            'inspect_code_graph output=mermaid requires a local operation=query. Specify callerCwd and omit workset and cursor.',
+          );
+        }
+        if (mermaid && packageName !== undefined) {
+          return argumentError(
+            'inspect_code_graph output=mermaid does not accept package. Name the package or a source path in query, or select a scoped project.',
+          );
+        }
+        if (
+          mermaid &&
+          (base !== undefined ||
+            nodeId !== undefined ||
+            from !== undefined ||
+            to !== undefined ||
+            symbol !== undefined ||
+            depth !== undefined ||
+            direction !== undefined ||
+            includeHeuristic === true ||
+            includeModelAssociations === true)
+        ) {
+          return argumentError(
+            'inspect_code_graph output=mermaid uses a question in query and source-backed relationships. Omit base, nodeId, from, to, symbol, depth, direction, and any option that adds heuristic or model edges.',
+          );
         }
         const missingSelector = Effect2.pipe(workset, effectOptionalString =>
           effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
@@ -614,24 +656,36 @@ export function registerCodeGraphTool(
           manifestPath?: string;
           project?: import('@threadnote/graph/watcher').CodeGraphWatchOptions['project'];
         };
+        const diagramQuestion = mermaid ? requestedQuery : undefined;
+        const diagramQuery = diagramQuestion === undefined ? undefined : prepareCodeGraphDiagramQuery(diagramQuestion);
+        if (diagramQuery === '') {
+          return argumentError(
+            'inspect_code_graph output=mermaid requires a question with a source symbol, package, or path.',
+          );
+        }
         const readInput = {
           project: inspectionProject,
           manifestPath: config.manifestPath,
           cwd: inspectionCwd,
-          depth,
+          depth: mermaid ? MCP_DIAGRAM_READ_DEPTH : depth,
           direction,
-          edgeLimit: effectiveRequest.edgeLimit,
+          edgeLimit: mermaid
+            ? Math.min(edgeLimit ?? CODE_GRAPH_DIAGRAM_EVIDENCE_LIMITS.edges, CODE_GRAPH_DIAGRAM_EVIDENCE_LIMITS.edges)
+            : effectiveRequest.edgeLimit,
           from,
           includeHeuristic,
           includeModelAssociations,
           nodeId: inspectionNodeId,
-          nodeLimit: effectiveRequest.nodeLimit,
-          operation,
+          nodeLimit: mermaid
+            ? Math.min(nodeLimit ?? CODE_GRAPH_DIAGRAM_EVIDENCE_LIMITS.nodes, CODE_GRAPH_DIAGRAM_EVIDENCE_LIMITS.nodes)
+            : effectiveRequest.nodeLimit,
+          // The query worker reads one hop for ordinary discovery. Explain admits a bounded call path.
+          operation: mermaid ? ('explain' as const) : operation,
           packageName:
             Effect2.pipe(packageName, effectOptionalString =>
               effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
             ) || undefined,
-          query: requestedQuery,
+          query: diagramQuery ?? requestedQuery,
           symbol,
           to,
           ...(changes?.baseCommit === undefined ? {} : {baseCommit: changes.baseCommit}),
@@ -784,6 +838,18 @@ export function registerCodeGraphTool(
           'graph.query.execute',
           'query-serialization',
           Effect.sync(() => {
+            if (diagramQuestion !== undefined) {
+              return codeGraphDiagramMcpResponse(
+                presentedResult,
+                diagramQuestion,
+                diagramType,
+                budgetTokens ?? MCP_DIAGRAM_DEFAULT_TOKENS,
+                selectedResponseFormat,
+                presentedResult.freshness === 'stale'
+                  ? codeGraphRefreshContinuityWarning(refreshStatus, refreshContinuity)
+                  : undefined,
+              );
+            }
             const response = codeGraphMcpResponse(
               codeGraphResultWithRefreshContinuity(presentedResult, refreshStatus, refreshContinuity),
               effectiveRequest.budgetTokens,
@@ -1460,6 +1526,14 @@ export function codeGraphResultWithRefreshContinuity(
   refresh?: CodeGraphRefreshContinuity,
 ): CodeGraphQueryResult {
   if (result.freshness !== 'stale') return result;
+  const warning = codeGraphRefreshContinuityWarning(refreshStatus, refresh);
+  return result.warnings.includes(warning) ? result : {...result, warnings: [...result.warnings, warning]};
+}
+
+export function codeGraphRefreshContinuityWarning(
+  refreshStatus: CodeGraphRefreshStatus | undefined,
+  refresh?: CodeGraphRefreshContinuity,
+): string {
   const warning =
     refreshStatus?.state === 'deferred'
       ? `Serving the existing stale ready snapshot because code graph refresh is deferred ` +
@@ -1473,8 +1547,7 @@ export function codeGraphResultWithRefreshContinuity(
             : refreshStatus?.state === 'indexing'
               ? 'Serving the existing stale ready snapshot while code graph refresh continues in the background.'
               : 'Serving the existing stale ready snapshot while background refresh discovery is pending; continue bounded discovery and use `path` or `impact` when current graph evidence is required.';
-  const bounded = compactMcpText(warning, 320);
-  return result.warnings.includes(bounded) ? result : {...result, warnings: [...result.warnings, bounded]};
+  return compactMcpText(warning, 320);
 }
 
 function codeGraphRefreshRecoveryWarning(failure: CodeGraphRefreshFailure): string {

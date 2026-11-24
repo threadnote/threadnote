@@ -17,7 +17,7 @@ const LABEL_LIMIT = 72;
 const SUBJECT_TERMS = /[\p{L}\p{N}_$@][\p{L}\p{N}_$@./#:-]*/gu;
 const QUESTION_WORDS = new Set(
   Str.split(' ')(
-    'a about and are architecture as call calls callpath chain class classes code component components connect connected dependency dependencies diagram do does draw explain flow flowchart for from give graph how i implement implements in inherit inherits interaction interface interfaces is it map me mermaid module modules of on order package packages path please project relate relates relationship relationships repository sequence show static structure the this to together type types use uses what when where which with work works',
+    'a about and are architecture as call calls callpath chain class classes code component components connect connected dependency dependencies diagram do does draw explain flow flowchart for from during give graph how i implement implements in inherit inherits interaction interface interfaces is it map me mermaid module modules of occur on order package packages path please project relate relates relationship relationships repository sequence show static structure the this to together type types use uses what when where which with work works',
   ),
 );
 const CLASS_KINDS = new Set(['class', 'interface', 'struct', 'trait', 'type', 'type_alias']);
@@ -242,7 +242,8 @@ function intent(terms: readonly string[]): DiagramType | undefined {
     ' ',
   );
   if (/\b(?:class(?:es)?|inherit(?:ance|s)?|implement(?:ation|s)?|interfaces?)\b/iu.test(value)) return 'class';
-  if (/\b(?:sequence|call path|call chain|call order|in what order|step by step)\b/iu.test(value)) return 'sequence';
+  if (/\b(?:sequence|call path|call chain|call order|what calls occur|in what order|step by step)\b/iu.test(value))
+    return 'sequence';
   if (/\b(?:architecture|topology|infrastructure)\b/iu.test(value)) return 'architecture';
   if (/\b(?:flowchart|dependency|dependencies|imports?|modules?|packages?)\b/iu.test(value)) return 'flowchart';
   return undefined;

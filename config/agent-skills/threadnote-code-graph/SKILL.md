@@ -33,6 +33,13 @@ For local `inspect_code_graph`, omit `responseFormat` for schema-aware text-only
 formatting/truncation. Analysis is bounded text. Worksets lack agent projection and default to lossless JSON; request `dual`
 for canonical structured content and inspect older schemas (`text`/`dual`).
 
+Request a Mermaid diagram from a local query with `output: "mermaid"`. Use a natural-language question that names a symbol,
+package, or path. Name the package in the question or select a scoped project. Omit `diagramType` or use `auto` to let Threadnote select the type. Use `architecture`, `class`, `sequence`,
+or `flowchart` to request a type. The result includes a complete fenced diagram when the graph has sufficient evidence.
+Request `responseFormat: "dual"` for the same plain source and its evidence in structured content. Check the snapshot,
+freshness, and source references. If the tool asks for clarification, select a candidate path or symbol. If the budget
+limits the result, ask a narrower question or increase `budgetTokens` from the default of 1250 to at most 1500.
+
 `context_brief.codeRefs` accept repository-relative POSIX paths or lowercase `cgs_<32 hex>` IDs, not `cgr_`. Follow retained
 selectors when truncated; bounded cards cannot prove absence. During indexing verify stale/deferred evidence against source;
 retry strict current/relationship claims or unusable cards.
