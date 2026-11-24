@@ -1,0 +1,80 @@
+import {Schema} from 'effect';
+
+export const CODE_GRAPH_DIAGRAM_TYPES = ['auto', 'architecture', 'class', 'sequence', 'flowchart'] as const;
+export const CodeGraphDiagramTypeSchema = Schema.Literals(CODE_GRAPH_DIAGRAM_TYPES);
+export type CodeGraphDiagramType = typeof CodeGraphDiagramTypeSchema.Type;
+
+const DiagramType = Schema.Literals(['architecture', 'class', 'sequence', 'flowchart']);
+const Freshness = Schema.Literals(['current', 'deferred', 'stale', 'unknown']);
+const Scope = Schema.Struct({
+  repositoryId: Schema.String,
+  repositoryName: Schema.String,
+  snapshotId: Schema.String,
+  commit: Schema.optionalKey(Schema.String),
+  viewKey: Schema.optionalKey(Schema.String),
+});
+const Span = Schema.Struct({
+  line: Schema.Int,
+  column: Schema.Int,
+  endLine: Schema.Int,
+  endColumn: Schema.Int,
+});
+const Subject = Schema.Struct({
+  id: Schema.String,
+  label: Schema.String,
+  kind: Schema.String,
+  path: Schema.String,
+  span: Span,
+});
+const Node = Schema.Struct({...Subject.fields, diagramId: Schema.String});
+const Edge = Schema.Struct({
+  id: Schema.String,
+  source: Schema.String,
+  target: Schema.String,
+  relation: Schema.String,
+  provenance: Schema.Literals(['declared', 'resolved', 'syntactic']),
+  path: Schema.String,
+  span: Span,
+});
+const Group = Schema.Struct({
+  diagramId: Schema.String,
+  label: Schema.String,
+  members: Schema.Array(Schema.String),
+});
+const Base = {
+  scope: Scope,
+  freshness: Freshness,
+  limits: Schema.Array(Schema.String),
+};
+
+export const CodeGraphDiagramResultSchema = Schema.Union([
+  Schema.Struct({
+    ...Base,
+    status: Schema.Literal('diagram'),
+    diagramType: DiagramType,
+    source: Schema.String,
+    inferred: Schema.Boolean,
+    evidence: Schema.Struct({
+      nodes: Schema.Array(Node),
+      edges: Schema.Array(Edge),
+      groups: Schema.Array(Group),
+    }),
+  }),
+  Schema.Struct({
+    ...Base,
+    status: Schema.Literal('clarification'),
+    message: Schema.String,
+    candidates: Schema.Array(Subject),
+  }),
+  Schema.Struct({
+    ...Base,
+    status: Schema.Literal('unavailable'),
+    message: Schema.String,
+    nextAction: Schema.String,
+    suggestedType: Schema.optionalKey(DiagramType),
+  }),
+]);
+
+export type CodeGraphDiagramResult = typeof CodeGraphDiagramResultSchema.Type;
+export type CodeGraphDiagramScope = typeof Scope.Type;
+export type CodeGraphDiagramFreshness = typeof Freshness.Type;

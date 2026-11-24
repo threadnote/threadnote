@@ -194,6 +194,8 @@
     "./progress/telemetry": "./src/progress/telemetry.ts",
     "./query": "./src/query.ts",
     "./query/contract": "./src/query/contract.ts",
+    "./query/diagram": "./src/query/diagram.ts",
+    "./query/diagram_contract": "./src/query/diagram_contract.ts",
     "./query/impact_base": "./src/query/impact_base.ts",
     "./query/path": "./src/query/path.ts",
     "./query/ready_snapshot": "./src/query/ready_snapshot.ts",
