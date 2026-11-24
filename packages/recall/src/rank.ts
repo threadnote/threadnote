@@ -393,7 +393,36 @@ export function rankRecallCandidates(
 const CLOSING_RECALL_DENSE_WEIGHT = 0.5;
 // Bound the extra synchronous token scan to 512 Ki UTF-16 code units per closing read.
 const MAX_CLOSING_BLEND_BODY_CODE_UNITS = 512 * 1024;
-const EXPLICIT_LITERAL_QUERY = /["“”\x60]|(?:^|\s)['‘][^'\n]+['’](?:$|[\s,.?!])/u;
+const QUERY_WHITESPACE = /\s/u;
+
+function queryHasExplicitLiteral(query: string): boolean {
+  let opening = -1;
+  for (let index = 0; index < query.length; index += 1) {
+    const character = query[index];
+    if (character === '"' || character === '“' || character === '”' || character === '\x60') return true;
+    if (character === "'" || character === '’') {
+      const next = query[index + 1];
+      if (
+        opening >= 0 &&
+        index > opening + 1 &&
+        (next === undefined || QUERY_WHITESPACE.test(next) || EffectString.includes(next)(',.?!'))
+      ) {
+        return true;
+      }
+    }
+
+    // A straight apostrophe ends the previous body and can open a new one.
+    if (character === "'" || character === '\n') opening = -1;
+    if (
+      opening < 0 &&
+      (character === "'" || character === '‘') &&
+      (index === 0 || QUERY_WHITESPACE.test(query[index - 1] ?? ''))
+    ) {
+      opening = index;
+    }
+  }
+  return false;
+}
 
 function blendClosingRecallOrder(
   query: string,
@@ -411,7 +440,7 @@ function blendClosingRecallOrder(
     results.length < 2 ||
     (context.protectedUris?.length ?? 0) > 0 ||
     recencyIntent ||
-    EXPLICIT_LITERAL_QUERY.test(query) ||
+    queryHasExplicitLiteral(query) ||
     EffectArray.some(
       results,
       ({candidate, signals}) =>

@@ -109,6 +109,48 @@ describe('closing recall order', () => {
     );
   });
 
+  it.each([
+    ["'artifact cache' releases disk space", true],
+    ["artifact cache\t'releases disk' space", true],
+    ["artifact cache\u00a0'releases disk' space", true],
+    ["artifact cache\u0085'releases disk' space", false],
+    ['artifact cache ‘releases disk’ space', true],
+    ["artifact cache 'releases disk’ space", true],
+    ["artifact cache ‘releases disk' space", true],
+    ["artifact cache 'releases disk'", true],
+    ["artifact cache 'releases disk', space", true],
+    ["artifact cache 'releases disk'.", true],
+    ["artifact cache 'releases disk'?", true],
+    ["artifact cache 'releases disk'!", true],
+    ["artifact cache 'releases disk': space", false],
+    ["artifact cache 'releases disk'; space", false],
+    ["artifact cache 'releases disk'\nspace", true],
+    ["artifact cache 'releases\ndisk' space", false],
+    ["artifact cache 'releases\rdisk' space", true],
+    ["artifact cache 'releases\u2028disk' space", true],
+    ["artifact cache isn't out of disk space", false],
+    ["artifact cache 'releases'disk space", false],
+    ["artifact cache'releases disk’ space", false],
+    ["artifact cache '' releases disk space", false],
+    ['artifact cache ‘’ releases disk space', false],
+    ['artifact cache ’releases disk’ space', false],
+    ["artifact cache ‘releases ‘' disk space", true],
+    ["artifact cache 'releases'old ‘disk space’", true],
+    ['artifact cache "releases disk space', true],
+    ['artifact cache “releases disk space', true],
+    ['artifact cache releases disk space”', true],
+    ['artifact cache \x60releases disk space', true],
+  ])('preserves explicit literal fallback for %j', (query, literal) => {
+    const closingDenseScores = new Map([
+      ['memory-a', 0.2],
+      ['memory-b', 0.5],
+      ['memory-c', 0.8],
+    ]);
+    const result = rankRecallCandidates(query, distinctCandidates, {closingDenseScores});
+    expect(result.rankerVersion).toBe(literal ? RECALL_RANKER_VERSION : RECALL_BLEND_RANKER_VERSION);
+    if (literal) expect(result).toEqual(rankRecallCandidates(query, distinctCandidates));
+  });
+
   it('keeps native order when the highest blend score would lower native confidence', () => {
     const query = 'artifact cache disk bundles';
     const text = 'Bicycles run beside a house.';
