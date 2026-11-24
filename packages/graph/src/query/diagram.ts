@@ -1,8 +1,9 @@
 import {Array as Arr, Option, String as Str} from 'effect';
 import {compareCodeUnits} from '../ordering.js';
 import {parseCodeGraphEndpointSelector} from './selector.js';
-import type {CodeGraphEdge, CodeGraphQueryNode, CodeGraphSpan} from '../types.js';
+import type {CodeGraphEdge, CodeGraphQueryNode, CodeGraphRelation, CodeGraphSpan} from '../types.js';
 import type {
+  CodeGraphDiagramCoverage,
   CodeGraphDiagramFreshness,
   CodeGraphDiagramResult,
   CodeGraphDiagramScope,
@@ -14,7 +15,9 @@ const DRAW_LIMITS = {nodes: 8, edges: 10} as const;
 const QUESTION_LIMIT = 1024;
 const SEED_LIMIT = 240;
 const LABEL_LIMIT = 72;
-const SUBJECT_TERMS = /[\p{L}\p{N}_$@][\p{L}\p{N}_$@./#:-]*/gu;
+const SUBJECT_TERMS = /(?:\.\/?)*[\p{L}\p{N}_$@](?:[\p{L}\p{M}\p{N}_$@./#:-]|\u{200C}|\u{200D})*/gu;
+const QUOTED_SUBJECT_TERMS =
+  /"[^"\r\n]*"|(?<![\p{L}\p{M}\p{N}_$@])'[^'\r\n]*'|\x60[^\x60\r\n]*\x60|(?:\.\/?)*[\p{L}\p{N}_$@](?:[\p{L}\p{M}\p{N}_$@./#:-]|\u{200C}|\u{200D})*/gu;
 const QUESTION_WORDS = new Set(
   Str.split(' ')(
     'a about and are architecture as call calls callpath chain class classes code component components connect connected dependency dependencies diagram do does draw explain flow flowchart for from during give graph how i implement implements in inherit inherits interaction interface interfaces is it map me mermaid module modules of occur on order package packages path please project relate relates relationship relationships repository sequence show static structure the this to together type types use uses what when where which with work works',
@@ -38,15 +41,33 @@ const FLOW_RELATIONS = new Set([
 ]);
 const DEPENDENCY_RELATIONS = new Set(['depends_on', 'imports', 'reexports']);
 const DEPENDENCY_KINDS = new Set(['module', 'package', 'project', 'target', 'file']);
+const DIAGRAM_TYPES = new Set([...CLASS_KINDS, 'enum', 'protocol']);
+const DIAGRAM_MEMBERS = new Set(['method', 'member', 'field', 'property', 'constructor', 'associated_type']);
+const DIAGRAM_COMPONENTS = new Set([...ARCHITECTURE_KINDS, ...DEPENDENCY_KINDS, 'config', 'repository', 'output']);
+export const DIAGRAM_ARCHITECTURE_RELATIONS = [
+  'depends_on',
+  'imports',
+  'reexports',
+  'configures',
+  'reads_or_writes',
+] as const;
+
+export const isDiagramTypeKind = (kind: string): boolean => DIAGRAM_TYPES.has(kind);
+export const isDiagramMemberKind = (kind: string): boolean => DIAGRAM_MEMBERS.has(kind);
+export const isDiagramComponentKind = (kind: string): boolean => DIAGRAM_COMPONENTS.has(kind);
+export const isDiagramOwnershipRelation = (relation: CodeGraphRelation): boolean =>
+  relation === 'contains' || relation === 'declares';
+const diagramArchitectureRelations = new Set<CodeGraphRelation>(DIAGRAM_ARCHITECTURE_RELATIONS);
 
 type Diagram = Extract<CodeGraphDiagramResult, {status: 'diagram'}>;
 type DiagramType = Diagram['diagramType'];
 type DiagramProvenance = Diagram['evidence']['edges'][number]['provenance'];
-interface Fact extends CodeGraphEdge {
+export interface CodeGraphDiagramFact extends CodeGraphEdge {
   readonly sourceId: string;
   readonly targetId: string;
   readonly provenance: DiagramProvenance;
 }
+type Fact = CodeGraphDiagramFact;
 
 export interface CodeGraphDiagramInput {
   readonly question: string;
@@ -65,9 +86,18 @@ export interface CodeGraphDiagramInput {
 
 function subjectTerms(question: string): readonly string[] {
   const bounded = Str.replaceAll('\\', '/')(Str.slice(0, QUESTION_LIMIT)(question));
-  const complete = question.length > QUESTION_LIMIT ? Str.replace(/[\p{L}\p{N}_$@./#:-]+$/u, '')(bounded) : bounded;
-  const tokens = Option.getOrElse(Str.match(SUBJECT_TERMS)(complete), () => []);
-  return Arr.map(tokens, token => Str.replace(/[.:]+$/u, '')(token));
+  const complete =
+    question.length > QUESTION_LIMIT
+      ? Str.replace(/(?:[\p{L}\p{M}\p{N}_$@./#:-]|\u{200C}|\u{200D})+$/u, '')(bounded)
+      : bounded;
+  const tokens = Option.getOrElse(Str.match(QUOTED_SUBJECT_TERMS)(complete), () => []);
+  return Arr.flatMap(tokens, token => {
+    if (!/^["'\x60]/u.test(token)) return [Str.replace(/[.:]+$/u, '')(token)];
+    const phrase = Str.slice(1, -1)(token);
+    if (isExplicitSelector(phrase)) return [phrase];
+    const words = Option.getOrElse(Str.match(SUBJECT_TERMS)(phrase), () => []);
+    return Arr.map(words, word => Str.replace(/[.:]+$/u, '')(word));
+  });
 }
 
 export function prepareCodeGraphDiagramQuery(question: string): string {
@@ -303,12 +333,31 @@ function safeLabel(value: string, fallback: string): string {
   return !label || /^end$/iu.test(label) ? fallback : label;
 }
 
+function safeCompleteLabel(value: string, fallback: string): string {
+  const safe = Str.replace(/[^\p{L}\p{M}\p{N} _.-]+/gu, ' ')(value);
+  const label = Str.trim(Str.replace(/ +/gu, ' ')(safe));
+  return !label || /^end$/iu.test(label) ? fallback : label;
+}
+
+function safeClassMemberLabel(value: string, fallback: string): string {
+  return Str.replace(/^-/u, '−')(safeCompleteLabel(value, fallback));
+}
+
 function groupNodes(
   nodes: Diagram['evidence']['nodes'],
   byId: ReadonlyMap<string, CodeGraphQueryNode>,
   facts: readonly Fact[],
+  complete = false,
 ): Diagram['evidence']['groups'] {
-  if (!Arr.some(facts, edge => DEPENDENCY_RELATIONS.has(edge.relation))) return [];
+  if (
+    !Arr.some(
+      facts,
+      edge =>
+        DEPENDENCY_RELATIONS.has(edge.relation) ||
+        (complete && ARCHITECTURE_RELATIONS.has(edge.relation) && edge.relation !== 'calls'),
+    )
+  )
+    return [];
   const groups = new Map<string, string[]>();
   for (const node of nodes) {
     const lastSlash = Option.getOrElse(Str.lastIndexOf('/')(node.path), () => -1);
@@ -319,37 +368,59 @@ function groupNodes(
   }
   return Arr.map([...groups], ([label, members], index) => ({
     diagramId: `g${index + 1}`,
-    label: present(label, 128),
+    label: complete ? label : present(label, 128),
     members,
   }));
 }
 
-function sourceFor(type: DiagramType, evidence: Diagram['evidence']): string {
+function sourceFor(type: DiagramType, evidence: Diagram['evidence'], complete = false): string {
   const {nodes, edges, groups} = evidence;
-  const labels = new Map(Arr.map(nodes, node => [node.diagramId, safeLabel(node.label, node.diagramId)]));
+  const labelFor = complete ? safeCompleteLabel : safeLabel;
+  const labels = new Map(Arr.map(nodes, node => [node.diagramId, labelFor(node.label, node.diagramId)]));
   const flowNode = (id: string) => `  ${id}["${labels.get(id)}"]`;
   switch (type) {
-    case 'architecture':
+    case 'architecture': {
+      const membership = new Map(
+        Arr.flatMap(groups, group => Arr.map(group.members, member => [member, group.diagramId] as const)),
+      );
       return Arr.join(
         [
           'architecture-beta',
-          ...Arr.map(nodes, node => `  service ${node.diagramId}[${labels.get(node.diagramId)}]`),
+          ...Arr.map(groups, group => `  group ${group.diagramId}[${labelFor(group.label, group.diagramId)}]`),
+          ...Arr.map(nodes, node => {
+            const group = membership.get(node.diagramId);
+            return `  service ${node.diagramId}[${labels.get(node.diagramId)}]${group ? ` in ${group}` : ''}`;
+          }),
           ...Arr.map(edges, edge => `  ${edge.source}:R --> L:${edge.target}`),
         ],
         '\n',
       );
-    case 'class':
+    }
+    case 'class': {
+      const members = complete ? Arr.filter(nodes, node => isDiagramMemberKind(node.kind)) : [];
+      const byId = new Map(Arr.map(members, node => [node.diagramId, node] as const));
       return Arr.join(
         [
           'classDiagram',
-          ...Arr.map(nodes, node => `  class ${node.diagramId}["${labels.get(node.diagramId)}"]`),
           ...Arr.map(
-            edges,
-            edge => `  ${edge.source} ${edge.relation === 'implements' ? '..|>' : '--|>'} ${edge.target}`,
+            Arr.filter(nodes, node => !byId.has(node.diagramId)),
+            node => `  class ${node.diagramId}["${labels.get(node.diagramId)}"]`,
           ),
+          ...Arr.map(edges, edge => {
+            const member = byId.get(edge.target);
+            if (member) {
+              const name = safeClassMemberLabel(member.name ?? member.label, member.diagramId);
+              const callable = member.kind === 'method' || member.kind === 'constructor';
+              return `  %% Member ${member.diagramId}\n  ${edge.source} : ${name}${callable ? '()' : ''}`;
+            }
+            if (edge.relation === 'implements' || edge.relation === 'extends')
+              return `  ${edge.source} ${edge.relation === 'implements' ? '..|>' : '--|>'} ${edge.target}`;
+            return `  ${edge.source} --> ${edge.target} : ${edge.relation}`;
+          }),
         ],
         '\n',
       );
+    }
     case 'sequence':
       return Arr.join(
         [
@@ -365,7 +436,7 @@ function sourceFor(type: DiagramType, evidence: Diagram['evidence']): string {
           'flowchart TD',
           ...(groups.length
             ? Arr.flatMap(groups, group => [
-                `  subgraph ${group.diagramId}["${safeLabel(group.label, 'Root')}"]`,
+                `  subgraph ${group.diagramId}["${labelFor(group.label, 'Root')}"]`,
                 ...Arr.map(group.members, flowNode),
                 '  end',
               ])
@@ -375,6 +446,351 @@ function sourceFor(type: DiagramType, evidence: Diagram['evidence']): string {
         '\n',
       );
   }
+}
+
+const EVIDENCE_REQUEST_WORDS = new Set([
+  ...QUESTION_WORDS,
+  'an',
+  'be',
+  'been',
+  'being',
+  'by',
+  'called',
+  'caller',
+  'callers',
+  'derived',
+  'details',
+  'entry',
+  'execution',
+  'external',
+  'feature',
+  'happen',
+  'happens',
+  'implementation',
+  'incoming',
+  'infrastructure',
+  'locally',
+  'implementations',
+  'members',
+  'methods',
+  'or',
+  'outgoing',
+  'reach',
+  'reaches',
+  'request',
+  'resources',
+  'step',
+  'steps',
+  'subclasses',
+  'structs',
+  'topology',
+  'trigger',
+  'triggers',
+  'upstream',
+  'who',
+]);
+const STRUCTURAL_PREDICATE =
+  /^(?:implement(?:s|ed|ing)?|extend(?:s|ed|ing)?|inherit(?:s|ed|ing)?|overrid(?:e|es|den|ing)|deriv(?:e|es|ed|ing))$/iu;
+
+const ARTICLE = /^(?:a|an|the)$/iu;
+
+function subjectAfter(tokens: readonly string[], index: number): number | undefined {
+  const subject = ARTICLE.test(tokens[index] ?? '') ? index + 1 : index;
+  return tokens[subject] === undefined ? undefined : subject;
+}
+
+function explicitSubjectIndex(tokens: readonly string[]): number | undefined {
+  const [first, second] = tokens;
+  if (!first) return undefined;
+  if (second === undefined) return 0;
+  if (/^(?:how|what)$/iu.test(first) && /^(?:do|does|did)$/iu.test(second)) return subjectAfter(tokens, 2);
+  if (tokens.length === 2 && /^(?:show|draw|explain|give)$/iu.test(first)) return 1;
+  const preposition = tokens.at(ARTICLE.test(tokens.at(-2) ?? '') ? -3 : -2);
+  return /^(?:for|from|of)$/iu.test(preposition ?? '') ? tokens.length - 1 : undefined;
+}
+
+function asksForStructuralSources(tokens: readonly string[], predicateIndex: number | undefined): boolean {
+  if (predicateIndex === undefined) return false;
+  if (
+    /^(?:implemented|extended|overridden|inherited)$/iu.test(tokens[predicateIndex] ?? '') &&
+    /^by$/iu.test(tokens[predicateIndex + 1] ?? '')
+  )
+    return true;
+  if (!/^(?:who|what|which)$/iu.test(tokens[0] ?? '')) return false;
+  // A named subject before the predicate is its source. An interrogative and generic type phrase ask for source types.
+  return Arr.every(tokens.slice(1, predicateIndex), token => EVIDENCE_REQUEST_WORDS.has(Str.toLowerCase(token)));
+}
+
+export function describeCodeGraphDiagramQuestion(question: string, type: CodeGraphDiagramType | undefined) {
+  const tokens = subjectTerms(question);
+  const selectors = Arr.filter(tokens, isExplicitSelector);
+  const explicitSubject = explicitSubjectIndex(tokens);
+  const possiblePredicate = Option.getOrUndefined(
+    Arr.findFirstIndex(tokens, (token, index) => index !== explicitSubject && STRUCTURAL_PREDICATE.test(token)),
+  );
+  const inverse = asksForStructuralSources(tokens, possiblePredicate);
+  const object = inverse && possiblePredicate !== undefined ? subjectAfter(tokens, possiblePredicate + 1) : undefined;
+  const cues = Arr.filter(
+    tokens,
+    (token, index) =>
+      index !== explicitSubject && index !== object && !isExplicitSelector(token) && !/[./#:@]/u.test(token),
+  );
+  const prose = Arr.join(cues, ' ');
+  const preferred = intent(cues);
+  const explicitType = type === 'auto' ? undefined : type;
+  const inheritance = /\b(?:inherit(?:s|ance)?|subclasses|derived|base class)\b/iu.test(prose);
+  const behavior = /\b(?:calls?|called|callers?|works?|executes?|execution|reaches?|triggers?|step by step)\b/iu.test(
+    prose,
+  );
+  const structuralArgument =
+    possiblePredicate !== undefined &&
+    Arr.some(
+      tokens,
+      (token, index) =>
+        index !== possiblePredicate &&
+        (index === explicitSubject ||
+          index === object ||
+          (!EVIDENCE_REQUEST_WORDS.has(Str.toLowerCase(token)) && !STRUCTURAL_PREDICATE.test(token))),
+    );
+  const predicateIndex = !behavior && structuralArgument ? possiblePredicate : undefined;
+  const structure =
+    /\b(?:class|type) diagram\b/iu.test(prose) ||
+    (!behavior &&
+      (predicateIndex !== undefined ||
+        inheritance ||
+        /\b(?:class(?:es)?|interfaces?|types?|members?)\b/iu.test(prose)));
+  const domain = structure
+    ? 'types'
+    : preferred === 'architecture' || /\b(?:dependencies|dependency|imports?|resources?)\b/iu.test(prose)
+      ? 'architecture'
+      : !behavior && explicitType === 'class'
+        ? 'types'
+        : !behavior && explicitType === 'architecture'
+          ? 'architecture'
+          : 'behavior';
+  const terms = Arr.filter(
+    tokens,
+    (term, index) =>
+      index === explicitSubject ||
+      (domain === 'types' && predicateIndex !== undefined && index === object) ||
+      (!EVIDENCE_REQUEST_WORDS.has(Str.toLowerCase(term)) && (domain !== 'types' || index !== predicateIndex)),
+  );
+  const named = namedTerm(tokens, Arr.map(terms, Str.toLowerCase));
+  const incoming =
+    (domain === 'types' && predicateIndex !== undefined && inverse) ||
+    /\b(?:incoming|upstream|callers?|called by|who calls|what calls(?!\s+occur\b)|(?:how|what) .{0,50}\breach(?:es)?|entry points? (?:to|for))\b/iu.test(
+      prose,
+    );
+  return {selectors, terms, named, preferred, explicitType, domain, incoming, inheritance} as const;
+}
+
+export type CodeGraphDiagramQuestion = ReturnType<typeof describeCodeGraphDiagramQuestion>;
+
+export function rankCodeGraphDiagramSubject(
+  node: CodeGraphQueryNode,
+  question: CodeGraphDiagramQuestion,
+): readonly [number, number, number] | undefined {
+  if (question.selectors.length) {
+    if (!Arr.some(question.selectors, selector => matchesSelector(node, selector))) return undefined;
+    return [6, 0, 0];
+  }
+  const path = Str.replaceAll('\\', '/')(node.path);
+  const exactPath = Arr.some(question.terms, term => Str.replace(/^\.\//u, '')(term) === path);
+  const qualified = Arr.some(question.terms, term => term === node.qualifiedName && term !== node.name);
+  const exact = Arr.some(question.terms, term => term === node.name || term === node.qualifiedName);
+  const exactPackage = Arr.some(question.terms, term => term === node.packageName);
+  const named = namedMatch(node, question.named);
+  const match = relevance(node, [...new Set(Arr.map(question.terms, Str.toLowerCase))]);
+  const role =
+    question.domain === 'types'
+      ? Number(isDiagramTypeKind(node.kind))
+      : question.domain === 'architecture'
+        ? Number(isDiagramComponentKind(node.kind))
+        : Number(/(?:route|handler|entry|main)$/iu.test(node.name));
+  if (exactPath && (node.kind === 'module' || node.kind === 'file')) return [5, match, role];
+  if (qualified) return [4, match, role];
+  if (named || exact || (exactPackage && node.kind === 'package')) return [3, match, role];
+  if (match === 0 || (!exactPath && Arr.some(question.terms, Str.includes('/')))) return undefined;
+  return [1, match, role];
+}
+
+export function completeDiagramSubject(
+  node: CodeGraphQueryNode,
+): Omit<Diagram['evidence']['nodes'][number], 'diagramId'> {
+  return {
+    id: node.id,
+    label: node.qualifiedName || node.name,
+    kind: node.kind,
+    path: node.path,
+    span: node.span,
+    name: node.name,
+    qualifiedName: node.qualifiedName,
+    ...(node.signature === undefined ? {} : {signature: node.signature}),
+  };
+}
+
+export function hasDiagramSourceSpan(path: string, span: CodeGraphSpan): boolean {
+  return path.length > 0 && validSpan(span);
+}
+
+export function completeDiagramFact(edge: CodeGraphEdge, sourceId: string, targetId: string): Fact | undefined {
+  return edge.id &&
+    hasDiagramSourceSpan(edge.evidencePath, edge.evidenceSpan) &&
+    (edge.provenance === 'declared' || edge.provenance === 'resolved' || edge.provenance === 'syntactic')
+    ? {...edge, sourceId, targetId, provenance: edge.provenance}
+    : undefined;
+}
+
+function completeSequence(facts: readonly Fact[]): readonly Fact[] | undefined {
+  if (!facts.length || Arr.some(facts, edge => edge.relation !== 'calls')) return undefined;
+  const outgoing = new Map(Arr.map(facts, edge => [edge.sourceId, edge] as const));
+  const targets = new Set(Arr.map(facts, edge => edge.targetId));
+  if (outgoing.size !== facts.length || targets.size !== facts.length) return undefined;
+  const starts = Arr.filter([...outgoing.keys()], id => !targets.has(id));
+  if (starts.length !== 1) return undefined;
+  const path: Fact[] = [];
+  let edge = outgoing.get(starts[0]);
+  while (edge) {
+    outgoing.delete(edge.sourceId);
+    path.push(edge);
+    edge = outgoing.get(edge.targetId);
+  }
+  return path.length === facts.length ? path : undefined;
+}
+
+function canRepresentClassDiagram(facts: readonly Fact[], nodes: ReadonlyMap<string, CodeGraphQueryNode>): boolean {
+  const representedMembers = new Set<string>();
+  return (
+    facts.length > 0 &&
+    Arr.every(facts, edge => {
+      const source = nodes.get(edge.sourceId);
+      const target = nodes.get(edge.targetId);
+      if (!source || !target || !isDiagramTypeKind(source.kind)) return false;
+      if (isDiagramTypeKind(target.kind)) return true;
+      if (
+        !isDiagramOwnershipRelation(edge.relation) ||
+        !isDiagramMemberKind(target.kind) ||
+        representedMembers.has(edge.targetId)
+      )
+        return false;
+      representedMembers.add(edge.targetId);
+      return true;
+    })
+  );
+}
+
+function canRepresentArchitectureDiagram(
+  facts: readonly Fact[],
+  nodes: ReadonlyMap<string, CodeGraphQueryNode>,
+  boundaryIds: ReadonlySet<string>,
+): boolean {
+  const representedPairs = new Set<string>();
+  const endpoint = (id: string) => boundaryIds.has(id) || isDiagramComponentKind(nodes.get(id)?.kind ?? '');
+  return (
+    facts.length > 0 &&
+    Arr.every(facts, edge => {
+      const pair = JSON.stringify([edge.sourceId, edge.targetId]);
+      if (
+        (!diagramArchitectureRelations.has(edge.relation) && !isDiagramOwnershipRelation(edge.relation)) ||
+        !endpoint(edge.sourceId) ||
+        !endpoint(edge.targetId) ||
+        representedPairs.has(pair)
+      )
+        return false;
+      representedPairs.add(pair);
+      return true;
+    })
+  );
+}
+
+export function renderCompleteCodeGraphDiagram(input: {
+  readonly question: CodeGraphDiagramQuestion;
+  readonly scope: CodeGraphDiagramScope;
+  readonly freshness: CodeGraphDiagramFreshness;
+  readonly coverage: CodeGraphDiagramCoverage;
+  readonly nodes: ReadonlyMap<string, CodeGraphQueryNode>;
+  readonly boundaryIds: ReadonlySet<string>;
+  readonly facts: readonly Fact[];
+}): CodeGraphDiagramResult {
+  const {question, scope, freshness, coverage, nodes, boundaryIds, facts} = input;
+  const limits = freshness === 'current' ? [] : [`Snapshot freshness is ${freshness}.`];
+  const base = {scope, freshness, coverage, limits};
+  const classFit = question.domain === 'types' && canRepresentClassDiagram(facts, nodes);
+  const architectureFit =
+    question.domain === 'architecture' && canRepresentArchitectureDiagram(facts, nodes, boundaryIds);
+  const sequence = completeSequence(facts);
+  const suitable =
+    question.domain === 'types' && classFit
+      ? 'class'
+      : question.domain === 'architecture' && architectureFit
+        ? 'architecture'
+        : question.preferred === 'sequence' && sequence
+          ? 'sequence'
+          : 'flowchart';
+  const diagramType = question.explicitType ?? suitable;
+  const fits =
+    diagramType === 'class'
+      ? classFit
+      : diagramType === 'architecture'
+        ? architectureFit
+        : diagramType === 'sequence'
+          ? sequence !== undefined && coverage.completeness === 'complete'
+          : true;
+  const build = (type: DiagramType) => {
+    const drawn = type === 'sequence' ? sequence! : facts;
+    const ids = new Set<string>();
+    if (type !== 'sequence' && coverage.subject) ids.add(coverage.subject.id);
+    for (const edge of drawn) {
+      ids.add(edge.sourceId);
+      ids.add(edge.targetId);
+    }
+    const evidenceNodes = Arr.map([...ids], (id, index) => ({
+      ...completeDiagramSubject(nodes.get(id)!),
+      diagramId: `n${index + 1}`,
+      ...(boundaryIds.has(id) ? {evidenceKind: 'boundary' as const} : {}),
+    }));
+    const diagramIds = new Map(Arr.map(evidenceNodes, node => [node.id, node.diagramId] as const));
+    const edges = Arr.map(drawn, edge => ({
+      id: edge.id,
+      source: diagramIds.get(edge.sourceId)!,
+      target: diagramIds.get(edge.targetId)!,
+      relation: edge.relation,
+      provenance: edge.provenance,
+      path: edge.evidencePath,
+      span: edge.evidenceSpan,
+    }));
+    const groups = type === 'flowchart' || type === 'architecture' ? groupNodes(evidenceNodes, nodes, drawn, true) : [];
+    const evidence = {nodes: evidenceNodes, edges, groups};
+    return {diagramType: type, source: sourceFor(type, evidence, true), inferred: type === 'sequence', evidence};
+  };
+  if (coverage.completeness === 'incomplete') {
+    const interrupted = Arr.some(coverage.gaps, gap => gap.kind === 'interrupted');
+    return {
+      ...base,
+      status: 'incomplete',
+      message: interrupted
+        ? 'The graph read stopped before it could establish complete coverage.'
+        : 'The selected snapshot has gaps in the evidence for this subject.',
+      nextAction: interrupted
+        ? 'Retry the diagram for the same subject and graph view.'
+        : 'Check the listed source locations or name a subject within the available graph evidence.',
+      ...(coverage.subject && facts.length ? {diagram: build(fits ? diagramType : 'flowchart')} : {}),
+    };
+  }
+  if (!fits) {
+    return {
+      ...base,
+      status: 'unavailable',
+      message:
+        diagramType === 'sequence'
+          ? 'Static evidence does not establish a single ordered call path.'
+          : `A ${diagramType} diagram cannot represent every relationship for this subject.`,
+      nextAction: 'Request a flowchart for the full relationship evidence.',
+      suggestedType: 'flowchart',
+    };
+  }
+  if (diagramType === 'sequence') limits.push('The sequence shows an inferred path from static calls.');
+  return {...base, status: 'diagram', ...build(diagramType)};
 }
 
 function snapshotLimits(

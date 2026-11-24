@@ -12,6 +12,7 @@ const Scope = Schema.Struct({
   snapshotId: Schema.String,
   commit: Schema.optionalKey(Schema.String),
   viewKey: Schema.optionalKey(Schema.String),
+  project: Schema.optionalKey(Schema.String),
 });
 const Span = Schema.Struct({
   line: Schema.Int,
@@ -25,8 +26,15 @@ const Subject = Schema.Struct({
   kind: Schema.String,
   path: Schema.String,
   span: Span,
+  name: Schema.optionalKey(Schema.String),
+  qualifiedName: Schema.optionalKey(Schema.String),
+  signature: Schema.optionalKey(Schema.String),
 });
-const Node = Schema.Struct({...Subject.fields, diagramId: Schema.String});
+const Node = Schema.Struct({
+  ...Subject.fields,
+  diagramId: Schema.String,
+  evidenceKind: Schema.optionalKey(Schema.Literal('boundary')),
+});
 const Edge = Schema.Struct({
   id: Schema.String,
   source: Schema.String,
@@ -41,24 +49,58 @@ const Group = Schema.Struct({
   label: Schema.String,
   members: Schema.Array(Schema.String),
 });
+const CoverageSite = {
+  label: Schema.String,
+  edgeId: Schema.optionalKey(Schema.String),
+  path: Schema.optionalKey(Schema.String),
+  span: Schema.optionalKey(Span),
+};
+const Coverage = Schema.Struct({
+  completeness: Schema.Literals(['complete', 'incomplete', 'undetermined']),
+  subject: Schema.optionalKey(Subject),
+  boundaries: Schema.Array(
+    Schema.Struct({
+      ...CoverageSite,
+      kind: Schema.Literals(['external', 'outside-scope']),
+    }),
+  ),
+  gaps: Schema.Array(
+    Schema.Struct({
+      ...CoverageSite,
+      kind: Schema.Literals(['unresolved-target', 'missing-evidence', 'partial-project', 'interrupted']),
+    }),
+  ),
+});
 const Base = {
   scope: Scope,
   freshness: Freshness,
   limits: Schema.Array(Schema.String),
+  coverage: Schema.optionalKey(Coverage),
 };
+const Diagram = Schema.Struct({
+  diagramType: DiagramType,
+  source: Schema.String,
+  inferred: Schema.Boolean,
+  evidence: Schema.Struct({
+    nodes: Schema.Array(Node),
+    edges: Schema.Array(Edge),
+    groups: Schema.Array(Group),
+  }),
+});
 
 export const CodeGraphDiagramResultSchema = Schema.Union([
   Schema.Struct({
     ...Base,
     status: Schema.Literal('diagram'),
-    diagramType: DiagramType,
-    source: Schema.String,
-    inferred: Schema.Boolean,
-    evidence: Schema.Struct({
-      nodes: Schema.Array(Node),
-      edges: Schema.Array(Edge),
-      groups: Schema.Array(Group),
-    }),
+    ...Diagram.fields,
+  }),
+  Schema.Struct({
+    ...Base,
+    coverage: Coverage,
+    status: Schema.Literal('incomplete'),
+    message: Schema.String,
+    nextAction: Schema.String,
+    diagram: Schema.optionalKey(Diagram),
   }),
   Schema.Struct({
     ...Base,
@@ -78,3 +120,4 @@ export const CodeGraphDiagramResultSchema = Schema.Union([
 export type CodeGraphDiagramResult = typeof CodeGraphDiagramResultSchema.Type;
 export type CodeGraphDiagramScope = typeof Scope.Type;
 export type CodeGraphDiagramFreshness = typeof Freshness.Type;
+export type CodeGraphDiagramCoverage = typeof Coverage.Type;

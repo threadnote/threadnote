@@ -9,7 +9,7 @@ import {
 import {configureConnection} from '../session.js';
 import {CODE_GRAPH_FILE_BLOB_AUTHORITY_TABLE} from '../cache/authority.js';
 import {CODE_GRAPH_STORED_FACT_CODEC, storedCodeGraphFactRawBytesSql} from '../../fact/storage.js';
-import {type CodeGraphProvenance, CodeGraphStoreError} from '../../types.js';
+import {type CodeGraphProvenance, type CodeGraphRelation, CodeGraphStoreError} from '../../types.js';
 import {sqlTextOption} from '../utilities.js';
 import {type CodeGraphSqlQueryStatement} from '../visualization_sql.js';
 import * as EffectString from 'effect/String';
@@ -770,6 +770,113 @@ function effectiveAdjacentEdgesCte(
     text: `WITH adjacent_edges AS (
       ${EffectArray.join(branches, direction === 'both' ? '\n      UNION\n      ' : '\n      UNION ALL\n      ')}
     )`,
+  };
+}
+
+export function codeGraphDiagramAdjacentPageStatement(
+  snapshotId: string,
+  baseSnapshotId: string | undefined,
+  nodeId: string,
+  direction: 'incoming' | 'outgoing',
+  relations: readonly CodeGraphRelation[],
+  afterId: string,
+  limit: number,
+): CodeGraphSqlQueryStatement {
+  const {column, index} =
+    direction === 'incoming'
+      ? {column: 'target_id', index: 'edges_target_resolved'}
+      : {column: 'source_id', index: 'edges_source'};
+  const keyBranches: string[] = [];
+  const parameters: (string | number)[] = [];
+  for (const id of baseSnapshotId === undefined ? [snapshotId] : [snapshotId, baseSnapshotId]) {
+    for (const relation of new Set(relations)) {
+      keyBranches.push(`SELECT * FROM (
+        SELECT id FROM edges INDEXED BY ${index}
+        WHERE snapshot_id = ? AND ${column} = ? AND ${column} IS NOT NULL AND relation = ? AND id > ?
+        ORDER BY id LIMIT ?
+      )`);
+      parameters.push(id, nodeId, relation, afterId, limit);
+    }
+  }
+  return {
+    // The key cursor advances even when an entire page is shadowed, deleted, or rejected by provenance.
+    text: `WITH page_keys AS MATERIALIZED (
+      SELECT id FROM (${EffectArray.join(keyBranches, '\nUNION\n')}) ORDER BY id LIMIT ?
+    )
+    SELECT page_keys.id AS cursor_id, edge.*
+    FROM page_keys
+    LEFT JOIN edges AS edge
+      ON edge.id = page_keys.id AND edge.snapshot_id = COALESCE(
+        (SELECT snapshot_id FROM edges WHERE snapshot_id = ? AND id = page_keys.id),
+        CASE WHEN NOT EXISTS (
+          SELECT 1 FROM snapshot_edge_deletions WHERE snapshot_id = ? AND edge_id = page_keys.id
+        ) THEN ? END
+      )
+      AND edge.${column} = ?
+      AND edge.relation IN (SELECT value FROM json_each(?))
+      AND edge.provenance IN ('declared', 'resolved', 'syntactic')
+    ORDER BY page_keys.id`,
+    parameters: [...parameters, limit, snapshotId, snapshotId, baseSnapshotId ?? '', nodeId, JSON.stringify(relations)],
+  };
+}
+
+export function codeGraphDiagramExactSubjectPageStatement(
+  snapshotId: string,
+  baseSnapshotId: string | undefined,
+  terms: readonly string[],
+  afterId: string,
+  limit: number,
+  packageName?: string,
+): CodeGraphSqlQueryStatement {
+  const branches: string[] = [];
+  const parameters: (string | number)[] = [];
+  const selectors = JSON.stringify(terms);
+  for (const field of EXACT_SYMBOL_FIELDS) {
+    for (const id of baseSnapshotId === undefined ? [snapshotId] : [snapshotId, baseSnapshotId]) {
+      branches.push(`SELECT key.value AS id
+        FROM json_each(?) AS term
+        CROSS JOIN json_each((
+          SELECT json_group_array(id) FROM (
+            SELECT candidate.id FROM symbols AS candidate INDEXED BY ${field.index}
+            WHERE candidate.snapshot_id = ? AND candidate.${field.column} = term.value COLLATE NOCASE
+              AND candidate.id > ?
+            ORDER BY candidate.id LIMIT ?
+          )
+        )) AS key`);
+      parameters.push(selectors, id, afterId, limit);
+    }
+  }
+  return {
+    text: `WITH page_keys AS MATERIALIZED (
+      SELECT id FROM (${EffectArray.join(branches, '\nUNION\n')}) ORDER BY id LIMIT ?
+    )
+    SELECT page_keys.id AS cursor_id, symbol.*
+    FROM page_keys
+    LEFT JOIN symbols AS symbol
+      ON symbol.id = page_keys.id AND symbol.snapshot_id = COALESCE(
+        (SELECT snapshot_id FROM symbols WHERE snapshot_id = ? AND id = page_keys.id),
+        CASE WHEN NOT EXISTS (
+          SELECT 1 FROM snapshot_symbol_deletions WHERE snapshot_id = ? AND symbol_id = page_keys.id
+        ) THEN ? END
+      )
+      AND (? = '' OR symbol.package_name = ?)
+      AND EXISTS (
+        SELECT 1 FROM json_each(?) AS term
+        WHERE symbol.name = term.value COLLATE NOCASE
+           OR symbol.qualified_name = term.value COLLATE NOCASE
+           OR symbol.path = term.value COLLATE NOCASE
+      )
+    ORDER BY page_keys.id`,
+    parameters: [
+      ...parameters,
+      limit,
+      snapshotId,
+      snapshotId,
+      baseSnapshotId ?? '',
+      packageName ?? '',
+      packageName ?? '',
+      selectors,
+    ],
   };
 }
 
