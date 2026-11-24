@@ -8,24 +8,24 @@ The evaluation did not establish the preregistered evidence for default fusion.
 
 Each count represents questions with every reference session inside the cutoff. A partial reference set scores zero.
 
-| Method | First five | First ten |
-| --- | ---: | ---: |
-| Offline · hybrid | 374/450 (83.1%) | 413/450 (91.8%) |
-| Offline · SQLite BM25 | 377/450 (83.8%) | 408/450 (90.7%) |
-| Offline · fusion | 382/450 (84.9%) | 414/450 (92.0%) |
-| Product CLI · hybrid | 373/450 (82.9%) | 407/450 (90.4%) |
+| Method                         |      First five |       First ten |
+| ------------------------------ | --------------: | --------------: |
+| Offline · hybrid               | 374/450 (83.1%) | 413/450 (91.8%) |
+| Offline · SQLite BM25          | 377/450 (83.8%) | 408/450 (90.7%) |
+| Offline · fusion               | 382/450 (84.9%) | 414/450 (92.0%) |
+| Product CLI · hybrid           | 373/450 (82.9%) | 407/450 (90.4%) |
 | Product CLI · candidate fusion | 376/450 (83.6%) | 413/450 (91.8%) |
 
 ## Paired comparisons
 
 Each row compares fusion with hybrid on the same questions. The four result groups sum to the number of questions.
 
-| Comparison | Cutoff | Both | Fusion only | Hybrid only | Neither |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Offline | 5 | 367 | 15 | 7 | 61 |
-| Offline | 10 | 410 | 4 | 3 | 33 |
-| Product CLI | 5 | 366 | 10 | 7 | 67 |
-| Product CLI | 10 | 405 | 8 | 2 | 35 |
+| Comparison  | Cutoff | Both | Fusion only | Hybrid only | Neither |
+| ----------- | -----: | ---: | ----------: | ----------: | ------: |
+| Offline     |      5 |  367 |          15 |           7 |      61 |
+| Offline     |     10 |  410 |           4 |           3 |      33 |
+| Product CLI |      5 |  366 |          10 |           7 |      67 |
+| Product CLI |     10 |  405 |           8 |           2 |      35 |
 
 The primary criterion required more complete sets at five and a one-sided exact McNemar p-value below 0.05.
 The secondary criterion required fusion to match or exceed hybrid at ten.
@@ -39,10 +39,10 @@ The product CLI default did not meet the combined criteria. The one-sided exact 
 These counts describe retained evidence from the frozen study at export time.
 Operational failures are outside the scored counts. A case recovered when a later valid receipt used the same frozen inputs.
 
-| Comparison | Valid case receipts | Recorded unscored attempts | Recovered attempts | Unresolved attempts |
-| --- | ---: | ---: | ---: | ---: |
-| Offline | 450 | 0 | 0 | 0 |
-| Product CLI | 450 | 1 | 1 | 0 |
+| Comparison  | Valid case receipts | Recorded unscored attempts | Recovered attempts | Unresolved attempts |
+| ----------- | ------------------: | -------------------------: | -----------------: | ------------------: |
+| Offline     |                 450 |                          0 |                  0 |                   0 |
+| Product CLI |                 450 |                          1 |                  1 |                   0 |
 
 The provenance file identifies affected cases and records the diagnostic categories.
 

@@ -36,9 +36,7 @@
         "case_index": 176,
         "question_id": "b6019101",
         "count": 1,
-        "categories": [
-          "recall_operational_warning"
-        ],
+        "categories": ["recall_operational_warning"],
         "status": "recovered",
         "receipt_sha256": "c14c1163aefec7bcf4b316fab5a5c849a7ae7a369af2c2eea7d7d2499e771463"
       }
