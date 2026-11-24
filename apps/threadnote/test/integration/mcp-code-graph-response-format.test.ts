@@ -200,11 +200,17 @@ describe('MCP code graph response format', () => {
       const tool = EffectOption.getOrUndefined(
         EffectArray.findFirst((await client.listTools()).tools, candidate => candidate.name === 'inspect_code_graph'),
       );
-      expect(JSON.stringify(tool?.inputSchema)).toContain('responseFormat');
-      expect(JSON.stringify(tool?.inputSchema)).not.toContain('readTimeoutMilliseconds');
-      expect(JSON.stringify(tool?.inputSchema)).toContain('impact agent defaults to 1250');
-      expect(JSON.stringify(tool?.inputSchema)).toContain('Ceiling:');
-      expect(JSON.stringify(tool?.inputSchema)).toContain('agent shows 3 unless set');
+      expect(tool?.inputSchema.properties).toMatchObject({
+        budgetTokens: {
+          description: expect.stringMatching(/\bimpact agent\b[^.\d]*\b1250\b/iu),
+          maximum: 1_500,
+          minimum: 1,
+          type: 'integer',
+        },
+        nodeLimit: {description: expect.stringMatching(/\bagent\b[^.\d]*\b3\b/iu)},
+        responseFormat: {enum: ['dual', 'text', 'agent']},
+      });
+      expect(tool?.inputSchema.properties).not.toHaveProperty('readTimeoutMilliseconds');
 
       let agentBytes = 0;
       let dualBytes = 0;
