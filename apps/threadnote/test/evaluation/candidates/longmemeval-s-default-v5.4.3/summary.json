@@ -1,0 +1,51 @@
+{
+  "release": "v5.4.3",
+  "configuration": "released default",
+  "dataset_questions": 500,
+  "eligible_questions": 470,
+  "excluded_abstention_questions": 30,
+  "completed": 470,
+  "unresolved": 0,
+  "native_no_answer_on_eligible_queries": 0,
+  "queries_with_weighted_ranking_reported": 0,
+  "question_session_instances": 22419,
+  "reference_session_instances": 890,
+  "all_reference_sessions_retrieved": {
+    "5": {
+      "questions": 384,
+      "denominator": 470,
+      "percentage": 81.7
+    },
+    "10": {
+      "questions": 416,
+      "denominator": 470,
+      "percentage": 88.51
+    }
+  },
+  "paired_with_v5_4_4": {
+    "5": {
+      "both": 381,
+      "only_5_4_3": 3,
+      "only_5_4_4": 16,
+      "neither": 70,
+      "questions": 470,
+      "v5_4_3": 384,
+      "v5_4_4": 397,
+      "net_change_in_questions": 13,
+      "change_in_percentage_points": 2.77,
+      "mcnemar_exact_two_sided_p": 0.00442505
+    },
+    "10": {
+      "both": 416,
+      "only_5_4_3": 0,
+      "only_5_4_4": 4,
+      "neither": 50,
+      "questions": 470,
+      "v5_4_3": 416,
+      "v5_4_4": 420,
+      "net_change_in_questions": 4,
+      "change_in_percentage_points": 0.85,
+      "mcnemar_exact_two_sided_p": 0.125
+    }
+  }
+}
