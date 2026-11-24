@@ -1,0 +1,13 @@
+{
+  "protocol": "LongMemEval-S actual CLI confirmation v1",
+  "frozen_holdout_sha256": "dc99b8a78f6489a83f01831c01cbad852b225c212872d3d066fdb453eb3c75c0",
+  "cases": 450,
+  "project": "longmemeval",
+  "limit": "Unset CLI limit, with the product default of 12",
+  "candidate": "Unset THREADNOTE_RECALL_RANKING",
+  "control": "THREADNOTE_RECALL_RANKING=hybrid",
+  "comparison": "Run both modes on the same copied and rebuilt official case home with the exact same pinned executable and question. Disable scope inference. Keep the default relevance threshold.",
+  "primary": "Require more complete reference sets at five with unset ranking and a one-sided exact paired McNemar p-value below 0.05.",
+  "secondary": "Require at least as many complete reference sets at ten with unset ranking as with hybrid.",
+  "coverage": "Require all 450 valid pairs. Retry only cases with setup or operational failures. Preserve the protocol if a case fails."
+}

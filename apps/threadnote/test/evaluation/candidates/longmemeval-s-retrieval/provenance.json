@@ -1,0 +1,60 @@
+{
+  "evidence_format": 1,
+  "status": "complete",
+  "frozen_file_sha256": {
+    "holdout-protocol.json": "dc99b8a78f6489a83f01831c01cbad852b225c212872d3d066fdb453eb3c75c0",
+    "product-protocol.json": "209bd84325f748a25371f113d89b21bfba17b4bc81da577f9e3338f9d9809c65",
+    "holdout-manifest.json": "1cd36f4ef7424095a858ada5fdb89c936e1d49975ec92e00008ee7f3c72d98c9"
+  },
+  "product": {
+    "product_protocol_sha256": "209bd84325f748a25371f113d89b21bfba17b4bc81da577f9e3338f9d9809c65",
+    "official_manifest_sha256": "1cd36f4ef7424095a858ada5fdb89c936e1d49975ec92e00008ee7f3c72d98c9",
+    "executable_sha256": "41fdbf9262e4bfd46560e9cffc519a91d66cd107c06b51cfd1f46f36ee288fac",
+    "version": "threadnote v5.4.4-local.g6c629495a721b1bac1bc983a2a0a1dc2fb3e2b7a",
+    "driver_sha256": "49ae26c801c9d7ac7a356a046af99f378018d18e9462feec22d88ade45b6ac50",
+    "helper_sha256": "31cbe579c7dd0ca747d7c703a174f687753297d485fbc12dbbedb98ac0b3b649",
+    "storage_adapter_sha256": "599804e888d53e2a089d51e46049264e5fa98cce6374862a4d8e71e2558575f3",
+    "project": "longmemeval",
+    "limit": "unset",
+    "threshold": "unset",
+    "infer_scope": false
+  },
+  "model": {
+    "id": "bge-small-en-v1.5-q8",
+    "sha256": "f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804"
+  },
+  "holdout_driver_commit": "78d0b32ad6044c267a9dbb2f2816a3ff89ba2e69",
+  "independent_reference_sha256": "0611928798a249402c4dc4344bb79568ddc3c78e5d7fb2476297a70be97bd368",
+  "receipt_hash": "Source receipt SHA-256 covers its UTF-8 JSON with sorted keys, compact separators, Unicode preserved, and the row_sha256 field omitted.",
+  "pairing": "Each product receipt includes the corresponding offline receipt digest. Each rankings row retains both source digests and this cross-reference.",
+  "input_hash": "The holdout manifest records the input digest from the benchmark adapter. Each product receipt also records the SHA-256 of the UTF-8 question.",
+  "export": "The data projection contains the fields needed to audit retrieval scores. Source receipt digests identify the original local records.",
+  "operational_attempts": {
+    "offline": [],
+    "cli": [
+      {
+        "case_index": 176,
+        "question_id": "b6019101",
+        "count": 1,
+        "categories": [
+          "recall_operational_warning"
+        ],
+        "status": "recovered",
+        "receipt_sha256": "c14c1163aefec7bcf4b316fab5a5c849a7ae7a369af2c2eea7d7d2499e771463"
+      }
+    ]
+  },
+  "operational_attempt_evidence": "The exporter counts errors from retained official case receipts and offline runner status. It uses diagnostic categories and counts only the attempts that this evidence records.",
+  "excluded_offline_setup": [
+    {
+      "count": 1,
+      "category": "temporary_directory_cleanup_failure",
+      "manifest_sha256": "de8884df163c26a0ad0cd0b3ee753498a859d8158d1e9493f79d2c9569f23ed8",
+      "status": "excluded_setup_rehearsal"
+    }
+  ],
+  "source_summary_file_sha256": {
+    "offline": "69946f0fd9a3bd6a9ea79a221b4fcb8de6918a7c77110ea34ea7c7f55e54b452",
+    "cli": "e044281811306a7a322e41ff8df0f05724a3bfe9dc420f5cbe57514578e3e430"
+  }
+}
