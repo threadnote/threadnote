@@ -110,7 +110,7 @@ import {
 } from './recall/session_closeout.js';
 import {candidateReviewResult, candidateReviewStructuredContent} from './recall/candidate_review_response.js';
 import {memoryReadRecoveryForRequestedUri, memoryReadRecoveryText} from '@threadnote/memory/read/recovery';
-import {RECALL_RANKER_VERSION} from '@threadnote/recall/rank';
+import {recallOrderingVersion} from '@threadnote/recall/rank';
 import {parseRecallMemoryConnectionInput} from '@threadnote/recall/memory/connections';
 import type {MemoryRelationType} from '@threadnote/memory/document';
 import {
@@ -1473,7 +1473,7 @@ function runRecallTool(
                 notices: responseNotices,
                 warnings: operationalWarnings,
                 queryExpansions: expansionQueries,
-                rankerVersion: RECALL_RANKER_VERSION,
+                rankerVersion: recallOrderingVersion(recallSections.ranked[0]),
                 results: recallSections.ranked.slice(0, params.nodeLimit ?? 12),
               },
               params,

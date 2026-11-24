@@ -116,6 +116,8 @@ export interface RecallMcpMemoryConnections {
 export interface RecallMcpResult {
   readonly aliasCount?: number;
   readonly aliases?: readonly string[];
+  /** Ordering score from normalized body BM25 and dense evidence. Available with ranking details. */
+  readonly blendScore?: number;
   readonly category: RecallHit['category'];
   readonly external?: {
     readonly provider: ExternalProvider;
@@ -126,6 +128,7 @@ export interface RecallMcpResult {
     readonly coverage: ExternalResourceMetadata['coverage'];
   };
   readonly confidence: number;
+  /** Native rank before any closing blend. */
   readonly finalScore?: number;
   readonly omittedAliases?: number;
   readonly rankWarnings?: RecallHit['rankWarnings'];
@@ -410,9 +413,13 @@ export function renderRecallMcpAgentText(
     for (const warning of result.warnings ?? []) {
       lines.push(`   Warning: ${oneLine(warning.message)} ${oneLine(warning.remediation)}`);
     }
+    if (result.blendScore !== undefined) {
+      lines.push(`   Body BM25 and dense blend rank: ${roundedConfidence(result.blendScore)}.`);
+    }
     if (result.finalScore !== undefined || result.reasons !== undefined || result.signals !== undefined) {
+      const details = result.blendScore === undefined ? 'Ranking details' : 'Native ranking details';
       lines.push(
-        `   Ranking details: ${scalar({
+        `   ${details}: ${scalar({
           ...(result.finalScore === undefined ? {} : {finalScore: result.finalScore}),
           ...(result.reasons === undefined ? {} : {reasons: result.reasons}),
           ...(result.signals === undefined ? {} : {signals: result.signals}),
@@ -731,6 +738,7 @@ function renderResult(hit: RecallHit, explain: boolean): RecallMcpResult {
   if (!explain) return compact;
   return {
     ...compact,
+    ...(hit.blendScore === undefined ? {} : {blendScore: hit.blendScore}),
     finalScore: hit.finalScore,
     reasons: hit.rankReasons,
     signals: hit.rankSignals,

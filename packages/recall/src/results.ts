@@ -282,6 +282,8 @@ export const RECALL_CATEGORY_ORDER = ['memories', 'resources', 'skills'] as cons
 export type RecallCategory = (typeof RECALL_CATEGORY_ORDER)[number];
 
 export interface RecallHit {
+  /** Normalized body BM25 and dense score used for closing order. */
+  readonly blendScore?: number;
   readonly category: RecallCategory;
   readonly contextType: string;
   readonly equivalentUris?: readonly string[];
@@ -301,6 +303,7 @@ export interface RecallHit {
    * semantic hits.
    */
   readonly exactTerms?: readonly string[];
+  /** Native rank before any closing blend. */
   readonly finalScore?: number;
   readonly rankReasons?: readonly RecallReason[];
   readonly rankSignals?: RecallSignals;
@@ -684,7 +687,12 @@ function renderRecallHits(
       : undefined;
   }
   const lines = EffectArray.flatMap(shown, (hit, index) => {
-    const finalScorePart = hit.finalScore === undefined ? undefined : `rank ${hit.finalScore.toFixed(2)}`;
+    const finalScorePart =
+      hit.blendScore !== undefined
+        ? `blend rank ${hit.blendScore.toFixed(2)}`
+        : hit.finalScore === undefined
+          ? undefined
+          : `rank ${hit.finalScore.toFixed(2)}`;
     const scorePart = hit.score > 0 ? `score ${hit.score.toFixed(2)}` : undefined;
     const exactLabel = hit.score > 0 ? 'exact' : 'keyword-only';
     const exactPart = hit.exactTerms?.length ? `${exactLabel}: ${EffectArray.join(hit.exactTerms, ', ')}` : undefined;
@@ -1008,6 +1016,7 @@ function hybridRankRecallHits(
             }
             return {
               ...hit,
+              ...(ranked.blendScore === undefined ? {} : {blendScore: ranked.blendScore}),
               equivalentUris: ranked.candidate.equivalentUris,
               ...(isExternalResourceUri(ranked.candidate.uri) && ranked.candidate.externalSource !== undefined
                 ? {

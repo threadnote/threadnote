@@ -60,6 +60,7 @@ const signals = Schema.Struct({
   workspace: finite,
 });
 const hitSchema = Schema.Struct({
+  blendScore: optional(finite),
   category: Schema.Literals(['memories', 'resources', 'skills']),
   contextType: Schema.String,
   equivalentUris: optional(strings),
