@@ -940,6 +940,21 @@ describe('Threadnote MCP toolsets', () => {
     );
   });
 
+  it('initializes legacy stdio tools without an available temporary directory', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'threadnote-mcp-missing-tmp-'));
+    try {
+      await withMcpClient(
+        async client => {
+          const tools = await client.listTools();
+          expect(EffectArray.some(tools.tools, tool => tool.name === 'recall_context')).toBe(true);
+        },
+        {environment: {TMPDIR: join(root, 'missing')}, toolset: 'core'},
+      );
+    } finally {
+      await rm(root, {force: true, recursive: true});
+    }
+  });
+
   it('advertises bounded Threadnote resource discovery without enumerating private memories', async () => {
     await withMcpClient(
       async client => {
@@ -949,12 +964,16 @@ describe('Threadnote MCP toolsets', () => {
         const templates = await client.listResourceTemplates();
         expect(templates.resourceTemplates).toEqual([
           expect.objectContaining({
+            name: 'Threadnote diagram part',
+            uriTemplate: 'threadnote://graph-diagram/{id}/{part}',
+          }),
+          expect.objectContaining({
             mimeType: 'text/plain; charset=utf-8',
             name: 'Threadnote canonical resource',
             uriTemplate: 'threadnote://{+resourcePath}',
           }),
         ]);
-        expect(templates.resourceTemplates[0]?._meta).toEqual({
+        expect(templates.resourceTemplates[1]?._meta).toEqual({
           'threadnote.io/max-resource-bytes': MCP_RESOURCE_READ_MAX_BYTES,
         });
       },

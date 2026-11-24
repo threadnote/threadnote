@@ -1,9 +1,18 @@
 import {Array as EffectArray} from 'effect';
+import * as BunServices from '@effect/platform-bun/BunServices';
+import {TestClock} from 'effect/testing';
+import {provideTestLayer} from '../helpers/effect-layer.js';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {it as effectIt} from '@effect/vitest';
 import {TestError} from '@threadnote/testing/test-error';
 import {describe, expect, it} from '@effect/vitest';
-import {Effect, Predicate} from 'effect';
+import {Effect, FileSystem, Layer, Option, Path, Predicate} from 'effect';
+import {SystemInfo} from '@threadnote/platform/system';
+import {sha256HexSync} from '@threadnote/platform/sha256';
+import {CommandExecutor} from '@threadnote/platform/command';
+import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import {EffectMcpServerAdapter} from '@threadnote/threadnote/effect/ai/mcp';
+import type {CodeGraphDiagramResult} from '@threadnote/graph/query/diagram_contract';
 import * as FC from 'fast-check';
 import {
   codeGraphAnalysisMcpResponse,
@@ -32,7 +41,7 @@ import {
 } from '../../src/mcp/server/code_graph/ready_read.js';
 import {analyzeCodeGraph, type CodeGraphStructuralRelationshipGroup} from '@threadnote/graph/analysis';
 import type {CodeGraphProgress, CodeGraphQueryResult} from '@threadnote/graph/types';
-import type {CodeGraphRefreshStatus} from '@threadnote/graph/watcher';
+import {CodeGraphWatcher, type CodeGraphRefreshStatus} from '@threadnote/graph/watcher';
 import {
   codeGraphInspectionNeedsReadyAttachment,
   type CodeGraphStatusObservation,
@@ -40,7 +49,8 @@ import {
 import {measureAgentToolResponse} from '@threadnote/protocol/agent-response';
 import {formatCodeGraphMcpResponse} from '@threadnote/threadnote/mcp/code_graph_projection';
 import {codeGraphDiagramMcpResponse} from '../../src/mcp/code_graph_diagram_projection.js';
-import {codeGraphRefreshContinuityWarning} from '../../src/mcp/server/code_graph.js';
+import {makeCodeGraphDiagramResources} from '../../src/mcp/code_graph_diagram_resource.js';
+import {codeGraphRefreshContinuityWarning, registerCodeGraphTool} from '../../src/mcp/server/code_graph.js';
 import {
   analysisEdge,
   analysisSnapshot,
@@ -383,38 +393,180 @@ describe('MCP code graph indexing progress', () => {
     {fastCheck: {numRuns: 250}},
   );
 
-  it('serves stale non-strict evidence with one bounded path-free recovery warning', () => {
-    const result = {...verboseCodeGraphResult(), freshness: 'stale' as const, warnings: []};
-    const deferred = {
-      ...deferredStatus('no-space'),
-      privateNativeDetail: '/Users/private/graph.sqlite',
-    };
-    const continued = codeGraphResultWithRefreshContinuity(result, deferred);
+  effectIt.effect('serves stale non-strict evidence with one bounded path-free recovery warning', () =>
+    Effect.gen(function* () {
+      const result = {...verboseCodeGraphResult(), freshness: 'stale' as const, warnings: []};
+      const deferred = {
+        ...deferredStatus('no-space'),
+        privateNativeDetail: '/Users/private/graph.sqlite',
+      };
+      const continued = codeGraphResultWithRefreshContinuity(result, deferred);
 
-    expect(continued.freshness).toBe('stale');
-    expect(continued.snapshot).toBe(result.snapshot);
-    expect(continued.warnings).toHaveLength(1);
-    expect(continued.warnings[0]).toContain('no-space');
-    expect(continued.warnings[0]).toContain('Free storage space');
-    expect(continued.warnings[0].length).toBeLessThanOrEqual(320);
-    expect(JSON.stringify(continued)).not.toContain('/Users/private');
-    expect(codeGraphResultWithRefreshContinuity(continued, deferred)).toBe(continued);
+      expect(continued.freshness).toBe('stale');
+      expect(continued.snapshot).toBe(result.snapshot);
+      expect(continued.warnings).toHaveLength(1);
+      expect(continued.warnings[0]).toContain('no-space');
+      expect(continued.warnings[0]).toContain('Free storage space');
+      expect(continued.warnings[0].length).toBeLessThanOrEqual(320);
+      expect(JSON.stringify(continued)).not.toContain('/Users/private');
+      expect(codeGraphResultWithRefreshContinuity(continued, deferred)).toBe(continued);
 
-    const diagram = codeGraphDiagramMcpResponse(
-      result,
-      'Show the unknown subject.',
-      undefined,
-      800,
-      'dual',
-      codeGraphRefreshContinuityWarning(deferred),
-    );
-    expect(diagram.structuredContent).toMatchObject({
-      status: 'unavailable',
-      limits: expect.arrayContaining([expect.stringContaining('Free storage space')]),
-    });
-    expect(JSON.stringify(diagram)).toContain('no-space');
-    expect(JSON.stringify(diagram)).not.toContain('/Users/private');
-  });
+      const inline: CodeGraphDiagramResult = {
+        status: 'unavailable',
+        scope: {
+          repositoryId: result.repository.repositoryId,
+          repositoryName: result.repository.displayName,
+          snapshotId: result.snapshot.id,
+        },
+        freshness: 'stale',
+        limits: [],
+        message: 'No evidence.',
+        nextAction: 'Name a subject.',
+        coverage: {
+          completeness: 'undetermined',
+          boundaries: [
+            {
+              kind: 'external',
+              label: 'dependency',
+              path: 'src/file.ts',
+              span: {line: 3, column: 0, endLine: 3, endColumn: 9},
+            },
+          ],
+          gaps: [
+            {
+              kind: 'unresolved-target',
+              label: 'missing',
+              path: 'src/file.ts',
+              span: {line: 7, column: 0, endLine: 7, endColumn: 9},
+            },
+          ],
+        },
+      };
+      const diagram = yield* codeGraphDiagramMcpResponse(
+        {
+          inline,
+          scope: inline.scope,
+          status: inline.status,
+          freshness: inline.freshness,
+          filename: '',
+          bytes: 0,
+          sha256: '',
+        },
+        800,
+        'dual',
+        undefined,
+        codeGraphRefreshContinuityWarning(deferred),
+      );
+      expect(diagram).toMatchObject({
+        structuredContent: {
+          status: 'unavailable',
+          limits: expect.arrayContaining([expect.stringContaining('Free storage space')]),
+        },
+      });
+      expect(JSON.stringify(diagram)).toContain('no-space');
+      expect(JSON.stringify(diagram)).not.toContain('/Users/private');
+      expect(textContent(diagram.content[0])).toContain('Boundary "dependency" "src/file.ts":3');
+      expect(textContent(diagram.content[0])).toContain('Gap "missing" "src/file.ts":7');
+    }),
+  );
+
+  effectIt.effect('renews diagram parts during retrieval and releases expired and scoped resources', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const published = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const resources = yield* makeCodeGraphDiagramResources();
+          expect(yield* fs.exists(resources.directory)).toBe(false);
+          const directory = yield* resources.prepareDirectory;
+          const receipt = {
+            status: 'unavailable' as const,
+            scope: {repositoryId: 'repo', repositoryName: 'Fixture', snapshotId: 'snapshot'},
+            freshness: 'current' as const,
+          };
+          const publish = Effect.gen(function* () {
+            const filename = path.join(directory, 'candidate.json');
+            const bytes = new TextEncoder().encode('fixture diagram bytes');
+            yield* fs.writeFile(filename, bytes, {mode: 0o600});
+            return yield* resources.publish({
+              ...receipt,
+              filename,
+              bytes: bytes.byteLength,
+              sha256: sha256HexSync(bytes),
+            });
+          });
+          const expiring = yield* publish;
+          const expiredUri = expiring.resource.uriPrefix + '1';
+          yield* TestClock.adjust('9 minutes');
+          expect((yield* resources.readPart(expiredUri))?.uri).toBe(expiredUri);
+          yield* TestClock.adjust('2 minutes');
+          expect((yield* resources.readPart(expiredUri))?.uri).toBe(expiredUri);
+          yield* TestClock.adjust('10 minutes');
+          expect(yield* resources.readPart(expiredUri)).toBeUndefined();
+          const live = yield* publish;
+          return {resources, uri: live.resource.uriPrefix + '1'};
+        }),
+      );
+      expect(yield* fs.exists(published.resources.directory)).toBe(false);
+      expect(yield* published.resources.readPart(published.uri)).toBeUndefined();
+    }).pipe(provideTestLayer(SystemInfo.layer.pipe(Layer.provideMerge(BunServices.layer)))),
+  );
+
+  effectIt.effect('reports an active writer when a Mermaid query has no ready graph', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const cwd = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-diagram-writer-'});
+      const manifestPath = path.join(cwd, 'manifest.json');
+      const server = new EffectMcpServerAdapter('graph-writer-fixture', '1.0.0', 'Test server.');
+      registerCodeGraphTool(server, {
+        account: 'local',
+        agentContextHome: cwd,
+        agentId: 'test',
+        manifestPath,
+        user: 'test',
+      });
+      let observed = 0;
+      const fixture = Layer.merge(
+        Layer.mock(CodeGraphWatcher, {
+          status: (key, target) =>
+            Effect.sync(() => {
+              observed += 1;
+              expect(key).toBe('worktree');
+              expect(target?.cwd).toBe(cwd);
+              return Option.some({
+                ...indexingStatus(60_000),
+                progress: {phase: 'waiting', reason: 'database-writer'},
+              });
+            }),
+        }),
+        Layer.mock(CommandExecutor, {
+          execute: () =>
+            Effect.succeed({
+              exitCode: 0,
+              stderr: '',
+              stdout: JSON.stringify({
+                protocol: 1,
+                ok: false,
+                unavailable: 'no-ready-snapshot',
+                identity: {repoRoot: cwd, worktreeId: 'worktree'},
+                telemetry: [],
+              }),
+            }),
+        }),
+      );
+      const ports = yield* Layer.build(fixture);
+      const args = {operation: 'query', query: 'Call the subject.', callerCwd: cwd};
+      const diagram = yield* server
+        .invokeTool('inspect_code_graph', {...args, output: 'mermaid'})
+        .pipe(Effect.provideContext(ports));
+      expect(diagram.structuredContent).toMatchObject({state: 'indexing', phase: 'waiting'});
+      expect(textContent(diagram.content[0])).toContain('A database writer is active');
+      const legacy = yield* server.invokeTool('inspect_code_graph', args).pipe(Effect.provideContext(ports));
+      expect(legacy.structuredContent).toMatchObject({state: 'unavailable', reason: 'no-ready-snapshot'});
+      expect(observed).toBe(1);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
 
   it('labels stale ready evidence while indexing continues', () => {
     const result = {...verboseCodeGraphResult(), freshness: 'stale' as const, warnings: []};
@@ -577,6 +729,13 @@ describe('MCP code graph indexing progress', () => {
     });
     expect(readAnonymousTelemetryReportedOutcome(timedOut)).toBe('timed-out');
     expect(textContent(timedOut.content[0])).toContain("this request's 55-second MCP budget");
+    const mermaidTimedOut = codeGraphQueryTimeoutResult('query', undefined, true, true);
+    expect(mermaidTimedOut.structuredContent).toMatchObject({
+      state: 'timed-out',
+      retryAfterMilliseconds: 5_000,
+      nextAction: expect.stringContaining('output="mermaid"'),
+    });
+    expect(textContent(mermaidTimedOut.content[0])).not.toContain('--read-timeout-ms');
     const readyReadTimedOut = codeGraphQueryTimeoutResult('query', indexingStatus(60_000), true);
     expect(readyReadTimedOut.structuredContent).toMatchObject({
       readySnapshotAvailable: true,

@@ -59,6 +59,11 @@ import {
 } from './common.js';
 import {registerCodeGraphTool, registerContextBriefTool} from './code_graph.js';
 import {
+  makeCodeGraphDiagramResources,
+  registerCodeGraphDiagramResource,
+  type CodeGraphDiagramResources,
+} from '../code_graph_diagram_resource.js';
+import {
   registerArchiveTool,
   registerCandidateMemoryTools,
   registerReadTool,
@@ -101,85 +106,97 @@ import {
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
-export const mcpServerEffect = withAnonymousTelemetry(
-  {component: 'mcp', operation: 'mcp-server'},
-  Effect.gen(function* () {
-    const system = yield* SystemInfo;
-    const config = yield* getRuntimeConfig();
-    return yield* withProductionLogging(
-      config.agentContextHome,
-      {component: 'mcp', operation: 'mcp-server'},
-      Effect.gen(function* () {
-        const toolset = yield* Effect.try({
-          try: () => parseMcpToolset(system.environment()[MCP_TOOLSET_ENV] ?? DEFAULT_MCP_TOOLSET),
-          catch: cause =>
-            Schema.is(McpServerOperationError)(cause)
-              ? cause
-              : McpServerOperationError.make({message: cause instanceof Error ? cause.message : String(cause), cause}),
-        });
-        const recallProgressTiming: RecallProgressTiming = {
-          heartbeatMilliseconds: mcpProgressHeartbeatMilliseconds(system.environment()),
-        };
-        const memoryScope = isCursorCloudPersonalToolset(toolset)
-          ? {resolve: () => resolveCursorCloudMemoryScope(config, system.environment())}
-          : undefined;
-        setMcpStartupVersion(yield* currentPackageVersion().pipe(Effect.orElseSucceed(() => undefined)));
-        const instructions = memoryScope
-          ? 'Personal Cursor Cloud discovers registered writable Git memory shares for each operation. Optional team environment selectors restrict that set; no default share is chosen. Call recall_context with an absolute callerCwd; optionally pass team to narrow recall. Results are unread pointers, so read relevant threadnote:// URIs with read_context. With multiple shares, new durable remember_context writes require team; writes are committed and pushed only to that share. Memory tools reject URIs outside the effective share set.'
-          : toolset === CURSOR_CLOUD_LOCAL_MCP_TOOLSET
-            ? 'Cursor Cloud remote-hybrid mode uses this local server only for checkout-specific code graph evidence, diagnostics, and workload attestation. All historical memory reads and writes belong to the managed threadnote-memory HTTP server. Never fall back to local personal memory or a Git memory share.'
-            : 'Threadnote offers bounded context, graph, and memory tools. Choose the tool whose description matches the evidence gap; verify returned evidence in source. Writes stay private unless sharing is confirmed. Never auto-apply/share or store secrets, credentials, customer data, or raw logs.';
-        const server = new EffectMcpServerAdapter(
-          'threadnote-local-adapter',
-          '0.2.0',
-          instructions,
-          config.agentContextHome,
-        );
+export const mcpServerEffect = (brokerChild: boolean) =>
+  withAnonymousTelemetry(
+    {component: 'mcp', operation: 'mcp-server'},
+    Effect.gen(function* () {
+      const system = yield* SystemInfo;
+      const config = yield* getRuntimeConfig();
+      return yield* withProductionLogging(
+        config.agentContextHome,
+        {component: 'mcp', operation: 'mcp-server'},
+        Effect.gen(function* () {
+          const toolset = yield* Effect.try({
+            try: () => parseMcpToolset(system.environment()[MCP_TOOLSET_ENV] ?? DEFAULT_MCP_TOOLSET),
+            catch: cause =>
+              Schema.is(McpServerOperationError)(cause)
+                ? cause
+                : McpServerOperationError.make({
+                    message: cause instanceof Error ? cause.message : String(cause),
+                    cause,
+                  }),
+          });
+          const recallProgressTiming: RecallProgressTiming = {
+            heartbeatMilliseconds: mcpProgressHeartbeatMilliseconds(system.environment()),
+          };
+          const memoryScope = isCursorCloudPersonalToolset(toolset)
+            ? {resolve: () => resolveCursorCloudMemoryScope(config, system.environment())}
+            : undefined;
+          setMcpStartupVersion(yield* currentPackageVersion().pipe(Effect.orElseSucceed(() => undefined)));
+          const instructions = memoryScope
+            ? 'Personal Cursor Cloud discovers registered writable Git memory shares for each operation. Optional team environment selectors restrict that set; no default share is chosen. Call recall_context with an absolute callerCwd; optionally pass team to narrow recall. Results are unread pointers, so read relevant threadnote:// URIs with read_context. With multiple shares, new durable remember_context writes require team; writes are committed and pushed only to that share. Memory tools reject URIs outside the effective share set.'
+            : toolset === CURSOR_CLOUD_LOCAL_MCP_TOOLSET
+              ? 'Cursor Cloud remote-hybrid mode uses this local server only for checkout-specific code graph evidence, diagnostics, and workload attestation. All historical memory reads and writes belong to the managed threadnote-memory HTTP server. Never fall back to local personal memory or a Git memory share.'
+              : 'Threadnote offers bounded context, graph, and memory tools. Choose the tool whose description matches the evidence gap; verify returned evidence in source. Writes stay private unless sharing is confirmed. Never auto-apply/share or store secrets, credentials, customer data, or raw logs.';
+          const server = new EffectMcpServerAdapter(
+            'threadnote-local-adapter',
+            '0.2.0',
+            instructions,
+            config.agentContextHome,
+          );
 
-        if (mcpToolCapabilities(toolset).memoryRead) registerResources(server, config, memoryScope);
-        registerTools(server, config, toolset, recallProgressTiming, memoryScope);
-        // Packaged lifecycle coverage uses runtime diagnostics to create the real
-        // crash-isolated child without requiring an installed or selected model.
-        if (system.environment()[MCP_PROCESS_LIFECYCLE_PROBE_ENV] === '1') {
-          const runtime = yield* LocalModelRuntime;
-          yield* runtime.diagnostics.pipe(Effect.catch(() => Effect.void));
-        }
-        const home = config.agentContextHome;
-        if (!memoryScope && toolset !== CURSOR_CLOUD_LOCAL_MCP_TOOLSET) {
-          // The model setup scheduler forks its loop into the ambient scope; a local scope ties it to this task.
-          yield* forkStartupTask(
-            home,
-            'model-setup',
-            Effect.scoped(Effect.andThen(startAutomaticModelSetupScheduler(home), Effect.never)),
-          );
-          yield* forkStartupTask(home, 'context-maintenance', runContextMaintenanceScheduler(config));
-          yield* forkStartupTask(home, 'shared-repository-monitor', monitorSharedRepositories(config));
-        }
-        if (mcpToolCapabilities(toolset).graphLocal) {
-          yield* forkStartupTask(home, 'graph-compaction', runCodeGraphAutomaticCompactionScheduler(home));
-          yield* forkStartupTask(home, 'graph-share-contributions', monitorGraphShareContributions(home));
-          yield* forkStartupTask(home, 'graph-share-signed-contributions', monitorGraphShareSignedContributions(home));
-        }
-        if (mcpToolCapabilities(toolset).memoryRead && mcpToolCapabilities(toolset).graphLocal) {
-          yield* forkStartupTask(
-            home,
-            'deferred-code-anchor-refresh',
-            refreshPendingDeferredCodeAnchorWorkspaces(config),
-          );
-        }
-        yield* Console.error('Threadnote local MCP adapter running');
-        return yield* server.run();
-      }),
-    );
-  }).pipe(
-    // MCP stdio reserves stdout for JSON-RPC frames. Route every Effect log in
-    // this process to stderr. server.run() already does this for protocol
-    // handling, but background fibers forked above (share/graph monitors) run
-    // outside that scope, and a single pretty-logger warning on stdout
-    // interleaves with protocol output and fails the client transport.
-    Effect.provideService(Logger.LogToStderr, true),
-  ),
-);
+          const diagramResources = mcpToolCapabilities(toolset).graphLocal
+            ? yield* makeCodeGraphDiagramResources(brokerChild ? 'broker-child' : 'server')
+            : undefined;
+          if (diagramResources) registerCodeGraphDiagramResource(server, diagramResources);
+          if (mcpToolCapabilities(toolset).memoryRead) registerResources(server, config, memoryScope);
+          registerTools(server, config, toolset, recallProgressTiming, memoryScope, diagramResources);
+          // Packaged lifecycle coverage uses runtime diagnostics to create the real
+          // crash-isolated child without requiring an installed or selected model.
+          if (system.environment()[MCP_PROCESS_LIFECYCLE_PROBE_ENV] === '1') {
+            const runtime = yield* LocalModelRuntime;
+            yield* runtime.diagnostics.pipe(Effect.catch(() => Effect.void));
+          }
+          const home = config.agentContextHome;
+          if (!memoryScope && toolset !== CURSOR_CLOUD_LOCAL_MCP_TOOLSET) {
+            // The model setup scheduler forks its loop into the ambient scope; a local scope ties it to this task.
+            yield* forkStartupTask(
+              home,
+              'model-setup',
+              Effect.scoped(Effect.andThen(startAutomaticModelSetupScheduler(home), Effect.never)),
+            );
+            yield* forkStartupTask(home, 'context-maintenance', runContextMaintenanceScheduler(config));
+            yield* forkStartupTask(home, 'shared-repository-monitor', monitorSharedRepositories(config));
+          }
+          if (mcpToolCapabilities(toolset).graphLocal) {
+            yield* forkStartupTask(home, 'graph-compaction', runCodeGraphAutomaticCompactionScheduler(home));
+            yield* forkStartupTask(home, 'graph-share-contributions', monitorGraphShareContributions(home));
+            yield* forkStartupTask(
+              home,
+              'graph-share-signed-contributions',
+              monitorGraphShareSignedContributions(home),
+            );
+          }
+          if (mcpToolCapabilities(toolset).memoryRead && mcpToolCapabilities(toolset).graphLocal) {
+            yield* forkStartupTask(
+              home,
+              'deferred-code-anchor-refresh',
+              refreshPendingDeferredCodeAnchorWorkspaces(config),
+            );
+          }
+          yield* Console.error('Threadnote local MCP adapter running');
+          return yield* server.run();
+        }),
+      );
+    }).pipe(
+      // MCP stdio reserves stdout for JSON-RPC frames. Route every Effect log in
+      // this process to stderr. server.run() already does this for protocol
+      // handling, but background fibers forked above (share/graph monitors) run
+      // outside that scope, and a single pretty-logger warning on stdout
+      // interleaves with protocol output and fails the client transport.
+      Effect.provideService(Logger.LogToStderr, true),
+    ),
+  );
 
 const MCP_STARTUP_TASK_LOG_WRITE_TIMEOUT_MILLISECONDS = 500;
 
@@ -320,6 +337,7 @@ function registerTools(
   toolset: McpToolset,
   recallProgressTiming: RecallProgressTiming,
   memoryScope?: MemoryScopeSource,
+  diagramResources?: CodeGraphDiagramResources,
 ): void {
   const capabilities = mcpToolCapabilities(toolset);
   if (capabilities.memoryRead) {
@@ -343,7 +361,9 @@ function registerTools(
     );
   }
 
-  if (capabilities.graphLocal) registerCodeGraphTool(server, config, {allowWorkset: capabilities.graphWorkset});
+  if (capabilities.graphLocal) {
+    registerCodeGraphTool(server, config, {allowWorkset: capabilities.graphWorkset, diagramResources});
+  }
   if (capabilities.contextBrief) registerContextBriefTool(server, config);
 
   if (capabilities.memoryRead) {

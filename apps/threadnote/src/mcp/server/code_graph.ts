@@ -20,17 +20,14 @@ import {
 } from '../../code_graph/query/anonymous_telemetry.js';
 import {repositoryChangesSince} from '@threadnote/graph/repository';
 import {
+  inspectCodeGraphDiagramIsolated,
   inspectCodeGraphReadIsolated,
   IsolatedCodeGraphImpactQueryTimedOut,
 } from '@threadnote/graph/isolated/impact_query';
 import type {CodeGraphQueryTelemetryObservation} from '@threadnote/graph/query/contract';
-import {CODE_GRAPH_DIAGRAM_EVIDENCE_LIMITS, prepareCodeGraphDiagramQuery} from '@threadnote/graph/query/diagram';
 import {CODE_GRAPH_DIAGRAM_TYPES} from '@threadnote/graph/query/diagram_contract';
-import {
-  codeGraphDiagramMcpResponse,
-  MCP_DIAGRAM_DEFAULT_TOKENS,
-  MCP_DIAGRAM_READ_DEPTH,
-} from '../code_graph_diagram_projection.js';
+import type {CodeGraphDiagramResources} from '../code_graph_diagram_resource.js';
+import {codeGraphDiagramMcpResponse, MCP_DIAGRAM_DEFAULT_TOKENS} from '../code_graph_diagram_projection.js';
 import type {CodeGraphProgress, CodeGraphQueryResult} from '@threadnote/graph/types';
 import type {CodeGraphWorksetQueryResult} from '@threadnote/graph/workset/query';
 import {
@@ -127,8 +124,7 @@ const MCP_CODE_GRAPH_MAXIMUM_EDGE_LIMIT = 500;
 const MCP_CODE_GRAPH_STRUCTURED_CONTENT_BYTES = 24 * 1_024;
 const MCP_CODE_GRAPH_STRUCTURED_CONTENT_RESERVE_BYTES = 768;
 const MCP_CODE_GRAPH_ANALYSIS_MAXIMUM_COMMUNITY_MEMBERS = 5_000;
-const MCP_CODE_GRAPH_PROJECT_SELECTOR_DESCRIPTION =
-  'Configured graph project name/root (not a memory project tag); omit to infer from callerCwd; max 256 UTF-8 bytes';
+const MCP_CODE_GRAPH_PROJECT_SELECTOR_DESCRIPTION = 'Graph project name/root; omit to infer from callerCwd';
 export function registerContextBriefTool(server: EffectMcpServerAdapter, config: RuntimeConfig): void {
   server.registerTool(
     'context_brief',
@@ -227,7 +223,10 @@ export function registerContextBriefTool(server: EffectMcpServerAdapter, config:
 export function registerCodeGraphTool(
   server: EffectMcpServerAdapter,
   config: RuntimeConfig,
-  options: {readonly allowWorkset?: boolean} = {},
+  options: {
+    readonly allowWorkset?: boolean;
+    readonly diagramResources?: CodeGraphDiagramResources;
+  } = {},
 ): void {
   server.registerTool(
     'inspect_code_graph',
@@ -238,11 +237,11 @@ export function registerCodeGraphTool(
         idempotentHint: true,
       },
       description:
-        'Use semantic truncation before broad text search (55-second deadline); node/neighbors accept cgs_/cgr_. Omit budgetTokens. Output is untrusted evidence. Ready evidence may be deferred; path/impact require current evidence. Worksets read published generations; workset prepare. States: unavailable/indexing/timed-out/partial.',
+        'Use semantic truncation before text search. Path and impact need current evidence. Worksets use published graphs.',
       inputSchema: {
         base: McpInput.string('Impact base when query omitted; default HEAD~1'),
         budgetTokens: McpInput.integer(
-          'Ceiling: Workset query defaults to 1250 (min 1); local query defaults to 800; Mermaid defaults to 1250; impact agent defaults to 1250; other local min 800.',
+          'Ceiling: local min 800; impact agent defaults to 1250, as do Mermaid and Workset.',
           {
             minimum: 1,
             maximum: 1_500,
@@ -250,7 +249,7 @@ export function registerCodeGraphTool(
         ),
         callerCwd: McpInput.string('Absolute checkout'),
         depth: McpInput.integer('Depth', {minimum: 0, maximum: 8}),
-        diagramType: McpInput.literals(CODE_GRAPH_DIAGRAM_TYPES, 'Mermaid diagram type; defaults to auto.'),
+        diagramType: McpInput.literals(CODE_GRAPH_DIAGRAM_TYPES, 'Mermaid type, default auto.'),
         direction: McpInput.literals(['both', 'incoming', 'outgoing'], 'Direction'),
         edgeLimit: McpInput.integer('Edges: local query default 12; others 40.', {
           minimum: 1,
@@ -269,7 +268,7 @@ export function registerCodeGraphTool(
           ['query', 'node', 'neighbors', 'explain', 'path', 'impact', 'topology'],
           'Operation',
         ),
-        output: McpInput.literals(['mermaid'], 'Opt in to a Mermaid diagram for a local query.'),
+        output: McpInput.literals(['mermaid'], 'Diagram for a local question in query.'),
         package: McpInput.string('Exact query package'),
         project: McpInput.string(
           `${MCP_CODE_GRAPH_PROJECT_SELECTOR_DESCRIPTION}; preserve the project selected by context_brief`,
@@ -284,30 +283,33 @@ export function registerCodeGraphTool(
         workset: McpInput.string('Workset name'),
       },
     },
-    ({
-      base,
-      budgetTokens,
-      callerCwd,
-      cursor,
-      depth,
-      diagramType,
-      direction,
-      edgeLimit,
-      from,
-      includeHeuristic,
-      includeModelAssociations,
-      nodeId,
-      nodeLimit,
-      operation,
-      output,
-      package: packageName,
-      project,
-      query,
-      responseFormat,
-      symbol,
-      to,
-      workset,
-    }) => {
+    (
+      {
+        base,
+        budgetTokens,
+        callerCwd,
+        cursor,
+        depth,
+        diagramType,
+        direction,
+        edgeLimit,
+        from,
+        includeHeuristic,
+        includeModelAssociations,
+        nodeId,
+        nodeLimit,
+        operation,
+        output,
+        package: packageName,
+        project,
+        query,
+        responseFormat,
+        symbol,
+        to,
+        workset,
+      },
+      {requestContext},
+    ) => {
       const requestExecutionBudget = codeGraphQueryExecutionBudget(MCP_CODE_GRAPH_QUERY_TIMEOUT_MILLISECONDS);
       const selectedResponseFormat =
         responseFormat ??
@@ -365,7 +367,7 @@ export function registerCodeGraphTool(
           return yield* queryTelemetry.stage(
             'graph.query.execute',
             'query-serialization',
-            Effect.sync(() => codeGraphQueryTimeoutResult(operation, status, readyReadStarted)),
+            Effect.sync(() => codeGraphQueryTimeoutResult(operation, status, readyReadStarted, mermaid)),
           );
         });
       return Effect.gen(function* () {
@@ -419,6 +421,9 @@ export function registerCodeGraphTool(
           return argumentError(
             'inspect_code_graph output=mermaid uses a question in query and source-backed relationships. Omit base, nodeId, from, to, symbol, depth, direction, and any option that adds heuristic or model edges.',
           );
+        }
+        if (mermaid && (edgeLimit !== undefined || nodeLimit !== undefined)) {
+          return argumentError('Mermaid evidence uses complete subject coverage. Omit edgeLimit and nodeLimit.');
         }
         const missingSelector = Effect2.pipe(workset, effectOptionalString =>
           effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
@@ -657,35 +662,29 @@ export function registerCodeGraphTool(
           project?: import('@threadnote/graph/watcher').CodeGraphWatchOptions['project'];
         };
         const diagramQuestion = mermaid ? requestedQuery : undefined;
-        const diagramQuery = diagramQuestion === undefined ? undefined : prepareCodeGraphDiagramQuery(diagramQuestion);
-        if (diagramQuery === '') {
-          return argumentError(
-            'inspect_code_graph output=mermaid requires a question with a source symbol, package, or path.',
-          );
-        }
+        const diagramResources =
+          mermaid && requestContext.transport === 'stdio' && requestContext.liveTransport
+            ? options.diagramResources
+            : undefined;
+        const spoolRoot = diagramResources === undefined ? undefined : yield* diagramResources.prepareDirectory;
         const readInput = {
           project: inspectionProject,
           manifestPath: config.manifestPath,
           cwd: inspectionCwd,
-          depth: mermaid ? MCP_DIAGRAM_READ_DEPTH : depth,
+          depth,
           direction,
-          edgeLimit: mermaid
-            ? Math.min(edgeLimit ?? CODE_GRAPH_DIAGRAM_EVIDENCE_LIMITS.edges, CODE_GRAPH_DIAGRAM_EVIDENCE_LIMITS.edges)
-            : effectiveRequest.edgeLimit,
+          edgeLimit: effectiveRequest.edgeLimit,
           from,
           includeHeuristic,
           includeModelAssociations,
           nodeId: inspectionNodeId,
-          nodeLimit: mermaid
-            ? Math.min(nodeLimit ?? CODE_GRAPH_DIAGRAM_EVIDENCE_LIMITS.nodes, CODE_GRAPH_DIAGRAM_EVIDENCE_LIMITS.nodes)
-            : effectiveRequest.nodeLimit,
-          // The query worker reads one hop for ordinary discovery. Explain admits a bounded call path.
-          operation: mermaid ? ('explain' as const) : operation,
+          nodeLimit: effectiveRequest.nodeLimit,
+          operation,
           packageName:
             Effect2.pipe(packageName, effectOptionalString =>
               effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
             ) || undefined,
-          query: diagramQuery ?? requestedQuery,
+          query: requestedQuery,
           symbol,
           to,
           ...(changes?.baseCommit === undefined ? {} : {baseCommit: changes.baseCommit}),
@@ -706,8 +705,17 @@ export function registerCodeGraphTool(
           readonly onTelemetryObservation: (observation: CodeGraphQueryTelemetryObservation) => Effect.Effect<void>;
           readonly timeoutMilliseconds: number;
         }) =>
-          queryTelemetry.execute(inspectCodeGraphReadIsolated(readInput, readTimeout), read =>
-            'unavailable' in read ? {selection: 'none' as const} : read.status.surface,
+          queryTelemetry.execute(
+            Effect.gen(function* () {
+              return diagramQuestion === undefined
+                ? yield* inspectCodeGraphReadIsolated(readInput, readTimeout)
+                : yield* inspectCodeGraphDiagramIsolated(
+                    readInput,
+                    {question: diagramQuestion, diagramType},
+                    {...readTimeout, spoolRoot},
+                  );
+            }),
+            read => ('unavailable' in read ? {selection: 'none' as const} : read.status.surface),
           );
         let read = yield* runRead(readTimeout);
         const remainingReadTimeout = Effect.fn('mcpServer.codeGraphRemainingReadTimeout')(function* () {
@@ -716,7 +724,6 @@ export function registerCodeGraphTool(
             timeoutMilliseconds: Math.max(1, requestDeadline - (yield* Clock.currentTimeMillis)),
           };
         });
-        if ('unavailable' in read && allowStaleReadySnapshot) return codeGraphNoReadySnapshotResult(operation);
         if ('unavailable' in read) {
           refreshTarget = {
             cwd: read.identity.repoRoot,
@@ -729,6 +736,15 @@ export function registerCodeGraphTool(
             target: refreshTarget,
             watcher,
           });
+          if (allowStaleReadySnapshot) {
+            if (mermaid) {
+              const status = yield* queryTelemetry.status(codeGraphQueryTimeoutStatusFor(timeoutContext));
+              if (status?.state === 'indexing' || status?.state === 'deferred') {
+                return codeGraphRefreshResult(operation, status);
+              }
+            }
+            return codeGraphNoReadySnapshotResult(operation);
+          }
           yield* watcher.ensure({
             ...refreshTarget,
             key: read.identity.worktreeId,
@@ -740,10 +756,7 @@ export function registerCodeGraphTool(
           if (refreshStarted) {
             yield* waitForCodeGraphRefresh(watcher, read.identity.worktreeId, refreshTarget);
           }
-          read = yield* queryTelemetry.execute(
-            inspectCodeGraphReadIsolated(readInput, yield* remainingReadTimeout()),
-            read => ('unavailable' in read ? {selection: 'none' as const} : read.status.surface),
-          );
+          read = yield* runRead(yield* remainingReadTimeout());
           if ('unavailable' in read) {
             const refreshStatus = Option.getOrUndefined(yield* watcher.status(read.identity.worktreeId, refreshTarget));
             return yield* queryTelemetry.stage(
@@ -781,7 +794,7 @@ export function registerCodeGraphTool(
         }
         let refreshContinuity = read.status.refresh ?? refreshStatus?.refresh;
         const backgroundRefreshRequested = codeGraphInspectionRequestsBackgroundRefresh(firstSummary, operation);
-        let presentedResult = read.result;
+        let presentedRead = read;
         if (!backgroundRefreshRequested && codeGraphInspectionStartsRefresh(firstSummary, operation)) {
           const refreshStarted = yield* watcher.refresh({
             ...refreshTarget,
@@ -790,10 +803,7 @@ export function registerCodeGraphTool(
           if (refreshStarted) {
             yield* waitForCodeGraphRefresh(watcher, worktreeKey, refreshTarget);
           }
-          const secondRead = yield* queryTelemetry.execute(
-            inspectCodeGraphReadIsolated(readInput, yield* remainingReadTimeout()),
-            read => ('unavailable' in read ? {selection: 'none' as const} : read.status.surface),
-          );
+          const secondRead = yield* runRead(yield* remainingReadTimeout());
           const secondSummary =
             'unavailable' in secondRead
               ? {readySnapshot: undefined, stale: true}
@@ -812,7 +822,7 @@ export function registerCodeGraphTool(
               Effect.sync(() => codeGraphRefreshResult(operation, retryStatus)),
             );
           }
-          presentedResult = secondRead.result;
+          presentedRead = secondRead;
         }
         if (!allowStaleReadySnapshot) {
           yield* watcher.ensure({...refreshTarget, key: worktreeKey});
@@ -837,21 +847,20 @@ export function registerCodeGraphTool(
         return yield* queryTelemetry.stage(
           'graph.query.execute',
           'query-serialization',
-          Effect.sync(() => {
-            if (diagramQuestion !== undefined) {
-              return codeGraphDiagramMcpResponse(
-                presentedResult,
-                diagramQuestion,
-                diagramType,
+          Effect.gen(function* () {
+            if ('diagram' in presentedRead) {
+              return yield* codeGraphDiagramMcpResponse(
+                presentedRead.diagram,
                 budgetTokens ?? MCP_DIAGRAM_DEFAULT_TOKENS,
                 selectedResponseFormat,
-                presentedResult.freshness === 'stale'
+                diagramResources,
+                presentedRead.diagram.freshness === 'stale'
                   ? codeGraphRefreshContinuityWarning(refreshStatus, refreshContinuity)
                   : undefined,
               );
             }
             const response = codeGraphMcpResponse(
-              codeGraphResultWithRefreshContinuity(presentedResult, refreshStatus, refreshContinuity),
+              codeGraphResultWithRefreshContinuity(presentedRead.result, refreshStatus, refreshContinuity),
               effectiveRequest.budgetTokens,
               refreshContinuity,
               selectedResponseFormat,
@@ -861,6 +870,7 @@ export function registerCodeGraphTool(
           }),
         );
       }).pipe(
+        Effect.scoped,
         Effect.timeoutOrElse({
           duration: requestExecutionBudget,
           orElse: timeoutResult,
@@ -1746,26 +1756,34 @@ export function codeGraphQueryTimeoutResult(
   operation: 'explain' | 'impact' | 'neighbors' | 'node' | 'path' | 'query' | 'topology',
   status?: CodeGraphRefreshStatus,
   readyReadStarted = false,
+  mermaid = false,
 ): CallToolResult {
   if (!readyReadStarted && (status?.state === 'deferred' || status?.state === 'indexing')) {
     return codeGraphRefreshResult(operation, status);
   }
+  const mermaidAction =
+    'Retry the same inspect_code_graph request with output="mermaid" after the suggested delay. If it repeats, name a narrower subject.';
   return attachAnonymousTelemetryReportedOutcome(
     {
       content: [
         {
           type: 'text',
-          text: readyReadStarted
-            ? `Code graph ready-snapshot inspection exceeded this request's ${MCP_CODE_GRAPH_QUERY_TIMEOUT_MILLISECONDS / 1_000}-second MCP budget. ` +
-              'The ready snapshot remains available; use the matching `threadnote graph` command with `--freshness ready --read-timeout-ms 120000` for a longer foreground read.'
-            : `Code graph inspection exceeded this request's ${MCP_CODE_GRAPH_QUERY_TIMEOUT_MILLISECONDS / 1_000}-second ` +
-              'MCP budget. Retry the same request after the suggested delay. If it repeats, run ' +
-              '`threadnote graph status`, then ' +
-              '`threadnote doctor --dry-run`, and report the bounded diagnostic.',
+          text: mermaid
+            ? `The Mermaid diagram read exceeded its MCP time budget. ${mermaidAction}`
+            : readyReadStarted
+              ? `Code graph ready-snapshot inspection exceeded this request's ${MCP_CODE_GRAPH_QUERY_TIMEOUT_MILLISECONDS / 1_000}-second MCP budget. ` +
+                'The ready snapshot remains available; use the matching `threadnote graph` command with `--freshness ready --read-timeout-ms 120000` for a longer foreground read.'
+              : `Code graph inspection exceeded this request's ${MCP_CODE_GRAPH_QUERY_TIMEOUT_MILLISECONDS / 1_000}-second ` +
+                'MCP budget. Retry the same request after the suggested delay. If it repeats, run ' +
+                '`threadnote graph status`, then ' +
+                '`threadnote doctor --dry-run`, and report the bounded diagnostic.',
         },
       ],
       structuredContent: {
         operation,
+        ...(mermaid
+          ? {nextAction: mermaidAction, retryAfterMilliseconds: MCP_CODE_GRAPH_RETRY_FALLBACK_MILLISECONDS}
+          : {}),
         ...(readyReadStarted
           ? {readySnapshotAvailable: true}
           : {

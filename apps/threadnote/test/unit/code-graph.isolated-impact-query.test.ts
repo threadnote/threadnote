@@ -5,13 +5,14 @@ import {fcProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
 import {it as effectIt} from '@effect/vitest';
 import {succeedUndefined} from '@threadnote/platform/optional';
-import {Clock, Effect, Fiber, FileSystem, Layer, Path} from 'effect';
+import {Clock, Deferred, Effect, Fiber, FileSystem, Layer, Path} from 'effect';
 import {TestClock} from 'effect/testing';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
   decodeImpactQueryRequest,
   inspectCodeGraphIsolated,
+  inspectCodeGraphDiagramIsolated,
   inspectCodeGraphImpactIsolated,
   inspectCodeGraphReadIsolated,
   impactQueryTransportSelector,
@@ -22,6 +23,7 @@ import {
   IsolatedCodeGraphImpactQueryTimedOut,
   serveCodeGraphDiscoveryRead,
 } from '@threadnote/graph/isolated/impact_query';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {attachCodeGraphStatusObservation, type CodeGraphStatusObservation} from '@threadnote/graph/query/contract';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import type {CodeGraphStatus} from '@threadnote/graph/types';
@@ -1197,6 +1199,125 @@ describe('isolated code graph discovery reads', () => {
 
       expect(failure._tag).toBe('IsolatedCodeGraphImpactQueryError');
     }),
+  );
+
+  effectIt.effect('rejects incomplete and invalid diagram handoffs and releases their directories', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const scope = {
+        repositoryId: result.repository.repositoryId,
+        repositoryName: 'fixture',
+        snapshotId: result.snapshot.id,
+        commit: result.snapshot.commit,
+        project: 'fixture',
+      };
+      const bytes = new TextEncoder().encode(
+        JSON.stringify({
+          status: 'unavailable',
+          scope,
+          freshness: 'current',
+          limits: [],
+          message: 'No evidence.',
+          nextAction: 'Name a subject.',
+        }),
+      );
+      for (const fault of [
+        'staging-only',
+        'bad-length',
+        'bad-hash',
+        'wrong-snapshot',
+        'wrong-project',
+        'wrong-status',
+      ]) {
+        let directory: string | undefined;
+        const command = CommandExecutor.of({
+          execute: (_file, _args, options) =>
+            Effect.gen(function* () {
+              directory = options?.env?.THREADNOTE_GRAPH_DIAGRAM_SPOOL;
+              if (directory === undefined) return yield* Effect.die('Missing the worker spool directory.');
+              const filename = fault === 'staging-only' ? 'diagram.pending' : 'diagram.json';
+              yield* fs.writeFile(path.join(directory, filename), bytes).pipe(Effect.orDie);
+              return commandResult(
+                JSON.stringify({
+                  ok: true,
+                  protocol: 1,
+                  diagram: {
+                    bytes: fault === 'bad-length' ? bytes.byteLength + 1 : bytes.byteLength,
+                    sha256: fault === 'bad-hash' ? EffectString.repeat(64)('a') : sha256HexSync(bytes),
+                    scope: {
+                      ...scope,
+                      ...(fault === 'wrong-snapshot' ? {snapshotId: `cgsn_${EffectString.repeat(40)('f')}`} : {}),
+                      ...(fault === 'wrong-project' ? {project: 'foreign'} : {}),
+                    },
+                    freshness: 'current',
+                    status: fault === 'wrong-status' ? 'incomplete' : 'unavailable',
+                  },
+                  status: {
+                    diagramScope: scope,
+                    stale: false,
+                    readySnapshotId: result.snapshot.id,
+                    surface: {
+                      freshness: 'current',
+                      selection: 'active',
+                      snapshot: {edgeCount: 0, fileCount: 1, symbolCount: 1},
+                    },
+                    worktreeId: result.snapshot.worktreeId,
+                    repoRoot: input.cwd,
+                  },
+                  telemetry: [],
+                }),
+              );
+            }),
+          executeStreaming: () => Effect.die('unused'),
+        });
+        const failure = yield* inspectCodeGraphDiagramIsolated(
+          {cwd: input.cwd, threadnoteHome: input.threadnoteHome},
+          {question: 'Show the subject.'},
+          {timeoutMilliseconds: 10_000},
+        ).pipe(
+          Effect.provideService(CommandExecutor, command),
+          Effect.provideService(SystemInfo, systemInfoStub({})),
+          Effect.scoped,
+          Effect.flip,
+        );
+        expect(failure.message).toContain('could not be verified');
+        if (directory === undefined) return yield* Effect.die('Missing the observed spool directory.');
+        expect(yield* fs.exists(directory)).toBe(false);
+      }
+    }).pipe(provideTestLayer(BunServices.layer)),
+  );
+
+  effectIt.effect('removes the private diagram handoff after cancellation', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const staged = yield* Deferred.make<string>();
+      const command = CommandExecutor.of({
+        execute: (_file, _args, options) =>
+          Effect.gen(function* () {
+            const directory = options?.env?.THREADNOTE_GRAPH_DIAGRAM_SPOOL;
+            if (directory === undefined) return yield* Effect.die('Missing the worker spool directory.');
+            yield* fs.writeFileString(path.join(directory, 'diagram.pending'), 'partial').pipe(Effect.orDie);
+            yield* Deferred.succeed(staged, directory);
+            return yield* Effect.never;
+          }),
+        executeStreaming: () => Effect.die('unused'),
+      });
+      const request = yield* inspectCodeGraphDiagramIsolated(
+        {cwd: input.cwd, threadnoteHome: input.threadnoteHome},
+        {question: 'Show the subject.'},
+        {timeoutMilliseconds: 10_000},
+      ).pipe(
+        Effect.provideService(CommandExecutor, command),
+        Effect.provideService(SystemInfo, systemInfoStub({})),
+        Effect.scoped,
+        Effect.forkChild,
+      );
+      const directory = yield* Deferred.await(staged);
+      yield* Fiber.interrupt(request);
+      expect(yield* fs.exists(directory)).toBe(false);
+    }).pipe(provideTestLayer(BunServices.layer)),
   );
 
   effectIt.effect('returns the worker no-snapshot verdict with its identity', () =>

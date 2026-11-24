@@ -3,6 +3,7 @@ import {compiledHandoffSaveIdentity, HANDOFF_SAVE_WORKER_ARGUMENT} from './memor
 import {cryptoLayer} from '@threadnote/platform/crypto';
 import {Array as EffectArray} from 'effect';
 import type {RuntimeEntrypoint} from '@threadnote/platform/runtime-entrypoint';
+import {SystemInfo} from '@threadnote/platform/system';
 import {runtimeEntrypointLayer} from './effect/runtime-entrypoint.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -687,16 +688,20 @@ async function applicationProgram(arguments_: readonly string[], isMcpServer: bo
     const processHome = normalizedProcessHome(arguments_, processDiagnostics.threadnoteHomeForProcess);
     return processHome.pipe(
       Effect.flatMap(home =>
-        processLease
-          .withStandaloneProcessLease(
-            processDiagnostics.withThreadnoteProcessRegistration(
-              home,
-              'mcp',
-              Effect.scoped(mcpServerEffect),
-              'mcp-server',
-            ),
-          )
-          .pipe(Effect.provide(runtime.applicationLayerForHome(home, 'mcp'))),
+        Effect.flatMap(SystemInfo, system => {
+          // The telemetry layer also marks direct MCP processes for graph diagnostics.
+          const brokerChild = system.environment().THREADNOTE_MCP_BROKER_CHILD === '1';
+          return processLease
+            .withStandaloneProcessLease(
+              processDiagnostics.withThreadnoteProcessRegistration(
+                home,
+                'mcp',
+                Effect.scoped(mcpServerEffect(brokerChild)),
+                'mcp-server',
+              ),
+            )
+            .pipe(Effect.provide(runtime.applicationLayerForHome(home, 'mcp')));
+        }),
       ),
       Effect.provide(runtime.StandaloneBrokerLayer),
     );
