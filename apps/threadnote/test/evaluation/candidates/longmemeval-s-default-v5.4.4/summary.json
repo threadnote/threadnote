@@ -1,0 +1,25 @@
+{
+  "release": "v5.4.4",
+  "configuration": "released default",
+  "dataset_questions": 500,
+  "eligible_questions": 470,
+  "excluded_abstention_questions": 30,
+  "completed": 470,
+  "unresolved": 0,
+  "native_no_answer_on_eligible_queries": 0,
+  "queries_with_weighted_ranking_reported": 353,
+  "question_session_instances": 22419,
+  "reference_session_instances": 890,
+  "all_reference_sessions_retrieved": {
+    "5": {
+      "questions": 397,
+      "denominator": 470,
+      "percentage": 84.47
+    },
+    "10": {
+      "questions": 420,
+      "denominator": 470,
+      "percentage": 89.36
+    }
+  }
+}
