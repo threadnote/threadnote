@@ -3,7 +3,7 @@ import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Option, Path, Predicate} from 'effect';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
-import {RECALL_RANKER_VERSION} from './rank.js';
+import {RECALL_BLEND_RANKER_VERSION} from './rank.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
@@ -68,7 +68,8 @@ export const recordRecallFeedback = Effect.fn('recall.recordFeedback')(function*
     action: input.action,
     project: input.project,
     queryFingerprint: yield* recallQueryFingerprint(input.query),
-    rankerVersion: RECALL_RANKER_VERSION,
+    // Standalone feedback has no proof of which order a previous read used.
+    rankerVersion: `${RECALL_BLEND_RANKER_VERSION}-policy`,
     timestamp: input.timestamp,
     uri: input.uri,
     version: 1,

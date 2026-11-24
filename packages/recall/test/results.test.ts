@@ -1,8 +1,80 @@
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {RECALL_LOW_CONFIDENCE_NOTE, buildRecallSections} from '@threadnote/recall/results';
+import {projectRecallMcpResponse} from '@threadnote/recall/mcp/response';
+import {recallOrderingVersion, RECALL_BLEND_RANKER_VERSION, RECALL_RANKER_VERSION} from '@threadnote/recall/rank';
 
 describe('hybrid recall result presentation', () => {
+  it('shows the closing blend score in CLI and MCP without changing native confidence', () => {
+    const query = 'artifact cache disk bundles';
+    const body = 'artifact cache releases disk bundles';
+    const fields = {title: 'cache', keywords: ['artifact cache'], topic: 'cache disk bundles'};
+    const first = 'threadnote://user/me/memories/durable/projects/threadnote/a.md';
+    const second = 'threadnote://user/me/memories/durable/projects/threadnote/b.md';
+    const third = 'threadnote://user/me/memories/durable/projects/threadnote/c.md';
+    const context = {
+      query,
+      indexedCandidates: [
+        {
+          uri: first,
+          text: 'wood furniture lives beside a house',
+          fields: {title: query, keywords: [query], topic: query},
+          semantic: 0.96,
+        },
+        {uri: second, text: query, fields, semantic: 0.96},
+        {uri: third, text: body, fields, semantic: 0.96},
+      ],
+    };
+    const native = buildRecallSections([], [], 3, context);
+    const blended = buildRecallSections([], [], 3, {
+      ...context,
+      closingDenseScores: new Map([
+        [first, 0.5],
+        [second, 0.5],
+        [third, 0.5],
+      ]),
+    });
+    expect(blended.semanticSection).toContain('blend rank 0.50');
+    expect(blended.semanticSection).toContain('blend rank 0.00');
+    expect(blended.ranked).toMatchObject([
+      {uri: second, blendScore: 0.5, finalScore: native.ranked[0]?.finalScore},
+      {uri: third, finalScore: native.ranked[2]?.finalScore},
+      {uri: first, blendScore: 0, finalScore: native.ranked[1]?.finalScore},
+    ]);
+    expect(blended.confidence?.level).toBe(native.confidence?.level);
+
+    const response = {
+      results: blended.ranked,
+      confidence: blended.confidence,
+      queryExpansions: [],
+      rankerVersion: recallOrderingVersion(blended.ranked[0]),
+    };
+    const nativeMcp = projectRecallMcpResponse({
+      results: native.ranked,
+      confidence: native.confidence,
+      queryExpansions: [],
+      rankerVersion: recallOrderingVersion(native.ranked[0]),
+    });
+    const detailed = projectRecallMcpResponse(response, {explain: true});
+    const compact = projectRecallMcpResponse(response);
+    expect(detailed.structuredContent.results).toMatchObject([
+      {
+        uri: second,
+        blendScore: 0.5,
+        finalScore: native.ranked[0]?.finalScore,
+        confidence: nativeMcp.structuredContent.results[0]?.confidence,
+      },
+      {uri: third, finalScore: native.ranked[2]?.finalScore},
+      {uri: first, blendScore: 0, finalScore: native.ranked[1]?.finalScore},
+    ]);
+    expect(detailed.text).toContain('Body BM25 and dense blend rank: 0.5');
+    expect(detailed.text).toContain('Native ranking details');
+    expect(detailed.structuredContent.rankerVersion).toBe(RECALL_BLEND_RANKER_VERSION);
+    expect(nativeMcp.structuredContent.rankerVersion).toBe(RECALL_RANKER_VERSION);
+    expect(compact.structuredContent.results).toMatchObject([{uri: second}, {uri: third}, {uri: first}]);
+    expect(compact.structuredContent.results[0]).not.toHaveProperty('blendScore');
+  });
+
   it('surfaces default-threshold semantic matches at the semantic confidence floor', () => {
     const uri = 'threadnote://user/me/memories/durable/projects/threadnote/coupon-proration.md';
     const sections = buildRecallSections([], [], 5, {

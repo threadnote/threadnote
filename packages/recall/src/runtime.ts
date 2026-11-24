@@ -733,6 +733,7 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
       allowSemanticRescue: input.allowSemanticRescue,
       allowedUriScopes: input.allowedUriScopes,
       candidateUris: input.candidateUris,
+      closingDenseScores: closingRead ? semanticScores : undefined,
       corpusStatistics: workspaceScope ? undefined : recallIndex?.corpusStatistics,
       eligibility: input.eligibility,
       feedbackByUri,

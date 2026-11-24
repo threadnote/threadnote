@@ -7,9 +7,154 @@ import {
   rankRecallCandidates,
   recallMemoryContentHash,
   RECALL_RANKER_VERSION,
+  RECALL_BLEND_RANKER_VERSION,
+  type RecallCandidate,
 } from '@threadnote/recall/rank';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
+
+describe('closing recall order', () => {
+  const body = 'The artifact cache releases disk space by evicting least-recently-used bundles.';
+  const distinctCandidates = [
+    {uri: 'memory-a', text: body, semantic: 0.9},
+    {uri: 'memory-b', text: body, semantic: 0.9},
+    {uri: 'memory-c', text: body, semantic: 0.9},
+  ];
+  const order = (results: ReturnType<typeof rankRecallCandidates>) =>
+    EffectArray.map(results.results, row => row.candidate.uri);
+
+  it('orders tied native scores by ready vector evidence without changing the eligible pool or confidence', () => {
+    const query = 'artifact cache releases disk space evicting bundles';
+    const candidates = [...distinctCandidates].reverse();
+    const candidateScores = new Map([
+      ['memory-a', 0.2],
+      ['memory-b', Number.POSITIVE_INFINITY],
+      ['memory-c', 0.8],
+      ['outside-native-pool', 100],
+    ]);
+    const native = rankRecallCandidates(query, candidates);
+    const result = rankRecallCandidates(query, candidates, {closingDenseScores: candidateScores});
+
+    expect(order(native)).toEqual(['memory-a', 'memory-b', 'memory-c']);
+    expect(order(result)).toEqual(['memory-c', 'memory-a', 'memory-b']);
+    expect(result.confidence).toEqual(native.confidence);
+    expect(result.rankerVersion).toBe(RECALL_BLEND_RANKER_VERSION);
+    expect(result.results).toEqual([
+      {...native.results[2], blendScore: 0.5},
+      {...native.results[0], blendScore: 0},
+      {...native.results[1], blendScore: 0},
+    ]);
+  });
+
+  it('uses body evidence when dense scores tie and metadata favors a different result', () => {
+    const query = 'artifact cache disk bundles';
+    const fields = {title: 'cache', keywords: ['artifact cache'], topic: 'cache disk bundles'};
+    const candidates = [
+      {
+        uri: 'memory-a',
+        text: 'wood furniture lives beside a house',
+        fields: {title: query, keywords: [query], topic: query},
+        semantic: 0.96,
+      },
+      {uri: 'memory-b', text: query, fields, semantic: 0.96},
+      {uri: 'memory-c', text: 'artifact cache releases disk bundles', fields, semantic: 0.96},
+    ];
+    const closingDenseScores = new Map(EffectArray.map(candidates, candidate => [candidate.uri, 0.5]));
+    const native = rankRecallCandidates(query, candidates);
+    const result = rankRecallCandidates(query, candidates, {closingDenseScores});
+
+    expect(order(native)).toEqual(['memory-b', 'memory-a', 'memory-c']);
+    expect(order(result)).toEqual(['memory-b', 'memory-c', 'memory-a']);
+    expect(result.confidence.level).toBe(native.confidence.level);
+  });
+
+  it('keeps native ties for flat or absent dense evidence', () => {
+    const query = 'artifact cache releases disk space evicting bundles';
+    const native = rankRecallCandidates(query, distinctCandidates);
+    const flat = new Map([
+      ['memory-a', 0.5],
+      ['memory-b', 0.5],
+      ['memory-c', 0.5],
+    ]);
+    const absent = new Map([['outside-native-pool', 0.99]]);
+
+    const tied = rankRecallCandidates(query, distinctCandidates, {closingDenseScores: flat});
+    expect(order(tied)).toEqual(order(native));
+    expect(EffectArray.map(tied.results, row => row.blendScore)).toEqual([0, 0, 0]);
+    expect(rankRecallCandidates(query, distinctCandidates, {closingDenseScores: absent})).toEqual(native);
+  });
+
+  it('retains native order for recency, literal, identifier and protected navigation queries', () => {
+    const candidates = EffectArray.map(distinctCandidates, (candidate, ordinal) => ({
+      ...candidate,
+      fields: {identifiers: ordinal === 0 ? ['cacheBudgetV7'] : []},
+      text: ordinal === 0 ? `${candidate.text} cacheBudgetV7` : candidate.text,
+      timestamp: ordinal === 0 ? '2025-03-01T00:00:00Z' : '2025-02-01T00:00:00Z',
+    }));
+    const closingDenseScores = new Map([
+      ['memory-a', 0.2],
+      ['memory-b', 0.5],
+      ['memory-c', 0.8],
+    ]);
+    const now = new Date('2025-03-03T00:00:00Z');
+
+    for (const query of ['latest artifact cache', 'artifact "cache releases" disk space', 'artifact cacheBudgetV7']) {
+      expect(rankRecallCandidates(query, candidates, {now, closingDenseScores})).toEqual(
+        rankRecallCandidates(query, candidates, {now}),
+      );
+    }
+    const navigation = {now, protectedUris: ['memory-b']};
+    expect(rankRecallCandidates('artifact cache', candidates, {...navigation, closingDenseScores})).toEqual(
+      rankRecallCandidates('artifact cache', candidates, navigation),
+    );
+  });
+
+  it('keeps native order when the highest blend score would lower native confidence', () => {
+    const query = 'artifact cache disk bundles';
+    const text = 'Bicycles run beside a house.';
+    const strong = {uri: 'memory-a', text, fields: {title: query, keywords: [query], topic: query}, semantic: 0.96};
+    const weak = {uri: 'memory-b', text, semantic: 0.96};
+    const candidates = [strong, weak];
+    const closingDenseScores = new Map([
+      ['memory-a', 0],
+      ['memory-b', 1],
+    ]);
+    const native = rankRecallCandidates(query, candidates);
+
+    expect(native.confidence.level).toBe('medium');
+    expect(rankRecallCandidates(query, [weak]).confidence.level).toBe('low');
+    expect(rankRecallCandidates(query, candidates, {closingDenseScores})).toEqual(native);
+  });
+
+  it('keeps native order when the closing bodies exceed the blend work limit', () => {
+    const query = 'artifact cache releases disk space evicting bundles';
+    const candidates = [
+      ...distinctCandidates.slice(0, 2),
+      {uri: 'memory-c', text: body + EffectString.repeat(512 * 1024)(' '), semantic: 0.9},
+    ];
+    const native = rankRecallCandidates(query, candidates);
+    const closingDenseScores = new Map([
+      ['memory-a', 0.2],
+      ['memory-c', 0.99],
+    ]);
+
+    expect(order(native)).toEqual(['memory-a', 'memory-b', 'memory-c']);
+    expect(rankRecallCandidates(query, candidates, {closingDenseScores})).toEqual(native);
+  });
+
+  it('keeps native abstention even when raw vector scores vary', () => {
+    const candidates = EffectArray.map(distinctCandidates, candidate => ({...candidate, semantic: undefined}));
+    const query = 'quasicrystalline boron nitride';
+    const closingDenseScores = new Map([
+      ['memory-a', 0],
+      ['memory-c', 1],
+    ]);
+    const native = rankRecallCandidates(query, candidates);
+
+    expect(native.confidence.level).toBe('no_answer');
+    expect(rankRecallCandidates(query, candidates, {closingDenseScores})).toEqual(native);
+  });
+});
 
 describe('hybrid recall ranker', () => {
   it('collapses authorized share aliases only when logical identity and body both agree', () => {
@@ -596,40 +741,44 @@ describe('hybrid recall ranker', () => {
     const resourceUri = 'threadnote://resources/repos/threadnote/.graph.md/code-graph-snapshot-lease.md';
     const memoryUri =
       'threadnote://user/me/memories/shared/threadnote/durable/projects/threadnote/graph-administration.md';
-    const ranked = rankRecallCandidates(
-      'code graph snapshot lease',
-      [
-        {
-          authority: 'external',
-          fields: {
-            project: 'threadnote',
-            title: 'Code graph snapshot lease',
-            topic: 'code-graph-snapshot-lease',
-          },
-          status: 'active',
-          text: 'Generated notes about the code graph snapshot lease.',
-          trust: 'untrusted',
-          uri: resourceUri,
+    const query = 'code graph snapshot lease';
+    const candidates = [
+      {
+        authority: 'external',
+        fields: {
+          project: 'threadnote',
+          title: 'Code graph snapshot lease',
+          topic: 'code-graph-snapshot-lease',
         },
-        {
-          authority: 'reviewed_shared',
-          fields: {
-            project: 'threadnote',
-            title: 'Graph administration',
-            topic: 'graph-administration',
-          },
-          kind: 'durable',
-          status: 'active',
-          text: 'Snapshot lease retirement and code graph maintenance policy.',
-          trust: 'approved',
-          uri: memoryUri,
+        status: 'active',
+        text: 'Generated notes about the code graph snapshot lease.',
+        trust: 'untrusted',
+        uri: resourceUri,
+      },
+      {
+        authority: 'reviewed_shared',
+        fields: {
+          project: 'threadnote',
+          title: 'Graph administration',
+          topic: 'graph-administration',
         },
-      ],
-      {now: new Date('2026-08-05T00:00:00.000Z'), project: 'threadnote'},
-    );
+        kind: 'durable',
+        status: 'active',
+        text: 'Snapshot lease retirement and code graph maintenance policy.',
+        trust: 'approved',
+        uri: memoryUri,
+      },
+    ] satisfies readonly RecallCandidate[];
+    const context = {now: new Date('2026-08-05T00:00:00.000Z'), project: 'threadnote'};
+    const ranked = rankRecallCandidates(query, candidates, context);
+    const closingDenseScores = new Map([
+      [resourceUri, 0.99],
+      [memoryUri, 0.1],
+    ]);
 
     expect(ranked.results[0]?.candidate.uri).toBe(memoryUri);
     expect(EffectArray.map(ranked.results, result => result.candidate.uri)).toContain(resourceUri);
+    expect(rankRecallCandidates(query, candidates, {...context, closingDenseScores})).toEqual(ranked);
   });
 
   it('uses native reranker evidence as a bounded, explained ranking signal', () => {
@@ -1084,29 +1233,33 @@ describe('hybrid recall ranker', () => {
   });
 
   it('keeps an active memory ahead of a stronger archived match', () => {
-    const ranked = rankRecallCandidates(
-      'release channel',
-      [
-        {
-          fields: {project: 'threadnote', title: 'Release channel'},
-          semantic: 0.9,
-          status: 'archived',
-          text: 'The release channel is beta.',
-          uri: 'threadnote://user/me/memories/archived.md',
-        },
-        {
-          fields: {project: 'threadnote', title: 'Release channel'},
-          semantic: 0.7,
-          status: 'active',
-          text: 'The release channel is stable.',
-          uri: 'threadnote://user/me/memories/active.md',
-        },
-      ],
-      {includeInactive: true, project: 'threadnote'},
-    );
+    const query = 'release channel';
+    const candidates = [
+      {
+        fields: {project: 'threadnote', title: 'Release channel'},
+        semantic: 0.9,
+        status: 'archived',
+        text: 'The release channel is beta.',
+        uri: 'threadnote://user/me/memories/archived.md',
+      },
+      {
+        fields: {project: 'threadnote', title: 'Release channel'},
+        semantic: 0.7,
+        status: 'active',
+        text: 'The release channel is stable.',
+        uri: 'threadnote://user/me/memories/active.md',
+      },
+    ] satisfies readonly RecallCandidate[];
+    const context = {includeInactive: true, project: 'threadnote'};
+    const ranked = rankRecallCandidates(query, candidates, context);
+    const closingDenseScores = new Map([
+      [candidates[0].uri, 0.99],
+      [candidates[1].uri, 0.1],
+    ]);
 
     expect(ranked.results[0]?.candidate.uri).toContain('active.md');
     expect(ranked.results[1]?.warnings).toContain('memory is archived');
+    expect(rankRecallCandidates(query, candidates, {...context, closingDenseScores})).toEqual(ranked);
   });
 
   it('keeps explicitly included archived matches eligible at the relevance threshold', () => {

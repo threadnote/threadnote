@@ -6,13 +6,20 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {MemoryKind, MemoryStatus} from '@threadnote/memory/types';
 import {hasExactCasedCodeIdentifierMatch} from './identifier.js';
 import {recallRankCandidateIsEligible, type RecallEligibilityPolicy} from './eligibility.js';
-import {recallLexicalTerms} from './tokenize.js';
+import {iterateRecallLexicalTerms, recallLexicalTerms} from './tokenize.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 import {Option as EffectOption} from 'effect';
 
 export const RECALL_RANKER_VERSION = 'hybrid-v8';
+/** Native shortlist with a normalized body BM25 and dense closing blend. */
+export const RECALL_BLEND_RANKER_VERSION = 'hybrid-v9';
+export type RecallRankerVersion = typeof RECALL_RANKER_VERSION | typeof RECALL_BLEND_RANKER_VERSION;
+
+export function recallOrderingVersion(first: {readonly blendScore?: number} | undefined): RecallRankerVersion {
+  return first?.blendScore === undefined ? RECALL_RANKER_VERSION : RECALL_BLEND_RANKER_VERSION;
+}
 
 export interface RecallFields {
   readonly identifiers?: readonly string[];
@@ -53,6 +60,8 @@ export interface RecallRankContext {
   readonly allowExactRescue?: boolean;
   readonly allowSemanticRescue?: boolean;
   readonly corpusStatistics?: RecallCorpusStatistics;
+  /** Raw local vector scores available after the final candidate window is fixed. */
+  readonly closingDenseScores?: ReadonlyMap<string, number>;
   readonly eligibility?: RecallEligibilityPolicy;
   readonly includeInactive?: boolean;
   readonly includeTemporallyInvalid?: boolean;
@@ -99,6 +108,8 @@ export interface RecallReason {
 }
 
 export interface RankedRecallCandidate {
+  /** Normalized body BM25 and dense score used for closing order. */
+  readonly blendScore?: number;
   readonly candidate: RecallCandidate;
   readonly finalScore: number;
   readonly passedRelevanceGate: boolean;
@@ -119,7 +130,7 @@ export interface RecallConfidence {
 
 export interface RankedRecallSet {
   readonly confidence: RecallConfidence;
-  readonly rankerVersion: typeof RECALL_RANKER_VERSION;
+  readonly rankerVersion: RecallRankerVersion;
   readonly results: readonly RankedRecallCandidate[];
 }
 
@@ -373,11 +384,124 @@ export function rankRecallCandidates(
       compareCodeUnits(left.candidate.uri, right.candidate.uri)
     );
   });
-  return {
-    confidence: assessConfidence(ranked, query, queryTermVariants[0] ?? []),
-    rankerVersion: RECALL_RANKER_VERSION,
-    results: ranked,
+  const originalQueryTerms = queryTermVariants[0] ?? [];
+  const confidence = assessConfidence(ranked, query, originalQueryTerms);
+  const ordered = blendClosingRecallOrder(query, originalQueryTerms, ranked, confidence, context, recencyIntent);
+  return {...ordered, rankerVersion: recallOrderingVersion(ordered.results[0])};
+}
+
+const CLOSING_RECALL_DENSE_WEIGHT = 0.5;
+// Bound the extra synchronous token scan to 512 Ki UTF-16 code units per closing read.
+const MAX_CLOSING_BLEND_BODY_CODE_UNITS = 512 * 1024;
+const EXPLICIT_LITERAL_QUERY = /["“”\x60]|(?:^|\s)['‘][^'\n]+['’](?:$|[\s,.?!])/u;
+
+function blendClosingRecallOrder(
+  query: string,
+  queryTerms: readonly string[],
+  results: readonly RankedRecallCandidate[],
+  confidence: RecallConfidence,
+  context: RecallRankContext,
+  recencyIntent: boolean,
+): Pick<RankedRecallSet, 'confidence' | 'results'> {
+  const native = {confidence, results};
+  const denseScores = context.closingDenseScores;
+  if (
+    denseScores === undefined ||
+    confidence.level === 'no_answer' ||
+    results.length < 2 ||
+    (context.protectedUris?.length ?? 0) > 0 ||
+    recencyIntent ||
+    EXPLICIT_LITERAL_QUERY.test(query) ||
+    EffectArray.some(
+      results,
+      ({candidate, signals}) =>
+        candidate.trust === 'untrusted' ||
+        signals.lifecycle !== LIFECYCLE_SCORES.active ||
+        signals.temporal === 0 ||
+        hasExactDistinctiveIdentifierMatch(query, queryTerms, candidate.fields),
+    )
+  ) {
+    return native;
+  }
+
+  let bodyCodeUnits = 0;
+  for (const {candidate} of results) {
+    bodyCodeUnits += candidate.text.length;
+    if (bodyCodeUnits > MAX_CLOSING_BLEND_BODY_CODE_UNITS) return native;
+  }
+
+  const dense = EffectArray.map(results, ({candidate}) => closingCandidateDenseScore(candidate, denseScores));
+  if (EffectArray.every(dense, score => score === undefined)) return native;
+
+  // Statistics and normalization use only the authorized, deduplicated results
+  // that already meet the native relevance threshold. Earlier selection is unchanged.
+  const lexical = normalizeClosingScores(closingBodyBm25(results, new Set(queryTerms)));
+  const normalizedDense = normalizeClosingScores(dense);
+  const ordered = EffectArray.map(
+    EffectArray.map(results, (result, ordinal) => ({
+      result,
+      ordinal,
+      score:
+        (1 - CLOSING_RECALL_DENSE_WEIGHT) * (lexical[ordinal] ?? 0) +
+        CLOSING_RECALL_DENSE_WEIGHT * (normalizedDense[ordinal] ?? 0),
+    })).sort((left, right) => right.score - left.score || left.ordinal - right.ordinal),
+    ({result, score}) => ({...result, blendScore: score}),
+  );
+  const reorderedConfidence = assessConfidence(ordered, query, queryTerms);
+  return reorderedConfidence.level === confidence.level ? {confidence: reorderedConfidence, results: ordered} : native;
+}
+
+function closingBodyBm25(
+  results: readonly RankedRecallCandidate[],
+  queryTerms: ReadonlySet<string>,
+): readonly number[] {
+  let totalDocumentLength = 0;
+  const documentFrequency = new Map<string, number>();
+  const bodyCounts = EffectArray.map(results, ({candidate}) => {
+    let count = 0;
+    const termFrequency = new Map<string, number>();
+    for (const term of iterateRecallLexicalTerms(candidate.text)) {
+      count += 1;
+      if (queryTerms.has(term)) termFrequency.set(term, (termFrequency.get(term) ?? 0) + 1);
+    }
+    totalDocumentLength += count;
+    for (const term of termFrequency.keys()) documentFrequency.set(term, (documentFrequency.get(term) ?? 0) + 1);
+    return {count, termFrequency};
+  });
+  const corpus = {
+    averageDocumentLength: totalDocumentLength / results.length,
+    documentCount: results.length,
+    documentFrequency: EffectRecord.fromEntries(documentFrequency),
+    totalDocumentLength,
   };
+  return EffectArray.map(bodyCounts, ({count, termFrequency}) =>
+    normalizedBm25FromCounts(queryTerms, termFrequency, count, corpus),
+  );
+}
+
+function closingCandidateDenseScore(
+  candidate: RecallCandidate,
+  scores: ReadonlyMap<string, number>,
+): number | undefined {
+  let best: number | undefined;
+  for (const uri of [candidate.uri, ...(candidate.equivalentUris ?? [])]) {
+    const score = scores.get(uri);
+    if (score !== undefined && Number.isFinite(score) && (best === undefined || score > best)) best = score;
+  }
+  return best;
+}
+
+function normalizeClosingScores(scores: readonly (number | undefined)[]): readonly number[] {
+  let minimum = Number.POSITIVE_INFINITY;
+  let maximum = Number.NEGATIVE_INFINITY;
+  for (const score of scores) {
+    if (score === undefined || !Number.isFinite(score)) continue;
+    minimum = Math.min(minimum, score);
+    maximum = Math.max(maximum, score);
+  }
+  return EffectArray.map(scores, score =>
+    maximum > minimum && score !== undefined && Number.isFinite(score) ? (score - minimum) / (maximum - minimum) : 0,
+  );
 }
 
 function protectedRecallOrdinal(
@@ -937,9 +1061,18 @@ function normalizedBm25(
   for (const term of documentTerms) {
     termFrequency.set(term, (termFrequency.get(term) ?? 0) + 1);
   }
+  return normalizedBm25FromCounts(new Set(queryTerms), termFrequency, documentTerms.length, corpusStatistics);
+}
+
+function normalizedBm25FromCounts(
+  queryTerms: ReadonlySet<string>,
+  termFrequency: ReadonlyMap<string, number>,
+  documentLength: number,
+  corpusStatistics: RecallCorpusStatistics,
+): number {
   let score = 0;
   let maximum = 0;
-  for (const term of new Set(queryTerms)) {
+  for (const term of queryTerms) {
     const frequency = termFrequency.get(term) ?? 0;
     const idf = inverseDocumentFrequency(term, corpusStatistics);
     maximum += idf * (BM25_SATURATION + 1);
@@ -951,7 +1084,7 @@ function normalizedBm25(
       BM25_SATURATION *
         (1 -
           BM25_LENGTH_NORMALIZATION +
-          BM25_LENGTH_NORMALIZATION * (documentTerms.length / Math.max(1, corpusStatistics.averageDocumentLength)));
+          BM25_LENGTH_NORMALIZATION * (documentLength / Math.max(1, corpusStatistics.averageDocumentLength)));
     score += idf * ((frequency * (BM25_SATURATION + 1)) / denominator);
   }
   return maximum === 0 ? 0 : clamp(score / maximum);

@@ -17,23 +17,25 @@ export function recallTokens(value: string): readonly string[] {
       [...Effect.pipe(normalizeRecallSearchText(value), EffectString.matchAll(RECALL_TOKEN_PATTERN))],
       match => match[0],
     ),
-    token => {
-      const characters = [...token];
-      return (
-        characters.length >= 3 ||
-        (characters.length === 2 &&
-          /\p{L}/u.test(token) &&
-          EffectArray.some(
-            characters,
-            character =>
-              (Effect.pipe(
-                character,
-                EffectString.codePointAt(0),
-                Effect.Option.getOrElse(() => undefined),
-              ) ?? 0) > 0x7f,
-          ))
-      );
-    },
+    recallTokenIsSupported,
+  );
+}
+
+function recallTokenIsSupported(token: string): boolean {
+  const characters = [...token];
+  return (
+    characters.length >= 3 ||
+    (characters.length === 2 &&
+      /\p{L}/u.test(token) &&
+      EffectArray.some(
+        characters,
+        character =>
+          (Effect.pipe(
+            character,
+            EffectString.codePointAt(0),
+            Effect.Option.getOrElse(() => undefined),
+          ) ?? 0) > 0x7f,
+      ))
   );
 }
 
@@ -48,22 +50,31 @@ export function normalizeRecallSearchText(value: string): string {
  * hyphenated identifiers match even when clients use different typography.
  */
 export function recallLexicalTerms(value: string): readonly string[] {
-  return EffectArray.flatMap(recallTokens(value), token => {
-    const canonical = canonicalizeConnectors(token);
-    const normalized = Effect.pipe(canonical, EffectString.toLowerCase);
-    const components = EffectArray.filter(
-      EffectArray.map(
-        Effect.pipe(
-          canonical,
-          EffectString.replace(/([\p{Ll}\p{N}])(\p{Lu})/gu, '$1 $2'),
-          EffectString.split(RECALL_CONNECTOR_PATTERN),
-        ),
-        term => Effect.pipe(term, EffectString.toLowerCase),
+  return EffectArray.flatMap(recallTokens(value), recallLexicalTokenTerms);
+}
+
+/** Stream the same normalized terms without retaining a body-sized token array. */
+export function* iterateRecallLexicalTerms(value: string): IterableIterator<string> {
+  for (const [token] of Effect.pipe(normalizeRecallSearchText(value), EffectString.matchAll(RECALL_TOKEN_PATTERN))) {
+    if (recallTokenIsSupported(token)) yield* recallLexicalTokenTerms(token);
+  }
+}
+
+function recallLexicalTokenTerms(token: string): readonly string[] {
+  const canonical = canonicalizeConnectors(token);
+  const normalized = Effect.pipe(canonical, EffectString.toLowerCase);
+  const components = EffectArray.filter(
+    EffectArray.map(
+      Effect.pipe(
+        canonical,
+        EffectString.replace(/([\p{Ll}\p{N}])(\p{Lu})/gu, '$1 $2'),
+        EffectString.split(RECALL_CONNECTOR_PATTERN),
       ),
-      term => [...term].length >= 2 && term !== normalized,
-    );
-    return [normalized, ...components];
-  });
+      term => Effect.pipe(term, EffectString.toLowerCase),
+    ),
+    term => [...term].length >= 2 && term !== normalized,
+  );
+  return [normalized, ...components];
 }
 
 function canonicalizeConnectors(value: string): string {
