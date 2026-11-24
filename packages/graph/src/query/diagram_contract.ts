@@ -101,6 +101,7 @@ export const CodeGraphDiagramResultSchema = Schema.Union([
     message: Schema.String,
     nextAction: Schema.String,
     diagram: Schema.optionalKey(Diagram),
+    suggestedType: Schema.optionalKey(DiagramType),
   }),
   Schema.Struct({
     ...Base,

@@ -831,6 +831,10 @@ const handleRequestLegacy = Effect.fn('manager.handleRequestLegacy')(function* (
 
   const body = yield* readJsonBody(request);
   switch (url.pathname) {
+    case '/api/graph/diagram': {
+      const diagram = yield* graphActions.runManagerGraphDiagram(context.config.agentContextHome, body);
+      return writeJson(response, diagram.status, diagram.body);
+    }
     case '/api/graphs/action':
       writeJson(response, 200, yield* runManagerGraphAction(context.config, body, context.runEffect));
       return;

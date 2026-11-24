@@ -65,6 +65,10 @@ export function mcpResourceInvalidParamsError(message: string): McpSchema.Invali
   return McpSchema.InvalidParams.make({message, data: MCP_RESOURCE_ERROR_DATA});
 }
 
+export function mcpResourceNotFoundError(message: string): McpSchema.InvalidParams {
+  return McpSchema.InvalidParams.make({message, data: MCP_RESOURCE_NOT_FOUND_ERROR_DATA});
+}
+
 export function mcpResourceNotFoundRecoveryErrorData(
   recovery: MemoryReadRecoveryV1,
 ): Readonly<Record<string, unknown>> {

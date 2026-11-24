@@ -295,6 +295,17 @@ effectIt.layer(diagramStoreLayer)(it => {
       const incomingEdges = Arr.map(incoming.evidence.edges, edge => edge.id);
       expect(incomingEdges).toEqual(expect.arrayContaining(['inbound-only', 'inbound-owner', 'inbound-job']));
       expect(incomingEdges).not.toContain('other-branch');
+      const outgoing = requireDiagram(yield* run('What does managerGraphQuery call?'));
+      expect(Arr.map(outgoing.evidence.edges, edge => edge.id)).toEqual(expected);
+      const mixedEdges = [...new Set([...expected, ...incomingEdges])].sort();
+      for (const question of [
+        'What does managerGraphQuery call and who calls it?',
+        'Who calls managerGraphQuery and what does it call?',
+      ]) {
+        const mixed = requireDiagram(yield* run(question));
+        expect(mixed.coverage?.subject).toMatchObject({id: entry.id});
+        expect(Arr.map(mixed.evidence.edges, edge => edge.id)).toEqual(mixedEdges);
+      }
     }).pipe(TestClock.withLive),
   );
 
@@ -327,6 +338,40 @@ effectIt.layer(diagramStoreLayer)(it => {
       });
       if (incomplete.status !== 'incomplete') throw new Error('Expected an incomplete diagram');
       expect(incomplete.diagram?.evidence.edges).toHaveLength(132);
+      expect(yield* readCodeGraphDiagram(f.store, f.databasePath, {...input, diagramType: 'flowchart'})).toEqual(
+        incomplete,
+      );
+      const requestedSequence = yield* readCodeGraphDiagram(f.store, f.databasePath, {
+        ...input,
+        diagramType: 'sequence',
+      });
+      expect(requestedSequence).toMatchObject({
+        status: 'incomplete',
+        suggestedType: 'flowchart',
+        coverage: incomplete.coverage,
+        message:
+          'The selected snapshot has gaps in the evidence for this subject. ' +
+          'Static evidence does not establish a single ordered call path. A flowchart can show the available relationships.',
+        nextAction:
+          'Select Sequence and ask "Show the call path from src/authenticate.ts#authenticate to src/worker0.ts#worker0". ' +
+          'Select Flowchart for the current relationships.',
+      });
+      expect(requestedSequence).not.toHaveProperty('diagram');
+      expect(yield* Schema.decodeEffect(CodeGraphDiagramResultSchema)(requestedSequence)).toEqual(requestedSequence);
+      const path = yield* readCodeGraphDiagram(f.store, f.databasePath, {
+        ...input,
+        question: 'Show the call path from src/authenticate.ts#authenticate to src/worker0.ts#worker0',
+        diagramType: 'sequence',
+      });
+      expect(path).toMatchObject({
+        status: 'incomplete',
+        coverage: incomplete.coverage,
+        diagram: {
+          diagramType: 'sequence',
+          inferred: true,
+          evidence: {edges: [expect.objectContaining({id: 'call-000'})]},
+        },
+      });
 
       const failingStore = CodeGraphStore.of({
         ...f.store,
@@ -447,6 +492,7 @@ effectIt.layer(diagramStoreLayer)(it => {
       expect(Arr.map(classes.evidence.edges, edge => edge.id)).toEqual(['implement', 'inherit']);
       expect(yield* run('Show the call order from dispatchSession.', 'sequence')).toMatchObject({
         status: 'unavailable',
+        message: 'Static evidence does not establish a single ordered call path.',
         suggestedType: 'flowchart',
         coverage: {completeness: 'complete'},
       });
@@ -459,6 +505,393 @@ effectIt.layer(diagramStoreLayer)(it => {
         'public-check',
         'read',
       ]);
+      expect(yield* run('Show the call path from dispatchSession to checkCredentials.', 'sequence')).toMatchObject({
+        status: 'unavailable',
+        suggestedType: 'flowchart',
+        message: 'Static evidence does not establish a single ordered call path.',
+      });
+    }).pipe(TestClock.withLive),
+  );
+
+  it.effect('selects named call paths and direct dependencies of the callable module', () =>
+    Effect.gen(function* () {
+      const f = yield* storedDiagramFixture;
+      const owner = symbol('entry.ts', 'module', {path: 'src/entry.ts'});
+      const from = {...symbol('entry', 'function', {path: owner.path, line: 2}), span: {...span(2), endLine: 12}};
+      const local = symbol('lookup', 'variable', {label: 'entry.lookup', path: owner.path, line: 3});
+      const target = symbol('fetchData', 'function', {path: 'src/store.ts'});
+      const other = symbol('reportFailure', 'function');
+      const dependency = symbol('store.ts', 'module', {path: target.path});
+      const transitive = symbol('cache.ts', 'module', {path: 'src/cache.ts'});
+      const unresolved = (id: string, targetName: string) => ({
+        ...relation(id, 'imports', owner, transitive, 7, 'syntactic'),
+        targetId: undefined,
+        targetName,
+      });
+      const snapshot = yield* f.save(
+        'a',
+        [owner, from, local, target, other, dependency, transitive],
+        [
+          relation('declares-entry', 'contains', owner, from, 2, 'syntactic'),
+          relation('owns-lookup', 'contains', from, local, 3, 'syntactic'),
+          relation('fetch', 'calls', local, target, 3),
+          relation('other-branch', 'calls', from, other, 5),
+          relation('store', 'imports', owner, dependency, 1),
+          relation('cache', 'imports', dependency, transitive, 1),
+          unresolved('opaque-import', 'external-library'),
+          unresolved('opaque-binding', 'import:external-library:read:read'),
+        ],
+      );
+      const run = (question: string, diagramType: 'architecture' | 'class' | 'sequence' | 'flowchart') =>
+        readCodeGraphDiagram(f.store, f.databasePath, {
+          question,
+          diagramType,
+          scope: f.snapshotScope(snapshot),
+          freshness: 'current',
+        });
+
+      for (const [endpoint, ids] of [
+        ['fetchData', ['fetch', 'owns-lookup']],
+        ['src/entry.ts#entry.lookup', ['owns-lookup']],
+      ] as const) {
+        const question = `Show the call path from entry to ${endpoint}.`;
+        expect(yield* run(question, 'sequence')).toMatchObject({
+          status: 'unavailable',
+          suggestedType: 'flowchart',
+          message: 'Static evidence does not establish a single ordered call path.',
+          nextAction: 'Select Flowchart to show relationships between the same endpoints.',
+        });
+        const flow = requireDiagram(yield* run(question, 'flowchart'));
+        expect(Arr.map(flow.evidence.edges, edge => edge.id)).toEqual(ids);
+      }
+      const flow = requireDiagram(yield* run('Show the call path from entry to fetchData.', 'flowchart'));
+      const lookupId = Option.getOrUndefined(
+        Arr.findFirst(flow.evidence.nodes, node => node.id === local.id),
+      )?.diagramId;
+      expect(flow.evidence.edges).toMatchObject([
+        {id: 'fetch', source: lookupId, path: owner.path, span: span(3)},
+        {id: 'owns-lookup', target: lookupId, path: owner.path, span: span(3)},
+      ]);
+
+      const architecture = yield* run('entry', 'architecture');
+      expect(architecture).toMatchObject({
+        status: 'incomplete',
+        coverage: {subject: {id: from.id}, gaps: [{kind: 'unresolved-target', edgeId: 'opaque-import'}]},
+        diagram: {
+          diagramType: 'architecture',
+          evidence: {
+            nodes: [{id: owner.id}, {id: dependency.id}],
+            edges: [{id: 'store', path: owner.path, span: span(1)}],
+          },
+        },
+      });
+      expect(architecture.limits).toContain(
+        'The architecture shows direct dependencies of the containing module. The indexed contains declaration is at src/entry.ts:2.',
+      );
+      expect(yield* run('entry', 'class')).toMatchObject({
+        status: 'incomplete',
+        message: 'The selected snapshot has no indexed structural relationships for this subject.',
+        nextAction: 'Name a class or interface with indexed type relationships.',
+      });
+    }).pipe(TestClock.withLive),
+  );
+
+  it.effect('resolves each named endpoint before reading the path and keeps real self-calls', () =>
+    Effect.gen(function* () {
+      const f = yield* storedDiagramFixture;
+      const a = {...symbol('A', 'function'), span: {...span(1), endLine: 7}};
+      const b = symbol('B', 'function', {path: a.path, line: 3});
+      const instance = symbol('Instance', 'class');
+      const fromOne = symbol('SameStart', 'function', {id: 'from-1', path: 'src/one.ts'});
+      const fromTwo = symbol('SameStart', 'function', {id: 'from-2', path: 'src/two.ts'});
+      const toOne = symbol('SameTarget', 'function', {id: 'to-1', path: 'src/one.ts'});
+      const toTwo = symbol('SameTarget', 'function', {id: 'to-2', path: 'src/two.ts'});
+      const recurse = symbol('recur', 'function');
+      const move = symbol('moveData', 'function', {id: `cgs_${Str.repeat(32)('e')}`, path: 'src/transfer.ts'});
+      const store = symbol('storeData', 'function', {path: 'src/Payment API.ts'});
+      const snapshot = yield* f.save(
+        'b',
+        [a, b, instance, fromOne, fromTwo, toOne, toTwo, recurse, move, store],
+        [
+          relation('a-b', 'calls', a, b, 2),
+          relation('owns-b', 'contains', a, b, 3, 'syntactic'),
+          relation('b-instance', 'constructs', b, instance, 4),
+          relation('a-other', 'calls', a, toOne, 3),
+          relation('same-start-call', 'calls', fromOne, fromTwo, 2),
+          relation('second-start-call', 'calls', fromTwo, b, 3),
+          relation('same-target-call', 'calls', toOne, toTwo, 2),
+          relation('recurse', 'calls', recurse, recurse, 1),
+          relation('recurse-other', 'calls', recurse, b, 2),
+          relation('move-store', 'calls', move, store, 2),
+        ],
+      );
+      const run = (question: string, diagramType: 'sequence' | 'flowchart' = 'sequence') =>
+        readCodeGraphDiagram(f.store, f.databasePath, {
+          question,
+          diagramType,
+          scope: f.snapshotScope(snapshot),
+          freshness: 'current',
+        });
+
+      expect(yield* run('Show the call path from SameStart to B.')).toMatchObject({
+        status: 'clarification',
+        candidates: [{id: fromOne.id}, {id: fromTwo.id}],
+      });
+      expect(yield* run('Show the call path from A to SameTarget.')).toMatchObject({
+        status: 'clarification',
+        candidates: [{id: toOne.id}, {id: toTwo.id}],
+      });
+      for (const question of [
+        'Show the call path from A to.',
+        'Show the call path from A other to B.',
+        'Show the call path to B.',
+      ]) {
+        expect(yield* run(question), question).toMatchObject({
+          status: 'unavailable',
+          message: 'The call path needs one source and one target.',
+        });
+      }
+      for (const named of [
+        'Show the call path from A to B please.',
+        'Show the sequence from A to B.',
+        'Show a sequence diagram from A to B.',
+        'Show a sequence diagram of the calls from A to B.',
+        'Show the sequence of calls from A to B.',
+        'from A to B',
+      ]) {
+        const sequence = requireDiagram(yield* run(named));
+        expect(sequence.source).toBe('sequenceDiagram\n  participant n1 as A\n  participant n2 as B\n  n1->>n2: calls');
+        for (const result of [sequence, requireDiagram(yield* run(named, 'flowchart'))]) {
+          expect(Arr.map(result.evidence.edges, edge => edge.id)).toEqual(['a-b', 'owns-b']);
+        }
+      }
+      const incidental = requireDiagram(yield* run('How does A work from B to Instance?', 'flowchart'));
+      expect(incidental.coverage?.subject).toMatchObject({id: a.id});
+      expect(Arr.map(incidental.evidence.edges, edge => edge.id)).toEqual(
+        expect.arrayContaining(['a-b', 'a-other', 'b-instance', 'owns-b']),
+      );
+      for (const question of [
+        'Show a sequence diagram of src/transfer.ts#moveData from source to destination.',
+        'Show a sequence diagram src/transfer.ts#moveData from source to destination.',
+        'Show the call path of src/transfer.ts#moveData from source to destination.',
+        `Show ${move.id} with the call chain from source to destination.`,
+      ]) {
+        const descriptive = requireDiagram(yield* run(question));
+        expect(descriptive.coverage?.subject).toMatchObject({id: move.id, path: move.path});
+        expect(descriptive.source).toBe(
+          'sequenceDiagram\n  participant n1 as moveData\n  participant n2 as storeData\n  n1->>n2: calls',
+        );
+        expect(Arr.map(descriptive.evidence.edges, edge => edge.id)).toEqual(['move-store']);
+      }
+      const exactPath = requireDiagram(
+        yield* run('Show the call chain from "src/transfer.ts#moveData" to "src/Payment API.ts#storeData" please.'),
+      );
+      expect(Arr.map(exactPath.evidence.edges, edge => edge.id)).toEqual(['move-store']);
+      expect(exactPath.limits).toContain(`The diagram covers indexed paths to storeData at ${store.path}:1.`);
+      const construction = requireDiagram(yield* run('from A to Instance'));
+      expect(construction.source).toContain('n2->>n3: constructs');
+      expect(Arr.map(construction.evidence.edges, edge => edge.id)).toEqual(['a-b', 'owns-b', 'b-instance']);
+      const recursion = requireDiagram(yield* run('Show the call path from recur to recur.'));
+      expect(recursion.source).toContain('n1->>n1: calls');
+      expect(Arr.map(recursion.evidence.edges, edge => edge.id)).toEqual(['recurse']);
+    }).pipe(TestClock.withLive),
+  );
+
+  it.effect('uses compound topic context and preserves explicit test and tied production subjects', () =>
+    Effect.gen(function* () {
+      const f = yield* storedDiagramFixture;
+      const packageName = '@fixture/catalog';
+      const production = symbol('executeQuery', 'function', {path: 'packages/catalog/src/query.ts', packageName});
+      const queryModule = {
+        ...symbol('src/query.ts', 'module', {path: production.path, packageName}),
+        span: {...span(1), endLine: 12},
+      };
+      const dep = symbol('src/adapter.ts', 'module', {path: 'packages/catalog/src/adapter.ts', packageName});
+      const depOfDep = symbol('src/clock.ts', 'module', {path: 'packages/catalog/src/clock.ts', packageName});
+      const empty = symbol('src/empty.ts', 'module', {path: 'packages/catalog/src/empty.ts', packageName});
+      const tied = symbol('executeQuery', 'function', {
+        id: 'alternate',
+        path: 'services/catalog/src/query.ts',
+        packageName,
+      });
+      const specialized = symbol('searchCatalogVectors', 'function', {
+        path: 'packages/catalog/src/vectors.ts',
+        packageName,
+      });
+      const test = symbol('search', 'variable', {path: 'packages/catalog/test/catalog-search.test.ts', packageName});
+      const showcase = symbol('CatalogSearchShowcase', 'function', {path: 'apps/web/src/landing.ts'});
+      const authenticate = symbol('authenticate', 'function');
+      const testAuthenticate = symbol('authenticate', 'function', {id: 'test-auth', path: 'test/authenticate.test.ts'});
+      const readSession = symbol('readSession', 'function');
+      const catalogPolicy = symbol('catalogIndexPolicy', 'function', {
+        id: `cgs_${Str.repeat(32)('f')}`,
+        path: 'packages/catalog/src/types.ts',
+        packageName,
+      });
+      const catalogCheck = symbol('catalogIndexCheck', 'function', {path: catalogPolicy.path, packageName});
+      const index = symbol('index', 'function', {path: 'packages/catalog/src/storage.ts', packageName});
+      const generate = {
+        ...symbol('prepareCatalogRecordGeneration', 'function', {path: 'packages/catalog/src/records.ts', packageName}),
+        span: {...span(1), endLine: 5},
+      };
+      const saveRecord = symbol('saveRecord', 'variable', {path: generate.path, line: 3});
+      const aliasNoise = symbol('archiveGeneration', 'function', {path: generate.path, packageName});
+      const scan = symbol('scanTerms', 'function');
+      const rank = symbol('rankMatches', 'function');
+      const facts = [
+        relation('owns-entry', 'contains', queryModule, production, 1, 'syntactic'),
+        relation('adapter-import-1', 'imports', queryModule, dep, 2),
+        relation('adapter-import-2', 'imports', queryModule, dep, 4),
+        relation('clock-import', 'imports', dep, depOfDep, 2),
+        relation('scan', 'calls', production, scan, 2),
+        relation('rank', 'calls', production, rank, 3),
+        relation('vectors', 'calls', production, specialized, 5),
+        relation('vector-rank', 'calls', specialized, rank, 2),
+        relation('test-search', 'calls', test, scan, 3),
+        relation('showcase', 'calls', showcase, rank, 3),
+        relation('session', 'calls', authenticate, readSession, 2),
+        relation('test-auth', 'calls', testAuthenticate, rank, 2),
+        relation('store-scan', 'calls', index, scan, 2),
+        relation('record-owner', 'contains', generate, saveRecord, 3, 'syntactic'),
+        relation('record-write', 'calls', saveRecord, scan, 4),
+        relation('archive-scan', 'calls', aliasNoise, scan, 2),
+        {
+          ...relation('opaque-index-check', 'calls', catalogCheck, index, 2, 'syntactic'),
+          targetId: undefined,
+          targetName: 'callback',
+        },
+        {
+          ...relation('dynamic', 'calls', production, scan, 4, 'syntactic'),
+          targetId: undefined,
+          targetName: 'callback',
+        },
+      ];
+      const base = [
+        production,
+        queryModule,
+        dep,
+        depOfDep,
+        empty,
+        specialized,
+        test,
+        showcase,
+        authenticate,
+        testAuthenticate,
+        readSession,
+        catalogPolicy,
+        catalogCheck,
+        index,
+        generate,
+        saveRecord,
+        aliasNoise,
+        scan,
+        rank,
+      ];
+      const snapshot = yield* f.save('c', base, facts);
+      const run = (
+        question: string,
+        diagramType: 'auto' | 'sequence' | 'flowchart' | 'architecture' | 'class',
+        ready = snapshot,
+      ) =>
+        readCodeGraphDiagram(f.store, f.databasePath, {
+          question,
+          diagramType,
+          scope: f.snapshotScope(ready),
+          freshness: 'current',
+        });
+      const topic = 'How catalog search work?';
+      const flow = yield* run(topic, 'flowchart');
+      expect(flow).toMatchObject({
+        status: 'incomplete',
+        coverage: {subject: {id: production.id}},
+        diagram: {
+          diagramType: 'flowchart',
+          evidence: {edges: [{id: 'rank'}, {id: 'scan'}, {id: 'vector-rank'}, {id: 'vectors'}]},
+        },
+      });
+      expect(yield* run(topic, 'auto')).toEqual(flow);
+      expect(yield* run('How catalog search works and who calls it?', 'flowchart')).toEqual(flow);
+      const architecture = requireDiagram(yield* run(topic, 'architecture'));
+      expect(architecture.diagramType).toBe('architecture');
+      expect(architecture.coverage?.subject).toMatchObject({id: production.id});
+      expect(Arr.map(architecture.evidence.edges, edge => edge.id)).toEqual(['adapter-import-1', 'adapter-import-2']);
+      expect(architecture.source).toContain('junction link2');
+      expect(architecture.source).toContain('link2:R --> L:n2');
+      const fileArchitecture = requireDiagram(yield* run(queryModule.path, 'architecture'));
+      expect(Arr.map(fileArchitecture.evidence.edges, edge => edge.id)).toEqual([
+        'adapter-import-1',
+        'adapter-import-2',
+        'clock-import',
+      ]);
+      const overview = requireDiagram(yield* run(queryModule.path, 'auto'));
+      expect(overview.diagramType).toBe('flowchart');
+      expect(Arr.map(overview.evidence.edges, edge => edge.id)).toEqual([
+        'adapter-import-1',
+        'adapter-import-2',
+        'clock-import',
+        'owns-entry',
+      ]);
+      const noEvidence = yield* run(empty.path, 'auto');
+      expect(noEvidence).toMatchObject({
+        status: 'incomplete',
+        message: 'The selected snapshot has no indexed relationships for this subject.',
+      });
+      expect(noEvidence).not.toHaveProperty('diagram');
+      const classResult = yield* run(topic, 'class');
+      expect(classResult).toMatchObject({
+        status: 'incomplete',
+        suggestedType: 'flowchart',
+        coverage: {subject: {id: production.id}},
+      });
+      expect(classResult).not.toHaveProperty('diagram');
+      expect(yield* run(topic, 'sequence')).toMatchObject({
+        status: 'incomplete',
+        coverage: {subject: {id: production.id}},
+        suggestedType: 'flowchart',
+      });
+      expect(yield* run('scanTerms', 'sequence')).not.toHaveProperty('suggestedType');
+      for (const unrelated of [
+        'How lunar inventory search work?',
+        'How does lunar inventory search work?',
+        'How lunar catalog index works?',
+        'How catalog archive index works?',
+      ]) {
+        expect(yield* run(unrelated, 'flowchart')).toMatchObject({
+          status: 'unavailable',
+          coverage: {completeness: 'undetermined'},
+        });
+      }
+      const modified = requireDiagram(yield* run('How does authenticate internally work?', 'flowchart'));
+      expect(modified.coverage?.subject).toMatchObject({id: authenticate.id});
+      expect(modified.evidence.edges).toEqual([expect.objectContaining({id: 'session', path: authenticate.path})]);
+      const supportedIndex = requireDiagram(yield* run('How catalog index works?', 'auto'));
+      expect(supportedIndex.coverage?.subject).toMatchObject({id: index.id, path: index.path});
+      expect(supportedIndex.evidence.edges).toEqual([expect.objectContaining({id: 'store-scan', path: index.path})]);
+      const generation = requireDiagram(yield* run('How catalog record index works?', 'auto'));
+      expect(generation.coverage?.subject).toMatchObject({id: generate.id, path: generate.path});
+      expect(Arr.map(generation.evidence.edges, edge => edge.id)).toEqual(['record-owner', 'record-write']);
+      for (const name of [
+        'How does catalogIndexPolicy work?',
+        `${catalogPolicy.path}#${catalogPolicy.name}`,
+        catalogPolicy.id,
+      ]) {
+        const exact = yield* run(name, 'auto');
+        expect(exact).toMatchObject({status: 'incomplete', coverage: {subject: {id: catalogPolicy.id}}});
+        expect(exact).not.toHaveProperty('diagram');
+      }
+      for (const request of ['How catalog search tests work?', `Show ${test.path}#search.`]) {
+        const selected = requireDiagram(yield* run(request, 'flowchart'));
+        expect(selected.coverage?.subject).toMatchObject({id: test.id, path: test.path});
+      }
+      const competing = yield* f.save(
+        'd',
+        [...base, tied],
+        [...facts, relation('alternate-call', 'calls', tied, rank, 3)],
+      );
+      expect(yield* run(topic, 'auto', competing)).toMatchObject({
+        status: 'clarification',
+        candidates: [{id: tied.id}, {id: production.id}],
+      });
     }).pipe(TestClock.withLive),
   );
 
@@ -472,14 +905,17 @@ effectIt.layer(diagramStoreLayer)(it => {
       const similar = symbol('Authentication', 'function');
       const caller = symbol('load', 'function', {id: 'caller', path: 'src/caller.ts'});
       const sink = symbol('load', 'function', {id: 'sink', path: 'src/sink.ts'});
+      const executeCaller = symbol('execute', 'function', {id: 'execute-caller', path: caller.path});
+      const executeSink = symbol('execute', 'function', {id: 'execute-sink', path: sink.path});
       const snapshot = yield* f.save(
         '8',
-        [exact, wrongPath, wrongName, named, similar, caller, sink],
+        [exact, wrongPath, wrongName, named, similar, caller, sink, executeCaller, executeSink],
         [
           relation('wrong-path-call', 'calls', wrongPath, sink, 3),
           relation('wrong-name-call', 'calls', wrongName, sink, 4),
           relation('similar-call', 'calls', similar, sink, 5),
           relation('nested-call', 'calls', caller, sink, 7),
+          relation('execute-call', 'calls', executeCaller, executeSink, 8),
         ],
       );
       const run = (question: string) =>
@@ -512,6 +948,17 @@ effectIt.layer(diagramStoreLayer)(it => {
         'sequenceDiagram\n  participant n1 as load\n  participant n2 as load\n  n1->>n2: calls',
       );
       expect(sequence.evidence.nodes).toMatchObject([{id: caller.id}, {id: sink.id}]);
+      const incoming = requireDiagram(yield* run('Who calls load?'));
+      expect(incoming.coverage?.subject).toMatchObject({id: sink.id});
+      expect(Arr.map(incoming.evidence.edges, edge => edge.id)).toEqual([
+        'nested-call',
+        'similar-call',
+        'wrong-name-call',
+        'wrong-path-call',
+      ]);
+      const execute = requireDiagram(yield* run('Who calls execute?'));
+      expect(execute.coverage?.subject).toMatchObject({id: executeSink.id});
+      expect(Arr.map(execute.evidence.edges, edge => edge.id)).toEqual(['execute-call']);
       expect(sequence.evidence.edges).toEqual([
         {
           id: 'nested-call',

@@ -124,7 +124,8 @@ const MCP_CODE_GRAPH_MAXIMUM_EDGE_LIMIT = 500;
 const MCP_CODE_GRAPH_STRUCTURED_CONTENT_BYTES = 24 * 1_024;
 const MCP_CODE_GRAPH_STRUCTURED_CONTENT_RESERVE_BYTES = 768;
 const MCP_CODE_GRAPH_ANALYSIS_MAXIMUM_COMMUNITY_MEMBERS = 5_000;
-const MCP_CODE_GRAPH_PROJECT_SELECTOR_DESCRIPTION = 'Graph project name/root; omit to infer from callerCwd';
+const MCP_CODE_GRAPH_PROJECT_SELECTOR_DESCRIPTION =
+  'Graph project name/root, distinct from memory tags. Default from callerCwd.';
 export function registerContextBriefTool(server: EffectMcpServerAdapter, config: RuntimeConfig): void {
   server.registerTool(
     'context_brief',
@@ -237,11 +238,11 @@ export function registerCodeGraphTool(
         idempotentHint: true,
       },
       description:
-        'Use semantic truncation before text search. Path and impact need current evidence. Worksets use published graphs.',
+        'Use semantic truncation before broad text search (55-second deadline). Untrusted evidence. Ready evidence may be deferred. Path/impact require current evidence. Worksets read published graphs. Refresh with workset prepare.',
       inputSchema: {
         base: McpInput.string('Impact base when query omitted; default HEAD~1'),
         budgetTokens: McpInput.integer(
-          'Ceiling: local min 800; impact agent defaults to 1250, as do Mermaid and Workset.',
+          'Local minimum 800. Local query defaults to 800. Impact agent, Mermaid and Workset default to 1250.',
           {
             minimum: 1,
             maximum: 1_500,
@@ -268,11 +269,9 @@ export function registerCodeGraphTool(
           ['query', 'node', 'neighbors', 'explain', 'path', 'impact', 'topology'],
           'Operation',
         ),
-        output: McpInput.literals(['mermaid'], 'Diagram for a local question in query.'),
+        output: McpInput.literals(['mermaid'], 'Mermaid for a local query. Read parts if supplied.'),
         package: McpInput.string('Exact query package'),
-        project: McpInput.string(
-          `${MCP_CODE_GRAPH_PROJECT_SELECTOR_DESCRIPTION}; preserve the project selected by context_brief`,
-        ),
+        project: McpInput.string(`${MCP_CODE_GRAPH_PROJECT_SELECTOR_DESCRIPTION} Keep the context_brief project.`),
         query: McpInput.string('Query/path/impact target'),
         responseFormat: McpInput.literals(
           ['dual', 'text', 'agent'],
@@ -909,9 +908,7 @@ export function registerCodeGraphTool(
           ['current', 'ready', 'allow-stale'],
           'Default current. ready accepts stale snapshots or refreshes if cold; allow-stale never indexes.',
         ),
-        project: McpInput.string(
-          `${MCP_CODE_GRAPH_PROJECT_SELECTOR_DESCRIPTION}; preserve the project selected by context_brief`,
-        ),
+        project: McpInput.string(`${MCP_CODE_GRAPH_PROJECT_SELECTOR_DESCRIPTION} Keep the context_brief project.`),
         communityId: McpInput.string('Required cgc_ ID for community'),
         includeHeuristic: McpInput.boolean('Include heuristic relationships; default false'),
         includeModelAssociations: McpInput.boolean('Include model associations; default false'),

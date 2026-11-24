@@ -1,4 +1,5 @@
 import {Array as Arr, Option, String as Str} from 'effect';
+import {codeGraphSymbolPathClass, codeGraphSymbolPathScoreMultiplier} from '../store/query/core.js';
 import {parseCodeGraphEndpointSelector} from './selector.js';
 import type {CodeGraphEdge, CodeGraphQueryNode, CodeGraphRelation, CodeGraphSpan} from '../types.js';
 import type {
@@ -148,6 +149,56 @@ function relevance(node: CodeGraphQueryNode, terms: readonly string[]): number {
   return score;
 }
 
+const TEST_TOPIC = /^(?:test|spec|fixture|mock)$/u;
+
+function isDiagramCallable(node: CodeGraphQueryNode): boolean {
+  return (
+    /^(?:(?:function|method)(?:[_a-z]+)?|constructor|macro|init|initializer|lambda|closure|callback)$/u.test(
+      node.kind,
+    ) ||
+    (node.kind === 'variable' && /\bfunction\b|=>/u.test(node.signature ?? ''))
+  );
+}
+
+export function diagramTopicSearchTerms(topic: readonly string[]): readonly string[] {
+  const action = Option.getOrUndefined(Arr.findLast(topic, term => !TEST_TOPIC.test(term))) ?? topic.at(-1);
+  if (action === 'search') return ['search', 'query'];
+  if (action === 'query') return ['query', 'search'];
+  // A specific compound topic can name the generation of an index.
+  if (action === 'index' && Arr.filter(topic, term => !TEST_TOPIC.test(term)).length > 2)
+    return ['index', 'generation'];
+  return action === undefined ? [] : [action];
+}
+
+function topicRelevance(node: CodeGraphQueryNode, terms: readonly string[]): number {
+  if (node.kind === 'module' || node.kind === 'file' || isDiagramTypeKind(node.kind)) return 0;
+  const tests = Arr.some(terms, term => TEST_TOPIC.test(term));
+  if (tests ? codeGraphSymbolPathClass(node.path) !== 'test' : !isDiagramCallable(node)) return 0;
+  const actions = diagramTopicSearchTerms(terms);
+  const name = words(node.name);
+  const identity = [...name, ...words(node.qualifiedName)];
+  const action = Option.getOrUndefined(Arr.findFirst(actions, term => identity.includes(term)));
+  if (action === undefined) return 0;
+  const packageWords = words(node.packageName ?? '');
+  const context =
+    actions[0] === 'index' && action === 'generation' ? identity : [...identity, ...packageWords, ...words(node.path)];
+  const qualifiers = Arr.filter(terms, term => !actions.includes(term) && !TEST_TOPIC.test(term));
+  if (!qualifiers.length || !Arr.every(qualifiers, term => context.includes(term))) return 0;
+  const matched = Arr.map(terms, term => (term === actions[0] ? action : term));
+  const local = Arr.filter(matched, term => packageWords.includes(term)).length;
+  const density = Arr.filter(name, term => matched.includes(term)).length / Math.max(1, name.length);
+  const entry = node.exported && !tests;
+  const pathParts = Str.split('/')(node.path);
+  const moduleName = Str.replace(/\.[^.]+$/u, '')(pathParts.at(-1) ?? '');
+  const primaryModule =
+    actions.includes(moduleName) && (pathParts.length === 1 || /^(?:src|lib)$/u.test(pathParts.at(-2) ?? ''));
+  const entryScore = entry ? (primaryModule ? 10 : 2) : 0;
+  return (
+    (relevance(node, matched) + 2 * local + 3 * density + entryScore) *
+    codeGraphSymbolPathScoreMultiplier(node.path, terms)
+  );
+}
+
 function validSpan(span: CodeGraphSpan): boolean {
   return (
     Arr.every(
@@ -213,6 +264,17 @@ function sourceFor(type: DiagramType, evidence: Diagram['evidence']): string {
       const membership = new Map(
         Arr.flatMap(groups, group => Arr.map(group.members, member => [member, group.diagramId] as const)),
       );
+      const pairs = new Set<string>();
+      const links = Arr.flatMap(edges, (edge, index) => {
+        const pair = `${edge.source}-${edge.target}`;
+        if (!pairs.has(pair)) {
+          pairs.add(pair);
+          return [`  ${edge.source}:R --> L:${edge.target}`];
+        }
+        // Mermaid uses the endpoint pair as the rendered edge ID.
+        const route = `link${index + 1}`;
+        return [`  junction ${route}`, `  ${edge.source}:R -- L:${route}`, `  ${route}:R --> L:${edge.target}`];
+      });
       return Arr.join(
         [
           'architecture-beta',
@@ -221,7 +283,7 @@ function sourceFor(type: DiagramType, evidence: Diagram['evidence']): string {
             const group = membership.get(node.diagramId);
             return `  service ${node.diagramId}[${labels.get(node.diagramId)}]${group ? ` in ${group}` : ''}`;
           }),
-          ...Arr.map(edges, edge => `  ${edge.source}:R --> L:${edge.target}`),
+          ...links,
         ],
         '\n',
       );
@@ -256,7 +318,11 @@ function sourceFor(type: DiagramType, evidence: Diagram['evidence']): string {
         [
           'sequenceDiagram',
           ...Arr.map(nodes, node => `  participant ${node.diagramId} as ${labels.get(node.diagramId)}`),
-          ...Arr.map(edges, edge => `  ${edge.source}->>${edge.target}: calls`),
+          ...Arr.flatMap(edges, edge =>
+            edge.relation === 'calls' || edge.relation === 'constructs'
+              ? [`  ${edge.source}->>${edge.target}: ${edge.relation}`]
+              : [],
+          ),
         ],
         '\n',
       );
@@ -322,21 +388,107 @@ const EVIDENCE_REQUEST_WORDS = new Set([
 const STRUCTURAL_PREDICATE =
   /^(?:implement(?:s|ed|ing)?|extend(?:s|ed|ing)?|inherit(?:s|ed|ing)?|overrid(?:e|es|den|ing)|deriv(?:e|es|ed|ing))$/iu;
 
-const ARTICLE = /^(?:a|an|the)$/iu;
+const ARTICLE = /^(?:a|an|the)$/u;
 
 function subjectAfter(tokens: readonly string[], index: number): number | undefined {
   const subject = ARTICLE.test(tokens[index] ?? '') ? index + 1 : index;
   return tokens[subject] === undefined ? undefined : subject;
 }
 
+function interrogativeSubjectIndex(tokens: readonly string[]): number | undefined {
+  const [first, second, third] = tokens;
+  if (/^(?:how|what)$/iu.test(first ?? '') && /^(?:do|does|did)$/iu.test(second ?? '')) return subjectAfter(tokens, 2);
+  if (/^(?:who|what)$/iu.test(first ?? '') && /^calls?$/iu.test(second ?? '') && !/^occurs?$/iu.test(third ?? ''))
+    return subjectAfter(tokens, 2);
+  return undefined;
+}
+
 function explicitSubjectIndex(tokens: readonly string[]): number | undefined {
   const [first, second] = tokens;
   if (!first) return undefined;
   if (second === undefined) return 0;
-  if (/^(?:how|what)$/iu.test(first) && /^(?:do|does|did)$/iu.test(second)) return subjectAfter(tokens, 2);
+  const interrogative = interrogativeSubjectIndex(tokens);
+  if (interrogative !== undefined) return interrogative;
   if (tokens.length === 2 && /^(?:show|draw|explain|give)$/iu.test(first)) return 1;
   const preposition = tokens.at(ARTICLE.test(tokens.at(-2) ?? '') ? -3 : -2);
   return /^(?:for|from|of)$/iu.test(preposition ?? '') ? tokens.length - 1 : undefined;
+}
+
+function behaviorDirections(tokens: readonly string[], cueTokens: readonly string[]) {
+  const separators = Arr.flatMap(tokens, (token, index) => (/^(?:and|or|then)$/iu.test(token) ? [index] : []));
+  let start = 0;
+  let incoming = false;
+  let outgoing = false;
+  for (const end of [...separators, tokens.length]) {
+    const clause = tokens.slice(start, end);
+    const subject = interrogativeSubjectIndex(clause);
+    const prose = Arr.join(
+      Arr.filter(cueTokens.slice(start, end), (token, index) => token !== '' && index !== subject),
+      ' ',
+    );
+    if (
+      /\b(?:incoming|upstream|callers?|called by|who calls|what calls(?!\s+occur\b)|(?:how|what) .{0,50}\breach(?:es)?|entry points? (?:to|for))\b/iu.test(
+        prose,
+      )
+    ) {
+      incoming = true;
+    } else if (
+      /^what (?:does|do|did) calls?\b|\b(?:works?|executes?|execution|triggers?|outgoing|downstream|step by step)\b/iu.test(
+        prose,
+      )
+    ) {
+      outgoing = true;
+    }
+    start = end + 1;
+  }
+  return {incoming, outgoing};
+}
+
+function pathOperand(tokens: readonly string[]): string | undefined {
+  if (tokens.length === 1) return tokens[0];
+  if (tokens.length === 2 && ARTICLE.test(tokens[0])) return tokens[1];
+  return undefined;
+}
+
+function compoundTopic(tokens: readonly string[]): readonly string[] {
+  if (!/^how$/iu.test(tokens[0] ?? '')) return [];
+  const start = /^(?:do|does|did)$/iu.test(tokens[1] ?? '') ? 2 : 1;
+  const end = Option.getOrUndefined(
+    Arr.findFirstIndex(tokens, (token, index) => index >= start && /^works?$/iu.test(token)),
+  );
+  if (end === undefined) return [];
+  const phrase = Arr.filter(
+    tokens.slice(start, end),
+    token => !/^(?:a|an|the|and|or|really|actually|please)$/iu.test(token),
+  );
+  if (phrase.length < 2 || Arr.some(phrase, token => /[./#:@_$]|[\p{Ll}\p{N}]\p{Lu}/u.test(token))) return [];
+  return Arr.map(phrase, token => Str.replace(/^(test|spec|fixture|mock)s$/u, '$1')(Str.toLowerCase(token)));
+}
+
+const PATH_CUE = /(?:^| )(?:call (?:path|chain|order)|sequence(?: diagram)?(?: of (?:the )?calls)?)$/iu;
+
+function requestedPath(tokens: readonly string[], cueTokens: readonly string[]) {
+  const start = Option.getOrUndefined(
+    Arr.findFirstIndex(cueTokens, (token, index) =>
+      index === 0
+        ? /^from$/iu.test(token)
+        : /^(?:from|to)$/iu.test(token) && PATH_CUE.test(Arr.join(cueTokens.slice(0, index), ' ')),
+    ),
+  );
+  if (start === undefined || Arr.some(tokens.slice(0, start), isExplicitSelector)) return undefined;
+  if (/^to$/iu.test(cueTokens[start])) return {kind: 'malformed'} as const;
+  const separator = Option.getOrUndefined(
+    Arr.findFirstIndex(tokens, (token, index) => index > start && /^to$/iu.test(token)),
+  );
+  if (separator === undefined) return undefined;
+  const fromTokens = tokens.slice(start + 1, separator);
+  const trailing = tokens.slice(separator + 1);
+  const toTokens = trailing.length > 1 && /^please$/iu.test(trailing.at(-1) ?? '') ? trailing.slice(0, -1) : trailing;
+  const from = pathOperand(fromTokens);
+  const to = pathOperand(toTokens);
+  if ((!from && Arr.some(fromTokens, isExplicitSelector)) || (!to && Arr.some(toTokens, isExplicitSelector)))
+    return undefined;
+  return from && to ? ({kind: 'path', from, to} as const) : ({kind: 'malformed'} as const);
 }
 
 function asksForStructuralSources(tokens: readonly string[], predicateIndex: number | undefined): boolean {
@@ -360,14 +512,16 @@ export function describeCodeGraphDiagramQuestion(question: string, type: CodeGra
   );
   const inverse = asksForStructuralSources(tokens, possiblePredicate);
   const object = inverse && possiblePredicate !== undefined ? subjectAfter(tokens, possiblePredicate + 1) : undefined;
-  const cues = Arr.filter(
-    tokens,
-    (token, index) =>
-      index !== explicitSubject && index !== object && !isExplicitSelector(token) && !/[./#:@]/u.test(token),
+  // Keep token positions so a path cue cannot cross a selector.
+  const cueTokens = Arr.map(tokens, (token, index) =>
+    index !== explicitSubject && index !== object && !isExplicitSelector(token) && !/[./#:@]/u.test(token) ? token : '',
   );
+  const cues = Arr.filter(cueTokens, Boolean);
   const prose = Arr.join(cues, ' ');
   const preferred = intent(cues);
   const explicitType = type === 'auto' ? undefined : type;
+  const pathRequest = requestedPath(tokens, cueTokens);
+  const path = pathRequest?.kind === 'path' ? pathRequest : undefined;
   const inheritance = /\b(?:inherit(?:s|ance)?|subclasses|derived|base class)\b/iu.test(prose);
   const behavior = /\b(?:calls?|called|callers?|works?|executes?|execution|reaches?|triggers?|step by step)\b/iu.test(
     prose,
@@ -389,15 +543,17 @@ export function describeCodeGraphDiagramQuestion(question: string, type: CodeGra
       (predicateIndex !== undefined ||
         inheritance ||
         /\b(?:class(?:es)?|interfaces?|types?|members?)\b/iu.test(prose)));
-  const domain = structure
-    ? 'types'
-    : preferred === 'architecture' || /\b(?:dependencies|dependency|imports?|resources?)\b/iu.test(prose)
-      ? 'architecture'
-      : !behavior && explicitType === 'class'
+  const intentDomain =
+    path !== undefined
+      ? 'behavior'
+      : structure
         ? 'types'
-        : !behavior && explicitType === 'architecture'
+        : preferred === 'architecture' || /\b(?:dependencies|dependency|imports?|resources?)\b/iu.test(prose)
           ? 'architecture'
-          : 'behavior';
+          : !behavior && explicitType === 'class'
+            ? 'types'
+            : 'behavior';
+  const domain = path === undefined && explicitType === 'architecture' ? 'architecture' : intentDomain;
   const terms = Arr.filter(
     tokens,
     (term, index) =>
@@ -405,17 +561,53 @@ export function describeCodeGraphDiagramQuestion(question: string, type: CodeGra
       (domain === 'types' && predicateIndex !== undefined && index === object) ||
       (!EVIDENCE_REQUEST_WORDS.has(Str.toLowerCase(term)) && (domain !== 'types' || index !== predicateIndex)),
   );
-  const named = namedTerm(tokens, Arr.map(terms, Str.toLowerCase));
-  const incoming =
-    (domain === 'types' && predicateIndex !== undefined && inverse) ||
-    /\b(?:incoming|upstream|callers?|called by|who calls|what calls(?!\s+occur\b)|(?:how|what) .{0,50}\breach(?:es)?|entry points? (?:to|for))\b/iu.test(
-      prose,
-    );
-  return {selectors, terms, named, preferred, explicitType, domain, incoming, inheritance} as const;
+  const named =
+    explicitSubject === undefined
+      ? namedTerm(tokens, Arr.map(terms, Str.toLowerCase))
+      : {spelling: tokens[explicitSubject], caseSensitive: true};
+  const topic =
+    intentDomain === 'behavior' && path === undefined && selectors.length === 0 ? compoundTopic(tokens) : [];
+  const directions = behaviorDirections(tokens, cueTokens);
+  const incoming = (domain === 'types' && predicateIndex !== undefined && inverse) || directions.incoming;
+  return {
+    selectors,
+    terms,
+    named,
+    preferred,
+    explicitType,
+    domain,
+    incoming: path === undefined && incoming,
+    outgoingBehavior: directions.outgoing,
+    inheritance,
+    path,
+    malformedPath: pathRequest?.kind === 'malformed',
+    topic,
+  } as const;
 }
 
 export type CodeGraphDiagramQuestion = ReturnType<typeof describeCodeGraphDiagramQuestion>;
 
+export function rankCodeGraphDiagramTopicFallback(
+  node: CodeGraphQueryNode,
+  question: CodeGraphDiagramQuestion,
+): readonly [number, number, number] | undefined {
+  const pathClass = Arr.some(question.topic, term => TEST_TOPIC.test(term)) ? 'test' : 'implementation';
+  return isDiagramCallable(node) &&
+    namedMatch(node, question.named) === 2 &&
+    codeGraphSymbolPathClass(node.path) === pathClass
+    ? [3, 0, 0]
+    : undefined;
+}
+
+export function diagramEndpoint(question: CodeGraphDiagramQuestion, selector: string): CodeGraphDiagramQuestion {
+  return {
+    ...question,
+    selectors: isExplicitSelector(selector) ? [selector] : [],
+    terms: [selector],
+    named: {spelling: selector, caseSensitive: true},
+    topic: [],
+  };
+}
 export function rankCodeGraphDiagramSubject(
   node: CodeGraphQueryNode,
   question: CodeGraphDiagramQuestion,
@@ -439,7 +631,12 @@ export function rankCodeGraphDiagramSubject(
         : Number(/(?:route|handler|entry|main)$/iu.test(node.name));
   if (exactPath && (node.kind === 'module' || node.kind === 'file')) return [5, match, role];
   if (qualified) return [4, match, role];
-  if (named || exact || (exactPackage && node.kind === 'package')) return [3, match, role];
+  if (question.topic.length) {
+    const topical = topicRelevance(node, question.topic);
+    return topical > 0 ? [1, topical, role] : undefined;
+  }
+  if (named) return [3, match, role];
+  if (exact || (exactPackage && node.kind === 'package')) return [2, match, role];
   if (match === 0 || (!exactPath && Arr.some(question.terms, Str.includes('/')))) return undefined;
   return [1, match, role];
 }
@@ -472,10 +669,23 @@ export function completeDiagramFact(edge: CodeGraphEdge, sourceId: string, targe
 }
 
 function completeSequence(facts: readonly Fact[]): readonly Fact[] | undefined {
-  if (!facts.length || Arr.some(facts, edge => edge.relation !== 'calls')) return undefined;
-  const outgoing = new Map(Arr.map(facts, edge => [edge.sourceId, edge] as const));
-  const targets = new Set(Arr.map(facts, edge => edge.targetId));
-  if (outgoing.size !== facts.length || targets.size !== facts.length) return undefined;
+  const calls = Arr.filter(facts, edge => edge.relation === 'calls' || edge.relation === 'constructs');
+  const first = calls[0];
+  if (!first) return undefined;
+  const outgoing = new Map(Arr.map(calls, edge => [edge.sourceId, edge] as const));
+  const targets = new Set(Arr.map(calls, edge => edge.targetId));
+  if (outgoing.size !== calls.length || targets.size !== calls.length) return undefined;
+  const ownership = new Map<string, Fact[]>();
+  for (const edge of facts) {
+    if (edge.relation === 'calls' || edge.relation === 'constructs') continue;
+    if (!isDiagramOwnershipRelation(edge.relation) || outgoing.get(edge.sourceId)?.targetId !== edge.targetId) {
+      return undefined;
+    }
+    const attached = ownership.get(edge.sourceId) ?? [];
+    attached.push(edge);
+    ownership.set(edge.sourceId, attached);
+  }
+  if (calls.length === 1 && first.sourceId === first.targetId) return facts;
   const starts = Arr.filter([...outgoing.keys()], id => !targets.has(id));
   if (starts.length !== 1) return undefined;
   const path: Fact[] = [];
@@ -485,7 +695,67 @@ function completeSequence(facts: readonly Fact[]): readonly Fact[] | undefined {
     path.push(edge);
     edge = outgoing.get(edge.targetId);
   }
-  return path.length === facts.length ? path : undefined;
+  return path.length === calls.length
+    ? Arr.flatMap(path, edge => [edge, ...(ownership.get(edge.sourceId) ?? [])])
+    : undefined;
+}
+
+function reachable(facts: readonly Fact[], start: string, reverse: boolean, terminal?: string): ReadonlySet<string> {
+  const adjacency = new Map<string, string[]>();
+  for (const edge of facts) {
+    const source = reverse ? edge.targetId : edge.sourceId;
+    const target = reverse ? edge.sourceId : edge.targetId;
+    const adjacent = adjacency.get(source) ?? [];
+    adjacent.push(target);
+    adjacency.set(source, adjacent);
+  }
+  const visited = new Set([start]);
+  for (const id of visited) {
+    if (id === terminal) continue;
+    for (const peer of adjacency.get(id) ?? []) visited.add(peer);
+  }
+  return visited;
+}
+
+export function selectDiagramPath(facts: readonly Fact[], from: string, to: string): readonly Fact[] {
+  const terminal = from === to ? undefined : to;
+  const forward = reachable(facts, from, false, terminal);
+  if (!forward.has(to)) return [];
+  const reverse = reachable(facts, to, true);
+  return Arr.filter(
+    facts,
+    edge => edge.sourceId !== terminal && forward.has(edge.sourceId) && reverse.has(edge.targetId),
+  );
+}
+
+function sequenceExample(
+  facts: readonly Fact[],
+  nodes: ReadonlyMap<string, CodeGraphQueryNode>,
+  from: string,
+): string | undefined {
+  const direct = Arr.filter(
+    facts,
+    edge => edge.sourceId === from && edge.relation === 'calls' && edge.provenance === 'resolved',
+  ).sort(
+    (left, right) =>
+      left.evidenceSpan.line - right.evidenceSpan.line || left.evidenceSpan.column - right.evidenceSpan.column,
+  );
+  const first = direct[0];
+  if (!first || !completeSequence(selectDiagramPath(facts, from, first.targetId))) return undefined;
+  const selector = (id: string) => {
+    const node = nodes.get(id);
+    if (
+      !node ||
+      !/^[\p{L}\p{M}\p{N} _./@-]+$/u.test(node.path) ||
+      !/^[\p{L}\p{M}\p{N}_.$:-]+$/u.test(node.qualifiedName)
+    )
+      return undefined;
+    const value = `${node.path}#${node.qualifiedName}`;
+    return Str.includes(' ')(value) ? `"${value}"` : value;
+  };
+  const source = selector(from);
+  const target = selector(first.targetId);
+  return source && target ? `Show the call path from ${source} to ${target}` : undefined;
 }
 
 function canRepresentClassDiagram(facts: readonly Fact[], nodes: ReadonlyMap<string, CodeGraphQueryNode>): boolean {
@@ -514,22 +784,16 @@ function canRepresentArchitectureDiagram(
   nodes: ReadonlyMap<string, CodeGraphQueryNode>,
   boundaryIds: ReadonlySet<string>,
 ): boolean {
-  const representedPairs = new Set<string>();
   const endpoint = (id: string) => boundaryIds.has(id) || isDiagramComponentKind(nodes.get(id)?.kind ?? '');
   return (
     facts.length > 0 &&
-    Arr.every(facts, edge => {
-      const pair = JSON.stringify([edge.sourceId, edge.targetId]);
-      if (
-        (!diagramArchitectureRelations.has(edge.relation) && !isDiagramOwnershipRelation(edge.relation)) ||
-        !endpoint(edge.sourceId) ||
-        !endpoint(edge.targetId) ||
-        representedPairs.has(pair)
-      )
-        return false;
-      representedPairs.add(pair);
-      return true;
-    })
+    Arr.every(
+      facts,
+      edge =>
+        (diagramArchitectureRelations.has(edge.relation) || isDiagramOwnershipRelation(edge.relation)) &&
+        endpoint(edge.sourceId) &&
+        endpoint(edge.targetId),
+    )
   );
 }
 
@@ -541,20 +805,32 @@ export function renderCompleteCodeGraphDiagram(input: {
   readonly nodes: ReadonlyMap<string, CodeGraphQueryNode>;
   readonly boundaryIds: ReadonlySet<string>;
   readonly facts: readonly Fact[];
+  readonly architectureAnchor?: Fact;
+  readonly pathTarget?: CodeGraphQueryNode;
 }): CodeGraphDiagramResult {
-  const {question, scope, freshness, coverage, nodes, boundaryIds, facts} = input;
+  const {question, scope, freshness, coverage, nodes, boundaryIds, facts, architectureAnchor, pathTarget} = input;
   const limits = freshness === 'current' ? [] : [`Snapshot freshness is ${freshness}.`];
+  if (architectureAnchor) {
+    limits.push(
+      `The architecture shows direct dependencies of the containing module. The indexed ${architectureAnchor.relation} declaration is at ${architectureAnchor.evidencePath}:${architectureAnchor.evidenceSpan.line}.`,
+    );
+  }
+  if (pathTarget)
+    limits.push(
+      `The diagram covers indexed paths to ${pathTarget.qualifiedName} at ${pathTarget.path}:${pathTarget.span.line}.`,
+    );
   const base = {scope, freshness, coverage, limits};
   const classFit = question.domain === 'types' && canRepresentClassDiagram(facts, nodes);
   const architectureFit =
     question.domain === 'architecture' && canRepresentArchitectureDiagram(facts, nodes, boundaryIds);
   const sequence = completeSequence(facts);
+  const interrupted = Arr.some(coverage.gaps, gap => gap.kind === 'interrupted');
   const suitable =
     question.domain === 'types' && classFit
       ? 'class'
       : question.domain === 'architecture' && architectureFit
         ? 'architecture'
-        : question.preferred === 'sequence' && sequence
+        : (question.preferred === 'sequence' || pathTarget !== undefined) && sequence
           ? 'sequence'
           : 'flowchart';
   const diagramType = question.explicitType ?? suitable;
@@ -564,12 +840,21 @@ export function renderCompleteCodeGraphDiagram(input: {
       : diagramType === 'architecture'
         ? architectureFit
         : diagramType === 'sequence'
-          ? sequence !== undefined && coverage.completeness === 'complete'
+          ? sequence !== undefined &&
+            (coverage.completeness === 'complete' || (pathTarget !== undefined && !interrupted))
           : true;
+  const unsupportedTypeMessage =
+    diagramType === 'sequence'
+      ? sequence === undefined
+        ? 'Static evidence does not establish a single ordered call path.'
+        : question.domain === 'behavior' && Arr.some(coverage.gaps, gap => gap.kind === 'unresolved-target')
+          ? 'Unresolved call targets prevent a complete sequence diagram.'
+          : 'Incomplete coverage prevents a complete sequence diagram.'
+      : `The ${diagramType} diagram cannot represent every relationship for this subject.`;
   const build = (type: DiagramType) => {
     const drawn = type === 'sequence' ? sequence! : facts;
     const ids = new Set<string>();
-    if (type !== 'sequence' && coverage.subject) ids.add(coverage.subject.id);
+    if (type !== 'sequence' && coverage.subject) ids.add(architectureAnchor?.sourceId ?? coverage.subject.id);
     for (const edge of drawn) {
       ids.add(edge.sourceId);
       ids.add(edge.targetId);
@@ -593,32 +878,80 @@ export function renderCompleteCodeGraphDiagram(input: {
     const evidence = {nodes: evidenceNodes, edges, groups};
     return {diagramType: type, source: sourceFor(type, evidence), inferred: type === 'sequence', evidence};
   };
+  if (diagramType === 'sequence' && fits) limits.push('The sequence shows an inferred path from static calls.');
+  const example =
+    diagramType === 'sequence' && !fits && !sequence && !pathTarget && coverage.subject
+      ? sequenceExample(facts, nodes, coverage.subject.id)
+      : undefined;
+  const selectPath = pathTarget
+    ? facts.length
+      ? 'Select Flowchart to show relationships between the same endpoints.'
+      : 'Choose an endpoint with an indexed path from the source.'
+    : example
+      ? `Select Sequence and ask "${example}". Select Flowchart for the current relationships.`
+      : 'Name both endpoints of an indexed call path or select Flowchart for the current relationships.';
+  const rejectsExplicitType = question.explicitType !== undefined && !fits;
+  const canSuggestFlowchart = rejectsExplicitType && coverage.subject !== undefined && facts.length > 0;
+  const noClassEvidence =
+    question.explicitType === 'class' &&
+    coverage.subject !== undefined &&
+    !interrupted &&
+    (facts.length === 0 ||
+      (question.domain === 'behavior' &&
+        !isDiagramTypeKind(coverage.subject.kind) &&
+        !isDiagramMemberKind(coverage.subject.kind)));
+  const noClassMessage = 'The selected snapshot has no indexed structural relationships for this subject.';
+  const noRelationships =
+    coverage.subject !== undefined &&
+    facts.length === 0 &&
+    Arr.every(coverage.gaps, gap => gap.kind === 'missing-evidence');
+  const classAction = canSuggestFlowchart
+    ? 'Name a class or interface with indexed type relationships, or select Flowchart for the current relationships.'
+    : 'Name a class or interface with indexed type relationships.';
   if (coverage.completeness === 'incomplete') {
-    const interrupted = Arr.some(coverage.gaps, gap => gap.kind === 'interrupted');
+    const gapMessage = interrupted
+      ? 'The graph read stopped before it could establish complete coverage.'
+      : noClassEvidence
+        ? noClassMessage
+        : noRelationships
+          ? 'The selected snapshot has no indexed relationships for this subject.'
+          : 'The selected snapshot has gaps in the evidence for this subject.';
+    const message =
+      rejectsExplicitType && !noClassEvidence
+        ? `${gapMessage} ${unsupportedTypeMessage}${facts.length ? ' A flowchart can show the available relationships.' : ''}`
+        : gapMessage;
     return {
       ...base,
       status: 'incomplete',
-      message: interrupted
-        ? 'The graph read stopped before it could establish complete coverage.'
-        : 'The selected snapshot has gaps in the evidence for this subject.',
+      message,
       nextAction: interrupted
         ? 'Retry the diagram for the same subject and graph view.'
-        : 'Check the listed source locations or name a subject within the available graph evidence.',
-      ...(coverage.subject && facts.length ? {diagram: build(fits ? diagramType : 'flowchart')} : {}),
+        : noClassEvidence
+          ? classAction
+          : question.explicitType === 'sequence' && !fits
+            ? selectPath
+            : canSuggestFlowchart
+              ? 'Select Flowchart to show the available relationships.'
+              : 'Check the listed source locations or name a subject within the available graph evidence.',
+      ...(coverage.subject && facts.length && !rejectsExplicitType
+        ? {diagram: build(fits ? diagramType : 'flowchart')}
+        : {}),
+      ...(canSuggestFlowchart ? {suggestedType: 'flowchart' as const} : {}),
     };
   }
   if (!fits) {
     return {
       ...base,
       status: 'unavailable',
-      message:
+      message: noClassEvidence ? noClassMessage : unsupportedTypeMessage,
+      nextAction:
         diagramType === 'sequence'
-          ? 'Static evidence does not establish a single ordered call path.'
-          : `A ${diagramType} diagram cannot represent every relationship for this subject.`,
-      nextAction: 'Request a flowchart for the full relationship evidence.',
+          ? selectPath
+          : noClassEvidence
+            ? classAction
+            : 'Request a flowchart for the full relationship evidence.',
       suggestedType: 'flowchart',
     };
   }
-  if (diagramType === 'sequence') limits.push('The sequence shows an inferred path from static calls.');
   return {...base, status: 'diagram', ...build(diagramType)};
 }

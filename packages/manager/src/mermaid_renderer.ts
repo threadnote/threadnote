@@ -38,7 +38,10 @@ export async function renderMermaid(
     const data = 'getData' in db && typeof db.getData === 'function' ? db.getData() : undefined;
     const edgeValue = typeof data === 'object' && data !== null && 'edges' in data ? data.edges : undefined;
     const edges =
-      edgeValue ?? ('getMessages' in db && typeof db.getMessages === 'function' ? db.getMessages() : undefined) ?? [];
+      edgeValue ??
+      ('getEdges' in db && typeof db.getEdges === 'function' ? db.getEdges() : undefined) ??
+      ('getMessages' in db && typeof db.getMessages === 'function' ? db.getMessages() : undefined) ??
+      [];
     if (!EffectArray.isArray(edges)) throw new Error('Diagram connection data is invalid.');
     if (edges.length > MERMAID_MAX_EDGES) throw new Error('Diagram has too many connections.');
     const {svg} = await mermaid.render(id, source, host);

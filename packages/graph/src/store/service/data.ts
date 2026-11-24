@@ -39,6 +39,7 @@ import {
   selectStoredGraph,
   selectStoredSymbols,
   selectEdgePage,
+  selectDiagramAdjacentCandidates,
   selectDiagramAdjacentPage,
   selectDiagramSubjectPage,
   selectEdgesForNodes,
@@ -120,6 +121,7 @@ type CodeGraphStoreDataMethods = Pick<
   | 'cachedCommittedFileKeys'
   | 'discardInvalidCachedFacts'
   | 'edgesForNodes'
+  | 'diagramAdjacentCandidates'
   | 'diagramAdjacentPage'
   | 'diagramSubjectPage'
   | 'traversalEdgesForNodes'
@@ -448,6 +450,11 @@ export function makeCodeGraphStoreDataMethods(runtime: CodeGraphStoreRuntime): C
         ),
         Effect.mapError(cause => storeError('load code graph adjacency', cause)),
       ),
+    diagramAdjacentCandidates: (databasePath, snapshotId, nodeIds, direction, relations) =>
+      useReadOnlyDatabase(
+        databasePath,
+        selectDiagramAdjacentCandidates(snapshotId, nodeIds, direction, relations),
+      ).pipe(Effect.mapError(cause => storeError('find code graph diagram adjacency candidates', cause))),
     diagramAdjacentPage: (databasePath, snapshotId, nodeId, direction, relations, afterId, limit) =>
       useReadOnlyDatabase(
         databasePath,

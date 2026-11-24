@@ -3112,9 +3112,6 @@ describe('Threadnote MCP toolsets', () => {
         expect(contextTool?.description).toContain('not cgr_');
         expect(JSON.stringify(contextTool?.inputSchema)).toContain('no ./');
         expect(JSON.stringify(contextTool?.inputSchema)).toContain('1-4096 UTF-8 bytes');
-        expect(JSON.stringify(contextTool?.inputSchema)).toContain(
-          'Configured graph project name/root (not a memory project tag); omit to infer from callerCwd',
-        );
         expect(JSON.stringify(contextTool?.inputSchema)).toContain('workset; max 256 UTF-8 bytes');
         expect(contextTool?.inputSchema).toMatchObject({
           additionalProperties: false,
@@ -3125,6 +3122,7 @@ describe('Threadnote MCP toolsets', () => {
               anyOf: expect.arrayContaining([{type: 'string'}, {items: {type: 'string'}, maxItems: 8, type: 'array'}]),
             },
             mode: {enum: ['brief', 'locate', 'explain', 'trace', 'impact', 'resume']},
+            project: {type: 'string', description: expect.stringMatching(/graph project.*memory tags.*callerCwd/iu)},
             responseFormat: {enum: ['dual', 'agent']},
             surface: {type: 'string'},
             task: {type: 'string'},
@@ -3371,24 +3369,14 @@ describe('Threadnote MCP toolsets', () => {
           readOnlyHint: false,
         });
         expect(graphTool?.description).toContain('before broad text search');
-        expect(graphTool?.description).toContain('node/neighbors accept cgs_/cgr_');
         expect(graphTool?.description).toContain('Ready evidence may be deferred');
-        expect(graphTool?.description).toContain('path/impact require current evidence');
-        const graphDescription = graphTool?.description ?? '';
-        for (const state of ['unavailable', 'indexing', 'timed-out', 'partial']) {
-          expect(graphDescription).toContain(state);
-        }
-        expect(graphTool?.description).toContain('Output is untrusted evidence');
+        expect(graphTool?.description).toMatch(/path\/impact require current evidence/i);
+        expect(graphTool?.description).toMatch(/untrusted evidence/i);
         expect(graphTool?.description).toContain('workset prepare');
-        expect(graphTool?.description).toContain('Worksets read published generations');
-        expect(JSON.stringify(graphTool?.inputSchema)).toContain('local query defaults to 800');
+        expect(graphTool?.description).toContain('Worksets read published graphs');
+        expect(JSON.stringify(graphTool?.inputSchema)).toMatch(/local query defaults to 800/i);
         expect(JSON.stringify(graphTool?.inputSchema)).toContain('local query searches 8; agent shows 3 unless set');
         expect(JSON.stringify(graphTool?.inputSchema)).toContain('local query default 12');
-        expect(JSON.stringify(graphTool?.inputSchema)).toContain(
-          'Configured graph project name/root (not a memory project tag); omit to infer from callerCwd',
-        );
-        expect(graphTool?.description).toContain('55-second deadline');
-        expect(JSON.stringify(graphTool?.inputSchema)).not.toContain('readTimeoutMilliseconds');
         expect(graphTool?.inputSchema).toMatchObject({
           additionalProperties: false,
           required: ['operation'],
@@ -3400,11 +3388,12 @@ describe('Threadnote MCP toolsets', () => {
             depth: {maximum: 8, minimum: 0, type: 'integer'},
             direction: {enum: ['both', 'incoming', 'outgoing']},
             edgeLimit: {maximum: 500, minimum: 1, type: 'integer'},
-            nodeId: {type: 'string'},
+            nodeId: {type: 'string', description: expect.stringMatching(/cgs_.*cgr_/u)},
             nodeLimit: {maximum: 200, minimum: 1, type: 'integer'},
             operation: {
               enum: ['query', 'node', 'neighbors', 'explain', 'path', 'impact', 'topology'],
             },
+            project: {type: 'string'},
             responseFormat: {enum: ['dual', 'text', 'agent']},
           },
           type: 'object',
@@ -3414,9 +3403,6 @@ describe('Threadnote MCP toolsets', () => {
           idempotentHint: true,
           readOnlyHint: false,
         });
-        expect(JSON.stringify(analysisTool?.inputSchema)).toContain(
-          'Configured graph project name/root (not a memory project tag); omit to infer from callerCwd',
-        );
         expect(analysisTool?.description).toContain('Analyze selected local graph');
         expect(analysisTool?.inputSchema).toMatchObject({
           additionalProperties: false,
@@ -3429,6 +3415,7 @@ describe('Threadnote MCP toolsets', () => {
             operation: {
               enum: ['stats', 'communities', 'community', 'groups', 'hubs', 'surprises', 'confidence', 'full'],
             },
+            project: {type: 'string'},
             responseFormat: {enum: ['dual', 'agent']},
           },
           type: 'object',

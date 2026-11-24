@@ -3,7 +3,7 @@ export {isGraphCatalogPage} from './response_guards_graph.js';
 export {isGraphViewPage} from './response_guards_graph.js';
 export {isGraphAnalysis} from './response_guards_graph.js';
 export {isGraphNodeDetail} from './response_guards_graph.js';
-export {isGraphQueryVisualization} from './response_guards_graph.js';
+export {isGraphDiagramResult, isGraphQueryVisualization} from './response_guards_graph.js';
 export {isContentResponse} from './response_guards_graph.js';
 export {isIntegrationResult} from './response_guards_graph.js';
 export {isResolvedSuperhumanSelection} from './response_guards_operations.js';

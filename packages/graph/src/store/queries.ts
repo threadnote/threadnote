@@ -52,6 +52,7 @@ import {
 } from './utilities.js';
 import {
   codeGraphAdjacencyQueryStatement,
+  codeGraphDiagramAdjacentCandidatesStatement,
   codeGraphDiagramAdjacentPageStatement,
   codeGraphDiagramExactSubjectPageStatement,
   codeGraphDirectEdgeQueryStatement,
@@ -1394,6 +1395,26 @@ const selectDiagramAdjacentPage = Effect.fn('codeGraph.selectDiagramAdjacentPage
   };
 });
 
+const selectDiagramAdjacentCandidates = Effect.fn('codeGraph.selectDiagramAdjacentCandidates')(function* (
+  snapshotId: string,
+  nodeIds: readonly string[],
+  direction: 'incoming' | 'outgoing',
+  relations: readonly CodeGraphRelation[],
+) {
+  if (!nodeIds.length || !relations.length) return [];
+  const sql = yield* SqlClient.SqlClient;
+  yield* configureConnection(sql);
+  const baseSnapshotId = yield* selectBaseSnapshotId(sql, snapshotId);
+  const {text, parameters} = codeGraphDiagramAdjacentCandidatesStatement(
+    snapshotId,
+    baseSnapshotId,
+    nodeIds,
+    direction,
+    relations,
+  );
+  return EffectArray.map(yield* sql.unsafe<{readonly id: string}>(text, parameters), ({id}) => id);
+});
+
 const selectDiagramSubjectPage = Effect.fn('codeGraph.selectDiagramSubjectPage')(function* (
   snapshotId: string,
   terms: readonly string[],
@@ -1935,6 +1956,7 @@ export {
   selectStoredGraph,
   selectStoredSymbols,
   selectEdgePage,
+  selectDiagramAdjacentCandidates,
   selectDiagramAdjacentPage,
   selectDiagramSubjectPage,
   selectSearchSymbols,

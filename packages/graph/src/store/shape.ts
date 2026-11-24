@@ -486,6 +486,13 @@ export interface CodeGraphStoreShape {
     limit: number,
     allowedProvenances: readonly CodeGraphProvenance[],
   ) => Effect.Effect<readonly CodeGraphEdge[], CodeGraphStoreFailure>;
+  readonly diagramAdjacentCandidates: (
+    databasePath: string,
+    snapshotId: string,
+    nodeIds: readonly string[],
+    direction: 'incoming' | 'outgoing',
+    relations: readonly CodeGraphRelation[],
+  ) => Effect.Effect<readonly string[], CodeGraphStoreFailure>;
   readonly diagramAdjacentPage: (
     databasePath: string,
     snapshotId: string,

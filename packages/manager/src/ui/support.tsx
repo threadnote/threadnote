@@ -1,7 +1,9 @@
+import type {CodeGraphDiagramResult, CodeGraphDiagramType} from '@threadnote/graph/query/diagram_contract';
 import {
   isGraphAnalysis,
   isGraphCatalogPage,
   isGraphNodeDetail,
+  isGraphDiagramResult,
   isGraphQueryVisualization,
   isGraphViewPage,
   isGraphVisualization,
@@ -298,6 +300,21 @@ function loadManagerGraphNodeDetail(
     undefined,
     {signal, timeoutMilliseconds: GRAPH_DETAIL_REQUEST_TIMEOUT_MILLISECONDS},
     isGraphNodeDetail,
+  );
+}
+
+function loadManagerGraphDiagram(
+  viewId: string,
+  snapshotId: string,
+  question: string,
+  diagramType: CodeGraphDiagramType,
+  signal: AbortSignal,
+): Promise<CodeGraphDiagramResult> {
+  return api<CodeGraphDiagramResult>(
+    '/api/graph/diagram',
+    {viewId, snapshotId, question, diagramType},
+    {signal},
+    isGraphDiagramResult,
   );
 }
 
@@ -643,6 +660,7 @@ export {
   loadManagerGraphAnalysis,
   loadManagerGraphCatalogPage,
   loadManagerGraphNodeDetail,
+  loadManagerGraphDiagram,
   loadManagerGraphQuery,
   loadManagerGraphViewsPage,
   markdownBodyForPreview,

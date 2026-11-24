@@ -1,5 +1,4 @@
 import {Clock, Effect, FileSystem, Option, Path, Predicate, Semaphore, String as Str} from 'effect';
-import {McpSchema} from 'effect/ai';
 import {SecureRandom} from 'effect/crypto';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -7,8 +6,7 @@ import {
   IsolatedCodeGraphImpactQueryError,
   type VerifiedCodeGraphDiagram,
 } from '@threadnote/graph/isolated/impact_query';
-import type {EffectMcpServerAdapter} from '../effect/ai/mcp.js';
-import {MCP_RESOURCE_NOT_FOUND_ERROR_DATA} from '../effect/ai/mcp.js';
+import {type EffectMcpServerAdapter, mcpResourceNotFoundError} from '../effect/ai/mcp.js';
 
 const DIAGRAM_URI = 'threadnote://graph-diagram/';
 const DIAGRAM_PART_MIME_TYPE = 'application/octet-stream';
@@ -158,13 +156,6 @@ function diagramExpired(stat: FileSystem.File.Info, now: number): boolean {
   return Option.isNone(stat.mtime) || stat.mtime.value.getTime() + DIAGRAM_LIFETIME_MILLISECONDS <= now;
 }
 
-function unavailableDiagramResource(recovery: string) {
-  return McpSchema.InvalidParams.make({
-    data: MCP_RESOURCE_NOT_FOUND_ERROR_DATA,
-    message: `${UNAVAILABLE_DIAGRAM_RESOURCE} ${recovery}`,
-  });
-}
-
 export const readBrokerCodeGraphDiagramResource = Effect.fn('mcpBroker.readGraphDiagramResource')(function* (
   resources: CodeGraphDiagramResources,
   params: unknown,
@@ -189,8 +180,8 @@ export function registerCodeGraphDiagramResource(server: EffectMcpServerAdapter,
     (uri, context) =>
       Effect.gen(function* () {
         const part = context.transport === 'stdio' ? yield* resources.readPart(uri) : undefined;
-        if (!part) return yield* unavailableDiagramResource(resources.recovery);
-        return {contents: [part]} satisfies McpSchema.ReadResourceResult;
+        if (!part) return yield* mcpResourceNotFoundError(`${UNAVAILABLE_DIAGRAM_RESOURCE} ${resources.recovery}`);
+        return {contents: [part]};
       }),
   );
 }

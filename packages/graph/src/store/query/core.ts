@@ -820,6 +820,40 @@ export function codeGraphDiagramAdjacentPageStatement(
   };
 }
 
+export function codeGraphDiagramAdjacentCandidatesStatement(
+  snapshotId: string,
+  baseSnapshotId: string | undefined,
+  nodeIds: readonly string[],
+  direction: 'incoming' | 'outgoing',
+  relations: readonly CodeGraphRelation[],
+): CodeGraphSqlQueryStatement {
+  const {column, index} =
+    direction === 'incoming'
+      ? {column: 'target_id', index: 'edges_target_resolved'}
+      : {column: 'source_id', index: 'edges_source'};
+  const branch = `SELECT 1 FROM edges AS edge INDEXED BY ${index}
+    WHERE edge.snapshot_id = ? AND edge.${column} = candidate.value AND edge.${column} IS NOT NULL
+      AND edge.relation IN (SELECT value FROM json_each(?))
+      AND edge.provenance IN ('declared', 'resolved', 'syntactic')`;
+  const base =
+    baseSnapshotId === undefined
+      ? ''
+      : `OR EXISTS (${branch}
+      AND NOT EXISTS (SELECT 1 FROM edges WHERE snapshot_id = ? AND id = edge.id)
+      AND NOT EXISTS (SELECT 1 FROM snapshot_edge_deletions WHERE snapshot_id = ? AND edge_id = edge.id))`;
+  const encodedRelations = JSON.stringify(relations);
+  return {
+    text: `SELECT candidate.value AS id FROM json_each(?) AS candidate
+      WHERE EXISTS (${branch}) ${base}`,
+    parameters: [
+      JSON.stringify(nodeIds),
+      snapshotId,
+      encodedRelations,
+      ...(baseSnapshotId === undefined ? [] : [baseSnapshotId, encodedRelations, snapshotId, snapshotId]),
+    ],
+  };
+}
+
 export function codeGraphDiagramExactSubjectPageStatement(
   snapshotId: string,
   baseSnapshotId: string | undefined,
