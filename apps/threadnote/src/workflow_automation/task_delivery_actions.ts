@@ -2,6 +2,7 @@ import {
   NativeCycleDeliverySchema,
   type NativeCycleDelivery,
   nextNativeCycle,
+  nativeCyclePublicationField,
   type NativeCycleValidation,
 } from '@threadnote/workflow-automations/cycle';
 import {
@@ -233,6 +234,8 @@ export const runNativeTaskPrDelivery = (
     if (request.pr.branch !== phase.branch)
       return yield* fail('pr-source-mismatch', 'The supplied PR head and branch must match the validated phase.');
     const userAuthority = request.userAuthority ?? proof.delivery?.userAuthority;
+    // A replay that omits publication keeps the stored receipt's publication, like its authority.
+    const publication = request.publication ?? proof.delivery?.publication;
     if (!proof.delivery && !EffectString.trim(userAuthority ?? ''))
       return yield* fail(
         'user-authority-required',
@@ -249,7 +252,7 @@ export const runNativeTaskPrDelivery = (
             cycleRequest(stored, {
               command: 'publication-ready',
               phaseId: ref.phaseId,
-              publication: request.publication,
+              ...nativeCyclePublicationField(publication),
             }),
           ),
           checkout,
@@ -272,7 +275,7 @@ export const runNativeTaskPrDelivery = (
       validatedTree: proof.tree,
       commitEvidence: request.commitEvidence,
       pr: request.pr,
-      publication: request.publication,
+      ...nativeCyclePublicationField(publication),
     };
     const providerIdentity = proof.delivery
       ? proof.delivery.providerIdentity
@@ -287,7 +290,7 @@ export const runNativeTaskPrDelivery = (
       validatedTree: proof.tree,
       commitEvidence: request.commitEvidence,
       pr: request.pr,
-      publication: request.publication,
+      ...nativeCyclePublicationField(publication),
     }).pipe(
       Effect.mapError(() => fail('invalid-pr-receipt', 'The supplied PR evidence is not a valid canonical receipt.')),
     );
@@ -346,7 +349,7 @@ export const runNativeTaskPrDelivery = (
           cycleRequest(stored, {
             command: 'publication-ready',
             phaseId: ref.phaseId,
-            publication: request.publication,
+            ...nativeCyclePublicationField(publication),
           }),
         ),
         checkout,
@@ -366,7 +369,7 @@ export const runNativeTaskPrDelivery = (
         deliveryRef,
         phaseId: phase.id,
         pr: request.pr,
-        publication: request.publication,
+        ...nativeCyclePublicationField(publication),
         commitEvidence: request.commitEvidence,
         next: {
           action: 'watch-pr',
@@ -388,7 +391,7 @@ export const runNativeTaskPrDelivery = (
             command: 'record-delivery',
             phaseId: ref.phaseId,
             delivery: finalReceipt,
-            publication: request.publication,
+            ...nativeCyclePublicationField(publication),
             expectedRevision: stored.revision,
           }),
         ),
@@ -890,7 +893,7 @@ export const runNativeTaskPrWatch = (
                 cycleRequest(stored, {
                   command: 'publication-ready',
                   phaseId: validation.phaseId,
-                  publication: embeddedDelivery.publication,
+                  ...nativeCyclePublicationField(embeddedDelivery.publication),
                 }),
               ),
               checkout,
@@ -900,11 +903,7 @@ export const runNativeTaskPrWatch = (
             return yield* fail('source-drift', 'Starting a watch requires its exact clean validated source.');
           return;
         }
-        if (
-          embeddedDelivery.pr?.state !== 'open' ||
-          typeof embeddedDelivery.commitEvidence !== 'string' ||
-          !embeddedDelivery.publication
-        )
+        if (embeddedDelivery.pr?.state !== 'open' || typeof embeddedDelivery.commitEvidence !== 'string')
           return yield* fail(
             'invalid-delivery-ref',
             'A provisional task watch needs the exact current open-PR delivery evidence.',
@@ -918,7 +917,7 @@ export const runNativeTaskPrWatch = (
             validationRef,
             commitEvidence: embeddedDelivery.commitEvidence,
             pr: embeddedDelivery.pr,
-            publication: embeddedDelivery.publication,
+            ...nativeCyclePublicationField(embeddedDelivery.publication),
             ...(embeddedDelivery.userAuthority ? {userAuthority: embeddedDelivery.userAuthority} : {}),
           },
           stored,
@@ -929,7 +928,12 @@ export const runNativeTaskPrWatch = (
         const deliveryMatches =
           admittedAction?.delivery !== undefined &&
           stableJson(admittedAction.delivery) === stableJson(embeddedDelivery);
-        if (admitted.status !== 'watch-required' || admitted.phaseId !== validation.phaseId || !deliveryMatches)
+        if (
+          admitted.status !== 'watch-required' ||
+          !('phaseId' in admitted) ||
+          admitted.phaseId !== validation.phaseId ||
+          !deliveryMatches
+        )
           return yield* fail(
             'stale-delivery-ref',
             'The provisional PR watch reference no longer matches independently revalidated delivery evidence.',
@@ -1189,7 +1193,7 @@ export const runNativeTaskPrWatch = (
                 cycleRequest(current, {
                   command: 'publication-ready',
                   phaseId: validatedPhaseId,
-                  publication: embeddedDelivery.publication,
+                  ...nativeCyclePublicationField(embeddedDelivery.publication),
                 }),
               ),
               checkout,
@@ -1244,7 +1248,7 @@ export const runNativeTaskPrWatch = (
                     command: 'record-delivery',
                     phaseId: validatedPhaseId,
                     delivery: finalReceipt,
-                    publication: embeddedDelivery.publication,
+                    ...nativeCyclePublicationField(embeddedDelivery.publication),
                     expectedRevision: latest.revision,
                   }),
                 ).pipe(

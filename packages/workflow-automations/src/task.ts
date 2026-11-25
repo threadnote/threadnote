@@ -1,7 +1,7 @@
 import {nativeWorkflowPolicies} from './gates.js';
 import {Array as EffectArray, Option as EffectOption, Schema, String as EffectString, pipe as EffectPipe} from 'effect';
 import {nativeCycleCanonicalJson, nativeCycleParentsReady, nextNativeCycle as cycleNext} from './cycle.js';
-import {NativeCycleDeliverySchema} from './cycle.js';
+import {NativeCycleDeliverySchema, nativeCycleDeliveryPendingMessage} from './cycle.js';
 import {
   nativeCyclePhaseReviewUsage,
   nativeCycleSnapshotIsCurrentIteration,
@@ -670,6 +670,16 @@ function projectNativeTaskCoreView(
   const phase = next.phaseId
     ? EffectOption.getOrUndefined(EffectArray.findFirst(cycle.plan.phases, item => item.id === next.phaseId))
     : undefined;
+  const deliveryPendingReason = (waiting: string) => {
+    const held = EffectArray.findFirst(
+      cycle.plan.phases,
+      item => item.id !== waiting && !cycle.phases[item.id].delivery,
+    );
+    return nativeCycleDeliveryPendingMessage(
+      waiting,
+      EffectOption.match(held, {onNone: () => 'the run completes', onSome: item => `phase ${item.id} starts`}),
+    );
+  };
   const currentProof = phase ? cycle.phases[phase.id] : undefined;
   const currentSource = phase
     ? EffectArray.filter(
@@ -784,7 +794,11 @@ function projectNativeTaskCoreView(
       action: next.action,
       ...(next.phaseId ? {phaseId: next.phaseId} : {}),
       ...('snapshotId' in next ? {snapshotId: next.snapshotId} : {}),
-      ...('reason' in next ? {reason: next.reason} : {}),
+      ...('reason' in next
+        ? {reason: next.reason}
+        : next.action === 'deliver' && next.phaseId
+          ? {reason: deliveryPendingReason(next.phaseId)}
+          : {}),
     },
     ...(reviewWork
       ? {role: 'review'}

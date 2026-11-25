@@ -10,6 +10,7 @@ import {
 import type {NativeCyclePlan} from '@threadnote/workflow-automations/cycle';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {nativeWorkflowError} from './memory.js';
+import {authoringMarker, authoringTrailerStart} from './authoring_trailer.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
@@ -98,9 +99,8 @@ export const AuthoringRootSchema = Schema.Struct({
 export type AuthoringRoot = typeof AuthoringRootSchema.Type;
 export type NativeAuthoringCall<R> = (request: unknown) => Effect.Effect<unknown, WorkflowAutomationError, R>;
 
-const marker = '<!-- threadnote-authoring:v1 ';
 const appendAuthoringPayload = (markdown: string, value: unknown): string => {
-  const body = markdown + '\n' + marker + stableJson(value) + ' -->\n';
+  const body = markdown + '\n' + authoringMarker + stableJson(value) + ' -->\n';
   if (utf8.encode(body).byteLength > 60_000)
     throw WorkflowAutomationError.make({
       code: 'authoring-size',
@@ -115,15 +115,10 @@ export function encodeAuthoringArtifact(title: string, summary: string, value: u
   return appendAuthoringPayload('# ' + title + '\n\n## Summary\n\n' + summary + '\n', value);
 }
 export function decodeAuthoringArtifact<A>(body: string, schema: Schema.ConstraintDecoder<A>): A {
-  const start = Effect2.pipe(
-    body,
-    EffectString.lastIndexOf('\n' + marker),
-    Effect2.Option.getOrElse(() => -1),
-  );
-  if (start < 0 || !Effect2.pipe(body, EffectString.endsWith(' -->\n')))
-    throw failure('The native authoring marker is missing.');
+  const start = authoringTrailerStart(body);
+  if (start === undefined) throw failure('The native authoring marker is missing.');
   try {
-    const json = Effect2.pipe(body, EffectString.slice(start + 1 + marker.length, -' -->\n'.length));
+    const json = Effect2.pipe(body, EffectString.slice(start + 1 + authoringMarker.length, -' -->\n'.length));
     return Schema.decodeUnknownSync(schema, {onExcessProperty: 'error'})(JSON.parse(json));
   } catch {
     throw failure('The native authoring artifact is malformed. No legacy record was imported.');

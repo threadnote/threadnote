@@ -7,6 +7,7 @@ import {
   nextNativeCycle,
   nativeCycleParentsReady,
   nativeCyclePhaseIntentHash,
+  nativeCycleDeliveryPendingMessage,
 } from '@threadnote/workflow-automations/cycle';
 import type {NativeCycleState} from '@threadnote/workflow-automations/cycle';
 import type {NativeCycleSnapshot} from '@threadnote/workflow-automations/cycle-review';
@@ -141,9 +142,11 @@ export const recordNativeCycleTreeSnapshot = Effect.fn('workflowAutomation.cycle
   const next = nextNativeCycle(state);
   const view = nativeNext.view({runId: input.runId, callerCwd: repo});
   if (next.action === 'deliver' && next.phaseId !== phase.id)
-    return yield* nativeRefusal('delivery-pending', 'Deliver the accepted prior phase before the next snapshot.', {
-      next: view,
-    });
+    return yield* nativeRefusal(
+      'delivery-pending',
+      nativeCycleDeliveryPendingMessage(next.phaseId, `the phase ${phase.id} snapshot`),
+      {next: view},
+    );
   if (!nativeCycleParentsReady(state, phase.id))
     return yield* nativeRefusal('dependency-stale', 'Reconcile the affected parent acceptance first.', {next: view});
   if (state.phases[phase.id].status === 'merged')

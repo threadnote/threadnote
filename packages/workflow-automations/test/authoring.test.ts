@@ -6,6 +6,8 @@ import {
   decodeNativeAuthoringDocument,
   nativeAuthoringDigest,
   nativeAuthoringIssueSummary,
+  nativeAuthoringSchemaDetail,
+  nativeAuthoringSchemaDiagnostic,
   NativeAuthoringPlanDocumentSchema,
   projectNativeCompactIntent,
   nativeSpecIntentDigest,
@@ -411,6 +413,15 @@ describe('native authoring documents', () => {
     }
   });
 
+  it('names a top-level unexpected key instead of the generic content refusal', () => {
+    const {kind: _kind, ...fields} = NativeAuthoringPlanDocumentSchema.fields;
+    const error = caught(() =>
+      Schema.decodeUnknownSync(Schema.Struct(fields), {onExcessProperty: 'error'})(validPlan()),
+    );
+    expect(nativeAuthoringSchemaDiagnostic(error)).toContain('`kind`');
+    expect(nativeAuthoringSchemaDetail(error)).toEqual({path: 'kind'});
+  });
+
   it('projects only recognized relative-path failures into bounded private diagnostics', () => {
     const base = asPlan(validPlan());
     if (base.source === null) throw new Error('Expected source fixture.');
@@ -462,10 +473,11 @@ describe('native authoring documents', () => {
       expect(error.message).toContain('a trailing separator');
       expect(error.message).not.toContain('src/');
     }
-    expect(caught(() => decodeNativeAuthoringDocument({...base, unexpectedField: 'private-marker'}))).toMatchObject({
-      code: 'invalid-document',
-      message: 'The native authoring document is malformed or contains unsupported fields.',
-    });
+    const unexpected = caught(() => decodeNativeAuthoringDocument({...base, unexpectedField: 'private-marker'}));
+    if (!(unexpected instanceof Error)) throw new Error('Unexpected field unexpectedly decoded.');
+    expect(unexpected).toMatchObject({code: 'invalid-document', detail: {path: 'unexpectedField'}});
+    expect(unexpected.message).toContain('`unexpectedField`');
+    expect(unexpected.message).not.toContain('private-marker');
     const nonString = caught(() =>
       decodeNativeAuthoringDocument({
         ...base,

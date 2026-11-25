@@ -1,4 +1,5 @@
 import {nativeWaivableGateIds} from '@threadnote/workflow-automations/gates';
+import {nativeCyclePublicationField} from '@threadnote/workflow-automations/cycle';
 import {Array as EffectArray, Effect, Schema} from 'effect';
 import {Command, Flag} from 'effect/cli';
 import {withDefaultActionSubcommand} from './cli/help.js';
@@ -104,7 +105,7 @@ export function makeNativeTaskPrDeliveryCommand<E, R>(
     readonly validationRef: string;
     readonly commitEvidence: string;
     readonly pr: unknown;
-    readonly publication: unknown;
+    readonly publication?: unknown;
     readonly userAuthority?: string;
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
 ) {
@@ -116,9 +117,9 @@ export function makeNativeTaskPrDeliveryCommand<E, R>(
       validationRef: requiredString('validation-ref', 'Opaque current validation reference from the task flow'),
       commitEvidence: requiredString('commit-evidence', 'Actual verified PR commit evidence'),
       pr: requiredString('pr', 'Physical PR metadata as JSON'),
-      publication: requiredString(
+      publication: optionalString(
         'publication',
-        'Feature-memory publication evidence as JSON; separate from user consent',
+        'Optional feature-memory publication evidence as JSON; separate from user consent',
       ),
       userAuthority: optionalString(
         'user-authority',
@@ -127,7 +128,12 @@ export function makeNativeTaskPrDeliveryCommand<E, R>(
     },
     options =>
       Effect.try({
-        try: () => ({pr: JSON.parse(options.pr) as unknown, publication: JSON.parse(options.publication) as unknown}),
+        try: () => ({
+          pr: JSON.parse(options.pr) as unknown,
+          ...nativeCyclePublicationField<unknown>(
+            options.publication === undefined ? undefined : JSON.parse(options.publication),
+          ),
+        }),
         catch: () =>
           WorkflowAutomationError.make({
             code: 'invalid-request',
@@ -225,9 +231,15 @@ export function makeNativeTaskPrWatchCommand<E, R>(
         'PR watch operation',
       ),
       host: optionalChoice('host', nativeWatchWakeupHosts, 'Registered wakeup host'),
-      executable: optionalString('host-executable', 'Absolute registered host executable'),
+      executable: optionalString(
+        'host-executable',
+        'Optional absolute host executable; required for Cursor CLI, defaults to `claude` on PATH for Claude Code',
+      ),
       hostReference: optionalString('host-reference', 'Codex thread ID, or Cursor CLI or Claude Code session ID'),
-      workspace: optionalString('workspace', 'Cursor CLI or Claude Code session workspace path'),
+      workspace: optionalString(
+        'workspace',
+        'Cursor CLI or Claude Code session workspace path; defaults to the verified checkout',
+      ),
       noticeRef: optionalString(
         'notice-ref',
         'Relay this current notice route, record its disposition, then ACK using the returned current refs',
@@ -295,7 +307,8 @@ export function makeNativeTaskPrWatchCommand<E, R>(
       }
       return handler({
         ...options,
-        ...(options.host && options.hostReference && (options.host === 'codex' || options.executable)
+        // The runtime derives an omitted session executable and workspace, as on the MCP route.
+        ...(options.host && options.hostReference
           ? {
               wakeup:
                 options.host === 'codex'
@@ -306,9 +319,9 @@ export function makeNativeTaskPrWatchCommand<E, R>(
                     }
                   : {
                       host: options.host,
-                      executable: options.executable!,
+                      ...(options.executable === undefined ? {} : {executable: options.executable}),
                       sessionId: options.hostReference,
-                      workspace: options.workspace ?? '',
+                      ...(options.workspace === undefined ? {} : {workspace: options.workspace}),
                       exclusiveSession: true as const,
                     },
             }

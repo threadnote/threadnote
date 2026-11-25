@@ -444,7 +444,18 @@ const fieldDiagnostic = (path: readonly PropertyKey[], constraint: string): stri
   return new TextEncoder().encode(message).byteLength <= 256 ? message : undefined;
 };
 
-/** First failing schema field and its declared constraint; never the rejected input or an unexpected key. */
+/** A top-level unexpected key is named only when it is a plain bounded identifier. */
+const rootUnexpectedKey = (path: readonly PropertyKey[]): string | undefined => {
+  const [key] = path;
+  return path.length === 1 && typeof key === 'string' && /^[A-Za-z_$][A-Za-z0-9_$-]{0,63}$/u.test(key)
+    ? key
+    : undefined;
+};
+
+/**
+ * First failing schema field and its declared constraint; never the rejected input. A nested unexpected key is
+ * reported at its parent object; a top-level one is named, because the root has no field path of its own.
+ */
 const schemaIssueDiagnostic = (issue: SchemaIssue.Issue, path: readonly PropertyKey[] = []): string | undefined => {
   switch (issue._tag) {
     case 'Pointer':
@@ -469,8 +480,12 @@ const schemaIssueDiagnostic = (issue: SchemaIssue.Issue, path: readonly Property
       return fieldDiagnostic(path, SchemaIssue.defaultLeafHook(new SchemaIssue.InvalidType(issue.ast)));
     case 'MissingKey':
       return fieldDiagnostic(path, SchemaIssue.defaultLeafHook(issue));
-    case 'UnexpectedKey':
-      return fieldDiagnostic(path.slice(0, -1), 'contains an unsupported field');
+    case 'UnexpectedKey': {
+      const key = rootUnexpectedKey(path);
+      return key === undefined
+        ? fieldDiagnostic(path.slice(0, -1), 'contains an unsupported field')
+        : `Unexpected key \`${key}\`: remove this unsupported field.`;
+    }
     default:
       return fieldDiagnostic(path, 'Invalid value');
   }
@@ -505,7 +520,7 @@ const schemaIssueLocation = (
       return limit === undefined ? {path} : {path, limit};
     }
     case 'UnexpectedKey':
-      return {path: path.slice(0, -1)};
+      return rootUnexpectedKey(path) === undefined ? {path: path.slice(0, -1)} : {path};
     default:
       return {path};
   }

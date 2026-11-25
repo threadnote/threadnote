@@ -73,6 +73,7 @@ export const nativeWatchHostRegistrationHint =
   'Claude Code: host claude-code with the sessionId that `printenv CLAUDE_CODE_SESSION_ID` prints in a shell tool; ' +
   'the runtime uses `claude` on PATH (`command -v claude`) as the executable and the verified checkout as the workspace when you omit them. ' +
   'Cursor CLI: host cursor-cli with its sessionId and the absolute `agent` executable; the workspace defaults to the verified checkout. ' +
+  'Threadnote cannot wake a Cursor desktop chat; such a chat needs a host-native PR subscription. ' +
   'Never guess a session ID.';
 
 const pathLauncher = Effect.fn('nativeWatch.pathLauncher')(function* (name: string) {

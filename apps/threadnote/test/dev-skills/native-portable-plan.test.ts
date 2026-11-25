@@ -561,6 +561,14 @@ effectIt.effect.each([
         }),
       );
       expect(readyPlan.status).toBe('ready');
+      // A commit that leaves every cited file unchanged moves HEAD but is not source drift.
+      yield* fs.writeFileString(path.join(donor.repo, 'notes.md'), 'Unrelated donor note\n');
+      yield* git(donor.repo, ['add', 'notes.md']);
+      yield* git(donor.repo, ['commit', '-m', 'unrelated donor note']);
+      expect(
+        (yield* (yield* CodeGraphIndexer).index({cwd: donor.repo, threadnoteHome: donor.home})).snapshot.state,
+      ).toBe('ready');
+      const donorHead = EffectString.trim((yield* git(donor.repo, ['rev-parse', 'HEAD'])).stdout);
       markPhase('donor-publication-and-admission');
       const published = yield* Schema.decodeUnknownEffect(shareResult)(
         yield* donorAuthor({
@@ -648,6 +656,7 @@ effectIt.effect.each([
         detail: 'document',
       });
       expect(donorPlanRead).toMatchObject({root: readyPlan.root, status: 'ready', document: {context}});
+      expect(donorPlanRead).toMatchObject({document: {source: {head: expect.not.stringContaining(donorHead)}}});
       expect(donorSpecRead).toMatchObject({root: readySpec.root, status: 'ready', document: {context: specContext}});
       expect(
         yield* donorAuthor({
@@ -682,6 +691,13 @@ effectIt.effect.each([
         userResponse: 'I authorize execution of this exact shared fixture plan.',
         review: {outcome: 'accepted', blockingIssueCount: 0},
       } as const;
+      // The recipient starts at its own HEAD; only the cited file content must match the shared snapshot.
+      yield* fs.writeFileString(path.join(recipient.repo, 'notes.md'), 'Unrelated recipient note\n');
+      yield* git(recipient.repo, ['add', 'notes.md']);
+      yield* git(recipient.repo, ['commit', '-m', 'unrelated recipient note']);
+      expect(
+        (yield* (yield* CodeGraphIndexer).index({cwd: recipient.repo, threadnoteHome: recipient.home})).snapshot.state,
+      ).toBe('ready');
       const started = yield* Schema.decodeUnknownEffect(startResult)(
         yield* runNativeTaskStart(recipientConfig, recipientStart).pipe(
           Effect.provideService(SystemInfo, recipientSystem),
