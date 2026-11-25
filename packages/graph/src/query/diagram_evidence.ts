@@ -18,9 +18,11 @@ import {
   completeDiagramFact,
   completeDiagramSubject,
   describeCodeGraphDiagramQuestion,
+  diagramClarificationCandidate,
   diagramEndpoint,
   diagramTopicSearchTerms,
   DIAGRAM_ARCHITECTURE_RELATIONS,
+  DIAGRAM_PROJECT_RETRY,
   hasDiagramSourceSpan,
   isDiagramComponentKind,
   isDiagramMemberKind,
@@ -34,6 +36,7 @@ import {
   type CodeGraphDiagramFact,
   type CodeGraphDiagramQuestion,
 } from './diagram.js';
+import {CODE_GRAPH_DIAGRAM_QUESTION_MAXIMUM_LENGTH} from './diagram_contract.js';
 import type {
   CodeGraphDiagramCoverage,
   CodeGraphDiagramFreshness,
@@ -82,7 +85,6 @@ type EvidencePage = (
 
 const PAGE_SIZE = 128;
 const READ_TIMEOUT_MILLISECONDS = 40_000;
-const MAX_QUESTION_LENGTH = 1024;
 const BEHAVIOR_INCOMING = ['calls', 'constructs'] as const;
 const BEHAVIOR_OUTGOING = [...BEHAVIOR_INCOMING, 'contains', 'declares'] as const;
 const TYPE_INCOMING = ['extends', 'implements', 'overrides'] as const;
@@ -307,9 +309,9 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
     nextAction,
   });
   const questionText = Str.trim(input.question);
-  if (!questionText || questionText.length > MAX_QUESTION_LENGTH) {
+  if (!questionText || questionText.length > CODE_GRAPH_DIAGRAM_QUESTION_MAXIMUM_LENGTH) {
     return noEvidence(
-      'The diagram question must contain between 1 and 1024 characters.',
+      `The diagram question must contain between 1 and ${CODE_GRAPH_DIAGRAM_QUESTION_MAXIMUM_LENGTH} characters.`,
       'Name a subject in the selected graph.',
     );
   }
@@ -484,6 +486,9 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
     Effect.gen(function* () {
       const candidates: CodeGraphQueryNode[] = [];
       const topical: RankedSubject[] = [];
+      const exactNames = new Set<string>();
+      const namedCandidates: RankedSubject[] = [];
+      const requestedNames = new Set(selection.unanchoredNames ? selection.terms : []);
       const stableIds = Arr.filter(Arr.map(selection.selectors, Str.toLowerCase), isStableCodeGraphNodeId);
       const topicTerms = diagramTopicSearchTerms(selection.topic);
       const terms = topicTerms.length
@@ -519,6 +524,10 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
             topical.push({node, rank});
             continue;
           }
+          if (exactOnly && requestedNames.has(node.name)) {
+            exactNames.add(node.name);
+            namedCandidates.push({node, rank});
+          }
           const comparison = topRank ? compareRank(rank, topRank) : 1;
           if (comparison < 0) continue;
           if (comparison > 0) {
@@ -550,6 +559,7 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
         if (!topicTerms.length) yield* readSubjects('exact');
         if (allowFuzzy && !candidates.length && !selection.selectors.length) yield* readSubjects('fuzzy');
       }
+      if (exactNames.size > 1) return yield* selectRelevantBehaviorSubjects(namedCandidates);
       if (!candidates.length && topical.length) return yield* selectRelevantBehaviorSubjects(topical);
       if (topicTerms.length && !candidates.length && selection.named?.caseSensitive) {
         yield* readSubjects('exact', [selection.named.spelling], rankCodeGraphDiagramTopicFallback);
@@ -571,6 +581,10 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
       input.packageName,
     );
     if (!candidates.length) {
+      if (input.partialProject) {
+        gaps.set('scope', {kind: 'partial-project', label: scope.project ?? 'Selected graph project'});
+        return noEvidence('The selected graph project has no source evidence for the subject.', DIAGRAM_PROJECT_RETRY);
+      }
       return noEvidence(
         'The selected graph has no source evidence for the subject.',
         'Name an indexed symbol, package, or path in this graph.',
@@ -581,8 +595,8 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
         ...base,
         status: 'clarification',
         coverage: coverage('undetermined', boundaries, gaps),
-        message: 'Which source location is the start of this path?',
-        candidates: Arr.map(candidates, completeDiagramSubject),
+        message: 'More than one source location matches the start of this path.',
+        candidates: Arr.map(candidates, candidate => diagramClarificationCandidate(question, candidate, 'from')),
       } satisfies CodeGraphDiagramResult;
     }
 
@@ -608,8 +622,8 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
           ...base,
           status: 'clarification',
           coverage: coverage('undetermined', boundaries, gaps, subject),
-          message: 'Which source location is the target of this path?',
-          candidates: Arr.map(targets, completeDiagramSubject),
+          message: 'More than one source location matches the target of this path.',
+          candidates: Arr.map(targets, target => diagramClarificationCandidate(question, target, 'to')),
         } satisfies CodeGraphDiagramResult;
       }
       pathTarget = targets[0];
@@ -737,8 +751,10 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
         ...base,
         status: 'clarification',
         coverage: coverage('undetermined', new Map(), new Map()),
-        message: 'Which source location is the subject of this diagram?',
-        candidates: Arr.map([subject, ...alternatives], completeDiagramSubject),
+        message: 'More than one source location matches the subject of this diagram.',
+        candidates: Arr.map([subject, ...alternatives], candidate =>
+          diagramClarificationCandidate(question, candidate),
+        ),
       } satisfies CodeGraphDiagramResult;
     }
     if (!facts.size && !gaps.size) {

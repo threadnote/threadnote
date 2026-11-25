@@ -1,18 +1,14 @@
 import {
+  CODE_GRAPH_DIAGRAM_QUESTION_MAXIMUM_LENGTH,
   CodeGraphDiagramTypeSchema,
   type CodeGraphDiagramCoverage,
   type CodeGraphDiagramResult,
   type CodeGraphDiagramType,
 } from '@threadnote/graph/query/diagram_contract';
-import {Array as Arr, Schema} from 'effect';
+import {Array as Arr, Schema, String as Str} from 'effect';
 import React, {useLayoutEffect, useRef, useState} from 'react';
 import {MermaidBlock} from '../mermaid_block.js';
-import {
-  GRAPH_QUERY_MAXIMUM_LENGTH,
-  graphDiagramScopeMatches,
-  managerGraphQueryCandidate,
-  type GraphDiagramLoader,
-} from './model.js';
+import {graphDiagramScopeMatches, type GraphDiagramLoader} from './model.js';
 
 const diagramTypes = ['auto', 'flowchart', 'sequence', 'class', 'architecture'] as const;
 const diagramLabels = {
@@ -44,7 +40,8 @@ export function GraphDiagramQuestion({
   const [diagramType, setDiagramType] = useState<CodeGraphDiagramType>('auto');
   const [state, setState] = useState<RequestState>({kind: 'idle'});
   const request = useRef<AbortController | undefined>(undefined);
-  const candidate = managerGraphQueryCandidate(question);
+  const candidate = Str.trim(question);
+  const canSubmit = candidate.length > 0 && candidate.length <= CODE_GRAPH_DIAGRAM_QUESTION_MAXIMUM_LENGTH;
 
   useLayoutEffect(() => () => request.current?.abort(), []);
 
@@ -54,8 +51,8 @@ export function GraphDiagramQuestion({
     setState({kind: 'idle'});
   }
 
-  async function submit(type: CodeGraphDiagramType): Promise<void> {
-    if (candidate === undefined) return;
+  async function submit(type: CodeGraphDiagramType, query = candidate): Promise<void> {
+    if (!query || query.length > CODE_GRAPH_DIAGRAM_QUESTION_MAXIMUM_LENGTH) return;
     request.current?.abort();
     const controller = new AbortController();
     request.current = controller;
@@ -63,7 +60,7 @@ export function GraphDiagramQuestion({
     setState({kind: 'pending'});
     const isCurrent = () => request.current === controller && !controller.signal.aborted;
     try {
-      const result = await load(viewId, snapshotId, candidate, type, controller.signal);
+      const result = await load(viewId, snapshotId, query, type, controller.signal);
       if (!isCurrent()) return;
       setState(
         graphDiagramScopeMatches(result, repositoryId, viewId, snapshotId)
@@ -97,7 +94,7 @@ export function GraphDiagramQuestion({
           Question
           <input
             type="text"
-            maxLength={GRAPH_QUERY_MAXIMUM_LENGTH}
+            maxLength={CODE_GRAPH_DIAGRAM_QUESTION_MAXIMUM_LENGTH}
             value={question}
             onChange={event => {
               reset();
@@ -123,14 +120,21 @@ export function GraphDiagramQuestion({
             ))}
           </select>
         </label>
-        <button type="submit" disabled={candidate === undefined || state.kind === 'pending'}>
+        <button type="submit" disabled={!canSubmit || state.kind === 'pending'}>
           Generate diagram
         </button>
       </form>
       {state.kind === 'pending' ? <p role="status">Reading graph evidence…</p> : null}
       {state.kind === 'failed' ? <p role="alert">{state.message}</p> : null}
       {state.kind === 'ready' ? (
-        <GraphDiagramResult result={state.result} onSuggest={type => void submit(type)} />
+        <GraphDiagramResult
+          result={state.result}
+          onSuggest={type => void submit(type)}
+          onChooseCandidate={query => {
+            setQuestion(query);
+            void submit(diagramType, query);
+          }}
+        />
       ) : null}
     </details>
   );
@@ -202,9 +206,11 @@ function CoverageSites({
 export function GraphDiagramResult({
   result,
   onSuggest,
+  onChooseCandidate,
 }: {
   readonly result: CodeGraphDiagramResult;
   readonly onSuggest?: (type: CodeGraphDiagramType) => void;
+  readonly onChooseCandidate?: (query: string) => void;
 }): React.ReactElement {
   const suggestion =
     'suggestedType' in result && Schema.is(CodeGraphDiagramTypeSchema)(result.suggestedType)
@@ -224,9 +230,16 @@ export function GraphDiagramResult({
 
   return (
     <section aria-label="Code diagram result" className="graph-diagram-result">
-      <h3>{diagram ? `${diagramLabels[diagram.diagramType]} diagram` : 'Diagram unavailable'}</h3>
+      <h3>
+        {diagram
+          ? `${diagramLabels[diagram.diagramType]} diagram`
+          : result.status === 'clarification'
+            ? 'Choose a source location'
+            : 'Diagram unavailable'}
+      </h3>
       <p>
         {result.scope.repositoryName} · Snapshot <code>{result.scope.snapshotId}</code> · Freshness {result.freshness}
+        {result.scope.project ? <> · Project {result.scope.project}</> : null}
       </p>
       {result.coverage ? <DiagramCoverage coverage={result.coverage} /> : null}
       {result.status !== 'diagram' ? <p>{result.message}</p> : null}
@@ -275,14 +288,27 @@ export function GraphDiagramResult({
       ) : null}
       {result.status === 'clarification' ? (
         <ul>
-          {Arr.map(result.candidates, candidate => (
-            <li key={candidate.id}>
-              {candidate.label} ·{' '}
-              <code>
-                {candidate.path}:{candidate.span.line}
-              </code>
-            </li>
-          ))}
+          {Arr.map(result.candidates, ({id, label, path, span, retryQuery}) => {
+            const location = (
+              <>
+                {label} ·{' '}
+                <code>
+                  {path}:{span.line}
+                </code>
+              </>
+            );
+            return (
+              <li key={id}>
+                {retryQuery && onChooseCandidate ? (
+                  <button type="button" onClick={() => onChooseCandidate(retryQuery)}>
+                    Use {location}
+                  </button>
+                ) : (
+                  location
+                )}
+              </li>
+            );
+          })}
         </ul>
       ) : null}
       {result.limits.length ? (

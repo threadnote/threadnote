@@ -1,8 +1,9 @@
 import {Array as Arr, Option, String as Str} from 'effect';
 import {codeGraphSymbolPathClass, codeGraphSymbolPathScoreMultiplier} from '../store/query/core.js';
-import {parseCodeGraphEndpointSelector} from './selector.js';
+import {isStableCodeGraphNodeId, parseCodeGraphEndpointSelector} from './selector.js';
 import type {CodeGraphEdge, CodeGraphQueryNode, CodeGraphRelation, CodeGraphSpan} from '../types.js';
 import {renderSourceBackedSequence} from './diagram_sequence.js';
+import {CODE_GRAPH_DIAGRAM_QUESTION_MAXIMUM_LENGTH} from './diagram_contract.js';
 import type {
   CodeGraphDiagramCoverage,
   CodeGraphDiagramFreshness,
@@ -10,6 +11,9 @@ import type {
   CodeGraphDiagramScope,
   CodeGraphDiagramType,
 } from './diagram_contract.js';
+
+export const DIAGRAM_PROJECT_RETRY =
+  'Retry the same question in a graph view or configured project that includes the implementation.';
 
 const SUBJECT_TERMS = /(?:\.\/?)*[\p{L}\p{N}_$@](?:[\p{L}\p{M}\p{N}_$@./#:-]|\u{200C}|\u{200D})*/gu;
 const QUOTED_SUBJECT_TERMS =
@@ -587,6 +591,15 @@ export function describeCodeGraphDiagramQuestion(question: string, type: CodeGra
     intentDomain === 'behavior' && path === undefined && selectors.length === 0 ? compoundTopic(tokens) : [];
   const directions = behaviorDirections(tokens, cueTokens);
   const incoming = (domain === 'types' && predicateIndex !== undefined && inverse) || directions.incoming;
+  const unanchoredNames =
+    domain === 'behavior' &&
+    path === undefined &&
+    explicitSubject === undefined &&
+    preferred === undefined &&
+    !behavior &&
+    !topic.length &&
+    !selectors.length &&
+    !Arr.some(tokens, token => /[./#:@]/u.test(token));
   return {
     selectors,
     terms,
@@ -600,6 +613,7 @@ export function describeCodeGraphDiagramQuestion(question: string, type: CodeGra
     path,
     malformedPath: pathRequest?.kind === 'malformed',
     topic,
+    unanchoredNames,
   } as const;
 }
 
@@ -632,6 +646,7 @@ export function diagramEndpoint(question: CodeGraphDiagramQuestion, selector: st
     terms: [selector],
     named: {spelling: selector, caseSensitive: true},
     topic: [],
+    unanchoredNames: false,
   };
 }
 export function rankCodeGraphDiagramSubject(
@@ -680,6 +695,50 @@ export function completeDiagramSubject(
     qualifiedName: node.qualifiedName,
     ...(node.signature === undefined ? {} : {signature: node.signature}),
   };
+}
+
+function quoteDiagramOperand(value: string): string | undefined {
+  if (/\r|\n/u.test(value)) return undefined;
+  const tokens = subjectTerms(value);
+  if (tokens.length === 1 && tokens[0] === value) return value;
+  for (const quote of ['"', "'", '`']) {
+    if (!Str.includes(quote)(value)) return `${quote}${value}${quote}`;
+  }
+  return undefined;
+}
+
+export function diagramClarificationCandidate(
+  question: CodeGraphDiagramQuestion,
+  node: CodeGraphQueryNode,
+  pathRole?: 'from' | 'to',
+): Extract<CodeGraphDiagramResult, {status: 'clarification'}>['candidates'][number] {
+  const candidate = completeDiagramSubject(node);
+  const value = isStableCodeGraphNodeId(node.id) ? node.id : `${node.path}#${node.qualifiedName || node.name}`;
+  const selector = isExplicitSelector(value) ? quoteDiagramOperand(value) : undefined;
+  if (!selector) return candidate;
+
+  let retryQuery: string;
+  if (question.path && pathRole) {
+    const from = pathRole === 'from' ? selector : quoteDiagramOperand(question.path.from);
+    const to = pathRole === 'to' ? selector : quoteDiagramOperand(question.path.to);
+    if (!from || !to) return candidate;
+    retryQuery = `from ${from} to ${to}`;
+  } else {
+    const focus =
+      question.domain === 'types'
+        ? question.inheritance
+          ? 'class diagram of inheritance'
+          : 'class diagram'
+        : question.domain === 'architecture'
+          ? 'architecture'
+          : question.preferred === 'sequence'
+            ? 'sequence diagram'
+            : 'diagram';
+    const directions = [question.incoming ? 'incoming calls' : '', question.outgoingBehavior ? 'outgoing calls' : ''];
+    const direction = Arr.join(Arr.filter(directions, Boolean), ' and ');
+    retryQuery = `Show the ${focus} for ${selector}${direction ? ` with ${direction}` : ''}`;
+  }
+  return retryQuery.length <= CODE_GRAPH_DIAGRAM_QUESTION_MAXIMUM_LENGTH ? {...candidate, retryQuery} : candidate;
 }
 
 export function hasDiagramSourceSpan(path: string, span: CodeGraphSpan): boolean {
@@ -972,6 +1031,7 @@ export function renderCompleteCodeGraphDiagram(input: {
         !isDiagramTypeKind(coverage.subject.kind) &&
         !isDiagramMemberKind(coverage.subject.kind)));
   const noClassMessage = 'The selected snapshot has no indexed structural relationships for this subject.';
+  const missingInProject = facts.length === 0 && Arr.some(coverage.gaps, gap => gap.kind === 'partial-project');
   const noRelationships =
     coverage.subject !== undefined &&
     facts.length === 0 &&
@@ -982,11 +1042,13 @@ export function renderCompleteCodeGraphDiagram(input: {
   if (coverage.completeness === 'incomplete') {
     const gapMessage = interrupted
       ? 'The graph read stopped before it could establish complete coverage.'
-      : noClassEvidence
-        ? noClassMessage
-        : noRelationships
-          ? 'The selected snapshot has no indexed relationships for this subject.'
-          : 'The selected snapshot has gaps in the evidence for this subject.';
+      : missingInProject
+        ? 'The selected graph project has partial coverage and no indexed relationships for this question.'
+        : noClassEvidence
+          ? noClassMessage
+          : noRelationships
+            ? 'The selected snapshot has no indexed relationships for this subject.'
+            : 'The selected snapshot has gaps in the evidence for this subject.';
     const message =
       rejectsExplicitType && !noClassEvidence
         ? `${gapMessage} ${unsupportedTypeMessage}${facts.length ? ' A flowchart can show the available relationships.' : ''}`
@@ -997,13 +1059,15 @@ export function renderCompleteCodeGraphDiagram(input: {
       message,
       nextAction: interrupted
         ? 'Retry the diagram for the same subject and graph view.'
-        : noClassEvidence
-          ? classAction
-          : question.explicitType === 'sequence' && !fits
-            ? selectPath
-            : canSuggestFlowchart
-              ? 'Select Flowchart to show the available relationships.'
-              : 'Check the listed source locations or name a subject within the available graph evidence.',
+        : missingInProject
+          ? DIAGRAM_PROJECT_RETRY
+          : noClassEvidence
+            ? classAction
+            : question.explicitType === 'sequence' && !fits
+              ? selectPath
+              : canSuggestFlowchart
+                ? 'Select Flowchart to show the available relationships.'
+                : 'Check the listed source locations or name a subject within the available graph evidence.',
       ...(coverage.subject && facts.length && !rejectsExplicitType
         ? {diagram: build(fits ? diagramType : 'flowchart')}
         : {}),

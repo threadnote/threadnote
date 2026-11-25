@@ -369,7 +369,9 @@ describe('MCP code graph response format', () => {
               ? 'export class A extends Authenticator {}\n' +
                 'export class B extends Authenticator {}\n' +
                 'export class C extends Authenticator {}\n' +
-                'export class D extends Authenticator {}\n'
+                'export class D extends Authenticator {}\n' +
+                'export function handleAdmin() { return loadProfile(); }\n' +
+                'function loadProfile() { return 7; }\n'
               : ''),
         );
         if (project.name === 'alpha') {
@@ -381,7 +383,9 @@ describe('MCP code graph response format', () => {
               'export function submitBatch() { return enqueue(); }\n' +
               'function enqueue() { return transmit(); }\n' +
               'function transmit() { return persist(); }\n' +
-              'function persist() { return 23; }\n',
+              'function persist() { return 23; }\n' +
+              'export function handleProfile() { return loadProfile(); }\n' +
+              'function loadProfile() { return 9; }\n',
           );
         }
         mkdirSync(join(project.path, 'excluded'));
@@ -556,6 +560,25 @@ describe('MCP code graph response format', () => {
       ]);
       expect(EffectArray.map(boundedResult.evidence.edges, edge => edge.span.line)).toEqual([4, 5, 6]);
       expect(boundedResult.coverage?.completeness).toBe('complete');
+
+      const ambiguous = await call({query: 'Who calls loadProfile?', diagramType: 'flowchart'});
+      const choice = Schema.decodeUnknownSync(CodeGraphDiagramResultSchema)(ambiguous.structuredContent);
+      expect(choice).toMatchObject({status: 'clarification', scope: {project: alpha.name}});
+      if (choice.status !== 'clarification') throw new Error('Expected a source choice.');
+      const candidate = EffectOption.getOrUndefined(
+        EffectArray.findFirst(choice.candidates, candidate => candidate.path === 'src/request.ts'),
+      );
+      if (!candidate?.retryQuery) throw new Error('Expected the retry query for src/request.ts.');
+      expect(firstText(ambiguous.content)).toContain(`Graph project "${alpha.name}"`);
+      expect(firstText(ambiguous.content)).toContain(`Retry query ${JSON.stringify(candidate.retryQuery)}`);
+      const selected = await call({query: candidate.retryQuery, diagramType: 'flowchart'});
+      expect(selected.structuredContent).toMatchObject({
+        status: 'diagram',
+        scope: choice.scope,
+        coverage: {subject: {id: candidate.id}},
+        evidence: {edges: [{relation: 'calls', path: 'src/request.ts'}]},
+      });
+      expect(firstText(selected.content)).toContain('handleProfile');
 
       const other = await call({callerCwd: beta.path, project: beta.name});
       const otherResult = Schema.decodeUnknownSync(CodeGraphDiagramResultSchema)(other.structuredContent);

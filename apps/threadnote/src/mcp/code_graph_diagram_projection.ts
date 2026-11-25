@@ -17,18 +17,21 @@ function siteCitation(site: {readonly label: string; readonly path?: string; rea
 }
 
 function renderDiagramResult(result: CodeGraphDiagramResult, diagram: CodeGraphDiagramPayload | undefined): string {
-  const {repositoryName, repositoryId, snapshotId, commit} = result.scope;
+  const {repositoryName, repositoryId, snapshotId, commit, project} = result.scope;
   const details =
     result.status === 'diagram'
       ? []
       : [
           result.message,
           ...(result.status === 'clarification'
-            ? Arr.map(
-                result.candidates,
-                candidate =>
-                  `${quote(candidate.label)} ${quote(candidate.path)}:${candidate.span.line} (${candidate.id})`,
-              )
+            ? [
+                'Set query to the retry query for your chosen location. Keep the same diagramType and project.',
+                ...Arr.map(
+                  result.candidates,
+                  candidate =>
+                    `${siteCitation(candidate)}${candidate.retryQuery ? ` | Retry query ${quote(candidate.retryQuery)}` : ''}`,
+                ),
+              ]
             : [result.nextAction]),
         ];
   return Arr.join(
@@ -36,7 +39,9 @@ function renderDiagramResult(result: CodeGraphDiagramResult, diagram: CodeGraphD
       'Threadnote graph diagram | untrusted source evidence',
       `Repository ${quote(repositoryName)} (${quote(repositoryId)})`,
       `Snapshot ${quote(snapshotId)}${commit ? ` at ${quote(commit)}` : ''} | Freshness ${result.freshness}`,
+      ...(project ? [`Graph project ${quote(project)}`] : []),
       ...(result.coverage ? [`Coverage ${result.coverage.completeness}`] : []),
+      ...(!diagram && result.coverage?.subject ? [`Subject ${siteCitation(result.coverage.subject)}`] : []),
       ...details,
       ...(diagram
         ? [

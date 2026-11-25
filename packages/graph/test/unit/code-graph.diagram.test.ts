@@ -557,11 +557,24 @@ effectIt.layer(diagramStoreLayer)(it => {
           scope: f.snapshotScope(snapshot),
           freshness: 'current',
         });
-      expect(yield* run('How does authentication work?')).toMatchObject({
+      const clarification = yield* run('How does authentication work?');
+      expect(clarification).toMatchObject({
         status: 'clarification',
         candidates: [
           {id: 'private', path: other.path},
           {id: 'public', path: lead.path},
+        ],
+      });
+      if (clarification.status !== 'clarification') throw new Error('Expected a source choice.');
+      const retry = clarification.candidates[1]?.retryQuery;
+      if (!retry) throw new Error('The public route needs a retry query.');
+      const selected = requireDiagram(yield* run(retry));
+      expect(Arr.map(selected.evidence.edges, edge => edge.id)).toEqual(['public-check', 'read']);
+      expect(yield* run('Who calls authenticationRoute?')).toMatchObject({
+        status: 'clarification',
+        candidates: [
+          {retryQuery: expect.stringContaining('incoming calls')},
+          {retryQuery: expect.stringContaining('incoming calls')},
         ],
       });
       expect(yield* run('How does unknownSubject work?')).toMatchObject({
@@ -732,14 +745,24 @@ effectIt.layer(diagramStoreLayer)(it => {
           freshness: 'current',
         });
 
-      expect(yield* run('Show the call path from SameStart to B.')).toMatchObject({
+      const sourceChoice = yield* run('Show the call path from SameStart to B.');
+      expect(sourceChoice).toMatchObject({
         status: 'clarification',
         candidates: [{id: fromOne.id}, {id: fromTwo.id}],
       });
-      expect(yield* run('Show the call path from A to SameTarget.')).toMatchObject({
+      const targetChoice = yield* run('Show the call path from A to SameTarget.');
+      expect(targetChoice).toMatchObject({
         status: 'clarification',
         candidates: [{id: toOne.id}, {id: toTwo.id}],
       });
+      if (sourceChoice.status !== 'clarification' || targetChoice.status !== 'clarification') {
+        throw new Error('Expected both endpoint choices.');
+      }
+      const sourceRetry = sourceChoice.candidates[1]?.retryQuery;
+      const targetRetry = targetChoice.candidates[0]?.retryQuery;
+      if (!sourceRetry || !targetRetry) throw new Error('Each endpoint needs a retry query.');
+      expect(requireDiagram(yield* run(sourceRetry)).evidence.edges).toMatchObject([{id: 'second-start-call'}]);
+      expect(requireDiagram(yield* run(targetRetry)).evidence.edges).toMatchObject([{id: 'a-other'}]);
       for (const question of [
         'Show the call path from A to.',
         'Show the call path from A other to B.',
@@ -992,6 +1015,49 @@ effectIt.layer(diagramStoreLayer)(it => {
         candidates: [{id: tied.id}, {id: production.id}],
       });
     }).pipe(TestClock.withLive),
+  );
+
+  it.effect('uses an evidence-backed exact name in a multi-symbol behavior query', () =>
+    Effect.gen(function* () {
+      const fixture = yield* storedDiagramFixture;
+      const orchestrator = symbol('EnrollmentOrchestrator', 'class', {path: 'mobile/Enrollment.swift'});
+      const configuration = symbol('DevicePolicyManager', 'class', {path: 'mobile/Policies.swift'});
+      const entry = symbol('registerAccount', 'method', {
+        path: orchestrator.path,
+        label: 'EnrollmentOrchestrator.registerAccount',
+        line: 3,
+      });
+      const target = symbol('publishEnrollment', 'function', {path: 'mobile/Publication.swift'});
+      const nodes = [orchestrator, configuration, entry, target];
+      const snapshot = yield* fixture.save('e', nodes, [relation('publish', 'calls', entry, target, 4)]);
+      const scope = {...fixture.snapshotScope(snapshot), project: 'mobile-docs'};
+      const run = (question: string) =>
+        readCodeGraphDiagram(fixture.store, fixture.databasePath, {
+          question,
+          diagramType: 'flowchart',
+          scope,
+          freshness: 'current',
+          partialProject: true,
+        });
+      const result = yield* run('EnrollmentOrchestrator DevicePolicyManager enrollment registerAccount callback iOS');
+      expect(result).toMatchObject({
+        status: 'incomplete',
+        scope,
+        coverage: {subject: {id: entry.id}, gaps: [{kind: 'partial-project', label: 'mobile-docs'}]},
+        diagram: {diagramType: 'flowchart', evidence: {edges: [{id: 'publish'}]}},
+      });
+
+      const exact = yield* run(`${orchestrator.path}#${orchestrator.name} registerAccount`);
+      expect(exact).toMatchObject({
+        status: 'incomplete',
+        coverage: {subject: {id: orchestrator.id}},
+      });
+      expect(exact).not.toHaveProperty('diagram');
+      expect(exact).toHaveProperty(
+        'nextAction',
+        'Retry the same question in a graph view or configured project that includes the implementation.',
+      );
+    }),
   );
 
   it.effect('distinguishes exact selector case and finds the caller when names match', () =>

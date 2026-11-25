@@ -1,4 +1,7 @@
-import {CodeGraphDiagramTypeSchema} from '@threadnote/graph/query/diagram_contract';
+import {
+  CODE_GRAPH_DIAGRAM_QUESTION_MAXIMUM_LENGTH,
+  CodeGraphDiagramTypeSchema,
+} from '@threadnote/graph/query/diagram_contract';
 import {managerGraphDiagram} from '@threadnote/graph/visualization';
 import {Console, Effect, Path, Schema, String as Str} from 'effect';
 import {runIsolatedCodeGraphIndexSnapshot} from '@threadnote/graph/isolated/index';
@@ -79,14 +82,13 @@ export const runManagerGraphDiagram = Effect.fn('managerGraphActions.runGraphDia
     typeof snapshotId !== 'string' ||
     !snapshotId ||
     !question ||
-    question.length > 512 ||
+    question.length > CODE_GRAPH_DIAGRAM_QUESTION_MAXIMUM_LENGTH ||
     !Schema.is(CodeGraphDiagramTypeSchema)(diagramType)
   ) {
     return {
       status: 400,
       body: {
-        error:
-          'Provide an indexed view, its snapshot, a question of 1 to 512 characters, and a supported diagram type.',
+        error: `Provide an indexed view, its snapshot, a question of 1 to ${CODE_GRAPH_DIAGRAM_QUESTION_MAXIMUM_LENGTH} characters, and a supported diagram type.`,
       },
     };
   }
