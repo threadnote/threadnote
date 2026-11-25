@@ -520,7 +520,60 @@ effectIt.effect('reports field-specific schema failures on task-author start and
       },
     });
     expect(JSON.stringify(oversizedRefsSave)).not.toContain(marker);
+    const kindFile = f.path.join(f.root, 'kind-plan.json');
+    yield* f.fs.writeFileString(kindFile, JSON.stringify({...validPlan, kind: 'plan'}));
+    const kindSave = yield* f
+      .author({command: 'save', authoringRef: draft.authoringRef, contentFile: kindFile})
+      .pipe(Effect.result);
+    expect(kindSave).toMatchObject({failure: {code: 'invalid-content', detail: {path: 'kind'}}});
+    expect(JSON.stringify(kindSave)).toContain('`kind`');
+    const missingDecision = yield* runNativeTaskAuthoring(f.config, {
+      command: 'decide',
+      callerCwd: f.repo,
+      authoringRef: draft.authoringRef,
+      userResponse: 'I approve this plan.',
+    }).pipe(Effect.provideService(SystemInfo, f.scoped), Effect.result);
+    expect(missingDecision).toMatchObject({failure: {code: 'invalid-request'}});
+    if (missingDecision._tag !== 'Failure') throw new Error('A decision without userDecision was accepted.');
+    expect(missingDecision.failure.message).toContain('decide');
+    expect(missingDecision.failure.message).toContain('userDecision');
     expect(yield* f.fs.readFileString(statePath)).toBe(before);
+    const openQuestionFile = f.path.join(f.root, 'open-question-plan.json');
+    yield* f.fs.writeFileString(
+      openQuestionFile,
+      JSON.stringify({...validPlan, openQuestions: ['Which reader owns the retry path?']}),
+    );
+    const openDraft = yield* f.author({
+      command: 'start',
+      featureName: 'Open question plan',
+      kind: 'plan',
+      contentFile: openQuestionFile,
+      installationTarget: 'codex',
+    });
+    const blocked = yield* f.author({
+      command: 'decide',
+      authoringRef: openDraft.authoringRef,
+      userDecision: 'approve',
+      userResponse: 'I approve this plan.',
+      review: {outcome: 'accepted', blockingIssueCount: 0},
+    });
+    expect(blocked).toMatchObject({status: 'needs-planning', issues: [{path: 'openQuestions[0]'}]});
+    yield* f.fs.writeFileString(openQuestionFile, JSON.stringify(validPlan));
+    const resolved = yield* f.author({
+      command: 'save',
+      authoringRef: blocked.authoringRef,
+      contentFile: openQuestionFile,
+    });
+    expect(resolved.status).toBe('draft');
+    expect(
+      yield* f.author({
+        command: 'decide',
+        authoringRef: resolved.authoringRef,
+        userDecision: 'approve',
+        userResponse: 'I approve the plan with its question resolved.',
+        review: {outcome: 'accepted', blockingIssueCount: 0},
+      }),
+    ).toMatchObject({status: 'ready'});
   }).pipe(TestClock.withLive, provideNative),
 );
 
@@ -2119,6 +2172,9 @@ effectIt.effect(
         review: {outcome: 'accepted', blockingIssueCount: 0},
       }).pipe(Effect.provideService(SystemInfo, f.scoped), Effect.result);
       expect(changedSource).toMatchObject({failure: {code: 'source-drift'}});
+      if (changedSource._tag !== 'Failure') throw new Error('Changed source unexpectedly approved.');
+      expect(changedSource.failure.message).toContain('context.codeRefs[0] (source.ts)');
+      expect(changedSource.failure.message).not.toContain(f.repo);
       expect(yield* f.fs.readFileString(statePath)).toBe(bytes);
       yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = true;\n');
       yield* f.fs.writeFileString(file, JSON.stringify({...direct, project: 'foreign'}));
@@ -2204,16 +2260,17 @@ effectIt.effect(
         f.path.join(f.repo, 'source.ts'),
         'export const fixture = "drift before spec transfer";\n',
       );
-      expect(
-        yield* runNativeTaskAuthoring(f.config, {
-          command: 'start',
-          callerCwd: f.repo,
-          featureName: 'Spec revision',
-          kind: 'plan',
-          contentFile: planFile,
-          specRef: ready.authoringRef,
-        }).pipe(Effect.provideService(SystemInfo, f.scoped), Effect.result),
-      ).toMatchObject({failure: {code: 'source-drift'}});
+      const driftedTransfer = yield* runNativeTaskAuthoring(f.config, {
+        command: 'start',
+        callerCwd: f.repo,
+        featureName: 'Spec revision',
+        kind: 'plan',
+        contentFile: planFile,
+        specRef: ready.authoringRef,
+      }).pipe(Effect.provideService(SystemInfo, f.scoped), Effect.result);
+      expect(driftedTransfer).toMatchObject({failure: {code: 'source-drift'}});
+      if (driftedTransfer._tag !== 'Failure') throw new Error('Drifted spec source unexpectedly transferred.');
+      expect(driftedTransfer.failure.message).toContain('context.codeRefs[0] (source.ts)');
       expect(yield* f.fs.readFileString(f.statePath(String(draft.runId)))).toBe(beforeSourceChange);
       yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = true;\n');
       yield* f.fs.writeFileString(

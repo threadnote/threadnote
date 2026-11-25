@@ -25,7 +25,8 @@ import {
 import {NativeCloseoutProposalSchema} from '@threadnote/workflow-automations/closeout';
 import {
   NativeCyclePublicationAuthoritySchema,
-  NativeCycleValidationSchema,
+  NativeCycleValidationInputSchema,
+  resolveNativeCycleAcceptance,
 } from '@threadnote/workflow-automations/cycle';
 import {NativeCyclePacketOptionsSchema} from '@threadnote/workflow-automations/cycle-packet';
 import * as CycleOutput from '@threadnote/workflow-automations/cycle-output';
@@ -118,12 +119,8 @@ const packetInputSchema = Schema.Struct({
 const reviewInputSchema = Schema.Struct({
   mode: NativeCycleReviewSchema.fields.mode,
   selected: NativeCycleReviewSchema.fields.selected,
-  lanes: NativeCycleReviewSchema.fields.lanes,
+  lanes: Schema.optionalKey(NativeCycleReviewSchema.fields.lanes),
   findings: NativeCycleReviewSchema.fields.findings,
-});
-const validationInputSchema = Schema.Struct({
-  checks: NativeCycleValidationSchema.fields.checks,
-  acceptance: NativeCycleValidationSchema.fields.acceptance,
 });
 const compactReviewSchema = Schema.Struct({
   documentHash: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)),
@@ -142,7 +139,7 @@ export const NativeTaskPrDeliveryFieldsSchema = Schema.Struct({
   userAuthority: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
   commitEvidence: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(2048)),
   pr: prDeliverySchema,
-  publication: NativeCyclePublicationAuthoritySchema,
+  publication: Schema.optionalKey(NativeCyclePublicationAuthoritySchema),
 });
 export type NativeTaskPrDeliveryFields = typeof NativeTaskPrDeliveryFieldsSchema.Type;
 export const NativeTaskCommitDeliveryFieldsSchema = Schema.Struct({
@@ -313,7 +310,7 @@ const requestSchema = Schema.Union([
     runId: id,
     callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
     snapshotRef: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
-    validation: validationInputSchema,
+    validation: NativeCycleValidationInputSchema,
   }),
   Schema.Struct({
     command: Schema.Literal('deliver-local'),
@@ -1508,6 +1505,7 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
         snapshotTree: entry.snapshot.tree,
         status: 'complete' as const,
         ...request.report,
+        lanes: request.report.lanes ?? EffectArray.map(request.report.selected, name => ({name, status: 'complete'})),
       };
       const reportJson = stableJson(report);
       const reportDigest = sha256HexSync(reportJson);
@@ -1638,6 +1636,10 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
       const head = proof?.validation ? proof.head : yield* gitValue(['rev-parse', 'HEAD'], checkout);
       if (!head) return yield* fail('source-unavailable', 'Could not read the current validation source head.');
       const waiver = nativeCycleCoverageWaiver(coverage);
+      const acceptance = yield* Effect.try({
+        try: () => resolveNativeCycleAcceptance(state.plan, ref.phaseId, request.validation.acceptance),
+        catch: nativeWorkflowError,
+      });
       const validation = {
         snapshotTree: entry.snapshot.tree,
         ...(coverage._tag === 'reviewed' ? {reviewTree: coverage.snapshot.tree} : {}),
@@ -1646,7 +1648,7 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
         status: 'passed' as const,
         productState: 'working' as const,
         checks: request.validation.checks,
-        acceptance: request.validation.acceptance,
+        acceptance,
       };
       const validationDigest = sha256HexSync(stableJson(validation));
       const validationRef = encodeNativeTaskActionRef({

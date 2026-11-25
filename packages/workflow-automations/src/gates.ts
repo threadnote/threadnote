@@ -207,7 +207,7 @@ export const nativeNext = {
     const fields = {
       validationRef: '<validationRef>',
       ...(delivery === 'local' ? {} : {commitEvidence: '<commitEvidence>'}),
-      ...(delivery === 'pr' ? {pr: '<pr>', publication: '<publication>', userAuthority: '<userAuthority>'} : {}),
+      ...(delivery === 'pr' ? {pr: '<pr>', userAuthority: '<userAuthority>'} : {}),
     };
     return nativeNextCommand(
       'workflow_task_deliver',

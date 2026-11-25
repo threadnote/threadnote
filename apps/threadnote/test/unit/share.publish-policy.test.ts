@@ -7,6 +7,8 @@ import {runSharePublish} from '@threadnote/threadnote/effect/share';
 import {runSharePublishTool} from '@threadnote/threadnote/mcp/server/share';
 import {sharePublishEligibilityError} from '@threadnote/threadnote/share/publish_policy';
 import type {ShareRuntime} from '@threadnote/threadnote/types';
+import {encodeAuthoringArtifact} from '../../src/workflow_automation/authoring_artifacts.js';
+import {formatMemoryDocument, type MemoryMetadata} from '@threadnote/memory/document';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -29,6 +31,50 @@ describe('share publication eligibility', () => {
         config,
         'threadnote://user/tester/memories/durable/projects/foo/bar.md',
         content('durable'),
+      ),
+    ).toBeUndefined();
+  });
+
+  it('refuses workflow-owned artifacts but publishes a memory that quotes the authoring marker', () => {
+    const uri = 'threadnote://user/tester/memories/durable/projects/foo/bar.md';
+    const stored = (body: string, metadata: Partial<MemoryMetadata> = {}) =>
+      formatMemoryDocument(
+        'MEMORY',
+        {
+          kind: 'durable',
+          status: 'active',
+          project: 'foo',
+          topic: 'bar',
+          sourceAgentClient: 'codex',
+          timestamp: '2026-11-25T00:00:00.000Z',
+          ...metadata,
+        },
+        body,
+      );
+    const artifact = encodeAuthoringArtifact('Plan', 'Plan data.', {format: 'threadnote-native-authoring-context'});
+    expect(sharePublishEligibilityError(config, uri, stored(artifact))).toContain(
+      'workflow_task_author command: share',
+    );
+    expect(
+      sharePublishEligibilityError(
+        config,
+        uri,
+        stored('Body', {
+          topic: 'workflow-feature-review',
+          sourceAgentClient: 'threadnote',
+          sourceSessionId: 'native-v1-task-1',
+        }),
+      ),
+    ).toContain('a workflow run owns this artifact');
+    expect(
+      sharePublishEligibilityError(config, uri, stored(artifact + '\nA later note explains the marker above.\n')),
+    ).toBeUndefined();
+    expect(sharePublishEligibilityError(config, uri, stored('Body', {topic: 'workflow-notes'}))).toBeUndefined();
+    expect(
+      sharePublishEligibilityError(
+        config,
+        uri,
+        stored('A note quotes the marker:\n<!-- threadnote-authoring:v1 {"kind":"plan"} -->\nMore text.\n<!-- end -->'),
       ),
     ).toBeUndefined();
   });

@@ -1169,6 +1169,9 @@ describe('native task actions', () => {
           const beforeReplay = yield* f.fs.readFileString(f.statePath());
           const replay = object(yield* runNativeTaskAction(f.config, deliveryRequest));
           expect(replay).toMatchObject({status: 'delivered', replayed: true, receipt: delivered.receipt});
+          // A replay that omits publication keeps the stored receipt's publication.
+          const {publication: _publication, ...withoutPublication} = deliveryRequest;
+          expect(object(yield* runNativeTaskAction(f.config, withoutPublication))).toEqual(replay);
           expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeReplay);
           return {deliveryRequest, delivered};
         });
@@ -1195,6 +1198,96 @@ describe('native task actions', () => {
       }).pipe(Effect.result);
       expect(missingWatch).toMatchObject({failure: {code: 'finish-scope'}});
       expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeBlockedCloseout);
+    }).pipe(run),
+  );
+
+  effectIt.effect('delivers and watches a PR phase without publication evidence after acceptance by ID', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(['one'], 'pr');
+      yield* f.mutate('begin-phase', {phaseId: 'one'});
+      const work = object(
+        yield* runNativeTaskAction(f.config, {command: 'work', runId: 'native-run', callerCwd: f.repo, packet}),
+      );
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "no publication";\n');
+      yield* f.git(['add', 'source.ts']);
+      yield* f.git(['commit', '-m', 'Phase one']);
+      const snapshot = object(
+        yield* runNativeTaskAction(f.config, {
+          command: 'record-snapshot',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          workRef: String(work.workRef),
+        }),
+      );
+      const snapshotRef = String(snapshot.snapshotRef);
+      // Omitted lanes record every selected lane as complete.
+      expect(
+        yield* runNativeTaskAction(f.config, {
+          command: 'record-review',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          snapshotRef,
+          report: {mode: 'full', selected: ['correctness', 'simplicity'], findings: []},
+        }),
+      ).toMatchObject({status: 'recorded'});
+      const validation = object(
+        yield* runNativeTaskAction(f.config, {
+          command: 'record-validation',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          snapshotRef,
+          validation: {
+            checks: [{command: 'phase one check', result: 'passed', evidence: 'Private fixture passed.'}],
+            acceptance: [{id: 'accept-one', result: 'passed', evidence: 'Phase one source is committed.'}],
+          },
+        }),
+      );
+      expect(validation).toMatchObject({validation: {acceptance: [{criterion: 'one works'}]}});
+      const headSha = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
+      const pr = {
+        url: 'https://github.com/example/repo/pull/41',
+        headSha,
+        branch: 'feature/one',
+        baseBranch: 'main',
+        state: 'open' as const,
+      };
+      const deliveryRequest = {
+        command: 'deliver-pr',
+        runId: 'native-run',
+        callerCwd: f.repo,
+        validationRef: String(validation.validationRef),
+        commitEvidence: `Private fixture commit ${headSha}`,
+        pr,
+      };
+      // A supplied publication is still checked against the exact source head.
+      const beforeStale = yield* f.fs.readFileString(f.statePath());
+      const stalePublication = {
+        state: 'published',
+        team: 'default',
+        uri: 'threadnote://default/memories/shared/default/feature',
+        revision: EffectString.repeat(64)('a'),
+        currentHead: EffectString.repeat(40)('f'),
+        remoteCommit: EffectString.repeat(40)('f'),
+        evidence: 'Private stale publication receipt.',
+      };
+      expect(
+        yield* runNativeTaskAction(f.config, {...deliveryRequest, publication: stalePublication}).pipe(Effect.result),
+      ).toMatchObject({failure: {code: 'invalid-cycle-packet'}});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeStale);
+      const delivered = object(yield* runNativeTaskAction(f.config, deliveryRequest));
+      expect(delivered).toMatchObject({status: 'watch-required', next: {action: 'watch-pr'}});
+      const watch = yield* startSimulatedTaskWatch(
+        f,
+        'native-run',
+        'one',
+        String(validation.validationRef),
+        String(delivered.deliveryRef),
+        pr.url,
+      );
+      expect(watch.result).toMatchObject({ok: true, value: {receipt: {pr, watch: {state: 'active'}}}});
+      const receipt = (yield* readNativeWorkflowState(f.config, 'native-run'))?.state.cycle?.state.phases.one?.delivery;
+      expect(receipt).toMatchObject({delivery: 'pr', pr: {state: 'open'}});
+      expect(receipt).not.toHaveProperty('publication');
     }).pipe(run),
   );
 

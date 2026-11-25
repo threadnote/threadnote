@@ -173,6 +173,34 @@ describe('native cycle review validation', () => {
       expect(caught(() => validateNativeCycleReview(snapshot(), input, previous))).toMatchObject({
         code: 'invalid-cycle-review',
       });
+    expect(
+      caught(() =>
+        validateNativeCycleReview(
+          snapshot(),
+          {...valid, lanes: [valid.lanes[0], valid.lanes[1], {name: 'docs', status: 'complete'}]},
+          previous,
+        ),
+      ),
+    ).toMatchObject({message: expect.stringMatching(/without a completed lane: security\..*not selected: docs\./u)});
+    expect(
+      caught(() =>
+        validateNativeCycleReview(
+          snapshot(),
+          {...valid, lanes: [{name: 'correctness', status: 'running'}, valid.lanes[1]]},
+          previous,
+        ),
+      ),
+    ).toMatchObject({message: expect.stringContaining('Field report.lanes[0].status:')});
+    const extras = EffectArray.map(['docs', 'perf', 'ux', 'api', 'ops'], name => ({name, status: 'complete' as const}));
+    expect(
+      caught(() => validateNativeCycleReview(snapshot(), {...valid, lanes: [...valid.lanes, ...extras]}, previous)),
+    ).toMatchObject({message: expect.stringContaining('not selected: docs, perf, ux and 2 more.')});
+    // A key that is not a plain bounded identifier is reported at its parent.
+    const hostile = caught(() =>
+      validateNativeCycleReview(snapshot(), {...valid, lanes: [{...valid.lanes[0], 'x y': 1}]}, previous),
+    );
+    expect(hostile).toMatchObject({message: expect.stringContaining('Field report.lanes[0]:')});
+    expect(hostile).not.toMatchObject({message: expect.stringContaining('x y')});
   });
 
   it('rejects self-review even alongside both independent mandatory lanes', () => {
@@ -567,6 +595,11 @@ describe('native cycle review validation', () => {
       expect(caught(() => validateNativeCycleReview(current, review({findings}), previous))).toMatchObject({
         code: 'invalid-cycle-review',
       });
+    expect(
+      caught(() =>
+        validateNativeCycleReview(current, review({findings: [finding({state: 'rejected', reason: ' '})]}), previous),
+      ),
+    ).toMatchObject({message: expect.stringContaining(`Finding ${finding().id} needs a reason`)});
   });
 
   it('derives active counts and preserves them across bounded unique findings', () => {

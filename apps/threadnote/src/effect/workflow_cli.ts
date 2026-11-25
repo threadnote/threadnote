@@ -1,4 +1,5 @@
 import {nativeWaivableGateIds} from '@threadnote/workflow-automations/gates';
+import {nativeCyclePublicationField} from '@threadnote/workflow-automations/cycle';
 import {Array as EffectArray, Effect, Schema} from 'effect';
 import {Command, Flag} from 'effect/cli';
 import {withDefaultActionSubcommand} from './cli/help.js';
@@ -104,7 +105,7 @@ export function makeNativeTaskPrDeliveryCommand<E, R>(
     readonly validationRef: string;
     readonly commitEvidence: string;
     readonly pr: unknown;
-    readonly publication: unknown;
+    readonly publication?: unknown;
     readonly userAuthority?: string;
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
 ) {
@@ -116,9 +117,9 @@ export function makeNativeTaskPrDeliveryCommand<E, R>(
       validationRef: requiredString('validation-ref', 'Opaque current validation reference from the task flow'),
       commitEvidence: requiredString('commit-evidence', 'Actual verified PR commit evidence'),
       pr: requiredString('pr', 'Physical PR metadata as JSON'),
-      publication: requiredString(
+      publication: optionalString(
         'publication',
-        'Feature-memory publication evidence as JSON; separate from user consent',
+        'Optional feature-memory publication evidence as JSON; separate from user consent',
       ),
       userAuthority: optionalString(
         'user-authority',
@@ -127,7 +128,12 @@ export function makeNativeTaskPrDeliveryCommand<E, R>(
     },
     options =>
       Effect.try({
-        try: () => ({pr: JSON.parse(options.pr) as unknown, publication: JSON.parse(options.publication) as unknown}),
+        try: () => ({
+          pr: JSON.parse(options.pr) as unknown,
+          ...nativeCyclePublicationField<unknown>(
+            options.publication === undefined ? undefined : JSON.parse(options.publication),
+          ),
+        }),
         catch: () =>
           WorkflowAutomationError.make({
             code: 'invalid-request',

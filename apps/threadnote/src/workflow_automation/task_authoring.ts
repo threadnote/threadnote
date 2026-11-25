@@ -7,6 +7,7 @@ import {
 } from '@threadnote/workflow-automations/gates';
 import {
   Array as A,
+  Cause,
   Effect,
   FileSystem,
   Option as O,
@@ -39,7 +40,7 @@ import {
 } from '@threadnote/workflow-automations/authoring';
 import {readNativeWorkflowState} from './store.js';
 import {runWorkflowAutomation} from './index.js';
-import {inspectNativeSourcePaths, nativeAuthoringSourceOrigins} from './authoring.js';
+import {inspectNativeSourcePaths, nativeAuthoringSourceOrigins, nativeSourceDrift} from './authoring.js';
 import {readNativeTaskInstalledTarget} from './task_admission.js';
 import {encodeNativeAuthoringTaskRef} from './task.js';
 export {encodeNativeAuthoringTaskRef} from './task.js';
@@ -121,7 +122,7 @@ const decodeNativeAuthoringJobRef = (ref: string) =>
     Effect.mapError(() => fail('job-not-found', 'Read the current authoring job continuation.')),
   );
 const scope = {callerCwd: text};
-const inputSchema = Schema.Union([
+const inputMembers = [
   Schema.Struct({
     ...scope,
     command: Schema.Literal('start'),
@@ -180,8 +181,23 @@ const inputSchema = Schema.Union([
     delivery: Schema.optionalKey(Schema.Literals(['local', 'commit', 'pr'])),
     bindings: Schema.Record(id, Schema.Struct({branch: text, baseBranch: text})),
   }),
-]);
+] as const;
+const inputSchema = Schema.Union(inputMembers);
 export type NativeTaskAuthoringInput = typeof inputSchema.Type;
+const genericRequestRefusal =
+  'Provide a typed task-authoring action and business content file; omit protocol, source and binding metadata.';
+/** Names the requested command and its first failing field, decoded against that command's own shape. */
+const requestRefusal = (input: unknown) => {
+  const command = Predicate.isObject(input) ? input.command : undefined;
+  const member = A.findFirst(inputMembers, item => item.fields.command.literal === command);
+  if (O.isNone(member) || typeof command !== 'string') return fail('invalid-request', genericRequestRefusal);
+  const decoded = Schema.decodeUnknownExit(member.value, {onExcessProperty: 'error'})(input);
+  const error = decoded._tag === 'Failure' ? O.getOrUndefined(Cause.findErrorOption(decoded.cause)) : undefined;
+  const diagnostic = error === undefined ? undefined : nativeAuthoringSchemaDiagnostic(error);
+  return diagnostic === undefined
+    ? fail('invalid-request', genericRequestRefusal)
+    : fail('invalid-request', `Invalid ${command} request: ${diagnostic}`);
+};
 const object = (value: unknown): Record<string, unknown> => {
   if (!Predicate.isObject(value)) throw fail('invalid-readback', 'The native authoring response is malformed.');
   return value;
@@ -342,12 +358,7 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
     if (Predicate.isObject(input) && input.command !== 'read' && Record.has(input, 'detail'))
       return yield* fail('invalid-request', 'The detail option applies only to read; retry with command read.');
     const request = yield* Schema.decodeUnknownEffect(inputSchema, {onExcessProperty: 'error'})(input).pipe(
-      Effect.mapError(() =>
-        fail(
-          'invalid-request',
-          'Provide a typed task-authoring action and business content file; omit protocol, source and binding metadata.',
-        ),
-      ),
+      Effect.mapError(() => requestRefusal(input)),
     );
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -637,15 +648,20 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
         );
       if (!document.source)
         return yield* fail('portable-plan-source', 'Record current source evidence before sharing this plan.');
+      const planOrigins = nativeAuthoringSourceOrigins(document);
       const source = yield* inCheckout(
         inspectNativeSourcePaths(
           checkout,
           A.map(document.source.files, file => file.path),
-          nativeAuthoringSourceOrigins(document),
+          planOrigins,
         ),
       ).pipe(Effect.mapError(() => fail('source-drift', 'The plan source cannot be verified for sharing.')));
-      if (stableJson(source) !== stableJson(document.source))
-        return yield* fail('source-drift', 'Refresh and review the plan against the current source before sharing.');
+      const planDrift = nativeSourceDrift(document.source, source, planOrigins);
+      if (planDrift !== undefined)
+        return yield* fail(
+          'source-drift',
+          `${planDrift} changed. Refresh and review the plan against the current source before sharing.`,
+        );
       let spec: PortablePlanPayload['spec'];
       let linkedSpecDocument: NativeAuthoringDocument | undefined;
       if (document.spec) {
@@ -658,19 +674,24 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
           nativeAuthoringDigest(specDocument) !== document.spec.documentHash
         )
           return yield* fail('portable-plan-conflict', 'The linked ready specification changed.');
+        const specOrigins = nativeAuthoringSourceOrigins(specDocument);
         const specSource = yield* inCheckout(
           inspectNativeSourcePaths(
             checkout,
             A.map(specDocument.source.files, file => file.path),
-            nativeAuthoringSourceOrigins(specDocument),
+            specOrigins,
           ),
         ).pipe(
           Effect.mapError(() =>
             fail('source-drift', 'The linked specification source cannot be verified for sharing.'),
           ),
         );
-        if (stableJson(specSource) !== stableJson(specDocument.source))
-          return yield* fail('source-drift', 'Refresh and review the linked specification source before sharing.');
+        const specDrift = nativeSourceDrift(specDocument.source, specSource, specOrigins);
+        if (specDrift !== undefined)
+          return yield* fail(
+            'source-drift',
+            `${specDrift} changed. Refresh and review the linked specification source before sharing.`,
+          );
         linkedSpecDocument = specDocument;
         spec = {document: canonicalAuthoringJson(specDocument), documentHash: nativeAuthoringDigest(specDocument)};
       }
@@ -815,7 +836,7 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
         userDecision: request.userDecision,
         userResponse: request.userResponse,
       });
-      yield* call('save', {
+      const approved = yield* call('save', {
         document: existing.document,
         ready: true,
         uri: referenced?.artifact?.uri,
@@ -823,6 +844,12 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
         confirmation: confirmation.confirmation,
         ...(request.review ? {review: {documentHash: existing.root.documentHash, ...request.review}} : {}),
       });
+      // The runtime saves an approval it cannot make ready as a draft; name what blocked readiness.
+      if (A.isArray(approved.readinessBlockers) && approved.readinessBlockers.length > 0) {
+        const draft = yield* current();
+        if (!draft) return yield* fail('invalid-readback', 'The saved document could not be independently read back.');
+        return {...result(draft), status: 'needs-planning', issues: approved.readinessBlockers};
+      }
     } else {
       const contentPath = path.isAbsolute(request.contentFile)
         ? request.contentFile
@@ -859,17 +886,19 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
             'needs-planning',
             'The approved specification needs actual source evidence before transfer.',
           );
+        const approvedOrigins = nativeAuthoringSourceOrigins(approvedSpec);
         const actualSpecSource = yield* inCheckout(
           inspectNativeSourcePaths(
             checkout,
             A.map(approvedSpec.source.files, file => file.path),
-            nativeAuthoringSourceOrigins(approvedSpec),
+            approvedOrigins,
           ),
         );
-        if (stableJson(actualSpecSource) !== stableJson(approvedSpec.source))
+        const approvedDrift = nativeSourceDrift(approvedSpec.source, actualSpecSource, approvedOrigins);
+        if (approvedDrift !== undefined)
           return yield* fail(
             'source-drift',
-            'The approved spec source changed; explicitly update and approve its exact current content before transfer.',
+            `${approvedDrift} changed in the approved spec source; explicitly update and approve its exact current content before transfer.`,
           );
         spec = packet.spec;
         requirements = object(packet.document).requirements;
