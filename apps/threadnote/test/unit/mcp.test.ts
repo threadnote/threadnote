@@ -13,22 +13,41 @@ import {
 } from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {delimiter, join} from '@threadnote/testing/node-path';
-import {Effect, FileSystem, Path, Predicate} from 'effect';
+import {Effect, Equal, FileSystem, Path, Predicate} from 'effect';
 import {TestClock} from 'effect/testing';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {captureConsole} from '@threadnote/threadnote/effect/console';
+import {getAgentAdapter} from '@threadnote/threadnote/agent_integration/adapters';
 import {
   installCursorCloudAgentIntegration,
   readAgentIntegrationRegistry,
 } from '@threadnote/threadnote/agent_integration/index';
-import {installCommandShim} from '@threadnote/threadnote/command-shim';
+import {commandLauncherPath, installCommandShim, renderCommandShim} from '@threadnote/threadnote/command-shim';
+import {hasActiveMcpLauncher} from '../../src/mcp/codex_broker_rotation.js';
+import {describeCodexMcpConfiguration} from '../../src/mcp/install.js';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {activateStandaloneRelease} from '@threadnote/threadnote/installations';
+import {CommandExecutor, formatShellCommand, shellQuote} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {repairRegisteredMcpClients, runUninstall} from '@threadnote/threadnote/lifecycle';
-import {mcpAdapterCommand, resolveMcpClients, runMcpInstall} from '@threadnote/threadnote/mcp/index';
+import {
+  mcpAdapterCommand,
+  mcpConfigurationChecks,
+  resolveMcpClients,
+  runMcpInstall,
+} from '@threadnote/threadnote/mcp/index';
 import {mcpToolCapabilities, parseMcpToolset} from '@threadnote/threadnote/mcp/toolset';
 import {runOmpHooksInstall} from '@threadnote/threadnote/omp_hooks';
+import {
+  writeAgentIntegrationRegistry,
+  withAgentIntegrationHost,
+} from '@threadnote/threadnote/agent_integration/registry';
+import {
+  CODEX_MCP_RELEASE_ENV,
+  reconcileActivatedCodexMcp,
+  reconcileRegisteredCodexMcp,
+  verifyRegisteredCodexMcp,
+} from '@threadnote/threadnote/mcp/index';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
@@ -163,12 +182,20 @@ describe('MCP toolsets', () => {
       const testSystem = SystemInfo.of({
         ...baseSystem,
         platform: 'linux',
-        environment: () => ({...baseSystem.environment(), THREADNOTE_BIN_DIR: "/opt/threadnote's bin"}),
+        environment: () => ({
+          ...baseSystem.environment(),
+          CODEX_HOME: '/home/example/codex home',
+          THREADNOTE_BIN_DIR: "/opt/threadnote's bin",
+        }),
       });
       const preview = yield* captureConsole(runMcpInstall(config, 'codex', {name: 'team-memory'})).pipe(
         Effect.provideService(SystemInfo, testSystem),
       );
-      expect(preview.output).toContain('codex mcp remove team-memory\n');
+      expect(preview.output).toContain(
+        'Set CODEX_HOME to the intended Codex home, then run `threadnote mcp-install codex --apply --name team-memory`',
+      );
+      expect(preview.output).toContain('team-memory');
+      expect(preview.output).not.toContain('codex mcp add');
       expect(preview.output).toContain(`'${join("/opt/threadnote'\"'\"'s bin", 'threadnote-mcp-server')}'`);
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
@@ -1086,8 +1113,485 @@ describe('JSON MCP host configuration', () => {
   );
 });
 
+const codexConfigurationFixture = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const base = yield* SystemInfo;
+  const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-codex-config-'}));
+  const userHome = path.join(root, 'user');
+  const hostRoot = path.join(root, 'desktop');
+  const alternateRoot = path.join(root, 'alternate');
+  const bin = path.join(root, 'bin');
+  const config = runtime(path.join(userHome, '.threadnote'));
+  const installRoot = path.join(root, 'installation');
+  const target = path.join(hostRoot, 'config.toml');
+  const alternateTarget = path.join(alternateRoot, 'config.toml');
+  yield* fs.makeDirectory(bin, {recursive: true});
+  yield* fs.makeDirectory(hostRoot, {recursive: true});
+  yield* fs.makeDirectory(alternateRoot, {recursive: true});
+  const executable = path.join(bin, 'codex');
+  yield* fs.writeFileString(executable, 'Codex executable probe fixture\n', {mode: 0o755});
+  yield* fs.chmod(executable, 0o755);
+  const commandCalls: string[][] = [];
+  const executor = yield* CommandExecutor;
+  const commandExecutor = CommandExecutor.of({
+    ...executor,
+    execute: (candidate, args, options) =>
+      candidate === executable
+        ? Effect.sync(() => {
+            commandCalls.push([...args]);
+            return {exitCode: Equal.equals(args, ['--version']) ? 0 : 1, stderr: '', stdout: ''};
+          })
+        : executor.execute(candidate, args, options),
+  });
+  const inCodexHome = (home: string) =>
+    SystemInfo.of({
+      ...base,
+      environment: () => ({
+        ...base.environment(),
+        CODEX_HOME: home,
+        PATH: bin,
+        THREADNOTE_BIN_DIR: bin,
+        THREADNOTE_INSTALL_ROOT: installRoot,
+      }),
+      homeDirectory: userHome,
+    });
+  const inFixture = <A, E, R>(effect: Effect.Effect<A, E, R>, selectedHome = hostRoot) =>
+    effect.pipe(
+      Effect.provideService(SystemInfo, inCodexHome(selectedHome)),
+      Effect.provideService(CommandExecutor, commandExecutor),
+    );
+  const activate = (version: string) =>
+    inFixture(
+      Effect.gen(function* () {
+        const releaseRoot = path.join(installRoot, 'versions', version);
+        yield* fs.makeDirectory(releaseRoot, {recursive: true});
+        yield* fs.writeFileString(path.join(releaseRoot, 'release.json'), JSON.stringify({version}));
+        yield* activateStandaloneRelease(releaseRoot, false);
+        yield* installCommandShim(false, releaseRoot, config.agentContextHome);
+      }),
+    );
+  return {
+    activate,
+    alternateRoot,
+    alternateTarget,
+    bin,
+    commandCalls,
+    config,
+    hostRoot,
+    inFixture,
+    installRoot,
+    target,
+  };
+});
+
+const firstCodexRelease = '6.4.1-dev.aaaaaaaaaaaa';
+const secondCodexRelease = '6.4.1-dev.bbbbbbbbbbbb';
+
+describe('Codex receipt-owned release marker', () => {
+  it.each([
+    {hostRoot: '/home/example/codex home', expectedHome: 'the recorded Codex home'},
+    {hostRoot: '/var/codex home', expectedHome: "'/var/codex home'"},
+  ])('describes the missing MCP entry for $hostRoot', ({hostRoot, expectedHome}) => {
+    expect(describeCodexMcpConfiguration('team-memory', {state: 'missing', hostRoot})).toEqual({
+      detail: `team-memory is missing from the recorded Codex home. Set CODEX_HOME to ${expectedHome}, then run \`threadnote mcp-install codex --apply --name team-memory\`.`,
+      name: 'codex MCP',
+      status: 'warn',
+    });
+  });
+
+  effectIt.effect('verifies the primary Windows CMD launcher without POSIX executable bits', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const base = yield* SystemInfo;
+      const bin = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-codex-cmd-launcher-'});
+      const release = path.join(bin, 'versions', firstCodexRelease);
+      const system = SystemInfo.of({
+        ...base,
+        environment: () => ({...base.environment(), THREADNOTE_BIN_DIR: bin}),
+        platform: 'win32',
+      });
+      yield* Effect.gen(function* () {
+        const cmd = yield* commandLauncherPath('mcp');
+        const posix = yield* commandLauncherPath('mcp', 'posix');
+        expect(cmd).toContain('threadnote-mcp-server.cmd');
+        yield* fs.writeFileString(posix, yield* renderCommandShim(release, 'mcp', 'posix'), {mode: 0o755});
+        expect(yield* hasActiveMcpLauncher(release)).toBe(false);
+        yield* fs.writeFileString(cmd, yield* renderCommandShim(release, 'mcp', 'cmd'), {mode: 0o600});
+        expect(yield* hasActiveMcpLauncher(release)).toBe(true);
+      }).pipe(Effect.provideService(SystemInfo, system));
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect.skipIf(process.platform === 'win32')(
+    'pins fresh custom setup and updates only the marker in both repair entry points',
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const fixture = yield* codexConfigurationFixture;
+        const {activate, alternateRoot, alternateTarget, config, hostRoot, inFixture, target} = fixture;
+        const untouched = EffectArray.join(
+          [
+            '# Other Codex settings',
+            'model = "fixture"',
+            '[mcp_servers.threadnote-org]',
+            'url = "https://composer.example/mcp" # organization',
+            '[mcp_servers.unrelated]',
+            'command = "/other/launcher"',
+            'enabled = false',
+            '',
+          ],
+          '\r\n',
+        );
+        yield* fs.writeFileString(target, untouched);
+        yield* activate(firstCodexRelease);
+        const install = runMcpInstall(config, 'codex', {apply: true, name: 'team-memory', toolset: 'full'});
+        const alias = path.join(alternateRoot, 'alias');
+        yield* fs.symlink(hostRoot, alias);
+        const preview = yield* inFixture(captureConsole(runMcpInstall(config, 'codex', {name: 'team-memory'})), alias);
+        expect(preview.output).toContain(hostRoot);
+        expect(preview.output).toContain(firstCodexRelease);
+        expect(preview.output).toContain('threadnote mcp-install codex --apply --name team-memory');
+        expect(yield* fs.readFileString(target)).toBe(untouched);
+        yield* inFixture(install, alias);
+        const registry = yield* readAgentIntegrationRegistry(config);
+        expect(registry?.hosts.codex?.mcp).toMatchObject({
+          hostRoot,
+          name: 'team-memory',
+          repair: true,
+          toolset: 'full',
+        });
+        const fresh = yield* fs.readFileString(target);
+        const marker = `${CODEX_MCP_RELEASE_ENV} = "${firstCodexRelease}"`;
+        expect(fresh).toContain(marker);
+        expect(EffectString.startsWith(untouched)(fresh)).toBe(true);
+        expect(fresh).toContain('THREADNOTE_MCP_TOOLSET = "full"');
+        expect(fixture.commandCalls.flat()).not.toContain('add');
+        expect(fixture.commandCalls.flat()).not.toContain('remove');
+
+        const modified = EffectString.replace(
+          marker,
+          `${marker} # keep marker comment\r\nUSER_OVERRIDE = 'keep'`,
+        )(fresh);
+        yield* fs.writeFileString(target, modified);
+        yield* fs.writeFileString(alternateTarget, modified);
+        const before = yield* fs.stat(target);
+        yield* inFixture(install);
+        expect((yield* fs.stat(target)).ino).toEqual(before.ino);
+        expect(yield* fs.readFileString(target)).toBe(modified);
+
+        yield* activate(secondCodexRelease);
+        expect(yield* inFixture(mcpConfigurationChecks(config), alternateRoot)).toContainEqual({
+          detail: expect.stringContaining('has a stale release marker'),
+          name: 'codex MCP',
+          status: 'warn',
+        });
+        const dryRun = repairRegisteredMcpClients(config, registry, ['codex'], true);
+        yield* inFixture(dryRun, alternateRoot);
+        expect(yield* fs.readFileString(target)).toBe(modified);
+        yield* inFixture(repairRegisteredMcpClients(config, registry, ['codex'], false), alternateRoot);
+        expect(yield* fs.readFileString(target)).toBe(
+          EffectString.replace(firstCodexRelease, secondCodexRelease)(modified),
+        );
+        expect(yield* fs.readFileString(alternateTarget)).toBe(modified);
+
+        const verified = yield* inFixture(reconcileRegisteredCodexMcp(config, secondCodexRelease), alternateRoot);
+        expect(verified).toMatchObject({state: 'current', hostRoot, name: 'team-memory', release: secondCodexRelease});
+        if (verified.state === 'current')
+          expect(yield* inFixture(verifyRegisteredCodexMcp(config, verified))).toBe(true);
+
+        yield* activate(firstCodexRelease);
+        const adapter = getAgentAdapter('codex-cli')!;
+        yield* inFixture(adapter.actions.repair(config, adapter, {apply: true}), alternateRoot);
+        expect(yield* fs.readFileString(target)).toBe(modified);
+        expect(yield* fs.readFileString(alternateTarget)).toBe(modified);
+        const oldRoot = path.join(alternateRoot, 'previous-desktop');
+        yield* fs.rename(hostRoot, oldRoot);
+        yield* fs.symlink(alternateRoot, hostRoot);
+        yield* activate(secondCodexRelease);
+        const redirected = yield* inFixture(reconcileActivatedCodexMcp(config, secondCodexRelease));
+        expect(redirected).toMatchObject({
+          configuration: 'deferred',
+          refresh: 'pending',
+          reason: expect.stringContaining(
+            'Set CODEX_HOME to the intended Codex home, then run `threadnote mcp-install codex --apply --name team-memory`',
+          ),
+        });
+        expect(yield* fs.readFileString(alternateTarget)).toBe(modified);
+        expect(yield* fs.readFileString(path.join(oldRoot, 'config.toml'))).toBe(modified);
+      }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect.skipIf(process.platform === 'win32')(
+    'requires explicit adoption of an unpinned legacy entry and preserves its user settings',
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const {activate, alternateRoot, alternateTarget, bin, config, hostRoot, inFixture, target} =
+          yield* codexConfigurationFixture;
+        yield* activate(secondCodexRelease);
+        yield* inFixture(runMcpInstall(config, 'codex', {apply: true, name: 'legacy-team'}));
+        const registry = (yield* readAgentIntegrationRegistry(config))!;
+        const previous = registry.hosts.codex!;
+        const unpinned = withAgentIntegrationHost(registry, 'codex', {
+          ...previous,
+          mcp: {...previous.mcp, hostRoot: undefined},
+        });
+        yield* writeAgentIntegrationRegistry(config, unpinned);
+        const direct = JSON.stringify(path.join(bin, 'threadnote'));
+        const broker = JSON.stringify(path.join(bin, 'threadnote-mcp-server'));
+        const dotted = 'mcp_servers."legacy-team"';
+        const ownerLine = `${dotted}.env.THREADNOTE_HOME = ${JSON.stringify(config.agentContextHome)} # profile\n`;
+        const legacy = EffectArray.join(
+          [
+            `${dotted}.command = ${direct} # keep legacy comment`,
+            `${dotted}.args = [ # keep array comment`,
+            "  'mcp-server', # keep argument comment",
+            ']',
+            `${dotted}.startup_timeout_sec = 19`,
+            EffectString.trimEnd(ownerLine),
+            `${dotted}.env.USER_CONFIG = 'keep'`,
+            `${dotted}.env.THREADNOTE_ACCOUNT = 'old-account'`,
+            `${dotted}.env.THREADNOTE_AGENT_ID = 'threadnote'`,
+            `${dotted}.env.THREADNOTE_USER = 'test-user'`,
+            `${dotted}.env.THREADNOTE_MCP_CLIENT = 'codex'`,
+            `${dotted}.env.THREADNOTE_MCP_SURFACE = 'codex-cli'`,
+            `${dotted}.env.THREADNOTE_MCP_TOOLSET = 'core'`,
+            '',
+          ],
+          '\n',
+        );
+        yield* fs.writeFileString(target, legacy);
+        yield* fs.writeFileString(alternateTarget, legacy);
+        const repair = yield* inFixture(
+          captureConsole(repairRegisteredMcpClients(config, unpinned, ['codex'], false)),
+          alternateRoot,
+        );
+        expect(repair.output).toContain('threadnote mcp-install codex --apply --name legacy-team');
+        expect(yield* fs.readFileString(target)).toBe(legacy);
+        expect(yield* fs.readFileString(alternateTarget)).toBe(legacy);
+
+        yield* inFixture(runMcpInstall(config, 'codex', {apply: true, name: 'legacy-team'}));
+        expect((yield* readAgentIntegrationRegistry(config))?.hosts.codex?.mcp.hostRoot).toBe(hostRoot);
+        const expected = Effect2.pipe(
+          legacy,
+          EffectString.replace(direct, broker),
+          EffectString.replace("'mcp-server',", ''),
+          EffectString.replace(
+            ownerLine,
+            `${ownerLine}${dotted}.env.${CODEX_MCP_RELEASE_ENV} = "${secondCodexRelease}"\n`,
+          ),
+        );
+        expect(yield* fs.readFileString(target)).toBe(EffectString.replace("'old-account'", '"local"')(expected));
+        expect(yield* fs.readFileString(alternateTarget)).toBe(legacy);
+        yield* fs.writeFileString(target, legacy);
+        const doctor = yield* inFixture(mcpConfigurationChecks(config), alternateRoot);
+        expect(doctor).toContainEqual({
+          detail: expect.stringContaining('uses the owned legacy direct server command'),
+          name: 'codex MCP',
+          status: 'warn',
+        });
+        expect((yield* inFixture(reconcileRegisteredCodexMcp(config, secondCodexRelease), alternateRoot)).state).toBe(
+          'saved',
+        );
+        expect(yield* fs.readFileString(target)).toBe(expected);
+      }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect.skipIf(process.platform === 'win32')(
+    'defers a generation changed during publication and lets repair converge',
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const {activate, config, inFixture, installRoot, target} = yield* codexConfigurationFixture;
+        const nextRelease = '6.4.1-dev.cccccccccccc';
+        yield* activate(nextRelease);
+        const activePath = path.join(installRoot, 'active-release.json');
+        const nextPointer = yield* fs.readFileString(activePath);
+        yield* activate(firstCodexRelease);
+        yield* inFixture(runMcpInstall(config, 'codex', {apply: true}));
+        yield* activate(secondCodexRelease);
+        const result = yield* inFixture(reconcileRegisteredCodexMcp(config, secondCodexRelease)).pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            rename: (from, to) =>
+              fs
+                .rename(from, to)
+                .pipe(Effect.tap(() => (to === target ? fs.writeFileString(activePath, nextPointer) : Effect.void))),
+          }),
+        );
+        expect(result).toMatchObject({state: 'deferred', reason: 'the active release changed during reconciliation'});
+        const repaired = yield* inFixture(reconcileRegisteredCodexMcp(config, nextRelease));
+        expect(repaired).toMatchObject({state: 'saved', release: nextRelease});
+        expect(yield* fs.readFileString(target)).toContain(`${CODEX_MCP_RELEASE_ENV} = "${nextRelease}"`);
+      }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect.skipIf(process.platform === 'win32')(
+    'defers disabled, external, cloud, and concurrently edited entries',
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const {activate, config, hostRoot, inFixture, target} = yield* codexConfigurationFixture;
+        yield* activate(firstCodexRelease);
+        yield* inFixture(runMcpInstall(config, 'codex', {apply: true}));
+        const registry = (yield* readAgentIntegrationRegistry(config))!;
+        const desktop = registry.hosts.codex!;
+        const original = yield* fs.readFileString(target);
+        yield* activate(secondCodexRelease);
+        const disabled = EffectString.replace(
+          '[mcp_servers.threadnote]\n',
+          '[mcp_servers.threadnote]\nenabled = false\n',
+        )(original);
+        yield* fs.writeFileString(target, disabled);
+        expect((yield* inFixture(reconcileRegisteredCodexMcp(config, secondCodexRelease))).state).toBe('deferred');
+        expect(yield* fs.readFileString(target)).toBe(disabled);
+        expect(yield* inFixture(reconcileActivatedCodexMcp(config, secondCodexRelease))).toMatchObject({
+          configuration: 'deferred',
+          refresh: 'pending',
+          reason: expect.stringContaining('Enable it in Codex before running repair'),
+        });
+
+        yield* fs.remove(target);
+        const formattedHome = formatShellCommand(hostRoot, []);
+        const expectedHome = formattedHome === shellQuote(hostRoot) ? formattedHome : 'the recorded Codex home';
+        const instruction = `Set CODEX_HOME to ${expectedHome}, then run \`threadnote mcp-install codex --apply --name threadnote\``;
+        const missing = yield* inFixture(mcpConfigurationChecks(config));
+        expect(missing).toContainEqual({
+          detail: expect.stringContaining(instruction),
+          name: 'codex MCP',
+          status: 'warn',
+        });
+        expect((yield* inFixture(reconcileRegisteredCodexMcp(config, secondCodexRelease))).state).toBe('deferred');
+        expect(yield* inFixture(reconcileActivatedCodexMcp(config, secondCodexRelease))).toMatchObject({
+          configuration: 'deferred',
+          refresh: 'pending',
+          reason: expect.stringContaining(instruction),
+        });
+        expect(yield* fs.exists(target)).toBe(false);
+
+        yield* fs.writeFileString(target, original);
+        for (const mcp of [
+          {...desktop.mcp, external: true},
+          {...desktop.mcp, artifactProfile: 'codex-cloud-personal' as const, transport: 'cli' as const, repair: false},
+        ]) {
+          yield* writeAgentIntegrationRegistry(config, withAgentIntegrationHost(registry, 'codex', {...desktop, mcp}));
+          expect((yield* inFixture(reconcileRegisteredCodexMcp(config, secondCodexRelease))).state).toBe('skipped');
+          expect(yield* fs.readFileString(target)).toBe(original);
+        }
+        yield* writeAgentIntegrationRegistry(config, registry);
+
+        const concurrent = `${original}# user wrote while reconciliation was staging\n`;
+        const result = yield* inFixture(reconcileRegisteredCodexMcp(config, secondCodexRelease)).pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            writeFileString: (file, content, options) =>
+              fs
+                .writeFileString(file, content, options)
+                .pipe(
+                  Effect.tap(() =>
+                    EffectString.includes('.threadnote-mcp-')(file)
+                      ? fs.writeFileString(target, concurrent)
+                      : Effect.void,
+                  ),
+                ),
+          }),
+        );
+        expect(result.state).toBe('deferred');
+        expect(yield* fs.readFileString(target)).toBe(concurrent);
+      }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect.skipIf(process.platform === 'win32')(
+    'requires the active release launcher bytes at activation and publication',
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const {activate, bin, config, inFixture, installRoot, target} = yield* codexConfigurationFixture;
+        yield* activate(firstCodexRelease);
+        const launcher = yield* inFixture(commandLauncherPath('mcp'));
+        const previousLauncher = yield* fs.readFileString(launcher);
+        yield* inFixture(runMcpInstall(config, 'codex', {apply: true}));
+        const previousConfig = yield* fs.readFileString(target);
+        yield* activate(secondCodexRelease);
+        const currentLauncher = yield* fs.readFileString(launcher);
+        const copy = path.join(bin, 'foreign-copy');
+        const writeLauncher = (contents: string) => fs.writeFileString(launcher, contents, {mode: 0o755});
+        const reconcile = inFixture(reconcileActivatedCodexMcp(config, secondCodexRelease));
+        const deferred = {
+          configuration: 'deferred',
+          refresh: 'pending',
+          reason: expect.stringContaining('The MCP launcher does not match the active Threadnote release'),
+        };
+        yield* writeLauncher('unmanaged launcher\n');
+        expect(yield* reconcile).toMatchObject(deferred);
+        expect(yield* fs.readFileString(launcher)).toBe('unmanaged launcher\n');
+        yield* writeLauncher(previousLauncher);
+        expect(yield* reconcile).toMatchObject(deferred);
+        expect(yield* fs.readFileString(launcher)).toBe(previousLauncher);
+        yield* fs.writeFileString(copy, currentLauncher, {mode: 0o755});
+        yield* fs.remove(launcher);
+        yield* fs.symlink(copy, launcher);
+        expect(yield* reconcile).toMatchObject(deferred);
+        expect(yield* fs.readLink(launcher)).toBe(copy);
+        expect(yield* fs.readFileString(target)).toBe(previousConfig);
+
+        yield* fs.remove(launcher);
+        yield* writeLauncher(currentLauncher);
+        expect(
+          yield* reconcile.pipe(
+            Effect.provideService(FileSystem.FileSystem, {
+              ...fs,
+              writeFileString: (file, contents, options) =>
+                fs
+                  .writeFileString(file, contents, options)
+                  .pipe(
+                    Effect.tap(() =>
+                      EffectString.includes('.threadnote-mcp-')(file) ? writeLauncher(previousLauncher) : Effect.void,
+                    ),
+                  ),
+            }),
+          ),
+        ).toMatchObject(deferred);
+        expect(yield* fs.readFileString(target)).toBe(previousConfig);
+        yield* writeLauncher(currentLauncher);
+        expect(yield* reconcile).toMatchObject({
+          configuration: 'saved',
+          refresh: 'pending',
+          release: secondCodexRelease,
+        });
+        const installAlias = path.join(bin, 'installation-alias');
+        yield* fs.symlink(installRoot, installAlias);
+        yield* inFixture(
+          Effect.gen(function* () {
+            const system = yield* SystemInfo;
+            const aliasRelease = path.join(installAlias, 'versions', secondCodexRelease);
+            yield* writeLauncher(yield* renderCommandShim(aliasRelease, 'mcp'));
+            const check = hasActiveMcpLauncher(path.join(installRoot, 'versions', secondCodexRelease)).pipe(
+              Effect.provideService(
+                SystemInfo,
+                SystemInfo.of({
+                  ...system,
+                  environment: () => ({...system.environment(), THREADNOTE_INSTALL_ROOT: installAlias}),
+                }),
+              ),
+            );
+            expect(yield* check).toBe(true);
+            yield* fs.remove(installAlias);
+            expect(yield* check).toBe(false);
+          }),
+        );
+      }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+});
+
 describe('MCP agent executable resolution', () => {
-  posixIt('does not remove or add semantically current Codex and Claude broker configurations', async () => {
+  posixIt('does not remove or add semantically current Claude broker configuration', async () => {
     const bin = await mkdtemp(join(tmpdir(), 'threadnote-managed-bin-'));
     const userHome = await mkdtemp(join(tmpdir(), 'threadnote-agent-home-'));
     temporaryDirectories.push(bin);
@@ -1098,37 +1602,32 @@ describe('MCP agent executable resolution', () => {
     process.env.THREADNOTE_BIN_DIR = bin;
     const broker = join(bin, 'threadnote-mcp-server');
 
-    for (const agent of ['codex', 'claude'] as const) {
+    {
+      const agent = 'claude';
       const managedEnvironment = {
         THREADNOTE_ACCOUNT: 'local',
         THREADNOTE_AGENT_ID: 'threadnote',
         THREADNOTE_HOME: testRuntime.agentContextHome,
         THREADNOTE_MCP_CLIENT: agent,
-        THREADNOTE_MCP_SURFACE: agent === 'codex' ? 'codex-cli' : 'claude-code',
+        THREADNOTE_MCP_SURFACE: 'claude-code',
         THREADNOTE_MCP_TOOLSET: 'core',
         THREADNOTE_USER: 'test-user',
       };
 
       const callsPath = join(tmpdir(), `threadnote-${agent}-current-calls-${process.pid}-${Date.now()}`);
-      const output =
-        agent === 'codex'
-          ? JSON.stringify({
-              enabled: true,
-              transport: {args: [], command: broker, env: managedEnvironment, type: 'stdio'},
-            })
-          : EffectArray.join(
-              [
-                'threadnote:',
-                '  Scope: User config (available in all your projects)',
-                '  Status: ✘ Failed to connect',
-                '  Type: stdio',
-                `  Command: ${broker}`,
-                '  Args:',
-                '  Environment:',
-                ...EffectArray.map(EffectRecord.toEntries(managedEnvironment), ([key, value]) => `    ${key}=${value}`),
-              ],
-              '\n',
-            );
+      const output = EffectArray.join(
+        [
+          'threadnote:',
+          '  Scope: User config (available in all your projects)',
+          '  Status: ✘ Failed to connect',
+          '  Type: stdio',
+          `  Command: ${broker}`,
+          '  Args:',
+          '  Environment:',
+          ...EffectArray.map(EffectRecord.toEntries(managedEnvironment), ([key, value]) => `    ${key}=${value}`),
+        ],
+        '\n',
+      );
       const launcher = await agentLauncher(
         agent,
         `if [ "$1" = "--version" ]; then printf '%s\\n' '${agent} 1'; exit 0; fi\nprintf '%s\\n' "$*" >> ${shellLiteral(callsPath)}\nprintf '%s\\n' ${shellLiteral(output)}`,
@@ -1148,13 +1647,13 @@ describe('MCP agent executable resolution', () => {
         mcp: {name: 'threadnote', repair: true, toolset: 'core'},
         status: 'current',
       });
-      const instructionPath = join(userHome, agent === 'codex' ? '.codex/AGENTS.md' : '.claude/CLAUDE.md');
+      const instructionPath = join(userHome, '.claude/CLAUDE.md');
       expect(await readFile(instructionPath, 'utf8'), agent).toContain('Route non-trivial work by situation');
       await rm(callsPath, {force: true});
     }
   });
 
-  posixIt('migrates legacy direct Codex and Claude server configurations to the broker launcher', async () => {
+  posixIt('migrates a legacy direct Claude server configuration to the broker launcher', async () => {
     const bin = await mkdtemp(join(tmpdir(), 'threadnote-managed-bin-'));
     const userHome = await mkdtemp(join(tmpdir(), 'threadnote-agent-home-'));
     temporaryDirectories.push(bin);
@@ -1173,27 +1672,22 @@ describe('MCP agent executable resolution', () => {
       THREADNOTE_USER: 'test-user',
     };
 
-    for (const agent of ['codex', 'claude'] as const) {
+    {
+      const agent = 'claude';
       const callsPath = join(tmpdir(), `threadnote-${agent}-legacy-calls-${process.pid}-${Date.now()}`);
-      const output =
-        agent === 'codex'
-          ? JSON.stringify({
-              enabled: true,
-              transport: {args: ['mcp-server'], command: legacyCommand, env: managedEnvironment, type: 'stdio'},
-            })
-          : EffectArray.join(
-              [
-                'threadnote:',
-                '  Scope: User config (available in all your projects)',
-                '  Status: ✘ Failed to connect',
-                '  Type: stdio',
-                `  Command: ${legacyCommand}`,
-                '  Args: mcp-server',
-                '  Environment:',
-                ...EffectArray.map(EffectRecord.toEntries(managedEnvironment), ([key, value]) => `    ${key}=${value}`),
-              ],
-              '\n',
-            );
+      const output = EffectArray.join(
+        [
+          'threadnote:',
+          '  Scope: User config (available in all your projects)',
+          '  Status: ✘ Failed to connect',
+          '  Type: stdio',
+          `  Command: ${legacyCommand}`,
+          '  Args: mcp-server',
+          '  Environment:',
+          ...EffectArray.map(EffectRecord.toEntries(managedEnvironment), ([key, value]) => `    ${key}=${value}`),
+        ],
+        '\n',
+      );
       const launcher = await agentLauncher(
         agent,
         `if [ "$1" = "--version" ]; then printf '%s\\n' '${agent} 1'; exit 0; fi\nprintf '%s\\n' "$*" >> ${shellLiteral(callsPath)}\ncase "$*" in\n  "mcp get threadnote"*) printf '%s\\n' ${shellLiteral(output)} ;;\nesac`,
@@ -1205,9 +1699,7 @@ describe('MCP agent executable resolution', () => {
       );
 
       const calls = await readFile(callsPath, 'utf8');
-      expect(calls, agent).toContain(
-        agent === 'claude' ? 'mcp remove --scope user threadnote' : 'mcp remove threadnote',
-      );
+      expect(calls, agent).toContain('mcp remove --scope user threadnote');
       expect(calls, agent).toContain('mcp add');
       expect(calls, agent).toContain(broker);
       await rm(callsPath, {force: true});
@@ -1292,12 +1784,16 @@ describe('MCP agent executable resolution', () => {
     const userHome = await mkdtemp(join(tmpdir(), 'threadnote-agent-home-'));
     temporaryDirectories.push(userHome);
     const system = await runEffect(SystemInfo);
-    const testSystem = SystemInfo.of({...system, homeDirectory: userHome});
+    const testSystem = SystemInfo.of({
+      ...system,
+      environment: () => ({...system.environment(), CODEX_HOME: join(userHome, '.codex')}),
+      homeDirectory: userHome,
+    });
     const testRuntime = runtime(join(userHome, '.threadnote'));
     const broken = await codexLauncher("printf '%s\\n' 'missing native binary' >&2\nexit 1");
     const callsPath = join(tmpdir(), `threadnote-codex-calls-${process.pid}-${Date.now()}`);
     const healthy = await codexLauncher(
-      `if [ "$1" = "--version" ]; then printf '%s\\n' 'codex-cli 1.0.0'; exit 0; fi\nprintf '%s\\n' "$*" >> "${callsPath}"`,
+      `printf '%s\\n' "$*" >> "${callsPath}"\nif [ "$1" = "--version" ]; then printf '%s\\n' 'codex-cli 1.0.0'; exit 0; fi\nexit 1`,
     );
     process.env.PATH = EffectArray.join([join(broken, '..'), join(healthy, '..')], delimiter);
 
@@ -1306,8 +1802,11 @@ describe('MCP agent executable resolution', () => {
     );
 
     const calls = await readFile(callsPath, 'utf8');
-    expect(calls).toContain('mcp remove threadnote');
-    expect(calls).toContain(`mcp add --env THREADNOTE_HOME=${testRuntime.agentContextHome}`);
+    expect(calls).toContain('--version');
+    expect(calls).not.toContain('mcp remove');
+    expect(await readFile(join(userHome, '.codex/config.toml'), 'utf8')).toContain(
+      `THREADNOTE_HOME = ${JSON.stringify(testRuntime.agentContextHome)}`,
+    );
     await rm(callsPath, {force: true});
   });
 

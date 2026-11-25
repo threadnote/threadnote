@@ -6,7 +6,7 @@ import {ScriptSystemInfoLayer} from './effect/system-layer.js';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import * as BunServices from '@effect/platform-bun/BunServices';
-import {Cause, Console, DateTime, Effect, Exit, FileSystem, Layer, Option, Path} from 'effect';
+import {Cause, Console, DateTime, Effect, Exit, FileSystem, Layer, Option, Path, Schema} from 'effect';
 import {
   commandLauncherPath,
   installCommandShim,
@@ -18,8 +18,14 @@ import {
 } from '@threadnote/threadnote/command-shim';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {captureConsole} from '@threadnote/threadnote/effect/console';
+import {reconcileActivatedCodexMcp, type CodexMcpActivationStatus} from '@threadnote/threadnote/mcp/index';
 import {sha256FileHex, sha256Hex} from '@threadnote/platform/digest';
+import {expandPath} from '@threadnote/platform/paths';
 import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
+import {codeGraphDatabasePaths} from '@threadnote/graph/maintenance';
+import {assertCodeGraphRuntimeSchemaCompatible} from '@threadnote/graph/store/schema/metadata';
+import {useReadOnlyDatabase} from '@threadnote/graph/store/session';
+import {CodeGraphRuntimeReconnectRequiredError} from '@threadnote/graph/types';
 import {
   activateStandaloneRelease,
   activeInstalledVersion,
@@ -83,6 +89,7 @@ export interface LocalStandaloneInstallOptions {
 
 export interface LocalStandaloneInstallResult extends DevelopmentRuntimeEvidence {
   readonly active: true;
+  readonly codexMcpRefresh?: Exclude<CodexMcpActivationStatus, {readonly configuration: 'skipped'}>;
   readonly cleanupComplete: boolean;
   readonly cleanupIssues: readonly LocalStandaloneCleanupIssue[];
   readonly doctorVerified: true;
@@ -115,6 +122,7 @@ export interface LocalStandaloneActivationInput {
   readonly sourceCheckoutId: string;
   readonly stagedRoot: Option.Option<string>;
   readonly terminateSuperseded: boolean;
+  readonly threadnoteHome: string;
   readonly version: string;
 }
 
@@ -239,6 +247,7 @@ export const installLocalStandalone = Effect.fn('developmentInstall.run')(functi
         }),
       );
   yield* verifyCleanSourceState(sourceRoot, commit);
+  const threadnoteHome = yield* expandPath(system.environment().THREADNOTE_HOME ?? '~/.threadnote');
   const activation = activateLocalStandaloneRelease({
     canonicalInstallRoot: roots.installRoot,
     canonicalVersionsRoot: roots.versionsRoot,
@@ -250,6 +259,7 @@ export const installLocalStandalone = Effect.fn('developmentInstall.run')(functi
     sourceCheckoutId,
     stagedRoot,
     terminateSuperseded: options.terminateSuperseded,
+    threadnoteHome,
     version,
   });
   const result = options.json ? (yield* captureConsole(activation)).value : yield* activation;
@@ -272,7 +282,7 @@ export const installLocalStandalone = Effect.fn('developmentInstall.run')(functi
     );
     if (result.preservedMcpSessionProcesses > 0) {
       yield* Console.log(
-        `${result.preservedMcpSessionProcesses} live MCP session process(es) remain safely pinned and will promote behind their stable transport.`,
+        `${result.preservedMcpSessionProcesses} live session process(es) remain pinned to their prior release. MCP transports promote behind their stable transport; PR watch collectors keep their release until the watch ends.`,
       );
     }
     const processStateUnknown = EffectArray.some(
@@ -535,6 +545,35 @@ const writeDevelopmentRuntimeOwner = Effect.fn('developmentInstall.writeRuntimeO
   return nextOwner;
 });
 
+const requireCompatibleGraphStorage = Effect.fn('developmentInstall.requireCompatibleGraphStorage')(function* (
+  threadnoteHome: string,
+) {
+  const databases = yield* codeGraphDatabasePaths(threadnoteHome).pipe(Effect.orElseSucceed(() => []));
+  yield* Effect.forEach(
+    databases,
+    database =>
+      // Doctor retains responsibility for missing, unreadable, or otherwise unhealthy stores.
+      useReadOnlyDatabase(database, assertCodeGraphRuntimeSchemaCompatible()).pipe(
+        Effect.catchCauseIf(
+          cause => !Cause.hasInterrupts(cause),
+          cause => {
+            const failure = Option.getOrUndefined(Cause.findErrorOption(cause));
+            return Schema.is(CodeGraphRuntimeReconnectRequiredError)(failure)
+              ? Effect.fail(
+                  ScriptError.make({
+                    cause: failure,
+                    message:
+                      'The code graph requires a newer Threadnote runtime. Use a development build that supports the stored schema.',
+                  }),
+                )
+              : Effect.void;
+          },
+        ),
+      ),
+    {discard: true},
+  );
+});
+
 /**
  * The complete managed-release mutation is one installation-lock critical
  * section. Activation is the commit point: a later health-repair failure keeps
@@ -593,6 +632,7 @@ export const activateLocalStandaloneRelease = Effect.fn('developmentInstall.acti
         ),
       );
       yield* requireEvidenceVersion(releaseEvidence, input.version);
+      yield* requireCompatibleGraphStorage(input.threadnoteHome);
       const doctor = yield* runCommandEffect(executable, ['doctor', '--dry-run'], {
         env: {...system.environment(), THREADNOTE_INSTALL_ROOT: installRoot},
         maxOutputBytes: 2 * 1024 * 1024,
@@ -720,8 +760,9 @@ export const activateLocalStandaloneRelease = Effect.fn('developmentInstall.acti
         [...live.value.verified, ...live.value.unverified],
         lease => lease.version !== input.version,
       );
-      // The benchmark/runtime preflight permits only the stable transport that
-      // explicitly opted into session preservation. Its versioned MCP runtime
+      // The benchmark/runtime preflight permits only leases that explicitly
+      // opted into session preservation: the stable transport and PR watch
+      // collectors. The transport's versioned MCP runtime
       // and workers remain terminate-policy leases, so report them as pending
       // retirement even before an explicit cleanup is requested.
       const preservedProcessIds = explicitlyPreservedStandaloneProcessIds(superseded);
@@ -765,13 +806,15 @@ export const activateLocalStandaloneRelease = Effect.fn('developmentInstall.acti
       terminatedSupersededProcesses,
     } satisfies LocalStandaloneInstallResult;
   });
-  return yield* withStandaloneInstallationLock(criticalSection).pipe(
+  const installed = yield* withStandaloneInstallationLock(criticalSection).pipe(
     Effect.ensuring(
       Option.isSome(input.stagedRoot)
         ? fs.remove(input.stagedRoot.value, {force: true, recursive: true}).pipe(Effect.ignore)
         : Effect.void,
     ),
   );
+  const codexMcpRefresh = yield* reconcileActivatedCodexMcp({agentContextHome: input.threadnoteHome}, input.version);
+  return codexMcpRefresh.configuration === 'skipped' ? installed : {...installed, codexMcpRefresh};
 });
 
 /** Refresh stale, enabled workflow targets after activation has crossed its rollback point. */

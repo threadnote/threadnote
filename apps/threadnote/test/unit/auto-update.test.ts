@@ -7,6 +7,8 @@ import {TestClock} from 'effect/testing';
 import {describe, expect, it, vi} from 'vitest';
 import {DevSkillsUpdatePending} from '../../src/release/dev_skills_update.js';
 import {runUpdate} from '@threadnote/threadnote/release/index';
+import {captureConsole} from '@threadnote/threadnote/effect/console';
+import {sendSystemNotification} from '../../src/system_notification.js';
 import {
   autoUpdateWorkerTelemetryFields,
   initializeAutoUpdatePolicy,
@@ -15,6 +17,7 @@ import {
   nextAutoUpdateAttempt,
   parseAutoUpdateState,
   readAutoUpdateStatus,
+  runAutoUpdateStatusCommand,
   runAutoUpdateWorker,
   setAutoUpdatePolicy,
   stateAfterFailedAutoUpdateSpawn,
@@ -60,7 +63,9 @@ vi.mock('@threadnote/workspace/runtime-version', async importOriginal => ({
   ...(await importOriginal<typeof import('@threadnote/workspace/runtime-version')>()),
   isStandaloneThreadnoteBuild: () => true,
 }));
-vi.mock('../../src/system_notification.js', () => ({sendSystemNotification: () => Effect.succeed('unavailable')}));
+vi.mock('../../src/system_notification.js', () => ({
+  sendSystemNotification: vi.fn(() => Effect.succeed('unavailable')),
+}));
 
 effectIt.effect(
   'records workflow attention after activation and clears it only after a successful same-version retry',
@@ -129,6 +134,19 @@ effectIt.effect(
       expect(
         (yield* readAutoUpdateStatus().pipe(Effect.provideService(SystemInfo, system))).lastSuccess?.repairRequired,
       ).toBe(true);
+      vi.mocked(runUpdate).mockReturnValue(activate('5.4.1'));
+      expect(yield* runAutoUpdateWorker(config).pipe(Effect.provideService(SystemInfo, system))).toEqual({
+        result: 'updated',
+        repairRequired: false,
+      });
+      expect(sendSystemNotification).toHaveBeenLastCalledWith({
+        title: 'Threadnote updated to v5.4.1',
+        body: 'Version 5.4.1 is active. Open Codex sessions may need a refresh or restart.',
+      });
+      const finalStatus = yield* captureConsole(runAutoUpdateStatusCommand(false)).pipe(
+        Effect.provideService(SystemInfo, system),
+      );
+      expect(finalStatus.output).toContain('Open Codex sessions may need a refresh or restart.');
     }).pipe(provideTestLayer(WorkerBoundaryLayer), TestClock.withLive),
 );
 

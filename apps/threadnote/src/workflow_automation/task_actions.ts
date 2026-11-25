@@ -56,6 +56,7 @@ import {
   FileSystem,
   Path,
   Predicate,
+  Schedule,
   Schema,
 } from 'effect';
 import * as EffectRecord from 'effect/Record';
@@ -75,7 +76,7 @@ import {nativeWorkflowError} from './memory.js';
 import {readNativeWorkflowState} from './store.js';
 import {nativeRunNotFoundMessage, readNativeTaskView, verifyNativeTaskReopen} from './task.js';
 import {inspectOldBindingOwners} from './task_binding_transition.js';
-import {NativeTaskPrWatchFieldsSchema} from './task_pr_watch.js';
+import {NativeTaskPrWatchFieldsSchema, validateNativeTaskWatchMaintenanceRoute} from './task_pr_watch.js';
 import {
   cycleRequest,
   currentNativeTaskRef,
@@ -346,6 +347,7 @@ const requestSchema = Schema.Union([
     callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
     validationRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
     deliveryRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(8192))),
+    maintenanceValidationRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
     ...NativeTaskPrWatchFieldsSchema.fields,
     snapshotRef: Schema.optionalKey(boundedRef),
     candidateWatchRef: Schema.optionalKey(boundedRef),
@@ -436,7 +438,7 @@ const nativeTaskStartShapeMessage = (input: unknown) => {
   const resume = !shared && EffectArray.contains(fields, 'taskRef');
   return `${label} ${resume ? 'resume' : 'start'} requires ${EffectArray.join(missing, ', ')}.${resume ? ' A resume repeats the original featureName and intent with the taskRef.' : ''}`;
 };
-export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
+const runNativeTaskStartOnce = (config: RuntimeConfig, input: unknown) =>
   Effect.gen(function* () {
     const request = yield* Schema.decodeUnknownEffect(NativeTaskStartRequestSchema, {onExcessProperty: 'error'})(
       input,
@@ -689,6 +691,24 @@ const standardRefusedRecoveries = new Set<string>([
   'requalify-invalid-tail',
 ]);
 
+/** Admission waits no time while an account is held, so a lock another process releases within seconds is transient. */
+const nativeTaskStartAdmissionRetries = 3;
+const nativeTaskStartAdmissionBackoffMilliseconds = 250;
+
+/**
+ * Starting is idempotent under the same intent: the run ID derives from the project and feature, and a repeated start
+ * resumes any pending compact save. A transient admission-busy failure therefore retries the whole start a few times.
+ * memory-busy and every other failure still surface at once.
+ */
+export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
+  runNativeTaskStartOnce(config, input).pipe(
+    Effect.retry({
+      schedule: Schedule.exponential(nativeTaskStartAdmissionBackoffMilliseconds),
+      times: nativeTaskStartAdmissionRetries,
+      while: error => nativeWorkflowError(error).code === 'admission-busy',
+    }),
+  );
+
 /** Typed task operations over the existing cycle state; references never authorize a mutation by themselves. */
 export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
   runNativeTaskActionCore(config, input).pipe(Effect.catch(error => withTaskNext(config, input, error)));
@@ -770,6 +790,7 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
         value => value !== undefined,
       );
       const standalone = request.prUrl !== undefined || request.watchRef !== undefined || request.runId === undefined;
+      yield* validateNativeTaskWatchMaintenanceRoute(request, standalone);
       if (standalone && workflowProof)
         return yield* fail(
           'invalid-request',

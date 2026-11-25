@@ -32,6 +32,7 @@ import {
   type LocalBinsWorkerDrain,
 } from '../helpers/local-bins-worker-drain.js';
 import {observeStdioClientTransportClose} from '../helpers/stdio-client-transport-close.js';
+import {installedRecallDiagnostic} from '../helpers/installed-recall-diagnostic.js';
 import {afterAll, beforeAll, describe, expect, it, vi} from 'vitest';
 import * as Schema from 'effect/Schema';
 import {windowsCommandLauncherInvocation} from '@threadnote/testing/windows-command-launcher';
@@ -162,49 +163,70 @@ const RecallCompletionDiagnosticSchema = withRest(
   }),
 );
 
-// Failure-only, bounded read of already emitted diagnostics. No invocation,
-// path, query, content, arbitrary error text or unknown field is rendered.
-async function recallFailureStages(component: 'cli' | 'mcp' = 'cli', targetHome = home): Promise<string> {
+async function readRecallFailureEntries(targetHome: string): Promise<readonly unknown[] | undefined> {
   try {
     const handle = await open(join(targetHome, 'logs', 'threadnote.log'), 'r');
     try {
       const size = (await handle.stat()).size;
       const bytes = new Uint8Array(Math.min(64 * 1024, size));
       const read = await handle.read(bytes, 0, bytes.length, Math.max(0, size - bytes.length));
-      let latest:
-        | {outcome: string; phaseTimings: readonly {phase: string; outcome: string; durationMilliseconds: number}[]}
-        | undefined;
-      for (const line of EffectString.split('\n')(new TextDecoder().decode(bytes.subarray(0, read.bytesRead))).slice(
-        -64,
-      )) {
-        let entry: unknown;
+      const lines = EffectArray.takeRight(
+        EffectString.split('\n')(new TextDecoder().decode(bytes.subarray(0, read.bytesRead))),
+        64,
+      );
+      return EffectArray.flatMap(lines, line => {
         try {
-          entry = JSON.parse(line);
+          return [JSON.parse(line)];
         } catch {
-          continue;
+          return [];
         }
-        if (!Schema.is(RecallCompletionDiagnosticSchema)(entry)) continue;
-        if (entry.component !== component || entry.operation !== (component === 'cli' ? 'recall' : 'recall_context'))
-          continue;
-        latest = {
-          outcome: entry.outcome,
-          phaseTimings: EffectArray.map(
-            EffectArray.filter(entry.phaseTimings ?? [], Schema.is(RecallPhaseDiagnosticSchema)).slice(0, 32),
-            timing => ({
-              phase: timing.phase,
-              outcome: timing.outcome,
-              durationMilliseconds: timing.durationMilliseconds,
-            }),
-          ),
-        };
-      }
-      return JSON.stringify(latest ?? {diagnostics: 'not-present'});
+      });
     } finally {
       await handle.close();
     }
   } catch {
-    return JSON.stringify({diagnostics: 'unavailable'});
+    return undefined;
   }
+}
+
+// Failure-only, bounded read of already emitted diagnostics. No invocation,
+// path, query, content, arbitrary error text or unknown field is rendered.
+async function recallFailureStages(component: 'cli' | 'mcp' = 'cli', targetHome = home): Promise<string> {
+  const entries = await readRecallFailureEntries(targetHome);
+  if (entries === undefined) return JSON.stringify({diagnostics: 'unavailable'});
+  let latest:
+    | {outcome: string; phaseTimings: readonly {phase: string; outcome: string; durationMilliseconds: number}[]}
+    | undefined;
+  for (const entry of entries) {
+    if (!Schema.is(RecallCompletionDiagnosticSchema)(entry)) continue;
+    if (entry.component !== component || entry.operation !== (component === 'cli' ? 'recall' : 'recall_context'))
+      continue;
+    latest = {
+      outcome: entry.outcome,
+      phaseTimings: EffectArray.map(
+        EffectArray.take(EffectArray.filter(entry.phaseTimings ?? [], Schema.is(RecallPhaseDiagnosticSchema)), 32),
+        timing => ({
+          phase: timing.phase,
+          outcome: timing.outcome,
+          durationMilliseconds: timing.durationMilliseconds,
+        }),
+      ),
+    };
+  }
+  return JSON.stringify(latest ?? {diagnostics: 'not-present'});
+}
+
+async function installedMcpRecallFailureStages(
+  processId: number | null,
+  completedBeforeInvocationId: string | undefined,
+): Promise<string> {
+  if (processId === null || completedBeforeInvocationId === undefined)
+    return JSON.stringify({diagnostics: 'unavailable'});
+  const entries = await readRecallFailureEntries(home);
+  if (entries === undefined) return JSON.stringify({diagnostics: 'unavailable'});
+  return JSON.stringify(
+    installedRecallDiagnostic(entries, processId, completedBeforeInvocationId) ?? {diagnostics: 'unavailable'},
+  );
 }
 
 const root = process.cwd();
@@ -1473,6 +1495,7 @@ describe('built self-contained distribution', () => {
     let operationFailure: unknown;
     try {
       await client.connect(transport);
+      const mcpProcessId = transport.pid;
       const names = EffectArray.map((await client.listTools()).tools, tool => tool.name);
       expect(names).toEqual(
         expect.arrayContaining([
@@ -1496,6 +1519,7 @@ describe('built self-contained distribution', () => {
       });
       expect(invalidRecall.isError).toBe(true);
       let productionLog = '';
+      let invalidRecallCompletion: {readonly invocationId: string} | undefined;
       await expect
         .poll(
           async () => {
@@ -1504,6 +1528,19 @@ describe('built self-contained distribution', () => {
               parseProductionLog(productionLog),
               entry => entry.component === 'mcp',
             );
+            if (mcpProcessId !== null) {
+              invalidRecallCompletion = EffectOption.getOrUndefined(
+                EffectArray.findFirst(
+                  EffectArray.reverse(mcpLogEntries),
+                  entry =>
+                    entry.errorType === 'McpToolError' &&
+                    entry.event === 'invocation.finished' &&
+                    entry.operation === 'recall_context' &&
+                    entry.outcome === 'failure' &&
+                    entry.processId === mcpProcessId,
+                ),
+              );
+            }
             return {
               health: EffectArray.some(
                 mcpLogEntries,
@@ -1529,9 +1566,12 @@ describe('built self-contained distribution', () => {
         arguments: {query: 'MCP-OBSIDIAN-881'},
         name: 'recall_context',
       });
-      expect(requested.isError, requested.isError === true ? await recallFailureStages('mcp') : undefined).not.toBe(
-        true,
-      );
+      expect(
+        requested.isError,
+        requested.isError === true
+          ? await installedMcpRecallFailureStages(mcpProcessId, invalidRecallCompletion?.invocationId)
+          : undefined,
+      ).not.toBe(true);
       expect(JSON.stringify(requested.content)).not.toContain('Auto-synced sources:');
       await expectAutomaticSourceSynchronizationOutcome(manifestPath, requestedAt, JSON.stringify(requested));
       expect(await runCli(['source', 'sync', sourceId, '--apply'])).toMatch(
@@ -2158,6 +2198,7 @@ function parseProductionLog(content: string): ReadonlyArray<{
   readonly invocationId: string;
   readonly operation: string;
   readonly outcome?: string;
+  readonly processId: number;
 }> {
   return EffectArray.map(
     EffectArray.filter(Effect.pipe(content, EffectString.trim, EffectString.split('\n')), Boolean),

@@ -106,6 +106,8 @@ export function recallReadPhaseClassification(warnings: readonly RecallOperation
   return reason === undefined ? {outcome} : {outcome, errorType: `lexical_read_failed.${reason}`};
 }
 
+const LEXICAL_MAINTENANCE_UNCONFIRMED = 'Background maintenance enqueue was not confirmed.';
+
 export function recallReadStateWarnings(
   state: import('./index.js').RecallReadyReadState | undefined,
 ): readonly RecallOperationalWarning[] {
@@ -117,7 +119,7 @@ export function recallReadStateWarnings(
       remediation:
         state.maintenance === 'queued'
           ? 'Lexical maintenance is queued in the background.'
-          : 'Background maintenance enqueue was not confirmed.',
+          : LEXICAL_MAINTENANCE_UNCONFIRMED,
     },
     ...(state.maintenance === 'unavailable'
       ? [
@@ -135,8 +137,17 @@ export function mergeRecallOperationalWarnings(
   ...warningSets: readonly (readonly RecallOperationalWarning[])[]
 ): readonly RecallOperationalWarning[] {
   const byCode = new Map<RecallOperationalWarning['code'], RecallOperationalWarning>();
+  let maintenanceUnconfirmed = false;
   for (const warning of warningSets.flat()) {
+    // A capped merge can retain the unconfirmed stale warning without the separate maintenance warning.
+    maintenanceUnconfirmed ||=
+      warning.code === 'lexical_maintenance_unavailable' ||
+      (warning.code === 'lexical_index_stale' && warning.remediation === LEXICAL_MAINTENANCE_UNCONFIRMED);
     if (!byCode.has(warning.code)) byCode.set(warning.code, warning);
+  }
+  const stale = byCode.get('lexical_index_stale');
+  if (stale && maintenanceUnconfirmed) {
+    byCode.set(stale.code, {...stale, remediation: LEXICAL_MAINTENANCE_UNCONFIRMED});
   }
   return [...byCode.values()].slice(0, RECALL_OPERATIONAL_WARNING_LIMIT);
 }

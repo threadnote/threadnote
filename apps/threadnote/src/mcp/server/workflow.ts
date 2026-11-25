@@ -1,7 +1,7 @@
 import {runNativeTaskAuthoring} from '../../workflow_automation/task_authoring.js';
 import {Effect, Schema, Struct} from 'effect';
 import {McpInput} from '../../effect/ai/mcp.js';
-import {readNativeTaskView} from '../../workflow_automation/task.js';
+import {readNativeTaskNoticeView, readNativeTaskView} from '../../workflow_automation/task.js';
 import {
   NativeTaskPrDeliveryFieldsSchema,
   NativeTaskSupplementalAttachFieldsSchema,
@@ -194,19 +194,29 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     'workflow_task_view',
     {
       annotations: {readOnlyHint: true, destructiveHint: false},
-      description: 'Read a task summary or packet (detail=packet).',
+      description: 'Read a task or recover an exact PR watch notice.',
       inputSchema: {
         runId: McpInput.requiredString(),
         callerCwd: McpInput.requiredString('Absolute path'),
         role: McpInput.string('Role'),
         cursor: McpInput.string('Cursor'),
-        phaseId: McpInput.string('Listed historical phase ID for its PR watch'),
+        phaseId: McpInput.string('Watch phase'),
+        noticeRoute: McpInput.string('Exact notice Route JSON'),
         detail: Schema.optionalKey(Schema.Literals(['summary', 'packet'])),
         outputKey: McpInput.string('Listed closeout body key; detail=packet'),
       },
     },
-    Effect.fn('mcp_server.workflowTaskView')(function* ({runId, callerCwd, role, cursor, phaseId, detail, outputKey}) {
-      const result = yield* readNativeTaskView(config, {
+    Effect.fn('mcp_server.workflowTaskView')(function* ({
+      runId,
+      callerCwd,
+      role,
+      cursor,
+      phaseId,
+      noticeRoute,
+      detail,
+      outputKey,
+    }) {
+      const input = {
         runId,
         callerCwd,
         ...(role === undefined ? {} : {role}),
@@ -214,7 +224,12 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
         ...(phaseId === undefined ? {} : {phaseId}),
         ...(detail === undefined ? {} : {detail}),
         ...(outputKey === undefined ? {} : {outputKey}),
-      });
+      };
+      if (noticeRoute !== undefined) {
+        const recovered = yield* readNativeTaskNoticeView(config, {...input, noticeRoute});
+        return {content: [{type: 'text' as const, text: JSON.stringify(recovered)}], structuredContent: recovered};
+      }
+      const result = yield* readNativeTaskView(config, input);
       const next = fillNativeNext(nativeNextForTaskAction(result.next.action, runId, callerCwd, result.delivery), {
         taskRef: result.taskRef,
         snapshotRef: result.phase?.snapshot?.snapshotRef,
@@ -584,7 +599,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Monitor standalone or canonical/candidate/supplemental PR watches with distinct proof. Relay noticeRefs only; persist dispositions before ACK with current refs.',
+        'PR watches. Relay noticeRefs only. Persist dispositions before ACK. Retarget recovery may require a separate commit-delivered maintenance validation ref.',
       inputSchema: {
         runId: McpInput.string('With prUrl or watchRef, runId is ignored and the watch is monitor-only.'),
         prUrl: McpInput.string(),
@@ -592,6 +607,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
         callerCwd: McpInput.requiredString(),
         validationRef: McpInput.string(),
         deliveryRef: McpInput.string('PR delivery ref; provisional inspect/stop may omit'),
+        maintenanceValidationRef: McpInput.string(),
         ...Struct.omit(NativeTaskPrWatchFieldsSchema.fields, ['noticeRef']),
         noticeRef: McpInput.string(),
         snapshotRef: McpInput.string('Candidate snapshot; diagnostics only'),

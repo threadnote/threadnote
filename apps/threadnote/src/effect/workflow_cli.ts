@@ -67,6 +67,7 @@ export function makeNativeTaskViewCommand<E, R>(
     readonly role?: string;
     readonly cursor?: string;
     readonly phaseId?: string;
+    readonly noticeRoute?: string;
     readonly detail?: 'summary' | 'packet';
     readonly outputKey?: string;
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
@@ -78,7 +79,11 @@ export function makeNativeTaskViewCommand<E, R>(
       callerCwd: requiredString('caller-cwd', 'Absolute checkout path for this task context'),
       role: optionalChoice('role', ['implementation', 'review', 'delivery'], 'Optional task role'),
       cursor: optionalString('cursor', 'Opaque continuation returned by the previous task-view page'),
-      phaseId: optionalString('phase-id', 'Select an active historical PR watch from task-view history'),
+      phaseId: optionalString('phase-id', 'Historical watch phase or known canonical notice phase'),
+      noticeRoute: optionalString(
+        'notice-route',
+        'Full Route JSON from the arrived canonical notice; requires --phase-id',
+      ),
       detail: optionalChoice(
         'detail',
         ['summary', 'packet'],
@@ -87,7 +92,9 @@ export function makeNativeTaskViewCommand<E, R>(
       outputKey: optionalString('output-key', 'Listed verified closeout output key; requires detail=packet'),
     },
     handler,
-  ).pipe(Command.withDescription('Read the next task or select a discovered active historical PR watch'));
+  ).pipe(
+    Command.withDescription('Read the next task, select a historical PR watch, or recover an arrived canonical notice'),
+  );
 }
 
 export function makeNativeTaskPrDeliveryCommand<E, R>(
@@ -140,6 +147,7 @@ export function makeNativeTaskPrWatchCommand<E, R>(
     readonly callerCwd: string;
     readonly validationRef?: string;
     readonly deliveryRef?: string;
+    readonly maintenanceValidationRef?: string;
     readonly snapshotRef?: string;
     readonly candidateWatchRef?: string;
     readonly supplementalRef?: string;
@@ -190,6 +198,10 @@ export function makeNativeTaskPrWatchCommand<E, R>(
       callerCwd: requiredString('caller-cwd', 'Bound checkout path'),
       validationRef: optionalString('validation-ref', 'Current opaque validation reference'),
       deliveryRef: optionalString('delivery-ref', 'Opaque open PR delivery reference'),
+      maintenanceValidationRef: optionalString(
+        'maintenance-validation-ref',
+        'Validation reference from a separate commit-delivered maintenance run for workflow-bound complete',
+      ),
       snapshotRef: optionalString('snapshot-ref', 'Candidate start immutable snapshot reference; diagnostics only'),
       candidateWatchRef: optionalString('candidate-watch-ref', 'Candidate continuation reference'),
       supplementalRef: optionalString('supplemental-ref', 'Completed-local publication reference'),

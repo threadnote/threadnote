@@ -1,0 +1,89 @@
+{
+  "status": "complete",
+  "questions": 450,
+  "expected_questions": 450,
+  "session_instances": 21456,
+  "reference_sessions": 850,
+  "counts": {
+    "offline_hybrid": {
+      "5": 374,
+      "10": 413
+    },
+    "sqlite_bm25": {
+      "5": 377,
+      "10": 408
+    },
+    "offline_fusion": {
+      "5": 382,
+      "10": 414
+    },
+    "cli_hybrid": {
+      "5": 373,
+      "10": 407
+    },
+    "cli_default": {
+      "5": 376,
+      "10": 413
+    }
+  },
+  "paired_outcomes": {
+    "offline": {
+      "5": {
+        "both": 367,
+        "fusion_only": 15,
+        "hybrid_only": 7,
+        "neither": 61
+      },
+      "10": {
+        "both": 410,
+        "fusion_only": 4,
+        "hybrid_only": 3,
+        "neither": 33
+      }
+    },
+    "cli": {
+      "5": {
+        "both": 366,
+        "fusion_only": 10,
+        "hybrid_only": 7,
+        "neither": 67
+      },
+      "10": {
+        "both": 405,
+        "fusion_only": 8,
+        "hybrid_only": 2,
+        "neither": 35
+      }
+    }
+  },
+  "decisions": {
+    "offline": {
+      "one_sided_exact_mcnemar_p": 0.06690025329589844,
+      "primary_pass": false,
+      "secondary_pass": true,
+      "gate": "fail"
+    },
+    "cli": {
+      "one_sided_exact_mcnemar_p": 0.3145294189453125,
+      "primary_pass": false,
+      "secondary_pass": true,
+      "gate": "fail"
+    }
+  },
+  "both_comparisons_passed": false,
+  "operational_attempts": {
+    "offline": {
+      "valid_case_receipts": 450,
+      "unscored_attempts": 0,
+      "recovered_attempts": 0,
+      "unresolved_attempts": 0
+    },
+    "cli": {
+      "valid_case_receipts": 450,
+      "unscored_attempts": 1,
+      "recovered_attempts": 1,
+      "unresolved_attempts": 0
+    }
+  },
+  "excluded_offline_setup_runs": 1
+}

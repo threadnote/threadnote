@@ -1,7 +1,7 @@
 import * as BunServices from '@effect/platform-bun/BunServices';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {it as effectIt} from '@effect/vitest';
-import {Clock, Context, Effect, Layer} from 'effect';
+import {Array as EffectArray, Clock, Context, DateTime, Effect, Layer} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
@@ -12,13 +12,16 @@ import {
   initializeCodeGraphGenerationSchema,
   readCodeGraphGenerationProgress,
   releaseCodeGraphGenerationClaim,
+  renewCodeGraphGenerationClaim,
   requireCodeGraphGenerationClaim,
+  selectCodeGraphPredecessorGeneration,
   CODE_GRAPH_GENERATION_LEASE_MILLISECONDS,
 } from '../../src/vector/generation.js';
 import {
   admitOneCodeGraphVectorRetirement,
   deleteCodeGraphVectorPointerWithRetirementSql,
   initializeCodeGraphVectorRetirementSchema,
+  CODE_GRAPH_VECTOR_BUILDING_GRACE_MILLISECONDS,
   CODE_GRAPH_VECTOR_POINTERS_TABLE_SQL,
   CODE_GRAPH_VECTOR_POINTER_GENERATION_INDEX_SQL,
   CODE_GRAPH_VECTOR_REUSE_INDEX_SQL,
@@ -65,14 +68,14 @@ const retirementFixture = Effect.gen(function* () {
   yield* initializeCodeGraphVectorRetirementSchema(sql);
   yield* initializeCodeGraphGenerationSchema(sql);
   yield* sql.unsafe('PRAGMA user_version = 3');
-  const insert = (generation: string, state: 'building' | 'ready') =>
+  const insert = (generation: string, state: 'building' | 'ready', createdAt = '2026-01-01T00:00:00.000Z') =>
     sql.unsafe('INSERT INTO vector_generations VALUES (?, ?, ?, ?, 1, 1, 0, ?, ?)', [
       generation,
       `snapshot-${generation}`,
       'model',
       Effect2.pipe('a', EffectString.repeat(64)),
       state,
-      '2026-01-01T00:00:00.000Z',
+      createdAt,
     ]);
   yield* insert('g0', 'ready');
   yield* sql.unsafe('INSERT INTO vectors VALUES (?, ?, ?, ?)', [
@@ -92,6 +95,25 @@ const retirementFixture = Effect.gen(function* () {
   });
   return {sql, insert};
 });
+
+const retired = (sql: SqlClient.SqlClient) =>
+  Effect.map(
+    sql.unsafe<{readonly generation: string}>(
+      'SELECT generation FROM vector_generation_retirements ORDER BY generation',
+    ),
+    rows => EffectArray.map(rows, row => row.generation),
+  );
+// Admission steps until a pass wraps cleanly; every restarted pass is reported.
+const admitUntilClean = (sql: SqlClient.SqlClient) =>
+  Effect.gen(function* () {
+    const states: string[] = [];
+    for (let count = 0; count < 24; count += 1) {
+      const result = yield* admitOneCodeGraphVectorRetirement(sql);
+      states.push(result.state);
+      if (result.state === 'wrapped') return states;
+    }
+    return yield* Effect.die(new Error('Vector retirement admission did not wrap cleanly.'));
+  });
 
 const step = {
   generation: 'target',
@@ -171,10 +193,11 @@ describe('durable vector generation checkpoints', () => {
         () =>
           Effect.gen(function* () {
             const {sql} = yield* retirementFixture;
+            // An expired claim keeps an unfinished generation through its grace period; that grace ends here.
             const expires = (yield* Clock.currentTimeMillis) + 500;
             if (expiry === 'expired')
               yield* sql.unsafe("UPDATE vector_generation_progress SET expires_at = ? WHERE generation = 'g1'", [
-                expires,
+                expires - CODE_GRAPH_VECTOR_BUILDING_GRACE_MILLISECONDS,
               ]);
             expect(yield* admitOneCodeGraphVectorRetirement(sql)).toMatchObject({state: 'advanced', generation: 'g0'});
             expect(yield* admitOneCodeGraphVectorRetirement(sql)).toMatchObject({state: 'advanced', generation: 'g1'});
@@ -194,6 +217,113 @@ describe('durable vector generation checkpoints', () => {
           }).pipe(TestClock.withLive),
       );
     }
+    it.effect('clears a retired pin so a fresh owner can claim the unfinished generation again', () =>
+      Effect.gen(function* () {
+        const {sql} = yield* retirementFixture;
+        yield* releaseCodeGraphGenerationClaim(sql, 'g1', 'stalled');
+        yield* deleteCodeGraphVectorPointerWithRetirementSql(sql, {
+          worktreeId: Effect2.pipe('b', EffectString.repeat(64)),
+          expectedSnapshotId: 'snapshot-g0',
+        });
+        expect(yield* retired(sql)).toEqual(['g0']);
+        expect(
+          yield* claimCodeGraphGeneration(sql, {generation: 'g1', ownerToken: 'fresh', requestEpoch: 'epoch-g1'}),
+        ).toMatchObject({owner_token: 'fresh', reusable_generation: null});
+        yield* requireCodeGraphGenerationClaim(sql, 'g1', 'fresh');
+      }).pipe(TestClock.withLive),
+    );
+    it.effect('prefers a released unfinished predecessor over a newer one with its own live claim', () =>
+      Effect.gen(function* () {
+        const {sql, insert} = yield* retirementFixture;
+        const select = selectCodeGraphPredecessorGeneration(sql, {
+          modelId: 'model',
+          modelSha256: Effect2.pipe('a', EffectString.repeat(64)),
+          dimensions: 1,
+          templateVersion: 1,
+        });
+        yield* releaseCodeGraphGenerationClaim(sql, 'g1', 'stalled');
+        yield* insert('g2', 'building');
+        yield* claimCodeGraphGeneration(sql, {generation: 'g2', ownerToken: 'live', requestEpoch: 'epoch-g2'});
+        expect(yield* select).toBe('g1');
+        yield* releaseCodeGraphGenerationClaim(sql, 'g2', 'live');
+        expect(yield* select).toBe('g2');
+      }).pipe(TestClock.withLive),
+    );
+    it.effect('keeps a pinned unfinished predecessor while the successor claim is live', () =>
+      Effect.gen(function* () {
+        const {sql, insert} = yield* retirementFixture;
+        yield* releaseCodeGraphGenerationClaim(sql, 'g1', 'stalled');
+        yield* insert('g2', 'building');
+        expect(
+          yield* claimCodeGraphGeneration(sql, {
+            generation: 'g2',
+            ownerToken: 'successor',
+            requestEpoch: 'epoch-g2',
+            reusableGeneration: 'g1',
+          }),
+        ).toMatchObject({reusable_generation: 'g1'});
+        expect(
+          yield* claimCodeGraphGeneration(sql, {
+            generation: 'g2',
+            ownerToken: 'successor',
+            requestEpoch: 'epoch-g2',
+            reusableGeneration: 'g2',
+          }),
+        ).toBeUndefined();
+        yield* admitUntilClean(sql);
+        expect(yield* retired(sql)).toEqual([]);
+        yield* releaseCodeGraphGenerationClaim(sql, 'g2', 'successor');
+        yield* admitUntilClean(sql);
+        expect(yield* retired(sql)).toEqual(['g1', 'g2']);
+      }).pipe(TestClock.withLive),
+    );
+    it.effect('keeps an unfinished generation through its creation and claim-expiry grace periods', () =>
+      Effect.gen(function* () {
+        const {sql, insert} = yield* retirementFixture;
+        yield* releaseCodeGraphGenerationClaim(sql, 'g1', 'stalled');
+        yield* insert('g2', 'building', DateTime.formatIso(yield* DateTime.now));
+        yield* insert('g3', 'building');
+        yield* claimCodeGraphGeneration(sql, {generation: 'g3', ownerToken: 'lapsed', requestEpoch: 'epoch-g3'});
+        const now = yield* Clock.currentTimeMillis;
+        yield* sql.unsafe("UPDATE vector_generation_progress SET expires_at = ? WHERE generation = 'g3'", [now - 1000]);
+        yield* admitUntilClean(sql);
+        expect(yield* retired(sql)).toEqual(['g1']);
+        yield* sql.unsafe("UPDATE vector_generation_progress SET expires_at = ? WHERE generation = 'g3'", [
+          now - CODE_GRAPH_VECTOR_BUILDING_GRACE_MILLISECONDS - 1000,
+        ]);
+        yield* admitUntilClean(sql);
+        expect(yield* retired(sql)).toEqual(['g1', 'g3']);
+      }).pipe(TestClock.withLive),
+    );
+    it.effect(
+      'admits an abandoned generation while checkpoints change the revision and claims clean only after a stable pass',
+      () =>
+        Effect.gen(function* () {
+          const {sql, insert} = yield* retirementFixture;
+          yield* releaseCodeGraphGenerationClaim(sql, 'g1', 'stalled');
+          yield* insert('g2', 'building');
+          yield* claimCodeGraphGeneration(sql, {generation: 'g2', ownerToken: 'worker', requestEpoch: 'epoch-g2'});
+          const state = () =>
+            Effect.map(
+              sql.unsafe<{readonly generation_revision: number; readonly clean_generation_revision: number | null}>(
+                'SELECT generation_revision, clean_generation_revision FROM vector_retirement_state',
+              ),
+              rows => rows[0],
+            );
+          expect(yield* admitOneCodeGraphVectorRetirement(sql)).toMatchObject({state: 'advanced', generation: 'g0'});
+          // Each embedding checkpoint renews the claim, and each renewal bumps generation_revision.
+          yield* renewCodeGraphGenerationClaim(sql, 'g2', 'worker');
+          expect(yield* admitOneCodeGraphVectorRetirement(sql)).toMatchObject({state: 'admitted', generation: 'g1'});
+          yield* renewCodeGraphGenerationClaim(sql, 'g2', 'worker');
+          expect(yield* admitOneCodeGraphVectorRetirement(sql)).toMatchObject({state: 'advanced', generation: 'g2'});
+          expect(yield* admitOneCodeGraphVectorRetirement(sql)).toEqual({state: 'restarted'});
+          expect((yield* state()).clean_generation_revision).toBeNull();
+          expect(yield* retired(sql)).toEqual(['g1']);
+          expect(yield* admitUntilClean(sql)).toEqual(['advanced', 'admitted', 'advanced', 'wrapped']);
+          const clean = yield* state();
+          expect(clean.clean_generation_revision).toBe(clean.generation_revision);
+        }).pipe(TestClock.withLive),
+    );
     it.effect('rolls back payload and cursor together, resumes, and treats acknowledged replay as idempotent', () =>
       Effect.gen(function* () {
         const sql = yield* fixture;

@@ -353,7 +353,9 @@ export const prepareWorkflowOperation = (config: RuntimeConfig, state: WorkflowJ
                 expectedProjectScope: {kind: 'selected-project' as const, project: state.binding.graphProject},
               }),
           refs: request.codeRefs ?? [],
-          ...((yield* standardProfileBinding(config, state.binding.workflowRunId)) ? {allowStaleGraph: true} : {}),
+          ...((yield* standardProfileBinding(config, state.binding.workflowRunId))
+            ? {allowStaleGraph: true, omitUnresolved: true}
+            : {}),
         },
         'workflow-memory',
       );
@@ -617,8 +619,9 @@ const prepareWorkflowOperationWithCapture = Effect.fn('workflowMemory.prepareOpe
       );
     if (foregroundReusable && stableJson(request.codeRefs ?? []) !== stableJson(foregroundAdmitted.citationRefs))
       return yield* workflowError('citation-drift', 'Child code references differ from the admitted citation witness.');
-    // A standard run never waits for a graph: stale evidence is accepted and missing evidence leaves the artifact
-    // uncited. It queues no deferred anchor, because an outside finalizer would rewrite bytes this run's receipts pin.
+    // A standard run never waits for a graph: stale evidence is accepted, and missing evidence or a path that the
+    // ready graph does not index leaves the artifact uncited. It queues no deferred anchor, because an outside
+    // finalizer would rewrite bytes this run's receipts pin.
     const standardRun = yield* standardProfileBinding(config, state.binding.workflowRunId);
     const captured =
       admitted && !promotion

@@ -1,5 +1,6 @@
 import {Array as EffectArray} from 'effect';
 import {
+  CONTEXT_BRIEF_READ_MILLISECONDS,
   compileContextBriefWith,
   retrieveSemanticContextSourceEvidence,
   retrieveSemanticContextSymbol,
@@ -438,7 +439,7 @@ const compileContextBriefRuntime = Effect.fn('contextBrief.compileRuntime')(func
       },
     );
   });
-  return yield* withReadyRecallReadBoundary(compilation).pipe(
+  return yield* withReadyRecallReadBoundary(compilation, {readMilliseconds: CONTEXT_BRIEF_READ_MILLISECONDS}).pipe(
     Effect.onExit(exit =>
       Clock.currentTimeMillis.pipe(
         Effect.flatMap(completedAt =>

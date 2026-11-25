@@ -50,7 +50,13 @@
   },
   "historicalQualification": {
     "status": "unqualified",
-    "adoptionDecision": "defer-shipping-until-complete-R5-evidence",
+    "adoptionDecision": "rollback-required",
+    "reason": "The shipped reader missed the unchanged R5 gates in complete paired comparisons. Darwin ARM64 10,000-vector dense p95 rose from 273.503 ms to 338.412 ms in pair 3, above the permitted 5% rise. Linux ARM64 musl 10,000-vector tied process-tree peak RSS rose 12.30% in pair 1, above the 10% limit. Ten of 32 required comparisons completed, and none of the eight profiles qualified.",
+    "qualificationRun": {
+      "candidateCommit": "18f102c69d4d6418d412c8e0c64974d3f98c34b1",
+      "candidateTree": "70645cd2155b227603a1da65c4931f986603e510",
+      "url": "https://github.com/threadnote/threadnote/actions/runs/45044682108"
+    },
     "evidence": {
       "darwin": "local-results.json",
       "linux": "linux-results.json",

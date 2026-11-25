@@ -102,7 +102,15 @@ export const runNativeTaskFinish = (
         const watch = resolved?.watch;
         const notification = watch?.envelope.notification;
         const consumer = watch?.envelope.state.consumer;
-        const hostReceipt = notification?.lastReceipt?.receipt ?? notification?.outbox?.receipt;
+        const evidence = receipt?.watch?.evidence;
+        // The terminal receipt may still be in the outbox while lastReceipt names an earlier notice.
+        const hasHostReceipt =
+          evidence !== undefined &&
+          EffectString.startsWith('native-watch-revision:')(evidence) &&
+          EffectArray.some(
+            [notification?.lastReceipt?.receipt, notification?.outbox?.receipt],
+            hostReceipt => !!hostReceipt && EffectString.endsWith(`;host-receipt:${hostReceipt}`)(evidence),
+          );
         const completeSources =
           watch &&
           watch.envelope.state.sources.length === requiredSources.length &&
@@ -134,13 +142,11 @@ export const runNativeTaskFinish = (
           receipt.watch.consumerId !== consumer.id ||
           notification.consumerId !== consumer.id ||
           notification.wakeupId !== consumer.wakeupId ||
-          !hostReceipt ||
-          !EffectString.startsWith('native-watch-revision:')(receipt.watch.evidence) ||
-          !EffectString.endsWith(`;host-receipt:${hostReceipt}`)(receipt.watch.evidence)
+          !hasHostReceipt
         )
           return yield* fail(
             'finish-scope',
-            'PR closeout requires each exact merged PR, terminal source-complete watch, live consumer record, and host receipt.',
+            'PR closeout requires each exact merged PR, terminal source-complete watch, matching consumer record, and host receipt.',
           );
         // Later phases or maintenance can merge the PR above this phase's own delivered head.
         yield* verifyNativeMergedPhaseHead(checkout, pr.headSha, receipt.watch.headSha);

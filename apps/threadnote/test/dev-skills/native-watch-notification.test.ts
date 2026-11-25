@@ -17,6 +17,7 @@ import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {
   CommandExecutor,
+  CommandFailed,
   CommandSpawnFailed,
   CommandTimedOut,
   type CommandExecutionError,
@@ -1280,12 +1281,95 @@ effectIt.effect('terminal notice survives lease expiry and explicit same-owner r
     expect(renewed.envelope.state.consumer).toMatchObject({id: 'consumer', wakeupId: 'wakeup'});
     yield* arrive(f);
     yield* acknowledge(f);
+    const acknowledged = yield* f.read();
     yield* renew();
     const finished = yield* f.read();
-    expect(finished.envelope.notification).toMatchObject({outbox: null, lastReceipt: {receipt}});
-    expect(finished.envelope.state.events).toHaveLength(0);
-    expect(finished.envelope.state.work.length).toBeGreaterThan(0);
+    const finalSequence = state.nextSequence - 1;
+    expect(finished.envelope.notification).toMatchObject({
+      consumerId: 'consumer',
+      wakeupId: 'wakeup',
+      outbox: {...queued.envelope.notification?.outbox, consumedThrough: finalSequence},
+    });
+    expect(finished.envelope.notification?.lastReceipt).toBe(queued.envelope.notification?.lastReceipt);
+    expect(finished.envelope.state).toMatchObject({
+      prState: 'merged',
+      acknowledged: finalSequence,
+      delivery: null,
+      events: [],
+      work: acknowledged.envelope.state.work,
+    });
+    expect(finished.envelope.state.work).toContainEqual(
+      expect.objectContaining({status: 'open', event: expect.objectContaining({kind: 'merged'})}),
+    );
   }).pipe(withStoppedFixtureCollector, provide),
+);
+
+effectIt.effect('distinguishes an exact Codex child destination refusal without releasing retained work', () =>
+  Effect.gen(function* () {
+    const rejection =
+      'Error: failed to queue session message: thread/queue/add failed: direct app-server input is not allowed for unloaded spawned sub-agents (code -32600)';
+    const diagnostic = 'private command context';
+    for (const {exitCode, stdout, stderr, error} of [
+      {exitCode: 1, stdout: '', stderr: rejection + '\n', error: 'host-command-failed'},
+      {exitCode: 1, stdout: diagnostic, stderr: rejection + '\n', error: 'host-delivery-ambiguous'},
+      {exitCode: 1, stdout: '', stderr: rejection + '\n' + diagnostic, error: 'host-delivery-ambiguous'},
+      {exitCode: 2, stdout: '', stderr: rejection + '\n', error: 'host-delivery-ambiguous'},
+    ]) {
+      const f = yield* fixture(1);
+      let calls = 0;
+      const dispatch = f.dispatch().pipe(
+        Effect.provideService(CommandExecutor, {
+          execute: (executable, args) => {
+            calls++;
+            return Effect.fail(CommandFailed.make({executable, args, exitCode, stdout, stderr, message: diagnostic}));
+          },
+          executeStreaming: () => Effect.die(new Error('Unexpected streaming command')),
+        }),
+      );
+      yield* dispatch;
+      const failed = yield* f.read();
+      expect(failed.envelope.state).toEqual(f.envelope.state);
+      expect(failed.envelope.notification).toMatchObject({
+        target,
+        consumerId: 'consumer',
+        wakeupId: 'wakeup',
+        notifiedThrough: 0,
+        outbox: {status: 'failed', error, attempts: 1, first: 1, last: 1, consumedThrough: 0},
+      });
+      const inspected = yield* runNativeWatch(f.config, {
+        protocolVersion: 1,
+        executorVersion: 1,
+        action: 'watch',
+        command: 'inspect',
+        watchId: 'watch-1',
+      });
+      expect(inspected).toMatchObject({
+        consumer: {id: 'consumer', wakeupId: 'wakeup', wakeupVerification: 'native-host-delivery-pending'},
+        notification: {
+          status: 'failed',
+          error: error === 'host-command-failed' ? 'host-codex-spawned-subagent' : error,
+          receipt: null,
+          attempts: 1,
+          consumedThrough: 0,
+        },
+        pending: 1,
+        deliveryId: null,
+      });
+      if (error === 'host-command-failed')
+        expect(inspected).toHaveProperty(
+          'notification.guidance',
+          "Ask the owning top-level Codex conversation to register future watches. Preserve this watch's owner and retained events.",
+        );
+      else expect(inspected).not.toHaveProperty('notification.guidance');
+      const serialized = JSON.stringify({failed, inspected});
+      expect(serialized).not.toContain(rejection);
+      expect(serialized).not.toContain(diagnostic);
+      yield* TestClock.adjust(100_000);
+      yield* dispatch;
+      expect(calls).toBe(1);
+      expect((yield* f.read()).revision).toBe(failed.revision);
+    }
+  }).pipe(provide),
 );
 
 effectIt.effect('Codex crash ambiguity and lost receipts never automatically repeat an unchanged event', () =>
@@ -1555,7 +1639,15 @@ effectIt.effect('resumes the exact Claude Code session in its workspace and reco
     expect(calls).toHaveLength(1);
     const [call] = calls;
     expect(call.executable).toBe(claudeTarget.executable);
-    expect(call.args.slice(0, -1)).toEqual(['--print', '--resume', claudeTarget.sessionId, '--output-format', 'json']);
+    expect(call.args.slice(0, -1)).toEqual([
+      '--print',
+      '--resume',
+      claudeTarget.sessionId,
+      '--allowedTools',
+      'mcp__threadnote__workflow_task_watch_pr',
+      '--output-format',
+      'json',
+    ]);
     expect(call.args.at(-1)).toMatch(/^Threadnote watch event\. Route=/u);
     expect(call.options).toMatchObject({cwd: claudeTarget.workspace, timeoutMs: 0});
     expect((yield* f.read()).envelope.notification).toMatchObject({
@@ -1563,6 +1655,30 @@ effectIt.effect('resumes the exact Claude Code session in its workspace and reco
       outbox: null,
       lastReceipt: {kind: 'cli-session-completed', receipt: claudeTarget.sessionId},
     });
+  }).pipe(provide, TestClock.withLive),
+);
+
+effectIt.effect('records a Claude Code turn that was denied the watch tool as an unhandled delivery', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture(1);
+    yield* useTarget(f, claudeTarget);
+    yield* f.drain().pipe(
+      commandLayer(() =>
+        Effect.succeed({
+          ...success,
+          stdout: JSON.stringify({
+            type: 'result',
+            subtype: 'success',
+            is_error: false,
+            session_id: claudeTarget.sessionId,
+            permission_denials: [{tool_name: 'mcp__threadnote__workflow_task_watch_pr', tool_use_id: 'toolu_1'}],
+          }),
+        }),
+      ),
+    );
+    const notification = (yield* f.read()).envelope.notification;
+    expect(notification?.outbox).toMatchObject({status: 'failed', error: 'host-permission-denied', attempts: 1});
+    expect(notification?.lastReceipt).toBeUndefined();
   }).pipe(provide, TestClock.withLive),
 );
 

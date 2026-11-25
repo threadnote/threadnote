@@ -416,6 +416,12 @@ jobs:
             exit 1
           fi
 
+      - name: Keep the Bun cache outside the checkout
+        # Inside the checkout, the compiler-backend cache changes source identity and the build discards its output.
+        # The preload step and the compile must also share one cache.
+        shell: bash
+        run: printf 'BUN_INSTALL_CACHE_DIR=%s\n' "$RUNNER_TEMP/threadnote-bun-install-cache" >> "$GITHUB_ENV"
+
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}

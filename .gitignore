@@ -51,3 +51,6 @@ docs/**/adr/
 
 # Cargo build outputs never participate in source identity or release discovery.
 /packages/recall/native-vector-reader/target/
+
+# Bun install and compiler-backend cache, when a tool places it in the checkout.
+/.bun-cache/

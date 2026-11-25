@@ -1395,10 +1395,23 @@ const selectSearchSymbols = Effect.fn('codeGraph.selectSearchSymbols')(function*
   snapshotId: string,
   query: string,
   limit: number,
+  selection?: 'exact-preview',
 ) {
   const sql = yield* SqlClient.SqlClient;
   yield* configureConnection(sql);
   const baseSnapshotId = yield* selectBaseSnapshotId(sql, snapshotId);
+  if (selection === 'exact-preview') {
+    const keys = [...new Set([normalizeExactSearchPath(query) ?? query, ...codeGraphIdentitySelectors(query)])].slice(
+      0,
+      3,
+    );
+    for (const key of keys) {
+      const statement = codeGraphExactSymbolQueryStatement(snapshotId, baseSnapshotId, key, limit, true);
+      const rows = yield* sql.unsafe<SearchSymbolRow>(statement.text, statement.parameters);
+      if (rows.length > 0) return EffectArray.map(rows, row => ({...symbolFromRow(row), score: row.score / 100}));
+    }
+    return [];
+  }
   return yield* selectSearchSymbolsWithSql(sql, snapshotId, baseSnapshotId, query, limit);
 });
 

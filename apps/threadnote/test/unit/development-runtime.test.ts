@@ -1,7 +1,9 @@
 import {Array as EffectArray} from 'effect';
+import {Database} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import {writeCodexActivationFixture} from '../fixtures/codex-activation.js';
 import fc from 'fast-check';
 import {Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -39,6 +41,10 @@ import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
 import {sha256FileHex} from '@threadnote/platform/digest';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {SystemInfo} from '@threadnote/platform/system';
+import {codeGraphRepositoryRoot} from '@threadnote/graph/layout';
+import {SCHEMA_METADATA_TABLE_SQL} from '@threadnote/graph/store/schema/metadata';
+import {CODE_GRAPH_PERSISTENT_SCHEMA_CURRENT_REVISION} from '@threadnote/graph/store/schema/revision';
+import {CODE_GRAPH_SCHEMA_VERSION} from '@threadnote/graph/types';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -332,6 +338,7 @@ describe('exact-head development runtime', () => {
                   sourceCheckoutId: secondCheckoutId,
                   stagedRoot: Option.none(),
                   terminateSuperseded: false,
+                  threadnoteHome: path.join(root, 'home'),
                   version,
                 });
               }).pipe(
@@ -447,6 +454,7 @@ describe('exact-head development runtime', () => {
             sourceCheckoutId: Effect2.pipe('2', EffectString.repeat(64)),
             stagedRoot: Option.none(),
             terminateSuperseded: false,
+            threadnoteHome: path.join(root, 'home'),
             version: waitingVersion,
           }).pipe(
             Effect.provideService(CommandExecutor, versionCommandExecutor(waitingVersion)),
@@ -579,6 +587,7 @@ describe('exact-head development runtime', () => {
             sourceCheckoutId: waitingCheckoutId,
             stagedRoot: Option.none(),
             terminateSuperseded: false,
+            threadnoteHome: path.join(root, 'home'),
             version: waitingVersion,
           }).pipe(
             Effect.provideService(CommandExecutor, versionCommandExecutor(waitingVersion)),
@@ -1230,6 +1239,7 @@ describe('exact-head development runtime', () => {
             stagedRoot: Option.none(),
             ownershipAuthorization: undefined,
             terminateSuperseded: false,
+            threadnoteHome: path.join(root, 'home'),
             version,
           }).pipe(
             Effect.provideService(CommandExecutor, commandExecutor),
@@ -1301,6 +1311,7 @@ describe('exact-head development runtime', () => {
             stagedRoot: Option.some(stagedRoot),
             ownershipAuthorization: undefined,
             terminateSuperseded: false,
+            threadnoteHome: path.join(root, 'home'),
             version,
           }).pipe(
             Effect.provideService(CommandExecutor, versionCommandExecutor(version)),
@@ -1389,6 +1400,7 @@ describe('exact-head development runtime', () => {
               stagedRoot: Option.none(),
               ownershipAuthorization: undefined,
               terminateSuperseded: false,
+              threadnoteHome: path.join(root, 'home'),
               version,
             }).pipe(Effect.provideService(CommandExecutor, executor), Effect.provideService(SystemInfo, testSystem));
             return {
@@ -1513,6 +1525,7 @@ describe('exact-head development runtime', () => {
             stagedRoot: Option.none(),
             ownershipAuthorization: undefined,
             terminateSuperseded: false,
+            threadnoteHome: path.join(root, 'home'),
             version,
           }).pipe(Effect.provideService(CommandExecutor, executor), Effect.provideService(SystemInfo, testSystem));
           return {installed, invocations, repairObservedInstallationLock, strictDoctorChecks};
@@ -1540,7 +1553,8 @@ describe('exact-head development runtime', () => {
     }),
   );
 
-  effectIt.effect('keeps committed activation and defers cleanup when repaired doctor remains unhealthy', () =>
+  const activationFailures = ['unhealthy repair', 'invalid graph metadata', 'newer graph schema'] as const;
+  effectIt.effect.each(activationFailures)('preserves runtime ownership after %s', scenario =>
     Effect.scoped(
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
@@ -1549,6 +1563,7 @@ describe('exact-head development runtime', () => {
         const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-development-doctor-committed-'});
         const installRoot = path.join(root, 'install');
         const binRoot = path.join(root, 'bin');
+        const threadnoteHome = path.join(root, 'home');
         const sourceCommit = Effect2.pipe('d', EffectString.repeat(40));
         const priorCommit = Effect2.pipe('e', EffectString.repeat(40));
         const version = developmentBuildVersion('4.0.0-beta.30', sourceCommit);
@@ -1578,7 +1593,8 @@ describe('exact-head development runtime', () => {
         const ownerPath = path.join(installRoot, 'development-runtime-owner.json');
         const priorPointer = `${JSON.stringify({releaseRoot: priorReleaseRoot, version: priorVersion})}\n`;
         const priorOwner = `${JSON.stringify({
-          schemaVersion: 1,
+          schemaVersion: 2,
+          ownershipRevision: Effect2.pipe('c', EffectString.repeat(32)),
           sourceCheckoutId: Effect2.pipe('b', EffectString.repeat(64)),
           version: priorVersion,
         })}\n`;
@@ -1589,9 +1605,40 @@ describe('exact-head development runtime', () => {
           environment: () => ({
             ...baseSystem.environment(),
             THREADNOTE_BIN_DIR: binRoot,
+            THREADNOTE_HOME: threadnoteHome,
             THREADNOTE_INSTALL_ROOT: installRoot,
           }),
         });
+        const codex = yield* writeCodexActivationFixture(threadnoteHome, path.join(root, 'codex'), priorVersion).pipe(
+          Effect.provideService(SystemInfo, testSystem),
+        );
+        const graphDatabase =
+          scenario !== 'unhealthy repair'
+            ? path.join(
+                codeGraphRepositoryRoot(path, threadnoteHome, Effect2.pipe('a', EffectString.repeat(64))),
+                `graph-v${CODE_GRAPH_SCHEMA_VERSION}.sqlite`,
+              )
+            : undefined;
+        let graphDigest: string | undefined;
+        if (graphDatabase !== undefined) {
+          const revision =
+            scenario === 'newer graph schema' ? String(CODE_GRAPH_PERSISTENT_SCHEMA_CURRENT_REVISION + 1) : 'invalid';
+          yield* fs.makeDirectory(path.dirname(graphDatabase), {recursive: true});
+          yield* Effect.acquireUseRelease(
+            Effect.sync(() => new Database(graphDatabase)),
+            database =>
+              Effect.sync(() => {
+                database.exec(SCHEMA_METADATA_TABLE_SQL);
+                database
+                  .prepare(
+                    "INSERT INTO schema_metadata (key, value) VALUES ('persistent_extension_schema_revision', ?)",
+                  )
+                  .run(revision);
+              }),
+            database => Effect.sync(() => database.close()),
+          );
+          graphDigest = yield* sha256FileHex(graphDatabase);
+        }
         const [cliLauncher, mcpLauncher, priorCli, priorMcp, activeCli, activeMcp] = yield* Effect.all([
           commandLauncherPath('cli'),
           commandLauncherPath('mcp'),
@@ -1635,13 +1682,25 @@ describe('exact-head development runtime', () => {
           sourceCheckoutId: Effect2.pipe('a', EffectString.repeat(64)),
           stagedRoot: Option.none(),
           terminateSuperseded: true,
+          threadnoteHome,
           version,
         }).pipe(
           Effect.provideService(CommandExecutor, executor),
           Effect.provideService(SystemInfo, testSystem),
           Effect.flip,
         );
+        expect(yield* fs.readFileString(codex.file)).toBe(codex.content);
 
+        if (scenario === 'newer graph schema' && graphDatabase !== undefined) {
+          expect(String(failure)).toContain('newer Threadnote runtime');
+          expect(yield* fs.readFileString(activePointerPath)).toBe(priorPointer);
+          expect(yield* fs.readFileString(ownerPath)).toBe(priorOwner);
+          expect(yield* fs.readFileString(cliLauncher)).toBe(priorCli);
+          expect(yield* fs.readFileString(mcpLauncher)).toBe(priorMcp);
+          expect(yield* sha256FileHex(graphDatabase)).toBe(graphDigest);
+          expect(invocations).toEqual([['--version']]);
+          return;
+        }
         expect(String(failure)).toContain('exact-HEAD development release is active');
         expect(JSON.parse(yield* fs.readFileString(activePointerPath))).toEqual({
           releaseRoot: yield* fs.realPath(releaseRoot),
@@ -1730,6 +1789,7 @@ describe('exact-head development runtime', () => {
               stagedRoot: Option.none(),
               ownershipAuthorization: undefined,
               terminateSuperseded: false,
+              threadnoteHome: path.join(root, 'home'),
               version,
             }).pipe(Effect.provideService(SystemInfo, testSystem));
             const launcher = yield* commandLauncherPath('cli').pipe(Effect.provideService(SystemInfo, testSystem));
@@ -1844,22 +1904,55 @@ describe('exact-head development runtime', () => {
             stagedRoot: Option.none(),
             ownershipAuthorization: undefined,
             terminateSuperseded: false,
+            threadnoteHome: path.join(root, 'home'),
             version,
           } as const;
-          const preserved = yield* activateLocalStandaloneRelease(activation).pipe(
-            Effect.provideService(CommandExecutor, versionCommandExecutor(version)),
-            Effect.provideService(SystemInfo, testSystem),
+          const fixture = yield* writeCodexActivationFixture(
+            activation.threadnoteHome,
+            path.join(root, 'codex'),
+            supersededVersion,
+          ).pipe(Effect.provideService(SystemInfo, testSystem));
+          const systemCommands = yield* CommandExecutor;
+          const versionCommands = versionCommandExecutor(version);
+          const observedCodexLock: boolean[] = [];
+          const executor = CommandExecutor.of({
+            ...versionCommands,
+            execute: (command, args, options) =>
+              ['/bin/ls', '/bin/cp', 'getfacl'].includes(command) || options?.env?.THREADNOTE_CODEX_METADATA_SOURCE
+                ? Effect.gen(function* () {
+                    observedCodexLock.push(
+                      yield* fs.exists(path.join(installRoot, '.installation.lock')).pipe(Effect.orDie),
+                    );
+                    return yield* systemCommands.execute(command, args, options);
+                  })
+                : versionCommands.execute(command, args, options),
+          });
+          const activate = (terminateSuperseded: boolean) =>
+            activateLocalStandaloneRelease({...activation, terminateSuperseded}).pipe(
+              Effect.provideService(CommandExecutor, executor),
+              Effect.provideService(SystemInfo, testSystem),
+            );
+          const preserved = yield* activate(false);
+          expect(yield* fs.readFileString(fixture.file)).toBe(
+            EffectString.replace(supersededVersion, version)(fixture.content),
           );
+          expect(observedCodexLock.length).toBeGreaterThan(0);
+          expect(observedCodexLock).not.toContain(true);
+          const unpinned = yield* writeCodexActivationFixture(
+            activation.threadnoteHome,
+            path.join(root, 'codex'),
+            supersededVersion,
+            false,
+          ).pipe(Effect.provideService(SystemInfo, testSystem));
           terminationRequested = true;
-          const cleaned = yield* activateLocalStandaloneRelease({...activation, terminateSuperseded: true}).pipe(
-            Effect.provideService(CommandExecutor, versionCommandExecutor(version)),
-            Effect.provideService(SystemInfo, testSystem),
-          );
+          const cleaned = yield* activate(true);
+          expect(yield* fs.readFileString(unpinned.file)).toBe(unpinned.content);
           return {cleaned, preserved, running, signals};
         }),
       ).pipe(provideTestLayer(ApplicationLayer));
 
       expect(result.preserved).toMatchObject({
+        codexMcpRefresh: {configuration: 'saved', refresh: 'pending', release: result.preserved.version},
         cleanupComplete: false,
         cleanupIssues: [],
         preservedMcpSessionProcesses: 1,
@@ -1872,6 +1965,7 @@ describe('exact-head development runtime', () => {
         [45_003, 'SIGTERM'],
       ]);
       expect(result.cleaned).toMatchObject({
+        codexMcpRefresh: {configuration: 'deferred', refresh: 'pending'},
         cleanupComplete: true,
         cleanupIssues: [],
         preservedMcpSessionProcesses: 1,
@@ -1956,6 +2050,7 @@ describe('exact-head development runtime', () => {
             stagedRoot: Option.none(),
             ownershipAuthorization: undefined,
             terminateSuperseded: false,
+            threadnoteHome: path.join(root, 'home'),
             version,
           }).pipe(
             Effect.provideService(CommandExecutor, versionCommandExecutor(version)),
@@ -2064,6 +2159,7 @@ describe('exact-head development runtime', () => {
             stagedRoot: Option.none(),
             ownershipAuthorization: undefined,
             terminateSuperseded: false,
+            threadnoteHome: path.join(root, 'home'),
             version,
           }).pipe(
             Effect.provideService(CommandExecutor, versionCommandExecutor(version)),
@@ -2155,6 +2251,7 @@ describe('exact-head development runtime', () => {
             stagedRoot: Option.some(stagedRoot),
             ownershipAuthorization: undefined,
             terminateSuperseded: false,
+            threadnoteHome: path.join(root, 'home'),
             version,
           }).pipe(
             Effect.provideService(CommandExecutor, versionCommandExecutor(version)),
@@ -2450,6 +2547,7 @@ function activateWithCleanupRace(race: CleanupRace, processCount = 1) {
         stagedRoot: Option.none(),
         ownershipAuthorization: undefined,
         terminateSuperseded: true,
+        threadnoteHome: path.join(root, 'home'),
         version,
       }).pipe(
         Effect.provideService(CommandExecutor, versionCommandExecutor(version)),

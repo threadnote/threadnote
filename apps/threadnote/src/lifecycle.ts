@@ -50,6 +50,7 @@ import {
   resolveMcpClients,
   runMcpInstall,
 } from './mcp/index.js';
+import {reconcileActivatedCodexMcp} from './mcp/codex_broker_activation.js';
 import {legacyProcessDoctorCheck} from './process/diagnostics.js';
 import {maybeRunPostUpdateAfterRepair} from './release/index.js';
 import {imageProjectionDoctorCheck} from './image_projection/config.js';
@@ -525,14 +526,20 @@ export const runInstall = Effect.fn('lifecycle.install')(function* (config: Runt
   const releaseRoot = options.skipReleaseLifecycle === true ? undefined : yield* toolRoot();
   if (releaseRoot !== undefined) {
     const legacyCleanup = yield* planLegacyInstallationCleanup();
-    yield* withStandaloneInstallationLock(
+    const committed = yield* withStandaloneInstallationLock(
       Effect.gen(function* () {
         yield* activateStandaloneRelease(releaseRoot, dryRun);
         yield* applyLegacyInstallationCleanup(legacyCleanup, dryRun);
         yield* installCommandShim(dryRun, releaseRoot, config.agentContextHome);
+        const active = dryRun ? undefined : yield* activeInstalledRelease();
+        const candidate = dryRun
+          ? undefined
+          : yield* fs.realPath(releaseRoot).pipe(Effect.orElseSucceed(() => undefined));
+        return active && active.releaseRoot === candidate ? active.version : undefined;
       }),
       dryRun,
     );
+    if (committed !== undefined) yield* reconcileActivatedCodexMcp(config, committed);
   }
   const layoutMigration = yield* migrateThreadnoteStorageLayout({
     apply: !dryRun,
@@ -635,11 +642,15 @@ export const runRepair = Effect.fn('lifecycle.repair')(function* (config: Runtim
     const activeRelease = yield* activeInstalledRelease();
     if (activeRelease) {
       yield* installCommandShim(dryRun, activeRelease.releaseRoot, config.agentContextHome);
+      return activeRelease.version;
     } else {
       yield* Console.warn('WARN no validated active standalone release; command launchers were not changed');
     }
   });
-  yield* withStandaloneInstallationLock(repairLaunchers, dryRun || options.skipReleaseLifecycle === true);
+  const repairRelease = yield* withStandaloneInstallationLock(
+    repairLaunchers,
+    dryRun || options.skipReleaseLifecycle === true,
+  );
   if (!dryRun) {
     const authorizationKey = yield* loadRecallVectorAuthorizationKey(config);
     const selection = yield* readModelSelection(config.agentContextHome);
@@ -677,20 +688,24 @@ export const runRepair = Effect.fn('lifecycle.repair')(function* (config: Runtim
       options.mcp === undefined ||
       ['all', 'available'].includes(Effect2.pipe(options.mcp, EffectString.trim, EffectString.toLowerCase))
     ) {
-      yield* repairRegisteredAgentAdapters(config, dryRun);
+      yield* repairRegisteredAgentAdapters(config, dryRun, {skipCodexMcp: true});
     }
     const registry = yield* readAgentIntegrationRegistry(config);
     const registeredClients = registry === undefined ? inferredMcpClients : registeredAgentClients(registry);
     const repairableClients = repairableAgentClients(registry);
+    const defaultMcpClients =
+      registeredClients.includes('codex') && !repairableClients.includes('codex')
+        ? [...repairableClients, 'codex']
+        : repairableClients;
     const receipts = EffectRecord.fromEntries(
       EffectArray.flatMap(registeredClients, agent =>
         registry?.hosts[agent]?.mcp === undefined ? [] : [[agent, registry.hosts[agent].mcp]],
       ),
     );
     const requestedMcpClients =
-      options.mcp ?? (repairableClients.length === 0 ? 'none' : EffectArray.join(repairableClients, ','));
+      options.mcp ?? (defaultMcpClients.length === 0 ? 'none' : EffectArray.join(defaultMcpClients, ','));
     const mcpClients = yield* resolveMcpClients(requestedMcpClients, 'repair', receipts);
-    yield* repairRegisteredMcpClients(config, registry, mcpClients, dryRun);
+    yield* repairRegisteredMcpClients(config, registry, mcpClients, dryRun, repairRelease ?? null);
     if (
       repairedIntegrationClients.length === 0 &&
       registeredClients.length === 0 &&
@@ -736,6 +751,8 @@ export const repairRegisteredMcpClients = Effect.fn('lifecycle.repairRegisteredM
   registry: AgentIntegrationRegistry | undefined,
   mcpClients: readonly AgentClient[],
   dryRun: boolean,
+  /** null means the locked launcher-restoration step found no eligible release. */
+  expectedRelease?: string | null,
 ) {
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
@@ -744,6 +761,14 @@ export const repairRegisteredMcpClients = Effect.fn('lifecycle.repairRegisteredM
   );
   for (const client of mcpClients) {
     const receipt = registry?.hosts[client];
+    if (client === 'codex') {
+      if (expectedRelease === null && !dryRun) {
+        yield* Console.warn('Codex MCP configuration deferred. No validated active Threadnote release is available.');
+      } else {
+        yield* reconcileActivatedCodexMcp(config, expectedRelease ?? undefined, {dryRun});
+      }
+      continue;
+    }
     if (!personalHome && (client === 'cursor' || client === 'copilot')) {
       yield* Console.log(`Skipping ${client} MCP repair for non-personal THREADNOTE_HOME.`);
       continue;
@@ -754,16 +779,21 @@ export const repairRegisteredMcpClients = Effect.fn('lifecycle.repairRegisteredM
       );
       continue;
     }
-    yield* runMcpInstall(config, client, {
-      apply: !dryRun,
-      cwd: receipt.mcp.cwd,
-      dryRunApplyCommand: 'threadnote repair',
-      hostRoot: receipt.mcp.hostRoot,
-      name: receipt.mcp.name,
-      project: client === 'cursor' || client === 'copilot' || client === 'omp' ? receipt.mcp.cwd : undefined,
-      scope: receipt.mcp.scope,
-      toolset: receipt.mcp.toolset,
-    });
+    yield* runMcpInstall(
+      config,
+      client,
+      {
+        apply: !dryRun,
+        cwd: receipt.mcp.cwd,
+        dryRunApplyCommand: 'threadnote repair',
+        hostRoot: receipt.mcp.hostRoot,
+        name: receipt.mcp.name,
+        project: client === 'cursor' || client === 'copilot' || client === 'omp' ? receipt.mcp.cwd : undefined,
+        scope: receipt.mcp.scope,
+        toolset: receipt.mcp.toolset,
+      },
+      'repair',
+    );
   }
 });
 
@@ -781,7 +811,7 @@ export const runDevelopmentInstallIntegrationActivation = Effect.fn(
   const inferredMcpClients = yield* inferConfiguredMcpClients(config);
   yield* migrateLegacyAgentIntegrations(config, inferredMcpClients, false);
   yield* repairAgentIntegrations(config, false);
-  yield* repairRegisteredAgentAdapters(config, false);
+  yield* repairRegisteredAgentAdapters(config, false, {skipCodexMcp: true});
   const incomplete = EffectArray.filter(
     yield* agentAdapterDoctorChecks(config, inferredMcpClients, {
       includeRetainedUnsupported: false,

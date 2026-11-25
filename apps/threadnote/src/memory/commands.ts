@@ -132,7 +132,7 @@ import {
   renderRecallOperationalWarning,
   type RecallOperationalWarning,
 } from '@threadnote/recall/warning';
-import type {RecallConfidence} from '@threadnote/recall/rank';
+import {recallOrderingVersion, type RecallConfidence, type RecallRankerVersion} from '@threadnote/recall/rank';
 import {parseRecallCliInput, projectRecallCliResponse} from '../recall/cli_response.js';
 import type {RecallMemoryConnectionsResult} from '@threadnote/recall/memory/connections';
 import type {
@@ -209,6 +209,7 @@ export interface RecallResult {
   readonly project?: string;
   readonly queryExpansions: readonly string[];
   readonly ranked: readonly RecallHit[];
+  readonly rankerVersion?: RecallRankerVersion;
   readonly totalRanked: number;
   readonly warnings: readonly RecallOperationalWarning[];
 }
@@ -786,15 +787,17 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
   yield* optionalReadyRecallRead(
     printRecallHygieneNudges(config.user, cliProjection.rankedContext, uris => readMemoryRecordsByUri(config, uris)),
   );
-  return {
+  const result: RecallResult = {
     ...(cliProjection.confidence === undefined ? {} : {confidence: cliProjection.confidence}),
     ...(recallSections.memoryConnections ? {memoryConnections: recallSections.memoryConnections} : {}),
     ...(recallProjectName === undefined ? {} : {project: recallProjectName}),
     queryExpansions: expansionQueries,
     ranked: recallSections.ranked.slice(0, recallLimit),
+    rankerVersion: recallOrderingVersion(recallSections.ranked[0]),
     totalRanked: recallSections.ranked.length,
     warnings: operationalWarnings,
-  } satisfies RecallResult;
+  };
+  return result;
 });
 
 /** Foreground recall waits for its caller while every owned read proves currentness. */

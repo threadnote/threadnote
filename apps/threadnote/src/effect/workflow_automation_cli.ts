@@ -17,7 +17,7 @@ import {
   makeNativeTaskStartCommand,
   makeNativeTaskViewCommand,
 } from './workflow_cli.js';
-import {readNativeTaskView} from '../workflow_automation/task.js';
+import {readNativeTaskNoticeView, readNativeTaskView} from '../workflow_automation/task.js';
 import {runNativeTaskAction, runNativeTaskStart} from '../workflow_automation/task_actions.js';
 
 export const nativeWorkflowInputByteLimit = 2_000_000;
@@ -111,16 +111,20 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
           ).pipe(Effect.asVoid),
         ),
       ).pipe(Command.withDescription('Internal same-executable native job process')),
-      makeNativeTaskViewCommand(options =>
+      makeNativeTaskViewCommand(({noticeRoute, ...options}) =>
         withRuntime(config =>
-          readNativeTaskView(config, {
-            runId: options.runId,
-            callerCwd: options.callerCwd,
-            ...(options.role === undefined ? {} : {role: options.role}),
-            ...(options.cursor === undefined ? {} : {cursor: options.cursor}),
-            ...(options.phaseId === undefined ? {} : {phaseId: options.phaseId}),
-            ...(options.detail === undefined ? {} : {detail: options.detail}),
-            ...(options.outputKey === undefined ? {} : {outputKey: options.outputKey}),
+          Effect.gen(function* () {
+            const input = {
+              runId: options.runId,
+              callerCwd: options.callerCwd,
+              ...(options.role === undefined ? {} : {role: options.role}),
+              ...(options.cursor === undefined ? {} : {cursor: options.cursor}),
+              ...(options.phaseId === undefined ? {} : {phaseId: options.phaseId}),
+              ...(options.detail === undefined ? {} : {detail: options.detail}),
+              ...(options.outputKey === undefined ? {} : {outputKey: options.outputKey}),
+            };
+            if (noticeRoute === undefined) return yield* readNativeTaskView(config, input);
+            return yield* readNativeTaskNoticeView(config, {...input, noticeRoute});
           }).pipe(printTaskResult),
         ),
       ),
@@ -223,6 +227,9 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
             callerCwd: options.callerCwd,
             ...(options.validationRef === undefined ? {} : {validationRef: options.validationRef}),
             ...(options.deliveryRef === undefined ? {} : {deliveryRef: options.deliveryRef}),
+            ...(options.maintenanceValidationRef === undefined
+              ? {}
+              : {maintenanceValidationRef: options.maintenanceValidationRef}),
             ...(options.snapshotRef === undefined ? {} : {snapshotRef: options.snapshotRef}),
             ...(options.candidateWatchRef === undefined ? {} : {candidateWatchRef: options.candidateWatchRef}),
             ...(options.supplementalRef === undefined ? {} : {supplementalRef: options.supplementalRef}),

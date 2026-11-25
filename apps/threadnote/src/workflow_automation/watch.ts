@@ -39,6 +39,7 @@ import {
   isNativeWatchSessionWakeup,
   matchesTerminalNativeWatchArrival,
   nativeWatchWakeupSchema,
+  ownedQueuedNativeWatchReceipt,
   type NativeWatchWakeup,
 } from './watch_notification_state.js';
 import {
@@ -121,7 +122,13 @@ const health = Effect.fn('workflowWatch.health')(function* (
   const alive = yield* nativeWatchCollectorAlive(envelope.collector);
   const consumer = envelope.state.consumer;
   const consumerLive = consumer !== null && consumer.leaseUntil > now;
-  const receipt = envelope.notification?.outbox?.receipt ?? null;
+  const outbox = envelope.notification?.outbox;
+  const receipt = outbox?.receipt ?? null;
+  const ambiguous = outbox?.status === 'sending' && !alive;
+  const codexChildRefused =
+    envelope.notification?.target.host === 'codex' &&
+    outbox?.status === 'failed' &&
+    outbox.error === 'host-command-failed';
   const sourceErrors = Array.flatMap(envelope.state.sources, source =>
     source.error ? [{source: source.source, ...source.error}] : [],
   );
@@ -135,7 +142,8 @@ const health = Effect.fn('workflowWatch.health')(function* (
     prState: envelope.state.prState,
     collector: {
       alive,
-      status: envelope.collector?.status ?? 'absent',
+      // A collector killed without its own final write still records `running`.
+      status: envelope.collector?.status === 'running' && !alive ? 'exited' : (envelope.collector?.status ?? 'absent'),
       pid: envelope.collector?.pid ?? null,
       lastSeenAt: envelope.collector?.lastSeenAt ?? null,
       nextPollAt: envelope.collector?.nextPollAt ?? null,
@@ -163,20 +171,24 @@ const health = Effect.fn('workflowWatch.health')(function* (
     notification: envelope.notification
       ? {
           host: envelope.notification.target.host,
-          status:
-            envelope.notification.outbox?.status === 'sending' && !alive
-              ? 'ambiguous'
-              : (envelope.notification.outbox?.status ?? 'idle'),
-          key: envelope.notification.outbox?.key ?? null,
-          attemptId: envelope.notification.outbox?.attemptId ?? null,
+          status: ambiguous ? 'ambiguous' : (outbox?.status ?? 'idle'),
+          key: outbox?.key ?? null,
+          attemptId: outbox?.attemptId ?? null,
           receipt,
-          consumedThrough: envelope.notification.outbox?.consumedThrough ?? null,
-          attempts: envelope.notification.outbox?.attempts ?? 0,
-          nextAttemptAt: envelope.notification.outbox?.nextAttemptAt ?? null,
-          error:
-            envelope.notification.outbox?.status === 'sending' && !alive
+          consumedThrough: outbox?.consumedThrough ?? null,
+          attempts: outbox?.attempts ?? 0,
+          nextAttemptAt: outbox?.nextAttemptAt ?? null,
+          error: codexChildRefused
+            ? 'host-codex-spawned-subagent'
+            : ambiguous
               ? 'host-delivery-ambiguous'
-              : (envelope.notification.outbox?.error ?? null),
+              : (outbox?.error ?? null),
+          ...(codexChildRefused
+            ? {
+                guidance:
+                  "Ask the owning top-level Codex conversation to register future watches. Preserve this watch's owner and retained events.",
+              }
+            : {}),
           notifiedThrough: envelope.notification.notifiedThrough,
           lastReceipt: envelope.notification.lastReceipt ?? null,
         }
@@ -992,16 +1004,39 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (
           envelope = yield* from(() => attachNotification(envelope, state, request.wakeup, at, request.recoverWakeup));
         } else {
           const consumerId = required(request.consumerId, 'consumerId');
+          const route =
+            request.eventKey === undefined
+              ? undefined
+              : {
+                  consumerId,
+                  wakeupId: required(request.wakeupId, 'wakeupId'),
+                  eventKey: request.eventKey,
+                  ...(request.attemptId === undefined ? {} : {attemptId: request.attemptId}),
+                };
+          const notification = envelope.notification;
+          const receipt =
+            envelope.stopRequested &&
+            notification &&
+            (request.command === 'relay' || request.command === 'disposition' || request.command === 'ack')
+              ? ownedQueuedNativeWatchReceipt(notification, envelope.state, {consumerId, wakeupId: request.wakeupId})
+              : undefined;
+          let noticeThrough: number | undefined;
+          // Stopping leaves the issued receipt in place. Its exact arrival claims a backlog once, with no lease change.
+          if (
+            notification &&
+            receipt &&
+            (route === undefined || (receipt.key === route.eventKey && receipt.attemptId === route.attemptId)) &&
+            (envelope.collector?.status === 'stopped' || envelope.collector?.status === 'terminal') &&
+            !(yield* nativeWatchCollectorAlive(envelope.collector))
+          ) {
+            const claimed = route ? consumeNativeWatchNotification(notification, envelope.state, route) : notification;
+            const through = claimed.outbox?.consumedThrough ?? 0;
+            if (through > 0 && (request.command !== 'relay' || through > envelope.state.acknowledged)) {
+              noticeThrough = through;
+              envelope = {...envelope, notification: claimed};
+            }
+          }
           if (request.command === 'relay' || request.command === 'wait') {
-            const route =
-              request.eventKey === undefined
-                ? undefined
-                : {
-                    consumerId,
-                    wakeupId: required(request.wakeupId, 'wakeupId'),
-                    eventKey: request.eventKey,
-                    ...(request.attemptId === undefined ? {} : {attemptId: request.attemptId}),
-                  };
             arrivalOnly =
               route !== undefined &&
               envelope.notification !== undefined &&
@@ -1017,7 +1052,7 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (
                 request.relayLimit ?? 32,
                 Math.max(1, boundedItems(envelope.state.events).items.length),
               );
-              const relay = yield* from(() => relayNativeWatch(envelope.state, consumerId, at, count));
+              const relay = yield* from(() => relayNativeWatch(envelope.state, consumerId, at, count, noticeThrough));
               envelope = {
                 ...envelope,
                 state: relay.state,
@@ -1045,6 +1080,7 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (
                   required(request.deliveryId, 'deliveryId'),
                   required(request.dispositions, 'dispositions'),
                   at,
+                  noticeThrough,
                 ),
               ),
             };
@@ -1059,7 +1095,13 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (
             envelope = {
               ...envelope,
               state: yield* from(() =>
-                acknowledgeNativeWatch(envelope.state, consumerId, required(request.deliveryId, 'deliveryId'), at),
+                acknowledgeNativeWatch(
+                  envelope.state,
+                  consumerId,
+                  required(request.deliveryId, 'deliveryId'),
+                  at,
+                  noticeThrough,
+                ),
               ),
             };
         }

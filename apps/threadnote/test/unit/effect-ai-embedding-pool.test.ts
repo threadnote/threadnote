@@ -309,7 +309,7 @@ describe('native embedding context pool', () => {
     );
   });
 
-  effectIt.effect('forces an offloaded model to one context without overriding its thread default', () => {
+  effectIt.effect('caps an offloaded model pool without overriding its thread default', () => {
     const {layer, state} = embeddingHarness({
       context: () => immediateContext(input => [input.length]),
       gpu: 'metal',
@@ -324,9 +324,45 @@ describe('native embedding context pool', () => {
           modelId: 'gpu-pool',
           modelPath: '/models/gpu.gguf',
         });
-        expect(yield* session.embedMany(['gpu'])).toEqual([[3]]);
-        expect(state.contextCalls).toHaveLength(1);
-        expect(state.contextCalls[0]?.threads).toBeUndefined();
+        expect(yield* session.embedMany(['gpu', 'pool'])).toEqual([[3], [4]]);
+        expect(state.contextCalls).toHaveLength(4);
+        expect(EffectArray.map(state.contextCalls, call => call.threads)).toEqual([
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+        ]);
+        expect(engine.diagnostics.embeddingContextPlan).toEqual({
+          effectiveContexts: 4,
+          modelGpuLayers: 1,
+          requestedContexts: 8,
+          threadCounts: [],
+        });
+      }).pipe(provideTestLayer(layer)),
+    );
+  });
+
+  effectIt.effect('keeps the contexts already created when the GPU refuses another for memory', () => {
+    const {layer, state} = embeddingHarness({
+      context: ({contextIndex}) => {
+        if (contextIndex === 2) throw Object.assign(new Error('out of memory'), {name: 'InsufficientMemoryError'});
+        return immediateContext(input => [input.length]);
+      },
+      gpu: 'metal',
+      gpuLayers: 1,
+    });
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const engine = yield* LlamaCppEngine;
+        const session = yield* engine.loadEmbeddingSession({
+          dimensions: 1,
+          embeddingContextPoolSize: 4,
+          modelId: 'gpu-memory',
+          modelPath: '/models/gpu.gguf',
+        });
+        expect(yield* session.embedMany(['a', 'bb', 'ccc'])).toEqual([[1], [2], [3]]);
+        expect(state.contextCalls).toHaveLength(3);
+        expect(engine.diagnostics.embeddingContextPlan).toMatchObject({effectiveContexts: 2, requestedContexts: 4});
       }).pipe(provideTestLayer(layer)),
     );
   });

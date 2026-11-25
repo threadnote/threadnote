@@ -32,15 +32,20 @@ export interface CodeGraphQueryScope {
   readonly evidence?: CodeGraphScopeApplicabilityEvidence;
 }
 
+/** Stored scope identities establish provenance only. They carry no current applicability observation. */
+export interface CodeGraphReadyScopeReceipt {
+  readonly scope: Pick<ResolvedCodeGraphIndexScope, 'closureDigest' | 'definitionDigest' | 'scopeKey'> & {
+    readonly membershipDigest: string;
+  };
+  readonly evidence?: CodeGraphScopeApplicabilityEvidence;
+}
+
 /**
  * Compact proof that an already-selected ready snapshot belongs to the
  * parent-observed project graph. Large path and workspace lists stay in the
  * parent process; the isolated reader only needs these persisted identities.
  */
-export interface CodeGraphQueryScopeReceipt {
-  readonly scope: Pick<ResolvedCodeGraphIndexScope, 'closureDigest' | 'definitionDigest' | 'scopeKey'> & {
-    readonly membershipDigest: string;
-  };
+export interface CodeGraphQueryScopeReceipt extends CodeGraphReadyScopeReceipt {
   readonly evidence: CodeGraphScopeApplicabilityEvidence;
 }
 
@@ -87,6 +92,7 @@ export const observeCodeGraphQueryScope = Effect.fn('codeGraph.observeQueryScope
   options: {
     readonly project?: string;
     readonly manifestPath?: string;
+    readonly onScopedRoute?: (project: CodeGraphQueryScope['project']) => Effect.Effect<void, unknown>;
     readonly preobservedWorktreeChanged?:
       boolean | Effect.Effect<boolean | undefined, unknown, FileSystem.FileSystem | Path.Path>;
   },
@@ -99,6 +105,7 @@ export const observeCodeGraphQueryScope = Effect.fn('codeGraph.observeQueryScope
   );
   if (route.state === 'full') return undefined;
   if (route.project.graph === undefined) return {project: route.project} satisfies CodeGraphQueryScope;
+  yield* options.onScopedRoute?.(route.project) ?? Effect.void;
   const observed = yield* observeCodeGraphStatusScope(identity, route.project, {
     includeOpaqueCorpusAssets: false,
     languagePacks,
@@ -113,7 +120,7 @@ export const observeCodeGraphQueryScope = Effect.fn('codeGraph.observeQueryScope
 });
 
 export const codeGraphQueryScopeCurrent = Effect.fn('codeGraph.queryScopeCurrent')(function* (
-  selection: CodeGraphQueryScope | CodeGraphQueryScopeReceipt,
+  selection: CodeGraphQueryScope | CodeGraphReadyScopeReceipt,
   store: CodeGraphStoreShape,
   layout: CodeGraphLayout,
   snapshot: CodeGraphSnapshot,
@@ -145,7 +152,7 @@ export const codeGraphQueryScopeCurrent = Effect.fn('codeGraph.queryScopeCurrent
 });
 
 export const codeGraphQueryScopeSnapshotCompatible = Effect.fn('codeGraph.queryScopeSnapshotCompatible')(function* (
-  selection: CodeGraphQueryScope | CodeGraphQueryScopeReceipt | undefined,
+  selection: CodeGraphQueryScope | CodeGraphReadyScopeReceipt | undefined,
   store: CodeGraphStoreShape,
   databasePath: string,
   worktreeId: string,
@@ -160,8 +167,10 @@ export const codeGraphQueryScopeSnapshotCompatible = Effect.fn('codeGraph.queryS
       ? selection.scope.membershipDigest
       : codeGraphIndexScopeMembershipDigest(selection.scope);
   return (
+    snapshot.scopeId === selection.scope.scopeKey &&
     active !== undefined &&
     receipt !== undefined &&
+    active.repositoryId === snapshot.repositoryId &&
     active.snapshotId === snapshot.id &&
     receipt.snapshotId === snapshot.id &&
     active.definitionDigest === receipt.definitionDigest &&
@@ -170,6 +179,35 @@ export const codeGraphQueryScopeSnapshotCompatible = Effect.fn('codeGraph.queryS
     codeGraphIndexScopeMembershipDigest(receipt) === membershipDigest &&
     (!requireExactClosure || active.closureDigest === selection.scope.closureDigest)
   );
+});
+
+export const readCodeGraphReadyScopeReceipt = Effect.fn('codeGraph.readReadyScopeReceipt')(function* (
+  store: CodeGraphStoreShape,
+  databasePath: string,
+  identity: RepositoryIdentity,
+  snapshot: CodeGraphSnapshot,
+  definition: {readonly scopeKey: string; readonly definitionDigest: string},
+) {
+  if (snapshot.repositoryId !== identity.repositoryId || snapshot.scopeId !== definition.scopeKey) return undefined;
+  const receipt = yield* store.loadSnapshotScopeReceipt(databasePath, snapshot.id, definition.scopeKey);
+  if (receipt === undefined || receipt.definitionDigest !== definition.definitionDigest) return undefined;
+  const selection = {
+    scope: {
+      ...definition,
+      closureDigest: receipt.closureDigest,
+      membershipDigest: codeGraphIndexScopeMembershipDigest(receipt),
+    },
+  } satisfies CodeGraphReadyScopeReceipt;
+  return (yield* codeGraphQueryScopeSnapshotCompatible(
+    selection,
+    store,
+    databasePath,
+    identity.worktreeId,
+    snapshot,
+    true,
+  ))
+    ? {selection, receipt}
+    : undefined;
 });
 
 export function codeGraphProjectCoverage(

@@ -1,0 +1,34 @@
+{
+  "release_tag": "v5.4.4",
+  "commit": "9e8879f9dd2c11283e1b49b9ca764c37e82fed4e",
+  "target": "darwin-arm64",
+  "release_url": "https://github.com/threadnote/threadnote/releases/tag/v5.4.4",
+  "archive": "threadnote-darwin-arm64.tar.gz",
+  "archive_sha256": "93e42f52f3bdcf658baaaf0733cd2c0b309a0e61a97b54b89973577c5318d321",
+  "executable_sha256": "fdd9648c176363c430ca03ade49184aee7e04b65833190a74f7e3c60690580c1",
+  "executable_version": "threadnote v5.4.4",
+  "model": "bge-small-en-v1.5-q8",
+  "model_sha256": "f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804",
+  "dimensions": 384,
+  "dataset_repository": "xiaowu0162/longmemeval-cleaned",
+  "dataset_revision": "98d7416c24c778c2fee6e6f3006e7a073259d48f",
+  "dataset_file": "longmemeval_s_cleaned.json",
+  "dataset_sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
+  "invocation": ["threadnote", "recall", "--query=<benchmark question>"],
+  "ranker_override": null,
+  "threshold_override": null,
+  "limit_override": null,
+  "scope_override": null,
+  "optional_model_override": null,
+  "driver_sha256_at_start": "cad25b26d813e4a7f5bcab1ce886b61df06177ea0c6533861bd7ac5d9df4e035",
+  "driver_sha256_at_completion": "72d8ba99dcbbb2bd59bc25097788b71cb044fa2aadae1df6d6cac21ba2edd604",
+  "driver_change": "The second revision retries cleanup of the private directory.",
+  "setup_attempts_before_first_recall": 3,
+  "repeated_queries_after_cleanup_error": [
+    {
+      "question_id": "73d42213",
+      "identical_cli_output": true
+    }
+  ],
+  "completed_utc": "2026-11-24T06:40:43+00:00"
+}

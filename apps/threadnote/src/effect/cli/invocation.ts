@@ -19,6 +19,7 @@ export interface CliInvocationInspection {
   readonly offline?: true;
   /** Release previews must run before process, lease, cache or telemetry writes. */
   readonly observationalUpdate?: true;
+  readonly observationalCodexRefresh?: true;
   /** CI reserves exit 1 for actionable findings, including when parsing fails before its handler. */
   readonly failureExitCode?: 2;
   readonly homeOverride?: string;
@@ -71,6 +72,10 @@ export function makeCliInvocationInspector(registrations: readonly CliCommandReg
       scanned.positionals.length === 1 &&
       !scanned.invalidBooleanValue &&
       (scanned.booleanValues.get('--check') === true || scanned.booleanValues.get('--dry-run') === true);
+    const observationalCodexRefresh =
+      operation === 'repair' &&
+      scanned.booleanValues.get('--dry-run') === true &&
+      (scanned.flags.has('--codex-reload-socket') || scanned.flags.has('--codex-reload-thread'));
     const telemetryOperation =
       operation === undefined
         ? undefined
@@ -92,6 +97,7 @@ export function makeCliInvocationInspector(registrations: readonly CliCommandReg
       !(mode === 'skips-on-preview' && scanned.booleanValues.get('--preview') === true);
     const writeAnonymousTelemetry =
       !observationalUpdate &&
+      !observationalCodexRefresh &&
       !offlinePilot &&
       operation !== undefined &&
       operation !== 'telemetry' &&
@@ -101,6 +107,7 @@ export function makeCliInvocationInspector(registrations: readonly CliCommandReg
     return {
       ...(offlinePilot ? {offline: true as const} : {}),
       ...(observationalUpdate ? {observationalUpdate: true as const} : {}),
+      ...(observationalCodexRefresh ? {observationalCodexRefresh: true as const} : {}),
       ...(operation === 'context' && scanned.positionals[1] === 'check' ? {failureExitCode: 2 as const} : {}),
       ...(scanned.homeOverride === undefined ? {} : {homeOverride: scanned.homeOverride}),
       ...(operation === undefined ? {} : {operation}),
@@ -129,6 +136,7 @@ function scanCliArguments(arguments_: readonly string[]) {
       ? undefined
       : (valueFlagKinds.get(flagName) ?? cliRuntimeValueFlagKinds.get(flagName));
     if (valueKind !== undefined) {
+      flags.add(flagName);
       const value =
         equalsIndex > 0 ? Effect.pipe(argument, EffectString.slice(equalsIndex + 1)) : arguments_[index + 1];
       if (flagName === '--home') {

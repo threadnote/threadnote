@@ -130,6 +130,7 @@ const EMBEDDING_CONTEXT_TOKEN_RESERVE = 16;
 const EMBEDDING_WINDOW_OVERLAP_TOKENS = 32;
 const discardNativeLog = (_level: string, _message: string): void => undefined;
 const EMBEDDING_CONTEXT_POOL_SIZES = [1, 2, 4, 8] as const;
+const GPU_EMBEDDING_CONTEXT_CAP = 4;
 
 export type EmbeddingContextPoolSize = (typeof EMBEDDING_CONTEXT_POOL_SIZES)[number];
 export const THREADNOTE_EMBEDDING_CONTEXTS_ENV = 'THREADNOTE_EMBEDDING_CONTEXTS';
@@ -299,34 +300,43 @@ function makeEngine(
             modelGpuLayers,
             requestedContexts: contextPoolSize,
           });
+          const contexts: NativeEmbeddingContext[] = [];
+          for (const threads of contextPlan.threadCounts) {
+            const created = Effect.acquireRelease(
+              fromPromiseInterruptible(
+                signal =>
+                  model.createEmbeddingContext({
+                    contextSize: options.contextSize,
+                    createSignal: signal,
+                    ignoreMemorySafetyChecks: false,
+                    ...(threads === undefined ? {} : {threads}),
+                  }),
+                cause => modelLoadError(options, cause, 'embedding context'),
+              ),
+              native => disposeIgnoringFailure(native),
+            );
+            if (contexts.length === 0) {
+              contexts.push(yield* created);
+              continue;
+            }
+            // Extra contexts only add throughput, so a memory refusal keeps the pool already created.
+            const extra = yield* created.pipe(
+              Effect.asSome,
+              Effect.catchTag('InsufficientMemory', () => Effect.succeedNone),
+            );
+            if (EffectOption.isNone(extra)) break;
+            contexts.push(extra.value);
+          }
           const embeddingContextPlan = {
-            effectiveContexts: contextPlan.contexts,
+            effectiveContexts: contexts.length,
             ...(modelGpuLayers === undefined ? {} : {modelGpuLayers}),
             requestedContexts: contextPoolSize,
             threadCounts: EffectArray.filter(
-              contextPlan.threadCounts,
+              contextPlan.threadCounts.slice(0, contexts.length),
               (threads): threads is number => threads !== undefined,
             ),
           };
           diagnostics.embeddingContextPlan = embeddingContextPlan;
-          const contexts = yield* Effect.forEach(
-            contextPlan.threadCounts,
-            threads =>
-              Effect.acquireRelease(
-                fromPromiseInterruptible(
-                  signal =>
-                    model.createEmbeddingContext({
-                      contextSize: options.contextSize,
-                      createSignal: signal,
-                      ignoreMemorySafetyChecks: false,
-                      ...(threads === undefined ? {} : {threads}),
-                    }),
-                  cause => modelLoadError(options, cause, 'embedding context'),
-                ),
-                native => disposeIgnoringFailure(native),
-              ),
-            {concurrency: 1},
-          );
           return embeddingSession(
             options,
             model,
@@ -410,8 +420,13 @@ export function nativeEmbeddingContextPlan(options: {
   readonly threadCounts: readonly (number | undefined)[];
 } {
   if (options.background) return {contexts: 1, threadCounts: [BACKGROUND_INFERENCE_THREADS]};
-  if (options.modelGpuLayers !== 0 || options.requestedContexts === 1) {
+  if (options.requestedContexts === 1 || options.modelGpuLayers === undefined) {
     return {contexts: 1, threadCounts: [undefined]};
+  }
+  if (options.modelGpuLayers > 0) {
+    // Short GPU inputs leave the device idle between single-sequence dispatches; more contexts stopped helping at four.
+    const contexts = Math.min(options.requestedContexts, GPU_EMBEDDING_CONTEXT_CAP);
+    return {contexts, threadCounts: Array.from({length: contexts}, () => undefined)};
   }
   const availableCores = Math.max(1, Math.floor(options.cpuMathCores));
   // Three single-thread contexts avoid the measured 2+1 partition overhead

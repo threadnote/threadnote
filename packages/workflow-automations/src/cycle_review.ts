@@ -589,7 +589,7 @@ function checkNativeCycleReviewHistory(
         effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
       )
     )
-      fail('Resolving, rejecting or downgrading a finding requires evidence.');
+      fail('Resolving, rejecting or downgrading a finding requires a reason.');
     if (['resolved', 'carried'].includes(finding.state) && !old) unmatched.push(finding.id);
     if (finding.state === 'new' && old) reintroduced.push(finding.id);
   }

@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "releaseSource": "212b1afa5f5564fceebb06de8d16b52e9ae421b2",
+  "evidence": "decision.json",
+  "candidates": [
+    {
+      "candidate": "graph-vector-search",
+      "decision": "defer",
+      "reason": "All eight frozen recall profiles must qualify before graph vector scoring can move to Rust. The 100k synthetic diagnostic found a large non-SQL envelope worth revisiting when that prerequisite is met."
+    },
+    {
+      "candidate": "reference-resolution-matching",
+      "decision": "defer",
+      "reason": "The production matching span combines SQL lookup and TypeScript matching. The reduced run cannot establish how much wall time a native matcher could recover."
+    },
+    {
+      "candidate": "graph-topology",
+      "decision": "defer",
+      "reason": "The loader accounts for most of the observed analysis envelope. It combines SQLite paging and row decoding. The observation does not isolate the proposed native work."
+    },
+    {
+      "candidate": "cached-fact-replay",
+      "decision": "defer",
+      "reason": "The release already uses bounded native inflate. Validation is the largest isolated decode stage. A batch prototype would need to recover enough time after transferring and reconstructing the decoded facts in Bun."
+    }
+  ]
+}

@@ -8,7 +8,7 @@ import {
 } from '@threadnote/platform/command';
 import {makeReadDeadline, readDeadlineRemaining} from '@threadnote/platform/read_deadline';
 import {CodeGraphScopeRoutingError} from '@threadnote/graph/scope/routing';
-import {retrieveContextBriefGraphEvidence} from '@threadnote/context/graph/evidence';
+import {retrieveContextBriefGraphEvidence, type ContextBriefGraphReadBudget} from '@threadnote/context/graph/evidence';
 import {retrieveContextBriefSourceEvidence} from '@threadnote/context/graph/source_evidence';
 import {
   retrieveSemanticContextSourceEvidence,
@@ -35,6 +35,7 @@ import {
   contextBriefNativeReadRequestSchema,
   contextBriefNativeReadResponseSchema,
   ContextBriefNativeReadFailed,
+  encodeContextBriefScopedReadyProgress,
   type ContextBriefNativeReadRequest,
   type ContextBriefNativeReadResponse,
   type ContextBriefNativeSemanticState,
@@ -117,14 +118,14 @@ export function nativeContextReadCommands(
 
 export const serveContextBriefNativeRead = Effect.fn('contextBrief.serveNativeRead')(function* (
   request: ContextBriefNativeReadRequest,
-  onStatusObserved?: () => Effect.Effect<void>,
+  progress?: Pick<ContextBriefGraphReadBudget, 'onStatusObserved' | 'onScopedReadyEvidence'>,
 ) {
   const deadline = yield* makeReadDeadline(request.remainingMilliseconds);
   const budget = {
     remaining: request.operation === 'graph' ? request.counters.remaining : 0,
     primaryRemaining: request.operation === 'graph' ? request.counters.primaryRemaining : 0,
     deadline,
-    ...(onStatusObserved === undefined ? {} : {onStatusObserved}),
+    ...progress,
   };
   let cleanupUnconfirmed = false;
   const program = Effect.gen(function* () {
@@ -312,17 +313,24 @@ export const contextBriefNativeReadWorkerProgram = Effect.gen(function* () {
   const stdout = (yield* Stdio.Stdio).stdout({endOnDone: false});
   const progress = new TextEncoder().encode(`${CONTEXT_BRIEF_NATIVE_READ_STATUS_PROGRESS}\n`);
   let progressBytes = 0;
-  // The parent observes this line as it arrives, so it survives a later deadline expiry.
-  const response = yield* serveContextBriefNativeRead(request, () =>
-    Stream.run(Stream.make(progress), stdout).pipe(
+  const writeProgress = (bytes: Uint8Array) =>
+    Stream.run(Stream.make(bytes), stdout).pipe(
       Effect.tap(() =>
         Effect.sync(() => {
-          progressBytes = progress.byteLength;
+          progressBytes += bytes.byteLength;
         }),
       ),
       Effect.ignore,
-    ),
-  );
+    );
+  // The parent observes completed progress before the worker can stall in synchronous reads.
+  const response = yield* serveContextBriefNativeRead(request, {
+    onStatusObserved: () => writeProgress(progress),
+    onScopedReadyEvidence: evidence =>
+      Effect.suspend(() => {
+        const bytes = encodeContextBriefScopedReadyProgress(request, evidence);
+        return bytes === undefined ? Effect.void : writeProgress(bytes);
+      }),
+  });
   yield* Schema.decodeEffect(contextBriefNativeReadResponseSchema)(response);
   const bytes = new TextEncoder().encode(`${JSON.stringify(response)}\n`);
   if (progressBytes + bytes.byteLength > CONTEXT_BRIEF_NATIVE_READ_OUTPUT_BYTES)

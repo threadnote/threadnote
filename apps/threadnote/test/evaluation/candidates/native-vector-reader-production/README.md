@@ -25,7 +25,7 @@ The release head requires its own CI results. [Native CI results](https://github
 
 ## Production capture method
 
-The reusable capture is a mode of the existing vector benchmark:
+The reusable capture is a mode of the existing vector benchmark. Run it from the recorded candidate checkout:
 
 ```sh
 bun scripts/benchmark-recall-vectors.ts \
@@ -72,6 +72,10 @@ Captures bind the actual compiled candidate commit/tree/target, strict native ma
 
 The earlier qualification plan required performance captures on all eight native profiles. The hosted campaign remains available for reference. [Hosted results](https://github.com/threadnote/threadnote/blob/5882dc7db71256f4d1151059fa6da527388f2515/apps/threadnote/test/evaluation/candidates/native-vector-reader-production/writer-qualification/results.md)
 
+An earlier hosted release capture measured candidate `18f102c69d4d6418d412c8e0c64974d3f98c34b1`. All eight native jobs finished, and ten of 32 required comparisons completed. Two of those missed the R5 limits, so that run recorded `rollback-required`. `decision.json` keeps that record under `historicalQualification`. [R5 capture run]
+
+The 100,000-vector cases lacked complete paired timings. Intel macOS stopped at the execution discriminator, and both Windows jobs stopped at the process-tree sampler pretest. The release headline limit separately stopped Bazel preflight and was fixed after this candidate was frozen. [Profile ledger], [PR 1142].
+
 ### Capture status fields
 
 The capture tool also reports `deadlineCompletion` version 1. For 100k dense only, the `candidate-only-deadline-completion` outcome requires three or more complete matched pairs, at least 30 exact warm sample IDs per arm in every pair, and exactly one sample-0 first-use observation per arm. Rust must return exact independent query and scalar-oracle digests within the original 2000ms deadline on every request. TS66 must exhaust that same budget on every first-use and warm request, as recorded from the typed ready-read boundary error. Both arms need complete process-tree RSS telemetry, executable and engine proof, verified provenance, and closing source, model, fixture and distribution fences.
@@ -84,4 +88,10 @@ Each capture reports its own case gates. The per-capture `qualified` field stays
 
 The root `platform-results.json`, `local-results.json`, and `linux-results.json` retain historical capture status. The current release decision is in `decision.json`.
 
+The profile ledger binds each available capture of that earlier release capture by artifact ID, file name, SHA-256, target and job ID. It reports missing or incomplete comparisons and preserves the first-use and warm failure counts. Its aggregate decision required all four cases on every profile.
+
 A two-document Darwin correctness probe confirmed that the unchanged TS66 executable accepts a genuine shared inference overlay, retains its original receipt, runs real staged BGE inference and the actual owned worker under the unchanged 2s deadline, and matches exact ordered scalar/query results. Original and hybrid inventories remained unchanged. `local-results.json` records that compatibility proof separately; it contains no performance qualification.
+
+[R5 capture run]: https://github.com/threadnote/threadnote/actions/runs/45044682108
+[Profile ledger]: platform-results.json
+[PR 1142]: https://github.com/threadnote/threadnote/pull/1142

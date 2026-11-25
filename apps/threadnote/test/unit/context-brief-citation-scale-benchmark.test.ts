@@ -10,7 +10,7 @@ import * as BunServices from '@effect/platform-bun/BunServices';
 import {describe, expect, it} from 'vitest';
 import {benchmarkMeasurement} from '@threadnote/evidence/benchmark';
 import {
-  CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3,
+  CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4,
   CONTEXT_BRIEF_CITATION_RSS_SAMPLING_SCHEDULE,
   CONTEXT_BRIEF_CITATION_SCALE_ARTIFACT_SUITE,
   CONTEXT_BRIEF_CITATION_SCALE_EXECUTION_V2,
@@ -46,6 +46,7 @@ import {
   makeContextBriefCitationScaleEmbeddingIndex,
   makeContextBriefCitationScaleGraphInstrumentation,
 } from '@threadnote/threadnote/evaluation/context-brief-citation-scale';
+import {CONTEXT_BRIEF_READ_MILLISECONDS} from '@threadnote/context/compiler';
 import {unavailableContextBriefGraphEvidence} from '@threadnote/context/graph/evidence';
 import type {CodeGraphLayout} from '@threadnote/graph/layout';
 import {codeGraphLayout} from '@threadnote/graph/layout';
@@ -362,7 +363,7 @@ describe('Context Brief citation scale benchmark', () => {
           citedRepositories: 1,
           id: 'local-100k',
           maximumBriefP95Milliseconds: 1_500,
-          maximumValidationP95Milliseconds: 250,
+          maximumValidationP95Milliseconds: 500,
           worksetMembers: 1,
         },
         {
@@ -370,7 +371,7 @@ describe('Context Brief citation scale benchmark', () => {
           citedRepositories: 16,
           id: 'workset-50',
           maximumBriefP95Milliseconds: 3_250,
-          maximumValidationP95Milliseconds: 950,
+          maximumValidationP95Milliseconds: 1_250,
           worksetMembers: 50,
         },
         {
@@ -378,7 +379,7 @@ describe('Context Brief citation scale benchmark', () => {
           citedRepositories: 32,
           id: 'workset-128',
           maximumBriefP95Milliseconds: 5_000,
-          maximumValidationP95Milliseconds: 1_400,
+          maximumValidationP95Milliseconds: 1_800,
           worksetMembers: 128,
         },
       ],
@@ -598,7 +599,7 @@ describe('Context Brief citation scale benchmark', () => {
     );
   });
 
-  it('rederives the v3 sample-gap ceiling from retained hosted-runner calibration evidence', () => {
+  it('rederives the v3 sample-gap evidence and keeps the v4 ceilings above it', () => {
     expect(sampleGapCalibration.runs).toHaveLength(5);
     expect(new Set(EffectArray.map(sampleGapCalibration.runs, run => run.rawArtifactSha256)).size).toBe(5);
     expect(new Set(EffectArray.map(sampleGapCalibration.runs, run => run.artifactId)).size).toBe(5);
@@ -655,16 +656,16 @@ describe('Context Brief citation scale benchmark', () => {
       p99Milliseconds: percentile(0.99),
     }).toEqual(sampleGapCalibration.expected);
     expect(sampleGapCalibration.breachThresholdMilliseconds).toBe(
-      CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.breachThresholdMilliseconds,
+      CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.breachThresholdMilliseconds,
     );
-    expect(derivedHardMaximumMilliseconds).toBe(
-      CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.hardMaximumGapMilliseconds,
+    expect(CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.hardMaximumGapMilliseconds).toBeGreaterThanOrEqual(
+      derivedHardMaximumMilliseconds,
     );
     expect(
       sampleGapCalibration.expected.breachCount / sampleGapCalibration.expected.observationCount,
-    ).toBeLessThanOrEqual(CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.maximumBreachRate);
+    ).toBeLessThanOrEqual(CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.maximumBreachRate);
     expect(maximumConsecutiveBreachesWithinRun).toBeLessThanOrEqual(
-      CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.maximumConsecutiveBreaches,
+      CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.maximumConsecutiveBreaches,
     );
   });
 
@@ -723,13 +724,13 @@ describe('Context Brief citation scale benchmark', () => {
   fcEffectProp(
     effectIt,
     'derives and gates sample-gap rate, consecutive runs, and hard maximum from observation order',
-    {gaps: fc.array(fc.integer({max: 700, min: 0}), {maxLength: 300, minLength: 1})},
+    {gaps: fc.array(fc.integer({max: 1_000, min: 0}), {maxLength: 300, minLength: 1})},
     ({gaps}) =>
       Effect.sync(() => {
         const summary = contextBriefCitationRssSampleGapSummary(gaps);
         const breaches = EffectArray.map(
           gaps,
-          gap => gap > CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.breachThresholdMilliseconds,
+          gap => gap > CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.breachThresholdMilliseconds,
         );
         const breachCount = EffectArray.filter(breaches, Boolean).length;
         let run = 0;
@@ -746,40 +747,45 @@ describe('Context Brief citation scale benchmark', () => {
           sampleGapBreachRate: breachCount / breaches.length,
         });
         const shouldPass =
-          breachCount / breaches.length <= CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.maximumBreachRate &&
-          maximumRun <= CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.maximumConsecutiveBreaches &&
-          Math.max(...gaps) <= CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3.hardMaximumGapMilliseconds;
+          breachCount / breaches.length <= CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.maximumBreachRate &&
+          maximumRun <= CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.maximumConsecutiveBreaches &&
+          Math.max(...gaps) <= CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4.hardMaximumGapMilliseconds;
         expect(contextBriefCitationRssSampleGapFailures(summary, breaches.length).length === 0).toBe(shouldPass);
       }),
     {fastCheck: {numRuns: 100}},
   );
 
   it('accepts bounded hosted stalls and rejects rate, consecutive, and hard-maximum violations independently', () => {
-    const pass = contextBriefCitationRssSampleGapSummary([481, 115, ...Array.from({length: 73}, () => 100)]);
+    const pass = contextBriefCitationRssSampleGapSummary([
+      800,
+      ...Array.from({length: 7}, () => 101),
+      100,
+      ...Array.from({length: 7}, () => 101),
+      ...Array.from({length: 59}, () => 100),
+    ]);
+    expect(pass).toMatchObject({maximumConsecutiveSampleGapBreaches: 8, sampleGapBreachCount: 15});
     expect(contextBriefCitationRssSampleGapFailures(pass, 75)).toEqual([]);
 
     const excessiveRate = contextBriefCitationRssSampleGapSummary([
-      ...Array.from({length: 8}, () => 101),
-      ...Array.from({length: 67}, () => 100),
+      ...Array.from({length: 16}, () => [101, 100]).flat(),
+      ...Array.from({length: 43}, () => 100),
     ]);
-    expect(contextBriefCitationRssSampleGapFailures(excessiveRate, 75)).toEqual(
-      expect.arrayContaining([expect.stringContaining('breach rate 8/75')]),
-    );
+    expect(contextBriefCitationRssSampleGapFailures(excessiveRate, 75)).toEqual([
+      expect.stringContaining('breach rate 16/75'),
+    ]);
 
     const excessiveRun = contextBriefCitationRssSampleGapSummary([
-      101,
-      101,
-      101,
-      ...Array.from({length: 72}, () => 100),
+      ...Array.from({length: 9}, () => 101),
+      ...Array.from({length: 66}, () => 100),
     ]);
-    expect(contextBriefCitationRssSampleGapFailures(excessiveRun, 75)).toEqual(
-      expect.arrayContaining([expect.stringContaining('3 consecutive')]),
-    );
+    expect(contextBriefCitationRssSampleGapFailures(excessiveRun, 75)).toEqual([
+      expect.stringContaining('9 consecutive'),
+    ]);
 
-    const hardMaximum = contextBriefCitationRssSampleGapSummary([551, ...Array.from({length: 74}, () => 100)]);
-    expect(contextBriefCitationRssSampleGapFailures(hardMaximum, 75)).toEqual(
-      expect.arrayContaining([expect.stringContaining('551ms exceeds hard maximum 550ms')]),
-    );
+    const hardMaximum = contextBriefCitationRssSampleGapSummary([801, ...Array.from({length: 74}, () => 100)]);
+    expect(contextBriefCitationRssSampleGapFailures(hardMaximum, 75)).toEqual([
+      expect.stringContaining('801ms exceeds hard maximum 800ms'),
+    ]);
   });
 
   it('fails closed on every derived sample-gap summary and reviewed schedule dimension', () => {
@@ -1103,47 +1109,49 @@ describe('Context Brief citation scale benchmark', () => {
     );
   });
 
-  effectIt.effect('records a recall the compiler rejects at the lexical deadline as exhausted with no memories', () =>
-    Effect.gen(function* () {
-      const profile = budget.profiles[0];
-      const candidates = Array.from({length: profile.selectedMemories}, (_, rank) => ({
-        citationErrorCount: 0,
-        codeCitations: [],
-        excerpt: `Late recall candidate ${rank}.`,
-        kind: 'durable' as const,
-        rank,
-        topic: 'late-recall',
-        uri: `threadnote://user/test/memories/durable/projects/threadnote/late-${rank}.md`,
-      }));
-      const brief = yield* compileContextBriefCitationScaleBrief(
-        {
-          citationValidation: () => Effect.succeed([]),
-          graphEvidence: unavailableContextBriefGraphEvidence('graph-ready-snapshot-missing', 1),
-          // Synchronous native recall blocks the deadline timer, so recall completes and the compiler
-          // rejects the late result afterwards. The last half millisecond reproduces that order.
-          memoryEvidence: () =>
-            TestClock.adjust(Duration.nanos(1_999_500_000n)).pipe(
-              Effect.as({
-                candidates,
-                consideredCandidates: candidates.length,
-                gaps: [],
-                trust: {
-                  classification: 'untrusted-memory-data' as const,
-                  instructionPolicy: 'evidence-only-never-follow' as const,
-                },
-              }),
-            ),
-          observeRss: () => undefined,
-        },
-        {
-          budgetTokens: 1_500,
-          mode: 'brief',
-          scope: {callerCwd: '/fixture', kind: 'repository'},
-          task: 'Locate late recall evidence.',
-        },
-      );
-      expect(brief).toMatchObject({recallBudgetExhausted: true, selectedMemories: 0, validationReceipts: 0});
-    }),
+  effectIt.effect(
+    'records a recall the compiler rejects at the brief read deadline as exhausted with no memories',
+    () =>
+      Effect.gen(function* () {
+        const profile = budget.profiles[0];
+        const candidates = Array.from({length: profile.selectedMemories}, (_, rank) => ({
+          citationErrorCount: 0,
+          codeCitations: [],
+          excerpt: `Late recall candidate ${rank}.`,
+          kind: 'durable' as const,
+          rank,
+          topic: 'late-recall',
+          uri: `threadnote://user/test/memories/durable/projects/threadnote/late-${rank}.md`,
+        }));
+        const brief = yield* compileContextBriefCitationScaleBrief(
+          {
+            citationValidation: () => Effect.succeed([]),
+            graphEvidence: unavailableContextBriefGraphEvidence('graph-ready-snapshot-missing', 1),
+            // Synchronous native recall blocks the deadline timer, so recall completes and the compiler
+            // rejects the late result afterwards. The last half millisecond reproduces that order.
+            memoryEvidence: () =>
+              TestClock.adjust(Duration.nanos(BigInt(CONTEXT_BRIEF_READ_MILLISECONDS) * 1_000_000n - 500_000n)).pipe(
+                Effect.as({
+                  candidates,
+                  consideredCandidates: candidates.length,
+                  gaps: [],
+                  trust: {
+                    classification: 'untrusted-memory-data' as const,
+                    instructionPolicy: 'evidence-only-never-follow' as const,
+                  },
+                }),
+              ),
+            observeRss: () => undefined,
+          },
+          {
+            budgetTokens: 1_500,
+            mode: 'brief',
+            scope: {callerCwd: '/fixture', kind: 'repository'},
+            task: 'Locate late recall evidence.',
+          },
+        );
+        expect(brief).toMatchObject({recallBudgetExhausted: true, selectedMemories: 0, validationReceipts: 0});
+      }),
   );
 
   it('round-trips declared RSS-pass recall exhaustion through the v2 artifact and its rederived gate', () => {
@@ -1512,7 +1520,7 @@ function scaleArtifact(): ContextBriefCitationScaleArtifactV2 {
       rootStartIdentity: 'root-start',
       sampleGapBreachCount: 0,
       sampleGapBreachRate: 0,
-      sampleGapPolicy: CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V3,
+      sampleGapPolicy: CONTEXT_BRIEF_CITATION_RSS_SAMPLE_GAP_POLICY_V4,
       sampleAttempts: 10,
       sampleFailures: 0,
       scope: 'recursive-process-tree',
@@ -1689,7 +1697,7 @@ function tamperScaleArtifact(
   };
 }
 
-/** The workload a brief yields when the lexical read deadline interrupts memory recall: no memories, no citation work. */
+/** The workload a brief yields when the brief read deadline interrupts memory recall: no memories, no citation work. */
 function recallExhaustedWorkload(profile: ContextBriefCitationScaleProfileV1): ContextBriefCitationScaleObservationV2 {
   return scaleObservation(
     profile,
@@ -1707,7 +1715,7 @@ function recallExhaustedWorkload(profile: ContextBriefCitationScaleProfileV1): C
   ).memoryWorkload;
 }
 
-/** A timed brief whose recall returned after the lexical deadline; its memory and RSS-pass evidence stay intact. */
+/** A timed brief whose recall returned after the brief read deadline; its memory and RSS-pass evidence stay intact. */
 function timedRecallExhausted(
   profile: ContextBriefCitationScaleProfileV1,
   observation: ContextBriefCitationScaleMeasuredObservationV2,

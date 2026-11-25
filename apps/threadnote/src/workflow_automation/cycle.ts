@@ -86,8 +86,12 @@ import {
 } from './cycle_merge.js';
 import {
   bindNativeCycleDeliveryBase,
+  CurrentNativeMaintenanceProof,
+  CurrentNativeTerminalDeliveryWatch,
   nativeCommitDescends,
+  nativeMaintenanceProofError,
   verifyNativeCyclePrDeliveryIdentity,
+  verifyNativeRetargetedBaseBinding,
 } from './cycle_delivery.js';
 import {verifyNativeCycleSnapshotEvidence, verifyNativeCycleUnreviewedRebase} from './cycle_recovery.js';
 import {nativeLegacyPathOnlyPhases, type NativeAuthoringCall} from './authoring_artifacts.js';
@@ -426,7 +430,7 @@ const runNativeCycleRequest = <R>(
             'state-conflict',
             'Read this run and provide its exact state revision before a cycle mutation.',
           );
-        const save = (value: NativeCycleRuntime) =>
+        const save = (value: NativeCycleRuntime, beforeCommit?: Effect.Effect<void, WorkflowAutomationError>) =>
           Effect.gen(function* () {
             if (stableJson(value) === stableJson(stored.state.cycle)) return stored.revision;
             const full =
@@ -442,8 +446,12 @@ const runNativeCycleRequest = <R>(
                 {detail: {limit: full.limit}, next: nativeNext.view({runId: request.runId, callerCwd: repo})},
               );
             const canonical = yield* from(() => decodeNativeCycleRuntime(JSON.parse(stableJson(value))));
-            return (yield* writeNativeWorkflowState(config, {...stored.state, cycle: canonical}, stored.revision))
-              .revision;
+            return (yield* writeNativeWorkflowState(
+              config,
+              {...stored.state, cycle: canonical},
+              stored.revision,
+              beforeCommit,
+            )).revision;
           });
         const pinBaseline = (phaseId: string) =>
           Effect.gen(function* () {
@@ -1696,22 +1704,6 @@ const runNativeCycleRequest = <R>(
             historicalMergedHead = incomingDelivery.watch.headSha;
             currentHead = proof.head;
             currentTree = proof.tree;
-            const {baseRefBinding: _baseRefBinding, ...unboundIncomingPr} = incomingPr;
-            const unboundDelivery: NativeCycleDelivery = {
-              ...incomingDelivery,
-              pr: unboundIncomingPr,
-            };
-            const checkedHistoricalBase = yield* bindNativeCycleDeliveryBase(
-              repo,
-              selected.baseBranch,
-              unboundDelivery,
-            );
-            if (stableJson(checkedHistoricalBase.pr?.baseRefBinding) !== stableJson(priorPr.baseRefBinding))
-              return yield* fail(
-                'base-ref-unverified',
-                'The historical PR base no longer matches its canonical receipt.',
-              );
-            incomingDelivery = checkedHistoricalBase;
           } else {
             const source = nativeCycleLatestSnapshot(runtime, selected.id, proof.phaseHash);
             if (
@@ -1790,11 +1782,45 @@ const runNativeCycleRequest = <R>(
           } else {
             delivery = yield* bindNativeCycleDeliveryBase(repo, selected.baseBranch, request.delivery);
           }
-          if (delivery.delivery === 'pr')
-            yield* verifyNativeCyclePrDeliveryIdentity(repo, delivery, {
+          const terminalWatch = yield* CurrentNativeTerminalDeliveryWatch;
+          const maintenance = yield* CurrentNativeMaintenanceProof;
+          const evidence = delivery.watch?.evidence ?? '';
+          const hasMaintenanceMarker = EffectString.includes(';maintenance-proof:')(evidence);
+          if (
+            (hasMaintenanceMarker || maintenance) &&
+            (!historicalMergeCandidate ||
+              !terminalWatch ||
+              !maintenance ||
+              !EffectString.includes(maintenance.marker)(evidence))
+          )
+            return yield* nativeMaintenanceProofError(
+              'Terminal maintenance evidence requires the verified workflow task route.',
+            );
+          let retargeted = false;
+          if (delivery.delivery === 'pr') {
+            const identity = yield* verifyNativeCyclePrDeliveryIdentity(repo, delivery, {
               requireEvidence: priorDelivery === undefined,
               allowMerged: delivery.pr?.state === 'merged',
+              ...(historicalMergeCandidate && terminalWatch ? {historicalState: state, maintenance} : {}),
             });
+            retargeted = identity.baseBranch !== delivery.pr?.baseBranch;
+          }
+          if (historicalMergeCandidate && delivery.pr) {
+            if (retargeted) {
+              yield* verifyNativeRetargetedBaseBinding(repo, selected.baseBranch, delivery);
+            } else {
+              const {baseRefBinding: _baseRefBinding, ...unboundPr} = delivery.pr;
+              const rebound = yield* bindNativeCycleDeliveryBase(repo, selected.baseBranch, {
+                ...delivery,
+                pr: unboundPr,
+              });
+              if (stableJson(rebound.pr?.baseRefBinding) !== stableJson(delivery.pr.baseRefBinding))
+                return yield* fail(
+                  'base-ref-unverified',
+                  'The historical PR base no longer matches its canonical receipt.',
+                );
+            }
+          }
           if (historicalMergedHead !== undefined) {
             // After the merge, the local branch can stand at any commit from the reviewed head to the merged head.
             const branchHead = Effect2.pipe(
@@ -1821,7 +1847,12 @@ const runNativeCycleRequest = <R>(
               return yield* fail('source-drift', 'Source changed during delivery base verification.');
           }
           const updated = yield* from(() => recordNativeCycleDelivery(accepted, selected.id, delivery));
-          return {status: 'ok', revision: yield* save({...runtime, state: updated}), next: nextNativeCycle(updated)};
+          const beforeCommit = historicalMergeCandidate ? terminalWatch?.(delivery) : undefined;
+          return {
+            status: 'ok',
+            revision: yield* save({...runtime, state: updated}, beforeCommit),
+            next: nextNativeCycle(updated),
+          };
         }
         if (request.command === 'learning-packet') {
           const selected = yield* from(getPhase);

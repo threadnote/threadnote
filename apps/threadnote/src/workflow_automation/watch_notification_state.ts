@@ -107,6 +107,7 @@ export const nativeWatchNotificationSchema = Schema.Struct({
           'host-session-interrupted',
           'host-delivery-ambiguous',
           'host-session-owned',
+          'host-permission-denied',
         ]),
       ),
     }),
@@ -123,27 +124,41 @@ export const nativeWatchNotificationSchema = Schema.Struct({
 });
 export type NativeWatchNotification = typeof nativeWatchNotificationSchema.Type;
 
+export function ownedQueuedNativeWatchReceipt(
+  value: NativeWatchNotification,
+  state: NativeWatchState,
+  owner: {consumerId: string; wakeupId?: string},
+) {
+  const pending = value.outbox;
+  if (
+    value.target.host === 'codex' &&
+    value.consumerId === owner.consumerId &&
+    value.wakeupId === owner.wakeupId &&
+    state.consumer?.id === owner.consumerId &&
+    state.consumer.wakeupId === owner.wakeupId &&
+    pending?.status === 'queued' &&
+    pending.receipt !== undefined &&
+    pending.attemptId !== undefined &&
+    pending.attempts > 0
+  )
+    return pending;
+  return undefined;
+}
+
 /** Terminal arrival has no lease, delivery, disposition or collector authority. */
 export function matchesTerminalNativeWatchArrival(
   value: NativeWatchNotification,
   state: NativeWatchState,
   route: {consumerId: string; wakeupId: string; eventKey: string; attemptId?: string},
 ): boolean {
-  const pending = value.outbox;
+  const pending = ownedQueuedNativeWatchReceipt(value, state, route);
   return (
-    value.target.host === 'codex' &&
     state.prState !== 'open' &&
     state.events.length === 0 &&
     state.delivery === null &&
     state.acknowledged === state.nextSequence - 1 &&
     !Array.some(state.work, item => item.status === 'open' || item.status === 'blocked') &&
-    value.consumerId === route.consumerId &&
-    value.wakeupId === route.wakeupId &&
-    state.consumer?.id === route.consumerId &&
-    state.consumer.wakeupId === route.wakeupId &&
-    pending?.status === 'queued' &&
-    pending.receipt !== undefined &&
-    pending.attempts > 0 &&
+    pending !== undefined &&
     route.attemptId !== undefined &&
     pending.attemptId === route.attemptId &&
     pending.key === route.eventKey &&
