@@ -1,0 +1,133 @@
+name: Native TypeScript prepared asset
+description: >-
+  Provide a verified prepared native TypeScript asset on a host with a reviewed binary pin and export
+  THREADNOTE_TYPESCRIPT_NATIVE_PREPARED_ASSET_DIR. Restores payload+prepared from actions/cache, keyed on every
+  construction input; constructs once on a miss. Cached bytes are untrusted and always re-verified. Also exports
+  THREADNOTE_NATIVE_TYPESCRIPT_REQUIRED=1, so a native test that then lacks the asset fails instead of skipping (Bazel
+  forwards both names). Windows and unpinned hosts provision and export nothing. Requires a checkout, Bun and
+  `bun install --frozen-lockfile` first.
+inputs:
+  restore-only:
+    description: >-
+      'true' for consumers of a per-host asset job: restore the saved asset (a miss fails the job), never construct.
+      Requires cache-key.
+    required: false
+    default: 'false'
+  cache-key:
+    description: >-
+      The producer job's exact `cache_key` output. A consumer restores by this key instead of re-deriving it from its
+      own checkout (a pull request merge commit can derive a different key than the head the producer built). The
+      restored bytes are still verified against this checkout's pins before use.
+    required: false
+    default: ''
+  deadline-multiplier:
+    description: THREADNOTE_TYPESCRIPT_NATIVE_DEADLINE_MULTIPLIER for a cold construction (1-4).
+    required: false
+    default: '3'
+outputs:
+  enabled:
+    description: "'true' when this host has a reviewed pin and the asset was provided."
+    value: ${{ steps.inputs.outputs.enabled }}
+  prepared:
+    description: The verified prepared asset directory (fixed per host under the runner temp directory).
+    value: ${{ steps.inputs.outputs.prepared }}
+  payload:
+    description: >-
+      The verified construction payload beside `prepared`. A job that builds a compiled release sets
+      THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR to it on the build step, so the payload stages runtime/typescript. Empty
+      where the host has no reviewed pin.
+    value: ${{ steps.inputs.outputs.payload }}
+  cache_key:
+    description: The cache key the asset was restored or saved under; producers expose it to their consumers.
+    value: ${{ steps.key.outputs.cache_key }}
+runs:
+  using: composite
+  steps:
+    - name: Resolve the host pin, cache key and fixed asset location
+      id: inputs
+      shell: bash
+      run: bun tools/ci/native-typescript-construction.ts provision-inputs
+    - name: Select the cache key (the producer's, for a restore-only consumer)
+      id: key
+      if: steps.inputs.outputs.enabled == 'true'
+      shell: bash
+      env:
+        RESTORE_ONLY: ${{ inputs.restore-only }}
+        PRODUCER_KEY: ${{ inputs.cache-key }}
+        DERIVED_KEY: ${{ steps.inputs.outputs.cache_key }}
+        HOST: ${{ steps.inputs.outputs.host }}
+      run: |
+        # Only a well-formed key for this host reaches GITHUB_OUTPUT (and from there the cache actions and consumers).
+        valid_key() {
+          printf '%s' "$1" | grep -Eqx "threadnote-native-typescript-$HOST-[0-9a-f]{64}"
+        }
+        if [ "$RESTORE_ONLY" != true ]; then
+          valid_key "$DERIVED_KEY" || { echo "::error::The derived native asset cache key is malformed."; exit 1; }
+          echo "cache_key=$DERIVED_KEY" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        if [ -z "$PRODUCER_KEY" ]; then
+          echo '::error::restore-only requires the producer job cache_key output (input cache-key).'
+          exit 1
+        fi
+        valid_key "$PRODUCER_KEY" || { echo "::error::The producer cache key is not a native asset key for $HOST."; exit 1; }
+        if [ "$PRODUCER_KEY" != "$DERIVED_KEY" ]; then
+          echo "::notice::This checkout derives a different native asset key than its producer (for example a merge commit); restoring the producer's asset and verifying it against this checkout's pins."
+        fi
+        echo "cache_key=$PRODUCER_KEY" >> "$GITHUB_OUTPUT"
+    - name: Restore the prepared asset
+      id: cache
+      if: steps.inputs.outputs.enabled == 'true'
+      uses: actions/cache/restore@v6
+      with:
+        key: ${{ steps.key.outputs.cache_key }}
+        path: ${{ steps.inputs.outputs.asset_root }}
+        fail-on-cache-miss: ${{ inputs.restore-only == 'true' }}
+    - name: Construct the prepared asset on a cache miss
+      if: >-
+        steps.inputs.outputs.enabled == 'true' && steps.cache.outputs.cache-hit != 'true' && inputs.restore-only != 'true'
+      uses: ./.github/actions/native-typescript-construct
+      with:
+        repository: ${{ steps.inputs.outputs.repository }}
+        commit: ${{ steps.inputs.outputs.commit }}
+        tree: ${{ steps.inputs.outputs.tree }}
+        source: ${{ steps.inputs.outputs.source }}
+        archive: ${{ steps.inputs.outputs.archive }}
+        archive-url: ${{ steps.inputs.outputs.archive_url }}
+        archive-size: ${{ steps.inputs.outputs.archive_size }}
+        private-root: ${{ steps.inputs.outputs.private_root }}
+        repository-root: ${{ steps.inputs.outputs.repository_root }}
+        evidence: ${{ steps.inputs.outputs.evidence }}
+        deadline-multiplier: ${{ inputs.deadline-multiplier }}
+    - name: Move the fresh construction to the fixed asset location
+      if: >-
+        steps.inputs.outputs.enabled == 'true' && steps.cache.outputs.cache-hit != 'true' && inputs.restore-only != 'true'
+      shell: bash
+      env:
+        EVIDENCE: ${{ steps.inputs.outputs.evidence }}
+        ASSET_ROOT: ${{ steps.inputs.outputs.asset_root }}
+      run: bun tools/ci/native-typescript-construction.ts provision-install
+    - name: Verify the prepared asset and its construction payload
+      # A cache hit is untrusted input: it is verified exactly like a fresh construction before any use.
+      if: steps.inputs.outputs.enabled == 'true'
+      shell: bash
+      env:
+        PREPARED: ${{ steps.inputs.outputs.prepared }}
+      run: bun tools/semantic/build-typescript-native.ts --verify-prepared "$PREPARED"
+    - name: Save the verified prepared asset
+      if: >-
+        steps.inputs.outputs.enabled == 'true' && steps.cache.outputs.cache-hit != 'true' && inputs.restore-only != 'true'
+      uses: actions/cache/save@v6
+      with:
+        key: ${{ steps.key.outputs.cache_key }}
+        path: ${{ steps.inputs.outputs.asset_root }}
+    - name: Export the prepared asset directory
+      if: steps.inputs.outputs.enabled == 'true'
+      shell: bash
+      env:
+        PREPARED: ${{ steps.inputs.outputs.prepared }}
+      run: |
+        {
+          echo "THREADNOTE_TYPESCRIPT_NATIVE_PREPARED_ASSET_DIR=$PREPARED"
+          echo 'THREADNOTE_NATIVE_TYPESCRIPT_REQUIRED=1'
+        } >> "$GITHUB_ENV"

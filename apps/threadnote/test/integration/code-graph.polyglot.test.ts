@@ -13,6 +13,7 @@ import {codeGraphLayout} from '@threadnote/graph/layout';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {CodeGraphStore} from '@threadnote/graph/store';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import {native} from '@threadnote/graph/test/helpers/native-typescript-session';
 
 const temporaryRoots: string[] = [];
 
@@ -21,7 +22,7 @@ afterEach(() => {
 });
 
 describe('polyglot code graph lifecycle', () => {
-  effectIt.effect(
+  native(effectIt.effect)(
     'indexes and queries a mixed compiler, AST, structured, and bounded specialist graph',
     () =>
       Effect.gen(function* () {

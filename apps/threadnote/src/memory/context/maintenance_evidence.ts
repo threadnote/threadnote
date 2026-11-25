@@ -1184,7 +1184,7 @@ export const requestedRootProjectionComplete = Effect.fn('contextMaintenance.req
       receipt !== undefined &&
       receiptWithinRetryWindow(receipt, now) &&
       (receipt.status !== 'unknown' ||
-        (!['validation-error', 'citation-limit'].includes(receipt.reason) &&
+        (!['validation-error', 'citation-limit', 'extraction-unavailable'].includes(receipt.reason) &&
           (receipt.reason !== 'graph-stale' || receipt.repositoryRouteUnavailable === true))) &&
       entry.associations?.[selector] !== undefined &&
       entry.associations[selector] === observation.association.bySelector[selector]

@@ -6,6 +6,7 @@ import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import {promisify} from '@threadnote/testing/node-util';
 import {describe, expect, it} from 'vitest';
+import {skipWithoutNativeTypeScript} from '@threadnote/graph/test/helpers/native-typescript-session';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 import {Option as EffectOption, Schema} from 'effect';
@@ -996,7 +997,8 @@ describe('Effect CLI', () => {
     }
   });
 
-  it('returns a ready stale graph immediately after the checked-out commit changes', async () => {
+  it('returns a ready stale graph immediately after the checked-out commit changes', async context => {
+    skipWithoutNativeTypeScript(context);
     const root = await mkdtemp(join(tmpdir(), 'threadnote-effect-cli-graph-stale-query-'));
     const home = join(root, '.threadnote-test-home');
     try {
@@ -1270,7 +1272,8 @@ describe('Effect CLI', () => {
     }
   }, 30_000);
 
-  it('drains graph query JSON larger than the platform pipe buffer before exiting', async () => {
+  it('drains graph query JSON larger than the platform pipe buffer before exiting', async context => {
+    skipWithoutNativeTypeScript(context);
     const root = await mkdtemp(join(tmpdir(), 'threadnote-effect-cli-graph-large-output-'));
     const home = join(root, '.threadnote-test-home');
     try {
@@ -1420,7 +1423,8 @@ describe('Effect CLI', () => {
     }
   });
 
-  it('includes eligible untracked files in Git-base impact analysis', async () => {
+  it('includes eligible untracked files in Git-base impact analysis', async context => {
+    skipWithoutNativeTypeScript(context);
     const root = await mkdtemp(join(tmpdir(), 'threadnote-effect-cli-graph-'));
     const home = join(root, '.threadnote-test-home');
     try {
@@ -1465,7 +1469,8 @@ describe('Effect CLI', () => {
     }
   });
 
-  it('recovers committed deletions from the exact CLI impact base', async () => {
+  it('recovers committed deletions from the exact CLI impact base', async context => {
+    skipWithoutNativeTypeScript(context);
     const root = await mkdtemp(join(tmpdir(), 'threadnote-effect-cli-graph-deleted-base-'));
     const home = join(root, '.threadnote-test-home');
     try {
@@ -1527,7 +1532,8 @@ describe('Effect CLI', () => {
     }
   });
 
-  it('uses ready snapshots by default and refreshes stale reads only when current freshness is requested', async () => {
+  it('uses ready snapshots by default and refreshes stale reads only when current freshness is requested', async context => {
+    skipWithoutNativeTypeScript(context);
     const root = await mkdtemp(join(tmpdir(), 'threadnote-effect-cli-graph-freshness-'));
     const home = join(root, '.threadnote-test-home');
     try {
@@ -1613,7 +1619,8 @@ describe('Effect CLI', () => {
     }
   }, 30_000);
 
-  it('fails fast for allow-stale without a snapshot and cancels bounded current refreshes cleanly', async () => {
+  it('fails fast for allow-stale without a snapshot and cancels bounded current refreshes cleanly', async context => {
+    skipWithoutNativeTypeScript(context);
     const root = await mkdtemp(join(tmpdir(), 'threadnote-effect-cli-graph-read-budget-'));
     const home = join(root, '.threadnote-test-home');
     try {

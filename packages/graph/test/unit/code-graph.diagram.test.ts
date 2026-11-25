@@ -5,6 +5,7 @@ import {TestClock} from 'effect/testing';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {expect} from 'vitest';
 import {CodeGraphDiagramResultSchema, type CodeGraphDiagramResult} from '../../src/query/diagram_contract.js';
+import {DIAGRAM_SOURCE_ORDER_UNAVAILABLE} from '../../src/query/diagram.js';
 import {readCodeGraphDiagram, readCodeGraphDiagramForStatus} from '../../src/query/diagram_evidence.js';
 import {extractRepositoryFacts, resolveExtractedRepositoryFacts} from '../../src/extractor.js';
 import {codeGraphCommittedContentHash} from '../../src/content_identity.js';
@@ -23,6 +24,8 @@ import {
   type RepositoryIdentity,
 } from '../../src/types.js';
 import {citationPlatformLayer} from '../helpers/citation-platform.js';
+import {NativeTypeScriptSessionService} from '../../src/typescript_runtime.js';
+import {native, nativeTypeScriptTestSession} from '../helpers/native-typescript-session.js';
 
 const span = (line: number) => ({line, column: 2, endLine: line, endColumn: 12});
 
@@ -143,62 +146,73 @@ const storedDiagramFixture = Effect.gen(function* () {
   return {databasePath, identity, save, snapshotScope, store};
 });
 
+/** One committed TypeScript file, so Sequence reads verified bytes from the selected commit. */
+const committedSequenceFixture = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const repository = yield* fs.makeTempDirectoryScoped({prefix: 'graph-sequence-'});
+  const home = yield* fs.makeTempDirectoryScoped({prefix: 'graph-sequence-home-'});
+  const git = (args: readonly string[]) => runCommandEffect('git', ['-C', repository, ...args]);
+  yield* git(['init', '--quiet']);
+  yield* git(['config', 'user.name', 'Test']);
+  yield* git(['config', 'user.email', 'test@example.invalid']);
+  const filename = 'pipeline.ts';
+  const source = Arr.join(
+    [
+      'function openInput() {}',
+      'function publishOutput() {}',
+      'export function runPipeline() {',
+      '  openInput();',
+      '  publishOutput();',
+      '}',
+      'export async function runWithCallback(callback: () => Promise<void>) {',
+      '  openInput();',
+      '  await callback();',
+      '}',
+      '',
+    ],
+    '\n',
+  );
+  yield* fs.writeFileString(path.join(repository, filename), source);
+  yield* git(['add', filename]);
+  yield* git(['commit', '--quiet', '-m', 'selected snapshot']);
+  const indexedIdentity = yield* resolveRepositoryIdentity(repository);
+  const {databasePath} = codeGraphLayout(path, home, indexedIdentity.checkoutId, indexedIdentity.worktreeId);
+  const blobId = Str.trim((yield* git(['rev-parse', `HEAD:${filename}`])).stdout);
+  const file = {
+    ...diagramSourceFile(filename, 'typescript', source),
+    blobId,
+    contentHash: codeGraphCommittedContentHash(indexedIdentity.objectFormat, blobId),
+  };
+  const snapshot = (symbolCount: number, edgeCount: number): CodeGraphSnapshot => ({
+    id: 'cgsn_' + Str.repeat(40)('8'),
+    repositoryId: indexedIdentity.repositoryId,
+    worktreeId: indexedIdentity.worktreeId,
+    commit: indexedIdentity.headCommit,
+    extractorSet: 'fixture',
+    dirty: false,
+    fileCount: 1,
+    symbolCount,
+    edgeCount,
+    state: 'ready',
+  });
+  return {databasePath, file, filename, git, home, indexedIdentity, repository, snapshot, source};
+});
+
 effectIt.layer(diagramStoreLayer)(it => {
-  it.effect('orders Sequence calls from the leased commit after the checkout changes', () =>
+  native(it.effect)('orders Sequence calls from the leased commit after the checkout changes', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const store = yield* CodeGraphStore;
-      const repository = yield* fs.makeTempDirectoryScoped({prefix: 'graph-sequence-'});
-      const home = yield* fs.makeTempDirectoryScoped({prefix: 'graph-sequence-home-'});
-      const git = (args: readonly string[]) => runCommandEffect('git', ['-C', repository, ...args]);
-      yield* git(['init', '--quiet']);
-      yield* git(['config', 'user.name', 'Test']);
-      yield* git(['config', 'user.email', 'test@example.invalid']);
-      const filename = 'pipeline.ts';
-      const source = Arr.join(
-        [
-          'function openInput() {}',
-          'function publishOutput() {}',
-          'export function runPipeline() {',
-          '  openInput();',
-          '  publishOutput();',
-          '}',
-          'export async function runWithCallback(callback: () => Promise<void>) {',
-          '  openInput();',
-          '  await callback();',
-          '}',
-          '',
-        ],
-        '\n',
-      );
-      yield* fs.writeFileString(path.join(repository, filename), source);
-      yield* git(['add', filename]);
-      yield* git(['commit', '--quiet', '-m', 'selected snapshot']);
-      const indexedIdentity = yield* resolveRepositoryIdentity(repository);
-      const {databasePath} = codeGraphLayout(path, home, indexedIdentity.checkoutId, indexedIdentity.worktreeId);
-      const blobId = Str.trim((yield* git(['rev-parse', `HEAD:${filename}`])).stdout);
-      const file = {
-        ...diagramSourceFile(filename, 'typescript', source),
-        blobId,
-        contentHash: codeGraphCommittedContentHash(indexedIdentity.objectFormat, blobId),
-      };
-      const [facts] = extractRepositoryFacts([file]);
+      const session = yield* nativeTypeScriptTestSession;
+      const {databasePath, file, filename, git, indexedIdentity, repository, source, ...fixture} =
+        yield* committedSequenceFixture;
+      const [facts] = yield* Effect.promise(() => extractRepositoryFacts([file], undefined, session));
       expect(facts).toBeDefined();
       if (facts === undefined) return;
       const indexedEdges = Arr.filter(facts.edges, edge => edge.evidenceSpan.line !== 9);
-      const snapshot: CodeGraphSnapshot = {
-        id: 'cgsn_' + Str.repeat(40)('8'),
-        repositoryId: indexedIdentity.repositoryId,
-        worktreeId: indexedIdentity.worktreeId,
-        commit: indexedIdentity.headCommit,
-        extractorSet: 'fixture',
-        dirty: false,
-        fileCount: 1,
-        symbolCount: facts.symbols.length,
-        edgeCount: indexedEdges.length,
-        state: 'ready',
-      };
+      const snapshot = fixture.snapshot(facts.symbols.length, indexedEdges.length);
       yield* store.activate(databasePath, indexedIdentity, snapshot, [file], facts.symbols, indexedEdges);
       yield* fs.writeFileString(
         path.join(repository, filename),
@@ -213,7 +227,7 @@ effectIt.layer(diagramStoreLayer)(it => {
           store,
           {databasePath, identity, freshness: 'stale', languagePacks: [], readySnapshot: snapshot, stale: true},
           {question: `How does ${subject} work?`, diagramType: 'sequence'},
-        );
+        ).pipe(Effect.provideService(NativeTypeScriptSessionService, session));
       const result = requireDiagram(yield* run('runPipeline'));
       expect(result.scope.commit).toBe(snapshot.commit);
       expect(result.source).toMatch(/->>[^\n]+openInput[^\n]*\n[^]*?->>[^\n]+publishOutput/u);
@@ -237,6 +251,49 @@ effectIt.layer(diagramStoreLayer)(it => {
           },
         },
       });
+    }).pipe(TestClock.withLive),
+  );
+
+  it.effect('reports unread source order when no native TypeScript session is available', () =>
+    Effect.gen(function* () {
+      const store = yield* CodeGraphStore;
+      const {databasePath, file, filename, indexedIdentity, snapshot} = yield* committedSequenceFixture;
+      const at = (line: number) => ({path: filename, line});
+      const run = symbol('runPipeline', 'function', at(3));
+      const openInput = symbol('openInput', 'function', at(1));
+      const publishOutput = symbol('publishOutput', 'function', at(2));
+      const edges = [relation('open', 'calls', run, openInput, 4), relation('publish', 'calls', run, publishOutput, 5)];
+      const selected = snapshot(3, edges.length);
+      yield* store.activate(databasePath, indexedIdentity, selected, [file], [run, openInput, publishOutput], edges);
+      // No borrowed session and no parser pool: the result names the unread source order instead of guessing it.
+      for (const threadnoteHome of [undefined, '/unused-home']) {
+        const result = yield* readCodeGraphDiagramForStatus(
+          store,
+          {
+            databasePath,
+            identity: indexedIdentity,
+            freshness: 'current',
+            languagePacks: [],
+            readySnapshot: selected,
+            stale: false,
+          },
+          {
+            question: 'How does runPipeline work?',
+            diagramType: 'sequence',
+            ...(threadnoteHome === undefined ? {} : {threadnoteHome}),
+          },
+        );
+        expect(result).toMatchObject({
+          status: 'incomplete',
+          coverage: {
+            completeness: 'incomplete',
+            gaps: [{kind: 'missing-evidence', label: DIAGRAM_SOURCE_ORDER_UNAVAILABLE}],
+          },
+          // Without source order the fan-out is not one ordered path, so the reader offers the full relationships.
+          message: expect.stringContaining('Static evidence does not establish a single ordered call path.'),
+          suggestedType: 'flowchart',
+        });
+      }
     }).pipe(TestClock.withLive),
   );
 
@@ -1378,9 +1435,10 @@ effectIt.layer(diagramStoreLayer)(it => {
     }).pipe(TestClock.withLive),
   );
 
-  it.effect('uses real declarations for exact Unicode, class members, and Bazel configuration', () =>
+  native(it.effect)('uses real declarations for exact Unicode, class members, and Bazel configuration', () =>
     Effect.gen(function* () {
       const f = yield* storedDiagramFixture;
+      const session = yield* nativeTypeScriptTestSession;
       const types = diagramSourceFile(
         'src/types.ts',
         'typescript',
@@ -1425,7 +1483,7 @@ effectIt.layer(diagramStoreLayer)(it => {
         'bazelrc',
         'build --config=common\ncommon --color=no\ntest --color=yes\n',
       );
-      const typed = extractRepositoryFacts([types, unicode, payment]);
+      const typed = yield* Effect.promise(() => extractRepositoryFacts([types, unicode, payment], undefined, session));
       const config = resolveExtractedRepositoryFacts(
         [extractBazelFacts(rc, {packageName: Option.none(), project: Option.none()})],
         [rc],

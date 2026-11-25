@@ -8,6 +8,7 @@ import {probeGuardedExchange} from '../fixtures/semantic/editor/proposal-wire.cj
 import {describe, expect, it, vi} from 'vitest';
 import fc from 'fast-check';
 import {Schema} from 'effect';
+import {nativeTypeScriptAssetPins} from '@threadnote/graph/typescript_native_asset_pins';
 import {
   ProbeConfig,
   expandProbeScratch,
@@ -98,6 +99,37 @@ describe('disposable semantic provider qualification', () => {
         for (const hash of EffectRecord.values(evidence.sourceHashes)) expect(hash).toMatch(/^[a-f0-9]{64}$/u);
       }
     }
+  });
+  it('records the native TypeScript artifact exactly as the reviewed asset pins', () => {
+    const ledger = Schema.decodeUnknownSync(
+      Schema.Struct({
+        providers: Schema.Array(
+          Schema.Struct({
+            id: Schema.String,
+            version: Schema.String,
+            artifacts: Schema.Array(Schema.Record(Schema.String, Schema.Unknown)),
+          }),
+        ),
+      }),
+    )(
+      JSON.parse(
+        readFileSync(new URL('../../../../config/semantic-providers/qualification-lock.json', import.meta.url), 'utf8'),
+      ),
+    );
+    const native = EffectOption.getOrUndefined(
+      EffectArray.findFirst(ledger.providers, x => x.id === 'typescript-native'),
+    );
+    const {version, reviewedHostBinaries, provenance} = nativeTypeScriptAssetPins;
+    expect(native?.version).toBe(version);
+    expect(native?.artifacts).toEqual(
+      EffectArray.map(reviewedHostBinaries, ({sha256}) => ({
+        kind: provenance.kind,
+        sha256,
+        sourceCommit: provenance.sourceCommit,
+        sourceTree: provenance.sourceTree,
+        overlaySha256: provenance.overlaySha256,
+      })),
+    );
   });
   it('clamps each readiness request to the remaining overall deadline', async () => {
     // Promise/timer boundary: no real provider or wall-clock wait is involved.

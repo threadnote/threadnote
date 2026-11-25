@@ -8,24 +8,18 @@ import {it as effectIt} from '@effect/vitest';
 import * as BunFileSystem from '@effect/platform-bun/BunFileSystem';
 import * as BunPath from '@effect/platform-bun/BunPath';
 import {cryptoLayer} from '@threadnote/platform/crypto';
-import {Deferred, Effect, Fiber, FileSystem, Layer, Option, Path, Schema} from 'effect';
+import {Deferred, Effect, Exit, Fiber, FileSystem, Layer, Option, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it, vi} from 'vitest';
 import fc from 'fast-check';
-import serverPackage from 'typescript-language-server/package.json' with {type: 'json'};
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import {sha256FileHex} from '@threadnote/platform/digest';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {extractRepositoryFileFacts} from '@threadnote/graph/extractor';
 import {selectSemanticContextSymbol} from '@threadnote/context/compiler';
 import {Observation, Position, observationKey} from '@threadnote/semantic/contracts';
 import {LspFault, makeLspClient, spawnLspWire, type LspClient} from '../../src/semantic/lsp_transport.js';
-import {
-  makeTypeScriptRuntime,
-  typeScriptPolicyCommand,
-  typeScriptPolicyVersion,
-} from '../../src/semantic/providers/typescript_runtime.js';
+import {verifyNativeTypeScriptCandidate} from '../../src/semantic/providers/typescript_runtime.js';
 import {
   makeTypeScriptSession as makeTypeScriptSessionWithPath,
   validTextPosition,
@@ -38,10 +32,31 @@ import {
   requestSemanticEndpoint,
 } from '../../src/semantic/coordinator.js';
 import {typeScriptConfigurationHasExtendsCycle} from '../../src/semantic/fingerprint.js';
+import {SemanticVerificationReply} from '../../src/semantic/agent_query_protocol.js';
 import {semanticHostProfileName} from '../../src/semantic/host_profile.js';
 import type {SemanticAgentQueryHost} from '../../src/semantic/agent_queries.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
+import {nativeTypeScriptTestCandidate} from '../helpers/native-typescript-asset.js';
+import {
+  native,
+  createNativeTypeScriptTestSession,
+  nativeTypeScriptUnavailable,
+} from '@threadnote/graph/test/helpers/native-typescript-session';
+
+it('accepts the native TypeScript verifier identity without admitting arbitrary provider names', () => {
+  const nativeReply = {
+    version: 1,
+    provider: 'typescript-native',
+    candidate: EffectString.repeat(64)('a'),
+    mode: 'candidate',
+    digest: EffectString.repeat(64)('b'),
+    runtimeVersion: false,
+  };
+  expect(Schema.decodeUnknownSync(SemanticVerificationReply)(nativeReply)).toEqual(nativeReply);
+  for (const provider of ['', 'typescript-native-extra', 'typescript-language-server-7.1'])
+    expect(Schema.is(SemanticVerificationReply)({...nativeReply, provider})).toBe(false);
+});
 
 // This fixture grants protocol tests only their own current profile bytes; native ACL proof is tested separately.
 const protocolProfiles = new Map<
@@ -133,13 +148,17 @@ const observation = (text: string, overrides: Partial<Observation> = {}): Observ
   projectEpoch: 0,
   ...overrides,
 });
+const nativeObservation = (text: string, overrides: Partial<Observation> = {}): Observation =>
+  observation(text, {
+    provider: {id: 'typescript-native', version: '7.1.0-beta', generation: 0},
+    ...overrides,
+  });
 const options = (basis: Observation) => ({
   basis,
   tsserver: '/host/typescript/tsserver.js',
   compiler: '/host/typescript/typescript.js',
   sourceRoot: '/host/typescript',
   verifyPolicy: Effect.void,
-  challenge: Effect.succeed(sha256HexSync('test-challenge')),
   maxMemoryMb: 256,
   startupMilliseconds: 1000,
 });
@@ -156,31 +175,6 @@ const fakeClient = (
     pid: 1,
     request: (method: string, params?: Schema.Json, _milliseconds?: number): Effect.Effect<Schema.Json> => {
       if (method === 'initialize') return Effect.succeed({capabilities: {positionEncoding: 'utf-16'}});
-      if (
-        method === 'workspace/executeCommand' &&
-        typeof params === 'object' &&
-        params !== null &&
-        'arguments' in params &&
-        EffectArray.isArray(params.arguments) &&
-        params.arguments[0] === typeScriptPolicyCommand
-      ) {
-        const challenge = Schema.decodeUnknownSync(Schema.Struct({challenge: Schema.String}))(
-          params.arguments[1],
-        ).challenge;
-        return Effect.succeed({
-          success: true,
-          body: {
-            policy: typeScriptPolicyVersion,
-            launcher: paths.tsserver,
-            compiler: paths.compiler,
-            version: '6.0.3',
-            pid: 2,
-            instance: sha256HexSync('test-instance'),
-            challenge,
-            locked: true,
-          },
-        });
-      }
       if (
         method === 'workspace/executeCommand' &&
         typeof params === 'object' &&
@@ -369,81 +363,6 @@ describe('TypeScript observation fences', () => {
       expect((yield* session.query('definition', current, {line: 0, character: 4}, 1000)).status).toBe('ok');
     }),
   );
-  effectIt.effect('refuses unguarded or mismatched launcher proof before opening any source', () =>
-    Effect.gen(function* () {
-      for (const mode of ['missing', 'launcher', 'unlocked', 'challenge'] as const) {
-        const base = fakeClient(() => Effect.succeed(null));
-        const notifications: string[] = [];
-        const client: LspClient = {
-          ...base,
-          notify: method =>
-            Effect.sync(() => {
-              notifications.push(method);
-            }),
-          request: (method, params, milliseconds) =>
-            base.request(method, params, milliseconds).pipe(
-              Effect.map(raw => {
-                if (method !== 'workspace/executeCommand') return raw;
-                const proof = Schema.decodeUnknownSync(
-                  Schema.Struct({success: Schema.Boolean, body: Schema.Record(Schema.String, Schema.Json)}),
-                )(raw);
-                if (mode === 'missing') return {success: false};
-                return {
-                  ...proof,
-                  body: {
-                    ...proof.body,
-                    ...(mode === 'launcher'
-                      ? {launcher: '/repo/tsserver.js'}
-                      : mode === 'unlocked'
-                        ? {locked: false}
-                        : {challenge: sha256HexSync('wrong')}),
-                  },
-                };
-              }),
-            ),
-        };
-        expect((yield* makeTypeScriptSession(client, options(observation('x'))).pipe(Effect.exit))._tag).toBe(
-          'Failure',
-        );
-        expect(notifications).toEqual(['initialized']);
-      }
-    }),
-  );
-  effectIt.effect('invalidates the session when the guarded child process instance changes', () =>
-    Effect.gen(function* () {
-      const basis = observation('x');
-      const base = fakeClient(() => Effect.succeed([]));
-      let generation = 0;
-      let reads = 0;
-      const client: LspClient = {
-        ...base,
-        request: (method, params, milliseconds) =>
-          base.request(method, params, milliseconds).pipe(
-            Effect.map(raw => {
-              if (method === 'textDocument/definition') reads++;
-              if (
-                method !== 'workspace/executeCommand' ||
-                !Schema.is(Schema.Struct({body: Schema.Struct({instance: Schema.String})}))(raw)
-              )
-                return raw;
-              const proof = Schema.decodeUnknownSync(
-                Schema.Struct({success: Schema.Boolean, body: Schema.Record(Schema.String, Schema.Json)}),
-              )(raw);
-              return {...proof, body: {...proof.body, instance: sha256HexSync(String(generation))}};
-            }),
-          ),
-      };
-      const session = yield* makeTypeScriptSession(client, options(basis));
-      const current = yield* session.upsert(basis, 'x', 'typescript', 1000);
-      generation++;
-      expect((yield* session.query('definition', current, {line: 0, character: 0}, 1000).pipe(Effect.exit))._tag).toBe(
-        'Failure',
-      );
-      expect(yield* session.available).toBe(false);
-      expect(reads).toBe(0);
-      expect(yield* session.observation(current.uri)).toBeUndefined();
-    }),
-  );
   it('candidate identity ignores object insertion order without merging different installations', () => {
     const candidate = {
       runtime: '/host/node',
@@ -617,41 +536,31 @@ const versionProbe = CommandExecutor.of({
 const coordinatorFixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const resolveFrom = path.dirname(yield* path.fromFileUrl(new URL(import.meta.url)));
   const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({directory: '/tmp', prefix: 'tn6-'}));
-  const sdkDirectory = yield* fs.realPath(path.dirname(Bun.resolveSync('typescript/package.json', resolveFrom)));
-  const serverDirectory = yield* fs.realPath(
-    path.dirname(Bun.resolveSync('typescript-language-server/package.json', resolveFrom)),
-  );
-  const runtime = yield* fs.realPath(process.execPath);
-  const candidate = {
-    runtime,
-    runtimeDigest: yield* sha256FileHex(runtime),
-    runtimeVersion: '24.19.0' as const,
-    sdkDirectory,
-    sdkTreeDigest: yield* semanticTreeDigest(sdkDirectory),
-    serverDirectory,
-    serverTreeDigest: yield* semanticTreeDigest(serverDirectory),
-  };
-  const options = {enabled: true, dataHome: root, candidate};
+  const candidate = yield* nativeTypeScriptTestCandidate();
+  const options = {enabled: true, dataHome: root, nativeCandidate: candidate};
   const coordinator = yield* makeSemanticCoordinator(options);
   return {fs, path, root, coordinator, candidate};
 });
-describe.skipIf(process.platform === 'win32')('semantic coordinator with injected runtime version probe', () => {
-  effectIt.effect('rejects relative host paths and excluded Git sources before provider execution', () =>
+describe.skipIf(process.platform === 'win32')('semantic coordinator with pinned native TypeScript candidate', () => {
+  native(effectIt.effect)('rejects relative host paths and excluded Git sources before provider execution', () =>
     Effect.gen(function* () {
       const {path, root, candidate, coordinator} = yield* coordinatorFixture;
-      for (const field of ['runtime', 'serverDirectory', 'sdkDirectory'] as const) {
+      for (const field of ['executable', 'sdkDirectory'] as const) {
         const relative = path.relative(process.cwd(), candidate[field]);
         expect(path.isAbsolute(relative)).toBe(false);
         expect(
           (yield* Effect.exit(
-            makeSemanticCoordinator({enabled: true, dataHome: root, candidate: {...candidate, [field]: relative}}),
+            makeSemanticCoordinator({
+              enabled: true,
+              dataHome: root,
+              nativeCandidate: {...candidate, [field]: relative},
+            }),
           ))._tag,
         ).toBe('Failure');
       }
       const uri = (yield* path.toFileUrl(root)).href;
-      const metadataSource = observation('x', {worktree: uri, project: uri, uri: uri + '/.git/hidden.ts'});
+      const metadataSource = nativeObservation('x', {worktree: uri, project: uri, uri: uri + '/.git/hidden.ts'});
       expect((yield* Effect.exit(coordinator.attach(metadataSource, 'x', 'typescript')))._tag).toBe('Failure');
       expect((yield* coordinator.status).providers).toBe(0);
     }).pipe(
@@ -790,7 +699,7 @@ describe.skipIf(process.platform === 'win32')('semantic coordinator with injecte
       TestClock.withLive,
     ),
   );
-  effectIt.effect(
+  native(effectIt.effect)(
     'rejects a disk change between the initial content check and project fingerprint and drains its provider',
     () =>
       Effect.gen(function* () {
@@ -818,8 +727,12 @@ describe.skipIf(process.platform === 'win32')('semantic coordinator with injecte
             }),
         };
         yield* Effect.gen(function* () {
-          const coordinator = yield* makeSemanticCoordinator({enabled: true, dataHome: root, candidate});
-          const input = observation(before, {
+          const coordinator = yield* makeSemanticCoordinator({
+            enabled: true,
+            dataHome: root,
+            nativeCandidate: candidate,
+          });
+          const input = nativeObservation(before, {
             worktree: uri,
             project: uri,
             uri: uri + '/main.ts',
@@ -864,26 +777,24 @@ describe.skipIf(process.platform === 'win32')('semantic coordinator with injecte
       TestClock.withLive,
     ),
   );
-  effectIt.effect(
-    'caps crash retries, reports their cause and releases each proven dead provider',
+  native(effectIt.effect)(
+    'caps rejected native candidate retries and releases each unused provider reservation',
     () =>
       Effect.gen(function* () {
         const {fs, path, root, candidate} = yield* coordinatorFixture;
-        const badServer = path.join(root, 'bad-server');
-        yield* fs.makeDirectory(path.join(badServer, 'lib'), {recursive: true});
-        yield* fs.writeFileString(path.join(badServer, 'package.json'), '{"version":"6.0.2"}');
-        yield* fs.writeFileString(path.join(badServer, 'lib', 'cli.mjs'), 'process.exit(1);');
+        const badServer = path.join(root, 'bad-native-compiler');
+        yield* fs.writeFileString(badServer, 'invalid native source bytes');
         const coordinator = yield* makeSemanticCoordinator({
           enabled: true,
           dataHome: root,
-          candidate: {...candidate, serverDirectory: badServer, serverTreeDigest: yield* semanticTreeDigest(badServer)},
+          nativeCandidate: {...candidate, executable: badServer},
         });
         const repo = path.join(root, 'repo');
         yield* fs.makeDirectory(repo);
         yield* fs.writeFileString(path.join(repo, 'tsconfig.json'), '{"files":["main.ts"]}');
         yield* fs.writeFileString(path.join(repo, 'main.ts'), 'const x = 1;');
         const uri = (yield* path.toFileUrl(repo)).href;
-        const source = observation('const x = 1;', {worktree: uri, project: uri, uri: uri + '/main.ts'});
+        const source = nativeObservation('const x = 1;', {worktree: uri, project: uri, uri: uri + '/main.ts'});
         for (let attempt = 0; attempt < 3; attempt++)
           expect(yield* coordinator.attach(source, 'const x = 1;', 'typescript').pipe(Effect.flip)).toMatchObject({
             code: 'prerequisite',
@@ -903,7 +814,7 @@ describe.skipIf(process.platform === 'win32')('semantic coordinator with injecte
       ),
     20000,
   );
-  effectIt.effect(
+  native(effectIt.effect)(
     'selects each monorepo dependency version and denies repository plugin/build execution',
     () =>
       Effect.gen(function* () {
@@ -959,7 +870,7 @@ describe.skipIf(process.platform === 'win32')('semantic coordinator with injecte
           const project = (yield* path.toFileUrl(path.join(repo, name))).href;
           const text = 'import {value} from "demo";\nvalue;\n';
           const attached = yield* coordinator.attach(
-            observation(text, {
+            nativeObservation(text, {
               worktree,
               project,
               uri: project + '/main.ts',
@@ -1008,12 +919,12 @@ describe.skipIf(process.platform === 'win32')('semantic coordinator with injecte
       ),
     45000,
   );
-  effectIt.effect(
+  native(effectIt.effect)(
     'isolates worktrees and client overlays, authenticates IPC and fences disk changes',
     () =>
       Effect.gen(function* () {
         const {fs, path, root, coordinator, candidate} = yield* coordinatorFixture;
-        const other = yield* makeSemanticCoordinator({enabled: true, dataHome: root, candidate});
+        const other = yield* makeSemanticCoordinator({enabled: true, dataHome: root, nativeCandidate: candidate});
         const aRoot = path.join(root, 'a');
         const bRoot = path.join(root, 'b');
         for (const directory of [aRoot, bRoot]) {
@@ -1027,9 +938,9 @@ describe.skipIf(process.platform === 'win32')('semantic coordinator with injecte
         const aUri = (yield* path.toFileUrl(aRoot)).href;
         const bUri = (yield* path.toFileUrl(bRoot)).href;
         const source = 'const x: number = 1;\nx;\n';
-        const a = observation(source, {worktree: aUri, project: aUri, uri: aUri + '/main.ts'});
+        const a = nativeObservation(source, {worktree: aUri, project: aUri, uri: aUri + '/main.ts'});
         const bText = 'const x: string = "other worktree";\nx;\n';
-        const b = observation(bText, {worktree: bUri, project: bUri, uri: bUri + '/main.ts'});
+        const b = nativeObservation(bText, {worktree: bUri, project: bUri, uri: bUri + '/main.ts'});
         const first = yield* coordinator.attach(a, source, 'typescript');
         const second = yield* other.attach(b, bText, 'typescript');
         expect(yield* coordinator.status).toMatchObject({providers: 2, sessions: 1});
@@ -1056,7 +967,7 @@ describe.skipIf(process.platform === 'win32')('semantic coordinator with injecte
           status: 'unavailable',
         });
         const overlayText = 'const x: boolean = true;\nx;\n';
-        const overlay = observation(overlayText, {
+        const overlay = nativeObservation(overlayText, {
           ...a,
           content: sha256HexSync(overlayText),
           view: {...a.view, id: 'second-view', owner: 'second-owner'},
@@ -1137,206 +1048,243 @@ describe.skipIf(process.platform === 'win32')('semantic coordinator with injecte
     45000,
   );
 });
-describe.skipIf(process.platform === 'win32')('pinned TypeScript engine read pilot', () => {
-  effectIt.effect(
-    'resolves aliases and typed occurrences while excluding unrelated same-name members',
-    () =>
-      Effect.gen(function* () {
-        expect(serverPackage.version).toBe('6.0.2');
-        const fs = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        const resolveFrom = path.dirname(yield* path.fromFileUrl(new URL(import.meta.url)));
-        const sdkDirectory = yield* fs.realPath(path.dirname(Bun.resolveSync('typescript/package.json', resolveFrom)));
-        const sdkPackage = yield* Schema.decodeEffect(Schema.fromJsonString(Schema.Struct({version: Schema.String})))(
-          yield* fs.readFileString(path.join(sdkDirectory, 'package.json')),
-        );
-        expect(sdkPackage.version).toBe('6.0.3');
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-semantic-ts-'});
-        const uri = (yield* path.toFileUrl(root)).href;
-        const source =
-          'class Alpha { run() { return 1; } }\nclass Beta { run() { return 2; } }\nconst alias = new Alpha();\nalias.run();\nnew Beta().run();\n';
-        const file = path.join(root, 'main.ts');
-        const fileUri = (yield* path.toFileUrl(file)).href;
-        yield* fs.writeFileString(
-          path.join(root, 'tsconfig.json'),
-          JSON.stringify({compilerOptions: {strict: true}, files: ['main.ts']}),
-        );
-        yield* fs.writeFileString(file, source);
-        const wire = yield* spawnLspWire({
-          command: process.execPath,
-          args: [Bun.resolveSync('typescript-language-server/lib/cli.mjs', resolveFrom), '--stdio'],
-          cwd: root,
-          environment: {},
-        });
-        const client = yield* makeLspClient(wire);
-        const basis = observation(source, {worktree: uri, project: uri, uri: fileUri});
-        const privateHome = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn6-ts-host-'}));
-        const runtime = yield* makeTypeScriptRuntime({
-          home: privateHome,
-          sdkDirectory,
-          sdkTreeDigest: yield* semanticTreeDigest(sdkDirectory),
-          worktree: yield* fs.realPath(root),
-        });
-        const session = yield* makeTypeScriptSession(client, {
-          ...options(basis),
-          tsserver: runtime.launcher,
-          compiler: runtime.compiler,
-          sourceRoot: runtime.sourceRoot,
-          verifyPolicy: runtime.verify,
-          startupMilliseconds: 15000,
-        });
-        yield* session.upsert(basis, source, 'typescript', 15000);
-        const position: Position = {line: 3, character: 7};
-        const definition = yield* session.query('definition', basis, position, 5000);
-        expect(definition.status).toBe('ok');
-        if (definition.status === 'ok')
-          expect(definition.items).toMatchObject([
-            {targetUri: fileUri, targetRange: {start: {line: 0}}, targetSelectionRange: {start: {line: 0}}},
-          ]);
-        const aliasDefinition = yield* session.query('definition', basis, {line: 3, character: 1}, 5000);
-        expect(aliasDefinition.status).toBe('ok');
-        if (aliasDefinition.status === 'ok')
-          expect(aliasDefinition.items).toMatchObject([
-            {
-              targetUri: fileUri,
-              targetRange: {start: {line: 2, character: 0}, end: {line: 2, character: 26}},
-              targetSelectionRange: {start: {line: 2, character: 6}, end: {line: 2, character: 11}},
-            },
-          ]);
-        if (definition.status !== 'ok' || aliasDefinition.status !== 'ok')
-          throw new Error('Pinned definition unavailable');
-        const rangeSchema = Schema.Struct({start: Position, end: Position});
-        const linkSchema = Schema.Struct({
-          targetUri: Schema.String,
-          targetRange: rangeSchema,
-          targetSelectionRange: rangeSchema,
-        });
-        const bytes = new TextEncoder().encode(source);
-        const hash = sha256HexSync(bytes);
-        const nodes = EffectArray.flatMap(
-          extractRepositoryFileFacts([
-            {
-              blobId: '',
-              content: source,
-              contentHash: hash,
-              language: 'typescript',
-              mode: '100644',
+describe.skipIf(process.platform === 'win32' || nativeTypeScriptUnavailable)(
+  'pinned TypeScript engine read pilot',
+  () => {
+    effectIt.effect(
+      'resolves aliases and typed occurrences while excluding unrelated same-name members',
+      () =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const candidate = yield* nativeTypeScriptTestCandidate();
+          const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-semantic-ts-'});
+          const uri = (yield* path.toFileUrl(root)).href;
+          const source =
+            'class Alpha { run() { return 1; } }\nclass Beta { run() { return 2; } }\nconst alias = new Alpha();\nalias.run();\nnew Beta().run();\n';
+          const file = path.join(root, 'main.ts');
+          const fileUri = (yield* path.toFileUrl(file)).href;
+          yield* fs.writeFileString(
+            path.join(root, 'tsconfig.json'),
+            JSON.stringify({compilerOptions: {strict: true}, files: ['main.ts']}),
+          );
+          yield* fs.writeFileString(file, source);
+          const wire = yield* spawnLspWire({
+            command: candidate.executable,
+            args: ['--lsp', '--stdio'],
+            cwd: root,
+            environment: {},
+          });
+          const assertOriginalCurrent = wire.assertOriginalCurrent;
+          if (!assertOriginalCurrent) throw new Error('Original native TypeScript owner proof unavailable');
+          const client = yield* makeLspClient(wire);
+          const basis = observation(source, {
+            worktree: uri,
+            project: uri,
+            uri: fileUri,
+            provider: {id: 'typescript-native', version: '7.1.0-beta', generation: 0},
+          });
+          const session = yield* makeTypeScriptSession(client, {
+            ...options(basis),
+            tsserver: candidate.executable,
+            compiler: candidate.executable,
+            sourceRoot: candidate.sdkDirectory,
+            // oxlint-disable-next-line effecttsgo/strict-effect-provide -- This real process test is the layer entry point.
+            verifyPolicy: verifyNativeTypeScriptCandidate(candidate).pipe(Effect.provide(coordinatorIo)),
+            startupMilliseconds: 15000,
+            native: {sdkRoot: candidate.sdkDirectory, assertOriginalCurrent},
+          });
+          let completed = false;
+          yield* Effect.addFinalizer(() =>
+            completed
+              ? Effect.void
+              : Effect.exit(session.close).pipe(
+                  Effect.flatMap(exit =>
+                    Effect.sync(() =>
+                      process.stderr.write(
+                        JSON.stringify({
+                          nativeStop: Exit.isSuccess(exit)
+                            ? {
+                                code: exit.value.code,
+                                drained: exit.value.drained,
+                                forced: exit.value.forced,
+                                stdioClosed: exit.value.stdioClosed,
+                                fault: exit.value.fault?.code,
+                              }
+                            : {state: 'unknown'},
+                        }) + '\n',
+                      ),
+                    ),
+                  ),
+                ),
+          );
+          yield* session.upsert(basis, source, 'typescript', 15000);
+          const position: Position = {line: 3, character: 7};
+          const definition = yield* session.query('definition', basis, position, 5000);
+          expect(definition.status).toBe('ok');
+          if (definition.status === 'ok')
+            expect(definition.items).toMatchObject([
+              {targetUri: fileUri, targetRange: {start: {line: 0}}, targetSelectionRange: {start: {line: 0}}},
+            ]);
+          const aliasDefinition = yield* session.query('definition', basis, {line: 3, character: 1}, 5000);
+          expect(aliasDefinition.status).toBe('ok');
+          if (aliasDefinition.status === 'ok')
+            expect(aliasDefinition.items).toMatchObject([
+              {
+                targetUri: fileUri,
+                targetRange: {start: {line: 2, character: 0}, end: {line: 2, character: 26}},
+                targetSelectionRange: {start: {line: 2, character: 6}, end: {line: 2, character: 11}},
+              },
+            ]);
+          if (definition.status !== 'ok' || aliasDefinition.status !== 'ok')
+            throw new Error('Pinned definition unavailable');
+          const rangeSchema = Schema.Struct({start: Position, end: Position});
+          const linkSchema = Schema.Struct({
+            targetUri: Schema.String,
+            targetRange: rangeSchema,
+            targetSelectionRange: rangeSchema,
+          });
+          const bytes = new TextEncoder().encode(source);
+          const hash = sha256HexSync(bytes);
+          const extractionSession = yield* Effect.acquireRelease(
+            Effect.promise(() => createNativeTypeScriptTestSession()),
+            session => Effect.promise(() => session.close()),
+          );
+          const facts = yield* Effect.promise(() =>
+            extractRepositoryFileFacts(
+              [
+                {
+                  blobId: '',
+                  content: source,
+                  contentHash: hash,
+                  language: 'typescript',
+                  mode: '100644',
+                  path: 'main.ts',
+                  size: bytes.byteLength,
+                  source: 'worktree',
+                },
+              ],
+              undefined,
+              extractionSession,
+            ),
+          );
+          const nodes = EffectArray.flatMap(facts, item =>
+            EffectArray.map(item.symbols, node => ({...node, score: 1})),
+          );
+          const binding = {
+            version: 1 as const,
+            scope: 'document' as const,
+            observation: sha256HexSync(observationKey(definition.evidence.observation)),
+            semanticContent: hash,
+            graph: {
+              repositoryId: sha256HexSync('fixture repository'),
+              snapshotId: 'fixture',
               path: 'main.ts',
-              size: bytes.byteLength,
-              source: 'worktree',
+              contentHash: hash,
             },
-          ]),
-          facts => EffectArray.map(facts.symbols, node => ({...node, score: 1})),
-        );
-        const binding = {
-          version: 1 as const,
-          scope: 'document' as const,
-          observation: sha256HexSync(observationKey(definition.evidence.observation)),
-          semanticContent: hash,
-          graph: {
-            repositoryId: sha256HexSync('fixture repository'),
-            snapshotId: 'fixture',
-            path: 'main.ts',
-            contentHash: hash,
-          },
-        };
-        const methodLink = yield* Schema.decodeUnknownEffect(linkSchema)(definition.items[0]);
-        const method = selectSemanticContextSymbol(
-          bytes,
-          definition.evidence,
-          {
-            evidence: definition.evidence,
-            uri: methodLink.targetUri,
-            range: methodLink.targetRange,
-            selectionRange: methodLink.targetSelectionRange,
-          },
-          nodes,
-          binding,
-        );
-        expect(method.nodeId).not.toBeNull();
-        expect(EffectArray.findFirst(nodes, node => node.id === method.nodeId)).toMatchObject({
-          value: {name: 'run', span: {line: 1}},
-        });
-        const aliasLink = yield* Schema.decodeUnknownEffect(linkSchema)(aliasDefinition.items[0]);
-        // TLS returns the whole variable statement; graph stores its declarator.
-        // The strict join must abstain rather than trim keywords or punctuation.
-        expect(
-          selectSemanticContextSymbol(
+          };
+          const methodLink = yield* Schema.decodeUnknownEffect(linkSchema)(definition.items[0]);
+          const method = selectSemanticContextSymbol(
             bytes,
-            aliasDefinition.evidence,
+            definition.evidence,
             {
-              evidence: aliasDefinition.evidence,
-              uri: aliasLink.targetUri,
-              range: aliasLink.targetRange,
-              selectionRange: aliasLink.targetSelectionRange,
+              evidence: definition.evidence,
+              uri: methodLink.targetUri,
+              range: methodLink.targetRange,
+              selectionRange: methodLink.targetSelectionRange,
             },
             nodes,
             binding,
-          ).nodeId,
-        ).toBeNull();
-        const references = yield* session.query('references', basis, position, 5000);
-        expect(references.status).toBe('ok');
-        if (references.status === 'ok') {
-          const lines = EffectArray.map(
-            references.items,
-            item =>
-              Schema.decodeUnknownSync(Schema.Struct({range: Schema.Struct({start: Position})}))(item).range.start.line,
           );
-          expect(lines.sort()).toEqual([0, 3]);
-          expect(references.evidence.completeness).toBe('partial');
-        }
-        const broken = source + 'const broken: number = "text";\n';
-        const next = yield* session.upsert(
-          observation(broken, {...basis, content: sha256HexSync(broken), documentVersion: 2}),
-          broken,
-          'typescript',
-          5000,
-        );
-        const diagnostics = yield* session.diagnostics(next, 10000);
-        expect(EffectArray.some(diagnostics.added, item => item.code === 2322)).toBe(true);
-        const fixed = yield* session.upsert(
-          observation(source, {...basis, documentVersion: 3}),
-          source,
-          'typescript',
-          5000,
-        );
-        const delta = yield* session.diagnostics(fixed, 10000);
-        expect(EffectArray.some(delta.resolved, ({item}) => item.code === 2322)).toBe(true);
-        expect(
-          EffectArray.every(
-            delta.resolved,
-            item => item.observation.documentVersion === 2 && item.resolvedIn.documentVersion === 3,
-          ),
-        ).toBe(true);
-        const javascript =
-          '// @ts-check\n/** @param {number} value */\nfunction twice(value) { return value * 2; }\ntwice("bad");\n';
-        const jsInput = observation(javascript, {
-          ...basis,
-          uri: basis.project + '/extra.js',
-          content: sha256HexSync(javascript),
-        });
-        const js = yield* session.upsert(jsInput, javascript, 'javascript', 5000);
-        expect(EffectArray.some((yield* session.diagnostics(js, 10000)).items, item => item.code === 2345)).toBe(true);
-        expect(yield* client.close).toEqual({
-          graceful: true,
-          code: 0,
-          drained: true,
-          stdioClosed: true,
-          forced: false,
-          fault: undefined,
-        });
-      }).pipe(
-        // oxlint-disable-next-line effecttsgo/strict-effect-provide -- Narrow OS test entrypoint.
-        Effect.provide(coordinatorIo),
-        Effect.provideService(ChildEnvironmentPolicy, {
-          sanitizeExternal: env => env,
-          preserveIntendedChild: env => env,
-        }),
-        TestClock.withLive,
-      ),
-    30000,
-  );
-});
+          expect(method.nodeId).not.toBeNull();
+          expect(EffectArray.findFirst(nodes, node => node.id === method.nodeId)).toMatchObject({
+            value: {name: 'run', span: {line: 1}},
+          });
+          const aliasLink = yield* Schema.decodeUnknownEffect(linkSchema)(aliasDefinition.items[0]);
+          // TLS returns the whole variable statement; graph stores its declarator.
+          // The strict join must abstain rather than trim keywords or punctuation.
+          expect(
+            selectSemanticContextSymbol(
+              bytes,
+              aliasDefinition.evidence,
+              {
+                evidence: aliasDefinition.evidence,
+                uri: aliasLink.targetUri,
+                range: aliasLink.targetRange,
+                selectionRange: aliasLink.targetSelectionRange,
+              },
+              nodes,
+              binding,
+            ).nodeId,
+          ).toBeNull();
+          const references = yield* session.query('references', basis, position, 5000);
+          expect(references.status).toBe('ok');
+          if (references.status === 'ok') {
+            const lines = EffectArray.map(
+              references.items,
+              item =>
+                Schema.decodeUnknownSync(Schema.Struct({range: Schema.Struct({start: Position})}))(item).range.start
+                  .line,
+            );
+            expect(lines.sort()).toEqual([0, 3]);
+            expect(references.evidence.completeness).toBe('partial');
+          }
+          const broken = source + 'const broken: number = "text";\n';
+          const next = yield* session.upsert(
+            observation(broken, {...basis, content: sha256HexSync(broken), documentVersion: 2}),
+            broken,
+            'typescript',
+            5000,
+          );
+          const diagnostics = yield* session.diagnostics(next, 10000);
+          expect(EffectArray.some(diagnostics.added, item => item.code === 2322)).toBe(true);
+          const fixed = yield* session.upsert(
+            observation(source, {...basis, documentVersion: 3}),
+            source,
+            'typescript',
+            5000,
+          );
+          const delta = yield* session.diagnostics(fixed, 10000);
+          expect(EffectArray.some(delta.resolved, ({item}) => item.code === 2322)).toBe(true);
+          expect(
+            EffectArray.every(
+              delta.resolved,
+              item => item.observation.documentVersion === 2 && item.resolvedIn.documentVersion === 3,
+            ),
+          ).toBe(true);
+          const javascript =
+            '// @ts-check\n/** @param {number} value */\nfunction twice(value) { return value * 2; }\ntwice("bad");\n';
+          const jsInput = observation(javascript, {
+            ...basis,
+            uri: basis.project + '/extra.js',
+            content: sha256HexSync(javascript),
+          });
+          const js = yield* session.upsert(jsInput, javascript, 'javascript', 5000);
+          expect(EffectArray.some((yield* session.diagnostics(js, 10000)).items, item => item.code === 2345)).toBe(
+            true,
+          );
+          expect(yield* session.close).toEqual({
+            graceful: true,
+            code: 0,
+            drained: true,
+            stdioClosed: true,
+            forced: false,
+            fault: undefined,
+          });
+          completed = true;
+        }).pipe(
+          // oxlint-disable-next-line effecttsgo/strict-effect-provide -- Narrow OS test entrypoint.
+          Effect.provide(coordinatorIo),
+          Effect.provideService(ChildEnvironmentPolicy, {
+            sanitizeExternal: env => env,
+            preserveIntendedChild: env => env,
+          }),
+          TestClock.withLive,
+        ),
+      30000,
+    );
+  },
+);
 
 // The real pinned cycle/control witness lives in the P06 feasibility artifact.
 // These tests keep classification deterministic at the selected-configuration boundary.
@@ -1510,322 +1458,339 @@ describe('selected TypeScript configuration resolution', () => {
   );
 });
 
-describe.skipIf(process.platform === 'win32')('pinned TypeScript rename source closure', () => {
-  effectIt.effect(
-    'recomputes all three files from synchronized exact input and never changes disk bytes',
-    () =>
-      Effect.gen(function* () {
-        const fs = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn7-rename-'}));
-        const project = (yield* path.toFileUrl(root)).href;
-        const texts = new Map([
-          ['a.ts', 'export function target() { return 1; }\n'],
-          ['b.ts', '\ufeffimport {target, target as unused} from "./a"; target();\r\n'],
-          ['c.ts', 'import {target} from "./a"; export const value = target();\r\n'],
-        ]);
-        for (const [name, text] of texts) yield* fs.writeFileString(path.join(root, name), text);
-        yield* fs.writeFileString(
-          path.join(root, 'tsconfig.json'),
-          JSON.stringify({compilerOptions: {strict: true}, files: [...texts.keys()]}),
-        );
-        const resolveFrom = path.dirname(yield* path.fromFileUrl(new URL(import.meta.url)));
-        const privateHome = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn7-host-'}));
-        const sdkDirectory = yield* fs.realPath(path.dirname(Bun.resolveSync('typescript/package.json', resolveFrom)));
-        const runtime = yield* makeTypeScriptRuntime({
-          home: privateHome,
-          sdkDirectory,
-          sdkTreeDigest: yield* semanticTreeDigest(sdkDirectory),
-          worktree: root,
-        });
-        const node = process.execPath;
-        const client = yield* makeLspClient(
-          yield* spawnLspWire({
-            command: node,
-            args: [Bun.resolveSync('typescript-language-server/lib/cli.mjs', resolveFrom), '--stdio'],
+describe.skipIf(process.platform === 'win32' || nativeTypeScriptUnavailable)(
+  'pinned TypeScript rename source closure',
+  () => {
+    effectIt.effect(
+      'recomputes all three files from synchronized exact input and never changes disk bytes',
+      () =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn7-rename-'}));
+          const project = (yield* path.toFileUrl(root)).href;
+          const texts = new Map([
+            ['a.ts', 'export function target() { return 1; }\n'],
+            ['b.ts', '\ufeffimport {target, target as unused} from "./a"; target();\r\n'],
+            ['c.ts', 'import {target} from "./a"; export const value = target();\r\n'],
+          ]);
+          for (const [name, text] of texts) yield* fs.writeFileString(path.join(root, name), text);
+          yield* fs.writeFileString(
+            path.join(root, 'tsconfig.json'),
+            JSON.stringify({compilerOptions: {strict: true}, files: [...texts.keys()]}),
+          );
+          const privateHome = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn7-host-'}));
+          const candidate = yield* nativeTypeScriptTestCandidate();
+          const wire = yield* spawnLspWire({
+            command: candidate.executable,
+            args: ['--lsp', '--stdio'],
             cwd: root,
             environment: {},
-          }),
-        );
-        const basis = observation(texts.get('a.ts')!, {
-          worktree: project,
-          project,
-          uri: project + '/a.ts',
-          view: {kind: 'disk', id: 'rename-disk', owner: 'rename-test', epoch: 0},
-          documentVersion: null,
-        });
-        let mutateOnRead = false;
-        const session = yield* makeTypeScriptSession(client, {
-          ...options(basis),
-          tsserver: runtime.launcher,
-          compiler: runtime.compiler,
-          sourceRoot: runtime.sourceRoot,
-          verifyPolicy: runtime.verify,
-          startupMilliseconds: 15000,
-          captureEditSource: uri =>
-            Effect.gen(function* () {
-              const file = yield* path.fromFileUrl(new URL(uri));
-              const text = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(yield* fs.readFile(file));
-              if (mutateOnRead && EffectString.endsWith('/b.ts')(file))
-                yield* fs.writeFileString(file, text + '// changed\n');
-              const stat = yield* fs.stat(file);
-              return {
-                uri,
-                text,
-                content: sha256HexSync(text),
-                identity: JSON.stringify([String(stat.dev), String(Option.getOrThrow(stat.ino))]),
-              };
-            }),
-        });
-        yield* session.upsert(basis, texts.get('a.ts')!, 'typescript', 15000);
-        const actionBasis = {...basis, uri: project + '/b.ts', content: sha256HexSync(texts.get('b.ts')!)};
-        const actionObserved = yield* session.upsert(actionBasis, texts.get('b.ts')!, 'typescript', 15000);
-        const actionQuery = {
-          range: {start: {line: 0, character: 0}, end: {line: 0, character: 0}},
-          only: ['source.removeUnusedImports.ts'],
-        };
-        const listed = yield* session.actions(actionObserved, actionQuery, 15000);
-        expect(listed.status).toBe('ok');
-        if (listed.status !== 'ok') throw new Error('Pinned action list failed');
-        const choices = yield* Schema.decodeUnknownEffect(
-          Schema.Array(
-            Schema.Struct({
-              selector: Schema.String,
-              queryDigest: Schema.String,
-              qualified: Schema.Boolean,
-              actionKind: Schema.String,
-            }),
-          ),
-        )(listed.items);
-        const selected = EffectArray.filter(choices, choice => choice.actionKind === 'source.removeUnusedImports.ts');
-        expect(selected).toHaveLength(1);
-        expect(selected[0].qualified).toBe(true);
-        const actionPrepared = yield* session.actions(actionObserved, actionQuery, 15000, selected[0]);
-        expect(actionPrepared).toMatchObject({
-          status: 'ok',
-          items: [{operation: 'code-action', sourceBasis: 'pre-request-synchronized-text-v1'}],
-        });
-        if (actionPrepared.status !== 'ok') throw new Error('Pinned action prepare failed');
-        expect(JSON.stringify(actionPrepared.items)).toContain('unused');
-        for (const [name, text] of texts)
-          expect(Array.from(yield* fs.readFile(path.join(root, name)))).toEqual(
-            Array.from(new TextEncoder().encode(text)),
-          );
-        const attached = (yield* session.observation(basis.uri))!;
-        const result = yield* session.prepare('rename', attached, {line: 0, character: 18}, 'renamed', 15000);
-        expect(result.status).toBe('ok');
-        if (result.status !== 'ok') throw new Error('Pinned rename did not prepare');
-        const item = yield* Schema.decodeUnknownEffect(
-          Schema.Struct({
-            files: Schema.Array(
-              Schema.Struct({
-                uri: Schema.String,
-                beforeText: Schema.String,
-                edits: Schema.Array(
-                  Schema.Struct({range: Schema.Struct({start: Position, end: Position}), newText: Schema.String}),
+          });
+          const assertOriginalCurrent = wire.assertOriginalCurrent;
+          if (!assertOriginalCurrent) throw new Error('Original native TypeScript owner proof unavailable');
+          const client = yield* makeLspClient(wire);
+          const basis = observation(texts.get('a.ts')!, {
+            worktree: project,
+            project,
+            uri: project + '/a.ts',
+            view: {kind: 'disk', id: 'rename-disk', owner: 'rename-test', epoch: 0},
+            documentVersion: null,
+            provider: {id: 'typescript-native', version: '7.1.0-beta', generation: 0},
+          });
+          let mutateOnRead = false;
+          const session = yield* makeTypeScriptSession(client, {
+            ...options(basis),
+            tsserver: candidate.executable,
+            compiler: candidate.executable,
+            sourceRoot: candidate.sdkDirectory,
+            // oxlint-disable-next-line effecttsgo/strict-effect-provide -- This real process test is the layer entry point.
+            verifyPolicy: verifyNativeTypeScriptCandidate(candidate).pipe(Effect.provide(coordinatorIo)),
+            startupMilliseconds: 15000,
+            native: {sdkRoot: candidate.sdkDirectory, assertOriginalCurrent},
+            captureEditSource: uri =>
+              Effect.gen(function* () {
+                const file = yield* path.fromFileUrl(new URL(uri));
+                const text = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(yield* fs.readFile(file));
+                if (mutateOnRead && EffectString.endsWith('/b.ts')(file))
+                  yield* fs.writeFileString(file, text + '// changed\n');
+                const stat = yield* fs.stat(file);
+                return {
+                  uri,
+                  text,
+                  content: sha256HexSync(text),
+                  identity: JSON.stringify([String(stat.dev), String(Option.getOrThrow(stat.ino))]),
+                };
+              }),
+          });
+          let completed = false;
+          yield* Effect.addFinalizer(() =>
+            completed
+              ? Effect.void
+              : Effect.exit(session.close).pipe(
+                  Effect.flatMap(exit =>
+                    Effect.sync(() =>
+                      process.stderr.write(
+                        JSON.stringify({
+                          nativeStop: Exit.isSuccess(exit)
+                            ? {
+                                code: exit.value.code,
+                                drained: exit.value.drained,
+                                forced: exit.value.forced,
+                                stdioClosed: exit.value.stdioClosed,
+                                fault: exit.value.fault?.code,
+                              }
+                            : {state: 'unknown'},
+                        }) + '\n',
+                      ),
+                    ),
+                  ),
                 ),
+          );
+          yield* session.upsert(basis, texts.get('a.ts')!, 'typescript', 15000);
+          const actionBasis = {...basis, uri: project + '/b.ts', content: sha256HexSync(texts.get('b.ts')!)};
+          const actionObserved = yield* session.upsert(actionBasis, texts.get('b.ts')!, 'typescript', 15000);
+          const actionQuery = {
+            range: {start: {line: 0, character: 0}, end: {line: 0, character: 0}},
+            only: ['source.removeUnusedImports.ts'],
+          };
+          const listed = yield* session.actions(actionObserved, actionQuery, 15000);
+          expect(listed.status).toBe('ok');
+          if (listed.status !== 'ok') throw new Error('Pinned action list failed');
+          const choices = yield* Schema.decodeUnknownEffect(
+            Schema.Array(
+              Schema.Struct({
+                selector: Schema.String,
+                queryDigest: Schema.String,
+                qualified: Schema.Boolean,
+                actionKind: Schema.String,
               }),
             ),
-          }),
-        )(result.items[0]);
-        expect(item.files).toHaveLength(3);
-        for (const file of item.files) {
-          const original = texts.get(EffectString.split('/')(file.uri).pop()!)!;
-          expect(file.beforeText).toBe(original);
-          let after = original;
-          const edits = [...file.edits].sort((a, b) => b.range.start.character - a.range.start.character);
-          for (const edit of edits) {
-            expect(edit.range.start.line).toBe(0);
-            expect(edit.range.end.line).toBe(0);
-            after =
-              EffectString.slice(0, edit.range.start.character)(after) +
-              edit.newText +
-              EffectString.slice(edit.range.end.character)(after);
-          }
-          expect(after).toBe(EffectString.replaceAll('target', 'renamed')(original));
-          expect(Array.from(yield* fs.readFile(yield* path.fromFileUrl(new URL(file.uri))))).toEqual(
-            Array.from(new TextEncoder().encode(original)),
-          );
-        }
-        const config: RuntimeConfig = {
-          account: 'local',
-          user: 'rename-test',
-          agentId: 'test',
-          agentContextHome: privateHome,
-          manifestPath: path.join(privateHome, 'manifest.json'),
-        };
-        yield* trustProtocolProfile(config, project);
-        const profileText = JSON.stringify({
-          version: 1,
-          enabled: true,
-          worktree: project,
-          catalog: {
-            candidate: {
-              runtime: '/fixture/node',
-              runtimeDigest: sha256HexSync('node'),
-              runtimeVersion: '24.19.0',
-              sdkDirectory: '/fixture/typescript',
-              sdkTreeDigest: sha256HexSync('sdk'),
-              serverDirectory: '/fixture/server',
-              serverTreeDigest: sha256HexSync('server'),
-            },
-          },
-        });
-        yield* fs.makeDirectory(path.join(privateHome, 'semantic', 'profiles'), {recursive: true, mode: 0o700});
-        yield* fs.writeFileString(
-          path.join(privateHome, 'semantic', 'profiles', semanticHostProfileName(config, project)),
-          profileText,
-          {mode: 0o600},
-        );
-        const changes = yield* makeSemanticAgentChanges(
-          {
-            attach: (seed, text) =>
-              session
-                .upsert({...basis, uri: seed.uri, content: seed.content}, text, 'typescript', 15000)
-                .pipe(Effect.map(observation => ({observation}))),
-            use: (_observation, _milliseconds, f) =>
-              f({
-                ...session,
-                upsert: (o, t) => session.upsert(o, t, 'typescript', 15000),
-                query: () =>
-                  Effect.succeed({version: 1, status: 'unsupported', reason: 'unused test query', evidence: null}),
-              }),
-            observe: observed => session.observation(observed.uri),
-          },
-          {
-            directory: privateHome,
-            profileHome: privateHome,
-            worktree: project,
-            runtimeIdentity: sha256HexSync('pinned-test-runtime'),
-          },
-        );
-        const changeContext = yield* Effect.context<Effect.Services<ReturnType<typeof changes.execute>>>();
-        const publicHost: SemanticAgentQueryHost = {
-          runtimeIdentity: Effect.succeed(sha256HexSync('pinned-test-runtime')),
-          connect: () =>
-            Effect.succeed({
-              request: (body: import('../../src/semantic/coordinator.js').SemanticRequest) =>
-                body.operation === 'agent-change'
-                  ? changes.execute(body.request).pipe(
-                      Effect.provideContext(changeContext),
-                      Effect.flatMap(Schema.decodeUnknownEffect(Schema.Json)),
-                      Effect.mapError(() => LspFault.make({code: 'protocol'})),
-                    )
-                  : Effect.die('Unexpected public request'),
+          )(listed.items);
+          const selected = EffectArray.filter(choices, choice => choice.actionKind === 'source.removeUnusedImports.ts');
+          expect(selected).toHaveLength(1);
+          expect(selected[0].qualified).toBe(true);
+          const actionPrepared = yield* session.actions(actionObserved, actionQuery, 15000, selected[0]);
+          expect(actionPrepared).toMatchObject({
+            status: 'ok',
+            items: [{operation: 'code-action', sourceBasis: 'pre-request-synchronized-text-v1'}],
+          });
+          if (actionPrepared.status !== 'ok') throw new Error('Pinned action prepare failed');
+          expect(JSON.stringify(actionPrepared.items)).toContain('unused');
+          for (const [name, text] of texts)
+            expect(Array.from(yield* fs.readFile(path.join(root, name)))).toEqual(
+              Array.from(new TextEncoder().encode(text)),
+            );
+          const attached = (yield* session.observation(basis.uri))!;
+          const result = yield* session.prepare('rename', attached, {line: 0, character: 18}, 'renamed', 15000);
+          expect(result.status).toBe('ok');
+          if (result.status !== 'ok') throw new Error('Pinned rename did not prepare');
+          const item = yield* Schema.decodeUnknownEffect(
+            Schema.Struct({
+              files: Schema.Array(
+                Schema.Struct({
+                  uri: Schema.String,
+                  beforeText: Schema.String,
+                  edits: Schema.Array(
+                    Schema.Struct({range: Schema.Struct({start: Position, end: Position}), newText: Schema.String}),
+                  ),
+                }),
+              ),
             }),
-        };
-        const publicAction = {
-          version: 1,
-          callerCwd: root,
-          action: 'prepare',
-          operation: 'code-action',
-          file: 'b.ts',
-          language: 'typescript',
-          range: actionQuery.range,
-          only: actionQuery.only,
-          milliseconds: 15000,
-          maxBytes: 32768,
-        };
-        const publicChoices = yield* runSemanticAgentChangeWith(publicHost, config, publicAction);
-        const choiceList = yield* Schema.decodeUnknownEffect(
-          Schema.Struct({
-            status: Schema.Literal('choices'),
-            choices: Schema.Array(Schema.Struct({choiceHandle: Schema.String, kind: Schema.String})),
-          }),
-        )(publicChoices);
-        const importChoice = EffectArray.filter(
-          choiceList.choices,
-          choice => choice.kind === 'source.removeUnusedImports.ts',
-        );
-        expect(importChoice).toHaveLength(1);
-        const publicPreview = yield* runSemanticAgentChangeWith(publicHost, config, {
-          ...publicAction,
-          choiceHandle: importChoice[0].choiceHandle,
-        });
-        expect(publicPreview).toMatchObject({
-          status: 'ok',
-          applicable: false,
-          writerAuthorityRequired: true,
-          qualification: 'qualified-text-only',
-          operationCount: 1,
-          targetCount: 1,
-        });
-        for (const [name, text] of texts)
-          expect(Array.from(yield* fs.readFile(path.join(root, name)))).toEqual(
-            Array.from(new TextEncoder().encode(text)),
+          )(result.items[0]);
+          expect(item.files).toHaveLength(3);
+          for (const file of item.files) {
+            const original = texts.get(EffectString.split('/')(file.uri).pop()!)!;
+            expect(file.beforeText).toBe(original);
+            let after = original;
+            const edits = [...file.edits].sort((a, b) => b.range.start.character - a.range.start.character);
+            for (const edit of edits) {
+              expect(edit.range.start.line).toBe(0);
+              expect(edit.range.end.line).toBe(0);
+              after =
+                EffectString.slice(0, edit.range.start.character)(after) +
+                edit.newText +
+                EffectString.slice(edit.range.end.character)(after);
+            }
+            expect(after).toBe(EffectString.replaceAll('target', 'renamed')(original));
+            expect(Array.from(yield* fs.readFile(yield* path.fromFileUrl(new URL(file.uri))))).toEqual(
+              Array.from(new TextEncoder().encode(original)),
+            );
+          }
+          const config: RuntimeConfig = {
+            account: 'local',
+            user: 'rename-test',
+            agentId: 'test',
+            agentContextHome: privateHome,
+            manifestPath: path.join(privateHome, 'manifest.json'),
+          };
+          yield* trustProtocolProfile(config, project);
+          const profileText = JSON.stringify({
+            version: 1,
+            enabled: true,
+            worktree: project,
+            catalog: {nativeCandidate: candidate},
+          });
+          yield* fs.makeDirectory(path.join(privateHome, 'semantic', 'profiles'), {recursive: true, mode: 0o700});
+          yield* fs.writeFileString(
+            path.join(privateHome, 'semantic', 'profiles', semanticHostProfileName(config, project)),
+            profileText,
+            {mode: 0o600},
           );
-        const request = {
-          version: 1 as const,
-          worktree: project,
-          project,
-          uri: basis.uri,
-          language: 'typescript' as const,
-          profile: sha256HexSync(profileText),
-          principal: EffectString.slice(0, -5)(semanticHostProfileName(config, project)),
-          action: 'prepare' as const,
-          operation: 'rename' as const,
-          position: {line: 0, character: 18},
-          newName: 'renamed',
-          milliseconds: 15000,
-          maxBytes: 32768,
-        };
-        const preview = yield* changes.execute(request);
-        expect(preview).toMatchObject({status: 'ok', applicable: false, targetCount: 3});
-        const {handle} = yield* Schema.decodeUnknownEffect(
-          Schema.Struct({handle: Schema.Struct({id: Schema.String, capability: Schema.String, digest: Schema.String})}),
-        )(preview);
-        const retrieved = yield* changes.execute({...request, action: 'status', handle});
-        expect(retrieved).toMatchObject({status: 'ok', applicable: false});
-        expect(yield* changes.execute({...request, action: 'preflight', handle})).toMatchObject({
-          status: 'ok',
-          applicable: false,
-          writerAuthorityRequired: true,
-          conflicts: [],
-        });
-        yield* fs.chmod(path.join(root, 'c.ts'), 0o400);
-        expect(yield* changes.execute({...request, action: 'preflight', handle})).toMatchObject({
-          status: 'conflict',
-          applicable: false,
-          conflicts: [{uri: project + '/c.ts', reason: 'readonly'}],
-        });
-        yield* fs.chmod(path.join(root, 'c.ts'), 0o600);
-        yield* fs.rename(path.join(root, 'c.ts'), path.join(root, 'original-c.ts'));
-        yield* fs.symlink(path.join(root, 'original-c.ts'), path.join(root, 'c.ts'));
-        expect(yield* changes.execute({...request, action: 'preflight', handle})).toMatchObject({
-          status: 'conflict',
-          applicable: false,
-          conflicts: [{uri: project + '/c.ts', reason: 'path-conflict'}],
-        });
-        yield* fs.remove(path.join(root, 'c.ts'));
-        yield* fs.rename(path.join(root, 'original-c.ts'), path.join(root, 'c.ts'));
-        yield* fs.writeFileString(path.join(root, 'c.ts'), texts.get('c.ts')! + '// changed\n');
-        expect(yield* changes.execute({...request, action: 'preflight', handle})).toMatchObject({
-          status: 'conflict',
-          applicable: false,
-          conflicts: [{uri: project + '/c.ts', reason: 'source-changed'}],
-        });
-        yield* fs.writeFileString(path.join(root, 'c.ts'), texts.get('c.ts')!);
-        mutateOnRead = true;
-        const current = yield* session.observation(basis.uri);
-        expect(current).toBeDefined();
-        expect(
-          (yield* session.prepare('rename', current!, {line: 0, character: 18}, 'other', 15000).pipe(Effect.exit))._tag,
-        ).toBe('Failure');
-        const closed = yield* client.close;
-        expect(closed.drained && closed.stdioClosed).toBe(true);
-      }).pipe(
-        // oxlint-disable-next-line effecttsgo/strict-effect-provide -- Scoped real process/filesystem boundary test.
-        Effect.provide(coordinatorIo),
-        Effect.provideService(CommandExecutor, versionProbe),
-        Effect.provideService(ChildEnvironmentPolicy, {
-          sanitizeExternal: env => env,
-          preserveIntendedChild: env => env,
-        }),
-        TestClock.withLive,
-      ),
-    45000,
-  );
-});
+          const changes = yield* makeSemanticAgentChanges(
+            {
+              attach: (seed, text) =>
+                session
+                  .upsert({...basis, uri: seed.uri, content: seed.content}, text, 'typescript', 15000)
+                  .pipe(Effect.map(observation => ({observation}))),
+              use: (_observation, _milliseconds, f) =>
+                f({
+                  ...session,
+                  upsert: (o, t) => session.upsert(o, t, 'typescript', 15000),
+                  query: () =>
+                    Effect.succeed({version: 1, status: 'unsupported', reason: 'unused test query', evidence: null}),
+                }),
+              observe: observed => session.observation(observed.uri),
+            },
+            {
+              directory: privateHome,
+              profileHome: privateHome,
+              worktree: project,
+              runtimeIdentity: sha256HexSync('pinned-test-runtime'),
+            },
+          );
+          const changeContext = yield* Effect.context<Effect.Services<ReturnType<typeof changes.execute>>>();
+          const publicHost: SemanticAgentQueryHost = {
+            runtimeIdentity: Effect.succeed(sha256HexSync('pinned-test-runtime')),
+            connect: () =>
+              Effect.succeed({
+                request: (body: import('../../src/semantic/coordinator.js').SemanticRequest) =>
+                  body.operation === 'agent-change'
+                    ? changes.execute(body.request).pipe(
+                        Effect.provideContext(changeContext),
+                        Effect.flatMap(Schema.decodeUnknownEffect(Schema.Json)),
+                        Effect.mapError(() => LspFault.make({code: 'protocol'})),
+                      )
+                    : Effect.die('Unexpected public request'),
+              }),
+          };
+          const publicAction = {
+            version: 1,
+            callerCwd: root,
+            action: 'prepare',
+            operation: 'code-action',
+            file: 'b.ts',
+            language: 'typescript',
+            range: actionQuery.range,
+            only: actionQuery.only,
+            milliseconds: 15000,
+            maxBytes: 32768,
+          };
+          const publicChoices = yield* runSemanticAgentChangeWith(publicHost, config, publicAction);
+          const choiceList = yield* Schema.decodeUnknownEffect(
+            Schema.Struct({
+              status: Schema.Literal('choices'),
+              choices: Schema.Array(Schema.Struct({choiceHandle: Schema.String, kind: Schema.String})),
+            }),
+          )(publicChoices);
+          const importChoice = EffectArray.filter(
+            choiceList.choices,
+            choice => choice.kind === 'source.removeUnusedImports.ts',
+          );
+          expect(importChoice).toHaveLength(1);
+          const publicPreview = yield* runSemanticAgentChangeWith(publicHost, config, {
+            ...publicAction,
+            choiceHandle: importChoice[0].choiceHandle,
+          });
+          expect(publicPreview).toMatchObject({
+            status: 'ok',
+            applicable: false,
+            writerAuthorityRequired: true,
+            qualification: 'qualified-text-only',
+            operationCount: 1,
+            targetCount: 1,
+          });
+          for (const [name, text] of texts)
+            expect(Array.from(yield* fs.readFile(path.join(root, name)))).toEqual(
+              Array.from(new TextEncoder().encode(text)),
+            );
+          const request = {
+            version: 1 as const,
+            worktree: project,
+            project,
+            uri: basis.uri,
+            language: 'typescript' as const,
+            profile: sha256HexSync(profileText),
+            principal: EffectString.slice(0, -5)(semanticHostProfileName(config, project)),
+            action: 'prepare' as const,
+            operation: 'rename' as const,
+            position: {line: 0, character: 18},
+            newName: 'renamed',
+            milliseconds: 15000,
+            maxBytes: 32768,
+          };
+          const preview = yield* changes.execute(request);
+          expect(preview).toMatchObject({status: 'ok', applicable: false, targetCount: 3});
+          const {handle} = yield* Schema.decodeUnknownEffect(
+            Schema.Struct({
+              handle: Schema.Struct({id: Schema.String, capability: Schema.String, digest: Schema.String}),
+            }),
+          )(preview);
+          const retrieved = yield* changes.execute({...request, action: 'status', handle});
+          expect(retrieved).toMatchObject({status: 'ok', applicable: false});
+          expect(yield* changes.execute({...request, action: 'preflight', handle})).toMatchObject({
+            status: 'ok',
+            applicable: false,
+            writerAuthorityRequired: true,
+            conflicts: [],
+          });
+          yield* fs.chmod(path.join(root, 'c.ts'), 0o400);
+          expect(yield* changes.execute({...request, action: 'preflight', handle})).toMatchObject({
+            status: 'conflict',
+            applicable: false,
+            conflicts: [{uri: project + '/c.ts', reason: 'readonly'}],
+          });
+          yield* fs.chmod(path.join(root, 'c.ts'), 0o600);
+          yield* fs.rename(path.join(root, 'c.ts'), path.join(root, 'original-c.ts'));
+          yield* fs.symlink(path.join(root, 'original-c.ts'), path.join(root, 'c.ts'));
+          expect(yield* changes.execute({...request, action: 'preflight', handle})).toMatchObject({
+            status: 'conflict',
+            applicable: false,
+            conflicts: [{uri: project + '/c.ts', reason: 'path-conflict'}],
+          });
+          yield* fs.remove(path.join(root, 'c.ts'));
+          yield* fs.rename(path.join(root, 'original-c.ts'), path.join(root, 'c.ts'));
+          yield* fs.writeFileString(path.join(root, 'c.ts'), texts.get('c.ts')! + '// changed\n');
+          expect(yield* changes.execute({...request, action: 'preflight', handle})).toMatchObject({
+            status: 'conflict',
+            applicable: false,
+            conflicts: [{uri: project + '/c.ts', reason: 'source-changed'}],
+          });
+          yield* fs.writeFileString(path.join(root, 'c.ts'), texts.get('c.ts')!);
+          mutateOnRead = true;
+          const current = yield* session.observation(basis.uri);
+          expect(current).toBeDefined();
+          expect(
+            (yield* session.prepare('rename', current!, {line: 0, character: 18}, 'other', 15000).pipe(Effect.exit))
+              ._tag,
+          ).toBe('Failure');
+          const closed = yield* session.close;
+          expect(closed).toMatchObject({graceful: true, code: 0, drained: true, stdioClosed: true, forced: false});
+          completed = true;
+        }).pipe(
+          // oxlint-disable-next-line effecttsgo/strict-effect-provide -- Scoped real process/filesystem boundary test.
+          Effect.provide(coordinatorIo),
+          Effect.provideService(CommandExecutor, versionProbe),
+          Effect.provideService(ChildEnvironmentPolicy, {
+            sanitizeExternal: env => env,
+            preserveIntendedChild: env => env,
+          }),
+          TestClock.withLive,
+        ),
+      45000,
+    );
+  },
+);
 
 describe('rename closure project barriers', () => {
   effectIt.effect('preserves JS module languages and refuses absent or changing effective project membership', () =>

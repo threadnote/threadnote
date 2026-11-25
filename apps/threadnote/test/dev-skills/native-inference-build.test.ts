@@ -11,6 +11,7 @@ import {
   nativeContainerFailureReport,
   nativeInferenceBuildEnvironment,
   GNU_INFERENCE_COMPILER_BOOTSTRAP,
+  gnuBuildContainerBootstrap,
   muslToolchainFetchScript,
   MUSL_BUILD_DEPENDENCY_INSTALL,
   buildNativeInferenceDriver,
@@ -725,6 +726,48 @@ if [ "$1" = --bun ] && [ "$2" = husky ]; then [ "$HUSKY" = 0 ] || exit 41; fi
           );
           expect(run().exitCode).not.toBe(0);
           expect(yield* fs.exists(calls)).toBe(false);
+        }),
+    );
+
+    it.effect.skipIf(process.platform === 'win32')(
+      'returns the GNU container checkout to the runner user on every exit before any build step',
+      () =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const directory = yield* fs.makeTempDirectoryScoped({prefix: 'native gnu ownership '});
+          const checkout = path.join(directory, "checkout 'root'");
+          const pins = {bun: 'bun-linux-x64-baseline', bunSha: 'a', rust: 'x86_64-unknown-linux-gnu', rustupSha: 'b'};
+          const bootstrap = gnuBuildContainerBootstrap(pins, checkout, path.join(checkout, 'run.mjs'), '1001:127');
+          expect(() => gnuBuildContainerBootstrap(pins, checkout, 'run.mjs', 'runner')).toThrow('numeric uid:gid');
+          // Everything before the first download: the exit trap is armed before any step can create root-owned files.
+          const preamble = EffectString.split('\ncurl ')(bootstrap)[0] ?? '';
+          expect(preamble).toContain('trap ');
+          const log = path.join(directory, 'chown.log');
+          const chown = path.join(directory, 'chown');
+          const run = (body: string, chownStatus: number) =>
+            Effect.gen(function* () {
+              yield* fs.writeFileString(chown, `#!/bin/sh\nprintf '%s\\n' "$@" > '${log}'\nexit ${chownStatus}\n`);
+              yield* fs.chmod(chown, 0o755);
+              yield* fs.remove(log, {force: true});
+              const result = Bun.spawnSync({
+                cmd: ['bash', '-c', `${preamble}\n${body}`],
+                env: {...Bun.env, PATH: `${directory}:${Bun.env.PATH ?? ''}`},
+                stdout: 'pipe',
+                stderr: 'pipe',
+              });
+              return {status: result.exitCode, stderr: result.stderr.toString(), chown: yield* fs.readFileString(log)};
+            });
+          const restored = EffectArray.join(['-hRP', '--', '1001:127', checkout, ''], '\n');
+          expect(yield* run('stage=requested-command\nexit 0', 0)).toMatchObject({status: 0, chown: restored});
+          // A failed build still returns ownership and keeps its own status and stage report.
+          const failed = yield* run('stage=requested-command\nexit 7', 0);
+          expect(failed).toMatchObject({status: 7, chown: restored});
+          expect(failed.stderr).toContain('failed at requested-command (exit 7)');
+          // A failed ownership restore fails an otherwise successful build.
+          const unowned = yield* run('stage=requested-command\nexit 0', 3);
+          expect(unowned.status).toBe(1);
+          expect(unowned.stderr).toContain('could not return the checkout to 1001:127');
         }),
     );
 

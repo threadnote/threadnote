@@ -45,6 +45,7 @@ import {
 import {codeGraphScopeAdmitsPath} from '../scope/applicability.js';
 import {observeCodeGraphBackgroundDemand, type CodeGraphRefreshDemandIdentity} from '../refresh/demand.js';
 import {resolveRepositoryIdentity} from '../repository.js';
+import {NATIVE_TYPESCRIPT_PREPARED_ASSET_ENV} from '../typescript_native_asset_pins.js';
 import {
   CodeGraphSnapshotUnavailable,
   type CodeGraphQueryResult,
@@ -659,6 +660,7 @@ const serveCodeGraphDiagram = Effect.fn('codeGraph.serveDiscoveryDiagram')(funct
   return yield* serveCodeGraphDiscoveryReadWith(request, options, attached =>
     readCodeGraphDiagramForStatus(store, attached, {
       question: request.query,
+      threadnoteHome: request.threadnoteHome,
       ...(diagram.type === undefined ? {} : {diagramType: diagram.type}),
       timeoutMilliseconds: diagram.timeoutMilliseconds,
     }).pipe(
@@ -1412,7 +1414,11 @@ function validImpactQueryResult(value: unknown): value is CodeGraphQueryResult {
   );
 }
 
-/** @internal Preserve only bootstrap variables required by the exact-runtime worker. */
+/**
+ * @internal Preserve only bootstrap variables required by the exact-runtime worker. A source-mode runtime also keeps
+ * its host-prepared native TypeScript asset, so the worker's parser pool can admit the same verified asset; a compiled
+ * runtime ignores it and uses the asset beside its executable.
+ */
 export function impactQueryWorkerEnvironment(source: NodeJS.ProcessEnv, threadnoteHome: string): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {
     THREADNOTE_CODE_GRAPH_IMPACT_QUERY_WORKER: '1',
@@ -1433,6 +1439,7 @@ export function impactQueryWorkerEnvironment(source: NodeJS.ProcessEnv, threadno
     'SystemRoot',
     'SYSTEMROOT',
     'WINDIR',
+    NATIVE_TYPESCRIPT_PREPARED_ASSET_ENV,
   ] as const) {
     const value = source[key];
     if (value !== undefined) environment[key] = value;

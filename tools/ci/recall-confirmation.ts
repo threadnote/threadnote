@@ -1,3 +1,4 @@
+import {requireNativeTypeScriptAsset} from '../../scripts/support/native-typescript-preflight.js';
 import {BunFileSystem} from '@effect/platform-bun';
 import {Array as EffectArray, Effect, FileSystem, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -118,6 +119,7 @@ export async function confirmRecall(
 
 if (import.meta.main) {
   try {
+    requireNativeTypeScriptAsset('recall confirmation');
     const result = await confirmRecall();
     await Bun.write(
       Bun.stdout,

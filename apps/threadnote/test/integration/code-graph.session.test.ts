@@ -19,6 +19,7 @@ import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {runEffect} from '../helpers/effect-runtime.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {skipWithoutNativeTypeScript} from '@threadnote/graph/test/helpers/native-typescript-session';
 
 const sqliteSessions = vi.hoisted(() => ({
   active: 0,
@@ -99,7 +100,8 @@ afterAll(() => {
 });
 
 describe('code graph SQLite session lifetime', () => {
-  it('decodes, postprocesses, and attributes each cached file only once while staging', async () => {
+  it('decodes, postprocesses, and attributes each cached file only once while staging', async context => {
+    skipWithoutNativeTypeScript(context);
     const decoded = new Map<string, number>();
     const postprocessed = new Map<string, number>();
     const indexed = await runEffect(

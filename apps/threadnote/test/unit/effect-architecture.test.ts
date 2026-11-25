@@ -5,11 +5,16 @@ import {statSync} from '@threadnote/testing/node-fs';
 import {dirname, join, relative} from '@threadnote/testing/node-path';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {fileURLToPath} from '@threadnote/testing/node-url';
-import {describe, expect, it} from 'vitest';
+import {describe, expect, it, afterAll} from 'vitest';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 import * as FC from 'fast-check';
-import ts from 'typescript-compiler';
+import * as ts from 'typescript/ast';
+import {DiagnosticCategory, JsxEmit} from 'typescript/async';
+import {
+  createTypeScriptSyntaxSession,
+  type TypeScriptSyntaxSession,
+} from '../../../../tools/workspace/typescript-syntax.js';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 const sourceRoot = join(repoRoot, 'apps', 'threadnote', 'src');
@@ -80,39 +85,43 @@ function inertCommentText(value: string): string {
   );
 }
 
-function rawConsoleCalls(
+async function rawConsoleCalls(
   source: string,
   path = 'source.ts',
-): readonly {method: ForbiddenConsoleMethod; position: number}[] | undefined {
-  let calls: readonly {method: ForbiddenConsoleMethod; position: number}[] | undefined;
+): Promise<readonly {method: ForbiddenConsoleMethod; position: number}[] | undefined> {
   try {
-    const parsed = ts.transpileModule(source, {
-      fileName: Effect.pipe(path, EffectString.endsWith('.d.ts'))
-        ? `${Effect.pipe(path, EffectString.slice(0, -5))}.ts`
-        : path,
-      reportDiagnostics: true,
-      compilerOptions: {jsx: ts.JsxEmit.Preserve, target: ts.ScriptTarget.Latest},
-      transformers: {
-        before: [
-          () => file => {
-            // Inspect the original parsed tree before emit erases types or rewrites calls.
-            calls = consoleCallsInFile(file);
-            return file;
-          },
-        ],
+    const session = await getSyntaxSession();
+    return await session.withSourceFileAndTranspile(
+      {fileName: path, text: source, scriptKind: scriptKindForPath(path)},
+      {
+        fileName: Effect.pipe(path, EffectString.endsWith('.d.ts'))
+          ? `${Effect.pipe(path, EffectString.slice(0, -5))}.ts`
+          : path,
+        reportDiagnostics: true,
+        compilerOptions: {jsx: JsxEmit.Preserve, target: ts.ScriptTarget.Latest},
       },
-    });
-    if (
-      parsed.diagnostics &&
-      EffectArray.some(parsed.diagnostics, diagnostic => diagnostic.category === ts.DiagnosticCategory.Error)
-    )
-      return undefined;
+      (file, parsed) => {
+        if (
+          parsed.diagnostics &&
+          EffectArray.some(
+            parsed.diagnostics,
+            diagnostic => Number(diagnostic.category) === Number(DiagnosticCategory.Error),
+          )
+        )
+          return undefined;
+        return consoleCallsInFile(file);
+      },
+    );
   } catch {
     return undefined;
   }
-
-  return calls;
 }
+
+/**
+ * The detector matches only the unescaped text `console` (an identifier or a string-literal key). Any escape that could
+ * spell it starts with a backslash, so source with neither `console` nor a backslash cannot contain a detectable call.
+ */
+const mayNameConsole = /console|\\/u;
 
 function consoleCallsInFile(file: ts.SourceFile): readonly {method: ForbiddenConsoleMethod; position: number}[] {
   const calls: {method: ForbiddenConsoleMethod; position: number}[] = [];
@@ -126,7 +135,7 @@ function consoleCallsInFile(file: ts.SourceFile): readonly {method: ForbiddenCon
     if (
       ts.isElementAccessExpression(node) &&
       node.argumentExpression &&
-      ts.isStringLiteralLike(node.argumentExpression)
+      ts.isStringLiteralLikeNode(node.argumentExpression)
     )
       return node.argumentExpression.text;
     return undefined;
@@ -152,7 +161,7 @@ function consoleCallsInFile(file: ts.SourceFile): readonly {method: ForbiddenCon
         }
       }
     }
-    ts.forEachChild(node, visit);
+    node.forEachChild(visit);
   };
   visit(file);
   return calls;
@@ -206,7 +215,7 @@ function importedModuleSpecifiers(path: string, source: string): readonly string
 }
 
 describe('Effect architecture boundaries', () => {
-  it('finds raw console calls in syntax rather than inert source text', () => {
+  it('finds raw console calls in syntax rather than inert source text', async () => {
     const inert = EffectArray.join(
       [
         'const text = "console.info(\\\"fixture\\\")";',
@@ -217,19 +226,19 @@ describe('Effect architecture boundaries', () => {
       ],
       '\n',
     );
-    expect(rawConsoleCalls(inert)).toEqual([]);
+    expect(await rawConsoleCalls(inert)).toEqual([]);
     for (const method of forbiddenConsoleMethods) {
-      expect(rawConsoleCalls(`function run() { if (true) console.${method}("sentinel"); }`)).toEqual([
+      expect(await rawConsoleCalls(`function run() { if (true) console.${method}("sentinel"); }`)).toEqual([
         expect.objectContaining({method}),
       ]);
     }
-    expect(rawConsoleCalls('const value = `data ${console.info("interpolation")} tail`;')).toHaveLength(1);
-    expect(rawConsoleCalls('globalThis.console.log(1);')).toHaveLength(1);
-    expect(rawConsoleCalls('console?.warn?.(1);')).toHaveLength(1);
-    expect(rawConsoleCalls('(console["debug"])(1);')).toHaveLength(1);
-    expect(rawConsoleCalls('const broken = ;')).toBeUndefined();
-    expect(rawConsoleCalls('declare const node: JSX.Element;', 'fixture.d.ts')).toEqual([]);
-    expect(rawConsoleCalls('const view = <div />;', 'fixture.tsx')).toEqual([]);
+    expect(await rawConsoleCalls('const value = `data ${console.info("interpolation")} tail`;')).toHaveLength(1);
+    expect(await rawConsoleCalls('globalThis.console.log(1);')).toHaveLength(1);
+    expect(await rawConsoleCalls('console?.warn?.(1);')).toHaveLength(1);
+    expect(await rawConsoleCalls('(console["debug"])(1);')).toHaveLength(1);
+    expect(await rawConsoleCalls('const broken = ;')).toBeUndefined();
+    expect(await rawConsoleCalls('declare const node: JSX.Element;', 'fixture.d.ts')).toEqual([]);
+    expect(await rawConsoleCalls('const view = <div />;', 'fixture.tsx')).toEqual([]);
     for (const text of ['`', '*/', '${console.log(1)}', '"\\', '\u2028', '\u2029']) {
       const escapedComment = inertCommentText(text);
       const spelling = `console.info(${escapedComment})`;
@@ -239,18 +248,18 @@ describe('Effect architecture boundaries', () => {
       ];
       for (const inertSource of inertSources) {
         const combined = `${inertSource}\nconsole.info(${JSON.stringify(text)});`;
-        expect(EffectArray.map(rawConsoleCalls(combined) ?? [], call => call.method)).toEqual(['info']);
+        expect(EffectArray.map((await rawConsoleCalls(combined)) ?? [], call => call.method)).toEqual(['info']);
       }
     }
   });
 
-  it('keeps inert console spellings independent from real calls across bounded generated syntax', () => {
+  it('keeps inert console spellings independent from real calls across bounded generated syntax', async () => {
     const methods = FC.constantFrom(...forbiddenConsoleMethods);
     const payload = FC.string({maxLength: 24});
     const dataContainer = FC.constantFrom('string', 'template', 'comment', 'regex');
     const callWrapper = FC.constantFrom('plain', 'nested', 'template');
-    FC.assert(
-      FC.property(methods, payload, dataContainer, callWrapper, (method, text, container, wrapper) => {
+    await FC.assert(
+      FC.asyncProperty(methods, payload, dataContainer, callWrapper, async (method, text, container, wrapper) => {
         const spelling = `console.${method}(${JSON.stringify(text)})`;
         const commentSpelling = `console.${method}(${inertCommentText(text)})`;
         const inert =
@@ -261,7 +270,7 @@ describe('Effect architecture boundaries', () => {
               : container === 'comment'
                 ? `/* ${commentSpelling} */`
                 : `const data = /console\\.${method}\\(.*\\)/u;`;
-        expect(rawConsoleCalls(inert)).toEqual([]);
+        expect(await rawConsoleCalls(inert)).toEqual([]);
         const actual =
           wrapper === 'nested'
             ? `function run() { if (true) ${spelling}; }`
@@ -269,36 +278,16 @@ describe('Effect architecture boundaries', () => {
               ? `const value = \`prefix \${${spelling}} suffix\`;`
               : `${spelling};`;
         const combined = `${inert}\n${actual}`;
-        expect(EffectArray.map(rawConsoleCalls(combined) ?? [], call => call.method)).toEqual([method]);
+        expect(EffectArray.map((await rawConsoleCalls(combined)) ?? [], call => call.method)).toEqual([method]);
         expect(combined).toContain(spelling);
       }),
       {numRuns: 32, seed: 424242},
     );
   });
 
-  it('conserves the independent reparse oracle, diagnostics and original positions across source kinds', () => {
-    // Keep the former parse boundary as the comparison oracle. The unchanged
-    // walker isolates original-AST reuse from receiver classification behavior.
-    const reparsed = (source: string, path: string) => {
-      try {
-        const parsed = ts.transpileModule(source, {
-          fileName: EffectString.endsWith('.d.ts')(path) ? EffectString.slice(0, -5)(path) + '.ts' : path,
-          reportDiagnostics: true,
-          compilerOptions: {jsx: ts.JsxEmit.Preserve, target: ts.ScriptTarget.Latest},
-        });
-        if (
-          EffectArray.some(parsed.diagnostics ?? [], diagnostic => diagnostic.category === ts.DiagnosticCategory.Error)
-        )
-          return undefined;
-      } catch {
-        return undefined;
-      }
-      return consoleCallsInFile(
-        ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, scriptKindForPath(path)),
-      );
-    };
-    FC.assert(
-      FC.property(
+  it('retains diagnostics and independently computed original positions across source kinds', async () => {
+    await FC.assert(
+      FC.asyncProperty(
         FC.constantFrom('ts', 'tsx', 'd.ts', 'js', 'jsx', 'mjs', 'cjs'),
         FC.constantFrom(
           'console.info(1)',
@@ -310,19 +299,17 @@ describe('Effect architecture boundaries', () => {
         ),
         FC.string({maxLength: 24}),
         FC.boolean(),
-        (extension, call, text, broken) => {
+        async (extension, call, text, broken) => {
           const prefix = `const inert = ${JSON.stringify(text)};\n`;
           const source = prefix + call + (broken ? '; const invalid = ;' : ';');
           const path = 'fixture.' + extension;
           const before = source;
-          expect(rawConsoleCalls(source, path)).toEqual(reparsed(source, path));
-          if (!broken) {
-            const calls = rawConsoleCalls(source, path);
-            if (calls !== undefined)
-              expect(calls).toEqual([
-                {method: /(?:info|warn|error|debug|log)/u.exec(call)![0], position: prefix.length},
-              ]);
-          } else expect(rawConsoleCalls(source, path)).toBeUndefined();
+          const typeAssertionInJavaScript =
+            call === '(console as Console)!.log(1)' && !['ts', 'tsx', 'd.ts'].includes(extension);
+          const calls = await rawConsoleCalls(source, path);
+          if (broken || typeAssertionInJavaScript) expect(calls).toBeUndefined();
+          else
+            expect(calls).toEqual([{method: /(?:info|warn|error|debug|log)/u.exec(call)![0], position: prefix.length}]);
           expect(source).toBe(before);
         },
       ),
@@ -537,16 +524,32 @@ describe('Effect architecture boundaries', () => {
     }
   });
 
+  it('only skips files whose text cannot spell a detectable console call', async () => {
+    for (const source of [
+      '\\u0063onsole.log(1);',
+      '\\u{63}onsole.warn(1);',
+      "globalThis['\\x63onsole'].info(1);",
+      "globalThis['con\\\nsole'].error(1);",
+      "globalThis['c\\onsole'].log(1);",
+    ]) {
+      expect(mayNameConsole.test(source), source).toBe(true);
+      expect(await rawConsoleCalls(source), source).toHaveLength(1);
+    }
+    expect(mayNameConsole.test('export const logger = Effect.log;')).toBe(false);
+  });
+
   it('routes console output through the Effect Console service', async () => {
     for (const root of codeRoots) {
       for (const path of await codeFiles(root)) {
         const source = await readFile(path, 'utf8');
-        const calls = rawConsoleCalls(source, path);
+        if (!mayNameConsole.test(source)) continue;
+        const calls = await rawConsoleCalls(source, path);
         expect(calls, relative(repoRoot, path)).not.toBeUndefined();
         expect(calls, relative(repoRoot, path)).toEqual([]);
       }
     }
-  });
+    // A whole-repository syntax scan: pooled Bazel targets on a slow runner need far more than the local ~10 s.
+  }, 120_000);
 
   it('isolates unstable Effect AI imports inside the AI adapter directory', async () => {
     for (const path of await sourceFiles()) {
@@ -648,3 +651,12 @@ describe('Effect architecture boundaries', () => {
     expect(processLease).not.toContain("from './utils.js'");
   });
 });
+
+// One npm TypeScript syntax child serves this whole file and is closed once.
+let syntaxSession: TypeScriptSyntaxSession | undefined;
+afterAll(async () => {
+  await syntaxSession?.close();
+});
+function getSyntaxSession(): Promise<TypeScriptSyntaxSession> {
+  return Promise.resolve((syntaxSession ??= createTypeScriptSyntaxSession({cwd: repoRoot})));
+}

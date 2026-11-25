@@ -853,27 +853,32 @@ export const nativeContainerCheckoutRoot = Effect.fn('nativeInference.checkoutRo
   return path.resolve(yield* fs.realPath(root));
 });
 
-export const runGnuBuildContainer = Effect.fn('nativeInference.gnuContainer')(function* (
-  root: string,
-  command: readonly string[],
-) {
-  const fs = yield* FileSystem.FileSystem;
-  if (process.platform !== 'linux' || (process.arch !== 'x64' && process.arch !== 'arm64'))
-    throw new Error('GNU CI builds require a native Linux host.');
-  const checkoutRoot = yield* nativeContainerCheckoutRoot(root);
-  const pins = GNU_PINS[process.arch];
-  const target = process.arch === 'x64' ? 'bun-linux-x64-baseline' : 'bun-linux-arm64';
-  const scratch = path.join(checkoutRoot, '.context', 'native-inference-container');
-  yield* fs.makeDirectory(scratch, {recursive: true});
-  const driver = path.join(scratch, 'run-gnu.mjs');
-  yield* fs.writeFileString(
-    driver,
-    `const child=Bun.spawn(${JSON.stringify(command)},{cwd:${JSON.stringify(checkoutRoot)},stdin:'inherit',stdout:'inherit',stderr:'inherit'});process.exitCode=await child.exited;`,
-  );
-  const quote = (value: string) => "'" + EffectString.replaceAll("'", "'\"'\"'")(value) + "'";
-  const bootstrap = `set -eu
+const shellQuote = (value: string) => "'" + EffectString.replaceAll("'", "'\"'\"'")(value) + "'";
+
+/** The host user that owns the bind-mounted checkout; the root build container hands its outputs back to it. */
+function runnerOwner(): string {
+  const uid = process.getuid?.();
+  const gid = process.getgid?.();
+  if (uid === undefined || gid === undefined) throw new Error('GNU CI builds require a POSIX runner user.');
+  return `${uid}:${gid}`;
+}
+
+/** The root GNU container's script. Its exit trap returns the checkout to `runnerOwner` before reporting a failure. */
+export function gnuBuildContainerBootstrap(
+  pins: {readonly bun: string; readonly bunSha: string; readonly rust: string; readonly rustupSha: string},
+  checkoutRoot: string,
+  driver: string,
+  runnerOwner: string,
+): string {
+  if (!/^\d+:\d+$/u.test(runnerOwner)) throw new Error('The GNU container runner owner must be numeric uid:gid.');
+  const quote = shellQuote;
+  return `set -eu
 stage=bun-bootstrap
-trap 'status=$?; if [ "$status" -ne 0 ]; then printf "Native GNU container failed at %s (exit %s)\\n" "$stage" "$status" >&2; fi' 0
+checkout_root=${quote(checkoutRoot)}
+runner_owner=${runnerOwner}
+# The container runs as root (the pinned clang installs under /opt); on exit, success or failure, the bind-mounted
+# checkout and its build outputs return to the runner user, so host steps and native ownership checks see their owner.
+trap 'status=$?; chown -hRP -- "$runner_owner" "$checkout_root" || { printf "Native GNU container could not return the checkout to %s\\n" "$runner_owner" >&2; status=1; }; if [ "$status" -ne 0 ]; then printf "Native GNU container failed at %s (exit %s)\\n" "$stage" "$status" >&2; fi; exit "$status"' 0
 curl --fail --location --silent --show-error 'https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/${pins.bun}.zip' -o /tmp/bun.zip
 printf '${pins.bunSha}  /tmp/bun.zip\\n' | sha256sum -c -
 unzip -q /tmp/bun.zip -d /tmp/bun
@@ -894,6 +899,30 @@ bun install --frozen-lockfile
 stage=requested-command
 bun ${quote(driver)}
 `;
+}
+
+export const runGnuBuildContainer = Effect.fn('nativeInference.gnuContainer')(function* (
+  root: string,
+  command: readonly string[],
+) {
+  const fs = yield* FileSystem.FileSystem;
+  if (process.platform !== 'linux' || (process.arch !== 'x64' && process.arch !== 'arm64'))
+    throw new Error('GNU CI builds require a native Linux host.');
+  const checkoutRoot = yield* nativeContainerCheckoutRoot(root);
+  const pins = GNU_PINS[process.arch];
+  const target = process.arch === 'x64' ? 'bun-linux-x64-baseline' : 'bun-linux-arm64';
+  const scratch = path.join(checkoutRoot, '.context', 'native-inference-container');
+  yield* fs.makeDirectory(scratch, {recursive: true});
+  const driver = path.join(scratch, 'run-gnu.mjs');
+  yield* fs.writeFileString(
+    driver,
+    `const child=Bun.spawn(${JSON.stringify(command)},{cwd:${JSON.stringify(checkoutRoot)},stdin:'inherit',stdout:'inherit',stderr:'inherit'});process.exitCode=await child.exited;`,
+  );
+  const bootstrap = gnuBuildContainerBootstrap(pins, checkoutRoot, driver, runnerOwner());
+  // A reviewed-pin release stages the verified native TypeScript payload; the build re-verifies it inside the container.
+  const typeScriptPayload = Bun.env.THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR
+    ? yield* fs.realPath(Bun.env.THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR)
+    : undefined;
   yield* runCommandEffect(
     'docker',
     [
@@ -902,6 +931,14 @@ bun ${quote(driver)}
       '--init',
       '--volume',
       `${checkoutRoot}:${checkoutRoot}`,
+      ...(typeScriptPayload === undefined
+        ? []
+        : [
+            '--volume',
+            `${typeScriptPayload}:${typeScriptPayload}:ro`,
+            '--env',
+            `THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR=${typeScriptPayload}`,
+          ]),
       '--workdir',
       checkoutRoot,
       '--env',

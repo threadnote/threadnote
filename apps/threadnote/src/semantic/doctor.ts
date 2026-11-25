@@ -16,6 +16,7 @@ import {
   verifySemanticNodeCandidate,
   inspectSemanticEndpoint,
 } from './coordinator.js';
+import {verifyNativeTypeScriptCandidate} from './providers/typescript_runtime.js';
 import {SemanticLanguage, SemanticSetupFault} from './provider.js';
 import {semanticHostSelection} from './host_catalog.js';
 import {semanticAgentQueryHost} from './agent_queries.js';
@@ -145,9 +146,21 @@ export const runSemanticDoctor = Effect.fn('semantic.doctor')(function* (
       return result('disabled', actions.disabled, {profileDigest: selected?.digest});
     const catalog = profile.catalog;
     const providers: {id: string; state: string; cause?: string; nextAction: string; productionQualified: false}[] = [];
+    // A legacy Node TypeScript candidate refuses only the TypeScript slot; every other provider is still assessed.
+    if (
+      catalog.candidate &&
+      (!request.language || semanticHostSelection[request.language].provider === 'typescript-native')
+    )
+      providers.push({
+        id: 'typescript-language-server',
+        state: 'incompatible',
+        cause: 'legacy-candidate',
+        nextAction: 'TypeScript analysis requires a host-owned native 7.1 candidate; other providers are unaffected',
+        productionQualified: false,
+      });
     const checks = [
-      ...(catalog.candidate
-        ? [{id: 'typescript-language-server', verify: verifySemanticNodeCandidate(catalog.candidate, true)}]
+      ...(catalog.nativeCandidate
+        ? [{id: 'typescript-native', verify: verifyNativeTypeScriptCandidate(catalog.nativeCandidate)}]
         : []),
       ...(catalog.python ? [{id: 'basedpyright', verify: verifySemanticNodeCandidate(catalog.python, true)}] : []),
       ...(catalog.go ? [{id: 'gopls', verify: verifyNativeSemanticCandidate(catalog.go, 'gopls')}] : []),
@@ -187,7 +200,9 @@ export const runSemanticDoctor = Effect.fn('semantic.doctor')(function* (
           ? 'Experimental host candidate only; license, distribution and platform release qualification remain gated'
           : verified._tag === 'Failure' && Schema.is(SemanticSetupFault)(verified.failure)
             ? verified.failure.nextAction
-            : 'Verify the configured exact provider, SDK and runtime versions and SHA-256 digests, permissions and artifact bounds; no download is performed',
+            : check.id === 'typescript-native'
+              ? 'Verify the host-prepared native TypeScript asset against its reviewed pins; the asset and every parent directory must be owned by you or root and not group- or other-writable (chmod g-w <dir>); no download is performed'
+              : 'Verify the configured exact provider, SDK and runtime versions and SHA-256 digests, permissions and artifact bounds; no download is performed',
         productionQualified: false,
       });
     }

@@ -1,7 +1,7 @@
 import * as EffectString from 'effect/String';
 import * as EffectRecord from 'effect/Record';
 import {Array as EffectArray} from 'effect';
-import {describe, expect, it, vi} from 'vitest';
+import {describe, expect, it, vi, afterAll} from 'vitest';
 import {it as effectIt} from '@effect/vitest';
 import {Deferred, Effect, Fiber, FileSystem, Option, Path} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -21,28 +21,38 @@ import {packCacheIdentity} from '@threadnote/graph/languages/registry';
 import {codeGraphLanguagePack} from '@threadnote/graph/languages/typescript/pack';
 import type {CodeGraphQueryResult} from '@threadnote/graph/types';
 import {citationPlatformLayer} from '../helpers/citation-platform.js';
-import {extractFileFacts} from '@threadnote/graph/extractor';
+import {extractNativeFileFacts} from '@threadnote/graph/extractor';
 import {createNavigationFactCollector} from '@threadnote/graph/navigation_facts';
-import {loadTypeScriptExtractionRuntime} from '@threadnote/graph/typescript_runtime';
+import type {NativeTypeScriptSession} from '@threadnote/graph/typescript_runtime';
+import {native, createNativeTypeScriptTestSession} from '../helpers/native-typescript-session.js';
 import * as graphSession from '@threadnote/graph/store/session';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+// One native session serves this file; each operation has its own budget.
+let nativeSession: Promise<NativeTypeScriptSession> | undefined;
+afterAll(async () => {
+  await (await nativeSession)?.close();
+});
+const currentNativeSession = () => (nativeSession ??= createNativeTypeScriptTestSession());
 const source =
   "import {writeFile as persistFile} from 'node:fs/promises';\nexport async function saveNote(path: string, text: string, persist: boolean) {\n  if (persist) {\n    await persistFile(path, text);\n  }\n  return text;\n}\n";
-function facts(content = source, path = 'operation.ts') {
-  return extractFileFacts({
-    blobId: EffectString.repeat(40)('a'),
-    content,
-    contentHash: sha256HexSync(content),
-    language: 'typescript',
-    mode: '100644',
-    path,
-    size: new TextEncoder().encode(content).byteLength,
-    source: 'worktree',
-  });
+async function facts(content = source, path = 'operation.ts') {
+  return extractNativeFileFacts(
+    {
+      blobId: EffectString.repeat(40)('a'),
+      content,
+      contentHash: sha256HexSync(content),
+      language: 'typescript',
+      mode: '100644',
+      path,
+      size: new TextEncoder().encode(content).byteLength,
+      source: 'worktree',
+    },
+    await currentNativeSession(),
+  );
 }
-describe('finite graph navigation facts', () => {
-  it('retains the canonical import, owner, target and enclosing if as source syntax', () => {
-    expect(facts()).toMatchObject({
+native(describe)('finite graph navigation facts', () => {
+  it('retains the canonical import, owner, target and enclosing if as source syntax', async () => {
+    expect(await facts()).toMatchObject({
       navigationFacts: {
         version: 1,
         omitted: false,
@@ -117,7 +127,7 @@ const refused = [
   ['parse error', source + '{'],
 ];
 for (const [name, content] of refused)
-  it(`refuses ${name}`, () => expect(facts(content).navigationFacts?.proofs ?? []).toEqual([]));
+  native(it)(`refuses ${name}`, async () => expect((await facts(content)).navigationFacts?.proofs ?? []).toEqual([]));
 const importEqualsDeclarations = [
   'import persistFile = require("pure");',
   'import persistFile = Pure.persistFile;',
@@ -127,16 +137,16 @@ const importEqualsDeclarations = [
   'export import persistFile = Pure.persistFile;',
 ];
 for (const declaration of importEqualsDeclarations) {
-  it(`refuses the conflicting module binding ${declaration}`, () => {
-    expect(facts(source + declaration).navigationFacts).toEqual({version: 1, omitted: false, proofs: []});
+  native(it)(`refuses the conflicting module binding ${declaration}`, async () => {
+    expect((await facts(source + declaration)).navigationFacts).toEqual({version: 1, omitted: false, proofs: []});
   });
-  it(`retains canonical proof beside unrelated ${declaration}`, () => {
+  native(it)(`retains canonical proof beside unrelated ${declaration}`, async () => {
     const unrelated = EffectString.replace('persistFile =', 'unrelated =')(declaration);
-    expect(facts(source + unrelated).navigationFacts?.proofs).toHaveLength(1);
+    expect((await facts(source + unrelated)).navigationFacts?.proofs).toHaveLength(1);
   });
 }
-it('retains canonical proof beside an export-only alias', () => {
-  expect(facts(source + 'export {pure as persistFile} from "pure";').navigationFacts?.proofs).toHaveLength(1);
+native(it)('retains canonical proof beside an export-only alias', async () => {
+  expect((await facts(source + 'export {pure as persistFile} from "pure";')).navigationFacts?.proofs).toHaveLength(1);
 });
 function storeFixture(variant: string) {
   return Effect.gen(function* () {
@@ -176,7 +186,7 @@ function storeFixture(variant: string) {
     ).run('snapshot', 'repository', 'worktree', 'commit', 0, 'ready', 'extractor');
     const paths =
       variant === 'stored aggregate' || variant === 'raw aggregate' ? ['operation.ts', 'second.ts'] : ['operation.ts'];
-    const extracted = EffectArray.map(paths, file => facts(source, file));
+    const extracted = yield* Effect.forEach(paths, file => Effect.tryPromise(() => facts(source, file)));
     const nodes = EffectArray.flatMap(extracted, file =>
       EffectArray.map(file.symbols, symbol => ({...symbol, rank: 0, score: 1})),
     );
@@ -342,7 +352,7 @@ function controlHeaderKey(key: string, code: number, position: number, suffix: b
     : EffectString.slice(1, -1)(JSON.stringify(character));
   return {key: left + character + right, encoded: left + encoded + right};
 }
-effectIt.layer(citationPlatformLayer)(it => {
+native(effectIt.layer(citationPlatformLayer))(it => {
   it.effect('rejects duplicate security headers before payload transfer or any oversized decoder allocation', () =>
     TestClock.withLive(
       Effect.gen(function* () {
@@ -516,7 +526,9 @@ effectIt.layer(citationPlatformLayer)(it => {
     TestClock.withLive(
       Effect.gen(function* () {
         const fixture = yield* storeFixture('valid');
-        const encoded = encodeStoredCodeGraphFact(serializeBoundedCodeGraphFact(facts()));
+        const encoded = encodeStoredCodeGraphFact(
+          serializeBoundedCodeGraphFact(yield* Effect.tryPromise(() => facts())),
+        );
         expect(encoded.codec).toBe('zlib-base64-v1');
         fixture.db.query('UPDATE file_blobs SET facts_json=?').run(encoded.json);
         let remaining = 2;
@@ -640,7 +652,10 @@ effectIt.layer(citationPlatformLayer)(it => {
     TestClock.withLive(
       Effect.gen(function* () {
         const fixture = yield* storeFixture('valid');
-        const bounded = serializeBoundedCodeGraphFact({...facts(), diagnostics: ['contains\0value']});
+        const bounded = serializeBoundedCodeGraphFact({
+          ...(yield* Effect.tryPromise(() => facts())),
+          diagnostics: ['contains\0value'],
+        });
         const compressed = encodeStoredCodeGraphFact(bounded);
         expect(compressed.codec).toBe('zlib-base64-v1');
         for (const storedJson of [bounded.json, compressed.json]) {
@@ -785,9 +800,12 @@ effectIt.layer(citationPlatformLayer)(it => {
       TestClock.withLive(
         Effect.gen(function* () {
           const fixture = yield* storeFixture('valid');
-          const proof = facts().navigationFacts!.proofs[0];
+          const proof = (yield* Effect.tryPromise(() => facts())).navigationFacts!.proofs[0];
           if (variant === 'envelope') {
-            const unsupported = {...facts(), navigationFacts: {...facts().navigationFacts, version: 2}};
+            const unsupported = {
+              ...(yield* Effect.tryPromise(() => facts())),
+              navigationFacts: {...(yield* Effect.tryPromise(() => facts())).navigationFacts, version: 2},
+            };
             fixture.db.query('UPDATE file_blobs SET facts_json=?').run(JSON.stringify(unsupported));
           }
           if (variant === 'policy')
@@ -837,7 +855,7 @@ effectIt.layer(citationPlatformLayer)(it => {
     TestClock.withLive(
       Effect.gen(function* () {
         const fixture = yield* storeFixture('valid');
-        const proof = facts().navigationFacts!.proofs[0];
+        const proof = (yield* Effect.tryPromise(() => facts())).navigationFacts!.proofs[0];
         const span = {...proof.callSpan, line: proof.callSpan.line + 1, endLine: proof.callSpan.endLine + 1};
         fixture.db
           .query('UPDATE edges SET evidence_span_json=? WHERE id=?')
@@ -1172,28 +1190,30 @@ effectIt.layer(citationPlatformLayer)(it => {
   );
 });
 
-it('caps the finite proof collection without retaining AST or silently claiming completeness', () => {
+native(it)('caps the finite proof collection without retaining AST or silently claiming completeness', async () => {
   let content = "import {writeFile as persistFile} from 'node:fs/promises';\n";
   for (let index = 0; index < 40; index++)
     content += `export async function save${index}(path: string, persist: boolean) {if (persist) {await persistFile(path, 'x');}}\n`;
-  const collected = facts(content).navigationFacts;
+  const collected = (await facts(content)).navigationFacts;
   expect(collected?.proofs).toHaveLength(32);
   expect(collected?.omitted).toBe(true);
   expect(Buffer.byteLength(JSON.stringify(collected))).toBeLessThanOrEqual(65536);
 });
 
-it('pins the supported proof policy to the explicit recorded TypeScript cache identity', () => {
+native(it)('pins the supported proof policy to the explicit recorded TypeScript cache identity', () => {
   expect(packCacheIdentity(codeGraphLanguagePack)).toBe(NAVIGATION_PROOF_CACHE_IDENTITY);
 });
 
-it('does not create a collector for unsupported or no canonical import files', () => {
-  const {compiler} = loadTypeScriptExtractionRuntime();
+native(it)('does not create a collector for unsupported or no canonical import files', async () => {
+  const session = await currentNativeSession();
+  const compiler = session.ast;
   for (const content of [
     'export const plain = 1;',
     "import type {writeFile} from 'node:fs/promises';",
     "import {writeFile} from 'not:canonical';",
   ]) {
-    const parsed = compiler.createSourceFile('unsupported.ts', content, compiler.ScriptTarget.Latest, true);
-    expect(createNavigationFactCollector(compiler, parsed, new Map())).toBeUndefined();
+    await session.withSourceFile({fileName: 'unsupported.ts', text: content}, parsed => {
+      expect(createNavigationFactCollector(compiler, parsed, new Map())).toBeUndefined();
+    });
   }
 });

@@ -32,6 +32,7 @@ import {provideTestLayer} from '../helpers/effect-layer.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {native} from '@threadnote/graph/test/helpers/native-typescript-session';
 
 const codeGraphAnalysisReadInputSchema = Schema.Struct({
   budget: Schema.optional(
@@ -259,115 +260,121 @@ describe('code graph terminal telemetry wiring', () => {
     ).pipe(TestClock.withLive, provideTestLayer(layer));
   });
 
-  effectIt.effect('reports the effective two-file delta for a dirty project-closure overlay exactly once', () => {
-    const capture = capturingTracer();
-    const layer = Layer.mergeAll(
-      ApplicationLayer,
-      anonymousTelemetryTestLayer({system: telemetrySystemInfoStub(), tracer: capture.tracer}),
-    );
+  native(effectIt.effect)(
+    'reports the effective two-file delta for a dirty project-closure overlay exactly once',
+    () => {
+      const capture = capturingTracer();
+      const layer = Layer.mergeAll(
+        ApplicationLayer,
+        anonymousTelemetryTestLayer({system: telemetrySystemInfoStub(), tracer: capture.tracer}),
+      );
 
-    return Effect.acquireUseRelease(
-      Effect.sync(createRepositoryFixture),
-      fixture =>
-        Effect.gen(function* () {
-          const indexer = yield* CodeGraphIndexer;
-          yield* indexer.index({cwd: fixture.root, threadnoteHome: fixture.home});
-          yield* Effect.sync(() => {
-            writeFileSync(
-              join(fixture.root, 'src', 'value.ts'),
-              'export function renamedValue(): number { return 1; }\n',
+      return Effect.acquireUseRelease(
+        Effect.sync(createRepositoryFixture),
+        fixture =>
+          Effect.gen(function* () {
+            const indexer = yield* CodeGraphIndexer;
+            yield* indexer.index({cwd: fixture.root, threadnoteHome: fixture.home});
+            yield* Effect.sync(() => {
+              writeFileSync(
+                join(fixture.root, 'src', 'value.ts'),
+                'export function renamedValue(): number { return 1; }\n',
+              );
+              writeFileSync(
+                join(fixture.root, 'src', 'other.ts'),
+                'export const other = 2;\nfunction localCallback(): number { return other; }\nlocalCallback();\n',
+              );
+            });
+            const summary = yield* indexer.index({cwd: fixture.root, threadnoteHome: fixture.home});
+
+            expect(summary.materialization).toMatchObject({
+              closureProjects: 1,
+              mode: 'incremental-overlay',
+              resolutionClosure: 'project',
+            });
+            const lifecycle = EffectArray.filter(
+              EffectArray.map(capture.spans, span => EffectRecord.fromEntries(span.attributes)),
+              attributes => attributes['threadnote.event'] === 'lifecycle',
             );
-            writeFileSync(
-              join(fixture.root, 'src', 'other.ts'),
-              'export const other = 2;\nfunction localCallback(): number { return other; }\nlocalCallback();\n',
+            expect(lifecycle).toHaveLength(2);
+            expect(lifecycle[1]).toMatchObject({
+              'threadnote.graph.build_kind': 'dirty',
+              'threadnote.graph.changed_fact_bytes_bucket': expect.not.stringMatching(/^0$/u),
+              'threadnote.graph.changed_files_bucket': '2^1',
+              'threadnote.graph.deleted_files_bucket': '0',
+              'threadnote.graph.extracted_files_bucket': '2^1',
+              'threadnote.graph.fallback_reason': 'none',
+              'threadnote.graph.materialization_mode': 'incremental-overlay',
+              'threadnote.graph.resolution_closure': 'project',
+              'threadnote.operation': 'graph-build',
+              'threadnote.outcome': 'success',
+            });
+            expect(JSON.stringify(lifecycle[1])).not.toContain(fixture.root);
+          }),
+        fixture => Effect.sync(() => rmSync(fixture.root, {force: true, recursive: true})),
+      ).pipe(TestClock.withLive, provideTestLayer(layer));
+    },
+  );
+
+  native(effectIt.effect)(
+    'retains changed-fact bytes when a dirty project-closure overlay reuses cached extraction',
+    () => {
+      const capture = capturingTracer();
+      const layer = Layer.mergeAll(
+        ApplicationLayer,
+        anonymousTelemetryTestLayer({system: telemetrySystemInfoStub(), tracer: capture.tracer}),
+      );
+
+      return Effect.acquireUseRelease(
+        Effect.sync(createRepositoryFixture),
+        fixture =>
+          Effect.gen(function* () {
+            const indexer = yield* CodeGraphIndexer;
+            const dirtyContent = 'export function renamedValue(): number { return 1; }\n';
+            yield* indexer.index({cwd: fixture.root, threadnoteHome: fixture.home});
+            yield* Effect.sync(() => writeFileSync(join(fixture.root, 'src', 'value.ts'), dirtyContent));
+            const firstDirty = yield* indexer.index({cwd: fixture.root, threadnoteHome: fixture.home});
+            expect(firstDirty.materialization).toMatchObject({
+              closureProjects: 1,
+              mode: 'incremental-overlay',
+              resolutionClosure: 'project',
+            });
+
+            yield* Effect.sync(() => {
+              git(fixture.root, ['checkout', '--', 'src/value.ts']);
+              git(fixture.root, ['commit', '--allow-empty', '-qm', 'new clean graph identity']);
+            });
+            yield* indexer.index({cwd: fixture.root, threadnoteHome: fixture.home});
+            yield* Effect.sync(() => writeFileSync(join(fixture.root, 'src', 'value.ts'), dirtyContent));
+            const cachedDirty = yield* indexer.index({cwd: fixture.root, threadnoteHome: fixture.home});
+
+            expect(cachedDirty.materialization).toMatchObject({
+              closureProjects: 1,
+              mode: 'incremental-overlay',
+              resolutionClosure: 'project',
+            });
+            expect(cachedDirty.reusedFiles).toBe(cachedDirty.materialization?.totalFiles);
+            const lifecycle = EffectArray.filter(
+              EffectArray.map(capture.spans, span => EffectRecord.fromEntries(span.attributes)),
+              attributes => attributes['threadnote.event'] === 'lifecycle',
             );
-          });
-          const summary = yield* indexer.index({cwd: fixture.root, threadnoteHome: fixture.home});
-
-          expect(summary.materialization).toMatchObject({
-            closureProjects: 1,
-            mode: 'incremental-overlay',
-            resolutionClosure: 'project',
-          });
-          const lifecycle = EffectArray.filter(
-            EffectArray.map(capture.spans, span => EffectRecord.fromEntries(span.attributes)),
-            attributes => attributes['threadnote.event'] === 'lifecycle',
-          );
-          expect(lifecycle).toHaveLength(2);
-          expect(lifecycle[1]).toMatchObject({
-            'threadnote.graph.build_kind': 'dirty',
-            'threadnote.graph.changed_fact_bytes_bucket': expect.not.stringMatching(/^0$/u),
-            'threadnote.graph.changed_files_bucket': '2^1',
-            'threadnote.graph.deleted_files_bucket': '0',
-            'threadnote.graph.extracted_files_bucket': '2^1',
-            'threadnote.graph.fallback_reason': 'none',
-            'threadnote.graph.materialization_mode': 'incremental-overlay',
-            'threadnote.graph.resolution_closure': 'project',
-            'threadnote.operation': 'graph-build',
-            'threadnote.outcome': 'success',
-          });
-          expect(JSON.stringify(lifecycle[1])).not.toContain(fixture.root);
-        }),
-      fixture => Effect.sync(() => rmSync(fixture.root, {force: true, recursive: true})),
-    ).pipe(TestClock.withLive, provideTestLayer(layer));
-  });
-
-  effectIt.effect('retains changed-fact bytes when a dirty project-closure overlay reuses cached extraction', () => {
-    const capture = capturingTracer();
-    const layer = Layer.mergeAll(
-      ApplicationLayer,
-      anonymousTelemetryTestLayer({system: telemetrySystemInfoStub(), tracer: capture.tracer}),
-    );
-
-    return Effect.acquireUseRelease(
-      Effect.sync(createRepositoryFixture),
-      fixture =>
-        Effect.gen(function* () {
-          const indexer = yield* CodeGraphIndexer;
-          const dirtyContent = 'export function renamedValue(): number { return 1; }\n';
-          yield* indexer.index({cwd: fixture.root, threadnoteHome: fixture.home});
-          yield* Effect.sync(() => writeFileSync(join(fixture.root, 'src', 'value.ts'), dirtyContent));
-          const firstDirty = yield* indexer.index({cwd: fixture.root, threadnoteHome: fixture.home});
-          expect(firstDirty.materialization).toMatchObject({
-            closureProjects: 1,
-            mode: 'incremental-overlay',
-            resolutionClosure: 'project',
-          });
-
-          yield* Effect.sync(() => {
-            git(fixture.root, ['checkout', '--', 'src/value.ts']);
-            git(fixture.root, ['commit', '--allow-empty', '-qm', 'new clean graph identity']);
-          });
-          yield* indexer.index({cwd: fixture.root, threadnoteHome: fixture.home});
-          yield* Effect.sync(() => writeFileSync(join(fixture.root, 'src', 'value.ts'), dirtyContent));
-          const cachedDirty = yield* indexer.index({cwd: fixture.root, threadnoteHome: fixture.home});
-
-          expect(cachedDirty.materialization).toMatchObject({
-            closureProjects: 1,
-            mode: 'incremental-overlay',
-            resolutionClosure: 'project',
-          });
-          expect(cachedDirty.reusedFiles).toBe(cachedDirty.materialization?.totalFiles);
-          const lifecycle = EffectArray.filter(
-            EffectArray.map(capture.spans, span => EffectRecord.fromEntries(span.attributes)),
-            attributes => attributes['threadnote.event'] === 'lifecycle',
-          );
-          expect(lifecycle).toHaveLength(4);
-          expect(lifecycle.at(-1)).toMatchObject({
-            'threadnote.graph.cached_fact_replay_bytes_bucket': '0',
-            'threadnote.graph.changed_fact_bytes_bucket': expect.not.stringMatching(/^0$/u),
-            'threadnote.graph.changed_files_bucket': '2^0',
-            'threadnote.graph.extracted_files_bucket': '0',
-            'threadnote.graph.fallback_reason': 'none',
-            'threadnote.graph.materialization_mode': 'incremental-overlay',
-            'threadnote.graph.resolution_closure': 'project',
-            'threadnote.outcome': 'success',
-          });
-          expect(JSON.stringify(lifecycle.at(-1))).not.toContain(fixture.root);
-        }),
-      fixture => Effect.sync(() => rmSync(fixture.root, {force: true, recursive: true})),
-    ).pipe(TestClock.withLive, provideTestLayer(layer));
-  });
+            expect(lifecycle).toHaveLength(4);
+            expect(lifecycle.at(-1)).toMatchObject({
+              'threadnote.graph.cached_fact_replay_bytes_bucket': '0',
+              'threadnote.graph.changed_fact_bytes_bucket': expect.not.stringMatching(/^0$/u),
+              'threadnote.graph.changed_files_bucket': '2^0',
+              'threadnote.graph.extracted_files_bucket': '0',
+              'threadnote.graph.fallback_reason': 'none',
+              'threadnote.graph.materialization_mode': 'incremental-overlay',
+              'threadnote.graph.resolution_closure': 'project',
+              'threadnote.outcome': 'success',
+            });
+            expect(JSON.stringify(lifecycle.at(-1))).not.toContain(fixture.root);
+          }),
+        fixture => Effect.sync(() => rmSync(fixture.root, {force: true, recursive: true})),
+      ).pipe(TestClock.withLive, provideTestLayer(layer));
+    },
+  );
 
   effectIt.effect('shares one terminal claim across an automatic worktree-change retry', () => {
     const capture = capturingTracer();

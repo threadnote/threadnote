@@ -90,12 +90,63 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: bun tools/ci/platform-benchmark-scope.ts --base "$BASE_SHA" --head "$HEAD_SHA"
 
+  # One shared prepared native TypeScript asset per reviewed-pin host used below: restore, construct once on a miss,
+  # save. Consumers only restore it, so their short job budgets never pay for a cold construction.
+  native-typescript-asset:
+    name: Native TypeScript asset · linux-x64
+    needs: classify-platform-benchmark
+    if: >-
+      ${{ always() && (github.event_name != 'pull_request' || needs.classify-platform-benchmark.result != 'success' ||
+      needs.classify-platform-benchmark.outputs.run_code_graph_pr != 'false' ||
+      needs.classify-platform-benchmark.outputs.run_recall_pr != 'false') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    outputs:
+      cache_key: ${{ steps.asset.outputs.cache_key }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - run: bun install --frozen-lockfile
+
+      - name: Restore, construct on a miss and save the verified native TypeScript asset
+        id: asset
+        timeout-minutes: 80
+        uses: ./.github/actions/native-typescript-asset
+
+  # Pull-request lanes run on Linux only; scheduled and manual runs also measure the macOS arm64 class.
+  native-typescript-asset-macos:
+    name: Native TypeScript asset · darwin-arm64
+    if: github.event_name != 'pull_request'
+    runs-on: macos-15
+    timeout-minutes: 90
+    outputs:
+      cache_key: ${{ steps.asset.outputs.cache_key }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - run: bun install --frozen-lockfile
+
+      - name: Restore, construct on a miss and save the verified native TypeScript asset
+        id: asset
+        timeout-minutes: 80
+        uses: ./.github/actions/native-typescript-asset
+
   benchmark-preflight:
     name: Benchmark harness · Bazel preflight
-    needs: classify-platform-benchmark
+    needs: [classify-platform-benchmark, native-typescript-asset]
     # Pull requests run this target through the affected-target Bazel shards.
     if: ${{ always() && github.event_name != 'pull_request' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
 
     steps:
@@ -109,6 +160,15 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
+      - name: Restore the verified native TypeScript asset
+        # Restored from this workflow's per-host asset job and re-verified; a miss fails here, never a misleading
+        # regression. Windows has no reviewed pin: the action exports nothing there.
+        timeout-minutes: 5
+        uses: ./.github/actions/native-typescript-asset
+        with:
+          restore-only: 'true'
+          cache-key: ${{ needs.native-typescript-asset.outputs.cache_key }}
+
       - name: Prepare Bazel workspace
         run: bun tools/bazel/prepare.mjs
 
@@ -117,9 +177,9 @@ jobs:
 
   recall-pr-10k:
     name: Recall production 10k · Linux
-    needs: classify-platform-benchmark
+    needs: [classify-platform-benchmark, native-typescript-asset]
     if: ${{ always() && github.event_name == 'pull_request' && (needs.classify-platform-benchmark.result != 'success' || needs.classify-platform-benchmark.outputs.run_recall_pr != 'false') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
       THREADNOTE_NATIVE_VECTOR_READER_MANIFEST: ${{ github.workspace }}/.context/native-vector-reader/manifest.json
@@ -133,6 +193,15 @@ jobs:
           bun-version: ${{ env.BUN_VERSION }}
 
       - run: bun install --frozen-lockfile
+
+      - name: Restore the verified native TypeScript asset
+        # Restored from this workflow's per-host asset job and re-verified; a miss fails here, never a misleading
+        # regression. Windows has no reviewed pin: the action exports nothing there.
+        timeout-minutes: 5
+        uses: ./.github/actions/native-typescript-asset
+        with:
+          restore-only: 'true'
+          cache-key: ${{ needs.native-typescript-asset.outputs.cache_key }}
 
       - name: Assemble the required source benchmark reader
         run: >-
@@ -174,13 +243,13 @@ jobs:
 
   code-graph-pr-scale:
     name: Code graph PR lexical ${{ matrix.scale }} · Linux
-    needs: classify-platform-benchmark
+    needs: [classify-platform-benchmark, native-typescript-asset]
     if: ${{ always() && github.event_name == 'pull_request' && (needs.classify-platform-benchmark.result != 'success' || needs.classify-platform-benchmark.outputs.run_code_graph_pr != 'false') }}
     strategy:
       fail-fast: false
       matrix:
         scale: [10000, 100000]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
 
     steps:
@@ -191,6 +260,15 @@ jobs:
           bun-version: ${{ env.BUN_VERSION }}
 
       - run: bun install --frozen-lockfile
+
+      - name: Restore the verified native TypeScript asset
+        # Restored from this workflow's per-host asset job and re-verified; a miss fails here, never a misleading
+        # regression. Windows has no reviewed pin: the action exports nothing there.
+        timeout-minutes: 5
+        uses: ./.github/actions/native-typescript-asset
+        with:
+          restore-only: 'true'
+          cache-key: ${{ needs.native-typescript-asset.outputs.cache_key }}
 
       - name: Gate changed graph runtime at ${{ matrix.scale }} symbols
         run: >-
@@ -211,16 +289,20 @@ jobs:
 
   code-graph:
     name: Code graph · ${{ matrix.os }}
+    needs: [native-typescript-asset, native-typescript-asset-macos]
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
         include:
+          # `os` stays the benchmark runner-class label; `image` pins the asset producer's exact image.
           - os: ubuntu-latest
+            image: ubuntu-24.04
             hotQuerySamples: 25
           - os: macos-latest
+            image: macos-15
             hotQuerySamples: 25
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.image }}
     timeout-minutes: 30
 
     steps:
@@ -231,6 +313,15 @@ jobs:
           bun-version: ${{ env.BUN_VERSION }}
 
       - run: bun install --frozen-lockfile
+
+      - name: Restore the verified native TypeScript asset
+        # Restored from this workflow's per-host asset job and re-verified; a miss fails here, never a misleading
+        # regression. Windows has no reviewed pin: the action exports nothing there.
+        timeout-minutes: 15
+        uses: ./.github/actions/native-typescript-asset
+        with:
+          restore-only: 'true'
+          cache-key: ${{ runner.os == 'macOS' && needs.native-typescript-asset-macos.outputs.cache_key || needs.native-typescript-asset.outputs.cache_key }}
 
       - name: Gate native graph quality
         run: bun run eval:code-graph
@@ -277,8 +368,13 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
-      - name: Gate native graph quality
-        run: bun run eval:code-graph
+      - name: Skip the native TypeScript graph quality gate on Windows
+        # eval:code-graph indexes TypeScript fixtures through the native TypeScript asset, which has no reviewed Windows
+        # pin yet; the fixed replica capture below still runs (its TypeScript files extract as degraded metadata).
+        shell: bash
+        run: >-
+          echo '::notice title=Native graph quality skipped on Windows::eval:code-graph needs the native TypeScript
+          asset, which has no reviewed Windows pin; the replica capture still runs.'
 
       - name: Capture fixed native graph replica
         env:
@@ -356,6 +452,7 @@ jobs:
 
   code-graph-workset:
     name: Code graph workset 32/50/64/128 · pinned Linux class
+    needs: native-typescript-asset
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -368,6 +465,15 @@ jobs:
           bun-version: ${{ env.BUN_VERSION }}
 
       - run: bun install --frozen-lockfile
+
+      - name: Restore the verified native TypeScript asset
+        # Restored from this workflow's per-host asset job and re-verified; a miss fails here, never a misleading
+        # regression. Windows has no reviewed pin: the action exports nothing there.
+        timeout-minutes: 15
+        uses: ./.github/actions/native-typescript-asset
+        with:
+          restore-only: 'true'
+          cache-key: ${{ needs.native-typescript-asset.outputs.cache_key }}
 
       - name: Gate the complete workset correctness matrix
         run: >-
@@ -576,12 +682,18 @@ jobs:
 
   code-graph-10k:
     name: Code graph 10k · ${{ matrix.os }}
+    needs: [native-typescript-asset, native-typescript-asset-macos]
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+        # `os` stays the benchmark runner-class label; `image` pins the asset producer's exact image.
+        include:
+          - {os: ubuntu-latest, image: ubuntu-24.04}
+          - {os: macos-latest, image: macos-15}
+          - {os: windows-latest, image: windows-latest}
+    runs-on: ${{ matrix.image }}
     timeout-minutes: 30
 
     steps:
@@ -592,6 +704,22 @@ jobs:
           bun-version: ${{ env.BUN_VERSION }}
 
       - run: bun install --frozen-lockfile
+
+      - name: Restore the verified native TypeScript asset
+        # Restored from this workflow's per-host asset job and re-verified; a miss fails here, never a misleading
+        # regression. Windows has no reviewed pin: the action exports nothing there.
+        timeout-minutes: 15
+        uses: ./.github/actions/native-typescript-asset
+        with:
+          restore-only: 'true'
+          cache-key: ${{ runner.os == 'macOS' && needs.native-typescript-asset-macos.outputs.cache_key || needs.native-typescript-asset.outputs.cache_key }}
+
+      - name: Record the Windows native TypeScript limitation
+        if: runner.os == 'Windows'
+        shell: bash
+        run: >-
+          echo '::notice title=Native TypeScript unavailable on Windows::No reviewed Windows pin; TypeScript files in this
+          capture extract as degraded metadata.'
 
       - name: Gate 10k-symbol indexing and queries
         env:
@@ -731,8 +859,8 @@ jobs:
   code-graph-vectors:
     name: Code graph pinned vectors · Linux
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    needs: prepare-code-graph-vector-model
-    runs-on: ubuntu-latest
+    needs: [prepare-code-graph-vector-model, native-typescript-asset]
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     steps:
@@ -743,6 +871,15 @@ jobs:
           bun-version: ${{ env.BUN_VERSION }}
 
       - run: bun install --frozen-lockfile
+
+      - name: Restore the verified native TypeScript asset
+        # Restored from this workflow's per-host asset job and re-verified; a miss fails here, never a misleading
+        # regression. Windows has no reviewed pin: the action exports nothing there.
+        timeout-minutes: 15
+        uses: ./.github/actions/native-typescript-asset
+        with:
+          restore-only: 'true'
+          cache-key: ${{ needs.native-typescript-asset.outputs.cache_key }}
 
       - name: Download pinned graph model
         uses: actions/download-artifact@v8
@@ -771,8 +908,8 @@ jobs:
   code-graph-vectors-10k:
     name: Code graph pinned vectors 10k · Linux
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    needs: prepare-code-graph-vector-model
-    runs-on: ubuntu-latest
+    needs: [prepare-code-graph-vector-model, native-typescript-asset]
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
 
     steps:
@@ -783,6 +920,15 @@ jobs:
           bun-version: ${{ env.BUN_VERSION }}
 
       - run: bun install --frozen-lockfile
+
+      - name: Restore the verified native TypeScript asset
+        # Restored from this workflow's per-host asset job and re-verified; a miss fails here, never a misleading
+        # regression. Windows has no reviewed pin: the action exports nothing there.
+        timeout-minutes: 15
+        uses: ./.github/actions/native-typescript-asset
+        with:
+          restore-only: 'true'
+          cache-key: ${{ needs.native-typescript-asset.outputs.cache_key }}
 
       - name: Download pinned graph model
         uses: actions/download-artifact@v8
@@ -811,8 +957,9 @@ jobs:
 
   code-graph-100k:
     name: Code graph 100k scale boundary · Linux
+    needs: native-typescript-asset
     if: github.event_name == 'schedule' || inputs.include_100k
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
 
     steps:
@@ -823,6 +970,15 @@ jobs:
           bun-version: ${{ env.BUN_VERSION }}
 
       - run: bun install --frozen-lockfile
+
+      - name: Restore the verified native TypeScript asset
+        # Restored from this workflow's per-host asset job and re-verified; a miss fails here, never a misleading
+        # regression. Windows has no reviewed pin: the action exports nothing there.
+        timeout-minutes: 15
+        uses: ./.github/actions/native-typescript-asset
+        with:
+          restore-only: 'true'
+          cache-key: ${{ needs.native-typescript-asset.outputs.cache_key }}
 
       - name: Gate 100k-symbol indexing and queries
         run: >-
@@ -844,7 +1000,7 @@ jobs:
   code-graph-vectors-100k:
     name: Code graph pinned vectors 100k · macOS ARM64
     if: github.event_name == 'schedule' || inputs.include_100k
-    needs: prepare-code-graph-vector-model
+    needs: [prepare-code-graph-vector-model, native-typescript-asset-macos]
     runs-on: macos-15
     timeout-minutes: 80
 
@@ -856,6 +1012,15 @@ jobs:
           bun-version: ${{ env.BUN_VERSION }}
 
       - run: bun install --frozen-lockfile
+
+      - name: Restore the verified native TypeScript asset
+        # Restored from this workflow's per-host asset job and re-verified; a miss fails here, never a misleading
+        # regression. Windows has no reviewed pin: the action exports nothing there.
+        timeout-minutes: 15
+        uses: ./.github/actions/native-typescript-asset
+        with:
+          restore-only: 'true'
+          cache-key: ${{ needs.native-typescript-asset-macos.outputs.cache_key }}
 
       - name: Download pinned graph model
         uses: actions/download-artifact@v8
@@ -895,6 +1060,7 @@ jobs:
 
   code-graph-heavy-tail:
     name: Code graph parser/cache heavy tail · pinned Linux class
+    needs: native-typescript-asset
     if: github.event_name == 'schedule' || inputs.include_heavy_tail
     runs-on: ubuntu-24.04
     timeout-minutes: 180
@@ -907,6 +1073,15 @@ jobs:
           bun-version: ${{ env.BUN_VERSION }}
 
       - run: bun install --frozen-lockfile
+
+      - name: Restore the verified native TypeScript asset
+        # Restored from this workflow's per-host asset job and re-verified; a miss fails here, never a misleading
+        # regression. Windows has no reviewed pin: the action exports nothing there.
+        timeout-minutes: 15
+        uses: ./.github/actions/native-typescript-asset
+        with:
+          restore-only: 'true'
+          cache-key: ${{ needs.native-typescript-asset.outputs.cache_key }}
 
       - name: Capture parser heavy tail, cache determinism, and interruption resume
         timeout-minutes: 160

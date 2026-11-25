@@ -1,13 +1,20 @@
 /**
- * Steps for .github/workflows/native-typescript-construction.yml. Inputs come only from the builder recipe; the summary
- * is unreviewed construction evidence and never edits a reviewed host pin or marks an asset qualified.
+ * Steps for .github/workflows/native-typescript-construction.yml and the .github/actions/native-typescript-asset
+ * provisioning action. Inputs come only from the builder recipe and the reviewed asset pins; the construction summary
+ * is unreviewed evidence and never edits a reviewed host pin or marks an asset qualified.
  * GITHUB_OUTPUT and GITHUB_STEP_SUMMARY are per-step files, so each step writes its file once.
  */
+import {mkdir, rename, stat} from 'node:fs/promises';
 import {Array as EffectArray, Option as EffectOption, Schema} from 'effect';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {hostToolchainArchive, typescriptNativeBuildRecipe} from '../semantic/build-typescript-native.js';
+import {
+  nativeTypeScriptAssetPins,
+  nativeTypeScriptHostKey,
+  nativeTypeScriptReviewedBinarySha256,
+} from '@threadnote/graph/typescript_native_asset_pins';
 
 const required = (name: string): string => {
   const value = process.env[name];
@@ -25,15 +32,14 @@ const writeOutputs = (outputs: Readonly<Record<string, string>>) =>
     ),
   );
 
-async function resolveInputs(): Promise<void> {
-  const host = `${process.platform}-${process.arch}`;
-  if (host !== required('EXPECTED_HOST'))
-    throw new Error(`Runtime host ${host} differs from the matrix host ${required('EXPECTED_HOST')}.`);
+/** Construction inputs for the current host, shared by the construction workflow and asset provisioning. */
+function constructionInputs(): Readonly<Record<string, string>> {
+  const host = nativeTypeScriptHostKey(process.platform, process.arch);
   const archive = hostToolchainArchive();
   if (!archive) throw new Error(`No pinned Go archive for ${host}.`);
   const temp = portable(required('RUNNER_TEMP'));
   const {upstream} = typescriptNativeBuildRecipe;
-  await writeOutputs({
+  return {
     repository: upstream.repository,
     commit: upstream.commit,
     tree: upstream.tree,
@@ -45,7 +51,79 @@ async function resolveInputs(): Promise<void> {
     evidence: `${temp}/ntc-evidence`,
     extracted: `${temp}/ntc-extracted`,
     repository_root: portable(process.cwd()),
+  };
+}
+
+async function resolveInputs(): Promise<void> {
+  const host = nativeTypeScriptHostKey(process.platform, process.arch);
+  if (host !== required('EXPECTED_HOST'))
+    throw new Error(`Runtime host ${host} differs from the matrix host ${required('EXPECTED_HOST')}.`);
+  await writeOutputs(constructionInputs());
+}
+
+/**
+ * Every input that determines the prepared bytes: the recipe, the builder source, its ordered overlays, this host's
+ * pinned Go archive, the host and the reviewed pins. A change to any of them is a new cache entry.
+ */
+export async function nativeTypeScriptAssetCacheKey(host: string, root = process.cwd()): Promise<string> {
+  const overlays: [string, string][] = [];
+  for (const name of [...new Bun.Glob('tools/semantic/typescript-native-*.patch').scanSync({cwd: root})].sort())
+    overlays.push([name, sha256HexSync(await Bun.file(`${root}/${name}`).bytes())]);
+  const digest = sha256HexSync(
+    JSON.stringify({
+      kind: 'threadnote-native-typescript-asset-cache-v1',
+      host,
+      recipe: typescriptNativeBuildRecipe,
+      builder: sha256HexSync(await Bun.file(`${root}/tools/semantic/build-typescript-native.ts`).bytes()),
+      overlays,
+      goArchive: hostToolchainArchive() ?? null,
+      pins: nativeTypeScriptAssetPins,
+    }),
+  );
+  return `threadnote-native-typescript-${host}-${digest}`;
+}
+
+/**
+ * A fixed per-host location under the runner temp directory, so the exported path (and the Bazel test action keys that
+ * inherit it) is identical on every runner of that image.
+ */
+const assetRoot = (host: string) => `${portable(required('RUNNER_TEMP'))}/threadnote-native-typescript/${host}`;
+
+async function provisionInputs(): Promise<void> {
+  const host = nativeTypeScriptHostKey(process.platform, process.arch);
+  // Windows and every host without a reviewed binary pin provision nothing; native tests there skip visibly.
+  if (process.platform === 'win32' || nativeTypeScriptReviewedBinarySha256(host) === undefined) {
+    await writeOutputs({enabled: 'false', host});
+    return;
+  }
+  const root = assetRoot(host);
+  await writeOutputs({
+    ...constructionInputs(),
+    enabled: 'true',
+    host,
+    cache_key: await nativeTypeScriptAssetCacheKey(host),
+    asset_root: root,
+    payload: `${root}/payload`,
+    prepared: `${root}/prepared`,
   });
+}
+
+/** Move a fresh construction's payload and prepared asset, as siblings, into the fixed per-host location. */
+async function provisionInstall(): Promise<void> {
+  const {assetDirectory, payloadDirectory} = Schema.decodeUnknownSync(VerifiedAsset)(
+    await readJson(evidencePath('prepare.json')),
+  );
+  const root = portable(required('ASSET_ROOT'));
+  if (
+    await stat(root).then(
+      () => true,
+      () => false,
+    )
+  )
+    throw new Error('Native TypeScript asset root must be fresh.');
+  await mkdir(root, {recursive: true, mode: 0o700});
+  await rename(portable(payloadDirectory), `${root}/payload`);
+  await rename(portable(assetDirectory), `${root}/prepared`);
 }
 
 const VerifiedAsset = Schema.Struct({
@@ -130,8 +208,13 @@ if (import.meta.main) {
     ['inputs', resolveInputs],
     ['locate', locateOutput],
     ['summarize', summarize],
+    ['provision-inputs', provisionInputs],
+    ['provision-install', provisionInstall],
   ]);
   const step = steps.get(process.argv[2] ?? '');
-  if (!step) throw new Error('Usage: bun tools/ci/native-typescript-construction.ts inputs|locate|summarize');
+  if (!step)
+    throw new Error(
+      'Usage: bun tools/ci/native-typescript-construction.ts inputs|locate|summarize|provision-inputs|provision-install',
+    );
   await step();
 }

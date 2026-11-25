@@ -21,7 +21,12 @@ Direct runtime software and packages bundled into the published JavaScript retai
 - `three` (MIT), used for GPU-accelerated manager graph rendering
 - `js-yaml` (MIT)
 - `yaml` 2.9.1 (ISC), used for comment-preserving Manager Workset manifest updates
-- TypeScript compiler 5.9 (`typescript-compiler`, Apache-2.0), bundled for native TypeScript/JavaScript graph extraction
+- Microsoft TypeScript 7.1.0-beta (Apache-2.0), used for TypeScript/JavaScript graph extraction and the semantic
+  TypeScript provider: a private source-overlay `tsc` built from the pinned upstream commit with the Go toolchain
+  runtime (BSD-3-Clause) linked in, plus the published `typescript` 7.1.0-beta API/AST frontend with a reviewed patch.
+  It is not the official npm binary. Staged assets retain `TYPESCRIPT_LICENSE.txt`, `TSC_LICENSE.txt`,
+  `TYPESCRIPT_NOTICE.txt`, `BUNDLED_NOTICE.txt` and `GO_LICENSE.txt` under `runtime/typescript/`; the complete
+  static-link module notice closure remains a release gate (`typescriptNativeBuildRecipe.attribution`)
 - `fflate` 0.8.3 (MIT), used for bounded local text extraction from tracked OpenXML, OpenDocument, and EPUB archives
 - `unpdf` 1.9.1 (MIT) and its bundled PDF.js engine (Apache-2.0), used for local tracked-PDF text and link extraction
 - `web-tree-sitter` 0.27.1 (MIT), bundled as the portable structural parser runtime

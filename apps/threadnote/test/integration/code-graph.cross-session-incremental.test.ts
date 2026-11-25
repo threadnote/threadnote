@@ -45,6 +45,7 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {native} from '@threadnote/graph/test/helpers/native-typescript-session';
 
 function requiredRow<Row extends object>(row: Row | null): Row {
   if (row === null) throw TestError.make({message: 'Expected a row for a required SQLite query result.'});
@@ -52,7 +53,7 @@ function requiredRow<Row extends object>(row: Row | null): Row {
 }
 
 describe('cross-session code graph increments', () => {
-  it.effect('shares a clean structural root across divergent sibling worktrees', () => {
+  native(it.effect)('shares a clean structural root across divergent sibling worktrees', () => {
     let home: string | undefined;
     let fullHome: string | undefined;
     let root: string | undefined;
@@ -109,7 +110,7 @@ describe('cross-session code graph increments', () => {
     );
   });
 
-  it.effect('tries an older compatible sibling root after a newer root exceeds the overlay budget', () => {
+  native(it.effect)('tries an older compatible sibling root after a newer root exceeds the overlay budget', () => {
     let home: string | undefined;
     let root: string | undefined;
     let recentRoot: string | undefined;
@@ -155,7 +156,7 @@ describe('cross-session code graph increments', () => {
     );
   });
 
-  it.effect(
+  native(it.effect)(
     'keeps one content identity when committed code is relocated through a dirty overlay',
     () => {
       let home: string | undefined;
@@ -508,7 +509,7 @@ describe('cross-session code graph increments', () => {
     60_000,
   );
 
-  it.effect(
+  native(it.effect)(
     'persists current skipped-inventory coverage on a real clean incremental snapshot',
     () => {
       let home: string | undefined;
@@ -551,7 +552,7 @@ describe('cross-session code graph increments', () => {
     60_000,
   );
 
-  it.effect(
+  native(it.effect)(
     're-promotes a recent clean increment after a dirty-to-clean round trip',
     () => {
       let root: string | undefined;
@@ -602,7 +603,7 @@ describe('cross-session code graph increments', () => {
     60_000,
   );
 
-  it.effect(
+  native(it.effect)(
     'keeps an imported-symbol body edit incremental immediately after dirty-root alias promotion',
     () => {
       let root: string | undefined;
@@ -665,10 +666,20 @@ describe('cross-session code graph increments', () => {
             ['~body:v1:verbatim'],
             128,
           );
-          const admitted = database
-            .query<Record<string, unknown>, SQLQueryBindings[]>(body.text)
-            .all(...body.parameters);
+          const rows = database.query<Record<string, unknown>, SQLQueryBindings[]>(body.text).all(...body.parameters);
+          // A V2 (alias) posting statement always appends exactly one accounting-only row after its logical rows.
+          const accounting = EffectArray.filter(rows, row => row.accounting_only === 1);
+          const admitted = EffectArray.filter(rows, row => row.accounting_only !== 1);
           expect(admitted.length).toBeGreaterThan(0);
+          expect(accounting).toEqual([
+            expect.objectContaining({
+              accounting_only: 1,
+              eligible: 0,
+              examined_count: admitted.length,
+              id: null,
+              posting_cap_reached: 0,
+            }),
+          ]);
           const functionOwner = database
             .query<{id: string}, [string]>("SELECT id FROM symbols WHERE snapshot_id=? AND name='useHelper'")
             .get(dirtyRoot.snapshot.id)!;
@@ -714,7 +725,7 @@ describe('cross-session code graph increments', () => {
     60_000,
   );
 
-  it.effect(
+  native(it.effect)(
     'keeps disjoint sequential increments one-layered and graph-equivalent',
     () => {
       let fullHome: string | undefined;
@@ -788,7 +799,7 @@ describe('cross-session code graph increments', () => {
     60_000,
   );
 
-  it.effect(
+  native(it.effect)(
     'replaces an overlapping prior delta without carrying stale rows',
     () => {
       let fullHome: string | undefined;
@@ -833,7 +844,7 @@ describe('cross-session code graph increments', () => {
     60_000,
   );
 
-  it.effect(
+  native(it.effect)(
     'retains cumulative-root fallback when the layered fold proof is unavailable',
     () => {
       let fullHome: string | undefined;
@@ -870,7 +881,7 @@ describe('cross-session code graph increments', () => {
     60_000,
   );
 
-  it.effect(
+  native(it.effect)(
     'fails closed and preserves full-build equivalence for corrupt-but-present fold proofs',
     () => {
       const temporaryPaths: string[] = [];
@@ -983,7 +994,7 @@ describe('cross-session code graph increments', () => {
     60_000,
   );
 
-  it.effect('reuses a persisted clean base for a body-only dirty overlay', () => {
+  native(it.effect)('reuses a persisted clean base for a body-only dirty overlay', () => {
     let fullHome: string | undefined;
     let incrementalHome: string | undefined;
     let root: string | undefined;
@@ -1168,7 +1179,7 @@ describe('cross-session code graph increments', () => {
     );
   });
 
-  it.effect('falls back to full admission when the inventory receipt is absent', () => {
+  native(it.effect)('falls back to full admission when the inventory receipt is absent', () => {
     let home: string | undefined;
     let root: string | undefined;
     return Effect.gen(function* () {
@@ -1216,7 +1227,7 @@ describe('cross-session code graph increments', () => {
     );
   });
 
-  it.effect('does not union different-base clean increments into full-materialization shards', () => {
+  native(it.effect)('does not union different-base clean increments into full-materialization shards', () => {
     let home: string | undefined;
     let root: string | undefined;
     let siblingRoot: string | undefined;
@@ -1265,7 +1276,7 @@ describe('cross-session code graph increments', () => {
     );
   });
 
-  it.effect('matches full rebuilds when changed-file relationships are added or deleted', () => {
+  native(it.effect)('matches full rebuilds when changed-file relationships are added or deleted', () => {
     const temporaryPaths: string[] = [];
     return Effect.gen(function* () {
       const indexer = yield* CodeGraphIndexer;
@@ -1302,76 +1313,80 @@ describe('cross-session code graph increments', () => {
     );
   });
 
-  it.effect('resolves changed consumers through persisted barrel aliases and declaration-only overloads', () => {
-    let fullHome: string | undefined;
-    let incrementalHome: string | undefined;
-    let root: string | undefined;
-    return Effect.gen(function* () {
-      root = createBarrelRepository();
-      incrementalHome = mkdtempSync(join(tmpdir(), 'threadnote-barrel-incremental-home-'));
-      fullHome = mkdtempSync(join(tmpdir(), 'threadnote-barrel-full-home-'));
-      const clean = yield* indexAndLoadEffect(root, incrementalHome);
-      expect(reusableReceiptStats(clean.databasePath, clean.summary.snapshot.id)).toMatchObject({
-        formatVersion: 2,
-        inventoryReceipt: true,
-        reexports: 2,
-      });
-      expect(reusableReceiptStats(clean.databasePath, clean.summary.snapshot.id).aliases).toBeGreaterThan(0);
-      deleteMaterializedShardCache(clean.databasePath);
-      writeBarrelConsumer(root, 'dirty');
-      const incremental = yield* indexAndLoadEffect(root, incrementalHome);
-      const indexer = yield* CodeGraphIndexer;
-      const fullSummary = yield* indexer.index({cwd: root, incrementalOverlay: false, threadnoteHome: fullHome});
-      const full = yield* loadGraphEffect(root, fullHome, fullSummary);
+  native(it.effect)(
+    'resolves changed consumers through persisted barrel aliases and declaration-only overloads',
+    () => {
+      let fullHome: string | undefined;
+      let incrementalHome: string | undefined;
+      let root: string | undefined;
+      return Effect.gen(function* () {
+        root = createBarrelRepository();
+        incrementalHome = mkdtempSync(join(tmpdir(), 'threadnote-barrel-incremental-home-'));
+        fullHome = mkdtempSync(join(tmpdir(), 'threadnote-barrel-full-home-'));
+        const clean = yield* indexAndLoadEffect(root, incrementalHome);
+        expect(reusableReceiptStats(clean.databasePath, clean.summary.snapshot.id)).toMatchObject({
+          formatVersion: 2,
+          inventoryReceipt: true,
+          reexports: 2,
+        });
+        expect(reusableReceiptStats(clean.databasePath, clean.summary.snapshot.id).aliases).toBeGreaterThan(0);
+        deleteMaterializedShardCache(clean.databasePath);
+        writeBarrelConsumer(root, 'dirty');
+        const incremental = yield* indexAndLoadEffect(root, incrementalHome);
+        const indexer = yield* CodeGraphIndexer;
+        const fullSummary = yield* indexer.index({cwd: root, incrementalOverlay: false, threadnoteHome: fullHome});
+        const full = yield* loadGraphEffect(root, fullHome, fullSummary);
 
-      expect(incremental.summary.materialization?.mode).toBe('incremental-overlay');
-      expect(incremental.summary.incrementalWork).toMatchObject({
-        baseFactsLoaded: 1,
-        changedFiles: 1,
-        inventoryFilesInspected: 1,
-        totalFiles: 3,
-      });
-      expect(projectGraph(incremental.graph)).toEqual(projectGraph(full));
-      const implementation = Option.getOrUndefined(
-        EffectArray.findFirst(
-          incremental.graph.symbols,
-          __effectArrayValue =>
-            !!(symbol =>
-              symbol.name === 'helper' &&
-              Effect2.pipe(symbol.signature, effectOptionalString =>
-                effectOptionalString == null
-                  ? undefined
-                  : Effect2.pipe(effectOptionalString, EffectString.includes('string | number')),
-              ))(__effectArrayValue),
-        ),
-      );
-      const decodeDeclarations = EffectArray.filter(incremental.graph.symbols, symbol => symbol.name === 'decode');
-      expect(implementation).toBeDefined();
-      expect(
-        EffectArray.some(
-          incremental.graph.edges,
-          edge => edge.relation === 'calls' && edge.sourceName === 'useHelper' && edge.targetId === implementation?.id,
-        ),
-      ).toBe(true);
-      expect(
-        new Set(
-          EffectArray.map(
-            EffectArray.filter(
-              incremental.graph.edges,
-              edge => edge.relation === 'calls' && edge.sourceName === 'useHelper' && edge.targetName === 'decode',
-            ),
-            edge => edge.targetId,
+        expect(incremental.summary.materialization?.mode).toBe('incremental-overlay');
+        expect(incremental.summary.incrementalWork).toMatchObject({
+          baseFactsLoaded: 1,
+          changedFiles: 1,
+          inventoryFilesInspected: 1,
+          totalFiles: 3,
+        });
+        expect(projectGraph(incremental.graph)).toEqual(projectGraph(full));
+        const implementation = Option.getOrUndefined(
+          EffectArray.findFirst(
+            incremental.graph.symbols,
+            __effectArrayValue =>
+              !!(symbol =>
+                symbol.name === 'helper' &&
+                Effect2.pipe(symbol.signature, effectOptionalString =>
+                  effectOptionalString == null
+                    ? undefined
+                    : Effect2.pipe(effectOptionalString, EffectString.includes('string | number')),
+                ))(__effectArrayValue),
           ),
-        ),
-      ).toEqual(new Set(EffectArray.map(decodeDeclarations, symbol => symbol.id)));
-    }).pipe(
-      provideTestLayer(ApplicationLayer),
-      TestClock.withLive,
-      Effect.ensuring(removeTemporaryPaths(() => [root, incrementalHome, fullHome])),
-    );
-  });
+        );
+        const decodeDeclarations = EffectArray.filter(incremental.graph.symbols, symbol => symbol.name === 'decode');
+        expect(implementation).toBeDefined();
+        expect(
+          EffectArray.some(
+            incremental.graph.edges,
+            edge =>
+              edge.relation === 'calls' && edge.sourceName === 'useHelper' && edge.targetId === implementation?.id,
+          ),
+        ).toBe(true);
+        expect(
+          new Set(
+            EffectArray.map(
+              EffectArray.filter(
+                incremental.graph.edges,
+                edge => edge.relation === 'calls' && edge.sourceName === 'useHelper' && edge.targetName === 'decode',
+              ),
+              edge => edge.targetId,
+            ),
+          ),
+        ).toEqual(new Set(EffectArray.map(decodeDeclarations, symbol => symbol.id)));
+      }).pipe(
+        provideTestLayer(ApplicationLayer),
+        TestClock.withLive,
+        Effect.ensuring(removeTemporaryPaths(() => [root, incrementalHome, fullHome])),
+      );
+    },
+  );
 
-  it.effect('falls back conservatively when the clean base predates reusable receipts', () => {
+  native(it.effect)('falls back conservatively when the clean base predates reusable receipts', () => {
     let home: string | undefined;
     let root: string | undefined;
     return Effect.gen(function* () {
@@ -1395,7 +1410,7 @@ describe('cross-session code graph increments', () => {
     );
   });
 
-  it.effect(
+  native(it.effect)(
     're-extracts only the changed language pack across a compatible extractor rollout',
     () => {
       let home: string | undefined;
@@ -1492,7 +1507,7 @@ describe('cross-session code graph increments', () => {
     60_000,
   );
 
-  it.effect('fails closed when a global extractor change is not explained by pack provenance', () => {
+  native(it.effect)('fails closed when a global extractor change is not explained by pack provenance', () => {
     let root: string | undefined;
     return Effect.gen(function* () {
       root = createRepository(4);
@@ -1516,7 +1531,7 @@ describe('cross-session code graph increments', () => {
     );
   });
 
-  it.effect('does not let a stale peer failure poison an already-ready reusable base', () => {
+  native(it.effect)('does not let a stale peer failure poison an already-ready reusable base', () => {
     let home: string | undefined;
     let root: string | undefined;
     return Effect.gen(function* () {

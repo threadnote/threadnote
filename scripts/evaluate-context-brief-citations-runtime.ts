@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import {requireNativeTypeScriptAsset} from './support/native-typescript-preflight.js';
 import {Array as EffectArray} from 'effect';
 
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
@@ -55,4 +56,7 @@ function required(value: string | undefined, option: string): string {
   return value;
 }
 
-if (import.meta.main) BunRuntime.runMain(provideScriptLayer(program, ApplicationLayer));
+if (import.meta.main) {
+  requireNativeTypeScriptAsset('eval:context-brief-citations:runtime');
+  BunRuntime.runMain(provideScriptLayer(program, ApplicationLayer));
+}

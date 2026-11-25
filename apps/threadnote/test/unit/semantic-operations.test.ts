@@ -21,7 +21,8 @@ import {
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {makeSemanticAdmission, semanticSessionLimits} from '../../src/semantic/coordinator.js';
-import {semanticTreeDigest} from '../../src/semantic/fingerprint.js';
+import {native} from '@threadnote/graph/test/helpers/native-typescript-session';
+import {nativeTypeScriptTestCandidate} from '../helpers/native-typescript-asset.js';
 
 const layer = Layer.mergeAll(
   BunFileSystem.layer,
@@ -73,72 +74,77 @@ describe.skipIf(!privateProfileSupported)('semantic operational inspection', () 
       expect(yield* f.fs.exists(f.path.join(f.home, 'semantic', 'admission-v1'))).toBe(false);
     }).pipe(provideTestLayer(layer)),
   );
-  effectIt.effect('previews pinned setup, resumes the exact profile and requires the observed digest for disable', () =>
+  native(effectIt.effect)(
+    'previews pinned setup, resumes the exact profile and requires the observed digest for disable',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const candidate = yield* nativeTypeScriptTestCandidate();
+        const profile = {
+          version: 1,
+          enabled: true,
+          worktree: f.worktree,
+          catalog: {nativeCandidate: candidate},
+        };
+        // Native verification reads pinned bytes only; the layer's executor dies if any process were started.
+        const run = (input: unknown, action: 'setup' | 'disable' | 'status') =>
+          runSemanticDoctor(f.config, input, action);
+        expect(yield* run({...f.request, profile}, 'setup')).toMatchObject({
+          state: 'preview',
+          providers: [{id: 'typescript-native', state: 'pinned-candidate', productionQualified: false}],
+        });
+        expect(yield* f.fs.exists(f.path.join(f.home, 'semantic'))).toBe(false);
+        const first = yield* run({...f.request, profile, apply: true}, 'setup');
+        expect(first).toMatchObject({state: 'configured', changed: true});
+        expect(yield* run({...f.request, profile, apply: true}, 'setup')).toMatchObject({
+          state: 'configured',
+          changed: false,
+        });
+        expect(yield* run({...f.request, apply: true, expectedDigest: 'stale'}, 'disable')).toMatchObject({
+          state: 'incompatible',
+        });
+        const status = yield* run(f.request, 'status');
+        const digest = 'profileDigest' in status ? status.profileDigest : undefined;
+        expect(yield* run({...f.request, apply: true, expectedDigest: digest}, 'disable')).toMatchObject({
+          state: 'disabled',
+          changed: true,
+        });
+        expect(JSON.stringify(status)).not.toContain(candidate.executable);
+        expect(yield* f.fs.exists(f.path.join(f.home, 'semantic', 'admission-v1'))).toBe(false);
+      }).pipe(provideTestLayer(layer), TestClock.withLive),
+  );
+
+  effectIt.effect('refuses only the TypeScript slot for a legacy Node TypeScript candidate', () =>
     Effect.gen(function* () {
       const f = yield* fixture;
-      const runtime = f.path.join(f.home, 'node');
-      const serverDirectory = f.path.join(f.home, 'server');
-      const sdkDirectory = f.path.join(f.home, 'sdk');
-      yield* f.fs.writeFileString(runtime, 'trusted-runtime-image');
-      for (const [directory, version] of [
-        [serverDirectory, '6.0.2'],
-        [sdkDirectory, '6.0.3'],
-      ] as const) {
-        yield* f.fs.makeDirectory(directory);
-        yield* f.fs.writeFileString(f.path.join(directory, 'package.json'), JSON.stringify({version}));
-      }
-      const profile = {
-        version: 1,
-        enabled: true,
-        worktree: f.worktree,
-        catalog: {
-          candidate: {
-            runtime,
-            runtimeDigest: sha256HexSync('trusted-runtime-image'),
-            runtimeVersion: '24.19.0',
-            serverDirectory,
-            serverTreeDigest: yield* semanticTreeDigest(serverDirectory),
-            sdkDirectory,
-            sdkTreeDigest: yield* semanticTreeDigest(sdkDirectory),
-          },
-        },
+      const go = {
+        executable: f.path.join(f.home, 'gopls'),
+        executableDigest: sha256HexSync('incorrect'),
+        sdkDirectory: f.path.join(f.home, 'go-sdk'),
+        sdkTreeDigest: sha256HexSync('sdk'),
       };
-      let checks = 0;
-      const run = (input: unknown, action: 'setup' | 'disable' | 'status') =>
-        runSemanticDoctor(f.config, input, action).pipe(
-          Effect.provideService(CommandExecutor, {
-            executeStreaming: () => Effect.die('Operational checks never stream a process'),
-            execute: (file, args, options) =>
-              Effect.sync(() => {
-                expect(file).toBe(runtime);
-                expect(args).toEqual(['--version']);
-                expect(options).toMatchObject({env: {}, timeoutMs: 2000, maxOutputBytes: 128});
-                checks++;
-                return {exitCode: 0, stdout: 'v24.19.0\n', stderr: 'PRIVATE_PROVIDER_TEXT'};
-              }),
-          }),
-        );
-      expect(yield* run({...f.request, profile}, 'setup')).toMatchObject({state: 'preview'});
-      expect(yield* f.fs.exists(f.path.join(f.home, 'semantic'))).toBe(false);
-      const first = yield* run({...f.request, profile, apply: true}, 'setup');
-      expect(first).toMatchObject({state: 'configured', changed: true});
-      expect(yield* run({...f.request, profile, apply: true}, 'setup')).toMatchObject({
-        state: 'configured',
-        changed: false,
+      const legacy = {
+        runtime: f.path.join(f.home, 'node'),
+        runtimeDigest: sha256HexSync('runtime'),
+        runtimeVersion: '24.19.0',
+        serverDirectory: f.path.join(f.home, 'server'),
+        serverTreeDigest: sha256HexSync('server'),
+        sdkDirectory: f.path.join(f.home, 'sdk'),
+        sdkTreeDigest: sha256HexSync('sdk'),
+      };
+      const profile = {version: 1, enabled: true, worktree: f.worktree, catalog: {candidate: legacy, go}};
+      const report = yield* runSemanticDoctor(f.config, {...f.request, profile}, 'setup');
+      // The other provider is still assessed on its own merits instead of the whole profile being refused.
+      expect(report).toMatchObject({
+        state: 'unavailable',
+        providers: [
+          {id: 'typescript-language-server', state: 'incompatible', cause: 'legacy-candidate'},
+          {id: 'gopls', state: 'unavailable', cause: 'incompatible'},
+        ],
       });
-      expect(yield* run({...f.request, apply: true, expectedDigest: 'stale'}, 'disable')).toMatchObject({
-        state: 'incompatible',
+      expect(yield* runSemanticDoctor(f.config, {...f.request, language: 'go', profile}, 'setup')).toMatchObject({
+        providers: [{id: 'gopls', state: 'unavailable'}],
       });
-      const status = yield* run(f.request, 'status');
-      const digest = 'profileDigest' in status ? status.profileDigest : undefined;
-      expect(yield* run({...f.request, apply: true, expectedDigest: digest}, 'disable')).toMatchObject({
-        state: 'disabled',
-        changed: true,
-      });
-      expect(checks).toBe(3);
-      expect(JSON.stringify(status)).not.toContain('PRIVATE_PROVIDER_TEXT');
-      expect(JSON.stringify(status)).not.toContain(runtime);
-      expect(yield* f.fs.exists(f.path.join(f.home, 'semantic', 'admission-v1'))).toBe(false);
     }).pipe(provideTestLayer(layer), TestClock.withLive),
   );
 

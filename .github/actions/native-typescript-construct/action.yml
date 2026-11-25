@@ -1,0 +1,83 @@
+name: Construct the native TypeScript asset
+description: >-
+  Acquire the exact official TypeScript source, download this host's pinned Go archive and run the builder's
+  --prepare. Inputs are the outputs of `bun tools/ci/native-typescript-construction.ts inputs` (or provision-inputs);
+  shared by the construction workflow and the prepared-asset provisioning action.
+inputs:
+  repository: {description: Official TypeScript repository URL from the recipe., required: true}
+  commit: {description: Exact upstream commit from the recipe., required: true}
+  tree: {description: Exact upstream tree from the recipe., required: true}
+  source: {description: Fresh checkout directory for the upstream source., required: true}
+  archive: {description: Destination of the pinned Go archive., required: true}
+  archive-url: {description: Pinned Go archive URL., required: true}
+  archive-size: {description: Pinned Go archive size in bytes., required: true}
+  private-root: {description: Fresh private construction root., required: true}
+  repository-root: {description: Canonical Threadnote checkout root., required: true}
+  evidence: {description: Fresh evidence directory; receives prepare.json., required: true}
+  deadline-multiplier:
+    description: THREADNOTE_TYPESCRIPT_NATIVE_DEADLINE_MULTIPLIER for cold runners (1-4).
+    required: false
+    default: '3'
+runs:
+  using: composite
+  steps:
+    - name: Acquire the exact official TypeScript source
+      shell: bash
+      env:
+        REPOSITORY: ${{ inputs.repository }}
+        COMMIT: ${{ inputs.commit }}
+        TREE: ${{ inputs.tree }}
+        SOURCE: ${{ inputs.source }}
+      run: |
+        set -euo pipefail
+        test ! -e "$SOURCE"
+        git init --quiet "$SOURCE"
+        # No line-ending conversion; longpaths only matters on Windows. Submodules are never fetched.
+        git -C "$SOURCE" config core.autocrlf false
+        git -C "$SOURCE" config core.eol lf
+        git -C "$SOURCE" config core.longpaths true
+        git -C "$SOURCE" remote add origin "$REPOSITORY"
+        # Composite steps take no timeout-minutes: a stalled transfer (<1 KiB/s for 60 s) fails the fetch instead.
+        git -C "$SOURCE" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 \
+          fetch --quiet --depth=1 --no-tags --no-recurse-submodules origin "$COMMIT"
+        git -C "$SOURCE" -c advice.detachedHead=false checkout --quiet --detach FETCH_HEAD
+        test "$(git -C "$SOURCE" rev-parse HEAD)" = "$COMMIT"
+        test "$(git -C "$SOURCE" rev-parse 'HEAD^{tree}')" = "$TREE"
+        test ! -e "$SOURCE/.gitmodules"
+        test -z "$(git -C "$SOURCE" status --porcelain)"
+    - name: Download the pinned host Go archive
+      shell: bash
+      env:
+        ARCHIVE: ${{ inputs.archive }}
+        ARCHIVE_URL: ${{ inputs.archive-url }}
+        ARCHIVE_SIZE: ${{ inputs.archive-size }}
+      run: |
+        set -euo pipefail
+        mkdir "$(dirname "$ARCHIVE")"
+        # Bounded per attempt: composite steps take no timeout-minutes of their own.
+        curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 3 \
+          --connect-timeout 30 --max-time 600 --output "$ARCHIVE" "$ARCHIVE_URL"
+        # The builder is the SHA-256 and size boundary; this only fails early on a missing or truncated download.
+        test -s "$ARCHIVE"
+        test "$(wc -c < "$ARCHIVE" | tr -d '[:space:]')" = "$ARCHIVE_SIZE"
+    - name: Construct and prepare the native TypeScript asset
+      shell: bash
+      env:
+        SOURCE: ${{ inputs.source }}
+        ARCHIVE: ${{ inputs.archive }}
+        PRIVATE_ROOT: ${{ inputs.private-root }}
+        REPOSITORY_ROOT: ${{ inputs.repository-root }}
+        EVIDENCE: ${{ inputs.evidence }}
+        THREADNOTE_TYPESCRIPT_NATIVE_DEADLINE_MULTIPLIER: ${{ inputs.deadline-multiplier }}
+      run: |
+        set -euo pipefail
+        # The builder checks POSIX modes only off Windows; Git Bash cannot chmod a Windows ACL directory.
+        if [ "$RUNNER_OS" = Windows ]; then
+          mkdir "$PRIVATE_ROOT" "$EVIDENCE"
+        else
+          mkdir -m 700 "$PRIVATE_ROOT" "$EVIDENCE"
+        fi
+        # No module cache argument: the builder acquires the pinned module graph once.
+        bun tools/semantic/build-typescript-native.ts --prepare "$SOURCE" "$ARCHIVE" "$PRIVATE_ROOT" \
+          "$REPOSITORY_ROOT" > "$EVIDENCE/prepare.json"
+        cat "$EVIDENCE/prepare.json"

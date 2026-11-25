@@ -25,7 +25,22 @@ for (const shard of shards) {
 }
 await Bun.write(resolve(output, 'shards.json'), JSON.stringify({shards}, null, 2) + '\n');
 
-const matrix = {include: EffectArray.map(shards, ({id, name, postgres}) => ({id, name, postgres}))};
+// A shard needs the prepared native TypeScript asset only when one of its targets declares the inherited variables.
+const native = new Set(
+  EffectArray.map(
+    EffectArray.filter(inventory.targets, target => (target.inheritedEnv ?? []).length > 0),
+    target => target.label,
+  ),
+);
+const nativeShard = shard => EffectArray.some(shard.targets, label => native.has(label));
+const matrix = {
+  include: EffectArray.map(shards, shard => ({
+    id: shard.id,
+    name: shard.name,
+    postgres: shard.postgres,
+    native_typescript: nativeShard(shard),
+  })),
+};
 if (process.env.GITHUB_OUTPUT) {
   const previous = await Bun.file(process.env.GITHUB_OUTPUT)
     .text()
@@ -34,6 +49,7 @@ if (process.env.GITHUB_OUTPUT) {
     process.env.GITHUB_OUTPUT,
     previous +
       `matrix=${JSON.stringify(matrix)}\nexecute_bazel=${shards.length > 0}\n` +
+      `native_typescript=${EffectArray.some(shards, nativeShard)}\n` +
       `executable_targets=${EffectArray.reduce(shards, 0, (count, shard) => count + shard.targets.length)}\n`,
   );
 }

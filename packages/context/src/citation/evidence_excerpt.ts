@@ -1,7 +1,7 @@
 import {Array as EffectArray} from 'effect';
 import {Effect, Option} from 'effect';
 import type {MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
-import type {RepositoryIdentity} from '@threadnote/graph/types';
+import type {CodeGraphInventoryFile, RepositoryIdentity} from '@threadnote/graph/types';
 import {
   createCodeGraphSourceSpanCanonicalizer,
   type CodeGraphEffectiveSnapshotCitationEvidence,
@@ -9,6 +9,8 @@ import {
 import {codeGraphFileContentHashMatchesBytes} from '@threadnote/graph/content_identity';
 import {TreeSitterRuntime} from '@threadnote/graph/tree_sitter/runtime';
 import {CodeGraphLanguagePackRegistry} from '@threadnote/graph/languages/registry';
+import {CodeGraphParserPool} from '@threadnote/graph/parser_worker';
+import {isNativeTypeScriptSource} from '@threadnote/graph/typescript_runtime';
 import type {CodeGraphCitationEvidenceSourceV1} from '@threadnote/graph/citation/capsule';
 import {decodeUtf8} from '@threadnote/graph/inventory/content';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -109,26 +111,51 @@ export function historicalSnapshotCitationMatches(
   );
 }
 
-export const historicalCitationBytesMatch = Effect.fn('contextHealth.historicalCitationBytesMatch')(function* (
+/**
+ * Outcome of the independent byte re-check. `extraction-unavailable` means the signature could not be re-derived here
+ * (no parser session, or a degraded extraction); it is never reported as a match.
+ */
+export type HistoricalCitationBytesCheckV1 = 'verified' | 'mismatch' | 'extraction-unavailable';
+
+/** Native TypeScript facts come from a parser worker that borrows the pool's native session, as indexing does. */
+const extractHistoricalCitationFacts = Effect.fn('contextHealth.extractHistoricalCitationFacts')(function* (
+  file: CodeGraphInventoryFile,
+  bytes: Uint8Array,
+  threadnoteHome: string,
+) {
+  const packs = yield* CodeGraphLanguagePackRegistry;
+  if (isNativeTypeScriptSource(file.path)) {
+    const pool = yield* Effect.serviceOption(CodeGraphParserPool);
+    if (Option.isNone(pool)) return undefined;
+    const parsed = yield* pool.value.extract(file, threadnoteHome);
+    return parsed.degraded ? undefined : packs.postprocessFile(file, parsed.facts);
+  }
+  const runtime = yield* Effect.serviceOption(TreeSitterRuntime);
+  if (Option.isNone(runtime)) return undefined;
+  return yield* packs.extractFile({...file, bytes}).pipe(
+    Effect.provideService(TreeSitterRuntime, runtime.value),
+    Effect.orElseSucceed(() => undefined),
+  );
+});
+
+export const checkHistoricalCitationBytes = Effect.fn('contextHealth.checkHistoricalCitationBytes')(function* (
   citation: MemoryCodeCitationV1,
   objectFormat: RepositoryIdentity['objectFormat'],
   bytes: Uint8Array,
+  threadnoteHome: string,
 ) {
-  if (!codeGraphFileContentHashMatchesBytes(citation.fileContentHash.value, objectFormat, bytes)) return false;
+  if (!codeGraphFileContentHashMatchesBytes(citation.fileContentHash.value, objectFormat, bytes))
+    return 'mismatch' as const;
   const target = citation.target;
-  if (target.kind === 'file') return true;
+  if (target.kind === 'file') return 'verified' as const;
   const source = decodeUtf8(bytes);
-  if (source === undefined) return false;
+  if (source === undefined) return 'mismatch' as const;
   const fragment = createCodeGraphSourceSpanCanonicalizer(source).fragment(target.span);
-  if (!fragment.ok || fragment.fragment.sha256 !== target.fragmentHash.value) return false;
-  if (target.signatureHash === undefined) return true;
-  const packs = yield* CodeGraphLanguagePackRegistry;
-  const runtime = yield* Effect.serviceOption(TreeSitterRuntime);
-  if (Option.isNone(runtime)) return false;
-  const facts = yield* packs
-    .extractFile({
+  if (!fragment.ok || fragment.fragment.sha256 !== target.fragmentHash.value) return 'mismatch' as const;
+  if (target.signatureHash === undefined) return 'verified' as const;
+  const facts = yield* extractHistoricalCitationFacts(
+    {
       blobId: '',
-      bytes,
       content: source,
       contentHash: citation.fileContentHash.value,
       language: target.language,
@@ -136,12 +163,11 @@ export const historicalCitationBytesMatch = Effect.fn('contextHealth.historicalC
       path: citation.path,
       size: bytes.byteLength,
       source: 'commit',
-    })
-    .pipe(
-      Effect.provideService(TreeSitterRuntime, runtime.value),
-      Effect.orElseSucceed(() => undefined),
-    );
-  if (facts === undefined) return false;
+    },
+    bytes,
+    threadnoteHome,
+  );
+  if (facts === undefined) return 'extraction-unavailable' as const;
   const matches = EffectArray.filter(
     facts.symbols,
     symbol =>
@@ -156,5 +182,5 @@ export const historicalCitationBytesMatch = Effect.fn('contextHealth.historicalC
       symbol.signature !== undefined &&
       sha256HexSync(symbol.signature) === target.signatureHash!.value,
   );
-  return matches.length === 1;
+  return matches.length === 1 ? ('verified' as const) : ('mismatch' as const);
 });

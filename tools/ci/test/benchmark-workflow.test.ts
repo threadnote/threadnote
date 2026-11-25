@@ -369,8 +369,8 @@ describe('platform benchmark workflow', () => {
     expect(preflight).toMatchObject({
       if: "${{ always() && github.event_name != 'pull_request' }}",
       name: 'Benchmark harness · Bazel preflight',
-      needs: 'classify-platform-benchmark',
-      'runs-on': 'ubuntu-latest',
+      needs: ['classify-platform-benchmark', 'native-typescript-asset'],
+      'runs-on': 'ubuntu-24.04',
       'timeout-minutes': 10,
     });
     expect(
@@ -620,21 +620,22 @@ describe('platform benchmark workflow', () => {
       BASE_SHA: '${{ github.event.pull_request.base.sha }}',
       HEAD_SHA: '${{ github.event.pull_request.head.sha }}',
     });
-    expect(pullRequestJob.needs).toBe('classify-platform-benchmark');
+    expect(pullRequestJob.needs).toEqual(['classify-platform-benchmark', 'native-typescript-asset']);
     expect(pullRequestJob.if).toBe(
       "${{ always() && github.event_name == 'pull_request' && (needs.classify-platform-benchmark.result != 'success' || needs.classify-platform-benchmark.outputs.run_code_graph_pr != 'false') }}",
     );
-    expect(pullRequestJob['runs-on']).toBe('ubuntu-latest');
+    // Asset consumers run on the asset producer's exact image.
+    expect(pullRequestJob['runs-on']).toBe('ubuntu-24.04');
     expect(pullRequestJob['timeout-minutes']).toBe(20);
     expect(pullRequestJob.strategy?.matrix?.scale).toEqual([10_000, 100_000]);
     expect(command).toContain('--scale-symbols ${{ matrix.scale }}');
     expect(command).toContain('--fail-on-budget');
     expect(command).not.toContain('--vectors');
-    expect(recallJob.needs).toBe('classify-platform-benchmark');
+    expect(recallJob.needs).toEqual(['classify-platform-benchmark', 'native-typescript-asset']);
     expect(recallJob.if).toBe(
       "${{ always() && github.event_name == 'pull_request' && (needs.classify-platform-benchmark.result != 'success' || needs.classify-platform-benchmark.outputs.run_recall_pr != 'false') }}",
     );
-    expect(recallJob['runs-on']).toBe('ubuntu-latest');
+    expect(recallJob['runs-on']).toBe('ubuntu-24.04');
     expect(recallJob['timeout-minutes']).toBeLessThanOrEqual(15);
     const sourceReader = Option.getOrUndefined(
       EffectArray.findFirst(
@@ -697,10 +698,12 @@ describe('platform benchmark workflow', () => {
       THREADNOTE_BENCHMARK_RUNNER_CLASS: 'github-hosted-${{ matrix.os }}-${{ runner.arch }}',
       THREADNOTE_BENCHMARK_RUNNER_ID: '${{ runner.name }}',
     });
+    // `os` keeps the runner-class label; `image` pins the native asset producer's exact image.
     expect(nativeJob.strategy?.matrix?.include).toEqual([
-      {hotQuerySamples: 25, os: 'ubuntu-latest'},
-      {hotQuerySamples: 25, os: 'macos-latest'},
+      {hotQuerySamples: 25, image: 'ubuntu-24.04', os: 'ubuntu-latest'},
+      {hotQuerySamples: 25, image: 'macos-15', os: 'macos-latest'},
     ]);
+    expect(nativeJob['runs-on']).toBe('${{ matrix.image }}');
     expect(nativeCapture?.run).toContain('--samples ${{ matrix.hotQuerySamples }}');
     expect(windowsReplicas.name).toBe('Code graph Windows replica ${{ matrix.replica }} · windows-latest');
     expect(windowsReplicas.strategy?.['max-parallel']).toBe(3);
@@ -817,8 +820,10 @@ describe('platform benchmark workflow', () => {
     expect(job['runs-on']).toBe('ubuntu-24.04');
     expect(job['timeout-minutes']).toBe(40);
     expect(EffectRecord.keys(ratchetWorkflow.jobs)).not.toContain('classify');
-    expect(job.needs).toBeUndefined();
-    expect(job.if).toBe("github.event_name == 'pull_request'");
+    // The shared asset job owns any cold construction; the ratchet only restores and still fails visibly on a miss.
+    expect(job.needs).toBe('native-typescript-asset');
+    expect(ratchetWorkflow.jobs['native-typescript-asset']?.['timeout-minutes']).toBe(90);
+    expect(job.if).toBe("${{ !cancelled() && github.event_name == 'pull_request' }}");
     expect(
       Option.getOrUndefined(
         Option.map(Option.fromNullishOr(job.steps), findArray =>
@@ -882,7 +887,9 @@ describe('platform benchmark workflow', () => {
         ),
       ),
     );
-    expect(controlMeasurement?.if).toBe("steps.static-ratchet.outcome == 'failure'");
+    expect(controlMeasurement?.if).toBe(
+      "steps.static-ratchet.outcome == 'failure' && steps.control-asset.outputs.same == 'true'",
+    );
     expect(controlMeasurement?.run).toContain('git worktree add --detach "$control_root" "$BASE_SHA"');
     expect(controlMeasurement?.run).toContain('GITHUB_WORKSPACE="$control_root" GITHUB_SHA="$BASE_SHA"');
     expect(controlMeasurement?.run).toContain('code-graph-production-ratchet-control-Linux-');
@@ -896,7 +903,9 @@ describe('platform benchmark workflow', () => {
         ),
       ),
     );
-    expect(pairedCandidateMeasurement?.if).toBe("steps.static-ratchet.outcome == 'failure'");
+    expect(pairedCandidateMeasurement?.if).toBe(
+      "steps.static-ratchet.outcome == 'failure' && steps.control-asset.outputs.same == 'true'",
+    );
     expect(pairedCandidateMeasurement?.run).toContain('code-graph-production-ratchet-paired-candidate-Linux-');
     expect(job.steps?.indexOf(candidateMeasurement!)).toBeLessThan(job.steps?.indexOf(controlMeasurement!) ?? 0);
     expect(job.steps?.indexOf(controlMeasurement!)).toBeLessThan(job.steps?.indexOf(pairedCandidateMeasurement!) ?? 0);
@@ -910,7 +919,9 @@ describe('platform benchmark workflow', () => {
         ),
       ),
     );
-    expect(pairedGate?.if).toBe("steps.static-ratchet.outcome == 'failure'");
+    expect(pairedGate?.if).toBe(
+      "steps.static-ratchet.outcome == 'failure' && steps.control-asset.outputs.same == 'true'",
+    );
     expect(pairedGate?.run).toContain('--artifact artifacts/code-graph-production-ratchet-paired-candidate-Linux-');
     expect(pairedGate?.run).toContain('--expected-candidate-commit "$GITHUB_SHA"');
     expect(pairedGate?.run).toContain('--expected-control-commit "$BASE_SHA"');
@@ -1034,7 +1045,7 @@ describe('platform benchmark workflow', () => {
       'code-graph-vectors-100k',
     ]) {
       const job = workflow.jobs[jobName];
-      expect(job.needs).toBe('prepare-code-graph-vector-model');
+      expect([job.needs].flat()[0]).toBe('prepare-code-graph-vector-model');
       const download = Option.getOrUndefined(
         Option.map(Option.fromNullishOr(job.steps), findArray =>
           Option.getOrUndefined(EffectArray.findFirst(findArray, step => step.uses === 'actions/download-artifact@v8')),

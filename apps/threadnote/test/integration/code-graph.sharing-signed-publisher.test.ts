@@ -63,10 +63,11 @@ import {runCommandEffect} from '@threadnote/platform/command';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {native} from '@threadnote/graph/test/helpers/native-typescript-session';
 
 describe('signed worker publisher', () => {
   for (const publicationMode of ['controlled', 'listener'] as const)
-    effectIt.effect(
+    native(effectIt.effect)(
       publicationMode === 'listener'
         ? 'automatically source-uses a signed result and retains its evidence after listener restart'
         : 'admits signed results through the authenticated publisher listener and source-verifies canonical publication',
@@ -484,7 +485,7 @@ describe('signed worker publisher', () => {
       180_000,
     );
 
-  effectIt.effect(
+  native(effectIt.effect)(
     'ignores legacy, quarantined, and revoked receipts for an OCI-worker profile',
     () =>
       TestClock.withLive(

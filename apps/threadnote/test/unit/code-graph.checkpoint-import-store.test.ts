@@ -247,7 +247,7 @@ describe('code graph checkpoint import store', () => {
               Effect.gen(function* () {
                 const sql = yield* SqlClient.SqlClient;
                 yield* sql`UPDATE checkpoint_import_receipts SET completion_sha256=NULL WHERE snapshot_id=${f.snapshot.id}`;
-                yield* sql`UPDATE snapshot_files SET mode='100755' WHERE snapshot_id=${f.snapshot.id} AND path='value.ts'`;
+                yield* sql`UPDATE snapshot_files SET mode='100755' WHERE snapshot_id=${f.snapshot.id} AND path='value.py'`;
               }),
             );
             expect(
@@ -266,7 +266,7 @@ describe('code graph checkpoint import store', () => {
               f.databasePath,
               Effect.gen(function* () {
                 const sql = yield* SqlClient.SqlClient;
-                yield* sql`UPDATE snapshot_files SET mode='100644' WHERE snapshot_id=${f.snapshot.id} AND path='value.ts'`;
+                yield* sql`UPDATE snapshot_files SET mode='100644' WHERE snapshot_id=${f.snapshot.id} AND path='value.py'`;
                 const changed = yield* sql<{readonly term_key: number}>`UPDATE lexical_compact_postings SET weight=2
             WHERE snapshot_key=(SELECT snapshot_key FROM lexical_compact_snapshots WHERE snapshot_id=${f.snapshot.id})
               AND term_key IN (SELECT term_key FROM lexical_compact_terms WHERE term LIKE '~body:v1:%') RETURNING term_key`;
@@ -1142,8 +1142,8 @@ function withAuthenticImport<A, E, R>(
         yield* fs.makeDirectory(repository);
         yield* fs.writeFileString(path.join(repository, 'package.json'), '{"name":"original-proof","private":true}');
         yield* fs.writeFileString(
-          path.join(repository, 'value.ts'),
-          'export function originalValue() { const privateToken = "secretword"; return privateToken; }',
+          path.join(repository, 'value.py'),
+          'def originalValue():\n    privateToken = "secretword"\n    return privateToken\n',
         );
         for (const args of [
           ['init', '-q', repository],

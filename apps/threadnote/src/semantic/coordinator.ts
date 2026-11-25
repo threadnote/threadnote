@@ -21,6 +21,7 @@ import {makeSemanticAgentChanges} from './agent_changes.js';
 import {Digest as EffectDigest, SecureRandom} from 'effect/crypto';
 import {
   JavaHostCandidate,
+  NativeTypeScriptHostCandidate,
   SemanticHostCatalog,
   semanticCatalogKey,
   semanticHostSelection,
@@ -94,7 +95,8 @@ import {sha256FileHex} from '@threadnote/platform/digest';
 import {CommandExecutor, runDetachedCommandEffect} from '@threadnote/platform/command';
 import {LspFault, makeLspClient, SemanticWireStartup, spawnLspWire, type LspWire} from './lsp_transport.js';
 import {makeTypeScriptSession, semanticTypeScriptCoordinatorSession} from './providers/typescript.js';
-import {makeTypeScriptRuntime} from './providers/typescript_runtime.js';
+import {verifyNativeTypeScriptCandidate} from './providers/typescript_runtime.js';
+import {recheckNativeTypeScriptExecutable} from '@threadnote/graph/typescript_runtime';
 import {
   SemanticSessionFault,
   SemanticSetupFault,
@@ -197,7 +199,14 @@ const verifyCoordinatorStorage = Effect.fn('semantic.verifyCoordinatorStorage')(
   const path = yield* Path.Path;
   const roots: string[] = [];
   if (catalog.worktree) roots.push(yield* path.fromFileUrl(new URL(catalog.worktree)));
-  for (const candidate of [catalog.candidate, catalog.python, catalog.go, catalog.rust, catalog.java]) {
+  for (const candidate of [
+    catalog.candidate,
+    catalog.nativeCandidate,
+    catalog.python,
+    catalog.go,
+    catalog.rust,
+    catalog.java,
+  ]) {
     if (!candidate) continue;
     roots.push(
       ...('runtimeCandidate' in candidate
@@ -229,6 +238,7 @@ export interface SemanticCoordinatorOptions {
   readonly enabled: boolean;
   readonly dataHome: string;
   readonly candidate?: TypeScriptHostCandidate;
+  readonly nativeCandidate?: NativeTypeScriptHostCandidate;
   readonly python?: PythonHostCandidate;
   readonly go?: SdkHostCandidate;
   readonly rust?: SdkHostCandidate;
@@ -238,7 +248,12 @@ export interface SemanticCoordinatorOptions {
   /** Exact-runtime, host-owned selected verification; never accepted from public requests. */
   readonly verifySelected?: (
     id: string,
-    candidate: TypeScriptHostCandidate | PythonHostCandidate | SdkHostCandidate | JavaHostCandidate,
+    candidate:
+      | TypeScriptHostCandidate
+      | NativeTypeScriptHostCandidate
+      | PythonHostCandidate
+      | SdkHostCandidate
+      | JavaHostCandidate,
     runtimeVersion: boolean,
     configurationOnly: boolean,
   ) => Effect.Effect<string, unknown>;
@@ -417,7 +432,8 @@ export const verifySemanticNodeCandidate = Effect.fn('semantic.verifyNodeCandida
 export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(function* (
   options: SemanticCoordinatorOptions,
 ) {
-  const {verifySelected, ...configuration} = options;
+  // A legacy Node TypeScript candidate is never started: only the TypeScript slot stays unconfigured.
+  const {verifySelected, candidate: _legacyTypeScript, ...configuration} = options;
   const catalog = structuredClone(configuration);
   if (!catalog.enabled) return yield* LspFault.make({code: 'prerequisite'});
   const fs = yield* FileSystem.FileSystem;
@@ -426,7 +442,6 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
   const command = yield* CommandExecutor;
   const crypto = yield* SecureRandom.SecureRandom;
   const digest = yield* EffectDigest.Digest;
-  const system = yield* SystemInfo;
   const home = yield* fs.realPath(catalog.dataHome);
   if (home !== path.resolve(catalog.dataHome)) return yield* LspFault.make({code: 'prerequisite'});
   if (catalog.java) yield* verifyJavaCoordinatorDirectory(catalog.java, home, catalog.worktree);
@@ -444,7 +459,12 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
   // Serialize coordinator candidate preflights; providers own their per-operation publication guards.
   const sdkVerification = yield* Semaphore.make(1);
   const verifyCandidate = (
-    candidate: TypeScriptHostCandidate | PythonHostCandidate | SdkHostCandidate | JavaHostCandidate,
+    candidate:
+      | TypeScriptHostCandidate
+      | NativeTypeScriptHostCandidate
+      | PythonHostCandidate
+      | SdkHostCandidate
+      | JavaHostCandidate,
     id: string,
     verifyRuntimeVersion = false,
   ): Effect.Effect<void, unknown, FileSystem.FileSystem | Path.Path | EffectDigest.Digest> =>
@@ -457,15 +477,19 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
         ? id === 'jdtls'
           ? sdkVerification.withPermit(verifyJavaSemanticCandidate(candidate))
           : Effect.fail(LspFault.make({code: 'prerequisite'}))
-        : 'runtime' in candidate
-          ? verifySemanticNodeCandidate(candidate, verifyRuntimeVersion).pipe(
-              Effect.provideService(CommandExecutor, command),
-            )
-          : id === 'gopls' || id === 'rust-analyzer'
-            ? sdkVerification.withPermit(verifyNativeSemanticCandidate(candidate, id))
-            : Effect.fail(LspFault.make({code: 'prerequisite'}));
+        : id === 'typescript-native' && Schema.is(NativeTypeScriptHostCandidate)(candidate)
+          ? sdkVerification.withPermit(verifyNativeTypeScriptCandidate(candidate))
+          : 'runtime' in candidate
+            ? verifySemanticNodeCandidate(candidate, verifyRuntimeVersion).pipe(
+                Effect.provideService(CommandExecutor, command),
+              )
+            : id === 'gopls' || id === 'rust-analyzer'
+              ? sdkVerification.withPermit(verifyNativeSemanticCandidate(candidate, id))
+              : Effect.fail(LspFault.make({code: 'prerequisite'}));
   const configured = [
-    ...(catalog.candidate ? [{candidate: catalog.candidate, id: 'typescript-language-server', version: '6.0.2'}] : []),
+    ...(catalog.nativeCandidate
+      ? [{candidate: catalog.nativeCandidate, id: 'typescript-native', version: '7.1.0-beta'}]
+      : []),
     ...(catalog.python ? [{candidate: catalog.python, id: 'basedpyright', version: '1.40.2'}] : []),
     ...(catalog.go ? [{candidate: catalog.go, id: 'gopls', version: goProviderVersion}] : []),
     ...(catalog.rust ? [{candidate: catalog.rust, id: 'rust-analyzer', version: rustProviderVersion}] : []),
@@ -481,7 +505,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
     const result =
       verifySelected && selected
         ? sdkVerification.withPermit(verifySelected(id, selected.candidate, false, true))
-        : semanticTreeDigest(worktree, id === 'typescript-language-server');
+        : semanticTreeDigest(worktree, id === 'typescript-native');
     return binding ? result.pipe(Effect.onError(binding.failed)) : result;
   };
   const retire = (id: string, session: AnalysisSession) =>
@@ -615,7 +639,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
                   })
                 : undefined;
             const nativeProject =
-              'executable' in candidate
+              'executable' in candidate && (language === 'go' || language === 'rust')
                 ? language === 'go'
                   ? yield* makeGoProject({
                       project,
@@ -629,15 +653,6 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
                       sdk: candidate.sdkDirectory,
                       privateDirectory: path.join(home, 'semantic', 'environments'),
                     }).pipe(Effect.timeout(10000), Effect.provideService(CommandExecutor, command))
-                : undefined;
-            const typeScriptRuntime =
-              providerId === 'typescript-language-server' && 'runtime' in candidate && 'sdkDirectory' in candidate
-                ? yield* makeTypeScriptRuntime({
-                    home,
-                    sdkDirectory: candidate.sdkDirectory,
-                    sdkTreeDigest: candidate.sdkTreeDigest,
-                    worktree,
-                  }).pipe(Effect.provideService(SystemInfo, system))
                 : undefined;
             const projectOptions = pythonProject ?? nativeProject;
             const javaDirectory =
@@ -672,7 +687,6 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
             let providerGuard: Effect.Effect<void, unknown> = Effect.void;
             const verify = verifyCandidate(candidate, providerId).pipe(
               Effect.andThen(projectOptions?.verify ?? Effect.void),
-              Effect.andThen(typeScriptRuntime?.verify ?? Effect.void),
               Effect.andThen(Effect.suspend(() => providerGuard)),
               Effect.onError(startupBinding.failed),
               Effect.provideService(FileSystem.FileSystem, fs),
@@ -714,6 +728,12 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
                 );
                 api = java.api;
               } else {
+                // Re-verify the admitted native binary immediately before it is started (ownership and lstat identity).
+                if (providerId === 'typescript-native' && !('runtime' in candidate))
+                  yield* fromPromiseInterruptible(
+                    () => recheckNativeTypeScriptExecutable(candidate.executable, candidate.executableDigest),
+                    () => LspFault.make({code: 'prerequisite'}),
+                  );
                 const wire = yield* spawnLspWire({
                   command: 'runtime' in candidate ? candidate.runtime : candidate.executable,
                   args:
@@ -726,7 +746,9 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
                           ),
                           '--stdio',
                         ]
-                      : [],
+                      : providerId === 'typescript-native'
+                        ? ['--lsp', '--stdio']
+                        : [],
                   cwd: project,
                   // No repository PATH, NODE_OPTIONS, Python startup hooks, plugins or inherited execution settings.
                   environment: nativeProject?.environment ?? {},
@@ -763,28 +785,37 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
                         : error,
                     ),
                   );
-                } else {
-                  if (!('runtime' in candidate) || !('sdkDirectory' in candidate) || !typeScriptRuntime)
-                    return yield* LspFault.make({code: 'prerequisite'});
+                } else if (
+                  providerId === 'typescript-native' &&
+                  'executable' in candidate &&
+                  'sdkDirectory' in candidate &&
+                  'sourceCommit' in candidate
+                ) {
+                  const assertOriginalCurrent = wire.assertOriginalCurrent;
+                  if (!assertOriginalCurrent) return yield* LspFault.make({code: 'prerequisite'});
                   const ts = yield* makeTypeScriptSession(client, {
                     basis: fixed,
-                    tsserver: typeScriptRuntime.launcher,
-                    compiler: typeScriptRuntime.compiler,
-                    sourceRoot: typeScriptRuntime.sourceRoot,
-                    verifyPolicy: typeScriptRuntime.verify,
+                    tsserver: candidate.executable,
+                    compiler: candidate.executable,
+                    sourceRoot: candidate.sdkDirectory,
+                    verifyPolicy: verifyCandidate(candidate, providerId).pipe(
+                      Effect.provideService(FileSystem.FileSystem, fs),
+                      Effect.provideService(Path.Path, path),
+                      Effect.provideService(EffectDigest.Digest, digest),
+                    ),
                     captureEditSource,
                     configurationIncomplete: configuration =>
                       typeScriptConfigurationHasExtendsCycle(worktree, configuration).pipe(
                         Effect.provideService(FileSystem.FileSystem, fs),
                         Effect.provideService(Path.Path, path),
                       ),
-                    challenge: crypto.randomBytes(32).pipe(Effect.map(sha256HexSync)),
                     maxMemoryMb: 512,
                     startupMilliseconds: control ? yield* control.remaining : 10000,
+                    native: {sdkRoot: candidate.sdkDirectory, assertOriginalCurrent},
                   });
                   providerGuard = ts.verifyPolicy;
                   api = semanticTypeScriptCoordinatorSession(ts);
-                }
+                } else return yield* LspFault.make({code: 'prerequisite'});
               }
               return api;
             }).pipe(Effect.provideService(SemanticPrivateSourceEvidence, sources?.port));
@@ -876,7 +907,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
           observation: structuredClone(fixed),
           status: 'experimental' as const,
           completeness: 'partial' as const,
-          edits: providerId !== 'typescript-language-server' ? ('preparation-only' as const) : ('disabled' as const),
+          edits: providerId === 'typescript-native' ? ('disabled' as const) : ('preparation-only' as const),
           project: projectInfo,
         };
       }),
@@ -1031,10 +1062,9 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
           capabilities: {
             reads: 'experimental',
             diagnostics: 'experimental',
-            rename: id === 'typescript-language-server' ? 'experimental-preparation-only' : 'preparation-only',
-            codeActions:
-              id === 'typescript-language-server' ? 'unsupported' : 'candidate-quickfix-text-only-retained-selection',
-            optional: id === 'typescript-language-server' ? 'unsupported-unqualified' : 'provider-advertised-reads',
+            rename: id === 'typescript-native' ? 'experimental-preparation-only' : 'preparation-only',
+            codeActions: id === 'typescript-native' ? 'unsupported' : 'candidate-quickfix-text-only-retained-selection',
+            optional: id === 'typescript-native' ? 'unsupported-unqualified' : 'provider-advertised-reads',
             apply: 'unsupported',
             commands: 'unsupported',
           },
@@ -1644,6 +1674,7 @@ export const ensureSemanticEndpoint = Effect.fn('semantic.ensureEndpoint')(funct
           token: sha256HexSync(yield* crypto.randomBytes(32)),
           dataHome: home,
           ...(launch.candidate ? {candidate: launch.candidate} : {}),
+          ...(launch.nativeCandidate ? {nativeCandidate: launch.nativeCandidate} : {}),
           ...(launch.python ? {python: launch.python} : {}),
           ...(launch.go ? {go: launch.go} : {}),
           ...(launch.rust ? {rust: launch.rust} : {}),
@@ -1718,8 +1749,8 @@ export const runSemanticCoordinatorWorker = Effect.fn('semantic.worker')(functio
       return yield* LspFault.make({code: 'rejected'});
     const id = arguments_[3];
     const candidate =
-      id === 'typescript-language-server'
-        ? bootstrap.candidate
+      id === 'typescript-native'
+        ? bootstrap.nativeCandidate
         : id === 'basedpyright'
           ? bootstrap.python
           : id === 'gopls'
@@ -1738,9 +1769,11 @@ export const runSemanticCoordinatorWorker = Effect.fn('semantic.worker')(functio
       const path = yield* Path.Path;
       digest = yield* semanticTreeDigest(
         yield* path.fromFileUrl(new URL(bootstrap.worktree)),
-        id === 'typescript-language-server',
+        id === 'typescript-native',
       );
     } else if ('runtimeCandidate' in candidate) yield* verifyJavaSemanticCandidate(candidate);
+    else if (id === 'typescript-native' && Schema.is(NativeTypeScriptHostCandidate)(candidate))
+      yield* verifyNativeTypeScriptCandidate(candidate);
     else if ('runtime' in candidate) yield* verifySemanticNodeCandidate(candidate, runtimeVersion, true);
     else if (id === 'gopls' || id === 'rust-analyzer') yield* verifyNativeSemanticCandidate(candidate, id);
     else return yield* LspFault.make({code: 'prerequisite'});

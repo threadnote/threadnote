@@ -1,11 +1,13 @@
+import {createTypeScriptSyntaxSession, type TypeScriptSyntaxSession} from '../../workspace/typescript-syntax.js';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
+import * as EffectString from 'effect/String';
 import {mkdtempSync, mkdirSync, writeFileSync, rmSync} from '@threadnote/testing/node-fs';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import {execFileSync} from '@threadnote/testing/node-child-process';
 
 import fc from 'fast-check';
-import {describe, expect, it} from 'vitest';
+import {describe, expect, it, afterAll} from 'vitest';
 import {buildGenerationModel} from '../generation-model.mjs';
 
 const fixture = () => {
@@ -30,8 +32,8 @@ const spec = (name: string) => ({
   data: ['tools/bazel/targets.json'],
   args: ['main.ts'],
 });
-const runModel = (root: string, specs: readonly object[], statics: readonly object[] = []) =>
-  buildGenerationModel({root, specs, suites: [], statics, modules: []});
+const runModel = async (root: string, specs: readonly object[], statics: readonly object[] = []) =>
+  buildGenerationModel({root, specs, suites: [], statics, modules: []}, await getSyntaxSession());
 
 describe('buildGenerationModel', () => {
   it('re-discovers test additions and removals for each root-scoped target-spec build', async () => {
@@ -52,17 +54,23 @@ describe('buildGenerationModel', () => {
       const testPath = join(root, 'apps/threadnote/test/unit/freshness.test.ts');
       writeFileSync(testPath, 'import {it} from "vitest"; it("fresh", () => {});');
       const {createTargetSpecs} = await import('../target-specs.mjs');
-      const first = EffectArray.flatMap((await createTargetSpecs(root)).targetSpecs, target => target.entries);
+      const first = EffectArray.flatMap(
+        (await createTargetSpecs(root, await getSyntaxSession())).targetSpecs,
+        target => target.entries,
+      );
       expect(first).toContain('apps/threadnote/test/unit/freshness.test.ts');
       await Bun.write(join(root, 'tools/bazel/debug.log'), 'ignored');
       await Bun.write(join(root, 'apps/threadnote/test/unit/ignored.test.ts'), 'throw new Error("ignored");');
-      const scratch = await createTargetSpecs(root);
+      const scratch = await createTargetSpecs(root, await getSyntaxSession());
       expect(EffectArray.flatMap(scratch.targetSpecs, target => target.entries)).toEqual(first);
       expect(EffectArray.flatMap(scratch.staticTargets, target => target.inputs)).not.toContain(
         'tools/bazel/debug.log',
       );
       rmSync(testPath);
-      const second = EffectArray.flatMap((await createTargetSpecs(root)).targetSpecs, target => target.entries);
+      const second = EffectArray.flatMap(
+        (await createTargetSpecs(root, await getSyntaxSession())).targetSpecs,
+        target => target.entries,
+      );
       expect(second).not.toContain('apps/threadnote/test/unit/freshness.test.ts');
     } finally {
       rmSync(root, {recursive: true, force: true});
@@ -210,8 +218,8 @@ it('factors fixture closures with identical inventory, settings, resources, and 
       },
     ];
     const options = {root, specs, suites: [], statics: [], modules: []};
-    const flat = await buildGenerationModel({...options, representation: 'flat'});
-    const factored = await buildGenerationModel({...options, representation: 'factored'});
+    const flat = await buildGenerationModel({...options, representation: 'flat'}, await getSyntaxSession());
+    const factored = await buildGenerationModel({...options, representation: 'factored'}, await getSyntaxSession());
     expect(factored.inventory).toEqual(flat.inventory);
     const declaration = factored.declarations.get('//apps/demo:sample')!;
     const files = new Set(declaration.srcs);
@@ -240,8 +248,64 @@ it('factors fixture closures with identical inventory, settings, resources, and 
     expect(build).toContain('timeout = "long"');
     expect(build).toContain('tags = ["local", "no-cache", "no-sandbox"]');
     expect(flat.libraries.size).toBe(0);
-    expect([...flat.output]).toEqual([...(await buildGenerationModel({...options, representation: 'flat'})).output]);
-    expect([...factored.output]).toEqual([...(await buildGenerationModel(options)).output]);
+    expect([...flat.output]).toEqual([
+      ...(await buildGenerationModel({...options, representation: 'flat'}, await getSyntaxSession())).output,
+    ]);
+    expect([...factored.output]).toEqual([...(await buildGenerationModel(options, await getSyntaxSession())).output]);
+  } finally {
+    rmSync(root, {recursive: true, force: true});
+  }
+});
+
+it('forwards the native TypeScript variables only to vitest targets gated by the native test helper', async () => {
+  const root = fixture();
+  try {
+    await Bun.write(join(root, 'packages/graph/package.json'), JSON.stringify({name: '@fixture/graph'}));
+    await Bun.write(join(root, 'packages/graph/src/typescript_runtime.ts'), 'export const session = 1;');
+    await Bun.write(
+      join(root, 'packages/graph/test/helpers/native-typescript-session.ts'),
+      'import "../../src/typescript_runtime.js";',
+    );
+    await Bun.write(
+      join(root, 'packages/graph/test/native.test.ts'),
+      'import "./helpers/native-typescript-session.js";',
+    );
+    // Owning the runtime alone (as lint and typecheck closures do) is not a reason to inherit host variables.
+    await Bun.write(join(root, 'packages/graph/test/runtime.test.ts'), 'import "../src/typescript_runtime.js";');
+    await Bun.write(
+      join(root, 'packages/graph/scripts/check.ts'),
+      'import "../test/helpers/native-typescript-session.js";',
+    );
+    await Bun.write(join(root, 'packages/graph/test/plain.test.ts'), 'export const plain = 1;');
+    await Bun.write(join(root, 'tools/bazel/project-vitest.config.ts'), 'export {};');
+    const test = (name: string, entry: string) => ({package: 'packages/graph', name, kind: 'test', entries: [entry]});
+    const model = await runModel(root, [
+      test('native', 'packages/graph/test/native.test.ts'),
+      test('runtime', 'packages/graph/test/runtime.test.ts'),
+      test('script', 'packages/graph/scripts/check.ts'),
+      test('plain', 'packages/graph/test/plain.test.ts'),
+    ]);
+    const inherited: Record<string, unknown> = {};
+    for (const entry of model.inventory) inherited[entry.label] = entry.inheritedEnv;
+    expect(inherited).toEqual({
+      '//packages/graph:native': [
+        'THREADNOTE_TYPESCRIPT_NATIVE_PREPARED_ASSET_DIR',
+        'THREADNOTE_NATIVE_TYPESCRIPT_REQUIRED',
+      ],
+      '//packages/graph:runtime': [],
+      '//packages/graph:script': [],
+      '//packages/graph:plain': [],
+    });
+    const build = model.output.get('packages/graph/BUILD.bazel') ?? '';
+    expect(build).toContain(
+      'inherited_env = ["THREADNOTE_TYPESCRIPT_NATIVE_PREPARED_ASSET_DIR","THREADNOTE_NATIVE_TYPESCRIPT_REQUIRED"]',
+    );
+    // Exactly the inheriting targets leave the sandbox, where an unmapped root would hide the asset's ancestor owners.
+    for (const entry of model.inventory) {
+      const name = EffectString.slice(EffectString.length('//packages/graph:'))(entry.label);
+      const block = EffectString.split('\n)')(EffectString.split(`name = "${name}",`)(build)[1] ?? '')[0] ?? '';
+      expect(EffectString.includes('"no-sandbox"')(block), entry.label).toBe(entry.inheritedEnv.length > 0);
+    }
   } finally {
     rmSync(root, {recursive: true, force: true});
   }
@@ -255,8 +319,8 @@ it.each(['BUILD', 'BUILD.bazel'])(
       const authored = 'exports_files(["main.ts", "package.json"])\n';
       await Bun.write(join(root, 'apps/demo', buildName), authored);
       const options = {root, specs: [spec('consumer')], suites: [], statics: [], modules: []};
-      const flat = await buildGenerationModel({...options, representation: 'flat'});
-      const factored = await buildGenerationModel({...options, representation: 'factored'});
+      const flat = await buildGenerationModel({...options, representation: 'flat'}, await getSyntaxSession());
+      const factored = await buildGenerationModel({...options, representation: 'factored'}, await getSyntaxSession());
       expect(factored.inventory).toEqual(flat.inventory);
       expect([...factored.output]).toEqual([...flat.output]);
       expect(factored.output.has('apps/demo/BUILD.bazel')).toBe(false);
@@ -264,10 +328,22 @@ it.each(['BUILD', 'BUILD.bazel'])(
       expect(factored.declarations.get('//:consumer')?.srcs).toContain('apps/demo/main.ts');
       expect(await Bun.file(join(root, 'apps/demo', buildName)).text()).toBe(authored);
       await expect(
-        buildGenerationModel({...options, specs: [{...spec('conflict'), package: 'apps/demo'}]}),
+        buildGenerationModel(
+          {...options, specs: [{...spec('conflict'), package: 'apps/demo'}]},
+          await getSyntaxSession(),
+        ),
       ).rejects.toThrow('Refusing to replace handwritten Bazel package');
     } finally {
       rmSync(root, {recursive: true, force: true});
     }
   },
 );
+
+// One npm TypeScript syntax child serves this whole file and is closed once.
+let syntaxSession: TypeScriptSyntaxSession | undefined;
+afterAll(async () => {
+  await syntaxSession?.close();
+});
+function getSyntaxSession(): Promise<TypeScriptSyntaxSession> {
+  return Promise.resolve((syntaxSession ??= createTypeScriptSyntaxSession({cwd: process.cwd()})));
+}

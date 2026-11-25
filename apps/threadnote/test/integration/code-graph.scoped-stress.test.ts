@@ -23,6 +23,7 @@ import {mkdirSync, writeFileSync} from '@threadnote/testing/node-fs';
 import {dirname, join} from '@threadnote/testing/node-path';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {nativeProperty} from '@threadnote/graph/test/helpers/native-typescript-session';
 
 const project = (name: string, roots = [`apps/${name}`]) => ({
   uri: `threadnote://resources/repos/${name}`,
@@ -239,7 +240,7 @@ describe('scoped reuse under bounded monorepo churn', () => {
   );
 
   fcEffectProp(
-    effectIt,
+    nativeProperty(effectIt),
     'keeps overlapping views isolated through dirty and committed churn plus maintenance',
     {
       values: FC.uniqueArray(FC.integer({min: 1, max: 1000}), {minLength: 3, maxLength: 3}),

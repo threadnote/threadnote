@@ -63,6 +63,7 @@ import {ReadyRecallReadWorkerAdmission} from '../../src/recall/ready_read_bounda
 import {loadRecallIndexData} from '@threadnote/recall/index';
 import {contextBriefNativeReadResponseSchema} from '../../src/context_brief/native_read_boundary.js';
 import {CONTEXT_BRIEF_NATIVE_READ_WORKER_ARGUMENT} from '../../src/worker_protocol.js';
+import {native} from '@threadnote/graph/test/helpers/native-typescript-session';
 
 // This fixture grants protocol tests only their own current profile bytes; native ACL proof is tested separately.
 const protocolProfiles = new Map<
@@ -468,14 +469,15 @@ const memoryContextFixture = Effect.gen(function* () {
       enabled: true,
       worktree,
       catalog: {
-        candidate: {
-          runtime: '/fixture/node',
-          runtimeDigest: sha256HexSync('node'),
-          runtimeVersion: '24.19.0',
-          sdkDirectory: '/fixture/typescript',
+        nativeCandidate: {
+          executable: '/fixture/typescript/tsc',
+          executableDigest: sha256HexSync('tsc'),
+          version: '7.1.0-beta',
+          sdkDirectory: '/fixture/typescript/sdk',
           sdkTreeDigest: sha256HexSync('typescript'),
-          serverDirectory: '/fixture/server',
-          serverTreeDigest: sha256HexSync('server'),
+          sourceCommit: '3e9236361fa97a9e6c685f4833ac457ae2d8c50a',
+          sourceTree: '2a322d5d8eefb3b2f295c5ed6398de7237f6249a',
+          overlaySha256: '3ec77e4026b698c701b60fe34238a9ac83eaa73ad33679430fb3bafcef5e607d',
         },
       },
     }),
@@ -587,7 +589,7 @@ const memoryContextFixture = Effect.gen(function* () {
               content: sha256HexSync(yield* fs.readFile(file)),
               configuration: sha256HexSync('configuration'),
               toolchain: sha256HexSync('toolchain'),
-              provider: {id: 'typescript-language-server', version: 'fixture', generation: 1},
+              provider: {id: 'typescript-native', version: 'fixture', generation: 1},
               view: {kind: 'disk', id: 'fixture', owner: 'fixture', epoch: 0},
               documentVersion: null,
               projectEpoch: 1,
@@ -849,7 +851,7 @@ const memoryContextFixture = Effect.gen(function* () {
   };
 });
 
-effectIt.layer(contextWorkerBundleLayer)('semantic context with canonical citation-backed memory', layerIt => {
+native(effectIt.layer(contextWorkerBundleLayer))('semantic context with canonical citation-backed memory', layerIt => {
   layerIt.effect(
     'invalidates pre-rename reads while keeping old citations visibly unresolved without rewriting memory',
     () =>
@@ -1042,7 +1044,7 @@ describe('semantic capability discovery', () => {
     expect(result.scope).toBe('distribution-catalog');
     expect(result.status).toBe('ok');
     expect(EffectArray.map(result.providers, provider => provider.id)).toEqual([
-      'typescript-language-server',
+      'typescript-native',
       'basedpyright',
       'gopls',
       'rust-analyzer',
@@ -1147,7 +1149,7 @@ describe('semantic capability discovery', () => {
     });
   });
 
-  it('binds runtime candidates to the selected versioned ledger without promoting unqualified pilots', () => {
+  it('keeps the historical selected ledger while exposing only the current native TypeScript candidate', () => {
     const ledger = Schema.decodeUnknownSync(
       Schema.Struct({
         selectedProviders: Schema.Record(Schema.String, Schema.String),
@@ -1161,28 +1163,34 @@ describe('semantic capability discovery', () => {
       ),
     );
     const result = semanticCapabilities();
-    expect(
-      EffectRecord.fromEntries(
-        EffectArray.flatMap(result.providers, provider =>
-          EffectArray.map(
-            EffectArray.filter(provider.languages, language => EffectRecord.has(ledger.selectedProviders, language)),
-            language => [language, provider.id] as const,
-          ),
-        ),
-      ),
-    ).toEqual(ledger.selectedProviders);
-    for (const language of ['typescriptreact', 'javascriptreact']) {
+    expect(ledger.selectedProviders.typescript).toBe('typescript-language-server');
+    expect(ledger.selectedProviders.javascript).toBe('typescript-language-server');
+    expect(EffectArray.some(result.providers, provider => provider.id === 'typescript-language-server')).toBe(false);
+    expect(result.providers).toContainEqual(
+      expect.objectContaining({id: 'typescript-native', candidateVersion: '7.1.0-beta', productionQualified: false}),
+    );
+    expect(ledger.providers).toContainEqual(
+      expect.objectContaining({id: 'typescript-native-7.0.2-historical', version: '7.0.2'}),
+    );
+    for (const language of ['typescript', 'javascript', 'typescriptreact', 'javascriptreact']) {
       const provider = Option.getOrUndefined(
-        EffectArray.findFirst(result.providers, candidate => candidate.languages.includes(language)),
+        EffectArray.findFirst(
+          result.providers,
+          candidate => candidate.id === 'typescript-native' && candidate.languages.includes(language),
+        ),
       );
-      expect(provider?.id).toBe('typescript-language-server');
-      expect(provider?.candidateVersion).toBe('6.0.2');
+      expect(provider?.id).toBe('typescript-native');
+      expect(provider?.candidateVersion).toBe('7.1.0-beta');
       expect(provider?.productionQualified).toBe(false);
       expect(provider?.qualification).toBe('pending');
     }
     for (const [language, id] of EffectRecord.toEntries(ledger.selectedProviders)) {
+      if (language === 'typescript' || language === 'javascript') continue;
       const provider = Option.getOrUndefined(
-        EffectArray.findFirst(result.providers, candidate => candidate.languages.includes(language)),
+        EffectArray.findFirst(
+          result.providers,
+          candidate => candidate.id === id && candidate.languages.includes(language),
+        ),
       );
       const pinned = Option.getOrUndefined(EffectArray.findFirst(ledger.providers, candidate => candidate.id === id));
       expect(provider?.id).toBe(id);
@@ -1231,16 +1239,17 @@ describe('semantic capability discovery', () => {
         language => {
           const result = semanticCapabilities({language});
           expect(result.status).toBe('ok');
-          expect(result.providers).toHaveLength(1);
-          expect(result.providers[0].languages).toEqual([language]);
-          expect(result.providers[0].id).toBe(
-            Option.getOrUndefined(
-              EffectArray.findFirst(full.providers, provider => provider.languages.includes(language)),
-            )?.id,
+          expect(result.providers).toEqual(
+            EffectArray.map(
+              EffectArray.filter(full.providers, provider => provider.languages.includes(language)),
+              provider => ({...provider, languages: [language]}),
+            ),
           );
           const original = structuredClone(result);
-          result.providers[0].languages.push('foreign');
-          result.providers[0].candidateVersion = 'forged';
+          for (const provider of result.providers) {
+            provider.languages.push('foreign');
+            provider.candidateVersion = 'forged';
+          }
           expect(semanticCapabilities({language})).toEqual(original);
           expect(semanticCapabilities()).toEqual(full);
         },

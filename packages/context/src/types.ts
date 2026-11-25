@@ -66,6 +66,7 @@ export type ContextBriefCitationValidationReasonV2 =
   | 'ambiguous-relocation'
   | 'citation-limit'
   | 'exact'
+  | 'extraction-unavailable'
   | 'extractor-mismatch'
   | 'graph-incomplete'
   | 'graph-stale'

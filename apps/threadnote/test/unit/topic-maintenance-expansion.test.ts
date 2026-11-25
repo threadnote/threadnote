@@ -1,6 +1,7 @@
 import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {describe, expect} from 'vitest';
+import {native} from '@threadnote/graph/test/helpers/native-typescript-session';
 import {Clock, Effect, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
@@ -70,7 +71,8 @@ const capsuleBytes = Effect.fn('test.expansionCapsuleBytes')(function* (home: st
   return values;
 });
 
-describe('reviewed bounded dependency expansion runtime', () => {
+// The expansion indexes a TypeScript project graph through the native extractor.
+native(describe)('reviewed bounded dependency expansion runtime', () => {
   effectIt.effect(
     'expands a complete selected project graph while refusing dirty files outside its scope and changed configuration',
     () =>

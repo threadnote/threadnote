@@ -1,6 +1,7 @@
 import {Array as EffectArray, Schema} from 'effect';
-import ts from 'typescript-compiler';
+import * as ts from 'typescript/ast';
 import {describe, expect, it} from 'vitest';
+import {createTypeScriptSyntaxSession} from '../../../tools/workspace/typescript-syntax.js';
 import {PRODUCTION_LOG_PHASES} from '@threadnote/threadnote/effect/production_log';
 import {
   ANONYMOUS_TELEMETRY_AUTO_UPDATE_RESULTS,
@@ -53,10 +54,8 @@ const TelemetrySchema = Schema.StructWithRest(
 const decodeTelemetrySchema = Schema.decodeUnknownSync(TelemetrySchema);
 
 const root = process.cwd();
-const effectTelemetrySource = sourceFile('apps/threadnote/src/effect/telemetry.ts');
-const diagnosticSource = sourceFile('apps/threadnote/src/telemetry/diagnostic.ts');
-const diskCapacitySource = sourceFile('packages/graph/src/disk/capacity.ts');
-const operationsSource = sourceFile('apps/threadnote/src/telemetry/operations.ts');
+const effectTelemetryText = readFileSync(join(root, 'apps/threadnote/src/effect/telemetry.ts'), 'utf8');
+const producer = await readProducerContract();
 const schemaV1 = decodeTelemetrySchema(
   JSON.parse(readFileSync(join(root, 'infra', 'telemetry-gateway', 'telemetry-schema-v1.json'), 'utf8')),
 );
@@ -77,7 +76,7 @@ const schema = decodeTelemetrySchema(
 );
 describe('telemetry producer and production gateway schema', () => {
   it('keeps the exact producer resource and span attribute surface', () => {
-    const sourceText = effectTelemetrySource.getFullText();
+    const sourceText = effectTelemetryText;
     const sourceAttributeKeys = new Set(
       EffectArray.map(
         [
@@ -297,7 +296,7 @@ describe('telemetry producer and production gateway schema', () => {
   });
 
   it('keeps every closed producer registry identical to the gateway boundary', () => {
-    const expected = producerRegistries();
+    const expected = producer.registries;
     expect(EffectRecord.keys(schema.registries).sort()).toEqual(EffectRecord.keys(expected).sort());
     for (const [name, values] of EffectRecord.toEntries(expected)) {
       expect(sortedUnique(schema.registries[name] ?? []), name).toEqual(sortedUnique(values));
@@ -320,10 +319,10 @@ describe('telemetry producer and production gateway schema', () => {
   });
 
   it('keeps bounded identifier, version, bucket, and numeric limits executable', () => {
-    expect(schema.schemaVersion).toBe(numericVariable(effectTelemetrySource, 'TELEMETRY_SCHEMA_VERSION'));
+    expect(schema.schemaVersion).toBe(producer.schemaVersion);
     expect(schema.limits.maxSafeInteger).toBe(Number.MAX_SAFE_INTEGER);
     expect(schema.limits.maxSpansPerRequest).toBeGreaterThan(0);
-    expect(schema.limits.maxVersionBytes).toBe(numericVariable(effectTelemetrySource, 'TELEMETRY_VERSION_MAX_BYTES'));
+    expect(schema.limits.maxVersionBytes).toBe(producer.versionMaxBytes);
 
     const invocation = pattern('invocationId');
     const quantity = pattern('quantityBucket');
@@ -464,62 +463,106 @@ describe('telemetry producer and production gateway schema', () => {
   });
 });
 
-function producerRegistries(): Readonly<Record<string, readonly string[]>> {
-  const modelWorkerOperations = literalRegistry(diagnosticSource, 'MODEL_WORKER_OPERATIONS');
-  const codeGraphFailureOperations = [
-    ...literalRegistry(diskCapacitySource, 'CODE_GRAPH_DIRECT_PERSISTENT_CAPACITY_OPERATIONS'),
-    ...literalRegistry(diagnosticSource, 'CODE_GRAPH_FAILURE_OPERATIONS', {ignoreSpreads: true}),
-  ];
-  return {
-    autoUpdateResult: ANONYMOUS_TELEMETRY_AUTO_UPDATE_RESULTS,
-    buildKind: literalRegistry(effectTelemetrySource, 'ANONYMOUS_TELEMETRY_GRAPH_BUILD_KINDS'),
-    codeAnchorFinalizationResult: ANONYMOUS_TELEMETRY_CODE_ANCHOR_FINALIZATION_RESULTS,
-    codeAnchorFinalizationTrigger: ANONYMOUS_TELEMETRY_CODE_ANCHOR_FINALIZATION_TRIGGERS,
-    component: interfacePropertyStrings(effectTelemetrySource, 'AnonymousTelemetryInvocationOptions', 'component'),
-    contextBriefCodeAnchorCoverage: ANONYMOUS_TELEMETRY_CONTEXT_BRIEF_CODE_ANCHOR_COVERAGES,
-    contextBriefCitationCoverage: ANONYMOUS_TELEMETRY_CONTEXT_BRIEF_CITATION_COVERAGES,
-    contextBriefCitationResult: ANONYMOUS_TELEMETRY_CONTEXT_BRIEF_CITATION_RESULTS,
-    contextBriefCitationUnknownReason: ANONYMOUS_TELEMETRY_CONTEXT_BRIEF_CITATION_UNKNOWN_REASONS,
-    contextBriefContract: ANONYMOUS_TELEMETRY_CONTEXT_BRIEF_CONTRACTS,
-    contextBriefGapClass: ANONYMOUS_TELEMETRY_CONTEXT_BRIEF_GAP_CLASSES,
-    contextBriefMode: ANONYMOUS_TELEMETRY_CONTEXT_BRIEF_MODES,
-    contextBriefReturnedLane: ANONYMOUS_TELEMETRY_CONTEXT_BRIEF_RETURNED_LANES,
-    contextBriefScope: ANONYMOUS_TELEMETRY_CONTEXT_BRIEF_SCOPES,
-    correlationScope: interfacePropertyStrings(
-      effectTelemetrySource,
-      'AnonymousTelemetryRuntimeOptions',
-      'correlationScope',
-    ),
-    degradationReason: interfacePropertyStrings(effectTelemetrySource, 'AnonymousTelemetryFields', 'degradationReason'),
-    efficiencyClass: literalRegistry(effectTelemetrySource, 'ANONYMOUS_TELEMETRY_GRAPH_EFFICIENCY_CLASSES'),
-    errorType: [...literalRegistry(diagnosticSource, 'SAFE_TELEMETRY_ERROR_TYPES'), 'UnknownError'],
-    event: functionStringLiterals(effectTelemetrySource, 'safeEvent'),
-    failureCode: literalRegistry(diagnosticSource, 'CODE_GRAPH_STORE_FAILURE_CODES'),
-    failureDomain: interfacePropertyStrings(diagnosticSource, 'AnonymousTelemetryDiagnostic', 'domain'),
-    failureOperation: EffectArray.map(codeGraphFailureOperations, value =>
-      Effect.pipe(value, EffectString.replaceAll(' ', '-')),
-    ),
-    failureReason: interfacePropertyStrings(diagnosticSource, 'AnonymousTelemetryDiagnostic', 'reason'),
-    failureRecovery: literalRegistry(diagnosticSource, 'CODE_GRAPH_STORE_RECOVERIES'),
-    fallbackReason: literalRegistry(effectTelemetrySource, 'ANONYMOUS_TELEMETRY_GRAPH_FALLBACK_REASONS'),
-    graphRequestKind: literalRegistry(effectTelemetrySource, 'ANONYMOUS_TELEMETRY_GRAPH_REQUEST_KINDS'),
-    graphRequestScope: literalRegistry(effectTelemetrySource, 'ANONYMOUS_TELEMETRY_GRAPH_REQUEST_SCOPES'),
-    graphSnapshotFreshness: literalRegistry(effectTelemetrySource, 'ANONYMOUS_TELEMETRY_GRAPH_SNAPSHOT_FRESHNESS'),
-    graphSnapshotSelection: literalRegistry(effectTelemetrySource, 'ANONYMOUS_TELEMETRY_GRAPH_SNAPSHOT_SELECTIONS'),
-    memoryBucket: functionStringLiterals(effectTelemetrySource, 'byteBucket'),
-    materializationMode: literalRegistry(effectTelemetrySource, 'ANONYMOUS_TELEMETRY_GRAPH_MATERIALIZATION_MODES'),
-    modelWorkerOperation: modelWorkerOperations,
-    operation: anonymousTelemetryOperations(),
-    outcome: interfacePropertyStrings(effectTelemetrySource, 'AnonymousTelemetryEventOptions', 'outcome'),
-    phase: ANONYMOUS_TELEMETRY_PHASES,
-    resolutionClosure: literalRegistry(effectTelemetrySource, 'ANONYMOUS_TELEMETRY_GRAPH_RESOLUTION_CLOSURES'),
-    stage: ANONYMOUS_TELEMETRY_STAGES,
-    subphase: ANONYMOUS_TELEMETRY_SUBPHASES,
-    waitingReason: ANONYMOUS_TELEMETRY_WAITING_REASONS,
-  };
+/**
+ * One npm TypeScript syntax session parses each producer source once. A source lease is valid only inside its
+ * callback, so only plain derived registries and limits leave it.
+ */
+async function readProducerContract(): Promise<{
+  readonly schemaVersion: number;
+  readonly versionMaxBytes: number;
+  readonly registries: Readonly<Record<string, readonly string[]>>;
+}> {
+  const session = createTypeScriptSyntaxSession({cwd: root});
+  try {
+    const withSource = <A>(path: string, use: (source: ts.SourceFile) => A) => {
+      const fileName = join(root, path);
+      return session.withSourceFile(
+        {fileName, text: readFileSync(fileName, 'utf8'), scriptKind: ts.ScriptKind.TS},
+        use,
+      );
+    };
+    const telemetry = await withSource('apps/threadnote/src/effect/telemetry.ts', effectTelemetrySource => ({
+      schemaVersion: numericVariable(effectTelemetrySource, 'TELEMETRY_SCHEMA_VERSION'),
+      versionMaxBytes: numericVariable(effectTelemetrySource, 'TELEMETRY_VERSION_MAX_BYTES'),
+      registries: {
+        buildKind: literalRegistry(effectTelemetrySource, 'ANONYMOUS_TELEMETRY_GRAPH_BUILD_KINDS'),
+        component: interfacePropertyStrings(effectTelemetrySource, 'AnonymousTelemetryInvocationOptions', 'component'),
+        correlationScope: interfacePropertyStrings(
+          effectTelemetrySource,
+          'AnonymousTelemetryRuntimeOptions',
+          'correlationScope',
+        ),
+        degradationReason: interfacePropertyStrings(
+          effectTelemetrySource,
+          'AnonymousTelemetryFields',
+          'degradationReason',
+        ),
+        efficiencyClass: literalRegistry(effectTelemetrySource, 'ANONYMOUS_TELEMETRY_GRAPH_EFFICIENCY_CLASSES'),
+        event: functionStringLiterals(effectTelemetrySource, 'safeEvent'),
+        fallbackReason: literalRegistry(effectTelemetrySource, 'ANONYMOUS_TELEMETRY_GRAPH_FALLBACK_REASONS'),
+        graphRequestKind: literalRegistry(effectTelemetrySource, 'ANONYMOUS_TELEMETRY_GRAPH_REQUEST_KINDS'),
+        graphRequestScope: literalRegistry(effectTelemetrySource, 'ANONYMOUS_TELEMETRY_GRAPH_REQUEST_SCOPES'),
+        graphSnapshotFreshness: literalRegistry(effectTelemetrySource, 'ANONYMOUS_TELEMETRY_GRAPH_SNAPSHOT_FRESHNESS'),
+        graphSnapshotSelection: literalRegistry(effectTelemetrySource, 'ANONYMOUS_TELEMETRY_GRAPH_SNAPSHOT_SELECTIONS'),
+        memoryBucket: functionStringLiterals(effectTelemetrySource, 'byteBucket'),
+        materializationMode: literalRegistry(effectTelemetrySource, 'ANONYMOUS_TELEMETRY_GRAPH_MATERIALIZATION_MODES'),
+        outcome: interfacePropertyStrings(effectTelemetrySource, 'AnonymousTelemetryEventOptions', 'outcome'),
+        resolutionClosure: literalRegistry(effectTelemetrySource, 'ANONYMOUS_TELEMETRY_GRAPH_RESOLUTION_CLOSURES'),
+      },
+    }));
+    const diagnostic = await withSource('apps/threadnote/src/telemetry/diagnostic.ts', diagnosticSource => ({
+      modelWorkerOperations: literalRegistry(diagnosticSource, 'MODEL_WORKER_OPERATIONS'),
+      codeGraphFailureOperations: literalRegistry(diagnosticSource, 'CODE_GRAPH_FAILURE_OPERATIONS', {
+        ignoreSpreads: true,
+      }),
+      registries: {
+        errorType: [...literalRegistry(diagnosticSource, 'SAFE_TELEMETRY_ERROR_TYPES'), 'UnknownError'],
+        failureCode: literalRegistry(diagnosticSource, 'CODE_GRAPH_STORE_FAILURE_CODES'),
+        failureDomain: interfacePropertyStrings(diagnosticSource, 'AnonymousTelemetryDiagnostic', 'domain'),
+        failureReason: interfacePropertyStrings(diagnosticSource, 'AnonymousTelemetryDiagnostic', 'reason'),
+        failureRecovery: literalRegistry(diagnosticSource, 'CODE_GRAPH_STORE_RECOVERIES'),
+      },
+    }));
+    const directCapacityOperations = await withSource('packages/graph/src/disk/capacity.ts', diskCapacitySource =>
+      literalRegistry(diskCapacitySource, 'CODE_GRAPH_DIRECT_PERSISTENT_CAPACITY_OPERATIONS'),
+    );
+    const operations = await withSource('apps/threadnote/src/telemetry/operations.ts', anonymousTelemetryOperations);
+    const codeGraphFailureOperations = [...directCapacityOperations, ...diagnostic.codeGraphFailureOperations];
+    return {
+      schemaVersion: telemetry.schemaVersion,
+      versionMaxBytes: telemetry.versionMaxBytes,
+      registries: {
+        ...telemetry.registries,
+        ...diagnostic.registries,
+        autoUpdateResult: ANONYMOUS_TELEMETRY_AUTO_UPDATE_RESULTS,
+        codeAnchorFinalizationResult: ANONYMOUS_TELEMETRY_CODE_ANCHOR_FINALIZATION_RESULTS,
+        codeAnchorFinalizationTrigger: ANONYMOUS_TELEMETRY_CODE_ANCHOR_FINALIZATION_TRIGGERS,
+        contextBriefCodeAnchorCoverage: ANONYMOUS_TELEMETRY_CONTEXT_BRIEF_CODE_ANCHOR_COVERAGES,
+        contextBriefCitationCoverage: ANONYMOUS_TELEMETRY_CONTEXT_BRIEF_CITATION_COVERAGES,
+        contextBriefCitationResult: ANONYMOUS_TELEMETRY_CONTEXT_BRIEF_CITATION_RESULTS,
+        contextBriefCitationUnknownReason: ANONYMOUS_TELEMETRY_CONTEXT_BRIEF_CITATION_UNKNOWN_REASONS,
+        contextBriefContract: ANONYMOUS_TELEMETRY_CONTEXT_BRIEF_CONTRACTS,
+        contextBriefGapClass: ANONYMOUS_TELEMETRY_CONTEXT_BRIEF_GAP_CLASSES,
+        contextBriefMode: ANONYMOUS_TELEMETRY_CONTEXT_BRIEF_MODES,
+        contextBriefReturnedLane: ANONYMOUS_TELEMETRY_CONTEXT_BRIEF_RETURNED_LANES,
+        contextBriefScope: ANONYMOUS_TELEMETRY_CONTEXT_BRIEF_SCOPES,
+        failureOperation: EffectArray.map(codeGraphFailureOperations, value =>
+          Effect.pipe(value, EffectString.replaceAll(' ', '-')),
+        ),
+        modelWorkerOperation: diagnostic.modelWorkerOperations,
+        operation: operations,
+        phase: ANONYMOUS_TELEMETRY_PHASES,
+        stage: ANONYMOUS_TELEMETRY_STAGES,
+        subphase: ANONYMOUS_TELEMETRY_SUBPHASES,
+        waitingReason: ANONYMOUS_TELEMETRY_WAITING_REASONS,
+      },
+    };
+  } finally {
+    await session.close();
+  }
 }
 
-function anonymousTelemetryOperations(): readonly string[] {
+function anonymousTelemetryOperations(operationsSource: ts.SourceFile): readonly string[] {
   const topLevel = literalRegistry(operationsSource, 'CLI_TOP_LEVEL_OPERATIONS');
   const fixed = literalRegistry(operationsSource, 'FIXED_RUNTIME_OPERATIONS');
   const subcommands = objectStringArrays(operationsSource, 'CLI_SUBCOMMANDS');
@@ -528,11 +571,6 @@ function anonymousTelemetryOperations(): readonly string[] {
   );
   const explicit = literalRegistry(operationsSource, 'ANONYMOUS_TELEMETRY_OPERATIONS', {ignoreSpreads: true});
   return [...topLevel, ...nested, ...fixed, ...explicit, 'unknown'];
-}
-
-function sourceFile(path: string): ts.SourceFile {
-  const absolute = join(root, path);
-  return ts.createSourceFile(absolute, readFileSync(absolute, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
 }
 
 function variableInitializer(source: ts.SourceFile, name: string): ts.Expression {
@@ -597,7 +635,7 @@ function interfacePropertyStrings(source: ts.SourceFile, interfaceName: string, 
   visit(source, node => {
     if (!ts.isInterfaceDeclaration(node) || node.name.text !== interfaceName) return;
     for (const member of node.members) {
-      if (ts.isPropertySignature(member) && propertyName(member.name) === property) type = member.type;
+      if (ts.isPropertySignatureDeclaration(member) && propertyName(member.name) === property) type = member.type;
     }
   });
   if (type === undefined) throw new Error(`Missing ${interfaceName}.${property}.`);
@@ -627,7 +665,7 @@ function unwrap(expression: ts.Expression): ts.Expression {
     ts.isAsExpression(current) ||
     ts.isSatisfiesExpression(current) ||
     ts.isParenthesizedExpression(current) ||
-    ts.isTypeAssertionExpression(current)
+    ts.isTypeAssertion(current)
   ) {
     current = current.expression;
   }
@@ -641,7 +679,7 @@ function propertyName(name: ts.PropertyName): string {
 
 function visit(node: ts.Node, observer: (node: ts.Node) => void): void {
   observer(node);
-  ts.forEachChild(node, child => visit(child, observer));
+  node.forEachChild(child => visit(child, observer));
 }
 
 function requiredRegistry(name: string): readonly string[] {

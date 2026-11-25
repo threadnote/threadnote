@@ -9,6 +9,13 @@ import {
   runtimeTerminateOwnedProviderTree,
   runtimeReadBoundedStableRegularFile,
 } from '@threadnote/platform/system';
+import {
+  nativeTypeScriptAssetManifest,
+  nativeTypeScriptAssetManifestText,
+  nativeTypeScriptAssetPins,
+  nativeTypeScriptTreeDigest,
+  type NativeTypeScriptAssetManifest,
+} from '@threadnote/graph/typescript_native_asset_pins';
 
 /**
  * Pinned SDK construction resource and explicitly invoked offline builder.
@@ -25,9 +32,9 @@ export const typescriptNativeBuildRecipe = {
     'Pinned construction and validation specification; the explicit executor consumes a caller-supplied official source checkout and toolchain archive, then acquires the exact Go module graph once.',
   upstream: {
     repository: 'https://github.com/microsoft/TypeScript.git',
-    commit: '3e9236361fa97a9e6c685f4833ac457ae2d8c50a',
-    tree: '2a322d5d8eefb3b2f295c5ed6398de7237f6249a',
-    version: '7.1.0-beta',
+    commit: nativeTypeScriptAssetPins.provenance.sourceCommit,
+    tree: nativeTypeScriptAssetPins.provenance.sourceTree,
+    version: nativeTypeScriptAssetPins.version,
     moduleDirectory: 'tsc',
     goModSha256: '1e0963224f3096e3e8215acea83c033392c8135e7453b8a9680261baa5c18b25',
     goSumSha256: '00f7fee0307755fa8b871cd25a68b8c478341bc2b2af8731b2f2fc4da3739eee',
@@ -137,7 +144,7 @@ export const typescriptNativeBuildRecipe = {
       },
     ],
   },
-  orderedOverlayDigest: '3ec77e4026b698c701b60fe34238a9ac83eaa73ad33679430fb3bafcef5e607d',
+  orderedOverlayDigest: nativeTypeScriptAssetPins.provenance.overlaySha256,
   toolchain: {
     version: 'go1.27.4',
     metadataUrl: 'https://go.dev/dl/?mode=json&include=all',
@@ -329,15 +336,7 @@ export const typescriptNativeBuildRecipe = {
   runtimeAsset: {
     executableName: () => (process.platform === 'win32' ? 'tsc.exe' : 'tsc'),
     /** Release staging accepts only these separately reviewed host binaries; a receipt cannot opt out. */
-    reviewedHostBinaries: [
-      {host: 'darwin-arm64', sha256: '6453082c0e4fa16b78a37106fce911d0df9b79192025a1b4fdecdf92286e3c47'},
-      // Reviewed construction identities, not qualification: trusted same-repository run 44645978175 of reviewed
-      // commit db499c1b3 (deadline multiplier 3), artifact native-typescript-construction-<host>. Its darwin-arm64
-      // artifact reproduced the pin above.
-      {host: 'darwin-x64', sha256: '0bff3b247bf35c5cc8f7544c665cd5cfaaacfa424400ca6e956d777ca3397458'},
-      {host: 'linux-x64', sha256: 'e822fbf40a9454e0f3dcb2e088d7b8b3dabf59f7d857c258a2c255abc305dfda'},
-      {host: 'linux-arm64', sha256: '294a3396080820b44e223d741eb040dfbd2d4c9b36855497f7df6ccdaaebacee'},
-    ],
+    reviewedHostBinaries: nativeTypeScriptAssetPins.reviewedHostBinaries,
     attribution: [
       {file: 'TYPESCRIPT_LICENSE.txt', sha256: 'a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47'},
       {file: 'TSC_LICENSE.txt', sha256: 'a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47'},
@@ -346,25 +345,25 @@ export const typescriptNativeBuildRecipe = {
       {file: 'GO_LICENSE.txt', sha256: '911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad'},
     ],
     frontend: {
-      baseSdkTreeSha256: '359158a40b603029094ae95804af12820ef1e90187300b12bdf6d3b50da5e568',
+      baseSdkTreeSha256: nativeTypeScriptAssetPins.frontend.baseSdkTreeSha256,
       patch: {
         path: 'tools/semantic/typescript-native-frontend-bom.patch',
-        sha256: '2d85454eb544d731610470668ec2a2e8b4153b328323ecf3c66a81c9b73dfba2',
+        sha256: nativeTypeScriptAssetPins.frontend.patchSha256,
       },
       wtf8: {
         path: 'dist/api/node/wtf8.js',
         beforeSha256: '629dc5e5978c15f93453084e2da86841a21a044d2ff38bcedbde10744adad088',
         afterSha256: 'f3c440657da611b7cf002a6c86c83b2c975715b6ffed8f0a48c19fb5e4522822',
       },
-      derivedSdkTreeSha256: 'd4807d3176106daeea1f77ddc25be07c0444c57c3cd7a276e025d490b96d6f1c',
+      derivedSdkTreeSha256: nativeTypeScriptAssetPins.frontend.derivedSdkTreeSha256,
       bundles: {
         'api/async/api.js': '6078e80617efccad93fea11c78780df69aadeb93e0f3792ca9045400f973c592',
         'ast/index.js': '663a4ce4d22c8ec5e1283374d7c77ff0738f52606ed1e1c7b21df6d7d2894069',
         'chunk.js': '755fb016e88a8eb6bf3e01d7b5a6040dbc144065b2e65fe7472a4cc67576c474',
       },
-      bundleTreeSha256: 'f5db6d62b42f88480b8ae9e9499f04cfe66f345df5dec4cb278dbecc54701cc9',
+      bundleTreeSha256: nativeTypeScriptAssetPins.frontend.bundleTreeSha256,
     },
-    provenanceKind: 'private-source-overlay',
+    provenanceKind: nativeTypeScriptAssetPins.provenance.kind,
   },
 } as const;
 
@@ -524,7 +523,7 @@ export async function nativeTypeScriptAssetTreeDigest(root: string): Promise<str
     )
       throw new Error('Native TypeScript asset tree changed during verification.');
   }
-  return hash(new TextEncoder().encode(JSON.stringify(entries.sort(([a], [b]) => a.localeCompare(b)))));
+  return nativeTypeScriptTreeDigest(entries);
 }
 const exact = async (file: string, digest: string, maximumBytes = 4 * 1024 * 1024) => {
   const bytes = await runtimeReadBoundedStableRegularFile(file, maximumBytes);
@@ -825,29 +824,12 @@ export async function stageNativeTypeScriptPublicFrontendBundles(
 }
 
 /** The exact runtime manifest for one constructed binary; staging writes it and verification compares its bytes. */
-function nativeTypeScriptRuntimeManifest(binarySha256: string) {
-  const {upstream, orderedOverlayDigest, runtimeAsset} = typescriptNativeBuildRecipe;
-  return {
-    version: upstream.version,
-    executable: runtimeAsset.executableName(),
-    sha256: binarySha256,
-    frontend: {
-      baseSdkTreeSha256: runtimeAsset.frontend.baseSdkTreeSha256,
-      patchSha256: runtimeAsset.frontend.patch.sha256,
-      derivedSdkTreeSha256: runtimeAsset.frontend.derivedSdkTreeSha256,
-      bundleTreeSha256: runtimeAsset.frontend.bundleTreeSha256,
-    },
-    provenance: {
-      kind: runtimeAsset.provenanceKind,
-      sourceCommit: upstream.commit,
-      sourceTree: upstream.tree,
-      overlaySha256: orderedOverlayDigest,
-      officialNpmBinary: false,
-    },
-  } as const;
+/** The staged manifest; its shape and every pin are owned by `@threadnote/graph/typescript_native_asset_pins`. */
+function nativeTypeScriptRuntimeManifest(binarySha256: string): NativeTypeScriptAssetManifest {
+  return nativeTypeScriptAssetManifest(typescriptNativeBuildRecipe.runtimeAsset.executableName(), binarySha256);
 }
-export type NativeTypeScriptRuntimeManifest = ReturnType<typeof nativeTypeScriptRuntimeManifest>;
-const manifestText = (manifest: NativeTypeScriptRuntimeManifest) => `${JSON.stringify(manifest, null, 2)}\n`;
+export type NativeTypeScriptRuntimeManifest = NativeTypeScriptAssetManifest;
+const manifestText = nativeTypeScriptAssetManifestText;
 
 /** Assemble one runtime-ready candidate from an actual construction receipt; never grants provider eligibility. */
 async function assembleNativeTypeScriptRuntimeAsset(

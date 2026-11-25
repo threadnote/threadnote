@@ -707,6 +707,7 @@ function telemetryUnknownReason(
       return 'ambiguous-relocation';
     case 'citation-limit':
       return 'budget-exhausted';
+    case 'extraction-unavailable':
     case 'extractor-mismatch':
       return 'unsupported';
     case 'graph-incomplete':

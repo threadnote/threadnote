@@ -12,6 +12,7 @@ import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {CodeGraphStore, type StoredCodeGraph} from '@threadnote/graph/store';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import {nativeProperty} from '@threadnote/graph/test/helpers/native-typescript-session';
 
 const barrelScenarioArbitrary = FC.record({
   barrelDepth: FC.integer({max: 4, min: 1}),
@@ -29,7 +30,7 @@ const barrelScenarioArbitrary = FC.record({
 
 describe('code graph incremental barrel differential properties', () => {
   fcEffectProp(
-    it,
+    nativeProperty(it),
     'matches a full rebuild through randomized transitive and cyclic named barrels',
     {scenario: barrelScenarioArbitrary},
     ({scenario}) =>

@@ -632,7 +632,14 @@ release_root="$versions_root/$version"
 staged_root="$versions_root/.$version.bootstrap.staging"
 backup_root="$versions_root/.$version.promotion-backup"
 promotion_journal="$versions_root/.$version.promotion.json"
+# The native TypeScript runtime refuses an asset with a group- or other-writable member or a group-writable ancestor
+# that is not the user's own private group. Keep everything this installer creates private whatever the caller's umask
+# (Ubuntu and Fedora default to 002). Only the installer-owned versions directory is tightened if an earlier run left it
+# writable; a pre-existing install root (possibly a user-chosen THREADNOTE_INSTALL_ROOT) and its parents are never
+# changed.
+umask 022
 mkdir -p "$versions_root"
+chmod go-w "$versions_root"
 acquire_installation_lock "$install_root/.installation.lock"
 recover_release_promotion
 mkdir -p "$staged_root"

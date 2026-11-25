@@ -106,6 +106,15 @@ Lexical and vector recall are immediately available after install or repair comp
 under `~/.threadnote/indexes/`; canonical memories and resources remain ordinary files under
 `~/.threadnote/data/<account>`.
 
+## Threadnote 6.0: citation validation receipts
+
+Threadnote 6.0 re-derives TypeScript and JavaScript symbol signatures with its packaged native TypeScript 7.1 asset.
+When that extraction is unavailable (an unsupported host or a degraded extraction), a citation receipt records the
+new reason `extraction-unavailable` instead of verifying the citation. The receipt stays version 2 and the reason is
+retryable. Readers older than 6.0 validate receipt reasons against a closed list, so they reject a V2 receipt carrying
+`extraction-unavailable` rather than misreading it; let a 6.0 or later release produce and read those receipts, and
+do not hand-edit the reason to satisfy an older reader.
+
 ## Release-engineering reference: 4.7 to 5.0 evidence comparison
 
 This section is release-engineering reference, not a user migration procedure. The optional local release-readiness procedure preserves a separate 4.7 capture and requires the

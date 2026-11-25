@@ -63,6 +63,7 @@ import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {native} from '@threadnote/graph/test/helpers/native-typescript-session';
 
 const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
 
@@ -1018,7 +1019,7 @@ describe('automatic private preparation', () => {
       }).pipe(TestClock.withLive, provide),
   );
 
-  effectIt.effect(
+  native(effectIt.effect)(
     'reconstructs only current bounded code candidates from the configured project and keeps missing scope unknown',
     () =>
       Effect.gen(function* () {

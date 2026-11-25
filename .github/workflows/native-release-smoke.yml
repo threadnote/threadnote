@@ -9,6 +9,11 @@ on:
       target:
         required: true
         type: string
+      native-asset-key:
+        # The caller's per-host asset job cache_key output; required on a reviewed-pin (non-musl, non-Windows) leg.
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -102,6 +107,17 @@ jobs:
           bun --bun vitest run
           packages/workflow-automations/test/inventory.test.ts
           packages/workflow-automations/test/baseline.test.ts
+      - name: Restore the verified native TypeScript asset
+        # semantic-mcp-cli and the semantic TypeScript provider need it on every reviewed-pin host; this is also the only
+        # test coverage of the darwin-x64 and arm64 pins. The ci.yml per-host asset job saved it; a miss fails here.
+        # Windows has no reviewed pin yet (the action exports nothing); musl targets run these tests in musl-native.
+        if: ${{ !endsWith(inputs.target, '-musl') && runner.os != 'Windows' }}
+        id: native-typescript
+        timeout-minutes: 15
+        uses: ./.github/actions/native-typescript-asset
+        with:
+          restore-only: 'true'
+          cache-key: ${{ inputs.native-asset-key }}
       - name: Semantic native ownership and safety components
         if: ${{ !endsWith(inputs.target, '-musl') }}
         run: >-
@@ -146,15 +162,19 @@ jobs:
         run: bun run build:release
         env:
           THREADNOTE_BUILD_TARGET: ${{ inputs.target == 'windows-x64' && 'bun-windows-x64-baseline' || format('bun-{0}', inputs.target) }}
+          # Stages runtime/typescript on a reviewed-pin host; empty on Windows, which builds without native TypeScript.
+          THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR: ${{ steps.native-typescript.outputs.payload }}
       - name: Build GNU payload at the preserved libc floor
         if: runner.os == 'Linux' && !endsWith(inputs.target, '-musl')
         run: >-
           bun scripts/assemble-native-inference.ts --gnu-container
           --container-command-json "$NATIVE_RELEASE_COMMAND_JSON"
         env:
+          # The container mounts this verified payload read-only so the GNU build stages runtime/typescript.
+          THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR: ${{ steps.native-typescript.outputs.payload }}
           # Keep $PWD literal until Bash runs inside the pinned native container.
           NATIVE_RELEASE_COMMAND_JSON: >-
-            ["bash","-ec","set -euo pipefail; bun run build:release; bun scripts/verify-native-vector-reader.ts --required; export THREADNOTE_NATIVE_VECTOR_READER_REQUIRED=1 THREADNOTE_NATIVE_VECTOR_READER_MANIFEST=\"$PWD/dist/runtime/vector-reader/manifest.json\" THREADNOTE_NATIVE_VECTOR_READER_SOURCE_ROOT=\"$PWD\"; bun --bun vitest run packages/recall/test/unit/native-vector-reader.test.ts packages/recall/test/background-vector-step.test.ts apps/threadnote/test/integration/recall-admission-budget.test.ts apps/threadnote/test/unit/vector-index.test.ts apps/threadnote/test/unit/vector-index.eligibility.test.ts packages/recall/test/unit/vector-scope-upgrade.test.ts apps/threadnote/test/unit/recall.mcp-background-refresh.test.ts; bun --bun vitest run --maxWorkers=1 --no-file-parallelism apps/threadnote/test/integration/vector-native-read-boundary.test.ts; bun scripts/smoke-self-contained.ts; bun --bun vitest run --config vitest.e2e.config.ts apps/threadnote/test/e2e/local-bins.e2e.ts -t \"recalls saved memory|loads only the bundled\""]
+            ["bash","-ec","set -euo pipefail; bun run build:release; bun scripts/verify-native-vector-reader.ts --required; export THREADNOTE_NATIVE_VECTOR_READER_REQUIRED=1 THREADNOTE_NATIVE_VECTOR_READER_MANIFEST=\"$PWD/dist/runtime/vector-reader/manifest.json\" THREADNOTE_NATIVE_VECTOR_READER_SOURCE_ROOT=\"$PWD\"; bun --bun vitest run packages/recall/test/unit/native-vector-reader.test.ts packages/recall/test/background-vector-step.test.ts apps/threadnote/test/integration/recall-admission-budget.test.ts apps/threadnote/test/unit/vector-index.test.ts apps/threadnote/test/unit/vector-index.eligibility.test.ts packages/recall/test/unit/vector-scope-upgrade.test.ts apps/threadnote/test/unit/recall.mcp-background-refresh.test.ts; bun --bun vitest run --maxWorkers=1 --no-file-parallelism apps/threadnote/test/integration/vector-native-read-boundary.test.ts; bun --bun vitest run --config vitest.e2e.config.ts apps/threadnote/test/e2e/local-bins.e2e.ts -t \"recalls saved memory|loads only the bundled\""]
       - name: Build musl payload at the preserved libc floor
         if: endsWith(inputs.target, '-musl')
         run: >-
@@ -192,7 +212,9 @@ jobs:
           THREADNOTE_NATIVE_VECTOR_READER_MANIFEST: ${{ github.workspace }}/dist/runtime/vector-reader/manifest.json
           THREADNOTE_NATIVE_VECTOR_READER_SOURCE_ROOT: ${{ github.workspace }}
       - name: Self-contained native smoke
-        if: runner.os != 'Linux'
+        # GNU payloads are built in a root container that returns them to the runner user; the smoke then runs here as
+        # that user, so the staged native TypeScript asset passes its ownership checks. Musl smokes in its container.
+        if: ${{ !endsWith(inputs.target, '-musl') }}
         run: bun scripts/smoke-self-contained.ts
       - name: Inspect bounded Windows application failure metadata
         if: failure() && runner.os == 'Windows'
@@ -690,6 +712,10 @@ jobs:
               printf '{"exitCode":%s}\n' "$acl_diagnostic_status" > .context/semantic-platform/private-acl-diagnostic-status.json
               bun --eval 'import {runtimeOpenPrivateWriterDirectory,runtimeClosePrivateWriterDirectory} from "@threadnote/platform/system"; const handle=runtimeOpenPrivateWriterDirectory(Bun.env.TMPDIR); runtimeClosePrivateWriterDirectory(handle); console.log("Native private musl temporary storage proof passed; production qualification remains false");'
               test "$acl_diagnostic_status" -eq 0
+              # Documented explicit skip: the native TypeScript asset is neither provisioned nor qualified for musl, and this
+              # env -i userspace has no CI or THREADNOTE_NATIVE_TYPESCRIPT_REQUIRED, so native suites skip with their reason.
+              echo '::notice title=Native TypeScript skipped on musl::The native TypeScript asset is not provisioned or qualified in the env -i musl userspace; native TypeScript suites skip with their stated reason.'
+              printf '%s\n' 'Native TypeScript: not provisioned or qualified for musl; native TypeScript suites skip with their stated reason and no pass is claimed.' > .context/semantic-platform/native-typescript-status.txt
               bun --bun vitest run packages/platform/test/system-stable-read.test.ts packages/platform/test/writer-system/linux-acl.test.ts packages/platform/test/writer-system/provider-process.test.ts apps/threadnote/test/unit/semantic-runtime.test.ts apps/threadnote/test/unit/semantic-writer-process.test.ts apps/threadnote/test/unit/semantic-operations.test.ts apps/threadnote/test/unit/semantic-mcp-cli.test.ts apps/threadnote/test/unit/semantic-python.test.ts apps/threadnote/test/unit/semantic-go-rust.test.ts apps/threadnote/test/unit/semantic-java-preparation.test.ts --reporter=default --reporter=json --outputFile=.context/semantic-platform/components.json
               # Musl release build, smoke, archive and extracted lifecycle run in the build job
               # through the pinned native musl containers.

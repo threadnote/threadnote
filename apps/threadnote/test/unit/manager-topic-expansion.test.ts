@@ -3,6 +3,8 @@ import * as BunServices from '@effect/platform-bun/BunServices';
 import {Array as EffectArray, DateTime, Effect, FileSystem, Path, Predicate, Scope} from 'effect';
 import {TestClock} from 'effect/testing';
 import {expect} from 'vitest';
+// Every case indexes a TypeScript project graph through the native extractor.
+import {native} from '@threadnote/graph/test/helpers/native-typescript-session';
 import {loadCandidateReview, saveCandidateReview} from '@threadnote/memory/candidate';
 import {
   applyTopicDependencyExpansion,
@@ -99,7 +101,7 @@ const safe = (body: unknown, f: Fixture) => {
   expect(json).not.toMatch(/callerCwd|scopeReceiptJson|sourceFenceDigest/u);
 };
 
-effectIt.effect('removes the owned topic-expansion fixture root after normal scope completion', () =>
+native(effectIt.effect)('removes the owned topic-expansion fixture root after normal scope completion', () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const home = yield* Effect.scoped(
@@ -117,7 +119,7 @@ effectIt.effect('removes the owned topic-expansion fixture root after normal sco
   }).pipe(provideTestLayer(BunServices.layer), TestClock.withLive),
 );
 
-effectIt.effect('cleans up the topic-expansion fixture when its owned root is already absent', () =>
+native(effectIt.effect)('cleans up the topic-expansion fixture when its owned root is already absent', () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const home = yield* Effect.scoped(
@@ -137,7 +139,7 @@ effectIt.effect('cleans up the topic-expansion fixture when its owned root is al
   }).pipe(provideTestLayer(BunServices.layer), TestClock.withLive),
 );
 
-effectIt.effect('inspects and previews a configured spaced project without changing the accepted memory', () =>
+native(effectIt.effect)('inspects and previews a configured spaced project without changing the accepted memory', () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const project = 'Example Project';
@@ -149,7 +151,7 @@ effectIt.effect('inspects and previews a configured spaced project without chang
   }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
 );
 
-effectIt.effect(
+native(effectIt.effect)(
   'Manager exposes explicit safe choices and exact full preview, then applies and replays without rewriting body or origins',
   () =>
     Effect.gen(function* () {
@@ -195,7 +197,7 @@ effectIt.effect(
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
 );
 
-effectIt.effect(
+native(effectIt.effect)(
   'Manager refuses bounded neighborhoods and wrong project/config/target/source without widening or writing',
   () =>
     Effect.gen(function* () {
@@ -231,7 +233,7 @@ effectIt.effect(
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
 );
 
-effectIt.effect('Manager rejects imported source authority without returning private note data', () =>
+native(effectIt.effect)('Manager rejects imported source authority without returning private note data', () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -277,7 +279,7 @@ effectIt.effect('Manager rejects imported source authority without returning pri
   }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
 );
 
-effectIt.effect('MCP registers explicit expansion actions with safe projections and exact approval', () =>
+native(effectIt.effect)('MCP registers explicit expansion actions with safe projections and exact approval', () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const f = yield* makeTopicExpansionFixture();
@@ -314,7 +316,7 @@ effectIt.effect('MCP registers explicit expansion actions with safe projections 
   }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
 );
 
-effectIt.effect(
+native(effectIt.effect)(
   'Manager and MCP explicitly restart only an exact expired unwritten intent and require fresh approval',
   () =>
     Effect.gen(function* () {

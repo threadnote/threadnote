@@ -4,7 +4,13 @@ import * as EffectRecord from 'effect/Record';
 import * as EffectArray from 'effect/Array';
 import * as EffectString from 'effect/String';
 import {Clock, Effect, Exit, Option, Path, Schema, Semaphore} from 'effect';
-import {typeScriptPolicyCommand, typeScriptPolicyVersion} from './typescript_runtime.js';
+import {inspectNativeTypeScriptProject} from './typescript_runtime.js';
+import {nativeTypeScriptAssetPins} from '@threadnote/graph/typescript_native_asset_pins';
+import {
+  connectNativeTypeScriptLanguageServerSession,
+  type NativeTypeScriptLanguageServerSession,
+} from '@threadnote/graph/typescript_runtime';
+import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   Evidence,
@@ -15,7 +21,7 @@ import {
   observationKey,
   type QueryOutcome,
 } from '@threadnote/semantic/contracts';
-import {LspFault, type LspClient} from '../lsp_transport.js';
+import {LspFault, SemanticWireStartup, type LspClient} from '../lsp_transport.js';
 import {
   SemanticSessionFault,
   SemanticPrivateSourceEvidence,
@@ -88,11 +94,12 @@ export interface TypeScriptSessionOptions {
   readonly compiler: string;
   readonly sourceRoot: string;
   readonly verifyPolicy: Effect.Effect<void, unknown>;
-  readonly challenge: Effect.Effect<string, unknown>;
   /** Host inspection is bound to the actual projectInfo-selected configuration. Unknown is false. */
   readonly configurationIncomplete?: (configuration: string) => Effect.Effect<boolean, unknown>;
   readonly maxMemoryMb: number;
   readonly startupMilliseconds: number;
+  /** Native 7.1 API borrows the original LSP wire and uses each operation's real deadline. */
+  readonly native?: {readonly sdkRoot: string; readonly assertOriginalCurrent: () => void};
 }
 const invalid = () => SemanticSessionFault.make({reason: 'invalid'});
 const decode = <S extends Schema.ConstraintDecoder<unknown>>(schema: S, input: unknown) =>
@@ -142,6 +149,14 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
     options.maxMemoryMb > 4096
   )
     return yield* invalid();
+  const nativeStartupDeadline = options.native
+    ? (yield* Clock.currentTimeMillis) + options.startupMilliseconds
+    : undefined;
+  const startupRemaining = Effect.gen(function* () {
+    if (nativeStartupDeadline === undefined) return options.startupMilliseconds;
+    const remaining = nativeStartupDeadline - (yield* Clock.currentTimeMillis);
+    return remaining > 0 ? remaining : yield* LspFault.make({code: 'timeout'});
+  });
   yield* options.verifyPolicy;
   const initialized = yield* client.request(
     'initialize',
@@ -154,14 +169,16 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
         workspace: {configuration: true, workspaceEdit: {documentChanges: false}},
         textDocument: {publishDiagnostics: {versionSupport: false}, definition: {linkSupport: true}},
       },
-      initializationOptions: {
-        disableAutomaticTypingAcquisition: true,
-        plugins: [],
-        tsserver: {path: options.tsserver, fallbackPath: options.tsserver, useSyntaxServer: 'never'},
-        maxTsServerMemory: options.maxMemoryMb,
-      },
+      initializationOptions: options.native
+        ? {runExternalCode: false}
+        : {
+            disableAutomaticTypingAcquisition: true,
+            plugins: [],
+            tsserver: {path: options.tsserver, fallbackPath: options.tsserver, useSyntaxServer: 'never'},
+            maxTsServerMemory: options.maxMemoryMb,
+          },
     },
-    options.startupMilliseconds,
+    yield* startupRemaining,
   );
   const init = yield* decode(
     Schema.Struct({capabilities: Schema.Struct({positionEncoding: Schema.optional(Schema.String)})}),
@@ -170,6 +187,53 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
   if (init.capabilities.positionEncoding !== undefined && init.capabilities.positionEncoding !== 'utf-16')
     return yield* SemanticSessionFault.make({reason: 'provider'});
   yield* client.notify('initialized', {});
+  let nativeApi: NativeTypeScriptLanguageServerSession | undefined;
+  let nativeClosePromise: Promise<void> | undefined;
+  const startup = yield* SemanticWireStartup;
+  const closeNative = () =>
+    fromPromiseInterruptible(
+      () => (nativeClosePromise ??= nativeApi?.close() ?? Promise.resolve()),
+      () => LspFault.make({code: 'exit'}),
+    ).pipe(
+      Effect.tapError(() =>
+        Effect.sync(() => {
+          startup?.cleanup('unknown');
+        }),
+      ),
+    );
+  const native = options.native;
+  if (native) {
+    const originalCurrent = Effect.try({
+      try: native.assertOriginalCurrent,
+      catch: () => LspFault.make({code: 'exit'}),
+    });
+    yield* originalCurrent;
+    const issued = yield* decode(
+      Schema.Struct({
+        // Pinned native API source formats an atomic uint64 as api-session-%d.
+        // This value correlates the original LSP request; it is never source or peer authority.
+        sessionId: Schema.String.check(Schema.isPattern(/^api-session-[1-9][0-9]{0,19}$/u)),
+        pipe: Schema.String.check(Schema.isMaxLength(4096)),
+      }),
+      yield* client.request('custom/initializeAPISession', {}, yield* startupRemaining),
+    );
+    yield* originalCurrent;
+    if (!path.isAbsolute(issued.pipe) || /[\p{Cc}]/u.test(issued.pipe)) return yield* invalid();
+    if (nativeStartupDeadline === undefined) return yield* invalid();
+    nativeApi = yield* fromPromiseInterruptible(
+      () =>
+        connectNativeTypeScriptLanguageServerSession({
+          pipe: issued.pipe,
+          endpointDirectory: path.dirname(issued.pipe),
+          sdkDirectory: native.sdkRoot,
+          deadline: nativeStartupDeadline,
+          assertOriginalCurrent: native.assertOriginalCurrent,
+        }),
+      () => LspFault.make({code: 'prerequisite'}),
+    );
+    // Acquired API closes before the original LSP wire even if first project sync fails.
+    yield* Effect.addFinalizer(() => closeNative().pipe(Effect.exit, Effect.asVoid));
+  }
   const mutations = yield* Semaphore.make(1);
   const documents = new Map<string, OpenDocument>();
   let invalidated = false;
@@ -197,41 +261,9 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
       },
       milliseconds,
     );
-  let processInstance: string | undefined;
+  // The provider admits only staged, pin-verified bytes; there is no separate in-process tsserver policy proof.
   const policy = (milliseconds: number) =>
-    Effect.gen(function* () {
-      const challenge = yield* options.challenge;
-      if (!/^[a-f0-9]{64}$/u.test(challenge)) return yield* invalid();
-      yield* options.verifyPolicy;
-      const raw = yield* client.request(
-        'workspace/executeCommand',
-        {
-          command: 'typescript.tsserverRequest',
-          arguments: [typeScriptPolicyCommand, {challenge}, {expectsResult: true, isAsync: false}],
-        },
-        Math.min(milliseconds, 2000),
-      );
-      const response = yield* decode(
-        Schema.Struct({
-          success: Schema.Literal(true),
-          body: Schema.Struct({
-            policy: Schema.Literal(typeScriptPolicyVersion),
-            launcher: Schema.Literal(options.tsserver),
-            compiler: Schema.Literal(options.compiler),
-            version: Schema.Literal('6.0.3'),
-            pid: Counter.check(Schema.isGreaterThan(0)),
-            instance: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)),
-            challenge: Schema.Literal(challenge),
-            locked: Schema.Literal(true),
-          }),
-        }),
-        raw,
-      );
-      const instance = response.body.pid + ':' + response.body.instance;
-      if (invalidated || (processInstance !== undefined && processInstance !== instance))
-        return yield* SemanticSessionFault.make({reason: 'not-ready'});
-      processInstance = instance;
-    }).pipe(
+    options.verifyPolicy.pipe(
       Effect.timeoutOption(Math.min(milliseconds, 2000)),
       Effect.flatMap(result => (Option.isSome(result) ? Effect.void : Effect.fail(LspFault.make({code: 'timeout'})))),
       Effect.onExit(exit =>
@@ -241,7 +273,7 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
       ),
     );
   // Initialization alone can silently fall back to an unguarded SDK. No document opens before this proof.
-  yield* policy(options.startupMilliseconds);
+  yield* policy(yield* startupRemaining);
   const allowedRoots = [yield* fileForUri(basis.worktree), canonicalPath(options.sourceRoot)!];
   const contained = (file: string) => {
     const canonical = canonicalPath(file);
@@ -252,6 +284,20 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
   };
   const projectInfo = (uri: string, milliseconds: number) =>
     Effect.gen(function* () {
+      if (nativeApi && options.native) {
+        const text = documents.get(uri)?.text;
+        if (text === undefined) return yield* SemanticSessionFault.make({reason: 'stale'});
+        const project = yield* inspectNativeTypeScriptProject({
+          session: nativeApi,
+          uri,
+          text,
+          worktree: allowedRoots[0],
+          sdkRoot: options.native.sdkRoot,
+          deadline: (yield* Clock.currentTimeMillis) + milliseconds,
+          maxFiles: typeScriptEditClosureLimits.maxProjectFiles,
+        }).pipe(Effect.provideService(Path.Path, path));
+        return {configuration: project.configuration, fileCount: project.fileCount, files: project.files};
+      }
       const project = yield* custom('projectInfo', {file: uri, needFileNameList: true}, milliseconds);
       const result = yield* decode(
         Schema.Struct({
@@ -298,6 +344,11 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
     suppliedCapture?: LspEditSource,
   ) =>
     Effect.gen(function* () {
+      const started = yield* Clock.currentTimeMillis;
+      const remaining = Effect.gen(function* () {
+        const left = milliseconds - ((yield* Clock.currentTimeMillis) - started);
+        return left > 0 ? left : yield* LspFault.make({code: 'timeout'});
+      });
       let fixed = structuredClone(yield* decode(Observation, observation));
       if (
         !wellFormed(text) ||
@@ -382,7 +433,12 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
               }
             : {textDocument: {uri: fixed.uri, version: wireVersion, languageId: language, text}},
         );
-        document.project = yield* projectInfo(fixed.uri, milliseconds);
+        if (nativeApi) {
+          // The API snapshot uses a second pipe. A response on the original LSP wire
+          // proves that its preceding didOpen/didChange notification was dispatched.
+          yield* client.request('custom/projectInfo', {textDocument: {uri: fixed.uri}}, yield* remaining);
+        }
+        document.project = yield* projectInfo(fixed.uri, nativeApi ? yield* remaining : milliseconds);
         document.ready = true;
         return structuredClone(fixed);
       }).pipe(
@@ -485,6 +541,76 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
       }
       return {version: 1, status: 'ok', evidence: evidence(fixed), items} satisfies QueryOutcome;
     });
+  const nativeDiagnostics = (uri: string, source: string, milliseconds: number) =>
+    Effect.gen(function* () {
+      const api = nativeApi;
+      if (!api) return yield* invalid();
+      const selected = yield* fileForUri(uri);
+      const lineStarts = [0];
+      for (let i = 0; i < source.length; i++) {
+        if (source[i] === '\r') {
+          if (source[i + 1] === '\n') i++;
+          lineStarts.push(i + 1);
+        } else if (source[i] === '\n') lineStarts.push(i + 1);
+      }
+      const location = (offset: number) => {
+        if (!Number.isSafeInteger(offset) || offset < 0 || offset > source.length)
+          throw new Error('Invalid diagnostic offset.');
+        let low = 0,
+          high = lineStarts.length - 1;
+        while (low < high) {
+          const middle = Math.ceil((low + high) / 2);
+          if (lineStarts[middle] <= offset) low = middle;
+          else high = middle - 1;
+        }
+        return {line: low + 1, offset: offset - lineStarts[low] + 1};
+      };
+      const deadline = (yield* Clock.currentTimeMillis) + milliseconds;
+      const raw = yield* fromPromiseInterruptible(
+        () =>
+          api.withLanguageServerSnapshot({deadline}, async snapshot => {
+            const project = await snapshot.getDefaultProjectForFile({uri});
+            if (!project) throw new Error('Native diagnostic project unavailable.');
+            const program = project.program;
+            const diagnostics = [
+              ...(await program.getSyntacticDiagnostics({uri})),
+              ...(await program.getSemanticDiagnostics({uri})),
+              ...(await program.getSuggestionDiagnostics({uri})),
+            ];
+            return EffectArray.map(diagnostics, diagnostic => {
+              if (
+                (diagnostic.fileName && diagnostic.fileName !== selected) ||
+                !Number.isSafeInteger(diagnostic.pos) ||
+                !Number.isSafeInteger(diagnostic.end) ||
+                diagnostic.end < diagnostic.pos
+              )
+                throw new Error('Native diagnostic source differs.');
+              return {
+                message: diagnostic.text,
+                start: diagnostic.pos,
+                length: diagnostic.end - diagnostic.pos,
+                startLocation: location(diagnostic.pos),
+                endLocation: location(diagnostic.end),
+                category:
+                  Number(diagnostic.category) === Number(api.diagnosticCategories.Error)
+                    ? 'error'
+                    : Number(diagnostic.category) === Number(api.diagnosticCategories.Warning)
+                      ? 'warning'
+                      : Number(diagnostic.category) === Number(api.diagnosticCategories.Suggestion)
+                        ? 'suggestion'
+                        : Number(diagnostic.category) === Number(api.diagnosticCategories.Message)
+                          ? 'message'
+                          : (() => {
+                              throw new Error('Unsupported native diagnostic category.');
+                            })(),
+                code: diagnostic.code,
+              };
+            });
+          }),
+        () => SemanticSessionFault.make({reason: 'provider'}),
+      );
+      return yield* decode(Schema.Array(Diagnostic), raw);
+    });
   const diagnostics = (observation: Observation, milliseconds: number) =>
     Effect.gen(function* () {
       const fixed = structuredClone(yield* decode(Observation, observation));
@@ -493,17 +619,20 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
       const sequence = ++document.diagnosticRequest;
       const refresh = Effect.gen(function* () {
         const items = new Map<string, SemanticDiagnostic>();
+        const nativeBody = nativeApi ? yield* nativeDiagnostics(fixed.uri, document.text, milliseconds) : undefined;
         for (const command of [
           'syntacticDiagnosticsSync',
           'semanticDiagnosticsSync',
           'suggestionDiagnosticsSync',
         ] as const) {
-          const raw = yield* custom(command, {file: fixed.uri, includeLinePosition: true}, milliseconds);
-          const response = yield* decode(
-            Schema.Struct({success: Schema.Literal(true), body: Schema.Array(Diagnostic)}),
-            raw,
-          );
-          for (const diagnostic of response.body) {
+          if (nativeBody && command !== 'syntacticDiagnosticsSync') continue;
+          const body =
+            nativeBody ??
+            (yield* decode(
+              Schema.Struct({success: Schema.Literal(true), body: Schema.Array(Diagnostic)}),
+              yield* custom(command, {file: fixed.uri, includeLinePosition: true}, milliseconds),
+            )).body;
+          for (const diagnostic of body) {
             const range = {
               start: {line: diagnostic.startLocation.line - 1, character: diagnostic.startLocation.offset - 1},
               end: {line: diagnostic.endLocation.line - 1, character: diagnostic.endLocation.offset - 1},
@@ -739,12 +868,12 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
                   EffectArray.every(preview.operations, op => op.kind === 'text') &&
                   new Set(EffectArray.map(preview.operations, op => (op.kind === 'text' ? op.uri : ''))).size ===
                     preview.operations.length;
-                // TLS6.0.2 / TS6.0.3 provide exactly these finite semantic source families as inline edits.
+                // The TypeScript provider offers exactly these finite semantic source families as inline edits.
                 const qualified = sourceFamilies[kind] === raw.title && !command && !disabled && !!independent;
                 const rawDigest = preview ? sha256HexSync(JSON.stringify(preview)) : null;
                 const selector = sha256HexSync(
                   JSON.stringify([
-                    'tls-6.0.2-ts-6.0.3-source-v1',
+                    `typescript-native-${nativeTypeScriptAssetPins.version}-source-v1`,
                     qualified ? kind : [kind, raw.title, disabled, command, rawDigest],
                     queryDigest,
                   ]),
@@ -1048,7 +1177,13 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
     invalidate: Effect.sync(() => {
       invalidated = true;
     }),
-    close: client.close,
+    close: Effect.gen(function* () {
+      const nativeClose = nativeApi ? yield* Effect.exit(closeNative()) : Exit.void;
+      const original = yield* client.close;
+      return Exit.isFailure(nativeClose)
+        ? {...original, graceful: false, fault: original.fault ?? LspFault.make({code: 'exit'})}
+        : original;
+    }),
     observation: (uri: string) =>
       Effect.sync(() => {
         const document = documents.get(uri);

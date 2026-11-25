@@ -37,8 +37,8 @@ const candidates: readonly {
   readonly languages: readonly string[];
 }[] = [
   {
-    id: 'typescript-language-server',
-    candidateVersion: '6.0.2',
+    id: 'typescript-native',
+    candidateVersion: '7.1.0-beta',
     languages: ['typescript', 'javascript', 'typescriptreact', 'javascriptreact'],
   },
   {id: 'basedpyright', candidateVersion: '1.40.2', languages: ['python']},
@@ -137,7 +137,7 @@ export function semanticCapabilities(input: unknown = {}) {
           resources: 'complete-ordered-unsupported-preview',
         },
         resources: 'unsupported',
-        providers: ['typescript-language-server', 'basedpyright', 'gopls', 'rust-analyzer', 'jdtls'],
+        providers: ['typescript-native', 'basedpyright', 'gopls', 'rust-analyzer', 'jdtls'],
         qualification: 'experimental-source-closure',
         limits: {
           request: semanticAgentChangeLimits,

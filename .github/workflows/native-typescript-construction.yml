@@ -12,6 +12,7 @@ on:
       - tools/semantic/build-typescript-native.ts
       - tools/semantic/typescript-native-*.patch
       - tools/ci/native-typescript-construction.ts
+      - .github/actions/native-typescript-construct/**
       - packages/platform/src/**
       - packages/platform/package.json
       - .gitattributes
@@ -35,7 +36,8 @@ jobs:
     # PR-controlled code produces this evidence; fork pull requests never run it.
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 75
+    # Above the 80-minute construction step: a step bound must never exceed its job bound.
+    timeout-minutes: 100
     strategy:
       fail-fast: false
       # Hosts use the builder's process.platform-process.arch labels. Every one has a pinned Go archive in
@@ -76,62 +78,22 @@ jobs:
         env:
           EXPECTED_HOST: ${{ matrix.host }}
         run: bun tools/ci/native-typescript-construction.ts inputs
-      - name: Acquire the exact official TypeScript source
-        timeout-minutes: 15
-        env:
-          REPOSITORY: ${{ steps.inputs.outputs.repository }}
-          COMMIT: ${{ steps.inputs.outputs.commit }}
-          TREE: ${{ steps.inputs.outputs.tree }}
-          SOURCE: ${{ steps.inputs.outputs.source }}
-        run: |
-          set -euo pipefail
-          test ! -e "$SOURCE"
-          git init --quiet "$SOURCE"
-          # No line-ending conversion; longpaths only matters on Windows. Submodules are never fetched.
-          git -C "$SOURCE" config core.autocrlf false
-          git -C "$SOURCE" config core.eol lf
-          git -C "$SOURCE" config core.longpaths true
-          git -C "$SOURCE" remote add origin "$REPOSITORY"
-          git -C "$SOURCE" fetch --quiet --depth=1 --no-tags --no-recurse-submodules origin "$COMMIT"
-          git -C "$SOURCE" -c advice.detachedHead=false checkout --quiet --detach FETCH_HEAD
-          test "$(git -C "$SOURCE" rev-parse HEAD)" = "$COMMIT"
-          test "$(git -C "$SOURCE" rev-parse 'HEAD^{tree}')" = "$TREE"
-          test ! -e "$SOURCE/.gitmodules"
-          test -z "$(git -C "$SOURCE" status --porcelain)"
-      - name: Download the pinned host Go archive
-        timeout-minutes: 5
-        env:
-          ARCHIVE: ${{ steps.inputs.outputs.archive }}
-          ARCHIVE_URL: ${{ steps.inputs.outputs.archive_url }}
-          ARCHIVE_SIZE: ${{ steps.inputs.outputs.archive_size }}
-        run: |
-          set -euo pipefail
-          mkdir "$(dirname "$ARCHIVE")"
-          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 3 \
-            --output "$ARCHIVE" "$ARCHIVE_URL"
-          # The builder is the SHA-256 and size boundary; this only fails early on a missing or truncated download.
-          test -s "$ARCHIVE"
-          test "$(wc -c < "$ARCHIVE" | tr -d '[:space:]')" = "$ARCHIVE_SIZE"
-      - name: Construct and prepare the native TypeScript asset
-        timeout-minutes: 60
-        env:
-          SOURCE: ${{ steps.inputs.outputs.source }}
-          ARCHIVE: ${{ steps.inputs.outputs.archive }}
-          PRIVATE_ROOT: ${{ steps.inputs.outputs.private_root }}
-          REPOSITORY_ROOT: ${{ steps.inputs.outputs.repository_root }}
-          EVIDENCE: ${{ steps.inputs.outputs.evidence }}
-        run: |
-          set -euo pipefail
-          # The builder checks POSIX modes only off Windows; Git Bash cannot chmod a Windows ACL directory.
-          if [ "$RUNNER_OS" = Windows ]; then
-            mkdir "$PRIVATE_ROOT" "$EVIDENCE"
-          else
-            mkdir -m 700 "$PRIVATE_ROOT" "$EVIDENCE"
-          fi
-          # No module cache argument: the builder acquires the pinned module graph once.
-          bun tools/semantic/build-typescript-native.ts --prepare "$SOURCE" "$ARCHIVE" "$PRIVATE_ROOT" \
-            "$REPOSITORY_ROOT" > "$EVIDENCE/prepare.json"
-          cat "$EVIDENCE/prepare.json"
+      - name: Acquire the source, download the Go archive and prepare the asset
+        # The three bounded steps live in the shared action, also used by CI asset provisioning on a cache miss.
+        timeout-minutes: 80
+        uses: ./.github/actions/native-typescript-construct
+        with:
+          repository: ${{ steps.inputs.outputs.repository }}
+          commit: ${{ steps.inputs.outputs.commit }}
+          tree: ${{ steps.inputs.outputs.tree }}
+          source: ${{ steps.inputs.outputs.source }}
+          archive: ${{ steps.inputs.outputs.archive }}
+          archive-url: ${{ steps.inputs.outputs.archive_url }}
+          archive-size: ${{ steps.inputs.outputs.archive_size }}
+          private-root: ${{ steps.inputs.outputs.private_root }}
+          repository-root: ${{ steps.inputs.outputs.repository_root }}
+          evidence: ${{ steps.inputs.outputs.evidence }}
+          deadline-multiplier: ${{ env.THREADNOTE_TYPESCRIPT_NATIVE_DEADLINE_MULTIPLIER }}
       - name: Locate the constructed payload and prepared asset
         id: output
         env:
@@ -167,7 +129,8 @@ jobs:
             else
               tar -C "$CONSTRUCTION" -cf native-typescript-construction.tar payload prepared
             fi
-            tar -C "$EXTRACTED" -xf native-typescript-construction.tar
+            # -p restores the archived modes regardless of umask (tsc must stay 0755 for --verify-prepared).
+            tar -C "$EXTRACTED" -xpf native-typescript-construction.tar
           )
           bun tools/semantic/build-typescript-native.ts --verify-prepared "$EXTRACTED/prepared" > "$EVIDENCE/verify-extracted.json"
           cat "$EVIDENCE/verify-extracted.json"

@@ -1,6 +1,6 @@
 import {Schema} from 'effect';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
-import {mkdtempSync, readFileSync, rmSync, writeFileSync} from '@threadnote/testing/node-fs';
+import {mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync} from '@threadnote/testing/node-fs';
 import {spawnSync} from '@threadnote/testing/node-child-process';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
@@ -8,6 +8,8 @@ import fc from 'fast-check';
 import {expect, it} from 'vitest';
 import {parse} from 'yaml';
 import {AGENT_CATALOG} from '@threadnote/integrations/catalog';
+// Statically imported so the hermetic test target carries the release target definitions the step reads.
+import {BUN_STANDALONE_TARGETS} from '../../../scripts/release-targets.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
@@ -29,6 +31,7 @@ interface Job {
   readonly if?: string;
   readonly needs?: string | readonly string[];
   readonly outputs?: Readonly<Record<string, string>>;
+  readonly 'runs-on'?: string;
   readonly services?: Readonly<Record<string, unknown>>;
   readonly steps?: readonly Step[];
   readonly 'timeout-minutes'?: number;
@@ -64,6 +67,7 @@ const JobSchema = Schema.Struct({
   if: Schema.optionalKey(Schema.String),
   needs: Schema.optionalKey(Schema.Union([Schema.String, Schema.Array(Schema.String)])),
   outputs: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+  'runs-on': Schema.optionalKey(Schema.String),
   services: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
   steps: Schema.optionalKey(Schema.Array(StepSchema)),
   'timeout-minutes': Schema.optionalKey(Schema.Finite),
@@ -177,7 +181,14 @@ it('routes native Bun caches through step-scoped runner paths before the first B
   }
 });
 
-it('runs each native release target exactly once in the self-contained distribution matrix', () => {
+const PINNED_RELEASE_LEGS = [
+  {target: 'linux-x64', os: 'ubuntu-24.04', asset: 'native-typescript-asset'},
+  {target: 'linux-arm64', os: 'ubuntu-24.04-arm', asset: 'native-typescript-asset-linux-arm64'},
+  {target: 'darwin-arm64', os: 'macos-15', asset: 'native-typescript-asset-darwin-arm64'},
+  {target: 'darwin-x64', os: 'macos-15-intel', asset: 'native-typescript-asset-darwin-x64'},
+] as const;
+
+it('runs each native release target exactly once across the unpinned matrix and the pinned legs', () => {
   const rows = Schema.decodeUnknownSync(
     Schema.Struct({
       jobs: Schema.Struct({
@@ -189,7 +200,10 @@ it('runs each native release target exactly once in the self-contained distribut
       }),
     }),
   )(rawWorkflow).jobs['self-contained-distribution'].strategy.matrix.include;
-  const targets = EffectArray.map(rows, row => row.target);
+  const targets = [
+    ...EffectArray.map(rows, row => row.target),
+    ...EffectArray.map(PINNED_RELEASE_LEGS, leg => jobs[`self-contained-distribution-${leg.target}`]?.with?.target),
+  ];
   // Duplicate rows fail the bazel-plan coverage check and collide on native-release-<target> artifacts.
   expect(new Set(targets).size).toBe(targets.length);
   expect([...targets].sort()).toEqual([
@@ -245,6 +259,7 @@ it('routes platform and quality lanes from Bazel outputs', () => {
     compile_targets: '${{ steps.selection.outputs.compile_targets }}',
     execute_bazel: '${{ steps.shards.outputs.execute_bazel }}',
     manager_e2e: '${{ steps.selection.outputs.manager_e2e }}',
+    native_typescript: '${{ steps.shards.outputs.native_typescript }}',
     recall_quality: '${{ steps.selection.outputs.recall_quality }}',
     release_matrix: '${{ steps.selection.outputs.release_matrix }}',
     shard_matrix: '${{ steps.shards.outputs.matrix }}',
@@ -256,6 +271,10 @@ it('routes platform and quality lanes from Bazel outputs', () => {
   expect(jobs['windows-smoke']?.if).toBe("needs.bazel-plan.outputs.windows_smoke == 'true'");
   expect(jobs['standalone-targets']?.if).toBe("needs.bazel-plan.outputs.compile_targets == 'true'");
   expect(jobs['self-contained-distribution']?.if).toBe("needs.bazel-plan.outputs.release_matrix == 'true'");
+  for (const leg of PINNED_RELEASE_LEGS)
+    expect(jobs[`self-contained-distribution-${leg.target}`]?.if).toBe(
+      "needs.bazel-plan.outputs.release_matrix == 'true'",
+    );
 });
 
 const CONSUMER_GUARD = "!cancelled() && steps.restore.outcome == 'success'";
@@ -430,12 +449,20 @@ it('keeps the stable aggregate check and requires the planner plus every selecte
     'native-workflow-stress',
     'bazel-plan',
     'bazel-plan-validation',
+    'native-typescript-asset',
+    'native-typescript-asset-linux-arm64',
+    'native-typescript-asset-darwin-arm64',
+    'native-typescript-asset-darwin-x64',
     'bazel-shards',
     'manager-e2e',
     'recall-quality',
     'windows-smoke',
     'standalone-targets',
     'self-contained-distribution',
+    'self-contained-distribution-linux-x64',
+    'self-contained-distribution-linux-arm64',
+    'self-contained-distribution-darwin-arm64',
+    'self-contained-distribution-darwin-x64',
   ]);
   expect(step(jobs.test, 'Require every selected lane')?.run).toContain('test "$BAZEL_PLAN_RESULT" = success');
   expect(step(jobs.test, 'Require every selected lane')?.run).toContain(
@@ -460,6 +487,8 @@ it.each(['success', 'failure', 'cancelled', 'skipped'])(
         BAZEL_SHARDS_RESULT: 'skipped',
         MANAGER_E2E_SELECTED: 'true',
         MANAGER_E2E_RESULT: result,
+        // The compiled Manager candidate stages the shared asset, so a selected Manager lane also requires it.
+        NATIVE_TYPESCRIPT_ASSET_RESULT: 'success',
       },
     });
     expect(completed.status).toBe(result === 'success' ? 0 : 1);
@@ -496,6 +525,98 @@ it.each(['success', 'failure', 'cancelled', 'skipped'])(
   },
 );
 
+it('provisions one shared native TypeScript asset job per pinned host and restores it only where needed', () => {
+  expect(jobs['native-typescript-asset']).toMatchObject({'runs-on': 'ubuntu-24.04', 'timeout-minutes': 90});
+  for (const leg of PINNED_RELEASE_LEGS) {
+    const producer = jobs[leg.asset];
+    // Every producer exposes the exact key it saved and the commit it checked out.
+    expect(producer?.outputs).toEqual({
+      cache_key: '${{ steps.asset.outputs.cache_key }}',
+      ref: '${{ github.event.pull_request.head.sha || github.sha }}',
+    });
+    if (leg.asset !== 'native-typescript-asset')
+      expect(producer?.if).toBe("needs.bazel-plan.outputs.release_matrix == 'true'");
+    const provide = step(producer, 'Restore, construct on a miss and save the verified native TypeScript asset');
+    expect(provide).toMatchObject({
+      id: 'asset',
+      uses: './.github/actions/native-typescript-asset',
+      'timeout-minutes': 80,
+    });
+    expect(provide?.with).toBeUndefined();
+    // A pinned release leg runs on its producer's image, needs only that producer and restores by its key.
+    expect(producer?.['runs-on']).toBe(leg.os);
+    const release = jobs[`self-contained-distribution-${leg.target}`];
+    expect(release?.needs).toEqual(['bazel-plan', leg.asset]);
+    expect(release?.with).toEqual({
+      runner: leg.os,
+      target: leg.target,
+      'native-asset-key': `\${{ needs.${leg.asset}.outputs.cache_key }}`,
+    });
+  }
+  // Unpinned legs (musl, Windows) never wait on an asset job.
+  expect(jobs['self-contained-distribution']?.needs).toBe('bazel-plan');
+  for (const [name, budget] of [
+    ['bazel-shards', 60],
+    ['recall-quality', 360],
+    ['manager-e2e', 30],
+  ] as const) {
+    expect(jobs[name]?.needs).toContain('native-typescript-asset');
+    expect(jobs[name]?.['runs-on']).toBe('ubuntu-24.04');
+    const restore = step(jobs[name], 'Restore the verified native TypeScript asset');
+    expect(restore).toMatchObject({
+      uses: './.github/actions/native-typescript-asset',
+      with: {'restore-only': 'true', 'cache-key': '${{ needs.native-typescript-asset.outputs.cache_key }}'},
+    });
+    expect(restore?.['timeout-minutes']).toBeLessThan(jobs[name]?.['timeout-minutes'] ?? budget);
+  }
+  // recall-quality checks out the producer's commit, not the default merge commit.
+  const recallCheckout = EffectArray.findFirst(
+    jobs['recall-quality']?.steps ?? [],
+    candidate => candidate.uses === 'actions/checkout@v7',
+  );
+  expect(EffectOption.getOrUndefined(recallCheckout)?.with?.ref).toBe(
+    '${{ needs.native-typescript-asset.outputs.ref }}',
+  );
+  expect(step(jobs['bazel-shards'], 'Restore the verified native TypeScript asset')?.if).toBe(
+    'matrix.native_typescript',
+  );
+  const releaseRestore = step(releaseJobs.build, 'Restore the verified native TypeScript asset');
+  expect(releaseRestore).toMatchObject({
+    with: {'restore-only': 'true', 'cache-key': '${{ inputs.native-asset-key }}'},
+  });
+  expect(releaseRestore?.if).toBe("${{ !endsWith(inputs.target, '-musl') && runner.os != 'Windows' }}");
+  const steps = releaseJobs.build?.steps ?? [];
+  expect(steps.indexOf(releaseRestore!)).toBeLessThan(
+    steps.indexOf(step(releaseJobs.build, 'Semantic native ownership and safety components')!),
+  );
+});
+
+it.each(['success', 'failure', 'cancelled', 'skipped'])(
+  'requires the shared native TypeScript asset result %s to succeed when a native lane is selected',
+  result => {
+    const aggregate = step(jobs.test, 'Require every selected lane')?.run;
+    for (const selected of ['NATIVE_TYPESCRIPT_SELECTED', 'RECALL_SELECTED', 'MANAGER_E2E_SELECTED']) {
+      const completed = spawnSync('/bin/bash', ['--noprofile', '--norc', '-e', '-c', aggregate ?? 'exit 98'], {
+        encoding: 'utf8',
+        env: {
+          BASH_ENV: '',
+          PATH: '',
+          BAZEL_PLAN_RESULT: 'success',
+          BAZEL_PLAN_VALIDATION_RESULT: 'success',
+          BAZEL_EXECUTE: 'false',
+          BAZEL_SHARDS_RESULT: 'skipped',
+          RECALL_RESULT: 'success',
+          MANAGER_E2E_RESULT: 'success',
+          [selected]: 'true',
+          NATIVE_TYPESCRIPT_ASSET_RESULT: result,
+        },
+        timeout: 2_000,
+      });
+      expect(completed.status).toBe(result === 'success' ? 0 : 1);
+    }
+  },
+);
+
 it('requires compile and release results independently for every lane-selection combination', () => {
   const aggregate = step(jobs.test, 'Require every selected lane')?.run;
   expect(aggregate).toBeDefined();
@@ -517,7 +638,10 @@ it('requires compile and release results independently for every lane-selection 
               COMPILE_SELECTED: compile,
               RELEASE_SELECTED: release,
               STANDALONE_RESULT: compiled,
-              SELF_CONTAINED_RESULT: released,
+              // One failed or skipped leg among the five release jobs fails the aggregate.
+              SELF_CONTAINED_RESULTS: `success success ${released} success success`,
+              NATIVE_TYPESCRIPT_ASSET_RESULT: 'success',
+              NATIVE_TYPESCRIPT_RELEASE_ASSET_RESULTS: 'success success success',
             },
             timeout: 2_000,
           });
@@ -744,4 +868,190 @@ it('confirms only Recall with always-retained attempt evidence', () => {
   );
   expect(upload?.if).toBe('always()');
   expect(upload?.with?.path).toBe('artifacts/recall-production-10000.json\nartifacts/recall-confirmation/\n');
+});
+
+// Only the fields this cross-workflow check reads; every other key in a workflow is left unvalidated.
+const AssetFlowWorkflowSchema = Schema.Struct({
+  jobs: Schema.Record(
+    Schema.String,
+    Schema.Struct({
+      needs: Schema.optionalKey(Schema.Union([Schema.String, Schema.Array(Schema.String)])),
+      outputs: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+      steps: Schema.optionalKey(
+        Schema.Array(
+          Schema.Struct({
+            id: Schema.optionalKey(Schema.String),
+            uses: Schema.optionalKey(Schema.String),
+            with: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
+          }),
+        ),
+      ),
+    }),
+  ),
+});
+
+it('restores every native TypeScript asset with the exact key its producer job saved', () => {
+  const restoreOnly = (candidate: Pick<Step, 'uses' | 'with'>) =>
+    candidate.uses === './.github/actions/native-typescript-asset' && candidate.with?.['restore-only'] === 'true';
+  let consumers = 0;
+  for (const file of [
+    '.github/workflows/ci.yml',
+    '.github/workflows/benchmarks.yml',
+    '.github/workflows/code-graph-production-ratchet.yml',
+    '.github/workflows/production-large-evidence.yml',
+  ]) {
+    const fileJobs = Schema.decodeUnknownSync(AssetFlowWorkflowSchema)(parse(readFileSync(file, 'utf8'))).jobs;
+    for (const [name, job] of EffectRecord.toEntries(fileJobs)) {
+      for (const restore of EffectArray.filter(job.steps ?? [], restoreOnly)) {
+        consumers++;
+        const key = String(restore.with?.['cache-key'] ?? '');
+        const producers = EffectArray.map(
+          [...Effect.pipe(key, EffectString.matchAll(/needs\.([\w-]+)\.outputs\.cache_key/gu))],
+          match => match[1] ?? '',
+        );
+        expect(producers.length, `${file} ${name}`).toBeGreaterThan(0);
+        const needs = typeof job.needs === 'string' ? [job.needs] : (job.needs ?? []);
+        for (const producer of producers) {
+          expect(needs, `${file} ${name}`).toContain(producer);
+          expect(fileJobs[producer]?.outputs?.cache_key, `${file} ${producer}`).toBe(
+            '${{ steps.asset.outputs.cache_key }}',
+          );
+          const provide = EffectArray.findFirst(
+            fileJobs[producer]?.steps ?? [],
+            candidate => candidate.uses === './.github/actions/native-typescript-asset',
+          );
+          expect(EffectOption.getOrUndefined(provide)?.id, `${file} ${producer}`).toBe('asset');
+        }
+      }
+    }
+  }
+  // The reusable release smoke takes the key from its caller instead of re-deriving it from its own checkout.
+  const releaseRestore = EffectArray.filter(releaseJobs.build?.steps ?? [], restoreOnly);
+  expect(EffectArray.map(releaseRestore, candidate => candidate.with?.['cache-key'])).toEqual([
+    '${{ inputs.native-asset-key }}',
+  ]);
+  expect(consumers).toBeGreaterThanOrEqual(15);
+});
+
+const CompiledBuildWorkflowSchema = Schema.Struct({
+  jobs: Schema.Record(
+    Schema.String,
+    Schema.Struct({
+      steps: Schema.optionalKey(
+        Schema.Array(
+          Schema.Struct({
+            // Every workflow file is scanned; some env values are numbers or booleans.
+            env: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
+            id: Schema.optionalKey(Schema.String),
+            if: Schema.optionalKey(Schema.String),
+            name: Schema.optionalKey(Schema.String),
+            run: Schema.optionalKey(Schema.String),
+            uses: Schema.optionalKey(Schema.String),
+          }),
+        ),
+      ),
+    }),
+  ),
+});
+const COMPILED_BUILD =
+  /\bbun run (?:build|build:release|test:e2e:manager)\b|assemble-native-inference\.ts --gnu-container/u;
+const PAYLOAD_REFERENCE = /^\$\{\{ steps\.([\w-]+)\.outputs\.payload \}\}$/u;
+// Compiled builds that need no native TypeScript asset, keyed `workflow job step`, each with its reason.
+const UNSTAGED_COMPILED_BUILDS = new Map([
+  ['publish.yml windows-build bun run build:release', 'Windows has no reviewed native TypeScript pin'],
+  ['benchmarks.yml recall-pr-10k Assemble the required source benchmark reader', 'assembles only the vector reader'],
+  ['benchmarks.yml recall-vector-native Prepare one serial native-host capture driver', 'recall vector capture only'],
+  [
+    'benchmarks.yml recall-vector-native Capture in the pinned native GNU compatibility environment',
+    'recall vector capture only',
+  ],
+  ['publish-v4.6.0-recovery.yml linux bun run build', 'rebuilds the v4.6.0 tag, which predates the native asset'],
+]);
+// Musl has no reviewed pin, so its container builds never stage the asset.
+const MUSL_BUILD = /--musl-container/u;
+// The release-smoke restore runs on every reviewed-pin leg; it skips only musl and Windows, which have no pin.
+const PINNED_HOST_ASSET_GUARD = "${{ !endsWith(inputs.target, '-musl') && runner.os != 'Windows' }}";
+
+it('stages the native TypeScript payload in every compiled build on a reviewed-pin host', () => {
+  // Every workflow file: a new compiled build must either stage the payload or be listed above with its reason.
+  const files = EffectArray.filter(readdirSync('.github/workflows'), file => /\.ya?ml$/u.test(file));
+  const unstaged = new Set<string>();
+  let staged = 0;
+  for (const file of files) {
+    const fileJobs = Schema.decodeUnknownSync(CompiledBuildWorkflowSchema)(
+      parse(readFileSync(`.github/workflows/${file}`, 'utf8')),
+    ).jobs;
+    for (const [name, job] of EffectRecord.toEntries(fileJobs)) {
+      const steps = job.steps ?? [];
+      for (const [index, build] of steps.entries()) {
+        if (!COMPILED_BUILD.test(build.run ?? '') || MUSL_BUILD.test(build.run ?? '')) continue;
+        const key = `${file} ${name} ${build.name ?? build.run}`;
+        const payload = build.env?.THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR;
+        if (UNSTAGED_COMPILED_BUILDS.has(key)) {
+          unstaged.add(key);
+          expect(payload, key).toBeUndefined();
+          continue;
+        }
+        const provider = EffectOption.getOrUndefined(EffectString.match(PAYLOAD_REFERENCE)(String(payload ?? '')))?.[1];
+        expect(provider, key).toBeDefined();
+        const providerIndex = EffectOption.getOrElse(
+          EffectArray.findFirstIndex(steps, candidate => candidate.id === provider),
+          () => -1,
+        );
+        expect(providerIndex, key).toBeGreaterThanOrEqual(0);
+        expect(providerIndex, key).toBeLessThan(index);
+        const asset = steps[providerIndex];
+        expect(asset?.uses, key).toBe('./.github/actions/native-typescript-asset');
+        // The asset step runs whenever the build does on a reviewed-pin host.
+        expect([undefined, build.if, PINNED_HOST_ASSET_GUARD], key).toContain(asset?.if);
+        staged++;
+      }
+    }
+  }
+  // Manager E2E, the non-Linux and GNU release-smoke builds, and the publish GNU and macOS builds.
+  expect(staged).toBe(5);
+  // A stale allowlist entry fails, so the list stays exact.
+  expect([...unstaged].sort()).toEqual([...UNSTAGED_COMPILED_BUILDS.keys()].sort());
+});
+
+it('smokes GNU payloads on the host after the root build container returns them to the runner user', () => {
+  const build = releaseJobs.build;
+  const container = step(build, 'Build GNU payload at the preserved libc floor');
+  expect(container?.env?.NATIVE_RELEASE_COMMAND_JSON).toBeDefined();
+  expect(container?.env?.NATIVE_RELEASE_COMMAND_JSON).not.toContain('smoke-self-contained');
+  const smoke = step(build, 'Self-contained native smoke');
+  expect(smoke?.if).toBe("${{ !endsWith(inputs.target, '-musl') }}");
+  const steps = build?.steps ?? [];
+  expect(steps.indexOf(smoke!)).toBeGreaterThan(steps.indexOf(container!));
+});
+
+it('executes the release matrix coverage step against every native release-smoke leg', () => {
+  const coverage = step(jobs['bazel-plan'], 'Verify native release matrix coverage')?.run;
+  expect(coverage).toBeDefined();
+  const run = (cwd: string) =>
+    spawnSync('/bin/bash', ['--noprofile', '--norc', '-e', '-c', coverage ?? 'exit 98'], {cwd, encoding: 'utf8'});
+  // The exact step text accepts the real workflow, whose legs are split across matrix and single-target jobs.
+  const actual = run(process.cwd());
+  expect(actual.status, actual.stderr).toBe(0);
+  // Dropping any one single-target leg must fail the same text.
+  const root = mkdtempSync(join(tmpdir(), 'threadnote-release-coverage-'));
+  try {
+    const legs = EffectArray.filter(
+      EffectRecord.keys(jobs),
+      name => jobs[name]?.uses === './.github/workflows/native-release-smoke.yml' && jobs[name]?.strategy === undefined,
+    );
+    expect(legs.length).toBeGreaterThan(0);
+    expect(BUN_STANDALONE_TARGETS.length).toBeGreaterThan(legs.length);
+    const reduced = parse(readFileSync('.github/workflows/ci.yml', 'utf8'));
+    Reflect.deleteProperty(reduced.jobs, legs[0]);
+    spawnSync('mkdir', ['-p', join(root, '.github/workflows'), join(root, 'scripts')]);
+    writeFileSync(join(root, '.github/workflows/ci.yml'), JSON.stringify(reduced));
+    writeFileSync(join(root, 'scripts/release-targets.ts'), readFileSync('scripts/release-targets.ts', 'utf8'));
+    spawnSync('ln', ['-s', join(process.cwd(), 'node_modules'), join(root, 'node_modules')]);
+    const missing = run(root);
+    expect(missing.status).not.toBe(0);
+    expect(missing.stderr).toContain('Native execution matrix must cover the exact release target definitions');
+  } finally {
+    rmSync(root, {recursive: true, force: true});
+  }
 });

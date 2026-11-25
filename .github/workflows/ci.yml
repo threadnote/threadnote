@@ -40,6 +40,7 @@ jobs:
       compile_targets: ${{ steps.selection.outputs.compile_targets }}
       execute_bazel: ${{ steps.shards.outputs.execute_bazel }}
       manager_e2e: ${{ steps.selection.outputs.manager_e2e }}
+      native_typescript: ${{ steps.shards.outputs.native_typescript }}
       recall_quality: ${{ steps.selection.outputs.recall_quality }}
       release_matrix: ${{ steps.selection.outputs.release_matrix }}
       shard_matrix: ${{ steps.shards.outputs.matrix }}
@@ -64,7 +65,9 @@ jobs:
           bun --eval 'import {BUN_STANDALONE_TARGETS} from "./scripts/release-targets.ts";
           import {parse} from "yaml";
           const workflow=parse(await Bun.file(".github/workflows/ci.yml").text());
-          const rows=workflow.jobs["self-contained-distribution"].strategy.matrix.include;
+          const smoke=Object.values(workflow.jobs).filter(job=>job.uses==="./.github/workflows/native-release-smoke.yml");
+          const rows=smoke.flatMap(job=>job.strategy?.matrix?.include??[{target:job.with?.target}]);
+          if(rows.some(row=>typeof row.target!=="string"||row.target.includes("{{")))throw new Error("Every native release leg must name a literal target");
           const targets=rows.map(row=>"bun-"+(row.target==="linux-x64"?"linux-x64-baseline":row.target==="linux-x64-musl"?"linux-x64-baseline-musl":row.target==="windows-x64"?"windows-x64-baseline":row.target));
           if(targets.length!==BUN_STANDALONE_TARGETS.length||new Set(targets).size!==targets.length||BUN_STANDALONE_TARGETS.some(target=>!targets.includes(target)))throw new Error("Native execution matrix must cover the exact release target definitions");'
 
@@ -143,11 +146,115 @@ jobs:
         if: needs.bazel-plan.outputs.bazel_validation == 'true'
         run: bun tools/bazel/verify-selection.mjs
 
+  # One shared prepared-asset job per reviewed-pin host: restore, construct once on a miss, save. Consumers below only
+  # restore it (a miss fails them) and so never build the asset inside their own, shorter job budgets.
+  native-typescript-asset:
+    name: Native TypeScript asset · linux-x64
+    needs: bazel-plan
+    if: >-
+      needs.bazel-plan.outputs.native_typescript == 'true' || needs.bazel-plan.outputs.recall_quality == 'true' ||
+      needs.bazel-plan.outputs.release_matrix == 'true' || needs.bazel-plan.outputs.manager_e2e == 'true'
+    # Every consumer runs on this exact image and restores by this job's cache_key output, never a key it re-derives.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    outputs:
+      cache_key: ${{ steps.asset.outputs.cache_key }}
+      ref: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: Install frozen workspace dependencies
+        run: bun install --frozen-lockfile
+      - name: Restore, construct on a miss and save the verified native TypeScript asset
+        id: asset
+        timeout-minutes: 80
+        uses: ./.github/actions/native-typescript-asset
+
+  # One job per release host (not a matrix) so each job exposes its own cache_key and only its own release leg needs it.
+  native-typescript-asset-linux-arm64:
+    name: Native TypeScript asset · linux-arm64
+    needs: bazel-plan
+    if: needs.bazel-plan.outputs.release_matrix == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    outputs:
+      cache_key: ${{ steps.asset.outputs.cache_key }}
+      ref: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: Install frozen workspace dependencies
+        run: bun install --frozen-lockfile
+      - name: Restore, construct on a miss and save the verified native TypeScript asset
+        id: asset
+        timeout-minutes: 80
+        uses: ./.github/actions/native-typescript-asset
+
+  # One job per release host (not a matrix) so each job exposes its own cache_key and only its own release leg needs it.
+  native-typescript-asset-darwin-arm64:
+    name: Native TypeScript asset · darwin-arm64
+    needs: bazel-plan
+    if: needs.bazel-plan.outputs.release_matrix == 'true'
+    runs-on: macos-15
+    timeout-minutes: 90
+    outputs:
+      cache_key: ${{ steps.asset.outputs.cache_key }}
+      ref: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: Install frozen workspace dependencies
+        run: bun install --frozen-lockfile
+      - name: Restore, construct on a miss and save the verified native TypeScript asset
+        id: asset
+        timeout-minutes: 80
+        uses: ./.github/actions/native-typescript-asset
+
+  # One job per release host (not a matrix) so each job exposes its own cache_key and only its own release leg needs it.
+  native-typescript-asset-darwin-x64:
+    name: Native TypeScript asset · darwin-x64
+    needs: bazel-plan
+    if: needs.bazel-plan.outputs.release_matrix == 'true'
+    runs-on: macos-15-intel
+    timeout-minutes: 90
+    outputs:
+      cache_key: ${{ steps.asset.outputs.cache_key }}
+      ref: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: Install frozen workspace dependencies
+        run: bun install --frozen-lockfile
+      - name: Restore, construct on a miss and save the verified native TypeScript asset
+        id: asset
+        timeout-minutes: 80
+        uses: ./.github/actions/native-typescript-asset
+
   bazel-shards:
     name: Bazel shard · ${{ matrix.name }}
-    needs: bazel-plan
-    if: needs.bazel-plan.outputs.execute_bazel == 'true'
-    runs-on: ubuntu-latest
+    needs: [bazel-plan, native-typescript-asset]
+    # The asset job is skipped when no selected shard carries the native variables; a failed asset job stops the shards.
+    if: >-
+      !cancelled() && needs.bazel-plan.result == 'success' && needs.bazel-plan.outputs.execute_bazel == 'true' &&
+      (needs.native-typescript-asset.result == 'success' || needs.native-typescript-asset.result == 'skipped')
+    # The asset's producer image: the restored path and the Bazel action keys that inherit it must match.
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -179,6 +286,15 @@ jobs:
 
       - name: Install frozen workspace dependencies
         run: bun install --frozen-lockfile
+
+      - name: Restore the verified native TypeScript asset
+        # Only shards whose targets inherit the native variables; restored from the shared asset job and re-verified.
+        if: matrix.native_typescript
+        timeout-minutes: 15
+        uses: ./.github/actions/native-typescript-asset
+        with:
+          restore-only: 'true'
+          cache-key: ${{ needs.native-typescript-asset.outputs.cache_key }}
 
       - name: Prepare Bazel workspace
         run: bun tools/bazel/prepare.mjs
@@ -224,9 +340,10 @@ jobs:
 
   manager-e2e:
     name: Manager browser E2E
-    needs: bazel-plan
+    # The compiled candidate indexes TypeScript fixtures, so it stages the producer's verified asset on its image.
+    needs: [bazel-plan, native-typescript-asset]
     if: needs.bazel-plan.outputs.manager_e2e == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       LIBGL_ALWAYS_SOFTWARE: '1'
@@ -244,8 +361,18 @@ jobs:
         run: bun install --frozen-lockfile
       - name: Install pinned Chromium and system dependencies
         run: node node_modules/@playwright/test/cli.js install --with-deps chromium
+      - name: Restore the verified native TypeScript asset
+        id: native-typescript
+        timeout-minutes: 15
+        uses: ./.github/actions/native-typescript-asset
+        with:
+          restore-only: 'true'
+          cache-key: ${{ needs.native-typescript-asset.outputs.cache_key }}
       - name: Build candidate and test Manager in Chromium
         run: bun run test:e2e:manager
+        env:
+          # A compiled candidate reads only its own runtime/typescript, which this build stages from the payload.
+          THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR: ${{ steps.native-typescript.outputs.payload }}
       - name: Preserve browser reports and synthetic failure evidence
         if: always()
         uses: actions/upload-artifact@v7
@@ -257,16 +384,27 @@ jobs:
 
   recall-quality:
     name: Recall quality and non-inferiority
-    needs: bazel-plan
+    # The asset job always runs when recall quality is selected; its failure skips this lane and fails the aggregate.
+    needs: [bazel-plan, native-typescript-asset]
     if: needs.bazel-plan.outputs.recall_quality == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
+      # The producer's checkout: the head commit of a pull request, so the restored asset matches these sources.
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.native-typescript-asset.outputs.ref }}
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
       - run: bun install --frozen-lockfile
+      - name: Restore the verified native TypeScript asset
+        # The code-graph, workset, citation and backlink gates index TypeScript fixtures through the native parser.
+        timeout-minutes: 15
+        uses: ./.github/actions/native-typescript-asset
+        with:
+          restore-only: 'true'
+          cache-key: ${{ needs.native-typescript-asset.outputs.cache_key }}
       - name: Frozen v1 quality and indexed-recall smoke
         run: bun tools/ci/recall-confirmation.ts
       - name: Preserve bounded recall quality diagnostics
@@ -363,6 +501,7 @@ jobs:
       # Without THREADNOTE_BUILD_TARGET the script cross-compiles every BUN_STANDALONE_TARGETS entry.
       - run: bun run compile:targets
 
+  # Legs without a reviewed pin (musl, Windows) need no asset, so a failed asset job never skips them.
   self-contained-distribution:
     name: Self-contained Bun release · ${{ matrix.os }}
     needs: bazel-plan
@@ -371,18 +510,58 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {os: ubuntu-24.04, target: linux-x64}
           - {os: ubuntu-24.04, target: linux-x64-musl}
           - {os: ubuntu-24.04-arm, target: linux-arm64-musl}
-          - {os: ubuntu-24.04-arm, target: linux-arm64}
-          - {os: macos-15, target: darwin-arm64}
-          - {os: macos-15-intel, target: darwin-x64}
           - {os: windows-latest, target: windows-x64}
           - {os: windows-11-arm, target: windows-arm64}
     uses: ./.github/workflows/native-release-smoke.yml
     with:
       runner: ${{ matrix.os }}
       target: ${{ matrix.target }}
+
+  # A pinned leg depends only on its own host's asset job and restores by that job's key on the same image.
+  self-contained-distribution-linux-x64:
+    name: Self-contained Bun release · ubuntu-24.04
+    needs: [bazel-plan, native-typescript-asset]
+    if: needs.bazel-plan.outputs.release_matrix == 'true'
+    uses: ./.github/workflows/native-release-smoke.yml
+    with:
+      runner: ubuntu-24.04
+      target: linux-x64
+      native-asset-key: ${{ needs.native-typescript-asset.outputs.cache_key }}
+
+  # A pinned leg depends only on its own host's asset job and restores by that job's key on the same image.
+  self-contained-distribution-linux-arm64:
+    name: Self-contained Bun release · ubuntu-24.04-arm
+    needs: [bazel-plan, native-typescript-asset-linux-arm64]
+    if: needs.bazel-plan.outputs.release_matrix == 'true'
+    uses: ./.github/workflows/native-release-smoke.yml
+    with:
+      runner: ubuntu-24.04-arm
+      target: linux-arm64
+      native-asset-key: ${{ needs.native-typescript-asset-linux-arm64.outputs.cache_key }}
+
+  # A pinned leg depends only on its own host's asset job and restores by that job's key on the same image.
+  self-contained-distribution-darwin-arm64:
+    name: Self-contained Bun release · macos-15
+    needs: [bazel-plan, native-typescript-asset-darwin-arm64]
+    if: needs.bazel-plan.outputs.release_matrix == 'true'
+    uses: ./.github/workflows/native-release-smoke.yml
+    with:
+      runner: macos-15
+      target: darwin-arm64
+      native-asset-key: ${{ needs.native-typescript-asset-darwin-arm64.outputs.cache_key }}
+
+  # A pinned leg depends only on its own host's asset job and restores by that job's key on the same image.
+  self-contained-distribution-darwin-x64:
+    name: Self-contained Bun release · macos-15-intel
+    needs: [bazel-plan, native-typescript-asset-darwin-x64]
+    if: needs.bazel-plan.outputs.release_matrix == 'true'
+    uses: ./.github/workflows/native-release-smoke.yml
+    with:
+      runner: macos-15-intel
+      target: darwin-x64
+      native-asset-key: ${{ needs.native-typescript-asset-darwin-x64.outputs.cache_key }}
 
   test:
     name: ${{ github.event_name == 'workflow_dispatch' && inputs.native_workflow_stress == true && 'Native workflow stress qualification' || 'Unit and integration tests' }}
@@ -392,12 +571,20 @@ jobs:
         native-workflow-stress,
         bazel-plan,
         bazel-plan-validation,
+        native-typescript-asset,
+        native-typescript-asset-linux-arm64,
+        native-typescript-asset-darwin-arm64,
+        native-typescript-asset-darwin-x64,
         bazel-shards,
         manager-e2e,
         recall-quality,
         windows-smoke,
         standalone-targets,
         self-contained-distribution,
+        self-contained-distribution-linux-x64,
+        self-contained-distribution-linux-arm64,
+        self-contained-distribution-darwin-arm64,
+        self-contained-distribution-darwin-x64,
       ]
     runs-on: ubuntu-latest
 
@@ -410,6 +597,12 @@ jobs:
           BAZEL_PLAN_RESULT: ${{ needs.bazel-plan.result }}
           BAZEL_PLAN_VALIDATION_RESULT: ${{ needs.bazel-plan-validation.result }}
           BAZEL_SHARDS_RESULT: ${{ needs.bazel-shards.result }}
+          NATIVE_TYPESCRIPT_SELECTED: ${{ needs.bazel-plan.outputs.native_typescript }}
+          NATIVE_TYPESCRIPT_ASSET_RESULT: ${{ needs.native-typescript-asset.result }}
+          NATIVE_TYPESCRIPT_RELEASE_ASSET_RESULTS: >-
+            ${{ needs.native-typescript-asset-linux-arm64.result }}
+            ${{ needs.native-typescript-asset-darwin-arm64.result }}
+            ${{ needs.native-typescript-asset-darwin-x64.result }}
           MANAGER_E2E_SELECTED: ${{ needs.bazel-plan.outputs.manager_e2e }}
           MANAGER_E2E_RESULT: ${{ needs.manager-e2e.result }}
           COMPILE_SELECTED: ${{ needs.bazel-plan.outputs.compile_targets }}
@@ -419,7 +612,12 @@ jobs:
           RECALL_RESULT: ${{ needs.recall-quality.result }}
           WINDOWS_RESULT: ${{ needs.windows-smoke.result }}
           STANDALONE_RESULT: ${{ needs.standalone-targets.result }}
-          SELF_CONTAINED_RESULT: ${{ needs.self-contained-distribution.result }}
+          SELF_CONTAINED_RESULTS: >-
+            ${{ needs.self-contained-distribution.result }}
+            ${{ needs.self-contained-distribution-linux-x64.result }}
+            ${{ needs.self-contained-distribution-linux-arm64.result }}
+            ${{ needs.self-contained-distribution-darwin-arm64.result }}
+            ${{ needs.self-contained-distribution-darwin-x64.result }}
         run: |
           if [ "$MANUAL_STRESS" = true ]; then
             test "$NATIVE_WORKFLOW_STRESS_RESULT" = success
@@ -432,10 +630,16 @@ jobs:
           else
             test "$BAZEL_SHARDS_RESULT" = skipped
           fi
+          if [ "$NATIVE_TYPESCRIPT_SELECTED" = true ] || [ "$RECALL_SELECTED" = true ] || [ "$RELEASE_SELECTED" = true ] ||
+            [ "$MANAGER_E2E_SELECTED" = true ]; then
+            test "$NATIVE_TYPESCRIPT_ASSET_RESULT" = success
+          fi
+          all_success() { for result in $1; do test "$result" = success || return 1; done; }
+          if [ "$RELEASE_SELECTED" = true ]; then all_success "$NATIVE_TYPESCRIPT_RELEASE_ASSET_RESULTS"; fi
           if [ "$RECALL_SELECTED" = true ]; then test "$RECALL_RESULT" = success; fi
           if [ "$MANAGER_E2E_SELECTED" = true ]; then test "$MANAGER_E2E_RESULT" = success; fi
           if [ "$WINDOWS_SELECTED" = true ]; then test "$WINDOWS_RESULT" = success; fi
           if [ "$COMPILE_SELECTED" = true ]; then test "$STANDALONE_RESULT" = success; fi
           if [ "$RELEASE_SELECTED" = true ]; then
-            test "$SELF_CONTAINED_RESULT" = success
+            all_success "$SELF_CONTAINED_RESULTS"
           fi

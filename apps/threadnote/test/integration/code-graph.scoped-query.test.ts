@@ -22,9 +22,10 @@ import {queryCodeGraphWorksetV2, resolveCodeGraphQualifiedRefTarget} from '@thre
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {native} from '@threadnote/graph/test/helpers/native-typescript-session';
 
 describe('scoped graph retrieval', () => {
-  effectIt.effect(
+  native(effectIt.effect)(
     'selects independent scoped views and discloses outside paths and equivalent old snapshots',
     () =>
       Effect.gen(function* () {

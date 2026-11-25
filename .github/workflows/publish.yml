@@ -167,9 +167,17 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Install pinned native vector toolchain
         run: rustup toolchain install 1.89.0 --profile minimal
+      - name: Provide the verified native TypeScript asset
+        # GNU hosts have a reviewed pin: the release stages runtime/typescript. Musl has none and builds without it.
+        if: matrix.libc == 'gnu'
+        id: native-typescript
+        timeout-minutes: 80
+        uses: ./.github/actions/native-typescript-asset
       - name: Build GNU release at the preserved libc floor
         if: matrix.libc == 'gnu'
         run: bun scripts/assemble-native-inference.ts --gnu-container
+        env:
+          THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR: ${{ steps.native-typescript.outputs.payload }}
       - name: Build and load musl release at the preserved libc floor
         if: matrix.libc == 'musl'
         run: >-
@@ -263,9 +271,14 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Install pinned native vector toolchain
         run: rustup toolchain install 1.89.0 --profile minimal
+      - name: Provide the verified native TypeScript asset
+        id: native-typescript
+        timeout-minutes: 80
+        uses: ./.github/actions/native-typescript-asset
       - run: bun run build:release
         env:
           THREADNOTE_BUILD_TARGET: ${{ matrix.target }}
+          THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR: ${{ steps.native-typescript.outputs.payload }}
       - run: ./dist/threadnote --version
       - name: Prepare strict doctor fixture
         shell: bash

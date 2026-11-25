@@ -1,6 +1,10 @@
+import {
+  createTypeScriptSyntaxSession,
+  type TypeScriptSyntaxSession,
+} from '../../../../tools/workspace/typescript-syntax.js';
 import {Array as EffectArray} from 'effect';
 import {readFileSync} from '@threadnote/testing/node-fs';
-import {describe, expect, it} from 'vitest';
+import {describe, expect, it, afterAll} from 'vitest';
 import fc from 'fast-check';
 import {hasUndeclaredPythonRuntimeReference} from '../../../../scripts/effect/self-contained-source.js';
 import * as EffectString from 'effect/String';
@@ -36,35 +40,46 @@ const fixtureDrainSources = EffectArray.map(
 );
 
 describe('self-contained source Python boundary', () => {
-  it.each(workflowSources)('accepts only retained workflow ownership metadata in $path', ({path, content}) => {
-    expect(hasUndeclaredPythonRuntimeReference(path, content)).toBe(false);
-    expect(hasUndeclaredPythonRuntimeReference(path, Effect.pipe(content, EffectString.replaceAll('\n', '\r\n')))).toBe(
-      false,
-    );
+  it.each(workflowSources)('accepts only retained workflow ownership metadata in $path', async ({path, content}) => {
+    expect(await hasUndeclaredPythonRuntimeReference(await getSyntaxSession(), path, content)).toBe(false);
+    expect(
+      await hasUndeclaredPythonRuntimeReference(
+        await getSyntaxSession(),
+        path,
+        Effect.pipe(content, EffectString.replaceAll('\n', '\r\n')),
+      ),
+    ).toBe(false);
   });
 
-  it.each(fixtureDrainSources)('keeps fixture deadline documentation self-contained in $path', ({path, content}) => {
-    expect(hasUndeclaredPythonRuntimeReference(path, content)).toBe(false);
-  });
+  it.each(fixtureDrainSources)(
+    'keeps fixture deadline documentation self-contained in $path',
+    async ({path, content}) => {
+      expect(await hasUndeclaredPythonRuntimeReference(await getSyntaxSession(), path, content)).toBe(false);
+    },
+  );
 
-  it('rejects Python execution added to every workflow metadata source or another runtime file', () => {
-    fc.assert(
-      fc.property(
+  it('rejects Python execution added to every workflow metadata source or another runtime file', async () => {
+    await fc.assert(
+      fc.asyncProperty(
         fc.oneof(
           fc.constantFrom('python', 'python3', 'Python'),
           fc
             .tuple(fc.integer({min: 1, max: 99}), fc.integer({min: 0, max: 99}))
             .map(([major, minor]) => `python${major}.${minor}`),
         ),
-        command => {
+        async command => {
           for (const {path, content} of [
             ...workflowSources,
             ...fixtureDrainSources,
             {path: 'apps/threadnote/src/threadnote.ts', content: ''},
           ]) {
-            expect(hasUndeclaredPythonRuntimeReference(path, `${content}\nspawn('${command}', ['app.py']);`)).toBe(
-              true,
-            );
+            expect(
+              await hasUndeclaredPythonRuntimeReference(
+                await getSyntaxSession(),
+                path,
+                `${content}\nspawn('${command}', ['app.py']);`,
+              ),
+            ).toBe(true);
           }
         },
       ),
@@ -72,7 +87,7 @@ describe('self-contained source Python boundary', () => {
     );
   });
 
-  it('rejects interpreter probes and prerequisites even in workflow metadata files', () => {
+  it('rejects interpreter probes and prerequisites even in workflow metadata files', async () => {
     const readiness = EffectOption.getOrUndefined(
       EffectArray.findFirst(
         workflowSources,
@@ -81,7 +96,8 @@ describe('self-contained source Python boundary', () => {
       ),
     )!;
     expect(
-      hasUndeclaredPythonRuntimeReference(
+      await hasUndeclaredPythonRuntimeReference(
+        await getSyntaxSession(),
         readiness.path,
         `${readiness.content}\nconst python = findWorkingExecutable(['python3']).pipe(Effect.orElseSucceed(() => undefined));`,
       ),
@@ -89,7 +105,8 @@ describe('self-contained source Python boundary', () => {
     for (const contract of EffectArray.filter(workflowSources, source => /\/contracts?\.ts$/u.test(source.path)))
       for (const field of ['readonly python?: string;', 'readonly python: string;'])
         expect(
-          hasUndeclaredPythonRuntimeReference(
+          await hasUndeclaredPythonRuntimeReference(
+            await getSyntaxSession(),
             contract.path,
             Effect.pipe(
               contract.content,
@@ -105,67 +122,112 @@ describe('self-contained source Python boundary', () => {
       ),
     )!;
     expect(
-      hasUndeclaredPythonRuntimeReference(
+      await hasUndeclaredPythonRuntimeReference(
+        await getSyntaxSession(),
         manifest.path,
         Effect.pipe(manifest.content, EffectString.replace("python: '>=3.10'", "python: '>=3.11'")),
       ),
     ).toBe(true);
   });
 
-  it('rejects undeclared metadata in a neighboring file', () => {
+  it('rejects undeclared metadata in a neighboring file', async () => {
     expect(
-      hasUndeclaredPythonRuntimeReference('apps/threadnote/src/dev_skills/new.ts', "const python = 'required';"),
+      await hasUndeclaredPythonRuntimeReference(
+        await getSyntaxSession(),
+        'apps/threadnote/src/dev_skills/new.ts',
+        "const python = 'required';",
+      ),
     ).toBe(true);
   });
 
-  it('preserves existing migration and language metadata exceptions', () => {
+  it('preserves existing migration and language metadata exceptions', async () => {
     expect(
-      hasUndeclaredPythonRuntimeReference('packages/manager/src/memory_editor_languages.ts', "python: 'Python'"),
+      await hasUndeclaredPythonRuntimeReference(
+        await getSyntaxSession(),
+        'packages/manager/src/memory_editor_languages.ts',
+        "python: 'Python'",
+      ),
     ).toBe(false);
     expect(
-      hasUndeclaredPythonRuntimeReference('apps/threadnote/src/migration/legacy-installations.ts', "'python'"),
+      await hasUndeclaredPythonRuntimeReference(
+        await getSyntaxSession(),
+        'apps/threadnote/src/migration/legacy-installations.ts',
+        "'python'",
+      ),
     ).toBe(false);
   });
 
-  it.each(semanticSources)('accepts owned static language metadata in $path', ({path, content}) => {
-    expect(hasUndeclaredPythonRuntimeReference(path, content)).toBe(false);
-    expect(hasUndeclaredPythonRuntimeReference(path, Effect.pipe(content, EffectString.replaceAll('\n', '\r\n')))).toBe(
-      false,
-    );
+  it.each(semanticSources)('accepts owned static language metadata in $path', async ({path, content}) => {
+    expect(await hasUndeclaredPythonRuntimeReference(await getSyntaxSession(), path, content)).toBe(false);
+    expect(
+      await hasUndeclaredPythonRuntimeReference(
+        await getSyntaxSession(),
+        path,
+        Effect.pipe(content, EffectString.replaceAll('\n', '\r\n')),
+      ),
+    ).toBe(false);
   });
 
-  it('consumes the public catalog language declaration only once and only at its owned path', () => {
+  it('consumes the public catalog language declaration only once and only at its owned path', async () => {
     const catalog = EffectOption.getOrUndefined(
       EffectArray.findFirst(semanticSources, source => source.path === 'apps/threadnote/src/effect/semantic_cli.ts'),
     )!;
-    expect(hasUndeclaredPythonRuntimeReference('apps/threadnote/src/effect/other.ts', catalog.content)).toBe(true);
+    expect(
+      await hasUndeclaredPythonRuntimeReference(
+        await getSyntaxSession(),
+        'apps/threadnote/src/effect/other.ts',
+        catalog.content,
+      ),
+    ).toBe(true);
     for (const extra of ["const extra = {languages: ['python']};", "const extra = {language: 'python'};"])
-      expect(hasUndeclaredPythonRuntimeReference(catalog.path, `${catalog.content}\n${extra}`)).toBe(true);
+      expect(
+        await hasUndeclaredPythonRuntimeReference(
+          await getSyntaxSession(),
+          catalog.path,
+          `${catalog.content}\n${extra}`,
+        ),
+      ).toBe(true);
   });
 
-  it('consumes only the singular host catalog slot without granting protocol or neighboring-path exceptions', () => {
+  it('consumes only the singular host catalog slot without granting protocol or neighboring-path exceptions', async () => {
     const catalog = EffectOption.getOrUndefined(
       EffectArray.findFirst(semanticSources, source => source.path === 'apps/threadnote/src/semantic/host_catalog.ts'),
     )!;
-    expect(hasUndeclaredPythonRuntimeReference('apps/threadnote/src/semantic/other.ts', catalog.content)).toBe(true);
+    expect(
+      await hasUndeclaredPythonRuntimeReference(
+        await getSyntaxSession(),
+        'apps/threadnote/src/semantic/other.ts',
+        catalog.content,
+      ),
+    ).toBe(true);
     for (const extra of [
       "const extra = {slot: 'python'};",
       "const extra = {language: 'python'};",
       "const extra = {languages: ['python']};",
     ])
-      expect(hasUndeclaredPythonRuntimeReference(catalog.path, `${catalog.content}\n${extra}`)).toBe(true);
+      expect(
+        await hasUndeclaredPythonRuntimeReference(
+          await getSyntaxSession(),
+          catalog.path,
+          `${catalog.content}\n${extra}`,
+        ),
+      ).toBe(true);
   });
 
-  it('keeps operational catalog properties scoped to the exact doctor module', () => {
+  it('keeps operational catalog properties scoped to the exact doctor module', async () => {
     const doctor = EffectOption.getOrUndefined(
       EffectArray.findFirst(semanticSources, source => source.path === 'apps/threadnote/src/semantic/doctor.ts'),
     )!;
-    expect(hasUndeclaredPythonRuntimeReference('apps/threadnote/src/semantic/doctor_extra.ts', doctor.content)).toBe(
-      true,
-    );
+    expect(
+      await hasUndeclaredPythonRuntimeReference(
+        await getSyntaxSession(),
+        'apps/threadnote/src/semantic/doctor_extra.ts',
+        doctor.content,
+      ),
+    ).toBe(true);
   });
 
-  it('scopes the TypeScript provider language discriminator to its exact source path', () => {
+  it('scopes the TypeScript provider language discriminator to its exact source path', async () => {
     const provider = EffectOption.getOrUndefined(
       EffectArray.findFirst(
         semanticSources,
@@ -173,11 +235,15 @@ describe('self-contained source Python boundary', () => {
       ),
     )!;
     expect(
-      hasUndeclaredPythonRuntimeReference('apps/threadnote/src/semantic/providers/other.ts', provider.content),
+      await hasUndeclaredPythonRuntimeReference(
+        await getSyntaxSession(),
+        'apps/threadnote/src/semantic/providers/other.ts',
+        provider.content,
+      ),
     ).toBe(true);
   });
 
-  it('rejects escaped shell-quoted and argv-list Python invocations in the TypeScript provider', () => {
+  it('rejects escaped shell-quoted and argv-list Python invocations in the TypeScript provider', async () => {
     const provider = EffectOption.getOrUndefined(
       EffectArray.findFirst(
         semanticSources,
@@ -192,15 +258,21 @@ describe('self-contained source Python boundary', () => {
 ]);`,
     ];
     expect(
-      EffectArray.map(examples, example =>
-        hasUndeclaredPythonRuntimeReference(provider.path, `${provider.content}\n${example}`),
+      await Promise.all(
+        EffectArray.map(examples, async example =>
+          hasUndeclaredPythonRuntimeReference(
+            await getSyntaxSession(),
+            provider.path,
+            `${provider.content}\n${example}`,
+          ),
+        ),
       ),
     ).toEqual([true, true]);
   });
 
-  it('still rejects added interpreter commands in every semantic metadata source', () => {
-    fc.assert(
-      fc.property(
+  it('still rejects added interpreter commands in every semantic metadata source', async () => {
+    await fc.assert(
+      fc.asyncProperty(
         fc.constantFrom('', '/usr/bin/', './tools/', 'C:\\Python\\', 'C:\\Program Files\\Python\\'),
         fc.integer({min: 1, max: 99}),
         fc.integer({min: 0, max: 99}),
@@ -208,12 +280,16 @@ describe('self-contained source Python boundary', () => {
         fc.constantFrom('', '.exe', '.EXE'),
         fc.constantFrom('', ' -c "pass"', ' -m module', '; echo done'),
         fc.constantFrom('', 'env '),
-        (prefix, major, minor, uppercase, suffix, args, shellPrefix) => {
+        async (prefix, major, minor, uppercase, suffix, args, shellPrefix) => {
           const command =
             shellPrefix + prefix + (uppercase ? 'Python' : 'python') + major + '.' + minor + suffix + args;
           for (const {path, content} of semanticSources)
             expect(
-              hasUndeclaredPythonRuntimeReference(path, `${content}\nspawn(${JSON.stringify(command)}, ['app.py']);`),
+              await hasUndeclaredPythonRuntimeReference(
+                await getSyntaxSession(),
+                path,
+                `${content}\nspawn(${JSON.stringify(command)}, ['app.py']);`,
+              ),
             ).toBe(true);
         },
       ),
@@ -231,27 +307,37 @@ describe('self-contained source Python boundary', () => {
     ])
       for (const {path, content} of semanticSources)
         expect(
-          hasUndeclaredPythonRuntimeReference(path, `${content}\nspawn(${JSON.stringify(command)}, ['app.py']);`),
+          await hasUndeclaredPythonRuntimeReference(
+            await getSyntaxSession(),
+            path,
+            `${content}\nspawn(${JSON.stringify(command)}, ['app.py']);`,
+          ),
         ).toBe(true);
   });
 
-  it('rejects generated quoted interpreter arguments in argv and shell-serialized source', () => {
+  it('rejects generated quoted interpreter arguments in argv and shell-serialized source', async () => {
     const provider = EffectOption.getOrUndefined(
       EffectArray.findFirst(
         semanticSources,
         source => source.path === 'apps/threadnote/src/semantic/providers/typescript.ts',
       ),
     )!;
-    fc.assert(
-      fc.property(fc.constantFrom('python', 'Python3', 'python3.13', 'python.exe'), executable => {
+    await fc.assert(
+      fc.asyncProperty(fc.constantFrom('python', 'Python3', 'python3.13', 'python.exe'), async executable => {
         const shellCommand = `${JSON.stringify(executable)} -V`;
         const examples = [
           `Bun.spawn([\n  ${JSON.stringify(executable)},\n  '-V',\n]);`,
           `Bun.spawn(["sh", "-c", ${JSON.stringify(shellCommand)}]);`,
         ];
         expect(
-          EffectArray.map(examples, example =>
-            hasUndeclaredPythonRuntimeReference(provider.path, `${provider.content}\n${example}`),
+          await Promise.all(
+            EffectArray.map(examples, async example =>
+              hasUndeclaredPythonRuntimeReference(
+                await getSyntaxSession(),
+                provider.path,
+                `${provider.content}\n${example}`,
+              ),
+            ),
           ),
         ).toEqual([true, true]);
       }),
@@ -259,7 +345,7 @@ describe('self-contained source Python boundary', () => {
     );
   });
 
-  it('requires one live unchanged bootstrap capsule and its exact publication wiring', () => {
+  it('requires one live unchanged bootstrap capsule and its exact publication wiring', async () => {
     const path = 'apps/threadnote/src/semantic/providers/python_project.ts';
     const source = readFileSync(path, 'utf8');
     const start = EffectString.indexOf('const pathProbe = ')(source);
@@ -321,17 +407,20 @@ describe('self-contained source Python boundary', () => {
       source + '\nconst syntax = ;',
     ];
     for (const [index, content] of mutations.entries()) {
-      expect(hasUndeclaredPythonRuntimeReference(path, content), 'closed Python capsule mutation ' + index).toBe(true);
+      expect(
+        await hasUndeclaredPythonRuntimeReference(await getSyntaxSession(), path, content),
+        'closed Python capsule mutation ' + index,
+      ).toBe(true);
     }
     for (const neighbor of [
       'apps/threadnote/src/semantic/providers/other.ts',
       'apps/threadnote/src/semantic/providers/python_project_extra.ts',
     ]) {
-      expect(hasUndeclaredPythonRuntimeReference(neighbor, source)).toBe(true);
+      expect(await hasUndeclaredPythonRuntimeReference(await getSyntaxSession(), neighbor, source)).toBe(true);
     }
   });
 
-  it('rejects alternate generator bindings while the frozen capsule and call text remain intact', () => {
+  it('rejects alternate generator bindings while the frozen capsule and call text remain intact', async () => {
     const path = 'apps/threadnote/src/semantic/providers/python_project.ts';
     const source = readFileSync(path, 'utf8');
     for (const shadow of [
@@ -345,18 +434,18 @@ describe('self-contained source Python boundary', () => {
         '  const source = pythonProviderBootstrap(',
         shadow + '\n  const source = pythonProviderBootstrap(',
       )(source);
-      expect(hasUndeclaredPythonRuntimeReference(path, content), shadow).toBe(true);
+      expect(await hasUndeclaredPythonRuntimeReference(await getSyntaxSession(), path, content), shadow).toBe(true);
     }
     for (const content of [
       EffectString.replace("Effect.fn('semantic.makePythonProject')", "Effect.fn('different.owner')")(source),
       EffectString.replace('function* (options: {', 'function* (pythonProviderBootstrap: unknown, options: {')(source),
       source + '\nfunction ignored(makePythonProject: unknown) {}',
     ]) {
-      expect(hasUndeclaredPythonRuntimeReference(path, content)).toBe(true);
+      expect(await hasUndeclaredPythonRuntimeReference(await getSyntaxSession(), path, content)).toBe(true);
     }
   });
 
-  it('rejects JSON intrinsic shadowing, aliasing and concrete mutation without executing the mutation', () => {
+  it('rejects JSON intrinsic shadowing, aliasing and concrete mutation without executing the mutation', async () => {
     const path = 'apps/threadnote/src/semantic/providers/python_project.ts';
     const source = readFileSync(path, 'utf8');
     for (const mutation of [
@@ -377,11 +466,11 @@ describe('self-contained source Python boundary', () => {
       "globalThis['JSON'] = {stringify: () => 'inert'};",
     ]) {
       const content = source + '\n' + mutation;
-      expect(hasUndeclaredPythonRuntimeReference(path, content), mutation).toBe(true);
+      expect(await hasUndeclaredPythonRuntimeReference(await getSyntaxSession(), path, content), mutation).toBe(true);
     }
   });
 
-  it('rejects all standard global-object dependencies outside the reviewed capsule', () => {
+  it('rejects all standard global-object dependencies outside the reviewed capsule', async () => {
     const path = 'apps/threadnote/src/semantic/providers/python_project.ts';
     const source = readFileSync(path, 'utf8');
     for (const root of ['globalThis', 'global', 'self', 'window']) {
@@ -392,12 +481,12 @@ describe('self-contained source Python boundary', () => {
         `const alias = ${root};`,
       ]) {
         const content = source + '\n' + extra;
-        expect(hasUndeclaredPythonRuntimeReference(path, content), extra).toBe(true);
+        expect(await hasUndeclaredPythonRuntimeReference(await getSyntaxSession(), path, content), extra).toBe(true);
       }
     }
   });
 
-  it('rejects concrete additional loading and execution forms outside the reviewed bootstrap', () => {
+  it('rejects concrete additional loading and execution forms outside the reviewed bootstrap', async () => {
     const path = 'apps/threadnote/src/semantic/providers/python_project.ts';
     const source = readFileSync(path, 'utf8');
     for (const extra of [
@@ -419,7 +508,19 @@ describe('self-contained source Python boundary', () => {
       "new Function('return 1');",
       "module.require('child_process');",
     ]) {
-      expect(hasUndeclaredPythonRuntimeReference(path, source + '\n' + extra), extra).toBe(true);
+      expect(
+        await hasUndeclaredPythonRuntimeReference(await getSyntaxSession(), path, source + '\n' + extra),
+        extra,
+      ).toBe(true);
     }
   });
 });
+
+// One npm TypeScript syntax child serves this whole file and is closed once.
+let syntaxSession: TypeScriptSyntaxSession | undefined;
+afterAll(async () => {
+  await syntaxSession?.close();
+});
+function getSyntaxSession(): Promise<TypeScriptSyntaxSession> {
+  return Promise.resolve((syntaxSession ??= createTypeScriptSyntaxSession({cwd: process.cwd()})));
+}

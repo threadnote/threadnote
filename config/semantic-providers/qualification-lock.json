@@ -114,7 +114,7 @@
       ]
     },
     {
-      "id": "typescript-native",
+      "id": "typescript-native-7.0.2-historical",
       "languages": ["typescript", "javascript"],
       "version": "7.0.2",
       "runtime": {
@@ -168,6 +168,66 @@
       },
       "productionQualified": false,
       "blockers": ["Native shutdown panicked in file-watcher teardown; not selected for the initial pilot."]
+    },
+    {
+      "id": "typescript-native",
+      "languages": ["typescript", "javascript"],
+      "version": "7.1.0-beta",
+      "runtime": {"kind": "native-source-overlay"},
+      "license": {
+        "reported": "Apache-2.0 AND bundled source notices",
+        "evidence": ["runtime/typescript/manifest.json"],
+        "redistribution": "Darwin source-built asset validated locally; all release targets and obligations remain gated"
+      },
+      "artifacts": [
+        {
+          "kind": "private-source-overlay",
+          "sha256": "6453082c0e4fa16b78a37106fce911d0df9b79192025a1b4fdecdf92286e3c47",
+          "sourceCommit": "3e9236361fa97a9e6c685f4833ac457ae2d8c50a",
+          "sourceTree": "2a322d5d8eefb3b2f295c5ed6398de7237f6249a",
+          "overlaySha256": "3ec77e4026b698c701b60fe34238a9ac83eaa73ad33679430fb3bafcef5e607d"
+        },
+        {
+          "kind": "private-source-overlay",
+          "sha256": "0bff3b247bf35c5cc8f7544c665cd5cfaaacfa424400ca6e956d777ca3397458",
+          "sourceCommit": "3e9236361fa97a9e6c685f4833ac457ae2d8c50a",
+          "sourceTree": "2a322d5d8eefb3b2f295c5ed6398de7237f6249a",
+          "overlaySha256": "3ec77e4026b698c701b60fe34238a9ac83eaa73ad33679430fb3bafcef5e607d"
+        },
+        {
+          "kind": "private-source-overlay",
+          "sha256": "e822fbf40a9454e0f3dcb2e088d7b8b3dabf59f7d857c258a2c255abc305dfda",
+          "sourceCommit": "3e9236361fa97a9e6c685f4833ac457ae2d8c50a",
+          "sourceTree": "2a322d5d8eefb3b2f295c5ed6398de7237f6249a",
+          "overlaySha256": "3ec77e4026b698c701b60fe34238a9ac83eaa73ad33679430fb3bafcef5e607d"
+        },
+        {
+          "kind": "private-source-overlay",
+          "sha256": "294a3396080820b44e223d741eb040dfbd2d4c9b36855497f7df6ccdaaebacee",
+          "sourceCommit": "3e9236361fa97a9e6c685f4833ac457ae2d8c50a",
+          "sourceTree": "2a322d5d8eefb3b2f295c5ed6398de7237f6249a",
+          "overlaySha256": "3ec77e4026b698c701b60fe34238a9ac83eaa73ad33679430fb3bafcef5e607d"
+        }
+      ],
+      "platforms": {
+        "darwin-arm64": {
+          "status": "source-build-evidence",
+          "evidence": [
+            "Pinned source, patch, focused Go and race checks, exact executable bytes and original private LSP feasibility passed; integrated semantic product session remains unqualified."
+          ]
+        },
+        "darwin-x64": {"status": "unqualified", "evidence": []},
+        "linux-arm64": {"status": "unqualified", "evidence": []},
+        "linux-arm64-musl": {"status": "unqualified", "evidence": []},
+        "linux-x64-baseline": {"status": "unqualified", "evidence": []},
+        "linux-x64-baseline-musl": {"status": "unqualified", "evidence": []},
+        "windows-arm64": {"status": "unqualified", "evidence": []},
+        "windows-x64-baseline": {"status": "unqualified", "evidence": []}
+      },
+      "productionQualified": false,
+      "blockers": [
+        "Integrated native semantic session/source/SDK authority pilot, all-platform build and writer qualification, and final product conformance remain unproved."
+      ]
     },
     {
       "id": "basedpyright",

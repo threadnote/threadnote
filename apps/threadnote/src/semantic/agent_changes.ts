@@ -56,8 +56,10 @@ const observeChangeTimeout =
       const enter = (next: Phase) =>
         Clock.monotonicTimeNanos.pipe(
           Effect.map(now => {
-            phase = next;
-            phaseStarted = now;
+            if (phase !== next) {
+              phase = next;
+              phaseStarted = now;
+            }
           }),
         );
       const remaining = Clock.monotonicTimeNanos.pipe(
@@ -668,7 +670,7 @@ export const makeSemanticAgentChanges = Effect.fn('semantic.agentChanges')(funct
           proposal,
           request.maxBytes,
         );
-        yield* enter('publication');
+        yield* enter('source-currentness');
         const current = yield* coordinator
           .observe(proposal.evidence.observation, request.milliseconds)
           .pipe(Effect.orElseSucceed(() => undefined));
@@ -677,6 +679,7 @@ export const makeSemanticAgentChanges = Effect.fn('semantic.agentChanges')(funct
         const publicationTime = yield* Clock.currentTimeMillis;
         if (publicationTime >= retained.expiresAt || publicationTime < retained.createdAt)
           return changeRefusal('stale', 'Proposal lifetime expired before publication');
+        yield* enter('publication');
         yield* verifyScope(request);
         if (request.choiceHandle && !(yield* choices.get(request.choiceHandle, choiceBinding, observed)))
           return changeRefusal('stale', 'Selected action capability expired before publication');

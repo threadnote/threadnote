@@ -8,9 +8,10 @@ import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import {native} from '@threadnote/graph/test/helpers/native-typescript-session';
 
 describe('first dirty index clean-base admission', () => {
-  it.effect(
+  native(it.effect)(
     'shares its verified committed base while keeping dirty symbols local',
     () =>
       Effect.gen(function* () {

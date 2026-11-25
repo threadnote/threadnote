@@ -12,6 +12,7 @@ import {createRepositoryFactResolver, createResolutionAttributor} from '@threadn
 import {BUILTIN_LANGUAGE_PACK_REGISTRY} from '@threadnote/graph/languages/registry';
 import type {CodeGraphFileMatcher} from '@threadnote/graph/languages/types';
 import {TreeSitterRuntime} from '@threadnote/graph/tree_sitter/runtime';
+import {native, NativeTypeScriptTestSessionLayer} from '@threadnote/graph/test/helpers/native-typescript-session';
 import type {CodeGraphFileFacts, CodeGraphInventoryFile, CodeGraphSpan} from '@threadnote/graph/types';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -103,13 +104,13 @@ const textStructuralCaseArbitrary = FC.constantFrom(
   },
 );
 
-const ExtractorTestLayer = TreeSitterRuntime.layer.pipe(
-  Layer.provide(TestSystemInfoLayer),
-  Layer.provide(BunServices.layer),
+const ExtractorTestLayer = Layer.merge(
+  TreeSitterRuntime.layer.pipe(Layer.provide(TestSystemInfoLayer), Layer.provide(BunServices.layer)),
+  NativeTypeScriptTestSessionLayer,
 );
 
-describe('polyglot code graph extractor properties', () => {
-  it.layer(ExtractorTestLayer)(layerIt => {
+native(describe)('polyglot code graph extractor properties', () => {
+  it.layer(ExtractorTestLayer)('with the polyglot extractor layer', layerIt => {
     describe('malformed-source safety', () => {
       for (const fuzzCase of fuzzCases) {
         fcEffectProp(

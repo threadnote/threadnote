@@ -93,6 +93,11 @@ import {isJsonObject} from '@threadnote/platform/json';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {
+  native,
+  nativeTypeScriptUnavailable,
+  skipWithoutNativeTypeScript,
+} from '@threadnote/graph/test/helpers/native-typescript-session';
 
 const directBuildProgressSchema = Schema.Struct({
   batchesCompleted: Schema.Int,
@@ -136,7 +141,7 @@ afterEach(() => {
 });
 
 describe('native code graph lifecycle', () => {
-  it('atomically indexes, queries, traverses paths, traces impact, and preserves no-answer', async () => {
+  native(it)('atomically indexes, queries, traverses paths, traces impact, and preserves no-answer', async () => {
     const root = createFixtureRepository();
     const home = join(root, '.threadnote-test-home');
     const indexed = await runEffect(
@@ -222,7 +227,7 @@ describe('native code graph lifecycle', () => {
     });
   });
 
-  effectIt.effect(
+  native(effectIt.effect)(
     'serves parallel ready-snapshot queries without contending on SQLite connection bootstrap',
     () =>
       Effect.gen(function* () {
@@ -536,7 +541,7 @@ describe('native code graph lifecycle', () => {
     }
   });
 
-  it('collapses repeated logical relationships before strict full-build staging', async () => {
+  native(it)('collapses repeated logical relationships before strict full-build staging', async () => {
     const root = createFixtureRepository();
     const sourcePath = join(root, 'packages/app/src/repeated-call.ts');
     writeFileSync(
@@ -593,7 +598,7 @@ describe('native code graph lifecycle', () => {
     ).toHaveLength(1);
   });
 
-  it('synchronously refreshes stale lightweight reads when the caller requires freshness', async () => {
+  native(it)('synchronously refreshes stale lightweight reads when the caller requires freshness', async () => {
     const root = createFixtureRepository();
     const home = join(root, '.threadnote-test-home');
     let observations = 0;
@@ -626,7 +631,7 @@ describe('native code graph lifecycle', () => {
     expect(observations).toBe(3);
   });
 
-  it('retries a strict read when the worktree changes after its pre-read observation', async () => {
+  native(it)('retries a strict read when the worktree changes after its pre-read observation', async () => {
     const root = createFixtureRepository();
     const home = join(root, '.threadnote-test-home');
     let observations = 0;
@@ -660,7 +665,8 @@ describe('native code graph lifecycle', () => {
     expect(observations).toBe(4);
   });
 
-  it('keeps dirty overlays isolated and preserves sibling views until authoritative reconciliation', async () => {
+  it('keeps dirty overlays isolated and preserves sibling views until authoritative reconciliation', async context => {
+    skipWithoutNativeTypeScript(context);
     const root = createFixtureRepository();
     git(root, ['branch', 'graph-a']);
     git(root, ['branch', 'graph-b']);
@@ -722,7 +728,7 @@ describe('native code graph lifecycle', () => {
     expect(activeSnapshotId(databasePath, resultB.snapshot.worktreeId)).toBe(resultB.snapshot.id);
   });
 
-  effectIt.effect('shares immutable clean snapshots without coupling worktree activation', () =>
+  native(effectIt.effect)('shares immutable clean snapshots without coupling worktree activation', () =>
     Effect.gen(function* () {
       const {home, worktreeA, worktreeB} = yield* Effect.sync(() => {
         const root = createFixtureRepository();
@@ -869,7 +875,7 @@ describe('native code graph lifecycle', () => {
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
-  it('attaches a shared clean ready snapshot to a new worktree without rematerializing', async () => {
+  native(it)('attaches a shared clean ready snapshot to a new worktree without rematerializing', async () => {
     const root = createFixtureRepository();
     git(root, ['branch', 'graph-attach-a']);
     git(root, ['branch', 'graph-attach-b']);
@@ -937,7 +943,7 @@ describe('native code graph lifecycle', () => {
     expect(EffectArray.some(result.found.nodes, node => node.name === 'ensureVectorIndex')).toBe(true);
   });
 
-  effectIt.effect('borrows a divergent-HEAD clean snapshot as stale evidence without promotion', () =>
+  native(effectIt.effect)('borrows a divergent-HEAD clean snapshot as stale evidence without promotion', () =>
     Effect.gen(function* () {
       const {home, worktreeA, worktreeB} = yield* Effect.sync(() => {
         const root = createFixtureRepository();
@@ -1014,7 +1020,7 @@ describe('native code graph lifecycle', () => {
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
-  it('attaches a shared clean base while a sibling worktree keeps a dirty overlay', async () => {
+  native(it)('attaches a shared clean base while a sibling worktree keeps a dirty overlay', async () => {
     const root = createFixtureRepository();
     git(root, ['branch', 'graph-sibling-a']);
     git(root, ['branch', 'graph-sibling-b']);
@@ -1065,7 +1071,7 @@ describe('native code graph lifecycle', () => {
     expect(EffectArray.some(result.dirtyOnly.nodes, node => node.name === 'ensureSiblingDirtyVectorIndex')).toBe(true);
   });
 
-  it('aliases a graph-equivalent clean commit without reparsing or rematerializing files', async () => {
+  native(it)('aliases a graph-equivalent clean commit without reparsing or rematerializing files', async () => {
     const root = createManySourceRepository(12);
     const home = join(root, '.threadnote-test-home');
     const first = await runEffect(
@@ -1132,7 +1138,7 @@ describe('native code graph lifecycle', () => {
     }
   });
 
-  effectIt.effect('aliases an exactly committed dirty root and reuses it for the next overlay', () =>
+  native(effectIt.effect)('aliases an exactly committed dirty root and reuses it for the next overlay', () =>
     Effect.gen(function* () {
       const root = yield* Effect.sync(() => createManySourceRepository(12));
       const home = join(root, '.threadnote-test-home');
@@ -1255,7 +1261,7 @@ describe('native code graph lifecycle', () => {
     [true, 16],
     [true, 40],
   ] as const) {
-    effectIt.effect(
+    native(effectIt.effect)(
       `admits membership addition with complete attribution and sparse decode (${committed ? 'clean' : 'dirty'}, ${unrelatedFiles} unrelated)`,
       () =>
         Effect.gen(function* () {
@@ -1667,7 +1673,7 @@ describe('native code graph lifecycle', () => {
   }
 
   for (const ambiguous of [false, true]) {
-    effectIt.effect(
+    native(effectIt.effect)(
       `compares membership replacement and deletion against full (${ambiguous ? 'ambiguous' : 'unique'} provider)`,
       () =>
         Effect.gen(function* () {
@@ -1751,7 +1757,7 @@ describe('native code graph lifecycle', () => {
     );
   }
 
-  effectIt.effect('keeps membership changes behind the layered fold-forward surface fence', () =>
+  native(effectIt.effect)('keeps membership changes behind the layered fold-forward surface fence', () =>
     Effect.gen(function* () {
       const root = temporaryDirectory('threadnote-membership-fold-forward-');
       const home = join(root, '.threadnote-test-home');
@@ -1816,7 +1822,7 @@ describe('native code graph lifecycle', () => {
   );
 
   for (const fault of ['failure', 'cancellation', 'publication-race'] as const) {
-    effectIt.effect(`preserves READY through membership ${fault}`, () =>
+    native(effectIt.effect)(`preserves READY through membership ${fault}`, () =>
       Effect.gen(function* () {
         const root = temporaryDirectory('threadnote-membership-ready-');
         const home = join(root, '.threadnote-test-home');
@@ -1912,7 +1918,7 @@ describe('native code graph lifecycle', () => {
     );
   }
 
-  effectIt.effect('materializes only body-changed files for a compatible clean commit', () =>
+  native(effectIt.effect)('materializes only body-changed files for a compatible clean commit', () =>
     Effect.gen(function* () {
       const root = createManySourceRepository(24);
       const home = join(root, '.threadnote-test-home');
@@ -1970,7 +1976,7 @@ describe('native code graph lifecycle', () => {
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
-  effectIt.effect('selects the nearest compatible ancestor instead of a newer sibling commit', () =>
+  native(effectIt.effect)('selects the nearest compatible ancestor instead of a newer sibling commit', () =>
     Effect.gen(function* () {
       const root = createManySourceRepository(12);
       const home = join(root, '.threadnote-test-home');
@@ -2034,7 +2040,7 @@ describe('native code graph lifecycle', () => {
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
-  effectIt.effect('reuses a compatible root when equally near merge parents are both ready', () =>
+  native(effectIt.effect)('reuses a compatible root when equally near merge parents are both ready', () =>
     Effect.gen(function* () {
       const root = createManySourceRepository(4);
       const home = join(root, '.threadnote-test-home');
@@ -2191,7 +2197,7 @@ describe('native code graph lifecycle', () => {
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
-  effectIt.effect('reattributes an incomplete deterministic batch while reusing a complete peer batch', () =>
+  native(effectIt.effect)('reattributes an incomplete deterministic batch while reusing a complete peer batch', () =>
     Effect.gen(function* () {
       const root = createManySourceRepository(130);
       const home = join(root, '.threadnote-test-home');
@@ -2381,7 +2387,7 @@ describe('native code graph lifecycle', () => {
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
-  effectIt.effect('keeps a regenerated barrel caller shard and graph equal to a clean full build', () =>
+  native(effectIt.effect)('keeps a regenerated barrel caller shard and graph equal to a clean full build', () =>
     Effect.gen(function* () {
       const root = createAmbientOverloadBarrelRepository();
       const mixedHome = temporaryDirectory('threadnote-code-graph-ambient-overload-mixed-');
@@ -2440,7 +2446,7 @@ describe('native code graph lifecycle', () => {
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
-  effectIt.effect('reuses an unchanged ambient-overload batch across a body-only generation', () =>
+  native(effectIt.effect)('reuses an unchanged ambient-overload batch across a body-only generation', () =>
     Effect.gen(function* () {
       const root = createAmbientOverloadBarrelRepository(126);
       const reusedHome = temporaryDirectory('threadnote-code-graph-cross-generation-overload-');
@@ -3048,51 +3054,53 @@ describe('native code graph lifecycle', () => {
     ),
   );
 
-  effectIt.effect('falls back to bounded full materialization when a clean commit changes global resolution', () =>
-    Effect.gen(function* () {
-      const root = createManySourceRepository(4);
-      const home = join(root, '.threadnote-test-home');
-      const indexer = yield* CodeGraphIndexer;
-      const query = yield* CodeGraphQueryService;
-      const first = yield* indexer.index({cwd: root, threadnoteHome: home});
-      yield* Effect.sync(() => {
-        const changedPath = join(root, 'src/file-000.ts');
-        writeFileSync(
-          changedPath,
-          Effect2.pipe(readFileSync(changedPath, 'utf8'), EffectString.replace('original0', 'renamed0')),
-        );
-        git(root, ['add', 'src/file-000.ts']);
-        git(root, [
-          '-c',
-          'user.name=Threadnote Test',
-          '-c',
-          'user.email=test@threadnote.local',
-          'commit',
-          '-qm',
-          'rename declaration',
-        ]);
-      });
-      const indexed = yield* indexer.index({cwd: root, threadnoteHome: home});
-      const found = yield* query.inspect({
-        cwd: root,
-        operation: 'query',
-        query: 'renamed0',
-        refresh: false,
-        threadnoteHome: home,
-      });
+  native(effectIt.effect)(
+    'falls back to bounded full materialization when a clean commit changes global resolution',
+    () =>
+      Effect.gen(function* () {
+        const root = createManySourceRepository(4);
+        const home = join(root, '.threadnote-test-home');
+        const indexer = yield* CodeGraphIndexer;
+        const query = yield* CodeGraphQueryService;
+        const first = yield* indexer.index({cwd: root, threadnoteHome: home});
+        yield* Effect.sync(() => {
+          const changedPath = join(root, 'src/file-000.ts');
+          writeFileSync(
+            changedPath,
+            Effect2.pipe(readFileSync(changedPath, 'utf8'), EffectString.replace('original0', 'renamed0')),
+          );
+          git(root, ['add', 'src/file-000.ts']);
+          git(root, [
+            '-c',
+            'user.name=Threadnote Test',
+            '-c',
+            'user.email=test@threadnote.local',
+            'commit',
+            '-qm',
+            'rename declaration',
+          ]);
+        });
+        const indexed = yield* indexer.index({cwd: root, threadnoteHome: home});
+        const found = yield* query.inspect({
+          cwd: root,
+          operation: 'query',
+          query: 'renamed0',
+          refresh: false,
+          threadnoteHome: home,
+        });
 
-      expect(indexed.materialization).toEqual({
-        fallbackReason: 'resolution-surface-changed',
-        mode: 'full',
-        resolutionLookupKeyForm: 'typescript-path-unscoped',
-        resolutionPublicationGate: 'exported',
-        stagedFiles: 4,
-        totalFiles: 4,
-      });
-      expect(indexed.snapshot.baseSnapshotId).toBeUndefined();
-      expect(indexed.snapshot.id).not.toBe(first.snapshot.id);
-      expect(EffectArray.some(found.nodes, node => node.name === 'renamed0')).toBe(true);
-    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+        expect(indexed.materialization).toEqual({
+          fallbackReason: 'resolution-surface-changed',
+          mode: 'full',
+          resolutionLookupKeyForm: 'typescript-path-unscoped',
+          resolutionPublicationGate: 'exported',
+          stagedFiles: 4,
+          totalFiles: 4,
+        });
+        expect(indexed.snapshot.baseSnapshotId).toBeUndefined();
+        expect(indexed.snapshot.id).not.toBe(first.snapshot.id);
+        expect(EffectArray.some(found.nodes, node => node.name === 'renamed0')).toBe(true);
+      }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
   effectIt.effect('falls back to bounded full materialization when a clean commit adds or deletes a file', () =>
@@ -3140,7 +3148,7 @@ describe('native code graph lifecycle', () => {
     ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
-  it('builds an immediately dirty worktree directly from the prior compatible anchor', async () => {
+  native(it)('builds an immediately dirty worktree directly from the prior compatible anchor', async () => {
     const root = createManySourceRepository(6);
     const home = join(root, '.threadnote-test-home');
     const first = await runEffect(
@@ -3224,7 +3232,7 @@ describe('native code graph lifecycle', () => {
     expect(second.reusedFiles).toBe(first.snapshot.fileCount - 1);
   });
 
-  it('refreshes package attribution when only a containing manifest changes', async () => {
+  native(it)('refreshes package attribution when only a containing manifest changes', async () => {
     const root = createFixtureRepository();
     const home = join(root, '.threadnote-test-home');
     const first = await runEffect(
@@ -3262,7 +3270,7 @@ describe('native code graph lifecycle', () => {
     ).toBe('@fixture/search-renamed');
   });
 
-  it('rehydrates cached manifest context across a committed rebuild without reparsing manifests', async () => {
+  native(it)('rehydrates cached manifest context across a committed rebuild without reparsing manifests', async () => {
     const root = createFixtureRepository();
     const home = join(root, '.threadnote-test-home');
     mkdirSync(join(root, 'cmd', 'fixture'), {recursive: true});
@@ -3380,7 +3388,7 @@ describe('native code graph lifecycle', () => {
     ).toEqual(firstContextHashes);
   });
 
-  it('prunes parser-cache revisions no longer referenced by an active snapshot', async () => {
+  native(it)('prunes parser-cache revisions no longer referenced by an active snapshot', async () => {
     const root = createFixtureRepository();
     const home = join(root, '.threadnote-test-home');
     const first = await runEffect(
@@ -3442,7 +3450,7 @@ describe('native code graph lifecycle', () => {
     expect(unchanged.reusedFiles).toBe(unchanged.snapshot.fileCount);
   });
 
-  it('performs a true full rebuild without parser-cache reuse', async () => {
+  native(it)('performs a true full rebuild without parser-cache reuse', async () => {
     const root = createFixtureRepository();
     const home = join(root, '.threadnote-test-home');
     const first = await runEffect(
@@ -3612,7 +3620,8 @@ describe('native code graph lifecycle', () => {
     expect(result.snapshot.fileCount).toBeGreaterThan(0);
   });
 
-  it('reuses the persisted clean base for a modification-only dirty overlay without changing graph results', async () => {
+  it('reuses the persisted clean base for a modification-only dirty overlay without changing graph results', async context => {
+    skipWithoutNativeTypeScript(context);
     const incrementalRoot = createBodyModifiedRepository(24);
     const fullRoot = createBodyModifiedRepository(24);
     const incrementalHome = join(incrementalRoot, '.threadnote-test-home');
@@ -3675,73 +3684,75 @@ describe('native code graph lifecycle', () => {
     expect(normalizeStoredGraph(result.incrementalGraph)).toEqual(normalizeStoredGraph(result.fullGraph));
   });
 
-  effectIt.effect('keeps added file-local TypeScript declarations incremental while a new export fails closed', () =>
-    Effect.gen(function* () {
-      const localRoot = yield* Effect.sync(createPublishedSurfaceRepository);
-      const exportedRoot = yield* Effect.sync(createPublishedSurfaceRepository);
-      const localHome = join(localRoot, '.threadnote-test-home');
-      const exportedHome = join(exportedRoot, '.threadnote-test-home');
-      const indexer = yield* CodeGraphIndexer;
-      const localClean = yield* indexer.index({cwd: localRoot, threadnoteHome: localHome});
-      const exportedClean = yield* indexer.index({cwd: exportedRoot, threadnoteHome: exportedHome});
+  native(effectIt.effect)(
+    'keeps added file-local TypeScript declarations incremental while a new export fails closed',
+    () =>
+      Effect.gen(function* () {
+        const localRoot = yield* Effect.sync(createPublishedSurfaceRepository);
+        const exportedRoot = yield* Effect.sync(createPublishedSurfaceRepository);
+        const localHome = join(localRoot, '.threadnote-test-home');
+        const exportedHome = join(exportedRoot, '.threadnote-test-home');
+        const indexer = yield* CodeGraphIndexer;
+        const localClean = yield* indexer.index({cwd: localRoot, threadnoteHome: localHome});
+        const exportedClean = yield* indexer.index({cwd: exportedRoot, threadnoteHome: exportedHome});
 
-      expect(localClean.snapshot).toMatchObject({dirty: false, state: 'ready'});
-      expect(exportedClean.snapshot).toMatchObject({dirty: false, state: 'ready'});
+        expect(localClean.snapshot).toMatchObject({dirty: false, state: 'ready'});
+        expect(exportedClean.snapshot).toMatchObject({dirty: false, state: 'ready'});
 
-      yield* Effect.sync(() => {
-        writeFileSync(
-          join(localRoot, 'src/service.ts'),
-          EffectArray.join(
-            [
-              'export class PublishedService {',
-              '  value(): number {',
-              '    return this.privateValue();',
-              '  }',
-              '',
-              '  private privateValue(): number {',
-              '    return 1;',
-              '  }',
-              '}',
-              '',
-            ],
-            '\n',
-          ),
-        );
-        writeFileSync(
-          join(localRoot, 'test/service.test.ts'),
-          `${readFileSync(join(localRoot, 'test/service.test.ts'), 'utf8')}\nit('reads through a new callback', () => {\n  return new PublishedService().value();\n});\n`,
-        );
-        writeFileSync(
-          join(exportedRoot, 'src/service.ts'),
-          `${readFileSync(join(exportedRoot, 'src/service.ts'), 'utf8')}\nexport function newPublishedHelper(): number { return 2; }\n`,
-        );
-      });
+        yield* Effect.sync(() => {
+          writeFileSync(
+            join(localRoot, 'src/service.ts'),
+            EffectArray.join(
+              [
+                'export class PublishedService {',
+                '  value(): number {',
+                '    return this.privateValue();',
+                '  }',
+                '',
+                '  private privateValue(): number {',
+                '    return 1;',
+                '  }',
+                '}',
+                '',
+              ],
+              '\n',
+            ),
+          );
+          writeFileSync(
+            join(localRoot, 'test/service.test.ts'),
+            `${readFileSync(join(localRoot, 'test/service.test.ts'), 'utf8')}\nit('reads through a new callback', () => {\n  return new PublishedService().value();\n});\n`,
+          );
+          writeFileSync(
+            join(exportedRoot, 'src/service.ts'),
+            `${readFileSync(join(exportedRoot, 'src/service.ts'), 'utf8')}\nexport function newPublishedHelper(): number { return 2; }\n`,
+          );
+        });
 
-      const local = yield* indexer.index({cwd: localRoot, threadnoteHome: localHome});
-      const exported = yield* indexer.index({cwd: exportedRoot, threadnoteHome: exportedHome});
+        const local = yield* indexer.index({cwd: localRoot, threadnoteHome: localHome});
+        const exported = yield* indexer.index({cwd: exportedRoot, threadnoteHome: exportedHome});
 
-      expect(local.materialization).toEqual({
-        mode: 'incremental-overlay',
-        resolutionLookupKeyForm: 'typescript-path-unscoped',
-        resolutionPublicationGate: 'own-path-local',
-        stagedFiles: 2,
-        totalFiles: 2,
-      });
-      expect(local.snapshot).toMatchObject({baseSnapshotId: localClean.snapshot.id, dirty: true});
-      expect(exported.materialization).toEqual({
-        fallbackReason: 'resolution-surface-changed',
-        mode: 'full',
-        resolutionLookupKeyForm: 'typescript-path-unscoped',
-        resolutionPublicationGate: 'exported',
-        stagedFiles: 2,
-        totalFiles: 2,
-      });
-      expect(exported.snapshot.baseSnapshotId).toBeUndefined();
-      expect(exported.snapshot.id).not.toBe(exportedClean.snapshot.id);
-    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+        expect(local.materialization).toEqual({
+          mode: 'incremental-overlay',
+          resolutionLookupKeyForm: 'typescript-path-unscoped',
+          resolutionPublicationGate: 'own-path-local',
+          stagedFiles: 2,
+          totalFiles: 2,
+        });
+        expect(local.snapshot).toMatchObject({baseSnapshotId: localClean.snapshot.id, dirty: true});
+        expect(exported.materialization).toEqual({
+          fallbackReason: 'resolution-surface-changed',
+          mode: 'full',
+          resolutionLookupKeyForm: 'typescript-path-unscoped',
+          resolutionPublicationGate: 'exported',
+          stagedFiles: 2,
+          totalFiles: 2,
+        });
+        expect(exported.snapshot.baseSnapshotId).toBeUndefined();
+        expect(exported.snapshot.id).not.toBe(exportedClean.snapshot.id);
+      }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
-  it('preserves scoped TypeScript barrel resolution in a persisted dirty overlay', async () => {
+  native(it)('preserves scoped TypeScript barrel resolution in a persisted dirty overlay', async () => {
     const incrementalRoot = createFixtureRepository();
     const fullRoot = createFixtureRepository();
     for (const root of [incrementalRoot, fullRoot]) {
@@ -3792,7 +3803,7 @@ describe('native code graph lifecycle', () => {
     expect(normalizeStoredGraph(result.incrementalGraph)).toEqual(normalizeStoredGraph(result.fullGraph));
   });
 
-  it('preserves diagnostics from unchanged files when reusing clean staging', async () => {
+  native(it)('preserves diagnostics from unchanged files when reusing clean staging', async () => {
     const root = createBodyModifiedRepositoryWithCommittedDiagnostic();
     const result = await runEffect(
       Effect.gen(function* () {
@@ -3845,7 +3856,7 @@ describe('native code graph lifecycle', () => {
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
-  effectIt.effect('keeps a span-only static re-export edit in the changed-file overlay', () =>
+  native(effectIt.effect)('keeps a span-only static re-export edit in the changed-file overlay', () =>
     Effect.gen(function* () {
       const root = yield* Effect.sync(createSpanOnlyReexportRepository);
       const indexer = yield* CodeGraphIndexer;
@@ -3868,7 +3879,7 @@ describe('native code graph lifecycle', () => {
     ['a deleted eligible file', createDeletedFileRepository, 'file-set-changed'],
     ['an expanded changed-fact batch', createFactBudgetExpandedRepository, 'project-closure-unbounded'],
   ] as const)('full materialization fallback for %s', (label, createRepository, fallbackReason) => {
-    effectIt.effect('fails closed with the exact bounded reason', () =>
+    native(effectIt.effect)('fails closed with the exact bounded reason', () =>
       Effect.gen(function* () {
         const root = yield* Effect.sync(createRepository);
         const planObservations: Pick<CodeGraphMaterializationMetrics, 'fallbackReason' | 'mode'>[] = [];
@@ -3941,7 +3952,7 @@ describe('native code graph lifecycle', () => {
     );
   });
 
-  it('indexes aggregate symbols across parser batches without a repository-scale cap', async () => {
+  native(it)('indexes aggregate symbols across parser batches without a repository-scale cap', async () => {
     const root = createManySourceRepository(129);
     const home = join(root, '.threadnote-test-home');
     const first = await runEffect(
@@ -3963,7 +3974,8 @@ describe('native code graph lifecycle', () => {
     }
   });
 
-  it('batches and indexes more than 128 dirty overlay files', async () => {
+  it('batches and indexes more than 128 dirty overlay files', async context => {
+    skipWithoutNativeTypeScript(context);
     const root = createManySourceRepository(129);
     const home = join(root, '.threadnote-test-home');
     await runEffect(
@@ -4000,7 +4012,7 @@ describe('native code graph lifecycle', () => {
     expect(EffectArray.some(result.inspected.nodes, node => node.name === 'changed128')).toBe(true);
   }, 30_000);
 
-  effectIt.effect('retries when the worktree changes after activation but before pointer promotion', () =>
+  native(effectIt.effect)('retries when the worktree changes after activation but before pointer promotion', () =>
     Effect.gen(function* () {
       const root = yield* Effect.sync(createFixtureRepository);
       const home = join(root, '.threadnote-test-home');
@@ -4073,7 +4085,7 @@ describe('native code graph lifecycle', () => {
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
-  effectIt.effect('reuses a retained dirty full root for the post-target bounded overlay', () =>
+  native(effectIt.effect)('reuses a retained dirty full root for the post-target bounded overlay', () =>
     Effect.gen(function* () {
       const root = yield* Effect.sync(createPublishedSurfaceRepository);
       const home = join(root, '.threadnote-test-home');
@@ -4271,7 +4283,7 @@ describe('native code graph lifecycle', () => {
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
-  effectIt.effect('reclaims a failed persistent snapshot before the automatic worktree-change retry', () =>
+  native(effectIt.effect)('reclaims a failed persistent snapshot before the automatic worktree-change retry', () =>
     Effect.gen(function* () {
       const root = yield* Effect.sync(createFixtureRepository);
       const home = join(root, '.threadnote-test-home');
@@ -4322,7 +4334,7 @@ describe('native code graph lifecycle', () => {
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
-  effectIt.effect('retains a completed dirty target when the worktree changes before activation', () =>
+  native(effectIt.effect)('retains a completed dirty target when the worktree changes before activation', () =>
     Effect.gen(function* () {
       const root = yield* Effect.sync(createFixtureRepository);
       const home = join(root, '.threadnote-test-home');
@@ -4907,7 +4919,7 @@ describe('native code graph lifecycle', () => {
     expect(second.reusedFiles).toBe(second.snapshot.fileCount);
   });
 
-  it('uses all supplied changed-path seeds for impact traversal', async () => {
+  native(it)('uses all supplied changed-path seeds for impact traversal', async () => {
     const root = createFixtureRepository();
     const home = join(root, '.threadnote-test-home');
     const impact = await runEffect(
@@ -4931,7 +4943,7 @@ describe('native code graph lifecycle', () => {
     );
   });
 
-  it('recovers impact from symbols deleted since the base snapshot', async () => {
+  native(it)('recovers impact from symbols deleted since the base snapshot', async () => {
     const root = createFixtureRepository();
     const home = join(root, '.threadnote-test-home');
     const clean = await runEffect(
@@ -5000,7 +5012,7 @@ describe('native code graph lifecycle', () => {
     expect(EffectArray.map(deep.nodes, node => node.id)).toEqual(EffectArray.map(shallow.nodes, node => node.id));
   });
 
-  it('keeps heuristic and model relationship opt-ins independent', async () => {
+  native(it)('keeps heuristic and model relationship opt-ins independent', async () => {
     const root = createFixtureRepository();
     const home = join(root, '.threadnote-test-home');
     const indexed = await runEffect(
@@ -5102,7 +5114,7 @@ describe('native code graph lifecycle', () => {
     expect(new Set(optionalEdgeIds(both))).toEqual(new Set(['test-heuristic-edge', 'test-model-edge']));
   });
 
-  it('reserves an impact seed for every changed path at the 200-path boundary', async () => {
+  native(it)('reserves an impact seed for every changed path at the 200-path boundary', async () => {
     const root = temporaryDirectory('threadnote-code-graph-impact-boundary-');
     const home = join(root, '.threadnote-test-home');
     mkdirSync(join(root, 'src'), {recursive: true});
@@ -5468,7 +5480,7 @@ describe('native code graph lifecycle', () => {
     }
   });
 
-  it.skipIf(process.platform === 'win32')(
+  it.skipIf(process.platform === 'win32' || nativeTypeScriptUnavailable)(
     'resumes exact postprocess-expanded batches without activating a killed partial build',
     async () => {
       const root = createRationaleAmplifiedRepository();
@@ -6289,7 +6301,8 @@ describe('native code graph lifecycle', () => {
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
-  it('indexes linked worktrees concurrently across processes without mixing dirty overlays or waiters', async () => {
+  it('indexes linked worktrees concurrently across processes without mixing dirty overlays or waiters', async context => {
+    skipWithoutNativeTypeScript(context);
     const root = createConcurrentProjectRepository();
     const home = join(root, '.threadnote-test-home');
     const baseline = await runEffect(
@@ -6621,7 +6634,7 @@ describe('native code graph lifecycle', () => {
     expect(existsSync(intent)).toBe(false);
   });
 
-  it('refuses ambiguous path endpoints and accepts explicit path#symbol selectors', async () => {
+  native(it)('refuses ambiguous path endpoints and accepts explicit path#symbol selectors', async () => {
     const root = createFixtureRepository();
     const home = join(root, '.threadnote-test-home');
     for (let index = 0; index < 25; index += 1) {
@@ -6871,7 +6884,7 @@ describe('native code graph lifecycle', () => {
     expect(readFileSync(target, 'utf8')).toBe(targetContent);
   });
 
-  effectIt.effect('keeps status read-only and converges disposable incomplete graph state', () =>
+  native(effectIt.effect)('keeps status read-only and converges disposable incomplete graph state', () =>
     Effect.gen(function* () {
       const root = yield* Effect.sync(createFixtureRepository);
       const home = join(root, '.threadnote-test-home');
@@ -7117,7 +7130,7 @@ describe('native code graph lifecycle', () => {
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
-  effectIt.effect('holds the maintenance gate while the repair diagnosis is consumed', () =>
+  native(effectIt.effect)('holds the maintenance gate while the repair diagnosis is consumed', () =>
     Effect.gen(function* () {
       const root = yield* Effect.sync(createFixtureRepository);
       const home = join(root, '.threadnote-test-home');
@@ -7183,7 +7196,7 @@ describe('native code graph lifecycle', () => {
     expect(readFileSync(victim, 'utf8')).toBe('must survive');
   });
 
-  it('indexes eligible files in a repository before its first commit', async () => {
+  native(it)('indexes eligible files in a repository before its first commit', async () => {
     const root = temporaryDirectory('threadnote-code-graph-unborn-');
     git(root, ['init', '-q']);
     writeFileSync(join(root, 'unborn.ts'), 'export function unbornSymbol(): string { return "ready"; }\n');

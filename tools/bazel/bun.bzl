@@ -2,6 +2,18 @@
 
 _TOOLCHAIN = "//tools/bazel:toolchain_type"
 
+# The only host variables a test may inherit: the prepared native TypeScript asset location and the CI flag that makes
+# a missing asset fail instead of skip. Values are part of the test action key, so CI exports a fixed per-host path
+# (see tools/bazel/README.md).
+_INHERITABLE = ["THREADNOTE_TYPESCRIPT_NATIVE_PREPARED_ASSET_DIR", "THREADNOTE_NATIVE_TYPESCRIPT_REQUIRED"]
+
+def _inherited(ctx):
+    names = getattr(ctx.attr, "inherited_env", [])
+    for name in names:
+        if name not in _INHERITABLE:
+            fail("%s may not inherit host variable %s" % (ctx.label, name))
+    return names
+
 def _toolchain_impl(ctx):
     return [platform_common.ToolchainInfo(bun = ctx.file.bun)]
 
@@ -31,7 +43,7 @@ def _manifest(ctx, inputs, args, testing):
             if not destination.startswith("node_modules/"):
                 fail("External Bun inputs must be npm files: " + path)
         files.append({"source": path if testing else file.path, "destination": destination})
-    ctx.actions.write(manifest, json.encode({"files": files, "args": args, "env": ctx.attr.env}))
+    ctx.actions.write(manifest, json.encode({"files": files, "args": args, "env": ctx.attr.env, "inheritedEnv": _inherited(ctx)}))
     return manifest
 
 def _test_impl(ctx):
@@ -44,7 +56,10 @@ set -eu
 cd "$TEST_SRCDIR/%s"
 exec "%s" "%s" "%s" --test "$@"
 """ % (ctx.workspace_name, bun.short_path, ctx.file._runner.short_path, manifest.short_path), is_executable = True)
-    return [DefaultInfo(executable = executable, runfiles = ctx.runfiles(files = [bun, manifest, ctx.file._runner], transitive_files = inputs))]
+    return [
+        DefaultInfo(executable = executable, runfiles = ctx.runfiles(files = [bun, manifest, ctx.file._runner], transitive_files = inputs)),
+        RunEnvironmentInfo(inherited_environment = _inherited(ctx)),
+    ]
 
 def _workspace_test_impl(ctx):
     inputs = _files(ctx)
@@ -56,16 +71,22 @@ set -eu
 cd "$TEST_SRCDIR/%s"
 exec "%s" "%s" "%s" --workspace-test "$@"
 """ % (ctx.workspace_name, bun.short_path, ctx.file._runner.short_path, manifest.short_path), is_executable = True)
-    return [DefaultInfo(executable = executable, runfiles = ctx.runfiles(files = [bun, manifest, ctx.file._runner], transitive_files = inputs))]
+    return [
+        DefaultInfo(executable = executable, runfiles = ctx.runfiles(files = [bun, manifest, ctx.file._runner], transitive_files = inputs)),
+        RunEnvironmentInfo(inherited_environment = _inherited(ctx)),
+    ]
 
 _RUN_ATTRS = dict(
     _ATTRS,
     env = attr.string_dict(),
     _runner = attr.label(default = "//tools/bazel:runner.mjs", allow_single_file = True),
 )
+# Names (never values) of allowlisted host variables a test inherits.
+_TEST_ATTRS = dict(_RUN_ATTRS, runner_args = attr.string_list(), inherited_env = attr.string_list())
+
 bun_test = rule(
     implementation = _test_impl,
-    attrs = dict(_RUN_ATTRS, runner_args = attr.string_list()),
+    attrs = _TEST_ATTRS,
     test = True,
     toolchains = [_TOOLCHAIN],
 )
@@ -74,7 +95,7 @@ bun_test = rule(
 # declare exact inputs for analysis and CI selection, but execute locally.
 bun_workspace_test = rule(
     implementation = _workspace_test_impl,
-    attrs = dict(_RUN_ATTRS, runner_args = attr.string_list()),
+    attrs = _TEST_ATTRS,
     test = True,
     toolchains = [_TOOLCHAIN],
 )

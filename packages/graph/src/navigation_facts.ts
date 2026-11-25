@@ -1,5 +1,5 @@
 import * as EffectRecord from 'effect/Record';
-import type ts from 'typescript-compiler';
+import type * as ts from 'typescript/ast';
 import {Array as EffectArray, Predicate} from 'effect';
 import {collectBindingNames, spanFor} from './extractor_syntax.js';
 import type {
@@ -22,12 +22,17 @@ export function createNavigationFactCollector(
   for (const statement of source.statements) {
     if (
       !compiler.isImportDeclaration(statement) ||
-      !compiler.isStringLiteralLike(statement.moduleSpecifier) ||
+      !compiler.isStringLiteralLikeNode(statement.moduleSpecifier) ||
       statement.moduleSpecifier.text !== 'node:fs/promises'
     )
       continue;
     const clause = statement.importClause;
-    if (!clause || clause.isTypeOnly || !clause.namedBindings || !compiler.isNamedImports(clause.namedBindings))
+    if (
+      !clause ||
+      clause.phaseModifier === compiler.SyntaxKind.TypeKeyword ||
+      !clause.namedBindings ||
+      !compiler.isNamedImports(clause.namedBindings)
+    )
       continue;
     for (const element of clause.namedBindings.elements)
       if (
@@ -78,7 +83,7 @@ export function createNavigationFactCollector(
   for (const [name, count] of bindings) if (count !== 1) invalid.add(name);
   const simpleValue = (node: ts.Expression): boolean =>
     compiler.isIdentifier(node) ||
-    compiler.isStringLiteralLike(node) ||
+    compiler.isStringLiteralLikeNode(node) ||
     compiler.isNumericLiteral(node) ||
     node.kind === compiler.SyntaxKind.TrueKeyword ||
     node.kind === compiler.SyntaxKind.FalseKeyword ||
@@ -140,7 +145,7 @@ export function createNavigationFactCollector(
   const invalidateAssignmentTarget = (node: ts.Node): void => {
     if (compiler.isIdentifier(node)) {
       if (imports.has(node.text)) invalid.add(node.text);
-    } else compiler.forEachChild(node, invalidateAssignmentTarget);
+    } else node.forEachChild(invalidateAssignmentTarget);
   };
   const span = (node: ts.Node) => spanFor(source, node.getStart(source, false), node.getEnd());
   return {
@@ -170,7 +175,8 @@ export function createNavigationFactCollector(
       ) {
         if (compiler.isIdentifier(node.name) && !imports.has(node.name.text)) return;
         let scope: ts.Node | undefined = node.parent;
-        while (scope && !compiler.isFunctionLike(scope) && !compiler.isSourceFile(scope)) scope = scope.parent;
+        while (scope && !compiler.isFunctionLikeDeclaration(scope) && !compiler.isSourceFile(scope))
+          scope = scope.parent;
         if (scope && compiler.isSourceFile(scope) && node.parent.parent.parent !== source) {
           const names = new Set<string>();
           collectBindingNames(compiler, node.name, names);
@@ -197,7 +203,7 @@ export function createNavigationFactCollector(
         return;
       let current: ts.Node = parent.parent;
       let guard: CodeGraphNavigationProof['guard'] | undefined;
-      while (current.parent && !compiler.isFunctionLike(current.parent)) {
+      while (current.parent && !compiler.isFunctionLikeDeclaration(current.parent)) {
         const next = current.parent;
         if (compiler.isIfStatement(next) && compiler.isIdentifier(next.expression) && !guard) {
           const branch = next.thenStatement === current ? 'then' : next.elseStatement === current ? 'else' : undefined;

@@ -21,8 +21,38 @@ env:
   BUN_VERSION: 1.4.4
 
 jobs:
+  # The shared prepared native TypeScript asset for this host: restore, construct once on a miss, save. The capture job
+  # only restores it. A measured ref older than the native TypeScript migration has no asset action and needs none.
+  native-typescript-asset:
+    name: Native TypeScript asset · linux-x64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    outputs:
+      cache_key: ${{ steps.asset.outputs.cache_key }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          ref: ${{ inputs.release_ref || github.sha }}
+
+      - uses: oven-sh/setup-bun@v2
+        if: hashFiles('.github/actions/native-typescript-asset/action.yml') != ''
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - run: bun install --frozen-lockfile
+        if: hashFiles('.github/actions/native-typescript-asset/action.yml') != ''
+
+      - name: Restore, construct on a miss and save the verified native TypeScript asset
+        id: asset
+        if: hashFiles('.github/actions/native-typescript-asset/action.yml') != ''
+        timeout-minutes: 80
+        uses: ./.github/actions/native-typescript-asset
+
   code-graph-production-large:
     name: Code graph production-shaped admission and bounded capture · pinned Linux class
+    needs: native-typescript-asset
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 
@@ -48,6 +78,15 @@ jobs:
           bun-version: ${{ env.BUN_VERSION }}
 
       - run: bun install --frozen-lockfile
+
+      # Both captures index TypeScript through the native asset; restored from the asset job and re-verified.
+      - name: Restore the verified native TypeScript asset
+        if: hashFiles('.github/actions/native-typescript-asset/action.yml') != ''
+        timeout-minutes: 10
+        uses: ./.github/actions/native-typescript-asset
+        with:
+          restore-only: 'true'
+          cache-key: ${{ needs.native-typescript-asset.outputs.cache_key }}
 
       - id: classify_production_large_admission
         name: Classify governed production-large runner capacity

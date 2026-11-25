@@ -7,13 +7,16 @@ import {
   isTypeScriptCallableImplementation,
   leadingDocumentation,
   propertyName,
+  parseLocallyBoundTarget,
+  groupSymbols,
+  uniqueSymbol,
   relationshipExpressionName,
   spanFor,
   textSpan,
   typeScriptDeclarationArity,
 } from './extractor_syntax.js';
 import {Array as EffectArray} from 'effect';
-import type ts from 'typescript-compiler';
+import type * as ts from 'typescript/ast';
 import {Option, Predicate} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {parseMarkdownHeadingLine, textLines} from '@threadnote/platform/string-boundaries';
@@ -21,7 +24,10 @@ import {compareCodeUnits} from './ordering.js';
 import {
   loadTypeScriptExtractionRuntime,
   TYPESCRIPT_FULL_TRAVERSAL_CHARACTER_LIMIT,
-  typeScriptKindForPath,
+  withNativeTypeScriptExtractionSource,
+  typeScriptDiagnosticMessages,
+  NativeTypeScriptUnavailable,
+  type NativeTypeScriptExtractionSession,
 } from './typescript_runtime.js';
 import {documentLookupTiers, resolveLegacyDocumentReference, resolveLookupTiers} from './resolution/lookup.js';
 import type {
@@ -106,24 +112,35 @@ export const TYPESCRIPT_DYNAMIC_RELATIONSHIP_LIMIT = 4_000;
 // that boundary keeps attribution and non-TypeScript extraction compiler-free.
 let compiler: typeof ts;
 let declarationKinds: ReadonlySet<ts.SyntaxKind>;
+let compilerAst: import('./typescript_runtime.js').NativeTypeScriptAst | undefined;
 
-export function extractRepositoryFacts(
+export async function extractRepositoryFacts(
   files: readonly CodeGraphInventoryFile[],
   observer: CodeGraphResolutionObserver = {},
-): readonly CodeGraphFileFacts[] {
-  return resolveExtractedRepositoryFacts(extractRepositoryFileFacts(files), files, observer);
+  nativeSession?: NativeTypeScriptExtractionSession,
+): Promise<readonly CodeGraphFileFacts[]> {
+  return resolveExtractedRepositoryFacts(
+    await extractRepositoryFileFacts(files, undefined, nativeSession),
+    files,
+    observer,
+  );
 }
 
-export function extractRepositoryFileFacts(
+export async function extractRepositoryFileFacts(
   files: readonly CodeGraphInventoryFile[],
   acceptedPaths?: ReadonlySet<string>,
-): readonly CodeGraphFileFacts[] {
+  nativeSession?: NativeTypeScriptExtractionSession,
+): Promise<readonly CodeGraphFileFacts[]> {
   const packages = discoverPackages(files);
   const output: CodeGraphFileFacts[] = [];
+  // The caller owns the one native session for the batch; each file gets its own per-operation budget.
   for (const file of files) {
     if (!(acceptedPaths?.has(file.path) ?? true)) continue;
-    const facts = extractFileFacts(file, {packageName: packageForPath(file.path, packages)});
-    output.push(facts);
+    const options = {packageName: packageForPath(file.path, packages)};
+    if (TYPESCRIPT_EXTENSIONS.test(file.path)) {
+      if (!nativeSession) throw NativeTypeScriptUnavailable.of('missing-asset');
+      output.push(await extractNativeFileFacts(file, nativeSession, options));
+    } else output.push(extractFileFacts(file, options));
   }
   return output;
 }
@@ -557,7 +574,14 @@ function uniqueByKey<A>(values: readonly A[], key: (value: A) => string): readon
 
 export function extractFileFacts(
   file: CodeGraphInventoryFile,
-  options: {readonly packageName?: string} = {},
+  options: {
+    readonly packageName?: string;
+    readonly nativeSource?: {
+      readonly file: ts.SourceFile;
+      readonly ast: import('./typescript_runtime.js').NativeTypeScriptAst;
+      readonly diagnostics?: readonly import('typescript/async').Diagnostic[];
+    };
+  } = {},
 ): CodeGraphFileFacts {
   if (file.content === undefined) {
     throw new Error(`Repository content for ${file.path} was not loaded before extraction.`);
@@ -568,22 +592,49 @@ export function extractFileFacts(
     packageName: options.packageName,
     path: file.path,
   };
-  if (TYPESCRIPT_EXTENSIONS.test(file.path)) return extractTypeScript(file.content, context);
+  if (TYPESCRIPT_EXTENSIONS.test(file.path)) {
+    if (!options.nativeSource || options.nativeSource.file.text !== file.content)
+      throw new Error('Native TypeScript source lease required.');
+    return extractTypeScript(
+      file.content,
+      context,
+      options.nativeSource.file,
+      options.nativeSource.ast,
+      options.nativeSource.diagnostics ?? [],
+    );
+  }
   if (/package\.json$/i.test(file.path)) return extractPackageManifest(file.content, context);
   if (/go\.mod$/i.test(file.path)) return extractGoManifest(file.content, context);
   if (/\.mdx?$/i.test(file.path)) return extractMarkdown(file.content, context);
   return {diagnostics: [], edges: [], path: file.path, symbols: []};
 }
 
-function extractTypeScript(content: string, context: ExtractionContext): CodeGraphFileFacts {
-  if (compiler === undefined) ({compiler, declarationKinds} = loadTypeScriptExtractionRuntime());
-  const sourceFile = compiler.createSourceFile(
-    context.path,
-    content,
-    compiler.ScriptTarget.Latest,
-    true,
-    typeScriptKindForPath(compiler, context.path),
+export async function extractNativeFileFacts(
+  file: CodeGraphInventoryFile,
+  session: NativeTypeScriptExtractionSession,
+  options: {readonly packageName?: string} = {},
+): Promise<CodeGraphFileFacts> {
+  if (file.content === undefined) throw new Error('Repository source content is unavailable.');
+  return withNativeTypeScriptExtractionSource(
+    {path: file.path, content: file.content},
+    session,
+    (source, diagnostics) =>
+      extractFileFacts(file, {...options, nativeSource: {file: source, ast: session.ast, diagnostics}}),
   );
+}
+
+function extractTypeScript(
+  content: string,
+  context: ExtractionContext,
+  sourceFile: ts.SourceFile,
+  ast: import('./typescript_runtime.js').NativeTypeScriptAst,
+  parseDiagnostics: readonly import('typescript/async').Diagnostic[],
+): CodeGraphFileFacts {
+  // Bind to the AST module of the session that produced this source; a later session never reuses another's binding.
+  if (compilerAst !== ast) {
+    ({compiler, declarationKinds} = loadTypeScriptExtractionRuntime(ast));
+    compilerAst = ast;
+  }
   const facts: MutableFacts = {
     diagnostics: [],
     edgeIdentities: new Set(),
@@ -635,7 +686,7 @@ function extractTypeScript(content: string, context: ExtractionContext): CodeGra
     }
 
     const owner = declarationStack.at(-1)!;
-    if (compiler.isImportDeclaration(node) && compiler.isStringLiteralLike(node.moduleSpecifier)) {
+    if (compiler.isImportDeclaration(node) && compiler.isStringLiteralLikeNode(node.moduleSpecifier)) {
       const specifier = node.moduleSpecifier.text;
       addUnresolvedEdge(facts, context, node, owner, specifier, 'imports', 'syntactic');
       const clause = node.importClause;
@@ -676,7 +727,7 @@ function extractTypeScript(content: string, context: ExtractionContext): CodeGra
     } else if (
       compiler.isExportDeclaration(node) &&
       node.moduleSpecifier &&
-      compiler.isStringLiteralLike(node.moduleSpecifier)
+      compiler.isStringLiteralLikeNode(node.moduleSpecifier)
     ) {
       const specifier = node.moduleSpecifier.text;
       addUnresolvedEdge(facts, context, node, owner, specifier, 'reexports', 'syntactic');
@@ -702,7 +753,11 @@ function extractTypeScript(content: string, context: ExtractionContext): CodeGra
       const relation: CodeGraphRelation =
         node.token === compiler.SyntaxKind.ImplementsKeyword ? 'implements' : 'extends';
       for (const type of node.types) {
-        const target = relationshipExpressionName(compiler, type.expression, localBindings);
+        const target = compiler.isExpressionWithTypeArguments(type)
+          ? relationshipExpressionName(compiler, type.expression, localBindings)
+          : compiler.isIdentifier(type.typeName)
+            ? relationshipExpressionName(compiler, type.typeName, localBindings)
+            : `${compiler.isIdentifier(type.typeName.left) ? type.typeName.left.text : 'property'}.${type.typeName.right.text}`;
         if (target) addUnresolvedEdge(facts, context, type, owner, target, relation, 'syntactic');
       }
     } else if (compiler.isExportAssignment(node)) {
@@ -711,21 +766,12 @@ function extractTypeScript(content: string, context: ExtractionContext): CodeGra
     }
 
     if (surfaceOnly || dynamicRelationshipsBounded) forEachTypeScriptStructuralChild(node, visit);
-    else compiler.forEachChild(node, visit);
+    else node.forEachChild(visit);
     if (pushed) declarationStack.pop();
   };
-  compiler.forEachChild(sourceFile, visit);
+  sourceFile.forEachChild(visit);
 
-  const parseDiagnostics = (
-    sourceFile as ts.SourceFile & {readonly parseDiagnostics?: readonly ts.DiagnosticWithLocation[]}
-  ).parseDiagnostics;
-  for (const diagnostic of parseDiagnostics ?? []) {
-    const position =
-      diagnostic.start === undefined ? undefined : sourceFile.getLineAndCharacterOfPosition(diagnostic.start).line + 1;
-    facts.diagnostics.push(
-      `${context.path}${position ? `:${position}` : ''}: ${compiler.flattenDiagnosticMessageText(diagnostic.messageText, ' ')}`,
-    );
-  }
+  facts.diagnostics.push(...typeScriptDiagnosticMessages(context.path, parseDiagnostics));
   if (dynamicRelationshipsBounded) {
     facts.diagnostics.push(
       surfaceOnly
@@ -751,7 +797,7 @@ function extractTypeScript(content: string, context: ExtractionContext): CodeGra
 }
 
 function forEachTypeScriptStructuralChild(node: ts.Node, visit: (node: ts.Node) => void): void {
-  compiler.forEachChild(node, child => {
+  node.forEachChild(child => {
     if (
       compiler.isExpression(child) &&
       !compiler.isArrowFunction(child) &&
@@ -799,7 +845,7 @@ function declarationForNode(
   }
   if (
     (compiler.isMethodDeclaration(node) ||
-      compiler.isMethodSignature(node) ||
+      compiler.isMethodSignatureDeclaration(node) ||
       compiler.isGetAccessorDeclaration(node) ||
       compiler.isSetAccessorDeclaration(node)) &&
     node.name
@@ -1881,34 +1927,6 @@ function qualify(stack: readonly CodeGraphSymbol[], name: string): string {
   return parent?.kind === 'module'
     ? name
     : Effect.pipe(`${parent?.qualifiedName ?? ''}.${name}`, EffectString.replace(/^\./, ''));
-}
-
-function parseLocallyBoundTarget(value: string): string | undefined {
-  const match = /^local:(.+)$/.exec(value);
-  if (!match) return undefined;
-  try {
-    return decodeURIComponent(match[1]);
-  } catch {
-    return undefined;
-  }
-}
-
-function groupSymbols(
-  symbols: readonly CodeGraphSymbol[],
-  key: (symbol: CodeGraphSymbol) => string,
-): ReadonlyMap<string, readonly CodeGraphSymbol[]> {
-  const result = new Map<string, CodeGraphSymbol[]>();
-  for (const symbol of symbols) {
-    const value = key(symbol);
-    const existing = result.get(value);
-    if (existing) existing.push(symbol);
-    else result.set(value, [symbol]);
-  }
-  return result;
-}
-
-function uniqueSymbol(symbols: readonly CodeGraphSymbol[] | undefined): CodeGraphSymbol | undefined {
-  return symbols?.length === 1 ? symbols[0] : undefined;
 }
 
 function moduleCandidates(base: string): readonly string[] {

@@ -4,11 +4,12 @@ import {
 } from '@threadnote/recall/vector/native-reader-payload';
 import {verifyNativeInferenceOverlay} from './native-inference-payload.js';
 import {readNativeReaderBuildInfo} from './native-vector-reader-payload.js';
+import {createTypeScriptSyntaxSession} from '../tools/workspace/typescript-syntax.js';
 import {Array as EffectArray} from 'effect';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import * as BunServices from '@effect/platform-bun/BunServices';
-import {Console, Effect, FileSystem, Path, Exit, Cause} from 'effect';
+import {Cause, Console, Effect, Exit, FileSystem, Path} from 'effect';
 import {sha256FileHex} from '@threadnote/platform/digest';
 import {hasUndeclaredPythonRuntimeReference} from './effect/self-contained-source.js';
 import * as EffectRecord from 'effect/Record';
@@ -42,7 +43,7 @@ const ROOT_URL = new URL('..', import.meta.url);
 const EXPECTED_BUN_VERSION = '1.4.4';
 const EXPECTED_EFFECT_VERSION = '4.1.4';
 const EXPECTED_NODE_LLAMA_CPP_VERSION = '3.22.2';
-const EXPECTED_TYPESCRIPT_COMPILER_VERSION = 'npm:typescript@5.9.3';
+const EXPECTED_TYPESCRIPT_VERSION = '7.1.0-beta';
 const EXPECTED_WEB_TREE_SITTER_VERSION = '0.27.1';
 const EXPECTED_VSCODE_TREE_SITTER_WASM_VERSION = '0.3.1';
 const EXPECTED_REPOMIX_TREE_SITTER_WASMS_VERSION = '0.1.17';
@@ -99,6 +100,11 @@ const checkSelfContained = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const root = yield* path.fromFileUrl(ROOT_URL);
+  // One npm TypeScript syntax child for the whole check.
+  const nativeSession = yield* Effect.acquireRelease(
+    Effect.sync(() => createTypeScriptSyntaxSession({cwd: root})),
+    session => Effect.promise(() => session.close()),
+  );
   const failures: string[] = [];
   yield* validateCodeGraphAssets(fs, path, path.join(root, 'assets', 'code-graph'), failures, root);
   yield* validateCursorPlugin(fs, path, root, failures);
@@ -121,7 +127,12 @@ const checkSelfContained = Effect.gen(function* () {
     if (/\b(?:openviking|pipx)\b/i.test(content) && !ALLOWED_LEGACY_RUNTIME_SOURCES.has(relativePath)) {
       failures.push(`legacy runtime token outside migration boundary: ${relativePath}`);
     }
-    if (hasUndeclaredPythonRuntimeReference(relativePath, content)) {
+    if (
+      yield* Effect.tryPromise({
+        try: () => hasUndeclaredPythonRuntimeReference(nativeSession, relativePath, content),
+        catch: cause => ScriptError.make({message: 'Native Python boundary analysis failed.', cause}),
+      })
+    ) {
       failures.push(
         `Python runtime token outside migration, language, semantic or retained workflow ownership metadata: ${relativePath}`,
       );
@@ -161,9 +172,10 @@ const checkSelfContained = Effect.gen(function* () {
   if (manifest.dependencies?.['@effect/sql-sqlite-bun'] !== EXPECTED_EFFECT_VERSION) {
     failures.push(`@effect/sql-sqlite-bun must be pinned to ${EXPECTED_EFFECT_VERSION}`);
   }
-  if (manifest.dependencies?.['typescript-compiler'] !== EXPECTED_TYPESCRIPT_COMPILER_VERSION) {
-    failures.push(`typescript-compiler must be pinned to ${EXPECTED_TYPESCRIPT_COMPILER_VERSION}`);
+  if (allDependencies.typescript !== EXPECTED_TYPESCRIPT_VERSION) {
+    failures.push(`typescript must be pinned to ${EXPECTED_TYPESCRIPT_VERSION}`);
   }
+  if (allDependencies['typescript-compiler']) failures.push('Legacy typescript-compiler alias must not remain.');
   if (manifest.dependencies?.['web-tree-sitter'] !== EXPECTED_WEB_TREE_SITTER_VERSION) {
     failures.push(`web-tree-sitter must be pinned to ${EXPECTED_WEB_TREE_SITTER_VERSION}`);
   }
@@ -375,7 +387,7 @@ const checkSelfContained = Effect.gen(function* () {
     });
   }
   yield* Console.log('Self-contained Bun source and release checks passed.');
-});
+}).pipe(Effect.scoped);
 
 const sourceFiles = Effect.fn('checkSelfContained.sourceFiles')(function* (
   fs: FileSystem.FileSystem,

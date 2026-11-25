@@ -1,3 +1,4 @@
+import {requireNativeTypeScriptAsset} from './support/native-typescript-preflight.js';
 import {lexicalV2PhysicalCountStatement, isLexicalV2Snapshot} from '@threadnote/graph/store';
 import {CodeGraphLanguagePackRegistry} from '@threadnote/graph/languages/registry';
 import {TreeSitterRuntime, TREE_SITTER_RUNTIME_CACHE_IDENTITY} from '@threadnote/graph/tree_sitter/runtime';
@@ -802,6 +803,12 @@ const benchmarkCodeGraph = Effect.scoped(
       yield* printJson(externalPreflight);
       return;
     }
+    // Checked after the checkout, disk and preflight refusals and before anything is indexed: a missing asset is a
+    // setup failure, never a measured regression.
+    yield* Effect.try({
+      try: () => requireNativeTypeScriptAsset('bench:code-graph'),
+      catch: cause => ScriptError.make({message: cause instanceof Error ? cause.message : String(cause)}),
+    });
     if (externalPrepared && options.retainHomes) {
       yield* externalPrepared.preserveHomes ??
         Effect.fail(ScriptError.make({message: 'External benchmark homes could not be retained after preflight.'}));

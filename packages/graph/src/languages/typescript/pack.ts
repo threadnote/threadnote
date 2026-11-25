@@ -1,22 +1,34 @@
 import {Effect, Option} from 'effect';
-import typescriptPackage from 'typescript-compiler/package.json' with {type: 'json'};
+import typescriptPackage from 'typescript/package.json' with {type: 'json'};
+import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import {extractFileFacts} from '../../extractor.js';
+import {extractNativeFileFacts} from '../../extractor.js';
+import {NativeTypeScriptSessionService} from '../../typescript_runtime.js';
+import {nativeTypeScriptAssetPins} from '../../typescript_native_asset_pins.js';
 import {CodeGraphLanguagePackError, type CodeGraphLanguagePack} from '../types.js';
 
-const EXTRACTOR_POLICY_VERSION = 'typescript-compiler-v9-finite-navigation-proofs';
+const EXTRACTOR_POLICY_VERSION = 'typescript-native-7.1-v2-full-utf16-finite-navigation-proofs';
 
 export const codeGraphLanguagePack: CodeGraphLanguagePack = {
   assets: [],
   capabilities: new Set(['calls', 'declarations', 'imports', 'inheritance']),
   extractor: {
     extract: file =>
-      Effect.try({
-        try: () => extractFileFacts(file),
-        catch: cause =>
-          CodeGraphLanguagePackError.make({message: `Could not extract TypeScript facts from ${file.path}.`, cause}),
+      Effect.gen(function* () {
+        const selected = yield* Effect.serviceOption(NativeTypeScriptSessionService);
+        if (Option.isNone(selected))
+          return yield* CodeGraphLanguagePackError.make({message: 'Native TypeScript parser session is unavailable.'});
+        return yield* fromPromiseInterruptible(
+          () => extractNativeFileFacts(file, selected.value),
+          cause =>
+            CodeGraphLanguagePackError.make({message: `Could not extract TypeScript facts from ${file.path}.`, cause}),
+        );
       }),
-    version: sha256HexSync(`${EXTRACTOR_POLICY_VERSION}\ntypescript:${typescriptPackage.version}`),
+    // The reviewed asset pins (binaries, SDK, patch, bundle, provenance) are part of the extractor identity, so a pin
+    // change invalidates every cached fact and navigation proof produced by the previous asset.
+    version: sha256HexSync(
+      `${EXTRACTOR_POLICY_VERSION}\ntypescript:${typescriptPackage.version}\nasset:${JSON.stringify(nativeTypeScriptAssetPins)}`,
+    ),
   },
   files: [
     {kind: 'extension', language: 'typescript', role: 'source', value: '.ts'},

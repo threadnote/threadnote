@@ -5,6 +5,7 @@ import {promisify} from '@threadnote/testing/node-util';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {describe, expect, it} from 'vitest';
+import {skipWithoutNativeTypeScript} from '@threadnote/graph/test/helpers/native-typescript-session';
 import {mkdir, mkdtemp, readFile, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
@@ -16,7 +17,9 @@ import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 
 describe('MCP-owned signed graph contribution', () => {
-  it('queues and delivers a signed candidate from a strict graph inspection without a contribute command', async () => {
+  it('queues and delivers a signed candidate from a strict graph inspection without a contribute command', async context => {
+    // The MCP-owned build indexes TypeScript fixtures, so a degraded native parser never yields a candidate.
+    skipWithoutNativeTypeScript(context);
     const root = await mkdtemp(join(tmpdir(), 'threadnote-signed-mcp-index-'));
     const home = join(root, 'home');
     const cas = join(root, 'cas');

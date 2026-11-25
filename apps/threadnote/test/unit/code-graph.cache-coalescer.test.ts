@@ -820,6 +820,7 @@ function coalescerHarness(options: {
     withParserSlot: (_threadnoteHome, _files, use) => use(extract),
     warm: () => Effect.void,
     trimIdle: Effect.void,
+    projectSourceSequence: () => Effect.succeed({status: 'unavailable'}),
   } satisfies CodeGraphParserPoolShape;
   const recordCache = (files: readonly CodeGraphInventoryFile[], facts: CacheCall['facts'], cacheIdentity: string) =>
     Effect.sync(() => {

@@ -416,6 +416,7 @@ const receipt = Schema.Struct({
     'ambiguous-relocation',
     'citation-limit',
     'exact',
+    'extraction-unavailable',
     'extractor-mismatch',
     'graph-incomplete',
     'graph-stale',

@@ -1,6 +1,6 @@
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Layer, Path, Schema, Tracer} from 'effect';
+import {Context, Effect, FileSystem, Layer, Path, Schema, Tracer} from 'effect';
 import {TestClock} from 'effect/testing';
 import fc from 'fast-check';
 import {describe, expect} from 'vitest';
@@ -18,6 +18,8 @@ import {
   createCodeGraphLanguagePackRegistry,
 } from '@threadnote/graph/languages/registry';
 import {TreeSitterRuntime} from '@threadnote/graph/tree_sitter/runtime';
+import {CodeGraphParserPool} from '@threadnote/graph/parser_worker';
+import {native} from '@threadnote/graph/test/helpers/native-typescript-session';
 import {
   createCodeGraphSourceSpanCanonicalizer,
   type CodeGraphEffectiveSnapshotCitationEvidence,
@@ -47,6 +49,25 @@ const platform = Layer.merge(
   Layer.succeed(CodeGraphLanguagePackRegistry, createCodeGraphLanguagePackRegistry([])),
 );
 const source = 'export const supported = true;\n';
+/** The production parser pool; its workers run the source entrypoint and borrow a native TypeScript session. */
+const parserPoolLayer = CodeGraphParserPool.layer.pipe(
+  Layer.provide(
+    Layer.effect(
+      SystemInfo,
+      Effect.gen(function* () {
+        const system = yield* SystemInfo;
+        const path = yield* Path.Path;
+        return SystemInfo.of({
+          ...system,
+          developmentEntrypoint: yield* path.fromFileUrl(
+            new URL('../../../../apps/threadnote/src/standalone.ts', import.meta.url),
+          ),
+          environment: () => ({...system.environment(), THREADNOTE_CODE_GRAPH_PARSER_WORKERS: '1'}),
+        });
+      }),
+    ),
+  ),
+);
 const git = (cwd: string, args: readonly string[]) => runCommandEffect('git', ['-C', cwd, ...args]);
 const fixture = (dirty = false, capturedSource?: string, legacyQuery = false) =>
   Effect.gen(function* () {
@@ -631,6 +652,17 @@ describe('citation proof before source retirement', () => {
           ];
           for (const anchor of invalid)
             expect((yield* data.check(anchor))[0]?.receipts[0]?.provenance).toBe('unverified');
+          // Without a parser pool the signature cannot be re-derived: an explicit unverified state, never a match.
+          expect((yield* data.check(invalid[2]))[0]?.receipts[0]).toMatchObject({
+            provenance: 'unverified',
+            reason: 'extraction-unavailable',
+            status: 'unknown',
+          });
+          const read = yield* data.provide(
+            readContextHealthCitationEvidence(data.config, {callerCwd: data.cwd, kind: 'repository'}, invalid[2]),
+          );
+          expect(read.coverage).toBe('unavailable');
+          expect(read.attemptedSteps).toContain('historical-extraction-unavailable');
         }),
       ),
     );
@@ -670,7 +702,7 @@ describe('citation proof before source retirement', () => {
       ),
     );
 
-    it.effect('independently extracts and verifies a required historical symbol signature', () =>
+    native(it.effect)('independently extracts and verifies a required historical symbol signature', () =>
       TestClock.withLive(
         Effect.gen(function* () {
           const data = yield* fixture();
@@ -678,7 +710,8 @@ describe('citation proof before source retirement', () => {
           const treeRuntime = TreeSitterRuntime.of({
             withParsedSource: () => Effect.die('TypeScript extraction must use its own parser.'),
           });
-          const facts = yield* BUILTIN_LANGUAGE_PACK_REGISTRY.extractFile({
+          // The production parser pool, whose worker borrows the native session; no session is injected here.
+          const file = {
             blobId: '',
             content: source,
             contentHash: data.citation.fileContentHash.value,
@@ -686,8 +719,12 @@ describe('citation proof before source retirement', () => {
             mode: '100644',
             path: 'source.ts',
             size: data.bytes.byteLength,
-            source: 'commit',
-          }).pipe(Effect.provideService(TreeSitterRuntime, treeRuntime));
+            source: 'commit' as const,
+          };
+          const pool = Context.get(yield* Layer.build(parserPoolLayer), CodeGraphParserPool);
+          const parsed = yield* pool.extract(file, data.home);
+          expect(parsed.degraded).toBe(false);
+          const facts = BUILTIN_LANGUAGE_PACK_REGISTRY.postprocessFile(file, parsed.facts);
           const symbol = EffectOption.getOrUndefined(
             EffectArray.findFirst(facts.symbols, value => value.name === 'supported'),
           );
@@ -723,6 +760,7 @@ describe('citation proof before source retirement', () => {
             .pipe(
               Effect.provideService(CodeGraphLanguagePackRegistry, BUILTIN_LANGUAGE_PACK_REGISTRY),
               Effect.provideService(TreeSitterRuntime, treeRuntime),
+              Effect.provideService(CodeGraphParserPool, pool),
             );
           expect(checked[0]?.receipts[0]?.provenance).toBe('historical-verified');
         }),

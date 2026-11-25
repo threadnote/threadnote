@@ -1,3 +1,4 @@
+import {requireNativeTypeScriptAsset} from './support/native-typescript-preflight.js';
 import {Array as EffectArray} from 'effect';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
@@ -311,4 +312,7 @@ const replaceContractSymbol = Effect.fn('codeGraphEvaluation.replaceContractSymb
   yield* fs.writeFileString(target, Effect2.pipe(content, EffectString.replaceAll(from, to)));
 });
 
-if (import.meta.main) BunRuntime.runMain(provideScriptLayer(evaluateNativeCodeGraph, ApplicationLayer));
+if (import.meta.main) {
+  requireNativeTypeScriptAsset('eval:code-graph');
+  BunRuntime.runMain(provideScriptLayer(evaluateNativeCodeGraph, ApplicationLayer));
+}

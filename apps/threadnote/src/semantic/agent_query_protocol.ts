@@ -278,7 +278,7 @@ export function formatSemanticAgentQuery(result: SemanticAgentQueryResult): stri
 /** Internal selected-verifier reply; never a public permission or caller input. */
 export const SemanticVerificationReply = Schema.Struct({
   version: Schema.Literal(1),
-  provider: Schema.Literals(['typescript-language-server', 'basedpyright', 'gopls', 'rust-analyzer', 'jdtls']),
+  provider: Schema.Literals(['typescript-native', 'basedpyright', 'gopls', 'rust-analyzer', 'jdtls']),
   candidate: Digest,
   mode: Schema.Literals(['candidate', 'configuration']),
   digest: Digest,

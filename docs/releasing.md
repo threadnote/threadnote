@@ -71,12 +71,93 @@ provider-eligible.
 - `.github/workflows/native-typescript-construction.yml` runs `--prepare` and both verifiers on the six GitHub-hosted
   targets on manual dispatch and for same-repository pull requests into `main` or a ci.yml release base that touch
   the builder, its overlays, `packages/platform`, `bun.lock`, `.gitattributes` or the workflow and its helper. It
-  uploads `payload` and `prepared` as one mode-preserving tar, re-verified after extraction, with a summary retained
-  for 14 days. These artifacts are unreviewed construction evidence, not pins.
+  uploads `payload` and `prepared` as one mode-preserving tar, re-verified after extraction, with a summary. Its
+  artifacts are retained for only 14 days and exist only for those construction pull requests and manual dispatches,
+  so a contributor often has none to download (see "To get an asset locally" below). These artifacts are unreviewed
+  construction evidence, not pins.
 - A reviewed host binary pin is a separate change. It may come only from a trusted run of a reviewed commit on this
   repository, never a fork pull request, and the summary's `threadnoteCommit` must match that commit.
 - `THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR` names a raw `payload` for `bun run build`, which stages
   `dist/runtime/typescript` only for a reviewed host binary pin.
+- Every CI and publish job that builds a compiled payload on a reviewed-pin host (Linux GNU x64 and arm64, macOS
+  arm64 and x64) sets that variable on its build step to the `payload` output of the native TypeScript asset action.
+  The GNU container mounts the payload read-only. The self-contained smoke then requires the TypeScript graph path, and
+  it fails a pinned payload that has no `runtime/typescript`.
+- Musl and Windows payloads have no reviewed pin. They build without the asset, and TypeScript extraction is not
+  available in those releases: TypeScript files index as degraded modules. The smoke skips its TypeScript graph check
+  there and prints the reason.
+- The product requires the verified asset. A compiled executable uses only its staged `runtime/typescript` and
+  ignores the variable below; it refuses with a distinct, value-free reason when the asset is missing, aliased,
+  lacks a valid manifest, is not owner-private, or its binary is not this host's reviewed pin. There is no fallback.
+- `THREADNOTE_TYPESCRIPT_NATIVE_PREPARED_ASSET_DIR` names a prepared asset (the `prepared` sibling of `payload`) for
+  source-mode TypeScript extraction and for the native tests. Repository tooling never reads it: Bazel generation,
+  `check:workspaces`, `check:self-contained` and the syntax-only repository tests parse with the official npm
+  `typescript` package after `bun install`.
+- Native tests need that asset: the graph native runtime, session, extractor and navigation tests, the semantic native
+  provider and runtime tests, the native parser-worker paths, and the graph, context and MCP suites that index
+  TypeScript. They are gated by `packages/graph/test/helpers/native-typescript-session.ts`. Without the asset, or on a
+  host with no reviewed pin, they skip and report the reason. On a host with a reviewed pin, a run is _required_ when
+  `THREADNOTE_NATIVE_TYPESCRIPT_REQUIRED` or `CI` is set to anything except empty, `0` or `false`; a required run with
+  no asset fails each gated test file at load instead of skipping.
+- Under Bazel the test environment is fixed, so `CI` does not reach a test. Generation declares `inherited_env` only for
+  vitest targets whose closure includes the gate helper, and those targets inherit exactly two host variables:
+  `THREADNOTE_TYPESCRIPT_NATIVE_PREPARED_ASSET_DIR` and `THREADNOTE_NATIVE_TYPESCRIPT_REQUIRED` (`bun.bzl` and the runner
+  refuse any other name). Lint, format, typecheck and workspace targets inherit nothing. A local
+  `bun run bazel -- test` with neither variable set therefore skips the native tests visibly; set
+  `THREADNOTE_NATIVE_TYPESCRIPT_REQUIRED=1` to make a missing asset fail as it does in CI.
+- To get an asset locally when no construction artifact is available, construct it from the pinned inputs; the
+  upstream repository, commit and tree and this host's Go archive URL, size and SHA-256 are in
+  `typescriptNativeBuildRecipe` in `tools/semantic/build-typescript-native.ts`. The private root must be a fresh
+  `0700` directory outside the checkout on a filesystem that records file ownership:
+
+  ```bash
+  git init ts-src && git -C ts-src fetch --depth=1 --no-tags <upstream repository> <upstream commit>
+  git -C ts-src -c advice.detachedHead=false checkout --detach FETCH_HEAD
+  curl --fail --location --connect-timeout 30 --max-time 600 --output go-archive <this host's Go archive URL>
+  mkdir -m 700 ntc
+  bun tools/semantic/build-typescript-native.ts --prepare ts-src go-archive ntc "$PWD" > prepare.json
+  export THREADNOTE_TYPESCRIPT_NATIVE_PREPARED_ASSET_DIR="$(bun -e 'console.log((await Bun.file("prepare.json").json()).assetDirectory)')"
+  ```
+
+  With a `native-typescript-construction-<host>` artifact instead, extract it with `tar -xpf
+native-typescript-construction.tar` (`-p` keeps the `0755` `tsc` mode that a umask would otherwise strip), run
+  `--verify-prepared <dir>/prepared`, and export that directory.
+
+- Asset location: the asset directory and every parent must be owned by you or root, and none may be other-writable
+  unless it is sticky (like `/tmp`). A group-writable parent is accepted only when it is yours and its group is your
+  own user-private group, which Threadnote can prove only when `/etc/nsswitch.conf` resolves `passwd` and `group` from
+  `files`, `systemd` or `altfiles` alone. Fedora's default lists `sss` first, so a group-writable `~/.local` left by
+  umask 002 is refused there as `group-writable-ancestor`; remove group write from that directory (`chmod g-w <dir>`)
+  or keep the asset below a private directory.
+
+- CI provisioning: `.github/actions/native-typescript-asset` restores `payload` and `prepared` from `actions/cache`
+  under a key that digests every construction input: the recipe, the builder source, its ordered overlay patches, the
+  host's pinned Go archive, the host and the asset pins. Each workflow that needs the asset has one asset job per
+  reviewed-pin host it uses (`ci.yml`: `native-typescript-asset` for linux-x64 and
+  `native-typescript-asset-linux-arm64`, `-darwin-arm64` and `-darwin-x64` for the other release hosts; the benchmark,
+  production-ratchet and production-large workflows have their own). An asset job restores, constructs on a miss with
+  the same steps as the construction workflow (`.github/actions/native-typescript-construct`, with the deadline
+  multiplier) and saves. Consumers (the Bazel shards whose targets inherit the native variables, recall quality, the
+  non-musl, non-Windows release smoke legs, and the benchmark and evidence captures that index TypeScript) only restore
+  it with `restore-only` and the producer job's `cache_key` output as `cache-key`, so a missing cache entry fails them.
+  They never re-derive the key from their own checkout: a pull request's merge commit can derive a different key than
+  the head commit the producer built (each producer also exposes that `ref`, which recall quality checks out). Every
+  consumer runs on its producer's exact runner image, and each pinned release leg depends only on its own host's asset
+  job, so one failed asset never skips the other release legs. The production-ratchet asset job runs the ratchet's
+  scope classifier first and builds nothing for a diff without ratchet-relevant paths. When the ratchet's static gate
+  fails and the protected base pins different native TypeScript asset inputs than the head, no same-asset control
+  exists: the job fails closed with that reason instead of measuring a degraded control. Hit or miss, `--verify-prepared` re-checks the bytes before the action exports
+  `THREADNOTE_TYPESCRIPT_NATIVE_PREPARED_ASSET_DIR` and `THREADNOTE_NATIVE_TYPESCRIPT_REQUIRED=1`, because cached bytes
+  are untrusted. The asset lives at the fixed `$RUNNER_TEMP/threadnote-native-typescript/<host>`, so the exported path,
+  and the Bazel test action keys that inherit it, are identical on every runner of an image. Windows and unpinned hosts
+  provision and export nothing: their native tests skip with the stated reason, and the Windows benchmark lanes skip the
+  TypeScript-dependent quality evaluation with a visible notice. The musl release lane runs its semantic suites inside
+  an `env -i` musl userspace without the asset and records that documented skip. The code-graph evaluations and
+  benchmarks check for the asset up front and stop with `native TypeScript asset missing` on a reviewed-pin host
+  instead of reporting a misleading regression.
+- Platform support: `darwin-arm64`, `darwin-x64`, `linux-x64` and `linux-arm64` have reviewed binary pins. Windows
+  (`win32-x64`, `win32-arm64`) has no pin yet: it builds construction evidence only, its native tests skip, and its
+  product build has no TypeScript asset.
 - To label a local stage, set `THREADNOTE_DEVELOPMENT_BUILD_VERSION` to a SHA-bound version such as
   `6.0.0-local.g<40-hex commit>`.
 

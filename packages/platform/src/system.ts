@@ -24,6 +24,7 @@ import {
   Schema,
 } from 'effect';
 import {succeedUndefined} from './optional.js';
+import {classifyUserPrimaryGroup, readLocalAccountFiles, type UserPrimaryGroup} from './user-account.js';
 import {effectiveLinuxMemoryBytes, linuxCgroupMemoryFiles} from './linux_cgroup.js';
 import {ChildEnvironmentPolicy, type ChildEnvironmentPolicyShape} from './child-environment-policy.js';
 import {readWindowsHardwareInfo} from './windows_system.js';
@@ -74,6 +75,7 @@ interface NativeUtilModuleShape {
 }
 
 interface NativeOperatingSystemModuleShape {
+  readonly tmpdir: () => string;
   readonly cpus: () => readonly {
     readonly model: string;
     readonly times: {
@@ -187,6 +189,14 @@ export function runtimeCurrentPlatform(): NodeJS.Platform {
 export function runtimeCurrentUserId(): number | undefined {
   return process.getuid?.();
 }
+/** The current user's primary group, classified from the local account files (user-private, shared or unknown). */
+let currentUserPrimaryGroup: UserPrimaryGroup | undefined | null = null;
+export function runtimeCurrentUserPrimaryGroup(): UserPrimaryGroup | undefined {
+  const [uid, gid] = [process.getuid?.(), process.getgid?.()];
+  if (uid === undefined || gid === undefined) return undefined;
+  // Ids never change within a process, so the bounded read and classification happen once.
+  return (currentUserPrimaryGroup ??= classifyUserPrimaryGroup(uid, gid, readLocalAccountFiles(nativeFileSystem())));
+}
 /** Read-only presence probe; ownership and every real signal remain with the retained backend capability. */
 export function runtimeAssertProcessGroupExistsSync(processGroupId: number): void {
   process.kill(-processGroupId, 0);
@@ -214,6 +224,10 @@ export function runtimeLinuxLibc(): LinuxLibc | undefined {
 
 const nativeOperatingSystemModule = process.getBuiltinModule('os') as NativeOperatingSystemModuleShape;
 export const runtimeOperatingSystemRelease = nativeOperatingSystemModule.release();
+/** Host setup fact only; private namespace callers must still acquire native ACL/identity guards. */
+export function runtimeHostTemporaryDirectory(): string {
+  return nativeOperatingSystemModule.tmpdir();
+}
 function nativeFileSystem() {
   return process.getBuiltinModule('fs');
 }
@@ -263,6 +277,9 @@ export function runtimeNativeDescriptorOperations() {
     },
     get readdirSync() {
       return native.readdirSync;
+    },
+    get rmdirSync() {
+      return native.rmdirSync;
     },
   };
 }

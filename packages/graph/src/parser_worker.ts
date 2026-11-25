@@ -1,6 +1,6 @@
 import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Context, Effect, FileSystem, Layer, Option, Path, Predicate, Queue, Stdio, Stream, Schema} from 'effect';
+import {Context, Effect, FileSystem, Layer, Option, Path, Predicate, Queue, Stdio, Stream, Schema, Scope} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {fromPromise, fromPromiseInterruptibleAwaiting} from '@threadnote/platform/errors';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -8,8 +8,10 @@ import {
   SystemInfo,
   runtimeSpawnOwnedProviderTree,
   runtimeObserveOwnedProviderTree,
+  runtimeObserveOwnedProviderResources,
   runtimeTerminateOwnedProviderTree,
   runtimeCloseOwnedProviderTree,
+  platformPathFor,
   type SystemInfoShape,
 } from '@threadnote/platform/system';
 import {
@@ -24,6 +26,28 @@ import type {CodeGraphFileFacts, CodeGraphInventoryFile, CodeGraphSymbol} from '
 import {CODE_GRAPH_PARSER_WORKER_ARGUMENT} from '@threadnote/graph/worker_protocol';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {
+  createNativeTypeScriptSession,
+  connectNativeTypeScriptPipeSession,
+  nativeTypeScriptSessionOwnership,
+  nativeTypeScriptOwnershipUnknown,
+  NativeTypeScriptSessionService,
+  isNativeTypeScriptSource,
+  type NativeTypeScriptSession,
+  NativeTypeScriptUnavailable,
+  boundedNativeTypeScriptSession,
+} from './typescript_runtime.js';
+import type {CodeGraphSourceSequenceOutcome, CodeGraphSourceSequenceRequest} from './query/diagram_sequence.js';
+import {
+  decodeSourceSequenceRequest,
+  decodeSourceSequenceResponse,
+  PARSER_WORKER_PROTOCOL_VERSION,
+  projectParserWorkerSourceSequence,
+  sourceSequenceUnavailable,
+  type ParserWorkerSourceSequenceRequest,
+  type ParserWorkerSourceSequenceResponse,
+} from './parser_worker_sequence.js';
+import {NATIVE_TYPESCRIPT_PREPARED_ASSET_ENV} from './typescript_native_asset_pins.js';
 
 export {CODE_GRAPH_PARSER_WORKER_ARGUMENT};
 export const CODE_GRAPH_PARSER_WORKERS_ENV = 'THREADNOTE_CODE_GRAPH_PARSER_WORKERS';
@@ -37,7 +61,7 @@ export const CODE_GRAPH_PARSER_SYMBOLS_MAXIMUM = 4_000;
 export const CODE_GRAPH_PARSER_ALLOCATION_BYTES_MAXIMUM = 512 * 1_048_576;
 export const CODE_GRAPH_PARSER_RSS_BYTES_MAXIMUM = 2 * 1_024 * 1_024 * 1_024;
 
-const PROTOCOL_VERSION = 1;
+const PROTOCOL_VERSION = PARSER_WORKER_PROTOCOL_VERSION;
 const DEFAULT_REQUEST_TIMEOUT_MILLISECONDS = 60_000;
 const DEFAULT_IDLE_TIMEOUT_MILLISECONDS = 60_000;
 const MAX_PROTOCOL_LINE_BYTES = 256 * 1_048_576;
@@ -47,15 +71,26 @@ const SLOT_RETRY_MILLISECONDS = 25;
 const SLOT_STALE_MILLISECONDS = 30_000;
 const PARSER_WORKER_PREWARM_CONCURRENCY = 4;
 const PARSER_WORKER_MEMORY_BYTES_PER_SLOT = 8 * 1_024 * 1_024 * 1_024;
-const PARSER_WORKER_WARMUP_SOURCE = 'export const __threadnoteParserWarmup = true;\n';
+const PARSER_WORKER_WARMUP_SOURCE = '{"__threadnoteParserWarmup":true}\n';
 const PARSER_WORKER_WARMUP_FILE: CodeGraphInventoryFile = {
   blobId: '',
   content: PARSER_WORKER_WARMUP_SOURCE,
   contentHash: sha256HexSync(PARSER_WORKER_WARMUP_SOURCE),
+  language: 'json',
+  mode: '100644',
+  path: '.threadnote/parser-warmup.json',
+  size: Buffer.byteLength(PARSER_WORKER_WARMUP_SOURCE, 'utf8'),
+  source: 'worktree',
+};
+const PARSER_WORKER_TYPESCRIPT_WARMUP_SOURCE = 'export const __threadnoteParserWarmup = true;\n';
+const PARSER_WORKER_TYPESCRIPT_WARMUP_FILE: CodeGraphInventoryFile = {
+  blobId: '',
+  content: PARSER_WORKER_TYPESCRIPT_WARMUP_SOURCE,
+  contentHash: sha256HexSync(PARSER_WORKER_TYPESCRIPT_WARMUP_SOURCE),
   language: 'typescript',
   mode: '100644',
   path: '.threadnote/parser-warmup.ts',
-  size: Buffer.byteLength(PARSER_WORKER_WARMUP_SOURCE, 'utf8'),
+  size: Buffer.byteLength(PARSER_WORKER_TYPESCRIPT_WARMUP_SOURCE, 'utf8'),
   source: 'worktree',
 };
 
@@ -132,10 +167,14 @@ export interface ParserWorkerSpawnOptions {
   readonly environment: ParserWorkerEnvironment;
   readonly executable: string;
   readonly cwd: string;
+  readonly nativeTypeScript?: boolean;
+  readonly startupDeadline?: number;
+  readonly compilerAssetDirectory?: string;
 }
 
 export type ParserWorkerSpawner = (
   options: ParserWorkerSpawnOptions,
+  signal?: AbortSignal,
 ) => ParserWorkerProcess | Promise<ParserWorkerProcess>;
 
 export interface CodeGraphParserPoolOptions {
@@ -215,24 +254,40 @@ export interface CodeGraphParserPoolShape {
     use: (
       extract: (file: CodeGraphInventoryFile) => Effect.Effect<CodeGraphParserResult, never>,
     ) => Effect.Effect<A, E, R>,
-  ) => Effect.Effect<A, E, R>;
+  ) => Effect.Effect<A, E | ParserWorkerError, R>;
   readonly warm: (
     threadnoteHome: string,
     requestedSlots?: number,
+    nativeTypeScript?: boolean,
   ) => Effect.Effect<void, ParserWorkerConfigurationError>;
   readonly trimIdle: Effect.Effect<void, never>;
+  /**
+   * Projects a diagram's source order in a worker that borrows this pool's native TypeScript session. Any worker,
+   * session or budget failure, or a `deadline` (wall-clock milliseconds) already passed, is `unavailable`.
+   */
+  readonly projectSourceSequence: (
+    request: CodeGraphSourceSequenceRequest,
+    threadnoteHome: string,
+    deadline: number,
+  ) => Effect.Effect<CodeGraphSourceSequenceOutcome, never>;
 }
 
+/** Prewarm the planned capacity with the kind of worker the inventory needs, so TypeScript work reuses it. */
 export function warmPlannedParserCapacity(
   pool: CodeGraphParserPoolShape,
   threadnoteHome: string,
   fileCount: number,
+  nativeTypeScript = false,
 ): Effect.Effect<void, ParserWorkerConfigurationError> {
-  return fileCount <= pool.capacity ? Effect.void : pool.warm(threadnoteHome, fileCount);
+  return fileCount <= pool.capacity ? Effect.void : pool.warm(threadnoteHome, fileCount, nativeTypeScript);
 }
 
 class ParserWorkerSessionUseError<E> {
   constructor(readonly error: E) {}
+}
+/** The SDK changed under a public operation: its results are not trusted and are never re-run as degraded. */
+class ParserWorkerSdkFenceFailure {
+  constructor(readonly error: ParserWorkerError) {}
 }
 
 export interface ParserWorkerCapacityInput {
@@ -339,7 +394,7 @@ export function codeGraphParserPoolLayer(
           file.bytes === undefined && sourceBudgetResult(file) === undefined;
         const workPlans = new WeakMap<
           readonly CodeGraphInventoryFile[],
-          {readonly required: boolean; readonly warm: boolean}
+          {readonly required: boolean; readonly warm: boolean; readonly nativeTypeScript: boolean}
         >();
         const workPlan = (files: readonly CodeGraphInventoryFile[]) => {
           const cached = workPlans.get(files);
@@ -350,7 +405,14 @@ export function codeGraphParserPoolLayer(
             workerFiles += 1;
             if (workerFiles > capacity) break;
           }
-          const planned = {required: workerFiles > 0, warm: capacity > 1 && workerFiles > capacity};
+          const planned = {
+            required: workerFiles > 0,
+            warm: capacity > 1 && workerFiles > capacity,
+            nativeTypeScript: EffectArray.some(
+              files,
+              file => requiresWorker(file) && isNativeTypeScriptSource(file.path),
+            ),
+          };
           workPlans.set(files, planned);
           return planned;
         };
@@ -360,13 +422,15 @@ export function codeGraphParserPoolLayer(
             budgeted ?? degradedResult(file, ParserWorkerError.of(file.bytes === undefined ? 'protocol' : 'operation')),
           );
         };
-        const warmSlot = (slot: ParserWorkerSlot, threadnoteHome: string) =>
+        const warmSlot = (slot: ParserWorkerSlot, threadnoteHome: string, nativeTypeScript: boolean) =>
           fromPromiseInterruptibleAwaiting(
-            signal => slot.warm(threadnoteHome, signal),
+            signal => slot.warm(threadnoteHome, signal, nativeTypeScript),
             cause => (Schema.is(ParserWorkerError)(cause) ? cause : ParserWorkerError.of('protocol')),
           );
-        const prewarmSlot = (slot: ParserWorkerSlot, threadnoteHome: string) =>
-          fromPromise('warm parser worker', () => slot.warm(threadnoteHome, new AbortController().signal));
+        const prewarmSlot = (slot: ParserWorkerSlot, threadnoteHome: string, nativeTypeScript: boolean) =>
+          fromPromise('warm parser worker', () =>
+            slot.warm(threadnoteHome, new AbortController().signal, nativeTypeScript),
+          );
 
         return {
           service: CodeGraphParserPool.of({
@@ -404,10 +468,23 @@ export function codeGraphParserPoolLayer(
                         threadnoteHome,
                         capacity,
                         slot.index,
-                        (planned.warm ? warmSlot(slot, threadnoteHome) : Effect.void).pipe(
-                          Effect.andThen(
-                            use(file => extractFromSlot(slot, file, threadnoteHome)).pipe(
-                              Effect.mapError(error => new ParserWorkerSessionUseError(error)),
+                        slot.withSdkScope(
+                          (planned.warm
+                            ? warmSlot(slot, threadnoteHome, planned.nativeTypeScript).pipe(
+                                Effect.asVoid,
+                                // A failed native warm only means TypeScript is unavailable here; other files proceed.
+                                Effect.catch(error =>
+                                  planned.nativeTypeScript ? Effect.succeed(error) : Effect.fail(error),
+                                ),
+                              )
+                            : Effect.void
+                          ).pipe(
+                            Effect.flatMap(nativeWarmFailure =>
+                              use(file =>
+                                nativeWarmFailure !== undefined && isNativeTypeScriptSource(file.path)
+                                  ? Effect.succeed(degradedResult(file, nativeWarmFailure))
+                                  : extractFromSlot(slot, file, threadnoteHome),
+                              ).pipe(Effect.mapError(error => new ParserWorkerSessionUseError(error))),
                             ),
                           ),
                         ),
@@ -415,14 +492,16 @@ export function codeGraphParserPoolLayer(
                         Effect.catch(error =>
                           error instanceof ParserWorkerSessionUseError
                             ? Effect.fail(error.error)
-                            : use(file => Effect.succeed(degradedResult(file, error))),
+                            : error instanceof ParserWorkerSdkFenceFailure
+                              ? Effect.fail(error.error)
+                              : use(file => Effect.succeed(degradedResult(file, error))),
                         ),
                       ),
                     slot => Queue.offer(available, slot),
                   )
                 : use(extractWithoutSlot);
             },
-            warm: (threadnoteHome, requestedSlots = capacity) =>
+            warm: (threadnoteHome, requestedSlots = capacity, nativeTypeScript = false) =>
               Number.isSafeInteger(requestedSlots) && requestedSlots >= 0
                 ? Effect.acquireUseRelease(
                     Queue.clear(available),
@@ -438,7 +517,7 @@ export function codeGraphParserPoolLayer(
                             threadnoteHome,
                             capacity,
                             slot.index,
-                            prewarmSlot(slot, threadnoteHome),
+                            prewarmSlot(slot, threadnoteHome, nativeTypeScript),
                           ),
                         {concurrency: PARSER_WORKER_PREWARM_CONCURRENCY, discard: true},
                       ).pipe(Effect.ignore),
@@ -447,6 +526,24 @@ export function codeGraphParserPoolLayer(
                 : Effect.fail(
                     ParserWorkerConfigurationError.make({message: 'Code graph parser warm slot count is invalid.'}),
                   ),
+            projectSourceSequence: (request, threadnoteHome, deadline) =>
+              Date.now() >= deadline || Buffer.byteLength(request.text, 'utf8') > maxSourceBytes
+                ? Effect.succeed(sourceSequenceUnavailable)
+                : Effect.acquireUseRelease(
+                    Queue.take(available),
+                    slot =>
+                      withGlobalParserSlot(
+                        crypto,
+                        fs,
+                        path,
+                        system,
+                        threadnoteHome,
+                        capacity,
+                        slot.index,
+                        slot.projectSourceSequence(request, threadnoteHome, deadline),
+                      ),
+                    slot => Queue.offer(available, slot),
+                  ).pipe(Effect.orElseSucceed(() => sourceSequenceUnavailable)),
             trimIdle: Effect.acquireUseRelease(
               Queue.clear(available),
               idleSlots =>
@@ -519,6 +616,7 @@ class ParserWorkerSlot {
   private idleGeneration = 0;
   private idleTimer: ReturnType<typeof setTimeout> | undefined;
   private sequence = 0;
+  private sdkScope: Map<ParserWorkerConnection, () => Promise<void>> | undefined;
 
   constructor(
     readonly index: number,
@@ -530,39 +628,125 @@ class ParserWorkerSlot {
     private readonly spawnWorker: ParserWorkerSpawner,
   ) {}
 
+  withSdkScope<A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E | ParserWorkerSdkFenceFailure, R> {
+    return Effect.acquireUseRelease(
+      Effect.suspend(() => {
+        // A nested scope on one slot is a typed refusal, never a defect.
+        if (this.sdkScope) return Effect.fail(new ParserWorkerSdkFenceFailure(ParserWorkerError.of('operation')));
+        const scope = new Map<ParserWorkerConnection, () => Promise<void>>();
+        this.sdkScope = scope;
+        return Effect.succeed(scope);
+      }),
+      () => effect,
+      scope =>
+        fromPromiseInterruptibleAwaiting(
+          async () => {
+            let failure: unknown;
+            for (const finish of scope.values()) {
+              try {
+                await finish();
+              } catch (error) {
+                failure ??= error;
+              }
+            }
+            if (this.sdkScope === scope) this.sdkScope = undefined;
+            if (failure !== undefined) throw failure instanceof Error ? failure : ParserWorkerError.of('protocol');
+          },
+          cause =>
+            new ParserWorkerSdkFenceFailure(
+              Schema.is(ParserWorkerError)(cause) ? cause : ParserWorkerError.of('protocol'),
+            ),
+        ),
+    );
+  }
+  private async enterSdkScope(connection: ParserWorkerConnection): Promise<void> {
+    const scope = this.sdkScope;
+    if (!scope || scope.has(connection)) return;
+    const finish = await connection.sdkFence();
+    if (this.sdkScope !== scope) {
+      await finish();
+      throw ParserWorkerError.of('operation');
+    }
+    scope.set(connection, finish);
+  }
+
   extract(file: CodeGraphInventoryFile, threadnoteHome: string): Effect.Effect<CodeGraphParserResult, Error> {
+    return this.exchange(
+      threadnoteHome,
+      isNativeTypeScriptSource(file.path),
+      undefined,
+      async (active, id, signal) => {
+        const response = await active.request({file, id, protocol: PROTOCOL_VERSION}, this.timeoutMilliseconds, signal);
+        if (!response.ok) throw ParserWorkerError.of('operation');
+        return {
+          recycle: response.recycle,
+          value: {
+            ...(response.degradationReason === undefined
+              ? response.degraded
+                ? {degradationReason: 'operation' as const}
+                : {}
+              : {degradationReason: response.degradationReason}),
+            degraded: response.degraded,
+            facts: response.facts,
+            parseMilliseconds: response.parseMilliseconds,
+          },
+        };
+      },
+      () => {
+        if (file.bytes !== undefined) throw ParserWorkerError.of('operation');
+      },
+    );
+  }
+
+  projectSourceSequence(
+    sequence: CodeGraphSourceSequenceRequest,
+    threadnoteHome: string,
+    deadline: number,
+  ): Effect.Effect<CodeGraphSourceSequenceOutcome, Error> {
+    return this.exchange(threadnoteHome, true, deadline, async (active, id, signal) => {
+      const response = await active.requestSourceSequence(
+        {deadline, id, protocol: PROTOCOL_VERSION, sequence},
+        Math.min(this.timeoutMilliseconds, Math.max(1, deadline - Date.now())),
+        signal,
+      );
+      if (!response.ok) throw ParserWorkerError.of('operation');
+      return {recycle: response.recycle, value: response.outcome};
+    });
+  }
+
+  /** One request on this slot's worker, retried once on a fresh worker after a transport failure. */
+  private exchange<A>(
+    threadnoteHome: string,
+    nativeTypeScript: boolean,
+    /** A caller deadline that also ends worker and compiler startup, when it is earlier than the slot timeout. */
+    deadline: number | undefined,
+    send: (
+      active: ParserWorkerConnection,
+      id: string,
+      signal: AbortSignal,
+    ) => Promise<{readonly recycle: boolean; readonly value: A}>,
+    refuse?: () => void,
+  ): Effect.Effect<A, Error> {
     return fromPromiseInterruptibleAwaiting(
       async signal => {
         if (this.closed) throw ParserWorkerError.of('exit');
         this.cancelIdleEviction();
         try {
-          if (file.bytes !== undefined) throw ParserWorkerError.of('operation');
+          refuse?.();
           for (let attempt = 0; attempt < 2; attempt += 1) {
             let connection = Option.none<ParserWorkerConnection>();
             try {
-              const active = await this.activeConnection(threadnoteHome);
-              connection = Option.some(active);
-              const response = await active.request(
-                {
-                  file,
-                  id: `${this.system.processId}-${this.index}-${++this.sequence}`,
-                  protocol: PROTOCOL_VERSION,
-                },
-                this.timeoutMilliseconds,
+              // Worker and compiler startup has its own deadline; the request then gets its whole budget.
+              const active = await this.activeConnection(
+                threadnoteHome,
+                nativeTypeScript,
+                Math.min(Date.now() + this.timeoutMilliseconds, deadline ?? Number.POSITIVE_INFINITY),
                 signal,
               );
-              if (!response.ok) throw ParserWorkerError.of('operation');
+              connection = Option.some(active);
+              const response = await send(active, `${this.system.processId}-${this.index}-${++this.sequence}`, signal);
               if (response.recycle) await this.discard(active).catch(() => undefined);
-              return {
-                ...(response.degradationReason === undefined
-                  ? response.degraded
-                    ? {degradationReason: 'operation' as const}
-                    : {}
-                  : {degradationReason: response.degradationReason}),
-                degraded: response.degraded,
-                facts: response.facts,
-                parseMilliseconds: response.parseMilliseconds,
-              };
+              return response.value;
             } catch (cause) {
               if (Option.isSome(connection) && Schema.is(ParserWorkerError)(cause) && cause.reason !== 'operation') {
                 await this.discard(connection.value);
@@ -570,6 +754,8 @@ class ParserWorkerSlot {
               if (
                 !Schema.is(ParserWorkerError)(cause) ||
                 cause.reason === 'operation' ||
+                cause.reason === 'rss' ||
+                cause.reason === 'allocation' ||
                 attempt === 1 ||
                 signal.aborted
               ) {
@@ -595,17 +781,22 @@ class ParserWorkerSlot {
     await this.discard(connection);
   }
 
-  async warm(threadnoteHome: string, signal: AbortSignal): Promise<void> {
+  async warm(threadnoteHome: string, signal: AbortSignal, nativeTypeScript = false): Promise<void> {
     if (this.closed) throw ParserWorkerError.of('exit');
     this.cancelIdleEviction();
     let connection = Option.none<ParserWorkerConnection>();
     try {
-      const active = await this.activeConnection(threadnoteHome);
+      const active = await this.activeConnection(
+        threadnoteHome,
+        nativeTypeScript,
+        Date.now() + this.timeoutMilliseconds,
+        signal,
+      );
       connection = Option.some(active);
       if (Option.contains(this.warmedConnection, active) && !active.closed) return;
       const response = await active.request(
         {
-          file: PARSER_WORKER_WARMUP_FILE,
+          file: nativeTypeScript ? PARSER_WORKER_TYPESCRIPT_WARMUP_FILE : PARSER_WORKER_WARMUP_FILE,
           id: `${this.system.processId}-${this.index}-${++this.sequence}`,
           protocol: PROTOCOL_VERSION,
         },
@@ -629,7 +820,12 @@ class ParserWorkerSlot {
     await this.evictConnection(this.connection.value);
   }
 
-  private async activeConnection(threadnoteHome: string): Promise<ParserWorkerConnection> {
+  private async activeConnection(
+    threadnoteHome: string,
+    nativeTypeScript: boolean,
+    deadline: number,
+    signal: AbortSignal,
+  ): Promise<ParserWorkerConnection> {
     if (this.closed) throw ParserWorkerError.of('exit');
     const eviction = this.evictingConnection;
     if (eviction) await eviction.catch(() => undefined);
@@ -637,24 +833,40 @@ class ParserWorkerSlot {
     if (
       Option.isSome(this.connection) &&
       Option.contains(this.connectionHome, threadnoteHome) &&
-      !this.connection.value.closed
+      !this.connection.value.closed &&
+      (!nativeTypeScript || this.connection.value.nativeTypeScript)
     ) {
+      await this.enterSdkScope(this.connection.value);
       return this.connection.value;
     }
     if (Option.isSome(this.connection)) await this.discard(this.connection.value);
     let worker: ParserWorkerProcess;
     try {
-      worker = await this.spawnWorker(parserWorkerSpawnOptions(this.system, threadnoteHome));
+      worker = await this.spawnWorker(
+        {
+          ...parserWorkerSpawnOptions(this.system, threadnoteHome),
+          nativeTypeScript,
+          startupDeadline: deadline,
+        },
+        signal,
+      );
     } catch {
       throw ParserWorkerError.of('spawn');
     }
-    const connection = new ParserWorkerConnection(worker, this.maxProtocolLineBytes, this.maxStderrBytes);
+    const connection = new ParserWorkerConnection(
+      worker,
+      this.maxProtocolLineBytes,
+      this.maxStderrBytes,
+      nativeTypeScript,
+      parserWorkerResourceOptions(this.system.environment()),
+    );
     if (this.closed) {
       await connection.close();
       throw ParserWorkerError.of('exit');
     }
     this.connection = Option.some(connection);
     this.connectionHome = Option.some(threadnoteHome);
+    await this.enterSdkScope(connection);
     return connection;
   }
 
@@ -727,11 +939,14 @@ class ParserWorkerConnection {
   private stderrBytes = 0;
   private readonly stderrDone: Promise<void>;
   private finishing: Promise<void> | undefined;
+  private readonly sdkFences = new Set<object>();
 
   constructor(
     private readonly worker: ParserWorkerProcess,
     private readonly maxProtocolLineBytes: number,
     private readonly maxStderrBytes: number,
+    readonly nativeTypeScript: boolean,
+    private readonly resourceOptions: ParserWorkerResourceBudgetOptions,
   ) {
     this.reader = worker.stdout[Symbol.asyncIterator]();
     this.stderrDone = this.consumeStderr(worker.stderr);
@@ -755,23 +970,46 @@ class ParserWorkerConnection {
     timeoutMilliseconds: number,
     signal: AbortSignal,
   ): Promise<ParserWorkerResponse> {
+    const decoded = decodeResponse(
+      await this.exchangeLine(request, timeoutMilliseconds, signal),
+      request.id,
+      request.file.path,
+    );
+    if (decoded === undefined) throw ParserWorkerError.of('protocol');
+    return decoded;
+  }
+
+  async requestSourceSequence(
+    request: ParserWorkerSourceSequenceRequest,
+    timeoutMilliseconds: number,
+    signal: AbortSignal,
+  ): Promise<ParserWorkerSourceSequenceResponse> {
+    const decoded = decodeSourceSequenceResponse(
+      parseParserWorkerLine(await this.exchangeLine(request, timeoutMilliseconds, signal)),
+      request.id,
+    );
+    if (decoded === undefined) throw ParserWorkerError.of('protocol');
+    return decoded;
+  }
+
+  private async exchangeLine(
+    request: ParserWorkerRequest | ParserWorkerSourceSequenceRequest,
+    timeoutMilliseconds: number,
+    signal: AbortSignal,
+  ): Promise<string> {
     if (signal.aborted) throw ParserWorkerError.of('abort');
+    if (timeoutMilliseconds <= 0) throw ParserWorkerError.of('timeout');
     const encoded = `${JSON.stringify(request)}\n`;
     if (Buffer.byteLength(encoded, 'utf8') > this.maxProtocolLineBytes) {
       throw ParserWorkerError.of('protocol');
     }
-    const response = await raceWorkerResponse(this.writeAndRead(encoded), timeoutMilliseconds, signal, () => {
+    return raceWorkerResponse(this.ownedWriteAndRead(encoded), timeoutMilliseconds, signal, () => {
       try {
         this.worker.kill();
       } catch {
         // The worker may have exited while the deadline or interrupt fired.
       }
     });
-    const decoded = decodeResponse(response, request.id, request.file.path);
-    if (decoded === undefined) {
-      throw ParserWorkerError.of('protocol');
-    }
-    return decoded;
   }
 
   close(): Promise<void> {
@@ -795,6 +1033,36 @@ class ParserWorkerConnection {
       nativeParserWorkerUnknown.get(this.worker)?.();
       throw ParserWorkerError.of('exit');
     }
+  }
+
+  async sdkFence(): Promise<() => Promise<void>> {
+    const owner = nativeParserResourceOwners.get(this.worker);
+    if (!owner) return async () => undefined;
+    await owner.verifyCurrent();
+    const fence = Object.freeze({});
+    this.sdkFences.add(fence);
+    return async () => {
+      try {
+        await owner.verifyCurrent();
+      } finally {
+        this.sdkFences.delete(fence);
+      }
+    };
+  }
+
+  private async ownedWriteAndRead(encoded: string): Promise<string> {
+    const owner = nativeParserResourceOwners.get(this.worker);
+    if (!owner) return this.writeAndRead(encoded);
+    if (this.sdkFences.size === 0) await owner.verifyCurrent();
+    owner.assertCurrent();
+    const before = owner.resources();
+    const response = await this.writeAndRead(encoded);
+    const after = owner.resources();
+    const rejected = parserWorkerResourceBudget(before, after, this.resourceOptions);
+    if (rejected) throw ParserWorkerError.of(rejected.code === 'rss-bytes' ? 'rss' : 'allocation', rejected);
+    owner.assertCurrent();
+    if (this.sdkFences.size === 0) await owner.verifyCurrent();
+    return response;
   }
 
   private async writeAndRead(encoded: string): Promise<string> {
@@ -852,27 +1120,76 @@ class ParserWorkerConnection {
 // A failed original-owner completion remains charged for this process lifetime. Recreating
 // a pool cannot turn an unobserved child into capacity for unbounded replacement workers.
 let parserWorkerOwnershipUnknown = false;
+/**
+ * A `tsc --api` close that failed with its owner drained (slow or nonzero exit, stray output) is that session's own
+ * anomaly. Only an owner the runtime could not prove gone blocks every later parser worker, of any language.
+ */
+const chargeUnknownCompilerOwner = () => {
+  if (nativeTypeScriptOwnershipUnknown()) parserWorkerOwnershipUnknown = true;
+};
 const nativeParserWorkerUnknown = new WeakMap<ParserWorkerProcess, () => void>();
-function spawnBunParserWorker(options: ParserWorkerSpawnOptions): ParserWorkerProcess {
+const nativeParserResourceOwners = new WeakMap<
+  ParserWorkerProcess,
+  {verifyCurrent(): Promise<void>; assertCurrent(): void; resources(): ParserWorkerResourceSnapshot}
+>();
+async function spawnBunParserWorker(
+  options: ParserWorkerSpawnOptions,
+  signal?: AbortSignal,
+): Promise<ParserWorkerProcess> {
   if (parserWorkerOwnershipUnknown) throw ParserWorkerError.of('exit');
-  const child = runtimeSpawnOwnedProviderTree({
-    command: options.executable,
-    args: options.arguments,
-    cwd: options.cwd,
-    environment: {...options.environment},
-  });
+  const startupDeadline = options.startupDeadline ?? Date.now() + DEFAULT_REQUEST_TIMEOUT_MILLISECONDS;
+  if (signal?.aborted) throw ParserWorkerError.of('abort');
+  if (!Number.isFinite(startupDeadline) || startupDeadline <= Date.now()) throw ParserWorkerError.of('timeout');
+  const {cwd} = options;
+  const compiler = options.nativeTypeScript
+    ? await createNativeTypeScriptSession({
+        cwd,
+        deadline: startupDeadline,
+        ...(signal === undefined ? {} : {startupSignal: signal}),
+        assetDirectory: options.compilerAssetDirectory,
+      })
+    : undefined;
+  const compilerOwner = compiler === undefined ? undefined : nativeTypeScriptSessionOwnership(compiler);
+  let child: ReturnType<typeof runtimeSpawnOwnedProviderTree>;
+  try {
+    if (signal?.aborted) throw ParserWorkerError.of('abort');
+    if (!Number.isFinite(startupDeadline) || startupDeadline <= Date.now()) throw ParserWorkerError.of('timeout');
+    child = runtimeSpawnOwnedProviderTree({
+      command: options.executable,
+      args: options.arguments,
+      cwd,
+      environment: {
+        ...options.environment,
+        ...(compilerOwner
+          ? {
+              THREADNOTE_NATIVE_TYPESCRIPT_PIPE: compilerOwner.pipe,
+              THREADNOTE_NATIVE_TYPESCRIPT_DIRECTORY: compilerOwner.endpointDirectory,
+              THREADNOTE_NATIVE_TYPESCRIPT_SDK: compilerOwner.sdkDirectory,
+            }
+          : {}),
+      },
+    });
+  } catch (error) {
+    await compiler?.close().catch(chargeUnknownCompilerOwner);
+    throw error;
+  }
   let retainedUnknown = false;
   const exited = (async () => {
-    for (;;) {
-      if (retainedUnknown) throw ParserWorkerError.of('exit');
-      const observation = runtimeObserveOwnedProviderTree(child.handle);
-      if (observation.state === 'unknown') throw ParserWorkerError.of('exit');
-      if (observation.state === 'drained') {
-        if (!observation.stdioClosed || observation.leaderExitCode === null) throw ParserWorkerError.of('exit');
-        runtimeCloseOwnedProviderTree(child.handle);
-        return observation.leaderExitCode;
+    try {
+      for (;;) {
+        if (retainedUnknown) throw ParserWorkerError.of('exit');
+        const observation = runtimeObserveOwnedProviderTree(child.handle);
+        if (observation.state === 'unknown') throw ParserWorkerError.of('exit');
+        if (observation.state === 'drained') {
+          if (!observation.stdioClosed || observation.leaderExitCode === null) throw ParserWorkerError.of('exit');
+          runtimeCloseOwnedProviderTree(child.handle);
+          return observation.leaderExitCode;
+        }
+        await Bun.sleep(5);
       }
-      await Bun.sleep(5);
+    } finally {
+      // The `tsc --api` owner is closed on every outcome, including an unknown worker state.
+      await compiler?.close().catch(chargeUnknownCompilerOwner);
     }
   })();
   void exited.catch(() => {
@@ -887,6 +1204,29 @@ function spawnBunParserWorker(options: ParserWorkerSpawnOptions): ParserWorkerPr
     stdout: child.stdout,
     write: line => child.write(new TextEncoder().encode(line)),
   };
+  nativeParserResourceOwners.set(worker, {
+    verifyCurrent: async () => {
+      await compilerOwner?.verifyCurrent();
+    },
+    assertCurrent: () => {
+      if (runtimeObserveOwnedProviderTree(child.handle).state !== 'running') throw ParserWorkerError.of('exit');
+      compilerOwner?.assertCurrent();
+    },
+    resources: () => {
+      const owners = compilerOwner ? [child.handle, compilerOwner.owner] : [child.handle];
+      let rssBytes = 0,
+        peakRssBytes = 0;
+      for (const handle of owners) {
+        const resource = runtimeObserveOwnedProviderResources(handle);
+        if (resource.state !== 'known') throw ParserWorkerError.of('exit');
+        rssBytes += resource.currentRssBytes;
+        peakRssBytes += resource.peakRssUpperBoundBytes;
+      }
+      if (!Number.isSafeInteger(rssBytes) || !Number.isSafeInteger(peakRssBytes)) throw ParserWorkerError.of('exit');
+      // POSIX is an attested closed parser/API pair of original processes, not a generic subtree census.
+      return {rssBytes, peakRssBytes};
+    },
+  });
   nativeParserWorkerUnknown.set(worker, () => {
     retainedUnknown = true;
     parserWorkerOwnershipUnknown = true;
@@ -894,13 +1234,33 @@ function spawnBunParserWorker(options: ParserWorkerSpawnOptions): ParserWorkerPr
   return worker;
 }
 
+/**
+ * A compiled executable only ever uses its packaged `runtime/typescript`; the source-mode prepared-asset variable is
+ * ignored there. Source mode reads that variable through SystemInfo and has no other fallback.
+ */
+function nativeTypeScriptAssetDirectory(
+  system: SystemInfoShape,
+  script: Option.Option<string>,
+): {readonly compilerAssetDirectory?: string} {
+  if (Option.isNone(script)) {
+    const path = platformPathFor(system.platform);
+    return {compilerAssetDirectory: path.join(path.dirname(system.executablePath), 'runtime', 'typescript')};
+  }
+  const prepared = system.environment()[NATIVE_TYPESCRIPT_PREPARED_ASSET_ENV];
+  return prepared ? {compilerAssetDirectory: prepared} : {};
+}
+
 function parserWorkerSpawnOptions(system: SystemInfoShape, threadnoteHome: string): ParserWorkerSpawnOptions {
   const script = developmentStandaloneScript(system);
   return {
     arguments: [...Option.toArray(script), CODE_GRAPH_PARSER_WORKER_ARGUMENT],
     cwd: system.currentDirectory(),
+    ...nativeTypeScriptAssetDirectory(system, script),
     environment: {
       ...system.intendedChildEnvironment(system.environment(), 'parser-worker'),
+      THREADNOTE_NATIVE_TYPESCRIPT_PIPE: undefined,
+      THREADNOTE_NATIVE_TYPESCRIPT_DIRECTORY: undefined,
+      THREADNOTE_NATIVE_TYPESCRIPT_SDK: undefined,
       THREADNOTE_HOME: threadnoteHome,
       THREADNOTE_CODE_GRAPH_PARSER_WORKER: '1',
     },
@@ -975,68 +1335,102 @@ async function completesBeforeDeadline(promise: Promise<unknown>, timeoutMillise
   }
 }
 
-export const codeGraphParserWorkerServer: Effect.Effect<void, never, Stdio.Stdio | SystemInfo | TreeSitterRuntime> =
-  Effect.gen(function* () {
-    const stdio = yield* Stdio.Stdio;
-    const system = yield* SystemInfo;
-    const treeSitter = yield* TreeSitterRuntime;
-    const decoder = new TextDecoder();
-    let buffered = '';
-    let bufferedBytes = 0;
-    let scannedLength = 0;
+export const codeGraphParserWorkerServer: Effect.Effect<
+  void,
+  never,
+  Stdio.Stdio | SystemInfo | TreeSitterRuntime | Scope.Scope
+> = Effect.gen(function* () {
+  const stdio = yield* Stdio.Stdio;
+  const system = yield* SystemInfo;
+  const treeSitter = yield* TreeSitterRuntime;
+  const environment = system.environment();
+  const pipe = environment.THREADNOTE_NATIVE_TYPESCRIPT_PIPE;
+  const endpointDirectory = environment.THREADNOTE_NATIVE_TYPESCRIPT_DIRECTORY;
+  const sdkDirectory = environment.THREADNOTE_NATIVE_TYPESCRIPT_SDK;
+  if (
+    (pipe === undefined) !== (endpointDirectory === undefined) ||
+    (pipe === undefined) !== (sdkDirectory === undefined)
+  )
+    // A partial parent-owned API environment is a composition defect, never a silent non-native worker.
+    return yield* Effect.die(new Error('Parser worker native TypeScript environment is incomplete.'));
+  const nativeSession =
+    pipe !== undefined && endpointDirectory !== undefined && sdkDirectory !== undefined
+      ? yield* Effect.acquireRelease(
+          fromPromise('connect parent-owned TypeScript API', () =>
+            connectNativeTypeScriptPipeSession({
+              pipe,
+              endpointDirectory,
+              sdkDirectory,
+              deadline: Date.now() + parserWorkerTimeout(environment),
+            }),
+          ),
+          session => fromPromise('close borrowed TypeScript API', () => session.close()).pipe(Effect.ignore),
+        )
+      : undefined;
+  const decoder = new TextDecoder();
+  let buffered = '';
+  let bufferedBytes = 0;
+  let scannedLength = 0;
 
-    const writeResponse = (response: ParserWorkerResponse) =>
-      Stream.run(Stream.make(encodeParserWorkerResponse(response)), stdio.stdout({endOnDone: false}));
+  const writeResponse = (response: ParserWorkerResponse | ParserWorkerSourceSequenceResponse) =>
+    Stream.run(Stream.make(encodeParserWorkerResponse(response)), stdio.stdout({endOnDone: false}));
 
-    const processLine = (line: string) =>
-      handleParserWorkerLine(line, treeSitter, system).pipe(Effect.flatMap(writeResponse));
+  // Once the borrowed session fails, every later response asks the parent to discard this worker.
+  const nativeState = {failed: false};
+  const processLine = (line: string) =>
+    handleParserWorkerLine(line, treeSitter, system, nativeSession, nativeState).pipe(Effect.flatMap(writeResponse));
 
-    yield* stdio.stdin.pipe(
-      Stream.runForEach(chunk =>
-        Effect.gen(function* () {
-          bufferedBytes += chunk.byteLength;
-          buffered += decoder.decode(chunk, {stream: true});
-          for (;;) {
-            // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Resuming the search position keeps framing linear; Effect String indexOf has no position parameter.
-            const newline = buffered.indexOf('\n', scannedLength);
-            if (newline < 0) {
-              scannedLength = buffered.length;
-              break;
-            }
-            scannedLength = 0;
-            const lineWithNewline = Effect2.pipe(buffered, EffectString.slice(0, newline + 1));
-            const line = Effect2.pipe(lineWithNewline, __effectPipeInput => {
-              const __effectPipeStage0 = Effect2.pipe(__effectPipeInput, EffectString.slice(0, -1));
-              const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.replace(/\r$/, ''));
-              return __effectPipeStage1;
-            });
-            bufferedBytes -= Buffer.byteLength(lineWithNewline, 'utf8');
-            buffered = Effect2.pipe(buffered, EffectString.slice(newline + 1));
-            if (Buffer.byteLength(line, 'utf8') > MAX_PROTOCOL_LINE_BYTES) {
-              return yield* ParserWorkerError.of('protocol');
-            }
-            if (line) yield* processLine(line);
+  yield* stdio.stdin.pipe(
+    Stream.runForEach(chunk =>
+      Effect.gen(function* () {
+        bufferedBytes += chunk.byteLength;
+        buffered += decoder.decode(chunk, {stream: true});
+        for (;;) {
+          // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Resuming the search position keeps framing linear; Effect String indexOf has no position parameter.
+          const newline = buffered.indexOf('\n', scannedLength);
+          if (newline < 0) {
+            scannedLength = buffered.length;
+            break;
           }
-          if (bufferedBytes > MAX_PROTOCOL_LINE_BYTES) {
+          scannedLength = 0;
+          const lineWithNewline = Effect2.pipe(buffered, EffectString.slice(0, newline + 1));
+          const line = Effect2.pipe(lineWithNewline, __effectPipeInput => {
+            const __effectPipeStage0 = Effect2.pipe(__effectPipeInput, EffectString.slice(0, -1));
+            const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.replace(/\r$/, ''));
+            return __effectPipeStage1;
+          });
+          bufferedBytes -= Buffer.byteLength(lineWithNewline, 'utf8');
+          buffered = Effect2.pipe(buffered, EffectString.slice(newline + 1));
+          if (Buffer.byteLength(line, 'utf8') > MAX_PROTOCOL_LINE_BYTES) {
             return yield* ParserWorkerError.of('protocol');
           }
-        }),
-      ),
-    );
+          if (line) yield* processLine(line);
+        }
+        if (bufferedBytes > MAX_PROTOCOL_LINE_BYTES) {
+          return yield* ParserWorkerError.of('protocol');
+        }
+      }),
+    ),
+  );
 
-    buffered += decoder.decode();
-    if (Buffer.byteLength(buffered, 'utf8') > MAX_PROTOCOL_LINE_BYTES) {
-      return yield* ParserWorkerError.of('protocol');
-    }
-    if (Effect2.pipe(buffered, EffectString.trim)) yield* processLine(Effect2.pipe(buffered, EffectString.trim));
-  }).pipe(Effect.ignore);
+  buffered += decoder.decode();
+  if (Buffer.byteLength(buffered, 'utf8') > MAX_PROTOCOL_LINE_BYTES) {
+    return yield* ParserWorkerError.of('protocol');
+  }
+  if (Effect2.pipe(buffered, EffectString.trim)) yield* processLine(Effect2.pipe(buffered, EffectString.trim));
+}).pipe(Effect.ignore);
 
 function handleParserWorkerLine(
   line: string,
   treeSitter: TreeSitterRuntimeShape,
   system: SystemInfoShape,
-): Effect.Effect<ParserWorkerResponse, never> {
-  const request = decodeRequest(line);
+  nativeSession?: NativeTypeScriptSession,
+  nativeState: {failed: boolean} = {failed: false},
+): Effect.Effect<ParserWorkerResponse | ParserWorkerSourceSequenceResponse, never> {
+  const value = parseParserWorkerLine(line);
+  if (Predicate.isObject(value) && 'sequence' in value)
+    return handleSourceSequenceRequest(decodeSourceSequenceRequest(value), system, nativeSession, nativeState);
+  const request = decodeRequest(value);
   if (request === undefined) return Effect.succeed(protocolFailure('invalid', 'Invalid parser worker request.'));
   const startedAt = performance.now();
   const resourceBefore = parserWorkerResourceSnapshot(system);
@@ -1071,10 +1465,22 @@ function handleParserWorkerLine(
       ok: true,
       parseMilliseconds,
       protocol: PROTOCOL_VERSION,
-      recycle: bounded.degraded,
+      recycle: bounded.degraded || nativeState.failed,
     };
   };
-  return BUILTIN_LANGUAGE_PACK_REGISTRY.extractRawFile(request.file).pipe(
+  const observed = observeNativeSessionFailure(nativeState);
+  const deadline = Date.now() + parserWorkerTimeout(system.environment());
+  const extract = BUILTIN_LANGUAGE_PACK_REGISTRY.extractRawFile(request.file);
+  const bounded =
+    nativeSession === undefined
+      ? extract
+      : extract.pipe(
+          Effect.provideService(
+            NativeTypeScriptSessionService,
+            boundedNativeTypeScriptSession(nativeSession, deadline, observed),
+          ),
+        );
+  return bounded.pipe(
     Effect.provideService(TreeSitterRuntime, treeSitter),
     Effect.match({
       onFailure: () => completedResponse(undefined),
@@ -1083,9 +1489,54 @@ function handleParserWorkerLine(
   );
 }
 
-function decodeRequest(line: string): ParserWorkerRequest | undefined {
+/** Once the borrowed session fails, later responses ask the parent to discard this worker. */
+function observeNativeSessionFailure(nativeState: {failed: boolean}) {
+  return <A>(operation: Promise<A>): Promise<A> =>
+    operation.catch((error: unknown) => {
+      // A request refused before it was sent (oversized input, expired budget) leaves the borrowed session healthy.
+      if (Schema.is(NativeTypeScriptUnavailable)(error) && error.reason !== 'input-budget') nativeState.failed = true;
+      throw error;
+    });
+}
+
+function handleSourceSequenceRequest(
+  request: ParserWorkerSourceSequenceRequest | undefined,
+  system: SystemInfoShape,
+  nativeSession: NativeTypeScriptSession | undefined,
+  nativeState: {failed: boolean},
+): Effect.Effect<ParserWorkerSourceSequenceResponse, never> {
+  if (request === undefined) return Effect.succeed(protocolFailure('invalid', 'Invalid parser worker request.'));
+  // The parent sends source order only to a native worker; a worker without the session cannot answer it.
+  if (nativeSession === undefined)
+    return Effect.succeed(protocolFailure(request.id, 'Native TypeScript is unavailable.'));
+  const resourceBefore = parserWorkerResourceSnapshot(system);
+  const deadline = Date.now() + parserWorkerTimeout(system.environment());
+  const observe = observeNativeSessionFailure(nativeState);
+  return fromPromise('project diagram source order', () =>
+    projectParserWorkerSourceSequence(request, nativeSession, deadline, observe),
+  ).pipe(
+    Effect.orElseSucceed(() => sourceSequenceUnavailable),
+    Effect.map((outcome): ParserWorkerSourceSequenceResponse => {
+      const resources = parserWorkerResourceSnapshot(system);
+      const options = parserWorkerResourceOptions(system.environment());
+      const exhausted = parserWorkerResourceBudget(resourceBefore, resources, options) !== undefined;
+      const recycle = exhausted || nativeState.failed;
+      const shown = exhausted ? sourceSequenceUnavailable : outcome;
+      return {id: request.id, ok: true, outcome: shown, protocol: PROTOCOL_VERSION, recycle};
+    }),
+  );
+}
+
+function parseParserWorkerLine(line: string): unknown {
   try {
-    const value: unknown = JSON.parse(line);
+    return JSON.parse(line);
+  } catch {
+    return undefined;
+  }
+}
+
+function decodeRequest(value: unknown): ParserWorkerRequest | undefined {
+  try {
     if (
       !Predicate.isObject(value) ||
       value.protocol !== PROTOCOL_VERSION ||
@@ -1426,7 +1877,7 @@ function currentHardwareConcurrency(): number {
   }
 }
 
-function encodeParserWorkerResponse(response: ParserWorkerResponse): string {
+function encodeParserWorkerResponse(response: ParserWorkerResponse | ParserWorkerSourceSequenceResponse): string {
   const line = `${JSON.stringify(response)}\n`;
   if (Buffer.byteLength(line, 'utf8') <= CODE_GRAPH_PARSER_WORKER_RESPONSE_BYTES_MAXIMUM) return line;
   return `${JSON.stringify(protocolFailure(response.id, 'Parser worker response exceeded its protocol budget.'))}\n`;

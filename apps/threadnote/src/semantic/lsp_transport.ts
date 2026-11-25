@@ -130,6 +130,8 @@ export const SemanticWireStartup = Context.Reference<
 export interface LspWire {
   readonly pid: number;
   readonly identity?: string;
+  /** Fresh proof from this wire's original opaque native owner, never from a PID or LSP response. */
+  readonly assertOriginalCurrent?: () => void;
   readonly messages: Stream.Stream<Message>;
   readonly failure: () => LspFault | undefined;
   readonly beginClosing: Effect.Effect<void>;
@@ -173,7 +175,7 @@ export const spawnSemanticProcess = Effect.fn('semantic.spawnSemanticProcess')(f
   };
   // Native creation, cleanup registration and both output owners are one acquisition.
   // A pending interrupt is restored only after the scope can drain the owned capability.
-  const {child, finish} = yield* Effect.uninterruptible(
+  const {child, finish, assertOriginalCurrent} = yield* Effect.uninterruptible(
     Effect.gen(function* () {
       // The platform capability, never a PID, owns signalling and the original group/Job.
       options.beforeCreation?.();
@@ -196,6 +198,14 @@ export const spawnSemanticProcess = Effect.fn('semantic.spawnSemanticProcess')(f
           cleanupUnknown = true;
           fail('exit');
           return {state: 'unknown', leaderExitCode: null, stdioClosed: false};
+        }
+      };
+      const assertOriginalCurrent = () => {
+        if (ending || nativeClosed || fault || cleanupUnknown) throw fault ?? LspFault.make({code: 'exit'});
+        const observation = observe();
+        if (observation.state !== 'running' || observation.leaderExitCode !== null) {
+          fail('exit');
+          throw fault!;
         }
       };
       const waitTree = (milliseconds: number) =>
@@ -337,13 +347,14 @@ export const spawnSemanticProcess = Effect.fn('semantic.spawnSemanticProcess')(f
       pumps = [pump(child.stdout, true), pump(child.stderr, false)];
       yield* Effect.addFinalizer(() => finish.pipe(Effect.asVoid));
       options.captureOriginal?.(child.pid, finish);
-      return {child, finish};
+      return {child, finish, assertOriginalCurrent};
     }),
   );
   return {
     pid: child.pid,
     identity: child.identity,
     failure: () => fault,
+    assertOriginalCurrent,
     beginClosing: Effect.sync(() => {
       ending = true;
     }),
@@ -414,6 +425,7 @@ export const spawnLspWire = Effect.fn('semantic.spawnLspWire')(function* (option
     pid: ownedProcess.pid,
     identity: ownedProcess.identity,
     failure: ownedProcess.failure,
+    assertOriginalCurrent: ownedProcess.assertOriginalCurrent,
     beginClosing: ownedProcess.beginClosing,
     messages: Stream.fromQueue(incoming).pipe(
       Stream.map(packet => {

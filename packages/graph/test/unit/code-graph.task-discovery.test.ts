@@ -40,6 +40,7 @@ import {SystemInfo} from '@threadnote/platform/system';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {citationPlatformLayer} from '../helpers/citation-platform.js';
 import type {CodeGraphBodyDiscovery, CodeGraphIndexSummary} from '@threadnote/graph/types';
+import {native} from '@threadnote/graph/test/helpers/native-typescript-session';
 
 // Independently frozen v2 oracle; production discovery receives only prompt/scope/budget.
 const frozen = [
@@ -831,7 +832,7 @@ effectIt.layer(citationPlatformLayer)(it => {
       ),
     );
     for (const oracle of frozen)
-      it.effect(
+      native(it.effect)(
         `acquires ${oracle.id} through real full/cache/spool and reserves its caller outside seeds`,
         () =>
           TestClock.withLive(

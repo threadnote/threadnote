@@ -1,8 +1,18 @@
 import {Array as Arr, Option, String as Str} from 'effect';
-import {expect, it} from 'vitest';
+import {afterAll, expect, it} from 'vitest';
 import type {CodeGraphDiagramFact} from '../../src/query/diagram.js';
-import {renderSourceBackedSequence} from '../../src/query/diagram_sequence.js';
+import {renderSourceBackedSequence as renderWithSession} from '../../src/query/diagram_sequence.js';
+import type {NativeTypeScriptSession} from '../../src/typescript_runtime.js';
 import type {CodeGraphQueryNode, CodeGraphSpan} from '../../src/types.js';
+import {createNativeTypeScriptTestSession, native} from '../helpers/native-typescript-session.js';
+
+// One native session serves this file; each operation has its own budget.
+let session: Promise<NativeTypeScriptSession> | undefined;
+afterAll(async () => {
+  await (await session)?.close();
+});
+const renderSourceBackedSequence = async (input: Parameters<typeof renderWithSession>[0]) =>
+  renderWithSession(input, await (session ??= createNativeTypeScriptTestSession()));
 
 const SOURCE = `import {Effect as Fx} from 'effect';
 export const run = Fx.fn('private label')(function* () {
@@ -90,42 +100,45 @@ const input = {
   ],
 };
 
-it('projects branch and loop order while keeping deferred calls and unresolved receivers explicit', () => {
-  const result = renderSourceBackedSequence(input);
-  expect(result).toMatchObject({orderedCalls: 7, unorderedCalls: 2});
-  if (!result) throw new Error('Expected source-backed sequence');
-  const source = result.source;
-  expect(source).toContain('alt Condition at line 4');
-  expect(source).toContain('loop Local iteration at line 5');
-  expect(source).toContain('else Otherwise');
-  expect(source).toContain('%% Unresolved call edge_dynamic\n  p1->>p3: embedMany yielded at line 8');
-  expect(source).toContain('participant p3 as Unresolved target');
-  expect(result.lifelines).toEqual([
-    {path: 'src/run.ts', diagramId: 'p1', label: 'src/run.ts'},
-    {path: 'src/work.ts', diagramId: 'p2', label: 'src/work.ts'},
-  ]);
-  expect(result.discoveredGaps).toEqual([]);
-  expect(source).toContain('Its order relative to other scopes is unknown');
-  expect(source).not.toContain('private mode');
-  expect(source).not.toContain('private label');
-  const orderedFacts = Arr.filter(Str.split('\n')(source), Str.includes('%% Indexed call'));
-  expect(Arr.map(orderedFacts, line => Str.split(' ')(line).at(-1))).toEqual([
-    'edge_setup',
-    'edge_claim',
-    'edge_persist',
-    'edge_reuse',
-    'edge_publish',
-    'edge_cleanup',
-    'edge_infer',
-  ]);
-  for (const call of facts) expect(Str.split(call.id)(source)).toHaveLength(2);
-  expect(source).toContain('Unordered indexed relationships in src/run.ts');
-  expect(source).toContain('%% edge_delayed\n  %% edge_release\n  Note over p1');
-  expect(source).toContain('run calls delayed at line 11');
-  expect(source).toContain('run calls release at line 18');
-});
+native(it)(
+  'projects branch and loop order while keeping deferred calls and unresolved receivers explicit',
+  async () => {
+    const result = await renderSourceBackedSequence(input);
+    expect(result).toMatchObject({orderedCalls: 7, unorderedCalls: 2});
+    if (!result) throw new Error('Expected source-backed sequence');
+    const source = result.source;
+    expect(source).toContain('alt Condition at line 4');
+    expect(source).toContain('loop Local iteration at line 5');
+    expect(source).toContain('else Otherwise');
+    expect(source).toContain('%% Unresolved call edge_dynamic\n  p1->>p3: embedMany yielded at line 8');
+    expect(source).toContain('participant p3 as Unresolved target');
+    expect(result.lifelines).toEqual([
+      {path: 'src/run.ts', diagramId: 'p1', label: 'src/run.ts'},
+      {path: 'src/work.ts', diagramId: 'p2', label: 'src/work.ts'},
+    ]);
+    expect(result.discoveredGaps).toEqual([]);
+    expect(source).toContain('Its order relative to other scopes is unknown');
+    expect(source).not.toContain('private mode');
+    expect(source).not.toContain('private label');
+    const orderedFacts = Arr.filter(Str.split('\n')(source), Str.includes('%% Indexed call'));
+    expect(Arr.map(orderedFacts, line => Str.split(' ')(line).at(-1))).toEqual([
+      'edge_setup',
+      'edge_claim',
+      'edge_persist',
+      'edge_reuse',
+      'edge_publish',
+      'edge_cleanup',
+      'edge_infer',
+    ]);
+    for (const call of facts) expect(Str.split(call.id)(source)).toHaveLength(2);
+    expect(source).toContain('Unordered indexed relationships in src/run.ts');
+    expect(source).toContain('%% edge_delayed\n  %% edge_release\n  Note over p1');
+    expect(source).toContain('run calls delayed at line 11');
+    expect(source).toContain('run calls release at line 18');
+  },
+);
 
-it('orders the receiver before optional arguments and guards continuation after an early return', () => {
+native(it)('orders the receiver before optional arguments and guards continuation after an early return', async () => {
   const source = `async function runOptional() {
   getService()?.run(buildInput());
   if (flag) return early();
@@ -156,7 +169,7 @@ it('orders the receiver before optional arguments and guards continuation after 
       };
     },
   );
-  const result = renderSourceBackedSequence({
+  const result = await renderSourceBackedSequence({
     subject: root,
     facts: calls,
     nodes: allNodes,
@@ -211,13 +224,13 @@ it('orders the receiver before optional arguments and guards continuation after 
   expect(result.source).not.toContain('private value');
 });
 
-it('abstains when verified bytes or anchored call sites are unavailable', () => {
-  expect(renderSourceBackedSequence({...input, sources: new Map()})).toBeUndefined();
+native(it)('abstains when verified bytes or anchored call sites are unavailable', async () => {
+  expect(await renderSourceBackedSequence({...input, sources: new Map()})).toBeUndefined();
   expect(
-    renderSourceBackedSequence({...input, facts: Arr.filter(facts, fact => fact.targetName === 'delayed')}),
+    await renderSourceBackedSequence({...input, facts: Arr.filter(facts, fact => fact.targetName === 'delayed')}),
   ).toMatchObject({source: '', orderedCalls: 0, unorderedCalls: 1});
   const wrongSite = {...facts[0], evidenceSpan: {...facts[0].evidenceSpan, endColumn: 1}};
-  expect(renderSourceBackedSequence({...input, facts: [wrongSite]})).toMatchObject({
+  expect(await renderSourceBackedSequence({...input, facts: [wrongSite]})).toMatchObject({
     source: '',
     orderedCalls: 0,
     discoveredGaps: expect.arrayContaining([

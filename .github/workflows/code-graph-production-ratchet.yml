@@ -15,9 +15,49 @@ env:
   BUN_VERSION: 1.4.4
 
 jobs:
+  # The shared prepared native TypeScript asset for this host: restore, construct once on a miss, save. The ratchet job
+  # only restores it, so a cold construction never consumes its 40-minute budget.
+  # It runs the ratchet's own scope classifier first, so a diff without production-ratchet paths never pays for a cold
+  # construction; a classifier failure fails open exactly as in the ratchet job.
+  native-typescript-asset:
+    name: Native TypeScript asset · linux-x64
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    outputs:
+      cache_key: ${{ steps.asset.outputs.cache_key }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: '0'
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - id: scope
+        name: Classify the production-ratchet diff
+        continue-on-error: true
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bun tools/ci/code-graph-production-ratchet-scope.ts --base "$BASE_SHA" --head "$HEAD_SHA"
+
+      - run: bun install --frozen-lockfile
+        if: steps.scope.outcome != 'success' || steps.scope.outputs.run_benchmark != 'false'
+
+      - name: Restore, construct on a miss and save the verified native TypeScript asset
+        id: asset
+        if: steps.scope.outcome != 'success' || steps.scope.outputs.run_benchmark != 'false'
+        timeout-minutes: 80
+        uses: ./.github/actions/native-typescript-asset
+
   ratchet:
     name: Governed reduced production profile · Linux
-    if: github.event_name == 'pull_request'
+    needs: native-typescript-asset
+    # Runs even when the asset job failed: its restore-only step then fails visibly instead of a skipped check.
+    if: ${{ !cancelled() && github.event_name == 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 40
 
@@ -46,6 +86,15 @@ jobs:
       - run: bun install --frozen-lockfile
         if: steps.scope.outcome != 'success' || steps.scope.outputs.run_benchmark != 'false'
 
+      # The governed profile indexes TypeScript; the candidate and the protected-base control read this one asset.
+      - name: Restore the verified native TypeScript asset
+        if: steps.scope.outcome != 'success' || steps.scope.outputs.run_benchmark != 'false'
+        timeout-minutes: 15
+        uses: ./.github/actions/native-typescript-asset
+        with:
+          restore-only: 'true'
+          cache-key: ${{ needs.native-typescript-asset.outputs.cache_key }}
+
       - name: Measure the governed reduced production profile
         if: steps.scope.outcome != 'success' || steps.scope.outputs.run_benchmark != 'false'
         env:
@@ -72,8 +121,30 @@ jobs:
           --artifact artifacts/code-graph-production-ratchet-Linux-${{ runner.arch }}.json
           --ratchet apps/threadnote/test/evaluation/baselines/code-graph-v1/production-ratchet-github-linux-x64.json
 
-      - name: Measure the exact protected-base control on the same runner
+      # The control runs the protected base against this job's asset, which is verified against the base's own pins.
+      # When the base and head disagree on the asset inputs, the control cannot be measured on the same asset: the
+      # job fails closed with that reason (the static ratchet failure stands) instead of comparing a degraded control.
+      - id: control-asset
+        name: Check that the protected base shares the native TypeScript asset inputs
         if: steps.static-ratchet.outcome == 'failure'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if git diff --quiet "$BASE_SHA" HEAD -- packages/graph/src/typescript_native_asset_pins.ts \
+            tools/semantic/build-typescript-native.ts 'tools/semantic/typescript-native-*.patch'; then
+            echo 'same=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'same=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Refuse a protected-base control with different native TypeScript pins
+        if: steps.static-ratchet.outcome == 'failure' && steps.control-asset.outputs.same != 'true'
+        run: |
+          echo '::error::The static ratchet failed and the protected base pins a different native TypeScript asset, so no same-asset control can confirm a fallback. Rebase onto a base with the same pins or update the reviewed ratchet.'
+          exit 1
+
+      - name: Measure the exact protected-base control on the same runner
+        if: steps.static-ratchet.outcome == 'failure' && steps.control-asset.outputs.same == 'true'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           THREADNOTE_BENCHMARK_RUNNER_CLASS: github-hosted-ubuntu-24.04-${{ runner.arch }}
@@ -97,7 +168,7 @@ jobs:
             --output "$candidate_root/artifacts/code-graph-production-ratchet-control-Linux-${{ runner.arch }}.json"
 
       - name: Remeasure the exact candidate immediately after the control
-        if: steps.static-ratchet.outcome == 'failure'
+        if: steps.static-ratchet.outcome == 'failure' && steps.control-asset.outputs.same == 'true'
         env:
           THREADNOTE_BENCHMARK_RUNNER_CLASS: github-hosted-ubuntu-24.04-${{ runner.arch }}
           THREADNOTE_BENCHMARK_RUNNER_ID: ${{ runner.name }}
@@ -114,7 +185,7 @@ jobs:
           --output artifacts/code-graph-production-ratchet-paired-candidate-Linux-${{ runner.arch }}.json
 
       - name: Enforce same-runner confirmatory fallback with bounded wall tail
-        if: steps.static-ratchet.outcome == 'failure'
+        if: steps.static-ratchet.outcome == 'failure' && steps.control-asset.outputs.same == 'true'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: >-

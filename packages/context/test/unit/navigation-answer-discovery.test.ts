@@ -23,6 +23,7 @@ import {runCommandEffect} from '@threadnote/platform/command';
 import {citationPlatformLayer} from '../helpers/citation-platform.js';
 import {retrieveTaskNavigationAnswer} from '@threadnote/context/navigation/discovery';
 import type {TaskDiscoveryBudget} from '@threadnote/graph/query/task_discovery';
+import {native} from '@threadnote/graph/test/helpers/native-typescript-session';
 
 const frozen = [
   {
@@ -204,7 +205,7 @@ const dependencies = Layer.mergeAll(
 
 effectIt.layer(citationPlatformLayer)(it => {
   for (const oracle of frozen)
-    it.effect(
+    native(it.effect)(
       `projects first working ${oracle.path} body candidate and structural caller without effect claims`,
       () =>
         TestClock.withLive(
@@ -451,7 +452,7 @@ effectIt.layer(citationPlatformLayer)(it => {
 });
 
 effectIt.layer(citationPlatformLayer)(it => {
-  it.effect(
+  native(it.effect)(
     'preserves source-supported test callers and denies large retained source behind a tiny excerpt before acquisition',
     () =>
       TestClock.withLive(

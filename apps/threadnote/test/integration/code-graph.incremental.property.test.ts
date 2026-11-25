@@ -29,6 +29,7 @@ import {
 import {CODE_GRAPH_MATERIALIZATION_SPOOL_FORMAT_VERSION} from '@threadnote/graph/materialization/spool';
 import type {CodeGraphMaterializationMetrics, CodeGraphQueryResult} from '@threadnote/graph/types';
 import {runEffect} from '../helpers/effect-runtime.js';
+import {native, nativeProperty} from '@threadnote/graph/test/helpers/native-typescript-session';
 
 interface DifferentialScenario {
   readonly baseTargets: readonly number[];
@@ -96,7 +97,7 @@ const unpublishedSurfaceChangeScenarioArbitrary = surfaceChangeScenarioArbitrary
 
 describe('code graph incremental-overlay differential properties', () => {
   fcEffectProp(
-    it,
+    nativeProperty(it),
     'preserves imported compact alias/replacement parity and the original deletion fallback without losing weighted body rows',
     {scenario: scenarioArbitrary},
     ({scenario}) =>
@@ -249,7 +250,7 @@ describe('code graph incremental-overlay differential properties', () => {
   );
 
   fcEffectProp(
-    it,
+    nativeProperty(it),
     'matches a full rebuild after randomized body-only edits change multi-file references',
     {scenario: scenarioArbitrary},
     ({scenario}) =>
@@ -414,7 +415,7 @@ describe('code graph incremental-overlay differential properties', () => {
   );
 
   fcEffectProp(
-    it,
+    nativeProperty(it),
     'keeps randomized unpublished TypeScript declarations equivalent to a forced dirty rebuild',
     {scenario: unpublishedSurfaceChangeScenarioArbitrary},
     ({scenario}) =>
@@ -468,7 +469,7 @@ describe('code graph incremental-overlay differential properties', () => {
   );
 
   fcEffectProp(
-    it,
+    nativeProperty(it),
     'matches a full rebuild after randomized compatible changes are committed cleanly',
     {scenario: scenarioArbitrary},
     ({scenario}) =>
@@ -561,7 +562,7 @@ describe('code graph incremental-overlay differential properties', () => {
   );
 
   fcEffectProp(
-    it,
+    nativeProperty(it),
     'fails closed to full materialization for randomized clean resolution-surface changes',
     {scenario: cleanSurfaceChangeScenarioArbitrary},
     ({scenario}) =>
@@ -690,7 +691,7 @@ describe('code graph incremental-overlay differential properties', () => {
     }
   });
 
-  it('does not reuse a completed incremental request for an explicit direct rebuild', async () => {
+  native(it)('does not reuse a completed incremental request for an explicit direct rebuild', async () => {
     const scenario = {
       baseTargets: [1, 0, 1],
       dirty: new Set([0, 2]),
@@ -736,64 +737,67 @@ describe('code graph incremental-overlay differential properties', () => {
     }
   });
 
-  it.effect('reuses the ready logical snapshot while bounded cleanup discards an interrupted direct sibling', () => {
-    const scenario = {
-      baseTargets: [1, 0, 1],
-      dirty: new Set([0, 2]),
-      dirtyTargets: [2, 0, 1],
-      fileCount: 3,
-      salt: 62,
-    } satisfies DifferentialScenario;
-    return Effect.acquireUseRelease(
-      Effect.sync(() => {
-        const root = createRepository(scenario);
-        return {home: join(root, '.threadnote-ready-logical-interrupted-direct-home'), root};
-      }),
-      ({home, root}) =>
-        Effect.gen(function* () {
-          const indexer = yield* CodeGraphIndexer;
-          yield* indexer.index({cwd: root, threadnoteHome: home});
-          yield* Effect.sync(() => applyDirtyScenario(root, scenario));
-          const path = yield* Path.Path;
-          const logical = yield* indexer.index({cwd: root, threadnoteHome: home});
-          const layout = codeGraphLayout(path, home, logical.identity.checkoutId, logical.identity.worktreeId);
-          const exit = yield* indexer
-            .index({
-              cwd: root,
-              incrementalOverlay: false,
-              onProgress: progress =>
-                progress.phase === 'materializing' && (progress.metrics?.batchesCompleted ?? 0) > 0
-                  ? Effect.interrupt
-                  : Effect.void,
-              threadnoteHome: home,
-            })
-            .pipe(Effect.exit);
-          const interrupted = {databasePath: layout.databasePath, exit, logical};
-
-          expect(interrupted.logical.materialization?.mode).toBe('incremental-overlay');
-          expect(interrupted.logical.snapshot.baseSnapshotId).toBeDefined();
-          expect(interrupted.exit._tag).toBe('Failure');
-          const direct = persistedBuildingSnapshot(interrupted.databasePath);
-          expect(isLexicalV2Snapshot(direct.id)).toBe(true);
-          expect(persistedLexicalLayoutMode(interrupted.databasePath, direct.id)).toBe('direct');
-          expect(Option.isNone(direct.baseSnapshotId)).toBe(true);
-          expect(persistedSnapshotRowCount(interrupted.databasePath, direct.id, 'symbols')).toBe(0);
-          expect(persistedMaterializationSpoolBatchCount(interrupted.databasePath, direct.id)).toBe(1);
-
-          const reused = yield* indexer.index({cwd: root, threadnoteHome: home});
-
-          expect(reused.snapshot.id).toBe(interrupted.logical.snapshot.id);
-          expect(reused.materialization?.mode).toBe('reused-snapshot');
-          expect(persistedSnapshotState(interrupted.databasePath, direct.id)).toBeUndefined();
-          expect(persistedSnapshotRowCount(interrupted.databasePath, direct.id, 'symbols')).toBe(0);
-          expect(
-            persistedSnapshotRowCount(interrupted.databasePath, direct.id, 'building_materialization_batches'),
-          ).toBe(0);
-          expect(existsSync(materializationSpoolPath(interrupted.databasePath, direct.id))).toBe(false);
+  native(it.effect)(
+    'reuses the ready logical snapshot while bounded cleanup discards an interrupted direct sibling',
+    () => {
+      const scenario = {
+        baseTargets: [1, 0, 1],
+        dirty: new Set([0, 2]),
+        dirtyTargets: [2, 0, 1],
+        fileCount: 3,
+        salt: 62,
+      } satisfies DifferentialScenario;
+      return Effect.acquireUseRelease(
+        Effect.sync(() => {
+          const root = createRepository(scenario);
+          return {home: join(root, '.threadnote-ready-logical-interrupted-direct-home'), root};
         }),
-      ({root}) => Effect.sync(() => rmSync(root, {force: true, recursive: true})),
-    ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive);
-  });
+        ({home, root}) =>
+          Effect.gen(function* () {
+            const indexer = yield* CodeGraphIndexer;
+            yield* indexer.index({cwd: root, threadnoteHome: home});
+            yield* Effect.sync(() => applyDirtyScenario(root, scenario));
+            const path = yield* Path.Path;
+            const logical = yield* indexer.index({cwd: root, threadnoteHome: home});
+            const layout = codeGraphLayout(path, home, logical.identity.checkoutId, logical.identity.worktreeId);
+            const exit = yield* indexer
+              .index({
+                cwd: root,
+                incrementalOverlay: false,
+                onProgress: progress =>
+                  progress.phase === 'materializing' && (progress.metrics?.batchesCompleted ?? 0) > 0
+                    ? Effect.interrupt
+                    : Effect.void,
+                threadnoteHome: home,
+              })
+              .pipe(Effect.exit);
+            const interrupted = {databasePath: layout.databasePath, exit, logical};
+
+            expect(interrupted.logical.materialization?.mode).toBe('incremental-overlay');
+            expect(interrupted.logical.snapshot.baseSnapshotId).toBeDefined();
+            expect(interrupted.exit._tag).toBe('Failure');
+            const direct = persistedBuildingSnapshot(interrupted.databasePath);
+            expect(isLexicalV2Snapshot(direct.id)).toBe(true);
+            expect(persistedLexicalLayoutMode(interrupted.databasePath, direct.id)).toBe('direct');
+            expect(Option.isNone(direct.baseSnapshotId)).toBe(true);
+            expect(persistedSnapshotRowCount(interrupted.databasePath, direct.id, 'symbols')).toBe(0);
+            expect(persistedMaterializationSpoolBatchCount(interrupted.databasePath, direct.id)).toBe(1);
+
+            const reused = yield* indexer.index({cwd: root, threadnoteHome: home});
+
+            expect(reused.snapshot.id).toBe(interrupted.logical.snapshot.id);
+            expect(reused.materialization?.mode).toBe('reused-snapshot');
+            expect(persistedSnapshotState(interrupted.databasePath, direct.id)).toBeUndefined();
+            expect(persistedSnapshotRowCount(interrupted.databasePath, direct.id, 'symbols')).toBe(0);
+            expect(
+              persistedSnapshotRowCount(interrupted.databasePath, direct.id, 'building_materialization_batches'),
+            ).toBe(0);
+            expect(existsSync(materializationSpoolPath(interrupted.databasePath, direct.id))).toBe(false);
+          }),
+        ({root}) => Effect.sync(() => rmSync(root, {force: true, recursive: true})),
+      ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive);
+    },
+  );
 
   it('keeps the explicit overlay option inert for a clean canonical snapshot', async () => {
     const scenario = {
@@ -838,7 +842,7 @@ describe('code graph incremental-overlay differential properties', () => {
     }
   });
 
-  it('keeps explicit direct semantics when default and direct dirty requests overlap', async () => {
+  native(it)('keeps explicit direct semantics when default and direct dirty requests overlap', async () => {
     const scenario = {
       baseTargets: [1, 0, 1],
       dirty: new Set([0, 2]),
@@ -948,7 +952,7 @@ describe('code graph incremental-overlay differential properties', () => {
     ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive);
   });
 
-  it('switches an interrupted incremental overlay to the disjoint explicit direct snapshot', async () => {
+  native(it)('switches an interrupted incremental overlay to the disjoint explicit direct snapshot', async () => {
     const scenario = {
       baseTargets: [1, 0, 1],
       dirty: new Set([0, 2]),

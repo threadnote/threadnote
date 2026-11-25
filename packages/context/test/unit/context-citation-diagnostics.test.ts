@@ -24,7 +24,7 @@ describe('Context Brief citation metadata diagnostics', () => {
     expect(logical.activeHandoffs[0].preciseStatus).toBe('exact');
   });
 
-  it.each(['citation-limit', 'graph-stale', 'validation-error'] as const)(
+  it.each(['citation-limit', 'extraction-unavailable', 'graph-stale', 'validation-error'] as const)(
     'preserves the displayed unknown citation reason %s within public response bounds',
     reason => {
       const {logical, record} = diagnostic([citationLine(0)], MEMORY_SCHEMA_VERSION, {

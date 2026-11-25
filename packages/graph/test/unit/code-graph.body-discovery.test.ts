@@ -21,6 +21,7 @@ import {
   relocateStructuredSchemaFacts,
 } from '@threadnote/graph/languages/schemas/extractor';
 import {NAVIGATION_PROOF_CACHE_IDENTITY} from '@threadnote/graph/query/navigation_facts';
+import {native, NativeTypeScriptTestSessionLayer} from '@threadnote/graph/test/helpers/native-typescript-session';
 import {serializeBoundedCodeGraphFact, budgetCachedCodeGraphFacts} from '@threadnote/graph/fact/budget';
 import {encodeStoredCodeGraphFact, decodeStoredCodeGraphFact} from '@threadnote/graph/fact/storage';
 import {preparedSymbolTerms, symbolTerms} from '@threadnote/graph/store/utilities';
@@ -246,9 +247,16 @@ it('keeps metadata and body key spaces separate and preserves legacy facts', () 
 it('binds finite TypeScript proof support to the exact new registry identity independently', () => {
   expect(BODY_DISCOVERY_POLICY).toBe('body-discovery-v3-owner-presence-utf16-cursor-combined-64k');
   expect(packCacheIdentity(codeGraphLanguagePack)).toBe(NAVIGATION_PROOF_CACHE_IDENTITY);
-  expect(NAVIGATION_PROOF_CACHE_IDENTITY).toBe('57a35e49fc3aaac3e897faf3ce928b546a3ec4b5404d82b21dfd76a59c96212f');
+  expect(NAVIGATION_PROOF_CACHE_IDENTITY).toBe('7bb7e0f170acc3b6d91e062188c27f6cac4d6c076546f708646191b756854f51');
 });
-effectIt.layer(TreeSitterRuntime.layer.pipe(Layer.provideMerge(citationPlatformLayer)))(it =>
+native(
+  effectIt.layer(
+    Layer.merge(
+      TreeSitterRuntime.layer.pipe(Layer.provideMerge(citationPlatformLayer)),
+      NativeTypeScriptTestSessionLayer,
+    ),
+  ),
+)(it =>
   it.effect('captures actual TypeScript and Python owners through the registry before source release', () =>
     Effect.gen(function* () {
       for (const [path, content] of [

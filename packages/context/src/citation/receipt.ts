@@ -46,7 +46,12 @@ export function unknownReceipt(
   citation: MemoryCodeCitationV1,
   reason: Extract<
     ContextBriefCitationValidationReceiptV2['reason'],
-    'citation-limit' | 'graph-stale' | 'repository-ambiguous' | 'repository-unavailable' | 'validation-error'
+    | 'citation-limit'
+    | 'extraction-unavailable'
+    | 'graph-stale'
+    | 'repository-ambiguous'
+    | 'repository-unavailable'
+    | 'validation-error'
   >,
   observedAt: string,
 ): ContextBriefCitationValidationReceiptV2 {

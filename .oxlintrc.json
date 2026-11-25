@@ -146,20 +146,6 @@
   },
   "overrides": [
     {
-      "files": ["packages/graph/src/typescript_runtime.ts"],
-      "globals": {
-        "require": "readonly"
-      },
-      "rules": {
-        "typescript/no-require-imports": [
-          "error",
-          {
-            "allow": ["^typescript-compiler$"]
-          }
-        ]
-      }
-    },
-    {
       "files": ["**/*.ts", "**/*.tsx", "**/*.mts", "**/*.cts"],
       "rules": {
         "constructor-super": "off",

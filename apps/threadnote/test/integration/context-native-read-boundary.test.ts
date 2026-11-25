@@ -44,6 +44,7 @@ import type {ContextBriefGraphReadBudget} from '@threadnote/context/graph/eviden
 import type {ContextBriefGraphEvidenceV1} from '@threadnote/context/types';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {withProductionLogging, withProductionPhaseTiming} from '../../src/effect/production_log.js';
+import {native} from '@threadnote/graph/test/helpers/native-typescript-session';
 
 const sources: ContextBriefRuntimeCompilerSources = {
   graphEvidence: () => Effect.die('Native graph reads must not fall back in process.'),
@@ -284,7 +285,7 @@ describe('whole native Context Brief read boundary', () => {
     {timeout: 20000},
   );
 
-  effectIt.effect(
+  native(effectIt.effect)(
     'native semantic reads bind the exact document and target, then abstain on foreign project or source drift',
     () =>
       Effect.gen(function* () {
@@ -378,7 +379,7 @@ describe('whole native Context Brief read boundary', () => {
     {timeout: 20000},
   );
 
-  effectIt.effect(
+  native(effectIt.effect)(
     'keeps compatible stale scoped graph cards when exact applicability stalls',
     () =>
       Effect.gen(function* () {

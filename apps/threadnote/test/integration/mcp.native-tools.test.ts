@@ -47,6 +47,7 @@ import {
 } from '../../src/mcp/server/common.js';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
+import {skipWithoutNativeTypeScript} from '@threadnote/graph/test/helpers/native-typescript-session';
 type TextContent = Extract<
   CallToolResult['content'][number],
   {
@@ -3487,7 +3488,8 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-  it('exposes current-source search through a separate read-only code graph tool', async () => {
+  it('exposes current-source search through a separate read-only code graph tool', async context => {
+    skipWithoutNativeTypeScript(context);
     await withMcpClient(
       async (client, fixture) => {
         const graphTool = EffectOption.getOrUndefined(
@@ -3883,7 +3885,8 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   }, 20000);
-  it('serves ready stale graphs and rejects cited replacements with typed recovery before mutation', async () => {
+  it('serves ready stale graphs and rejects cited replacements with typed recovery before mutation', async context => {
+    skipWithoutNativeTypeScript(context);
     await withMcpClient(
       async (client, fixture) => {
         const repository = join(fixture.root, 'stale-ready-repository');
@@ -4456,7 +4459,8 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'full'},
     );
   }, 40000);
-  it('serves a divergent-HEAD new worktree from stale shared evidence while its builder is blocked', async () => {
+  it('serves a divergent-HEAD new worktree from stale shared evidence while its builder is blocked', async context => {
+    skipWithoutNativeTypeScript(context);
     await withMcpClient(
       async (client, fixture) => {
         const repository = join(fixture.root, 'divergent-worktree-repository');
@@ -4549,7 +4553,8 @@ describe('Threadnote MCP toolsets', () => {
       {environment: {THREADNOTE_CODE_GRAPH_PREWARM: '0'}, toolset: 'core'},
     );
   }, 40000);
-  it('keeps graphs immediately available across new TypeScript, Python, and Rust worktrees and edits', async () => {
+  it('keeps graphs immediately available across new TypeScript, Python, and Rust worktrees and edits', async context => {
+    skipWithoutNativeTypeScript(context);
     await withMcpClient(
       async (client, fixture) => {
         const repositories = [
@@ -4687,7 +4692,8 @@ describe('Threadnote MCP toolsets', () => {
       {environment: {THREADNOTE_CODE_GRAPH_PREWARM: '0'}, toolset: 'core'},
     );
   }, 120000);
-  it('keeps ordinary watched reads deferred until an explicit current inspection', async () => {
+  it('keeps ordinary watched reads deferred until an explicit current inspection', async context => {
+    skipWithoutNativeTypeScript(context);
     await withMcpClient(
       async (client, fixture) => {
         const repository = join(fixture.root, 'watched-repository');

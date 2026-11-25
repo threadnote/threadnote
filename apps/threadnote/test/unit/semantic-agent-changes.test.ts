@@ -136,14 +136,15 @@ const fixture = Effect.gen(function* () {
     enabled: true,
     worktree,
     catalog: {
-      candidate: {
-        runtime: '/fixture/node',
-        runtimeDigest: sha256HexSync('node'),
-        runtimeVersion: '24.19.0',
+      nativeCandidate: {
+        executable: '/fixture/tsc',
+        executableDigest: sha256HexSync('native-compiler'),
+        version: '7.1.0-beta',
         sdkDirectory: '/fixture/typescript',
         sdkTreeDigest: sha256HexSync('sdk'),
-        serverDirectory: '/fixture/server',
-        serverTreeDigest: sha256HexSync('server'),
+        sourceCommit: '3e9236361fa97a9e6c685f4833ac457ae2d8c50a',
+        sourceTree: '2a322d5d8eefb3b2f295c5ed6398de7237f6249a',
+        overlaySha256: '3ec77e4026b698c701b60fe34238a9ac83eaa73ad33679430fb3bafcef5e607d',
       },
     },
   };
@@ -271,7 +272,7 @@ it.effect.skipIf(process.platform === 'win32')(
         uri,
         configuration: sha256HexSync('config'),
         toolchain: sha256HexSync('tools'),
-        provider: {id: 'typescript-language-server', version: '6.0.2', generation: 1},
+        provider: {id: 'typescript-native', version: '7.1.0-beta', generation: 1},
         view: {kind: 'disk', id: 'disk', owner: 'test', epoch: 0},
         content: sha256HexSync(text),
         documentVersion: null,
@@ -383,6 +384,12 @@ it.effect.skipIf(process.platform === 'win32')(
       let privateProof = false;
       let rejectPublication = false;
       let finalAssertions = 0;
+      let closingObservation = () => Effect.succeed(stale ? undefined : observed);
+      let profileStat: () => Effect.Effect<void> = () => Effect.void;
+      const timedFs: FileSystem.FileSystem = {
+        ...f.fs,
+        stat: file => (file === f.profileFile ? profileStat() : Effect.void).pipe(Effect.andThen(f.fs.stat(file))),
+      };
       const directory = path.join(f.request.callerCwd, 'private-preview');
       const changes = yield* makeSemanticAgentChanges(
         {
@@ -417,10 +424,10 @@ it.effect.skipIf(process.platform === 'win32')(
                 }),
               ),
             ),
-          observe: () => Effect.succeed(stale ? undefined : observed),
+          observe: () => closingObservation(),
         },
         {directory, profileHome: f.home, worktree, runtimeIdentity: sha256HexSync('runtime')},
-      );
+      ).pipe(Effect.provideService(FileSystem.FileSystem, timedFs));
       const request = {
         version: 1 as const,
         worktree,
@@ -546,6 +553,66 @@ it.effect.skipIf(process.platform === 'win32')(
       ).toMatchObject({status: 'ok', applicable: false, writerAuthorityRequired: true, conflicts: []});
 
       expect(yield* blobs()).toHaveLength(2);
+      const observing = yield* Deferred.make<void>();
+      closingObservation = () => Deferred.succeed(observing, undefined).pipe(Effect.andThen(Effect.never));
+      const currentnessTimeout = yield* Effect.forkChild(
+        changes.execute({...request, milliseconds: 100, maxBytes: 8192}, observed),
+      );
+      yield* Deferred.await(observing);
+      yield* TestClock.adjust(100);
+      expect(yield* Fiber.join(currentnessTimeout)).toMatchObject({
+        status: 'timeout',
+        applicable: false,
+        writerAuthorityRequired: true,
+        diagnostic: {origin: 'service', phase: 'source-currentness', cleanup: 'unobserved'},
+      });
+      expect(yield* blobs()).toHaveLength(2);
+
+      const firstScope = yield* Deferred.make<void>();
+      const finalScope = yield* Deferred.make<void>();
+      let publicationStarted = false;
+      let profileChecks = 0;
+      closingObservation = () =>
+        Effect.sync(() => {
+          publicationStarted = true;
+          return observed;
+        });
+      profileStat = () =>
+        Effect.gen(function* () {
+          if (!publicationStarted) return;
+          profileChecks++;
+          if (profileChecks === 1) {
+            yield* Deferred.succeed(firstScope, undefined);
+            yield* Effect.sleep(20);
+          }
+          if (profileChecks === 3) {
+            yield* Deferred.succeed(finalScope, undefined);
+            return yield* Effect.never;
+          }
+        });
+      const publicationTimeout = yield* Effect.forkChild(
+        changes.execute({...request, milliseconds: 100, maxBytes: 8192}, observed),
+      );
+      yield* Deferred.await(firstScope);
+      yield* TestClock.adjust(20);
+      yield* Deferred.await(finalScope);
+      yield* TestClock.adjust(80);
+      expect(yield* Fiber.join(publicationTimeout)).toMatchObject({
+        status: 'timeout',
+        applicable: false,
+        writerAuthorityRequired: true,
+        diagnostic: {
+          origin: 'service',
+          phase: 'publication',
+          elapsedMilliseconds: 100,
+          phaseElapsedMilliseconds: 100,
+          budgetMilliseconds: 100,
+          remainingMilliseconds: 0,
+          cleanup: 'unobserved',
+        },
+      });
+      expect(profileChecks).toBe(3);
+      expect(yield* blobs()).toHaveLength(2);
       expect(yield* f.fs.readFileString(path.join(f.request.callerCwd, 'a.ts'))).toBe(text);
     }).pipe(
       // oxlint-disable-next-line effecttsgo/strict-effect-provide -- Narrow publication filesystem and coordinator seam.
@@ -566,7 +633,7 @@ it.effect('retains every ordered raw resource effect, refuses the whole prefligh
       uri,
       configuration: sha256HexSync('config'),
       toolchain: sha256HexSync('tools'),
-      provider: {id: 'typescript-language-server', version: '6.0.2', generation: 1},
+      provider: {id: 'typescript-native', version: '7.1.0-beta', generation: 1},
       view: {kind: 'disk', id: 'disk', owner: 'test', epoch: 0},
       content: sha256HexSync(text),
       documentVersion: null,

@@ -1,14 +1,14 @@
-import type ts from 'typescript-compiler';
-import {Array as EffectArray, Option} from 'effect';
+import type * as ts from 'typescript/ast';
+import {Array as EffectArray} from 'effect';
 import * as Effect from 'effect';
 import * as EffectString from 'effect/String';
-import type {CodeGraphSpan} from './types.js';
+import type {CodeGraphSpan, CodeGraphSymbol} from './types.js';
 
 export function typeScriptDeclarationArity(compiler: typeof ts, node: ts.Node): number | undefined {
   if (
     compiler.isFunctionDeclaration(node) ||
     compiler.isMethodDeclaration(node) ||
-    compiler.isMethodSignature(node) ||
+    compiler.isMethodSignatureDeclaration(node) ||
     compiler.isGetAccessorDeclaration(node) ||
     compiler.isSetAccessorDeclaration(node) ||
     compiler.isConstructorDeclaration(node)
@@ -52,20 +52,14 @@ export function declarationKind(compiler: typeof ts, node: ts.Node): string {
 
 export function hasExportModifier(compiler: typeof ts, node: ts.Node): boolean {
   return (
-    compiler.canHaveModifiers(node) &&
-    (Option.getOrUndefined(
-      Option.map(Option.fromNullishOr(compiler.getModifiers(node)), __effectOptionalArray =>
-        Boolean(
-          EffectArray.some(__effectOptionalArray, modifier => modifier.kind === compiler.SyntaxKind.ExportKeyword),
-        ),
-      ),
-    ) ??
-      false)
+    'modifierFlags' in node &&
+    typeof node.modifierFlags === 'number' &&
+    (node.modifierFlags & compiler.ModifierFlags.Export) !== 0
   );
 }
 
 export function propertyName(compiler: typeof ts, name: ts.PropertyName): string | undefined {
-  return compiler.isIdentifier(name) || compiler.isStringLiteralLike(name) || compiler.isNumericLiteral(name)
+  return compiler.isIdentifier(name) || compiler.isStringLiteralLikeNode(name) || compiler.isNumericLiteral(name)
     ? name.text
     : undefined;
 }
@@ -96,7 +90,7 @@ export function collectLocalBindings(
     bindings.set(scope, values);
   };
   const visit = (node: ts.Node): void => {
-    if (compiler.isParameter(node)) {
+    if (compiler.isParameterDeclaration(node)) {
       add(nearestFunctionScope(compiler, node.parent), node.name);
     } else if (compiler.isVariableDeclaration(node) && !compiler.isCatchClause(node.parent)) {
       const list = compiler.isVariableDeclarationList(node.parent) ? node.parent : undefined;
@@ -116,13 +110,14 @@ export function collectLocalBindings(
     } else if (compiler.isCatchClause(node)) {
       add(node, node.variableDeclaration?.name);
     }
-    compiler.forEachChild(node, visit);
+    node.forEachChild(visit);
   };
-  compiler.forEachChild(sourceFile, visit);
+  sourceFile.forEachChild(visit);
   return bindings;
 }
 
-export function collectBindingNames(compiler: typeof ts, name: ts.BindingName, output: Set<string>): void {
+export function collectBindingNames(compiler: typeof ts, name: ts.BindingName | undefined, output: Set<string>): void {
+  if (!name) return;
   if (compiler.isIdentifier(name)) {
     output.add(name.text);
     return;
@@ -134,14 +129,14 @@ export function collectBindingNames(compiler: typeof ts, name: ts.BindingName, o
 
 export function nearestFunctionScope(compiler: typeof ts, node: ts.Node | undefined): ts.Node | undefined {
   for (let current = node; current && !compiler.isSourceFile(current); current = current.parent) {
-    if (compiler.isFunctionLike(current)) return current;
+    if (compiler.isFunctionLikeDeclaration(current)) return current;
   }
   return undefined;
 }
 
 export function nearestBlockScope(compiler: typeof ts, node: ts.Node | undefined): ts.Node | undefined {
   for (let current = node; current && !compiler.isSourceFile(current); current = current.parent) {
-    if (compiler.isBlock(current) || compiler.isCatchClause(current) || compiler.isFunctionLike(current))
+    if (compiler.isBlock(current) || compiler.isCatchClause(current) || compiler.isFunctionLikeDeclaration(current))
       return current;
   }
   return undefined;
@@ -202,4 +197,32 @@ export function leadingDocumentation(
   );
   const value = comments.at(-1);
   return value ? Effect.pipe(value, EffectString.slice(0, 1_024)) : undefined;
+}
+
+export function parseLocallyBoundTarget(value: string): string | undefined {
+  const match = /^local:(.+)$/.exec(value);
+  if (!match) return undefined;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return undefined;
+  }
+}
+
+export function groupSymbols(
+  symbols: readonly CodeGraphSymbol[],
+  key: (symbol: CodeGraphSymbol) => string,
+): ReadonlyMap<string, readonly CodeGraphSymbol[]> {
+  const result = new Map<string, CodeGraphSymbol[]>();
+  for (const symbol of symbols) {
+    const value = key(symbol);
+    const existing = result.get(value);
+    if (existing) existing.push(symbol);
+    else result.set(value, [symbol]);
+  }
+  return result;
+}
+
+export function uniqueSymbol(symbols: readonly CodeGraphSymbol[] | undefined): CodeGraphSymbol | undefined {
+  return symbols?.length === 1 ? symbols[0] : undefined;
 }
