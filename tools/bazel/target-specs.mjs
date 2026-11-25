@@ -309,6 +309,8 @@ const createTargetSpecsWithSession = async (root, session) => {
     'packages/memory': ['apps/threadnote/src/standalone.ts'],
     'packages/platform': ['apps/threadnote/src/standalone.ts', 'scripts/remote-memory-canary.ts'],
   };
+  // Runtime targets whose spawned CLI indexes TypeScript without a native-test-helper import in the target closure.
+  const packageRuntimeNativeTypeScript = new Set(['packages/memory']);
   const packageWorkspaceTestEntries = {
     'packages/graph': ['packages/graph/test/unit/code-graph.stage3-gate.test.ts'],
   };
@@ -380,6 +382,7 @@ const createTargetSpecsWithSession = async (root, session) => {
               // These source-runtime consumers launch the graph parser through standalone.ts.
               dataRoots: [...new Set([...shared.dataRoots, ...graphRuntimeDataRoots])],
               npm: [...new Set([...shared.npm, ...graphRuntimeNpm])],
+              ...(packageRuntimeNativeTypeScript.has(directory) ? {nativeTypeScript: true} : {}),
             },
           ]
         : []),
@@ -621,6 +624,8 @@ const createTargetSpecsWithSession = async (root, session) => {
       timeout: 'long',
       entries: platformBenchmarkPreflightTests,
       closureEntries: ['apps/threadnote/src/standalone.ts'],
+      // The preflight benchmark indexes TypeScript fixtures through the native asset.
+      nativeTypeScript: true,
       data: ['bun.lock', 'package.json'],
       dataRoots: ['.github/workflows', 'apps/threadnote/test/evaluation/baselines/code-graph-v1'],
       npm: packageTestNpm['packages/graph'],

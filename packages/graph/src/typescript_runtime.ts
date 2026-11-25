@@ -211,6 +211,10 @@ function pinMismatch(check: NativeTypeScriptPinCheck): NativeTypeScriptUnavailab
  * (rejecting pending requests) before it destroys the socket, so nothing writes to a destroyed stream.
  */
 const guardedNativeApiSockets = new WeakSet<object>();
+/** Write-callback codes that report peer loss; see `guardNativeApiSocket`. */
+const nativeApiPeerLossCodes = new Set(['EPIPE', 'ECONNRESET', 'ERR_SOCKET_CLOSED', 'ECANCELED']);
+const nativeApiPeerLoss = (error: unknown) =>
+  typeof error === 'object' && error !== null && nativeApiPeerLossCodes.has(String(Reflect.get(error, 'code')));
 /**
  * Installs both transport guards on the published client's socket, once, as soon as the socket exists:
  * - Writes: a write still queued or attempted after the peer is gone fails with ECANCELED, ERR_SOCKET_CLOSED or EPIPE.
@@ -218,10 +222,13 @@ const guardedNativeApiSockets = new WeakSet<object>();
  *   loss itself is reported through the socket's close/error events, so a write callback on a socket whose readable or
  *   writable side has ended, or that is destroyed, is completed without the error. node:net replaces `write` with
  *   `writeAfterFIN` when the peer sends FIN (before `destroyed` is set), so `write` is an accessor that keeps
- *   wrapping whatever implementation the socket installs.
+ *   wrapping whatever implementation the socket installs. On Linux a write can fail with EPIPE or ECONNRESET before
+ *   the local EOF is observed: a peer-loss code on a socket that is not yet gone destroys the socket first, so its
+ *   close event fails the session and every pending request, and only then is the callback error dropped. Any other
+ *   write error, or a peer-loss error the socket does not turn into a close, still reaches the caller.
  * - Reads: see `framedNativeApiReads`.
  */
-function guardNativeApiSocket(socket: object): void {
+export function guardNativeApiSocket(socket: object): void {
   if (guardedNativeApiSockets.has(socket)) return;
   let write: unknown = Reflect.get(socket, 'write');
   if (typeof write !== 'function') return;
@@ -230,10 +237,17 @@ function guardNativeApiSocket(socket: object): void {
     Reflect.get(socket, 'destroyed') === true ||
     Reflect.get(socket, 'readableEnded') === true ||
     Reflect.get(socket, 'writableEnded') === true;
+  const settled = (error: unknown) => {
+    if (error === undefined || error === null || gone()) return undefined;
+    if (!nativeApiPeerLoss(error)) return error;
+    const destroy: unknown = Reflect.get(socket, 'destroy');
+    if (typeof destroy === 'function') Reflect.apply(destroy, socket, []);
+    return gone() ? undefined : error;
+  };
   const quiet = (...args: unknown[]) => {
     const callback = args.at(-1);
     if (typeof callback === 'function')
-      args[args.length - 1] = (error?: unknown) => Reflect.apply(callback, undefined, [gone() ? undefined : error]);
+      args[args.length - 1] = (error?: unknown) => Reflect.apply(callback, undefined, [settled(error)]);
     return typeof write === 'function' ? Reflect.apply(write, socket, args) : false;
   };
   Reflect.defineProperty(socket, 'write', {

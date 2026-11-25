@@ -4,7 +4,7 @@ import {withFreshCodeGraphReadTransaction} from '../store/session.js';
 import {decodeStoredCodeGraphFact} from '../fact/storage.js';
 import type {CodeGraphNavigationFacts, CodeGraphQueryResult, CodeGraphSpan} from '../types.js';
 
-export const NAVIGATION_PROOF_CACHE_IDENTITY = '7bb7e0f170acc3b6d91e062188c27f6cac4d6c076546f708646191b756854f51';
+export const NAVIGATION_PROOF_CACHE_IDENTITY = '000a8482e17588280b7e9ab3d24acbe7ff0854e985379f6fbf4ecf9ec05345d4';
 const BYTE_LIMIT = 1024 * 1024;
 const FILE_LIMIT = 3;
 const OWNER_LIMIT = 24;

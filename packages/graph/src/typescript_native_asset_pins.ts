@@ -7,6 +7,8 @@ import * as EffectString from 'effect/String';
  * and the tree-digest encoding. Construction, release staging, prepared-asset verification, the graph extractor, the
  * semantic provider and the native tests all consume these values.
  * Importing this module has no acquisition, process or environment side effects.
+ * Every pin is part of the TypeScript pack cache identity: a pin change also updates NAVIGATION_PROOF_CACHE_IDENTITY,
+ * which the any-OS body-discovery unit test asserts against the computed identity.
  */
 export const nativeTypeScriptAssetPins = {
   version: '7.1.0-beta',

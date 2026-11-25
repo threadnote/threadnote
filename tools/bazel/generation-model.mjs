@@ -13,6 +13,7 @@ import {Option as EffectOption} from 'effect';
 
 // Every test that needs the native runtime is gated by this helper. A vitest target whose closure includes it inherits
 // the prepared asset location and the CI "asset required" flag, nothing else; lint, format and typecheck never do.
+// A test target whose child process indexes TypeScript without importing the helper opts in with `nativeTypeScript`.
 const NATIVE_TYPESCRIPT_TEST_GATE = 'packages/graph/test/helpers/native-typescript-session.ts';
 /**
  * Tags for a non-workspace target. A target that inherits the native TypeScript asset runs unsandboxed: inside the
@@ -249,13 +250,16 @@ const buildGenerationModelWithSession = async (
     const npm = [
       ...new Set([...closure.npm, ...(target.npm ?? []), ...(target.kind === 'test' ? ['vitest'] : [])]),
     ].sort();
+    const publicLabel = `//${target.package}:${target.name}`;
+    if (target.nativeTypeScript && target.kind !== 'test')
+      throw new Error(`${publicLabel} opts in to native TypeScript but is not a test target`);
     const inheritedEnv =
       target.kind === 'test' &&
-      EffectArray.some(target.entries, entry => vitestEntry.test(entry)) &&
-      EffectArray.contains(files, NATIVE_TYPESCRIPT_TEST_GATE)
+      (target.nativeTypeScript === true ||
+        (EffectArray.some(target.entries, entry => vitestEntry.test(entry)) &&
+          EffectArray.contains(files, NATIVE_TYPESCRIPT_TEST_GATE)))
         ? NATIVE_TYPESCRIPT_INHERITED_ENV
         : [];
-    const publicLabel = `//${target.package}:${target.name}`;
     const declaration = {srcs: files, deps: [], npm};
     declarations.set(publicLabel, declaration);
     const commonDefinition = () => [

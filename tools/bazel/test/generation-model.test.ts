@@ -284,6 +284,8 @@ it('forwards the native TypeScript variables only to vitest targets gated by the
       test('runtime', 'packages/graph/test/runtime.test.ts'),
       test('script', 'packages/graph/scripts/check.ts'),
       test('plain', 'packages/graph/test/plain.test.ts'),
+      // A spawned CLI can need the asset without the helper in the closure; the target then opts in explicitly.
+      {...test('opted', 'packages/graph/test/plain.test.ts'), nativeTypeScript: true},
     ]);
     const inherited: Record<string, unknown> = {};
     for (const entry of model.inventory) inherited[entry.label] = entry.inheritedEnv;
@@ -295,6 +297,10 @@ it('forwards the native TypeScript variables only to vitest targets gated by the
       '//packages/graph:runtime': [],
       '//packages/graph:script': [],
       '//packages/graph:plain': [],
+      '//packages/graph:opted': [
+        'THREADNOTE_TYPESCRIPT_NATIVE_PREPARED_ASSET_DIR',
+        'THREADNOTE_NATIVE_TYPESCRIPT_REQUIRED',
+      ],
     });
     const build = model.output.get('packages/graph/BUILD.bazel') ?? '';
     expect(build).toContain(

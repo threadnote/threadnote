@@ -9,7 +9,7 @@ import * as EffectRecord from 'effect/Record';
 import {Schema} from 'effect';
 import {expect, it, vi} from 'vitest';
 import fc from 'fast-check';
-import {decodeUnreapedPosixExitStatus} from '../../src/writer-system/provider-posix.js';
+import {decodeUnreapedPosixExitStatus, LinuxRunningResourcePeak} from '../../src/writer-system/provider-posix.js';
 import {OwnedProviderResourceLedger, ownedProviderMaxProcesses} from '../../src/writer-system/provider-contract.js';
 import {RuntimeWriterFault} from '../../src/writer-system/fault.js';
 import {
@@ -206,6 +206,45 @@ it('keeps invalid, regressing and overflowing resource evidence unknown without 
   overflow.capture({}, 0, Number.MAX_SAFE_INTEGER);
   overflow.capture({}, 0, 1);
   expect(overflow.observe('complete-captured-tree')).toEqual({state: 'unknown'});
+});
+
+it('keeps a decreasing Linux high-water sequence known and still rejects invalid Linux samples', () => {
+  // [VmRSS, VmHWM] samples whose approximate high-water mark decreases, then a lower wait4 ru_maxrss at reap.
+  const samples = [
+      [100, 200],
+      [150, 190],
+      [210, 205],
+      [120, 180],
+    ],
+    raw = new OwnedProviderResourceLedger(1),
+    clamped = new OwnedProviderResourceLedger(1),
+    peak = new LinuxRunningResourcePeak(),
+    rawMember = {},
+    member = {};
+  for (const [current, highWater] of samples) {
+    raw.capture(rawMember, current, highWater);
+    clamped.capture(member, current, peak.next(current, highWater));
+  }
+  expect(raw.observe('original-process')).toEqual({state: 'unknown'});
+  const live = {state: 'known', coverage: 'original-process', peakRssUpperBoundBytes: 210, capturedProcesses: 1};
+  expect(clamped.observe('original-process')).toEqual({...live, currentRssBytes: 120});
+  clamped.capture(member, 0, peak.next(0, 170), true);
+  expect(clamped.observe('original-process')).toEqual({...live, currentRssBytes: 0});
+  for (const [current, highWater] of [
+    [-1, 300],
+    [100, -1],
+    [Number.NaN, 300],
+    [100, Number.NaN],
+    [100, 1.5],
+  ]) {
+    const ledger = new OwnedProviderResourceLedger(1),
+      sampled = {},
+      sampler = new LinuxRunningResourcePeak();
+    ledger.capture(sampled, 10, sampler.next(10, 20));
+    ledger.capture(sampled, current, sampler.next(current, highWater));
+    ledger.capture(sampled, 10, sampler.next(10, 400));
+    expect(ledger.observe('original-process')).toEqual({state: 'unknown'});
+  }
 });
 
 const faultReason = (launch: () => unknown): string | undefined => {

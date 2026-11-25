@@ -24,6 +24,23 @@ import {
 } from './provider-contract.js';
 
 const fs = runtimeNativeDescriptorOperations();
+const validResourceBytes = (value: number) => Number.isSafeInteger(value) && value >= 0;
+
+/**
+ * Linux reports VmRSS and VmHWM from approximate per-CPU RSS counters, so a later VmHWM, or wait4's terminal ru_maxrss,
+ * can read below an earlier sample of the same process. The tree's peak is the running maximum of every valid sample.
+ * An invalid sample yields NaN, so the strict ledger still rejects it. darwin and Windows peaks are monotonic and never
+ * pass through this clamp.
+ */
+export class LinuxRunningResourcePeak {
+  private peak = 0;
+  next(current: number, highWater: number): number {
+    if (!validResourceBytes(current) || !validResourceBytes(highWater)) return Number.NaN;
+    this.peak = Math.max(this.peak, current, highWater);
+    return this.peak;
+  }
+}
+
 const encoder = new TextEncoder();
 const pause = () => Bun.sleep(5);
 const again = (error: unknown) =>
@@ -302,7 +319,8 @@ function makeOwned(input: {
 }): OwnedProviderBackend {
   const {pid, identity, lib, closeFd} = input;
   const resources = new OwnedProviderResourceLedger(1),
-    resourceMember = {};
+    resourceMember = {},
+    linuxPeak = new LinuxRunningResourcePeak();
   const retry = () => {
     const errno = input.errno();
     return errno === 4 || errno === (runtimeCurrentPlatform() === 'darwin' ? 35 : 11);
@@ -421,11 +439,12 @@ function makeOwned(input: {
               else if (result === pid) {
                 reaped = true;
                 // This is the sole original native waiter. Never reap another process for accounting.
-                const peak = new DataView(usage.buffer).getBigInt64(32, true),
-                  bytes = Number(peak * (runtimeCurrentPlatform() === 'linux' ? 1024n : 1n));
+                const linux = runtimeCurrentPlatform() === 'linux',
+                  peak = new DataView(usage.buffer).getBigInt64(32, true),
+                  bytes = Number(peak * (linux ? 1024n : 1n));
                 if (peak < 0n || !Number.isSafeInteger(bytes) || !usage.subarray(144).every(value => value === 0xa5))
                   resources.invalidate();
-                else resources.capture(resourceMember, 0, bytes, true);
+                else resources.capture(resourceMember, 0, linux ? linuxPeak.next(0, bytes) : bytes, true);
                 const raw = status[0];
                 leaderExitCode = (raw & 0x7f) === 0 ? (raw >>> 8) & 0xff : 128 + (raw & 0x7f);
                 try {
@@ -482,7 +501,8 @@ function makeOwned(input: {
               if (!Number.isSafeInteger(bytes)) fail('identity');
               return bytes;
             };
-            resources.capture(resourceMember, value('VmRSS'), value('VmHWM'));
+            const current = value('VmRSS');
+            resources.capture(resourceMember, current, linuxPeak.next(current, value('VmHWM')));
           }
         } catch {
           resources.invalidate();

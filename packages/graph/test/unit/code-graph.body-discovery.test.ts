@@ -247,7 +247,7 @@ it('keeps metadata and body key spaces separate and preserves legacy facts', () 
 it('binds finite TypeScript proof support to the exact new registry identity independently', () => {
   expect(BODY_DISCOVERY_POLICY).toBe('body-discovery-v3-owner-presence-utf16-cursor-combined-64k');
   expect(packCacheIdentity(codeGraphLanguagePack)).toBe(NAVIGATION_PROOF_CACHE_IDENTITY);
-  expect(NAVIGATION_PROOF_CACHE_IDENTITY).toBe('7bb7e0f170acc3b6d91e062188c27f6cac4d6c076546f708646191b756854f51');
+  expect(NAVIGATION_PROOF_CACHE_IDENTITY).toBe('000a8482e17588280b7e9ab3d24acbe7ff0854e985379f6fbf4ecf9ec05345d4');
 });
 native(
   effectIt.layer(
