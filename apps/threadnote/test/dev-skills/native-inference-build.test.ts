@@ -12,6 +12,7 @@ import {
   nativeInferenceBuildEnvironment,
   GNU_INFERENCE_COMPILER_BOOTSTRAP,
   gnuBuildContainerBootstrap,
+  gnuContainerTypeScriptArguments,
   muslToolchainFetchScript,
   MUSL_BUILD_DEPENDENCY_INSTALL,
   buildNativeInferenceDriver,
@@ -200,6 +201,14 @@ describe('native inference overlay filesystem boundary', () => {
       ]);
     }),
   );
+
+  it('never passes the native TypeScript payload into the glibc 2.17 GNU container', () => {
+    // A reviewed-pin release defers staging to the host; the container sees neither the payload path nor a mount.
+    const deferred = gnuContainerTypeScriptArguments({THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR: '/runner/temp/payload'});
+    expect(deferred).toEqual(['--env', 'THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DEFERRED=1']);
+    expect(EffectArray.join(deferred, ' ')).not.toContain('/runner/temp/payload');
+    expect(gnuContainerTypeScriptArguments({})).toEqual([]);
+  });
 
   it('retains build stdout even when Docker pull diagnostics occupy stderr', () => {
     const error = CommandFailed.make({

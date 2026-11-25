@@ -177,6 +177,12 @@ jobs:
         if: matrix.libc == 'gnu'
         run: bun scripts/assemble-native-inference.ts --gnu-container
         env:
+          # With a payload, the glibc 2.17 container defers native TypeScript staging to the next host step.
+          THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR: ${{ steps.native-typescript.outputs.payload }}
+      - name: Stage the native TypeScript asset on the host
+        if: matrix.libc == 'gnu'
+        run: bun scripts/stage-native-typescript-release.ts
+        env:
           THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR: ${{ steps.native-typescript.outputs.payload }}
       - name: Build and load musl release at the preserved libc floor
         if: matrix.libc == 'musl'

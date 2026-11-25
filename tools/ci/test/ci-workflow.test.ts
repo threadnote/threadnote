@@ -1026,6 +1026,42 @@ it('stages the native TypeScript payload in every compiled build on a reviewed-p
   expect([...unstaged].sort()).toEqual([...UNSTAGED_COMPILED_BUILDS.keys()].sort());
 });
 
+it('stages native TypeScript on the host after each GNU container build and before the payload is used', () => {
+  const HOST_STAGE = 'bun scripts/stage-native-typescript-release.ts';
+  for (const [file, jobName, container, consumers] of [
+    [releaseWorkflowPath, 'build', 'Build GNU payload at the preserved libc floor', ['Self-contained native smoke']],
+    [
+      '.github/workflows/publish.yml',
+      'linux',
+      'Build GNU release at the preserved libc floor',
+      ['./dist/threadnote --version', 'Verify release with strict read-only doctor', 'bun run archive:release'],
+    ],
+  ] as const) {
+    const steps =
+      Schema.decodeUnknownSync(CompiledBuildWorkflowSchema)(parse(readFileSync(file, 'utf8'))).jobs[jobName]?.steps ??
+      [];
+    const index = (name: string) =>
+      EffectOption.getOrElse(
+        EffectArray.findFirstIndex(steps, candidate => candidate.name === name || candidate.run === name),
+        () => -1,
+      );
+    const build = steps[index(container)];
+    const stages = EffectArray.filter(steps, candidate => candidate.run === HOST_STAGE);
+    expect(stages, file).toHaveLength(1);
+    const stage = stages[0];
+    // The container only defers staging; the host stages the same payload under the same condition right after it.
+    expect(index(stage?.name ?? HOST_STAGE), file).toBe(index(container) + 1);
+    expect(stage?.if, file).toBe(build?.if);
+    expect(stage?.env?.THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR, file).toBe(
+      build?.env?.THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR,
+    );
+    expect(String(build?.env?.NATIVE_RELEASE_COMMAND_JSON ?? ''), file).not.toContain(HOST_STAGE);
+    for (const consumer of consumers) {
+      expect(index(consumer), `${file} ${consumer}`).toBeGreaterThan(index(container) + 1);
+    }
+  }
+});
+
 it('smokes GNU payloads on the host after the root build container returns them to the runner user', () => {
   const build = releaseJobs.build;
   const container = step(build, 'Build GNU payload at the preserved libc floor');

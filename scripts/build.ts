@@ -7,6 +7,7 @@ import {
 } from '@threadnote/threadnote/dev_skills/manifest';
 import {integrationStaticFiles} from '@threadnote/threadnote/manager/static-files';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
+import {NATIVE_TYPESCRIPT_STAGING_DEFERRED_ENV} from './native-typescript-staging.js';
 import {runBunBuild} from './effect/bun-build.js';
 import {assertRuntimeSourceIdentity, runtimeSourceIdentity} from './runtime-source-identity.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
@@ -152,6 +153,12 @@ const build = Effect.gen(function* () {
   );
 
   const nativeRuntimeRoot = path.join(outputRoot, 'runtime');
+  // A glibc 2.17 build container cannot start the staging subprocess; it defers staging to its host (see below).
+  const typescriptNativeAssetPending = Bun.env[NATIVE_TYPESCRIPT_STAGING_DEFERRED_ENV] === '1';
+  if (typescriptNativeAssetPending && Bun.env.THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR)
+    return yield* ScriptError.make({
+      message: `${NATIVE_TYPESCRIPT_STAGING_DEFERRED_ENV} defers native TypeScript staging; do not also name its payload.`,
+    });
   const typescriptNativeAsset = yield* stageTypeScriptNativeAsset(fs, path, root, outputRoot);
   if (Effect2.pipe(target, EffectString.includes('darwin'))) {
     yield* fs.makeDirectory(nativeRuntimeRoot, {recursive: true});
@@ -218,30 +225,27 @@ const build = Effect.gen(function* () {
   );
   yield* fs.writeFileString(
     path.join(outputRoot, 'release.json'),
-    `${JSON.stringify(
-      {
-        codeGraphAssets: {
-          manifest: 'assets/code-graph/manifest.json',
-          version: 1,
-        },
-        codeSignature: Effect2.pipe(target, EffectString.includes('windows'))
-          ? 'unsigned'
-          : Effect2.pipe(target, EffectString.includes('darwin'))
-            ? 'developer-id'
-            : 'none',
-        executable: executableName,
-        devSkills: {digest: devSkills.digest, manifest: 'config/dev-skills.json', protocol: devSkills.workflowProtocol},
-        nativeRuntime: `runtime/${NATIVE_RUNTIME_PACKAGE}.js`,
-        ...(typescriptNativeAsset ? {typescriptNativeAsset} : {}),
-        nativeRuntimePackage: nativePackage ?? 'portable-local-build',
-        runtime: `bun-${Bun.version}`,
-        target,
-        sourceIdentity: sourceIdentity ?? null,
-        version,
+    releaseMetadataText({
+      codeGraphAssets: {
+        manifest: 'assets/code-graph/manifest.json',
+        version: 1,
       },
-      null,
-      2,
-    )}\n`,
+      codeSignature: Effect2.pipe(target, EffectString.includes('windows'))
+        ? 'unsigned'
+        : Effect2.pipe(target, EffectString.includes('darwin'))
+          ? 'developer-id'
+          : 'none',
+      executable: executableName,
+      devSkills: {digest: devSkills.digest, manifest: 'config/dev-skills.json', protocol: devSkills.workflowProtocol},
+      nativeRuntime: `runtime/${NATIVE_RUNTIME_PACKAGE}.js`,
+      ...(typescriptNativeAsset ? {typescriptNativeAsset} : {}),
+      ...(typescriptNativeAssetPending ? {typescriptNativeAssetPending: true} : {}),
+      nativeRuntimePackage: nativePackage ?? 'portable-local-build',
+      runtime: `bun-${Bun.version}`,
+      target,
+      sourceIdentity: sourceIdentity ?? null,
+      version,
+    }),
   );
   yield* Console.log(`Built standalone Threadnote ${version} for ${target}: ${executablePath}`);
 });
@@ -380,6 +384,33 @@ const relinkSignedNativeTypeScript = Effect.gen(function* () {
   });
   yield* Console.log(`Relinked ${executablePath} with signed native TypeScript ${staged.sha256} (${staged.cdhash}).`);
 });
+
+// release.json key order. Host staging rewrites the file through this order, so it is byte-identical to a host build.
+const RELEASE_METADATA_KEYS = [
+  'codeGraphAssets',
+  'codeSignature',
+  'executable',
+  'devSkills',
+  'nativeRuntime',
+  'typescriptNativeAsset',
+  'typescriptNativeAssetPending',
+  'nativeRuntimePackage',
+  'runtime',
+  'target',
+  'sourceIdentity',
+  'version',
+] as const;
+
+/** The exact release.json bytes for these fields; an unknown field is refused instead of being reordered. */
+export function releaseMetadataText(metadata: Readonly<Record<string, unknown>>): string {
+  const known = new Set<string>(RELEASE_METADATA_KEYS);
+  for (const key of EffectRecord.keys(metadata))
+    if (!known.has(key)) throw new Error(`release.json field ${key} has no declared position.`);
+  const ordered = EffectRecord.fromEntries(
+    EffectArray.flatMap(RELEASE_METADATA_KEYS, key => (key in metadata ? [[key, metadata[key]] as const] : [])),
+  );
+  return `${JSON.stringify(ordered, null, 2)}\n`;
+}
 
 /** A release input is a verified derivative payload, never the old npm native binary. */
 export const stageTypeScriptNativeAsset = Effect.fn('build.stageTypeScriptNativeAsset')(function* (

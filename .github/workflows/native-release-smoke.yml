@@ -182,11 +182,17 @@ jobs:
           bun scripts/assemble-native-inference.ts --gnu-container
           --container-command-json "$NATIVE_RELEASE_COMMAND_JSON"
         env:
-          # The container mounts this verified payload read-only so the GNU build stages runtime/typescript.
+          # With a payload, the glibc 2.17 container defers native TypeScript staging to the next host step.
           THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR: ${{ steps.native-typescript.outputs.payload }}
           # Keep $PWD literal until Bash runs inside the pinned native container.
           NATIVE_RELEASE_COMMAND_JSON: >-
             ["bash","-ec","set -euo pipefail; bun run build:release; bun scripts/verify-native-vector-reader.ts --required; export THREADNOTE_NATIVE_VECTOR_READER_REQUIRED=1 THREADNOTE_NATIVE_VECTOR_READER_MANIFEST=\"$PWD/dist/runtime/vector-reader/manifest.json\" THREADNOTE_NATIVE_VECTOR_READER_SOURCE_ROOT=\"$PWD\"; bun --bun vitest run packages/recall/test/unit/native-vector-reader.test.ts packages/recall/test/background-vector-step.test.ts apps/threadnote/test/integration/recall-admission-budget.test.ts apps/threadnote/test/unit/vector-index.test.ts apps/threadnote/test/unit/vector-index.eligibility.test.ts packages/recall/test/unit/vector-scope-upgrade.test.ts apps/threadnote/test/unit/recall.mcp-background-refresh.test.ts; bun --bun vitest run --maxWorkers=1 --no-file-parallelism apps/threadnote/test/integration/vector-native-read-boundary.test.ts; bun --bun vitest run --config vitest.e2e.config.ts apps/threadnote/test/e2e/local-bins.e2e.ts -t \"recalls saved memory|loads only the bundled\""]
+      - name: Stage the native TypeScript asset on the host
+        # The checkout is back with the runner user, so the staged asset passes the runtime's ownership checks.
+        if: runner.os == 'Linux' && !endsWith(inputs.target, '-musl')
+        run: bun scripts/stage-native-typescript-release.ts
+        env:
+          THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR: ${{ steps.native-typescript.outputs.payload }}
       - name: Build musl payload at the preserved libc floor
         if: endsWith(inputs.target, '-musl')
         run: >-

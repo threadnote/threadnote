@@ -48,6 +48,7 @@ const ROOT_URL = new URL('..', import.meta.url);
 const StandaloneReleaseSchema = Schema.Struct({
   target: Schema.String,
   typescriptNativeAsset: Schema.optionalKey(Schema.Struct({manifest: Schema.String})),
+  typescriptNativeAssetPending: Schema.optionalKey(Schema.Literal(true)),
 });
 
 /**
@@ -60,6 +61,10 @@ const standaloneTypeScriptGraphEvidence = Effect.fn('smoke.standaloneTypeScriptG
   const release = yield* Schema.decodeEffect(Schema.fromJsonString(StandaloneReleaseSchema))(releaseJson).pipe(
     Effect.mapError(cause => ScriptError.make({message: 'dist/release.json is not a release manifest.', cause})),
   );
+  if (release.typescriptNativeAssetPending === true)
+    return yield* ScriptError.make({
+      message: 'Native TypeScript staging is still pending; run scripts/stage-native-typescript-release.ts first.',
+    });
   if (release.typescriptNativeAsset !== undefined) return true;
   const pinned =
     !/musl|windows/u.test(release.target) &&

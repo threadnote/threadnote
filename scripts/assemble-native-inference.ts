@@ -7,6 +7,7 @@ import {platformPathFor, SystemInfo} from '@threadnote/platform/system';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {ScriptCommandExecutorLayer, ScriptSystemInfoLayer} from './effect/system-layer.js';
 import {provideScriptLayer} from './effect/errors.js';
+import {NATIVE_TYPESCRIPT_STAGING_DEFERRED_ENV} from './native-typescript-staging.js';
 import {auditNativeReaderBinary, nativeReaderGit, type CompilerLibgccProvider} from './native-vector-reader-payload.js';
 import {
   NATIVE_INFERENCE_BUNDLE_SHA256,
@@ -901,6 +902,17 @@ bun ${quote(driver)}
 `;
 }
 
+/**
+ * The manylinux2014 container's glibc 2.17 cannot start the subprocess that native TypeScript staging runs, so a
+ * reviewed-pin release defers it: the container never receives the payload, and its build records the pending staging
+ * that `scripts/stage-native-typescript-release.ts` completes on the host after ownership returns to the runner.
+ */
+export function gnuContainerTypeScriptArguments(environment: Readonly<NodeJS.ProcessEnv>): readonly string[] {
+  return environment.THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR
+    ? ['--env', `${NATIVE_TYPESCRIPT_STAGING_DEFERRED_ENV}=1`]
+    : [];
+}
+
 export const runGnuBuildContainer = Effect.fn('nativeInference.gnuContainer')(function* (
   root: string,
   command: readonly string[],
@@ -919,10 +931,6 @@ export const runGnuBuildContainer = Effect.fn('nativeInference.gnuContainer')(fu
     `const child=Bun.spawn(${JSON.stringify(command)},{cwd:${JSON.stringify(checkoutRoot)},stdin:'inherit',stdout:'inherit',stderr:'inherit'});process.exitCode=await child.exited;`,
   );
   const bootstrap = gnuBuildContainerBootstrap(pins, checkoutRoot, driver, runnerOwner());
-  // A reviewed-pin release stages the verified native TypeScript payload; the build re-verifies it inside the container.
-  const typeScriptPayload = Bun.env.THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR
-    ? yield* fs.realPath(Bun.env.THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR)
-    : undefined;
   yield* runCommandEffect(
     'docker',
     [
@@ -931,14 +939,7 @@ export const runGnuBuildContainer = Effect.fn('nativeInference.gnuContainer')(fu
       '--init',
       '--volume',
       `${checkoutRoot}:${checkoutRoot}`,
-      ...(typeScriptPayload === undefined
-        ? []
-        : [
-            '--volume',
-            `${typeScriptPayload}:${typeScriptPayload}:ro`,
-            '--env',
-            `THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR=${typeScriptPayload}`,
-          ]),
+      ...gnuContainerTypeScriptArguments(Bun.env),
       '--workdir',
       checkoutRoot,
       '--env',

@@ -62,6 +62,10 @@ export const archiveRelease = Effect.fn('archiveRelease')(function* (options: Ar
     return yield* ScriptError.make({
       message: 'Release metadata target differs from the requested archive target/libc.',
     });
+  if ('typescriptNativeAssetPending' in release)
+    return yield* ScriptError.make({
+      message: 'Native TypeScript staging is still pending; run scripts/stage-native-typescript-release.ts first.',
+    });
   if (
     !('sourceIdentity' in release) ||
     !Schema.is(ReleaseSourceIdentity)(release.sourceIdentity) ||
