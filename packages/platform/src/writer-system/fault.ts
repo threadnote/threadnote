@@ -11,6 +11,10 @@ export class RuntimeWriterFault extends Schema.TaggedError<RuntimeWriterFault, {
       'source-changed',
       'private-storage',
       'io',
+      // A Darwin child image differs from the expected code identity; it was refused before it ran.
+      'image-mismatch',
+      // The kernel did not report the code identity of a Darwin child, which was refused before it ran.
+      'code-signature-unavailable',
     ]),
   },
 ) {}

@@ -11,6 +11,7 @@
     "THREADNOTE_STANDALONE": "readonly",
     "THREADNOTE_VERSION": "readonly",
     "THREADNOTE_RUNTIME_SOURCE_IDENTITY": "readonly",
+    "THREADNOTE_SIGNED_NATIVE_TYPESCRIPT": "readonly",
     "process": "readonly"
   },
   "rules": {

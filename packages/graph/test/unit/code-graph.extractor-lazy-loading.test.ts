@@ -1,5 +1,5 @@
 import {Array as EffectArray, Option, Schema} from 'effect';
-import {afterAll, expect, it} from 'vitest';
+import {afterAll, expect, it, vi} from 'vitest';
 import * as FC from 'fast-check';
 import {extractNativeFileFacts} from '@threadnote/graph/extractor';
 import {
@@ -141,6 +141,49 @@ native(it)('refuses a self-consistent manifest naming a substituted executable',
   }
 });
 
+native(it)('admits only the compiled-in signed compiler image in a signed macOS release', async context => {
+  if (process.platform !== 'darwin') context.skip('Darwin signed release identity');
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'threadnote-native-signed-')));
+  const host = nativeTypeScriptHostKey(process.platform, process.arch);
+  const start = (assetDirectory: string) =>
+    createNativeTypeScriptSession({cwd: process.cwd(), deadline: Date.now() + 30_000, assetDirectory}).then(
+      async session => {
+        await session.close();
+        return 'started';
+      },
+      refusal,
+    );
+  try {
+    // A private copy signed ad-hoc the way publish signs it: hardened runtime and the explicit identifier.
+    const asset = join(root, 'prepared');
+    cpSync(nativeTypeScriptTestAssetDirectory(), asset, {recursive: true});
+    const compiler = join(asset, 'tsc');
+    const sign = ['--force', '-s', '-', '--options', 'runtime', '--identifier', 'dev.threadnote.typescript-native'];
+    expect(Bun.spawnSync(['/usr/bin/codesign', ...sign, compiler]).exitCode).toBe(0);
+    const sha256 = sha256HexSync(readFileSync(compiler));
+    const shown = Bun.spawnSync(['/usr/bin/codesign', '-dvvv', compiler], {stderr: 'pipe'}).stderr.toString();
+    const cdhash = /^CDHash=([0-9a-f]{40})$/mu.exec(shown)?.[1];
+    // Source mode and unsigned builds accept only the reviewed bytes.
+    expect(await start(asset)).toBe('pin-mismatch');
+    vi.stubGlobal('THREADNOTE_SIGNED_NATIVE_TYPESCRIPT', {host, sha256, cdhash});
+    expect(await start(asset)).toBe('started');
+    // A signed release accepts only its signed bytes, never the reviewed unsigned original.
+    expect(await start(nativeTypeScriptTestAssetDirectory())).toBe('pin-mismatch');
+    // The kernel must report the compiled-in image: the same bytes running as another cdhash never run.
+    vi.stubGlobal('THREADNOTE_SIGNED_NATIVE_TYPESCRIPT', {
+      host,
+      sha256,
+      cdhash: '0000000000000000000000000000000000000000',
+    });
+    expect(await start(asset)).toBe('image-mismatch');
+    vi.stubGlobal('THREADNOTE_SIGNED_NATIVE_TYPESCRIPT', {host, sha256: 'signed', cdhash});
+    expect(await start(asset)).toBe('pin-mismatch');
+  } finally {
+    vi.unstubAllGlobals();
+    rmSync(root, {recursive: true, force: true});
+  }
+});
+
 it('loads the TypeScript compiler only for TypeScript extraction, preserving its identity and repeated facts', context => {
   skipWithoutNativeTypeScript(context);
   // This contract is process-global module loading, so an isolated CLI boundary is intentional.
@@ -230,7 +273,8 @@ native(it.each([false, true]))(
   'bundles the lazy compiler outside the dependency checkout (compiled: %s)',
   async compiled => {
     // The program under test is the Bun bundler and its child-process module boundary.
-    const directory = mkdtempSync(join(tmpdir(), 'threadnote-lazy-extractor-'));
+    // Canonical: admission refuses an asset below a symlinked temporary path such as macOS /var/folders.
+    const directory = realpathSync(mkdtempSync(join(tmpdir(), 'threadnote-lazy-extractor-')));
     let retainUnknownNative = false;
     try {
       const executable = join(directory, process.platform === 'win32' ? 'extractor.exe' : 'extractor');

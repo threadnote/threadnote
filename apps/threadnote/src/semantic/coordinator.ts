@@ -729,12 +729,16 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
                 api = java.api;
               } else {
                 // Re-verify the admitted native binary immediately before it is started (ownership and lstat identity).
-                if (providerId === 'typescript-native' && !('runtime' in candidate))
-                  yield* fromPromiseInterruptible(
-                    () => recheckNativeTypeScriptExecutable(candidate.executable, candidate.executableDigest),
-                    () => LspFault.make({code: 'prerequisite'}),
-                  );
+                // On Darwin the recheck also names the image the kernel must report before the compiler runs.
+                const expectedDarwinImage =
+                  providerId === 'typescript-native' && !('runtime' in candidate)
+                    ? yield* fromPromiseInterruptible(
+                        () => recheckNativeTypeScriptExecutable(candidate.executable, candidate.executableDigest),
+                        () => LspFault.make({code: 'prerequisite'}),
+                      )
+                    : undefined;
                 const wire = yield* spawnLspWire({
+                  ...(expectedDarwinImage ? {expectedDarwinImage} : {}),
                   command: 'runtime' in candidate ? candidate.runtime : candidate.executable,
                   args:
                     'runtime' in candidate

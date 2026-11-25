@@ -590,6 +590,17 @@ it('provisions one shared native TypeScript asset job per pinned host and restor
   expect(steps.indexOf(releaseRestore!)).toBeLessThan(
     steps.indexOf(step(releaseJobs.build, 'Semantic native ownership and safety components')!),
   );
+  // The Darwin signed-compiler identity tests run only on the macOS legs, after the asset is restored.
+  const darwinIdentity = step(releaseJobs.build, 'Darwin signed native TypeScript identity components');
+  expect(darwinIdentity?.if).toBe("runner.os == 'macOS'");
+  expect(steps.indexOf(releaseRestore!)).toBeLessThan(steps.indexOf(darwinIdentity!));
+  for (const file of [
+    'packages/platform/test/writer-system/provider-darwin-image.test.ts',
+    'tools/ci/test/signed-native-typescript.test.ts',
+    'packages/graph/test/unit/code-graph.extractor-lazy-loading.test.ts',
+    'apps/threadnote/test/unit/semantic-native-image-launch.test.ts',
+  ])
+    expect(darwinIdentity?.run).toContain(file);
 });
 
 it.each(['success', 'failure', 'cancelled', 'skipped'])(

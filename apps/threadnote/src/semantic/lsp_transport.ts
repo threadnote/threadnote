@@ -9,6 +9,7 @@ import {
   runtimeObserveOwnedProviderTree,
   runtimeTerminateOwnedProviderTree,
   runtimeCloseOwnedProviderTree,
+  type RuntimeOwnedProviderExpectedDarwinImage,
   type RuntimeOwnedProviderObservation,
 } from '@threadnote/platform/system';
 /** Bounded refusal context only; never input admission or native-ownership evidence. */
@@ -146,6 +147,8 @@ export interface LspLaunch {
   readonly maxMessageBytes?: number;
   readonly beforeCreation?: () => void;
   readonly captureOriginal?: (pid: number, finish: Effect.Effect<WireStop>) => void;
+  /** Darwin: the kernel must report this image before the started provider runs (see the platform launch option). */
+  readonly expectedDarwinImage?: RuntimeOwnedProviderExpectedDarwinImage;
 }
 export interface SemanticProcessAdapter {
   readonly stdout: (bytes: Uint8Array) => void;
@@ -186,6 +189,7 @@ export const spawnSemanticProcess = Effect.fn('semantic.spawnSemanticProcess')(f
             args: options.args,
             cwd: options.cwd,
             environment: policy.sanitizeExternal(options.environment),
+            ...(options.expectedDarwinImage ? {expectedDarwinImage: options.expectedDarwinImage} : {}),
           }),
         catch: () => LspFault.make({code: 'prerequisite'}),
       });

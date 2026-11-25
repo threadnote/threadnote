@@ -569,6 +569,11 @@ const createTargetSpecsWithSession = async (root, session) => {
         'apps/threadnote/test/unit/semantic-python.test.ts',
         'apps/threadnote/test/unit/semantic-go-rust.test.ts',
         'apps/threadnote/test/unit/semantic-java-preparation.test.ts',
+        'packages/platform/test/writer-system/provider-darwin-image.test.ts',
+        'tools/ci/test/macho-code-identity.test.ts',
+        'tools/ci/test/signed-native-typescript.test.ts',
+        'packages/graph/test/unit/code-graph.extractor-lazy-loading.test.ts',
+        'apps/threadnote/test/unit/semantic-native-image-launch.test.ts',
         'packages/workflow-automations/test/inventory.test.ts',
         'packages/workflow-automations/test/baseline.test.ts',
         ...EffectArrayPipe(filesBelow('apps/threadnote/test/e2e'), __effectArrayValues =>

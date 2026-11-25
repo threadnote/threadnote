@@ -134,10 +134,25 @@ describe('standalone release workflows', () => {
     Effect.gen(function* () {
       const workflow = yield* readProjectFile('.github/workflows/publish.yml');
       const publisher = yield* readProjectFile('.github/workflows/publish-release-assets.yml');
-      const signing = Effect2.pipe(
-        workflow,
-        EffectString.indexOf('Sign nested native code and Bun executable'),
-        Effect2.Option.getOrElse(() => -1),
+      const position = (text: string) =>
+        Effect2.pipe(
+          workflow,
+          EffectString.indexOf(text),
+          Effect2.Option.getOrElse(() => -1),
+        );
+      const signing = position('- name: Sign nested native code');
+      // The signed compiler is verified and its identity compiled in before the outer executable is signed, and the
+      // signed payload is smoked before notarization.
+      const signedOrder = EffectArray.map(
+        [
+          '- name: Verify signed native TypeScript identity',
+          'bun tools/ci/signed-native-typescript.ts verify',
+          'bun scripts/build.ts --relink-signed-native-typescript',
+          '- name: Sign the Bun executable',
+          '--entitlements scripts/macos-entitlements.plist',
+          '- name: Index TypeScript with the signed payload',
+        ],
+        position,
       );
       const notarization = Effect2.pipe(
         workflow,
@@ -163,6 +178,16 @@ describe('standalone release workflows', () => {
       const signedWindowsArchive = workflow.indexOf('THREADNOTE_RELEASE_TARGET: windows-', authenticode);
 
       expect(signing).toBeGreaterThan(0);
+      expect(signedOrder[0]).toBeGreaterThan(signing);
+      for (let index = 1; index < signedOrder.length; index += 1)
+        expect(signedOrder[index]).toBeGreaterThan(signedOrder[index - 1]);
+      expect(notarization).toBeGreaterThan(signedOrder.at(-1) ?? Infinity);
+      expect(workflow).toContain('--identifier dev.threadnote.typescript-native');
+      // The imported identity must belong to the committed release team, checked before any signing.
+      expect(position('bun tools/ci/signed-native-typescript.ts check-signing-team')).toBeGreaterThan(0);
+      expect(position('bun tools/ci/signed-native-typescript.ts check-signing-team')).toBeLessThan(signing);
+      expect(workflow).not.toContain('APPLE_TEAM_ID=%s');
+      expect(workflow).toContain('name: signed-native-typescript-darwin-${{ matrix.architecture }}');
       // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Search after signing to bind finalization to the macOS job; Effect String has no position argument.
       const finalization = workflow.indexOf('bun scripts/finalize-native-vector-reader.ts', signing);
       expect(finalization).toBeGreaterThan(signing);

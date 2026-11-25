@@ -38,6 +38,64 @@ export const nativeTypeScriptAssetPins = {
   },
 } as const;
 
+/**
+ * The darwin-arm64 reviewed binary is linker-signed. Its cdhash is a pure function of the reviewed bytes, so it is
+ * pinned with them and binds the spawned image through the kernel. The darwin-x64 reviewed binary is unsigned: it has no
+ * image to bind, and only the exact byte check applies to it outside a signed release.
+ */
+const reviewedLinkerSignedCdhashes: Readonly<Record<string, string>> = {
+  'darwin-arm64': 'ee5a36bcabbc43bcdc7fa6e4d4bb9245551d4ece',
+};
+
+/** The Darwin code identity the kernel must report for a spawned compiler, before it runs. */
+export interface NativeTypeScriptExpectedImage {
+  readonly cdhash: string;
+  readonly requireRuntime: boolean;
+}
+/** The exact executable bytes the runtime accepts on a host, and the Darwin image they must run as. */
+export interface NativeTypeScriptExecutableIdentity {
+  /** The reviewed construction digest that `manifest.json` names. */
+  readonly reviewedSha256: string;
+  /** The exact file digest: the reviewed pin, or the compiled-in signed digest in a signed macOS release. */
+  readonly sha256: string;
+  readonly image?: NativeTypeScriptExpectedImage;
+}
+
+const digest = (value: unknown, bytes: number): value is string =>
+  typeof value === 'string' && new RegExp(`^[0-9a-f]{${bytes * 2}}$`, 'u').test(value);
+
+/**
+ * The signed `tsc` identity that publish compiled into a notarized macOS executable, after its CI verifier proved the
+ * signed bytes carry the reviewed code. Source mode and unsigned builds have none. A malformed value throws.
+ */
+export function nativeTypeScriptSignedReleaseIdentity():
+  {readonly host: string; readonly sha256: string; readonly cdhash: string} | undefined {
+  if (typeof THREADNOTE_SIGNED_NATIVE_TYPESCRIPT === 'undefined' || THREADNOTE_SIGNED_NATIVE_TYPESCRIPT === null)
+    return undefined;
+  const {host, sha256, cdhash} = THREADNOTE_SIGNED_NATIVE_TYPESCRIPT;
+  if (typeof host !== 'string' || !digest(sha256, 32) || !digest(cdhash, 20))
+    throw new Error('The compiled-in signed native TypeScript identity is malformed.');
+  return {host, sha256, cdhash};
+}
+
+/**
+ * The executable identity for a host, or undefined when the host has no reviewed pin:
+ * - a compiled macOS release built with a signed identity accepts exactly those signed bytes, which must run as the
+ *   signed cdhash with the hardened runtime;
+ * - every other build accepts exactly the reviewed bytes; on darwin-arm64 they must also run as the linker cdhash.
+ */
+export function nativeTypeScriptExecutableIdentity(host: string): NativeTypeScriptExecutableIdentity | undefined {
+  const reviewedSha256 = nativeTypeScriptReviewedBinarySha256(host);
+  if (reviewedSha256 === undefined) return undefined;
+  const signed = nativeTypeScriptSignedReleaseIdentity();
+  if (signed !== undefined && EffectString.startsWith('darwin-')(host)) {
+    if (signed.host !== host) throw new Error('The compiled-in signed native TypeScript identity names another host.');
+    return {reviewedSha256, sha256: signed.sha256, image: {cdhash: signed.cdhash, requireRuntime: true}};
+  }
+  const linker = reviewedLinkerSignedCdhashes[host];
+  return {reviewedSha256, sha256: reviewedSha256, ...(linker ? {image: {cdhash: linker, requireRuntime: false}} : {})};
+}
+
 /** Source-mode variable naming a host-prepared asset (the `prepared` sibling of `payload`). Compiled builds ignore it. */
 export const NATIVE_TYPESCRIPT_PREPARED_ASSET_ENV = 'THREADNOTE_TYPESCRIPT_NATIVE_PREPARED_ASSET_DIR';
 

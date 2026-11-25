@@ -88,7 +88,8 @@ provider-eligible.
   there and prints the reason.
 - The product requires the verified asset. A compiled executable uses only its staged `runtime/typescript` and
   ignores the variable below; it refuses with a distinct, value-free reason when the asset is missing, aliased,
-  lacks a valid manifest, is not owner-private, or its binary is not this host's reviewed pin. There is no fallback.
+  lacks a valid manifest, is not owner-private, or its binary is not this host's reviewed pin (in a notarized macOS
+  release, the compiled-in signed digest; see "Signed native TypeScript identity"). There is no fallback.
 - `THREADNOTE_TYPESCRIPT_NATIVE_PREPARED_ASSET_DIR` names a prepared asset (the `prepared` sibling of `payload`) for
   source-mode TypeScript extraction and for the native tests. Repository tooling never reads it: Bazel generation,
   `check:workspaces`, `check:self-contained` and the syntax-only repository tests parse with the official npm
@@ -163,11 +164,92 @@ native-typescript-construction.tar` (`-p` keeps the `0755` `tsc` mode that a uma
 
 ## Signing order
 
-macOS builds sign each nested Mach-O native library first, then sign the Bun executable with hardened runtime and the
-minimal JIT entitlements in `scripts/macos-entitlements.plist`. CI verifies the signatures, submits a ZIP containing
-the exact `dist/` payload to Apple notarization, waits for acceptance, and verifies the executable signature again.
-Only then does it create the release archive and checksum. `spctl` app assessment is not used because Threadnote is a
-standalone command-line executable rather than an application bundle.
+macOS builds sign each nested Mach-O native library first. CI then verifies the signed private TypeScript compiler,
+compiles its signed identity into the Bun executable, and signs the Bun executable with hardened runtime and the
+minimal JIT entitlements in `scripts/macos-entitlements.plist`. It smokes TypeScript indexing with the signed payload,
+submits a ZIP containing the exact `dist/` payload to Apple notarization, waits for acceptance, and verifies the
+executable signature again. Only then does it create the release archive and checksum. `spctl` app assessment is not
+used because Threadnote is a standalone command-line executable rather than an application bundle.
+
+### Signed native TypeScript identity
+
+Signing changes the bytes of `runtime/typescript/tsc`, so a notarized release cannot accept it by the reviewed
+construction pin. The reviewed pins stay the trust root, and the macOS publish legs bind the signed compiler to them:
+
+1. "Sign nested native code" signs `tsc` with Developer ID, the hardened runtime, no entitlements and the explicit
+   identifier `dev.threadnote.typescript-native`.
+2. "Verify signed native TypeScript identity" (`tools/ci/signed-native-typescript.ts`, release tooling that the product
+   never ships) proves, or fails closed with every violation:
+   - The reference payload from the native TypeScript asset action has the reviewed host pin.
+   - The signed code is the reviewed code. On arm64, whose reviewed binary is linker-signed, `macho-code-v1` (SHA-256
+     of the bytes up to `dataoff` with `__LINKEDIT.vmsize`, `__LINKEDIT.filesize` and `LC_CODE_SIGNATURE.datasize`
+     set to zero) equals the recorded canonical digest of the reviewed binary, recomputed from the reference on each
+     run. On x64, whose reviewed binary is unsigned, `unsigned-origin-v1` (remove the added `LC_CODE_SIGNATURE`,
+     restore `ncmds` and `sizeofcmds`, truncate at `dataoff`, restore the unaligned `__LINKEDIT` sizes) restores bytes
+     with the exact reviewed pin.
+   - The signature policy holds: one SHA-256 CodeDirectory and no alternate one, superblob slots limited to the
+     CodeDirectory, requirements and CMS, no entitlement slot or special-slot hash, the hardened runtime flag, flags
+     limited to adhoc, linker-signed and runtime, `execSegFlags` equal to MAIN_BINARY only, the expected identifier,
+     a code limit equal to `dataoff`, bound special slots and every page hash equal to the file.
+   - Every `__LINKEDIT` data reference ends at or before `dataoff`.
+   - `codesign --verify --strict` accepts the Developer ID requirement built from the committed release Team ID:
+     `anchor apple generic`, the identifier, the Developer ID intermediate and leaf markers, and
+     `certificate leaf[subject.OU]`.
+
+   It then records the exact signed SHA-256 and the cdhash in `$RUNNER_TEMP/signed-native-typescript/record.json`,
+   prints them in the job log and uploads the record as the `signed-native-typescript-darwin-<arch>` workflow
+   artifact.
+
+3. "Compile the signed native TypeScript identity into the Bun executable" runs
+   `bun scripts/build.ts --relink-signed-native-typescript <record>`. It recompiles only `dist/threadnote`. It first
+   recomputes the SHA-256 and the cdhash from the `tsc` bytes now in `dist` and requires both to equal the record, and
+   it requires the source identity, version and target to equal `dist/release.json`. The build define
+   `THREADNOTE_SIGNED_NATIVE_TYPESCRIPT` carries the host and the recomputed SHA-256 and cdhash; every other compiled
+   build defines it as `null`. The Bun executable is signed after this step, so the outer signature covers the
+   compiled-in identity.
+4. "Index TypeScript with the signed payload" (`apps/threadnote/test/e2e/native-typescript-release.e2e.ts`) requires
+   the compiler's identifier, `flags=0x10000(runtime)`, a non-ad-hoc signature and the release `TeamIdentifier`, then
+   builds a TypeScript code graph through `dist/threadnote` in
+   an isolated home and queries a resolved call. With a refused compiler, TypeScript files index as degraded modules
+   and the query finds no call, so the step fails.
+
+The release Team ID is a committed constant, `RELEASE_APPLE_TEAM_ID` in `tools/ci/signed-native-typescript.ts`. It is
+public: every signed binary carries it, and its value comes from the Developer ID signature of the v5.4.4 darwin-arm64
+release executable. Changing it needs a reviewed change.
+There are two check points. Before any signing, the import step requires the one imported Developer ID Application
+identity (from `APPLE_CERTIFICATE_P12_BASE64`) to name that team (`check-signing-team`). In step 2 the code
+requirement compares the constant with the leaf certificate's subject OU, so an identity name that disagrees with its
+certificate also fails. A changed signing secret therefore cannot move releases to another team without a reviewed
+change to the constant.
+
+At runtime a compiled macOS release accepts exactly the compiled-in signed SHA-256; it ships no Mach-O parser. The
+manifest beside `tsc` still names the reviewed construction digest. Source mode and builds without the define, such
+as `dev:install-global`, accept exactly the reviewed pin. On Darwin both compiler spawn paths (the graph native API
+session and the semantic LSP) start `tsc` with `POSIX_SPAWN_START_SUSPENDED` through the owned-process spawn. Before
+any instruction runs, `csops` must report the expected cdhash, `CS_VALID` and `CS_KILL` (plus `CS_HARD` and
+`CS_RUNTIME` for a release image), no `CS_GET_TASK_ALLOW` or `CS_DEBUGGED`, and empty XML and DER entitlement blobs.
+The expected cdhash comes from the compiled-in value, or, for the linker-signed arm64 reviewed binary in source mode,
+from a pin that is a pure function of the reviewed bytes. It is never read from the file at launch. The child is then
+resumed with `SIGCONT`. Otherwise it is killed while suspended and reaped within a bound of two seconds, the session
+fails with `image-mismatch` or `code-signature-unavailable`, and the next launch is not quarantined. With an equal
+cdhash every executed page is hashed by the same CodeDirectory, and `CS_KILL` makes the kernel kill the child on a
+page that differs, so a swap of the file after the pre-spawn recheck cannot run different code.
+
+What CI proves without the real identity: the canonical digests across signing variants, every policy refusal, the
+kernel binding and suspended-spawn lifecycle, the expected image on both spawn paths, and admission of a
+hardened-runtime signed compiler through a compiled-in identity, all with ad-hoc signatures on copies. The Bazel shards
+run on Linux, so the macOS release-smoke legs (`macos-15` and `macos-15-intel`) run these tests in "Darwin signed
+native TypeScript identity components" with the restored prepared asset. Only the Team ID requirement, a real CMS
+signature and notarization need a `workflow_dispatch` publish run.
+
+Limits:
+
+- The darwin-x64 reviewed binary is unsigned, so source mode and unsigned builds on x64 keep the exact byte check with
+  no kernel binding. A signed x64 release has the binding. `csops` was measured to report the cdhash and status of a
+  signed x64 `tsc` that runs under Rosetta on arm64; confirm it on the first x64 publish.
+- If the parent process dies between the suspended spawn and `SIGCONT` or `SIGKILL`, the stopped child stays behind.
+  This orphan is an accepted leak: it never ran user code and holds no Threadnote state. No sweeper exists.
+- A writer that can replace the outer executable is out of scope, as for every pinned native asset.
 
 Windows x64 and arm64 build, strict-doctor, real-embedding, archive, and clean-machine installer verification are
 publication dependencies. Their release metadata declares the payload unsigned, and official installers reject a

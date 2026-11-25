@@ -4,6 +4,15 @@ export const ownedProviderTreeBrand: unique symbol = Symbol('owned-provider-tree
 export interface RuntimeOwnedProviderTree {
   readonly [ownedProviderTreeBrand]: true;
 }
+/**
+ * The code identity the Darwin kernel must report for a launched image before it runs any instruction: the cdhash of
+ * its CodeDirectory (40 lowercase hex) and, for release images, the hardened runtime. The caller derives it from
+ * admitted bytes or a compiled-in value, never from the file on disk at launch.
+ */
+export interface RuntimeOwnedProviderExpectedDarwinImage {
+  readonly cdhash: string;
+  readonly requireRuntime: boolean;
+}
 export interface RuntimeOwnedProviderLaunch {
   readonly command: string;
   readonly args: readonly string[];
@@ -15,6 +24,26 @@ export interface RuntimeOwnedProviderLaunch {
    * still meet that total. POSIX observes the live process group and validates but ignores it.
    */
   readonly maxProcesses?: number;
+  /**
+   * Darwin only. The child starts suspended; it is resumed only when the kernel reports this image: the exact cdhash,
+   * CS_VALID and CS_KILL (plus CS_HARD and CS_RUNTIME when required), no CS_GET_TASK_ALLOW or CS_DEBUGGED, and empty
+   * entitlement blobs. Otherwise it is killed while suspended, reaped within a bound, and the launch fails with
+   * 'image-mismatch' or 'code-signature-unavailable'. Other platforms refuse the option.
+   */
+  readonly expectedDarwinImage?: RuntimeOwnedProviderExpectedDarwinImage;
+}
+/** Validated expected image; refused before any native resource is created. */
+export function ownedProviderExpectedDarwinImage(
+  value: RuntimeOwnedProviderExpectedDarwinImage | undefined,
+  platform: string,
+): RuntimeOwnedProviderExpectedDarwinImage | undefined {
+  if (value === undefined) return undefined;
+  if (platform !== 'darwin') return writerFail('unsupported-platform');
+  return typeof value.cdhash === 'string' &&
+    /^[0-9a-f]{40}$/u.test(value.cdhash) &&
+    typeof value.requireRuntime === 'boolean'
+    ? {cdhash: value.cdhash, requireRuntime: value.requireRuntime}
+    : writerFail('identity');
 }
 /** Validated per-launch Windows Job lifetime process cap; refused before any native resource is created. */
 export function ownedProviderMaxProcesses(value: number | undefined): number {

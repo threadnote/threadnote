@@ -5,10 +5,12 @@ import {Array as EffectArray, Context, String as EffectString} from 'effect';
 import {
   NativeTypeScriptAssetManifest,
   nativeTypeScriptAssetPins,
+  nativeTypeScriptExecutableIdentity,
   nativeTypeScriptHostKey,
   nativeTypeScriptManifestPinFailure,
-  nativeTypeScriptReviewedBinarySha256,
   nativeTypeScriptTreeDigest,
+  type NativeTypeScriptExecutableIdentity,
+  type NativeTypeScriptExpectedImage,
 } from './typescript_native_asset_pins.js';
 import {Schema} from 'effect';
 
@@ -153,6 +155,10 @@ const NativeTypeScriptRefusal = Schema.Literals([
   'input-budget',
   // An ancestor of the asset is group-writable by a group not proved to be the user's own private group.
   'group-writable-ancestor',
+  // The Darwin kernel reported a different code identity for the started compiler; it was killed before it ran.
+  'image-mismatch',
+  // The Darwin kernel did not report the started compiler's code identity; it was killed before it ran.
+  'code-signature-unavailable',
 ]);
 export type NativeTypeScriptRefusal = typeof NativeTypeScriptRefusal.Type;
 /** Value-free name of the reviewed-asset check behind a `pin-mismatch`; it never carries a path or digest. */
@@ -166,6 +172,8 @@ const NativeTypeScriptPinCheck = Schema.Literals([
   'tree-git-entry',
   'tree-bytes',
   'tree-digest',
+  // The compiled-in signed release identity is malformed or names another host.
+  'signed-identity',
 ]);
 export type NativeTypeScriptPinCheck = typeof NativeTypeScriptPinCheck.Type;
 /** A session-level (transport, budget, protocol or admission) failure, never a caller callback's own error. */
@@ -181,7 +189,9 @@ export class NativeTypeScriptUnavailable extends Schema.TaggedError<
     const hint =
       reason === 'group-writable-ancestor'
         ? '; remove group write from the asset directory and its parents (chmod g-w <dir>)'
-        : '';
+        : reason === 'image-mismatch' || reason === 'code-signature-unavailable'
+          ? '; the compiler image is not the one this Threadnote release accepts, reinstall Threadnote'
+          : '';
     return NativeTypeScriptUnavailable.make({
       reason,
       ...(check === undefined ? {} : {check}),
@@ -877,13 +887,34 @@ async function makeNativeTypeScriptPipeSession(
   return Object.freeze(session);
 }
 
-/** The admitted, verified asset: canonical root, schema-valid manifest and this host's reviewed binary. */
+/** The admitted, verified asset: canonical root, schema-valid manifest and this host's accepted binary. */
 export interface NativeTypeScriptAdmittedAsset {
   readonly assetDirectory: string;
   readonly sdkDirectory: string;
   readonly compilerPath: string;
+  /** The exact accepted file digest: the reviewed pin, or the compiled-in signed digest of a signed macOS release. */
   readonly pinned: string;
+  /** The Darwin image the started compiler must run as; absent for unsigned images (darwin-x64 outside a release). */
+  readonly image?: NativeTypeScriptExpectedImage;
   readonly manifest: NativeTypeScriptAssetManifest;
+}
+/** This host's accepted executable identity; a malformed compiled-in identity is refused like a pin mismatch. */
+function nativeExecutableIdentity(native: NativePlatform): NativeTypeScriptExecutableIdentity {
+  let identity: NativeTypeScriptExecutableIdentity | undefined;
+  try {
+    identity = nativeTypeScriptExecutableIdentity(nativeTypeScriptHostKey(native.runtimePlatform, process.arch));
+  } catch {
+    throw pinMismatch('signed-identity');
+  }
+  if (identity === undefined) throw nativeApiError('no-reviewed-pin');
+  return identity;
+}
+/** A spawn refused by the kernel image check is a typed session refusal; other launch failures stay as they are. */
+function nativeSpawnRefusal(native: NativePlatform, error: unknown): unknown {
+  if (!Schema.is(native.RuntimeWriterFault)(error)) return error;
+  return error.reason === 'image-mismatch' || error.reason === 'code-signature-unavailable'
+    ? nativeApiError(error.reason)
+    : error;
 }
 async function admitNativeTypeScriptAsset(
   native: NativePlatform,
@@ -900,9 +931,10 @@ async function admitNativeTypeScriptAsset(
   if (!path.isAbsolute(assetDirectory) || canonical !== path.resolve(assetDirectory))
     throw nativeApiError('non-canonical-path');
   assertNativeAssetRoot(native, canonical);
-  // The binary must be this host's reviewed pin; a self-consistent manifest can never substitute another executable.
-  const pinned = nativeTypeScriptReviewedBinarySha256(nativeTypeScriptHostKey(native.runtimePlatform, process.arch));
-  if (pinned === undefined) throw nativeApiError('no-reviewed-pin');
+  // The binary must be this host's accepted identity; a self-consistent manifest can never substitute another
+  // executable. The manifest always names the reviewed construction digest, also in a signed release.
+  const identity = nativeExecutableIdentity(native);
+  const pinned = identity.sha256;
   let manifest: NativeTypeScriptAssetManifest;
   try {
     const raw: unknown = JSON.parse(
@@ -914,6 +946,7 @@ async function admitNativeTypeScriptAsset(
   } catch {
     throw nativeApiError('missing-manifest');
   }
+  // The shared reviewed-binary decision: the manifest names the reviewed construction binary, also in a signed release.
   const manifestFailure = nativeTypeScriptManifestPinFailure(manifest, native.runtimePlatform, process.arch);
   if (manifestFailure === 'no-reviewed-pin') throw nativeApiError('no-reviewed-pin');
   if (manifestFailure !== undefined) throw pinMismatch(manifestFailure);
@@ -923,7 +956,14 @@ async function admitNativeTypeScriptAsset(
   await verifyNativeTree(native, path.join(canonical, 'frontend'), nativeTypeScriptPublicBundleDigest, true);
   await verifyNativeFile(native, compilerPath, pinned, true);
   assertNativeAssetRoot(native, canonical);
-  return {assetDirectory: canonical, sdkDirectory, compilerPath, pinned, manifest};
+  return {
+    assetDirectory: canonical,
+    sdkDirectory,
+    compilerPath,
+    pinned,
+    ...(identity.image ? {image: identity.image} : {}),
+    manifest,
+  };
 }
 /** Cheap recheck immediately before an executable is started: root/ancestor ownership and the binary's lstat identity. */
 async function recheckNativeExecutable(native: NativePlatform, compilerPath: string, sha256: string): Promise<void> {
@@ -931,9 +971,19 @@ async function recheckNativeExecutable(native: NativePlatform, compilerPath: str
   assertNativeAssetRoot(native, path.dirname(compilerPath));
   await verifyNativeFile(native, compilerPath, sha256, true);
 }
-/** The semantic provider's pre-spawn recheck of an already admitted candidate executable. */
-export async function recheckNativeTypeScriptExecutable(compilerPath: string, sha256: string): Promise<void> {
-  await recheckNativeExecutable(await import('@threadnote/platform/system'), compilerPath, sha256);
+/**
+ * The semantic provider's pre-spawn recheck of an already admitted candidate executable. It returns the Darwin image
+ * the started compiler must run as, derived from the accepted identity and never re-read from the file.
+ */
+export async function recheckNativeTypeScriptExecutable(
+  compilerPath: string,
+  sha256: string,
+): Promise<NativeTypeScriptExpectedImage | undefined> {
+  const native = await import('@threadnote/platform/system');
+  const identity = nativeExecutableIdentity(native);
+  if (identity.sha256 !== sha256) throw pinMismatch('file-digest');
+  await recheckNativeExecutable(native, compilerPath, sha256);
+  return identity.image;
 }
 /** The one runtime verification of a staged or prepared asset, shared by the graph session and the semantic provider. */
 export async function verifyNativeTypeScriptAsset(assetDirectory: string): Promise<NativeTypeScriptAdmittedAsset> {
@@ -986,6 +1036,9 @@ export async function createNativeTypeScriptSession(
       args: ['--api', '--async', '--pipe', windows ? pipe : endpoint, '--cwd', cwd],
       cwd,
       environment,
+      // Darwin: the kernel must report the admitted image before the compiler runs, which closes the swap window
+      // between the recheck above and exec.
+      ...(asset.image ? {expectedDarwinImage: asset.image} : {}),
     });
   } catch (error) {
     if (setupDirectory) {
@@ -1001,7 +1054,7 @@ export async function createNativeTypeScriptSession(
         }
       }
     }
-    throw error;
+    throw nativeSpawnRefusal(native, error);
   }
   let outputBytes = 0,
     outputFailed = false,

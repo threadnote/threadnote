@@ -1,5 +1,9 @@
 import {runtimeCurrentPlatform} from '../system.js';
-import {ownedProviderMaxProcesses, ownedProviderTreeBrand} from './provider-contract.js';
+import {
+  ownedProviderExpectedDarwinImage,
+  ownedProviderMaxProcesses,
+  ownedProviderTreeBrand,
+} from './provider-contract.js';
 import type {
   OwnedProviderBackend,
   RuntimeOwnedProviderTree,
@@ -14,6 +18,7 @@ import {spawnWindowsProvider} from './provider-windows.js';
 import {spawnPosixProvider, probePosixProviderTree} from './provider-posix.js';
 import {writerFail as fail} from './fault.js';
 export type {
+  RuntimeOwnedProviderExpectedDarwinImage,
   RuntimeOwnedProviderTree,
   RuntimeOwnedProviderLaunch,
   RuntimeOwnedProviderProcess,
@@ -34,6 +39,7 @@ export function runtimeSpawnOwnedProviderTree(options: RuntimeOwnedProviderLaunc
     return fail('unsupported-platform');
   if (liveNativeOwners.size >= 64) return fail('identity');
   ownedProviderMaxProcesses(options.maxProcesses);
+  ownedProviderExpectedDarwinImage(options.expectedDarwinImage, runtimeCurrentPlatform());
   const instance = runtimeCurrentPlatform() === 'win32' ? spawnWindowsProvider(options) : spawnPosixProvider(options);
   liveNativeOwners.add(instance);
   const handle: RuntimeOwnedProviderTree = Object.freeze({[ownedProviderTreeBrand]: true as const});

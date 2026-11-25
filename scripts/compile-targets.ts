@@ -73,6 +73,7 @@ const compileTargets = Effect.gen(function* () {
             THREADNOTE_STANDALONE: 'true',
             THREADNOTE_VERSION: JSON.stringify(manifest.version),
             THREADNOTE_RUNTIME_SOURCE_IDENTITY: JSON.stringify(sourceIdentity ?? null),
+            THREADNOTE_SIGNED_NATIVE_TYPESCRIPT: 'null',
           },
           entrypoints: [path.join(root, 'apps', 'threadnote', 'src', 'standalone.ts')],
           format: 'esm',

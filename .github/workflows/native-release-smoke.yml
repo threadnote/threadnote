@@ -133,6 +133,18 @@ jobs:
           apps/threadnote/test/unit/semantic-go-rust.test.ts
           apps/threadnote/test/unit/semantic-java-preparation.test.ts
           --reporter=default --reporter=json --outputFile=.context/semantic-platform/components.json
+      - name: Darwin signed native TypeScript identity components
+        # Bazel shards run on Linux only. These need macOS (codesign, clang, csops) and the restored prepared asset,
+        # which also exports THREADNOTE_NATIVE_TYPESCRIPT_REQUIRED, so a missing tool or asset fails instead of skipping.
+        if: runner.os == 'macOS'
+        run: >-
+          bun --bun vitest run
+          packages/platform/test/writer-system/provider-darwin-image.test.ts
+          tools/ci/test/macho-code-identity.test.ts
+          tools/ci/test/signed-native-typescript.test.ts
+          packages/graph/test/unit/code-graph.extractor-lazy-loading.test.ts
+          apps/threadnote/test/unit/semantic-native-image-launch.test.ts
+          --reporter=default --reporter=json --outputFile=.context/semantic-platform/darwin-signed-components.json
       - name: Preserve semantic component evidence
         if: ${{ always() && !endsWith(inputs.target, '-musl') }}
         uses: actions/upload-artifact@v7

@@ -17,7 +17,9 @@ import {
 } from './posix-native.js';
 import {
   OwnedProviderResourceLedger,
+  ownedProviderExpectedDarwinImage,
   type OwnedProviderBackend,
+  type RuntimeOwnedProviderExpectedDarwinImage,
   type RuntimeOwnedProviderLaunch,
 } from './provider-contract.js';
 
@@ -37,6 +39,56 @@ function pointers(values: readonly Uint8Array[]): BigUint64Array {
   return new BigUint64Array([...EffectArray.map(values, value => BigInt(ptr(value))), 0n]);
 }
 
+const CS_VALID = 0x1,
+  CS_GET_TASK_ALLOW = 0x4,
+  CS_HARD = 0x100,
+  CS_KILL = 0x200,
+  CS_RUNTIME = 0x10000,
+  CS_DEBUGGED = 0x10000000;
+/** A refused suspended child must be reaped within this bound, so the refusal never quarantines the next launch. */
+const SUSPENDED_REAP_MILLISECONDS = 2000;
+/**
+ * Kernel-attested image binding for a child spawned with POSIX_SPAWN_START_SUSPENDED: no user-space instruction has
+ * run yet. An equal cdhash means an identical CodeDirectory, so every page the child can execute is a page hashed by it,
+ * and CS_KILL makes the kernel kill the child on any page that differs. The entitlement operations are 7 (XML blob)
+ * and 16 (DER blob).
+ */
+function assertDarwinImage(pid: number, image: RuntimeOwnedProviderExpectedDarwinImage): void {
+  const lib = dlopen('/usr/lib/libSystem.B.dylib', {
+    csops: {args: ['i32', 'u32', 'buffer', 'u64'], returns: 'i32'},
+  });
+  try {
+    const status = new Uint32Array(1),
+      cdhash = new Uint8Array(20);
+    if (
+      lib.symbols.csops(pid, 0, new Uint8Array(status.buffer), 4n) !== 0 ||
+      lib.symbols.csops(pid, 5, cdhash, 20n) !== 0
+    )
+      fail('code-signature-unavailable');
+    for (const operation of [7, 16]) {
+      // No entitlements: success with the buffer untouched (or a zero header). A present blob either fails with
+      // ERANGE (it is larger than the buffer) or is copied with its nonzero magic.
+      const blob = new Uint8Array(16).fill(0xa5),
+        header = blob.subarray(0, 8);
+      if (
+        lib.symbols.csops(pid, operation, blob, 16n) !== 0 ||
+        !(header.every(value => value === 0xa5) || header.every(value => value === 0))
+      )
+        fail('image-mismatch');
+    }
+    const flags = status[0],
+      required = CS_VALID | CS_KILL | (image.requireRuntime ? CS_HARD | CS_RUNTIME : 0);
+    if (
+      (flags & required) !== required ||
+      (flags & (CS_GET_TASK_ALLOW | CS_DEBUGGED)) !== 0 ||
+      Buffer.from(cdhash).toString('hex') !== image.cdhash
+    )
+      fail('image-mismatch');
+  } finally {
+    lib.close();
+  }
+}
+
 /**
  * Spawn without a ChildProcess reaper. The unreaped original leader reserves its PID/PGID
  * until the entire original group is observed empty. Signalling never reconstructs ownership
@@ -49,6 +101,7 @@ export function spawnPosixProvider(options: RuntimeOwnedProviderLaunch): OwnedPr
     quarantinedLaunch = undefined;
   }
   requirePosixWriterPlatform();
+  const image = ownedProviderExpectedDarwinImage(options.expectedDarwinImage, runtimeCurrentPlatform());
   if (
     !EffectString.startsWith('/')(options.command) ||
     !EffectString.startsWith('/')(options.cwd) ||
@@ -80,7 +133,8 @@ export function spawnPosixProvider(options: RuntimeOwnedProviderLaunch): OwnedPr
   let attrReady = false,
     actionsReady = false,
     transferred = false,
-    pid = 0;
+    pid = 0,
+    suspended = false;
   const check = (status: number) => {
     if (status !== 0) fail('io');
   };
@@ -96,7 +150,13 @@ export function spawnPosixProvider(options: RuntimeOwnedProviderLaunch): OwnedPr
     actionsReady = true;
     check(lib.symbols.posix_spawnattr_setpgroup(attr, 0));
     // A new session makes the original leader the group/session anchor, matching the prior detached launch.
-    check(lib.symbols.posix_spawnattr_setflags(attr, runtimeCurrentPlatform() === 'darwin' ? 0x0400 | 0x4000 : 0x0080));
+    // Darwin: SETSID | CLOEXEC_DEFAULT, plus START_SUSPENDED when the image must be attested before it runs.
+    check(
+      lib.symbols.posix_spawnattr_setflags(
+        attr,
+        runtimeCurrentPlatform() === 'darwin' ? 0x0400 | 0x4000 | (image ? 0x0080 : 0) : 0x0080,
+      ),
+    );
     check(lib.symbols.posix_spawn_file_actions_addchdir_np(actions, text(options.cwd)));
     for (let i = 0; i < 3; i++) {
       const pair = new Int32Array(2);
@@ -132,6 +192,12 @@ export function spawnPosixProvider(options: RuntimeOwnedProviderLaunch): OwnedPr
     );
     pid = output[0];
     if (pid <= 0) fail('identity');
+    if (image) {
+      suspended = true;
+      assertDarwinImage(pid, image);
+      if (lib.symbols.kill(pid, 19) !== 0) fail('identity'); // SIGCONT
+      suspended = false;
+    }
     const [stdinRead, stdinWrite, stdoutRead, stdoutWrite, stderrRead, stderrWrite] = pipes;
     for (const fd of [stdinRead, stdoutWrite, stderrWrite]) closeFd(fd);
     for (const fd of [stdinWrite, stdoutRead, stderrRead]) {
@@ -186,7 +252,15 @@ export function spawnPosixProvider(options: RuntimeOwnedProviderLaunch): OwnedPr
           return isMissing(error);
         }
       };
-      if (!cleanup()) {
+      // A refused suspended child never ran and cannot fork, and SIGKILL ends it without its cooperation. Reap it now,
+      // within a bound, so this refusal does not quarantine the next launch. Only a reap that misses the bound falls
+      // back to the quarantine below.
+      let done = cleanup();
+      for (const until = Date.now() + SUSPENDED_REAP_MILLISECONDS; suspended && !done && Date.now() < until;) {
+        Bun.sleepSync(1);
+        done = cleanup();
+      }
+      if (!done) {
         transferred = true; // The quarantine, rather than the thrown launch, now owns these native libraries.
         quarantinedLaunch = () => {
           if (!cleanup()) return false;
