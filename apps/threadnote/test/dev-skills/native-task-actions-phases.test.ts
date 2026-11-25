@@ -2426,7 +2426,7 @@ describe('native task actions', () => {
           runId: 'native-run',
           callerCwd: f.repo,
           snapshotRef,
-          report: {mode: 'full', selected: ['correctness'], findings: []},
+          report: {mode: 'full', selected: ['correctness'], lanes: 'correctness', findings: []},
         }).pipe(Effect.result);
         expect(invalidReview).toMatchObject({
           failure: {code: 'invalid-request', message: expect.stringContaining('lanes')},
