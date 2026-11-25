@@ -268,7 +268,8 @@ export function GraphDiagramResult({
             <ul>
               {Arr.map(diagram.evidence.nodes, node => (
                 <li key={node.id}>
-                  {node.diagramId} {node.label} ·{' '}
+                  {node.diagramId} {node.label}
+                  {node.evidenceKind === 'unresolved' ? ' (unresolved target)' : ''} ·{' '}
                   <code>
                     {node.path}:{node.span.line}
                   </code>

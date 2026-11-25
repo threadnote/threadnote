@@ -34,7 +34,7 @@ const Subject = Schema.Struct({
 const Node = Schema.Struct({
   ...Subject.fields,
   diagramId: Schema.String,
-  evidenceKind: Schema.optionalKey(Schema.Literal('boundary')),
+  evidenceKind: Schema.optionalKey(Schema.Literals(['boundary', 'unresolved'])),
 });
 const Edge = Schema.Struct({
   id: Schema.String,

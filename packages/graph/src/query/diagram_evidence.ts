@@ -210,9 +210,13 @@ function boundaryKind(targetName: string, peer?: CodeGraphSymbol): Boundary['kin
   return !peer && EXTERNAL.test(targetName) ? 'external' : undefined;
 }
 
-function boundarySymbol(edge: CodeGraphEdge, label: string, kind: Boundary['kind']): CodeGraphQueryNode {
+function endpointPlaceholder(
+  edge: CodeGraphEdge,
+  label: string,
+  kind: Boundary['kind'] | 'unresolved',
+): CodeGraphQueryNode {
   return {
-    id: `boundary:${edge.id}`,
+    id: `${kind === 'unresolved' ? 'unresolved' : 'boundary'}:${edge.id}`,
     name: label,
     qualifiedName: label,
     kind,
@@ -378,7 +382,7 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
             const label = work.direction === 'outgoing' ? edge.targetName : edge.sourceName;
             const boundary = boundaryKind(label, peer);
             const visiblePeer =
-              boundary && (!peer || boundary === 'outside-scope') ? boundarySymbol(edge, label, boundary) : peer;
+              boundary && (!peer || boundary === 'outside-scope') ? endpointPlaceholder(edge, label, boundary) : peer;
             if (
               !visiblePeer ||
               !hasDiagramSourceSpan(visiblePeer.path, visiblePeer.span) ||
@@ -435,6 +439,7 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
   const nodes = new Map<string, CodeGraphQueryNode>();
   const boundaryIds = new Set<string>();
   const facts = new Map<string, CodeGraphDiagramFact>();
+  const unresolvedCalls = new Map<string, CodeGraphDiagramFact>();
   const parentsByChild = new Map<string, CodeGraphDiagramFact[]>();
   const contributing = new Set<string>();
   let subject: CodeGraphQueryNode | undefined;
@@ -702,7 +707,7 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
           if (boundary) {
             boundaries.set(edge.id, {...site(edge, label), kind: boundary});
             if (!peer || boundary === 'outside-scope') {
-              peer = boundarySymbol(edge, label, boundary);
+              peer = endpointPlaceholder(edge, label, boundary);
               nodes.set(peer.id, peer);
             }
             boundaryIds.add(peer.id);
@@ -710,6 +715,20 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
           if (!peer || !hasDiagramSourceSpan(peer.path, peer.span)) {
             gaps.set(edge.id, {...site(edge, label), kind: peerId ? 'missing-evidence' : 'unresolved-target'});
             contributing.add(work.node.id);
+            if (
+              peerId === undefined &&
+              work.direction === 'outgoing' &&
+              question.path === undefined &&
+              relationshipQuery.domain === 'behavior' &&
+              (edge.relation === 'calls' || edge.relation === 'constructs')
+            ) {
+              const placeholder = endpointPlaceholder(edge, label, 'unresolved');
+              const fact = completeDiagramFact(edge, work.node.id, placeholder.id);
+              if (fact) {
+                nodes.set(placeholder.id, placeholder);
+                unresolvedCalls.set(edge.id, {...fact, provenance: 'syntactic'});
+              }
+            }
             continue;
           }
           const fact = completeDiagramFact(
@@ -726,7 +745,12 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
             const parents = parentsByChild.get(peer.id) ?? [];
             parents.push(fact);
             parentsByChild.set(peer.id, parents);
-            if (relationshipQuery.domain === 'architecture' || allowsBridge(work.node, peer))
+            const rootMethod =
+              question.path === undefined &&
+              work.node.id === subject.id &&
+              (subject.kind === 'class' || subject.kind === 'struct') &&
+              CALLABLES.has(peer.kind);
+            if (relationshipQuery.domain === 'architecture' || rootMethod || allowsBridge(work.node, peer))
               schedule(peer, work.direction);
             continue;
           }
@@ -817,6 +841,7 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
     nodes,
     boundaryIds,
     facts: selected,
+    unresolvedCalls: [...unresolvedCalls.values()].sort((left, right) => compareCodeUnits(left.id, right.id)),
     ...(hasSourceTime ? {sequenceSources} : {}),
     ...(architectureAnchor === undefined ? {} : {architectureAnchor}),
     ...(pathTarget === undefined ? {} : {pathTarget}),

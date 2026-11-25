@@ -436,7 +436,8 @@ effectIt.layer(diagramStoreLayer)(it => {
         },
       });
       if (incomplete.status !== 'incomplete') throw new Error('Expected an incomplete diagram');
-      expect(incomplete.diagram?.evidence.edges).toHaveLength(132);
+      expect(incomplete.diagram?.evidence.edges).toHaveLength(133);
+      expect(incomplete.diagram?.evidence.edges).toContainEqual(expect.objectContaining({id: unresolved.id}));
       expect(yield* readCodeGraphDiagram(f.store, f.databasePath, {...input, diagramType: 'flowchart'})).toEqual(
         incomplete,
       );
@@ -484,6 +485,56 @@ effectIt.layer(diagramStoreLayer)(it => {
       });
       if (interrupted.status !== 'incomplete') throw new Error('Expected an interrupted diagram');
       expect(interrupted.diagram?.evidence.edges).toHaveLength(128);
+    }).pipe(TestClock.withLive),
+  );
+
+  it.effect('shows indexed call sites and preserves a known sequence when targets are unresolved', () =>
+    Effect.gen(function* () {
+      const f = yield* storedDiagramFixture;
+      const entry = symbol('applyPolicy', 'function');
+      const validate = symbol('validatePolicy', 'function');
+      const dynamic = {
+        ...relation('apply-callback', 'calls', entry, validate, 3, 'syntactic'),
+        targetId: undefined,
+        targetName: 'input.onComplete',
+      };
+      const call = relation('validate', 'calls', entry, validate, 2);
+      const unresolvedOnly = yield* f.save('6', [entry, validate], [dynamic]);
+      const linear = yield* f.save('7', [entry, validate], [call, dynamic]);
+      const run = (snapshot: CodeGraphSnapshot, diagramType: 'auto' | 'flowchart' | 'sequence') =>
+        readCodeGraphDiagram(f.store, f.databasePath, {
+          question: 'How does applyPolicy work?',
+          diagramType,
+          freshness: 'current',
+          scope: f.snapshotScope(snapshot),
+        });
+      for (const type of ['auto', 'flowchart'] as const) {
+        const result = yield* run(unresolvedOnly, type);
+        expect(result).toMatchObject({
+          status: 'incomplete',
+          coverage: {gaps: [{kind: 'unresolved-target', edgeId: dynamic.id, path: entry.path, span: span(3)}]},
+          diagram: {
+            diagramType: 'flowchart',
+            evidence: {
+              nodes: [{id: entry.id}, {label: dynamic.targetName, evidenceKind: 'unresolved'}],
+              edges: [{id: dynamic.id, provenance: 'syntactic', path: entry.path, span: span(3)}],
+            },
+          },
+        });
+        if (result.status !== 'incomplete') throw new Error('Expected a partial diagram.');
+        expect(result.diagram?.source).toContain('-. Unresolved call site .->');
+        expect(yield* Schema.decodeEffect(CodeGraphDiagramResultSchema)(result)).toEqual(result);
+      }
+
+      expect(yield* run(linear, 'sequence')).toMatchObject({
+        status: 'incomplete',
+        coverage: {gaps: [{kind: 'unresolved-target', edgeId: dynamic.id}]},
+        diagram: {diagramType: 'sequence', inferred: true, evidence: {edges: [{id: call.id}]}},
+      });
+      expect(yield* run(unresolvedOnly, 'sequence')).toMatchObject({
+        status: 'incomplete',
+        suggestedType: 'flowchart',
+      });
     }).pipe(TestClock.withLive),
   );
 
@@ -928,7 +979,7 @@ effectIt.layer(diagramStoreLayer)(it => {
         coverage: {subject: {id: production.id}},
         diagram: {
           diagramType: 'flowchart',
-          evidence: {edges: [{id: 'rank'}, {id: 'scan'}, {id: 'vector-rank'}, {id: 'vectors'}]},
+          evidence: {edges: [{id: 'rank'}, {id: 'scan'}, {id: 'vector-rank'}, {id: 'vectors'}, {id: 'dynamic'}]},
         },
       });
       expect(yield* run(topic, 'auto')).toEqual(flow);
@@ -1057,6 +1108,28 @@ effectIt.layer(diagramStoreLayer)(it => {
         'nextAction',
         'Retry the same question in a graph view or configured project that includes the implementation.',
       );
+
+      const owner = {...orchestrator, span: {...orchestrator.span, endLine: 5}};
+      const withOwner = yield* fixture.save(
+        'f',
+        [owner, configuration, entry, target],
+        [
+          relation('declares-register', 'contains', owner, entry, 3, 'syntactic'),
+          relation('publish', 'calls', entry, target, 4),
+        ],
+      );
+      const owned = yield* readCodeGraphDiagram(fixture.store, fixture.databasePath, {
+        question: 'How does EnrollmentOrchestrator work?',
+        diagramType: 'flowchart',
+        scope: {...fixture.snapshotScope(withOwner), project: scope.project},
+        freshness: 'current',
+        partialProject: true,
+      });
+      expect(owned).toMatchObject({
+        status: 'incomplete',
+        coverage: {subject: {id: owner.id}},
+        diagram: {diagramType: 'flowchart', evidence: {edges: [{id: 'declares-register'}, {id: 'publish'}]}},
+      });
     }),
   );
 

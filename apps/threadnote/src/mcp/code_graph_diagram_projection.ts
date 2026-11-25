@@ -52,7 +52,8 @@ function renderDiagramResult(result: CodeGraphDiagramResult, diagram: CodeGraphD
             'Source evidence',
             ...Arr.map(
               diagram.evidence.nodes,
-              node => `${node.diagramId} ${quote(node.label)} ${quote(node.path)}:${node.span.line}`,
+              node =>
+                `${node.diagramId} ${quote(node.label)} ${quote(node.path)}:${node.span.line}${node.evidenceKind === 'unresolved' ? ' (unresolved target)' : ''}`,
             ),
             ...Arr.map(
               diagram.evidence.edges,
