@@ -17,7 +17,11 @@ export const nativeTypeScriptAssetPins = {
     // commit db499c1b3 (deadline multiplier 3), artifact native-typescript-construction-<host>. Its darwin-arm64
     // artifact reproduced the pin above.
     {host: 'darwin-x64', sha256: '0bff3b247bf35c5cc8f7544c665cd5cfaaacfa424400ca6e956d777ca3397458'},
-    {host: 'linux-x64', sha256: 'e822fbf40a9454e0f3dcb2e088d7b8b3dabf59f7d857c258a2c255abc305dfda'},
+    // The binary links the runner image's C toolchain (cgo), so a pin holds only on the image it was reviewed on.
+    // linux-x64 is the ubuntu-24.04 construction that every linux-x64 consumer runs on: trusted same-repository CI run
+    // 45657551541 of reviewed commit 2ed43b880, job "Native TypeScript asset · linux-x64". The earlier pin came from
+    // the ubuntu-26.04 image that ubuntu-latest selected on 2026-11-20 and never matched an ubuntu-24.04 build.
+    {host: 'linux-x64', sha256: '0faa85f91e05a506f9a5d61ce643a565960d3e332d55aeb2c28bdbf6372af026'},
     {host: 'linux-arm64', sha256: '294a3396080820b44e223d741eb040dfbd2d4c9b36855497f7df6ccdaaebacee'},
   ],
   frontend: {
@@ -43,6 +47,22 @@ export const nativeTypeScriptHostKey = (platform: string, arch: string) => `${pl
 /** The reviewed binary digest for a host, or undefined when that host has no reviewed pin. */
 export function nativeTypeScriptReviewedBinarySha256(host: string): string | undefined {
   for (const pin of nativeTypeScriptAssetPins.reviewedHostBinaries) if (pin.host === host) return pin.sha256;
+  return undefined;
+}
+
+/**
+ * The one reviewed-binary decision shared by CI asset provisioning and runtime admission: which check a staged manifest
+ * fails on this host, or `undefined` when it names this host's reviewed binary. The result is a value-free check name.
+ */
+export function nativeTypeScriptManifestPinFailure(
+  manifest: {readonly sha256: string; readonly executable: string},
+  platform: string,
+  arch: string,
+): 'no-reviewed-pin' | 'manifest-binary' | 'manifest-executable' | undefined {
+  const pinned = nativeTypeScriptReviewedBinarySha256(nativeTypeScriptHostKey(platform, arch));
+  if (pinned === undefined) return 'no-reviewed-pin';
+  if (manifest.sha256 !== pinned) return 'manifest-binary';
+  if (manifest.executable !== (platform === 'win32' ? 'tsc.exe' : 'tsc')) return 'manifest-executable';
   return undefined;
 }
 

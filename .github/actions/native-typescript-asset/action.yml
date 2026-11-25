@@ -108,12 +108,13 @@ runs:
         ASSET_ROOT: ${{ steps.inputs.outputs.asset_root }}
       run: bun tools/ci/native-typescript-construction.ts provision-install
     - name: Verify the prepared asset and its construction payload
-      # A cache hit is untrusted input: it is verified exactly like a fresh construction before any use.
+      # A cache hit is untrusted input: it is verified exactly like a fresh construction before any use. The binary
+      # must also be this host's reviewed pin, so an asset the runtime would refuse fails here and is never cached.
       if: steps.inputs.outputs.enabled == 'true'
       shell: bash
       env:
         PREPARED: ${{ steps.inputs.outputs.prepared }}
-      run: bun tools/semantic/build-typescript-native.ts --verify-prepared "$PREPARED"
+      run: bun tools/semantic/build-typescript-native.ts --verify-prepared "$PREPARED" --require-reviewed-pin
     - name: Save the verified prepared asset
       if: >-
         steps.inputs.outputs.enabled == 'true' && steps.cache.outputs.cache-hit != 'true' && inputs.restore-only != 'true'

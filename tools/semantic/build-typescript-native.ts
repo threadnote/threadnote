@@ -15,6 +15,7 @@ import {
   nativeTypeScriptAssetPins,
   nativeTypeScriptTreeDigest,
   type NativeTypeScriptAssetManifest,
+  nativeTypeScriptManifestPinFailure,
 } from '@threadnote/graph/typescript_native_asset_pins';
 
 /**
@@ -1370,8 +1371,24 @@ if (import.meta.main) {
     if (!rest[0]) throw new Error('Usage: bun build-typescript-native.ts --verify-construction PAYLOAD');
     process.stdout.write(`${JSON.stringify(await readNativeTypeScriptConstructionReceipt(rest[0]))}\n`);
   } else if (mode === '--verify-prepared') {
-    if (!rest[0]) throw new Error('Usage: bun build-typescript-native.ts --verify-prepared PREPARED_ASSET');
-    process.stdout.write(`${JSON.stringify(await verifyPreparedNativeTypeScriptAsset(rest[0]))}\n`);
+    const usage = 'Usage: bun build-typescript-native.ts --verify-prepared PREPARED_ASSET [--require-reviewed-pin]';
+    if (!rest[0] || (rest[1] !== undefined && rest[1] !== '--require-reviewed-pin') || rest.length > 2)
+      throw new Error(usage);
+    const verified = await verifyPreparedNativeTypeScriptAsset(rest[0]);
+    // A provisioned asset must pass runtime admission; construction evidence for a new pin omits this flag.
+    const failure =
+      rest[1] === '--require-reviewed-pin'
+        ? nativeTypeScriptManifestPinFailure(
+            {sha256: verified.binarySha256, executable: typescriptNativeBuildRecipe.runtimeAsset.executableName()},
+            process.platform,
+            process.arch,
+          )
+        : undefined;
+    if (failure !== undefined)
+      throw new Error(
+        `The prepared native TypeScript asset would be refused at runtime on ${process.platform}-${process.arch} [${failure}]: its binary ${verified.binarySha256} is not this host's reviewed pin. Construct it on the image the pin was reviewed on, or review a new pin.`,
+      );
+    process.stdout.write(`${JSON.stringify(verified)}\n`);
   } else if (mode === '--prepare') {
     const input = buildInput(rest, `--prepare ${buildUsage}`);
     process.stdout.write(`${JSON.stringify(await prepareNativeTypeScriptAsset(input))}\n`);

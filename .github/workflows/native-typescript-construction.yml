@@ -47,7 +47,8 @@ jobs:
         include:
           - {os: macos-15, host: darwin-arm64}
           - {os: macos-15-intel, host: darwin-x64}
-          - {os: ubuntu-latest, host: linux-x64}
+          # Each pinned host constructs on the image its CI producer and consumers use; cgo ties the binary to it.
+          - {os: ubuntu-24.04, host: linux-x64}
           - {os: ubuntu-24.04-arm, host: linux-arm64}
           - {os: windows-latest, host: win32-x64}
           - {os: windows-11-arm, host: win32-arm64}

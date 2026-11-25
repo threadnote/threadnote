@@ -8,6 +8,7 @@ import fc from 'fast-check';
 import {expect, it} from 'vitest';
 import {parse} from 'yaml';
 import {AGENT_CATALOG} from '@threadnote/integrations/catalog';
+import {nativeTypeScriptAssetPins} from '@threadnote/graph/typescript_native_asset_pins';
 // Statically imported so the hermetic test target carries the release target definitions the step reads.
 import {BUN_STANDALONE_TARGETS} from '../../../scripts/release-targets.js';
 import * as EffectRecord from 'effect/Record';
@@ -1023,6 +1024,41 @@ it('smokes GNU payloads on the host after the root build container returns them 
   expect(smoke?.if).toBe("${{ !endsWith(inputs.target, '-musl') }}");
   const steps = build?.steps ?? [];
   expect(steps.indexOf(smoke!)).toBeGreaterThan(steps.indexOf(container!));
+});
+
+const ConstructionWorkflowSchema = Schema.Struct({
+  jobs: Schema.Record(
+    Schema.String,
+    Schema.Struct({
+      strategy: Schema.optionalKey(
+        Schema.Struct({
+          matrix: Schema.optionalKey(
+            Schema.Struct({
+              include: Schema.optionalKey(Schema.Array(Schema.Struct({os: Schema.String, host: Schema.String}))),
+            }),
+          ),
+        }),
+      ),
+    }),
+  ),
+});
+
+it('constructs every reviewed binary pin on the runner image its CI producer uses', () => {
+  // The binary links its runner image's C toolchain (cgo): a pin reviewed on another image never matches CI's build.
+  const construction = Schema.decodeUnknownSync(ConstructionWorkflowSchema)(
+    parse(readFileSync('.github/workflows/native-typescript-construction.yml', 'utf8')),
+  );
+  const images = new Map(
+    EffectArray.flatMap(EffectRecord.values(construction.jobs), job =>
+      EffectArray.map(job.strategy?.matrix?.include ?? [], row => [row.host, row.os] as const),
+    ),
+  );
+  const pinnedHosts = EffectArray.map(nativeTypeScriptAssetPins.reviewedHostBinaries, pin => pin.host);
+  expect([...pinnedHosts].sort()).toEqual(EffectArray.map(PINNED_RELEASE_LEGS, leg => leg.target).sort());
+  for (const leg of PINNED_RELEASE_LEGS) {
+    expect(images.get(leg.target), leg.target).toBe(leg.os);
+    expect(jobs[leg.asset]?.['runs-on'], leg.target).toBe(images.get(leg.target));
+  }
 });
 
 it('executes the release matrix coverage step against every native release-smoke leg', () => {

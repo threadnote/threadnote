@@ -6,6 +6,7 @@ import {
   NativeTypeScriptAssetManifest,
   nativeTypeScriptAssetPins,
   nativeTypeScriptHostKey,
+  nativeTypeScriptManifestPinFailure,
   nativeTypeScriptReviewedBinarySha256,
   nativeTypeScriptTreeDigest,
 } from './typescript_native_asset_pins.js';
@@ -154,24 +155,45 @@ const NativeTypeScriptRefusal = Schema.Literals([
   'group-writable-ancestor',
 ]);
 export type NativeTypeScriptRefusal = typeof NativeTypeScriptRefusal.Type;
+/** Value-free name of the reviewed-asset check behind a `pin-mismatch`; it never carries a path or digest. */
+const NativeTypeScriptPinCheck = Schema.Literals([
+  // The manifest's binary digest is not this host's reviewed pin, or it names another executable.
+  'manifest-binary',
+  'manifest-executable',
+  // A verified file, or an SDK/bundle tree, differs from its pinned bytes, shape or size bounds.
+  'file-digest',
+  'tree-entries',
+  'tree-git-entry',
+  'tree-bytes',
+  'tree-digest',
+]);
+export type NativeTypeScriptPinCheck = typeof NativeTypeScriptPinCheck.Type;
 /** A session-level (transport, budget, protocol or admission) failure, never a caller callback's own error. */
 export class NativeTypeScriptUnavailable extends Schema.TaggedError<
   NativeTypeScriptUnavailable,
   {readonly brand: unique symbol}
->()('NativeTypeScriptUnavailable', {reason: NativeTypeScriptRefusal, message: Schema.String}) {
-  static of(reason: NativeTypeScriptRefusal): NativeTypeScriptUnavailable {
+>()('NativeTypeScriptUnavailable', {
+  reason: NativeTypeScriptRefusal,
+  check: Schema.optionalKey(NativeTypeScriptPinCheck),
+  message: Schema.String,
+}) {
+  static of(reason: NativeTypeScriptRefusal, check?: NativeTypeScriptPinCheck): NativeTypeScriptUnavailable {
     const hint =
       reason === 'group-writable-ancestor'
         ? '; remove group write from the asset directory and its parents (chmod g-w <dir>)'
         : '';
     return NativeTypeScriptUnavailable.make({
       reason,
-      message: `Native TypeScript session unavailable [${reason}]${hint}`,
+      ...(check === undefined ? {} : {check}),
+      message: `Native TypeScript session unavailable [${reason}${check === undefined ? '' : `: ${check}`}]${hint}`,
     });
   }
 }
 function nativeApiError(reason: NativeTypeScriptRefusal = 'request'): NativeTypeScriptUnavailable {
   return NativeTypeScriptUnavailable.of(reason);
+}
+function pinMismatch(check: NativeTypeScriptPinCheck): NativeTypeScriptUnavailable {
+  return NativeTypeScriptUnavailable.of('pin-mismatch', check);
 }
 /**
  * The published client's transport, located by shape only (its socket is created lazily by the first request): socket
@@ -486,7 +508,7 @@ async function verifyNativeFile(native: NativePlatform, file: string, sha256: st
   if (verifiedNativeFiles.get(file) === key) return;
   assertPrivateNativeMember(native, stat, executable);
   if (sha256HexSync(await native.runtimeReadBoundedStableRegularFile(file, 256 * 1_048_576)) !== sha256)
-    throw nativeApiError('pin-mismatch');
+    throw pinMismatch('file-digest');
   if (nativeStatKey(fs.lstatSync(file, {bigint: true})) !== nativeStatKey(stat)) throw nativeApiError('unsafe-asset');
   verifiedNativeFiles.set(file, key);
 }
@@ -504,12 +526,13 @@ async function walkNativeTree(native: NativePlatform, root: string, bundle: bool
     if (hash) assertPrivateNativeMember(native, before);
     const directories: string[] = [];
     const names = fs.readdirSync(directory).sort();
-    if (count + names.length > (bundle ? 6 : 20_000)) throw nativeApiError('pin-mismatch');
+    if (count + names.length > (bundle ? 6 : 20_000)) throw pinMismatch('tree-entries');
     // Bounded parallel reads retain the original whole-SDK entry cap.
     for (let start = 0; start < names.length; start += 8) {
       const settled = await Promise.allSettled(
         EffectArray.map(names.slice(start, start + 8), async name => {
-          if (++count > (bundle ? 6 : 20_000) || name === '.git') throw nativeApiError('pin-mismatch');
+          if (++count > (bundle ? 6 : 20_000)) throw pinMismatch('tree-entries');
+          if (name === '.git') throw pinMismatch('tree-git-entry');
           const file = path.join(directory, name);
           const relative = EffectArray.join(EffectString.split(path.sep)(path.relative(root, file)), '/');
           const stat = fs.lstatSync(file, {bigint: true});
@@ -522,7 +545,7 @@ async function walkNativeTree(native: NativePlatform, root: string, bundle: bool
               throw nativeApiError('unsafe-asset');
             if (hash) assertPrivateNativeMember(native, stat);
             bytes += Number(stat.size);
-            if (bytes > (bundle ? 1 : 256) * 1_048_576) throw nativeApiError('pin-mismatch');
+            if (bytes > (bundle ? 1 : 256) * 1_048_576) throw pinMismatch('tree-bytes');
             if (hash)
               entries.push([
                 relative,
@@ -560,7 +583,7 @@ async function verifyNativeTree(native: NativePlatform, root: string, expected: 
     return;
   }
   const {entries, keys} = await walkNativeTree(native, root, bundle, true);
-  if (nativeTypeScriptTreeDigest(entries) !== expected) throw nativeApiError('pin-mismatch');
+  if (nativeTypeScriptTreeDigest(entries) !== expected) throw pinMismatch('tree-digest');
   verifiedNativeTrees.set(cacheKey, keys);
 }
 
@@ -891,8 +914,9 @@ async function admitNativeTypeScriptAsset(
   } catch {
     throw nativeApiError('missing-manifest');
   }
-  if (manifest.sha256 !== pinned || manifest.executable !== (native.runtimePlatform === 'win32' ? 'tsc.exe' : 'tsc'))
-    throw nativeApiError('pin-mismatch');
+  const manifestFailure = nativeTypeScriptManifestPinFailure(manifest, native.runtimePlatform, process.arch);
+  if (manifestFailure === 'no-reviewed-pin') throw nativeApiError('no-reviewed-pin');
+  if (manifestFailure !== undefined) throw pinMismatch(manifestFailure);
   const sdkDirectory = path.join(canonical, 'sdk');
   const compilerPath = path.join(canonical, manifest.executable);
   await verifyNativeTree(native, sdkDirectory, nativeTypeScriptFrontendDigest, false);
