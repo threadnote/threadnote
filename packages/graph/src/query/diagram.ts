@@ -1,8 +1,9 @@
 import {Array as Arr, Option, String as Str} from 'effect';
 import {codeGraphSymbolPathClass, codeGraphSymbolPathScoreMultiplier} from '../store/query/core.js';
-import {parseCodeGraphEndpointSelector} from './selector.js';
+import {isStableCodeGraphNodeId, parseCodeGraphEndpointSelector} from './selector.js';
 import type {CodeGraphEdge, CodeGraphQueryNode, CodeGraphRelation, CodeGraphSpan} from '../types.js';
 import {renderSourceBackedSequence} from './diagram_sequence.js';
+import {CODE_GRAPH_DIAGRAM_QUESTION_MAXIMUM_LENGTH} from './diagram_contract.js';
 import type {
   CodeGraphDiagramCoverage,
   CodeGraphDiagramFreshness,
@@ -10,6 +11,9 @@ import type {
   CodeGraphDiagramScope,
   CodeGraphDiagramType,
 } from './diagram_contract.js';
+
+export const DIAGRAM_PROJECT_RETRY =
+  'Retry the same question in a graph view or configured project that includes the implementation.';
 
 const SUBJECT_TERMS = /(?:\.\/?)*[\p{L}\p{N}_$@](?:[\p{L}\p{M}\p{N}_$@./#:-]|\u{200C}|\u{200D})*/gu;
 const QUOTED_SUBJECT_TERMS =
@@ -344,7 +348,10 @@ function sourceFor(type: DiagramType, evidence: Diagram['evidence']): string {
         ],
         '\n',
       );
-    case 'flowchart':
+    case 'flowchart': {
+      const unresolved = new Set(
+        Arr.flatMap(nodes, node => (node.evidenceKind === 'unresolved' ? [node.diagramId] : [])),
+      );
       return Arr.join(
         [
           'flowchart TD',
@@ -355,10 +362,15 @@ function sourceFor(type: DiagramType, evidence: Diagram['evidence']): string {
                 '  end',
               ])
             : Arr.map(nodes, node => flowNode(node.diagramId))),
-          ...Arr.map(edges, edge => `  ${edge.source} -->|${edge.relation}| ${edge.target}`),
+          ...Arr.map(edges, edge =>
+            unresolved.has(edge.target)
+              ? `  ${edge.source} -.-> ${edge.target}`
+              : `  ${edge.source} -->|${edge.relation}| ${edge.target}`,
+          ),
         ],
         '\n',
       );
+    }
   }
 }
 
@@ -587,6 +599,15 @@ export function describeCodeGraphDiagramQuestion(question: string, type: CodeGra
     intentDomain === 'behavior' && path === undefined && selectors.length === 0 ? compoundTopic(tokens) : [];
   const directions = behaviorDirections(tokens, cueTokens);
   const incoming = (domain === 'types' && predicateIndex !== undefined && inverse) || directions.incoming;
+  const unanchoredNames =
+    domain === 'behavior' &&
+    path === undefined &&
+    explicitSubject === undefined &&
+    preferred === undefined &&
+    !behavior &&
+    !topic.length &&
+    !selectors.length &&
+    !Arr.some(tokens, token => /[./#:@]/u.test(token));
   return {
     selectors,
     terms,
@@ -594,16 +615,29 @@ export function describeCodeGraphDiagramQuestion(question: string, type: CodeGra
     preferred,
     explicitType,
     domain,
+    explicitBehavior: behavior || directions.outgoing,
     incoming: path === undefined && incoming,
     outgoingBehavior: directions.outgoing,
     inheritance,
     path,
     malformedPath: pathRequest?.kind === 'malformed',
     topic,
+    unanchoredNames,
   } as const;
 }
 
 export type CodeGraphDiagramQuestion = ReturnType<typeof describeCodeGraphDiagramQuestion>;
+
+export function diagramFileOverview(question: CodeGraphDiagramQuestion, node: CodeGraphQueryNode): boolean {
+  return (
+    question.domain === 'behavior' &&
+    !question.explicitBehavior &&
+    !question.incoming &&
+    !question.path &&
+    (node.kind === 'module' || node.kind === 'file') &&
+    (question.selectors.length > 0 || Arr.some(question.terms, term => Str.replace(/^\.\//u, '')(term) === node.path))
+  );
+}
 
 export function wantsSourceBackedSequence(question: CodeGraphDiagramQuestion): boolean {
   return (
@@ -632,6 +666,7 @@ export function diagramEndpoint(question: CodeGraphDiagramQuestion, selector: st
     terms: [selector],
     named: {spelling: selector, caseSensitive: true},
     topic: [],
+    unanchoredNames: false,
   };
 }
 export function rankCodeGraphDiagramSubject(
@@ -680,6 +715,58 @@ export function completeDiagramSubject(
     qualifiedName: node.qualifiedName,
     ...(node.signature === undefined ? {} : {signature: node.signature}),
   };
+}
+
+function quoteDiagramOperand(value: string): string | undefined {
+  if (/\r|\n/u.test(value)) return undefined;
+  const tokens = subjectTerms(value);
+  if (tokens.length === 1 && tokens[0] === value) return value;
+  for (const quote of ['"', "'", '`']) {
+    if (!Str.includes(quote)(value)) return `${quote}${value}${quote}`;
+  }
+  return undefined;
+}
+
+export function diagramClarificationCandidate(
+  question: CodeGraphDiagramQuestion,
+  node: CodeGraphQueryNode,
+  pathChoice?: {readonly role: 'from'} | {readonly role: 'to'; readonly source: CodeGraphQueryNode},
+): Extract<CodeGraphDiagramResult, {status: 'clarification'}>['candidates'][number] {
+  const candidate = completeDiagramSubject(node);
+  const value = isStableCodeGraphNodeId(node.id) ? node.id : `${node.path}#${node.qualifiedName || node.name}`;
+  const selector = isExplicitSelector(value) ? quoteDiagramOperand(value) : undefined;
+  if (!selector) return candidate;
+
+  let retryQuery: string;
+  if (question.path && pathChoice) {
+    const from =
+      pathChoice.role === 'from'
+        ? selector
+        : isStableCodeGraphNodeId(pathChoice.source.id)
+          ? pathChoice.source.id
+          : quoteDiagramOperand(question.path.from);
+    const to = pathChoice.role === 'to' ? selector : quoteDiagramOperand(question.path.to);
+    if (!from || !to) return candidate;
+    retryQuery = `from ${from} to ${to}`;
+  } else {
+    const overview = diagramFileOverview(question, node);
+    const focus =
+      question.domain === 'types'
+        ? question.inheritance
+          ? 'class diagram of inheritance'
+          : 'class diagram'
+        : question.domain === 'architecture'
+          ? 'architecture'
+          : question.preferred === 'sequence'
+            ? `sequence diagram${overview ? '' : ' of calls'}`
+            : overview
+              ? 'diagram'
+              : 'calls';
+    const directions = [question.incoming ? 'incoming calls' : '', question.outgoingBehavior ? 'outgoing calls' : ''];
+    const direction = Arr.join(Arr.filter(directions, Boolean), ' and ');
+    retryQuery = `Show the ${focus} for ${selector}${direction ? ` with ${direction}` : ''}`;
+  }
+  return retryQuery.length <= CODE_GRAPH_DIAGRAM_QUESTION_MAXIMUM_LENGTH ? {...candidate, retryQuery} : candidate;
 }
 
 export function hasDiagramSourceSpan(path: string, span: CodeGraphSpan): boolean {
@@ -831,12 +918,23 @@ export function renderCompleteCodeGraphDiagram(input: {
   readonly nodes: ReadonlyMap<string, CodeGraphQueryNode>;
   readonly boundaryIds: ReadonlySet<string>;
   readonly facts: readonly Fact[];
+  readonly unresolvedCalls?: readonly Fact[];
   readonly sequenceSources?: ReadonlyMap<string, Uint8Array>;
   readonly architectureAnchor?: Fact;
   readonly pathTarget?: CodeGraphQueryNode;
 }): CodeGraphDiagramResult {
-  const {question, scope, freshness, nodes, boundaryIds, facts, architectureAnchor, pathTarget, sequenceSources} =
-    input;
+  const {
+    question,
+    scope,
+    freshness,
+    nodes,
+    boundaryIds,
+    facts,
+    architectureAnchor,
+    pathTarget,
+    sequenceSources,
+    unresolvedCalls = [],
+  } = input;
   const limits = freshness === 'current' ? [] : [`Snapshot freshness is ${freshness}.`];
   if (architectureAnchor) {
     limits.push(
@@ -883,12 +981,14 @@ export function renderCompleteCodeGraphDiagram(input: {
   const architectureFit =
     question.domain === 'architecture' && canRepresentArchitectureDiagram(facts, nodes, boundaryIds);
   const interrupted = Arr.some(coverage.gaps, gap => gap.kind === 'interrupted');
+  const sequenceFit = sourceSequence !== undefined || (sequence !== undefined && !interrupted);
+  const flowchartFacts = unresolvedCalls.length ? [...facts, ...unresolvedCalls] : facts;
   const suitable =
     question.domain === 'types' && classFit
       ? 'class'
       : question.domain === 'architecture' && architectureFit
         ? 'architecture'
-        : (question.preferred === 'sequence' || pathTarget !== undefined) && (sourceSequence || sequence)
+        : (question.preferred === 'sequence' || pathTarget !== undefined) && sequenceFit
           ? 'sequence'
           : 'flowchart';
   const diagramType = question.explicitType ?? suitable;
@@ -898,20 +998,16 @@ export function renderCompleteCodeGraphDiagram(input: {
       : diagramType === 'architecture'
         ? architectureFit
         : diagramType === 'sequence'
-          ? sourceSequence !== undefined ||
-            (sequence !== undefined &&
-              (coverage.completeness === 'complete' || (pathTarget !== undefined && !interrupted)))
+          ? sequenceFit
           : true;
   const unsupportedTypeMessage =
     diagramType === 'sequence'
       ? sequence === undefined
         ? 'Static evidence does not establish a single ordered call path.'
-        : question.domain === 'behavior' && Arr.some(coverage.gaps, gap => gap.kind === 'unresolved-target')
-          ? 'Unresolved call targets prevent a complete sequence diagram.'
-          : 'Incomplete coverage prevents a complete sequence diagram.'
+        : 'The graph read stopped before it could verify the indexed call path.'
       : `The ${diagramType} diagram cannot represent every relationship for this subject.`;
   const build = (type: DiagramType) => {
-    const drawn = type === 'sequence' && !sourceSequence ? sequence! : facts;
+    const drawn = type === 'flowchart' ? flowchartFacts : type === 'sequence' && !sourceSequence ? sequence! : facts;
     const ids = new Set<string>();
     if ((type !== 'sequence' || sourceSequence) && coverage.subject)
       ids.add(architectureAnchor?.sourceId ?? coverage.subject.id);
@@ -919,11 +1015,15 @@ export function renderCompleteCodeGraphDiagram(input: {
       ids.add(edge.sourceId);
       ids.add(edge.targetId);
     }
-    const evidenceNodes = Arr.map([...ids], (id, index) => ({
-      ...completeDiagramSubject(nodes.get(id)!),
-      diagramId: `n${index + 1}`,
-      ...(boundaryIds.has(id) ? {evidenceKind: 'boundary' as const} : {}),
-    }));
+    const evidenceNodes = Arr.map([...ids], (id, index): Diagram['evidence']['nodes'][number] => {
+      const node = nodes.get(id)!;
+      const evidenceKind = node.kind === 'unresolved' ? 'unresolved' : boundaryIds.has(id) ? 'boundary' : undefined;
+      return {
+        ...completeDiagramSubject(node),
+        diagramId: `n${index + 1}`,
+        ...(evidenceKind === undefined ? {} : {evidenceKind}),
+      };
+    });
     const diagramIds = new Map(Arr.map(evidenceNodes, node => [node.id, node.diagramId] as const));
     const edges = Arr.map(drawn, edge => ({
       id: edge.id,
@@ -948,7 +1048,7 @@ export function renderCompleteCodeGraphDiagram(input: {
     limits.push(
       sourceSequence
         ? 'The sequence follows verified static source. Calls without proven order remain in the evidence.'
-        : 'The sequence shows an inferred path from static calls.',
+        : 'The sequence shows an inferred path from indexed calls.',
     );
   const example =
     diagramType === 'sequence' && !fits && !sequence && !pathTarget && coverage.subject
@@ -960,9 +1060,9 @@ export function renderCompleteCodeGraphDiagram(input: {
       : 'Choose an endpoint with an indexed path from the source.'
     : example
       ? `Select Sequence and ask "${example}". Select Flowchart for the current relationships.`
-      : 'Name both endpoints of an indexed call path or select Flowchart for the current relationships.';
+      : 'Name both endpoints of an indexed call path or select Flowchart for the available evidence.';
   const rejectsExplicitType = question.explicitType !== undefined && !fits;
-  const canSuggestFlowchart = rejectsExplicitType && coverage.subject !== undefined && facts.length > 0;
+  const canSuggestFlowchart = rejectsExplicitType && coverage.subject !== undefined && flowchartFacts.length > 0;
   const noClassEvidence =
     question.explicitType === 'class' &&
     coverage.subject !== undefined &&
@@ -972,6 +1072,7 @@ export function renderCompleteCodeGraphDiagram(input: {
         !isDiagramTypeKind(coverage.subject.kind) &&
         !isDiagramMemberKind(coverage.subject.kind)));
   const noClassMessage = 'The selected snapshot has no indexed structural relationships for this subject.';
+  const missingInProject = facts.length === 0 && Arr.some(coverage.gaps, gap => gap.kind === 'partial-project');
   const noRelationships =
     coverage.subject !== undefined &&
     facts.length === 0 &&
@@ -982,14 +1083,18 @@ export function renderCompleteCodeGraphDiagram(input: {
   if (coverage.completeness === 'incomplete') {
     const gapMessage = interrupted
       ? 'The graph read stopped before it could establish complete coverage.'
-      : noClassEvidence
-        ? noClassMessage
-        : noRelationships
-          ? 'The selected snapshot has no indexed relationships for this subject.'
-          : 'The selected snapshot has gaps in the evidence for this subject.';
+      : missingInProject
+        ? unresolvedCalls.length
+          ? 'The selected graph project has partial coverage and no resolved relationships for this question.'
+          : 'The selected graph project has partial coverage and no indexed relationships for this question.'
+        : noClassEvidence
+          ? noClassMessage
+          : noRelationships
+            ? 'The selected snapshot has no indexed relationships for this subject.'
+            : 'The selected snapshot has gaps in the evidence for this subject.';
     const message =
       rejectsExplicitType && !noClassEvidence
-        ? `${gapMessage} ${unsupportedTypeMessage}${facts.length ? ' A flowchart can show the available relationships.' : ''}`
+        ? `${gapMessage} ${unsupportedTypeMessage}${canSuggestFlowchart ? ' A flowchart can show the available relationships.' : ''}`
         : gapMessage;
     return {
       ...base,
@@ -997,15 +1102,19 @@ export function renderCompleteCodeGraphDiagram(input: {
       message,
       nextAction: interrupted
         ? 'Retry the diagram for the same subject and graph view.'
-        : noClassEvidence
-          ? classAction
-          : question.explicitType === 'sequence' && !fits
-            ? selectPath
-            : canSuggestFlowchart
-              ? 'Select Flowchart to show the available relationships.'
-              : 'Check the listed source locations or name a subject within the available graph evidence.',
-      ...(coverage.subject && facts.length && !rejectsExplicitType
-        ? {diagram: build(fits ? diagramType : 'flowchart')}
+        : missingInProject
+          ? DIAGRAM_PROJECT_RETRY
+          : noClassEvidence
+            ? classAction
+            : question.explicitType === 'sequence' && !fits
+              ? selectPath
+              : canSuggestFlowchart
+                ? 'Select Flowchart to show the available relationships.'
+                : 'Check the listed source locations or name a subject within the available graph evidence.',
+      ...(coverage.subject &&
+      (diagramType === 'flowchart' ? flowchartFacts.length : facts.length) &&
+      !rejectsExplicitType
+        ? {diagram: build(diagramType)}
         : {}),
       ...(canSuggestFlowchart ? {suggestedType: 'flowchart' as const} : {}),
     };

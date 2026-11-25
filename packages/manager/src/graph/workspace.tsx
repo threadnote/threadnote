@@ -1246,7 +1246,7 @@ export function GraphWorkspace(props: {
         </div>
         {repository && repositoryGroup ? (
           <GraphDiagramQuestion
-            key={`${repositoryGroup.repositoryId}:${analysisScope}:${projectId}`}
+            key={`${repository.id}:${repository.snapshot.id}`}
             repositoryId={repositoryGroup.repositoryId}
             viewId={repository.id}
             snapshotId={repository.snapshot.id}

@@ -1,5 +1,6 @@
 import {Schema} from 'effect';
 
+export const CODE_GRAPH_DIAGRAM_QUESTION_MAXIMUM_LENGTH = 1024;
 export const CODE_GRAPH_DIAGRAM_TYPES = ['auto', 'architecture', 'class', 'sequence', 'flowchart'] as const;
 export const CodeGraphDiagramTypeSchema = Schema.Literals(CODE_GRAPH_DIAGRAM_TYPES);
 export type CodeGraphDiagramType = typeof CodeGraphDiagramTypeSchema.Type;
@@ -33,7 +34,7 @@ const Subject = Schema.Struct({
 const Node = Schema.Struct({
   ...Subject.fields,
   diagramId: Schema.String,
-  evidenceKind: Schema.optionalKey(Schema.Literal('boundary')),
+  evidenceKind: Schema.optionalKey(Schema.Literals(['boundary', 'unresolved'])),
 });
 const Edge = Schema.Struct({
   id: Schema.String,
@@ -107,7 +108,7 @@ export const CodeGraphDiagramResultSchema = Schema.Union([
     ...Base,
     status: Schema.Literal('clarification'),
     message: Schema.String,
-    candidates: Schema.Array(Subject),
+    candidates: Schema.Array(Schema.Struct({...Subject.fields, retryQuery: Schema.optionalKey(Schema.String)})),
   }),
   Schema.Struct({
     ...Base,

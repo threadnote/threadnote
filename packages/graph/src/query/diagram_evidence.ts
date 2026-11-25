@@ -18,9 +18,12 @@ import {
   completeDiagramFact,
   completeDiagramSubject,
   describeCodeGraphDiagramQuestion,
+  diagramClarificationCandidate,
   diagramEndpoint,
+  diagramFileOverview,
   diagramTopicSearchTerms,
   DIAGRAM_ARCHITECTURE_RELATIONS,
+  DIAGRAM_PROJECT_RETRY,
   hasDiagramSourceSpan,
   isDiagramComponentKind,
   isDiagramMemberKind,
@@ -34,6 +37,7 @@ import {
   type CodeGraphDiagramFact,
   type CodeGraphDiagramQuestion,
 } from './diagram.js';
+import {CODE_GRAPH_DIAGRAM_QUESTION_MAXIMUM_LENGTH} from './diagram_contract.js';
 import type {
   CodeGraphDiagramCoverage,
   CodeGraphDiagramFreshness,
@@ -71,6 +75,7 @@ type DiagramStore = Pick<
 type Boundary = CodeGraphDiagramCoverage['boundaries'][number];
 type Gap = CodeGraphDiagramCoverage['gaps'][number];
 type Direction = 'incoming' | 'outgoing';
+type BehaviorEvidence = 'resolved' | 'unresolved' | 'none';
 type Rank = NonNullable<ReturnType<typeof rankCodeGraphDiagramSubject>>;
 type RankedSubject = {readonly node: CodeGraphQueryNode; readonly rank: Rank};
 type Work = {readonly node: CodeGraphQueryNode; readonly direction: Direction};
@@ -82,7 +87,6 @@ type EvidencePage = (
 
 const PAGE_SIZE = 128;
 const READ_TIMEOUT_MILLISECONDS = 40_000;
-const MAX_QUESTION_LENGTH = 1024;
 const BEHAVIOR_INCOMING = ['calls', 'constructs'] as const;
 const BEHAVIOR_OUTGOING = [...BEHAVIOR_INCOMING, 'contains', 'declares'] as const;
 const TYPE_INCOMING = ['extends', 'implements', 'overrides'] as const;
@@ -163,6 +167,21 @@ function allowsBridge(parent: CodeGraphSymbol, child: CodeGraphSymbol): boolean 
   return false;
 }
 
+function followsOwnedBehavior(
+  question: CodeGraphDiagramQuestion,
+  subject: CodeGraphSymbol,
+  parent: CodeGraphSymbol,
+  child: CodeGraphSymbol,
+): boolean {
+  return (
+    allowsBridge(parent, child) ||
+    (question.path === undefined &&
+      parent.id === subject.id &&
+      (subject.kind === 'class' || subject.kind === 'struct') &&
+      CALLABLES.has(child.kind))
+  );
+}
+
 function eligible(
   question: CodeGraphDiagramQuestion,
   work: Work,
@@ -208,9 +227,13 @@ function boundaryKind(targetName: string, peer?: CodeGraphSymbol): Boundary['kin
   return !peer && EXTERNAL.test(targetName) ? 'external' : undefined;
 }
 
-function boundarySymbol(edge: CodeGraphEdge, label: string, kind: Boundary['kind']): CodeGraphQueryNode {
+function endpointPlaceholder(
+  edge: CodeGraphEdge,
+  label: string,
+  kind: Boundary['kind'] | 'unresolved',
+): CodeGraphQueryNode {
   return {
-    id: `boundary:${edge.id}`,
+    id: `${kind === 'unresolved' ? 'unresolved' : 'boundary'}:${edge.id}`,
     name: label,
     qualifiedName: label,
     kind,
@@ -221,6 +244,18 @@ function boundarySymbol(edge: CodeGraphEdge, label: string, kind: Boundary['kind
     language: '',
     score: 0,
   };
+}
+
+function unresolvedCall(edge: CodeGraphEdge, work: Work) {
+  if (
+    work.direction !== 'outgoing' ||
+    edge.targetId !== undefined ||
+    (edge.relation !== 'calls' && edge.relation !== 'constructs')
+  )
+    return undefined;
+  const placeholder = endpointPlaceholder(edge, edge.targetName, 'unresolved');
+  const fact = completeDiagramFact(edge, work.node.id, placeholder.id);
+  return fact ? {placeholder, fact: {...fact, provenance: 'syntactic' as const}} : undefined;
 }
 
 function site(edge: CodeGraphEdge, label: string) {
@@ -307,9 +342,9 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
     nextAction,
   });
   const questionText = Str.trim(input.question);
-  if (!questionText || questionText.length > MAX_QUESTION_LENGTH) {
+  if (!questionText || questionText.length > CODE_GRAPH_DIAGRAM_QUESTION_MAXIMUM_LENGTH) {
     return noEvidence(
-      'The diagram question must contain between 1 and 1024 characters.',
+      `The diagram question must contain between 1 and ${CODE_GRAPH_DIAGRAM_QUESTION_MAXIMUM_LENGTH} characters.`,
       'Name a subject in the selected graph.',
     );
   }
@@ -352,10 +387,11 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
   const subjectQuery = question.topic.length ? {...question, domain: 'behavior' as const} : question;
   const initialDirections = directionsFor(question);
   const subjectDirections = directionsFor(subjectQuery);
-  const hasBehaviorEvidence = (candidate: CodeGraphQueryNode, direction: Direction) =>
+  const behaviorEvidence = (candidate: CodeGraphQueryNode, direction: Direction) =>
     Effect.gen(function* () {
-      if (!hasDiagramSourceSpan(candidate.path, candidate.span)) return false;
+      if (!hasDiagramSourceSpan(candidate.path, candidate.span)) return 'none' as const;
       const pending = new Map([[candidate.id, candidate]]);
+      let hasUnresolved = false;
       for (const node of pending.values()) {
         const work = {node, direction};
         let cursor = '';
@@ -376,9 +412,12 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
             const label = work.direction === 'outgoing' ? edge.targetName : edge.sourceName;
             const boundary = boundaryKind(label, peer);
             const visiblePeer =
-              boundary && (!peer || boundary === 'outside-scope') ? boundarySymbol(edge, label, boundary) : peer;
+              boundary && (!peer || boundary === 'outside-scope') ? endpointPlaceholder(edge, label, boundary) : peer;
+            if (!visiblePeer) {
+              hasUnresolved ||= unresolvedCall(edge, work) !== undefined;
+              continue;
+            }
             if (
-              !visiblePeer ||
               !hasDiagramSourceSpan(visiblePeer.path, visiblePeer.span) ||
               !completeDiagramFact(
                 edge,
@@ -387,8 +426,8 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
               )
             )
               continue;
-            if (work.direction === 'incoming' || !isDiagramOwnershipRelation(edge.relation)) return true;
-            if (allowsBridge(node, visiblePeer) && !pending.has(visiblePeer.id)) {
+            if (work.direction === 'incoming' || !isDiagramOwnershipRelation(edge.relation)) return 'resolved' as const;
+            if (followsOwnedBehavior(subjectQuery, candidate, node, visiblePeer) && !pending.has(visiblePeer.id)) {
               pending.set(visiblePeer.id, asNode(visiblePeer));
             }
           }
@@ -396,7 +435,7 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
           cursor = nextCursor;
         }
       }
-      return false;
+      return hasUnresolved ? ('unresolved' as const) : ('none' as const);
     });
   const selectRelevantBehaviorSubjects = (ranked: RankedSubject[]) =>
     Effect.gen(function* () {
@@ -404,7 +443,9 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
       const first = ranked[0];
       if (!first) return [];
       const supported: CodeGraphQueryNode[] = [];
+      const unresolved: CodeGraphQueryNode[] = [];
       let supportedRank: Rank | undefined;
+      let unresolvedRank: Rank | undefined;
       for (const batch of Arr.chunksOf(ranked, PAGE_SIZE)) {
         if (supportedRank && compareRank(batch[0].rank, supportedRank) < 0) break;
         const nodeIds = Arr.map(batch, ({node}) => node.id);
@@ -415,24 +456,34 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
         );
         for (const {node, rank} of batch) {
           if (supportedRank && compareRank(rank, supportedRank) < 0) break;
+          let evidence: BehaviorEvidence = 'none';
           for (const {direction, anchors} of anchorSets) {
-            if (!anchors.has(node.id) || !(yield* hasBehaviorEvidence(node, direction))) continue;
+            if (!anchors.has(node.id)) continue;
+            const found = yield* behaviorEvidence(node, direction);
+            if (found === 'none') continue;
+            evidence = found;
+            if (evidence === 'resolved') break;
+          }
+          if (evidence === 'resolved') {
             supportedRank = rank;
             supported.push(node);
-            break;
+          } else if (evidence === 'unresolved' && (!unresolvedRank || compareRank(rank, unresolvedRank) === 0)) {
+            unresolvedRank = rank;
+            unresolved.push(node);
           }
         }
       }
-      return supported.length
-        ? supported
-        : Arr.map(
-            Arr.takeWhile(ranked, ({rank}) => compareRank(rank, first.rank) === 0),
-            ({node}) => node,
-          );
+      if (supported.length) return supported;
+      if (unresolved.length) return unresolved;
+      return Arr.map(
+        Arr.takeWhile(ranked, ({rank}) => compareRank(rank, first.rank) === 0),
+        ({node}) => node,
+      );
     });
   const nodes = new Map<string, CodeGraphQueryNode>();
   const boundaryIds = new Set<string>();
   const facts = new Map<string, CodeGraphDiagramFact>();
+  const unresolvedCalls = new Map<string, CodeGraphDiagramFact>();
   const parentsByChild = new Map<string, CodeGraphDiagramFact[]>();
   const contributing = new Set<string>();
   let subject: CodeGraphQueryNode | undefined;
@@ -484,6 +535,9 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
     Effect.gen(function* () {
       const candidates: CodeGraphQueryNode[] = [];
       const topical: RankedSubject[] = [];
+      const exactNames = new Set<string>();
+      const namedCandidates: RankedSubject[] = [];
+      const requestedNames = new Set(selection.unanchoredNames ? selection.terms : []);
       const stableIds = Arr.filter(Arr.map(selection.selectors, Str.toLowerCase), isStableCodeGraphNodeId);
       const topicTerms = diagramTopicSearchTerms(selection.topic);
       const terms = topicTerms.length
@@ -519,6 +573,10 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
             topical.push({node, rank});
             continue;
           }
+          if (exactOnly && requestedNames.has(node.name)) {
+            exactNames.add(node.name);
+            namedCandidates.push({node, rank});
+          }
           const comparison = topRank ? compareRank(rank, topRank) : 1;
           if (comparison < 0) continue;
           if (comparison > 0) {
@@ -550,11 +608,15 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
         if (!topicTerms.length) yield* readSubjects('exact');
         if (allowFuzzy && !candidates.length && !selection.selectors.length) yield* readSubjects('fuzzy');
       }
+      if (exactNames.size > 1) return yield* selectRelevantBehaviorSubjects(namedCandidates);
       if (!candidates.length && topical.length) return yield* selectRelevantBehaviorSubjects(topical);
       if (topicTerms.length && !candidates.length && selection.named?.caseSensitive) {
         yield* readSubjects('exact', [selection.named.spelling], rankCodeGraphDiagramTopicFallback);
       }
-      return candidates.sort((left, right) => compareCodeUnits(left.id, right.id));
+      candidates.sort((left, right) => compareCodeUnits(left.id, right.id));
+      return question.path || question.topic.length
+        ? candidates
+        : yield* supportedCandidates(candidates, initialDirections, page);
     });
   let sequenceEvidence: {readonly snapshot: CodeGraphSnapshot; readonly file: CodeGraphInventoryFile} | undefined;
   const read = Effect.gen(function* () {
@@ -571,6 +633,10 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
       input.packageName,
     );
     if (!candidates.length) {
+      if (input.partialProject) {
+        gaps.set('scope', {kind: 'partial-project', label: scope.project ?? 'Selected graph project'});
+        return noEvidence('The selected graph project has no source evidence for the subject.', DIAGRAM_PROJECT_RETRY);
+      }
       return noEvidence(
         'The selected graph has no source evidence for the subject.',
         'Name an indexed symbol, package, or path in this graph.',
@@ -581,16 +647,14 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
         ...base,
         status: 'clarification',
         coverage: coverage('undetermined', boundaries, gaps),
-        message: 'Which source location is the start of this path?',
-        candidates: Arr.map(candidates, completeDiagramSubject),
+        message: 'More than one source location matches the start of this path.',
+        candidates: Arr.map(candidates, candidate =>
+          diagramClarificationCandidate(question, candidate, {role: 'from'}),
+        ),
       } satisfies CodeGraphDiagramResult;
     }
 
-    const supported =
-      question.path || question.topic.length
-        ? candidates
-        : yield* supportedCandidates(candidates, initialDirections, page);
-    subject = supported[0]!;
+    subject = candidates[0]!;
     if (!hasDiagramSourceSpan(subject.path, subject.span)) {
       gaps.set('subject', {kind: 'missing-evidence', label: subject.qualifiedName});
       return undefined;
@@ -604,12 +668,13 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
         );
       }
       if (targets.length > 1) {
+        const source = subject;
         return {
           ...base,
           status: 'clarification',
           coverage: coverage('undetermined', boundaries, gaps, subject),
-          message: 'Which source location is the target of this path?',
-          candidates: Arr.map(targets, completeDiagramSubject),
+          message: 'More than one source location matches the target of this path.',
+          candidates: Arr.map(targets, target => diagramClarificationCandidate(question, target, {role: 'to', source})),
         } satisfies CodeGraphDiagramResult;
       }
       pathTarget = targets[0];
@@ -622,13 +687,7 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
         return undefined;
       }
     }
-    const fileOverview =
-      question.domain === 'behavior' &&
-      !question.incoming &&
-      !question.path &&
-      isArchitectureFile(subject) &&
-      (question.selectors.length > 0 ||
-        Arr.some(question.terms, term => Str.replace(/^\.\//u, '')(term) === subject?.path));
+    const fileOverview = diagramFileOverview(question, subject);
     const relationshipQuery = fileOverview ? {...question, domain: 'architecture' as const} : question;
 
     const pending: Work[] = [];
@@ -688,7 +747,7 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
           if (boundary) {
             boundaries.set(edge.id, {...site(edge, label), kind: boundary});
             if (!peer || boundary === 'outside-scope') {
-              peer = boundarySymbol(edge, label, boundary);
+              peer = endpointPlaceholder(edge, label, boundary);
               nodes.set(peer.id, peer);
             }
             boundaryIds.add(peer.id);
@@ -696,6 +755,13 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
           if (!peer || !hasDiagramSourceSpan(peer.path, peer.span)) {
             gaps.set(edge.id, {...site(edge, label), kind: peerId ? 'missing-evidence' : 'unresolved-target'});
             contributing.add(work.node.id);
+            if (question.path === undefined && (overviewRoot || relationshipQuery.domain === 'behavior')) {
+              const call = unresolvedCall(edge, work);
+              if (call) {
+                nodes.set(call.placeholder.id, call.placeholder);
+                unresolvedCalls.set(edge.id, call.fact);
+              }
+            }
             continue;
           }
           const fact = completeDiagramFact(
@@ -712,7 +778,7 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
             const parents = parentsByChild.get(peer.id) ?? [];
             parents.push(fact);
             parentsByChild.set(peer.id, parents);
-            if (relationshipQuery.domain === 'architecture' || allowsBridge(work.node, peer))
+            if (relationshipQuery.domain === 'architecture' || followsOwnedBehavior(question, subject, work.node, peer))
               schedule(peer, work.direction);
             continue;
           }
@@ -729,7 +795,7 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
     collectBridges(parentsByChild, contributing, facts);
     const subjectId = subject.id;
     const alternatives = Arr.filter(
-      supported,
+      candidates,
       candidate => candidate.id !== subjectId && (question.topic.length > 0 || !contributing.has(candidate.id)),
     );
     if (alternatives.length) {
@@ -737,8 +803,10 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
         ...base,
         status: 'clarification',
         coverage: coverage('undetermined', new Map(), new Map()),
-        message: 'Which source location is the subject of this diagram?',
-        candidates: Arr.map([subject, ...alternatives], completeDiagramSubject),
+        message: 'More than one source location matches the subject of this diagram.',
+        candidates: Arr.map([subject, ...alternatives], candidate =>
+          diagramClarificationCandidate(question, candidate),
+        ),
       } satisfies CodeGraphDiagramResult;
     }
     if (!facts.size && !gaps.size) {
@@ -801,6 +869,7 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
     nodes,
     boundaryIds,
     facts: selected,
+    unresolvedCalls: [...unresolvedCalls.values()].sort((left, right) => compareCodeUnits(left.id, right.id)),
     ...(hasSourceTime ? {sequenceSources} : {}),
     ...(architectureAnchor === undefined ? {} : {architectureAnchor}),
     ...(pathTarget === undefined ? {} : {pathTarget}),

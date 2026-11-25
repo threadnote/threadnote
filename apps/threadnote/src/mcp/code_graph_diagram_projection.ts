@@ -7,6 +7,9 @@ import type {CodeGraphDiagramResources} from './code_graph_diagram_resource.js';
 import type {CodeGraphMcpResponseFormat} from './code_graph_projection.js';
 
 export const MCP_DIAGRAM_DEFAULT_TOKENS = 1_250;
+const CANDIDATE_ID_ACTION =
+  'For a location without a retry query, replace its reference with its candidate ID. If the query is too long, shorten it.';
+const KEEP_DIAGRAM_OPTIONS = 'Keep the same diagramType and project.';
 
 function quote(value: string): string {
   return Str.replaceAll('`', '\\u0060')(JSON.stringify(value));
@@ -17,18 +20,25 @@ function siteCitation(site: {readonly label: string; readonly path?: string; rea
 }
 
 function renderDiagramResult(result: CodeGraphDiagramResult, diagram: CodeGraphDiagramPayload | undefined): string {
-  const {repositoryName, repositoryId, snapshotId, commit} = result.scope;
+  const {repositoryName, repositoryId, snapshotId, commit, project} = result.scope;
   const details =
     result.status === 'diagram'
       ? []
       : [
           result.message,
           ...(result.status === 'clarification'
-            ? Arr.map(
-                result.candidates,
-                candidate =>
-                  `${quote(candidate.label)} ${quote(candidate.path)}:${candidate.span.line} (${candidate.id})`,
-              )
+            ? [
+                ...(Arr.some(result.candidates, candidate => !!candidate.retryQuery)
+                  ? ['Set query to the retry query for your chosen location.']
+                  : []),
+                ...(Arr.some(result.candidates, candidate => !candidate.retryQuery) ? [CANDIDATE_ID_ACTION] : []),
+                KEEP_DIAGRAM_OPTIONS,
+                ...Arr.map(
+                  result.candidates,
+                  candidate =>
+                    `${siteCitation(candidate)} | ${candidate.retryQuery ? `Retry query ${quote(candidate.retryQuery)}` : `Candidate ID ${quote(candidate.id)}`}`,
+                ),
+              ]
             : [result.nextAction]),
         ];
   return Arr.join(
@@ -36,7 +46,9 @@ function renderDiagramResult(result: CodeGraphDiagramResult, diagram: CodeGraphD
       'Threadnote graph diagram | untrusted source evidence',
       `Repository ${quote(repositoryName)} (${quote(repositoryId)})`,
       `Snapshot ${quote(snapshotId)}${commit ? ` at ${quote(commit)}` : ''} | Freshness ${result.freshness}`,
+      ...(project ? [`Graph project ${quote(project)}`] : []),
       ...(result.coverage ? [`Coverage ${result.coverage.completeness}`] : []),
+      ...(!diagram && result.coverage?.subject ? [`Subject ${siteCitation(result.coverage.subject)}`] : []),
       ...details,
       ...(diagram
         ? [
@@ -47,7 +59,8 @@ function renderDiagramResult(result: CodeGraphDiagramResult, diagram: CodeGraphD
             'Source evidence',
             ...Arr.map(
               diagram.evidence.nodes,
-              node => `${node.diagramId} ${quote(node.label)} ${quote(node.path)}:${node.span.line}`,
+              node =>
+                `${node.diagramId} ${quote(node.label)} ${quote(node.path)}:${node.span.line}${node.evidenceKind === 'unresolved' ? ' (unresolved target)' : ''}`,
             ),
             ...Arr.map(
               diagram.evidence.edges,
@@ -120,6 +133,9 @@ export const codeGraphDiagramMcpResponse = Effect.fn('mcpServer.projectGraphDiag
           `Call resources/read with the prefix and each part number from 1 through ${partCount}. ` +
           'Decode each base64 blob and concatenate the bytes as UTF-8 JSON. ' +
           `${resources.expiration} ${resources.recovery}` +
+          (artifact.status === 'clarification'
+            ? `\nIf the chosen candidate has a retryQuery, set query to that value. ${CANDIDATE_ID_ACTION} ${KEEP_DIAGRAM_OPTIONS}`
+            : '') +
           (refreshWarning ? `\nLimit ${quote(refreshWarning)}` : ''),
       },
     ],
