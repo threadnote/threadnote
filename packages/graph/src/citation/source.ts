@@ -57,7 +57,7 @@ export const readCodeGraphCitationSources = Effect.fn('codeGraph.readCitationSou
   /** Historical recovery must prove that the exact commit contains the bytes. */
   readonly commitOnly?: boolean;
   readonly objectFormat: RepositoryIdentity['objectFormat'];
-  /** @internal Narrower bound used by focused admission tests. */
+  /** Optional narrower bound for consumers that admit source to a parser. */
   readonly retainedBytesLimit?: number;
   readonly repositoryRoot: string;
   readonly sourceCommit: string;

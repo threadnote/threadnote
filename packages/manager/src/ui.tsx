@@ -113,6 +113,7 @@ import {
   loadManagerGraphAnalysis,
   loadManagerGraphCatalogPage,
   loadManagerGraphNodeDetail,
+  loadManagerGraphDiagram,
   loadManagerGraphQuery,
   loadManagerGraphViewsPage,
   managerProjectOptions,
@@ -1591,6 +1592,7 @@ function App({
                 loadCatalogPage={loadManagerGraphCatalogPage}
                 loadGraph={loadManagerGraph}
                 loadNodeDetail={loadManagerGraphNodeDetail}
+                loadDiagram={loadManagerGraphDiagram}
                 loadQuery={loadManagerGraphQuery}
                 loadViewsPage={loadManagerGraphViewsPage}
                 onAdministrationAction={action => void runGraphAdministration(action)}

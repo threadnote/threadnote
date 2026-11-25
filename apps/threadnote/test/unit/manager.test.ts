@@ -2394,6 +2394,44 @@ describe('manager http API', () => {
         state: 'legacy-unknown',
       });
 
+      const diagramUrl = `${server.url}/api/graph/diagram`;
+      const diagramBody = {
+        viewId: viewsPage.repositories[0]?.views[0]?.id,
+        snapshotId: MANAGER_GRAPH_SNAPSHOT_ID,
+        question: 'Show a flowchart for App',
+        diagramType: 'flowchart',
+      };
+      const postDiagram = (body: unknown, authorized = true) =>
+        testHttpFetch(diagramUrl, {
+          method: 'POST',
+          headers: {'content-type': 'application/json', ...(authorized ? headers : {})},
+          body: JSON.stringify(body),
+        });
+      expect((await postDiagram(diagramBody, false)).status).toBe(401);
+      expect((await postDiagram({...diagramBody, diagramType: 'unknown'})).status).toBe(400);
+      expect((await postDiagram({...diagramBody, snapshotId: undefined})).status).toBe(400);
+      expect((await postDiagram({...diagramBody, snapshotId: 'missing-snapshot'})).status).toBe(409);
+      const diagram = await postDiagram(diagramBody);
+      expect(diagram.status).toBe(200);
+      expect(await diagram.json()).toMatchObject({
+        status: 'diagram',
+        diagramType: 'flowchart',
+        scope: {viewKey: diagramBody.viewId, snapshotId: MANAGER_GRAPH_SNAPSHOT_ID},
+        freshness: 'unknown',
+        coverage: {completeness: 'complete'},
+      });
+      const incomplete = await postDiagram({...diagramBody, question: 'How does renderView work?'});
+      expect(incomplete.status).toBe(200);
+      expect(await incomplete.json()).toMatchObject({
+        status: 'incomplete',
+        coverage: {
+          completeness: 'incomplete',
+          subject: {name: 'renderView', path: 'packages/app/src/view.ts'},
+          gaps: [{kind: 'missing-evidence'}],
+        },
+        nextAction: expect.any(String),
+      });
+
       const unpinnedCatalogPage = await testHttpFetch(`${server.url}/api/graphs/page?repository=${repositoryId}`, {
         headers,
       });

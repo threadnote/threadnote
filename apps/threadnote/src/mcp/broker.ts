@@ -53,6 +53,11 @@ export interface McpBrokerDependencies {
   readonly onFailure?: (event: McpBrokerFailureEvent) => void;
   readonly onClientInfo?: (clientInfo: unknown) => void;
   readonly readActiveRelease: () => Promise<StandaloneActiveRelease | undefined>;
+  readonly readPrivateResource?: (
+    params: unknown,
+  ) => Promise<
+    {readonly error: {readonly code: number; readonly message: string}} | {readonly result: unknown} | undefined
+  >;
   readonly replayTimeoutMilliseconds?: number;
   readonly spawn: (release: StandaloneActiveRelease) => McpBrokerChild;
   readonly writeOutput: (line: string) => Promise<void>;
@@ -159,6 +164,13 @@ class McpBroker {
     }
 
     const requestId = envelope?.method !== undefined && isJsonRpcId(envelope.id) ? envelope.id : undefined;
+    if (requestId !== undefined && envelope?.method === 'resources/read' && this.#initializeLine !== undefined) {
+      const response = await this.#dependencies.readPrivateResource?.(envelope.params);
+      if (response !== undefined) {
+        await this.#queueOutput(JSON.stringify({jsonrpc: '2.0', id: requestId, ...response}));
+        return;
+      }
+    }
     let trackedRequest = false;
     try {
       const current = await this.#ensureCurrentChild();

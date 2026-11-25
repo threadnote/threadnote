@@ -47,6 +47,7 @@ import {
   type GraphCatalogPage,
   type GraphCatalogSearchOptions,
   type GraphFocusMode,
+  type GraphDiagramLoader,
   type GraphNodeDetail,
   type GraphQueryVisualization,
   type GraphRepositoryGroup,
@@ -63,6 +64,7 @@ import {
   GraphSummary,
   NodeInspector,
 } from './panels.js';
+import {GraphDiagramQuestion} from './diagram_result.js';
 import {ThreeGraph} from './scene.js';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
@@ -95,6 +97,7 @@ export function GraphWorkspace(props: {
     nodeId: string,
     signal: AbortSignal,
   ) => Promise<GraphNodeDetail>;
+  readonly loadDiagram: GraphDiagramLoader;
   readonly loadQuery: (
     repositoryId: string,
     snapshotId: string,
@@ -1241,6 +1244,15 @@ export function GraphWorkspace(props: {
             </div>
           </details>
         </div>
+        {repository && repositoryGroup ? (
+          <GraphDiagramQuestion
+            key={`${repository.id}:${repository.snapshot.id}`}
+            repositoryId={repositoryGroup.repositoryId}
+            viewId={repository.id}
+            snapshotId={repository.snapshot.id}
+            load={props.loadDiagram}
+          />
+        ) : null}
         <div className={`graph-body${repository ? '' : ' is-empty'}`}>
           <section className="graph-stage">
             {!props.catalog && props.catalogError ? (

@@ -112,6 +112,8 @@ import {
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
+export {readCodeGraphDiagramForStatus, type CodeGraphDiagramRequest} from './query/diagram_evidence.js';
+
 export interface CodeGraphInspectOptions extends CodeGraphQueryOptions {
   readonly baseCommit?: string;
   /** @internal Bounded read workers may reuse a ready base but must never start repository-sized indexing. */

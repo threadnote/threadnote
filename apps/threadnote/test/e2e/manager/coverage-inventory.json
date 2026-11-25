@@ -210,11 +210,31 @@
     },
     {
       "id": "S08",
-      "behavior": "Graph query and source inspection",
+      "behavior": "Graph query, source inspection, and Mermaid diagrams",
       "tests": [
         {
           "file": "graph.spec.ts",
           "title": "S08 the real graph scene queries a symbol and opens indexed source and relationships"
+        },
+        {
+          "file": "graph.spec.ts",
+          "title": "S08 Graph Explore renders and copies a diagram from indexed authentication source"
+        },
+        {
+          "file": "graph.spec.ts",
+          "title": "S08 all projected diagram types render hostile evidence labels as inert text"
+        },
+        {
+          "file": "graph.spec.ts",
+          "title": "S08 a rendered diagram opens a full-screen viewer with zoom and scroll"
+        },
+        {
+          "file": "graph.spec.ts",
+          "title": "S08 oversized diagram source remains selectable and copyable after preview failure"
+        },
+        {
+          "file": "graph.spec.ts",
+          "title": "S08 an architecture preview with 501 connections preserves exact source for copy"
         }
       ]
     },

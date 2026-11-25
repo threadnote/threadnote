@@ -2,6 +2,8 @@ import {Array as EffectArray} from 'effect';
 import {Clock, Context, Effect, Option, Path, Result, Schema, Semaphore} from 'effect';
 import {codeGraphDatabasePaths} from './maintenance.js';
 import {CodeGraphEmbeddingIndex} from './embedding.js';
+import {worktreeOverlayState} from './inventory.js';
+import {CodeGraphLanguagePackRegistry} from './languages/registry.js';
 import {codeGraphLayout} from './layout.js';
 import {runCodeGraphLifecycleOpportunity} from './lifecycle/opportunity.js';
 import {CodeGraphMaintenanceCoordinator} from './maintenance/coordinator.js';
@@ -9,6 +11,11 @@ import {observeCodeGraphMaintenanceStatus, type CodeGraphMaintenanceStatus} from
 import {compareCodeUnits} from './ordering.js';
 import {managerGraphCatalogRevision, type ManagerGraphCatalogRevisionDatabase} from './manager/catalog_revision.js';
 import {traversalQuery} from './query.js';
+import {codeGraphSnapshotMatchesWorktree} from './query/contract.js';
+import {readCodeGraphDiagram} from './query/diagram_evidence.js';
+import type {CodeGraphDiagramType} from './query/diagram_contract.js';
+import {codeGraphSnapshotRuntimeCurrent} from './query/snapshot_runtime.js';
+import {resolveRepositoryIdentityForExpectation} from './repository.js';
 import {
   CodeGraphStore,
   type CodeGraphStoreShape,
@@ -894,6 +901,88 @@ export const managerGraphVisualization = Effect.fn('codeGraph.managerVisualizati
         );
         if (!project) return yield* CodeGraphVisualizationError.make({message: 'Indexed graph project was not found.'});
         return yield* detailVisualization(store, database, repository, project, limits);
+      }),
+    resolved => resolved.release,
+  );
+});
+
+export const managerGraphDiagram = Effect.fn('codeGraph.managerDiagram')(function* (
+  threadnoteHome: string,
+  viewId: string,
+  snapshotId: string,
+  question: string,
+  diagramType: CodeGraphDiagramType,
+) {
+  const path = yield* Path.Path;
+  const store = yield* CodeGraphStore;
+  const languagePacks = yield* CodeGraphLanguagePackRegistry;
+  return yield* Effect.acquireUseRelease(
+    resolveManagerGraphView(threadnoteHome, viewId, {
+      expectedSnapshotId: Option.some(snapshotId),
+      includeDependencies: false,
+      projectLimit: 1,
+    }),
+    ({catalog, checkoutId, database}) =>
+      Effect.gen(function* () {
+        const {repository, snapshot, viewWorktreeId, viewScopeId} = catalog;
+        const viewKey = managerIndexedViewId(checkoutId, viewWorktreeId, viewScopeId);
+        if (viewKey !== viewId) {
+          return yield* ManagerGraphViewUnavailableError.make({
+            message: 'The snapshot does not belong to the selected graph view. Refresh the graph catalog.',
+          });
+        }
+        const checkedIdentity = yield* Effect.gen(function* () {
+          const association = yield* managerGraphLocalAssociationForCatalog(threadnoteHome, checkoutId, catalog);
+          if (association.state !== 'verified' || !association.path) return undefined;
+          return yield* resolveRepositoryIdentityForExpectation(association.path, {
+            checkoutId,
+            repositoryId: repository.repositoryId,
+            worktreeId: viewWorktreeId,
+          });
+        }).pipe(
+          Effect.orElseSucceed(() => undefined),
+          Effect.timeoutOption(500),
+        );
+        const identity = Option.getOrUndefined(checkedIdentity);
+        const checkedFreshness = yield* Effect.gen(function* () {
+          if (!identity) return 'unknown' as const;
+          if (identity.headCommit !== snapshot.commit) return 'stale' as const;
+          if (viewScopeId !== undefined) return 'unknown' as const;
+          const layout = codeGraphLayout(path, threadnoteHome, checkoutId, viewWorktreeId);
+          const [overlay, runtimeCurrent] = yield* Effect.all(
+            [
+              worktreeOverlayState(identity),
+              codeGraphSnapshotRuntimeCurrent(store, database, snapshot, languagePacks, {layout, identity}),
+            ],
+            {concurrency: 2},
+          );
+          return runtimeCurrent && codeGraphSnapshotMatchesWorktree(snapshot, identity.headCommit, overlay)
+            ? ('current' as const)
+            : ('stale' as const);
+        }).pipe(
+          Effect.orElseSucceed(() => 'unknown' as const),
+          Effect.timeoutOption(500),
+        );
+        const receipt =
+          viewScopeId === undefined
+            ? undefined
+            : yield* store
+                .loadSnapshotScopeReceipt(database, snapshot.id, viewScopeId)
+                .pipe(Effect.orElseSucceed(() => undefined));
+        return yield* readCodeGraphDiagram(store, database, {
+          question,
+          diagramType,
+          scope: {
+            repositoryId: repository.repositoryId,
+            repositoryName: repository.displayName,
+            viewKey,
+            snapshotId: snapshot.id,
+            commit: snapshot.commit,
+          },
+          freshness: Option.getOrElse(checkedFreshness, () => 'unknown'),
+          ...(identity === undefined ? {} : {sourceIdentity: identity}),
+          partialProject: viewScopeId !== undefined && receipt?.completeness !== 'complete',
+        });
       }),
     resolved => resolved.release,
   );

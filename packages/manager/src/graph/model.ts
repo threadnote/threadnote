@@ -1,3 +1,4 @@
+import type {CodeGraphDiagramResult, CodeGraphDiagramType} from '@threadnote/graph/query/diagram_contract';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import type * as THREE from 'three';
 import type {CodeGraphAutomaticCompactionStatus} from '@threadnote/graph/automatic/compaction';
@@ -1185,6 +1186,27 @@ export function graphRequestIsCurrent(
   requestedScope: string,
 ): boolean {
   return currentSequence === requestedSequence && currentScope === requestedScope;
+}
+
+export type GraphDiagramLoader = (
+  viewId: string,
+  snapshotId: string,
+  question: string,
+  diagramType: CodeGraphDiagramType,
+  signal: AbortSignal,
+) => Promise<CodeGraphDiagramResult>;
+
+export function graphDiagramScopeMatches(
+  result: CodeGraphDiagramResult,
+  repositoryId: string,
+  viewId: string,
+  snapshotId: string,
+): boolean {
+  return (
+    result.scope.repositoryId === repositoryId &&
+    result.scope.viewKey === viewId &&
+    result.scope.snapshotId === snapshotId
+  );
 }
 
 export function graphQueryRequestIsCurrent(

@@ -1,4 +1,9 @@
-import {Console, Effect, Path, Schema} from 'effect';
+import {
+  CODE_GRAPH_DIAGRAM_QUESTION_MAXIMUM_LENGTH,
+  CodeGraphDiagramTypeSchema,
+} from '@threadnote/graph/query/diagram_contract';
+import {managerGraphDiagram} from '@threadnote/graph/visualization';
+import {Console, Effect, Path, Schema, String as Str} from 'effect';
 import {runIsolatedCodeGraphIndexSnapshot} from '@threadnote/graph/isolated/index';
 import {resolveAndRecordCodeGraphLocalAssociation} from '@threadnote/graph/local_provenance';
 import {captureConsole} from '../../effect/console.js';
@@ -63,4 +68,29 @@ export const runManagerExplicitCwdGraphIndex = Effect.fn('managerGraphActions.ru
     },
   };
   return body.action === 'index-cwd' ? {output: result.output} : result;
+});
+
+export const runManagerGraphDiagram = Effect.fn('managerGraphActions.runGraphDiagram')(function* (
+  threadnoteHome: string,
+  body: Record<string, unknown>,
+) {
+  const {viewId, snapshotId, diagramType = 'auto'} = body;
+  const question = typeof body.question === 'string' ? Str.trim(body.question) : '';
+  if (
+    typeof viewId !== 'string' ||
+    !viewId ||
+    typeof snapshotId !== 'string' ||
+    !snapshotId ||
+    !question ||
+    question.length > CODE_GRAPH_DIAGRAM_QUESTION_MAXIMUM_LENGTH ||
+    !Schema.is(CodeGraphDiagramTypeSchema)(diagramType)
+  ) {
+    return {
+      status: 400,
+      body: {
+        error: `Provide an indexed view, its snapshot, a question of 1 to ${CODE_GRAPH_DIAGRAM_QUESTION_MAXIMUM_LENGTH} characters, and a supported diagram type.`,
+      },
+    };
+  }
+  return {status: 200, body: yield* managerGraphDiagram(threadnoteHome, viewId, snapshotId, question, diagramType)};
 });

@@ -2,6 +2,11 @@ import {Cause, Effect, Logger, Queue, Schema} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import {activeInstalledRelease} from '../installations.js';
 import {McpBrokerError, runMcpBroker, type McpBrokerChild, type McpBrokerFailureEvent} from '../mcp/broker.js';
+import {
+  makeCodeGraphDiagramResources,
+  MCP_DIAGRAM_OWNER_DIRECTORY_ENV,
+  readBrokerCodeGraphDiagramResource,
+} from '../mcp/code_graph_diagram_resource.js';
 import type {StandaloneActiveRelease} from '../process/standalone_lease.js';
 import {
   takePreparedAgentSessionEnvironment,
@@ -23,13 +28,22 @@ import {
 const AUTO_UPDATE_CHECK_INTERVAL_MILLISECONDS = 15 * 60 * 1_000;
 
 interface ActiveReleaseRequest {
+  readonly kind: 'release';
   readonly reject: (cause: unknown) => void;
   readonly resolve: (release: StandaloneActiveRelease | undefined) => void;
+}
+
+type BrokerResourceReply = Effect.Success<ReturnType<typeof readBrokerCodeGraphDiagramResource>>;
+interface BrokerResourceRequest {
+  readonly kind: 'resource';
+  readonly params: unknown;
+  readonly resolve: (reply: BrokerResourceReply) => void;
 }
 
 /** Runtime boundary for the stable MCP broker's stdio and child process. */
 const mcpBrokerProgram = Effect.gen(function* () {
   const system = yield* SystemInfo;
+  const diagrams = yield* makeCodeGraphDiagramResources('broker');
   const agentSession = yield* Effect.sync(() =>
     takePreparedAgentSessionEnvironment(system.environment(), 'mcp-broker-runtime'),
   ).pipe(Effect.catchCause(() => succeedUndefined));
@@ -50,18 +64,25 @@ const mcpBrokerProgram = Effect.gen(function* () {
       ),
     ),
   );
-  const activeReleaseRequests = yield* Queue.unbounded<ActiveReleaseRequest>();
+  const brokerRequests = yield* Queue.unbounded<ActiveReleaseRequest | BrokerResourceRequest>();
   yield* Effect.forkScoped(
     Effect.forever(
-      Queue.take(activeReleaseRequests).pipe(
+      Queue.take(brokerRequests).pipe(
         Effect.flatMap(request =>
-          activeInstalledRelease().pipe(
-            Effect.matchCauseEffect({
-              onFailure: cause =>
-                Effect.sync(() => request.reject(McpBrokerError.make({message: Cause.pretty(cause)}))),
-              onSuccess: release => Effect.sync(() => request.resolve(release)),
-            }),
-          ),
+          request.kind === 'resource'
+            ? readBrokerCodeGraphDiagramResource(diagrams, request.params).pipe(
+                Effect.matchCauseEffect({
+                  onFailure: () => Effect.sync(() => request.resolve(undefined)),
+                  onSuccess: reply => Effect.sync(() => request.resolve(reply)),
+                }),
+              )
+            : activeInstalledRelease().pipe(
+                Effect.matchCauseEffect({
+                  onFailure: cause =>
+                    Effect.sync(() => request.reject(McpBrokerError.make({message: Cause.pretty(cause)}))),
+                  onSuccess: release => Effect.sync(() => request.resolve(release)),
+                }),
+              ),
         ),
       ),
     ),
@@ -79,12 +100,17 @@ const mcpBrokerProgram = Effect.gen(function* () {
         },
         readActiveRelease: () => {
           const {promise, reject, resolve} = Promise.withResolvers<StandaloneActiveRelease | undefined>();
-          if (!Queue.offerUnsafe(activeReleaseRequests, {reject, resolve})) {
+          if (!Queue.offerUnsafe(brokerRequests, {kind: 'release', reject, resolve})) {
             reject(McpBrokerError.make({message: 'Threadnote MCP broker active-release reader is unavailable.'}));
           }
           return promise;
         },
-        spawn: release => spawnMcpRuntime(release, system, agentSession),
+        readPrivateResource: params => {
+          const {promise, resolve} = Promise.withResolvers<BrokerResourceReply>();
+          if (!Queue.offerUnsafe(brokerRequests, {kind: 'resource', params, resolve})) resolve(undefined);
+          return promise;
+        },
+        spawn: release => spawnMcpRuntime(release, system, agentSession, diagrams.directory),
         writeOutput: writeBrokerOutput,
       }),
     catch: cause =>
@@ -137,6 +163,7 @@ function spawnMcpRuntime(
   release: StandaloneActiveRelease,
   system: SystemInfoShape,
   agentSession: PreparedAgentSession | undefined,
+  diagramDirectory: string,
 ): McpBrokerChild {
   const separator =
     Effect2.pipe(release.releaseRoot, EffectString.endsWith('/')) ||
@@ -151,6 +178,7 @@ function spawnMcpRuntime(
         ? withoutTelemetrySessionEnvironment(system.environment())
         : withAgentSessionEnvironment(system.environment(), agentSession, 'mcp-server')),
       THREADNOTE_MCP_BROKER_CHILD: '1',
+      [MCP_DIAGRAM_OWNER_DIRECTORY_ENV]: diagramDirectory,
     },
     stdin: 'pipe',
     stderr: 'inherit',

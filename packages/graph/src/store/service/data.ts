@@ -45,6 +45,11 @@ import {
   selectEdgesByIds,
   selectDirectEdgeBetweenNodes,
 } from '../queries.js';
+import {
+  selectDiagramAdjacentCandidates,
+  selectDiagramAdjacentPage,
+  selectDiagramSubjectPage,
+} from '../diagram_queries.js';
 import {selectSnapshotPackProvenance} from '../pack_provenance.js';
 import {pruneCachedFileBlobs} from '../cleanup_core.js';
 import {prepareActivationTables} from '../staging_core.js';
@@ -119,6 +124,9 @@ type CodeGraphStoreDataMethods = Pick<
   | 'cachedCommittedFileKeys'
   | 'discardInvalidCachedFacts'
   | 'edgesForNodes'
+  | 'diagramAdjacentCandidates'
+  | 'diagramAdjacentPage'
+  | 'diagramSubjectPage'
   | 'traversalEdgesForNodes'
   | 'edgesByIds'
   | 'directEdgeBetweenNodes'
@@ -448,6 +456,21 @@ export function makeCodeGraphStoreDataMethods(runtime: CodeGraphStoreRuntime): C
         ),
         Effect.mapError(cause => storeError('load code graph adjacency', cause)),
       ),
+    diagramAdjacentCandidates: (databasePath, snapshotId, nodeIds, direction, relations) =>
+      useReadOnlyDatabase(
+        databasePath,
+        selectDiagramAdjacentCandidates(snapshotId, nodeIds, direction, relations),
+      ).pipe(Effect.mapError(cause => storeError('find code graph diagram adjacency candidates', cause))),
+    diagramAdjacentPage: (databasePath, snapshotId, nodeId, direction, relations, afterId, limit) =>
+      useReadOnlyDatabase(
+        databasePath,
+        selectDiagramAdjacentPage(snapshotId, nodeId, direction, relations, afterId, limit),
+      ).pipe(Effect.mapError(cause => storeError('read code graph diagram adjacency page', cause))),
+    diagramSubjectPage: (databasePath, snapshotId, terms, afterId, limit, match, packageName) =>
+      useReadOnlyDatabase(
+        databasePath,
+        selectDiagramSubjectPage(snapshotId, terms, afterId, limit, match, packageName),
+      ).pipe(Effect.mapError(cause => storeError('read code graph diagram subject page', cause))),
     traversalEdgesForNodes: (databasePath, snapshotId, nodeIds, direction, limit, allowedProvenances) =>
       prepare(databasePath).pipe(
         Effect.andThen(
