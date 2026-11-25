@@ -1,6 +1,7 @@
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
+import {it as effectIt} from '@effect/vitest';
 import {describe, expect, it} from 'vitest';
 import {Effect, Schema} from 'effect';
 import {
@@ -24,7 +25,7 @@ import {
 } from '@threadnote/testing/node-fs';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
-import {CodeGraphDiagramResultSchema} from '@threadnote/graph/query/diagram_contract';
+import {CodeGraphDiagramResultSchema, type CodeGraphDiagramResult} from '@threadnote/graph/query/diagram_contract';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {CodeGraphQueryService, readCodeGraphDiagramForStatus} from '@threadnote/graph/query';
 import {CodeGraphStore} from '@threadnote/graph/store';
@@ -35,6 +36,7 @@ import {
   parseCodeGraphEvaluationFixtureV1,
 } from '@threadnote/threadnote/evaluation/code-graph';
 import {measureAgentToolResponse} from '@threadnote/protocol/agent-response';
+import {codeGraphDiagramMcpResponse} from '../../src/mcp/code_graph_diagram_projection.js';
 import {runEffect} from '../helpers/effect-runtime.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -135,6 +137,48 @@ async function fetchDiagramResource(client: Client, value: unknown, afterFirstPa
 }
 
 describe('MCP code graph response format', () => {
+  effectIt.effect('offers an exact candidate ID when a diagram clarification has no retry query', () =>
+    Effect.gen(function* () {
+      const id = 'cgs_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+      const choice = {
+        status: 'clarification',
+        scope: {repositoryName: 'Repo', repositoryId: 'repo', snapshotId: 'snapshot'},
+        freshness: 'current',
+        limits: [],
+        message: 'Which source location is the subject of this diagram?',
+        candidates: [
+          {
+            id,
+            label: 'Load',
+            kind: 'function',
+            path: 'src/load.ts',
+            span: {line: 7, column: 1, endLine: 7, endColumn: 10},
+          },
+        ],
+      } satisfies CodeGraphDiagramResult;
+      const serialized = JSON.stringify(choice);
+      const response = yield* codeGraphDiagramMcpResponse(
+        {
+          status: choice.status,
+          scope: choice.scope,
+          freshness: choice.freshness,
+          filename: '/unused-inline-artifact',
+          bytes: Buffer.byteLength(serialized),
+          sha256: sha256HexSync(serialized),
+          inline: choice,
+        },
+        800,
+        'dual',
+      );
+      const reply = firstText(response.content);
+      if (!('structuredContent' in response)) throw new Error('Expected an inline diagram clarification.');
+      expect(response.structuredContent).toEqual(choice);
+      expect(reply).toContain(`Candidate ID "${id}"`);
+      expect(reply).toContain('replace its reference');
+      expect(reply).not.toContain('Set query to the retry query');
+    }),
+  );
+
   it('preserves the complete projected graph across explicit dual/text and default agent formats', async () => {
     const root = mkdtempSync(join(tmpdir(), 'threadnote-graph-format-'));
     const repository = join(root, 'repository');

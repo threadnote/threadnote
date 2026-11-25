@@ -615,6 +615,7 @@ export function describeCodeGraphDiagramQuestion(question: string, type: CodeGra
     preferred,
     explicitType,
     domain,
+    explicitBehavior: behavior || directions.outgoing,
     incoming: path === undefined && incoming,
     outgoingBehavior: directions.outgoing,
     inheritance,
@@ -626,6 +627,17 @@ export function describeCodeGraphDiagramQuestion(question: string, type: CodeGra
 }
 
 export type CodeGraphDiagramQuestion = ReturnType<typeof describeCodeGraphDiagramQuestion>;
+
+export function diagramFileOverview(question: CodeGraphDiagramQuestion, node: CodeGraphQueryNode): boolean {
+  return (
+    question.domain === 'behavior' &&
+    !question.explicitBehavior &&
+    !question.incoming &&
+    !question.path &&
+    (node.kind === 'module' || node.kind === 'file') &&
+    (question.selectors.length > 0 || Arr.some(question.terms, term => Str.replace(/^\.\//u, '')(term) === node.path))
+  );
+}
 
 export function wantsSourceBackedSequence(question: CodeGraphDiagramQuestion): boolean {
   return (
@@ -718,7 +730,7 @@ function quoteDiagramOperand(value: string): string | undefined {
 export function diagramClarificationCandidate(
   question: CodeGraphDiagramQuestion,
   node: CodeGraphQueryNode,
-  pathRole?: 'from' | 'to',
+  pathChoice?: {readonly role: 'from'} | {readonly role: 'to'; readonly source: CodeGraphQueryNode},
 ): Extract<CodeGraphDiagramResult, {status: 'clarification'}>['candidates'][number] {
   const candidate = completeDiagramSubject(node);
   const value = isStableCodeGraphNodeId(node.id) ? node.id : `${node.path}#${node.qualifiedName || node.name}`;
@@ -726,12 +738,18 @@ export function diagramClarificationCandidate(
   if (!selector) return candidate;
 
   let retryQuery: string;
-  if (question.path && pathRole) {
-    const from = pathRole === 'from' ? selector : quoteDiagramOperand(question.path.from);
-    const to = pathRole === 'to' ? selector : quoteDiagramOperand(question.path.to);
+  if (question.path && pathChoice) {
+    const from =
+      pathChoice.role === 'from'
+        ? selector
+        : isStableCodeGraphNodeId(pathChoice.source.id)
+          ? pathChoice.source.id
+          : quoteDiagramOperand(question.path.from);
+    const to = pathChoice.role === 'to' ? selector : quoteDiagramOperand(question.path.to);
     if (!from || !to) return candidate;
     retryQuery = `from ${from} to ${to}`;
   } else {
+    const overview = diagramFileOverview(question, node);
     const focus =
       question.domain === 'types'
         ? question.inheritance
@@ -740,8 +758,10 @@ export function diagramClarificationCandidate(
         : question.domain === 'architecture'
           ? 'architecture'
           : question.preferred === 'sequence'
-            ? 'sequence diagram'
-            : 'diagram';
+            ? `sequence diagram${overview ? '' : ' of calls'}`
+            : overview
+              ? 'diagram'
+              : 'calls';
     const directions = [question.incoming ? 'incoming calls' : '', question.outgoingBehavior ? 'outgoing calls' : ''];
     const direction = Arr.join(Arr.filter(directions, Boolean), ' and ');
     retryQuery = `Show the ${focus} for ${selector}${direction ? ` with ${direction}` : ''}`;
@@ -1064,7 +1084,9 @@ export function renderCompleteCodeGraphDiagram(input: {
     const gapMessage = interrupted
       ? 'The graph read stopped before it could establish complete coverage.'
       : missingInProject
-        ? 'The selected graph project has partial coverage and no indexed relationships for this question.'
+        ? unresolvedCalls.length
+          ? 'The selected graph project has partial coverage and no resolved relationships for this question.'
+          : 'The selected graph project has partial coverage and no indexed relationships for this question.'
         : noClassEvidence
           ? noClassMessage
           : noRelationships

@@ -20,6 +20,7 @@ import {
   describeCodeGraphDiagramQuestion,
   diagramClarificationCandidate,
   diagramEndpoint,
+  diagramFileOverview,
   diagramTopicSearchTerms,
   DIAGRAM_ARCHITECTURE_RELATIONS,
   DIAGRAM_PROJECT_RETRY,
@@ -74,6 +75,7 @@ type DiagramStore = Pick<
 type Boundary = CodeGraphDiagramCoverage['boundaries'][number];
 type Gap = CodeGraphDiagramCoverage['gaps'][number];
 type Direction = 'incoming' | 'outgoing';
+type BehaviorEvidence = 'resolved' | 'unresolved' | 'none';
 type Rank = NonNullable<ReturnType<typeof rankCodeGraphDiagramSubject>>;
 type RankedSubject = {readonly node: CodeGraphQueryNode; readonly rank: Rank};
 type Work = {readonly node: CodeGraphQueryNode; readonly direction: Direction};
@@ -165,6 +167,21 @@ function allowsBridge(parent: CodeGraphSymbol, child: CodeGraphSymbol): boolean 
   return false;
 }
 
+function followsOwnedBehavior(
+  question: CodeGraphDiagramQuestion,
+  subject: CodeGraphSymbol,
+  parent: CodeGraphSymbol,
+  child: CodeGraphSymbol,
+): boolean {
+  return (
+    allowsBridge(parent, child) ||
+    (question.path === undefined &&
+      parent.id === subject.id &&
+      (subject.kind === 'class' || subject.kind === 'struct') &&
+      CALLABLES.has(child.kind))
+  );
+}
+
 function eligible(
   question: CodeGraphDiagramQuestion,
   work: Work,
@@ -227,6 +244,18 @@ function endpointPlaceholder(
     language: '',
     score: 0,
   };
+}
+
+function unresolvedCall(edge: CodeGraphEdge, work: Work) {
+  if (
+    work.direction !== 'outgoing' ||
+    edge.targetId !== undefined ||
+    (edge.relation !== 'calls' && edge.relation !== 'constructs')
+  )
+    return undefined;
+  const placeholder = endpointPlaceholder(edge, edge.targetName, 'unresolved');
+  const fact = completeDiagramFact(edge, work.node.id, placeholder.id);
+  return fact ? {placeholder, fact: {...fact, provenance: 'syntactic' as const}} : undefined;
 }
 
 function site(edge: CodeGraphEdge, label: string) {
@@ -358,10 +387,11 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
   const subjectQuery = question.topic.length ? {...question, domain: 'behavior' as const} : question;
   const initialDirections = directionsFor(question);
   const subjectDirections = directionsFor(subjectQuery);
-  const hasBehaviorEvidence = (candidate: CodeGraphQueryNode, direction: Direction) =>
+  const behaviorEvidence = (candidate: CodeGraphQueryNode, direction: Direction) =>
     Effect.gen(function* () {
-      if (!hasDiagramSourceSpan(candidate.path, candidate.span)) return false;
+      if (!hasDiagramSourceSpan(candidate.path, candidate.span)) return 'none' as const;
       const pending = new Map([[candidate.id, candidate]]);
+      let hasUnresolved = false;
       for (const node of pending.values()) {
         const work = {node, direction};
         let cursor = '';
@@ -383,8 +413,11 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
             const boundary = boundaryKind(label, peer);
             const visiblePeer =
               boundary && (!peer || boundary === 'outside-scope') ? endpointPlaceholder(edge, label, boundary) : peer;
+            if (!visiblePeer) {
+              hasUnresolved ||= unresolvedCall(edge, work) !== undefined;
+              continue;
+            }
             if (
-              !visiblePeer ||
               !hasDiagramSourceSpan(visiblePeer.path, visiblePeer.span) ||
               !completeDiagramFact(
                 edge,
@@ -393,8 +426,8 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
               )
             )
               continue;
-            if (work.direction === 'incoming' || !isDiagramOwnershipRelation(edge.relation)) return true;
-            if (allowsBridge(node, visiblePeer) && !pending.has(visiblePeer.id)) {
+            if (work.direction === 'incoming' || !isDiagramOwnershipRelation(edge.relation)) return 'resolved' as const;
+            if (followsOwnedBehavior(subjectQuery, candidate, node, visiblePeer) && !pending.has(visiblePeer.id)) {
               pending.set(visiblePeer.id, asNode(visiblePeer));
             }
           }
@@ -402,7 +435,7 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
           cursor = nextCursor;
         }
       }
-      return false;
+      return hasUnresolved ? ('unresolved' as const) : ('none' as const);
     });
   const selectRelevantBehaviorSubjects = (ranked: RankedSubject[]) =>
     Effect.gen(function* () {
@@ -410,7 +443,9 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
       const first = ranked[0];
       if (!first) return [];
       const supported: CodeGraphQueryNode[] = [];
+      const unresolved: CodeGraphQueryNode[] = [];
       let supportedRank: Rank | undefined;
+      let unresolvedRank: Rank | undefined;
       for (const batch of Arr.chunksOf(ranked, PAGE_SIZE)) {
         if (supportedRank && compareRank(batch[0].rank, supportedRank) < 0) break;
         const nodeIds = Arr.map(batch, ({node}) => node.id);
@@ -421,20 +456,29 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
         );
         for (const {node, rank} of batch) {
           if (supportedRank && compareRank(rank, supportedRank) < 0) break;
+          let evidence: BehaviorEvidence = 'none';
           for (const {direction, anchors} of anchorSets) {
-            if (!anchors.has(node.id) || !(yield* hasBehaviorEvidence(node, direction))) continue;
+            if (!anchors.has(node.id)) continue;
+            const found = yield* behaviorEvidence(node, direction);
+            if (found === 'none') continue;
+            evidence = found;
+            if (evidence === 'resolved') break;
+          }
+          if (evidence === 'resolved') {
             supportedRank = rank;
             supported.push(node);
-            break;
+          } else if (evidence === 'unresolved' && (!unresolvedRank || compareRank(rank, unresolvedRank) === 0)) {
+            unresolvedRank = rank;
+            unresolved.push(node);
           }
         }
       }
-      return supported.length
-        ? supported
-        : Arr.map(
-            Arr.takeWhile(ranked, ({rank}) => compareRank(rank, first.rank) === 0),
-            ({node}) => node,
-          );
+      if (supported.length) return supported;
+      if (unresolved.length) return unresolved;
+      return Arr.map(
+        Arr.takeWhile(ranked, ({rank}) => compareRank(rank, first.rank) === 0),
+        ({node}) => node,
+      );
     });
   const nodes = new Map<string, CodeGraphQueryNode>();
   const boundaryIds = new Set<string>();
@@ -569,7 +613,10 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
       if (topicTerms.length && !candidates.length && selection.named?.caseSensitive) {
         yield* readSubjects('exact', [selection.named.spelling], rankCodeGraphDiagramTopicFallback);
       }
-      return candidates.sort((left, right) => compareCodeUnits(left.id, right.id));
+      candidates.sort((left, right) => compareCodeUnits(left.id, right.id));
+      return question.path || question.topic.length
+        ? candidates
+        : yield* supportedCandidates(candidates, initialDirections, page);
     });
   let sequenceEvidence: {readonly snapshot: CodeGraphSnapshot; readonly file: CodeGraphInventoryFile} | undefined;
   const read = Effect.gen(function* () {
@@ -601,15 +648,13 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
         status: 'clarification',
         coverage: coverage('undetermined', boundaries, gaps),
         message: 'More than one source location matches the start of this path.',
-        candidates: Arr.map(candidates, candidate => diagramClarificationCandidate(question, candidate, 'from')),
+        candidates: Arr.map(candidates, candidate =>
+          diagramClarificationCandidate(question, candidate, {role: 'from'}),
+        ),
       } satisfies CodeGraphDiagramResult;
     }
 
-    const supported =
-      question.path || question.topic.length
-        ? candidates
-        : yield* supportedCandidates(candidates, initialDirections, page);
-    subject = supported[0]!;
+    subject = candidates[0]!;
     if (!hasDiagramSourceSpan(subject.path, subject.span)) {
       gaps.set('subject', {kind: 'missing-evidence', label: subject.qualifiedName});
       return undefined;
@@ -623,12 +668,13 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
         );
       }
       if (targets.length > 1) {
+        const source = subject;
         return {
           ...base,
           status: 'clarification',
           coverage: coverage('undetermined', boundaries, gaps, subject),
           message: 'More than one source location matches the target of this path.',
-          candidates: Arr.map(targets, target => diagramClarificationCandidate(question, target, 'to')),
+          candidates: Arr.map(targets, target => diagramClarificationCandidate(question, target, {role: 'to', source})),
         } satisfies CodeGraphDiagramResult;
       }
       pathTarget = targets[0];
@@ -641,13 +687,7 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
         return undefined;
       }
     }
-    const fileOverview =
-      question.domain === 'behavior' &&
-      !question.incoming &&
-      !question.path &&
-      isArchitectureFile(subject) &&
-      (question.selectors.length > 0 ||
-        Arr.some(question.terms, term => Str.replace(/^\.\//u, '')(term) === subject?.path));
+    const fileOverview = diagramFileOverview(question, subject);
     const relationshipQuery = fileOverview ? {...question, domain: 'architecture' as const} : question;
 
     const pending: Work[] = [];
@@ -715,18 +755,11 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
           if (!peer || !hasDiagramSourceSpan(peer.path, peer.span)) {
             gaps.set(edge.id, {...site(edge, label), kind: peerId ? 'missing-evidence' : 'unresolved-target'});
             contributing.add(work.node.id);
-            if (
-              peerId === undefined &&
-              work.direction === 'outgoing' &&
-              question.path === undefined &&
-              relationshipQuery.domain === 'behavior' &&
-              (edge.relation === 'calls' || edge.relation === 'constructs')
-            ) {
-              const placeholder = endpointPlaceholder(edge, label, 'unresolved');
-              const fact = completeDiagramFact(edge, work.node.id, placeholder.id);
-              if (fact) {
-                nodes.set(placeholder.id, placeholder);
-                unresolvedCalls.set(edge.id, {...fact, provenance: 'syntactic'});
+            if (question.path === undefined && (overviewRoot || relationshipQuery.domain === 'behavior')) {
+              const call = unresolvedCall(edge, work);
+              if (call) {
+                nodes.set(call.placeholder.id, call.placeholder);
+                unresolvedCalls.set(edge.id, call.fact);
               }
             }
             continue;
@@ -745,12 +778,7 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
             const parents = parentsByChild.get(peer.id) ?? [];
             parents.push(fact);
             parentsByChild.set(peer.id, parents);
-            const rootMethod =
-              question.path === undefined &&
-              work.node.id === subject.id &&
-              (subject.kind === 'class' || subject.kind === 'struct') &&
-              CALLABLES.has(peer.kind);
-            if (relationshipQuery.domain === 'architecture' || rootMethod || allowsBridge(work.node, peer))
+            if (relationshipQuery.domain === 'architecture' || followsOwnedBehavior(question, subject, work.node, peer))
               schedule(peer, work.direction);
             continue;
           }
@@ -767,7 +795,7 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
     collectBridges(parentsByChild, contributing, facts);
     const subjectId = subject.id;
     const alternatives = Arr.filter(
-      supported,
+      candidates,
       candidate => candidate.id !== subjectId && (question.topic.length > 0 || !contributing.has(candidate.id)),
     );
     if (alternatives.length) {

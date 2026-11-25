@@ -332,29 +332,45 @@ export function GraphDiagramResult({
                 </button>
               ) : null}
               {result.status === 'clarification' ? (
-                <ul className="graph-diagram-choices">
-                  {Arr.map(result.candidates, ({id, label, path, span, retryQuery}) => {
-                    const location = (
-                      <>
-                        {label} ·{' '}
-                        <code>
-                          {path}:{span.line}
-                        </code>
-                      </>
-                    );
-                    return (
-                      <li key={id}>
-                        {retryQuery && onChooseCandidate ? (
-                          <button type="button" onClick={() => onChooseCandidate(retryQuery)}>
-                            Use {location}
-                          </button>
-                        ) : (
-                          location
-                        )}
-                      </li>
-                    );
-                  })}
-                </ul>
+                <>
+                  {Arr.some(result.candidates, candidate => !candidate.retryQuery) ? (
+                    <p className="graph-diagram-note">
+                      For a location without a retry button, replace its reference with its candidate ID. If the
+                      question is too long, shorten it.
+                    </p>
+                  ) : null}
+                  <ul className="graph-diagram-choices">
+                    {Arr.map(result.candidates, ({id, label, path, span, retryQuery}) => {
+                      const location = (
+                        <>
+                          {label} ·{' '}
+                          <code>
+                            {path}:{span.line}
+                          </code>
+                        </>
+                      );
+                      return (
+                        <li key={id}>
+                          {retryQuery && onChooseCandidate ? (
+                            <button type="button" onClick={() => onChooseCandidate(retryQuery)}>
+                              Use {location}
+                            </button>
+                          ) : (
+                            <>
+                              {location}
+                              {!retryQuery ? (
+                                <>
+                                  {' '}
+                                  · Candidate ID <code>{id}</code>
+                                </>
+                              ) : null}
+                            </>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </>
               ) : null}
             </div>
           ) : null}

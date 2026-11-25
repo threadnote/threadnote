@@ -535,6 +535,26 @@ effectIt.layer(diagramStoreLayer)(it => {
         status: 'incomplete',
         suggestedType: 'flowchart',
       });
+
+      const failingStore = CodeGraphStore.of({
+        ...f.store,
+        diagramAdjacentPage: (...args) =>
+          args[2] === validate.id
+            ? Effect.fail(CodeGraphStoreError.of('fixture page failure'))
+            : f.store.diagramAdjacentPage(...args),
+      });
+      const interrupted = yield* readCodeGraphDiagram(failingStore, f.databasePath, {
+        question: 'How does applyPolicy work?',
+        diagramType: 'sequence',
+        freshness: 'current',
+        scope: f.snapshotScope(linear),
+      });
+      expect(interrupted).toMatchObject({
+        status: 'incomplete',
+        suggestedType: 'flowchart',
+        coverage: {gaps: expect.arrayContaining([expect.objectContaining({kind: 'interrupted'})])},
+      });
+      expect(interrupted).not.toHaveProperty('diagram');
     }).pipe(TestClock.withLive),
   );
 
@@ -621,6 +641,25 @@ effectIt.layer(diagramStoreLayer)(it => {
       if (!retry) throw new Error('The public route needs a retry query.');
       const selected = requireDiagram(yield* run(retry));
       expect(Arr.map(selected.evidence.edges, edge => edge.id)).toEqual(['public-check', 'read']);
+      let secondCandidateReads = 0;
+      const store = CodeGraphStore.of({
+        ...f.store,
+        diagramAdjacentPage: (...args) =>
+          args[2] === lead.id && ++secondCandidateReads > 1
+            ? Effect.fail(CodeGraphStoreError.of('repeated candidate probe'))
+            : f.store.diagramAdjacentPage(...args),
+      });
+      expect(
+        yield* readCodeGraphDiagram(store, f.databasePath, {
+          question: 'authenticationRoute checkCredentials',
+          scope: f.snapshotScope(snapshot),
+          freshness: 'current',
+        }),
+      ).toMatchObject({
+        status: 'clarification',
+        candidates: [{id: other.id}, {id: lead.id}],
+      });
+      expect(secondCandidateReads).toBe(1);
       expect(yield* run('Who calls authenticationRoute?')).toMatchObject({
         status: 'clarification',
         candidates: [
@@ -672,6 +711,68 @@ effectIt.layer(diagramStoreLayer)(it => {
         status: 'unavailable',
         suggestedType: 'flowchart',
         message: 'Static evidence does not establish a single ordered call path.',
+      });
+    }).pipe(TestClock.withLive),
+  );
+
+  it.effect('preserves call questions after source choices and shows unresolved file calls', () =>
+    Effect.gen(function* () {
+      const f = yield* storedDiagramFixture;
+      const core = symbol('Core', 'module', {id: `cgs_${Str.repeat(32)('1')}`, path: 'src/core.ts'});
+      const otherCore = symbol('Core', 'module', {id: `cgs_${Str.repeat(32)('2')}`, path: 'src/other.ts'});
+      const work = {...symbol('Work', 'class', {path: 'src/work.ts'}), span: {...span(1), endLine: 6}};
+      const otherWork = {
+        ...symbol('Work', 'class', {id: 'other-work', path: 'src/workers.ts'}),
+        span: {...span(1), endLine: 6},
+      };
+      const start = symbol('start', 'method', {path: work.path, line: 3});
+      const stop = symbol('stop', 'method', {path: otherWork.path, line: 3});
+      const library = symbol('Library', 'module');
+      const sink = symbol('connect', 'function');
+      const snapshot = yield* f.save(
+        '5',
+        [core, otherCore, work, otherWork, start, stop, library, sink],
+        [
+          relation('core-call', 'calls', core, sink, 2),
+          relation('core-import', 'imports', core, library, 1),
+          {...relation('dynamic-call', 'calls', otherCore, sink, 2, 'syntactic'), targetId: undefined},
+          relation('owns-start', 'contains', work, start, 3, 'syntactic'),
+          relation('owns-stop', 'contains', otherWork, stop, 3, 'syntactic'),
+          relation('start-call', 'calls', start, sink, 3),
+          relation('stop-call', 'calls', stop, sink, 3),
+        ],
+      );
+      const run = (question: string, diagramType: 'flowchart' | 'class', partialProject = false) =>
+        readCodeGraphDiagram(f.store, f.databasePath, {
+          question,
+          diagramType,
+          scope: f.snapshotScope(snapshot),
+          freshness: 'current',
+          partialProject,
+        });
+      const moduleChoice = yield* run('Show the calls for Core', 'flowchart');
+      const classChoice = yield* run('Show the calls for Work', 'class');
+      if (moduleChoice.status !== 'clarification' || classChoice.status !== 'clarification') {
+        throw new Error('Expected both source choices.');
+      }
+      const moduleRetry = Option.getOrUndefined(
+        Arr.findFirst(moduleChoice.candidates, candidate => candidate.id === core.id),
+      )?.retryQuery;
+      const classRetry = Option.getOrUndefined(
+        Arr.findFirst(classChoice.candidates, candidate => candidate.id === work.id),
+      )?.retryQuery;
+      if (!moduleRetry || !classRetry) throw new Error('Expected a retry for each source.');
+      const selected = requireDiagram(yield* run(moduleRetry, 'flowchart'));
+      expect(Arr.map(selected.evidence.edges, edge => edge.id)).toEqual(['core-call']);
+      expect(yield* run(classRetry, 'class')).toMatchObject({status: 'unavailable', suggestedType: 'flowchart'});
+      const behavior = requireDiagram(yield* run(classRetry, 'flowchart'));
+      expect(Arr.map(behavior.evidence.edges, edge => edge.id)).toEqual(['owns-start', 'start-call']);
+
+      expect(yield* run(otherCore.path, 'flowchart', true)).toMatchObject({
+        status: 'incomplete',
+        message: expect.stringContaining('no resolved relationships'),
+        coverage: {gaps: expect.arrayContaining([expect.objectContaining({kind: 'unresolved-target'})])},
+        diagram: {source: expect.stringContaining('  n1 -.-> n2'), evidence: {edges: [{id: 'dynamic-call'}]}},
       });
     }).pipe(TestClock.withLive),
   );
@@ -772,9 +873,13 @@ effectIt.layer(diagramStoreLayer)(it => {
       const recurse = symbol('recur', 'function');
       const move = symbol('moveData', 'function', {id: `cgs_${Str.repeat(32)('e')}`, path: 'src/transfer.ts'});
       const store = symbol('storeData', 'function', {path: 'src/Payment API.ts'});
+      const longSource = symbol('longSource', 'function', {
+        id: `cgs_${Str.repeat(32)('c')}`,
+        path: `src/${Str.repeat(984)('p')}.ts`,
+      });
       const snapshot = yield* f.save(
         'b',
-        [a, b, instance, fromOne, fromTwo, toOne, toTwo, recurse, move, store],
+        [a, b, instance, fromOne, fromTwo, toOne, toTwo, recurse, move, store, longSource],
         [
           relation('a-b', 'calls', a, b, 2),
           relation('owns-b', 'contains', a, b, 3, 'syntactic'),
@@ -786,6 +891,7 @@ effectIt.layer(diagramStoreLayer)(it => {
           relation('recurse', 'calls', recurse, recurse, 1),
           relation('recurse-other', 'calls', recurse, b, 2),
           relation('move-store', 'calls', move, store, 2),
+          relation('long-source-call', 'calls', longSource, toOne, 2),
         ],
       );
       const run = (question: string, diagramType: 'sequence' | 'flowchart' = 'sequence') =>
@@ -814,6 +920,12 @@ effectIt.layer(diagramStoreLayer)(it => {
       if (!sourceRetry || !targetRetry) throw new Error('Each endpoint needs a retry query.');
       expect(requireDiagram(yield* run(sourceRetry)).evidence.edges).toMatchObject([{id: 'second-start-call'}]);
       expect(requireDiagram(yield* run(targetRetry)).evidence.edges).toMatchObject([{id: 'a-other'}]);
+      const longChoice = yield* run(`from ${longSource.path}#longSource to SameTarget`);
+      if (longChoice.status !== 'clarification') throw new Error('Expected a long target choice.');
+      const longRetry = longChoice.candidates[0]?.retryQuery;
+      if (!longRetry) throw new Error('Expected the resolved source to make the retry fit.');
+      expect(longRetry).toContain(`from ${longSource.id} to`);
+      expect(requireDiagram(yield* run(longRetry)).evidence.edges).toMatchObject([{id: 'long-source-call'}]);
       for (const question of [
         'Show the call path from A to.',
         'Show the call path from A other to B.',
@@ -1082,11 +1194,11 @@ effectIt.layer(diagramStoreLayer)(it => {
       const nodes = [orchestrator, configuration, entry, target];
       const snapshot = yield* fixture.save('e', nodes, [relation('publish', 'calls', entry, target, 4)]);
       const scope = {...fixture.snapshotScope(snapshot), project: 'mobile-docs'};
-      const run = (question: string) =>
+      const run = (question: string, ready = snapshot) =>
         readCodeGraphDiagram(fixture.store, fixture.databasePath, {
           question,
           diagramType: 'flowchart',
-          scope,
+          scope: {...fixture.snapshotScope(ready), project: scope.project},
           freshness: 'current',
           partialProject: true,
         });
@@ -1116,19 +1228,33 @@ effectIt.layer(diagramStoreLayer)(it => {
         [
           relation('declares-register', 'contains', owner, entry, 3, 'syntactic'),
           relation('publish', 'calls', entry, target, 4),
+          relation('configure', 'calls', configuration, target, 2),
         ],
       );
-      const owned = yield* readCodeGraphDiagram(fixture.store, fixture.databasePath, {
-        question: 'How does EnrollmentOrchestrator work?',
-        diagramType: 'flowchart',
-        scope: {...fixture.snapshotScope(withOwner), project: scope.project},
-        freshness: 'current',
-        partialProject: true,
-      });
-      expect(owned).toMatchObject({
+      expect(yield* run('EnrollmentOrchestrator DevicePolicyManager', withOwner)).toMatchObject({
         status: 'incomplete',
         coverage: {subject: {id: owner.id}},
         diagram: {diagramType: 'flowchart', evidence: {edges: [{id: 'declares-register'}, {id: 'publish'}]}},
+      });
+
+      const dynamic = (source: CodeGraphQueryNode) => ({
+        ...relation('dynamic-registration', 'calls', source, target, 4, 'syntactic'),
+        targetId: undefined,
+      });
+      const unresolvedOnly = yield* fixture.save('0', nodes, [dynamic(entry)]);
+      expect(yield* run('EnrollmentOrchestrator registerAccount', unresolvedOnly)).toMatchObject({
+        status: 'incomplete',
+        coverage: {subject: {id: entry.id}},
+        diagram: {diagramType: 'flowchart', evidence: {edges: [{id: 'dynamic-registration'}]}},
+      });
+      const prefersResolved = yield* fixture.save('1', nodes, [
+        dynamic(orchestrator),
+        relation('publish', 'calls', entry, target, 4),
+      ]);
+      expect(yield* run('EnrollmentOrchestrator registerAccount', prefersResolved)).toMatchObject({
+        status: 'incomplete',
+        coverage: {subject: {id: entry.id}},
+        diagram: {diagramType: 'flowchart', evidence: {edges: [{id: 'publish'}]}},
       });
     }),
   );

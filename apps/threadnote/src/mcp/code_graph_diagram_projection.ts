@@ -7,6 +7,9 @@ import type {CodeGraphDiagramResources} from './code_graph_diagram_resource.js';
 import type {CodeGraphMcpResponseFormat} from './code_graph_projection.js';
 
 export const MCP_DIAGRAM_DEFAULT_TOKENS = 1_250;
+const CANDIDATE_ID_ACTION =
+  'For a location without a retry query, replace its reference with its candidate ID. If the query is too long, shorten it.';
+const KEEP_DIAGRAM_OPTIONS = 'Keep the same diagramType and project.';
 
 function quote(value: string): string {
   return Str.replaceAll('`', '\\u0060')(JSON.stringify(value));
@@ -25,11 +28,15 @@ function renderDiagramResult(result: CodeGraphDiagramResult, diagram: CodeGraphD
           result.message,
           ...(result.status === 'clarification'
             ? [
-                'Set query to the retry query for your chosen location. Keep the same diagramType and project.',
+                ...(Arr.some(result.candidates, candidate => !!candidate.retryQuery)
+                  ? ['Set query to the retry query for your chosen location.']
+                  : []),
+                ...(Arr.some(result.candidates, candidate => !candidate.retryQuery) ? [CANDIDATE_ID_ACTION] : []),
+                KEEP_DIAGRAM_OPTIONS,
                 ...Arr.map(
                   result.candidates,
                   candidate =>
-                    `${siteCitation(candidate)}${candidate.retryQuery ? ` | Retry query ${quote(candidate.retryQuery)}` : ''}`,
+                    `${siteCitation(candidate)} | ${candidate.retryQuery ? `Retry query ${quote(candidate.retryQuery)}` : `Candidate ID ${quote(candidate.id)}`}`,
                 ),
               ]
             : [result.nextAction]),
@@ -126,6 +133,9 @@ export const codeGraphDiagramMcpResponse = Effect.fn('mcpServer.projectGraphDiag
           `Call resources/read with the prefix and each part number from 1 through ${partCount}. ` +
           'Decode each base64 blob and concatenate the bytes as UTF-8 JSON. ' +
           `${resources.expiration} ${resources.recovery}` +
+          (artifact.status === 'clarification'
+            ? `\nIf the chosen candidate has a retryQuery, set query to that value. ${CANDIDATE_ID_ACTION} ${KEEP_DIAGRAM_OPTIONS}`
+            : '') +
           (refreshWarning ? `\nLimit ${quote(refreshWarning)}` : ''),
       },
     ],

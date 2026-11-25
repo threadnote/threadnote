@@ -173,7 +173,9 @@ it('discards late results after a type change and rejects a mismatched snapshot'
 });
 
 it('runs the chosen source location in the same view, snapshot, and diagram type', async () => {
-  const retryQuery = 'Show the sequence diagram for cgs_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const retryQuery = 'Show the sequence diagram for cgs_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+  const fallbackId = 'cgs_cccccccccccccccccccccccccccccccc';
+  const span = {line: 7, column: 1, endLine: 7, endColumn: 10};
   const load = vi
     .fn<GraphDiagramLoader>()
     .mockResolvedValueOnce({
@@ -184,13 +186,22 @@ it('runs the chosen source location in the same view, snapshot, and diagram type
       message: 'Which source location is the subject of this diagram?',
       candidates: [
         {
-          id: 'route',
+          id: 'cgs_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          label: 'Load',
+          path: 'src/other.ts',
+          kind: 'function',
+          span,
+          retryQuery: 'Show the sequence diagram for cgs_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        },
+        {
+          id: 'cgs_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
           label: 'Load',
           path: 'src/route.ts',
           kind: 'function',
-          span: {line: 7, column: 1, endLine: 7, endColumn: 10},
+          span,
           retryQuery,
         },
+        {id: fallbackId, label: 'Load', path: 'src/fallback.ts', kind: 'function', span},
       ],
     })
     .mockResolvedValueOnce({...diagram, diagramType: 'sequence', source: 'sequenceDiagram\n  A->>B: load'});
@@ -208,7 +219,12 @@ it('runs the chosen source location in the same view, snapshot, and diagram type
     select.dispatchEvent(new Event('change', {bubbles: true}));
   });
   await act(async () => form.dispatchEvent(new Event('submit', {bubbles: true, cancelable: true})));
-  const action = document.querySelector<HTMLButtonElement>('.graph-diagram-result button');
+  const choices = document.querySelectorAll<HTMLButtonElement>('.graph-diagram-choices button');
+  expect(choices).toHaveLength(2);
+  const fallback = document.querySelector('.graph-diagram-choices li:last-child code:last-child');
+  expect(fallback?.textContent).toBe(fallbackId);
+  expect(document.querySelector('.graph-diagram-note')?.textContent).toContain('replace its reference');
+  const action = choices[1];
   expect(action?.textContent).toBe('Use Load · src/route.ts:7');
   await act(async () => action?.click());
   expect(load).toHaveBeenNthCalledWith(2, 'view', 'snapshot', retryQuery, 'sequence', expect.any(AbortSignal));
