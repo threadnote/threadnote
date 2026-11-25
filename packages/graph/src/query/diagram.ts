@@ -364,7 +364,7 @@ function sourceFor(type: DiagramType, evidence: Diagram['evidence']): string {
             : Arr.map(nodes, node => flowNode(node.diagramId))),
           ...Arr.map(edges, edge =>
             unresolved.has(edge.target)
-              ? `  ${edge.source} -. Unresolved call site .-> ${edge.target}`
+              ? `  ${edge.source} -.-> ${edge.target}`
               : `  ${edge.source} -->|${edge.relation}| ${edge.target}`,
           ),
         ],

@@ -522,7 +522,7 @@ effectIt.layer(diagramStoreLayer)(it => {
           },
         });
         if (result.status !== 'incomplete') throw new Error('Expected a partial diagram.');
-        expect(result.diagram?.source).toContain('-. Unresolved call site .->');
+        expect(result.diagram?.source).toContain('  n1 -.-> n2');
         expect(yield* Schema.decodeEffect(CodeGraphDiagramResultSchema)(result)).toEqual(result);
       }
 
