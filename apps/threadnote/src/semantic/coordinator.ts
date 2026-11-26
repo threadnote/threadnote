@@ -18,6 +18,7 @@ export {
 } from './admission.js';
 import {SemanticAgentEndpointChange, semanticAgentChangeLimits} from './agent_change_protocol.js';
 import {makeSemanticAgentChanges} from './agent_changes.js';
+import {semanticCandidateMetadata, semanticCandidateRoots} from './candidate_fence.js';
 import {Digest as EffectDigest, SecureRandom} from 'effect/crypto';
 import {
   JavaHostCandidate,
@@ -206,24 +207,8 @@ const verifyCoordinatorStorage = Effect.fn('semantic.verifyCoordinatorStorage')(
     catalog.go,
     catalog.rust,
     catalog.java,
-  ]) {
-    if (!candidate) continue;
-    roots.push(
-      ...('runtimeCandidate' in candidate
-        ? [
-            candidate.runtimeCandidate.serverDirectory,
-            candidate.runtimeCandidate.runtimeJavaHome,
-            candidate.runtimeCandidate.projectJavaHome,
-          ]
-        : 'runtime' in candidate
-          ? [
-              candidate.runtime,
-              candidate.serverDirectory,
-              ...('sdkDirectory' in candidate ? [candidate.sdkDirectory] : []),
-            ]
-          : [candidate.executable, candidate.sdkDirectory]),
-    );
-  }
+  ])
+    if (candidate) roots.push(...semanticCandidateRoots(candidate));
   for (const root of roots) {
     if (
       !path.isAbsolute(root) ||
@@ -685,7 +670,27 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
               projectEpoch: reservation.generation,
             };
             let providerGuard: Effect.Effect<void, unknown> = Effect.void;
-            const verify = verifyCandidate(candidate, providerId).pipe(
+            // One full candidate digest per session: later requests compare a metadata snapshot taken around it,
+            // and any metadata change repeats the full digest before the request continues.
+            const roots = semanticCandidateRoots(candidate);
+            let fence: string | undefined;
+            const candidateCurrent = Effect.suspend(() => {
+              const before = semanticCandidateMetadata(roots);
+              if (before !== undefined && before === fence) return Effect.void;
+              fence = undefined;
+              return verifyCandidate(candidate, providerId).pipe(
+                Effect.andThen(
+                  Effect.suspend(() => {
+                    if (before === undefined) return Effect.void;
+                    const after = semanticCandidateMetadata(roots);
+                    if (after !== before) return Effect.fail(LspFault.make({code: 'rejected'}));
+                    fence = after;
+                    return Effect.void;
+                  }),
+                ),
+              );
+            });
+            const verify = candidateCurrent.pipe(
               Effect.andThen(projectOptions?.verify ?? Effect.void),
               Effect.andThen(Effect.suspend(() => providerGuard)),
               Effect.onError(startupBinding.failed),
