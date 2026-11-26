@@ -60,6 +60,8 @@ jobs:
           exit $semanticComponentExit
       - name: Require native semantic platform capability
         # Musl targets prove the native semantic platform in the musl-native job's own userspace.
+        # The Windows private writer is declared unsupported until it is qualified: on Windows this step requires that
+        # declaration (writer false, provider tree true) and records it. It never qualifies Windows.
         if: ${{ !cancelled() && !endsWith(inputs.target, '-musl') }}
         env:
           EXPECTED_NATIVE_TARGET: ${{ inputs.target == 'linux-x64' && 'linux-x64-baseline' || inputs.target == 'windows-x64' && 'windows-x64-baseline' || inputs.target }}
@@ -69,7 +71,7 @@ jobs:
           const actual=runtimeNativePlatformTarget(),support=runtimeNativePlatformSupport();
           mkdirSync(".context/semantic-platform",{recursive:true});
           writeFileSync(".context/semantic-platform/native.json",JSON.stringify({actual,expected:Bun.env.EXPECTED_NATIVE_TARGET,support,productionQualified:false}));
-          if(actual!==Bun.env.EXPECTED_NATIVE_TARGET||!support.writer||!support.providerTree)throw new Error("Native semantic platform capability unavailable; qualification blocked");'
+          if(actual!==Bun.env.EXPECTED_NATIVE_TARGET||support.writer!==(process.platform!=="win32")||!support.providerTree)throw new Error("Native semantic platform capability differs from its declaration; qualification blocked");'
       - name: Linux workflow prerequisites
         if: runner.os == 'Linux'
         run: |

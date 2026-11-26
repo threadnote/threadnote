@@ -550,8 +550,9 @@ native(it)(
         deadline: Date.now() + 30_000,
       });
     };
-    // A large response streams for a while, so a late close can land while a frame is only partly received.
-    const text = Array.from({length: 120_000}, (_, index) =>
+    // A large response streams for a while, so a late close can land while a frame is only partly received. The
+    // close delays scale with the measured duration; a larger text only makes slow runners exceed the 30 s borrow.
+    const text = Array.from({length: 30_000}, (_, index) =>
       'export function f' + index + '(a: number, b: string): Promise<Map<string, number[]>> { return g(a, b, [1, 2, 3].map(x => x * a)); }',
     ).join('\\n');
     const measuredOwner = await open();

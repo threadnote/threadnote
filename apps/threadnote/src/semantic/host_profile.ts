@@ -107,6 +107,8 @@ export class SemanticHostProfileFault extends Schema.TaggedError<
     'unsupported-platform',
     'indeterminate',
   ]),
+  // Value-free native writer reason behind an `untrusted` refusal; it names a failed check, never a path or value.
+  writerReason: Schema.optionalKey(Native.RuntimeWriterFault.fields.reason),
 }) {}
 
 export const semanticHostProfileName = (config: Pick<RuntimeConfig, 'account' | 'user'>, worktree: string) =>
@@ -116,14 +118,13 @@ const reject = (reason: typeof SemanticHostProfileFault.prototype.reason) => Sem
 const native = <A>(operation: () => A) =>
   Effect.try({
     try: operation,
-    catch: error =>
-      Schema.is(SemanticHostProfileFault)(error)
-        ? error
-        : reject(
-            Schema.is(Native.RuntimeWriterFault)(error) && error.reason === 'unsupported-platform'
-              ? 'unsupported-platform'
-              : 'untrusted',
-          ),
+    catch: error => {
+      if (Schema.is(SemanticHostProfileFault)(error)) return error;
+      if (!Schema.is(Native.RuntimeWriterFault)(error)) return reject('untrusted');
+      return error.reason === 'unsupported-platform'
+        ? reject('unsupported-platform')
+        : SemanticHostProfileFault.make({reason: 'untrusted', writerReason: error.reason});
+    },
   });
 
 const profileLocation = Effect.fn('semantic.profileLocation')(function* (
