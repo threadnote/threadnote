@@ -159,6 +159,27 @@ export function assembleNavigationAnswer(input: NavigationInput): NavigationAnsw
     for (const link of input.links) {
       const from = aliases.get(link.from);
       const to = aliases.get(link.to);
+      if (link.observationSourceIds !== undefined) {
+        // Every proving observation must itself survive quarantine inside the requested scope.
+        const observed = EffectArray.map(link.observationSourceIds, id => sources.get(id));
+        if (EffectArray.some(observed, source => source === undefined)) {
+          gaps.add('semantic-observation-rejected');
+          continue;
+        }
+        const foreign = EffectArray.filter(
+          observed,
+          source => source !== undefined && keyFor(source) !== requestedScope,
+        );
+        if (foreign.length) {
+          for (const attached of [from, to]) {
+            if (attached === undefined) continue;
+            const separated = separatedSources.get(attached) ?? new Set<string>();
+            for (const source of foreign) separated.add(source!.id);
+            separatedSources.set(attached, separated);
+          }
+          continue;
+        }
+      }
       if (!from || !to) {
         const attached = from ?? to;
         const counterpartSources = inputCandidateSources.get(from === undefined ? link.from : link.to);
@@ -201,6 +222,9 @@ export function assembleNavigationAnswer(input: NavigationInput): NavigationAnsw
     gaps.add('target-unresolved');
   const retainedNodes = EffectArray.filter(ordered, node => selected.has(node.id));
   const retainedSources = new Set(EffectArray.map(retainedNodes, node => node.sourceId));
+  for (const link of links.values())
+    if (selected.has(link.from) && selected.has(link.to))
+      for (const id of link.observationSourceIds ?? []) retainedSources.add(id);
   for (const [attached, sourceIds] of separatedSources) {
     if (selected.has(attached)) {
       for (const sourceId of sourceIds) retainedSources.add(sourceId);
@@ -303,7 +327,15 @@ function effectKey(candidate: NavigationCandidate): string {
 }
 
 function linkKey(link: NavigationLink): string {
-  return JSON.stringify([link.from, link.to, link.relation, link.basis, link.compatibility, link.reason]);
+  return JSON.stringify([
+    link.from,
+    link.to,
+    link.relation,
+    link.basis,
+    link.compatibility,
+    link.reason,
+    link.observationSourceIds ?? null,
+  ]);
 }
 
 function roleResult(
@@ -400,7 +432,17 @@ function admit(input: NavigationInput): void {
     }
   }
   if (input.target.kind !== 'task') for (const id of input.target.candidateIds) text(id);
-  for (const link of input.links) for (const item of [link.from, link.to, link.reason]) text(item);
+  for (const link of input.links) {
+    for (const item of [link.from, link.to, link.reason]) text(item);
+    const observations = link.observationSourceIds ?? [];
+    if (observations.length > 2) throw new RangeError('Navigation input exceeds observation limits.');
+    for (const id of observations) text(id);
+    if (
+      link.basis === 'qualified-semantic' &&
+      (observations.length === 0 || EffectArray.some(observations, id => !semanticSources.has(id)))
+    )
+      throw new RangeError('Qualified semantic evidence requires its complete observation.');
+  }
   for (const gap of input.roleGaps ?? []) {
     text(gap.reason);
     if (gap.sourceProof) {

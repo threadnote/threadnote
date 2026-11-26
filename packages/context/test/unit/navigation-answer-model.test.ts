@@ -658,4 +658,61 @@ describe('navigation answer model', () => {
     },
     {fastCheck: {numRuns: 80}},
   );
+  it('keeps a qualified semantic link next to the structural link and retains its proving observation', () => {
+    const input = fixture();
+    const semantic = {observationKey: 'semantic-operation', observationJson: '{"provider":"fixture"}'};
+    const observed = {...input.sources[0], id: 'semantic-operation', semantic};
+    const semanticLink: NavigationLink = {
+      ...link('entrypoint', 'implementation'),
+      basis: 'qualified-semantic',
+      reason: 'The compiler reports this call.',
+      observationSourceIds: [observed.id],
+    };
+    const result = assembleNavigationAnswer({
+      ...input,
+      sources: [...input.sources, observed],
+      links: [...input.links, semanticLink],
+    });
+    const bases = EffectArray.map(
+      EffectArray.filter(result.links, item => item.from === 'entrypoint' && item.to === 'implementation'),
+      item => item.basis,
+    );
+    expect(bases.sort()).toEqual(['qualified-semantic', 'structural']);
+    expect(EffectArray.map(result.sources, item => item.id)).toContain(observed.id);
+    expect(() =>
+      assembleNavigationAnswer({
+        ...input,
+        links: [...input.links, {...semanticLink, observationSourceIds: []}],
+      }),
+    ).toThrow('Qualified semantic evidence requires its complete observation.');
+  });
+  it('separates a semantic link proven only by an unsaved buffer observation', () => {
+    const input = fixture();
+    const overlay = {...scope.view, kind: 'overlay' as const, id: 'buffer-view'};
+    const observed: NavigationSource = {
+      ...input.sources[0],
+      view: overlay,
+      id: 'buffer-operation',
+      contentHash: 'buffer-bytes',
+      freshness: 'unverified',
+      semantic: {observationKey: 'buffer-operation', observationJson: '{"view":"overlay"}'},
+    };
+    const result = assembleNavigationAnswer({
+      ...input,
+      sources: [...input.sources, observed],
+      links: [
+        ...input.links,
+        {
+          ...link('entrypoint', 'tests'),
+          basis: 'qualified-semantic',
+          reason: 'The compiler reports this reference in the buffer.',
+          observationSourceIds: [observed.id],
+        },
+      ],
+    });
+    expect(result.outcome).toBe('conflict');
+    expect(result.gaps).toContain('source-view-conflict');
+    expect(EffectArray.some(result.links, item => item.basis === 'qualified-semantic')).toBe(false);
+    expect(EffectArray.map(result.sources, item => item.id)).toContain(observed.id);
+  });
 });

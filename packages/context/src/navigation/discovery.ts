@@ -1,5 +1,5 @@
 import * as EffectArray from 'effect/Array';
-import {Clock, Effect} from 'effect';
+import {Clock, Effect, Option} from 'effect';
 import {assembleNavigationAnswer} from './assemble.js';
 import {
   discoverCodeGraphTask,
@@ -10,7 +10,8 @@ import type {CodeGraphQueryResult, RepositoryIdentity} from '@threadnote/graph/t
 import {retrieveNavigationSourceProofs} from './source_facts.js';
 import {structuralNavigationInput, type NavigationSourceProofs} from './structural.js';
 import {projectNavigationAnswer} from './project.js';
-import type {NavigationScope} from './model.js';
+import type {NavigationAnswerV1, NavigationScope} from './model.js';
+import {navigationEffectsDelta} from './continuation.js';
 
 export interface TaskNavigationRequest extends TaskDiscoveryRequest {
   readonly identity: RepositoryIdentity;
@@ -161,4 +162,66 @@ export const retrieveTaskNavigationAnswer = Effect.fn('navigation.retrieveTaskAn
       total: milliseconds(wholeStarted, completed),
     },
   };
+});
+
+export interface NavigationEffectsFollowUpRequest extends TaskNavigationRequest {
+  /** The answer the warm agent already holds; its effect files bound the follow-up acquisition. */
+  readonly previous: NavigationAnswerV1;
+  /** Required: a write-boundary follow-up re-reads known anchors and never repeats task discovery. */
+  readonly anchoredResult: CodeGraphQueryResult;
+}
+
+/**
+ * Warm write-boundary follow-up. Only the previous answer's effect files are re-acquired: other route nodes,
+ * memory and projections are not reloaded. The result is the effects delta or a truthful invalidation.
+ */
+export const retrieveNavigationEffectsFollowUp = Effect.fn('navigation.retrieveEffectsFollowUp')(function* (
+  input: NavigationEffectsFollowUpRequest,
+) {
+  const effectRole = Option.getOrUndefined(
+    EffectArray.findFirst(input.previous.roles, role => role.role === 'effects'),
+  );
+  const effectNodeIds = new Set(effectRole?.nodeIds ?? []);
+  const effectSourceIds = new Set(
+    EffectArray.map(
+      EffectArray.filter(input.previous.nodes, node => effectNodeIds.has(node.id)),
+      node => node.sourceId,
+    ),
+  );
+  const paths = new Set(
+    EffectArray.map(
+      EffectArray.filter(input.previous.sources, source => effectSourceIds.has(source.id)),
+      source => source.path,
+    ),
+  );
+  const nodes = EffectArray.filter(input.anchoredResult.nodes, node => paths.has(node.path));
+  const ids = new Set(EffectArray.map(nodes, node => node.id));
+  if (nodes.length === 0)
+    return {
+      delta: navigationEffectsDelta(input.previous, {
+        ...input.previous,
+        outcome: 'unresolved',
+        nodes: [],
+        links: [],
+        sources: [],
+        roles: [],
+      }),
+      answer: undefined,
+    };
+  const followUp = yield* retrieveTaskNavigationAnswer({
+    ...input,
+    anchoredResult: {
+      ...input.anchoredResult,
+      nodes,
+      edges: EffectArray.filter(
+        input.anchoredResult.edges,
+        edge =>
+          edge.sourceId !== undefined &&
+          edge.targetId !== undefined &&
+          ids.has(edge.sourceId) &&
+          ids.has(edge.targetId),
+      ),
+    },
+  });
+  return {delta: navigationEffectsDelta(input.previous, followUp.structural.answer), answer: followUp};
 });

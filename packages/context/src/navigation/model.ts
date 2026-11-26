@@ -25,6 +25,21 @@ export interface NavigationScope {
   };
 }
 
+/** Identity of one file observation inside one complete scope; equal paths in other views never collide. */
+export function navigationSourceId(scope: NavigationScope, path: string, contentHash: string): string {
+  return JSON.stringify([
+    scope.repository,
+    scope.worktree,
+    scope.project,
+    scope.view.kind,
+    scope.view.id,
+    scope.view.owner,
+    scope.view.epoch,
+    path,
+    contentHash,
+  ]);
+}
+
 export type NavigationFreshness = 'verified-current' | 'stale' | 'deferred' | 'unverified';
 export type NavigationEvidenceBasis = 'qualified-semantic' | 'structural' | 'inspected-source' | 'inference' | 'memory';
 
@@ -71,6 +86,8 @@ export interface NavigationLink {
   /** Explicit proof from the owning evidence join; matching names or endpoints do not supply it. */
   readonly compatibility: 'verified' | 'unknown' | 'conflict';
   readonly reason: string;
+  /** Required for qualified-semantic links: every source that carries a complete proving observation. */
+  readonly observationSourceIds?: readonly string[];
 }
 
 export interface NavigationRoleGap {
