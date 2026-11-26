@@ -62,6 +62,8 @@ const CSSLOT_REQUIREMENTS = 2;
 const CSSLOT_SIGNATURESLOT = 0x10000;
 const CS_HASHTYPE_SHA256 = 2;
 export const CS_ADHOC = 0x2;
+export const CS_HARD = 0x100;
+export const CS_KILL = 0x200;
 export const CS_RUNTIME = 0x10000;
 export const CS_LINKER_SIGNED = 0x20000;
 const CS_EXECSEG_MAIN_BINARY = 0x1n;
@@ -397,10 +399,13 @@ export function machoSignaturePolicyViolations(
   policy: {readonly identifier: string; readonly requireRuntime: boolean},
 ): readonly string[] {
   const violations = [...signature.violations];
-  if ((signature.flags & ~(CS_ADHOC | CS_LINKER_SIGNED | CS_RUNTIME)) !== 0)
+  if ((signature.flags & ~(CS_ADHOC | CS_LINKER_SIGNED | CS_HARD | CS_KILL | CS_RUNTIME)) !== 0)
     violations.push(`CodeDirectory flags 0x${signature.flags.toString(16)}`);
   if (policy.requireRuntime && (signature.flags & CS_RUNTIME) === 0)
     violations.push('hardened runtime flag is not set');
+  // macOS 15 does not imply kill or hard from the hardened runtime; the runtime image check requires both.
+  if (policy.requireRuntime && (signature.flags & CS_KILL) === 0) violations.push('kill flag is not set');
+  if (policy.requireRuntime && (signature.flags & CS_HARD) === 0) violations.push('hard flag is not set');
   if (policy.requireRuntime && (signature.flags & CS_LINKER_SIGNED) !== 0) violations.push('linker signature');
   if (signature.identifier !== policy.identifier)
     violations.push(`identifier ${JSON.stringify(signature.identifier)} is not ${JSON.stringify(policy.identifier)}`);

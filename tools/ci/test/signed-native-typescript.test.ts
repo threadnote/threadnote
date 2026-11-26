@@ -56,7 +56,7 @@ async function signedCopy(name: string, sign: readonly string[], change?: number
   await codesign(['--force', '-s', '-', ...sign, path]);
   return path;
 }
-const release = ['--options', 'runtime', '--identifier', SIGNED_NATIVE_TYPESCRIPT_IDENTIFIER];
+const release = ['--options', 'runtime,kill,hard', '--identifier', SIGNED_NATIVE_TYPESCRIPT_IDENTIFIER];
 async function violations(executable: string, requirement?: string): Promise<readonly string[]> {
   try {
     await verifySignedNativeTypeScript({
@@ -156,7 +156,17 @@ describe.skipIf(!enabled)('signed native TypeScript publish verifier', () => {
 
   it('refuses a signature without the hardened runtime', async () => {
     const executable = await signedCopy('tsc.no-runtime', ['--identifier', SIGNED_NATIVE_TYPESCRIPT_IDENTIFIER]);
-    expect(await violations(executable)).toEqual(['hardened runtime flag is not set']);
+    expect(await violations(executable)).toEqual([
+      'hardened runtime flag is not set',
+      'kill flag is not set',
+      'hard flag is not set',
+    ]);
+  });
+
+  it('refuses a hardened runtime signature without the kill and hard flags', async () => {
+    const runtimeOnly = ['--options', 'runtime', '--identifier', SIGNED_NATIVE_TYPESCRIPT_IDENTIFIER];
+    const executable = await signedCopy('tsc.runtime-only', runtimeOnly);
+    expect(await violations(executable)).toEqual(['kill flag is not set', 'hard flag is not set']);
   });
 
   it('refuses an extra CodeDirectory', async () => {

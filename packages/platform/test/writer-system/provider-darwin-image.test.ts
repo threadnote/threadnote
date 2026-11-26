@@ -68,9 +68,9 @@ beforeAll(() => {
     '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>com.apple.security.get-task-allow</key><true/></dict></plist>',
   );
   const source = join(directory, 'program');
-  variant('runtime', source, ['--options', 'runtime', '--identifier', 'dev.threadnote.image-test']);
-  // Explicit kill and hard flags: some kernels (macOS 15) do not imply CS_KILL from the hardened runtime alone.
-  variant('explicit', source, ['--options', 'runtime,kill,hard', '--identifier', 'dev.threadnote.image-test']);
+  // The release shape: explicit kill and hard flags, because macOS 15 does not imply them from the hardened runtime.
+  variant('runtime', source, ['--options', 'runtime,kill,hard', '--identifier', 'dev.threadnote.image-test']);
+  variant('kill', source, ['--options', 'kill', '--identifier', 'dev.threadnote.image-test']);
   variant('plain', source, ['--identifier', 'dev.threadnote.image-test']);
   variant('debuggable', source, ['--options', 'runtime', '--entitlements', join(directory, 'debug.plist')]);
   // Same CodeDirectory as `runtime`, one changed byte in the marker page: the cdhash still matches.
@@ -82,12 +82,6 @@ beforeAll(() => {
   bytes[marker + 1] = 0x58;
   writeFileSync(tampered, bytes);
   signed.tampered = {path: tampered, cdhash: signed.runtime.cdhash};
-  const explicitTampered = join(directory, 'explicit-tampered');
-  copyFileSync(signed.explicit.path, explicitTampered);
-  const explicitBytes = readFileSync(explicitTampered);
-  explicitBytes[explicitBytes.indexOf('REVIEWED-PAGE') + 1] = 0x58;
-  writeFileSync(explicitTampered, explicitBytes);
-  signed['explicit-tampered'] = {path: explicitTampered, cdhash: signed.explicit.cdhash};
   const plainTampered = join(directory, 'plain-tampered');
   copyFileSync(signed.plain.path, plainTampered);
   const plainBytes = readFileSync(plainTampered);
@@ -122,6 +116,15 @@ async function launch(name: string, image: RuntimeOwnedProviderExpectedDarwinIma
   runtimeCloseOwnedProviderTree(provider.handle);
   return {output, exitCode: observation.leaderExitCode, ran: existsSync(marker)};
 }
+/** The launch result, or the typed refusal when the image check refused the image before it ran. */
+async function outcome(name: string, image: RuntimeOwnedProviderExpectedDarwinImage) {
+  try {
+    return await launch(name, image);
+  } catch (error) {
+    if (!Schema.is(RuntimeWriterFault)(error)) throw error;
+    return {reason: error.reason, check: error.check};
+  }
+}
 /** A refused launch throws the typed reason; the child was killed before it created its marker. */
 function refused(name: string, image: RuntimeOwnedProviderExpectedDarwinImage) {
   const marker = join(directory, `${name}-${(launches += 1)}.ran`);
@@ -153,7 +156,7 @@ it.skipIf(!tools)('kills a refused image while suspended and does not quarantine
   // Each refusal names the failed check, without its value.
   const cases: readonly [string, RuntimeOwnedProviderExpectedDarwinImage, string][] = [
     ['runtime', {cdhash: signed.plain.cdhash, requireRuntime: true}, 'cdhash'],
-    ['plain', {cdhash: signed.plain.cdhash, requireRuntime: true}, 'runtime'],
+    ['kill', {cdhash: signed.kill.cdhash, requireRuntime: true}, 'runtime'],
     ['debuggable', {cdhash: signed.debuggable.cdhash, requireRuntime: true}, 'entitlements'],
   ];
   for (const [name, image, check] of cases) {
@@ -166,36 +169,29 @@ it.skipIf(!tools)('kills a refused image while suspended and does not quarantine
   }
 });
 
-it.skipIf(!tools || process.arch !== 'arm64')(
-  'admits an image without the hardened runtime only when the runtime is not required',
-  async () => {
-    // arm64 kernels run every image with CS_KILL; this is the source-mode linker-signed shape.
-    await expect(launch('plain', {cdhash: signed.plain.cdhash, requireRuntime: false})).resolves.toMatchObject({
-      exitCode: 0,
-      ran: true,
-    });
-  },
-);
-
-it.skipIf(!tools)('resumes an image signed with explicit kill and hard flags and kills its tampered copy', async () => {
-  await expect(launch('explicit', {cdhash: signed.explicit.cdhash, requireRuntime: true})).resolves.toEqual({
-    output: 'ran R\n',
+it.skipIf(!tools)('admits an image with the kill flag but without the hardened runtime when it is not required', async () => {
+  await expect(launch('kill', {cdhash: signed.kill.cdhash, requireRuntime: false})).resolves.toMatchObject({
     exitCode: 0,
     ran: true,
   });
-  const result = await launch('explicit-tampered', {cdhash: signed.explicit.cdhash, requireRuntime: true});
-  expect(result.output).toBe('');
-  expect(result.exitCode).toBe(128 + 9);
 });
 
 it.skipIf(!tools || process.arch !== 'arm64')(
-  'sees the arm64 kernel kill a tampered page of an image signed without flags',
+  'admits a flag-free image only where the kernel reports that it kills changed pages',
   async () => {
-    // Kernel behavior only, without the image check: arm64 enforces executed pages whether or not CS_KILL is reported.
-    const child = Bun.spawn([signed['plain-tampered'].path], {stdout: 'pipe', stderr: 'pipe'});
-    const output = await new Response(child.stdout).text();
-    await child.exited;
-    expect({output, signal: child.signalCode}).toEqual({output: '', signal: 'SIGKILL'});
+    // The source-mode linker-signed shape. macOS 15 does not report CS_KILL for it and runs a changed page of it, so
+    // the check refuses it there. A kernel that reports CS_KILL admits it and kills its tampered copy.
+    const image = {cdhash: signed.plain.cdhash, requireRuntime: false};
+    const [plain, tampered] = [await outcome('plain', image), await outcome('plain-tampered', image)];
+    if ('reason' in plain) {
+      expect({plain, tampered}).toEqual({
+        plain: {reason: 'image-mismatch', check: 'kill'},
+        tampered: {reason: 'image-mismatch', check: 'kill'},
+      });
+    } else {
+      expect(plain).toMatchObject({output: 'ran R\n', exitCode: 0});
+      expect(tampered).toMatchObject({output: '', exitCode: 128 + 9});
+    }
   },
 );
 

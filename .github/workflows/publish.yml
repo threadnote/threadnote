@@ -358,8 +358,9 @@ jobs:
           while IFS= read -r -d '' native_file; do
             if file "$native_file" | grep -q 'Mach-O'; then
               if [[ "$native_file" == dist/runtime/typescript/tsc ]]; then
-                # The private compiler: an explicit identifier, the hardened runtime and no entitlements.
-                codesign --force --options runtime --timestamp --identifier dev.threadnote.typescript-native \
+                # The private compiler: an explicit identifier, the hardened runtime with kill and hard (macOS 15
+                # does not imply them, and the runtime image check requires them) and no entitlements.
+                codesign --force --options runtime,kill,hard --timestamp --identifier dev.threadnote.typescript-native \
                   --sign "$APPLE_SIGNING_IDENTITY" "$native_file"
               else
                 codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$native_file"

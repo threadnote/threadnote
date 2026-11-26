@@ -4,6 +4,7 @@ import {
   nativeTypeScriptHostKey,
   nativeTypeScriptReviewedBinarySha256,
 } from '@threadnote/graph/typescript_native_asset_pins';
+import {nativeTypeScriptSourceModeRefused} from '../helpers/native-typescript-session.js';
 
 // The gate decides at module load, so each case imports it in a child process with a controlled environment.
 const gate = Bun.fileURLToPath(new URL('../helpers/native-typescript-session.ts', import.meta.url));
@@ -49,7 +50,10 @@ describe('native TypeScript test gate', () => {
       // Configuration alone decides; the asset itself is verified only when a test opens a session.
       const result = load({...required, [NATIVE_TYPESCRIPT_PREPARED_ASSET_ENV]: '/configured/prepared'});
       expect(result.exitCode, result.stderr.toString()).toBe(0);
-      expect(result.stdout.toString()).toBe(pinned ? 'runs' : `no reviewed native TypeScript pin for ${host}`);
+      const configuredReason = nativeTypeScriptSourceModeRefused
+        ? 'this macOS kernel refuses the source-mode compiler (image-mismatch: kill)'
+        : 'runs';
+      expect(result.stdout.toString()).toBe(pinned ? configuredReason : `no reviewed native TypeScript pin for ${host}`);
     }
   });
 });

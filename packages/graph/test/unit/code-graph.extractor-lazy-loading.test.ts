@@ -18,6 +18,8 @@ import {
 import {
   createNativeTypeScriptTestSession,
   native,
+  nativeTypeScriptAssetUnavailable,
+  nativeTypeScriptSourceModeRefused,
   nativeTypeScriptTestAssetDirectory,
   skipWithoutNativeTypeScript,
 } from '../helpers/native-typescript-session.js';
@@ -142,7 +144,28 @@ native(it)('refuses a self-consistent manifest naming a substituted executable',
   }
 });
 
-native(it)('admits only the compiled-in signed compiler image in a signed macOS release', async context => {
+it.skipIf(nativeTypeScriptAssetUnavailable || nativeTypeScriptHostKey(process.platform, process.arch) !== 'darwin-arm64')(
+  'refuses the source-mode compiler exactly on the kernels that the test gate names',
+  async () => {
+    // The gate skips native tests where this refusal holds; here the real kernel decides it.
+    const outcome = await createNativeTypeScriptSession({
+      cwd: process.cwd(),
+      deadline: Date.now() + 30_000,
+      assetDirectory: nativeTypeScriptTestAssetDirectory(),
+    }).then(
+      async session => {
+        await session.close();
+        return 'started';
+      },
+      (error: unknown) =>
+        Schema.is(NativeTypeScriptUnavailable)(error) ? `${error.reason}: ${error.check ?? ''}` : error,
+    );
+    expect(outcome).toBe(nativeTypeScriptSourceModeRefused ? 'image-mismatch: kill' : 'started');
+  },
+);
+
+// A signed copy of the compiler: it runs also on the kernels that refuse the source-mode compiler.
+it.skipIf(nativeTypeScriptAssetUnavailable)('admits only the compiled-in signed compiler image in a signed macOS release', async context => {
   if (process.platform !== 'darwin') context.skip('Darwin signed release identity');
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'threadnote-native-signed-')));
   const host = nativeTypeScriptHostKey(process.platform, process.arch);
@@ -155,11 +178,12 @@ native(it)('admits only the compiled-in signed compiler image in a signed macOS 
       refusal,
     );
   try {
-    // A private copy signed ad-hoc the way publish signs it: hardened runtime and the explicit identifier.
+    // A private copy signed ad-hoc the way publish signs it: hardened runtime with kill and hard, explicit identifier.
     const asset = join(root, 'prepared');
     cpSync(nativeTypeScriptTestAssetDirectory(), asset, {recursive: true});
     const compiler = join(asset, 'tsc');
-    const sign = ['--force', '-s', '-', '--options', 'runtime', '--identifier', 'dev.threadnote.typescript-native'];
+    const options = ['--options', 'runtime,kill,hard', '--identifier', 'dev.threadnote.typescript-native'];
+    const sign = ['--force', '-s', '-', ...options];
     expect(Bun.spawnSync(['/usr/bin/codesign', ...sign, compiler]).exitCode).toBe(0);
     const sha256 = sha256HexSync(readFileSync(compiler));
     const shown = Bun.spawnSync(['/usr/bin/codesign', '-dvvv', compiler], {stderr: 'pipe'}).stderr.toString();

@@ -119,7 +119,7 @@ function sign(image: Unsigned, options: SignOptions = {}): Uint8Array {
   view.setUint32(0, 0xfade0c02);
   view.setUint32(4, cdLength);
   view.setUint32(8, 0x20500);
-  view.setUint32(12, options.flags ?? 0x10002);
+  view.setUint32(12, options.flags ?? 0x10302);
   view.setUint32(16, hashOffset);
   view.setUint32(20, identOffset);
   view.setUint32(24, nSpecial);
@@ -228,7 +228,7 @@ describe('embedded signature', () => {
     const signature = machoCodeSignature(signed, CPU_TYPE_ARM64);
     expect(signature).toMatchObject({
       identifier: 'dev.threadnote.typescript-native',
-      flags: 0x10002,
+      flags: 0x10302,
       pageSize: 4096,
       codeDirectories: 1,
       slots: [0, 2, 0x10000],
@@ -252,8 +252,13 @@ describe('embedded signature', () => {
     expect(alternate).toContain('forbidden superblob slot 0x1000');
     expect(alternate).toContain('expected one CodeDirectory, found 2');
     expect(violations({execSegFlags: 0x11n})).toEqual(['execSegFlags 0x11']);
-    expect(violations({flags: 0x2})).toEqual(['hardened runtime flag is not set']);
-    expect(violations({flags: 0x10102})).toEqual(['CodeDirectory flags 0x10102']);
+    expect(violations({flags: 0x2})).toEqual([
+      'hardened runtime flag is not set',
+      'kill flag is not set',
+      'hard flag is not set',
+    ]);
+    expect(violations({flags: 0x10002})).toEqual(['kill flag is not set', 'hard flag is not set']);
+    expect(violations({flags: 0x10b02})).toEqual(['CodeDirectory flags 0x10b02']);
     expect(violations({identifier: 'a.out'})).toEqual(['identifier "a.out" is not "dev.threadnote.typescript-native"']);
     const tampered = sign(unsignedImage());
     tampered[TEXT - 100] ^= 1;

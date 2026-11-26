@@ -2,6 +2,7 @@ import {Effect, Layer} from 'effect';
 import {it as vitestIt} from 'vitest';
 import * as EffectString from 'effect/String';
 import {realpathSync} from '@threadnote/testing/node-fs';
+import {release} from '@threadnote/testing/node-os';
 import {
   createNativeTypeScriptSession,
   NativeTypeScriptSessionService,
@@ -30,11 +31,25 @@ if (required && pinned && configured === undefined)
   throw new Error(
     `${host} must provide ${NATIVE_TYPESCRIPT_PREPARED_ASSET_ENV} when native TypeScript tests are required (${NATIVE_TYPESCRIPT_REQUIRED_ENV} or CI): they never skip on a reviewed-pin host there.`,
   );
-export const nativeTypeScriptSkipReason: string | undefined = !pinned
+const assetSkipReason: string | undefined = !pinned
   ? `no reviewed native TypeScript pin for ${host}`
   : configured === undefined
     ? `${NATIVE_TYPESCRIPT_PREPARED_ASSET_ENV} is not set`
     : undefined;
+/** The prepared asset is missing or the host has no pin; a signed copy of the compiler can still not be tested. */
+export const nativeTypeScriptAssetUnavailable = assetSkipReason !== undefined;
+/**
+ * macOS 15 (Darwin 24) and earlier do not report CS_KILL for the linker-signed reviewed compiler and run a changed page
+ * of such an image, so the runtime refuses it there: only a signed release runs native TypeScript on those kernels.
+ * A test in code-graph.extractor-lazy-loading.test.ts proves this predicate against the real kernel.
+ */
+export const nativeTypeScriptSourceModeRefused =
+  host === 'darwin-arm64' && Number(EffectString.split('.')(release())[0]) <= 24;
+export const nativeTypeScriptSkipReason: string | undefined =
+  assetSkipReason ??
+  (nativeTypeScriptSourceModeRefused
+    ? 'this macOS kernel refuses the source-mode compiler (image-mismatch: kill)'
+    : undefined);
 export const nativeTypeScriptUnavailable = nativeTypeScriptSkipReason !== undefined;
 
 let skipReported = false;

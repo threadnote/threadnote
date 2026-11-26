@@ -6,7 +6,7 @@
  * - the signed code is the reviewed code: arm64 `macho-code-v1` equals the reviewed canonical digest, and x64
  *   `unsigned-origin-v1` restores the exact reviewed unsigned bytes;
  * - the signature policy holds: one SHA-256 CodeDirectory, no alternate CodeDirectory, no entitlements, hardened
- *   runtime, MAIN_BINARY exec-segment flags only, the explicit identifier, every page hash and every special slot;
+ *   runtime with the kill and hard flags, MAIN_BINARY exec-segment flags only, the explicit identifier, every page hash and every special slot;
  * - every `__LINKEDIT` data reference ends at or before `dataoff`;
  * - `codesign --verify --strict` accepts the Developer ID requirement for the committed release Team ID.
  * It then records the exact signed SHA-256 and cdhash. `scripts/build.ts --relink-signed-native-typescript` compiles
