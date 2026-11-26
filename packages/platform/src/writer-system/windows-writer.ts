@@ -873,6 +873,11 @@ export function openWindowsPrivateDirectory(path: string): WindowsPrivateDirecto
   const expected = native.lstatSync(path, {bigint: true});
   return privateDirectory(openRootState(path, expected, true), true);
 }
+/**
+ * The account home is owned by the user or by LocalSystem: the User Profile Service creates profiles as SYSTEM, which
+ * can already override every ACL on the host. Its DACL policy is unchanged; Administrators as owner is not accepted.
+ */
+const WINDOWS_LOCAL_SYSTEM_SID = 'S-1-5-18';
 function openWindowsAccountHome(accountHome: string, principal: string): WindowsPrivateDirectory {
   const current = windowsTokenPrincipal();
   if (current.sid !== principal || current.accountHome !== accountHome) return fail('identity');
@@ -880,7 +885,8 @@ function openWindowsAccountHome(accountHome: string, principal: string): Windows
   const state = openRootState(accountHome, expected, true);
   const home = privateDirectory(state, false);
   try {
-    if (state.resources.principal !== principal || state.chain[state.chain.length - 1].security.owner !== principal)
+    const owner = state.chain[state.chain.length - 1].security.owner;
+    if (state.resources.principal !== principal || (owner !== principal && owner !== WINDOWS_LOCAL_SYSTEM_SID))
       return fail('identity');
     return home;
   } catch (error) {

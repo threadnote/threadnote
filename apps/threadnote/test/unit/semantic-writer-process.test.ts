@@ -1302,7 +1302,7 @@ effectIt.effect.skipIf(process.platform !== 'win32')(
 
 // Setup may provision missing protected children beneath the actual OS account home, never repair that home's ACL.
 effectIt.effect.skipIf(process.platform !== 'win32')(
-  'cold Windows setup creates its private home from the actual account-home owner while inspection stays read-only',
+  'cold Windows setup creates its private home under an account home owned by the user or SYSTEM while inspection stays read-only',
   () =>
     Effect.gen(function* () {
       const f = yield* fixture;
