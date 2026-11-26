@@ -18,7 +18,7 @@ import {CodeGraphParserPool} from '@threadnote/graph/parser_worker';
 import {CodeGraphObservability, CodeGraphProcessActivity} from '@threadnote/graph/runtime_ports';
 import {CodeGraphStore} from '@threadnote/graph/store';
 import {TreeSitterRuntime} from '@threadnote/graph/tree_sitter/runtime';
-import type {CodeGraphIndexSummary, CodeGraphProjectCoverage} from '@threadnote/graph/types';
+import type {CodeGraphIndexSummary, CodeGraphProjectCoverage, CodeGraphNavigationProof} from '@threadnote/graph/types';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
@@ -36,6 +36,10 @@ import {selectContextBriefNavigationMemory} from '../../src/memory-evidence.js';
 import type {ContextBriefMemoryCandidateV1, ContextBriefMemoryRetrievalV1} from '../../src/types.js';
 import * as navigationFacts from '@threadnote/graph/query/navigation_facts';
 import {native} from '@threadnote/graph/test/helpers/native-typescript-session';
+const typeScriptProof = (proof: CodeGraphNavigationProof) => {
+  if (proof.module !== 'node:fs/promises') throw new Error('Expected a TypeScript proof.');
+  return proof;
+};
 
 effectIt.layer(citationPlatformLayer)(it => {
   describe('navigation caller-owned acquisition deadline', () => {
@@ -906,7 +910,7 @@ effectIt.layer(dependencies)('with a physical graph fixture', it => {
               }),
             );
             for (const span of [
-              acquired.proofs[0].proof.importSpan,
+              typeScriptProof(acquired.proofs[0].proof).importSpan,
               acquired.proofs[0].proof.callSpan,
               acquired.proofs[0].proof.calleeSpan,
               acquired.proofs[0].proof.targetSpan,
@@ -992,7 +996,7 @@ effectIt.layer(dependencies)('with a physical graph fixture', it => {
         let remaining = 3;
         const acquired = yield* retrieveNavigationSourceProofs({...f, acquireRead: Effect.sync(() => remaining-- > 0)});
         expect(acquired.proofs).toHaveLength(2);
-        expect(acquired.proofs[0].proof.importSpan.line).toBe(81);
+        expect(typeScriptProof(acquired.proofs[0].proof).importSpan.line).toBe(81);
         expect(acquired.proofs[0].proof.ownerSpan.line).toBe(166);
         expect(EffectArray.filter(acquired.source.excerpts, excerpt => excerpt.path === 'operation.ts')).toHaveLength(
           2,

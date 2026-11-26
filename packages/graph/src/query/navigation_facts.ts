@@ -2,9 +2,18 @@ import {Array as EffectArray, Clock, Effect, Predicate} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {withFreshCodeGraphReadTransaction} from '../store/session.js';
 import {decodeStoredCodeGraphFact} from '../fact/storage.js';
+import {navigationProofEdgeSpan} from '../navigation_facts.js';
 import type {CodeGraphNavigationFacts, CodeGraphQueryResult, CodeGraphSpan} from '../types.js';
 
 export const NAVIGATION_PROOF_CACHE_IDENTITY = '000a8482e17588280b7e9ab3d24acbe7ff0854e985379f6fbf4ecf9ec05345d4';
+/** The Python pack identity that carries open-write proofs; any Python pack policy change must update it. */
+export const PYTHON_NAVIGATION_PROOF_CACHE_IDENTITY =
+  '03c1df2f585574c6acb78aecba033b50b69470b12fc64d27dd9c7a7e0a1c7937';
+/** The extractor pack that owns proofs for a path; other files have no navigation proof capability. */
+export function navigationProofPack(path: string): 'typescript' | 'python' | null {
+  if (/\.(?:[cm]?[jt]s|[jt]sx)$/iu.test(path)) return 'typescript';
+  return /\.pyi?$/iu.test(path) ? 'python' : null;
+}
 const BYTE_LIMIT = 1024 * 1024;
 const FILE_LIMIT = 3;
 const OWNER_LIMIT = 24;
@@ -76,13 +85,13 @@ const effectiveReadyCte = `WITH selected AS MATERIALIZED (
         AND base.repository_id = current.repository_id AND base.extractor_set = current.extractor_set))
   LIMIT 1
 ), requested AS (SELECT value FROM json_each(?)), files AS MATERIALIZED (
-  SELECT file.path, file.content_hash
+  SELECT file.path, file.content_hash, json_extract(requested.value, '$.packId') AS pack_id
   FROM requested CROSS JOIN selected
   CROSS JOIN snapshot_files AS file WHERE file.snapshot_id = selected.id
     AND file.path = json_extract(requested.value, '$.path')
     AND file.content_hash = json_extract(requested.value, '$.contentHash')
   UNION ALL
-  SELECT file.path, file.content_hash
+  SELECT file.path, file.content_hash, json_extract(requested.value, '$.packId') AS pack_id
   FROM requested CROSS JOIN selected
   CROSS JOIN snapshot_files AS file WHERE file.snapshot_id = selected.base_snapshot_id
     AND file.path = json_extract(requested.value, '$.path')
@@ -119,16 +128,21 @@ export const navigationFactMetadataSql = `${effectiveReadyCte},
   owner_ids AS (SELECT value FROM json_each(?)), call_ids AS (SELECT value FROM json_each(?)),
   owners AS MATERIALIZED (${anchorBranches('symbols', 'owner_ids')}),
   calls AS MATERIALIZED (${anchorBranches('edges', 'call_ids')}),
-  pack AS MATERIALIZED (
-    SELECT provenance.cache_identity FROM selected
-    CROSS JOIN snapshot_pack_provenance AS provenance ON provenance.snapshot_id = selected.id AND provenance.pack_id = 'typescript'
+  packs AS MATERIALIZED (
+    SELECT provenance.pack_id, provenance.cache_identity FROM selected
+    CROSS JOIN snapshot_pack_provenance AS provenance ON provenance.snapshot_id = selected.id
     CROSS JOIN snapshot_extractor_generations AS generation ON generation.snapshot_id = selected.id AND generation.generation = 14
-    WHERE provenance.cache_identity = '${NAVIGATION_PROOF_CACHE_IDENTITY}'
-      AND provenance.resolution_domain = 'typescript'
-      AND provenance.resolution_version = 'typescript-modules-v2-published-surface'
+    WHERE ((provenance.pack_id = 'typescript'
+        AND provenance.cache_identity = '${NAVIGATION_PROOF_CACHE_IDENTITY}'
+        AND provenance.resolution_domain = 'typescript'
+        AND provenance.resolution_version = 'typescript-modules-v2-published-surface')
+      OR (provenance.pack_id = 'python'
+        AND provenance.cache_identity = '${PYTHON_NAVIGATION_PROOF_CACHE_IDENTITY}'
+        AND provenance.resolution_domain = 'python'
+        AND provenance.resolution_version = 'python-static-v1'))
       AND (SELECT COUNT(*) FROM snapshot_pack_provenance AS duplicate
-        WHERE duplicate.snapshot_id = selected.id AND duplicate.pack_id = 'typescript') = 1
-    LIMIT 1
+        WHERE duplicate.snapshot_id = selected.id AND duplicate.pack_id = provenance.pack_id) = 1
+    LIMIT 2
   )
   SELECT 'fact' AS kind, effective_file.path, effective_file.content_hash, NULL AS id, pack.cache_identity,
     length(CAST(blob.facts_json AS BLOB)) AS stored_bytes,
@@ -149,7 +163,7 @@ export const navigationFactMetadataSql = `${effectiveReadyCte},
         ELSE 1 END END ELSE 0 END END AS valid,
     pack.cache_identity IS NOT NULL AS capability, blob.path_hint IS NOT NULL AS present,
     NULL AS span_json, NULL AS source_id, NULL AS target_name
-  FROM files AS effective_file LEFT JOIN pack ON 1
+  FROM files AS effective_file LEFT JOIN packs AS pack ON pack.pack_id = effective_file.pack_id
   LEFT JOIN file_blobs AS blob ON blob.path_hint = effective_file.path AND blob.content_hash = effective_file.content_hash AND blob.extractor_set = pack.cache_identity
     AND EXISTS (SELECT 1 FROM file_blob_authority AS authority WHERE authority.extractor_set = blob.extractor_set
       AND authority.path_hint = effective_file.path AND authority.content_hash = effective_file.content_hash)
@@ -243,7 +257,9 @@ export const readCodeGraphNavigationFacts = Effect.fn('codeGraph.readNavigationF
       snapshot.worktreeId,
       snapshot.commit,
       snapshot.dirty ? 1 : 0,
-      JSON.stringify(selectors),
+      JSON.stringify(
+        EffectArray.map(selectors, selector => ({...selector, packId: navigationProofPack(selector.path)})),
+      ),
       JSON.stringify(owners),
       JSON.stringify(calls),
     ]);
@@ -361,7 +377,7 @@ export const readCodeGraphNavigationFacts = Effect.fn('codeGraph.readNavigationF
           calls[0].source_id === proof.ownerId &&
           calls[0].target_name === proof.local &&
           spanMatches(owners[0].span_json, proof.ownerSpan) &&
-          spanMatches(calls[0].span_json, proof.callSpan)
+          spanMatches(calls[0].span_json, navigationProofEdgeSpan(proof))
         );
       });
       const complete = proofs.length === facts.proofs.length;

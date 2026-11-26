@@ -124,19 +124,32 @@ export interface CodeGraphEdge {
   readonly targetName: string;
 }
 
-export interface CodeGraphNavigationProof {
+interface CodeGraphNavigationProofBase {
   readonly ownerId: string;
   readonly ownerSpan: CodeGraphSpan;
   readonly callEdgeId: string;
-  readonly module: 'node:fs/promises';
-  readonly imported: 'writeFile';
   readonly local: string;
-  readonly importSpan: CodeGraphSpan;
   readonly callSpan: CodeGraphSpan;
   readonly calleeSpan: CodeGraphSpan;
   readonly targetSpan: CodeGraphSpan;
   readonly guard: {readonly span: CodeGraphSpan; readonly branch: 'then' | 'else'};
 }
+
+/** TypeScript: an awaited `writeFile` imported from `node:fs/promises`. */
+export interface CodeGraphTypeScriptWriteProof extends CodeGraphNavigationProofBase {
+  readonly module: 'node:fs/promises';
+  readonly imported: 'writeFile';
+  readonly importSpan: CodeGraphSpan;
+}
+
+/** Python: the unshadowed builtin `open` with a literal write mode, opened in a `with` statement. */
+export interface CodeGraphPythonOpenWriteProof extends CodeGraphNavigationProofBase {
+  readonly module: 'builtins';
+  readonly imported: 'open';
+  readonly modeSpan: CodeGraphSpan;
+}
+
+export type CodeGraphNavigationProof = CodeGraphTypeScriptWriteProof | CodeGraphPythonOpenWriteProof;
 
 export interface CodeGraphNavigationFacts {
   readonly version: 1;
