@@ -16,9 +16,11 @@ export class RuntimeWriterFault extends Schema.TaggedError<RuntimeWriterFault, {
       // The kernel did not report the code identity of a Darwin child, which was refused before it ran.
       'code-signature-unavailable',
     ]),
+    // Value-free name of the Darwin image check behind an `image-mismatch`; it never carries a flag or digest value.
+    check: Schema.optionalKey(Schema.Literals(['entitlements', 'valid', 'kill', 'runtime', 'debuggable', 'cdhash'])),
   },
 ) {}
 
-export const writerFail = (reason: RuntimeWriterFault['reason']): never => {
-  throw RuntimeWriterFault.make({reason});
+export const writerFail = (reason: RuntimeWriterFault['reason'], check?: RuntimeWriterFault['check']): never => {
+  throw RuntimeWriterFault.make({reason, ...(check === undefined ? {} : {check})});
 };

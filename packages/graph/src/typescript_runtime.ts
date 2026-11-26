@@ -161,7 +161,7 @@ const NativeTypeScriptRefusal = Schema.Literals([
   'code-signature-unavailable',
 ]);
 export type NativeTypeScriptRefusal = typeof NativeTypeScriptRefusal.Type;
-/** Value-free name of the reviewed-asset check behind a `pin-mismatch`; it never carries a path or digest. */
+/** Value-free name of the check behind a `pin-mismatch` or an `image-mismatch`; it never carries a path, flag or digest. */
 const NativeTypeScriptPinCheck = Schema.Literals([
   // The manifest's binary digest is not this host's reviewed pin, or it names another executable.
   'manifest-binary',
@@ -174,6 +174,13 @@ const NativeTypeScriptPinCheck = Schema.Literals([
   'tree-digest',
   // The compiled-in signed release identity is malformed or names another host.
   'signed-identity',
+  // The Darwin kernel check behind an `image-mismatch`: entitlements, a missing or forbidden status flag, or the cdhash.
+  'entitlements',
+  'valid',
+  'kill',
+  'runtime',
+  'debuggable',
+  'cdhash',
 ]);
 export type NativeTypeScriptPinCheck = typeof NativeTypeScriptPinCheck.Type;
 /** A session-level (transport, budget, protocol or admission) failure, never a caller callback's own error. */
@@ -934,7 +941,7 @@ function nativeExecutableIdentity(native: NativePlatform): NativeTypeScriptExecu
 function nativeSpawnRefusal(native: NativePlatform, error: unknown): unknown {
   if (!Schema.is(native.RuntimeWriterFault)(error)) return error;
   return error.reason === 'image-mismatch' || error.reason === 'code-signature-unavailable'
-    ? nativeApiError(error.reason)
+    ? NativeTypeScriptUnavailable.of(error.reason, error.check)
     : error;
 }
 async function admitNativeTypeScriptAsset(

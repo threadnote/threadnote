@@ -91,16 +91,15 @@ function assertDarwinImage(pid: number, image: RuntimeOwnedProviderExpectedDarwi
         lib.symbols.csops(pid, operation, blob, 16n) !== 0 ||
         !(header.every(value => value === 0xa5) || header.every(value => value === 0))
       )
-        fail('image-mismatch');
+        fail('image-mismatch', 'entitlements');
     }
-    const flags = status[0],
-      required = CS_VALID | CS_KILL | (image.requireRuntime ? CS_HARD | CS_RUNTIME : 0);
-    if (
-      (flags & required) !== required ||
-      (flags & (CS_GET_TASK_ALLOW | CS_DEBUGGED)) !== 0 ||
-      Buffer.from(cdhash).toString('hex') !== image.cdhash
-    )
-      fail('image-mismatch');
+    const flags = status[0];
+    if ((flags & CS_VALID) === 0) fail('image-mismatch', 'valid');
+    if ((flags & CS_KILL) === 0) fail('image-mismatch', 'kill');
+    if (image.requireRuntime && (flags & (CS_HARD | CS_RUNTIME)) !== (CS_HARD | CS_RUNTIME))
+      fail('image-mismatch', 'runtime');
+    if ((flags & (CS_GET_TASK_ALLOW | CS_DEBUGGED)) !== 0) fail('image-mismatch', 'debuggable');
+    if (Buffer.from(cdhash).toString('hex') !== image.cdhash) fail('image-mismatch', 'cdhash');
   } finally {
     lib.close();
   }

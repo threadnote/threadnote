@@ -111,7 +111,7 @@ async function launch(name: string, image: RuntimeOwnedProviderExpectedDarwinIma
 /** A refused launch throws the typed reason; the child was killed before it created its marker. */
 function refused(name: string, image: RuntimeOwnedProviderExpectedDarwinImage) {
   const marker = join(directory, `${name}-${(launches += 1)}.ran`);
-  let reason: string | undefined;
+  let reason: string | undefined, check: string | undefined;
   try {
     runtimeSpawnOwnedProviderTree({
       command: signed[name].path,
@@ -122,8 +122,9 @@ function refused(name: string, image: RuntimeOwnedProviderExpectedDarwinImage) {
     });
   } catch (error) {
     reason = Schema.is(RuntimeWriterFault)(error) ? error.reason : String(error);
+    check = Schema.is(RuntimeWriterFault)(error) ? error.check : undefined;
   }
-  return {reason, ran: existsSync(marker)};
+  return {reason, check, ran: existsSync(marker)};
 }
 
 it.skipIf(!tools)('resumes an image the kernel reports with the expected cdhash and hardened runtime', async () => {
@@ -135,13 +136,14 @@ it.skipIf(!tools)('resumes an image the kernel reports with the expected cdhash 
 });
 
 it.skipIf(!tools)('kills a refused image while suspended and does not quarantine the next launch', async () => {
-  const cases: readonly [string, RuntimeOwnedProviderExpectedDarwinImage][] = [
-    ['runtime', {cdhash: signed.plain.cdhash, requireRuntime: true}],
-    ['plain', {cdhash: signed.plain.cdhash, requireRuntime: true}],
-    ['debuggable', {cdhash: signed.debuggable.cdhash, requireRuntime: true}],
+  // Each refusal names the failed check, without its value.
+  const cases: readonly [string, RuntimeOwnedProviderExpectedDarwinImage, string][] = [
+    ['runtime', {cdhash: signed.plain.cdhash, requireRuntime: true}, 'cdhash'],
+    ['plain', {cdhash: signed.plain.cdhash, requireRuntime: true}, 'runtime'],
+    ['debuggable', {cdhash: signed.debuggable.cdhash, requireRuntime: true}, 'entitlements'],
   ];
-  for (const [name, image] of cases) {
-    expect(refused(name, image), name).toEqual({reason: 'image-mismatch', ran: false});
+  for (const [name, image, check] of cases) {
+    expect(refused(name, image), name).toEqual({reason: 'image-mismatch', check, ran: false});
     // The refused child was reaped within the bound, so the very next launch is admitted.
     await expect(launch('runtime', {cdhash: signed.runtime.cdhash, requireRuntime: true})).resolves.toMatchObject({
       exitCode: 0,

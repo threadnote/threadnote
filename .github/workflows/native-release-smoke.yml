@@ -136,7 +136,8 @@ jobs:
       - name: Darwin signed native TypeScript identity components
         # Bazel shards run on Linux only. These need macOS (codesign, clang, csops) and the restored prepared asset,
         # which also exports THREADNOTE_NATIVE_TYPESCRIPT_REQUIRED, so a missing tool or asset fails instead of skipping.
-        if: runner.os == 'macOS'
+        # They also run after a failed earlier test step, so a kernel identity refusal there is diagnosed here.
+        if: ${{ !cancelled() && runner.os == 'macOS' && steps.native-typescript.outcome == 'success' }}
         run: >-
           bun --bun vitest run
           packages/platform/test/writer-system/provider-darwin-image.test.ts
