@@ -53,6 +53,7 @@ import {
   explicitParserWorkerCapacity,
   nativeParserWorkerCapacity,
   parserWorkerCapacity,
+  type CodeGraphParserLanePlan,
   type ParserWorkerEnvironment,
 } from './parser_worker_capacity.js';
 
@@ -62,6 +63,9 @@ export {
   CODE_GRAPH_PARSER_WORKERS_ENV,
   nativeParserWorkerCapacity,
   parserWorkerCapacity,
+  plannedGeneralParserLanes,
+  warmPlannedParserCapacity,
+  type CodeGraphParserLanePlan,
   type ParserWorkerCapacityInput,
 } from './parser_worker_capacity.js';
 export const CODE_GRAPH_PARSER_TIMEOUT_ENV = 'THREADNOTE_CODE_GRAPH_PARSER_TIMEOUT_MS';
@@ -254,12 +258,6 @@ export class ParserWorkerConfigurationError extends Schema.TaggedError<
 
 /** A native lane may run a native TypeScript compiler pair; a general lane never does. */
 export type CodeGraphParserLane = 'native' | 'general';
-/** Which kinds of planned parser work exist: native TypeScript, and every other parser-bound language. */
-export interface CodeGraphParserLanePlan {
-  readonly native: boolean;
-  readonly general: boolean;
-}
-
 export interface CodeGraphParserPoolShape {
   readonly capacity: number;
   /** Slots that may own a native TypeScript compiler; native TypeScript work runs only on them. */
@@ -293,17 +291,6 @@ export interface CodeGraphParserPoolShape {
     threadnoteHome: string,
     deadline: number,
   ) => Effect.Effect<CodeGraphSourceSequenceOutcome, never>;
-}
-
-/** Prewarm the planned lanes (every slot without evidence) with the worker kind the inventory needs. */
-export function warmPlannedParserCapacity(
-  pool: CodeGraphParserPoolShape,
-  threadnoteHome: string,
-  fileCount: number,
-  work?: {readonly nativeTypeScript: boolean; readonly general: boolean},
-): Effect.Effect<void, ParserWorkerConfigurationError> {
-  const lanes = work && {native: work.nativeTypeScript, general: work.general};
-  return fileCount <= pool.capacity ? Effect.void : pool.warm(threadnoteHome, fileCount, work?.nativeTypeScript, lanes);
 }
 
 class ParserWorkerSessionUseError<E> {
@@ -384,6 +371,17 @@ export function codeGraphParserPoolLayer(
           lane === 'general' && generalCapacity > 0 ? generalAvailable : nativeAvailable;
         // A slot always returns to the queue of its own role.
         const release = (slot: ParserWorkerSlot) => Queue.offer(queueFor(slot.role), slot);
+        // Lowest index first, so a lane reuses the worker it started instead of starting one per idle slot.
+        const takeLowest = (lane: CodeGraphParserLane) =>
+          Effect.gen(function* () {
+            const idle = [yield* Queue.take(queueFor(lane)), ...(yield* Queue.clear(queueFor(lane)))];
+            const lowest = EffectArray.reduce(idle, idle[0], (best, slot) => (slot.index < best.index ? slot : best));
+            yield* Queue.offerAll(
+              queueFor(lane),
+              EffectArray.filter(idle, slot => slot !== lowest),
+            );
+            return lowest;
+          }).pipe(Effect.uninterruptible);
         const releaseAll = (idle: readonly ParserWorkerSlot[]) => Effect.forEach(idle, release, {discard: true});
         const clearIdle = Effect.zipWith(
           Queue.clear(nativeAvailable),
@@ -398,7 +396,9 @@ export function codeGraphParserPoolLayer(
         // work only without general slots, as the materializer schedules them.
         const runsPlannedLane = (slot: ParserWorkerSlot, lanes: CodeGraphParserLanePlan | undefined) =>
           lanes === undefined ||
-          (slot.role === 'native' ? lanes.native || (lanes.general && generalCapacity === 0) : lanes.general);
+          (slot.role === 'native'
+            ? lanes.native || (lanes.general && generalCapacity === 0)
+            : lanes.general && slot.index < nativeCapacity + (lanes.generalSlots ?? generalCapacity));
         const lockRange = (slot: ParserWorkerSlot) =>
           slot.role === 'native' ? {first: 0, count: nativeCapacity} : {first: nativeCapacity, count: generalCapacity};
         const degradedResult = (file: CodeGraphInventoryFile, cause: unknown): CodeGraphParserResult => {
@@ -477,7 +477,7 @@ export function codeGraphParserPoolLayer(
           const budgeted = sourceBudgetResult(file);
           if (budgeted !== undefined) return Effect.succeed(budgeted);
           return Effect.acquireUseRelease(
-            Queue.take(queueFor(isNativeTypeScriptSource(file.path) ? 'native' : 'general')),
+            takeLowest(isNativeTypeScriptSource(file.path) ? 'native' : 'general'),
             slot =>
               globalSlot(slot, threadnoteHome, extractFromSlot(slot, file, threadnoteHome)).pipe(
                 Effect.catch(cause => Effect.succeed(degradedResult(file, cause))),
@@ -495,7 +495,7 @@ export function codeGraphParserPoolLayer(
               const planned = workPlan(files);
               return planned.required
                 ? Effect.acquireUseRelease(
-                    Queue.take(queueFor(lane)),
+                    takeLowest(lane),
                     slot => {
                       // A general lane never warms or upgrades to a native compiler pair.
                       const warmNative = planned.nativeTypeScript && lane === 'native' && slot.role === 'native';
@@ -566,7 +566,7 @@ export function codeGraphParserPoolLayer(
               Date.now() >= deadline || Buffer.byteLength(request.text, 'utf8') > maxSourceBytes
                 ? Effect.succeed(sourceSequenceUnavailable)
                 : Effect.acquireUseRelease(
-                    Queue.take(nativeAvailable),
+                    takeLowest('native'),
                     slot =>
                       globalSlot(slot, threadnoteHome, slot.projectSourceSequence(request, threadnoteHome, deadline)),
                     release,

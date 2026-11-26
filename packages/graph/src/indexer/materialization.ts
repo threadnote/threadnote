@@ -48,6 +48,7 @@ import {codeGraphDiskReservationLockPath, codeGraphDiskReservationRoot, type Cod
 import {compareCodeUnits} from '../ordering.js';
 import {codeGraphScopeIdentitySuffix, type CodeGraphScopeIdentity} from '../scope/identity.js';
 import {budgetParserWorkerFacts, type CodeGraphParserPoolShape, type CodeGraphParserResult} from '../parser_worker.js';
+import {windowGeneralParserLanes} from '../parser_worker_capacity.js';
 import {isNativeTypeScriptSource} from '../typescript_runtime.js';
 import {
   codeGraphExtractionWorkUnits,
@@ -606,8 +607,13 @@ export function cacheContentBatch(options: {
               nativeCapacity,
               generalCapacity === 0 ? groupWindow.length : nativeGroups.length,
             );
+            // Only the general lanes the planned work needs run beside native lanes: each keeps a resident worker.
             const generalLanes = Math.min(
-              generalCapacity,
+              windowGeneralParserLanes(
+                {nativeCapacity, generalCapacity},
+                cumulativeContext.parserLaneWork,
+                nativeGroups.length > 0,
+              ),
               nativeCapacity === 0 ? groupWindow.length : generalGroups.length,
             );
             const groupedResults = (yield* Effect.forEach(

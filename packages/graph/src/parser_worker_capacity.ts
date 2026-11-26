@@ -1,7 +1,18 @@
+import {Effect} from 'effect';
+import type {CodeGraphParserPoolShape, ParserWorkerConfigurationError} from './parser_worker.js';
+
 export const CODE_GRAPH_PARSER_WORKERS_ENV = 'THREADNOTE_CODE_GRAPH_PARSER_WORKERS';
 export const CODE_GRAPH_NATIVE_PARSER_WORKERS_ENV = 'THREADNOTE_CODE_GRAPH_NATIVE_PARSER_WORKERS';
 
 const PARSER_WORKER_MEMORY_BYTES_PER_SLOT = 8 * 1_024 * 1_024 * 1_024;
+
+/** Which kinds of planned parser work exist: native TypeScript, and every other parser-bound language. */
+export interface CodeGraphParserLanePlan {
+  readonly native: boolean;
+  readonly general: boolean;
+  /** General slots the planned work needs (`plannedGeneralParserLanes`); every general slot when omitted. */
+  readonly generalSlots?: number;
+}
 
 export type ParserWorkerEnvironment = Readonly<Record<string, string | undefined>>;
 
@@ -53,4 +64,71 @@ export function currentHardwareConcurrency(): number {
   } catch {
     return 1;
   }
+}
+
+/**
+ * General lanes to run beside the native TypeScript lanes. Each general lane keeps a resident parser worker, so a
+ * build runs only enough of them to finish its general work, by static work units, no later than the native lanes
+ * finish theirs. Without planned native work or native slots, every general slot runs. At least one general lane runs
+ * whenever a general slot exists, so planned general work is never stranded.
+ */
+export function plannedGeneralParserLanes(
+  slots: {readonly nativeCapacity: number; readonly generalCapacity: number},
+  work: {readonly nativeWorkUnits: number; readonly generalWorkUnits: number},
+): number {
+  const generalCapacity = Number.isSafeInteger(slots.generalCapacity) ? Math.max(0, slots.generalCapacity) : 0;
+  if (generalCapacity === 0) return 0;
+  const {nativeWorkUnits, generalWorkUnits} = work;
+  if (
+    !Number.isSafeInteger(slots.nativeCapacity) ||
+    slots.nativeCapacity <= 0 ||
+    !Number.isFinite(nativeWorkUnits) ||
+    nativeWorkUnits <= 0 ||
+    !Number.isFinite(generalWorkUnits)
+  ) {
+    return generalCapacity;
+  }
+  const needed = Math.ceil((Math.max(0, generalWorkUnits) * slots.nativeCapacity) / nativeWorkUnits);
+  return Math.min(generalCapacity, Math.max(1, needed));
+}
+
+/**
+ * General lanes for one extraction window. A window without native work also takes the idle native share, so it keeps
+ * the busy lane count of a mixed window. Without a plan, or without native slots, every general slot runs.
+ */
+export function windowGeneralParserLanes(
+  slots: {readonly nativeCapacity: number; readonly generalCapacity: number},
+  work: {readonly nativeWorkUnits: number; readonly generalWorkUnits: number} | undefined,
+  windowHasNativeWork: boolean,
+): number {
+  if (work === undefined || slots.nativeCapacity <= 0) return Math.max(0, slots.generalCapacity);
+  const planned = plannedGeneralParserLanes(slots, work);
+  return Math.min(planned + (windowHasNativeWork ? 0 : slots.nativeCapacity), Math.max(0, slots.generalCapacity));
+}
+
+/** Prewarm the planned lanes (every slot without evidence) with the worker kind the inventory needs. */
+export function warmPlannedParserCapacity(
+  pool: CodeGraphParserPoolShape,
+  threadnoteHome: string,
+  fileCount: number,
+  work?: {
+    readonly nativeTypeScript: boolean;
+    readonly general: boolean;
+    readonly nativeWorkUnits?: number;
+    readonly generalWorkUnits?: number;
+  },
+): Effect.Effect<void, ParserWorkerConfigurationError> {
+  const generalSlots =
+    work?.nativeWorkUnits === undefined || work.generalWorkUnits === undefined
+      ? undefined
+      : plannedGeneralParserLanes(
+          {nativeCapacity: pool.nativeCapacity, generalCapacity: pool.capacity - pool.nativeCapacity},
+          {nativeWorkUnits: work.nativeWorkUnits, generalWorkUnits: work.generalWorkUnits},
+        );
+  const lanes = work && {
+    native: work.nativeTypeScript,
+    general: work.general,
+    ...(generalSlots === undefined ? {} : {generalSlots}),
+  };
+  return fileCount <= pool.capacity ? Effect.void : pool.warm(threadnoteHome, fileCount, work?.nativeTypeScript, lanes);
 }

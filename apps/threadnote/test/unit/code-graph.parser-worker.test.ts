@@ -24,6 +24,7 @@ import {
   nativeParserWorkerCapacity,
   parserWorkerCapacity,
   parserWorkerResourceBudget,
+  plannedGeneralParserLanes,
   parserWorkerSourceByteBudget,
   parserWorkerSuccessResponseBytes,
   warmPlannedParserCapacity,
@@ -235,6 +236,16 @@ describe('code graph parser worker pool', () => {
     const nativeOverride = (value: string) =>
       nativeParserWorkerCapacity(4, {THREADNOTE_CODE_GRAPH_NATIVE_PARSER_WORKERS: value});
     expect(EffectArray.map(['3', '9', '0', 'x'], nativeOverride)).toEqual([3, 4, 1, 1]);
+    // General lanes finish the general work, by static units, no later than the native lanes; at least one runs.
+    const generalLanes = (nativeWorkUnits: number, generalWorkUnits: number, nativeCapacity = 1) =>
+      plannedGeneralParserLanes({nativeCapacity, generalCapacity: 3}, {nativeWorkUnits, generalWorkUnits});
+    expect([generalLanes(100, 0), generalLanes(100, 10), generalLanes(100, 150), generalLanes(100, 900)]).toEqual([
+      1, 1, 2, 3,
+    ]);
+    expect([generalLanes(0, 10), generalLanes(100, 10, 0), generalLanes(Number.NaN, 10)]).toEqual([3, 3, 3]);
+    expect(
+      plannedGeneralParserLanes({nativeCapacity: 1, generalCapacity: 0}, {nativeWorkUnits: 1, generalWorkUnits: 9}),
+    ).toBe(0);
   });
 
   it.effect('degrades oversized source before acquiring or launching a parser worker', () => {
@@ -545,7 +556,7 @@ describe('code graph parser worker pool', () => {
     }).pipe(provideTestLayer(baseLayer)),
   );
 
-  it.effect.each([0, 1])('falls back from preferred global slot %i held by another pool', preferredSlot =>
+  it.effect.each([0, 1])('takes a free global slot while global slot %i is held by another pool', heldSlot =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-parser-worker-preferred-busy-'});
@@ -553,7 +564,7 @@ describe('code graph parser worker pool', () => {
       const owner = yield* Effect.forkScoped(
         withExclusiveFileLock(
           fs,
-          `${home}/locks/indexes/code-graph/parser-slots/${preferredSlot}.lock`,
+          `${home}/locks/indexes/code-graph/parser-slots/${heldSlot}.lock`,
           {
             onAcquired: () => Deferred.succeed(held, undefined).pipe(Effect.asVoid),
             retryIntervalMilliseconds: 1,
@@ -574,7 +585,7 @@ describe('code graph parser worker pool', () => {
       });
       const result = yield* Effect.gen(function* () {
         const pool = yield* CodeGraphParserPool;
-        if (preferredSlot === 1) {
+        if (heldSlot === 1) {
           yield* pool.extract(inventoryFile('src/first-slot.ts', 'export const first = true;'), home);
           attempts.length = 0;
         }
@@ -588,11 +599,12 @@ describe('code graph parser worker pool', () => {
       );
 
       expect(result.degraded).toBe(false);
-      expect(EffectArray.map(attempts, path => Effect2.pipe(path, EffectString.split('/')).at(-1))).toEqual([
-        `${preferredSlot}.lock`,
-        `${1 - preferredSlot}.lock`,
-      ]);
-      expect(yield* fs.exists(`${home}/locks/indexes/code-graph/parser-slots/${preferredSlot}.lock`)).toBe(true);
+      // A held preferred lock rotates to the other lock in the range. A later request reuses idle slot 0, whose
+      // preferred lock is free, so it never tries the held lock.
+      expect(EffectArray.map(attempts, path => Effect2.pipe(path, EffectString.split('/')).at(-1))).toEqual(
+        heldSlot === 0 ? ['0.lock', '1.lock'] : ['0.lock'],
+      );
+      expect(yield* fs.exists(`${home}/locks/indexes/code-graph/parser-slots/${heldSlot}.lock`)).toBe(true);
       yield* Fiber.interrupt(owner);
     }).pipe(provideTestLayer(baseLayer)),
   );
@@ -977,7 +989,9 @@ describe('code graph parser worker pool', () => {
     {general: false, nativeTypeScript: true, native: 1, total: 1},
     {general: true, nativeTypeScript: false, native: 0, total: 3},
     {general: true, nativeTypeScript: true, native: 1, total: 4},
-  ])('warms only the lanes that planned work runs: %o', ({general, nativeTypeScript, native, total}) => {
+    {general: true, nativeTypeScript: true, nativeWorkUnits: 100, generalWorkUnits: 10, native: 1, total: 2},
+    {general: true, nativeTypeScript: true, nativeWorkUnits: 100, generalWorkUnits: 150, native: 1, total: 3},
+  ])('warms only the lanes that planned work runs: %o', ({native, total, ...work}) => {
     const launches: ParserWorkerSpawnOptions[] = [];
     const spawn: ParserWorkerSpawner = options => {
       launches.push(options);
@@ -987,9 +1001,33 @@ describe('code graph parser worker pool', () => {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-parser-worker-lane-warm-'});
       const pool = yield* CodeGraphParserPool;
-      yield* warmPlannedParserCapacity(pool, home, 8, {general, nativeTypeScript});
+      yield* warmPlannedParserCapacity(pool, home, 8, work);
       expect(launches).toHaveLength(total);
       expect(EffectArray.filter(launches, launch => launch.nativeTypeScript === true)).toHaveLength(native);
+    }).pipe(provideTestLayer(parserLayer({capacity: 4, spawnWorker: spawn})), Effect.scoped);
+  });
+
+  it.effect('reuses the started general worker across sequential general lanes', () => {
+    const launches: ParserWorkerSpawnOptions[] = [];
+    const spawn: ParserWorkerSpawner = options => {
+      launches.push(options);
+      return echoProcess();
+    };
+    return Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-parser-worker-general-reuse-'});
+      const pool = yield* CodeGraphParserPool;
+      for (const index of [0, 1, 2]) {
+        const file = inventoryFile(`src/general-${index}.json`, `{"index":${index}}`, 'json');
+        const [result] = yield* pool.withParserSlot(
+          home,
+          [file],
+          extract => Effect.forEach([file], extract),
+          'general',
+        );
+        expect(result.degraded).toBe(false);
+      }
+      expect(launches).toHaveLength(1);
     }).pipe(provideTestLayer(parserLayer({capacity: 4, spawnWorker: spawn})), Effect.scoped);
   });
 

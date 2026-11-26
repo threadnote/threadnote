@@ -96,6 +96,20 @@ export function codeGraphExtractionWorkUnits(
   return Math.min(Number.MAX_SAFE_INTEGER, Math.max(1, sourceBytes) * languageWeight * sizeWeight);
 }
 
+/** Static work units of planned parser files, split into native TypeScript work and every other parser language. */
+export function codeGraphParserLaneWork(
+  files: readonly {readonly language: string; readonly size: number; readonly native: boolean}[],
+): {readonly nativeWorkUnits: number; readonly generalWorkUnits: number} {
+  let nativeWorkUnits = 0;
+  let generalWorkUnits = 0;
+  for (const file of files) {
+    const units = codeGraphExtractionWorkUnits(file.size, file.language, codeGraphSourceSizeBucket(file.size));
+    if (file.native) nativeWorkUnits = saturatingAdd(nativeWorkUnits, units);
+    else generalWorkUnits = saturatingAdd(generalWorkUnits, units);
+  }
+  return {generalWorkUnits, nativeWorkUnits};
+}
+
 export function codeGraphExtractionPlanMetrics(
   files: readonly {readonly language: string; readonly size: number}[],
 ): CodeGraphExtractionPlanMetrics {

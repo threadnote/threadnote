@@ -92,9 +92,15 @@ export interface CodeGraphInventoryOptions {
   /** Start idle parser processes once the total uncached parser-bound input count is known, alongside the first read. */
   readonly onParserWorkPlanned?: (
     fileCount: number,
-    evidence: {readonly nativeTypeScript: boolean; readonly general: boolean},
+    evidence: {readonly nativeTypeScript: boolean; readonly general: boolean} & CodeGraphParserLaneWork,
   ) => Effect.Effect<void, unknown>;
   readonly onProgress?: (progress: CodeGraphProgress) => Effect.Effect<void, unknown>;
+}
+
+/** Static work units (`codeGraphExtractionWorkUnits`) of planned parser work, split by parser lane. */
+export interface CodeGraphParserLaneWork {
+  readonly nativeWorkUnits: number;
+  readonly generalWorkUnits: number;
 }
 
 export interface CodeGraphContentBatchContext {
@@ -102,6 +108,8 @@ export interface CodeGraphContentBatchContext {
   readonly blobReuseCounts?: ReadonlyMap<string, number>;
   /** Full path-free extraction denominator for this inventory pass. */
   readonly extractionPlan?: CodeGraphExtractionPlanMetrics;
+  /** Static work units of the planned parser work, split by parser lane, for this inventory pass. */
+  readonly parserLaneWork?: CodeGraphParserLaneWork;
   /** Counters remain at the last completed inventory boundary while this batch is extracted. */
   readonly progress: Extract<CodeGraphProgress, {readonly phase: 'scanning'}>;
   readonly readingMilliseconds: number;

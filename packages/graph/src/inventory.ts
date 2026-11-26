@@ -69,6 +69,7 @@ import {
 } from './threadnote_ignore.js';
 import {
   codeGraphExtractionPlanMetrics,
+  codeGraphParserLaneWork,
   codeGraphSourceSizeBucket,
   CODE_GRAPH_SCANNING_STARTED_PROGRESS,
 } from './progress/telemetry.js';
@@ -1374,13 +1375,14 @@ const readCommittedFiles = Effect.fn('codeGraph.readCommittedFiles')(function* (
     0,
     (count, entry) => count + (entry.parse ? 1 : 0),
   );
-  const parserWorkNativeTypeScript = EffectArray.some(
-    orderedNeedsContent,
-    entry => entry.parse && isNativeTypeScriptSource(entry.path),
-  );
-  const parserWorkGeneral = EffectArray.some(
-    orderedNeedsContent,
-    entry => entry.parse && !isNativeTypeScriptSource(entry.path),
+  // Static work units split by lane (every planned file has at least one), so the pool warms and the materializer
+  // runs only the lanes the planned work needs.
+  const parserLaneWork = codeGraphParserLaneWork(
+    EffectArray.flatMap(orderedNeedsContent, entry =>
+      entry.parse
+        ? [{...committedInventoryFile(identity, entry, languagePacks), native: isNativeTypeScriptSource(entry.path)}]
+        : [],
+    ),
   );
   let parserWorkPrepared = false;
   for (let offset = 0; offset < metadataOnlyContent.length; offset += CODE_GRAPH_CAT_FILE_BATCH_ENTRIES) {
@@ -1443,8 +1445,9 @@ const readCommittedFiles = Effect.fn('codeGraph.readCommittedFiles')(function* (
             parserWorkPrepared = true;
             return (
               onParserWorkPlanned?.(parserWorkFileCount, {
-                general: parserWorkGeneral,
-                nativeTypeScript: parserWorkNativeTypeScript,
+                general: parserLaneWork.generalWorkUnits > 0,
+                nativeTypeScript: parserLaneWork.nativeWorkUnits > 0,
+                ...parserLaneWork,
               }) ?? Effect.void
             );
           })
@@ -1502,6 +1505,7 @@ const readCommittedFiles = Effect.fn('codeGraph.readCommittedFiles')(function* (
       yield* onContentBatch?.(contentBatch, {
         ...(blobReuseCounts.size === 0 ? {} : {blobReuseCounts}),
         extractionPlan,
+        parserLaneWork,
         progress: {
           accepted: files.length,
           completed,

@@ -311,6 +311,46 @@ describe('code graph parser cache coalescer', () => {
     }),
   );
 
+  effectIt.effect('runs only the general lanes that the planned general work needs', () =>
+    Effect.gen(function* () {
+      const files = [
+        ...Array.from({length: 6}, (_, index) => cacheFile(index, 'src/alpha')),
+        ...Array.from({length: 6}, (_, index) => {
+          const file = cacheFile(100 + index, 'src/beta');
+          return {...file, language: 'json', path: EffectString.replace(/\.ts$/u, '.json')(file.path)};
+        }),
+      ];
+      const facts = (file: CodeGraphInventoryFile) =>
+        Effect.yieldNow.pipe(Effect.as({degraded: false, facts: emptyFacts(file.path), parseMilliseconds: 0}));
+      const run = (parserLaneWork?: CodeGraphContentBatchContext['parserLaneWork']) =>
+        Effect.gen(function* () {
+          const harness = coalescerHarness({capacity: 4, nativeCapacity: 1, facts});
+          yield* harness.run(files, {...cacheContext(files.length), ...(parserLaneWork ? {parserLaneWork} : {})});
+          yield* harness.flush;
+          return harness;
+        });
+      const light = yield* run({nativeWorkUnits: 100, generalWorkUnits: 10});
+      const heavy = yield* run({nativeWorkUnits: 100, generalWorkUnits: 900});
+      const unplanned = yield* run();
+      expect(EffectArray.map([light, heavy, unplanned], harness => harness.openLanes.generalPeak)).toEqual([1, 3, 3]);
+      // A window without TypeScript also takes the idle native share: one planned lane plus one native slot.
+      const generalOnly = coalescerHarness({capacity: 4, nativeCapacity: 1, facts});
+      const jsonFiles = EffectArray.filter(files, file => file.language === 'json');
+      yield* generalOnly.run(jsonFiles, {
+        ...cacheContext(jsonFiles.length),
+        parserLaneWork: {nativeWorkUnits: 100, generalWorkUnits: 10},
+      });
+      yield* generalOnly.flush;
+      expect(generalOnly.openLanes.generalPeak).toBe(2);
+      for (const harness of [heavy, unplanned]) {
+        expect(EffectArray.map(light.lanes, entry => entry.path).sort(compareCodeUnits)).toEqual(
+          EffectArray.map(harness.lanes, entry => entry.path).sort(compareCodeUnits),
+        );
+        expect(cacheCallIdentity(light.calls)).toEqual(cacheCallIdentity(harness.calls));
+      }
+    }),
+  );
+
   effectIt.effect('stops before the next cache group when the first durable receipt fails', () =>
     checkCacheGroupCheckpoint(2, 1, 'failure'),
   );
@@ -853,7 +893,7 @@ function coalescerHarness(options: {
 }) {
   const calls: CacheCall[] = [];
   const lanes: {readonly path: string; readonly lane: CodeGraphParserLane | 'direct'}[] = [];
-  const openLanes = {native: 0, general: 0, nativePeak: 0};
+  const openLanes = {native: 0, general: 0, nativePeak: 0, generalPeak: 0};
   const extractOn = (lane: CodeGraphParserLane | 'direct') => (file: CodeGraphInventoryFile) => {
     lanes.push({path: file.path, lane});
     const result = options.facts?.(file) ?? {
@@ -873,6 +913,7 @@ function coalescerHarness(options: {
         Effect.sync(() => {
           openLanes[lane] += 1;
           openLanes.nativePeak = Math.max(openLanes.nativePeak, openLanes.native);
+          openLanes.generalPeak = Math.max(openLanes.generalPeak, openLanes.general);
         }),
         () => use(extractOn(lane)),
         () => Effect.sync(() => void (openLanes[lane] -= 1)),
