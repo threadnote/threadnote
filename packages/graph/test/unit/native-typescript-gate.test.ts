@@ -53,7 +53,9 @@ describe('native TypeScript test gate', () => {
       const configuredReason = nativeTypeScriptSourceModeRefused
         ? 'this macOS kernel refuses the source-mode compiler (image-mismatch: kill)'
         : 'runs';
-      expect(result.stdout.toString()).toBe(pinned ? configuredReason : `no reviewed native TypeScript pin for ${host}`);
+      expect(result.stdout.toString()).toBe(
+        pinned ? configuredReason : `no reviewed native TypeScript pin for ${host}`,
+      );
     }
   });
 });

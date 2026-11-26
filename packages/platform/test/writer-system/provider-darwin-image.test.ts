@@ -169,12 +169,15 @@ it.skipIf(!tools)('kills a refused image while suspended and does not quarantine
   }
 });
 
-it.skipIf(!tools)('admits an image with the kill flag but without the hardened runtime when it is not required', async () => {
-  await expect(launch('kill', {cdhash: signed.kill.cdhash, requireRuntime: false})).resolves.toMatchObject({
-    exitCode: 0,
-    ran: true,
-  });
-});
+it.skipIf(!tools)(
+  'admits an image with the kill flag but without the hardened runtime when it is not required',
+  async () => {
+    await expect(launch('kill', {cdhash: signed.kill.cdhash, requireRuntime: false})).resolves.toMatchObject({
+      exitCode: 0,
+      ran: true,
+    });
+  },
+);
 
 it.skipIf(!tools || process.arch !== 'arm64')(
   'admits a flag-free image only where the kernel reports that it kills changed pages',

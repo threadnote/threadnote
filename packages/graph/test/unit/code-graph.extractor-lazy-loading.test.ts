@@ -144,70 +144,72 @@ native(it)('refuses a self-consistent manifest naming a substituted executable',
   }
 });
 
-it.skipIf(nativeTypeScriptAssetUnavailable || nativeTypeScriptHostKey(process.platform, process.arch) !== 'darwin-arm64')(
-  'refuses the source-mode compiler exactly on the kernels that the test gate names',
-  async () => {
-    // The gate skips native tests where this refusal holds; here the real kernel decides it.
-    const outcome = await createNativeTypeScriptSession({
-      cwd: process.cwd(),
-      deadline: Date.now() + 30_000,
-      assetDirectory: nativeTypeScriptTestAssetDirectory(),
-    }).then(
-      async session => {
-        await session.close();
-        return 'started';
-      },
-      (error: unknown) =>
-        Schema.is(NativeTypeScriptUnavailable)(error) ? `${error.reason}: ${error.check ?? ''}` : error,
-    );
-    expect(outcome).toBe(nativeTypeScriptSourceModeRefused ? 'image-mismatch: kill' : 'started');
-  },
-);
+it.skipIf(
+  nativeTypeScriptAssetUnavailable || nativeTypeScriptHostKey(process.platform, process.arch) !== 'darwin-arm64',
+)('refuses the source-mode compiler exactly on the kernels that the test gate names', async () => {
+  // The gate skips native tests where this refusal holds; here the real kernel decides it.
+  const outcome = await createNativeTypeScriptSession({
+    cwd: process.cwd(),
+    deadline: Date.now() + 30_000,
+    assetDirectory: nativeTypeScriptTestAssetDirectory(),
+  }).then(
+    async session => {
+      await session.close();
+      return 'started';
+    },
+    (error: unknown) =>
+      Schema.is(NativeTypeScriptUnavailable)(error) ? `${error.reason}: ${error.check ?? ''}` : error,
+  );
+  expect(outcome).toBe(nativeTypeScriptSourceModeRefused ? 'image-mismatch: kill' : 'started');
+});
 
 // A signed copy of the compiler: it runs also on the kernels that refuse the source-mode compiler.
-it.skipIf(nativeTypeScriptAssetUnavailable)('admits only the compiled-in signed compiler image in a signed macOS release', async context => {
-  if (process.platform !== 'darwin') context.skip('Darwin signed release identity');
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'threadnote-native-signed-')));
-  const host = nativeTypeScriptHostKey(process.platform, process.arch);
-  const start = (assetDirectory: string) =>
-    createNativeTypeScriptSession({cwd: process.cwd(), deadline: Date.now() + 30_000, assetDirectory}).then(
-      async session => {
-        await session.close();
-        return 'started';
-      },
-      refusal,
-    );
-  try {
-    // A private copy signed ad-hoc the way publish signs it: hardened runtime with kill and hard, explicit identifier.
-    const asset = join(root, 'prepared');
-    cpSync(nativeTypeScriptTestAssetDirectory(), asset, {recursive: true});
-    const compiler = join(asset, 'tsc');
-    const options = ['--options', 'runtime,kill,hard', '--identifier', 'dev.threadnote.typescript-native'];
-    const sign = ['--force', '-s', '-', ...options];
-    expect(Bun.spawnSync(['/usr/bin/codesign', ...sign, compiler]).exitCode).toBe(0);
-    const sha256 = sha256HexSync(readFileSync(compiler));
-    const shown = Bun.spawnSync(['/usr/bin/codesign', '-dvvv', compiler], {stderr: 'pipe'}).stderr.toString();
-    const cdhash = /^CDHash=([0-9a-f]{40})$/mu.exec(shown)?.[1];
-    // Source mode and unsigned builds accept only the reviewed bytes.
-    expect(await start(asset)).toBe('pin-mismatch');
-    vi.stubGlobal('THREADNOTE_SIGNED_NATIVE_TYPESCRIPT', {host, sha256, cdhash});
-    expect(await start(asset)).toBe('started');
-    // A signed release accepts only its signed bytes, never the reviewed unsigned original.
-    expect(await start(nativeTypeScriptTestAssetDirectory())).toBe('pin-mismatch');
-    // The kernel must report the compiled-in image: the same bytes running as another cdhash never run.
-    vi.stubGlobal('THREADNOTE_SIGNED_NATIVE_TYPESCRIPT', {
-      host,
-      sha256,
-      cdhash: '0000000000000000000000000000000000000000',
-    });
-    expect(await start(asset)).toBe('image-mismatch');
-    vi.stubGlobal('THREADNOTE_SIGNED_NATIVE_TYPESCRIPT', {host, sha256: 'signed', cdhash});
-    expect(await start(asset)).toBe('pin-mismatch');
-  } finally {
-    vi.unstubAllGlobals();
-    rmSync(root, {recursive: true, force: true});
-  }
-});
+it.skipIf(nativeTypeScriptAssetUnavailable)(
+  'admits only the compiled-in signed compiler image in a signed macOS release',
+  async context => {
+    if (process.platform !== 'darwin') context.skip('Darwin signed release identity');
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'threadnote-native-signed-')));
+    const host = nativeTypeScriptHostKey(process.platform, process.arch);
+    const start = (assetDirectory: string) =>
+      createNativeTypeScriptSession({cwd: process.cwd(), deadline: Date.now() + 30_000, assetDirectory}).then(
+        async session => {
+          await session.close();
+          return 'started';
+        },
+        refusal,
+      );
+    try {
+      // A private copy signed ad-hoc the way publish signs it: hardened runtime with kill and hard, explicit identifier.
+      const asset = join(root, 'prepared');
+      cpSync(nativeTypeScriptTestAssetDirectory(), asset, {recursive: true});
+      const compiler = join(asset, 'tsc');
+      const options = ['--options', 'runtime,kill,hard', '--identifier', 'dev.threadnote.typescript-native'];
+      const sign = ['--force', '-s', '-', ...options];
+      expect(Bun.spawnSync(['/usr/bin/codesign', ...sign, compiler]).exitCode).toBe(0);
+      const sha256 = sha256HexSync(readFileSync(compiler));
+      const shown = Bun.spawnSync(['/usr/bin/codesign', '-dvvv', compiler], {stderr: 'pipe'}).stderr.toString();
+      const cdhash = /^CDHash=([0-9a-f]{40})$/mu.exec(shown)?.[1];
+      // Source mode and unsigned builds accept only the reviewed bytes.
+      expect(await start(asset)).toBe('pin-mismatch');
+      vi.stubGlobal('THREADNOTE_SIGNED_NATIVE_TYPESCRIPT', {host, sha256, cdhash});
+      expect(await start(asset)).toBe('started');
+      // A signed release accepts only its signed bytes, never the reviewed unsigned original.
+      expect(await start(nativeTypeScriptTestAssetDirectory())).toBe('pin-mismatch');
+      // The kernel must report the compiled-in image: the same bytes running as another cdhash never run.
+      vi.stubGlobal('THREADNOTE_SIGNED_NATIVE_TYPESCRIPT', {
+        host,
+        sha256,
+        cdhash: '0000000000000000000000000000000000000000',
+      });
+      expect(await start(asset)).toBe('image-mismatch');
+      vi.stubGlobal('THREADNOTE_SIGNED_NATIVE_TYPESCRIPT', {host, sha256: 'signed', cdhash});
+      expect(await start(asset)).toBe('pin-mismatch');
+    } finally {
+      vi.unstubAllGlobals();
+      rmSync(root, {recursive: true, force: true});
+    }
+  },
+);
 
 it('loads the TypeScript compiler only for TypeScript extraction, preserving its identity and repeated facts', context => {
   skipWithoutNativeTypeScript(context);
