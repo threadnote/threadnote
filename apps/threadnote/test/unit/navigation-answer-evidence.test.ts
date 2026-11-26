@@ -3,6 +3,7 @@ import {it as effectIt} from '@effect/vitest';
 import {Array as EffectArray, Effect, Option, String as EffectString} from 'effect';
 import {observationKey, type Observation} from '@threadnote/semantic/contracts';
 import {makeReadDeadline} from '@threadnote/platform/read_deadline';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {assembleNavigationAnswer} from '@threadnote/context/navigation/assemble';
 import {navigationSourceId, type NavigationInput, type NavigationScope} from '@threadnote/context/navigation/model';
 import {
@@ -33,8 +34,16 @@ function structural(): NavigationInput {
         path: 'src/operation.ts',
         contentHash: 'graph-operation',
         freshness: 'verified-current',
+        snapshot: 'snapshot',
       },
-      {...scope, id: storeSource, path: 'src/store.ts', contentHash: 'graph-store', freshness: 'verified-current'},
+      {
+        ...scope,
+        id: storeSource,
+        path: 'src/store.ts',
+        contentHash: 'graph-store',
+        freshness: 'verified-current',
+        snapshot: 'snapshot',
+      },
     ],
     candidates: [
       {
@@ -123,7 +132,7 @@ function document(
         ? {
             version: 1,
             scope: 'document',
-            observation: 'binding',
+            observation: sha256HexSync(observationKey(observed)),
             semanticContent: observed.content,
             graph: {repositoryId: 'fixture-repository', snapshotId: 'snapshot', path, contentHash: graphHash},
           }
@@ -185,7 +194,7 @@ describe('semantic navigation evidence', () => {
     const operation = operationDocument();
     const result = answer(
       [operation, document('src/store.ts', 'graph-store')],
-      [callHierarchy(operation.observation, {incoming: [['src/operation.ts', 21]], outgoing: [['src/store.ts', 4]]})],
+      [callHierarchy(operation.observation, {incoming: [['src/operation.ts', 21]], outgoing: [['src/store.ts', 2]]})],
     );
     const bases = (from: string, to: string) =>
       EffectArray.map(
@@ -251,7 +260,7 @@ describe('semantic navigation evidence', () => {
 
   it('does not verify a cross-file route when the far document has no disk join', () => {
     const operation = operationDocument();
-    const result = answer([operation], [callHierarchy(operation.observation, {outgoing: [['src/store.ts', 4]]})]);
+    const result = answer([operation], [callHierarchy(operation.observation, {outgoing: [['src/store.ts', 2]]})]);
     expect(result.gaps).toEqual(
       expect.arrayContaining(['semantic-target-source-unbound', 'relationship-view-unverified']),
     );
@@ -275,6 +284,78 @@ describe('semantic navigation evidence', () => {
   });
 });
 
+describe('semantic navigation attachment', () => {
+  const definition = (path: string, line: number): SemanticNavigationQuery => {
+    const base = callHierarchy(operationDocument().observation, {});
+    if (base.result.status !== 'ok') throw new Error('Expected a successful fixture result.');
+    return {
+      ...base,
+      operation: 'definition',
+      result: {...base.result, items: [{uri: `${worktreeUri}/${path}`, range: range(line)}]},
+    };
+  };
+  it('attaches a definition only to a candidate that starts on its line, never to an enclosing one', () => {
+    const documents = [operationDocument()];
+    const atHandle = withSemanticNavigationEvidence(structural(), {
+      worktreeUri,
+      documents,
+      queries: [definition('src/operation.ts', 19)],
+    });
+    expect(EffectArray.filter(atHandle.links, link => link.basis === 'qualified-semantic')).toMatchObject([
+      {from: 'save', to: 'handle', relation: 'references'},
+    ]);
+    // Line 10 is inside `save` (5-12) but no candidate starts there: a semantic-only candidate is created.
+    const inside = withSemanticNavigationEvidence(structural(), {
+      worktreeUri,
+      documents,
+      queries: [definition('src/operation.ts', 9)],
+    });
+    const created = EffectArray.filter(inside.candidates, candidate => candidate.basis.includes('qualified-semantic'));
+    expect(created).toMatchObject([{startLine: 10, endLine: 10, roles: ['implementation']}]);
+  });
+  it('skips an attachment with two equally small candidates', () => {
+    const operation = operationDocument();
+    const input = structural();
+    const twin = {...input.candidates[0], id: 'handle-twin'};
+    const result = withSemanticNavigationEvidence(
+      {...input, candidates: [...input.candidates, twin]},
+      {
+        worktreeUri,
+        documents: [operation],
+        queries: [callHierarchy(operation.observation, {incoming: [['src/operation.ts', 21]]})],
+      },
+    );
+    expect(result.gaps).toContain('semantic-attachment-ambiguous');
+    expect(EffectArray.some(result.links, link => link.basis === 'qualified-semantic')).toBe(false);
+  });
+  it('refuses a disk join that names an earlier observation or another snapshot', () => {
+    const operation = operationDocument();
+    const query = callHierarchy(operation.observation, {incoming: [['src/operation.ts', 21]]});
+    for (const binding of [
+      {...operation.binding!, observation: sha256HexSync(observationKey({...operation.observation, projectEpoch: 0}))},
+      {...operation.binding!, graph: {...operation.binding!.graph, snapshotId: 'older-snapshot'}},
+    ]) {
+      const result = withSemanticNavigationEvidence(structural(), {
+        worktreeUri,
+        documents: [{...operation, binding}],
+        queries: [query],
+      });
+      expect(result.gaps).toContain('semantic-graph-source-unbound');
+      expect(EffectArray.some(result.links, link => link.basis === 'qualified-semantic')).toBe(false);
+    }
+  });
+  it('reports a line-convention refusal of the disk join with its own gap', () => {
+    const operation = {...operationDocument(), binding: null, refusal: 'line-convention-unsupported' as const};
+    const result = withSemanticNavigationEvidence(structural(), {
+      worktreeUri,
+      documents: [operation],
+      queries: [callHierarchy(operation.observation, {incoming: [['src/operation.ts', 21]]})],
+    });
+    expect(result.gaps).toContain('semantic-line-convention-unsupported');
+    expect(EffectArray.some(result.links, link => link.basis === 'qualified-semantic')).toBe(false);
+  });
+});
+
 describe('semantic navigation acquisition', () => {
   effectIt.effect('starts no semantic request when the parent deadline is exhausted', () =>
     Effect.gen(function* () {
@@ -290,7 +371,7 @@ describe('semantic navigation acquisition', () => {
           query: () =>
             record('query').pipe(Effect.as({version: 1, status: 'timeout', reason: 'x', evidence: null} as const)),
           observe: () => record('observe').pipe(Effect.as(null)),
-          bind: () => record('bind').pipe(Effect.as(null)),
+          bind: () => record('bind').pipe(Effect.as({binding: null})),
         },
       });
       expect(calls).toEqual([]);
@@ -302,7 +383,7 @@ describe('semantic navigation acquisition', () => {
     Effect.gen(function* () {
       const calls: string[] = [];
       const operation = operationDocument();
-      const query = callHierarchy(operation.observation, {outgoing: [['src/store.ts', 4]]});
+      const query = callHierarchy(operation.observation, {outgoing: [['src/store.ts', 2]]});
       const store = observation('src/store.ts', 'src/store.ts-bytes');
       const evidence = yield* acquireSemanticNavigationEvidence({
         worktreeUri,
@@ -311,21 +392,24 @@ describe('semantic navigation acquisition', () => {
         deadline: yield* makeReadDeadline(60_000),
         ports: {
           capability: () => Effect.succeed('qualified' as const),
-          query: () => Effect.sync(() => void calls.push('query')).pipe(Effect.as(query.result)),
-          observe: path =>
-            Effect.sync(() => void calls.push(`observe ${path}`)).pipe(
+          query: request =>
+            Effect.sync(() => void calls.push(`query ${request.milliseconds}`)).pipe(Effect.as(query.result)),
+          observe: (path, milliseconds) =>
+            Effect.sync(() => void calls.push(`observe ${path} ${milliseconds}`)).pipe(
               Effect.as(path === 'src/store.ts' ? store : operation.observation),
             ),
-          bind: path => Effect.sync(() => void calls.push(`bind ${path}`)).pipe(Effect.as(null)),
+          bind: path => Effect.sync(() => void calls.push(`bind ${path}`)).pipe(Effect.as({binding: null})),
         },
       });
+      // The test clock does not advance: the query keeps three 500 ms closing reservations, and each closing
+      // observation keeps one reservation for every later document.
       expect(calls).toEqual([
-        'query',
-        'observe src/store.ts',
+        'query 58500',
+        'observe src/store.ts 59000',
         'bind src/operation.ts',
         'bind src/store.ts',
-        'observe src/operation.ts',
-        'observe src/store.ts',
+        'observe src/operation.ts 59500',
+        'observe src/store.ts 60000',
       ]);
       expect(EffectArray.map(evidence.documents, item => item.closingObservationKey)).toEqual([
         observationKey(operation.observation),

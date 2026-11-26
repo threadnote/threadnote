@@ -2,6 +2,7 @@ import {Array as EffectArray} from 'effect';
 import {
   NAVIGATION_INPUT_LIMITS,
   NAVIGATION_ROLES,
+  navigationScopeKey,
   type NavigationAnswerV1,
   type NavigationCandidate,
   type NavigationInput,
@@ -15,16 +16,7 @@ import {
 
 const compareText = (left: string, right: string) => (left < right ? -1 : left > right ? 1 : 0);
 const strings = <Value extends string>(values: readonly Value[]) => [...new Set(values)].sort(compareText);
-const scopeKey = (scope: NavigationScope) =>
-  JSON.stringify([
-    scope.repository,
-    scope.worktree,
-    scope.project,
-    scope.view.kind,
-    scope.view.id,
-    scope.view.owner,
-    scope.view.epoch,
-  ]);
+const scopeKey = navigationScopeKey;
 const locatorKey = (candidate: NavigationCandidate, source: NavigationSource, scope: string) =>
   JSON.stringify([scope, source.path, source.contentHash, candidate.startLine, candidate.endLine]);
 const sameSource = (left: NavigationSource, right: NavigationSource, keyFor: (scope: NavigationScope) => string) =>

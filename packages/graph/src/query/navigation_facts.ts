@@ -9,7 +9,11 @@ export const NAVIGATION_PROOF_CACHE_IDENTITY = '000a8482e17588280b7e9ab3d24acbe7
 /** The Python pack identity that carries open-write proofs; any Python pack policy change must update it. */
 export const PYTHON_NAVIGATION_PROOF_CACHE_IDENTITY =
   '03c1df2f585574c6acb78aecba033b50b69470b12fc64d27dd9c7a7e0a1c7937';
-/** The extractor pack that owns proofs for a path; other files have no navigation proof capability. */
+/**
+ * The extractor pack that owns proofs for a path; other files have no navigation proof capability.
+ * These extensions mirror the TypeScript and Python pack matchers; derive them from the registry when a third
+ * pack gains proofs.
+ */
 export function navigationProofPack(path: string): 'typescript' | 'python' | null {
   if (/\.(?:[cm]?[jt]s|[jt]sx)$/iu.test(path)) return 'typescript';
   return /\.pyi?$/iu.test(path) ? 'python' : null;

@@ -54,6 +54,12 @@ export const TREE_SITTER_EXTRACTOR_POLICY_VERSION =
 
 type NodeSpan = (node: Node) => CodeGraphSpan;
 
+export interface TreeSitterNavigationFactInput {
+  readonly root: Node;
+  readonly symbols: readonly CodeGraphSymbol[];
+  readonly edges: readonly CodeGraphEdge[];
+  readonly span: NodeSpan;
+}
 export interface TreeSitterLanguageDefinition {
   readonly asset: VerifiedLanguageAsset;
   readonly declarationQuery: string;
@@ -72,12 +78,7 @@ export interface TreeSitterLanguageDefinition {
   readonly referenceTarget?: (capture: string, node: Node) => string;
   readonly resolutionDomain: string;
   /** Optional finite navigation proofs; a pack that sets it must version its definition. */
-  readonly navigationFacts?: (input: {
-    readonly root: Node;
-    readonly symbols: readonly CodeGraphSymbol[];
-    readonly edges: readonly CodeGraphEdge[];
-    readonly span: NodeSpan;
-  }) => CodeGraphNavigationFacts | undefined;
+  readonly navigationFacts?: (input: TreeSitterNavigationFactInput) => CodeGraphNavigationFacts | undefined;
 }
 
 interface Declaration {

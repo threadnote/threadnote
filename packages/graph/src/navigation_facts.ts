@@ -386,7 +386,7 @@ function contains(outer: CodeGraphSpan, inner: CodeGraphSpan): boolean {
     (inner.endLine < outer.endLine || (inner.endLine === outer.endLine && inner.endColumn <= outer.endColumn))
   );
 }
-function sameSpan(left: CodeGraphSpan, right: CodeGraphSpan): boolean {
+export function sameSpan(left: CodeGraphSpan, right: CodeGraphSpan): boolean {
   return (
     left.line === right.line &&
     left.column === right.column &&

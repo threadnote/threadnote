@@ -5,39 +5,33 @@ import {
   CODE_GRAPH_NAVIGATION_FACT_BYTES,
   CODE_GRAPH_NAVIGATION_FACT_VERSION,
   CODE_GRAPH_NAVIGATION_PROOF_LIMIT,
+  sameSpan,
 } from '../../navigation_facts.js';
-import type {
-  CodeGraphEdge,
-  CodeGraphNavigationFacts,
-  CodeGraphPythonOpenWriteProof,
-  CodeGraphSpan,
-  CodeGraphSymbol,
-} from '../../types.js';
+import type {TreeSitterNavigationFactInput} from '../../tree_sitter/extractor.js';
+import type {CodeGraphNavigationFacts, CodeGraphPythonOpenWriteProof, CodeGraphSpan} from '../../types.js';
 
 /**
- * Names that can rebind or bypass the builtin `open` without a visible binding of the identifier itself.
- * A file that uses any of them yields no proof.
+ * Names that can rebind or bypass the builtin `open` in this module without a visible binding of the identifier
+ * itself (module dictionaries, the import system, dynamic code). A file that uses any of them yields no proof.
+ * A per-file proof cannot see a rebinding done from another module; that limit stays with the proof's meaning:
+ * a possible source effect, never an observed write.
  */
 const REBINDING_NAMES = new Set([
   '__builtins__',
+  '__dict__',
   '__import__',
   'builtins',
   'eval',
   'exec',
   'globals',
+  'importlib',
   'locals',
+  'modules',
   'setattr',
+  'sys',
   'vars',
 ]);
-const WRITE_MODE = /^(?=[rwxabt+]{1,3}$)(?=.*[wxa+])(?!.*(.).*\1)[rwxabt+]+$/u;
 const encoder = new TextEncoder();
-
-export interface PythonNavigationFactInput {
-  readonly root: Node;
-  readonly symbols: readonly CodeGraphSymbol[];
-  readonly edges: readonly CodeGraphEdge[];
-  readonly span: (node: Node) => CodeGraphSpan;
-}
 
 /**
  * Finite Python proof of one possible conditional durable write: a top-level function whose single
@@ -45,7 +39,9 @@ export interface PythonNavigationFactInput {
  * grammar, any rebinding of `open` and any dynamic rebinding helper yields no proof. The proof states a
  * possible source effect, never an observed write.
  */
-export function collectPythonNavigationFacts(input: PythonNavigationFactInput): CodeGraphNavigationFacts | undefined {
+export function collectPythonNavigationFacts(
+  input: TreeSitterNavigationFactInput,
+): CodeGraphNavigationFacts | undefined {
   const calls: Node[] = [];
   let unsafe = false;
   const stack: Node[] = [input.root];
@@ -99,7 +95,11 @@ export function collectPythonNavigationFacts(input: PythonNavigationFactInput): 
   return facts(proofs, omitted);
 }
 
-function proveCall(input: PythonNavigationFactInput, call: Node, fn: Node): CodeGraphPythonOpenWriteProof | undefined {
+function proveCall(
+  input: TreeSitterNavigationFactInput,
+  call: Node,
+  fn: Node,
+): CodeGraphPythonOpenWriteProof | undefined {
   const callee = call.childForFieldName('function');
   const argumentsNode = call.childForFieldName('arguments');
   const args = argumentsNode?.namedChildren ?? [];
@@ -117,7 +117,9 @@ function proveCall(input: PythonNavigationFactInput, call: Node, fn: Node): Code
     item?.type !== 'with_item' ||
     clause?.type !== 'with_clause' ||
     clause.namedChildren.length !== 1 ||
-    statement?.type !== 'with_statement'
+    statement?.type !== 'with_statement' ||
+    // `async with` needs an asynchronous context manager; a plain file object raises before any write.
+    statement.child(0)?.type === 'async'
   )
     return undefined;
   const handle = pattern.childForFieldName('alias')?.namedChildren[0];
@@ -191,15 +193,24 @@ function guardOf(
     ifStatement = branchOwner.parent;
     branch = 'else';
   }
-  if (!ifStatement || !branch || !sameNode(ifStatement.parent, body) || !supportedOwner(fn, ifStatement))
+  if (!ifStatement || !branch || !sameNode(ifStatement.parent, body) || !supportedOwner(fn, ifStatement, statement))
     return undefined;
   const condition = ifStatement.childForFieldName('condition');
   if (condition?.type !== 'identifier') return undefined;
+  // A guard name assigned in the owner may be a constant, so the write may not be conditional.
+  if (
+    EffectArray.some(body?.namedChildren ?? [], statement =>
+      statement?.namedChildren[0]?.type === 'assignment'
+        ? statement.namedChildren[0].childForFieldName('left')?.text === condition.text
+        : false,
+    )
+  )
+    return undefined;
   return {span: span(condition), branch};
 }
 
 /** Owner body: simple assignments, one guard whose branches only assign or write, then an optional return. */
-function supportedOwner(fn: Node, guard: Node): boolean {
+function supportedOwner(fn: Node, guard: Node, proved: Node): boolean {
   const statements = fn.childForFieldName('body')?.namedChildren ?? [];
   let seenGuard = false;
   for (let index = 0; index < statements.length; index++) {
@@ -215,8 +226,8 @@ function supportedOwner(fn: Node, guard: Node): boolean {
       );
       if (
         alternatives.length > 0 ||
-        !branchStatements(consequence) ||
-        (otherwise && !branchStatements(otherwise.childForFieldName('body')))
+        !branchStatements(consequence, proved) ||
+        (otherwise && !branchStatements(otherwise.childForFieldName('body'), proved))
       )
         return false;
       continue;
@@ -230,28 +241,12 @@ function supportedOwner(fn: Node, guard: Node): boolean {
   return seenGuard;
 }
 
-function branchStatements(block: Node | null): boolean {
+/** A branch may only assign simple values or contain the one proved write statement. */
+function branchStatements(block: Node | null, proved: Node): boolean {
   if (block?.type !== 'block') return false;
   return EffectArray.every(
     block.namedChildren,
-    statement => !!statement && (simpleAssignment(statement) || withWrite(statement)),
-  );
-}
-
-function withWrite(statement: Node): boolean {
-  if (statement.type !== 'with_statement') return false;
-  const clause = statement.namedChildren[0];
-  const pattern = clause?.namedChildren[0]?.childForFieldName('value');
-  const call = pattern?.namedChildren[0];
-  const handle = pattern?.childForFieldName('alias')?.namedChildren[0];
-  return (
-    clause?.type === 'with_clause' &&
-    clause.namedChildren.length === 1 &&
-    pattern?.type === 'as_pattern' &&
-    call?.type === 'call' &&
-    call.childForFieldName('function')?.text === 'open' &&
-    handle?.type === 'identifier' &&
-    writesOnly(statement.childForFieldName('body'), handle.text)
+    statement => !!statement && (simpleAssignment(statement) || sameNode(statement, proved)),
   );
 }
 
@@ -315,20 +310,17 @@ function plainString(node: Node): string | undefined {
   );
 }
 
+/** A mode Python accepts (one of r/w/x/a, at most one + and one of b/t) that can write. */
 function writeMode(node: Node): boolean {
   const value = plainString(node);
-  return value !== undefined && WRITE_MODE.test(value) && !EffectString.includes('\\')(value);
+  if (value === undefined || value.length === 0 || value.length > 3) return false;
+  const chars = EffectString.split('')(value);
+  const count = (set: string) => EffectArray.filter(chars, char => EffectString.includes(char)(set)).length;
+  return (
+    count('rwxabt+') === chars.length && count('rwxa') === 1 && count('+') <= 1 && count('bt') <= 1 && count('wxa+') > 0
+  );
 }
 
 function sameNode(left: Node | null | undefined, right: Node | null | undefined): boolean {
   return !!left && !!right && left.id === right.id;
-}
-
-function sameSpan(left: CodeGraphSpan, right: CodeGraphSpan): boolean {
-  return (
-    left.line === right.line &&
-    left.column === right.column &&
-    left.endLine === right.endLine &&
-    left.endColumn === right.endColumn
-  );
 }

@@ -25,8 +25,8 @@ export interface NavigationScope {
   };
 }
 
-/** Identity of one file observation inside one complete scope; equal paths in other views never collide. */
-export function navigationSourceId(scope: NavigationScope, path: string, contentHash: string): string {
+/** The one complete identity of a scope. Every scope comparison uses it, so a new field cannot be missed. */
+export function navigationScopeKey(scope: NavigationScope): string {
   return JSON.stringify([
     scope.repository,
     scope.worktree,
@@ -35,9 +35,12 @@ export function navigationSourceId(scope: NavigationScope, path: string, content
     scope.view.id,
     scope.view.owner,
     scope.view.epoch,
-    path,
-    contentHash,
   ]);
+}
+
+/** Identity of one file observation inside one complete scope; equal paths in other views never collide. */
+export function navigationSourceId(scope: NavigationScope, path: string, contentHash: string): string {
+  return JSON.stringify([navigationScopeKey(scope), path, contentHash]);
 }
 
 export type NavigationFreshness = 'verified-current' | 'stale' | 'deferred' | 'unverified';

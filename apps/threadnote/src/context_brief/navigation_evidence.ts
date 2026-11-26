@@ -2,9 +2,11 @@ import * as EffectArray from 'effect/Array';
 import * as EffectString from 'effect/String';
 import {Effect, Option, Schema} from 'effect';
 import {readDeadlineRemaining, type ReadDeadline} from '@threadnote/platform/read_deadline';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {FileUri, Position, observationKey, Capability, type Observation} from '@threadnote/semantic/contracts';
 import {
   NAVIGATION_INPUT_LIMITS,
+  navigationScopeKey,
   navigationSourceId,
   type NavigationAcquisition,
   type NavigationCandidate,
@@ -29,6 +31,8 @@ export interface SemanticNavigationDocument {
   readonly observation: Observation;
   /** Result of retrieveSemanticContextSourceEvidence for this document; null when the join refused it. */
   readonly binding: SemanticContextSourceBindingV1 | null;
+  /** Set when the join refused the document because LSP and graph line numbering can differ. */
+  readonly refusal?: 'line-convention-unsupported';
   /** Key observed again after all queries; any difference (content, generation, epoch, view) is drift. */
   readonly closingObservationKey: string | null;
 }
@@ -66,6 +70,51 @@ const CallHierarchyJson = Schema.Struct({
 });
 const decodeLocation = Schema.decodeUnknownOption(LocationJson);
 const decodeCallHierarchy = Schema.decodeUnknownOption(CallHierarchyJson);
+
+type UsableQuery = SemanticNavigationQuery & {
+  readonly result: Extract<SemanticAgentQueryResult, {readonly status: 'ok'}>;
+};
+interface SemanticTarget {
+  /** incoming: a caller of the anchor; outgoing: a callee; location: a definition or reference. */
+  readonly direction: 'incoming' | 'outgoing' | 'location';
+  readonly uri: string;
+  readonly range: SemanticRangeJson;
+}
+
+/** Decode the provider items of one successful query once into target locations. */
+function resultTargets(query: UsableQuery): {
+  readonly targets: readonly SemanticTarget[];
+  readonly unrecognized: boolean;
+} {
+  const targets: SemanticTarget[] = [];
+  let unrecognized = false;
+  for (const item of query.result.items) {
+    if (query.operation === 'call-hierarchy') {
+      const hierarchy = decodeCallHierarchy(item);
+      if (Option.isNone(hierarchy)) unrecognized = true;
+      else {
+        for (const call of hierarchy.value.incoming)
+          targets.push({direction: 'incoming', uri: call.from.uri, range: call.from.selectionRange});
+        for (const call of hierarchy.value.outgoing)
+          targets.push({direction: 'outgoing', uri: call.to.uri, range: call.to.selectionRange});
+      }
+      continue;
+    }
+    const location = decodeLocation(item);
+    if (Option.isNone(location)) unrecognized = true;
+    else if ('uri' in location.value)
+      targets.push({direction: 'location', uri: location.value.uri, range: location.value.range});
+    else
+      targets.push({
+        direction: 'location',
+        uri: location.value.targetUri,
+        range: location.value.targetSelectionRange,
+      });
+  }
+  return {targets, unrecognized};
+}
+const usableQuery = (query: SemanticNavigationQuery): query is UsableQuery =>
+  query.result.status === 'ok' && query.capability === 'qualified';
 
 /** Observations that may be combined must share one project, configuration, provider generation and epoch. */
 const projectObservationKey = (observation: Observation) =>
@@ -106,17 +155,14 @@ export function withSemanticNavigationEvidence(
     if (query.result.status !== 'ok') gaps.add(`semantic-${query.result.status}`);
     else if (query.capability !== 'qualified') gaps.add('semantic-provider-unqualified');
   }
-  const usable = EffectArray.filter(
-    evidence.queries,
-    query => query.result.status === 'ok' && query.capability === 'qualified',
-  );
-  if (usable.length === 0) return finish(input, gaps, followUps, [], [], []);
+  const usable = EffectArray.filter(evidence.queries, usableQuery);
+  if (usable.length === 0) return finish(input, gaps, followUps);
 
   const documents = new Map<string, SemanticNavigationDocument>();
   for (const document of evidence.documents) {
     if (documents.has(document.path)) {
       gaps.add('semantic-observation-conflict');
-      return finish(input, gaps, followUps, [], [], []);
+      return finish(input, gaps, followUps);
     }
     documents.set(document.path, document);
   }
@@ -125,13 +171,14 @@ export function withSemanticNavigationEvidence(
   );
   if (projects.size > 1) {
     gaps.add('semantic-observation-conflict');
-    return finish(input, gaps, followUps, [], [], []);
+    return finish(input, gaps, followUps);
   }
 
+  const requestedScope = navigationScopeKey(input.scope);
   const structuralSources = new Map(EffectArray.map(input.sources, source => [source.id, source] as const));
-  const requestedPathHash = new Map<string, string>();
+  const requestedPathSource = new Map<string, NavigationSource>();
   for (const source of input.sources)
-    if (sameScope(source, input.scope)) requestedPathHash.set(source.path, source.contentHash);
+    if (navigationScopeKey(source) === requestedScope) requestedPathSource.set(source.path, source);
 
   // One semantic source per usable document, in the requested scope only when the disk join proved it.
   const semanticSources = new Map<string, NavigationSource>();
@@ -157,22 +204,30 @@ export function withSemanticNavigationEvidence(
       gaps.add('semantic-buffer-view-unbound');
       continue;
     }
-    const graphHash = requestedPathHash.get(document.path);
+    if (document.refusal === 'line-convention-unsupported') {
+      gaps.add('semantic-line-convention-unsupported');
+      continue;
+    }
+    const graph = requestedPathSource.get(document.path);
+    // The join must name this exact observation and the same graph repository, snapshot, path and bytes.
     if (
       document.binding === null ||
-      document.binding.graph.path !== document.path ||
+      document.binding.observation !== sha256HexSync(key) ||
       document.binding.semanticContent !== document.observation.content ||
-      graphHash === undefined ||
-      document.binding.graph.contentHash !== graphHash
+      graph === undefined ||
+      document.binding.graph.path !== document.path ||
+      document.binding.graph.contentHash !== graph.contentHash ||
+      document.binding.graph.repositoryId !== input.scope.repository ||
+      document.binding.graph.snapshotId !== graph.snapshot
     ) {
       gaps.add('semantic-graph-source-unbound');
       continue;
     }
     semanticSources.set(document.path, {
       ...input.scope,
-      id: semanticSourceId(input.scope, document.path, graphHash, key),
+      id: semanticSourceId(input.scope, document.path, graph.contentHash, key),
       path: document.path,
-      contentHash: graphHash,
+      contentHash: graph.contentHash,
       freshness: 'verified-current',
       semantic: {observationKey: key, observationJson: json},
     });
@@ -183,21 +238,38 @@ export function withSemanticNavigationEvidence(
   const semanticCandidates = new Map<string, NavigationCandidate>();
   const inScopeCandidates = EffectArray.filter(input.candidates, candidate => {
     const source = structuralSources.get(candidate.sourceId);
-    return source !== undefined && sameScope(source, input.scope);
+    return source !== undefined && navigationScopeKey(source) === requestedScope;
   });
   const sourcePath = new Map(EffectArray.map(input.sources, source => [source.id, source.path] as const));
-  const locate = (located: Located, role: NavigationRole, reason: string): NavigationCandidate | undefined => {
-    const containing = EffectArray.filter(
+  /**
+   * Attach a semantic location to one structural candidate in the same bound document.
+   * - 'enclosing': the smallest candidate that contains the location (the referrer or incoming caller).
+   * - 'declaration': only a candidate that starts on the location's line (a definition or outgoing callee);
+   *   an enclosing class or module is not the defined symbol.
+   * Two equal best candidates are ambiguous and the location is not attached.
+   */
+  const locate = (
+    located: Located,
+    match: 'enclosing' | 'declaration',
+    role: NavigationRole,
+    reason: string,
+  ): NavigationCandidate | undefined => {
+    const matching = EffectArray.filter(
       inScopeCandidates,
       candidate =>
         sourcePath.get(candidate.sourceId) === located.path &&
-        candidate.startLine <= located.startLine &&
-        candidate.endLine >= located.endLine,
-    ).sort(
-      (left, right) =>
-        left.endLine - left.startLine - (right.endLine - right.startLine) || compareText(left.id, right.id),
+        (match === 'declaration'
+          ? candidate.startLine === located.startLine
+          : candidate.startLine <= located.startLine && candidate.endLine >= located.endLine),
     );
-    if (containing.length) return containing[0];
+    const width = (candidate: NavigationCandidate) => candidate.endLine - candidate.startLine;
+    const smallest = Math.min(...EffectArray.map(matching, width));
+    const best = EffectArray.filter(matching, candidate => width(candidate) === smallest);
+    if (best.length > 1) {
+      gaps.add('semantic-attachment-ambiguous');
+      return undefined;
+    }
+    if (best.length === 1) return best[0];
     const source = semanticSources.get(located.path);
     if (source === undefined) return undefined;
     const id = JSON.stringify(['semantic', source.id, located.startLine, located.endLine]);
@@ -224,7 +296,6 @@ export function withSemanticNavigationEvidence(
   };
 
   for (const query of usable) {
-    if (query.result.status !== 'ok') continue;
     const queried = documents.get(query.path);
     const proving = semanticSources.get(query.path);
     const anchor = EffectArray.findFirst(inScopeCandidates, candidate => candidate.id === query.anchorCandidateId);
@@ -244,6 +315,7 @@ export function withSemanticNavigationEvidence(
       relation: NavigationLink['relation'],
       far: string,
     ) => {
+      if (from.id === to.id) return;
       if (links.length + input.links.length >= NAVIGATION_INPUT_LIMITS.links) {
         gaps.add('semantic-evidence-omitted');
         return;
@@ -272,41 +344,37 @@ export function withSemanticNavigationEvidence(
       }
       return {path, startLine: range.start.line + 1, endLine: range.end.line + 1};
     };
-    for (const item of query.result.items) {
-      if (query.operation === 'call-hierarchy') {
-        const hierarchy = decodeCallHierarchy(item);
-        if (Option.isNone(hierarchy)) {
-          gaps.add('semantic-result-unrecognized');
-          continue;
-        }
-        for (const call of hierarchy.value.incoming) {
-          const at = located(call.from.uri, call.from.selectionRange);
-          const caller =
-            at && locate(at, 'entrypoint', 'Qualified semantic incoming caller; runtime invocation is unknown.');
-          if (at && caller) connect(caller, anchor.value, 'calls', at.path);
-        }
-        for (const call of hierarchy.value.outgoing) {
-          const at = located(call.to.uri, call.to.selectionRange);
-          const callee =
-            at && locate(at, 'implementation', 'Qualified semantic outgoing callee; runtime invocation is unknown.');
-          if (at && callee) connect(anchor.value, callee, 'calls', at.path);
-        }
-        continue;
-      }
-      const location = decodeLocation(item);
-      if (Option.isNone(location)) {
-        gaps.add('semantic-result-unrecognized');
-        continue;
-      }
-      const value = location.value;
-      const at =
-        'uri' in value ? located(value.uri, value.range) : located(value.targetUri, value.targetSelectionRange);
+    const {targets, unrecognized} = resultTargets(query);
+    if (unrecognized) gaps.add('semantic-result-unrecognized');
+    for (const target of targets) {
+      const at = located(target.uri, target.range);
       if (!at) continue;
-      if (query.operation === 'definition') {
-        const definition = locate(at, 'implementation', 'Qualified semantic definition of the queried symbol.');
+      if (target.direction === 'incoming') {
+        const caller = locate(
+          at,
+          'enclosing',
+          'entrypoint',
+          'Qualified semantic incoming caller; runtime invocation is unknown.',
+        );
+        if (caller) connect(caller, anchor.value, 'calls', at.path);
+      } else if (target.direction === 'outgoing') {
+        const callee = locate(
+          at,
+          'declaration',
+          'implementation',
+          'Qualified semantic outgoing callee; runtime invocation is unknown.',
+        );
+        if (callee) connect(anchor.value, callee, 'calls', at.path);
+      } else if (query.operation === 'definition') {
+        const definition = locate(
+          at,
+          'declaration',
+          'implementation',
+          'Qualified semantic definition of the queried symbol.',
+        );
         if (definition) connect(anchor.value, definition, 'references', at.path);
       } else {
-        const referrer = locate(at, 'entrypoint', 'Qualified semantic reference to the queried symbol.');
+        const referrer = locate(at, 'enclosing', 'entrypoint', 'Qualified semantic reference to the queried symbol.');
         if (referrer) connect(referrer, anchor.value, 'references', at.path);
       }
     }
@@ -320,23 +388,16 @@ export function withSemanticNavigationEvidence(
         reason:
           'Query the saved disk view so semantic and graph evidence can join; the buffer observation stays separate.',
       });
-  return finish(
-    input,
-    gaps,
-    followUps,
-    [...semanticSources.values()],
-    candidates,
-    EffectArray.filter(links, link => link.from !== link.to),
-  );
+  return finish(input, gaps, followUps, [...semanticSources.values()], candidates, links);
 }
 
 function finish(
   input: NavigationInput,
   gaps: ReadonlySet<string>,
   followUps: readonly NavigationAcquisition[],
-  sources: readonly NavigationSource[],
-  candidates: readonly NavigationCandidate[],
-  links: readonly NavigationLink[],
+  sources: readonly NavigationSource[] = [],
+  candidates: readonly NavigationCandidate[] = [],
+  links: readonly NavigationLink[] = [],
 ): NavigationInput {
   const allSources = [...input.sources, ...sources];
   const limited = allSources.length > NAVIGATION_INPUT_LIMITS.sources;
@@ -368,18 +429,6 @@ function semanticSourceId(scope: NavigationScope, path: string, contentHash: str
   return JSON.stringify(['semantic', navigationSourceId(scope, path, contentHash), key]);
 }
 
-function sameScope(source: NavigationScope, scope: NavigationScope): boolean {
-  return (
-    source.repository === scope.repository &&
-    source.worktree === scope.worktree &&
-    source.project === scope.project &&
-    source.view.kind === scope.view.kind &&
-    source.view.id === scope.view.id &&
-    source.view.owner === scope.view.owner &&
-    source.view.epoch === scope.view.epoch
-  );
-}
-
 /** Repository-relative POSIX path of a canonical file URI, or undefined outside the worktree. */
 function relativePath(worktreeUri: string, uri: string): string | undefined {
   const root = EffectString.endsWith('/')(worktreeUri) ? worktreeUri : `${worktreeUri}/`;
@@ -390,7 +439,11 @@ function relativePath(worktreeUri: string, uri: string): string | undefined {
 
 /** Narrow ports: the LSP owner's agent-query handler, disk join and document observation. */
 export interface SemanticNavigationPorts<R> {
-  readonly capability: (operation: SemanticNavigationOperation) => Effect.Effect<CapabilityStatus, never, R>;
+  /** Capability comes from the provider for the document's language, not from the operation alone. */
+  readonly capability: (
+    operation: SemanticNavigationOperation,
+    path: string,
+  ) => Effect.Effect<CapabilityStatus, never, R>;
   readonly query: (request: {
     readonly path: string;
     readonly operation: SemanticNavigationOperation;
@@ -399,11 +452,18 @@ export interface SemanticNavigationPorts<R> {
   }) => Effect.Effect<SemanticAgentQueryResult, never, R>;
   /** Observe one saved document; null when it is not observable. */
   readonly observe: (path: string, milliseconds: number) => Effect.Effect<Observation | null, never, R>;
-  /** The LSP-owned disk join for one observed document; null when it refuses the binding. */
+  /**
+   * The LSP-owned disk join for one observed document. A null binding is a refusal; `refusal` names the
+   * line-convention case (a lone CR, U+2028 or U+2029), where LSP and graph line numbers can differ.
+   */
   readonly bind: (
     path: string,
     observation: Observation,
-  ) => Effect.Effect<SemanticContextSourceBindingV1 | null, never, R>;
+  ) => Effect.Effect<
+    {readonly binding: SemanticContextSourceBindingV1 | null; readonly refusal?: 'line-convention-unsupported'},
+    never,
+    R
+  >;
 }
 
 export interface SemanticNavigationAnchor {
@@ -413,15 +473,21 @@ export interface SemanticNavigationAnchor {
   readonly position: {readonly line: number; readonly character: number};
 }
 
-/** Below this remaining time no semantic request starts; the parent route is returned as is. */
-const MINIMUM_QUERY_MILLISECONDS = 50;
+/**
+ * Minimum time for one coordinator request or observation. Each request has host overhead (configuration check
+ * and candidate fence, about 0.2-0.3 s) before the provider sees it; a shorter request only spends budget.
+ */
+const MINIMUM_REQUEST_MILLISECONDS = 500;
 /** Queried plus far-end documents observed for one answer. */
 const MAXIMUM_DOCUMENTS = 3;
+/** Anchors queried for one answer; the rest of the document budget is for far-end documents. */
+const MAXIMUM_ANCHORS = 2;
 
 /**
  * Acquire semantic navigation evidence inside the parent's remaining deadline. Optional semantic work never
  * extends the parent budget: when time is short it stops with a gap, and the structural route stays useful.
  * Each document is observed, bound and observed again after all queries, so drift during the request is visible.
+ * Time for the closing observations is reserved before any query starts, so a slow query cannot consume it.
  */
 export const acquireSemanticNavigationEvidence = Effect.fn('navigation.acquireSemanticEvidence')(function* <R>(input: {
   readonly worktreeUri: string;
@@ -433,17 +499,23 @@ export const acquireSemanticNavigationEvidence = Effect.fn('navigation.acquireSe
   const gaps = new Set<string>();
   const queries: SemanticNavigationQuery[] = [];
   const opening = new Map<string, Observation>();
-  const startable = Effect.map(readDeadlineRemaining(input.deadline), left =>
-    left < MINIMUM_QUERY_MILLISECONDS ? undefined : left,
-  );
-  outer: for (const anchor of input.anchors.slice(0, 2))
+  /** Remaining time after reserving `reserved` closing observations, or undefined below one request floor. */
+  const available = (reserved: number) =>
+    Effect.map(readDeadlineRemaining(input.deadline), left => {
+      const usable = left - reserved * MINIMUM_REQUEST_MILLISECONDS;
+      return usable < MINIMUM_REQUEST_MILLISECONDS ? undefined : usable;
+    });
+  const capabilities = new Map<string, CapabilityStatus>();
+  outer: for (const anchor of input.anchors.slice(0, MAXIMUM_ANCHORS))
     for (const operation of input.operations) {
-      const left = yield* startable;
+      const left = yield* available(MAXIMUM_DOCUMENTS);
       if (left === undefined) {
         gaps.add('semantic-deadline-exhausted');
         break outer;
       }
-      const capability = yield* input.ports.capability(operation);
+      const capabilityKey = JSON.stringify([operation, anchor.path]);
+      const capability = capabilities.get(capabilityKey) ?? (yield* input.ports.capability(operation, anchor.path));
+      capabilities.set(capabilityKey, capability);
       if (capability === 'unsupported' || capability === 'deferred' || capability === 'prerequisite-blocked') {
         gaps.add(`semantic-capability-${capability}`);
         continue;
@@ -460,7 +532,8 @@ export const acquireSemanticNavigationEvidence = Effect.fn('navigation.acquireSe
   // Far-end documents need their own observation and disk join before a cross-file route can be verified.
   for (const path of farPaths(input.worktreeUri, queries)) {
     if (opening.size >= MAXIMUM_DOCUMENTS || opening.has(path)) continue;
-    const left = yield* startable;
+    // Keep one closing observation for every document opened so far and for this one.
+    const left = yield* available(opening.size + 1);
     if (left === undefined) {
       gaps.add('semantic-deadline-exhausted');
       break;
@@ -470,18 +543,23 @@ export const acquireSemanticNavigationEvidence = Effect.fn('navigation.acquireSe
   }
   const documents: SemanticNavigationDocument[] = [];
   for (const [path, observation] of opening) {
-    const left = yield* startable;
-    if (left === undefined) {
-      gaps.add('semantic-deadline-exhausted');
-      break;
+    if (observation.view.kind !== 'disk') {
+      documents.push({path, observation, binding: null, closingObservationKey: null});
+      continue;
     }
-    const binding = observation.view.kind === 'disk' ? yield* input.ports.bind(path, observation) : null;
-    documents.push({path, observation, binding, closingObservationKey: null});
+    const joined = yield* input.ports.bind(path, observation);
+    documents.push({
+      path,
+      observation,
+      binding: joined.binding,
+      ...(joined.refusal === undefined ? {} : {refusal: joined.refusal}),
+      closingObservationKey: null,
+    });
   }
   // The closing observations run last, after every query and join, so any drift in between is detected.
   const closed: SemanticNavigationDocument[] = [];
-  for (const document of documents) {
-    const left = yield* startable;
+  for (const [index, document] of documents.entries()) {
+    const left = yield* available(documents.length - index - 1);
     const closing = left === undefined ? null : yield* input.ports.observe(document.path, left);
     if (left === undefined) gaps.add('semantic-deadline-exhausted');
     closed.push({...document, closingObservationKey: closing === null ? null : observationKey(closing)});
@@ -496,23 +574,10 @@ export const acquireSemanticNavigationEvidence = Effect.fn('navigation.acquireSe
 
 function farPaths(worktreeUri: string, queries: readonly SemanticNavigationQuery[]): readonly string[] {
   const paths = new Set<string>();
-  const add = (uri: string) => {
-    const path = relativePath(worktreeUri, uri);
-    if (path !== undefined) paths.add(path);
-  };
-  for (const query of queries) {
-    if (query.result.status !== 'ok') continue;
-    for (const item of query.result.items) {
-      if (query.operation === 'call-hierarchy') {
-        const hierarchy = decodeCallHierarchy(item);
-        if (Option.isNone(hierarchy)) continue;
-        for (const call of hierarchy.value.incoming) add(call.from.uri);
-        for (const call of hierarchy.value.outgoing) add(call.to.uri);
-        continue;
-      }
-      const location = decodeLocation(item);
-      if (Option.isSome(location)) add('uri' in location.value ? location.value.uri : location.value.targetUri);
+  for (const query of EffectArray.filter(queries, usableQuery))
+    for (const target of resultTargets(query).targets) {
+      const path = relativePath(worktreeUri, target.uri);
+      if (path !== undefined) paths.add(path);
     }
-  }
   return [...paths].sort(compareText);
 }

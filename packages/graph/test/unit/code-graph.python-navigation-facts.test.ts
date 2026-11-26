@@ -84,6 +84,13 @@ effectIt.layer(TreeSitterRuntime.layer.pipe(Layer.provideMerge(citationPlatformL
     }),
   );
 
+  it.effect('accepts every valid write-capable mode', () =>
+    Effect.gen(function* () {
+      for (const mode of ['wb', 'a', 'x+', 'r+', 'at'])
+        expect((yield* extract(edit(WRITE, '"w"', `"${mode}"`))).navigationFacts?.proofs).toHaveLength(1);
+    }),
+  );
+
   it.effect('refuses every shape outside the finite grammar or with a possible rebinding of open', () =>
     Effect.gen(function* () {
       const refused: Record<string, string> = {
@@ -110,6 +117,12 @@ effectIt.layer(TreeSitterRuntime.layer.pipe(Layer.provideMerge(citationPlatformL
         )}`,
         'non-identifier guard': edit(WRITE, 'if persist:', 'if persist and text:'),
         'computed target': edit(WRITE, 'open(path, "w")', 'open(path + ".bak", "w")'),
+        'sys module': `import sys\n${WRITE}`,
+        'importlib module': `import importlib\n${WRITE}`,
+        'invalid rw mode': edit(WRITE, '"w"', '"rw"'),
+        'invalid plus mode': edit(WRITE, '"w"', '"+"'),
+        'async with': edit(edit(WRITE, 'def save_note', 'async def save_note'), 'with open', 'async with open'),
+        'constant guard': edit(WRITE, '    body = text\n', '    body = text\n    persist = True\n'),
       };
       for (const [name, content] of EffectRecord.toEntries(refused)) {
         const facts = yield* extract(content);
