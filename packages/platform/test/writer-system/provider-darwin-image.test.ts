@@ -69,6 +69,8 @@ beforeAll(() => {
   );
   const source = join(directory, 'program');
   variant('runtime', source, ['--options', 'runtime', '--identifier', 'dev.threadnote.image-test']);
+  // Explicit kill and hard flags: some kernels (macOS 15) do not imply CS_KILL from the hardened runtime alone.
+  variant('explicit', source, ['--options', 'runtime,kill,hard', '--identifier', 'dev.threadnote.image-test']);
   variant('plain', source, ['--identifier', 'dev.threadnote.image-test']);
   variant('debuggable', source, ['--options', 'runtime', '--entitlements', join(directory, 'debug.plist')]);
   // Same CodeDirectory as `runtime`, one changed byte in the marker page: the cdhash still matches.
@@ -80,6 +82,12 @@ beforeAll(() => {
   bytes[marker + 1] = 0x58;
   writeFileSync(tampered, bytes);
   signed.tampered = {path: tampered, cdhash: signed.runtime.cdhash};
+  const explicitTampered = join(directory, 'explicit-tampered');
+  copyFileSync(signed.explicit.path, explicitTampered);
+  const explicitBytes = readFileSync(explicitTampered);
+  explicitBytes[explicitBytes.indexOf('REVIEWED-PAGE') + 1] = 0x58;
+  writeFileSync(explicitTampered, explicitBytes);
+  signed['explicit-tampered'] = {path: explicitTampered, cdhash: signed.explicit.cdhash};
 });
 afterAll(() => {
   if (directory) rmSync(directory, {recursive: true, force: true});
@@ -162,6 +170,17 @@ it.skipIf(!tools || process.arch !== 'arm64')(
     });
   },
 );
+
+it.skipIf(!tools)('resumes an image signed with explicit kill and hard flags and kills its tampered copy', async () => {
+  await expect(launch('explicit', {cdhash: signed.explicit.cdhash, requireRuntime: true})).resolves.toEqual({
+    output: 'ran R\n',
+    exitCode: 0,
+    ran: true,
+  });
+  const result = await launch('explicit-tampered', {cdhash: signed.explicit.cdhash, requireRuntime: true});
+  expect(result.output).toBe('');
+  expect(result.exitCode).toBe(128 + 9);
+});
 
 it.skipIf(!tools)('lets the kernel kill an image whose executed page differs from its CodeDirectory', async () => {
   // The cdhash binding passes: the CodeDirectory is unchanged. CS_KILL then ends the child when it touches the page.
