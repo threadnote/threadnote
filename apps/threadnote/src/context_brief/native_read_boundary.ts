@@ -1,11 +1,34 @@
-import {Array as EffectArray, Effect, Option, Record as EffectRecord, Schema} from 'effect';
+import {
+  Array as EffectArray,
+  Cause,
+  Deferred,
+  Effect,
+  Exit,
+  Fiber,
+  Option,
+  Record as EffectRecord,
+  Schema,
+  Scope,
+} from 'effect';
 import * as EffectString from 'effect/String';
 import {assertMemoryCodeCitation, type MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import {CodeGraphProjectCoverageSchema} from '@threadnote/graph/types';
 import {CodeGraphScopeRoutingError} from '@threadnote/graph/scope/routing';
-import {CommandCleanupUnconfirmed, CommandExecutor, CommandTimedOut} from '@threadnote/platform/command';
+import {
+  CommandCleanupUnconfirmed,
+  CommandExecutor,
+  CommandTimedOut,
+  type CommandDeferredInput,
+  type CommandExecutionError,
+  type CommandResult,
+} from '@threadnote/platform/command';
 import {isJsonObject} from '@threadnote/platform/json';
-import {ReadDeadlineExceeded, readDeadlineRemaining, type ReadDeadline} from '@threadnote/platform/read_deadline';
+import {
+  ReadDeadlineExceeded,
+  hasReadCleanupUnconfirmed,
+  readDeadlineRemaining,
+  type ReadDeadline,
+} from '@threadnote/platform/read_deadline';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SystemInfo} from '@threadnote/platform/system';
 import {Evidence, FileUri, Position} from '@threadnote/semantic/contracts';
@@ -23,6 +46,8 @@ import {CONTEXT_BRIEF_NATIVE_READ_WORKER_ARGUMENT} from '../worker_protocol.js';
 export const CONTEXT_BRIEF_NATIVE_READ_INPUT_BYTES = 2 * 1024 * 1024;
 export const CONTEXT_BRIEF_NATIVE_READ_OUTPUT_BYTES = 2 * 1024 * 1024;
 const CLEANUP_AND_DECODE_RESERVE_MILLISECONDS = 1_100;
+/** An unused prestarted worker stops after this; its request deadline, not this, bounds a request. */
+const PRESTARTED_WORKER_IDLE_MILLISECONDS = 30_000;
 /** The graph status and attach reads completed. */
 export const CONTEXT_BRIEF_NATIVE_READ_STATUS_PROGRESS = JSON.stringify({protocol: 1, progress: 'status-observed'});
 const scopedReadyPrefix = 'scoped-ready:';
@@ -565,10 +590,16 @@ export function contextBriefNativeReadBinding(request: ContextBriefNativeReadReq
   );
 }
 
-/** Parent-owned execution only. Missing budget never creates a fresh five second window. */
-const makeNativeReadExecutor = Effect.fn('contextBrief.makeNativeReadExecutor')(function* () {
+/**
+ * Parent-owned execution only. Missing budget never creates a fresh five second window. Each read starts one spare
+ * single-use worker, so the next read's worker loads its code while this read runs (slow hosts spend seconds there).
+ * The request deadline still starts at the request, and a process never serves two requests. The scope stops an
+ * unused spare and checks the owned exit of every worker it started.
+ */
+const makeNativeReadExecutor = Effect.fn('contextBrief.makeNativeReadExecutor')(function* (home: string) {
   const command = yield* CommandExecutor;
   const system = yield* SystemInfo;
+  const scope = yield* Effect.scope;
   const name = EffectString.toLowerCase(
     EffectString.split('/')(EffectString.replaceAll('\\', '/')(system.executablePath)).at(-1) ?? '',
   );
@@ -576,6 +607,86 @@ const makeNativeReadExecutor = Effect.fn('contextBrief.makeNativeReadExecutor')(
     ...(name === 'bun' || name === 'bun.exe' ? [system.developmentEntrypoint] : []),
     CONTEXT_BRIEF_NATIVE_READ_WORKER_ARGUMENT,
   ];
+  const started = new Set<Worker>();
+  const prestart = Effect.gen(function* () {
+    const deferred = yield* Deferred.make<CommandDeferredInput>();
+    const lines: {sink?: (line: string) => void} = {};
+    const fiber = yield* command
+      .execute(system.executablePath, args, {
+        env: {...system.environment(), THREADNOTE_HOME: home},
+        deferredInput: deferred,
+        maxOutputBytes: CONTEXT_BRIEF_NATIVE_READ_OUTPUT_BYTES,
+        timeoutMs: PRESTARTED_WORKER_IDLE_MILLISECONDS,
+        forceKillAfterMilliseconds: 0,
+        sensitiveOutput: true,
+        verifyOwnedProcessExit: system.platform === 'win32' ? 'leader' : 'group',
+        onStdoutLine: line => lines.sink?.(line),
+      })
+      .pipe(Effect.forkIn(scope));
+    const worker = {deferred, fiber, lines};
+    started.add(worker);
+    return worker;
+  });
+  type Worker = {
+    readonly deferred: Deferred.Deferred<CommandDeferredInput>;
+    readonly fiber: Fiber.Fiber<CommandResult, CommandExecutionError>;
+    readonly lines: {sink?: (line: string) => void};
+  };
+  // Stopping a worker still requires its confirmed owned exit. A worker stopped before its request started no Git
+  // child, so on Windows only an unconfirmed exit, not every failure, is a cleanup failure here.
+  const retire = (worker: Worker) =>
+    Fiber.interrupt(worker.fiber).pipe(
+      Effect.andThen(Fiber.await(worker.fiber)),
+      Effect.flatMap(exit => {
+        started.delete(worker);
+        return Exit.isFailure(exit) && hasReadCleanupUnconfirmed(exit.cause)
+          ? Effect.fail(ContextBriefNativeReadFailed.make({reason: 'cleanup-unconfirmed'}))
+          : Effect.void;
+      }),
+    );
+  let spare: Worker | undefined;
+  yield* Scope.addFinalizer(
+    scope,
+    Effect.suspend(() => {
+      spare = undefined;
+      return Effect.forEach([...started], worker => Effect.result(retire(worker))).pipe(
+        Effect.flatMap(results =>
+          EffectArray.some(results, result => result._tag === 'Failure')
+            ? Effect.die(ContextBriefNativeReadFailed.make({reason: 'cleanup-unconfirmed'}))
+            : Effect.void,
+        ),
+      );
+    }),
+  );
+  // Taking a worker and handing it the request cannot be interrupted; only the wait for its result can. An interrupted
+  // read (its deadline) interrupts its worker and keeps that worker's cleanup failure.
+  const run = (input: Uint8Array, timeoutMs: number, line?: (line: string) => void) =>
+    Effect.uninterruptibleMask(restore =>
+      Effect.gen(function* () {
+        let worker = spare;
+        spare = undefined;
+        if (worker !== undefined && worker.fiber.pollUnsafe() !== undefined) {
+          yield* retire(worker);
+          worker = undefined;
+        }
+        worker ??= yield* prestart;
+        if (spare === undefined) {
+          const next = yield* prestart;
+          if (spare === undefined) spare = next;
+        }
+        worker.lines.sink = line;
+        yield* Deferred.succeed(worker.deferred, {input, timeoutMs});
+        const exit = yield* Effect.exit(restore(Fiber.join(worker.fiber)));
+        if (Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause)) {
+          yield* Fiber.interrupt(worker.fiber);
+          const owned = yield* Fiber.await(worker.fiber);
+          started.delete(worker);
+          return yield* Effect.failCause(Exit.isFailure(owned) ? Cause.combine(exit.cause, owned.cause) : exit.cause);
+        }
+        started.delete(worker);
+        return Exit.isSuccess(exit) ? exit.value : yield* Effect.failCause(exit.cause);
+      }),
+    );
   return (
     request: ContextBriefNativeReadRequest,
     deadline: ReadDeadline,
@@ -588,33 +699,24 @@ const makeNativeReadExecutor = Effect.fn('contextBrief.makeNativeReadExecutor')(
       });
       if (input.byteLength > CONTEXT_BRIEF_NATIVE_READ_INPUT_BYTES)
         return yield* ContextBriefNativeReadFailed.make({reason: 'invalid-protocol'});
+      if (request.config.agentContextHome !== home)
+        return yield* ContextBriefNativeReadFailed.make({reason: 'invalid-protocol'});
       const timeoutMs = yield* readDeadlineRemaining(deadline, CLEANUP_AND_DECODE_RESERVE_MILLISECONDS);
       if (timeoutMs <= 0) return yield* ReadDeadlineExceeded.make({});
-      const result = yield* command
-        .execute(system.executablePath, args, {
-          env: {...system.environment(), THREADNOTE_HOME: request.config.agentContextHome},
-          input,
-          maxOutputBytes: CONTEXT_BRIEF_NATIVE_READ_OUTPUT_BYTES,
-          timeoutMs,
-          forceKillAfterMilliseconds: 0,
-          sensitiveOutput: true,
-          verifyOwnedProcessExit: system.platform === 'win32' ? 'leader' : 'group',
-          ...(progress === undefined ? {} : {onStdoutLine: progress.line}),
-        })
-        .pipe(
-          Effect.mapError(error => {
-            if (Schema.is(CommandCleanupUnconfirmed)(error))
-              return ContextBriefNativeReadFailed.make({reason: 'cleanup-unconfirmed'});
-            if (Schema.is(CommandTimedOut)(error)) {
-              // A Windows watchdog confirms only the worker leader. Its Git descendants may still be running.
-              if (system.platform !== 'win32') progress?.joinedDeadline();
-              return ReadDeadlineExceeded.make({});
-            }
-            return ContextBriefNativeReadFailed.make({
-              reason: system.platform === 'win32' ? 'cleanup-unconfirmed' : 'worker-failed',
-            });
-          }),
-        );
+      const result = yield* run(input, timeoutMs, progress?.line).pipe(
+        Effect.mapError(error => {
+          if (Schema.is(CommandCleanupUnconfirmed)(error))
+            return ContextBriefNativeReadFailed.make({reason: 'cleanup-unconfirmed'});
+          if (Schema.is(CommandTimedOut)(error)) {
+            // A Windows watchdog confirms only the worker leader. Its Git descendants may still be running.
+            if (system.platform !== 'win32') progress?.joinedDeadline();
+            return ReadDeadlineExceeded.make({});
+          }
+          return ContextBriefNativeReadFailed.make({
+            reason: system.platform === 'win32' ? 'cleanup-unconfirmed' : 'worker-failed',
+          });
+        }),
+      );
       // A graph worker prints its progress line first; the response is always the last line.
       const final = EffectString.split('\n')(EffectString.trimEnd(result.stdout)).at(-1) ?? '';
       const response = yield* Schema.decodeEffect(Schema.fromJsonString(contextBriefNativeReadResponseSchema), {
@@ -664,8 +766,8 @@ export const withNativeContextBriefReadSources = Effect.fn('contextBrief.withNat
   } = {},
 ) {
   if (Option.isNone(yield* Effect.serviceOption(ReadyRecallReadWorkerAdmission))) return sources;
-  const execute = yield* makeNativeReadExecutor();
   const safeConfig = yield* Schema.decodeEffect(runtimeConfigSchema)(config);
+  const execute = yield* makeNativeReadExecutor(safeConfig.agentContextHome);
   return {
     ...sources,
     graphEvidence: (plan, budget) =>

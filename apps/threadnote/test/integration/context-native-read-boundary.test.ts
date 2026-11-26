@@ -1,5 +1,5 @@
 import {it as effectIt} from '@effect/vitest';
-import {Array as EffectArray, Clock, Effect, Fiber, FileSystem, Option, Path, Schema} from 'effect';
+import {Array as EffectArray, Clock, Deferred, Effect, Fiber, FileSystem, Option, Path, Schema} from 'effect';
 import * as EffectString from 'effect/String';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
@@ -43,6 +43,13 @@ import {
 import type {ContextBriefGraphReadBudget} from '@threadnote/context/graph/evidence';
 import type {ContextBriefGraphEvidenceV1} from '@threadnote/context/types';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import type {CommandOptions} from '@threadnote/platform/command';
+
+/** A worker answers only after its request arrives; a prestarted one receives it later through `deferredInput`. */
+const requestInput = (options?: CommandOptions) =>
+  options?.deferredInput === undefined
+    ? Effect.succeed(options?.input)
+    : Effect.map(Deferred.await(options.deferredInput), deferred => deferred.input);
 import {withProductionLogging, withProductionPhaseTiming} from '../../src/effect/production_log.js';
 import {native} from '@threadnote/graph/test/helpers/native-typescript-session';
 
@@ -515,6 +522,7 @@ describe('whole native Context Brief read boundary', () => {
         const plan = planContextBrief({scope: {kind: 'repository', callerCwd: f.repo}, mode: 'locate', task: 'answer'});
         const empty = yield* native.citationValidation(plan.scope, [], undefined, yield* makeReadDeadline(5000));
         expect(empty).toEqual([]);
+        // A read without candidates starts no worker.
         expect(invocations).toBe(0);
         const deadline = yield* makeReadDeadline(1600);
         const budget: ContextBriefGraphReadBudget = {remaining: 2, primaryRemaining: 17, deadline};
@@ -530,7 +538,8 @@ describe('whole native Context Brief read boundary', () => {
         expect(Number((yield* Clock.monotonicTimeNanos) - start) / 1_000_000).toBeLessThan(1600);
         const second = yield* native.citationValidation(plan.scope, [], undefined, deadline).pipe(Effect.result);
         expect(second._tag).toBe('Failure');
-        expect(invocations).toBe(1);
+        // The graph read started its worker and one spare; the expired read started none.
+        expect(invocations).toBe(2);
         const log = yield* f.fs.readFileString(f.path.join(f.home, 'logs', 'threadnote.log'));
         expect(log).toContain('"phase":"context.brief.graph"');
         expect(log).toContain('"outcome":"timed-out"');
@@ -586,12 +595,14 @@ describe('whole native Context Brief read boundary', () => {
             Effect.provideService(CommandExecutor, {
               ...command,
               execute: (_executable, _args, options) =>
-                Effect.suspend(() => {
-                  for (const line of lines) options?.onStdoutLine?.(line);
-                  return Effect.fail(
-                    CommandTimedOut.make({args: [], executable: '<test>', message: 'worker timed out', timeoutMs: 1}),
-                  );
-                }),
+                requestInput(options).pipe(
+                  Effect.andThen(() => {
+                    for (const line of lines) options?.onStdoutLine?.(line);
+                    return Effect.fail(
+                      CommandTimedOut.make({args: [], executable: '<test>', message: 'worker timed out', timeoutMs: 1}),
+                    );
+                  }),
+                ),
             }),
           );
           const brief = yield* compileContextBriefWith(native, {
@@ -677,7 +688,9 @@ describe('whole native Context Brief read boundary', () => {
               execute: (_executable, _args, options) =>
                 Effect.gen(function* () {
                   expect(options?.verifyOwnedProcessExit).toBe('leader');
-                  const request = yield* decode(new TextDecoder().decode(options?.input)).pipe(Effect.orDie);
+                  const request = yield* decode(new TextDecoder().decode(yield* requestInput(options))).pipe(
+                    Effect.orDie,
+                  );
                   const progress = new TextDecoder().decode(encodeContextBriefScopedReadyProgress(request, value));
                   for (const line of EffectString.split('\n')(EffectString.trimEnd(progress)))
                     options?.onStdoutLine?.(line);
@@ -776,6 +789,63 @@ describe('whole native Context Brief read boundary', () => {
         TestClock.withLive,
       ),
     {timeout: 10000},
+  );
+
+  effectIt.effect('gives concurrent reads separate single-use workers and stops the unused spare at scope close', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const command = yield* CommandExecutor;
+      const decode = Schema.decodeUnknownEffect(Schema.fromJsonString(contextBriefNativeReadRequestSchema));
+      const workers: {started: boolean; served: number; stopped: boolean}[] = [];
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const native = yield* withNativeContextBriefReadSources(f.config, sources).pipe(
+            Effect.provideService(CommandExecutor, {
+              ...command,
+              execute: (_executable, _args, options) => {
+                const worker = {started: false, served: 0, stopped: false};
+                workers.push(worker);
+                return Effect.gen(function* () {
+                  worker.started = true;
+                  const request = yield* decode(new TextDecoder().decode(yield* requestInput(options))).pipe(
+                    Effect.orDie,
+                  );
+                  worker.served += 1;
+                  const reply = {
+                    protocol: 1,
+                    operation: 'graph',
+                    binding: contextBriefNativeReadBinding(request),
+                    commandsJoined: true,
+                    ok: false,
+                    failure: 'worker-failed',
+                  };
+                  return {exitCode: 0, stdout: JSON.stringify(reply) + '\n', stderr: ''};
+                }).pipe(Effect.onInterrupt(() => Effect.sync(() => (worker.stopped = true))));
+              },
+            }),
+          );
+          const plan = planContextBrief({
+            scope: {kind: 'repository', callerCwd: f.repo},
+            mode: 'locate',
+            task: 'answer',
+          });
+          const deadline = yield* makeReadDeadline(5000);
+          // Separate budgets: a graph read reserves its own budget's counters.
+          const read = Effect.suspend(() =>
+            native.graphEvidence(plan.graph, {remaining: 2, primaryRemaining: 17, deadline}).pipe(Effect.flip),
+          );
+          const failures = yield* Effect.all([read, read], {concurrency: 2});
+          for (const failure of failures)
+            expect(failure, JSON.stringify(failure)).toMatchObject({
+              _tag: 'ContextBriefNativeReadFailed',
+              reason: 'worker-failed',
+            });
+        }),
+      );
+      // Each request had its own process. One spare never served; the scope stopped it if it had started at all.
+      expect(EffectArray.map(workers, worker => worker.served).sort()).toEqual([0, 1, 1]);
+      expect(EffectArray.every(workers, worker => worker.served === 1 || !worker.started || worker.stopped)).toBe(true);
+    }).pipe(Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}), provideTestLayer(ApplicationLayer)),
   );
 
   effectIt.effect('an unexpected Windows worker failure explicitly refuses to claim descendant cleanup', () =>

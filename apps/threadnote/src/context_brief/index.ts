@@ -16,6 +16,7 @@ import {withReadyRecallReadBoundary} from '../recall/ready_read_boundary.js';
 import {ReadDeadlineExceeded, isReadCleanupUnconfirmed, type ReadDeadline} from '@threadnote/platform/read_deadline';
 import {RecallReadyReadUnavailable} from '@threadnote/recall/index';
 import {
+  ContextBriefNativeReadFailed,
   withNativeContextBriefReadSources,
   type ContextBriefNativeSemanticRead,
   type ContextBriefNativeSemanticState,
@@ -342,6 +343,7 @@ const compileContextBriefRuntime = Effect.fn('contextBrief.compileRuntime')(func
     contract: request.codeAnchors.codeRefs.length === 0 ? 'task-only-v2' : 'code-anchored-v3',
     mode: request.mode,
   });
+  // The scope owns the prestarted native read worker for this one brief.
   const compilation = Effect.gen(function* () {
     yield* reporter.annotate;
     return yield* compileContextBriefWith(
@@ -439,7 +441,17 @@ const compileContextBriefRuntime = Effect.fn('contextBrief.compileRuntime')(func
       },
     );
   });
-  return yield* withReadyRecallReadBoundary(compilation, {readMilliseconds: CONTEXT_BRIEF_READ_MILLISECONDS}).pipe(
+  // A spare native read worker whose exit cannot be confirmed fails the brief as a typed read cleanup failure.
+  const scopedCompilation = Effect.scoped(compilation).pipe(
+    Effect.catchDefect(defect =>
+      isReadCleanupUnconfirmed(defect)
+        ? Effect.fail(ContextBriefNativeReadFailed.make({reason: 'cleanup-unconfirmed'}))
+        : Effect.die(defect),
+    ),
+  );
+  return yield* withReadyRecallReadBoundary(scopedCompilation, {
+    readMilliseconds: CONTEXT_BRIEF_READ_MILLISECONDS,
+  }).pipe(
     Effect.onExit(exit =>
       Clock.currentTimeMillis.pipe(
         Effect.flatMap(completedAt =>

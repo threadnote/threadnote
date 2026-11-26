@@ -1,5 +1,5 @@
 import {Array as EffectArray} from 'effect';
-import {Cause, Context, Effect, Exit, Layer, Schema, Sink, Stdio, Stream} from 'effect';
+import {Cause, Context, Deferred, Effect, Exit, Layer, Option, Schema, Sink, Stdio, Stream} from 'effect';
 import * as ChildProcess from 'effect/process/ChildProcess';
 import * as CommandLine from 'effect/process/CommandLine';
 import {ChildProcessSpawner} from 'effect/process/ChildProcessSpawner';
@@ -16,6 +16,13 @@ export interface CommandOptions {
   /** @internal Permit one explicitly selected private index for a Git child. */
   readonly trustedGitIndexFile?: string;
   readonly input?: Uint8Array;
+  /**
+   * @internal `execute` only, in place of `input`: spawn now and write stdin when this completes. `timeoutMs` bounds
+   * the wait for it; from then on the completed `timeoutMs` bounds the command. A prestarted worker loads its code
+   * before its request, while the request's own deadline still bounds the request. Here a zero timeout is not
+   * caller-owned: it ends the command at once.
+   */
+  readonly deferredInput?: Deferred.Deferred<CommandDeferredInput>;
   /** Set to zero to collect output without a byte ceiling. */
   readonly maxOutputBytes?: number;
   readonly timeoutMs?: number;
@@ -32,6 +39,11 @@ export interface CommandOptions {
    * Lines longer than `COMMAND_STDOUT_LINE_OBSERVER_CHARACTERS` are skipped. No line is kept on any error.
    */
   readonly onStdoutLine?: (line: string) => void;
+}
+
+export interface CommandDeferredInput {
+  readonly input: Uint8Array;
+  readonly timeoutMs: number;
 }
 
 export interface BinaryCommandResult {
@@ -271,7 +283,12 @@ const executeCommand = Effect.fn('CommandExecutor.execute')(function* (
         forceKillAfter: options.forceKillAfterMilliseconds ?? 1000,
         detached: options.detached,
         shell: invocation.shell,
-        stdin: options.input ? Stream.make(options.input) : 'ignore',
+        stdin:
+          options.deferredInput !== undefined
+            ? Stream.fromEffect(Effect.map(Deferred.await(options.deferredInput), deferred => deferred.input))
+            : options.input
+              ? Stream.make(options.input)
+              : 'ignore',
       }).pipe(Effect.mapError(spawnFailed));
       ownedProcessId = Number(handle.pid);
       const [stdout, stderr, exitCode] = yield* Effect.all(
@@ -311,15 +328,41 @@ const executeCommand = Effect.fn('CommandExecutor.execute')(function* (
     message: `${command} timed out after ${timeoutMs}ms`,
     timeoutMs,
   });
+  const deferredInput = options.deferredInput;
+  // Both phases end like `timeoutOrElse`: the losing command is interrupted and its scope kills the process.
+  const deferredDeadline =
+    deferredInput === undefined
+      ? undefined
+      : Deferred.await(deferredInput).pipe(
+          Effect.timeoutOption(Math.max(0, timeoutMs)),
+          Effect.flatMap(started =>
+            Option.isNone(started)
+              ? Effect.fail(timedOut)
+              : Effect.sleep(Math.max(0, started.value.timeoutMs)).pipe(
+                  Effect.andThen(
+                    Effect.fail(
+                      CommandTimedOut.make({
+                        args: safeArgs,
+                        executable: safeExecutable,
+                        message: `${command} timed out after ${started.value.timeoutMs}ms`,
+                        timeoutMs: started.value.timeoutMs,
+                      }),
+                    ),
+                  ),
+                ),
+          ),
+        );
   const bounded = verifyOwnedCommandExit(
-    timeoutMs <= 0
-      ? run
-      : run.pipe(
-          Effect.timeoutOrElse({
-            duration: timeoutMs,
-            orElse: () => Effect.fail(timedOut),
-          }),
-        ),
+    deferredDeadline !== undefined
+      ? Effect.raceFirst(run, deferredDeadline)
+      : timeoutMs <= 0
+        ? run
+        : run.pipe(
+            Effect.timeoutOrElse({
+              duration: timeoutMs,
+              orElse: () => Effect.fail(timedOut),
+            }),
+          ),
     () => ownedProcessId,
     options,
     system,
