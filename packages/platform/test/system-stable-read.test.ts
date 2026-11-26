@@ -761,6 +761,90 @@ effectIt.layer(BunServices.layer)(it => {
   );
 });
 
+effectIt.layer(BunServices.layer)(it => {
+  it.effect('sizes a bounded read to the file, not to its bound', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fs.makeTempDirectoryScoped({prefix: 'stable-read-size-'});
+      const filename = path.join(directory, 'source.md');
+      yield* fs.writeFileString(filename, 'abc');
+      const bytes = yield* fromPromise('read', () => runtimeReadBoundedStableRegularFile(filename, 1024 * 1024));
+      expect(new TextDecoder().decode(bytes)).toBe('abc');
+      expect(bytes.byteLength).toBe(3);
+      expect(bytes.buffer.byteLength).toBe(3);
+    }),
+  );
+});
+
+for (const mutation of ['grow', 'shrink'] as const) {
+  effectIt.layer(BunServices.layer)(it => {
+    it.effect(`rejects a file that ${mutation}s in place during a bounded read despite unchanged metadata`, () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const directory = yield* fs.makeTempDirectoryScoped({prefix: 'stable-read-resize-'});
+        const filename = path.join(directory, 'source.md');
+        yield* fs.writeFileString(filename, 'abc');
+        const native = process.getBuiltinModule('fs');
+        const promises = native.promises;
+        const before = yield* fromPromise('before', () => promises.lstat(filename, {bigint: true}));
+        const originalLstat = promises.lstat.bind(promises),
+          originalOpen = promises.open.bind(promises);
+        let mutated = false;
+        yield* Effect.acquireUseRelease(
+          Effect.sync(() => {
+            // Frozen metadata leaves the byte count as the only evidence of the in-place change.
+            const lstat = vi
+              .spyOn(promises, 'lstat')
+              .mockImplementation((...args) =>
+                args[0] === filename ? Promise.resolve(before) : originalLstat(...args),
+              );
+            const open = vi.spyOn(promises, 'open').mockImplementation(async (...args) => {
+              const handle = await originalOpen(...args);
+              if (args[0] !== filename) return handle;
+              // The open-time descriptor probe changes the bytes in place just before the read starts.
+              Object.defineProperty(handle, 'stat', {
+                value: () => {
+                  if (!mutated) {
+                    mutated = true;
+                    if (mutation === 'grow') native.appendFileSync(filename, 'd');
+                    else native.truncateSync(filename, 1);
+                  }
+                  return Promise.resolve(before);
+                },
+              });
+              return handle;
+            });
+            return {lstat, open};
+          }),
+          () =>
+            Effect.gen(function* () {
+              for (const strict of [true, false]) {
+                mutated = false;
+                yield* fs.writeFileString(filename, 'abc');
+                const failure = yield* fromPromise('read', (): Promise<unknown> =>
+                  strict
+                    ? runtimeReadBoundedStableRegularFile(filename, 1024)
+                    : runtimeReadBoundedRegularFileAttempt(filename, 1024),
+                ).pipe(Effect.flip);
+                expect(mutated).toBe(true);
+                expect(failure).toMatchObject({
+                  cause: {_tag: 'SystemOperationError', message: 'Target changed during bounded read.'},
+                });
+              }
+            }),
+          spies =>
+            Effect.sync(() => {
+              spies.open.mockRestore();
+              spies.lstat.mockRestore();
+            }),
+        );
+      }),
+    );
+  });
+}
+
 for (const boundary of [
   'replacement',
   'strict',

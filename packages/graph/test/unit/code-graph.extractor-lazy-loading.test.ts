@@ -31,6 +31,7 @@ import {
   mkdtempSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -444,6 +445,49 @@ native(it)(
     }
   },
 );
+
+native(it)('refuses a borrowed result after its endpoint directory changes and keeps the session closed', async () => {
+  const owner = await createNativeTypeScriptTestSession();
+  const original = nativeTypeScriptSessionOwnership(owner);
+  const moved = `${original.endpointDirectory}-moved`;
+  let renamed = false;
+  try {
+    // An unguarded borrowed session skips duplicate checks, but still proves its endpoint before it returns a result.
+    const borrowed = await connectNativeTypeScriptPipeSession({
+      pipe: original.pipe,
+      endpointDirectory: original.endpointDirectory,
+      sdkDirectory: original.sdkDirectory,
+      deadline: Date.now() + 30_000,
+    });
+    try {
+      const failure = await borrowed
+        .withSourceFile({fileName: 'moved.ts', text: 'export const moved = 1;'}, () => {
+          renameSync(original.endpointDirectory, moved);
+          renamed = true;
+          return 'parsed';
+        })
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+      expect(Schema.is(NativeTypeScriptUnavailable)(failure)).toBe(true);
+      renameSync(moved, original.endpointDirectory);
+      renamed = false;
+      const later = await borrowed
+        .withSourceFile({fileName: 'later.ts', text: 'export const later = 1;'}, () => 'parsed')
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+      expect(Schema.is(NativeTypeScriptUnavailable)(later)).toBe(true);
+    } finally {
+      await borrowed.close().catch(() => undefined);
+    }
+  } finally {
+    if (renamed) renameSync(moved, original.endpointDirectory);
+    await owner.close().catch(() => undefined);
+  }
+});
 
 native(it)('fails its own first in-flight request when closed from outside, without unhandled rejections', async () => {
   const session = await createNativeTypeScriptTestSession();

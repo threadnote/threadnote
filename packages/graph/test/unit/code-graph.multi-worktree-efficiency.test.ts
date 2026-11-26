@@ -128,8 +128,8 @@ const fixture = (worktreeCount: number) =>
     const observedParser = CodeGraphParserPool.of({
       ...parser,
       extract: (file, threadnoteHome) => observeExtract(value => parser.extract(value, threadnoteHome))(file),
-      withParserSlot: (threadnoteHome, files, use) =>
-        parser.withParserSlot(threadnoteHome, files, extract => use(observeExtract(extract))),
+      withParserSlot: (threadnoteHome, files, use, lane) =>
+        parser.withParserSlot(threadnoteHome, files, extract => use(observeExtract(extract)), lane),
     });
     const observedStore = CodeGraphStore.of({
       ...store,

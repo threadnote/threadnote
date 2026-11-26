@@ -716,6 +716,9 @@ async function makeNativeTypeScriptPipeSession(
     if (directory) native.runtimeAssertPrivateWriterDirectoryCurrent(directory);
     assertIssuedNamespace();
   };
+  const assertOpen = () => {
+    if (failed || closing) throw nativeApiError();
+  };
   // The published client opens its socket lazily, and the owner's endpoint serves a single connection (the owner or the
   // one borrower that uses it). So nothing connects at construction: the first operation connects explicitly, before
   // its own request, and attaches the watch then. Socket loss (owner exit, socket error) fails the session at once,
@@ -776,6 +779,8 @@ async function makeNativeTypeScriptPipeSession(
       }
     })());
   type Outcome<A> = Awaited<ReturnType<typeof callbackOutcome<A>>>;
+  // A session without host guards proves its endpoint once before it sends, once before it consumes a response, and
+  // once before it returns a result.
   const operate = async <A>(budget: NativeTypeScriptBudget | undefined, run: () => Promise<Outcome<A>>): Promise<A> => {
     assertCurrent();
     if (active) throw nativeApiError();
@@ -793,7 +798,8 @@ async function makeNativeTypeScriptPipeSession(
     try {
       const work = (async () => {
         await guards?.before();
-        assertCurrent();
+        if (guards) assertCurrent();
+        else assertOpen();
         if (!watched) {
           await nativeApiConnect(api);
           watchTransport();
@@ -801,7 +807,8 @@ async function makeNativeTypeScriptPipeSession(
         }
         const value = await run();
         watchTransport();
-        assertCurrent();
+        if (guards) assertCurrent();
+        else assertOpen();
         await guards?.after();
         return value;
       })();

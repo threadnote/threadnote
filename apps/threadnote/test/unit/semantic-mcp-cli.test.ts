@@ -63,7 +63,10 @@ import {ReadyRecallReadWorkerAdmission} from '../../src/recall/ready_read_bounda
 import {loadRecallIndexData} from '@threadnote/recall/index';
 import {contextBriefNativeReadResponseSchema} from '../../src/context_brief/native_read_boundary.js';
 import {CONTEXT_BRIEF_NATIVE_READ_WORKER_ARGUMENT} from '../../src/worker_protocol.js';
-import {native} from '@threadnote/graph/test/helpers/native-typescript-session';
+import {createNativeTypeScriptTestSession, native} from '@threadnote/graph/test/helpers/native-typescript-session';
+import {isNativeTypeScriptSource, NativeTypeScriptUnavailable} from '@threadnote/graph/typescript_runtime';
+import {TestError} from '@threadnote/testing/test-error';
+import type {ParserWorkerFailureReason} from '@threadnote/graph/parser_worker';
 
 // This fixture grants protocol tests only their own current profile bytes; native ACL proof is tested separately.
 const protocolProfiles = new Map<
@@ -500,10 +503,36 @@ const memoryContextFixture = Effect.gen(function* () {
     ]);
   });
   yield* commit;
+  // A direct native session first: a refusal fails here with its typed reason instead of a degraded extraction.
+  const nativeRefusal = (error: unknown) =>
+    Schema.is(NativeTypeScriptUnavailable)(error)
+      ? error
+      : TestError.make({message: 'Native TypeScript session failed.', cause: error});
+  yield* Effect.acquireUseRelease(
+    Effect.tryPromise({try: () => createNativeTypeScriptTestSession(repository), catch: nativeRefusal}),
+    session =>
+      Effect.tryPromise({
+        try: () => session.withSourceFile({fileName: file, text: source(42)}, () => undefined),
+        catch: nativeRefusal,
+      }),
+    session => Effect.promise(() => session.close()),
+  );
   const indexer = yield* CodeGraphIndexer;
   const query = yield* CodeGraphQueryService;
-  const publish = indexer.index({cwd: repository, ensureVectors: false, threadnoteHome: home});
+  const degraded: {readonly path: string; readonly degradationReason?: ParserWorkerFailureReason}[] = [];
+  const publish = indexer.index({
+    cwd: repository,
+    ensureVectors: false,
+    threadnoteHome: home,
+    onProgress: progress =>
+      Effect.sync(() => {
+        const activity = progress.phase === 'scanning' ? progress.activity : undefined;
+        if (activity?.stage === 'extracting' && activity.degraded === true && isNativeTypeScriptSource(activity.path))
+          degraded.push({path: activity.path, degradationReason: activity.degradationReason});
+      }),
+  });
   yield* publish;
+  expect(degraded, JSON.stringify(degraded)).toEqual([]);
   const nodes = yield* query.inspect({
     threadnoteHome: home,
     cwd: repository,

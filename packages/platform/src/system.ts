@@ -426,7 +426,9 @@ async function readBoundedRegularFile(
         return {status: 'replaced'};
       throw SystemOperationError.make({message: 'Target changed while opening.'});
     }
-    const bytes = new Uint8Array(maximumBytes + 1);
+    // The bound check above proves this size is within the bound, so memory follows the file, never the bound.
+    const expectedBytes = Number(openedBefore.size);
+    const bytes = new Uint8Array(expectedBytes);
     let offset = 0;
     while (offset < bytes.length) {
       checkCancellation();
@@ -438,7 +440,11 @@ async function readBoundedRegularFile(
       if (bytesRead === 0) break;
       offset += bytesRead;
     }
+    // One probe byte past the observed size proves the file did not grow during the read.
+    const {bytesRead: grownBytes} = await opened.read(new Uint8Array(1), 0, 1, null);
     checkCancellation();
+    if (!Number.isSafeInteger(grownBytes) || grownBytes < 0 || grownBytes > 1)
+      throw SystemOperationError.make({message: 'Target returned an invalid read size.'});
     const openedAfter = await opened.stat({bigint: true});
     checkCancellation();
     const pathAfter = await nativeFileSystemPromises.lstat(path, {bigint: true});
@@ -446,18 +452,18 @@ async function readBoundedRegularFile(
     if (
       !sameStableRegularFile(pathBefore, openedAfter) ||
       !sameStableRegularFile(pathBefore, pathAfter) ||
-      offset > maximumBytes ||
+      grownBytes > 0 ||
+      offset !== expectedBytes ||
       BigInt(offset) !== pathBefore.size
     ) {
       if (
-        offset <= maximumBytes &&
         options.replacement !== 'reject' &&
         safeRegularFileReplacement([pathBefore, pathOpened, pathAfter], [openedBefore, openedAfter], maximumBytes)
       )
         return {status: 'replaced'};
       throw SystemOperationError.make({message: 'Target changed during bounded read.'});
     }
-    return {status: 'read', bytes: bytes.slice(0, offset)};
+    return {status: 'read', bytes};
   } finally {
     await opened.close();
     checkCancellation();

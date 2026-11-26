@@ -48,9 +48,22 @@ import {
   type ParserWorkerSourceSequenceResponse,
 } from './parser_worker_sequence.js';
 import {NATIVE_TYPESCRIPT_PREPARED_ASSET_ENV} from './typescript_native_asset_pins.js';
+import {
+  currentHardwareConcurrency,
+  explicitParserWorkerCapacity,
+  nativeParserWorkerCapacity,
+  parserWorkerCapacity,
+  type ParserWorkerEnvironment,
+} from './parser_worker_capacity.js';
 
 export {CODE_GRAPH_PARSER_WORKER_ARGUMENT};
-export const CODE_GRAPH_PARSER_WORKERS_ENV = 'THREADNOTE_CODE_GRAPH_PARSER_WORKERS';
+export {
+  CODE_GRAPH_NATIVE_PARSER_WORKERS_ENV,
+  CODE_GRAPH_PARSER_WORKERS_ENV,
+  nativeParserWorkerCapacity,
+  parserWorkerCapacity,
+  type ParserWorkerCapacityInput,
+} from './parser_worker_capacity.js';
 export const CODE_GRAPH_PARSER_TIMEOUT_ENV = 'THREADNOTE_CODE_GRAPH_PARSER_TIMEOUT_MS';
 export const CODE_GRAPH_PARSER_IDLE_TIMEOUT_ENV = 'THREADNOTE_CODE_GRAPH_PARSER_IDLE_TIMEOUT_MS';
 export const CODE_GRAPH_PARSER_ALLOCATION_BYTES_ENV = 'THREADNOTE_CODE_GRAPH_PARSER_ALLOCATION_BYTES_MAX';
@@ -70,7 +83,6 @@ const WORKER_SHUTDOWN_TIMEOUT_MILLISECONDS = 500;
 const SLOT_RETRY_MILLISECONDS = 25;
 const SLOT_STALE_MILLISECONDS = 30_000;
 const PARSER_WORKER_PREWARM_CONCURRENCY = 4;
-const PARSER_WORKER_MEMORY_BYTES_PER_SLOT = 8 * 1_024 * 1_024 * 1_024;
 const PARSER_WORKER_WARMUP_SOURCE = '{"__threadnoteParserWarmup":true}\n';
 const PARSER_WORKER_WARMUP_FILE: CodeGraphInventoryFile = {
   blobId: '',
@@ -93,8 +105,6 @@ const PARSER_WORKER_TYPESCRIPT_WARMUP_FILE: CodeGraphInventoryFile = {
   size: Buffer.byteLength(PARSER_WORKER_TYPESCRIPT_WARMUP_SOURCE, 'utf8'),
   source: 'worktree',
 };
-
-type ParserWorkerEnvironment = Readonly<Record<string, string | undefined>>;
 
 export type ParserWorkerFailureReason =
   | 'abort'
@@ -242,8 +252,13 @@ export class ParserWorkerConfigurationError extends Schema.TaggedError<
   {readonly brand: unique symbol}
 >()('ParserWorkerConfigurationError', {message: Schema.String}) {}
 
+/** A native lane may run a native TypeScript compiler pair; a general lane never does. */
+export type CodeGraphParserLane = 'native' | 'general';
+
 export interface CodeGraphParserPoolShape {
   readonly capacity: number;
+  /** Slots that may own a native TypeScript compiler; native TypeScript work runs only on them. */
+  readonly nativeCapacity: number;
   readonly extract: (
     file: CodeGraphInventoryFile,
     threadnoteHome: string,
@@ -254,6 +269,7 @@ export interface CodeGraphParserPoolShape {
     use: (
       extract: (file: CodeGraphInventoryFile) => Effect.Effect<CodeGraphParserResult, never>,
     ) => Effect.Effect<A, E, R>,
+    lane?: CodeGraphParserLane,
   ) => Effect.Effect<A, E | ParserWorkerError, R>;
   readonly warm: (
     threadnoteHome: string,
@@ -288,13 +304,6 @@ class ParserWorkerSessionUseError<E> {
 /** The SDK changed under a public operation: its results are not trusted and are never re-run as degraded. */
 class ParserWorkerSdkFenceFailure {
   constructor(readonly error: ParserWorkerError) {}
-}
-
-export interface ParserWorkerCapacityInput {
-  readonly effectiveMemoryBytes?: number;
-  readonly environment: ParserWorkerEnvironment;
-  readonly hardwareConcurrency: number;
-  readonly override?: number;
 }
 
 export class CodeGraphParserPool extends Context.Service<CodeGraphParserPool, CodeGraphParserPoolShape>()(
@@ -345,11 +354,14 @@ export function codeGraphParserPoolLayer(
         );
         const maxStderrBytes = positiveInteger(options.maxStderrBytes, STDERR_BYTES_LIMIT);
         const spawnWorker = options.spawnWorker ?? spawnBunParserWorker;
+        const nativeCapacity = nativeParserWorkerCapacity(capacity, environment);
+        const generalCapacity = capacity - nativeCapacity;
         const slots = Array.from(
           {length: capacity},
           (_, index) =>
             new ParserWorkerSlot(
               index,
+              index < nativeCapacity ? 'native' : 'general',
               system,
               requestTimeoutMilliseconds,
               idleTimeoutMilliseconds,
@@ -358,8 +370,24 @@ export function codeGraphParserPoolLayer(
               spawnWorker,
             ),
         );
-        const available = yield* Queue.unbounded<ParserWorkerSlot>();
-        yield* Queue.offerAll(available, slots);
+        const nativeAvailable = yield* Queue.unbounded<ParserWorkerSlot>();
+        const generalAvailable = yield* Queue.unbounded<ParserWorkerSlot>();
+        const queueFor = (lane: CodeGraphParserLane) =>
+          lane === 'general' && generalCapacity > 0 ? generalAvailable : nativeAvailable;
+        // A slot always returns to the queue of its own role.
+        const release = (slot: ParserWorkerSlot) => Queue.offer(queueFor(slot.role), slot);
+        const releaseAll = (idle: readonly ParserWorkerSlot[]) => Effect.forEach(idle, release, {discard: true});
+        const clearIdle = Effect.zipWith(
+          Queue.clear(nativeAvailable),
+          Queue.clear(generalAvailable),
+          (native, general) => [...native, ...general].sort((left, right) => left.index - right.index),
+        );
+        yield* releaseAll(slots);
+        // Native and general slots hold separate global lock ranges, so the cross-process total stays at `capacity`.
+        const globalSlot = <A, E, R>(slot: ParserWorkerSlot, threadnoteHome: string, effect: Effect.Effect<A, E, R>) =>
+          withGlobalParserSlot(crypto, fs, path, system, threadnoteHome, lockRange(slot), slot.index, effect);
+        const lockRange = (slot: ParserWorkerSlot) =>
+          slot.role === 'native' ? {first: 0, count: nativeCapacity} : {first: nativeCapacity, count: generalCapacity};
         const degradedResult = (file: CodeGraphInventoryFile, cause: unknown): CodeGraphParserResult => {
           const reason = Schema.is(ParserWorkerError)(cause) ? cause.reason : 'protocol';
           return {
@@ -432,58 +460,54 @@ export function codeGraphParserPoolLayer(
             slot.warm(threadnoteHome, new AbortController().signal, nativeTypeScript),
           );
 
+        const extract = (file: CodeGraphInventoryFile, threadnoteHome: string) => {
+          const budgeted = sourceBudgetResult(file);
+          if (budgeted !== undefined) return Effect.succeed(budgeted);
+          return Effect.acquireUseRelease(
+            Queue.take(queueFor(isNativeTypeScriptSource(file.path) ? 'native' : 'general')),
+            slot =>
+              globalSlot(slot, threadnoteHome, extractFromSlot(slot, file, threadnoteHome)).pipe(
+                Effect.catch(cause => Effect.succeed(degradedResult(file, cause))),
+              ),
+            release,
+          );
+        };
+
         return {
           service: CodeGraphParserPool.of({
             capacity,
-            extract: (file, threadnoteHome) => {
-              const budgeted = sourceBudgetResult(file);
-              if (budgeted !== undefined) return Effect.succeed(budgeted);
-              return Effect.acquireUseRelease(
-                Queue.take(available),
-                slot =>
-                  withGlobalParserSlot(
-                    crypto,
-                    fs,
-                    path,
-                    system,
-                    threadnoteHome,
-                    capacity,
-                    slot.index,
-                    extractFromSlot(slot, file, threadnoteHome),
-                  ).pipe(Effect.catch(cause => Effect.succeed(degradedResult(file, cause)))),
-                slot => Queue.offer(available, slot),
-              );
-            },
-            withParserSlot: (threadnoteHome, files, use) => {
+            nativeCapacity,
+            extract,
+            withParserSlot: (threadnoteHome, files, use, lane = 'general') => {
               const planned = workPlan(files);
               return planned.required
                 ? Effect.acquireUseRelease(
-                    Queue.take(available),
-                    slot =>
-                      withGlobalParserSlot(
-                        crypto,
-                        fs,
-                        path,
-                        system,
+                    Queue.take(queueFor(lane)),
+                    slot => {
+                      // A general lane never warms or upgrades to a native compiler pair.
+                      const warmNative = planned.nativeTypeScript && lane === 'native' && slot.role === 'native';
+                      return globalSlot(
+                        slot,
                         threadnoteHome,
-                        capacity,
-                        slot.index,
                         slot.withSdkScope(
                           (planned.warm
-                            ? warmSlot(slot, threadnoteHome, planned.nativeTypeScript).pipe(
+                            ? warmSlot(slot, threadnoteHome, warmNative).pipe(
                                 Effect.asVoid,
                                 // A failed native warm only means TypeScript is unavailable here; other files proceed.
-                                Effect.catch(error =>
-                                  planned.nativeTypeScript ? Effect.succeed(error) : Effect.fail(error),
-                                ),
+                                Effect.catch(error => (warmNative ? Effect.succeed(error) : Effect.fail(error))),
                               )
                             : Effect.void
                           ).pipe(
                             Effect.flatMap(nativeWarmFailure =>
                               use(file =>
-                                nativeWarmFailure !== undefined && isNativeTypeScriptSource(file.path)
-                                  ? Effect.succeed(degradedResult(file, nativeWarmFailure))
-                                  : extractFromSlot(slot, file, threadnoteHome),
+                                !isNativeTypeScriptSource(file.path)
+                                  ? extractFromSlot(slot, file, threadnoteHome)
+                                  : slot.role === 'general'
+                                    ? // A native slot never waits for a general one, so this delegation cannot deadlock.
+                                      extract(file, threadnoteHome)
+                                    : nativeWarmFailure !== undefined
+                                      ? Effect.succeed(degradedResult(file, nativeWarmFailure))
+                                      : extractFromSlot(slot, file, threadnoteHome),
                               ).pipe(Effect.mapError(error => new ParserWorkerSessionUseError(error))),
                             ),
                           ),
@@ -496,32 +520,28 @@ export function codeGraphParserPoolLayer(
                               ? Effect.fail(error.error)
                               : use(file => Effect.succeed(degradedResult(file, error))),
                         ),
-                      ),
-                    slot => Queue.offer(available, slot),
+                      );
+                    },
+                    release,
                   )
                 : use(extractWithoutSlot);
             },
             warm: (threadnoteHome, requestedSlots = capacity, nativeTypeScript = false) =>
               Number.isSafeInteger(requestedSlots) && requestedSlots >= 0
                 ? Effect.acquireUseRelease(
-                    Queue.clear(available),
+                    clearIdle,
                     idleSlots =>
                       Effect.forEach(
                         idleSlots.slice(0, Math.min(capacity, requestedSlots)),
                         slot =>
-                          withGlobalParserSlot(
-                            crypto,
-                            fs,
-                            path,
-                            system,
+                          globalSlot(
+                            slot,
                             threadnoteHome,
-                            capacity,
-                            slot.index,
-                            prewarmSlot(slot, threadnoteHome, nativeTypeScript),
+                            prewarmSlot(slot, threadnoteHome, nativeTypeScript && slot.role === 'native'),
                           ),
                         {concurrency: PARSER_WORKER_PREWARM_CONCURRENCY, discard: true},
                       ).pipe(Effect.ignore),
-                    idleSlots => Queue.offerAll(available, idleSlots),
+                    releaseAll,
                   ).pipe(Effect.asVoid)
                 : Effect.fail(
                     ParserWorkerConfigurationError.make({message: 'Code graph parser warm slot count is invalid.'}),
@@ -530,28 +550,19 @@ export function codeGraphParserPoolLayer(
               Date.now() >= deadline || Buffer.byteLength(request.text, 'utf8') > maxSourceBytes
                 ? Effect.succeed(sourceSequenceUnavailable)
                 : Effect.acquireUseRelease(
-                    Queue.take(available),
+                    Queue.take(nativeAvailable),
                     slot =>
-                      withGlobalParserSlot(
-                        crypto,
-                        fs,
-                        path,
-                        system,
-                        threadnoteHome,
-                        capacity,
-                        slot.index,
-                        slot.projectSourceSequence(request, threadnoteHome, deadline),
-                      ),
-                    slot => Queue.offer(available, slot),
+                      globalSlot(slot, threadnoteHome, slot.projectSourceSequence(request, threadnoteHome, deadline)),
+                    release,
                   ).pipe(Effect.orElseSucceed(() => sourceSequenceUnavailable)),
             trimIdle: Effect.acquireUseRelease(
-              Queue.clear(available),
+              clearIdle,
               idleSlots =>
                 Effect.forEach(idleSlots, slot => fromPromise('trim idle parser worker', () => slot.trimIdle()), {
                   concurrency: 'unbounded',
                   discard: true,
                 }).pipe(Effect.ignore),
-              idleSlots => Queue.offerAll(available, idleSlots),
+              releaseAll,
             ).pipe(Effect.asVoid),
           }),
           slots,
@@ -572,7 +583,8 @@ function withGlobalParserSlot<A, E, R>(
   path: Path.Path,
   system: SystemInfoShape,
   threadnoteHome: string,
-  capacity: number,
+  /** The lock indices of this slot's role: `count` indices from `first`. */
+  {first, count}: {readonly first: number; readonly count: number},
   preferredSlot: number,
   effect: Effect.Effect<A, E, R>,
 ): Effect.Effect<A, E | unknown, R> {
@@ -598,8 +610,8 @@ function withGlobalParserSlot<A, E, R>(
 
   return Effect.gen(function* () {
     while (true) {
-      for (let offset = 0; offset < capacity; offset += 1) {
-        const acquired = yield* attempt((preferredSlot + offset) % capacity);
+      for (let offset = 0; offset < count; offset += 1) {
+        const acquired = yield* attempt(first + ((preferredSlot - first + offset) % count));
         if (Option.isSome(acquired)) return acquired.value;
       }
       yield* Effect.sleep(SLOT_RETRY_MILLISECONDS);
@@ -620,6 +632,7 @@ class ParserWorkerSlot {
 
   constructor(
     readonly index: number,
+    readonly role: CodeGraphParserLane,
     private readonly system: SystemInfoShape,
     private readonly timeoutMilliseconds: number,
     private readonly idleTimeoutMilliseconds: number,
@@ -827,6 +840,8 @@ class ParserWorkerSlot {
     signal: AbortSignal,
   ): Promise<ParserWorkerConnection> {
     if (this.closed) throw ParserWorkerError.of('exit');
+    // Routing keeps native TypeScript off general slots; this keeps the invariant explicit.
+    if (nativeTypeScript && this.role === 'general') throw ParserWorkerError.of('operation');
     const eviction = this.evictingConnection;
     if (eviction) await eviction.catch(() => undefined);
     if (this.closed) throw ParserWorkerError.of('exit');
@@ -1843,38 +1858,6 @@ export function parserWorkerSuccessResponseBytes(
     `${JSON.stringify({degraded: false, facts, id, ok: true, parseMilliseconds: 0, protocol: PROTOCOL_VERSION, recycle: false})}\n`,
     'utf8',
   );
-}
-
-export function parserWorkerCapacity(input: ParserWorkerCapacityInput): number {
-  const explicit = explicitParserWorkerCapacity(input.environment, input.override);
-  if (explicit !== undefined) return explicit;
-  const hardwareConcurrency =
-    Number.isSafeInteger(input.hardwareConcurrency) && input.hardwareConcurrency > 0 ? input.hardwareConcurrency : 1;
-  const cpuCapacity = Math.max(1, Math.min(4, Math.floor(hardwareConcurrency / 2)));
-  const effectiveMemoryBytes = input.effectiveMemoryBytes;
-  if (
-    typeof effectiveMemoryBytes !== 'number' ||
-    !Number.isSafeInteger(effectiveMemoryBytes) ||
-    effectiveMemoryBytes <= 0
-  ) {
-    return 1;
-  }
-  const memoryCapacity = Math.max(1, Math.floor(effectiveMemoryBytes / PARSER_WORKER_MEMORY_BYTES_PER_SLOT));
-  return Math.min(cpuCapacity, memoryCapacity);
-}
-
-function explicitParserWorkerCapacity(environment: ParserWorkerEnvironment, override?: number): number | undefined {
-  if (Number.isSafeInteger(override) && override! > 0) return Math.min(8, override!);
-  const configured = Number.parseInt(environment[CODE_GRAPH_PARSER_WORKERS_ENV] ?? '', 10);
-  return Number.isSafeInteger(configured) && configured > 0 ? Math.min(8, configured) : undefined;
-}
-
-function currentHardwareConcurrency(): number {
-  try {
-    return navigator.hardwareConcurrency || 1;
-  } catch {
-    return 1;
-  }
 }
 
 function encodeParserWorkerResponse(response: ParserWorkerResponse | ParserWorkerSourceSequenceResponse): string {

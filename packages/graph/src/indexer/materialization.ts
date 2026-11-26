@@ -48,6 +48,7 @@ import {codeGraphDiskReservationLockPath, codeGraphDiskReservationRoot, type Cod
 import {compareCodeUnits} from '../ordering.js';
 import {codeGraphScopeIdentitySuffix, type CodeGraphScopeIdentity} from '../scope/identity.js';
 import {budgetParserWorkerFacts, type CodeGraphParserPoolShape, type CodeGraphParserResult} from '../parser_worker.js';
+import {isNativeTypeScriptSource} from '../typescript_runtime.js';
 import {
   codeGraphExtractionWorkUnits,
   codeGraphSourceSizeBucket,
@@ -572,22 +573,46 @@ export function cacheContentBatch(options: {
                   }),
                 {concurrency: 1},
               );
-            let nextGroupIndex = 0;
-            const drainGroups = (parserExtract: CodeGraphParserPoolShape['extract']) =>
+            // Native TypeScript groups run only on native lanes; native lanes then help with the general groups.
+            const nativeGroup = (group: ExtractionReuseGroup) =>
+              EffectArray.some(group.files, file => isNativeTypeScriptSource(file.path));
+            const nativeGroups = EffectArray.filter(groupWindow, nativeGroup);
+            const generalGroups = EffectArray.filter(groupWindow, group => !nativeGroup(group));
+            let nextNativeGroupIndex = 0,
+              nextGeneralGroupIndex = 0;
+            const takeNativeGroup = () => nativeGroups[nextNativeGroupIndex++];
+            const takeGeneralGroup = () => generalGroups[nextGeneralGroupIndex++];
+            const drainGroups = (
+              parserExtract: CodeGraphParserPoolShape['extract'],
+              take: () => ExtractionReuseGroup | undefined,
+            ) =>
               Effect.gen(function* () {
                 const drained = [];
-                while (nextGroupIndex < groupWindow.length) {
-                  const group = groupWindow[nextGroupIndex];
-                  nextGroupIndex += 1;
-                  if (group !== undefined) drained.push(yield* extractGroup(group, parserExtract));
+                for (let group = take(); group !== undefined; group = take()) {
+                  drained.push(yield* extractGroup(group, parserExtract));
                 }
                 return drained;
               });
+            const nativeLanes = Math.min(options.parserPool.nativeCapacity, groupWindow.length);
+            const generalLanes = Math.min(
+              options.parserPool.capacity - options.parserPool.nativeCapacity,
+              generalGroups.length,
+            );
             const groupedResults = (yield* Effect.forEach(
-              Array.from({length: Math.min(lane.concurrency, groupWindow.length)}),
-              () =>
-                options.parserPool.withParserSlot(options.threadnoteHome, window, extract =>
-                  drainGroups((file, _threadnoteHome) => extract(file)),
+              [
+                ...Array.from({length: nativeLanes}, () => 'native' as const),
+                ...Array.from({length: generalLanes}, () => 'general' as const),
+              ],
+              parserLane =>
+                options.parserPool.withParserSlot(
+                  options.threadnoteHome,
+                  window,
+                  extract =>
+                    drainGroups(
+                      (file, _threadnoteHome) => extract(file),
+                      parserLane === 'native' ? () => takeNativeGroup() ?? takeGeneralGroup() : takeGeneralGroup,
+                    ),
+                  parserLane,
                 ),
               {concurrency: 'unbounded'},
             )).flat();
