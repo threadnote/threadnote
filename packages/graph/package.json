@@ -400,6 +400,7 @@
     "./test/helpers/code-graph-legacy-authority": "./test/helpers/code-graph-legacy-authority.ts",
     "./test/helpers/graph-registry": "./test/helpers/graph-registry.ts",
     "./test/helpers/graph-share-contribution": "./test/helpers/graph-share-contribution.ts",
+    "./test/helpers/native-typescript-kernel": "./test/helpers/native-typescript-kernel.ts",
     "./test/helpers/native-typescript-session": "./test/helpers/native-typescript-session.ts",
     "./threadnote_ignore": "./src/threadnote_ignore.ts",
     "./tree_sitter/extractor": "./src/tree_sitter/extractor.ts",

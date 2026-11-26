@@ -2,7 +2,6 @@ import {Effect, Layer} from 'effect';
 import {it as vitestIt} from 'vitest';
 import * as EffectString from 'effect/String';
 import {realpathSync} from '@threadnote/testing/node-fs';
-import {release} from '@threadnote/testing/node-os';
 import {
   createNativeTypeScriptSession,
   NativeTypeScriptSessionService,
@@ -13,6 +12,9 @@ import {
   nativeTypeScriptHostKey,
   nativeTypeScriptReviewedBinarySha256,
 } from '@threadnote/graph/typescript_native_asset_pins';
+import {nativeTypeScriptSourceModeRefused} from './native-typescript-kernel.js';
+
+export {nativeTypeScriptSourceModeRefused};
 
 const host = nativeTypeScriptHostKey(process.platform, process.arch);
 const configured = process.env[NATIVE_TYPESCRIPT_PREPARED_ASSET_ENV] || undefined;
@@ -38,13 +40,6 @@ const assetSkipReason: string | undefined = !pinned
     : undefined;
 /** The prepared asset is missing or the host has no pin; a signed copy of the compiler can still not be tested. */
 export const nativeTypeScriptAssetUnavailable = assetSkipReason !== undefined;
-/**
- * macOS 15 (Darwin 24) and earlier do not report CS_KILL for the linker-signed reviewed compiler and run a changed page
- * of such an image, so the runtime refuses it there: only a signed release runs native TypeScript on those kernels.
- * A test in code-graph.extractor-lazy-loading.test.ts proves this predicate against the real kernel.
- */
-export const nativeTypeScriptSourceModeRefused =
-  host === 'darwin-arm64' && Number(EffectString.split('.')(release())[0]) <= 24;
 export const nativeTypeScriptSkipReason: string | undefined =
   assetSkipReason ??
   (nativeTypeScriptSourceModeRefused

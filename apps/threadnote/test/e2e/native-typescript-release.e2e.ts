@@ -11,6 +11,7 @@ import {
   SIGNED_NATIVE_TYPESCRIPT_IDENTIFIER,
   releaseAppleTeamId,
 } from '../../../../tools/ci/signed-native-typescript.js';
+import {nativeTypeScriptSourceModeRefused} from '@threadnote/graph/test/helpers/native-typescript-kernel';
 
 /**
  * Publish smoke for the final payload (macOS: after the private `tsc` is signed, its signed identity is compiled into
@@ -23,6 +24,8 @@ const root = process.cwd();
 const cli = join(root, 'dist', process.platform === 'win32' ? 'threadnote.exe' : 'threadnote');
 const compiler = join(root, 'dist', 'runtime', 'typescript', process.platform === 'win32' ? 'tsc.exe' : 'tsc');
 const expectSigned = process.env.THREADNOTE_EXPECT_SIGNED_NATIVE_TYPESCRIPT === '1';
+// An unsigned payload carries the linker-signed compiler, which these kernels refuse; a signed release runs there.
+const refused = nativeTypeScriptSourceModeRefused && !expectSigned;
 const PathResult = Schema.Struct({
   operation: Schema.String,
   edges: Schema.Array(
@@ -81,10 +84,10 @@ describe('native TypeScript in the release payload', () => {
   it.skipIf(!expectSigned || process.platform !== 'darwin')(
     'ships the Developer ID signed private compiler',
     async () => {
-      // Publish mode: the release team's hardened runtime signature only, never an ad-hoc one.
+      // Publish mode: the release team's hardened runtime signature with kill and hard, never an ad-hoc one.
       const {stderr} = await execute('/usr/bin/codesign', ['-dvvv', compiler]);
       expect(stderr).toContain(`Identifier=${SIGNED_NATIVE_TYPESCRIPT_IDENTIFIER}`);
-      expect(stderr).toMatch(/flags=0x10000\(runtime\) /u);
+      expect(stderr).toMatch(/flags=0x10300\(hard,kill,runtime\) /u);
       expect(stderr).not.toContain('Signature=adhoc');
       expect(stderr).toMatch(new RegExp(`^TeamIdentifier=${releaseAppleTeamId()}$`, 'mu'));
     },
@@ -108,8 +111,11 @@ describe('native TypeScript in the release payload', () => {
       JSON.parse(EffectArray.lastNonEmpty(EffectString.split(EffectString.trim(stdout), '\n')) ?? '{}'),
     );
     expect(result.operation).toBe('path');
-    expect(result.edges).toEqual(
-      expect.arrayContaining([expect.objectContaining({relation: 'calls', targetName: 'withExclusiveFileLock'})]),
-    );
+    // A refused compiler leaves the TypeScript files degraded, without resolved calls.
+    if (refused) expect(result.edges).toEqual([]);
+    else
+      expect(result.edges).toEqual(
+        expect.arrayContaining([expect.objectContaining({relation: 'calls', targetName: 'withExclusiveFileLock'})]),
+      );
   });
 });

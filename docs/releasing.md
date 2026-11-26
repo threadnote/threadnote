@@ -208,7 +208,7 @@ construction pin. The reviewed pins stay the trust root, and the macOS publish l
    build defines it as `null`. The Bun executable is signed after this step, so the outer signature covers the
    compiled-in identity.
 4. "Index TypeScript with the signed payload" (`apps/threadnote/test/e2e/native-typescript-release.e2e.ts`) requires
-   the compiler's identifier, `flags=0x10000(runtime)`, a non-ad-hoc signature and the release `TeamIdentifier`, then
+   the compiler's identifier, `flags=0x10300(hard,kill,runtime)`, a non-ad-hoc signature and the release `TeamIdentifier`, then
    builds a TypeScript code graph through `dist/threadnote` in
    an isolated home and queries a resolved call. With a refused compiler, TypeScript files index as degraded modules
    and the query finds no call, so the step fails.
