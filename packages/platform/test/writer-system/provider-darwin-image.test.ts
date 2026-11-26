@@ -88,6 +88,12 @@ beforeAll(() => {
   explicitBytes[explicitBytes.indexOf('REVIEWED-PAGE') + 1] = 0x58;
   writeFileSync(explicitTampered, explicitBytes);
   signed['explicit-tampered'] = {path: explicitTampered, cdhash: signed.explicit.cdhash};
+  const plainTampered = join(directory, 'plain-tampered');
+  copyFileSync(signed.plain.path, plainTampered);
+  const plainBytes = readFileSync(plainTampered);
+  plainBytes[plainBytes.indexOf('REVIEWED-PAGE') + 1] = 0x58;
+  writeFileSync(plainTampered, plainBytes);
+  signed['plain-tampered'] = {path: plainTampered, cdhash: signed.plain.cdhash};
 });
 afterAll(() => {
   if (directory) rmSync(directory, {recursive: true, force: true});
@@ -181,6 +187,17 @@ it.skipIf(!tools)('resumes an image signed with explicit kill and hard flags and
   expect(result.output).toBe('');
   expect(result.exitCode).toBe(128 + 9);
 });
+
+it.skipIf(!tools || process.arch !== 'arm64')(
+  'sees the arm64 kernel kill a tampered page of an image signed without flags',
+  async () => {
+    // Kernel behavior only, without the image check: arm64 enforces executed pages whether or not CS_KILL is reported.
+    const child = Bun.spawn([signed['plain-tampered'].path], {stdout: 'pipe', stderr: 'pipe'});
+    const output = await new Response(child.stdout).text();
+    await child.exited;
+    expect({output, signal: child.signalCode}).toEqual({output: '', signal: 'SIGKILL'});
+  },
+);
 
 it.skipIf(!tools)('lets the kernel kill an image whose executed page differs from its CodeDirectory', async () => {
   // The cdhash binding passes: the CodeDirectory is unchanged. CS_KILL then ends the child when it touches the page.
