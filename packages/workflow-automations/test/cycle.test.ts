@@ -19,6 +19,7 @@ import {
   nativeCyclePhaseHash,
   reconcileNativeCyclePlan,
   recordNativeCycleDelivery,
+  resolveNativeCycleAcceptance,
   validateNativeCyclePhase,
   type NativeCycleValidation,
   type NativeCycleState,
@@ -330,6 +331,35 @@ describe('native cycle pure domain', () => {
     expect(() => validateNativeCyclePhase(state, 'one', snapshot(), nearMiss)).toThrow(
       /Missing stored criteria: "works"\..*match no stored criterion: "work"\./u,
     );
+  });
+
+  it('resolves acceptance IDs to the stored criterion and names the failing entry', () => {
+    const plan = decodeNativeCyclePlan(makePlan());
+    const resolve = (entries: Parameters<typeof resolveNativeCycleAcceptance>[2]) =>
+      resolveNativeCycleAcceptance(plan, 'one', entries);
+    const byId = resolve([{id: 'a1', result: 'passed', evidence: 'ok'}]);
+    expect(byId).toEqual(validation.acceptance);
+    expect(
+      validateNativeCyclePhase(initializeNativeCycle(plan), 'one', snapshot(), {...validation, acceptance: byId}),
+    ).toEqual(validateFirst());
+    // Duplicates still fail through the phase coverage message after resolution.
+    const state = initializeNativeCycle(plan);
+    for (const duplicate of [resolve([...byId, {id: 'a1', result: 'passed', evidence: 'ok'}]), [...byId, ...byId]])
+      expect(() => validateNativeCyclePhase(state, 'one', snapshot(), {...validation, acceptance: duplicate})).toThrow(
+        /Acceptance criteria coverage is incomplete\..*Duplicate entries: "works"\./u,
+      );
+    // Text passes unchanged, so phase validation still names a near-miss criterion.
+    expect(resolve([{criterion: 'work', result: 'passed', evidence: 'ok'}])).toEqual([
+      {criterion: 'work', result: 'passed', evidence: 'ok'},
+    ]);
+    const unknown = () => resolve([...byId, {id: 'private-missing', result: 'passed', evidence: 'ok'}]);
+    expect(unknown).toThrow(/Acceptance entry 1 names an unknown acceptance id\. Known ids: "a1"\./u);
+    expect(unknown).not.toThrow(/private-missing/u);
+    for (const entry of [
+      {id: 'a1', criterion: 'works', result: 'passed' as const, evidence: 'ok'},
+      {result: 'passed' as const, evidence: 'ok'},
+    ])
+      expect(() => resolve([...byId, entry])).toThrow(/Acceptance entry 1 needs exactly one of id or criterion\./u);
   });
 
   it('admits zero-write phases while retaining the path cardinality and text bounds', () => {

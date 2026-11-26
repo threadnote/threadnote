@@ -11,6 +11,7 @@ import {formatMemoryDocument} from '@threadnote/memory/document';
 import {runSharePublishTool} from '@threadnote/threadnote/mcp/server/share';
 import {runForget} from '@threadnote/threadnote/memory/commands';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import {encodeAuthoringArtifact} from '../../src/workflow_automation/authoring_artifacts.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -115,6 +116,98 @@ describe('MCP share-publish citation policy', () => {
         expect(kindReads).toBe(2);
         expect(kindText).toContain('only active personal durable memories');
         expect(yield* fs.exists(path.join(worktree, 'durable', 'projects', 'threadnote', 'policy.md'))).toBe(false);
+      }),
+    ).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  it.effect('refuses a workflow authoring artifact in preview and in the publish-lock recheck', () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-mcp-share-authoring-'});
+        const worktree = path.join(home, 'share', 'worktrees', 'default');
+        const sourceUri = 'threadnote://user/tester/memories/durable/projects/threadnote/plan-data.md';
+        const sourcePath = path.join(
+          home,
+          'data',
+          'local',
+          'user',
+          'tester',
+          'memories',
+          'durable',
+          'projects',
+          'threadnote',
+          'plan-data.md',
+        );
+        const config: RuntimeConfig = {
+          account: 'local',
+          agentContextHome: home,
+          agentId: 'threadnote',
+          manifestPath: path.join(home, 'seed-manifest.yaml'),
+          user: 'tester',
+        };
+        yield* fs.makeDirectory(path.dirname(sourcePath), {recursive: true});
+        yield* fs.makeDirectory(worktree, {recursive: true});
+        yield* fs.writeFileString(
+          path.join(home, 'share', 'teams.json'),
+          `${JSON.stringify({
+            defaultTeam: 'default',
+            teams: {
+              default: {
+                addedAt: '2026-08-26T20:00:00.000Z',
+                gitdir: path.join(home, 'share', 'teams', 'default.gitdir'),
+                name: 'default',
+                remote: 'git@example.com:team/memories.git',
+                worktree,
+              },
+            },
+            version: 1,
+          })}\n`,
+        );
+        const memory = (body: string) =>
+          formatMemoryDocument(
+            'MEMORY',
+            {
+              kind: 'durable',
+              project: 'threadnote',
+              sourceAgentClient: 'codex',
+              status: 'active',
+              timestamp: '2026-08-26T20:00:00.000Z',
+              topic: 'plan-data',
+            },
+            body,
+          );
+        const artifact = memory(
+          encodeAuthoringArtifact('Plan', 'Plan data.', {format: 'threadnote-native-authoring-context'}),
+        );
+        const textOf = (result: Effect.Success<ReturnType<typeof runSharePublishTool>>) =>
+          EffectArray.join(
+            EffectArray.map(result.content, item => (item.type === 'text' ? item.text : '')),
+            '\n',
+          );
+        yield* fs.writeFileString(sourcePath, artifact);
+        const preview = yield* runSharePublishTool(config, sourceUri, {preview: true});
+        expect(preview.isError).toBe(true);
+        expect(textOf(preview)).toContain('workflow_task_author command: share');
+
+        const realStore = yield* ResourceStore;
+        let reads = 0;
+        const swapStore = ResourceStore.of({
+          ...realStore,
+          read: (location, uri) =>
+            uri === sourceUri
+              ? Effect.sync(() => (++reads === 1 ? memory('A plain durable note.') : artifact))
+              : realStore.read(location, uri),
+        });
+        const published = yield* runSharePublishTool(config, sourceUri, {push: false}).pipe(
+          Effect.provideService(ResourceStore, swapStore),
+        );
+        expect(published.isError).toBe(true);
+        expect(reads).toBe(2);
+        expect(textOf(published)).toContain('workflow_task_author command: share');
+        expect(yield* fs.readFileString(sourcePath)).toBe(artifact);
+        expect(yield* fs.exists(path.join(worktree, 'durable', 'projects', 'threadnote', 'plan-data.md'))).toBe(false);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );

@@ -1,6 +1,6 @@
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
-import {Schema} from 'effect';
+import {Schema, SchemaIssue} from 'effect';
 import {WorkflowAutomationError} from './contracts.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {nativeCycleCanonicalJson, nativeCycleHasControl} from './cycle.js';
@@ -446,11 +446,32 @@ export function validateNativeCycleReview(
   return checkNativeCycleReviewHistory(snapshot, review, previous, findingBasis);
 }
 
+/** At most three lane names, so a refusal stays bounded. */
+const laneList = (names: ReadonlyArray<string>) =>
+  EffectArray.join(EffectArray.take(names, 3), ', ') + (names.length > 3 ? ` and ${names.length - 3} more` : '');
+
 const decodeNativeCycleReview = (input: unknown): NativeCycleReview => {
   try {
     return Schema.decodeUnknownSync(NativeCycleReviewSchema, {onExcessProperty: 'error'})(input);
-  } catch {
-    return fail('Every selected review lane and finding must have a complete valid report.');
+  } catch (error) {
+    const issue = Schema.isSchemaError(error)
+      ? SchemaIssue.makeFormatterStandardSchemaV1()(error.issue).issues[0]
+      : undefined;
+    // Name caller keys only while they are plain bounded identifiers; report anything else at its parent.
+    const path = EffectArray.join(
+      EffectArray.map(
+        EffectArray.takeWhile(
+          issue?.path ?? [],
+          key => typeof key === 'number' || (typeof key === 'string' && /^[A-Za-z_][A-Za-z0-9_]{0,63}$/u.test(key)),
+        ),
+        key => (typeof key === 'number' ? `[${key}]` : `.${String(key)}`),
+      ),
+      '',
+    );
+    const detail = issue ? Effect.pipe(issue.message, EffectString.slice(0, 200)) : undefined;
+    return fail(
+      `Every selected review lane and finding must have a complete valid report.${detail ? ` Field report${path}: ${detail}.` : ''}`,
+    );
   }
 };
 
@@ -490,8 +511,22 @@ function checkNativeCycleReviewHistory(
     lanes.size !== review.lanes.length ||
     selected.size !== lanes.size ||
     EffectArray.some([...selected], name => !lanes.has(name))
-  )
-    fail('Selected and completed review lanes differ.');
+  ) {
+    const missing = EffectArray.filter([...selected], name => !lanes.has(name)),
+      extra = EffectArray.filter([...lanes], name => !selected.has(name)),
+      repeated = selected.size !== review.selected.length || lanes.size !== review.lanes.length;
+    fail(
+      EffectArray.join(
+        [
+          'Selected and completed review lanes differ.',
+          ...(missing.length > 0 ? [`Selected lanes without a completed lane: ${laneList(missing)}.`] : []),
+          ...(extra.length > 0 ? [`Completed lanes that are not selected: ${laneList(extra)}.`] : []),
+          ...(repeated ? ['Name each lane once.'] : []),
+        ],
+        ' ',
+      ),
+    );
+  }
   if (snapshot.version === 4) {
     const basis = snapshot.reviewBasis;
     if (!!basis !== !!previous) fail('Prior review evidence is required.');
@@ -589,7 +624,7 @@ function checkNativeCycleReviewHistory(
         effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
       )
     )
-      fail('Resolving, rejecting or downgrading a finding requires a reason.');
+      fail(`Finding ${finding.id} needs a reason: resolving, rejecting or downgrading a finding requires one.`);
     if (['resolved', 'carried'].includes(finding.state) && !old) unmatched.push(finding.id);
     if (finding.state === 'new' && old) reintroduced.push(finding.id);
   }

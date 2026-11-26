@@ -151,6 +151,23 @@ const hasControl = (value: string) =>
         Effect2.Option.getOrElse(() => NaN),
       ) === 127,
   );
+const sourcePathLabel = (origin: string | undefined, relative: string) =>
+  `${origin ?? 'source path'} (${EffectArray.join([...relative].slice(0, 128), '') + (relative.length > 128 ? '…' : '')})`;
+
+type SourceFiles = {readonly files: readonly {readonly path: string; readonly sha256: string}[]};
+/** The first cited file whose content differs, by its origin label. HEAD is provenance only, so it is not drift. */
+export const nativeSourceDrift = (pinned: SourceFiles, observed: SourceFiles, origins?: readonly string[]) => {
+  const differs = (a: SourceFiles, b: SourceFiles) =>
+    EffectArray.findFirstIndex(
+      a.files,
+      file => !EffectArray.some(b.files, item => stableJson(item) === stableJson(file)),
+    );
+  const index = differs(pinned, observed);
+  if (index._tag === 'Some') return sourcePathLabel(origins?.[index.value], pinned.files[index.value]?.path ?? '');
+  const extra = differs(observed, pinned);
+  return extra._tag === 'Some' ? sourcePathLabel(undefined, observed.files[extra.value]?.path ?? '') : undefined;
+};
+
 const inspectSource = Effect.fn('workflowAutomation.authoring.inspectSource')(function* (
   repo: string,
   paths: readonly string[],
@@ -190,8 +207,7 @@ const inspectSource = Effect.fn('workflowAutomation.authoring.inspectSource')(fu
       )
     )
       return yield* fail('invalid-scope', 'Source paths must be canonical repository-relative files.');
-    const safeRelative = EffectArray.join([...relative].slice(0, 128), '') + (relative.length > 128 ? '…' : '');
-    const label = `${origins?.[index] ?? 'source path'} (${safeRelative})`;
+    const label = sourcePathLabel(origins?.[index], relative);
     const unavailable = () => fail('source-path-unavailable', `${label}: file is missing or inaccessible.`);
     const actual = yield* fs.realPath(path.join(root, relative)).pipe(Effect.mapError(() => unavailable()));
     if (!Effect2.pipe(actual, EffectString.startsWith(root + path.sep)))
@@ -245,16 +261,18 @@ const verifySource = Effect.fn('workflowAutomation.authoring.verifySource')(func
   live = false,
 ) {
   if (!document.source) return;
+  const origins = nativeAuthoringSourceOrigins(document);
   const source = yield* inspectSource(
     repo,
     EffectArray.map(document.source.files, file => file.path),
     live,
-    nativeAuthoringSourceOrigins(document),
+    origins,
   );
-  if (stableJson(source) !== stableJson(document.source))
+  const drifted = nativeSourceDrift(document.source, source, origins);
+  if (drifted !== undefined)
     return yield* fail(
       'source-drift',
-      'Source changed since inspection. Reconcile the draft and obtain a fresh review where required.',
+      `${drifted} changed since inspection. Reconcile the draft and obtain a fresh review where required.`,
     );
 });
 

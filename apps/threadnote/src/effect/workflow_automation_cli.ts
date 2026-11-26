@@ -3,6 +3,7 @@ import {Console, Effect, FileSystem, Path, Schema, Stdio, Stream} from 'effect';
 import {Command, Flag} from 'effect/cli';
 import type {CliRuntimeRunner} from './cli.js';
 import {runWorkflowAutomation} from '../workflow_automation/index.js';
+import {nativeCyclePublicationField} from '@threadnote/workflow-automations/cycle';
 import {nativeWorkflowError} from '../workflow_automation/memory.js';
 import {WorkflowAutomationError, workflowAutomationErrorEnvelope} from '@threadnote/workflow-automations/contracts';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -212,7 +213,7 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
             validationRef: options.validationRef,
             commitEvidence: options.commitEvidence,
             pr: options.pr,
-            publication: options.publication,
+            ...nativeCyclePublicationField(options.publication),
             ...(options.userAuthority === undefined ? {} : {userAuthority: options.userAuthority}),
           }).pipe(printTaskResult),
         ),

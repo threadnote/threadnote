@@ -13,7 +13,7 @@ import {
 } from '../../workflow_automation/task_actions.js';
 import {NativeCyclePacketOptionsSchema} from '@threadnote/workflow-automations/cycle-packet';
 import {NativeCycleReviewSchema} from '@threadnote/workflow-automations/cycle-review';
-import {NativeCycleValidationSchema} from '@threadnote/workflow-automations/cycle';
+import {NativeCycleValidationInputSchema, nativeCyclePublicationField} from '@threadnote/workflow-automations/cycle';
 import {NativeTaskAnchorSchema} from '@threadnote/workflow-automations/task';
 import {NativeCompactIntentSchema, NativePlanBusinessShapeSchema} from '@threadnote/workflow-automations/authoring';
 import {
@@ -469,7 +469,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     'workflow_task_record_review',
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
-      description: 'Record an independent review for a snapshot.',
+      description: 'Record an independent snapshot review; lanes default to selected.',
       inputSchema: {
         runId: McpInput.requiredString(),
         callerCwd: McpInput.requiredString('Absolute bound checkout'),
@@ -478,7 +478,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
         userAuthority: McpInput.string('Human authority for blocked retry'),
         mode: NativeCycleReviewSchema.fields.mode,
         selected: NativeCycleReviewSchema.fields.selected,
-        lanes: NativeCycleReviewSchema.fields.lanes,
+        lanes: Schema.optionalKey(NativeCycleReviewSchema.fields.lanes),
         findings: NativeCycleReviewSchema.fields.findings,
       },
     },
@@ -500,7 +500,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
         snapshotRef,
         ...(taskRef === undefined ? {} : {taskRef}),
         ...(userAuthority === undefined ? {} : {userAuthority}),
-        report: {mode, selected, lanes, findings},
+        report: {mode, selected, ...(lanes === undefined ? {} : {lanes}), findings},
       });
       const text = JSON.stringify(result);
       return {content: [{type: 'text' as const, text}], structuredContent: result};
@@ -510,13 +510,13 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     'workflow_task_record_validation',
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
-      description: 'Record passed checks/acceptance for the reviewed task snapshot.',
+      description: 'Record passed checks/acceptance on reviewed snapshot; acceptance: acceptanceRefs id/criterion.',
       inputSchema: {
         runId: McpInput.requiredString(),
         callerCwd: McpInput.requiredString(),
         snapshotRef: McpInput.requiredString('Reviewed snapshot ref'),
-        checks: NativeCycleValidationSchema.fields.checks,
-        acceptance: NativeCycleValidationSchema.fields.acceptance,
+        checks: NativeCycleValidationInputSchema.fields.checks,
+        acceptance: NativeCycleValidationInputSchema.fields.acceptance,
       },
     },
     Effect.fn('mcp_server.workflowTaskRecordValidation')(function* ({
@@ -542,7 +542,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Record approved local/commit/PR delivery with exact review/validation, actual userAuthority and separate publication evidence; open PRs need a watch. Supplemental attaches an existing authorized PR to unchanged completed local proof, preserving original delivery.',
+        'Record approved local/commit/PR delivery with exact review/validation and actual userAuthority; open PRs need a watch. Supplemental attaches an existing authorized PR to unchanged completed local proof, preserving original delivery.',
       inputSchema: {
         runId: McpInput.requiredString(),
         callerCwd: McpInput.requiredString(),
@@ -586,7 +586,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
                   validationRef: delivery.validationRef,
                   commitEvidence: delivery.commitEvidence,
                   pr: delivery.pr,
-                  publication: delivery.publication,
+                  ...nativeCyclePublicationField(delivery.publication),
                   ...(delivery.userAuthority === undefined ? {} : {userAuthority: delivery.userAuthority}),
                 };
       const result = yield* runNativeTaskAction(config, request);

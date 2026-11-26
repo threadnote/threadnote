@@ -12,7 +12,7 @@ import {decodeNativeAuthoringDocument, type NativeAuthoringDocument} from '@thre
 import {gitValue, resolveRepoName} from '../utils.js';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
-import {inspectNativeSourcePaths, nativeAuthoringSourceOrigins} from './authoring.js';
+import {inspectNativeSourcePaths, nativeAuthoringSourceOrigins, nativeSourceDrift} from './authoring.js';
 import {runNativeTaskAuthoring, encodeNativeAuthoringTaskRef} from './task_authoring.js';
 import {readNativeTaskView} from './task.js';
 import {readPortablePlanPayload} from './portable_plan.js';
@@ -83,11 +83,12 @@ export const runNativeSharedPlanStart = Effect.fn('workflowAutomation.runNativeS
           'source-drift',
           'The shared document has no pinned source; review a current local revision.',
         );
+      const origins = nativeAuthoringSourceOrigins(document);
       const observed = yield* inCheckout(
         inspectNativeSourcePaths(
           checkout,
           EffectArray.map(document.source.files, file => file.path),
-          nativeAuthoringSourceOrigins(document),
+          origins,
         ),
       ).pipe(
         Effect.mapError(() =>
@@ -97,18 +98,19 @@ export const runNativeSharedPlanStart = Effect.fn('workflowAutomation.runNativeS
           ),
         ),
       );
-      if (stableJson(observed) === stableJson(document.source)) return;
-      const drift = () =>
-        fail(
-          'source-drift',
-          'The recipient source differs from the shared snapshot. Update and review the plan locally.',
-        );
-      if (observed.head !== document.source.head || observed.files.length !== document.source.files.length)
-        return yield* drift();
+      // The recipient HEAD is its own commit; only cited file content fences the shared snapshot.
+      const firstDrift = nativeSourceDrift(document.source, observed, origins);
+      if (firstDrift === undefined) return;
+      const driftAt = (label: string) => () =>
+        fail('source-drift', `${label} differs from the shared snapshot. Update and review the plan locally.`);
+      if (observed.files.length !== document.source.files.length) return yield* driftAt(firstDrift)();
       for (const [index, pinned] of document.source.files.entries()) {
         const current = observed.files[index];
-        if (current?.path !== pinned.path) return yield* drift();
+        if (current?.path !== pinned.path) return yield* driftAt(firstDrift)();
         if (current.sha256 === pinned.sha256) continue;
+        const drift = driftAt(
+          nativeSourceDrift({files: [pinned]}, {files: [current]}, origins.slice(index, index + 1)) ?? firstDrift,
+        );
         // Git may render the same committed text with LF or CRLF on either
         // checkout. Admit only those two exact renderings of the pinned blob.
         const actual = yield* fs.realPath(path.join(checkout, pinned.path)).pipe(Effect.mapError(drift));

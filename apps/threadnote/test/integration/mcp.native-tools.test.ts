@@ -952,13 +952,7 @@ describe('Threadnote MCP toolsets', () => {
           minLength: 1,
           maxLength: 4096,
         });
-        expect(deliveryByCommand.get('pr')?.required).toEqual([
-          'command',
-          'validationRef',
-          'commitEvidence',
-          'pr',
-          'publication',
-        ]);
+        expect(deliveryByCommand.get('pr')?.required).toEqual(['command', 'validationRef', 'commitEvidence', 'pr']);
 
         for (const [name, maximumBytes] of EffectRecord.toEntries(WORKFLOW_TASK_MUTATING_TOOL_MAX_BYTES)) {
           const tool = EffectOption.getOrUndefined(

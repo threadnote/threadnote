@@ -101,6 +101,44 @@ const validationSchema = Schema.Struct({
 });
 export const NativeCycleValidationSchema = validationSchema;
 export type NativeCycleValidation = typeof validationSchema.Type;
+/** Validation input names each acceptance criterion by its phase `acceptanceRefs` id or by its exact stored text. */
+export const NativeCycleValidationInputSchema = Schema.Struct({
+  checks: validationSchema.fields.checks,
+  acceptance: Schema.Array(
+    Schema.Struct({
+      id: Schema.optionalKey(id),
+      criterion: Schema.optionalKey(text()),
+      result: Schema.Literal('passed'),
+      evidence: text(),
+    }),
+  ).check(Schema.isBetweenLength(1, 128)),
+});
+export type NativeCycleAcceptanceInput = (typeof NativeCycleValidationInputSchema.Type)['acceptance'];
+/** Resolve acceptance ids to stored criterion text; text entries pass unchanged to phase validation. */
+export function resolveNativeCycleAcceptance(
+  plan: NativeCyclePlan,
+  phaseId: string | undefined,
+  entries: NativeCycleAcceptanceInput,
+): NativeCycleValidation['acceptance'] {
+  const phase = EffectOption.getOrUndefined(EffectArray.findFirst(plan.phases, x => x.id === phaseId));
+  if (!phase) err('Unknown phase.');
+  return EffectArray.map(entries, ({id: refId, criterion: stated, result, evidence}, index) => {
+    if ((refId === undefined) === (stated === undefined))
+      err(`Acceptance entry ${index} needs exactly one of id or criterion.`);
+    const ref = EffectOption.getOrUndefined(EffectArray.findFirst(phase.acceptanceRefs, x => x.id === refId));
+    if (refId !== undefined && !ref)
+      err(
+        `Acceptance entry ${index} names an unknown acceptance id. Known ids: ${quotedList(EffectArray.map(phase.acceptanceRefs, x => x.id))}.`,
+      );
+    return {criterion: ref?.criterion ?? stated ?? '', result, evidence};
+  });
+}
+/** Spread a publication only when the caller supplied one, so a receipt without it has no key. */
+export const nativeCyclePublicationField = <P>(publication: P | undefined): {publication?: P} =>
+  publication === undefined ? {} : {publication};
+/** Name the phase that waits for delivery and the work it holds back. */
+export const nativeCycleDeliveryPendingMessage = (waitingPhaseId: string | undefined, before: string): string =>
+  `Phase ${waitingPhaseId ?? 'unknown'} waits for delivery; deliver it before ${before}.`;
 const watchSchema = Schema.Struct({
   prUrl: text(2048),
   headSha: gitObject,
@@ -746,7 +784,8 @@ export function validateNativeCyclePhase(
   if (r.status === 'merged') err('Merged history cannot be rewritten.');
   if (!nativeCycleParentsReady(s, idValue)) err('Reconcile unvalidated dependencies before accepting this phase.');
   const pending = nextNativeCycle(s);
-  if (pending.action === 'deliver' && pending.phaseId !== idValue) err('Finish the prior phase delivery first.');
+  if (pending.action === 'deliver' && pending.phaseId !== idValue)
+    err(nativeCycleDeliveryPendingMessage(pending.phaseId, `validating phase ${idValue}`));
   const v = decode(validationSchema, evidence, 'Invalid validation evidence.');
   if (
     !isGitObject(snapshot.head) ||
@@ -803,7 +842,8 @@ export function recordNativeCycleDelivery(value: NativeCycleState, idValue: stri
   }
   if (!nativeCycleParentsReady(s, idValue)) err('Reconcile and deliver effective parents before phase delivery.');
   const pending = nextNativeCycle(s);
-  if (pending.action === 'deliver' && pending.phaseId !== idValue) err('Finish the prior phase delivery first.');
+  if (pending.action === 'deliver' && pending.phaseId !== idValue)
+    err(nativeCycleDeliveryPendingMessage(pending.phaseId, `delivering phase ${idValue}`));
   if (
     d.phaseId !== idValue ||
     d.phaseHash !== r.phaseHash ||

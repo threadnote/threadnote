@@ -11,6 +11,7 @@ import {CommandExecutor} from '@threadnote/platform/command';
 
 import * as Effect2 from 'effect';
 import {fixture, object, reviewed, run, windowsCycleFixtureTimeout} from './native-cycle-lifecycle-fixture.js';
+import {readNativeTaskView} from '../../src/workflow_automation/task.js';
 
 describe('native cycle lifecycle', () => {
   // prettier-ignore
@@ -176,7 +177,12 @@ describe('native cycle lifecycle', () => {
       expect(ready.next).toEqual({action: 'deliver', phaseId: 'one'});
       expect(
         yield* f.mutate('snapshot', {phaseId: 'two', snapshotId: 'two-too-early'}).pipe(Effect.result),
-      ).toMatchObject({failure: {code: 'delivery-pending'}});
+      ).toMatchObject({failure: {code: 'delivery-pending', message: expect.stringContaining('Phase one waits')}});
+      expect((yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo})).next).toMatchObject({
+        action: 'deliver',
+        phaseId: 'one',
+        reason: expect.stringMatching(/^Phase one waits for delivery; .*phase two starts\.$/u),
+      });
       yield* f.git(['add', 'source.ts']);
       yield* f.git(['commit', '-m', 'Phase one']);
       const head = Effect2.pipe((yield* f.git(['rev-parse', 'HEAD'])).stdout, EffectString.trim);
@@ -199,37 +205,58 @@ describe('native cycle lifecycle', () => {
             ? Effect.succeed({exitCode: 0, stderr: '', stdout: JSON.stringify({...providerIdentity, merged: false})})
             : executor.execute(executable, args, options),
       });
-      const delivered = yield* f
-        .mutate('record-delivery', {
-          phaseId: 'one',
-          publication: {exemption: 'maintenance', reason: 'Private test, no feature publication.'},
-          delivery: {
+      const receipt = {
+        phaseId: 'one',
+        phaseHash: f.snapshot.phaseHash,
+        delivery: 'pr',
+        userAuthority: 'The fixture user approved this exact phase PR delivery.',
+        providerIdentity,
+        headSha: head,
+        validatedTree: f.snapshot.tree,
+        commitEvidence: 'Actual clean Git commit.',
+        pr: {
+          url: 'https://github.com/example/private-fixture/pull/1',
+          headSha: head,
+          branch: 'feature/one',
+          baseBranch: 'main',
+          state: 'open',
+        },
+        watch: {
+          prUrl: 'https://github.com/example/private-fixture/pull/1',
+          headSha: head,
+          state: 'active',
+          stateDir: f.path.join(f.root, 'watch'),
+          consumerKind: 'orchestrator',
+          consumerId: 'test',
+          evidence: 'Private owned consumer fixture; no external poller.',
+        },
+      };
+      // A receipt's own publication is still checked against the exact source head.
+      const stalePublication = {
+        state: 'published',
+        team: 'default',
+        uri: 'threadnote://default/memories/shared/default/feature',
+        revision: EffectString.repeat(64)('a'),
+        currentHead: EffectString.repeat(40)('f'),
+        remoteCommit: EffectString.repeat(40)('f'),
+        evidence: 'Private stale publication receipt.',
+      };
+      expect(
+        yield* f
+          .mutate('record-delivery', {phaseId: 'one', delivery: {...receipt, publication: stalePublication}})
+          .pipe(Effect.provideService(CommandExecutor, provider), Effect.result),
+      ).toMatchObject({failure: {code: 'invalid-cycle-packet'}});
+      expect(
+        yield* f
+          .mutate('record-delivery', {
             phaseId: 'one',
-            phaseHash: f.snapshot.phaseHash,
-            delivery: 'pr',
-            userAuthority: 'The fixture user approved this exact phase PR delivery.',
-            providerIdentity,
-            headSha: head,
-            validatedTree: f.snapshot.tree,
-            commitEvidence: 'Actual clean Git commit.',
-            pr: {
-              url: 'https://github.com/example/private-fixture/pull/1',
-              headSha: head,
-              branch: 'feature/one',
-              baseBranch: 'main',
-              state: 'open',
-            },
-            watch: {
-              prUrl: 'https://github.com/example/private-fixture/pull/1',
-              headSha: head,
-              state: 'active',
-              stateDir: f.path.join(f.root, 'watch'),
-              consumerKind: 'orchestrator',
-              consumerId: 'test',
-              evidence: 'Private owned consumer fixture; no external poller.',
-            },
-          },
-        })
+            publication: {exemption: 'maintenance', reason: 'Private supplied publication.'},
+            delivery: {...receipt, publication: {exemption: 'small-fix', reason: 'Private receipt publication.'}},
+          })
+          .pipe(Effect.provideService(CommandExecutor, provider), Effect.result),
+      ).toMatchObject({failure: {code: 'delivery-conflict'}});
+      const delivered = yield* f
+        .mutate('record-delivery', {phaseId: 'one', delivery: receipt})
         .pipe(Effect.provideService(CommandExecutor, provider));
       expect(delivered.next).toEqual({action: 'implement', phaseId: 'two'});
       expect((yield* f.inspect()).next).toEqual({action: 'implement', phaseId: 'two'});

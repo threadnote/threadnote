@@ -2771,7 +2771,7 @@ describe('native task actions', () => {
           runId: 'native-run',
           callerCwd: f.repo,
           snapshotRef,
-          report: {mode: 'full', selected: ['correctness'], findings: []},
+          report: {mode: 'full', selected: ['correctness'], lanes: 'correctness', findings: []},
         }).pipe(Effect.result);
         expect(invalidReview).toMatchObject({
           failure: {code: 'invalid-request', message: expect.stringContaining('lanes')},
@@ -3159,6 +3159,20 @@ effectIt.effect('routes distinct semantic proof inputs through CLI adapters', ()
       '--workspace',
       '/repo',
     ]);
+    // Without an executable or workspace the CLI still registers the host; the runtime derives both.
+    yield* invoke([
+      'watch-pr',
+      '--caller-cwd',
+      '/repo',
+      '--operation',
+      'start',
+      '--pr-url',
+      'https://github.com/example/repo/pull/1',
+      '--host',
+      'claude-code',
+      '--host-reference',
+      'cccccccc-cccc-4ccc-cccc-cccccccccccc',
+    ]);
     expect(captured[0]).toMatchObject({
       taskRef: 'complete-ref',
       phaseId: 'one',
@@ -3183,6 +3197,11 @@ effectIt.effect('routes distinct semantic proof inputs through CLI adapters', ()
         workspace: '/repo',
         exclusiveSession: true,
       },
+    });
+    expect(object(captured[4]).wakeup).toEqual({
+      host: 'claude-code',
+      sessionId: 'cccccccc-cccc-4ccc-cccc-cccccccccccc',
+      exclusiveSession: true,
     });
   }).pipe(provideTestLayer(cliTestLayer)),
 );

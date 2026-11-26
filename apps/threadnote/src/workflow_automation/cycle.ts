@@ -1,7 +1,7 @@
 import {pipe as EffectArrayPipe} from 'effect';
 import {isJsonObject} from '@threadnote/platform/json';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
-import {Effect, FileSystem, Path, Schema} from 'effect';
+import {Effect, FileSystem, Path, Predicate, Schema} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import {
@@ -19,6 +19,7 @@ import {
   type NativeCycleDelivery,
   NativeCycleDeliverySchema,
   type NativeCyclePlan,
+  nativeCycleDeliveryPendingMessage,
 } from '@threadnote/workflow-automations/cycle';
 import {
   NativeCyclePacketOptionsSchema,
@@ -597,8 +598,12 @@ const runNativeCycleRequest = <R>(
           const reason = yield* from(() => required(request.reason, 'the completed reconciliation evidence'));
           if (!['stale', 'blocked'].includes(prior.status) || !nativeCycleParentsReady(state, selected.id))
             return yield* fail('dependency-stale', 'Resume only the reconciled phase after its parent acceptance.');
-          if (nextNativeCycle(state).action === 'deliver')
-            return yield* fail('delivery-pending', 'Finish the outstanding delivery first.');
+          const pending = nextNativeCycle(state);
+          if (pending.action === 'deliver')
+            return yield* fail(
+              'delivery-pending',
+              nativeCycleDeliveryPendingMessage(pending.phaseId, `resuming phase ${selected.id}`),
+            );
           const updated = {
             ...state,
             phases: {...state.phases, [selected.id]: {...prior, status: 'pending' as const, reason}},
@@ -656,7 +661,10 @@ const runNativeCycleRequest = <R>(
           const selected = yield* from(getPhase);
           const next = nextNativeCycle(state);
           if (next.action === 'deliver' && next.phaseId !== selected.id)
-            return yield* fail('delivery-pending', 'Deliver the accepted prior phase before the next implementation.');
+            return yield* fail(
+              'delivery-pending',
+              nativeCycleDeliveryPendingMessage(next.phaseId, `implementing phase ${selected.id}`),
+            );
           if (!nativeCycleParentsReady(state, selected.id))
             return yield* fail('dependency-stale', 'Reconcile the affected parent acceptance first.');
           if (state.phases[selected.id].status === 'merged')
@@ -1647,7 +1655,10 @@ const runNativeCycleRequest = <R>(
             return yield* fail('dependency-stale', 'Reconcile and deliver effective parents before publication.');
           const pending = nextNativeCycle(state);
           if (pending.action === 'deliver' && pending.phaseId !== selected.id)
-            return yield* fail('delivery-pending', 'Finish the outstanding delivery first.');
+            return yield* fail(
+              'delivery-pending',
+              nativeCycleDeliveryPendingMessage(pending.phaseId, `delivering phase ${selected.id}`),
+            );
           if (!proof.validation || !proof.tree)
             return yield* fail('not-ready', 'Current phase validation is required.');
 
@@ -1757,9 +1768,21 @@ const runNativeCycleRequest = <R>(
             currentHead = current.head;
             currentTree = current.tree;
           }
-          if (state.plan.delivery === 'pr')
+          // A receipt's own publication is policy evidence too, so it is checked like the supplied one.
+          const receiptPublication =
+            request.command === 'record-delivery' && Predicate.isObject(request.delivery)
+              ? request.delivery.publication
+              : undefined;
+          if (
+            receiptPublication !== undefined &&
+            request.publication !== undefined &&
+            stableJson(receiptPublication) !== stableJson(request.publication)
+          )
+            return yield* fail('delivery-conflict', 'The receipt publication differs from the supplied publication.');
+          const publication = request.publication ?? receiptPublication;
+          if (state.plan.delivery === 'pr' && publication !== undefined)
             yield* from(() =>
-              validateNativeCycleFeaturePublication(request.publication, {
+              validateNativeCycleFeaturePublication(publication, {
                 currentHead,
                 team: stored.state.team ?? 'default',
               }),
