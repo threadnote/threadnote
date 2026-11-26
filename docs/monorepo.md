@@ -189,7 +189,9 @@ All eight profiles retain distinct native identities: Darwin ARM64/x64, Windows
 ARM64/x64, and Linux GNU/musl ARM64/x64. The six existing archive names remain;
 Linux musl archives add `-musl`. The installer and updater select the host libc.
 Linux CI builds run on native hardware in pinned glibc 2.17 or musl 1.2.3
-containers. Genuine upstream local-build inference closures include the complete
+containers. The owned semantic provider tree needs
+`posix_spawn_file_actions_addchdir_np`, so it is unavailable before glibc 2.29;
+the glibc 2.17 container checks that refusal. Genuine upstream local-build inference closures include the complete
 Release directory, metadata and completion marker. The inference overlay descriptor
 binds source/header/lock inputs, build tools and every final payload file; the same
 verified overlay can be staged into the private TS66 comparison distribution.

@@ -111,7 +111,26 @@ function assertDarwinImage(pid: number, image: RuntimeOwnedProviderExpectedDarwi
  * from a persisted PID, and never occurs after that reservation is released.
  */
 let quarantinedLaunch: (() => boolean) | undefined;
+let spawnDirectoryAvailable: boolean | undefined;
+/**
+ * The owned launch sets the child cwd with posix_spawn_file_actions_addchdir_np, which glibc has only from 2.29 (musl
+ * from 1.1.24, macOS from 10.15). Without it the provider tree is unavailable; the spawn refuses before any side effect.
+ */
+export function posixProviderSpawnAvailable(): boolean {
+  if (runtimeCurrentPlatform() !== 'linux') return runtimeCurrentPlatform() === 'darwin';
+  if (spawnDirectoryAvailable !== undefined) return spawnDirectoryAvailable;
+  try {
+    dlopen(linuxRuntimeLibc().library, {
+      posix_spawn_file_actions_addchdir_np: {args: ['buffer', 'buffer'], returns: 'i32'},
+    }).close();
+    spawnDirectoryAvailable = true;
+  } catch {
+    spawnDirectoryAvailable = false;
+  }
+  return spawnDirectoryAvailable;
+}
 export function spawnPosixProvider(options: RuntimeOwnedProviderLaunch): OwnedProviderBackend {
+  if (!posixProviderSpawnAvailable()) return fail('unsupported-platform');
   if (quarantinedLaunch) {
     if (!quarantinedLaunch()) return fail('identity');
     quarantinedLaunch = undefined;

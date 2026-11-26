@@ -15,7 +15,7 @@ import type {
 import {linuxRuntimeLibc, assertPosixPrivateProviderPath} from './posix-native.js';
 import {assertWindowsPrivateProviderPath} from './windows-files.js';
 import {spawnWindowsProvider} from './provider-windows.js';
-import {spawnPosixProvider, probePosixProviderTree} from './provider-posix.js';
+import {spawnPosixProvider, probePosixProviderTree, posixProviderSpawnAvailable} from './provider-posix.js';
 import {writerFail as fail} from './fault.js';
 export type {
   RuntimeOwnedProviderExpectedDarwinImage,
@@ -87,7 +87,8 @@ export function runtimeProbeProviderTree(instance: {
 export function runtimeNativePlatformSupport(): {readonly writer: boolean; readonly providerTree: boolean} {
   const target = runtimeNativePlatformTarget();
   const supported = target !== undefined && runtimeCurrentPlatform() !== 'win32';
-  return {writer: supported, providerTree: target !== undefined};
+  const providerTree = target !== undefined && (runtimeCurrentPlatform() === 'win32' || posixProviderSpawnAvailable());
+  return {writer: supported, providerTree};
 }
 export function runtimeAssertPrivateProviderPath(path: string, options: {readonly kind: 'file' | 'directory'}): void {
   if (runtimeCurrentPlatform() === 'win32') assertWindowsPrivateProviderPath(path, options.kind);
