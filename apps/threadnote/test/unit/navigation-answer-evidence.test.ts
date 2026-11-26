@@ -14,8 +14,16 @@ import {
 } from '../../src/context_brief/navigation_evidence.js';
 
 const worktreeUri = 'file:///fixture/worktree';
+/**
+ * Both structuralNavigationInput (scope.repository === result.repository.repositoryId, snapshot = result.snapshot.id)
+ * and retrieveSemanticContextSourceEvidence (graph.repositoryId = identity.repositoryId, required equal to
+ * result.repository.repositoryId; graph.snapshotId = result.snapshot.id) use the graph identity. The semantic
+ * observation's own repository value is a different domain and is deliberately different here.
+ */
+const GRAPH_REPOSITORY_ID = 'graph-repository-id';
+const GRAPH_SNAPSHOT_ID = 'graph-snapshot-id';
 const scope: NavigationScope = {
-  repository: 'fixture-repository',
+  repository: GRAPH_REPOSITORY_ID,
   worktree: 'fixture-worktree',
   project: 'fixture-project',
   view: {kind: 'disk', id: 'disk', owner: 'graph', epoch: 0},
@@ -34,7 +42,7 @@ function structural(): NavigationInput {
         path: 'src/operation.ts',
         contentHash: 'graph-operation',
         freshness: 'verified-current',
-        snapshot: 'snapshot',
+        snapshot: GRAPH_SNAPSHOT_ID,
       },
       {
         ...scope,
@@ -42,7 +50,7 @@ function structural(): NavigationInput {
         path: 'src/store.ts',
         contentHash: 'graph-store',
         freshness: 'verified-current',
-        snapshot: 'snapshot',
+        snapshot: GRAPH_SNAPSHOT_ID,
       },
     ],
     candidates: [
@@ -105,7 +113,7 @@ function structural(): NavigationInput {
 function observation(path: string, content: string, overrides: Partial<Observation> = {}): Observation {
   return {
     version: 1,
-    repository: 'fixture-repository',
+    repository: 'semantic-observation-repository',
     worktree: worktreeUri,
     project: worktreeUri,
     configuration: EffectString.repeat(64)('a'),
@@ -134,7 +142,7 @@ function document(
             scope: 'document',
             observation: sha256HexSync(observationKey(observed)),
             semanticContent: observed.content,
-            graph: {repositoryId: 'fixture-repository', snapshotId: 'snapshot', path, contentHash: graphHash},
+            graph: {repositoryId: GRAPH_REPOSITORY_ID, snapshotId: GRAPH_SNAPSHOT_ID, path, contentHash: graphHash},
           }
         : null,
     closingObservationKey: observationKey(observed),
@@ -202,6 +210,13 @@ describe('semantic navigation evidence', () => {
         link => link.basis,
       ).sort();
     expect(bases('handle', 'save')).toEqual(['qualified-semantic', 'structural']);
+    // The binding passes in the graph identity domain and yields verified links that the assembler retains.
+    expect(
+      EffectArray.every(
+        EffectArray.filter(result.links, link => link.basis === 'qualified-semantic'),
+        link => link.compatibility === 'verified',
+      ),
+    ).toBe(true);
     expect(bases('save', 'write')).toEqual(['qualified-semantic', 'structural']);
     expect(
       Option.getOrUndefined(EffectArray.findFirst(result.links, link => link.relation === 'reads_or_writes'))?.basis,

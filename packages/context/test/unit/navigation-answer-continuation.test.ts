@@ -112,6 +112,21 @@ describe('navigation effects follow-up delta', () => {
       reason: 'navigation-effects-not-reacquired',
     });
   });
+  it('invalidates a smaller effect set when the follow-up acquisition was incomplete', () => {
+    const base = input();
+    const second = {...base.candidates[1], id: 'second-effect', startLine: 11, endLine: 11};
+    const previous = assembleNavigationAnswer({
+      ...base,
+      candidates: [...base.candidates, second],
+      links: [...base.links, {...base.links[0], to: 'second-effect'}],
+    });
+    const partial = assembleNavigationAnswer({...base, gaps: ['navigation-facts-omitted']});
+    expect(navigationEffectsDelta(previous, partial)).toMatchObject({
+      status: 'invalidated',
+      reason: 'navigation-effects-not-reacquired',
+    });
+    expect(navigationEffectsDelta(previous, assembleNavigationAnswer(base)).status).toBe('changed');
+  });
   it('anchors a follow-up only on the previous effect nodes found again', () => {
     const previous = assembleNavigationAnswer(input());
     const node = (id: string, kind: string) => ({

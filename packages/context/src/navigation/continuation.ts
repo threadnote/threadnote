@@ -10,6 +10,9 @@ import {
 } from './model.js';
 
 const compareText = (left: string, right: string) => (left < right ? -1 : left > right ? 1 : 0);
+/** Acquisition gaps after which absent evidence was possibly not read, not proven absent. */
+const INCOMPLETE_ACQUISITION =
+  /^(?:task-source-|navigation-(?:read-budget|anchor-budget|selector-budget|fact-|facts-|proof-source-incomplete|ready-closure-))/u;
 const sourceKey = (source: NavigationSource) =>
   JSON.stringify([
     navigationScopeKey(source),
@@ -153,5 +156,8 @@ export function navigationEffectsDelta(
     return after.status === 'not-applicable'
       ? {status: 'changed', reason: 'navigation-effects-not-applicable', effects: [], sources: []}
       : invalidatedNavigationEffects('navigation-effects-not-reacquired');
+  // Fewer effects after an incomplete acquisition may only mean some were not read again.
+  if (EffectArray.some(current.gaps, gap => INCOMPLETE_ACQUISITION.test(gap)))
+    return invalidatedNavigationEffects('navigation-effects-not-reacquired');
   return {status: 'changed', reason: 'navigation-effects-changed', effects: after.nodes, sources: after.sources};
 }

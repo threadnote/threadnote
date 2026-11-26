@@ -197,7 +197,9 @@ function guardOf(
     return undefined;
   const condition = ifStatement.childForFieldName('condition');
   if (condition?.type !== 'identifier') return undefined;
-  // A guard name assigned in the owner may be a constant, so the write may not be conditional.
+  // The guard must be a parameter the owner never reassigns; a module or local name may be a constant, so the
+  // write would not be conditional.
+  if (!EffectArray.contains(parameterNames(fn), condition.text)) return undefined;
   if (
     EffectArray.some(body?.namedChildren ?? [], statement =>
       statement?.namedChildren[0]?.type === 'assignment'
@@ -207,6 +209,22 @@ function guardOf(
   )
     return undefined;
   return {span: span(condition), branch};
+}
+
+/** Plain parameter names of a function; `*args`, `**kwargs` and other forms are not guard candidates. */
+function parameterNames(fn: Node): readonly string[] {
+  return EffectArray.flatMap(fn.childForFieldName('parameters')?.namedChildren ?? [], parameter => {
+    if (parameter?.type === 'identifier') return [parameter.text];
+    if (
+      parameter?.type === 'default_parameter' ||
+      parameter?.type === 'typed_parameter' ||
+      parameter?.type === 'typed_default_parameter'
+    ) {
+      const name = parameter.childForFieldName('name') ?? parameter.namedChildren[0];
+      return name?.type === 'identifier' ? [name.text] : [];
+    }
+    return [];
+  });
 }
 
 /** Owner body: simple assignments, one guard whose branches only assign or write, then an optional return. */

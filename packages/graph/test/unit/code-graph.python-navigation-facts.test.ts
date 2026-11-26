@@ -123,6 +123,11 @@ effectIt.layer(TreeSitterRuntime.layer.pipe(Layer.provideMerge(citationPlatformL
         'invalid plus mode': edit(WRITE, '"w"', '"+"'),
         'async with': edit(edit(WRITE, 'def save_note', 'async def save_note'), 'with open', 'async with open'),
         'constant guard': edit(WRITE, '    body = text\n', '    body = text\n    persist = True\n'),
+        'module constant guard': edit(
+          WRITE,
+          'def save_note(path, text, persist):',
+          'persist = True\n\ndef save_note(path, text):',
+        ),
       };
       for (const [name, content] of EffectRecord.toEntries(refused)) {
         const facts = yield* extract(content);

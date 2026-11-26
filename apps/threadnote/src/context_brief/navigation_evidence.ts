@@ -547,6 +547,12 @@ export const acquireSemanticNavigationEvidence = Effect.fn('navigation.acquireSe
       documents.push({path, observation, binding: null, closingObservationKey: null});
       continue;
     }
+    // The join reads source bytes: start it only with time left for the closing observations.
+    if ((yield* available(opening.size)) === undefined) {
+      gaps.add('semantic-deadline-exhausted');
+      documents.push({path, observation, binding: null, closingObservationKey: null});
+      continue;
+    }
     const joined = yield* input.ports.bind(path, observation);
     documents.push({
       path,
