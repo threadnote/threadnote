@@ -601,20 +601,21 @@ export function cacheContentBatch(options: {
               : 0;
             const generalCapacity = parserCapacity - nativeCapacity;
             const takeNativeFirst = () => takeNativeGroup() ?? takeGeneralGroup();
-            const takeNativeLane = generalCapacity === 0 ? takeNativeFirst : takeNativeGroup;
-            const takeGeneralLane = nativeCapacity === 0 ? takeNativeFirst : takeGeneralGroup;
-            const nativeLanes = Math.min(
-              nativeCapacity,
-              generalCapacity === 0 ? groupWindow.length : nativeGroups.length,
-            );
             // Only the general lanes the planned work needs run beside native lanes: each keeps a resident worker.
             const generalLanes = Math.min(
-              windowGeneralParserLanes(
-                {nativeCapacity, generalCapacity},
-                cumulativeContext.parserLaneWork,
-                nativeGroups.length > 0,
-              ),
+              windowGeneralParserLanes({nativeCapacity, generalCapacity}, cumulativeContext.parserLaneWork),
               nativeCapacity === 0 ? groupWindow.length : generalGroups.length,
+            );
+            // A window without native work lets the native lanes, whose workers the plan starts anyway, take the
+            // remaining general groups. They hold the native lock only for this window.
+            const nativeShares =
+              nativeGroups.length === 0 && (cumulativeContext.parserLaneWork?.nativeWorkUnits ?? 0) > 0;
+            const takeNativeLane = generalCapacity === 0 || nativeShares ? takeNativeFirst : takeNativeGroup;
+            const takeGeneralLane = nativeCapacity === 0 ? takeNativeFirst : takeGeneralGroup;
+            const sharedGeneral = nativeShares ? generalGroups.length - generalLanes : 0;
+            const nativeLanes = Math.min(
+              nativeCapacity,
+              generalCapacity === 0 ? groupWindow.length : nativeGroups.length + sharedGeneral,
             );
             const groupedResults = (yield* Effect.forEach(
               [

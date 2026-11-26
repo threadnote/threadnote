@@ -92,18 +92,14 @@ export function plannedGeneralParserLanes(
   return Math.min(generalCapacity, Math.max(1, needed));
 }
 
-/**
- * General lanes for one extraction window. A window without native work also takes the idle native share, so it keeps
- * the busy lane count of a mixed window. Without a plan, or without native slots, every general slot runs.
- */
+/** General lanes for one extraction window: the planned lanes, or every general slot without a plan or native slots. */
 export function windowGeneralParserLanes(
   slots: {readonly nativeCapacity: number; readonly generalCapacity: number},
   work: {readonly nativeWorkUnits: number; readonly generalWorkUnits: number} | undefined,
-  windowHasNativeWork: boolean,
 ): number {
-  if (work === undefined || slots.nativeCapacity <= 0) return Math.max(0, slots.generalCapacity);
-  const planned = plannedGeneralParserLanes(slots, work);
-  return Math.min(planned + (windowHasNativeWork ? 0 : slots.nativeCapacity), Math.max(0, slots.generalCapacity));
+  return work === undefined || slots.nativeCapacity <= 0
+    ? Math.max(0, slots.generalCapacity)
+    : plannedGeneralParserLanes(slots, work);
 }
 
 /** Prewarm the planned lanes (every slot without evidence) with the worker kind the inventory needs. */

@@ -333,7 +333,7 @@ describe('code graph parser cache coalescer', () => {
       const heavy = yield* run({nativeWorkUnits: 100, generalWorkUnits: 900});
       const unplanned = yield* run();
       expect(EffectArray.map([light, heavy, unplanned], harness => harness.openLanes.generalPeak)).toEqual([1, 3, 3]);
-      // A window without TypeScript also takes the idle native share: one planned lane plus one native slot.
+      // A window without TypeScript lets the native lane take general groups beside the one planned general lane.
       const generalOnly = coalescerHarness({capacity: 4, nativeCapacity: 1, facts});
       const jsonFiles = EffectArray.filter(files, file => file.language === 'json');
       yield* generalOnly.run(jsonFiles, {
@@ -341,7 +341,16 @@ describe('code graph parser cache coalescer', () => {
         parserLaneWork: {nativeWorkUnits: 100, generalWorkUnits: 10},
       });
       yield* generalOnly.flush;
-      expect(generalOnly.openLanes.generalPeak).toBe(2);
+      expect([generalOnly.openLanes.generalPeak, generalOnly.openLanes.nativePeak]).toEqual([1, 1]);
+      expect(EffectArray.some(generalOnly.lanes, entry => entry.lane === 'native')).toBe(true);
+      // Without planned native work no native worker exists, so the native lane stays idle.
+      const noNativePlan = coalescerHarness({capacity: 4, nativeCapacity: 1, facts});
+      yield* noNativePlan.run(jsonFiles, {
+        ...cacheContext(jsonFiles.length),
+        parserLaneWork: {nativeWorkUnits: 0, generalWorkUnits: 10},
+      });
+      yield* noNativePlan.flush;
+      expect([noNativePlan.openLanes.generalPeak, noNativePlan.openLanes.nativePeak]).toEqual([3, 0]);
       for (const harness of [heavy, unplanned]) {
         expect(EffectArray.map(light.lanes, entry => entry.path).sort(compareCodeUnits)).toEqual(
           EffectArray.map(harness.lanes, entry => entry.path).sort(compareCodeUnits),
