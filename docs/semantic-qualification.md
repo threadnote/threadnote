@@ -260,9 +260,10 @@ it was built. A dirty harness never changes the compiled candidate's source attr
 
 Receipts record the app release/runtime, OS release/architecture, harness Bun, isolated environment, fixed fixture
 version and byte hashes, bounded transport output and cleanup. Without provider inputs, provider artifact and runtime
-are explicitly null. Provider inputs are a strict version-1 record: language, exact Node runtime path/version/hash,
-server directory/full-tree digest, explicit component notice paths/hashes, and for TypeScript/JavaScript the SDK
-directory/full-tree digest. The runner recomputes these before and after execution. Python uses an authored static
+are explicitly null. Provider inputs are a strict version-1 record with explicit component notice paths/hashes.
+TypeScript and JavaScript name the native 7.1 asset directory, which the product's own asset admission verifies;
+the legacy TypeScript Language Server candidate is refused. Python names the exact Node runtime path/version/hash and
+server directory/full-tree digest. The runner recomputes these before and after execution. Python uses an authored static
 environment manifest and dependency stub; it executes no interpreter. Available branches prove their own inputs rather
 than borrowing historical P00 results. Metadata and notice bytes do not confer legal/distribution approval.
 

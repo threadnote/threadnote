@@ -124,6 +124,34 @@ describe('final combined qualification preparation', () => {
       await rm(root, {recursive: true, force: true});
     }
   });
+  it('accepts only native 7.1 asset inputs for TypeScript and JavaScript', () => {
+    const notice = {component: 'typescript-native', file: '/fixture/notice', sha256: EffectString.repeat(64)('a')};
+    for (const language of ['typescript', 'javascript'] as const)
+      expect(
+        Schema.decodeSync(ProviderInputs)({
+          version: 1,
+          language,
+          providerVersion: '7.1.0-beta',
+          assetDirectory: '/fixture/runtime/typescript',
+          notices: [notice],
+        }),
+      ).toMatchObject({language, assetDirectory: '/fixture/runtime/typescript'});
+    // The product refuses the legacy TypeScript Language Server candidate, so the runner cannot select it.
+    expect(() =>
+      Schema.decodeUnknownSync(ProviderInputs, {onExcessProperty: 'error'})({
+        version: 1,
+        language: 'typescript',
+        runtime: '/fixture/node',
+        runtimeDigest: EffectString.repeat(64)('a'),
+        runtimeVersion: '24.19.0',
+        serverDirectory: '/fixture/server',
+        serverTreeDigest: EffectString.repeat(64)('a'),
+        sdkDirectory: '/fixture/sdk',
+        sdkTreeDigest: EffectString.repeat(64)('a'),
+        notices: [notice],
+      }),
+    ).toThrow();
+  });
   it('awaits one explicit source-bound startup and cancels a failed job before existing owned shutdown', async () => {
     const inputs = Schema.decodeSync(ProviderInputs)({
       version: 1,

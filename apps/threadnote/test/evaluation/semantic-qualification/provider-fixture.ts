@@ -25,6 +25,8 @@ import {
   type JavaPreparedModel,
 } from '../../../src/semantic/providers/java_preparation.js';
 import {LspFault} from '../../../src/semantic/lsp_transport.js';
+import {verifyNativeTypeScriptAsset} from '@threadnote/graph/typescript_runtime';
+import {nativeTypeScriptAssetPins} from '@threadnote/graph/typescript_native_asset_pins';
 import {makeJavaPreparation} from '../../../src/semantic/providers/java.js';
 import {makeJavaPreparationOwners, verifyJavaGradleInstallation} from '../../../src/semantic/providers/java_runtime.js';
 import {telemetryChildEnvironmentPolicyLayer} from '../../../src/telemetry/session.js';
@@ -51,11 +53,12 @@ const node = {
   serverTreeDigest: digest,
 };
 export const ProviderInputs = Schema.Union([
+  // The product selects only the native 7.1 compiler for TypeScript and JavaScript; the verified asset supplies it.
   Schema.Struct({
-    ...node,
+    ...common,
     language: Schema.Literals(['typescript', 'javascript']),
-    sdkDirectory: Schema.String,
-    sdkTreeDigest: digest,
+    providerVersion: Schema.Literal(nativeTypeScriptAssetPins.version),
+    assetDirectory: Schema.String,
   }),
   Schema.Struct({...node, language: Schema.Literal('python')}),
   Schema.Struct({
@@ -184,11 +187,16 @@ export async function readProviderInputs(file: string) {
       ),
       'Explicit JDT source and both Java SDK notice objects',
     );
+  } else if ('assetDirectory' in input) {
+    // The product's own admission verifies every pinned file, tree and the reviewed compiler bytes.
+    await verifyNativeTypeScriptAsset(input.assetDirectory);
+    assert.ok(
+      EffectArray.some(input.notices, notice => notice.component === 'typescript-native'),
+      'Explicit native TypeScript notice object',
+    );
   } else {
     assert.equal(hash(await readFile(input.runtime)), input.runtimeDigest, 'Pinned runtime bytes');
     assert.equal(await tree(input.serverDirectory), input.serverTreeDigest, 'Complete provider tree');
-    if (input.language !== 'python')
-      assert.equal(await tree(input.sdkDirectory), input.sdkTreeDigest, 'Complete SDK tree');
   }
   for (const notice of input.notices)
     assert.equal(hash(await readFile(notice.file)), notice.sha256, 'Exact local notice bytes');
@@ -639,6 +647,20 @@ export async function providerCatalog(
     };
     return {catalog: input.language === 'go' ? {go: candidate} : {rust: candidate}, environment: undefined};
   }
+  if ('assetDirectory' in input) {
+    const asset = await verifyNativeTypeScriptAsset(input.assetDirectory);
+    const nativeCandidate = {
+      executable: asset.compilerPath,
+      executableDigest: asset.pinned,
+      version: asset.manifest.version,
+      sdkDirectory: asset.sdkDirectory,
+      sdkTreeDigest: asset.manifest.frontend.derivedSdkTreeSha256,
+      sourceCommit: asset.manifest.provenance.sourceCommit,
+      sourceTree: asset.manifest.provenance.sourceTree,
+      overlaySha256: asset.manifest.provenance.overlaySha256,
+    };
+    return {catalog: {nativeCandidate}, environment: undefined};
+  }
   const base = {
     runtime: input.runtime,
     runtimeDigest: input.runtimeDigest,
@@ -646,11 +668,6 @@ export async function providerCatalog(
     serverDirectory: input.serverDirectory,
     serverTreeDigest: input.serverTreeDigest,
   };
-  if (input.language !== 'python')
-    return {
-      catalog: {candidate: {...base, sdkDirectory: input.sdkDirectory, sdkTreeDigest: input.sdkTreeDigest}},
-      environment: undefined,
-    };
   const prefix = join(scratch, 'python-environment');
   const library = join(prefix, 'static-library');
   await mkdir(library, {recursive: true, mode: 0o700});

@@ -577,7 +577,9 @@ export async function runCandidateChecks(
                     projectSha256: provider.input.projectExecutableDigest,
                     projectSdkTreeDigest: provider.input.projectSdkDigest,
                   }
-                : {version: provider.input.runtimeVersion, sha256: provider.input.runtimeDigest},
+                : 'assetDirectory' in provider.input
+                  ? {version: provider.input.providerVersion, assetDirectory: provider.input.assetDirectory}
+                  : {version: provider.input.runtimeVersion, sha256: provider.input.runtimeDigest},
       };
       if (provider.input.language === 'java' && !writerFixture) report.provider.started = false;
       assertProviderFixtureBranch(provider.input, writerFixture);
