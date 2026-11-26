@@ -1,5 +1,9 @@
 import * as EffectString from 'effect/String';
 import {arch, platform, release} from '@threadnote/testing/node-os';
+import {
+  nativeTypeScriptHostKey,
+  nativeTypeScriptReviewedBinarySha256,
+} from '@threadnote/graph/typescript_native_asset_pins';
 
 /**
  * macOS 15 (Darwin 24) and earlier do not report CS_KILL for the linker-signed reviewed compiler and run a changed page
@@ -9,3 +13,7 @@ import {arch, platform, release} from '@threadnote/testing/node-os';
  */
 export const nativeTypeScriptSourceModeRefused =
   platform() === 'darwin' && arch() === 'arm64' && Number(EffectString.split('.')(release())[0]) <= 24;
+
+/** A host without a reviewed compiler pin (Windows today) builds its payload without native TypeScript. */
+export const nativeTypeScriptHostUnpinned =
+  nativeTypeScriptReviewedBinarySha256(nativeTypeScriptHostKey(platform(), arch())) === undefined;

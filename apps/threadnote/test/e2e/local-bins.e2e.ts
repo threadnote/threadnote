@@ -34,7 +34,13 @@ import {
 import {observeStdioClientTransportClose} from '../helpers/stdio-client-transport-close.js';
 import {installedRecallDiagnostic} from '../helpers/installed-recall-diagnostic.js';
 import {afterAll, beforeAll, describe, expect, it, vi} from 'vitest';
-import {nativeTypeScriptSourceModeRefused} from '@threadnote/graph/test/helpers/native-typescript-kernel';
+import {
+  nativeTypeScriptHostUnpinned,
+  nativeTypeScriptSourceModeRefused,
+} from '@threadnote/graph/test/helpers/native-typescript-kernel';
+
+// This payload runs no native TypeScript compiler: refused by the kernel, or never staged on an unpinned host.
+const nativeTypeScriptAbsent = nativeTypeScriptSourceModeRefused || nativeTypeScriptHostUnpinned;
 import * as Schema from 'effect/Schema';
 import {windowsCommandLauncherInvocation} from '@threadnote/testing/windows-command-launcher';
 import {BUILTIN_MODEL_MANIFESTS, CORE_EMBEDDING_MODEL_ID} from '@threadnote/inference/models/builtin';
@@ -469,8 +475,8 @@ describe('built self-contained distribution', () => {
     await expect(readFile(canonical, 'utf8')).resolves.toContain('QZ9 native recall');
   });
 
-  // This unsigned payload's compiler is refused on these kernels (proved in code-graph.extractor-lazy-loading).
-  it.skipIf(nativeTypeScriptSourceModeRefused)(
+  // Without a runnable native compiler TypeScript indexes as degraded modules (see nativeTypeScriptAbsent).
+  it.skipIf(nativeTypeScriptAbsent)(
     'lazily builds and queries the native code graph with visible packaged progress',
     async () => {
       const firstQuery = await runCli([
@@ -1637,9 +1643,8 @@ describe('built self-contained distribution', () => {
         operation: 'query',
         repository: {displayName: 'code-graph-repository'},
       });
-      // TypeScript symbols need the native compiler, which this unsigned payload cannot run on these kernels.
-      if (!nativeTypeScriptSourceModeRefused)
-        expect(JSON.stringify(graph.structuredContent)).toContain('withExclusiveFileLock');
+      // TypeScript symbols need the native compiler, which this payload cannot run here.
+      if (!nativeTypeScriptAbsent) expect(JSON.stringify(graph.structuredContent)).toContain('withExclusiveFileLock');
       await expect
         .poll(
           async () => {

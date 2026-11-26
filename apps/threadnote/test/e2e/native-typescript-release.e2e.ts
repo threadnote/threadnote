@@ -11,7 +11,10 @@ import {
   SIGNED_NATIVE_TYPESCRIPT_IDENTIFIER,
   releaseAppleTeamId,
 } from '../../../../tools/ci/signed-native-typescript.js';
-import {nativeTypeScriptSourceModeRefused} from '@threadnote/graph/test/helpers/native-typescript-kernel';
+import {
+  nativeTypeScriptHostUnpinned,
+  nativeTypeScriptSourceModeRefused,
+} from '@threadnote/graph/test/helpers/native-typescript-kernel';
 
 /**
  * Publish smoke for the final payload (macOS: after the private `tsc` is signed, its signed identity is compiled into
@@ -25,7 +28,8 @@ const cli = join(root, 'dist', process.platform === 'win32' ? 'threadnote.exe' :
 const compiler = join(root, 'dist', 'runtime', 'typescript', process.platform === 'win32' ? 'tsc.exe' : 'tsc');
 const expectSigned = process.env.THREADNOTE_EXPECT_SIGNED_NATIVE_TYPESCRIPT === '1';
 // An unsigned payload carries the linker-signed compiler, which these kernels refuse; a signed release runs there.
-const refused = nativeTypeScriptSourceModeRefused && !expectSigned;
+// A host without a reviewed pin ships no native compiler at all.
+const refused = (nativeTypeScriptSourceModeRefused && !expectSigned) || nativeTypeScriptHostUnpinned;
 const PathResult = Schema.Struct({
   operation: Schema.String,
   edges: Schema.Array(
