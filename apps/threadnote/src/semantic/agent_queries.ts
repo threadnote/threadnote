@@ -1,4 +1,14 @@
-import {Array as EffectArray, Clock, Effect, FileSystem, Path, Schema, String as EffectString} from 'effect';
+import {
+  Array as EffectArray,
+  Cause,
+  Clock,
+  Effect,
+  FileSystem,
+  Path,
+  Schema,
+  Scope,
+  String as EffectString,
+} from 'effect';
 import {canonicalFileUri, Observation, observationKey, type Evidence} from '@threadnote/semantic/contracts';
 import {AGENT_RESPONSE_ESTIMATED_BYTES_PER_TOKEN} from '@threadnote/protocol/agent-response';
 import type {
@@ -9,6 +19,11 @@ import type {
 } from '@threadnote/context/types';
 import {compactSemanticContextKnowledge} from '@threadnote/context/compiler';
 import {compileSemanticContextKnowledge} from '../context_brief/index.js';
+import {
+  ContextBriefNativeReadWorkers,
+  prestartContextBriefNativeReadWorkers,
+} from '../context_brief/native_read_boundary.js';
+import {hasReadCleanupUnconfirmed} from '@threadnote/platform/read_deadline';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {ensureSemanticEndpoint} from './coordinator.js';
 import {LspFault} from './lsp_transport.js';
@@ -68,11 +83,19 @@ export interface SemanticAgentQueryHost<ContextR = never> {
     evidence: Evidence,
     target: SemanticContextSymbolTarget | null,
   ) => Effect.Effect<SemanticContextKnowledgeV1, unknown, ContextR>;
+  /**
+   * Start the context brief's native read worker in the query's scope before the provider request, so that the
+   * brief's first read does not spend its budget on worker start-up. The executor is provided to `context`.
+   */
+  readonly prestartContext?: (
+    config: RuntimeConfig,
+  ) => Effect.Effect<ContextBriefNativeReadWorkers['Service'] | undefined, unknown, ContextR | Scope.Scope>;
 }
 export const semanticAgentQueryHost = {
   runtimeIdentity: compiledRuntimeIdentity,
   connect: (...args: Parameters<typeof ensureSemanticEndpoint>) => ensureSemanticEndpoint(...args),
   context: compileSemanticContextKnowledge,
+  prestartContext: (config: RuntimeConfig) => prestartContextBriefNativeReadWorkers(config.agentContextHome),
 };
 
 const executeSemanticAgentQueryWith = Effect.fn('semantic.agentQueryWith')(function* <ContextR>(
@@ -175,6 +198,11 @@ const executeSemanticAgentQueryWith = Effect.fn('semantic.agentQueryWith')(funct
   });
   if (request.cursor && request.cursor.query !== query)
     return fail('stale', 'Continuation belongs to a different query, configuration or runtime');
+  // Only a knowledge request reads the context brief; its worker loads while the provider answers.
+  const contextWorkers =
+    contextQuery && typeof request.view !== 'object' && services.context && services.prestartContext
+      ? yield* services.prestartContext(config).pipe(Effect.orElseSucceed(() => undefined))
+      : undefined;
   const endpoint = yield* services.connect({
     enabled: true,
     dataHome: selected.home,
@@ -373,6 +401,9 @@ const executeSemanticAgentQueryWith = Effect.fn('semantic.agentQueryWith')(funct
             result.evidence,
             target,
           ).pipe(
+            contextWorkers === undefined
+              ? effect => effect
+              : Effect.provideService(ContextBriefNativeReadWorkers, contextWorkers),
             Effect.orElseSucceed((): SemanticContextKnowledgeV1 => ({
               scope: 'document',
               binding: null,
@@ -436,6 +467,12 @@ export const runSemanticAgentQueryWith = <ContextR = never>(
   input: unknown,
 ) =>
   executeSemanticAgentQueryWith(services, config, input).pipe(
+    // The scope owns a prestarted context worker; a worker whose exit cannot be confirmed makes the query unavailable.
+    Effect.scoped,
+    Effect.catchCauseIf(
+      cause => hasReadCleanupUnconfirmed(cause) && !Cause.hasInterrupts(cause),
+      () => Effect.fail(LspFault.make({code: 'prerequisite'})),
+    ),
     Effect.timeoutOption(Schema.is(SemanticAgentQuery)(input) ? (input.milliseconds ?? 10000) : 45000),
     Effect.map(result => (result._tag === 'None' ? fail('timeout', 'Semantic query deadline expired') : result.value)),
     Effect.catch(error =>

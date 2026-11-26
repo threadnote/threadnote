@@ -33,6 +33,8 @@ import {
   ContextBriefNativeReadFailed,
   encodeContextBriefScopedReadyProgress,
   withNativeContextBriefReadSources,
+  ContextBriefNativeReadWorkers,
+  prestartContextBriefNativeReadWorkers,
   type ContextBriefNativeReadRequest,
 } from '../../src/context_brief/native_read_boundary.js';
 import {nativeContextReadCommands} from '../../src/context_brief/native_read_worker.js';
@@ -845,6 +847,57 @@ describe('whole native Context Brief read boundary', () => {
       // Each request had its own process. One spare never served; the scope stopped it if it had started at all.
       expect(EffectArray.map(workers, worker => worker.served).sort()).toEqual([0, 1, 1]);
       expect(EffectArray.every(workers, worker => worker.served === 1 || !worker.started || worker.stopped)).toBe(true);
+    }).pipe(Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}), provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('a prestarted executor loads its worker before the brief and serves the first read', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const command = yield* CommandExecutor;
+      const decode = Schema.decodeUnknownEffect(Schema.fromJsonString(contextBriefNativeReadRequestSchema));
+      const workers: {served: number}[] = [];
+      const fake = {
+        ...command,
+        execute: (_executable: string, _args: readonly string[], options?: CommandOptions) => {
+          const worker = {served: 0};
+          workers.push(worker);
+          return Effect.gen(function* () {
+            const request = yield* decode(new TextDecoder().decode(yield* requestInput(options))).pipe(Effect.orDie);
+            worker.served += 1;
+            const reply = {
+              protocol: 1,
+              operation: 'graph',
+              binding: contextBriefNativeReadBinding(request),
+              commandsJoined: true,
+              ok: false,
+              failure: 'worker-failed',
+            };
+            return {exitCode: 0, stdout: JSON.stringify(reply) + '\n', stderr: ''};
+          });
+        },
+      };
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const shared = yield* prestartContextBriefNativeReadWorkers(f.config.agentContextHome).pipe(
+            Effect.provideService(CommandExecutor, fake),
+          );
+          // Started before any brief exists: the worker loads while the caller does other work.
+          expect(workers).toEqual([{served: 0}]);
+          const native = yield* withNativeContextBriefReadSources(f.config, sources).pipe(
+            Effect.provideService(ContextBriefNativeReadWorkers, shared!),
+          );
+          const plan = planContextBrief({
+            scope: {kind: 'repository', callerCwd: f.repo},
+            mode: 'locate',
+            task: 'answer',
+          });
+          yield* native
+            .graphEvidence(plan.graph, {remaining: 2, primaryRemaining: 17, deadline: yield* makeReadDeadline(5000)})
+            .pipe(Effect.flip);
+        }),
+      );
+      // The first read used the prestarted worker and started one new spare.
+      expect(workers).toEqual([{served: 1}, {served: 0}]);
     }).pipe(Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}), provideTestLayer(ApplicationLayer)),
   );
 

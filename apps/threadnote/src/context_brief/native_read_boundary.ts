@@ -1,6 +1,7 @@
 import {
   Array as EffectArray,
   Cause,
+  Context,
   Deferred,
   Effect,
   Exit,
@@ -596,7 +597,10 @@ export function contextBriefNativeReadBinding(request: ContextBriefNativeReadReq
  * The request deadline still starts at the request, and a process never serves two requests. The scope stops an
  * unused spare and checks the owned exit of every worker it started.
  */
-const makeNativeReadExecutor = Effect.fn('contextBrief.makeNativeReadExecutor')(function* (home: string) {
+const makeNativeReadExecutor = Effect.fn('contextBrief.makeNativeReadExecutor')(function* (
+  home: string,
+  eager = false,
+) {
   const command = yield* CommandExecutor;
   const system = yield* SystemInfo;
   const scope = yield* Effect.scope;
@@ -644,7 +648,8 @@ const makeNativeReadExecutor = Effect.fn('contextBrief.makeNativeReadExecutor')(
           : Effect.void;
       }),
     );
-  let spare: Worker | undefined;
+  // An eager executor starts its spare at once, so a caller can load it before the brief's deadline starts.
+  let spare: Worker | undefined = eager ? yield* prestart : undefined;
   yield* Scope.addFinalizer(
     scope,
     Effect.suspend(() => {
@@ -743,6 +748,24 @@ const makeNativeReadExecutor = Effect.fn('contextBrief.makeNativeReadExecutor')(
     });
 });
 
+type NativeReadExecute = Effect.Success<ReturnType<typeof makeNativeReadExecutor>>;
+/**
+ * A native read executor that a caller started before the brief, in its own scope, for one agent home. A semantic
+ * query starts it before its provider request, so the brief's first read finds a loaded worker.
+ */
+export class ContextBriefNativeReadWorkers extends Context.Service<
+  ContextBriefNativeReadWorkers,
+  {readonly home: string; readonly execute: NativeReadExecute}
+>()('@threadnote/threadnote/context_brief/native_read_boundary/ContextBriefNativeReadWorkers') {}
+
+/** Start one native read worker for `home` in the caller's scope; none without ready-read worker admission. */
+export const prestartContextBriefNativeReadWorkers = Effect.fn('contextBrief.prestartNativeReadWorkers')(function* (
+  home: string,
+) {
+  if (Option.isNone(yield* Effect.serviceOption(ReadyRecallReadWorkerAdmission))) return undefined;
+  return ContextBriefNativeReadWorkers.of({home, execute: yield* makeNativeReadExecutor(home, true)});
+});
+
 const requireRemaining = Effect.fn('contextBrief.requireNativeRemaining')(function* (deadline?: ReadDeadline) {
   if (deadline === undefined) return yield* ReadDeadlineExceeded.make({});
   const remainingMilliseconds = yield* readDeadlineRemaining(deadline, CLEANUP_AND_DECODE_RESERVE_MILLISECONDS);
@@ -767,7 +790,11 @@ export const withNativeContextBriefReadSources = Effect.fn('contextBrief.withNat
 ) {
   if (Option.isNone(yield* Effect.serviceOption(ReadyRecallReadWorkerAdmission))) return sources;
   const safeConfig = yield* Schema.decodeEffect(runtimeConfigSchema)(config);
-  const execute = yield* makeNativeReadExecutor(safeConfig.agentContextHome);
+  const shared = yield* Effect.serviceOption(ContextBriefNativeReadWorkers);
+  const execute =
+    Option.isSome(shared) && shared.value.home === safeConfig.agentContextHome
+      ? shared.value.execute
+      : yield* makeNativeReadExecutor(safeConfig.agentContextHome);
   return {
     ...sources,
     graphEvidence: (plan, budget) =>

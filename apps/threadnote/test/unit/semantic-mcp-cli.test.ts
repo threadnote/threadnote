@@ -61,7 +61,10 @@ import {makeSemanticAgentDiskQueries} from '../../src/semantic/agent_query_store
 import type {SemanticSession} from '../../src/semantic/provider.js';
 import {ReadyRecallReadWorkerAdmission} from '../../src/recall/ready_read_boundary.js';
 import {loadRecallIndexData} from '@threadnote/recall/index';
-import {contextBriefNativeReadResponseSchema} from '../../src/context_brief/native_read_boundary.js';
+import {
+  contextBriefNativeReadResponseSchema,
+  prestartContextBriefNativeReadWorkers,
+} from '../../src/context_brief/native_read_boundary.js';
 import {CONTEXT_BRIEF_NATIVE_READ_WORKER_ARGUMENT} from '../../src/worker_protocol.js';
 import {createNativeTypeScriptTestSession, native} from '@threadnote/graph/test/helpers/native-typescript-session';
 import {isNativeTypeScriptSource, NativeTypeScriptUnavailable} from '@threadnote/graph/typescript_runtime';
@@ -605,6 +608,12 @@ const memoryContextFixture = Effect.gen(function* () {
   const host: SemanticAgentQueryHost<Effect.Services<ReturnType<typeof compileSemanticContextKnowledge>>> = {
     runtimeIdentity: Effect.succeed(sha256HexSync('stable-provider-runtime')),
     context,
+    // The production prestart, with the same worker entrypoint and observed executor as the context compiler.
+    prestartContext: currentConfig =>
+      prestartContextBriefNativeReadWorkers(currentConfig.agentContextHome).pipe(
+        Effect.provideService(SystemInfo, contextSystem),
+        Effect.provideService(CommandExecutor, observedCommand),
+      ),
     connect: () =>
       Effect.succeed({
         request: body =>
