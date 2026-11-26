@@ -573,7 +573,8 @@ export function cacheContentBatch(options: {
                   }),
                 {concurrency: 1},
               );
-            // Native TypeScript groups run only on native lanes; native lanes then help with the general groups.
+            // Native TypeScript groups run only on native lanes, and general groups only on general lanes, so a native
+            // lane holds the scarce native slot only for native work. A role without slots hands its groups to the other.
             const nativeGroup = (group: ExtractionReuseGroup) =>
               EffectArray.some(group.files, file => isNativeTypeScriptSource(file.path));
             const nativeGroups = EffectArray.filter(groupWindow, nativeGroup);
@@ -593,10 +594,21 @@ export function cacheContentBatch(options: {
                 }
                 return drained;
               });
-            const nativeLanes = Math.min(options.parserPool.nativeCapacity, groupWindow.length);
+            const reportedNative = options.parserPool.nativeCapacity;
+            const nativeCapacity = Number.isSafeInteger(reportedNative)
+              ? Math.max(0, Math.min(parserCapacity, reportedNative))
+              : 0;
+            const generalCapacity = parserCapacity - nativeCapacity;
+            const takeNativeFirst = () => takeNativeGroup() ?? takeGeneralGroup();
+            const takeNativeLane = generalCapacity === 0 ? takeNativeFirst : takeNativeGroup;
+            const takeGeneralLane = nativeCapacity === 0 ? takeNativeFirst : takeGeneralGroup;
+            const nativeLanes = Math.min(
+              nativeCapacity,
+              generalCapacity === 0 ? groupWindow.length : nativeGroups.length,
+            );
             const generalLanes = Math.min(
-              options.parserPool.capacity - options.parserPool.nativeCapacity,
-              generalGroups.length,
+              generalCapacity,
+              nativeCapacity === 0 ? groupWindow.length : generalGroups.length,
             );
             const groupedResults = (yield* Effect.forEach(
               [
@@ -610,7 +622,7 @@ export function cacheContentBatch(options: {
                   extract =>
                     drainGroups(
                       (file, _threadnoteHome) => extract(file),
-                      parserLane === 'native' ? () => takeNativeGroup() ?? takeGeneralGroup() : takeGeneralGroup,
+                      parserLane === 'native' ? takeNativeLane : takeGeneralLane,
                     ),
                   parserLane,
                 ),

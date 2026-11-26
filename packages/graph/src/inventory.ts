@@ -1378,6 +1378,10 @@ const readCommittedFiles = Effect.fn('codeGraph.readCommittedFiles')(function* (
     orderedNeedsContent,
     entry => entry.parse && isNativeTypeScriptSource(entry.path),
   );
+  const parserWorkGeneral = EffectArray.some(
+    orderedNeedsContent,
+    entry => entry.parse && !isNativeTypeScriptSource(entry.path),
+  );
   let parserWorkPrepared = false;
   for (let offset = 0; offset < metadataOnlyContent.length; offset += CODE_GRAPH_CAT_FILE_BATCH_ENTRIES) {
     const batch = metadataOnlyContent.slice(offset, offset + CODE_GRAPH_CAT_FILE_BATCH_ENTRIES);
@@ -1438,7 +1442,10 @@ const readCommittedFiles = Effect.fn('codeGraph.readCommittedFiles')(function* (
         ? Effect.suspend(() => {
             parserWorkPrepared = true;
             return (
-              onParserWorkPlanned?.(parserWorkFileCount, {nativeTypeScript: parserWorkNativeTypeScript}) ?? Effect.void
+              onParserWorkPlanned?.(parserWorkFileCount, {
+                general: parserWorkGeneral,
+                nativeTypeScript: parserWorkNativeTypeScript,
+              }) ?? Effect.void
             );
           })
         : Effect.void;

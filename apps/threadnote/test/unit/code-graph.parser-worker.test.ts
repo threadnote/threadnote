@@ -973,6 +973,63 @@ describe('code graph parser worker pool', () => {
     }).pipe(provideTestLayer(parserLayer({capacity: 4, spawnWorker: spawn})), Effect.scoped);
   });
 
+  it.effect.each([
+    {general: false, nativeTypeScript: true, native: 1, total: 1},
+    {general: true, nativeTypeScript: false, native: 0, total: 3},
+    {general: true, nativeTypeScript: true, native: 1, total: 4},
+  ])('warms only the lanes that planned work runs: %o', ({general, nativeTypeScript, native, total}) => {
+    const launches: ParserWorkerSpawnOptions[] = [];
+    const spawn: ParserWorkerSpawner = options => {
+      launches.push(options);
+      return echoProcess();
+    };
+    return Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-parser-worker-lane-warm-'});
+      const pool = yield* CodeGraphParserPool;
+      yield* warmPlannedParserCapacity(pool, home, 8, {general, nativeTypeScript});
+      expect(launches).toHaveLength(total);
+      expect(EffectArray.filter(launches, launch => launch.nativeTypeScript === true)).toHaveLength(native);
+    }).pipe(provideTestLayer(parserLayer({capacity: 4, spawnWorker: spawn})), Effect.scoped);
+  });
+
+  it.effect('hands a TypeScript file in a general lane to the native slot', () => {
+    const launched: {readonly options: ParserWorkerSpawnOptions; readonly worker: ScriptedParserWorkerProcess}[] = [];
+    const spawn: ParserWorkerSpawner = options => {
+      const worker = echoProcess();
+      launched.push({options, worker});
+      return worker;
+    };
+    return Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-parser-worker-general-fallback-'});
+      const pool = yield* CodeGraphParserPool;
+      const json = inventoryFile('src/general.json', '{"general":true}', 'json');
+      const typescript = inventoryFile('src/fallback.ts', 'export const fallback = true;');
+      const results = yield* pool.withParserSlot(
+        home,
+        [json, typescript],
+        extract => Effect.forEach([json, typescript], extract),
+        'general',
+      );
+
+      expect(EffectArray.every(results, result => !result.degraded)).toBe(true);
+      const writes = EffectArray.flatMap(launched, launch =>
+        EffectArray.map(launch.worker.writes, write => ({
+          native: launch.options.nativeTypeScript === true,
+          path: write.file.path,
+        })),
+      );
+      expect(writes).toEqual(
+        expect.arrayContaining([
+          {native: false, path: 'src/general.json'},
+          {native: true, path: 'src/fallback.ts'},
+        ]),
+      );
+      expect(writes).toHaveLength(2);
+    }).pipe(provideTestLayer(parserLayer({capacity: 4, spawnWorker: spawn})), Effect.scoped);
+  });
+
   it.effect('warms every idle slot before extraction and reuses the workers', () => {
     const processes: ScriptedParserWorkerProcess[] = [];
     const spawn: ParserWorkerSpawner = () => {

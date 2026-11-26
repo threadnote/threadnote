@@ -292,16 +292,22 @@ describe('code graph parser cache coalescer', () => {
         });
       const routed = yield* run(1);
       const allNative = yield* run(4);
+      // A pool without native slots still extracts every group, on general lanes.
+      const noNative = yield* run(0);
       const paths = EffectArray.map(files, file => file.path).sort(compareCodeUnits);
-      expect(EffectArray.map(routed.lanes, entry => entry.path).sort(compareCodeUnits)).toEqual(paths);
+      for (const harness of [routed, allNative, noNative])
+        expect(EffectArray.map(harness.lanes, entry => entry.path).sort(compareCodeUnits)).toEqual(paths);
+      // The native lane holds the native slot for TypeScript only; general slots take every other group.
       for (const entry of routed.lanes)
-        if (EffectString.endsWith('.ts')(entry.path)) expect(entry).toEqual({path: entry.path, lane: 'native'});
-      expect(EffectArray.some(routed.lanes, entry => entry.lane === 'general')).toBe(true);
+        expect(entry.lane).toBe(EffectString.endsWith('.ts')(entry.path) ? 'native' : 'general');
+      expect(EffectArray.every(noNative.lanes, entry => entry.lane === 'general')).toBe(true);
       expect(routed.openLanes.nativePeak).toBe(1);
-      expect(cacheCallIdentity(routed.calls)).toEqual(cacheCallIdentity(allNative.calls));
-      expect(EffectArray.map(routed.calls, call => call.facts)).toEqual(
-        EffectArray.map(allNative.calls, call => call.facts),
-      );
+      for (const harness of [allNative, noNative]) {
+        expect(cacheCallIdentity(routed.calls)).toEqual(cacheCallIdentity(harness.calls));
+        expect(EffectArray.map(routed.calls, call => call.facts)).toEqual(
+          EffectArray.map(harness.calls, call => call.facts),
+        );
+      }
     }),
   );
 

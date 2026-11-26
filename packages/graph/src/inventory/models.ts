@@ -92,7 +92,7 @@ export interface CodeGraphInventoryOptions {
   /** Start idle parser processes once the total uncached parser-bound input count is known, alongside the first read. */
   readonly onParserWorkPlanned?: (
     fileCount: number,
-    evidence: {readonly nativeTypeScript: boolean},
+    evidence: {readonly nativeTypeScript: boolean; readonly general: boolean},
   ) => Effect.Effect<void, unknown>;
   readonly onProgress?: (progress: CodeGraphProgress) => Effect.Effect<void, unknown>;
 }

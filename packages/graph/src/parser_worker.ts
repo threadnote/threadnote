@@ -254,6 +254,11 @@ export class ParserWorkerConfigurationError extends Schema.TaggedError<
 
 /** A native lane may run a native TypeScript compiler pair; a general lane never does. */
 export type CodeGraphParserLane = 'native' | 'general';
+/** Which kinds of planned parser work exist: native TypeScript, and every other parser-bound language. */
+export interface CodeGraphParserLanePlan {
+  readonly native: boolean;
+  readonly general: boolean;
+}
 
 export interface CodeGraphParserPoolShape {
   readonly capacity: number;
@@ -275,6 +280,8 @@ export interface CodeGraphParserPoolShape {
     threadnoteHome: string,
     requestedSlots?: number,
     nativeTypeScript?: boolean,
+    /** Warm only the slots of the lanes that planned work runs; every slot when omitted. */
+    lanes?: CodeGraphParserLanePlan,
   ) => Effect.Effect<void, ParserWorkerConfigurationError>;
   readonly trimIdle: Effect.Effect<void, never>;
   /**
@@ -288,14 +295,15 @@ export interface CodeGraphParserPoolShape {
   ) => Effect.Effect<CodeGraphSourceSequenceOutcome, never>;
 }
 
-/** Prewarm the planned capacity with the kind of worker the inventory needs, so TypeScript work reuses it. */
+/** Prewarm the planned lanes (every slot without evidence) with the worker kind the inventory needs. */
 export function warmPlannedParserCapacity(
   pool: CodeGraphParserPoolShape,
   threadnoteHome: string,
   fileCount: number,
-  nativeTypeScript = false,
+  work?: {readonly nativeTypeScript: boolean; readonly general: boolean},
 ): Effect.Effect<void, ParserWorkerConfigurationError> {
-  return fileCount <= pool.capacity ? Effect.void : pool.warm(threadnoteHome, fileCount, nativeTypeScript);
+  const lanes = work && {native: work.nativeTypeScript, general: work.general};
+  return fileCount <= pool.capacity ? Effect.void : pool.warm(threadnoteHome, fileCount, work?.nativeTypeScript, lanes);
 }
 
 class ParserWorkerSessionUseError<E> {
@@ -386,6 +394,11 @@ export function codeGraphParserPoolLayer(
         // Native and general slots hold separate global lock ranges, so the cross-process total stays at `capacity`.
         const globalSlot = <A, E, R>(slot: ParserWorkerSlot, threadnoteHome: string, effect: Effect.Effect<A, E, R>) =>
           withGlobalParserSlot(crypto, fs, path, system, threadnoteHome, lockRange(slot), slot.index, effect);
+        // A worker idle in a lane that planned work never runs only adds resident memory. Native lanes take general
+        // work only without general slots, as the materializer schedules them.
+        const runsPlannedLane = (slot: ParserWorkerSlot, lanes: CodeGraphParserLanePlan | undefined) =>
+          lanes === undefined ||
+          (slot.role === 'native' ? lanes.native || (lanes.general && generalCapacity === 0) : lanes.general);
         const lockRange = (slot: ParserWorkerSlot) =>
           slot.role === 'native' ? {first: 0, count: nativeCapacity} : {first: nativeCapacity, count: generalCapacity};
         const degradedResult = (file: CodeGraphInventoryFile, cause: unknown): CodeGraphParserResult => {
@@ -526,13 +539,16 @@ export function codeGraphParserPoolLayer(
                   )
                 : use(extractWithoutSlot);
             },
-            warm: (threadnoteHome, requestedSlots = capacity, nativeTypeScript = false) =>
+            warm: (threadnoteHome, requestedSlots = capacity, nativeTypeScript = false, lanes) =>
               Number.isSafeInteger(requestedSlots) && requestedSlots >= 0
                 ? Effect.acquireUseRelease(
                     clearIdle,
                     idleSlots =>
                       Effect.forEach(
-                        idleSlots.slice(0, Math.min(capacity, requestedSlots)),
+                        EffectArray.filter(idleSlots, slot => runsPlannedLane(slot, lanes)).slice(
+                          0,
+                          Math.min(capacity, requestedSlots),
+                        ),
                         slot =>
                           globalSlot(
                             slot,
