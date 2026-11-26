@@ -1207,7 +1207,8 @@ effectIt.effect.skipIf(!supported)(
         expect(refs).toEqual([]);
       }),
     ).pipe(Effect.provide(layer)),
-  10000,
+  // Real native writer handoffs across two homes take 4-10 s on the macOS Intel runner.
+  30000,
 );
 
 // Exact owning Windows private store→Admission→retained source mutation→lost-ack recovery boundary.
