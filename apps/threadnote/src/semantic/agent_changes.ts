@@ -361,6 +361,7 @@ export const makeSemanticAgentChanges = Effect.fn('semantic.agentChanges')(funct
     buffer: Observation | undefined,
     enter: (phase: ServiceTimeoutPhase) => Effect.Effect<void>,
     publication: {published: boolean; expected?: unknown; assertCurrentSync?: () => void},
+    currentness?: {current?: Observation},
   ) =>
     Effect.gen(function* () {
       if (request.worktree !== options.worktree) return changeRefusal('conflict', 'Different authenticated worktree');
@@ -676,6 +677,7 @@ export const makeSemanticAgentChanges = Effect.fn('semantic.agentChanges')(funct
           .pipe(Effect.orElseSucceed(() => undefined));
         if (!current || observationKey(current) !== observationKey(proposal.evidence.observation))
           return changeRefusal('stale', 'Initiating view changed before publication');
+        if (currentness) currentness.current = current;
         const publicationTime = yield* Clock.currentTimeMillis;
         if (publicationTime >= retained.expiresAt || publicationTime < retained.createdAt)
           return changeRefusal('stale', 'Proposal lifetime expired before publication');
@@ -808,14 +810,15 @@ export const makeSemanticAgentChanges = Effect.fn('semantic.agentChanges')(funct
         : base;
     });
   return {
-    execute: (request: SemanticAgentEndpointChange, buffer?: Observation) =>
+    /** `currentness.current` receives the source-currentness observation this preparation already verified. */
+    execute: (request: SemanticAgentEndpointChange, buffer?: Observation, currentness?: {current?: Observation}) =>
       Effect.scoped(
         Effect.gen(function* () {
           const publication: {published: boolean; expected?: unknown; assertCurrentSync?: () => void} = {
             published: false,
           };
           return yield* observeServiceTimeout(request.milliseconds, enter =>
-            execute(request, buffer, enter, publication).pipe(
+            execute(request, buffer, enter, publication, currentness).pipe(
               Effect.tap(() => enter('publication').pipe(Effect.andThen(verifyScope(request)))),
             ),
           ).pipe(

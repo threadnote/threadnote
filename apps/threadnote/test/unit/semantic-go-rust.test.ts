@@ -2539,10 +2539,7 @@ effectIt.effect('composes owned Go rename source closure and publication through
       'textDocument/rename',
       'verify:candidate',
       'verify:configuration',
-      'verify:configuration',
-      'verify:candidate',
-      'verify:candidate',
-      'verify:configuration',
+      // One source-currentness observation; the endpoint reuses it instead of observing a third time.
       'verify:configuration',
       'verify:candidate',
       'verify:candidate',

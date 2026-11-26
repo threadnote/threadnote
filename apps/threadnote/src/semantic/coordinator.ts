@@ -1328,10 +1328,13 @@ export const serveSemanticEndpoint = Effect.fn('semantic.serveEndpoint')(functio
               selector.documentVersion !== before.documentVersion
             )
               return yield* SemanticSessionFault.make({reason: 'conflict'});
-            const result = yield* agentChanges.execute(body.request, before);
+            const observed: {current?: Observation} = {};
+            const result = yield* agentChanges.execute(body.request, before, observed);
             yield* checkPublic(selector.handle, body.request.profile);
-            // Closure may advance the shared epoch without changing the owned document/version.
-            const refreshed = yield* coordinator.observe!(before, body.request.milliseconds);
+            // Closure may advance the shared epoch without changing the owned document/version. The preparation
+            // already observed the view after its closure; each observation runs every host check, so observe
+            // again only when the preparation stopped before that point.
+            const refreshed = observed.current ?? (yield* coordinator.observe!(before, body.request.milliseconds));
             if (
               refreshed &&
               refreshed.content === before.content &&
