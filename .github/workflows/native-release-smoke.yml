@@ -50,6 +50,15 @@ jobs:
           SEMANTIC_SOURCE_COMMIT: ${{ github.sha }}
         run: |
           New-Item -ItemType Directory -Force .context/semantic-platform | Out-Null
+          # Account-home identity evidence for the cold setup check: SIDs and ACL ownership only, no file contents.
+          $sid = [System.Security.Principal.SecurityIdentifier]
+          $accountHome = [ordered]@{
+            user = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            profile = $env:USERPROFILE
+            resolvedProfile = (Get-Item -LiteralPath $env:USERPROFILE).FullName
+            owners = @($env:USERPROFILE, (Split-Path $env:USERPROFILE), ([System.IO.Path]::GetPathRoot($env:USERPROFILE))) | ForEach-Object { [ordered]@{ path = $_; owner = (Get-Acl -LiteralPath $_).GetOwner($sid).Value; protected = (Get-Acl -LiteralPath $_).AreAccessRulesProtected } }
+          }
+          $accountHome | ConvertTo-Json -Depth 4 | Tee-Object -FilePath .context/semantic-platform/windows-account-home.json
           bun --eval 'import {mkdirSync,readFileSync,writeFileSync} from "node:fs"; import {createHash} from "node:crypto"; import {release} from "node:os";
           const paths=["packages/platform/src/system.ts","packages/platform/src/writer-system/provider.ts","packages/platform/src/writer-system/provider-windows.ts","packages/platform/src/writer-system/windows-native.ts","packages/platform/src/writer-system/windows-files.ts","packages/platform/src/writer_system.ts","packages/platform/src/writer-system/windows-writer.ts","packages/platform/src/writer-system/writer-transaction.ts","packages/platform/test/writer-system/windows-writer.test.ts","packages/platform/test/writer-system/provider-process.test.ts","packages/platform/test/writer-system/windows-native.test.ts","apps/threadnote/test/unit/semantic-writer-process.test.ts",".github/workflows/native-release-smoke.yml"];
           writeFileSync(".context/semantic-platform/windows-source.json",JSON.stringify({version:1,scope:"native-component-observation",sourceCommit:Bun.env.SEMANTIC_SOURCE_COMMIT,os:process.platform,osBuild:release(),architecture:process.arch,bun:Bun.version,productionQualified:false,sourceHashes:Object.fromEntries(paths.map(path=>[path,createHash("sha256").update(readFileSync(path)).digest("hex")]))}));'
