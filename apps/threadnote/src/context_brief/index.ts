@@ -10,10 +10,15 @@ import {
 } from '@threadnote/context/compiler';
 import type {Evidence} from '@threadnote/semantic/contracts';
 export {compileContextBriefWith, type ContextBriefCompilerDependencies} from '@threadnote/context/compiler';
-import {Clock, DateTime, Effect, Exit, Schema} from 'effect';
+import {Cause, Clock, DateTime, Effect, Exit, Schema} from 'effect';
 import {CodeGraphScopeRoutingError} from '@threadnote/graph/scope/routing';
 import {withReadyRecallReadBoundary} from '../recall/ready_read_boundary.js';
-import {ReadDeadlineExceeded, isReadCleanupUnconfirmed, type ReadDeadline} from '@threadnote/platform/read_deadline';
+import {
+  ReadDeadlineExceeded,
+  hasReadCleanupUnconfirmed,
+  isReadCleanupUnconfirmed,
+  type ReadDeadline,
+} from '@threadnote/platform/read_deadline';
 import {RecallReadyReadUnavailable} from '@threadnote/recall/index';
 import {
   ContextBriefNativeReadFailed,
@@ -441,12 +446,12 @@ const compileContextBriefRuntime = Effect.fn('contextBrief.compileRuntime')(func
       },
     );
   });
-  // A spare native read worker whose exit cannot be confirmed fails the brief as a typed read cleanup failure.
+  // A native read worker whose exit cannot be confirmed fails the brief as a typed read cleanup failure, which takes
+  // precedence over any other failure of the same brief. An interrupted brief keeps its cause unchanged.
   const scopedCompilation = Effect.scoped(compilation).pipe(
-    Effect.catchDefect(defect =>
-      isReadCleanupUnconfirmed(defect)
-        ? Effect.fail(ContextBriefNativeReadFailed.make({reason: 'cleanup-unconfirmed'}))
-        : Effect.die(defect),
+    Effect.catchCauseIf(
+      cause => hasReadCleanupUnconfirmed(cause) && !Cause.hasInterrupts(cause),
+      () => Effect.fail(ContextBriefNativeReadFailed.make({reason: 'cleanup-unconfirmed'})),
     ),
   );
   return yield* withReadyRecallReadBoundary(scopedCompilation, {
