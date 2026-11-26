@@ -130,7 +130,7 @@ jobs:
           restore-only: 'true'
           cache-key: ${{ inputs.native-asset-key }}
       - name: Semantic native ownership and safety components
-        if: ${{ !endsWith(inputs.target, '-musl') }}
+        if: ${{ !endsWith(inputs.target, '-musl') && runner.os != 'Windows' }}
         run: >-
           bun --bun vitest run
           packages/platform/test/system-stable-read.test.ts
@@ -143,6 +143,16 @@ jobs:
           apps/threadnote/test/unit/semantic-python.test.ts
           apps/threadnote/test/unit/semantic-go-rust.test.ts
           apps/threadnote/test/unit/semantic-java-preparation.test.ts
+          --reporter=default --reporter=json --outputFile=.context/semantic-platform/components.json
+      - name: Semantic native platform components
+        # Windows semantic provider cells are not qualified, and the application semantic suites assume POSIX paths;
+        # Windows runs only the platform ownership and safety tests until Windows semantic support is planned.
+        if: runner.os == 'Windows'
+        run: >-
+          bun --bun vitest run
+          packages/platform/test/system-stable-read.test.ts
+          packages/platform/test/writer-system/linux-acl.test.ts
+          packages/platform/test/writer-system/provider-process.test.ts
           --reporter=default --reporter=json --outputFile=.context/semantic-platform/components.json
       - name: Darwin signed native TypeScript identity components
         # Bazel shards run on Linux only. These need macOS (codesign, clang, csops) and the restored prepared asset,
