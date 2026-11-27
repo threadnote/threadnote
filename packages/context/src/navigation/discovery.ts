@@ -10,7 +10,12 @@ import type {CodeGraphQueryResult, RepositoryIdentity} from '@threadnote/graph/t
 import {retrieveNavigationSourceProofs} from './source_facts.js';
 import {structuralNavigationInput, type NavigationSourceProofs} from './structural.js';
 import {projectNavigationAnswer} from './project.js';
-import type {NavigationScope} from './model.js';
+import type {NavigationAnswerV1, NavigationScope} from './model.js';
+import {
+  invalidatedNavigationEffects,
+  navigationEffectsDelta,
+  navigationEffectsFollowUpAnchors,
+} from './continuation.js';
 
 export interface TaskNavigationRequest extends TaskDiscoveryRequest {
   readonly identity: RepositoryIdentity;
@@ -161,4 +166,25 @@ export const retrieveTaskNavigationAnswer = Effect.fn('navigation.retrieveTaskAn
       total: milliseconds(wholeStarted, completed),
     },
   };
+});
+
+export interface NavigationEffectsFollowUpRequest extends TaskNavigationRequest {
+  /** The answer the warm agent already holds; its effect files bound the follow-up acquisition. */
+  readonly previous: NavigationAnswerV1;
+  /** Required: a write-boundary follow-up re-reads known anchors and never repeats task discovery. */
+  readonly anchoredResult: CodeGraphQueryResult;
+}
+
+/**
+ * Warm write-boundary follow-up. Only the previous answer's effect files are re-acquired: other route nodes,
+ * memory and projections are not reloaded. The result is the effects delta or a truthful invalidation.
+ */
+export const retrieveNavigationEffectsFollowUp = Effect.fn('navigation.retrieveEffectsFollowUp')(function* (
+  input: NavigationEffectsFollowUpRequest,
+) {
+  const anchoredResult = navigationEffectsFollowUpAnchors(input.previous, input.anchoredResult);
+  if (anchoredResult === undefined)
+    return {delta: invalidatedNavigationEffects('navigation-follow-up-unresolved'), answer: undefined};
+  const followUp = yield* retrieveTaskNavigationAnswer({...input, anchoredResult});
+  return {delta: navigationEffectsDelta(input.previous, followUp.structural.answer), answer: followUp};
 });

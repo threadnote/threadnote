@@ -19,6 +19,7 @@ import {createGenericTreeSitterLanguagePack} from './factory.js';
 import {genericReferenceLookupTiers, genericSymbolLookupKeys, simpleImport} from './lookup.js';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
+import {collectPythonNavigationFacts} from '../python/navigation_facts.js';
 
 const SOURCE_CAPABILITIES = new Set(['calls', 'declarations', 'imports', 'inheritance'] as const);
 
@@ -49,8 +50,9 @@ export const pythonLanguagePack = createGenericTreeSitterLanguagePack({
         ? Option.getOrElse(pythonImport(node.text), () => emptyImport()).module
         : node.text,
     resolutionDomain: 'python',
+    navigationFacts: collectPythonNavigationFacts,
   }),
-  definitionVersion: 'python-structural-v1',
+  definitionVersion: 'python-structural-v2-open-write-navigation-proofs',
   files: [
     {kind: 'extension', language: 'python', role: 'source', value: '.py'},
     {kind: 'extension', language: 'python', role: 'source', value: '.pyi'},

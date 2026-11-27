@@ -5,6 +5,7 @@ import type {ContextBriefSourceExcerptV1} from '../types.js';
 import {assembleNavigationAnswer} from './assemble.js';
 import {
   NAVIGATION_INPUT_LIMITS,
+  navigationSourceId,
   type NavigationCandidate,
   type NavigationInput,
   type NavigationScope,
@@ -86,7 +87,7 @@ export function structuralNavigationInput(request: StructuralNavigationRequest):
   // Module containment does not make every declaration in a file part of a behavioral route.
   const symbols = compatible ? EffectArray.filter(result.nodes, node => node.kind !== 'module') : [];
   const byId = new Map(EffectArray.map(symbols, node => [node.id, node] as const));
-  const sourceId = (node: CodeGraphQueryNode) => JSON.stringify([node.path, node.contentHash]);
+  const sourceId = (node: CodeGraphQueryNode) => navigationSourceId(scope, node.path, node.contentHash);
   const sources = new Map<string, NavigationInput['sources'][number]>();
   for (const node of symbols) {
     const inspected =

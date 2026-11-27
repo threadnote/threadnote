@@ -258,6 +258,10 @@ export function createNavigationFactCollector(
     },
   };
 }
+/** The call edge evidence span: tree-sitter records the callee, the TypeScript extractor the whole call. */
+export function navigationProofEdgeSpan(proof: CodeGraphNavigationProof): CodeGraphSpan {
+  return proof.module === 'builtins' ? proof.calleeSpan : proof.callSpan;
+}
 export function closeNavigationFacts(
   facts: CodeGraphNavigationFacts | undefined,
   symbols: readonly CodeGraphSymbol[],
@@ -290,6 +294,7 @@ export function parseNavigationFacts(
   )
     throw new Error('Invalid navigation fact envelope.');
   const proofs = EffectArray.map(object.proofs, item => {
+    const python = Predicate.isObject(item) && item.module === 'builtins';
     const input = record(item, [
       'ownerId',
       'ownerSpan',
@@ -297,32 +302,34 @@ export function parseNavigationFacts(
       'module',
       'imported',
       'local',
-      'importSpan',
+      python ? 'modeSpan' : 'importSpan',
       'callSpan',
       'calleeSpan',
       'targetSpan',
       'guard',
     ]);
     const guard = record(input.guard, ['span', 'branch']);
-    if (
-      input.module !== 'node:fs/promises' ||
-      input.imported !== 'writeFile' ||
-      (guard.branch !== 'then' && guard.branch !== 'else')
-    )
-      throw new Error('Unsupported navigation proof.');
-    const proof: CodeGraphNavigationProof = {
+    if (guard.branch !== 'then' && guard.branch !== 'else') throw new Error('Unsupported navigation proof.');
+    const base = {
       ownerId: text(input.ownerId),
       ownerSpan: parseSpan(input.ownerSpan),
       callEdgeId: text(input.callEdgeId),
-      module: input.module,
-      imported: input.imported,
       local: text(input.local),
-      importSpan: parseSpan(input.importSpan),
       callSpan: parseSpan(input.callSpan),
       calleeSpan: parseSpan(input.calleeSpan),
       targetSpan: parseSpan(input.targetSpan),
       guard: {span: parseSpan(guard.span), branch: guard.branch},
-    };
+    } as const;
+    let proof: CodeGraphNavigationProof;
+    if (python) {
+      if (input.imported !== 'open' || input.local !== 'open') throw new Error('Unsupported navigation proof.');
+      proof = {...base, module: 'builtins', imported: 'open', modeSpan: parseSpan(input.modeSpan)};
+      if (!contains(proof.callSpan, proof.modeSpan)) throw new Error('Navigation proof spans or owner are invalid.');
+    } else {
+      if (input.module !== 'node:fs/promises' || input.imported !== 'writeFile')
+        throw new Error('Unsupported navigation proof.');
+      proof = {...base, module: 'node:fs/promises', imported: 'writeFile', importSpan: parseSpan(input.importSpan)};
+    }
     const owner = EffectArray.findFirst(symbols, symbol => symbol.id === proof.ownerId);
     if (
       owner._tag === 'None' ||
@@ -379,7 +386,7 @@ function contains(outer: CodeGraphSpan, inner: CodeGraphSpan): boolean {
     (inner.endLine < outer.endLine || (inner.endLine === outer.endLine && inner.endColumn <= outer.endColumn))
   );
 }
-function sameSpan(left: CodeGraphSpan, right: CodeGraphSpan): boolean {
+export function sameSpan(left: CodeGraphSpan, right: CodeGraphSpan): boolean {
   return (
     left.line === right.line &&
     left.column === right.column &&

@@ -82,7 +82,8 @@ const retrieveNavigationSourceProofsWithinBudget = Effect.fn('navigation.retriev
   const additionalRanges: ContextBriefSourceRangeCandidateV1[] = [];
   for (const file of facts.files) {
     for (const proof of file.facts?.proofs ?? []) {
-      for (const span of [proof.importSpan, proof.ownerSpan])
+      // A Python mode literal sits inside the owner; a TypeScript import sits outside it.
+      for (const span of proof.module === 'builtins' ? [proof.ownerSpan] : [proof.importSpan, proof.ownerSpan])
         additionalRanges.push({
           path: file.path,
           contentHash: file.contentHash,
@@ -132,7 +133,13 @@ export function navigationProofSpansInspected(
   excerpts: readonly ContextBriefSourceExcerptV1[],
 ): boolean {
   return EffectArray.every(
-    [proof.importSpan, proof.callSpan, proof.calleeSpan, proof.targetSpan, proof.guard.span],
+    [
+      proof.module === 'builtins' ? proof.modeSpan : proof.importSpan,
+      proof.callSpan,
+      proof.calleeSpan,
+      proof.targetSpan,
+      proof.guard.span,
+    ],
     span => EffectArray.some(excerpts, excerpt => containsSpan(excerpt, span)),
   );
 }
