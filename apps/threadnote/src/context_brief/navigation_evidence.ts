@@ -516,7 +516,8 @@ export const acquireSemanticNavigationEvidence = Effect.fn('navigation.acquireSe
   const capabilities = new Map<string, CapabilityStatus>();
   outer: for (const anchor of input.anchors.slice(0, MAXIMUM_ANCHORS))
     for (const operation of input.operations) {
-      const left = yield* available(MAXIMUM_DOCUMENTS);
+      // Keep one closing observation for every document opened so far, and for this one if it is not open yet.
+      const left = yield* available(opening.size + (opening.has(anchor.path) ? 0 : 1));
       if (left === undefined) {
         gaps.add('semantic-deadline-exhausted');
         break outer;

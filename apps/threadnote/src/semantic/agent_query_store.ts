@@ -6,6 +6,7 @@ import {createQuerySnapshot, queryPage, type Continuation, type QuerySnapshot} f
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   semanticAgentQueryKey,
+  semanticProviderNotRunning,
   type SemanticAgentEndpointQuery,
   type SemanticAgentQueryResult,
   type SemanticReadinessSource,
@@ -15,6 +16,7 @@ import type {makeSemanticCoordinator} from './coordinator.js';
 import {readBounded} from './fingerprint.js';
 import {LspFault} from './lsp_transport.js';
 import {SemanticSessionFault, type SemanticLanguage} from './provider.js';
+import {SemanticProviderNotRunning} from './source_evidence.js';
 
 interface RetainedQuery {
   readonly binding: string;
@@ -44,6 +46,7 @@ export const makeSemanticAgentDiskQueries = Effect.fn('semantic.agentDiskQueries
     file: string,
     control?: SemanticStartupControl,
     expectedContent?: string,
+    existingOnly = false,
   ) {
     const project = yield* path.fromFileUrl(new URL(request.project));
     if (
@@ -81,7 +84,7 @@ export const makeSemanticAgentDiskQueries = Effect.fn('semantic.agentDiskQueries
       documentVersion: null,
       projectEpoch: 0,
     };
-    return yield* coordinator.attach(seed, text, request.language, request.environment, control);
+    return yield* coordinator.attach(seed, text, request.language, request.environment, control, existingOnly);
   });
   const query = Effect.fn('semantic.agentDiskQuery')(function* (
     request: SemanticAgentEndpointQuery,
@@ -115,7 +118,12 @@ export const makeSemanticAgentDiskQueries = Effect.fn('semantic.agentDiskQueries
         reason: 'Source is outside this canonical project or uses an unsupported link',
         evidence: null,
       };
-    const attached = buffer ?? (yield* attachDisk(request, file));
+    const attached =
+      buffer ??
+      (yield* attachDisk(request, file, undefined, undefined, request.attachOnly === true).pipe(
+        Effect.catchIf(Schema.is(SemanticProviderNotRunning), () => Effect.succeed(null)),
+      ));
+    if (attached === null) return structuredClone(semanticProviderNotRunning);
     const outcome = yield* coordinator.use(attached.observation, request.milliseconds, api =>
       request.operation === 'diagnostics'
         ? Effect.gen(function* () {

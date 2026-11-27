@@ -394,6 +394,30 @@ describe('semantic navigation acquisition', () => {
     }),
   );
 
+  effectIt.effect('starts the first query inside the 1500 ms navigation sub-deadline', () =>
+    Effect.gen(function* () {
+      const operation = operationDocument();
+      const query = callHierarchy(operation.observation, {outgoing: []});
+      const requested: number[] = [];
+      const evidence = yield* acquireSemanticNavigationEvidence({
+        worktreeUri,
+        anchors: [{candidateId: 'save', path: 'src/operation.ts', position: {line: 4, character: 9}}],
+        operations: ['call-hierarchy'],
+        deadline: yield* makeReadDeadline(1500),
+        ports: {
+          capability: () => Effect.succeed('qualified' as const),
+          query: request => Effect.sync(() => void requested.push(request.milliseconds)).pipe(Effect.as(query.result)),
+          observe: () => Effect.succeed(operation.observation),
+          bind: () => Effect.succeed({binding: null}),
+        },
+      });
+      // One closing observation is reserved for the queried document; the rest of the deadline is the query's.
+      expect(requested).toEqual([1000]);
+      expect(evidence.gaps).not.toContain('semantic-deadline-exhausted');
+      expect(evidence.queries).toHaveLength(1);
+    }),
+  );
+
   effectIt.effect('observes every document again only after all queries and joins', () =>
     Effect.gen(function* () {
       const calls: string[] = [];
@@ -416,10 +440,10 @@ describe('semantic navigation acquisition', () => {
           bind: path => Effect.sync(() => void calls.push(`bind ${path}`)).pipe(Effect.as({binding: null})),
         },
       });
-      // The test clock does not advance: the query keeps three 500 ms closing reservations, and each closing
-      // observation keeps one reservation for every later document.
+      // The test clock does not advance: the query keeps one 500 ms closing reservation for its own document, and
+      // each later observation keeps one reservation for every document opened so far and for itself.
       expect(calls).toEqual([
-        'query 58500',
+        'query 59500',
         'observe src/store.ts 59000',
         'bind src/operation.ts',
         'bind src/store.ts',
