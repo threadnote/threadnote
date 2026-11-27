@@ -20,7 +20,7 @@ import {
   unavailableContextBriefCodeLinkedMemoryEvidence,
 } from '@threadnote/context/memory-evidence';
 import {validateContextBriefMemoryCitations} from '@threadnote/context/citation_validation';
-import {readNavigationEvidence} from '@threadnote/context/navigation/read';
+import {readNavigationEvidenceWithMemory} from './navigation_memory.js';
 import {
   selectVerifiedProcedureEvidence,
   type VerifiedProcedureCoverageGap,
@@ -264,7 +264,7 @@ export const serveContextBriefNativeRead = Effect.fn('contextBrief.serveNativeRe
           ...fields,
           ok: true as const,
           operation: request.operation,
-          value: yield* readNavigationEvidence(request.config, request.request, deadline),
+          value: yield* readNavigationEvidenceWithMemory(request.config, request.request, deadline),
         };
     }
   }).pipe(

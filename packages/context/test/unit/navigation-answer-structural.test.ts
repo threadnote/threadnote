@@ -29,9 +29,7 @@ import * as extractionRuntime from '@threadnote/graph/typescript_runtime';
 import {retrieveNavigationSourceProofs, navigationProofSpansInspected} from '../../src/navigation/source_facts.js';
 import * as sourceEvidence from '../../src/graph/source_evidence.js';
 import {assembleStructuralNavigationAnswer} from '../../src/navigation/structural.js';
-import {projectNavigationAnswer, projectStructuralNavigationAnswer} from '../../src/navigation/project.js';
-import {fromRepositoryQuery} from '../../src/graph/evidence.js';
-import {planContextBrief} from '../../src/planner.js';
+import {projectNavigationAnswer, selectNavigationMemory} from '../../src/navigation/project.js';
 import {selectContextBriefNavigationMemory} from '../../src/memory-evidence.js';
 import type {ContextBriefMemoryCandidateV1, ContextBriefMemoryRetrievalV1} from '../../src/types.js';
 import * as navigationFacts from '@threadnote/graph/query/navigation_facts';
@@ -549,21 +547,23 @@ effectIt.layer(dependencies)('with a physical graph fixture', it => {
                 })),
               })),
             });
-            const composition = {
-              structural,
-              graph: fromRepositoryQuery(f.result),
-              observedAt,
-              memoryProjects,
-              plan: planContextBrief({
-                budgetTokens: 1500,
-                mode: 'brief',
+            // Compose as the navigate lane does: select memory for the actual route, then project both.
+            const compose = (
+              memory: ContextBriefMemoryRetrievalV1,
+              projects: typeof memoryProjects | null = memoryProjects,
+            ) => {
+              const selected = selectNavigationMemory({
+                answer: structural.answer,
+                observation: f.result,
                 task: 'saveNote',
-                scope: {kind: 'repository', callerCwd: f.cwd},
-              }),
-              repositoryIdentityKind: 'local' as const,
+                observedAt,
+                memory,
+                ...(projects === null ? {} : {memoryProjects: projects}),
+                repositoryIdentityKind: 'local',
+              });
+              return projectNavigationAnswer({...structural, answer: selected.answer}, 1500, 'agent', selected.memory);
             };
-            const noMemory = projectStructuralNavigationAnswer(composition, 1500);
-            expect(noMemory).toEqual(projectNavigationAnswer(structural, 1500));
+            const noMemory = projectNavigationAnswer(structural, 1500);
             expect(EffectArray.map(noMemory.structuredContent.roles, role => role[1])).toEqual([
               'supported',
               'supported',
@@ -577,8 +577,8 @@ effectIt.layer(dependencies)('with a physical graph fixture', it => {
               [file, 'fresh', 'user_approved', 'approved'],
             ] as const) {
               const memory = rawMemory([applicable, ...excluded]);
-              const immutable = JSON.stringify({composition, memory});
-              const projected = projectStructuralNavigationAnswer({...composition, memory}, 1500);
+              const immutable = JSON.stringify({structural, memory});
+              const projected = compose(memory);
               expect(projected.structuredContent.memory).toEqual([
                 expect.objectContaining({uri: applicable.uri, freshness, authority, memoryTrust}),
               ]);
@@ -589,7 +589,7 @@ effectIt.layer(dependencies)('with a physical graph fixture', it => {
               expect(projected.structuredContent.effects).toEqual(noMemory.structuredContent.effects);
               expect(projected.structuredContent.gaps).toContain('code-anchors-unresolved');
               expect(projected.structuredContent.gaps).toContain('navigation-memory-coverage-incomplete');
-              expect(JSON.stringify({composition, memory})).toBe(immutable);
+              expect(JSON.stringify({structural, memory})).toBe(immutable);
             }
             const mixed = rawMemory([current, stale, proposed, file, ...excluded]);
             const selected = selectContextBriefNavigationMemory({
@@ -601,7 +601,7 @@ effectIt.layer(dependencies)('with a physical graph fixture', it => {
             expect(selected.candidates).toHaveLength(4);
             expect(selected.codeAnchorCoverage).toEqual({...mixed.codeAnchorCoverage, matchedMemories: 4});
             expect(selected.citationValidations).toBe(mixed.citationValidations);
-            const mixedProjection = projectStructuralNavigationAnswer({...composition, memory: mixed}, 1500);
+            const mixedProjection = compose(mixed);
             expect(
               mixedProjection.structuredContent.memory.length + mixedProjection.structuredContent.omissions.memory,
             ).toBe(4);
@@ -611,13 +611,10 @@ effectIt.layer(dependencies)('with a physical graph fixture', it => {
                 memory => !EffectArray.some(excluded, entry => entry.uri === memory.uri),
               ),
             ).toBe(true);
-            const unresolvedProject = projectStructuralNavigationAnswer(
-              {...composition, memory: mixed, memoryProjects: undefined},
-              1500,
-            );
+            const unresolvedProject = compose(mixed, null);
             expect(unresolvedProject.structuredContent.memory).toEqual([]);
             expect(unresolvedProject.structuredContent.gaps).toContain('memory-project-scope-unavailable');
-            const empty = projectStructuralNavigationAnswer({...composition, memory: rawMemory([])}, 1500);
+            const empty = compose(rawMemory([]));
             expect(empty.structuredContent.roles).toEqual(noMemory.structuredContent.roles);
             expect(empty.structuredContent.effects).toEqual(noMemory.structuredContent.effects);
             // Reuse the real acquired observation: project metadata changes must never relabel its evidence.

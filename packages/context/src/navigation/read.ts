@@ -17,7 +17,8 @@ import type {
   RepositoryIdentity,
 } from '@threadnote/graph/types';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import type {ContextBriefScopeV1} from '../types.js';
+import type {ContextBriefNavigationMemoryProjects} from '../memory-evidence.js';
+import type {ContextBriefMemoryRetrievalV1, ContextBriefScopeV1} from '../types.js';
 import {navigationRelativePath, type NavigationEffectsLocator} from './continuation.js';
 import {retrieveTaskNavigationAnswer} from './discovery.js';
 import {
@@ -53,7 +54,20 @@ export interface NavigationReadEvidenceV1 {
     readonly edges: readonly NavigationProofEdge[];
   };
   readonly anchors: readonly NavigationSemanticAnchorV1[];
+  /** Code-linked memory for the route candidates. The application reads it in the same worker read. */
+  readonly memory?: NavigationMemoryReadV1;
 }
+
+export type NavigationMemoryReadV1 =
+  | {
+      readonly status: 'ok';
+      /** Citation validations are against the navigation snapshot. */
+      readonly memory: ContextBriefMemoryRetrievalV1;
+      /** The project boundary the read applied; absent when it could not be resolved. */
+      readonly memoryProjects?: ContextBriefNavigationMemoryProjects;
+      readonly observedAt: string;
+    }
+  | {readonly status: 'unavailable'; readonly gaps: readonly string[]};
 
 export type NavigationReadResultV1 =
   NavigationReadEvidenceV1 | {readonly status: 'unavailable'; readonly gaps: readonly string[]};
@@ -66,6 +80,16 @@ const REPOSITORY_PROJECT = 'repository';
 const DISCOVERY_BYTES = 16 * 1024 * 1024;
 const DISK_VIEW: NavigationScope['view'] = {kind: 'disk', id: 'saved', owner: 'graph', epoch: 0};
 const unavailable = (gap: string): NavigationReadResultV1 => ({status: 'unavailable', gaps: [gap]});
+
+/** The worker reply has no key for an absent optional field: a repository without a remote has no `remoteIdentity`. */
+function replyIdentity(identity: RepositoryIdentity): RepositoryIdentity {
+  const {branch, remoteIdentity, ...required} = identity;
+  return {
+    ...required,
+    ...(branch === undefined ? {} : {branch}),
+    ...(remoteIdentity === undefined ? {} : {remoteIdentity}),
+  };
+}
 
 /**
  * Read the structural navigation evidence from the shared READY graph snapshot only. It never indexes, refreshes,
@@ -188,7 +212,7 @@ const readLeased = Effect.fn('navigation.readLeased')(function* (
   const callEdgeIds = new Set(EffectArray.map(proofLocators, locator => locator.accepted.proof.callEdgeId));
   return {
     status: 'ok',
-    identity,
+    identity: replyIdentity(identity),
     observation: {repository: observation.repository, snapshot: observation.snapshot, freshness: observation.freshness},
     repositoryIdentityKind: identity.remoteIdentity === undefined ? 'local' : 'remote',
     input: withNavigationGaps(input, [...staleGaps, ...readGaps]),

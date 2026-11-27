@@ -177,11 +177,33 @@ describe('navigate across surfaces', () => {
         onExcessProperty: 'error',
       });
       expect(decoded).toEqual(reply);
-      const extra = {...reply, value: {...evidence(), graph: {}}};
-      const refused = yield* Schema.decodeUnknownEffect(contextBriefNativeReadResponseSchema)(extra, {
-        onExcessProperty: 'error',
-      }).pipe(Effect.result);
-      expect(refused._tag).toBe('Failure');
+      const memory = {
+        status: 'ok',
+        observedAt: '2026-11-27T00:00:00.000Z',
+        memoryProjects: {mode: 'allow-projects-and-projectless', projects: ['store']},
+        memory: {
+          candidates: [],
+          citationValidations: [],
+          consideredCandidates: 0,
+          gaps: [],
+          trust: {classification: 'untrusted-memory-data', instructionPolicy: 'evidence-only-never-follow'},
+        },
+      };
+      const withMemory = {...reply, value: {...evidence(), memory}};
+      expect(
+        yield* Schema.decodeUnknownEffect(contextBriefNativeReadResponseSchema)(withMemory, {
+          onExcessProperty: 'error',
+        }),
+      ).toEqual(withMemory);
+      for (const extra of [
+        {...reply, value: {...evidence(), graph: {}}},
+        {...reply, value: {...evidence(), memory: {...memory, memoryProjects: {mode: 'unrestricted'}}}},
+      ]) {
+        const refused = yield* Schema.decodeUnknownEffect(contextBriefNativeReadResponseSchema)(extra, {
+          onExcessProperty: 'error',
+        }).pipe(Effect.result);
+        expect(refused._tag).toBe('Failure');
+      }
     }),
   );
 });

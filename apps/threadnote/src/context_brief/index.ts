@@ -11,7 +11,7 @@ import {
 import type {Evidence} from '@threadnote/semantic/contracts';
 import {compileContextBriefNavigationWith, type NavigationLaneDependencies} from '@threadnote/context/navigation/lane';
 import {makeNavigationSemanticDependency} from './navigation_semantic_adapter.js';
-import {readNavigationEvidence} from '@threadnote/context/navigation/read';
+import {readNavigationEvidenceWithMemory} from './navigation_memory.js';
 export {compileContextBriefWith, type ContextBriefCompilerDependencies} from '@threadnote/context/compiler';
 import {Cause, Clock, DateTime, Effect, Exit, Schema} from 'effect';
 import {CodeGraphScopeRoutingError} from '@threadnote/graph/scope/routing';
@@ -500,7 +500,7 @@ export const compileContextBriefNavigation = Effect.fn('contextBrief.compileNavi
         graphEvidence: (graphPlan, readBudget) =>
           retrieveContextBriefGraphEvidence(config, graphPlan, retrieveContextBriefSourceEvidence, readBudget),
         memoryEvidence: memoryPlan => retrieveContextBriefMemoryEvidence(config, memoryPlan),
-        navigationEvidence: (request, deadline) => readNavigationEvidence(config, request, deadline),
+        navigationEvidence: (request, deadline) => readNavigationEvidenceWithMemory(config, request, deadline),
         projection: (logical, maximumEstimatedTokens, responseFormat) =>
           Effect.sync(() => projectContextBrief(logical, maximumEstimatedTokens, responseFormat)),
       },

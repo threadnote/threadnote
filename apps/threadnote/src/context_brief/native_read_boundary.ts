@@ -611,6 +611,23 @@ const navigationSnapshot = Schema.Struct({
   id: shortText,
   worktreeId: shortText,
 });
+const navigationMemory = Schema.Union([
+  Schema.Struct({
+    status: Schema.Literal('ok'),
+    memory: memoryEvidence,
+    memoryProjects: optional(
+      Schema.Union([
+        Schema.Struct({mode: Schema.Literal('allow-projects-and-projectless'), projects: strings}),
+        Schema.Struct({mode: Schema.Literals(['projectless-only', 'deny-all'])}),
+      ]),
+    ),
+    observedAt: shortText,
+  }),
+  Schema.Struct({
+    status: Schema.Literal('unavailable'),
+    gaps: Schema.Array(shortText).check(Schema.isMaxLength(navigationLimits.gaps)),
+  }),
+]);
 const navigationRead = Schema.Union([
   Schema.Struct({
     status: Schema.Literal('ok'),
@@ -660,6 +677,7 @@ const navigationRead = Schema.Union([
     anchors: Schema.Array(
       Schema.Struct({candidateId: shortText, path: shortText, contentHash: shortText, name: shortText, span}),
     ).check(Schema.isMaxLength(NAVIGATION_SEMANTIC_ANCHORS)),
+    memory: optional(navigationMemory),
   }),
   Schema.Struct({
     status: Schema.Literal('unavailable'),

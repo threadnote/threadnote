@@ -21,7 +21,7 @@ import {
   type NavigationEffectsDelta,
 } from './continuation.js';
 import {navigationScopeKey, withNavigationGaps, type NavigationAnswerV1} from './model.js';
-import {projectNavigationAnswer, type NavigationProjection} from './project.js';
+import {projectNavigationAnswer, selectNavigationMemory, type NavigationProjection} from './project.js';
 import type {NavigationReadEvidenceV1, NavigationReadRequestV1, NavigationReadResultV1} from './read.js';
 import {parseContextBriefNavigationRequestV1, type ContextBriefNavigationRequestV1} from './request.js';
 import type {NavigationSemanticDependency} from './semantic.js';
@@ -45,7 +45,7 @@ export interface NavigationLaneDependencies<NavigationR = never, SemanticR = nev
   readonly navigationSemantic?: NavigationSemanticDependency<SemanticR>;
 }
 
-/** NAV04 reads no memory: code-linked memory needs the navigation anchors and so a second worker read. */
+/** The read returned no memory step at all, for example a structural-only dependency. */
 const MEMORY_GAP = 'navigation-memory-not-read';
 /** Room for the envelope around the projection before measuring; the measured overflow refines it once. */
 const ENVELOPE_RESERVE_BYTES = 192;
@@ -181,19 +181,21 @@ function project(
 ): ProjectedContextBriefNavigationV1 {
   const maximumBytes = request.budgetTokens * AGENT_RESPONSE_ESTIMATED_BYTES_PER_TOKEN;
   const token = encodeNavigationContinuation(answer);
+  const memory = navigationMemory(request, answer, evidence);
+  const routed = memory.selected?.answer ?? answer;
   const attempt = (continuation: string | undefined, reserve: number) => {
     try {
       const projected = projectNavigationAnswer(
-        {answer, proofLocators: evidence.proofLocators},
+        {answer: routed, proofLocators: evidence.proofLocators},
         request.budgetTokens,
         request.responseFormat,
-        [],
+        memory.selected?.memory ?? [],
         reserve,
       );
       const gaps =
         continuation === undefined && token !== undefined
-          ? [MEMORY_GAP, 'navigation-continuation-omitted']
-          : [MEMORY_GAP];
+          ? [...memory.gaps, 'navigation-continuation-omitted']
+          : memory.gaps;
       const result = finish(request, {gaps, navigation: projected.structuredContent, continuation}, projected.text);
       return {result, overflow: result.measurement.totalBytes - maximumBytes};
     } catch {
@@ -207,7 +209,30 @@ function project(
     const second = first === undefined ? undefined : attempt(continuation, reserve + first.overflow);
     if (second !== undefined && second.overflow <= 0) return second.result;
   }
-  return finish(request, {gaps: [MEMORY_GAP, 'navigation-budget-too-small']});
+  return finish(request, {gaps: [...memory.gaps, 'navigation-budget-too-small']});
+}
+
+/** The memory step's routed answer and applicable memories, or the lane gaps that say why there are none. */
+function navigationMemory(
+  request: ContextBriefNavigationRequestV1,
+  answer: NavigationAnswerV1,
+  evidence: NavigationReadEvidenceV1,
+): {readonly gaps: readonly string[]; readonly selected?: ReturnType<typeof selectNavigationMemory>} {
+  const read = evidence.memory;
+  if (read === undefined) return {gaps: [MEMORY_GAP]};
+  if (read.status !== 'ok') return {gaps: read.gaps};
+  return {
+    gaps: [],
+    selected: selectNavigationMemory({
+      answer,
+      observation: evidence.observation,
+      task: request.task,
+      observedAt: read.observedAt,
+      memory: read.memory,
+      ...(read.memoryProjects === undefined ? {} : {memoryProjects: read.memoryProjects}),
+      repositoryIdentityKind: evidence.repositoryIdentityKind,
+    }),
+  };
 }
 
 function finish(

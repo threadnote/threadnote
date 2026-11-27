@@ -94,14 +94,17 @@ export function planContextBrief(input: ContextBriefRequestV1 | unknown): Contex
   };
 }
 
-export function assembleContextBriefLogicalResult(input: {
-  readonly graph: ContextBriefGraphEvidenceV1;
+/**
+ * Classify retrieved memory candidates: citation validation sets precise freshness, the snapshot sets coarse
+ * freshness, and authority and trust stay as stored. The gaps are only the memory-derived ones.
+ */
+export function assembleContextBriefMemoryEvidence(input: {
   readonly memory: ContextBriefMemoryRetrievalV1;
+  readonly resolvedSnapshots: ContextBriefGraphEvidenceV1['resolvedSnapshots'];
   readonly observedAt: string;
-  readonly plan: ContextBriefPlanV1;
-  readonly verifiedProcedureGaps?: readonly string[];
-  readonly verifiedProcedures?: readonly VerifiedProcedureEvidence[];
-}): ContextBriefLogicalResultV1 {
+  readonly mode: ContextBriefPlanV1['mode'];
+  readonly task: string;
+}) {
   const validations = new Map(
     EffectArray.map(input.memory.citationValidations ?? [], validation => [validation.uri, validation]),
   );
@@ -121,7 +124,7 @@ export function assembleContextBriefLogicalResult(input: {
     ).slice(0, CONTEXT_BRIEF_MAXIMUM_PUBLIC_CODE_RELATIONS);
     const codeRelations = validatedCodeRelations.slice(0, CONTEXT_BRIEF_DEFAULT_PUBLIC_CODE_RELATIONS);
     const citationReceipts = compactCodeLinkedCitationReceipts(publicReceipts, codeRelations);
-    const coarse = classifyMemoryFreshness(candidate.sourceCommit, input.graph.resolvedSnapshots);
+    const coarse = classifyMemoryFreshness(candidate.sourceCommit, input.resolvedSnapshots);
     const {
       actionCard: privateActionCard,
       citationErrorCount,
@@ -174,20 +177,18 @@ export function assembleContextBriefLogicalResult(input: {
   const durableDecisions = stableMemories(EffectArray.filter(memories, memory => memory.kind === 'durable'));
   const handoffs = prioritizeHandoffs(
     EffectArray.filter(memories, memory => memory.kind === 'handoff'),
-    input.plan.mode,
-    input.plan.task,
+    input.mode,
+    input.task,
   );
-  const issues = contextIssues(memories);
-  const procedureGaps = stableUnique(input.verifiedProcedureGaps ?? []);
-  const generalGaps = EffectArray.filter(
-    stableUnique([
-      ...input.graph.gaps,
-      ...contextBriefGraphWarningGaps(input.graph.warnings),
-      ...input.memory.gaps,
-      ...(input.graph.cards.length === 0 ? ['no-graph-evidence'] : []),
+  return {
+    memories,
+    durableDecisions,
+    handoffs,
+    validatedCodeLinkedMemories,
+    gaps: [
       ...(memories.length === 0 ? ['no-relevant-active-memory'] : []),
       ...(EffectArray.some(memories, memory => memory.freshness === 'unknown') ? ['memory-freshness-unknown'] : []),
-      ...(input.plan.mode === 'resume' &&
+      ...(input.mode === 'resume' &&
       !EffectArray.some(handoffs, memory => memory.freshness === 'fresh' && memory.continuationCard !== undefined)
         ? ['resume-continuation-card-unavailable']
         : []),
@@ -202,6 +203,40 @@ export function assembleContextBriefLogicalResult(input: {
       validatedCodeLinkedMemories === 0
         ? ['code-anchor-selector-matches-unvalidated']
         : []),
+    ],
+  };
+}
+
+export function assembleContextBriefLogicalResult(input: {
+  readonly graph: ContextBriefGraphEvidenceV1;
+  readonly memory: ContextBriefMemoryRetrievalV1;
+  readonly observedAt: string;
+  readonly plan: ContextBriefPlanV1;
+  readonly verifiedProcedureGaps?: readonly string[];
+  readonly verifiedProcedures?: readonly VerifiedProcedureEvidence[];
+}): ContextBriefLogicalResultV1 {
+  const {
+    memories,
+    durableDecisions,
+    handoffs,
+    validatedCodeLinkedMemories,
+    gaps: memoryGaps,
+  } = assembleContextBriefMemoryEvidence({
+    memory: input.memory,
+    resolvedSnapshots: input.graph.resolvedSnapshots,
+    observedAt: input.observedAt,
+    mode: input.plan.mode,
+    task: input.plan.task,
+  });
+  const issues = contextIssues(memories);
+  const procedureGaps = stableUnique(input.verifiedProcedureGaps ?? []);
+  const generalGaps = EffectArray.filter(
+    stableUnique([
+      ...input.graph.gaps,
+      ...contextBriefGraphWarningGaps(input.graph.warnings),
+      ...input.memory.gaps,
+      ...(input.graph.cards.length === 0 ? ['no-graph-evidence'] : []),
+      ...memoryGaps,
     ]),
     gap => !procedureGaps.includes(gap),
   );
