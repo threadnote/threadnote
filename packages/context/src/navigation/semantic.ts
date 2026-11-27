@@ -1,5 +1,5 @@
 import type {Effect} from 'effect';
-import type {CodeGraphSpan} from '@threadnote/graph/types';
+import type {CodeGraphQueryResult, CodeGraphSpan, RepositoryIdentity} from '@threadnote/graph/types';
 import type {ReadDeadline} from '@threadnote/platform/read_deadline';
 import type {NavigationInput, NavigationScope} from './model.js';
 
@@ -22,6 +22,10 @@ export interface NavigationSemanticRequestV1 {
   readonly callerCwd: string;
   /** The requested navigation scope; the result must keep it. */
   readonly scope: NavigationScope;
+  /** Repository identity of the structural read; callerCwd can be a subdirectory, so it is not a substitute. */
+  readonly identity: RepositoryIdentity;
+  /** Ready graph observation the structural read used; the disk join binds to this snapshot and head commit. */
+  readonly observation: Pick<CodeGraphQueryResult, 'repository' | 'snapshot' | 'freshness'>;
   /** Structural input after task discovery and source-proof admission. */
   readonly input: NavigationInput;
   /** At most two anchors, in lane priority order. Never empty. */
