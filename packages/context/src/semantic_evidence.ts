@@ -201,14 +201,37 @@ export function selectSemanticContextSymbol(
     return fail('semantic-symbol-source-unbound');
   if (EffectArray.some(nodes, node => !canonicalizer.fragment(node.span).ok))
     return fail('semantic-symbol-lookup-incomplete');
-  const matches = EffectArray.filter(nodes, node => {
+  const offsets = (node: CodeGraphQueryNode) => {
     const fragment = canonicalizer.fragment(node.span);
+    return fragment.ok ? fragment.fragment : undefined;
+  };
+  const exact = EffectArray.filter(nodes, node => {
+    const fragment = offsets(node);
     return (
-      fragment.ok &&
-      fragment.fragment.startOffset === full.fragment.startOffset &&
-      fragment.fragment.endOffset === full.fragment.endOffset
+      fragment !== undefined &&
+      fragment.startOffset === full.fragment.startOffset &&
+      fragment.endOffset === full.fragment.endOffset
     );
   });
+  // Providers that report only the name (a plain Location), or a full range with other extent than the graph
+  // declaration (for example with attributes or comments), join through the declared name instead. The name is
+  // read from the bound bytes, the declaration must contain it, and the two full extents must nest.
+  const name = EffectString.slice(selection.fragment.startOffset, selection.fragment.endOffset)(text);
+  const named =
+    exact.length > 0 || !/^[\p{L}\p{Nl}_$][\p{L}\p{Nl}\p{Mn}\p{Mc}\p{Nd}\p{Pc}$]*$/u.test(name)
+      ? []
+      : EffectArray.filter(nodes, node => {
+          const fragment = offsets(node);
+          return (
+            fragment !== undefined &&
+            node.name === name &&
+            fragment.startOffset <= selection.fragment.startOffset &&
+            fragment.endOffset >= selection.fragment.endOffset &&
+            ((fragment.startOffset <= full.fragment.startOffset && fragment.endOffset >= full.fragment.endOffset) ||
+              (fragment.startOffset >= full.fragment.startOffset && fragment.endOffset <= full.fragment.endOffset))
+          );
+        });
+  const matches = exact.length > 0 ? exact : named;
   if (matches.length !== 1)
     return fail(matches.length > 1 ? 'semantic-symbol-target-ambiguous' : 'semantic-symbol-target-unresolved');
   return /^cgs_[0-9a-f]{32}$/u.test(matches[0].id)
@@ -216,7 +239,10 @@ export function selectSemanticContextSymbol(
     : fail('semantic-symbol-target-unresolved');
 }
 
-/** Join only the exact current same-document definition; never a lexical container. */
+/**
+ * Join only the current same-document definition: its exact full range, or else its declared name inside one
+ * declaration. Never a lexical container.
+ */
 export const retrieveSemanticContextSymbol = Effect.fn('context.semanticSymbol')(function* (
   config: RuntimeConfig,
   request: ContextBriefSourceEvidenceRequest,

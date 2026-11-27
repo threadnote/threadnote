@@ -272,6 +272,52 @@ effectIt.layer(citationPlatformLayer)(test => {
     }),
   );
 
+  test.effect('joins name-only and wider provider ranges through the declared name inside one declaration', () =>
+    Effect.gen(function* () {
+      // Go and Python report only the name; Rust reports a full range that includes the leading attribute.
+      const f = yield* fixture('class Box:\r\n    #[keep]\r\n    def run(self): return 1\r\n');
+      const proof = yield* retrieveSemanticContextSourceEvidence(f.request, f.evidence);
+      expect(proof.binding).not.toBeNull();
+      const base = f.request.result.nodes[0];
+      const box = {
+        ...base,
+        id: 'cgs_' + EffectString.repeat(32)('a'),
+        name: 'Box',
+        span: {line: 1, column: 1, endLine: 3, endColumn: 28},
+      };
+      const run = {
+        ...base,
+        id: 'cgs_' + EffectString.repeat(32)('b'),
+        name: 'run',
+        span: {line: 3, column: 5, endLine: 3, endColumn: 28},
+      };
+      const name = {start: {line: 2, character: 8}, end: {line: 2, character: 11}};
+      const located = {evidence: f.evidence, uri: f.evidence.observation.uri, range: name};
+      const linked = {
+        ...located,
+        range: {start: {line: 1, character: 4}, end: {line: 2, character: 27}},
+        selectionRange: name,
+      };
+      const select = (target: typeof located, nodes: readonly (typeof run)[]) =>
+        selectSemanticContextSymbol(f.bytes, f.evidence, target, nodes, proof.binding!);
+      expect(select(located, [box, run])).toEqual({nodeId: run.id});
+      expect(select(linked, [box, run]).nodeId).toBe(run.id);
+      // The container has another name, so it never stands in for the declaration.
+      expect(select(located, [box]).gap).toBe('semantic-symbol-target-unresolved');
+      // Two declarations with the name that both contain it stay ambiguous.
+      expect(select(located, [run, {...run, id: 'cgs_' + EffectString.repeat(32)('c')}]).gap).toBe(
+        'semantic-symbol-target-ambiguous',
+      );
+      // A name-only range that is not an identifier, or extents that do not nest, never join by name.
+      expect(select({...located, range: {start: name.start, end: {line: 2, character: 12}}}, [run]).nodeId).toBeNull();
+      expect(
+        select({...linked, range: {start: {line: 2, character: 4}, end: {line: 2, character: 27}}}, [
+          {...run, span: {line: 2, column: 5, endLine: 3, endColumn: 12}},
+        ]).nodeId,
+      ).toBeNull();
+    }),
+  );
+
   test.effect.prop(
     'exact range joins are cap-safe, Unicode/CRLF-safe and do not mutate evidence',
     [
