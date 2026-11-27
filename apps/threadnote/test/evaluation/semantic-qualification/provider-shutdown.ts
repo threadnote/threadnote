@@ -1,4 +1,5 @@
 import {createHash} from 'node:crypto';
+import {existsSync} from 'node:fs';
 import {lstat, readFile, readdir, rm} from 'node:fs/promises';
 import {join} from 'node:path';
 import {pathToFileURL} from 'node:url';
@@ -95,7 +96,14 @@ export async function shutdownFixtureProviders(home: string, project: string) {
   const processesGone = () =>
     EffectArray.every([...workers], absent) &&
     EffectArray.every([...providers], pid => absent(pid) && groupAbsent(pid));
-  while (!processesGone() && Date.now() - started < 5000) await new Promise(resolve => setTimeout(resolve, 25));
+  // A running coordinator holds its worker lock and socket in its own directory and removes both when it exits. A
+  // crashed one leaves them, so their absence proves a released endpoint where no admission entry names its process.
+  const endpointsReleased = () =>
+    EffectArray.every(removed, name =>
+      EffectArray.every(['worker.lock', 'rpc.sock'], file => !existsSync(join(home, 'semantic', name, file))),
+    );
+  while ((!processesGone() || !endpointsReleased()) && Date.now() - started < 5000)
+    await new Promise(resolve => setTimeout(resolve, 25));
   const final = await readAdmission(home);
   // A verifier is owned by its admission slot before a provider PID exists. Dead coordinator
   // PIDs cannot replace the native owner's missing group-drain proof or erase a retained slot.
@@ -107,7 +115,8 @@ export async function shutdownFixtureProviders(home: string, project: string) {
     (initial === undefined
       ? final === undefined && removed.length === 0
       : final !== undefined && final.slots.length === 0 && final.tickets.length === 0);
-  const coordinatorObserved = !observedCoordinator || workers.size > 0;
+  const released = endpointsReleased();
+  const coordinatorObserved = !observedCoordinator || workers.size > 0 || released;
   return {
     drained: processesGone() && admissionResolved && coordinatorObserved,
     admission: {
@@ -121,6 +130,7 @@ export async function shutdownFixtureProviders(home: string, project: string) {
       retainedTickets: final?.tickets.length ?? null,
     },
     coordinatorObserved,
+    endpointsReleased: released,
     bootstrapFilesRemoved: removed,
     workers: EffectArray.map([...workers], pid => ({pid, absent: absent(pid)})),
     providers: EffectArray.map([...providers], pid => ({pid, absent: absent(pid), groupAbsent: groupAbsent(pid)})),
