@@ -9,6 +9,11 @@ const PYTHON_METADATA_SOURCES = new Set([
   'apps/threadnote/src/migration/legacy-installations.ts',
   'packages/graph/src/languages/catalog.generated.ts',
   'packages/graph/src/languages/generic/definitions.ts',
+  // Navigation write proofs for the Python language pack: pack identity, builtin open modes and spans.
+  'packages/graph/src/languages/python/navigation_facts.ts',
+  'packages/graph/src/navigation_facts.ts',
+  'packages/graph/src/query/navigation_facts.ts',
+  'packages/graph/src/types.ts',
   'packages/graph/src/languages/tree_sitter_assets.ts',
   'packages/manager/src/memory_editor_languages.ts',
 ]);

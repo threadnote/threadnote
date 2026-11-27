@@ -82,7 +82,7 @@ const retrieveNavigationSourceProofsWithinBudget = Effect.fn('navigation.retriev
   const additionalRanges: ContextBriefSourceRangeCandidateV1[] = [];
   for (const file of facts.files) {
     for (const proof of file.facts?.proofs ?? []) {
-      // A Python mode literal sits inside the owner; a TypeScript import sits outside it.
+      // A builtins mode literal sits inside the owner; a module import sits outside it.
       for (const span of proof.module === 'builtins' ? [proof.ownerSpan] : [proof.importSpan, proof.ownerSpan])
         additionalRanges.push({
           path: file.path,
