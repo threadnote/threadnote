@@ -2624,6 +2624,12 @@ describe('native task actions', () => {
           bindings: {compact: {branch: 'main', baseBranch: 'main'}},
         }).pipe(Effect.provideService(SystemInfo, testSystem), Effect.result),
       ).toMatchObject({failure: {code: 'evidence-unavailable'}});
+      expect(
+        yield* runNativeTaskStart(config, {...startInput, bindings: {compact: {branch: 'main'}}}).pipe(
+          Effect.provideService(SystemInfo, testSystem),
+          Effect.result,
+        ),
+      ).toMatchObject({failure: {code: 'invalid-request', message: expect.stringContaining('bindings')}});
       // A standard run needs no published graph: it starts in a fresh checkout and stores its artifacts uncited.
       const standardStart = object(
         yield* runNativeTaskStart(config, {

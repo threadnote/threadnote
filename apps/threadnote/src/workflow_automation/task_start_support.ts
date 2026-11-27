@@ -69,6 +69,13 @@ export const nativeTaskStartShapeMessage = (input: unknown) => {
     EffectRecord.keys(shapeFields),
     field => !shapeFields[field].ast.context?.isOptional && !EffectArray.contains(fields, field),
   );
+  if (!missing.length) {
+    const record = Predicate.isObject(input) ? input : {};
+    if ('delivery' in record && !Schema.is(Schema.Literals(['local', 'commit', 'pr']))(record.delivery))
+      return 'delivery must be local, commit or pr.';
+    if ('bindings' in record && !Schema.is(NativeBranchBindingsSchema)(record.bindings))
+      return 'bindings must map phase IDs to {branch, baseBranch}.';
+  }
   if (!missing.length)
     return 'Provide a feature name, absolute checkout path, bounded compact intent, and an optional installed target or task reference.';
   const resume = !shared && EffectArray.contains(fields, 'taskRef');
