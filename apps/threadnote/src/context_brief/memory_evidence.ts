@@ -98,7 +98,7 @@ export function contextBriefMemoryEligibilityPolicy(
   };
 }
 
-const contextBriefMemoryEligibility = Effect.fn('contextBrief.resolveMemoryEligibility')(function* (
+export const contextBriefMemoryEligibility = Effect.fn('contextBrief.resolveMemoryEligibility')(function* (
   config: RuntimeConfig,
   scope: ContextBriefScopeV1,
   query: string,
@@ -180,6 +180,10 @@ export const retrieveContextBriefCodeLinkedMemoryEvidence = Effect.fn('contextBr
     plan: ContextBriefPlanV1['codeAnchors'],
     options: {
       readonly allowedUriScopes?: readonly string[];
+      /** The caller's already resolved boundary for this scope and query. */
+      readonly eligibility?: Effect.Success<ReturnType<typeof contextBriefMemoryEligibility>>;
+      /** Resolve anchors without retaining citation evidence capsules: the read writes nothing. */
+      readonly planOnly?: boolean;
     } = {},
   ) {
     const requested = plan.codeRefs.length;
@@ -195,7 +199,8 @@ export const retrieveContextBriefCodeLinkedMemoryEvidence = Effect.fn('contextBr
     if (plan.scope.kind !== 'repository') {
       return unavailableContextBriefCodeLinkedMemoryEvidence(requested, 'code-anchor-scope-unsupported');
     }
-    const scopedEligibility = yield* contextBriefMemoryEligibility(config, plan.scope, plan.query);
+    const scopedEligibility =
+      options.eligibility ?? (yield* contextBriefMemoryEligibility(config, plan.scope, plan.query));
     const callerCwd = plan.scope.callerCwd;
     if (EffectArray.some(plan.codeRefs, ref => Effect2.pipe(ref, EffectString.startsWith('cgr_')))) {
       return unavailableContextBriefCodeLinkedMemoryEvidence(requested, 'code-anchor-ref-unsupported');
@@ -207,6 +212,7 @@ export const retrieveContextBriefCodeLinkedMemoryEvidence = Effect.fn('contextBr
           callerCwd,
           project: plan.scope.project,
           refs: plan.codeRefs,
+          ...(options.planOnly === true ? {planOnly: true} : {}),
         }),
         retryBudget,
       ),
@@ -231,6 +237,7 @@ export const retrieveContextBriefCodeLinkedMemoryEvidence = Effect.fn('contextBr
                       callerCwd,
                       project: plan.scope.project,
                       refs: [ref],
+                      ...(options.planOnly === true ? {planOnly: true} : {}),
                     }),
                     retryBudget,
                   ),

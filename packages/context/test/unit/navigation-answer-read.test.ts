@@ -156,6 +156,9 @@ effectIt.layer(dependencies)('navigation read from a prepared graph', it => {
           expect(taskOnly.status).toBe('ok');
           if (taskOnly.status !== 'ok') return;
           expect(taskOnly.input.scope.project).toBe('repository');
+          // The fixture has no Git remote: the strict worker reply must not carry an undefined optional key.
+          expect(taskOnly.identity).not.toHaveProperty('remoteIdentity');
+          expect(taskOnly.repositoryIdentityKind).toBe('local');
           expect(admitNavigationRead(taskOnly)).toBe(taskOnly);
           const anchored = yield* read([hub.id]);
           expect(anchored.status).toBe('ok');

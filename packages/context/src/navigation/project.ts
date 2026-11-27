@@ -4,7 +4,7 @@ import {
   AgentResponseBudgetTooSmallError,
   AGENT_RESPONSE_ESTIMATED_BYTES_PER_TOKEN,
 } from '@threadnote/protocol/agent-response';
-import type {CodeGraphSpan} from '@threadnote/graph/types';
+import type {CodeGraphQueryResult, CodeGraphSpan} from '@threadnote/graph/types';
 import {NAVIGATION_PROJECTION_LANES} from '../projection_lanes.js';
 import {compactProjectedMemory} from '../projector/compaction.js';
 import {projectAgentViewMemory} from '../projection_view.js';
@@ -19,16 +19,22 @@ import {
   uniqueProjectionItems,
 } from '../projector/selection.js';
 import type {
-  ContextBriefGraphEvidenceV1,
   ContextBriefLogicalMemoryEvidenceV1,
   ContextBriefMemoryRetrievalV1,
-  ContextBriefPlanV1,
+  ContextBriefSnapshotV1,
 } from '../types.js';
 import {selectContextBriefNavigationMemory, type ContextBriefNavigationMemoryProjects} from '../memory-evidence.js';
-import {assembleContextBriefLogicalResult} from '../planner.js';
-import {type NavigationAcquisition, type NavigationAnswerV1, type NavigationScope} from './model.js';
+import {assembleContextBriefMemoryEvidence} from '../planner.js';
+import {
+  NAVIGATION_INPUT_LIMITS,
+  type NavigationAcquisition,
+  type NavigationAnswerV1,
+  type NavigationScope,
+} from './model.js';
 import type {assembleStructuralNavigationAnswer, NavigationProofLocator} from './structural.js';
 type Item = ProjectionItem<(typeof NAVIGATION_PROJECTION_LANES)[number]>;
+/** Reviewed memories one projection admits. */
+const NAVIGATION_MEMORY_LIMIT = 24;
 /** The row dictionaries retain exact locators and evidence qualifiers without repeating scope. */
 type NodeRow = readonly [
   id: string,
@@ -82,23 +88,20 @@ export interface NavigationProjection {
   readonly followUps: readonly NavigationAcquisition[];
   readonly memory: readonly ReturnType<typeof projectAgentViewMemory>[];
 }
-/** Compose already-acquired memory with the actual structural route before stripping private citations. */
-export function projectStructuralNavigationAnswer(
-  input: {
-    readonly structural: Pick<ReturnType<typeof assembleStructuralNavigationAnswer>, 'answer' | 'proofLocators'>;
-    readonly graph: ContextBriefGraphEvidenceV1;
-    readonly plan: ContextBriefPlanV1;
-    readonly observedAt: string;
-    readonly memory?: ContextBriefMemoryRetrievalV1;
-    readonly memoryProjects?: ContextBriefNavigationMemoryProjects;
-    readonly repositoryIdentityKind: 'local' | 'remote';
-  },
-  maximumEstimatedTokens = 1250,
-  responseFormat: 'agent' | 'dual' = 'agent',
-) {
-  if (input.memory === undefined)
-    return projectNavigationAnswer(input.structural, maximumEstimatedTokens, responseFormat);
-  const {answer} = input.structural;
+/**
+ * Select the acquired code-linked memory that names an actual route node and classify it with the Context Brief rules.
+ * Memory never changes the route: the answer only gains the memory gaps, earlier gaps first.
+ */
+export function selectNavigationMemory(input: {
+  readonly answer: NavigationAnswerV1;
+  readonly observation: Pick<CodeGraphQueryResult, 'freshness' | 'repository' | 'snapshot'>;
+  readonly task: string;
+  readonly observedAt: string;
+  readonly memory: ContextBriefMemoryRetrievalV1;
+  readonly memoryProjects?: ContextBriefNavigationMemoryProjects;
+  readonly repositoryIdentityKind: 'local' | 'remote';
+}): {readonly answer: NavigationAnswerV1; readonly memory: readonly ContextBriefLogicalMemoryEvidenceV1[]} {
+  const {answer} = input;
   const memory = selectContextBriefNavigationMemory({
     memory: input.memory,
     anchors: EffectArray.flatMap(answer.nodes, node => {
@@ -112,19 +115,38 @@ export function projectStructuralNavigationAnswer(
     repositoryIdentityKind: input.repositoryIdentityKind,
     memoryProjects: input.memoryProjects,
   });
-  const logical = assembleContextBriefLogicalResult({...input, memory});
-  return projectNavigationAnswer(
-    {
-      ...input.structural,
-      answer: {
-        ...answer,
-        gaps: [...new Set([...answer.gaps, ...logical.coverage.gaps])],
-      },
+  const classified = assembleContextBriefMemoryEvidence({
+    memory,
+    resolvedSnapshots: [memorySnapshot(input.observation)],
+    observedAt: input.observedAt,
+    mode: 'brief',
+    task: input.task,
+  });
+  return {
+    answer: {
+      ...answer,
+      gaps: EffectArray.take(
+        [...new Set([...answer.gaps, ...memory.gaps, ...classified.gaps])],
+        NAVIGATION_INPUT_LIMITS.gaps,
+      ),
     },
-    maximumEstimatedTokens,
-    responseFormat,
-    [...logical.durableDecisions, ...logical.activeHandoffs],
-  );
+    // The worker reply is untrusted: more memories than one projection admits are cut, not fatal.
+    memory: EffectArray.take([...classified.durableDecisions, ...classified.handoffs], NAVIGATION_MEMORY_LIMIT),
+  };
+}
+
+/** The navigation snapshot as coarse memory freshness sees it, as Context Brief derives it from a graph query. */
+function memorySnapshot(
+  observation: Pick<CodeGraphQueryResult, 'freshness' | 'repository' | 'snapshot'>,
+): ContextBriefSnapshotV1 {
+  return {
+    commit: observation.snapshot.commit,
+    dirty: observation.snapshot.dirty,
+    freshness: observation.freshness === 'current' ? 'fresh' : observation.freshness === 'stale' ? 'stale' : 'unknown',
+    repositoryId: observation.repository.repositoryId,
+    repositoryKey: observation.repository.displayName,
+    snapshotId: observation.snapshot.id,
+  };
 }
 
 /** Pure policy and rendering only. The caller owns all acquisition and proof admission. */
@@ -144,7 +166,7 @@ export function projectNavigationAnswer(
     answer.links.length > 64 ||
     answer.sources.length > 32 ||
     input.proofLocators.length > 96 ||
-    reviewedMemory.length > 24
+    reviewedMemory.length > NAVIGATION_MEMORY_LIMIT
   )
     throw new RangeError('Navigation projection exceeds admitted evidence limits.');
   const {proofs, rejected} = compatibleProofs(answer, input.proofLocators);

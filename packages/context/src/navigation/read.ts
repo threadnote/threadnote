@@ -17,7 +17,8 @@ import type {
   RepositoryIdentity,
 } from '@threadnote/graph/types';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import type {ContextBriefScopeV1} from '../types.js';
+import type {ContextBriefNavigationMemoryProjects} from '../memory-evidence.js';
+import type {ContextBriefMemoryRetrievalV1, ContextBriefScopeV1} from '../types.js';
 import {navigationRelativePath, type NavigationEffectsLocator} from './continuation.js';
 import {retrieveTaskNavigationAnswer} from './discovery.js';
 import {
@@ -27,7 +28,7 @@ import {
   type NavigationInput,
   type NavigationScope,
 } from './model.js';
-import type {NavigationSemanticAnchorV1} from './semantic.js';
+import type {NavigationSemanticAnchorV1, NavigationSemanticReadiness} from './semantic.js';
 import type {NavigationProofLocator} from './structural.js';
 
 /** The structural read of one navigate request. Worksets are not supported by the v1 lane. */
@@ -38,6 +39,12 @@ export interface NavigationReadRequestV1 {
   readonly maximumEstimatedTokens: number;
   /** Warm write-boundary follow-up: re-read only these effect nodes; task discovery does not run. */
   readonly followUp?: readonly NavigationEffectsLocator[];
+  /**
+   * Wall-clock epoch milliseconds at which the semantic step must start to keep its floor. When the application
+   * finds that semantic can run and this time is not past, the memory step ends before it; otherwise memory keeps
+   * only its own cap. Wall clock, because the worker's monotonic clock has a different origin.
+   */
+  readonly semanticFloorAt?: number;
 }
 
 export interface NavigationReadEvidenceV1 {
@@ -53,7 +60,22 @@ export interface NavigationReadEvidenceV1 {
     readonly edges: readonly NavigationProofEdge[];
   };
   readonly anchors: readonly NavigationSemanticAnchorV1[];
+  /** Code-linked memory for the route candidates. The application reads it in the same worker read. */
+  readonly memory?: NavigationMemoryReadV1;
+  /** Absent when the application gives no semantic hint, for example in a structural-only lane. */
+  readonly semanticReadiness?: NavigationSemanticReadiness;
 }
+
+export type NavigationMemoryReadV1 =
+  | {
+      readonly status: 'ok';
+      /** Citation validations are against the navigation snapshot. */
+      readonly memory: ContextBriefMemoryRetrievalV1;
+      /** The project boundary the read applied; absent when it could not be resolved. */
+      readonly memoryProjects?: ContextBriefNavigationMemoryProjects;
+      readonly observedAt: string;
+    }
+  | {readonly status: 'unavailable'; readonly gaps: readonly string[]};
 
 export type NavigationReadResultV1 =
   NavigationReadEvidenceV1 | {readonly status: 'unavailable'; readonly gaps: readonly string[]};
@@ -66,6 +88,16 @@ const REPOSITORY_PROJECT = 'repository';
 const DISCOVERY_BYTES = 16 * 1024 * 1024;
 const DISK_VIEW: NavigationScope['view'] = {kind: 'disk', id: 'saved', owner: 'graph', epoch: 0};
 const unavailable = (gap: string): NavigationReadResultV1 => ({status: 'unavailable', gaps: [gap]});
+
+/** The worker reply has no key for an absent optional field: a repository without a remote has no `remoteIdentity`. */
+function replyIdentity(identity: RepositoryIdentity): RepositoryIdentity {
+  const {branch, remoteIdentity, ...required} = identity;
+  return {
+    ...required,
+    ...(branch === undefined ? {} : {branch}),
+    ...(remoteIdentity === undefined ? {} : {remoteIdentity}),
+  };
+}
 
 /**
  * Read the structural navigation evidence from the shared READY graph snapshot only. It never indexes, refreshes,
@@ -188,7 +220,7 @@ const readLeased = Effect.fn('navigation.readLeased')(function* (
   const callEdgeIds = new Set(EffectArray.map(proofLocators, locator => locator.accepted.proof.callEdgeId));
   return {
     status: 'ok',
-    identity,
+    identity: replyIdentity(identity),
     observation: {repository: observation.repository, snapshot: observation.snapshot, freshness: observation.freshness},
     repositoryIdentityKind: identity.remoteIdentity === undefined ? 'local' : 'remote',
     input: withNavigationGaps(input, [...staleGaps, ...readGaps]),

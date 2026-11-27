@@ -1,6 +1,6 @@
 import * as EffectArray from 'effect/Array';
 import * as EffectString from 'effect/String';
-import {Cause, Effect, Option, Path, Schema} from 'effect';
+import {Cause, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
 import {readDeadlineRemaining} from '@threadnote/platform/read_deadline';
 import {canonicalFileUri, Observation} from '@threadnote/semantic/contracts';
 import {createCodeGraphSourceSpanCanonicalizer} from '@threadnote/graph/citation/primitives';
@@ -8,7 +8,7 @@ import {codeGraphCitationSourceKey, readCodeGraphCitationSources} from '@threadn
 import type {CodeGraphSpan} from '@threadnote/graph/types';
 import {bindSemanticContextSource} from '@threadnote/context/compiler';
 import {NAVIGATION_INPUT_LIMITS, navigationScopeKey, type NavigationInput} from '@threadnote/context/navigation/model';
-import type {NavigationSemanticRequestV1} from '@threadnote/context/navigation/semantic';
+import type {NavigationSemanticReadiness, NavigationSemanticRequestV1} from '@threadnote/context/navigation/semantic';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {semanticProviderNotRunning, type SemanticAgentQueryResult} from '../semantic/agent_query_protocol.js';
 import {runSemanticAgentQueryWith, type SemanticAgentQueryHost} from '../semantic/agent_queries.js';
@@ -16,6 +16,7 @@ import {semanticCompiledRuntimeIdentity} from '../semantic/readiness_jobs.js';
 import {semanticLanguageProductionQualified} from '../effect/semantic_cli.js';
 import {
   attachSemanticEndpoint,
+  semanticEndpointBootstrapPresent,
   type ensureSemanticEndpoint,
   type SemanticEndpointLaunch,
 } from '../semantic/coordinator.js';
@@ -203,6 +204,37 @@ function environmentFor(
   const environments = (language === 'python' ? catalog.python?.environments : catalog.java?.environments) ?? [];
   return environments.length === 1 ? {ok: true, environment: environments[0].id} : {ok: false};
 }
+
+/**
+ * A cheap passive hint whether the semantic step can run for these anchor paths. 'unconfigured': no enabled
+ * worktree host profile, or no configured provider for an anchor language (Kotlin and unknown languages have
+ * none). 'not-running': no coordinator bootstrap with its socket file exists for this worktree. File reads only:
+ * no socket request, status probe, attach, lock, write or process start. Every failure fails closed; an
+ * interruption still propagates. It is a hint, not an authorization: the enrichment makes the real attach-only
+ * check and keeps its own gaps.
+ */
+export const navigationSemanticReadiness = (
+  config: RuntimeConfig,
+  repositoryRoot: string,
+  anchorPaths: readonly string[],
+) =>
+  softly(
+    Effect.gen(function* (): Effect.fn.Return<NavigationSemanticReadiness, unknown, FileSystem.FileSystem | Path.Path> {
+      const languages = EffectArray.filterMap(anchorPaths.slice(0, 2), anchorPath => {
+        const language = navigationSemanticLanguage(anchorPath);
+        return language === undefined || language === 'kotlin' ? Result.failVoid : Result.succeed(language);
+      });
+      if (languages.length === 0) return 'unconfigured';
+      const path = yield* Path.Path;
+      const worktree = canonicalFileUri((yield* path.toFileUrl(repositoryRoot)).href);
+      const selected = yield* readSemanticHostProfile(config, worktree);
+      if (!EffectArray.some(languages, language => environmentFor(selected.profile.catalog, language).ok))
+        return 'unconfigured';
+      const present = yield* softly(semanticEndpointBootstrapPresent({dataHome: selected.home, worktree}), () => false);
+      return present ? 'ready' : 'not-running';
+    }),
+    (): NavigationSemanticReadiness => 'unconfigured',
+  );
 
 const enrich = Effect.fn('navigation.semanticEnrichment')(function* (
   config: RuntimeConfig,

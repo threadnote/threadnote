@@ -49,3 +49,11 @@ export interface NavigationSemanticRequestV1 {
 export type NavigationSemanticDependency<R = never> = (
   request: NavigationSemanticRequestV1,
 ) => Effect.Effect<NavigationInput, never, R>;
+
+/**
+ * A passive hint of the application about the semantic step, read with the structural evidence. 'unconfigured':
+ * no enabled worktree host profile configures a provider for an anchor language. 'not-running': it does, but no
+ * coordinator endpoint exists. 'ready': the step can run; it still makes its own exact attach-only check.
+ */
+export const NAVIGATION_SEMANTIC_READINESS = ['unconfigured', 'not-running', 'ready'] as const;
+export type NavigationSemanticReadiness = (typeof NAVIGATION_SEMANTIC_READINESS)[number];

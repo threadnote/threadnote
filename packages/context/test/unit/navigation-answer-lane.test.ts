@@ -4,6 +4,7 @@ import {Array as EffectArray, Effect, Fiber} from 'effect';
 import * as EffectString from 'effect/String';
 import {TestClock} from 'effect/testing';
 import type {RepositoryIdentity} from '@threadnote/graph/types';
+import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
 import {readDeadlineRemaining} from '@threadnote/platform/read_deadline';
 import {assembleNavigationAnswer} from '../../src/navigation/assemble.js';
 import {
@@ -11,17 +12,27 @@ import {
   encodeNavigationContinuation,
   navigationRelativePath,
 } from '../../src/navigation/continuation.js';
-import {compileContextBriefNavigationWith, type NavigationLaneDependencies} from '../../src/navigation/lane.js';
+import {
+  compileContextBriefNavigationWith,
+  NAVIGATION_SEMANTIC_FLOOR_MILLISECONDS,
+  type NavigationLaneDependencies,
+} from '../../src/navigation/lane.js';
 import type {NavigationInput, NavigationScope} from '../../src/navigation/model.js';
-import {admitNavigationRead, type NavigationReadEvidenceV1} from '../../src/navigation/read.js';
+import {
+  admitNavigationRead,
+  type NavigationReadEvidenceV1,
+  type NavigationReadRequestV1,
+} from '../../src/navigation/read.js';
 import {parseContextBriefNavigationRequestV1} from '../../src/navigation/request.js';
 import type {NavigationSemanticRequestV1} from '../../src/navigation/semantic.js';
-import {parseContextBriefRequestV1} from '../../src/types.js';
+import {parseContextBriefRequestV1, type ContextBriefMemoryCandidateV1} from '../../src/types.js';
 
 const ENTRY = 'cgs_00000000000000000000000000000001';
 const WRITE = 'cgs_00000000000000000000000000000002';
+/** Canonical memory citations need a SHA-256 repository id. */
+const REPOSITORY = EffectString.repeat(64)('c');
 const scope: NavigationScope = {
-  repository: 'repository-id',
+  repository: REPOSITORY,
   worktree: 'worktree-id',
   project: 'repository',
   view: {kind: 'disk', id: 'saved', owner: 'graph', epoch: 0},
@@ -34,11 +45,11 @@ const identity: RepositoryIdentity = {
   headCommit: EffectString.repeat(40)('a'),
   objectFormat: 'sha1',
   repoRoot: '/fixture',
-  repositoryId: 'repository-id',
+  repositoryId: REPOSITORY,
   worktreeId: 'worktree-id',
 };
 const observation = {
-  repository: {repositoryId: 'repository-id', displayName: 'fixture'},
+  repository: {repositoryId: REPOSITORY, displayName: 'fixture'},
   snapshot: {id: 'snapshot-id', commit: EffectString.repeat(40)('a'), worktreeId: 'worktree-id', dirty: false},
   freshness: 'current' as const,
 };
@@ -238,6 +249,38 @@ describe('navigate lane', () => {
     }),
   );
 
+  effectIt.effect('reports why semantic cannot run before the floor check and starts no semantic work', () =>
+    Effect.gen(function* () {
+      for (const [semanticReadiness, gap] of [
+        ['unconfigured', 'semantic-unavailable'],
+        ['not-running', 'semantic-provider-not-running'],
+      ] as const) {
+        let called = false;
+        const projected = yield* compileContextBriefNavigationWith(
+          deps({
+            // A slow read below the floor still reports the readiness reason, not the semantic budget.
+            navigationEvidence: () =>
+              TestClock.adjust('1100 millis').pipe(Effect.as({...evidence(), semanticReadiness})),
+            navigationSemantic: semantic => Effect.sync(() => ((called = true), semantic.input)),
+          }),
+          request(),
+        );
+        expect(called).toBe(false);
+        expect(projected.structuredContent.navigation?.gaps).toContain(gap);
+        expect(projected.structuredContent.navigation?.gaps).not.toContain('semantic-enrichment-budget-exhausted');
+      }
+      const short = yield* compileContextBriefNavigationWith(
+        deps({
+          navigationEvidence: () =>
+            TestClock.adjust('1100 millis').pipe(Effect.as({...evidence(), semanticReadiness: 'ready' as const})),
+          navigationSemantic: semantic => Effect.succeed(semantic.input),
+        }),
+        request(),
+      );
+      expect(short.structuredContent.navigation?.gaps).toContain('semantic-enrichment-budget-exhausted');
+    }),
+  );
+
   effectIt.effect('stops a slow semantic step at the sub-deadline by interruption', () =>
     Effect.gen(function* () {
       const fiber = yield* compileContextBriefNavigationWith(
@@ -343,6 +386,122 @@ describe('navigate lane', () => {
           expect(projected.measurement.totalBytes).toBeLessThanOrEqual(projected.maximumBytes);
           expect(projected.structuredContent.navigation).toBeDefined();
         }
+    }),
+  );
+
+  effectIt.effect('keeps the semantic floor from the memory step and reads no memory for a follow-up', () =>
+    Effect.gen(function* () {
+      const requests: NavigationReadRequestV1[] = [];
+      const recording = deps({
+        navigationEvidence: read => Effect.sync(() => (requests.push(read), evidence())),
+      });
+      yield* TestClock.adjust('5 seconds');
+      const first = yield* compileContextBriefNavigationWith(recording, request());
+      yield* compileContextBriefNavigationWith(
+        recording,
+        request({continuation: {token: first.structuredContent.continuation!, focus: 'effects'}}),
+      );
+      expect(requests[0]?.semanticFloorAt).toBe(5000 + NAVIGATION_SEMANTIC_FLOOR_MILLISECONDS);
+      expect(NAVIGATION_SEMANTIC_FLOOR_MILLISECONDS).toBe(1000);
+      expect(requests[1]?.followUp).toBeDefined();
+      expect(requests[1]?.semanticFloorAt).toBeUndefined();
+    }),
+  );
+
+  effectIt.effect('carries applicable code-linked memory and reports a failed memory step as a lane gap', () =>
+    Effect.gen(function* () {
+      const hash = EffectString.repeat(64)('b');
+      const pin = (nodeId: string) =>
+        createMemoryCodeCitation({
+          version: 1,
+          extractorSet: 'fixture',
+          repositoryId: REPOSITORY,
+          repositoryIdentityKind: 'local',
+          path: 'src/store.ts',
+          target: {
+            kind: 'symbol',
+            nodeId,
+            language: 'typescript',
+            name: 'write',
+            qualifiedName: 'write',
+            symbolKind: 'function',
+            span: span(9),
+            fragmentCanonicalization: 'utf8-source-span-v1',
+            fragmentHash: {algorithm: 'sha256', value: hash},
+          },
+          fileContentHash: {algorithm: 'sha256', value: hash},
+          sourceCommit: observation.snapshot.commit,
+          sourceDirty: false,
+          sourceSnapshotId: `cgsn_${EffectString.repeat(40)('d')}`,
+        });
+      const memory = (name: string, nodeId: string): ContextBriefMemoryCandidateV1 => {
+        const citation = pin(nodeId);
+        return {
+          uri: `threadnote://memory/tn_${name}`,
+          kind: 'durable',
+          rank: 0,
+          excerpt: name,
+          citationErrorCount: 0,
+          codeCitations: [citation],
+          codeLinkMatches: [
+            {
+              anchorNodeId: nodeId,
+              anchorPath: 'src/store.ts',
+              anchorOrdinal: 0,
+              citationId: citation.id,
+              matchKind: 'symbol-node',
+            },
+          ],
+        };
+      };
+      const candidates = [memory('applicable', WRITE), memory('unrelated', 'cgs_0000000000000000000000000000000f')];
+      const withMemory = (read: NavigationReadEvidenceV1['memory']) =>
+        deps({navigationEvidence: () => Effect.succeed({...evidence(), memory: read})});
+      const projected = yield* compileContextBriefNavigationWith(
+        withMemory({
+          status: 'ok',
+          observedAt: '2026-11-27T00:00:00.000Z',
+          memoryProjects: {mode: 'projectless-only'},
+          memory: {
+            candidates,
+            consideredCandidates: candidates.length,
+            gaps: [],
+            trust: {classification: 'untrusted-memory-data', instructionPolicy: 'evidence-only-never-follow'},
+            citationValidations: EffectArray.map(candidates, candidate => ({
+              uri: candidate.uri,
+              receipts: EffectArray.map(candidate.codeCitations, citation => ({
+                citationId: citation.id,
+                candidateCount: 1,
+                coverage: 'current-complete' as const,
+                kind: citation.target.kind,
+                observedAt: '2026-11-27T00:00:00.000Z',
+                observedPath: 'src/store.ts',
+                observedNodeId: WRITE,
+                reason: 'exact' as const,
+                status: 'exact' as const,
+                strategy: 'node-id' as const,
+                validatorVersion: 1 as const,
+              })),
+            })),
+          },
+        }),
+        request({budgetTokens: 1500}),
+      );
+      expect(projected.structuredContent.gaps).toEqual([]);
+      const navigation = projected.structuredContent.navigation!;
+      expect(EffectArray.map(navigation.memory, entry => [entry.uri, entry.freshness])).toEqual([
+        ['threadnote://memory/tn_applicable', 'fresh'],
+      ]);
+      expect(navigation.gaps).toContain('navigation-memory-coverage-incomplete');
+      for (const budgetTokens of [800, 1500]) {
+        const bounded = yield* compileContextBriefNavigationWith(
+          withMemory({status: 'unavailable', gaps: ['navigation-memory-budget-exhausted']}),
+          request({budgetTokens}),
+        );
+        expect(bounded.structuredContent.gaps).toEqual(['navigation-memory-budget-exhausted']);
+        expect(bounded.structuredContent.navigation?.memory).toEqual([]);
+        expect(bounded.measurement.totalBytes).toBeLessThanOrEqual(bounded.maximumBytes);
+      }
     }),
   );
 

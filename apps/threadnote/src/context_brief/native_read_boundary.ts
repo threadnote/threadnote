@@ -29,6 +29,7 @@ import {isJsonObject} from '@threadnote/platform/json';
 import type {CodeGraphNavigationProof} from '@threadnote/graph/types';
 import {NAVIGATION_INPUT_LIMITS, NAVIGATION_ROLES} from '@threadnote/context/navigation/model';
 import {NAVIGATION_CONTINUATION_LOCATORS} from '@threadnote/context/navigation/continuation';
+import {NAVIGATION_SEMANTIC_READINESS} from '@threadnote/context/navigation/semantic';
 import {
   ReadDeadlineExceeded,
   hasReadCleanupUnconfirmed,
@@ -611,6 +612,23 @@ const navigationSnapshot = Schema.Struct({
   id: shortText,
   worktreeId: shortText,
 });
+const navigationMemory = Schema.Union([
+  Schema.Struct({
+    status: Schema.Literal('ok'),
+    memory: memoryEvidence,
+    memoryProjects: optional(
+      Schema.Union([
+        Schema.Struct({mode: Schema.Literal('allow-projects-and-projectless'), projects: strings}),
+        Schema.Struct({mode: Schema.Literals(['projectless-only', 'deny-all'])}),
+      ]),
+    ),
+    observedAt: shortText,
+  }),
+  Schema.Struct({
+    status: Schema.Literal('unavailable'),
+    gaps: Schema.Array(shortText).check(Schema.isMaxLength(navigationLimits.gaps)),
+  }),
+]);
 const navigationRead = Schema.Union([
   Schema.Struct({
     status: Schema.Literal('ok'),
@@ -660,6 +678,8 @@ const navigationRead = Schema.Union([
     anchors: Schema.Array(
       Schema.Struct({candidateId: shortText, path: shortText, contentHash: shortText, name: shortText, span}),
     ).check(Schema.isMaxLength(NAVIGATION_SEMANTIC_ANCHORS)),
+    memory: optional(navigationMemory),
+    semanticReadiness: optional(Schema.Literals(NAVIGATION_SEMANTIC_READINESS)),
   }),
   Schema.Struct({
     status: Schema.Literal('unavailable'),
@@ -677,6 +697,7 @@ const navigationRequest = Schema.Struct({
       Schema.isMaxLength(NAVIGATION_CONTINUATION_LOCATORS),
     ),
   ),
+  semanticFloorAt: optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
 });
 export const contextBriefNativeReadRequestSchema = Schema.Union([
   Schema.Struct({

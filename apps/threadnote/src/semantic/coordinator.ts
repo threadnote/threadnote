@@ -72,6 +72,7 @@ import {
   Exit,
   FileSystem,
   Option,
+  Order,
   Path,
   Schema,
   Scope,
@@ -1652,6 +1653,35 @@ export const inspectSemanticEndpoint = Effect.fn('semantic.inspectEndpoint')(fun
     Effect.timeoutOption(2000),
     Effect.map(Option.getOrUndefined),
   );
+});
+/** Endpoint directories a presence hint reads at most; a data home has one per runtime and worktree. */
+const PRESENCE_DIRECTORIES = 32;
+/**
+ * A passive presence hint, for a caller that must not attach: some coordinator bootstrap for this data home and
+ * worktree exists next to its socket file. It reads files only: no socket request, attach, lock, write or process
+ * start. It does not compare the runtime identity, because that hashes the whole executable; an attach still
+ * makes the exact check. Any doubt gives false.
+ */
+export const semanticEndpointBootstrapPresent = Effect.fn('semantic.endpointBootstrapPresent')(function* (
+  options: Pick<SemanticEndpointLaunch, 'dataHome' | 'worktree'>,
+) {
+  if (!Schema.is(FileUri)(options.worktree)) return false;
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const home = yield* fs.realPath(options.dataHome);
+  if (home !== path.resolve(options.dataHome)) return false;
+  const root = path.join(home, 'semantic');
+  if (!(yield* fs.exists(root))) return false;
+  const entries = EffectArray.take(EffectArray.sort(yield* fs.readDirectory(root), Order.String), PRESENCE_DIRECTORIES);
+  for (const entry of entries) {
+    const directory = path.join(root, entry);
+    const bootstrapFile = path.join(directory, 'host.json');
+    if (!(yield* fs.exists(bootstrapFile)) || !(yield* fs.exists(path.join(directory, 'rpc.sock')))) continue;
+    const bootstrap = yield* readSemanticBootstrap(bootstrapFile).pipe(Effect.option);
+    if (Option.isSome(bootstrap) && bootstrap.value.worktree === options.worktree && bootstrap.value.dataHome === home)
+      return true;
+  }
+  return false;
 });
 /**
  * Attach to the coordinator that already runs for this exact runtime, worktree, data home and host catalog.

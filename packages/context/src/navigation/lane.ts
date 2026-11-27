@@ -1,4 +1,4 @@
-import {Array as EffectArray, Effect, Schema} from 'effect';
+import {Array as EffectArray, Clock, Effect, Schema} from 'effect';
 import {
   AGENT_RESPONSE_ESTIMATED_BYTES_PER_TOKEN,
   type measureAgentToolResponse,
@@ -21,16 +21,19 @@ import {
   type NavigationEffectsDelta,
 } from './continuation.js';
 import {navigationScopeKey, withNavigationGaps, type NavigationAnswerV1} from './model.js';
-import {projectNavigationAnswer, type NavigationProjection} from './project.js';
+import {projectNavigationAnswer, selectNavigationMemory, type NavigationProjection} from './project.js';
 import type {NavigationReadEvidenceV1, NavigationReadRequestV1, NavigationReadResultV1} from './read.js';
 import {parseContextBriefNavigationRequestV1, type ContextBriefNavigationRequestV1} from './request.js';
-import type {NavigationSemanticDependency} from './semantic.js';
+import type {NavigationSemanticDependency, NavigationSemanticReadiness} from './semantic.js';
 
 export const CONTEXT_BRIEF_NAVIGATION_TYPE = 'context-brief-navigation' as const;
 /** Semantic enrichment ends this long after the request starts, or at the parent deadline when that is earlier. */
 export const NAVIGATION_SEMANTIC_MILLISECONDS = 1500;
 /** No semantic request starts with less time than one coordinator request needs. */
 export const NAVIGATION_SEMANTIC_MINIMUM_MILLISECONDS = 500;
+/** The semantic step must start this long after the request to keep its floor; memory never takes that time. */
+export const NAVIGATION_SEMANTIC_FLOOR_MILLISECONDS =
+  NAVIGATION_SEMANTIC_MILLISECONDS - NAVIGATION_SEMANTIC_MINIMUM_MILLISECONDS;
 
 export interface NavigationLaneDependencies<NavigationR = never, SemanticR = never> {
   /**
@@ -45,7 +48,7 @@ export interface NavigationLaneDependencies<NavigationR = never, SemanticR = nev
   readonly navigationSemantic?: NavigationSemanticDependency<SemanticR>;
 }
 
-/** NAV04 reads no memory: code-linked memory needs the navigation anchors and so a second worker read. */
+/** The read returned no memory step at all, for example a structural-only dependency. */
 const MEMORY_GAP = 'navigation-memory-not-read';
 /** Room for the envelope around the projection before measuring; the measured overflow refines it once. */
 const ENVELOPE_RESERVE_BYTES = 192;
@@ -90,6 +93,7 @@ export const compileContextBriefNavigationWith = Effect.fn('contextBrief.navigat
   SemanticR = never,
 >(dependencies: NavigationLaneDependencies<NavigationR, SemanticR>, input: unknown) {
   const request = parseContextBriefNavigationRequestV1(input);
+  const startedAt = yield* Clock.currentTimeMillis;
   const readDeadline = yield* makeReadDeadline(CONTEXT_BRIEF_READ_MILLISECONDS);
   // The read deadline started with the request, so the semantic step ends 1500 ms after the start.
   const semanticDeadline: ReadDeadline = Object.freeze({
@@ -111,7 +115,9 @@ export const compileContextBriefNavigationWith = Effect.fn('contextBrief.navigat
     task: request.task,
     codeRefs: request.codeRefs,
     maximumEstimatedTokens: request.budgetTokens,
-    ...(continuation === undefined ? {} : {followUp: continuation.locators}),
+    ...(continuation === undefined
+      ? {semanticFloorAt: startedAt + NAVIGATION_SEMANTIC_FLOOR_MILLISECONDS}
+      : {followUp: continuation.locators}),
   };
   const evidence = yield* withinReadDeadline(
     readDeadline,
@@ -132,6 +138,12 @@ export const compileContextBriefNavigationWith = Effect.fn('contextBrief.navigat
   return project(request, answer, evidence);
 });
 
+/** The gap for an application hint that the semantic step cannot run; the floor check comes only after it. */
+const SEMANTIC_HINT_GAPS: Readonly<Record<Exclude<NavigationSemanticReadiness, 'ready'>, string>> = {
+  unconfigured: 'semantic-unavailable',
+  'not-running': 'semantic-provider-not-running',
+};
+
 /** Optional semantic step. Its result must keep the scope and every structural candidate and source. */
 const enrich = Effect.fn('contextBrief.navigation.enrich')(function* <R>(
   dependency: NavigationSemanticDependency<R> | undefined,
@@ -140,6 +152,9 @@ const enrich = Effect.fn('contextBrief.navigation.enrich')(function* <R>(
   deadline: ReadDeadline,
 ) {
   if (dependency === undefined || evidence.anchors.length === 0) return evidence.input;
+  const readiness = evidence.semanticReadiness;
+  if (readiness !== undefined && readiness !== 'ready')
+    return withNavigationGaps(evidence.input, [SEMANTIC_HINT_GAPS[readiness]]);
   if ((yield* readDeadlineRemaining(deadline)) < NAVIGATION_SEMANTIC_MINIMUM_MILLISECONDS)
     return withNavigationGaps(evidence.input, ['semantic-enrichment-budget-exhausted']);
   const result = yield* withinReadDeadline(
@@ -181,19 +196,21 @@ function project(
 ): ProjectedContextBriefNavigationV1 {
   const maximumBytes = request.budgetTokens * AGENT_RESPONSE_ESTIMATED_BYTES_PER_TOKEN;
   const token = encodeNavigationContinuation(answer);
+  const memory = navigationMemory(request, answer, evidence);
+  const routed = memory.selected?.answer ?? answer;
   const attempt = (continuation: string | undefined, reserve: number) => {
     try {
       const projected = projectNavigationAnswer(
-        {answer, proofLocators: evidence.proofLocators},
+        {answer: routed, proofLocators: evidence.proofLocators},
         request.budgetTokens,
         request.responseFormat,
-        [],
+        memory.selected?.memory ?? [],
         reserve,
       );
       const gaps =
         continuation === undefined && token !== undefined
-          ? [MEMORY_GAP, 'navigation-continuation-omitted']
-          : [MEMORY_GAP];
+          ? [...memory.gaps, 'navigation-continuation-omitted']
+          : memory.gaps;
       const result = finish(request, {gaps, navigation: projected.structuredContent, continuation}, projected.text);
       return {result, overflow: result.measurement.totalBytes - maximumBytes};
     } catch {
@@ -207,7 +224,30 @@ function project(
     const second = first === undefined ? undefined : attempt(continuation, reserve + first.overflow);
     if (second !== undefined && second.overflow <= 0) return second.result;
   }
-  return finish(request, {gaps: [MEMORY_GAP, 'navigation-budget-too-small']});
+  return finish(request, {gaps: [...memory.gaps, 'navigation-budget-too-small']});
+}
+
+/** The memory step's routed answer and applicable memories, or the lane gaps that say why there are none. */
+function navigationMemory(
+  request: ContextBriefNavigationRequestV1,
+  answer: NavigationAnswerV1,
+  evidence: NavigationReadEvidenceV1,
+): {readonly gaps: readonly string[]; readonly selected?: ReturnType<typeof selectNavigationMemory>} {
+  const read = evidence.memory;
+  if (read === undefined) return {gaps: [MEMORY_GAP]};
+  if (read.status !== 'ok') return {gaps: read.gaps};
+  return {
+    gaps: [],
+    selected: selectNavigationMemory({
+      answer,
+      observation: evidence.observation,
+      task: request.task,
+      observedAt: read.observedAt,
+      memory: read.memory,
+      ...(read.memoryProjects === undefined ? {} : {memoryProjects: read.memoryProjects}),
+      repositoryIdentityKind: evidence.repositoryIdentityKind,
+    }),
+  };
 }
 
 function finish(
