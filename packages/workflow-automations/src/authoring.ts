@@ -248,8 +248,7 @@ const NativeCompactIntentInputSchema = Schema.Struct({
     }),
   ]),
   review: Schema.Struct({required: Schema.Boolean, reason: prose}).annotate({
-    description:
-      'The independent plan-authoring review of this intent, recorded before admission. Source review of the implementation always happens separately.',
+    description: 'Plan review of this intent; source review is separate.',
   }),
 });
 
