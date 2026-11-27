@@ -95,6 +95,7 @@ import {
 import {sha256FileHex} from '@threadnote/platform/digest';
 import {CommandExecutor, runDetachedCommandEffect} from '@threadnote/platform/command';
 import {LspFault, makeLspClient, SemanticWireStartup, spawnLspWire, type LspWire} from './lsp_transport.js';
+import {SemanticProviderNotRunning} from './source_evidence.js';
 import {makeTypeScriptSession, semanticTypeScriptCoordinatorSession} from './providers/typescript.js';
 import {verifyNativeTypeScriptCandidate} from './providers/typescript_runtime.js';
 import {recheckNativeTypeScriptExecutable} from '@threadnote/graph/typescript_runtime';
@@ -510,12 +511,14 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
         }).pipe(Effect.onExit(exit => Deferred.done(session.closed, exit)));
       }),
     );
+  /** `existingOnly` attaches only to a running session: without one it fails and starts nothing. */
   const attach = (
     observation: Observation,
     text: string,
     language: SemanticLanguage,
     environment?: string,
     control?: SemanticStartupControl,
+    existingOnly = false,
   ) =>
     startup.withPermit(
       Effect.gen(function* () {
@@ -585,9 +588,12 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
         let diskBasis = session ? yield* configurationBasis(providerId, worktree, session.startup) : '';
         fixed = {...fixed, configuration: diskBasis};
         if (session && (session.diskBasis !== diskBasis || session.basis.toolchain !== toolchain)) {
+          // A read-only existing-only request never closes a running session; it only reports that none is usable.
+          if (existingOnly) return yield* SemanticProviderNotRunning.make({});
           yield* retire(id, session);
           return yield* LspFault.make({code: 'rejected'});
         }
+        if (!session && existingOnly) return yield* SemanticProviderNotRunning.make({});
         if (!session) {
           if ((failures.get(id) ?? 0) >= 2 || failures.size >= 256) return yield* LspFault.make({code: 'prerequisite'});
           const owned = yield* Scope.fork(scope);
@@ -1646,6 +1652,54 @@ export const inspectSemanticEndpoint = Effect.fn('semantic.inspectEndpoint')(fun
     Effect.timeoutOption(2000),
     Effect.map(Option.getOrUndefined),
   );
+});
+/**
+ * Attach to the coordinator that already runs for this exact runtime, worktree, data home and host catalog.
+ * It never starts, repairs or writes. No attachment, another identity or a failed status probe gives undefined;
+ * a storage fence or bootstrap that does not decode fails.
+ */
+export const attachSemanticEndpoint = Effect.fn('semantic.attachEndpoint')(function* (
+  options: SemanticEndpointLaunch,
+  milliseconds = 250,
+) {
+  const launch = structuredClone(options);
+  if (!launch.enabled || !Schema.is(Digest)(launch.runtimeIdentity) || !Schema.is(FileUri)(launch.worktree))
+    return undefined;
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const home = yield* fs.realPath(launch.dataHome);
+  if (home !== path.resolve(launch.dataHome)) return undefined;
+  yield* verifyCoordinatorStorage(launch, home);
+  const key = sha256HexSync(JSON.stringify([home, launch.worktree, launch.runtimeIdentity]));
+  const directory = path.join(home, 'semantic', EffectString.slice(0, 20)(key));
+  const bootstrapFile = path.join(directory, 'host.json');
+  if (!(yield* fs.exists(bootstrapFile))) return undefined;
+  const bootstrap = yield* readSemanticBootstrap(bootstrapFile);
+  if (
+    bootstrap.worktree !== launch.worktree ||
+    bootstrap.runtimeIdentity !== launch.runtimeIdentity ||
+    bootstrap.dataHome !== home ||
+    semanticCatalogKey(bootstrap) !== semanticCatalogKey(launch)
+  )
+    return undefined;
+  const socket = path.join(directory, 'rpc.sock');
+  const running = yield* requestSemanticEndpoint(socket, bootstrap.token, {operation: 'status'}).pipe(
+    Effect.timeoutOption(Math.max(1, milliseconds)),
+    Effect.map(
+      result =>
+        Option.isSome(result) &&
+        typeof result.value === 'object' &&
+        result.value !== null &&
+        'experimental' in result.value &&
+        result.value.experimental === true,
+    ),
+    Effect.orElseSucceed(() => false),
+  );
+  if (!running) return undefined;
+  return {
+    request: (body: SemanticRequest, capability?: string) =>
+      requestSemanticEndpoint(socket, bootstrap.token, body, capability),
+  };
 });
 /** Starts one runtime/worktree coordinator lazily. Capabilities/source text never enter process arguments. */
 export const ensureSemanticEndpoint = Effect.fn('semantic.ensureEndpoint')(function* (options: SemanticEndpointLaunch) {

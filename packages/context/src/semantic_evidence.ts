@@ -5,7 +5,7 @@ import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {CodeGraphStore} from '@threadnote/graph/store';
 import {withCodeGraphDeferredTransaction} from '@threadnote/graph/store/session';
 import {createCodeGraphSourceSpanCanonicalizer} from '@threadnote/graph/citation/primitives';
-import type {CodeGraphQueryNode} from '@threadnote/graph/types';
+import type {CodeGraphQueryNode, CodeGraphQueryResult, RepositoryIdentity} from '@threadnote/graph/types';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {codeGraphCitationSourceKey, readCodeGraphCitationSources} from '@threadnote/graph/citation/source';
@@ -81,63 +81,94 @@ export function compactSemanticContextKnowledge(
   };
 }
 
-/** Bind a document, without treating graph edges or memory as compiler facts. No commit fallback is permitted. */
-export const retrieveSemanticContextSourceEvidence = Effect.fn('context.semanticSourceEvidence')(function* (
-  request: ContextBriefSourceEvidenceRequest,
+/** The graph side of one semantic disk join: the exact repository, worktree, snapshot and path hashes. */
+export interface SemanticContextSourceGraph {
+  readonly identity: RepositoryIdentity;
+  readonly repositoryId: string;
+  readonly snapshot: Pick<CodeGraphQueryResult['snapshot'], 'id' | 'worktreeId' | 'commit'>;
+  readonly freshness: CodeGraphQueryResult['freshness'];
+  /** Graph content hashes recorded for the observed path; the join requires exactly one. */
+  readonly contentHashes: (path: string) => readonly string[];
+}
+
+/**
+ * The LSP-owned disk join of one semantic observation to the same graph bytes. It reads only the current
+ * worktree file (no commit fallback) and binds it only when those bytes are the observed content.
+ * The bytes are returned with a binding so a caller can apply its own line-number rules to them.
+ */
+export const bindSemanticContextSource = Effect.fn('context.bindSemanticSource')(function* (
+  graph: SemanticContextSourceGraph,
   evidence: Evidence,
 ) {
   const path = yield* Path.Path;
   const observed = evidence.observation;
-  const worktree = canonicalFileUri((yield* path.toFileUrl(request.identity.repoRoot)).href);
+  const worktree = canonicalFileUri((yield* path.toFileUrl(graph.identity.repoRoot)).href);
   const target = yield* path.fromFileUrl(new URL(observed.uri));
   const project = yield* path.fromFileUrl(new URL(observed.project));
-  const relative = EffectArray.join(
-    EffectString.split(path.sep)(path.relative(request.identity.repoRoot, target)),
-    '/',
-  );
-  const nodes = EffectArray.filter(request.result.nodes, node => node.path === relative);
-  const hashes = [...new Set(EffectArray.map(nodes, node => node.contentHash))];
-  let binding: SemanticContextSourceBindingV1 | null = null;
-  if (
+  const relative = EffectArray.join(EffectString.split(path.sep)(path.relative(graph.identity.repoRoot, target)), '/');
+  const hashes = [...new Set(graph.contentHashes(relative))];
+  const unbound = {binding: null, bytes: undefined} as const;
+  if (!(
     evidence.basis === 'semantic' &&
     observed.view.kind === 'disk' &&
     observed.worktree === worktree &&
-    request.result.repository.repositoryId === request.identity.repositoryId &&
-    request.result.snapshot.worktreeId === request.identity.worktreeId &&
-    request.result.snapshot.commit === request.identity.headCommit &&
-    request.result.freshness === 'current' &&
-    (project === request.identity.repoRoot || EffectString.startsWith(request.identity.repoRoot + path.sep)(project)) &&
+    graph.repositoryId === graph.identity.repositoryId &&
+    graph.snapshot.worktreeId === graph.identity.worktreeId &&
+    graph.snapshot.commit === graph.identity.headCommit &&
+    graph.freshness === 'current' &&
+    (project === graph.identity.repoRoot || EffectString.startsWith(graph.identity.repoRoot + path.sep)(project)) &&
     EffectString.startsWith(project + path.sep)(target) &&
     hashes.length === 1 &&
     relative !== '' &&
     !EffectString.startsWith('../')(relative) &&
     !path.isAbsolute(relative)
-  ) {
-    const source = {repositoryPath: relative, expectedContentHash: hashes[0], requireBytes: true};
-    const resolved = yield* readCodeGraphCitationSources({
-      allowCommitFallback: false,
-      objectFormat: request.identity.objectFormat,
-      repositoryRoot: request.identity.repoRoot,
-      sourceCommit: request.result.snapshot.commit,
-      retainedBytesLimit: 4 * 1024 * 1024,
-      sources: [source],
-    });
-    const bytes = resolved.get(codeGraphCitationSourceKey(source));
-    if (bytes !== undefined && sha256HexSync(bytes) === observed.content) {
-      binding = {
-        version: 1,
-        scope: 'document',
-        observation: sha256HexSync(observationKey(observed)),
-        semanticContent: observed.content,
-        graph: {
-          repositoryId: request.identity.repositoryId,
-          snapshotId: request.result.snapshot.id,
-          path: relative,
-          contentHash: hashes[0],
-        },
-      };
-    }
-  }
+  ))
+    return unbound;
+  const source = {repositoryPath: relative, expectedContentHash: hashes[0], requireBytes: true};
+  const resolved = yield* readCodeGraphCitationSources({
+    allowCommitFallback: false,
+    objectFormat: graph.identity.objectFormat,
+    repositoryRoot: graph.identity.repoRoot,
+    sourceCommit: graph.snapshot.commit,
+    retainedBytesLimit: 4 * 1024 * 1024,
+    sources: [source],
+  });
+  const bytes = resolved.get(codeGraphCitationSourceKey(source));
+  if (bytes === undefined || sha256HexSync(bytes) !== observed.content) return unbound;
+  const binding: SemanticContextSourceBindingV1 = {
+    version: 1,
+    scope: 'document',
+    observation: sha256HexSync(observationKey(observed)),
+    semanticContent: observed.content,
+    graph: {
+      repositoryId: graph.identity.repositoryId,
+      snapshotId: graph.snapshot.id,
+      path: relative,
+      contentHash: hashes[0],
+    },
+  };
+  return {binding, bytes};
+});
+
+/** Bind a document, without treating graph edges or memory as compiler facts. No commit fallback is permitted. */
+export const retrieveSemanticContextSourceEvidence = Effect.fn('context.semanticSourceEvidence')(function* (
+  request: ContextBriefSourceEvidenceRequest,
+  evidence: Evidence,
+) {
+  const {binding} = yield* bindSemanticContextSource(
+    {
+      identity: request.identity,
+      repositoryId: request.result.repository.repositoryId,
+      snapshot: request.result.snapshot,
+      freshness: request.result.freshness,
+      contentHashes: path =>
+        EffectArray.map(
+          EffectArray.filter(request.result.nodes, node => node.path === path),
+          node => node.contentHash,
+        ),
+    },
+    evidence,
+  );
   return {
     binding,
     source:

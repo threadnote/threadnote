@@ -10,6 +10,7 @@ import {
 } from '@threadnote/context/compiler';
 import type {Evidence} from '@threadnote/semantic/contracts';
 import {compileContextBriefNavigationWith, type NavigationLaneDependencies} from '@threadnote/context/navigation/lane';
+import {makeNavigationSemanticDependency} from './navigation_semantic_adapter.js';
 import {readNavigationEvidence} from '@threadnote/context/navigation/read';
 export {compileContextBriefWith, type ContextBriefCompilerDependencies} from '@threadnote/context/compiler';
 import {Cause, Clock, DateTime, Effect, Exit, Schema} from 'effect';
@@ -505,6 +506,7 @@ export const compileContextBriefNavigation = Effect.fn('contextBrief.compileNavi
       {
         navigationEvidence: sources.navigationEvidence!,
         memoryEvidence: sources.memoryEvidence,
+        navigationSemantic: makeNavigationSemanticDependency(config),
       },
       input,
     );

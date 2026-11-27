@@ -814,6 +814,47 @@ describe.skipIf(process.platform === 'win32')('Java coordinator registration', (
           expect(f.finishes()).toBe(1);
         }).pipe(TestClock.withLive),
     );
+    layerIt.effect('an existing-only attach starts no provider session and reuses a running one', () =>
+      Effect.gen(function* () {
+        const f = yield* javaCoordinatorFixture();
+        const coordinator = yield* f.make();
+        const refused = yield* coordinator
+          .attach(f.basis, f.text, 'java', 'prepared-main', undefined, true)
+          .pipe(Effect.exit);
+        expect(refused._tag).toBe('Failure');
+        if (refused._tag === 'Failure')
+          expect(Cause.findErrorOption(refused.cause)).toMatchObject({value: {_tag: 'SemanticProviderNotRunning'}});
+        expect(f.factory).not.toHaveBeenCalled();
+        yield* coordinator.attach(f.basis, f.text, 'java', 'prepared-main');
+        expect(f.factory).toHaveBeenCalledTimes(1);
+        yield* coordinator.attach(f.basis, f.text, 'java', 'prepared-main', undefined, true);
+        expect(f.factory).toHaveBeenCalledTimes(1);
+      }).pipe(TestClock.withLive),
+    );
+    layerIt.effect('an existing-only attach never retires a running session whose configuration drifted', () =>
+      Effect.gen(function* () {
+        const f = yield* javaCoordinatorFixture();
+        let configuration = yield* semanticTreeDigest(f.project);
+        const coordinator = yield* makeSemanticCoordinator({
+          enabled: true,
+          dataHome: f.home,
+          java: f.candidate,
+          worktree: f.basis.worktree,
+          verifySelected: (_id, _candidate, _runtime, configurationOnly) =>
+            Effect.sync(() => (configurationOnly ? configuration : sha256HexSync('verified'))),
+        });
+        yield* coordinator.attach(f.basis, f.text, 'java', 'prepared-main');
+        configuration = sha256HexSync('drifted configuration');
+        const refused = yield* coordinator
+          .attach(f.basis, f.text, 'java', 'prepared-main', undefined, true)
+          .pipe(Effect.exit);
+        expect(refused._tag).toBe('Failure');
+        if (refused._tag === 'Failure')
+          expect(Cause.findErrorOption(refused.cause)).toMatchObject({value: {_tag: 'SemanticProviderNotRunning'}});
+        expect(f.finishes()).toBe(0);
+        expect(f.factory).toHaveBeenCalledTimes(1);
+      }).pipe(TestClock.withLive),
+    );
     layerIt.effect(
       'saved-disk preview attachment reuses the ready provider and refuses drift without granting preparation',
       () =>
