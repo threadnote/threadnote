@@ -457,6 +457,7 @@ function checkNativeCycleReviewHistory(
   );
   const seen = new Set<string>();
   const unmatched: string[] = [];
+  const reasonless: string[] = [];
   const reintroduced: string[] = [];
   for (const finding of review.findings) {
     if (
@@ -470,17 +471,25 @@ function checkNativeCycleReviewHistory(
       fail('Findings require unique IDs, relative locations and concrete evidence.');
     seen.add(finding.id);
     const old = prior.get(finding.id);
+    // A resolved finding's required evidence explains the resolution; rejecting or downgrading one needs a reason.
     if (
-      (['resolved', 'rejected'].includes(finding.state) ||
-        (old && nativeCycleBlockingFinding(old) && !nativeCycleBlockingFinding(finding))) &&
+      (finding.state === 'rejected' ||
+        (finding.state !== 'resolved' &&
+          old &&
+          nativeCycleBlockingFinding(old) &&
+          !nativeCycleBlockingFinding(finding))) &&
       !Effect.pipe(finding.reason, effectOptionalString =>
         effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
       )
     )
-      fail(`Finding ${finding.id} needs a reason: resolving, rejecting or downgrading a finding requires one.`);
+      reasonless.push(finding.id);
     if (['resolved', 'carried'].includes(finding.state) && !old) unmatched.push(finding.id);
     if (finding.state === 'new' && old) reintroduced.push(finding.id);
   }
+  if (reasonless.length > 0)
+    fail(
+      `Findings ${EffectArray.join(reasonless, ', ')} need a reason: rejecting or downgrading a finding requires one.`,
+    );
   if (unmatched.length > 0)
     fail(
       previous

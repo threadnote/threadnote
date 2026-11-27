@@ -4589,14 +4589,6 @@ describe('native task actions', () => {
               phaseId: 'one',
               reason: 'A separately approved followup needs fresh source proof.',
             });
-            const blocked = yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo});
-            yield* runNativeTaskAction(f.config, {
-              command: 'resume',
-              runId: 'native-run',
-              callerCwd: f.repo,
-              taskRef: String(blocked.taskRef),
-              reason: 'Continue the approved same-phase followup.',
-            });
           });
         yield* reopen();
         const watchFile = (id: string) => f.path.join(f.home, 'workflow-automations', 'native-watch-v1', id + '.json');
