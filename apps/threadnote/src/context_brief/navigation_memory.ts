@@ -1,4 +1,4 @@
-import {Array as EffectArray, DateTime, Effect, Schema} from 'effect';
+import {Array as EffectArray, Clock, DateTime, Effect, Schema} from 'effect';
 import {
   isReadCleanupUnconfirmed,
   makeReadDeadline,
@@ -19,13 +19,16 @@ import {
 } from '@threadnote/context/navigation/read';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {contextBriefMemoryEligibility, retrieveContextBriefCodeLinkedMemoryEvidence} from './memory_evidence.js';
+import {navigationSemanticReady} from './navigation_semantic_adapter.js';
 
-/** The memory step ends this long after it starts, or earlier with the read; the semantic step comes after it. */
+/** The memory step's own cap; the request's `semanticFloorAt` and the read deadline can end it earlier. */
 const NAVIGATION_MEMORY_MILLISECONDS = 750;
 /** The memories one answer can carry. */
 const NAVIGATION_MEMORY_CANDIDATES = 4;
 /** Time the worker keeps after the memory step to reply inside its own deadline. */
 const REPLY_RESERVE_MILLISECONDS = 250;
+/** Parent work after the worker reply (decode, admission, cwd check) before the semantic step starts. */
+const PARENT_RESERVE_MILLISECONDS = 150;
 
 const unavailable = (gap: string): NavigationMemoryReadV1 => ({status: 'unavailable', gaps: [gap]});
 
@@ -60,8 +63,24 @@ const readNavigationMemory = Effect.fn('navigation.readMemory')(function* (
     CONTEXT_BRIEF_MAXIMUM_CODE_REFS,
   );
   if (codeRefs.length === 0) return unavailable('navigation-memory-no-route-candidates');
+  // Memory gives way to the semantic floor only when the semantic step can run and the floor is not lost yet.
+  const untilFloor =
+    request.semanticFloorAt === undefined
+      ? 0
+      : request.semanticFloorAt - PARENT_RESERVE_MILLISECONDS - (yield* Clock.currentTimeMillis);
+  const yields =
+    untilFloor > 0 &&
+    (yield* navigationSemanticReady(
+      config,
+      evidence.identity.repoRoot,
+      EffectArray.map(evidence.anchors, anchor => anchor.path),
+    ));
   const deadline = yield* makeReadDeadline(
-    Math.min(NAVIGATION_MEMORY_MILLISECONDS, yield* readDeadlineRemaining(parent, REPLY_RESERVE_MILLISECONDS)),
+    Math.min(
+      yields ? untilFloor : NAVIGATION_MEMORY_MILLISECONDS,
+      NAVIGATION_MEMORY_MILLISECONDS,
+      yield* readDeadlineRemaining(parent, REPLY_RESERVE_MILLISECONDS),
+    ),
   );
   const scope = request.scope;
   const read = Effect.gen(function* () {

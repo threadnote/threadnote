@@ -1,6 +1,6 @@
 import * as EffectArray from 'effect/Array';
 import * as EffectString from 'effect/String';
-import {Cause, Effect, Option, Path, Schema} from 'effect';
+import {Cause, Effect, Option, Path, Result, Schema} from 'effect';
 import {readDeadlineRemaining} from '@threadnote/platform/read_deadline';
 import {canonicalFileUri, Observation} from '@threadnote/semantic/contracts';
 import {createCodeGraphSourceSpanCanonicalizer} from '@threadnote/graph/citation/primitives';
@@ -16,6 +16,7 @@ import {semanticCompiledRuntimeIdentity} from '../semantic/readiness_jobs.js';
 import {semanticLanguageProductionQualified} from '../effect/semantic_cli.js';
 import {
   attachSemanticEndpoint,
+  semanticEndpointBootstrapPresent,
   type ensureSemanticEndpoint,
   type SemanticEndpointLaunch,
 } from '../semantic/coordinator.js';
@@ -203,6 +204,34 @@ function environmentFor(
   const environments = (language === 'python' ? catalog.python?.environments : catalog.java?.environments) ?? [];
   return environments.length === 1 ? {ok: true, environment: environments[0].id} : {ok: false};
 }
+
+/**
+ * A cheap passive hint that the semantic step can run for these anchor paths: the worktree host profile configures
+ * a provider for at least one anchor language, and a coordinator bootstrap with its socket file exists for this
+ * worktree. File reads only: no socket request, status probe, attach, lock, write or process start. Any failure is
+ * not ready; an interruption still propagates. It is a hint, not an authorization: the enrichment makes the real
+ * attach-only check and keeps its own gaps, so a stale socket file costs only memory time.
+ */
+export const navigationSemanticReady = (
+  config: RuntimeConfig,
+  repositoryRoot: string,
+  anchorPaths: readonly string[],
+) =>
+  softly(
+    Effect.gen(function* () {
+      const languages = EffectArray.filterMap(anchorPaths.slice(0, 2), anchorPath => {
+        const language = navigationSemanticLanguage(anchorPath);
+        return language === undefined || language === 'kotlin' ? Result.failVoid : Result.succeed(language);
+      });
+      if (languages.length === 0) return false;
+      const path = yield* Path.Path;
+      const worktree = canonicalFileUri((yield* path.toFileUrl(repositoryRoot)).href);
+      const selected = yield* readSemanticHostProfile(config, worktree);
+      if (!EffectArray.some(languages, language => environmentFor(selected.profile.catalog, language).ok)) return false;
+      return yield* semanticEndpointBootstrapPresent({dataHome: selected.home, worktree});
+    }),
+    () => false,
+  );
 
 const enrich = Effect.fn('navigation.semanticEnrichment')(function* (
   config: RuntimeConfig,

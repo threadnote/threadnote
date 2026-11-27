@@ -695,6 +695,7 @@ const navigationRequest = Schema.Struct({
       Schema.isMaxLength(NAVIGATION_CONTINUATION_LOCATORS),
     ),
   ),
+  semanticFloorAt: optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
 });
 export const contextBriefNativeReadRequestSchema = Schema.Union([
   Schema.Struct({

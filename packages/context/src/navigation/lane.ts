@@ -1,4 +1,4 @@
-import {Array as EffectArray, Effect, Schema} from 'effect';
+import {Array as EffectArray, Clock, Effect, Schema} from 'effect';
 import {
   AGENT_RESPONSE_ESTIMATED_BYTES_PER_TOKEN,
   type measureAgentToolResponse,
@@ -31,6 +31,9 @@ export const CONTEXT_BRIEF_NAVIGATION_TYPE = 'context-brief-navigation' as const
 export const NAVIGATION_SEMANTIC_MILLISECONDS = 1500;
 /** No semantic request starts with less time than one coordinator request needs. */
 export const NAVIGATION_SEMANTIC_MINIMUM_MILLISECONDS = 500;
+/** The semantic step must start this long after the request to keep its floor; memory never takes that time. */
+export const NAVIGATION_SEMANTIC_FLOOR_MILLISECONDS =
+  NAVIGATION_SEMANTIC_MILLISECONDS - NAVIGATION_SEMANTIC_MINIMUM_MILLISECONDS;
 
 export interface NavigationLaneDependencies<NavigationR = never, SemanticR = never> {
   /**
@@ -90,6 +93,7 @@ export const compileContextBriefNavigationWith = Effect.fn('contextBrief.navigat
   SemanticR = never,
 >(dependencies: NavigationLaneDependencies<NavigationR, SemanticR>, input: unknown) {
   const request = parseContextBriefNavigationRequestV1(input);
+  const startedAt = yield* Clock.currentTimeMillis;
   const readDeadline = yield* makeReadDeadline(CONTEXT_BRIEF_READ_MILLISECONDS);
   // The read deadline started with the request, so the semantic step ends 1500 ms after the start.
   const semanticDeadline: ReadDeadline = Object.freeze({
@@ -111,7 +115,9 @@ export const compileContextBriefNavigationWith = Effect.fn('contextBrief.navigat
     task: request.task,
     codeRefs: request.codeRefs,
     maximumEstimatedTokens: request.budgetTokens,
-    ...(continuation === undefined ? {} : {followUp: continuation.locators}),
+    ...(continuation === undefined
+      ? {semanticFloorAt: startedAt + NAVIGATION_SEMANTIC_FLOOR_MILLISECONDS}
+      : {followUp: continuation.locators}),
   };
   const evidence = yield* withinReadDeadline(
     readDeadline,

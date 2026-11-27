@@ -1,8 +1,9 @@
 import * as HostProfile from '../../src/semantic/host_profile.js';
 import * as AgentQueries from '../../src/semantic/agent_queries.js';
+import * as Coordinator from '../../src/semantic/coordinator.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Layer, Path, String as EffectString} from 'effect';
+import {Array as EffectArray, Effect, FileSystem, Layer, Path, String as EffectString} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it, vi} from 'vitest';
 import {canonicalFileUri} from '@threadnote/semantic/contracts';
@@ -16,6 +17,7 @@ import {
   navigationAnchorPosition,
   navigationLineConvention,
   navigationSemanticLanguage,
+  navigationSemanticReady,
   type NavigationSemanticHost,
   type NavigationSemanticServices,
 } from '../../src/context_brief/navigation_semantic_adapter.js';
@@ -336,6 +338,55 @@ describe('navigation semantic adapter', () => {
       expect(attaches).toBe(0);
       expect(enriched.candidates).toEqual(f.input.candidates);
       expect(enriched.gaps).toEqual(['structural-fixture-gap', 'semantic-unavailable']);
+    }).pipe(Effect.scoped, provideTestLayer(io), TestClock.withLive),
+  );
+});
+
+describe('navigation semantic readiness probe', () => {
+  /** A bootstrap next to a plain file named rpc.sock: a probe that connected to it could not answer ready. */
+  const bootstrap = (f: Effect.Success<typeof fixture>) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = path.join(f.home, 'semantic', EffectString.repeat(20)('a'));
+      yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
+      yield* fs.writeFileString(
+        path.join(directory, 'host.json'),
+        JSON.stringify({
+          version: 1,
+          runtimeIdentity: sha256HexSync('runtime'),
+          token: sha256HexSync('token'),
+          worktree: f.worktree,
+          dataHome: f.home,
+          ...f.profile.catalog,
+        }),
+        {mode: 0o600},
+      );
+      yield* fs.writeFileString(path.join(directory, 'rpc.sock'), '');
+    });
+  const neverConnects = Effect.acquireRelease(
+    Effect.sync(() => [
+      vi.spyOn(Coordinator, 'attachSemanticEndpoint'),
+      vi.spyOn(Coordinator, 'inspectSemanticEndpoint'),
+      vi.spyOn(AgentQueries, 'runSemanticAgentQueryWith'),
+    ]),
+    spies => Effect.sync(() => EffectArray.forEach(spies, spy => spy.mockRestore())),
+  );
+
+  effectIt.effect('is ready only with a profile slot for an anchor language and an endpoint bootstrap', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const spies = yield* neverConnects;
+      const ready = (paths: readonly string[]) => navigationSemanticReady(f.config, f.request.identity.repoRoot, paths);
+      yield* withProfile(Effect.fail(HostProfile.SemanticHostProfileFault.make({reason: 'missing'})));
+      expect(yield* ready(['main.go'])).toBe(false);
+      yield* withProfile(Effect.succeed({home: f.home, profile: f.profile, digest: sha256HexSync('profile')}));
+      expect(yield* ready(['main.go'])).toBe(false);
+      yield* bootstrap(f);
+      expect(yield* ready(['main.go'])).toBe(true);
+      expect(yield* ready(['store.py', 'main.go'])).toBe(true);
+      for (const paths of [[], ['store.py'], ['Main.kt'], ['notes.txt']]) expect(yield* ready(paths)).toBe(false);
+      for (const spy of spies) expect(spy).not.toHaveBeenCalled();
     }).pipe(Effect.scoped, provideTestLayer(io), TestClock.withLive),
   );
 });

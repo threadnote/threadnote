@@ -39,6 +39,12 @@ export interface NavigationReadRequestV1 {
   readonly maximumEstimatedTokens: number;
   /** Warm write-boundary follow-up: re-read only these effect nodes; task discovery does not run. */
   readonly followUp?: readonly NavigationEffectsLocator[];
+  /**
+   * Wall-clock epoch milliseconds at which the semantic step must start to keep its floor. When the application
+   * finds that semantic can run and this time is not past, the memory step ends before it; otherwise memory keeps
+   * only its own cap. Wall clock, because the worker's monotonic clock has a different origin.
+   */
+  readonly semanticFloorAt?: number;
 }
 
 export interface NavigationReadEvidenceV1 {

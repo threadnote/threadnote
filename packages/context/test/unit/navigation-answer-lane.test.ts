@@ -12,9 +12,17 @@ import {
   encodeNavigationContinuation,
   navigationRelativePath,
 } from '../../src/navigation/continuation.js';
-import {compileContextBriefNavigationWith, type NavigationLaneDependencies} from '../../src/navigation/lane.js';
+import {
+  compileContextBriefNavigationWith,
+  NAVIGATION_SEMANTIC_FLOOR_MILLISECONDS,
+  type NavigationLaneDependencies,
+} from '../../src/navigation/lane.js';
 import type {NavigationInput, NavigationScope} from '../../src/navigation/model.js';
-import {admitNavigationRead, type NavigationReadEvidenceV1} from '../../src/navigation/read.js';
+import {
+  admitNavigationRead,
+  type NavigationReadEvidenceV1,
+  type NavigationReadRequestV1,
+} from '../../src/navigation/read.js';
 import {parseContextBriefNavigationRequestV1} from '../../src/navigation/request.js';
 import type {NavigationSemanticRequestV1} from '../../src/navigation/semantic.js';
 import {parseContextBriefRequestV1, type ContextBriefMemoryCandidateV1} from '../../src/types.js';
@@ -346,6 +354,25 @@ describe('navigate lane', () => {
           expect(projected.measurement.totalBytes).toBeLessThanOrEqual(projected.maximumBytes);
           expect(projected.structuredContent.navigation).toBeDefined();
         }
+    }),
+  );
+
+  effectIt.effect('keeps the semantic floor from the memory step and reads no memory for a follow-up', () =>
+    Effect.gen(function* () {
+      const requests: NavigationReadRequestV1[] = [];
+      const recording = deps({
+        navigationEvidence: read => Effect.sync(() => (requests.push(read), evidence())),
+      });
+      yield* TestClock.adjust('5 seconds');
+      const first = yield* compileContextBriefNavigationWith(recording, request());
+      yield* compileContextBriefNavigationWith(
+        recording,
+        request({continuation: {token: first.structuredContent.continuation!, focus: 'effects'}}),
+      );
+      expect(requests[0]?.semanticFloorAt).toBe(5000 + NAVIGATION_SEMANTIC_FLOOR_MILLISECONDS);
+      expect(NAVIGATION_SEMANTIC_FLOOR_MILLISECONDS).toBe(1000);
+      expect(requests[1]?.followUp).toBeDefined();
+      expect(requests[1]?.semanticFloorAt).toBeUndefined();
     }),
   );
 
