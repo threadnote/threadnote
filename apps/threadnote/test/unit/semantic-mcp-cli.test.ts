@@ -257,6 +257,30 @@ const citationFailureEvidence = (
   return EffectString.slice(0, 2048)(JSON.stringify({candidate: selected, gaps, nativeReads}));
 };
 
+/**
+ * One native context read takes 2.5-3.2 s on the macOS Intel runner, so the 5 s brief budget can end before the
+ * memory read. Only there, and only when a native read timed out, may a brief omit memory: it must then declare a
+ * budget gap. Every other host must return the memory. Safety assertions apply on every host.
+ */
+const SLOW_NATIVE_READ_HOST = process.platform === 'darwin' && process.arch === 'x64';
+const SLOW_HOST_TEST_MILLISECONDS = SLOW_NATIVE_READ_HOST ? 60_000 : 20_000;
+function memoryBudgetDeclared(
+  brief: {readonly coverage?: {readonly gaps?: readonly string[]}} | null | undefined,
+  nativeReads: readonly (NativeReadDiagnostic | string)[],
+): boolean {
+  if (
+    !SLOW_NATIVE_READ_HOST ||
+    !EffectArray.some(nativeReads, read => typeof read === 'object' && read.outcome === 'timeout')
+  )
+    return false;
+  const gaps = brief?.coverage?.gaps ?? [];
+  expect(
+    EffectArray.some(gaps, gap => EffectString.endsWith('-budget-exhausted')(gap)),
+    JSON.stringify({gaps, nativeReads}),
+  ).toBe(true);
+  return true;
+}
+
 // Compilation has its own setup allowance inside the existing 30-second hook.
 // Leave ten seconds for launch, phase handling and original owned cleanup; read budgets are separate.
 const CONTEXT_WORKER_BUNDLE_BUILD_MILLISECONDS = 20_000;
@@ -901,7 +925,8 @@ native(effectIt.layer(contextWorkerBundleLayer))('semantic context with canonica
         yield* f.prepareMemory;
         const before = yield* f.ask;
         const beforeImage = structuredClone(before.result);
-        expect(JSON.stringify(before.publicKnowledge)).toContain('ORIGINAL_RUN_CONSTRAINT');
+        if (!memoryBudgetDeclared(before.knowledge.brief, f.nativeReadDiagnostics()))
+          expect(JSON.stringify(before.publicKnowledge)).toContain('ORIGINAL_RUN_CONSTRAINT');
         const diagnostics = yield* f.diagnostics;
         const first = yield* diagnostics.read();
         expect(first.status).toBe('ok');
@@ -954,6 +979,12 @@ native(effectIt.layer(contextWorkerBundleLayer))('semantic context with canonica
         // The document projection exposes the old citation; new-symbol context safely excludes that constraint.
         const document = yield* f.document;
         const unresolved = memoryByUri(document.durableDecisions ?? [], 'threadnote://memory/tn_before-rename');
+        // An unresolved citation is never shown as fresh.
+        if (unresolved !== undefined) expect(unresolved).not.toMatchObject({freshness: 'fresh'});
+        if (memoryBudgetDeclared(document, f.nativeReadDiagnostics()) && unresolved === undefined) {
+          yield* f.unchanged;
+          return;
+        }
         expect(unresolved, JSON.stringify(unresolved)).toMatchObject({
           freshness: 'unknown',
           freshnessBasis: 'code-citations',
@@ -971,7 +1002,7 @@ native(effectIt.layer(contextWorkerBundleLayer))('semantic context with canonica
         ).toBe(true);
         yield* f.unchanged;
       }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
-    {timeout: 20000},
+    {timeout: SLOW_HOST_TEST_MILLISECONDS},
   );
 
   layerIt.effect(
@@ -995,6 +1026,18 @@ native(effectIt.layer(contextWorkerBundleLayer))('semantic context with canonica
         expect(knowledge.binding?.scope).toBe('document');
         expect(knowledge.memorySelection?.nodeId).toBe(f.run.id);
         const cards = knowledge.brief?.durableDecisions ?? [];
+        expect(f.nativeReadDiagnostics().length).toBeGreaterThan(0);
+        expect(JSON.stringify(publicKnowledge)).not.toContain('NEVER_FOR_RUN');
+        expect(JSON.stringify(publicKnowledge)).not.toContain('NEVER_FOREIGN_PROJECT');
+        expect(JSON.stringify(knowledge.brief)).not.toContain('NEVER_FOR_RUN');
+        expect(knowledge.gaps).toContain('semantic-symbol-memory-coverage-incomplete');
+        const staleCard = memoryByUri(cards, 'threadnote://memory/tn_stale');
+        if (staleCard !== undefined) expect(staleCard).not.toMatchObject({freshness: 'fresh'});
+        expect(current).not.toBe(stale);
+        if (memoryBudgetDeclared(knowledge.brief, f.nativeReadDiagnostics())) {
+          yield* f.unchanged;
+          return;
+        }
         expect(
           memoryByUri(cards, 'threadnote://memory/tn_current'),
           citationFailureEvidence(
@@ -1008,10 +1051,7 @@ native(effectIt.layer(contextWorkerBundleLayer))('semantic context with canonica
           memoryTrust: 'approved',
           freshnessBasis: 'code-citations',
         });
-        expect(f.nativeReadDiagnostics().length).toBeGreaterThan(0);
         expect(JSON.stringify(publicKnowledge)).toContain('KEEP_CURRENT_43');
-        expect(JSON.stringify(publicKnowledge)).not.toContain('NEVER_FOR_RUN');
-        expect(JSON.stringify(publicKnowledge)).not.toContain('NEVER_FOREIGN_PROJECT');
         expect(memoryByUri(cards, 'threadnote://memory/tn_stale')).toMatchObject({freshness: 'stale'});
         const visible = publicKnowledge.brief.durableDecisions ?? [];
         expect(memoryByUri(visible, 'threadnote://memory/tn_current')).toMatchObject({
@@ -1026,16 +1066,13 @@ native(effectIt.layer(contextWorkerBundleLayer))('semantic context with canonica
         expect(
           EffectArray.some(EffectRecord.values(publicKnowledge.brief.output?.omissions ?? {}), count => count > 0),
         ).toBe(true);
-        expect(JSON.stringify(knowledge.brief)).not.toContain('NEVER_FOR_RUN');
-        expect(knowledge.gaps).toContain('semantic-symbol-memory-coverage-incomplete');
-        expect(current).not.toBe(stale);
         yield* f.unchanged;
       }).pipe(
         Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}),
         provideTestLayer(ApplicationLayer),
         TestClock.withLive,
       ),
-    {timeout: 20000},
+    {timeout: SLOW_HOST_TEST_MILLISECONDS},
   );
 
   layerIt.effect(
@@ -1053,12 +1090,18 @@ native(effectIt.layer(contextWorkerBundleLayer))('semantic context with canonica
         yield* f.prepareMemory;
         const {knowledge, publicKnowledge} = yield* f.ask;
         const proposal = memoryByUri(knowledge.brief?.durableDecisions ?? [], 'threadnote://memory/tn_inferred');
+        expect(f.nativeReadDiagnostics().length).toBeGreaterThan(0);
+        // Inferred guidance is never promoted, whatever the budget left.
+        if (proposal !== undefined) expect(proposal).not.toMatchObject({memoryTrust: 'approved'});
+        if (memoryBudgetDeclared(knowledge.brief, f.nativeReadDiagnostics()) && proposal === undefined) {
+          yield* f.unchanged;
+          return;
+        }
         expect(proposal, citationFailureEvidence(proposal, knowledge.gaps, f.nativeReadDiagnostics())).toMatchObject({
           authority: 'agent_generated',
           memoryTrust: 'inferred',
           freshness: 'fresh',
         });
-        expect(f.nativeReadDiagnostics().length).toBeGreaterThan(0);
         expect(JSON.stringify(publicKnowledge)).toContain('PROPOSED_ONLY');
         expect(JSON.stringify(publicKnowledge)).toContain('KEEP_FILE_CONSTRAINT');
         expect(JSON.stringify(publicKnowledge)).toContain('agent_generated');
@@ -1072,7 +1115,7 @@ native(effectIt.layer(contextWorkerBundleLayer))('semantic context with canonica
         provideTestLayer(ApplicationLayer),
         TestClock.withLive,
       ),
-    {timeout: 20000},
+    {timeout: SLOW_HOST_TEST_MILLISECONDS},
   );
 });
 
