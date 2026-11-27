@@ -1026,12 +1026,13 @@ describe('Threadnote MCP toolsets', () => {
             !EffectArray.some(changeTools, change => change.name === tool.name) &&
             !EffectArray.some(writerTools, writer => writer.name === tool.name),
         );
-        // Preserve the P1 budgets for the catalog without the later workflow-task additions.
-        expect(Buffer.byteLength(JSON.stringify(priorCore))).toBeLessThanOrEqual(36_000);
+        // Preserve the P1 budgets for the catalog without the later workflow-task additions. The NAV04 navigate mode
+        // and its continuation argument add about 190 bytes to context_brief.
+        expect(Buffer.byteLength(JSON.stringify(priorCore))).toBeLessThanOrEqual(36_250);
         expect(status).toBeDefined();
         expect(Buffer.byteLength(JSON.stringify(status))).toBeLessThanOrEqual(500);
-        expect(Buffer.byteLength(JSON.stringify(withoutWorkflowTaskTools))).toBeLessThanOrEqual(36_500);
-        expect(Buffer.byteLength(JSON.stringify(withoutMutatingWorkflowTaskTools))).toBeLessThanOrEqual(37_200);
+        expect(Buffer.byteLength(JSON.stringify(withoutWorkflowTaskTools))).toBeLessThanOrEqual(36_700);
+        expect(Buffer.byteLength(JSON.stringify(withoutMutatingWorkflowTaskTools))).toBeLessThanOrEqual(37_450);
         const semanticDescriptorBudgets = [
           ['semantic_capabilities', 512],
           ['semantic_query', 1024],
@@ -1104,7 +1105,8 @@ describe('Threadnote MCP toolsets', () => {
         // control variants, compact expansion declares its phase and decision shapes, and Threadnote 6 adds workflow
         // fields; keep the additive baseline catalog budget explicit. Both caps mirror main's approved +1,900 raise
         // for #1106 (65,200 -> 67,100): baseline 65,250 -> 67,150 and whole catalog 70,192 -> 72,092.
-        expect(baselineCatalogBytes).toBeLessThanOrEqual(67_150);
+        // The NAV04 navigate mode raises the baseline to 67,400; the whole-catalog bound is unchanged.
+        expect(baselineCatalogBytes).toBeLessThanOrEqual(67_400);
         const snapshotBytes = Buffer.byteLength(JSON.stringify(workflowTaskSnapshot));
         const sameLabelBranchBytes = snapshotBytes - Buffer.byteLength(JSON.stringify(baselineSnapshot));
         expect(sameLabelBranchBytes).toBeGreaterThan(0);
@@ -1112,7 +1114,7 @@ describe('Threadnote MCP toolsets', () => {
         // The unchanged 2,500-byte full snapshot guard above bounds this exact delta, including its comma.
         // Each added semantic descriptor contributes one comma to the nonempty compact JSON array.
         const composedCatalogLimit =
-          67_150 +
+          67_400 +
           sameLabelBranchBytes +
           EffectArray.reduce(semanticDescriptorBudgets, 0, (total, [, maximum]) => total + maximum) +
           semanticDescriptorBudgets.length;
@@ -3258,7 +3260,7 @@ describe('Threadnote MCP toolsets', () => {
             codeRefs: {
               anyOf: expect.arrayContaining([{type: 'string'}, {items: {type: 'string'}, maxItems: 8, type: 'array'}]),
             },
-            mode: {enum: ['brief', 'locate', 'explain', 'trace', 'impact', 'resume']},
+            mode: {enum: ['brief', 'locate', 'explain', 'trace', 'impact', 'resume', 'navigate']},
             project: {type: 'string', description: expect.stringMatching(/graph project.*memory tags.*callerCwd/iu)},
             responseFormat: {enum: ['dual', 'agent']},
             surface: {type: 'string'},
