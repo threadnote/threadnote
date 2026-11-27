@@ -29,7 +29,8 @@
     "./navigation/structural": "./src/navigation/structural.ts",
     "./navigation/project": "./src/navigation/project.ts",
     "./navigation/discovery": "./src/navigation/discovery.ts",
-    "./navigation/continuation": "./src/navigation/continuation.ts"
+    "./navigation/continuation": "./src/navigation/continuation.ts",
+    "./navigation/semantic": "./src/navigation/semantic.ts"
   },
   "dependencies": {
     "@threadnote/semantic": "workspace:*",
