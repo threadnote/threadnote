@@ -21,6 +21,7 @@ import {
   RECALL_INVENTORY_POLICY_VERSION,
 } from './freshness.js';
 import * as RecallIndexIdentity from './identity.js';
+import {recordRecallChangeLog} from './change_log.js';
 import {candidatePostings} from './lexical.js';
 import {captureRecallSourceInput, normalizeRecallHydrationChanges, recallRefreshSuperseded} from './refresh_cut.js';
 import {numericMetadata} from './read_policy.js';
@@ -300,6 +301,14 @@ export const publishPreparedRecallDatabase = Effect.fn('recall.publishPreparedDa
 ) {
   const {staleGeneration, canonicalMutationGeneration, sourceScan, contentGeneration, previousValidatedAt, now} =
     prepared;
+  // Same transaction as the metadata write below, so the log and content_generation commit together.
+  // Keep this the first statement of the publish, before any write to a tracked table: it reads the
+  // integrity state and the old document rows.
+  yield* recordRecallChangeLog(
+    sql,
+    {indexedTable: RECALL_REFRESH_INDEXED_DOCUMENT_TABLE, replacedTable: RECALL_REFRESH_REPLACED_DOCUMENT_TABLE},
+    contentGeneration,
+  );
   yield* stageRemovedRecallLinkTargets(sql);
   yield* sql.unsafe(`
     DELETE FROM exact_search
