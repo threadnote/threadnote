@@ -748,6 +748,9 @@ effectIt.layer(BunServices.layer)(it => {
       const read = (expected: typeof before) =>
         fromPromise('read', () => runtimeReadBoundedStableRegularFile(filename, 3, expected));
       expect(new TextDecoder().decode(yield* read(before))).toBe('old');
+      // NTFS stamps the change time from the coarse system clock (about 15.6 ms). A same-size rewrite in the same
+      // tick keeps the change time, so let one tick pass before the rewrite.
+      if (process.platform === 'win32') yield* fromPromise('tick', () => Bun.sleep(32));
       yield* fs.writeFileString(filename, 'new');
       yield* fs.utimes(filename, timestamp, timestamp);
       const after = yield* fromPromise('after', () => runtimeLstat(filename));
