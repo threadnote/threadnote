@@ -84,6 +84,8 @@ jobs:
       - name: Linux workflow prerequisites
         if: runner.os == 'Linux'
         run: |
+          # The image's Microsoft package source is not needed for these packages and can refuse requests (HTTP 403).
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/microsoft-prod.sources
           sudo apt-get update
           sudo apt-get install -y ripgrep bubblewrap
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0

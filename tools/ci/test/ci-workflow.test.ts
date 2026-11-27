@@ -824,6 +824,7 @@ ${initialCommand}
 sudo() {
   printf '%s\\n' "$*"
   case "$*" in
+    'rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/microsoft-prod.sources') return 0 ;;
     'apt-get update') return ${failure === 'update' ? status : 0} ;;
     'apt-get install --yes ripgrep')
       if test ${failure === 'install' ? status : 0} -ne 0; then return ${status}; fi
@@ -853,7 +854,9 @@ it.each(['missing', 'broken'] as const)('installs and verifies %s ripgrep before
   const result = runPrerequisite(initial);
   expect(result.error).toBeUndefined();
   expect(result.status).toBe(0);
-  expect(result.stdout).toBe('apt-get update\napt-get install --yes ripgrep\nbazel-shard-executed\n');
+  expect(result.stdout).toBe(
+    'rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/microsoft-prod.sources\napt-get update\napt-get install --yes ripgrep\nbazel-shard-executed\n',
+  );
 });
 
 it('bounds only prerequisite setup while retaining the selected shard and job budget', () => {
@@ -873,7 +876,8 @@ it('preserves every prerequisite failure status and prevents shard execution', (
       expect(result.status).toBe(status);
       expect(result.stdout).not.toContain('bazel-shard-executed');
       expect(result.stdout).toBe(
-        failure === 'update' ? 'apt-get update\n' : 'apt-get update\napt-get install --yes ripgrep\n',
+        'rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/microsoft-prod.sources\n' +
+          (failure === 'update' ? 'apt-get update\n' : 'apt-get update\napt-get install --yes ripgrep\n'),
       );
     }),
     {numRuns: 20},
