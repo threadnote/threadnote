@@ -799,7 +799,7 @@ describe('platform benchmark workflow', () => {
     const ratchetWorkflow = decodeWorkflow(
       load(readFileSync('.github/workflows/code-graph-production-ratchet.yml', 'utf8'), {schema: JSON_SCHEMA}),
     );
-    const job = ratchetWorkflow.jobs.ratchet;
+    const job = ratchetWorkflow.jobs['ratchet-attempt-1'];
     const command =
       Option.getOrUndefined(
         Option.map(
@@ -820,6 +820,19 @@ describe('platform benchmark workflow', () => {
     expect(job['runs-on']).toBe('ubuntu-24.04');
     expect(job['timeout-minutes']).toBe(40);
     expect(EffectRecord.keys(ratchetWorkflow.jobs)).not.toContain('classify');
+    // Each attempt is a new runner; the next one runs only after a runner with another CPU measured nothing.
+    expect(job.outputs).toEqual({runner_class: '${{ steps.runner-class.outputs.class }}'});
+    for (const attempt of [2, 3]) {
+      const retry = ratchetWorkflow.jobs[`ratchet-attempt-${attempt}`];
+      expect(retry.steps).toEqual(job.steps);
+      expect(retry.needs).toEqual(['native-typescript-asset', `ratchet-attempt-${attempt - 1}`]);
+      expect(retry.if).toBe(
+        `\${{ !cancelled() && github.event_name == 'pull_request' && needs.ratchet-attempt-${attempt - 1}.outputs.runner_class == 'uncalibrated' }}`,
+      );
+    }
+    const aggregate = ratchetWorkflow.jobs.ratchet;
+    expect(aggregate.needs).toEqual(['ratchet-attempt-1', 'ratchet-attempt-2', 'ratchet-attempt-3']);
+    expect(aggregate.if).toBe("${{ !cancelled() && github.event_name == 'pull_request' }}");
     // The shared asset job owns any cold construction; the ratchet only restores and still fails visibly on a miss.
     expect(job.needs).toBe('native-typescript-asset');
     expect(ratchetWorkflow.jobs['native-typescript-asset']?.['timeout-minutes']).toBe(90);
@@ -848,8 +861,13 @@ describe('platform benchmark workflow', () => {
       ),
     );
     expect(guardedSteps).toHaveLength(3);
+    const runnerClass = Option.getOrUndefined(
+      EffectArray.findFirst(job.steps ?? [], step => step.id === 'runner-class'),
+    );
+    expect(runnerClass?.run).toContain('"$RATCHET_CALIBRATED_CPU"');
     for (const step of guardedSteps ?? []) {
-      expect(step.if).toBe("steps.scope.outcome != 'success' || steps.scope.outputs.run_benchmark != 'false'");
+      expect(step.if).toBe("steps.runner-class.outputs.class == 'calibrated'");
+      expect(job.steps?.indexOf(runnerClass!)).toBeLessThan(job.steps?.indexOf(step) ?? 0);
     }
     expect(
       Option.getOrUndefined(
@@ -935,7 +953,7 @@ describe('platform benchmark workflow', () => {
           ),
         ),
       )?.if,
-    ).toContain("steps.scope.outcome != 'success' || steps.scope.outputs.run_benchmark != 'false'");
+    ).toBe("always() && steps.runner-class.outputs.class == 'calibrated'");
     expect(
       Effect.pipe(
         command,
@@ -984,6 +1002,7 @@ describe('platform benchmark workflow', () => {
     const captureJob = ratchetWorkflow.jobs['capture-baseline'];
     expect(captureJob.if).toBe("github.event_name == 'workflow_dispatch'");
     expect(captureJob['runs-on']).toBe('ubuntu-24.04');
+    expect(captureJob.steps?.[0]?.run).toContain('"$RATCHET_CALIBRATED_CPU"');
     const capture = Option.getOrUndefined(
       EffectArray.findFirst(
         captureJob.steps ?? [],

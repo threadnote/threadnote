@@ -13,6 +13,8 @@ concurrency:
 
 env:
   BUN_VERSION: 1.4.4
+  # The reviewed ratchet budgets hold on this hosted-runner CPU only; other CPUs GitHub assigns are slower or faster.
+  RATCHET_CALIBRATED_CPU: 'Intel(R) Xeon(R) 6975P-C'
 
 jobs:
   # The shared prepared native TypeScript asset for this host: restore, construct once on a miss, save. The ratchet job
@@ -53,15 +55,17 @@ jobs:
         timeout-minutes: 80
         uses: ./.github/actions/native-typescript-asset
 
-  ratchet:
-    name: Governed reduced production profile · Linux
+  # Up to three attempts, each on a new runner, until one runs on the calibrated CPU. The first attempt runs even when
+  # the asset job failed: its restore-only step then fails visibly instead of a skipped check.
+  ratchet-attempt-1:
+    name: Governed reduced production profile · Linux · attempt 1
     needs: native-typescript-asset
-    # Runs even when the asset job failed: its restore-only step then fails visibly instead of a skipped check.
     if: ${{ !cancelled() && github.event_name == 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 40
-
-    steps:
+    outputs:
+      runner_class: ${{ steps.runner-class.outputs.class }}
+    steps: &ratchet-attempt-steps
       - uses: actions/checkout@v7
         with:
           fetch-depth: '0'
@@ -79,16 +83,36 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: bun tools/ci/code-graph-production-ratchet-scope.ts --base "$BASE_SHA" --head "$HEAD_SHA"
 
+      # GitHub assigns hosted runner hardware per job. A runner with another CPU measures nothing and succeeds, and the
+      # next attempt job gets a new runner.
+      - id: runner-class
+        name: Pin the calibrated runner class
+        env:
+          SCOPE_OUTCOME: ${{ steps.scope.outcome }}
+          RUN_BENCHMARK: ${{ steps.scope.outputs.run_benchmark }}
+        run: |
+          if [ "$SCOPE_OUTCOME" = success ] && [ "$RUN_BENCHMARK" = false ]; then
+            echo 'class=skipped' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          cpu="$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -n 1)"
+          if [ "$cpu" = "$RATCHET_CALIBRATED_CPU" ]; then
+            echo 'class=calibrated' >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::This runner has the CPU '$cpu', not the calibrated '$RATCHET_CALIBRATED_CPU'. The next attempt gets a new runner."
+            echo 'class=uncalibrated' >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Record scoped skip
-        if: steps.scope.outcome == 'success' && steps.scope.outputs.run_benchmark == 'false'
+        if: steps.runner-class.outputs.class == 'skipped'
         run: echo 'Governed benchmark skipped because the diff has no production-ratchet-relevant paths.'
 
       - run: bun install --frozen-lockfile
-        if: steps.scope.outcome != 'success' || steps.scope.outputs.run_benchmark != 'false'
+        if: steps.runner-class.outputs.class == 'calibrated'
 
       # The governed profile indexes TypeScript; the candidate and the protected-base control read this one asset.
       - name: Restore the verified native TypeScript asset
-        if: steps.scope.outcome != 'success' || steps.scope.outputs.run_benchmark != 'false'
+        if: steps.runner-class.outputs.class == 'calibrated'
         timeout-minutes: 15
         uses: ./.github/actions/native-typescript-asset
         with:
@@ -96,7 +120,7 @@ jobs:
           cache-key: ${{ needs.native-typescript-asset.outputs.cache_key }}
 
       - name: Measure the governed reduced production profile
-        if: steps.scope.outcome != 'success' || steps.scope.outputs.run_benchmark != 'false'
+        if: steps.runner-class.outputs.class == 'calibrated'
         env:
           THREADNOTE_BENCHMARK_RUNNER_CLASS: github-hosted-ubuntu-24.04-${{ runner.arch }}
           THREADNOTE_BENCHMARK_RUNNER_ID: ${{ runner.name }}
@@ -114,7 +138,7 @@ jobs:
 
       - id: static-ratchet
         name: Enforce the reviewed static ratchet
-        if: steps.scope.outcome != 'success' || steps.scope.outputs.run_benchmark != 'false'
+        if: steps.runner-class.outputs.class == 'calibrated'
         continue-on-error: true
         run: >-
           bun tools/ci/code-graph-production-ratchet-gate.ts
@@ -198,14 +222,67 @@ jobs:
           --initial-candidate artifacts/code-graph-production-ratchet-Linux-${{ runner.arch }}.json
 
       - uses: actions/upload-artifact@v7
-        if: >-
-          always() &&
-          (steps.scope.outcome != 'success' || steps.scope.outputs.run_benchmark != 'false')
+        if: always() && steps.runner-class.outputs.class == 'calibrated'
         with:
           name: code-graph-production-ratchet-Linux-${{ runner.arch }}
           path: artifacts/
           if-no-files-found: error
           retention-days: 14
+
+  ratchet-attempt-2:
+    name: Governed reduced production profile · Linux · attempt 2
+    needs: [native-typescript-asset, ratchet-attempt-1]
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && needs.ratchet-attempt-1.outputs.runner_class == 'uncalibrated' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    outputs:
+      runner_class: ${{ steps.runner-class.outputs.class }}
+    steps: *ratchet-attempt-steps
+
+  ratchet-attempt-3:
+    name: Governed reduced production profile · Linux · attempt 3
+    needs: [native-typescript-asset, ratchet-attempt-2]
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && needs.ratchet-attempt-2.outputs.runner_class == 'uncalibrated' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    outputs:
+      runner_class: ${{ steps.runner-class.outputs.class }}
+    steps: *ratchet-attempt-steps
+
+  ratchet:
+    name: Governed reduced production profile · Linux
+    needs: [ratchet-attempt-1, ratchet-attempt-2, ratchet-attempt-3]
+    if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require the ratchet result from the calibrated runner class
+        env:
+          RESULTS: >-
+            ${{ needs.ratchet-attempt-1.result }}
+            ${{ needs.ratchet-attempt-2.result }}
+            ${{ needs.ratchet-attempt-3.result }}
+          CLASSES: >-
+            ${{ needs.ratchet-attempt-1.outputs.runner_class || 'none' }}
+            ${{ needs.ratchet-attempt-2.outputs.runner_class || 'none' }}
+            ${{ needs.ratchet-attempt-3.outputs.runner_class || 'none' }}
+        run: |
+          read -r -a results <<< "$RESULTS"
+          read -r -a classes <<< "$CLASSES"
+          for attempt in 0 1 2; do
+            class="${classes[$attempt]}"
+            result="${results[$attempt]}"
+            [ "$class" = uncalibrated ] && continue
+            if [ "$class" = none ]; then
+              echo "::error::Ratchet attempt $((attempt + 1)) ended '$result' before it recorded a runner class."
+              exit 1
+            fi
+            [ "$result" = success ] && exit 0
+            echo "::error::Ratchet attempt $((attempt + 1)) on the $class runner class ended '$result'."
+            exit 1
+          done
+          echo "::error::No ratchet attempt got a runner with the calibrated CPU '$RATCHET_CALIBRATED_CPU'. Rerun the workflow."
+          exit 1
 
   capture-baseline:
     name: Capture a governed baseline candidate
@@ -213,6 +290,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
+      # A baseline holds only for the CPU it was captured on; refuse another CPU instead of recalibrating to it.
+      - name: Require the calibrated runner class
+        run: |
+          cpu="$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -n 1)"
+          if [ "$cpu" != "$RATCHET_CALIBRATED_CPU" ]; then
+            echo "::error::This runner has the CPU '$cpu', not the calibrated '$RATCHET_CALIBRATED_CPU'. Rerun the workflow."
+            exit 1
+          fi
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
         with:
