@@ -1749,7 +1749,21 @@ describe('document-linked semantic context', () => {
           return;
         }
         const retained = parseContextBriefJsonText(JSON.stringify(item.knowledge.brief));
-        expect(retained.durableDecisions).toEqual(knowledge.brief?.durableDecisions);
+        // The last compaction stage keeps every card but may drop its citation detail, never its labels.
+        const originals = knowledge.brief?.durableDecisions ?? [];
+        const detailOmitted = EffectArray.some(
+          retained.durableDecisions ?? [],
+          card => card.citationDetailsOmitted === true,
+        );
+        expect(retained.durableDecisions).toEqual(
+          detailOmitted
+            ? EffectArray.map(originals, ({citationActions, citationSummary, codeRelations, ...card}) =>
+                citationActions === undefined && citationSummary === undefined && codeRelations === undefined
+                  ? card
+                  : {...card, citationDetailsOmitted: true},
+              )
+            : originals,
+        );
         expect(retained.trust).toBe(knowledge.brief?.trust);
         expect(retained.scope).toEqual(knowledge.brief?.scope);
         expect(retained.coverage).toEqual(knowledge.brief?.coverage);
@@ -1768,6 +1782,9 @@ describe('document-linked semantic context', () => {
         expect(compactSemanticContextKnowledge(compact)).toEqual(compact);
         const withoutFollowUps = compactSemanticContextKnowledge(compact, {omitFollowUps: true});
         expect(compactSemanticContextKnowledge(withoutFollowUps, {omitFollowUps: true})).toEqual(withoutFollowUps);
+        const last = {omitFollowUps: true, omitCitationDetails: true};
+        const withoutDetail = compactSemanticContextKnowledge(withoutFollowUps, last);
+        expect(compactSemanticContextKnowledge(withoutDetail, last)).toEqual(withoutDetail);
       }).pipe(provideTestLayer(queryIo)),
     {arbitrary: {runs: 20}},
   );
