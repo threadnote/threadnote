@@ -50,6 +50,9 @@ export type NavigationReadResultV1 =
 
 const LEASE_WAIT_MILLISECONDS = 250;
 const SEMANTIC_ANCHORS = 2;
+const REPOSITORY_PROJECT = 'repository';
+/** Accounting bound for discovery plus the one source-proof batch; the worker reply limit is separate. */
+const DISCOVERY_BYTES = 16 * 1024 * 1024;
 const DISK_VIEW: NavigationScope['view'] = {kind: 'disk', id: 'saved', owner: 'graph', epoch: 0};
 const unavailable = (gap: string): NavigationReadResultV1 => ({status: 'unavailable', gaps: [gap]});
 
@@ -115,7 +118,8 @@ const readLeased = Effect.fn('navigation.readLeased')(function* (
   const scope: NavigationScope = {
     repository: identity.repositoryId,
     worktree: identity.worktreeId,
-    project: status.projectCoverage?.kind === 'project' ? status.projectCoverage.project : '',
+    // The assembler admits only nonempty identities; a repository-wide graph has no project name.
+    project: status.projectCoverage?.kind === 'project' ? status.projectCoverage.project : REPOSITORY_PROJECT,
     view: DISK_VIEW,
   };
   const staleGaps = status.freshness === 'current' ? [] : [`navigation-graph-${status.freshness}`];
@@ -140,9 +144,11 @@ const readLeased = Effect.fn('navigation.readLeased')(function* (
     )
       return unavailable('navigation-follow-up-unresolved');
   }
+  // The source-proof stage reserves its worst case before it reads: 2 MiB of facts, up to 64 edges at 128 KiB,
+  // 1.5 MiB of retained source and the excerpt. 4 MiB never covers that, so proofs were always skipped.
   const budget: TaskDiscoveryBudget = {
     remainingReads: 17,
-    remainingBytes: 4 * 1024 * 1024,
+    remainingBytes: DISCOVERY_BYTES,
     remainingNodes: 12,
     remainingEdges: 2,
     deadline,
