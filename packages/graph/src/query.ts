@@ -1126,18 +1126,22 @@ export const traversalQuery = Effect.fn('codeGraph.traversalQuery')(function* (
     lexicalSeeds.length < seedLimit;
   const semanticResult = !semanticEligible
     ? {scores: new Map<string, number>(), timedOut: false}
-    : yield* embedding.search(threadnoteHome, layout, snapshotId, query, Math.min(nodeLimit, 12)).pipe(
-        Effect.map(scores => ({scores, timedOut: false as const})),
-        Effect.orElseSucceed(() => ({scores: new Map<string, number>(), timedOut: false as const})),
-        Effect.timeoutOrElse({
-          duration: semanticTimeBudgetMilliseconds,
-          orElse: () =>
-            Effect.succeed({
-              scores: new Map<string, number>(),
-              timedOut: true as const,
-            }),
-        }),
-      );
+    : yield* embedding
+        .search(threadnoteHome, layout, snapshotId, query, Math.min(nodeLimit, 12), ids =>
+          store.symbolsByIds(databasePath, snapshotId, ids),
+        )
+        .pipe(
+          Effect.map(scores => ({scores, timedOut: false as const})),
+          Effect.orElseSucceed(() => ({scores: new Map<string, number>(), timedOut: false as const})),
+          Effect.timeoutOrElse({
+            duration: semanticTimeBudgetMilliseconds,
+            orElse: () =>
+              Effect.succeed({
+                scores: new Map<string, number>(),
+                timedOut: true as const,
+              }),
+          }),
+        );
   if (semanticEligible) {
     deadline = (yield* Clock.currentTimeMillis) + traversalTimeBudgetMilliseconds;
   }

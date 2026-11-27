@@ -693,13 +693,18 @@ export function nextNativeCycle(value: NativeCycleState): NativeCycleAction {
       nativeCycleParentsReady(s, p.id)
     )
       return {action: 'deliver', phaseId: p.id};
+  const eligible = EffectArray.filter(
+    ps,
+    p => ['pending', 'active'].includes(s.phases[p.id].status) && nativeCycleParentsReady(s, p.id),
+  );
+  // A reopened or resumed phase carries a reason or proof history; it keeps the card ahead of fresh pending work.
   const ready = EffectOption.getOrUndefined(
-    EffectArray.findFirst(
-      ps,
-      __effectArrayValue =>
-        !!(p => ['pending', 'active'].includes(s.phases[p.id].status) && nativeCycleParentsReady(s, p.id))(
-          __effectArrayValue,
-        ),
+    EffectOption.orElse(
+      EffectArray.findFirst(
+        eligible,
+        p => s.phases[p.id].reason !== undefined || (s.phases[p.id].history?.length ?? 0) > 0,
+      ),
+      () => EffectArray.head(eligible),
     ),
   );
   if (ready) return {action: 'implement', phaseId: ready.id};

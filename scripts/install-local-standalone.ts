@@ -708,44 +708,61 @@ export const activateLocalStandaloneRelease = Effect.fn('developmentInstall.acti
         ),
       ),
     );
-    yield* verifyActivatedDevelopmentRelease(executable, installRoot, input.version).pipe(
-      Effect.catchCause(healthCause =>
-        Effect.fail(
-          ScriptError.make({
-            cause: Cause.squash(healthCause),
-            message:
-              'The exact-HEAD development release is active, but doctor verification still failed after repair. ' +
-              'The prior release and superseded processes were preserved for diagnosis.',
-          }),
-        ),
-      ),
-    );
-
-    const workflowRefresh = yield* refreshDevelopmentWorkflowTargets(executable, installRoot);
-
     let terminatedSupersededProcesses = 0;
     const preservedMcpSessionProcessIds = new Set<number>();
     const unresolvedProcessIds = new Set<number>();
     const cleanupIssues = new Set<LocalStandaloneCleanupIssue>();
-    if (input.terminateSuperseded) {
-      // Revalidate the pointer immediately before signaling. The installation
-      // lock prevents it from changing until retirement and pruning finish.
-      const activeRevalidation = yield* Effect.exit(readManagedDevelopmentRuntimeEvidence(input.commit));
-      if (Exit.isFailure(activeRevalidation)) {
+    let retirementRan = false;
+    const retireSupersededProcesses = Effect.gen(function* () {
+      retirementRan = true;
+      // The installation lock keeps the pointer stable until retirement and pruning finish.
+      const revalidation = yield* Effect.exit(readManagedDevelopmentRuntimeEvidence(input.commit));
+      if (Exit.isFailure(revalidation)) {
         cleanupIssues.add('process-termination');
-      } else {
-        const termination = yield* Effect.exit(terminateSupersededStandaloneProcesses(input.version));
-        if (Exit.isFailure(termination)) {
-          cleanupIssues.add('process-termination');
-        } else {
-          terminatedSupersededProcesses = termination.value.signaled.length;
-          for (const lease of termination.value.preserved) preservedMcpSessionProcessIds.add(lease.processId);
-          for (const lease of [...termination.value.skippedUnverified, ...termination.value.remaining]) {
-            unresolvedProcessIds.add(lease.processId);
-          }
-        }
+        return yield* SupersededRetirementError.make({
+          cause: Cause.squash(revalidation.cause),
+          message: 'Superseded process retirement could not revalidate the active development release.',
+        });
       }
-    }
+      const termination = yield* Effect.exit(terminateSupersededStandaloneProcesses(input.version));
+      if (Exit.isFailure(termination)) {
+        cleanupIssues.add('process-termination');
+        return yield* SupersededRetirementError.make({
+          cause: Cause.squash(termination.cause),
+          message: 'Superseded process retirement failed.',
+        });
+      }
+      terminatedSupersededProcesses = termination.value.signaled.length;
+      for (const lease of termination.value.preserved) preservedMcpSessionProcessIds.add(lease.processId);
+      for (const lease of [...termination.value.skippedUnverified, ...termination.value.remaining]) {
+        unresolvedProcessIds.add(lease.processId);
+      }
+      return [...unresolvedProcessIds];
+    });
+    yield* verifyActivatedDevelopmentRelease(
+      executable,
+      installRoot,
+      input.version,
+      input.terminateSuperseded ? retireSupersededProcesses : undefined,
+    ).pipe(
+      Effect.catchCause(healthCause => {
+        const inner = Cause.squash(healthCause);
+        const error: LegacyRecallWorkerBlockError | SupersededRetirementError | ScriptError =
+          Schema.is(LegacyRecallWorkerBlockError)(inner) || Schema.is(SupersededRetirementError)(inner)
+            ? inner
+            : ScriptError.make({
+                cause: inner,
+                message:
+                  'The exact-HEAD development release is active, but doctor verification still failed after repair. ' +
+                  'The prior release was preserved for diagnosis.',
+              });
+        return Effect.fail(error);
+      }),
+    );
+
+    const workflowRefresh = yield* refreshDevelopmentWorkflowTargets(executable, installRoot);
+
+    if (input.terminateSuperseded && !retirementRan) yield* Effect.exit(retireSupersededProcesses);
     const live = yield* Effect.exit(readStandaloneProcessLeaseVerification());
     if (Exit.isFailure(live)) {
       cleanupIssues.add('process-inspection');
@@ -903,10 +920,102 @@ export const refreshDevelopmentWorkflowTargets = Effect.fn('developmentInstall.r
   return results;
 });
 
-const verifyActivatedDevelopmentRelease = Effect.fn('developmentInstall.verifyActivated')(function* (
+export class LegacyRecallWorkerBlockError extends Schema.TaggedError<
+  LegacyRecallWorkerBlockError,
+  {readonly brand: unique symbol}
+>()('LegacyRecallWorkerBlockError', {
+  message: Schema.String,
+}) {}
+
+export class SupersededRetirementError extends Schema.TaggedError<
+  SupersededRetirementError,
+  {readonly brand: unique symbol}
+>()('SupersededRetirementError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
+
+interface DevelopmentDoctorResult {
+  readonly exitCode: number;
+  readonly stdout: string;
+}
+
+/** Retirement resolves to the process IDs that remain unresolved or unverified. */
+export const runDevelopmentDoctorVerification = Effect.fn('developmentInstall.runDoctorVerification')(function* <
+  E,
+  R,
+  RR = never,
+>(input: {
+  readonly runDoctor: () => Effect.Effect<DevelopmentDoctorResult, E, R>;
+  readonly repair: () => Effect.Effect<void, E, R>;
+  readonly retireSuperseded?: Effect.Effect<readonly number[], ScriptError | SupersededRetirementError, RR> | undefined;
+}) {
+  const {runDoctor, repair, retireSuperseded} = input;
+  const passed = (result: DevelopmentDoctorResult) =>
+    result.exitCode === 0 && developmentDoctorFailureCount(result.stdout) === 0;
+  const stillFailing = ScriptError.make({
+    message: 'The activated development executable still has doctor failures after repair.',
+  });
+  const hasOnly = (result: DevelopmentDoctorResult, classifier: (stdout: string, failureCount: number) => boolean) => {
+    const failures = developmentDoctorFailureCount(result.stdout);
+    return result.exitCode !== 0 && failures !== undefined && classifier(result.stdout, failures);
+  };
+
+  const initial = yield* runDoctor();
+  const initialFailures = developmentDoctorFailureCount(initial.stdout);
+  if (initialFailures === undefined || (initial.exitCode !== 0 && initialFailures === 0)) {
+    return yield* ScriptError.make({
+      message: 'The activated development executable did not complete doctor verification.',
+    });
+  }
+  if (passed(initial)) return;
+
+  yield* repair();
+  let current = yield* runDoctor();
+  let retiredUnresolved: readonly number[] | undefined;
+  const legacyBlockError = (unresolved: readonly number[]) =>
+    LegacyRecallWorkerBlockError.make({
+      message:
+        'The recall embedding worker block remains after identity-verified superseded process cleanup' +
+        (unresolved.length > 0
+          ? ` (unresolved or unverified process IDs: ${EffectArray.join(EffectArray.map(unresolved, String), ', ')})`
+          : '') +
+        '. Let the worker owner release it, or stop the named process if it is a verified Threadnote process, ' +
+        'confirm `threadnote doctor --dry-run --strict` passes, then rerun the installer. ' +
+        'Worker control state was not reset.',
+    });
+  const retireIfBlocked = Effect.gen(function* () {
+    if (retiredUnresolved !== undefined || retireSuperseded === undefined) return;
+    if (!hasOnly(current, developmentDoctorHasOnlySupersededRecallWorkerBlock)) return;
+    retiredUnresolved = yield* retireSuperseded;
+    yield* repair();
+    current = yield* runDoctor();
+    if (hasOnly(current, developmentDoctorHasOnlySupersededRecallWorkerBlock)) {
+      return yield* legacyBlockError(retiredUnresolved);
+    }
+  });
+
+  if (passed(current)) return;
+  yield* retireIfBlocked;
+  if (passed(current)) return;
+  if (!hasOnly(current, developmentDoctorHasOnlyConcurrentRecallProjectionFailures)) return yield* stillFailing;
+
+  yield* repair();
+  current = yield* runDoctor();
+  if (passed(current)) return;
+  yield* retireIfBlocked;
+  if (passed(current)) return;
+  if (retiredUnresolved !== undefined && hasOnly(current, developmentDoctorHasOnlySupersededRecallWorkerBlock)) {
+    return yield* legacyBlockError(retiredUnresolved);
+  }
+  return yield* stillFailing;
+});
+
+const verifyActivatedDevelopmentRelease = Effect.fn('developmentInstall.verifyActivated')(function* <R>(
   executable: string,
   installRoot: string,
   expectedVersion: string,
+  retireSuperseded?: Effect.Effect<readonly number[], SupersededRetirementError, R>,
 ) {
   const system = yield* SystemInfo;
   const commandOptions = {
@@ -914,45 +1023,22 @@ const verifyActivatedDevelopmentRelease = Effect.fn('developmentInstall.verifyAc
     maxOutputBytes: 2 * 1024 * 1024,
     timeoutMs: COMMAND_TIMEOUT_MILLISECONDS,
   } as const;
-  const runDoctorStrict = () =>
-    runCommandEffect(executable, ['doctor', '--dry-run', '--strict'], {...commandOptions, allowFailure: true});
   yield* runCommandEffect(
     executable,
     ['development-install-repair', '--activate-integrations', '--expected-version', expectedVersion],
     commandOptions,
   );
-  const repair = () =>
-    runCommandEffect(executable, ['development-install-repair', '--expected-version', expectedVersion], commandOptions);
-  const initial = yield* runDoctorStrict();
-  const initialFailures = developmentDoctorFailureCount(initial.stdout);
-  if (initialFailures === undefined || (initial.exitCode !== 0 && initialFailures === 0)) {
-    return yield* ScriptError.make({
-      message: 'The activated development executable did not complete doctor verification.',
-    });
-  }
-  if (initial.exitCode === 0 && initialFailures === 0) return;
-
-  yield* repair();
-  const repaired = yield* runDoctorStrict();
-  const repairedFailures = developmentDoctorFailureCount(repaired.stdout);
-  if (repaired.exitCode === 0 && repairedFailures === 0) return;
-  if (
-    repaired.exitCode === 0 ||
-    repairedFailures === undefined ||
-    !developmentDoctorHasOnlyConcurrentRecallProjectionFailures(repaired.stdout, repairedFailures)
-  ) {
-    return yield* ScriptError.make({
-      message: 'The activated development executable still has doctor failures after repair.',
-    });
-  }
-
-  yield* repair();
-  const stabilized = yield* runDoctorStrict();
-  if (stabilized.exitCode !== 0 || developmentDoctorFailureCount(stabilized.stdout) !== 0) {
-    return yield* ScriptError.make({
-      message: 'The activated development executable still has doctor failures after repair.',
-    });
-  }
+  yield* runDevelopmentDoctorVerification({
+    runDoctor: () =>
+      runCommandEffect(executable, ['doctor', '--dry-run', '--strict'], {...commandOptions, allowFailure: true}),
+    repair: () =>
+      runCommandEffect(
+        executable,
+        ['development-install-repair', '--expected-version', expectedVersion],
+        commandOptions,
+      ).pipe(Effect.asVoid),
+    retireSuperseded,
+  });
 });
 
 function developmentDoctorFailureCount(stdout: string): number | undefined {
@@ -962,11 +1048,13 @@ function developmentDoctorFailureCount(stdout: string): number | undefined {
   return Number.isSafeInteger(failures) ? failures : undefined;
 }
 
-export function developmentDoctorHasOnlyConcurrentRecallProjectionFailures(
-  stdout: string,
-  failureCount: number,
-): boolean {
-  const failures = EffectArray.map(
+interface DevelopmentDoctorFailure {
+  readonly detail: string;
+  readonly name: string;
+}
+
+function developmentDoctorFailures(stdout: string): readonly DevelopmentDoctorFailure[] {
+  return EffectArray.map(
     EffectArray.filter(
       EffectArray.map(Effect2.pipe(stdout, EffectString.split(/\r?\n/u)), line =>
         /^FAIL\s+([^:]+):\s*(.*)$/u.exec(Effect2.pipe(line, EffectString.trim)),
@@ -975,19 +1063,44 @@ export function developmentDoctorHasOnlyConcurrentRecallProjectionFailures(
     ),
     match => ({detail: match[2] ?? '', name: match[1] ?? ''}),
   );
+}
+
+function isConcurrentRecallProjectionFailure({detail, name}: DevelopmentDoctorFailure): boolean {
+  if (name === 'lexical recall index') {
+    return detail === 'canonical documents changed; run `threadnote repair`';
+  }
+  if (name !== 'vector recall index') return false;
+  return (
+    detail === 'unavailable until the lexical recall index is ready' ||
+    /; stale; canonical documents changed; run `threadnote repair`$/u.test(detail)
+  );
+}
+
+function isSupersededRecallWorkerBlock({detail, name}: DevelopmentDoctorFailure): boolean {
+  return name === 'vector recall index' && EffectString.includes('; blocked by a legacy or unverified worker;')(detail);
+}
+
+export function developmentDoctorHasOnlyConcurrentRecallProjectionFailures(
+  stdout: string,
+  failureCount: number,
+): boolean {
+  const failures = developmentDoctorFailures(stdout);
   return (
     failures.length === failureCount &&
     failures.length > 0 &&
-    EffectArray.every(failures, ({detail, name}) => {
-      if (name === 'lexical recall index') {
-        return detail === 'canonical documents changed; run `threadnote repair`';
-      }
-      if (name !== 'vector recall index') return false;
-      return (
-        detail === 'unavailable until the lexical recall index is ready' ||
-        /; stale; canonical documents changed; run `threadnote repair`$/u.test(detail)
-      );
-    })
+    EffectArray.every(failures, isConcurrentRecallProjectionFailure)
+  );
+}
+
+export function developmentDoctorHasOnlySupersededRecallWorkerBlock(stdout: string, failureCount: number): boolean {
+  const failures = developmentDoctorFailures(stdout);
+  return (
+    failures.length === failureCount &&
+    EffectArray.some(failures, isSupersededRecallWorkerBlock) &&
+    EffectArray.every(
+      failures,
+      failure => isSupersededRecallWorkerBlock(failure) || isConcurrentRecallProjectionFailure(failure),
+    )
   );
 }
 

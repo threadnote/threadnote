@@ -135,7 +135,6 @@ describe('standard-profile tree snapshots', () => {
       });
       yield* task('record-validation', {snapshotRef: String(recorded.snapshotRef), validation});
       yield* task('reopen', {taskRef: (yield* view()).taskRef, phaseId: 'one', reason: 'The evidence was incomplete.'});
-      yield* task('resume', {taskRef: (yield* view()).taskRef, reason: 'Resume after the reopen.'});
       const again = yield* task('record-snapshot', {reason: 'Same tree after the reopen.'});
       const second = object(object(again.snapshot).snapshot);
       expect(again.replayed).toBe(false);
@@ -559,9 +558,9 @@ describe('standard-profile reconcile of a phase with proof', () => {
       expect(snapshot).toMatchObject({code: 'task-not-ready', next: reopen});
       expect(snapshot.message).not.toMatch(/validation reference/iu);
       yield* f.git(['checkout', '-q', 'main']);
-      yield* f.fs.writeFileString(f.path.join(f.repo, 'upstream.md'), 'Upstream work.\n');
-      yield* f.git(['add', 'upstream.md']);
-      yield* f.git(['commit', '-qm', 'upstream']);
+      // The advance overlaps the reviewed file; a base that only advanced over other files stays accepted.
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "upstream";\n');
+      yield* f.git(['commit', '-qam', 'upstream']);
       yield* f.git(['checkout', '-q', 'feature/one']);
       const moved = yield* deliver();
       expect(moved).toMatchObject({code: 'review-stale', next: reopen});
@@ -569,7 +568,6 @@ describe('standard-profile reconcile of a phase with proof', () => {
       expect(
         yield* task('reopen', {taskRef: card.taskRef, phaseId: 'one', reason: 'The source changed after validation.'}),
       ).toMatchObject({status: 'reopened'});
-      yield* task('resume', {taskRef: (yield* view()).taskRef, reason: 'Record the changed tree.'});
       yield* task('record-snapshot');
       expect((yield* view()).next).toMatchObject({action: 'review', phaseId: 'one'});
     }).pipe(runCycle),
@@ -1350,7 +1348,6 @@ describe('review coverage under one intent', () => {
       const earlier = yield* task('record-validation', {snapshotRef: first.ref, validation});
       expect((yield* view()).phase?.validationRef).toBe(earlier.validationRef);
       yield* task('reopen', {taskRef: (yield* view()).taskRef, phaseId: 'one', reason: 'Look again.'});
-      yield* task('resume', {taskRef: (yield* view()).taskRef, reason: 'Validate again.'});
       const again = yield* task('record-snapshot');
       const current = yield* task('record-validation', {
         snapshotRef: again.snapshotRef,
@@ -1393,7 +1390,6 @@ describe('review coverage under one intent', () => {
       const waived = yield* task('waive', accept);
       yield* task('record-validation', {snapshotRef: first.ref, validation});
       yield* task('reopen', {taskRef: (yield* view()).taskRef, phaseId: 'one', reason: 'Look again.'});
-      yield* task('resume', {taskRef: (yield* view()).taskRef, reason: 'Review the same tree again.'});
       const again = yield* task('record-snapshot');
       const second = object(object(again.snapshot).snapshot);
       expect(second.tree).toBe(first.snapshot.tree);
@@ -1470,7 +1466,8 @@ describe('incremental review by default', () => {
   effectIt.effect('records the same tree again when the base moved without a rebase, then validates it', () =>
     Effect.gen(function* () {
       const {f, record, view, reviewed} = yield* setup();
-      expect((yield* view()).next).toMatchObject({action: 'implement'});
+      // A base that only advanced over other files keeps the reviewed snapshot current.
+      expect((yield* view()).next).toMatchObject({action: 'validate', snapshotId: reviewed.snapshotId});
       const again = yield* record();
       expect(again.snapshotId).not.toBe(reviewed.snapshotId);
       expect(again).toMatchObject({tree: reviewed.tree, scopeBase: reviewed.scopeBase});

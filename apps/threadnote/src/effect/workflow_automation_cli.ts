@@ -145,26 +145,26 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
               reviewOutcome,
               ...fields
             } = options;
+            const fs = yield* FileSystem.FileSystem;
+            const path = yield* Path.Path;
+            const raw =
+              bindingsFile === undefined
+                ? undefined
+                : yield* fs.readFileString(
+                    path.isAbsolute(bindingsFile) ? bindingsFile : path.join(fields.callerCwd, bindingsFile),
+                  );
+            const bindings =
+              raw === undefined
+                ? undefined
+                : yield* Effect.try({
+                    try: () => JSON.parse(raw) as unknown,
+                    catch: () =>
+                      WorkflowAutomationError.make({
+                        code: 'invalid-bindings',
+                        message: 'Provide local branch/base choices as JSON.',
+                      }),
+                  });
             if (sharedPlanRef !== undefined) {
-              const fs = yield* FileSystem.FileSystem;
-              const path = yield* Path.Path;
-              const raw =
-                bindingsFile === undefined
-                  ? undefined
-                  : yield* fs.readFileString(
-                      path.isAbsolute(bindingsFile) ? bindingsFile : path.join(fields.callerCwd, bindingsFile),
-                    );
-              const bindings =
-                raw === undefined
-                  ? undefined
-                  : yield* Effect.try({
-                      try: () => JSON.parse(raw) as unknown,
-                      catch: () =>
-                        WorkflowAutomationError.make({
-                          code: 'invalid-bindings',
-                          message: 'Provide local branch/base choices as JSON.',
-                        }),
-                    });
               const result = yield* runNativeTaskStart(config, {
                 callerCwd: fields.callerCwd,
                 installationTarget: fields.installationTarget,
@@ -199,6 +199,8 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
               ...(fields.taskRef === undefined ? {} : {taskRef: fields.taskRef}),
               ...(fields.graphProject === undefined ? {} : {graphProject: fields.graphProject}),
               ...(fields.workflowProfile === undefined ? {} : {workflowProfile: fields.workflowProfile}),
+              ...(delivery === undefined ? {} : {delivery}),
+              ...(bindings === undefined ? {} : {bindings}),
               intent,
             }).pipe(printTaskResult);
           }),

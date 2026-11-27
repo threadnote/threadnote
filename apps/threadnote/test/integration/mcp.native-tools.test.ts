@@ -1105,8 +1105,9 @@ describe('Threadnote MCP toolsets', () => {
         // control variants, compact expansion declares its phase and decision shapes, and Threadnote 6 adds workflow
         // fields; keep the additive baseline catalog budget explicit. Both caps mirror main's approved +1,900 raise
         // for #1106 (65,200 -> 67,100): baseline 65,250 -> 67,150 and whole catalog 70,192 -> 72,092.
-        // The NAV04 navigate mode raises the baseline to 67,400; the whole-catalog bound is unchanged.
-        expect(baselineCatalogBytes).toBeLessThanOrEqual(67_400);
+        // The NAV04 navigate mode raises the baseline to 67,400, and main's +200 raise for #1196 (67,100 -> 67,300)
+        // raises the baseline to 67,600; the whole-catalog bound is unchanged.
+        expect(baselineCatalogBytes).toBeLessThanOrEqual(67_600);
         const snapshotBytes = Buffer.byteLength(JSON.stringify(workflowTaskSnapshot));
         const sameLabelBranchBytes = snapshotBytes - Buffer.byteLength(JSON.stringify(baselineSnapshot));
         expect(sameLabelBranchBytes).toBeGreaterThan(0);
@@ -1114,7 +1115,7 @@ describe('Threadnote MCP toolsets', () => {
         // The unchanged 2,500-byte full snapshot guard above bounds this exact delta, including its comma.
         // Each added semantic descriptor contributes one comma to the nonempty compact JSON array.
         const composedCatalogLimit =
-          67_400 +
+          67_600 +
           sameLabelBranchBytes +
           EffectArray.reduce(semanticDescriptorBudgets, 0, (total, [, maximum]) => total + maximum) +
           semanticDescriptorBudgets.length;

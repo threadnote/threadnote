@@ -75,6 +75,8 @@ import {runCompactOriginAuthoringSave, runWorkflowAutomation} from './index.js';
 import {nativePlanDocumentFromBusiness} from './task_authoring.js';
 import {nativeWorkflowError} from './memory.js';
 import {readNativeWorkflowState} from './store.js';
+import {decodeStoredBindings, nativeTaskStartShapeMessage, withConfirmArguments} from './task_start_support.js';
+import {resumeReopenedNativeTaskPhase} from './task_reopen.js';
 import {nativeRunNotFoundMessage, readNativeTaskView, verifyNativeTaskReopen} from './task.js';
 import {inspectOldBindingOwners} from './task_binding_transition.js';
 import {NativeTaskPrWatchFieldsSchema, validateNativeTaskWatchMaintenanceRoute} from './task_pr_watch.js';
@@ -413,34 +415,13 @@ const compactIntentMatchesDocument = (intent: NativeCompactIntent, value: unknow
     intent.eligibility.status === 'eligible'
   );
 };
-/** Names the fields that do not belong to, or are missing from, the chosen start shape. */
-const nativeTaskStartShapeMessage = (input: unknown) => {
-  const fields = Predicate.isObject(input) ? EffectRecord.keys(input) : [];
-  const shared = EffectArray.contains(fields, 'sharedPlanRef');
-  const [compact, sharedPlan] = NativeTaskStartRequestSchema.members;
-  const shapeFields: Readonly<Record<string, Schema.Top>> = shared ? sharedPlan.fields : compact.fields;
-  const label = shared ? 'A shared-plan' : 'A compact';
-  const foreign = EffectArray.filter(fields, field => !(field in shapeFields));
-  if (foreign.length) {
-    const confirmTime =
-      !shared && EffectArray.some(foreign, field => ['delivery', 'bindings', 'baseBranch'].includes(field));
-    return `${label} start does not accept ${EffectArray.join(foreign, ', ')}.${confirmTime ? ' Choose delivery and branch bindings at compact-confirm.' : ''}`;
-  }
-  const missing = EffectArray.filter(
-    EffectRecord.keys(shapeFields),
-    field => !shapeFields[field].ast.context?.isOptional && !EffectArray.contains(fields, field),
-  );
-  if (!missing.length)
-    return 'Provide a feature name, absolute checkout path, bounded compact intent, and an optional installed target or task reference.';
-  const resume = !shared && EffectArray.contains(fields, 'taskRef');
-  return `${label} ${resume ? 'resume' : 'start'} requires ${EffectArray.join(missing, ', ')}.${resume ? ' A resume repeats the original featureName and intent with the taskRef.' : ''}`;
-};
 const runNativeTaskStartOnce = (config: RuntimeConfig, input: unknown) =>
   Effect.gen(function* () {
     const request = yield* Schema.decodeUnknownEffect(NativeTaskStartRequestSchema, {onExcessProperty: 'error'})(
       input,
     ).pipe(Effect.mapError(() => fail('invalid-request', nativeTaskStartShapeMessage(input))));
     if ('sharedPlanRef' in request) return yield* runNativeSharedPlanStart(config, request);
+    // Delivery and bindings are chosen at compact-confirm, which owns the approval; start only returns them to repeat.
     const taskStartReference = request.taskRef ? decodeNativeTaskStartReference(request.taskRef) : undefined;
     if (request.taskRef && !taskStartReference)
       return yield* fail('invalid-task-ref', 'Provide a canonical run ID or current task-view reference.');
@@ -611,7 +592,13 @@ const runNativeTaskStartOnce = (config: RuntimeConfig, input: unknown) =>
         callerCwd: checkout,
         intent: request.intent,
       });
-      return {...started, runId, taskRef: runId, resumed: true, ...(pendingCompactSave ? {recovered: true} : {})};
+      return {
+        ...withConfirmArguments(started, request, runId, checkout),
+        runId,
+        taskRef: runId,
+        resumed: true,
+        ...(pendingCompactSave ? {recovered: true} : {}),
+      };
     }
     if (request.taskRef)
       return yield* fail(
@@ -657,7 +644,7 @@ const runNativeTaskStartOnce = (config: RuntimeConfig, input: unknown) =>
       callerCwd: checkout,
       intent: request.intent,
     });
-    return {...started, runId, taskRef: runId};
+    return {...withConfirmArguments(started, request, runId, checkout), runId, taskRef: runId};
   }).pipe(
     Effect.catchDefect(error => Effect.fail(nativeWorkflowError(error))),
     Effect.mapError(nativeWorkflowError),
@@ -694,15 +681,16 @@ const nativeTaskStartAdmissionBackoffMilliseconds = 250;
 
 /**
  * Starting is idempotent under the same intent: the run ID derives from the project and feature, and a repeated start
- * resumes any pending compact save. A transient admission-busy failure therefore retries the whole start a few times.
- * memory-busy and every other failure still surface at once.
+ * resumes any pending compact save. A transient admission-busy or memory-busy failure (a recall embedding worker can
+ * hold the canonical-account lock for a while) therefore retries the whole start a few times. Every other failure
+ * still surfaces at once.
  */
 export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
   runNativeTaskStartOnce(config, input).pipe(
     Effect.retry({
       schedule: Schedule.exponential(nativeTaskStartAdmissionBackoffMilliseconds),
       times: nativeTaskStartAdmissionRetries,
-      while: error => nativeWorkflowError(error).code === 'admission-busy',
+      while: error => ['admission-busy', 'memory-busy'].includes(nativeWorkflowError(error).code),
     }),
   );
 
@@ -995,7 +983,13 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
           `This run admitted ${existingCycle.plan.delivery} delivery, and an admitted cycle keeps its delivery. Omit delivery, or start a new task for ${request.delivery} delivery.`,
         );
       const currentBranch = yield* gitValue(['branch', '--show-current'], checkout);
-      if (!existingCycle && !request.baseBranch)
+      // A replay that omits bindings reuses those the earlier confirming call stored with its confirmation.
+      const storedConfirmation = current.metadata.confirmation;
+      const storedBindings =
+        Predicate.isObject(storedConfirmation) && storedConfirmation.intentHash === intentHash
+          ? decodeStoredBindings(storedConfirmation.bindings)
+          : undefined;
+      if (!existingCycle && !request.baseBranch && !request.bindings && !storedBindings)
         return {status: 'missing-input', intentHash, missingInputs: ['baseBranch for the local cycle']};
       const priorBindings = new Map(
         EffectArray.map(
@@ -1003,13 +997,15 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
           phase => [phase.id, {branch: phase.branch, baseBranch: phase.baseBranch}] as const,
         ),
       );
+      // Precedence: explicit bindings, then the admitted cycle's bindings, then an explicit baseBranch, then stored ones.
       const bindings =
         request.bindings ??
         EffectRecord.fromEntries(
           EffectArray.map(current.document.phases, phase => {
-            const priorBinding = priorBindings.get(phase.id);
-            if (priorBinding) return [phase.id, priorBinding] as const;
-            return [phase.id, {branch: currentBranch ?? '', baseBranch: request.baseBranch ?? ''}] as const;
+            const fresh = request.baseBranch
+              ? {branch: currentBranch ?? '', baseBranch: request.baseBranch}
+              : (storedBindings?.[phase.id] ?? {branch: currentBranch ?? '', baseBranch: ''});
+            return [phase.id, priorBindings.get(phase.id) ?? fresh] as const;
           }),
         );
       if (
@@ -1071,7 +1067,7 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
           actorIdentity: 'caller-asserted; not independently verified by this local command boundary',
         };
 
-      const confirmation = {...confirmationResult.confirmation, ...(delivery === 'local' ? {} : {delivery})};
+      const confirmation = {...confirmationResult.confirmation, ...(delivery === 'local' ? {} : {delivery}), bindings};
       const saved = yield* authoring('save', {
         document: current.document,
         ready: true,
@@ -1251,8 +1247,10 @@ const runNativeTaskActionCore = (config: RuntimeConfig, input: unknown) =>
         reason: request.reason,
         expectedRevision: stored.revision,
       });
-      const cycle = unwrapCycle(yield* inCheckout(runWorkflowAutomation(config, invalidation), checkout));
-      return {status: 'reopened', phaseId, cycle, task: yield* taskView()};
+      const invalidated = unwrapCycle(yield* inCheckout(runWorkflowAutomation(config, invalidation), checkout));
+      // The reopened phase returns to pending at once so the card stays on it; dependents stay stale.
+      const resumed = yield* resumeReopenedNativeTaskPhase(config, stored, invalidated.revision, request, checkout);
+      return {status: 'reopened', phaseId, cycle: resumed ?? invalidated, task: yield* taskView()};
     }
 
     if (request.command === 'reconcile') {

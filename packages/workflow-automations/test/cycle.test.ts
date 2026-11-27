@@ -857,6 +857,23 @@ const supplementalRequest = (runtime: NativeCycleRuntime, event: unknown) => {
   };
 };
 
+describe('native cycle next phase selection', () => {
+  it('keeps a reopened phase ahead of fresh independent pending work', () => {
+    const [one, two] = makePlan().phases;
+    const independent = {...two, dependsOn: []};
+    const initial = initializeNativeCycle(decodeNativeCyclePlan(makePlan([one, independent])));
+    expect(nextNativeCycle(initial)).toEqual({action: 'implement', phaseId: 'one'});
+    const reopened = {
+      ...initial,
+      phases: {...initial.phases, two: {...initial.phases.two, reason: 'Reopened after review.'}},
+    };
+    expect(nextNativeCycle(reopened)).toEqual({action: 'implement', phaseId: 'two'});
+    // A stale phase is not pinned ahead of eligible pending work.
+    const stale = {...initial, phases: {...initial.phases, two: {...initial.phases.two, status: 'stale' as const}}};
+    expect(nextNativeCycle(stale)).toEqual({action: 'implement', phaseId: 'one'});
+  });
+});
+
 describe('supplemental local publication proof', () => {
   it('validates a full bounded chain with an independent ref oracle and rejects middle corruption or aggregate overflow', () => {
     const {runtime, initialization, source} = supplementalFixture();

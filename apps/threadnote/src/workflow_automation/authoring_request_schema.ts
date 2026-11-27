@@ -1,4 +1,5 @@
 import {Schema} from 'effect';
+import {NativeBranchBindingsSchema} from '@threadnote/workflow-automations/task';
 
 const digest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
 const id = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u));
@@ -13,6 +14,8 @@ const confirmation = Schema.Struct({
   response: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
   /** The compact delivery that the response approved; an approval without it approved local delivery. */
   delivery: Schema.optionalKey(Schema.Literals(['commit', 'pr'])),
+  /** The exact branch bindings the confirming call supplied, reused when a later replay omits them. */
+  bindings: Schema.optionalKey(NativeBranchBindingsSchema),
 });
 const review = Schema.Struct({
   documentHash: digest,

@@ -1,5 +1,6 @@
 import {Array as EffectArray} from 'effect';
 import {Effect, Schema} from 'effect';
+import {NativeBranchBindingsSchema} from '@threadnote/workflow-automations/task';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {WorkflowAutomationError, type WorkflowArtifact} from '@threadnote/workflow-automations/contracts';
 import {renderNativeDocument, type NativeDocumentEnvelope} from '@threadnote/workflow-automations/documents';
@@ -86,6 +87,7 @@ export const AuthoringRootSchema = Schema.Struct({
       decision: Schema.Literal('approved'),
       response: Schema.String,
       delivery: Schema.optionalKey(Schema.Literals(['commit', 'pr'])),
+      bindings: Schema.optionalKey(NativeBranchBindingsSchema),
     }),
   ),
   review: Schema.optionalKey(

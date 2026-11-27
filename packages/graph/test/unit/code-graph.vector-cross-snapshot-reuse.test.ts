@@ -1,7 +1,7 @@
 import * as BunServices from '@effect/platform-bun/BunServices';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {it as effectIt} from '@effect/vitest';
-import {Array as EffectArray, Context, Effect, FileSystem, Layer, Path, String as EffectString} from 'effect';
+import {Array as EffectArray, Context, Effect, FileSystem, Layer, Option, Path, String as EffectString} from 'effect';
 import {TestClock} from 'effect/testing';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
@@ -12,7 +12,7 @@ import * as SqlClient from 'effect/sql/SqlClient';
 import {describe, expect} from 'vitest';
 import fc from 'fast-check';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
-import {executeCodeGraphVectorGeneration} from '../../src/embedding.js';
+import {executeCodeGraphVectorGeneration, graphEmbeddingQueryPrefix, searchGraphVectors} from '../../src/embedding.js';
 import {codeGraphLayout} from '../../src/layout.js';
 import type {CodeGraphSnapshot, CodeGraphSymbol} from '../../src/types.js';
 import {citationPlatformLayer} from '../helpers/citation-platform.js';
@@ -207,7 +207,25 @@ const production = Effect.gen(function* () {
         }),
       ).toMatchObject({ready: false, state: 'checkpointed'});
   });
-  return {calls, changed, execute, gamma, original, run, snapshot, unfinishedPredecessor, vectorDatabase};
+  const search = (
+    snapshotId: string,
+    query: string,
+    resolveSymbols?: (ids: readonly string[]) => Effect.Effect<readonly CodeGraphSymbol[], unknown>,
+  ) =>
+    searchGraphVectors({
+      catalog,
+      fs,
+      layout: codeGraphLayout(path, home, EffectString.repeat(64)('a'), EffectString.repeat(64)('b')),
+      limit: 4,
+      modelStore,
+      path,
+      query,
+      resolveSymbols,
+      runtime,
+      snapshotId,
+      threadnoteHome: home,
+    });
+  return {calls, changed, execute, gamma, original, run, search, snapshot, unfinishedPredecessor, vectorDatabase};
 });
 
 effectIt.layer(Layer.mergeAll(citationPlatformLayer, LocalModelCatalog.layer([productionManifest])))(it => {
@@ -230,6 +248,45 @@ effectIt.layer(Layer.mergeAll(citationPlatformLayer, LocalModelCatalog.layer([pr
           [worktree],
         );
       expect(yield* payload(EffectString.repeat(64)('d'))).toEqual(yield* payload(EffectString.repeat(64)('e')));
+    }).pipe(TestClock.withLive),
+  );
+
+  it.effect('searching a newer snapshot scores only symbols whose fingerprint is unchanged', () =>
+    Effect.gen(function* () {
+      const {calls, gamma, original, run, search, snapshot} = yield* production;
+      // The fake runtime embeds text as [1, byteSum % 31]. Pad Beta so it embeds like Alpha, and
+      // build a query that embeds like both, so every symbol scores above the threshold.
+      const byteSum = (text: string) =>
+        EffectArray.reduce(Array.from(new TextEncoder().encode(text)), 0, (sum, byte) => sum + byte) % 31;
+      yield* run(snapshot('snapshot-probe', 'e'), [...original, gamma]);
+      const probe = (name: string) =>
+        byteSum(
+          EffectArray.findFirst(calls, call => EffectString.includes('Original ' + name)(call)).pipe(Option.getOrThrow),
+        );
+      const pad = (name: string) => {
+        let padding = '';
+        while ((probe(name) + byteSum(padding)) % 31 !== probe('Alpha')) padding += 'a';
+        return 'Original ' + name + padding;
+      };
+      const beta = {...original[1], documentation: pad('Beta')};
+      const paddedGamma = {...gamma, documentation: pad('Gamma')};
+      const stored = [original[0], beta, paddedGamma];
+      const changed = [original[0], {...beta, documentation: 'Changed Beta'}];
+      yield* run(snapshot('snapshot-a', 'b'), stored);
+      const prefix = graphEmbeddingQueryPrefix(productionManifest);
+      let query = 'q';
+      while (byteSum(prefix + query) !== probe('Alpha')) query += 'a';
+      const resolver = (symbols: readonly CodeGraphSymbol[]) => (ids: readonly string[]) =>
+        Effect.succeed(EffectArray.filter(symbols, symbol => ids.includes(symbol.id)));
+
+      const exact = yield* search('snapshot-a', query);
+      expect(exact.get('Alpha')).toBeGreaterThan(0.99);
+      expect(exact.get('Beta')).toBeGreaterThan(0.99);
+      expect(exact.get('Gamma')).toBeGreaterThan(0.99);
+      expect(yield* search('snapshot-b', query)).toEqual(new Map());
+      // Beta changed and Gamma is absent from the snapshot B resolver result, so only Alpha keeps its stored score.
+      expect(yield* search('snapshot-b', query, resolver(changed))).toEqual(new Map([['Alpha', exact.get('Alpha')]]));
+      expect(yield* search('snapshot-b', query, resolver([]))).toEqual(new Map());
     }).pipe(TestClock.withLive),
   );
 

@@ -30,6 +30,9 @@ import {
 import {
   activateLocalStandaloneRelease,
   developmentDoctorHasOnlyConcurrentRecallProjectionFailures,
+  developmentDoctorHasOnlySupersededRecallWorkerBlock,
+  LegacyRecallWorkerBlockError,
+  runDevelopmentDoctorVerification,
   developmentRuntimeOwnershipConflict,
   developmentRuntimeTakeoverAuthorizationMatches,
   parseLocalStandaloneInstallArguments,
@@ -127,6 +130,94 @@ describe('exact-head development runtime', () => {
     );
     expect(developmentDoctorHasOnlyConcurrentRecallProjectionFailures(output, 2)).toBe(true);
     expect(developmentDoctorHasOnlyConcurrentRecallProjectionFailures(output, 1)).toBe(false);
+  });
+
+  describe('superseded recall worker block classifier', () => {
+    const legacy =
+      'FAIL vector recall index: model-id; blocked by a legacy or unverified worker; wait for its owner to release it and restart the compatible runtime; lexical recall available';
+    const lexical = 'FAIL lexical recall index: canonical documents changed; run `threadnote repair`';
+    const report = (lines: readonly string[]) =>
+      EffectArray.join([...lines, `Summary: ${lines.length} failure(s), 0 warning(s)`, ''], '\n');
+
+    const pass = {exitCode: 0, stdout: 'Summary: 0 failure(s), 0 warning(s)\n'};
+    const blocked = {exitCode: 1, stdout: report([legacy])};
+    const projection = {exitCode: 1, stdout: report([lexical])};
+    const hidden = {
+      exitCode: 1,
+      stdout: report(['FAIL vector recall index: unavailable until the lexical recall index is ready']),
+    };
+    const unrelated = {exitCode: 1, stdout: report(['FAIL storage: unwritable'])};
+    const scripted = (results: readonly {exitCode: number; stdout: string}[]) => {
+      const counts = {doctor: 0, repair: 0, retire: 0};
+      return {
+        counts,
+        input: {
+          repair: () => Effect.sync(() => void (counts.repair += 1)),
+          retireSuperseded: Effect.sync(() => {
+            counts.retire += 1;
+            return [] as readonly number[];
+          }),
+          runDoctor: () => Effect.sync(() => results[Math.min(counts.doctor++, results.length - 1)]),
+        },
+      };
+    };
+
+    effectIt.effect.each([
+      {name: 'legacy block only', results: [blocked, blocked, pass]},
+      {name: 'block hidden until the stabilize repair', results: [blocked, hidden, blocked, pass]},
+      {name: 'retire then concurrent projection then stabilize', results: [blocked, blocked, projection, pass]},
+    ])('retires exactly once and succeeds: $name', ({results}) =>
+      Effect.gen(function* () {
+        const run = scripted(results);
+        yield* runDevelopmentDoctorVerification(run.input);
+        expect(run.counts.retire).toBe(1);
+      }),
+    );
+
+    effectIt.effect.each([
+      {name: 'no retirement effect', results: [blocked, blocked], retire: false},
+      {name: 'unrelated failure', results: [unrelated], retire: true},
+    ])('fails with the existing error and never retires: $name', ({results, retire}) =>
+      Effect.gen(function* () {
+        const run = scripted(results);
+        const error = yield* runDevelopmentDoctorVerification({
+          ...run.input,
+          retireSuperseded: retire ? run.input.retireSuperseded : undefined,
+        }).pipe(Effect.flip);
+        expect(error.message).toContain('still has doctor failures after repair');
+        expect(run.counts.retire).toBe(0);
+      }),
+    );
+
+    effectIt.effect.each([
+      {name: 'immediately', results: [blocked]},
+      {name: 'after concurrent projection and stabilize', results: [blocked, blocked, projection, blocked]},
+    ])('reports a typed error when the block persists after retirement: $name', ({results}) =>
+      Effect.gen(function* () {
+        const run = scripted(results);
+        const error = yield* runDevelopmentDoctorVerification(run.input).pipe(Effect.flip);
+        expect(error).toBeInstanceOf(LegacyRecallWorkerBlockError);
+        expect(run.counts.retire).toBe(1);
+      }),
+    );
+
+    it('accepts only the legacy worker block plus bounded recall invalidation', () => {
+      expect(developmentDoctorHasOnlySupersededRecallWorkerBlock(report([legacy]), 1)).toBe(true);
+      expect(developmentDoctorHasOnlySupersededRecallWorkerBlock(report([legacy, lexical]), 2)).toBe(true);
+    });
+
+    it('rejects unrelated failures, count mismatches, and worker control failures', () => {
+      expect(developmentDoctorHasOnlySupersededRecallWorkerBlock(report([legacy, 'FAIL storage: unwritable']), 2)).toBe(
+        false,
+      );
+      expect(developmentDoctorHasOnlySupersededRecallWorkerBlock(report([legacy]), 2)).toBe(false);
+      expect(
+        developmentDoctorHasOnlySupersededRecallWorkerBlock(
+          report(['FAIL vector recall index: model-id; worker control unavailable; run `threadnote repair`']),
+          1,
+        ),
+      ).toBe(false);
+    });
   });
 
   it('parses only the explicit developer installer switches', () => {
