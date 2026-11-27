@@ -67,8 +67,8 @@ idle lifecycle. Graph and memory need no semantic process. Reactivation uses exp
 
 The shared private admission ledger coordinates clients and runtime generations within one canonical data home.
 Current defaults are eight provider reservations per home, four per workspace, two concurrent imports, 32 admission
-tickets, four running queries per session and 32 admitted/queued session requests. Query defaults are 10 seconds with a
-45-second maximum. Session and empty coordinator idle expiry are 600,000 milliseconds, checked on a one-second sweep.
+tickets, four running queries per session and 32 admitted/queued session requests. Query and change defaults are 10 seconds with a
+45-second maximum; a Java change request defaults to 45 seconds, because jdtls imports and indexes the project first. Session and empty coordinator idle expiry are 600,000 milliseconds, checked on a one-second sweep.
 The admission wait budget is finite (at most 120 seconds); file-lock acquisition and owned cleanup have their own
 bounded budgets. A request deadline cancels pending protocol work; cleanup can continue after the response deadline.
 

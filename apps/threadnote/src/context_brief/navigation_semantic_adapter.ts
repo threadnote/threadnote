@@ -13,6 +13,7 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {semanticProviderNotRunning, type SemanticAgentQueryResult} from '../semantic/agent_query_protocol.js';
 import {runSemanticAgentQueryWith, type SemanticAgentQueryHost} from '../semantic/agent_queries.js';
 import {semanticCompiledRuntimeIdentity} from '../semantic/readiness_jobs.js';
+import {semanticLanguageProductionQualified} from '../effect/semantic_cli.js';
 import {
   attachSemanticEndpoint,
   type ensureSemanticEndpoint,
@@ -343,8 +344,10 @@ const enrich = Effect.fn('navigation.semanticEnrichment')(function* (
           : language === 'kotlin'
             ? 'deferred'
             : environmentFor(catalog, language).ok
-              ? // Production qualification is pending for every provider, so no link is qualified yet.
-                'experimental'
+              ? // The provider's reviewed production qualification, as capability discovery reports it.
+                semanticLanguageProductionQualified(language)
+                ? 'qualified'
+                : 'experimental'
               : 'prerequisite-blocked',
       );
     },

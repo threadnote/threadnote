@@ -47,6 +47,14 @@ const candidates: readonly {
   {id: 'jdtls', candidateVersion: '1.63.0-202610191322', languages: ['java']},
 ];
 
+/**
+ * The reviewed production qualification of the provider that serves a language, from the same projection that
+ * capability discovery reports. False for every provider until a release qualifies one.
+ */
+export function semanticLanguageProductionQualified(language: string): boolean {
+  return EffectArray.some(semanticCapabilities({language}).providers, provider => provider.productionQualified);
+}
+
 /** Distribution evidence only. Discovery neither probes nor launches a provider. */
 export function semanticCapabilities(input: unknown = {}) {
   const {language} = Schema.decodeUnknownSync(CapabilityRequest, {onExcessProperty: 'error'})(input);

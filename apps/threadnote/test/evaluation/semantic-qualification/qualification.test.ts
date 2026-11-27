@@ -120,6 +120,27 @@ describe('final combined qualification preparation', () => {
       await expect(shutdownFixtureProviders(home, project)).rejects.toThrow('Unknown fixture coordinator proof');
       expect((await stat(coordinator)).isDirectory()).toBe(true);
       expect(await readFile(file, 'utf8')).toBe(text);
+      await rm(coordinator, {recursive: true});
+      // An exact bootstrap with no admission entry: only the released endpoint lock and socket prove the exit.
+      const runtimeIdentity = EffectString.repeat(64)('c');
+      const name = EffectString.slice(
+        0,
+        20,
+      )(
+        createHash('sha256')
+          .update(JSON.stringify([home, pathToFileURL(project).href, runtimeIdentity]))
+          .digest('hex'),
+      );
+      const endpoint = join(home, 'semantic', name);
+      const bootstrap = JSON.stringify({dataHome: home, worktree: pathToFileURL(project).href, runtimeIdentity});
+      for (const held of [false, true]) {
+        await mkdir(endpoint, {recursive: true});
+        await writeFile(join(endpoint, 'host.json'), bootstrap);
+        if (held) await writeFile(join(endpoint, 'worker.lock'), 'held');
+        const result = await shutdownFixtureProviders(home, project);
+        expect(result).toMatchObject({drained: !held, endpointsReleased: !held, coordinatorObserved: !held});
+        await rm(endpoint, {recursive: true});
+      }
     } finally {
       await rm(root, {recursive: true, force: true});
     }

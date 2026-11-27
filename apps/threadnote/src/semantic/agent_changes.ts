@@ -29,6 +29,7 @@ import {
 import {
   SemanticAgentChangeRequest,
   SemanticWriterRequest,
+  semanticAgentChangeDefaultMilliseconds,
   semanticAgentChangeLimits,
   type SemanticAgentEndpointChange,
   changeRefusal,
@@ -99,8 +100,8 @@ export const runSemanticAgentChangeWith = <R>(
     ? runSemanticWriterRequestWith(services, config, input)
     : observeHostTimeout(
         Schema.is(SemanticAgentChangeRequest)(input)
-          ? (input.milliseconds ?? semanticAgentChangeLimits.defaultMilliseconds)
-          : semanticAgentChangeLimits.defaultMilliseconds,
+          ? (input.milliseconds ?? semanticAgentChangeDefaultMilliseconds(input))
+          : semanticAgentChangeDefaultMilliseconds(input),
         (enter, hostRemaining) =>
           Effect.gen(function* () {
             const bytes = yield* Effect.try({
