@@ -1201,22 +1201,24 @@ describe.skipIf(process.platform === 'win32' || nativeTypeScriptUnavailable)(
             value: {name: 'run', span: {line: 1}},
           });
           const aliasLink = yield* Schema.decodeUnknownEffect(linkSchema)(aliasDefinition.items[0]);
-          // TLS returns the whole variable statement; graph stores its declarator.
-          // The strict join must abstain rather than trim keywords or punctuation.
-          expect(
-            selectSemanticContextSymbol(
-              bytes,
-              aliasDefinition.evidence,
-              {
-                evidence: aliasDefinition.evidence,
-                uri: aliasLink.targetUri,
-                range: aliasLink.targetRange,
-                selectionRange: aliasLink.targetSelectionRange,
-              },
-              nodes,
-              binding,
-            ).nodeId,
-          ).toBeNull();
+          // TLS returns the whole variable statement; graph stores its declarator. The join never trims keywords
+          // or punctuation: the declarator joins through its declared name, inside the statement range.
+          const alias = selectSemanticContextSymbol(
+            bytes,
+            aliasDefinition.evidence,
+            {
+              evidence: aliasDefinition.evidence,
+              uri: aliasLink.targetUri,
+              range: aliasLink.targetRange,
+              selectionRange: aliasLink.targetSelectionRange,
+            },
+            nodes,
+            binding,
+          );
+          expect(alias.nodeId).not.toBeNull();
+          expect(EffectArray.findFirst(nodes, node => node.id === alias.nodeId)).toMatchObject({
+            value: {span: {line: 3}},
+          });
           const references = yield* session.query('references', basis, position, 5000);
           expect(references.status).toBe('ok');
           if (references.status === 'ok') {
