@@ -81,6 +81,7 @@ import {nativeRunNotFoundMessage, readNativeTaskView, verifyNativeTaskReopen} fr
 import {inspectOldBindingOwners} from './task_binding_transition.js';
 import {
   NativeTaskPrWatchFieldsSchema,
+  sourceChangedCodes,
   validateNativeTaskWatchMaintenanceRoute,
   watchRecovery,
 } from './task_pr_watch.js';
@@ -708,9 +709,6 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
 /** Typed task operations over the existing cycle state; references never authorize a mutation by themselves. */
 export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
   runNativeTaskActionCore(config, input).pipe(Effect.catch(error => withTaskNext(config, input, error)));
-
-/** Refusals that mean the validated source or its declared base changed after validation. */
-const sourceChangedCodes = new Set(['source-drift', 'review-stale']);
 
 /**
  * A refusal without a named next command points at the action on the current task card, or at reopen when a deliver

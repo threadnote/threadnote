@@ -774,7 +774,8 @@ describe('native GitHub watch provider', () => {
             '2026-11-27T16:22:32.1892227Z \u001b[31m FAIL \u001b[39m apps/a.test.ts > suite > keeps limits',
             '2026-11-27T16:22:32.1892300Z ⎯⎯⎯',
             '2026-11-27T16:22:32.1893387Z AssertionError: expected 67409 to be less than or equal to 67100',
-            '2026-11-27T16:26:39.8144690Z //apps/threadnote:test_heavy                    FAILED in 445.5s',
+            '2026-11-27T16:26:39.8144690Z \u001b]8;;https://example.invalid/target\u0007//apps/threadnote:test_heavy\u001b]8;;\u0007                    FAILED in 445.5s',
+            '2026-11-27T16:26:40.0000000Z FAIL  apps/b.test.ts > token \u202eghp_ABCDEFGHIJKLMNOPQRSTUVWX\u200b leaks',
           ],
           '\n',
         );
@@ -807,9 +808,11 @@ describe('native GitHub watch provider', () => {
         const first = yield* provider.sweep();
         const summary = summaryOf(first);
         expect(summary).toBe(
-          'Bazel shard · 3/8: failure | FAIL apps/a.test.ts > suite > keeps limits | AssertionError: expected 67409 to be less than or equal to 67100 | //apps/threadnote:test_heavy FAILED in 445.5s',
+          'Bazel shard · 3/8: failure | FAIL apps/a.test.ts > suite > keeps limits | AssertionError: expected 67409 to be less than or equal to 67100 | //apps/threadnote:test_heavy FAILED in 445.5s | FAIL apps/b.test.ts > token <secret> leaks',
         );
         expect(summary).not.toContain(secretBody);
+        expect(summary).not.toContain('ghp_');
+        expect(summary).not.toContain('example.invalid');
         const state = reconcileNativeWatch(initializeNativeWatch('watch-1', pr, 0), first.sweep);
         expect(
           EffectOption.getOrUndefined(EffectArray.findFirst(state.events, event => event.kind === 'ci_error'))?.summary,
@@ -822,6 +825,43 @@ describe('native GitHub watch provider', () => {
         expect(logReads).toBe(1);
         expect(JSON.stringify(refreshed.cache)).not.toContain(secretBody);
       }),
+  );
+
+  effectIt.effect('retries an unreadable job log in a later sweep instead of caching the failure', () =>
+    Effect.gen(function* () {
+      let logReads = 0;
+      const provider = harness((args, input, call, now) => {
+        const endpoint = apiEndpoint(args);
+        if (Effect2.pipe(endpoint, EffectString.endsWith('/actions/jobs/42/logs'))) {
+          logReads++;
+          return logReads === 1 ? {status: 500, body: 'unavailable'} : {body: 'FAIL  apps/c.test.ts > retries'};
+        }
+        if (Effect2.pipe(endpoint, EffectString.includes('/check-runs')))
+          return {
+            body: {
+              check_runs: [
+                {
+                  ...check(42, 'failure'),
+                  name: 'unit',
+                  html_url: 'https://github.com/example/project/actions/runs/9/job/42',
+                },
+              ],
+            },
+          };
+        return defaultReply(args, input, call, now);
+      });
+      const summaryOf = (result: Effect.Success<ReturnType<typeof provider.sweep>>) => {
+        const checks = EffectOption.getOrUndefined(
+          EffectArray.findFirst(result.sweep.sources, source => source.source === 'checks'),
+        );
+        return checks?.complete ? checks.items[0]?.summary : undefined;
+      };
+      const first = yield* provider.sweep();
+      expect(summaryOf(first)).toBe('unit: failure');
+      const second = yield* provider.sweep(first.cache);
+      expect(summaryOf(second)).toBe('unit: failure | FAIL apps/c.test.ts > retries');
+      expect(logReads).toBe(2);
+    }),
   );
 
   effectIt.effect('turns malformed or unknown responses into bounded errors without exposing bodies', () =>

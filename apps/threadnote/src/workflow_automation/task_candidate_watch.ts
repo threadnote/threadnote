@@ -36,7 +36,7 @@ import {
   assertNativeWatchOutput,
   nativeWatchOutputLimit,
   nativeWatchWorkDetail,
-  nativeWatchWorkList,
+  nativeWatchWorkPage,
 } from './watch_output.js';
 
 export interface OwnedNativeTaskWatchRequest {
@@ -246,9 +246,7 @@ export const runOwnedNativeTaskWatch = (
       });
     }
     if (request.operation === 'work') {
-      // A continuation without the current view digest starts a fresh view instead of failing.
-      const restarted = (request.workOffset ?? 0) > 0 && request.workViewDigest !== workViewDigest;
-      const page = nativeWatchWorkList(watch.envelope.state.work, restarted ? 0 : (request.workOffset ?? 0));
+      const {page, restarted} = nativeWatchWorkPage(watch.envelope.state.work, request, workViewDigest);
       const items = EffectArray.flatMap(page.items, item =>
         Predicate.isObject(item) && typeof item.eventId === 'string'
           ? [

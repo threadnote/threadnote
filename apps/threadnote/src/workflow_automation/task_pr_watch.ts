@@ -1,7 +1,7 @@
 import type {WorkflowAutomationError, WorkflowNextCommand} from '@threadnote/workflow-automations/contracts';
 import {
   nativeNext,
-  nativeWatchIdentityKeys,
+  nativeWatchIdentityOf,
   nativeWatchNext,
   withNativeNext,
 } from '@threadnote/workflow-automations/gates';
@@ -17,7 +17,7 @@ import {
   assertNativeWatchOutput,
   nativeWatchOutputLimit,
   nativeWatchWorkDetail,
-  nativeWatchWorkList,
+  nativeWatchWorkPage,
 } from './watch_output.js';
 import {readNativeWatch, readNativeTaskWatchIds} from './watch_store.js';
 import {nativeWatchWakeupRequestSchema} from './watch_notification_state.js';
@@ -80,55 +80,79 @@ export function validateNativeTaskWatchMaintenanceRoute(
   return Effect.void;
 }
 
-const watchWorkRecoveryCodes = new Set([
-  'stale-watch-work-view',
-  'stale-watch-work-ref',
-  'invalid-watch-page',
-  'invalid-watch-work',
-]);
-const watchReferenceReloadCodes = new Set(['invalid-delivery-ref', 'stale-delivery-ref']);
+/** Refusals that mean the validated source or its declared base changed after validation. */
+export const sourceChangedCodes = new Set(['source-drift', 'review-stale']);
+
+/** Refusal codes whose recovery operation is fixed; anything unlisted inspects the watch. */
+const watchRecoveryOperations: Readonly<Record<string, 'work' | 'relay' | 'view' | 'deliver' | 'card'>> = {
+  'stale-watch-work-view': 'work',
+  'stale-watch-work-ref': 'work',
+  'invalid-watch-page': 'work',
+  'invalid-watch-work': 'work',
+  'stale-watch-delivery-ref': 'relay',
+  'invalid-delivery-ref': 'view',
+  'stale-delivery-ref': 'view',
+  'invalid-validation-ref': 'view',
+  'stale-validation-ref': 'view',
+  'user-authority-required': 'deliver',
+  'provisional-watch-not-eligible': 'card',
+};
+const routeProofKeys = ['snapshotRef', 'candidateWatchRef', 'pr', 'supplementalRef'] as const;
 
 /**
- * The watch operation that recovers a watch refusal: reload retained work from offset zero, renew an expired lease,
- * reload the task card for current references, or inspect the watch. A watch refusal never points at task finish.
+ * The operation that recovers a watch refusal, or undefined to keep the task card's next command. A watch refusal
+ * never points at task finish, and a candidate or supplemental route stays on its own proof and never renews.
  */
 export const nativeWatchRecoveryNext = (
   input: Readonly<Record<string, unknown>>,
   error: WorkflowAutomationError,
-): WorkflowNextCommand => {
-  const identity: Partial<Record<(typeof nativeWatchIdentityKeys)[number], string>> = {};
-  for (const key of nativeWatchIdentityKeys) {
-    const value = input[key];
-    if (typeof value === 'string') identity[key] = value;
+): WorkflowNextCommand | undefined => {
+  const identity = nativeWatchIdentityOf(input);
+  const routed = EffectArray.some(routeProofKeys, key => identity[key] !== undefined);
+  const scope =
+    identity.runId !== undefined && identity.callerCwd !== undefined
+      ? {runId: identity.runId, callerCwd: identity.callerCwd}
+      : undefined;
+  const mapped =
+    error.code === 'stale-watch-event-ref'
+      ? input.operation === 'work-disposition' || input.operation === 'work-detail'
+        ? 'work'
+        : 'relay'
+      : error.code === 'invalid-watch' && EffectString.includes('does not own a live lease')(error.message)
+        ? routed
+          ? 'inspect'
+          : 'renew'
+        : (watchRecoveryOperations[error.code] ?? 'inspect');
+  if (mapped === 'card') return undefined;
+  if (mapped === 'deliver') return scope ? nativeNext.deliver(scope, 'pr') : undefined;
+  if (mapped === 'view') {
+    if (!scope) return nativeWatchNext(identity, 'inspect');
+    const phaseId =
+      identity.phaseId ??
+      (identity.validationRef ? decodeNativeTaskActionRef(identity.validationRef)?.phaseId : undefined) ??
+      (identity.deliveryRef ? decodeNativeTaskActionRef(identity.deliveryRef)?.phaseId : undefined);
+    return nativeNext.view(scope, phaseId);
   }
-  if (watchReferenceReloadCodes.has(error.code) && identity.runId !== undefined && identity.callerCwd !== undefined)
-    return nativeNext.view({runId: identity.runId, callerCwd: identity.callerCwd});
-  if (
-    watchWorkRecoveryCodes.has(error.code) ||
-    (error.code === 'stale-watch-event-ref' &&
-      (input.operation === 'work-disposition' || input.operation === 'work-detail'))
-  )
-    return nativeWatchNext(identity, 'work');
-  if (error.code === 'invalid-watch' && /\blease\b|takeover/iu.test(error.message))
-    return nativeWatchNext(identity, 'renew');
-  return nativeWatchNext(identity, 'inspect');
+  return nativeWatchNext(identity, mapped);
 };
 
-const sourceChangedCodes = new Set(['source-drift', 'review-stale']);
-
 /**
- * A watch-pr refusal without its own next command recovers through the watch itself. Start (admission) and
- * changed-source refusals keep the task card's next command and return unchanged.
+ * A watch refusal without its own next command recovers through the watch itself. Start (admission) and
+ * changed-source refusals, and refusals the task card owns, keep the task card's next command and return unchanged.
  */
-export const watchRecovery = (input: unknown, error: WorkflowAutomationError): WorkflowAutomationError =>
-  Predicate.isObject(input) &&
-  input.command === 'watch-pr' &&
-  input.operation !== 'start' &&
-  !sourceChangedCodes.has(error.code) &&
-  typeof input.callerCwd === 'string' &&
-  error.next === undefined
-    ? withNativeNext(error, nativeWatchRecoveryNext(input, error))
-    : error;
+export const watchRecovery = (input: unknown, error: WorkflowAutomationError): WorkflowAutomationError => {
+  if (
+    !Predicate.isObject(input) ||
+    (input.command !== 'watch-pr' && input.command !== 'watch-candidate-pr') ||
+    input.operation === 'start' ||
+    sourceChangedCodes.has(error.code) ||
+    typeof input.callerCwd !== 'string' ||
+    error.next !== undefined
+  )
+    return error;
+  const next = nativeWatchRecoveryNext(input, error);
+  return next ? withNativeNext(error, next) : error;
+};
 
 // Preserve persisted legacy routes; the PR suffix qualifies only a different PR in the same phase.
 export const nativeTaskLegacyWatchIdentity = (runId: string, phaseId: string) => {
@@ -298,9 +322,7 @@ export const runNativePrWatchOperation = (
       });
     }
     if (request.operation === 'work') {
-      // A continuation without the current view digest starts a fresh view instead of failing.
-      const restarted = (request.workOffset ?? 0) > 0 && request.workViewDigest !== workViewDigest;
-      const page = nativeWatchWorkList(watch.envelope.state.work, restarted ? 0 : (request.workOffset ?? 0));
+      const {page, restarted} = nativeWatchWorkPage(watch.envelope.state.work, request, workViewDigest);
       const items: Record<string, unknown>[] = EffectArray.map(page.items, item => {
         if (!Predicate.isObject(item) || typeof item.eventId !== 'string')
           throw fail('invalid-watch-work', 'A retained work row has no canonical identity.');

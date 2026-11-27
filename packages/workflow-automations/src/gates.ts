@@ -164,7 +164,8 @@ export const nativeControlNext = (
 
 /** The next legal commands of the dev-cycle, each callable as given on MCP and on the CLI. */
 export const nativeNext = {
-  view: (scope: NativeNextScope) => sameShape('workflow_task_view', 'view', 'task-view', scope),
+  view: (scope: NativeNextScope, phaseId?: string) =>
+    sameShape('workflow_task_view', 'view', 'task-view', phaseId === undefined ? scope : {...scope, phaseId}),
   snapshot: (scope: NativeNextScope) =>
     nativeNextCommand(
       'workflow_task_snapshot',
@@ -249,18 +250,33 @@ export const nativeWatchIdentityKeys = [
   'phaseId',
   'prUrl',
   'watchRef',
+  'snapshotRef',
+  'candidateWatchRef',
+  'pr',
+  'supplementalRef',
 ] as const;
 
-/** A `workflow_task_watch_pr` operation over the caller's own watch identity; `work` restarts at offset zero. */
-export const nativeWatchNext = (
-  identity: Readonly<Partial<Record<(typeof nativeWatchIdentityKeys)[number], string>>>,
-  operation: 'inspect' | 'renew' | 'work' | 'complete',
-): WorkflowNextCommand => {
-  const fields: Record<string, string> = {};
+export type NativeWatchIdentity = Readonly<Partial<Record<(typeof nativeWatchIdentityKeys)[number], string>>>;
+
+/** The watch identity and route proof fields of a caller's input, in CLI order. */
+export const nativeWatchIdentityOf = (input: Readonly<Record<string, unknown>>): NativeWatchIdentity => {
+  const fields: Partial<Record<(typeof nativeWatchIdentityKeys)[number], string>> = {};
   for (const key of nativeWatchIdentityKeys) {
-    const value = identity[key];
-    if (value !== undefined) fields[key] = value;
+    const value = input[key];
+    if (typeof value === 'string') fields[key] = value;
   }
+  return fields;
+};
+
+/**
+ * A `workflow_task_watch_pr` operation over the caller's own watch identity and route proof; `work` restarts at
+ * offset zero and `relay` carries no delivery reference.
+ */
+export const nativeWatchNext = (
+  identity: NativeWatchIdentity,
+  operation: 'inspect' | 'renew' | 'work' | 'relay' | 'complete',
+): WorkflowNextCommand => {
+  const fields = nativeWatchIdentityOf(identity);
   return nativeNextCommand(
     'workflow_task_watch_pr',
     operation,

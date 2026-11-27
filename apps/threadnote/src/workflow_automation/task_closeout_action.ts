@@ -68,6 +68,71 @@ const taskJobSummary = (value: unknown): Record<string, unknown> => {
   };
 };
 
+const requiredSources = ['comments', 'reviews', 'threads', 'checks', 'statuses'];
+type PhaseWatch = NonNullable<Effect.Success<ReturnType<typeof resolveNativeTaskPrWatch>>['watch']>;
+type PhaseWatchState = PhaseWatch['envelope']['state'];
+/** The finish gate and its prerequisite diagnosis share these predicates. */
+const watchSourcesComplete = (state: PhaseWatchState) =>
+  state.sources.length === requiredSources.length &&
+  EffectArray.every(requiredSources, source =>
+    EffectArray.some(
+      state.sources,
+      item => item.source === source && item.lastCompleteAt !== undefined && item.error === undefined,
+    ),
+  );
+const watchHostReceipts = (notification: PhaseWatch['envelope']['notification']) =>
+  EffectArray.filter(
+    [notification?.lastReceipt?.receipt, notification?.outbox?.receipt],
+    (receipt): receipt is string => !!receipt,
+  );
+// The terminal receipt may still be in the outbox while lastReceipt names an earlier notice.
+const receiptCitesHost = (evidence: string | undefined, notification: PhaseWatch['envelope']['notification']) =>
+  evidence !== undefined &&
+  EffectString.startsWith('native-watch-revision:')(evidence) &&
+  EffectArray.some(watchHostReceipts(notification), receipt =>
+    EffectString.endsWith(`;host-receipt:${receipt}`)(evidence),
+  );
+const leaseExpiredWithWork = (state: PhaseWatchState, now: number) =>
+  state.consumer !== null && state.consumer.leaseUntil <= now && !watchWorkDrained(state);
+type CloseoutWatchWork = NonNullable<NativeCloseoutProposal['watchWork']>[number];
+/**
+ * Open and blocked work, plus every event that has no disposition yet, so closeout never drops an event that was
+ * still undelivered at merge. The merge event of the watch itself is the terminal state, not work.
+ */
+const closeoutWorkOf = (state: PhaseWatchState): CloseoutWatchWork[] => {
+  const disposed = new Set(EffectArray.map(state.work, item => item.eventId));
+  return [
+    ...EffectArray.flatMap(state.work, item =>
+      item.status === 'open' || item.status === 'blocked'
+        ? [
+            {
+              eventId: item.eventId,
+              status: item.status,
+              reason: item.reason,
+              evidence: item.evidence,
+              event: item.event,
+              at: item.at,
+            },
+          ]
+        : [],
+    ),
+    ...EffectArray.flatMap(state.events, event =>
+      disposed.has(event.id) || (event.source === 'watch' && event.kind === 'merged')
+        ? []
+        : [
+            {
+              eventId: event.id,
+              status: 'open' as const,
+              reason: 'Undelivered watch event at merge.',
+              evidence: state.pr,
+              event,
+              at: event.at,
+            },
+          ],
+    ),
+  ];
+};
+
 /**
  * Record the terminal receipt of each merged phase watch that is ready, so finish needs no separate watch complete.
  * The collector never writes canonical workflow receipts; finish runs the same checkout-bound complete route, which
@@ -116,12 +181,7 @@ const settleMergedPhaseWatches = (
         validationRef: refs.validationRef,
         deliveryRef: refs.deliveryRef,
       };
-      const consumer = watch.envelope.state.consumer;
-      if (
-        consumer &&
-        consumer.leaseUntil <= (yield* Clock.currentTimeMillis) &&
-        !watchWorkDrained(watch.envelope.state)
-      ) {
+      if (leaseExpiredWithWork(watch.envelope.state, yield* Clock.currentTimeMillis)) {
         const renewed = yield* runNativeTaskPrWatch(config, {...route, operation: 'renew'}, stored, checkout).pipe(
           Effect.result,
         );
@@ -151,6 +211,19 @@ export const runNativeTaskFinish = (
   Effect.gen(function* () {
     let stored = initialStored;
     let state = initialState;
+    // Cheap request-shape refusals come first, so they never settle a watch.
+    if (request.prepareRef && request.finishRef)
+      return yield* fail('invalid-request', 'Continue one closeout reference at a time.');
+    if (request.resume && !request.prepareRef && !request.finishRef)
+      return yield* fail('invalid-request', 'Explicit job resume requires its exact prepareRef or finishRef.');
+    const invalidProposal = fail(
+      'invalid-closeout-proposal',
+      'The semantic closeout proposal could not retain canonical PR watch work.',
+    );
+    if (request.proposal !== undefined)
+      yield* Schema.decodeEffect(NativeCloseoutProposalSchema, {onExcessProperty: 'error'})(request.proposal).pipe(
+        Effect.mapError(() => invalidProposal),
+      );
     if (nextNativeCycle(state).action !== 'complete')
       return yield* fail('finish-scope', 'Task finish requires the current canonical phase completion gate.');
     const phase = state.plan.phases[0];
@@ -178,8 +251,7 @@ export const runNativeTaskFinish = (
         state = fresh.state.cycle.state;
       }
       const autoFailures = settlement.failures;
-      const requiredSources = ['comments', 'reviews', 'threads', 'checks', 'statuses'];
-      const watchWork: Array<NonNullable<NativeCloseoutProposal['watchWork']>[number]> = [];
+      const watchWork: CloseoutWatchWork[] = [];
       for (const planPhase of state.plan.phases) {
         const proof = state.phases[planPhase.id];
         const receipt = proof?.delivery;
@@ -191,24 +263,8 @@ export const runNativeTaskFinish = (
         const watch = resolved?.watch;
         const notification = watch?.envelope.notification;
         const consumer = watch?.envelope.state.consumer;
-        const evidence = receipt?.watch?.evidence;
-        // The terminal receipt may still be in the outbox while lastReceipt names an earlier notice.
-        const hasHostReceipt =
-          evidence !== undefined &&
-          EffectString.startsWith('native-watch-revision:')(evidence) &&
-          EffectArray.some(
-            [notification?.lastReceipt?.receipt, notification?.outbox?.receipt],
-            hostReceipt => !!hostReceipt && EffectString.endsWith(`;host-receipt:${hostReceipt}`)(evidence),
-          );
-        const completeSources =
-          watch &&
-          watch.envelope.state.sources.length === requiredSources.length &&
-          EffectArray.every(requiredSources, source =>
-            EffectArray.some(
-              watch.envelope.state.sources,
-              item => item.source === source && item.lastCompleteAt !== undefined && item.error === undefined,
-            ),
-          );
+        const hasHostReceipt = receiptCitesHost(receipt?.watch?.evidence, notification);
+        const completeSources = watch !== undefined && watchSourcesComplete(watch.envelope.state);
         if (
           !proof ||
           !receipt ||
@@ -254,12 +310,12 @@ export const runNativeTaskFinish = (
                       `The watch of phase ${planPhase.id} has not finished its terminal merged sweep with every source complete; wait for that sweep.`,
                       'inspect',
                     ]
-                  : consumer && consumer.leaseUntil <= now && !watchWorkDrained(watchState)
+                  : leaseExpiredWithWork(watchState, now)
                     ? [
                         `The watch consumer lease of phase ${planPhase.id} expired while merged-watch events or open work remain; renew the watch${autoFailure ? ` (automatic renew refused: ${autoFailure.message})` : ''}.`,
                         'renew',
                       ]
-                    : !notification?.lastReceipt?.receipt && !notification?.outbox?.receipt
+                    : !watchHostReceipts(notification).length
                       ? [
                           `The merged watch notice of phase ${planPhase.id} has no host receipt yet; wait until the host wakeup is delivered.`,
                           'inspect',
@@ -323,34 +379,13 @@ export const runNativeTaskFinish = (
               retainedNotification.recoveryRequested ||
               !(retainedNotification.lastReceipt || retainedOutbox?.receipt) ||
               (retainedOutbox && ['pending', 'sending', 'failed'].includes(retainedOutbox.status)) ||
-              retainedState.sources.length !== requiredSources.length ||
-              !EffectArray.every(requiredSources, source =>
-                EffectArray.some(
-                  retainedState.sources,
-                  item => item.source === source && item.lastCompleteAt !== undefined && item.error === undefined,
-                ),
-              ))
+              !watchSourcesComplete(retainedState))
           )
             return yield* fail(
               'finish-scope',
               'A retained prior PR watch still owns active collection; settle that exact watch before finish.',
             );
-          watchWork.push(
-            ...EffectArray.map(
-              EffectArray.filter(
-                retained.watch.envelope.state.work,
-                item => item.status === 'open' || item.status === 'blocked',
-              ),
-              item => ({
-                eventId: item.eventId,
-                status: item.status === 'blocked' ? ('blocked' as const) : ('open' as const),
-                reason: item.reason,
-                evidence: item.evidence,
-                event: item.event,
-                at: item.at,
-              }),
-            ),
-          );
+          watchWork.push(...closeoutWorkOf(retainedState));
         }
       }
       closeoutWatchWork = watchWork;
@@ -361,18 +396,7 @@ export const runNativeTaskFinish = (
         : yield* Schema.decodeEffect(NativeCloseoutProposalSchema, {onExcessProperty: 'error'})({
             ...request.proposal,
             ...(closeoutWatchWork === undefined ? {} : {watchWork: closeoutWatchWork}),
-          }).pipe(
-            Effect.mapError(() =>
-              fail(
-                'invalid-closeout-proposal',
-                'The semantic closeout proposal could not retain canonical PR watch work.',
-              ),
-            ),
-          );
-    if (request.prepareRef && request.finishRef)
-      return yield* fail('invalid-request', 'Continue one closeout reference at a time.');
-    if (request.resume && !request.prepareRef && !request.finishRef)
-      return yield* fail('invalid-request', 'Explicit job resume requires its exact prepareRef or finishRef.');
+          }).pipe(Effect.mapError(() => invalidProposal));
     let proposalDigest = closeoutProposal ? sha256HexSync(stableJson(closeoutProposal)) : undefined;
     let expectedPreparedRevision: string | undefined;
     const journal = yield* readNativeCloseoutJournal(config, request.runId, decodeJournal);

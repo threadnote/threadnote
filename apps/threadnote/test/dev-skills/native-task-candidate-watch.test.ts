@@ -381,6 +381,28 @@ effectIt.effect(
           object(yield* invoke({...continuation, operation: 'work-detail', workEventRef: workRef})).result,
         );
         expect(detail.workDetail).toBeDefined();
+        // A stale candidate row reference recovers on its own route proof, never on a canonical watch route.
+        const staleWorkRef = encodeNativeTaskActionRef({
+          ...required(decodeNativeTaskActionRef(workRef)),
+          workRowDigest: EffectString.repeat(64)('a'),
+        });
+        expect(
+          yield* runNativeTaskAction(f.config, {
+            ...resume,
+            command: 'watch-pr',
+            operation: 'work-detail',
+            workEventRef: staleWorkRef,
+          }).pipe(Effect.result),
+        ).toMatchObject({
+          failure: {
+            code: 'stale-watch-work-ref',
+            next: {
+              tool: 'workflow_task_watch_pr',
+              command: 'work',
+              arguments: {operation: 'work', workOffset: 0, candidateWatchRef: resume.candidateWatchRef},
+            },
+          },
+        });
         watch = required(yield* readNativeWatch(f.config, watchId));
         const appended = recordNativeWatchLifecycle(
           watch.envelope.state,

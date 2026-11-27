@@ -5,6 +5,7 @@ import {
 import {Array as EffectArray, Predicate} from 'effect';
 import {Cause, Context, Effect, Schema} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
+import {redactSensitiveText} from '@threadnote/platform/scrubber';
 import type {
   NativeWatchEntity,
   NativeWatchSourceResult,
@@ -128,12 +129,21 @@ const entity = (
 const summaryLimit = 1024;
 const summaryLineLimit = 200;
 const summaryLogLines = 6;
-const summaryLogChecks = 3;
+const summaryLogChecks = 6;
 const summaryDetailSeparator = ' | ';
-/** Replace characters the watch event schema refuses and collapse whitespace. */
+const logTimestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s?/u;
+// oxlint-disable-next-line no-control-regex -- Terminal escapes (OSC hyperlinks, then CSI styles) are removed from CI text.
+const terminalEscapes = /\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b\[[0-9;?]*[A-Za-z]/gu;
+const invisibleFormatting = /[\u200b-\u200d\u202a-\u202e\u2066-\u2069\ufeff]/gu;
+const stripTerminal = (value: string) =>
+  Effect2.pipe(value, EffectString.replace(terminalEscapes, ''), EffectString.replace(invisibleFormatting, ''));
+/**
+ * Make untrusted CI text safe to keep: remove terminal and invisible formatting, redact credential-shaped values,
+ * replace characters the watch event schema refuses and collapse whitespace.
+ */
 const summaryText = (value: string, maximum: number) =>
   Effect2.pipe(
-    value,
+    redactSensitiveText(stripTerminal(value)),
     EffectString.replace(/[^\u0020-\u007e\u00a0-\u{10ffff}]+/gu, ' '),
     EffectString.replace(/\s+/gu, ' '),
     EffectString.trim,
@@ -148,9 +158,6 @@ const failureSummary = (name: unknown, outcome: unknown, fallback: string) =>
     ),
     EffectString.replaceAll('|', '/'),
   ) || undefined;
-const logTimestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s?/u;
-// oxlint-disable-next-line no-control-regex -- ANSI escapes are removed from CI log lines before extraction.
-const logAnsi = /\u001b\[[0-9;?]*[A-Za-z]/gu;
 
 /**
  * Select only failing test names, their first error line and failing Bazel targets from a CI job log. The raw log is
@@ -168,12 +175,7 @@ export function nativeWatchFailureLines(log: string): string[] {
   };
   for (const raw of EffectString.split(log, /\r?\n/u)) {
     if (lines.length >= summaryLogLines) break;
-    const line = Effect2.pipe(
-      raw,
-      EffectString.replace(logTimestamp, ''),
-      EffectString.replace(logAnsi, ''),
-      EffectString.trim,
-    );
+    const line = EffectString.trim(stripTerminal(EffectString.replace(logTimestamp, '')(raw)));
     if (!line) continue;
     if (/^FAIL\s+\S.*\s>\s\S/u.test(line)) {
       add(line);
@@ -694,48 +696,45 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
           {allowFailure: true, timeoutMs: 15_000, maxOutputBytes: 8 * 1024 * 1024, sensitiveOutput: true},
         ).pipe(Effect.result);
         if (result._tag === 'Failure' || result.success.exitCode !== 0) return undefined;
-        metrics.responseBytes += new TextEncoder().encode(result.success.stdout).byteLength;
+        metrics.responseBytes += Buffer.byteLength(result.success.stdout);
         return nativeWatchFailureLines(result.success.stdout);
       });
-    /** Best effort: a missing or unreadable log keeps the base summary and never fails the checks source. */
+    /**
+     * Best effort: an unreadable log keeps the base summary for a retry in a later sweep and never fails the checks
+     * source. An event carries the summary of its emitting sweep only; a later summary never re-emits it.
+     */
     const enrichFailedChecks = (items: readonly NativeWatchEntity[]) =>
       Effect.gen(function* () {
-        let fetched = 0;
-        const enriched: NativeWatchEntity[] = [];
+        const summaries = new Map<string, string>();
+        const pendingReads: {readonly item: NativeWatchEntity & {readonly summary: string}; readonly jobId: string}[] =
+          [];
         for (const item of items) {
-          const summary = priorSummaries.get(`${item.id}\u0000${item.version}`) ?? item.summary;
-          const jobId = item.kind === 'ci_error' && item.summary ? actionsJobId(item) : undefined;
-          // Only an attempted enrichment adds the ` | ` separator; the base summary never contains it.
-          if (
-            summary === undefined ||
-            !jobId ||
-            !item.summary ||
-            EffectString.includes(summaryDetailSeparator)(summary)
-          )
-            enriched.push(summary === undefined ? item : {...item, summary});
-          else if (
-            fetched >= summaryLogChecks ||
-            authenticationFailed ||
-            now() < blockedUntil ||
-            now() - started > 30_000
-          )
-            enriched.push(item);
-          else {
-            fetched++;
-            const lines = yield* jobFailureLines(jobId);
-            const detail =
-              lines === undefined
-                ? ['job log unavailable']
-                : lines.length
-                  ? lines
-                  : ['no failing test lines in job log'];
-            enriched.push({
-              ...item,
-              summary: summaryText(EffectArray.join([item.summary, ...detail], summaryDetailSeparator), summaryLimit),
-            });
-          }
+          const prior = priorSummaries.get(`${item.id}\u0000${item.version}`);
+          const jobId = item.kind === 'ci_error' ? actionsJobId(item) : undefined;
+          // Only a successful read adds the ` | ` separator; the base summary never contains it.
+          if (prior !== undefined && EffectString.includes(summaryDetailSeparator)(prior))
+            summaries.set(item.id, prior);
+          else if (jobId && item.summary) pendingReads.push({item: {...item, summary: item.summary}, jobId});
         }
-        return enriched;
+        // First-seen failures emit their event in this sweep, so they read their logs first.
+        const ordered = [
+          ...EffectArray.filter(pendingReads, ({item}) => !priorSummaries.has(`${item.id}\u0000${item.version}`)),
+          ...EffectArray.filter(pendingReads, ({item}) => priorSummaries.has(`${item.id}\u0000${item.version}`)),
+        ];
+        for (const {item, jobId} of EffectArray.take(ordered, summaryLogChecks)) {
+          if (authenticationFailed || now() < blockedUntil || now() - started > 20_000) break;
+          const lines = yield* jobFailureLines(jobId);
+          if (lines === undefined) continue;
+          const detail = lines.length ? lines : ['no failing test lines in job log'];
+          summaries.set(
+            item.id,
+            summaryText(EffectArray.join([item.summary, ...detail], summaryDetailSeparator), summaryLimit),
+          );
+        }
+        return EffectArray.map(items, item => {
+          const summary = summaries.get(item.id);
+          return summary === undefined ? item : {...item, summary};
+        });
       });
     const sources: NativeWatchSourceResult[] = [];
     const all: NativeWatchEntity[] = [];
