@@ -149,3 +149,9 @@ export interface NavigationAnswerV1 {
   readonly gaps: readonly string[];
   readonly followUps: readonly NavigationAcquisition[];
 }
+
+/** Add gaps once, in order, keeping the assembler's gap limit; earlier gaps win. */
+export function withNavigationGaps(input: NavigationInput, gaps: readonly string[]): NavigationInput {
+  if (gaps.length === 0) return input;
+  return {...input, gaps: [...new Set([...gaps, ...(input.gaps ?? [])])].slice(0, NAVIGATION_INPUT_LIMITS.gaps)};
+}

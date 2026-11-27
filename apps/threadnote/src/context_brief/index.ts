@@ -492,20 +492,31 @@ export const compileContextBriefNavigation = Effect.fn('contextBrief.compileNavi
   input: unknown,
 ) {
   const compilation = Effect.gen(function* () {
-    const sources = yield* withNativeContextBriefReadSources(config, {
-      citationValidation: (scope, candidates, fence) =>
-        validateContextBriefMemoryCitations(config, scope, candidates, fence),
-      graphEvidence: (graphPlan, readBudget) =>
-        retrieveContextBriefGraphEvidence(config, graphPlan, retrieveContextBriefSourceEvidence, readBudget),
-      memoryEvidence: memoryPlan => retrieveContextBriefMemoryEvidence(config, memoryPlan),
-      navigationEvidence: (request, deadline) => readNavigationEvidence(config, request, deadline),
-      projection: (logical, maximumEstimatedTokens, responseFormat) =>
-        Effect.sync(() => projectContextBrief(logical, maximumEstimatedTokens, responseFormat)),
-    });
+    const sources = yield* withNativeContextBriefReadSources(
+      config,
+      {
+        citationValidation: (scope, candidates, fence) =>
+          validateContextBriefMemoryCitations(config, scope, candidates, fence),
+        graphEvidence: (graphPlan, readBudget) =>
+          retrieveContextBriefGraphEvidence(config, graphPlan, retrieveContextBriefSourceEvidence, readBudget),
+        memoryEvidence: memoryPlan => retrieveContextBriefMemoryEvidence(config, memoryPlan),
+        navigationEvidence: (request, deadline) => readNavigationEvidence(config, request, deadline),
+        projection: (logical, maximumEstimatedTokens, responseFormat) =>
+          Effect.sync(() => projectContextBrief(logical, maximumEstimatedTokens, responseFormat)),
+      },
+      {prestartSpare: false},
+    );
+    const read = sources.navigationEvidence!;
     return yield* compileContextBriefNavigationWith(
       {
-        navigationEvidence: sources.navigationEvidence!,
-        memoryEvidence: sources.memoryEvidence,
+        // A failed worker read keeps a truthful answer. Deadline, cleanup and routing failures keep their meaning.
+        navigationEvidence: (request, deadline) =>
+          read(request, deadline).pipe(
+            Effect.catchIf(
+              error => Schema.is(ContextBriefNativeReadFailed)(error) && error.reason !== 'cleanup-unconfirmed',
+              () => Effect.succeed({status: 'unavailable', gaps: ['navigation-read-unavailable']} as const),
+            ),
+          ),
         navigationSemantic: makeNavigationSemanticDependency(config),
       },
       input,

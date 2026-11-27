@@ -3,7 +3,11 @@ import * as EffectString from 'effect/String';
 import {ReadDeadlineExceeded, readDeadlineRemaining, type ReadDeadline} from '@threadnote/platform/read_deadline';
 import {CodeGraphQueryService, observationFromCodeGraphStatus} from '@threadnote/graph/query';
 import {CodeGraphStore} from '@threadnote/graph/store';
-import {parseNavigationFacts} from '@threadnote/graph/navigation_facts';
+import {
+  parseNavigationFacts,
+  type NavigationProofEdge,
+  type NavigationProofSymbol,
+} from '@threadnote/graph/navigation_facts';
 import type {TaskDiscoveryBudget} from '@threadnote/graph/query/task_discovery';
 import type {
   CodeGraphEdge,
@@ -13,11 +17,16 @@ import type {
   RepositoryIdentity,
 } from '@threadnote/graph/types';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import {fromRepositoryQuery} from '../graph/evidence.js';
-import type {ContextBriefGraphEvidenceV1, ContextBriefScopeV1} from '../types.js';
+import type {ContextBriefScopeV1} from '../types.js';
 import {navigationRelativePath, type NavigationEffectsLocator} from './continuation.js';
 import {retrieveTaskNavigationAnswer} from './discovery.js';
-import {NAVIGATION_INPUT_LIMITS, type NavigationInput, type NavigationScope} from './model.js';
+import {
+  NAVIGATION_INPUT_LIMITS,
+  navigationScopeKey,
+  withNavigationGaps,
+  type NavigationInput,
+  type NavigationScope,
+} from './model.js';
 import type {NavigationSemanticAnchorV1} from './semantic.js';
 import type {NavigationProofLocator} from './structural.js';
 
@@ -38,18 +47,20 @@ export interface NavigationReadEvidenceV1 {
   readonly repositoryIdentityKind: 'local' | 'remote';
   readonly input: NavigationInput;
   readonly proofLocators: readonly NavigationProofLocator[];
-  /** The owner symbols and call edges the proofs reference, so the parent can re-validate every proof. */
-  readonly proofContext: {readonly symbols: readonly CodeGraphQueryNode[]; readonly edges: readonly CodeGraphEdge[]};
+  /** Only the owner-symbol and call-edge fields the proofs are closed against, so the parent can re-validate them. */
+  readonly proofContext: {
+    readonly symbols: readonly (NavigationProofSymbol & Pick<CodeGraphQueryNode, 'path' | 'contentHash'>)[];
+    readonly edges: readonly NavigationProofEdge[];
+  };
   readonly anchors: readonly NavigationSemanticAnchorV1[];
-  /** Graph evidence of the same read, for memory selection; no second graph read is needed. */
-  readonly graph: ContextBriefGraphEvidenceV1;
 }
 
 export type NavigationReadResultV1 =
   NavigationReadEvidenceV1 | {readonly status: 'unavailable'; readonly gaps: readonly string[]};
 
 const LEASE_WAIT_MILLISECONDS = 250;
-const SEMANTIC_ANCHORS = 2;
+/** Anchors offered to the semantic step for one answer. */
+export const NAVIGATION_SEMANTIC_ANCHORS = 2;
 const REPOSITORY_PROJECT = 'repository';
 /** Accounting bound for discovery plus the one source-proof batch; the worker reply limit is separate. */
 const DISCOVERY_BYTES = 16 * 1024 * 1024;
@@ -118,8 +129,9 @@ const readLeased = Effect.fn('navigation.readLeased')(function* (
   const scope: NavigationScope = {
     repository: identity.repositoryId,
     worktree: identity.worktreeId,
-    // The assembler admits only nonempty identities; a repository-wide graph has no project name.
-    project: status.projectCoverage?.kind === 'project' ? status.projectCoverage.project : REPOSITORY_PROJECT,
+    // The structural adapter requires this to equal the coverage project. The assembler admits only nonempty
+    // identities, so a graph with no project coverage uses a fixed name.
+    project: status.projectCoverage?.project ?? REPOSITORY_PROJECT,
     view: DISK_VIEW,
   };
   const staleGaps = status.freshness === 'current' ? [] : [`navigation-graph-${status.freshness}`];
@@ -128,14 +140,19 @@ const readLeased = Effect.fn('navigation.readLeased')(function* (
     ? EffectArray.map(request.followUp, locator => locator.nodeId)
     : EffectArray.filter(request.codeRefs, EffectString.startsWith('cgs_'));
   let anchoredResult: CodeGraphQueryResult | undefined;
+  const readGaps: string[] = [];
   if (request.followUp !== undefined) {
+    // A follow-up never repeats task discovery, so it needs at least one effect node to re-read.
+    if (request.followUp.length === 0) return unavailable('navigation-follow-up-unresolved');
     const contained = yield* followUpPathsContained(identity.repoRoot, request.followUp);
     if (!contained) return unavailable('navigation-continuation-path-rejected');
   }
   if (nodeIds.length > 0) {
-    anchoredResult = yield* readAnchors(config, request, status, nodeIds, request.followUp === undefined ? 1 : 0);
-    if (anchoredResult === undefined)
+    const anchored = yield* readAnchors(config, request, status, nodeIds, request.followUp === undefined ? 1 : 0);
+    if (anchored === undefined)
       return unavailable(request.followUp ? 'navigation-follow-up-unresolved' : 'navigation-anchor-unresolved');
+    anchoredResult = anchored.result;
+    if (anchored.truncated) readGaps.push('navigation-anchor-budget');
     if (
       request.followUp !== undefined &&
       !EffectArray.every(request.followUp, locator =>
@@ -162,7 +179,7 @@ const readLeased = Effect.fn('navigation.readLeased')(function* (
     repositoryKey: identity.displayName,
     scope,
     maximumEstimatedTokens: request.maximumEstimatedTokens,
-    ...(anchoredResult === undefined ? {} : {anchoredResult}),
+    ...(anchoredResult === undefined ? {} : {anchoredResult, anchorIds: nodeIds}),
     ...(anchoredResult === undefined && paths.length > 0 ? {paths} : {}),
   });
   const result = anchoredResult ?? answer.discovery!.result;
@@ -174,17 +191,28 @@ const readLeased = Effect.fn('navigation.readLeased')(function* (
     identity,
     observation: {repository: observation.repository, snapshot: observation.snapshot, freshness: observation.freshness},
     repositoryIdentityKind: identity.remoteIdentity === undefined ? 'local' : 'remote',
-    input: staleGaps.length === 0 ? input : {...input, gaps: [...new Set([...(input.gaps ?? []), ...staleGaps])]},
+    input: withNavigationGaps(input, [...staleGaps, ...readGaps]),
     proofLocators,
     proofContext: {
-      symbols: EffectArray.filter(result.nodes, node => ownerIds.has(node.id)),
-      edges: EffectArray.filter(result.edges, edge => callEdgeIds.has(edge.id)),
+      symbols: EffectArray.map(
+        EffectArray.filter(result.nodes, node => ownerIds.has(node.id)),
+        ({id, kind, span, path, contentHash}) => ({id, kind, span, path, contentHash}),
+      ),
+      edges: EffectArray.map(
+        EffectArray.filter(result.edges, edge => callEdgeIds.has(edge.id)),
+        ({id, sourceId, relation, targetName}) => ({
+          id,
+          relation,
+          targetName,
+          ...(sourceId === undefined ? {} : {sourceId}),
+        }),
+      ),
     },
     anchors: semanticAnchors(input, result),
-    graph: fromRepositoryQuery(result),
   } satisfies NavigationReadResultV1;
 });
 
+/** Read each anchor's neighbourhood. Every anchor node is kept; neighbours fill the remaining limits. */
 const readAnchors = Effect.fn('navigation.readAnchors')(function* (
   config: RuntimeConfig,
   request: NavigationReadRequestV1,
@@ -193,9 +221,7 @@ const readAnchors = Effect.fn('navigation.readAnchors')(function* (
   depth: 0 | 1,
 ) {
   const query = yield* CodeGraphQueryService;
-  const nodes = new Map<string, CodeGraphQueryNode>();
-  const edges = new Map<string, CodeGraphEdge>();
-  let first: CodeGraphQueryResult | undefined;
+  const results: CodeGraphQueryResult[] = [];
   for (const nodeId of nodeIds.slice(0, NAVIGATION_INPUT_LIMITS.anchors)) {
     const result = yield* query
       .inspect({
@@ -215,26 +241,39 @@ const readAnchors = Effect.fn('navigation.readAnchors')(function* (
         threadnoteHome: config.agentContextHome,
       })
       .pipe(Effect.option);
-    if (Option.isNone(result) || !EffectArray.some(result.value.nodes, node => node.id === nodeId)) return undefined;
     if (
+      Option.isNone(result) ||
+      !EffectArray.some(result.value.nodes, node => node.id === nodeId) ||
       result.value.repository.repositoryId !== status.identity.repositoryId ||
       result.value.snapshot.id !== status.readySnapshot?.id
     )
       return undefined;
-    first ??= result.value;
-    for (const node of result.value.nodes)
-      if (nodes.size < NAVIGATION_INPUT_LIMITS.candidates || nodes.has(node.id)) nodes.set(node.id, node);
-    for (const edge of result.value.edges)
+    results.push(result.value);
+  }
+  const first = results[0];
+  if (first === undefined) return undefined;
+  const anchors = new Set(nodeIds);
+  const nodes = new Map<string, CodeGraphQueryNode>();
+  for (const result of results) for (const node of result.nodes) if (anchors.has(node.id)) nodes.set(node.id, node);
+  let truncated = false;
+  for (const result of results)
+    for (const node of result.nodes)
+      if (nodes.has(node.id)) continue;
+      else if (nodes.size < NAVIGATION_INPUT_LIMITS.candidates) nodes.set(node.id, node);
+      else truncated = true;
+  const edges = new Map<string, CodeGraphEdge>();
+  for (const result of results)
+    for (const edge of result.edges)
       if (
-        edges.size < NAVIGATION_INPUT_LIMITS.links &&
         edge.sourceId !== undefined &&
         edge.targetId !== undefined &&
         nodes.has(edge.sourceId) &&
-        nodes.has(edge.targetId)
+        nodes.has(edge.targetId) &&
+        !edges.has(edge.id)
       )
-        edges.set(edge.id, edge);
-  }
-  return first === undefined ? undefined : {...first, nodes: [...nodes.values()], edges: [...edges.values()]};
+        if (edges.size < NAVIGATION_INPUT_LIMITS.links) edges.set(edge.id, edge);
+        else truncated = true;
+  return {result: {...first, nodes: [...nodes.values()], edges: [...edges.values()]}, truncated};
 });
 
 /** Every follow-up path must stay inside the repository root after links are resolved. */
@@ -275,7 +314,7 @@ function semanticAnchors(input: NavigationInput, result: CodeGraphQueryResult): 
   const ordered = [...candidates].sort(
     (left, right) => rank(left.roles) - rank(right.roles) || right.relevance - left.relevance,
   );
-  return EffectArray.map(ordered.slice(0, SEMANTIC_ANCHORS), candidate => {
+  return EffectArray.map(ordered.slice(0, NAVIGATION_SEMANTIC_ANCHORS), candidate => {
     const node = nodes.get(candidate.id)!;
     return {
       candidateId: candidate.id,
@@ -288,15 +327,17 @@ function semanticAnchors(input: NavigationInput, result: CodeGraphQueryResult): 
 }
 
 /**
- * Parent-side admission of a read reply from the native worker. The reply is untrusted: identities must agree,
- * every path must be repository-relative, every anchor must name a candidate and its source bytes, and every
- * proof is re-validated against its owner symbol and call edge. Any violation throws.
+ * Parent-side admission of a read reply from the native worker. The reply is untrusted: identities must agree with
+ * each other and with the request scope, every path must be repository-relative, every anchor must name a candidate
+ * and its source bytes, and every proof is re-validated against its own source, owner symbol and call edge. The
+ * caller checks separately that the request cwd lies inside `identity.repoRoot`. Any violation throws.
  */
 export function admitNavigationRead(result: NavigationReadResultV1): NavigationReadResultV1 {
   if (result.status !== 'ok') return result;
   const {identity, observation, input} = result;
   if (
     observation.repository.repositoryId !== identity.repositoryId ||
+    observation.snapshot.worktreeId !== identity.worktreeId ||
     input.scope.repository !== identity.repositoryId ||
     input.scope.worktree !== identity.worktreeId
   )
@@ -307,28 +348,50 @@ export function admitNavigationRead(result: NavigationReadResultV1): NavigationR
   for (const anchor of result.anchors) {
     const candidate = EffectArray.findFirst(input.candidates, item => item.id === anchor.candidateId);
     const source = Option.isSome(candidate) ? sources.get(candidate.value.sourceId) : undefined;
-    if (
-      !navigationRelativePath(anchor.path) ||
-      source === undefined ||
-      source.path !== anchor.path ||
-      source.contentHash !== anchor.contentHash
-    )
+    if (source === undefined || source.path !== anchor.path || source.contentHash !== anchor.contentHash)
       throw new Error('Navigation read anchor rejected.');
   }
+  const scopeKey = navigationScopeKey(input.scope);
   const byPath = new Map<string, NavigationProofLocator[]>();
   for (const locator of result.proofLocators) {
-    if (!navigationRelativePath(locator.accepted.path) || locator.snapshot.id !== observation.snapshot.id)
+    const source = sources.get(locator.sourceId);
+    if (
+      navigationScopeKey(locator.scope) !== scopeKey ||
+      locator.snapshot.id !== observation.snapshot.id ||
+      source === undefined ||
+      source.path !== locator.accepted.path ||
+      source.contentHash !== locator.accepted.contentHash
+    )
       throw new Error('Navigation read proof locator rejected.');
     byPath.set(locator.accepted.path, [...(byPath.get(locator.accepted.path) ?? []), locator]);
   }
   for (const [path, locators] of byPath) {
-    const proofs = EffectArray.map(locators, locator => locator.accepted.proof);
-    const facts = parseNavigationFacts(
-      {version: 1, omitted: false, proofs},
-      EffectArray.filter(result.proofContext.symbols, symbol => symbol.path === path),
-      result.proofContext.edges,
+    const hash = locators[0].accepted.contentHash;
+    const symbols = EffectArray.filter(
+      result.proofContext.symbols,
+      symbol => symbol.path === path && symbol.contentHash === hash,
     );
+    const proofs = EffectArray.map(locators, locator => locator.accepted.proof);
+    const facts = parseNavigationFacts({version: 1, omitted: false, proofs}, symbols, result.proofContext.edges);
     if (facts.proofs.length !== proofs.length) throw new Error('Navigation read proof rejected.');
   }
   return result;
 }
+
+/** The request cwd must lie inside the repository root the worker reported. */
+export const navigationReadContainsCwd = Effect.fn('navigation.readContainsCwd')(function* (
+  result: NavigationReadResultV1,
+  callerCwd: string,
+) {
+  if (result.status !== 'ok') return true;
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const real = yield* Effect.option(Effect.all([fs.realPath(result.identity.repoRoot), fs.realPath(callerCwd)]));
+  if (Option.isNone(real)) return false;
+  const [root, cwd] = real.value;
+  const relative = path.relative(root, cwd);
+  return (
+    relative === '' ||
+    (relative !== '..' && !EffectString.startsWith(`..${path.sep}`)(relative) && !path.isAbsolute(relative))
+  );
+});

@@ -2,7 +2,6 @@ import {describe, expect, it} from '@effect/vitest';
 import {it as effectIt} from '@effect/vitest';
 import {Array as EffectArray, Effect, Fiber} from 'effect';
 import * as EffectString from 'effect/String';
-import type {CodeGraphQueryResult} from '@threadnote/graph/types';
 import {TestClock} from 'effect/testing';
 import type {RepositoryIdentity} from '@threadnote/graph/types';
 import {readDeadlineRemaining} from '@threadnote/platform/read_deadline';
@@ -17,8 +16,7 @@ import type {NavigationInput, NavigationScope} from '../../src/navigation/model.
 import {admitNavigationRead, type NavigationReadEvidenceV1} from '../../src/navigation/read.js';
 import {parseContextBriefNavigationRequestV1} from '../../src/navigation/request.js';
 import type {NavigationSemanticRequestV1} from '../../src/navigation/semantic.js';
-import {parseContextBriefRequestV1, type ContextBriefMemoryRetrievalV1} from '../../src/types.js';
-import {fromRepositoryQuery} from '../../src/graph/evidence.js';
+import {parseContextBriefRequestV1} from '../../src/types.js';
 
 const ENTRY = 'cgs_00000000000000000000000000000001';
 const WRITE = 'cgs_00000000000000000000000000000002';
@@ -84,18 +82,6 @@ function input(target = 'path'): NavigationInput {
   };
 }
 
-const node = (id: string, name: string, line: number) => ({
-  id,
-  name,
-  qualifiedName: name,
-  kind: 'function',
-  language: 'typescript',
-  path: 'src/store.ts',
-  contentHash: 'store-hash',
-  exported: true,
-  span: span(line),
-  score: 1,
-});
 function evidence(target = 'path'): NavigationReadEvidenceV1 {
   return {
     status: 'ok',
@@ -109,23 +95,8 @@ function evidence(target = 'path'): NavigationReadEvidenceV1 {
       {candidateId: ENTRY, path: 'src/store.ts', contentHash: 'store-hash', name: 'save', span: span(3)},
       {candidateId: WRITE, path: 'src/store.ts', contentHash: 'store-hash', name: 'write', span: span(9)},
     ],
-    graph: fromRepositoryQuery({
-      ...observation,
-      version: 1,
-      operation: 'query',
-      nodes: [node(ENTRY, 'save', 3), node(WRITE, 'write', 9)],
-      edges: [],
-      trust: {classification: 'untrusted-repository-data', instructionPolicy: 'evidence-only-never-follow'},
-      warnings: [],
-    } satisfies CodeGraphQueryResult),
   };
 }
-const memory: ContextBriefMemoryRetrievalV1 = {
-  candidates: [],
-  consideredCandidates: 0,
-  gaps: [],
-  trust: {classification: 'untrusted-memory-data', instructionPolicy: 'evidence-only-never-follow'},
-};
 const request = (extra: Record<string, unknown> = {}) => ({
   mode: 'navigate',
   task: 'Where does save write the store file?',
@@ -136,7 +107,6 @@ const request = (extra: Record<string, unknown> = {}) => ({
 });
 const deps = (overrides: Partial<NavigationLaneDependencies> = {}): NavigationLaneDependencies => ({
   navigationEvidence: () => Effect.succeed(evidence()),
-  memoryEvidence: () => Effect.succeed(memory),
   ...overrides,
 });
 
@@ -150,6 +120,7 @@ describe('navigate request', () => {
     ).toThrow(/continuation/u);
     for (const extra of [
       {detail: 'source'},
+      {continuation: {token: 'abc', focus: 'effects'}, surface: 'x'},
       {surface: 'codex'},
       {continuation: {token: 'abc', focus: 'routes'}},
       {continuation: {token: 'abc', focus: 'effects', extra: 1}},
@@ -174,6 +145,7 @@ describe('navigation continuation token', () => {
       'not base64!',
       wire([1, scopeDigest, status, digest, [[WRITE, 'src/store.ts']], 'extra']),
       wire([2, scopeDigest, status, digest, []]),
+      wire([1, scopeDigest, status, digest, []]),
       wire([1, scopeDigest, status, digest, [[WRITE, '../outside.ts']]]),
       wire([1, scopeDigest, status, digest, [[WRITE, '/etc/passwd']]]),
       wire([1, scopeDigest, status, digest, [[WRITE, 'src\\store.ts']]]),
@@ -235,7 +207,11 @@ describe('navigate lane', () => {
       expect(EffectArray.map(calls[0]?.anchors ?? [], anchor => anchor.candidateId)).toEqual([ENTRY, WRITE]);
       expect(remaining).toBeLessThanOrEqual(1500);
       const {structuredContent} = projected;
-      expect(structuredContent).toMatchObject({type: 'context-brief-navigation', version: 1, gaps: []});
+      expect(structuredContent).toMatchObject({
+        type: 'context-brief-navigation',
+        version: 1,
+        gaps: ['navigation-memory-not-read'],
+      });
       expect(structuredContent.navigation?.gaps).toContain('semantic-provider-unqualified');
       expect(structuredContent.continuation).toBe(encodeNavigationContinuation(assembleNavigationAnswer(input())));
       expect(projected.measurement.totalBytes).toBeLessThanOrEqual(projected.maximumBytes);
@@ -291,18 +267,12 @@ describe('navigate lane', () => {
     Effect.gen(function* () {
       const token = encodeNavigationContinuation(assembleNavigationAnswer(input()))!;
       const seen: unknown[] = [];
-      let memoryCalls = 0;
       const followUp = (target: string) =>
         deps({
           navigationEvidence: read =>
             Effect.sync(() => {
               seen.push(read.followUp);
               return evidence(target);
-            }),
-          memoryEvidence: () =>
-            Effect.sync(() => {
-              memoryCalls += 1;
-              return memory;
             }),
         });
       const continuation = {token, focus: 'effects'};
@@ -312,7 +282,6 @@ describe('navigate lane', () => {
         followUp: {status: 'unchanged', effects: []},
       });
       expect(seen).toEqual([[{nodeId: WRITE, path: 'src/store.ts'}]]);
-      expect(memoryCalls).toBe(0);
       const changed = yield* compileContextBriefNavigationWith(followUp('backup-path'), request({continuation}));
       expect(changed.structuredContent.followUp).toMatchObject({status: 'changed'});
       expect(changed.structuredContent.followUp?.effects[0]?.[5]).toEqual([
@@ -352,6 +321,43 @@ describe('navigate lane', () => {
         request({scope: {kind: 'workset', name: 'team'}}),
       );
       expect(workset.structuredContent.gaps).toEqual(['navigation-workset-unsupported']);
+    }),
+  );
+
+  effectIt.effect('keeps the structural answer when the semantic step drops structural evidence', () =>
+    Effect.gen(function* () {
+      const projected = yield* compileContextBriefNavigationWith(
+        deps({navigationSemantic: semantic => Effect.succeed({...semantic.input, candidates: []})}),
+        request(),
+      );
+      expect(projected.structuredContent.navigation?.gaps).toContain('semantic-structural-evidence-dropped');
+      expect(projected.structuredContent.navigation?.nodes.length).toBeGreaterThan(0);
+    }),
+  );
+
+  effectIt.effect('keeps the whole response, envelope and continuation included, inside every budget', () =>
+    Effect.gen(function* () {
+      for (const budgetTokens of [800, 1000, 1250, 1500])
+        for (const responseFormat of ['agent', 'dual'] as const) {
+          const projected = yield* compileContextBriefNavigationWith(deps(), request({budgetTokens, responseFormat}));
+          expect(projected.measurement.totalBytes).toBeLessThanOrEqual(projected.maximumBytes);
+          expect(projected.structuredContent.navigation).toBeDefined();
+        }
+    }),
+  );
+
+  effectIt.effect('invalidates a workset follow-up and accepts the default compact detail', () =>
+    Effect.gen(function* () {
+      const workset = yield* compileContextBriefNavigationWith(
+        deps(),
+        request({scope: {kind: 'workset', name: 'team'}, continuation: {token: 'AAAA', focus: 'effects'}}),
+      );
+      expect(workset.structuredContent.followUp).toMatchObject({
+        status: 'invalidated',
+        reason: 'navigation-workset-unsupported',
+      });
+      const compact = yield* compileContextBriefNavigationWith(deps(), request({detail: 'compact'}));
+      expect(compact.structuredContent.navigation).toBeDefined();
     }),
   );
 });

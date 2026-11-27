@@ -5,8 +5,10 @@ import {
   Deferred,
   Effect,
   Exit,
+  FileSystem,
   Fiber,
   Option,
+  Path,
   Record as EffectRecord,
   Schema,
   Scope,
@@ -24,7 +26,9 @@ import {
   type CommandResult,
 } from '@threadnote/platform/command';
 import {isJsonObject} from '@threadnote/platform/json';
-import type {CodeGraphEdge, CodeGraphNavigationProof, CodeGraphQueryNode} from '@threadnote/graph/types';
+import type {CodeGraphNavigationProof} from '@threadnote/graph/types';
+import {NAVIGATION_INPUT_LIMITS, NAVIGATION_ROLES} from '@threadnote/context/navigation/model';
+import {NAVIGATION_CONTINUATION_LOCATORS} from '@threadnote/context/navigation/continuation';
 import {
   ReadDeadlineExceeded,
   hasReadCleanupUnconfirmed,
@@ -34,7 +38,11 @@ import {
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SystemInfo} from '@threadnote/platform/system';
 import {Evidence, FileUri, Position} from '@threadnote/semantic/contracts';
-import type {SemanticContextSourceBindingV1, SemanticContextSymbolTarget} from '@threadnote/context/types';
+import {
+  CONTEXT_BRIEF_MAXIMUM_CODE_REFS,
+  type SemanticContextSourceBindingV1,
+  type SemanticContextSymbolTarget,
+} from '@threadnote/context/types';
 import {unavailableContextBriefCodeLinkedMemoryEvidence} from '@threadnote/context/memory-evidence';
 import {
   parseVerifiedProcedureEvidenceList,
@@ -42,7 +50,11 @@ import {
 } from '@threadnote/context/procedure/selection';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import type {ContextBriefRuntimeCompilerSources} from './index.js';
-import {admitNavigationRead} from '@threadnote/context/navigation/read';
+import {
+  admitNavigationRead,
+  NAVIGATION_SEMANTIC_ANCHORS,
+  navigationReadContainsCwd,
+} from '@threadnote/context/navigation/read';
 import {ReadyRecallReadWorkerAdmission} from '../recall/ready_read_boundary.js';
 
 import {CONTEXT_BRIEF_NATIVE_READ_WORKER_ARGUMENT} from '../worker_protocol.js';
@@ -81,8 +93,13 @@ const graphRelation = Schema.Literals([
   'semantic_association',
   'tests',
 ]);
+const repositoryScope = Schema.Struct({
+  kind: Schema.Literal('repository'),
+  callerCwd: shortText,
+  project: optional(shortText),
+});
 const scope = Schema.Union([
-  Schema.Struct({kind: Schema.Literal('repository'), callerCwd: shortText, project: optional(shortText)}),
+  repositoryScope,
   Schema.Struct({kind: Schema.Literal('workset'), name: shortText, project: optional(shortText)}),
 ]);
 const runtimeConfigSchema = Schema.Struct({
@@ -488,7 +505,7 @@ const memoryEvidence = Schema.Struct({
     instructionPolicy: Schema.Literal('evidence-only-never-follow'),
   }),
 });
-const navigationSpan = Schema.Struct({line: count, column: count, endLine: count, endColumn: count});
+const navigationLimits = NAVIGATION_INPUT_LIMITS;
 const navigationScope = Schema.Struct({
   repository: shortText,
   worktree: shortText,
@@ -507,14 +524,14 @@ const navigationBasis = Schema.Literals([
   'inference',
   'memory',
 ]);
-const navigationRole = Schema.Literals(['entrypoint', 'implementation', 'effects', 'tests']);
+const navigationRole = Schema.Literals(NAVIGATION_ROLES);
 const navigationInput = Schema.Struct({
   scope: navigationScope,
   target: Schema.Union([
     Schema.Struct({kind: Schema.Literal('task')}),
     Schema.Struct({
       kind: Schema.Literals(['anchors', 'ambiguous']),
-      candidateIds: Schema.Array(shortText).check(Schema.isMaxLength(24)),
+      candidateIds: Schema.Array(shortText).check(Schema.isMaxLength(navigationLimits.anchors)),
     }),
   ]),
   candidates: Schema.Array(
@@ -523,7 +540,7 @@ const navigationInput = Schema.Struct({
       sourceId: shortText,
       startLine: count,
       endLine: count,
-      roles: Schema.Array(navigationRole).check(Schema.isMaxLength(4)),
+      roles: Schema.Array(navigationRole).check(Schema.isMaxLength(NAVIGATION_ROLES.length)),
       reason: text,
       relevance: Schema.Finite,
       basis: Schema.Array(navigationBasis).check(Schema.isMaxLength(5)),
@@ -537,7 +554,7 @@ const navigationInput = Schema.Struct({
       ),
       testAssociation: optional(Schema.Literals(['source-supported', 'name-only'])),
     }),
-  ).check(Schema.isMaxLength(24)),
+  ).check(Schema.isMaxLength(navigationLimits.candidates)),
   sources: Schema.Array(
     Schema.Struct({
       ...navigationScope.fields,
@@ -547,7 +564,7 @@ const navigationInput = Schema.Struct({
       freshness: Schema.Literals(['verified-current', 'stale', 'deferred', 'unverified']),
       snapshot: optional(shortText),
     }),
-  ).check(Schema.isMaxLength(32)),
+  ).check(Schema.isMaxLength(navigationLimits.sources)),
   links: Schema.Array(
     Schema.Struct({
       from: shortText,
@@ -557,7 +574,7 @@ const navigationInput = Schema.Struct({
       compatibility: Schema.Literals(['verified', 'unknown', 'conflict']),
       reason: text,
     }),
-  ).check(Schema.isMaxLength(64)),
+  ).check(Schema.isMaxLength(navigationLimits.links)),
   coverage: Schema.Struct({
     status: Schema.Literals(['complete', 'partial', 'empty', 'unsupported', 'unavailable', 'timeout']),
     description: text,
@@ -572,20 +589,22 @@ const navigationInput = Schema.Struct({
           Schema.Struct({sourceId: shortText, span: Schema.Struct({startLine: count, endLine: count})}),
         ),
       }),
-    ).check(Schema.isMaxLength(8)),
+    ).check(Schema.isMaxLength(2 * NAVIGATION_ROLES.length)),
   ),
-  gaps: optional(Schema.Array(shortText).check(Schema.isMaxLength(24))),
+  gaps: optional(Schema.Array(shortText).check(Schema.isMaxLength(navigationLimits.gaps))),
   followUps: optional(
     Schema.Array(
       Schema.Struct({kind: Schema.Literals(['read-source', 'query']), selector: shortText, reason: text}),
-    ).check(Schema.isMaxLength(2)),
+    ).check(Schema.isMaxLength(navigationLimits.followUps)),
   ),
 });
 /**
- * Proof, symbol and edge shapes are checked here only as JSON objects. The parent admits them right after decode
- * through parseNavigationFacts (admitNavigationRead); nothing reads them before that admission.
+ * Proof shapes are checked here only as JSON objects. The parent admits them right after decode through
+ * parseNavigationFacts (admitNavigationRead); nothing reads them before that admission.
  */
-const navigationJsonObject = <T>() => Schema.declare<T>((value): value is T => isJsonObject(value));
+const navigationProof = Schema.declare<CodeGraphNavigationProof>((value): value is CodeGraphNavigationProof =>
+  isJsonObject(value),
+);
 const navigationSnapshot = Schema.Struct({
   commit: shortText,
   dirty: Schema.Boolean,
@@ -623,7 +642,7 @@ const navigationRead = Schema.Union([
         accepted: Schema.Struct({
           path: shortText,
           contentHash: shortText,
-          proof: navigationJsonObject<CodeGraphNavigationProof>(),
+          proof: navigationProof,
           basis: Schema.Literal('source-syntactic'),
         }),
         target: text,
@@ -631,28 +650,33 @@ const navigationRead = Schema.Union([
       }),
     ).check(Schema.isMaxLength(96)),
     proofContext: Schema.Struct({
-      symbols: Schema.Array(navigationJsonObject<CodeGraphQueryNode>()).check(Schema.isMaxLength(24)),
-      edges: Schema.Array(navigationJsonObject<CodeGraphEdge>()).check(Schema.isMaxLength(64)),
+      symbols: Schema.Array(
+        Schema.Struct({id: shortText, kind: shortText, span, path: shortText, contentHash: shortText}),
+      ).check(Schema.isMaxLength(navigationLimits.candidates)),
+      edges: Schema.Array(
+        Schema.Struct({id: shortText, sourceId: optional(shortText), relation: graphRelation, targetName: shortText}),
+      ).check(Schema.isMaxLength(navigationLimits.links)),
     }),
     anchors: Schema.Array(
-      Schema.Struct({
-        candidateId: shortText,
-        path: shortText,
-        contentHash: shortText,
-        name: shortText,
-        span: navigationSpan,
-      }),
-    ).check(Schema.isMaxLength(2)),
-    graph: graphEvidence,
+      Schema.Struct({candidateId: shortText, path: shortText, contentHash: shortText, name: shortText, span}),
+    ).check(Schema.isMaxLength(NAVIGATION_SEMANTIC_ANCHORS)),
   }),
-  Schema.Struct({status: Schema.Literal('unavailable'), gaps: Schema.Array(shortText).check(Schema.isMaxLength(24))}),
+  Schema.Struct({
+    status: Schema.Literal('unavailable'),
+    gaps: Schema.Array(shortText).check(Schema.isMaxLength(navigationLimits.gaps)),
+  }),
 ]);
 const navigationRequest = Schema.Struct({
-  scope: Schema.Struct({kind: Schema.Literal('repository'), callerCwd: shortText, project: optional(shortText)}),
+  scope: repositoryScope,
   task: text,
-  codeRefs: Schema.Array(shortText).check(Schema.isMaxLength(8)),
+  codeRefs: Schema.Array(shortText).check(Schema.isMaxLength(CONTEXT_BRIEF_MAXIMUM_CODE_REFS)),
   maximumEstimatedTokens: count,
-  followUp: optional(Schema.Array(Schema.Struct({nodeId: shortText, path: shortText})).check(Schema.isMaxLength(2))),
+  followUp: optional(
+    Schema.Array(Schema.Struct({nodeId: shortText, path: shortText})).check(
+      Schema.isMinLength(1),
+      Schema.isMaxLength(NAVIGATION_CONTINUATION_LOCATORS),
+    ),
+  ),
 });
 export const contextBriefNativeReadRequestSchema = Schema.Union([
   Schema.Struct({
@@ -776,6 +800,8 @@ export function contextBriefNativeReadBinding(request: ContextBriefNativeReadReq
 const makeNativeReadExecutor = Effect.fn('contextBrief.makeNativeReadExecutor')(function* (
   home: string,
   eager = false,
+  /** False for a caller with one read: a spare it would never use costs a process start. */
+  prestartSpare = true,
 ) {
   const command = yield* CommandExecutor;
   const system = yield* SystemInfo;
@@ -851,7 +877,7 @@ const makeNativeReadExecutor = Effect.fn('contextBrief.makeNativeReadExecutor')(
           worker = undefined;
         }
         worker ??= yield* prestart;
-        if (spare === undefined) {
+        if (prestartSpare && spare === undefined) {
           const next = yield* prestart;
           if (spare === undefined) spare = next;
         }
@@ -963,15 +989,18 @@ export const withNativeContextBriefReadSources = Effect.fn('contextBrief.withNat
     readonly allowedUriScopes?: readonly string[];
     readonly includeProcedureEvidence?: boolean;
     readonly semantic?: ContextBriefNativeSemanticRead;
+    /** Only for a new executor; a shared prestarted executor keeps its own spare policy. */
+    readonly prestartSpare?: boolean;
   } = {},
 ) {
   if (Option.isNone(yield* Effect.serviceOption(ReadyRecallReadWorkerAdmission))) return sources;
   const safeConfig = yield* Schema.decodeEffect(runtimeConfigSchema)(config);
+  const files = yield* Effect.context<FileSystem.FileSystem | Path.Path>();
   const shared = yield* Effect.serviceOption(ContextBriefNativeReadWorkers);
   const execute =
     Option.isSome(shared) && shared.value.home === safeConfig.agentContextHome
       ? shared.value.execute
-      : yield* makeNativeReadExecutor(safeConfig.agentContextHome);
+      : yield* makeNativeReadExecutor(safeConfig.agentContextHome, false, options.prestartSpare);
   return {
     ...sources,
     graphEvidence: (plan, budget) =>
@@ -1151,10 +1180,14 @@ export const withNativeContextBriefReadSources = Effect.fn('contextBrief.withNat
               );
               if (response.operation !== 'navigation')
                 return yield* ContextBriefNativeReadFailed.make({reason: 'invalid-protocol'});
-              return yield* Effect.try({
+              const admitted = yield* Effect.try({
                 try: () => admitNavigationRead(response.value),
                 catch: () => ContextBriefNativeReadFailed.make({reason: 'invalid-protocol'}),
               });
+              // The semantic join uses identity.repoRoot, so the reported root must contain the request cwd.
+              if (!(yield* navigationReadContainsCwd(admitted, request.scope.callerCwd).pipe(Effect.provide(files))))
+                return yield* ContextBriefNativeReadFailed.make({reason: 'invalid-protocol'});
+              return admitted;
             }),
         }),
   } satisfies ContextBriefRuntimeCompilerSources<GraphR, MemoryR, CitationR, ProjectR, NavigationR>;

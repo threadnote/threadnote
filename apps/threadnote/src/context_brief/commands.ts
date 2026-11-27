@@ -51,33 +51,26 @@ export const runContextBrief = Effect.fn('contextBrief.command.compile')(functio
         // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The optional-chain guard narrows `options.project` for the property value.
         ...(options.project?.trim() ? {project: options.project.trim()} : {}),
       };
+  const shared = {
+    ...(options.budgetTokens === undefined ? {} : {budgetTokens: options.budgetTokens}),
+    codeRefs: options.codeRefs ?? [],
+    ...(options.detail === undefined ? {} : {detail: options.detail}),
+    responseFormat: 'agent' as const,
+    scope,
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The optional-chain guard narrows `options.surface` for the property value.
+    ...(options.surface?.trim() ? {surface: options.surface.trim()} : {}),
+    task: options.task,
+  };
+  const continuation =
+    options.continuation === undefined ? {} : {continuation: {token: options.continuation, focus: 'effects'}};
+  // The strict Context Brief parser rejects `continuation` for the other modes, as the MCP surface does.
   const projected =
     options.mode === CONTEXT_BRIEF_NAVIGATION_MODE
-      ? yield* compileContextBriefNavigation(config, {
-          ...(options.budgetTokens === undefined ? {} : {budgetTokens: options.budgetTokens}),
-          codeRefs: options.codeRefs ?? [],
-          // The CLI default `compact` is not a navigate option; an explicit `source` is rejected by the parser.
-          ...(options.detail === undefined || options.detail === 'compact' ? {} : {detail: options.detail}),
-          mode: CONTEXT_BRIEF_NAVIGATION_MODE,
-          responseFormat: 'agent',
-          scope,
-          // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The optional-chain guard narrows `options.surface` for the property value.
-          ...(options.surface?.trim() ? {surface: options.surface.trim()} : {}),
-          task: options.task,
-          ...(options.continuation === undefined
-            ? {}
-            : {continuation: {token: options.continuation, focus: 'effects'}}),
-        })
+      ? yield* compileContextBriefNavigation(config, {...shared, mode: CONTEXT_BRIEF_NAVIGATION_MODE, ...continuation})
       : yield* compileContextBrief(config, {
-          ...(options.budgetTokens === undefined ? {} : {budgetTokens: options.budgetTokens}),
-          codeRefs: options.codeRefs ?? [],
-          ...(options.detail === undefined ? {} : {detail: options.detail}),
+          ...shared,
           ...(options.mode === undefined ? {} : {mode: options.mode}),
-          responseFormat: 'agent',
-          scope,
-          // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The optional-chain guard narrows `options.surface` for the property value.
-          ...(options.surface?.trim() ? {surface: options.surface.trim()} : {}),
-          task: options.task,
+          ...continuation,
         });
   yield* writeFinalCliOutput(
     options.json ? JSON.stringify(projected.structuredContent) : Effect2.pipe(projected.text, EffectString.trimEnd),

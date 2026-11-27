@@ -1,16 +1,17 @@
 import {it as effectIt} from '@effect/vitest';
 import {Effect} from 'effect';
 import * as EffectString from 'effect/String';
-import type {CodeGraphQueryResult} from '@threadnote/graph/types';
 import {describe, expect, vi} from 'vitest';
 import {compileContextBriefNavigationWith} from '@threadnote/context/navigation/lane';
+import {parseContextBriefNavigationRequestV1} from '@threadnote/context/navigation/request';
 import type {NavigationReadEvidenceV1} from '@threadnote/context/navigation/read';
-import {fromRepositoryQuery} from '@threadnote/context/graph/evidence';
 import {EffectMcpServerAdapter} from '@threadnote/threadnote/effect/ai/mcp';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {runContextBrief} from '@threadnote/threadnote/context_brief/commands';
 import {registerContextBriefTool} from '@threadnote/threadnote/mcp/server/code_graph';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import {Schema} from 'effect';
+import {contextBriefNativeReadResponseSchema} from '../../src/context_brief/native_read_boundary.js';
 
 const controls = vi.hoisted(() => ({output: '', briefs: 0, semantic: 0, navigations: [] as unknown[]}));
 vi.mock('@threadnote/threadnote/effect/cli/output', async importOriginal => {
@@ -40,13 +41,6 @@ vi.mock('@threadnote/threadnote/context_brief/index', async importOriginal => {
         return compileContextBriefNavigationWith(
           {
             navigationEvidence: () => MockEffect.succeed(evidence()),
-            memoryEvidence: () =>
-              MockEffect.succeed({
-                candidates: [],
-                consideredCandidates: 0,
-                gaps: [],
-                trust: {classification: 'untrusted-memory-data', instructionPolicy: 'evidence-only-never-follow'},
-              } as const),
             navigationSemantic: request =>
               MockEffect.sync(() => {
                 controls.semantic += 1;
@@ -119,15 +113,6 @@ function evidence(): NavigationReadEvidenceV1 {
     proofLocators: [],
     proofContext: {symbols: [], edges: []},
     anchors: [{candidateId: ID, path: 'src/store.ts', contentHash: 'hash', name: 'save', span}],
-    graph: fromRepositoryQuery({
-      ...observation,
-      version: 1,
-      operation: 'query',
-      nodes: [],
-      edges: [],
-      trust: {classification: 'untrusted-repository-data', instructionPolicy: 'evidence-only-never-follow'},
-      warnings: [],
-    } satisfies CodeGraphQueryResult),
   };
 }
 const TASK = 'Where does save write the store file?';
@@ -154,7 +139,9 @@ describe('navigate across surfaces', () => {
       expect(JSON.parse(cli)).toMatchObject({type: 'context-brief-navigation', version: 1});
       expect(viaMcp).toBe(cli);
       // Both surfaces normalize to the same lane request.
-      expect(controls.navigations[0]).toEqual(controls.navigations[1]);
+      expect(parseContextBriefNavigationRequestV1(controls.navigations[0])).toEqual(
+        parseContextBriefNavigationRequestV1(controls.navigations[1]),
+      );
       const repeated = textOf(yield* call({callerCwd: CWD, mode: 'navigate', task: TASK}));
       expect(repeated).toBe(viaMcp);
     }),
@@ -173,6 +160,28 @@ describe('navigate across surfaces', () => {
       const refused = yield* call({callerCwd: CWD, mode: 'brief', task: TASK, continuation: 'AAAA'});
       expect(refused.isError).toBe(true);
       expect(controls.navigations).toHaveLength(0);
+    }),
+  );
+
+  effectIt.effect('decodes a navigation reply strictly at the worker boundary', () =>
+    Effect.gen(function* () {
+      const reply = {
+        protocol: 1,
+        binding: 'b',
+        commandsJoined: true,
+        ok: true,
+        operation: 'navigation',
+        value: evidence(),
+      };
+      const decoded = yield* Schema.decodeUnknownEffect(contextBriefNativeReadResponseSchema)(reply, {
+        onExcessProperty: 'error',
+      });
+      expect(decoded).toEqual(reply);
+      const extra = {...reply, value: {...evidence(), graph: {}}};
+      const refused = yield* Schema.decodeUnknownEffect(contextBriefNativeReadResponseSchema)(extra, {
+        onExcessProperty: 'error',
+      }).pipe(Effect.result);
+      expect(refused._tag).toBe('Failure');
     }),
   );
 });

@@ -262,10 +262,13 @@ export function createNavigationFactCollector(
 export function navigationProofEdgeSpan(proof: CodeGraphNavigationProof): CodeGraphSpan {
   return proof.module === 'builtins' ? proof.calleeSpan : proof.callSpan;
 }
+/** The symbol and edge fields a navigation proof is closed against. */
+export type NavigationProofSymbol = Pick<CodeGraphSymbol, 'id' | 'kind' | 'span'>;
+export type NavigationProofEdge = Pick<CodeGraphEdge, 'id' | 'sourceId' | 'relation' | 'targetName'>;
 export function closeNavigationFacts(
   facts: CodeGraphNavigationFacts | undefined,
-  symbols: readonly CodeGraphSymbol[],
-  edges: readonly CodeGraphEdge[],
+  symbols: readonly NavigationProofSymbol[],
+  edges: readonly NavigationProofEdge[],
 ): CodeGraphNavigationFacts | undefined {
   if (!facts) return undefined;
   const owners = new Set(EffectArray.map(symbols, symbol => symbol.id));
@@ -282,8 +285,8 @@ export function closeNavigationFacts(
 }
 export function parseNavigationFacts(
   value: unknown,
-  symbols: readonly CodeGraphSymbol[],
-  edges: readonly CodeGraphEdge[],
+  symbols: readonly NavigationProofSymbol[],
+  edges: readonly NavigationProofEdge[],
 ): CodeGraphNavigationFacts {
   const object = record(value, ['version', 'omitted', 'proofs']);
   if (

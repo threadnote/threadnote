@@ -96,7 +96,8 @@ export interface SemanticAgentQueryHost<ContextR = never> {
 export const semanticAgentQueryHost = {
   runtimeIdentity: compiledRuntimeIdentity,
   connect: (...args: Parameters<typeof ensureSemanticEndpoint>) => ensureSemanticEndpoint(...args),
-  context: compileSemanticContextKnowledge,
+  // Read at call time: the navigate lane's adapter imports this module from the context brief, an import cycle.
+  context: (...args: Parameters<typeof compileSemanticContextKnowledge>) => compileSemanticContextKnowledge(...args),
   prestartContext: (config: RuntimeConfig) => prestartContextBriefNativeReadWorkers(config.agentContextHome),
 };
 

@@ -50,6 +50,7 @@ import {
   CONTEXT_BRIEF_MINIMUM_ESTIMATED_TOKENS,
 } from '../../context_brief/index.js';
 import {withIsolatedContextBriefGraphReads} from '@threadnote/context/graph/isolated_inspect';
+import {NAVIGATION_CONTINUATION_BYTES} from '@threadnote/context/navigation/continuation';
 import {
   CodeGraphWatcher,
   type CodeGraphProgressTiming,
@@ -153,7 +154,7 @@ export function registerContextBriefTool(server: EffectMcpServerAdapter, config:
           'Default brief; navigate returns a versioned entrypoint/implementation/effects/tests answer',
         ),
         continuation: McpInput.string(
-          'Navigate only: opaque continuation from a prior navigate answer; max 1024 bytes',
+          `Navigate only: opaque continuation from a prior navigate answer; max ${NAVIGATION_CONTINUATION_BYTES} bytes`,
         ),
         project: McpInput.string(MCP_CODE_GRAPH_PROJECT_SELECTOR_DESCRIPTION),
         responseFormat: McpInput.literals(['dual', 'agent'], 'Default agent; dual adds structured content.'),

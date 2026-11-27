@@ -112,11 +112,13 @@ export interface NavigationContinuationV1 {
 
 /** At most this many effect nodes are re-read; a larger write boundary gets no continuation. */
 export const NAVIGATION_CONTINUATION_LOCATORS = 2;
-const CONTINUATION_BYTES = 1024;
+/** Continuation text is client input; this bound applies before any decoding. */
+export const NAVIGATION_CONTINUATION_BYTES = 1024;
 /** Change detection only, not a security binding: scope and binding are re-derived from the request. */
 const DIGEST = /^[0-9a-f]{16}$/u;
 const digest16 = (text: string) => EffectString.slice(0, 16)(sha256HexSync(text));
-const NODE_ID = /^cgs_[0-9a-f]{32}$/u;
+/** Same graph symbol id forms as citation capture: 32, 40 or 64 lowercase hex digits. */
+const NODE_ID = /^cgs_(?:[0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{64})$/u;
 const BASE64URL = /^[A-Za-z0-9_-]+$/u;
 
 export function navigationEffectsSummary(answer: NavigationAnswerV1): NavigationEffectsSummary {
@@ -138,7 +140,7 @@ const ContinuationWire = Schema.Tuple([
       Schema.String.check(Schema.isPattern(NODE_ID)),
       Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(512)),
     ]),
-  ).check(Schema.isMaxLength(NAVIGATION_CONTINUATION_LOCATORS)),
+  ).check(Schema.isMinLength(1), Schema.isMaxLength(NAVIGATION_CONTINUATION_LOCATORS)),
 ]);
 
 /**
@@ -161,12 +163,12 @@ export function encodeNavigationContinuation(answer: NavigationAnswerV1): string
     JSON.stringify([1, summary.scope, summary.status, summary.digest, locators]),
     'utf8',
   ).toString('base64url');
-  return token.length > CONTINUATION_BYTES ? undefined : token;
+  return token.length > NAVIGATION_CONTINUATION_BYTES ? undefined : token;
 }
 
 /** Strict decode of untrusted continuation text. Any violation is undefined, which invalidates the follow-up. */
 export function decodeNavigationContinuation(token: string): NavigationContinuationV1 | undefined {
-  if (token.length === 0 || token.length > CONTINUATION_BYTES || !BASE64URL.test(token)) return undefined;
+  if (token.length === 0 || token.length > NAVIGATION_CONTINUATION_BYTES || !BASE64URL.test(token)) return undefined;
   let json: unknown;
   try {
     json = JSON.parse(Buffer.from(token, 'base64url').toString('utf8'));
