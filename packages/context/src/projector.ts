@@ -1321,11 +1321,14 @@ function projectionItems(
   const sourceFirst =
     responseFormat === 'agent' && logical.coverage.memory.codeAnchors === undefined && logical.mode === 'locate';
   // Reserve one linked memory, then the exact card, before admitting more stale handoffs.
+  // A budget gap explains why evidence is missing, so it is the limitation that output trimming keeps first.
+  const budgetGapRank = (gap: string, rank: number) =>
+    EffectString.endsWith('-budget-exhausted')(gap) ? rank - logical.coverage.gaps.length : rank;
   const projected = [
     ...EffectArray.map(logical.coverage.gaps, (gap, rank) => ({
       id: coverageGapProjectionId(gap),
       lane: 'coverage-gap' as const,
-      laneRank: rank,
+      laneRank: budgetGapRank(gap, rank),
       priority: 3,
     })),
     ...EffectArray.map(logical.graph.cards, card => ({
