@@ -252,11 +252,55 @@ const currentSnapshot = Effect.fn('workflowAutomation.cycle.checkSnapshot')(func
     const branch = EffectString.trim(yield* git(repo, ['branch', '--show-current']));
     // A phase on its own base branch advances that base with the commit it accepts; the tree check below binds it.
     const acceptedOwnBase = phase.baseBranch === phase.branch && acceptedHead !== undefined && base === acceptedHead;
-    if ((base !== snapshot.declaredBaseHead && !acceptedOwnBase) || branch !== phase.branch)
+    if (branch !== phase.branch)
       return yield* fail(
         'review-stale',
         'Snapshot belongs to a different declared base or phase branch; requalify current source.',
       );
+    if (base !== snapshot.declaredBaseHead && !acceptedOwnBase) {
+      // Accepting a base advance means validation ran on the older base; pull-request CI is the backstop for the
+      // combined tree. The reviewed snapshot is never rewritten, so delivery keeps its reviewed base evidence.
+      const recovery =
+        ' Merge or rebase the base into the phase branch, then record a new snapshot (reopen the phase first if it is already validated).';
+      // Case-folded, NFC-normalized keys so a case-insensitive or normalizing checkout still counts as overlap.
+      const pathKey = (path: string) => EffectString.toLowerCase(EffectString.normalize('NFC')(path));
+      const reviewed = new Set(EffectArray.map([...snapshot.files, ...snapshot.scopeFiles], pathKey));
+      const advance: 'rewritten' | 'unverified' | readonly string[] = historicalComparison
+        ? 'rewritten'
+        : yield* Effect.gen(function* () {
+            if (!(yield* nativeCycleIsAncestor(repo, snapshot.declaredBaseHead, base))) return 'rewritten' as const;
+            const output = yield* git(repo, [
+              'diff',
+              '-z',
+              '--name-only',
+              '--no-renames',
+              '--ignore-submodules=none',
+              snapshot.declaredBaseHead,
+              base,
+              '--',
+            ]);
+            return EffectArray.filter(
+              EffectString.split(output, '\0'),
+              path => path !== '' && reviewed.has(pathKey(path)),
+            );
+          }).pipe(Effect.orElseSucceed(() => 'unverified' as const));
+      if (advance === 'rewritten' || advance === 'unverified')
+        return yield* fail(
+          'review-stale',
+          (advance === 'rewritten'
+            ? 'The declared base was rewritten or is not an ancestor of the current base.'
+            : 'The base advance could not be verified against the reviewed files.') + recovery,
+        );
+      if (advance.length > 0)
+        return yield* fail(
+          'review-stale',
+          'The base advanced over reviewed files (' +
+            EffectArray.join(advance.slice(0, 3), ', ') +
+            (advance.length > 3 ? ', ...' : '') +
+            ').' +
+            recovery,
+        );
+    }
   }
   if (
     current.tree !== snapshot.tree ||

@@ -891,7 +891,7 @@ describe('Threadnote MCP toolsets', () => {
         // control variants, and compact expansion declares its phase and decision shapes; keep the additive catalog
         // budget explicit.
         const totalCatalogBytes = Buffer.byteLength(JSON.stringify(tools.tools));
-        expect(totalCatalogBytes).toBeLessThanOrEqual(67_100);
+        expect(totalCatalogBytes).toBeLessThanOrEqual(67_300);
         expect(
           EffectOption.getOrUndefined(EffectArray.findFirst(tools.tools, tool => tool.name === 'recall_context'))
             ?.description,

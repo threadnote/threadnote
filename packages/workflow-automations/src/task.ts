@@ -16,6 +16,12 @@ import type {NativeWorkflowState} from './native.js';
 import {NativeCompactIntentSchema} from './authoring.js';
 import {nativeCycleReviewRecordingMode} from './cycle_review.js';
 
+/** Exact branch and base-branch binding for each plan phase. */
+export const NativeBranchBindingsSchema = Schema.Record(
+  Schema.String,
+  Schema.Struct({branch: Schema.String, baseBranch: Schema.String}),
+);
+
 export const NativeTaskStartRequestSchema = Schema.Union([
   Schema.Struct({
     callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
@@ -25,6 +31,8 @@ export const NativeTaskStartRequestSchema = Schema.Union([
     taskRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
     intent: NativeCompactIntentSchema,
     workflowProfile: Schema.optionalKey(Schema.Literals(nativeWorkflowPolicies)),
+    delivery: Schema.optionalKey(Schema.Literals(['local', 'commit', 'pr'])),
+    bindings: Schema.optionalKey(NativeBranchBindingsSchema),
   }),
   Schema.Struct({
     callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
@@ -32,7 +40,7 @@ export const NativeTaskStartRequestSchema = Schema.Union([
     installationTarget: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128)),
     graphProject: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256))),
     delivery: Schema.Literals(['local', 'commit', 'pr']),
-    bindings: Schema.Record(Schema.String, Schema.Struct({branch: Schema.String, baseBranch: Schema.String})),
+    bindings: NativeBranchBindingsSchema,
     userResponse: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
     review: Schema.Struct({outcome: Schema.Literal('accepted'), blockingIssueCount: Schema.Literal(0)}),
   }),

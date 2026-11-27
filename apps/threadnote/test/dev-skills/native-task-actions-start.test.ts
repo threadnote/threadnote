@@ -2616,15 +2616,20 @@ describe('native task actions', () => {
       ).toMatchObject({
         failure: {code: 'evidence-unavailable'},
       });
-      const mixedShape = yield* runNativeTaskStart(config, {
-        ...startInput,
-        delivery: 'pr',
-        bindings: {compact: {branch: 'main', baseBranch: 'main'}},
-      }).pipe(Effect.provideService(SystemInfo, testSystem), Effect.result);
-      if (mixedShape._tag !== 'Failure') throw new Error('A compact start must refuse shared-plan fields.');
-      expect(mixedShape.failure).toMatchObject({code: 'invalid-request'});
-      expect(mixedShape.failure.message).toContain('delivery');
-      expect(mixedShape.failure.message).toContain('bindings');
+      // A compact start accepts delivery and bindings; it only fails here for the missing published graph.
+      expect(
+        yield* runNativeTaskStart(config, {
+          ...startInput,
+          delivery: 'pr',
+          bindings: {compact: {branch: 'main', baseBranch: 'main'}},
+        }).pipe(Effect.provideService(SystemInfo, testSystem), Effect.result),
+      ).toMatchObject({failure: {code: 'evidence-unavailable'}});
+      expect(
+        yield* runNativeTaskStart(config, {...startInput, bindings: {compact: {branch: 'main'}}}).pipe(
+          Effect.provideService(SystemInfo, testSystem),
+          Effect.result,
+        ),
+      ).toMatchObject({failure: {code: 'invalid-request', message: expect.stringContaining('bindings')}});
       // A standard run needs no published graph: it starts in a fresh checkout and stores its artifacts uncited.
       const standardStart = object(
         yield* runNativeTaskStart(config, {
@@ -2634,6 +2639,24 @@ describe('native task actions', () => {
         }).pipe(Effect.provideService(SystemInfo, testSystem)),
       );
       expect(standardStart.status).toBe('awaiting-user-confirmation');
+      // A start that names delivery and bindings returns a pre-filled confirm command and keeps the consent instruction.
+      const bindings = {compact: {branch: 'main', baseBranch: 'main'}};
+      const prefilled = object(
+        yield* runNativeTaskStart(config, {
+          ...startInput,
+          featureName: 'Prefilled ' + intent.title,
+          workflowProfile: 'standard',
+          delivery: 'pr',
+          bindings,
+        }).pipe(Effect.provideService(SystemInfo, testSystem)),
+      );
+      expect(prefilled).toMatchObject({
+        instruction: expect.any(String),
+        next: {
+          arguments: {presentedIntentHash: prefilled.intentHash, delivery: 'pr', bindings},
+          cli: expect.stringContaining('--delivery pr'),
+        },
+      });
       const standardRunId = String(standardStart.taskRef);
       // Compact confirmation chooses the first admission's delivery.
       expect(
@@ -2662,6 +2685,14 @@ describe('native task actions', () => {
         failure: {code: 'delivery-conflict'},
       });
       expect(yield* confirmStandard({})).toMatchObject({status: 'admitted'});
+      // Neither the stored confirmation nor a later baseBranch replaces the admitted cycle's bindings.
+      expect(yield* confirmStandard({baseBranch: 'elsewhere'})).toMatchObject({status: 'admitted'});
+      expect(
+        EffectArray.map(
+          (yield* readNativeWorkflowState(config, standardRunId))?.state.cycle?.state.plan.phases ?? [],
+          phase => phase.baseBranch,
+        ),
+      ).toEqual(['main']);
       expect((yield* readNativeWorkflowState(config, standardRunId))?.state.cycle?.state.plan.delivery).toBe('pr');
       // Before admission, a replay that names another delivery needs the user's new response.
       const reviewedStart = object(
@@ -2678,7 +2709,6 @@ describe('native task actions', () => {
           runId: String(reviewedStart.taskRef),
           callerCwd: repo,
           presentedIntentHash: String(reviewedStart.intentHash),
-          baseBranch: 'main',
           ...fields,
         }).pipe(Effect.provideService(SystemInfo, testSystem));
       expect(
@@ -2686,6 +2716,7 @@ describe('native task actions', () => {
           userDecision: 'approve',
           userResponse: 'I approve this exact fixture change delivered as a PR.',
           delivery: 'pr',
+          baseBranch: 'main',
         }),
       ).toMatchObject({status: 'awaiting-review'});
       expect(yield* confirmReviewed({delivery: 'local'}).pipe(Effect.result)).toMatchObject({
@@ -2693,6 +2724,17 @@ describe('native task actions', () => {
       });
       expect(yield* confirmReviewed({delivery: 'pr'})).toMatchObject({status: 'awaiting-review'});
       expect((yield* readNativeWorkflowState(config, String(reviewedStart.taskRef)))?.state.cycle).toBeUndefined();
+      // Recording the plan review reuses the delivery and branch bindings that the earlier confirmation supplied.
+      expect(
+        yield* confirmReviewed({
+          review: {documentHash: String(reviewedStart.documentHash), outcome: 'accepted', blockingIssueCount: 0},
+        }),
+      ).toMatchObject({
+        status: 'admitted',
+      });
+      expect(
+        (yield* readNativeWorkflowState(config, String(reviewedStart.taskRef)))?.state.cycle?.state.plan,
+      ).toMatchObject({delivery: 'pr'});
       expect(
         (yield* (yield* CodeGraphIndexer).index({cwd: repo, threadnoteHome: home, ensureVectors: false})).snapshot
           .state,

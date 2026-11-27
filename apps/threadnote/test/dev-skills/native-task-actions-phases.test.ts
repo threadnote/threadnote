@@ -2038,10 +2038,10 @@ describe('native task actions', () => {
             control: {command: 'reopen', phaseId: request.phaseId, reason: request.reason},
           })).structuredContent,
         );
-        expect(reopened).toMatchObject({status: 'reopened', phaseId: 'one', task: {next: {action: 'blocked'}}});
+        expect(reopened).toMatchObject({status: 'reopened', phaseId: 'one', task: {next: {action: 'implement'}}});
         const invalidated = yield* readNativeWorkflowState(f.config, 'native-run');
         expect(invalidated?.state.cycle?.state.phases.one).toMatchObject({
-          status: 'stale',
+          status: 'pending',
           history: [expect.objectContaining({delivery: expect.any(Object), validation: expect.any(Object)})],
         });
         const retiredId = invalidated?.state.cycle?.snapshots.at(-1)?.snapshot.snapshotId;
@@ -2065,17 +2065,6 @@ describe('native task actions', () => {
         );
         const staleReplay = yield* runNativeTaskAction(f.config, request).pipe(Effect.result);
         expect(staleReplay).toMatchObject({failure: {code: 'stale-task-ref'}});
-        const blocked = yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo});
-        const resumed = object(
-          yield* runNativeTaskAction(f.config, {
-            command: 'resume',
-            runId: 'native-run',
-            callerCwd: f.repo,
-            taskRef: String(blocked.taskRef),
-            reason: request.reason,
-          }),
-        );
-        expect(resumed).toMatchObject({status: 'resumed', phaseId: 'one'});
         const priorRuntime = invalidated.state.cycle;
         const priorSnapshot = priorRuntime.snapshots.at(-1)?.snapshot;
         const priorBaseline = priorRuntime.baselines.one;
@@ -2213,13 +2202,9 @@ describe('native task actions', () => {
           'The corrected CI environment revealed a remaining source defect.',
         ]);
         expect(reopenedValidation).toMatchObject({status: 'reopened', phaseId: 'one'});
-        const secondBlocked = yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo});
-        yield* runNativeTaskAction(f.config, {
-          command: 'resume',
-          runId: 'native-run',
-          callerCwd: f.repo,
-          taskRef: String(secondBlocked.taskRef),
-          reason: 'The source defect is ready for another bounded implementation.',
+        expect((yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo})).next).toMatchObject({
+          action: 'implement',
+          phaseId: 'one',
         });
         const secondWork = object(
           yield* runNativeTaskAction(f.config, {
@@ -2283,6 +2268,33 @@ describe('native task actions', () => {
         expect((yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo})).next.action).toBe(
           'complete',
         );
+      }).pipe(run),
+    windowsRealGitFixtureTimeout,
+  );
+
+  effectIt.effect(
+    'keeps the card on a reopened phase while an independent phase is pending',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture(['one', 'two'], 'local', false, true);
+        yield* completeLocalPhase(f, 'one');
+        const current = yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo});
+        expect(current).toMatchObject({next: {action: 'implement', phaseId: 'two'}});
+        const reopened = object(
+          yield* runNativeTaskAction(f.config, {
+            command: 'reopen',
+            runId: 'native-run',
+            callerCwd: f.repo,
+            taskRef: String(current.taskRef),
+            phaseId: 'one',
+            reason: 'CI found a defect in the delivered phase.',
+          }),
+        );
+        expect(reopened).toMatchObject({status: 'reopened', phaseId: 'one', task: {next: {action: 'implement'}}});
+        expect((yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo})).next).toMatchObject({
+          action: 'implement',
+          phaseId: 'one',
+        });
       }).pipe(run),
     windowsRealGitFixtureTimeout,
   );

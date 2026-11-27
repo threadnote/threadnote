@@ -497,11 +497,7 @@ describe('native cycle review validation', () => {
         validateNativeCycleReview(restarted, review({...carriedFullReport, findings: []}, restarted), previous),
       ),
     ).toMatchObject({code: 'invalid-cycle-review'});
-    for (const disposition of [
-      finding({state: 'resolved'}),
-      finding({state: 'rejected'}),
-      finding({severity: 'minor'}),
-    ])
+    for (const disposition of [finding({state: 'rejected'}), finding({severity: 'minor'})])
       expect(
         caught(() =>
           validateNativeCycleReview(
@@ -545,7 +541,7 @@ describe('native cycle review validation', () => {
 
   it('requires blockers to remain present and prevents unsupported disposition or downgrade', () => {
     const current = snapshot();
-    for (const findings of [[], [finding({severity: 'minor'})], [finding({state: 'resolved'})]])
+    for (const findings of [[], [finding({severity: 'minor'})], [finding({state: 'rejected'})]])
       expect(caught(() => validateNativeCycleReview(current, review({findings}), previous))).toMatchObject({
         code: 'invalid-cycle-review',
       });
@@ -589,7 +585,6 @@ describe('native cycle review validation', () => {
       ...EffectArray.map(badLocations, file => [finding({file})]),
       [finding({evidence: '  '})],
       [finding({body: ''})],
-      [finding({state: 'resolved', reason: '   '})],
     ];
     for (const findings of invalidFindings)
       expect(caught(() => validateNativeCycleReview(current, review({findings}), previous))).toMatchObject({
@@ -599,7 +594,20 @@ describe('native cycle review validation', () => {
       caught(() =>
         validateNativeCycleReview(current, review({findings: [finding({state: 'rejected', reason: ' '})]}), previous),
       ),
-    ).toMatchObject({message: expect.stringContaining(`Finding ${finding().id} needs a reason`)});
+    ).toMatchObject({message: expect.stringContaining(finding().id)});
+    // Every reasonless rejection is named at once.
+    const rejected = EffectArray.map(['finding-a', 'finding-b'], id => finding({id, state: 'rejected', reason: ' '}));
+    expect(caught(() => validateNativeCycleReview(current, review({findings: rejected}), previous))).toMatchObject({
+      message: expect.stringMatching(/finding-a.*finding-b/u),
+    });
+    // A resolved finding's evidence explains it, so no reason is required.
+    expect(() =>
+      validateNativeCycleReview(
+        current,
+        review({findings: [(({reason: _reason, ...resolved}) => resolved)(finding({state: 'resolved'}))]}),
+        previous,
+      ),
+    ).not.toThrow();
   });
 
   it('derives active counts and preserves them across bounded unique findings', () => {
