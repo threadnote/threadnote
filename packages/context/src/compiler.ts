@@ -130,6 +130,17 @@ export const compileContextBriefWith = Effect.fn('contextBrief.compileWith')(fun
         ),
       ),
     );
+  // Citations that expire with the deadline are only unknown; the brief must still say that the budget ended them.
+  let citationBudgetExhausted = false;
+  const expiredCitations = (candidates: ContextBriefMemoryRetrievalV1['candidates']) => {
+    const expired = budgetExpiredCitationValidations(candidates, observedAt);
+    if (expired.length > 0) citationBudgetExhausted = true;
+    return expired;
+  };
+  const withCitationBudgetGap = (memory: ContextBriefMemoryRetrievalV1): ContextBriefMemoryRetrievalV1 =>
+    citationBudgetExhausted
+      ? {...memory, gaps: [...new Set([...memory.gaps, 'memory-citation-budget-exhausted'])]}
+      : memory;
   const readCitations = (
     candidates: ContextBriefMemoryRetrievalV1['candidates'],
     fence: ContextBriefCitationValidationFenceV2 | undefined,
@@ -139,11 +150,7 @@ export const compileContextBriefWith = Effect.fn('contextBrief.compileWith')(fun
       : withinReadDeadline(
           readDeadline,
           Effect.suspend(() => dependencies.citationValidation!(plan.scope, candidates, fence, readDeadline)),
-        ).pipe(
-          Effect.catchIf(Schema.is(ReadDeadlineExceeded), () =>
-            Effect.succeed(budgetExpiredCitationValidations(candidates, observedAt)),
-          ),
-        );
+        ).pipe(Effect.catchIf(Schema.is(ReadDeadlineExceeded), () => Effect.sync(() => expiredCitations(candidates))));
   const observedAt = DateTime.formatIso(yield* DateTime.now);
   const codeLinkedMemory =
     plan.codeAnchors.codeRefs.length === 0
@@ -217,13 +224,12 @@ export const compileContextBriefWith = Effect.fn('contextBrief.compileWith')(fun
           ),
         ),
       ).pipe(
-        Effect.catchIf(Schema.is(ReadDeadlineExceeded), () => {
-          const fallback = fallbackMemory();
-          return Effect.succeed({
-            ...fallback,
-            citationValidations: budgetExpiredCitationValidations(fallback.candidates, observedAt),
-          });
-        }),
+        Effect.catchIf(Schema.is(ReadDeadlineExceeded), () =>
+          Effect.sync(() => {
+            const fallback = fallbackMemory();
+            return {...fallback, citationValidations: expiredCitations(fallback.candidates)};
+          }),
+        ),
       )
     : mergeContextBriefMemoryEvidence(
         lexicalMemory,
@@ -277,7 +283,7 @@ export const compileContextBriefWith = Effect.fn('contextBrief.compileWith')(fun
   if (plan.mode === 'resume' && plan.graph.codeRefs.length === 0) {
     const initialLogical = assembleContextBriefLogicalResult({
       graph,
-      memory: validatedMemory,
+      memory: withCitationBudgetGap(validatedMemory),
       observedAt,
       plan,
       verifiedProcedureGaps: procedureEvidence.gaps,
@@ -301,7 +307,7 @@ export const compileContextBriefWith = Effect.fn('contextBrief.compileWith')(fun
       }
       const refreshedLogical = assembleContextBriefLogicalResult({
         graph,
-        memory: validatedMemory,
+        memory: withCitationBudgetGap(validatedMemory),
         observedAt,
         plan,
         verifiedProcedureGaps: procedureEvidence.gaps,
@@ -334,7 +340,7 @@ export const compileContextBriefWith = Effect.fn('contextBrief.compileWith')(fun
   }
   const logical = assembleContextBriefLogicalResult({
     graph,
-    memory: validatedMemory,
+    memory: withCitationBudgetGap(validatedMemory),
     observedAt,
     plan,
     verifiedProcedureGaps: procedureEvidence.gaps,

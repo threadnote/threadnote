@@ -102,6 +102,8 @@ describe('Context Brief shared elapsed budgets', () => {
         unknown: 1,
       });
       expect(logical?.durableDecisions[0]?.citationReceipts?.[0]?.reason).toBe('citation-limit');
+      // Expired citations are only unknown, so the brief also names the budget that ended them.
+      expect(logical?.coverage.gaps).toContain('memory-citation-budget-exhausted');
     }),
   );
 
