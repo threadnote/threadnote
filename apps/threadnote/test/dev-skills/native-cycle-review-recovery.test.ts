@@ -32,8 +32,9 @@ describe('native cycle lifecycle', () => {
           ).snapshot,
         );
         yield* f.git(['checkout', 'main']);
-        yield* f.fs.writeFileString(f.path.join(f.repo, 'incoming.ts'), 'export const incoming = true;\n');
-        yield* f.git(['add', 'incoming.ts']);
+        // The advance overlaps the reviewed file: a base that only advanced over other files stays accepted.
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "main";\n');
+        yield* f.git(['add', 'source.ts']);
         yield* f.git(['commit', '-m', 'Advance comparison']);
         yield* f.git(['checkout', 'feature/one']);
         const report = {

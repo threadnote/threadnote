@@ -247,7 +247,10 @@ const NativeCompactIntentInputSchema = Schema.Struct({
       evidenceRefs: Schema.Array(memoryUri).check(Schema.isMaxLength(8)),
     }),
   ]),
-  review: Schema.Struct({required: Schema.Boolean, reason: prose}),
+  review: Schema.Struct({required: Schema.Boolean, reason: prose}).annotate({
+    description:
+      'The independent plan-authoring review of this intent, recorded before admission. Source review of the implementation always happens separately.',
+  }),
 });
 
 export const NativeAuthoringSpecDocumentSchema = nativeSpecSchema;
