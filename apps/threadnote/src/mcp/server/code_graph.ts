@@ -44,6 +44,7 @@ import {
 import type {CodeGraphCrossRepositoryTraversalResultV1} from '@threadnote/graph/cross_repository/traversal';
 import {
   compileContextBrief,
+  compileContextBriefNavigation,
   CONTEXT_BRIEF_MAXIMUM_CODE_REFS,
   CONTEXT_BRIEF_MAXIMUM_ESTIMATED_TOKENS,
   CONTEXT_BRIEF_MINIMUM_ESTIMATED_TOKENS,
@@ -147,7 +148,13 @@ export function registerContextBriefTool(server: EffectMcpServerAdapter, config:
           maximumItems: CONTEXT_BRIEF_MAXIMUM_CODE_REFS,
         }),
         detail: McpInput.literals(['compact', 'source'], 'Default compact; source adds exact-current excerpts.'),
-        mode: McpInput.literals(['brief', 'locate', 'explain', 'trace', 'impact', 'resume'], 'Default brief'),
+        mode: McpInput.literals(
+          ['brief', 'locate', 'explain', 'trace', 'impact', 'resume', 'navigate'],
+          'Default brief; navigate returns a versioned entrypoint/implementation/effects/tests answer',
+        ),
+        continuation: McpInput.string(
+          'Navigate only: opaque continuation from a prior navigate answer; max 1024 bytes',
+        ),
         project: McpInput.string(MCP_CODE_GRAPH_PROJECT_SELECTOR_DESCRIPTION),
         responseFormat: McpInput.literals(['dual', 'agent'], 'Default agent; dual adds structured content.'),
         surface: McpInput.string('Agent catalog surface selector for compatible verified procedures'),
@@ -155,7 +162,19 @@ export function registerContextBriefTool(server: EffectMcpServerAdapter, config:
         workset: McpInput.string('Prepared workset; max 256 UTF-8 bytes; else callerCwd'),
       },
     },
-    ({budgetTokens, callerCwd, codeRefs, detail, mode, project, responseFormat, surface, task, workset}) => {
+    ({
+      budgetTokens,
+      callerCwd,
+      codeRefs,
+      continuation,
+      detail,
+      mode,
+      project,
+      responseFormat,
+      surface,
+      task,
+      workset,
+    }) => {
       const selectedResponseFormat = responseFormat ?? 'agent';
       const worksetName = Effect2.pipe(workset, effectOptionalString =>
         effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
@@ -181,11 +200,10 @@ export function registerContextBriefTool(server: EffectMcpServerAdapter, config:
         const requestedCodeRefs = codeRefs === undefined ? [] : typeof codeRefs === 'string' ? [codeRefs] : codeRefs;
         const query = yield* CodeGraphQueryService;
         const isolatedReads = yield* withIsolatedContextBriefGraphReads(query);
-        const response = yield* compileContextBrief(config, {
+        const shared = {
           ...(budgetTokens === undefined ? {} : {budgetTokens}),
           codeRefs: requestedCodeRefs,
           ...(detail === undefined ? {} : {detail}),
-          ...(mode === undefined ? {} : {mode}),
           responseFormat: selectedResponseFormat,
           scope: worksetName
             ? {
@@ -203,7 +221,19 @@ export function registerContextBriefTool(server: EffectMcpServerAdapter, config:
           // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Preserve optional-chain narrowing for `surface`.
           ...(surface?.trim() ? {surface: surface.trim()} : {}),
           task: checkedTask.value,
-        }).pipe(Effect.provideService(CodeGraphQueryService, isolatedReads));
+        };
+        if (continuation !== undefined && mode !== 'navigate')
+          return argumentError('context_brief continuation requires mode navigate.');
+        const response =
+          mode === 'navigate'
+            ? yield* compileContextBriefNavigation(config, {
+                ...shared,
+                mode,
+                ...(continuation === undefined ? {} : {continuation: {token: continuation, focus: 'effects'}}),
+              }).pipe(Effect.provideService(CodeGraphQueryService, isolatedReads))
+            : yield* compileContextBrief(config, {...shared, ...(mode === undefined ? {} : {mode})}).pipe(
+                Effect.provideService(CodeGraphQueryService, isolatedReads),
+              );
         return selectedResponseFormat === 'agent'
           ? {
               content: [

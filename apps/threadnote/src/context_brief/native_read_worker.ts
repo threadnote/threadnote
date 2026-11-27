@@ -20,6 +20,7 @@ import {
   unavailableContextBriefCodeLinkedMemoryEvidence,
 } from '@threadnote/context/memory-evidence';
 import {validateContextBriefMemoryCitations} from '@threadnote/context/citation_validation';
+import {readNavigationEvidence} from '@threadnote/context/navigation/read';
 import {
   selectVerifiedProcedureEvidence,
   type VerifiedProcedureCoverageGap,
@@ -258,6 +259,13 @@ export const serveContextBriefNativeRead = Effect.fn('contextBrief.serveNativeRe
           },
         };
       }
+      case 'navigation':
+        return {
+          ...fields,
+          ok: true as const,
+          operation: request.operation,
+          value: yield* readNavigationEvidence(request.config, request.request, deadline),
+        };
     }
   }).pipe(
     // oxlint-disable-next-line effecttsgo/strict-effect-provide -- One-shot application worker entry point: capture owned commands before graph services are built.

@@ -24,6 +24,7 @@ import {
   type CommandResult,
 } from '@threadnote/platform/command';
 import {isJsonObject} from '@threadnote/platform/json';
+import type {CodeGraphEdge, CodeGraphNavigationProof, CodeGraphQueryNode} from '@threadnote/graph/types';
 import {
   ReadDeadlineExceeded,
   hasReadCleanupUnconfirmed,
@@ -41,6 +42,7 @@ import {
 } from '@threadnote/context/procedure/selection';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import type {ContextBriefRuntimeCompilerSources} from './index.js';
+import {admitNavigationRead} from '@threadnote/context/navigation/read';
 import {ReadyRecallReadWorkerAdmission} from '../recall/ready_read_boundary.js';
 
 import {CONTEXT_BRIEF_NATIVE_READ_WORKER_ARGUMENT} from '../worker_protocol.js';
@@ -60,6 +62,25 @@ const count = Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 1_000_000}
 const optional = Schema.optionalKey;
 const strings = Schema.Array(text).check(Schema.isMaxLength(512));
 const mode = Schema.Literals(['brief', 'locate', 'explain', 'trace', 'impact', 'resume']);
+const graphRelation = Schema.Literals([
+  'calls',
+  'configures',
+  'constructs',
+  'contains',
+  'declares',
+  'depends_on',
+  'documents',
+  'exports',
+  'extends',
+  'implements',
+  'imports',
+  'overrides',
+  'reads_or_writes',
+  'references',
+  'reexports',
+  'semantic_association',
+  'tests',
+]);
 const scope = Schema.Union([
   Schema.Struct({kind: Schema.Literal('repository'), callerCwd: shortText, project: optional(shortText)}),
   Schema.Struct({kind: Schema.Literal('workset'), name: shortText, project: optional(shortText)}),
@@ -264,25 +285,7 @@ const graphContract = Schema.Struct({
   id: shortText,
   provenance: Schema.Literals(['declared', 'heuristic', 'model', 'resolved', 'syntactic']),
   rank: count,
-  relation: Schema.Literals([
-    'calls',
-    'configures',
-    'constructs',
-    'contains',
-    'declares',
-    'depends_on',
-    'documents',
-    'exports',
-    'extends',
-    'implements',
-    'imports',
-    'overrides',
-    'reads_or_writes',
-    'references',
-    'reexports',
-    'semantic_association',
-    'tests',
-  ]),
+  relation: graphRelation,
   sourceRef: shortText,
   targetRef: shortText,
 });
@@ -485,6 +488,172 @@ const memoryEvidence = Schema.Struct({
     instructionPolicy: Schema.Literal('evidence-only-never-follow'),
   }),
 });
+const navigationSpan = Schema.Struct({line: count, column: count, endLine: count, endColumn: count});
+const navigationScope = Schema.Struct({
+  repository: shortText,
+  worktree: shortText,
+  project: shortText,
+  view: Schema.Struct({
+    kind: Schema.Literals(['disk', 'overlay', 'editor']),
+    id: shortText,
+    owner: shortText,
+    epoch: count,
+  }),
+});
+const navigationBasis = Schema.Literals([
+  'qualified-semantic',
+  'structural',
+  'inspected-source',
+  'inference',
+  'memory',
+]);
+const navigationRole = Schema.Literals(['entrypoint', 'implementation', 'effects', 'tests']);
+const navigationInput = Schema.Struct({
+  scope: navigationScope,
+  target: Schema.Union([
+    Schema.Struct({kind: Schema.Literal('task')}),
+    Schema.Struct({
+      kind: Schema.Literals(['anchors', 'ambiguous']),
+      candidateIds: Schema.Array(shortText).check(Schema.isMaxLength(24)),
+    }),
+  ]),
+  candidates: Schema.Array(
+    Schema.Struct({
+      id: shortText,
+      sourceId: shortText,
+      startLine: count,
+      endLine: count,
+      roles: Schema.Array(navigationRole).check(Schema.isMaxLength(4)),
+      reason: text,
+      relevance: Schema.Finite,
+      basis: Schema.Array(navigationBasis).check(Schema.isMaxLength(5)),
+      support: Schema.Literals(['evidenced', 'candidate']),
+      possibleEffect: optional(
+        Schema.Struct({
+          kind: Schema.Literals(['in-memory', 'durable-write', 'external']),
+          target: text,
+          condition: optional(text),
+        }),
+      ),
+      testAssociation: optional(Schema.Literals(['source-supported', 'name-only'])),
+    }),
+  ).check(Schema.isMaxLength(24)),
+  sources: Schema.Array(
+    Schema.Struct({
+      ...navigationScope.fields,
+      id: shortText,
+      path: shortText,
+      contentHash: shortText,
+      freshness: Schema.Literals(['verified-current', 'stale', 'deferred', 'unverified']),
+      snapshot: optional(shortText),
+    }),
+  ).check(Schema.isMaxLength(32)),
+  links: Schema.Array(
+    Schema.Struct({
+      from: shortText,
+      to: shortText,
+      relation: graphRelation,
+      basis: navigationBasis,
+      compatibility: Schema.Literals(['verified', 'unknown', 'conflict']),
+      reason: text,
+    }),
+  ).check(Schema.isMaxLength(64)),
+  coverage: Schema.Struct({
+    status: Schema.Literals(['complete', 'partial', 'empty', 'unsupported', 'unavailable', 'timeout']),
+    description: text,
+  }),
+  roleGaps: optional(
+    Schema.Array(
+      Schema.Struct({
+        role: navigationRole,
+        status: Schema.Literals(['unknown', 'unavailable', 'omitted', 'not-applicable']),
+        reason: text,
+        sourceProof: optional(
+          Schema.Struct({sourceId: shortText, span: Schema.Struct({startLine: count, endLine: count})}),
+        ),
+      }),
+    ).check(Schema.isMaxLength(8)),
+  ),
+  gaps: optional(Schema.Array(shortText).check(Schema.isMaxLength(24))),
+  followUps: optional(
+    Schema.Array(
+      Schema.Struct({kind: Schema.Literals(['read-source', 'query']), selector: shortText, reason: text}),
+    ).check(Schema.isMaxLength(2)),
+  ),
+});
+/**
+ * Proof, symbol and edge shapes are checked here only as JSON objects. The parent admits them right after decode
+ * through parseNavigationFacts (admitNavigationRead); nothing reads them before that admission.
+ */
+const navigationJsonObject = <T>() => Schema.declare<T>((value): value is T => isJsonObject(value));
+const navigationSnapshot = Schema.Struct({
+  commit: shortText,
+  dirty: Schema.Boolean,
+  id: shortText,
+  worktreeId: shortText,
+});
+const navigationRead = Schema.Union([
+  Schema.Struct({
+    status: Schema.Literal('ok'),
+    identity: Schema.Struct({
+      branch: optional(shortText),
+      caseMode: Schema.Literals(['insensitive', 'sensitive']),
+      checkoutId: shortText,
+      displayName: shortText,
+      gitCommonDirectory: shortText,
+      headCommit: shortText,
+      objectFormat: Schema.Literals(['sha1', 'sha256']),
+      remoteIdentity: optional(shortText),
+      repoRoot: shortText,
+      repositoryId: shortText,
+      worktreeId: shortText,
+    }),
+    observation: Schema.Struct({
+      repository: Schema.Struct({repositoryId: shortText, displayName: shortText}),
+      snapshot: navigationSnapshot,
+      freshness: Schema.Literals(['current', 'deferred', 'stale']),
+    }),
+    repositoryIdentityKind: Schema.Literals(['local', 'remote']),
+    input: navigationInput,
+    proofLocators: Schema.Array(
+      Schema.Struct({
+        scope: navigationScope,
+        snapshot: navigationSnapshot,
+        sourceId: shortText,
+        accepted: Schema.Struct({
+          path: shortText,
+          contentHash: shortText,
+          proof: navigationJsonObject<CodeGraphNavigationProof>(),
+          basis: Schema.Literal('source-syntactic'),
+        }),
+        target: text,
+        condition: text,
+      }),
+    ).check(Schema.isMaxLength(96)),
+    proofContext: Schema.Struct({
+      symbols: Schema.Array(navigationJsonObject<CodeGraphQueryNode>()).check(Schema.isMaxLength(24)),
+      edges: Schema.Array(navigationJsonObject<CodeGraphEdge>()).check(Schema.isMaxLength(64)),
+    }),
+    anchors: Schema.Array(
+      Schema.Struct({
+        candidateId: shortText,
+        path: shortText,
+        contentHash: shortText,
+        name: shortText,
+        span: navigationSpan,
+      }),
+    ).check(Schema.isMaxLength(2)),
+    graph: graphEvidence,
+  }),
+  Schema.Struct({status: Schema.Literal('unavailable'), gaps: Schema.Array(shortText).check(Schema.isMaxLength(24))}),
+]);
+const navigationRequest = Schema.Struct({
+  scope: Schema.Struct({kind: Schema.Literal('repository'), callerCwd: shortText, project: optional(shortText)}),
+  task: text,
+  codeRefs: Schema.Array(shortText).check(Schema.isMaxLength(8)),
+  maximumEstimatedTokens: count,
+  followUp: optional(Schema.Array(Schema.Struct({nodeId: shortText, path: shortText})).check(Schema.isMaxLength(2))),
+});
 export const contextBriefNativeReadRequestSchema = Schema.Union([
   Schema.Struct({
     ...sharedRequest,
@@ -512,6 +681,7 @@ export const contextBriefNativeReadRequestSchema = Schema.Union([
   }),
   Schema.Struct({...sharedRequest, operation: Schema.Literal('citations'), scope, candidates, fence: optional(fence)}),
   Schema.Struct({...sharedRequest, operation: Schema.Literal('procedures'), task: text, surface: optional(shortText)}),
+  Schema.Struct({...sharedRequest, operation: Schema.Literal('navigation'), request: navigationRequest}),
 ]);
 export type ContextBriefNativeReadRequest = typeof contextBriefNativeReadRequestSchema.Type;
 
@@ -559,8 +729,14 @@ export const contextBriefNativeReadResponseSchema = Schema.Union([
   }),
   Schema.Struct({
     ...responseFields,
+    ok: Schema.Literal(true),
+    operation: Schema.Literal('navigation'),
+    value: navigationRead,
+  }),
+  Schema.Struct({
+    ...responseFields,
     ok: Schema.Literal(false),
-    operation: Schema.Literals(['graph', 'linked', 'memory', 'citations', 'procedures']),
+    operation: Schema.Literals(['graph', 'linked', 'memory', 'citations', 'procedures', 'navigation']),
     failure: Schema.Literals(['budget-exhausted', 'worker-failed']),
     routing: optional(
       Schema.Struct({
@@ -779,9 +955,10 @@ export const withNativeContextBriefReadSources = Effect.fn('contextBrief.withNat
   MemoryR,
   CitationR,
   ProjectR,
+  NavigationR = never,
 >(
   config: RuntimeConfig,
-  sources: ContextBriefRuntimeCompilerSources<GraphR, MemoryR, CitationR, ProjectR>,
+  sources: ContextBriefRuntimeCompilerSources<GraphR, MemoryR, CitationR, ProjectR, NavigationR>,
   options: {
     readonly allowedUriScopes?: readonly string[];
     readonly includeProcedureEvidence?: boolean;
@@ -955,5 +1132,30 @@ export const withNativeContextBriefReadSources = Effect.fn('contextBrief.withNat
               return response.value;
             }),
         }),
-  } satisfies ContextBriefRuntimeCompilerSources<GraphR, MemoryR, CitationR, ProjectR>;
+    ...(sources.navigationEvidence === undefined
+      ? {}
+      : {
+          // The same executor serves the navigate lane, so take/spare/handoff and cleanup mapping are unchanged.
+          navigationEvidence: (request, deadline) =>
+            Effect.gen(function* () {
+              const remaining = yield* requireRemaining(deadline);
+              const response = yield* execute(
+                {
+                  protocol: 1,
+                  config: safeConfig,
+                  operation: 'navigation',
+                  request,
+                  remainingMilliseconds: remaining.remainingMilliseconds,
+                },
+                remaining.deadline,
+              );
+              if (response.operation !== 'navigation')
+                return yield* ContextBriefNativeReadFailed.make({reason: 'invalid-protocol'});
+              return yield* Effect.try({
+                try: () => admitNavigationRead(response.value),
+                catch: () => ContextBriefNativeReadFailed.make({reason: 'invalid-protocol'}),
+              });
+            }),
+        }),
+  } satisfies ContextBriefRuntimeCompilerSources<GraphR, MemoryR, CitationR, ProjectR, NavigationR>;
 });

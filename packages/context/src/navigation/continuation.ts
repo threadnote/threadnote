@@ -1,4 +1,5 @@
-import {Array as EffectArray, Option} from 'effect';
+import {Array as EffectArray, Option, Schema} from 'effect';
+import * as EffectString from 'effect/String';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {CodeGraphQueryResult} from '@threadnote/graph/types';
 import {
@@ -91,6 +92,115 @@ export function navigationEffectsFollowUpAnchors(
   };
 }
 
+/** What a follow-up compares: the scope, the effects status and a digest of every effect key. */
+export interface NavigationEffectsSummary {
+  readonly scope: string;
+  readonly status: string;
+  readonly digest: string;
+}
+
+/** A previous effect node the follow-up re-reads. Client input: the reader re-resolves it through the graph. */
+export interface NavigationEffectsLocator {
+  readonly nodeId: string;
+  readonly path: string;
+}
+
+export interface NavigationContinuationV1 {
+  readonly summary: NavigationEffectsSummary;
+  readonly locators: readonly NavigationEffectsLocator[];
+}
+
+/** At most this many effect nodes are re-read; a larger write boundary gets no continuation. */
+export const NAVIGATION_CONTINUATION_LOCATORS = 2;
+const CONTINUATION_BYTES = 1024;
+/** Change detection only, not a security binding: scope and binding are re-derived from the request. */
+const DIGEST = /^[0-9a-f]{16}$/u;
+const digest16 = (text: string) => EffectString.slice(0, 16)(sha256HexSync(text));
+const NODE_ID = /^cgs_[0-9a-f]{32}$/u;
+const BASE64URL = /^[A-Za-z0-9_-]+$/u;
+
+export function navigationEffectsSummary(answer: NavigationAnswerV1): NavigationEffectsSummary {
+  const effects = navigationEffects(answer);
+  return {
+    scope: digest16(navigationScopeKey(answer.scope)),
+    status: effects.status,
+    digest: digest16(JSON.stringify(effectKeys(effects))),
+  };
+}
+
+const ContinuationWire = Schema.Tuple([
+  Schema.Literal(1),
+  Schema.String.check(Schema.isPattern(DIGEST)),
+  Schema.Literals(['supported', 'unknown', 'unavailable', 'omitted', 'not-applicable']),
+  Schema.String.check(Schema.isPattern(DIGEST)),
+  Schema.Array(
+    Schema.Tuple([
+      Schema.String.check(Schema.isPattern(NODE_ID)),
+      Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(512)),
+    ]),
+  ).check(Schema.isMaxLength(NAVIGATION_CONTINUATION_LOCATORS)),
+]);
+
+/**
+ * Opaque, stateless continuation for the warm write-boundary follow-up. It carries no source text, secret or
+ * handle, and it is undefined when the effects cannot be re-read within its bounds.
+ */
+export function encodeNavigationContinuation(answer: NavigationAnswerV1): string | undefined {
+  const effects = navigationEffects(answer);
+  const nodes = EffectArray.filter(effects.nodes, node => NODE_ID.test(node.id));
+  if (nodes.length === 0 || nodes.length !== effects.nodes.length || nodes.length > NAVIGATION_CONTINUATION_LOCATORS)
+    return undefined;
+  const sources = new Map(EffectArray.map(effects.sources, source => [source.id, source] as const));
+  const locators = EffectArray.flatMap(nodes, node => {
+    const source = sources.get(node.sourceId);
+    return source === undefined ? [] : [[node.id, source.path] as const];
+  });
+  if (locators.length !== nodes.length) return undefined;
+  const summary = navigationEffectsSummary(answer);
+  const token = Buffer.from(
+    JSON.stringify([1, summary.scope, summary.status, summary.digest, locators]),
+    'utf8',
+  ).toString('base64url');
+  return token.length > CONTINUATION_BYTES ? undefined : token;
+}
+
+/** Strict decode of untrusted continuation text. Any violation is undefined, which invalidates the follow-up. */
+export function decodeNavigationContinuation(token: string): NavigationContinuationV1 | undefined {
+  if (token.length === 0 || token.length > CONTINUATION_BYTES || !BASE64URL.test(token)) return undefined;
+  let json: unknown;
+  try {
+    json = JSON.parse(Buffer.from(token, 'base64url').toString('utf8'));
+  } catch {
+    return undefined;
+  }
+  const decoded = Schema.decodeUnknownOption(ContinuationWire)(json, {onExcessProperty: 'error'});
+  if (Option.isNone(decoded)) return undefined;
+  const [, scope, status, digest, locators] = decoded.value;
+  if (!EffectArray.every(locators, ([, path]) => navigationRelativePath(path))) return undefined;
+  if (new Set(EffectArray.map(locators, ([nodeId]) => nodeId)).size !== locators.length) return undefined;
+  return {
+    summary: {scope, status, digest},
+    locators: EffectArray.map(locators, ([nodeId, path]) => ({nodeId, path})),
+  };
+}
+
+/** Repository-relative POSIX path with no empty, `.` or `..` segment, no backslash and no control character. */
+export function navigationRelativePath(path: string): boolean {
+  if (
+    path.length === 0 ||
+    EffectString.startsWith('/')(path) ||
+    /^[A-Za-z]:/u.test(path) ||
+    EffectString.includes('\\')(path)
+  )
+    return false;
+  // oxlint-disable-next-line no-control-regex -- Control characters are rejected in client paths.
+  if (/[\u0000-\u001f\u007f]/u.test(path)) return false;
+  return EffectArray.every(
+    EffectString.split('/')(path),
+    segment => segment !== '' && segment !== '.' && segment !== '..',
+  );
+}
+
 export interface NavigationEffectsDelta {
   readonly status: 'unchanged' | 'changed' | 'invalidated';
   readonly reason: string;
@@ -128,11 +238,12 @@ function effectKeys(effects: ReturnType<typeof navigationEffects>): readonly str
  * the previous effect files; this pure step reports the needed delta or a truthful invalidation.
  */
 export function navigationEffectsDelta(
-  previous: NavigationAnswerV1,
+  previous: NavigationAnswerV1 | NavigationEffectsSummary,
   current: NavigationAnswerV1,
 ): NavigationEffectsDelta {
-  if (navigationScopeKey(previous.scope) !== navigationScopeKey(current.scope))
-    return invalidatedNavigationEffects('navigation-scope-changed');
+  const before = 'digest' in previous ? previous : navigationEffectsSummary(previous);
+  const now = navigationEffectsSummary(current);
+  if (before.scope !== now.scope) return invalidatedNavigationEffects('navigation-scope-changed');
   if (
     current.outcome === 'conflict' ||
     current.outcome === 'unavailable' ||
@@ -140,15 +251,8 @@ export function navigationEffectsDelta(
     current.outcome === 'unresolved'
   )
     return invalidatedNavigationEffects(`navigation-follow-up-${current.outcome}`);
-  const before = navigationEffects(previous);
   const after = navigationEffects(current);
-  const beforeKeys = effectKeys(before);
-  const afterKeys = effectKeys(after);
-  if (
-    before.status === after.status &&
-    beforeKeys.length === afterKeys.length &&
-    EffectArray.every(beforeKeys, (key, index) => key === afterKeys[index])
-  )
+  if (before.status === now.status && before.digest === now.digest)
     return {status: 'unchanged', reason: 'navigation-effects-unchanged', effects: [], sources: []};
   // An unsupported role after the follow-up may only mean the evidence was not read again (deadline, budget or
   // omitted facts). Only an affirmative not-applicable result says the write boundary is gone.
