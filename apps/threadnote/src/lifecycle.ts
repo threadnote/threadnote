@@ -1,5 +1,7 @@
 import {
+  completeRecallEmbeddingDemand,
   readRecallEmbeddingDemand,
+  recallEmbeddingModelIdentity,
   requestRecallEmbeddings,
   recallEmbeddingObservedState,
 } from '@threadnote/recall/background/demand';
@@ -8,7 +10,7 @@ import {Array as EffectArray} from 'effect';
 import {queueAutomaticModelSetup} from './models/setup_lifecycle.js';
 import {stopModelSetup} from './models/setup.js';
 import {hasManagedCursorHooks} from './cursor/hooks.js';
-import {Console, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
+import {Cause, Console, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
 import {
   repairRegisteredAgentAdapters,
   removeRegisteredAgentAdaptersInTransaction,
@@ -266,6 +268,10 @@ export const prepareRecallIndexes = Effect.fn('lifecycle.prepareRecallIndexes')(
   authorizationKey: string,
   verifyInputs: Effect.Effect<void, E, R>,
 ) {
+  // A build of the selected model for this configuration settles demand that existed before it,
+  // including a blocked one. Completion is fenced by revision, so a write during the build stays queued.
+  const settled = Option.getOrUndefined(yield* readRecallEmbeddingDemand(config).pipe(Effect.option))?.desired;
+  const covers = settled !== undefined && settled.manifestPath === config.manifestPath;
   for (let completedRetries = 0; ; completedRetries += 1) {
     const attempt = yield* Effect.gen(function* () {
       yield* Console.log('Preparing lexical recall from canonical documents.');
@@ -299,7 +305,19 @@ export const prepareRecallIndexes = Effect.fn('lifecycle.prepareRecallIndexes')(
       );
       yield* Console.log(`Lexical and vector recall indexes are ready for ${manifest.id}.`);
     }).pipe(Effect.result);
-    if (Result.isSuccess(attempt)) return;
+    if (Result.isSuccess(attempt)) {
+      if (
+        covers &&
+        selectedEmbeddingModelId(yield* readModelSelection(config.agentContextHome), 'recall') === manifest.id
+      )
+        yield* completeRecallEmbeddingDemand(config, settled.token, settled.revision).pipe(
+          Effect.catchCauseIf(
+            cause => !Cause.hasInterrupts(cause),
+            () => Console.error('Background recall demand could not be cleared; run `threadnote repair`.'),
+          ),
+        );
+      return;
+    }
     if (!recallIndexMaintenanceShouldRetry(attempt.failure, completedRetries))
       return yield* Effect.fail(attempt.failure);
   }
@@ -1201,10 +1219,7 @@ function vectorRecallIndexCheck(config: RuntimeConfig, lexicalStatus: RecallInde
       yield* loadRecallVectorAuthorizationKey(config),
     );
     if (!currentGeneration && queued && (status.ready || status.reason === 'not built') && readiness !== 'corrupt') {
-      const observed = yield* recallEmbeddingObservedState(
-        config,
-        manifest.id + ':' + manifest.sha256 + ':' + String(manifest.dimensions),
-      );
+      const observed = yield* recallEmbeddingObservedState(config, recallEmbeddingModelIdentity(manifest));
       const control = yield* recallEmbeddingWorkerControlState(config.agentContextHome);
       if (control.state === 'legacy-owner' || control.state === 'unavailable')
         return {

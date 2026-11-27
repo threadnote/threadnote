@@ -379,7 +379,7 @@ effectIt.effect('reconciles legacy inactive inventory before admitting current w
         logicalScope: recallLogicalScope({...f.config, user: 'other'}, false),
       }).pipe(Effect.flip),
     ).toMatchObject({_tag: 'RecallIdentityAdmissionBusy'});
-  }).pipe(provide, TestClock.withLive),
+  }).pipe(provide),
 );
 
 effectIt.effect('rejects an older writer generation that inherited a newer inventory stamp', () =>

@@ -1,7 +1,7 @@
 import {RECALL_INVENTORY_POLICY_CHANGED_REASON, RECALL_LOGICAL_SCOPE_CHANGED_REASON} from '../index/freshness.js';
 import {loadRecallVectorAuthorizationKey} from '../vector/preparation-identity.js';
 import * as EffectString from 'effect/String';
-import {Cause, Effect, Schema} from 'effect';
+import {Cause, Effect, Option, Schema} from 'effect';
 import {
   consumeResourceRecallInvalidationReceipt,
   type ResourceRecallInvalidationReceipt,
@@ -10,7 +10,14 @@ import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/
 import {readModelSelection, selectedEmbeddingModelId} from '@threadnote/inference/models/selection';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {vectorIndexGenerationReadiness} from '../vector-index.js';
-import {expireRecallIndexValidation, loadRecallIndexData, recallIndexStatus, type RecallIndexStatus} from '../index.js';
+import {
+  currentRecallCorpusGeneration,
+  expireRecallIndexValidation,
+  loadRecallIndexData,
+  recallIndexStatus,
+  type RecallIndexStatus,
+} from '../index.js';
+import {hasReadCleanupUnconfirmed} from '@threadnote/platform/read_deadline';
 import {emitRecallDiagnostic} from '../diagnostics.js';
 
 interface McpRecallRefreshConfig {
@@ -28,7 +35,11 @@ export type DerivedIndexRefreshOutcome =
   | {readonly state: 'unavailable'}
   | {readonly state: 'blocked'; readonly repair: string};
 
-import {deferRecallEmbeddings, requestRecallEmbeddingsReceipt} from '../background/demand.js';
+import {
+  deferRecallEmbeddings,
+  recallEmbeddingModelIdentity,
+  requestRecallEmbeddingsReceipt,
+} from '../background/demand.js';
 
 class McpRecallBackgroundRefreshBlocked extends Schema.TaggedError<
   McpRecallBackgroundRefreshBlocked,
@@ -41,9 +52,21 @@ class McpRecallBackgroundRefreshBlocked extends Schema.TaggedError<
 /** Persist demand before returning; an ephemeral caller cannot discard it on exit. */
 export const scheduleMcpRecallBackgroundRefresh = Effect.fn('recall.scheduleMcpBackgroundRefresh')(function* (
   config: McpRecallRefreshConfig,
-  _manifest: LocalModelManifest,
+  manifest: LocalModelManifest,
 ) {
-  return (yield* requestRecallEmbeddingsReceipt(config, true)).disposition;
+  // A stale or unreadable lexical index gives no generation, so the read cannot join and is a new event.
+  const corpusGeneration = Option.getOrUndefined(
+    yield* currentRecallCorpusGeneration(config).pipe(
+      Effect.catchCauseIf(
+        cause => !Cause.hasInterrupts(cause) && !hasReadCleanupUnconfirmed(cause),
+        () => Effect.succeed(Option.none<string>()),
+      ),
+    ),
+  );
+  return (yield* requestRecallEmbeddingsReceipt(config, true, {
+    model: recallEmbeddingModelIdentity(manifest),
+    corpusGeneration,
+  })).disposition;
 });
 
 /** Canonical and lexical readiness complete now; document inference is durable idle demand. */

@@ -3,7 +3,9 @@ import {EffectMcpServerRegistry} from '@threadnote/threadnote/effect/ai/mcp';
 import {registerStoreTool} from '@threadnote/threadnote/mcp/server/store';
 import {
   completeRecallEmbeddingDemand,
+  observeRecallEmbeddingDemand,
   readRecallEmbeddingDemand,
+  recallEmbeddingModelIdentity,
   requestRecallEmbeddings,
   RecallEmbeddingDemandUnavailable,
   RecallEmbeddingWakePort,
@@ -776,6 +778,32 @@ describe('MCP recall background vector refresh', () => {
         );
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('schedules a stale read as a read-triggered enqueue that keeps demand and wakes once', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'mcp-recall-read-enqueue-'});
+      const config = {account: 'local', agentContextHome: home, user: 'tester'};
+      const lexical = yield* loadRecallIndexData(config, {forceRefresh: true, includeInactive: false});
+      yield* requestRecallEmbeddings(config);
+      const desired = (yield* readRecallEmbeddingDemand(config))!.desired!;
+      yield* observeRecallEmbeddingDemand(config, desired, {
+        state: 'running',
+        failures: 2,
+        model: recallEmbeddingModelIdentity(manifest),
+        corpusGeneration: recallGeneration(lexical),
+      });
+      const before = yield* readRecallEmbeddingDemand(config);
+      let wakes = 0;
+      expect(
+        yield* scheduleMcpRecallBackgroundRefresh(config, manifest).pipe(
+          Effect.provideService(RecallEmbeddingWakePort, () => Effect.sync(() => void wakes++)),
+        ),
+      ).toBe('coalesced');
+      expect(yield* readRecallEmbeddingDemand(config)).toEqual(before);
+      expect(wakes).toBe(1);
+    }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
   effectIt.effect('retains lexical fallback without acknowledging demand when the actual enqueue guard times out', () =>

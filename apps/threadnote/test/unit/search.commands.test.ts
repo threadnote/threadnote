@@ -23,6 +23,11 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SystemInfo} from '@threadnote/platform/system';
 import {systemLayer} from '../../src/effect/runtime-bootstrap.js';
 import {runIndexRebuild} from '../../src/search/commands.js';
+import {
+  observeRecallEmbeddingDemand,
+  readRecallEmbeddingDemand,
+  requestRecallEmbeddingsReceipt,
+} from '@threadnote/recall/background/demand';
 import {CliOutput} from '../../src/effect/cli/output.js';
 import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
@@ -246,6 +251,63 @@ describe('foreground index rebuild', () => {
     ),
   );
 
+  effectIt.effect('settles a blocked background demand but keeps a write that arrives during the rebuild', () =>
+    test(
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const blocked = yield* requestRecallEmbeddingsReceipt(f.config);
+        yield* observeRecallEmbeddingDemand(f.config, blocked, {state: 'blocked', failures: 8});
+        yield* f.run();
+        expect((yield* readRecallEmbeddingDemand(f.config))?.desired).toBeUndefined();
+
+        const again = yield* requestRecallEmbeddingsReceipt(f.config);
+        yield* observeRecallEmbeddingDemand(f.config, again, {state: 'blocked', failures: 8});
+        // A changed body makes the second rebuild embed, so the write lands mid-build.
+        yield* f.fs.writeFileString(f.resource, 'Changed synthetic body for the second rebuild.');
+        let write: {token: string; revision: string} | undefined;
+        f.beforeEmbedding(
+          requestRecallEmbeddingsReceipt(f.config, true).pipe(
+            Effect.map(receipt => {
+              write ??= receipt;
+            }),
+          ),
+        );
+        yield* f.run();
+        const kept = (yield* readRecallEmbeddingDemand(f.config))?.desired;
+        expect(kept?.token).toBe(again.token);
+        expect(kept?.revision).toBe(write?.revision);
+      }),
+    ),
+  );
+
+  effectIt.effect('keeps background demand of another manifest path after a rebuild', () =>
+    test(
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const demand = yield* requestRecallEmbeddingsReceipt({...f.config, manifestPath: '/abs/other/manifest.json'});
+        yield* f.run();
+        expect((yield* readRecallEmbeddingDemand(f.config))?.desired).toMatchObject({
+          token: demand.token,
+          revision: demand.revision,
+        });
+      }),
+    ),
+  );
+
+  effectIt.effect('keeps background demand after a rebuild of a model that is not selected', () =>
+    test(
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const demand = yield* requestRecallEmbeddingsReceipt(f.config);
+        yield* f.run({model: alternate.id});
+        expect((yield* readRecallEmbeddingDemand(f.config))?.desired).toMatchObject({
+          token: demand.token,
+          revision: demand.revision,
+        });
+      }),
+    ),
+  );
+
   effectIt.effect('fails missing and non-embedding selections without claiming readiness', () =>
     test(
       Effect.gen(function* () {
@@ -265,8 +327,13 @@ describe('foreground index rebuild', () => {
     test(
       Effect.gen(function* () {
         const f = yield* fixture;
+        const demand = yield* requestRecallEmbeddingsReceipt(f.config);
         f.failEmbedding();
         expect(Result.isFailure(yield* f.run().pipe(Effect.result))).toBe(true);
+        expect((yield* readRecallEmbeddingDemand(f.config))?.desired).toMatchObject({
+          token: demand.token,
+          revision: demand.revision,
+        });
         expect(EffectArray.some(f.output, EffectString.includes('indexes are ready'))).toBe(false);
         expect((yield* vectorIndexStatus(f.home, manifest)).ready).toBe(false);
       }),

@@ -8,7 +8,7 @@ import {
   RecallIndexCorrupt,
   RecallIndexSourceChanged,
 } from '@threadnote/recall/index';
-import {Array as EffectArray, Clock, Context, Effect, FileSystem, Path, Schema} from 'effect';
+import {Array as EffectArray, Clock, Context, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import {BackgroundInferenceAdmission, BackgroundInferenceDeferred} from '@threadnote/inference/background/admission';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
@@ -19,6 +19,7 @@ import {
   completeRecallEmbeddingDemand,
   observeRecallEmbeddingDemand,
   readRecallEmbeddingDemand,
+  recallEmbeddingModelIdentity,
   type RecallEmbeddingObservation,
   type RecallEmbeddingScope,
 } from '@threadnote/recall/background/demand';
@@ -140,13 +141,16 @@ export const makeRecallEmbeddingWorker = Effect.fn('recall.makeEmbeddingWorker')
     const modelId = selectedEmbeddingModelId(selection, 'recall');
     const manifest = modelId ? yield* catalog.get(modelId).pipe(Effect.option) : undefined;
     const selected = manifest?._tag === 'Some' ? manifest.value : undefined;
-    const model = selected ? selected.id + ':' + selected.sha256 + ':' + String(selected.dimensions) : undefined;
+    const model = selected ? recallEmbeddingModelIdentity(selected) : undefined;
     const previous =
       demand.observation?.revision === desired.revision && demand.observation.model === model
         ? demand.observation
         : undefined;
     const failures = previous?.failures ?? 0;
     let progress = previous?.progress;
+    // Every observation records the lexical generation, so a read after a corpus change retries a block.
+    const startLexical = Option.getOrUndefined(yield* recallIndexStatus(config, false).pipe(Effect.option));
+    let corpusGeneration = startLexical?.ready ? startLexical.generation : previous?.corpusGeneration;
     const persistObservation = (
       state: RecallEmbeddingObservation['state'],
       reason?: string,
@@ -161,6 +165,7 @@ export const makeRecallEmbeddingWorker = Effect.fn('recall.makeEmbeddingWorker')
         ...(reason === undefined ? {} : {reason}),
         ...(notBefore === undefined ? {} : {notBefore}),
         ...(progress === undefined ? {} : {progress}),
+        ...(corpusGeneration === undefined ? {} : {corpusGeneration}),
       }).pipe(Effect.provide(platform), Effect.mapError(controlUnavailable));
     const observe = (...args: Parameters<typeof persistObservation>) =>
       persistObservation(...args).pipe(Effect.orElseSucceed(() => false));
@@ -213,7 +218,9 @@ export const makeRecallEmbeddingWorker = Effect.fn('recall.makeEmbeddingWorker')
             return yield* RecallIndexCorrupt.make({
               message: 'Lexical storage requires explicit repair before background embeddings.',
             });
-          if (!lexical.ready) yield* loadRecallIndexData(config, {includeInactive: false, memoryIds: []});
+          corpusGeneration = lexical.ready
+            ? lexical.generation
+            : (yield* loadRecallIndexData(config, {includeInactive: false, memoryIds: []})).generation;
           const result = yield* runRecallVectorPreparationBatch(config, selected, current).pipe(
             Effect.provideService(LocalModelRuntime, observedRuntime),
             Effect.provideService(LocalModelCatalog, catalog),

@@ -278,6 +278,86 @@ describe('recall embedding worker', () => {
       expect((yield* recallIndexStatus(f.config, false)).ready).toBe(true);
     }).pipe(TestClock.withLive, provideTestLayer(base)),
   );
+  effectIt.effect('keeps an in-flight build across ten stale reads and publishes it', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const initial = (yield* readRecallEmbeddingDemand(f.config))!.desired!;
+      const context = yield* Effect.context<
+        FileSystem.FileSystem | Path.Path | SystemInfo | SecureRandom.SecureRandom
+      >().pipe(Effect.map(Context.pick(FileSystem.FileSystem, Path.Path, SystemInfo, SecureRandom.SecureRandom)));
+      let reads = 0;
+      const runtime = LocalModelRuntime.of({
+        ...f.runtime,
+        embedMany: request =>
+          Effect.gen(function* () {
+            for (; reads < 10; reads++)
+              expect(yield* scheduleMcpRecallBackgroundRefresh(f.config, manifest)).toBe('coalesced');
+            const demand = (yield* readRecallEmbeddingDemand(f.config))!;
+            expect(demand.desired).toEqual(initial);
+            expect(demand.observation).toMatchObject({revision: initial.revision, state: 'running', failures: 0});
+            return yield* f.runtime.embedMany(request);
+          }).pipe(Effect.provide(context), Effect.orDie),
+      });
+      expect(
+        yield* runRecallEmbeddingWorker(f.config).pipe(
+          Effect.provideService(LocalModelStore, f.store),
+          Effect.provideService(LocalModelRuntime, runtime),
+          Effect.provideService(BackgroundInferenceAdmission, immediate),
+        ),
+      ).toEqual({state: 'complete'});
+      expect(reads).toBe(10);
+      expect(f.calls()).toBe(1);
+      expect((yield* readRecallEmbeddingDemand(f.config))?.desired).toBeUndefined();
+      expect((yield* recallIndexStatus(f.config, false)).ready).toBe(true);
+    }).pipe(TestClock.withLive, provideTestLayer(base)),
+  );
+  effectIt.effect('keeps a block reached after eight failures across a read and retries after a write', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      let attempts = 0;
+      const runtime = LocalModelRuntime.of({
+        ...f.runtime,
+        embedMany: () =>
+          Effect.suspend(() => {
+            attempts++;
+            return EmbeddingFailed.make({
+              modelId: manifest.id,
+              message: 'Synthetic inference failure.',
+              cause: undefined,
+            });
+          }),
+      });
+      const unit = yield* makeRecallEmbeddingWorker().pipe(
+        Effect.provideService(LocalModelStore, f.store),
+        Effect.provideService(LocalModelRuntime, runtime),
+        Effect.provideService(BackgroundInferenceAdmission, immediate),
+      );
+      for (let step = 0; step < 32; step++) {
+        const result = yield* unit(f.config);
+        if (result.state === 'blocked') break;
+        yield* TestClock.adjust(result.delay);
+      }
+      expect((yield* readRecallEmbeddingDemand(f.config))?.observation).toMatchObject({
+        state: 'blocked',
+        reason: 'embedding-preparation-failed',
+        failures: 8,
+        corpusGeneration: (yield* recallIndexStatus(f.config, false)).generation,
+      });
+      expect(attempts).toBe(8);
+      expect(yield* scheduleMcpRecallBackgroundRefresh(f.config, manifest)).toBe('coalesced');
+      expect((yield* unit(f.config)).state).toBe('blocked');
+      expect(attempts).toBe(8);
+      // A corpus change that reaches only the lexical index releases the block on the next read.
+      yield* f.fs.writeFileString(f.resource, 'Changed synthetic body without a write-triggered enqueue.');
+      yield* loadRecallIndexData(f.config, {forceRefresh: true, includeInactive: false});
+      yield* scheduleMcpRecallBackgroundRefresh(f.config, manifest);
+      expect((yield* unit(f.config)).state).not.toBe('blocked');
+      expect(attempts).toBe(9);
+      yield* requestRecallEmbeddings(f.config, true);
+      expect((yield* unit(f.config)).state).not.toBe('blocked');
+      expect(attempts).toBe(10);
+    }).pipe(provideTestLayer(base)),
+  );
   effectIt.effect('keeps native authority deferrals outside the eight-failure retry budget', () =>
     Effect.gen(function* () {
       const f = yield* fixture;

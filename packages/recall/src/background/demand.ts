@@ -21,6 +21,7 @@ export const RecallEmbeddingWakePort = Context.Reference<((home: string) => Effe
 const observationSchema = Schema.Struct({
   revision: Schema.String,
   model: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(256))),
+  corpusGeneration: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(256))),
   state: Schema.Literals([
     'queued',
     'deferred-cpu',
@@ -287,17 +288,54 @@ const updateDemand = <A>(
     );
   }).pipe(Effect.mapError(error => mappedFailure('guard', error)));
 
+/** The model identity a worker records in `observation.model`. */
+export const recallEmbeddingModelIdentity = (manifest: {
+  readonly id: string;
+  readonly sha256: string;
+  readonly dimensions?: number | undefined;
+}) => manifest.id + ':' + manifest.sha256 + ':' + String(manifest.dimensions);
+
+/** A read that finds observed work for its model and corpus generation; it carries no corpus change. */
+export interface RecallEmbeddingReadJoin {
+  readonly model: string;
+  readonly corpusGeneration: string | undefined;
+}
+
 /** Signals reconciliation, never a trusted corpus/model target or a document body. */
 const enqueueRecallEmbeddings = Effect.fn('recall.enqueueEmbeddings')(function* (
   scope: RecallEmbeddingScope,
   coalesce: boolean,
   resetInvalid: boolean,
+  join?: RecallEmbeddingReadJoin,
 ) {
   const crypto = yield* SecureRandom.SecureRandom;
   const revision = yield* crypto.uuidV4();
   const selected = yield* updateDemand(
     scope,
     state => {
+      // A read joins observed work of the same configuration, model and corpus generation.
+      // Older worker binaries record no generation; an unblocked one joins by model so mixed versions do not thrash.
+      const observed = state.observation;
+      const legacy = observed?.corpusGeneration === undefined;
+      const joins =
+        join !== undefined &&
+        state.desired !== undefined &&
+        state.desired.manifestPath === scope.manifestPath &&
+        observed?.revision === state.desired.revision &&
+        observed.model === join.model &&
+        join.corpusGeneration !== undefined &&
+        (legacy
+          ? observed.state !== 'blocked' && observed.state !== 'corrupt'
+          : observed.corpusGeneration === join.corpusGeneration);
+      if (joins)
+        return {
+          state,
+          value: {
+            token: state.desired.token,
+            revision: state.desired.revision,
+            disposition: 'coalesced',
+          } satisfies RecallEmbeddingDemandReceipt,
+        };
       const sameConfiguration = coalesce && state.desired?.manifestPath === scope.manifestPath;
       // A same-generation hint cannot prove model/authorization equivalence.
       // Every admitted enqueue is a distinct event; only configuration coalesces.
@@ -333,8 +371,11 @@ const enqueueRecallEmbeddings = Effect.fn('recall.enqueueEmbeddings')(function* 
 });
 
 /** Acknowledges this event only after the guarded durable update and original wake. */
-export const requestRecallEmbeddingsReceipt = (scope: RecallEmbeddingScope, coalesce = false) =>
-  enqueueRecallEmbeddings(scope, coalesce, false);
+export const requestRecallEmbeddingsReceipt = (
+  scope: RecallEmbeddingScope,
+  coalesce = false,
+  join?: RecallEmbeddingReadJoin,
+) => enqueueRecallEmbeddings(scope, coalesce, false, join);
 export const requestRecallEmbeddings = (scope: RecallEmbeddingScope, coalesce = false) =>
   requestRecallEmbeddingsReceipt(scope, coalesce).pipe(Effect.map(receipt => receipt.token));
 /** Explicit operator repair preserves the rejected control file before rebuilding demand. */
