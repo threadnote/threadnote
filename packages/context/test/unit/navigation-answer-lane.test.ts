@@ -249,6 +249,38 @@ describe('navigate lane', () => {
     }),
   );
 
+  effectIt.effect('reports why semantic cannot run before the floor check and starts no semantic work', () =>
+    Effect.gen(function* () {
+      for (const [semanticReadiness, gap] of [
+        ['unconfigured', 'semantic-unavailable'],
+        ['not-running', 'semantic-provider-not-running'],
+      ] as const) {
+        let called = false;
+        const projected = yield* compileContextBriefNavigationWith(
+          deps({
+            // A slow read below the floor still reports the readiness reason, not the semantic budget.
+            navigationEvidence: () =>
+              TestClock.adjust('1100 millis').pipe(Effect.as({...evidence(), semanticReadiness})),
+            navigationSemantic: semantic => Effect.sync(() => ((called = true), semantic.input)),
+          }),
+          request(),
+        );
+        expect(called).toBe(false);
+        expect(projected.structuredContent.navigation?.gaps).toContain(gap);
+        expect(projected.structuredContent.navigation?.gaps).not.toContain('semantic-enrichment-budget-exhausted');
+      }
+      const short = yield* compileContextBriefNavigationWith(
+        deps({
+          navigationEvidence: () =>
+            TestClock.adjust('1100 millis').pipe(Effect.as({...evidence(), semanticReadiness: 'ready' as const})),
+          navigationSemantic: semantic => Effect.succeed(semantic.input),
+        }),
+        request(),
+      );
+      expect(short.structuredContent.navigation?.gaps).toContain('semantic-enrichment-budget-exhausted');
+    }),
+  );
+
   effectIt.effect('stops a slow semantic step at the sub-deadline by interruption', () =>
     Effect.gen(function* () {
       const fiber = yield* compileContextBriefNavigationWith(

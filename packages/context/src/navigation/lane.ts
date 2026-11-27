@@ -24,7 +24,7 @@ import {navigationScopeKey, withNavigationGaps, type NavigationAnswerV1} from '.
 import {projectNavigationAnswer, selectNavigationMemory, type NavigationProjection} from './project.js';
 import type {NavigationReadEvidenceV1, NavigationReadRequestV1, NavigationReadResultV1} from './read.js';
 import {parseContextBriefNavigationRequestV1, type ContextBriefNavigationRequestV1} from './request.js';
-import type {NavigationSemanticDependency} from './semantic.js';
+import type {NavigationSemanticDependency, NavigationSemanticReadiness} from './semantic.js';
 
 export const CONTEXT_BRIEF_NAVIGATION_TYPE = 'context-brief-navigation' as const;
 /** Semantic enrichment ends this long after the request starts, or at the parent deadline when that is earlier. */
@@ -138,6 +138,12 @@ export const compileContextBriefNavigationWith = Effect.fn('contextBrief.navigat
   return project(request, answer, evidence);
 });
 
+/** The gap for an application hint that the semantic step cannot run; the floor check comes only after it. */
+const SEMANTIC_HINT_GAPS: Readonly<Record<Exclude<NavigationSemanticReadiness, 'ready'>, string>> = {
+  unconfigured: 'semantic-unavailable',
+  'not-running': 'semantic-provider-not-running',
+};
+
 /** Optional semantic step. Its result must keep the scope and every structural candidate and source. */
 const enrich = Effect.fn('contextBrief.navigation.enrich')(function* <R>(
   dependency: NavigationSemanticDependency<R> | undefined,
@@ -146,6 +152,9 @@ const enrich = Effect.fn('contextBrief.navigation.enrich')(function* <R>(
   deadline: ReadDeadline,
 ) {
   if (dependency === undefined || evidence.anchors.length === 0) return evidence.input;
+  const readiness = evidence.semanticReadiness;
+  if (readiness !== undefined && readiness !== 'ready')
+    return withNavigationGaps(evidence.input, [SEMANTIC_HINT_GAPS[readiness]]);
   if ((yield* readDeadlineRemaining(deadline)) < NAVIGATION_SEMANTIC_MINIMUM_MILLISECONDS)
     return withNavigationGaps(evidence.input, ['semantic-enrichment-budget-exhausted']);
   const result = yield* withinReadDeadline(

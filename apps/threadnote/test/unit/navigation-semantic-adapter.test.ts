@@ -17,7 +17,7 @@ import {
   navigationAnchorPosition,
   navigationLineConvention,
   navigationSemanticLanguage,
-  navigationSemanticReady,
+  navigationSemanticReadiness,
   type NavigationSemanticHost,
   type NavigationSemanticServices,
 } from '../../src/context_brief/navigation_semantic_adapter.js';
@@ -373,19 +373,21 @@ describe('navigation semantic readiness probe', () => {
     spies => Effect.sync(() => EffectArray.forEach(spies, spy => spy.mockRestore())),
   );
 
-  effectIt.effect('is ready only with a profile slot for an anchor language and an endpoint bootstrap', () =>
+  effectIt.effect('says why the semantic step cannot run, or ready with a profile slot and a bootstrap', () =>
     Effect.gen(function* () {
       const f = yield* fixture;
       const spies = yield* neverConnects;
-      const ready = (paths: readonly string[]) => navigationSemanticReady(f.config, f.request.identity.repoRoot, paths);
+      const readiness = (paths: readonly string[]) =>
+        navigationSemanticReadiness(f.config, f.request.identity.repoRoot, paths);
       yield* withProfile(Effect.fail(HostProfile.SemanticHostProfileFault.make({reason: 'missing'})));
-      expect(yield* ready(['main.go'])).toBe(false);
+      expect(yield* readiness(['main.go'])).toBe('unconfigured');
       yield* withProfile(Effect.succeed({home: f.home, profile: f.profile, digest: sha256HexSync('profile')}));
-      expect(yield* ready(['main.go'])).toBe(false);
+      expect(yield* readiness(['main.go'])).toBe('not-running');
       yield* bootstrap(f);
-      expect(yield* ready(['main.go'])).toBe(true);
-      expect(yield* ready(['store.py', 'main.go'])).toBe(true);
-      for (const paths of [[], ['store.py'], ['Main.kt'], ['notes.txt']]) expect(yield* ready(paths)).toBe(false);
+      expect(yield* readiness(['main.go'])).toBe('ready');
+      expect(yield* readiness(['store.py', 'main.go'])).toBe('ready');
+      for (const paths of [[], ['store.py'], ['Main.kt'], ['notes.txt']])
+        expect(yield* readiness(paths)).toBe('unconfigured');
       for (const spy of spies) expect(spy).not.toHaveBeenCalled();
     }).pipe(Effect.scoped, provideTestLayer(io), TestClock.withLive),
   );

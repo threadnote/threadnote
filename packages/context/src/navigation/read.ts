@@ -28,7 +28,7 @@ import {
   type NavigationInput,
   type NavigationScope,
 } from './model.js';
-import type {NavigationSemanticAnchorV1} from './semantic.js';
+import type {NavigationSemanticAnchorV1, NavigationSemanticReadiness} from './semantic.js';
 import type {NavigationProofLocator} from './structural.js';
 
 /** The structural read of one navigate request. Worksets are not supported by the v1 lane. */
@@ -62,6 +62,8 @@ export interface NavigationReadEvidenceV1 {
   readonly anchors: readonly NavigationSemanticAnchorV1[];
   /** Code-linked memory for the route candidates. The application reads it in the same worker read. */
   readonly memory?: NavigationMemoryReadV1;
+  /** Absent when the application gives no semantic hint, for example in a structural-only lane. */
+  readonly semanticReadiness?: NavigationSemanticReadiness;
 }
 
 export type NavigationMemoryReadV1 =

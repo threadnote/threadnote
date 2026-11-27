@@ -29,6 +29,7 @@ import {isJsonObject} from '@threadnote/platform/json';
 import type {CodeGraphNavigationProof} from '@threadnote/graph/types';
 import {NAVIGATION_INPUT_LIMITS, NAVIGATION_ROLES} from '@threadnote/context/navigation/model';
 import {NAVIGATION_CONTINUATION_LOCATORS} from '@threadnote/context/navigation/continuation';
+import {NAVIGATION_SEMANTIC_READINESS} from '@threadnote/context/navigation/semantic';
 import {
   ReadDeadlineExceeded,
   hasReadCleanupUnconfirmed,
@@ -678,6 +679,7 @@ const navigationRead = Schema.Union([
       Schema.Struct({candidateId: shortText, path: shortText, contentHash: shortText, name: shortText, span}),
     ).check(Schema.isMaxLength(NAVIGATION_SEMANTIC_ANCHORS)),
     memory: optional(navigationMemory),
+    semanticReadiness: optional(Schema.Literals(NAVIGATION_SEMANTIC_READINESS)),
   }),
   Schema.Struct({
     status: Schema.Literal('unavailable'),

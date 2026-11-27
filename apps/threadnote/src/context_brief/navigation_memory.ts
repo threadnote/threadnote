@@ -19,7 +19,7 @@ import {
 } from '@threadnote/context/navigation/read';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {contextBriefMemoryEligibility, retrieveContextBriefCodeLinkedMemoryEvidence} from './memory_evidence.js';
-import {navigationSemanticReady} from './navigation_semantic_adapter.js';
+import {navigationSemanticReadiness} from './navigation_semantic_adapter.js';
 
 /** The memory step's own cap; the request's `semanticFloorAt` and the read deadline can end it earlier. */
 const NAVIGATION_MEMORY_MILLISECONDS = 750;
@@ -33,8 +33,8 @@ const PARENT_RESERVE_MILLISECONDS = 150;
 const unavailable = (gap: string): NavigationMemoryReadV1 => ({status: 'unavailable', gaps: [gap]});
 
 /**
- * The structural read, then the code-linked memory of its route candidates in the same read. A follow-up reads no
- * memory. The native worker and the in-process fallback both call this function.
+ * The structural read, the passive semantic readiness hint, then the code-linked memory of the route candidates,
+ * all in the same read. A follow-up reads no memory. The native worker and the in-process fallback both call it.
  */
 export const readNavigationEvidenceWithMemory = Effect.fn('navigation.readEvidenceWithMemory')(function* (
   config: RuntimeConfig,
@@ -42,8 +42,19 @@ export const readNavigationEvidenceWithMemory = Effect.fn('navigation.readEviden
   deadline: ReadDeadline,
 ) {
   const evidence = yield* readNavigationEvidence(config, request, deadline);
-  if (evidence.status !== 'ok' || request.followUp !== undefined) return evidence;
-  return {...evidence, memory: yield* readNavigationMemory(config, request, evidence, deadline)};
+  if (evidence.status !== 'ok') return evidence;
+  const semanticReadiness = yield* navigationSemanticReadiness(
+    config,
+    evidence.identity.repoRoot,
+    EffectArray.map(evidence.anchors, anchor => anchor.path),
+  );
+  return request.followUp !== undefined
+    ? {...evidence, semanticReadiness}
+    : {
+        ...evidence,
+        semanticReadiness,
+        memory: yield* readNavigationMemory(config, request, {...evidence, semanticReadiness}, deadline),
+      };
 });
 
 /**
@@ -68,13 +79,7 @@ const readNavigationMemory = Effect.fn('navigation.readMemory')(function* (
     request.semanticFloorAt === undefined
       ? 0
       : request.semanticFloorAt - PARENT_RESERVE_MILLISECONDS - (yield* Clock.currentTimeMillis);
-  const yields =
-    untilFloor > 0 &&
-    (yield* navigationSemanticReady(
-      config,
-      evidence.identity.repoRoot,
-      EffectArray.map(evidence.anchors, anchor => anchor.path),
-    ));
+  const yields = untilFloor > 0 && evidence.semanticReadiness === 'ready';
   const deadline = yield* makeReadDeadline(
     Math.min(
       yields ? untilFloor : NAVIGATION_MEMORY_MILLISECONDS,
