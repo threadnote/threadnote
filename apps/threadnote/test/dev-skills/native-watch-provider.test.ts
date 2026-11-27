@@ -861,7 +861,7 @@ describe('native GitHub watch provider', () => {
         read === 1 ? {status: 500, body: 'unavailable'} : {body: 'FAIL  apps/c.test.ts > retries'},
       );
       const first = yield* recovering.provider.sweep();
-      expect(recovering.summaryOf(first)).toBe('unit: failure');
+      expect(recovering.summaryOf(first)).toBe('unit: failure (job log read failed; retrying)');
       const second = yield* recovering.provider.sweep(first.cache);
       expect(recovering.summaryOf(second)).toBe('unit: failure | FAIL apps/c.test.ts > retries');
       expect(recovering.logReads()).toBe(2);
@@ -881,9 +881,52 @@ describe('native GitHub watch provider', () => {
       const crafted = singleFailedCheck(() => ({
         body: 'FAIL a > b ' + EffectString.repeat(80_000)('redis://a:'),
       }));
+      // Wall time, not the test clock: unbounded redaction of this line took about 17 seconds.
+      const started = performance.now();
       const summary = crafted.summaryOf(yield* crafted.provider.sweep());
+      expect(performance.now() - started).toBeLessThan(5000);
       expect(summary).toMatch(/^unit: failure \| FAIL a > b /u);
       expect(summary?.length).toBeLessThanOrEqual(1024);
+    }),
+  );
+
+  effectIt.effect('keeps both log read attempts for a failed check that the per-sweep cap skipped', () =>
+    Effect.gen(function* () {
+      const reads = new Map<string, number>();
+      const failedChecks = EffectArray.makeBy(7, index => ({
+        ...check(51 + index, 'failure'),
+        name: `unit-${51 + index}`,
+        html_url: `https://github.com/example/project/actions/runs/9/job/${51 + index}`,
+      }));
+      const provider = harness((args, input, call, now) => {
+        const endpoint = apiEndpoint(args);
+        const job = /\/actions\/jobs\/(\d+)\/logs$/u.exec(endpoint)?.[1];
+        if (job) {
+          reads.set(job, (reads.get(job) ?? 0) + 1);
+          // The seventh check, which the cap skips first, never has a readable log.
+          return job === '57' ? {status: 500, body: 'unavailable'} : {body: `FAIL  apps/${job}.test.ts > fails`};
+        }
+        if (Effect2.pipe(endpoint, EffectString.includes('/check-runs'))) return {body: {check_runs: failedChecks}};
+        return defaultReply(args, input, call, now);
+      });
+      const summaryOf57 = (result: Effect.Success<ReturnType<typeof provider.sweep>>) => {
+        const checks = EffectOption.getOrUndefined(
+          EffectArray.findFirst(result.sweep.sources, source => source.source === 'checks'),
+        );
+        return checks?.complete
+          ? EffectOption.getOrUndefined(EffectArray.findFirst(checks.items, item => item.id === '57'))?.summary
+          : undefined;
+      };
+      const capped = yield* provider.sweep();
+      expect(reads.get('57')).toBeUndefined();
+      expect(summaryOf57(capped)).toBe('unit-57: failure');
+      const firstFailure = yield* provider.sweep(capped.cache);
+      expect(summaryOf57(firstFailure)).toBe('unit-57: failure (job log read failed; retrying)');
+      const secondFailure = yield* provider.sweep(firstFailure.cache);
+      expect(summaryOf57(secondFailure)).toBe('unit-57: failure | job log unavailable');
+      yield* provider.sweep(secondFailure.cache);
+      expect(reads.get('57')).toBe(2);
+      expect(reads.get('51')).toBe(1);
     }),
   );
 

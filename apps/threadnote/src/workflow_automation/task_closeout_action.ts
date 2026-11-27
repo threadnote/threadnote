@@ -112,7 +112,7 @@ const closeoutEvent = ({summary: _summary, ...event}: PhaseWatchState['events'][
  * Open and blocked work, plus each actionable event that has no disposition yet, so closeout never drops an event that
  * was still undelivered at merge. A long backlog keeps its first rows and one aggregate row for the rest.
  */
-const closeoutWorkOf = (state: PhaseWatchState): CloseoutWatchWork[] => {
+const closeoutWorkOf = (state: PhaseWatchState): {rows: CloseoutWatchWork[]; undelivered: number} => {
   const disposed = new Set(EffectArray.map(state.work, item => item.eventId));
   const undelivered = EffectArray.filter(
     state.events,
@@ -129,7 +129,7 @@ const closeoutWorkOf = (state: PhaseWatchState): CloseoutWatchWork[] => {
   const excess = undelivered.slice(closeoutUndeliveredRowLimit);
   const first = excess[0];
   const last = excess.at(-1);
-  return [
+  const rows: CloseoutWatchWork[] = [
     ...EffectArray.flatMap(state.work, item =>
       item.status === 'open' || item.status === 'blocked'
         ? [
@@ -148,9 +148,15 @@ const closeoutWorkOf = (state: PhaseWatchState): CloseoutWatchWork[] => {
       row(event, 'Undelivered watch event at merge.'),
     ),
     ...(first && last
-      ? [row(first, `${excess.length} more undelivered watch events (${first.id}..${last.id}); inspect the watch.`)]
+      ? [
+          row(
+            first,
+            `${excess.length} more undelivered watch events (${first.id}..${last.id}); relay them and persist dispositions before ACK.`,
+          ),
+        ]
       : []),
   ];
+  return {rows, undelivered: undelivered.length};
 };
 
 /**
@@ -231,6 +237,21 @@ export const runNativeTaskFinish = (
   Effect.gen(function* () {
     let stored = initialStored;
     let state = initialState;
+    /** A watch operation with the phase's current references, or the task card when the phase has none. */
+    const phaseWatchNext = (phaseId: string, operation: 'inspect' | 'renew' | 'work' | 'relay' | 'complete') => {
+      const refs = nativeTaskPhaseWatchRefs(stored, phaseId);
+      return refs
+        ? nativeWatchNext(
+            {
+              runId: request.runId,
+              callerCwd: checkout,
+              validationRef: refs.validationRef,
+              deliveryRef: refs.deliveryRef,
+            },
+            operation,
+          )
+        : nativeNext.view({runId: request.runId, callerCwd: checkout});
+    };
     // Cheap request-shape refusals come first, so they never settle a watch.
     if (request.prepareRef && request.finishRef)
       return yield* fail('invalid-request', 'Continue one closeout reference at a time.');
@@ -309,7 +330,6 @@ export const runNativeTaskFinish = (
           notification.wakeupId !== consumer.wakeupId ||
           !hasHostReceipt
         ) {
-          const refs = nativeTaskPhaseWatchRefs(stored, planPhase.id);
           const now = yield* Clock.currentTimeMillis;
           const watchState = watch?.envelope.state;
           const autoFailure = autoFailures.get(planPhase.id);
@@ -349,19 +369,7 @@ export const runNativeTaskFinish = (
                             'PR closeout requires each exact merged PR, terminal source-complete watch, matching consumer record, and host receipt.',
                             'inspect',
                           ];
-          return yield* nativeRefusal('finish-scope', message, {
-            next: refs
-              ? nativeWatchNext(
-                  {
-                    runId: request.runId,
-                    callerCwd: checkout,
-                    validationRef: refs.validationRef,
-                    deliveryRef: refs.deliveryRef,
-                  },
-                  operation,
-                )
-              : nativeNext.view({runId: request.runId, callerCwd: checkout}),
-          });
+          return yield* nativeRefusal('finish-scope', message, {next: phaseWatchNext(planPhase.id, operation)});
         }
         // Later phases or maintenance can merge the PR above this phase's own delivered head.
         yield* verifyNativeMergedPhaseHead(checkout, pr.headSha, receipt.watch.headSha);
@@ -405,27 +413,26 @@ export const runNativeTaskFinish = (
               'finish-scope',
               'A retained prior PR watch still owns active collection; settle that exact watch before finish.',
             );
-          watchWork.push(...closeoutWorkOf(retainedState));
+          const carried = closeoutWorkOf(retainedState);
+          watchWork.push(...carried.rows);
+          // Measure the rendered form the closeout documents use.
           if (
             watchWork.length > closeoutWatchWorkRowLimit ||
-            Buffer.byteLength(JSON.stringify(watchWork)) > closeoutWatchWorkByteBudget
+            Buffer.byteLength(JSON.stringify(watchWork, null, 2)) > closeoutWatchWorkByteBudget
           ) {
-            const refs = nativeTaskPhaseWatchRefs(stored, planPhase.id);
+            const current = watchId === resolved.watchId;
+            const renewFirst =
+              current &&
+              retainedState.consumer !== null &&
+              retainedState.consumer.leaseUntil <= (yield* Clock.currentTimeMillis);
             return yield* nativeRefusal(
               'closeout-watch-work-overflow',
-              `Closeout would carry ${watchWork.length} open watch work rows, more than its bounded budget; resolve or ignore open watch work first.`,
+              `Closeout would carry ${watchWork.length} open watch work rows after watch ${watchId}, more than its bounded budget; ${renewFirst ? 'renew the watch first, then ' : ''}resolve or ignore open watch work first.`,
               {
-                next: refs
-                  ? nativeWatchNext(
-                      {
-                        runId: request.runId,
-                        callerCwd: checkout,
-                        validationRef: refs.validationRef,
-                        deliveryRef: refs.deliveryRef,
-                      },
-                      'work',
-                    )
-                  : nativeNext.view({runId: request.runId, callerCwd: checkout}),
+                // A retained prior watch is not reachable through watch-pr, so the task card leads to it.
+                next: !current
+                  ? nativeNext.view({runId: request.runId, callerCwd: checkout})
+                  : phaseWatchNext(planPhase.id, carried.undelivered ? 'relay' : 'work'),
               },
             );
           }

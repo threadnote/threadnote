@@ -133,7 +133,14 @@ const summaryLogChecks = 6;
 const summaryDetailSeparator = ' | ';
 const summaryInputLimit = 4096;
 const summaryLogFailureLimit = 2;
+const summaryLogCandidateLimit = 64;
 const summaryLogUnavailable = 'job log unavailable';
+/** Marks one failed log read; it has no ` | ` separator and survives summaryText unchanged. */
+const summaryLogRetrySentinel = ' (job log read failed; retrying)';
+const withoutRetrySentinel = (summary: string) =>
+  EffectString.endsWith(summaryLogRetrySentinel)(summary)
+    ? EffectString.slice(0, summary.length - summaryLogRetrySentinel.length)(summary)
+    : summary;
 const logTimestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s?/u;
 // oxlint-disable-next-line no-control-regex -- Terminal escapes (OSC hyperlinks, also unterminated, then CSI styles) are removed from CI text.
 const terminalEscapes = /\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\|$)|\u001b\[[0-9;?]*[A-Za-z]/gu;
@@ -170,15 +177,18 @@ const failureSummary = (name: unknown, outcome: unknown, fallback: string) =>
 export function nativeWatchFailureLines(log: string): string[] {
   const lines: string[] = [];
   const seen = new Set<string>();
+  let candidates = 0;
   let errorWindow = 0;
+  // Dedupe on the cut raw line and cap the candidates, so a hostile log cannot force many redaction passes.
   const add = (line: string) => {
+    if (seen.has(line) || lines.length >= summaryLogLines || candidates >= summaryLogCandidateLimit) return;
+    seen.add(line);
+    candidates++;
     const value = summaryText(line, summaryLineLimit);
-    if (!value || seen.has(value) || lines.length >= summaryLogLines) return;
-    seen.add(value);
-    lines.push(value);
+    if (value && !EffectArray.contains(lines, value)) lines.push(value);
   };
   for (const raw of EffectString.split(log, /\r?\n/u)) {
-    if (lines.length >= summaryLogLines) break;
+    if (lines.length >= summaryLogLines || candidates >= summaryLogCandidateLimit) break;
     // A crafted long line is cut before any regular expression or redaction pass reads it.
     const line = EffectString.trim(
       stripTerminal(EffectString.replace(logTimestamp, '')(EffectString.slice(0, summaryInputLimit)(raw))),
@@ -714,7 +724,8 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
       Effect.gen(function* () {
         const summaries = new Map<string, string>();
         const pendingReads: {
-          readonly item: NativeWatchEntity & {readonly summary: string};
+          readonly id: string;
+          readonly base: string;
           readonly jobId: string;
           readonly retry: boolean;
         }[] = [];
@@ -724,8 +735,12 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
           // Only a finished read adds the ` | ` separator; the base summary never contains it.
           if (prior !== undefined && EffectString.includes(summaryDetailSeparator)(prior))
             summaries.set(item.id, summaryText(prior, summaryLimit));
-          else if (jobId && item.summary)
-            pendingReads.push({item: {...item, summary: item.summary}, jobId, retry: prior !== undefined});
+          else if (jobId && item.summary) {
+            const retry = prior !== undefined && EffectString.endsWith(summaryLogRetrySentinel)(prior);
+            // An unread retry keeps its sentinel, so a skipped sweep never grants another attempt.
+            if (retry) summaries.set(item.id, prior);
+            pendingReads.push({id: item.id, base: withoutRetrySentinel(item.summary), jobId, retry});
+          }
         }
         // First-seen failures emit their event in this sweep, so they read their logs first.
         const ordered = [
@@ -733,7 +748,7 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
           ...EffectArray.filter(pendingReads, read => read.retry),
         ];
         let consecutiveFailures = 0;
-        for (const {item, jobId, retry} of EffectArray.take(ordered, summaryLogChecks)) {
+        for (const {id, base, jobId, retry} of EffectArray.take(ordered, summaryLogChecks)) {
           if (
             authenticationFailed ||
             now() < blockedUntil ||
@@ -743,13 +758,25 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
             break;
           const lines = yield* jobFailureLines(jobId);
           consecutiveFailures = lines === undefined ? consecutiveFailures + 1 : 0;
-          // The first failed read keeps the base summary for one retry; a second failure is final.
-          if (lines === undefined && !retry) continue;
-          const detail =
-            lines === undefined ? [summaryLogUnavailable] : lines.length ? lines : ['no failing test lines in job log'];
+          // Only a read that was tried counts: the first failure marks one retry, and a second failure is final.
           summaries.set(
-            item.id,
-            summaryText(EffectArray.join([item.summary, ...detail], summaryDetailSeparator), summaryLimit),
+            id,
+            lines === undefined && !retry
+              ? summaryText(base, summaryLimit - summaryLogRetrySentinel.length) + summaryLogRetrySentinel
+              : summaryText(
+                  EffectArray.join(
+                    [
+                      base,
+                      ...(lines === undefined
+                        ? [summaryLogUnavailable]
+                        : lines.length
+                          ? lines
+                          : ['no failing test lines in job log']),
+                    ],
+                    summaryDetailSeparator,
+                  ),
+                  summaryLimit,
+                ),
           );
         }
         return EffectArray.map(items, item => {

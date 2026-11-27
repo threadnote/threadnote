@@ -3106,6 +3106,30 @@ describe('native task actions', () => {
         const renewed = yield* readNativeWatch(f.config, published.watchId);
         if (!renewed) throw new Error('Expected the renewed merged watch.');
         expect(renewed.envelope.state.consumer?.leaseUntil).toBeGreaterThan(yield* Clock.currentTimeMillis);
+        // Seventeen unrelayed events with long links overflow the rendered budget on their own; relay them first.
+        const longLink = 'https://github.com/example/repo/pull/76#' + EffectString.repeat(2000)('a');
+        const settledWork = EffectArray.map(openWork, item => ({...item, status: 'resolved' as const}));
+        const bulky = EffectArray.makeBy(17, index => ({
+          ...watchEvent(131 + index, {source: 'reviews', kind: 'review'}),
+          url: longLink,
+        }));
+        const bulkyWatch = yield* writeNativeWatch(
+          f.config,
+          {
+            ...renewed.envelope,
+            state: {...renewed.envelope.state, nextSequence: 131 + bulky.length, events: bulky, work: settledWork},
+          },
+          renewed.revision,
+        );
+        expect(yield* finish.pipe(Effect.provideService(CommandExecutor, mergedProvider), Effect.result)).toMatchObject(
+          {
+            failure: {
+              code: 'closeout-watch-work-overflow',
+              message: expect.stringContaining(`after watch ${published.watchId}`),
+              next: {tool: 'workflow_task_watch_pr', command: 'relay', arguments: {operation: 'relay'}},
+            },
+          },
+        );
         // The work is settled, but a later backlog was never relayed: CI progress and head moves are not work, and
         // twenty actionable events keep sixteen rows and one aggregate row.
         const failedCheck = {
@@ -3123,14 +3147,9 @@ describe('native task actions', () => {
           f.config,
           {
             ...renewed.envelope,
-            state: {
-              ...renewed.envelope.state,
-              nextSequence: 131 + backlog.length,
-              events: backlog,
-              work: EffectArray.map(openWork, item => ({...item, status: 'resolved' as const})),
-            },
+            state: {...renewed.envelope.state, nextSequence: 131 + backlog.length, events: backlog, work: settledWork},
           },
-          renewed.revision,
+          bulkyWatch.revision,
         );
         const closeout = object(yield* finish.pipe(Effect.provideService(CommandExecutor, mergedProvider)));
         expect(closeout).toMatchObject({status: 'pending', stage: 'prepare'});
@@ -3156,7 +3175,7 @@ describe('native task actions', () => {
           ),
           carried(
             reviews[15],
-            `4 more undelivered watch events (${reviews[15].id}..${reviews[18].id}); inspect the watch.`,
+            `4 more undelivered watch events (${reviews[15].id}..${reviews[18].id}); relay them and persist dispositions before ACK.`,
           ),
         ]);
       }).pipe(run),
