@@ -10,7 +10,7 @@ import type {CodeGraphQueryResult, RepositoryIdentity} from '@threadnote/graph/t
 import {retrieveNavigationSourceProofs} from './source_facts.js';
 import {structuralNavigationInput, type NavigationSourceProofs} from './structural.js';
 import {projectNavigationAnswer} from './project.js';
-import type {NavigationAnswerV1, NavigationScope} from './model.js';
+import {NAVIGATION_INPUT_LIMITS, type NavigationAnswerV1, type NavigationScope} from './model.js';
 import {
   invalidatedNavigationEffects,
   navigationEffectsDelta,
@@ -23,6 +23,8 @@ export interface TaskNavigationRequest extends TaskDiscoveryRequest {
   readonly scope: NavigationScope;
   /** Already resolved and validated anchors retain precedence; no task candidate acquisition occurs. */
   readonly anchoredResult?: CodeGraphQueryResult;
+  /** The requested anchor ids inside `anchoredResult`; its other nodes are neighbours, not targets. */
+  readonly anchorIds?: readonly string[];
   readonly maximumEstimatedTokens?: number;
 }
 
@@ -116,7 +118,13 @@ export const retrieveTaskNavigationAnswer = Effect.fn('navigation.retrieveTaskAn
     target:
       anchored === undefined
         ? {kind: 'task'}
-        : {kind: 'anchors', candidateIds: EffectArray.map(anchored.nodes, node => node.id)},
+        : {
+            kind: 'anchors',
+            candidateIds: (input.anchorIds ?? EffectArray.map(anchored.nodes, node => node.id)).slice(
+              0,
+              NAVIGATION_INPUT_LIMITS.anchors,
+            ),
+          },
   });
   if (discovery !== undefined) {
     const focus = new Set(

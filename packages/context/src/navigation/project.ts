@@ -133,6 +133,8 @@ export function projectNavigationAnswer(
   maximumEstimatedTokens = 1250,
   responseFormat: 'agent' | 'dual' = 'agent',
   reviewedMemory: readonly ContextBriefLogicalMemoryEvidenceV1[] = [],
+  /** Bytes a caller's envelope adds around this projection; they come out of the same budget. */
+  reserveBytes = 0,
 ) {
   if (!Number.isSafeInteger(maximumEstimatedTokens) || maximumEstimatedTokens < 800 || maximumEstimatedTokens > 1500)
     throw new Error('Navigation budget must be an integer from 800 to 1500.');
@@ -161,7 +163,7 @@ export function projectNavigationAnswer(
     EffectArray.filter(items, candidate => candidate.lane !== 'node' || !requiredKeys.has(candidate.id)),
     NAVIGATION_PROJECTION_LANES,
   );
-  const maximumBytes = maximumEstimatedTokens * AGENT_RESPONSE_ESTIMATED_BYTES_PER_TOKEN;
+  const maximumBytes = maximumEstimatedTokens * AGENT_RESPONSE_ESTIMATED_BYTES_PER_TOKEN - Math.max(0, reserveBytes);
   const selection = selectFiniteProjection({
     required,
     optional,

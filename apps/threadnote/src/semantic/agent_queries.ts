@@ -76,6 +76,8 @@ const compiledRuntimeIdentity = semanticCompiledRuntimeIdentity;
 export interface SemanticAgentQueryHost<ContextR = never> {
   readonly runtimeIdentity: typeof compiledRuntimeIdentity;
   readonly knowledgeAuthorized?: boolean;
+  /** Use only a running provider session: the coordinator answers not-running and starts nothing. */
+  readonly attachOnly?: boolean;
   readonly connect: typeof ensureSemanticEndpoint;
   readonly context?: (
     config: RuntimeConfig,
@@ -94,7 +96,8 @@ export interface SemanticAgentQueryHost<ContextR = never> {
 export const semanticAgentQueryHost = {
   runtimeIdentity: compiledRuntimeIdentity,
   connect: (...args: Parameters<typeof ensureSemanticEndpoint>) => ensureSemanticEndpoint(...args),
-  context: compileSemanticContextKnowledge,
+  // Read at call time: the navigate lane's adapter imports this module from the context brief, an import cycle.
+  context: (...args: Parameters<typeof compileSemanticContextKnowledge>) => compileSemanticContextKnowledge(...args),
   prestartContext: (config: RuntimeConfig) => prestartContextBriefNativeReadWorkers(config.agentContextHome),
 };
 
@@ -227,6 +230,7 @@ const executeSemanticAgentQueryWith = Effect.fn('semantic.agentQueryWith')(funct
       maxBytes: limit,
       milliseconds: yield* remaining,
       ...(request.cursor ? {cursor: request.cursor} : {}),
+      ...(services.attachOnly ? {attachOnly: true as const} : {}),
     },
   });
   let result = yield* Schema.decodeUnknownEffect(SemanticAgentQueryResult)(raw).pipe(
@@ -304,6 +308,7 @@ const executeSemanticAgentQueryWith = Effect.fn('semantic.agentQueryWith')(funct
                 maxItems: 2,
                 maxBytes: limit,
                 milliseconds: yield* remaining,
+                ...(services.attachOnly ? {attachOnly: true as const} : {}),
               },
             })
             .pipe(Effect.flatMap(Schema.decodeUnknownEffect(SemanticAgentQueryResult)), Effect.result);

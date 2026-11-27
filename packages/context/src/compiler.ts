@@ -1,5 +1,6 @@
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 export {
+  bindSemanticContextSource,
   retrieveSemanticContextSourceEvidence,
   retrieveSemanticContextSymbol,
   selectSemanticContextSymbol,

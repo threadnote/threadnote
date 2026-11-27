@@ -1,3 +1,4 @@
+import {CONTEXT_BRIEF_NAVIGATION_MODE} from '@threadnote/context/navigation/request';
 import {nativeWaivableGateIds} from '@threadnote/workflow-automations/gates';
 import {nativeCyclePublicationField} from '@threadnote/workflow-automations/cycle';
 import {Array as EffectArray, Effect, Schema} from 'effect';
@@ -1089,7 +1090,16 @@ export function makeContextBriefCommand<E, R>(
         'compact',
       ),
       json: boolean('json', 'Print the structured Context Brief projection'),
-      mode: defaultChoice('mode', CONTEXT_BRIEF_MODES, 'Evidence-planning mode', 'brief'),
+      mode: defaultChoice(
+        'mode',
+        [...CONTEXT_BRIEF_MODES, CONTEXT_BRIEF_NAVIGATION_MODE],
+        'Evidence-planning mode; navigate returns a versioned navigation answer',
+        'brief',
+      ),
+      continuation: optionalString(
+        'continuation',
+        'Navigate only: opaque continuation from a prior navigate answer, for the write-boundary follow-up',
+      ),
       project: optionalString('project', 'Optional memory project scope, at most 256 UTF-8 bytes'),
       surface: optionalString('surface', 'Agent catalog surface selector used for compatible procedure admission'),
       task: requiredString('task', 'Engineering task or question, 1-4096 UTF-8 bytes without control characters'),

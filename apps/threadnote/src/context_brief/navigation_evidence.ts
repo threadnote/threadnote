@@ -21,6 +21,9 @@ import type {SemanticAgentQueryResult} from '../semantic/agent_query_protocol.js
 
 type CapabilityStatus = (typeof Capability.Type)['status'];
 
+/** The adapter's attach-only probe found no running coordinator or warm provider session. */
+const NOT_RUNNING = 'semantic-provider-not-running';
+
 /** Navigation consumes only these read operations; every other operation stays outside this adapter. */
 export type SemanticNavigationOperation = 'definition' | 'references' | 'call-hierarchy';
 
@@ -152,7 +155,12 @@ export function withSemanticNavigationEvidence(
   const gaps = new Set([...(input.gaps ?? []), ...(evidence.gaps ?? [])]);
   const followUps: NavigationAcquisition[] = [...(input.followUps ?? [])];
   for (const query of evidence.queries) {
-    if (query.result.status !== 'ok') gaps.add(`semantic-${query.result.status}`);
+    // A provider that is not running is not a generic unavailability: the agent can start it explicitly.
+    if (query.result.status === 'unavailable' && query.result.reason === NOT_RUNNING) {
+      gaps.add(NOT_RUNNING);
+      if (!EffectArray.some(followUps, followUp => followUp.reason === NOT_RUNNING))
+        followUps.push({kind: 'query', selector: `semantic_readiness start ${query.path}`, reason: NOT_RUNNING});
+    } else if (query.result.status !== 'ok') gaps.add(`semantic-${query.result.status}`);
     else if (query.capability !== 'qualified') gaps.add('semantic-provider-unqualified');
   }
   const usable = EffectArray.filter(evidence.queries, usableQuery);
@@ -508,7 +516,8 @@ export const acquireSemanticNavigationEvidence = Effect.fn('navigation.acquireSe
   const capabilities = new Map<string, CapabilityStatus>();
   outer: for (const anchor of input.anchors.slice(0, MAXIMUM_ANCHORS))
     for (const operation of input.operations) {
-      const left = yield* available(MAXIMUM_DOCUMENTS);
+      // Keep one closing observation for every document opened so far, and for this one if it is not open yet.
+      const left = yield* available(opening.size + (opening.has(anchor.path) ? 0 : 1));
       if (left === undefined) {
         gaps.add('semantic-deadline-exhausted');
         break outer;

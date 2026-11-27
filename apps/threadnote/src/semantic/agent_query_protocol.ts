@@ -192,8 +192,17 @@ export const SemanticAgentEndpointQuery = Schema.Struct({
   maxBytes: MaxBytes,
   milliseconds: Milliseconds,
   cursor: Schema.optionalKey(Cursor),
+  /** Host-only: use only a running provider session; without one, answer not-running and start nothing. */
+  attachOnly: Schema.optionalKey(Schema.Literal(true)),
 });
 export type SemanticAgentEndpointQuery = typeof SemanticAgentEndpointQuery.Type;
+/** The answer to an attach-only query when no provider session runs for the document. */
+export const semanticProviderNotRunning = {
+  version: 1,
+  status: 'unavailable',
+  reason: 'semantic-provider-not-running',
+  evidence: null,
+} as const satisfies SemanticAgentQueryResult;
 export function semanticAgentQueryKey(
   runtimeIdentity: string,
   profile: string,

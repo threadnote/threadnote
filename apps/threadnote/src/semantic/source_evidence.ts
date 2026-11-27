@@ -19,6 +19,11 @@ export class SemanticSessionFault extends Schema.TaggedError<SemanticSessionFaul
     reason: Schema.Literals(['invalid', 'conflict', 'stale', 'not-ready', 'provider']),
   },
 ) {}
+/** An attach-only request found no running provider session; nothing was started. */
+export class SemanticProviderNotRunning extends Schema.TaggedError<
+  SemanticProviderNotRunning,
+  {readonly brand: unique symbol}
+>()('SemanticProviderNotRunning', {}) {}
 export interface LspEditSource {
   readonly uri: string;
   readonly text: string;

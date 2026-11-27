@@ -9,6 +9,9 @@ import {
   type ContextBriefCompilerDependencies,
 } from '@threadnote/context/compiler';
 import type {Evidence} from '@threadnote/semantic/contracts';
+import {compileContextBriefNavigationWith, type NavigationLaneDependencies} from '@threadnote/context/navigation/lane';
+import {makeNavigationSemanticDependency} from './navigation_semantic_adapter.js';
+import {readNavigationEvidence} from '@threadnote/context/navigation/read';
 export {compileContextBriefWith, type ContextBriefCompilerDependencies} from '@threadnote/context/compiler';
 import {Cause, Clock, DateTime, Effect, Exit, Schema} from 'effect';
 import {CodeGraphScopeRoutingError} from '@threadnote/graph/scope/routing';
@@ -73,6 +76,7 @@ export interface ContextBriefRuntimeCompilerSources<
   MemoryR = never,
   CitationR = never,
   ProjectR = never,
+  NavigationR = never,
 > {
   readonly citationValidation: NonNullable<
     ContextBriefCompilerDependencies<never, never, CitationR>['citationValidation']
@@ -88,6 +92,8 @@ export interface ContextBriefRuntimeCompilerSources<
   readonly memoryEvidence: ContextBriefCompilerDependencies<never, MemoryR>['memoryEvidence'];
   readonly procedureEvidence?: ContextBriefCompilerDependencies<never, MemoryR>['procedureEvidence'];
   readonly projection: NonNullable<ContextBriefCompilerDependencies<never, never, never, ProjectR>['projection']>;
+  /** The navigate lane's structural read; only that lane calls it. */
+  readonly navigationEvidence?: NavigationLaneDependencies<NavigationR>['navigationEvidence'];
 }
 
 /** Internal compiler controls for reviewed callers; never part of the Context Brief request schema. */
@@ -475,6 +481,54 @@ const compileContextBriefRuntime = Effect.fn('contextBrief.compileRuntime')(func
       ),
     ),
   );
+});
+
+/**
+ * The navigate lane (`mode: navigate`) through the same native read boundary and worker executor. Other modes
+ * never reach it. The semantic owner injects `navigationSemantic` in the dependency object below.
+ */
+export const compileContextBriefNavigation = Effect.fn('contextBrief.compileNavigation')(function* (
+  config: RuntimeConfig,
+  input: unknown,
+) {
+  const compilation = Effect.gen(function* () {
+    const sources = yield* withNativeContextBriefReadSources(
+      config,
+      {
+        citationValidation: (scope, candidates, fence) =>
+          validateContextBriefMemoryCitations(config, scope, candidates, fence),
+        graphEvidence: (graphPlan, readBudget) =>
+          retrieveContextBriefGraphEvidence(config, graphPlan, retrieveContextBriefSourceEvidence, readBudget),
+        memoryEvidence: memoryPlan => retrieveContextBriefMemoryEvidence(config, memoryPlan),
+        navigationEvidence: (request, deadline) => readNavigationEvidence(config, request, deadline),
+        projection: (logical, maximumEstimatedTokens, responseFormat) =>
+          Effect.sync(() => projectContextBrief(logical, maximumEstimatedTokens, responseFormat)),
+      },
+      {prestartSpare: false},
+    );
+    const read = sources.navigationEvidence!;
+    return yield* compileContextBriefNavigationWith(
+      {
+        // A failed worker read keeps a truthful answer. Deadline, cleanup and routing failures keep their meaning.
+        navigationEvidence: (request, deadline) =>
+          read(request, deadline).pipe(
+            Effect.catchIf(
+              error => Schema.is(ContextBriefNativeReadFailed)(error) && error.reason !== 'cleanup-unconfirmed',
+              () => Effect.succeed({status: 'unavailable', gaps: ['navigation-read-unavailable']} as const),
+            ),
+          ),
+        navigationSemantic: makeNavigationSemanticDependency(config),
+      },
+      input,
+    );
+  });
+  const scopedCompilation = Effect.scoped(compilation).pipe(
+    Effect.catchCauseIf(
+      cause => hasReadCleanupUnconfirmed(cause) && !Cause.hasInterrupts(cause),
+      () => Effect.fail(ContextBriefNativeReadFailed.make({reason: 'cleanup-unconfirmed'})),
+    ),
+  );
+  return yield* withReadyRecallReadBoundary(scopedCompilation, {readMilliseconds: CONTEXT_BRIEF_READ_MILLISECONDS});
 });
 
 /** Compile a normal Context Brief using its stable two-argument public contract. */
