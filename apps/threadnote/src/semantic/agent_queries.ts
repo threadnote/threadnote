@@ -448,6 +448,8 @@ const executeSemanticAgentQueryWith = Effect.fn('semantic.agentQueryWith')(funct
       knowledge = compactSemanticContextKnowledge(knowledge);
     if (new TextEncoder().encode(JSON.stringify(page())).length > limit)
       knowledge = compactSemanticContextKnowledge(knowledge, {omitFollowUps: true});
+    if (new TextEncoder().encode(JSON.stringify(page())).length > limit)
+      knowledge = compactSemanticContextKnowledge(knowledge, {omitFollowUps: true, omitCitationDetails: true});
     if (new TextEncoder().encode(JSON.stringify(page())).length > limit) {
       knowledge = {
         ...knowledge,

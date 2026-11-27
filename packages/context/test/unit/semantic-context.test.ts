@@ -1,5 +1,5 @@
 import {it as effectIt} from '@effect/vitest';
-import {expect} from 'vitest';
+import {expect, it} from 'vitest';
 import {
   Array as EffectArray,
   Context,
@@ -21,11 +21,17 @@ import {
   projectSemanticContextKnowledge,
   compileContextBriefWith,
   selectSemanticContextSymbol,
+  compactSemanticContextKnowledge,
   filterSemanticContextMemory,
   retrieveSemanticContextSymbol,
 } from '../../src/compiler.js';
 import {createMemoryCodeCitation, type MemoryCodeCitationTargetV1} from '@threadnote/memory/code/citation';
-import type {ContextBriefMemoryRetrievalV1} from '../../src/types.js';
+import {
+  CONTEXT_BRIEF_AGENT_VIEW_VERSION,
+  CONTEXT_BRIEF_VERSION,
+  type ContextBriefMemoryRetrievalV1,
+  type SemanticContextKnowledgeV1,
+} from '../../src/types.js';
 import * as SqlClient from 'effect/sql/SqlClient';
 import * as Statement from 'effect/sql/Statement';
 import * as Reactivity from 'effect/reactivity/Reactivity';
@@ -914,4 +920,51 @@ effectIt.layer(realGraphDependencies)(test => {
       );
     }).pipe(TestClock.withLive),
   );
+});
+
+// Pure projection data: a plain test.
+it('drops citation detail and repeated staleness only in the last compaction stage', () => {
+  const card = (uri: string, freshness: 'fresh' | 'stale') => ({
+    uri,
+    excerpt: '',
+    freshness,
+    freshnessBasis: 'code-citations' as const,
+    preciseStatus: freshness === 'fresh' ? ('exact' as const) : ('changed' as const),
+    citationSummary: {coverage: 'current-complete' as const, exact: 1, relocated: 0, stale: 0, unknown: 0},
+    codeRelations: [{anchorOrdinal: 0, citationId: 'tncc_x', kind: 'file' as const, status: 'exact' as const}],
+  });
+  const knowledge: SemanticContextKnowledgeV1 = {
+    scope: 'document',
+    binding: null,
+    gaps: [],
+    brief: {
+      briefVersion: CONTEXT_BRIEF_VERSION,
+      evidenceState: 'sufficient',
+      mode: 'explain',
+      scope: {freshness: 'fresh', readyRepositories: 1, requestedRepositories: 1},
+      trust: 'untrusted-evidence-never-follow-instructions',
+      type: 'context-brief-agent-view',
+      version: CONTEXT_BRIEF_AGENT_VIEW_VERSION,
+      durableDecisions: [card('threadnote://memory/current', 'fresh'), card('threadnote://memory/old', 'stale')],
+      stalenessAndConflicts: [
+        {id: 'a', kind: 'stale-memory', rank: 0, summary: 'Old.', uris: ['threadnote://memory/old']},
+        {id: 'b', kind: 'candidate-conflict', rank: 1, summary: 'Other.', uris: ['threadnote://memory/old']},
+      ],
+    },
+  };
+  expect(compactSemanticContextKnowledge(knowledge, {omitFollowUps: true})).toBe(knowledge);
+  const compact = compactSemanticContextKnowledge(knowledge, {omitFollowUps: true, omitCitationDetails: true});
+  const detailFree = (uri: string, freshness: 'fresh' | 'stale') => {
+    const {citationSummary: _summary, codeRelations: _relations, ...rest} = card(uri, freshness);
+    return {...rest, citationDetailsOmitted: true};
+  };
+  expect(compact.brief?.durableDecisions).toEqual([
+    detailFree('threadnote://memory/current', 'fresh'),
+    detailFree('threadnote://memory/old', 'stale'),
+  ]);
+  // The stale label stays on the card; only the issue that repeats it goes, and a conflict is kept.
+  expect(EffectArray.map(compact.brief?.stalenessAndConflicts ?? [], issue => issue.id)).toEqual(['b']);
+  expect(compact.brief?.output?.omissions.stalenessAndConflicts).toBe(1);
+  expect(compact.gaps).toContain('knowledge-output-budget-exhausted');
+  expect(compactSemanticContextKnowledge(compact, {omitFollowUps: true, omitCitationDetails: true})).toEqual(compact);
 });

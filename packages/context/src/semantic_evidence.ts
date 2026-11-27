@@ -29,27 +29,58 @@ export function projectSemanticContextKnowledge(
     : {scope: 'document', binding, brief: projectContextBriefAgentView(projected.structuredContent, true), gaps: []};
 }
 
-/** Preserve complete validated guidance before optional graph detail or follow-up actions. */
+type AgentViewMemory = NonNullable<NonNullable<SemanticContextKnowledgeV1['brief']>['durableDecisions']>[number];
+
+/** A card without its citation detail; freshness and precise status still carry the citation outcome. */
+function withoutCitationDetails(memory: AgentViewMemory): AgentViewMemory {
+  const {citationActions, citationSummary, codeRelations, ...rest} = memory;
+  return citationActions === undefined && citationSummary === undefined && codeRelations === undefined
+    ? memory
+    : {...rest, citationDetailsOmitted: true};
+}
+
+/**
+ * Preserve complete validated guidance before optional graph detail or follow-up actions. As a last stage before
+ * the brief is dropped, `omitCitationDetails` removes card citation detail and staleness entries that only repeat
+ * a card's own stale or unknown label.
+ */
 export function compactSemanticContextKnowledge(
   knowledge: SemanticContextKnowledgeV1,
-  options: {readonly omitFollowUps?: boolean} = {},
+  options: {readonly omitFollowUps?: boolean; readonly omitCitationDetails?: boolean} = {},
 ): SemanticContextKnowledgeV1 {
   const brief = knowledge.brief;
-  const graph = brief?.graph;
+  if (!brief || ((brief.activeHandoffs?.length ?? 0) === 0 && (brief.durableDecisions?.length ?? 0) === 0))
+    return knowledge;
+  const graph = brief.graph;
   const omitGraph =
     graph !== undefined &&
     ((graph.cards?.length ?? 0) > 0 ||
       (graph.contracts?.length ?? 0) > 0 ||
       (graph.sources?.length ?? 0) > 0 ||
       graph.continuation !== undefined);
-  const followUps = options.omitFollowUps ? brief?.recommendedFollowUps : undefined;
+  const followUps = options.omitFollowUps ? brief.recommendedFollowUps : undefined;
   const omitFollowUps = (followUps?.length ?? 0) > 0;
-  if (
-    !brief ||
-    ((brief.activeHandoffs?.length ?? 0) === 0 && (brief.durableDecisions?.length ?? 0) === 0) ||
-    (!omitGraph && !omitFollowUps)
-  )
-    return knowledge;
+  const cards = [...(brief.activeHandoffs ?? []), ...(brief.durableDecisions ?? [])];
+  const labeled = new Set(
+    EffectArray.map(
+      EffectArray.filter(cards, card => card.freshness !== 'fresh'),
+      card => card.uri,
+    ),
+  );
+  const issues = brief.stalenessAndConflicts ?? [];
+  const keptIssues = options.omitCitationDetails
+    ? EffectArray.filter(
+        issues,
+        issue =>
+          (issue.kind !== 'stale-memory' && issue.kind !== 'unknown-memory-freshness') ||
+          issue.uris.length === 0 ||
+          !EffectArray.every(issue.uris, uri => labeled.has(uri)),
+      )
+    : issues;
+  const omitCitations =
+    options.omitCitationDetails === true &&
+    (keptIssues.length < issues.length || EffectArray.some(cards, card => withoutCitationDetails(card) !== card));
+  if (!omitGraph && !omitFollowUps && !omitCitations) return knowledge;
   const {answer: _answer, ...withoutDerivedAnswer} = brief;
   const omissions = brief.output?.omissions;
   return {
@@ -59,6 +90,17 @@ export function compactSemanticContextKnowledge(
       // These omitted optional bundles are counted below, not reported as absent evidence.
       ...(omitGraph ? {graph: {}} : {}),
       ...(omitFollowUps ? {recommendedFollowUps: []} : {}),
+      ...(omitCitations
+        ? {
+            ...(brief.activeHandoffs
+              ? {activeHandoffs: EffectArray.map(brief.activeHandoffs, withoutCitationDetails)}
+              : {}),
+            ...(brief.durableDecisions
+              ? {durableDecisions: EffectArray.map(brief.durableDecisions, withoutCitationDetails)}
+              : {}),
+            ...(brief.stalenessAndConflicts ? {stalenessAndConflicts: keptIssues} : {}),
+          }
+        : {}),
       evidenceState: brief.evidenceState === 'sufficient' ? 'partial' : brief.evidenceState,
       output: {
         truncated: true,
@@ -73,6 +115,9 @@ export function compactSemanticContextKnowledge(
             : {}),
           ...(omitFollowUps
             ? {recommendedFollowUps: (omissions?.recommendedFollowUps ?? 0) + (followUps?.length ?? 0)}
+            : {}),
+          ...(omitCitations && keptIssues.length < issues.length
+            ? {stalenessAndConflicts: (omissions?.stalenessAndConflicts ?? 0) + issues.length - keptIssues.length}
             : {}),
         },
       },
