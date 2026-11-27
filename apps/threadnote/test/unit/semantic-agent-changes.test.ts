@@ -5,7 +5,12 @@ import {cryptoLayer} from '@threadnote/platform/crypto';
 import {LspFault} from '../../src/semantic/lsp_transport.js';
 import {it} from '@effect/vitest';
 import {TestClock} from 'effect/testing';
-import {changeTimeoutRefusal, SemanticChangeTimeoutObservation} from '../../src/semantic/agent_change_protocol.js';
+import {
+  changeTimeoutRefusal,
+  semanticAgentChangeDefaultMilliseconds,
+  semanticAgentChangeLimits,
+  SemanticChangeTimeoutObservation,
+} from '../../src/semantic/agent_change_protocol.js';
 import {
   Array as EffectArray,
   Deferred,
@@ -1112,4 +1117,16 @@ it.layer(io, {buildPerTest: true})(layerIt => {
       }),
     {arbitrary: {runs: 16}},
   );
+});
+
+// Pure budget selection: a plain example.
+it('gives a Java change request without milliseconds the longer default and keeps 10 s for other languages', () => {
+  expect(semanticAgentChangeDefaultMilliseconds({language: 'java', action: 'prepare'})).toBe(
+    semanticAgentChangeLimits.javaDefaultMilliseconds,
+  );
+  expect(semanticAgentChangeLimits.javaDefaultMilliseconds).toBeLessThanOrEqual(
+    semanticAgentChangeLimits.maxMilliseconds,
+  );
+  for (const input of [{language: 'go', action: 'prepare'}, {action: 'status'}, null, 'java'])
+    expect(semanticAgentChangeDefaultMilliseconds(input)).toBe(semanticAgentChangeLimits.defaultMilliseconds);
 });

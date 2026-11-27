@@ -9,9 +9,17 @@ export const semanticAgentChangeLimits = {
   maxPageBytes: 8 * 1024 * 1024,
   defaultPageBytes: 8192,
   defaultMilliseconds: 10000,
+  /** Java change preparation imports and indexes the project in jdtls first, which takes longer than 10 s. */
+  javaDefaultMilliseconds: 45000,
   maxMilliseconds: 45000,
   maxSourceBytes: 4 * 1024 * 1024,
 } as const;
+/** The change budget a request without `milliseconds` receives; Java takes the longer default. */
+export function semanticAgentChangeDefaultMilliseconds(input: unknown): number {
+  return typeof input === 'object' && input !== null && 'language' in input && input.language === 'java'
+    ? semanticAgentChangeLimits.javaDefaultMilliseconds
+    : semanticAgentChangeLimits.defaultMilliseconds;
+}
 const Text = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(8192));
 const Milliseconds = Counter.check(Schema.isBetween({minimum: 1, maximum: semanticAgentChangeLimits.maxMilliseconds}));
 export const SemanticProposalHandle = Schema.Struct({id: Digest, capability: Digest, digest: Digest});
