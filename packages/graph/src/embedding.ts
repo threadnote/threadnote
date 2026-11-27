@@ -153,6 +153,13 @@ export type CodeGraphEmbeddingCheck =
   | {readonly modelId: string; readonly reused: number; readonly state: 'ready'}
   | {readonly reason: string; readonly state: 'stale' | 'unavailable'};
 
+/** Loads symbols by id from the queried snapshot so stale-generation vectors can be fingerprint-checked. */
+export type CodeGraphVectorSymbolResolver = (
+  ids: readonly string[],
+) => Effect.Effect<readonly CodeGraphSymbol[], unknown>;
+
+const CROSS_SNAPSHOT_CANDIDATE_CAP = 48;
+
 export interface CodeGraphEmbeddingIndexShape {
   readonly check: (
     threadnoteHome: string,
@@ -178,6 +185,7 @@ export interface CodeGraphEmbeddingIndexShape {
     snapshotId: string,
     query: string,
     limit: number,
+    resolveSymbols?: CodeGraphVectorSymbolResolver,
   ) => Effect.Effect<ReadonlyMap<string, number>, unknown>;
 }
 
@@ -226,7 +234,7 @@ export class CodeGraphEmbeddingIndex extends Context.Service<CodeGraphEmbeddingI
             Effect.provideService(Path.Path, path),
             Effect.provideService(SystemInfo, system),
           ),
-        search: (threadnoteHome, layout, snapshotId, query, limit) =>
+        search: (threadnoteHome, layout, snapshotId, query, limit, resolveSymbols) =>
           searchGraphVectors({
             catalog,
             fs,
@@ -235,6 +243,7 @@ export class CodeGraphEmbeddingIndex extends Context.Service<CodeGraphEmbeddingI
             modelStore,
             path,
             query,
+            resolveSymbols,
             runtime,
             snapshotId,
             threadnoteHome,
@@ -882,7 +891,7 @@ export const releaseCodeGraphVectorOwner = Effect.fn('codeGraph.releaseVectorOwn
   );
 });
 
-const searchGraphVectors = Effect.fn('codeGraph.searchVectors')(function* (input: {
+export const searchGraphVectors = Effect.fn('codeGraph.searchVectors')(function* (input: {
   readonly catalog: LocalModelCatalogShape;
   readonly fs: FileSystem.FileSystem;
   readonly layout: CodeGraphLayout;
@@ -890,6 +899,7 @@ const searchGraphVectors = Effect.fn('codeGraph.searchVectors')(function* (input
   readonly modelStore: LocalModelStoreShape;
   readonly path: Path.Path;
   readonly query: string;
+  readonly resolveSymbols?: CodeGraphVectorSymbolResolver | undefined;
   readonly runtime: LocalModelRuntimeShape;
   readonly snapshotId: string;
   readonly threadnoteHome: string;
@@ -905,19 +915,24 @@ const searchGraphVectors = Effect.fn('codeGraph.searchVectors')(function* (input
       const active = yield* selectActiveGeneration(sql, requiredWorktreeId(input.layout));
       if (
         !active ||
-        active.snapshot_id !== input.snapshotId ||
         active.model_sha256 !== selected.manifest.sha256 ||
         active.template_version !== graphEmbeddingTemplateVersion(selected.manifest) ||
         active.dimensions !== selected.manifest.dimensions
       ) {
         return new Map<string, number>();
       }
+      // A generation built for another snapshot is usable only through per-symbol fingerprint checks.
+      const stale = active.snapshot_id !== input.snapshotId;
+      const resolve = stale ? input.resolveSymbols : undefined;
+      if (stale && !resolve) return new Map<string, number>();
       const [queryVector] = yield* input.runtime.embedMany({
         inputs: [`${graphEmbeddingQueryPrefix(selected.manifest)}${input.query}`],
         manifest: selected.manifest,
         modelPath: selected.modelPath,
       });
-      const boundedLimit = Math.max(1, input.limit);
+      const finalLimit = Math.max(1, input.limit);
+      const candidateLimit = stale ? Math.min(finalLimit * 4, CROSS_SNAPSHOT_CANDIDATE_CAP) : finalLimit;
+      const storedFingerprints = new Map<string, string>();
       let cursor = '';
       let best: readonly VectorSearchResult[] = [];
       for (;;) {
@@ -936,12 +951,27 @@ const searchGraphVectors = Effect.fn('codeGraph.searchVectors')(function* (input
         }));
         const pageMatches = searchExactVectors(queryVector, records, {
           dimensions: active.dimensions,
-          limit: Math.min(boundedLimit, records.length),
+          limit: Math.min(candidateLimit, records.length),
           minimumScore: graphEmbeddingMinimumScore(selected.manifest),
         });
-        best = mergeSearchResults(best, pageMatches, boundedLimit);
+        best = mergeSearchResults(best, pageMatches, candidateLimit);
+        if (resolve) {
+          const pageFingerprints = new Map(EffectArray.map(rows, row => [row.symbol_id, row.fingerprint]));
+          for (const match of pageMatches) storedFingerprints.set(match.id, pageFingerprints.get(match.id)!);
+        }
         cursor = rows.at(-1)!.symbol_id;
         if (rows.length < VECTOR_PAGE_SIZE) break;
+      }
+      if (resolve && best.length > 0) {
+        const symbols = selectGraphEmbeddingSymbols(yield* resolve(EffectArray.map(best, match => match.id)));
+        const current = new Map(
+          EffectArray.map(symbols, symbol => [symbol.id, projectSymbol(symbol, selected.manifest).fingerprint]),
+        );
+        // Stored fingerprints are always strings, so a missing or ineligible current symbol never matches.
+        best = EffectArray.filter(best, match => current.get(match.id) === storedFingerprints.get(match.id)).slice(
+          0,
+          finalLimit,
+        );
       }
       return new Map(EffectArray.map(best, match => [match.id, Math.max(0, match.score)]));
     }),
