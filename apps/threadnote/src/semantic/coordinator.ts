@@ -1701,6 +1701,21 @@ export const attachSemanticEndpoint = Effect.fn('semantic.attachEndpoint')(funct
       requestSemanticEndpoint(socket, bootstrap.token, body, capability),
   };
 });
+/**
+ * Every provider slot of a published bootstrap, for the coordinator it starts. Only the endpoint identity is removed,
+ * so no slot can be left out: a missing slot leaves a profile with only that provider without a configured provider.
+ */
+export function semanticBootstrapCatalog(bootstrap: typeof Bootstrap.Type): SemanticHostCatalog {
+  const {
+    version: _version,
+    runtimeIdentity: _runtimeIdentity,
+    token: _token,
+    worktree: _worktree,
+    dataHome: _dataHome,
+    ...catalog
+  } = bootstrap;
+  return catalog;
+}
 /** Starts one runtime/worktree coordinator lazily. Capabilities/source text never enter process arguments. */
 export const ensureSemanticEndpoint = Effect.fn('semantic.ensureEndpoint')(function* (options: SemanticEndpointLaunch) {
   const launch = structuredClone(options);
@@ -1870,11 +1885,7 @@ export const runSemanticCoordinatorWorker = Effect.fn('semantic.worker')(functio
         const coordinator = yield* makeSemanticCoordinator({
           enabled: true,
           dataHome: bootstrap.dataHome,
-          candidate: bootstrap.candidate,
-          python: bootstrap.python,
-          go: bootstrap.go,
-          rust: bootstrap.rust,
-          java: bootstrap.java,
+          ...semanticBootstrapCatalog(bootstrap),
           worktree: bootstrap.worktree,
           verifySelected: (id, candidate, runtimeVersion, configurationOnly) =>
             runSemanticSelectedVerification(

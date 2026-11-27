@@ -31,6 +31,7 @@ import * as platformSystem from '@threadnote/platform/system';
 import {TestClock as SemanticTestClock} from 'effect/testing';
 import {CommandCleanupUnconfirmed, CommandExecutor} from '@threadnote/platform/command';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import {nativeTypeScriptAssetPins} from '@threadnote/graph/typescript_native_asset_pins';
 import {semanticTreeDigest} from '../../src/semantic/fingerprint.js';
 import * as fingerprint from '../../src/semantic/fingerprint.js';
 import {Observation, type QueryOutcome} from '@threadnote/semantic/contracts';
@@ -54,6 +55,7 @@ import {
   serveSemanticEndpoint,
   requestSemanticEndpoint,
   semanticCatalogKey,
+  semanticBootstrapCatalog,
   verifyJavaSemanticCandidate,
   type JavaHostCandidate,
 } from '../../src/semantic/coordinator.js';
@@ -2783,4 +2785,27 @@ describe('production original Gradle transport and operation joins', () => {
       Effect.provideService(ChildEnvironmentPolicy, {sanitizeExternal: env => env, preserveIntendedChild: env => env}),
     ),
   );
+});
+
+it('starts the coordinator with every provider slot of its bootstrap, the native TypeScript candidate included', () => {
+  const nativeCandidate = {
+    executable: '/candidate/runtime/typescript/tsc',
+    executableDigest: sha256HexSync('tsc'),
+    version: nativeTypeScriptAssetPins.version,
+    sdkDirectory: '/candidate/runtime/typescript/sdk',
+    sdkTreeDigest: sha256HexSync('sdk'),
+    sourceCommit: nativeTypeScriptAssetPins.provenance.sourceCommit,
+    sourceTree: nativeTypeScriptAssetPins.provenance.sourceTree,
+    overlaySha256: nativeTypeScriptAssetPins.provenance.overlaySha256,
+  };
+  const catalog = semanticBootstrapCatalog({
+    version: 1,
+    runtimeIdentity: sha256HexSync('runtime'),
+    token: sha256HexSync('token'),
+    worktree: 'file:///worktree',
+    dataHome: '/home',
+    nativeCandidate,
+  });
+  expect(catalog).toEqual({nativeCandidate});
+  expect(semanticCatalogKey(catalog)).toBe(semanticCatalogKey({nativeCandidate}));
 });
