@@ -7,6 +7,8 @@ import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 const PYTHON_METADATA_SOURCES = new Set([
   'apps/threadnote/src/migration/legacy-installations.ts',
+  // Maps file extensions and host catalog slots to semantic languages for navigation; it runs no command.
+  'apps/threadnote/src/context_brief/navigation_semantic_adapter.ts',
   'packages/graph/src/languages/catalog.generated.ts',
   'packages/graph/src/languages/generic/definitions.ts',
   // Navigation write proofs for the Python language pack: pack identity, builtin open modes and spans.
