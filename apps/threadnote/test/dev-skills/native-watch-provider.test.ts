@@ -144,7 +144,13 @@ const harness = (replyFor: ReplyFor = defaultReply) => {
       const reply = replyFor(args, input, calls.length, at);
       calls.push({args: [...args], input, at});
       now += 20;
-      const result: CommandResult = {exitCode: 0, stderr: '', stdout: frame(reply)};
+      // Job log downloads follow a redirect and print the raw body without --include.
+      const raw = !EffectArray.contains(args, '--include');
+      const result: CommandResult = {
+        exitCode: raw && (reply.status ?? 200) >= 400 ? 1 : 0,
+        stderr: '',
+        stdout: raw ? (typeof reply.body === 'string' ? reply.body : JSON.stringify(reply.body)) : frame(reply),
+      };
       return Effect.succeed(result);
     },
     executeStreaming: () => Effect.die(new Error('Streaming is outside the provider test contract')),
@@ -753,6 +759,68 @@ describe('native GitHub watch provider', () => {
         expect(updated.sweep.ci.count).toBe(2);
         expect(updated.sweep.ci.failed).toBe(1);
         expect(updated.sweep.ci.version).not.toBe(first.sweep.ci.version);
+      }),
+  );
+
+  effectIt.effect(
+    'summarizes a failed Actions job from selected log lines and keeps the summary without re-reading',
+    () =>
+      Effect.gen(function* () {
+        const jobUrl = 'https://github.com/example/project/actions/runs/9/job/41';
+        const log = EffectArray.join(
+          [
+            '2026-11-27T16:22:32.1673244Z ##[group]Run tests',
+            `2026-11-27T16:22:32.1700000Z ${secretBody}`,
+            '2026-11-27T16:22:32.1892227Z \u001b[31m FAIL \u001b[39m apps/a.test.ts > suite > keeps limits',
+            '2026-11-27T16:22:32.1892300Z ⎯⎯⎯',
+            '2026-11-27T16:22:32.1893387Z AssertionError: expected 67409 to be less than or equal to 67100',
+            '2026-11-27T16:26:39.8144690Z //apps/threadnote:test_heavy                    FAILED in 445.5s',
+          ],
+          '\n',
+        );
+        let logReads = 0;
+        let checkReads = 0;
+        const provider = harness((args, input, call, now) => {
+          const endpoint = apiEndpoint(args);
+          if (Effect2.pipe(endpoint, EffectString.endsWith('/actions/jobs/41/logs'))) {
+            logReads++;
+            return {body: log};
+          }
+          if (Effect2.pipe(endpoint, EffectString.includes('/check-runs'))) {
+            checkReads++;
+            // The second sweep is not modified; the third returns a fresh page of the same immutable check run.
+            if (checkReads === 2 && EffectArray.contains(args, 'If-None-Match: "checks-failed"'))
+              return {status: 304, headers: {etag: '"checks-failed"'}, body: ''};
+            return {
+              headers: {etag: '"checks-failed"'},
+              body: {check_runs: [{...check(41, 'failure'), name: 'Bazel shard · 3/8', html_url: jobUrl}]},
+            };
+          }
+          return defaultReply(args, input, call, now);
+        });
+        const summaryOf = (result: Effect.Success<ReturnType<typeof provider.sweep>>) => {
+          const checks = EffectOption.getOrUndefined(
+            EffectArray.findFirst(result.sweep.sources, source => source.source === 'checks'),
+          );
+          return checks?.complete ? checks.items[0]?.summary : undefined;
+        };
+        const first = yield* provider.sweep();
+        const summary = summaryOf(first);
+        expect(summary).toBe(
+          'Bazel shard · 3/8: failure | FAIL apps/a.test.ts > suite > keeps limits | AssertionError: expected 67409 to be less than or equal to 67100 | //apps/threadnote:test_heavy FAILED in 445.5s',
+        );
+        expect(summary).not.toContain(secretBody);
+        const state = reconcileNativeWatch(initializeNativeWatch('watch-1', pr, 0), first.sweep);
+        expect(
+          EffectOption.getOrUndefined(EffectArray.findFirst(state.events, event => event.kind === 'ci_error'))?.summary,
+        ).toBe(summary);
+        const cached = yield* provider.sweep(first.cache);
+        const refreshed = yield* provider.sweep(cached.cache);
+        expect(checkReads).toBe(3);
+        expect(summaryOf(cached)).toBe(summary);
+        expect(summaryOf(refreshed)).toBe(summary);
+        expect(logReads).toBe(1);
+        expect(JSON.stringify(refreshed.cache)).not.toContain(secretBody);
       }),
   );
 

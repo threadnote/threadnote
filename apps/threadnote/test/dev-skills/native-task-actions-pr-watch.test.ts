@@ -556,7 +556,7 @@ describe('native task actions', () => {
             ...watchRequest,
             validationRef: foreignValidation,
           }).pipe(Effect.result),
-        ).toMatchObject({failure: {code: 'invalid-delivery-ref'}});
+        ).toMatchObject({failure: {code: 'invalid-delivery-ref', next: {tool: 'workflow_task_view'}}});
         const watchDirectory = f.path.dirname(watchPath);
         const storedWatchBytes = () =>
           Effect.gen(function* () {
@@ -2932,6 +2932,82 @@ describe('native task actions', () => {
   );
 
   effectIt.effect(
+    'records a ready merged watch receipt during finish and names a missing watch prerequisite',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture(['one'], 'pr');
+        const published = yield* publishOpenHistoricalPhase(f, 'one', 'main', 76);
+        const finish = runNativeTaskAction(f.config, {
+          command: 'finish',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          proposal,
+        }).pipe(Effect.provideService(CurrentNativeJobAutoLaunch, false));
+        const beforeMerge = yield* f.fs.readFileString(f.statePath());
+        expect(yield* finish.pipe(Effect.result)).toMatchObject({
+          failure: {
+            code: 'finish-scope',
+            message: expect.stringContaining('is not merged yet'),
+            next: {
+              tool: 'workflow_task_watch_pr',
+              command: 'inspect',
+              arguments: {
+                operation: 'inspect',
+                runId: 'native-run',
+                validationRef: expect.any(String),
+                deliveryRef: expect.any(String),
+              },
+            },
+          },
+        });
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeMerge);
+        const current = yield* readNativeWatch(f.config, published.watchId);
+        if (!current?.envelope.collector) throw new Error('Expected the published phase watch.');
+        yield* writeNativeWatch(
+          f.config,
+          {
+            ...current.envelope,
+            state: {...current.envelope.state, prState: 'merged'},
+            collector: {...current.envelope.collector, status: 'terminal', reason: 'merged'},
+          },
+          current.revision,
+        );
+        // No separate watch complete: finish records the terminal receipt through the same guarded route,
+        // including its provider observation of the merged PR.
+        const executor = yield* CommandExecutor;
+        const mergedProvider = CommandExecutor.of({
+          ...executor,
+          execute: (executable, args, options) =>
+            executable === 'gh' && EffectArray.some(args, arg => EffectString.includes('headSha: .head.sha')(arg))
+              ? Effect.succeed({
+                  exitCode: 0,
+                  stderr: '',
+                  stdout: JSON.stringify({
+                    number: 76,
+                    url: 'https://github.com/example/repo/pull/76',
+                    baseRepository: 'example/repo',
+                    headRepository: 'example/repo',
+                    baseBranch: 'main',
+                    headBranch: 'feature/one',
+                    headSha: current.envelope.state.head,
+                    state: 'closed',
+                    merged: true,
+                  }),
+                })
+              : executor.execute(executable, args, options),
+        });
+        expect(object(yield* finish.pipe(Effect.provideService(CommandExecutor, mergedProvider)))).toMatchObject({
+          status: 'pending',
+          stage: 'prepare',
+        });
+        expect(
+          (yield* readNativeWorkflowState(f.config, 'native-run'))?.state.cycle?.state.phases.one?.delivery,
+        ).toMatchObject({pr: {state: 'merged'}, watch: {state: 'terminal'}});
+      }).pipe(run),
+    windowsRealGitFixtureTimeout,
+  );
+
+  effectIt.effect(
     'completes and closes out a merged PR whose head descends from the delivered phase head',
     () =>
       Effect.gen(function* () {
@@ -4099,7 +4175,7 @@ describe('native task actions', () => {
         {...detailContinuation, workEventRef: encodeNativeTaskActionRef({...detailRef, consumerId: 'foreign'})},
         {
           ...detailContinuation,
-          workEventRef: encodeNativeTaskActionRef({...detailRef, workViewDigest: EffectString.repeat(64)('a')}),
+          workEventRef: encodeNativeTaskActionRef({...detailRef, workRowDigest: EffectString.repeat(64)('a')}),
         },
       ]) {
         expect(
@@ -4121,10 +4197,7 @@ describe('native task actions', () => {
         [disposition, disposition],
         [disposition, {...disposition, eventRef: String(eventRefs[0])}],
         [disposition, {...disposition, eventRef: encodeNativeTaskActionRef({...ref, consumerId: 'foreign'})}],
-        [
-          disposition,
-          {...disposition, eventRef: encodeNativeTaskActionRef({...ref, workViewDigest: EffectString.repeat(64)('a')})},
-        ],
+        [{...disposition, eventRef: encodeNativeTaskActionRef({...ref, workRowDigest: EffectString.repeat(64)('a')})}],
       ]) {
         expect(
           (yield* runNativeTaskAction(f.config, {
@@ -4193,29 +4266,57 @@ describe('native task actions', () => {
         dispositions: [disposition],
       });
       const beforeStale = yield* f.fs.readFileString(watchFile);
+      // A continuation with a superseded view digest starts a fresh view instead of failing.
+      const restartedPage = object(
+        object(
+          object(
+            yield* runNativeTaskAction(f.config, {
+              command: 'watch-pr',
+              operation: 'work',
+              ...watchRequest,
+              workOffset: 1,
+              workViewDigest,
+            }),
+          ).result,
+        ).work,
+      );
+      expect(restartedPage).toMatchObject({offset: 0, restarted: true});
+      expect(restartedPage.workViewDigest).not.toBe(workViewDigest);
+      // The changed row's reference is stale and recovers by reloading work, never by task finish.
       expect(
-        (yield* runNativeTaskAction(f.config, {
-          command: 'watch-pr',
-          operation: 'work',
-          ...watchRequest,
-          workOffset: 1,
-          workViewDigest,
-        }).pipe(Effect.result))._tag,
-      ).toBe('Failure');
-      expect(
-        (yield* runNativeTaskAction(f.config, {
+        yield* runNativeTaskAction(f.config, {
           command: 'watch-pr',
           operation: 'work-disposition',
           ...watchRequest,
           dispositions: [disposition],
-        }).pipe(Effect.result))._tag,
-      ).toBe('Failure');
+        }).pipe(Effect.result),
+      ).toMatchObject({
+        failure: {
+          code: 'stale-watch-event-ref',
+          next: {tool: 'workflow_task_watch_pr', command: 'work', arguments: {operation: 'work', workOffset: 0}},
+        },
+      });
       expect(yield* f.fs.readFileString(watchFile)).toBe(beforeStale);
+      // An unchanged row keeps its reference after another row changed.
       expect(
-        (yield* mcp.invokeTool('workflow_task_watch_pr', {...watchRequest, ...detailContinuation}).pipe(Effect.result))
-          ._tag,
-      ).toBe('Failure');
+        object(yield* mcp.invokeTool('workflow_task_watch_pr', {...watchRequest, ...detailContinuation})).isError,
+      ).not.toBe(true);
       expect(yield* f.fs.readFileString(watchFile)).toBe(beforeStale);
+      yield* runNativeTaskAction(f.config, {
+        command: 'watch-pr',
+        operation: 'work-disposition',
+        ...watchRequest,
+        dispositions: [{...disposition, eventRef: String(detailContinuation.workEventRef)}],
+      });
+      expect(
+        EffectArray.findFirst(
+          (yield* readNativeWatch(f.config, watchId))?.envelope.state.work ?? [],
+          row => row.eventId === expectedIds[1],
+        ).pipe(
+          EffectOption.map(row => row.status),
+          EffectOption.getOrUndefined,
+        ),
+      ).toBe('resolved');
       // Read each fresh view after mutation and settle the remaining rows without a delivery ID.
       for (;;) {
         const content = object(

@@ -2,7 +2,9 @@ import {NativeCloseoutProposalSchema, type NativeCloseoutProposal} from '@thread
 import {nextNativeCycle} from '@threadnote/workflow-automations/cycle';
 import {decodeNativeTaskActionRef, encodeNativeTaskActionRef} from '@threadnote/workflow-automations/task';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import {Effect, Array as EffectArray, Predicate, Schema} from 'effect';
+import {nativeNext, nativeRefusal, nativeWatchNext} from '@threadnote/workflow-automations/gates';
+import type {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
+import {Clock, Effect, Array as EffectArray, Predicate, Schema} from 'effect';
 import * as EffectString from 'effect/String';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
@@ -18,6 +20,10 @@ import {
   nativeTaskWatchIdentityForConsumer,
 } from './task_pr_watch.js';
 import {nativeWatchCollectorAlive} from './watch_process.js';
+import {nativeWorkflowError} from './memory.js';
+import {readNativeWorkflowState} from './store.js';
+import {nativeTaskPhaseWatchRefs} from './task.js';
+import {runNativeTaskPrWatch, watchWorkDrained} from './task_delivery_actions.js';
 
 import type {NativeTaskCycleRuntime, NativeTaskStoredState} from './task_action_helpers.js';
 import {fail, inCheckout} from './task_action_helpers.js';
@@ -62,14 +68,89 @@ const taskJobSummary = (value: unknown): Record<string, unknown> => {
   };
 };
 
-export const runNativeTaskFinish = (
+/**
+ * Record the terminal receipt of each merged phase watch that is ready, so finish needs no separate watch complete.
+ * The collector never writes canonical workflow receipts; finish runs the same checkout-bound complete route, which
+ * keeps every merged-PR, terminal-watch, consumer and host-receipt gate. A plain renew first refreshes an expired
+ * lease of the same consumer; on a merged watch it neither restarts collection nor changes the PR binding.
+ */
+const settleMergedPhaseWatches = (
   config: RuntimeConfig,
-  request: Extract<NativeTaskActionRequest, {command: 'finish'}>,
+  runId: string,
   stored: NativeTaskStoredState,
   checkout: string,
   state: NativeTaskCycleRuntime['state'],
 ) =>
   Effect.gen(function* () {
+    const failures = new Map<string, WorkflowAutomationError>();
+    let advanced = false;
+    for (const planPhase of state.plan.phases) {
+      const receipt = state.phases[planPhase.id]?.delivery;
+      if (
+        receipt?.delivery !== 'pr' ||
+        receipt.pr?.state !== 'open' ||
+        receipt.watch?.state !== 'active' ||
+        !receipt.watch.consumerId
+      )
+        continue;
+      const resolved = yield* resolveNativeTaskPrWatch(
+        config,
+        runId,
+        planPhase.id,
+        receipt.pr.url,
+        receipt.watch.consumerId,
+      ).pipe(Effect.option);
+      const watch = resolved._tag === 'Some' ? resolved.value.watch : undefined;
+      const refs = nativeTaskPhaseWatchRefs(stored, planPhase.id);
+      if (
+        !watch ||
+        !refs ||
+        watch.envelope.state.prState !== 'merged' ||
+        watch.envelope.collector?.status !== 'terminal'
+      )
+        continue;
+      const route = {
+        command: 'watch-pr' as const,
+        runId,
+        callerCwd: checkout,
+        validationRef: refs.validationRef,
+        deliveryRef: refs.deliveryRef,
+      };
+      const consumer = watch.envelope.state.consumer;
+      if (
+        consumer &&
+        consumer.leaseUntil <= (yield* Clock.currentTimeMillis) &&
+        !watchWorkDrained(watch.envelope.state)
+      ) {
+        const renewed = yield* runNativeTaskPrWatch(config, {...route, operation: 'renew'}, stored, checkout).pipe(
+          Effect.result,
+        );
+        if (renewed._tag === 'Failure') {
+          failures.set(planPhase.id, nativeWorkflowError(renewed.failure));
+          continue;
+        }
+      }
+      const current = yield* readNativeWorkflowState(config, runId);
+      if (!current) continue;
+      const completed = yield* runNativeTaskPrWatch(config, {...route, operation: 'complete'}, current, checkout).pipe(
+        Effect.result,
+      );
+      if (completed._tag === 'Failure') failures.set(planPhase.id, nativeWorkflowError(completed.failure));
+      else advanced = true;
+    }
+    return {advanced, failures};
+  });
+
+export const runNativeTaskFinish = (
+  config: RuntimeConfig,
+  request: Extract<NativeTaskActionRequest, {command: 'finish'}>,
+  initialStored: NativeTaskStoredState,
+  checkout: string,
+  initialState: NativeTaskCycleRuntime['state'],
+) =>
+  Effect.gen(function* () {
+    let stored = initialStored;
+    let state = initialState;
     if (nextNativeCycle(state).action !== 'complete')
       return yield* fail('finish-scope', 'Task finish requires the current canonical phase completion gate.');
     const phase = state.plan.phases[0];
@@ -89,6 +170,14 @@ export const runNativeTaskFinish = (
     } else {
       if (state.plan.delivery !== 'pr')
         return yield* fail('finish-scope', 'PR closeout requires a canonical PR delivery plan.');
+      const settlement = yield* settleMergedPhaseWatches(config, request.runId, stored, checkout, state);
+      if (settlement.advanced) {
+        const fresh = yield* readNativeWorkflowState(config, request.runId);
+        if (!fresh?.state.cycle) return yield* fail('cycle-not-found', 'This run no longer has its canonical cycle.');
+        stored = fresh;
+        state = fresh.state.cycle.state;
+      }
+      const autoFailures = settlement.failures;
       const requiredSources = ['comments', 'reviews', 'threads', 'checks', 'statuses'];
       const watchWork: Array<NonNullable<NativeCloseoutProposal['watchWork']>[number]> = [];
       for (const planPhase of state.plan.phases) {
@@ -143,11 +232,61 @@ export const runNativeTaskFinish = (
           notification.consumerId !== consumer.id ||
           notification.wakeupId !== consumer.wakeupId ||
           !hasHostReceipt
-        )
-          return yield* fail(
-            'finish-scope',
-            'PR closeout requires each exact merged PR, terminal source-complete watch, matching consumer record, and host receipt.',
-          );
+        ) {
+          const refs = nativeTaskPhaseWatchRefs(stored, planPhase.id);
+          const now = yield* Clock.currentTimeMillis;
+          const watchState = watch?.envelope.state;
+          const autoFailure = autoFailures.get(planPhase.id);
+          const [message, operation]: readonly [string, 'inspect' | 'renew' | 'complete'] = !watchState
+            ? [
+                `Phase ${planPhase.id} has no canonical PR watch; reload the task card for its watch references.`,
+                'inspect',
+              ]
+            : watchState.prState === 'open'
+              ? [
+                  `The PR of phase ${planPhase.id} is not merged yet; the watch must observe the merge before finish.`,
+                  'inspect',
+                ]
+              : watchState.prState !== 'merged'
+                ? [`The PR of phase ${planPhase.id} closed without a merge.`, 'inspect']
+                : watch?.envelope.collector?.status !== 'terminal' || !completeSources
+                  ? [
+                      `The watch of phase ${planPhase.id} has not finished its terminal merged sweep with every source complete; wait for that sweep.`,
+                      'inspect',
+                    ]
+                  : consumer && consumer.leaseUntil <= now && !watchWorkDrained(watchState)
+                    ? [
+                        `The watch consumer lease of phase ${planPhase.id} expired while merged-watch events or open work remain; renew the watch${autoFailure ? ` (automatic renew refused: ${autoFailure.message})` : ''}.`,
+                        'renew',
+                      ]
+                    : !notification?.lastReceipt?.receipt && !notification?.outbox?.receipt
+                      ? [
+                          `The merged watch notice of phase ${planPhase.id} has no host receipt yet; wait until the host wakeup is delivered.`,
+                          'inspect',
+                        ]
+                      : receipt?.watch?.state !== 'terminal' || pr?.state !== 'merged'
+                        ? [
+                            `The merged PR receipt of phase ${planPhase.id} is not recorded: ${autoFailure?.message ?? 'watch complete has not run'}`,
+                            'complete',
+                          ]
+                        : [
+                            'PR closeout requires each exact merged PR, terminal source-complete watch, matching consumer record, and host receipt.',
+                            'inspect',
+                          ];
+          return yield* nativeRefusal('finish-scope', message, {
+            next: refs
+              ? nativeWatchNext(
+                  {
+                    runId: request.runId,
+                    callerCwd: checkout,
+                    validationRef: refs.validationRef,
+                    deliveryRef: refs.deliveryRef,
+                  },
+                  operation,
+                )
+              : nativeNext.view({runId: request.runId, callerCwd: checkout}),
+          });
+        }
         // Later phases or maintenance can merge the PR above this phase's own delivered head.
         yield* verifyNativeMergedPhaseHead(checkout, pr.headSha, receipt.watch.headSha);
         const watchIds = new Set(yield* readNativeTaskPhaseWatchIds(config, request.runId, planPhase.id));

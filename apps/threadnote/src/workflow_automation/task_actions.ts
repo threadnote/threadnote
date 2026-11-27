@@ -79,7 +79,11 @@ import {decodeStoredBindings, nativeTaskStartShapeMessage, withConfirmArguments}
 import {resumeReopenedNativeTaskPhase} from './task_reopen.js';
 import {nativeRunNotFoundMessage, readNativeTaskView, verifyNativeTaskReopen} from './task.js';
 import {inspectOldBindingOwners} from './task_binding_transition.js';
-import {NativeTaskPrWatchFieldsSchema, validateNativeTaskWatchMaintenanceRoute} from './task_pr_watch.js';
+import {
+  NativeTaskPrWatchFieldsSchema,
+  validateNativeTaskWatchMaintenanceRoute,
+  watchRecovery,
+} from './task_pr_watch.js';
 import {
   cycleRequest,
   currentNativeTaskRef,
@@ -715,7 +719,7 @@ const sourceChangedCodes = new Set(['source-drift', 'review-stale']);
  */
 const withTaskNext = (config: RuntimeConfig, input: unknown, cause: unknown) =>
   Effect.gen(function* () {
-    const error = nativeWorkflowError(cause);
+    const error = watchRecovery(input, nativeWorkflowError(cause));
     if (!Predicate.isObject(input) || typeof input.runId !== 'string' || typeof input.callerCwd !== 'string')
       return yield* error;
     const {runId, callerCwd} = input;

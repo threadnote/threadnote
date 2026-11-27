@@ -240,6 +240,35 @@ export const nativeNext = {
     ),
 } as const;
 
+/** Watch identity fields a watch next command repeats, in CLI order. */
+export const nativeWatchIdentityKeys = [
+  'runId',
+  'callerCwd',
+  'validationRef',
+  'deliveryRef',
+  'phaseId',
+  'prUrl',
+  'watchRef',
+] as const;
+
+/** A `workflow_task_watch_pr` operation over the caller's own watch identity; `work` restarts at offset zero. */
+export const nativeWatchNext = (
+  identity: Readonly<Partial<Record<(typeof nativeWatchIdentityKeys)[number], string>>>,
+  operation: 'inspect' | 'renew' | 'work' | 'complete',
+): WorkflowNextCommand => {
+  const fields: Record<string, string> = {};
+  for (const key of nativeWatchIdentityKeys) {
+    const value = identity[key];
+    if (value !== undefined) fields[key] = value;
+  }
+  return nativeNextCommand(
+    'workflow_task_watch_pr',
+    operation,
+    {command: 'watch-pr', flags: {...fields, operation, ...(operation === 'work' ? {workOffset: '0'} : {})}},
+    {...fields, operation, ...(operation === 'work' ? {workOffset: 0} : {})},
+  );
+};
+
 /** Every refusal names its rule and the next legal command; the type makes `next` mandatory. */
 export const nativeRefusal = (
   code: string,

@@ -219,12 +219,10 @@ export const runOwnedNativeTaskWatch = (
         ? encode(kinds.work, {watchEventId: row.eventId, workViewDigest, workRowDigest: sha256HexSync(stableJson(row))})
         : undefined;
     };
+    // The exact row digest binds a retained reference; unrelated rows may change after the page was read.
     const validWorkRef = (ref: NativeTaskActionRef | undefined) => {
       const row = find(watch.envelope.state.work, item => item.eventId === ref?.watchEventId);
-      return matches(ref, kinds.work) &&
-        ref?.workViewDigest === workViewDigest &&
-        row &&
-        ref.workRowDigest === sha256HexSync(stableJson(row))
+      return matches(ref, kinds.work) && row && ref && ref.workRowDigest === sha256HexSync(stableJson(row))
         ? row
         : undefined;
     };
@@ -248,12 +246,9 @@ export const runOwnedNativeTaskWatch = (
       });
     }
     if (request.operation === 'work') {
-      if (
-        ((request.workOffset ?? 0) > 0 && !request.workViewDigest) ||
-        (request.workViewDigest !== undefined && request.workViewDigest !== workViewDigest)
-      )
-        return yield* fail('stale-watch-work-view', 'Restart retained work paging with its current view digest.');
-      const page = nativeWatchWorkList(watch.envelope.state.work, request.workOffset ?? 0);
+      // A continuation without the current view digest starts a fresh view instead of failing.
+      const restarted = (request.workOffset ?? 0) > 0 && request.workViewDigest !== workViewDigest;
+      const page = nativeWatchWorkList(watch.envelope.state.work, restarted ? 0 : (request.workOffset ?? 0));
       const items = EffectArray.flatMap(page.items, item =>
         Predicate.isObject(item) && typeof item.eventId === 'string'
           ? [
@@ -285,6 +280,7 @@ export const runOwnedNativeTaskWatch = (
             nextOffset:
               page.offset + items.length < watch.envelope.state.work.length ? page.offset + items.length : null,
             workViewDigest,
+            ...(restarted ? {restarted: true} : {}),
           },
         },
       });

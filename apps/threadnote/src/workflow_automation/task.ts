@@ -266,6 +266,15 @@ const phaseWatchTaskRefs = (
   };
 };
 
+/** The current validation and PR delivery references of a phase whose canonical receipt binds its watch. */
+export const nativeTaskPhaseWatchRefs = (
+  stored: NonNullable<Effect.Success<ReturnType<typeof readNativeWorkflowState>>>,
+  phaseId: string,
+) => {
+  const candidate = canonicalPhaseWatchProof(stored, phaseId, stored.state.cycle?.state.phases[phaseId]);
+  return candidate ? phaseWatchTaskRefs(stored, candidate) : undefined;
+};
+
 /** Recover maintenance references from a specific arrived notice without refreshing the watch or publication proof. */
 export const readNativeTaskNoticeView = (config: RuntimeConfig, input: unknown) =>
   Effect.gen(function* () {

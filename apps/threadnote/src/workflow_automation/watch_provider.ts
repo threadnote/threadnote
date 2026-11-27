@@ -114,6 +114,7 @@ const entity = (
   bootstrap: boolean,
   link?: unknown,
   head?: string,
+  summary?: string,
 ): NativeWatchEntity => ({
   id: text(id),
   kind,
@@ -121,7 +122,79 @@ const entity = (
   bootstrap,
   ...(link === undefined || link === null ? {} : {url: url(link)}),
   ...(head === undefined ? {} : {head: sha(head)}),
+  ...(summary ? {summary} : {}),
 });
+
+const summaryLimit = 1024;
+const summaryLineLimit = 200;
+const summaryLogLines = 6;
+const summaryLogChecks = 3;
+const summaryDetailSeparator = ' | ';
+/** Replace characters the watch event schema refuses and collapse whitespace. */
+const summaryText = (value: string, maximum: number) =>
+  Effect2.pipe(
+    value,
+    EffectString.replace(/[^\u0020-\u007e\u00a0-\u{10ffff}]+/gu, ' '),
+    EffectString.replace(/\s+/gu, ' '),
+    EffectString.trim,
+    EffectString.slice(0, maximum),
+    EffectString.trim,
+  );
+const failureSummary = (name: unknown, outcome: unknown, fallback: string) =>
+  Effect2.pipe(
+    summaryText(
+      `${typeof name === 'string' && name ? name : fallback}: ${typeof outcome === 'string' && outcome ? outcome : 'failed'}`,
+      summaryLimit,
+    ),
+    EffectString.replaceAll('|', '/'),
+  ) || undefined;
+const logTimestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s?/u;
+// oxlint-disable-next-line no-control-regex -- ANSI escapes are removed from CI log lines before extraction.
+const logAnsi = /\u001b\[[0-9;?]*[A-Za-z]/gu;
+
+/**
+ * Select only failing test names, their first error line and failing Bazel targets from a CI job log. The raw log is
+ * never retained.
+ */
+export function nativeWatchFailureLines(log: string): string[] {
+  const lines: string[] = [];
+  const seen = new Set<string>();
+  let errorWindow = 0;
+  const add = (line: string) => {
+    const value = summaryText(line, summaryLineLimit);
+    if (!value || seen.has(value) || lines.length >= summaryLogLines) return;
+    seen.add(value);
+    lines.push(value);
+  };
+  for (const raw of EffectString.split(log, /\r?\n/u)) {
+    if (lines.length >= summaryLogLines) break;
+    const line = Effect2.pipe(
+      raw,
+      EffectString.replace(logTimestamp, ''),
+      EffectString.replace(logAnsi, ''),
+      EffectString.trim,
+    );
+    if (!line) continue;
+    if (/^FAIL\s+\S.*\s>\s\S/u.test(line)) {
+      add(line);
+      errorWindow = 8;
+    } else if (/^\/\/\S+\s+FAILED\b/u.test(line)) add(line);
+    else if (errorWindow > 0) {
+      errorWindow--;
+      if (/^(?:[A-Za-z]*Error\b|expected\b)/u.test(line)) {
+        add(line);
+        errorWindow = 0;
+      }
+    }
+  }
+  return lines;
+}
+const actionsJobId = (item: NativeWatchEntity) => {
+  const match = item.url
+    ? /^https:\/\/github\.com\/[^/]+\/[^/]+\/actions\/runs\/\d+\/job\/(\d+)$/u.exec(item.url)
+    : null;
+  return match?.[1] === item.id ? match[1] : undefined;
+};
 
 /** This adapter never accepts a hostname, executable, API URL or credential from PR content. */
 export function nativeWatchPullRequest(pr: string) {
@@ -360,6 +433,9 @@ const restProjection = (source: Source, input: unknown, head: string): Projectio
         !isPending && !success,
         value.html_url ?? value.target_url,
         head,
+        !isPending && !success
+          ? failureSummary(value.name ?? value.context, source === 'checks' ? value.conclusion : value.state, id)
+          : undefined,
       );
     }
     return entity(
@@ -601,6 +677,66 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
         catch: error => (Schema.is(WorkflowAutomationError)(error) ? error : fail('provider-shape')),
       });
     const before = yield* verifiedPull((yield* rest('pull', pullEndpoint, projectPull)).pull!);
+    // A completed check run is immutable, so a prior summary for the same id and version is reused as is.
+    const priorSummaries = new Map(
+      EffectArray.flatMap(previous.pages, page =>
+        EffectArray.flatMap(page.projection.items, item =>
+          item.summary ? [[`${item.id}\u0000${item.version}`, item.summary] as const] : [],
+        ),
+      ),
+    );
+    const jobFailureLines = (jobId: string) =>
+      Effect.gen(function* () {
+        metrics.requests++;
+        const result = yield* runCommandEffect(
+          'gh',
+          ['api', '--hostname', 'github.com', '--method', 'GET', `${base}/actions/jobs/${jobId}/logs`],
+          {allowFailure: true, timeoutMs: 15_000, maxOutputBytes: 8 * 1024 * 1024, sensitiveOutput: true},
+        ).pipe(Effect.result);
+        if (result._tag === 'Failure' || result.success.exitCode !== 0) return undefined;
+        metrics.responseBytes += new TextEncoder().encode(result.success.stdout).byteLength;
+        return nativeWatchFailureLines(result.success.stdout);
+      });
+    /** Best effort: a missing or unreadable log keeps the base summary and never fails the checks source. */
+    const enrichFailedChecks = (items: readonly NativeWatchEntity[]) =>
+      Effect.gen(function* () {
+        let fetched = 0;
+        const enriched: NativeWatchEntity[] = [];
+        for (const item of items) {
+          const summary = priorSummaries.get(`${item.id}\u0000${item.version}`) ?? item.summary;
+          const jobId = item.kind === 'ci_error' && item.summary ? actionsJobId(item) : undefined;
+          // Only an attempted enrichment adds the ` | ` separator; the base summary never contains it.
+          if (
+            summary === undefined ||
+            !jobId ||
+            !item.summary ||
+            EffectString.includes(summaryDetailSeparator)(summary)
+          )
+            enriched.push(summary === undefined ? item : {...item, summary});
+          else if (
+            fetched >= summaryLogChecks ||
+            authenticationFailed ||
+            now() < blockedUntil ||
+            now() - started > 30_000
+          )
+            enriched.push(item);
+          else {
+            fetched++;
+            const lines = yield* jobFailureLines(jobId);
+            const detail =
+              lines === undefined
+                ? ['job log unavailable']
+                : lines.length
+                  ? lines
+                  : ['no failing test lines in job log'];
+            enriched.push({
+              ...item,
+              summary: summaryText(EffectArray.join([item.summary, ...detail], summaryDetailSeparator), summaryLimit),
+            });
+          }
+        }
+        return enriched;
+      });
     const sources: NativeWatchSourceResult[] = [];
     const all: NativeWatchEntity[] = [];
     let pending = 0;
@@ -648,15 +784,14 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
         Effect.gen(function* () {
           const items: NativeWatchEntity[] = [];
           const oldKeys = new Set(used);
+          const pageKeys: string[] = [];
           for (let page = 1; page <= 101; page++) {
             if (page === 101) return yield* fail('provider-pagination-limit');
             const query =
               endpoint + (Effect2.pipe(endpoint, EffectString.includes('?')) ? '&' : '?') + `per_page=100&page=${page}`;
-            const projection = yield* rest(
-              source + ':' + (source === 'checks' || source === 'statuses' ? before.head + ':' : '') + page,
-              query,
-              input => restProjection(source, input, before.head),
-            );
+            const key = source + ':' + (source === 'checks' || source === 'statuses' ? before.head + ':' : '') + page;
+            pageKeys.push(key);
+            const projection = yield* rest(key, query, input => restProjection(source, input, before.head));
             items.push(...projection.items);
             if (source === 'checks' || source === 'statuses') {
               all.push(...projection.items);
@@ -670,7 +805,22 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
             for (const key of used) if (!oldKeys.has(key)) used.delete(key);
             return yield* fail('provider-pagination-race', true);
           }
-          return items;
+          if (source !== 'checks') return items;
+          const enriched = yield* enrichFailedChecks(items);
+          const byId = new Map(EffectArray.map(enriched, item => [item.id, item]));
+          // Cache the enriched items so a not-modified sweep keeps their summaries without a log request.
+          for (const key of pageKeys) {
+            const page = pages.get(key);
+            if (page)
+              pages.set(key, {
+                ...page,
+                projection: {
+                  ...page.projection,
+                  items: EffectArray.map(page.projection.items, item => byId.get(item.id) ?? item),
+                },
+              });
+          }
+          return enriched;
         }),
       );
     }

@@ -592,7 +592,7 @@ const verifyNativeTaskMaintenance = Effect.fn('workflowAutomation.task.verifyMai
 
 const requiredWatchSources = ['comments', 'reviews', 'threads', 'checks', 'statuses'];
 
-const watchWorkDrained = (state: StoredWatch['envelope']['state']) =>
+export const watchWorkDrained = (state: StoredWatch['envelope']['state']) =>
   state.events.length === 0 &&
   state.delivery === null &&
   state.acknowledged === state.nextSequence - 1 &&

@@ -1,3 +1,10 @@
+import type {WorkflowAutomationError, WorkflowNextCommand} from '@threadnote/workflow-automations/contracts';
+import {
+  nativeNext,
+  nativeWatchIdentityKeys,
+  nativeWatchNext,
+  withNativeNext,
+} from '@threadnote/workflow-automations/gates';
 import {decodeNativeTaskActionRef, encodeNativeTaskActionRef} from '@threadnote/workflow-automations/task';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {Array as EffectArray, Effect, Option, Predicate, Schema, String as EffectString} from 'effect';
@@ -72,6 +79,56 @@ export function validateNativeTaskWatchMaintenanceRoute(
     );
   return Effect.void;
 }
+
+const watchWorkRecoveryCodes = new Set([
+  'stale-watch-work-view',
+  'stale-watch-work-ref',
+  'invalid-watch-page',
+  'invalid-watch-work',
+]);
+const watchReferenceReloadCodes = new Set(['invalid-delivery-ref', 'stale-delivery-ref']);
+
+/**
+ * The watch operation that recovers a watch refusal: reload retained work from offset zero, renew an expired lease,
+ * reload the task card for current references, or inspect the watch. A watch refusal never points at task finish.
+ */
+export const nativeWatchRecoveryNext = (
+  input: Readonly<Record<string, unknown>>,
+  error: WorkflowAutomationError,
+): WorkflowNextCommand => {
+  const identity: Partial<Record<(typeof nativeWatchIdentityKeys)[number], string>> = {};
+  for (const key of nativeWatchIdentityKeys) {
+    const value = input[key];
+    if (typeof value === 'string') identity[key] = value;
+  }
+  if (watchReferenceReloadCodes.has(error.code) && identity.runId !== undefined && identity.callerCwd !== undefined)
+    return nativeNext.view({runId: identity.runId, callerCwd: identity.callerCwd});
+  if (
+    watchWorkRecoveryCodes.has(error.code) ||
+    (error.code === 'stale-watch-event-ref' &&
+      (input.operation === 'work-disposition' || input.operation === 'work-detail'))
+  )
+    return nativeWatchNext(identity, 'work');
+  if (error.code === 'invalid-watch' && /\blease\b|takeover/iu.test(error.message))
+    return nativeWatchNext(identity, 'renew');
+  return nativeWatchNext(identity, 'inspect');
+};
+
+const sourceChangedCodes = new Set(['source-drift', 'review-stale']);
+
+/**
+ * A watch-pr refusal without its own next command recovers through the watch itself. Start (admission) and
+ * changed-source refusals keep the task card's next command and return unchanged.
+ */
+export const watchRecovery = (input: unknown, error: WorkflowAutomationError): WorkflowAutomationError =>
+  Predicate.isObject(input) &&
+  input.command === 'watch-pr' &&
+  input.operation !== 'start' &&
+  !sourceChangedCodes.has(error.code) &&
+  typeof input.callerCwd === 'string' &&
+  error.next === undefined
+    ? withNativeNext(error, nativeWatchRecoveryNext(input, error))
+    : error;
 
 // Preserve persisted legacy routes; the PR suffix qualifies only a different PR in the same phase.
 export const nativeTaskLegacyWatchIdentity = (runId: string, phaseId: string) => {
@@ -206,7 +263,8 @@ export const runNativePrWatchOperation = (
             EffectArray.findFirst(watch.envelope.state.work, item => item.eventId === ref.watchEventId),
           )
         : undefined;
-      // Like work, detail reads bind the current owner without requiring or renewing its lease.
+      // Like work, detail reads bind the current owner without requiring or renewing its lease. The exact row digest
+      // binds the reference, so unrelated rows may change after the page was read.
       if (
         !ref ||
         ref.kind !== 'retained-work' ||
@@ -215,7 +273,6 @@ export const runNativePrWatchOperation = (
         ref.watchId !== watchId ||
         ref.consumerId !== consumer.id ||
         ref.wakeupId !== consumer.wakeupId ||
-        ref.workViewDigest !== workViewDigest ||
         !row ||
         ref.workRowDigest !== sha256HexSync(stableJson(row))
       )
@@ -241,11 +298,9 @@ export const runNativePrWatchOperation = (
       });
     }
     if (request.operation === 'work') {
-      if ((request.workOffset ?? 0) > 0 && !request.workViewDigest)
-        return yield* fail('stale-watch-work-view', 'Continue work paging with its complete workViewDigest.');
-      if (request.workViewDigest !== undefined && request.workViewDigest !== workViewDigest)
-        return yield* fail('stale-watch-work-view', 'Retained work changed; restart work paging at offset zero.');
-      const page = nativeWatchWorkList(watch.envelope.state.work, request.workOffset ?? 0);
+      // A continuation without the current view digest starts a fresh view instead of failing.
+      const restarted = (request.workOffset ?? 0) > 0 && request.workViewDigest !== workViewDigest;
+      const page = nativeWatchWorkList(watch.envelope.state.work, restarted ? 0 : (request.workOffset ?? 0));
       const items: Record<string, unknown>[] = EffectArray.map(page.items, item => {
         if (!Predicate.isObject(item) || typeof item.eventId !== 'string')
           throw fail('invalid-watch-work', 'A retained work row has no canonical identity.');
@@ -299,6 +354,7 @@ export const runNativePrWatchOperation = (
             nextOffset:
               page.offset + items.length < watch.envelope.state.work.length ? page.offset + items.length : null,
             workViewDigest,
+            ...(restarted ? {restarted: true} : {}),
           },
         },
       });
@@ -398,15 +454,14 @@ export const runNativePrWatchOperation = (
         eventRef.consumerId !== consumer.id ||
         eventRef.wakeupId !== consumer.wakeupId ||
         (retained
-          ? eventRef.workViewDigest !== workViewDigest ||
-            eventRef.workRowDigest !==
-              sha256HexSync(
-                stableJson(
-                  Option.getOrNull(
-                    EffectArray.findFirst(watch.envelope.state.work, row => row.eventId === eventRef.watchEventId),
-                  ),
+          ? eventRef.workRowDigest !==
+            sha256HexSync(
+              stableJson(
+                Option.getOrNull(
+                  EffectArray.findFirst(watch.envelope.state.work, row => row.eventId === eventRef.watchEventId),
                 ),
-              )
+              ),
+            )
           : eventRef.watchDeliveryId !== watchDelivery?.watchDeliveryId) ||
         !eventRef.watchEventId ||
         dispositionIds.has(eventRef.watchEventId)
@@ -414,7 +469,7 @@ export const runNativePrWatchOperation = (
         return yield* fail(
           'stale-watch-event-ref',
           retained
-            ? 'Use current retained work references returned by work; reload its complete view.'
+            ? 'A retained work row changed or is unknown; reload work from offset zero for its current reference.'
             : 'A disposition must use an event from the current opaque watch delivery.',
         );
       dispositionIds.add(eventRef.watchEventId);

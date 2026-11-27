@@ -75,6 +75,8 @@ const entitySchema = Schema.Struct({
   url: Schema.optionalKey(httpsUrl),
   head: Schema.optionalKey(sha),
   bootstrap: Schema.Boolean,
+  // Informational failure detail; never part of the entity version.
+  summary: Schema.optionalKey(boundedText(1024)),
 });
 const sourceErrorSchema = Schema.Struct({code: boundedText(64), retryable: Schema.Boolean});
 const leaseMillisecondsSchema = integerRange(1, nativeWatchMaximumLeaseMilliseconds);
@@ -124,6 +126,7 @@ const watchEventSchema = Schema.Struct({
   at: timestamp,
   removed: Schema.Boolean,
   ready: Schema.optionalKey(Schema.Literal(false)),
+  summary: Schema.optionalKey(boundedText(1024)),
 });
 const sourceCheckpointSchema = Schema.Struct({
   source: sourceSchema,
@@ -356,6 +359,7 @@ const eventForEntity = (
   version: item.version,
   ...(item.url ? {url: item.url} : {}),
   ...(item.head ? {head: item.head} : {}),
+  ...(item.summary && !removed ? {summary: item.summary} : {}),
   at,
   removed,
 });
