@@ -75,6 +75,18 @@ function inertTemplateText(value: string): string {
   );
 }
 
+/** A JavaScript string literal whose text cannot close a script, comment or line inside generated source. */
+function javaScriptStringLiteral(value: string): string {
+  return Effect.pipe(
+    JSON.stringify(value),
+    EffectString.replaceAll(/</gu, '\\u003c'),
+    EffectString.replaceAll(/>/gu, '\\u003e'),
+    EffectString.replaceAll(/\//gu, '\\u002f'),
+    EffectString.replaceAll(/\u2028/gu, '\\u2028'),
+    EffectString.replaceAll(/\u2029/gu, '\\u2029'),
+  );
+}
+
 function inertCommentText(value: string): string {
   return Effect.pipe(
     JSON.stringify(value),
@@ -260,7 +272,7 @@ describe('Effect architecture boundaries', () => {
     const callWrapper = FC.constantFrom('plain', 'nested', 'template');
     await FC.assert(
       FC.asyncProperty(methods, payload, dataContainer, callWrapper, async (method, text, container, wrapper) => {
-        const spelling = `console.${method}(${JSON.stringify(text)})`;
+        const spelling = `console.${method}(${javaScriptStringLiteral(text)})`;
         const commentSpelling = `console.${method}(${inertCommentText(text)})`;
         const inert =
           container === 'string'

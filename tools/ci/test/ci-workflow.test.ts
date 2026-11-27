@@ -575,8 +575,15 @@ it('provisions one shared native TypeScript asset job per pinned host and restor
     jobs['recall-quality']?.steps ?? [],
     candidate => candidate.uses === 'actions/checkout@v7',
   );
+  const producerCheckout = EffectArray.findFirst(
+    jobs['native-typescript-asset']?.steps ?? [],
+    candidate => candidate.uses === 'actions/checkout@v7',
+  );
   expect(EffectOption.getOrUndefined(recallCheckout)?.with?.ref).toBe(
-    '${{ needs.native-typescript-asset.outputs.ref }}',
+    '${{ github.event.pull_request.head.sha || github.sha }}',
+  );
+  expect(EffectOption.getOrUndefined(recallCheckout)?.with?.ref).toBe(
+    EffectOption.getOrUndefined(producerCheckout)?.with?.ref,
   );
   expect(step(jobs['bazel-shards'], 'Restore the verified native TypeScript asset')?.if).toBe(
     'matrix.native_typescript',

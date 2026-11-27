@@ -390,10 +390,11 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      # The producer's checkout: the head commit of a pull request, so the restored asset matches these sources.
+      # The producer's checkout expression: the head commit of a pull request, so the restored asset matches these
+      # sources. It repeats the producer's expression instead of reading a job output.
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.native-typescript-asset.outputs.ref }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
