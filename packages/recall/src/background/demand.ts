@@ -118,6 +118,8 @@ export interface RecallEmbeddingDemandReceipt {
   readonly token: string;
   readonly revision: string;
   readonly disposition: 'scheduled' | 'coalesced';
+  /** The read joined a blocked or corrupt observation; this read does not retry it. */
+  readonly blocked?: true;
 }
 
 export function recallEmbeddingDemandKey(scope: Pick<RecallEmbeddingScope, 'account' | 'user'>): string {
@@ -310,7 +312,7 @@ const enqueueRecallEmbeddings = Effect.fn('recall.enqueueEmbeddings')(function* 
 ) {
   const crypto = yield* SecureRandom.SecureRandom;
   const revision = yield* crypto.uuidV4();
-  const selected = yield* updateDemand(
+  const selected = yield* updateDemand<RecallEmbeddingDemandReceipt>(
     scope,
     state => {
       // A read joins observed work of the same configuration, model and corpus generation.
@@ -334,6 +336,7 @@ const enqueueRecallEmbeddings = Effect.fn('recall.enqueueEmbeddings')(function* 
             token: state.desired.token,
             revision: state.desired.revision,
             disposition: 'coalesced',
+            ...(observed.state === 'blocked' || observed.state === 'corrupt' ? {blocked: true as const} : {}),
           } satisfies RecallEmbeddingDemandReceipt,
         };
       const sameConfiguration = coalesce && state.desired?.manifestPath === scope.manifestPath;

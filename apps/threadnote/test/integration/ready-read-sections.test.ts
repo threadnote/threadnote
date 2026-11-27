@@ -7,7 +7,8 @@ import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {formatMemoryDocument} from '@threadnote/memory/document';
 import {readLocalMemoryRecordsByUri} from '@threadnote/memory/local-path';
 import {loadRecallIndexData, readRecallExactMatches} from '@threadnote/recall/index';
-import {emptyRecallSemanticScoresResult, prepareRecallSections} from '@threadnote/recall/runtime';
+import {prepareRecallSections} from '@threadnote/recall/runtime';
+import {emptyRecallSemanticScoresResult} from '@threadnote/recall/semantic_scores';
 import {
   RecallReadyReadBoundary,
   recallReadySectionsOptionsSchema,

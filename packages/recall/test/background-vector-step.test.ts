@@ -31,13 +31,12 @@ import {selectLocalModel} from '@threadnote/inference/models/selection';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 import {loadRecallIndexData, expireRecallIndexValidation} from '../src/index.js';
 import {
-  vectorIndexGenerationReadiness,
   vectorIndexStatus,
   ensureVectorIndex,
   vectorIndexDatabaseFilename,
-  selectedSemanticScores,
   recallVectorStorage,
 } from '../src/vector-index.js';
+import {vectorIndexGenerationReadiness, selectedSemanticScores} from '../src/vector/semantic-read.js';
 import {runRecallVectorPreparationBatch, stepRecallVectorPreparation} from '../src/background/vector-step.js';
 
 const manifest = {

@@ -8,7 +8,7 @@ import {
   createMcpRecallSemanticRetrievalGate,
   MCP_RECALL_SEMANTIC_RETRIEVAL_TIMEOUT_MILLISECONDS,
   MCP_RECALL_SEMANTIC_TIMEOUT_COOLDOWN_MILLISECONDS,
-} from '../../src/runtime.js';
+} from '../../src/semantic_scores.js';
 
 describe('MCP semantic retrieval cooldown', () => {
   effectIt.effect('preserves typed failures when a cause also carries an interruption', () =>

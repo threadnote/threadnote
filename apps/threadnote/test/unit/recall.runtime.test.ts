@@ -36,19 +36,21 @@ import {RECALL_RERANKER_WINDOW_WARM_MILLISECONDS, warmRecallRerankerWindow} from
 import {formatMemoryDocument} from '@threadnote/memory/document';
 import {buildRecallTopicalCorpusStatistics} from '@threadnote/recall/rank';
 import {
-  boundedRecallSemanticRetrieval,
   createRecallRerankerCache,
   loadRecallExpansionVocabulary,
   mergeRecallCandidateLanes,
   mergeRecallIndexCandidates,
   mergePrioritizedRecallIndexCandidates,
-  MCP_RECALL_SEMANTIC_RETRIEVAL_TIMEOUT_MILLISECONDS,
   prepareRecallSections,
   prioritizeCrossScopeRecallCandidates,
   prioritizeWorkspaceRecallCandidates,
   recallCrossScopeFallbackRequired,
   recallCrossScopeLaneBudgets,
 } from '@threadnote/recall/runtime';
+import {
+  boundedRecallSemanticRetrieval,
+  MCP_RECALL_SEMANTIC_RETRIEVAL_TIMEOUT_MILLISECONDS,
+} from '@threadnote/recall/semantic_scores';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {buildRecallSections, exactRecallTerms} from '@threadnote/recall/results';
 import * as EffectString from 'effect/String';

@@ -9,7 +9,7 @@ import {
 import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/models/catalog';
 import {readModelSelection, selectedEmbeddingModelId} from '@threadnote/inference/models/selection';
 import {LocalModelStore} from '@threadnote/inference/models/store';
-import {vectorIndexGenerationReadiness} from '../vector-index.js';
+import {vectorIndexGenerationReadiness} from '../vector/semantic-read.js';
 import {
   currentRecallCorpusGeneration,
   expireRecallIndexValidation,
@@ -37,6 +37,8 @@ export type DerivedIndexRefreshOutcome =
 
 import {
   deferRecallEmbeddings,
+  RecallEmbeddingDemandUnavailable,
+  type RecallEmbeddingDemandReceipt,
   recallEmbeddingModelIdentity,
   requestRecallEmbeddingsReceipt,
 } from '../background/demand.js';
@@ -49,25 +51,66 @@ class McpRecallBackgroundRefreshBlocked extends Schema.TaggedError<
   message: Schema.String,
 }) {}
 
-/** Persist demand before returning; an ephemeral caller cannot discard it on exit. */
-export const scheduleMcpRecallBackgroundRefresh = Effect.fn('recall.scheduleMcpBackgroundRefresh')(function* (
-  config: McpRecallRefreshConfig,
-  manifest: LocalModelManifest,
-) {
-  // A stale or unreadable lexical index gives no generation, so the read cannot join and is a new event.
-  const corpusGeneration = Option.getOrUndefined(
-    yield* currentRecallCorpusGeneration(config).pipe(
-      Effect.catchCauseIf(
-        cause => !Cause.hasInterrupts(cause) && !hasReadCleanupUnconfirmed(cause),
-        () => Effect.succeed(Option.none<string>()),
-      ),
-    ),
-  );
-  return (yield* requestRecallEmbeddingsReceipt(config, true, {
-    model: recallEmbeddingModelIdentity(manifest),
-    corpusGeneration,
-  })).disposition;
-});
+/**
+ * Persist demand before returning; an ephemeral caller cannot discard it on exit. A caller that already
+ * holds the current lexical generation passes it and saves a status read.
+ */
+export const scheduleMcpRecallBackgroundRefreshReceipt = Effect.fn('recall.scheduleMcpBackgroundRefreshReceipt')(
+  function* (config: McpRecallRefreshConfig, manifest: LocalModelManifest, knownCorpusGeneration?: string) {
+    // A stale or unreadable lexical index gives no generation, so the read cannot join and is a new event.
+    const corpusGeneration =
+      knownCorpusGeneration ??
+      Option.getOrUndefined(
+        yield* currentRecallCorpusGeneration(config).pipe(
+          Effect.catchCauseIf(
+            cause => !Cause.hasInterrupts(cause) && !hasReadCleanupUnconfirmed(cause),
+            () => Effect.succeed(Option.none<string>()),
+          ),
+        ),
+      );
+    return yield* requestRecallEmbeddingsReceipt(config, true, {
+      model: recallEmbeddingModelIdentity(manifest),
+      corpusGeneration,
+    });
+  },
+);
+
+export const scheduleMcpRecallBackgroundRefresh = (config: McpRecallRefreshConfig, manifest: LocalModelManifest) =>
+  scheduleMcpRecallBackgroundRefreshReceipt(config, manifest).pipe(Effect.map(receipt => receipt.disposition));
+
+// Refresh warnings live here. A joined block is not retried by the read, so no warning may claim it is queued.
+
+/** The warning of a read without scores whose refresh was enqueued. */
+export function staleReadRefreshWarning(receipt: Pick<RecallEmbeddingDemandReceipt, 'blocked'>): string {
+  return receipt.blocked
+    ? 'Local AI recall warning: semantic indexes are stale or missing; background refresh is blocked. Lexical recall continued. Run threadnote doctor --dry-run.'
+    : 'Local AI recall warning: semantic indexes are stale or missing; background refresh is queued for idle. Lexical recall continued without waiting.';
+}
+
+/** A masked read of an older generation warns only when the refresh it joined is blocked. */
+export function olderReadRefreshWarning(receipt: Pick<RecallEmbeddingDemandReceipt, 'blocked'>): Option.Option<string> {
+  return receipt.blocked
+    ? Option.some(
+        'Local AI recall warning: semantic recall uses an older index; the background refresh is blocked. Run threadnote doctor --dry-run.',
+      )
+    : Option.none();
+}
+
+/** Maps only a durable-demand enqueue failure to its warning; every other cause stays a failure. */
+export const catchRecallRefreshEnqueueUnavailable =
+  <B, E2, R2>(onWarning: (warning: string) => Effect.Effect<B, E2, R2>) =>
+  <A, E, R>(self: Effect.Effect<A, E, R>): Effect.Effect<A | B, E | E2, R | R2> =>
+    self.pipe(
+      Effect.catchCause((cause): Effect.Effect<B, E | E2, R2> => {
+        const reason = cause.reasons[0];
+        if (cause.reasons.length !== 1 || !Cause.isFailReason(reason)) return Effect.failCause(cause);
+        if (!Schema.is(RecallEmbeddingDemandUnavailable)(reason.error)) return Effect.failCause(cause);
+        const error = reason.error;
+        return onWarning(
+          `Local AI recall warning: background refresh enqueue not confirmed [${error.stage ?? 'unknown'}/${error.reason ?? 'unknown'}]; lexical recall continued.`,
+        );
+      }),
+    );
 
 /** Canonical and lexical readiness complete now; document inference is durable idle demand. */
 export const refreshRecallDerivedIndexesFromSelection = Effect.fn('recall.refreshDerivedIndexesFromSelection')(

@@ -36,7 +36,8 @@ import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtim
 import {InferenceInterrupted} from '@threadnote/inference/engine/errors';
 import {writeModelSelection} from '@threadnote/inference/models/selection';
 import {expireRecallIndexValidation, recallIndexStatus} from '@threadnote/recall/index';
-import {vectorIndexGenerationReadiness, vectorIndexStatus} from '@threadnote/recall/vector-index';
+import {vectorIndexStatus} from '@threadnote/recall/vector-index';
+import {vectorIndexGenerationReadiness} from '@threadnote/recall/vector/semantic-read';
 import {
   ExternalSourcePolicy,
   externalDocumentManifestUri,

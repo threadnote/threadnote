@@ -13,7 +13,8 @@ import {LocalModelStore} from '@threadnote/inference/models/store';
 import {SourceCoordinator, type SourceWorkResult} from '@threadnote/integration-core/source-coordinator';
 import {makeCoordinatorEngine, openCoordinatorStore} from '@threadnote/integration-runtime/coordinator';
 import {loadRecallIndexData, recallIndexStatus} from '@threadnote/recall/index';
-import {ensureVectorIndex, vectorIndexGenerationReadiness} from '@threadnote/recall/vector-index';
+import {ensureVectorIndex} from '@threadnote/recall/vector-index';
+import {vectorIndexGenerationReadiness} from '@threadnote/recall/vector/semantic-read';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {
   externalDocumentManifestUri,

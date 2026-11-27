@@ -26,8 +26,8 @@ import {
   vectorIndexDatabaseFilename,
   loadRecallVectorAuthorizationKey,
   recallVectorStorage,
-  readSelectedSemanticVectorState,
 } from '@threadnote/recall/vector-index';
+import {readSelectedSemanticVectorState} from '@threadnote/recall/vector/semantic-read';
 import {
   loadNativeVectorReader,
   nativeVectorReaderHostProfile,

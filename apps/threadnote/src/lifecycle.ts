@@ -84,11 +84,13 @@ import {
   loadRecallVectorAuthorizationKey,
   rebuildVectorIndex,
   VectorCorpusGenerationChanged,
+  vectorIndexStatus,
+} from '@threadnote/recall/vector-index';
+import {
   type VectorIndexGenerationReadiness,
   vectorIndexGenerationReadiness,
   vectorIndexMatchesGeneration,
-  vectorIndexStatus,
-} from '@threadnote/recall/vector-index';
+} from '@threadnote/recall/vector/semantic-read';
 import {
   codeGraphDoctorCheck,
   type CodeGraphMaintenanceProgress,

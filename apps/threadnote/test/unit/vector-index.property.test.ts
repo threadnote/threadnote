@@ -18,9 +18,9 @@ import {
   rebuildVectorIndex,
   VectorCorpusGenerationChanged,
   vectorIndexDatabaseFilename,
-  vectorIndexMatchesGeneration,
   vectorIndexStatus,
 } from '@threadnote/recall/vector-index';
+import {vectorIndexMatchesGeneration} from '@threadnote/recall/vector/semantic-read';
 import {mkdtemp, rm} from '../helpers/effect-filesystem.js';
 import {runEffect} from '../helpers/effect-runtime.js';
 import * as EffectString from 'effect/String';

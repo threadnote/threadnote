@@ -1,5 +1,9 @@
 import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
-import {scheduleMcpRecallBackgroundRefresh} from '../src/mcp/refresh.js';
+import {
+  olderReadRefreshWarning,
+  scheduleMcpRecallBackgroundRefresh,
+  staleReadRefreshWarning,
+} from '../src/mcp/refresh.js';
 import * as RecallIndexBoundary from '../src/index.js';
 import {hasReadCleanupUnconfirmed} from '@threadnote/platform/read_deadline';
 import {cryptoLayer} from '@threadnote/platform/crypto';
@@ -43,6 +47,17 @@ const fixture = Effect.gen(function* () {
   const home = yield* fs.makeTempDirectoryScoped({prefix: 'recall-demand-'});
   return {fs, scope: {account: 'local', agentContextHome: home, user: 'test'}};
 });
+describe('read-triggered refresh warnings', () => {
+  // A joined block is not retried by the read: a masked read must say so, and a stale read must not claim a queue.
+  effectIt.effect('warns a masked read only for a joined block and gives a stale read its own blocked text', () =>
+    Effect.sync(() => {
+      expect(Option.isSome(olderReadRefreshWarning({blocked: true}))).toBe(true);
+      expect(Option.isNone(olderReadRefreshWarning({}))).toBe(true);
+      expect(staleReadRefreshWarning({blocked: true})).not.toBe(staleReadRefreshWarning({}));
+    }),
+  );
+});
+
 describe('durable recall embedding demand', () => {
   for (const boundary of ['replacement', 'churn', 'unsafe'] as const)
     effectIt.effect(`reads coherent demand through ${boundary} without unbounded retries or unsafe fallback`, () =>
@@ -256,6 +271,7 @@ describe('durable recall embedding demand', () => {
             token: initial.token,
             revision: initial.revision,
             disposition: 'coalesced',
+            ...(observed === 'blocked' ? {blocked: true} : {}),
           });
         expect(yield* readRecallEmbeddingDemand(scope)).toEqual(before);
         expect(yield* requestRecallEmbeddings(scope, true)).toBe(initial.token);

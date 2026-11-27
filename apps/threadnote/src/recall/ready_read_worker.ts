@@ -44,12 +44,15 @@ import {
 } from '@threadnote/recall/read_boundary';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
-  readSelectedSemanticVectorState,
-  readSelectedSemanticVectorScores,
-  vectorIndexGenerationReadiness,
   recallVectorStorage,
   loadRecallVectorAuthorizationKey,
+  VectorCorpusGenerationChanged,
 } from '@threadnote/recall/vector-index';
+import {
+  openSelectedSemanticVectorRead,
+  readSelectedSemanticVectorScores,
+  vectorIndexGenerationReadiness,
+} from '@threadnote/recall/vector/semantic-read';
 import {negativeSemanticReadinessHint} from '@threadnote/recall/vector/negative-readiness';
 import type {MemoryRecord} from '@threadnote/memory/document';
 import type {RecallIndexQueryDiagnostics, RecallReadyReadState} from '@threadnote/recall/index';
@@ -144,6 +147,7 @@ export const serveRecallReadyRead = Effect.fn('recall.serveReadyRead')(function*
           request.options.model,
           request.options.corpusGeneration,
           authorizationKey,
+          request.config,
         );
       }
       case 'vector-state': {
@@ -152,24 +156,26 @@ export const serveRecallReadyRead = Effect.fn('recall.serveReadyRead')(function*
         const corpusGeneration = current.value;
         if (request.options.corpusGeneration !== undefined && request.options.corpusGeneration !== corpusGeneration)
           return {readiness: 'stale' as const, corpusGeneration};
-        const authorizationKey = yield* loadRecallVectorAuthorizationKey(request.config);
-        const readiness = yield* vectorIndexGenerationReadiness(
-          request.config.agentContextHome,
-          request.options.model,
-          corpusGeneration,
-          authorizationKey,
-        );
-        if (readiness !== 'current') return {readiness, corpusGeneration};
-        const state = yield* readSelectedSemanticVectorState(request.config, request.options.model, {
+        // The same opening as the in-process read: one masked decision, and its mask decides the readiness.
+        // A write that raced this request is stale here: the parent has no retry loop for a failed worker.
+        return yield* openSelectedSemanticVectorRead(request.config, request.options.model, {
           corpusGeneration,
           currentCorpusGeneration: () => currentRecallCorpusGeneration(request.config),
-        });
-        return state === undefined
-          ? {readiness: 'stale' as const, corpusGeneration}
-          : {readiness: 'current' as const, corpusGeneration, state};
+        }).pipe(
+          Effect.catchIf(Schema.is(VectorCorpusGenerationChanged), () =>
+            Effect.succeed({readiness: 'stale' as const, corpusGeneration}),
+          ),
+        );
       }
       case 'vector-scores': {
-        const generation = request.options.corpusGeneration ?? request.options.state.corpusGeneration;
+        // Trust model: the mask comes from the same-user parent that ran the decision. Scoring rechecks the
+        // generation's compatibility with the current authorization key, and the current-document validation,
+        // the external-access check and the lexical fence apply to every scored URI.
+        // A masked state is bound to its mask's lexical generation; a current one to its own corpus.
+        const generation =
+          request.options.corpusGeneration ??
+          request.options.state.mask?.contentGeneration ??
+          request.options.state.corpusGeneration;
         if (generation === undefined) return undefined;
         const value = yield* readSelectedSemanticVectorScores(
           request.config,

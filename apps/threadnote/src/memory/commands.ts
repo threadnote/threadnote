@@ -115,14 +115,16 @@ import {
   createRecallRerankerCache,
   prepareRecallSemanticPreflight,
   warmRecallReranker,
-  emptyRecallSemanticScoresResult,
   loadRecallExpansionVocabulary,
-  loadRecallSemanticScoresResult,
   recallSelectionQueries,
   recallSelectionAnchorIds,
   selectedRecallCandidateUris,
-  type RecallSemanticScoresResult,
 } from '@threadnote/recall/runtime';
+import {
+  emptyRecallSemanticScoresResult,
+  loadRecallSemanticScoresResult,
+  type RecallSemanticScoresResult,
+} from '@threadnote/recall/semantic_scores';
 import {refreshRecallDerivedIndexesAfterCanonicalMutation} from '@threadnote/recall/mcp/refresh';
 import {resolveMemoryIdentityAliases, verifyResolvedMemoryIdentity} from '@threadnote/recall/memory/identity';
 import {

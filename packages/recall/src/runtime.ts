@@ -1,9 +1,4 @@
-import {
-  RecallReadyReadBoundary,
-  recallSemanticPreflightSchema,
-  type RecallVectorReadModel,
-  type RecallSemanticPreflight,
-} from './read_boundary.js';
+import {RecallReadyReadBoundary, recallSemanticPreflightSchema, type RecallVectorReadModel} from './read_boundary.js';
 import {
   CallerReadCancellation,
   hasReadCleanupUnconfirmed,
@@ -11,10 +6,9 @@ import {
   ReadDeadlineContext,
   readDeadlineRemaining,
 } from '@threadnote/platform/read_deadline';
-import {loadRecallVectorAuthorizationKey} from './vector/preparation-identity.js';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
-import {Cause, Clock, Console, DateTime, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
+import {Cause, DateTime, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
 import {stripFragment} from '@threadnote/platform/string-boundaries';
 import {MAX_RECALL_SELECTION_CANDIDATES, type RecallSelectionCandidate} from '@threadnote/recall/selection';
 import {uriSegment} from '@threadnote/workspace/manifest';
@@ -28,21 +22,14 @@ import {
   type RecallHit,
 } from '@threadnote/recall/results';
 import {rerankWithSelectedLocalModel} from '@threadnote/inference/models/inference';
-import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/models/catalog';
-import {
-  readModelSelection,
-  parseModelSelection,
-  selectedEmbeddingModelId,
-} from '@threadnote/inference/models/selection';
+import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
+import {parseModelSelection, selectedEmbeddingModelId} from '@threadnote/inference/models/selection';
 import {LocalModelStore} from '@threadnote/inference/models/store';
-import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 import {loadRecallFeedback} from './feedback.js';
 import {
-  currentRecallCorpusGeneration,
   readRecallIndexData,
   readRecallIndexDataBatch,
   readRecallExactMatches,
-  recallIndexStatus,
   recallUriMatchesScopes,
 } from './index.js';
 import {recallWorkspaceScopeMatches} from './index/scope.js';
@@ -67,19 +54,12 @@ import {
   type RecallOperationalWarning,
 } from './warning.js';
 import {
-  selectedSemanticScores,
-  selectedSemanticScoreSnapshot,
-  VectorCorpusGenerationChanged,
-  VectorIndexCorrupt,
-  vectorIndexGenerationReadiness,
-  vectorIndexMatchesGeneration,
-} from './vector-index.js';
-import {
-  lexicalRefreshDisposition,
-  scheduleMcpRecallBackgroundRefresh,
-  type McpRecallBackgroundRefreshSchedule,
-} from './mcp/refresh.js';
-import {RecallEmbeddingDemandUnavailable} from './background/demand.js';
+  emptyRecallSemanticScoresResult,
+  loadRecallSemanticScoresResult,
+  SEMANTIC_GENERATION_RETRY_LIMIT,
+  semanticResultMatchesLexicalSnapshot,
+  type RecallSemanticScoresResult,
+} from './semantic_scores.js';
 import {
   retrieveRecallMemoryConnections,
   type RecallMemoryConnectionsResult,
@@ -187,23 +167,6 @@ export const prepareRecallSemanticPreflight = Effect.fn('recall.prepareSemanticP
   );
 });
 
-/** A negative hint skips only optional vector probing, never a final content proof. */
-export function recallPreflightSkipsSemanticRead(
-  model: RecallVectorReadModel | undefined,
-  hint: RecallSemanticPreflight | undefined,
-): boolean {
-  return (
-    model !== undefined &&
-    hint !== undefined &&
-    (hint.readiness === 'missing' || hint.readiness === 'stale') &&
-    model.id === hint.model.id &&
-    model.sha256 === hint.model.sha256 &&
-    model.dimensions === hint.model.dimensions &&
-    model.promptPrefixes?.document === hint.model.promptPrefixes?.document &&
-    model.promptPrefixes?.query === hint.model.promptPrefixes?.query
-  );
-}
-
 const EXPANSION_VOCABULARY_LIMIT = 50;
 const EXPANSION_VOCABULARY_INDEX_SAMPLE_LIMIT = 200;
 const EXPANSION_VOCABULARY_RANKED_RESERVE = 25;
@@ -214,13 +177,10 @@ const MAX_DETERMINISTIC_QUERY_VARIANTS = 3;
 const MINIMUM_QUERY_VARIANT_TERMS = 2;
 const NATIVE_RERANK_CANDIDATE_LIMIT = 32;
 const NATIVE_RERANK_DOCUMENT_LIMIT = 4_000;
-const SEMANTIC_GENERATION_RETRY_LIMIT = 2;
 const WORKSPACE_CANDIDATE_RESERVE_MAXIMUM = 16;
 const WORKSPACE_CANDIDATE_RESERVE_MULTIPLIER = 2;
 const CROSS_SCOPE_CANDIDATE_RESERVE_MAXIMUM = 4;
 const CROSS_SCOPE_CANDIDATE_SELECTION_MAXIMUM = 16;
-export const MCP_RECALL_SEMANTIC_RETRIEVAL_TIMEOUT_MILLISECONDS = 30_000;
-export const MCP_RECALL_SEMANTIC_TIMEOUT_COOLDOWN_MILLISECONDS = 60_000;
 
 export interface RecallCrossScopeLaneBudgets {
   readonly admissionLimit: number;
@@ -761,472 +721,6 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
     sections: {...sections, expansionCandidates, ...(memoryConnections ? {memoryConnections} : {})},
   };
 });
-
-export interface RecallSemanticScoresResult {
-  readonly corpusGeneration: Option.Option<string>;
-  readonly scores: Option.Option<ReadonlyMap<string, number>>;
-  readonly warning: Option.Option<string>;
-}
-
-export type BoundedRecallSemanticRetrieval<A> =
-  | {readonly status: 'completed'; readonly value: A}
-  | {readonly cause: Cause.Cause<unknown>; readonly status: 'failed'}
-  | {readonly status: 'timed-out'};
-
-export type GatedRecallSemanticRetrieval<A> = BoundedRecallSemanticRetrieval<A> | {readonly status: 'cooldown'};
-
-export interface McpRecallSemanticScoresResult {
-  readonly result: RecallSemanticScoresResult;
-  readonly status: 'available' | 'failed' | 'timed-out' | 'unavailable';
-}
-
-type McpReadOnlySemanticScoresAttempt =
-  | {
-      readonly corpusGeneration: string;
-      readonly scores: ReadonlyMap<string, number> | undefined;
-      readonly state: 'available';
-    }
-  | {readonly manifest: LocalModelManifest; readonly state: 'refreshable'}
-  | {readonly state: 'structurally-unavailable'}
-  | {readonly state: 'unavailable'};
-
-export function emptyRecallSemanticScoresResult(
-  warning: Option.Option<string> = Option.none(),
-): RecallSemanticScoresResult {
-  return {
-    corpusGeneration: Option.none(),
-    scores: Option.none(),
-    warning,
-  };
-}
-
-export function boundedRecallSemanticRetrieval<A, E, R>(
-  retrieval: Effect.Effect<A, E, R>,
-): Effect.Effect<BoundedRecallSemanticRetrieval<A>, E, R> {
-  return retrieval.pipe(
-    Effect.map(value => ({status: 'completed' as const, value})),
-    Effect.catchCauseIf(
-      cause => !Cause.hasInterrupts(cause) && !hasReadCleanupUnconfirmed(cause),
-      cause => Effect.succeed({cause: cause, status: 'failed' as const}),
-    ),
-    Effect.catchCause(cause => Effect.failCause(cause)),
-    work =>
-      Effect.flatMap(CallerReadCancellation, caller =>
-        caller
-          ? work
-          : work.pipe(
-              Effect.timeoutOrElse({
-                duration: MCP_RECALL_SEMANTIC_RETRIEVAL_TIMEOUT_MILLISECONDS,
-                orElse: () => Effect.succeed({status: 'timed-out' as const}),
-              }),
-            ),
-      ),
-  );
-}
-
-export function createMcpRecallSemanticRetrievalGate() {
-  const retryAfterByRuntime = new WeakMap<object, {readonly deadline: bigint}>();
-  const cooldownNanos = BigInt(MCP_RECALL_SEMANTIC_TIMEOUT_COOLDOWN_MILLISECONDS) * 1_000_000n;
-  return <A, E, R>(
-    runtime: object,
-    retrieval: Effect.Effect<A, E, R>,
-  ): Effect.Effect<GatedRecallSemanticRetrieval<A>, E, R> =>
-    Effect.gen(function* () {
-      if (yield* CallerReadCancellation) return yield* boundedRecallSemanticRetrieval(retrieval);
-      const now = yield* Clock.monotonicTimeNanos;
-      const previousCooldown = retryAfterByRuntime.get(runtime);
-      if (previousCooldown && previousCooldown.deadline > now) return {status: 'cooldown'} as const;
-      const result = yield* boundedRecallSemanticRetrieval(retrieval);
-      if (result.status === 'timed-out') {
-        retryAfterByRuntime.set(runtime, {deadline: (yield* Clock.monotonicTimeNanos) + cooldownNanos});
-      } else if (retryAfterByRuntime.get(runtime) === previousCooldown) {
-        retryAfterByRuntime.delete(runtime);
-      }
-      return result;
-    });
-}
-
-const mcpRecallSemanticRetrievalGate = createMcpRecallSemanticRetrievalGate();
-
-/**
- * MCP recall uses only the already-active lexical/vector generations. It never
- * builds, repairs, or retries derived storage while a client request is open.
- */
-export const loadMcpRecallSemanticScoresResult = Effect.fn('recall.loadMcpSemanticScoresResult')(function* (
-  config: RecallRuntimeConfig,
-  query: string,
-  limit: number,
-  eligibility?: RecallEligibilityPolicy,
-  allowedUriScopes?: readonly string[],
-  preflight?: RecallSemanticPreflight,
-) {
-  const semanticLimit = recallIndexPreselectionLimit(limit);
-  const runtime = yield* LocalModelRuntime;
-  const attempt = yield* mcpRecallSemanticRetrievalGate(
-    runtime,
-    loadReadOnlySemanticScoresAttempt(config, query, semanticLimit, eligibility, allowedUriScopes, preflight),
-  );
-  if (attempt.status === 'cooldown') {
-    return {
-      result: emptyRecallSemanticScoresResult(Option.some(semanticRecallCooldownWarning())),
-      status: 'unavailable',
-    } satisfies McpRecallSemanticScoresResult;
-  }
-  if (attempt.status === 'timed-out') {
-    return {
-      result: emptyRecallSemanticScoresResult(Option.some(semanticRecallTimeoutWarning())),
-      status: 'timed-out',
-    } satisfies McpRecallSemanticScoresResult;
-  }
-  if (attempt.status === 'failed') {
-    return {
-      result: emptyRecallSemanticScoresResult(Option.some(semanticRecallFailureWarning(attempt.cause))),
-      status: 'failed',
-    } satisfies McpRecallSemanticScoresResult;
-  }
-  if (attempt.value.state === 'refreshable') {
-    return yield* scheduleMcpRecallBackgroundRefresh(config, attempt.value.manifest).pipe(
-      Effect.map(schedule => ({
-        result: emptyRecallSemanticScoresResult(Option.some(semanticRecallRefreshingWarning(schedule))),
-        status: 'unavailable' as const,
-      })),
-      Effect.catchCause(cause => {
-        const reason = cause.reasons[0];
-        if (cause.reasons.length !== 1 || !Cause.isFailReason(reason)) return Effect.failCause(cause);
-        if (!Schema.is(RecallEmbeddingDemandUnavailable)(reason.error)) return Effect.failCause(cause);
-        const error = reason.error;
-        const warning = `Local AI recall warning: background refresh enqueue not confirmed [${error.stage ?? 'unknown'}/${error.reason ?? 'unknown'}]; lexical recall continued.`;
-        return Effect.succeed({
-          result: emptyRecallSemanticScoresResult(Option.some(warning)),
-          status: 'failed' as const,
-        });
-      }),
-    );
-  }
-  if (attempt.value.state === 'structurally-unavailable') {
-    return {
-      result: emptyRecallSemanticScoresResult(Option.some(semanticRecallStructuralWarning())),
-      status: 'failed',
-    } satisfies McpRecallSemanticScoresResult;
-  }
-  if (attempt.value.state === 'unavailable' || attempt.value.scores === undefined) {
-    return {result: emptyRecallSemanticScoresResult(), status: 'unavailable'} satisfies McpRecallSemanticScoresResult;
-  }
-  return {
-    result: {
-      corpusGeneration: Option.some(attempt.value.corpusGeneration),
-      scores: Option.fromNullishOr(attempt.value.scores),
-      warning: Option.none(),
-    },
-    status: 'available',
-  } satisfies McpRecallSemanticScoresResult;
-});
-
-const loadReadOnlySemanticScoresAttempt = Effect.fn('recall.loadReadOnlySemanticScoresAttempt')(function* (
-  config: RecallRuntimeConfig,
-  query: string,
-  limit: number,
-  eligibility?: RecallEligibilityPolicy,
-  allowedUriScopes?: readonly string[],
-  preflight?: RecallSemanticPreflight,
-) {
-  const selection = yield* readModelSelection(config.agentContextHome);
-  const modelId = selectedEmbeddingModelId(selection, 'recall');
-  if (!modelId) return {state: 'unavailable'} satisfies McpReadOnlySemanticScoresAttempt;
-  const catalog = yield* LocalModelCatalog;
-  const manifest = yield* catalog.get(modelId);
-  if (manifest.role !== 'embedding') return {state: 'unavailable'} satisfies McpReadOnlySemanticScoresAttempt;
-  const store = yield* LocalModelStore;
-  const installed = yield* store.status(config.agentContextHome, manifest);
-  if (!installed.installed) return {state: 'unavailable'} satisfies McpReadOnlySemanticScoresAttempt;
-  if (
-    recallPreflightSkipsSemanticRead(
-      {
-        id: manifest.id,
-        sha256: manifest.sha256,
-        dimensions: manifest.dimensions ?? 0,
-        promptPrefixes: manifest.promptPrefixes,
-      },
-      preflight,
-    )
-  )
-    return {manifest, state: 'refreshable'} satisfies McpReadOnlySemanticScoresAttempt;
-  if (Option.isSome(yield* Effect.serviceOption(RecallReadyReadBoundary))) {
-    const snapshot = yield* selectedSemanticScoreSnapshot(config, query, {allowedUriScopes, eligibility, limit});
-    if (snapshot === undefined) return {state: 'unavailable'} satisfies McpReadOnlySemanticScoresAttempt;
-    if (snapshot.readiness === 'missing' || snapshot.readiness === 'stale')
-      return {manifest, state: 'refreshable'} satisfies McpReadOnlySemanticScoresAttempt;
-    if (snapshot.readiness !== 'current' || snapshot.corpusGeneration === undefined)
-      return {state: 'structurally-unavailable'} satisfies McpReadOnlySemanticScoresAttempt;
-    return {
-      state: 'available',
-      corpusGeneration: snapshot.corpusGeneration,
-      scores: snapshot.scores,
-    } satisfies McpReadOnlySemanticScoresAttempt;
-  }
-  const lexicalStatus = yield* recallIndexStatus(config, false);
-  const lexicalDisposition = lexicalRefreshDisposition(lexicalStatus);
-  if (lexicalDisposition === 'refreshable') {
-    return {manifest, state: 'refreshable'} satisfies McpReadOnlySemanticScoresAttempt;
-  }
-  if (lexicalDisposition === 'unsafe' || !('generation' in lexicalStatus) || !lexicalStatus.generation) {
-    return {state: 'structurally-unavailable'} satisfies McpReadOnlySemanticScoresAttempt;
-  }
-  const corpusGeneration = lexicalStatus.generation;
-  const vectorReadiness = yield* vectorIndexGenerationReadiness(
-    config.agentContextHome,
-    manifest,
-    corpusGeneration,
-    yield* loadRecallVectorAuthorizationKey(config),
-    config,
-  );
-  if (vectorReadiness === 'corrupt') {
-    return {state: 'structurally-unavailable'} satisfies McpReadOnlySemanticScoresAttempt;
-  }
-  if (vectorReadiness === 'missing' || vectorReadiness === 'stale') {
-    return {manifest, state: 'refreshable'} satisfies McpReadOnlySemanticScoresAttempt;
-  }
-  return yield* selectedSemanticScores(config, query, {
-    corpusGeneration,
-    currentCorpusGeneration: () => currentRecallCorpusGeneration(config),
-    allowedUriScopes,
-    eligibility,
-    limit,
-  }).pipe(
-    Effect.map(scores =>
-      scores === undefined
-        ? {manifest, state: 'refreshable' as const}
-        : {corpusGeneration, scores, state: 'available' as const},
-    ),
-    Effect.catchCauseIf(
-      cause =>
-        cause.reasons.length > 0 &&
-        EffectArray.every(
-          cause.reasons,
-          reason => Cause.isFailReason(reason) && Schema.is(VectorCorpusGenerationChanged)(reason.error),
-        ),
-      () => Effect.succeed({manifest, state: 'refreshable' as const}),
-    ),
-  );
-});
-
-const semanticResultMatchesLexicalSnapshot = Effect.fn('recall.semanticResultMatchesLexicalSnapshot')(function* (
-  config: RecallRuntimeConfig,
-  semanticResult: RecallSemanticScoresResult,
-  snapshotGenerations: readonly string[],
-) {
-  if (Option.isNone(semanticResult.scores)) return true;
-  if (Option.isNone(semanticResult.corpusGeneration)) return false;
-  const semanticGeneration = semanticResult.corpusGeneration.value;
-  if (snapshotGenerations.length !== 1 || snapshotGenerations[0] !== semanticGeneration) {
-    return false;
-  }
-  const currentGeneration = yield* currentRecallCorpusGeneration(config);
-  return Option.isSome(currentGeneration) && currentGeneration.value === semanticGeneration;
-});
-
-export const loadRecallSemanticScoresResult = Effect.fn('recall.loadSemanticScoresResult')(function* (
-  config: RecallRuntimeConfig,
-  query: string,
-  limit: number,
-  eligibility?: RecallEligibilityPolicy,
-  allowedUriScopes?: readonly string[],
-  preflight?: RecallSemanticPreflight,
-) {
-  return yield* Effect.gen(function* () {
-    const selection = yield* readModelSelection(config.agentContextHome);
-    const modelId = selectedEmbeddingModelId(selection, 'recall');
-    if (!modelId) return undefined;
-    const catalog = yield* LocalModelCatalog;
-    const manifest = yield* catalog.get(modelId);
-    if (manifest.role !== 'embedding') return undefined;
-    const store = yield* LocalModelStore;
-    const installed = yield* store.status(config.agentContextHome, manifest);
-    if (!installed.installed) return undefined;
-    if (
-      recallPreflightSkipsSemanticRead(
-        {
-          id: manifest.id,
-          sha256: manifest.sha256,
-          dimensions: manifest.dimensions ?? 0,
-          promptPrefixes: manifest.promptPrefixes,
-        },
-        preflight,
-      )
-    ) {
-      yield* scheduleMcpRecallBackgroundRefresh(config, manifest);
-      return undefined;
-    }
-    const semanticLimit = recallIndexPreselectionLimit(limit);
-    return yield* loadCurrentSemanticScores(config, manifest, query, semanticLimit, eligibility, allowedUriScopes);
-  }).pipe(
-    Effect.map(snapshot =>
-      snapshot === undefined
-        ? emptyRecallSemanticScoresResult()
-        : ({
-            corpusGeneration: Option.some(snapshot.corpusGeneration),
-            scores: Option.fromNullishOr(snapshot.scores),
-            warning: Option.none(),
-          } satisfies RecallSemanticScoresResult),
-    ),
-    Effect.catchCauseIf(
-      cause => !Cause.hasInterrupts(cause) && !hasReadCleanupUnconfirmed(cause),
-      cause => Effect.succeed(emptyRecallSemanticScoresResult(Option.some(semanticRecallFailureWarning(cause)))),
-    ),
-  );
-});
-
-const loadCurrentSemanticScores = Effect.fn('recall.loadCurrentSemanticScores')(function* (
-  config: RecallRuntimeConfig,
-  manifest: LocalModelManifest,
-  query: string,
-  limit: number,
-  eligibility?: RecallEligibilityPolicy,
-  allowedUriScopes?: readonly string[],
-) {
-  for (let retry = 0; retry <= SEMANTIC_GENERATION_RETRY_LIMIT; retry += 1) {
-    const attempt = yield* loadSemanticScoresAttempt(
-      config,
-      manifest,
-      query,
-      limit,
-      eligibility,
-      allowedUriScopes,
-    ).pipe(Effect.result);
-    if (Result.isSuccess(attempt)) return attempt.success;
-    if (Schema.is(VectorCorpusGenerationChanged)(attempt.failure) && retry < SEMANTIC_GENERATION_RETRY_LIMIT) {
-      continue;
-    }
-    return yield* Effect.fail(attempt.failure);
-  }
-  return yield* Effect.die(new Error('Semantic generation retry loop exhausted without a result.'));
-});
-
-const loadSemanticScoresAttempt = Effect.fn('recall.loadSemanticScoresAttempt')(function* (
-  config: RecallRuntimeConfig,
-  manifest: LocalModelManifest,
-  query: string,
-  limit: number,
-  eligibility?: RecallEligibilityPolicy,
-  allowedUriScopes?: readonly string[],
-) {
-  if (Option.isSome(yield* Effect.serviceOption(RecallReadyReadBoundary))) {
-    const snapshot = yield* selectedSemanticScoreSnapshot(config, query, {allowedUriScopes, eligibility, limit});
-    if (snapshot?.readiness === 'corrupt')
-      return yield* VectorIndexCorrupt.make({
-        modelId: manifest.id,
-        message: 'Semantic ready storage failed read-only validation.',
-      });
-    if (snapshot?.readiness === 'missing' || snapshot?.readiness === 'stale')
-      yield* scheduleMcpRecallBackgroundRefresh(config, manifest);
-    return snapshot?.corpusGeneration === undefined
-      ? undefined
-      : {corpusGeneration: snapshot.corpusGeneration, scores: snapshot.scores};
-  }
-  const fence = () => currentRecallCorpusGeneration(config);
-  const snapshot = yield* readRecallIndexData(config, {
-    includeInactive: false,
-    limit: 0,
-    query: '',
-  });
-  const corpusGeneration = snapshot.generation;
-  if (
-    !(yield* vectorIndexMatchesGeneration(
-      config.agentContextHome,
-      manifest,
-      corpusGeneration,
-      yield* loadRecallVectorAuthorizationKey(config),
-      config,
-    ))
-  ) {
-    yield* scheduleMcpRecallBackgroundRefresh(config, manifest);
-    return {corpusGeneration, scores: undefined};
-  }
-  return yield* selectedSemanticScores(config, query, {
-    allowedUriScopes,
-    corpusGeneration,
-    currentCorpusGeneration: fence,
-    eligibility,
-    limit,
-  }).pipe(
-    Effect.tap(scores => (scores === undefined ? scheduleMcpRecallBackgroundRefresh(config, manifest) : Effect.void)),
-    Effect.map(scores => ({corpusGeneration, scores})),
-  );
-});
-
-export const loadRecallSemanticScores = Effect.fn('recall.loadSemanticScores')(function* (
-  config: RecallRuntimeConfig,
-  query: string,
-  limit: number,
-  eligibility?: RecallEligibilityPolicy,
-  allowedUriScopes?: readonly string[],
-) {
-  const result = yield* loadRecallSemanticScoresResult(config, query, limit, eligibility, allowedUriScopes);
-  if (Option.isSome(result.warning)) yield* Console.warn(result.warning.value);
-  return Option.getOrUndefined(result.scores);
-});
-
-function semanticRecallFailureWarning(cause: Cause.Cause<unknown>): string {
-  const error = Cause.squash(cause);
-  const failureType =
-    typeof error === 'object' &&
-    error !== null &&
-    '_tag' in error &&
-    error._tag === 'EmbeddingFailed' &&
-    'message' in error &&
-    typeof error.message === 'string' &&
-    Effect2.pipe(error.message, EffectString.includes('isolated worker retry was exhausted'))
-      ? 'LocalModelWorkerRetryExhausted'
-      : semanticRecallFailureType(error);
-  return (
-    `Local AI recall warning: semantic retrieval failed (${failureType}); deterministic lexical recall continued. ` +
-    'Run threadnote doctor --dry-run if this repeats.'
-  );
-}
-
-function semanticRecallTimeoutWarning(): string {
-  return (
-    `Local AI recall warning: semantic retrieval timed out after ${MCP_RECALL_SEMANTIC_RETRIEVAL_TIMEOUT_MILLISECONDS}ms; ` +
-    'deterministic lexical recall continued. Run threadnote doctor --dry-run if this repeats.'
-  );
-}
-
-function semanticRecallCooldownWarning(): string {
-  return (
-    'Local AI recall warning: semantic retrieval was skipped after a recent timeout; ' +
-    `deterministic lexical recall continued. Retry after ${MCP_RECALL_SEMANTIC_TIMEOUT_COOLDOWN_MILLISECONDS / 1_000}s ` +
-    'or run threadnote doctor --dry-run if this repeats.'
-  );
-}
-
-function semanticRecallRefreshingWarning(_schedule: McpRecallBackgroundRefreshSchedule): string {
-  return 'Local AI recall warning: semantic indexes are stale or missing; background refresh is queued for idle. Lexical recall continued without waiting.';
-}
-
-function semanticRecallStructuralWarning(): string {
-  return (
-    'Local AI recall warning: semantic index storage failed read-only validation. Lexical recall continued; ' +
-    'no automatic repair ran. Run threadnote doctor --dry-run.'
-  );
-}
-
-function semanticRecallFailureType(error: unknown): string {
-  if (typeof error !== 'object' || error === null || !('_tag' in error) || typeof error._tag !== 'string') {
-    return 'SemanticRecallUnavailable';
-  }
-  return [
-    'EmbeddingFailed',
-    'InferenceInterrupted',
-    'InsufficientMemory',
-    'ModelLoadFailed',
-    'ModelNotInstalled',
-    'NativeRuntimeUnavailable',
-    'UnsupportedNativeRuntime',
-    'VectorIndexCorrupt',
-  ].includes(error._tag)
-    ? error._tag
-    : 'SemanticRecallUnavailable';
-}
 
 /** Reuse the existing cache from the completed authorized baseline before closing reads. */
 export const warmRecallReranker = Effect.fn('recall.warmReranker')(function* (

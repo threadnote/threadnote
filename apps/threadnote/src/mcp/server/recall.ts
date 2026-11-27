@@ -133,12 +133,14 @@ import {
   prepareRecallSemanticPreflight,
   warmRecallReranker,
   loadRecallExpansionVocabulary,
-  loadMcpRecallSemanticScoresResult,
   recallSelectionAnchorIds,
   recallSelectionQueries,
   selectedRecallCandidateUris,
-  type McpRecallSemanticScoresResult,
 } from '@threadnote/recall/runtime';
+import {
+  loadMcpRecallSemanticScoresResult,
+  type McpRecallSemanticScoresResult,
+} from '@threadnote/recall/semantic_scores';
 import {
   McpServerOperationError,
   type RecallProgressTiming,

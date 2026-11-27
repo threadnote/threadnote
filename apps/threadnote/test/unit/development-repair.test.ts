@@ -39,9 +39,8 @@ import {
   rebuildVectorIndex,
   loadRecallVectorAuthorizationKey,
   VectorCorpusGenerationChanged,
-  vectorIndexMatchesGeneration,
-  vectorIndexGenerationReadiness,
 } from '@threadnote/recall/vector-index';
+import {vectorIndexMatchesGeneration, vectorIndexGenerationReadiness} from '@threadnote/recall/vector/semantic-read';
 import {readRecallEmbeddingDemand} from '@threadnote/recall/background/demand';
 import {writeModelSelection} from '@threadnote/inference/models/selection';
 import {EmbeddingFailed, InferenceInterrupted, ModelLoadFailed} from '@threadnote/inference/engine/errors';

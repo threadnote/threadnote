@@ -116,6 +116,18 @@ describe('negative metadata access bounds', () => {
       }),
     );
 
+    // P3-A1 prerequisite: an older generation that may serve a masked read is not a definitive negative.
+    it.effect('keeps an older authorization-bound generation unknown and a legacy identity stale', () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        expect(yield* negativeSemanticReadinessHint(f.config, manifest, recallVectorStorage)).toBe('stale');
+        yield* useDatabase(f.vector, db =>
+          db.query('UPDATE vector_generations SET job_id=?').run(`idle-recall-v2:${EffectString.repeat(64)('a')}`),
+        );
+        expect(yield* negativeSemanticReadinessHint(f.config, manifest, recallVectorStorage)).toBe('unknown');
+      }),
+    );
+
     for (const column of [
       'corpus_generation',
       'job_id',

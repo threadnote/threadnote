@@ -1,4 +1,3 @@
-import {VECTOR_SCOPE_MAPPING_VERSION} from './vector/negative-readiness.js';
 import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
@@ -7,24 +6,12 @@ import * as SqlClient from 'effect/sql/SqlClient';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
-import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/models/catalog';
+import {type LocalModelManifest} from '@threadnote/inference/models/catalog';
 import {LocalModelStore} from '@threadnote/inference/models/store';
-import {readModelSelection, selectedEmbeddingModelId} from '@threadnote/inference/models/selection';
-import {recallIndexScopeProject, type RecallEligibilityPolicy} from './eligibility.js';
-import {recallApprovedAuthoritative, recallEligibilityPredicate} from './index/eligibility.js';
-import {
-  combineRecallSqlPredicates,
-  recallUriMatchesScopes,
-  recallUriScopePredicate,
-  type RecallSqlPredicate,
-} from './index/scope.js';
+import {recallIndexScopeProject} from './eligibility.js';
+import {recallApprovedAuthoritative} from './index/eligibility.js';
 import type {RecallCandidate} from './rank.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import {
-  externalResourceAccess,
-  isExternalResourceUri,
-  loadExternalResourceAccess,
-} from '@threadnote/store/external-resource';
 import {chunkRecallDocument, RECALL_CHUNKER_VERSION, type RecallChunk} from './chunker.js';
 import {normalizeVector} from '@threadnote/inference/vector-search';
 import {
@@ -36,63 +23,20 @@ import {
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
-import {
-  loadRecallVectorAuthorizationKey,
-  recallVectorAuthorizationKey,
-  recallVectorPreparationIdentity,
-  recallVectorPreparationMatches,
-  recallVectorPreparationJobId,
-} from './vector/preparation-identity.js';
+import {loadRecallVectorAuthorizationKey} from './vector/preparation-identity.js';
 export {loadRecallVectorAuthorizationKey};
 import {
-  RecallReadyReadBoundary,
-  RecallReadyReadBoundaryError,
-  recallReadyReadRequestSchema,
-  recallVectorQueryStateSchema,
-  type RecallReadyReadRequest,
-  type RecallVectorReadModel,
-  type RecallVectorReadState,
-} from './read_boundary.js';
-import {readRecallIndexData, type RecallIndexConfig} from './index.js';
-import {requiredNativeVectorReader, runNativeVectorRead} from './vector/native-reader.js';
-import type {NativeVectorReadRequest} from './vector/native-reader-contract.js';
-type VectorReadModel = Pick<LocalModelManifest, 'id' | 'sha256' | 'dimensions' | 'promptPrefixes'>;
-type VectorReadConfig = {
+  VECTOR_SCOPE_MAPPING_VERSION,
+  recallVectorGenerationMatchesModel,
+  type RecallVectorModelExpectation,
+} from './vector/generation-compatibility.js';
+export type VectorReadModel = Pick<LocalModelManifest, 'id' | 'sha256' | 'dimensions' | 'promptPrefixes'>;
+export type VectorReadConfig = {
   readonly agentContextHome: string;
   readonly account?: string;
   readonly user?: string;
   readonly manifestPath?: string;
 };
-const wireVectorModel = (manifest: VectorReadModel): RecallVectorReadModel => ({
-  id: manifest.id,
-  sha256: manifest.sha256,
-  dimensions: manifest.dimensions ?? 0,
-  ...(manifest.promptPrefixes === undefined ? {} : {promptPrefixes: manifest.promptPrefixes}),
-});
-
-const throughVectorReadBoundary = Effect.fn('vectorIndex.throughReadyReadBoundary')(function* <A>(
-  boundary: ReturnType<typeof RecallReadyReadBoundary.of>,
-  request: RecallReadyReadRequest,
-  decode: (value: unknown) => A,
-) {
-  const checked = yield* Schema.decodeEffect(recallReadyReadRequestSchema, {onExcessProperty: 'error'})({
-    ...request,
-    config: {
-      account: request.config.account,
-      user: request.config.user,
-      agentContextHome: request.config.agentContextHome,
-      ...(request.config.manifestPath === undefined ? {} : {manifestPath: request.config.manifestPath}),
-    },
-  });
-  const response = yield* boundary.read(checked);
-  if (response.operation !== request.operation || response.outcome !== 'success')
-    return yield* RecallReadyReadBoundaryError.make({reason: 'worker-failed'});
-  return yield* Effect.try({
-    try: () => decode(response.value),
-    catch: () => RecallReadyReadBoundaryError.make({reason: 'invalid-protocol'}),
-  });
-});
-
 const VECTOR_INDEX_DATABASE_VERSION = 5;
 
 const VECTOR_INDEX_EMBED_BATCH_SIZE = 256;
@@ -121,7 +65,7 @@ const VECTOR_INDEX_SCHEMA_COLUMNS = {
   vector_values: ['id', 'vector_key', 'vector'],
 } as const;
 
-interface VectorGenerationRow {
+export interface VectorGenerationRow {
   readonly actual_chunk_count: number;
   readonly chunk_count: number;
   readonly chunker_version: number;
@@ -182,8 +126,6 @@ export interface VectorIndexStatus {
   readonly reusedChunkCount?: number;
 }
 
-export type VectorIndexGenerationReadiness = 'corrupt' | 'current' | 'missing' | 'stale';
-
 export class VectorIndexCorrupt extends Schema.TaggedError<VectorIndexCorrupt, {readonly brand: unique symbol}>()(
   'VectorIndexCorrupt',
   {
@@ -213,7 +155,7 @@ export type VectorIndexProgress =
       readonly phase: 'activating';
     };
 
-interface VectorCorpusGenerationOptions<R> {
+export interface VectorCorpusGenerationOptions<R> {
   readonly corpusGeneration?: string;
   readonly currentCorpusGeneration?: () => Effect.Effect<Option.Option<string>, unknown, R>;
 }
@@ -222,24 +164,9 @@ interface VectorIndexBuildOptions<R> extends VectorCorpusGenerationOptions<R> {
   readonly onProgress?: (progress: VectorIndexProgress) => Effect.Effect<void, unknown>;
 }
 
-/** Semantic fences run in the caller's ambient context, outside the native snapshot.
- * Build/promotion callbacks retain their separate vector-SqlClient transaction context.
- */
-interface SemanticCorpusGenerationOptions<R> {
-  readonly corpusGeneration?: string;
-  readonly currentCorpusGeneration?: () => Effect.Effect<Option.Option<string>, unknown, R>;
-}
-
-interface SemanticScoreOptions<R> extends SemanticCorpusGenerationOptions<R> {
-  readonly allowedUriScopes?: readonly string[];
-  readonly eligibility?: RecallEligibilityPolicy;
-  readonly limit?: number;
-}
-
-const verifyCurrentCorpusGeneration = Effect.fn('vectorIndex.verifyCurrentCorpusGeneration')(function* <R = never>(
-  manifest: VectorReadModel,
-  options: VectorCorpusGenerationOptions<R>,
-) {
+export const verifyCurrentCorpusGeneration = Effect.fn('vectorIndex.verifyCurrentCorpusGeneration')(function* <
+  R = never,
+>(manifest: VectorReadModel, options: VectorCorpusGenerationOptions<R>) {
   if (options.currentCorpusGeneration === undefined) return;
   const requestedGeneration = options.corpusGeneration;
   if (requestedGeneration === undefined) {
@@ -254,22 +181,6 @@ const verifyCurrentCorpusGeneration = Effect.fn('vectorIndex.verifyCurrentCorpus
     modelId: manifest.id,
     requestedGeneration,
   });
-});
-
-const verifySelectedCorpusGeneration = Effect.fn('vectorIndex.verifySelectedCorpusGeneration')(function* <R = never>(
-  active: VectorGenerationRow,
-  manifest: VectorReadModel,
-  options: VectorCorpusGenerationOptions<R>,
-) {
-  const requestedGeneration = options.corpusGeneration;
-  if (requestedGeneration !== undefined && active.corpus_generation !== requestedGeneration) {
-    return yield* VectorCorpusGenerationChanged.make({
-      message: 'The active vector index no longer matches the requested lexical recall corpus.',
-      modelId: manifest.id,
-      requestedGeneration,
-    });
-  }
-  yield* verifyCurrentCorpusGeneration(manifest, options);
 });
 
 export const rebuildVectorIndex = Effect.fn('vectorIndex.rebuild')(function* <R = never>(
@@ -320,62 +231,13 @@ export const ensureVectorIndex = Effect.fn('vectorIndex.ensure')(function* <R = 
   );
 });
 
-export const vectorIndexMatchesGeneration = Effect.fn('vectorIndex.matchesGeneration')(function* (
-  home: string,
-  manifest: LocalModelManifest,
-  corpusGeneration: string,
-  authorizationKey?: string,
-  readConfig?: RecallIndexConfig,
-) {
-  return (
-    (yield* vectorIndexGenerationReadiness(home, manifest, corpusGeneration, authorizationKey, readConfig)) ===
-    'current'
-  );
-});
-
-/**
- * Read only the active generation metadata and retain the distinction between
- * an absent/stale derived index and structural storage failure. Callers may
- * safely schedule ordinary generation work for missing/stale state, but must
- * keep corruption behind an explicit repair boundary.
- */
-export const vectorIndexGenerationReadiness = Effect.fn('vectorIndex.generationReadiness')(function* (
-  home: string,
-  manifest: VectorReadModel,
-  corpusGeneration: string,
-  authorizationKey?: string,
-  readConfig?: RecallIndexConfig,
-) {
-  const boundary = yield* Effect.serviceOption(RecallReadyReadBoundary);
-  if (Option.isSome(boundary)) {
-    if (readConfig === undefined) return yield* RecallReadyReadBoundaryError.make({reason: 'invalid-protocol'});
-    if (readConfig.agentContextHome !== home)
-      return yield* RecallReadyReadBoundaryError.make({reason: 'invalid-protocol'});
-    return yield* throughVectorReadBoundary(
-      boundary.value,
-      {
-        operation: 'vector-readiness',
-        config: readConfig,
-        options: {
-          model: wireVectorModel(manifest),
-          corpusGeneration,
-          ...(authorizationKey === undefined ? {} : {authorizationKey}),
-        },
-      },
-      value => Schema.decodeUnknownSync(Schema.Literals(['current', 'missing', 'stale', 'corrupt']))(value),
-    );
-  }
-  const active = yield* readActiveVectorGeneration(home, manifest).pipe(Effect.result);
-  if (Result.isFailure(active)) return 'corrupt' as const;
-  if (!active.success) return 'missing' as const;
-  return generationMatchesCorpus(active.success, manifest, corpusGeneration) &&
-    (authorizationKey === undefined ||
-      recallVectorPreparationMatches(
-        active.success.job_id,
-        recallVectorPreparationIdentity(corpusGeneration, authorizationKey, manifest.id, embeddingRecipe(manifest)),
-      ))
-    ? ('current' as const)
-    : ('stale' as const);
+export const vectorReadExpectation = (manifest: VectorReadModel): RecallVectorModelExpectation => ({
+  modelId: manifest.id,
+  modelSha256: manifest.sha256,
+  dimensions: manifest.dimensions,
+  embeddingRecipe: embeddingRecipe(manifest),
+  chunkerVersion: RECALL_CHUNKER_VERSION,
+  scopeMappingVersion: VECTOR_SCOPE_MAPPING_VERSION,
 });
 
 const currentVectorIndexStatus = Effect.fn('vectorIndex.currentStatus')(function* <R = never>(
@@ -610,291 +472,6 @@ const rebuildVectorIndexUnlocked = Effect.fn('vectorIndex.rebuildUnlocked')(func
   return status;
 });
 
-export const selectedSemanticScoreSnapshot = Effect.fn('vectorIndex.selectedSemanticScoreSnapshot')(function* <
-  R = never,
->(config: VectorReadConfig, query: string, options: SemanticScoreOptions<R> = {}) {
-  const selection = yield* readModelSelection(config.agentContextHome);
-  const modelId = selectedEmbeddingModelId(selection, 'recall');
-  if (!modelId) return undefined;
-  const catalog = yield* LocalModelCatalog;
-  const manifest = yield* catalog.get(modelId);
-  if (!manifest.dimensions || manifest.role !== 'embedding') return undefined;
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const databasePath = vectorDatabasePath(path, config.agentContextHome, manifest.id);
-  if (!(yield* fs.exists(databasePath))) return undefined;
-  const store = yield* LocalModelStore;
-  const runtime = yield* LocalModelRuntime;
-  const status = yield* store.status(config.agentContextHome, manifest);
-  if (!status.installed) return undefined;
-
-  const boundary = yield* Effect.serviceOption(RecallReadyReadBoundary);
-  const wireConfig =
-    config.account !== undefined && config.user !== undefined
-      ? {
-          account: config.account,
-          user: config.user,
-          agentContextHome: config.agentContextHome,
-          manifestPath: config.manifestPath,
-        }
-      : undefined;
-  const nativeRead = Option.getOrUndefined(boundary);
-  if (nativeRead !== undefined && wireConfig === undefined)
-    return yield* RecallReadyReadBoundaryError.make({reason: 'invalid-protocol'});
-  const useBoundary = nativeRead !== undefined && wireConfig !== undefined;
-  const opening = useBoundary
-    ? yield* throughVectorReadBoundary(
-        nativeRead,
-        {
-          operation: 'vector-state',
-          config: wireConfig,
-          options: {
-            model: wireVectorModel(manifest),
-            ...(options.corpusGeneration === undefined ? {} : {corpusGeneration: options.corpusGeneration}),
-          },
-        },
-        value => Schema.decodeUnknownSync(recallVectorQueryStateSchema)(value),
-      )
-    : undefined;
-  if (opening !== undefined && opening.readiness !== 'current')
-    return {readiness: opening.readiness, corpusGeneration: opening.corpusGeneration, scores: undefined};
-  const state =
-    opening === undefined ? yield* readSelectedSemanticVectorState(config, manifest, options) : opening.state;
-  if (state === undefined) return undefined;
-  // Custom parent callbacks remain authoritative in addition to the worker's production fence.
-  yield* verifyCurrentCorpusGeneration(manifest, options);
-  const normalizedQuery =
-    state.chunkCount === 0
-      ? Option.none<readonly number[]>()
-      : Option.some(
-          normalizeVector(
-            (yield* runtime.embedMany({
-              inputs: [`${manifest.promptPrefixes?.query ?? ''}${query}`],
-              manifest,
-              modelPath: status.path,
-            }))[0],
-          ),
-        );
-
-  const scores = useBoundary
-    ? yield* throughVectorReadBoundary(
-        nativeRead,
-        {
-          operation: 'vector-scores',
-          config: wireConfig,
-          options: {
-            model: wireVectorModel(manifest),
-            state,
-            ...(Option.isNone(normalizedQuery) ? {} : {queryVector: normalizedQuery.value}),
-            ...(options.corpusGeneration === undefined ? {} : {corpusGeneration: options.corpusGeneration}),
-            ...(options.eligibility === undefined ? {} : {eligibility: options.eligibility}),
-            ...(options.allowedUriScopes === undefined ? {} : {allowedUriScopes: options.allowedUriScopes}),
-            ...(options.limit === undefined ? {} : {limit: options.limit}),
-          },
-        },
-        value => {
-          const decoded = Schema.decodeUnknownSync(
-            Schema.UndefinedOr(Schema.Array(Schema.Tuple([Schema.String, Schema.Finite]))),
-          )(value);
-          return decoded === undefined ? undefined : new Map(decoded);
-        },
-      )
-    : yield* readSelectedSemanticVectorScores(config, manifest, state, normalizedQuery, options);
-  yield* verifyCurrentCorpusGeneration(manifest, options);
-  return {readiness: 'current' as const, corpusGeneration: state.corpusGeneration ?? options.corpusGeneration, scores};
-});
-
-/** Stable scores-only API; query inference remains in the caller's foreground runtime. */
-export const selectedSemanticScores = Effect.fn('vectorIndex.selectedSemanticScores')(function* <R = never>(
-  config: VectorReadConfig,
-  query: string,
-  options: SemanticScoreOptions<R> = {},
-) {
-  return (yield* selectedSemanticScoreSnapshot(config, query, options))?.scores;
-});
-
-/** Model-free opening proof; the child independently checks current authorization and corpus. */
-export const readSelectedSemanticVectorState = Effect.fn('vectorIndex.readSelectedState')(function* <R = never>(
-  config: VectorReadConfig,
-  manifest: VectorReadModel,
-  options: SemanticCorpusGenerationOptions<R> = {},
-) {
-  const externalLocation =
-    config.account !== undefined && config.user !== undefined
-      ? {home: config.agentContextHome, account: config.account, user: config.user}
-      : undefined;
-  const externalResources = externalLocation === undefined ? {} : yield* loadExternalResourceAccess(externalLocation);
-  const authorizationKey = recallVectorAuthorizationKey(externalResources);
-  const matchesAuthorization = (active: VectorGenerationRow) =>
-    recallVectorPreparationMatches(
-      active.job_id,
-      recallVectorPreparationIdentity(
-        options.corpusGeneration ?? active.corpus_generation ?? '',
-        authorizationKey,
-        manifest.id,
-        embeddingRecipe(manifest),
-      ),
-    );
-
-  const activeBeforeInference = yield* readActiveVectorGeneration(config.agentContextHome, manifest);
-  if (!activeBeforeInference) return undefined;
-  if (!matchesAuthorization(activeBeforeInference)) return undefined;
-  yield* verifySelectedCorpusGeneration(activeBeforeInference, manifest, options);
-  return {
-    chunkCount: activeBeforeInference.chunk_count,
-    generation: activeBeforeInference.generation,
-    authorizationKey,
-    ...(activeBeforeInference.corpus_generation === null
-      ? {}
-      : {corpusGeneration: activeBeforeInference.corpus_generation}),
-  } satisfies RecallVectorReadState;
-});
-
-/** Model-free scoring, authorization and closing proof; never starts inference or builds an index. */
-export const readSelectedSemanticVectorScores = Effect.fn('vectorIndex.readSelectedScores')(function* <R = never>(
-  config: VectorReadConfig,
-  manifest: VectorReadModel,
-  state: RecallVectorReadState,
-  normalizedQuery: Option.Option<readonly number[]>,
-  options: SemanticScoreOptions<R> = {},
-  validateCanonicalScores = false,
-) {
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const databasePath = vectorDatabasePath(path, config.agentContextHome, manifest.id);
-  if (!(yield* fs.exists(databasePath))) return undefined;
-  const externalLocation =
-    config.account !== undefined && config.user !== undefined
-      ? {home: config.agentContextHome, account: config.account, user: config.user}
-      : undefined;
-  const externalResources = externalLocation === undefined ? {} : yield* loadExternalResourceAccess(externalLocation);
-  const authorizationKey = recallVectorAuthorizationKey(externalResources);
-  if (authorizationKey !== state.authorizationKey) return undefined;
-  const suppliedExternal = options.eligibility?.externalResources;
-  const effectiveExternal =
-    suppliedExternal === undefined
-      ? externalResources
-      : EffectRecord.fromEntries(
-          EffectArray.filter(
-            EffectRecord.toEntries(externalResources),
-            ([uri, fingerprint]) => suppliedExternal[uri] === fingerprint,
-          ),
-        );
-  const eligibility: RecallEligibilityPolicy = {
-    ...(options.eligibility ?? {kind: 'candidate-policy', authority: 'any', projects: {mode: 'unrestricted'}}),
-    externalResources: effectiveExternal,
-  };
-  const nativeRequest: NativeVectorReadRequest = {
-    dbPath: databasePath,
-    generation: state.generation,
-    model: {
-      id: manifest.id,
-      sha256: manifest.sha256,
-      dimensions: manifest.dimensions ?? 0,
-      embeddingRecipe: embeddingRecipe(manifest),
-      chunkerVersion: RECALL_CHUNKER_VERSION,
-    },
-    expectedPreparationJobId: recallVectorPreparationJobId(
-      recallVectorPreparationIdentity(
-        options.corpusGeneration ?? state.corpusGeneration ?? '',
-        authorizationKey,
-        manifest.id,
-        embeddingRecipe(manifest),
-      ),
-    ),
-    preparationIdentitySuffix: EffectString.slice(1)(
-      JSON.stringify([authorizationKey, manifest.id, embeddingRecipe(manifest), RECALL_CHUNKER_VERSION]),
-    ),
-    ...(options.corpusGeneration === undefined ? {} : {corpusGeneration: options.corpusGeneration}),
-    limit: options.limit ?? 500,
-    selection: vectorChunkSelectionPredicate(eligibility, options.allowedUriScopes),
-    aliasScope: recallUriScopePredicate('alias', options.allowedUriScopes),
-    aliasEligibility: recallEligibilityPredicate('chunk', eligibility, false),
-  };
-  const query = Option.getOrUndefined(normalizedQuery);
-  const binding = yield* requiredNativeVectorReader;
-  const selectedRead = Effect.gen(function* () {
-    // Evaluate the independent lexical proof before native work, but defer its
-    // failure until metadata reaches the old callback position. Schema/count,
-    // generation/preparation and requested-corpus outcomes keep their precedence.
-    const openingCorpus = yield* verifyCurrentCorpusGeneration(manifest, options).pipe(Effect.result);
-    const result = yield* runNativeVectorRead(binding, nativeRequest, query);
-    if (result.corpusCheckRequired && Result.isFailure(openingCorpus)) return yield* Effect.fail(openingCorpus.failure);
-    switch (result.status) {
-      case 'success':
-        return new Map(EffectArray.map(result.scores, value => [value.uri, value.score] as const));
-      case 'absent':
-        return undefined;
-      case 'corrupt':
-        return yield* VectorIndexCorrupt.make({modelId: manifest.id, message: result.message});
-      case 'corpus-changed':
-        return yield* VectorCorpusGenerationChanged.make({
-          modelId: manifest.id,
-          requestedGeneration: nativeRequest.corpusGeneration ?? '',
-          message: result.message,
-        });
-      case 'operation-error':
-        return yield* VectorIndexOperationError.make({message: result.message});
-      case 'cancelled':
-        return yield* Effect.interrupt;
-    }
-  });
-  const scores = yield* selectedRead;
-  // The SQLite transaction pins the vector snapshot. Re-check the independently
-  // changing lexical corpus after releasing that read snapshot so a long paged
-  // scan cannot return scores for a corpus that was superseded mid-query.
-  yield* verifyCurrentCorpusGeneration(manifest, options);
-  if (scores !== undefined) {
-    for (const uri of scores.keys()) {
-      if (!recallUriMatchesScopes(uri, options.allowedUriScopes)) {
-        scores.delete(uri);
-        continue;
-      }
-      if (
-        isExternalResourceUri(uri) &&
-        (externalLocation === undefined ||
-          !(yield* externalResourceAccess(externalLocation, uri, undefined, externalResources[uri])))
-      )
-        scores.delete(uri);
-    }
-  }
-  if (
-    externalLocation !== undefined &&
-    recallVectorAuthorizationKey(yield* loadExternalResourceAccess(externalLocation)) !== authorizationKey
-  )
-    return undefined;
-  if (validateCanonicalScores && scores !== undefined) {
-    if (config.account === undefined || config.user === undefined) return undefined;
-    const current = yield* readRecallIndexData(
-      {
-        account: config.account,
-        user: config.user,
-        agentContextHome: config.agentContextHome,
-        manifestPath: config.manifestPath,
-      },
-      {
-        includeInactive: false,
-        requiredUris: [...scores.keys()],
-        query: '',
-        limit: Math.max(1, scores.size),
-        allowedUriScopes: options.allowedUriScopes,
-        eligibility: options.eligibility,
-      },
-    );
-    const currentUris = new Set(EffectArray.map(current.candidates, candidate => candidate.uri));
-    for (const uri of scores.keys()) if (!currentUris.has(uri)) scores.delete(uri);
-    yield* verifyCurrentCorpusGeneration(manifest, options);
-    const closing = yield* readActiveVectorGeneration(config.agentContextHome, manifest);
-    if (
-      closing?.generation !== state.generation ||
-      (externalLocation !== undefined &&
-        recallVectorAuthorizationKey(yield* loadExternalResourceAccess(externalLocation)) !== authorizationKey)
-    )
-      return undefined;
-  }
-  return scores;
-});
-
 export const vectorIndexStatus = Effect.fn('vectorIndex.status')(function* (
   home: string,
   manifest: LocalModelManifest,
@@ -973,7 +550,7 @@ export function vectorIndexDatabaseFilename(): string {
   return VECTOR_INDEX_DATABASE_FILENAME;
 }
 
-const readActiveVectorGeneration = Effect.fn('vectorIndex.readActive')(function* (
+export const readActiveVectorGeneration = Effect.fn('vectorIndex.readActive')(function* (
   home: string,
   manifest: VectorReadModel,
 ) {
@@ -1299,28 +876,6 @@ const replaceVectorAliases = Effect.fn('vectorIndex.replaceAliases')(function* (
   }
 });
 
-function vectorChunkSelectionPredicate(
-  eligibilityPolicy: RecallEligibilityPolicy | undefined,
-  allowedUriScopes: readonly string[] | undefined,
-): RecallSqlPredicate {
-  const eligibility = recallEligibilityPredicate('chunk', eligibilityPolicy, false);
-  const directUriScope = recallUriScopePredicate('chunk', allowedUriScopes);
-  if (!directUriScope.restricted) return combineRecallSqlPredicates(eligibility, directUriScope);
-
-  const aliasUriScope = recallUriScopePredicate('scope_alias', allowedUriScopes);
-  return combineRecallSqlPredicates(eligibility, {
-    params: [...directUriScope.params, ...aliasUriScope.params],
-    restricted: true,
-    sql: `(${directUriScope.sql} OR EXISTS (
-      SELECT 1
-      FROM vector_aliases AS scope_alias
-      WHERE scope_alias.generation = chunk.generation
-        AND scope_alias.representative_uri = chunk.uri
-        AND ${aliasUriScope.sql}
-    ))`,
-  });
-}
-
 const removeUndesiredVectorRows = Effect.fn('vectorIndex.removeUndesiredRows')(function* (
   sql: SqlClient.SqlClient,
   generation: string,
@@ -1606,27 +1161,8 @@ function encodeVector(vector: readonly number[], dimensions: number): Uint8Array
   return bytes;
 }
 
-function generationMatchesCorpus(
-  generation: VectorGenerationRow,
-  manifest: VectorReadModel,
-  corpusGeneration: string,
-): boolean {
-  return (
-    generation.corpus_generation === corpusGeneration &&
-    generation.scope_mapping_version === VECTOR_SCOPE_MAPPING_VERSION &&
-    generationIsCompatible(generation, manifest)
-  );
-}
-
-function generationIsCompatible(generation: VectorGenerationRow, manifest: VectorReadModel): boolean {
-  return (
-    generation.model_id === manifest.id &&
-    generation.model_sha256 === manifest.sha256 &&
-    generation.dimensions === manifest.dimensions &&
-    generation.embedding_recipe === embeddingRecipe(manifest) &&
-    generation.chunker_version === RECALL_CHUNKER_VERSION &&
-    generation.normalized === 'l2'
-  );
+export function generationIsCompatible(generation: VectorGenerationRow, manifest: VectorReadModel): boolean {
+  return recallVectorGenerationMatchesModel(generation, vectorReadExpectation(manifest));
 }
 
 function vectorChunkMappings(candidates: readonly RecallCandidate[]): readonly VectorChunkMapping[] {
@@ -1680,7 +1216,7 @@ function vectorJobId(
   );
 }
 
-function embeddingRecipe(manifest: VectorReadModel): string {
+export function embeddingRecipe(manifest: VectorReadModel): string {
   // Native backend/offload policy is intentionally excluded: the frozen Darwin
   // compatibility fixture verifies that it preserves this embedding space.
   return sha256HexSync(
@@ -1731,7 +1267,7 @@ function assertVectorGeneration(generation: VectorGenerationRow): void {
   }
 }
 
-function vectorDatabasePath(path: Path.Path, home: string, modelId: string): string {
+export function vectorDatabasePath(path: Path.Path, home: string, modelId: string): string {
   return path.join(vectorModelRoot(path, home, modelId), VECTOR_INDEX_DATABASE_FILENAME);
 }
 

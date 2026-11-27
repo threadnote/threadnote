@@ -17,7 +17,7 @@ import {
   requestRecallEmbeddings,
 } from '@threadnote/recall/background/demand';
 import {loadRecallIndexData, recallIndexStatus} from '@threadnote/recall/index';
-import {vectorIndexGenerationReadiness} from '@threadnote/recall/vector-index';
+import {vectorIndexGenerationReadiness} from '@threadnote/recall/vector/semantic-read';
 import {scheduleMcpRecallBackgroundRefresh} from '@threadnote/recall/mcp/refresh';
 import {SystemInfo} from '@threadnote/platform/system';
 import {
