@@ -827,40 +827,63 @@ describe('native GitHub watch provider', () => {
       }),
   );
 
-  effectIt.effect('retries an unreadable job log in a later sweep instead of caching the failure', () =>
+  const singleFailedCheck = (logReply: (read: number) => Reply) => {
+    let logReads = 0;
+    const provider = harness((args, input, call, now) => {
+      const endpoint = apiEndpoint(args);
+      if (Effect2.pipe(endpoint, EffectString.endsWith('/actions/jobs/42/logs'))) return logReply(++logReads);
+      if (Effect2.pipe(endpoint, EffectString.includes('/check-runs')))
+        return {
+          body: {
+            check_runs: [
+              {
+                ...check(42, 'failure'),
+                name: 'unit',
+                html_url: 'https://github.com/example/project/actions/runs/9/job/42',
+              },
+            ],
+          },
+        };
+      return defaultReply(args, input, call, now);
+    });
+    const summaryOf = (result: Effect.Success<ReturnType<typeof provider.sweep>>) => {
+      const checks = EffectOption.getOrUndefined(
+        EffectArray.findFirst(result.sweep.sources, source => source.source === 'checks'),
+      );
+      return checks?.complete ? checks.items[0]?.summary : undefined;
+    };
+    return {provider, summaryOf, logReads: () => logReads};
+  };
+
+  effectIt.effect('retries an unreadable job log once in a later sweep instead of caching the failure', () =>
     Effect.gen(function* () {
-      let logReads = 0;
-      const provider = harness((args, input, call, now) => {
-        const endpoint = apiEndpoint(args);
-        if (Effect2.pipe(endpoint, EffectString.endsWith('/actions/jobs/42/logs'))) {
-          logReads++;
-          return logReads === 1 ? {status: 500, body: 'unavailable'} : {body: 'FAIL  apps/c.test.ts > retries'};
-        }
-        if (Effect2.pipe(endpoint, EffectString.includes('/check-runs')))
-          return {
-            body: {
-              check_runs: [
-                {
-                  ...check(42, 'failure'),
-                  name: 'unit',
-                  html_url: 'https://github.com/example/project/actions/runs/9/job/42',
-                },
-              ],
-            },
-          };
-        return defaultReply(args, input, call, now);
-      });
-      const summaryOf = (result: Effect.Success<ReturnType<typeof provider.sweep>>) => {
-        const checks = EffectOption.getOrUndefined(
-          EffectArray.findFirst(result.sweep.sources, source => source.source === 'checks'),
-        );
-        return checks?.complete ? checks.items[0]?.summary : undefined;
-      };
-      const first = yield* provider.sweep();
-      expect(summaryOf(first)).toBe('unit: failure');
-      const second = yield* provider.sweep(first.cache);
-      expect(summaryOf(second)).toBe('unit: failure | FAIL apps/c.test.ts > retries');
-      expect(logReads).toBe(2);
+      const recovering = singleFailedCheck(read =>
+        read === 1 ? {status: 500, body: 'unavailable'} : {body: 'FAIL  apps/c.test.ts > retries'},
+      );
+      const first = yield* recovering.provider.sweep();
+      expect(recovering.summaryOf(first)).toBe('unit: failure');
+      const second = yield* recovering.provider.sweep(first.cache);
+      expect(recovering.summaryOf(second)).toBe('unit: failure | FAIL apps/c.test.ts > retries');
+      expect(recovering.logReads()).toBe(2);
+
+      const unavailable = singleFailedCheck(() => ({status: 500, body: 'unavailable'}));
+      const failedOnce = yield* unavailable.provider.sweep();
+      const failedTwice = yield* unavailable.provider.sweep(failedOnce.cache);
+      expect(unavailable.summaryOf(failedTwice)).toBe('unit: failure | job log unavailable');
+      const settled = yield* unavailable.provider.sweep(failedTwice.cache);
+      expect(unavailable.summaryOf(settled)).toBe('unit: failure | job log unavailable');
+      expect(unavailable.logReads()).toBe(2);
+    }),
+  );
+
+  effectIt.effect('bounds a crafted long log line before redaction', () =>
+    Effect.gen(function* () {
+      const crafted = singleFailedCheck(() => ({
+        body: 'FAIL a > b ' + EffectString.repeat(80_000)('redis://a:'),
+      }));
+      const summary = crafted.summaryOf(yield* crafted.provider.sweep());
+      expect(summary).toMatch(/^unit: failure \| FAIL a > b /u);
+      expect(summary?.length).toBeLessThanOrEqual(1024);
     }),
   );
 

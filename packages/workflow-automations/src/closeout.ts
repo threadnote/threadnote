@@ -107,8 +107,6 @@ export const NativeCloseoutProposalSchema = Schema.Struct({
           at: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
           removed: Schema.Boolean,
           ready: Schema.optionalKey(Schema.Literal(false)),
-          // A watch summary holds at most 1024 characters, so its UTF-8 form fits 4096 bytes.
-          summary: Schema.optionalKey(text(4096)),
         }),
         at: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
       }),

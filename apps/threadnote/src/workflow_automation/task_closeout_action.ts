@@ -95,12 +95,40 @@ const receiptCitesHost = (evidence: string | undefined, notification: PhaseWatch
 const leaseExpiredWithWork = (state: PhaseWatchState, now: number) =>
   state.consumer !== null && state.consumer.leaseUntil <= now && !watchWorkDrained(state);
 type CloseoutWatchWork = NonNullable<NativeCloseoutProposal['watchWork']>[number];
+const closeoutUndeliveredRowLimit = 16;
+const closeoutWatchWorkRowLimit = 128;
+/** Well under the 60,000-byte closeout document limit, so watch work never crowds out the closeout itself. */
+const closeoutWatchWorkByteBudget = 30_000;
+/** Actionable events only; CI progress, head moves, source errors and watcher lifecycle are not work. */
+const actionableUndelivered = (event: PhaseWatchState['events'][number]) =>
+  event.source === 'comments' || event.source === 'reviews' || event.source === 'threads'
+    ? event.kind !== 'removed'
+    : event.source === 'checks' || event.source === 'statuses'
+      ? event.kind === 'ci_error'
+      : event.kind === 'merge_conflict';
+/** The live watch keeps the untrusted CI summary; closeout journals and memory documents never carry it. */
+const closeoutEvent = ({summary: _summary, ...event}: PhaseWatchState['events'][number]) => event;
 /**
- * Open and blocked work, plus every event that has no disposition yet, so closeout never drops an event that was
- * still undelivered at merge. The merge event of the watch itself is the terminal state, not work.
+ * Open and blocked work, plus each actionable event that has no disposition yet, so closeout never drops an event that
+ * was still undelivered at merge. A long backlog keeps its first rows and one aggregate row for the rest.
  */
 const closeoutWorkOf = (state: PhaseWatchState): CloseoutWatchWork[] => {
   const disposed = new Set(EffectArray.map(state.work, item => item.eventId));
+  const undelivered = EffectArray.filter(
+    state.events,
+    event => !disposed.has(event.id) && actionableUndelivered(event),
+  );
+  const row = (event: PhaseWatchState['events'][number], reason: string): CloseoutWatchWork => ({
+    eventId: event.id,
+    status: 'open',
+    reason,
+    evidence: state.pr,
+    event: closeoutEvent(event),
+    at: event.at,
+  });
+  const excess = undelivered.slice(closeoutUndeliveredRowLimit);
+  const first = excess[0];
+  const last = excess.at(-1);
   return [
     ...EffectArray.flatMap(state.work, item =>
       item.status === 'open' || item.status === 'blocked'
@@ -110,26 +138,18 @@ const closeoutWorkOf = (state: PhaseWatchState): CloseoutWatchWork[] => {
               status: item.status,
               reason: item.reason,
               evidence: item.evidence,
-              event: item.event,
+              event: closeoutEvent(item.event),
               at: item.at,
             },
           ]
         : [],
     ),
-    ...EffectArray.flatMap(state.events, event =>
-      disposed.has(event.id) || (event.source === 'watch' && event.kind === 'merged')
-        ? []
-        : [
-            {
-              eventId: event.id,
-              status: 'open' as const,
-              reason: 'Undelivered watch event at merge.',
-              evidence: state.pr,
-              event,
-              at: event.at,
-            },
-          ],
+    ...EffectArray.map(undelivered.slice(0, closeoutUndeliveredRowLimit), event =>
+      row(event, 'Undelivered watch event at merge.'),
     ),
+    ...(first && last
+      ? [row(first, `${excess.length} more undelivered watch events (${first.id}..${last.id}); inspect the watch.`)]
+      : []),
   ];
 };
 
@@ -386,6 +406,29 @@ export const runNativeTaskFinish = (
               'A retained prior PR watch still owns active collection; settle that exact watch before finish.',
             );
           watchWork.push(...closeoutWorkOf(retainedState));
+          if (
+            watchWork.length > closeoutWatchWorkRowLimit ||
+            Buffer.byteLength(JSON.stringify(watchWork)) > closeoutWatchWorkByteBudget
+          ) {
+            const refs = nativeTaskPhaseWatchRefs(stored, planPhase.id);
+            return yield* nativeRefusal(
+              'closeout-watch-work-overflow',
+              `Closeout would carry ${watchWork.length} open watch work rows, more than its bounded budget; resolve or ignore open watch work first.`,
+              {
+                next: refs
+                  ? nativeWatchNext(
+                      {
+                        runId: request.runId,
+                        callerCwd: checkout,
+                        validationRef: refs.validationRef,
+                        deliveryRef: refs.deliveryRef,
+                      },
+                      'work',
+                    )
+                  : nativeNext.view({runId: request.runId, callerCwd: checkout}),
+              },
+            );
+          }
         }
       }
       closeoutWatchWork = watchWork;

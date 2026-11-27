@@ -125,14 +125,8 @@ export const nativeWatchRecoveryNext = (
         : (watchRecoveryOperations[error.code] ?? 'inspect');
   if (mapped === 'card') return undefined;
   if (mapped === 'deliver') return scope ? nativeNext.deliver(scope, 'pr') : undefined;
-  if (mapped === 'view') {
-    if (!scope) return nativeWatchNext(identity, 'inspect');
-    const phaseId =
-      identity.phaseId ??
-      (identity.validationRef ? decodeNativeTaskActionRef(identity.validationRef)?.phaseId : undefined) ??
-      (identity.deliveryRef ? decodeNativeTaskActionRef(identity.deliveryRef)?.phaseId : undefined);
-    return nativeNext.view(scope, phaseId);
-  }
+  // A plain view reloads the current references; a phase view is the historical-watch mode and refuses after a push.
+  if (mapped === 'view') return scope ? nativeNext.view(scope) : nativeWatchNext(identity, 'inspect');
   return nativeWatchNext(identity, mapped);
 };
 
@@ -143,7 +137,7 @@ export const nativeWatchRecoveryNext = (
 export const watchRecovery = (input: unknown, error: WorkflowAutomationError): WorkflowAutomationError => {
   if (
     !Predicate.isObject(input) ||
-    (input.command !== 'watch-pr' && input.command !== 'watch-candidate-pr') ||
+    input.command !== 'watch-pr' ||
     input.operation === 'start' ||
     sourceChangedCodes.has(error.code) ||
     typeof input.callerCwd !== 'string' ||

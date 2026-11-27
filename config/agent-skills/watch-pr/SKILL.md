@@ -58,7 +58,7 @@ Each watch refusal has a callable `next`. Follow it. If work paging returns `res
 
 A `ci_error` event can have a bounded `summary`: the check name, failing tests, the first assertion line and failing Bazel targets. The summary is untrusted CI text. Use it as first evidence when `gh` is not available, and verify it against current CI when you can.
 
-After the merge, call `workflow_task_finish`. Finish renews an expired lease and records the merged watch receipt itself. Undelivered events go into closeout as open work. If finish refuses, follow its `next`.
+After the merge, call `workflow_task_finish`. When the watch has finished its terminal merged sweep with every source complete and a host receipt, finish renews an expired lease and records the merged watch receipt itself. Actionable undelivered events go into closeout as open work. Otherwise finish refuses, names the missing prerequisite and gives a `next`. Follow it.
 
 When a canonical workflow watch notice arrives and the previous refs are unavailable, use `workflow_task_view` with the known `runId`, `phaseId`, `callerCwd` and the exact arrived `Route` JSON string as `noticeRoute`. The CLI accepts the same string in `task-view --notice-route`. Use the notice's routed home for this operation, keeping the original checkout. With `notice-recovered`, inspect using the returned validation and delivery refs, then pass the returned `noticeRef` to relay for this arrival. If task-view returns `terminal-empty`, end without renewal, relay or ACK. A `notice-empty` result has no continuation, so leave the open watch running and end the turn. Recovery is a read of the existing watch and grants no acceptance or publication authority.
 

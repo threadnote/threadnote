@@ -131,20 +131,24 @@ const summaryLineLimit = 200;
 const summaryLogLines = 6;
 const summaryLogChecks = 6;
 const summaryDetailSeparator = ' | ';
+const summaryInputLimit = 4096;
+const summaryLogFailureLimit = 2;
+const summaryLogUnavailable = 'job log unavailable';
 const logTimestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s?/u;
-// oxlint-disable-next-line no-control-regex -- Terminal escapes (OSC hyperlinks, then CSI styles) are removed from CI text.
-const terminalEscapes = /\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b\[[0-9;?]*[A-Za-z]/gu;
-const invisibleFormatting = /[\u200b-\u200d\u202a-\u202e\u2066-\u2069\ufeff]/gu;
+// oxlint-disable-next-line no-control-regex -- Terminal escapes (OSC hyperlinks, also unterminated, then CSI styles) are removed from CI text.
+const terminalEscapes = /\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\|$)|\u001b\[[0-9;?]*[A-Za-z]/gu;
+const invisibleFormatting = /[\p{Cf}\u{e0000}-\u{e007f}]/gu;
 const stripTerminal = (value: string) =>
   Effect2.pipe(value, EffectString.replace(terminalEscapes, ''), EffectString.replace(invisibleFormatting, ''));
 /**
- * Make untrusted CI text safe to keep: remove terminal and invisible formatting, redact credential-shaped values,
- * replace characters the watch event schema refuses and collapse whitespace.
+ * Make untrusted CI text safe to keep: bound its input, remove terminal and invisible formatting, replace characters
+ * the watch event schema refuses, redact credential-shaped values and collapse whitespace.
  */
 const summaryText = (value: string, maximum: number) =>
   Effect2.pipe(
-    redactSensitiveText(stripTerminal(value)),
+    stripTerminal(EffectString.slice(0, summaryInputLimit)(value)),
     EffectString.replace(/[^\u0020-\u007e\u00a0-\u{10ffff}]+/gu, ' '),
+    redactSensitiveText,
     EffectString.replace(/\s+/gu, ' '),
     EffectString.trim,
     EffectString.slice(0, maximum),
@@ -175,7 +179,10 @@ export function nativeWatchFailureLines(log: string): string[] {
   };
   for (const raw of EffectString.split(log, /\r?\n/u)) {
     if (lines.length >= summaryLogLines) break;
-    const line = EffectString.trim(stripTerminal(EffectString.replace(logTimestamp, '')(raw)));
+    // A crafted long line is cut before any regular expression or redaction pass reads it.
+    const line = EffectString.trim(
+      stripTerminal(EffectString.replace(logTimestamp, '')(EffectString.slice(0, summaryInputLimit)(raw))),
+    );
     if (!line) continue;
     if (/^FAIL\s+\S.*\s>\s\S/u.test(line)) {
       add(line);
@@ -706,26 +713,40 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
     const enrichFailedChecks = (items: readonly NativeWatchEntity[]) =>
       Effect.gen(function* () {
         const summaries = new Map<string, string>();
-        const pendingReads: {readonly item: NativeWatchEntity & {readonly summary: string}; readonly jobId: string}[] =
-          [];
+        const pendingReads: {
+          readonly item: NativeWatchEntity & {readonly summary: string};
+          readonly jobId: string;
+          readonly retry: boolean;
+        }[] = [];
         for (const item of items) {
           const prior = priorSummaries.get(`${item.id}\u0000${item.version}`);
           const jobId = item.kind === 'ci_error' ? actionsJobId(item) : undefined;
-          // Only a successful read adds the ` | ` separator; the base summary never contains it.
+          // Only a finished read adds the ` | ` separator; the base summary never contains it.
           if (prior !== undefined && EffectString.includes(summaryDetailSeparator)(prior))
-            summaries.set(item.id, prior);
-          else if (jobId && item.summary) pendingReads.push({item: {...item, summary: item.summary}, jobId});
+            summaries.set(item.id, summaryText(prior, summaryLimit));
+          else if (jobId && item.summary)
+            pendingReads.push({item: {...item, summary: item.summary}, jobId, retry: prior !== undefined});
         }
         // First-seen failures emit their event in this sweep, so they read their logs first.
         const ordered = [
-          ...EffectArray.filter(pendingReads, ({item}) => !priorSummaries.has(`${item.id}\u0000${item.version}`)),
-          ...EffectArray.filter(pendingReads, ({item}) => priorSummaries.has(`${item.id}\u0000${item.version}`)),
+          ...EffectArray.filter(pendingReads, read => !read.retry),
+          ...EffectArray.filter(pendingReads, read => read.retry),
         ];
-        for (const {item, jobId} of EffectArray.take(ordered, summaryLogChecks)) {
-          if (authenticationFailed || now() < blockedUntil || now() - started > 20_000) break;
+        let consecutiveFailures = 0;
+        for (const {item, jobId, retry} of EffectArray.take(ordered, summaryLogChecks)) {
+          if (
+            authenticationFailed ||
+            now() < blockedUntil ||
+            now() - started > 20_000 ||
+            consecutiveFailures >= summaryLogFailureLimit
+          )
+            break;
           const lines = yield* jobFailureLines(jobId);
-          if (lines === undefined) continue;
-          const detail = lines.length ? lines : ['no failing test lines in job log'];
+          consecutiveFailures = lines === undefined ? consecutiveFailures + 1 : 0;
+          // The first failed read keeps the base summary for one retry; a second failure is final.
+          if (lines === undefined && !retry) continue;
+          const detail =
+            lines === undefined ? [summaryLogUnavailable] : lines.length ? lines : ['no failing test lines in job log'];
           summaries.set(
             item.id,
             summaryText(EffectArray.join([item.summary, ...detail], summaryDetailSeparator), summaryLimit),

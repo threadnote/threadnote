@@ -164,8 +164,7 @@ export const nativeControlNext = (
 
 /** The next legal commands of the dev-cycle, each callable as given on MCP and on the CLI. */
 export const nativeNext = {
-  view: (scope: NativeNextScope, phaseId?: string) =>
-    sameShape('workflow_task_view', 'view', 'task-view', phaseId === undefined ? scope : {...scope, phaseId}),
+  view: (scope: NativeNextScope) => sameShape('workflow_task_view', 'view', 'task-view', scope),
   snapshot: (scope: NativeNextScope) =>
     nativeNextCommand(
       'workflow_task_snapshot',
