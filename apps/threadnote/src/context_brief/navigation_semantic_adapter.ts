@@ -11,11 +11,8 @@ import {NAVIGATION_INPUT_LIMITS, navigationScopeKey, type NavigationInput} from 
 import type {NavigationSemanticRequestV1} from '@threadnote/context/navigation/semantic';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {semanticProviderNotRunning, type SemanticAgentQueryResult} from '../semantic/agent_query_protocol.js';
-import {
-  runSemanticAgentQueryWith,
-  semanticAgentQueryHost,
-  type SemanticAgentQueryHost,
-} from '../semantic/agent_queries.js';
+import {runSemanticAgentQueryWith, type SemanticAgentQueryHost} from '../semantic/agent_queries.js';
+import {semanticCompiledRuntimeIdentity} from '../semantic/readiness_jobs.js';
 import {
   attachSemanticEndpoint,
   type ensureSemanticEndpoint,
@@ -48,7 +45,8 @@ export interface NavigationSemanticHost {
 }
 
 export const navigationSemanticHost: NavigationSemanticHost = {
-  runtimeIdentity: semanticAgentQueryHost.runtimeIdentity,
+  // Imported directly: agent_queries imports the context brief, so its host is not initialized here yet.
+  runtimeIdentity: semanticCompiledRuntimeIdentity,
   attach: launch => attachSemanticEndpoint(launch),
 };
 
