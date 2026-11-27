@@ -13,14 +13,25 @@ import {
 import type {Observation} from '@threadnote/semantic/contracts';
 import {LspFault, SemanticWireStartup} from './lsp_transport.js';
 import {SemanticSessionFault} from './provider.js';
-import {runtimeAssertPrivateProviderPath, SystemInfo} from '@threadnote/platform/system';
+import {
+  runtimeAssertPrivateProviderPath,
+  runtimeNativeDescriptorOperations,
+  SystemInfo,
+} from '@threadnote/platform/system';
 import {sha256FileHex} from '@threadnote/platform/digest';
 import {getThreadnoteVersion, isStandaloneThreadnoteBuild} from '@threadnote/workspace/runtime-version';
 import {SemanticHostProfile, SemanticHostProfileFault} from './host_profile.js';
 import {semanticCatalogKey} from './host_catalog.js';
 import {readBounded} from './fingerprint.js';
 
-/** The existing public standalone identity is shared with its selected-verification child. */
+/** The last computed identity and the executable metadata it was computed for. */
+let cachedRuntimeIdentity: {readonly metadata: string; readonly identity: string} | undefined;
+
+/**
+ * The existing public standalone identity is shared with its selected-verification child. Hashing the executable
+ * takes most of a second, so one process keeps the result while the executable's device, inode, size and change
+ * time stay the same: any write or replacement changes the change time or inode, so the bytes are hashed again.
+ */
 export const semanticCompiledRuntimeIdentity = Effect.gen(function* () {
   if (!isStandaloneThreadnoteBuild()) return yield* SemanticHostProfileFault.make({reason: 'incompatible'});
   const system = yield* SystemInfo;
@@ -29,14 +40,26 @@ export const semanticCompiledRuntimeIdentity = Effect.gen(function* () {
   const stat = yield* fs.stat(executable);
   if (stat.type !== 'File' || Number(stat.size) > 512 * 1024 * 1024)
     return yield* SemanticHostProfileFault.make({reason: 'incompatible'});
-  return sha256HexSync(
-    JSON.stringify([
-      'threadnote-agent-read-v1',
-      yield* getThreadnoteVersion(),
-      executable,
-      yield* sha256FileHex(executable),
-    ]),
+  const version = yield* getThreadnoteVersion();
+  const info = yield* Effect.try({
+    try: () => runtimeNativeDescriptorOperations().lstatSync(executable, {bigint: true}),
+    catch: () => SemanticHostProfileFault.make({reason: 'incompatible'}),
+  });
+  const metadata = JSON.stringify([
+    version,
+    executable,
+    String(info.dev),
+    String(info.ino),
+    String(info.size),
+    String(info.mtimeNs),
+    String(info.ctimeNs),
+  ]);
+  if (cachedRuntimeIdentity?.metadata === metadata) return cachedRuntimeIdentity.identity;
+  const identity = sha256HexSync(
+    JSON.stringify(['threadnote-agent-read-v1', version, executable, yield* sha256FileHex(executable)]),
   );
+  cachedRuntimeIdentity = {metadata, identity};
+  return identity;
 });
 import {
   semanticReadinessLimits,
