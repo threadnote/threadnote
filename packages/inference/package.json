@@ -27,7 +27,7 @@
     "node-llama-cpp": "3.22.2"
   },
   "devDependencies": {
-    "@effect/platform-bun": "4.1.4",
+    "@effect/platform-bun": "4.1.5",
     "@threadnote/testing": "workspace:*",
     "@effect/vitest": "4.1.4",
     "vitest": "5.0.5",
