@@ -17,6 +17,7 @@ import {
 import {expectedFixtureSources} from './writer-fixture.js';
 import {SemanticAgentQuery} from '../../../src/semantic/agent_query_protocol.js';
 import {SemanticAgentChangeRequest} from '../../../src/semantic/agent_change_protocol.js';
+import {nativeTypeScriptAssetPins} from '@threadnote/graph/typescript_native_asset_pins';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {observeCandidateTransport} from './transport-lifecycle.js';
@@ -791,6 +792,13 @@ describe('final combined qualification preparation', () => {
     });
     expect(inventory.counts).toEqual({familyPlatformCells: 40, activeClientCells: 80, qualifiedCells: 0});
     expect(inventory.productionQualified).toBe(false);
+    const tsJsCells = EffectArray.filter(inventory.cells, cell => cell.languages[0] === 'typescript');
+    expect(EffectArray.map(tsJsCells, cell => cell.provider)).toEqual(
+      EffectArray.map(ledger.requiredPlatforms, () => ({
+        id: 'typescript-native',
+        version: nativeTypeScriptAssetPins.version,
+      })),
+    );
     expect(inventory.scenarios).toHaveLength(43);
     expect(new Set(EffectArray.map(inventory.scenarios, scenario => scenario.id)).size).toBe(43);
     expect(EffectArray.some(inventory.scenarios, scenario => scenario.id === 'S39')).toBe(false);
@@ -815,10 +823,11 @@ describe('final combined qualification preparation', () => {
   it('rejects omitted or duplicate release matrix entries', () => {
     expect(() => qualificationInventory({...ledger, requiredPlatforms: ledger.requiredPlatforms.slice(1)})).toThrow();
     expect(() => qualificationInventory({...ledger, releaseLanguages: [...ledger.releaseLanguages, 'java']})).toThrow();
+    const {selectedProviders} = ledger.candidateQualification;
     expect(() =>
       qualificationInventory({
         ...ledger,
-        selectedProviders: {...ledger.selectedProviders, python: ledger.selectedProviders.typescript},
+        candidateQualification: {selectedProviders: {...selectedProviders, python: selectedProviders.typescript}},
       }),
     ).toThrow();
   });

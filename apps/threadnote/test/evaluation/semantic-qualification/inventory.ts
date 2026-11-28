@@ -5,7 +5,9 @@ import scenarios from './scenario-contracts.json' with {type: 'json'};
 export const Ledger = Schema.Struct({
   requiredPlatforms: Schema.Array(Schema.String),
   releaseLanguages: Schema.Array(Schema.String),
-  selectedProviders: Schema.Record(Schema.String, Schema.String),
+  candidateQualification: Schema.Struct({
+    selectedProviders: Schema.Record(Schema.String, Schema.String),
+  }),
   providers: Schema.Array(
     Schema.Struct({id: Schema.String, version: Schema.String, languages: Schema.Array(Schema.String)}),
   ),
@@ -26,13 +28,14 @@ const editorOnly = ['S29', 'S30', 'S31', 'S32'];
 /** Missing evidence remains missing. This inventory never consumes a caller qualification flag. */
 export function qualificationInventory(input: unknown) {
   const ledger = Schema.decodeUnknownSync(Ledger)(input);
+  const {selectedProviders} = ledger.candidateQualification;
   const platforms = EffectArray.map(BUN_STANDALONE_TARGETS, target => EffectString.slice(4)(target));
   const sameSet = (a: readonly string[], b: readonly string[]) =>
     a.length === b.length && new Set(a).size === a.length && EffectArray.every(a, value => b.includes(value));
   if (
     platforms.length !== 8 ||
     !sameSet(ledger.requiredPlatforms, platforms) ||
-    !sameSet(EffectRecord.keys(ledger.selectedProviders), ledger.releaseLanguages) ||
+    !sameSet(EffectRecord.keys(selectedProviders), ledger.releaseLanguages) ||
     !sameSet(
       ledger.releaseLanguages,
       EffectArray.flatMap(families, languages => [...languages]),
@@ -40,13 +43,13 @@ export function qualificationInventory(input: unknown) {
   )
     throw new Error('Qualification inventory does not match the selected release matrix');
   const cells = EffectArray.flatMap(families, languages => {
-    const providerId = ledger.selectedProviders[languages[0]];
+    const providerId = selectedProviders[languages[0]];
     const candidates = EffectArray.filter(ledger.providers, provider => provider.id === providerId);
     if (
       candidates.length !== 1 ||
       EffectArray.some(
         languages,
-        language => ledger.selectedProviders[language] !== providerId || !candidates[0].languages.includes(language),
+        language => selectedProviders[language] !== providerId || !candidates[0].languages.includes(language),
       )
     )
       throw new Error('Qualification inventory requires one selected provider per family');

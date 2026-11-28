@@ -976,6 +976,14 @@
     "status": "blocked",
     "productionQualified": false,
     "historicalEvidencePhase": "P00",
+    "selectedProviders": {
+      "typescript": "typescript-native",
+      "javascript": "typescript-native",
+      "python": "basedpyright",
+      "go": "gopls",
+      "rust": "rust-analyzer",
+      "java": "jdtls"
+    },
     "inventorySource": "apps/threadnote/test/evaluation/semantic-qualification/inventory.ts",
     "runner": "scripts/qualify-semantic-providers.ts --candidate-manifest",
     "familyPlatformCells": 40,
