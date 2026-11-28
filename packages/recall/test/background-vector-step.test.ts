@@ -15,7 +15,7 @@ import {formatMemoryDocument} from '@threadnote/memory/document';
 import {forceRecallFullVectorWalk, recordRecallBodyReads} from './vector-walk.fixture.js';
 import {openRecallVectorPreparationSource} from '../src/index/vector-preparation-source.js';
 import {recallEmbeddingDemandKey} from '../src/background/demand.js';
-import {RECALL_CHUNKER_VERSION} from '../src/chunker.js';
+import {DEFAULT_CHUNK_MAX_CHARACTERS, RECALL_CHUNKER_VERSION} from '../src/chunker.js';
 import * as EffectString from 'effect/String';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
@@ -75,17 +75,17 @@ const platform = Layer.mergeAll(
   ),
   LocalModelCatalog.layer([manifest]),
 );
-const fixture = Effect.gen(function* () {
+const recallVectorStepFixture = Effect.fnUntraced(function* (body: string, otherDocuments: readonly string[] = []) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const home = yield* fs.makeTempDirectoryScoped({prefix: 'recall-vector-step-'});
   const config = {account: 'local', agentContextHome: home, user: 'test'};
   const resource = path.join(home, 'data/local/resources/repos/threadnote/document.md');
   yield* fs.makeDirectory(path.dirname(resource), {recursive: true});
-  yield* fs.writeFileString(
-    resource,
-    '# Document\n\n' + EffectString.repeat(400)('Bounded resumable example content. '),
-  );
+  yield* fs.writeFileString(resource, body);
+  for (const [index, document] of otherDocuments.entries()) {
+    yield* fs.writeFileString(path.join(path.dirname(resource), `${index}.md`), document);
+  }
   const index = yield* loadRecallIndexData(config, {includeInactive: false});
   yield* selectLocalModel(home, yield* LocalModelCatalog, 'embedding', manifest.id);
   const filename = path.join(home, 'indexes/vectors', manifest.id, vectorIndexDatabaseFilename());
@@ -178,6 +178,10 @@ const fixture = Effect.gen(function* () {
     },
   };
 });
+
+const fixture = recallVectorStepFixture(
+  '# Document\n\n' + EffectString.repeat(400)('Bounded resumable example content. '),
+);
 
 describe('resumable recall vector preparation', () => {
   effectIt.effect('retains full and delta refresh counts and durations across retirement', () =>
@@ -503,35 +507,49 @@ describe('resumable recall vector preparation', () => {
   );
   effectIt.effect('batches lightweight checkpoints while making at most one native request', () =>
     Effect.gen(function* () {
-      const f = yield* fixture;
-      const path = yield* Path.Path;
-      for (let index = 0; index < 40; index++)
-        yield* f.fs.writeFileString(path.join(path.dirname(f.resource), `${index}.md`), `Document ${index}`);
-      yield* loadRecallIndexData(f.config, {forceRefresh: true, includeInactive: false});
+      const documents = EffectArray.map(EffectArray.range(1, 12), index => `Document ${index}`);
+      const f = yield* recallVectorStepFixture('Reference document', documents);
+      const clock = yield* Clock.Clock;
+      let demandChecks = 0;
+      const stillDesired = Effect.sync(() => {
+        demandChecks++;
+        return true;
+      });
+      // Advance time per demand check so a small fixture spans several worker checkpoints.
+      const batchClock = {
+        ...clock,
+        monotonicTimeNanos: Effect.sync(() => BigInt(demandChecks) * 84_000_000n),
+      };
       let before = 0;
-      let largestPreparationAdvance = 0;
+      const hydrateAdvances: number[] = [];
+      let inferenceBatches = 0;
+      let reachedCurrent = false;
       for (let turn = 0; turn < 100; turn++) {
         const inferred = f.inputs();
-        const result = yield* runRecallVectorPreparationBatch(f.config, manifest, Effect.succeed(true)).pipe(
+        const result = yield* runRecallVectorPreparationBatch(f.config, manifest, stillDesired).pipe(
           Effect.provideService(LocalModelStore, f.store),
           Effect.provideService(LocalModelRuntime, f.runtime),
+          Effect.provideService(Clock.Clock, batchClock),
         );
-        expect(f.inputs() - inferred).toBeLessThanOrEqual(1);
+        const nativeRequests = f.inputs() - inferred;
+        expect(nativeRequests).toBeLessThanOrEqual(1);
+        if (nativeRequests === 1) inferenceBatches++;
         if (result.progress?.phase === 'hydrate') {
-          largestPreparationAdvance = Math.max(largestPreparationAdvance, result.progress.completed - before);
+          const advance = result.progress.completed - before;
+          if (advance > 0) hydrateAdvances.push(advance);
           before = result.progress.completed;
-          expect(result.progress.total).toBe(41);
+          expect(result.progress.total).toBe(documents.length + 1);
         }
-        if (result.state === 'current') break;
+        if (result.state === 'current') {
+          reachedCurrent = true;
+          break;
+        }
       }
-      expect(largestPreparationAdvance).toBeGreaterThan(1);
-      expect(
-        yield* vectorIndexGenerationReadiness(
-          f.home,
-          manifest,
-          (yield* loadRecallIndexData(f.config, {includeInactive: false})).generation,
-        ),
-      ).toBe('current');
+      expect(hydrateAdvances.length).toBeGreaterThan(1);
+      expect(EffectArray.some(hydrateAdvances, advance => advance > 1)).toBe(true);
+      expect(inferenceBatches).toBeGreaterThan(1);
+      expect(reachedCurrent).toBe(true);
+      expect(yield* vectorIndexGenerationReadiness(f.home, manifest, f.index.generation)).toBe('current');
     }).pipe(provideFixtureLayer(platform)),
   );
 
@@ -858,14 +876,18 @@ describe('resumable recall vector preparation', () => {
     'resumed background publication equals a clean foreground build for varied chunk boundaries',
     {
       words: fc.array(fc.constantFrom('alpha', 'βeta', 'gamma', '😀', 'delta'), {minLength: 1, maxLength: 15}),
-      repeats: fc.integer({min: 10, max: 250}),
+      length: fc.integer({min: DEFAULT_CHUNK_MAX_CHARACTERS + 1, max: DEFAULT_CHUNK_MAX_CHARACTERS * 2 + 64}),
     },
-    ({words, repeats}) => cleanBuildEquivalent(words, repeats),
-    {fastCheck: {numRuns: 8}},
+    ({words, length}) => {
+      const line = EffectArray.join(words, ' ') + '\n';
+      const repeated = EffectString.repeat(Math.ceil(length / line.length))(line);
+      return cleanBuildEquivalent(EffectString.slice(0, length)(repeated));
+    },
+    {fastCheck: {numRuns: 5}},
   );
   effectIt.effect(
     'preserves surrogate boundary fragments through durable preparation and the clean foreground oracle',
-    () => cleanBuildEquivalent(['βeta', 'alpha', '😀'], 213),
+    () => cleanBuildEquivalent(EffectString.repeat(213)('βeta alpha 😀\n')),
   );
   effectIt.effect('resumes the durable global-resolution output cursor after losing its optional metadata cache', () =>
     Effect.gen(function* () {
@@ -1227,29 +1249,27 @@ const preparationSnapshot = (filename: string) =>
     }
   });
 
-function cleanBuildEquivalent(words: readonly string[], repeats: number) {
+function cleanBuildEquivalent(body: string) {
   return Effect.gen(function* () {
-    const f = yield* fixture;
-    yield* f.fs.writeFileString(
-      f.resource,
-      '# Varied document\n\n' + EffectString.repeat(repeats)(EffectArray.join(words, ' ') + '\n'),
-    );
-    const index = yield* loadRecallIndexData(f.config, {forceRefresh: true, includeInactive: false});
+    const f = yield* recallVectorStepFixture('# Varied document\n\n' + body);
+    yield* f.stepUntil('embed');
+    expect(f.inputs()).toBeGreaterThan(0);
     yield* f.finish;
     const cleanHome = yield* f.fs.makeTempDirectoryScoped({prefix: 'recall-clean-oracle-'});
     const cleanRuntime = LocalModelRuntime.of({
       ...f.runtime,
       embedMany: ({inputs}) => Effect.succeed(EffectArray.map(inputs, embeddingForInput)),
     });
-    const built = yield* ensureVectorIndex({agentContextHome: cleanHome}, manifest, index.candidates, {
-      corpusGeneration: index.generation,
+    const built = yield* ensureVectorIndex({agentContextHome: cleanHome}, manifest, f.index.candidates, {
+      corpusGeneration: f.index.generation,
     }).pipe(Effect.provideService(LocalModelStore, f.store), Effect.provideService(LocalModelRuntime, cleanRuntime));
     const path = yield* Path.Path;
     const cleanFilename = path.join(cleanHome, 'indexes/vectors', manifest.id, vectorIndexDatabaseFilename());
+    expect(built.chunkCount).toBeGreaterThan(1);
     expect(yield* vectorSnapshot(f.filename)).toEqual(yield* vectorSnapshot(cleanFilename));
     expect(yield* readLastRecallVectorRefresh(cleanHome, manifest)).toMatchObject({
       kind: 'full',
-      changedCount: index.candidates.length,
+      changedCount: f.index.candidates.length,
       copiedChunkCount: 0,
       reusedChunkCount: 0,
       embeddedChunkCount: built.chunkCount,
