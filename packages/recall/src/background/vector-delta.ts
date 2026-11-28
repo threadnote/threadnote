@@ -8,7 +8,7 @@ import {
   readRecallVectorGroupMembers,
   recallMaskedReadCompatible,
 } from '../vector/masked-read.js';
-import {preparationChanged, withRecallVectorWrite} from '../vector/storage.js';
+import {preparationChanged, RECALL_CHUNK_SCOPE_COLUMNS, withRecallVectorWrite} from '../vector/storage.js';
 import type {RecallEmbeddingScope} from './demand.js';
 import {
   assertRecallVectorTarget,
@@ -128,11 +128,7 @@ export const copyRecallVectorDeltaRows = Effect.fn('recall.copyVectorDeltaRows')
       if (ready.length !== 1) return yield* resetRecallVectorDeltaToFull(target.generation);
       const [table, key, columns] =
         stage === 'chunks'
-          ? ([
-              'vector_chunks',
-              'chunk_id',
-              'chunk_id,uri,fingerprint,project,approved_authoritative,vector_id',
-            ] as const)
+          ? (['vector_chunks', 'chunk_id', `${RECALL_CHUNK_SCOPE_COLUMNS},vector_id`] as const)
           : (['vector_aliases', 'uri', 'uri,representative_uri'] as const);
       const copied = yield* sql.unsafe(
         `INSERT INTO ${table} (generation,${columns}) SELECT ?,${columns} FROM ${table}

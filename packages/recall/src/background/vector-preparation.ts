@@ -1,7 +1,7 @@
 import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import * as EffectString from 'effect/String';
-import {Clock, DateTime, Effect} from 'effect';
+import {Clock, DateTime, Effect, Path} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {LocalModelManifest} from '@threadnote/inference/models/catalog';
@@ -10,8 +10,10 @@ import type {RecallCandidate} from '../rank.js';
 import type {RecallEmbeddingScope} from './demand.js';
 import {recallEmbeddingDemandKey} from './demand.js';
 import {openRecallVectorPreparationSource} from '../index/vector-preparation-source.js';
-import {recallVectorStorage} from '../vector-index.js';
-import {preparationChanged, withRecallVectorWrite} from '../vector/storage.js';
+import {recallVectorStorage, vectorReadExpectation} from '../vector-index.js';
+import {type RecallVectorGenerationMetadata, VECTOR_SCOPE_MAPPING_VERSION} from '../vector/generation-compatibility.js';
+import {recallMaskedReadCompatible} from '../vector/masked-read.js';
+import {preparationChanged, RECALL_CHUNK_SCOPE_COLUMNS, withRecallVectorWrite} from '../vector/storage.js';
 import {
   RECALL_DELTA_JOB_PREFIX,
   recallVectorDeltaJobId,
@@ -240,6 +242,7 @@ let preparedDocument:
       readonly chunks: readonly RecallPreparedChunk[];
       readonly aliases: ReturnType<typeof recallVectorStorage.aliasMappings>;
       readonly reuseKey: string | undefined;
+      readonly identityKey: string | undefined;
     }
   | undefined;
 export function releasePreparedRecallDocument(generation: string): void {
@@ -265,6 +268,189 @@ function documentPreparationKey(
   );
 }
 
+/** The chunk columns a body read decides; the digest binds a document identity to its chunk rows. */
+type RecallChunkBinding = Pick<
+  RecallPreparedChunk,
+  'chunk_id' | 'uri' | 'fingerprint' | 'project' | 'approved_authoritative' | 'vector_key'
+>;
+function recallChunkSetDigest(chunks: readonly RecallChunkBinding[]) {
+  const ordered = [...chunks].sort((left, right) =>
+    left.chunk_id < right.chunk_id ? -1 : left.chunk_id > right.chunk_id ? 1 : 0,
+  );
+  return sha256HexSync(
+    JSON.stringify(
+      EffectArray.map(ordered, chunk => [
+        chunk.chunk_id,
+        chunk.uri,
+        chunk.fingerprint,
+        chunk.project ?? null,
+        chunk.approved_authoritative,
+        chunk.vector_key,
+      ]),
+    ),
+  );
+}
+
+/**
+ * The durable identity of each document: its lexical stamp (lexical schema, text derivation, URI, stored size,
+ * modification time and content hash), its candidate record without text, the authorization key, embedding
+ * recipe, chunker version and scope mapping version. A document without a stamp has no identity.
+ */
+const recallDocumentIdentityKeys = Effect.fn('recall.documentIdentityKeys')(function* (
+  manifest: LocalModelManifest,
+  source: RecallVectorSource,
+  candidates: readonly RecallCandidate[],
+) {
+  const stamps = yield* source.readDocumentStamps(candidates);
+  return EffectArray.map(candidates, candidate => {
+    const stamp = stamps.get(candidate.uri);
+    if (stamp === undefined) return undefined;
+    const {text: _text, ...record} = candidate;
+    return sha256HexSync(
+      JSON.stringify([
+        'recall-document-identity-v1',
+        stamp,
+        sha256HexSync(JSON.stringify(record)),
+        source.authorizationKey,
+        recallVectorStorage.recipe(manifest),
+        RECALL_CHUNKER_VERSION,
+        VECTOR_SCOPE_MAPPING_VERSION,
+      ]),
+    );
+  });
+});
+
+/** Records the identity of a body read, or drops a stale one when the document has no identity or chunks. */
+const recordRecallDocumentIdentity = (
+  uri: string,
+  identityKey: string | undefined,
+  chunks: readonly RecallChunkBinding[],
+) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    if (identityKey === undefined || chunks.length === 0)
+      return yield* sql`DELETE FROM idle_recall_document_identities WHERE uri = ${uri}`;
+    return yield* sql`INSERT INTO idle_recall_document_identities (uri,identity_key,chunk_count,chunk_digest)
+      VALUES (${uri},${identityKey},${chunks.length},${recallChunkSetDigest(chunks)})
+      ON CONFLICT(uri) DO UPDATE SET identity_key = excluded.identity_key, chunk_count = excluded.chunk_count,
+        chunk_digest = excluded.chunk_digest`;
+  });
+
+/** Most chunk and alias rows one step copies for documents that need no body read. */
+const UNCHANGED_COPY_ROWS = 100;
+
+/**
+ * The leading documents whose recorded identity equals the current one and whose chunk rows, by digest, exist
+ * in a ready generation that the masked read accepts, up to `UNCHANGED_COPY_ROWS` rows. It stops at the first
+ * document that needs a body read.
+ */
+const matchUnchangedRecallDocuments = (
+  manifest: LocalModelManifest,
+  source: RecallVectorSource,
+  candidates: readonly RecallCandidate[],
+  identityKeys: readonly (string | undefined)[],
+) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const expected = vectorReadExpectation(manifest);
+    const ready = EffectArray.filter(
+      yield* sql<RecallVectorGenerationMetadata>`SELECT g.* FROM vector_generations g WHERE g.state = 'ready'
+        ORDER BY EXISTS (SELECT 1 FROM vector_pointer p WHERE p.generation = g.generation) DESC,
+          g.created_at DESC, g.generation DESC`,
+      generation => recallMaskedReadCompatible(generation, expected, source.authorizationKey),
+    );
+    const matched: {readonly candidate: RecallCandidate; readonly generation: string; readonly chunks: number}[] = [];
+    let rows = 0;
+    for (const [index, candidate] of candidates.entries()) {
+      const identityKey = identityKeys[index];
+      if (identityKey === undefined) break;
+      const identity = yield* sql<{readonly chunk_count: number; readonly chunk_digest: string}>`
+        SELECT chunk_count,chunk_digest FROM idle_recall_document_identities
+        WHERE uri = ${candidate.uri} AND identity_key = ${identityKey}`;
+      const recorded = identity[0];
+      const aliases = recallVectorStorage.aliasMappings([candidate]).length;
+      if (!recorded || rows + recorded.chunk_count + aliases > UNCHANGED_COPY_ROWS) break;
+      let generation: string | undefined;
+      for (const {generation: candidateGeneration} of ready) {
+        const chunks = yield* sql.unsafe<RecallChunkBinding>(
+          `SELECT ${RECALL_CHUNK_SCOPE_COLUMNS},v.vector_key FROM vector_chunks c JOIN vector_values v ON v.id = c.vector_id
+           WHERE c.generation = ? AND c.uri = ? LIMIT ?`,
+          [candidateGeneration, candidate.uri, recorded.chunk_count + 1],
+        );
+        if (chunks.length === recorded.chunk_count && recallChunkSetDigest(chunks) === recorded.chunk_digest) {
+          generation = candidateGeneration;
+          break;
+        }
+      }
+      if (generation === undefined) break;
+      matched.push({candidate, generation, chunks: recorded.chunk_count});
+      rows += recorded.chunk_count + aliases;
+    }
+    return matched;
+  });
+
+/**
+ * One bounded batch of documents whose identity did not change: their chunk rows come from a ready generation
+ * that holds them, with their vector ids, and their alias rows from the candidate. No body is read; external
+ * URIs are still authorized. Returns false when the first document, whose key the caller has, needs a body read;
+ * only then are the keys of the rest of the batch computed.
+ */
+const copyUnchangedRecallDocuments = Effect.fn('recall.copyUnchangedDocuments')(function* (
+  config: RecallEmbeddingScope,
+  manifest: LocalModelManifest,
+  source: RecallVectorSource,
+  target: RecallVectorTarget,
+  candidates: readonly RecallCandidate[],
+  firstKey: string | undefined,
+) {
+  const path = yield* Path.Path;
+  const filename = recallVectorStorage.databasePath(path, config.agentContextHome, manifest.id);
+  const first = yield* recallVectorStorage.read(
+    filename,
+    matchUnchangedRecallDocuments(manifest, source, candidates.slice(0, 1), [firstKey]),
+  );
+  if (!first.length) return false;
+  const identityKeys = [firstKey, ...(yield* recallDocumentIdentityKeys(manifest, source, candidates.slice(1)))];
+  const planned = yield* recallVectorStorage.read(
+    filename,
+    matchUnchangedRecallDocuments(manifest, source, candidates, identityKeys),
+  );
+  if (!planned.length) return false;
+  yield* source.authorize(EffectArray.map(planned, document => document.candidate));
+  return yield* withRecallVectorWrite(
+    config,
+    manifest,
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* assertRecallVectorTarget(target);
+      yield* source.fence;
+      // Only the authorized documents, matched again under the writer.
+      const matched = yield* matchUnchangedRecallDocuments(
+        manifest,
+        source,
+        candidates.slice(0, planned.length),
+        identityKeys,
+      );
+      if (!matched.length) return false;
+      let copied = 0;
+      for (const {candidate, generation, chunks} of matched) {
+        yield* sql.unsafe(
+          `INSERT INTO vector_chunks (generation,${RECALL_CHUNK_SCOPE_COLUMNS},vector_id)
+           SELECT ?,${RECALL_CHUNK_SCOPE_COLUMNS},vector_id FROM vector_chunks WHERE generation = ? AND uri = ?`,
+          [target.generation, generation, candidate.uri],
+        );
+        for (const alias of recallVectorStorage.aliasMappings([candidate]))
+          yield* sql`INSERT INTO vector_aliases (generation,uri,representative_uri)
+            VALUES (${target.generation},${alias.uri},${alias.representativeUri})`;
+        copied += chunks;
+      }
+      yield* sql`UPDATE idle_recall_targets SET cursor = ${target.cursor + matched.length},
+        copied_chunks = ${target.copied_chunks + copied}, source_after = NULL WHERE generation = ${target.generation}`;
+      return true;
+    }),
+  );
+});
+
 const reusePreparedDocument = Effect.fn('recall.reusePreparedDocument')(function* (
   config: RecallEmbeddingScope,
   manifest: LocalModelManifest,
@@ -272,6 +458,7 @@ const reusePreparedDocument = Effect.fn('recall.reusePreparedDocument')(function
   target: RecallVectorTarget,
   candidate: RecallCandidate,
   reuseKey: string,
+  identityKey: string | undefined,
 ) {
   const aliases = recallVectorStorage.aliasMappings([candidate]);
   if (target.chunk_cursor !== 0 || target.alias_cursor !== 0 || aliases.length > 100) return false;
@@ -305,16 +492,19 @@ const reusePreparedDocument = Effect.fn('recall.reusePreparedDocument')(function
         catch: () => false,
       }).pipe(Effect.orElseSucceed(() => false));
       if (!valid) return false;
-      for (const chunk of chunks)
-        yield* sql`INSERT INTO idle_recall_chunks
-      (generation,chunk_id,uri,fingerprint,project,approved_authoritative,vector_key,content,payload_hash)
-      VALUES (${target.generation},${chunk.chunk_id},${chunk.uri},${chunk.fingerprint},${chunk.project},
-        ${chunk.approved_authoritative},${chunk.vector_key},${chunk.content},${chunk.payload_hash})`;
+      // The rows just validated: every chunk of the URI, since the read above was not truncated.
+      yield* sql.unsafe(
+        `INSERT INTO idle_recall_chunks (generation,${RECALL_CHUNK_SCOPE_COLUMNS},vector_key,content,payload_hash)
+         SELECT ?,${RECALL_CHUNK_SCOPE_COLUMNS},vector_key,content,payload_hash FROM idle_recall_chunks
+         WHERE generation = ? AND uri = ?`,
+        [target.generation, previous.generation, candidate.uri],
+      );
       for (const alias of aliases)
         yield* sql`INSERT INTO vector_aliases (generation,uri,representative_uri)
       VALUES (${target.generation},${alias.uri},${alias.representativeUri})`;
       yield* sql`INSERT INTO idle_recall_document_preparations (generation,ordinal,reuse_key,chunk_count,reused)
       VALUES (${target.generation},${target.cursor},${reuseKey},${chunks.length},1)`;
+      yield* recordRecallDocumentIdentity(candidate.uri, identityKey, chunks);
       yield* sql`UPDATE idle_recall_targets SET cursor = ${target.cursor + 1} WHERE generation = ${target.generation}`;
       return true;
     }),
@@ -329,9 +519,24 @@ export const hydrateRecallVectorDocuments = Effect.fn('recall.hydrateVectorDocum
   metadata: readonly RecallCandidate[],
 ) {
   const selected = metadata.slice(0, 1);
+  let prepared =
+    preparedDocument?.generation === target.generation && preparedDocument.ordinal === target.cursor
+      ? preparedDocument
+      : undefined;
+  let identityKey: string | undefined;
+  if (!prepared && selected.length) {
+    [identityKey] = yield* recallDocumentIdentityKeys(manifest, source, selected);
+    // A document start may copy a batch of unchanged documents; a resumed document reads its body again.
+    if (
+      target.chunk_cursor === 0 &&
+      target.alias_cursor === 0 &&
+      (yield* copyUnchangedRecallDocuments(config, manifest, source, target, metadata.slice(0, 100), identityKey))
+    )
+      return;
+  }
   yield* source.authorize(selected);
   let reuseKey: string | undefined;
-  if (preparedDocument?.generation !== target.generation || preparedDocument.ordinal !== target.cursor) {
+  if (!prepared) {
     const documents = yield* source.hydrate(selected, {requireAll: true});
     if (
       documents.length !== selected.length ||
@@ -340,10 +545,10 @@ export const hydrateRecallVectorDocuments = Effect.fn('recall.hydrateVectorDocum
       return yield* preparationChanged();
     if (selected[0]) {
       reuseKey = documentPreparationKey(selected[0], documents[0].text, manifest, source.authorizationKey);
-      if (yield* reusePreparedDocument(config, manifest, source, target, selected[0], reuseKey)) return;
+      if (yield* reusePreparedDocument(config, manifest, source, target, selected[0], reuseKey, identityKey)) return;
     }
     const recipe = recallVectorStorage.recipe(manifest);
-    preparedDocument = {
+    prepared = {
       generation: target.generation,
       ordinal: target.cursor,
       chunks: EffectArray.map(recallVectorStorage.chunkMappings(documents), chunk => {
@@ -360,15 +565,16 @@ export const hydrateRecallVectorDocuments = Effect.fn('recall.hydrateVectorDocum
       }),
       aliases: recallVectorStorage.aliasMappings(documents),
       reuseKey,
+      identityKey,
     };
+    preparedDocument = prepared;
   }
-  const chunks = preparedDocument.chunks.slice(target.chunk_cursor, target.chunk_cursor + 100);
-  const aliases = preparedDocument.aliases.slice(target.alias_cursor, target.alias_cursor + 100 - chunks.length);
+  const document = prepared;
+  const chunks = document.chunks.slice(target.chunk_cursor, target.chunk_cursor + 100);
+  const aliases = document.aliases.slice(target.alias_cursor, target.alias_cursor + 100 - chunks.length);
   const done =
-    target.chunk_cursor + chunks.length === preparedDocument.chunks.length &&
-    target.alias_cursor + aliases.length === preparedDocument.aliases.length;
-  const preparedChunkCount = preparedDocument.chunks.length;
-  const preparedReuseKey = preparedDocument.reuseKey;
+    target.chunk_cursor + chunks.length === document.chunks.length &&
+    target.alias_cursor + aliases.length === document.aliases.length;
   yield* withRecallVectorWrite(
     config,
     manifest,
@@ -381,9 +587,11 @@ export const hydrateRecallVectorDocuments = Effect.fn('recall.hydrateVectorDocum
       VALUES (${target.generation},${chunk.chunk_id},${chunk.uri},${chunk.fingerprint},${chunk.project},${chunk.approved_authoritative},${chunk.vector_key},${JSON.stringify(chunk.content)},${chunk.payload_hash})`;
       for (const alias of aliases)
         yield* sql`INSERT INTO vector_aliases (generation,uri,representative_uri) VALUES (${target.generation},${alias.uri},${alias.representativeUri})`;
-      if (done && selected.length && preparedReuseKey)
+      if (done && selected.length && document.reuseKey)
         yield* sql`INSERT INTO idle_recall_document_preparations (generation,ordinal,reuse_key,chunk_count,reused)
-          VALUES (${target.generation},${target.cursor},${preparedReuseKey},${preparedChunkCount},0)`;
+          VALUES (${target.generation},${target.cursor},${document.reuseKey},${document.chunks.length},0)`;
+      if (done && selected[0])
+        yield* recordRecallDocumentIdentity(selected[0].uri, document.identityKey, document.chunks);
       yield* sql`UPDATE idle_recall_targets SET cursor = ${target.cursor + (done ? selected.length : 0)},
       chunk_cursor = ${done ? 0 : target.chunk_cursor + chunks.length}, alias_cursor = ${done ? 0 : target.alias_cursor + aliases.length},
       phase = ${selected.length === 0 ? 'embed' : 'hydrate'}, source_after = NULL WHERE generation = ${target.generation}`;
@@ -477,6 +685,12 @@ export const retireRecallVectorPreparation = Effect.fn('recall.retireVectorPrepa
       }
       for (const table of RECALL_BUILD_TABLES)
         if (yield* removeRecallTargetBatch(target.generation, table)) return false;
+      // Every ready generation holds the whole corpus, so an identity without chunks here is a removed memory.
+      const removedIdentities = yield* sql`DELETE FROM idle_recall_document_identities WHERE uri IN (
+        SELECT i.uri FROM idle_recall_document_identities i WHERE NOT EXISTS (
+          SELECT 1 FROM vector_chunks c WHERE c.generation = ${target.generation} AND c.uri = i.uri) LIMIT 100
+      ) RETURNING uri`;
+      if (removedIdentities.length) return false;
       const removedValues = yield* sql.unsafe(`DELETE FROM vector_values WHERE id IN (
       SELECT v.id FROM vector_values v WHERE NOT EXISTS (SELECT 1 FROM vector_chunks c WHERE c.vector_id = v.id) LIMIT 100
     ) RETURNING id`);

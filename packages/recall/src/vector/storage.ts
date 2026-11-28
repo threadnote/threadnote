@@ -13,6 +13,9 @@ export class RecallVectorPreparationChanged extends Schema.TaggedError<
 export const preparationChanged = () =>
   RecallVectorPreparationChanged.make({message: 'Recall vector preparation ownership changed; retry current demand.'});
 
+/** The scope columns of a chunk row in every table that holds one; each chunk copy carries exactly these. */
+export const RECALL_CHUNK_SCOPE_COLUMNS = 'chunk_id,uri,fingerprint,project,approved_authoritative';
+
 /**
  * Delta state of a target. `copy_stage` walks 'chunks' → 'aliases' → 'done'; the page cursor is the largest key
  * the target holds, since copying precedes preparation. `copy_expected` and `alias_expected` are the base rows
@@ -128,6 +131,12 @@ export function withRecallVectorWrite<A, E, R>(
                 yield* sql.unsafe(
                   'CREATE INDEX IF NOT EXISTS idle_recall_chunks_uri ON idle_recall_chunks (generation,uri)',
                 );
+                // One row per prepared memory, outside any target and without text: the identity of its last
+                // body read and a digest of the chunk rows that read produced.
+                yield* sql.unsafe(`CREATE TABLE IF NOT EXISTS idle_recall_document_identities (
+            uri TEXT PRIMARY KEY, identity_key TEXT NOT NULL,
+            chunk_count INTEGER NOT NULL CHECK(chunk_count > 0), chunk_digest TEXT NOT NULL
+          ) WITHOUT ROWID`);
                 return yield* program;
               }),
             );

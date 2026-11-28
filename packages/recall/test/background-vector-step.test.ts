@@ -11,6 +11,8 @@ import {
   type RecallVectorBuildPlan,
   prepareRecallVectorMetadata,
 } from '../src/background/vector-preparation.js';
+import {formatMemoryDocument} from '@threadnote/memory/document';
+import {forceRecallFullVectorWalk, recordRecallBodyReads} from './vector-walk.fixture.js';
 import {openRecallVectorPreparationSource} from '../src/index/vector-preparation-source.js';
 import {recallEmbeddingDemandKey} from '../src/background/demand.js';
 import {RECALL_CHUNKER_VERSION} from '../src/chunker.js';
@@ -242,6 +244,66 @@ describe('resumable recall vector preparation', () => {
       }).pipe(provideFixtureLayer(platform)),
     );
 
+  // P5-A1.
+  effectIt.effect('reads each body once on a first full walk and none on a full walk of the unchanged corpus', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const path = yield* Path.Path;
+      // Memories carry a content hash; more of them than one batch of copied rows.
+      yield* f.fs.remove(f.resource);
+      const memories = path.join(f.home, 'data/local/user/test/memories/durable/projects/threadnote');
+      yield* f.fs.makeDirectory(memories, {recursive: true});
+      for (let index = 0; index < 120; index++)
+        yield* f.fs.writeFileString(
+          path.join(memories, `${index}.md`),
+          formatMemoryDocument(
+            'MEMORY',
+            {
+              kind: 'durable',
+              memoryId: `tn_document_${index}`,
+              status: 'active',
+              project: 'threadnote',
+              topic: `document-${index}`,
+              sourceAgentClient: 'test',
+              timestamp: '2026-11-01T00:00:00Z',
+            },
+            `Document body ${index}.`,
+          ),
+        );
+      yield* loadRecallIndexData(f.config, {forceRefresh: true, includeInactive: false});
+      const reads = yield* recordRecallBodyReads;
+      yield* f.finish;
+      expect(reads).toHaveLength(120);
+      expect(new Set(reads).size).toBe(120);
+      const identities = Effect.sync(() => {
+        const db = new Database(f.filename, {readonly: true});
+        try {
+          return db.query<{count: number}, []>('SELECT COUNT(*) AS count FROM idle_recall_document_identities').get()!
+            .count;
+        } finally {
+          db.close();
+        }
+      });
+      expect(yield* identities).toBe(120);
+      const published = yield* vectorSnapshot(f.filename);
+      yield* forceRecallFullVectorWalk(f.config);
+      reads.length = 0;
+      const inputs = f.inputs();
+      let hydrateSteps = 0;
+      for (let turn = 0; turn < 500; turn++) {
+        const result = yield* f.step();
+        if (result.phase === 'hydrate') hydrateSteps++;
+        if (result.state === 'current') break;
+      }
+      expect(reads).toEqual([]);
+      expect(f.inputs()).toBe(inputs);
+      // Bounded batches: one chunk and one alias row per document, at most 100 rows per step.
+      expect(hydrateSteps).toBeGreaterThanOrEqual(3);
+      expect(hydrateSteps).toBeLessThan(10);
+      expect(yield* vectorSnapshot(f.filename)).toEqual(published);
+      expect(yield* identities).toBe(120);
+    }).pipe(provideFixtureLayer(platform)),
+  );
   effectIt.effect('batches lightweight checkpoints while making at most one native request', () =>
     Effect.gen(function* () {
       const f = yield* fixture;

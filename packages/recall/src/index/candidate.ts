@@ -17,6 +17,14 @@ import {recallCandidateIsEligible, type RecallEligibilityPolicy} from '../eligib
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 
+/**
+ * Version of the text that `indexCandidate` stores: redaction, external body parsing and memory text selection.
+ * Change it with that derivation; each vector build then reads every body once again.
+ */
+export const RECALL_CANDIDATE_TEXT_VERSION: number = 1;
+/** The text version of every publication that does not record one; binaries before the record derive it so. */
+export const LEGACY_RECALL_CANDIDATE_TEXT_VERSION = 1;
+
 export function indexCandidate(
   uri: string,
   content: string,

@@ -118,7 +118,7 @@ export const stepRecallVectorPreparation = Effect.fn('recall.stepVectorPreparati
     if (target.purging === 1) yield* purgeRecallVectorTarget(config, manifest, source, target);
     else if (target.copy_stage === 'chunks' || target.copy_stage === 'aliases')
       yield* copyRecallVectorDeltaRows(config, manifest, source, target);
-    else yield* hydrateRecallVectorDocuments(config, manifest, source, target, yield* documents(target.cursor, 1));
+    else yield* hydrateRecallVectorDocuments(config, manifest, source, target, yield* documents(target.cursor));
   } else if (target.phase === 'embed') {
     const pending = yield* recallVectorStorage.read(
       filename,

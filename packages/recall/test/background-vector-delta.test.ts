@@ -3,7 +3,7 @@ import {it as effectIt} from '@effect/vitest';
 import {Database} from 'bun:sqlite';
 import {Array as EffectArray, Clock, Effect, FileSystem, Layer, Option, Path} from 'effect';
 import * as EffectString from 'effect/String';
-import {describe, expect, vi} from 'vitest';
+import {describe, expect} from 'vitest';
 import {cryptoLayer} from '@threadnote/platform/crypto';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
@@ -32,6 +32,7 @@ import {stepRecallVectorPreparation} from '../src/background/vector-step.js';
 import {ensureVectorIndex, recallVectorStorage, vectorIndexDatabaseFilename} from '../src/vector-index.js';
 import {recallVectorPreparationIdentity, recallVectorPreparationJobId} from '../src/vector/preparation-identity.js';
 import {vectorIndexGenerationReadiness} from '../src/vector/semantic-read.js';
+import {forceRecallFullVectorWalk, recordRecallBodyReads} from './vector-walk.fixture.js';
 
 const manifest = {
   ...Option.getOrThrow(EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.role === 'embedding')),
@@ -184,7 +185,6 @@ const fixture = Effect.gen(function* () {
   );
   let inputs = 0;
   let beforeInference: Effect.Effect<void, unknown> = Effect.void;
-  const reads: string[] = [];
   const diagnostics: RecallDiagnostic[] = [];
   const runtime = LocalModelRuntime.of({
     diagnostics: Effect.succeed({backend: 'fake', buildType: 'prebuilt', cpuMathCores: 1}),
@@ -216,24 +216,7 @@ const fixture = Effect.gen(function* () {
     status: () => Effect.succeed(installed),
     verify: () => Effect.succeed(installed),
   });
-  // Count body reads through the source port.
-  const open = PreparationSource.openRecallVectorPreparationSource;
-  yield* Effect.acquireRelease(
-    Effect.sync(() =>
-      vi.spyOn(PreparationSource, 'openRecallVectorPreparationSource').mockImplementation(scope =>
-        open(scope).pipe(
-          Effect.map(source => ({
-            ...source,
-            hydrate: (metadata: Parameters<typeof source.hydrate>[0], options?: Parameters<typeof source.hydrate>[1]) =>
-              Effect.sync(() => reads.push(...EffectArray.map(metadata, candidate => candidate.uri))).pipe(
-                Effect.andThen(source.hydrate(metadata, options)),
-              ),
-          })),
-        ),
-      ),
-    ),
-    spy => Effect.sync(() => spy.mockRestore()),
-  );
+  const reads = yield* recordRecallBodyReads;
   const step = () =>
     stepRecallVectorPreparation(config, manifest, Effect.succeed(true)).pipe(
       Effect.provideService(LocalModelStore, models),
@@ -449,11 +432,47 @@ describe('delta vector generation', () => {
         expect(Math.max(...counts.slice(0, purged))).toBeGreaterThan(100);
         for (let index = 1; index <= purged; index++)
           expect(counts[index - 1] - counts[index]).toBeLessThanOrEqual(100);
-        expect(f.reads).toHaveLength(6);
-        expect(f.diagnostics.at(-1)).toMatchObject({kind: 'full', changedCount: 0, copiedChunkCount: 0});
+        // The full walk reads only the changed body and the one above a copy batch while a ready generation
+        // still holds the other chunks; with no ready generation it reads every body.
+        if (fault === 'base-not-ready') expect(f.reads).toHaveLength(6);
+        else expect([...f.reads].sort()).toEqual([memoryUri('big'), memoryUri('m2')]);
+        expect(f.diagnostics.at(-1)).toMatchObject({kind: 'full', changedCount: 0});
         expect(yield* vectorSnapshot(f.filename)).toEqual(yield* f.fullWalkSnapshot);
       }).pipe(provideFixtureLayer(services)),
     );
+
+  // P5-A3, and the identity of a removed memory.
+  effectIt.effect('a full walk that skips unchanged bodies publishes the generation a walk of every body builds', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      yield* f.seed;
+      yield* f.refresh;
+      yield* f.finish;
+      expect(f.reads).toHaveLength(6);
+      const identities = f
+        .query<{uri: string}>('SELECT uri FROM idle_recall_document_identities ORDER BY uri')
+        .pipe(Effect.map(rows => EffectArray.map(rows, row => row.uri)));
+      expect(yield* identities).toHaveLength(6);
+      expect(yield* identities).toContain(memoryUri('m1'));
+      // A delta reads the revised body again and replaces its identity.
+      yield* f.memory('m2', 'Third standalone body, revised.');
+      yield* f.refresh;
+      yield* f.finish;
+      // A full walk after a removal.
+      yield* f.remove('m1');
+      yield* forceRecallFullVectorWalk(f.config);
+      f.reads.length = 0;
+      const inputs = f.inputs();
+      yield* f.finish;
+      // Only the memory above one copy batch is read again; no chunk is embedded again.
+      expect(f.reads).toEqual([memoryUri('big')]);
+      expect(f.inputs()).toBe(inputs);
+      expect(f.diagnostics.at(-1)).toMatchObject({kind: 'full', copiedChunkCount: 4, embeddedChunkCount: 0});
+      expect(yield* vectorSnapshot(f.filename)).toEqual(yield* f.fullWalkSnapshot);
+      expect(yield* identities).toHaveLength(5);
+      expect(yield* identities).not.toContain(memoryUri('m1'));
+    }).pipe(provideFixtureLayer(services)),
+  );
 
   // P4-A3.
   effectIt.effect('keeps the base and the completed vectors when a write replaces a delta build', () =>

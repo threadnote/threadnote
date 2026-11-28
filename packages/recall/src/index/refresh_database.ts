@@ -13,7 +13,12 @@ import type {RecallIndexConfig, RecallIndexProgress} from '../index.js';
 import {deriveIndexedRecallCodeLinks} from '../code_links.js';
 import {deriveIndexedRecallMemoryLinks} from '../memory/links.js';
 import {recallDocumentTerms} from '../rank.js';
-import {indexCandidate, recallExactSearchText} from './candidate.js';
+import {
+  indexCandidate,
+  LEGACY_RECALL_CANDIDATE_TEXT_VERSION,
+  RECALL_CANDIDATE_TEXT_VERSION,
+  recallExactSearchText,
+} from './candidate.js';
 import {loadCanonicalResourcePolicy, verifyCanonicalResource} from './canonical_resource.js';
 import {
   recallIndexCanonicalMutationContinuityAllowsIncrementalRefresh,
@@ -21,6 +26,7 @@ import {
   RECALL_INVENTORY_POLICY_VERSION,
 } from './freshness.js';
 import * as RecallIndexIdentity from './identity.js';
+import {RECALL_INDEX_DATABASE_VERSION} from './schema.js';
 import {recordRecallChangeLog} from './change_log.js';
 import {candidatePostings} from './lexical.js';
 import {captureRecallSourceInput, normalizeRecallHydrationChanges, recallRefreshSuperseded} from './refresh_cut.js';
@@ -458,9 +464,15 @@ export const publishPreparedRecallDatabase = Effect.fn('recall.publishPreparedDa
   `;
   const logicalDocumentCount = logicalAggregate[0]?.document_count ?? 0;
   const logicalTotalDocumentLength = logicalAggregate[0]?.total_document_length ?? 0;
+  const derivation = yield* nextRecallCandidateTextDerivation(
+    sql,
+    prepared.forceAllSources && sourceScan.mode === 'full',
+    contentGeneration,
+  );
   const metadataEntries = [
     ['canonical_mutation_generation', canonicalMutationGeneration],
     ['content_generation', contentGeneration],
+    ...(derivation === undefined ? [] : [['candidate_text_derivation', derivation] as const]),
     ['inventory_policy_version', RECALL_INVENTORY_POLICY_VERSION],
     ['inventory_policy_content_generation', contentGeneration],
     ['source_policy_inputs', prepared.policyInputProof ?? ''],
@@ -485,12 +497,50 @@ export const publishPreparedRecallDatabase = Effect.fn('recall.publishPreparedDa
      ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
     metadataEntries.flat(),
   );
+  if (derivation === undefined) yield* sql`DELETE FROM metadata WHERE key = 'candidate_text_derivation'`;
   yield* sql.unsafe(`
     INSERT INTO metadata (key, value)
     SELECT 'integrity_sequence', value FROM metadata WHERE key = 'mutation_sequence'
     ON CONFLICT(key) DO UPDATE SET value = excluded.value
   `);
   return documentCount;
+});
+
+/**
+ * `[content generation, lexical schema, text version]`: every stored candidate text was derived with these
+ * versions. A publication that derives every source again, or the first one, writes it. An incremental one
+ * carries it to the new content generation when the previous texts have the current version: the recorded one
+ * when the record belongs to the previous generation, else the legacy version of a publication that does not
+ * write the record. Otherwise it drops the record: after a version change, an older or legacy publication
+ * leaves vector builds reading every body until a full derivation writes the record again.
+ */
+const nextRecallCandidateTextDerivation = Effect.fn('recall.nextCandidateTextDerivation')(function* (
+  sql: SqlClient.SqlClient,
+  derivedEverySource: boolean,
+  contentGeneration: string,
+) {
+  const previous = new Map(
+    EffectArray.map(
+      yield* sql<{readonly key: string; readonly value: string}>`SELECT key, value FROM metadata
+        WHERE key IN ('content_generation', 'candidate_text_derivation')`,
+      row => [row.key, row.value] as const,
+    ),
+  );
+  const previousGeneration = previous.get('content_generation');
+  const recorded = yield* Effect.try({
+    try: (): unknown => JSON.parse(previous.get('candidate_text_derivation') ?? 'null'),
+    catch: () => undefined,
+  }).pipe(Effect.orElseSucceed(() => undefined));
+  const previousVersion =
+    EffectArray.isArray(recorded) &&
+    recorded.length === 3 &&
+    recorded[0] === previousGeneration &&
+    recorded[1] === RECALL_INDEX_DATABASE_VERSION
+      ? recorded[2]
+      : LEGACY_RECALL_CANDIDATE_TEXT_VERSION;
+  return derivedEverySource || previousGeneration === undefined || previousVersion === RECALL_CANDIDATE_TEXT_VERSION
+    ? JSON.stringify([contentGeneration, RECALL_INDEX_DATABASE_VERSION, RECALL_CANDIDATE_TEXT_VERSION])
+    : undefined;
 });
 
 const hasLegacyRecallMemoryLinks = (sql: SqlClient.SqlClient) =>
