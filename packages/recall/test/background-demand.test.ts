@@ -1,10 +1,16 @@
 import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
-import {scheduleMcpRecallBackgroundRefresh} from '../src/mcp/refresh.js';
+import {
+  olderReadRefreshWarning,
+  scheduleMcpRecallBackgroundRefresh,
+  staleReadRefreshWarning,
+} from '../src/mcp/refresh.js';
+import * as RecallIndexBoundary from '../src/index.js';
+import {hasReadCleanupUnconfirmed} from '@threadnote/platform/read_deadline';
 import {cryptoLayer} from '@threadnote/platform/crypto';
 import * as EffectString from 'effect/String';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Array as EffectArray, Deferred, Effect, Fiber, FileSystem, Layer, Option, Path, Schema} from 'effect';
+import {Array as EffectArray, Deferred, Effect, Exit, Fiber, FileSystem, Layer, Option, Path, Schema} from 'effect';
 import {expect, describe, vi} from 'vitest';
 import * as SystemBoundary from '@threadnote/platform/system';
 import * as LockBoundary from '@threadnote/platform/file/lock';
@@ -17,6 +23,7 @@ import {RuntimeEntrypoint} from '@threadnote/platform/runtime-entrypoint';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
 import {
   completeRecallEmbeddingDemand,
+  observeRecallEmbeddingDemand,
   readRecallEmbeddingDemand,
   requestRecallEmbeddings,
   requestRecallEmbeddingsReceipt,
@@ -40,6 +47,17 @@ const fixture = Effect.gen(function* () {
   const home = yield* fs.makeTempDirectoryScoped({prefix: 'recall-demand-'});
   return {fs, scope: {account: 'local', agentContextHome: home, user: 'test'}};
 });
+describe('read-triggered refresh warnings', () => {
+  // A joined block is not retried by the read: a masked read must say so, and a stale read must not claim a queue.
+  effectIt.effect('warns a masked read only for a joined block and gives a stale read its own blocked text', () =>
+    Effect.sync(() => {
+      expect(Option.isSome(olderReadRefreshWarning({blocked: true}))).toBe(true);
+      expect(Option.isNone(olderReadRefreshWarning({}))).toBe(true);
+      expect(staleReadRefreshWarning({blocked: true})).not.toBe(staleReadRefreshWarning({}));
+    }),
+  );
+});
+
 describe('durable recall embedding demand', () => {
   for (const boundary of ['replacement', 'churn', 'unsafe'] as const)
     effectIt.effect(`reads coherent demand through ${boundary} without unbounded retries or unsafe fallback`, () =>
@@ -232,6 +250,94 @@ describe('durable recall embedding demand', () => {
       );
       expect(reads).toBe(1);
       expect((yield* readRecallEmbeddingDemand(scope))?.desired?.revision).not.toBe(initial.revision);
+    }).pipe(provideFixtureLayer(platform)),
+  );
+
+  const join = {model: 'bge:sha:384', corpusGeneration: 'generation-1'};
+  for (const observed of ['retrying', 'blocked'] as const)
+    effectIt.effect(`keeps ${observed} observed demand across reads and retries it after a write`, () =>
+      Effect.gen(function* () {
+        const {scope} = yield* fixture;
+        const initial = yield* requestRecallEmbeddingsReceipt(scope, true);
+        const observation =
+          observed === 'blocked'
+            ? {state: 'blocked' as const, reason: 'embedding-preparation-failed', failures: 8}
+            : {state: 'queued' as const, reason: 'retry-backoff', failures: 3, notBefore: 9_000};
+        expect(yield* observeRecallEmbeddingDemand(scope, initial, {...observation, ...join})).toBe(true);
+        const before = yield* readRecallEmbeddingDemand(scope);
+        expect(before?.observation).toMatchObject({...observation, ...join, revision: initial.revision});
+        for (let read = 0; read < 10; read++)
+          expect(yield* requestRecallEmbeddingsReceipt(scope, true, join)).toEqual({
+            token: initial.token,
+            revision: initial.revision,
+            disposition: 'coalesced',
+            ...(observed === 'blocked' ? {blocked: true} : {}),
+          });
+        expect(yield* readRecallEmbeddingDemand(scope)).toEqual(before);
+        expect(yield* requestRecallEmbeddings(scope, true)).toBe(initial.token);
+        const after = (yield* readRecallEmbeddingDemand(scope))!;
+        expect(after.desired!.revision).not.toBe(initial.revision);
+        expect(after.observation).toBeUndefined();
+      }).pipe(provideFixtureLayer(platform)),
+    );
+
+  for (const [label, state, recorded, read, joins] of [
+    ['same corpus generation joins', 'blocked', 'generation-1', join, true],
+    ['an unblocked observation without a generation joins by model', 'running', undefined, join, true],
+    ['a blocked observation without a generation is a new event', 'blocked', undefined, join, false],
+    [
+      'a changed corpus generation is a new event',
+      'blocked',
+      'generation-1',
+      {...join, corpusGeneration: 'generation-2'},
+      false,
+    ],
+    [
+      'an unknown read generation is a new event',
+      'blocked',
+      'generation-1',
+      {...join, corpusGeneration: undefined},
+      false,
+    ],
+    ['another model is a new event', 'blocked', 'generation-1', {...join, model: 'other:model:2'}, false],
+  ] as const)
+    effectIt.effect(`read join: ${label}`, () =>
+      Effect.gen(function* () {
+        const {scope} = yield* fixture;
+        const initial = yield* requestRecallEmbeddingsReceipt(scope, true);
+        yield* observeRecallEmbeddingDemand(scope, initial, {
+          state,
+          failures: 8,
+          model: join.model,
+          ...(recorded === undefined ? {} : {corpusGeneration: recorded}),
+        });
+        expect((yield* requestRecallEmbeddingsReceipt(scope, true, read)).disposition).toBe('coalesced');
+        const after = (yield* readRecallEmbeddingDemand(scope))!;
+        expect(after.desired!.token).toBe(initial.token);
+        expect(after.desired!.revision === initial.revision).toBe(joins);
+        expect(after.observation === undefined).toBe(!joins);
+      }).pipe(provideFixtureLayer(platform)),
+    );
+
+  effectIt.effect('propagates an unconfirmed read cleanup from the generation read and keeps demand', () =>
+    Effect.gen(function* () {
+      const {scope} = yield* fixture;
+      yield* requestRecallEmbeddingsReceipt(scope, true);
+      const before = yield* readRecallEmbeddingDemand(scope);
+      const manifest = Option.getOrThrow(
+        EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.id === 'bge-small-en-v1.5-q8'),
+      );
+      const exit = yield* Effect.acquireUseRelease(
+        Effect.sync(() =>
+          vi
+            .spyOn(RecallIndexBoundary, 'currentRecallCorpusGeneration')
+            .mockReturnValue(Effect.die({reason: 'cleanup-unconfirmed'})),
+        ),
+        () => scheduleMcpRecallBackgroundRefresh(scope, manifest).pipe(Effect.exit),
+        spy => Effect.sync(() => spy.mockRestore()),
+      );
+      expect(Exit.isFailure(exit) && hasReadCleanupUnconfirmed(exit.cause)).toBe(true);
+      expect(yield* readRecallEmbeddingDemand(scope)).toEqual(before);
     }).pipe(provideFixtureLayer(platform)),
   );
 

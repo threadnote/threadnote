@@ -270,6 +270,21 @@ const phaseWatchTaskRefs = (
   };
 };
 
+/** Get the current watch references, or the retained proof for one exact watch ID. */
+export const nativeTaskPhaseWatchRefs = (
+  stored: NonNullable<Effect.Success<ReturnType<typeof readNativeWorkflowState>>>,
+  phaseId: string,
+  watchId?: string,
+) => {
+  const phase = stored.state.cycle?.state.phases[phaseId];
+  for (const proof of watchId ? [phase, ...[...(phase?.history ?? [])].reverse()] : [phase]) {
+    const candidate = canonicalPhaseWatchProof(stored, phaseId, proof);
+    if (candidate && (watchId === undefined || candidate.watchId === watchId))
+      return phaseWatchTaskRefs(stored, candidate);
+  }
+  return undefined;
+};
+
 /** Recover maintenance references from a specific arrived notice without refreshing the watch or publication proof. */
 export const readNativeTaskNoticeView = (config: RuntimeConfig, input: unknown) =>
   Effect.gen(function* () {

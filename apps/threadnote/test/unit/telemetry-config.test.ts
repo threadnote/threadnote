@@ -41,7 +41,7 @@ describe('telemetry configuration', () => {
       {consentVersion: 2, enabled: true, endpoint: DEFAULT_TELEMETRY_ENDPOINT, version: 1},
       {consentVersion: 2, enabled: false, endpoint: DEFAULT_TELEMETRY_ENDPOINT, version: 1},
       {
-        consentVersion: 5,
+        consentVersion: 6,
         autoAccept: 'yes',
         enabled: true,
         endpoint: DEFAULT_TELEMETRY_ENDPOINT,
@@ -49,7 +49,7 @@ describe('telemetry configuration', () => {
         version: 1,
       },
       {
-        consentVersion: 6,
+        consentVersion: 7,
         autoAccept: true,
         enabled: true,
         endpoint: DEFAULT_TELEMETRY_ENDPOINT,
@@ -58,8 +58,8 @@ describe('telemetry configuration', () => {
         version: 1,
       },
       {consentVersion: 3, enabled: false, version: 1},
-      {consentVersion: 7, enabled: false, version: 1},
-      {consentVersion: 5, enabled: false, version: 2},
+      {consentVersion: 8, enabled: false, version: 1},
+      {consentVersion: 6, enabled: false, version: 2},
     ]) {
       expect(() => parseTelemetryConfiguration(JSON.stringify(malformed))).toThrow(TelemetryConfigurationError);
     }
@@ -96,7 +96,7 @@ describe('telemetry configuration', () => {
 
   fcEffectProp(
     effectIt,
-    'recognizes only the exact renewable enabled-consent generation',
+    'recognizes the renewable enabled-consent generations',
     {
       autoAccept: FC.option(FC.boolean(), {nil: undefined}),
       consentVersion: FC.integer({max: 8, min: 1}),
@@ -120,14 +120,14 @@ describe('telemetry configuration', () => {
           }),
         );
         expect(renewal).toEqual(
-          consentVersion === 5 &&
+          (consentVersion === 5 || consentVersion === 6) &&
             enabled &&
             autoAccept !== true &&
             !extraField &&
             validEndpoint &&
             validSalt &&
             version === 1
-            ? {consentVersion: 5, endpoint: DEFAULT_TELEMETRY_ENDPOINT}
+            ? {consentVersion, endpoint: DEFAULT_TELEMETRY_ENDPOINT}
             : undefined,
         );
       }),
@@ -154,10 +154,10 @@ describe('telemetry configuration', () => {
               version: 1,
             }),
           );
-        if (consentVersion === 6 || (consentVersion < 6 && autoAccept)) {
+        if (consentVersion === 7 || (consentVersion < 7 && autoAccept)) {
           expect(parse()).toEqual({
             ...(autoAccept ? {autoAccept: true} : {}),
-            consentVersion: 6,
+            consentVersion: 7,
             enabled: true,
             endpoint: DEFAULT_TELEMETRY_ENDPOINT,
             sessionSalt: FIXED_SESSION_SALT,
@@ -236,7 +236,7 @@ describe('telemetry configuration', () => {
         yield* fs.writeFileString(
           file,
           `${JSON.stringify({
-            consentVersion: 5,
+            consentVersion: 6,
             enabled: true,
             endpoint: DEFAULT_TELEMETRY_ENDPOINT,
             sessionSalt: FIXED_SESSION_SALT,
@@ -248,7 +248,7 @@ describe('telemetry configuration', () => {
         expect(yield* resolveTelemetryConfiguration(config)).toBeUndefined();
         expect(yield* Effect.exit(readTelemetryConfiguration(config))).toMatchObject({_tag: 'Failure'});
         expect(yield* readTelemetryConsentRenewal(config)).toEqual({
-          consentVersion: 5,
+          consentVersion: 6,
           endpoint: DEFAULT_TELEMETRY_ENDPOINT,
         });
 
@@ -256,7 +256,7 @@ describe('telemetry configuration', () => {
           file,
           `${JSON.stringify({
             autoAccept: true,
-            consentVersion: 5,
+            consentVersion: 6,
             enabled: true,
             endpoint: DEFAULT_TELEMETRY_ENDPOINT,
             sessionSalt: FIXED_SESSION_SALT,
@@ -266,7 +266,7 @@ describe('telemetry configuration', () => {
         );
         expect(yield* resolveTelemetryConfiguration(config)).toEqual({
           autoAccept: true,
-          consentVersion: 6,
+          consentVersion: 7,
           enabled: true,
           endpoint: DEFAULT_TELEMETRY_ENDPOINT,
           sessionSalt: FIXED_SESSION_SALT,

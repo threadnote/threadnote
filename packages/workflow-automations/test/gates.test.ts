@@ -7,7 +7,10 @@ import {
   decideGate,
   nativeGates,
   nativeNextCommand,
+  nativeNextPlaceholder,
+  fillNativeNext,
   nativeNext,
+  nativeRefusal,
   nativeWaivableGateIds,
   nativeWorkflowPolicyOf,
   type GateId,
@@ -53,15 +56,30 @@ describe('dev-cycle gate decisions', () => {
       nativeNextCommand(
         'workflow_task_snapshot',
         'record',
-        {command: 'task-action record-snapshot', flags: {runId: 'run-1', callerCwd: '/a b', reason: '<reason>'}},
-        {runId: 'run-1', callerCwd: '/a b', snapshot: {command: 'record', reason: '<reason>'}},
+        {
+          command: 'task-action record-snapshot',
+          flags: {runId: 'run-1', callerCwd: '/a b', reason: nativeNextPlaceholder('reason')},
+        },
+        {runId: 'run-1', callerCwd: '/a b', snapshot: {command: 'record', reason: nativeNextPlaceholder('reason')}},
       ),
     ).toEqual({
       tool: 'workflow_task_snapshot',
       command: 'record',
-      cli: 'threadnote workflow-automation task-action record-snapshot --run-id run-1 --caller-cwd "/a b" --reason <reason>',
-      arguments: {runId: 'run-1', callerCwd: '/a b', snapshot: {command: 'record', reason: '<reason>'}},
+      cli: "threadnote workflow-automation task-action record-snapshot --run-id run-1 --caller-cwd '/a b' --reason '<reason>'",
+      arguments: {
+        runId: 'run-1',
+        callerCwd: '/a b',
+        snapshot: {command: 'record', reason: '<reason>'},
+      },
     });
+  });
+  it('keeps placeholder-shaped text inside a literal CLI argument unchanged', () => {
+    const scope = {runId: 'run-1', callerCwd: '/space <snapshotRef> suffix'};
+    const refusal = nativeRefusal('review', 'Review source.', {next: nativeNext.review(scope)});
+    expect(refusal.next).toBeDefined();
+    const next = fillNativeNext(refusal.next!, {snapshotRef: 'reference;value'});
+    expect(next.cli).toContain("--caller-cwd '/space <snapshotRef> suffix' --snapshot-ref 'reference;value'");
+    expect(next.arguments).toMatchObject({...scope, snapshotRef: 'reference;value'});
   });
 });
 

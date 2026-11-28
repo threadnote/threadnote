@@ -16,11 +16,8 @@ import {BUILTIN_MODEL_MANIFESTS, CORE_EMBEDDING_MODEL_ID} from '@threadnote/infe
 import {LocalModelStore, type LocalModelStoreShape} from '@threadnote/inference/models/store';
 import {readModelSelection, writeModelSelection} from '@threadnote/inference/models/selection';
 import {loadRecallIndexData} from '@threadnote/recall/index';
-import {
-  ensureVectorIndex,
-  loadRecallVectorAuthorizationKey,
-  vectorIndexGenerationReadiness,
-} from '@threadnote/recall/vector-index';
+import {ensureVectorIndex, loadRecallVectorAuthorizationKey} from '@threadnote/recall/vector-index';
+import {vectorIndexGenerationReadiness} from '@threadnote/recall/vector/semantic-read';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 
 const embeddingManifest = EffectOption.getOrUndefined(

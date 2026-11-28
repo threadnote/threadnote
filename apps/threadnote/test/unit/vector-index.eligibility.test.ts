@@ -22,10 +22,10 @@ import type {RecallCandidate} from '@threadnote/recall/rank';
 import {
   ensureVectorIndex,
   rebuildVectorIndex,
-  selectedSemanticScores,
   vectorIndexDatabaseFilename,
   vectorIndexStatus,
 } from '@threadnote/recall/vector-index';
+import {selectedSemanticScores} from '@threadnote/recall/vector/semantic-read';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 

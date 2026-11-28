@@ -19,14 +19,13 @@ import {
 import type {RecallCandidate} from './rank.js';
 import type {RecallHit} from './results.js';
 import {
-  emptyRecallSemanticScoresResult,
   prepareRecallSectionsWithoutInference,
   warmRecallReranker,
   type PrepareRecallSectionsInput,
   type RecallRerankerCache,
   type RecallRuntimeConfig,
-  type RecallSemanticScoresResult,
 } from './runtime.js';
+import {emptyRecallSemanticScoresResult, type RecallSemanticScoresResult} from './semantic_scores.js';
 import {
   lexicalReadFailureWarning,
   mergeRecallOperationalWarnings,

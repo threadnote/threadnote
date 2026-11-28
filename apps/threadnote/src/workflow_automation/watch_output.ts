@@ -44,6 +44,16 @@ export function nativeWatchWorkList(work: readonly NativeWatchWork[], offset = 0
   return {items, offset, nextOffset: offset + items.length < work.length ? offset + items.length : null};
 }
 
+/** A continuation whose view digest is missing or superseded starts a fresh view at offset zero instead of failing. */
+export function nativeWatchWorkPage(
+  work: readonly NativeWatchWork[],
+  request: {readonly workOffset?: number; readonly workViewDigest?: string},
+  workViewDigest: string,
+) {
+  const restarted = (request.workOffset ?? 0) > 0 && request.workViewDigest !== workViewDigest;
+  return {page: nativeWatchWorkList(work, restarted ? 0 : (request.workOffset ?? 0)), restarted};
+}
+
 export function nativeWatchWorkDetail(
   work: readonly NativeWatchWork[],
   eventId: string,

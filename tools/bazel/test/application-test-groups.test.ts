@@ -2,8 +2,6 @@ import {Array as EffectArray, Option as EffectOption} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {groupApplicationTests} from '../application-test-groups.mjs';
-import * as EffectString from 'effect/String';
-import * as Effect from 'effect';
 
 describe('generated application test groups', () => {
   it('keeps feature families readable and bounds large families', () => {
@@ -25,22 +23,21 @@ describe('generated application test groups', () => {
     expect(EffectArray.every(groups, group => group.entries.length <= 8)).toBe(true);
   });
 
-  it('keeps small feature families together while pooling their process overhead', () => {
-    const paths = [
-      ...Array.from({length: 3}, (_, index) => `apps/threadnote/test/unit/telemetry-case-${index}.test.ts`),
-      ...Array.from({length: 3}, (_, index) => `apps/threadnote/test/unit/update-case-${index}.test.ts`),
-      ...Array.from({length: 3}, (_, index) => `apps/threadnote/test/unit/windows-case-${index}.test.ts`),
-    ];
+  it('keeps hashed assignments and moves a whole family when its bucket fills', () => {
+    const family = (feature: string) =>
+      Array.from({length: 3}, (_, index) => `apps/threadnote/test/unit/${feature}-case-${index}.test.ts`);
+    const telemetry = family('telemetry');
+    const update = family('update');
+    const windows = family('windows');
+    const alpha = 'apps/threadnote/test/unit/alpha-case.test.ts';
+    const paths = [...telemetry, ...update, ...windows, alpha];
 
-    const groups = groupApplicationTests(paths, {maxEntries: 6, minFeatureEntries: 4, targetEntries: 4});
+    const groups = groupApplicationTests(paths, {maxEntries: 6, minFeatureEntries: 4, targetEntries: 6});
 
-    expect(groups.length).toBeGreaterThan(1);
-    for (const feature of ['telemetry', 'update', 'windows']) {
-      const owners = EffectArray.filter(groups, group =>
-        group.entries.some((entry: string) => Effect.pipe(entry, EffectString.includes(`/${feature}-`))),
-      );
-      expect(owners).toHaveLength(1);
-    }
+    expect(groups).toEqual([
+      {name: 'test_standard_pooled_1_of_2', entries: [...telemetry, ...update]},
+      {name: 'test_standard_pooled_2_of_2', entries: [alpha, ...windows]},
+    ]);
   });
 
   it('keeps tests with different integration source closures in separate targets', () => {

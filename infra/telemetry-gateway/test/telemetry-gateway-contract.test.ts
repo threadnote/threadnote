@@ -71,8 +71,11 @@ const schemaV4 = decodeTelemetrySchema(
 const schemaV5 = decodeTelemetrySchema(
   JSON.parse(readFileSync(join(root, 'infra', 'telemetry-gateway', 'telemetry-schema-v5.json'), 'utf8')),
 );
-const schema = decodeTelemetrySchema(
+const schemaV6 = decodeTelemetrySchema(
   JSON.parse(readFileSync(join(root, 'infra', 'telemetry-gateway', 'telemetry-schema-v6.json'), 'utf8')),
+);
+const schema = decodeTelemetrySchema(
+  JSON.parse(readFileSync(join(root, 'infra', 'telemetry-gateway', 'telemetry-schema-v7.json'), 'utf8')),
 );
 describe('telemetry producer and production gateway schema', () => {
   it('keeps the exact producer resource and span attribute surface', () => {
@@ -120,13 +123,14 @@ describe('telemetry producer and production gateway schema', () => {
     ]);
   });
 
-  it('retains frozen v1 through v5 while v6 adds only the closed Context Brief and finalization surface', () => {
+  it('retains the frozen telemetry versions and adds only recall refresh buckets in v7', () => {
     expect(schemaV1.schemaVersion).toBe(1);
     expect(schemaV2.schemaVersion).toBe(2);
     expect(schemaV3.schemaVersion).toBe(3);
     expect(schemaV4.schemaVersion).toBe(4);
     expect(schemaV5.schemaVersion).toBe(5);
-    expect(schema.schemaVersion).toBe(6);
+    expect(schemaV6.schemaVersion).toBe(6);
+    expect(schema.schemaVersion).toBe(7);
     expect(schemaV1.attributeContract.resource).toEqual(schemaV2.attributeContract.resource);
     expect(schemaV2.attributeContract.resource).toEqual(schemaV3.attributeContract.resource);
     expect(schemaV3.attributeContract.resource).toEqual(schemaV4.attributeContract.resource);
@@ -243,7 +247,7 @@ describe('telemetry producer and production gateway schema', () => {
     ).toEqual(['threadnote.context_brief.output_truncated']);
 
     const v6Attributes = EffectArray.filter(
-      schema.attributeContract.span,
+      schemaV6.attributeContract.span,
       key => !schemaV5.attributeContract.span.includes(key),
     );
     expect(v6Attributes).toEqual([
@@ -278,6 +282,23 @@ describe('telemetry producer and production gateway schema', () => {
         key => !schemaV5.attributeContract.booleanSpan.includes(key),
       ),
     ).toEqual(['threadnote.context_brief.code_anchor_gap', 'threadnote.context_brief.recovery_present']);
+    const recallAttributes = [
+      'threadnote.recall.read_compaction_bucket',
+      'threadnote.recall.read_current_bucket',
+      'threadnote.recall.read_refreshable_bucket',
+      'threadnote.recall.read_serving_older_bucket',
+      'threadnote.recall.refresh_build_ms_bucket',
+      'threadnote.recall.refresh_stale_ms_bucket',
+    ];
+    expect(
+      EffectArray.filter(schema.attributeContract.span, key => !schemaV6.attributeContract.span.includes(key)),
+    ).toEqual(recallAttributes);
+    expect(
+      EffectArray.filter(
+        schema.attributeContract.quantityBucketSpan,
+        key => !schemaV6.attributeContract.quantityBucketSpan.includes(key),
+      ),
+    ).toEqual(recallAttributes);
     const collector = readFileSync(join(root, 'infra', 'telemetry-gateway', 'collector.yaml'), 'utf8');
     const canarySource = readFileSync(join(root, 'infra', 'telemetry-gateway', 'cmd', 'canary', 'main.go'), 'utf8');
     expect(collector).toContain(
@@ -289,6 +310,7 @@ describe('telemetry producer and production gateway schema', () => {
       ...graphQueryAttributes,
       ...contextBriefV5Attributes,
       ...v6Attributes,
+      ...recallAttributes,
     ]) {
       expect(collector).toContain(`"${attribute}"`);
       expect(canarySource).toContain(`"${attribute}"`);
@@ -356,6 +378,7 @@ describe('telemetry producer and production gateway schema', () => {
       'telemetry-schema-v4.json',
       'telemetry-schema-v5.json',
       'telemetry-schema-v6.json',
+      'telemetry-schema-v7.json',
     ]) {
       expect(dockerfile).toContain(`infra/telemetry-gateway/${file}`);
       expect(dockerignore).toContain(`!infra/telemetry-gateway/${file}`);
@@ -411,6 +434,7 @@ describe('telemetry producer and production gateway schema', () => {
     expect(canarySource).toContain('{schemaVersion: 6, kind: canaryTraceContextCodeLinkedMemoryCheckpoint}');
     expect(canarySource).toContain('{schemaVersion: 6, kind: canaryTraceContextCompletion}');
     expect(canarySource).toContain('{schemaVersion: 6, kind: canaryTraceCodeAnchorFinalizationCheckpoint}');
+    expect(canarySource).toContain('{schemaVersion: 7, kind: canaryTraceRecallCompletion}');
     expect(canarySource).toContain('{"threadnote.stage", "query-worktree-observation"}');
     expect(canarySource).toContain('{"threadnote.subphase", "skipped"}');
     expect(canarySource).toContain('{"threadnote.auto_update.result", "updated"}');
@@ -458,8 +482,8 @@ describe('telemetry producer and production gateway schema', () => {
     expect(runbook).toContain('THREADNOTE_TELEMETRY_PUBLIC_INGESTION=disabled');
     expect(runbook).toContain('THREADNOTE_TELEMETRY_CANARY_GATEWAY_URL');
     expect(runbook).toContain('deployment order is a hard compatibility gate');
-    expect(runbook).toContain('Only after the gateway, sixteen-trace/six-version canary, and dashboard gates');
-    expect(runbook).toContain('Keep v1/v2/v3/v4/v5 ingress and canary coverage');
+    expect(runbook).toContain('Only after the gateway, seventeen-trace/seven-version canary, and dashboard gates');
+    expect(runbook).toContain('Keep v1/v2/v3/v4/v5/v6 ingress and canary coverage');
   });
 });
 

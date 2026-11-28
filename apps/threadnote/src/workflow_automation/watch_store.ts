@@ -382,6 +382,18 @@ const envelopeSchema = Schema.Struct({
     Schema.Struct({kind: Schema.Literal('candidate_invalidated'), reason: text(64), at: integer}),
   ),
   provider: Schema.Struct({
+    jobLogs: Schema.optionalKey(
+      Schema.Struct({
+        head: Schema.String.check(Schema.isPattern(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u)),
+        entries: Schema.Array(
+          Schema.Struct({
+            id: text(256),
+            version: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)),
+            detail: text(1024).pipe(Schema.NullOr, Schema.optionalKey),
+          }),
+        ).check(Schema.isMaxLength(10_000)),
+      }),
+    ),
     pages: Schema.Array(
       Schema.Struct({
         key: text(2048),
@@ -469,6 +481,9 @@ export function decodeNativeWatchEnvelope(value: unknown): NativeWatchEnvelope {
     if (envelope.notification) validateNativeWatchNotification(envelope.notification, state);
     if (new Set(EffectArray.map(envelope.provider.pages, page => page.key)).size !== envelope.provider.pages.length)
       throw new Error('Duplicate page');
+    const jobLogs = envelope.provider.jobLogs;
+    if (jobLogs && new Set(EffectArray.map(jobLogs.entries, entry => entry.id)).size !== jobLogs.entries.length)
+      throw new Error('Duplicate job log state');
     const head = Fn.pipe('a', EffectString.repeat(40));
     const pages = EffectArray.map(envelope.provider.pages, page => {
       const projection = page.projection;
@@ -493,7 +508,7 @@ export function decodeNativeWatchEnvelope(value: unknown): NativeWatchEnvelope {
       if (!source.complete) throw new Error('Source');
       return {...page, projection: {...projection, items: source.items}};
     });
-    return {...envelope, state, provider: {pages}};
+    return {...envelope, state, provider: {...envelope.provider, pages}};
   } catch {
     throw issue('invalid-state', 'Malformed native watch runtime envelope.');
   }

@@ -1,3 +1,4 @@
+import {hasMergedWatchProofMarker} from './task_watched_merge_proof.js';
 import {pipe as EffectArrayPipe} from 'effect';
 import {isJsonObject} from '@threadnote/platform/json';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
@@ -1809,6 +1810,12 @@ const runNativeCycleRequest = <R>(
           const maintenance = yield* CurrentNativeMaintenanceProof;
           const evidence = delivery.watch?.evidence ?? '';
           const hasMaintenanceMarker = EffectString.includes(';maintenance-proof:')(evidence);
+          const hasMergeProof = hasMergedWatchProofMarker(evidence);
+          if (
+            hasMergeProof &&
+            (!terminalWatch || delivery.pr?.state !== 'merged' || delivery.watch?.state !== 'terminal')
+          )
+            return yield* fail('invalid-watch-receipt', 'Exact merge proof requires the guarded terminal watch route.');
           if (
             (hasMaintenanceMarker || maintenance) &&
             (!historicalMergeCandidate ||
@@ -1870,7 +1877,7 @@ const runNativeCycleRequest = <R>(
               return yield* fail('source-drift', 'Source changed during delivery base verification.');
           }
           const updated = yield* from(() => recordNativeCycleDelivery(accepted, selected.id, delivery));
-          const beforeCommit = historicalMergeCandidate ? terminalWatch?.(delivery) : undefined;
+          const beforeCommit = historicalMergeCandidate || hasMergeProof ? terminalWatch?.(delivery) : undefined;
           return {
             status: 'ok',
             revision: yield* save({...runtime, state: updated}, beforeCommit),

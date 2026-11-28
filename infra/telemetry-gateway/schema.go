@@ -36,6 +36,9 @@ var telemetrySchemaV5JSON []byte
 //go:embed telemetry-schema-v6.json
 var telemetrySchemaV6JSON []byte
 
+//go:embed telemetry-schema-v7.json
+var telemetrySchemaV7JSON []byte
+
 type telemetrySchema struct {
 	SchemaVersion int `json:"schemaVersion"`
 	Limits        struct {
@@ -165,8 +168,8 @@ var terminalGraphSpanAttributes = []string{
 }
 
 func loadTelemetrySchemas() (*compiledTelemetrySchemas, error) {
-	result := &compiledTelemetrySchemas{byVersion: make(map[int]*compiledTelemetrySchema, 6)}
-	for version, data := range map[int][]byte{1: telemetrySchemaV1JSON, 2: telemetrySchemaV2JSON, 3: telemetrySchemaV3JSON, 4: telemetrySchemaV4JSON, 5: telemetrySchemaV5JSON, 6: telemetrySchemaV6JSON} {
+	result := &compiledTelemetrySchemas{byVersion: make(map[int]*compiledTelemetrySchema, 7)}
+	for version, data := range map[int][]byte{1: telemetrySchemaV1JSON, 2: telemetrySchemaV2JSON, 3: telemetrySchemaV3JSON, 4: telemetrySchemaV4JSON, 5: telemetrySchemaV5JSON, 6: telemetrySchemaV6JSON, 7: telemetrySchemaV7JSON} {
 		compiled, err := compileTelemetrySchema(data, version)
 		if err != nil {
 			return nil, err
@@ -801,7 +804,36 @@ func validateSpanAttributeShape(attributes map[string]*commonpb.AnyValue, schema
 	if err := validateContextBriefAttributeShape(attributes, schema, event, operation); err != nil {
 		return err
 	}
+	if err := validateRecallRefreshAttributeShape(attributes, event, operation); err != nil {
+		return err
+	}
 	return validateCodeAnchorFinalizationAttributeShape(attributes, schema, event, operation)
+}
+
+func validateRecallRefreshAttributeShape(attributes map[string]*commonpb.AnyValue, event, operation string) error {
+	countFields := 0
+	for _, key := range []string{
+		"threadnote.recall.read_compaction_bucket",
+		"threadnote.recall.read_current_bucket",
+		"threadnote.recall.read_refreshable_bucket",
+		"threadnote.recall.read_serving_older_bucket",
+	} {
+		if _, exists := attributes[key]; exists {
+			countFields++
+		}
+	}
+	_, build := attributes["threadnote.recall.refresh_build_ms_bucket"]
+	_, stale := attributes["threadnote.recall.refresh_stale_ms_bucket"]
+	if countFields == 0 && !build && !stale {
+		return nil
+	}
+	if event != "completion" || (operation != "recall" && operation != "recall_context") {
+		return errors.New("recall refresh attributes require a recall completion")
+	}
+	if countFields != 4 || (stale && !build) {
+		return errors.New("incomplete recall refresh telemetry")
+	}
+	return nil
 }
 
 func validateContextBriefAttributeShape(attributes map[string]*commonpb.AnyValue, schema *compiledTelemetrySchema, event, operation string) error {

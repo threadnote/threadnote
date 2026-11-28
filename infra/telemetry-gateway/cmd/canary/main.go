@@ -1,4 +1,4 @@
-// Command canary proves that frozen-v1 through frozen-v5 and current-v6
+// Command canary proves that frozen-v1 through frozen-v6 and current-v7
 // privacy-safe synthetic traces traverse the public gateway and become
 // queryable in Tempo.
 package main
@@ -68,6 +68,7 @@ const (
 	canaryTraceContextProjectionCheckpoint
 	canaryTraceContextCompletion
 	canaryTraceCodeAnchorFinalizationCheckpoint
+	canaryTraceRecallCompletion
 )
 
 type canaryStringAttribute struct {
@@ -89,7 +90,7 @@ func main() {
 		_, _ = fmt.Fprintln(os.Stderr, "threadnote-telemetry-canary:", err)
 		os.Exit(1)
 	}
-	_, _ = fmt.Fprintln(os.Stdout, "threadnote-telemetry-canary: v1, v2, v3, v4, v5, and v6 traces stored")
+	_, _ = fmt.Fprintln(os.Stdout, "threadnote-telemetry-canary: v1, v2, v3, v4, v5, v6, and v7 traces stored")
 }
 
 func configFromEnvironment() (config, error) {
@@ -176,6 +177,7 @@ func run(
 		{schemaVersion: 6, kind: canaryTraceContextCodeLinkedMemoryCheckpoint},
 		{schemaVersion: 6, kind: canaryTraceContextCompletion},
 		{schemaVersion: 6, kind: canaryTraceCodeAnchorFinalizationCheckpoint},
+		{schemaVersion: 7, kind: canaryTraceRecallCompletion},
 	}
 	traces := make([]canaryTrace, 0, len(plans))
 	for _, trace := range plans {
@@ -243,6 +245,8 @@ func (trace canaryTrace) label() string {
 		return fmt.Sprintf("schema v%d context completion", trace.schemaVersion)
 	case canaryTraceCodeAnchorFinalizationCheckpoint:
 		return fmt.Sprintf("schema v%d code anchor finalization checkpoint", trace.schemaVersion)
+	case canaryTraceRecallCompletion:
+		return fmt.Sprintf("schema v%d recall completion", trace.schemaVersion)
 	default:
 		return fmt.Sprintf("schema v%d completion", trace.schemaVersion)
 	}
@@ -486,7 +490,7 @@ func storedSpanMatchesTrace(span *tracepb.Span, trace canaryTrace) bool {
 			!hasBoolAttribute(span.Attributes, "threadnote.context_brief.recovery_present", true)) {
 		return false
 	}
-	return trace.schemaVersion >= 1 && trace.schemaVersion <= 6
+	return trace.schemaVersion >= 1 && trace.schemaVersion <= 7
 }
 
 func randomIDs() (canaryIDs, error) {
@@ -666,6 +670,17 @@ func canaryStringAttributes(canary canaryTrace) []canaryStringAttribute {
 			canaryStringAttribute{"threadnote.code_anchor_finalization.matched_bucket", "2^1"},
 			canaryStringAttribute{"threadnote.code_anchor_finalization.pending_bucket", "0"},
 			canaryStringAttribute{"threadnote.code_anchor_finalization.scanned_bucket", "2^1"},
+		)
+	case canaryTraceRecallCompletion:
+		attributes = append(attributes,
+			canaryStringAttribute{"threadnote.event", "completion"},
+			canaryStringAttribute{"threadnote.operation", "recall"},
+			canaryStringAttribute{"threadnote.recall.read_compaction_bucket", "0"},
+			canaryStringAttribute{"threadnote.recall.read_current_bucket", "0"},
+			canaryStringAttribute{"threadnote.recall.read_refreshable_bucket", "0"},
+			canaryStringAttribute{"threadnote.recall.read_serving_older_bucket", "2^0"},
+			canaryStringAttribute{"threadnote.recall.refresh_build_ms_bucket", "2^3"},
+			canaryStringAttribute{"threadnote.recall.refresh_stale_ms_bucket", "2^5"},
 		)
 	}
 	return attributes

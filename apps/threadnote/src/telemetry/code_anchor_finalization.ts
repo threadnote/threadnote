@@ -5,7 +5,7 @@ import {
   type AnonymousTelemetryCodeAnchorFinalizationResult,
   type AnonymousTelemetryCodeAnchorFinalizationTrigger,
   type AnonymousTelemetryFields,
-  type AnonymousTelemetryQuantityBucket,
+  telemetryQuantityBucket,
 } from '../effect/telemetry.js';
 
 export interface CodeAnchorFinalizationTelemetryReceipt {
@@ -86,11 +86,6 @@ export function codeAnchorFinalizationTelemetryFields(
     codeAnchorFinalizationResult: result,
     codeAnchorFinalizationScannedBucket: telemetryQuantityBucket(receipt.scannedCount),
   };
-}
-
-export function telemetryQuantityBucket(value: number): AnonymousTelemetryQuantityBucket | undefined {
-  if (!isPrivateCount(value)) return undefined;
-  return value === 0 ? '0' : `2^${Math.min(52, Math.floor(Math.log2(value)))}`;
 }
 
 function finalizationResult(

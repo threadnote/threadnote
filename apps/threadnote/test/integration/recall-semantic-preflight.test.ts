@@ -21,17 +21,17 @@ import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtim
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {loadRecallIndexData} from '@threadnote/recall/index';
 import {ensureVectorIndex, recallVectorStorage, vectorIndexDatabaseFilename} from '@threadnote/recall/vector-index';
-import {negativeSemanticReadinessHint} from '@threadnote/recall/vector/negative-readiness';
+import {
+  negativeSemanticReadinessHint,
+  recallPreflightSkipsSemanticRead,
+} from '@threadnote/recall/vector/negative-readiness';
 import {
   RecallReadyReadBoundary,
   recallReadySectionsOptionsSchema,
   recallSemanticPreflightSchema,
 } from '@threadnote/recall/read_boundary';
-import {
-  createMcpRecallSemanticRetrievalGate,
-  prepareRecallSemanticPreflight,
-  recallPreflightSkipsSemanticRead,
-} from '@threadnote/recall/runtime';
+import {prepareRecallSemanticPreflight} from '@threadnote/recall/runtime';
+import {createMcpRecallSemanticRetrievalGate} from '@threadnote/recall/semantic_scores';
 import {decodeRecallReadySectionsResult} from '@threadnote/recall/sections_read';
 import {CallerReadCancellation, makeReadDeadline, ReadDeadlineContext} from '@threadnote/platform/read_deadline';
 import {ApplicationLayer} from '../../src/effect/runtime.js';

@@ -15,17 +15,16 @@ import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {selectLocalModel} from '@threadnote/inference/models/selection';
 import {LocalModelStore, type LocalModelStoreShape} from '@threadnote/inference/models/store';
 import {loadRecallIndexData} from '@threadnote/recall/index';
-import {loadMcpRecallSemanticScoresResult, loadRecallSemanticScores} from '@threadnote/recall/runtime';
+import {loadMcpRecallSemanticScoresResult, loadRecallSemanticScores} from '@threadnote/recall/semantic_scores';
 import {
   ensureVectorIndex,
   purgeVectorIndex,
   rebuildVectorIndex,
-  selectedSemanticScores,
   VectorCorpusGenerationChanged,
   vectorIndexDatabaseFilename,
-  vectorIndexMatchesGeneration,
   vectorIndexStatus,
 } from '@threadnote/recall/vector-index';
+import {selectedSemanticScores, vectorIndexMatchesGeneration} from '@threadnote/recall/vector/semantic-read';
 import {mkdir, mkdtemp, rm, stat, writeFile} from '../helpers/effect-filesystem.js';
 import {runEffect} from '../helpers/effect-runtime.js';
 import * as EffectString from 'effect/String';

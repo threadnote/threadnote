@@ -53,6 +53,7 @@ import {
   type NativeWatchWakeup,
 } from './watch_notification_state.js';
 import {readNativeWatch, withNativeWatchControlLock} from './watch_store.js';
+import {mergedWatchProof, mergedWatchProofMarker, receiptCitesMergedWatchProof} from './task_watched_merge_proof.js';
 
 import type {NativeTaskCycleRuntime, NativeTaskStoredState} from './task_action_helpers.js';
 import {cycleRequest, fail, inCheckout, unwrapCycle} from './task_action_helpers.js';
@@ -430,7 +431,7 @@ const validationRefMatches = (
   return EffectArray.some(forms, form => sha256HexSync(stableJson(form)) === digest);
 };
 const maintenanceMarker =
-  /;maintenance-proof:([A-Za-z0-9._-]+):([A-Za-z0-9._-]+):([A-Za-z0-9._-]+):([a-f0-9]{64}):[a-f0-9]{64}(?=;host-receipt:)/u;
+  /;maintenance-proof:([A-Za-z0-9._-]+):([A-Za-z0-9._-]+):([A-Za-z0-9._-]+):([a-f0-9]{64}):[a-f0-9]{64}(?=;(?:merged-notice|host-receipt|merged-ack):)/u;
 
 const verifyNativeTaskMaintenance = Effect.fn('workflowAutomation.task.verifyMaintenance')(function* (
   config: RuntimeConfig,
@@ -592,51 +593,20 @@ const verifyNativeTaskMaintenance = Effect.fn('workflowAutomation.task.verifyMai
 
 const requiredWatchSources = ['comments', 'reviews', 'threads', 'checks', 'statuses'];
 
-const watchWorkDrained = (state: StoredWatch['envelope']['state']) =>
+export const watchSourcesComplete = (state: StoredWatch['envelope']['state']) =>
+  state.sources.length === requiredWatchSources.length &&
+  EffectArray.every(requiredWatchSources, source =>
+    EffectArray.some(
+      state.sources,
+      item => item.source === source && item.lastCompleteAt !== undefined && item.error === undefined,
+    ),
+  );
+
+export const watchWorkDrained = (state: StoredWatch['envelope']['state']) =>
   state.events.length === 0 &&
   state.delivery === null &&
   state.acknowledged === state.nextSequence - 1 &&
   !EffectArray.some(state.work, item => item.status === 'open' || item.status === 'blocked');
-
-/** Retain the host receipt for the acknowledged terminal range, even if the outbox is still queued. */
-const acknowledgedMergedWatchReceipt = ({state, collector, notification}: StoredWatch['envelope']) => {
-  if (
-    state.prState !== 'merged' ||
-    collector?.status !== 'terminal' ||
-    collector.reason !== 'merged' ||
-    !notification ||
-    notification.recoveryRequested ||
-    !state.lastAck ||
-    !watchWorkDrained(state)
-  )
-    return undefined;
-  const {outbox, lastReceipt} = notification;
-  const coversMergedRange = (first: number, last: number) =>
-    last === state.acknowledged &&
-    EffectArray.some(
-      state.work,
-      ({event}) =>
-        event.source === 'watch' &&
-        event.kind === 'merged' &&
-        event.key === state.watchId &&
-        !event.removed &&
-        event.head === state.head &&
-        event.sequence >= first &&
-        event.sequence <= last,
-    );
-  if (outbox) {
-    // An authenticated Codex arrival can claim backlog beyond its original notice range.
-    const through = outbox.status === 'queued' ? Math.max(outbox.last, outbox.consumedThrough ?? 0) : outbox.last;
-    return (outbox.status === 'queued' || outbox.status === 'completed') &&
-      !outbox.error &&
-      coversMergedRange(outbox.first, through)
-      ? outbox.receipt
-      : undefined;
-  }
-  if (!lastReceipt) return undefined;
-  const [, first, last] = EffectString.split(lastReceipt.key, ':');
-  return coversMergedRange(Number(first), Number(last)) ? lastReceipt.receipt : undefined;
-};
 
 const standaloneWatchRoute =
   'To monitor the PR now, call watch-pr with prUrl and the host wakeup (runId optional) for a monitor-only standalone watch.';
@@ -947,45 +917,42 @@ export const runNativeTaskPrWatch = (
         threadId: inputWakeup.threadId,
       };
     const validatedPhaseId = validation.phaseId;
-    const watchReady = (candidate: StoredWatch, now: number, hasRetainedWatch = false) => {
-      const state = candidate.envelope.state;
-      const notification = candidate.envelope.notification;
+    const watchReady = (
+      candidate: StoredWatch,
+      now: number,
+      hasRetainedWatch = false,
+      canonicalTerminalEvidence?: string,
+    ) => {
+      const {state, notification, collector} = candidate.envelope;
       const consumer = state.consumer;
       const terminal = state.prState === 'merged';
       const consumerExpired = consumer !== null && consumer.leaseUntil <= now;
-      const settledReceipt =
-        consumerExpired && hasRetainedWatch && terminal
-          ? acknowledgedMergedWatchReceipt(candidate.envelope)
-          : undefined;
-      const hostReceipt = consumerExpired
-        ? settledReceipt
-        : (notification?.lastReceipt?.receipt ?? notification?.outbox?.receipt);
-      // The watch head is the last sweep. A merged head can descend from the delivered head; record-delivery
-      // verifies that ancestry. Fresh provider verification binds an open PR head before its receipt.
+      const mergeProof = terminal ? mergedWatchProof(candidate.envelope) : undefined;
+      const canonicalTerminal = terminal && receiptCitesMergedWatchProof(canonicalTerminalEvidence, candidate.envelope);
+      const settled = hasRetainedWatch && state.lastAck !== null && watchWorkDrained(state);
+      // A merged head can descend from the delivered head. Record-delivery verifies that ancestry.
       const head = terminal ? state.head : embeddedDelivery.headSha;
-      const completeSources =
-        state.sources.length === requiredWatchSources.length &&
-        EffectArray.every(requiredWatchSources, source =>
-          EffectArray.some(
-            state.sources,
-            item => item.source === source && item.lastCompleteAt !== undefined && item.error === undefined,
-          ),
-        );
       if (
         (state.prState !== 'open' && !terminal) ||
         state.pr !== referencedPr.url ||
         head === undefined ||
-        (terminal && (candidate.envelope.collector?.status !== 'terminal' || !completeSources || !hostReceipt)) ||
+        (terminal &&
+          (collector?.status !== 'terminal' ||
+            collector.reason !== 'merged' ||
+            !watchSourcesComplete(state) ||
+            (!mergeProof && !canonicalTerminal))) ||
         !consumer ||
         consumer.id !== consumerId ||
         consumer.wakeupId !== wakeupId ||
-        (consumerExpired && !settledReceipt) ||
+        (consumerExpired &&
+          !canonicalTerminal &&
+          !(mergeProof && settled && (mergeProof.kind === 'ack' || mergeProof.last === state.acknowledged))) ||
         !notification ||
         notification.consumerId !== consumer.id ||
         notification.wakeupId !== consumer.wakeupId
       )
         return undefined;
-      return {consumer, hostReceipt, head};
+      return {consumer, mergeProof, canonicalTerminal, head};
     };
     const recordWatchedDelivery = (watch: StoredWatch, providerVerified = false) =>
       Effect.gen(function* () {
@@ -1018,15 +985,17 @@ export const runNativeTaskPrWatch = (
           request.operation === 'complete' &&
           canonicalReceipt?.delivery === 'pr' &&
           canonicalReceipt.watch?.consumerId === consumerId;
-        const bound = watchReady(watch, now, hasRetainedWatch);
+        const canonicalTerminalEvidence =
+          canonicalReceipt?.pr?.state === 'merged' ? canonicalReceipt.watch?.evidence : undefined;
+        const bound = watchReady(watch, now, hasRetainedWatch, canonicalTerminalEvidence);
         if (!bound)
           return yield* fail(
             'watch-not-ready',
             terminal
-              ? 'A merged PR needs a source-complete terminal watch with a host receipt and either its live consumer or acknowledged, settled terminal work.'
+              ? 'A merged PR needs a source-complete terminal watch with exact merge proof and either its live consumer or acknowledged, settled terminal work.'
               : 'An open PR needs a started watch with its live consumer and host wakeup registration before delivery.',
           );
-        const {consumer, hostReceipt, head} = bound;
+        const {consumer, mergeProof, canonicalTerminal, head} = bound;
         if (!canonicalReceipt && (!embeddedDelivery.userAuthority || !embeddedDelivery.providerIdentity))
           return yield* fail(
             'user-authority-required',
@@ -1093,10 +1062,14 @@ export const runNativeTaskPrWatch = (
           }
         }
         const marker = maintenance?.marker ?? retainedMarker?.[0] ?? '';
-        // An open PR records its verified watch registration; only terminal completion has a host receipt to cite.
+        // Bind new terminal proof to the exact merged event and its host range or consumer ACK.
+        const revisionEvidence = `native-watch-revision:${watch.revision}`;
+        const terminalEvidence = mergeProof ? mergedWatchProofMarker(mergeProof) : undefined;
         const evidence = terminal
-          ? `native-watch-revision:${watch.revision}${marker};host-receipt:${hostReceipt}`
-          : `native-watch-revision:${watch.revision};consumer:${consumer.id};wakeup:${consumer.wakeupId}`;
+          ? canonicalTerminal
+            ? canonicalTerminalEvidence!
+            : `${revisionEvidence}${marker};${terminalEvidence!}`
+          : `${revisionEvidence};consumer:${consumer.id};wakeup:${consumer.wakeupId}`;
         const watchEvidence = {
           prUrl: referencedPr.url,
           headSha: head,
@@ -1254,18 +1227,19 @@ export const runNativeTaskPrWatch = (
                 ).pipe(
                   Effect.provideService(
                     CurrentNativeTerminalDeliveryWatch,
-                    completesPublished
+                    terminal
                       ? delivery =>
                           Effect.gen(function* () {
                             if (recheckMaintenance) yield* recheckMaintenance;
                             const currentTime = yield* Clock.currentTimeMillis;
                             if (
                               stableJson(delivery) !== stableJson(finalReceipt) ||
-                              watchReady(latestWatch, currentTime, hasRetainedWatch)?.hostReceipt !== hostReceipt
+                              stableJson(watchReady(latestWatch, currentTime, hasRetainedWatch)?.mergeProof) !==
+                                stableJson(mergeProof)
                             )
                               return yield* fail(
                                 'watch-not-ready',
-                                'The exact terminal watch needs its host receipt and either a live consumer or acknowledged, settled terminal work at delivery.',
+                                'The exact terminal watch needs its merge proof and either a live consumer or acknowledged, settled terminal work at delivery.',
                               );
                           })
                       : undefined,

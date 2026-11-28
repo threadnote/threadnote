@@ -21,6 +21,7 @@ import * as SqlClient from 'effect/sql/SqlClient';
 import {SqlError} from 'effect/sql/SqlError';
 import {recallIndexForegroundRefreshRequired, recallInventoryPolicyIsCurrent} from './freshness.js';
 import {recallIndexMetadataIsCurrent} from './identity.js';
+import {RecallIndexSourceChanged} from './refresh_cut.js';
 import {readRecallStaleMarker} from './stale_marker.js';
 
 export class RecallIdentityAdmissionBusy extends Schema.TaggedError<
@@ -52,6 +53,7 @@ export function normalizeRecallIdentityPreparation<A, E, R>(effect: Effect.Effec
           const error = Cause.squash(cause);
           return (
             Schema.is(FileLockTimeout)(error) ||
+            Schema.is(RecallIndexSourceChanged)(error) ||
             (Schema.is(SqlError)(error) && error.reason._tag === 'LockTimeoutError')
           );
         },

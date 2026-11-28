@@ -7,6 +7,7 @@ import {
   decodeNativeWatchState,
   initializeNativeWatch,
   nativeWatchEventLimit,
+  nativeWatchWorkHistoryLimit,
   reconcileNativeWatch,
   recordNativeWatchDispositions,
   recordNativeWatchLifecycle,
@@ -924,11 +925,12 @@ describe('native watch domain', () => {
     expect(acked.work).toMatchObject([{status: 'blocked'}]);
   });
 
-  it('compacts terminal work to the newest 128 records only after acknowledgement', () => {
+  it.each(['open', 'merged'] as const)('compacts acknowledged work within its limit when the PR is %s', prState => {
     let current = withConsumer(
       reconcileNativeWatch(
         state(),
         sweep({
+          state: prState,
           sources: [
             {
               source: 'comments',
@@ -940,6 +942,7 @@ describe('native watch domain', () => {
         }),
       ),
     );
+    const original = current.events;
     for (let at = 20; current.events.length > 0; at += 10) {
       const relayed = relayNativeWatch(current, 'consumer-1', at, 32);
       const dispositions = EffectArray.map(relayed.delivery!.events, event => ({
@@ -955,11 +958,17 @@ describe('native watch domain', () => {
         dispositions,
         at + 1,
       );
-      expect(recorded.work.length).toBeLessThanOrEqual(140);
+      expect(recorded.work.length).toBeLessThanOrEqual(original.length);
       current = acknowledgeNativeWatch(recorded, 'consumer-1', relayed.delivery!.id, at + 2);
     }
-    expect(current.work).toHaveLength(128);
+    expect(current.work).toHaveLength(nativeWatchWorkHistoryLimit);
     expect(current.events).toHaveLength(0);
+    expect(current.acknowledged).toBe(original.at(-1)?.sequence);
+    expect(EffectArray.map(current.work, item => item.event)).toEqual(
+      prState === 'merged'
+        ? [original[0], ...original.slice(1 - nativeWatchWorkHistoryLimit)]
+        : original.slice(-nativeWatchWorkHistoryLimit),
+    );
   });
 
   it('strictly decodes sequence, checkpoint, and delivery invariants', () => {

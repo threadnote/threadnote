@@ -1,12 +1,10 @@
 import {Array as EffectArray, Effect, FileSystem, Option, Path, PlatformError, Predicate, Schema} from 'effect';
-import * as SqlClient from 'effect/sql/SqlClient';
 import {readPathFileSystemIdentity, runtimeLstat} from '@threadnote/platform/system';
 import {ApplicationError, fromPromise} from '@threadnote/platform/errors';
 import {readCanonicalMutationGeneration} from '@threadnote/store/resource/mutation_generation';
 import type {RecallIndexConfig} from '../index.js';
 import {recallResourcePolicyInputProof} from './canonical_resource.js';
 import {recallLogicalScope} from './freshness.js';
-import {loadRecallMetadata} from './read_policy.js';
 import {readRecallStaleMarker} from './stale_marker.js';
 
 export class RecallIndexSourceChanged extends Schema.TaggedError<
@@ -68,9 +66,8 @@ export function verifyRecallSourceInputs(inputs: ReadonlyMap<string, string>) {
   );
 }
 
-/** Caller holds lexical then canonical fences; this captures metadata, never corpus bodies. */
+/** The SQLite writer protects its prewrite metadata separately from this file cut. */
 export const captureRecallRefreshCut = Effect.fn('recall.captureRefreshCut')(function* (
-  sql: SqlClient.SqlClient,
   fs: FileSystem.FileSystem,
   path: Path.Path,
   config: RecallIndexConfig,
@@ -100,7 +97,14 @@ export const captureRecallRefreshCut = Effect.fn('recall.captureRefreshCut')(fun
   const physicalHome = yield* fs.realPath(config.agentContextHome);
   const databaseIdentity = yield* identity(location.databasePath);
   const activeIdentity = yield* identity(location.activeDatabasePath);
-  const metadata = yield* loadRecallMetadata(sql);
+  // A recovery database owns a different SQLite writer. Bind the unreadable active file and its WAL.
+  const activeRevision =
+    location.databasePath === location.activeDatabasePath
+      ? undefined
+      : [
+          (yield* captureRecallSourceInput(location.activeDatabasePath)).key,
+          (yield* captureRecallSourceInput(`${location.activeDatabasePath}-wal`)).key,
+        ];
   const staleMarker = yield* readRecallStaleMarker(fs, location.staleMarkerBasePath);
   const canonicalMutationGeneration = yield* readCanonicalMutationGeneration(
     fs,
@@ -110,7 +114,6 @@ export const captureRecallRefreshCut = Effect.fn('recall.captureRefreshCut')(fun
   );
   const policyInputProof = yield* recallResourcePolicyInputProof(config);
   return {
-    metadata,
     staleMarker,
     canonicalMutationGeneration,
     policyInputProof,
@@ -121,8 +124,8 @@ export const captureRecallRefreshCut = Effect.fn('recall.captureRefreshCut')(fun
       databaseIdentity,
       location.activeDatabasePath,
       activeIdentity,
+      activeRevision,
       pointer,
-      recallMetadataCut(metadata),
       staleMarker,
       canonicalMutationGeneration,
       policyInputProof ?? null,

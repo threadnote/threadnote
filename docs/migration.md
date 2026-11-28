@@ -106,6 +106,12 @@ Lexical and vector recall are immediately available after install or repair comp
 under `~/.threadnote/indexes/`; canonical memories and resources remain ordinary files under
 `~/.threadnote/data/<account>`.
 
+## Incremental recall vectors
+
+An existing vector database works after the update. If the previous generation lacks an authorization identity, the background refresh uses a full walk.
+`threadnote index status` and `threadnote doctor --dry-run` show `last refresh none` until the first refresh completes.
+If you purge the vector database, the purge also removes its refresh history.
+
 ## Threadnote 6.0: citation validation receipts
 
 Threadnote 6.0 re-derives TypeScript and JavaScript symbol signatures with its packaged native TypeScript 7.1 asset.

@@ -49,6 +49,25 @@ const emitBucketed = (result, key, entries, maxEntries, targetEntries, prefix) =
   });
 };
 
+const placePooledFamilies = (families, bucketCount, maxEntries) => {
+  const buckets = Array.from({length: bucketCount}, () => []);
+  const overflow = [];
+  // Keep each hash assignment that fits. Move overflow families as units.
+  for (const [family, entries] of families) {
+    const bucket = buckets[fnv1a(family) % bucketCount];
+    if (bucket.length + entries.length <= maxEntries) bucket.push(...entries);
+    else overflow.push(entries);
+  }
+  for (const entries of overflow.sort((left, right) => right.length - left.length)) {
+    const bucket = EffectArray.reduce(buckets, buckets[0], (least, candidate) =>
+      candidate.length < least.length ? candidate : least,
+    );
+    if (bucket.length + entries.length > maxEntries) return undefined;
+    bucket.push(...entries);
+  }
+  return buckets;
+};
+
 const emitPooledFamilies = (result, families, maxEntries, targetEntries, prefix) => {
   const entries = families.flatMap(([, familyEntries]) => familyEntries);
   if (entries.length === 0) return;
@@ -59,13 +78,11 @@ const emitPooledFamilies = (result, families, maxEntries, targetEntries, prefix)
   let bucketCount = nextPowerOfTwo(Math.ceil(entries.length / targetEntries));
   let buckets;
   do {
-    buckets = Array.from({length: bucketCount}, () => []);
-    for (const [family, familyEntries] of families) buckets[fnv1a(family) % bucketCount].push(...familyEntries);
-    if (EffectArray.every(buckets, bucket => bucket.length <= maxEntries)) break;
+    buckets = placePooledFamilies(families, bucketCount, maxEntries);
+    if (buckets) break;
     bucketCount *= 2;
   } while (bucketCount <= 256);
-  if (EffectArray.some(buckets, bucket => bucket.length > maxEntries))
-    throw new Error('Unable to bound generated pooled application test groups');
+  if (!buckets) throw new Error('Unable to bound generated pooled application test groups');
   const width = String(bucketCount).length;
   EffectArray.forEach(buckets, (bucket, index) => {
     if (bucket.length === 0) return;

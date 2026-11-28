@@ -1,3 +1,12 @@
+import type {WorkflowAutomationError, WorkflowNextCommand} from '@threadnote/workflow-automations/contracts';
+import {
+  nativeNext,
+  nativeNextCommand,
+  nativeNextPlaceholder,
+  nativeWatchIdentityOf,
+  nativeWatchNext,
+  withNativeNext,
+} from '@threadnote/workflow-automations/gates';
 import {decodeNativeTaskActionRef, encodeNativeTaskActionRef} from '@threadnote/workflow-automations/task';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {Array as EffectArray, Effect, Option, Predicate, Schema, String as EffectString} from 'effect';
@@ -10,7 +19,7 @@ import {
   assertNativeWatchOutput,
   nativeWatchOutputLimit,
   nativeWatchWorkDetail,
-  nativeWatchWorkList,
+  nativeWatchWorkPage,
 } from './watch_output.js';
 import {readNativeWatch, readNativeTaskWatchIds} from './watch_store.js';
 import {nativeWatchWakeupRequestSchema} from './watch_notification_state.js';
@@ -72,6 +81,83 @@ export function validateNativeTaskWatchMaintenanceRoute(
     );
   return Effect.void;
 }
+
+/** Refusals that mean the validated source or its declared base changed after validation. */
+export const sourceChangedCodes = new Set(['source-drift', 'review-stale']);
+
+/** Refusal codes whose recovery operation is fixed; anything unlisted inspects the watch. */
+const watchRecoveryOperations: Readonly<Record<string, 'work' | 'relay' | 'view' | 'deliver'>> = {
+  'stale-watch-work-view': 'work',
+  'stale-watch-work-ref': 'work',
+  'invalid-watch-page': 'work',
+  'invalid-watch-work': 'work',
+  'stale-watch-delivery-ref': 'relay',
+  'invalid-delivery-ref': 'view',
+  'stale-delivery-ref': 'view',
+  'invalid-validation-ref': 'view',
+  'stale-validation-ref': 'view',
+  'user-authority-required': 'deliver',
+  'provisional-watch-not-eligible': 'view',
+  'watch-proof-conflict': 'view',
+  'invalid-request': 'view',
+  'invalid-supplemental-ref': 'view',
+  'stale-supplemental-ref': 'view',
+  'watch-identity-conflict': 'view',
+  'snapshot-ambiguous': 'view',
+};
+const routeProofKeys = ['snapshotRef', 'candidateWatchRef', 'pr', 'supplementalRef'] as const;
+
+/**
+ * Use the watch operation that can recover the refusal. Invalid proof returns to the task view.
+ * A candidate or supplemental route stays on its own proof and never renews.
+ */
+export const nativeWatchRecoveryNext = (
+  input: Readonly<Record<string, unknown>>,
+  error: WorkflowAutomationError,
+): WorkflowNextCommand | undefined => {
+  const identity = nativeWatchIdentityOf(input);
+  const routed = EffectArray.some(routeProofKeys, key => identity[key] !== undefined);
+  const scope =
+    identity.runId !== undefined && identity.callerCwd !== undefined
+      ? {runId: identity.runId, callerCwd: identity.callerCwd}
+      : undefined;
+  const mapped =
+    error.code === 'stale-watch-event-ref'
+      ? input.operation === 'work-disposition' || input.operation === 'work-detail'
+        ? 'work'
+        : 'relay'
+      : error.code === 'invalid-watch' && EffectString.includes('does not own a live lease')(error.message)
+        ? routed
+          ? 'inspect'
+          : 'renew'
+        : (watchRecoveryOperations[error.code] ?? 'inspect');
+  if (error.code === 'invalid-candidate-watch-ref' && scope) {
+    const fields = {...scope, candidateWatchRef: nativeNextPlaceholder('candidateWatchRef'), operation: 'inspect'};
+    return nativeNextCommand('workflow_task_watch_pr', 'inspect', {command: 'watch-pr', flags: fields}, fields);
+  }
+  if (mapped === 'deliver') return scope ? nativeNext.deliver(scope, 'pr') : undefined;
+  // A plain view reloads the current references; a phase view is the historical-watch mode and refuses after a push.
+  if (mapped === 'view') return scope ? nativeNext.view(scope) : undefined;
+  return nativeWatchNext(identity, mapped);
+};
+
+/**
+ * A watch refusal without its own next command recovers through the watch itself. Start (admission) and
+ * changed-source refusals, and refusals the task card owns, keep the task card's next command and return unchanged.
+ */
+export const watchRecovery = (input: unknown, error: WorkflowAutomationError): WorkflowAutomationError => {
+  if (
+    !Predicate.isObject(input) ||
+    input.command !== 'watch-pr' ||
+    input.operation === 'start' ||
+    sourceChangedCodes.has(error.code) ||
+    typeof input.callerCwd !== 'string' ||
+    error.next !== undefined
+  )
+    return error;
+  const next = nativeWatchRecoveryNext(input, error);
+  return next ? withNativeNext(error, next) : error;
+};
 
 // Preserve persisted legacy routes; the PR suffix qualifies only a different PR in the same phase.
 export const nativeTaskLegacyWatchIdentity = (runId: string, phaseId: string) => {
@@ -206,7 +292,8 @@ export const runNativePrWatchOperation = (
             EffectArray.findFirst(watch.envelope.state.work, item => item.eventId === ref.watchEventId),
           )
         : undefined;
-      // Like work, detail reads bind the current owner without requiring or renewing its lease.
+      // Like work, detail reads bind the current owner without requiring or renewing its lease. The exact row digest
+      // binds the reference, so unrelated rows may change after the page was read.
       if (
         !ref ||
         ref.kind !== 'retained-work' ||
@@ -215,7 +302,6 @@ export const runNativePrWatchOperation = (
         ref.watchId !== watchId ||
         ref.consumerId !== consumer.id ||
         ref.wakeupId !== consumer.wakeupId ||
-        ref.workViewDigest !== workViewDigest ||
         !row ||
         ref.workRowDigest !== sha256HexSync(stableJson(row))
       )
@@ -241,11 +327,7 @@ export const runNativePrWatchOperation = (
       });
     }
     if (request.operation === 'work') {
-      if ((request.workOffset ?? 0) > 0 && !request.workViewDigest)
-        return yield* fail('stale-watch-work-view', 'Continue work paging with its complete workViewDigest.');
-      if (request.workViewDigest !== undefined && request.workViewDigest !== workViewDigest)
-        return yield* fail('stale-watch-work-view', 'Retained work changed; restart work paging at offset zero.');
-      const page = nativeWatchWorkList(watch.envelope.state.work, request.workOffset ?? 0);
+      const {page, restarted} = nativeWatchWorkPage(watch.envelope.state.work, request, workViewDigest);
       const items: Record<string, unknown>[] = EffectArray.map(page.items, item => {
         if (!Predicate.isObject(item) || typeof item.eventId !== 'string')
           throw fail('invalid-watch-work', 'A retained work row has no canonical identity.');
@@ -299,6 +381,7 @@ export const runNativePrWatchOperation = (
             nextOffset:
               page.offset + items.length < watch.envelope.state.work.length ? page.offset + items.length : null,
             workViewDigest,
+            ...(restarted ? {restarted: true} : {}),
           },
         },
       });
@@ -398,15 +481,14 @@ export const runNativePrWatchOperation = (
         eventRef.consumerId !== consumer.id ||
         eventRef.wakeupId !== consumer.wakeupId ||
         (retained
-          ? eventRef.workViewDigest !== workViewDigest ||
-            eventRef.workRowDigest !==
-              sha256HexSync(
-                stableJson(
-                  Option.getOrNull(
-                    EffectArray.findFirst(watch.envelope.state.work, row => row.eventId === eventRef.watchEventId),
-                  ),
+          ? eventRef.workRowDigest !==
+            sha256HexSync(
+              stableJson(
+                Option.getOrNull(
+                  EffectArray.findFirst(watch.envelope.state.work, row => row.eventId === eventRef.watchEventId),
                 ),
-              )
+              ),
+            )
           : eventRef.watchDeliveryId !== watchDelivery?.watchDeliveryId) ||
         !eventRef.watchEventId ||
         dispositionIds.has(eventRef.watchEventId)
@@ -414,7 +496,7 @@ export const runNativePrWatchOperation = (
         return yield* fail(
           'stale-watch-event-ref',
           retained
-            ? 'Use current retained work references returned by work; reload its complete view.'
+            ? 'A retained work row changed or is unknown; reload work from offset zero for its current reference.'
             : 'A disposition must use an event from the current opaque watch delivery.',
         );
       dispositionIds.add(eventRef.watchEventId);

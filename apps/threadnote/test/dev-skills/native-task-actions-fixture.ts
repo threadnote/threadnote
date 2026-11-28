@@ -6,6 +6,7 @@ import {ChildProcessSpawner} from 'effect/process';
 import {SecureRandom} from 'effect/crypto';
 import {expect} from 'vitest';
 import {decodeNativeTaskActionRef, encodeNativeTaskActionRef} from '@threadnote/workflow-automations/task';
+import type {NativeWatchState} from '@threadnote/workflow-automations/watch';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
 import {registerWorkflowTaskTool} from '../../src/mcp/server/workflow.js';
@@ -428,6 +429,53 @@ export const recoverHistoricalTaskWatch = (f: Effect.Success<ReturnType<typeof f
     };
   });
 
+export const simulatedMergeEvent = (watchId: string, head: string, sequence: number, at: number) => ({
+  sequence,
+  id: `${watchId}:${sequence}`,
+  source: 'watch' as const,
+  kind: 'merged' as const,
+  key: watchId,
+  version: sha256HexSync(`state:merged:${head}`),
+  head,
+  at,
+  removed: false,
+});
+
+export const simulatedMergeState = (state: NativeWatchState, head: string, at: number): NativeWatchState => {
+  const prior = EffectOption.getOrUndefined(EffectArray.findFirst(state.events, event => event.kind === 'merged'));
+  const terminal = simulatedMergeEvent(state.watchId, head, prior?.sequence ?? state.nextSequence, at);
+  return {
+    ...state,
+    head,
+    prState: 'merged',
+    nextSequence: prior ? state.nextSequence : state.nextSequence + 1,
+    events: prior
+      ? EffectArray.map(state.events, event => (event.id === prior.id ? terminal : event))
+      : [...state.events, terminal],
+  };
+};
+
+export const simulatedReceiptedMerge = (
+  envelope: NonNullable<Effect.Success<ReturnType<typeof readNativeWatch>>>['envelope'],
+  head: string,
+  at: number,
+) => {
+  const notification = envelope.notification;
+  const outbox = notification?.outbox;
+  if (!notification || !outbox?.receipt || !envelope.collector) throw new Error('Expected a previous host notice.');
+  const state = simulatedMergeState(envelope.state, head, at);
+  const last = state.nextSequence - 1;
+  return {
+    ...envelope,
+    state,
+    collector: {...envelope.collector, status: 'terminal' as const, reason: 'merged' as const},
+    notification: {
+      ...notification,
+      outbox: {...outbox, key: `${state.watchId}:${outbox.first}:${last}`, last, consumedThrough: 0},
+    },
+  };
+};
+
 export const writeSimulatedTaskWatch = (
   f: Effect.Success<ReturnType<typeof fixture>>,
   startedWatch: NonNullable<Effect.Success<ReturnType<typeof readNativeWatch>>>,
@@ -472,16 +520,18 @@ export const writeSimulatedTaskWatch = (
     const notification = startedWatch.envelope.notification;
     if (!collector || !notification)
       throw new Error('Expected a collector and host notification after task watch start.');
+    const baseState = {
+      ...startedWatch.envelope.state,
+      head: headSha,
+      prState: 'open' as const,
+      nextSequence: sequence + 1,
+      events: [event],
+      sources,
+    };
+    const state = terminal ? simulatedMergeState(baseState, headSha, now) : baseState;
     const envelope = {
       ...startedWatch.envelope,
-      state: {
-        ...startedWatch.envelope.state,
-        head: headSha,
-        prState: terminal ? ('merged' as const) : ('open' as const),
-        nextSequence: sequence + 1,
-        events: [event],
-        sources,
-      },
+      state,
       collector: {
         ...collector,
         status: terminal ? ('terminal' as const) : ('running' as const),
@@ -506,7 +556,7 @@ export const writeSimulatedTaskWatch = (
           collectorToken: collector.token,
           status: 'queued' as const,
           receipt: receiptId,
-          consumedThrough: 0,
+          consumedThrough: terminal ? state.nextSequence - 1 : 0,
         },
       },
     };
