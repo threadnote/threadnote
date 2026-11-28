@@ -2,7 +2,9 @@ import {NativeCloseoutProposalSchema, type NativeCloseoutProposal} from '@thread
 import {nextNativeCycle} from '@threadnote/workflow-automations/cycle';
 import {decodeNativeTaskActionRef, encodeNativeTaskActionRef} from '@threadnote/workflow-automations/task';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import {Effect, Array as EffectArray, Predicate, Schema} from 'effect';
+import {nativeNext, nativeRefusal, nativeWatchNext} from '@threadnote/workflow-automations/gates';
+import type {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
+import {Clock, Effect, Array as EffectArray, Predicate, Schema} from 'effect';
 import * as EffectString from 'effect/String';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
@@ -18,6 +20,11 @@ import {
   nativeTaskWatchIdentityForConsumer,
 } from './task_pr_watch.js';
 import {nativeWatchCollectorAlive} from './watch_process.js';
+import {nativeWorkflowError} from './memory.js';
+import {readNativeWorkflowState} from './store.js';
+import {nativeTaskPhaseWatchRefs} from './task.js';
+import {mergedWatchProof, receiptCitesMergedWatchProof} from './task_watched_merge_proof.js';
+import {runNativeTaskPrWatch, watchSourcesComplete, watchWorkDrained} from './task_delivery_actions.js';
 
 import type {NativeTaskCycleRuntime, NativeTaskStoredState} from './task_action_helpers.js';
 import {fail, inCheckout} from './task_action_helpers.js';
@@ -62,16 +69,315 @@ const taskJobSummary = (value: unknown): Record<string, unknown> => {
   };
 };
 
-export const runNativeTaskFinish = (
+type PhaseWatch = NonNullable<Effect.Success<ReturnType<typeof resolveNativeTaskPrWatch>>['watch']>;
+type PhaseWatchState = PhaseWatch['envelope']['state'];
+const leaseExpiredWithWork = (state: PhaseWatchState, now: number) =>
+  state.consumer !== null && state.consumer.leaseUntil <= now && !watchWorkDrained(state);
+type CloseoutWatchWork = NonNullable<NativeCloseoutProposal['watchWork']>[number];
+const closeoutUndeliveredRowLimit = 16;
+const closeoutWatchWorkRowLimit = 128;
+/** Well under the 60,000-byte closeout document limit, so watch work never crowds out the closeout itself. */
+const closeoutWatchWorkByteBudget = 30_000;
+const exceedsWatchWorkBudget = (rows: readonly CloseoutWatchWork[]) =>
+  rows.length > closeoutWatchWorkRowLimit ||
+  Buffer.byteLength(JSON.stringify(rows, null, 2)) > closeoutWatchWorkByteBudget;
+
+const stoppedWatchWorkSummary = (
+  watchId: string,
+  pr: string,
+  firstRow: CloseoutWatchWork,
+  open: number,
+  pending: number,
+): CloseoutWatchWork => {
+  const {url: _url, ...event} = firstRow.event;
+  return {
+    ...firstRow,
+    reason: `Stopped watch ${watchId} retains ${open} open work rows${pending ? ` and ${pending} pending events` : ''} in its original state.`,
+    evidence: pr,
+    event,
+  };
+};
+/** Actionable events only; CI progress, head moves, source errors and watcher lifecycle are not work. */
+const actionableUndelivered = (event: PhaseWatchState['events'][number]) =>
+  event.source === 'comments' || event.source === 'reviews' || event.source === 'threads'
+    ? event.kind !== 'removed'
+    : event.source === 'checks' || event.source === 'statuses'
+      ? event.kind === 'ci_error'
+      : event.kind === 'merge_conflict';
+/** Keep provider text, private URL parameters, and raw CI keys in the live watch. */
+const closeoutEvent = ({summary: _summary, ...event}: PhaseWatchState['events'][number]) => {
+  if (event.source !== 'checks' && event.source !== 'statuses') return event;
+  const {url: _url, ...ci} = event;
+  return {...ci, key: event.id};
+};
+/**
+ * Open and blocked work, plus each actionable event that has no disposition yet, so closeout never drops an event that
+ * was still undelivered at merge. A long backlog keeps its first rows and one aggregate row for the rest.
+ */
+const closeoutWorkOf = (state: PhaseWatchState): {rows: CloseoutWatchWork[]; undelivered: number} => {
+  const disposed = new Set(EffectArray.map(state.work, item => item.eventId));
+  const undelivered = EffectArray.filter(
+    state.events,
+    event => !disposed.has(event.id) && actionableUndelivered(event),
+  );
+  const row = (event: PhaseWatchState['events'][number], reason: string): CloseoutWatchWork => ({
+    eventId: event.id,
+    status: 'open',
+    reason,
+    evidence: state.pr,
+    event: closeoutEvent(event),
+    at: event.at,
+  });
+  const excess = undelivered.slice(closeoutUndeliveredRowLimit);
+  const first = excess[0];
+  const last = excess.at(-1);
+  const rows: CloseoutWatchWork[] = [
+    ...EffectArray.flatMap(state.work, item =>
+      item.status === 'open' || item.status === 'blocked'
+        ? [
+            {
+              eventId: item.eventId,
+              status: item.status,
+              reason: item.reason,
+              evidence: item.event.source === 'checks' || item.event.source === 'statuses' ? state.pr : item.evidence,
+              event: closeoutEvent(item.event),
+              at: item.at,
+            },
+          ]
+        : [],
+    ),
+    ...EffectArray.map(undelivered.slice(0, closeoutUndeliveredRowLimit), event =>
+      row(event, 'Undelivered watch event at merge.'),
+    ),
+    ...(first && last
+      ? [
+          row(
+            first,
+            `${excess.length} more undelivered watch events (${first.id}..${last.id}); relay them and persist dispositions before ACK.`,
+          ),
+        ]
+      : []),
+  ];
+  return {rows, undelivered: undelivered.length};
+};
+
+/**
+ * Record the terminal receipt of each merged phase watch that is ready, so finish needs no separate watch complete.
+ * The collector never writes canonical workflow receipts; finish runs the same checkout-bound complete route, which
+ * keeps every merged-PR, terminal-watch, consumer and host-receipt gate. A plain renew first refreshes an expired
+ * lease of the same consumer; on a merged watch it neither restarts collection nor changes the PR binding.
+ */
+const settleMergedPhaseWatches = <R>(
   config: RuntimeConfig,
-  request: Extract<NativeTaskActionRequest, {command: 'finish'}>,
+  runId: string,
   stored: NativeTaskStoredState,
   checkout: string,
   state: NativeTaskCycleRuntime['state'],
+  validateIntent: Effect.Effect<void, WorkflowAutomationError, R>,
 ) =>
   Effect.gen(function* () {
+    const failures = new Map<string, WorkflowAutomationError>();
+    let advanced = false;
+    let intentValidated = false;
+    for (const planPhase of state.plan.phases) {
+      const receipt = state.phases[planPhase.id]?.delivery;
+      if (
+        receipt?.delivery !== 'pr' ||
+        receipt.pr?.state !== 'open' ||
+        receipt.watch?.state !== 'active' ||
+        !receipt.watch.consumerId
+      )
+        continue;
+      const resolved = yield* resolveNativeTaskPrWatch(
+        config,
+        runId,
+        planPhase.id,
+        receipt.pr.url,
+        receipt.watch.consumerId,
+      ).pipe(Effect.option);
+      const watch = resolved._tag === 'Some' ? resolved.value.watch : undefined;
+      const refs = nativeTaskPhaseWatchRefs(stored, planPhase.id);
+      if (
+        !watch ||
+        !refs ||
+        watch.envelope.state.prState !== 'merged' ||
+        watch.envelope.collector?.status !== 'terminal' ||
+        !watchSourcesComplete(watch.envelope.state) ||
+        !mergedWatchProof(watch.envelope)
+      )
+        continue;
+      if (!intentValidated) {
+        yield* validateIntent;
+        intentValidated = true;
+      }
+      const route: Pick<
+        Extract<NativeTaskActionRequest, {command: 'watch-pr'}>,
+        'command' | 'callerCwd' | 'validationRef' | 'deliveryRef'
+      > & {runId: string} = {
+        command: 'watch-pr',
+        runId,
+        callerCwd: checkout,
+        validationRef: refs.validationRef,
+        deliveryRef: refs.deliveryRef,
+      };
+      if (leaseExpiredWithWork(watch.envelope.state, yield* Clock.currentTimeMillis)) {
+        const renewed = yield* runNativeTaskPrWatch(config, {...route, operation: 'renew'}, stored, checkout).pipe(
+          Effect.result,
+        );
+        if (renewed._tag === 'Failure') {
+          failures.set(planPhase.id, nativeWorkflowError(renewed.failure));
+          continue;
+        }
+      }
+      const current = yield* readNativeWorkflowState(config, runId);
+      if (!current) continue;
+      const completed = yield* runNativeTaskPrWatch(config, {...route, operation: 'complete'}, current, checkout).pipe(
+        Effect.result,
+      );
+      if (completed._tag === 'Failure') failures.set(planPhase.id, nativeWorkflowError(completed.failure));
+      else advanced = true;
+    }
+    return {advanced, failures};
+  });
+
+export const runNativeTaskFinish = (
+  config: RuntimeConfig,
+  request: Extract<NativeTaskActionRequest, {command: 'finish'}>,
+  initialStored: NativeTaskStoredState,
+  checkout: string,
+  initialState: NativeTaskCycleRuntime['state'],
+) =>
+  Effect.gen(function* () {
+    let stored = initialStored;
+    let state = initialState;
+    /** A watch operation with the phase's current references, or the task card when the phase has none. */
+    const phaseWatchNext = (
+      phaseId: string,
+      operation: 'inspect' | 'renew' | 'work' | 'relay' | 'complete',
+      watchId?: string,
+    ) => {
+      const refs = nativeTaskPhaseWatchRefs(stored, phaseId, watchId);
+      return refs
+        ? nativeWatchNext(
+            {
+              runId: request.runId,
+              callerCwd: checkout,
+              validationRef: refs.validationRef,
+              deliveryRef: refs.deliveryRef,
+            },
+            operation,
+          )
+        : nativeNext.view({runId: request.runId, callerCwd: checkout});
+    };
+    // Cheap request-shape refusals come first, so they never settle a watch.
+    if (request.prepareRef && request.finishRef)
+      return yield* fail('invalid-request', 'Continue one closeout reference at a time.');
+    if (request.resume && !request.prepareRef && !request.finishRef)
+      return yield* fail('invalid-request', 'Explicit job resume requires its exact prepareRef or finishRef.');
+    if (!request.prepareRef && !request.finishRef && request.proposal === undefined)
+      return yield* fail(
+        'invalid-request',
+        'Provide the semantic closeout proposal or its exact prepare/finish reference.',
+      );
+    const generationHash = sha256HexSync(stored.state.generation);
+    const decodedFinishRef = request.finishRef === undefined ? undefined : decodeNativeTaskActionRef(request.finishRef);
+    const prepareRef = request.prepareRef === undefined ? undefined : decodeNativeTaskActionRef(request.prepareRef);
+    if (
+      request.finishRef !== undefined &&
+      (!decodedFinishRef ||
+        decodedFinishRef.kind !== 'closeout-finish' ||
+        decodedFinishRef.runId !== request.runId ||
+        decodedFinishRef.generationHash !== generationHash ||
+        !decodedFinishRef.jobId ||
+        !decodedFinishRef.transactionId ||
+        !decodedFinishRef.payloadDigest)
+    )
+      return yield* fail('stale-closeout-ref', 'The finish reference does not match the active canonical closeout.');
+    if (
+      request.prepareRef !== undefined &&
+      (!prepareRef ||
+        prepareRef.kind !== 'closeout-prepare' ||
+        prepareRef.runId !== request.runId ||
+        prepareRef.generationHash !== generationHash ||
+        !prepareRef.jobId ||
+        !prepareRef.payloadDigest)
+    )
+      return yield* fail('closeout-intent-conflict', 'The prepare reference is bound to different proposal content.');
+    const invalidProposal = fail(
+      'invalid-closeout-proposal',
+      'The semantic closeout proposal could not retain canonical PR watch work.',
+    );
+    const proposed =
+      request.proposal === undefined
+        ? undefined
+        : yield* Schema.decodeEffect(NativeCloseoutProposalSchema, {onExcessProperty: 'error'})(request.proposal).pipe(
+            Effect.mapError(() => invalidProposal),
+          );
     if (nextNativeCycle(state).action !== 'complete')
       return yield* fail('finish-scope', 'Task finish requires the current canonical phase completion gate.');
+    let intentValidated = false;
+    const validateIntent = (proposed: NativeCloseoutProposal) =>
+      Effect.gen(function* () {
+        const validation = yield* inCheckout(
+          runWorkflowAutomation(config, {
+            protocolVersion: 1,
+            executorVersion: 1,
+            action: 'closeout',
+            command: 'validation-input',
+            runId: request.runId,
+            generation: stored.state.generation,
+          }),
+          checkout,
+        );
+        const validationInput = yield* Schema.decodeUnknownEffect(closeoutValidationInputSchema)(validation).pipe(
+          Effect.mapError(() =>
+            fail('closeout-not-ready', 'The canonical closeout validation inputs are unavailable.'),
+          ),
+        );
+        const mismatches: string[] = [];
+        if (
+          !sameIds(
+            EffectArray.map(proposed.phaseEvidence, item => item.id),
+            EffectArray.map(validationInput.phases, item => item.id),
+          )
+        )
+          mismatches.push('phaseEvidence');
+        for (const phaseInput of validationInput.phases) {
+          const evidence = EffectArray.findFirst(proposed.phaseEvidence, item => item.id === phaseInput.id);
+          if (
+            evidence._tag === 'None' ||
+            !sameIds(
+              EffectArray.map(evidence.value.acceptance, item => item.criterion),
+              phaseInput.acceptanceCriteria,
+            )
+          ) {
+            mismatches.push('acceptance');
+            break;
+          }
+        }
+        if (
+          !sameIds(
+            EffectArray.map(proposed.decisions, item => item.id),
+            EffectArray.map(validationInput.decisions, item => item.id),
+          )
+        )
+          mismatches.push('decisions');
+        if (
+          !sameIds(
+            EffectArray.map(proposed.scenarios, item => item.id),
+            EffectArray.map(validationInput.scenarios, item => item.id),
+          )
+        )
+          mismatches.push('scenarios');
+        if ((state.plan.spec === undefined) !== (proposed.behaviorVerification === undefined))
+          mismatches.push('behaviorVerification');
+        if (mismatches.length > 0)
+          return yield* fail(
+            'invalid-closeout-proposal',
+            `Closeout proposal fields ${EffectArray.join(mismatches, ', ')} must match the pinned plan and spec. Correct the proposal and submit a new finish request.`,
+          );
+        intentValidated = true;
+      });
     const phase = state.plan.phases[0];
     const phaseReceipt = phase ? state.phases[phase.id]?.delivery : undefined;
     let closeoutWatchWork: NativeCloseoutProposal['watchWork'] | undefined;
@@ -89,8 +395,26 @@ export const runNativeTaskFinish = (
     } else {
       if (state.plan.delivery !== 'pr')
         return yield* fail('finish-scope', 'PR closeout requires a canonical PR delivery plan.');
-      const requiredSources = ['comments', 'reviews', 'threads', 'checks', 'statuses'];
-      const watchWork: Array<NonNullable<NativeCloseoutProposal['watchWork']>[number]> = [];
+      // A continuation only recovers an existing closeout. It never records delivery or renews a lease.
+      const settlement =
+        request.prepareRef || request.finishRef
+          ? undefined
+          : yield* settleMergedPhaseWatches(config, request.runId, stored, checkout, state, validateIntent(proposed!));
+      if (settlement?.advanced) {
+        const fresh = yield* readNativeWorkflowState(config, request.runId);
+        if (!fresh?.state.cycle) return yield* fail('cycle-not-found', 'This run no longer has its canonical cycle.');
+        stored = fresh;
+        state = fresh.state.cycle.state;
+      }
+      const autoFailures = settlement?.failures;
+      const watchWork: CloseoutWatchWork[] = [];
+      const stoppedWork: CloseoutWatchWork[] = [];
+      const stoppedSummaries: CloseoutWatchWork[] = [];
+      let stoppedWatchCount = 0;
+      let stoppedRowCount = 0;
+      let stoppedOpen = 0;
+      let stoppedPending = 0;
+      let overflowRoute: ReturnType<typeof phaseWatchNext> | undefined;
       for (const planPhase of state.plan.phases) {
         const proof = state.phases[planPhase.id];
         const receipt = proof?.delivery;
@@ -102,24 +426,9 @@ export const runNativeTaskFinish = (
         const watch = resolved?.watch;
         const notification = watch?.envelope.notification;
         const consumer = watch?.envelope.state.consumer;
-        const evidence = receipt?.watch?.evidence;
-        // The terminal receipt may still be in the outbox while lastReceipt names an earlier notice.
-        const hasHostReceipt =
-          evidence !== undefined &&
-          EffectString.startsWith('native-watch-revision:')(evidence) &&
-          EffectArray.some(
-            [notification?.lastReceipt?.receipt, notification?.outbox?.receipt],
-            hostReceipt => !!hostReceipt && EffectString.endsWith(`;host-receipt:${hostReceipt}`)(evidence),
-          );
-        const completeSources =
-          watch &&
-          watch.envelope.state.sources.length === requiredSources.length &&
-          EffectArray.every(requiredSources, source =>
-            EffectArray.some(
-              watch.envelope.state.sources,
-              item => item.source === source && item.lastCompleteAt !== undefined && item.error === undefined,
-            ),
-          );
+        const hasMergeProof =
+          watch !== undefined && receiptCitesMergedWatchProof(receipt?.watch?.evidence, watch.envelope);
+        const completeSources = watch !== undefined && watchSourcesComplete(watch.envelope.state);
         if (
           !proof ||
           !receipt ||
@@ -142,12 +451,49 @@ export const runNativeTaskFinish = (
           receipt.watch.consumerId !== consumer.id ||
           notification.consumerId !== consumer.id ||
           notification.wakeupId !== consumer.wakeupId ||
-          !hasHostReceipt
-        )
-          return yield* fail(
-            'finish-scope',
-            'PR closeout requires each exact merged PR, terminal source-complete watch, matching consumer record, and host receipt.',
-          );
+          !hasMergeProof
+        ) {
+          const now = yield* Clock.currentTimeMillis;
+          const watchState = watch?.envelope.state;
+          const autoFailure = autoFailures?.get(planPhase.id);
+          const [message, operation]: readonly [string, 'inspect' | 'renew' | 'complete'] = !watchState
+            ? [
+                `Phase ${planPhase.id} has no canonical PR watch; reload the task card for its watch references.`,
+                'inspect',
+              ]
+            : watchState.prState === 'open'
+              ? [
+                  `The PR of phase ${planPhase.id} is not merged yet; the watch must observe the merge before finish.`,
+                  'inspect',
+                ]
+              : watchState.prState !== 'merged'
+                ? [`The PR of phase ${planPhase.id} closed without a merge.`, 'inspect']
+                : watch?.envelope.collector?.status !== 'terminal' || !completeSources
+                  ? [
+                      `The watch of phase ${planPhase.id} has not finished its terminal merged sweep with every source complete; wait for that sweep.`,
+                      'inspect',
+                    ]
+                  : !watch.envelope.stopRequested && leaseExpiredWithWork(watchState, now)
+                    ? [
+                        `The watch consumer lease of phase ${planPhase.id} expired while merged-watch events or open work remain. Renew the watch${autoFailure ? ` (automatic renew refused: ${autoFailure.message})` : ''}.`,
+                        'renew',
+                      ]
+                    : !mergedWatchProof(watch.envelope)
+                      ? [
+                          `The merged watch notice of phase ${planPhase.id} has no host receipt or consumer ACK yet. Wait for the wakeup or handle the exact merged event.`,
+                          'inspect',
+                        ]
+                      : receipt?.watch?.state !== 'terminal' || pr?.state !== 'merged'
+                        ? [
+                            `The merged PR receipt of phase ${planPhase.id} is not recorded: ${autoFailure?.message ?? 'watch complete has not run'}`,
+                            'complete',
+                          ]
+                        : [
+                            'PR closeout requires each exact merged PR, terminal source-complete watch, matching consumer record, and proof for the exact merged event.',
+                            'inspect',
+                          ];
+          return yield* nativeRefusal('finish-scope', message, {next: phaseWatchNext(planPhase.id, operation)});
+        }
         // Later phases or maintenance can merge the PR above this phase's own delivered head.
         yield* verifyNativeMergedPhaseHead(checkout, pr.headSha, receipt.watch.headSha);
         const watchIds = new Set(yield* readNativeTaskPhaseWatchIds(config, request.runId, planPhase.id));
@@ -169,71 +515,101 @@ export const runNativeTaskFinish = (
           const retained = yield* readNativeTaskPhaseWatch(config, request.runId, planPhase.id, watchId);
           if (watchId === resolved.watchId && retained.watch.revision !== watch.revision)
             return yield* fail('watch-inventory-changed', 'The canonical watch changed during closeout discovery.');
-          const retainedState = retained.watch.envelope.state;
-          const retainedNotification = retained.watch.envelope.notification;
+          const {
+            state: retainedState,
+            notification: retainedNotification,
+            collector,
+            stopRequested,
+          } = retained.watch.envelope;
           const retainedOutbox = retainedNotification?.outbox;
+          const prior = watchId !== resolved.watchId;
+          const expired =
+            retainedState.consumer !== null && retainedState.consumer.leaseUntil <= (yield* Clock.currentTimeMillis);
           if (
-            watchId !== resolved.watchId &&
+            prior &&
             (retainedState.prState === 'open' ||
-              !retained.watch.envelope.collector ||
-              !['terminal', 'stopped'].includes(retained.watch.envelope.collector.status) ||
-              (yield* nativeWatchCollectorAlive(retained.watch.envelope.collector)) ||
+              !collector ||
+              !['terminal', 'stopped'].includes(collector.status) ||
+              (yield* nativeWatchCollectorAlive(collector)) ||
               retainedState.delivery !== null ||
               retainedState.acknowledged !== retainedState.nextSequence - 1 ||
               !retainedNotification ||
               retainedNotification.recoveryRequested ||
               !(retainedNotification.lastReceipt || retainedOutbox?.receipt) ||
               (retainedOutbox && ['pending', 'sending', 'failed'].includes(retainedOutbox.status)) ||
-              retainedState.sources.length !== requiredSources.length ||
-              !EffectArray.every(requiredSources, source =>
-                EffectArray.some(
-                  retainedState.sources,
-                  item => item.source === source && item.lastCompleteAt !== undefined && item.error === undefined,
-                ),
-              ))
+              !watchSourcesComplete(retainedState))
           )
-            return yield* fail(
+            return yield* nativeRefusal(
               'finish-scope',
-              'A retained prior PR watch still owns active collection; settle that exact watch before finish.',
+              `Prior watch ${watchId} for ${retainedState.pr} still has unsettled collection or delivery. Inspect its exact route before finish.`,
+              {next: phaseWatchNext(planPhase.id, 'inspect', watchId)},
             );
-          watchWork.push(
-            ...EffectArray.map(
-              EffectArray.filter(
-                retained.watch.envelope.state.work,
-                item => item.status === 'open' || item.status === 'blocked',
-              ),
-              item => ({
-                eventId: item.eventId,
-                status: item.status === 'blocked' ? ('blocked' as const) : ('open' as const),
-                reason: item.reason,
-                evidence: item.evidence,
-                event: item.event,
-                at: item.at,
-              }),
-            ),
+          const carried = closeoutWorkOf(retainedState);
+          if (!carried.rows.length) continue;
+          // An expired, explicitly stopped watch cannot renew or change work dispositions.
+          // If its rows exceed the closeout budget, leave them in the original watch and retain an audit row.
+          if (expired && stopRequested) {
+            stoppedWatchCount += 1;
+            stoppedRowCount += carried.rows.length;
+            const open = EffectArray.filter(
+              retainedState.work,
+              item => item.status === 'open' || item.status === 'blocked',
+            ).length;
+            stoppedOpen += open;
+            stoppedPending += retainedState.events.length;
+            if (stoppedRowCount <= closeoutWatchWorkRowLimit) stoppedWork.push(...carried.rows);
+            if (stoppedWatchCount <= closeoutWatchWorkRowLimit)
+              stoppedSummaries.push(
+                stoppedWatchWorkSummary(watchId, retainedState.pr, carried.rows[0], open, retainedState.events.length),
+              );
+            continue;
+          }
+          watchWork.push(...carried.rows);
+          overflowRoute = phaseWatchNext(
+            planPhase.id,
+            expired ? 'renew' : carried.undelivered ? 'relay' : 'work',
+            watchId,
           );
+          if (exceedsWatchWorkBudget(watchWork))
+            return yield* nativeRefusal(
+              'closeout-watch-work-overflow',
+              `Closeout would carry ${watchWork.length} open watch work rows after watch ${watchId}, more than its bounded budget. ${expired ? 'Renew the watch first. ' : ''}Resolve or ignore open watch work.`,
+              {next: overflowRoute},
+            );
         }
       }
-      closeoutWatchWork = watchWork;
+      if (stoppedWatchCount) {
+        const detailed = [...watchWork, ...stoppedWork];
+        if (stoppedRowCount === stoppedWork.length && !exceedsWatchWorkBudget(detailed)) {
+          closeoutWatchWork = detailed;
+        } else {
+          const summaries = [...watchWork, ...stoppedSummaries];
+          const first = stoppedSummaries[0];
+          const aggregate = {
+            ...first,
+            reason: `${stoppedWatchCount} stopped watches retain ${stoppedOpen} open work rows and ${stoppedPending} pending events in their original states. First event ${first.eventId}.`,
+          };
+          const bounded =
+            stoppedWatchCount === stoppedSummaries.length && !exceedsWatchWorkBudget(summaries)
+              ? summaries
+              : [...watchWork, aggregate];
+          if (exceedsWatchWorkBudget(bounded))
+            return yield* nativeRefusal(
+              'closeout-watch-work-overflow',
+              'Resolve open work in the live watch to leave room for the audit row for stopped watches.',
+              {next: overflowRoute!},
+            );
+          closeoutWatchWork = bounded;
+        }
+      } else closeoutWatchWork = watchWork;
     }
     const closeoutProposal =
-      request.proposal === undefined
+      proposed === undefined
         ? undefined
         : yield* Schema.decodeEffect(NativeCloseoutProposalSchema, {onExcessProperty: 'error'})({
-            ...request.proposal,
+            ...proposed,
             ...(closeoutWatchWork === undefined ? {} : {watchWork: closeoutWatchWork}),
-          }).pipe(
-            Effect.mapError(() =>
-              fail(
-                'invalid-closeout-proposal',
-                'The semantic closeout proposal could not retain canonical PR watch work.',
-              ),
-            ),
-          );
-    if (request.prepareRef && request.finishRef)
-      return yield* fail('invalid-request', 'Continue one closeout reference at a time.');
-    if (request.resume && !request.prepareRef && !request.finishRef)
-      return yield* fail('invalid-request', 'Explicit job resume requires its exact prepareRef or finishRef.');
+          }).pipe(Effect.mapError(() => invalidProposal));
     let proposalDigest = closeoutProposal ? sha256HexSync(stableJson(closeoutProposal)) : undefined;
     let expectedPreparedRevision: string | undefined;
     const journal = yield* readNativeCloseoutJournal(config, request.runId, decodeJournal);
@@ -260,7 +636,7 @@ export const runNativeTaskFinish = (
         }
       : undefined;
     if (request.finishRef) {
-      const ref = decodeNativeTaskActionRef(request.finishRef);
+      const ref = decodedFinishRef;
       if (
         !ref ||
         ref.kind !== 'closeout-finish' ||
@@ -318,13 +694,8 @@ export const runNativeTaskFinish = (
         },
       };
     }
-    if (!request.prepareRef && (!closeoutProposal || !proposalDigest || !prepareWork))
-      return yield* fail(
-        'invalid-request',
-        'Provide the semantic closeout proposal or its exact prepare/finish reference.',
-      );
     if (request.prepareRef) {
-      const ref = decodeNativeTaskActionRef(request.prepareRef);
+      const ref = prepareRef;
       if (
         !ref ||
         ref.kind !== 'closeout-prepare' ||
@@ -485,62 +856,7 @@ export const runNativeTaskFinish = (
         graphValue.graph.state !== 'ready'
       )
         return yield* fail('graph-not-ready', 'Refresh or repair current graph evidence before starting closeout.');
-      const validation = yield* inCheckout(
-        runWorkflowAutomation(config, {
-          protocolVersion: 1,
-          executorVersion: 1,
-          action: 'closeout',
-          command: 'validation-input',
-          runId: request.runId,
-          generation: stored.state.generation,
-        }),
-        checkout,
-      );
-      const validationInput = yield* Schema.decodeUnknownEffect(closeoutValidationInputSchema)(validation).pipe(
-        Effect.mapError(() => fail('closeout-not-ready', 'The canonical closeout validation inputs are unavailable.')),
-      );
-      const mismatches: string[] = [];
-      if (
-        !sameIds(
-          EffectArray.map(closeoutProposal!.phaseEvidence, item => item.id),
-          EffectArray.map(validationInput.phases, item => item.id),
-        )
-      )
-        mismatches.push('phaseEvidence');
-      for (const phaseInput of validationInput.phases) {
-        const evidence = EffectArray.findFirst(closeoutProposal!.phaseEvidence, item => item.id === phaseInput.id);
-        if (
-          evidence._tag === 'None' ||
-          !sameIds(
-            EffectArray.map(evidence.value.acceptance, item => item.criterion),
-            phaseInput.acceptanceCriteria,
-          )
-        ) {
-          mismatches.push('acceptance');
-          break;
-        }
-      }
-      if (
-        !sameIds(
-          EffectArray.map(closeoutProposal!.decisions, item => item.id),
-          EffectArray.map(validationInput.decisions, item => item.id),
-        )
-      )
-        mismatches.push('decisions');
-      if (
-        !sameIds(
-          EffectArray.map(closeoutProposal!.scenarios, item => item.id),
-          EffectArray.map(validationInput.scenarios, item => item.id),
-        )
-      )
-        mismatches.push('scenarios');
-      if ((state.plan.spec === undefined) !== (closeoutProposal!.behaviorVerification === undefined))
-        mismatches.push('behaviorVerification');
-      if (mismatches.length > 0)
-        return yield* fail(
-          'invalid-closeout-proposal',
-          `Closeout proposal fields ${EffectArray.join(mismatches, ', ')} must match the pinned plan and spec. Correct the proposal and submit a new finish request.`,
-        );
+      if (!intentValidated) yield* validateIntent(proposed!);
       const submitted = yield* inCheckout(jobRequest('submit', undefined, prepareWork), checkout);
       const submittedValue: unknown = submitted;
       if (!Predicate.isObject(submittedValue) || typeof submittedValue.jobId !== 'string')

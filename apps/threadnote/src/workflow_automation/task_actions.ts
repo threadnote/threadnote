@@ -79,7 +79,12 @@ import {decodeStoredBindings, nativeTaskStartShapeMessage, withConfirmArguments}
 import {resumeReopenedNativeTaskPhase} from './task_reopen.js';
 import {nativeRunNotFoundMessage, readNativeTaskView, verifyNativeTaskReopen} from './task.js';
 import {inspectOldBindingOwners} from './task_binding_transition.js';
-import {NativeTaskPrWatchFieldsSchema, validateNativeTaskWatchMaintenanceRoute} from './task_pr_watch.js';
+import {
+  NativeTaskPrWatchFieldsSchema,
+  sourceChangedCodes,
+  validateNativeTaskWatchMaintenanceRoute,
+  watchRecovery,
+} from './task_pr_watch.js';
 import {
   cycleRequest,
   currentNativeTaskRef,
@@ -705,9 +710,6 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
 export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
   runNativeTaskActionCore(config, input).pipe(Effect.catch(error => withTaskNext(config, input, error)));
 
-/** Refusals that mean the validated source or its declared base changed after validation. */
-const sourceChangedCodes = new Set(['source-drift', 'review-stale']);
-
 /**
  * A refusal without a named next command points at the action on the current task card, or at reopen when a deliver
  * card's source changed. Placeholders the card or the request already answer are filled; a refused reference is never
@@ -715,7 +717,7 @@ const sourceChangedCodes = new Set(['source-drift', 'review-stale']);
  */
 const withTaskNext = (config: RuntimeConfig, input: unknown, cause: unknown) =>
   Effect.gen(function* () {
-    const error = nativeWorkflowError(cause);
+    const error = watchRecovery(input, nativeWorkflowError(cause));
     if (!Predicate.isObject(input) || typeof input.runId !== 'string' || typeof input.callerCwd !== 'string')
       return yield* error;
     const {runId, callerCwd} = input;
