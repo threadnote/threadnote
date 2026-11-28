@@ -181,6 +181,7 @@ const WORKSPACE_CANDIDATE_RESERVE_MAXIMUM = 16;
 const WORKSPACE_CANDIDATE_RESERVE_MULTIPLIER = 2;
 const CROSS_SCOPE_CANDIDATE_RESERVE_MAXIMUM = 4;
 const CROSS_SCOPE_CANDIDATE_SELECTION_MAXIMUM = 16;
+const SEMANTIC_CANDIDATE_RESERVE_MAXIMUM = 8;
 
 export interface RecallCrossScopeLaneBudgets {
   readonly admissionLimit: number;
@@ -653,6 +654,11 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
   ) {
     generations.push(crossScopeFallbackResult.success.generation);
   }
+  const reserveSemanticCandidates = !navigationOnly && !closingRead && (semanticScores?.size ?? 0) > 0;
+  const selectedUris =
+    reserveSemanticCandidates && input.candidateUris
+      ? new Set(EffectArray.map(input.candidateUris, stripFragment))
+      : undefined;
   const semanticCandidates = mergeRecallCandidateLanes(
     [EffectArray.map(mergeRecallIndexCandidates(topicalRecallIndexCandidateSets), withSemanticScore)],
     [memoryConnections?.candidates ?? [], prioritizedBranchCandidates, prioritizedWorkspaceCandidates],
@@ -663,6 +669,15 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
       protectedReserve: Math.max(laneBudgets.protectedReserve, memoryConnections?.candidates.length ?? 0),
       recencyCandidateSets: [prioritizedRecentCandidates],
       recencyReserve: RECALL_RECENCY_CANDIDATE_RESERVE,
+      semanticReserve: reserveSemanticCandidates
+        ? {
+            limit: Math.min(input.limit, SEMANTIC_CANDIDATE_RESERVE_MAXIMUM),
+            isEligible: candidate =>
+              (selectedUris === undefined || selectedUris.has(stripFragment(candidate.uri))) &&
+              recallUriMatchesScopes(candidate.uri, input.allowedUriScopes) &&
+              recallRuntimeCandidateIsEligible(candidate, input.eligibility),
+          }
+        : undefined,
     },
   );
   const indexedCandidates = navigationOnly && !closingRead ? semanticCandidates : yield* rerank(semanticCandidates);
@@ -1154,9 +1169,8 @@ export function mergePrioritizedRecallIndexCandidates(
 }
 
 /**
- * Admit protected workspace/branch candidates and outside-hierarchy
- * challengers through independent bounded reserves. A busy protected lane can
- * therefore never consume the challenger's tiny admission budget.
+ * Admit recent, protected, and cross-scope candidates through bounded reserves.
+ * Reserve up to the final topical slots for semantic evidence when stronger candidates can enter from overflow.
  */
 export function mergeRecallCandidateLanes(
   topicalCandidateSets: readonly (readonly RecallCandidate[])[],
@@ -1168,6 +1182,10 @@ export function mergeRecallCandidateLanes(
     readonly protectedReserve: number;
     readonly recencyCandidateSets?: readonly (readonly RecallCandidate[])[];
     readonly recencyReserve?: number;
+    readonly semanticReserve?: {
+      readonly limit: number;
+      readonly isEligible: (candidate: RecallCandidate) => boolean;
+    };
   },
 ): readonly RecallCandidate[] {
   const topical = mergeRecallIndexCandidates(topicalCandidateSets);
@@ -1205,12 +1223,44 @@ export function mergeRecallCandidateLanes(
     (candidate, __effectArrayIndex) =>
       __effectArrayIndex in topical && !reservedKeys.has(recallCandidateAdmissionKey(candidate)),
   );
-  const topicalHeadLength = Math.max(0, admissionLimit - reserved.length);
+  const topicalLimit = admissionLimit - reserved.length;
+  const originalTopicalHead = topicalWithoutReserved.slice(0, topicalLimit);
+  const semanticReserve = options.semanticReserve;
+  const semanticLimit = Math.min(Math.max(0, Math.floor(semanticReserve?.limit ?? 0)), topicalLimit);
+  const rankedSemantic =
+    semanticReserve && semanticLimit > 0 && topicalWithoutReserved.length > topicalLimit
+      ? selectRecallLaneHead(
+          EffectArray.filter(
+            topicalWithoutReserved.slice(topicalLimit - semanticLimit),
+            (candidate): candidate is RecallCandidate & {readonly semantic: number} =>
+              candidate.semantic !== undefined &&
+              Number.isFinite(candidate.semantic) &&
+              candidate.semantic > 0 &&
+              semanticReserve.isEligible(candidate),
+          ).sort((left, right) => right.semantic - left.semantic),
+          semanticLimit,
+          reservedKeys,
+        )
+      : [];
+  const semanticHead: readonly RecallCandidate[] = EffectArray.some(
+    rankedSemantic,
+    candidate => !originalTopicalHead.includes(candidate),
+  )
+    ? rankedSemantic
+    : [];
+  const topicalHead =
+    semanticHead.length === 0
+      ? originalTopicalHead
+      : EffectArray.filter(originalTopicalHead, candidate => !semanticHead.includes(candidate)).slice(
+          0,
+          topicalLimit - semanticHead.length,
+        );
   return deduplicateLogicalRecallCandidates(
     uniqueRecallCandidatesByUri([
-      ...topicalWithoutReserved.slice(0, topicalHeadLength),
+      ...topicalHead,
       ...reserved,
-      ...topicalWithoutReserved.slice(topicalHeadLength),
+      ...semanticHead,
+      ...topicalWithoutReserved.slice(topicalHead.length),
       ...protectedCandidates.slice(protectedHead.length),
       ...crossScopeCandidates.slice(crossHead.length),
       ...recentCandidates.slice(recentHead.length),
