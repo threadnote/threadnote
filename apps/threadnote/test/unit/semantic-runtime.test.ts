@@ -1471,7 +1471,9 @@ effectIt.layer(CoordinatorTestLayer, {buildPerTest: true})(layerIt => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn-context-closing-'}));
+        const root = yield* fs.realPath(
+          yield* fs.makeTempDirectoryScoped({directory: '/tmp', prefix: 'tn-context-closing-'}),
+        );
         const project = path.join(root, 'project');
         const home = path.join(root, 'home');
         yield* fs.makeDirectory(project, {mode: 0o700});
