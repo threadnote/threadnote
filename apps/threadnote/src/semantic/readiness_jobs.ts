@@ -55,9 +55,8 @@ export const semanticCompiledRuntimeIdentity = Effect.gen(function* () {
     String(info.ctimeNs),
   ]);
   if (cachedRuntimeIdentity?.metadata === metadata) return cachedRuntimeIdentity.identity;
-  const identity = sha256HexSync(
-    JSON.stringify(['threadnote-agent-read-v1', version, executable, yield* sha256FileHex(executable)]),
-  );
+  const digest = yield* sha256FileHex(executable, {chunkSize: 1024 * 1024});
+  const identity = sha256HexSync(JSON.stringify(['threadnote-agent-read-v1', version, executable, digest]));
   cachedRuntimeIdentity = {metadata, identity};
   return identity;
 });

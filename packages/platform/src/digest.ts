@@ -5,9 +5,12 @@ export const sha256Hex = Effect.fn('digest.sha256Hex')((value: string | Uint8Arr
   Effect.sync(() => sha256HexSync(value)),
 );
 
-export const sha256FileHex = Effect.fn('digest.sha256FileHex')(function* (path: string) {
+export const sha256FileHex = Effect.fn('digest.sha256FileHex')(function* (
+  path: string,
+  options?: {readonly chunkSize: number},
+) {
   const fs = yield* FileSystem.FileSystem;
   const hash = yield* Effect.sync(() => new Bun.CryptoHasher('sha256'));
-  yield* fs.stream(path).pipe(Stream.runForEach(chunk => Effect.sync(() => hash.update(chunk))));
+  yield* fs.stream(path, options).pipe(Stream.runForEach(chunk => Effect.sync(() => hash.update(chunk))));
   return yield* Effect.sync(() => hash.digest('hex'));
 });
