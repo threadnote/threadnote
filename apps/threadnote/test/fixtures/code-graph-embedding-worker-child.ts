@@ -310,6 +310,11 @@ const fixtureMain = Effect.gen(function* () {
           ),
         ),
   };
+  const observePageDeferrals = existsSync(`${home}/observe-page-deferrals`);
+  const observedLanes = lanes(home).pipe(
+    Effect.provideService(CodeGraphStore, store),
+    Effect.provideService(Path.Path, path),
+  );
   const program = runCodeGraphEmbeddingWorker(home, {
     version: argument('--version') || (yield* getThreadnoteVersion()),
     lifecycle,
@@ -325,7 +330,16 @@ const fixtureMain = Effect.gen(function* () {
             })()
           : [checkoutId],
       }),
-    onUnitResult: result => Effect.sync(() => record(home, {event: 'unit-result', state: result.state})),
+    onUnitResult: result =>
+      Effect.gen(function* () {
+        const lane = observePageDeferrals && result.state === 'deferred' ? (yield* observedLanes)[0] : undefined;
+        record(home, {
+          event: 'unit-result',
+          state: result.state,
+          attempt: lane?.attempt,
+          reason: lane?.reason,
+        });
+      }),
     pollMilliseconds: 25,
     idleGraceMilliseconds: 75,
     onReady: Effect.sync(() => {
