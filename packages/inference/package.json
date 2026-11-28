@@ -31,7 +31,7 @@
     "@threadnote/testing": "workspace:*",
     "@effect/vitest": "4.1.4",
     "vitest": "5.0.5",
-    "fast-check": "4.10.2"
+    "fast-check": "4.11.0"
   },
   "scripts": {
     "test": "bun --bun vitest run --config ../../vitest.config.ts --root ../.. packages/inference/test"

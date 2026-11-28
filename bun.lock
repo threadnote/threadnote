@@ -63,7 +63,7 @@
         "@vitejs/plugin-react": "6.3.0",
         "@vitest/coverage-istanbul": "5.0.5",
         "@vscode/tree-sitter-wasm": "0.3.1",
-        "fast-check": "4.10.2",
+        "fast-check": "4.11.0",
         "happy-dom": "21.0.4",
         "husky": "^9.1.7",
         "mitata": "1.0.34",
@@ -123,7 +123,7 @@
         "@effect/vitest": "4.1.4",
         "@playwright/test": "1.65.1",
         "@threadnote/testing": "workspace:*",
-        "fast-check": "4.10.2",
+        "fast-check": "4.11.0",
         "postgres": "3.4.9",
         "react": "^19.3.1",
         "react-dom": "^19.3.1",
@@ -157,7 +157,7 @@
         "@types/react-dom": "^19.3.0",
         "@types/three": "^0.186.0",
         "@vitejs/plugin-react": "6.3.0",
-        "fast-check": "4.10.2",
+        "fast-check": "4.11.0",
         "happy-dom": "21.0.4",
         "jsdom": "30.1.3",
         "vite": "8.3.8",
@@ -181,7 +181,7 @@
         "@effect/platform-bun": "4.1.4",
         "@effect/vitest": "4.1.4",
         "@threadnote/testing": "workspace:*",
-        "fast-check": "4.10.2",
+        "fast-check": "4.11.0",
         "vitest": "5.0.5",
       },
     },
@@ -193,7 +193,7 @@
       },
       "devDependencies": {
         "@threadnote/testing": "workspace:*",
-        "fast-check": "4.10.2",
+        "fast-check": "4.11.0",
         "js-yaml": "^5.5.0",
         "vitest": "5.0.5",
       },
@@ -219,7 +219,7 @@
         "@effect/vitest": "4.1.4",
         "@modelcontextprotocol/sdk": "1.32.2",
         "@threadnote/testing": "workspace:*",
-        "fast-check": "4.10.2",
+        "fast-check": "4.11.0",
         "vitest": "5.0.5",
       },
     },
@@ -234,7 +234,7 @@
         "@effect/platform-bun": "4.1.4",
         "@effect/vitest": "4.1.4",
         "@threadnote/testing": "workspace:*",
-        "fast-check": "4.10.2",
+        "fast-check": "4.11.0",
         "vitest": "5.0.5",
       },
     },
@@ -249,7 +249,7 @@
       "devDependencies": {
         "@effect/platform-bun": "4.1.4",
         "@effect/vitest": "4.1.4",
-        "fast-check": "4.10.2",
+        "fast-check": "4.11.0",
         "vitest": "5.0.5",
       },
     },
@@ -270,7 +270,7 @@
         "@effect/vitest": "4.1.4",
         "@threadnote/integration-runtime": "workspace:*",
         "@threadnote/testing": "workspace:*",
-        "fast-check": "4.10.2",
+        "fast-check": "4.11.0",
         "happy-dom": "21.0.4",
         "react-dom": "^19.3.1",
         "vitest": "5.0.5",
@@ -293,7 +293,7 @@
         "@effect/vitest": "4.1.4",
         "@threadnote/integration-runtime": "workspace:*",
         "@threadnote/testing": "workspace:*",
-        "fast-check": "4.10.2",
+        "fast-check": "4.11.0",
         "happy-dom": "21.0.4",
         "react-dom": "^19.3.1",
         "vitest": "5.0.5",
@@ -318,7 +318,7 @@
         "@effect/vitest": "4.1.4",
         "@threadnote/integration-runtime": "workspace:*",
         "@threadnote/testing": "workspace:*",
-        "fast-check": "4.10.2",
+        "fast-check": "4.11.0",
         "happy-dom": "21.0.4",
         "react-dom": "^19.3.1",
         "vitest": "5.0.5",
@@ -342,7 +342,7 @@
         "@threadnote/integration-runtime": "workspace:*",
         "@threadnote/recall": "workspace:*",
         "@threadnote/testing": "workspace:*",
-        "fast-check": "4.10.2",
+        "fast-check": "4.11.0",
         "happy-dom": "21.0.4",
         "react-dom": "^19.3.1",
         "vitest": "5.0.5",
@@ -362,7 +362,7 @@
       },
       "devDependencies": {
         "@effect/vitest": "4.1.4",
-        "fast-check": "4.10.2",
+        "fast-check": "4.11.0",
         "vitest": "5.0.5",
       },
     },
@@ -385,7 +385,7 @@
         "@threadnote/integration-runtime": "workspace:*",
         "@threadnote/recall": "workspace:*",
         "@threadnote/testing": "workspace:*",
-        "fast-check": "4.10.2",
+        "fast-check": "4.11.0",
         "happy-dom": "21.0.4",
         "react-dom": "^19.3.1",
         "vitest": "5.0.5",
@@ -427,7 +427,7 @@
       "devDependencies": {
         "@effect/vitest": "4.1.4",
         "@threadnote/testing": "workspace:*",
-        "fast-check": "4.10.2",
+        "fast-check": "4.11.0",
         "happy-dom": "21.0.4",
         "vitest": "5.0.5",
       },
@@ -444,7 +444,7 @@
         "@effect/platform-bun": "4.1.4",
         "@effect/vitest": "4.1.4",
         "@threadnote/testing": "workspace:*",
-        "fast-check": "4.10.2",
+        "fast-check": "4.11.0",
         "vitest": "5.0.5",
       },
     },
@@ -457,7 +457,7 @@
       "devDependencies": {
         "@effect/vitest": "4.1.4",
         "@threadnote/testing": "workspace:*",
-        "fast-check": "4.10.2",
+        "fast-check": "4.11.0",
         "vitest": "5.0.5",
       },
     },
@@ -468,7 +468,7 @@
         "jose": "6.2.17",
       },
       "devDependencies": {
-        "fast-check": "4.10.2",
+        "fast-check": "4.11.0",
         "vitest": "5.0.5",
       },
     },
@@ -488,7 +488,7 @@
         "@effect/platform-bun": "4.1.4",
         "@effect/vitest": "4.1.4",
         "@threadnote/testing": "workspace:*",
-        "fast-check": "4.10.2",
+        "fast-check": "4.11.0",
         "vitest": "5.0.5",
       },
     },
@@ -509,7 +509,7 @@
       "devDependencies": {
         "@effect/vitest": "4.1.4",
         "@threadnote/testing": "workspace:*",
-        "fast-check": "4.10.2",
+        "fast-check": "4.11.0",
         "vitest": "5.0.5",
       },
     },
@@ -523,7 +523,7 @@
         "@effect/platform-bun": "4.1.4",
         "@effect/vitest": "4.1.4",
         "@threadnote/testing": "workspace:*",
-        "fast-check": "4.10.2",
+        "fast-check": "4.11.0",
         "vitest": "5.0.5",
       },
     },
@@ -532,7 +532,7 @@
       "dependencies": {
         "@effect/vitest": "4.1.4",
         "effect": "4.1.4",
-        "fast-check": "4.10.2",
+        "fast-check": "4.11.0",
       },
     },
     "packages/workflow-automations": {
@@ -544,7 +544,7 @@
       "devDependencies": {
         "@effect/vitest": "4.1.4",
         "@threadnote/testing": "workspace:*",
-        "fast-check": "4.10.2",
+        "fast-check": "4.11.0",
         "vitest": "5.0.5",
       },
     },
@@ -559,12 +559,11 @@
       "devDependencies": {
         "@effect/vitest": "4.1.4",
         "@threadnote/testing": "workspace:*",
-        "fast-check": "4.10.2",
+        "fast-check": "4.11.0",
         "vitest": "5.0.5",
       },
     },
   },
-  "trustedDependencies": [],
   "overrides": {
     "@effect/platform-node-shared": "4.1.4",
     "@hono/node-server": "^2.1.9",
@@ -869,19 +868,19 @@
 
     "@napi-rs/wasm-runtime": ["@napi-rs/wasm-runtime@1.2.6", "", { "dependencies": { "@tybys/wasm-util": "^0.10.3" }, "peerDependencies": { "@emnapi/core": "^1.7.1 || 2.0.0-beta.2", "@emnapi/runtime": "^1.7.1 || 2.0.0-beta.2" } }, "sha512-mRyDmEw9/fCDXCGfL1sbgIw/GUK0PVxRW4YwgPN61F3LQ+fSyoBFarJVzgGyhF6kRzEQZ0FejDqm4WLXSeqQmw=="],
 
-    "@node-llama-cpp/linux-arm64": ["@node-llama-cpp/linux-arm64@3.22.2", "", { "os": "linux", "cpu": [ "x64", "arm64", ], "libc": "glibc" }, "sha512-ulAPe+pqZtO1LrX3wa8Yvnw4VZiMJxdL500ebJdAxLxXt+HnqY2vksJ/ZBW+f+ZwwBu2wIS2auwVvS8JkZHffQ=="],
+    "@node-llama-cpp/linux-arm64": ["@node-llama-cpp/linux-arm64@3.22.2", "", { "os": "linux", "cpu": [ "x64", "arm64", ] }, "sha512-ulAPe+pqZtO1LrX3wa8Yvnw4VZiMJxdL500ebJdAxLxXt+HnqY2vksJ/ZBW+f+ZwwBu2wIS2auwVvS8JkZHffQ=="],
 
-    "@node-llama-cpp/linux-armv7l": ["@node-llama-cpp/linux-armv7l@3.22.2", "", { "os": "linux", "cpu": [ "arm", "x64", ], "libc": "glibc" }, "sha512-bzXeVGSrwxRH7m7p+SG5pC61T+97wb0aV2e84BXKfNDqMnOj7Z5qVtrxwwLAMYw+1wt4qz9KiuDLEmTqNaiUuQ=="],
+    "@node-llama-cpp/linux-armv7l": ["@node-llama-cpp/linux-armv7l@3.22.2", "", { "os": "linux", "cpu": [ "arm", "x64", ] }, "sha512-bzXeVGSrwxRH7m7p+SG5pC61T+97wb0aV2e84BXKfNDqMnOj7Z5qVtrxwwLAMYw+1wt4qz9KiuDLEmTqNaiUuQ=="],
 
-    "@node-llama-cpp/linux-riscv64": ["@node-llama-cpp/linux-riscv64@3.22.2", "", { "os": "linux", "cpu": "none", "libc": "glibc" }, "sha512-PUE1sG+ZoMzGBTcM9V50UGLRRO4ESh9tNwScPFKV5fG9Ho02RuDORzOZvWw3giGrhdc8PY74yghJTUfFUyGdog=="],
+    "@node-llama-cpp/linux-riscv64": ["@node-llama-cpp/linux-riscv64@3.22.2", "", { "os": "linux", "cpu": "none" }, "sha512-PUE1sG+ZoMzGBTcM9V50UGLRRO4ESh9tNwScPFKV5fG9Ho02RuDORzOZvWw3giGrhdc8PY74yghJTUfFUyGdog=="],
 
-    "@node-llama-cpp/linux-x64": ["@node-llama-cpp/linux-x64@3.22.2", "", { "os": "linux", "cpu": "x64", "libc": "glibc" }, "sha512-JwSanJFqX2qsxPNwgQo/QMkijBzQKot7YaybXz7kjxfHq+RgXuw7Z/NyUPC1psQHOOnF6vV4FXBd8jmI2KZUJw=="],
+    "@node-llama-cpp/linux-x64": ["@node-llama-cpp/linux-x64@3.22.2", "", { "os": "linux", "cpu": "x64" }, "sha512-JwSanJFqX2qsxPNwgQo/QMkijBzQKot7YaybXz7kjxfHq+RgXuw7Z/NyUPC1psQHOOnF6vV4FXBd8jmI2KZUJw=="],
 
-    "@node-llama-cpp/linux-x64-cuda": ["@node-llama-cpp/linux-x64-cuda@3.22.2", "", { "os": "linux", "cpu": "x64", "libc": "glibc" }, "sha512-MjGkxag2QzF0KEeTfgz+VlYgXDmlWavYQOwGyNlIylopsW5y4OTzOz7bgU4MEVQf2fjQcES3kdUfbls5pSUicQ=="],
+    "@node-llama-cpp/linux-x64-cuda": ["@node-llama-cpp/linux-x64-cuda@3.22.2", "", { "os": "linux", "cpu": "x64" }, "sha512-MjGkxag2QzF0KEeTfgz+VlYgXDmlWavYQOwGyNlIylopsW5y4OTzOz7bgU4MEVQf2fjQcES3kdUfbls5pSUicQ=="],
 
-    "@node-llama-cpp/linux-x64-cuda-ext": ["@node-llama-cpp/linux-x64-cuda-ext@3.22.2", "", { "os": "linux", "cpu": "x64", "libc": "glibc" }, "sha512-Y9AZrGMjzmBCRwWHzRxrHa/UFt/JmjiN8nCpW5jZ9/jqqvAfIFTEiEDElAef6sZ/Tq8+6d13nX65Fo7rXOjr1Q=="],
+    "@node-llama-cpp/linux-x64-cuda-ext": ["@node-llama-cpp/linux-x64-cuda-ext@3.22.2", "", { "os": "linux", "cpu": "x64" }, "sha512-Y9AZrGMjzmBCRwWHzRxrHa/UFt/JmjiN8nCpW5jZ9/jqqvAfIFTEiEDElAef6sZ/Tq8+6d13nX65Fo7rXOjr1Q=="],
 
-    "@node-llama-cpp/linux-x64-vulkan": ["@node-llama-cpp/linux-x64-vulkan@3.22.2", "", { "os": "linux", "cpu": "x64", "libc": "glibc" }, "sha512-GWbS7vUhiWowYe2UAAtzoN/zRQ1j8HIS3mxytetgqmRI7XfVWhsbkyA0erx/gk1jG7CEfjlYdkyEpAHR6c7S2g=="],
+    "@node-llama-cpp/linux-x64-vulkan": ["@node-llama-cpp/linux-x64-vulkan@3.22.2", "", { "os": "linux", "cpu": "x64" }, "sha512-GWbS7vUhiWowYe2UAAtzoN/zRQ1j8HIS3mxytetgqmRI7XfVWhsbkyA0erx/gk1jG7CEfjlYdkyEpAHR6c7S2g=="],
 
     "@node-llama-cpp/mac-arm64-metal": ["@node-llama-cpp/mac-arm64-metal@3.22.2", "", { "os": "darwin", "cpu": [ "x64", "arm64", ] }, "sha512-bjCewyZcx7voQeu+pVPlDw+m0p0wrpkPw3SnkT0bCJ3VhIXdYyLUkCCQRYgxXz6MI5Qz7jv89JreD0OqzffIVA=="],
 
@@ -925,21 +924,21 @@
 
     "@oxlint/binding-linux-arm-musleabihf": ["@oxlint/binding-linux-arm-musleabihf@1.90.0", "", { "os": "linux", "cpu": "arm" }, "sha512-MvYmpHyJqUJjEvkZbJHdwfdL45cGn8EVBkYmoXFiaYFW9suoD3dbJl5mBdpy0DVgdjlyddmldbRtk3cCgETadQ=="],
 
-    "@oxlint/binding-linux-arm64-gnu": ["@oxlint/binding-linux-arm64-gnu@1.90.0", "", { "os": "linux", "cpu": "arm64", "libc": "glibc" }, "sha512-L13Sy+Kg0nZhwTsToniqjUFPA2TuM6962qCZ5Wp5KeB517Tw7ApdLTTtlb+bF86fcZZa2EtvCVvAJxk4Dya/MQ=="],
+    "@oxlint/binding-linux-arm64-gnu": ["@oxlint/binding-linux-arm64-gnu@1.90.0", "", { "os": "linux", "cpu": "arm64" }, "sha512-L13Sy+Kg0nZhwTsToniqjUFPA2TuM6962qCZ5Wp5KeB517Tw7ApdLTTtlb+bF86fcZZa2EtvCVvAJxk4Dya/MQ=="],
 
-    "@oxlint/binding-linux-arm64-musl": ["@oxlint/binding-linux-arm64-musl@1.90.0", "", { "os": "linux", "cpu": "arm64", "libc": "musl" }, "sha512-wFDdZWGpzIPFdJFjSLWnKB0TGzFriTKUIrl04iMqMyM9BBIJTuerfCHYa0WpDSjr5x3lcW/CHLyacSt886WpGg=="],
+    "@oxlint/binding-linux-arm64-musl": ["@oxlint/binding-linux-arm64-musl@1.90.0", "", { "os": "linux", "cpu": "arm64" }, "sha512-wFDdZWGpzIPFdJFjSLWnKB0TGzFriTKUIrl04iMqMyM9BBIJTuerfCHYa0WpDSjr5x3lcW/CHLyacSt886WpGg=="],
 
-    "@oxlint/binding-linux-ppc64-gnu": ["@oxlint/binding-linux-ppc64-gnu@1.90.0", "", { "os": "linux", "cpu": "ppc64", "libc": "glibc" }, "sha512-FRywfn+MoKn8xpBSzgNwNVliSKRI2QXkxi/iF7o6FEQs8Bh8z2RpVTaFAcO3pchXjvB2eGNFIoLLQABIQ+u7VA=="],
+    "@oxlint/binding-linux-ppc64-gnu": ["@oxlint/binding-linux-ppc64-gnu@1.90.0", "", { "os": "linux", "cpu": "ppc64" }, "sha512-FRywfn+MoKn8xpBSzgNwNVliSKRI2QXkxi/iF7o6FEQs8Bh8z2RpVTaFAcO3pchXjvB2eGNFIoLLQABIQ+u7VA=="],
 
-    "@oxlint/binding-linux-riscv64-gnu": ["@oxlint/binding-linux-riscv64-gnu@1.90.0", "", { "os": "linux", "cpu": "none", "libc": "glibc" }, "sha512-IS2PaUgpc/qeLADTyhUNmdx3x4ijs9pjJdPKBYHaT+mAE7k3FsjnHPTjhpsak1b++h6CIPhv6WX9Z+y7Pw0voQ=="],
+    "@oxlint/binding-linux-riscv64-gnu": ["@oxlint/binding-linux-riscv64-gnu@1.90.0", "", { "os": "linux", "cpu": "none" }, "sha512-IS2PaUgpc/qeLADTyhUNmdx3x4ijs9pjJdPKBYHaT+mAE7k3FsjnHPTjhpsak1b++h6CIPhv6WX9Z+y7Pw0voQ=="],
 
-    "@oxlint/binding-linux-riscv64-musl": ["@oxlint/binding-linux-riscv64-musl@1.90.0", "", { "os": "linux", "cpu": "none", "libc": "musl" }, "sha512-s7JFKRkGS8O7i2ZVODfuO++NC7sH6HDqpMn8lYxw91w0SXJOxnAVjQ8utvmDwLMMT0jaSkuOKuUYJDGDtu4sHQ=="],
+    "@oxlint/binding-linux-riscv64-musl": ["@oxlint/binding-linux-riscv64-musl@1.90.0", "", { "os": "linux", "cpu": "none" }, "sha512-s7JFKRkGS8O7i2ZVODfuO++NC7sH6HDqpMn8lYxw91w0SXJOxnAVjQ8utvmDwLMMT0jaSkuOKuUYJDGDtu4sHQ=="],
 
-    "@oxlint/binding-linux-s390x-gnu": ["@oxlint/binding-linux-s390x-gnu@1.90.0", "", { "os": "linux", "cpu": "s390x", "libc": "glibc" }, "sha512-b0GxrOQr5VONCkd7KLSqmP6b6nqZuTpuS8QPQHzltmqdXP5bY0Jl0CZ0QmlCTrS3ExaLYbioFYOARzNbYvcApQ=="],
+    "@oxlint/binding-linux-s390x-gnu": ["@oxlint/binding-linux-s390x-gnu@1.90.0", "", { "os": "linux", "cpu": "s390x" }, "sha512-b0GxrOQr5VONCkd7KLSqmP6b6nqZuTpuS8QPQHzltmqdXP5bY0Jl0CZ0QmlCTrS3ExaLYbioFYOARzNbYvcApQ=="],
 
-    "@oxlint/binding-linux-x64-gnu": ["@oxlint/binding-linux-x64-gnu@1.90.0", "", { "os": "linux", "cpu": "x64", "libc": "glibc" }, "sha512-iaJeShJtgUp8rZbt9YUdTAGOpmX5KogCLba17Jp1tWdJ3F4M3D2g2TKUyI1FMTHxKH9NNHuQcuC2kZRg6IV7yQ=="],
+    "@oxlint/binding-linux-x64-gnu": ["@oxlint/binding-linux-x64-gnu@1.90.0", "", { "os": "linux", "cpu": "x64" }, "sha512-iaJeShJtgUp8rZbt9YUdTAGOpmX5KogCLba17Jp1tWdJ3F4M3D2g2TKUyI1FMTHxKH9NNHuQcuC2kZRg6IV7yQ=="],
 
-    "@oxlint/binding-linux-x64-musl": ["@oxlint/binding-linux-x64-musl@1.90.0", "", { "os": "linux", "cpu": "x64", "libc": "musl" }, "sha512-/aZoXnL5WBLCXuzfHqvEFXcm4iwYmr/cYByHDTXzLFzJdE5DC7bm6phpWqHv6BeqpVgY9IpBAxGDv2WEkl5JCg=="],
+    "@oxlint/binding-linux-x64-musl": ["@oxlint/binding-linux-x64-musl@1.90.0", "", { "os": "linux", "cpu": "x64" }, "sha512-/aZoXnL5WBLCXuzfHqvEFXcm4iwYmr/cYByHDTXzLFzJdE5DC7bm6phpWqHv6BeqpVgY9IpBAxGDv2WEkl5JCg=="],
 
     "@oxlint/binding-openharmony-arm64": ["@oxlint/binding-openharmony-arm64@1.90.0", "", { "os": "none", "cpu": "arm64" }, "sha512-SMhk7ozwoxYDKfYqGZCQEfULOKDneF9uhaoIf2neoDLWvNtjY9yVeL7YHmE5L9WdKvMpWNwwZxhenxBu6AgfOg=="],
 
@@ -1083,17 +1082,17 @@
 
     "@rolldown/binding-linux-arm-gnueabihf": ["@rolldown/binding-linux-arm-gnueabihf@1.2.19", "", { "os": "linux", "cpu": "arm" }, "sha512-/lYCba5NO0yq4S0jGMH8QTBtkvQxoXjoQWzF5BcWp9MjB9jxVRD1GQDNofkVjcOj30DWyhLIN/4Oe60JKzaONw=="],
 
-    "@rolldown/binding-linux-arm64-gnu": ["@rolldown/binding-linux-arm64-gnu@1.2.19", "", { "os": "linux", "cpu": "arm64", "libc": "glibc" }, "sha512-pm/apFMBnSbFb3O6nG5pHO1iqHhZrjGDFEjSm+ot9J17XXPvH9L90y5h+jgfHCE+Qdlsvy8qKEcU4VKxgjD+vA=="],
+    "@rolldown/binding-linux-arm64-gnu": ["@rolldown/binding-linux-arm64-gnu@1.2.19", "", { "os": "linux", "cpu": "arm64" }, "sha512-pm/apFMBnSbFb3O6nG5pHO1iqHhZrjGDFEjSm+ot9J17XXPvH9L90y5h+jgfHCE+Qdlsvy8qKEcU4VKxgjD+vA=="],
 
-    "@rolldown/binding-linux-arm64-musl": ["@rolldown/binding-linux-arm64-musl@1.2.19", "", { "os": "linux", "cpu": "arm64", "libc": "musl" }, "sha512-K1SmQp3FFichn8oqrNIwvFoZ5wcvjC7goBzpaMNvLf9FZc+QB/QvLmnpJZgAAGHiD980tP8FZZnXk2K94rvlxg=="],
+    "@rolldown/binding-linux-arm64-musl": ["@rolldown/binding-linux-arm64-musl@1.2.19", "", { "os": "linux", "cpu": "arm64" }, "sha512-K1SmQp3FFichn8oqrNIwvFoZ5wcvjC7goBzpaMNvLf9FZc+QB/QvLmnpJZgAAGHiD980tP8FZZnXk2K94rvlxg=="],
 
-    "@rolldown/binding-linux-ppc64-gnu": ["@rolldown/binding-linux-ppc64-gnu@1.2.19", "", { "os": "linux", "cpu": "ppc64", "libc": "glibc" }, "sha512-I0xwD57jP/3A7+5UPZin2w8Y7XHEmEM5zqpYZOcQ45MlNW6tUJUziymV3yRr7rL4vwyfEcRsRksC4a7Kc08p5Q=="],
+    "@rolldown/binding-linux-ppc64-gnu": ["@rolldown/binding-linux-ppc64-gnu@1.2.19", "", { "os": "linux", "cpu": "ppc64" }, "sha512-I0xwD57jP/3A7+5UPZin2w8Y7XHEmEM5zqpYZOcQ45MlNW6tUJUziymV3yRr7rL4vwyfEcRsRksC4a7Kc08p5Q=="],
 
-    "@rolldown/binding-linux-s390x-gnu": ["@rolldown/binding-linux-s390x-gnu@1.2.19", "", { "os": "linux", "cpu": "s390x", "libc": "glibc" }, "sha512-BrtEHT24SNXj9HiXqy+s/kXiSiQGt6EKCPUlRirAoIioVxKGnbXBUEkbZASAei7iZJB0/Ynm+0JP00Ipx7AnSw=="],
+    "@rolldown/binding-linux-s390x-gnu": ["@rolldown/binding-linux-s390x-gnu@1.2.19", "", { "os": "linux", "cpu": "s390x" }, "sha512-BrtEHT24SNXj9HiXqy+s/kXiSiQGt6EKCPUlRirAoIioVxKGnbXBUEkbZASAei7iZJB0/Ynm+0JP00Ipx7AnSw=="],
 
-    "@rolldown/binding-linux-x64-gnu": ["@rolldown/binding-linux-x64-gnu@1.2.19", "", { "os": "linux", "cpu": "x64", "libc": "glibc" }, "sha512-rm75/9DkHKeU2WnA8w4X94WGYgLlDCFCfkQC+4bguVJmC/jvDRv2B+2wLOYhyE0fVuv7//Ckk39OoOufyCu76Q=="],
+    "@rolldown/binding-linux-x64-gnu": ["@rolldown/binding-linux-x64-gnu@1.2.19", "", { "os": "linux", "cpu": "x64" }, "sha512-rm75/9DkHKeU2WnA8w4X94WGYgLlDCFCfkQC+4bguVJmC/jvDRv2B+2wLOYhyE0fVuv7//Ckk39OoOufyCu76Q=="],
 
-    "@rolldown/binding-linux-x64-musl": ["@rolldown/binding-linux-x64-musl@1.2.19", "", { "os": "linux", "cpu": "x64", "libc": "musl" }, "sha512-irh/4+iYFM4GAzpluDErgjz89bj6NDtqqMAG/6O1LG38Ed3NpyebzCpcVNkFW8uhy+/3/BocUvnXDR33CXWe9A=="],
+    "@rolldown/binding-linux-x64-musl": ["@rolldown/binding-linux-x64-musl@1.2.19", "", { "os": "linux", "cpu": "x64" }, "sha512-irh/4+iYFM4GAzpluDErgjz89bj6NDtqqMAG/6O1LG38Ed3NpyebzCpcVNkFW8uhy+/3/BocUvnXDR33CXWe9A=="],
 
     "@rolldown/binding-openharmony-arm64": ["@rolldown/binding-openharmony-arm64@1.2.19", "", { "os": "none", "cpu": "arm64" }, "sha512-+KWTWNoPt+CfSq94CiceWu3yPE+QzkaG+phPyz9G60tmZLwfQkcA4AeksafzvJAw4pvg1mcd5a1TkUqVv0s4JA=="],
 
@@ -1615,7 +1614,7 @@
 
     "extend": ["extend@3.0.2", "", {}, "sha512-fjquC59cD7CyW6urNXK0FBufkZcoiGG80wTuPujX590cB5Ttln20E2UB4S/WARVqhXffZl2LNgS+gQdPIIim/g=="],
 
-    "fast-check": ["fast-check@4.10.2", "", { "dependencies": { "pure-rand": "^8.0.0" } }, "sha512-iK2f+YrcmoeGqk6fA0ea2bptcu/itMIm4NfEozq6N25+aG6h7s5HZbB/k1aV7b5w5sFLMCbbtRUsTVR+BgC3xw=="],
+    "fast-check": ["fast-check@4.11.0", "", { "dependencies": { "pure-rand": "^8.0.0" } }, "sha512-V4Uc238rhQOdQlc+Gz7JG6SGBtrWnWL8d/6RyiBeCMcNKMhF6DZ0KkAVHJSyNV5r4lA0PmIpZ6iRpTVoz4qjoA=="],
 
     "fast-deep-equal": ["fast-deep-equal@3.1.3", "", {}, "sha512-f3qQ9oQy9j2AhBe/H9VC91wLmKBCCU/gDOnKNAYG5hswO7BLKj09Hc5HYNz9cGI++xlpDCIgDaitVs03ATR84Q=="],
 
@@ -1969,7 +1968,7 @@
 
     "node-gyp-build": ["node-gyp-build@4.8.4", "", { "bin": { "node-gyp-build": "bin.js", "node-gyp-build-optional": "optional.js", "node-gyp-build-test": "build-test.js" } }, "sha512-LA4ZjwlnUblHVgq0oBF3Jl/6h/Nvs5fzBLwdEF4nuxnFdsfajde4WfxtJr3CaiH+F6ewcIB/q4jQ4UzPyid+CQ=="],
 
-    "node-llama-cpp": ["node-llama-cpp@3.22.2", "", { "dependencies": { "@huggingface/jinja": "^0.5.10", "async-retry": "^1.3.3", "bytes": "^3.1.2", "chalk": "^5.6.2", "chmodrp": "^1.0.2", "cmake-js": "^8.0.0", "cross-spawn": "^7.0.6", "env-var": "^7.5.0", "filenamify": "^6.0.0", "fs-extra": "^11.4.0", "ignore": "^7.0.4", "ipull": "^3.9.5", "is-unicode-supported": "^2.1.0", "lifecycle-utils": "^4.5.2", "log-symbols": "^7.0.1", "nanoid": "^5.1.6", "node-addon-api": "^8.9.2", "ora": "^9.3.0", "pretty-ms": "^9.3.0", "proper-lockfile": "^4.1.2", "semver": "^7.7.1", "simple-git": "^3.36.0", "slice-ansi": "^8.0.0", "stdout-update": "^4.0.1", "strip-ansi": "^7.2.0", "validate-npm-package-name": "^7.0.2", "which": "^6.0.1", "yargs": "^17.7.2" }, "optionalDependencies": { "@node-llama-cpp/linux-arm64": "3.22.2", "@node-llama-cpp/linux-armv7l": "3.22.2", "@node-llama-cpp/linux-riscv64": "3.22.2", "@node-llama-cpp/linux-x64": "3.22.2", "@node-llama-cpp/linux-x64-cuda": "3.22.2", "@node-llama-cpp/linux-x64-cuda-ext": "3.22.2", "@node-llama-cpp/linux-x64-vulkan": "3.22.2", "@node-llama-cpp/mac-arm64-metal": "3.22.2", "@node-llama-cpp/mac-x64": "3.22.2", "@node-llama-cpp/win-arm64": "3.22.2", "@node-llama-cpp/win-x64": "3.22.2", "@node-llama-cpp/win-x64-cuda": "3.22.2", "@node-llama-cpp/win-x64-cuda-ext": "3.22.2", "@node-llama-cpp/win-x64-vulkan": "3.22.2" }, "peerDependencies": { "typescript": ">=5.0.0" }, "optionalPeers": ["typescript"], "hasInstallScript": true, "bin": { "nlc": "dist/cli/cli.js", "node-llama-cpp": "dist/cli/cli.js" } }, "sha512-kHggUzq5+8aShET07hlGllyo+t7gNOl+xLQyEeyERStkm8JdBGVh+Yh4Jd/uZ15xYt8lYJIDYkzToLjhe0eyZw=="],
+    "node-llama-cpp": ["node-llama-cpp@3.22.2", "", { "dependencies": { "@huggingface/jinja": "^0.5.10", "async-retry": "^1.3.3", "bytes": "^3.1.2", "chalk": "^5.6.2", "chmodrp": "^1.0.2", "cmake-js": "^8.0.0", "cross-spawn": "^7.0.6", "env-var": "^7.5.0", "filenamify": "^6.0.0", "fs-extra": "^11.4.0", "ignore": "^7.0.4", "ipull": "^3.9.5", "is-unicode-supported": "^2.1.0", "lifecycle-utils": "^4.5.2", "log-symbols": "^7.0.1", "nanoid": "^5.1.6", "node-addon-api": "^8.9.2", "ora": "^9.3.0", "pretty-ms": "^9.3.0", "proper-lockfile": "^4.1.2", "semver": "^7.7.1", "simple-git": "^3.36.0", "slice-ansi": "^8.0.0", "stdout-update": "^4.0.1", "strip-ansi": "^7.2.0", "validate-npm-package-name": "^7.0.2", "which": "^6.0.1", "yargs": "^17.7.2" }, "optionalDependencies": { "@node-llama-cpp/linux-arm64": "3.22.2", "@node-llama-cpp/linux-armv7l": "3.22.2", "@node-llama-cpp/linux-riscv64": "3.22.2", "@node-llama-cpp/linux-x64": "3.22.2", "@node-llama-cpp/linux-x64-cuda": "3.22.2", "@node-llama-cpp/linux-x64-cuda-ext": "3.22.2", "@node-llama-cpp/linux-x64-vulkan": "3.22.2", "@node-llama-cpp/mac-arm64-metal": "3.22.2", "@node-llama-cpp/mac-x64": "3.22.2", "@node-llama-cpp/win-arm64": "3.22.2", "@node-llama-cpp/win-x64": "3.22.2", "@node-llama-cpp/win-x64-cuda": "3.22.2", "@node-llama-cpp/win-x64-cuda-ext": "3.22.2", "@node-llama-cpp/win-x64-vulkan": "3.22.2" }, "peerDependencies": { "typescript": ">=5.0.0" }, "optionalPeers": ["typescript"], "bin": { "nlc": "dist/cli/cli.js", "node-llama-cpp": "dist/cli/cli.js" } }, "sha512-kHggUzq5+8aShET07hlGllyo+t7gNOl+xLQyEeyERStkm8JdBGVh+Yh4Jd/uZ15xYt8lYJIDYkzToLjhe0eyZw=="],
 
     "node-releases": ["node-releases@2.0.65", "", {}, "sha512-PfvofsGQ+MiOQIPkX9fU8ELUWmy5zL74CdQaph/ismKszfFkfwXaw0cGiwbwym2hT9k5+mdyl8O5WQ1MD8EHmA=="],
 

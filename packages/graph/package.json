@@ -474,7 +474,7 @@
     "@effect/vitest": "4.1.4",
     "@modelcontextprotocol/sdk": "1.32.2",
     "@threadnote/testing": "workspace:*",
-    "fast-check": "4.10.2",
+    "fast-check": "4.11.0",
     "vitest": "5.0.5"
   }
 }
