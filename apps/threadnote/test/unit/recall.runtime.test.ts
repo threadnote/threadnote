@@ -2,6 +2,7 @@ import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
 import {readRecallEmbeddingDemand} from '@threadnote/recall/background/demand';
+import {vectorIndexStatus} from '@threadnote/recall/vector-index';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {mkdir, mkdtemp, rm, utimes, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -20,7 +21,8 @@ vi.mock('@threadnote/inference/models/inference', () => ({
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {captureConsole} from '@threadnote/threadnote/effect/console';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
-import {readMemoryRecordsByUri, runRecall} from '@threadnote/threadnote/memory/index';
+import {readMemoryRecordsByUri, runArchive, runRecall, runRemember} from '@threadnote/threadnote/memory/index';
+import {ResourceStore} from '@threadnote/store/resource-store';
 import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {selectLocalModel} from '@threadnote/inference/models/selection';
@@ -30,10 +32,11 @@ import {
   loadRecallIndexData,
   readRecallExactMatches,
   recallIndexDatabaseFilename,
+  recallIndexStatus,
 } from '@threadnote/recall/index';
 import {RecallReadyReadBoundary, RecallReadyReadBoundaryError} from '@threadnote/recall/read_boundary';
 import {RECALL_RERANKER_WINDOW_WARM_MILLISECONDS, warmRecallRerankerWindow} from '@threadnote/recall/sections_read';
-import {formatMemoryDocument} from '@threadnote/memory/document';
+import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
 import {buildRecallTopicalCorpusStatistics} from '@threadnote/recall/rank';
 import {
   createRecallRerankerCache,
@@ -902,7 +905,7 @@ describe('recall runtime orchestration', () => {
       expect(Option.isNone(prepared.semanticResult.scores)).toBe(true);
     }),
   );
-  effectIt.effect('keeps top-level lexical recall available without starting inference for missing vectors', () =>
+  effectIt.effect('keeps lexical fallback and exact replacement history available with pending vectors', () =>
     Effect.gen(function* () {
       const home = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'threadnote-recall-runtime-')));
       homes.push(home);
@@ -960,25 +963,80 @@ describe('recall runtime orchestration', () => {
           rerank: () => Effect.die(TestError.make({message: 'Unexpected reranking'})),
         }),
       );
-      const recalled = yield* Effect.gen(function* () {
+      yield* Effect.gen(function* () {
         const catalog = yield* LocalModelCatalog;
         yield* loadRecallIndexData(config, {includeInactive: false});
         yield* selectLocalModel(home, catalog, 'embedding', embedding.id);
-        return yield* captureConsole(
+        const recalled = yield* captureConsole(
           runRecall(config, {
             inferScope: false,
             query: 'lexical-fallback-anchor',
             threshold: '0.1',
           }),
         );
+        expect(recalled.output).toContain('fallback.md');
+        expect(recalled.output).toContain('lexical-fallback-anchor');
+        expect(recalled.output).not.toContain('semantic retrieval failed');
+
+        const store = yield* ResourceStore;
+        const uri = 'threadnote://user/tester/memories/durable/projects/general/history.md';
+        const location = {account: config.account, home, user: config.user};
+        const memoryId = 'tn_exact_replacement_history';
+        const previous = 'previousexactsentinel5361';
+        const replacement = 'replacementexactsentinel7429';
+        yield* store.write(
+          location,
+          uri,
+          formatMemoryDocument(
+            'MEMORY',
+            {
+              kind: 'durable',
+              memoryId,
+              sourceAgentClient: 'test',
+              status: 'active',
+              timestamp: (yield* DateTime.nowAsDate).toISOString(),
+              topic: 'history',
+            },
+            previous,
+          ),
+          {mode: 'create'},
+        );
+        const recallExact = (query: string, includeArchived = false) =>
+          captureConsole(runRecall(config, {query, includeArchived, inferScope: false}));
+        yield* loadRecallIndexData(config, {includeInactive: false});
+        const original = yield* recallExact(previous);
+        expect(original.value.ranked).toEqual([expect.objectContaining({exactTerms: [previous], memoryId, uri})]);
+        expect(original.value.warnings).toEqual([]);
+
+        yield* captureConsole(
+          runRemember(config, {keywords: ['history'], replace: uri, text: replacement, topic: 'history'}),
+        );
+        expect(yield* recallIndexStatus(config)).toMatchObject({ready: true});
+        const active = yield* recallExact(replacement);
+        expect(active.value.ranked).toEqual([expect.objectContaining({exactTerms: [replacement], memoryId, uri})]);
+        expect(active.value.warnings).toEqual([]);
+        expect((yield* recallExact(previous)).value.ranked).toEqual([]);
+
+        yield* loadRecallIndexData(config, {includeInactive: true});
+        const invalidatedUris = [uri];
+        yield* captureConsole(runArchive(config, uri, {invalidatedUris}));
+        const archiveUri = invalidatedUris[1];
+        expect(archiveUri).toContain('/archived/');
+        const archived = parseMemoryDocument(archiveUri, yield* store.read(location, archiveUri));
+        expect(archived?.metadata).toMatchObject({archivedFrom: uri, memoryId, status: 'archived'});
+        expect((yield* recallExact(replacement)).value.ranked).toEqual([]);
+        expect(yield* recallIndexStatus(config, true)).toMatchObject({ready: false});
+        yield* loadRecallIndexData(config, {includeInactive: true});
+        expect(yield* recallIndexStatus(config, true)).toMatchObject({ready: true});
+        const history = yield* recallExact(replacement, true);
+        expect(history.value.ranked).toEqual([
+          expect.objectContaining({exactTerms: [replacement], memoryId, uri: archiveUri}),
+        ]);
+        expect(history.value.warnings).toEqual([]);
+        expect(yield* vectorIndexStatus(home, embedding)).toMatchObject({ready: false, reason: 'not built'});
+        expect((yield* readRecallEmbeddingDemand(config))?.desired).toBeDefined();
+        expect(embeddingCalls).toBe(0);
       }).pipe(provideTestLayer(failingRuntimeLayer), provideTestLayer(storeLayer), provideTestLayer(ApplicationLayer));
-      expect(recalled.output).toContain('fallback.md');
-      expect(recalled.output).toContain('lexical-fallback-anchor');
-      expect(recalled.output).not.toContain('semantic retrieval failed');
-      expect(
-        (yield* readRecallEmbeddingDemand(config).pipe(provideTestLayer(ApplicationLayer)))?.desired,
-      ).toBeDefined();
-      expect(embeddingCalls).toBe(0);
     }),
   );
   effectIt.effect('preserves fallback hits and reports a real persistent lexical recovery failure', () =>

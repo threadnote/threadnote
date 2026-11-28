@@ -1818,6 +1818,56 @@ describe('ordinary memory exact public review', () => {
       ).pipe(provideTestLayer(ApplicationLayer)),
   );
 
+  effectIt.effect('retries superseded lexical preparation before and after the approved write', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      const packet = yield* requestAutomaticMemoryReview(f.config, {
+        uri: f.uri,
+        expectedContentHash: sha256HexSync(f.content),
+      });
+      if ('reviewId' in packet) throw new Error('Expected source packet');
+      const preview = (yield* f.review({
+        action: 'automatic-preview',
+        uri: f.uri,
+        expectedContentHash: sha256HexSync(f.content),
+        draftJson: draft(packet, packet.basis.body),
+      })).structuredContent;
+      const original = recallIndex.loadRecallMemoryIdentities;
+      const observedStages: string[] = [];
+      const result = yield* Effect.acquireUseRelease(
+        Effect.sync(() => {
+          const attemptsByStage = new Set<string>();
+          return vi.spyOn(recallIndex, 'loadRecallMemoryIdentities').mockImplementation((...args) => {
+            if (args[1].memoryIds.length || args[1].allowedUriScopes.length) return original(...args);
+            return Effect.gen(function* () {
+              const review = yield* loadCandidateReview(f.home, preview.reviewId);
+              const stage = review.maintenanceApproval!.stage;
+              observedStages.push(stage);
+              if (attemptsByStage.has(stage)) return yield* original(...args);
+              attemptsByStage.add(stage);
+              return yield* recallIndex.RecallIndexSourceChanged.make({message: 'Lexical preparation superseded'});
+            });
+          });
+        }),
+        () =>
+          f.rawReview({
+            action: 'apply',
+            reviewId: preview.reviewId,
+            revision: preview.revision,
+            approvalDigest: preview.approval.approvalDigest,
+            approved: true,
+          }),
+        spy => Effect.sync(() => spy.mockRestore()),
+      );
+      expect(result.isError).not.toBe(true);
+      expect(observedStages).toEqual(['preview', 'preview', 'prepared', 'prepared']);
+      const completed = yield* loadCandidateReview(f.home, preview.reviewId);
+      expect(completed.maintenanceApproval?.stage).toBe('written');
+      expect(EffectArray.filter(completed.auditEvents, event => event.action === 'begin_apply')).toHaveLength(1);
+      expect(EffectArray.filter(completed.auditEvents, event => event.action === 'apply')).toHaveLength(1);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
   for (const fault of ['readiness', 'source-io', 'identity-query'] as const)
     effectIt.effect(`keeps a postwrite ${fault} failure pending and retries the same approved review`, () =>
       Effect.gen(function* () {

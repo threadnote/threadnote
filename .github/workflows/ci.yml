@@ -62,7 +62,7 @@ jobs:
       - id: selection
         name: Select affected Bazel targets
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}
         run: bun tools/ci/bazel-select.mjs --base "$BASE_SHA"
 
       - id: shards
