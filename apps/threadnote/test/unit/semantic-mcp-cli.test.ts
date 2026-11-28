@@ -68,6 +68,7 @@ import {
 import {CONTEXT_BRIEF_NATIVE_READ_WORKER_ARGUMENT} from '../../src/worker_protocol.js';
 import {createNativeTypeScriptTestSession, native} from '@threadnote/graph/test/helpers/native-typescript-session';
 import {isNativeTypeScriptSource, NativeTypeScriptUnavailable} from '@threadnote/graph/typescript_runtime';
+import {nativeTypeScriptAssetPins} from '@threadnote/graph/typescript_native_asset_pins';
 import {TestError} from '@threadnote/testing/test-error';
 import type {ParserWorkerFailureReason} from '@threadnote/graph/parser_worker';
 
@@ -507,7 +508,7 @@ const memoryContextFixture = Effect.gen(function* () {
           sdkTreeDigest: sha256HexSync('typescript'),
           sourceCommit: '3e9236361fa97a9e6c685f4833ac457ae2d8c50a',
           sourceTree: '2a322d5d8eefb3b2f295c5ed6398de7237f6249a',
-          overlaySha256: '3ec77e4026b698c701b60fe34238a9ac83eaa73ad33679430fb3bafcef5e607d',
+          overlaySha256: nativeTypeScriptAssetPins.provenance.overlaySha256,
         },
       },
     }),

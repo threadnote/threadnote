@@ -36,7 +36,7 @@ export const nativeTypeScriptAssetPins = {
     kind: 'private-source-overlay',
     sourceCommit: '3e9236361fa97a9e6c685f4833ac457ae2d8c50a',
     sourceTree: '2a322d5d8eefb3b2f295c5ed6398de7237f6249a',
-    overlaySha256: '3ec77e4026b698c701b60fe34238a9ac83eaa73ad33679430fb3bafcef5e607d',
+    overlaySha256: '48f5fb06e0ba3b505b3633077cf6670c652c28e594309e259a5248412c87dae0',
   },
 } as const;
 

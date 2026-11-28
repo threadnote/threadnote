@@ -27,6 +27,7 @@ import * as BunPath from '@effect/platform-bun/BunPath';
 import {expect, vi} from 'vitest';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import {nativeTypeScriptAssetPins} from '@threadnote/graph/typescript_native_asset_pins';
 import {canonicalFileUri, type Observation, type QueryOutcome} from '@threadnote/semantic/contracts';
 import {SemanticSessionFault, type SemanticSession} from '../../src/semantic/provider.js';
 import {makeSemanticAgentChanges, runSemanticAgentChangeWith} from '../../src/semantic/agent_changes.js';
@@ -149,7 +150,7 @@ const fixture = Effect.gen(function* () {
         sdkTreeDigest: sha256HexSync('sdk'),
         sourceCommit: '3e9236361fa97a9e6c685f4833ac457ae2d8c50a',
         sourceTree: '2a322d5d8eefb3b2f295c5ed6398de7237f6249a',
-        overlaySha256: '3ec77e4026b698c701b60fe34238a9ac83eaa73ad33679430fb3bafcef5e607d',
+        overlaySha256: nativeTypeScriptAssetPins.provenance.overlaySha256,
       },
     },
   };

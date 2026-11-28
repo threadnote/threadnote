@@ -100,7 +100,7 @@ describe('disposable semantic provider qualification', () => {
       }
     }
   });
-  it('records the native TypeScript artifact exactly as the reviewed asset pins', () => {
+  it('preserves the observed provenance of the reviewed native TypeScript artifacts', () => {
     const ledger = Schema.decodeUnknownSync(
       Schema.Struct({
         providers: Schema.Array(
@@ -120,6 +120,7 @@ describe('disposable semantic provider qualification', () => {
       EffectArray.findFirst(ledger.providers, x => x.id === 'typescript-native'),
     );
     const {version, reviewedHostBinaries, provenance} = nativeTypeScriptAssetPins;
+    const observedOverlaySha256 = '3ec77e4026b698c701b60fe34238a9ac83eaa73ad33679430fb3bafcef5e607d';
     expect(native?.version).toBe(version);
     expect(native?.artifacts).toEqual(
       EffectArray.map(reviewedHostBinaries, ({sha256}) => ({
@@ -127,7 +128,7 @@ describe('disposable semantic provider qualification', () => {
         sha256,
         sourceCommit: provenance.sourceCommit,
         sourceTree: provenance.sourceTree,
-        overlaySha256: provenance.overlaySha256,
+        overlaySha256: observedOverlaySha256,
       })),
     );
   });

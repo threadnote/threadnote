@@ -25,6 +25,10 @@ import {
  * Keep source-overlay provenance and upstream notices; never label it an official npm binary.
  */
 const bundledCopyrightNoticeSha256 = 'f0dc63a96c37a7f08e97780a36bd84ae705b2e1786df4c1f2ae45dec3874f0f2';
+const upstreamGoModSha256 = '1e0963224f3096e3e8215acea83c033392c8135e7453b8a9680261baa5c18b25';
+const upstreamGoSumSha256 = '00f7fee0307755fa8b871cd25a68b8c478341bc2b2af8731b2f2fc4da3739eee';
+const patchedGoModSha256 = '5bcca2017abe2997f9657c847ab5e0a6f20ca556023b8ee0787ba96163ae4bdd';
+const patchedGoSumSha256 = '3283226390917699b4dec8258ac31d9b647667a0a8570e574c0898fa370edb20';
 export const typescriptNativeBuildRecipe = {
   schemaVersion: 1,
   status: 'pinned-source-executor',
@@ -37,8 +41,8 @@ export const typescriptNativeBuildRecipe = {
     tree: nativeTypeScriptAssetPins.provenance.sourceTree,
     version: nativeTypeScriptAssetPins.version,
     moduleDirectory: 'tsc',
-    goModSha256: '1e0963224f3096e3e8215acea83c033392c8135e7453b8a9680261baa5c18b25',
-    goSumSha256: '00f7fee0307755fa8b871cd25a68b8c478341bc2b2af8731b2f2fc4da3739eee',
+    goModSha256: upstreamGoModSha256,
+    goSumSha256: upstreamGoSumSha256,
     submodules: 'none: exact commit contains no .gitmodules; do not resolve an arbitrary recursive dependency',
     bundled: {
       path: 'tsc/internal/bundled',
@@ -91,8 +95,19 @@ export const typescriptNativeBuildRecipe = {
   },
   apiPipeLifecycleOverlay: {
     path: 'tools/semantic/typescript-native-api-pipe-lifecycle.patch',
-    sha256: '9b284492cd4781125607f31de9489faebead13e05724aee4d62f25f9f9893340',
+    sha256: 'aa10a128d9384670d14b868429b81dca28d7153c0af601be3f42fc643d476fd8',
     files: [
+      // go-winio v0.6.3 fixes a Windows listener close that can stall API cancellation.
+      {
+        path: 'tsc/go.mod',
+        beforeSha256: upstreamGoModSha256,
+        afterSha256: patchedGoModSha256,
+      },
+      {
+        path: 'tsc/go.sum',
+        beforeSha256: upstreamGoSumSha256,
+        afterSha256: patchedGoSumSha256,
+      },
       {
         path: 'tsc/cmd/tsc/api.go',
         beforeSha256: '9aa01d0c0e5e531edfb2f39aa2bab00e44b8eb239bd756f7cfbffb2693a72ad3',
@@ -219,7 +234,7 @@ export const typescriptNativeBuildRecipe = {
     'Fetch exact upstream commit and verify HEAD/tree/clean source, then copy its tracked tree to a separate candidate. Validate no unsafe archive paths/links if an equivalent source archive is used.',
     'Verify modules, bundled subtree and all three ordered patch hashes; require every tracked before/after hash and exactly the one new host-refusal test file.',
     'No go generate, latest dependency, loose patch application or unstamped generated-library replacement.',
-    'Acquire only exact Go module graph once with checksum verification. Capture additive checksum records outside source; restore exact original go.sum before offline validation. Never upgrade versions.',
+    'Acquire the exact module graph from the patched lock files once. Verify checksums and restore the patched go.sum before offline validation.',
   ],
   environment: {
     GOTOOLCHAIN: 'local',
@@ -241,7 +256,7 @@ export const typescriptNativeBuildRecipe = {
       GOSUMDB: 'sum.golang.org',
     },
     argv: ['go', 'mod', 'download', '-json', 'all'],
-    then: 'Verify exact modules; restore original go.sum; use only offline commands below.',
+    then: 'Restore the patched go.sum. Verify both patched lock files and use only offline commands below.',
   },
   offlineCommands: {
     cwd: 'CANDIDATE_SOURCE/tsc',
@@ -1154,7 +1169,7 @@ export async function buildTypeScriptNativeAsset(input: TypeScriptNativeBuildInp
   if (version !== `go version ${toolchain.version} ${archive.os}/${archive.arch}`)
     throw new Error('Native TypeScript Go toolchain version differs.');
   const module = join(candidate, upstream.moduleDirectory);
-  const originalGoSum = await runtimeReadBoundedStableRegularFile(join(module, 'go.sum'), 1024 * 1024);
+  const patchedGoSum = await runtimeReadBoundedStableRegularFile(join(module, 'go.sum'), 1024 * 1024);
   await run(
     go,
     ['mod', 'download', '-json', 'all'],
@@ -1165,8 +1180,9 @@ export async function buildTypeScriptNativeAsset(input: TypeScriptNativeBuildInp
     120000,
     goProcesses,
   );
-  await writeFile(join(module, 'go.sum'), originalGoSum);
-  await exact(join(module, 'go.sum'), upstream.goSumSha256);
+  await writeFile(join(module, 'go.sum'), patchedGoSum);
+  await exact(join(module, 'go.mod'), patchedGoModSha256);
+  await exact(join(module, 'go.sum'), patchedGoSumSha256);
   await run(go, offlineCommands.modules.slice(1), module, env, 60000, goProcesses);
   // The upstream API/IPC tests create another private socket below TMPDIR.
   // Keep only those tests under a short 0700 path; long SSD artifact roots can

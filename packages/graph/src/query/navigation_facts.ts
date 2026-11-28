@@ -5,7 +5,7 @@ import {decodeStoredCodeGraphFact} from '../fact/storage.js';
 import {navigationProofEdgeSpan} from '../navigation_facts.js';
 import type {CodeGraphNavigationFacts, CodeGraphQueryResult, CodeGraphSpan} from '../types.js';
 
-export const NAVIGATION_PROOF_CACHE_IDENTITY = '000a8482e17588280b7e9ab3d24acbe7ff0854e985379f6fbf4ecf9ec05345d4';
+export const NAVIGATION_PROOF_CACHE_IDENTITY = '19a4741eee82154d74ac4b2c934c4f2371fd38bff5c38488cc3fc3d3c2a175a4';
 /** The Python pack identity that carries open-write proofs; any Python pack policy change must update it. */
 export const PYTHON_NAVIGATION_PROOF_CACHE_IDENTITY =
   '03c1df2f585574c6acb78aecba033b50b69470b12fc64d27dd9c7a7e0a1c7937';

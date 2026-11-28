@@ -612,6 +612,31 @@ it('provisions one shared native TypeScript asset job per pinned host and restor
     expect(darwinIdentity?.run).toContain(file);
 });
 
+it('scopes the P11 read pilot to the draft release head and uploads only the bounded summary', () => {
+  const pilot = jobs['p11-linux-read-pilot'];
+  const scope =
+    "github.event_name == 'pull_request' && github.event.pull_request.draft && " +
+    "github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == '6.0.0' && " +
+    "github.base_ref == 'main'";
+  expect(pilot).toMatchObject({if: scope, needs: 'native-typescript-asset', 'runs-on': 'ubuntu-24.04'});
+  expect(jobs['native-typescript-asset']?.if).toContain(`(${scope})`);
+  const checkout = EffectOption.getOrUndefined(
+    EffectArray.findFirst(pilot?.steps ?? [], candidate => candidate.uses === 'actions/checkout@v7'),
+  );
+  expect(checkout?.with).toEqual({ref: '${{ github.event.pull_request.head.sha }}', 'persist-credentials': false});
+  expect(step(pilot, 'Run exact-head partial read fixtures')).toMatchObject({
+    run: 'bash tools/ci/p11-linux-read-pilot.sh',
+    env: {
+      EXPECTED_HEAD: '${{ github.event.pull_request.head.sha }}',
+      ASSET_HEAD: '${{ needs.native-typescript-asset.outputs.ref }}',
+      THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR: '${{ steps.native-asset.outputs.payload }}',
+    },
+  });
+  const uploads = EffectArray.filter(pilot?.steps ?? [], candidate => candidate.uses === 'actions/upload-artifact@v7');
+  expect(uploads).toMatchObject([{if: 'always()', with: {path: '${{ runner.temp }}/threadnote-p11-linux-read.json'}}]);
+  expect(jobs.test?.needs).not.toContain('p11-linux-read-pilot');
+});
+
 it.each(['success', 'failure', 'cancelled', 'skipped'])(
   'requires the shared native TypeScript asset result %s to succeed when a native lane is selected',
   result => {

@@ -153,7 +153,10 @@ jobs:
     needs: bazel-plan
     if: >-
       needs.bazel-plan.outputs.native_typescript == 'true' || needs.bazel-plan.outputs.recall_quality == 'true' ||
-      needs.bazel-plan.outputs.release_matrix == 'true' || needs.bazel-plan.outputs.manager_e2e == 'true'
+      needs.bazel-plan.outputs.release_matrix == 'true' || needs.bazel-plan.outputs.manager_e2e == 'true' ||
+      (github.event_name == 'pull_request' && github.event.pull_request.draft &&
+      github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == '6.0.0' &&
+      github.base_ref == 'main')
     # Every consumer runs on this exact image and restores by this job's cache_key output, never a key it re-derives.
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -173,6 +176,48 @@ jobs:
         id: asset
         timeout-minutes: 80
         uses: ./.github/actions/native-typescript-asset
+
+  p11-linux-read-pilot:
+    name: P11 Linux x64 read pilot
+    needs: native-typescript-asset
+    if: >-
+      github.event_name == 'pull_request' && github.event.pull_request.draft &&
+      github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == '6.0.0' &&
+      github.base_ref == 'main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: Install frozen workspace dependencies
+        run: bun install --frozen-lockfile
+      - name: Restore the verified native TypeScript asset
+        id: native-asset
+        timeout-minutes: 8
+        uses: ./.github/actions/native-typescript-asset
+        with:
+          restore-only: 'true'
+          cache-key: ${{ needs.native-typescript-asset.outputs.cache_key }}
+      - name: Run exact-head partial read fixtures
+        timeout-minutes: 15
+        shell: bash
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          ASSET_HEAD: ${{ needs.native-typescript-asset.outputs.ref }}
+          THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR: ${{ steps.native-asset.outputs.payload }}
+        run: bash tools/ci/p11-linux-read-pilot.sh
+      - name: Upload the bounded read pilot summary
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: p11-linux-x64-read-pilot
+          path: ${{ runner.temp }}/threadnote-p11-linux-read.json
+          if-no-files-found: ignore
 
   # One job per release host (not a matrix) so each job exposes its own cache_key and only its own release leg needs it.
   native-typescript-asset-linux-arm64:
