@@ -41,6 +41,79 @@ exact_checkout() {
     [[ "$head" == "$source_commit" && "$tree" == "$source_tree" && -z "$status" ]]
 }
 
+# Upload only closed values from the bounded receipt. The receipt never supplies summary keys or free-form text.
+receipt_diagnosis() {
+  jq -cs --arg branch "$2" '
+    def field($path): try getpath($path) catch null;
+    def array: if type == "array" then . else [] end;
+    def closed($values): . as $value | first($values[] | select(. == $value)) // null;
+    def state: closed(["ok", "configured", "observed", "observing", "passed", "failed", "accepted", "running",
+      "cancelling", "ready", "cancelled", "stale", "timeout", "unavailable", "unsupported", "conflict",
+      "invalid-request", "budget-exceeded", "unknown"]);
+    def compact: with_entries(select(.value != null));
+    def asset_refusal:
+      . as $message | first(
+        ["missing-asset", "missing-manifest", "non-canonical-path", "no-reviewed-pin", "unsafe-asset", "pin-mismatch",
+          "pin-mismatch: manifest-binary", "pin-mismatch: manifest-executable", "pin-mismatch: file-digest",
+          "pin-mismatch: tree-entries", "pin-mismatch: tree-git-entry", "pin-mismatch: tree-bytes",
+          "pin-mismatch: tree-digest"][] | select($message == "Native TypeScript session unavailable [\(.)]")
+      ) // (if $message == "Native TypeScript session unavailable [group-writable-ancestor]; remove group write from the asset directory and its parents (chmod g-w <dir>)"
+            then "group-writable-ancestor" else null end);
+    if length != 1 or field([0, "schemaVersion"]) != 1 or field([0, "kind"]) != "candidate-transport-branch" then null else
+      .[0] | (field(["status"]) | closed(["started", "failed", "passed"])) as $status |
+      {
+        receiptStatus: $status,
+        failureCode: (field(["failureEvidence", "code"]) | closed(["protocol", "write", "exit", "closing",
+          "capacity", "timeout", "rejected", "prerequisite"])),
+        provision: (if $status != "failed" or $branch == "provider-free" then null
+          elif (field(["candidate"]) | type) != "object" then "candidate-verification"
+          elif field(["provider", "artifact"]) == null then "provider-input-verification"
+          elif field(["providerChecks"]) == null then "provider-setup"
+          else null end),
+        assetRefusal: (if $status == "failed" and $branch != "provider-free" and field(["provider", "artifact"]) == null
+          then field(["failure"]) | asset_refusal else null end),
+        lastCli: (last((field(["operations"]) | array)[] |
+          select(field(["args", 0]) == "semantic" or field(["args", 0]) == "graph") |
+          (field(["args", 1]) | closed(["setup", "readiness", "query", "view", "change", "index"])) as $command |
+          select($command != null) | {
+            command: $command,
+            operation: (field(["request", "operation"]) | closed(["definition", "references", "symbols", "rename", "context"])),
+            result: ((field(["canonical", "status"]) // field(["canonical", "state"])) | state)
+          } | compact) // null),
+        lastStage: (last((field(["providerChecks", "navigation", "branches"]) | array)[] |
+          (field(["operation"]) | closed(["explicit-saved-disk-readiness", "explicit-owned-buffer-readiness",
+            "definition", "references", "owned-buffer-open", "owned-buffer-symbols", "owned-buffer-unapplied-preview",
+            "owned-buffer-version-update", "stale-buffer-version-refusal", "owned-buffer-failure",
+            "owned-buffer-close-failure", "complete-rename-preview", "proposal-status-parity", "unapplied-preflight",
+            "read-capability-cannot-authorize-write", "semantic-context-graph-memory-join"])) as $operation |
+          select($operation != null) | {
+            operation: $operation,
+            stage: ((field(["stage"]) // field(["observations", -1, "progress", "stage"])) |
+              closed(["queued", "verifying-inputs", "preparing-project", "acquiring-provider", "initializing",
+                "synchronizing", "checking-ready", "finalizing", "symbols", "preview", "disk-conservation",
+                "version-update", "stale-version"])),
+            result: ((field(["canonical", "status"]) // field(["result", "status"]) //
+              field(["observations", -1, "progress", "state"]) // field(["observations", -1, "status"]) //
+              field(["cleanup"]) // field(["status"])) | state),
+            mcpResult: (field(["mcp", "canonical", "status"]) | state)
+          } | compact) // null),
+        cleanup: ({
+          mcpCloseCompleted: field(["cleanup", "mcpCloseCompleted"]),
+          mcpCloseObserved: field(["cleanup", "mcpCloseObserved"]),
+          ownedProcessesGone: field(["cleanup", "ownedProcessesGone"]),
+          fixtureRemoved: field(["cleanup", "fixtureRemoved"]),
+          semanticDrained: field(["cleanup", "semantic", "drained"]),
+          admissionResolved: field(["cleanup", "semantic", "admission", "resolved"]),
+          endpointsReleased: field(["cleanup", "semantic", "endpointsReleased"])
+        } | with_entries(select(.value | type == "boolean"))),
+        cleanupState: (if field(["cleanup", "semantic", "drained"]) == false then "provider-drain-unconfirmed"
+          elif (field(["cleanup", "closeFailure"]) | type) == "string" then "close-failed"
+          elif (field(["cleanup", "fixtureRetained"]) | type) == "string" then "fixture-retained"
+          else null end)
+      } | compact
+    end' "$1" 2>/dev/null || printf 'null\n'
+}
+
 [[ "${EXPECTED_HEAD:?}" =~ ^[a-f0-9]{40}$ ]]
 source_commit=$EXPECTED_HEAD
 [[ "${ASSET_HEAD:?}" == "$source_commit" ]]
@@ -106,6 +179,7 @@ for branch in provider-free typescript javascript; do
     > "$private_root/$branch.log" 2>&1 || code=$?
   receipt_sha=
   outcome=failed
+  diagnosis=null
   if [[ -f "$receipt" && ! -L "$receipt" ]] && [[ $(stat -c %s "$receipt") -le 2097152 ]]; then
     receipt_sha=$(file_sha "$receipt")
     if [[ "$code" == 2 ]] && jq -e --arg branch "$branch" --arg input "$input_sha" --arg manifest "$manifest_sha" \
@@ -131,9 +205,11 @@ for branch in provider-free typescript javascript; do
       end)' "$receipt" > /dev/null 2>&1; then
       outcome=partial-pass
     fi
+    diagnosis=$(receipt_diagnosis "$receipt" "$branch")
   fi
   jq -nc --arg branch "$branch" --arg status "$outcome" --argjson exitCode "$code" \
-    --arg providerManifestSha256 "$input_sha" --arg receiptSha256 "$receipt_sha" '$ARGS.named' >> "$attempts"
+    --arg providerManifestSha256 "$input_sha" --arg receiptSha256 "$receipt_sha" \
+    --argjson diagnosis "$diagnosis" '$ARGS.named' >> "$attempts"
   if [[ "$outcome" != partial-pass ]]; then failed=1; fi
 done
 

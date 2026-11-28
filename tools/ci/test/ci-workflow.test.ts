@@ -633,7 +633,12 @@ it('scopes the P11 read pilot to the draft release head and uploads only the bou
     },
   });
   const uploads = EffectArray.filter(pilot?.steps ?? [], candidate => candidate.uses === 'actions/upload-artifact@v7');
-  expect(uploads).toMatchObject([{if: 'always()', with: {path: '${{ runner.temp }}/threadnote-p11-linux-read.json'}}]);
+  expect(uploads).toMatchObject([{if: 'always()'}]);
+  expect(uploads[0]?.with).toEqual({
+    name: 'p11-linux-x64-read-pilot',
+    path: '${{ runner.temp }}/threadnote-p11-linux-read.json',
+    'if-no-files-found': 'ignore',
+  });
   expect(jobs.test?.needs).not.toContain('p11-linux-read-pilot');
 });
 
